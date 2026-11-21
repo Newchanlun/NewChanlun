@@ -40,12 +40,21 @@ pub(super) fn name(s: &str, field: &str) -> Result<(), String> {
     checked(is_name(s), field, "逻辑业务标识")
 }
 
-/// 域生产者等可用 `E:<id>`、`B:<id>`、`S:<id>`、`X:<id>`，并非通用 URI。
+/// 域生产者可用 `E:<id>`、`B:<id>`、`S:<id>`、`X:<id>`；
+/// B 的回包另带重和会话两段：`B:<chong_id>:<session_id>`。
 pub(super) fn domain_name(s: &str, field: &str) -> Result<(), String> {
     checked(
-        is_name(s)
-            || s.split_once(':')
-                .is_some_and(|(domain, id)| matches!(domain, "E" | "B" | "S" | "X") && is_name(id)),
+        match s.split_once(':') {
+            None => is_name(s),
+            Some(("B", id)) => {
+                is_name(id)
+                    || id
+                        .split_once(':')
+                        .is_some_and(|(chong, session)| is_name(chong) && is_name(session))
+            }
+            Some(("E" | "S" | "X", id)) => is_name(id),
+            _ => false,
+        },
         field,
         "逻辑域业务标识",
     )
@@ -53,7 +62,7 @@ pub(super) fn domain_name(s: &str, field: &str) -> Result<(), String> {
 
 pub(super) fn namespace(s: &str, field: &str) -> Result<(), String> {
     checked(
-        is_name(s) || s.strip_suffix("/replies").is_some_and(is_name),
+        is_name(s) || s.strip_suffix("/replies").is_some_and(is_name) || s == "s-observe/browser",
         field,
         "逻辑来源命名空间",
     )
@@ -71,13 +80,24 @@ pub(super) fn reference(s: &str, field: &str) -> Result<(), String> {
     domain_name(s, field)
 }
 
-/// 交易所标的允许点分代码、连字符及一条斜杠的 BASE/QUOTE；
-/// 交易对的两侧都是大写 ASCII 资产代码，不接收通用位置串。
+/// 行情源的 ASCII 单码可带指数前缀 `^` 或期货/外汇后缀 `=F`、`=X` 等。
+/// BASE/QUOTE 仍要求两侧均为大写 ASCII 资产代码。
 pub(super) fn instrument(s: &str, field: &str) -> Result<(), String> {
-    let asset = |s: &str| is_name(s) && s.bytes().all(|b| b.is_ascii() && !b.is_ascii_lowercase());
+    let ticker = |s: &str| s.is_ascii() && is_name(s);
+    let asset = |s: &str| ticker(s) && !s.bytes().any(|b| b.is_ascii_lowercase());
     let valid = match s.split_once('/') {
         Some((base, quote)) => asset(base) && asset(quote),
-        None => s.is_ascii() && is_name(s),
+        None => match s.strip_prefix('^') {
+            Some(index) => ticker(index),
+            None => match s.split_once('=') {
+                Some((base, suffix)) => {
+                    ticker(base)
+                        && !suffix.is_empty()
+                        && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+                }
+                None => ticker(s),
+            },
+        },
     };
     checked(valid, field, "市场标的或 BASE/QUOTE 交易对")
 }
@@ -90,12 +110,23 @@ mod tests {
     fn economic_session_logical_names_are_not_path_or_reference_grammars() {
         assert!(namespace("test.feed", "source").is_ok());
         assert!(namespace("economic-session/replies", "replies").is_ok());
-        assert!(domain_name("X:historical", "producer").is_ok());
+        assert!(namespace("s-observe/browser", "source").is_ok());
+        for producer in [
+            "historic",
+            "E:sim-p4",
+            "B:chong-BTC-L0",
+            "B:chong-BTC-L0:tb1406-c8",
+            "S:writer",
+            "X:sim-p4",
+        ] {
+            assert!(domain_name(producer, "producer").is_ok(), "{producer}");
+        }
         assert!(reference("per-leg-source-attribution/1", "contract").is_ok());
         for local in [
             "/tmp/db",
             "../db",
             "data/db",
+            "local/e",
             "db.sqlite",
             r"C:\db",
             "C:db",
@@ -105,6 +136,24 @@ mod tests {
             assert!(namespace(local, "source").is_err(), "{local}");
             assert!(domain_name(local, "producer").is_err(), "{local}");
             assert!(reference(local, "contract").is_err(), "{local}");
+        }
+        for producer in [
+            "B:",
+            "B::id",
+            "B:id:",
+            "B:id:..",
+            "B:id:/tmp/x",
+            "B:id:session.db",
+            "B:::id",
+            "B:id:session:extra",
+            "E:id:session",
+            "S:id:session",
+            "X:id:session",
+        ] {
+            assert!(domain_name(producer, "producer").is_err(), "{producer}");
+        }
+        for ns in ["local/browser", "s-observe/browser/replies", "a/b/replies"] {
+            assert!(namespace(ns, "source").is_err(), "{ns}");
         }
     }
 
@@ -117,6 +166,14 @@ mod tests {
             "000001.SZ",
             "600519.SH",
             "BRK.B",
+            "DX-Y.NYB",
+            "^GSPC",
+            "^HSI",
+            "^STOXX50E",
+            "GC=F",
+            "CL=F",
+            "EURUSD=X",
+            "USDJPY=X",
             "BTC/USDT",
             "ETH/USDT",
             "BTC-USDT",
@@ -144,6 +201,21 @@ mod tests {
             "E.DB-WAL",
             "local/e",
             "BTC/USDT.JSONL",
+            "^",
+            "^^GSPC",
+            "^../GSPC",
+            "^GSPC..NASDAQ",
+            "^GSPC.CSV",
+            "^GSPC=X",
+            "^GSPC/USDT",
+            "=X",
+            "GC=",
+            "GC==F",
+            "GC=F=X",
+            "GC=期货",
+            "GC=F.db",
+            "GC.sqlite=F",
+            "GC=F/USDT",
         ] {
             assert!(instrument(value, "symbol").is_err(), "{value}");
         }

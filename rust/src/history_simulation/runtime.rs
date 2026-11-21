@@ -127,7 +127,7 @@ impl BusinessProfile {
     fn validate_identity(&self) -> Result<(), String> {
         ids::name(&self.session_id, "session_id")?;
         positive(&self.session_generation, "session_generation")?;
-        ids::name(&self.x_id, "x_id")?;
+        ids::domain_name(&self.x_id, "x_id")?;
         ids::namespace(&self.source_namespace, "source_namespace")?;
         ids::name(&self.source_epoch, "source_epoch")?;
         for authority in [&self.e, &self.s] {

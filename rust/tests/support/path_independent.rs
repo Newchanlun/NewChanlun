@@ -37,14 +37,17 @@ fn exchange(path: &Path, value: &Value) -> Value {
     socket.read_to_string(&mut raw).unwrap();
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{path:?}: {e}: {raw}"))
 }
-fn econ_frame(source: &str, id: &str, payload: Value) -> Value {
-    let producer = if source == "x-sim" { "X" } else { "fixture" };
+fn econ_frame(source: &str, producer: &str, id: &str, payload: Value) -> Value {
     json!({"schema_revision":"economic-session/1","session_id":SESSION_ID,"session_generation":"1",
         "source_namespace":source,"source_epoch":"one","producer_id":producer,"producer_epoch":"1",
         "message_id":id,"payload_hash":digest(&payload),"payload":payload,"causal_refs":[]})
 }
 fn econ(space: &Space, owner: &str, id: &str, payload: Value) -> Value {
-    exchange(&space.path(owner), &econ_frame("test", id, payload))["payload"].clone()
+    exchange(
+        &space.path(owner),
+        &econ_frame("test", "fixture", id, payload),
+    )["payload"]
+        .clone()
 }
 fn expect(v: Value, kind: &str) -> Value {
     assert_eq!(v["kind"], kind, "{v}");
@@ -120,7 +123,16 @@ fn signed(cap: &str) -> Value {
         "valid_through_ns":"100000","authorizer":"TestOnly controlled signer","authorized_at_ns":"1","signature_ref":SIG})
 }
 
+fn x_producer(split: bool) -> &'static str {
+    if split {
+        "X:sim-p4"
+    } else {
+        "X"
+    }
+}
+
 fn inputs(space: &Space, s_db: &Path, split: bool) -> Input {
+    let x_id = x_producer(split);
     let voice_dir = space.path("voice");
     let caps_dir = space.path("caps");
     std::fs::create_dir_all(&voice_dir).unwrap();
@@ -225,7 +237,7 @@ fn inputs(space: &Space, s_db: &Path, split: bool) -> Input {
         "rights":[{"right_id":"alpha","owner":"B:alpha","version":"1","amount":"40","currency":"TEST-CASH","source_ref":"TestOnly-privately-owned-cash"}],
         "plans":[plan],"slots":[{"slot_id":"slot","applicants":["alpha"],"input_end":{"kind":"ControlledInputEnd",
             "source_id":"fixture","source_epoch":"1","watermark":"1","complete_request_hash":digest(&json!(["alpha"]))}}],
-        "exact_release":{"x_target":{"x_id":"X","x_epoch":"1"},"projection_kind":"per_leg","rd11_policy":"controlled-fixture-rd11",
+        "exact_release":{"x_target":{"x_id":x_id,"x_epoch":"1"},"projection_kind":"per_leg","rd11_policy":"controlled-fixture-rd11",
             "rule_revision":"TestOnly-rule/2127","market_dependencies":["TestOnly-market/2127"],"conditions":conditions(),
             "model_coverage":{"model_ref":{"model_id":"history-sim/bar-batch-known-frontier/1","revision":"oracle-1",
             "content_hash":digest(&json!("history-sim/bar-batch-known-frontier/1@oracle-1"))},"domain_id":"TestOnly-domain/2127",
@@ -360,17 +372,17 @@ fn inputs(space: &Space, s_db: &Path, split: bool) -> Input {
     let e = json!({"db":space.path("e.db"),"socket":space.path("e.sock")});
     let b = json!({"db":space.path("b.db"),"socket":space.path("b.sock")});
     let xdb = space.path("x.db");
-    let x_binding = json!({"source_namespace":"x-sim","source_epoch":"one","producer_id":"X","producer_epoch":"1","model_content_hash":digest(&x_model)});
+    let x_binding = json!({"source_namespace":"x-sim","source_epoch":"one","producer_id":x_id,"producer_epoch":"1","model_content_hash":digest(&x_model)});
     let mut business = json!({"schema_revision":format!("economic-manifest/{ver}"),"protocol_revision":"economic-session/1",
         "session_id":SESSION_ID,"session_generation":"1","book_revision":"tb03c-book/1",
         "chongs":[{"chong_id":"alpha","symbol":"alpha","operation_level":"2","fixed_q":"12"}],
-        "authorized_sources":[rights,{"source_namespace":"x-sim","source_epoch":"one","producer_id":"X","producer_epoch":"1",
+        "authorized_sources":[rights,{"source_namespace":"x-sim","source_epoch":"one","producer_id":x_id,"producer_epoch":"1",
             "operations":["QueryReleasedExact","CaptureExternal"]}],
         "resources":{"max_frame_bytes":"16777216","read_timeout_ms":"2000","write_timeout_ms":"2000","response_timeout_ms":"30000","queue_capacity":"4","max_connections":"4"},
         "clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":["1000"],"messages":clocks}},
         "voice_binding":{"schema_revision":format!("voice-binding/{ver}"),"authorities":[authority]},"finance":fin,
         "history_simulation_source":x_binding});
-    let mut x_profile = json!({"model":x_model,"session_id":SESSION_ID,"session_generation":"1","x_id":"X",
+    let mut x_profile = json!({"model":x_model,"session_id":SESSION_ID,"session_generation":"1","x_id":x_id,
         "source_namespace":"x-sim","source_epoch":"one",
         "e":{"authority_id":"E","authority_epoch":"1","schema_revision":"economic-session/1","reply_namespace":"economic-session/replies","producer_id":format!("E:{SESSION_ID}")},
         "s":{"authority_id":"S","authority_epoch":"1","schema_revision":S_SCHEMA,"reply_namespace":S_RESP,"producer_id":S_PRODUCER},
@@ -416,8 +428,8 @@ fn cap_payload(record: &Value, digest: &str) -> Value {
         "valid_through_ns":record["valid_through_ns"],"policy_record":{"sha256":digest},"writer_epoch":"1"})
 }
 
-struct Launcher(Child);
-impl Drop for Launcher {
+struct Service(Child);
+impl Drop for Service {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
             let _ = stop(&mut self.0);
@@ -588,7 +600,7 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
         }
     }
     let source = controlled_s(&space.path("condition.sock"));
-    let mut service = Launcher(spawn_launcher(&launcher));
+    let mut service = Service(spawn_launcher(&launcher));
     wait_domains(&mut service.0);
     for name in ["e.sock", "b.sock", "x.sock"] {
         eventually(name, || UnixStream::connect(space.path(name)).is_ok());
@@ -755,7 +767,7 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
             "e.sock",
             "release",
             json!({"op":"ReleaseExact","decision_id":"alpha","command_id":"cmd-alpha",
-        "plan_hash":digest(&submit),"certificate":certificate,"x_id":"X","x_epoch":"1","writer_epoch":"1"}),
+        "plan_hash":digest(&submit),"certificate":certificate,"x_id":fin["x_target"]["x_id"],"x_epoch":"1","writer_epoch":"1"}),
         ),
         "ReleasedExactReceipt",
     );
@@ -792,7 +804,7 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
     let originals = batch["originals"].as_array().unwrap();
     assert_eq!(originals.len(), 2, "{batch}");
     for (doc, id) in originals.iter().zip(["x-fill", "x-fee"]) {
-        let frame = econ_frame("x-sim", id, captures(doc, "/event", id));
+        let frame = econ_frame("x-sim", x_producer(split), id, captures(doc, "/event", id));
         expect(
             exchange(&space.path("e.sock"), &frame)["payload"].clone(),
             "Recorded",
@@ -1018,6 +1030,9 @@ fn signed_market_identifiers_round_trip_without_deployment_bytes() {
         (2, "000001.SZ", "000001.SZ"),
         (2, "BTC/USDT", "BTC/USDT"),
         (3, "BTC", "BTC/USDT"),
+        (3, "BTC", "^GSPC"),
+        (3, "BTC", "GC=F"),
+        (3, "BTC", "EURUSD=X"),
     ] {
         let arms = [Space::new(), Space::new()].map(|space| {
             let package = funding_package(&space, book, symbol, instrument);
@@ -1052,6 +1067,67 @@ fn signed_market_identifiers_round_trip_without_deployment_bytes() {
 }
 
 #[test]
+fn real_b_reply_and_s_browser_namespace_are_valid_read_sources() {
+    let space = Space::new();
+    let mut manifest = funding_package(&space, 2, "BTC", "BTC");
+    manifest["business"]["authorized_sources"][0]["operations"] = json!(["ReadView"]);
+    let input = write_json(&space.path("source.json"), &manifest);
+    successful_json(run(&mut domain_command(
+        "init",
+        &space.path("e.db"),
+        &input,
+        false,
+    )));
+    let db = space.path("b.db");
+    successful_json(run(&mut domain_command("init", &db, &input, true)));
+    let mut service = Service(
+        domain_command("serve", &db, &input, true)
+            .args(["--epoch", "1", "--e-epoch", "1"])
+            .spawn()
+            .unwrap(),
+    );
+    let sock = space.path("b.sock");
+    eventually("B ReadView", || UnixStream::connect(&sock).is_ok());
+    let reply = exchange(
+        &sock,
+        &econ_frame(
+            "test.feed",
+            "X:fixture",
+            "read-producer",
+            json!({"op":"ReadView","cut":null,"as_known_ns":null}),
+        ),
+    );
+    let _ = stop(&mut service.0);
+    assert_eq!(reply["payload"]["kind"], "EconomicView", "{reply}");
+    assert_eq!(reply["source_namespace"], "economic-session/replies");
+    assert_eq!(reply["producer_id"], "B:alpha:tb2127");
+
+    let target = Space::new();
+    let mut registered = funding_package(&target, 2, "BTC", "BTC");
+    registered["business"]["authorized_sources"] = json!([
+        {"source_namespace":reply["source_namespace"],"source_epoch":reply["source_epoch"],
+            "producer_id":reply["producer_id"],"producer_epoch":reply["producer_epoch"],
+            "operations":["ReadView"]},
+        {"source_namespace":"s-observe/browser","source_epoch":"one","producer_id":"browser",
+            "producer_epoch":"1","operations":["ReadView"]}
+    ]);
+    let config = write_json(&target.path("registered.json"), &registered);
+    for (file, b) in [("e.db", false), ("b.db", true)] {
+        let db = target.path(file);
+        let init = expect(
+            successful_json(run(&mut domain_command("init", &db, &config, b))),
+            "Initialized",
+        );
+        let audit = expect(
+            successful_json(audit_domain(&db, &config, b, &[])),
+            "Audited",
+        );
+        assert_eq!(audit["cut"], init["cut"]);
+        assert_eq!(audit["manifest_hash"], digest(&registered["business"]));
+    }
+}
+
+#[test]
 fn local_economic_identities_are_rejected_before_any_db_or_lock() {
     for book in [2, 3] {
         let space = Space::new();
@@ -1066,6 +1142,11 @@ fn local_economic_identities_are_rejected_before_any_db_or_lock() {
             ("clock.plan.messages", json!(db)),
             ("session_id", json!(db)),
             ("producer_id", json!(db)),
+            ("producer_id", json!("C:db")),
+            ("producer_id", json!("B:a:/tmp/x")),
+            ("source_namespace", json!("data/db")),
+            ("source_namespace", json!("local/e")),
+            ("source_namespace", json!("/tmp/x")),
             ("test_only_fault.message_id", json!(db)),
             ("symbol", json!("X/STATE.SOCK")),
         ] {
@@ -1087,7 +1168,9 @@ fn local_economic_identities_are_rejected_before_any_db_or_lock() {
                     let plan = messages["trade-01"].clone();
                     messages.insert(value.as_str().unwrap().to_owned(), plan);
                 }
-                "producer_id" => business["authorized_sources"][0][field] = value,
+                "producer_id" | "source_namespace" => {
+                    business["authorized_sources"][0][field] = value
+                }
                 "test_only_fault.message_id" => {
                     business["test_only_fault"] =
                         json!([{"message_id":value,"phase":"before_commit"}]);
@@ -1225,7 +1308,7 @@ fn r2_b3_voice_rejects_pinned_review_with_deployment_scope_without_b_write() {
     pinned["business"]["voice_binding"]["authorities"][0]["verification_sha256"] = json!(sha);
     save(&manifest, &pinned);
 
-    let mut service = Launcher(spawn_launcher(&launcher));
+    let mut service = Service(spawn_launcher(&launcher));
     wait_domains(&mut service.0);
     for name in ["e.sock", "b.sock"] {
         eventually(name, || UnixStream::connect(space.path(name)).is_ok());
@@ -1279,6 +1362,7 @@ fn local_x_authority_model_and_condition_identity_are_rejected_before_serve() {
     let before = entries();
     for (pointer, field) in [
         ("/session_id", "session_id"),
+        ("/x_id", "x_id"),
         ("/source_epoch", "source_epoch"),
         ("/e/authority_id", "authority_id"),
         ("/s/producer_id", "producer_id"),
