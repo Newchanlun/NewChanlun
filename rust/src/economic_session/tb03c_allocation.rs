@@ -2,6 +2,7 @@
 //! 原件、派生分配和提交证明各自保存；金额与数量只调用 C1 同一配额函数。
 use super::book::{array, hash, integer};
 use super::store::Config;
+use crate::session_business_id as ids;
 use crate::session_protocol::{nonnegative, positive, required};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -49,6 +50,7 @@ pub(super) fn validate_config(config: &Value) -> Result<(), String> {
     if !super::book::rules(config)?.is_tb03c() {
         return Err("SchemaUnsupported：净额分配须 tb03c-book/1 或 /2".into());
     }
+    let split = super::deployment::is_business(config);
     if let Some(policy) = config.get("fill_allocation_policy") {
         super::voice::exact(policy, &["fill_allocation_policy_id", "policy_revision"])?;
         if policy["fill_allocation_policy_id"] != super::allocation::FILL_ALLOCATION_POLICY_ID
@@ -56,7 +58,10 @@ pub(super) fn validate_config(config: &Value) -> Result<(), String> {
         {
             return Err("SchemaUnsupported：净额政策仅 /2；per_leg 仅来源归属 /1".into());
         }
-        required(policy, "policy_revision")?;
+        let revision = required(policy, "policy_revision")?;
+        if split {
+            ids::name(revision, "fill_allocation_policy.policy_revision")?;
+        }
     }
     let mut hashes = BTreeSet::new();
     for manifest in array(config, "fill_manifests")? {
@@ -88,6 +93,9 @@ pub(super) fn validate_config(config: &Value) -> Result<(), String> {
             return Err("IdentityConflict：投影清单 hash 不符或重复".into());
         }
         let symbol = required(manifest, "symbol")?;
+        if split {
+            ids::instrument(symbol, "fill_manifests.symbol")?;
+        }
         let mut ids = BTreeSet::new();
         for participant in array(manifest, "participants")? {
             super::voice::exact(
@@ -101,12 +109,18 @@ pub(super) fn validate_config(config: &Value) -> Result<(), String> {
                 ],
             )?;
             let id = required(participant, "chong_id")?;
-            required(participant, "command_id")?;
-            required(participant, "revision")?;
+            let command = required(participant, "command_id")?;
+            let revision = required(participant, "revision")?;
             if !ids.insert(id) {
                 return Err("IdentityConflict：投影参与重重复".into());
             }
-            required(participant, "family_id")?;
+            let family = required(participant, "family_id")?;
+            if split {
+                ids::domain_name(command, "fill_manifests.participants.command_id")?;
+                ids::domain_name(family, "fill_manifests.participants.family_id")?;
+                ids::name(revision, "fill_manifests.participants.revision")?;
+            }
+            // chong_id 必须引用已核路由；tie_break_order 在下方绑定同一组 ID。
             positive(required(participant, "requested_q")?, "requested_q")?;
             let route = array(config, "chongs")?
                 .iter()

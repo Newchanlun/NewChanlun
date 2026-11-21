@@ -333,6 +333,9 @@ pub(super) fn validate_config(m: &Value) -> Result<(), String> {
             "producer_epoch",
         ],
     )?;
+    if split {
+        deployment::source_identity(&f["coordinator_source"])?;
+    }
     let mut structure = vec![
         "binary_sha256",
         "session_id",

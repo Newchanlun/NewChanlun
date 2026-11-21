@@ -5,6 +5,7 @@ use super::book::hash;
 use super::deployment::{self, logical_name};
 use super::store::Config;
 use super::voice::{digest, exact};
+use crate::session_business_id as ids;
 use crate::session_protocol::{nonnegative, positive, required, sha256_hex, strict_json};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -70,7 +71,7 @@ pub(super) fn validate_config(manifest: &Value) -> Result<(), String> {
         .as_array()
         .filter(|a| !a.is_empty())
         .ok_or("InvalidDomain：Voice 缺固定权威列表")?;
-    let mut ids = std::collections::BTreeSet::new();
+    let mut authority_ids = std::collections::BTreeSet::new();
     for a in authorities {
         let mut keys = vec![
             "authority_id",
@@ -82,7 +83,11 @@ pub(super) fn validate_config(manifest: &Value) -> Result<(), String> {
             keys.extend(["bundle_path", "verification_path"]);
         }
         exact(a, &keys)?;
-        if !ids.insert(required(a, "authority_id")?) {
+        let id = required(a, "authority_id")?;
+        if split {
+            ids::name(id, "voice_binding.authority_id")?;
+        }
+        if !authority_ids.insert(id) {
             return Err("IdentityConflict：重复 Voice 权威".into());
         }
         for k in ["bundle_sha256", "verification_sha256"] {

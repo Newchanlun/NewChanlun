@@ -506,7 +506,11 @@ fn audit_domain(db: &Path, manifest: &Path, b: bool, extra: &[&str]) -> Output {
     run(domain_command("audit", db, manifest, b).args(extra))
 }
 fn domain_command(action: &str, db: &Path, manifest: &Path, b: bool) -> Command {
-    let exe = if b {
+    command_for_chong(action, db, manifest, b.then_some("alpha"))
+}
+
+fn command_for_chong(action: &str, db: &Path, manifest: &Path, chong: Option<&str>) -> Command {
+    let exe = if chong.is_some() {
         env!("CARGO_BIN_EXE_b_chong_session")
     } else {
         env!("CARGO_BIN_EXE_e_economic_session")
@@ -518,8 +522,8 @@ fn domain_command(action: &str, db: &Path, manifest: &Path, b: bool) -> Command 
         .arg(manifest)
         .arg("--db")
         .arg(db);
-    if b {
-        command.args(["--chong", "alpha"]);
+    if let Some(chong) = chong {
+        command.args(["--chong", chong]);
     }
     command
 }
@@ -955,6 +959,167 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
     all
 }
 
+fn funding_package(space: &Space, book: u32, symbol: &str, instrument: &str) -> Value {
+    let mut route = json!({"chong_id":"alpha","symbol":symbol,"operation_level":"0","fixed_q":"1",
+        "funding":{"Q":"100","policy_record":{"profile_id":"TestOnly","policy_id":"#1355/quantity-tier-policy/v1",
+        "version":"v1","supersedes":"none","symbol":symbol,"operation_level":"L0",
+        "q_ref":"#1557/funding-authorization/v1@TestOnly","tiers":"none",
+        "capacities":[{"level":"L0","C":"100","source":"UserSigned(#917)","valid_through":"2027-10-20"}],
+        "frequency_evidence_ref":"#915 报告 :153","authorizer":"合成签署（#2127）",
+        "authorized_at":"2026-10-20","valid_through":"2027-10-20"}}});
+    let mut funding = json!({"funding_record":{"profile_id":"TestOnly",
+        "policy_id":"#1557/funding-authorization/v1","version":"v1","supersedes":"none","cap":"100",
+        "currency":"USDC","authorizer":"合成签署（#2127）","authorized_at":"2026-10-20",
+        "valid_through":"2027-10-20"},"margin_leverage":{"value":"1","source":"ADR 0040 裁定三"}});
+    if book == 3 {
+        let mut quote = json!({"source":"synthetic-feed","market":"SYNTH","instrument":instrument,"price_field":"last"});
+        let unit = json!({"unit":"BTC-UNIT","quantum":{"num":"1","den":"1"}});
+        let mut calibration = json!({"policy_id":"#1610/quantity-calibration/v1","version":"qc-v1","supersedes":"none",
+            "binding":{"profile_id":"TestOnly","funding_version":"v1","symbol":symbol,"operation_level":"L0",
+                "q_ref":"#1557/funding-authorization/v1@TestOnly"},"quantity_unit":unit,"tiers":[],
+            "quantity_basis":{"kind":"frozen_quote","quote_time_policy":"activation_request_asof",
+                "max_quote_age":"100","currency_scale":{"from":"USDC","to":"USDC","num":"1","den":"1"},
+                "selector":quote,"rounding":"floor"}});
+        let sha = digest(&calibration);
+        calibration["signature"] = json!({"signature_ref":"fixture://signature/qc-v1","version":"qc-v1",
+            "authorizer":"合成签署（#2127）","signed_ns":"1","content_sha256":sha});
+        route["funding"]["quantity_calibration"] = calibration;
+        route["funding"]["quote_snapshot"] = json!("sealed-1");
+        quote.as_object_mut().unwrap().extend(
+            json!({"quote_id":"quote-1","price_unit":{"money":"USDC","quantity":unit},
+                "t_occurred":"1","t_first_observed":"1","price":{"num":"1","den":"1"},
+                "original_ref":"fixture://quotes/quote-1"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        funding["quote_snapshots"] =
+            json!([{"snapshot_id":"sealed-1","sealed_ns":"2","quotes":[quote]}]);
+    }
+    json!({"schema_revision":"economic-session-config/2",
+        "business":{"schema_revision":"economic-manifest/2","protocol_revision":"economic-session/1",
+            "book_revision":format!("tb03c-book/{book}"),"session_id":"tb2127","session_generation":"1","chongs":[route],
+            "authorized_sources":[{"source_namespace":"test.feed","source_epoch":"one","producer_id":"X:fixture",
+                "producer_epoch":"1","operations":["CaptureExternal"]}],
+            "resources":{"max_frame_bytes":"1048576","read_timeout_ms":"1000","write_timeout_ms":"1000",
+                "response_timeout_ms":"2000","queue_capacity":"2","max_connections":"2"},
+            "clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":[],
+                "messages":{"trade-01":{"received_ns":"2","first_known_ns":"3","commit_ns":"4"}}}},
+            "funding":funding},
+        "deployment":{"schema_revision":"economic-deployment/1",
+            "domains":{"E":{"db":space.path("e.db"),"socket":space.path("e.sock")},
+            "B:alpha":{"db":space.path("b.db"),"socket":space.path("b.sock")}},
+            "voice":{},"finance":null,"fault_markers":[],"x_db":null}})
+}
+
+#[test]
+fn signed_market_identifiers_round_trip_without_deployment_bytes() {
+    for (book, symbol, instrument) in [
+        (2, "000001.SZ", "000001.SZ"),
+        (2, "BTC/USDT", "BTC/USDT"),
+        (3, "BTC", "BTC/USDT"),
+    ] {
+        let arms = [Space::new(), Space::new()].map(|space| {
+            let package = funding_package(&space, book, symbol, instrument);
+            let manifest = write_json(&space.path("manifest.json"), &package);
+            [("e.db", None), ("b.db", Some("alpha"))].map(|(file, chong)| {
+                let db = space.path(file);
+                let init =
+                    successful_json(run(&mut command_for_chong("init", &db, &manifest, chong)));
+                assert_eq!(init["kind"], "Initialized");
+                let audit =
+                    successful_json(run(&mut command_for_chong("audit", &db, &manifest, chong)));
+                assert_eq!(audit["kind"], "Audited");
+                assert_eq!(audit["cut"], init["cut"]);
+                assert_eq!(audit["manifest_hash"], digest(&package["business"]));
+                let connection =
+                    Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+                let raw: String = connection
+                    .query_row("SELECT v FROM meta WHERE k='business_manifest'", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(raw, canonical_json(&package["business"]));
+                (
+                    raw,
+                    audit["manifest_hash"].clone(),
+                    audit["cut"]["root_hash"].as_str().unwrap().to_owned(),
+                )
+            })
+        });
+        assert_eq!(arms[0], arms[1], "book/{book}: {symbol} {instrument}");
+    }
+}
+
+#[test]
+fn local_economic_identities_are_rejected_before_any_db_or_lock() {
+    for book in [2, 3] {
+        let space = Space::new();
+        let baseline = funding_package(&space, book, "BTC", "BTC/USDT");
+        let db = space.path("e.db");
+        let socket = space.path("e.sock");
+        let manifest = space.path("manifest.json");
+        let b = space.path("b.db");
+        for (field, value) in [
+            ("chong_id", json!(socket)),
+            ("chong_id", json!("data/chong")),
+            ("clock.plan.messages", json!(db)),
+            ("session_id", json!(db)),
+            ("producer_id", json!(db)),
+            ("test_only_fault.message_id", json!(db)),
+            ("symbol", json!("X/STATE.SOCK")),
+        ] {
+            let mut m = baseline.clone();
+            let business = &mut m["business"];
+            let mut chong = "alpha";
+            match field {
+                "chong_id" => {
+                    business["chongs"][0]["chong_id"] = value.clone();
+                    chong = value.as_str().unwrap();
+                    let domains = m["deployment"]["domains"].as_object_mut().unwrap();
+                    let layout = domains.remove("B:alpha").unwrap();
+                    domains.insert(format!("B:{chong}"), layout);
+                }
+                "clock.plan.messages" => {
+                    let messages = business["clock"]["plan"]["messages"]
+                        .as_object_mut()
+                        .unwrap();
+                    let plan = messages["trade-01"].clone();
+                    messages.insert(value.as_str().unwrap().to_owned(), plan);
+                }
+                "producer_id" => business["authorized_sources"][0][field] = value,
+                "test_only_fault.message_id" => {
+                    business["test_only_fault"] =
+                        json!([{"message_id":value,"phase":"before_commit"}]);
+                    m["deployment"]["fault_markers"] = json!([
+                        {"message_id":value,"phase":"before_commit","marker_path":space.path("fault.marker")}
+                    ]);
+                }
+                "symbol" => {
+                    business["chongs"][0]["symbol"] = value.clone();
+                    business["chongs"][0]["funding"]["policy_record"]["symbol"] = value;
+                }
+                _ => business[field] = value,
+            }
+            write_json(&manifest, &m);
+            for (target, chong) in [(&db, None), (&b, Some(chong))] {
+                for op in ["init", "audit"] {
+                    let out = run(&mut command_for_chong(op, target, &manifest, chong));
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    assert_eq!(out.status.code(), Some(1), "{op} {field}: {err}");
+                    assert!(
+                        out.stdout.is_empty() && err.contains(field),
+                        "{op} {field}: {err}"
+                    );
+                }
+            }
+            let mut files = space.0.path().read_dir().unwrap();
+            assert_eq!(files.next().unwrap().unwrap().path(), manifest);
+            assert!(files.next().is_none(), "book/{book} {field} 留下部署文件");
+        }
+    }
+}
+
 #[test]
 fn path_independent_e_b_x_full_business_tables_and_offline_archives() {
     let a = workload(&Space::new(), true, true);
@@ -1093,6 +1258,49 @@ fn serve_x(db: &Path, profile: &Path) -> Command {
         .arg(profile)
         .args(["--writer-epoch", "1"]);
     cmd
+}
+
+#[test]
+fn local_x_authority_model_and_condition_identity_are_rejected_before_serve() {
+    let space = Space::new();
+    inputs(&space, &space.path("s.db"), true);
+    let profile = space.path("x-profile.json");
+    let valid = read(&profile);
+    let db = space.path("x.db");
+    let entries = || {
+        space
+            .0
+            .path()
+            .read_dir()
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let before = entries();
+    for (pointer, field) in [
+        ("/session_id", "session_id"),
+        ("/source_epoch", "source_epoch"),
+        ("/e/authority_id", "authority_id"),
+        ("/s/producer_id", "producer_id"),
+        ("/model/symbol", "model.symbol"),
+        ("/model/fee_profile/role_source", "fee_profile.role_source"),
+        ("/conditions/0/evidence_refs/0", "evidence_refs"),
+        ("/conditions/0/condition_id", "condition_id"),
+    ] {
+        let mut bad = valid.clone();
+        *bad["history_simulation"]["business"]
+            .pointer_mut(pointer)
+            .unwrap() = json!(db);
+        save(&profile, &bad);
+        let out = run_refusal(&mut serve_x(&db, &profile));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{field}: {err}");
+        assert!(
+            out.stdout.is_empty() && err.contains(field),
+            "{field}: {err}"
+        );
+        assert_eq!(entries(), before);
+    }
 }
 
 #[test]

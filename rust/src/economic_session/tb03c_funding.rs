@@ -16,6 +16,7 @@
 //! - q_rebase：「Q 变大不自动改现役 Q（输出 AwaitingPolicy{q_rebase, (S,ℓ)}）」。
 use super::book::{rules, target, Rules};
 use super::quantity_calibration::{self as qc, Readiness};
+use crate::session_business_id as ids;
 use crate::session_protocol::{nonnegative, parse_canonical_i64, positive, required};
 use serde_json::{json, Value};
 
@@ -381,39 +382,67 @@ fn validate_tiers(tiers: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// /3 的定标与快照已经由定标解析器校验业务类型；这里封闭唯一共享而未做键检查的
-/// selector，并约束每个持久字符串。政策族及 q_ref 已由解析器按本合同绑定。
-fn validate_quantity_text(v: &Value, field: &str) -> Result<(), String> {
-    match v {
-        Value::Object(fields) => {
-            if field == "selector" {
-                exact(
-                    v,
-                    &["source", "market", "instrument", "price_field"],
-                    &[],
-                    "quote selector ",
-                )?;
-            }
-            for (key, value) in fields {
-                validate_quantity_text(value, key)?;
-            }
-        }
-        Value::Array(items) => {
-            for value in items {
-                validate_quantity_text(value, field)?;
-            }
-        }
-        Value::String(s) if !matches!(field, "policy_id" | "q_ref") => {
-            let fixture = match field {
-                "signature_ref" => s.strip_prefix("fixture://signature/"),
-                "original_ref" => s.strip_prefix("fixture://quotes/"),
-                _ => None,
-            };
-            if !fixture.is_some_and(business_id) {
-                business_provenance(s, field)?;
-            }
-        }
-        _ => {}
+/// ADR 0049：匹配的是来源、市场、标的、价格字段四个独立维度。报价行与已签选择器共用判据。
+fn validate_selector(v: &Value) -> Result<(), String> {
+    ids::namespace(required(v, "source")?, "source")?;
+    ids::name(required(v, "market")?, "market")?;
+    ids::instrument(required(v, "instrument")?, "instrument")?;
+    ids::name(required(v, "price_field")?, "price_field")
+}
+
+fn validate_quantity_ref(v: &Value, field: &str, fixture_prefix: &str) -> Result<(), String> {
+    let value = required(v, field)?;
+    if value.strip_prefix(fixture_prefix).is_some_and(business_id) {
+        return Ok(());
+    }
+    business_provenance(value, field)
+}
+
+/// 数值、结构、摘要和绑定已由定标合同解析；这里只核尚未限定词法的业务字符串。
+fn validate_snapshot(snapshot: &Value) -> Result<(), String> {
+    ids::name(required(snapshot, "snapshot_id")?, "snapshot_id")?;
+    for quote in snapshot["quotes"].as_array().unwrap() {
+        ids::domain_name(required(quote, "quote_id")?, "quote_id")?;
+        validate_selector(quote)?;
+        let unit = &quote["price_unit"];
+        ids::name(required(unit, "money")?, "price_unit.money")?;
+        ids::name(
+            required(&unit["quantity"], "unit")?,
+            "price_unit.quantity.unit",
+        )?;
+        validate_quantity_ref(quote, "original_ref", "fixture://quotes/")?;
+    }
+    Ok(())
+}
+
+fn validate_calibration(version: &Value) -> Result<(), String> {
+    ids::name(required(version, "quote_snapshot")?, "quote_snapshot")?;
+    let policy = &version["quantity_calibration"];
+    for k in ["version", "supersedes"] {
+        logical_id(policy, k)?;
+    }
+    ids::name(
+        required(&policy["quantity_unit"], "unit")?,
+        "quantity_unit.unit",
+    )?;
+    let signature = &policy["signature"];
+    if signature.is_object() {
+        validate_quantity_ref(signature, "signature_ref", "fixture://signature/")?;
+        business_provenance(required(signature, "authorizer")?, "signature.authorizer")?;
+    }
+    let basis = &policy["quantity_basis"];
+    if basis["kind"] == "frozen_quote" {
+        let selector = &basis["selector"];
+        exact(
+            selector,
+            &["source", "market", "instrument", "price_field"],
+            &[],
+            "quote selector ",
+        )?;
+        validate_selector(selector)?;
+        let currency = &basis["currency_scale"];
+        ids::name(required(currency, "from")?, "currency_scale.from")?;
+        ids::name(required(currency, "to")?, "currency_scale.to")?;
     }
     Ok(())
 }
@@ -432,16 +461,20 @@ fn validate_business_values(m: &Value) -> Result<(), String> {
         "margin_leverage.source",
     )?;
     if let Some(snapshots) = funding.get("quote_snapshots") {
-        validate_quantity_text(snapshots, "quote_snapshots")?;
+        for snapshot in snapshots.as_array().unwrap() {
+            validate_snapshot(snapshot)?;
+        }
     }
     for route in m["chongs"].as_array().unwrap() {
         let cf = &route["funding"];
         let policy = &cf["policy_record"];
         scope(policy)?;
         // profile_id、q_ref 与本授权绑定；operation_level 与路由绑定。
-        for k in ["version", "supersedes", "symbol"] {
+        for k in ["version", "supersedes"] {
             logical_id(policy, k)?;
         }
+        // Contract::of 已要求 policy.symbol == route.symbol，定标 binding.symbol 同样绑定该标的。
+        ids::instrument(required(policy, "symbol")?, "policy_record.symbol")?;
         for k in ["frequency_evidence_ref", "authorizer"] {
             business_provenance(text(policy, k)?, k)?;
         }
@@ -453,9 +486,12 @@ fn validate_business_values(m: &Value) -> Result<(), String> {
             nonnegative(level, "capacity.level")?;
             business_provenance(text(cap, "source")?, "capacity.source")?;
         }
-        for key in ["quantity_calibration", "quote_snapshot", "quantity_rebases"] {
-            if let Some(value) = cf.get(key) {
-                validate_quantity_text(value, key)?;
+        if cf.get("quantity_calibration").is_some() {
+            validate_calibration(cf)?;
+            if let Some(rebases) = cf["quantity_rebases"].as_array() {
+                for rebase in rebases {
+                    validate_calibration(rebase)?;
+                }
             }
         }
     }

@@ -2,6 +2,7 @@ use super::{
     model::{Batch, Change, Model},
     store,
 };
+use crate::session_business_id as ids;
 use crate::session_protocol::{canonical_json, positive, reply_envelope, sha256_hex};
 use crate::session_transport::{
     read_frame, serve_unix, write_frame_observed, NoObserver, TransportBounds,
@@ -122,6 +123,58 @@ struct BusinessProfile {
     max_frame_bytes: usize,
 }
 
+impl BusinessProfile {
+    fn validate_identity(&self) -> Result<(), String> {
+        ids::name(&self.session_id, "session_id")?;
+        positive(&self.session_generation, "session_generation")?;
+        ids::name(&self.x_id, "x_id")?;
+        ids::namespace(&self.source_namespace, "source_namespace")?;
+        ids::name(&self.source_epoch, "source_epoch")?;
+        for authority in [&self.e, &self.s] {
+            ids::name(&authority.authority_id, "authority_id")?;
+            ids::name(&authority.authority_epoch, "authority_epoch")?;
+            ids::reference(&authority.schema_revision, "schema_revision")?;
+            ids::namespace(&authority.reply_namespace, "reply_namespace")?;
+            ids::domain_name(&authority.producer_id, "producer_id")?;
+        }
+        let model = &self.model;
+        ids::instrument(&model.symbol, "model.symbol")?;
+        for (field, value) in [
+            ("model.revision", &model.revision),
+            ("model.quantity_unit", &model.quantity_unit),
+            ("model.currency", &model.currency),
+        ] {
+            ids::name(value, field)?;
+        }
+        for (field, value) in [
+            ("model.rd11_policy", &model.rd11_policy),
+            ("fee_profile.reference", &model.fee_profile.reference),
+            ("fee_profile.role_source", &model.fee_profile.role_source),
+            (
+                "fee_profile.market_slippage_source",
+                &model.fee_profile.market_slippage_source,
+            ),
+        ] {
+            ids::reference(value, field)?;
+        }
+        for condition in &self.conditions {
+            ids::reference(&condition.condition_id, "condition_id")?;
+            ids::reference(&condition.coverage_proof, "coverage_proof")?;
+            for (field, refs) in [
+                ("dependency_set", &condition.dependency_set),
+                ("invalidation_sources", &condition.invalidation_sources),
+                ("evidence_refs", &condition.evidence_refs),
+            ] {
+                for reference in refs {
+                    ids::reference(reference, field)?;
+                }
+            }
+        }
+        // 模型族、RD12、投影/seed、检查阶段/能力/失败语义由 Profile::validate 的闭集校验。
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Deployment {
@@ -173,6 +226,7 @@ impl ConfiguredProfile {
         {
             return Err("InvalidDomain：X 部署位置非法".into());
         }
+        b.validate_identity()?;
         let profile = Profile {
             model: b.model,
             session_id: b.session_id,

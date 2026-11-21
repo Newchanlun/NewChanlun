@@ -1,5 +1,6 @@
 //! #2127：部署映射独立于业务清单和提交图像。同一事务登记，绝不参与业务摘要。
 use super::voice::{digest, exact};
+use crate::session_business_id as ids;
 use crate::session_protocol::{nonnegative, required, sha256_hex};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -57,11 +58,11 @@ fn validate_clock(m: &Value) -> Result<(), String> {
             {
                 time(tick)?;
             }
-            for phase in plan["messages"]
+            for (message, phase) in plan["messages"]
                 .as_object()
                 .ok_or("InvalidDomain：消息时钟须对象")?
-                .values()
             {
+                ids::name(message, "clock.plan.messages 键 (message_id)")?;
                 closed(phase, &[], &["received_ns", "first_known_ns", "commit_ns"])?;
                 for tick in phase.as_object().unwrap().values() {
                     match tick {
@@ -88,6 +89,14 @@ pub(super) const RESOURCES: &[&str] = &[
     "queue_capacity",
     "max_connections",
 ];
+
+pub(super) fn source_identity(v: &Value) -> Result<(), String> {
+    ids::namespace(required(v, "source_namespace")?, "source_namespace")?;
+    ids::name(required(v, "source_epoch")?, "source_epoch")?;
+    ids::domain_name(required(v, "producer_id")?, "producer_id")?;
+    crate::session_protocol::positive(required(v, "producer_epoch")?, "producer_epoch")?;
+    Ok(())
+}
 
 pub(super) fn validate_business(m: &Value) -> Result<(), String> {
     if !is_business(m) {
@@ -119,6 +128,7 @@ pub(super) fn validate_business(m: &Value) -> Result<(), String> {
         ],
     )?;
     required(m, "protocol_revision")?;
+    ids::name(required(m, "session_id")?, "session_id")?;
     exact(&m["resources"], RESOURCES)?;
     let book = super::book::rules(m)?;
     let route_fields: &[&str] = match book {
@@ -134,6 +144,8 @@ pub(super) fn validate_business(m: &Value) -> Result<(), String> {
     // 内层资金由 tb03c_funding::validate_config 校验业务值及书账约束，装载完成前不写库。
     for c in m["chongs"].as_array().ok_or("InvalidDomain：重须数组")? {
         exact(c, route_fields)?;
+        ids::name(required(c, "chong_id")?, "chong_id")?;
+        ids::instrument(required(c, "symbol")?, "symbol")?;
     }
     for a in m["authorized_sources"]
         .as_array()
@@ -149,9 +161,11 @@ pub(super) fn validate_business(m: &Value) -> Result<(), String> {
                 "operations",
             ],
         )?;
+        source_identity(a)?;
     }
     for f in super::store::fault_plans(&m["test_only_fault"]) {
         exact(f, &["message_id", "phase"])?;
+        ids::name(required(f, "message_id")?, "test_only_fault.message_id")?;
     }
     if let Some(x) = m.get("history_simulation_source") {
         exact(
@@ -164,10 +178,7 @@ pub(super) fn validate_business(m: &Value) -> Result<(), String> {
                 "model_content_hash",
             ],
         )?;
-        for field in ["source_namespace", "source_epoch", "producer_id"] {
-            required(x, field)?;
-        }
-        crate::session_protocol::positive(required(x, "producer_epoch")?, "X producer epoch")?;
+        source_identity(x)?;
         digest(required(x, "model_content_hash")?)?;
         if !m["authorized_sources"].as_array().unwrap().iter().any(|a| {
             [

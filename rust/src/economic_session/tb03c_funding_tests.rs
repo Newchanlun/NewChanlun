@@ -870,6 +870,16 @@ fn r3_b2_rejects_non_business_funding_values_before_e_b_init_and_audit() {
                     json!(db),
                 ),
             ]);
+            for key in ["source", "market", "instrument", "price_field"] {
+                cases.push((
+                    format!("/chongs/0/funding/quantity_calibration/quantity_basis/selector/{key}"),
+                    json!(socket),
+                ));
+                cases.push((
+                    format!("/funding/quote_snapshots/0/quotes/0/{key}"),
+                    json!(db),
+                ));
+            }
         }
         for (field, value) in cases {
             let mut malformed = package.clone();
@@ -877,11 +887,13 @@ fn r3_b2_rejects_non_business_funding_values_before_e_b_init_and_audit() {
             if field.ends_with("/selector/db") {
                 let parent = field.strip_suffix("/db").unwrap();
                 business.pointer_mut(parent).unwrap()["db"] = value;
+            } else {
+                *business.pointer_mut(&field).unwrap() = value;
+            }
+            if field.contains("/quantity_basis/") {
                 let cal = &mut business["chongs"][0]["funding"]["quantity_calibration"];
                 cal["signature"]["content_sha256"] =
                     json!(super::quantity_calibration::content_digest(cal));
-            } else {
-                *business.pointer_mut(&field).unwrap() = value;
             }
             std::fs::write(&config, canonical_json(&malformed)).unwrap();
             for (target, route) in [(&db, None), (&b_db, Some(chong.as_str()))] {
