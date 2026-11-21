@@ -114,6 +114,7 @@ pub(crate) fn domain_revision(manifest: &Value) -> Result<&'static str, String> 
 pub(crate) struct Config {
     pub manifest: Value,
     pub manifest_hash: String,
+    pub deployment: Option<std::sync::Arc<Value>>,
     pub db: PathBuf,
     pub domain: String,
     pub session: String,
@@ -132,15 +133,36 @@ impl Config {
         super::book::rules(&self.manifest)
     }
     pub fn load(path: &Path, db: &Path, chong: Option<&str>) -> Result<Self, String> {
-        let manifest = strict_json(&std::fs::read(path).map_err(err)?)?;
-        if manifest["schema_revision"] != "economic-manifest/1" {
+        Self::load_inner(path, db, chong, false)
+    }
+    pub(super) fn load_inner(
+        path: &Path,
+        db: &Path,
+        chong: Option<&str>,
+        offline: bool,
+    ) -> Result<Self, String> {
+        use super::deployment;
+        let file = strict_json(&std::fs::read(path).map_err(err)?)?;
+        let (manifest, deployment) = if file["schema_revision"] == deployment::PACKAGE {
+            super::voice::exact(&file, &["schema_revision", "business", "deployment"])?;
+            deployment::validate_business(&file["business"])?;
+            (
+                file["business"].clone(),
+                Some(std::sync::Arc::new(file["deployment"].clone())),
+            )
+        } else if file["schema_revision"] == "economic-manifest/1" {
+            if file.get("business").is_some() || file.get("deployment").is_some() {
+                return Err("SchemaUnsupported：混合经济清单".into());
+            }
+            (file, None)
+        } else {
             return Err("SchemaUnsupported：manifest版本".into());
-        }
+        };
         // 域版本先判：未知值/混写不得进入任何后续配置校验。
         if domain_revision(&manifest)? == SCHEMA_V2
             && !manifest.get("finance").is_some_and(|v| !v.is_null())
         {
-            return Err("SchemaUnsupported：economic-session/2 必须冻结 tb03b-finance/2".into());
+            return Err("SchemaUnsupported：economic-session/2 必须冻结内容域 FIN 合同".into());
         }
         // #1717：SR 扩量是并列子合同，与域版本一同先判；未选择它的 manifest 不认识其操作。
         let sr_expansion = super::sr_expansion::validate_config(&manifest)?;
@@ -151,10 +173,15 @@ impl Config {
         let exact_release = super::finance::exact_release_selected(&manifest);
         super::tb03c_allocation::validate_config(&manifest)?;
         super::tb03c_funding::validate_config(&manifest)?;
+        if let Some(d) = &deployment {
+            deployment::validate_mapping(&manifest, d)?;
+        }
         let session = required(&manifest, "session_id")?.to_owned();
         let generation = required(&manifest, "session_generation")?.to_owned();
         positive(&generation, "session_generation")?;
-        let es = &manifest["e"];
+        let es = deployment
+            .as_ref()
+            .map_or(&manifest["e"], |d| &d["domains"]["E"]);
         let epath = absolute(required(es, "db")?)?;
         absolute(required(es, "socket")?)?;
         let mut ids = std::collections::BTreeSet::new();
@@ -167,19 +194,47 @@ impl Config {
             .ok_or("InvalidDomain：重路由为空")?;
         for c in routes {
             let id = required(c, "chong_id")?;
+            let location = deployment
+                .as_ref()
+                .map_or(c, |d| &d["domains"][format!("B:{id}")]);
             let symbol = required(c, "symbol")?;
             let level = required(c, "operation_level")?;
             nonnegative(level, "operation_level")?;
             positive(required(c, "fixed_q")?, "fixed_q")?;
             if !ids.insert(id)
                 || !semantics.insert((symbol, level))
-                || !paths.insert(absolute(required(c, "db")?)?)
-                || !sockets.insert(absolute(required(c, "socket")?)?)
+                || !paths.insert(absolute(required(location, "db")?)?)
+                || !sockets.insert(absolute(required(location, "socket")?)?)
             {
                 return Err("IdentityConflict：重身份/语义/数据库/socket重复".into());
             }
         }
-        if domain_revision(&manifest)? == SCHEMA_V2 {
+        if deployment.is_some() && !offline {
+            let mut locations = std::collections::BTreeSet::new();
+            let mut add = |path: &Path| -> Result<(), String> {
+                if !locations.insert(canonical_target(path)?) {
+                    return Err(
+                        "IdentityConflict：库、锁、SQLite 附件与 socket 部署不得别名互撞".into(),
+                    );
+                }
+                Ok(())
+            };
+            for db in &paths {
+                add(db)?;
+                for suffix in [".writer.lock", "-wal", "-shm"] {
+                    let mut location = db.as_os_str().to_owned();
+                    location.push(suffix);
+                    add(Path::new(&location))?;
+                }
+            }
+            for socket in &sockets {
+                add(socket)?;
+            }
+            if let Some(xdb) = deployment.as_ref().and_then(|d| d["x_db"].as_str()) {
+                add(Path::new(xdb))?;
+            }
+        }
+        if domain_revision(&manifest)? == SCHEMA_V2 && !offline {
             let resources = super::financial_reader_resources::FinancialReaderResources::from_json(
                 &manifest["finance"]["structure"]["reader_resources"],
             )?;
@@ -247,14 +302,7 @@ impl Config {
                 return Err("IdentityConflict：重复来源配置".into());
             }
         }
-        for k in [
-            "max_frame_bytes",
-            "read_timeout_ms",
-            "write_timeout_ms",
-            "response_timeout_ms",
-            "queue_capacity",
-            "max_connections",
-        ] {
+        for &k in deployment::RESOURCES {
             positive(required(&manifest["resources"], k)?, k)?;
         }
         match required(&manifest["clock"], "kind")? {
@@ -264,7 +312,11 @@ impl Config {
             }
             _ => return Err("InvalidDomain：必须显式指定时钟adapter".into()),
         }
-        let configured_faults = fault_plans(&manifest["test_only_fault"]);
+        let configured_faults = fault_plans(
+            deployment
+                .as_ref()
+                .map_or(&manifest["test_only_fault"], |d| &d["fault_markers"]),
+        );
         let mut fault_keys = std::collections::BTreeSet::new();
         for f in configured_faults {
             if manifest["clock"]["kind"] != "TestOnly" {
@@ -291,21 +343,51 @@ impl Config {
         } else {
             ("E".to_owned(), es)
         };
-        let expected = absolute(required(route, "db")?)?;
-        if canonical_target(db)? != canonical_target(&expected)? {
+        let location = deployment
+            .as_ref()
+            .map_or(route, |d| &d["domains"][&domain]);
+        let expected = absolute(required(location, "db")?)?;
+        if !offline && canonical_target(db)? != canonical_target(&expected)? {
             return Err("IdentityConflict：命令数据库不是manifest域路径".into());
         }
-        let socket = absolute(required(route, "socket")?)?;
+        let socket = absolute(required(location, "socket")?)?;
         Ok(Self {
             manifest_hash: hash(&manifest),
             manifest,
-            db: expected,
+            deployment,
+            db: if offline { db.to_owned() } else { expected },
             producer: format!("{domain}:{session}"),
             domain,
             session,
             generation,
             socket,
         })
+    }
+    pub(super) fn location(&self, domain: &str) -> Result<&Value, String> {
+        let location = if let Some(d) = &self.deployment {
+            &d["domains"][domain]
+        } else if domain == "E" {
+            &self.manifest["e"]
+        } else {
+            self.route(
+                domain
+                    .strip_prefix("B:")
+                    .ok_or("InvalidDomain：未知经济域")?,
+            )?
+        };
+        if !location.is_object() {
+            return Err("InvalidDomain：未配置域部署".into());
+        }
+        Ok(location)
+    }
+    pub(super) fn for_domain(&self, domain: &str) -> Result<Self, String> {
+        let location = self.location(domain)?;
+        let mut other = self.clone();
+        other.domain = domain.to_owned();
+        other.producer = format!("{domain}:{}", self.session);
+        other.db = absolute(required(location, "db")?)?;
+        other.socket = absolute(required(location, "socket")?)?;
+        Ok(other)
     }
     pub fn route(&self, id: &str) -> Result<&Value, String> {
         self.manifest["chongs"]
@@ -395,7 +477,11 @@ impl Config {
         Ok(())
     }
     pub fn pause(&self, msg: &str, phase: &str) -> Result<(), String> {
-        if let Some(f) = fault_plans(&self.manifest["test_only_fault"])
+        let faults = self
+            .deployment
+            .as_ref()
+            .map_or(&self.manifest["test_only_fault"], |d| &d["fault_markers"]);
+        if let Some(f) = fault_plans(faults)
             .into_iter()
             .find(|f| f["message_id"] == msg && f["phase"] == phase)
         {
@@ -433,7 +519,7 @@ impl Config {
         Ok(())
     }
 }
-fn fault_plans(value: &Value) -> Vec<&Value> {
+pub(super) fn fault_plans(value: &Value) -> Vec<&Value> {
     match value {
         Value::Null => vec![],
         Value::Array(values) => values.iter().collect(),
@@ -812,8 +898,20 @@ pub(crate) fn init(config: &Config) -> Result<Value, String> {
         )
         .map_err(err)?;
     }
-    if super::evidence::enabled(config) {
-        set_meta(&tx, "voice_binding_revision", "voice-binding/1")?;
+    if let Some(d) = &config.deployment {
+        tx.execute_batch(super::deployment::SQL).map_err(err)?;
+        tx.execute(
+            "INSERT INTO deployment VALUES(1,?,?)",
+            params![canonical_json(d), hash(d)],
+        )
+        .map_err(err)?;
+        set_meta(&tx, "business_manifest", &canonical_json(&config.manifest))?;
+        if let Some(fin) = super::finance::bound_revision(&config.manifest)? {
+            set_meta(&tx, "finance_write_revision", fin)?;
+        }
+    }
+    if let Some(voice) = super::evidence::bound_revision(config) {
+        set_meta(&tx, "voice_binding_revision", voice)?;
     }
     // #1406 / 根裁定 OQ-7：书账子合同版本只由 init 显式绑定；旧域无此行。
     if let Some(revision) = config.book_rules()?.revision() {
@@ -953,6 +1051,11 @@ pub(super) fn audit_with_budget(
     if revision == SCHEMA_V2 {
         expected.execute_batch(CONTENT_SQL).map_err(err)?;
     }
+    if config.deployment.is_some() {
+        expected
+            .execute_batch(super::deployment::SQL)
+            .map_err(err)?;
+    }
     let schema_dump = |db: &Connection| -> Result<Vec<(String, String, String)>, String> {
         let mut q = db
             .prepare(
@@ -978,7 +1081,12 @@ pub(super) fn audit_with_budget(
         return Err(format!("StorageUnavailable：域损坏：SQLite {integrity}"));
     }
     let names: Vec<String> = budget.all(c,"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", [], |r| r.get(0))?;
-    if names != domain_tables(revision) {
+    let mut expected_tables = domain_tables(revision);
+    if config.deployment.is_some() {
+        expected_tables.push("deployment".to_owned());
+        expected_tables.sort();
+    }
+    if names != expected_tables {
         return Err("StorageUnavailable：域损坏：表集合变化".into());
     }
     let extra: i64 = budget.one(
@@ -1002,19 +1110,43 @@ pub(super) fn audit_with_budget(
             return Err(format!("IdentityConflict：持久{k}未绑定当前配置"));
         }
     }
+    if let Some(d) = &config.deployment {
+        let (mapping, fingerprint): (String, String) = budget.one(
+            c,
+            "SELECT mapping,fingerprint FROM deployment WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if mapping != canonical_json(d) || fingerprint != hash(d) {
+            return Err("IdentityConflict：部署映射已冻结".into());
+        }
+    }
+    for (key, expected) in [
+        (
+            "business_manifest",
+            config
+                .deployment
+                .as_ref()
+                .map(|_| canonical_json(&config.manifest)),
+        ),
+        (
+            "finance_write_revision",
+            super::finance::bound_revision(&config.manifest)?.map(str::to_owned),
+        ),
+    ] {
+        let actual: Option<String> =
+            budget.optional(c, "SELECT v FROM meta WHERE k=?", [key], |r| r.get(0))?;
+        if actual != expected {
+            return Err(format!("IdentityConflict：持久{key}未绑定当前业务合同"));
+        }
+    }
     let voice_revision: Option<String> = budget.optional(
         c,
         "SELECT v FROM meta WHERE k='voice_binding_revision'",
         [],
         |r| r.get(0),
     )?;
-    if voice_revision.as_deref()
-        != if super::evidence::enabled(config) {
-            Some("voice-binding/1")
-        } else {
-            None
-        }
-    {
+    if voice_revision.as_deref() != super::evidence::bound_revision(config) {
         return Err(
             "IdentityConflict：Voice 存储版本未由 init 显式绑定；不得在 recover 暗迁移".into(),
         );
@@ -1114,7 +1246,7 @@ pub(super) fn audit_with_budget(
             super::content_store::verify_image_with_budget(
                 c,
                 &image,
-                &config.manifest["finance"]["structure"],
+                &super::finance::deployed_structure(config),
                 budget,
             )
             .map_err(|e| format!("StorageUnavailable：本地内容闭包审计失败：{e}"))?;
@@ -1632,6 +1764,7 @@ pub(crate) fn verify_e_copy(record: &Value, config: &Config) -> Result<(), Strin
     {
         return Err("StorageUnavailable：域损坏：E回执/原件/提交证明不一致".into());
     }
+    super::finance::verify_cap_closure(&ec, image)?;
     let mut original = record.clone();
     for key in [
         "cut",

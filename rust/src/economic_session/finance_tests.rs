@@ -1,6 +1,7 @@
 //! #1394：本地事务测试缝。S/γ 受信输入明确为单位夹具，不能计正式会话/浏览器成功。
 use super::super::{book, service};
 use super::*;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture {

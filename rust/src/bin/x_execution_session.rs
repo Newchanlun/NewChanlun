@@ -10,7 +10,8 @@
 //!   x_execution_session serve --db FILE --profile FILE --writer-epoch N
 //!   x_execution_session query --db FILE
 //!   x_execution_session submit|cancel --db FILE      （恒 UnsupportedCapability）
-use newchan_rust::session_protocol::positive;
+use newchan_rust::history_simulation::runtime::{audit_persisted, ConfiguredProfile};
+use newchan_rust::session_protocol::{positive, strict_json};
 use newchan_rust::session_transport::process_lock;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
@@ -31,7 +32,7 @@ struct Profile {
     endpoint: Option<String>,
     credential_env: String,
     tb09_fingerprint: Option<String>,
-    history_simulation: Option<newchan_rust::history_simulation::runtime::Profile>,
+    history_simulation: Option<ConfiguredProfile>,
 }
 
 impl Profile {
@@ -78,11 +79,13 @@ impl Profile {
                         "InvalidDomain：history_simulation 仅允许 simulation profile".into(),
                     );
                 }
-                let profile: newchan_rust::history_simulation::runtime::Profile =
-                    serde_json::from_value(value.clone())
-                        .map_err(|e| format!("InvalidDomain：模拟 profile：{e}"))?;
-                profile.validate()?;
-                Some(profile)
+                let supplied =
+                    if value.get("business").is_some() || value.get("deployment").is_some() {
+                        strict_json(text.as_bytes())?["history_simulation"].clone()
+                    } else {
+                        value.clone()
+                    };
+                Some(ConfiguredProfile::parse(supplied)?)
             }
         };
         Ok(Self {
@@ -130,9 +133,7 @@ fn persist(conn: &mut Connection, profile: &Profile, epoch: i64) -> Result<Value
         }
     }
     if let Some(simulation) = &profile.history_simulation {
-        newchan_rust::history_simulation::runtime::initialize_in_transaction(
-            &tx, simulation, epoch,
-        )?;
+        simulation.initialize_in_transaction(&tx, epoch)?;
     }
     let (send_state, reason) = if profile.mode == "production" && profile.tb09_fingerprint.is_none()
     {
@@ -202,14 +203,15 @@ fn run() -> Result<(), String> {
         "serve" => {
             let profile = Profile::load(Path::new(get("--profile")?))?;
             let epoch = positive(get("--writer-epoch")?, "writer_epoch")?;
+            if let Some(simulation) = &profile.history_simulation {
+                simulation.check_db(db)?;
+            }
             let _lock = process_lock(db, "X")?;
             let (mut conn, storage) = newchan_rust::economic_session::open_durable_db(db)?;
             eprintln!("x_execution_session storage {storage}");
             let state = persist(&mut conn, &profile, epoch)?;
             if let Some(simulation) = &profile.history_simulation {
-                return newchan_rust::history_simulation::runtime::serve(
-                    &mut conn, simulation, epoch,
-                );
+                return simulation.serve(&mut conn, epoch);
             }
             drop(conn);
             // 凭据门在任何传输构造之前：缺即 MissingDependency 非 0 退出，端点从未被连接。
@@ -232,10 +234,23 @@ fn run() -> Result<(), String> {
                 std::thread::sleep(Duration::from_millis(200));
             }
         }
-        "query" => {
-            let conn =
+        "audit" | "query" => {
+            let mut conn =
                 Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
-            println!("{}", query_conn(&conn)?);
+            let tx = conn.transaction().map_err(err)?;
+            let state = query_conn(&tx)?;
+            if command == "audit" {
+                if state["history_simulation"] != "true" {
+                    return Err("SchemaUnsupported：离线 audit 仅用于 simulation X".into());
+                }
+                let epoch = positive(
+                    state["writer_epoch"].as_str().unwrap_or_default(),
+                    "writer_epoch",
+                )?;
+                audit_persisted(&tx, epoch)?;
+            }
+            tx.commit().map_err(err)?;
+            println!("{state}");
             Ok(())
         }
         "submit" | "cancel" => Err(format!(

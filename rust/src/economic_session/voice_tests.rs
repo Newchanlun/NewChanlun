@@ -36,6 +36,7 @@ fn config() -> store::Config {
     store::Config {
         manifest: json!({}),
         manifest_hash: "unit".into(),
+        deployment: None,
         db: PathBuf::new(),
         domain: "B:opaque-one".into(),
         session: "unit".into(),

@@ -2,12 +2,30 @@
 //! 此适配器不生产 γ，不调用旧 π，也不把 Closed/Strict 作为定义 γ 的前置。
 #[cfg(test)]
 use super::book::hash;
+use super::deployment::{self, logical_name};
 use super::store::Config;
 use super::voice::{digest, exact};
 use crate::session_protocol::{nonnegative, positive, required, sha256_hex, strict_json};
 use serde_json::{json, Value};
-use std::io::Read;
 use std::path::Path;
+const V1: &str = "voice-binding/1";
+const V2: &str = "voice-binding/2";
+pub(super) fn bound_revision(c: &Config) -> Option<&'static str> {
+    enabled(c).then(|| {
+        if deployment::is_business(&c.manifest) {
+            V2
+        } else {
+            V1
+        }
+    })
+}
+pub(super) const REQUIRED_ROLES: &[&str] = &[
+    "input",
+    "controlled_gammas",
+    "carrier_objects",
+    "instrument_declaration",
+    "opening_raw",
+];
 const LIMIT: u64 = 64 * 1024 * 1024;
 
 pub(super) struct VerifiedGammaEvidence {
@@ -42,8 +60,11 @@ pub(super) fn validate_config(manifest: &Value) -> Result<(), String> {
         return Ok(());
     };
     exact(v, &["schema_revision", "authorities"])?;
-    if v["schema_revision"] != "voice-binding/1" || manifest["clock"]["kind"] != "TestOnly" {
-        return Err("SchemaUnsupported：Voice 证据仅显式 TestOnly voice-binding/1".into());
+    let split = deployment::is_business(manifest);
+    if v["schema_revision"] != if split { V2 } else { V1 }
+        || manifest["clock"]["kind"] != "TestOnly"
+    {
+        return Err("SchemaUnsupported：Voice 证据版本与 TestOnly 业务合同不符".into());
     }
     let authorities = v["authorities"]
         .as_array()
@@ -51,26 +72,27 @@ pub(super) fn validate_config(manifest: &Value) -> Result<(), String> {
         .ok_or("InvalidDomain：Voice 缺固定权威列表")?;
     let mut ids = std::collections::BTreeSet::new();
     for a in authorities {
-        exact(
-            a,
-            &[
-                "authority_id",
-                "bundle_path",
-                "bundle_sha256",
-                "verification_path",
-                "verification_sha256",
-                "max_bytes",
-            ],
-        )?;
+        let mut keys = vec![
+            "authority_id",
+            "bundle_sha256",
+            "verification_sha256",
+            "max_bytes",
+        ];
+        if !split {
+            keys.extend(["bundle_path", "verification_path"]);
+        }
+        exact(a, &keys)?;
         if !ids.insert(required(a, "authority_id")?) {
             return Err("IdentityConflict：重复 Voice 权威".into());
         }
         for k in ["bundle_sha256", "verification_sha256"] {
             digest(required(a, k)?)?;
         }
-        for k in ["bundle_path", "verification_path"] {
-            if !Path::new(required(a, k)?).is_absolute() {
-                return Err("InvalidDomain：Voice 固定原件路径须绝对路径".into());
+        if !split {
+            for k in ["bundle_path", "verification_path"] {
+                if !Path::new(required(a, k)?).is_absolute() {
+                    return Err("InvalidDomain：Voice 固定原件路径须绝对路径".into());
+                }
             }
         }
         let max = positive(required(a, "max_bytes")?, "evidence max_bytes")? as u64;
@@ -93,37 +115,8 @@ fn authority<'a>(config: &'a Config, id: &str) -> Result<&'a Value, String> {
         .ok_or_else(|| "MissingDependency：未配置该 γ 权威".into())
 }
 fn read_pinned(path: &str, expected: &str, max: u64) -> Result<String, String> {
-    if !Path::new(path).is_absolute() {
-        return Err("InvalidDomain：证据原件须固定绝对路径".into());
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
-    }
-    let f = options
-        .open(path)
-        .map_err(|e| format!("MissingDependency：固定证据原件不可读：{e}"))?;
-    if !f
-        .metadata()
-        .map_err(|e| format!("StorageUnavailable：证据文件状态：{e}"))?
-        .is_file()
-    {
-        return Err("InvalidDomain：证据原件须普通文件".into());
-    }
-    let mut bytes = Vec::new();
-    f.take(max + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("StorageUnavailable：读取证据：{e}"))?;
-    if bytes.len() as u64 > max {
-        return Err("InvalidDomain：证据原件超过明确上限".into());
-    }
-    if sha256_hex(&bytes) != expected {
-        return Err("IdentityConflict：证据原始字节摘要与固定权威不同".into());
-    }
-    String::from_utf8(bytes).map_err(|_| "InvalidDomain：证据原件非 UTF8".into())
+    String::from_utf8(deployment::read_pinned(path, expected, max)?)
+        .map_err(|_| "InvalidDomain：证据原件非 UTF8".into())
 }
 
 /// 单次读取并保留原字节。运行时只在此处读外部文件，审计重放使用已提交 witness。
@@ -135,11 +128,18 @@ pub(super) fn load(
     if !enabled(config) {
         return Err("MissingDependency：未配置定义 γ 工作例权威".into());
     }
-    validate_config(&config.manifest)?;
     let a = authority(config, authority_id)?;
     let max = positive(required(a, "max_bytes")?, "max_bytes")? as u64;
+    let mapping = config
+        .deployment
+        .as_ref()
+        .map(|d| &d["voice"][authority_id]);
     let raw = read_pinned(
-        required(a, "bundle_path")?,
+        if let Some(m) = mapping {
+            required(m, "bundle")?
+        } else {
+            required(a, "bundle_path")?
+        },
         required(a, "bundle_sha256")?,
         max,
     )?;
@@ -153,42 +153,294 @@ pub(super) fn load(
         return Err("MissingDependency：固定权威不存在该 evidence_id".into());
     }
     let verification = read_pinned(
-        required(a, "verification_path")?,
+        if let Some(m) = mapping {
+            required(m, "verification")?
+        } else {
+            required(a, "verification_path")?
+        },
         required(a, "verification_sha256")?,
         max,
     )?;
-    let witness = json!({"authority_id":a["authority_id"],"evidence_id":evidence_id,"bundle_raw_utf8":raw,"verification_raw_utf8":verification});
-    // 先核受信清单/独评绑定，再读其中的固定路径；没有全局扫描无关 authority。
-    let verified = verify_witness(config, &witness)?;
+    let mut witness = json!({"authority_id":a["authority_id"],"evidence_id":evidence_id,"bundle_raw_utf8":raw,"verification_raw_utf8":verification});
+    // 先核受信清单/独评绑定，后读有界原件。新版保存摘要键控的原件闭包。
+    let verified = verify_binding(config, &witness)?;
     let artifacts = bundle["artifacts"].as_array().unwrap();
+    let mut objects = serde_json::Map::new();
+    let locations = mapping
+        .map(|m| {
+            m["artifacts"]
+                .as_array()
+                .ok_or("MissingDependency：缺 Voice 部署原件列表")
+        })
+        .transpose()?;
+    if locations.is_some_and(|list| list.len() != artifacts.len()) {
+        return Err("IdentityConflict：Voice 闭包与部署映射的原件集合不同".into());
+    }
     for artifact in artifacts {
         let n = positive(required(artifact, "bytes")?, "artifact bytes")? as u64;
-        let actual = read_pinned(
-            required(artifact, "path")?,
-            required(artifact, "sha256")?,
-            n,
-        )?;
-        if actual.len() as u64 != n {
-            return Err("IdentityConflict：原件精确长度与清单不同".into());
+        let sha = required(artifact, "sha256")?;
+        if let Some(list) = locations {
+            let name = required(artifact, "name")?;
+            let location = list
+                .iter()
+                .find(|loc| loc["name"] == name && loc["sha256"] == sha)
+                .ok_or("MissingDependency：逻辑角色和内容摘要无对应原件")?;
+            if let Some(prior) = objects.get(sha) {
+                let prior: &Value = prior;
+                if prior
+                    .as_str()
+                    .is_none_or(|encoded| encoded.len() as u64 != n * 2)
+                {
+                    return Err("IdentityConflict：同一内容地址有不同精确长度".into());
+                }
+                // 仍读取此角色绑定的位置；不能以另一角色的成功掩盖缺件。
+            }
+            let bytes = deployment::read_pinned(required(location, "path")?, sha, n)?;
+            if bytes.len() as u64 != n {
+                return Err("IdentityConflict：原件精确长度与清单不同".into());
+            }
+            objects.insert(sha.to_owned(), json!(encode_hex(&bytes)));
+        } else {
+            let actual = read_pinned(required(artifact, "path")?, sha, n)?;
+            if actual.len() as u64 != n {
+                return Err("IdentityConflict：原件精确长度与清单不同".into());
+            }
         }
     }
-    Ok(verified)
+    if locations.is_some() {
+        witness["artifacts_by_sha256"] = Value::Object(objects);
+        Ok(VerifiedGammaEvidence {
+            witness,
+            ..verified
+        })
+    } else {
+        Ok(verified)
+    }
 }
 
-/// 独评结果必须由 manifest 事先固定，且覆盖完整 bundle 与其中每一原件；绝不相信请求的布尔值。
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 15) as usize] as char);
+    }
+    s
+}
+fn decode_hex(raw: &str, bytes: u64) -> Result<Vec<u8>, String> {
+    if raw.len() as u64 != bytes * 2 {
+        return Err("IdentityConflict：持久原件精确长度不符".into());
+    }
+    let nibble = |b: u8| match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        _ => Err("SchemaUnsupported：持久原件非小写 hex".to_owned()),
+    };
+    raw.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| Ok(nibble(pair[0])? << 4 | nibble(pair[1])?))
+        .collect()
+}
+
+const WITNESS: &[&str] = &[
+    "authority_id",
+    "evidence_id",
+    "bundle_raw_utf8",
+    "verification_raw_utf8",
+];
+
 pub(super) fn verify_witness(
     config: &Config,
     witness: &Value,
 ) -> Result<VerifiedGammaEvidence, String> {
-    exact(
-        witness,
-        &[
-            "authority_id",
-            "evidence_id",
-            "bundle_raw_utf8",
-            "verification_raw_utf8",
-        ],
-    )?;
+    if bound_revision(config) != Some(V2) {
+        exact(witness, WITNESS)?;
+        return verify_binding(config, witness);
+    }
+    let mut keys = WITNESS.to_vec();
+    keys.push("artifacts_by_sha256");
+    exact(witness, &keys)?;
+    let verified = verify_binding(config, witness)?;
+    let bundle = strict_json(required(witness, "bundle_raw_utf8")?.as_bytes())?;
+    let objects = witness["artifacts_by_sha256"]
+        .as_object()
+        .ok_or("MissingDependency：缺 Voice 原件闭包")?;
+    let mut checked = std::collections::BTreeMap::new();
+    for a in bundle["artifacts"].as_array().unwrap() {
+        let sha = required(a, "sha256")?;
+        let n = positive(required(a, "bytes")?, "artifact bytes")? as u64;
+        if let Some(prior) = checked.insert(sha, n) {
+            if prior != n {
+                return Err("IdentityConflict：同一内容地址有不同精确长度".into());
+            }
+        } else {
+            let raw = objects
+                .get(sha)
+                .and_then(Value::as_str)
+                .ok_or("MissingDependency：闭包缺少独评原件")?;
+            let bytes = decode_hex(raw, n)?;
+            deployment::verify_bytes(&bytes, sha, n)?;
+        }
+    }
+    if objects.len() != checked.len() {
+        return Err("IdentityConflict：持久 Voice 闭包含未独评原件".into());
+    }
+    Ok(verified)
+}
+
+/// 跨域证明携带的是原图像；直接消费其原件闭包，不向原部署路径求证。
+pub(super) fn verify_image_closure(config: &Config, image: &Value) -> Result<(), String> {
+    if !deployment::is_business(&config.manifest) {
+        return Ok(());
+    }
+    for event in image["history"]
+        .as_array()
+        .ok_or("SchemaUnsupported：证明图像缺历史")?
+    {
+        if event["kind"] == "BindVoice" {
+            let v = verify_witness(config, &event["evidence_witness"])?;
+            if event["record"]["evidence"] != v.reference() {
+                return Err("IdentityConflict：证明中的 Voice 记录未绑定原件".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 旧见证中的原始路径仍参与原摘要，不重写；归档只按独评绑定的摘要定位副本。
+pub(super) fn verify_legacy_archive(
+    config: &Config,
+    image: &Value,
+    index: &Value,
+) -> Result<(), String> {
+    if deployment::is_business(&config.manifest) {
+        if !index.is_null() {
+            return Err("SchemaUnsupported：新版 Voice 不接受外部归档索引".into());
+        }
+        return Ok(());
+    }
+    if !index.is_null() {
+        exact(index, &["schema_revision", "objects"])?;
+        if index["schema_revision"] != "voice-archive-index/1" || !index["objects"].is_object() {
+            return Err("SchemaUnsupported：未知 Voice 归档索引".into());
+        }
+    }
+    visit_archived_voice(config, image, index, &mut std::collections::BTreeSet::new())
+}
+
+type SeenProofs = std::collections::BTreeSet<(String, String)>;
+fn visit_archive_cut(
+    config: &Config,
+    domain: &str,
+    root: &Value,
+    image: &Value,
+    index: &Value,
+    seen: &mut SeenProofs,
+) -> Result<(), String> {
+    let root = root
+        .as_str()
+        .ok_or("MissingDependency：归档跨域证明缺提交根")?;
+    if seen.insert((domain.to_owned(), root.to_owned())) {
+        visit_archived_voice(&config.for_domain(domain)?, image, index, seen)?;
+    }
+    Ok(())
+}
+fn visit_archived_voice(
+    config: &Config,
+    image: &Value,
+    index: &Value,
+    seen: &mut SeenProofs,
+) -> Result<(), String> {
+    for event in image["history"]
+        .as_array()
+        .ok_or("SchemaUnsupported：离线图像缺历史")?
+    {
+        if event["kind"] == "BindVoice" {
+            let witness = &event["evidence_witness"];
+            verify_witness(config, witness)?;
+            let bundle = strict_json(required(witness, "bundle_raw_utf8")?.as_bytes())?;
+            for artifact in bundle["artifacts"].as_array().unwrap() {
+                let sha = required(artifact, "sha256")?;
+                let length = positive(required(artifact, "bytes")?, "artifact bytes")? as u64;
+                let path = index["objects"][sha].as_str().ok_or_else(|| {
+                    format!(
+                        "MissingDependency：历史 Voice 归档缺角色 {} 摘要 {sha}",
+                        artifact["name"]
+                    )
+                })?;
+                if read_pinned(path, sha, length)?.len() as u64 != length {
+                    return Err("IdentityConflict：归档原件精确长度不符".into());
+                }
+            }
+        }
+        let witness = &event["witness"];
+        let prepared = witness["prepared_proofs"].as_array().into_iter().flatten();
+        for proof in prepared.chain(
+            [&witness["grant_proof"], &witness["commit_proof"]]
+                .into_iter()
+                .filter(|p| !p.is_null()),
+        ) {
+            let domain = required(proof, "domain_id")?;
+            visit_archive_cut(
+                config,
+                domain,
+                &proof["receipt"]["cut"]["root_hash"],
+                &proof["image"],
+                index,
+                seen,
+            )?;
+            visit_archive_cut(
+                config,
+                domain,
+                &proof["current_cut"]["root_hash"],
+                &proof["current_image"],
+                index,
+                seen,
+            )?;
+        }
+    }
+    for record in image["recorded"]
+        .as_array()
+        .ok_or("SchemaUnsupported：离线图像缺原件列表")?
+    {
+        if let Some(proof) = record.get("e_commit_proof") {
+            visit_archive_cut(
+                config,
+                "E",
+                &record["cut"]["root_hash"],
+                &proof["image"],
+                index,
+                seen,
+            )?;
+        }
+        if let Some(proof) = record.get("b_source_debit_proof") {
+            let domain = required(proof, "domain_id")?;
+            visit_archive_cut(
+                config,
+                domain,
+                &proof["receipt"]["cut"]["root_hash"],
+                &proof["image"],
+                index,
+                seen,
+            )?;
+        }
+        if let Some(proof) = record.get("e_resolution_proof") {
+            visit_archive_cut(
+                config,
+                "E",
+                &proof["receipt"]["cut"]["root_hash"],
+                &proof["image"],
+                index,
+                seen,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// 独评结果必须由 manifest 事先固定，且覆盖完整 bundle 与其中每一原件；绝不相信请求的布尔值。
+fn verify_binding(config: &Config, witness: &Value) -> Result<VerifiedGammaEvidence, String> {
+    let split = bound_revision(config) == Some(V2);
     let a = authority(config, required(witness, "authority_id")?)?;
     let raw = required(witness, "bundle_raw_utf8")?;
     let review_raw = required(witness, "verification_raw_utf8")?;
@@ -206,9 +458,47 @@ pub(super) fn verify_witness(
         &bundle,
         &["schema", "authority_id", "source", "artifacts", "bindings"],
     )?;
-    if bundle["schema"] != "voice-binding-authority/1"
+    let (bundle_schema, review_schema) = if split {
+        deployment::closed(
+            &review,
+            &[
+                "schema",
+                "verdict",
+                "authority_id",
+                "bundle_sha256",
+                "artifacts",
+                "verified_evidence_ids",
+            ],
+            &["scope"],
+        )?;
+        if let Some(scope) = review.get("scope") {
+            if !scope.is_string() {
+                return Err("SchemaUnsupported：独评 scope 须文本".into());
+            }
+        }
+        exact(
+            &bundle["source"],
+            &[
+                "instrument",
+                "input_sha256",
+                "profile_id",
+                "first_confirming_observation_source",
+                "clock_mapping",
+            ],
+        )?;
+        (
+            "voice-binding-authority/2",
+            "voice-binding-independent-verification/2",
+        )
+    } else {
+        (
+            "voice-binding-authority/1",
+            "voice-binding-independent-verification/1",
+        )
+    };
+    if bundle["schema"] != bundle_schema
         || bundle["authority_id"] != a["authority_id"]
-        || review["schema"] != "voice-binding-independent-verification/1"
+        || review["schema"] != review_schema
         || review["verdict"] != "APPROVE_CONTROLLED_VOICE_BINDING"
         || review["authority_id"] != a["authority_id"]
         || review["bundle_sha256"] != a["bundle_sha256"]
@@ -223,12 +513,17 @@ pub(super) fn verify_witness(
     let mut names = std::collections::BTreeSet::new();
     let mut total = 0u64;
     for f in artifacts {
-        exact(f, &["name", "path", "sha256", "bytes"])?;
+        if split {
+            exact(f, &["name", "sha256", "bytes"])?;
+            logical_name(required(f, "name")?)?;
+        } else {
+            exact(f, &["name", "path", "sha256", "bytes"])?;
+        }
         if !names.insert(required(f, "name")?) {
             return Err("IdentityConflict：γ 原件名重复".into());
         }
         digest(required(f, "sha256")?)?;
-        if !Path::new(required(f, "path")?).is_absolute() {
+        if !split && !Path::new(required(f, "path")?).is_absolute() {
             return Err("InvalidDomain：证据原件须固定绝对路径".into());
         }
         let n = positive(required(f, "bytes")?, "artifact bytes")? as u64;
@@ -237,13 +532,7 @@ pub(super) fn verify_witness(
             return Err("InvalidDomain：权威原件集合超过明确上限".into());
         }
     }
-    for name in [
-        "input",
-        "controlled_gammas",
-        "carrier_objects",
-        "instrument_declaration",
-        "opening_raw",
-    ] {
+    for &name in REQUIRED_ROLES {
         if !names.contains(name) {
             return Err(format!("MissingDependency：γ 绑定缺原件 {name}"));
         }

@@ -16,15 +16,7 @@ pub(super) fn call(
     epoch: &str,
     request: Value,
 ) -> Result<Value, String> {
-    let route = if domain == "E" {
-        &config.manifest["e"]
-    } else {
-        config.route(
-            domain
-                .strip_prefix("B:")
-                .ok_or("InvalidDomain：传输目标域无效")?,
-        )?
-    };
+    let route = config.location(domain)?;
     let r = &config.manifest["resources"];
     let limit = positive(required(r, "max_frame_bytes")?, "frame")? as usize;
     let deadline = Instant::now()
@@ -512,6 +504,7 @@ mod tests {
             let config = Config {
                 manifest: json!({}),
                 manifest_hash: String::new(),
+                deployment: None,
                 db: Default::default(),
                 domain: "E".into(),
                 session: "transport-unit".into(),
@@ -890,6 +883,7 @@ mod revision_tests {
         let config = Config {
             manifest,
             manifest_hash: String::new(),
+            deployment: None,
             db: Default::default(),
             domain: "E".into(),
             session: "transport-revision-unit".into(),

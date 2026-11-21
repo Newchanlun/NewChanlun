@@ -96,7 +96,12 @@ pub(crate) fn decode(doc: &Value, pointer: &str) -> Result<(Value, Value), Strin
 }
 
 /// Capture 的首次写入验证冻结 X 库中的原字节；请求不能自行提供来源路径或升级格式。
-pub(crate) fn verify_capture(manifest: &Value, envelope: &Value, raw: &str) -> Result<(), String> {
+pub(crate) fn verify_capture(
+    manifest: &Value,
+    deployment: Option<&Value>,
+    envelope: &Value,
+    raw: &str,
+) -> Result<(), String> {
     let doc = strict_json(raw.as_bytes())?;
     let binding = &manifest["history_simulation_source"];
     if doc["format"] != RAW_FORMAT {
@@ -121,7 +126,7 @@ pub(crate) fn verify_capture(manifest: &Value, envelope: &Value, raw: &str) -> R
     if binding["model_content_hash"] != doc["model_content_hash"] {
         return Err("IdentityConflict：模拟模型不是本会话冻结版本".into());
     }
-    let db = Path::new(required(binding, "x_db")?);
+    let db = Path::new(required(deployment.unwrap_or(binding), "x_db")?);
     if !db.is_absolute() {
         return Err("InvalidDomain：X 原件库须为冻结绝对路径".into());
     }
@@ -140,6 +145,9 @@ pub(crate) fn verify_capture(manifest: &Value, envelope: &Value, raw: &str) -> R
         || contract["source_epoch"] != binding["source_epoch"]
     {
         return Err("IdentityConflict：冻结 X 库合同与会话来源不符".into());
+    }
+    if deployment.is_some() {
+        super::runtime::verify_intake_binding(&c, db, binding, manifest)?;
     }
     let stored: String = c
         .query_row(
