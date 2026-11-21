@@ -1,0 +1,9 @@
+{
+  "schema_version": "at18-registry/1",
+  "crosswalk_sha256": "0d31d68e75a6d672c948e8708bfb261549029c7310f7ad4dbb326c087157ce5d",
+  "adapter_contract_sha256": "cd8808cfe052afde9ee3d3576ab76f6c324d4e21ead4b150c89017d5697ead99",
+  "experiment_profile_id": null,
+  "checks": [],
+  "bindings": [],
+  "pregate": {"census_sha256": "36c76a9cfa4ec39f518184ba91d61988027a775b0e319ea9eb719012ad0a3a00", "landings": []}
+}
