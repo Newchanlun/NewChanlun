@@ -130,23 +130,53 @@ theorem nextSegmentEnd_le (strokes : List Stroke) :
       omega
 
 /-! ═══════════════════════════════════════════════════════════════════════
-    § 3. 从消费的笔构造一个线段（端点几何，第78课顶高于底载体）
+    § 3. 从消费的笔构造一个线段（保留边界索引，标准化端价）
     ═══════════════════════════════════════════════════════════════════════ -/
 
+/-! #1486：给既有段区间读法提供第 78 课标准化的线段输入。
+
+[旧缠论] `docs/chanlun/text/blog/078-第78课.md:58`【正文】：
+「都可以把该线段标准化为最高低点都在端点」。
+`:60`【正文】：「所有向上线段都是以最低点开始最高点结束，向下线段都是以最高点开始最低点结束」。
+[新缠论:选择] #1419 L3（见 #1486）据此取已确定的成员笔端价极值，不把几何分段端点价
+用作区间。下面的构造保留首末笔的索引，只标准化端价。
+-/
+
+private def memberPrices (first : Stroke) (rest : List Stroke) : List Tick :=
+  first.startPrice :: first.endPrice :: rest.flatMap (fun s => [s.startPrice, s.endPrice])
+
+def memberLow (first : Stroke) (rest : List Stroke) : Tick :=
+  (memberPrices first rest).min (by simp [memberPrices])
+
+def memberHigh (first : Stroke) (rest : List Stroke) : Tick :=
+  (memberPrices first rest).max (by simp [memberPrices])
+
+theorem memberLow_le_memberHigh (first : Stroke) (rest : List Stroke) :
+    memberLow first rest ≤ memberHigh first rest := by
+  have h : first.startPrice ∈ memberPrices first rest := by simp [memberPrices]
+  exact Int.le_trans (List.min_le_of_mem h) (List.le_max_of_mem h)
+
+/-- 构造前提：成员已由分段判据确定且非空；Segment 的端点价是第 78 课
+    标准化后的方向极值。向上段为低→高，向下段为高→低。 -/
+def segOfMembers (dir : Direction) (first : Stroke) (rest : List Stroke) : Segment :=
+  let lo := memberLow first rest
+  let hi := memberHigh first rest
+  let (startPrice, endPrice) := match dir with
+    | .up => (lo, hi)
+    | .down => (hi, lo)
+  { direction := dir
+    startIndex := first.startIndex
+    endIndex := ((first :: rest).getLast (by simp)).endIndex
+    startPrice, endPrice }
+
 /--
-  **从一段笔（已消费的前 k 根）构造线段** —— 线段方向 = 第一根笔方向；起点 = 第一根笔起点，
-  终点 = 最后一根笔终点（第78课：线段从转折点到转折点）。
+  **从一段笔（已消费的前 k 根）构造线段** —— 方向沿用首笔，索引沿用首笔起点、末笔终点，
+  端价经 `segOfMembers` 标准化。
   对空列返回一个退化占位（不应被调用——构造保证非空，见 § 4）。
 -/
 def segmentOfStrokes : List Stroke → Segment
   | [] => { direction := Direction.up, startIndex := 0, endIndex := 0, startPrice := 0, endPrice := 0 }
-  | s :: rest =>
-      let last := (s :: rest).getLast (by simp)
-      { direction := s.direction
-        startIndex := s.startIndex
-        endIndex := last.endIndex
-        startPrice := s.startPrice
-        endPrice := last.endPrice }
+  | s :: rest => segOfMembers s.direction s rest
 
 /-! ═══════════════════════════════════════════════════════════════════════
     § 4. segmentsOf 全自动构造（well-founded 递归，终止性机器检查）

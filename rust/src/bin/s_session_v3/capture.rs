@@ -17,6 +17,8 @@ use std::{
     os::unix::fs::MetadataExt,
     time::{Duration, Instant},
 };
+#[path = "q_projection_memo.rs"]
+mod memo;
 #[path = "q_retained.rs"]
 mod retained;
 
@@ -203,6 +205,7 @@ pub(super) fn capture_verified_with_allocation(
 pub(super) struct ConfiguredCapture<'a> {
     capture: VerifiedCapture,
     resources: &'a q_resources::QResources,
+    content_memo: Option<(&'a mut memo::Slot, u64)>,
 }
 #[cfg_attr(not(test), allow(dead_code, reason = "#1608：仅测试使用"))]
 pub(super) struct DeltaReferences {
@@ -267,7 +270,8 @@ impl ConfiguredCapture<'_> {
         cut.try_extend_bytes(b"cut-").map_err(|e| e.to_string())?;
         cut.try_extend_bytes(gen.as_bytes())
             .map_err(|e| e.to_string())?;
-        let cut = TextValue::from_bytes(cut)?;
+        let cut = TextValue::from_bytes(cut)
+            .map_err(newchan_rust::s_content::ContextError::into_message)?;
         struct Ready<'a> {
             fields: [(&'static str, JsonView<'a>); 6],
         }
@@ -399,18 +403,51 @@ impl ConfiguredCapture<'_> {
             Some(self.resources.limit(Limit::CaptureBytes)),
         )
         .map_err(err)?;
+        let reply_plain = |fragment, job: &mut dyn sc::access::Access| {
+            request
+                .reply(
+                    fragment,
+                    &self.capture.digest,
+                    &session,
+                    &incarnation,
+                    producer_epoch,
+                    self.resources,
+                    job,
+                )
+                .map(CodecVec::from_plain)
+        };
         let root = match request.anchor_kind() {
             q_content::Anchor::Projection { generation, mode } => {
-                let actual = projection::build(
-                    &tx,
-                    &self.capture.audited,
-                    &mut graph,
-                    *generation,
-                    *mode,
-                    self.resources.limit(Limit::CaptureBytes),
-                    job,
+                let build = |graph: &mut history::HashReader<'_>,
+                             job: &mut dyn sc::access::Access| {
+                    projection::build(
+                        &tx,
+                        &self.capture.audited,
+                        graph,
+                        *generation,
+                        *mode,
+                        self.resources.limit(Limit::CaptureBytes),
+                        job,
+                    )
+                };
+                if let Some((slot, remaining)) = &mut self.content_memo {
+                    let fragment = slot.fragment(
+                        *remaining,
+                        *generation,
+                        *mode,
+                        request,
+                        &mut graph,
+                        self.resources,
+                        job,
+                        build,
+                    )?;
+                    return reply_plain(fragment, job);
+                }
+                let actual = build(&mut graph, job)?;
+                reader::check_projection_anchor_view(
+                    actual.anchor_view().view(),
+                    request.anchor_view(),
                 )?;
-                reader::check_projection_anchor_view(&actual, request.anchor_view())?;
                 actual.root
             }
             q_content::Anchor::Delta => {
@@ -440,17 +477,7 @@ impl ConfiguredCapture<'_> {
             )
         } else {
             let fragment = request.read(&mut graph, root.view(), self.resources, job)?;
-            request
-                .reply(
-                    fragment,
-                    &self.capture.digest,
-                    &session,
-                    &incarnation,
-                    producer_epoch,
-                    self.resources,
-                    job,
-                )
-                .map(CodecVec::from_plain)
+            reply_plain(fragment, job)
         }
     }
     pub(super) fn snapshot(
@@ -599,7 +626,11 @@ pub(super) fn capture_configured<'a>(
     )?;
     let capture = packed.checkout(verify_deadline)?;
     job.pre_io_check().map_err(err)?;
-    Ok(ConfiguredCapture { capture, resources })
+    Ok(ConfiguredCapture {
+        capture,
+        resources,
+        content_memo: None,
+    })
 }
 #[cfg(test)]
 fn capture_with(
@@ -1562,7 +1593,7 @@ pub(super) struct AuditReader {
     allocation: Option<super::q_allocation::Profile>,
     source: Option<Connection>,
     identity: Option<(u64, u64)>,
-    cached: Option<(i64, retained::Packed)>,
+    cached: Option<(i64, retained::Packed, memo::Slot)>,
     stats: ReaderStats,
 }
 #[derive(Default, Clone, Copy, Debug)]
@@ -1632,12 +1663,24 @@ impl AuditReader {
             &mut dyn newchan_rust::s_content::access::Access,
         ) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.with_seam(resources, job, |_| {}, action)
+        self.with_seam(resources, job, false, |_| {}, action)
+    }
+    pub(super) fn with_server_capture<T>(
+        &mut self,
+        resources: &q_resources::QResources,
+        access: &mut q_runtime::ServerAccess<'_>,
+        action: impl FnOnce(
+            &mut ConfiguredCapture<'_>,
+            &mut dyn sc::access::Access,
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_seam(resources, access, self.allocation.is_none(), |_| {}, action)
     }
     fn with_seam<T>(
         &mut self,
         resources: &q_resources::QResources,
         job: &mut dyn newchan_rust::s_content::access::Access,
+        use_content_memo: bool,
         mut seam: impl FnMut(&str),
         action: impl FnOnce(
             &mut ConfiguredCapture<'_>,
@@ -1653,7 +1696,7 @@ impl AuditReader {
         }
         let hard = job.read_deadline().map_err(err)?;
         let result = self.prepare(resources, job, hard, &mut seam);
-        let (mut packed, cache_version, verify_deadline) = match result {
+        let (mut packed, mut memo, cache_version, verify_deadline) = match result {
             Ok(v) => v,
             Err(e) => {
                 if !allocation_refusal(&e) {
@@ -1667,8 +1710,8 @@ impl AuditReader {
             Err(e) => {
                 if allocation_refusal(&e) {
                     if let Some(version) = cache_version {
-                        self.stats.cached_bytes = packed.retained_bytes;
-                        self.cached = Some((version, packed));
+                        self.stats.cached_bytes = packed.retained_bytes + memo.bytes();
+                        self.cached = Some((version, packed, memo));
                     }
                 } else {
                     self.close();
@@ -1679,15 +1722,22 @@ impl AuditReader {
         if let Err(e) = job.pre_io_check().map_err(err) {
             packed.restore(proof);
             if let Some(version) = cache_version {
-                self.stats.cached_bytes = packed.retained_bytes;
-                self.cached = Some((version, packed));
+                self.stats.cached_bytes = packed.retained_bytes + memo.bytes();
+                self.cached = Some((version, packed, memo));
             }
             return Err(e);
         }
         seam("verify_complete");
+        let allowance = resources.limit(q_resources::Limit::CacheBytes)
+            / resources.limit(q_resources::Limit::QueryWorkers);
+        let remaining = allowance
+            .min(resources.limit(q_resources::Limit::CaptureBytes))
+            .saturating_sub(packed.retained_bytes);
         let mut capture = ConfiguredCapture {
             capture: proof,
             resources,
+            content_memo: (use_content_memo && cache_version.is_some())
+                .then_some((&mut memo, remaining)),
         };
         let output = action(&mut capture, job);
         seam("action_complete");
@@ -1696,8 +1746,8 @@ impl AuditReader {
         // 沿旧AuditReader语义，查询错误或其后job停止不撤销此前有效proof。
         // 下一请求仍先夹持当前源，再按其自己的job余额重放receipt。
         if let Some(version) = cache_version {
-            self.stats.cached_bytes = packed.retained_bytes;
-            self.cached = Some((version, packed));
+            self.stats.cached_bytes = packed.retained_bytes + memo.bytes();
+            self.cached = Some((version, packed, memo));
         }
         job.pre_io_check().map_err(err)?;
         output
@@ -1708,7 +1758,7 @@ impl AuditReader {
         job: &mut dyn newchan_rust::s_content::access::Access,
         hard: Option<Instant>,
         seam: &mut impl FnMut(&str),
-    ) -> Result<(retained::Packed, Option<i64>, Instant), String> {
+    ) -> Result<(retained::Packed, memo::Slot, Option<i64>, Instant), String> {
         use q_resources::Limit as Q;
         let limits = resources.capture_limits();
         let local = until(limits.capture_deadline_ms)?;
@@ -1742,7 +1792,7 @@ impl AuditReader {
                 let candidate = self
                     .cached
                     .as_ref()
-                    .is_some_and(|(v, _)| *v == v0 && v0 == v1);
+                    .is_some_and(|(v, _, _)| *v == v0 && v0 == v1);
                 let image = if candidate {
                     None
                 } else {
@@ -1771,13 +1821,13 @@ impl AuditReader {
             let local = until(limits.verify_deadline_ms)?;
             let verify_deadline = hard.map_or(local, |d| d.min(local));
             if candidate && versions.iter().all(|v| *v == versions[0]) {
-                let (_, packed) = self.cached.as_ref().ok_or_else(|| err("缓存候选消失"))?;
+                let (_, packed, _) = self.cached.as_ref().ok_or_else(|| err("缓存候选消失"))?;
                 packed.replay(job)?;
                 job.pre_io_check().map_err(err)?;
-                let (_, packed) = self.cached.take().ok_or_else(|| err("缓存候选消失"))?;
+                let (_, packed, memo) = self.cached.take().ok_or_else(|| err("缓存候选消失"))?;
                 self.stats.cached_bytes = 0;
                 self.stats.cache_hits += 1;
-                return Ok((packed, Some(versions[2]), verify_deadline));
+                return Ok((packed, memo, Some(versions[2]), verify_deadline));
             }
             if candidate {
                 if attempt == 1 {
@@ -1806,7 +1856,12 @@ impl AuditReader {
             // 新鲜完整proof和保留量都成功后才撤销旧缓存；失败不得把旧权威丢掉。
             self.cached = None;
             self.stats.cached_bytes = 0;
-            return Ok((packed, reusable.then_some(v3), verify_deadline));
+            return Ok((
+                packed,
+                memo::Slot::default(),
+                reusable.then_some(v3),
+                verify_deadline,
+            ));
         }
         Err(err("Incomplete：捕获重试已耗尽"))
     }
@@ -2578,6 +2633,7 @@ print(q.capture_digest(dict(schema=schema,schema_rows=rows,tables=tables)))
             .with_seam(
                 &r,
                 &mut j,
+                false,
                 |seam| {
                     if seam == "after_transaction" && !fired {
                         fired = true;
@@ -2597,6 +2653,7 @@ print(q.capture_digest(dict(schema=schema,schema_rows=rows,tables=tables)))
             .with_seam(
                 &r,
                 &mut job(),
+                false,
                 |seam| {
                     if seam == "before_cache_registration" && !fired {
                         fired = true;
@@ -2985,7 +3042,7 @@ print(q.capture_digest(dict(schema=schema,schema_rows=rows,tables=tables)))
             let mut events = Vec::new();
             let mut verified_capture = None;
             let (result, audit_phases, work_counts) = state::traced(count_nodes, || {
-                reader.with_seam(&r,&mut Server,|event| {
+                reader.with_seam(&r,&mut Server,false, |event| {
                 events.push(json!({"phase":event,"elapsed_ns":start.elapsed().as_nanos().to_string()}));
             },|capture,access| {
                 let head=capture.capture.generation();
