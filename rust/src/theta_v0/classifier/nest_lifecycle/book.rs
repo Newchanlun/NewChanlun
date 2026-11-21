@@ -293,13 +293,13 @@ impl NestLifecycleBook {
     /// 缺账、冲突、空版本返回 Rejected，不为旧对象猜配身份。
     /// 单独登记只绑定；v2 出生当步清账须由同批出生的伴随绑定喂入触发。
     pub fn register_center_bridge(&mut self, binding: HypothesisBridge) -> BridgeRegistration {
-        self.register_center_bridge_with_revisions(binding, false).0
+        self.register_center_bridge_with_revisions(binding, None).0
     }
 
     pub(super) fn register_center_bridge_with_revisions(
         &mut self,
         binding: HypothesisBridge,
-        born_in_step: bool,
+        birth_evidence: Option<&CenterBreakBirthEvidence<'_>>,
     ) -> (BridgeRegistration, Vec<LifecycleRevision>) {
         let Some(policy_version) =
             CompletionPolicyVersion::for_component_binding(&binding.policy.version)
@@ -363,29 +363,28 @@ impl NestLifecycleBook {
         };
         self.bridges.insert(key, binding.clone());
         self.bridge_meta.insert(key, meta);
-        let revisions = match policy_version {
-            CompletionPolicyVersion::V1 => Vec::new(),
-            CompletionPolicyVersion::V2 => {
-                if born_in_step
+        let revisions = match birth_evidence {
+            Some(evidence)
+                if policy_version == CompletionPolicyVersion::V2
                     && binding.policy.anchor == CompletionAnchor::CenterBreak
-                    && entry_last_as_of == binding.registered_at
-                {
-                    self.apply_pre_archived_breaks_at_birth(key, binding, meta)
-                } else {
-                    Vec::new()
-                }
+                    && entry_last_as_of == binding.registered_at =>
+            {
+                self.apply_pre_archived_breaks_at_birth(key, binding, meta, evidence)
             }
+            _ => Vec::new(),
         };
         (BridgeRegistration::Accepted, revisions)
     }
 
     /// v2 U1 出生当步规则（ADR 0003 §2）：对象首次出生并登记的同一步，消费出生前已留档且
-    /// 精确匹配的 Broken 事实，application_at = invalidated_at = registered_at，保留原 K。
+    /// 精确匹配、且来源 owner 确认在本步仍有效的 Broken 修订。
+    /// application_at = invalidated_at = registered_at，保留原 K。
     fn apply_pre_archived_breaks_at_birth(
         &mut self,
         key: LifecycleKey,
         bridge: HypothesisBridge,
         meta: BridgeRegistrationMeta,
+        evidence: &CenterBreakBirthEvidence<'_>,
     ) -> Vec<LifecycleRevision> {
         let mut archived_matches: Vec<(BreakIdentity, ArchivedCenterBreakFact)> = self
             .center_break_facts
@@ -395,6 +394,7 @@ impl NestLifecycleBook {
                     && identity.center_id == bridge.center_id
                     && archived.archived_at <= bridge.registered_at
                     && archived.archived_seq < meta.registered_seq
+                    && evidence.confirms_active(archived, bridge.registered_at)
             })
             .map(|(identity, archived)| (*identity, *archived))
             .collect();
@@ -500,11 +500,7 @@ impl NestLifecycleBook {
                 LedgerAdmission::Accepted
             );
             let entry = self.ledger.get_mut(&key).expect("已核目标存在");
-            revision = Some(entry.invalidate(
-                InvalidatedReason::CenterBreak,
-                application_at,
-                None,
-            ));
+            revision = Some(entry.invalidate(InvalidatedReason::CenterBreak, application_at, None));
             self.center_break_audits.push(CenterBreakAudit {
                 fact,
                 bridge,
@@ -531,7 +527,8 @@ impl NestLifecycleBook {
 
     /// #1719 只清原政策允许、精确 B 对应、从未可证且仍 Provisional 的对象。
     /// 迟到事实不改账，完整留档并返回 LatePendingRecovery；恢复接线须按原钟重放。
-    /// 事实先于绑定到达也留档并记录 archived_at 证据；v1 须由调用方重送原件，v2 在首次出生登记同一步消费。
+    /// 事实先于绑定到达也留档并记录 archived_at 证据；v1 须由调用方重送原件，
+    /// v2 只在首次出生登记的同一步自动消费经来源 owner 确认仍有效的留档。
     pub fn apply_center_break(
         &mut self,
         fact: &CenterBreakFact,

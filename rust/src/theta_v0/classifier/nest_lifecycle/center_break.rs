@@ -194,6 +194,36 @@ pub struct ArchivedCenterBreakFact {
     pub archived_seq: u64,
 }
 
+/// S / 来源 owner 在出生步骤对某份精确留档修订的当前判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CenterBreakSourceStatus {
+    Active,
+    Withdrawn,
+}
+
+/// 只用于本次出生步骤，不写回留档，也不沿用上一步的有效性判定。
+/// 缺失、撤回、冲突或时点不符均不授权自动清账。
+#[derive(Debug, Clone, Copy)]
+pub struct CenterBreakBirthEvidence<'a> {
+    pub as_of: usize,
+    pub revisions: &'a [(ArchivedCenterBreakFact, CenterBreakSourceStatus)],
+}
+
+impl CenterBreakBirthEvidence<'_> {
+    pub(super) fn confirms_active(&self, archived: &ArchivedCenterBreakFact, as_of: usize) -> bool {
+        if self.as_of != as_of {
+            return false;
+        }
+        let mut statuses = self
+            .revisions
+            .iter()
+            .filter_map(|(revision, status)| (revision == archived).then_some(*status))
+            .peekable();
+        statuses.peek().is_some()
+            && statuses.all(|status| status == CenterBreakSourceStatus::Active)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakApplicationMode {
     /// 常规清账（v1 与 v2 共有）：`application_at == fact.known_at()`。

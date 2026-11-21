@@ -125,13 +125,16 @@ mod feed;
 mod key;
 mod observation;
 mod pan;
+mod run;
 mod stats;
 mod window;
 
 pub use book::NestLifecycleBook;
 pub use center_break::{
-    BridgeRegistration, CenterBreakAttempt, CenterBreakAudit, CenterBreakFact, CenterBreakOutcome,
-    CenterBreakResult, CenterBreakTarget, CompletionAnchor, CompletionPolicy, HypothesisBridge,
+    ArchivedCenterBreakFact, BridgeRegistration, CenterBreakAttempt, CenterBreakAudit,
+    CenterBreakBirthEvidence, CenterBreakFact, CenterBreakOutcome, CenterBreakResult,
+    CenterBreakSourceStatus, CenterBreakTarget, CompletionAnchor, CompletionPolicy,
+    CompletionPolicyVersion, HypothesisBridge, UnknownCompletionPolicyVersion,
 };
 pub use entry::{
     ForceCheck, ForceEvidence, InvalidatedReason, LifecycleRevision, LifecycleRevisionKind,
@@ -151,6 +154,7 @@ pub use pan::{
     provide_active_pan_live_windows_with_policy, provide_pan_live_windows, ActiveSegmentFrontier,
     PanLiveOutcome,
 };
+pub use run::{I4CompletionRun, I4RunAdmissionError, I4RunPolicyMismatch};
 pub use stats::{
     CompletionForceUnavailableAudit, CompletionSignal, LifecycleSettlementStats,
     LifetimeDistribution, RetrogradeRejection,

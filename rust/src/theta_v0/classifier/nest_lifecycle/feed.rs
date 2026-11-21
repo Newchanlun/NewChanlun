@@ -252,15 +252,29 @@ pub fn feed_replay_bar(
     (delta, stats)
 }
 
-/// #1719 伴随绑定喂入。旧 channel_switch 函数及其两相执行顺序保持不变。
-/// bindings 必须来自本 bar 的 active provider；迁移由原 book 执行。
-/// 返回每份绑定的接纳/政策冻结/拒绝结果，调用方不能把新政策误报为已接纳。
-/// v2 绑定在首次出生登记同一步消费出生前已留档 Broken 事实产生的修订并入返回增量；v1 行为不变。
+/// #1719 旧组件伴随绑定入口，保留原政策字符串合同。没有来源有效性证据，不自动清账。
+/// 新独立运行与历史运行恢复使用 [`I4CompletionRun`] 冻结政策后喂入。
 pub fn feed_replay_bar_with_bridges(
     book: &mut NestLifecycleBook,
     feed: &ReplayBarFeed<'_>,
     material: &ForceMaterial,
     bindings: &[HypothesisBridge],
+) -> (
+    Vec<LifecycleRevision>,
+    ReplayFeedStats,
+    Vec<BridgeRegistration>,
+) {
+    feed_replay_bar_with_birth_evidence(book, feed, material, bindings, None)
+}
+
+/// bindings 必须来自本 bar 的 active provider；迁移由原 book 执行。
+/// 返回每份绑定结果，v2 出生当步实际发生的清账修订并入本批增量。
+pub(super) fn feed_replay_bar_with_birth_evidence(
+    book: &mut NestLifecycleBook,
+    feed: &ReplayBarFeed<'_>,
+    material: &ForceMaterial,
+    bindings: &[HypothesisBridge],
+    birth_evidence: Option<&CenterBreakBirthEvidence<'_>>,
 ) -> (
     Vec<LifecycleRevision>,
     ReplayFeedStats,
@@ -283,11 +297,10 @@ pub fn feed_replay_bar_with_bridges(
                         if LifecycleKey::from(window) == binding.binding_key)
                 });
             if supplied {
-                let (registration, break_revisions) =
-                    book.register_center_bridge_with_revisions(
-                        binding.clone(),
-                        newborns.contains(&binding.lifecycle_key),
-                    );
+                let (registration, break_revisions) = book.register_center_bridge_with_revisions(
+                    binding.clone(),
+                    birth_evidence.filter(|_| newborns.contains(&binding.lifecycle_key)),
+                );
                 delta.extend(break_revisions);
                 registration
             } else {
