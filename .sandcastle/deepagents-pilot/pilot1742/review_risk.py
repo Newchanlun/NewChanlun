@@ -117,15 +117,6 @@ def _fold_segments(segments: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(seg.casefold() for seg in segments)
 
 
-def _validate_optional_sha(raw: str | None, field_name: str) -> str | None:
-    if raw is None:
-        return None
-    try:
-        return str(parse_sha(raw))
-    except ValueError as exc:
-        raise RiskPolicyError(f"{field_name} 非法：{exc}") from exc
-
-
 def match_glob(path: str, pattern: str, *, case_sensitive: bool = True) -> bool:
     """按 POSIX 路径段匹配：单段 `*`/`?` 不跨 `/`，`**` 匹配零或多层目录（末尾 `/**` 至少匹配一层）。"""
     path_segs = tuple(normalize_repo_path(path).split("/"))
@@ -249,8 +240,6 @@ class RiskAssessment:
     matched_deep_paths: tuple[MatchedPath, ...]
     all_paths: tuple[str, ...]
     reason: str
-    base_sha: str | None = None
-    head_sha: str | None = None
 
     def __post_init__(self) -> None:
         if self.tier is RiskTier.HIGH:
@@ -258,8 +247,22 @@ class RiskAssessment:
                 raise RiskPolicyError("HIGH 档必须要求人工签批、深审且禁止补丁沿用")
         elif self.tier is RiskTier.LOW and self.requires_human_approval:
             raise RiskPolicyError("LOW 档不应要求人工签批")
-        _validate_optional_sha(self.base_sha, "base_sha")
-        _validate_optional_sha(self.head_sha, "head_sha")
+
+
+@dataclass(frozen=True)
+class DiffRiskAssessment:
+    """只读 diff 风险评估结果；仅供展示/检查，不作为准入凭证传入签批入口。"""
+
+    base_sha: str
+    head_sha: str
+    assessment: RiskAssessment
+
+    def __post_init__(self) -> None:
+        try:
+            parse_sha(self.base_sha)
+            parse_sha(self.head_sha)
+        except ValueError as exc:
+            raise RiskPolicyError(f"diff SHA 非法：{exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -268,7 +271,9 @@ class HighRiskApprovalResult:
     satisfied: bool
     status: str
     reason: str
+    base_sha: str
     head_sha: str
+    assessment: RiskAssessment
     request_path: str | None
     sign_command: str | None
 
@@ -335,9 +340,6 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> RiskPolicy:
 def classify_paths(
     paths: Iterable[str],
     policy: RiskPolicy | None = None,
-    *,
-    base_sha: str | None = None,
-    head_sha: str | None = None,
 ) -> RiskAssessment:
     """对改动路径集执行 fail-closed 风险分档。
 
@@ -350,8 +352,6 @@ def classify_paths(
     - 全部路径命中低风险（大小写敏感）且无排除项 -> LOW + QUICK + 免人工签批；
     - 其余 -> NORMAL + STANDARD + 免人工签批。
     """
-    validated_base = _validate_optional_sha(base_sha, "base_sha")
-    validated_head = _validate_optional_sha(head_sha, "head_sha")
     active_policy = load_policy() if policy is None else policy
     normalized = tuple(sorted({normalize_repo_path(p) for p in paths}))
 
@@ -365,8 +365,6 @@ def classify_paths(
             matched_deep_paths=(),
             all_paths=(),
             reason="空路径集：按 fail-closed 规则提升为高风险，禁止降级放行",
-            base_sha=validated_base,
-            head_sha=validated_head,
         )
 
     matched_high: list[MatchedPath] = []
@@ -410,8 +408,6 @@ def classify_paths(
             matched_deep_paths=tuple(matched_deep),
             all_paths=normalized,
             reason=f"命中高风险类别（{categories}），须用户 Secure Enclave 签批且禁止补丁沿用",
-            base_sha=validated_base,
-            head_sha=validated_head,
         )
 
     if matched_deep:
@@ -424,8 +420,6 @@ def classify_paths(
             matched_deep_paths=tuple(matched_deep),
             all_paths=normalized,
             reason="命中深审配置路径（CI/审查规则），走深度 AI 审查且免人工签批",
-            base_sha=validated_base,
-            head_sha=validated_head,
         )
 
     if all_low:
@@ -438,8 +432,6 @@ def classify_paths(
             matched_deep_paths=(),
             all_paths=normalized,
             reason="全部改动均属于低风险文档路径，走快速审查",
-            base_sha=validated_base,
-            head_sha=validated_head,
         )
 
     return RiskAssessment(
@@ -451,8 +443,6 @@ def classify_paths(
         matched_deep_paths=(),
         all_paths=normalized,
         reason="常规代码路径，走标准审查",
-        base_sha=validated_base,
-        head_sha=validated_head,
     )
 
 
@@ -533,42 +523,41 @@ def assess_diff(
     base_sha: str,
     head_sha: str,
     policy: RiskPolicy | None = None,
-) -> RiskAssessment:
-    """从 git diff 提取变更路径（含重命名/复制旧新路径）并返回强绑定提交身份的风险评估。"""
+) -> DiffRiskAssessment:
+    """从 git diff 提取变更路径（含重命名/复制旧新路径）并返回只读 diff 风险评估。"""
     try:
         base = parse_sha(base_sha)
         head = parse_sha(head_sha)
     except ValueError as exc:
         raise RiskPolicyError(f"diff SHA 非法：{exc}") from exc
     paths = extract_diff_paths(repo_root, str(base), str(head))
-    return classify_paths(paths, policy=policy, base_sha=str(base), head_sha=str(head))
+    return DiffRiskAssessment(
+        base_sha=str(base),
+        head_sha=str(head),
+        assessment=classify_paths(paths, policy=policy),
+    )
 
 
 def evaluate_high_risk_approval(
-    assessment: RiskAssessment,
     *,
-    pr_number: int,
+    repo_root: Path,
+    base_sha: str,
     head_sha: str,
+    pr_number: int,
     desk_folder: Path,
+    policy: RiskPolicy | None = None,
     approvals: SignedApprovals | None = None,
     generation: int = 1,
     now: datetime | None = None,
 ) -> HighRiskApprovalResult:
-    """复用 ApprovalDesk 与 Secure Enclave CommitTarget 评估高风险 PR 签批准入状态。"""
+    """在准入边界直接重算真实 git diff 风险，并复用 ApprovalDesk 与 CommitTarget 评估签批状态。"""
     if type(pr_number) is not int or pr_number <= 0:
         raise RiskPolicyError(f"pr_number 必须为正整数：{pr_number!r}")
     if type(generation) is not int or generation <= 0:
         raise RiskPolicyError(f"generation 必须为正整数：{generation!r}")
-    try:
-        head = parse_sha(head_sha)
-    except ValueError as exc:
-        raise RiskPolicyError(f"head_sha 非法：{exc}") from exc
-    if assessment.head_sha is None:
-        raise RiskPolicyError("风险评估未绑定 head_sha，拒绝用于准入判定")
-    if assessment.head_sha != str(head):
-        raise RiskPolicyError(
-            f"风险评估绑定的 head_sha（{assessment.head_sha}）与待评估 head_sha（{head}）不匹配，拒绝跨提交复用"
-        )
+
+    diff_assessment = assess_diff(repo_root, base_sha, head_sha, policy=policy)
+    assessment = diff_assessment.assessment
 
     if not assessment.requires_human_approval:
         return HighRiskApprovalResult(
@@ -576,7 +565,9 @@ def evaluate_high_risk_approval(
             satisfied=True,
             status="not_required",
             reason=f"风险分档为 {assessment.tier.value}（{assessment.review_depth.value}），免人工签批",
-            head_sha=str(head),
+            base_sha=diff_assessment.base_sha,
+            head_sha=diff_assessment.head_sha,
+            assessment=assessment,
             request_path=None,
             sign_command=None,
         )
@@ -587,14 +578,21 @@ def evaluate_high_risk_approval(
         run_id=f"pr-{pr_number}-high-risk",
         approvals=approvals or SignedApprovals(),
     )
-    decision = desk.check(Scope.CANDIDATE_HEAD, generation, CommitTarget(str(head)), now=now)
+    decision = desk.check(
+        Scope.CANDIDATE_HEAD,
+        generation,
+        CommitTarget(diff_assessment.head_sha),
+        now=now,
+    )
     if isinstance(decision, Approved):
         return HighRiskApprovalResult(
             required=True,
             satisfied=True,
             status="approved",
             reason=decision.reason,
-            head_sha=str(head),
+            base_sha=diff_assessment.base_sha,
+            head_sha=diff_assessment.head_sha,
+            assessment=assessment,
             request_path=decision.request_path,
             sign_command=None,
         )
@@ -604,7 +602,9 @@ def evaluate_high_risk_approval(
         satisfied=False,
         status=decision.status,
         reason=decision.reason,
-        head_sha=str(head),
+        base_sha=diff_assessment.base_sha,
+        head_sha=diff_assessment.head_sha,
+        assessment=assessment,
         request_path=decision.request_path,
         sign_command=f"{SIGN_COMMAND} {shlex.quote(decision.request_path)}",
     )

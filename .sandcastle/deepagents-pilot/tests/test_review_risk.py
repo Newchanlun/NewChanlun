@@ -15,6 +15,7 @@ from pilot1742.review_risk import (
     DEFAULT_POLICY_PATH,
     MANDATORY_HIGH_RISK_PATTERNS,
     SCHEMA_VERSION,
+    DiffRiskAssessment,
     ReviewDepth,
     RiskAssessment,
     RiskPolicy,
@@ -28,8 +29,6 @@ from pilot1742.review_risk import (
     match_glob,
 )
 
-HEAD_A = "a" * 40
-HEAD_B = "b" * 40
 NOW = datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)
 
 
@@ -51,6 +50,15 @@ def _init_repo(root: Path) -> str:
     (root / "README.md").write_text("# demo\n", encoding="utf-8")
     _git(root, "add", ".")
     _git(root, "commit", "-qm", "init")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _commit_file(root: Path, rel_path: str, content: str, message: str) -> str:
+    target = root / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    _git(root, "add", rel_path)
+    _git(root, "commit", "-qm", message)
     return _git(root, "rev-parse", "HEAD")
 
 
@@ -377,21 +385,22 @@ def test_extract_diff_paths_rename_out_of_high_risk_and_unicode_spaces(tmp_path:
     paths = extract_diff_paths(repo, commit_with_live, rename_sha)
     assert paths == ("docs/缠论 归档/说明 01.md", "trading_system/live/实盘 策略.py")
 
-    assessment = assess_diff(repo, commit_with_live, rename_sha)
-    assert assessment.tier is RiskTier.HIGH
-    assert assessment.requires_human_approval is True
-    assert assessment.allow_patch_reuse is False
-    assert assessment.base_sha == commit_with_live
-    assert assessment.head_sha == rename_sha
-    assert [m.path for m in assessment.matched_high_paths] == ["trading_system/live/实盘 策略.py"]
+    diff_assessment = assess_diff(repo, commit_with_live, rename_sha)
+    assert isinstance(diff_assessment, DiffRiskAssessment)
+    assert diff_assessment.base_sha == commit_with_live
+    assert diff_assessment.head_sha == rename_sha
+    assert diff_assessment.assessment.tier is RiskTier.HIGH
+    assert diff_assessment.assessment.requires_human_approval is True
+    assert diff_assessment.assessment.allow_patch_reuse is False
+    assert [m.path for m in diff_assessment.assessment.matched_high_paths] == ["trading_system/live/实盘 策略.py"]
 
-    # 同一提交空 diff -> extract 返回空元组，assess_diff fail-closed 判 HIGH 且仍写入 SHA
+    # 同一提交空 diff -> extract 返回空元组，assess_diff fail-closed 判 HIGH 且保留 SHA
     assert extract_diff_paths(repo, base_sha, base_sha) == ()
     empty_assessment = assess_diff(repo, base_sha, base_sha)
-    assert empty_assessment.tier is RiskTier.HIGH
-    assert empty_assessment.requires_human_approval is True
     assert empty_assessment.base_sha == base_sha
     assert empty_assessment.head_sha == base_sha
+    assert empty_assessment.assessment.tier is RiskTier.HIGH
+    assert empty_assessment.assessment.requires_human_approval is True
 
     # 复制高风险文件并修改原文件（-C 场景）：同时覆盖旧新路径
     secret_src = repo / "deploy" / "prod.env"
@@ -408,7 +417,7 @@ def test_extract_diff_paths_rename_out_of_high_risk_and_unicode_spaces(tmp_path:
     _git(repo, "commit", "-qm", "copy env to docs")
     after_copy = _git(repo, "rev-parse", "HEAD")
     assert extract_diff_paths(repo, before_copy, after_copy) == ("deploy/prod.env", "docs/copied_env.md")
-    assert assess_diff(repo, before_copy, after_copy).tier is RiskTier.HIGH
+    assert assess_diff(repo, before_copy, after_copy).assessment.tier is RiskTier.HIGH
 
     # 非法 SHA 与不存在的 SHA 均抛 RiskPolicyError
     with pytest.raises(RiskPolicyError):
@@ -444,184 +453,263 @@ def test_extract_diff_paths_detects_copy_from_untouched_high_risk_source(tmp_pat
     paths = extract_diff_paths(repo, before_copy, after_copy)
     assert paths == ("docs/copied.md", "trading_system/live/untouched_executor.py")
 
-    assessment = assess_diff(repo, before_copy, after_copy)
-    assert assessment.tier is RiskTier.HIGH
-    assert assessment.review_depth is ReviewDepth.DEEP
-    assert assessment.requires_human_approval is True
-    assert assessment.allow_patch_reuse is False
-    assert assessment.base_sha == before_copy
-    assert assessment.head_sha == after_copy
-    assert [m.path for m in assessment.matched_high_paths] == ["trading_system/live/untouched_executor.py"]
+    diff_assessment = assess_diff(repo, before_copy, after_copy)
+    assert isinstance(diff_assessment, DiffRiskAssessment)
+    assert diff_assessment.base_sha == before_copy
+    assert diff_assessment.head_sha == after_copy
+    assert diff_assessment.assessment.tier is RiskTier.HIGH
+    assert diff_assessment.assessment.review_depth is ReviewDepth.DEEP
+    assert diff_assessment.assessment.requires_human_approval is True
+    assert diff_assessment.assessment.allow_patch_reuse is False
+    assert [m.path for m in diff_assessment.assessment.matched_high_paths] == [
+        "trading_system/live/untouched_executor.py"
+    ]
 
 
 def test_low_and_normal_risk_skip_human_approval_without_writing_request(tmp_path: Path) -> None:
     desk_dir = tmp_path / "desk"
-    for assessment in (
-        classify_paths(["docs/guide.md"], head_sha=HEAD_A),
-        classify_paths([".github/workflows/ci.yml"], head_sha=HEAD_A),
-        classify_paths(["scripts/tool.py"], head_sha=HEAD_A),
-    ):
+    cases = [
+        ("low", "docs/guide.md", RiskTier.LOW, ReviewDepth.QUICK),
+        ("deep-ai", ".github/workflows/ci.yml", RiskTier.NORMAL, ReviewDepth.DEEP),
+        ("standard", "scripts/tool.py", RiskTier.NORMAL, ReviewDepth.STANDARD),
+    ]
+    for name, rel_path, expected_tier, expected_depth in cases:
+        repo = tmp_path / f"repo-{name}"
+        base_sha = _init_repo(repo)
+        head_sha = _commit_file(repo, rel_path, f"# change for {name}\n", f"add {rel_path}")
         result = evaluate_high_risk_approval(
-            assessment,
+            repo_root=repo,
+            base_sha=base_sha,
+            head_sha=head_sha,
             pr_number=1930,
-            head_sha=HEAD_A,
             desk_folder=desk_dir,
             now=NOW,
         )
         assert result.required is False
         assert result.satisfied is True
         assert result.status == "not_required"
-        assert result.head_sha == HEAD_A
+        assert result.base_sha == base_sha
+        assert result.head_sha == head_sha
+        assert result.assessment.tier is expected_tier
+        assert result.assessment.review_depth is expected_depth
+        assert result.assessment.all_paths == (rel_path,)
         assert result.request_path is None
         assert result.sign_command is None
     assert not desk_dir.exists()
 
 
-def test_evaluate_high_risk_approval_requires_matching_head_sha_binding(tmp_path: Path) -> None:
-    desk_dir = tmp_path / "desk"
-
-    # 未绑定 head_sha 的评估一律拒收（无论 LOW 还是 HIGH）
-    unbound_low = classify_paths(["docs/guide.md"])
-    unbound_high = classify_paths(["trading_system/live/ibkr_client.py"])
-    for assessment in (unbound_low, unbound_high):
-        with pytest.raises(RiskPolicyError):
-            evaluate_high_risk_approval(
-                assessment,
-                pr_number=1930,
-                head_sha=HEAD_A,
-                desk_folder=desk_dir,
-                now=NOW,
-            )
-
-    # 拿提交 A 的 LOW 免签评估错配给提交 B -> 必须拒绝（fail-closed）
-    low_a = classify_paths(["docs/guide.md"], base_sha=HEAD_B, head_sha=HEAD_A)
-    with pytest.raises(RiskPolicyError):
-        evaluate_high_risk_approval(
-            low_a,
-            pr_number=1930,
-            head_sha=HEAD_B,
-            desk_folder=desk_dir,
-            now=NOW,
-        )
-
-    # 拿提交 A 的 HIGH 评估错配给提交 B -> 同样拒绝
-    high_a = classify_paths(["trading_system/live/ibkr_client.py"], head_sha=HEAD_A)
-    with pytest.raises(RiskPolicyError):
-        evaluate_high_risk_approval(
-            high_a,
-            pr_number=1930,
-            head_sha=HEAD_B,
-            desk_folder=desk_dir,
-            now=NOW,
-        )
-
-    assert not desk_dir.exists()
-
-
-def test_high_risk_ecdsa_p256_approval_lifecycle_and_head_rotation(
+def test_high_risk_ecdsa_p256_approval_lifecycle_recomputes_diff_and_rotates_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     signer = Signer(tmp_path / "authority")
     approvals = signer.protect(monkeypatch)
     desk_dir = tmp_path / "pr 1930's approvals"
-    assessment_a = classify_paths(["trading_system/execution/order_router.py"], head_sha=HEAD_A)
-    assessment_b = classify_paths(["trading_system/execution/order_router.py"], head_sha=HEAD_B)
+    repo = tmp_path / "repo-lifecycle"
+    base_sha = _init_repo(repo)
 
-    # 1. 未签批 -> awaiting_human 且写出规范 CommitTarget 请求；sign_command 对含空格和单引号的路径做安全引用
-    pending = evaluate_high_risk_approval(
-        assessment_a,
+    # 1. 提交 A 仅改 docs/note.md -> 免签且不落盘审批请求
+    sha_a = _commit_file(repo, "docs/note.md", "# doc only\n", "commit A: doc note")
+    doc_only = evaluate_high_risk_approval(
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=sha_a,
         pr_number=1930,
-        head_sha=HEAD_A,
         desk_folder=desk_dir,
         approvals=approvals,
         now=NOW,
     )
-    assert pending.required is True
-    assert pending.satisfied is False
-    assert pending.status == "awaiting_human"
-    assert pending.head_sha == HEAD_A
-    assert pending.request_path is not None
-    assert pending.sign_command == f"{SIGN_COMMAND} {shlex.quote(pending.request_path)}"
-    assert shlex.split(pending.sign_command)[-1] == pending.request_path
+    assert doc_only.required is False
+    assert doc_only.satisfied is True
+    assert doc_only.status == "not_required"
+    assert doc_only.base_sha == base_sha
+    assert doc_only.head_sha == sha_a
+    assert doc_only.assessment.tier is RiskTier.LOW
+    assert doc_only.assessment.review_depth is ReviewDepth.QUICK
+    assert doc_only.request_path is None
+    assert doc_only.sign_command is None
+    assert not desk_dir.exists()
 
-    req_a = ApprovalRequest.parse(Path(pending.request_path).read_bytes())
-    assert (req_a.repository_id, req_a.ticket, req_a.run_id, req_a.claim_generation, req_a.scope, req_a.target) == (
+    # 2. 在同一仓库追加高风险提交 B（改 trading_system/live/order.py）-> 准入边界直接重算为 HIGH 并拦截
+    sha_b = _commit_file(
+        repo,
+        "trading_system/live/order.py",
+        "def send_order(symbol: str, qty: int) -> None:\n    pass\n",
+        "commit B: live order",
+    )
+    pending_b = evaluate_high_risk_approval(
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=sha_b,
+        pr_number=1930,
+        desk_folder=desk_dir,
+        approvals=approvals,
+        now=NOW,
+    )
+    assert pending_b.required is True
+    assert pending_b.satisfied is False
+    assert pending_b.status == "awaiting_human"
+    assert pending_b.base_sha == base_sha
+    assert pending_b.head_sha == sha_b
+    assert pending_b.assessment.tier is RiskTier.HIGH
+    assert pending_b.assessment.review_depth is ReviewDepth.DEEP
+    assert pending_b.assessment.requires_human_approval is True
+    assert pending_b.assessment.allow_patch_reuse is False
+    assert [m.path for m in pending_b.assessment.matched_high_paths] == ["trading_system/live/order.py"]
+    assert pending_b.request_path is not None
+    assert pending_b.sign_command == f"{SIGN_COMMAND} {shlex.quote(pending_b.request_path)}"
+    assert shlex.split(pending_b.sign_command)[-1] == pending_b.request_path
+
+    req_b = ApprovalRequest.parse(Path(pending_b.request_path).read_bytes())
+    assert (req_b.repository_id, req_b.ticket, req_b.run_id, req_b.claim_generation, req_b.scope, req_b.target) == (
         REPOSITORY_ID,
         1930,
         "pr-1930-high-risk",
         1,
         Scope.CANDIDATE_HEAD,
-        CommitTarget(HEAD_A),
+        CommitTarget(sha_b),
     )
 
-    # 2. 真实 ECDSA-P256 签批精确 head_sha -> approved
-    signer.publish(pending.request_path, Decision.APPROVE)
-    approved = evaluate_high_risk_approval(
-        assessment_a,
-        pr_number=1930,
-        head_sha=HEAD_A,
-        desk_folder=desk_dir,
-        approvals=approvals,
-        now=NOW,
-    )
-    assert approved.required is True
-    assert approved.satisfied is True
-    assert approved.status == "approved"
-    assert approved.head_sha == HEAD_A
-    assert approved.sign_command is None
-
-    # 3. 推新提交换 head_sha -> 旧批准立刻失效并轮换 nonce
-    rotated = evaluate_high_risk_approval(
-        assessment_b,
-        pr_number=1930,
-        head_sha=HEAD_B,
-        desk_folder=desk_dir,
-        approvals=approvals,
-        now=NOW,
-    )
-    assert rotated.required is True
-    assert rotated.satisfied is False
-    assert rotated.status == "awaiting_human"
-    assert rotated.head_sha == HEAD_B
-    assert rotated.request_path is not None
-    req_b = ApprovalRequest.parse(Path(rotated.request_path).read_bytes())
-    assert req_b.target == CommitTarget(HEAD_B)
-    assert req_b.request_nonce != req_a.request_nonce
-    assert req_a.encode() in [p.read_bytes() for p in (desk_dir / "history").iterdir()]
-
-    # 4. 对新 head 签批后，后续 REJECT 覆盖之前的 APPROVE
-    signer.publish(rotated.request_path, Decision.APPROVE)
+    # 3. 真实 ECDSA-P256 签批提交 B -> approved
+    signer.publish(pending_b.request_path, Decision.APPROVE)
     approved_b = evaluate_high_risk_approval(
-        assessment_b,
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=sha_b,
         pr_number=1930,
-        head_sha=HEAD_B,
         desk_folder=desk_dir,
         approvals=approvals,
         now=NOW,
     )
-    assert approved_b.satisfied is True and approved_b.status == "approved"
+    assert approved_b.required is True
+    assert approved_b.satisfied is True
+    assert approved_b.status == "approved"
+    assert approved_b.base_sha == base_sha
+    assert approved_b.head_sha == sha_b
+    assert approved_b.assessment.tier is RiskTier.HIGH
+    assert approved_b.sign_command is None
 
-    signer.publish(rotated.request_path, Decision.REJECT)
-    rejected_b = evaluate_high_risk_approval(
-        assessment_b,
+    # 4. 追加提交 C（即使只改文档也更换了 head_sha）-> 旧批准立刻失效并轮换 nonce
+    sha_c = _commit_file(repo, "docs/note.md", "# doc only\nfollowup\n", "commit C: followup doc")
+    rotated_c = evaluate_high_risk_approval(
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=sha_c,
         pr_number=1930,
-        head_sha=HEAD_B,
         desk_folder=desk_dir,
         approvals=approvals,
         now=NOW,
     )
-    assert rejected_b.required is True
-    assert rejected_b.satisfied is False
-    assert rejected_b.status == "rejected"
+    assert rotated_c.required is True
+    assert rotated_c.satisfied is False
+    assert rotated_c.status == "awaiting_human"
+    assert rotated_c.base_sha == base_sha
+    assert rotated_c.head_sha == sha_c
+    assert rotated_c.assessment.tier is RiskTier.HIGH
+    assert rotated_c.request_path is not None
+    req_c = ApprovalRequest.parse(Path(rotated_c.request_path).read_bytes())
+    assert req_c.target == CommitTarget(sha_c)
+    assert req_c.request_nonce != req_b.request_nonce
+    assert req_b.encode() in [p.read_bytes() for p in (desk_dir / "history").iterdir()]
+
+    # 5. 对新 head C 签批后，后续 REJECT 覆盖之前的 APPROVE
+    signer.publish(rotated_c.request_path, Decision.APPROVE)
+    approved_c = evaluate_high_risk_approval(
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=sha_c,
+        pr_number=1930,
+        desk_folder=desk_dir,
+        approvals=approvals,
+        now=NOW,
+    )
+    assert approved_c.satisfied is True and approved_c.status == "approved"
+
+    signer.publish(rotated_c.request_path, Decision.REJECT)
+    rejected_c = evaluate_high_risk_approval(
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=sha_c,
+        pr_number=1930,
+        desk_folder=desk_dir,
+        approvals=approvals,
+        now=NOW,
+    )
+    assert rejected_c.required is True
+    assert rejected_c.satisfied is False
+    assert rejected_c.status == "rejected"
+    assert rejected_c.head_sha == sha_c
+
+
+def test_evaluate_high_risk_approval_empty_diff_and_self_protection_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signer = Signer(tmp_path / "authority")
+    approvals = signer.protect(monkeypatch)
+    repo = tmp_path / "repo-e2e-edge"
+    base_sha = _init_repo(repo)
+
+    # 空 diff（base == head）在准入边界按 fail-closed 判 HIGH，禁止免签放行
+    empty_res = evaluate_high_risk_approval(
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=base_sha,
+        pr_number=1930,
+        desk_folder=tmp_path / "desk-empty",
+        approvals=approvals,
+        now=NOW,
+    )
+    assert empty_res.required is True
+    assert empty_res.satisfied is False
+    assert empty_res.status == "awaiting_human"
+    assert empty_res.base_sha == base_sha
+    assert empty_res.head_sha == base_sha
+    assert empty_res.assessment.tier is RiskTier.HIGH
+    assert empty_res.assessment.all_paths == ()
+
+    # 修改自保路径 + 传入被篡改的自定义策略（企图将 .sandcastle/** 标为 LOW）-> 依然强制 HIGH
+    head_sha = _commit_file(
+        repo,
+        ".sandcastle/deepagents-pilot/pilot1742/review_risk.py",
+        "# tampered\n",
+        "modify review_risk.py",
+    )
+    tampered_policy = RiskPolicy(
+        schema_version=SCHEMA_VERSION,
+        high_risk_categories={},
+        deep_ai_only_patterns=(),
+        low_risk_patterns=(".sandcastle/**",),
+        low_risk_excludes=(),
+    )
+    protected_res = evaluate_high_risk_approval(
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        pr_number=1931,
+        desk_folder=tmp_path / "desk-self-protect",
+        policy=tampered_policy,
+        approvals=approvals,
+        now=NOW,
+    )
+    assert protected_res.required is True
+    assert protected_res.satisfied is False
+    assert protected_res.status == "awaiting_human"
+    assert protected_res.assessment.tier is RiskTier.HIGH
+    assert [m.path for m in protected_res.assessment.matched_high_paths] == [
+        ".sandcastle/deepagents-pilot/pilot1742/review_risk.py"
+    ]
 
 
 def test_high_risk_missing_trust_config_returns_not_configured(tmp_path: Path) -> None:
-    assessment = classify_paths([".sandcastle/review-risk-tiers.json"], head_sha=HEAD_A)
+    repo = tmp_path / "repo-no-trust"
+    base_sha = _init_repo(repo)
+    head_sha = _commit_file(repo, ".sandcastle/review-risk-tiers.json", "{}\n", "touch policy")
     result = evaluate_high_risk_approval(
-        assessment,
+        repo_root=repo,
+        base_sha=base_sha,
+        head_sha=head_sha,
         pr_number=1930,
-        head_sha=HEAD_A,
         desk_folder=tmp_path / "desk",
         approvals=SignedApprovals(trust_path=tmp_path / "absent-trust.json"),
         now=NOW,
@@ -629,21 +717,55 @@ def test_high_risk_missing_trust_config_returns_not_configured(tmp_path: Path) -
     assert result.required is True
     assert result.satisfied is False
     assert result.status == "not_configured"
+    assert result.base_sha == base_sha
+    assert result.head_sha == head_sha
+    assert result.assessment.tier is RiskTier.HIGH
     assert result.request_path is not None
     assert result.sign_command == f"{SIGN_COMMAND} {shlex.quote(result.request_path)}"
 
 
 def test_evaluate_high_risk_approval_rejects_bad_arguments(tmp_path: Path) -> None:
-    assessment = classify_paths(["docs/guide.md"], head_sha=HEAD_A)
+    repo = tmp_path / "repo-bad-args"
+    base_sha = _init_repo(repo)
+    head_sha = _commit_file(repo, "docs/guide.md", "# guide\n", "add guide")
+    desk_dir = tmp_path / "desk"
+
     with pytest.raises(RiskPolicyError):
-        evaluate_high_risk_approval(assessment, pr_number=0, head_sha=HEAD_A, desk_folder=tmp_path)
+        evaluate_high_risk_approval(
+            repo_root=repo, base_sha=base_sha, head_sha=head_sha, pr_number=0, desk_folder=desk_dir
+        )
     with pytest.raises(RiskPolicyError):
-        evaluate_high_risk_approval(assessment, pr_number=1930, head_sha="not-a-sha", desk_folder=tmp_path)
+        evaluate_high_risk_approval(
+            repo_root=repo, base_sha=base_sha, head_sha=head_sha, pr_number=True, desk_folder=desk_dir
+        )
     with pytest.raises(RiskPolicyError):
-        evaluate_high_risk_approval(assessment, pr_number=1930, head_sha=HEAD_A, desk_folder=tmp_path, generation=0)
+        evaluate_high_risk_approval(
+            repo_root=repo, base_sha="not-a-sha", head_sha=head_sha, pr_number=1930, desk_folder=desk_dir
+        )
+    with pytest.raises(RiskPolicyError):
+        evaluate_high_risk_approval(
+            repo_root=repo, base_sha=base_sha, head_sha="not-a-sha", pr_number=1930, desk_folder=desk_dir
+        )
+    with pytest.raises(RiskPolicyError):
+        evaluate_high_risk_approval(
+            repo_root=repo, base_sha=base_sha, head_sha="f" * 40, pr_number=1930, desk_folder=desk_dir
+        )
+    with pytest.raises(RiskPolicyError):
+        evaluate_high_risk_approval(
+            repo_root=tmp_path / "missing-repo",
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=1930,
+            desk_folder=desk_dir,
+        )
+    with pytest.raises(RiskPolicyError):
+        evaluate_high_risk_approval(
+            repo_root=repo, base_sha=base_sha, head_sha=head_sha, pr_number=1930, desk_folder=desk_dir, generation=0
+        )
+    assert not desk_dir.exists()
 
 
-def test_assessment_invariants_cannot_be_violated_manually() -> None:
+def test_assessment_invariants_and_unforgeable_sha_api() -> None:
     with pytest.raises(RiskPolicyError):
         RiskAssessment(
             tier=RiskTier.HIGH,
@@ -666,17 +788,14 @@ def test_assessment_invariants_cannot_be_violated_manually() -> None:
             all_paths=(),
             reason="broken",
         )
+
+    pure_low = classify_paths(["docs/a.md"])
+    assert not hasattr(pure_low, "base_sha")
+    assert not hasattr(pure_low, "head_sha")
+    with pytest.raises(TypeError):
+        classify_paths(["docs/a.md"], head_sha="a" * 40)  # type: ignore[call-arg]
+
     with pytest.raises(RiskPolicyError):
-        RiskAssessment(
-            tier=RiskTier.LOW,
-            review_depth=ReviewDepth.QUICK,
-            requires_human_approval=False,
-            allow_patch_reuse=True,
-            matched_high_paths=(),
-            matched_deep_paths=(),
-            all_paths=("docs/a.md",),
-            reason="bad head sha",
-            head_sha="A" * 40,
-        )
+        DiffRiskAssessment(base_sha="a" * 40, head_sha="A" * 40, assessment=pure_low)
     with pytest.raises(RiskPolicyError):
-        classify_paths(["docs/a.md"], base_sha="not-a-sha")
+        DiffRiskAssessment(base_sha="not-a-sha", head_sha="a" * 40, assessment=pure_low)
