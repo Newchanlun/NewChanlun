@@ -1294,12 +1294,15 @@ fn launcher_and_e_refuse_duplicate_fx_revisions_before_start() {
 /// 临时文件 stderr（无管道读线程）、独立进程组 RAII 守卫（`WNOWAIT` 固定 `pgid`，只对 `-pgid` 发兜底
 /// SIGKILL，不按 `/proc` 裸 PID 发信号）、非阻塞 `connect` + `session_transport` 共享总截止。
 mod non_history_bound {
-    use super::{launcher_bin, sha256_hex, Space, CREDENTIAL_KEY, SESSION, THETA_DIAGNOSTIC};
+    use super::{
+        launcher_bin, sha256_hex, x_bin, Space, CREDENTIAL_KEY, SESSION, THETA_DIAGNOSTIC,
+    };
     use newchan_rust::session_transport::{read_frame, write_frame_observed, NoObserver};
     use serde_json::{json, Value};
-    use std::fs::File;
+    use std::fs::{self, File, Permissions};
     use std::io::ErrorKind;
     use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
@@ -1312,6 +1315,32 @@ mod non_history_bound {
             .filter_map(|l| l.strip_prefix("production_session "))
             .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
             .collect()
+    }
+
+    /// X 可在 launcher 写完 spawn JSON 前打印拒绝原因。只分离 stderr；
+    /// exec 保持原 X 的参数、PID 和退出状态，launcher 仍监督同一个进程。
+    pub(super) fn launcher_with_x_stderr(space: &Space) -> (PathBuf, PathBuf) {
+        let bin = space.path("bin");
+        fs::create_dir_all(bin.join("real")).unwrap();
+        let launcher = bin.join("production_session");
+        fs::copy(launcher_bin(), &launcher).unwrap();
+        let built = Path::new(launcher_bin()).parent().unwrap();
+        for name in [
+            "s_structure_session",
+            "e_economic_session",
+            "b_chong_session",
+        ] {
+            symlink(built.join(name), bin.join(name)).unwrap();
+        }
+        symlink(x_bin(), bin.join("real/x_execution_session")).unwrap();
+        let x = bin.join("x_execution_session");
+        fs::write(
+            &x,
+            "#!/bin/sh\nexec \"${0%/*}/real/x_execution_session\" \"$@\" 2>\"$0.stderr\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(x, Permissions::from_mode(0o700)).unwrap();
+        (launcher, bin.join("x_execution_session.stderr"))
     }
 
     fn wait_while(cap: Duration, mut busy: impl FnMut() -> bool) -> bool {
@@ -1357,13 +1386,13 @@ mod non_history_bound {
     }
 
     impl NonHistoryLauncher {
-        pub(super) fn spawn(space: &Space, manifest: &Path, log_name: &str) -> Self {
+        pub(super) fn spawn(bin: &Path, space: &Space, manifest: &Path, log_name: &str) -> Self {
             assert!(
                 std::env::var_os(CREDENTIAL_KEY).is_none(),
                 "测试环境不得含哨兵键"
             );
             let stderr_path = space.path(log_name);
-            let child = Command::new(launcher_bin())
+            let child = Command::new(bin)
                 .args(["--manifest"])
                 .arg(manifest)
                 .env_remove(CREDENTIAL_KEY)
@@ -1658,7 +1687,8 @@ mod non_history_bound {
 #[test]
 fn non_history_preserves_parent_startup_and_x_degradation() {
     use non_history_bound::{
-        has_other_live_pgid_member, launcher_events, s_ingest_bounded, NonHistoryLauncher,
+        has_other_live_pgid_member, launcher_events, launcher_with_x_stderr, s_ingest_bounded,
+        NonHistoryLauncher,
     };
 
     // 1) 非历史配置 + 坏 X revision：`launcher` 声明在 `space` 之后，任何路径先按进程组清理再删临时目录。
@@ -1677,7 +1707,9 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
         }),
     );
     let manifest = launcher_manifest(&space, "simulation", &source, &s_db, &limits, &bad_xp);
-    let launcher = NonHistoryLauncher::spawn(&space, &manifest, "launcher.stderr.log");
+    let (launcher_path, x_stderr_path) = launcher_with_x_stderr(&space);
+    let launcher =
+        NonHistoryLauncher::spawn(&launcher_path, &space, &manifest, "launcher.stderr.log");
     let (s_pid, e_pid, b_pid, x_pid, x_exit) = launcher.wait_until(
         "launcher 观测到同一 X 的退出事件",
         Duration::from_secs(30),
@@ -1800,9 +1832,10 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
         !has_other_live_pgid_member(launcher_pid),
         "停止后进程组 {launcher_pid} 不得有残留"
     );
+    let x_stderr = std::fs::read_to_string(x_stderr_path).unwrap();
     assert!(
-        stderr.contains("VersionUnsupported") && stderr.contains("x-execution-profile/99"),
-        "X 应报 VersionUnsupported：{stderr}"
+        x_stderr.contains("VersionUnsupported") && x_stderr.contains("x-execution-profile/99"),
+        "X 应报 VersionUnsupported：{x_stderr}"
     );
     let events = launcher_events(&stderr);
     let x_spawns: Vec<&Value> = events
@@ -1830,7 +1863,12 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
     let xp2 = x_profile(&space2, "simulation", None, Some("tb09-sentinel"), false);
     let manifest2 = launcher_manifest(&space2, "simulation", &source2, &s_db2, &limits2, &xp2);
     std::fs::remove_file(space2.path("economic.json")).unwrap();
-    let launcher2 = NonHistoryLauncher::spawn(&space2, &manifest2, "launcher-missing-e.stderr.log");
+    let launcher2 = NonHistoryLauncher::spawn(
+        Path::new(launcher_bin()),
+        &space2,
+        &manifest2,
+        "launcher-missing-e.stderr.log",
+    );
     let launcher2_pid = launcher2.id();
     let (status2, stderr2) = launcher2
         .wait_exit(Duration::from_secs(30))
