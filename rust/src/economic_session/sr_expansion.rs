@@ -14,6 +14,7 @@
 //! 同一具名政策版本只能对应一份判据，改值必须登记新版本。
 use super::book::hash;
 use super::store::*;
+use crate::session_business_id as ids;
 use crate::session_protocol::{
     nonnegative, positive, required, sha256_hex, strict_json, validate_envelope,
 };
@@ -305,6 +306,27 @@ fn registry(manifest: &Value) -> Result<Option<Vec<Authorization>>, String> {
         }
         let reference = required(a, "reference")?.to_owned();
         let p = parse_policy(&a["policy"])?;
+        if super::deployment::is_business(manifest) {
+            ids::name(&p.policy_id, "sr_expansion.policy_id")?;
+            ids::name(&p.version, "sr_expansion.version")?;
+            // 已有合成授权夹具使用这个具名版本引用；签署逐条绑定到同一引用。
+            if reference
+                != format!(
+                    "TestOnly-synthetic-authorization/{}/{}",
+                    p.policy_id, p.version
+                )
+            {
+                ids::reference(&reference, "sr_expansion.reference")?;
+            }
+            for entry in &p.entries {
+                ids::name(&entry.id, "sr_expansion.entry_id")?;
+                ids::name(&entry.unit.0, "sr_expansion.fact.currency")?;
+                ids::name(&entry.unit.1, "sr_expansion.fact.money_unit")?;
+                if let Scope::Symbol(symbol) = &entry.scope {
+                    ids::instrument(symbol, "sr_expansion.scope.symbol")?;
+                }
+            }
+        }
         if p.entries
             .iter()
             .any(|e| e.reference.as_ref().is_some_and(|r| *r != reference))

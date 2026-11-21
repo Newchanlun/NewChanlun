@@ -2,19 +2,45 @@ use super::{
     model::{Batch, Change, Model},
     store,
 };
-use crate::session_protocol::{canonical_json, reply_envelope, sha256_hex};
+use crate::session_business_id as ids;
+use crate::session_protocol::{canonical_json, positive, reply_envelope, sha256_hex};
 use crate::session_transport::{
     read_frame, serve_unix, write_frame_observed, NoObserver, TransportBounds,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::fs;
+use std::os::unix::{fs::MetadataExt, net::UnixStream};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const WIRE: &str = "x-exact-simulation/1";
 pub const AUTHORITY_WIRE: &str = "x-exact-authority/1";
+const EXECUTION_PROFILE_V1: &str = "x-execution-profile/1";
+
+/// 外层执行合同同时约束在线配置与持久归档；只有 simulation 可以选内层合同。
+pub fn validate_execution_profile_header(
+    revision: &str,
+    mode: &str,
+    history_simulation: bool,
+) -> Result<(), String> {
+    if revision != EXECUTION_PROFILE_V1 {
+        return Err(format!(
+            "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {EXECUTION_PROFILE_V1}"
+        ));
+    }
+    if !matches!(mode, "simulation" | "dry-run" | "experiment" | "production") {
+        return Err(
+            "InvalidDomain：执行 profile mode 必须是 simulation|dry-run|experiment|production"
+                .into(),
+        );
+    }
+    if history_simulation && mode != "simulation" {
+        return Err("InvalidDomain：history_simulation 仅允许 simulation profile".into());
+    }
+    Ok(())
+}
 fn hash<T: Serialize>(v: &T) -> String {
     sha256_hex(canonical_json(&serde_json::to_value(v).expect("integer domain")).as_bytes())
 }
@@ -54,6 +80,334 @@ pub struct Profile {
     pub timeout_ms: u64,
     pub max_frame_bytes: usize,
 }
+const X_BUSINESS: &str = "x-simulation-authority/2";
+const X_DEPLOYMENT: &str = "x-simulation-deployment/1";
+const DEPLOYMENT_SQL: &str = "CREATE TABLE x_sim_deployment(singleton INTEGER PRIMARY KEY CHECK(singleton=1), mapping TEXT NOT NULL, fingerprint TEXT NOT NULL) STRICT;";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorityIdentity {
+    authority_id: String,
+    authority_epoch: String,
+    schema_revision: String,
+    reply_namespace: String,
+    producer_id: String,
+}
+impl AuthorityIdentity {
+    fn local(self, socket: String) -> Authority {
+        Authority {
+            socket,
+            authority_id: self.authority_id,
+            authority_epoch: self.authority_epoch,
+            schema_revision: self.schema_revision,
+            reply_namespace: self.reply_namespace,
+            producer_id: self.producer_id,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BusinessProfile {
+    schema_revision: String,
+    model: Model,
+    session_id: String,
+    session_generation: String,
+    x_id: String,
+    source_namespace: String,
+    source_epoch: String,
+    e: AuthorityIdentity,
+    s: AuthorityIdentity,
+    conditions: Vec<Condition>,
+    timeout_ms: u64,
+    max_frame_bytes: usize,
+}
+
+impl BusinessProfile {
+    fn validate_identity(&self) -> Result<(), String> {
+        ids::name(&self.session_id, "session_id")?;
+        positive(&self.session_generation, "session_generation")?;
+        ids::domain_name(&self.x_id, "x_id")?;
+        ids::namespace(&self.source_namespace, "source_namespace")?;
+        ids::name(&self.source_epoch, "source_epoch")?;
+        for authority in [&self.e, &self.s] {
+            ids::name(&authority.authority_id, "authority_id")?;
+            ids::name(&authority.authority_epoch, "authority_epoch")?;
+            ids::reference(&authority.schema_revision, "schema_revision")?;
+            ids::namespace(&authority.reply_namespace, "reply_namespace")?;
+            ids::domain_name(&authority.producer_id, "producer_id")?;
+        }
+        let model = &self.model;
+        ids::instrument(&model.symbol, "model.symbol")?;
+        for (field, value) in [
+            ("model.revision", &model.revision),
+            ("model.quantity_unit", &model.quantity_unit),
+            ("model.currency", &model.currency),
+        ] {
+            ids::name(value, field)?;
+        }
+        for (field, value) in [
+            ("model.rd11_policy", &model.rd11_policy),
+            ("fee_profile.reference", &model.fee_profile.reference),
+            ("fee_profile.role_source", &model.fee_profile.role_source),
+            (
+                "fee_profile.market_slippage_source",
+                &model.fee_profile.market_slippage_source,
+            ),
+        ] {
+            ids::reference(value, field)?;
+        }
+        for condition in &self.conditions {
+            ids::reference(&condition.condition_id, "condition_id")?;
+            ids::reference(&condition.coverage_proof, "coverage_proof")?;
+            for (field, refs) in [
+                ("dependency_set", &condition.dependency_set),
+                ("invalidation_sources", &condition.invalidation_sources),
+                ("evidence_refs", &condition.evidence_refs),
+            ] {
+                for reference in refs {
+                    ids::reference(reference, field)?;
+                }
+            }
+        }
+        // 模型族、RD12、投影/seed、检查阶段/能力/失败语义由 Profile::validate 的闭集校验。
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Deployment {
+    schema_revision: String,
+    db: String,
+    socket: String,
+    e_socket: String,
+    s_socket: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SplitProfile {
+    business: Value,
+    deployment: Value,
+}
+
+/// 旧版直接解析混合 profile；新版两份闭集单独解析，组装的 Profile 只向既有运行时供给参数。
+pub struct ConfiguredProfile {
+    profile: Profile,
+    binding: Option<(Value, Value)>,
+}
+impl ConfiguredProfile {
+    pub fn parse(value: Value) -> Result<Self, String> {
+        if value.get("business").is_some() || value.get("deployment").is_some() {
+            let split: SplitProfile = serde_json::from_value(value).map_err(error)?;
+            return Self::split(split.business, split.deployment);
+        }
+        Self::legacy(value)
+    }
+    fn legacy(value: Value) -> Result<Self, String> {
+        let profile: Profile = serde_json::from_value(value).map_err(error)?;
+        profile.validate()?;
+        Ok(Self {
+            profile,
+            binding: None,
+        })
+    }
+    fn split(business: Value, deployment: Value) -> Result<Self, String> {
+        let b: BusinessProfile = serde_json::from_value(business.clone()).map_err(error)?;
+        let d: Deployment = serde_json::from_value(deployment.clone()).map_err(error)?;
+        if b.schema_revision != X_BUSINESS || d.schema_revision != X_DEPLOYMENT {
+            return Err("SchemaUnsupported：未知模拟 X 业务或部署版本".into());
+        }
+        if !Path::new(&d.db).is_absolute()
+            || [&d.db, &d.socket, &d.e_socket, &d.s_socket]
+                .iter()
+                .any(|p| p.contains('\0'))
+        {
+            return Err("InvalidDomain：X 部署位置非法".into());
+        }
+        b.validate_identity()?;
+        let profile = Profile {
+            model: b.model,
+            session_id: b.session_id,
+            session_generation: b.session_generation,
+            x_id: b.x_id,
+            source_namespace: b.source_namespace,
+            source_epoch: b.source_epoch,
+            socket: d.socket,
+            e: b.e.local(d.e_socket),
+            s: b.s.local(d.s_socket),
+            conditions: b.conditions,
+            timeout_ms: b.timeout_ms,
+            max_frame_bytes: b.max_frame_bytes,
+        };
+        profile.validate()?;
+        Ok(Self {
+            profile,
+            binding: Some((business, deployment)),
+        })
+    }
+    fn check_db(&self, db: &Path) -> Result<(), String> {
+        if let Some((_, d)) = &self.binding {
+            let expected = d["db"].as_str().unwrap();
+            if Path::new(expected) != db {
+                return Err("IdentityConflict：X DB 不等于固定部署".into());
+            }
+        }
+        Ok(())
+    }
+    /// 只在启服前访问真实目录；离线核证只读冻结的部署原字节。
+    pub fn check_serve_deployment(&self, db: &Path) -> Result<(), String> {
+        self.check_db(db)?;
+        if self.binding.is_some() {
+            let p = &self.profile;
+            let mut names = std::collections::BTreeSet::new();
+            let mut objects = std::collections::BTreeSet::new();
+            for socket in [&p.socket, &p.e.socket, &p.s.socket] {
+                let target = socket_target(socket)?;
+                if !names.insert(target.path) || target.object.is_some_and(|id| !objects.insert(id))
+                {
+                    return Err("IdentityConflict：X/E/S socket 实际目标重复".into());
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn initialize_in_transaction(
+        &self,
+        c: &rusqlite::Transaction<'_>,
+        epoch: i64,
+    ) -> Result<(), String> {
+        initialize_bound(c, &self.profile, self.binding.as_ref(), epoch)
+    }
+    pub fn serve(&self, c: &mut Connection, epoch: i64) -> Result<(), String> {
+        serve_bound(c, &self.profile, self.binding.as_ref(), epoch)
+    }
+}
+
+struct SocketTarget {
+    path: PathBuf,
+    object: Option<(u64, u64)>,
+}
+
+fn socket_target(raw: &str) -> Result<SocketTarget, String> {
+    let path = Path::new(raw);
+    let parent = path.parent().ok_or("InvalidDomain：模拟 socket 缺父目录")?;
+    let name = path
+        .file_name()
+        .ok_or("InvalidDomain：模拟 socket 缺文件名")?;
+    let mut path = parent.canonicalize().map_err(io)?.join(name);
+    let object = match path.symlink_metadata() {
+        Ok(meta) => {
+            let meta = if meta.is_symlink() {
+                path = path.canonicalize().map_err(io)?;
+                fs::metadata(&path).map_err(io)?
+            } else {
+                meta
+            };
+            Some((meta.dev(), meta.ino()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io(e)),
+    };
+    Ok(SocketTarget { path, object })
+}
+
+fn has_deployment(c: &Connection) -> Result<bool, String> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='x_sim_deployment')",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(error)
+}
+fn deployed(c: &Connection) -> Result<(String, String), String> {
+    c.query_row(
+        "SELECT mapping,fingerprint FROM x_sim_deployment WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .map_err(error)
+}
+
+/// E 只从选定的新版 X 部署读事实；同模型的另一会话或旧版库不是替代权威。
+pub(crate) fn verify_intake_binding(
+    c: &Connection,
+    db: &Path,
+    source: &Value,
+    session: &Value,
+) -> Result<(), String> {
+    let raw: String = c
+        .query_row(
+            "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(error)?;
+    let business = crate::session_protocol::strict_json(raw.as_bytes())?;
+    let (mapping, fingerprint) = deployed(c)?;
+    let deployment = crate::session_protocol::strict_json(mapping.as_bytes())?;
+    if fingerprint != hash(&deployment) {
+        return Err("IdentityConflict：X 部署摘要不符".into());
+    }
+    let config = ConfiguredProfile::split(business.clone(), deployment)?;
+    config.check_db(db)?;
+    let writer_epoch: String = c
+        .query_row(
+            "SELECT value FROM x_meta WHERE key='writer_epoch'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(error)?;
+    if business["session_id"] != session["session_id"]
+        || business["session_generation"] != session["session_generation"]
+        || business["x_id"] != source["producer_id"]
+        || business["source_namespace"] != source["source_namespace"]
+        || business["source_epoch"] != source["source_epoch"]
+        || source["producer_epoch"] != writer_epoch
+        || source["model_content_hash"] != hash(&business["model"])
+    {
+        return Err("IdentityConflict：X 业务身份或事实写者未绑定".into());
+    }
+    Ok(())
+}
+
+/// 先分派持久的外层与内层合同，再核证因果记录和模型原件；不访问原部署。
+pub fn audit_persisted(c: &Connection) -> Result<(), String> {
+    let meta = |key| -> Result<String, String> {
+        c.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
+            .optional()
+            .map_err(error)?
+            .ok_or_else(|| format!("SchemaUnsupported：X 持久元数据缺 {key}"))
+    };
+    let revision = meta("profile_revision")?;
+    let mode = meta("profile_mode")?;
+    let history = meta("history_simulation")? == "true";
+    validate_execution_profile_header(&revision, &mode, history)?;
+    if !history {
+        return Err("SchemaUnsupported：离线 audit 仅用于 simulation X".into());
+    }
+    let epoch = positive(&meta("writer_epoch")?, "writer_epoch")?;
+    let raw: String = c
+        .query_row(
+            "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(error)?;
+    let business = crate::session_protocol::strict_json(raw.as_bytes())?;
+    let config = if has_deployment(c)? {
+        let (raw, _) = deployed(c)?;
+        ConfiguredProfile::split(
+            business,
+            crate::session_protocol::strict_json(raw.as_bytes())?,
+        )?
+    } else {
+        ConfiguredProfile::legacy(business)?
+    };
+    validate_bound(c, &config.profile, config.binding.as_ref(), epoch)
+}
+
 impl Profile {
     pub fn validate(&self) -> Result<(), String> {
         self.model.validate()?;
@@ -789,6 +1143,14 @@ fn validate_pending_epoch(c: &Connection, epoch: i64) -> Result<(), String> {
 
 /// 在 bin 写入 writer_epoch 之前检查已有冻结合同与接纳记录。
 pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), String> {
+    validate_bound(c, p, None, epoch)
+}
+fn validate_bound(
+    c: &Connection,
+    p: &Profile,
+    binding: Option<&(Value, Value)>,
+    epoch: i64,
+) -> Result<(), String> {
     p.validate()?;
     let exists: bool = c
         .query_row(
@@ -797,9 +1159,17 @@ pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), 
             |r| r.get(0),
         )
         .map_err(error)?;
+    let has_local = has_deployment(c)?;
+    if (!exists && has_local) || (exists && has_local != binding.is_some()) {
+        return Err("IdentityConflict：现有 X 原件禁止切换部署合同版本".into());
+    }
     if exists {
-        validate_pending_epoch(c, epoch)?;
-        store::audit_history(c)?;
+        if let Some((_, mapping)) = binding {
+            let (raw, fingerprint) = deployed(c)?;
+            if raw != canonical_json(mapping) || fingerprint != hash(mapping) {
+                return Err("IdentityConflict：X 部署位置已冻结".into());
+            }
+        }
         let frozen: Option<String> = c
             .query_row("SELECT v FROM x_sim_meta WHERE k='contract'", [], |r| {
                 r.get(0)
@@ -809,7 +1179,9 @@ pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), 
         let expected = canonical_json(
             &json!({"model":p.model,"source_namespace":p.source_namespace,"source_epoch":p.source_epoch}),
         );
-        if frozen.as_ref().is_some_and(|s| s != &expected) {
+        if frozen.as_ref().is_some_and(|s| s != &expected)
+            || (binding.is_some() && frozen.is_none())
+        {
             return Err("IdentityConflict：X 模型或事实来源已冻结".into());
         }
         let prior: Option<String> = c
@@ -820,10 +1192,11 @@ pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), 
             )
             .optional()
             .map_err(error)?;
-        let binding = canonical_json(&serde_json::to_value(p).map_err(error)?);
-        if prior.as_ref() != Some(&binding) {
+        if prior.as_ref() != Some(&business_binding(p, binding)?) {
             return Err("IdentityConflict：X 权威端点合同已冻结".into());
         }
+        validate_pending_epoch(c, epoch)?;
+        store::audit_history(c)?;
     }
     let commands:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_exact_commands')",[],|r|r.get(0)).map_err(error)?;
     if commands {
@@ -841,8 +1214,21 @@ pub fn initialize_in_transaction(
     p: &Profile,
     epoch: i64,
 ) -> Result<(), String> {
-    p.validate()?;
-    validate_existing(c, p, epoch)?;
+    initialize_bound(c, p, None, epoch)
+}
+fn business_binding(p: &Profile, binding: Option<&(Value, Value)>) -> Result<String, String> {
+    Ok(match binding {
+        Some((business, _)) => canonical_json(business),
+        None => canonical_json(&serde_json::to_value(p).map_err(error)?),
+    })
+}
+fn initialize_bound(
+    c: &rusqlite::Transaction<'_>,
+    p: &Profile,
+    binding: Option<&(Value, Value)>,
+    epoch: i64,
+) -> Result<(), String> {
+    validate_bound(c, p, binding, epoch)?;
     let exists: bool = c
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_sim_meta')",
@@ -857,15 +1243,31 @@ pub fn initialize_in_transaction(
     c.execute_batch("CREATE TABLE x_exact_commands(id TEXT PRIMARY KEY,command TEXT NOT NULL,release_receipt TEXT NOT NULL,state TEXT NOT NULL,attempt_batch TEXT,accept_clock TEXT NOT NULL,release_evidence TEXT NOT NULL,execute_evidence TEXT) STRICT;").map_err(error)?;
     c.execute(
         "INSERT INTO x_sim_meta VALUES('authority_profile',?1)",
-        [canonical_json(&serde_json::to_value(p).map_err(error)?)],
+        [business_binding(p, binding)?],
     )
     .map_err(error)?;
+    if let Some((_, deployment)) = binding {
+        c.execute_batch(DEPLOYMENT_SQL).map_err(error)?;
+        c.execute(
+            "INSERT INTO x_sim_deployment VALUES(1,?,?)",
+            params![canonical_json(deployment), hash(deployment)],
+        )
+        .map_err(error)?;
+    }
     Ok(())
 }
 
 pub fn serve(c: &mut Connection, p: &Profile, epoch: i64) -> Result<(), String> {
+    serve_bound(c, p, None, epoch)
+}
+fn serve_bound(
+    c: &mut Connection,
+    p: &Profile,
+    binding: Option<&(Value, Value)>,
+    epoch: i64,
+) -> Result<(), String> {
     let tx = c.transaction().map_err(error)?;
-    initialize_in_transaction(&tx, p, epoch)?;
+    initialize_bound(&tx, p, binding, epoch)?;
     #[cfg(test)]
     if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
         .ok()

@@ -3,6 +3,7 @@
 mod allocation;
 mod book;
 mod content_store;
+mod deployment;
 // #1768：B/E 域事件外壳与 snapshot/delta 读口为 crate 内只读接口；wire op 接线待主控裁定，
 // 生产构建暂无调用方，故只在非测试构建豁免 dead_code。
 #[cfg_attr(not(test), allow(dead_code))]

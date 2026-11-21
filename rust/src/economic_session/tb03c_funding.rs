@@ -16,7 +16,8 @@
 //! - q_rebase：「Q 变大不自动改现役 Q（输出 AwaitingPolicy{q_rebase, (S,ℓ)}）」。
 use super::book::{rules, target, Rules};
 use super::quantity_calibration::{self as qc, Readiness};
-use crate::session_protocol::{parse_canonical_i64, positive, required};
+use crate::session_business_id as ids;
+use crate::session_protocol::{nonnegative, parse_canonical_i64, positive, required};
 use serde_json::{json, Value};
 
 /// ADR 0040 签署记录的政策族标识（标识不是数值；版本号从记录本身读）。
@@ -233,7 +234,268 @@ fn parse_quantity(
 }
 
 pub(super) fn validate_config(manifest: &Value) -> Result<(), String> {
-    Contract::of(manifest).map(|_| ())
+    let contract = Contract::of(manifest)?;
+    if contract.is_some() && super::deployment::is_business(manifest) {
+        validate_business_values(manifest)?;
+    }
+    Ok(())
+}
+
+/// 业务标识不经路径解析；点分版本可用，文件扩展名与点段不可用。
+fn business_id(s: &str) -> bool {
+    let segment = |p: &str| {
+        p.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    };
+    let mut parts = s.split('.');
+    parts.next().is_some_and(segment) && parts.all(digits)
+}
+
+fn digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn logical_id(v: &Value, key: &str) -> Result<(), String> {
+    if business_id(required(v, key)?) {
+        Ok(())
+    } else {
+        Err(format!("InvalidDomain：{key} 须为非路径业务标识"))
+    }
+}
+
+fn scope(v: &Value) -> Result<(), String> {
+    match v.get("scope") {
+        None => Ok(()),
+        Some(value) if value == "evidence_only" => Ok(()),
+        Some(_) => Err("InvalidDomain：资金签署 scope 只允许 evidence_only".into()),
+    }
+}
+
+/// ADR 0040 出处可用人读文字、工单链（#1557/#1558）、行号及十进制量；
+/// 斜杠、冒号只用于这些出处，文件扩展名、反斜杠及点段不属于出处词法。
+fn business_provenance(s: &str, field: &str) -> Result<(), String> {
+    fn ticket(s: &str) -> bool {
+        s.strip_prefix('#').is_some_and(digits)
+    }
+    fn citation(word: &str) -> bool {
+        match word.split_once(':') {
+            Some((refs, line)) => digits(line) && (refs.is_empty() || refs.split('/').all(ticket)),
+            None => word.split('/').all(ticket),
+        }
+    }
+
+    let words: Vec<_> = s
+        .split(|c: char| c.is_whitespace() || "()（）[]{},，;；。、\"'“”=：".contains(c))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let valid_word = |(i, &word): (usize, &&str)| {
+        if word == "/" {
+            // 签署出处可以把编号或工单和下一张工单并列（例：评论 5199839236 / #915）。
+            return i > 0
+                && (digits(words[i - 1]) || ticket(words[i - 1]))
+                && words
+                    .get(i + 1)
+                    .is_some_and(|next| citation(next) && next.starts_with('#'));
+        }
+        if word.contains(['/', ':', '\\']) {
+            return citation(word);
+        }
+        let mut parts = word.split('.');
+        parts.next().is_some_and(|p| !p.is_empty()) && parts.all(digits)
+    };
+    if words.is_empty()
+        || s.chars().any(char::is_control)
+        || !words.iter().enumerate().all(valid_word)
+    {
+        return Err(format!("InvalidDomain：{field} 须为非路径业务出处"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod business_provenance_tests {
+    use super::business_provenance;
+
+    #[test]
+    fn accepts_signed_citations_and_rejects_local_locators() {
+        for signed in [
+            "用户（#1557/#1558 2026-10-20 批复）",
+            "#915 报告 :153",
+            "UserSigned(引 #917 评论 5199839236 / #915 报告 :272)",
+            "Measured{#915 BTC, 1m, δ=0.5, 中位, L0→L1}",
+            "ADR 0040 裁定三（#842 R-10；γ = 1.0 先例）",
+            "#915:153",
+        ] {
+            assert!(business_provenance(signed, "source").is_ok(), "{signed}");
+        }
+        for local in [
+            "/tmp/x",
+            "引用(/tmp/x)",
+            "./x",
+            "a/b",
+            r"C:tmp",
+            r"C:\tmp\x",
+            r"\\host\share\x",
+            "FiLe:///tmp/x",
+            "本机 e.sock",
+            "#915/../x",
+            ".",
+        ] {
+            assert!(business_provenance(local, "source").is_err(), "{local}");
+        }
+    }
+}
+
+fn validate_tiers(tiers: &Value) -> Result<(), String> {
+    if tiers == "none" {
+        return Ok(());
+    }
+    let tiers = tiers
+        .as_array()
+        .ok_or("SchemaUnsupported：policy-record tiers 须为 none 或量档数组")?;
+    let mut depths = std::collections::BTreeSet::new();
+    for t in tiers {
+        exact(
+            t,
+            &["d", "w", "source"],
+            &["tier_quantity", "valid_through"],
+            "policy tier ",
+        )?;
+        if !depths.insert(positive(required(t, "d")?, "tier.d")?) {
+            return Err("IdentityConflict：policy-record tiers 深度重复".into());
+        }
+        let w = &t["w"];
+        if w != "Unmeasured" {
+            exact(w, &["num", "den"], &[], "tier.w ")?;
+            positive(required(w, "num")?, "tier.w.num")?;
+            positive(required(w, "den")?, "tier.w.den")?;
+        }
+        business_provenance(text(t, "source")?, "tier.source")?;
+        if t.get("tier_quantity").is_some() {
+            nonnegative(required(t, "tier_quantity")?, "tier_quantity")?;
+        }
+        if t.get("valid_through").is_some() {
+            date(t, "valid_through")?;
+        }
+    }
+    Ok(())
+}
+
+/// ADR 0049：匹配的是来源、市场、标的、价格字段四个独立维度。报价行与已签选择器共用判据。
+fn validate_selector(v: &Value) -> Result<(), String> {
+    ids::namespace(required(v, "source")?, "source")?;
+    ids::name(required(v, "market")?, "market")?;
+    ids::instrument(required(v, "instrument")?, "instrument")?;
+    ids::name(required(v, "price_field")?, "price_field")
+}
+
+fn validate_quantity_ref(v: &Value, field: &str, fixture_prefix: &str) -> Result<(), String> {
+    let value = required(v, field)?;
+    if value.strip_prefix(fixture_prefix).is_some_and(business_id) {
+        return Ok(());
+    }
+    business_provenance(value, field)
+}
+
+/// 数值、结构、摘要和绑定已由定标合同解析；这里只核尚未限定词法的业务字符串。
+fn validate_snapshot(snapshot: &Value) -> Result<(), String> {
+    ids::name(required(snapshot, "snapshot_id")?, "snapshot_id")?;
+    for quote in snapshot["quotes"].as_array().unwrap() {
+        ids::domain_name(required(quote, "quote_id")?, "quote_id")?;
+        validate_selector(quote)?;
+        let unit = &quote["price_unit"];
+        ids::name(required(unit, "money")?, "price_unit.money")?;
+        ids::name(
+            required(&unit["quantity"], "unit")?,
+            "price_unit.quantity.unit",
+        )?;
+        validate_quantity_ref(quote, "original_ref", "fixture://quotes/")?;
+    }
+    Ok(())
+}
+
+fn validate_calibration(version: &Value) -> Result<(), String> {
+    ids::name(required(version, "quote_snapshot")?, "quote_snapshot")?;
+    let policy = &version["quantity_calibration"];
+    for k in ["version", "supersedes"] {
+        logical_id(policy, k)?;
+    }
+    ids::name(
+        required(&policy["quantity_unit"], "unit")?,
+        "quantity_unit.unit",
+    )?;
+    let signature = &policy["signature"];
+    if signature.is_object() {
+        validate_quantity_ref(signature, "signature_ref", "fixture://signature/")?;
+        business_provenance(required(signature, "authorizer")?, "signature.authorizer")?;
+    }
+    let basis = &policy["quantity_basis"];
+    if basis["kind"] == "frozen_quote" {
+        let selector = &basis["selector"];
+        exact(
+            selector,
+            &["source", "market", "instrument", "price_field"],
+            &[],
+            "quote selector ",
+        )?;
+        validate_selector(selector)?;
+        let currency = &basis["currency_scale"];
+        ids::name(required(currency, "from")?, "currency_scale.from")?;
+        ids::name(required(currency, "to")?, "currency_scale.to")?;
+    }
+    Ok(())
+}
+
+/// 只在新版首写与审计装载边界封闭原值，不重写清单，也不改变旧混合清单的解释。
+fn validate_business_values(m: &Value) -> Result<(), String> {
+    let funding = &m["funding"];
+    let record = &funding["funding_record"];
+    scope(record)?;
+    for k in ["profile_id", "version", "supersedes", "currency"] {
+        logical_id(record, k)?;
+    }
+    business_provenance(text(record, "authorizer")?, "funding_record.authorizer")?;
+    business_provenance(
+        text(&funding["margin_leverage"], "source")?,
+        "margin_leverage.source",
+    )?;
+    if let Some(snapshots) = funding.get("quote_snapshots") {
+        for snapshot in snapshots.as_array().unwrap() {
+            validate_snapshot(snapshot)?;
+        }
+    }
+    for route in m["chongs"].as_array().unwrap() {
+        let cf = &route["funding"];
+        let policy = &cf["policy_record"];
+        scope(policy)?;
+        // profile_id、q_ref 与本授权绑定；operation_level 与路由绑定。
+        for k in ["version", "supersedes"] {
+            logical_id(policy, k)?;
+        }
+        // Contract::of 已要求 policy.symbol == route.symbol，定标 binding.symbol 同样绑定该标的。
+        ids::instrument(required(policy, "symbol")?, "policy_record.symbol")?;
+        for k in ["frequency_evidence_ref", "authorizer"] {
+            business_provenance(text(policy, k)?, k)?;
+        }
+        validate_tiers(&policy["tiers"])?;
+        for cap in policy["capacities"].as_array().unwrap() {
+            let level = text(cap, "level")?
+                .strip_prefix('L')
+                .ok_or("InvalidDomain：capacity.level 须为 Ln")?;
+            nonnegative(level, "capacity.level")?;
+            business_provenance(text(cap, "source")?, "capacity.source")?;
+        }
+        if cf.get("quantity_calibration").is_some() {
+            validate_calibration(cf)?;
+            if let Some(rebases) = cf["quantity_rebases"].as_array() {
+                for rebase in rebases {
+                    validate_calibration(rebase)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Chong {

@@ -11,7 +11,7 @@ use crate::session_transport::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 // #1406 C6a：分页是单独、显式授权的只读协议，不接管旧单帧读失败。
@@ -787,6 +787,7 @@ fn capture(
     check_operation_deadline(None, ingress_response_deadline)?;
     crate::history_simulation::intake::verify_capture(
         &config.manifest,
+        config.deployment.as_deref(),
         e,
         required(&record, "raw_utf8")?,
     )?;
@@ -912,11 +913,7 @@ fn authoritative_fact_inner(
     if let Some((_, job)) = import.as_mut() {
         job.charge_requests(1).map_err(|e| e.to_string())?;
     }
-    let mut ec = config.clone();
-    ec.domain = "E".into();
-    ec.producer = format!("E:{}", ec.session);
-    ec.db = PathBuf::from(required(&ec.manifest["e"], "db")?);
-    ec.socket = PathBuf::from(required(&ec.manifest["e"], "socket")?);
+    let ec = config.for_domain("E")?;
     let (mut c, _) = open(&ec.db, true)?;
     let tx = c.transaction().map_err(err)?;
     check_epoch(&tx, expected_epoch)?;
@@ -1571,7 +1568,7 @@ fn serve_with_shutdown(
 pub fn cli(is_b: bool) -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or(
-        "usage: init|serve|recover --manifest FILE --db FILE [--chong ID] [--epoch N --e-epoch N]",
+        "usage: init|serve|recover|audit --manifest FILE --db FILE [--chong ID] [--epoch N --e-epoch N]",
     )?;
     let named_recovery = match command.as_str() {
         "recover-named" => Some(super::recovery::Action::Recover),
@@ -1589,6 +1586,15 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     for k in opts.keys() {
         let allowed = if named_recovery.is_some() {
             ["--manifest", "--db", "--chong", "--recovery-request"].contains(&k.as_str())
+        } else if command == "audit" {
+            [
+                "--manifest",
+                "--db",
+                "--chong",
+                "--voice-archive-index",
+                "--as-known-ns",
+            ]
+            .contains(&k.as_str())
         } else {
             ["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].contains(&k.as_str())
                 || (command == "serve" && k == SHUTDOWN_CONTROL_FLAG)
@@ -1603,14 +1609,36 @@ pub fn cli(is_b: bool) -> Result<(), String> {
             .map(String::as_str)
             .ok_or_else(|| format!("InvalidDomain：缺{k}"))
     };
-    let config = Config::load(
-        Path::new(get("--manifest")?),
-        Path::new(get("--db")?),
-        if is_b { Some(get("--chong")?) } else { None },
-    )?;
+    let manifest = Path::new(get("--manifest")?);
+    let db = Path::new(get("--db")?);
+    let chong = if is_b { Some(get("--chong")?) } else { None };
     if !is_b && opts.contains_key("--chong") {
         return Err("InvalidDomain：E不能指定重".into());
     }
+    if command == "audit" {
+        let config = Config::load_inner(manifest, db, chong, true)?;
+        let index = opts
+            .get("--voice-archive-index")
+            .map(|p| crate::session_protocol::strict_json(&std::fs::read(p).map_err(err)?))
+            .transpose()?
+            .unwrap_or(Value::Null);
+        let (mut c, _) = open(db, true)?;
+        let tx = c.transaction().map_err(err)?;
+        audit(&tx, &config)?;
+        let (seq, root, ns, image) = latest(&tx)?;
+        super::evidence::verify_legacy_archive(&config, &image, &index)?;
+        let mut result = json!({"kind":"Audited","domain_id":config.domain,"manifest_hash":config.manifest_hash,"writer_epoch":meta(&tx,"writer_epoch")?,"cut":cut(&config, seq, &root),"commit_ns":ns});
+        if let Some(t) = opts.get("--as-known-ns") {
+            let (seq, root, ns, image) =
+                select_cut(&tx, &config, &json!({"cut":null,"as_known_ns":t}))?;
+            result["cut"] = cut(&config, seq, &root);
+            result["commit_ns"] = json!(ns);
+            result["image"] = image;
+        }
+        println!("{}", canonical_json(&result));
+        return Ok(());
+    }
+    let config = Config::load(manifest, db, chong)?;
     if let Some(action) = named_recovery {
         let request =
             super::recovery::Request::load(Path::new(get("--recovery-request")?), &config)?;

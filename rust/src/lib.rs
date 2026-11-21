@@ -2921,3 +2921,6 @@ pub mod economic_session;
 
 #[cfg(feature = "s_session")]
 pub mod history_simulation;
+
+#[cfg(feature = "s_session")]
+mod session_business_id;

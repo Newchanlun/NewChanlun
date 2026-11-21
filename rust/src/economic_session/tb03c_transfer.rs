@@ -5,7 +5,6 @@ use super::store::{self, Config};
 use crate::s_content::job::Job;
 use crate::session_protocol::{nonnegative, positive, required, strict_json};
 use serde_json::{json, Value};
-use std::path::PathBuf;
 
 pub(super) fn is_in(event: &Value) -> bool {
     event["transfer"]["role"] == "in"
@@ -369,13 +368,7 @@ pub(super) fn target_effect(event: &Value, record: &Value, book: &mut Value) -> 
 }
 fn source_config(config: &Config, claim: &Value) -> Result<Config, String> {
     let id = required(claim, "source_chong")?;
-    let route = config.route(id)?;
-    let mut source = config.clone();
-    source.domain = format!("B:{id}");
-    source.producer = format!("{}:{}", source.domain, source.session);
-    source.db = PathBuf::from(required(route, "db")?);
-    source.socket = PathBuf::from(required(route, "socket")?);
-    Ok(source)
+    config.for_domain(&format!("B:{id}"))
 }
 /// 目标写事务之外只读实取固定源 owner；从不接收 caller 提供的派生扣账证明。
 pub(super) fn attach_source_proof(
@@ -492,6 +485,7 @@ pub(super) fn verify_source_proof(config: &Config, record: &Value) -> Result<(),
     let previous = required(proof, "previous_root")?;
     let image = &proof["image"];
     let prior = &proof["previous_image"];
+    super::evidence::verify_image_closure(&source, image)?;
     let original = array(image, "recorded")?
         .last()
         .ok_or("MissingDependency：源扣账提交缺原件")?;

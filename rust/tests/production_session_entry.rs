@@ -1262,3 +1262,6 @@ fn production_launcher_does_not_forward_theta_diagnostic_switch() {
     assert_s_environ_lacks_theta_diagnostic(&kids);
     assert_eq!(stop(&mut launcher).code(), Some(0));
 }
+
+#[path = "support/path_independent.rs"]
+mod path_independent;

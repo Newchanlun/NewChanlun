@@ -1,6 +1,7 @@
 //! #1394：具名 TestOnly 现金买入域的 Prepared → Reserved → Committed。
 //! 原始资金/量/政策/slot 输入须冻结；本模块无场所、Release 或资金排序权。
 use super::book::hash;
+use super::deployment;
 use super::store::*;
 use super::voice::{digest, exact};
 use crate::s_content::job::Job;
@@ -10,9 +11,10 @@ use crate::session_protocol::{
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const REV: &str = "tb03b-finance/1";
 /// #1394 §5.7：新财务子合同。没有 `/2` 域，`/1` 的子合同也不得靠改名接管新域。
@@ -26,6 +28,11 @@ const REV_V4: &str = "tb03b-finance/4";
 /// #1407 C1：`economic-session/1` 域上显式选择的 E 侧精确命令生产者 = `/1` 全部语义 + MakeDispatchable、
 /// ReleaseExact、QueryCommand 与 `x-exact-authority/1` 的 QueryReleasedExact 应答。只跑 TestOnly 已定域 slot。
 const REV_V5: &str = "tb03b-finance/5";
+// #1407 CE-S07（PR #2163）占用 tb03b-finance/6：model_binding=true、cap_activation=false。
+// 本分支不实现该合同，保留槽不登记，由未知版本门拒绝。
+/// #2127：路径无关域的 FIN 写合同。/7 同时提供精确命令，/8 延续内容域的读法。
+const REV_V7: &str = "tb03b-finance/7";
+const REV_V8: &str = "tb03b-finance/8";
 /// §5.7 `s_ref/2` 的 exact 四字段版本值。
 const S_REF_V2: &str = "s-object-ref/2";
 /// 财务子合同：一个版本串只有一种含义。
@@ -43,7 +50,7 @@ struct Contract {
     exact_release: bool,
 }
 /// 财务子合同的唯一登记点（§5.8：未知值与跨域混写当场拒绝，旧 manifest 缺省仍按域基础合同读）。
-const CONTRACTS: [Contract; 5] = [
+const CONTRACTS: [Contract; 7] = [
     Contract {
         revision: REV,
         domain: SCHEMA_V1,
@@ -79,6 +86,20 @@ const CONTRACTS: [Contract; 5] = [
         cap_activation: false,
         exact_release: true,
     },
+    Contract {
+        revision: REV_V7,
+        domain: SCHEMA_V1,
+        content: false,
+        cap_activation: true,
+        exact_release: true,
+    },
+    Contract {
+        revision: REV_V8,
+        domain: SCHEMA_V2,
+        content: true,
+        cap_activation: true,
+        exact_release: false,
+    },
 ];
 fn contract(m: &Value) -> Result<Contract, String> {
     let domain = super::store::domain_revision(m)?;
@@ -94,28 +115,44 @@ fn contract(m: &Value) -> Result<Contract, String> {
         None => c.domain == domain && !c.cap_activation && !c.exact_release,
     });
     match found {
-        Some(c) if c.domain == domain => Ok(*c),
+        Some(c)
+            if c.domain == domain
+                && (declared.is_none()
+                    || deployment::is_business(m) == matches!(c.revision, REV_V7 | REV_V8)) =>
+        {
+            Ok(*c)
+        }
         Some(_) => Err("IdentityConflict：财务子合同版本与 E/B 域版本混写".into()),
         None => Err(unsupported_contract()),
     }
 }
 fn unsupported_contract() -> String {
-    "SchemaUnsupported：财务子合同只有 tb03b-finance/1、/2、/3、/4 与 /5".into()
+    "SchemaUnsupported：未登记财务子合同版本".into()
 }
 fn revision(m: &Value) -> Result<&'static str, String> {
     Ok(contract(m)?.revision)
 }
+pub(super) fn bound_revision(m: &Value) -> Result<Option<&'static str>, String> {
+    if deployment::is_business(m) && !m["finance"].is_null() {
+        Ok(Some(revision(m)?))
+    } else {
+        Ok(None)
+    }
+}
+
 const LIMIT: usize = 16 * 1024 * 1024;
 /// #1349 共同资金争用政策的具名 id（ADR 0029 裁定一：整 slot 原子等待）。版本字段与失效/重组归 #1408。
 pub(super) const ALLOCATION_POLICY_ID: &str = "#1349/atomic-slot-wait/v1";
 /// #1716 I1-C（ADR 0049 Q1）：E 当前生效 cap 版本记录。创世版本 1 由冻结原件 `policy` 派生；
-/// 只有 `/3`、`/4` 的显式 `ActivateCapPolicy` 在同一原子点核签署原件与当前责任后整体切换，不提供自动排队激活。
+/// 仅登记支持 cap 激活的 FIN 合同接受显式 `ActivateCapPolicy` 在同一原子点核签署原件与当前责任后整体切换，不提供自动排队激活。
 const CAP_POLICY_REV: &str = "funding-cap-policy/1";
 /// 新 cap 版本的不可变签署原件（ADR 0029 裁定四记录形状的 TestOnly 载体）。
 const CAP_RECORD_REV: &str = "funding-cap-policy-record/1";
 fn cap_activation_contract(config: &Config) -> Result<(), String> {
     if contract(&config.manifest)?.cap_activation {
         Ok(())
+    } else if deployment::is_business(&config.manifest) {
+        Err("SchemaUnsupported：当前 FIN 写合同不支持 cap 激活".into())
     } else {
         Err("SchemaUnsupported：cap 激活只属于 tb03b-finance/3 与 /4；/1、/2 不接受新激活".into())
     }
@@ -173,6 +210,57 @@ fn signed_cap_record(d: &Value, p: &Value, raw: &str, ns: &str) -> Result<Value,
     }
     Ok(r)
 }
+fn verify_cap_original(
+    config: &Config,
+    d: &Value,
+    p: &Value,
+    witness: &Value,
+    ns: &str,
+) -> Result<Value, String> {
+    let raw = required(witness, "cap_policy_raw")?;
+    let split = deployment::is_business(&config.manifest);
+    if split && raw.len() > LIMIT {
+        return Err("InvalidDomain：持久 cap 签署原件超限".into());
+    }
+    let signed = signed_cap_record(d, p, raw, ns)?;
+    if split {
+        // 当前只接受受控 TestOnly 签署证据：固定命名空间 + 正整数票号。
+        let reference = required(&signed, "signature_ref")?;
+        if !reference
+            .strip_prefix("TestOnly-synthetic-signature/#")
+            .is_some_and(|ticket| positive(ticket, "signature ticket").is_ok())
+        {
+            return Err(
+                "InvalidDomain：signature_ref 须为 TestOnly-synthetic-signature/#<票号>".into(),
+            );
+        }
+    }
+    Ok(signed)
+}
+
+/// 跨域证明只读实际历史图像中的 cap 签署原件；不从部署解析器补件。
+pub(super) fn verify_cap_closure(config: &Config, image: &Value) -> Result<(), String> {
+    if !deployment::is_business(&config.manifest) || config.domain != "E" {
+        return Ok(());
+    }
+    for event in list(image, "history")? {
+        if event["kind"] == "ActivateCapPolicy" {
+            cap_activation_contract(config)?;
+            let request = &event["request"];
+            config.authorized(request)?;
+            let payload = &request["payload"];
+            validate_request(config, payload)?;
+            if payload["op"] != "ActivateCapPolicy" {
+                return Err("IdentityConflict：cap 事件未绑定原始激活请求".into());
+            }
+            let witness = &event["witness"];
+            let d = input(config, required(witness, "input_raw")?)?;
+            verify_cap_original(config, &d, payload, witness, required(event, "commit_ns")?)?;
+        }
+    }
+    Ok(())
+}
+
 fn active_cap_policy(config: &Config, image: &Value, d: &Value) -> Result<Value, String> {
     match finance(config, image)?.get("cap_policy") {
         Some(active) if !active.is_null() => Ok(active.clone()),
@@ -204,6 +292,8 @@ pub(super) fn exact_release_selected(m: &Value) -> bool {
 fn exact_release_contract(config: &Config) -> Result<(), String> {
     if contract(&config.manifest)?.exact_release {
         Ok(())
+    } else if deployment::is_business(&config.manifest) {
+        Err("SchemaUnsupported：当前 FIN 写合同不支持精确命令".into())
     } else {
         Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5".into())
     }
@@ -215,23 +305,23 @@ pub(super) fn validate_config(m: &Value) -> Result<(), String> {
     let Some(f) = m.get("finance").filter(|f| !f.is_null()) else {
         return Ok(());
     };
-    // 外层 `economic-manifest/1` 与 finance 顶层 exact 五字段不随版本变化（§5.7 冻结）。
-    exact(
-        f,
-        &[
-            "schema_revision",
-            "input_path",
-            "input_sha256",
-            "coordinator_source",
-            "structure",
-        ],
-    )?;
+    let split = deployment::is_business(m);
+    let mut fields = vec![
+        "schema_revision",
+        "input_sha256",
+        "coordinator_source",
+        "structure",
+    ];
+    if !split {
+        fields.push("input_path");
+    }
+    exact(f, &fields)?;
     let content = contract(m)?.content;
     if m["clock"]["kind"] != "TestOnly" {
         return Err("UnsupportedCapability：仅显式 TestOnly 财务输入域".into());
     }
     digest(required(f, "input_sha256")?)?;
-    if !Path::new(required(f, "input_path")?).is_absolute() {
+    if !split && !Path::new(required(f, "input_path")?).is_absolute() {
         return Err("InvalidDomain：资金原件须绝对路径".into());
     }
     exact(
@@ -243,35 +333,32 @@ pub(super) fn validate_config(m: &Value) -> Result<(), String> {
             "producer_epoch",
         ],
     )?;
-    // structure 的 exact 形状按子合同版本分派：`/1` 六字段逐字保持，`/2` 十字段（#1394 A6 2.4：
-    // 增 `reader_session`；A6-1 不升 `/3`，旧九字段 `/2` manifest 因此被拒）。
-    let structure: &[&str] = if content {
-        &[
-            "binary",
-            "binary_sha256",
-            "db",
-            "session_id",
-            "session_generation",
-            "writer_epoch",
+    if split {
+        deployment::source_identity(&f["coordinator_source"])?;
+    }
+    let mut structure = vec![
+        "binary_sha256",
+        "session_id",
+        "session_generation",
+        "writer_epoch",
+    ];
+    if !split {
+        structure.extend(["binary", "db"]);
+    }
+    if content {
+        structure.extend([
             "reader_revision",
             "content_format",
             "reader_resources",
-            "reader_session",
-        ]
-    } else {
-        &[
-            "binary",
-            "binary_sha256",
-            "db",
-            "session_id",
-            "session_generation",
-            "writer_epoch",
-        ]
-    };
-    exact(&f["structure"], structure)?;
-    for k in ["binary", "db"] {
-        if !Path::new(required(&f["structure"], k)?).is_absolute() {
-            return Err("InvalidDomain：S 固定路径须绝对".into());
+            if split { "reading" } else { "reader_session" },
+        ]);
+    }
+    exact(&f["structure"], &structure)?;
+    if !split {
+        for k in ["binary", "db"] {
+            if !Path::new(required(&f["structure"], k)?).is_absolute() {
+                return Err("InvalidDomain：S 固定路径须绝对".into());
+            }
         }
     }
     digest(required(&f["structure"], "binary_sha256")?)?;
@@ -293,7 +380,16 @@ pub(super) fn validate_config(m: &Value) -> Result<(), String> {
             &f["structure"]["reader_resources"],
         )?;
         // A6 第4节：冻结读法与 `SourcePins::from_structure` 同一判定。
-        super::financial_content::Reading::from_json(&f["structure"]["reader_session"])?;
+        if split {
+            if !matches!(
+                required(&f["structure"], "reading")?,
+                "ColdFragment" | "SessionClosure"
+            ) {
+                return Err("SchemaUnsupported：未知业务结构读法".into());
+            }
+        } else {
+            super::financial_content::Reading::from_json(&f["structure"]["reader_session"])?;
+        }
     }
     Ok(())
 }
@@ -327,10 +423,45 @@ fn item<'a>(a: &'a [Value], k: &str, id: &str) -> Result<&'a Value, String> {
         .ok_or_else(|| format!("MissingDependency：{k}={id} 不存在"))
 }
 fn pinned_raw(config: &Config) -> Result<String, String> {
+    if let Some(d) = &config.deployment {
+        return read_deployed_raw(
+            required(&d["finance"], "input")?,
+            required(&config.manifest["finance"], "input_sha256")?,
+        );
+    }
     original_raw(
         required(&config.manifest["finance"], "input_path")?,
         "财务原件",
     )
+}
+fn read_deployed_raw(path: &str, sha: &str) -> Result<String, String> {
+    String::from_utf8(deployment::read_pinned(path, sha, LIMIT as u64)?).map_err(err)
+}
+fn cap_policy_raw(config: &Config, p: &Value) -> Result<String, String> {
+    let record = &p["policy_record"];
+    if let Some(d) = &config.deployment {
+        let sha = required(record, "sha256")?;
+        let path = d["finance"]["cap_records"][sha]
+            .as_str()
+            .ok_or("MissingDependency：部署未登记该 cap 签署原件摘要")?;
+        return read_deployed_raw(path, sha);
+    }
+    original_raw(required(record, "path")?, "新 cap 签署原件")
+}
+/// 给既有 S 读器装配本机定位；只作为读器参数，不进入任何 witness。
+pub(super) fn deployed_structure(config: &Config) -> Cow<'_, Value> {
+    let business = &config.manifest["finance"]["structure"];
+    let Some(d) = &config.deployment else {
+        return Cow::Borrowed(business);
+    };
+    let mut reader = business.clone();
+    let local = &d["finance"]["s"];
+    reader["binary"] = local["binary"].clone();
+    reader["db"] = local["db"].clone();
+    if reader.as_object_mut().unwrap().remove("reading").is_some() {
+        reader["reader_session"] = local["reader_socket"].clone();
+    }
+    Cow::Owned(reader)
 }
 fn original_raw(path: &str, what: &str) -> Result<String, String> {
     let mut bytes = Vec::new();
@@ -748,7 +879,7 @@ fn key_for(config: &Config, p: &Value) -> Result<String, String> {
 fn key(p: &Value) -> Result<String, String> {
     Ok(receipt_key(required(p, "op")?, operation_id(p)?))
 }
-fn validate_request(p: &Value) -> Result<(), String> {
+fn validate_request(config: &Config, p: &Value) -> Result<(), String> {
     match required(p, "op")? {
         "ImportResponsibility" => exact(p, &["op", "responsibility_id", "writer_epoch"]),
         "PrepareDecision" => exact(p, &["op", "decision_id", "plan_hash", "writer_epoch"]),
@@ -783,9 +914,13 @@ fn validate_request(p: &Value) -> Result<(), String> {
             positive(required(p, "to_version")?, "cap to_version")?;
             nonnegative(required(p, "cap")?, "new cap")?;
             nonnegative(required(p, "valid_through_ns")?, "cap valid_through_ns")?;
-            exact(&p["policy_record"], &["path", "sha256"])?;
-            if !Path::new(required(&p["policy_record"], "path")?).is_absolute() {
-                return Err("InvalidDomain：新 cap 签署原件须绝对路径".into());
+            if deployment::is_business(&config.manifest) {
+                exact(&p["policy_record"], &["sha256"])?;
+            } else {
+                exact(&p["policy_record"], &["path", "sha256"])?;
+                if !Path::new(required(&p["policy_record"], "path")?).is_absolute() {
+                    return Err("InvalidDomain：新 cap 签署原件须绝对路径".into());
+                }
             }
             digest(required(&p["policy_record"], "sha256")?)
         }
@@ -871,21 +1006,7 @@ fn proof_inner(
     Ok(result)
 }
 fn domain_config(config: &Config, domain: &str) -> Result<Config, String> {
-    let mut x = config.clone();
-    let r = if domain == "E" {
-        &config.manifest["e"]
-    } else {
-        config.route(
-            domain
-                .strip_prefix("B:")
-                .ok_or("InvalidDomain：未知经济域")?,
-        )?
-    };
-    x.domain = domain.into();
-    x.producer = format!("{domain}:{}", config.session);
-    x.db = PathBuf::from(required(r, "db")?);
-    x.socket = PathBuf::from(required(r, "socket")?);
-    Ok(x)
+    config.for_domain(domain)
 }
 fn verify_proof(config: &Config, p: &Value, domain: &str) -> Result<(), String> {
     exact(
@@ -944,6 +1065,13 @@ fn verify_proof(config: &Config, p: &Value, domain: &str) -> Result<(), String> 
     {
         return Err("IdentityConflict：当前权威图像证明不符".into());
     }
+    for image in [&p["image"], &p["current_image"]]
+        .into_iter()
+        .take(if cs == seq { 1 } else { 2 })
+    {
+        super::evidence::verify_image_closure(&other, image)?;
+        verify_cap_closure(&other, image)?;
+    }
     let e = list(&p["image"], "history")?
         .last()
         .ok_or("MissingDependency：原提交事件缺失")?;
@@ -955,14 +1083,14 @@ fn verify_proof(config: &Config, p: &Value, domain: &str) -> Result<(), String> 
 // 只读 S 正式入口（只服务 `/1` 子合同；`/2` 由 `write` 的版本门在到达这里之前拒绝）。
 // 输出由 S 自己核完整可达根和当前 Begin 门。
 fn structure(config: &Config) -> Result<Value, String> {
-    let s = &config.manifest["finance"]["structure"];
-    let binary = required(s, "binary")?;
+    let s = deployed_structure(config);
+    let binary = required(&s, "binary")?;
     if sha256_hex(&std::fs::read(binary).map_err(err)?) != s["binary_sha256"] {
         return Err("IdentityConflict：S 构建摘要变化".into());
     }
     let v = super::finance_transport::reader(
         binary,
-        &["financial-basis", "--db", required(s, "db")?],
+        &["financial-basis", "--db", required(&s, "db")?],
         LIMIT,
     )?;
     verify_structure(config, &v, None)?;
@@ -1018,7 +1146,7 @@ fn verify_structure_for_domain(
         )
     };
     super::financial_content::verify_evidence_with_read(
-        &config.manifest["finance"]["structure"],
+        &deployed_structure(config),
         evidence,
         &mut read,
         job,
@@ -1162,7 +1290,7 @@ fn reduce_with_budget(
     budget: &mut super::store::ReadBudget<'_>,
 ) -> Result<(Value, Value), String> {
     let p = &request["payload"];
-    validate_request(p)?;
+    validate_request(config, p)?;
     let op = required(p, "op")?;
     let d = input(config, required(w, "input_raw")?)?;
     // #1716：E 的 Reserve 读当前生效 cap 版本的有效期；激活事件自核新版本有效期，不受旧版本过期挡。
@@ -1492,7 +1620,7 @@ fn reduce_with_budget(
             if positive(required(p, "to_version")?, "cap to_version")? != add(from, 1)? {
                 return Err("IdentityConflict：新 cap 版本须为当前版本+1".into());
             }
-            let signed = signed_cap_record(&d, p, required(w, "cap_policy_raw")?, ns)?;
+            let signed = verify_cap_original(config, &d, p, w, ns)?;
             let commit_ns = nonnegative(ns, "commit_ns")?;
             if nonnegative(required(p, "valid_through_ns")?, "cap valid_through_ns")? < commit_ns {
                 return Err("MissingDependency：新 cap 版本在原子点已过期".into());
@@ -1831,7 +1959,7 @@ pub(super) fn audit_message(
     r: &Value,
     budget: &mut super::store::ReadBudget<'_>,
 ) -> Result<(), String> {
-    validate_request(&request["payload"])?;
+    validate_request(config, &request["payload"])?;
     if r["receipt_key"] != key_for(config, &request["payload"])? {
         return Err("StorageUnavailable：财务消息/回执键不符".into());
     }
@@ -1866,7 +1994,7 @@ pub(super) fn write_with_ingress(
 ) -> Result<Value, String> {
     super::phase_trace::begin();
     let p = &e["payload"];
-    validate_request(p)?;
+    validate_request(config, p)?;
     if p["op"] == "ActivateCapPolicy" {
         cap_activation_contract(config)?;
     }
@@ -1975,10 +2103,7 @@ pub(super) fn write_with_ingress(
             w["structure"] = structure(config)?;
         }
         "ActivateCapPolicy" => {
-            w["cap_policy_raw"] = json!(original_raw(
-                required(&p["policy_record"], "path")?,
-                "新 cap 签署原件"
-            )?);
+            w["cap_policy_raw"] = json!(cap_policy_raw(config, p)?);
         }
         "MakeDispatchable" => {
             let q = plan(&d, p)?;
@@ -2078,10 +2203,7 @@ fn write_v2_inner(
             ));
         }
         "ActivateCapPolicy" => {
-            witness["cap_policy_raw"] = json!(original_raw(
-                required(&p["policy_record"], "path")?,
-                "新 cap 签署原件"
-            )?);
+            witness["cap_policy_raw"] = json!(cap_policy_raw(config, p)?);
             check_operation_deadline(Some(&mut *job), Some(deadline))?;
         }
         "ImportResponsibility" | "AbortDecision" | "CloseApplicants" => (),
@@ -2125,7 +2247,7 @@ fn write_v2_inner(
         Some("PrepareDecision" | "Reserve" | "CommitDecision")
     ) {
         let basis = super::financial_content::read_current(
-            &config.manifest["finance"]["structure"],
+            &deployed_structure(config),
             &object_ids,
             job,
             deadline,
