@@ -431,12 +431,251 @@ pub(super) struct Ledger {
 fn error(e: impl std::fmt::Display) -> String {
     format!("AuditLedgerStale：{e}")
 }
-fn root_value(r: RefView<'_>) -> Value {
-    json!({"format":r.format(), "root":r.root(), "kind":r.kind().name(),
-        "extent":r.extent().map(|n|n.to_string())})
+struct HashWriter(sha2::Sha256);
+
+impl std::io::Write for HashWriter {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest as _;
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
-fn roots_value(roots: &[ContentRef; 4]) -> Value {
-    Value::Array(roots.iter().map(|r| root_value(r.into())).collect())
+
+fn write_json_str(w: &mut impl std::io::Write, text: &str) -> Result<(), String> {
+    serde_json::to_writer(&mut *w, text).map_err(error)
+}
+
+fn write_u8_array(w: &mut impl std::io::Write, bytes: &[u8; 32]) -> Result<(), String> {
+    let mut buf = [0u8; 130];
+    let mut pos = 0usize;
+    buf[pos] = b'[';
+    pos += 1;
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 {
+            buf[pos] = b',';
+            pos += 1;
+        }
+        if b >= 100 {
+            buf[pos] = b'0' + (b / 100);
+            buf[pos + 1] = b'0' + ((b / 10) % 10);
+            buf[pos + 2] = b'0' + (b % 10);
+            pos += 3;
+        } else if b >= 10 {
+            buf[pos] = b'0' + (b / 10);
+            buf[pos + 1] = b'0' + (b % 10);
+            pos += 2;
+        } else {
+            buf[pos] = b'0' + b;
+            pos += 1;
+        }
+    }
+    buf[pos] = b']';
+    pos += 1;
+    w.write_all(&buf[..pos]).map_err(error)
+}
+
+fn write_i64_decimal(w: &mut impl std::io::Write, value: i64) -> Result<(), String> {
+    let mut buf = [0u8; 24];
+    let mut pos = buf.len();
+    let neg = value < 0;
+    let mut n = value.unsigned_abs();
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    if neg {
+        pos -= 1;
+        buf[pos] = b'-';
+    }
+    w.write_all(&buf[pos..]).map_err(error)
+}
+
+fn write_unit_json(w: &mut impl std::io::Write, unit: &Unit) -> Result<(), String> {
+    w.write_all(b"{\"digest\":").map_err(error)?;
+    write_u8_array(w, &unit.digest)?;
+    let flavor = match unit.flavor {
+        Flavor::Value => ",\"flavor\":\"Value\"",
+        Flavor::JsonInner => ",\"flavor\":\"JsonInner\"",
+    };
+    let mode = match unit.mode {
+        Mode::Public => ",\"mode\":\"Public\"}",
+        Mode::Template => ",\"mode\":\"Template\"}",
+    };
+    w.write_all(flavor.as_bytes()).map_err(error)?;
+    w.write_all(mode.as_bytes()).map_err(error)
+}
+
+fn write_raw_fact_json(w: &mut impl std::io::Write, row: &RawFact) -> Result<(), String> {
+    w.write_all(b"{\"bar_digest\":").map_err(error)?;
+    write_u8_array(w, &row.bar_digest)?;
+    w.write_all(b",\"event_digest\":").map_err(error)?;
+    write_u8_array(w, &row.event_digest)?;
+    w.write_all(b"}").map_err(error)
+}
+
+fn write_object_fact_json(w: &mut impl std::io::Write, row: &ObjectFact) -> Result<(), String> {
+    w.write_all(b"{\"first_cut\":").map_err(error)?;
+    write_json_str(w, &row.first_cut)?;
+    w.write_all(b",\"first_generation\":").map_err(error)?;
+    write_i64_decimal(w, row.first_generation)?;
+    w.write_all(b",\"published_generation\":").map_err(error)?;
+    write_i64_decimal(w, row.published_generation)?;
+    w.write_all(b",\"record_digest\":").map_err(error)?;
+    write_u8_array(w, &row.record_digest)?;
+    w.write_all(b",\"source_digest\":").map_err(error)?;
+    write_u8_array(w, &row.source_digest)?;
+    w.write_all(if row.withdrawn {
+        b",\"withdrawn\":true}"
+    } else {
+        b",\"withdrawn\":false}"
+    })
+    .map_err(error)
+}
+
+fn write_related_fact_json(w: &mut impl std::io::Write, row: &RelatedFact) -> Result<(), String> {
+    w.write_all(b"{\"record_digest\":").map_err(error)?;
+    write_u8_array(w, &row.record_digest)?;
+    w.write_all(b",\"source_digest\":").map_err(error)?;
+    write_u8_array(w, &row.source_digest)?;
+    w.write_all(b"}").map_err(error)
+}
+
+fn write_cover_change_json(
+    w: &mut impl std::io::Write,
+    change: &CoverChange,
+) -> Result<(), String> {
+    match change {
+        CoverChange::Group { seq, object_id } => {
+            w.write_all(b"{\"Group\":{\"object_id\":").map_err(error)?;
+            write_json_str(w, object_id)?;
+            w.write_all(b",\"seq\":").map_err(error)?;
+            write_i64_decimal(w, *seq)?;
+            w.write_all(b"}}").map_err(error)
+        }
+        CoverChange::Pending { seq } => {
+            w.write_all(b"{\"Pending\":{\"seq\":").map_err(error)?;
+            write_i64_decimal(w, *seq)?;
+            w.write_all(b"}}").map_err(error)
+        }
+        CoverChange::Removed => w.write_all(b"\"Removed\"").map_err(error),
+    }
+}
+
+fn write_i64_map_json<V>(
+    w: &mut impl std::io::Write,
+    map: &BTreeMap<i64, V>,
+    mut write_val: impl FnMut(&mut dyn std::io::Write, &V) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut entries: Vec<(String, &V)> = map.iter().map(|(k, v)| (k.to_string(), v)).collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    w.write_all(b"{").map_err(error)?;
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            w.write_all(b",").map_err(error)?;
+        }
+        write_json_str(w, k)?;
+        w.write_all(b":").map_err(error)?;
+        write_val(w, v)?;
+    }
+    w.write_all(b"}").map_err(error)
+}
+
+fn write_str_map_json<V>(
+    w: &mut impl std::io::Write,
+    map: &BTreeMap<String, V>,
+    mut write_val: impl FnMut(&mut dyn std::io::Write, &V) -> Result<(), String>,
+) -> Result<(), String> {
+    w.write_all(b"{").map_err(error)?;
+    for (i, (k, v)) in map.iter().enumerate() {
+        if i > 0 {
+            w.write_all(b",").map_err(error)?;
+        }
+        write_json_str(w, k)?;
+        w.write_all(b":").map_err(error)?;
+        write_val(w, v)?;
+    }
+    w.write_all(b"}").map_err(error)
+}
+
+fn stream_stage_digests<'u>(
+    previous: &str,
+    d: &GenerationDelta,
+    verifier_revision: &str,
+    new_units: impl Iterator<Item = &'u Unit>,
+) -> Result<(String, String, usize, String), String> {
+    use sha2::Digest as _;
+    use std::io::Write as _;
+    let mut roots_json = String::with_capacity(Qualification::ROOTS_BOUND);
+    roots_json_into(&mut roots_json, d.roots.each_ref().map(Into::into))?;
+    let mut units_buf = Vec::new();
+    let mut unit_count = 0usize;
+    units_buf.push(b'[');
+    for unit in new_units {
+        if unit_count > 0 {
+            units_buf.push(b',');
+        }
+        write_unit_json(&mut units_buf, unit)?;
+        unit_count += 1;
+    }
+    units_buf.push(b']');
+    let units_digest = sha256_hex(&units_buf);
+
+    let mut hw = HashWriter(sha2::Sha256::new());
+    hw.write_all(b"[").map_err(error)?;
+    write_json_str(&mut hw, previous)?;
+    hw.write_all(b",{\"cover\":").map_err(error)?;
+    write_i64_map_json(&mut hw, &d.cover, |mut w, v| {
+        write_cover_change_json(&mut w, v)
+    })?;
+    hw.write_all(b",\"effective\":").map_err(error)?;
+    write_i64_decimal(&mut hw, d.effective)?;
+    hw.write_all(b",\"generation\":").map_err(error)?;
+    write_i64_decimal(&mut hw, d.generation)?;
+    hw.write_all(b",\"new_units\":").map_err(error)?;
+    hw.write_all(&units_buf).map_err(error)?;
+    hw.write_all(b",\"objects\":").map_err(error)?;
+    write_str_map_json(&mut hw, &d.objects, |mut w, v| {
+        write_object_fact_json(&mut w, v)
+    })?;
+    hw.write_all(b",\"observations\":").map_err(error)?;
+    write_str_map_json(&mut hw, &d.observations, |mut w, v| {
+        write_related_fact_json(&mut w, v)
+    })?;
+    hw.write_all(b",\"raw\":").map_err(error)?;
+    write_i64_map_json(&mut hw, &d.raw, |mut w, v| write_raw_fact_json(&mut w, v))?;
+    hw.write_all(b",\"roots\":").map_err(error)?;
+    hw.write_all(roots_json.as_bytes()).map_err(error)?;
+    hw.write_all(b",\"verifier_revision\":").map_err(error)?;
+    write_json_str(&mut hw, verifier_revision)?;
+    hw.write_all(b",\"withdrawals\":[").map_err(error)?;
+    for (i, id) in d.withdrawals.iter().enumerate() {
+        if i > 0 {
+            hw.write_all(b",").map_err(error)?;
+        }
+        write_json_str(&mut hw, id)?;
+    }
+    hw.write_all(b"],\"witnesses\":").map_err(error)?;
+    write_str_map_json(&mut hw, &d.witnesses, |mut w, v| {
+        write_related_fact_json(&mut w, v)
+    })?;
+    hw.write_all(b"}]").map_err(error)?;
+    let digest = hw.0.finalize();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut fold = String::with_capacity(64);
+    for b in digest {
+        fold.push(HEX[(b >> 4) as usize] as char);
+        fold.push(HEX[(b & 0xf) as usize] as char);
+    }
+    Ok((roots_json, units_digest, unit_count, fold))
 }
 fn file_bytes(path: &Path) -> Result<u64, String> {
     match std::fs::metadata(path) {
@@ -603,31 +842,32 @@ impl Ledger {
             return Err(error("完整台账尚无已提交的一代"));
         }
         let conn = self.connection.as_ref().unwrap();
-        conn.query_row(
-            "SELECT c.roots, c.fold_digest, c.verifier_revision, m.fold_digest, m.content_identity, \
-             m.binary_commit, m.rule_revision FROM cert c, meta m WHERE c.generation=?1 AND m.singleton=1",
-            [through],
-            |r| {
-                let text = |i: usize| r.get_ref(i)?.as_str().map_err(rusqlite::Error::from);
-                let fold_digest = text(1)?;
-                if text(3)? != fold_digest {
-                    return Ok(Err(error("完整水位与末代 cert 折叠摘要不一致")));
-                }
-                let rule_revision = text(6)?;
-                if rule_revision != self.rule_revision {
-                    return Ok(Err(error("台账持久规则与安装规则不一致")));
-                }
-                Ok(f(&QualificationView {
-                    through,
-                    roots: text(0)?,
-                    fold_digest,
-                    verifier_revision: text(2)?,
-                    rule_revision,
-                    content_identity: text(4)?,
-                    binary_commit: text(5)?,
-                }))
-            },
-        )
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT c.roots, c.fold_digest, c.verifier_revision, m.fold_digest, m.content_identity, \
+                 m.binary_commit, m.rule_revision FROM cert c, meta m WHERE c.generation=?1 AND m.singleton=1",
+            )
+            .map_err(error)?;
+        stmt.query_row([through], |r| {
+            let text = |i: usize| r.get_ref(i)?.as_str().map_err(rusqlite::Error::from);
+            let fold_digest = text(1)?;
+            if text(3)? != fold_digest {
+                return Ok(Err(error("完整水位与末代 cert 折叠摘要不一致")));
+            }
+            let rule_revision = text(6)?;
+            if rule_revision != self.rule_revision {
+                return Ok(Err(error("台账持久规则与安装规则不一致")));
+            }
+            Ok(f(&QualificationView {
+                through,
+                roots: text(0)?,
+                fold_digest,
+                verifier_revision: text(2)?,
+                rule_revision,
+                content_identity: text(4)?,
+                binary_commit: text(5)?,
+            }))
+        })
         .map_err(error)?
     }
     /// H1 的私有点查资格：绑定已提交完整水位、四根、规则、verifier 与内容库身份。
@@ -653,10 +893,26 @@ impl Ledger {
         q: &Qualification,
         unit: &Unit,
     ) -> Result<bool, String> {
-        if !self.matches_committed(q)? {
+        let matched_through = self.with_committed_qualification(|v| {
+            Ok(if q.matches(v) { Some(v.through) } else { None })
+        })?;
+        let Some(through) = matched_through else {
             return Err(error("点查资格与当前已提交台账不符"));
-        }
-        self.contains_committed_unit(unit)
+        };
+        let conn = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| error("台账已丢弃"))?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM node WHERE digest=?1 AND flavor=?2 AND mode=?3 AND first_generation<=?4)",
+            )
+            .map_err(error)?;
+        stmt.query_row(
+            params![unit.digest.as_slice(), unit.flavor(), unit.mode(), through],
+            |r| r.get(0),
+        )
+        .map_err(error)
     }
     #[cfg(feature = "s_incremental")]
     pub(super) fn raw_partition_through(&self) -> Result<i64, String> {
@@ -680,15 +936,14 @@ impl Ledger {
         drop(self.connection.take());
     }
     pub(super) fn through(&self) -> Result<i64, String> {
-        self.connection
+        let conn = self
+            .connection
             .as_ref()
-            .ok_or_else(|| error("台账已丢弃"))?
-            .query_row(
-                "SELECT certified_through_generation FROM meta WHERE singleton=1",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(error)
+            .ok_or_else(|| error("台账已丢弃"))?;
+        let mut stmt = conn
+            .prepare_cached("SELECT certified_through_generation FROM meta WHERE singleton=1")
+            .map_err(error)?;
+        stmt.query_row([], |r| r.get(0)).map_err(error)
     }
     /// 已提交存储读数，不是 U-A 资格；准备中连本连接的未提交行也不暴露。
     pub(super) fn committed_through(&self) -> Result<i64, String> {
@@ -699,10 +954,20 @@ impl Ledger {
     }
     pub(super) fn contains_committed_unit(&self, unit: &Unit) -> Result<bool, String> {
         let through = self.committed_through()?;
-        self.connection.as_ref().ok_or_else(||error("台账已丢弃"))?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node WHERE digest=?1 AND flavor=?2 AND mode=?3 AND first_generation<=?4)",
-            params![unit.digest.as_slice(), unit.flavor(), unit.mode(), through], |r|r.get(0),
-        ).map_err(error)
+        let conn = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| error("台账已丢弃"))?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM node WHERE digest=?1 AND flavor=?2 AND mode=?3 AND first_generation<=?4)",
+            )
+            .map_err(error)?;
+        stmt.query_row(
+            params![unit.digest.as_slice(), unit.flavor(), unit.mode(), through],
+            |r| r.get(0),
+        )
+        .map_err(error)
     }
     pub(super) fn stage(&mut self, token: &str, delta: &GenerationDelta) -> Result<(), String> {
         let result = self.stage_inner(
@@ -729,7 +994,7 @@ impl Ledger {
         prior: Option<&Qualification>,
     ) -> Result<(), String> {
         let result = (|| {
-            self.committed_through()?;
+            let through = self.committed_through()?;
             if !verified
                 .matches_roots(delta.roots.each_ref().map(Into::into))
                 .map_err(error)?
@@ -737,29 +1002,46 @@ impl Ledger {
                 return Err(error("闭包单位与待准备事实四根不匹配"));
             }
             let mut units = sc::CodecVec::default();
-            verified.try_for_each_unit(|u| -> Result<(), String> {
-                use sc::closure_delta::{Context, VerificationMode};
-                let unit = Unit {
-                    digest: u.digest,
-                    flavor: match u.context {
-                        Context::Value => Flavor::Value,
-                        Context::JsonInner => Flavor::JsonInner,
-                    },
-                    mode: match u.mode {
-                        VerificationMode::Public => Mode::Public,
-                        VerificationMode::Template => Mode::Template,
-                    },
-                };
-                if !self.contains_committed_unit(&unit)? {
-                    match work {
-                        Some(work) => units.try_reserve_native(work, 1),
-                        None => units.try_reserve(1),
-                    }
+            {
+                let conn = self
+                    .connection
+                    .as_ref()
+                    .ok_or_else(|| error("台账已丢弃"))?;
+                let mut exists_stmt = conn
+                    .prepare_cached(
+                        "SELECT EXISTS(SELECT 1 FROM node WHERE digest=?1 AND flavor=?2 AND mode=?3 AND first_generation<=?4)",
+                    )
                     .map_err(error)?;
-                    units.try_push(unit).map_err(error)?;
-                }
-                Ok(())
-            })?;
+                verified.try_for_each_unit(|u| -> Result<(), String> {
+                    use sc::closure_delta::{Context, VerificationMode};
+                    let unit = Unit {
+                        digest: u.digest,
+                        flavor: match u.context {
+                            Context::Value => Flavor::Value,
+                            Context::JsonInner => Flavor::JsonInner,
+                        },
+                        mode: match u.mode {
+                            VerificationMode::Public => Mode::Public,
+                            VerificationMode::Template => Mode::Template,
+                        },
+                    };
+                    let exists: bool = exists_stmt
+                        .query_row(
+                            params![unit.digest.as_slice(), unit.flavor(), unit.mode(), through],
+                            |r| r.get(0),
+                        )
+                        .map_err(error)?;
+                    if !exists {
+                        match work {
+                            Some(work) => units.try_reserve_native(work, 1),
+                            None => units.try_reserve(1),
+                        }
+                        .map_err(error)?;
+                        units.try_push(unit).map_err(error)?;
+                    }
+                    Ok(())
+                })?;
+            }
             units.sort_unstable();
             self.stage_inner(
                 token,
@@ -817,90 +1099,144 @@ impl Ledger {
         let mut next: i64 = conn
             .query_row("SELECT COALESCE(MAX(seq),-1)+1 FROM raw", [], |r| r.get(0))
             .map_err(error)?;
-        for (seq, row) in &d.raw {
-            if *seq != next {
-                return Err(error("raw 只允许连续追加"));
-            }
-            conn.execute(
-                "INSERT INTO raw VALUES(?1,?2,?3,?4)",
-                params![
+        if !d.raw.is_empty() {
+            let mut stmt = conn
+                .prepare_cached("INSERT INTO raw VALUES(?1,?2,?3,?4)")
+                .map_err(error)?;
+            for (seq, row) in &d.raw {
+                if *seq != next {
+                    return Err(error("raw 只允许连续追加"));
+                }
+                stmt.execute(params![
                     seq,
                     row.event_digest.as_slice(),
                     row.bar_digest.as_slice(),
                     d.generation
-                ],
-            )
-            .map_err(error)?;
-            next = next.checked_add(1).ok_or_else(|| error("raw 序号溢出"))?;
-        }
-        for (id, r) in &d.objects {
-            if r.first_generation < 1
-                || r.first_generation > r.published_generation
-                || r.published_generation > d.generation
-            {
-                return Err(error("对象代戳无效"));
+                ])
+                .map_err(error)?;
+                next = next.checked_add(1).ok_or_else(|| error("raw 序号溢出"))?;
             }
-            conn.execute("INSERT INTO object VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+        }
+        if !d.objects.is_empty() {
+            let mut stmt = conn
+                .prepare_cached(
+                    "INSERT INTO object VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
                 ON CONFLICT(id) DO UPDATE SET record_digest=excluded.record_digest,
                 first_generation=excluded.first_generation, first_cut=excluded.first_cut,
                 published_generation=excluded.published_generation, source_digest=excluded.source_digest,
                 withdrawn=excluded.withdrawn, certified_generation=excluded.certified_generation",
-                params![id,r.record_digest.as_slice(),r.first_generation,r.first_cut,
-                    r.published_generation,r.source_digest.as_slice(),r.withdrawn,d.generation]).map_err(error)?;
-        }
-        for (table, rows) in [("witness", &d.witnesses), ("observation", &d.observations)] {
-            for (id, r) in rows {
-                conn.execute(&format!("INSERT INTO {table} VALUES(?1,?2,?3,?4)
-                    ON CONFLICT(id) DO UPDATE SET record_digest=excluded.record_digest,
-                    source_digest=excluded.source_digest, certified_generation=excluded.certified_generation"),
-                    params![id,r.record_digest.as_slice(),r.source_digest.as_slice(),d.generation]).map_err(error)?;
-            }
-        }
-        for id in &d.withdrawals {
-            let changed = conn
-                .execute(
-                    "UPDATE object SET withdrawn=1,certified_generation=?1 WHERE id=?2 AND withdrawn=0",
-                    params![d.generation, id],
                 )
                 .map_err(error)?;
-            if changed != 1 {
-                return Err(error("撤回身份缺失或已撤回"));
+            for (id, r) in &d.objects {
+                if r.first_generation < 1
+                    || r.first_generation > r.published_generation
+                    || r.published_generation > d.generation
+                {
+                    return Err(error("对象代戳无效"));
+                }
+                stmt.execute(params![
+                    id,
+                    r.record_digest.as_slice(),
+                    r.first_generation,
+                    r.first_cut,
+                    r.published_generation,
+                    r.source_digest.as_slice(),
+                    r.withdrawn,
+                    d.generation
+                ])
+                .map_err(error)?;
             }
         }
-        for (coord, change) in &d.cover {
-            match change {
-                CoverChange::Removed => {
-                    if conn
-                        .execute("DELETE FROM cover WHERE source_coord=?1", [coord])
-                        .map_err(error)?
-                        != 1
-                    {
-                        return Err(error("cover 失效坐标不在当前分区"));
+        if !d.witnesses.is_empty() {
+            let mut stmt = conn
+                .prepare_cached(
+                    "INSERT INTO witness VALUES(?1,?2,?3,?4)
+                    ON CONFLICT(id) DO UPDATE SET record_digest=excluded.record_digest,
+                    source_digest=excluded.source_digest, certified_generation=excluded.certified_generation",
+                )
+                .map_err(error)?;
+            for (id, r) in &d.witnesses {
+                stmt.execute(params![
+                    id,
+                    r.record_digest.as_slice(),
+                    r.source_digest.as_slice(),
+                    d.generation
+                ])
+                .map_err(error)?;
+            }
+        }
+        if !d.observations.is_empty() {
+            let mut stmt = conn
+                .prepare_cached(
+                    "INSERT INTO observation VALUES(?1,?2,?3,?4)
+                    ON CONFLICT(id) DO UPDATE SET record_digest=excluded.record_digest,
+                    source_digest=excluded.source_digest, certified_generation=excluded.certified_generation",
+                )
+                .map_err(error)?;
+            for (id, r) in &d.observations {
+                stmt.execute(params![
+                    id,
+                    r.record_digest.as_slice(),
+                    r.source_digest.as_slice(),
+                    d.generation
+                ])
+                .map_err(error)?;
+            }
+        }
+        if !d.withdrawals.is_empty() {
+            let mut stmt = conn
+                .prepare_cached(
+                    "UPDATE object SET withdrawn=1,certified_generation=?1 WHERE id=?2 AND withdrawn=0",
+                )
+                .map_err(error)?;
+            for id in &d.withdrawals {
+                let changed = stmt.execute(params![d.generation, id]).map_err(error)?;
+                if changed != 1 {
+                    return Err(error("撤回身份缺失或已撤回"));
+                }
+            }
+        }
+        if !d.cover.is_empty() {
+            let mut del_stmt = conn
+                .prepare_cached("DELETE FROM cover WHERE source_coord=?1")
+                .map_err(error)?;
+            let mut group_stmt = conn
+                .prepare_cached(
+                    "INSERT INTO cover VALUES(?1,?2,'group',?3,?4) ON CONFLICT(source_coord) DO UPDATE SET
+                         seq=excluded.seq, owner=excluded.owner, object_id=excluded.object_id,
+                         certified_generation=excluded.certified_generation
+                         WHERE seq IS NOT excluded.seq OR owner IS NOT excluded.owner
+                         OR object_id IS NOT excluded.object_id",
+                )
+                .map_err(error)?;
+            let mut pending_stmt = conn
+                .prepare_cached(
+                    "INSERT INTO cover VALUES(?1,?2,'pending',NULL,?3) ON CONFLICT(source_coord) DO UPDATE SET
+                         seq=excluded.seq, owner=excluded.owner, object_id=excluded.object_id,
+                         certified_generation=excluded.certified_generation
+                         WHERE seq IS NOT excluded.seq OR owner IS NOT excluded.owner
+                         OR object_id IS NOT excluded.object_id",
+                )
+                .map_err(error)?;
+            for (coord, change) in &d.cover {
+                match change {
+                    CoverChange::Removed => {
+                        if del_stmt.execute([coord]).map_err(error)? != 1 {
+                            return Err(error("cover 失效坐标不在当前分区"));
+                        }
                     }
-                }
-                // 行只在 (seq, owner, object_id) 变化时推进 certified_generation：Native 增量只列
-                // 触及坐标、完整原件导出列整份分区，同一内容在两条路径上必须落出同一行。
-                CoverChange::Group { seq, object_id } => {
-                    conn.execute(
-                        "INSERT INTO cover VALUES(?1,?2,'group',?3,?4) ON CONFLICT(source_coord) DO UPDATE SET
-                         seq=excluded.seq, owner=excluded.owner, object_id=excluded.object_id,
-                         certified_generation=excluded.certified_generation
-                         WHERE seq IS NOT excluded.seq OR owner IS NOT excluded.owner
-                         OR object_id IS NOT excluded.object_id",
-                        params![coord, seq, object_id, d.generation],
-                    )
-                    .map_err(error)?;
-                }
-                CoverChange::Pending { seq } => {
-                    conn.execute(
-                        "INSERT INTO cover VALUES(?1,?2,'pending',NULL,?3) ON CONFLICT(source_coord) DO UPDATE SET
-                         seq=excluded.seq, owner=excluded.owner, object_id=excluded.object_id,
-                         certified_generation=excluded.certified_generation
-                         WHERE seq IS NOT excluded.seq OR owner IS NOT excluded.owner
-                         OR object_id IS NOT excluded.object_id",
-                        params![coord, seq, d.generation],
-                    )
-                    .map_err(error)?;
+                    // 行只在 (seq, owner, object_id) 变化时推进 certified_generation：Native 增量只列
+                    // 触及坐标、完整原件导出列整份分区，同一内容在两条路径上必须落出同一行。
+                    CoverChange::Group { seq, object_id } => {
+                        group_stmt
+                            .execute(params![coord, seq, object_id, d.generation])
+                            .map_err(error)?;
+                    }
+                    CoverChange::Pending { seq } => {
+                        pending_stmt
+                            .execute(params![coord, seq, d.generation])
+                            .map_err(error)?;
+                    }
                 }
             }
         }
@@ -910,38 +1246,30 @@ impl Ledger {
         if covered != d.effective {
             return Err(error("cover 行数不等于本 cut 生效坐标总数"));
         }
-        for unit in new_units.clone() {
-            // new_units 必须真是本代新增集合，重复认证单位拒绝而非静默忽略。
-            conn.execute(
-                "INSERT INTO node VALUES(?1,?2,?3,?4)",
-                params![
-                    unit.digest.as_slice(),
-                    unit.flavor(),
-                    unit.mode(),
-                    d.generation
-                ],
-            )
-            .map_err(error)?;
+        {
+            let mut node_stmt = conn
+                .prepare_cached("INSERT INTO node VALUES(?1,?2,?3,?4)")
+                .map_err(error)?;
+            for unit in new_units.clone() {
+                // new_units 必须真是本代新增集合，重复认证单位拒绝而非静默忽略。
+                node_stmt
+                    .execute(params![
+                        unit.digest.as_slice(),
+                        unit.flavor(),
+                        unit.mode(),
+                        d.generation
+                    ])
+                    .map_err(error)?;
+            }
         }
-        let roots = roots_value(&d.roots);
-        let unit_count = new_units.clone().count();
-        let unit_values = Value::Array(
-            new_units
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(error)?,
-        );
-        let units = canonical_json(&unit_values);
-        let delta = json!({"generation":d.generation,"roots":roots,"verifier_revision":verifier_revision,
-            "raw":d.raw,"objects":d.objects,"witnesses":d.witnesses,"observations":d.observations,
-            "withdrawals":d.withdrawals,"cover":d.cover,"effective":d.effective,"new_units":unit_values});
-        let fold = sha256_hex(canonical_json(&json!([previous, delta])).as_bytes());
+        let (roots_json, units_digest, unit_count, fold) =
+            stream_stage_digests(&previous, d, verifier_revision, new_units)?;
         conn.execute(
             "INSERT INTO cert VALUES(?1,?2,?3,?4,?5,?6)",
             params![
                 d.generation,
-                canonical_json(&roots),
-                sha256_hex(units.as_bytes()),
+                roots_json,
+                units_digest,
                 i64::try_from(unit_count).map_err(error)?,
                 fold,
                 verifier_revision
@@ -1667,5 +1995,91 @@ pub(super) mod tests {
         )
         .is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn streamed_stage_digests_match_canonical_json_value_oracle_byte_for_byte() {
+        let (_, _, _, m, r) = prepared::tests::p6_candidate();
+        let mut d = delta(&m, &r);
+        d.raw.insert(
+            10,
+            RawFact {
+                event_digest: [
+                    0, 9, 10, 99, 100, 255, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                    17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+                ],
+                bar_digest: [255; 32],
+            },
+        );
+        d.raw.insert(
+            2,
+            RawFact {
+                event_digest: [1; 32],
+                bar_digest: [0; 32],
+            },
+        );
+        d.cover.insert(10, CoverChange::Pending { seq: 10 });
+        d.cover.insert(
+            2,
+            CoverChange::Group {
+                seq: 2,
+                object_id: "obj-\"quote\"\\slash\nline".into(),
+            },
+        );
+        d.cover.insert(3, CoverChange::Removed);
+        d.withdrawals.insert("w-1".into());
+        d.withdrawals.insert("w-2".into());
+        d.objects.insert(
+            "obj-\"b\"".into(),
+            ObjectFact {
+                record_digest: [42; 32],
+                first_generation: 1,
+                first_cut: "cut-\"1\"".into(),
+                published_generation: 1,
+                source_digest: [7; 32],
+                withdrawn: true,
+            },
+        );
+        let previous = "prev-\"digest\"\\1";
+        let verifier_revision = "rev/1";
+        let (roots_json, units_digest, unit_count, fold) =
+            stream_stage_digests(previous, &d, verifier_revision, d.new_units.iter()).unwrap();
+
+        let root_val = |rv: RefView<'_>| {
+            json!({
+                "format": rv.format(),
+                "root": rv.root(),
+                "kind": rv.kind().name(),
+                "extent": rv.extent().map(|n| n.to_string()),
+            })
+        };
+        let roots = Value::Array(d.roots.iter().map(|rv| root_val(rv.into())).collect());
+        let unit_values = Value::Array(
+            d.new_units
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+        );
+        let expected_units = canonical_json(&unit_values);
+        let expected_delta = json!({
+            "generation": d.generation,
+            "roots": roots,
+            "verifier_revision": verifier_revision,
+            "raw": d.raw,
+            "objects": d.objects,
+            "witnesses": d.witnesses,
+            "observations": d.observations,
+            "withdrawals": d.withdrawals,
+            "cover": d.cover,
+            "effective": d.effective,
+            "new_units": unit_values,
+        });
+        let expected_fold =
+            sha256_hex(canonical_json(&json!([previous, expected_delta])).as_bytes());
+        assert_eq!(roots_json, canonical_json(&roots));
+        assert_eq!(units_digest, sha256_hex(expected_units.as_bytes()));
+        assert_eq!(unit_count, d.new_units.len());
+        assert_eq!(fold, expected_fold);
     }
 }
