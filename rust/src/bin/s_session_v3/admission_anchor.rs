@@ -5,6 +5,7 @@
 //! 原时刻与实际前导读取在实测 Existing 后一次性回灌，provider 只能借记账门面。
 //! 同步系统调用只有前后期限门，不承诺可中断 I/O，也不证明 SQLite pathname 连续性。
 
+use super::admission::DomainLocks;
 use newchan_rust::s_content::job::JobLimits;
 use newchan_rust::session_protocol::{sha256_hex, strict_json};
 use serde_json::{Map, Value};
@@ -543,6 +544,12 @@ impl PreparedAdmission {
     }
 }
 
+/// 版本来自调用方冻结配置，摘要只能来自本次钉住的原锚，不能从 CLI 或恢复请求代填。
+pub(super) struct NamedContract<'a> {
+    pub(super) version: &'a str,
+    pub(super) registry: &'a issuance::Contract<'a>,
+}
+
 impl ConsumedAdmission {
     pub(crate) fn limits(&self) -> JobLimits {
         self.limits
@@ -635,6 +642,8 @@ struct TerminalState {
 }
 thread_local! {
     static TERMINAL: RefCell<Option<TerminalState>> = const { RefCell::new(None) };
+    // 独立于普通/mixed Job 元数据；具名 serve 完成启动账后仍保有这个命令守卫。
+    static NAMED_LOCKS: RefCell<Option<Rc<super::admission::DomainLockPair>>> = const { RefCell::new(None) };
 }
 pub(crate) struct CommandAccounting;
 #[derive(Debug)]
@@ -679,10 +688,24 @@ impl CommandAccounting {
         });
         Self
     }
+    pub(super) fn retain_named_locks(locks: &Rc<super::admission::DomainLockPair>) {
+        TERMINAL.with(|slot| {
+            if slot.borrow().is_some() {
+                NAMED_LOCKS.with(|held| {
+                    let mut held = held.borrow_mut();
+                    assert!(held.is_none(), "nested named recovery locks");
+                    *held = Some(Rc::clone(locks));
+                });
+            }
+        });
+    }
+
     /// 最后错误 sink 是已停止 Job 的清理输出，不能用 pre_io_check 丢掉诊断。
     /// 每次实际 write 返回 n 后调用原 charge；原 stopped 拒收量另记，不改首错/续期。
     /// 返回收据不再次输出，避免按日志长度虚造自引用计数。
     pub(crate) fn report(&self, error: &str, sink: &mut impl io::Write) -> TerminalReceipt {
+        // 即使 SQLite 已关闭、准入作用域已返回，守卫也要跨过最后一次 stderr write 和 Job 收尾。
+        let _named_locks = NAMED_LOCKS.with(|slot| slot.borrow_mut().take());
         let state = TERMINAL
             .with(|slot| slot.borrow_mut().take())
             .unwrap_or_default();
@@ -765,6 +788,9 @@ impl CommandAccounting {
 impl Drop for CommandAccounting {
     fn drop(&mut self) {
         TERMINAL.with(|slot| {
+            slot.borrow_mut().take();
+        });
+        NAMED_LOCKS.with(|slot| {
             slot.borrow_mut().take();
         });
     }
@@ -1241,6 +1267,24 @@ pub(crate) fn from_args_for_db(
     args: &[String],
     env: ControlEnv,
 ) -> Result<PreparedAdmission, AdmissionError> {
+    let mut prepared = load_for_db(db, &limits_arg(args)?, env)?;
+    wait_serve_gate(args, &mut prepared)?;
+    Ok(prepared)
+}
+
+pub(super) fn from_args_for_named_db(
+    db: &Path,
+    args: &[String],
+    env: ControlEnv,
+    contract: NamedContract<'_>,
+) -> Result<(PreparedAdmission, DomainLocks), String> {
+    let path = limits_arg(args).map_err(|e| e.to_string())?;
+    let (mut prepared, locks) = load_named_for_db(db, &path, env, contract)?;
+    wait_serve_gate(args, &mut prepared).map_err(|e| e.to_string())?;
+    Ok((prepared, locks))
+}
+
+fn limits_arg(args: &[String]) -> Result<PathBuf, AdmissionError> {
     let prelude = ControlPrelude::new();
     let mut path = None;
     for (index, arg) in args.iter().enumerate() {
@@ -1258,8 +1302,13 @@ pub(crate) fn from_args_for_db(
             return Err(prelude.error(ErrorKind::ResourcesInvalid, Stage::E0));
         }
     }
-    let path = path.ok_or_else(|| prelude.error(ErrorKind::ResourcesMissing, Stage::E0))?;
-    let mut prepared = load_for_db(db, &path, env)?;
+    path.ok_or_else(|| prelude.error(ErrorKind::ResourcesMissing, Stage::E0))
+}
+
+fn wait_serve_gate(
+    args: &[String],
+    prepared: &mut PreparedAdmission,
+) -> Result<(), AdmissionError> {
     // #1527：独立 CLI 不要求 launcher 握手；托管 serve 等父进程登记完成。
     if args.get(1).is_some_and(|arg| arg == "serve") {
         if let Some(marker) = std::env::var_os("S_CONTROL_START_GATE") {
@@ -1271,15 +1320,90 @@ pub(crate) fn from_args_for_db(
             prepared.wait_start_gate(libc::STDIN_FILENO)?;
         }
     }
-    Ok(prepared)
+    Ok(())
 }
 
-/// 消费既有 R4：DB → 外置 owner → 已发布 binding → 原 limits 字节 → 最终原 FD 复核。
 pub(crate) fn load_for_db(
     db: &Path,
     limits_path: &Path,
     env: ControlEnv,
 ) -> Result<PreparedAdmission, AdmissionError> {
+    let pinned = pin_for_db(db, limits_path, env)?;
+    let invalid = || pinned.prelude.error(ErrorKind::ResourcesInvalid, Stage::E3);
+    let node = strict_json(&pinned.lease.limits._raw).map_err(|_| invalid())?;
+    let resources = AdmissionResources::parse(&node).map_err(|_| invalid())?;
+    pinned.prepare(resources)
+}
+
+pub(super) fn load_named_for_db(
+    db: &Path,
+    limits_path: &Path,
+    env: ControlEnv,
+    contract: NamedContract<'_>,
+) -> Result<(PreparedAdmission, DomainLocks), String> {
+    let pinned = pin_for_db(db, limits_path, env).map_err(|e| e.to_string())?;
+    if db != pinned.lease.db_path() {
+        return Err("SRecoveryMediumUnproven".into());
+    }
+    pinned.check_environment().map_err(|e| e.to_string())?;
+    let check =
+        || check_lease(&pinned.lease, &pinned.prelude, Stage::E5).map_err(|e| e.to_string());
+    check()?;
+    // 先托住双锁，合同拒绝也以同一锁对写完失败回执。
+    let locks = DomainLocks::acquire_named(db, check)?;
+    // 六字段锚不带版本；注册表以已钉住的规范原字节摘要绑定版本。
+    // 只采用注册表核准的额度，未核准的原件不进入数值解析。
+    let values = contract
+        .registry
+        .authorize_limits(contract.version, &pinned.lease.anchor.sha256)?;
+    let prepared = pinned
+        .prepare(AdmissionResources::Ordinary(values))
+        .map_err(|e| e.to_string())?;
+    Ok((prepared, locks))
+}
+
+struct PinnedAdmission {
+    lease: BudgetLease,
+    prelude: ControlPrelude,
+    environment: Option<Binding>,
+}
+
+impl PinnedAdmission {
+    fn check_environment(&self) -> Result<(), AdmissionError> {
+        if self
+            .environment
+            .as_ref()
+            .is_some_and(|binding| binding != &self.lease.anchor)
+        {
+            return Err(self.prelude.error(ErrorKind::ControlMismatch, Stage::E4));
+        }
+        Ok(())
+    }
+
+    fn prepare(
+        mut self,
+        resources: AdmissionResources,
+    ) -> Result<PreparedAdmission, AdmissionError> {
+        let limits = resources.job_limits();
+        self.prelude.trusted = Some(limits);
+        self.prelude.gate(Stage::E4)?;
+        self.check_environment()?;
+        check_lease(&self.lease, &self.prelude, Stage::E4)?;
+        Ok(PreparedAdmission {
+            limits,
+            resources,
+            lease: Arc::new(self.lease),
+            prelude: self.prelude,
+        })
+    }
+}
+
+/// 消费既有 R4：DB → 外置 owner → 已发布 binding → 原 limits 字节；不解释额度。
+fn pin_for_db(
+    db: &Path,
+    limits_path: &Path,
+    env: ControlEnv,
+) -> Result<PinnedAdmission, AdmissionError> {
     let mut prelude = ControlPrelude::new();
     // SAFETY：geteuid 无指针入参、无资源所有权转移。
     let uid = unsafe { libc::geteuid() };
@@ -1384,20 +1508,7 @@ pub(crate) fn load_for_db(
     if limits.stamp.identity != anchor.file_identity || sha256_hex(&limits._raw) != anchor.sha256 {
         return Err(prelude.error(ErrorKind::Changed, Stage::E3));
     }
-    let node = strict_json(&limits._raw)
-        .map_err(|_| prelude.error(ErrorKind::ResourcesInvalid, Stage::E3))?;
-    let resources = AdmissionResources::parse(&node)
-        .map_err(|_| prelude.error(ErrorKind::ResourcesInvalid, Stage::E3))?;
-    let values = resources.job_limits();
-    prelude.trusted = Some(values);
-    prelude.gate(Stage::E4)?;
-    if environment
-        .as_ref()
-        .is_some_and(|binding| binding != &anchor)
-    {
-        return Err(prelude.error(ErrorKind::ControlMismatch, Stage::E4));
-    }
-    let lease = Arc::new(BudgetLease {
+    let lease = BudgetLease {
         db,
         db_file,
         db_identity: Identity::of(&db_meta),
@@ -1410,13 +1521,11 @@ pub(crate) fn load_for_db(
         binding,
         limits,
         anchor,
-    });
-    check_lease(&lease, &prelude, Stage::E4)?;
-    Ok(PreparedAdmission {
-        limits: values,
-        resources,
+    };
+    Ok(PinnedAdmission {
         lease,
         prelude,
+        environment,
     })
 }
 

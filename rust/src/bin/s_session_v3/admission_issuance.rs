@@ -12,17 +12,25 @@ const REVOKING: &str = ".s-admission-revoking";
 
 type Result<T> = std::result::Result<T, String>;
 
-struct Contract<'a> {
+pub(in crate::v3) struct Contract<'a> {
     version: &'a str,
     canonical: &'a str,
 }
-const CURRENT: Contract<'static> = Contract {
+pub(in crate::v3) const CURRENT: Contract<'static> = Contract {
     version: VERSION,
     canonical: CONTRACT,
 };
 
 impl Contract<'_> {
     fn authorize(&self, version: &str, sha: &str, timeout: u64) -> Result<JobLimits> {
+        let limits = self.authorize_limits(version, sha)?;
+        if timeout < limits.max_elapsed_ms {
+            return Err("AdmissionStartupWindowTooShort".into());
+        }
+        Ok(limits)
+    }
+
+    pub(in crate::v3) fn authorize_limits(&self, version: &str, sha: &str) -> Result<JobLimits> {
         if version.is_empty() {
             return Err("AdmissionContractVersionMissing".into());
         }
@@ -40,11 +48,15 @@ impl Contract<'_> {
         {
             return Err("AdmissionContractAwaitingMeasurement".into());
         }
-        let limits = JobLimits::from_canonical_json(&node).map_err(|e| e.to_string())?;
-        if timeout < limits.max_elapsed_ms {
-            return Err("AdmissionStartupWindowTooShort".into());
-        }
-        Ok(limits)
+        JobLimits::from_canonical_json(&node).map_err(|e| e.to_string())
+    }
+
+    #[cfg(test)]
+    pub(in crate::v3) fn test_named_contract<'a>(
+        version: &'a str,
+        canonical: &'a str,
+    ) -> Contract<'a> {
+        Contract { version, canonical }
     }
 }
 

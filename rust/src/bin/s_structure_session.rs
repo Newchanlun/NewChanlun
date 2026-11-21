@@ -6164,7 +6164,7 @@ fn recover_core(
 // ────────────────────────────────────────────────────────────────────────────
 
 fn usage() -> String {
-    "用法：s_structure_session <init|accept|advance|catalog|snapshot|meta|watch|recover|reset|serve|query-serve|admission-prepare|admission-revoke|admission-contract> [参数]\n\
+    "用法：s_structure_session <init|accept|advance|catalog|snapshot|meta|watch|recover|reset|serve|query-serve|admission-prepare|admission-revoke|admission-contract|inspect-recovery|recover-named|query-recovery|current-recovery> [参数]\n\
      \x20 catalog   --db <路径> [--as-of <generation>]\n\
      \x20 snapshot  --db <路径> [--as-of <generation>]\n\
      \x20 meta      --db <路径>\n\
@@ -6174,6 +6174,7 @@ fn usage() -> String {
      \x20 serve --protocol-revision s-session/3 --db <已有库> --profile <profile.json> --writer-epoch <n> --clock-plan <clock.json> --socket <路径> --resource-config <S资源.json>（资源及C09条件队列资格未满足时拒绝监听）\n\
      \x20 advance --protocol-revision s-session/3 --db <已有库> --profile <profile.json> --writer-epoch <n> --clock-plan <clock.json> [--input <单份envelope.json> --max-input-bytes <显式上限>]（无input仅恢复已持久接纳的原消息）\n\
      \x20 recover --protocol-revision s-session/3 --db <已有库> --new-epoch <n> --clock-plan <clock.json> --clock-event-id <id>（监督器换代）\n\
+     \x20 inspect-recovery|recover-named|query-recovery|current-recovery --protocol-revision s-session/3 --db <已有库> --profile <profile.json> --clock-plan <clock.json> --structure-source <source.json> --admission-job-limits <已发布limits> [--s-recovery-request <请求.json>（inspect除外）]\n\
      \x20 watch     --db <路径> --after-generation <n>\n\
      \x20 （#1419 裁定②：v2 旧库 init/accept/advance/recover/reset/serve 一律拒绝；旧库只读上列查询子命令）\n"
         .to_string()
@@ -6334,7 +6335,7 @@ fn main() {
     let accounting = v3::admission_anchor::CommandAccounting::begin();
     if let Err(e) = run() {
         let receipt = accounting.report(&e, &mut std::io::stderr().lock());
-        // report 已等每次 write 返回并核原账；显式析构发生在 process::exit 之前。
+        // report 持具名动作交付的双锁只写出一条首错，并核完原账才解锁。
         drop(receipt);
         drop(accounting);
         std::process::exit(1);

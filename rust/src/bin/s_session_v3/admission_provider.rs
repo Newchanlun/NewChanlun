@@ -155,8 +155,114 @@ fn verify_unframed_wal(db: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 只读恢复证据不签发 R4；不得把此类型交给 WriterScope 或开写连接。
+pub(super) struct RecoveryObservation {
+    source: MeasuredDomain,
+    has_shm: bool,
+}
+impl RecoveryObservation {
+    pub(super) fn probe(consumed: &ConsumedAdmission) -> Result<Self, String> {
+        let (media, scanned) = MeasuredDomain::scan(consumed)?;
+        Self::from_scan(scanned.finish(media, consumed)?, media.shm, consumed)
+    }
+
+    pub(super) fn through_r4(consumed: &ConsumedAdmission) -> Result<Self, String> {
+        Self::from_scan(MeasuredDomain::measure(consumed)?, false, consumed)
+    }
+
+    fn from_scan(
+        source: MeasuredDomain,
+        has_shm: bool,
+        consumed: &ConsumedAdmission,
+    ) -> Result<Self, String> {
+        if source.medium == Medium::RollbackJournal || (has_shm && source.wal_index.is_none()) {
+            return Err(consumed.failure("SRecoveryMediumUnproven"));
+        }
+        source
+            .verify_recovery_identity()
+            .map_err(|e| consumed.failure(&e))?;
+        Ok(Self { source, has_shm })
+    }
+    pub(super) fn has_shm(&self) -> bool {
+        self.has_shm
+    }
+    pub(super) fn source(&self) -> &MeasuredDomain {
+        &self.source
+    }
+}
+#[derive(Clone, Copy)]
+struct SqliteSidecars {
+    wal: Option<usize>,
+    journal: bool,
+    shm: bool,
+}
+
+struct ScannedFiles {
+    db: PathBuf,
+    state: PathBuf,
+    files: Vec<Pinned>,
+    ledger_cache: Vec<Pinned>,
+    members: BTreeSet<PathBuf>,
+    main_index: Option<usize>,
+    existing: Existing,
+}
+
+impl ScannedFiles {
+    fn finish(
+        self,
+        media: SqliteSidecars,
+        consumed: &ConsumedAdmission,
+    ) -> Result<MeasuredDomain, String> {
+        Ok(MeasuredDomain {
+            db: self.db,
+            state: self.state,
+            files: self.files,
+            ledger_cache: RefCell::new(self.ledger_cache),
+            members: self.members,
+            main_index: self
+                .main_index
+                .ok_or_else(|| consumed.failure("MainMissing"))?,
+            wal_index: media.wal,
+            medium: if media.journal {
+                Medium::RollbackJournal
+            } else if media.wal.is_some() {
+                Medium::Wal
+            } else {
+                Medium::MainOnly
+            },
+            existing: self.existing,
+        })
+    }
+}
+
 impl MeasuredDomain {
     pub(super) fn measure(consumed: &ConsumedAdmission) -> Result<Self, String> {
+        let (
+            SqliteSidecars {
+                wal: wal_index,
+                journal,
+                shm,
+            },
+            scanned,
+        ) = Self::scan(consumed)?;
+        if shm || (journal && wal_index.is_some()) {
+            return Err(consumed.failure("UnsupportedWalShmJournalCombination"));
+        }
+        let result = scanned.finish(
+            SqliteSidecars {
+                wal: wal_index,
+                journal,
+                shm,
+            },
+            consumed,
+        )?;
+        let verified = result.verify_before_open();
+        consumed.check(Stage::E6).map_err(|e| e.to_string())?;
+        verified.map_err(|e| consumed.failure(&e))?;
+        Ok(result)
+    }
+
+    fn scan(consumed: &ConsumedAdmission) -> Result<(SqliteSidecars, ScannedFiles), String> {
         consumed.check(Stage::E6).map_err(|e| e.to_string())?;
         let db = consumed.lease().db_path().to_owned();
         let state = consumed.lease().state_path().to_owned();
@@ -228,34 +334,25 @@ impl MeasuredDomain {
         {
             return Err(consumed.failure("PrivateResidueOwnershipUnproven"));
         }
-        if shm || (journal && wal_index.is_some()) {
-            return Err(consumed.failure("UnsupportedWalShmJournalCombination"));
-        }
-        let medium = if journal {
-            Medium::RollbackJournal
-        } else if wal_index.is_some() {
-            Medium::Wal
-        } else {
-            Medium::MainOnly
-        };
-        let result = Self {
-            db,
-            state,
-            files,
-            ledger_cache: RefCell::new(ledger_cache),
-            members,
-            main_index: main_index.ok_or_else(|| consumed.failure("MainMissing"))?,
-            wal_index,
-            medium,
-            existing: Existing {
-                store_bytes: store,
-                staged_bytes: staged,
+        Ok((
+            SqliteSidecars {
+                wal: wal_index,
+                journal,
+                shm,
             },
-        };
-        let verified = result.verify_before_open();
-        consumed.check(Stage::E6).map_err(|e| e.to_string())?;
-        verified.map_err(|e| consumed.failure(&e))?;
-        Ok(result)
+            ScannedFiles {
+                db,
+                state,
+                files,
+                ledger_cache,
+                members,
+                main_index,
+                existing: Existing {
+                    store_bytes: store,
+                    staged_bytes: staged,
+                },
+            },
+        ))
     }
 
     fn members(
@@ -403,6 +500,24 @@ impl MeasuredDomain {
         }
         Ok(ColdConvertedContent { main, wal })
     }
+    pub(super) fn verify_recovery_identity(&self) -> Result<(), String> {
+        let uid = unsafe { libc::geteuid() };
+        let cache = self.ledger_cache.borrow();
+        for p in self.files.iter().chain(cache.iter()) {
+            if p.stamp.uid != uid
+                || p.stamp.mode & 0o022 != 0
+                || (p.directory
+                    && ["-shm", "-wal"]
+                        .iter()
+                        .any(|suffix| p.path == sidecar(&self.db, suffix)))
+            {
+                return Err("SRecoveryMediumUnproven".into());
+            }
+        }
+        drop(cache);
+        self.verify_before_open()
+    }
+
     pub(super) fn verify_before_open(&self) -> Result<(), String> {
         for p in &self.files {
             p.verify(true)?;

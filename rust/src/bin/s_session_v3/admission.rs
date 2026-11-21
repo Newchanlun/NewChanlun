@@ -1,6 +1,8 @@
 //! #1527：一次性准备态 → 真实双锁 → 实测基线 → 私有 SQLite → 原账收尾 → 原件资格。
 //! 后续 source pathname 连续性、完整 RAM/extent 与同步硬截止分别仍属 I-2/I-3/I-4/I-5。
-use super::admission_anchor::{BudgetLease, FinishedAdmission, PreparedAdmission, Stage};
+use super::admission_anchor::{
+    BudgetLease, CommandAccounting, FinishedAdmission, PreparedAdmission, Stage,
+};
 use super::admission_provider::{self as provider, MeasuredDomain};
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -17,11 +19,17 @@ pub(super) struct Lock {
 }
 impl Lock {
     pub(super) fn acquire(db: &Path, suffix: &str) -> Result<Self, String> {
+        Self::open(db, suffix, true)
+    }
+    pub(super) fn acquire_existing(db: &Path, suffix: &str) -> Result<Self, String> {
+        Self::open(db, suffix, false)
+    }
+    fn open(db: &Path, suffix: &str, create: bool) -> Result<Self, String> {
         let path = provider::sidecar(db, suffix);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -64,6 +72,53 @@ impl Drop for Lock {
         let _ = self.file.unlock();
     }
 }
+pub(super) struct DomainLockPair {
+    writer: Lock,
+    maintenance: Lock,
+}
+
+pub(super) enum DomainLocks {
+    Ordinary(DomainLockPair),
+    Named(Rc<DomainLockPair>),
+}
+
+impl DomainLocks {
+    fn new(writer: Lock, maintenance: Lock, named: bool) -> Self {
+        let pair = DomainLockPair {
+            writer,
+            maintenance,
+        };
+        if named {
+            let pair = Rc::new(pair);
+            CommandAccounting::retain_named_locks(&pair);
+            Self::Named(pair)
+        } else {
+            Self::Ordinary(pair)
+        }
+    }
+
+    pub(super) fn acquire_named(
+        db: &Path,
+        revalidate: impl Fn() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let writer = Lock::acquire_existing(db, ".writer.lock")?;
+        revalidate()?;
+        let maintenance = Lock::acquire_existing(db, ".maintenance.lock")?;
+        let locks = Self::new(writer, maintenance, true);
+        revalidate()?;
+        Ok(locks)
+    }
+
+    pub(super) fn check(&self) -> Result<(), String> {
+        let pair = match self {
+            Self::Ordinary(pair) => pair,
+            Self::Named(pair) => pair.as_ref(),
+        };
+        pair.writer.check()?;
+        pair.maintenance.check()
+    }
+}
+
 struct Inner {
     lease: Arc<BudgetLease>,
     source: MeasuredDomain,
@@ -74,8 +129,7 @@ struct Inner {
     // #1527 M-02：原 Job 的未结预留错误不设 stopped；scope 必须保留首次收尾失败。
     startup_failure: RefCell<Option<String>>,
     // 资格必须与文件锁同寿命，控制 lease 的 Arc 不能单独授权开库。
-    writer: Lock,
-    maintenance: Lock,
+    locks: DomainLocks,
     // 准入所见源形状；只有 PrePolicyRecords 授权开库时那次 #1602 迁移写。
     delta: std::cell::Cell<crate::DeltaShape>,
 }
@@ -102,8 +156,7 @@ impl Inner {
             return Err("AdmissionDatabaseMismatch".into());
         }
         self.lease.revalidate_paths().map_err(|e| e.to_string())?;
-        self.writer.check()?;
-        self.maintenance.check()?;
+        self.locks.check()?;
         let source = self.source.verify_runtime();
         self.startup_gate()?;
         source
@@ -329,10 +382,31 @@ impl WriterScope {
             super::admission_private::RejectionPrefix::LegacyWrite,
         )
     }
+    pub(super) fn admit_named(
+        db: &Path,
+        prepared: PreparedAdmission,
+        locks: DomainLocks,
+    ) -> Result<Self, String> {
+        Self::admit_prefix_locked(
+            db,
+            prepared,
+            super::admission_private::RejectionPrefix::None,
+            Some(locks),
+        )
+    }
+
     fn admit_prefix(
         db: &Path,
         prepared: PreparedAdmission,
         prefix: super::admission_private::RejectionPrefix<'_>,
+    ) -> Result<Self, String> {
+        Self::admit_prefix_locked(db, prepared, prefix, None)
+    }
+    fn admit_prefix_locked(
+        db: &Path,
+        prepared: PreparedAdmission,
+        prefix: super::admission_private::RejectionPrefix<'_>,
+        named_locks: Option<DomainLocks>,
     ) -> Result<Self, String> {
         let mixed_resources = prepared.is_mixed();
         let consumed = prepared.consume().map_err(|e| e.to_string())?;
@@ -342,12 +416,19 @@ impl WriterScope {
             return Err(consumed.failure("AdmissionDatabaseMismatch"));
         }
         consumed.check(Stage::E5).map_err(|e| e.to_string())?;
-        let writer_result = Lock::acquire(consumed.lease().db_path(), ".writer.lock");
-        consumed.check(Stage::E5).map_err(|e| e.to_string())?;
-        let writer = writer_result.map_err(|e| consumed.failure(&e))?;
-        let maintenance_result = Lock::acquire(consumed.lease().db_path(), ".maintenance.lock");
-        consumed.check(Stage::E5).map_err(|e| e.to_string())?;
-        let maintenance = maintenance_result.map_err(|e| consumed.failure(&e))?;
+        let locks = if let Some(locks) = named_locks {
+            locks.check()?;
+            consumed.check(Stage::E5).map_err(|e| e.to_string())?;
+            locks
+        } else {
+            let writer_result = Lock::acquire(consumed.lease().db_path(), ".writer.lock");
+            consumed.check(Stage::E5).map_err(|e| e.to_string())?;
+            let writer = writer_result.map_err(|e| consumed.failure(&e))?;
+            let maintenance_result = Lock::acquire(consumed.lease().db_path(), ".maintenance.lock");
+            consumed.check(Stage::E5).map_err(|e| e.to_string())?;
+            let maintenance = maintenance_result.map_err(|e| consumed.failure(&e))?;
+            DomainLocks::new(writer, maintenance, false)
+        };
         let source = MeasuredDomain::measure(&consumed)?;
         #[cfg(feature = "s_incremental")]
         let max_store_bytes = consumed.limits().max_store_bytes;
@@ -414,8 +495,7 @@ impl WriterScope {
                 format!("{e}；原准入账={:?}", finished.accounting().snapshot())
             }
         })?;
-        writer.check()?;
-        maintenance.check()?;
+        locks.check()?;
         finished.accounting().check_deadline().map_err(|e| {
             if mixed {
                 mixed_failure(e.code(), "seal", e.detail())
@@ -431,8 +511,7 @@ impl WriterScope {
                 #[cfg(feature = "s_incremental")]
                 max_store_bytes,
                 startup_failure: RefCell::new(None),
-                writer,
-                maintenance,
+                locks,
                 delta: std::cell::Cell::new(delta),
             }),
         })
@@ -458,6 +537,28 @@ impl WriterScope {
     pub(crate) fn require_admitted(&self) -> Result<(), String> {
         self.inner.require(self.db_path())
     }
+    /// 具名启动在自己的 R4 锁内检查原回执，早于开写连接和 pending 推进。
+    pub(super) fn verify_named_startup(
+        &self,
+        config: &super::named_recovery::FrozenConfig,
+        request: &super::named_recovery::Request,
+        epoch: &str,
+    ) -> Result<(), String> {
+        self.require_admitted()?;
+        self.inner.source.verify_recovery_identity()?;
+        {
+            let mut state = self.inner.accounting.borrow_mut();
+            let finished = state.as_mut().ok_or("StartupAccountingFinished")?;
+            super::admission_private::inspect_recovery(
+                &self.inner.source,
+                &mut finished.accounting(),
+                |conn| super::named_recovery::verify_startup(conn, config, request, epoch),
+            )?;
+        }
+        self.inner.source.verify_recovery_identity()?;
+        self.require_admitted()
+    }
+
     pub(crate) fn enter(&self) -> Result<OpenGuard, String> {
         self.require_admitted()?;
         ACTIVE.with(|slot| {
@@ -491,40 +592,54 @@ impl WriterScope {
     }
     pub(crate) fn write_result(&self, value: &serde_json::Value) -> Result<(), String> {
         self.require_admitted()?;
-        let mut payload = serde_json::to_vec(value).map_err(|_| "AdmissionOutputEncodeFailed")?;
-        payload.push(b'\n');
         let mut state = self.inner.accounting.borrow_mut();
         let account = state.as_mut().ok_or("StartupAccountingFinished")?;
-        let mut stdout = std::io::stdout().lock();
-        let mut offset = 0;
-        while offset < payload.len() {
-            account
-                .accounting()
-                .pre_io_check()
-                .map_err(|e| e.to_string())?;
-            let result = stdout.write(&payload[offset..]);
-            match result {
-                Ok(n) => {
-                    account
-                        .accounting()
-                        .charge_wire_bytes(n as u64)
-                        .map_err(|e| e.to_string())?;
-                    if n == 0 {
-                        return Err("AdmissionOutputWriteZero".into());
-                    }
-                    offset += n;
+        emit_accounted(value, account)
+    }
+}
+
+fn emit_accounted(
+    value: &serde_json::Value,
+    account: &mut FinishedAdmission,
+) -> Result<(), String> {
+    let mut payload = serde_json::to_vec(value).map_err(|_| "AdmissionOutputEncodeFailed")?;
+    payload.push(b'\n');
+    emit_accounted_payload(&payload, account)
+}
+
+pub(super) fn emit_accounted_payload(
+    payload: &[u8],
+    account: &mut FinishedAdmission,
+) -> Result<(), String> {
+    let mut stdout = std::io::stdout().lock();
+    let mut offset = 0;
+    while offset < payload.len() {
+        account
+            .accounting()
+            .pre_io_check()
+            .map_err(|e| e.to_string())?;
+        let result = stdout.write(&payload[offset..]);
+        match result {
+            Ok(n) => {
+                account
+                    .accounting()
+                    .charge_wire_bytes(n as u64)
+                    .map_err(|e| e.to_string())?;
+                if n == 0 {
+                    return Err("AdmissionOutputWriteZero".into());
                 }
-                Err(_) => {
-                    account
-                        .accounting()
-                        .check_deadline()
-                        .map_err(|e| e.to_string())?;
-                    return Err("AdmissionOutputWriteFailed".into());
-                }
+                offset += n;
+            }
+            Err(_) => {
+                account
+                    .accounting()
+                    .check_deadline()
+                    .map_err(|e| e.to_string())?;
+                return Err("AdmissionOutputWriteFailed".into());
             }
         }
-        account.finish_output().map_err(|e| e.to_string())
     }
+    account.finish_output().map_err(|e| e.to_string())
 }
 /// 输出仍持同一 scope/父账；序列化结果不能先丢掉账本再由 dispatch 无账 println。
 pub(crate) struct CommandOutput {

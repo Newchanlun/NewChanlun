@@ -111,6 +111,7 @@ mod source_audit;
 mod state;
 #[cfg(test)]
 pub(crate) use state::trace_event as diagnostic_trace_event;
+mod named_recovery;
 mod writer_cli;
 #[cfg(test)]
 pub(crate) use admission_private::s4_read_trace as diagnostic_s4_read_trace;
@@ -223,6 +224,9 @@ fn dispatch_with_policy(args: &[String], production: bool) -> Result<bool, Strin
         }
     }
     if positions.is_empty() {
+        if named_recovery::Action::from_command(cmd).is_some() {
+            return Err("VersionUnsupported：具名恢复必须显式选择 s-session/3".into());
+        }
         if matches!(
             cmd,
             "financial-basis-ref"
@@ -251,7 +255,10 @@ fn dispatch_with_policy(args: &[String], production: bool) -> Result<bool, Strin
         #[cfg(not(unix))]
         return Err("VersionUnsupported：Q3监听入口当前需要Unix平台".into());
     }
-    if matches!(cmd, "serve" | "advance" | "recover") && value == PROTOCOL_REVISION {
+    if (matches!(cmd, "serve" | "advance" | "recover")
+        || named_recovery::Action::from_command(cmd).is_some())
+        && value == PROTOCOL_REVISION
+    {
         let out = if production {
             writer_cli::run(args)?
         } else {
@@ -398,8 +405,15 @@ fn init_from_args(args: &[String]) -> Result<Value, String> {
 /// `kind/title/domain/branches`；定义与规范 hash 落库后可被同一审计逐字重算。不引入第二套签署
 /// 格式，也不接受缺版本的默认值（旧 `init_core` 的 `.unwrap_or("unknown")` 宽松口径不复用）。
 fn load_catalog_strict(path: &Path) -> Result<(Value, String, usize), String> {
-    let definition =
-        strict_json(&std::fs::read(path).map_err(|e| format!("读 catalog 失败：{e}"))?)?;
+    parse_catalog_strict(&std::fs::read(path).map_err(|e| format!("读 catalog 失败：{e}"))?)
+}
+
+fn catalog_definition_hash(definition: &Value) -> String {
+    sha256_hex(canonical_json(definition).as_bytes())
+}
+
+fn parse_catalog_strict(bytes: &[u8]) -> Result<(Value, String, usize), String> {
+    let definition = strict_json(bytes)?;
     let (revision, item_count) = {
         let object = definition
             .as_object()
@@ -541,7 +555,7 @@ pub(super) fn init_v3_declared(
     let clock = v2::ClockPlan::load(clock_path)?;
     let (profile_def, profile_id, profile_hash) = load_profile(profile_path)?;
     let (catalog_def, catalog_revision, catalog_items) = load_catalog_strict(catalog_path)?;
-    let catalog_hash = sha256_hex(canonical_json(&catalog_def).as_bytes());
+    let catalog_hash = catalog_definition_hash(&catalog_def);
 
     // ── 第二步：既有库一律拒绝；与既有初始化共用同一把域进程锁，锁后复查防并发双建 ──
     if db.exists() {
