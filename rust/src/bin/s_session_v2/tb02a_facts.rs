@@ -174,29 +174,15 @@ impl UnitsCache {
 
 /// 后续 bar 的精确内容键（源坐标 + revision + 4 价）——修订即键变，杜绝同 ID 未核内容兜底。
 fn unit_content_key(coord: i64, event: &Value, bar: &Value) -> String {
-    use std::fmt::Write as _;
-    let mut key = String::with_capacity(96);
-    let _ = write!(key, "{coord}|");
-    let push_val = |buf: &mut String, v: &Value| match v {
-        Value::String(s) => {
-            buf.push('s');
-            let _ = write!(buf, "{}:{s}|", s.len());
-        }
-        Value::Number(n) => {
-            let _ = write!(buf, "n{n}|");
-        }
-        other => {
-            let enc = canonical_json(other);
-            let _ = write!(buf, "j{}:{enc}|", enc.len());
-        }
-    };
-    push_val(&mut key, &event["revision"]);
-    push_val(&mut key, &event["input_revision"]);
-    push_val(&mut key, &bar["open"]);
-    push_val(&mut key, &bar["high"]);
-    push_val(&mut key, &bar["low"]);
-    push_val(&mut key, &bar["close"]);
-    key
+    unit_content_key_fast(
+        coord,
+        &event["revision"],
+        &event["input_revision"],
+        &bar["open"],
+        &bar["high"],
+        &bar["low"],
+        &bar["close"],
+    )
 }
 fn comparisons(a: Option<&Bar>, b: &Bar) -> (Value, Value) {
     let Some(a) = a else {
@@ -258,47 +244,14 @@ impl Builder<'_> {
         let key = canonical_json(&slot);
         let payload_json = canonical_json(&payload);
         let input_refs_json = canonical_json(&Value::Array(refs));
-        let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-        sha2::Digest::update(&mut hasher, b"{\"fact_key\":");
-        sha2::Digest::update(
-            &mut hasher,
-            serde_json::to_string(&key).expect("string json").as_bytes(),
+        let id = object_id_from_canonical(
+            kind,
+            &key,
+            &payload_json,
+            &input_refs_json,
+            tb02a::PROFILE,
+            RULE_REVISION,
         );
-        sha2::Digest::update(&mut hasher, b",\"input_refs\":");
-        sha2::Digest::update(&mut hasher, input_refs_json.as_bytes());
-        sha2::Digest::update(&mut hasher, b",\"kind\":");
-        sha2::Digest::update(
-            &mut hasher,
-            serde_json::to_string(kind).expect("string json").as_bytes(),
-        );
-        sha2::Digest::update(&mut hasher, b",\"payload\":");
-        sha2::Digest::update(&mut hasher, payload_json.as_bytes());
-        sha2::Digest::update(&mut hasher, b",\"profile_id\":");
-        sha2::Digest::update(
-            &mut hasher,
-            serde_json::to_string(tb02a::PROFILE)
-                .expect("string json")
-                .as_bytes(),
-        );
-        sha2::Digest::update(&mut hasher, b",\"rule_revision\":");
-        sha2::Digest::update(
-            &mut hasher,
-            serde_json::to_string(RULE_REVISION)
-                .expect("string json")
-                .as_bytes(),
-        );
-        sha2::Digest::update(&mut hasher, b"}");
-        let digest = sha2::Digest::finalize(hasher);
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut id_bytes = [0u8; 68];
-        id_bytes[..4].copy_from_slice(b"obj-");
-        for (i, b) in digest.iter().enumerate() {
-            id_bytes[4 + i * 2] = HEX[(b >> 4) as usize];
-            id_bytes[5 + i * 2] = HEX[(b & 15) as usize];
-        }
-        let id = std::str::from_utf8(&id_bytes)
-            .expect("ascii hex")
-            .to_owned();
         json!({"object_id":id,"object_revision":1,"kind":kind,"fact_key":key,
             "payload_json":payload_json,"input_refs_json":input_refs_json,"source_coords_json":canonical_json(&json!(coords(&sources))),
             "first_known_generation":self.generation,"first_known_cut":self.cut,"published_generation":self.generation})
@@ -425,10 +378,7 @@ fn cc007_add(
     }
     let shape_sources = base_sources.clone();
     let end = *groups[2].members.last().unwrap();
-    let ref_targets: Vec<i64> = references
-        .iter()
-        .map(|r| r["value"].as_str().unwrap().parse::<i64>().unwrap())
-        .collect();
+    let ref_targets = cc007_ref_targets(&groups);
     let refs_key = canonical_json(&json!(references));
     let mut sources = base_sources;
     let mut observed: Vec<Value> = Vec::new();
@@ -441,9 +391,8 @@ fn cc007_add(
         let unit = units.unit(&refs_key, coord, content_key.clone(), || {
             let mut relations = Vec::with_capacity(4 * references.len());
             for axis in ["open", "high", "low", "close"] {
-                let price_str = bar[axis].as_str().unwrap();
-                let price = price_str.parse::<i64>().unwrap();
-                for (r, &target) in references.iter().zip(&ref_targets) {
+                let (price_str, price) = parse_bar_axis(&bar, axis);
+                for (r, target) in references.iter().zip(ref_targets) {
                     relations.push(json!({"axis":axis,"value":price_str,"reference":r["name"],"reference_value":r["value"],"order":order(price,target)}));
                 }
             }
@@ -1516,6 +1465,109 @@ pub(super) fn catalog_axes_admitted<'a, 'objects, 'changes>(
         push(store, &mut root_fields, (*key, row.view()))?;
     }
     fields(store, &root_fields)
+}
+
+fn unit_content_key_fast(
+    coord: i64,
+    revision: &Value,
+    input_revision: &Value,
+    open: &Value,
+    high: &Value,
+    low: &Value,
+    close: &Value,
+) -> String {
+    use std::fmt::Write as _;
+    let mut key = String::with_capacity(96);
+    let _ = write!(key, "{coord}|");
+    let push_val = |buf: &mut String, v: &Value| match v {
+        Value::String(s) => {
+            buf.push('s');
+            let _ = write!(buf, "{}:{s}|", s.len());
+        }
+        Value::Number(n) => {
+            let _ = write!(buf, "n{n}|");
+        }
+        other => {
+            let enc = canonical_json(other);
+            let _ = write!(buf, "j{}:{enc}|", enc.len());
+        }
+    };
+    push_val(&mut key, revision);
+    push_val(&mut key, input_revision);
+    push_val(&mut key, open);
+    push_val(&mut key, high);
+    push_val(&mut key, low);
+    push_val(&mut key, close);
+    key
+}
+
+fn object_id_from_canonical(
+    kind: &str,
+    fact_key: &str,
+    payload_json: &str,
+    input_refs_json: &str,
+    profile_id: &str,
+    rule_revision: &str,
+) -> String {
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut hasher, b"{\"fact_key\":");
+    sha2::Digest::update(
+        &mut hasher,
+        serde_json::to_string(fact_key)
+            .expect("string json")
+            .as_bytes(),
+    );
+    sha2::Digest::update(&mut hasher, b",\"input_refs\":");
+    sha2::Digest::update(&mut hasher, input_refs_json.as_bytes());
+    sha2::Digest::update(&mut hasher, b",\"kind\":");
+    sha2::Digest::update(
+        &mut hasher,
+        serde_json::to_string(kind).expect("string json").as_bytes(),
+    );
+    sha2::Digest::update(&mut hasher, b",\"payload\":");
+    sha2::Digest::update(&mut hasher, payload_json.as_bytes());
+    sha2::Digest::update(&mut hasher, b",\"profile_id\":");
+    sha2::Digest::update(
+        &mut hasher,
+        serde_json::to_string(profile_id)
+            .expect("string json")
+            .as_bytes(),
+    );
+    sha2::Digest::update(&mut hasher, b",\"rule_revision\":");
+    sha2::Digest::update(
+        &mut hasher,
+        serde_json::to_string(rule_revision)
+            .expect("string json")
+            .as_bytes(),
+    );
+    sha2::Digest::update(&mut hasher, b"}");
+    let digest = sha2::Digest::finalize(hasher);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut id_bytes = [0u8; 68];
+    id_bytes[..4].copy_from_slice(b"obj-");
+    for (i, b) in digest.iter().enumerate() {
+        id_bytes[4 + i * 2] = HEX[(b >> 4) as usize];
+        id_bytes[5 + i * 2] = HEX[(b & 15) as usize];
+    }
+    std::str::from_utf8(&id_bytes)
+        .expect("ascii hex")
+        .to_owned()
+}
+
+fn cc007_ref_targets(groups: &[&InclusionGroupFact; 3]) -> [i64; 6] {
+    [
+        groups[0].bar.high,
+        groups[0].bar.low,
+        groups[1].bar.high,
+        groups[1].bar.low,
+        groups[2].bar.high,
+        groups[2].bar.low,
+    ]
+}
+
+fn parse_bar_axis<'a>(bar: &'a Value, axis: &str) -> (&'a str, i64) {
+    let price_str = bar[axis].as_str().unwrap();
+    (price_str, price_str.parse::<i64>().unwrap())
 }
 
 #[cfg(test)]
