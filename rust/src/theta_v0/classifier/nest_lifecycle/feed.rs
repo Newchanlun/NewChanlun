@@ -280,6 +280,8 @@ pub(super) fn feed_replay_bar_with_birth_evidence(
     ReplayFeedStats,
     Vec<BridgeRegistration>,
 ) {
+    let source_statuses =
+        birth_evidence.map(|evidence| book.review_center_break_sources(evidence, feed.as_of));
     let (mut delta, stats) = feed_replay_bar(book, feed, material);
     // 同一个 bar 可以喂多次；只有这批实际建仓的对象才在出生当步。
     let newborns: BTreeSet<_> = delta
@@ -299,7 +301,9 @@ pub(super) fn feed_replay_bar_with_birth_evidence(
             if supplied {
                 let (registration, break_revisions) = book.register_center_bridge_with_revisions(
                     binding.clone(),
-                    birth_evidence.filter(|_| newborns.contains(&binding.lifecycle_key)),
+                    source_statuses
+                        .as_ref()
+                        .filter(|_| newborns.contains(&binding.lifecycle_key)),
                 );
                 delta.extend(break_revisions);
                 registration

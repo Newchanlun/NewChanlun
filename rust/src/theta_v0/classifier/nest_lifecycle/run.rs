@@ -62,6 +62,7 @@ impl I4CompletionRun {
     }
 
     /// 接收来源 owner 交付的 Broken，保留首次留档与普通消费结果。
+    /// 重送不改变已记录的来源撤回状态。
     pub fn apply_center_break(
         &mut self,
         fact: &CenterBreakFact,
@@ -72,6 +73,7 @@ impl I4CompletionRun {
 
     /// 先校验整批政策；混版或换锚整批拒绝，不修改账本。
     /// v2 自动清账须同时提供本步的来源有效性证据；缺失时仍正常观察和登记。
+    /// 来源也可在后续喂入中更新原件状态；后来的确认不能倒填原已知钟。
     pub fn feed_bar(
         &mut self,
         feed: &ReplayBarFeed<'_>,
@@ -96,6 +98,10 @@ impl I4CompletionRun {
                 supplied: binding.policy.clone(),
             });
         }
+        let birth_evidence = birth_evidence.filter(|_| {
+            self.policy.anchor == CompletionAnchor::CenterBreak
+                && self.policy.version == CompletionPolicyVersion::V2.as_str()
+        });
         Ok(feed_replay_bar_with_birth_evidence(
             &mut self.book,
             feed,

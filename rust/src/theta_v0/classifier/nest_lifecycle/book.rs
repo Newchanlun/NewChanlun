@@ -54,6 +54,8 @@ pub struct NestLifecycleBook {
     /// 首次收到的合法原事实及留档先后证据，包含无绑定、迟到待恢复和终态保留的事实。
     /// 相同身份不准改写物理钟、known-at、留档时点或证据后重试放行。
     center_break_facts: BTreeMap<BreakIdentity, ArchivedCenterBreakFact>,
+    /// 只跟踪已撤回原件的最近一次明确来源判定（证据时钟、状态）；不改动首次留档。
+    center_break_withdrawal_reviews: BTreeMap<BreakIdentity, (usize, CenterBreakSourceStatus)>,
     /// 第二层清账独立审计；只追加实际生效的清账。
     center_break_audits: Vec<CenterBreakAudit>,
     /// #1719 每次消费的显式结果，迟到原件、目标和拒绝原因在此留档。
@@ -288,6 +290,42 @@ impl NestLifecycleBook {
         self.center_break_seq
     }
 
+    /// 校验本步精确修订。冲突批内的 Withdrawn 拦下 Active；缺席不抹掉此前的撤回。
+    pub(super) fn review_center_break_sources(
+        &mut self,
+        evidence: &CenterBreakBirthEvidence<'_>,
+        as_of: usize,
+    ) -> BTreeMap<BreakIdentity, CenterBreakSourceStatus> {
+        let mut current = BTreeMap::new();
+        if evidence.as_of != as_of {
+            return current;
+        }
+        for (revision, status) in evidence.revisions {
+            let identity = revision.fact.identity();
+            if revision.archived_at <= as_of
+                && self.center_break_facts.get(&identity) == Some(revision)
+            {
+                let observed = current.entry(identity).or_insert(*status);
+                if *status == CenterBreakSourceStatus::Withdrawn {
+                    *observed = *status;
+                }
+            }
+        }
+        current.retain(|identity, status| {
+            if let Some(previous) = self.center_break_withdrawal_reviews.get_mut(identity) {
+                if previous.0 > as_of {
+                    return false;
+                }
+                *previous = (as_of, *status);
+            } else if *status == CenterBreakSourceStatus::Withdrawn {
+                self.center_break_withdrawal_reviews
+                    .insert(*identity, (as_of, *status));
+            }
+            true
+        });
+        current
+    }
+
     /// #1719 首次绑定只可在原建仓 bar 登记；重发不覆盖原对象/政策/注册钟。
     /// 升级只接收已经由原迁移规则认可、且 provider 精确选中的新 B。
     /// 缺账、冲突、空版本返回 Rejected，不为旧对象猜配身份。
@@ -299,7 +337,7 @@ impl NestLifecycleBook {
     pub(super) fn register_center_bridge_with_revisions(
         &mut self,
         binding: HypothesisBridge,
-        birth_evidence: Option<&CenterBreakBirthEvidence<'_>>,
+        birth_evidence: Option<&BTreeMap<BreakIdentity, CenterBreakSourceStatus>>,
     ) -> (BridgeRegistration, Vec<LifecycleRevision>) {
         let Some(policy_version) =
             CompletionPolicyVersion::for_component_binding(&binding.policy.version)
@@ -384,7 +422,7 @@ impl NestLifecycleBook {
         key: LifecycleKey,
         bridge: HypothesisBridge,
         meta: BridgeRegistrationMeta,
-        evidence: &CenterBreakBirthEvidence<'_>,
+        evidence: &BTreeMap<BreakIdentity, CenterBreakSourceStatus>,
     ) -> Vec<LifecycleRevision> {
         let mut archived_matches: Vec<(BreakIdentity, ArchivedCenterBreakFact)> = self
             .center_break_facts
@@ -394,7 +432,7 @@ impl NestLifecycleBook {
                     && identity.center_id == bridge.center_id
                     && archived.archived_at <= bridge.registered_at
                     && archived.archived_seq < meta.registered_seq
-                    && evidence.confirms_active(archived, bridge.registered_at)
+                    && evidence.get(identity) == Some(&CenterBreakSourceStatus::Active)
             })
             .map(|(identity, archived)| (*identity, *archived))
             .collect();
@@ -463,12 +501,27 @@ impl NestLifecycleBook {
             } else {
                 match mode {
                     BreakApplicationMode::KnownAt => {
-                        if entry.last_as_of > fact.known_at() {
+                        let known_at = fact.known_at();
+                        let review = meta
+                            .filter(|meta| meta.policy_version == CompletionPolicyVersion::V2)
+                            .and_then(|_| self.center_break_withdrawal_reviews.get(&identity));
+                        if entry.last_as_of > known_at {
                             // ledger_kernel::admit 拒绝倒退；修订链要求 as_of 非降。
                             // 不改终态、不改门卫钟、不用消费钟，不抢占已应用集合（#1719 B4）。
                             (CenterBreakOutcome::LatePendingRecovery, None)
                         } else {
-                            (CenterBreakOutcome::Applied, Some(fact.known_at()))
+                            match review {
+                                Some((_, CenterBreakSourceStatus::Withdrawn)) => {
+                                    (CenterBreakOutcome::SourceWithdrawn, None)
+                                }
+                                // 新证据不能让已撤回原件倒填原 K；交给恢复路径。
+                                Some((confirmed_at, CenterBreakSourceStatus::Active))
+                                    if *confirmed_at > known_at =>
+                                {
+                                    (CenterBreakOutcome::LatePendingRecovery, None)
+                                }
+                                _ => (CenterBreakOutcome::Applied, Some(known_at)),
+                            }
                         }
                     }
                     BreakApplicationMode::BirthStep => {

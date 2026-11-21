@@ -1507,49 +1507,174 @@ fn i4_run_history_replays_original_v1_in_current_and_fresh_process() {
 }
 
 #[test]
-fn i4_run_birth_step_does_not_consume_withdrawn_revision() {
-    for (status, expected) in [
-        (CenterBreakSourceStatus::Active, NestEventState::Invalidated),
-        // 唯一变化：来源在 O95 已撤回同一精确修订。
-        (CenterBreakSourceStatus::Withdrawn, NestEventState::Provisional),
+fn i4_run_birth_and_redelivery_respect_exact_source_withdrawal() {
+    use CenterBreakOutcome::*;
+    use CenterBreakSourceStatus::{Active, Withdrawn};
+
+    for (known, status, expected_redelivery) in [
+        (94, Active, Some(AlreadyApplied)),
+        (94, Withdrawn, Some(LatePendingRecovery)),
+        (95, Active, Some(AlreadyApplied)),
+        (95, Withdrawn, None),
+        (95, Withdrawn, Some(SourceWithdrawn)),
     ] {
-        let mut run = I4CompletionRun::start_new(CompletionPolicy::v2(CompletionAnchor::CenterBreak))
-            .unwrap();
-        let f = selected_fixture(1, 0, 0, 20, 95, run.policy());
-        let fact = broken_fixture(f.2, 1, 90, 94);
-        run.apply_center_break(&fact, 94);
-        let revision = *run.book().archived_center_break_facts().next().unwrap();
+        let mut run =
+            I4CompletionRun::start_new(CompletionPolicy::v2(CompletionAnchor::CenterBreak)).unwrap();
+        let (window, binding, center) = selected_fixture(1, 0, 0, 20, 95, run.policy());
+        let key = binding.lifecycle_key;
+        let fact = broken_fixture(center, 1, 90, known);
+        assert_eq!(
+            run.apply_center_break(&fact, known).attempts[0].outcome,
+            NoTarget
+        );
+        let original = *run.book().archived_center_break_facts().next().unwrap();
         let (delta, _, accepted) = run
             .feed_bar(
                 &ReplayBarFeed {
                     as_of: 95,
-                    phases: &[PanProviderPhase::Live(f.0)],
+                    phases: &[PanProviderPhase::Live(window)],
                 },
                 &ForceMaterial::unavailable(&[]),
-                &[f.1.clone()],
+                &[binding],
                 Some(&CenterBreakBirthEvidence {
                     as_of: 95,
-                    revisions: &[(revision, status)],
+                    revisions: &[(original, status)],
                 }),
             )
             .unwrap();
         assert_eq!(accepted, [BridgeRegistration::Accepted]);
-        let entry = run.book().get(&f.1.lifecycle_key).unwrap();
-        assert_eq!(entry.state, expected, "source status: {status:?}");
-        let applied = usize::from(status == CenterBreakSourceStatus::Active);
+        let (expected_state, invalidated_at) = if status == Active {
+            (NestEventState::Invalidated, Some(95))
+        } else {
+            (NestEventState::Provisional, None)
+        };
+        let expected_count = usize::from(status == Active);
+        let entry = run.book().get(&key).unwrap();
         assert_eq!(
-            delta.iter().filter(|r| r.kind == LifecycleRevisionKind::Invalidated {
-                reason: InvalidatedReason::CenterBreak,
-            }).count(),
-            applied
+            entry.state, expected_state,
+            "K{known}/O95 {status:?} at birth"
         );
-        assert_eq!(run.book().center_break_audits().len(), applied);
-        assert_eq!(entry.invalidated_at, (applied == 1).then_some(95));
-        if let Some(audit) = run.book().center_break_audits().first() {
-            assert_eq!(audit.application_at, 95);
-            assert_eq!(audit.fact.known_at(), 94);
+        assert_eq!(
+            delta
+                .iter()
+                .filter(|revision| revision.kind == LifecycleRevisionKind::Invalidated {
+                    reason: InvalidatedReason::CenterBreak,
+                })
+                .count(),
+            expected_count
+        );
+
+        let before_redelivery = entry.revisions.clone();
+        if let Some(expected) = expected_redelivery {
+            let repeated = run.apply_center_break(&fact, 95);
+            assert_eq!(
+                repeated.attempts[0].outcome,
+                expected,
+                "K{known}/O95 {status:?} exact redelivery",
+            );
+            assert!(repeated.revisions.is_empty());
         }
-        assert_eq!(run.book().archived_center_break_facts().copied().collect::<Vec<_>>(), [revision]);
+        let entry = run.book().get(&key).unwrap();
+        assert_eq!(entry.state, expected_state);
+        assert_eq!(entry.invalidated_at, invalidated_at);
+        assert_eq!(entry.revisions, before_redelivery);
+        let audits = run.book().center_break_audits();
+        assert_eq!(audits.len(), expected_count);
+        if let Some(audit) = audits.first() {
+            assert_eq!(audit.mode, center_break::BreakApplicationMode::BirthStep);
+            assert_eq!(audit.application_at, 95);
+            assert_eq!(audit.fact, fact);
+        }
+        assert_eq!(
+            run.book()
+                .archived_center_break_facts()
+                .copied()
+                .collect::<Vec<_>>(),
+            [original],
+        );
+    }
+}
+
+#[test]
+fn i4_run_known_at_preserves_fresh_facts_and_accepts_exact_same_bar_reconfirmation() {
+    use CenterBreakSourceStatus::{Active, Withdrawn};
+
+    let policy = CompletionPolicy::v2(CompletionAnchor::CenterBreak);
+    let (window, binding, center) = selected_fixture(1, 0, 0, 20, 95, &policy);
+    let fact = broken_fixture(center, 1, 90, 95);
+    let feed = ReplayBarFeed {
+        as_of: 95,
+        phases: &[PanProviderPhase::Live(window)],
+    };
+    let material = ForceMaterial::unavailable(&[]);
+    let bindings = std::slice::from_ref(&binding);
+    for pre_archived in [false, true] {
+        let mut run = I4CompletionRun::start_new(policy.clone()).unwrap();
+        let withdrawn = pre_archived.then(|| {
+            run.apply_center_break(&fact, 95);
+            (*run.book().archived_center_break_facts().next().unwrap(), Withdrawn)
+        });
+        let input = withdrawn.as_ref().map(|revision| CenterBreakBirthEvidence {
+            as_of: 95,
+            revisions: std::slice::from_ref(revision),
+        });
+        run.feed_bar(&feed, &material, bindings, input.as_ref())
+            .unwrap();
+
+        if let Some((original, _)) = withdrawn {
+            let wrong_revision = ArchivedCenterBreakFact {
+                archived_seq: original.archived_seq + 1,
+                ..original
+            };
+            for evidence in [
+                None,
+                Some(CenterBreakBirthEvidence {
+                    as_of: 95,
+                    revisions: &[(wrong_revision, Active)],
+                }),
+                Some(CenterBreakBirthEvidence {
+                    as_of: 94,
+                    revisions: &[(original, Active)],
+                }),
+                Some(CenterBreakBirthEvidence {
+                    as_of: 95,
+                    revisions: &[(original, Withdrawn), (original, Active)],
+                }),
+            ] {
+                run.feed_bar(&feed, &material, bindings, evidence.as_ref())
+                    .unwrap();
+                let repeated = run.apply_center_break(&fact, 95);
+                assert_eq!(
+                    repeated.attempts[0].outcome,
+                    CenterBreakOutcome::SourceWithdrawn
+                );
+                assert!(repeated.revisions.is_empty());
+            }
+            let (delta, _, _) = run
+                .feed_bar(
+                    &feed,
+                    &material,
+                    bindings,
+                    Some(&CenterBreakBirthEvidence {
+                        as_of: 95,
+                        revisions: &[(original, Active)],
+                    }),
+                )
+                .unwrap();
+            // 重新确认不是又一次出生；原件仍走普通 KnownAt 门卫。
+            assert!(delta.is_empty());
+            assert!(run.book().center_break_audits().is_empty());
+        }
+
+        let applied = run.apply_center_break(&fact, 95);
+        assert_eq!(applied.attempts[0].outcome, CenterBreakOutcome::Applied);
+        assert_eq!(applied.revisions.len(), 1);
+        let [audit] = run.book().center_break_audits() else {
+            panic!();
+        };
+        assert_eq!(audit.mode, center_break::BreakApplicationMode::KnownAt);
+        assert_eq!(audit.application_at, 95);
+        assert_eq!(audit.fact, fact);
     }
 }
 

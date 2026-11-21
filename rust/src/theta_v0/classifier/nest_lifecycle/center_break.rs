@@ -194,34 +194,19 @@ pub struct ArchivedCenterBreakFact {
     pub archived_seq: u64,
 }
 
-/// S / 来源 owner 在出生步骤对某份精确留档修订的当前判定。
+/// S / 来源 owner 在当前步骤对某份精确留档修订的判定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CenterBreakSourceStatus {
     Active,
     Withdrawn,
 }
 
-/// 只用于本次出生步骤，不写回留档，也不沿用上一步的有效性判定。
-/// 缺失、撤回、冲突或时点不符均不授权自动清账。
+/// 本步的精确来源证据。只有本步的 Active 能授权出生清账；撤回会拦下原件重送，
+/// 除非来源重新确认。该判定不改写原件或首次留档。
 #[derive(Debug, Clone, Copy)]
 pub struct CenterBreakBirthEvidence<'a> {
     pub as_of: usize,
     pub revisions: &'a [(ArchivedCenterBreakFact, CenterBreakSourceStatus)],
-}
-
-impl CenterBreakBirthEvidence<'_> {
-    pub(super) fn confirms_active(&self, archived: &ArchivedCenterBreakFact, as_of: usize) -> bool {
-        if self.as_of != as_of {
-            return false;
-        }
-        let mut statuses = self
-            .revisions
-            .iter()
-            .filter_map(|(revision, status)| (revision == archived).then_some(*status))
-            .peekable();
-        statuses.peek().is_some()
-            && statuses.all(|status| status == CenterBreakSourceStatus::Active)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,6 +257,8 @@ pub enum CenterBreakOutcome {
     NoTarget,
     NotReady,
     LatePendingRecovery,
+    /// v2 来源已明确撤回精确原件；重送本身不是重新确认。
+    SourceWithdrawn,
     FactConflict,
     PolicyDisallowed,
     Preserved,
