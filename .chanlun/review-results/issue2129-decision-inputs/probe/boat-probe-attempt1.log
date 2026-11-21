@@ -1,0 +1,115 @@
+creating a default sandbox...
+bx_sjfvyuvd ready in 6.8s
+pushed 952 files (42.5 MB) to ~/.probe-input
+baseline=329be34f5a9ca9c2bcc38ae75783304cc654904c
+Linux x86_64
+/usr/local/cargo/bin/cargo
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+   Compiling target-lexicon v0.12.16
+   Compiling once_cell v1.21.4
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling autocfg v1.5.1
+   Compiling serde_core v1.0.229
+   Compiling generic-array v0.14.7
+   Compiling cc v1.2.65
+   Compiling vcpkg v0.2.15
+   Compiling pkg-config v0.3.34
+   Compiling libc v0.2.189
+   Compiling memoffset v0.9.1
+   Compiling foldhash v0.2.0
+   Compiling heck v0.5.0
+   Compiling zmij v1.0.21
+   Compiling pyo3-build-config v0.23.5
+   Compiling allocator-api2 v0.2.21
+   Compiling crypto-common v0.1.7
+   Compiling hashbrown v0.17.1
+   Compiling block-buffer v0.10.4
+   Compiling syn v2.0.117
+   Compiling syn v3.0.4
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling libsqlite3-sys v0.38.2
+   Compiling cfg-if v1.0.4
+   Compiling hashlink v0.12.2
+   Compiling digest v0.10.7
+   Compiling itoa v1.0.18
+   Compiling fallible-iterator v0.3.0
+   Compiling indoc v2.0.7
+   Compiling unindent v0.2.4
+   Compiling memchr v2.8.2
+   Compiling pyo3-ffi v0.23.5
+   Compiling pyo3-macros-backend v0.23.5
+   Compiling pyo3 v0.23.5
+   Compiling cpufeatures v0.2.17
+   Compiling smallvec v1.15.2
+   Compiling bitflags v2.13.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling sha2 v0.10.9
+   Compiling serde_derive v1.0.229
+   Compiling pyo3-macros v0.23.5
+   Compiling rusqlite v0.40.2
+   Compiling newchan_rust v0.1.0 (/home/user/.probe-input/rust)
+    Finished `dev` profile [unoptimized] target(s) in 18.65s
+   Compiling getrandom v0.4.3
+   Compiling rustix v1.1.5
+   Compiling bitflags v2.13.0
+   Compiling linux-raw-sys v0.12.1
+   Compiling fastrand v2.5.0
+   Compiling rusqlite v0.40.2
+   Compiling tempfile v3.27.0
+   Compiling newchan_rust v0.1.0 (/var/lib/ascii-lazy/retired/home/.probe-input/rust)
+
+running 1 test
+    Finished `test` profile [unoptimized] target(s) in 38.19s
+     Running unittests src/lib.rs (target/debug/deps/newchan_rust-360e4b0a82a049e2)
+E1 argv="/home/user/.probe-input/rust/target/debug/e_economic_session" "serve" "--manifest" "/tmp/unit-13232-0/manifest.json" "--db" "/tmp/unit-13232-0/e.db" "--epoch" "1"
+E1 ready pid=13296
+X1 argv=env -u ISSUE2129_UNUSED_FIXTURE_CREDENTIAL "/home/user/.probe-input/rust/target/debug/x_execution_session" "serve" "--db" "/tmp/unit-13232-0/x.sqlite" "--profile" "/tmp/unit-13232-0/x.json" "--writer-epoch" "1"
+X1 ready pid=13300
+X→E1 before release request={"op":"AcceptExact","payload":{"certificate":{"conditions":[{"authority_revision":"released-exact/1","condition_id":"released-exact/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"released-exact/1"},{"authority_revision":"execute-committed/1","condition_id":"execute-committed/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["S.RequestConditionalExecution"],"validator_capability":"execute-committed/1"},{"authority_revision":"simulation-local-transaction/1","condition_id":"simulation-local-transaction/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["X.OwnAttemptAndCall"],"validator_capability":"simulation-local-transaction/1"},{"authority_revision":"model-coverage/1","condition_id":"model_coverage","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"model-coverage/1"}],"market_dependencies":["TestOnly-market/1407-c1"],"rd11_policy":"controlled-fixture-rd11","responsibility_refs":["d548c1009972bdba11051816c73b64d8ed30ed52b6d411e39501e580a6014666"],"rule_revision":"TestOnly-rule/1407-c1","structure_dependencies":["unit-S-object@8e133bfe5c2161e88a6a327e0ba071e5a5a3fc86bd5e458c309be42c5d0fc18a"]},"certificate_hash":"21d9c809f4dcfd631451b8f023091d2722572f22a9ee800aa0684ad0d116d32f","change":{"kind":"submit","order":{"chong_id":"alpha","command_id":"cmd-alpha","eligibility_ref":"S:cmd-alpha","family_id":"family-alpha","kind":{"kind":"limit","price":14},"projection_manifest":"TestOnly-projection/alpha","quantity":2,"revision":1,"side":"buy"}},"command_id":"cmd-alpha","logical_order_family":"family-alpha","plan_hash":"31a03d6680b4a02d7a85d2e70879d9b4fccf10d0d8cfb29052d4186aa72504b5","projection_kind":"per_leg","session_generation":"1","session_id":"tb03b-unit","symbol":"alpha","x_epoch":1,"x_id":"X"},"protocol":"x-exact-simulation/1"}
+X→E1 before release reply={"error":"MissingDependency：权威结果为NoRecord，需要ReleasedExact","kind":"Error"}
+E1 release request={"causal_refs":[],"message_id":"ReleaseExact-alpha","payload":{"certificate":{"conditions":[{"authority_revision":"released-exact/1","condition_id":"released-exact/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"released-exact/1"},{"authority_revision":"execute-committed/1","condition_id":"execute-committed/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["S.RequestConditionalExecution"],"validator_capability":"execute-committed/1"},{"authority_revision":"simulation-local-transaction/1","condition_id":"simulation-local-transaction/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["X.OwnAttemptAndCall"],"validator_capability":"simulation-local-transaction/1"},{"authority_revision":"model-coverage/1","condition_id":"model_coverage","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"model-coverage/1"}],"market_dependencies":["TestOnly-market/1407-c1"],"rd11_policy":"controlled-fixture-rd11","responsibility_refs":["d548c1009972bdba11051816c73b64d8ed30ed52b6d411e39501e580a6014666"],"rule_revision":"TestOnly-rule/1407-c1","structure_dependencies":["unit-S-object@8e133bfe5c2161e88a6a327e0ba071e5a5a3fc86bd5e458c309be42c5d0fc18a"]},"command_id":"cmd-alpha","decision_id":"alpha","op":"ReleaseExact","plan_hash":"31a03d6680b4a02d7a85d2e70879d9b4fccf10d0d8cfb29052d4186aa72504b5","writer_epoch":"1","x_epoch":"1","x_id":"X"},"payload_hash":"1d44aa1c10148413842ee3f6beafda640672b876d8416c05128af8ead6ff9fe4","producer_epoch":"1","producer_id":"unit","schema_revision":"economic-session/1","session_generation":"1","session_id":"tb03b-unit","source_epoch":"one","source_namespace":"test"}
+E1 release reply={"causal_refs":[{"message_id":"ReleaseExact-alpha","payload_hash":"1d44aa1c10148413842ee3f6beafda640672b876d8416c05128af8ead6ff9fe4","source_epoch":"one","source_namespace":"test"}],"message_id":"reply-9571eaabfde3fbda4bddc12d2272fb2db6941193214f8d8e12702ef8b94348b2","payload":{"commit_ns":"162","cut":{"commit_seq":"6","domain_id":"E","root_hash":"d6d544e3ba5313acd4a37a47b6a863bb6ef0d0ade3d7642fa4b09669c8ae1a69"},"domain_id":"E","first_known_ns":"161","kind":"ReleasedExactReceipt","receipt_key":"tb03b-finance/5:ReleaseExact:221228f3e1fad72f982ebd658c9725189170deaeced3677630d5978f17de6349","record":{"allocation_id":"alloc-alpha","command":{"certificate":{"conditions":[{"authority_revision":"released-exact/1","condition_id":"released-exact/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"released-exact/1"},{"authority_revision":"execute-committed/1","condition_id":"execute-committed/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["S.RequestConditionalExecution"],"validator_capability":"execute-committed/1"},{"authority_revision":"simulation-local-transaction/1","condition_id":"simulation-local-transaction/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["X.OwnAttemptAndCall"],"validator_capability":"simulation-local-transaction/1"},{"authority_revision":"model-coverage/1","condition_id":"model_coverage","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"model-coverage/1"}],"market_dependencies":["TestOnly-market/1407-c1"],"rd11_policy":"controlled-fixture-rd11","responsibility_refs":["d548c1009972bdba11051816c73b64d8ed30ed52b6d411e39501e580a6014666"],"rule_revision":"TestOnly-rule/1407-c1","structure_dependencies":["unit-S-object@8e133bfe5c2161e88a6a327e0ba071e5a5a3fc86bd5e458c309be42c5d0fc18a"]},"certificate_hash":"21d9c809f4dcfd631451b8f023091d2722572f22a9ee800aa0684ad0d116d32f","change":{"kind":"submit","order":{"chong_id":"alpha","command_id":"cmd-alpha","eligibility_ref":"S:cmd-alpha","family_id":"family-alpha","kind":{"kind":"limit","price":14},"projection_manifest":"TestOnly-projection/alpha","quantity":2,"revision":1,"side":"buy"}},"command_id":"cmd-alpha","logical_order_family":"family-alpha","plan_hash":"31a03d6680b4a02d7a85d2e70879d9b4fccf10d0d8cfb29052d4186aa72504b5","projection_kind":"per_leg","session_generation":"1","session_id":"tb03b-unit","symbol":"alpha","x_epoch":1,"x_id":"X"},"command_hash":"d56002898387c9ee9d7721e8fccb9d434fe5b3af778c8914cf30390603821ff4","command_id":"cmd-alpha","commit_cut":{"commit_seq":"4","domain_id":"B:alpha","root_hash":"c2c6d8da17b47202a291ebe5eeb9da2c5a3cc0379e7f490b326aa8c8d18f60a4"},"decision_id":"alpha","dispatchable_ns":"142","dispatchable_seq":"5","execution_eligibility":"ReleasedExact","first_quantity":"2","grant_id":"d548c1009972bdba11051816c73b64d8ed30ed52b6d411e39501e580a6014666","local_commit_receipt":{"book_version_after":"4","book_version_before":"3","commit_hash":"3fae637058e5dfde545583a3463592f00b130cfc0ca93977ac3f9b6cd61f2ee8","commit_ns":"102","decision_id":"alpha","e_cut":{"commit_seq":"4","domain_id":"E","root_hash":"bb8977f70c175c35191938b5760d592bebea7d9ef445b0023979003e5ba3d84b"},"execution_eligibility":"None","grant_id":"d548c1009972bdba11051816c73b64d8ed30ed52b6d411e39501e580a6014666","plan_hash":"c4d33ae783518fd7ceee6e0cbac3f0bede56038b6ba7e11dd4881ce7063f0195"},"model_ref":{"content_hash":"e28cb65bf917085d648735d192848c2d1a9d460f0b61c3c57144055770f925cb","model_id":"history-sim/bar-batch-known-frontier/1","revision":"oracle-1"},"owner":"B:alpha","plan_hash":"c4d33ae783518fd7ceee6e0cbac3f0bede56038b6ba7e11dd4881ce7063f0195","release_commit_ns":"162","release_seq":"6","responsibility_ref":"d548c1009972bdba11051816c73b64d8ed30ed52b6d411e39501e580a6014666","state":"ReleasedExact"}},"payload_hash":"766472928432f8ba70490dfe66311957ead5bb185f8198e502f8c93c94e30756","producer_epoch":"1","producer_id":"E:tb03b-unit","schema_revision":"economic-session/1","session_generation":"1","session_id":"tb03b-unit","source_epoch":"1","source_namespace":"economic-session/replies"}
+E1 pid=13296 status=signal: 9 (SIGKILL) stderr-begin
+stderr-end
+fixture moved its own stopped E1 socket aside; E2 reuses e.sock; X PID remains 13300
+E recover-named status=exit status: 0 stdout-begin
+{"kind":"NamedRecoveryReceipt","recover_ns":"1000","request":{"cut":{"commit_seq":"6","domain_id":"E","root_hash":"d6d544e3ba5313acd4a37a47b6a863bb6ef0d0ade3d7642fa4b09669c8ae1a69"},"domain_id":"E","from_epoch":"1","manifest_hash":"ea2e52032f2de7f274852a95dc2b4d321d65983a68fcc5e462a81a0643c80e49","recovery_id":"probe-2129-e","schema_revision":"economic-recovery/1","session_generation":"1","session_id":"tb03b-unit"},"writer_epoch":"2"}
+stdout-end stderr-begin
+stderr-end
+E current-recovery status=exit status: 0 stdout-begin
+{"kind":"NamedRecoveryReceipt","recover_ns":"1000","request":{"cut":{"commit_seq":"6","domain_id":"E","root_hash":"d6d544e3ba5313acd4a37a47b6a863bb6ef0d0ade3d7642fa4b09669c8ae1a69"},"domain_id":"E","from_epoch":"1","manifest_hash":"ea2e52032f2de7f274852a95dc2b4d321d65983a68fcc5e462a81a0643c80e49","recovery_id":"probe-2129-e","schema_revision":"economic-recovery/1","session_generation":"1","session_id":"tb03b-unit"},"writer_epoch":"2"}
+stdout-end stderr-begin
+stderr-end
+E2 argv="/home/user/.probe-input/rust/target/debug/e_economic_session" "serve" "--manifest" "/tmp/unit-13232-0/manifest.json" "--db" "/tmp/unit-13232-0/e.db" "--epoch" "2"
+E2 ready pid=13473
+X→E2 first post-recovery authority exchange request={"op":"AcceptExact","payload":{"certificate":{"conditions":[{"authority_revision":"released-exact/1","condition_id":"released-exact/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"released-exact/1"},{"authority_revision":"execute-committed/1","condition_id":"execute-committed/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["S.RequestConditionalExecution"],"validator_capability":"execute-committed/1"},{"authority_revision":"simulation-local-transaction/1","condition_id":"simulation-local-transaction/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["X.OwnAttemptAndCall"],"validator_capability":"simulation-local-transaction/1"},{"authority_revision":"model-coverage/1","condition_id":"model_coverage","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"model-coverage/1"}],"market_dependencies":["TestOnly-market/1407-c1"],"rd11_policy":"controlled-fixture-rd11","responsibility_refs":["d548c1009972bdba11051816c73b64d8ed30ed52b6d411e39501e580a6014666"],"rule_revision":"TestOnly-rule/1407-c1","structure_dependencies":["unit-S-object@8e133bfe5c2161e88a6a327e0ba071e5a5a3fc86bd5e458c309be42c5d0fc18a"]},"certificate_hash":"21d9c809f4dcfd631451b8f023091d2722572f22a9ee800aa0684ad0d116d32f","change":{"kind":"submit","order":{"chong_id":"alpha","command_id":"cmd-alpha","eligibility_ref":"S:cmd-alpha","family_id":"family-alpha","kind":{"kind":"limit","price":14},"projection_manifest":"TestOnly-projection/alpha","quantity":2,"revision":1,"side":"buy"}},"command_id":"cmd-alpha","logical_order_family":"family-alpha","plan_hash":"31a03d6680b4a02d7a85d2e70879d9b4fccf10d0d8cfb29052d4186aa72504b5","projection_kind":"per_leg","session_generation":"1","session_id":"tb03b-unit","symbol":"alpha","x_epoch":1,"x_id":"X"},"protocol":"x-exact-simulation/1"}
+X→E2 first post-recovery authority exchange reply={"error":"IdentityConflict：权威回复信封的身份/epoch/因果/规范字节不符","kind":"Error"}
+direct E2 old authority epoch request={"causal_refs":[],"message_id":"x-authority-03b384a6774852c36aaee504a209115efc9a67d254a40813583cc53e6071746b","payload":{"authority_epoch":"1","authority_id":"E","command":{"certificate":{"conditions":[{"authority_revision":"released-exact/1","condition_id":"released-exact/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"released-exact/1"},{"authority_revision":"execute-committed/1","condition_id":"execute-committed/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["S.RequestConditionalExecution"],"validator_capability":"execute-committed/1"},{"authority_revision":"simulation-local-transaction/1","condition_id":"simulation-local-transaction/1","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["X.OwnAttemptAndCall"],"validator_capability":"simulation-local-transaction/1"},{"authority_revision":"model-coverage/1","condition_id":"model_coverage","coverage_proof":"controlled-coverage","dependency_set":["controlled-dependency"],"evidence_refs":["controlled-evidence"],"failure_result":"Denied","invalidation_sources":["controlled-invalidation"],"required_check_stages":["E.ReleaseExact"],"validator_capability":"model-coverage/1"}],"market_dependencies":["TestOnly-market/1407-c1"],"rd11_policy":"controlled-fixture-rd11","responsibility_refs":["d548c1009972bdba11051816c73b64d8ed30ed52b6d411e39501e580a6014666"],"rule_revision":"TestOnly-rule/1407-c1","structure_dependencies":["unit-S-object@8e133bfe5c2161e88a6a327e0ba071e5a5a3fc86bd5e458c309be42c5d0fc18a"]},"certificate_hash":"21d9c809f4dcfd631451b8f023091d2722572f22a9ee800aa0684ad0d116d32f","change":{"kind":"submit","order":{"chong_id":"alpha","command_id":"cmd-alpha","eligibility_ref":"S:cmd-alpha","family_id":"family-alpha","kind":{"kind":"limit","price":14},"projection_manifest":"TestOnly-projection/alpha","quantity":2,"revision":1,"side":"buy"}},"command_id":"cmd-alpha","logical_order_family":"family-alpha","plan_hash":"31a03d6680b4a02d7a85d2e70879d9b4fccf10d0d8cfb29052d4186aa72504b5","projection_kind":"per_leg","session_generation":"1","session_id":"tb03b-unit","symbol":"alpha","x_epoch":1,"x_id":"X"},"command_hash":"d56002898387c9ee9d7721e8fccb9d434fe5b3af778c8914cf30390603821ff4","command_id":"cmd-alpha","op":"QueryReleasedExact","protocol":"x-exact-authority/1","release_receipt_id":null,"session_generation":"1","session_id":"tb03b-unit"},"payload_hash":"03b384a6774852c36aaee504a209115efc9a67d254a40813583cc53e6071746b","producer_epoch":"1","producer_id":"X","schema_revision":"economic-session/1","session_generation":"1","session_id":"tb03b-unit","source_epoch":"epoch1","source_namespace":"x-sim"}
+direct E2 old authority epoch reply={"causal_refs":[{"message_id":"x-authority-03b384a6774852c36aaee504a209115efc9a67d254a40813583cc53e6071746b","payload_hash":"03b384a6774852c36aaee504a209115efc9a67d254a40813583cc53e6071746b","source_epoch":"epoch1","source_namespace":"x-sim"}],"message_id":"reply-c4add6db89e8aa329bd8af43f8d56a54dfd0c5fb300f1f0623b965f4ed36d434","payload":{"domain_id":"E","error":"StaleWriter：权威查询的 E epoch 不是当前 writer","kind":"Error"},"payload_hash":"accfb46566aa70a9cb962206572360af0be9f603550c74fe3afe60060d47142a","producer_epoch":"2","producer_id":"E:tb03b-unit","schema_revision":"economic-session/1","session_generation":"1","session_id":"tb03b-unit","source_epoch":"2","source_namespace":"economic-session/replies"}
+E2 pid=13473 status=signal: 9 (SIGKILL) stderr-begin
+stderr-end
+X1 pid=13300 status=signal: 9 (SIGKILL) stderr-begin
+x_execution_session storage {"control_instance_id":null,"filesystem":"ext2/ext3","fullfsync":"1","journal_mode":"wal","pid":"13300","read_only":false,"sqlite_version":"3.53.2","sqlite_version_number":"3053002","synchronous":"2"}
+stderr-end
+test economic_session::finance::tests::exact_release::x_e2e::issue2129_real_e_named_recovery_then_x_next_exchange ... FAILED
+
+failures:
+
+failures:
+    economic_session::finance::tests::exact_release::x_e2e::issue2129_real_e_named_recovery_then_x_next_exchange
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3671 filtered out; finished in 3.88s
+
+
+thread 'economic_session::finance::tests::exact_release::x_e2e::issue2129_real_e_named_recovery_then_x_next_exchange' (13233) panicked at src/economic_session/exact_x_e2e_tests.rs:412:5:
+assertion failed: old["payload"]["error"].as_str().unwrap().starts_with("IdentityConflict")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `--lib`
+exit 101 · 1m 24s · large · $0.0016 · bx_sjfvyuvd deleted
