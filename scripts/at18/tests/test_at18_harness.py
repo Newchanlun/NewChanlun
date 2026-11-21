@@ -196,11 +196,18 @@ def test_formal_pregate_replays_frozen_landing_fields_and_cure_inventory():
     assert all(row["jobs"] and row["targets"] for row in catalog)
 
 
-def test_typescript_node_selector_uses_ci_loader_without_changing_js_selection(repo):
+def test_typescript_node_selector_preserves_definition_line(repo):
     from check_selector import command
 
-    check = bind(repo, NODE_CASE, runner="node-test", selector="run.entry+1", source="trial/test_exact.mts")
-    assert command(check, repo)[:4] == ["node", "--import", "tsx", "--test"]
+    # 该语法不能只做类型擦除；注册定义必须与实际 test 事件行相等。
+    text = NODE_CASE.replace("test('run.entry+1', () => {});",
+                             "test('run.entry+1', () => { class X { constructor(readonly n: number) {} }"
+                             " if (new X(2).n !== 2) throw Error('parameter property'); });")
+    check = bind(repo, text, runner="node-test", selector="run.entry+1", source="trial/test_exact.mts")
+    _, contract, _, keys, definitions = load(repo)
+    cid = check["check_id"]
+    result, _ = execute(repo, check, contract, IDENTITY, keys[cid], definitions[cid])
+    assert result["status"] == "PASS" and result["tests"][0]["line"] == definitions[cid][1] == 3
     check["source"]["path"] = "trial/test_exact.mjs"
     assert command(check, repo)[:2] == ["node", "--test"]
 

@@ -1,8 +1,7 @@
 # 闸前落地清册（ADR 0064 R10/R11）
 
 [入口](../landing-census.json)绑定 r5 的四份原始字节：完整 P0 第一父链、收集到的 GitHub 关联、候选信号和逐条裁决。来源提交为
-[`10f41af19c`](https://github.com/Newchanlun/NewChanlun/commit/10f41af19cb46ffa23fa03b5cdc650179328a3fe)，
-原目录为 `.chanlun/review-results/issue1551-amend-inputs-r5/`。[作用域依据](scope-basis.md)解释显式归属；
+[r5 冻结原件（10f41af19c）](https://github.com/Newchanlun/NewChanlun/tree/10f41af19cb46ffa23fa03b5cdc650179328a3fe/.chanlun/review-results/issue1551-amend-inputs-r5)。[作用域依据](scope-basis.md)解释显式归属；
 [落地账](landings.json)列逐票作用域、逐提交的第一父文件差异。
 
 从有完整历史的克隆根目录运行以下命令。把 `F` 设为验收所用的主线提交，`O` 设为新的仓外输出目录；

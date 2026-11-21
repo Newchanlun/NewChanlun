@@ -17,7 +17,7 @@ PR 上的同一入口额外计算真正的 merge-base，禁止原有键、basis 
 | runner | selector 示例 | 执行口径 |
 |---|---|---|
 | `pytest` | `TestContract::test_retry` | 相对登记文件的节点 ID；未指定参数 ID 时包括该定义的全部参数实例，实例须使用稳定的 ASCII 标识（不要将参数值写入 ID）。 |
-| `node-test` | `restarts and resumes` | 文件内唯一的顶层字面 `test` 或 `it` 名，按原名匹配；Node 22，TypeScript 源另用本仓锁定的 `tsx`。 |
+| `node-test` | `restarts and resumes` | 文件内唯一的顶层字面 `test` 或 `it` 名，按原名匹配；Node 22，TypeScript 源用原生 `--experimental-transform-types`，保留实际测试定义的行身份。 |
 | `cargo-test` | `x_execution+production_session/replay::resumes` | `target[+feature,feature]/完整用例路径`；`lib` 选库，`bin:<name>` 选二进制，`test:<name>` 或裸名称选集成测试。从 Cargo target 根沿普通模块声明定位实际定义文件，只接受直接 `#[test]`；不接受路径重写、item 宏展开或自定义 harness。Linux 用锁文件和 libtest 精确运行。 |
 | `command` | `scripts/check-example` | 直接执行登记的可执行文件，不经 shell 拼接，不接受额外参数。期望一次运行，必须键感知。 |
 
