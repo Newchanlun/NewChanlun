@@ -1010,6 +1010,16 @@ fn audit_core_fresh_with_policy(
     } else {
         None
     };
+    let mut rw_proofs = if ordinary_source.is_none()
+        && !verified_history.qualified()
+        && verified_history.manifest_covered()
+        && allow_ordinary
+        && history::ordinary_proofs_enabled()
+    {
+        Some(source_audit::OrdinaryProofs::default())
+    } else {
+        None
+    };
     let mut previous = -1i64;
     for cut in cuts {
         let mut audit_cut =
@@ -1049,6 +1059,19 @@ fn audit_core_fresh_with_policy(
             verified_history.audit_cut(tx, cut, deadline, max_render_bytes, budget, |store| {
                 audit_cut(store, None)
             })?;
+        } else if verified_history.manifest_covered() {
+            let result =
+                verified_history.audit_cut_manifest_covered(tx, cut, &mut store, |store| {
+                    audit_cut(store, rw_proofs.as_mut())
+                });
+            if result.is_ok() {
+                if let Some(proofs) = rw_proofs.as_mut() {
+                    proofs.commit();
+                }
+            } else {
+                rw_proofs = None;
+            }
+            result?;
         } else {
             audit_cut(&mut store, None)?;
         }

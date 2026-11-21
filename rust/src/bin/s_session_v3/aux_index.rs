@@ -150,6 +150,9 @@ fn array_elements(
     if r.view().kind() != Kind::Array {
         return Err(err("预期数组"));
     }
+    if s.audit_full_array_scan() {
+        return s.lookup_array_ref(r.view()).map_err(err);
+    }
     let mut out = bj::new_work(s.allocation_budget().as_ref());
     for i in 0..r.view().extent().ok_or_else(|| err("数组缺长度"))? {
         s.native_codec_room(&mut out, 1).map_err(err)?;
@@ -158,11 +161,13 @@ fn array_elements(
     }
     Ok(out)
 }
-fn root(s: &mut (impl CodecRead + ?Sized), b: &[u8]) -> Result<RefValue, String> {
+fn root_header(s: &mut (impl CodecRead + ?Sized), b: &[u8]) -> Result<RefValue, String> {
     let d: NodeDigest = b.try_into().map_err(|_| err("根不是32字节"))?;
-    let r = s
-        .content_ref_view(sc::FixedRoot::new(&d).as_str())
-        .map_err(err)?;
+    s.content_ref_view(sc::FixedRoot::new(&d).as_str())
+        .map_err(err)
+}
+fn root(s: &mut (impl CodecRead + ?Sized), b: &[u8]) -> Result<RefValue, String> {
+    let r = root_header(s, b)?;
     s.verify_many_ref_fresh([r.view()], sc::Mode::Public)
         .map_err(err)?;
     Ok(r)
@@ -2028,6 +2033,146 @@ pub(super) fn load(
     let owned_budget = s.allocation_budget();
     let mut out = Index::new(owned_budget.clone());
     let mut rt = Runtime::default();
+    if owned_budget.is_none() && s.audit_full_array_scan() {
+        let mut raw_w = bj::new_work(None);
+        let mut raw_r = bj::new_work(None);
+        let mut raw_o = bj::new_work(None);
+        let mut refs = bj::new_work(None);
+        let mut stmt = snap.prepare(SnapshotQuery::WITNESSES).map_err(err)?;
+        while let Some(mut row) = stmt.next().map_err(err)? {
+            let id =
+                TextValue::from_sql_admitted(&mut row, 0, None, s.codec_work()).map_err(err)?;
+            let object_id =
+                TextValue::from_sql_admitted(&mut row, 1, None, s.codec_work()).map_err(err)?;
+            let slot: i64 = row.integer(2).map_err(err)?;
+            let merged_index: i64 = row.integer(6).map_err(err)?;
+            let generated = root_header(s, row.blob(3).map_err(err)?)?;
+            let wire = root_header(s, row.blob(4).map_err(err)?)?;
+            let first: i64 = row.integer(5).map_err(err)?;
+            check_generation(first, latest)?;
+            s.native_codec_room(&mut refs, 2).map_err(err)?;
+            refs.try_push(s.native_ref_clone(&generated).map_err(err)?)
+                .map_err(err)?;
+            refs.try_push(s.native_ref_clone(&wire).map_err(err)?)
+                .map_err(err)?;
+            s.native_codec_room(&mut raw_w, 1).map_err(err)?;
+            raw_w
+                .try_push((id, object_id, slot, merged_index, generated, wire, first))
+                .map_err(err)?;
+        }
+        stmt.finalize().map_err(err)?;
+        let mut stmt = snap.prepare(SnapshotQuery::RELATIONS).map_err(err)?;
+        while let Some(mut row) = stmt.next().map_err(err)? {
+            let first: i64 = row.integer(5).map_err(err)?;
+            check_generation(first, latest)?;
+            let generated = root_header(s, row.blob(4).map_err(err)?)?;
+            let id =
+                TextValue::from_sql_admitted(&mut row, 0, None, s.codec_work()).map_err(err)?;
+            let subject =
+                TextValue::from_sql_admitted(&mut row, 1, None, s.codec_work()).map_err(err)?;
+            let relation_type =
+                TextValue::from_sql_admitted(&mut row, 2, None, s.codec_work()).map_err(err)?;
+            let object =
+                TextValue::from_sql_admitted(&mut row, 3, None, s.codec_work()).map_err(err)?;
+            s.native_codec_room(&mut refs, 1).map_err(err)?;
+            refs.try_push(s.native_ref_clone(&generated).map_err(err)?)
+                .map_err(err)?;
+            s.native_codec_room(&mut raw_r, 1).map_err(err)?;
+            raw_r
+                .try_push((id, subject, relation_type, object, generated, first))
+                .map_err(err)?;
+        }
+        stmt.finalize().map_err(err)?;
+        let mut stmt = snap.prepare(SnapshotQuery::OBSERVATIONS).map_err(err)?;
+        while let Some(mut row) = stmt.next().map_err(err)? {
+            let id =
+                TextValue::from_sql_admitted(&mut row, 0, None, s.codec_work()).map_err(err)?;
+            let kind =
+                TextValue::from_sql_admitted(&mut row, 1, None, s.codec_work()).map_err(err)?;
+            let window_start: Option<i64> = row.optional_integer(2).map_err(err)?;
+            let batch =
+                TextValue::from_sql_admitted(&mut row, 3, None, s.codec_work()).map_err(err)?;
+            check_batch(&batch)?;
+            let generated = root_header(s, row.blob(4).map_err(err)?)?;
+            let wire = root_header(s, row.blob(5).map_err(err)?)?;
+            let first: i64 = row.integer(6).map_err(err)?;
+            check_generation(first, latest)?;
+            s.native_codec_room(&mut refs, 2).map_err(err)?;
+            refs.try_push(s.native_ref_clone(&generated).map_err(err)?)
+                .map_err(err)?;
+            refs.try_push(s.native_ref_clone(&wire).map_err(err)?)
+                .map_err(err)?;
+            s.native_codec_room(&mut raw_o, 1).map_err(err)?;
+            raw_o
+                .try_push((id, kind, window_start, batch, generated, wire, first))
+                .map_err(err)?;
+        }
+        stmt.finalize().map_err(err)?;
+        s.verify_many_ref(refs.iter().map(RefValue::view), sc::Mode::Public)
+            .map_err(err)?;
+        drop(refs);
+        for (id, object_id, slot, merged_index, generated, wire, first) in raw_w {
+            exact(&generated, 9)?;
+            if text(s, &generated, "witness_id")? != id
+                || text(s, &generated, "object_id")? != object_id
+                || integer(s, &generated, "slot")? != slot
+                || !(0..3).contains(&slot)
+            {
+                return Err(err("见证索引与原件不符"));
+            }
+            verify_witness_id(s, &generated, &id, &object_id, slot, merged_index)?;
+            if rt.witness_wire(s, &generated)? != wire {
+                return Err(err("见证wire与生成原件不符"));
+            }
+            s.native_codec_room(&mut out.witnesses, 1).map_err(err)?;
+            out.witnesses
+                .try_push(Witness {
+                    id,
+                    object_id,
+                    slot,
+                    merged_index,
+                    generated,
+                    wire,
+                    first,
+                })
+                .map_err(err)?;
+        }
+        for (id, subject, relation_type, object, generated, first) in raw_r {
+            let r = relation(s, generated, first)?;
+            if r.id != id
+                || r.subject != subject
+                || r.relation_type != relation_type
+                || r.object != object
+            {
+                return Err(err("关系索引与原件不符"));
+            }
+            s.native_codec_room(&mut out.relations, 1).map_err(err)?;
+            out.relations.try_push(r).map_err(err)?;
+        }
+        for (id, kind, window_start, batch, generated, wire, first) in raw_o {
+            exact(&generated, 6)?;
+            if text(s, &generated, "kind")? != kind
+                || window(s, &generated, "window_start")? != window_start
+                || observation_id(s, &generated)? != id
+                || observation_wire(s, &generated, &id, Some(&batch))? != wire
+            {
+                return Err(err("观察索引与出生原件不符"));
+            }
+            s.native_codec_room(&mut out.observations, 1).map_err(err)?;
+            out.observations
+                .try_push(Observation {
+                    id,
+                    kind,
+                    window_start,
+                    batch: Some(batch),
+                    generated,
+                    wire,
+                    first,
+                })
+                .map_err(err)?;
+        }
+        return Ok(out);
+    }
     let mut stmt = snap.prepare(SnapshotQuery::WITNESSES).map_err(err)?;
     while let Some(mut row) = stmt.next().map_err(err)? {
         let entry = audit_persisted_witness(&mut row, s, latest, owned_budget.as_ref(), &mut rt)?;

@@ -1367,6 +1367,11 @@ fn resolve_objects(
     }
     let mut seen = NativeSet::default();
     let mut cursor = store.array_cursor(array.view()).map_err(err)?;
+    let items = if cursor.is_none() && store.audit_full_array_scan() {
+        Some(store.lookup_array_ref(array.view()).map_err(err)?)
+    } else {
+        None
+    };
     for i in 0..n {
         let path = PublicationPath::new(
             store,
@@ -1377,6 +1382,8 @@ fn resolve_objects(
         )?;
         let record = if let Some(cursor) = &mut cursor {
             store.next_array_member(cursor).map_err(err)?
+        } else if let Some(items) = &items {
+            store.native_ref_clone(&items[i as usize]).map_err(err)?
         } else {
             store
                 .lookup_ref(array.view(), &[PathStep::Index(i)])
@@ -3106,6 +3113,23 @@ impl<'scope, 'tx> PublicationProjection<'scope, 'tx> {
         if !tx.is_readonly(rusqlite::MAIN_DB).map_err(err)?
             || !store.ordinary_bound_births_qualified()
         {
+            return Err(err("ordinary投影需要同事务只读原件"));
+        }
+        Ok(Self {
+            transaction: tx,
+            reader: store as *const _ as *const (),
+            previous: Default::default(),
+            current: Default::default(),
+            batch_previous: Default::default(),
+            batch_current: Default::default(),
+            peak_bytes: 0,
+        })
+    }
+    pub(crate) fn new_for_snapshot(
+        tx: &'scope Transaction<'tx>,
+        store: &HashReader<'_>,
+    ) -> Result<Self, String> {
+        if !store.ordinary_bound_births_qualified() {
             return Err(err("ordinary投影需要同事务只读原件"));
         }
         Ok(Self {

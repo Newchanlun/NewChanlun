@@ -991,6 +991,21 @@ impl HistoryObjects<'_> {
         at_cut_projected_bound(s, self.layout, &self.entries, g, budget, None, true)
     }
 
+    pub(super) fn has_native(&self) -> bool {
+        self.native.is_some()
+    }
+
+    pub(super) fn at_cut_loaded_births(
+        &mut self,
+        s: &mut super::history::HashReader<'_>,
+        g: i64,
+    ) -> Result<(Built, Built, Built), String> {
+        if !s.ordinary_bound_births_qualified() || self.native.is_some() {
+            return Err(err("出生根复用不属于普通只读完整索引上下文"));
+        }
+        at_cut_projected_bound(s, self.layout, &self.entries, g, None, None, true)
+    }
+
     pub(super) fn at_cut(
         &mut self,
         s: &mut super::history::HashReader<'_>,

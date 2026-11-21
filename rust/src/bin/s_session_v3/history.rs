@@ -656,6 +656,7 @@ pub(super) struct VerifiedPublicHistory<'scope, 'tx> {
     history: IndexedHistory,
     transaction: &'scope ReadSnapshot<'tx>,
     qualified: bool,
+    manifest_covered: bool,
     materials: Option<std::cell::RefCell<super::ordinary_materials::OrdinaryAuditMaterials>>,
 }
 impl<'scope, 'tx> VerifiedPublicHistory<'scope, 'tx> {
@@ -667,6 +668,38 @@ impl<'scope, 'tx> VerifiedPublicHistory<'scope, 'tx> {
     }
     pub(super) fn qualified(&self) -> bool {
         self.qualified
+    }
+    pub(super) fn manifest_covered(&self) -> bool {
+        self.manifest_covered
+    }
+    pub(super) fn audit_cut_manifest_covered<R>(
+        &self,
+        snap: &ReadSnapshot<'_>,
+        cut: &PublishedCut,
+        store: &mut HashReader<'_>,
+        action: impl FnOnce(&mut HashReader<'_>) -> Result<R, String>,
+    ) -> Result<R, String> {
+        if !self.manifest_covered
+            || !snap.same(self.transaction)
+            || !self
+                .history
+                .cuts
+                .iter()
+                .any(|known| std::ptr::eq(known, cut))
+        {
+            return Err(err("Public覆盖事务/cut绑定不符"));
+        }
+        let prev_roots = store.history_public_roots;
+        let prev_count = store.count_history_coverage;
+        store.history_public_roots = Some([
+            cut.roots.generated_state.view().digest().map_err(err)?,
+            cut.delta.view().digest().map_err(err)?,
+        ]);
+        store.count_history_coverage = false;
+        let result = action(store);
+        store.history_public_roots = prev_roots;
+        store.count_history_coverage = prev_count;
+        result
     }
     pub(super) fn ordinary_source_session(&self) -> Option<OrdinarySourceSession<'_, 'scope, 'tx>> {
         (self.qualified && ordinary_proofs_enabled()).then(|| OrdinarySourceSession {
@@ -763,6 +796,11 @@ pub(super) fn read_verified_public_history<'scope, 'tx, 'raw>(
     materials: Option<&mut super::ordinary_materials::OrdinaryAuditMaterials>,
     policy: SourcePolicy,
 ) -> Result<VerifiedPublicHistory<'scope, 'tx>, String> {
+    let manifest_covered = policy == SourcePolicy::Ordinary
+        && capture.is_none()
+        && work.is_none()
+        && budget.is_none()
+        && materials.is_none();
     let qualified = policy == SourcePolicy::Ordinary
         && capture.is_none()
         && work.is_none()
@@ -811,6 +849,7 @@ pub(super) fn read_verified_public_history<'scope, 'tx, 'raw>(
         history,
         transaction: snap,
         qualified,
+        manifest_covered,
         materials: originals.map(std::cell::RefCell::new),
     })
 }
@@ -1094,6 +1133,12 @@ fn read_indexed_history_inner(
     let publication_memo = content_publication::NativePublicationMemo::new(&store);
     let mut ordinary_publication = if bound_births_qualified && ordinary_proofs_enabled() {
         Some(snap.publication_projection(&store)?)
+    } else if manifest_coverage
+        && budget.is_none()
+        && store.ordinary_bound_births_qualified()
+        && ordinary_proofs_enabled()
+    {
+        Some(snap.publication_projection_snapshot(&store)?)
     } else {
         None
     };
@@ -1381,6 +1426,11 @@ fn audit_one_published_cut<'capture>(
         snap.trace_begin("ord_obj_at_cut");
         let at_cut = if bound_births_qualified {
             objects.at_cut_bound_births(snap, store, generation, budget)
+        } else if budget.is_none()
+            && store.ordinary_bound_births_qualified()
+            && !objects.has_native()
+        {
+            objects.at_cut_loaded_births(store, generation)
         } else {
             objects.at_cut(store, generation, budget)
         };
@@ -3179,6 +3229,7 @@ pub(crate) enum SourcePolicy {
 
 pub(crate) struct HashReader<'a> {
     history_public_roots: Option<[NodeDigest; 2]>,
+    count_history_coverage: bool,
     policy: SourcePolicy,
     source: ReadOwner<'a>,
     overlay: OverlayOwner,
@@ -3528,6 +3579,7 @@ impl<'a> HashReader<'a> {
             audit_full_arrays: false,
             policy: SourcePolicy::Ordinary,
             history_public_roots: None,
+            count_history_coverage: true,
         }
     }
     #[cfg(test)]
@@ -3639,6 +3691,7 @@ impl<'a> HashReader<'a> {
             audit_full_arrays: false,
             policy: SourcePolicy::Ordinary,
             history_public_roots: None,
+            count_history_coverage: true,
         }
     }
     #[cfg(test)]
@@ -3661,6 +3714,7 @@ impl<'a> HashReader<'a> {
             audit_full_arrays: false,
             policy: SourcePolicy::Ordinary,
             history_public_roots: None,
+            count_history_coverage: true,
         }
     }
     #[cfg(test)]
@@ -3684,6 +3738,7 @@ impl<'a> HashReader<'a> {
             audit_full_arrays: false,
             policy: SourcePolicy::Ordinary,
             history_public_roots: None,
+            count_history_coverage: true,
         }
     }
     #[cfg(all(test, feature = "s_incremental"))]
@@ -3711,6 +3766,7 @@ impl<'a> HashReader<'a> {
             audit_full_arrays: false,
             policy: SourcePolicy::Ordinary,
             history_public_roots: None,
+            count_history_coverage: true,
         }
     }
 }
@@ -4072,7 +4128,9 @@ impl CodecRead for HashReader<'_> {
                 ));
             }
             #[cfg(test)]
-            super::admission_private::s4_read_trace::coverage(1);
+            if self.count_history_coverage {
+                super::admission_private::s4_read_trace::coverage(1);
+            }
             return sc::audit_verify_refview_headers(self, [r]);
         }
         self.verify_ref(r, mode)

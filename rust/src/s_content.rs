@@ -1767,6 +1767,9 @@ fn utf8_step(state: Utf8State, byte: u8) -> Option<Utf8State> {
 }
 
 fn utf8_feed(state: Utf8State, bytes: &[u8]) -> Option<Utf8State> {
+    if state == Utf8State::Empty && std::str::from_utf8(bytes).is_ok() {
+        return Some(Utf8State::Empty);
+    }
     let mut s = state;
     for &b in bytes {
         s = utf8_step(s, b)?;
