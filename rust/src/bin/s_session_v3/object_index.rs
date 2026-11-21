@@ -1912,7 +1912,11 @@ fn load_r5_deferred(
     s: &mut (impl CodecRead + ?Sized),
     record: sc::RefView<'_>,
 ) -> Result<sc::CodecVec<TextValue>, PublishError> {
-    let payload = field_ref(s, record, "payload")?;
+    // 独立生成/回放存 JsonText 原件，只有公开投影才把它解成 payload 对象。
+    let payload = field_ref(s, record, "payload_json")?;
+    let payload = s
+        .lookup_ref(payload.view(), &[PathStep::JsonText])
+        .map_err(publish_err)?;
     r5_deferred_from_payload(s, payload.view())
 }
 
