@@ -1891,7 +1891,7 @@ def test_reopen_blocks_inline_comment_reuse_even_when_github_diff_line_shifts() 
         round_number=plan2.round_number,
         head_sha=plan2.diff_head_sha,
         panel=DEFAULT_PANEL,
-        finder_batches=_batches_for_panel([], panel=DEFAULT_PANEL, round_number=2),
+        finder_batches=_batches_for_panel([f_r1], panel=DEFAULT_PANEL, round_number=2),
         history=plan2.history,
     )
     verified2 = parse_verifier_output(
@@ -3350,14 +3350,14 @@ def test_r7_finding7_explicit_file_line_reply_key_no_collision_and_conflict_guar
     assert f"comment:9:resolved:{f_a.finding_id}" in e1.consumed_reply_keys
     assert "comment:9:loc:b.py:2" not in e1.consumed_reply_keys
 
-    # 第 2 轮：B 依然有效且可正常解除 B
+    # 第 2 轮：B 在新 HEAD 重新定位后，B 对应回复依然有效且可正常解除 B
     plan2 = plan_next_round(BASE_SHA, HEAD_2, [e1], author_replies=replies)
     assert [r.reply_key for r in plan2.author_replies] == ["comment:9:loc:b.py:2"]
     c2 = build_round_candidates(
         round_number=2,
         head_sha=HEAD_2,
         panel=DEFAULT_PANEL,
-        finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+        finder_batches=_batches_for_panel([f_b], round_number=2, head_sha=HEAD_2),
         history=plan2.history,
     )
     v2 = parse_verifier_output(
@@ -3634,8 +3634,8 @@ def test_r8_important3_decodes_html_entities_before_non_empty_reason_check() -> 
     assert parse_one(f"[{fid}] 不修：&#160;&#xFEFF;") == ()
     assert parse_one(f"[{fid}] 不修：<code>&#8203;</code>") == ()
 
-    # 直接构造含空实体理由的 AuthorReply 也必须抛 ConvergenceError
-    for bad_reason in ("&#8203;", "&#x200B;", "&ZeroWidthSpace;&nbsp;", "\x07\x1b", "\u2028\u2029"):
+    # 直接构造仅含不可见/空白字符理由的 AuthorReply 必须抛 ConvergenceError（不做二次 HTML 实体解码）
+    for bad_reason in ("\u200b", "\u200b\u00a0", "\u00a0\ufeff", "\x07\x1b", "\u2028\u2029"):
         with pytest.raises(ConvergenceError):
             AuthorReply(fid, None, None, bad_reason, "892", "alice")
 
@@ -3924,3 +3924,479 @@ def test_r8_nit1_to_history_entry_validates_and_uses_own_non_blocking_records() 
     assert [vf.finding.line for vf in r_b.omitted_non_blocking] == [2]
     e_b = dec_b.to_history_entry(rendered=r_b)
     assert [vf.finding.line for vf in e_b.pending_non_blocking] == [2]
+
+
+# ── 10. R9 精准回归：Codex R8 全部 6 项 Important 最小反例 ──────────────────────
+
+
+def test_r9_important1_cross_head_stale_location_blocks_coordinate_binding_and_persists() -> None:
+    """R8 Important 1：跨 HEAD 结转且未在新 HEAD 重新定位的旧发现，严禁按行号/坐标绑定当前评论，仅允许显式 [finding_id]。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+
+    # 第 1 轮（HEAD_1）确认 demo.py:42 的 Important
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1], round_number=1, head_sha=HEAD_1),
+    )
+    assert c1.stale_location_fingerprints == frozenset()
+    v1 = parse_verifier_output(
+        _verifier_payload(c1, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r1 确认"}]),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+    assert e1.stale_location_fingerprints == frozenset()
+
+    # 第 2 轮切 HEAD_2，双 finder 均返回空 -> f1 保留 line=42 供展示，但记入 stale_location_fingerprints
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+        history=(e1,),
+    )
+    assert c2.findings[0].line == 42
+    assert c2.stale_location_fingerprints == frozenset({f1.finding_id})
+
+    # 新 HEAD 上 side="RIGHT", line=42 的无 ID 行内回复 -> 0 匹配，parse_verifier_output 与 VerifiedRound 均抛 ConvergenceError
+    inline_r2 = parse_wontfix_replies(
+        [
+            {
+                "id": 910,
+                "user": {"login": "alice", "type": "User"},
+                "path": "pilot1742/demo.py",
+                "side": "RIGHT",
+                "line": 42,
+                "body": "不修：此行是测试夹具",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert len(inline_r2) == 1
+    assert bind_author_replies(c2.findings, inline_r2, stale_location_fingerprints=c2.stale_location_fingerprints) == {}
+
+    # 显式 file:line 与仅 file 坐标回复对过期发现同样禁止绑定
+    loc_replies = parse_wontfix_replies(
+        [
+            {"id": 911, "user": {"login": "alice", "type": "User"}, "body": "pilot1742/demo.py:42 不修：旧行号"},
+            {"id": 912, "user": {"login": "alice", "type": "User"}, "body": "不修(pilot1742/demo.py)：仅文件"},
+        ],
+        allowed_authors={"alice"},
+    )
+    assert bind_author_replies(c2.findings, loc_replies, stale_location_fingerprints=c2.stale_location_fingerprints) == {}
+
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                c2,
+                [{"finding_id": f1.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图按旧行号放行"}],
+            ),
+            c2,
+            verifier_model="claude-opus-5-5",
+            author_replies=inline_r2,
+        )
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(
+            c2,
+            (
+                VerifiedFinding(
+                    finding=c2.findings[0],
+                    verdict=VerificationVerdict.RESOLVED_BY_WONTFIX,
+                    verifier_model="claude-opus-5-5",
+                    verifier_evidence="直接构造绕过旧行号",
+                    round_number=2,
+                    head_sha=HEAD_2,
+                    author_reply=inline_r2[0],
+                ),
+            ),
+        )
+
+    # 若第 2 轮仍确认未解除，写入 RoundHistoryEntry 后第 3 轮即使停在 HEAD_2 也绝不丢失过期标记
+    v2_still = parse_verifier_output(
+        _verifier_payload(c2, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r2 仍未修"}]),
+        c2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec2_still = evaluate_round(v2_still)
+    assert dec2_still.stale_location_fingerprints == frozenset({f1.finding_id})
+    e2_still = dec2_still.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2_still))
+    assert e2_still.stale_location_fingerprints == frozenset({f1.finding_id})
+
+    c3_same_head = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_2),
+        history=(e1, e2_still),
+    )
+    assert c3_same_head.stale_location_fingerprints == frozenset({f1.finding_id})
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                c3_same_head,
+                [{"finding_id": f1.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "第 3 轮同 HEAD 试图借旧行号放行"}],
+            ),
+            c3_same_head,
+            verifier_model="claude-opus-5-5",
+            author_replies=inline_r2,
+        )
+
+    # 显式 [finding_id] 仍能精确解除过期发现
+    explicit_id_reply = parse_wontfix_replies(
+        [
+            {
+                "id": 913,
+                "user": {"login": "alice", "type": "User"},
+                "body": f"[{f1.finding_id}] 不修：显式指纹确认设计如此",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    v2_explicit = parse_verifier_output(
+        _verifier_payload(
+            c2,
+            [{"finding_id": f1.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "显式 ID 核实通过"}],
+        ),
+        c2,
+        verifier_model="claude-opus-5-5",
+        author_replies=explicit_id_reply,
+    )
+    assert v2_explicit.verdicts[0].verdict is VerificationVerdict.RESOLVED_BY_WONTFIX
+
+    # 第 2 轮 finder 在 HEAD_2 的 demo.py:20 重新定位到同指纹 -> 清除过期标记，第 20 行行内回复正常解除
+    f1_relocated = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=20)
+    assert f1_relocated.finding_id == f1.finding_id
+    c2_reloc = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1_relocated], round_number=2, head_sha=HEAD_2),
+        history=(e1,),
+    )
+    assert c2_reloc.stale_location_fingerprints == frozenset()
+    assert c2_reloc.findings[0].line == 20
+    inline_line20 = parse_wontfix_replies(
+        [
+            {
+                "id": 914,
+                "user": {"login": "alice", "type": "User"},
+                "path": "pilot1742/demo.py",
+                "side": "RIGHT",
+                "line": 20,
+                "body": "不修：新行号处已确认夹具逻辑",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    v2_reloc = parse_verifier_output(
+        _verifier_payload(
+            c2_reloc,
+            [{"finding_id": f1.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "重新定位行号后核实通过"}],
+        ),
+        c2_reloc,
+        verifier_model="claude-opus-5-5",
+        author_replies=inline_line20,
+    )
+    assert v2_reloc.verdicts[0].verdict is VerificationVerdict.RESOLVED_BY_WONTFIX
+
+    # RoundHistoryEntry 校验 stale_location_fingerprints 必须是 unresolved_important 的子集
+    with pytest.raises(ConvergenceError):
+        RoundHistoryEntry(
+            1,
+            HEAD_1,
+            frozenset(),
+            (),
+            panel=DEFAULT_PANEL,
+            finder_session_ids=frozenset({"s-stale-1", "s-stale-2"}),
+            stale_location_fingerprints=frozenset({f1.finding_id}),
+        )
+
+
+def test_r9_important2_cross_blank_line_html_comment_and_raw_text_state() -> None:
+    """R8 Important 2：跨空行 HTML 注释与原始文本标签状态持久传递，防止注释内 </blockquote> 提前关闭抑制。"""
+    fid = "a98df8e465064919"
+
+    def parse_one(body: str) -> tuple[AuthorReply, ...]:
+        return parse_wontfix_replies(
+            [{"id": 920, "user": {"login": "alice", "type": "User"}, "body": body}],
+            allowed_authors={"alice"},
+        )
+
+    # 核心反例：未闭 HTML 注释跨空行包裹 </blockquote>，后续段落仍在 <blockquote> 内 -> 0 条回复
+    tricky_blockquote = f"<blockquote>\n<!-- note\n\n</blockquote> -->\n\n[{fid}] 不修：示例\n\n</blockquote>"
+    assert parse_one(tricky_blockquote) == ()
+
+    f_target = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="空值解引用",
+        failure_scenario="配置缺失时直接访问属性触发 AttributeError",
+    )
+    tricky_for_target = f"<blockquote>\n<!-- note\n\n</blockquote> -->\n\n[{f_target.finding_id}] 不修：示例\n\n</blockquote>"
+    parsed_tricky = parse_one(tricky_for_target)
+    assert parsed_tricky == ()
+    cand = _candidates([f_target], round_number=1, head_sha=HEAD_1)
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [{"finding_id": f_target.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图借跨空行注释关闭 blockquote"}],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+            author_replies=parsed_tricky,
+        )
+
+    # 跨空行纯 HTML 注释 -> 0 条；闭合后新段落恢复可见
+    assert parse_one(f"<!--\n\n[{fid}] 不修：示例\n\n-->") == ()
+    after_comment = parse_one(f"<!-- note\n\n[{fid}] 不修：示例\n\n-->\n\n[def67890] 不修：注释后真理由")
+    assert [(r.finding_id, r.reason) for r in after_comment] == [("def67890", "注释后真理由")]
+
+    # 注释内既有段落又有伪 </blockquote>，闭合注释后再经真实 </blockquote> 才恢复可见
+    nested_comment = (
+        f"<blockquote>\n<!--\n\n[{fid}] 不修：注释内示例\n\n</blockquote> -->\n\n"
+        f"[def67890] 不修：仍在引用内\n\n</blockquote>\n\n[12345678] 不修：闭合后真理由"
+    )
+    assert [(r.finding_id, r.reason) for r in parse_one(nested_comment)] == [("12345678", "闭合后真理由")]
+
+    # <div> 内开未闭注释，段落中裸 --> 会被 CommonMark 转义为 --&gt;，注释不提前关闭
+    assert parse_one(f"<div>\n<!--\n\n[{fid}] 不修：示例\n\n-->\n\n[def67890] 不修：仍在注释内") == ()
+
+    # 短注释 <!--> 与 <!---> 立即闭合，不吞掉外层 <blockquote>
+    assert parse_one(f"<blockquote>\n<!-->\n\n[{fid}] 不修：示例\n\n</blockquote>") == ()
+    assert parse_one(f"<blockquote>\n<!--->\n\n[{fid}] 不修：示例\n\n</blockquote>") == ()
+
+    # 跨空行原始文本标签 <script>/<style>/<textarea> 状态持久传递，闭合后恢复可见
+    for raw_tag in ("script", "style", "textarea"):
+        body = f"<div>\n<{raw_tag}>\n\n[{fid}] 不修：屏蔽示例\n\n</{raw_tag}>\n\n[def67890] 不修：闭合后真理由"
+        assert [(r.finding_id, r.reason) for r in parse_one(body)] == [("def67890", "闭合后真理由")]
+
+
+def test_r9_important3_and_important4_single_entity_decode_and_emphasis_stripping() -> None:
+    """R8 Important 3 + 4：严格单次实体解码 + 剥离配对排版强调/删除线定界符，封杀 **&#8203;** 且保留 `&nbsp;` / &amp;nbsp;。"""
+    fid = "a98df8e465064919"
+
+    def parse_one(body: str) -> tuple[AuthorReply, ...]:
+        return parse_wontfix_replies(
+            [{"id": 930, "user": {"login": "alice", "type": "User"}, "body": body}],
+            allowed_authors={"alice"},
+        )
+
+    # Important 3：配对强调/删除线包裹不可见实体或空白/注释 -> 剥离定界符后为空 -> 0 条回复
+    for empty_formatted in (
+        f"[{fid}] 不修：**&#8203;**",
+        f"[{fid}] 不修：*&#8203;*",
+        f"[{fid}] 不修：_&#8203;_",
+        f"[{fid}] 不修：__&#8203;__",
+        f"[{fid}] 不修：___&#8203;___",
+        f"[{fid}] 不修：~~&#8203;~~",
+        f"[{fid}] 不修：***&ZeroWidthSpace;***",
+        f"[{fid}] 不修：**&nbsp;**",
+        f"[{fid}] 不修：**&#160;**",
+        f"[{fid}] 不修：&#8203;",
+        f"[{fid}] 不修：**<!-- 注释 -->**",
+        f"[{fid}] 不修：**[&#8203;](https://example.com)**",
+        f"[{fid}] 不修：[**&#8203;**](https://example.com)",
+        f"[{fid}] 不修：**&#8203;** _&#8203;_ ~~&#8203;~~",
+    ):
+        assert parse_one(empty_formatted) == (), f"expected 0 replies for {empty_formatted!r}"
+
+    # Important 4：行内代码跨度 `&nbsp;` 与普通文本 &amp;nbsp; 严格单次解码 -> 均保留字面 "&nbsp;"
+    r_code_nbsp = parse_one(f"[{fid}] 不修：`&nbsp;`")
+    assert [(r.finding_id, r.reason) for r in r_code_nbsp] == [(fid, "&nbsp;")]
+
+    r_amp_nbsp = parse_one(f"[{fid}] 不修：&amp;nbsp;")
+    assert [(r.finding_id, r.reason) for r in r_amp_nbsp] == [(fid, "&nbsp;")]
+
+    r_code_zwsp = parse_one(f"[{fid}] 不修：`&#8203;`")
+    assert [(r.finding_id, r.reason) for r in r_code_zwsp] == [(fid, "&#8203;")]
+
+    r_amp_zwsp = parse_one(f"[{fid}] 不修：&amp;#8203;")
+    assert [(r.finding_id, r.reason) for r in r_amp_zwsp] == [(fid, "&#8203;")]
+
+    # AuthorReply.__post_init__ 不做二次 html.unescape，直接接受已解码的字面 "&nbsp;"
+    direct_literal = AuthorReply(fid, None, None, "&nbsp;", "931", "alice")
+    assert direct_literal.reason == "&nbsp;"
+
+    # 正常排版强调/删除线剥离后保留真实理由；转义符、代码跨度、词内下划线与空白包围星号保持字面
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：**兼容旧配置**")] == [(fid, "兼容旧配置")]
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：**a _b_ ~~c~~**")] == [(fid, "a b c")]
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：foo_bar_baz")] == [(fid, "foo_bar_baz")]
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：a * b * c")] == [(fid, "a * b * c")]
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：\\*\\*&#8203;\\*\\*")] == [(fid, "****")]
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：`**`")] == [(fid, "**")]
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：&#42;foo&#42;")] == [(fid, "*foo*")]
+
+
+def test_r9_important5_history_chain_enforces_monotonic_source_models() -> None:
+    """R8 Important 5：历史链未解除项 source_models 单调不减，禁止丢掉原 finder 绕过异家族核实。"""
+    f_r1 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/monotonic.py",
+        line=18,
+        source_models=("gpt-6-astra",),
+    )
+    e1 = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({f_r1.finding_id}),
+        (f_r1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r1-m-1", "r1-m-2"}),
+    )
+
+    panel_r2 = ReviewPanel(
+        finder_models=("gemini-2.5-pro", "gemini-2.5-flash"),
+        verifier_model="claude-opus-5-5",
+        require_verifier=True,
+    )
+    # 伪造第 2 轮：保留同指纹却丢掉原来源 gpt-6-astra，仅留 gemini-2.5-pro
+    f_r2_shrunk = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/monotonic.py",
+        line=18,
+        source_models=("gemini-2.5-pro",),
+    )
+    assert f_r2_shrunk.finding_id == f_r1.finding_id
+    e2_shrunk = RoundHistoryEntry(
+        2,
+        HEAD_2,
+        frozenset({f_r1.finding_id}),
+        (f_r2_shrunk,),
+        panel=panel_r2,
+        finder_session_ids=frozenset({"r2-m-1", "r2-m-2"}),
+    )
+
+    panel_r3_gpt_verifier = ReviewPanel(
+        finder_models=("gemini-2.5-pro", "gemini-2.5-flash"),
+        verifier_model="gpt-6-astra",
+        require_verifier=True,
+    )
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_3, (e1, e2_shrunk))
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(
+            round_number=3,
+            head_sha=HEAD_3,
+            panel=panel_r3_gpt_verifier,
+            finder_batches=_batches_for_panel([], panel=panel_r3_gpt_verifier, round_number=3, head_sha=HEAD_3),
+            history=(e1, e2_shrunk),
+        )
+
+    # 正向对照：第 2 轮完整保留原来源 + 新来源时，plan_next_round 通过，且第 3 轮仍禁止用 gpt-6-astra 核实
+    f_r2_cumulative = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/monotonic.py",
+        line=18,
+        source_models=("gemini-2.5-pro", "gpt-6-astra"),
+    )
+    e2_valid = RoundHistoryEntry(
+        2,
+        HEAD_2,
+        frozenset({f_r1.finding_id}),
+        (f_r2_cumulative,),
+        panel=panel_r2,
+        finder_session_ids=frozenset({"r2-m-ok-1", "r2-m-ok-2"}),
+    )
+    plan3 = plan_next_round(BASE_SHA, HEAD_3, (e1, e2_valid))
+    assert plan3.round_number == 3
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(
+            round_number=3,
+            head_sha=HEAD_3,
+            panel=panel_r3_gpt_verifier,
+            finder_batches=_batches_for_panel([], panel=panel_r3_gpt_verifier, round_number=3, head_sha=HEAD_3),
+            history=(e1, e2_valid),
+        )
+    c3_ok = RoundCandidates(
+        round_number=3,
+        head_sha=HEAD_3,
+        panel=panel_r2,
+        finder_batches=_batches_for_panel([], panel=panel_r2, round_number=3, head_sha=HEAD_3),
+        history=(e1, e2_valid),
+    )
+    assert c3_ok.findings[0].source_models == ("gemini-2.5-pro", "gpt-6-astra")
+
+
+def test_r9_important6_normalizes_commit_sha_case_to_block_same_head_fix_bypass() -> None:
+    """R8 Important 6：全链路规范化十六进制提交 SHA 为小写，禁止大小写变体绕过同提交 resolved_by_fix 校验。"""
+    sha_lower = "d44378842677ac7656376c493766fa14e638bf98"
+    sha_upper = sha_lower.upper()
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/sha_case.py", line=10)
+
+    # 第 1 轮使用小写 SHA
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=sha_lower,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1], round_number=1, head_sha=sha_lower),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(c1, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r1 确认"}]),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    r1 = render_findings_comment(1928, sha_upper, dec1)
+    assert r1.head_sha == sha_lower
+    assert parse_comment_marker(r1.body) == (1928, 1, sha_lower)
+    e1 = dec1.to_history_entry(sha_upper, rendered=r1)
+    assert e1.head_sha == sha_lower
+
+    # 第 2 轮使用大写 SHA 变体 -> 全部规范化为小写且识别为同一 HEAD
+    plan2 = plan_next_round(BASE_SHA.upper(), sha_upper, (e1,))
+    assert plan2.diff_base_sha == sha_lower
+    assert plan2.diff_head_sha == sha_lower
+
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=sha_upper,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=sha_upper),
+        history=(e1,),
+    )
+    assert c2.head_sha == sha_lower
+    assert all(b.head_sha == sha_lower for b in c2.finder_batches)
+
+    # 1) parse_verifier_output 传入大写或小写 head_sha 提交 resolved_by_fix -> 均立即抛 ConvergenceError
+    for payload_head in (sha_upper, sha_lower):
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                {
+                    "round_number": 2,
+                    "head_sha": payload_head,
+                    "verdicts": [
+                        {
+                            "finding_id": f1.finding_id,
+                            "verdict": "resolved_by_fix",
+                            "verifier_evidence": "试图借大写 SHA 绕过同提交校验",
+                        }
+                    ],
+                },
+                c2,
+                verifier_model="claude-opus-5-5",
+            )
+
+    # 2) 直接构造 VerifiedRound 传入大写 SHA -> VerifiedFinding 归一化后同样立即抛 ConvergenceError
+    vf_upper = VerifiedFinding(
+        finding=f1,
+        verdict=VerificationVerdict.RESOLVED_BY_FIX,
+        verifier_model="claude-opus-5-5",
+        verifier_evidence="直接构造大写 SHA 绕过",
+        round_number=2,
+        head_sha=sha_upper,
+    )
+    assert vf_upper.head_sha == sha_lower
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(c2, (vf_upper,))
+
+    # 3) 大小写混合的 marker 同样归一化为小写
+    assert parse_comment_marker(f"{COMMENT_MARKER_PREFIX} pr=1928 round=1 head={sha_upper} -->") == (
+        1928,
+        1,
+        sha_lower,
+    )
