@@ -538,13 +538,29 @@ fn stat_environment_fixture_child() {
     let Ok(expected) = std::fs::read_to_string(dir.join("stat-operation")) else {
         return;
     };
-    assert_eq!(expected, "open durable database");
+    let expect_path = match expected.as_str() {
+        "fixture stat search" => true,
+        "default stat search" => false,
+        _ => panic!("未知 stat 夹具模式"),
+    };
+    assert_eq!(std::env::var_os("PATH").is_some(), expect_path);
     let raw = std::fs::read("/proc/self/environ").unwrap();
     let has_empty_name = raw.split(|&b| b == 0).any(|item| item == b"=fixture");
     let has_normal_key = std::env::var_os("NC_X_VENUE_CREDENTIAL_FIXTURE").is_some();
     assert_ne!(has_empty_name, has_normal_key);
+    if has_empty_name {
+        // SAFETY: 动态链接已完成。独立进程只运行这一个测试（--exact、--test-threads=1）；
+        // libtest 主线程等待用例结束，此处没有其他线程访问环境。
+        unsafe { std::env::remove_var("LD_LIBRARY_PATH") };
+        assert_eq!(std::env::vars_os().count(), usize::from(expect_path));
+    } else {
+        // 在正常键夹具中保留加载器路径，和其他键一起交给生产隔离逻辑过滤。
+        assert!(std::env::var_os("LD_LIBRARY_PATH").is_some_and(|path| !path.is_empty()));
+    }
     let (_, evidence) = crate::economic_session::open_durable_db(&dir.join("probe.db")).unwrap();
-    assert_eq!(evidence["filesystem"], "tmpfs");
+    if expect_path {
+        assert_eq!(evidence["filesystem"], "tmpfs");
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -552,37 +568,56 @@ fn stat_environment_fixture_child() {
 fn durable_db_stat_preserves_only_path() {
     use std::os::unix::ffi::OsStrExt;
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stat-operation"), "open durable database").unwrap();
     crate::economic_session::write_test_executable(
         &dir.path().join("stat"),
         "#!/bin/sh\n/bin/cat /proc/$$/environ >stat-env || exit 1\nprintf 'tmpfs\n'\n",
         0o700,
     );
     let exe = std::env::current_exe().unwrap();
-    for (path, inject_empty_name, inject_normal_keys) in [
-        (dir.path().as_os_str(), true, false),
-        (std::ffi::OsStr::new(""), true, false),
-        (dir.path().as_os_str(), false, true),
+    let loader_path = std::env::var_os("LD_LIBRARY_PATH");
+    for (path, inject_normal_keys) in [
+        (Some(dir.path().as_os_str()), false),
+        (Some(std::ffi::OsStr::new("")), false),
+        (None, false),
+        (Some(dir.path().as_os_str()), true),
     ] {
+        std::fs::write(
+            dir.path().join("stat-operation"),
+            if path.is_some() {
+                "fixture stat search"
+            } else {
+                "default stat search"
+            },
+        )
+        .unwrap();
         let trace = dir.path().join("stat-env");
         let mut cmd = Command::new(&exe);
         cmd.args([
             "--exact",
             "economic_session::store::stat_environment_fixture_child",
             "--ignored",
+            "--test-threads=1",
         ])
         .current_dir(dir.path())
-        .env_clear()
-        .env("PATH", path);
-        if inject_empty_name {
-            cmd.env("", "fixture");
+        .env_clear();
+        if let Some(path) = path {
+            cmd.env("PATH", path);
+        }
+        // 自启动的 Rust 测试二进制可能依赖非系统目录中的 libpython。
+        if let Some(loader_path) = &loader_path {
+            cmd.env("LD_LIBRARY_PATH", loader_path);
         }
         if inject_normal_keys {
+            if loader_path.as_ref().is_none_or(|path| path.is_empty()) {
+                cmd.env("LD_LIBRARY_PATH", dir.path().join("unused-loader-dir"));
+            }
             cmd.env("NC_X_VENUE_CREDENTIAL_FIXTURE", "synthetic");
             cmd.env(
                 std::ffi::OsStr::from_bytes(b"NEWCHAN_2113_NON_UTF8_\xff"),
                 std::ffi::OsStr::from_bytes(b"fixture\xfe"),
             );
+        } else {
+            cmd.env("", "fixture");
         }
         let output = cmd.output().unwrap();
         assert!(
@@ -591,11 +626,15 @@ fn durable_db_stat_preserves_only_path() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        let mut expected = b"PATH=".to_vec();
-        expected.extend_from_slice(path.as_bytes());
-        expected.push(0);
-        assert_eq!(std::fs::read(&trace).unwrap(), expected);
-        std::fs::remove_file(trace).unwrap();
+        if let Some(path) = path {
+            let mut expected = b"PATH=".to_vec();
+            expected.extend_from_slice(path.as_bytes());
+            expected.push(0);
+            assert_eq!(std::fs::read(&trace).unwrap(), expected);
+            std::fs::remove_file(trace).unwrap();
+        } else {
+            assert!(!trace.exists());
+        }
     }
 }
 
