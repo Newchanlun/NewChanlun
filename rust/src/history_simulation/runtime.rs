@@ -9,7 +9,8 @@ use crate::session_transport::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::os::unix::net::UnixStream;
+use std::fs;
+use std::os::unix::{fs::MetadataExt, net::UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -206,9 +207,12 @@ impl ConfiguredProfile {
         self.check_db(db)?;
         if self.binding.is_some() {
             let p = &self.profile;
-            let mut targets = std::collections::BTreeSet::new();
+            let mut names = std::collections::BTreeSet::new();
+            let mut objects = std::collections::BTreeSet::new();
             for socket in [&p.socket, &p.e.socket, &p.s.socket] {
-                if !targets.insert(socket_target(socket)?) {
+                let target = socket_target(socket)?;
+                if !names.insert(target.path) || target.object.is_some_and(|id| !objects.insert(id))
+                {
                     return Err("IdentityConflict：X/E/S socket 实际目标重复".into());
                 }
             }
@@ -227,19 +231,32 @@ impl ConfiguredProfile {
     }
 }
 
-fn socket_target(raw: &str) -> Result<PathBuf, String> {
+struct SocketTarget {
+    path: PathBuf,
+    object: Option<(u64, u64)>,
+}
+
+fn socket_target(raw: &str) -> Result<SocketTarget, String> {
     let path = Path::new(raw);
     let parent = path.parent().ok_or("InvalidDomain：模拟 socket 缺父目录")?;
     let name = path
         .file_name()
         .ok_or("InvalidDomain：模拟 socket 缺文件名")?;
-    let target = parent.canonicalize().map_err(io)?.join(name);
-    match target.symlink_metadata() {
-        Ok(meta) if meta.is_symlink() => target.canonicalize().map_err(io),
-        Ok(_) => Ok(target),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(target),
-        Err(e) => Err(io(e)),
-    }
+    let mut path = parent.canonicalize().map_err(io)?.join(name);
+    let object = match path.symlink_metadata() {
+        Ok(meta) => {
+            let meta = if meta.is_symlink() {
+                path = path.canonicalize().map_err(io)?;
+                fs::metadata(&path).map_err(io)?
+            } else {
+                meta
+            };
+            Some((meta.dev(), meta.ino()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io(e)),
+    };
+    Ok(SocketTarget { path, object })
 }
 
 fn has_deployment(c: &Connection) -> Result<bool, String> {

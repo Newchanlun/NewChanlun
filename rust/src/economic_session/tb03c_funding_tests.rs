@@ -752,6 +752,213 @@ fn r2_b2_deployed_business_funding_initializes_book_2_and_3() {
     }
 }
 
+fn r3_signed_books(space: &Space) -> [Value; 2] {
+    let mut book2 = profile_manifest(space, P5M);
+    let mut book3 = super::quantity_calibration_tests::three_chongs();
+    for field in [
+        "session_id",
+        "session_generation",
+        "authorized_sources",
+        "resources",
+        "clock",
+    ] {
+        book3[field] = book2[field].clone();
+    }
+    for book in [&mut book2, &mut book3] {
+        book["chongs"][1]["funding"]["policy_record"]["tiers"] = json!([
+            {"d":"1","w":{"num":"347","den":"1000"},"source":"Measured{#915 BTC, 1m, δ=0.5, 中位, L0→L1}"}
+        ]);
+        book["chongs"][2]["funding"]["policy_record"]["tiers"] = json!([
+            {"d":"1","w":"Unmeasured","source":"none"},
+            {"d":"2","w":"Unmeasured","source":"none"}
+        ]);
+    }
+    [book2, book3]
+}
+
+fn r3_package(mut business: Value, folder: &std::path::Path) -> Value {
+    let mut domains = serde_json::Map::new();
+    domains.insert(
+        "E".into(),
+        json!({"db":folder.join("e.db"),"socket":folder.join("e.sock")}),
+    );
+    business.as_object_mut().unwrap().remove("e");
+    business["schema_revision"] = json!("economic-manifest/2");
+    business["protocol_revision"] = json!("economic-session/1");
+    for (i, route) in business["chongs"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        domains.insert(format!("B:{}", route["chong_id"].as_str().unwrap()),
+            json!({"db":folder.join(format!("b{i}.db")),"socket":folder.join(format!("b{i}.sock"))}));
+        route.as_object_mut().unwrap().remove("db");
+        route.as_object_mut().unwrap().remove("socket");
+    }
+    json!({"schema_revision":"economic-session-config/2","business":business,
+        "deployment":{"schema_revision":"economic-deployment/1","domains":domains,"voice":{},
+            "finance":null,"fault_markers":[],"x_db":null}})
+}
+
+#[test]
+fn r3_b2_rejects_non_business_funding_values_before_e_b_init_and_audit() {
+    let space = Space::new("b2record");
+    let db = space.0.join("e.db");
+    let b_db = space.0.join("b0.db");
+    let socket = space.0.join("e.sock");
+    let config = space.0.join("manifest.json");
+    let deployment = json!({"db":db,"socket":socket});
+    let chong = chong_id("0");
+    let mut admitted = Vec::new();
+    let policy = "/chongs/0/funding/policy_record";
+    let funding = "/funding/funding_record";
+    for book in r3_signed_books(&space) {
+        let rev = book["book_revision"].as_str().unwrap().to_owned();
+        let package = r3_package(book, &space.0);
+        let mut cases = vec![
+            (format!("{policy}/scope"), deployment.clone()),
+            (format!("{policy}/scope"), json!("unrecognized_scope")),
+            (format!("{funding}/scope"), deployment.clone()),
+            (format!("{funding}/scope"), json!(db)),
+            (format!("{funding}/scope"), json!(["evidence_only"])),
+            (format!("{policy}/tiers"), deployment.clone()),
+            (format!("{policy}/frequency_evidence_ref"), json!(db)),
+            ("/funding/margin_leverage/source".into(), json!(db)),
+            (format!("{policy}/capacities/0/source"), json!(socket)),
+            (
+                format!("{policy}/authorizer"),
+                json!("用户（相对目录/e.sock）"),
+            ),
+            (format!("{policy}/capacities/0/level"), json!("tmp/e.db")),
+            (format!("{funding}/version"), json!(r"C:relative")),
+            (format!("{funding}/supersedes"), json!(r"\\host\share\db")),
+            (
+                "/chongs/1/funding/policy_record/tiers/0/source".into(),
+                json!("Measured{../e.db}"),
+            ),
+            (
+                "/chongs/1/funding/policy_record/tiers/0/w".into(),
+                json!({"num":"347","den":"0"}),
+            ),
+        ];
+        for path in [
+            "FiLe:///tmp/e.db",
+            "./e.sock",
+            "tmp/e.sock",
+            "e.db",
+            r"C:\tmp\e.db",
+        ] {
+            cases.push((format!("{policy}/frequency_evidence_ref"), json!(path)));
+        }
+        if rev == "tb03c-book/3" {
+            cases.extend([
+                (
+                    "/funding/quote_snapshots/0/quotes/0/original_ref".into(),
+                    json!(db),
+                ),
+                (
+                    "/chongs/0/funding/quantity_calibration/signature/signature_ref".into(),
+                    json!(socket),
+                ),
+                (
+                    "/chongs/0/funding/quote_snapshot".into(),
+                    json!("tmp/quote"),
+                ),
+                (
+                    "/chongs/0/funding/quantity_calibration/quantity_basis/selector/db".into(),
+                    json!(db),
+                ),
+            ]);
+        }
+        for (field, value) in cases {
+            let mut malformed = package.clone();
+            let business = &mut malformed["business"];
+            if field.ends_with("/selector/db") {
+                let parent = field.strip_suffix("/db").unwrap();
+                business.pointer_mut(parent).unwrap()["db"] = value;
+                let cal = &mut business["chongs"][0]["funding"]["quantity_calibration"];
+                cal["signature"]["content_sha256"] =
+                    json!(super::quantity_calibration::content_digest(cal));
+            } else {
+                *business.pointer_mut(&field).unwrap() = value;
+            }
+            std::fs::write(&config, canonical_json(&malformed)).unwrap();
+            for (target, route) in [(&db, None), (&b_db, Some(chong.as_str()))] {
+                for offline in [false, true] {
+                    if store::Config::load_inner(&config, target, route, offline).is_ok() {
+                        admitted.push(format!("{rev} {field} {route:?} offline={offline}"));
+                    }
+                }
+                assert!(!target.exists());
+            }
+        }
+    }
+    assert!(admitted.is_empty(), "首写或审计准入错误放行：{admitted:?}");
+}
+
+#[test]
+fn r3_b2_signed_books_audit_to_equal_hashes_and_roots_across_deployments() {
+    let space = Space::new("b2arms");
+    for (version, business) in r3_signed_books(&space).into_iter().enumerate() {
+        let mut first = None;
+        for arm in ["a", "b"] {
+            let folder = space.0.join(format!("{version}-{arm}"));
+            std::fs::create_dir(&folder).unwrap();
+            let path = folder.join("manifest.json");
+            let package = r3_package(business.clone(), &folder);
+            std::fs::write(&path, canonical_json(&package)).unwrap();
+            let mut hashes = Vec::new();
+            for (domain, location) in package["deployment"]["domains"].as_object().unwrap() {
+                let db = std::path::Path::new(location["db"].as_str().unwrap());
+                let route = domain.strip_prefix("B:");
+                let config = store::Config::load(&path, db, route).unwrap();
+                store::init(&config).unwrap();
+                let audit = store::Config::load_inner(&path, db, route, true).unwrap();
+                let (conn, _) = store::open(db, true).unwrap();
+                store::audit(&conn, &audit).unwrap();
+                assert_eq!(
+                    store::meta(&conn, "business_manifest").unwrap(),
+                    canonical_json(&package["business"])
+                );
+                hashes.push((audit.manifest_hash, store::latest(&conn).unwrap().1));
+            }
+            assert!(hashes.iter().all(|entry| entry.0 == hashes[0].0));
+            if let Some(expected) = &first {
+                assert_eq!(&hashes, expected);
+            } else {
+                first = Some(hashes);
+            }
+        }
+    }
+}
+
+#[test]
+fn r3_b2_mixed_manifest_keeps_its_historical_read_contract() {
+    let space = Space::new("b2old");
+    let path = space.0.join("manifest.json");
+    let db_path = space.0.join("e.db");
+    let mut legacy = profile_manifest(&space, P0);
+    let endpoint = json!({"db":db_path,"socket":space.0.join("e.sock")});
+    legacy["funding"]["funding_record"]["scope"] = json!(db_path);
+    let policy = &mut legacy["chongs"][0]["funding"]["policy_record"];
+    policy["scope"] = endpoint.clone();
+    policy["tiers"] = endpoint;
+    policy["frequency_evidence_ref"] = json!(db_path);
+    std::fs::write(&path, canonical_json(&legacy)).unwrap();
+    let chong = chong_id("0");
+    for (db, route) in [
+        (db_path, None),
+        (space.0.join("b0.db"), Some(chong.as_str())),
+    ] {
+        let config = store::Config::load(&path, &db, route).unwrap();
+        store::init(&config).unwrap();
+        let audit = store::Config::load_inner(&path, &db, route, true).unwrap();
+        let (conn, _) = store::open(&db, true).unwrap();
+        store::audit(&conn, &audit).unwrap();
+    }
+}
+
 #[test]
 fn v2_domain_binds_revision_waits_in_e_and_replays() {
     let space = Space::new("c8-domain");

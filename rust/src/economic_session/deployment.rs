@@ -131,7 +131,7 @@ pub(super) fn validate_business(m: &Value) -> Result<(), String> {
         ],
         _ => &["chong_id", "symbol", "operation_level", "fixed_q"],
     };
-    // 重资金的内部形状与政策交叉约束由 tb03c_funding 按同一书账版本验证。
+    // 内层资金由 tb03c_funding::validate_config 校验业务值及书账约束，装载完成前不写库。
     for c in m["chongs"].as_array().ok_or("InvalidDomain：重须数组")? {
         exact(c, route_fields)?;
     }

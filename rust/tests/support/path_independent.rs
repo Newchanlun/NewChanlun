@@ -4,7 +4,7 @@ use super::*;
 use newchan_rust::session_protocol::{canonical_json, reply_envelope, validate_envelope};
 use rusqlite::types::ValueRef;
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixListener;
+use std::os::unix::{fs::MetadataExt, net::UnixListener};
 
 const S_SCHEMA: &str = "s-authority-fixture/1";
 const S_RESP: &str = "s-authority-fixture/replies";
@@ -503,6 +503,9 @@ fn table_bytes(db: &Path, local_table: &str) -> (String, Option<String>) {
 }
 
 fn audit_domain(db: &Path, manifest: &Path, b: bool, extra: &[&str]) -> Output {
+    run(domain_command("audit", db, manifest, b).args(extra))
+}
+fn domain_command(action: &str, db: &Path, manifest: &Path, b: bool) -> Command {
     let exe = if b {
         env!("CARGO_BIN_EXE_b_chong_session")
     } else {
@@ -510,7 +513,7 @@ fn audit_domain(db: &Path, manifest: &Path, b: bool, extra: &[&str]) -> Output {
     };
     let mut command = Command::new(exe);
     command
-        .arg("audit")
+        .arg(action)
         .arg("--manifest")
         .arg(manifest)
         .arg("--db")
@@ -518,7 +521,7 @@ fn audit_domain(db: &Path, manifest: &Path, b: bool, extra: &[&str]) -> Output {
     if b {
         command.args(["--chong", "alpha"]);
     }
-    run(command.args(extra))
+    command
 }
 fn successful_json(out: Output) -> Value {
     assert!(
@@ -1137,6 +1140,162 @@ fn r2_b5_x_rejects_socket_aliases_before_any_db_or_bind() {
         assert!(!space.path("x.db.writer.lock").exists());
         assert!(!socket.exists());
     }
+}
+
+#[test]
+fn r3_b2_e_and_b_reject_nested_deployment_before_first_write() {
+    for revision in ["tb03c-book/2", "tb03c-book/3"] {
+        let space = Space::new();
+        inputs(&space, &space.path("s.db"), true);
+        let path = space.path("economic.json");
+        let mut package = read(&path);
+        for key in ["voice_binding", "finance", "history_simulation_source"] {
+            package["business"].as_object_mut().unwrap().remove(key);
+        }
+        let deploy = &mut package["deployment"];
+        deploy["voice"] = json!({});
+        deploy["finance"] = Value::Null;
+        deploy["x_db"] = Value::Null;
+        let business = &mut package["business"];
+        business["book_revision"] = json!(revision);
+        business["authorized_sources"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        business["authorized_sources"][0]["operations"] = json!(["CaptureExternal"]);
+        let funding_id = "#1557/funding-authorization/v1";
+        let q_ref = format!("{funding_id}@P0-acceptance-5m");
+        let policy = json!({"policy_id":"#1355/quantity-tier-policy/v1","profile_id":"P0-acceptance-5m",
+            "version":"v1","supersedes":"none","scope":"evidence_only","symbol":"alpha","operation_level":"L2","q_ref":q_ref,
+            "tiers":[{"d":"1","w":"Unmeasured","source":"none"}],
+            "capacities":[{"level":"L2","C":"9630000","source":"UserSigned(#917)","valid_through":"2027-10-20"}],
+            "frequency_evidence_ref":"#915 报告 :153","authorizer":"用户（#1557/#1558 2026-10-20 批复）",
+            "authorized_at":"2026-10-20","valid_through":"2027-10-20"});
+        business["funding"] = json!({"funding_record":{"policy_id":funding_id,"profile_id":"P0-acceptance-5m",
+            "version":"v1","supersedes":"none","scope":"evidence_only","cap":"5000000","currency":"USDC",
+            "authorizer":"用户（#1557/#1558 2026-10-20 批复）","authorized_at":"2026-10-20","valid_through":"2027-10-20"},
+            "margin_leverage":{"value":"1","source":"ADR 0040 裁定三"}});
+        business["chongs"][0]["funding"] = json!({"Q":"690000","policy_record":policy});
+        if revision == "tb03c-book/3" {
+            business["funding"]["quote_snapshots"] = json!([]);
+            let cf = &mut business["chongs"][0]["funding"];
+            cf["quote_snapshot"] = json!("pending");
+            cf["quantity_calibration"] = json!({
+                "policy_id":"#1610/quantity-calibration/v1","version":"v1","supersedes":"none",
+                "binding":{"profile_id":"P0-acceptance-5m","funding_version":"v1",
+                    "symbol":"alpha","operation_level":"L2","q_ref":q_ref},
+                "quantity_unit":{"unit":"lot","quantum":{"num":"1","den":"1"}},
+                "signature":"AwaitingPolicy","quantity_basis":"AwaitingPolicy","tiers":[]
+            });
+        }
+        let mut malformed = package.clone();
+        malformed["business"]["chongs"][0]["funding"]["policy_record"]["scope"] =
+            package["deployment"]["domains"]["E"].clone();
+        save(&path, &malformed);
+        for (owner, b) in [("e", false), ("b", true)] {
+            let db = space.path(&format!("{owner}.db"));
+            let out = run(&mut domain_command("init", &db, &path, b));
+            assert!(
+                !out.status.success() && out.stdout.is_empty(),
+                "{revision} {owner}"
+            );
+            let error = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                error.contains("scope 只允许 evidence_only"),
+                "{revision} {owner}: {error}"
+            );
+            for name in [".db", ".db.writer.lock", ".db-wal", ".db-shm", ".sock"] {
+                assert!(
+                    !space.path(&format!("{owner}{name}")).exists(),
+                    "{revision} {owner}{name}"
+                );
+            }
+        }
+        save(&path, &package);
+        for (owner, b) in [("e", false), ("b", true)] {
+            let db = space.path(&format!("{owner}.db"));
+            expect(
+                successful_json(run(&mut domain_command("init", &db, &path, b))),
+                "Initialized",
+            );
+            let audit = expect(successful_json(audit_domain(&db, &path, b, &[])), "Audited");
+            assert_eq!(audit["manifest_hash"], digest(&package["business"]));
+        }
+    }
+}
+
+#[test]
+fn r3_b5_x_rejects_existing_socket_hard_links_before_lock_db_or_bind() {
+    let mut failures = Vec::new();
+    for (first, second) in [("e", "s"), ("x", "e"), ("x", "s")] {
+        let space = Space::new();
+        inputs(&space, &space.path("s.db"), true);
+        let profile_path = space.path("x-profile.json");
+        let mut profile = read(&profile_path);
+        let a = space.path(&format!("{first}.sock"));
+        let b = space.path(&format!("{second}.sock"));
+        let _peer = UnixListener::bind(&a).unwrap();
+        std::fs::hard_link(&a, &b).unwrap();
+        let object = |path: &Path| {
+            let m = std::fs::metadata(path).unwrap();
+            (m.dev(), m.ino())
+        };
+        let id = object(&a);
+        assert_eq!(id, object(&b));
+        assert_ne!(a.canonicalize().unwrap(), b.canonicalize().unwrap());
+        let db = space.path("x.db");
+        let socket = space.path("x.sock");
+        let cfg = &mut profile["history_simulation"];
+        cfg["deployment"]["socket"] = json!(socket);
+        cfg["deployment"]["e_socket"] = json!(space.path("e.sock"));
+        cfg["deployment"]["s_socket"] = json!(space.path("s.sock"));
+        let parsed =
+            newchan_rust::history_simulation::runtime::ConfiguredProfile::parse(cfg.clone())
+                .unwrap();
+        let prelock = parsed.check_serve_deployment(&db);
+        save(&profile_path, &profile);
+
+        let list = || {
+            std::fs::read_dir(&space.path("."))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = list();
+        let lock = space.path("x.db.writer.lock");
+        let mut child = serve_x(&db, &profile_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        eventually("X 应退出或已打开数据库", || {
+            child.try_wait().unwrap().is_some() || db.exists()
+        });
+        let running = child.try_wait().unwrap().is_none();
+        if running {
+            let _ = child.kill();
+        }
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !matches!(&prelock, Err(e) if e.contains("socket 实际目标重复"))
+            || out.status.success()
+            || !stderr.contains("socket 实际目标重复")
+            || db.exists()
+            || lock.exists()
+            || (first != "x" && socket.exists())
+        {
+            failures.push(format!(
+                "{first}/{second}: prelock={prelock:?}, status={}, db={}, lock={}, x_socket={}, stderr={stderr}",
+                out.status, db.exists(), lock.exists(), socket.exists()
+            ));
+        }
+        assert_eq!(object(&a), id);
+        assert_eq!(object(&b), id);
+        if list() != before {
+            failures.push(format!("{first}/{second}: 启动拒绝时生成了本地文件"));
+        }
+    }
+    assert!(failures.is_empty(), "硬链接通过取锁前门禁：{failures:#?}");
 }
 
 #[test]
