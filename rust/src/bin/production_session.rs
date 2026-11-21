@@ -17,7 +17,9 @@ use newchan_rust::session_protocol::strict_json;
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,15 +128,26 @@ fn canon_layout_path(path: &Path) -> io::Result<PathBuf> {
         Err(err) => return Err(err),
     }
 
-    let absolute = std::path::absolute(path)?;
-    let mut todo: Vec<_> = absolute
-        .components()
-        .rev()
-        .map(|c| c.as_os_str().to_owned())
-        .collect();
-    let mut resolved = PathBuf::new();
+    // components() 和 absolute() 都会丢掉内部的 `.`，先按 POSIX 分隔符保留原始路径段。
+    fn segments(path: &Path) -> impl DoubleEndedIterator<Item = &OsStr> {
+        path.as_os_str()
+            .as_bytes()
+            .split(|&byte| byte == b'/')
+            .filter(|part| !part.is_empty())
+            .map(OsStr::from_bytes)
+    }
+
+    let mut todo: Vec<_> = segments(path).rev().map(OsStr::to_owned).collect();
+    let mut resolved = if path.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        std::env::current_dir()?
+    };
     let mut links = 0;
     while let Some(part) = todo.pop() {
+        if part == "." {
+            continue;
+        }
         if part == ".." {
             resolved.pop();
             continue;
@@ -148,14 +161,18 @@ fn canon_layout_path(path: &Path) -> io::Result<PathBuf> {
                 }
                 let target = std::fs::read_link(&resolved)?;
                 resolved.pop();
-                todo.extend(target.components().rev().map(|c| c.as_os_str().to_owned()));
+                if target.is_absolute() {
+                    resolved = PathBuf::from("/");
+                }
+                todo.extend(segments(&target).rev().map(OsStr::to_owned));
             }
             Ok(_) => (),
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 resolved.pop();
                 let mut path = resolved.canonicalize()?;
-                path.push(part);
-                path.extend(todo.into_iter().rev());
+                for part in std::iter::once(part).chain(todo.into_iter().rev()) {
+                    path.push(part);
+                }
                 return Ok(path);
             }
             Err(err) => return Err(err),
@@ -170,8 +187,24 @@ fn layout_canon(field: &str, path: &Path) -> Result<PathBuf, String> {
 }
 
 fn layout_parent<'a>(field: &str, path: &'a Path) -> Result<&'a Path, String> {
-    path.parent()
-        .ok_or_else(|| format!("InvalidDomain：{field} 路径 {path:?} 缺父目录"))
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("InvalidDomain：{field} 路径 {path:?} 缺父目录"))?;
+    // 沿用 parent() 所取的末项，但保留它之前的原始字节（例如 missing/./e.db 的 missing/.）。
+    let mut raw = path.as_os_str().as_bytes();
+    while let Some(stem) = raw.strip_suffix(b"/").or_else(|| raw.strip_suffix(b"/.")) {
+        raw = stem;
+    }
+    Ok(raw
+        .iter()
+        .rposition(|&byte| byte == b'/')
+        .map_or(parent, |i| {
+            let end = raw[..i]
+                .iter()
+                .rposition(|&byte| byte != b'/')
+                .map_or(1, |last| last + 1);
+            Path::new(OsStr::from_bytes(&raw[..end]))
+        }))
 }
 
 /// S admission 比对目录本身的 stamp：非族、非 A 的 P 子目录不属于测量域。

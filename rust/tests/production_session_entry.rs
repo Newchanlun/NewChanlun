@@ -1293,6 +1293,10 @@ fn layout_rejects_e_db_under_s_family_entry() {
         "s.db",
         &f.path("s/s.db.admission-private"),
     );
+    let member = f.path("s/s.db.marker");
+    std::fs::File::create(&member).unwrap();
+    f.e_db(&f.path("s/s.db.marker//e.db"));
+    f.assert_conflict("economic.e.db", &member, "s.db", &member);
 }
 
 #[test]
@@ -1333,6 +1337,35 @@ fn layout_preserves_missing_path_suffix_in_measurement_domain() {
         f.e_db(&q.join("e.db"));
         f.assert_conflict("economic.e.db", &q, source, &member);
     }
+}
+
+#[test]
+fn layout_preserves_curdir_in_missing_path_suffix() {
+    let mut f = LayoutFixture::new();
+    let admission = f.path("admission");
+    let family = f.dir("s/s.db.fam");
+    for (member, suffix, source) in [
+        (&admission, "missing/./sub", "s.admission_job_limits"),
+        (&admission, "missing/.", "s.admission_job_limits"),
+        (&family, "missing/./x", "s.db"),
+    ] {
+        assert!(!member.join("missing").exists());
+        let q = member.join(suffix);
+        f.e_db(&q.join("e.db"));
+        f.assert_conflict("economic.e.db", &q, source, member);
+    }
+}
+
+#[test]
+fn layout_preserves_missing_path_suffix_toward_safe_sibling() {
+    let mut f = LayoutFixture::new();
+    let admission = f.path("admission");
+    let safe = f.dir("safe");
+    assert!(!admission.join("missing").exists());
+    let q = admission.join("missing/../../safe");
+    f.e_db(&q.join("e.db"));
+    f.assert_conflict("economic.e.db", &q, "s.admission_job_limits", &admission);
+    assert!(!safe.join("e.db").exists());
 }
 
 #[test]
@@ -1508,6 +1541,7 @@ fn layout_accepts_parent_of_existing_symlink_target() {
         meta(&physical_db, "SELECT v FROM meta WHERE k='writer_epoch'").as_deref(),
         Some("1")
     );
+    assert!(!f.path("s/e.db").exists());
 }
 
 #[test]
