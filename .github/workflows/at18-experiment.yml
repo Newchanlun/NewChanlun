@@ -1,0 +1,187 @@
+name: AT-18 experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    permissions:
+      contents: read
+      issues: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      registry_sha: ${{ steps.plan.outputs.registry_sha }}
+      has_groups: ${{ steps.plan.outputs.has_groups }}
+      groups: ${{ steps.plan.outputs.groups }}
+      runner_group: ${{ steps.plan.outputs.runner_group }}
+      runner_label: ${{ steps.plan.outputs.runner_label }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r scripts/at18/requirements.txt
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/at18/workflow.py plan experiment
+
+  checks:
+    permissions:
+      contents: read
+      issues: read
+    if: needs.plan.outputs.has_groups == 'true'
+    needs: plan
+    name: at18 ${{ matrix.group }} ${{ needs.plan.outputs.registry_sha }}
+    # Formal #2133 provisioning restricts this runner group to this workflow on main.
+    # No generic self-hosted or GitHub-hosted fallback can run credential checks.
+    runs-on:
+      group: ${{ needs.plan.outputs.runner_group }}
+      labels: ${{ needs.plan.outputs.runner_label }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.groups) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: run
+        env:
+          AT18_GROUP: ${{ matrix.group }}
+          GH_TOKEN: ${{ github.token }}
+          AT18_RUNNER_GROUP: ${{ needs.plan.outputs.runner_group }}
+          AT18_RUNNER_LABEL: ${{ needs.plan.outputs.runner_label }}
+          AT18_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python scripts/at18/workflow.py run experiment --group="$AT18_GROUP" --output "$RUNNER_TEMP/at18-execution"
+      - uses: actions/upload-artifact@v4
+        if: always() && (steps.run.outcome == 'success' || steps.run.outcome == 'failure')
+        with:
+          name: at18-${{ github.run_attempt }}-experiment-g-${{ matrix.group }}
+          path: ${{ runner.temp }}/at18-execution/
+          if-no-files-found: error
+          retention-days: 14
+
+  scaffold:
+    if: needs.plan.outputs.has_groups == 'false'
+    needs: plan
+    # 不占 R06 业务组名，也不生产 R07 运行原件。
+    name: at18-scaffold experiment ${{ needs.plan.outputs.registry_sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r scripts/at18/requirements.txt
+      - run: python scripts/at18/workflow.py run experiment --output "$RUNNER_TEMP/at18-scaffold"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: at18-${{ github.run_attempt }}-experiment-scaffold
+          path: ${{ runner.temp }}/at18-scaffold/
+          if-no-files-found: error
+          retention-days: 14
+
+  seal_plan:
+    needs: [plan, checks, scaffold]
+    if: >-
+      ${{ !cancelled() && needs.plan.result == 'success' &&
+      ((needs.plan.outputs.has_groups == 'true' && needs.checks.result == 'success') ||
+       (needs.plan.outputs.has_groups == 'false' && needs.scaffold.result == 'success')) }}
+    name: at18-seal-plan experiment ${{ needs.plan.outputs.registry_sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      has_seals: ${{ steps.plan.outputs.has_seals }}
+      scaffold_sha: ${{ steps.plan.outputs.scaffold_sha }}
+      seals: ${{ steps.plan.outputs.seals }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r scripts/at18/requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: at18-${{ github.run_attempt }}-experiment-*
+          path: ${{ runner.temp }}/at18-input
+      - id: plan
+        run: python scripts/at18/workflow.py seal-plan experiment --artifacts "$RUNNER_TEMP/at18-input"
+
+  seal_scaffold:
+    needs: [plan, seal_plan]
+    if: needs.plan.outputs.has_groups == 'false' && needs.seal_plan.outputs.scaffold_sha != ''
+    name: at18-seal-scaffold experiment ${{ needs.plan.outputs.registry_sha }} ${{ needs.seal_plan.outputs.scaffold_sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r scripts/at18/requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: at18-${{ github.run_attempt }}-experiment-scaffold
+          path: ${{ runner.temp }}/at18-input
+      - env:
+          AT18_SHA: ${{ needs.seal_plan.outputs.scaffold_sha }}
+        run: >-
+          python scripts/at18/workflow.py seal-scaffold experiment
+          --sha256="$AT18_SHA" --artifacts "$RUNNER_TEMP/at18-input" --output "$RUNNER_TEMP/at18-sealed-scaffold"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: at18-${{ github.run_attempt }}-experiment-sealed-scaffold
+          path: ${{ runner.temp }}/at18-sealed-scaffold/
+          if-no-files-found: error
+          retention-days: 14
+
+  seal:
+    needs: [plan, seal_plan]
+    if: needs.seal_plan.outputs.has_seals == 'true'
+    name: at18-seal ${{ matrix.record }} ${{ matrix.profile }} ${{ needs.plan.outputs.registry_sha }} ${{ matrix.sha256 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.seal_plan.outputs.seals) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r scripts/at18/requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: at18-${{ github.run_attempt }}-experiment-g-${{ matrix.group }}
+          path: ${{ runner.temp }}/at18-input
+      - env:
+          AT18_GROUP: ${{ matrix.group }}
+          AT18_RECORD: ${{ matrix.record }}
+          AT18_PROFILE: ${{ matrix.profile }}
+          AT18_SHA: ${{ matrix.sha256 }}
+        run: >-
+          python scripts/at18/workflow.py seal experiment
+          --group="$AT18_GROUP" --record="$AT18_RECORD"
+          --profile="$AT18_PROFILE" --sha256="$AT18_SHA" --artifacts "$RUNNER_TEMP/at18-input"

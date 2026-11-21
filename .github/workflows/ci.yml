@@ -1453,6 +1453,31 @@ jobs:
         working-directory: .sandcastle/approval-signing
         run: python -m pytest -q tests
 
+  at18-registry-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install -r scripts/at18/requirements.txt
+      - name: 核登记册与 PR merge-base
+        if: github.event_name == 'pull_request'
+        run: scripts/at18/at18-registry-lint --pr-merge-ref
+      - name: 核 F 登记册
+        if: github.event_name != 'pull_request'
+        run: scripts/at18/at18-registry-lint
+      - run: python -m pytest -p no:cacheprovider -q tests/test_at18_harness.py
+
   # #1875 p2m：唯一汇总门。依赖本 workflow 全部作业（macos-session 只在手动触发时跑，不计入）；
   #   任一作业 failure 或 cancelled 即失败，被 changes 正确跳过的 Rust 作业（skipped）不算失败。
   #   已是 main 的必需检查（与 deepagents/review 并列，#1742 裁定），auto-merge 会同时等审查和整轮 CI，不会因审查单绿绕过 CI。
@@ -1475,6 +1500,7 @@ jobs:
       - fixture-drift
       - sandcastle-ts
       - deepagents-pilot
+      - at18-registry-lint
     steps:
       - name: Require every CI job to succeed or be skipped by the path filter
         env:

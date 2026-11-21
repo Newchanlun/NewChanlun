@@ -1,0 +1,642 @@
+{
+  "schema_version": "at18-adapter-contract/1",
+  "run_record_envelope": {
+    "schema_version": {"pointer": "/schema_version", "type": "string"},
+    "record": {"pointer": "/record", "type": "string"},
+    "head": {"pointer": "/head", "type": "git-commit"},
+    "run_id": {"pointer": "/run_id", "type": "positive-integer"},
+    "run_attempt": {"pointer": "/run_attempt", "type": "positive-integer"},
+    "check_id": {"pointer": "/check_id", "type": "string"},
+    "profile_id": {"pointer": "/profile_id", "type": "nullable-profile-id"},
+    "payload": {"pointer": "/payload", "type": "object"}
+  },
+  "run_records": {
+    "permission.experiment": {
+      "role": "RUN_RECORD",
+      "version": "at18-permission/1",
+      "fields": {
+        "binding": {"pointer": "/binding", "type": "object"},
+        "launch": {"pointer": "/launch", "type": "object"},
+        "venue_profile_sha256": {"pointer": "/venue_profile_sha256", "type": "sha256"},
+        "capability_record_sha256": {"pointer": "/capability_record_sha256", "type": "sha256"},
+        "derived_credential_public_id": {"pointer": "/derived_credential_public_id", "type": "string"},
+        "queried_public_id": {"pointer": "/user_role/request/public_id", "type": "string"},
+        "role": {"pointer": "/user_role/response/role", "type": "string"},
+        "role_user": {"pointer": "/user_role/response/data/user", "type": "string"},
+        "query_received_at": {"pointer": "/user_role/received_at", "type": "utc-timestamp"},
+        "binding_writer_epoch": {"pointer": "/binding/writer_epoch", "type": "positive-integer"},
+        "binding_profile_id": {"pointer": "/binding/profile_id", "type": "profile-id"},
+        "binding_profile_version": {"pointer": "/binding/profile_version", "type": "positive-integer"},
+        "binding_venue_profile_sha256": {"pointer": "/binding/venue_profile_sha256", "type": "sha256"},
+        "binding_capability_record_version": {"pointer": "/binding/capability_record_version", "type": "string"},
+        "binding_capability_record_sha256": {"pointer": "/binding/capability_record_sha256", "type": "sha256"},
+        "binding_tb09_fingerprint": {"pointer": "/binding/tb09_fingerprint", "type": "sha256"},
+        "binding_authorization_id": {"pointer": "/binding/authorization_id", "type": "string"},
+        "binding_evidence_class": {"pointer": "/binding/evidence_class", "type": "evidence-class"},
+        "launch_writer_epoch": {"pointer": "/launch/writer_epoch", "type": "positive-integer"},
+        "launch_launch_seq": {"pointer": "/launch/launch_seq", "type": "positive-integer"},
+        "launch_launched_at": {"pointer": "/launch/launched_at", "type": "utc-timestamp"},
+        "launch_tb09_fingerprint_computed": {"pointer": "/launch/tb09_fingerprint_computed", "type": "sha256"},
+        "launch_credential_public_id_verified": {"pointer": "/launch/credential_public_id_verified", "type": "boolean"},
+        "launch_session_permission_verified": {"pointer": "/launch/session_permission_verified", "type": "boolean"},
+        "launch_send_state": {"pointer": "/launch/send_state", "type": "string"},
+        "launch_send_refusal_class": {"pointer": "/launch/send_refusal_class", "type": "nullable-string"},
+        "launch_send_refusal_detail": {"pointer": "/launch/send_refusal_detail", "type": "nullable-string"}
+      },
+      "version_pointer": "/schema_version"
+    },
+    "migration.experiment": {
+      "role": "RUN_RECORD",
+      "version": "at18-migration/1",
+      "fields": {
+        "profile_id": {"pointer": "/profile_id", "type": "profile-id"},
+        "evidence_class": {"pointer": "/evidence_class", "type": "evidence-class"},
+        "identity_map": {"pointer": "/identity_map", "type": "object-array", "decode_as": "migration.identity"},
+        "old_before": {"pointer": "/old_before", "type": "object", "decode_as": "migration.snapshot"},
+        "new_after": {"pointer": "/new_after", "type": "object", "decode_as": "migration.snapshot"},
+        "after_recovery": {"pointer": "/after_recovery", "type": "object", "decode_as": "migration.snapshot"},
+        "after_rollback": {"pointer": "/after_rollback", "type": "object", "decode_as": "migration.snapshot"},
+        "interruption": {"pointer": "/interruption", "type": "object", "decode_as": "migration.interruption"},
+        "ownership_journal": {"pointer": "/ownership_journal", "type": "object-array", "decode_as": "migration.owner_event"},
+        "capital_journal": {"pointer": "/capital_journal", "type": "object-array", "decode_as": "migration.capital_event"},
+        "writer_journal": {"pointer": "/writer_journal", "type": "object-array", "decode_as": "migration.writer_event"},
+        "send_journal": {"pointer": "/send_journal", "type": "object-array", "decode_as": "migration.send_event"}
+      },
+      "version_pointer": "/schema_version"
+    },
+    "post_gate.experiment": {
+      "role": "RUN_RECORD",
+      "version": "at18-post-gate/1",
+      "fields": {
+        "profile_id": {"pointer": "/profile_id", "type": "profile-id"},
+        "evidence_class": {"pointer": "/evidence_class", "type": "evidence-class"},
+        "growth_eligible": {"pointer": "/growth_eligible", "type": "boolean"},
+        "growth_enabled": {"pointer": "/growth_enabled", "type": "boolean"},
+        "post_gate_params_effective": {"pointer": "/post_gate_params_effective", "type": "boolean"},
+        "outputs": {"pointer": "/outputs", "type": "object-array", "decode_as": "post_gate.output"},
+        "gate_events": {"pointer": "/gate_events", "type": "object-array", "decode_as": "post_gate.gate"},
+        "first_activations": {"pointer": "/first_activations", "type": "object-array", "decode_as": "post_gate.activation"},
+        "parameter_version_id": {"pointer": "/parameter_version_id", "type": "nullable-string"}
+      },
+      "version_pointer": "/schema_version"
+    },
+    "tb": {
+      "role": "RUN_RECORD",
+      "version": "at18-tb-entity/1",
+      "fields": {
+        "tb_id": {"pointer": "/tb_id", "type": "string"},
+        "evidence_class": {"pointer": "/evidence_class", "type": "evidence-class"},
+        "profile_id": {"pointer": "/profile_id", "type": "nullable-profile-id"},
+        "tests": {"pointer": "/tests", "type": "object-array", "decode_as": "tb.test"},
+        "keys": {"pointer": "/keys", "type": "object-array", "decode_as": "tb.key"},
+        "conditions": {"pointer": "/conditions", "type": "object"},
+        "output": {"pointer": "/output", "type": "object"}
+      },
+      "version_pointer": "/schema_version"
+    }
+  },
+  "item_sources": {
+    "migration.identity": {
+      "old_id": {"pointer": "/old_id", "type": "string"},
+      "new_id": {"pointer": "/new_id", "type": "string"},
+      "kind": {"pointer": "/kind", "type": "string"}
+    },
+    "migration.snapshot": {
+      "positions": {"pointer": "/positions", "type": "object-array", "decode_as": "migration.ledger_entry"},
+      "open_orders": {"pointer": "/open_orders", "type": "object-array", "decode_as": "migration.ledger_entry"},
+      "fee_tail": {"pointer": "/fee_tail", "type": "object-array", "decode_as": "migration.ledger_entry"},
+      "owner_epoch": {"pointer": "/owner_epoch", "type": "positive-integer"},
+      "capital": {"pointer": "/capital", "type": "object-array", "decode_as": "migration.ledger_entry"}
+    },
+    "migration.ledger_entry": {
+      "id": {"pointer": "/id", "type": "string"},
+      "owner": {"pointer": "/owner", "type": "string"},
+      "account": {"pointer": "/account", "type": "string"},
+      "asset": {"pointer": "/asset", "type": "string"},
+      "quantity": {"pointer": "/quantity", "type": "decimal-string"}
+    },
+    "migration.interruption": {
+      "step": {"pointer": "/step", "type": "string"},
+      "interrupted_at": {"pointer": "/interrupted_at", "type": "utc-timestamp"},
+      "recovered_at": {"pointer": "/recovered_at", "type": "utc-timestamp"}
+    },
+    "migration.owner_event": {
+      "sequence": {"pointer": "/sequence", "type": "positive-integer"},
+      "id": {"pointer": "/id", "type": "string"},
+      "owner": {"pointer": "/owner", "type": "string"},
+      "writer_epoch": {"pointer": "/writer_epoch", "type": "positive-integer"}
+    },
+    "migration.capital_event": {
+      "sequence": {"pointer": "/sequence", "type": "positive-integer"},
+      "id": {"pointer": "/id", "type": "string"},
+      "account": {"pointer": "/account", "type": "string"},
+      "asset": {"pointer": "/asset", "type": "string"},
+      "quantity": {"pointer": "/quantity", "type": "decimal-string"}
+    },
+    "migration.writer_event": {
+      "sequence": {"pointer": "/sequence", "type": "positive-integer"},
+      "writer_epoch": {"pointer": "/writer_epoch", "type": "positive-integer"},
+      "writer_id": {"pointer": "/writer_id", "type": "string"},
+      "operation": {"pointer": "/operation", "type": "string"}
+    },
+    "migration.send_event": {
+      "sequence": {"pointer": "/sequence", "type": "positive-integer"},
+      "command_id": {"pointer": "/command_id", "type": "string"},
+      "writer_epoch": {"pointer": "/writer_epoch", "type": "positive-integer"},
+      "operation": {"pointer": "/operation", "type": "string"}
+    },
+    "post_gate.gate": {
+      "type": {"pointer": "/type", "type": "string"},
+      "event_id": {"pointer": "/event_id", "type": "string"},
+      "known_at": {"pointer": "/known_at", "type": "utc-timestamp"},
+      "profile_id": {"pointer": "/profile_id", "type": "profile-id"},
+      "evidence_class": {"pointer": "/evidence_class", "type": "evidence-class"}
+    },
+    "post_gate.activation": {
+      "type": {"pointer": "/type", "type": "string"},
+      "event_id": {"pointer": "/event_id", "type": "string"},
+      "gate_event_id": {"pointer": "/gate_event_id", "type": "string"},
+      "parameter_version_id": {"pointer": "/parameter_version_id", "type": "string"},
+      "known_at": {"pointer": "/known_at", "type": "utc-timestamp"},
+      "profile_id": {"pointer": "/profile_id", "type": "profile-id"},
+      "evidence_class": {"pointer": "/evidence_class", "type": "evidence-class"}
+    },
+    "post_gate.output": {
+      "type": {"pointer": "/type", "type": "string"},
+      "dependency": {"pointer": "/dependency", "type": "nullable-string"}
+    },
+    "tb.test": {
+      "check_id": {"pointer": "/check_id", "type": "string"},
+      "name": {"pointer": "/name", "type": "string"},
+      "source_path": {"pointer": "/source_path", "type": "string"}
+    },
+    "tb.key": {
+      "slice_id": {"pointer": "/slice_id", "type": "string"},
+      "kind": {"pointer": "/kind", "type": "string"},
+      "id": {"pointer": "/id", "type": "string"},
+      "basis_path": {"pointer": "/basis_path", "type": "string"},
+      "basis_pointer": {"pointer": "/basis_pointer", "type": "pointer"}
+    }
+  },
+  "external_sources": {
+    "capability_record": {
+      "role": "CAPABILITY_RECORD",
+      "ticket": 1770,
+      "fields": {
+        "capability_record_version": {"pointer": "/version", "type": "string"},
+        "source_url": {"pointer": "/session_permission/source/url", "type": "https-url"},
+        "retrieved_at": {"pointer": "/session_permission/source/retrieved_at", "type": "utc-timestamp"},
+        "sha256": {"pointer": "/session_permission/source/sha256", "type": "sha256"}
+      }
+    },
+    "venue_profile": {
+      "role": "AUTHORIZATION",
+      "ticket": 1351,
+      "fields": {
+        "profile_id": {"pointer": "/profile_id", "type": "profile-id"},
+        "version": {"pointer": "/version", "type": "positive-integer"},
+        "evidence_class": {"pointer": "/evidence_class", "type": "evidence-class"},
+        "account": {"pointer": "/account", "type": "string"},
+        "allowed_actions": {"pointer": "/allowed_actions", "type": "string-array"},
+        "credential_class": {"pointer": "/credential_scope/class", "type": "string"},
+        "public_id": {"pointer": "/credential_scope/public_id", "type": "string"},
+        "authorization_id": {"pointer": "/authorization/authorization_id", "type": "string"},
+        "authorizer": {"pointer": "/authorization/authorizer", "type": "string"},
+        "authorized_at": {"pointer": "/authorization/authorized_at", "type": "utc-timestamp"}
+      }
+    },
+    "post_gate_parameter_version": {
+      "role": "AUTHORIZATION",
+      "ticket": null,
+      "fields": {
+        "parameter_version_id": {"pointer": "/parameter_version_id", "type": "string"},
+        "profile_id": {"pointer": "/profile_id", "type": "profile-id"},
+        "evidence_class": {"pointer": "/evidence_class", "type": "evidence-class"},
+        "gate_event_id": {"pointer": "/gate_event_id", "type": "string"},
+        "authorized_at": {"pointer": "/authorized_at", "type": "utc-timestamp"},
+        "authorizer": {"pointer": "/authorizer", "type": "string"},
+        "parameters": {"pointer": "/parameters", "type": "object"}
+      }
+    }
+  },
+  "record_slots": {
+    "permission.experiment": {"tb_ids": ["TB-09"], "destination_ids": ["DST-05"]},
+    "migration.experiment": {"tb_ids": ["TB-10"], "destination_ids": ["DST-02", "DST-03", "DST-05"]},
+    "post_gate.experiment": {"tb_ids": ["TB-11"], "destination_ids": []}
+  },
+  "reference_roles": {
+    "gate_reached_event": "RUN_RECORD",
+    "parameter_version": "AUTHORIZATION",
+    "first_activation": "RUN_RECORD",
+    "non_activation_evidence": "RUN_RECORD",
+    "authorization_declaration": "AUTHORIZATION",
+    "runtime_verification": "RUN_RECORD",
+    "non_empty_evidence_refs": "RUN_RECORD",
+    "tb_entities": "RUN_RECORD"
+  },
+  "evidence_projection": {
+    "destination_experiment": {
+      "DST-01": [],
+      "DST-02": ["non_empty_evidence_refs"],
+      "DST-03": ["non_empty_evidence_refs"],
+      "DST-04": [],
+      "DST-05": ["runtime_verification", "non_empty_evidence_refs"],
+      "DST-06": []
+    },
+    "tb_special_refs": [],
+    "top_level_only": ["gate_reached_event", "parameter_version", "first_activation", "non_activation_evidence"],
+    "excluded": ["authorization_declaration", "venue_permission_fact", "capability_hash"]
+  },
+  "failed_check_scope": {
+    "escape_operations": [["~", "~0"], ["/", "~1"], ["%", "%25"], ["@", "%40"]],
+    "obligation_escape_operations": [["%", "%25"], ["@", "%40"]],
+    "null_profile_token": "none",
+    "reserved_profile_ids": ["none"],
+    "templates": {
+      "key": "key:<slice>/<kind>/<esc_id>",
+      "basis": "K@basis:<esc_path>@<esc_pointer>",
+      "domain": "K@<evidence_class>@<profile>",
+      "basis_domain": "K@basis:<esc_path>@<esc_pointer>@<evidence_class>@<profile>",
+      "ticket": {"base": "ticket:<n>", "named": "ticket:<n>@<esc_obligation_id>"},
+      "slot": "slot:<record>@<profile>"
+    }
+  },
+  "legacy_sources": {
+    "i1096": {
+      "kind": "issue-body",
+      "ticket": 1096,
+      "comment_id": null,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "b9bf58223ef5e19a3e6fd219e2a9c11e331eac86672bb0b6ba04f34f4b58575f"
+    },
+    "i1279": {
+      "kind": "issue-body",
+      "ticket": 1279,
+      "comment_id": null,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "d862ee5f2abc186812243a3bda071a8342e262fa6d6d8805851150d9de7d1b82"
+    },
+    "i1304": {
+      "kind": "issue-body",
+      "ticket": 1304,
+      "comment_id": null,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "37e757214eb6476fcad035bb1e69350c5254af4348a4e066b32040fd5aaeba47"
+    },
+    "i1319": {
+      "kind": "issue-body",
+      "ticket": 1319,
+      "comment_id": null,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "f2030e361490f8875ca769ceea35c82c604552b6341073da7a4cbc21c03b5409"
+    },
+    "i1320": {
+      "kind": "issue-body",
+      "ticket": 1320,
+      "comment_id": null,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "867b8ffff15cfc7e200abcb7d3f26c0cc7b19bc16604d666832c171c6facf436"
+    },
+    "c5224523519": {
+      "kind": "issue-comment",
+      "ticket": 942,
+      "comment_id": 5224523519,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "f76bb8ac218e048cdf652fda6540373a3bf81856919b27cd02d11b505d4adbc3"
+    },
+    "c5224551950": {
+      "kind": "issue-comment",
+      "ticket": 942,
+      "comment_id": 5224551950,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "ecaaa5a110d0f22c99b5142889c6bb0974561a70299790766e69ddfbbf70e029"
+    },
+    "c6325275012": {
+      "kind": "issue-comment",
+      "ticket": 1096,
+      "comment_id": 6325275012,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "26c904aae09463d69f8aaa89d14f59099a629fe2008a1e1446375fb114f25ee4"
+    },
+    "c5465215005": {
+      "kind": "issue-comment",
+      "ticket": 1282,
+      "comment_id": 5465215005,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "915a00da7a22706ac2fabc368e081c8909bb15985ae0196209bf54e8cd03a837"
+    },
+    "c5596451156": {
+      "kind": "issue-comment",
+      "ticket": 1304,
+      "comment_id": 5596451156,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "a07e12348bdd826c844e85a73231a674d7e6fcd7cab93a2f8cdff53476728a79"
+    },
+    "c6552159628": {
+      "kind": "issue-comment",
+      "ticket": 1304,
+      "comment_id": 6552159628,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "8f58ca007a3bd6b338f43680c2cb1aeed198ff91fce894cdd42efb5c49171424"
+    },
+    "c5596451506": {
+      "kind": "issue-comment",
+      "ticket": 1319,
+      "comment_id": 5596451506,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "4f99e19edac13c4aea6ea15be2b4e7614733f7ba1e8270d18306a2a4fdd4eefe"
+    },
+    "c5596451863": {
+      "kind": "issue-comment",
+      "ticket": 1320,
+      "comment_id": 5596451863,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "17ae9513eeb25a9da2f7e7836448fc02f07aff25a0f9b1a766b4035868808941"
+    },
+    "c6242843651": {
+      "kind": "issue-comment",
+      "ticket": 1320,
+      "comment_id": 6242843651,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "07a3e98c6910c4397f7d1bd15d01bdf2bde14540343e028309cdd104b9558396"
+    },
+    "c5440707729": {
+      "kind": "issue-comment",
+      "ticket": 1279,
+      "comment_id": 5440707729,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "21dcbe36d55b0e1e661623b59c89573d5d53e4c1e2f21e1b892f6117c2e450f9"
+    },
+    "c5462459006": {
+      "kind": "issue-comment",
+      "ticket": 1279,
+      "comment_id": 5462459006,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "b21dd974207d154122828b5ffe137a2a274d6d880945808440dd8405bb7ea614"
+    },
+    "c5465517520": {
+      "kind": "issue-comment",
+      "ticket": 1279,
+      "comment_id": 5465517520,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "dd9eb921c4c6dbe3d90d4c2bb0fbbf29e9da509893fc97da84b7fdab43bb7104"
+    },
+    "c5466854598": {
+      "kind": "issue-comment",
+      "ticket": 1279,
+      "comment_id": 5466854598,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "c2ee6cb75ff00e145f7bb25201a5e4f4fde7ca8f43a8e11343c4ed44c801b8b9"
+    },
+    "c5501144382": {
+      "kind": "issue-comment",
+      "ticket": 1279,
+      "comment_id": 5501144382,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "cb7a5a96a105fa12c7e726d36399a927af9873f74efe4f880532bf142bc9921c"
+    },
+    "c5596452227": {
+      "kind": "issue-comment",
+      "ticket": 1279,
+      "comment_id": 5596452227,
+      "pointer": "/body",
+      "type": "string",
+      "sha256": "4c451869a4ff4dad0aced14ec674bd526b6990f9f945a8045e0d9d583cb56cd2"
+    },
+    "hl_942": {
+      "kind": "git-blob",
+      "commit": "7fa4a278eec54704637dd68dcb6101d6dbccdd6a",
+      "path": ".chanlun/review-results/hl-margin-table-disabledex-20260808.md",
+      "sha256": "fa4c938d6b8f7bacb5fb6083afb6ec93cda422f352456afb782db8e034436637",
+      "pointer": null,
+      "type": "bytes"
+    },
+    "retirement_0048": {
+      "kind": "git-blob",
+      "commit": "7fa4a278eec54704637dd68dcb6101d6dbccdd6a",
+      "path": "docs/adr/0048-legacy-engine-module-level-dispositions.md",
+      "sha256": "1c148912e39cde8075649a5eb18c9860696551039e1e085fc6c601808e00888d",
+      "pointer": null,
+      "type": "bytes"
+    },
+    "at14_0058": {
+      "kind": "git-blob",
+      "commit": "7fa4a278eec54704637dd68dcb6101d6dbccdd6a",
+      "path": "docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md",
+      "sha256": "526ef8000a3833c4de861de366fe51fea02c2b7ab514bd536316967664017a88",
+      "pointer": null,
+      "type": "bytes"
+    },
+    "prereg_windows": {
+      "kind": "git-blob",
+      "commit": "7fa4a278eec54704637dd68dcb6101d6dbccdd6a",
+      "path": "docs/backtest-prereg-windows-v0.md",
+      "sha256": "1c621da0fc13c6827f5b3b1ad18add4c035e97f6e8988ccd0190356129031e7f",
+      "pointer": null,
+      "type": "bytes"
+    }
+  },
+  "legacy_dispositions": {
+    "942": {
+      "disposition": "PRESERVE_BOUNDED",
+      "sources": ["c5224523519", "c5224551950", "hl_942"],
+      "obligations": {
+        "ISSUE_942_DISPOSITION": {
+          "requirement": "CLOSED_AND_PRESERVE_Q1_TO_Q10",
+          "sources": ["c5224523519", "c5224551950", "hl_942"],
+          "tb_ids": [],
+          "when": "always",
+          "entity": null
+        }
+      }
+    },
+    "1096": {
+      "disposition": "RETIRE_OR_INCORPORATE",
+      "sources": ["i1096", "c6325275012", "retirement_0048"],
+      "obligations": {
+        "ISSUE_1096_ENTRY_END_STATE": {
+          "requirement": "ENTRY_FREEZE_OR_INCORPORATION",
+          "sources": ["i1096", "c6325275012"],
+          "tb_ids": ["TB-10"],
+          "when": "always",
+          "entity": "tb-entry-inventory"
+        },
+        "ISSUE_1096_RETIREMENT_CONDITIONS": {
+          "requirement": "ADR_0048_RETIREMENT_CONDITIONS",
+          "sources": ["retirement_0048"],
+          "tb_ids": ["TB-10"],
+          "when": "on-deletion",
+          "entity": "tb-entry-inventory"
+        }
+      }
+    },
+    "1282": {
+      "disposition": "PRESERVE_ARCHIVE",
+      "sources": ["c5465215005", "c5466854598", "prereg_windows"],
+      "obligations": {
+        "ISSUE_1282_ARCHIVE": {
+          "requirement": "CLOSED_AND_PRESERVE_7_OF_7_AND_DUAL_CONTROLS",
+          "sources": ["c5465215005", "c5466854598", "prereg_windows"],
+          "tb_ids": [],
+          "when": "always",
+          "entity": null
+        }
+      }
+    },
+    "1304": {
+      "disposition": "ADOPT_AT14",
+      "sources": ["i1304", "c5596451156", "c6552159628", "at14_0058"],
+      "obligations": {
+        "ISSUE_1304_REPLAY": {
+          "requirement": "FULL_HISTORY_REPLAY",
+          "sources": ["c5596451156", "c6552159628", "at14_0058"],
+          "tb_ids": ["TB-07"],
+          "when": "always",
+          "entity": "history-input-profile/1"
+        },
+        "ISSUE_1304_RECOVERY": {
+          "requirement": "RESTART_AND_RECOVERY",
+          "sources": ["c5596451156", "c6552159628", "at14_0058"],
+          "tb_ids": ["TB-07"],
+          "when": "always",
+          "entity": null
+        },
+        "ISSUE_1304_AS_KNOWN": {
+          "requirement": "AS_KNOWN",
+          "sources": ["c5596451156", "c6552159628", "at14_0058"],
+          "tb_ids": ["TB-07"],
+          "when": "always",
+          "entity": null
+        },
+        "ISSUE_1304_STATE_PARITY": {
+          "requirement": "FULL_STATE_PARITY",
+          "sources": ["c5596451156", "c6552159628", "at14_0058"],
+          "tb_ids": ["TB-07"],
+          "when": "always",
+          "entity": null
+        },
+        "ISSUE_1304_AT14": {
+          "requirement": "LIVE_AT14_REPORT_AND_REGRESSION_LOCK",
+          "sources": ["c5596451156", "c6552159628", "at14_0058"],
+          "tb_ids": ["TB-07"],
+          "when": "always",
+          "entity": "at14-report"
+        }
+      }
+    },
+    "1319": {
+      "disposition": "INCORPORATE_FEED_WIRE",
+      "sources": ["i1319", "c5596451506"],
+      "obligations": {
+        "ISSUE_1319_FEED_WIRE": {
+          "requirement": "INCORPORATE_OR_RETIRE_FEED_AND_WIRE",
+          "sources": ["c5596451506"],
+          "tb_ids": ["TB-08"],
+          "when": "always",
+          "entity": "feed-wire-inventory"
+        },
+        "ISSUE_1319_INTENT_RECEIPT": {
+          "requirement": "FORMAL_INTENT_AND_RECEIPT",
+          "sources": ["c5596451506"],
+          "tb_ids": ["TB-04"],
+          "when": "always",
+          "entity": null
+        },
+        "ISSUE_1319_SEND_ISOLATION": {
+          "requirement": "ACTUAL_SEND_ISOLATION_WITHIN_942_SCOPE",
+          "sources": ["c5596451506", "c5224551950"],
+          "tb_ids": ["TB-09"],
+          "when": "always",
+          "entity": "permission.experiment"
+        }
+      }
+    },
+    "1320": {
+      "disposition": "REPLAY_AND_PRESERVE_HEAVY",
+      "sources": ["i1320", "c5596451863", "c6242843651", "at14_0058", "prereg_windows"],
+      "obligations": {
+        "ISSUE_1320_FULL_REPLAY": {
+          "requirement": "FULL_HISTORY_REPLAY",
+          "sources": ["c6242843651", "at14_0058"],
+          "tb_ids": ["TB-07"],
+          "when": "always",
+          "entity": "history-input-profile/1"
+        },
+        "ISSUE_1320_HEAVY_MEASUREMENT": {
+          "requirement": "HEAVY_RESULTS_OR_EXPLICIT_AUTHORIZED_RETIREMENT",
+          "sources": ["c6242843651", "prereg_windows"],
+          "tb_ids": ["TB-11"],
+          "when": "always",
+          "entity": "heavy-measurement"
+        }
+      }
+    },
+    "1279": {
+      "disposition": "KEEP_OPEN",
+      "sources": ["i1279", "c5462459006", "c5466854598", "c5501144382", "c5596452227"],
+      "obligations": {}
+    }
+  },
+  "issue_1279": {
+    "state_source": {"ticket": 1279, "pointer": "/state", "type": "string", "expected": "open"},
+    "comment_source": {"ticket": 1279, "complete_pagination": true, "pointer": "/body", "type": "string"},
+    "graph_scope_source": "c5596452227",
+    "precondition_source": "c5501144382",
+    "own_checklist": [
+      {"source": "c5466854598", "entry": 1, "line": 5, "key": "cross-asset-alpha"},
+      {"source": "c5462459006", "entry": 1, "line": 6, "key": "own-replay-horizon"},
+      {"source": "c5596452227", "entry": 2, "line": 5, "key": "own-ledger"},
+      {"source": "c5596452227", "entry": 3, "line": 5, "key": "own-execution"},
+      {"source": "c5440707729", "entry": 3, "line": 3, "key": "own-minimum-data"},
+      {"source": "c5596452227", "entry": 5, "line": 5, "key": "own-other-checklist"}
+    ],
+    "release_disposition": {
+      "required": "OPEN_WITHOUT_PREMATURE_RELEASE",
+      "unknown": "LEGACY_DISPOSITION",
+      "known_historical_comments": ["c5440707729", "c5462459006", "c5465517520", "c5466854598", "c5501144382", "c5596452227"]
+    }
+  },
+  "experiment_authorization": {
+    "ticket": 2133,
+    "comment_id": null,
+    "body_sha256": null,
+    "workflow": ".github/workflows/at18-experiment.yml",
+    "ref": "refs/heads/main",
+    "signature_fence": "at18-experiment-authorization/1",
+    "fields": {
+      "schema_version": {"pointer": "/schema_version", "type": "string"},
+      "runner_group": {"pointer": "/runner_group", "type": "string"},
+      "runner_label": {"pointer": "/runner_label", "type": "string"},
+      "profile_id": {"pointer": "/profile_id", "type": "profile-id"},
+      "not_before": {"pointer": "/not_before", "type": "utc-timestamp"},
+      "expires_at": {"pointer": "/expires_at", "type": "utc-timestamp"},
+      "actions": {"pointer": "/actions", "type": "string-array"}
+    },
+    "group_actions": {},
+    "send_authorization": {
+      "ticket": 1412,
+      "comment_id": null,
+      "body_sha256": null,
+      "signature_fence": "at18-send-authorization/1"
+    }
+  }
+}
