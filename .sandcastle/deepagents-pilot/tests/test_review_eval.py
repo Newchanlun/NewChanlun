@@ -4240,7 +4240,7 @@ def test_r13_per_field_merge_target_and_outcome_target(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (r_att_b / "target.json").write_text(
-        json.dumps({"pr_number": 2, "head_sha": "b" * 40, "attempt": True}),
+        json.dumps({"pr_number": 2, "head_sha": "b" * 40}),
         encoding="utf-8",
     )
     (r_att_b / "outcome.json").write_text(
@@ -4274,3 +4274,200 @@ def test_r13_per_field_merge_target_and_outcome_target(tmp_path: Path) -> None:
         assert m_bad.unorderable_runs == 1, case_name
         assert m_bad.rounds_to_first_pass_all.prs_counted == 0, case_name
         assert m_bad.rounds_to_first_pass_effective.prs_counted == 0, case_name
+
+
+def test_r14_attempt_conflict_and_invalid_unorderable(tmp_path: Path) -> None:
+    # Important 1：复现 Codex R13 最小反例（两种冲突方向：3 vs 1 与 1 vs 3）
+    for direction_name, target_att, outcome_att in [
+        ("target_3_outcome_1", 3, 1),
+        ("target_1_outcome_3", 1, 3),
+    ]:
+        runs_dir = tmp_path / f"conflict_{direction_name}"
+        r_pass = runs_dir / "r-pass"
+        r_block = runs_dir / "r-block"
+        r_pass.mkdir(parents=True)
+        (r_block / "claude-opus-5-5").mkdir(parents=True)
+
+        (r_pass / "target.json").write_text(
+            json.dumps({"pr_number": 1, "head_sha": "b" * 40, "registered_at_ns": 100, "attempt": 2}),
+            encoding="utf-8",
+        )
+        (r_pass / "outcome.json").write_text(
+            json.dumps(
+                {
+                    "verdict": "PASS",
+                    "target": {"pr_number": 1, "head_sha": "b" * 40, "registered_at_ns": 100, "attempt": 2},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        (r_block / "target.json").write_text(
+            json.dumps({"pr_number": 1, "head_sha": "a" * 40, "registered_at_ns": 100, "attempt": target_att}),
+            encoding="utf-8",
+        )
+        (r_block / "outcome.json").write_text(
+            json.dumps(
+                {
+                    "verdict": "BLOCK",
+                    "target": {"pr_number": 1, "head_sha": "a" * 40, "registered_at_ns": 100, "attempt": outcome_att},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (r_block / "claude-opus-5-5" / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "run_id": f"run-{direction_name}",
+                    "pr_number": 1,
+                    "head_sha": "a" * 40,
+                    "status": "completed",
+                    "model": "claude-opus-5-5",
+                    "result": {"status": "blocked", "findings": ["[P1] 真实缺陷"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        m = analyze_review_runs(runs_dir)
+        assert m.corrupted_files == (), direction_name
+        assert m.unorderable_runs == 1, direction_name
+        assert m.rounds_to_first_pass_all.prs_counted == 0, direction_name
+        assert m.rounds_to_first_pass_effective.prs_counted == 0, direction_name
+        assert m.subsequent_head_pass_undeterminable_findings == 1, direction_name
+        assert m.subsequent_head_pass_total_block_findings == 0, direction_name
+
+    # PASS 轮 attempt 冲突时同样标为不可排序并记录 unorderable_pass_heads_by_pr，使同 PR BLOCK 发现不可判定
+    runs_pass_bad = tmp_path / "pass_attempt_conflict"
+    r_b = runs_pass_bad / "r1-block"
+    r_p = runs_pass_bad / "r2-pass"
+    (r_b / "claude-opus-5-5").mkdir(parents=True)
+    r_p.mkdir(parents=True)
+    (r_b / "target.json").write_text(
+        json.dumps({"pr_number": 7, "head_sha": "a" * 40, "registered_at_ns": 100, "attempt": 1}),
+        encoding="utf-8",
+    )
+    (r_b / "outcome.json").write_text(
+        json.dumps({"verdict": "BLOCK", "target": {"pr_number": 7, "registered_at_ns": 100, "attempt": 1}}),
+        encoding="utf-8",
+    )
+    (r_b / "claude-opus-5-5" / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-p7-block",
+                "pr_number": 7,
+                "head_sha": "a" * 40,
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[P1] 缺陷"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (r_p / "target.json").write_text(
+        json.dumps({"pr_number": 7, "head_sha": "b" * 40, "registered_at_ns": 100, "attempt": 3}),
+        encoding="utf-8",
+    )
+    (r_p / "outcome.json").write_text(
+        json.dumps({"verdict": "PASS", "target": {"pr_number": 7, "registered_at_ns": 100, "attempt": 1}}),
+        encoding="utf-8",
+    )
+    m_pb = analyze_review_runs(runs_pass_bad)
+    assert m_pb.corrupted_files == ()
+    assert m_pb.unorderable_runs == 1
+    assert m_pb.rounds_to_first_pass_all.prs_counted == 0
+    assert m_pb.subsequent_head_pass_undeterminable_findings == 1
+    assert m_pb.subsequent_head_pass_total_block_findings == 0
+
+    # 显式非法 attempt（bool / 负数 / 字符串 / None / float）无论出现在哪一侧均判不可排序
+    for bad_name, target_obj, outcome_target_obj in [
+        ("target_bool_true", {"pr_number": 1, "registered_at_ns": 100, "attempt": True}, {"pr_number": 1, "attempt": 2}),
+        ("outcome_bool_false", {"pr_number": 1, "registered_at_ns": 100, "attempt": 1}, {"pr_number": 1, "attempt": False}),
+        ("target_negative", {"pr_number": 1, "registered_at_ns": 100, "attempt": -1}, {"pr_number": 1}),
+        ("outcome_negative", {"pr_number": 1, "registered_at_ns": 100}, {"pr_number": 1, "attempt": -2}),
+        ("target_str", {"pr_number": 1, "registered_at_ns": 100, "attempt": "1"}, {"pr_number": 1, "attempt": 1}),
+        ("outcome_none", {"pr_number": 1, "registered_at_ns": 100, "attempt": 1}, {"pr_number": 1, "attempt": None}),
+        ("target_float", {"pr_number": 1, "registered_at_ns": 100, "attempt": 1.5}, {"pr_number": 1}),
+    ]:
+        runs_inv = tmp_path / f"inv_{bad_name}"
+        r_inv = runs_inv / "r1"
+        r_inv.mkdir(parents=True)
+        (r_inv / "target.json").write_text(json.dumps(target_obj), encoding="utf-8")
+        (r_inv / "outcome.json").write_text(
+            json.dumps({"verdict": "PASS", "target": outcome_target_obj}),
+            encoding="utf-8",
+        )
+        m_inv = analyze_review_runs(runs_inv)
+        assert m_inv.corrupted_files == (), bad_name
+        assert m_inv.unorderable_runs == 1, bad_name
+        assert m_inv.rounds_to_first_pass_all.prs_counted == 0, bad_name
+
+    # 正对照：attempt == 0（非负整数）与双侧省略（默认 0）均合法且按 0 < 1 排序
+    runs_zero = tmp_path / "valid_zero_attempt"
+    r_z1 = runs_zero / "z-block-attempt-0"
+    r_z2 = runs_zero / "a-pass-attempt-1"
+    r_z1.mkdir(parents=True)
+    r_z2.mkdir(parents=True)
+    (r_z1 / "target.json").write_text(
+        json.dumps({"pr_number": 3, "head_sha": "a" * 40, "registered_at_ns": 100, "attempt": 0}),
+        encoding="utf-8",
+    )
+    (r_z1 / "outcome.json").write_text(
+        json.dumps({"verdict": "BLOCK", "target": {"pr_number": 3, "attempt": 0}}),
+        encoding="utf-8",
+    )
+    (r_z2 / "target.json").write_text(
+        json.dumps({"pr_number": 3, "head_sha": "b" * 40, "registered_at_ns": 100}),
+        encoding="utf-8",
+    )
+    (r_z2 / "outcome.json").write_text(
+        json.dumps({"verdict": "PASS", "target": {"pr_number": 3, "attempt": 1}}),
+        encoding="utf-8",
+    )
+    m_zero = analyze_review_runs(runs_zero)
+    assert m_zero.corrupted_files == ()
+    assert m_zero.unorderable_runs == 0
+    assert m_zero.rounds_to_first_pass_all.bucket_2 == 1
+    assert m_zero.rounds_to_first_pass_effective.bucket_2 == 1
+
+
+def test_r14_leading_tag_parenthetical_negated_pass_and_style_word_boundary() -> None:
+    # Important 2：非链接括号附注不再误杀行首标签，真实链接仍由 CommonMark §6.3 栈屏蔽
+    assert (
+        classify_finding_heuristic("[P1](Linux only) 数据丢失，建议后续也补监控", "blocked")
+        == "blocking_substantive"
+    )
+    assert _parse_leading_severity_tag("[P1](Linux only) 数据丢失，建议后续也补监控") == "blocking"
+    assert classify_finding_heuristic("[nit](Linux only) 命名可微调", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[P1] [src/low:1](src/low#L1) 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[nit](/doc) 数据丢失", "blocked") == "blocking_substantive"
+    assert (
+        classify_finding_heuristic("[P1] [nit][location] 数据丢失\n\n[location]: src/nit#L1", "blocked")
+        == "blocking_substantive"
+    )
+
+    # Important 3：_TAG_NON_BLOCKING_RE 中“通过”加否定保护，防止“[阻断/验收未通过]”误判非阻断
+    assert classify_finding_heuristic("[阻断/验收未通过] 数据丢失", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("[阻断/验收未通过] 数据丢失") == "blocking"
+    assert classify_finding_heuristic("[验收不通过] 数据丢失", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("[验收不通过] 数据丢失") is None
+    assert classify_finding_heuristic("[测试没通过] 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[没有通过校验] 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[非通过状态] 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[未获通过] 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[通过] 无问题", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("【核实通过】无问题", "blocked") == "non_blocking_or_nit"
+
+    # Nit：_STYLE_FORMAT_RE 英文词项词边界保护，防止 blacklist 误命中 black
+    assert is_style_or_format_finding("blacklist 校验失效导致数据丢失") is False
+    assert classify_finding_heuristic("blacklist 校验失效导致数据丢失", "blocked") == "blocking_substantive"
+    assert is_style_or_format_finding("black 格式化失败") is True
+    assert classify_finding_heuristic("black 格式化失败", "blocked") == "blocking_style_or_format"
+    assert is_style_or_format_finding("black check failed") is True
+    assert is_style_or_format_finding("scruffy state causes crash") is False
+    assert is_style_or_format_finding("ruff lint failed") is True
+    assert is_style_or_format_finding("typography rendering panic") is False
+    assert is_style_or_format_finding("typo in comment") is True
+    assert is_style_or_format_finding("reimport order mismatch") is False
+    assert is_style_or_format_finding("fix import order") is True
+    assert is_style_or_format_finding("import 排序混乱") is True

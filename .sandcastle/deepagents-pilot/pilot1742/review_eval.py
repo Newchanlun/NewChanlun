@@ -33,10 +33,10 @@ _DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 # 启发式正则：仅用于对历史纯文本 findings 做粗粒度归类，非人工标注真值。
 _STYLE_FORMAT_RE = re.compile(
-    r"(?:rustfmt|cargo\s+fmt|prettier|eslint|ruff|flake8|black|"
-    r"import\s*(?:排序|顺序|分组|order)|"
-    r"格式(?:化|问题|对齐)?|缩进|尾随空格|多余空行|拼写错误|typo|"
-    r"style\s*(?:only|issue|nit)|formatting|whitespace)",
+    r"(?:(?<![A-Za-z0-9_])(?:rustfmt|cargo\s+fmt|prettier|eslint|ruff|flake8|black|"
+    r"typo|style\s*(?:only|issue|nit)|formatting|whitespace|import\s*order)(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])import\s*(?:排序|顺序|分组)|"
+    r"格式(?:化|问题|对齐)?|缩进|尾随空格|多余空行|拼写错误)",
     re.IGNORECASE,
 )
 _LEADING_LIST_PREFIX_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
@@ -122,7 +122,7 @@ _TAG_NON_BLOCKING_RE = re.compile(
     r"(?<![A-Za-z0-9])low(?![A-Za-z0-9])|(?<![A-Za-z0-9])info(?![A-Za-z0-9])|"
     r"信息|提示|(?<!不是)(?<!并非)(?<!非)建议|(?<!不是)(?<!并非)(?<!非)可选|"
     r"(?<![A-Za-z0-9])p3(?![A-Za-z0-9])|"
-    r"已核.*(?:无问题|未发现问题)|核实通过|确认无(?:问题|误)|通过)",
+    r"已核.*(?:无问题|未发现问题)|核实通过|确认无(?:问题|误)|(?<!未)(?<!不)(?<!没)(?<!没有)(?<!非)(?<!未获)通过)",
     re.IGNORECASE,
 )
 _TAG_BLOCKING_RE = re.compile(
@@ -2459,7 +2459,7 @@ def _parse_leading_severity_tag(
         tag_content = bracket_match.group("tag")
         if open_br == "[" and close_br == "]":
             after_close = unbold[pos + bracket_match.end("close") :]
-            if after_close.startswith("(") or after_close.startswith("[]"):
+            if after_close.startswith("[]"):
                 break
             ref_match = _IMMEDIATE_REF_BRACKET_RE.match(after_close)
             if ref_match:
@@ -2615,6 +2615,16 @@ def _parse_optional_positive_int_field(data: dict[str, Any] | None, key: str) ->
     return (raw, False)
 
 
+def _parse_optional_nonneg_int_field(data: dict[str, Any] | None, key: str) -> tuple[int | None, bool]:
+    """解析可选非负整数顺序字段，返回 (规范值, 是否显式非法)；键省略返回 (None, False)。"""
+    if data is None or key not in data:
+        return (None, False)
+    raw = data[key]
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return (None, True)
+    return (raw, False)
+
+
 @dataclass(frozen=True)
 class _RunTimelineRecord:
     registered_at_ns: int
@@ -2662,6 +2672,7 @@ def analyze_review_runs(
 
     all_prs: set[int] = set()
     prs_with_any_pass: set[int] = set()
+    prs_with_unorderable_run: set[int] = set()
     unorderable_pass_heads_by_pr: dict[int, set[str | None]] = defaultdict(set)
     pr_timeline: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
     unorderable_block_by_receipt_key: list[tuple[tuple[str, str], int]] = []
@@ -2884,23 +2895,24 @@ def analyze_review_runs(
         ot_reg, ot_reg_bad = _parse_optional_positive_int_field(outcome_target, "registered_at_ns")
         reg_values = {v for v in (t_reg, ot_reg) if v is not None}
         has_valid_ts = not t_reg_bad and not ot_reg_bad and len(reg_values) == 1
-        if run_pr_number is None or not has_valid_ts:
+
+        t_att, t_att_bad = _parse_optional_nonneg_int_field(target_data, "attempt")
+        ot_att, ot_att_bad = _parse_optional_nonneg_int_field(outcome_target, "attempt")
+        att_values = {v for v in (t_att, ot_att) if v is not None}
+        has_valid_attempt = not t_att_bad and not ot_att_bad and len(att_values) <= 1
+
+        if run_pr_number is None or not has_valid_ts or not has_valid_attempt:
             unorderable_runs += 1
-            if run_pr_number is not None and verdict == "PASS":
-                unorderable_pass_heads_by_pr[run_pr_number].add(dir_head_sha or None)
+            if run_pr_number is not None:
+                prs_with_unorderable_run.add(run_pr_number)
+                if verdict == "PASS":
+                    unorderable_pass_heads_by_pr[run_pr_number].add(dir_head_sha or None)
             if verdict == "BLOCK" and run_blocking_by_key:
                 unorderable_block_by_receipt_key.extend(run_blocking_by_key)
             continue
 
         resolved_reg_at_ns = next(iter(reg_values))
-        t_att_raw = target_data.get("attempt") if target_data is not None else None
-        ot_att_raw = outcome_target.get("attempt") if outcome_target is not None else None
-        if isinstance(t_att_raw, int) and not isinstance(t_att_raw, bool):
-            attempt = t_att_raw
-        elif isinstance(ot_att_raw, int) and not isinstance(ot_att_raw, bool):
-            attempt = ot_att_raw
-        else:
-            attempt = 0
+        attempt = next(iter(att_values), 0)
         pr_timeline[run_pr_number].append(
             _RunTimelineRecord(
                 registered_at_ns=resolved_reg_at_ns,
@@ -2925,24 +2937,25 @@ def analyze_review_runs(
     for pr_number, records in sorted(pr_timeline.items()):
         ordered_runs = sorted(records, key=lambda r: (r.registered_at_ns, r.attempt, r.dir_name))
 
-        first_pass_idx: int | None = None
-        for idx, rec in enumerate(ordered_runs):
-            if rec.verdict == "PASS":
-                first_pass_idx = idx
-                break
-        if first_pass_idx is not None:
-            rounds_all.append(first_pass_idx + 1)
-            first_pass_rec = ordered_runs[first_pass_idx]
-            if first_pass_rec.is_reused:
-                prs_first_pass_reused += 1
-            else:
-                # 有效评审轮次：仅计真实新产生正式裁定（PASS / BLOCK 且非 reused_from）的轮次。
-                fresh_effective_until_pass = sum(
-                    1
-                    for rec in ordered_runs[: first_pass_idx + 1]
-                    if rec.verdict in ("PASS", "BLOCK") and not rec.is_reused
-                )
-                rounds_effective.append(fresh_effective_until_pass)
+        if pr_number not in prs_with_unorderable_run:
+            first_pass_idx: int | None = None
+            for idx, rec in enumerate(ordered_runs):
+                if rec.verdict == "PASS":
+                    first_pass_idx = idx
+                    break
+            if first_pass_idx is not None:
+                rounds_all.append(first_pass_idx + 1)
+                first_pass_rec = ordered_runs[first_pass_idx]
+                if first_pass_rec.is_reused:
+                    prs_first_pass_reused += 1
+                else:
+                    # 有效评审轮次：仅计真实新产生正式裁定（PASS / BLOCK 且非 reused_from）的轮次。
+                    fresh_effective_until_pass = sum(
+                        1
+                        for rec in ordered_runs[: first_pass_idx + 1]
+                        if rec.verdict in ("PASS", "BLOCK") and not rec.is_reused
+                    )
+                    rounds_effective.append(fresh_effective_until_pass)
 
         unorderable_pass_heads = unorderable_pass_heads_by_pr.get(pr_number, set())
         for rec in ordered_runs:
@@ -3119,7 +3132,7 @@ def render_baseline_markdown(metrics: BaselineMetrics) -> str:
         "# 外部正式审查基线统计报告（#1931）",
         "",
         f"- 扫描目录：`{metrics.runs_dir}`",
-        f"- 总运行数：`{metrics.total_runs}`（其中缺 `outcome.json` 未完结：`{metrics.missing_outcome_runs}`；沿用历史 PASS：`{metrics.reused_runs}`；新产生 PASS：`{metrics.fresh_pass_runs}`；缺合法时间戳不可排序运行：`{metrics.unorderable_runs}`；损坏跳过文件：`{len(metrics.corrupted_files)}`）",
+        f"- 总运行数：`{metrics.total_runs}`（其中缺 `outcome.json` 未完结：`{metrics.missing_outcome_runs}`；沿用历史 PASS：`{metrics.reused_runs}`；新产生 PASS：`{metrics.fresh_pass_runs}`；不可排序运行：`{metrics.unorderable_runs}`；损坏跳过文件：`{len(metrics.corrupted_files)}`）",
         f"- 唯一 PR 数：`{metrics.unique_prs}`（已获 PASS：`{metrics.prs_with_pass}`；尚未 PASS：`{metrics.prs_without_pass}`；其中首次 PASS 为历史复用的 PR：`{metrics.prs_first_pass_reused}`）",
         f"- BLOCK 率（占全量运行 `{metrics.total_runs}`）：`{_fmt_pct(metrics.block_rate_all)}`",
         f"- BLOCK 率（含历史复用 PASS 分母 `PASS+BLOCK = {decided_including_reuse}`）：`{_fmt_pct(metrics.block_rate_decided_including_reuse)}`",
