@@ -6,7 +6,7 @@
 #   并要求错误条数恰好等于负例行数（第 5 参数），防止一行被拒就掩盖其余几行意外编译通过。
 # #1426：check 新增第 6 参数指定 cargo 目标参数（默认不变：`--features s_session --bin s_structure_session`）、
 #   第 7 参数可选精确匹配无码错误（默认空，原行为不变），并新增 `--test trend_formation_1426` 五结构体完整字面量
-#   拒绝负例（5 条 E0451 + 1 条私有类型 `trend_formation::Chain` 无码错误）。
+#   拒绝负例（5 条 E0451 + 1 条私有类型 `trend_formation::Chain` 无码错误），以及形成凭据与归属的类型负例。
 # 任一不满足即失败：负例意外编译通过，或因别处的无关错误失败，都不能当作「边界仍然拒绝」。
 # 用法：在 rust/ 目录下运行：`check-compile-negatives-1394.sh [all|s_session|default]`（默认 all）。
 set -uo pipefail
@@ -88,6 +88,7 @@ esac
 
 case "$suite" in
   all|default)
+    check issue1426_formation_type_refusal tests/trend_formation_1426.rs "" "E0308|E0061" 4 "--test trend_formation_1426" || status=1
     check issue1426_fabricated_evidence_refusal tests/trend_formation_1426.rs "" "E0451" 6 "--test trend_formation_1426" 'type `trend_formation::Chain` is private$' || status=1
     ;;
 esac
