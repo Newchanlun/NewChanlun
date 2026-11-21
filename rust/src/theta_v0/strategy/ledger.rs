@@ -550,8 +550,8 @@ impl TwEvent {
     /// OQ-9 合法转移谓词 `LegalTransition`（契约锚 `Origin.TotalWealth.LegalTransition`，
     /// review 019f0318 修正后的 legal 层）。
     ///
-    /// 哪些 `(s, e)` 合法（raw 层 [`tw_step`] 对所有 (s,e) 都有定义，包括非法的；本谓词只标注
-    /// 合法子集——raw 层保留非法路径作 violation witness，legal 层排除它）：
+    /// 这里只判业务合法性，不判机器整数能否表示结果。[`try_tw_step`] 也执行可表示的
+    /// 非法路径，以保留反例见证；[`tw_step_legal`] 同时要求业务合法且结果可表示。
     /// - `EnterEarning`：须 `open_legacy_legs == 0`（清空 legacy 腿后才能进，OQ-9 入口证书）。
     /// - `OpenShareLeg`：须 `stage.rank < EarningShares.rank`（修正1：earning 阶段不再开 legacy 腿）。
     /// - `CloseShareLeg`：须 `open_legacy_legs >= 1`（有腿才能闭——否则凭空闭不存在的腿 = 幽灵）。
@@ -578,50 +578,84 @@ impl TwEvent {
     }
 }
 
-/// TW 更新 `tw_step`（契约锚 `Origin.TotalWealth.twStep`，全函数）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TwStepError {
+    RepresentationOverflow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TwTransitionError {
+    IllegalTransition,
+    RepresentationOverflow,
+}
+
+/// 先按 Lean 的业务谓词判合法性，再受检执行。非法事件优先返回 `IllegalTransition`。
+pub fn tw_step_legal(s: &TwState, e: TwEvent) -> Result<TwState, TwTransitionError> {
+    if !e.is_legal_from(s) {
+        return Err(TwTransitionError::IllegalTransition);
+    }
+    try_tw_step(s, e)
+        .map_err(|TwStepError::RepresentationOverflow| TwTransitionError::RepresentationOverflow)
+}
+
+/// TW raw 更新的兼容入口，适用于调用方已保证结果可表示的路径。
+///
+/// 与 Lean `Int` 的状态对拍域是共有结果字段均落在各自表示范围内（金额为 `i64`，
+/// 未闭腿计数为 `u32`）。若另比对 `tw()` / `l_wc()`，这些读数的运算也须可表示。
+/// 这里不判业务合法性，保留可表示的非法路径作反例。边界输入用 [`try_tw_step`]。
+///
+/// # Panics
+///
+/// 任一结果字段不可表示时，在所有构建档位 panic，不回绕成另一账本。
+pub fn tw_step(s: &TwState, e: TwEvent) -> TwState {
+    try_tw_step(s, e).expect("TW 转移结果超出整数表示域")
+}
+
+/// 受检执行 TW raw 更新（契约锚 `Origin.TotalWealth.twStep`）。
 ///
 /// 同价 c 固定下 free/holding/withdrawn 间转移，**非 Realize 构造子三量之和 TW 不变**（同价中性，
 /// design §6.3 L0）；**`Realize(d_pi)` 使 TW 漂移 = d_pi**（codex GAP3 裁定 A'：已实现利润入账，
 /// 可正可负——L2 变价下平仓结算的费后 PnL 是 TW 的唯一非回补资金源）。
-/// raw 层全函数——对所有 (s, e) 都有定义（包括非法的 EnterEarning，保留 violation witness）；
-/// 合法性由 [`TwEvent::is_legal_from`] 标注。
+/// 不可表示的结果返回 [`TwStepError::RepresentationOverflow`]；可表示的非法事件也执行，
+/// 例如保留非法 EnterEarning 的反例。需要同时检查业务合法性时用 [`tw_step_legal`]。
 ///
 /// ★契约锚诚实标注：`Realize` 是 Rust 侧 A' 裁定新增构造子，`Origin.TotalWealth.TWEvent`
 /// **尚无对应物**——与 `Revalue`（R3 新增第 7 构造子）同为待 Lean 侧
 /// 扩展的 Rust 先行构造子，不冒充已锚 Origin（声明与实际一致，090号）。
 ///
 /// 不可变模式（coding-style）：返回新 [`TwState`]，不就地修改。
-pub fn tw_step(s: &TwState, e: TwEvent) -> TwState {
-    match e {
+pub fn try_tw_step(s: &TwState, e: TwEvent) -> Result<TwState, TwStepError> {
+    let overflow = TwStepError::RepresentationOverflow;
+    Ok(match e {
         // holding→free 转 d_cash（free+=d, holding-=d）⟹ TW 不变。
         TwEvent::ShortDiff(d_cash) => TwState {
-            free: s.free + d_cash,
-            holding: s.holding - d_cash,
+            free: s.free.checked_add(d_cash).ok_or(overflow)?,
+            holding: s.holding.checked_sub(d_cash).ok_or(overflow)?,
             ..*s
         },
         // 开 legacy 降成本短差腿（无 TW 三量变动）⟹ TW 不变。
         TwEvent::OpenShareLeg => TwState {
-            open_legacy_legs: s.open_legacy_legs + 1,
+            open_legacy_legs: s.open_legacy_legs.checked_add(1).ok_or(overflow)?,
             ..*s
         },
         // 闭合 legacy 腿：open_legacy_legs 饱和减 + cum_net_cash += profit（净现金口径，端A
         // 载体）⟹ TW 三量不变（profit 进 cum_net_cash 口径量，不进 TW 财富量）⟹ TW 不变。
         TwEvent::CloseShareLeg(profit) => TwState {
             open_legacy_legs: s.open_legacy_legs.saturating_sub(1),
-            cum_net_cash: s.cum_net_cash + profit,
+            cum_net_cash: s.cum_net_cash.checked_add(profit).ok_or(overflow)?,
             ..*s
         },
         // free→withdrawn 转 w（withdrawn+=w, free-=w）⟹ TW 不变；stage 推进 CapitalRecovered（单向）。
         TwEvent::RecoverCapital(w) => TwState {
-            free: s.free - w,
-            withdrawn: s.withdrawn + w,
+            free: s.free.checked_sub(w).ok_or(overflow)?,
+            withdrawn: s.withdrawn.checked_add(w).ok_or(overflow)?,
             stage: advance_to(s.stage, TStage::CapitalRecovered),
             ..*s
         },
         // 期内把已退本金重新放回在险池；其余账项不动。
         TwEvent::ReexposePrincipal(amount) => TwState {
-            free: s.free + amount,
-            withdrawn: s.withdrawn - amount,
+            free: s.free.checked_add(amount).ok_or(overflow)?,
+            withdrawn: s.withdrawn.checked_sub(amount).ok_or(overflow)?,
             ..*s
         },
         // 纯 stage 切换到 EarningShares（单向），无资金变动 ⟹ TW 不变。raw 层无入口守卫
@@ -633,7 +667,7 @@ pub fn tw_step(s: &TwState, e: TwEvent) -> TwState {
         // campaign 结束：withdrawn→free 归还（TW 不变）；stage 重置 + legacy 腿/cum_net_cash 清零。
         // 注意：campaign 边界，新 campaign 起点，**非回退**（stage 单向性是 campaign 内性质）。
         TwEvent::ClearCampaign => TwState {
-            free: s.free + s.withdrawn,
+            free: s.free.checked_add(s.withdrawn).ok_or(overflow)?,
             holding: s.holding,
             withdrawn: 0,
             notional_in: 0,
@@ -647,7 +681,7 @@ pub fn tw_step(s: &TwState, e: TwEvent) -> TwState {
         // 链路已移除：旧版 free += g 的浮盈棘轮入账被裁定为语义回补）。诊断-only 效应见独立引理
         // tw_step_revalue_diagnostic_only。g 由 transition_adapter 以「浮盈超高水位增量」派发（g≥0）。
         TwEvent::Revalue(g) => TwState {
-            hwm_gain: s.hwm_gain + g,
+            hwm_gain: s.hwm_gain.checked_add(g).ok_or(overflow)?,
             ..*s
         },
         // ★codex GAP3 终局裁定 A'（推导链第 4/5 条）：已实现利润入账 free += d_pi（可正可负）。
@@ -655,10 +689,10 @@ pub fn tw_step(s: &TwState, e: TwEvent) -> TwState {
         // holding/withdrawn/cum_net_cash/hwm_gain。资金源硬边界（实际平仓 fill 费后 PnL）由 producer
         // 保证（runner ②'' / schedule_adapter 减仓分支），raw 层不设门（与 ShortDiff 同类恒合法）。
         TwEvent::Realize(d_pi) => TwState {
-            free: s.free + d_pi,
+            free: s.free.checked_add(d_pi).ok_or(overflow)?,
             ..*s
         },
-    }
+    })
 }
 
 /// 账本分量 `LedgerComp`（契约锚 **`Origin.FullDefinitionStrategy.LedgerState`**，R=Π-A-W 恒等载体）。
@@ -875,6 +909,86 @@ mod tests {
     //  TwState TW 守恒 + stage 单向（契约锚 `Origin.TotalWealth.twStep_preserves_tw` /
     //  `stage_rank_monotone`——#127 native port，两端均锚 Origin canonical）
     // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn checked_tw_step_rejects_unrepresentable_result_fields() {
+        let initial = TwState::initial();
+        let high_free = TwState {
+            free: i64::MAX,
+            withdrawn: 1,
+            ..initial
+        };
+        for (s, event) in [
+            (high_free, TwEvent::ShortDiff(1)),
+            (
+                TwState {
+                    holding: i64::MIN,
+                    ..initial
+                },
+                TwEvent::ShortDiff(1),
+            ),
+            (
+                TwState {
+                    open_legacy_legs: u32::MAX,
+                    ..initial
+                },
+                TwEvent::OpenShareLeg,
+            ),
+            (
+                TwState {
+                    cum_net_cash: i64::MAX,
+                    open_legacy_legs: 1,
+                    ..initial
+                },
+                TwEvent::CloseShareLeg(1),
+            ),
+            (
+                TwState {
+                    free: i64::MIN,
+                    ..initial
+                },
+                TwEvent::RecoverCapital(1),
+            ),
+            (
+                TwState {
+                    withdrawn: i64::MAX,
+                    ..initial
+                },
+                TwEvent::RecoverCapital(1),
+            ),
+            (high_free, TwEvent::ClearCampaign),
+            (
+                TwState {
+                    hwm_gain: i64::MAX,
+                    ..initial
+                },
+                TwEvent::Revalue(1),
+            ),
+            (high_free, TwEvent::Realize(1)),
+            (high_free, TwEvent::ReexposePrincipal(1)),
+        ] {
+            assert!(event.is_legal_from(&s), "{event:?}");
+            assert_eq!(
+                try_tw_step(&s, event),
+                Err(TwStepError::RepresentationOverflow)
+            );
+            assert_eq!(
+                tw_step_legal(&s, event),
+                Err(TwTransitionError::RepresentationOverflow)
+            );
+        }
+
+        let event = TwEvent::ReexposePrincipal(i64::MIN);
+        assert!(!event.is_legal_from(&initial));
+        assert_eq!(
+            try_tw_step(&initial, event),
+            Err(TwStepError::RepresentationOverflow)
+        );
+        assert_eq!(
+            tw_step_legal(&initial, event),
+            Err(TwTransitionError::IllegalTransition)
+        );
+    }
 
     /// ★tw_step 非 Realize 构造子保 TW 守恒（契约锚 `Origin.TotalWealth.twStep_preserves_tw`；
     /// codex GAP3 裁定 A' 清单①：新不变量 =「非 Realize 保 TW，Realize 使 TW 漂移 = Σd_pi」——

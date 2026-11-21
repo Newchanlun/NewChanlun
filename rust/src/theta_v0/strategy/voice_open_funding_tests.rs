@@ -35,17 +35,23 @@ fn new_ledger() -> VoiceOpenLedger {
     }
 }
 
-fn recovered_ledger() -> VoiceOpenLedger {
-    let mut ledger = new_ledger();
-    for (known_at, event) in [
-        (10, TwEvent::RecoverCapital(100)),
-        (20, TwEvent::EnterEarning),
-    ] {
-        assert!(event.is_legal_from(&ledger.tw));
-        ledger.tw = tw_step(&ledger.tw, event);
-        ledger.phase_events.push(PhaseEvent { event, known_at });
+fn apply_phase(ledger: &mut VoiceOpenLedger, event: TwEvent, known_at: i64) {
+    ledger.tw = tw_step_legal(&ledger.tw, event).expect("合法的阶段转换");
+    if let TwEvent::RecoverCapital(amount) = event {
+        ledger.p_recovered += amount;
     }
-    ledger.p_recovered = 100;
+    ledger.phase_events.push(PhaseEvent { event, known_at });
+}
+
+fn capital_recovered_ledger() -> VoiceOpenLedger {
+    let mut ledger = new_ledger();
+    apply_phase(&mut ledger, TwEvent::RecoverCapital(100), 10);
+    ledger
+}
+
+fn recovered_ledger() -> VoiceOpenLedger {
+    let mut ledger = capital_recovered_ledger();
+    apply_phase(&mut ledger, TwEvent::EnterEarning, 20);
     ledger
 }
 
@@ -143,7 +149,8 @@ fn topup_reexposes_exact_shortfall_capped_by_withdrawn() {
 
 #[test]
 fn chong_full_shortfall_values_are_identical() {
-    let starting = recovered_ledger();
+    let mut starting = recovered_ledger();
+    starting.principal_total = 120;
     for free in [-15, 0, 8, 55] {
         for withdrawn in [0, 4, 40, 120] {
             for q in [0, 3, 20, 80, 160] {
@@ -168,24 +175,36 @@ fn chong_full_shortfall_values_are_identical() {
     }
 }
 
-/// 模拟只读 AsKnown 消费方：在知识截止点用原始账本与可知阶段事件重放，并编码结果。
-fn as_known_bytes(events: &[PhaseEvent], cutoff: i64) -> Vec<u8> {
-    let ledger = new_ledger();
-    let (tw, known) = events
-        .iter()
-        .take_while(|record| record.known_at <= cutoff)
-        .fold((ledger.tw, Vec::new()), |(tw, mut known), record| {
-            known.push((record.known_at, format!("{:?}", record.event)));
-            (tw_step(&tw, record.event), known)
-        });
-    serde_json::to_vec(&(
+/// 模拟 AsKnown 消费方：从初态重放选定的事件前缀，再编码 TW 字段和事件序列。
+fn replay_bytes(prefix: &[PhaseEvent]) -> (TwState, Vec<u8>) {
+    let (tw, known) =
+        prefix
+            .iter()
+            .fold((new_ledger().tw, Vec::new()), |(tw, mut known), record| {
+                known.push((record.known_at, format!("{:?}", record.event)));
+                (
+                    tw_step_legal(&tw, record.event).expect("合法的历史事件"),
+                    known,
+                )
+            });
+    let bytes = serde_json::to_vec(&(
         tw.free,
+        tw.holding,
         tw.withdrawn,
+        tw.notional_in,
         tw.stage.rank(),
+        tw.open_legacy_legs,
         tw.cum_net_cash,
+        tw.hwm_gain,
         known,
     ))
-    .expect("固定整数与事件记录可编码")
+    .expect("固定整数与事件记录可编码");
+    (tw, bytes)
+}
+
+fn as_known_bytes(events: &[PhaseEvent], cutoff: i64) -> Vec<u8> {
+    let prefix_len = events.partition_point(|record| record.known_at <= cutoff);
+    replay_bytes(&events[..prefix_len]).1
 }
 
 #[test]
@@ -227,35 +246,83 @@ fn reexposure_appends_once_without_rewriting_as_known() {
         }
     );
     assert_eq!(after.tw.tw(), before.tw.tw());
+}
+
+#[test]
+fn same_known_at_keeps_the_frozen_prefix_not_the_bare_cutoff() {
+    let before = recovered_ledger();
+    let prefix_len = before.phase_events.len();
+    let known_at = 20;
+    assert_eq!(before.phase_events[prefix_len - 1].known_at, known_at);
+    let frozen = as_known_bytes(&before.phase_events, known_at);
+    let after = evaluate_voice_open_funding(&before, 60, TOPUP, known_at)
+        .expect("同刻允许顺序追加")
+        .ledger;
+
+    assert_eq!(after.phase_events.len(), prefix_len + 1);
+    assert_eq!(&after.phase_events[..prefix_len], before.phase_events);
     assert_eq!(
-        evaluate_voice_open_funding(&before, 60, TOPUP, 19),
-        Err(VoiceOpenFundingError::KnownAtOutOfOrder),
+        after.phase_events[prefix_len],
+        PhaseEvent {
+            event: TwEvent::ReexposePrincipal(40),
+            known_at,
+        }
     );
+    let (replayed, bytes) = replay_bytes(&after.phase_events[..prefix_len]);
+    assert_eq!((replayed.free, replayed.withdrawn), (20, 100));
+    assert_eq!(bytes, frozen);
+    assert_ne!(as_known_bytes(&after.phase_events, known_at), frozen);
+    assert_eq!((after.tw.free, after.tw.withdrawn), (60, 60));
+}
+
+#[test]
+fn every_policy_rejects_future_or_disordered_history_even_when_q_is_zero() {
+    let before = recovered_ledger();
+    let mut disordered = before.clone();
+    disordered.phase_events.swap(0, 1);
+    for policy in [AVAILABLE, TOPUP, FULL, FULL_TOPUP] {
+        for q in [60, 0] {
+            for (ledger, known_at) in [(&before, 9), (&before, 19), (&disordered, 30)] {
+                assert_eq!(
+                    evaluate_voice_open_funding(ledger, q, policy, known_at),
+                    Err(VoiceOpenFundingError::NonMonotonicKnownAt),
+                    "{policy:?} Q={q} @ {known_at}",
+                );
+            }
+        }
+    }
 }
 
 #[test]
 fn long_recovery_can_be_lost_and_regained_without_latch_regression() {
-    let before = recovered_ledger();
-    assert!(before.growth_eligible_long());
-    assert_eq!(before.tw.l_wc(), 0);
-    let mut after = evaluate_voice_open_funding(&before, 60, TOPUP, 30)
-        .expect("可补到 Q")
-        .ledger;
-    assert_eq!(after.p_recovered, 60);
-    assert!(!after.growth_eligible_long());
-    assert_eq!(after.tw.l_wc(), 40);
-    assert_eq!(after.tw.stage, TStage::EarningShares);
-    assert!(after.tw.stage.rank() >= before.tw.stage.rank());
+    let mut before = new_ledger();
+    assert_eq!(before.tw.stage, TStage::CostReduction);
+    assert_eq!(before.growth_eligible(VoiceSide::Long), Some(false));
+    apply_phase(&mut before, TwEvent::RecoverCapital(100), 10);
 
-    // RecoverCapital 由账本上游记入，两种读数都恢复，不改 K、P 或利润。
-    let recover = TwEvent::RecoverCapital(40);
-    assert!(recover.is_legal_from(&after.tw));
-    after.tw = tw_step(&after.tw, recover);
-    after.p_recovered += 40;
-    assert_eq!(after.p_recovered, after.principal_total);
-    assert!(after.growth_eligible_long());
-    assert_eq!(after.tw.l_wc(), 0);
-    assert_eq!(after.tw.stage, TStage::EarningShares);
+    for stage in [TStage::CapitalRecovered, TStage::EarningShares] {
+        if stage == TStage::EarningShares {
+            apply_phase(&mut before, TwEvent::EnterEarning, 20);
+        }
+        assert_eq!(before.tw.stage, stage);
+        assert_eq!(before.growth_eligible(VoiceSide::Long), Some(true));
+        assert_eq!(before.tw.l_wc(), 0);
+
+        let mut after = evaluate_voice_open_funding(&before, 60, TOPUP, 30)
+            .expect("可补到 Q")
+            .ledger;
+        assert_eq!(after.tw.stage, stage);
+        assert_eq!(after.p_recovered, 60);
+        assert_eq!(after.growth_eligible(VoiceSide::Long), Some(false));
+        assert_eq!(after.tw.l_wc(), 40);
+
+        // 上游再次退足本金后，资格恢复；两条轨迹各自保持阶段。
+        apply_phase(&mut after, TwEvent::RecoverCapital(40), 40);
+        assert_eq!(after.tw.stage, stage);
+        assert_eq!(after.p_recovered, after.principal_total);
+        assert_eq!(after.growth_eligible(VoiceSide::Long), Some(true));
+        assert_eq!(after.tw.l_wc(), 0);
+    }
 }
 
 #[test]
@@ -263,7 +330,7 @@ fn zero_quantity_does_not_return_a_transfer() {
     let mut before = recovered_ledger();
     before.tw.free = i64::MAX; // 非正 Q 不会尝试回流（否则可用资金会越界）。
     assert_eq!(
-        evaluate_voice_open_funding(&before, -1, FULL, 19),
+        evaluate_voice_open_funding(&before, -1, FULL, 30),
         Err(VoiceOpenFundingError::QuantityZero),
     );
     assert_eq!(
@@ -285,13 +352,69 @@ fn zero_quantity_does_not_return_a_transfer() {
 #[test]
 fn updates_each_recovery_balance_by_the_same_amount() {
     let mut before = recovered_ledger();
+    before.principal_total = 200;
     before.p_recovered = 140;
     let after = evaluate_voice_open_funding(&before, 60, TOPUP, 30)
         .expect("可补到 Q")
         .ledger;
     assert_eq!(after.tw.withdrawn, 60);
     assert_eq!(after.p_recovered, 100);
-    assert!(after.growth_eligible_long());
+    assert!(!after.growth_eligible_long());
+}
+
+#[test]
+fn insufficient_recovered_principal_rejects_the_whole_requested_transfer() {
+    let mut before = recovered_ledger();
+    before.p_recovered = 10;
+    let snapshot = before.clone();
+
+    for (policy, requested) in [(TOPUP, 40), (FULL, 100), (FULL_TOPUP, 100)] {
+        assert_eq!(
+            evaluate_voice_open_funding(&before, 60, policy, 30),
+            Err(VoiceOpenFundingError::InsufficientRecoveredPrincipal {
+                requested,
+                available: 10,
+            }),
+        );
+        assert_eq!(before, snapshot);
+    }
+
+    let result = evaluate_voice_open_funding(&before, 60, AVAILABLE, 30).expect("无需回流凭证");
+    assert_eq!(result.opening_quantity, 20);
+    assert_eq!(result.reexpose_event, None);
+    assert_eq!(result.ledger, snapshot);
+}
+
+#[test]
+fn invalid_principal_balances_never_project_or_qualify() {
+    for (principal, recovered, withdrawn) in [
+        (100, 100, -1),
+        (-1, 0, 100),
+        (0, 0, 100),
+        (100, -1, 100),
+        (100, 101, 100),
+    ] {
+        let mut before = recovered_ledger();
+        before.principal_total = principal;
+        before.p_recovered = recovered;
+        before.tw.withdrawn = withdrawn;
+        let snapshot = before.clone();
+
+        assert_eq!(before.growth_eligible(VoiceSide::Long), None);
+        assert_eq!(before.growth_eligible(VoiceSide::Short), None);
+        assert!(!before.growth_eligible_long());
+        assert!(!before.growth_eligible_short());
+        for policy in [AVAILABLE, TOPUP, FULL, FULL_TOPUP] {
+            for q in [60, 0] {
+                assert_eq!(
+                    evaluate_voice_open_funding(&before, q, policy, 30),
+                    Err(VoiceOpenFundingError::InvalidLedgerState),
+                    "P={principal}, P_recovered={recovered}, withdrawn={withdrawn}, {policy:?} Q={q}",
+                );
+                assert_eq!(before, snapshot);
+            }
+        }
+    }
 }
 
 #[test]
@@ -302,16 +425,10 @@ fn projection_does_not_wrap_i64() {
         evaluate_voice_open_funding(&before, 60, FULL, 30),
         Err(VoiceOpenFundingError::AmountOutOfRange)
     );
-    before.tw.free = 0;
-    before.p_recovered = i64::MIN;
-    assert_eq!(
-        evaluate_voice_open_funding(&before, 60, FULL, 30),
-        Err(VoiceOpenFundingError::AmountOutOfRange)
-    );
-
     before.tw.free = -1;
     before.tw.withdrawn = i64::MAX;
     before.p_recovered = i64::MAX;
+    before.principal_total = i64::MAX;
     let result =
         evaluate_voice_open_funding(&before, i64::MAX, TOPUP, 30).expect("差额超界后取已退余额");
     assert_eq!(result.reexpose_amount, i64::MAX);
@@ -320,64 +437,47 @@ fn projection_does_not_wrap_i64() {
 
 #[test]
 fn growth_eligible_same_inputs_per_side_on_l0_l1_l2_after_direction_switch() {
+    use VoiceSide::{Long, Short};
+    // 独立期望表：塔顶是 L2；每行从 L0 到 L2，不从实现反推期望方向。
+    let routing = [(Long, [Long, Short, Long]), (Short, [Short, Long, Short])];
     for (basis, profit, long, short) in [
         (0, 99, true, false),
         (1, 100, false, true),
         (-1, 100, true, true),
     ] {
-        for stage in [TStage::CapitalRecovered, TStage::EarningShares] {
-            let mut before = recovered_ledger();
-            if stage == TStage::CapitalRecovered {
-                before.tw = tw_step(&new_ledger().tw, TwEvent::RecoverCapital(100));
-                assert_eq!(
-                    before.phase_events.pop().map(|record| record.event),
-                    Some(TwEvent::EnterEarning)
-                );
-            }
-            before.k_cost_basis = basis;
-            before.cum_net_realized_profit = profit;
-
-            let after = evaluate_voice_open_funding(&before, 60, FULL, 30)
-                .expect("可开局")
-                .ledger;
-            assert_eq!(after.tw.stage, stage);
-            assert_eq!(before.growth_eligible(VoiceSide::Flat), None);
-            assert_eq!(
-                after.growth_eligible_short(),
-                before.growth_eligible_short()
-            );
-            assert!(
-                !after.growth_eligible_short()
-                    || after.tw.stage.rank() >= TStage::CapitalRecovered.rank()
-            );
-
-            // 塔顶是 L2；两种根方向都走一遍 L2→L1→L0，避免把方向与级别绑死。
-            for level in 0..=2 {
-                for root in [VoiceSide::Long, VoiceSide::Short] {
-                    let side = voice_side(root, 2 - level);
-                    for (state, want_long) in [(&before, long), (&after, false)] {
-                        let expected = if side == VoiceSide::Long {
-                            want_long
-                        } else {
-                            short
-                        };
-                        assert_eq!(
-                            state.growth_eligible(side),
-                            Some(expected),
-                            "L{level} {side:?}"
-                        );
-                        assert_eq!(
-                            state.growth_eligible(side.flip()),
-                            Some(if side == VoiceSide::Short {
-                                want_long
-                            } else {
-                                short
-                            }),
-                            "L{level} {side:?} 换向"
-                        );
-                    }
-                }
+        let mut ledger = recovered_ledger();
+        ledger.k_cost_basis = basis;
+        ledger.cum_net_realized_profit = profit;
+        let after = evaluate_voice_open_funding(&ledger, 60, FULL, 30)
+            .expect("可开局")
+            .ledger;
+        assert_eq!(ledger.growth_eligible(VoiceSide::Flat), None);
+        for (root, expected_sides) in routing {
+            for (level, expected_side) in (0..=2).zip(expected_sides) {
+                let actual_side = voice_side(root, 2 - level);
+                assert_eq!(actual_side, expected_side, "方向路由：根 {root:?} L{level}");
+                let (before_expected, after_expected) = if expected_side == Long {
+                    (long, false)
+                } else {
+                    (short, short)
+                };
+                assert_eq!(ledger.growth_eligible(actual_side), Some(before_expected));
+                assert_eq!(after.growth_eligible(actual_side), Some(after_expected));
             }
         }
+    }
+}
+
+#[test]
+fn short_growth_threshold_does_not_read_the_stage_or_long_inputs() {
+    let mut ledger = new_ledger();
+    ledger.k_cost_basis = 1;
+    assert_eq!(ledger.tw.stage, TStage::CostReduction);
+    assert_eq!(ledger.p_recovered, 0);
+    // ADR 0043 裁定二仅验数值阈值；业务事件的 latch 和负债登记由切片 2 验证。
+    for (profit, expected) in [(99, false), (100, true), (101, true)] {
+        ledger.cum_net_realized_profit = profit;
+        assert_eq!(ledger.growth_eligible(VoiceSide::Short), Some(expected));
+        assert_eq!(ledger.growth_eligible(VoiceSide::Long), Some(false));
     }
 }
