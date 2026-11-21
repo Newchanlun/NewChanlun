@@ -25,8 +25,14 @@ cd rust && cargo build --release --features production_session \
 
 launcher 不打开任何域库；各域进程自行持锁与 epoch。S/E/B 任一故障退出 → 回收全部、退出码 1；
 X 退出只记日志，S/E/B 继续。各域使用独立进程组，前台 Ctrl-C 只发给 launcher。
-launcher 收到 SIGTERM/SIGINT 后，先记录已经退出的域，再向仍在运行的子进程发 SIGTERM；
-10 秒宽限后 SIGKILL，全部 wait。主动停服退出码为 0；停服请求不会覆盖已经发生的关键域故障。
+前台 Ctrl-C 或向 launcher 发 SIGTERM，均可在初始化或常驻阶段停服：
+
+- 初始化中：launcher 向当前 init 进程组发 SIGTERM，1 秒后仍未退出的进程组发 SIGKILL；
+  回收该组后退出，不再启动后续 init 或常驻域。
+- 常驻阶段：launcher 向各域进程组发 SIGTERM，10 秒后向尚未退出的组发 SIGKILL。
+  即使组长已经退出，也要回收同组后代。收到停服请求或关键域故障后，launcher 都按这一路径回收。
+- 主动停服退出码为 0。回收时仍按每域实际收到的停服信号判读组长的退出状态；
+  停服信号解释不了的退出记为域故障，关键域退出码为 1，X 只记降级。
 
 ## manifest（`production-session-manifest/1`）
 

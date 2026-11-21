@@ -558,6 +558,27 @@ impl Drop for ForegroundLauncher {
 fn spawn_foreground_launcher() -> ForegroundLauncher {
     let space = Space::new();
     let (manifest, _) = simulation(&space, "simulation", false);
+    let mut launcher = start_foreground_launcher(space, &manifest, |_| {});
+    launcher.kids = wait_domains(&mut launcher.child);
+    for socket in ["s.sock", "e.sock", "b.sock"] {
+        eventually(socket, || launcher.space.path(socket).exists());
+    }
+    eventually("X writer_epoch", || {
+        meta(
+            &launcher.space.path("x.db"),
+            "SELECT value FROM x_meta WHERE key='writer_epoch'",
+        )
+        .as_deref()
+            == Some("1")
+    });
+    launcher
+}
+
+fn start_foreground_launcher(
+    space: Space,
+    manifest: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> ForegroundLauncher {
     let master = OpenOptions::new()
         .read(true)
         .write(true)
@@ -593,25 +614,13 @@ fn spawn_foreground_launcher() -> ForegroundLauncher {
             Ok(())
         });
     }
-    let mut launcher = ForegroundLauncher {
+    configure(&mut command);
+    let launcher = ForegroundLauncher {
         child: command.spawn().unwrap(),
         master,
         kids: Vec::new(),
         space,
     };
-    launcher.kids = wait_domains(&mut launcher.child);
-    for socket in ["s.sock", "e.sock", "b.sock"] {
-        eventually(socket, || launcher.space.path(socket).exists());
-    }
-    eventually("X writer_epoch", || {
-        meta(
-            &launcher.space.path("x.db"),
-            "SELECT value FROM x_meta WHERE key='writer_epoch'",
-        )
-        .as_deref()
-            == Some("1")
-    });
-
     // SAFETY：验证真实 PTY 前台组与 VINTR 映射；Ctrl-C 测试不对 launcher PID 模拟 SIGINT。
     unsafe {
         let fd = launcher.master.as_raw_fd();
@@ -734,13 +743,22 @@ impl ForegroundLauncher {
     }
 
     fn assert_exit(mut self, label: &str, expected_exits: &[(&str, bool, libc::c_int)]) {
+        self.assert_exit_within(label, expected_exits, Duration::from_secs(30));
+    }
+
+    fn assert_exit_within(
+        &mut self,
+        label: &str,
+        expected_exits: &[(&str, bool, libc::c_int)],
+        timeout: Duration,
+    ) -> Vec<Value> {
         let mut stderr = self.child.stderr.take().unwrap();
         let reader = std::thread::spawn(move || {
             let mut buf = String::new();
             stderr.read_to_string(&mut buf).unwrap();
             buf
         });
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + timeout;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
@@ -749,10 +767,8 @@ impl ForegroundLauncher {
             std::thread::sleep(Duration::from_millis(50));
         };
         for (_, pid) in &self.kids {
-            assert!(
-                !Path::new(&format!("/proc/{pid}")).exists(),
-                "{label}：{pid} 未回收"
-            );
+            assert!(proc_stat(*pid).is_none(), "{label}：{pid} 未回收");
+            assert_group_gone(*pid, label);
         }
         let stderr = reader.join().unwrap();
         let stderr = stderr.trim_start_matches('\n'); // 去掉回归夹具注入的 pipe 填充。
@@ -769,8 +785,9 @@ impl ForegroundLauncher {
             "{label}：{stderr}"
         );
         let exits: Vec<_> = events
-            .into_iter()
+            .iter()
             .filter(|e| e["event"] == "exit")
+            .cloned()
             .collect();
         let expected: Vec<_> = expected_exits
             .iter()
@@ -783,6 +800,7 @@ impl ForegroundLauncher {
             .collect();
         assert_eq!(exits, expected, "{label}：{stderr}");
         println!("{label}: exit={code}, failed={failed}, exits={exits:?}, all children reaped");
+        events
     }
 }
 
@@ -854,6 +872,324 @@ fn parent_stop_rechecks_domain_after_last_poll() {
         launcher.assert_exit(
             &format!("已检查 E → E 因 SIGKILL 退出 → {stop:?}"),
             &[("X", false, libc::SIGKILL), ("E", true, libc::SIGKILL)],
+        );
+    }
+}
+
+fn assert_group_gone(pgid: u32, label: &str) {
+    // SAFETY：只探测测试启动的 PGID，不发送信号。
+    assert_eq!(
+        unsafe { libc::kill(-(pgid as libc::pid_t), 0) },
+        -1,
+        "{label}：进程组 {pgid} 仍存在"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "{label}：无法确认进程组 {pgid} 已消失"
+    );
+}
+
+// 用系统调用入口停住真实 launcher，不改 launcher、不注入返回值。
+#[cfg(target_env = "gnu")]
+struct SyscallTrace(libc::pid_t);
+
+#[cfg(target_env = "gnu")]
+impl SyscallTrace {
+    fn command(&self, op: libc::c_uint, addr: usize, data: usize) -> libc::c_long {
+        // SAFETY：目标是本测试自己的 launcher；各操作的附加参数由调用方按 ptrace ABI 传入。
+        let result = unsafe { libc::ptrace(op, self.0, addr, data) };
+        assert_ne!(
+            result,
+            -1,
+            "ptrace {op}: {}",
+            std::io::Error::last_os_error()
+        );
+        result
+    }
+
+    fn wait_stop(&self) -> libc::c_int {
+        let mut status = 0;
+        eventually("ptrace syscall stop", || {
+            // SAFETY：只等待本线程跟踪的 launcher。
+            let got = unsafe { libc::waitpid(self.0, &mut status, libc::__WALL | libc::WNOHANG) };
+            assert!(got >= 0, "ptrace wait: {}", std::io::Error::last_os_error());
+            got == self.0
+        });
+        assert!(
+            libc::WIFSTOPPED(status),
+            "launcher 提前退出，wait 状态 {status}"
+        );
+        libc::WSTOPSIG(status)
+    }
+
+    fn start(pid: u32) -> Self {
+        let trace = Self(pid as libc::pid_t);
+        trace.command(libc::PTRACE_SEIZE, 0, libc::PTRACE_O_TRACESYSGOOD as usize);
+        trace.command(libc::PTRACE_INTERRUPT, 0, 0);
+        assert_eq!(trace.wait_stop(), libc::SIGTRAP);
+        trace
+    }
+
+    fn at_entry(&self, mut matches: impl FnMut(libc::c_long, [u64; 6]) -> bool) {
+        let mut deliver = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "未找到预期的系统调用入口");
+            self.command(libc::PTRACE_SYSCALL, 0, deliver);
+            let signal = self.wait_stop();
+            if signal != (libc::SIGTRAP | 0x80) {
+                assert!(
+                    matches!(signal, libc::SIGTERM | libc::SIGCHLD),
+                    "意外跟踪信号 {signal}"
+                );
+                deliver = signal as usize;
+                continue;
+            }
+            deliver = 0;
+            // SAFETY：结构仅含数值和数值联合体；零初始化后由 ptrace 写入给定长度。
+            let mut info: libc::ptrace_syscall_info = unsafe { std::mem::zeroed() };
+            self.command(
+                libc::PTRACE_GET_SYSCALL_INFO,
+                std::mem::size_of_val(&info),
+                &mut info as *mut _ as usize,
+            );
+            if info.op == libc::PTRACE_SYSCALL_INFO_ENTRY {
+                // SAFETY：op 确认内核写入了 entry 成员。
+                let entry = unsafe { info.u.entry };
+                if matches(entry.nr as libc::c_long, entry.args) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_env = "gnu")]
+impl Drop for SyscallTrace {
+    fn drop(&mut self) {
+        // SAFETY：结束本测试的跟踪并恢复 launcher 正常执行。
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, self.0, 0usize, 0usize) };
+    }
+}
+
+#[cfg(target_env = "gnu")]
+#[test]
+fn first_stop_syscall_cannot_hide_independent_domain_death() {
+    for (domain, critical, fault) in [("E", true, libc::SIGKILL), ("X", false, libc::SIGINT)] {
+        let mut launcher = spawn_foreground_launcher();
+        let trace = SyscallTrace::start(launcher.child.id());
+        trace.at_entry(|nr, _| matches!(nr, libc::SYS_clock_nanosleep | libc::SYS_nanosleep));
+        launcher.request_stop(ParentStop::Sigterm);
+        let victim = launcher.domain_pid(domain);
+        let s = launcher.domain_pid("S");
+        let mut victim_checks = 0;
+        trace.at_entry(|nr, args| {
+            if nr == libc::SYS_wait4 && args[0] as u32 == victim && args[2] as i32 == libc::WNOHANG
+            {
+                victim_checks += 1;
+            }
+            if nr == libc::SYS_kill && args[1] == libc::SIGTERM as u64 {
+                assert_eq!((args[0] as i32).unsigned_abs(), s, "首个 SIGTERM 发给 S");
+                return true;
+            }
+            false
+        });
+        assert_eq!(victim_checks, 2, "监督与最后补查都查过受测域");
+        assert!(proc_stat(s).is_some_and(|(state, _)| state != 'Z'));
+        launcher.crash_and_wait_for_zombie(domain, fault);
+        assert!(proc_stat(s).is_some_and(|(state, _)| state != 'Z'));
+        println!("{domain}：两轮 WNOHANG 后、第一条 SIGTERM 执行前，内核记录信号 {fault}");
+        drop(trace); // 执行第一条 SIGTERM，随后真实回收。
+        launcher.assert_exit(
+            &format!("第一条 SIGTERM 前 {domain} 独立退出"),
+            &[(domain, critical, fault)],
+        );
+    }
+}
+
+fn fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY：路径为私有 tempdir 内非空 C 字符串。
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+}
+
+fn waiting_on_fifo(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/wchan"))
+        .is_ok_and(|channel| channel.trim() == "wait_for_partner")
+}
+
+struct FifoHelper(u32);
+
+impl Drop for FifoHelper {
+    fn drop(&mut self) {
+        if waiting_on_fifo(self.0) {
+            // SAFETY：只清理由本测试启动、仍阻塞在 FIFO 上的 helper。
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+}
+
+fn start_with_e_helper(ignore_term: bool) -> (ForegroundLauncher, FifoHelper) {
+    let space = Space::new();
+    let (manifest, _) = simulation(&space, "simulation", false);
+    fifo(&space.path("stat-fifo"));
+    let stat = space.path("stat");
+    // 只替换真实 E serve 的文件系统检查；shell 自己阻塞，不再另起 FIFO 读者。
+    std::fs::write(
+        &stat,
+        format!(
+            r#"#!/bin/sh
+case "$(tr '\000' ' ' < /proc/$PPID/cmdline)" in
+  */e_economic_session\ serve\ *)
+    {}
+    printf '%s\n' "$$" > "${{0%/*}}/stat-pid"
+    read -r blocked < "${{0%/*}}/stat-fifo"
+    ;;
+esac
+exec /usr/bin/stat "$@"
+"#,
+            if ignore_term { "trap '' TERM" } else { ":" }
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stat, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path =
+        std::env::join_paths([space.0.path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    let mut launcher = start_foreground_launcher(space, &manifest, |command| {
+        command.env("PATH", path);
+    });
+    launcher.kids = wait_domains(&mut launcher.child);
+    let e = launcher.domain_pid("E");
+    let mut helper = None;
+    eventually("E serve 的 stat helper 阻塞在 FIFO", || {
+        helper = std::fs::read_to_string(launcher.space.path("stat-pid"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        helper.is_some_and(waiting_on_fifo)
+    });
+    let helper = FifoHelper(helper.unwrap());
+    assert_eq!(ppid(helper.0), Some(e));
+    // SAFETY：校验真实 helper 与 E 组长的所有权。
+    unsafe {
+        assert_eq!(libc::getsid(helper.0 as libc::pid_t), e as libc::pid_t);
+        assert_eq!(libc::getpgid(helper.0 as libc::pid_t), e as libc::pid_t);
+    }
+    (launcher, helper)
+}
+
+#[test]
+fn shutdown_drains_entire_domain_groups_even_after_leader_exit() {
+    for stop in [ParentStop::CtrlC, ParentStop::Sigterm] {
+        let (mut launcher, helper) = start_with_e_helper(false);
+        launcher.request_stop(stop);
+        launcher.assert_exit_within(
+            &format!("{stop:?} 回收真实 E stat 同组孙进程"),
+            &[],
+            Duration::from_secs(5),
+        );
+        assert!(proc_stat(helper.0).is_none(), "helper {} 未回收", helper.0);
+    }
+
+    let (mut launcher, helper) = start_with_e_helper(true);
+    let e = launcher.domain_pid("E");
+    launcher.pause();
+    launcher.crash_and_wait_for_zombie("E", libc::SIGKILL);
+    assert!(waiting_on_fifo(helper.0), "E 已退后 helper 仍应存活");
+    let started = Instant::now();
+    launcher.stop_while_paused(ParentStop::Sigterm);
+    eventually("组长被回收且 helper 已由 launcher 接养", || {
+        proc_stat(e).is_none() && ppid(helper.0) == Some(launcher.child.id())
+    });
+    assert!(waiting_on_fifo(helper.0), "忽略 TERM 的 helper 未等到宽限");
+    launcher.assert_exit("E 已回收、仍有同组 helper", &[("E", true, libc::SIGKILL)]);
+    assert!(
+        started.elapsed() >= Duration::from_secs(10),
+        "没有保留 10 秒宽限"
+    );
+    assert!(
+        proc_stat(helper.0).is_none(),
+        "宽限后 helper {} 未回收",
+        helper.0
+    );
+    println!(
+        "已先回收 E；同组 helper 经 {:.3}s 后强杀并回收",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+#[test]
+fn paused_domain_gets_full_stop_grace() {
+    let mut launcher = spawn_foreground_launcher();
+    let e = launcher.domain_pid("E");
+    signal(e, libc::SIGSTOP);
+    eventually("E 已暂停", || {
+        proc_stat(e).is_some_and(|(state, _)| state == 'T')
+    });
+    let started = Instant::now();
+    launcher.request_stop(ParentStop::Sigterm);
+    launcher.assert_exit("launcher 宽限后强杀暂停的 E", &[]);
+    assert!(
+        started.elapsed() >= Duration::from_secs(10),
+        "暂停的 E 被过早强杀"
+    );
+    println!("暂停的 E 得到 {:.3}s 宽限", started.elapsed().as_secs_f64());
+}
+
+#[test]
+fn stop_cancels_real_blocked_init_before_starting_other_domains() {
+    for (stop, paused) in [
+        (ParentStop::CtrlC, false),
+        (ParentStop::Sigterm, false),
+        (ParentStop::Sigterm, true),
+    ] {
+        let space = Space::new();
+        let (manifest, _) = simulation(&space, "simulation", false);
+        let blocked = space.path("blocked-e-manifest");
+        fifo(&blocked);
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        value["economic"]["manifest"] = json!(blocked);
+        write_json(&manifest, &value);
+        let mut launcher = start_foreground_launcher(space, &manifest, |_| {});
+        let mut e = None;
+        eventually("真实 E init 阻塞在 manifest FIFO", || {
+            e = domain_children(launcher.child.id())
+                .into_iter()
+                .find(|(name, pid)| name == "e_economic_session" && waiting_on_fifo(*pid));
+            e.is_some()
+        });
+        let (_, pid) = e.unwrap();
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+        assert_eq!(cmdline.split(|&b| b == 0).nth(1), Some(&b"init"[..]));
+        // SAFETY：确认 init 与已经验证的 PTY 前台组隔离。
+        assert_eq!(
+            unsafe { libc::getsid(pid as libc::pid_t) },
+            pid as libc::pid_t
+        );
+        launcher.kids.push(("E init".into(), pid));
+        if paused {
+            signal(pid, libc::SIGSTOP);
+            eventually("E init 已暂停", || {
+                proc_stat(pid).is_some_and(|(state, _)| state == 'T')
+            });
+        }
+        let b_db = launcher.space.path("b.db");
+        let x_db = launcher.space.path("x.db");
+        let started = Instant::now();
+        launcher.request_stop(stop);
+        let events = launcher.assert_exit_within(
+            &format!("{stop:?} 取消卡在 FIFO 的 E init（暂停={paused}）"),
+            &[],
+            Duration::from_secs(3),
+        );
+        assert!(events
+            .iter()
+            .all(|e| e["event"] != "spawn" && e["event"] != "init"));
+        assert!(!b_db.exists() && !x_db.exists(), "启动了后续域");
+        println!(
+            "{stop:?}：{:.3}s 回收 E init 进程组，没有后续 init 或 serve",
+            started.elapsed().as_secs_f64()
         );
     }
 }
