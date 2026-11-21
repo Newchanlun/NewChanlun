@@ -24,15 +24,18 @@ cd rust && cargo build --release --features production_session \
 | X | `x_execution_session serve` | `x.db` | 同上 | `x_meta.writer_epoch` |
 
 launcher 不打开任何域库；各域进程自行持锁与 epoch。S/E/B 任一故障退出 → 回收全部、退出码 1；
-X 退出只记日志，S/E/B 继续。各域使用独立进程组，前台 Ctrl-C 只发给 launcher。
-前台 Ctrl-C 或向 launcher 发 SIGTERM，均可在初始化或常驻阶段停服：
+X 退出只记日志，S/E/B 继续。前台 Ctrl-C 发给 launcher 所在的前台组，不发给已通过
+`setsid` 独立成域的进程组；尚未脱离前台组的子进程也可能收到同一次中断，但不会因此被记作域故障。
+直接向运行中的 S 发送 SIGINT 仍按关键域故障处理。要停服，请按前台 Ctrl-C 或向 launcher 发 SIGTERM：
 
 - 初始化中：launcher 向当前 init 进程组发 SIGTERM，1 秒后仍未退出的进程组发 SIGKILL。
-  Linux 同时回收该 init 会话里已被 launcher 接养的异组后代。取消不等 stderr 写端关闭；
-  正常失败时则排空 stderr 到 EOF，保留完整诊断。
-- 初始化和常驻拉起共用启动门：门放行前已处理或已挂起的停服请求阻止该域执行。
-  通过门后若信号在本次 `spawn` 交界到达，域可能完成 exec；父进程在交界内屏蔽停服信号，
-  返回即恢复原掩码，将刚启动的组纳入同一停服路径，不再启动后续域。
+  Linux 同时回收该 init 会话里已被 launcher 接养的异组后代。launcher 忽略 init 的 stdout。
+  正常完成（成功或失败）时，读完 stderr 中已排队的字节；读到 EOF 或当前无字节可读即继续，
+  不等外部写端关闭。取消也不等 EOF。
+- 初始化和常驻拉起共用启动门：launcher 接管 SIGTERM/SIGINT，即使启动者屏蔽了它们。
+  门放行前已处理或已挂起的请求阻止该域执行，并进入统一停服路径。
+  通过门后若信号在本次 `spawn` 交界到达，当前域可以完成 exec；子进程脱离前台组后恢复
+  默认信号处置和启动者的掩码，launcher 将刚启动的组纳入回收，不再启动后续域。
 - 常驻阶段：launcher 向各域进程组发 SIGTERM，10 秒后向尚未退出的组发 SIGKILL。
   即使组长已经退出，也要回收同组后代。主动停服退出码为 0。
 - 发 SIGTERM 或升级 SIGKILL 前，launcher 就地非阻塞核对当前组长；已观察到的退出按原阶段登记。

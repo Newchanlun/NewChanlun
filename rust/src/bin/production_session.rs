@@ -47,38 +47,49 @@ extern "C" fn on_stop(_: libc::c_int) {
     STOP_REQUESTED.store(true, Ordering::Release);
 }
 
-fn install_signal_policy() -> io::Result<()> {
+struct StopPolicy {
+    signals: libc::sigset_t,
+    child_mask: libc::sigset_t,
+}
+
+fn install_signal_policy() -> io::Result<StopPolicy> {
     // SAFETY：只在单线程 launcher 的首次 spawn 前设置处置。
     unsafe {
         // 恢复 SIGCHLD 默认动作（也清除 SA_NOCLDWAIT），保留子进程的真实退出状态。
         if libc::signal(libc::SIGCHLD, libc::SIG_DFL) == libc::SIG_ERR {
             return Err(io::Error::last_os_error());
         }
+        let mut signals: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut signals);
         let stop = on_stop as *const () as libc::sighandler_t;
         for signal in STOP_SIGNALS {
             if libc::signal(signal, stop) == libc::SIG_ERR {
                 return Err(io::Error::last_os_error());
             }
+            libc::sigaddset(&mut signals, signal);
         }
+        // launcher 始终接收停服信号，即使启动者屏蔽了它们；域仍继承启动者原掩码。
+        let mut child_mask: libc::sigset_t = std::mem::zeroed();
+        if libc::sigprocmask(libc::SIG_UNBLOCK, &signals, &mut child_mask) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(StopPolicy {
+            signals,
+            child_mask,
+        })
     }
-    Ok(())
 }
 
 /// 父进程在 spawn 交界内只挂起停服信号，不执行处理器。进入交界前检查已处理和已挂起
 /// 的请求；通过此门后的在途启动可以 exec，父进程恢复掩码后将其纳入统一回收。
-fn spawn_before_stop(command: &mut Command) -> io::Result<Option<Child>> {
+fn spawn_before_stop(command: &mut Command, policy: &StopPolicy) -> io::Result<Option<Child>> {
     if shutdown_requested() {
         return Ok(None);
     }
     // SAFETY：sigset 均由 POSIX API 初始化；launcher 单线程，掩码覆盖其整个 spawn 交界。
     unsafe {
-        let mut blocked: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut blocked);
-        for signal in STOP_SIGNALS {
-            libc::sigaddset(&mut blocked, signal);
-        }
         let mut previous: libc::sigset_t = std::mem::zeroed();
-        if libc::sigprocmask(libc::SIG_BLOCK, &blocked, &mut previous) == -1 {
+        if libc::sigprocmask(libc::SIG_BLOCK, &policy.signals, &mut previous) == -1 {
             return Err(io::Error::last_os_error());
         }
         let result = (|| {
@@ -86,23 +97,43 @@ fn spawn_before_stop(command: &mut Command) -> io::Result<Option<Child>> {
             if libc::sigpending(&mut pending) == -1 {
                 return Err(io::Error::last_os_error());
             }
-            if shutdown_requested()
-                || STOP_SIGNALS
-                    .iter()
-                    .any(|&s| libc::sigismember(&pending, s) == 1)
+            if STOP_SIGNALS
+                .iter()
+                .any(|&s| libc::sigismember(&pending, s) == 1)
             {
+                STOP_REQUESTED.store(true, Ordering::Release);
+            }
+            if shutdown_requested() {
                 return Ok(None);
             }
-            // 此回调在 setsid 后执行；先恢复子进程默认处置，再恢复原掩码。
+            let StopPolicy {
+                signals,
+                child_mask,
+            } = *policy;
             // 只调用 async-signal-safe 的 POSIX 函数。
             command.pre_exec(move || {
+                // fork 后仍在 launcher 前台组。SIG_IGN 丢弃已为该子进程挂起的停服信号，
+                // 并覆盖到 setsid 完成；由收到同一请求的 launcher 回收这次在途启动。
+                for signal in STOP_SIGNALS {
+                    if libc::signal(signal, libc::SIG_IGN) == libc::SIG_ERR {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                // Linux 仍可能挂起被屏蔽的信号，即使其处置为 SIG_IGN。
+                // 在 setsid 前解除屏蔽，确保后续前台信号也直接被丢弃。
+                if libc::sigprocmask(libc::SIG_UNBLOCK, &signals, std::ptr::null_mut()) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::sigprocmask(libc::SIG_SETMASK, &child_mask, std::ptr::null_mut()) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
                 for signal in STOP_SIGNALS {
                     if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
                         return Err(io::Error::last_os_error());
                     }
-                }
-                if libc::sigprocmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) == -1 {
-                    return Err(io::Error::last_os_error());
                 }
                 Ok(())
             });
@@ -345,15 +376,6 @@ fn clean(mut command: Command, pass: &[&str]) -> Command {
         }
     }
     command.stdin(Stdio::null());
-    // SAFETY：exec 前只调用 setsid；域进程不共享前台 Ctrl-C 或后台终端作业控制。
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     command
 }
 
@@ -668,8 +690,7 @@ fn stop_adopted_init_children(
 }
 
 enum InitOutput {
-    Eof,
-    Pending,
+    Drained,
     BatchLimit,
 }
 
@@ -678,9 +699,9 @@ fn drain_init_output(pipe: &mut PipeReader, bytes: &mut Vec<u8>) -> io::Result<I
     let mut buf = [0_u8; 8192];
     for _ in 0..16 {
         match pipe.read(&mut buf) {
-            Ok(0) => return Ok(InitOutput::Eof),
+            Ok(0) => return Ok(InitOutput::Drained),
             Ok(n) => bytes.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(InitOutput::Pending),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(InitOutput::Drained),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         }
@@ -712,7 +733,7 @@ fn reap_init(
 }
 
 /// 返回 false 表示停服已取消启动。
-fn run_once(mut command: Command, what: &str) -> Result<bool, String> {
+fn run_once(mut command: Command, what: &str, policy: &StopPolicy) -> Result<bool, String> {
     if shutdown_requested() {
         return Ok(false);
     }
@@ -723,7 +744,7 @@ fn run_once(mut command: Command, what: &str) -> Result<bool, String> {
         return Err(read_error(io::Error::last_os_error()));
     }
     command.stdout(Stdio::null()).stderr(writer);
-    let leader = spawn_before_stop(&mut command)
+    let leader = spawn_before_stop(&mut command, policy)
         .map_err(|e| format!("MissingDependency：{what} 启动失败：{e}"))?;
     drop(command);
     let Some(leader) = leader else {
@@ -751,18 +772,16 @@ fn run_once(mut command: Command, what: &str) -> Result<bool, String> {
         return Ok(false);
     };
     let mut output_error = output_error;
-    // 正常完成须保留完整诊断，即使最后一次 poll 前已有多批数据排在管道中。
-    // 保持非阻塞；若别的写者仍持有写端，新的停服请求仍能立即转入取消路径。
+    // init 已回收，读完已排队的全部字节；EOF 或 WouldBlock 都表示此时已排空。
     while !shutdown_requested() && output_error.is_none() {
         match drain_init_output(&mut pipe, &mut bytes) {
-            Ok(InitOutput::Eof) => break,
-            Ok(InitOutput::Pending) => std::thread::sleep(STOP_POLL),
+            Ok(InitOutput::Drained) => break,
             Ok(InitOutput::BatchLimit) => (),
             Err(e) => output_error = Some(e),
         }
     }
     if shutdown_requested() {
-        // 同组已回收；若停服发生在 EOF 等待中，仍需回收同会话的 Linux 养子。
+        // 同组已回收；若停服发生在最后排空时，仍需回收同会话的 Linux 养子。
         reap_init(&mut child, &mut pipe, &mut bytes)?;
         return Ok(false);
     }
@@ -790,7 +809,8 @@ fn run() -> Result<i32, String> {
         [flag, path] if flag == "--manifest" => PathBuf::from(path),
         _ => return Err("InvalidDomain：usage: production_session --manifest FILE".into()),
     };
-    install_signal_policy().map_err(|e| format!("MissingDependency：无法设置会话信号处理：{e}"))?;
+    let policy = install_signal_policy()
+        .map_err(|e| format!("MissingDependency：无法设置会话信号处理：{e}"))?;
     #[cfg(target_os = "linux")]
     adopt_orphans().map_err(|e| format!("MissingDependency：无法接养域进程组后代：{e}"))?;
     let m = load_manifest(&manifest_path)?;
@@ -829,7 +849,7 @@ fn run() -> Result<i32, String> {
             ])
             .arg("--structure-source")
             .arg(&decl);
-        if !run_once(c, "S")? {
+        if !run_once(c, "S", &policy)? {
             return Ok(stopped(false));
         }
     }
@@ -838,7 +858,7 @@ fn run() -> Result<i32, String> {
     if !Path::new(e_db).exists() {
         let mut c = clean(Command::new(&e_bin), &[]);
         c.args(["init", "--manifest", econ, "--db", e_db]);
-        if !run_once(c, "E")? {
+        if !run_once(c, "E", &policy)? {
             return Ok(stopped(false));
         }
     }
@@ -856,7 +876,7 @@ fn run() -> Result<i32, String> {
                 "--chong",
                 text(b, "chong")?,
             ]);
-            if !run_once(c, "B")? {
+            if !run_once(c, "B", &policy)? {
                 return Ok(stopped(false));
             }
         }
@@ -864,9 +884,9 @@ fn run() -> Result<i32, String> {
 
     // ── 拉起：每域独立进程；中途失败也先回收已拉起的子进程再报错，不留孤儿 ──
     let mut children = Vec::new();
-    let spawned = spawn_domains(&m, &s_bin, &e_bin, &b_bin, &x_bin, &mut children);
+    let spawned = spawn_domains(&m, &s_bin, &e_bin, &b_bin, &x_bin, &mut children, &policy);
 
-    let supervised = if spawned.is_ok() {
+    let supervised = if spawned.is_ok() && !shutdown_requested() {
         loop {
             match supervise(&mut children) {
                 Ok(false) if !shutdown_requested() => {
@@ -895,6 +915,7 @@ fn spawn_domains(
     b_bin: &Path,
     x_bin: &Path,
     children: &mut Vec<DomainProcess>,
+    policy: &StopPolicy,
 ) -> Result<(), String> {
     let raw = &m.raw;
     let s_db = text(raw, "s.db")?;
@@ -903,7 +924,7 @@ fn spawn_domains(
     let chongs = raw["economic"]["b"].as_array().cloned().unwrap_or_default();
     let mut spawn = |domain: String, mut c: Command, critical: bool| -> Result<bool, String> {
         c.stdout(Stdio::null());
-        let Some(child) = spawn_before_stop(&mut c)
+        let Some(child) = spawn_before_stop(&mut c, policy)
             .map_err(|e| format!("MissingDependency：{domain} 启动失败：{e}"))?
         else {
             return Ok(false);

@@ -676,6 +676,15 @@ enum ParentStop {
     Sigterm,
 }
 
+impl ParentStop {
+    fn signal(self) -> libc::c_int {
+        match self {
+            Self::CtrlC => libc::SIGINT,
+            Self::Sigterm => libc::SIGTERM,
+        }
+    }
+}
+
 impl ForegroundLauncher {
     fn domain_pid(&self, domain: &str) -> u32 {
         let exe = match domain {
@@ -706,10 +715,7 @@ impl ForegroundLauncher {
     fn stop_while_paused(&mut self, stop: ParentStop) {
         self.request_stop(stop);
         let pid = self.child.id();
-        let sig = match stop {
-            ParentStop::CtrlC => libc::SIGINT,
-            ParentStop::Sigterm => libc::SIGTERM,
-        };
+        let sig = stop.signal();
         // PTY 写入与终端发送 SIGINT 不同步。确认进程级信号已挂起才恢复 launcher。
         eventually("停服信号已送达暂停的 launcher", || {
             proc_signal_set(pid, "ShdPnd:").is_some_and(|bits| bits & signal_bit(sig) != 0)
@@ -1045,8 +1051,12 @@ impl SyscallTrace {
         }
     }
 
-    /// 追到 launcher 退出，直接观测子进程 exec；fork 臂在子进程未运行时给父进程发停服。
-    fn domain_execs_before_launcher_exit(&self, stop_after_fork: bool) -> Vec<u32> {
+    /// 追到 launcher 退出；fork 臂在新子进程尚未运行时触发停服。
+    fn domain_execs_before_launcher_exit(
+        &self,
+        mut stop_after_fork: Option<(&mut ForegroundLauncher, ParentStop)>,
+        inherited_mask: u64,
+    ) -> Vec<u32> {
         self.command(
             libc::PTRACE_SETOPTIONS,
             0,
@@ -1057,10 +1067,11 @@ impl SyscallTrace {
                 | libc::PTRACE_O_TRACEEXEC) as usize,
         );
         let mut executed = Vec::new();
-        let mut injected = false;
         let mut deliver = 0;
         let stop_bits = signal_bit(libc::SIGTERM) | signal_bit(libc::SIGINT);
+        let deadline = Instant::now() + Duration::from_secs(15);
         loop {
+            assert!(Instant::now() < deadline, "一次停服后 launcher 未退出");
             self.command(libc::PTRACE_SYSCALL, 0, deliver);
             let status = self.wait_status();
             assert!(
@@ -1077,17 +1088,44 @@ impl SyscallTrace {
                 self.command(libc::PTRACE_GETEVENTMSG, 0, &mut pid as *mut _ as usize);
                 let child = Self(pid as libc::pid_t);
                 child.wait_stop(); // 自动接管的新进程尚未运行。
-                let inject_here = stop_after_fork && !injected;
-                if inject_here {
-                    injected = true;
-                    signal(self.0 as u32, libc::SIGTERM);
+                let stop = stop_after_fork.take().map(|(launcher, stop)| {
                     assert_eq!(
                         proc_signal_set(self.0 as u32, "SigBlk:").unwrap() & stop_bits,
                         stop_bits
                     );
-                }
+                    let ctrl_c = matches!(stop, ParentStop::CtrlC);
+                    if ctrl_c {
+                        child.at_entry(|nr, _| nr == libc::SYS_setsid);
+                        // SAFETY：跟踪停在 setsid 入口，内核尚未更改子进程的会话和组。
+                        unsafe {
+                            assert_eq!(libc::getpgid(child.0), self.0);
+                            assert_eq!(libc::tcgetpgrp(launcher.master.as_raw_fd()), self.0);
+                        }
+                    }
+                    launcher.request_stop(stop);
+                    let pending = |pid| {
+                        proc_signal_set(pid, "ShdPnd:")
+                            .is_some_and(|bits| bits & signal_bit(stop.signal()) != 0)
+                    };
+                    eventually("停服信号已送达 launcher 与 PTY 前台组", || {
+                        pending(self.0 as u32)
+                            && (!ctrl_c
+                                || pending(pid as u32)
+                                || proc_signal_set(pid as u32, "SigBlk:")
+                                    .is_some_and(|bits| bits & signal_bit(libc::SIGINT) == 0))
+                    });
+                    stop
+                });
                 child.command(libc::PTRACE_CONT, 0, 0);
-                let status = child.wait_status();
+                let mut status = child.wait_status();
+                // 转交子进程收到的 INT，不能由夹具吞掉它（R6 会在 exec 前被杀）。
+                if status >> 16 == 0
+                    && libc::WIFSTOPPED(status)
+                    && libc::WSTOPSIG(status) == libc::SIGINT
+                {
+                    child.command(libc::PTRACE_CONT, 0, libc::SIGINT as usize);
+                    status = child.wait_status();
+                }
                 if libc::WIFSTOPPED(status) {
                     assert_eq!(
                         status >> 16,
@@ -1095,22 +1133,23 @@ impl SyscallTrace {
                         "意外子进程事件 {status}"
                     );
                     executed.push(pid as u32);
-                    if inject_here {
+                    if let Some(stop) = stop {
                         assert_ne!(
                             proc_signal_set(self.0 as u32, "ShdPnd:").unwrap()
-                                & signal_bit(libc::SIGTERM),
+                                & signal_bit(stop.signal()),
                             0,
                             "父进程在子进程 exec 前已处理停服"
                         );
                         assert_eq!(
                             proc_signal_set(pid as u32, "SigBlk:").unwrap() & stop_bits,
-                            0,
+                            inherited_mask,
                             "子进程 exec 时应恢复原掩码"
                         );
                     }
                 } else {
                     assert!(
-                        libc::WIFEXITED(status),
+                        libc::WIFEXITED(status)
+                            || matches!(stop, Some(ParentStop::CtrlC)) && libc::WIFSIGNALED(status),
                         "被拒绝的 spawn 未正常向父进程报告 {status}"
                     );
                 }
@@ -1120,7 +1159,7 @@ impl SyscallTrace {
                     .syscall_entry()
                     .is_some_and(|(nr, _)| nr == libc::SYS_exit_group)
                 {
-                    assert!(!stop_after_fork || injected, "未到达 fork 后的停服点");
+                    assert!(stop_after_fork.is_none(), "未到达 fork 后的停服点");
                     return executed;
                 }
             } else {
@@ -1464,7 +1503,7 @@ fn isolated_launcher_with_e_wrapper(space: &Space, wrapper: &str) -> PathBuf {
 
 /// 大管道加父进程暂停：E 退出时整段 stderr 都仍在管道中，不能靠边写边读让旧实现碰巧通过。
 #[test]
-fn failed_init_retains_all_buffered_stderr_and_can_cancel_while_waiting_for_eof() {
+fn failed_init_retains_all_buffered_stderr_without_waiting_for_eof() {
     for retain_writer in [false, true] {
         let space = Space::new();
         let (manifest, _) = simulation(&space, "simulation", false);
@@ -1516,35 +1555,78 @@ sys.exit(7)
         });
         signal(launcher.child.id(), libc::SIGCONT);
 
-        if retain_writer {
-            eventually("E 已回收，外部写端仍打开", || {
-                proc_stat(e).is_none()
-            });
-            launcher.request_stop(ParentStop::Sigterm);
-            launcher.assert_exit_within(
-                "正常排空遇停服，不等外部写端 EOF",
-                &[],
-                Duration::from_secs(4),
-            );
-            drop(extra_writer);
-        } else {
-            let (status, stderr) = launcher.finish("正常 init 失败", Duration::from_secs(4));
-            assert_eq!(status.code(), Some(2));
-            let summary = stderr
-                .lines()
-                .find(|line| line.starts_with("START-DIAG "))
-                .unwrap();
-            let body = summary
-                .strip_prefix("START-DIAG ")
-                .unwrap()
-                .strip_suffix(" END-DIAG-TAG（E init 失败，exit status: 7）")
-                .expect("长 stderr 的尾标记或退出状态丢失");
-            assert_eq!(body.len(), 524288);
-            assert!(body.bytes().all(|b| b == b'x'));
-            assert!(!stderr.contains("OUT-CONTROL-ONLY"));
-        }
+        let (status, stderr) = launcher.finish("正常 init 失败", Duration::from_secs(4));
+        assert_eq!(status.code(), Some(2));
+        let summary = stderr
+            .lines()
+            .find(|line| line.starts_with("START-DIAG "))
+            .unwrap();
+        let body = summary
+            .strip_prefix("START-DIAG ")
+            .unwrap()
+            .strip_suffix(" END-DIAG-TAG（E init 失败，exit status: 7）")
+            .expect("长 stderr 的尾标记或退出状态丢失");
+        assert_eq!(body.len(), 524288);
+        assert!(body.bytes().all(|b| b == b'x'));
+        assert!(!stderr.contains("OUT-CONTROL-ONLY"));
+        drop(extra_writer);
         assert!(!launcher.space.path("b.db").exists() && !launcher.space.path("x.db").exists());
     }
+}
+
+#[test]
+fn successful_real_e_init_starts_all_domains_with_stderr_writer_open() {
+    let space = Space::new();
+    let (manifest, _) = simulation(&space, "simulation", false);
+    let barrier = space.path("exec-e-init");
+    fifo(&barrier);
+    let bin = isolated_launcher_with_e_wrapper(
+        &space,
+        r#"#!/usr/bin/python3
+import os, sys
+from pathlib import Path
+here = Path(__file__).parent
+if sys.argv[1] == 'init':
+    with open(here.parent / 'exec-e-init', 'rb', buffering=0) as barrier:
+        assert barrier.read(1) == b'1'
+real = str(here / 'e-real')
+os.execv(real, sys.argv)
+"#,
+    );
+    let mut launcher = start_foreground_launcher_at(space, &manifest, &bin, |_| {});
+    let mut e = None;
+    eventually("E init 包装器等待 exec", || {
+        e = domain_children(launcher.child.id())
+            .into_iter()
+            .find_map(|(_, pid)| waiting_on_fifo(pid).then_some(pid));
+        e.is_some()
+    });
+    let e = e.unwrap();
+    let extra_writer = OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/{e}/fd/2"))
+        .unwrap();
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(barrier)
+        .unwrap()
+        .write_all(b"1")
+        .unwrap();
+    launcher.kids = wait_domains(&mut launcher.child);
+    for socket in ["s.sock", "e.sock", "b.sock"] {
+        eventually(socket, || launcher.space.path(socket).exists());
+    }
+    assert_lock_held(&launcher.space.path("x.db"));
+    assert!(proc_stat(e).is_none(), "E init 未回收");
+    launcher.request_stop(ParentStop::Sigterm);
+    let events = launcher.assert_exit_within("外部 stderr 写端仍打开", &[], Duration::from_secs(5));
+    for domain in ["E", "B"] {
+        assert!(events
+            .iter()
+            .any(|e| e["event"] == "init" && e["domain"] == domain));
+    }
+    drop(extra_writer);
 }
 
 #[test]
@@ -1664,110 +1746,156 @@ os.execv(real, [str(real), *sys.argv[1:]])
 }
 
 #[cfg(target_env = "gnu")]
+fn assert_stop_at_spawn_boundary(
+    next: &str,
+    point: &str,
+    inherit_term_block: bool,
+    stop: ParentStop,
+) {
+    let after_fork = point == "after-fork";
+    let space = Space::new();
+    let (manifest, _) = simulation(&space, "simulation", false);
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    let econ = value["economic"]["manifest"].as_str().unwrap().to_owned();
+    let barrier = space.path("launch-barrier");
+    fifo(&barrier);
+    let (input, manifest) = if next == "B init" {
+        value["economic"]["manifest"] = json!(barrier);
+        write_json(&manifest, &value);
+        (std::fs::read(&econ).unwrap(), manifest)
+    } else {
+        run(
+            Command::new(env!("CARGO_BIN_EXE_e_economic_session")).args([
+                "init",
+                "--manifest",
+                &econ,
+                "--db",
+                value["economic"]["e"]["db"].as_str().unwrap(),
+            ]),
+        );
+        let b = &value["economic"]["b"][0];
+        run(Command::new(env!("CARGO_BIN_EXE_b_chong_session")).args([
+            "init",
+            "--manifest",
+            &econ,
+            "--db",
+            b["db"].as_str().unwrap(),
+            "--chong",
+            b["chong"].as_str().unwrap(),
+        ]));
+        (serde_json::to_vec(&value).unwrap(), barrier.clone())
+    };
+    let mut launcher = start_foreground_launcher(space, &manifest, |command| {
+        if inherit_term_block {
+            // SAFETY：只在测试启动器的 fork 后、exec 前，修改子进程掩码。
+            unsafe {
+                command.pre_exec(|| {
+                    let mut mask: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut mask);
+                    libc::sigaddset(&mut mask, libc::SIGTERM);
+                    if libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+    });
+    let pid = launcher.child.id();
+    let mut waiting = None;
+    eventually("下一启动前的 FIFO 屏障", || {
+        waiting = if next == "B init" {
+            domain_children(pid).iter().find_map(|(exe, child)| {
+                (exe == "e_economic_session" && waiting_on_fifo(*child)).then_some(*child)
+            })
+        } else {
+            waiting_on_fifo(pid).then_some(pid)
+        };
+        waiting.is_some()
+    });
+    let trace = SyscallTrace::start(pid);
+    // ptrace 可以让 launcher 的 FIFO open 重启；写者与跟踪并行，且等待有上限。
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            eventually("FIFO 已有读者", || {
+                match OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&barrier)
+                {
+                    Ok(mut pipe) => {
+                        pipe.write_all(&input).unwrap();
+                        true
+                    }
+                    Err(e) if e.raw_os_error() == Some(libc::ENXIO) => false,
+                    Err(e) => panic!("打开启动屏障：{e}"),
+                }
+            });
+        });
+        trace.at_entry(|nr, args| {
+            if point == "before-mask" {
+                nr == libc::SYS_rt_sigprocmask && args[0] as i32 == libc::SIG_BLOCK
+            } else {
+                nr == libc::SYS_rt_sigpending
+            }
+        });
+    });
+    if !after_fork {
+        launcher.request_stop(stop);
+    }
+    let executed = trace.domain_execs_before_launcher_exit(
+        after_fork.then_some((&mut launcher, stop)),
+        if inherit_term_block {
+            signal_bit(libc::SIGTERM)
+        } else {
+            0
+        },
+    );
+    drop(trace);
+    let label = format!("{next}（{point}，{stop:?}，继承屏蔽 TERM={inherit_term_block}）");
+    let exec_count = executed.len();
+    launcher
+        .kids
+        .extend(executed.into_iter().map(|pid| (next.into(), pid)));
+    let events = launcher.assert_exit_within(&label, &[], Duration::from_secs(5));
+    assert_eq!(exec_count, usize::from(after_fork), "{label}");
+    let spawns: Vec<_> = events.iter().filter(|e| e["event"] == "spawn").collect();
+    assert_eq!(
+        spawns.len(),
+        usize::from(after_fork && next == "S serve"),
+        "{label}"
+    );
+    if let Some(spawn) = spawns.first() {
+        assert_eq!(spawn["domain"], "S");
+    }
+}
+
+#[cfg(target_env = "gnu")]
 #[test]
 fn stop_at_spawn_boundary_skips_or_reaps_b_init_and_s_serve() {
     for next in ["B init", "S serve"] {
         for point in ["before-mask", "pending-at-gate", "after-fork"] {
-            let after_fork = point == "after-fork";
-            let space = Space::new();
-            let (manifest, _) = simulation(&space, "simulation", false);
-            let mut value: Value =
-                serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-            let econ = value["economic"]["manifest"].as_str().unwrap().to_owned();
-            let barrier = space.path("launch-barrier");
-            fifo(&barrier);
-            let (input, manifest) = if next == "B init" {
-                value["economic"]["manifest"] = json!(barrier);
-                write_json(&manifest, &value);
-                (std::fs::read(&econ).unwrap(), manifest)
-            } else {
-                run(
-                    Command::new(env!("CARGO_BIN_EXE_e_economic_session")).args([
-                        "init",
-                        "--manifest",
-                        &econ,
-                        "--db",
-                        value["economic"]["e"]["db"].as_str().unwrap(),
-                    ]),
-                );
-                let b = &value["economic"]["b"][0];
-                run(Command::new(env!("CARGO_BIN_EXE_b_chong_session")).args([
-                    "init",
-                    "--manifest",
-                    &econ,
-                    "--db",
-                    b["db"].as_str().unwrap(),
-                    "--chong",
-                    b["chong"].as_str().unwrap(),
-                ]));
-                (serde_json::to_vec(&value).unwrap(), barrier.clone())
-            };
-            let mut launcher = start_foreground_launcher(space, &manifest, |_| {});
-            let pid = launcher.child.id();
-            let mut waiting = None;
-            eventually("下一启动前的 FIFO 屏障", || {
-                waiting = if next == "B init" {
-                    domain_children(pid).iter().find_map(|(exe, child)| {
-                        (exe == "e_economic_session" && waiting_on_fifo(*child)).then_some(*child)
-                    })
-                } else {
-                    waiting_on_fifo(pid).then_some(pid)
-                };
-                waiting.is_some()
-            });
-            let trace = SyscallTrace::start(pid);
-            // ptrace 可以让 launcher 的 FIFO open 重启；写者与跟踪并行，且等待有上限。
-            std::thread::scope(|scope| {
-                scope.spawn(move || {
-                    eventually("FIFO 已有读者", || {
-                        match OpenOptions::new()
-                            .write(true)
-                            .custom_flags(libc::O_NONBLOCK)
-                            .open(&barrier)
-                        {
-                            Ok(mut pipe) => {
-                                pipe.write_all(&input).unwrap();
-                                true
-                            }
-                            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => false,
-                            Err(e) => panic!("打开启动屏障：{e}"),
-                        }
-                    });
-                });
-                trace.at_entry(|nr, args| {
-                    if point == "before-mask" {
-                        nr == libc::SYS_rt_sigprocmask && args[0] as i32 == libc::SIG_BLOCK
-                    } else {
-                        nr == libc::SYS_rt_sigpending
-                    }
-                });
-            });
-            if !after_fork {
-                launcher.request_stop(ParentStop::Sigterm);
-            }
-            let executed = trace.domain_execs_before_launcher_exit(after_fork);
-            drop(trace);
-            let label = format!("{next}（{point}）");
-            assert_eq!(
-                executed.len(),
-                usize::from(after_fork),
-                "{label}: {executed:?}"
-            );
-            launcher
-                .kids
-                .extend(executed.into_iter().map(|pid| (next.into(), pid)));
-            let events = launcher.assert_exit_within(&label, &[], Duration::from_secs(5));
-            let spawns: Vec<_> = events.iter().filter(|e| e["event"] == "spawn").collect();
-            assert_eq!(
-                spawns.len(),
-                usize::from(after_fork && next == "S serve"),
-                "{label}"
-            );
-            if let Some(spawn) = spawns.first() {
-                assert_eq!(spawn["domain"], "S");
-            }
+            assert_stop_at_spawn_boundary(next, point, false, ParentStop::Sigterm);
         }
     }
+}
+
+#[cfg(target_env = "gnu")]
+#[test]
+fn foreground_ctrl_c_during_s_fork_before_setsid_is_clean() {
+    assert_stop_at_spawn_boundary("S serve", "after-fork", false, ParentStop::CtrlC);
+}
+
+#[cfg(target_env = "gnu")]
+#[test]
+fn inherited_term_mask_stops_before_first_domain() {
+    assert_stop_at_spawn_boundary("S serve", "pending-at-gate", true, ParentStop::Sigterm);
+}
+
+#[cfg(target_env = "gnu")]
+#[test]
+fn inherited_term_mask_stops_with_s_in_flight() {
+    assert_stop_at_spawn_boundary("S serve", "after-fork", true, ParentStop::Sigterm);
 }
 
 #[test]
