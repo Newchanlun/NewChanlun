@@ -38,7 +38,6 @@
 
 - ADR 0028 十个字段落成一份具名版本化**场所 profile 记录**（`venue-profile/1`，形状同 ADR 0057:43-51 的版本化记录）。它是政策记录，不含任何凭据值。
 - X 执行 profile 升到 `x-execution-profile/2`：按 `{path, profile_id, version, sha256}` 引用场所 profile 记录，按 `{path, version, sha256}` 引用 #1770 能力记录；原 `credential_scope.{env,file}` 改名 **`credential_source.{env,file}`**，只管部署管道。挪凭据文件路径不改场所 profile 记录，因而不改作用域版本。
-- `credential_source.env` 只指定注入键名，沿用 [ADR 0039「修订（#2134）」](0039-production-entry-inventory-and-unique-launcher.md#修订2134x-凭据注入键名2026-11-20) 的同一准入规则与前置 `InvalidDomain`；字段改名不改变合法域，也不授予凭据接触权限。
 - X 库持久两种记录，都只追加、不覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。**绑定行**每个 `writer_epoch` 一行，在该 epoch 首次启动、第 1–3 步通过后，与该次启动记录同一事务写入，记下该 epoch 的身份元组 I =（`profile_id@version`、`venue_profile_sha256`、能力记录版本与 `capability_record_sha256`、声明的 `tb09_fingerprint`、`authorization_id`、`evidence_class`）。**启动记录**每次启动一行，键 `(writer_epoch, launch_seq)`，与发送门结果同一事务，记下本次计算的指纹、第 4–7 步各项核验结果、`send_state` 与拒发类别、细分。场所 profile 与能力记录各自独立升版都是新 epoch 的新绑定行，互不阻塞。同 `profile_id@version` 而 `venue_profile_sha256` 与任一已持久绑定行不同 → `IdentityConflict`，不写，进程非 0 退出（INTERFACE-CONTRACTS:11）。旧行全部保留，库里能看出曾经绑过哪些 `profile_id@version`、能力记录版本、指纹及其哈希；账户与钥匙本体不进库（裁定八），要还原须对照部署状态目录里同哈希的记录。
 - **重启路径（四种，穷尽）。** 记库内最大 epoch 为 E，本次启动的 epoch 为 e、身份元组为 I。
   1. e < E：`StaleWriter`，进程非 0 退出，不写（既有 `x_execution_session.rs:101-107`）。
@@ -289,3 +288,9 @@ ADR 0028:24 的动作维度：
 ## 溯源标签
 
 全部 `[新缠论:选择]` 或 `[新缠论:推论]`。缠师原文对程序化执行场所无论述（同 ADR 0028）。Q5、Q7、公开地址存放为 `[新缠论:选择]`（P 类政策取舍，依 #1909 代理独审裁定，用户可一句话回退 Q5）；`trade_no_transfer` 三条叠加读法、拒发类别映射为 `[新缠论:推论]`（出处见各条）。
+
+## 修订（#2134，凭据注入键名指针，2026-11-20）
+
+（append-only：以上原文不改；本节仅同步 #2134 指针，已裁 P 类正文与授权硬门照旧。）
+
+本 ADR 第 40、147 行的 `credential_source.env` 指定注入键名，沿用 [ADR 0039「修订（#2134）」](0039-production-entry-inventory-and-unique-launcher.md#修订2134x-凭据注入键名2026-11-20) 的同一准入规则与前置 `InvalidDomain`。字段改名不另立键名判据，也不授予凭据接触权限。
