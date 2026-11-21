@@ -1181,6 +1181,32 @@ jobs:
           mkdir -p "$(dirname "$cfg")"
           flock "$cfg.lock" bash -c 'grep -qF "[profile.dev.package.\"*\"]" "$1" 2>/dev/null || printf "[profile.dev.package.\"*\"]\nopt-level = 2\n" >> "$1"' _ "$cfg"
           cat "$cfg" 2>/dev/null || echo "(no $cfg yet)"
+      - name: Compute third-party dependency cache key (#1488 Native)
+        id: deps-cache-key
+        if: runner.environment != 'self-hosted'
+        run: |
+          cfg="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          fp=$(
+            {
+              rustc -vV
+              python3 -V 2>&1
+              printf 'dev_debug=%s\n' "${CARGO_PROFILE_DEV_DEBUG:-default}"
+              cat "$cfg" 2>/dev/null || true
+            } | sha256sum | cut -c1-16
+          )
+          echo "fp=$fp" >> "$GITHUB_OUTPUT"
+      - name: Cache compiled third-party Cargo dependencies (#1488 Native)
+        if: runner.environment != 'self-hosted'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/1488-native-target/debug/deps/lib*
+            ~/1488-native-target/debug/build
+            ~/1488-native-target/debug/.fingerprint
+            !~/1488-native-target/debug/deps/libnewchan_rust*
+            !~/1488-native-target/debug/.fingerprint/newchan_rust-*
+            !~/1488-native-target/debug/.fingerprint/newchan_rust-*/**
+          key: ${{ runner.os }}-${{ runner.arch }}-1488-native-deps-v1-${{ steps.deps-cache-key.outputs.fp }}-${{ hashFiles('rust/Cargo.lock') }}
       - name: Run Native candidate fields, union and shared path locks (#1488)
         run: |
           set -euo pipefail
