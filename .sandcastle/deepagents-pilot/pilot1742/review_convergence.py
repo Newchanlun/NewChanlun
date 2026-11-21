@@ -264,18 +264,37 @@ def _normalize_line(raw: Any) -> int | None:
     return raw
 
 
-def _normalize_inline_fingerprint_text(chunk: str) -> str:
-    """在单段/行内归一化指纹文本：按 CommonMark §6.1 保留行内代码跨度大小写与内部全部空格（含跨行代码跨度换行前空格），并保留自动链接与内联链接目标大小写；仅对普通叙述折叠空白并转小写。"""
-    normalized = _COMMONMARK_LINE_ENDING_RE.sub("\n", chunk.replace("\x00", "\ufffd"))
-    out: list[str] = []
+def _tokenize_inline_fingerprint(
+    text: str,
+    *,
+    defined_labels: frozenset[str] = frozenset(),
+) -> list[Any]:
+    """将单段/行内文本编码为不可碰撞的类型化 token 列表，供注入式 JSON 指纹使用。
+
+    - 普通叙述：合并相邻普通片段、折叠空白并转小写，仅修剪首尾外缘空白，记为 ["prose", lowered]；
+    - CommonMark §6.1 行内代码跨度：按规范将换行转为单空格（完整保留换行前空格）并在首尾均为空格且非全空格时各去 1 空格，
+      原样保留大小写与内部全部空格，记为 ["code_span", content]；
+    - CommonMark §6.3 内联链接/图片：分别递归编码 label token、原样大小写 dest 与可选 title，
+      记为 ["link"|"image", label_tokens, dest, title]（绝不重拼回有歧义 Markdown 字符串）；
+    - CommonMark §6.5 URI/Email 自动链接：原样保留大小写，记为 ["autolink", inner]。
+    """
+    normalized = _COMMONMARK_LINE_ENDING_RE.sub("\n", text.replace("\x00", "\ufffd"))
+    tokens: list[Any] = []
     plain_buf: list[str] = []
     n = len(normalized)
     i = 0
 
     def flush_plain() -> None:
-        if plain_buf:
-            out.append(re.sub(r"\s+", " ", "".join(plain_buf)).lower())
-            plain_buf.clear()
+        if not plain_buf:
+            return
+        collapsed = re.sub(r"\s+", " ", "".join(plain_buf)).lower()
+        plain_buf.clear()
+        if not collapsed:
+            return
+        if tokens and tokens[-1][0] == "prose":
+            tokens[-1][1] = re.sub(r"\s+", " ", tokens[-1][1] + collapsed)
+        else:
+            tokens.append(["prose", collapsed])
 
     while i < n:
         ch = normalized[i]
@@ -289,7 +308,7 @@ def _normalize_inline_fingerprint_text(chunk: str) -> str:
                 flush_plain()
                 tick_len = tick_end - i
                 inner = normalized[tick_end : found_end - tick_len]
-                out.append(_wrap_markdown_code_span(_extract_code_span_text(inner)))
+                tokens.append(["code_span", _extract_code_span_text(inner)])
                 i = found_end
             else:
                 plain_buf.append(normalized[i:tick_end])
@@ -299,13 +318,13 @@ def _normalize_inline_fingerprint_text(chunk: str) -> str:
             auto_uri_m = _AUTOLINK_URI_RE.match(normalized, i)
             if auto_uri_m is not None:
                 flush_plain()
-                out.append(auto_uri_m.group(0))
+                tokens.append(["autolink", auto_uri_m.group(0)[1:-1]])
                 i = auto_uri_m.end()
                 continue
             auto_email_m = _AUTOLINK_EMAIL_RE.match(normalized, i)
             if auto_email_m is not None:
                 flush_plain()
-                out.append(auto_email_m.group(0).lower())
+                tokens.append(["autolink", auto_email_m.group(0)[1:-1]])
                 i = auto_email_m.end()
                 continue
             html_m = _INLINE_RAW_HTML_RE.match(normalized, i)
@@ -320,24 +339,48 @@ def _normalize_inline_fingerprint_text(chunk: str) -> str:
                 normalized,
                 bracket_pos,
                 allow_nested_links=is_image,
-                defined_labels=frozenset(),
+                defined_labels=defined_labels,
             )
             if close_bracket != -1 and close_bracket + 1 < n and normalized[close_bracket + 1] == "(":
                 inline_parts = _match_inline_link_dest_title_parts(normalized, close_bracket + 1)
                 if inline_parts is not None:
                     end_pos, dest_val, title_val = inline_parts
                     flush_plain()
-                    norm_label = _normalize_inline_fingerprint_text(normalized[bracket_pos + 1 : close_bracket])
-                    title_suffix = f" \x00title\x00{title_val}" if title_val else ""
-                    prefix = "!" if is_image else ""
-                    out.append(f"{prefix}[{norm_label}]({dest_val}{title_suffix})")
+                    label_tokens = _tokenize_inline_fingerprint(
+                        normalized[bracket_pos + 1 : close_bracket],
+                        defined_labels=defined_labels,
+                    )
+                    token_kind = "image" if is_image else "link"
+                    tokens.append([token_kind, label_tokens, dest_val, title_val or None])
                     i = end_pos
                     continue
         plain_buf.append(ch)
         i += 1
 
     flush_plain()
-    return "".join(out).strip()
+    if tokens and tokens[0][0] == "prose":
+        trimmed_head = tokens[0][1].lstrip(" ")
+        if trimmed_head:
+            tokens[0][1] = trimmed_head
+        else:
+            tokens.pop(0)
+    if tokens and tokens[-1][0] == "prose":
+        trimmed_tail = tokens[-1][1].rstrip(" ")
+        if trimmed_tail:
+            tokens[-1][1] = trimmed_tail
+        else:
+            tokens.pop()
+    return tokens
+
+
+def _normalize_block_literal(block_text: str) -> str:
+    """规范代码块/HTML 块换行并移除首尾纯空白行，完整保留正文大小写、缩进与内部水平空格。"""
+    lines = _split_commonmark_lines(block_text)
+    while lines and not lines[0].strip(" \t"):
+        lines.pop(0)
+    while lines and not lines[-1].strip(" \t"):
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _normalize_fingerprint_text(
@@ -346,135 +389,53 @@ def _normalize_fingerprint_text(
     *,
     allow_code_blocks: bool = False,
 ) -> str:
-    """无损指纹归一化：不调用 _parse_commonmark_blocks，避免剥离链接引用定义或误删跨行代码跨度换行前空格。
+    """无损、无碰撞的注入式 JSON 指纹归一化。
 
-    - allow_code_blocks=False（category / reason 等行内标签字段）：直接对 raw.strip() 走行内代码与链接感知归一化，
-      与输入解析及归并择优的 .strip() 语义严格一致，杜绝前导空格触发伪缩进代码块导致归并后 ID 突变。
-    - allow_code_blocks=True（failure_scenario 等 Markdown 块级字段）：按行顺序识别围栏/缩进代码块、
-      链接引用定义（保留目标大小写且绝不剥离）及普通非代码块（绝不剥离行尾空格以保全跨行代码跨度）。
+    - allow_code_blocks=False（category / reason 等行内字段）：不调用块解析器，直接对 raw.strip() 做类型化行内
+      token 编码，与输入解析及归并择优的 .strip() 语义严格一致，杜绝前导空格触发伪缩进代码块导致归并后 ID 突变；
+    - allow_code_blocks=True（failure_scenario 等 Markdown 块级字段）：复用唯一权威块解析器
+      `_parse_commonmark_blocks(..., include_all_visible_blocks=True, preserve_trailing_spaces=True)`，
+      同时捕获顶层、块引用、列表项及任意嵌套容器内的链接引用定义，并以 `json.dumps` 类型化数组编码彻底消除定界符碰撞。
     """
-    text = _require_non_empty_str(raw, field_name)
+    text = _require_visible_text(raw, field_name)
     assert isinstance(raw, str)
     if not allow_code_blocks:
-        return _normalize_inline_fingerprint_text(text)
+        inline_tokens = _tokenize_inline_fingerprint(text)
+        return json.dumps(["inline", inline_tokens], ensure_ascii=False, separators=(",", ":"))
 
-    parts: list[str] = []
-    non_code_lines: list[str] = []
-    indented_lines: list[str] | None = None
-    fence_state: tuple[str, int, int, list[str]] | None = None
+    defined_link_defs: dict[str, tuple[str, str | None]] = {}
+    doc_blocks, frozen_labels = _parse_commonmark_blocks(
+        raw,
+        include_all_visible_blocks=True,
+        preserve_trailing_spaces=True,
+        defined_link_defs_out=defined_link_defs,
+    )
+    block_entries: list[Any] = []
+    for block_kind, block_text in doc_blocks:
+        if block_kind == "code":
+            code_text = _normalize_block_literal(block_text)
+            if code_text:
+                block_entries.append(["code", code_text])
+        elif block_kind == "html":
+            html_text = _normalize_block_literal(block_text)
+            if html_text:
+                block_entries.append(["html", html_text])
+        else:
+            inline_tokens = _tokenize_inline_fingerprint(block_text, defined_labels=frozen_labels)
+            if inline_tokens:
+                block_entries.append([block_kind, inline_tokens])
 
-    def flush_code_block(code_lines: list[str]) -> None:
-        trimmed = list(code_lines)
-        while trimmed and not trimmed[0].strip(" \t"):
-            trimmed.pop(0)
-        while trimmed and not trimmed[-1].strip(" \t"):
-            trimmed.pop()
-        if trimmed:
-            code_body = "\n".join(trimmed)
-            parts.append(f"\x00code\x00{code_body}\x00")
+    if defined_link_defs:
+        sorted_defs = [
+            [label, dest, title or None]
+            for label, (dest, title) in sorted(defined_link_defs.items())
+        ]
+        block_entries.append(["link_defs", sorted_defs])
 
-    def flush_non_code() -> None:
-        if not non_code_lines:
-            return
-        raw_block = "\n".join(non_code_lines)
-        non_code_lines.clear()
-
-        pos = 0
-        block_len = len(raw_block)
-        while pos < block_len:
-            matched = _match_single_link_ref_def_parts(raw_block, pos)
-            if matched is None:
-                break
-            next_pos, norm_label, dest_val, title_val = matched
-            if title_val:
-                parts.append(f"\x00linkdef\x00[{norm_label}]: {dest_val}\x00{title_val}\x00")
-            else:
-                parts.append(f"\x00linkdef\x00[{norm_label}]: {dest_val}\x00")
-            pos = next_pos
-
-        remaining = raw_block[pos:]
-        if remaining:
-            # 按 CommonMark §4.8 仅跳过段落每行前导 ASCII 空格/Tab，严禁剥离行尾空格（保全跨行代码跨度换行前空格）
-            para_text = "\n".join(line.lstrip(" \t") for line in remaining.split("\n"))
-            norm_block = _normalize_inline_fingerprint_text(para_text)
-            if norm_block:
-                parts.append(norm_block)
-
-    for raw_line in _split_commonmark_lines(raw):
-        cursor = _LineCursor(raw_line)
-
-        if fence_state is not None:
-            fence_char, fence_len, fence_indent, fenced_lines = fence_state
-            if not cursor.is_blank() and cursor.indent_ahead() <= 3:
-                saved = cursor.save()
-                cursor.advance_cols(cursor.indent_ahead())
-                rest = cursor.rest_text()
-                if re.fullmatch(rf"{re.escape(fence_char)}{{{fence_len},}}[ \t]*", rest):
-                    flush_code_block(fenced_lines)
-                    fence_state = None
-                    continue
-                cursor.restore(saved)
-            if fence_indent > 0:
-                cursor.advance_cols(min(fence_indent, cursor.indent_ahead()))
-            fenced_lines.append(cursor.rest_text())
-            continue
-
-        if indented_lines is not None:
-            if cursor.is_blank():
-                cursor.advance_cols(4)
-                indented_lines.append(cursor.rest_text())
-                continue
-            if cursor.indent_ahead() >= 4:
-                cursor.advance_cols(4)
-                indented_lines.append(cursor.rest_text())
-                continue
-            flush_code_block(indented_lines)
-            indented_lines = None
-
-        if cursor.is_blank():
-            flush_non_code()
-            continue
-
-        indent = cursor.indent_ahead()
-        if indent >= 4:
-            if not non_code_lines:
-                cursor.advance_cols(4)
-                indented_lines = [cursor.rest_text()]
-                continue
-            non_code_lines.append(raw_line)
-            continue
-
-        saved = cursor.save()
-        cursor.advance_cols(indent)
-        rest = cursor.rest_text()
-
-        bt_match = _FENCE_OPEN_BACKTICK_BODY_RE.match(rest)
-        tilde_match = _FENCE_OPEN_TILDE_BODY_RE.match(rest) if bt_match is None else None
-        fence_match = bt_match or tilde_match
-        if fence_match is not None:
-            flush_non_code()
-            marker = fence_match.group(1)
-            fence_state = (marker[0], len(marker), indent, [])
-            continue
-
-        if _ATX_HEADING_BODY_RE.match(rest):
-            flush_non_code()
-            non_code_lines.append(raw_line)
-            flush_non_code()
-            continue
-
-        cursor.restore(saved)
-        non_code_lines.append(raw_line)
-
-    if fence_state is not None:
-        flush_code_block(fence_state[3])
-    if indented_lines is not None:
-        flush_code_block(indented_lines)
-    flush_non_code()
-
-    if not parts:
-        return _normalize_inline_fingerprint_text(text)
-    return " ".join(parts)
+    if not block_entries:
+        fallback_tokens = _tokenize_inline_fingerprint(text)
+        return json.dumps(["inline", fallback_tokens], ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(["blocks", block_entries], ensure_ascii=False, separators=(",", ":"))
 
 
 def _normalize_str_collection(
@@ -1346,27 +1307,23 @@ def _match_single_link_ref_def_parts(text: str, start: int) -> tuple[int, str, s
     return None
 
 
-def _match_single_link_ref_def(text: str, start: int) -> tuple[int, str] | None:
-    matched = _match_single_link_ref_def_parts(text, start)
-    if matched is None:
-        return None
-    return matched[0], matched[1]
-
-
 def _strip_leading_link_ref_defs(
     paragraph_text: str,
     defined_labels: set[str] | None = None,
+    defined_link_defs: dict[str, tuple[str, str | None]] | None = None,
 ) -> str:
-    """按 CommonMark §4.7 剥离段落开头的全部合法链接引用定义，并记录定义标签。"""
+    """按 CommonMark §4.7 剥离段落开头的全部合法链接引用定义，并记录定义标签与首次生效的 (dest, title)。"""
     pos = 0
     n = len(paragraph_text)
     while pos < n:
-        matched = _match_single_link_ref_def(paragraph_text, pos)
+        matched = _match_single_link_ref_def_parts(paragraph_text, pos)
         if matched is None:
             break
-        next_pos, norm_label = matched
+        next_pos, norm_label, dest_val, title_val = matched
         if defined_labels is not None:
             defined_labels.add(norm_label)
+        if defined_link_defs is not None and norm_label not in defined_link_defs:
+            defined_link_defs[norm_label] = (dest_val, title_val)
         pos = next_pos
     return paragraph_text[pos:]
 
@@ -2344,8 +2301,16 @@ def _parse_commonmark_blocks(
     body: str,
     *,
     include_all_visible_blocks: bool = False,
+    preserve_trailing_spaces: bool = False,
+    defined_link_defs_out: dict[str, tuple[str, str | None]] | None = None,
 ) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code", "table_cell"], str]], frozenset[str]]:
-    """按 CommonMark Phase-1 容器栈/叶子块（含 GFM §4.10 管道表格）+ §4.7 链接引用定义剥离收集文档块与已定义链接标签。"""
+    """按 CommonMark Phase-1 容器栈/叶子块（含 GFM §4.10 管道表格）+ §4.7 链接引用定义剥离收集文档块与已定义链接标签。
+
+    - preserve_trailing_spaces=False（默认）：保持段落续行 strip(" \\t") 原语义，对所有既有调用方零变动；
+      为 True 时仅剥离行首缩进 lstrip(" \\t")，完整保全跨行代码跨度换行前空格。
+    - defined_link_defs_out：可选收集字典，按 CommonMark §4.7 首次定义生效语义记录全文档（含块引用/列表等嵌套容器内）
+      的 `norm_label -> (dest, title)` 映射。
+    """
     containers: list[_Container] = []
     leaf: _Leaf | None = None
     defined_labels: set[str] = set()
@@ -2357,7 +2322,11 @@ def _parse_commonmark_blocks(
     def close_leaf(*, emit: bool = True) -> None:
         nonlocal leaf
         if isinstance(leaf, _Paragraph):
-            remaining = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
+            remaining = _strip_leading_link_ref_defs(
+                "\n".join(leaf.lines),
+                defined_labels,
+                defined_link_defs_out,
+            )
             if emit and remaining and (include_all_visible_blocks or not in_blockquote()):
                 doc_blocks.append(("paragraph", remaining))
         elif isinstance(leaf, _HTMLBlock):
@@ -2540,7 +2509,11 @@ def _parse_commonmark_blocks(
 
             if same_container_para and _SETEXT_UNDERLINE_BODY_RE.match(rest):
                 assert isinstance(leaf, _Paragraph)
-                remaining_before_setext = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
+                remaining_before_setext = _strip_leading_link_ref_defs(
+                    "\n".join(leaf.lines),
+                    defined_labels,
+                    defined_link_defs_out,
+                )
                 if remaining_before_setext:
                     if include_all_visible_blocks:
                         doc_blocks.append(("heading", remaining_before_setext))
@@ -2608,7 +2581,8 @@ def _parse_commonmark_blocks(
             continue
 
         # 4. 段落续行（含 BlockQuote / ListItem 惰性续行）或开启新段落；按 CommonMark §4.8 仅剥离 ASCII 空格/制表符
-        text_line = cursor.rest_text().strip(" \t")
+        raw_rest = cursor.rest_text()
+        text_line = raw_rest.lstrip(" \t") if preserve_trailing_spaces else raw_rest.strip(" \t")
         if isinstance(leaf, _Paragraph):
             leaf.lines.append(text_line)
         else:
