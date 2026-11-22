@@ -1,7 +1,6 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-new file mode 100644
-index 0000000..2b8a7a8
---- /dev/null
+index e69de29..2b8a7a8 100644
+--- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,107 @@
 +package middleware
@@ -112,9 +111,8 @@ index 0000000..2b8a7a8
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-new file mode 100644
-index 0000000..653e3c5
---- /dev/null
+index e69de29..653e3c5 100644
+--- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
 @@ -0,0 +1,1016 @@
 +//go:build preflight_test_roots
@@ -1178,9 +1176,8 @@ index e2b039a..07de86f 100644
  		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
  		v1beta.POST("/interactions", geminiHandlers.Interactions)
 diff --git a/internal/pluginhost/preflight_receipt_test.go b/internal/pluginhost/preflight_receipt_test.go
-new file mode 100644
-index 0000000..6cebb36
---- /dev/null
+index e69de29..6cebb36 100644
+--- a/internal/pluginhost/preflight_receipt_test.go
 +++ b/internal/pluginhost/preflight_receipt_test.go
 @@ -0,0 +1,19 @@
 +package pluginhost
@@ -1540,7 +1537,7 @@ index e04fe3b..b25b42a 100644
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
-index b1a8e8c..ac8082b 100644
+index b1a8e8c..05f948b 100644
 --- a/sdk/cliproxy/auth/conductor_execution.go
 +++ b/sdk/cliproxy/auth/conductor_execution.go
 @@ -5,6 +5,7 @@ import (
@@ -1551,6 +1548,15 @@ index b1a8e8c..ac8082b 100644
  	"io"
  	"maps"
  	"net/http"
+@@ -604,7 +605,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 
+ 		tried[auth.ID] = struct{}{}
+ 		execCtx := ctx
+-		if rt := m.roundTripperFor(auth); rt != nil {
++		if rt := m.roundTripperForContext(execCtx, auth); rt != nil {
+ 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+ 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+ 		}
 @@ -673,7 +674,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
  			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
  			executionSeq := m.nextExecutionSeq()
@@ -1569,6 +1575,15 @@ index b1a8e8c..ac8082b 100644
  					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
  					durationRetry := time.Since(startRetry)
  					if errExec != nil {
+@@ -822,7 +823,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 
+ 		tried[auth.ID] = struct{}{}
+ 		execCtx := ctx
+-		if rt := m.roundTripperFor(auth); rt != nil {
++		if rt := m.roundTripperForContext(execCtx, auth); rt != nil {
+ 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+ 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+ 		}
 @@ -891,7 +892,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
  			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
  			executionSeq := m.nextExecutionSeq()
@@ -1587,7 +1602,56 @@ index b1a8e8c..ac8082b 100644
  					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
  					durationRetry := time.Since(startRetry)
  					if errExec != nil {
-@@ -2195,6 +2196,10 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
+@@ -1145,7 +1146,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
+ 				return nil, errBind
+ 			}
+ 		}
+-		if rt := m.roundTripperFor(auth); rt != nil {
++		if rt := m.roundTripperForContext(execCtx, auth); rt != nil {
+ 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+ 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+ 		}
+@@ -1901,11 +1902,39 @@ func (m *Manager) roundTripperFor(auth *Auth) http.RoundTripper {
+ 	return p.RoundTripperFor(auth)
+ }
+ 
++// roundTripperForContext resolves the auth RoundTripper, routing preflight and formal-review
++// executions through PreflightRoundTripperProvider when available so proxy-owned sealed transports
++// are used and pre-populated context transports are preserved for trust verification.
++func (m *Manager) roundTripperForContext(ctx context.Context, auth *Auth) http.RoundTripper {
++	if preflightreceipt.From(ctx) != nil {
++		if ctx != nil && ctx.Value("cliproxy.roundtripper") != nil {
++			return nil
++		}
++		m.mu.RLock()
++		p := m.rtProvider
++		m.mu.RUnlock()
++		if p == nil || auth == nil {
++			return nil
++		}
++		if pp, ok := p.(PreflightRoundTripperProvider); ok {
++			return pp.PreflightRoundTripperFor(auth)
++		}
++		return p.RoundTripperFor(auth)
++	}
++	return m.roundTripperFor(auth)
++}
++
+ // RoundTripperProvider defines a minimal provider of per-auth HTTP transports.
+ type RoundTripperProvider interface {
+ 	RoundTripperFor(auth *Auth) http.RoundTripper
+ }
+ 
++// PreflightRoundTripperProvider is an optional extension implemented by the default
++// provider to return a sealed, immutable proxy-owned RoundTripper for preflight/review traffic.
++type PreflightRoundTripperProvider interface {
++	PreflightRoundTripperFor(auth *Auth) http.RoundTripper
++}
++
+ // RequestPreparer is an optional interface that provider executors can implement
+ // to mutate outbound HTTP requests with provider credentials.
+ type RequestPreparer interface {
+@@ -2195,6 +2224,10 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
  	if exec == nil {
  		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
  	}
@@ -1598,7 +1662,7 @@ index b1a8e8c..ac8082b 100644
  	return exec.HttpRequest(ctx, auth, req)
  }
  
-@@ -2360,12 +2365,12 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
+@@ -2360,12 +2393,12 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
  	credVersion := auth.CredentialVersion
  	regEpoch := auth.RegistrationEpoch
  
@@ -1627,9 +1691,18 @@ index 26e8511..ceafacb 100644
  			if errExec != nil {
  				result.Error = resultErrorFromError(errExec)
 diff --git a/sdk/cliproxy/auth/conductor_home_execution.go b/sdk/cliproxy/auth/conductor_home_execution.go
-index 8bccc58..d0e2374 100644
+index 8bccc58..e78a6e2 100644
 --- a/sdk/cliproxy/auth/conductor_home_execution.go
 +++ b/sdk/cliproxy/auth/conductor_home_execution.go
+@@ -139,7 +139,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+ 			Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
+ 		})
+ 		execCtx = newUpstreamAttemptContext(execCtx)
+-		if rt := m.roundTripperFor(auth); rt != nil {
++		if rt := m.roundTripperForContext(execCtx, auth); rt != nil {
+ 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+ 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+ 		}
 @@ -243,9 +243,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
  			executor := executorForAuth(selection.Executor, preparedAuth)
  			execute := func() (cliproxyexecutor.Response, error) {
@@ -1674,9 +1747,8 @@ index 47f87de..3a1a2d4 100644
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-new file mode 100644
-index 0000000..5b0c4e6
---- /dev/null
+index e69de29..5b0c4e6 100644
+--- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
 @@ -0,0 +1,154 @@
 +package auth
@@ -1834,11 +1906,10 @@ index 0000000..5b0c4e6
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-new file mode 100644
-index 0000000..ef7d3b0
---- /dev/null
+index e69de29..0802e77 100644
+--- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,145 @@
 +//go:build !preflight_test_roots
 +
 +package auth
@@ -1848,8 +1919,10 @@ index 0000000..ef7d3b0
 +	"crypto/tls"
 +	"crypto/x509"
 +	"errors"
++	"io"
 +	"net"
 +	"net/http"
++	"net/http/httptest"
 +	"testing"
 +)
 +
@@ -1860,21 +1933,94 @@ index 0000000..ef7d3b0
 +}
 +
 +func TestPreflightReceiptProductionTransportTrust(t *testing.T) {
-+	// Proxy-owned controlled transports constructed via ControlledTransportForProxy MUST be trusted.
++	// Proxy-owned controlled transports constructed via ControlledTransportForProxy MUST be trusted
++	// and MUST NOT expose mutable *http.Transport to external callers.
 +	for _, proxyURL := range []string{"", "direct", "http://127.0.0.1:8080", "socks5://127.0.0.1:1080"} {
-+		tr, err := ControlledTransportForProxy(proxyURL)
-+		if err != nil || tr == nil {
-+			t.Fatalf("ControlledTransportForProxy(%q) failed: tr=%v err=%v", proxyURL, tr, err)
++		rt, err := ControlledTransportForProxy(proxyURL)
++		if err != nil || rt == nil {
++			t.Fatalf("ControlledTransportForProxy(%q) failed: rt=%v err=%v", proxyURL, rt, err)
 +		}
-+		if !isTrustedPreflightTransport(tr) {
++		if _, exposed := rt.(*http.Transport); exposed {
++			t.Fatalf("ControlledTransportForProxy(%q) exposed mutable *http.Transport", proxyURL)
++		}
++		if !isTrustedPreflightTransport(rt) {
 +			t.Fatalf("controlled transport for %q was rejected", proxyURL)
 +		}
 +	}
 +	// Unsupported https:// proxy (requires DialTLSContext) and malformed proxy URLs MUST fail closed.
 +	for _, badProxy := range []string{"https://127.0.0.1:8443", "ftp://127.0.0.1:21", "://bad"} {
-+		if tr, err := ControlledTransportForProxy(badProxy); err == nil || tr != nil {
-+			t.Fatalf("ControlledTransportForProxy(%q) escaped guard: tr=%v err=%v", badProxy, tr, err)
++		if rt, err := ControlledTransportForProxy(badProxy); err == nil || rt != nil {
++			t.Fatalf("ControlledTransportForProxy(%q) escaped guard: rt=%v err=%v", badProxy, rt, err)
 +		}
++	}
++
++	// Go's net/http lazily initializes Transport.TLSClientConfig on the first HTTPS request when
++	// ForceAttemptHTTP2 is enabled. Reusing the exact same cached controlled transport across
++	// multiple consecutive requests MUST remain trusted without tainting subsequent turns.
++	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer tlsSrv.Close()
++	directRT, err := ControlledTransportForProxy("direct")
++	if err != nil {
++		t.Fatalf("ControlledTransportForProxy(direct) failed: %v", err)
++	}
++	for attempt := 1; attempt <= 2; attempt++ {
++		req, errReq := http.NewRequestWithContext(context.Background(), http.MethodGet, tlsSrv.URL, nil)
++		if errReq != nil {
++			t.Fatalf("new request: %v", errReq)
++		}
++		resp, errRT := directRT.RoundTrip(req)
++		if resp != nil && resp.Body != nil {
++			_ = resp.Body.Close()
++		}
++		if errRT == nil {
++			t.Fatalf("attempt %d: self-signed TLS server unexpectedly passed OS trust roots", attempt)
++		}
++		if !isTrustedPreflightTransport(directRT) {
++			t.Fatalf("attempt %d: controlled transport rejected after Go HTTP/2 TLSClientConfig auto-init", attempt)
++		}
++	}
++	if sealed, ok := directRT.(*controlledPreflightTransport); !ok || sealed.tr.TLSClientConfig == nil {
++		t.Fatal("expected Go net/http to auto-initialize TLSClientConfig on ForceAttemptHTTP2 transport")
++	}
++
++	// Same controlled transport for an explicit HTTP proxy MUST complete two consecutive requests cleanly.
++	proxyHits := 0
++	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		proxyHits++
++		w.WriteHeader(http.StatusOK)
++		_, _ = io.WriteString(w, "ok")
++	}))
++	defer proxySrv.Close()
++	proxyRT1, err := ControlledTransportForProxy(proxySrv.URL)
++	if err != nil {
++		t.Fatalf("ControlledTransportForProxy(http proxy) failed: %v", err)
++	}
++	proxyRT2, err := ControlledTransportForProxy(proxySrv.URL)
++	if err != nil || proxyRT1 != proxyRT2 {
++		t.Fatalf("expected cached controlled transport for proxy %s", proxySrv.URL)
++	}
++	for attempt := 1; attempt <= 2; attempt++ {
++		if !isTrustedPreflightTransport(proxyRT1) {
++			t.Fatalf("attempt %d: cached proxy transport not trusted before request", attempt)
++		}
++		req, errReq := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.invalid/v1/responses", nil)
++		if errReq != nil {
++			t.Fatalf("new proxy request: %v", errReq)
++		}
++		resp, errRT := proxyRT1.RoundTrip(req)
++		if errRT != nil {
++			t.Fatalf("attempt %d: proxy RoundTrip failed: %v", attempt, errRT)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		if !isTrustedPreflightTransport(proxyRT1) {
++			t.Fatalf("attempt %d: cached proxy transport rejected after completion", attempt)
++		}
++	}
++	if proxyHits != 2 {
++		t.Fatalf("proxyHits = %d, want 2", proxyHits)
 +	}
 +
 +	// Any externally constructed *http.Transport (even default-looking, or carrying RegisterProtocol("https", ...),
@@ -2105,10 +2251,10 @@ index 0000000..94e96e0
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..9663265
+index 0000000..0a88f01
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,148 @@
 +package auth
 +
 +import (
@@ -2125,10 +2271,24 @@ index 0000000..9663265
 +	"golang.org/x/net/proxy"
 +)
 +
++// controlledPreflightTransport seals a proxy-owned *http.Transport behind an unexported
++// http.RoundTripper wrapper so callers outside package auth can never type-assert *http.Transport,
++// mutate TLSClientConfig, set DialTLS/DialTLSContext, or call RegisterProtocol("https", ...).
++// Go's net/http may still lazily initialize tr.TLSClientConfig for HTTP/2 on the first request;
++// trusting the sealed wrapper avoids both false rejection on reuse and data races against
++// onceSetNextProtoDefaults().
++type controlledPreflightTransport struct {
++	tr *http.Transport
++}
++
++func (c *controlledPreflightTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	return c.tr.RoundTrip(req)
++}
++
 +var (
 +	controlledTransportMu      sync.RWMutex
-+	controlledTransportByProxy = make(map[string]*http.Transport)
-+	controlledTransportPtrs    = make(map[*http.Transport]struct{})
++	controlledTransportByProxy = make(map[string]*controlledPreflightTransport)
++	controlledTransportPtrs    = make(map[*controlledPreflightTransport]struct{})
 +)
 +
 +func newFreshStandardTransport() *http.Transport {
@@ -2150,10 +2310,10 @@ index 0000000..9663265
 +	}
 +}
 +
-+// ControlledTransportForProxy returns a proxy-owned *http.Transport bound strictly to
-+// OS system trust roots (TLSClientConfig == nil, no DialTLS/DialTLSContext, no RegisterProtocol).
++// ControlledTransportForProxy returns a sealed proxy-owned http.RoundTripper bound strictly to
++// OS system trust roots (no DialTLS/DialTLSContext, no RegisterProtocol, never exposing *http.Transport).
 +// Unsupported schemes such as https:// proxy (which require DialTLSContext) fail closed.
-+func ControlledTransportForProxy(raw string) (*http.Transport, error) {
++func ControlledTransportForProxy(raw string) (http.RoundTripper, error) {
 +	trimmed := strings.TrimSpace(raw)
 +	controlledTransportMu.RLock()
 +	if existing := controlledTransportByProxy[trimmed]; existing != nil {
@@ -2199,29 +2359,27 @@ index 0000000..9663265
 +		return nil, preflightreceipt.ErrUnavailable
 +	}
 +
++	wrapped := &controlledPreflightTransport{tr: tr}
 +	controlledTransportMu.Lock()
 +	if existing := controlledTransportByProxy[trimmed]; existing != nil {
 +		controlledTransportMu.Unlock()
 +		return existing, nil
 +	}
-+	controlledTransportByProxy[trimmed] = tr
-+	controlledTransportPtrs[tr] = struct{}{}
++	controlledTransportByProxy[trimmed] = wrapped
++	controlledTransportPtrs[wrapped] = struct{}{}
 +	controlledTransportMu.Unlock()
-+	return tr, nil
++	return wrapped, nil
 +}
 +
 +func isControlledPreflightTransport(rt any) bool {
-+	tr, ok := rt.(*http.Transport)
-+	if !ok || tr == nil {
++	c, ok := rt.(*controlledPreflightTransport)
++	if !ok || c == nil || c.tr == nil {
 +		return false
 +	}
 +	controlledTransportMu.RLock()
-+	_, owned := controlledTransportPtrs[tr]
++	_, owned := controlledTransportPtrs[c]
 +	controlledTransportMu.RUnlock()
-+	if !owned {
-+		return false
-+	}
-+	return tr.DialTLS == nil && tr.DialTLSContext == nil && tr.TLSClientConfig == nil
++	return owned
 +}
 +
 +type failClosedRoundTripper struct {
@@ -2246,34 +2404,75 @@ index 0000000..9663265
 +	return isAllowedTestTransport(rt)
 +}
 diff --git a/sdk/cliproxy/rtprovider.go b/sdk/cliproxy/rtprovider.go
-index ddbd342..a9e5bec 100644
+index ddbd342..bc1efb8 100644
 --- a/sdk/cliproxy/rtprovider.go
 +++ b/sdk/cliproxy/rtprovider.go
-@@ -36,10 +36,16 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
- 	if rt != nil {
- 		return rt
+@@ -6,6 +6,7 @@ import (
+ 	"sync"
+ 
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
+ 	log "github.com/sirupsen/logrus"
+ )
+@@ -49,3 +50,21 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
+ 	p.mu.Unlock()
+ 	return transport
+ }
++
++// PreflightRoundTripperFor implements coreauth.PreflightRoundTripperProvider.
++// It returns a sealed proxy-owned RoundTripper (never exposing *http.Transport for mutation)
++// and fails closed for unsupported proxy schemes (such as https://).
++func (p *defaultRoundTripperProvider) PreflightRoundTripperFor(auth *coreauth.Auth) http.RoundTripper {
++	if auth == nil {
++		return nil
++	}
++	proxyStr := strings.TrimSpace(auth.ProxyURL)
++	if proxyStr == "" {
++		return nil
++	}
++	controlled, errControlled := coreauth.ControlledTransportForProxy(proxyStr)
++	if errControlled != nil || controlled == nil {
++		return coreauth.NewPreflightTransportError(preflightreceipt.ErrUnavailable)
++	}
++	return controlled
++}
+diff --git a/sdk/cliproxy/rtprovider_test.go b/sdk/cliproxy/rtprovider_test.go
+index 8a29e48..8c01ee0 100644
+--- a/sdk/cliproxy/rtprovider_test.go
++++ b/sdk/cliproxy/rtprovider_test.go
+@@ -20,3 +20,28 @@ func TestRoundTripperForDirectBypassesProxy(t *testing.T) {
+ 		t.Fatal("expected direct transport to disable proxy function")
  	}
--	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
--	if errBuild != nil {
--		log.Errorf("%v", errBuild)
--		return nil
-+	var transport *http.Transport
-+	if controlled, errControlled := coreauth.ControlledTransportForProxy(proxyStr); errControlled == nil && controlled != nil {
-+		transport = controlled
-+	} else {
-+		var errBuild error
-+		transport, _, errBuild = proxyutil.BuildHTTPTransport(proxyStr)
-+		if errBuild != nil {
-+			log.Errorf("%v", errBuild)
-+			return nil
-+		}
- 	}
- 	if transport == nil {
- 		return nil
+ }
++
++func TestPreflightRoundTripperForReturnsSealedReusableTransport(t *testing.T) {
++	t.Parallel()
++
++	provider := newDefaultRoundTripperProvider()
++	rt1 := provider.PreflightRoundTripperFor(&coreauth.Auth{ProxyURL: "direct"})
++	rt2 := provider.PreflightRoundTripperFor(&coreauth.Auth{ProxyURL: "direct"})
++	if rt1 == nil || rt1 != rt2 {
++		t.Fatalf("expected cached non-nil sealed preflight RoundTripper, got %v / %v", rt1, rt2)
++	}
++	if _, exposed := rt1.(*http.Transport); exposed {
++		t.Fatalf("PreflightRoundTripperFor exposed mutable *http.Transport")
++	}
++	bad := provider.PreflightRoundTripperFor(&coreauth.Auth{ProxyURL: "https://127.0.0.1:8443"})
++	if bad == nil {
++		t.Fatal("expected fail-closed RoundTripper for unsupported https:// proxy")
++	}
++	req, err := http.NewRequest(http.MethodGet, "https://chatgpt.com/backend-api/codex/responses", nil)
++	if err != nil {
++		t.Fatalf("new request: %v", err)
++	}
++	if resp, errRT := bad.RoundTrip(req); errRT == nil || resp != nil {
++		t.Fatalf("unsupported https:// proxy transport did not fail closed: resp=%v err=%v", resp, errRT)
++	}
++}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-new file mode 100644
-index 0000000..8867033
---- /dev/null
+index e69de29..8867033 100644
+--- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
 @@ -0,0 +1,1451 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
@@ -3728,9 +3927,8 @@ index 0000000..8867033
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-new file mode 100644
-index 0000000..6ddbeae
---- /dev/null
+index e69de29..6ddbeae 100644
+--- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
 @@ -0,0 +1,1360 @@
 +package preflightreceipt

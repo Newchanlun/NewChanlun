@@ -50,11 +50,13 @@ if tool:
     call_id = f"call_{launch['model']}_{session[:8]}"
     session_lines.extend([
         json.dumps({"type": "response_item", "payload": {
-            "type": "function_call", "name": "exec_command", "call_id": call_id, "arguments": json.dumps({"cmd": read}),
+            "type": "function_call", "name": "exec_command", "call_id": call_id,
+            "arguments": json.dumps({"cmd": f"git {' '.join(diff)}"}),
         }}),
         json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_tool_{session}"}}),
         json.dumps({"type": "response_item", "payload": {
-            "type": "function_call_output", "call_id": call_id, "output": "ok",
+            "type": "function_call_output", "call_id": call_id,
+            "output": f"Process exited with code 0\nOutput:\n{patch}",
         }}),
     ])
 session_lines.extend([

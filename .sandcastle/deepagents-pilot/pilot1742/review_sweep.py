@@ -610,7 +610,22 @@ class Sweep:
         unreadable: set[int] = set()
         review_actions: dict[int, str] = {}
         withdrawn: set[int] = set()   # 本轮已确认撤掉原生 auto-merge 的 PR
+        deferred_armed: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+        drifted: set[int] = set()
+        repo_native: tuple[bool, str] | None = None
         try:
+            if self.auto_merge:
+                # 先核验仓库级 allow_auto_merge：为 true 或读不到时禁止派发任何可能发布 success 的审查/续跑任务，
+                # 防止快速沿用 PASS 在撤回原生 auto-merge 前触发 GitHub 自动合入。
+                try:
+                    native = self.github.allow_auto_merge()
+                except SourceUnreadable:
+                    raise
+                except Exception as error:
+                    native, why = True, f"读取仓库设置 allow_auto_merge 失败：{type(error).__name__}: {error}"
+                else:
+                    why = "仓库设置 allow_auto_merge=true：原生 auto-merge 可在两轮之间被挂上，绕过人工确认两类"
+                repo_native = (native, why)
             for pr in self.launch_order(pulls, busy):  # 审查按 launch_order；合入、追平、兜底撤销仍按 PR 号
                 entry: dict[str, Any] = {"pr": pr["number"], "head": pr["head"]["sha"]}
                 try:
@@ -622,7 +637,8 @@ class Sweep:
                     if self.auto_merge:
                         try:
                             states[pr["number"]] = self.github.pr(pr["number"])
-                        except SourceUnreadable:
+                        except SourceUnreadable:  # 实时 PR 状态读取超时：记未知，让 fail_closed 兜底撤原生 auto-merge
+                            unreadable.add(pr["number"])
                             raise
                         except Exception:  # 状态读不到：不派审，合入阶段按失败关闭处理（撤原生 auto-merge）
                             unreadable.add(pr["number"])
@@ -640,6 +656,16 @@ class Sweep:
                         continue
                     pr_for_decide = ({**pr, "base": {**pr["base"], "sha": states[pr["number"]]["base"]}}
                                      if pr["number"] in states else pr)
+                    if self.auto_merge and repo_native is not None and repo_native[0]:
+                        action = "held-native-auto-merge"
+                        actions.append({**entry, "action": action, "reason": repo_native[1]})
+                        review_actions[pr["number"]] = action
+                        continue
+                    if self.auto_merge and states[pr["number"]].get("auto_merge") is not False:
+                        # 已挂（或状态不明）原生 auto-merge 的 PR 推迟到 merge_actions 确认撤回后再派发，
+                        # 绝不允许快速沿用 PASS 先于 disable_auto_merge 发布 success。
+                        deferred_armed.append((pr_for_decide, entry, behind))
+                        continue
                     action, record = self.decide(pr_for_decide, busy, running, behind)
                     started = action in ("launch", "resume-review", "resume-publish")
                     running += started
@@ -652,12 +678,36 @@ class Sweep:
                     action = "error"
                     actions.append({**entry, "action": action, "reason": f"{type(error).__name__}: {error}"})
                 review_actions[pr["number"]] = action
+            if self.auto_merge:
+                self.merge_actions(pulls, states, reviewing_now, review_actions, unreadable,
+                                   out=actions, withdrawn=withdrawn, live_busy=busy,
+                                   repo_native=repo_native, drifted=drifted)
+                if deferred_armed and not (repo_native and repo_native[0]):
+                    for pr_for_decide, entry, behind in deferred_armed:
+                        number = pr_for_decide["number"]
+                        if number in drifted:
+                            continue
+                        if number not in withdrawn:
+                            action = "held-auto-merge-withdraw-failed"
+                            actions.append({**entry, "action": action})
+                            review_actions[number] = action
+                            continue
+                        try:
+                            action, record = self.decide(pr_for_decide, busy, running, behind)
+                            started = action in ("launch", "resume-review", "resume-publish")
+                            running += started
+                            if started:
+                                reviewing_now.add(number)
+                            actions.append({**entry, "action": action, **(record or {})})
+                        except SourceUnreadable:
+                            raise
+                        except Exception as error:
+                            action = "error"
+                            actions.append({**entry, "action": action, "reason": f"{type(error).__name__}: {error}"})
+                        review_actions[number] = action
             if self._backoff is not None:
                 actions.append({**self._backoff,
                                 "held": [n for n, a in review_actions.items() if a == "review-backoff"]})
-            if self.auto_merge:
-                self.merge_actions(pulls, states, reviewing_now, review_actions, unreadable,
-                                   out=actions, withdrawn=withdrawn, live_busy=busy)
         except SourceUnreadable as error:
             # 超时（或整轮输入源读不到）：本轮不再合入、不再追平；凡尚未确认撤回且挂着（或不知道挂没挂）
             # 原生 auto-merge 的 PR（含跳过派审的 PR）都撤原生 auto-merge。已做的动作随异常带出，照常写日志。
@@ -729,6 +779,8 @@ class Sweep:
         try:
             again = self.github.pr(number)
         except SourceUnreadable:
+            # 复核实时 PR 状态超时：此后是否新挂原生 auto-merge 未知，置为待撤让 fail_closed 兜底。
+            state["auto_merge"] = True
             raise
         except Exception as error:
             raise EvidenceInsufficient(f"复核 head 失败：{type(error).__name__}: {error}") from None
@@ -821,7 +873,9 @@ class Sweep:
                       unreadable: set[int] | frozenset[int] = frozenset(), *,
                       out: list[dict[str, Any]] | None = None,
                       withdrawn: set[int] | None = None,
-                      live_busy: set[int] | frozenset[int] = frozenset()) -> list[dict[str, Any]]:
+                      live_busy: set[int] | frozenset[int] = frozenset(),
+                      repo_native: tuple[bool, str] | None = None,
+                      drifted: set[int] | None = None) -> list[dict[str, Any]]:
         """两段：先把每个 PR 的证据读完并定好动作（只读），全部读完才按序执行撤原生 auto-merge 写操作。
         读阶段任何超时都在写之前抛出，并由 fail_closed 按已确认撤回集合兜底撤销；动作逐条追加到 out，超时时已做的也不丢。"""
         actions = [] if out is None else out
@@ -843,14 +897,17 @@ class Sweep:
             app = required.get(name, GATED_APP_IDS.get(name))
             if app is not None:
                 bindings[name] = app
-        try:
-            native = self.github.allow_auto_merge()
-        except SourceUnreadable:
-            raise
-        except Exception as error:
-            native, why = True, f"读取仓库设置 allow_auto_merge 失败：{type(error).__name__}: {error}"
+        if repo_native is not None:
+            native, why = repo_native
         else:
-            why = "仓库设置 allow_auto_merge=true：原生 auto-merge 可在两轮之间被挂上，绕过人工确认两类"
+            try:
+                native = self.github.allow_auto_merge()
+            except SourceUnreadable:
+                raise
+            except Exception as error:
+                native, why = True, f"读取仓库设置 allow_auto_merge 失败：{type(error).__name__}: {error}"
+            else:
+                why = "仓库设置 allow_auto_merge=true：原生 auto-merge 可在两轮之间被挂上，绕过人工确认两类"
         if native:  # 本轮不合入、不追平；撤原生 auto-merge 照常做
             gate_ok = evidence_ok = False
             actions.append({"action": "native-auto-merge-enabled", "reason": why})
@@ -893,6 +950,8 @@ class Sweep:
                 result, write = {"action": kind, "reason": reason}, ("disable" if armed else None)
             else:
                 armed = states[number].get("auto_merge") is not False
+                if drifted is not None and result.get("action") in ("head-moved", "base-moved", "base-ref-moved"):
+                    drifted.add(number)
             head_free = head_free and not claimed
             plan.append((entry, result, write, armed))
         for entry, result, write, armed in plan:

@@ -2936,9 +2936,24 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
         {"type": "item.completed", "item": {"type": "agent_message", "text": final_text}},
         {"type": "turn.completed"},
     ]
+    def _materialize_records(records: list[dict], *, cmd_override: str | None = None,
+                             out_override: str | None = None) -> list[dict]:
+        out: list[dict] = []
+        for rec in records:
+            item = json.loads(json.dumps(rec))
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            if item.get("type") == "response_item" and payload.get("type") == "function_call":
+                payload["arguments"] = json.dumps({"cmd": diff_cmd if cmd_override is None else cmd_override})
+            elif item.get("type") == "response_item" and payload.get("type") == "function_call_output":
+                payload["output"] = (f"Process exited with code 0\nOutput:\n{patch}"
+                                     if out_override is None else out_override)
+            out.append(item)
+        return out
+
+    matched_records = _materialize_records(fixture["session_records"])
     (worker / "events.jsonl").write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n")
     (worker / "session.jsonl").write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in fixture["session_records"]) + "\n"
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in matched_records) + "\n"
     )
     updated_receipt = {**receipt, "session_id": session_id, "result": fixture["final_result"],
                        "observed_provider": fixture["provider"], "observed_model": fixture["model"]}
@@ -2972,6 +2987,16 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
     assert outcome.verdict == "PASS"
     verified = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
     assert verified.verdict == "PASS"
+
+    # R16：仅工具调用总数相等不够——session.jsonl 命令与 events.jsonl 错配、或输出未含候选补丁/退出码非零，均判 FAILED
+    for bad_records in (
+        _materialize_records(fixture["session_records"], cmd_override="git diff --no-ext-diff --no-textconv"),
+        _materialize_records(fixture["session_records"], out_override="Process exited with code 0\nOutput:\nnot-the-patch"),
+        _materialize_records(fixture["session_records"], out_override=f"Process exited with code 1\nOutput:\n{patch}"),
+    ):
+        (worker / "session.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in bad_records) + "\n")
+        assert strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome).verdict == "FAILED"
+    (worker / "session.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in matched_records) + "\n")
 
     # 中间轮 response_id 被替换（即使总轮数与末条 response_id/终答摘要完全一致），必须判 FAILED
     if len(fixture_rid_shas) >= 2:
@@ -3010,7 +3035,7 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
 
     # R15：工具调用轮整条 token_usage_record 缺失（仅保留终答轮）：即使终答与代理子序列匹配，也必须判 FAILED
     records_missing_tool_tur = [
-        r for r in fixture["session_records"]
+        r for r in matched_records
         if not (r.get("type") == "token_usage_record"
                 and (r.get("payload") or {}).get("response_id") == fixture["response_ids"][0])
     ]

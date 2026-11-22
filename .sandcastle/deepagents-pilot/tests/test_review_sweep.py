@@ -2366,3 +2366,81 @@ def test_recheck_discovers_auto_merge_then_checks_error_still_withdraws(lane):
     ev = next(a for a in actions if a.get("pr") == 1810 and a["action"] == "evidence-insufficient")
     assert ev.get("auto_merge_withdrawn") is True
     assert github.calls == [("disable", 1810)]
+
+
+def test_armed_pr_disables_auto_merge_before_dispatch_and_blocks_on_withdraw_failure(lane):
+    """R16（Sol P1）：原生 auto-merge 必须先于任何可能发布 success 的审查/沿用派发完成撤回；
+    仓库 allow_auto_merge=true 或撤回失败时严禁派发子进程。"""
+    order: list[tuple[str, int]] = []
+    github = FakeGitHub(lane)
+    github.states[1810] = {"auto_merge": True}
+    orig_disable = github.disable_auto_merge
+
+    def record_disable(number):
+        order.append(("disable", number))
+        orig_disable(number)
+
+    github.disable_auto_merge = record_disable
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    orig_spawn = sweep.spawn
+
+    def record_spawn(number, attempt, head, log, base=None):
+        order.append(("spawn", number))
+        return orig_spawn(number, attempt, head, log, base)
+
+    sweep.spawn = record_spawn
+    actions = sweep.tick()
+    assert order == [("disable", 1810), ("spawn", 1810)]
+    assert any(a.get("pr") == 1810 and a["action"] == "launch" for a in actions)
+
+    # 撤回失败时绝不派发子进程
+    github2 = FakeGitHub(lane)
+    github2.states[1810] = {"auto_merge": True}
+    github2.disable_auto_merge = _raise
+    sweep2, host2, _ = make(lane, run=False, github=github2, auto_merge=True)
+    actions2 = sweep2.tick()
+    assert host2.spawned == []
+    assert any(a.get("pr") == 1810 and a["action"] == "held-auto-merge-withdraw-failed" for a in actions2)
+
+    # 仓库 allow_auto_merge=true（或读不到）时绝不派发子进程（即便 PR 当前未挂 auto-merge）
+    for unsafe_fn in (lambda: True, _raise):
+        github3 = FakeGitHub(lane)
+        github3.states[1810] = {"auto_merge": False}
+        github3.allow_auto_merge = unsafe_fn
+        sweep3, host3, _ = make(lane, run=False, github=github3, auto_merge=True)
+        actions3 = sweep3.tick()
+        assert host3.spawned == []
+        assert any(a.get("pr") == 1810 and a["action"] == "held-native-auto-merge" for a in actions3)
+
+
+def test_pr_state_timeout_marks_unreadable_so_fail_closed_withdraws_despite_stale_null_snapshot(lane):
+    """R16（Astra P1）：open_pulls 快照显示 auto_merge=None，随后实时 pr() 读取或复核超时：
+    fail_closed 必须将该 PR 视为状态未知并尝试撤回原生 auto-merge，不按旧快照跳过。"""
+    lane.gateway.pr["auto_merge"] = None
+    github = FakeGitHub(lane)
+    github.pr = _hang
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    with pytest.raises(SourceUnreadable) as caught:
+        sweep.tick()
+    assert host.spawned == []
+    assert github.calls == [("disable", 1810)]
+    assert any(a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw" for a in caught.value.actions)
+
+    # 首次 pr() 返回 auto_merge=False，但 _plan_one 复核 pr() 超时时同样须加入 unreadable 兜底撤回
+    github2 = FakeGitHub(lane)
+    github2.states[1810] = {"auto_merge": False}
+    orig_pr = github2.pr
+    calls = []
+
+    def pr_hang_on_recheck(number):
+        calls.append(number)
+        if len(calls) >= 2:
+            _hang()
+        return orig_pr(number)
+
+    github2.pr = pr_hang_on_recheck
+    sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
+    with pytest.raises(SourceUnreadable) as caught2:
+        sweep2.tick()
+    assert github2.calls == [("disable", 1810)]
+    assert any(a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw" for a in caught2.value.actions)

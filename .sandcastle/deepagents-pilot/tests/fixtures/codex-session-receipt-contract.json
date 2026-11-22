@@ -35,7 +35,7 @@
         "type": "function_call",
         "name": "exec_command",
         "call_id": "call_01",
-        "arguments": "{\"cmd\":\"git diff --no-ext-diff --no-textconv\"}"
+        "arguments": "{\"cmd\":\"git diff --no-ext-diff --no-textconv {{MERGE_BASE_SHA}} {{HEAD_SHA}}\"}"
       }
     },
     {
@@ -58,7 +58,7 @@
       "payload": {
         "type": "function_call_output",
         "call_id": "call_01",
-        "output": "diff --git a/x b/x"
+        "output": "Process exited with code 0\nOutput:\n{{CANDIDATE_PATCH}}"
       }
     },
     {

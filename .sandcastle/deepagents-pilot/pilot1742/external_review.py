@@ -13,11 +13,13 @@ main 前进而 PR 改动的文件在 main 侧未变时 patch_id 不变；冲突�
 from __future__ import annotations
 
 import argparse
+import collections
 import fcntl
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -823,10 +825,50 @@ class ExternalReview:
             "last_output_sha256": payload["last_output_sha256"],
         }
 
+    @staticmethod
+    def _unwrap_shell_command(raw: str) -> str:
+        try:
+            toks = shlex.split(raw)
+            if len(toks) >= 3 and toks[0].endswith(("bash", "sh")) and toks[1] in ("-c", "-lc"):
+                return toks[2]
+        except ValueError:
+            pass
+        return raw
+
+    @classmethod
+    def _extract_session_tool_command(cls, payload: dict[str, Any]) -> str | None:
+        pt = payload.get("type")
+        if pt in ("function_call", "custom_tool_call"):
+            args = payload.get("arguments")
+            if isinstance(args, str):
+                try:
+                    parsed = json.loads(args)
+                except ValueError:
+                    return None
+                if isinstance(parsed, dict):
+                    cmd = parsed.get("cmd") if isinstance(parsed.get("cmd"), str) else parsed.get("command")
+                    if isinstance(cmd, str):
+                        return cls._unwrap_shell_command(cmd)
+            if pt == "custom_tool_call" and isinstance(payload.get("input"), str):
+                return cls._unwrap_shell_command(payload["input"])
+            return None
+        if pt == "local_shell_call":
+            action = payload.get("action")
+            if isinstance(action, dict):
+                raw_cmd = action.get("command")
+                if isinstance(raw_cmd, list) and raw_cmd:
+                    parts = [str(x) for x in raw_cmd]
+                    if len(parts) >= 3 and parts[0].endswith(("bash", "sh")) and parts[1] in ("-c", "-lc"):
+                        return parts[2]
+                    return " ".join(parts)
+                if isinstance(raw_cmd, str):
+                    return cls._unwrap_shell_command(raw_cmd)
+        return None
+
     def _verify_session_receipt(self, target: ReviewTarget, launch: dict, receipt: dict, worker: Path,
                                 outcome: ReviewOutcome) -> ReviewOutcome:
         """正式双审的每一次有效结论（PASS/BLOCK）都必须绑定代理侧未污染的 cliproxy-review-v1 收据，
-        且终答文本摘要（及 session.jsonl 末条 response_id 与轮数）与代理观测到的最终上游响应一致。"""
+        逐项核对 events.jsonl 与 session.jsonl 的命令、助手消息与闭合补丁读取轮次，并与代理观测到的响应序列一致。"""
         if target.policy_version != POLICY or outcome.verdict not in ("PASS", "BLOCK"):
             return outcome
         candidates: list[float] = []
@@ -842,14 +884,17 @@ class ExternalReview:
                 pass
         since = min(candidates) if candidates else 0.0
         final_text: str | None = None
-        ev_cmd_count = 0
-        ev_am_count = 0
+        ev_cmds: list[str] = []
+        ev_ams: list[str] = []
         response_ids: list[str] = []
-        sess_fc_count = 0
-        sess_am_count = 0
-        last_assistant_text: str | None = None
+        sess_cmds: list[str] = []
+        sess_ams: list[str] = []
+        pending_calls: dict[str, str] = {}
+        closed_calls: dict[str, str] = {}
+        sess_patch_reads = 0
         pending_model_output = False
         try:
+            patch = frozen_patch(self.source, target)
             for line in (worker / "events.jsonl").read_text().splitlines():
                 if not line.strip():
                     continue
@@ -857,11 +902,18 @@ class ExternalReview:
                 item = ev.get("item") if isinstance(ev.get("item"), dict) else {}
                 if ev.get("type") == "item.completed":
                     if item.get("type") == "command_execution":
-                        ev_cmd_count += 1
+                        raw_cmd = item.get("command")
+                        if not isinstance(raw_cmd, str):
+                            return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
+                                                 "events.jsonl 存在非字符串命令项，PASS/BLOCK 均不采信")
+                        ev_cmds.append(self._unwrap_shell_command(raw_cmd))
                     elif item.get("type") == "agent_message":
-                        ev_am_count += 1
                         text = item.get("text")
-                        final_text = text if isinstance(text, str) else None
+                        if isinstance(text, str):
+                            ev_ams.append(text)
+                            final_text = text
+                        else:
+                            final_text = None
             with open(worker / "session.jsonl", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as stream:
                 for line in stream:
                     if not line.strip():
@@ -873,10 +925,19 @@ class ExternalReview:
                         pt = payload.get("type")
                         role = payload.get("role")
                         if pt in ("function_call", "custom_tool_call", "local_shell_call", "web_search_call"):
-                            sess_fc_count += 1
                             pending_model_output = True
+                            if pt != "web_search_call":
+                                cmd = self._extract_session_tool_command(payload)
+                                if cmd is None:
+                                    return ReviewOutcome(
+                                        outcome.model, "FAILED", outcome.session_id,
+                                        "session.jsonl 含无法解析命令的 response_item 工具调用，PASS/BLOCK 均不采信",
+                                    )
+                                sess_cmds.append(cmd)
+                                cid = payload.get("call_id")
+                                if isinstance(cid, str) and cid.strip():
+                                    pending_calls[cid] = cmd
                         elif pt == "message" and role == "assistant":
-                            sess_am_count += 1
                             pending_model_output = True
                             content = payload.get("content")
                             if isinstance(content, list):
@@ -885,9 +946,7 @@ class ExternalReview:
                                     for part in content
                                     if isinstance(part, dict) and part.get("type") in (None, "", "output_text")
                                 ]
-                                joined = "".join(parts)
-                                if joined:
-                                    last_assistant_text = joined
+                                sess_ams.append("".join(parts))
                         elif pt in ("function_call_output", "custom_tool_call_output") or (
                                 pt == "message" and role == "user"):
                             if pending_model_output:
@@ -895,6 +954,15 @@ class ExternalReview:
                                     outcome.model, "FAILED", outcome.session_id,
                                     "session.jsonl 存在未由 token_usage_record.response_id 闭合的工具调用/助手响应轮，PASS/BLOCK 均不采信",
                                 )
+                            if pt in ("function_call_output", "custom_tool_call_output"):
+                                cid = payload.get("call_id")
+                                out_text = str(payload.get("output") or "")
+                                if isinstance(cid, str) and cid in closed_calls:
+                                    call_cmd = closed_calls.pop(cid)
+                                    exit_m = re.search(r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text)
+                                    ok_exit = exit_m is None or exit_m.group(1) == "0"
+                                    if ok_exit and reads_candidate_patch(call_cmd, out_text, patch):
+                                        sess_patch_reads += 1
                     elif rtype == "token_usage_record":
                         rid = payload.get("response_id")
                         if not isinstance(rid, str) or not rid.strip():
@@ -903,8 +971,10 @@ class ExternalReview:
                                 "session.jsonl 含缺失或为空的 token_usage_record.response_id，PASS/BLOCK 均不采信",
                             )
                         response_ids.append(rid.strip())
+                        closed_calls.update(pending_calls)
+                        pending_calls.clear()
                         pending_model_output = False
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, subprocess.CalledProcessError):
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "无法读取 events.jsonl/session.jsonl 核验代理侧最终响应绑定，PASS/BLOCK 均不采信")
         if final_text is None:
@@ -913,12 +983,15 @@ class ExternalReview:
         if pending_model_output:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "session.jsonl 末轮模型输出缺少闭合的 token_usage_record.response_id，PASS/BLOCK 均不采信")
-        if sess_fc_count < ev_cmd_count or sess_am_count < ev_am_count or sess_am_count == 0:
+        if collections.Counter(ev_cmds) != collections.Counter(sess_cmds):
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
-                                 "session.jsonl 缺少与 events.jsonl 工具调用或助手消息对应的 response_item 证据，PASS/BLOCK 均不采信")
-        if last_assistant_text != final_text:
+                                 "session.jsonl response_item 与 events.jsonl 记录的工具调用命令不逐项匹配，PASS/BLOCK 均不采信")
+        if not sess_ams or ev_ams != sess_ams or sess_ams[-1] != final_text:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
-                                 "session.jsonl 末条助手正文与 events.jsonl 终答不一致，PASS/BLOCK 均不采信")
+                                 "session.jsonl 助手消息与 events.jsonl 终答不逐项一致，PASS/BLOCK 均不采信")
+        if sess_patch_reads <= 0:
+            return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
+                                 "session.jsonl 缺少已由 token_usage_record 闭合的冻结候选补丁读取命令与输出，PASS/BLOCK 均不采信")
         if not response_ids:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "session.jsonl 缺少可核验的 token_usage_record.response_id，PASS/BLOCK 均不采信")
