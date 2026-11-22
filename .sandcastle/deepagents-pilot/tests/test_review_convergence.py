@@ -27,6 +27,7 @@ from pilot1742.review_convergence import (
     VerifiedFinding,
     VerifiedRound,
     _clip_formatted_inline,
+    _collapse_prose_whitespace,
     _contains_raw_html_outside_code,
     _escape_unmatched_backticks,
     _extract_code_span_text,
@@ -9926,3 +9927,205 @@ def test_r28_container_soft_wraps_hard_breaks_and_headings_matrix() -> None:
         assert len(merged) == 2
         assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
         assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+
+# ── R29 精准返修（Codex R26 两项 Important：奇数反斜杠裸链接尾空格保护 + 容器归属确定性编码） ────
+
+
+def test_r29_codex_r26_repros_odd_backslash_link_and_container_ownership() -> None:
+    """R29 精准回归：锁定 Codex R26 两项最小复现（指纹/去重/贴报/紧凑渲染/多轮收敛）。"""
+    # 1. Important 1：奇数反斜杠结尾裸链接目的地保留 1 个必需空格，避免与普通文本误合并或破坏紧凑渲染链接
+    l_valid = r"[spec](/dir\ )"
+    l_broken = r"[spec](/dir\)"
+    f1, f2, merged_link = _r21_probe(l_valid, l_broken, category=True)
+    assert f1.finding_id != f2.finding_id
+    assert len(merged_link) == 2
+    assert {item.finding_id for item in merged_link} == {f1.finding_id, f2.finding_id}
+    assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    # 紧凑渲染路径保留合法可点击链接 `[spec](/dir\ )`
+    assert _collapse_prose_whitespace(l_valid) == l_valid
+    assert _single_line(l_valid) == l_valid
+    nb_finding = Finding(
+        severity=Severity.NIT,
+        file="src/a.py",
+        line=10,
+        category=l_valid,
+        failure_scenario=f"See {l_valid}",
+        evidence=f"Ref {l_valid}",
+        source_models=("gpt-6-astra",),
+    )
+    compact = _render_compact_non_blocking_item(_verified(nb_finding, VerificationVerdict.CONFIRMED), 300)
+    assert compact is not None
+    assert l_valid in compact
+    assert l_broken not in compact
+
+    # 2. Important 2：列表前缀空格影响后续块容器归属（围栏代码在列表项内 vs 列表外），严禁误合并
+    code = "\n\n  ~~~\n  panic\n  ~~~"
+    in_list = "- x" + code
+    out_list = "-   x" + code
+    c1, c2, merged_cont = _r21_probe(in_list, out_list, category=True)
+    assert c1.finding_id != c2.finding_id
+    assert len(merged_cont) == 2
+    assert {item.finding_id for item in merged_cont} == {c1.finding_id, c2.finding_id}
+    assert len(select_postable_findings([_verified(c2, VerificationVerdict.CONFIRMED)], frozenset({c1.finding_id}))) == 1
+
+    # 同义列表缩进偏移（两者围栏均在列表项内且正文同为 panic）应跨轮收敛不重复贴报
+    in_list_pad4 = "-   x\n\n    ~~~\n    panic\n    ~~~"
+    e1, e2, merged_eq = _r21_probe(in_list, in_list_pad4, category=True)
+    assert e1.finding_id == e2.finding_id
+    assert len(merged_eq) == 1
+    assert merged_eq[0].finding_id == e1.finding_id
+    assert len(select_postable_findings([_verified(e2, VerificationVerdict.CONFIRMED)], frozenset({e1.finding_id}))) == 0
+
+    e1_r1 = dataclasses.replace(e1, source_models=("gpt-6-astra",))
+    e2_r2 = dataclasses.replace(e2, source_models=("gpt-6-astra",))
+    hist_r1 = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({e1_r1.finding_id}),
+        (e1_r1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r29-r1-s1", "r29-r1-s2"}),
+    )
+    cand_r2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([e2_r2], round_number=2, head_sha=HEAD_2),
+        history=(hist_r1,),
+    )
+    assert len(cand_r2.findings) == 1
+    assert cand_r2.findings[0].finding_id == e1.finding_id
+    vr_r2 = parse_verifier_output(
+        _verifier_payload(cand_r2, [{"finding_id": e1.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2 = evaluate_round(vr_r2)
+    assert len(dec_r2.postable_findings) == 0
+    assert len(dec_r2.blocking_findings) == 1
+
+
+def test_r29_odd_even_backslash_link_tail_matrix() -> None:
+    """R29：奇数/偶数反斜杠结尾裸链接目的地全矩阵（含标题、图片、表格/容器内及紧凑渲染验证）。"""
+    distinct_pairs: tuple[tuple[str, str], ...] = (
+        # bs_1_sp_vs_none / bs_3_sp_vs_none
+        (r"[spec](/dir\ )", r"[spec](/dir\)"),
+        (r"[spec](/dir\\\ )", r"[spec](/dir\\\)"),
+        # 图片与含转义圆括号目的地
+        (r"![alt](/img\ )", r"![alt](/img\)"),
+        (r"[spec](/dir\(a\)\ )", r"[spec](/dir\(a\)\)"),
+        # 表格、引用、列表内同样严格区分
+        ("| C |\n| - |\n| [spec](/dir\\ ) |", "| C |\n| - |\n| [spec](/dir\\) |"),
+        (r"> [spec](/dir\ )", r"> [spec](/dir\)"),
+        (r"- [spec](/dir\ )", r"- [spec](/dir\)"),
+    )
+    for left, right in distinct_pairs:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id != f2.finding_id, f"unexpected odd-backslash link collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    equivalent_pairs: tuple[tuple[str, str], ...] = (
+        # bs_2_sp_vs_none / bs_4_sp_vs_none
+        (r"[spec](/dir\\ )", r"[spec](/dir\\)"),
+        (r"[spec](/dir\\\\ )", r"[spec](/dir\\\\)"),
+        # bs_1_sp_vs_2sp / tab / newline / leading spaces
+        (r"[spec](/dir\ )", r"[spec](/dir\  )"),
+        ("[spec](/dir\\\t)", r"[spec](/dir\ )"),
+        ("[spec](/dir\\\n)", r"[spec](/dir\ )"),
+        (r"[spec](  /dir\  )", r"[spec](/dir\ )"),
+        # bs_1_with_title / bs_3_with_title
+        (r'[spec](/dir\ "t")', r'[spec](/dir\   "t")'),
+        (r'[spec](/dir\\\ "t")', r'[spec](/dir\\\   "t" )'),
+        # 偶数反斜杠图片
+        (r"![alt](/img\\ )", r"![alt](/img\\)"),
+    )
+    for left, right in equivalent_pairs:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id == f2.finding_id, f"unexpected backslash link split for {left!r} vs {right!r}"
+        assert len(merged) == 1
+        assert merged[0].finding_id == f1.finding_id
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 0
+
+    assert _collapse_prose_whitespace(r"[spec](/dir\  )") == r"[spec](/dir\ )"
+    assert _collapse_prose_whitespace(r"[spec](/dir\\\  )") == r"[spec](/dir\\\ )"
+    assert _collapse_prose_whitespace(r"[spec](/dir\\  )") == r"[spec](/dir\\)"
+
+
+def test_r29_container_ownership_and_padding_matrix() -> None:
+    """R29：容器归属全矩阵（围栏/缩进代码、段落、子列表、引用、标题、表格、HTML、Setext、空行与同义缩进归并）。"""
+    distinct_pairs: tuple[tuple[str, str], ...] = (
+        # list_pad_fenced (tilde / backtick / info / body indent)
+        ("- x\n\n  ~~~\n  panic\n  ~~~", "-   x\n\n  ~~~\n  panic\n  ~~~"),
+        ("- x\n\n  ```\n  panic\n  ```", "-   x\n\n  ```\n  panic\n  ```"),
+        ("- x\n\n  ```py\n  panic\n  ```", "-   x\n\n  ```py\n  panic\n  ```"),
+        ("- x\n\n  ~~~\n   panic\n  ~~~", "- x\n\n  ~~~\n  panic\n  ~~~"),
+        # list_pad_para / sublist / bq / heading
+        ("- x\n\n  y", "-   x\n\n  y"),
+        ("- x\n\n  - y", "-   x\n\n  - y"),
+        ("- x\n\n  > y", "-   x\n\n  > y"),
+        ("- x\n  # h", "-   x\n  # h"),
+        ("- x\n  # h", "- x\n- # h"),
+        # list_ord_pad_fenced
+        ("1. x\n\n   ~~~\n   panic\n   ~~~", "1.   x\n\n   ~~~\n   panic\n   ~~~"),
+        ("10. x\n\n    ~~~\n    panic\n    ~~~", "10.   x\n\n    ~~~\n    panic\n    ~~~"),
+        # 缩进代码 vs 段落
+        ("- x\n\n      indented", "-   x\n\n      indented"),
+        # 两列表项 vs 同列表项两段；两引用块 vs 同引用块两段
+        ("- x\n\n- y", "- x\n\n  y"),
+        ("> x\n\n> y", "> x\n>\n> y"),
+        # 其余块型容器归属（表格 / HTML / 分隔线 / Setext / Tab 缩进 / 嵌套容器 / 紧松列表 / 链接引用定义）
+        ("- x\n\n  | a | b |\n  | - | - |\n  | 1 | 2 |", "-   x\n\n  | a | b |\n  | - | - |\n  | 1 | 2 |"),
+        ("- x\n\n  <div>hi</div>", "-   x\n\n  <div>hi</div>"),
+        ("- x\n\n  ---", "-   x\n\n  ---"),
+        ("- x\n\n  y\n  ===", "-   x\n\n  y\n  ==="),
+        ("-\tx\n\n  ~~~\n  panic\n  ~~~", "- x\n\n  ~~~\n  panic\n  ~~~"),
+        ("> - x\n>\n>   ~~~\n>   panic\n>   ~~~", "> -   x\n>\n>   ~~~\n>   panic\n>   ~~~"),
+        ("- a\n  - b\n\n    ~~~\n    p\n    ~~~", "- a\n  -   b\n\n    ~~~\n    p\n    ~~~"),
+        ("- a\n- b", "- a\n\n- b"),
+        ("-\n- x", "- x"),
+        ("- x\n\n  [spec]: /csv\n  See [spec]", "-   x\n\n  [spec]: /csv\n  See [spec]"),
+        ("> ~~~\n> a\n>\n> b\n> ~~~", "> ~~~\n> a\n>\n>\n> b\n> ~~~"),
+        # 严禁伪造容器编码哨兵与真实容器碰撞
+        ('\x00["li:1:-"]\x00x', "- x"),
+    )
+    for left, right in distinct_pairs:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id != f2.finding_id, f"unexpected container ownership collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    equivalent_pairs: tuple[tuple[str, str], ...] = (
+        ("- x", "-   x"),
+        ("- x\n  y", "-   x\n  y"),
+        ("-   x\n  y", "- x y"),
+        ("- x\n  y", "- x y"),
+        ("- x\n- y", "-   x\n- y"),
+        ("1. x", "1.  x"),
+        ("> Race\nCondition", "> Race\n> Condition"),
+        ("> Race\nCondition", "> Race Condition"),
+        ("- x\n\n  ~~~\n  panic\n  ~~~", "-   x\n\n    ~~~\n    panic\n    ~~~"),
+        ("- x\n\n      indented", "-   x\n\n        indented"),
+        ("- x\n\n  y", "-   x\n\n    y"),
+        ("- a\n  - b", "-   a\n    - b"),
+        ("- x\n\n  > y", "-   x\n\n    > y"),
+        ("- x\n  # h", "-   x\n    # h"),
+        ("- x\n\n  | a | b |\n  | - | - |\n  | 1 | 2 |", "-   x\n\n    | a | b |\n    | - | - |\n    | 1 | 2 |"),
+        ("> x\n>\n>\n> y", "> x\n>\n> y"),
+        ("-\tx\n\n    ~~~\n    panic\n    ~~~", "-   x\n\n    ~~~\n    panic\n    ~~~"),
+    )
+    for left, right in equivalent_pairs:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id == f2.finding_id, f"unexpected container ownership split for {left!r} vs {right!r}"
+        assert len(merged) == 1
+        assert merged[0].finding_id == f1.finding_id
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 0
+
+    # 无容器顶层文本严格保持明文输出（不含内部容器编码哨兵）
+    assert _normalize_fingerprint_text("  Race  Condition ", "category") == "Race Condition"
+    assert _normalize_fingerprint_text("---", "category") == "---"
+    assert "\x00" not in _normalize_fingerprint_text("Race Condition", "category")

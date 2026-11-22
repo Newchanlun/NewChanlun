@@ -309,7 +309,7 @@ def _normalize_gfm_table_row_inline(content: str, defined_labels: frozenset[str]
 
 
 def _normalize_inline_fingerprint_text(normalized: str) -> str:
-    """行内短文本（category / reason）无损指纹规范化：按 CommonMark 块、GFM 表格单元格与 §6.5 行内语法保护原样结构。"""
+    """行内短文本（category / reason）无损指纹规范化：按 CommonMark 块、容器归属、GFM 表格单元格与 §6.5 行内语法保护原样结构。"""
     stripped = normalized.strip(_ASCII_WS_CHARS)
     if not stripped:
         return ""
@@ -317,7 +317,9 @@ def _normalize_inline_fingerprint_text(normalized: str) -> str:
     trailing_ws_strippable: set[int] = set()
     ref_def_lines: set[int] = set()
     inline_block_groups: list[_InlineBlockGroup] = []
-    table_row_lines: dict[int, int] = {}
+    table_row_lines: set[int] = set()
+    line_container_sig: dict[int, tuple[str, ...]] = {}
+    line_stripped_text: dict[int, str] = {}
     _, defined_labels = _parse_commonmark_blocks(
         stripped,
         include_all_visible_blocks=True,
@@ -326,58 +328,72 @@ def _normalize_inline_fingerprint_text(normalized: str) -> str:
         ref_def_line_indices_out=ref_def_lines,
         inline_block_groups_out=inline_block_groups,
         table_row_lines_out=table_row_lines,
+        line_container_sig_out=line_container_sig,
+        line_stripped_text_out=line_stripped_text,
     )
     lines = _split_commonmark_lines(stripped)
     inline_by_start: dict[int, _InlineBlockGroup] = {
-        group.lines[0][0]: group for group in inline_block_groups if group.lines
+        group.lines[0]: group for group in inline_block_groups if group.lines
     }
 
-    out_lines: list[tuple[bool, str]] = []
+    out_items: list[tuple[bool, tuple[str, ...], str]] = []
     idx = 0
     total = len(lines)
     while idx < total:
         line = lines[idx]
+        sig = line_container_sig.get(idx, ())
+        text_val = line_stripped_text.get(idx, line)
         if idx in verbatim_lines:
-            out_lines.append((True, line))
+            out_items.append((True, sig, text_val))
             idx += 1
             continue
         if idx in ref_def_lines:
-            out_lines.append((False, line.rstrip(" \t") if idx in trailing_ws_strippable else line))
+            out_items.append((False, sig, text_val.rstrip(" \t") if idx in trailing_ws_strippable else text_val))
             idx += 1
             continue
-        table_prefix_end = table_row_lines.get(idx)
-        if table_prefix_end is not None:
-            raw_prefix = line[:table_prefix_end]
-            content = line[table_prefix_end:]
-            out_lines.append((False, f"{raw_prefix}{_normalize_gfm_table_row_inline(content, defined_labels)}"))
+        if idx in table_row_lines:
+            out_items.append((False, sig, _normalize_gfm_table_row_inline(text_val, defined_labels)))
             idx += 1
             continue
         inline_group = inline_by_start.get(idx)
         if inline_group is not None:
             contents: list[str] = []
-            for line_i, prefix_end in inline_group.lines:
-                content = lines[line_i][prefix_end:].lstrip(" \t")
+            for line_i in inline_group.lines:
+                content = line_stripped_text.get(line_i, lines[line_i]).lstrip(" \t")
                 contents.append(content.rstrip(" \t") if line_i in trailing_ws_strippable else content)
             rebuilt = _normalize_inline_chunk("\n".join(contents), defined_labels)
-            if rebuilt or inline_group.first_prefix:
-                for line_offset, rebuilt_line in enumerate(rebuilt.split("\n")):
-                    prefix = inline_group.first_prefix if line_offset == 0 else inline_group.cont_prefix
-                    out_lines.append((False, f"{prefix}{rebuilt_line}"))
-            idx = inline_group.lines[-1][0] + 1
+            if rebuilt or inline_group.container_sig:
+                for rebuilt_line in rebuilt.split("\n"):
+                    out_items.append((False, inline_group.container_sig, rebuilt_line))
+            idx = inline_group.lines[-1] + 1
             continue
-        if line.strip(" \t") == "":
-            if not out_lines or out_lines[-1] != (False, ""):
-                out_lines.append((False, ""))
+        if text_val.strip(" \t") == "":
+            blank_item = (False, sig, "")
+            if not out_items or out_items[-1] != blank_item:
+                out_items.append(blank_item)
             idx += 1
             continue
-        out_lines.append((False, line.rstrip(" \t") if idx in trailing_ws_strippable else line))
+        out_items.append((False, sig, text_val.rstrip(" \t") if idx in trailing_ws_strippable else text_val))
         idx += 1
 
-    while out_lines and not out_lines[0][0] and out_lines[0][1] == "":
-        out_lines.pop(0)
-    while out_lines and not out_lines[-1][0] and out_lines[-1][1] == "":
-        out_lines.pop()
-    return "\n".join(text for _, text in out_lines)
+    while out_items and not out_items[0][0] and not out_items[0][1] and out_items[0][2] == "":
+        out_items.pop(0)
+    while out_items and not out_items[-1][0] and not out_items[-1][1] and out_items[-1][2] == "":
+        out_items.pop()
+
+    has_container_or_nul = any(sig or "\x00" in text for _, sig, text in out_items)
+    if not has_container_or_nul:
+        return "\n".join(text for _, _, text in out_items)
+    encoded: list[str] = []
+    for _, sig, text in out_items:
+        if sig:
+            sig_json = json.dumps(list(sig), ensure_ascii=False, separators=(",", ":"))
+            encoded.append(f"\x00{sig_json}\x00{text}")
+        elif text.startswith("\x00"):
+            encoded.append(f"\x00{text}")
+        else:
+            encoded.append(text)
+    return "\n".join(encoded)
 
 
 def _normalize_fingerprint_text(
@@ -1032,7 +1048,7 @@ class _LineCursor:
 
 @dataclass
 class _BlockQuote:
-    pass
+    node_id: int = 0
 
 
 @dataclass
@@ -1040,14 +1056,13 @@ class _ListItem:
     padding: int
     has_content: bool = False
     marker: str = ""
-    opened_line: int = -1
+    node_id: int = 0
 
 
 @dataclass(frozen=True)
 class _InlineBlockGroup:
-    lines: tuple[tuple[int, int], ...]
-    first_prefix: str
-    cont_prefix: str
+    lines: tuple[int, ...]
+    container_sig: tuple[str, ...]
 
 
 @dataclass
@@ -1073,7 +1088,6 @@ class _HTMLBlock:
 class _Paragraph:
     lines: list[str]
     line_indices: list[int] = field(default_factory=list)
-    prefix_ends: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -1372,6 +1386,15 @@ def _find_code_span_end(text: str, start: int) -> tuple[int, int]:
     return tick_end, -1
 
 
+def _ends_with_odd_backslashes(text: str) -> bool:
+    count = 0
+    idx = len(text) - 1
+    while idx >= 0 and text[idx] == "\\":
+        count += 1
+        idx -= 1
+    return count % 2 == 1
+
+
 def _match_and_canonicalize_inline_link_tail(text: str, pos: int) -> tuple[int, str] | None:
     """按 CommonMark §6.5 解析行内链接/图片尾 `(...)`：原样保留 destination 与 title 本体，规范外侧排版空白。"""
     n = len(text)
@@ -1392,6 +1415,8 @@ def _match_and_canonicalize_inline_link_tail(text: str, pos: int) -> tuple[int, 
     while i < n and text[i] in (" ", "\t", "\n"):
         i += 1
     if i < n and text[i] == ")":
+        if not dest_raw.startswith("<") and _ends_with_odd_backslashes(dest_raw):
+            return i + 1, f"]({dest_raw} )"
         return i + 1, f"]({dest_raw})"
     if i > ws_start:
         title_start = i
@@ -2441,7 +2466,9 @@ def _parse_commonmark_blocks(
     trailing_ws_strippable_out: set[int] | None = None,
     ref_def_line_indices_out: set[int] | None = None,
     inline_block_groups_out: list[_InlineBlockGroup] | None = None,
-    table_row_lines_out: dict[int, int] | None = None,
+    table_row_lines_out: set[int] | None = None,
+    line_container_sig_out: dict[int, tuple[str, ...]] | None = None,
+    line_stripped_text_out: dict[int, str] | None = None,
 ) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]], frozenset[str]]:
     """按 CommonMark Phase-1 容器栈/叶子块（含 GFM §4.10 管道表格）+ §4.7 链接引用定义剥离收集文档块与已定义链接标签。"""
     containers: list[_Container] = []
@@ -2449,30 +2476,37 @@ def _parse_commonmark_blocks(
     defined_labels: set[str] = set()
     doc_blocks: list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]] = []
     indented_pending_blank_indices: list[int] = []
+    next_container_id = 0
+
+    def alloc_container_id() -> int:
+        nonlocal next_container_id
+        next_container_id += 1
+        return next_container_id
 
     def in_blockquote() -> bool:
         return any(isinstance(c, _BlockQuote) for c in containers)
 
-    def format_container_prefixes(start_line_idx: int) -> tuple[str, str]:
-        first_parts: list[str] = []
-        cont_parts: list[str] = []
-        for container in containers:
-            if isinstance(container, _BlockQuote):
-                first_parts.append("> ")
-                cont_parts.append("> ")
-            else:
-                if container.opened_line == start_line_idx:
-                    first_parts.append(f"{container.marker} ")
-                else:
-                    first_parts.append("  ")
-                cont_parts.append("  ")
-        return "".join(first_parts), "".join(cont_parts)
+    def current_container_sig() -> tuple[str, ...]:
+        return tuple(
+            f"bq:{c.node_id}" if isinstance(c, _BlockQuote) else f"li:{c.node_id}:{c.marker}"
+            for c in containers
+        )
+
+    def record_line_meta(idx: int, stripped_text: str) -> None:
+        if line_container_sig_out is not None:
+            line_container_sig_out[idx] = current_container_sig()
+        if line_stripped_text_out is not None:
+            line_stripped_text_out[idx] = stripped_text
 
     def close_leaf(*, emit: bool = True) -> None:
         nonlocal leaf
-        if trailing_ws_strippable_out is not None and indented_pending_blank_indices:
-            trailing_ws_strippable_out.update(indented_pending_blank_indices)
-        indented_pending_blank_indices.clear()
+        if indented_pending_blank_indices:
+            if trailing_ws_strippable_out is not None:
+                trailing_ws_strippable_out.update(indented_pending_blank_indices)
+            if line_stripped_text_out is not None:
+                for blank_idx in indented_pending_blank_indices:
+                    line_stripped_text_out[blank_idx] = ""
+            indented_pending_blank_indices.clear()
         if isinstance(leaf, _Paragraph):
             strippable_rel: set[int] = set()
             ref_def_rel: set[int] = set()
@@ -2493,17 +2527,15 @@ def _parse_commonmark_blocks(
             if remaining:
                 if inline_block_groups_out is not None:
                     rem_inline = tuple(
-                        (leaf.line_indices[r], leaf.prefix_ends[r])
+                        leaf.line_indices[r]
                         for r in range(len(leaf.line_indices))
                         if r not in ref_def_rel
                     )
                     if rem_inline:
-                        first_prefix, cont_prefix = format_container_prefixes(rem_inline[0][0])
                         inline_block_groups_out.append(
                             _InlineBlockGroup(
                                 lines=rem_inline,
-                                first_prefix=first_prefix,
-                                cont_prefix=cont_prefix,
+                                container_sig=current_container_sig(),
                             )
                         )
                 if emit and (include_all_visible_blocks or not in_blockquote()):
@@ -2578,14 +2610,17 @@ def _parse_commonmark_blocks(
                     if re.fullmatch(rf"{re.escape(leaf.fence_char)}{{{leaf.fence_len},}}[ \t]*", rest):
                         if trailing_ws_strippable_out is not None:
                             trailing_ws_strippable_out.add(line_idx)
+                        record_line_meta(line_idx, rest.rstrip(" \t"))
                         close_leaf()
                         continue
                     cursor.restore(saved)
                 if leaf.indent > 0:
                     cursor.advance_cols(min(cursor.indent_ahead(), leaf.indent))
-                leaf.lines.append(cursor.rest_text())
+                code_line = cursor.rest_text()
+                leaf.lines.append(code_line)
                 if verbatim_line_indices_out is not None:
                     verbatim_line_indices_out.add(line_idx)
+                record_line_meta(line_idx, code_line)
                 continue
             if isinstance(leaf, _HTMLBlock):
                 if leaf.kind in (6, 7):
@@ -2593,30 +2628,39 @@ def _parse_commonmark_blocks(
                         close_leaf()
                         if trailing_ws_strippable_out is not None:
                             trailing_ws_strippable_out.add(line_idx)
+                        record_line_meta(line_idx, "")
                         continue
-                    leaf.lines.append(cursor.rest_text())
+                    html_line = cursor.rest_text()
+                    leaf.lines.append(html_line)
                     if verbatim_line_indices_out is not None:
                         verbatim_line_indices_out.add(line_idx)
+                    record_line_meta(line_idx, html_line)
                     continue
-                leaf.lines.append(cursor.rest_text())
+                html_line = cursor.rest_text()
+                leaf.lines.append(html_line)
                 if verbatim_line_indices_out is not None:
                     verbatim_line_indices_out.add(line_idx)
-                if _is_html_block_end(leaf.kind, cursor.rest_text()):
+                record_line_meta(line_idx, html_line)
+                if _is_html_block_end(leaf.kind, html_line):
                     close_leaf()
                 continue
             if isinstance(leaf, _IndentedCode):
                 if cursor.is_blank():
                     cursor.advance_cols(4)
-                    leaf.lines.append(cursor.rest_text())
+                    code_line = cursor.rest_text()
+                    leaf.lines.append(code_line)
                     indented_pending_blank_indices.append(line_idx)
+                    record_line_meta(line_idx, f"    {code_line}")
                     continue
                 if cursor.indent_ahead() >= 4:
                     cursor.advance_cols(4)
-                    leaf.lines.append(cursor.rest_text())
+                    code_line = cursor.rest_text()
+                    leaf.lines.append(code_line)
                     if verbatim_line_indices_out is not None:
                         verbatim_line_indices_out.update(indented_pending_blank_indices)
                         verbatim_line_indices_out.add(line_idx)
                     indented_pending_blank_indices.clear()
+                    record_line_meta(line_idx, f"    {code_line}")
                     continue
                 close_leaf()
             if isinstance(leaf, _Table):
@@ -2624,14 +2668,17 @@ def _parse_commonmark_blocks(
                     close_leaf()
                     if trailing_ws_strippable_out is not None:
                         trailing_ws_strippable_out.add(line_idx)
+                    record_line_meta(line_idx, "")
                     continue
-                row_cells = _split_gfm_table_row(cursor.rest_text(), require_pipe=True)
+                row_text = cursor.rest_text()
+                row_cells = _split_gfm_table_row(row_text, require_pipe=True)
                 if row_cells is not None:
                     leaf.body_rows.append(tuple(row_cells[: len(leaf.header_cells)]))
                     if trailing_ws_strippable_out is not None:
                         trailing_ws_strippable_out.add(line_idx)
                     if table_row_lines_out is not None:
-                        table_row_lines_out[line_idx] = cursor.pos
+                        table_row_lines_out.add(line_idx)
+                    record_line_meta(line_idx, row_text)
                     continue
                 close_leaf()
 
@@ -2644,6 +2691,7 @@ def _parse_commonmark_blocks(
                 close_leaf()
             if trailing_ws_strippable_out is not None:
                 trailing_ws_strippable_out.add(line_idx)
+            record_line_meta(line_idx, "")
             continue
 
         # 3. 按 CommonMark 优先级开启新容器或叶子块
@@ -2652,6 +2700,7 @@ def _parse_commonmark_blocks(
             if cursor.is_blank():
                 if trailing_ws_strippable_out is not None:
                     trailing_ws_strippable_out.add(line_idx)
+                record_line_meta(line_idx, "")
                 line_consumed = True
                 break
 
@@ -2665,14 +2714,17 @@ def _parse_commonmark_blocks(
                 close_unmatched(matched)
                 mark_parent_has_content()
                 cursor.advance_cols(4)
-                leaf = _IndentedCode(lines=[cursor.rest_text()])
+                code_line = cursor.rest_text()
+                leaf = _IndentedCode(lines=[code_line])
                 indented_pending_blank_indices.clear()
                 if verbatim_line_indices_out is not None:
                     verbatim_line_indices_out.add(line_idx)
+                record_line_meta(line_idx, f"    {code_line}")
                 line_consumed = True
                 break
 
             saved = cursor.save()
+            raw_before_indent = cursor.rest_text()
             cursor.advance_cols(indent)
             rest = cursor.rest_text()
 
@@ -2683,7 +2735,7 @@ def _parse_commonmark_blocks(
                 if cursor.peek_char() in (" ", "\t"):
                     cursor.advance_cols(1)
                 mark_parent_has_content()
-                containers.append(_BlockQuote())
+                containers.append(_BlockQuote(node_id=alloc_container_id()))
                 matched = len(containers)
                 continue
 
@@ -2693,13 +2745,12 @@ def _parse_commonmark_blocks(
                 mark_parent_has_content()
                 if trailing_ws_strippable_out is not None:
                     trailing_ws_strippable_out.add(line_idx)
+                record_line_meta(line_idx, rest)
                 if inline_block_groups_out is not None:
-                    first_prefix, cont_prefix = format_container_prefixes(line_idx)
                     inline_block_groups_out.append(
                         _InlineBlockGroup(
-                            lines=((line_idx, saved[0]),),
-                            first_prefix=first_prefix,
-                            cont_prefix=cont_prefix,
+                            lines=(line_idx,),
+                            container_sig=current_container_sig(),
                         )
                     )
                 if include_all_visible_blocks:
@@ -2718,6 +2769,7 @@ def _parse_commonmark_blocks(
                 mark_parent_has_content()
                 if trailing_ws_strippable_out is not None:
                     trailing_ws_strippable_out.add(line_idx)
+                record_line_meta(line_idx, rest.rstrip(" \t"))
                 marker = fence_match.group(1)
                 leaf = _FencedCode(fence_char=marker[0], fence_len=len(marker), indent=indent)
                 line_consumed = True
@@ -2731,6 +2783,7 @@ def _parse_commonmark_blocks(
                 leaf = _HTMLBlock(kind=html_kind, lines=[rest])
                 if verbatim_line_indices_out is not None:
                     verbatim_line_indices_out.add(line_idx)
+                record_line_meta(line_idx, raw_before_indent)
                 if html_kind in (1, 2, 3, 4, 5) and _is_html_block_end(html_kind, rest, is_opening_line=True):
                     close_leaf()
                 line_consumed = True
@@ -2757,19 +2810,18 @@ def _parse_commonmark_blocks(
                         if leaf.line_indices:
                             trailing_ws_strippable_out.add(leaf.line_indices[-1])
                         trailing_ws_strippable_out.add(line_idx)
+                    record_line_meta(line_idx, rest.rstrip(" \t"))
                     if inline_block_groups_out is not None:
                         rem_inline = tuple(
-                            (leaf.line_indices[r], leaf.prefix_ends[r])
+                            leaf.line_indices[r]
                             for r in range(len(leaf.line_indices))
                             if r not in ref_def_rel
                         )
                         if rem_inline:
-                            first_prefix, cont_prefix = format_container_prefixes(rem_inline[0][0])
                             inline_block_groups_out.append(
                                 _InlineBlockGroup(
                                     lines=rem_inline,
-                                    first_prefix=first_prefix,
-                                    cont_prefix=cont_prefix,
+                                    container_sig=current_container_sig(),
                                 )
                             )
                     if include_all_visible_blocks:
@@ -2788,6 +2840,7 @@ def _parse_commonmark_blocks(
                 mark_parent_has_content()
                 if trailing_ws_strippable_out is not None:
                     trailing_ws_strippable_out.add(line_idx)
+                record_line_meta(line_idx, rest.rstrip(" \t"))
                 line_consumed = True
                 break
 
@@ -2821,7 +2874,7 @@ def _parse_commonmark_blocks(
                             padding=padding,
                             has_content=False,
                             marker=rest[:marker_width],
-                            opened_line=line_idx,
+                            node_id=alloc_container_id(),
                         )
                     )
                     matched = len(containers)
@@ -2841,7 +2894,8 @@ def _parse_commonmark_blocks(
                             trailing_ws_strippable_out.add(leaf.line_indices[-1])
                         trailing_ws_strippable_out.add(line_idx)
                     if table_row_lines_out is not None and leaf.line_indices:
-                        table_row_lines_out[leaf.line_indices[0]] = leaf.prefix_ends[0]
+                        table_row_lines_out.add(leaf.line_indices[0])
+                    record_line_meta(line_idx, rest.rstrip(" \t"))
                     leaf = _Table(header_cells=tuple(header_cells))
                     line_consumed = True
                     break
@@ -2853,16 +2907,17 @@ def _parse_commonmark_blocks(
             continue
 
         # 4. 段落续行（含 BlockQuote / ListItem 惰性续行）或开启新段落；按 CommonMark §4.8 仅剥离 ASCII 空格/制表符
-        prefix_end = cursor.pos
-        text_line = cursor.rest_text().strip(" \t")
+        raw_after_container = cursor.rest_text()
+        text_line = raw_after_container.strip(" \t")
         if isinstance(leaf, _Paragraph):
             leaf.lines.append(text_line)
             leaf.line_indices.append(line_idx)
-            leaf.prefix_ends.append(prefix_end)
+            record_line_meta(line_idx, raw_after_container)
         else:
             close_unmatched(matched)
             mark_parent_has_content()
-            leaf = _Paragraph(lines=[text_line], line_indices=[line_idx], prefix_ends=[prefix_end])
+            record_line_meta(line_idx, raw_after_container)
+            leaf = _Paragraph(lines=[text_line], line_indices=[line_idx])
 
     close_leaf()
     return doc_blocks, frozenset(defined_labels)
