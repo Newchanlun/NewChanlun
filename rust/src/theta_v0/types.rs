@@ -21,6 +21,7 @@ pub type Timestamp = i64;
 ///
 /// bit-exact：用 `round`（四舍五入到最近 tick），不是 floor/ceil——避免方向偏置。
 /// 边界条件：`tick_size <= 0` 在 config 校验层拒绝（此处假设已校验 > 0）。
+#[inline]
 pub fn quantize(price: f64, tick_size: f64) -> Tick {
     (price / tick_size).round() as Tick
 }
@@ -33,6 +34,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    #[inline]
     pub fn flip(self) -> Direction {
         match self {
             Direction::Up => Direction::Down,
@@ -62,6 +64,7 @@ pub struct Bar {
 
 impl Bar {
     /// 平局裁决键（reference-theta-v0.md:16）：`(timestamp, source_index)` 升序。
+    #[inline]
     pub fn tie_key(&self) -> (Timestamp, usize) {
         (self.timestamp, self.source_index)
     }
@@ -215,6 +218,7 @@ pub struct BspBits {
 
 /// #542 schema-only 铁律：归因载荷不改变六 bit 的相等关系。
 impl PartialEq for BspBits {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.buy1 == other.buy1
             && self.buy2 == other.buy2
@@ -261,6 +265,7 @@ impl BspBits {
     /// - **影响声明**：新增买侧确认析取；[`crate::theta_v0::classifier::nest::confirm`] 改为委托本方法
     ///   +`conf_minus`（单一来源，消除重复析取）。L0 操作语义，**不**声明择时 alpha（买卖点 v1 全窗 8/8
     ///   L3 已否证）。
+    #[inline]
     pub fn conf_plus(&self) -> bool {
         self.buy1 || self.buy2 || self.buy3
     }
@@ -269,12 +274,14 @@ impl BspBits {
     ///
     /// 镜像 [`BspBits::conf_plus`]（spec P5 §6 line 285；δ=-1/Short 方向）。六要素见 `conf_plus`，
     /// 此为其卖侧对偶（买卖对偶 §10.1）。
+    #[inline]
     pub fn conf_minus(&self) -> bool {
         self.sell1 || self.sell2 || self.sell3
     }
 
     /// 方向化确认 `Conf^δ_e(x)`（spec P5 §6 区间套证书基例 ℓ=e）：`δ=+1`(Long)→`Conf^+`，
     /// `δ=-1`(Short)→`Conf^-`。区间套证书 `N^δ_{ℓ↓e}` 按方向 δ 选取本谓词作基例。
+    #[inline]
     pub fn confirm_side(&self, side: Side) -> bool {
         match side {
             Side::Long => self.conf_plus(),
@@ -288,6 +295,7 @@ impl BspBits {
     /// 「64 类完全分类、指示函数和恒为 1」(P4 §5 line 241) 的可计算落点。**非互斥**：6 位可任意组合
     /// （含多位同 1），覆盖全部 2^6=64 状态，故是完全分类而非互斥子集。与 [`BspBits::from_class_index`]
     /// 互逆（round-trip 见单测）。
+    #[inline]
     pub fn class_index(&self) -> u8 {
         (self.buy1 as u8)
             | (self.buy2 as u8) << 1
@@ -301,6 +309,7 @@ impl BspBits {
     ///
     /// 定义域 `idx ∈ 0..64`（{0,1}^6 的 64 个元素）。`idx >= 64` 越界（高于 6 位无意义）⟹ debug 断言
     /// 失败（fail-fast 边界校验，非静默截断）。
+    #[inline]
     pub fn from_class_index(idx: u8) -> Self {
         debug_assert!(idx < 64, "BspBits 64 类索引必须 ∈ 0..64，收到 {idx}");
         BspBits {
