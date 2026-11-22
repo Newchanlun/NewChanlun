@@ -227,7 +227,7 @@ pub(super) fn validate_config(m: &Value) -> Result<(), String> {
         ],
     )?;
     let content = contract(m)?.content;
-    if m["clock"]["kind"] != "TestOnly" {
+    if !super::store::component_clock(m) {
         return Err("UnsupportedCapability：仅显式 TestOnly 财务输入域".into());
     }
     digest(required(f, "input_sha256")?)?;

@@ -6,8 +6,11 @@
 """
 import copy, errno, hashlib, json, os, socket, sqlite3, subprocess, sys, tempfile, threading, time
 from pathlib import Path
+from history_fixture_model import model
 BIN=Path(sys.argv[1]).resolve()
 ROOT=Path(sys.argv[2]).resolve(); ROOT.mkdir(parents=True,exist_ok=True)
+REPAIR = len(sys.argv) == 5 and sys.argv[3] == "capture-repair"
+GENERATION = "1" if REPAIR else "g1"
 def canonical(x): return json.dumps(x,sort_keys=True,separators=(',',':'),ensure_ascii=False)
 def digest(x): return hashlib.sha256(canonical(x).encode()).hexdigest()
 # logical-bar/1: the open bar index X has reached (last committed bar + 1), the only clock E/S may report.
@@ -79,7 +82,7 @@ class Authority:
             with c:
                 envelope=json.loads(c.makefile('rb').readline()); q=envelope['payload']; self.calls.append(q)
                 r={k:q[k] for k in ['protocol','session_id','session_generation','authority_id','authority_epoch','command_id','command_hash','command']}
-                r.update(state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted',receipt_id=self.role+':'+q['command_id'],release_receipt_id=q['release_receipt_id'],commit_ns=CLOCK['bar'])
+                r.update(state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted',receipt_id=self.role+':'+q['command_id'],release_receipt_id=q['release_receipt_id'],commit_ns=str(CLOCK['bar']))
                 if q['command_id'] in self.compact:
                     r['receipt_id']=self.compact[q['command_id']]; r.pop('release_receipt_id')
                 if self.role=='S':
@@ -95,20 +98,28 @@ class Authority:
                 if self.bad=='denied': r['state']='Denied'
                 if self.bad=='identity': r['authority_epoch']='wrong'
                 if self.bad=='content': r['command']['symbol']='wrong'
-                if self.bad=='future': r['commit_ns']=9_000_000_000_000_000_000
+                if self.bad=='future': r['commit_ns']='9000000000000000000'
                 if self.bad=='missing': r['state']='NoRecord'
                 reply=reply_envelope(envelope,r,SIM[self.role.lower()])
                 self.replies.append(reply); c.sendall((canonical(reply)+'\n').encode())
-def model():
-    return dict(model_id='history-sim/bar-batch-known-frontier/1',revision='oracle-1',symbol='TEST',quantity_unit='TEST-UNIT',currency='TEST-CASH',tick_value=1,rd11_policy='controlled-fixture-rd11',rd12_policy='per-leg-source-attribution/1',projection_kind='per_leg',seed='none',fee_profile=dict(reference='controlled-fee/1',role_source='controlled-role-map/1',limit_role='maker',market_role='taker',maker=dict(numerator=1,denominator=100,rounding='ceiling'),taker=dict(numerator=2,denominator=100,rounding='ceiling'),market_slippage_ticks=1,market_slippage_source='controlled-oracle/1'))
 def order(name,side='buy',quantity=100,price=100):
     return dict(command_id=name,family_id='f-'+name,chong_id='ch-'+name,revision=1,side=side,quantity=quantity,kind=dict(kind='limit',price=price),eligibility_ref='S:'+name,projection_manifest='controlled-projection-'+name)
 # The approved list frozen in both E's exact_release and X's profile (#1407 C2 item 1), model_coverage included.
 CONDITIONS=[dict(condition_id=cid,authority_revision=cap,dependency_set=['controlled-dependency'],invalidation_sources=['controlled-invalidation'],required_check_stages=[stage],evidence_refs=['controlled-evidence'],coverage_proof='controlled-coverage',validator_capability=cap,failure_result='Denied') for cid,cap,stage in [('released-exact/1','released-exact/1','E.ReleaseExact'),('execute-committed/1','execute-committed/1','S.RequestConditionalExecution'),('simulation-local-transaction/1','simulation-local-transaction/1','X.OwnAttemptAndCall'),('model_coverage','model-coverage/1','E.ReleaseExact')]]
+FIRST_QUANTITY={}
 def command(change):
     o=change.get('order',change); cid=o['command_id']; family=o['family_id']
+    first=FIRST_QUANTITY.setdefault(family,o.get('quantity'))
+    assert first is not None
+    change=copy.deepcopy(change)
+    if 'order' in change:
+        order_wire=change['order']
+        for k in ('revision','quantity'): order_wire[k]=str(order_wire[k])
+        kind=order_wire['kind']
+        key='price' if kind['kind']=='limit' else 'exec_index'
+        kind[key]=str(kind[key])
     cert=dict(rd11_policy='controlled-fixture-rd11',responsibility_refs=['controlled-responsibility'],structure_dependencies=['controlled-structure'],market_dependencies=['controlled-market'],rule_revision='controlled-rule',conditions=copy.deepcopy(CONDITIONS))
-    return dict(command_id=cid,logical_order_family=family,session_id='session',session_generation='g1',x_id='X',x_epoch=1,symbol='TEST',projection_kind='per_leg',change=change,plan_hash=digest(change),certificate_hash=digest(cert),certificate=cert)
+    return dict(command_id=cid,logical_order_family=family,session_id='session',session_generation=GENERATION,x_id='X',x_epoch='1',first_quantity=str(first),allocation_id='alloc-'+family,symbol='TEST',projection_kind='per_leg',change=change,plan_hash=digest(change),certificate_hash=digest(cert),certificate=cert)
 def batch(i,changes=[]):
     return dict(request_id='b'+str(i),known_frontier_cut='frontier'+str(i),bar=dict(index=i,open=100,low=90,high=110,close=105),capacity=dict(kind='none'),close_changes=changes,scenario_busts=[])
 def run(name):
@@ -118,9 +129,9 @@ def run(name):
     CLOCK['bar']=0; sockets=Path(tempfile.gettempdir())/('i1381-'+str(os.getpid())); sockets.mkdir()
     e=Authority(sockets/'e','E'); s=Authority(sockets/'s','S'); xp=sockets/'x'
     # S's long schema_revision keeps every S request larger than the matching E reply (oversized-frame case below).
-    sim=dict(model=model(),session_id='session',session_generation='g1',x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1',schema_revision='e-authority-fixture/1',reply_namespace='e/replies',producer_id='E:session'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1',schema_revision='s-authority-fixture/1#'+'s'*512,reply_namespace='s/replies',producer_id='S:session'),conditions=CONDITIONS,timeout_ms=500,max_frame_bytes=262144)
-    SIM.clear(); SIM.update(sim)
-    profile=dict(profile_revision='x-execution-profile/1',mode='simulation',credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=sim)
+    sim=dict(model=model(),session_id='session',session_generation=GENERATION,x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1',schema_revision='e-authority-fixture/1',reply_namespace='e/replies',producer_id='E:session'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1',schema_revision='s-authority-fixture/1#'+'s'*512,reply_namespace='s/replies',producer_id='S:session'),conditions=CONDITIONS,timeout_ms=500,max_frame_bytes=262144)
+    SIM.clear(); SIM.update(sim); FIRST_QUANTITY.clear()
+    profile=dict(profile_revision='x-execution-profile/2',mode='simulation',credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=sim)
     pp=directory/'profile.json'; pp.write_text(canonical(profile)); db=directory/'x.sqlite'
     log=open(directory/'x.log','ab')
     fixture=len(sys.argv)>3 and sys.argv[3]=='runtime-fixture'
@@ -187,8 +198,54 @@ def run(name):
         with sqlite3.connect(db) as c:
             assert c.execute("select value from x_meta where key='writer_epoch'").fetchone()==('1',)
             assert json.loads(c.execute("select v from x_sim_meta where k='authority_profile'").fetchone()[0])==sim
+        # Even an initialized /1 database with no commands is not a /2 database.
+        with sqlite3.connect(db) as c:
+            assert c.execute('select count(*) from x_exact_commands').fetchone()==(0,)
+            c.execute("update x_meta set value='x-execution-profile/1' where key='profile_revision'")
+            c.execute("delete from x_sim_meta where k='exact_profile_revision'")
+            old='\n'.join(c.iterdump())
+        for rev in ('x-execution-profile/1','x-execution-profile/2'):
+            pp.write_text(canonical({**profile,'profile_revision':rev}))
+            refused=subprocess.run(argv(),env=env(),capture_output=True,timeout=5)
+            assert refused.returncode and b'VersionUnsupported' in refused.stderr
+            with sqlite3.connect(db) as c: assert old=='\n'.join(c.iterdump())
+        # Use a fresh file; the old database is never migrated.
+        db=directory/'fresh-v2.sqlite'; main_db=db
     p=start()
     try:
+        if REPAIR:
+            from simulation_capture_repair import exercise
+            submit = dict(kind='submit',order=order('a',quantity=3))
+            assert request(xp,'AcceptExact',command(submit))['state']=='Accepted'
+            assert request(xp,'AdvanceBar',batch(0,[submit]))['originals']==[]
+            alternate = directory / 'alternate-frontier.sqlite'
+            with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True) as src, sqlite3.connect(alternate) as dst:
+                src.backup(dst)
+            # Keep capacity=none so the frontier changes the original documents
+            # without becoming part of a newly formed capacity epoch in State.
+            b1=batch(1)
+            r1=request(xp,'AdvanceBar',b1)
+            assert len(r1['originals'])==2
+            assert request(xp,'AdvanceBar',batch(2))['bar_index']==2
+            assert request(xp,'QueryBatch','b1')==r1
+
+            # Close/reopen the same X authority on an independent snapshot cut
+            # at b0. Only the b1 input frontier differs; real X writes both receipts.
+            p.terminate(); p.wait(5); xp.unlink()
+            db=alternate; p=start()
+            other=request(xp,'AdvanceBar',{**b1,'known_frontier_cut':'different-frontier1'})
+            assert request(xp,'QueryBatch','b1')==other
+            assert r1['state_content_hash']==other['state_content_hash'] and r1!=other
+            p.terminate(); p.wait(5); xp.unlink()
+            db=main_db; p=start()
+            assert request(xp,'QueryBatch','b1')==r1
+
+            before = (len(e.calls), len(s.calls))
+            exercise(Path(sys.argv[4]).resolve(),directory,sockets/'real-e',db,sim,r1,
+                     alternate,other,canonical,digest)
+            assert (len(e.calls), len(s.calls)) == before
+            return
+
         a=dict(kind='submit',order=order('a')); ca=command(a)
         # The production open path holds the S-authorize-once state: WAL and synchronous=FULL, as E's store.
         with sqlite3.connect(db) as c: assert c.execute('PRAGMA journal_mode').fetchone()==('wal',)
@@ -211,7 +268,7 @@ def run(name):
         assert request(xp,'AcceptExact',unknown)['kind']=='Error'
         assert request(xp,'AcceptExact',ca)['state']=='Accepted'
         assert len(s.calls)==before, 'Accept must never ask S/call adapter'
-        conflicting=copy.deepcopy(ca); conflicting['x_epoch']=2
+        conflicting=copy.deepcopy(ca); conflicting['x_epoch']='2'
         assert request(xp,'AcceptExact',conflicting)['kind']=='Error'
         assert request(xp,'AcceptExact',ca)['state']=='Accepted'
         # Invalid input cannot consume S eligibility or poison Accepted with MayHaveCalled.
@@ -246,7 +303,7 @@ def run(name):
         assert request(xp,'AcceptExact',big)['state']=='Accepted'
         assert len(canonical(x_envelope('s',dict(s_payload,command=big,command_hash=digest(big),command_id='big-x',release_receipt_id='Ex'))))+1>limit
         before=len(s.calls)
-        oversized=request(xp,'AdvanceBar',batch(0,[big['change']]))
+        oversized=request(xp,'AdvanceBar',batch(0,[dict(kind='submit',order=order('big-x'))]))
         assert oversized['kind']=='Error' and '帧界' in canonical(oversized),oversized
         assert request(xp,'QueryCommand','big-x')['state']=='Accepted'
         assert len(s.calls)==before, 'oversized frame reached S'
@@ -359,8 +416,9 @@ def run(name):
             clocks=c.execute('select accept_clock,release_evidence from x_exact_commands').fetchall()
             for clock,release in clocks:
                 clock=json.loads(clock); release=json.loads(release)
-                assert clock['received_ns']<=clock['first_known_ns']<=clock['commit_ns']
-                assert clock['first_known_ns']>=release['commit_ns']
+                assert all(type(t) is str for t in (*clock.values(), release['commit_ns']))
+                assert int(clock['received_ns'])<=int(clock['first_known_ns'])<=int(clock['commit_ns'])
+                assert int(clock['first_known_ns'])>=int(release['commit_ns'])
         (directory/'tables.sql').write_text(tables)
         p.terminate(); p.wait(5); xp.unlink(missing_ok=True)
         # Cold recovery refuses missing authority/original evidence; exact restoration resumes.
@@ -418,7 +476,7 @@ def run(name):
         assert request(xp,'QueryBatch','b10')==bust_batches[0] and request(xp,'QueryBatch','b11')==bust_batches[1]
         p.terminate(); p.wait(5); xp.unlink(missing_ok=True)
         # Frozen namespace cannot be re-opened as venue/dry-run profile.
-        bad=copy.deepcopy(profile); bad.pop('history_simulation'); bad['mode']='dry-run'; pp.write_text(canonical(bad))
+        bad=copy.deepcopy(profile); bad.pop('history_simulation'); bad.update(mode='dry-run',profile_revision='x-execution-profile/1'); pp.write_text(canonical(bad))
         blocked=subprocess.run(argv(),env=env(),capture_output=True,timeout=5)
         assert blocked.returncode!=0 and (fixture or b'IdentityConflict' in blocked.stderr)
         pp.write_text(canonical(profile))
@@ -438,9 +496,9 @@ def run(name):
         # Recovery uses the same clock predicate and refuses a corrupted earlier-than-release record.
         with sqlite3.connect(db) as c:
             clock,release=c.execute('select accept_clock,release_evidence from x_exact_commands where id=?',('r',)).fetchone()
-            clock=json.loads(clock); early=json.loads(release)['commit_ns']-1
+            clock=json.loads(clock); early=int(json.loads(release)['commit_ns'])-1
             assert early>=0
-            clock.update(received_ns=early,first_known_ns=early,commit_ns=early)
+            clock.update(received_ns=str(early),first_known_ns=str(early),commit_ns=str(early))
             c.execute('update x_exact_commands set accept_clock=? where id=?',(canonical(clock),'r'))
         blocked=subprocess.run(argv(),env=env(),capture_output=True,timeout=5)
         assert blocked.returncode!=0 and b'InvalidDomain' in blocked.stderr
@@ -451,6 +509,12 @@ def run(name):
         log.close(); e.sock.close(); s.sock.close()
         for file in sockets.iterdir(): file.unlink()
         sockets.rmdir()
-check_listening_predicate()
-a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
-print('PASS two fresh processes: byte-identical X tables')
+if len(sys.argv) == 5 and sys.argv[3] == "archive-repair":
+    from simulation_capture_archive import archived_capture
+    archived_capture(BIN, Path(sys.argv[4]).resolve(), ROOT, canonical, digest)
+elif REPAIR:
+    run('capture-repair')
+else:
+    check_listening_predicate()
+    a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
+    print('PASS two fresh processes: byte-identical X tables')

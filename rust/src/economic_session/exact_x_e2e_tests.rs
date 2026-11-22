@@ -1,7 +1,4 @@
-//! #1407 C2 第 1、2 项的集成锁：E 经正式入口放行的命令，经共同信封查询真 E，被 X 的 AcceptExact 接纳，
-//! 随后受控 S 条件执行、X 占有调用。E 与 X 都是生产 serve 循环；S 仍是受控夹具（真 S producer 归 TB04-D/E）。
-//! 本批 E 仍是 TestOnly 时钟（alpha 放行读数 162）；E 改读 logical-bar/1 归 C2 第 4 项。在那之前，X 先走 162 根空 bar
-//! 让接纳前沿追上放行读数，这里只锁条件清单与信封两处断点，不作时钟域证据。
+//! 真 E socket 在逻辑 bar 2 放行，X 在前沿 1 拒绝、前沿 2 接纳；受控 S 只在执行时签发。
 use super::*;
 use crate::history_simulation::runtime::Profile as XProfile;
 use rusqlite::types::ValueRef;
@@ -183,7 +180,7 @@ fn controlled_s(socket: PathBuf, bar: i64, calls: Arc<AtomicUsize>) {
                     }
                     r["state"] = json!("ExecuteCommitted");
                     r["receipt_id"] = q["command"]["change"]["order"]["eligibility_ref"].clone();
-                    r["commit_ns"] = json!(bar);
+                    r["commit_ns"] = json!(bar.to_string());
                     records.insert(id, r.clone());
                     r
                 }
@@ -223,62 +220,107 @@ fn bar(index: i64, changes: Value) -> Value {
         "close_changes":changes,"scenario_busts":[]})
 }
 
-const RELEASE_NS: i64 = 162;
-
+fn logical_bar_fixture() -> Fixture {
+    Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::LogicalBar),
+    )
+}
 #[test]
 fn e_formal_release_is_accepted_by_x_over_the_common_envelope() {
-    let mut f = fixture(None);
+    let mut f = logical_bar_fixture();
     committed(&mut f);
     dispatch(&mut f, "alpha");
-    let released = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
+    let e_config = Config::load(&f.dir.join("manifest.json"), &f.configs[0].db, None).unwrap();
+    std::thread::spawn(move || service::serve(&e_config, 1, 1).unwrap());
+    wait_for(&f.dir.join("e.sock"));
+    let released = exchange(
+        &f.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&f, "alpha")),
+    )["payload"]
+        .clone();
     assert_eq!(released["record"]["state"], "ReleasedExact", "{released}");
     assert_eq!(
-        released["record"]["release_commit_ns"],
-        RELEASE_NS.to_string()
+        released["record"]["release_commit_ns"], "2",
+        "E 放行读数是 bar 2"
     );
     let command = released["record"]["command"].clone();
 
-    let profile: XProfile = serde_json::from_value(x_profile(&f)).unwrap();
-    profile.validate().unwrap();
-    let parsed: crate::history_simulation::runtime::ExactCommand =
-        serde_json::from_value(command.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&parsed).unwrap(), command);
-
-    let e_config = f.configs[0].clone();
-    std::thread::spawn(move || service::serve(&e_config, 1, 1).unwrap());
-    wait_for(&f.dir.join("e.sock"));
     let s_calls = Arc::new(AtomicUsize::new(0));
-    controlled_s(f.dir.join("s.sock"), RELEASE_NS, s_calls.clone());
+    controlled_s(f.dir.join("s.sock"), 2, s_calls.clone());
+    let profile: XProfile = serde_json::from_value(x_profile(&f)).unwrap();
     let x_db = f.dir.join("x.sqlite");
-    let db = x_db.clone();
     let serving = profile.clone();
+    let db = x_db.clone();
     std::thread::spawn(move || {
         let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
         crate::history_simulation::runtime::serve(&mut c, &serving, 1).unwrap()
     });
     let xs = f.dir.join("x.sock");
     wait_for(&xs);
-    for index in 0..RELEASE_NS {
-        assert_eq!(
-            x(&xs, "AdvanceBar", bar(index, json!([])))["kind"],
-            "SimulationBatch"
-        );
-    }
+
+    // #1621 负例：X 推进 bar 0 后前沿为 1，E 放行读数 2。X 持久写前拒绝，E 不变，S 未被调用。
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(0, json!([])))["kind"],
+        "SimulationBatch"
+    );
     let before = economic_tables(&f);
+    let x_before = tables(&x_db);
+    let early = x(&xs, "AcceptExact", command.clone());
+    assert_eq!(early["kind"], "Error", "{early}");
+    assert!(
+        early["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("InvalidDomain：X 接纳时钟早于 E 持久交付"),
+        "{early}"
+    );
+    assert_eq!(
+        x(&xs, "QueryCommand", json!("cmd-alpha"))["state"],
+        "NoRecord"
+    );
+    assert_eq!(s_calls.load(Ordering::SeqCst), 0, "早 1 个读数不得调用 S");
+    assert_eq!(tables(&x_db), x_before, "拒绝不落任何 X 业务行");
+    assert_eq!(economic_tables(&f), before, "E/B 全表不变");
+    assert_eq!(query_command(&mut f, "alpha")["state"], "ReleasedExact");
+
+    // 正例：推进 bar 1 后前沿为 2 = E 放行读数，合法重试被接纳；接纳本身仍不调用 S。
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(1, json!([])))["kind"],
+        "SimulationBatch"
+    );
     let accepted = x(&xs, "AcceptExact", command.clone());
     assert_eq!(accepted["state"], "Accepted", "{accepted}");
-    assert_eq!(accepted["causal_refs"][0]["release_commit_ns"], RELEASE_NS);
-    assert_eq!(s_calls.load(Ordering::SeqCst), 0, "接纳不产生调用权");
-    assert_eq!(economic_tables(&f), before, "QueryReleasedExact 只读");
-    let claimed = x(
-        &xs,
-        "AdvanceBar",
-        bar(RELEASE_NS, json!([command["change"]])),
+    assert_eq!(
+        accepted["x_accept"],
+        json!({"received_ns":"2","first_known_ns":"2","commit_ns":"2"})
     );
+    assert_eq!(accepted["causal_refs"][0]["release_commit_ns"], "2");
+    assert_eq!(s_calls.load(Ordering::SeqCst), 0, "接纳不产生调用权");
+
+    let parsed: crate::history_simulation::runtime::ExactCommand =
+        serde_json::from_value(command.clone()).unwrap();
+    let claimed = x(&xs, "AdvanceBar", bar(2, json!([parsed.change])));
     assert_eq!(claimed["kind"], "SimulationBatch", "{claimed}");
     assert_eq!(s_calls.load(Ordering::SeqCst), 1, "S 恰一次");
     assert_eq!(
         x(&xs, "QueryCommand", json!("cmd-alpha"))["state"],
         "Observed"
     );
+    let filled = x(&xs, "AdvanceBar", bar(3, json!([])));
+    let fill = &filled["originals"][0]["event"]["fill"];
+    assert_eq!(
+        (&fill["family_id"], &fill["quantity"]),
+        (&json!("family-alpha"), &json!(2)),
+        "{filled}"
+    );
+    assert_eq!(query_command(&mut f, "alpha")["state"], "ReleasedExact");
 }

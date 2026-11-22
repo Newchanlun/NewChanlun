@@ -10,6 +10,7 @@
 //!   x_execution_session serve --db FILE --profile FILE --writer-epoch N
 //!   x_execution_session query --db FILE
 //!   x_execution_session submit|cancel --db FILE      （恒 UnsupportedCapability）
+use newchan_rust::history_simulation::EXACT_PROFILE_REVISION;
 use newchan_rust::session_protocol::positive;
 use newchan_rust::session_transport::process_lock;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -23,7 +24,7 @@ const MODES: [&str; 4] = ["simulation", "dry-run", "experiment", "production"];
 const SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
-/// 执行 profile（`x-execution-profile/1`）。凭据只经 `credential_scope.env` 指名的环境变量
+/// 历史模拟采用 /2，其他执行 profile 保留 /1。凭据只经 `credential_scope.env` 指名的环境变量
 /// 进入本进程；值永不落库、不打印。
 struct Profile {
     revision: String,
@@ -44,9 +45,14 @@ impl Profile {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        if revision != PROFILE_REVISION {
+        let expected = if v["history_simulation"].is_null() {
+            PROFILE_REVISION
+        } else {
+            EXACT_PROFILE_REVISION
+        };
+        if revision != expected {
             return Err(format!(
-                "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {PROFILE_REVISION}"
+                "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {expected}"
             ));
         }
         let mode = v["mode"]
@@ -120,6 +126,11 @@ fn persist(conn: &mut Connection, profile: &Profile, epoch: i64) -> Result<Value
     let old_mode = meta_get(&tx, "profile_mode")?;
     if old_mode.is_some() && (old_simulation.as_deref() == Some("true")) != simulation {
         return Err("IdentityConflict：模拟原件执行域不可与其他 profile 共用 X 库".into());
+    }
+    if old_simulation.as_deref() == Some("true")
+        && meta_get(&tx, "profile_revision")?.as_deref() != Some(EXACT_PROFILE_REVISION)
+    {
+        return Err("VersionUnsupported：旧历史模拟库须从空库重放".into());
     }
     if let Some(stored) = meta_get(&tx, "writer_epoch")? {
         let stored: i64 = stored.parse().map_err(err)?;

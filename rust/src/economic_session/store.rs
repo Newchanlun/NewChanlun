@@ -25,6 +25,15 @@ pub(crate) const SCHEMA: &str = SCHEMA_V1;
 /// manifest 顶层的版本选择子：缺省 `/1`（旧 manifest 逐字仍可读），显式只认两个已知值。
 /// 外层 `economic-manifest/1` 不因此改变。
 const REVISION_FIELD: &str = "protocol_revision";
+/// ADR 0056:52 simulation 证据类的时钟 kind；E 只在 `tb03b-finance/5` 下认（#1407 C2）。
+pub(super) const LOGICAL_BAR: &str = "logical-bar/1";
+/// 财务 TestOnly 输入域可配的组件时钟：TestOnly，或 `/5` 下的 logical-bar/1。二者都不是 System，
+/// 所以 TestOnly 财务输入照旧不进生产时钟。
+pub(super) fn component_clock(manifest: &Value) -> bool {
+    manifest["clock"]["kind"] == "TestOnly"
+        || (manifest["clock"]["kind"] == LOGICAL_BAR
+            && super::finance::exact_release_selected(manifest))
+}
 /// `economic-session/1`、`/2` 的封闭已知 op 集合（两个域版本同一份，§5.8 逐字冻结）。
 /// 并列子合同的 op（`sr-expansion/1`、`domain-event-withdrawal/1`）只在该子合同被选择时另行算已知。
 pub(crate) const BASE_OPS: [&str; 22] = [
@@ -262,6 +271,10 @@ impl Config {
             "TestOnly" => {
                 nonnegative(required(&manifest["clock"]["plan"], "init_ns")?, "init_ns")?;
             }
+            // #1407 C2：只在 `/5` 生效，旧合同的时钟闭集不变。
+            LOGICAL_BAR if exact_release => {
+                nonnegative(required(&manifest["clock"]["bars"], "init")?, "init bar")?;
+            }
             _ => return Err("InvalidDomain：必须显式指定时钟adapter".into()),
         }
         let configured_faults = fault_plans(&manifest["test_only_fault"]);
@@ -321,6 +334,9 @@ impl Config {
         phase: &str,
         recovery_index: usize,
     ) -> Result<String, String> {
+        if self.manifest["clock"]["kind"] == LOGICAL_BAR {
+            return self.logical_bar(msg, phase, recovery_index);
+        }
         if self.manifest["clock"]["kind"] == "System" {
             let n = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -350,6 +366,34 @@ impl Config {
             format!("MissingDependency：TestOnly时钟缺{phase}/{msg:?}/{recovery_index}")
         })?;
         nonnegative(s, phase)?;
+        Ok(s.to_owned())
+    }
+    /// ADR 0052:296、ADR 0056:52：simulation 下 E 不读系统时钟。读数是调度把该消息交给 E 时的
+    /// bar_index，received/first_known/commit 三相同值，与 X 接纳时钟（已提交前沿 + 1）同一单位。
+    /// 调度表随 manifest 冻结，进 manifest_hash。
+    fn logical_bar(
+        &self,
+        msg: Option<&str>,
+        phase: &str,
+        recovery_index: usize,
+    ) -> Result<String, String> {
+        let bars = &self.manifest["clock"]["bars"];
+        let v = match msg {
+            Some(m) => {
+                let v = &bars["messages"][m];
+                if v.is_array() {
+                    &v[recovery_index]
+                } else {
+                    v
+                }
+            }
+            None if phase == "recover_ns" => &bars["recover"][recovery_index],
+            None => &bars["init"],
+        };
+        let s = v.as_str().ok_or_else(|| {
+            format!("MissingDependency：logical-bar/1 调度缺{phase}/{msg:?}/{recovery_index}")
+        })?;
+        nonnegative(s, "bar_index")?;
         Ok(s.to_owned())
     }
     pub fn authorized(&self, e: &Value) -> Result<(), String> {
