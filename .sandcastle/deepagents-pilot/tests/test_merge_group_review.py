@@ -2146,8 +2146,9 @@ def test_unicode_line_separator_block_aligned_with_external_review(
         head_sha=pr1_head,
     )
     events_path = folder / DEFAULT_EXPECTED_MODELS[0] / "events.jsonl"
+    # 使用标准 JSON 转义写入 events.jsonl（ensure_ascii=True），使 JSONL 保持单行合法且解码后 text 含原始 Unicode 行分隔符
     events_path.write_text(
-        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": msg}}, ensure_ascii=False)
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": msg}}, ensure_ascii=True)
         + "\n",
         encoding="utf-8",
     )
@@ -2907,3 +2908,215 @@ def test_r2_corrupted_or_truncated_events_attributed_to_evidence_corrupted_not_b
     assert dec.verdict == "ERROR"
     assert dec.status_state == "error"
     assert dec.reason_code == "member_evidence_corrupted"
+
+
+# ---------------------------------------------------------------------------
+# 7. Codex R3 全量 3 项 Important 离线回归测试（含 .gitattributes 正向回归）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\u0085"])
+def test_r3_unicode_line_separator_in_events_jsonl_aligned_with_external_review(
+    mq_fixture: MergeQueueFixture,
+    sep: str,
+) -> None:
+    """Important 1（unicode_log）：events.jsonl 含裸 Unicode 行分隔符时按 str.splitlines() 切行，与 external_review 逐案一致拒绝 PASS。"""
+    content = f"first normal changed line\nsecond{sep}third\n"
+    head = mq_fixture.create_branch_commit("pr-r3-uni", from_ref=mq_fixture.base_sha, files={"text.dat": content})
+    folder, _, _ = mq_fixture.write_direct_pass_run(pr_number=1, base_sha=mq_fixture.base_sha, head_sha=head)
+    worker = folder / DEFAULT_EXPECTED_MODELS[0]
+
+    target_json = json.loads((folder / "target.json").read_text(encoding="utf-8"))
+    ext_outcome = external_review.validate_review(
+        external_review.ReviewTarget(**target_json),
+        json.loads((worker / "launch.json").read_text(encoding="utf-8")),
+        json.loads((worker / "receipt.json").read_text(encoding="utf-8")),
+        worker,
+        mq_fixture.repo,
+    )
+    assert ext_outcome.verdict == "FAILED"
+
+    target = mq_fixture.make_target(base_sha=mq_fixture.base_sha, head_sha=head, members=[MergeGroupMember(1, head)])
+    dec = evaluate_merge_group(
+        target,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert dec.verdict == "ERROR"
+    assert dec.status_state == "error"
+    assert dec.reason_code == "member_evidence_corrupted"
+
+
+@pytest.mark.parametrize(
+    "bad_event",
+    [
+        {"type": "item.completed", "item": None},
+        {"type": "item.completed"},
+        {"type": "item.completed", "item": "not-a-dict"},
+        {"type": "item.completed", "item": 123},
+        {"type": "item.completed", "item": []},
+        {"type": "error", "message": None},
+        {"type": "error", "message": 404},
+    ],
+)
+def test_r3_malformed_item_completed_and_error_message_fail_closed(
+    mq_fixture: MergeQueueFixture,
+    bad_event: dict[str, Any],
+) -> None:
+    """Important 2（bad_item）：损坏的 item.completed（item 非 dict）与非法 error.message 在直审与历史 BLOCK 扫描均 fail-closed 报 member_evidence_corrupted。"""
+    head_v1 = mq_fixture.create_branch_commit("pr-r3-bad-v1", from_ref=mq_fixture.base_sha, files={"a.py": "x = 1\n"})
+    folder, orig_rid, orig_pid = mq_fixture.write_direct_pass_run(
+        pr_number=1, base_sha=mq_fixture.base_sha, head_sha=head_v1, run_id="r3-orig-bad"
+    )
+    worker = folder / DEFAULT_EXPECTED_MODELS[0]
+    events_path = worker / "events.jsonl"
+    with events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(bad_event, ensure_ascii=False) + "\n")
+    os.chmod(events_path, 0o600)
+
+    # 1. 与 external_review.validate_review 对拍：含显式非 dict item 或非法 error.message 时绝不产出 PASS
+    if "item" in bad_event or bad_event.get("type") == "error":
+        target_json = json.loads((folder / "target.json").read_text(encoding="utf-8"))
+        try:
+            ext_verdict = external_review.validate_review(
+                external_review.ReviewTarget(**target_json),
+                json.loads((worker / "launch.json").read_text(encoding="utf-8")),
+                json.loads((worker / "receipt.json").read_text(encoding="utf-8")),
+                worker,
+                mq_fixture.repo,
+            ).verdict
+        except AttributeError:
+            ext_verdict = "AttributeError"
+        assert ext_verdict != "PASS"
+
+    # 2. 直审与历史 BLOCK 扫描（_run_has_block）均直接报错为 member_evidence_corrupted
+    record = mgr._load_run_record(
+        mq_fixture.state_root,
+        folder,
+        expected_models=DEFAULT_EXPECTED_MODELS,
+        check_ownership=True,
+    )
+    with pytest.raises(mgr._EvidenceError):
+        mgr._run_has_block(record)
+
+    t_direct = mq_fixture.make_target(
+        base_sha=mq_fixture.base_sha, head_sha=head_v1, members=[MergeGroupMember(1, head_v1)]
+    )
+    dec_direct = evaluate_merge_group(
+        t_direct,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert dec_direct.verdict == "ERROR"
+    assert dec_direct.status_state == "error"
+    assert dec_direct.reason_code == "member_evidence_corrupted"
+
+    # 3. 作为 1 跳 reused_from 原件同样归因 member_evidence_corrupted
+    base1 = mq_fixture.create_branch_commit("main", from_ref=mq_fixture.base_sha, files={"other.txt": "o\n"})
+    head_v2 = mq_fixture.create_branch_commit("pr-r3-bad-v2", from_ref=base1, files={"a.py": "x = 1\n"})
+    mq_fixture.write_reused_pass_run(
+        pr_number=1,
+        base_sha=base1,
+        head_sha=head_v2,
+        origin_run_id=orig_rid,
+        origin_patch_id=orig_pid,
+        run_id="r3-reuse-bad",
+    )
+    t_reuse = mq_fixture.make_target(base_sha=base1, head_sha=head_v2, members=[MergeGroupMember(1, head_v2)])
+    dec_reuse = evaluate_merge_group(
+        t_reuse,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert dec_reuse.verdict == "ERROR"
+    assert dec_reuse.status_state == "error"
+    assert dec_reuse.reason_code == "member_evidence_corrupted"
+
+
+def test_r3_git_signal_exit_mapped_to_replay_env_error(mq_fixture: MergeQueueFixture) -> None:
+    """Important 3（signal）：_frozen_patch 与 _run_git 被信号中止（负 returncode 如 -15）全路径归因 replay_env_error。"""
+    head = mq_fixture.create_branch_commit("pr-r3-sig", from_ref=mq_fixture.base_sha, files={"sig.txt": "1\n"})
+    mq_fixture.write_direct_pass_run(pr_number=1, base_sha=mq_fixture.base_sha, head_sha=head)
+    member = MergeGroupMember(1, head)
+    target = mq_fixture.make_target(base_sha=mq_fixture.base_sha, head_sha=head, members=[member])
+    kw = dict(source_repo=mq_fixture.repo, state_root=mq_fixture.state_root, policy=mq_fixture.policy())
+
+    # 1. _frozen_patch 抛出负返回码 CalledProcessError(-15) / OSError / TimeoutExpired -> replay_env_error
+    for exc in (
+        subprocess.CalledProcessError(-15, "git"),
+        OSError(errno.EIO, "git io error"),
+        subprocess.TimeoutExpired(["git"], 5),
+    ):
+        with patch.object(mgr, "_frozen_patch", side_effect=exc):
+            dec = evaluate_merge_group(target, **kw)
+            assert dec.verdict == "ERROR"
+            assert dec.status_state == "error"
+            assert dec.reason_code == "replay_env_error"
+
+            mv = verify_member_pass(member, repository_id=REPO_ID, **kw)
+            assert mv.passed is False
+            assert mv.reason_code == "replay_env_error"
+
+    # 2. _frozen_patch 抛出正退出码 CalledProcessError(128) 仍归因 member_patch_id_mismatch
+    with patch.object(mgr, "_frozen_patch", side_effect=subprocess.CalledProcessError(128, "git")):
+        dec_pos = evaluate_merge_group(target, **kw)
+        assert dec_pos.verdict == "ERROR"
+        assert dec_pos.reason_code == "member_patch_id_mismatch"
+
+    # 3. _run_git 内部 subprocess.run 返回负退出码 -15（跨 cat-file / merge-base / merge-tree / diff-tree 全路径）-> replay_env_error
+    real_subprocess_run = mgr.subprocess.run
+    for target_cmd in ("cat-file", "merge-base", "merge-tree", "diff-tree"):
+        def _kill_on_cmd(
+            cmd: list[str],
+            *args: Any,
+            _target_cmd: str = target_cmd,
+            **kwargs: Any,
+        ) -> subprocess.CompletedProcess[bytes]:
+            if _target_cmd in cmd:
+                return subprocess.CompletedProcess(cmd, -15, b"", b"")
+            return real_subprocess_run(cmd, *args, **kwargs)
+
+        with patch.object(mgr.subprocess, "run", side_effect=_kill_on_cmd):
+            dec_sig = evaluate_merge_group(target, **kw)
+            assert dec_sig.verdict == "ERROR"
+            assert dec_sig.status_state == "error"
+            assert dec_sig.reason_code == "replay_env_error", f"cmd={target_cmd} got {dec_sig.reason_code}"
+
+            if target_cmd in ("cat-file", "merge-tree", "diff-tree"):
+                tr_sig = verify_merge_group_tree(target, source_repo=mq_fixture.repo)
+                assert tr_sig.matched is False
+                assert tr_sig.reason_code == "replay_env_error", f"tree cmd={target_cmd} got {tr_sig.reason_code}"
+
+
+def test_r3_gitattributes_nodiff_positive_regression(mq_fixture: MergeQueueFixture) -> None:
+    """R3 正向回归：仓库含 .gitattributes (*.dat -diff) 时 external_review 与 merge_group 均正常 PASS。"""
+    base = mq_fixture.create_branch_commit(
+        "rules-attr", from_ref=mq_fixture.base_sha, files={".gitattributes": "*.dat -diff\n"}
+    )
+    head = mq_fixture.create_branch_commit("doc-attr", from_ref=base, files={"text.dat": "first normal changed line\n"})
+    folder, _, _ = mq_fixture.write_direct_pass_run(pr_number=1, base_sha=base, head_sha=head)
+    worker = folder / DEFAULT_EXPECTED_MODELS[0]
+
+    target_json = json.loads((folder / "target.json").read_text(encoding="utf-8"))
+    ext_outcome = external_review.validate_review(
+        external_review.ReviewTarget(**target_json),
+        json.loads((worker / "launch.json").read_text(encoding="utf-8")),
+        json.loads((worker / "receipt.json").read_text(encoding="utf-8")),
+        worker,
+        mq_fixture.repo,
+    )
+    assert ext_outcome.verdict == "PASS"
+
+    target = mq_fixture.make_target(base_sha=base, head_sha=head, members=[MergeGroupMember(1, head)])
+    dec = evaluate_merge_group(
+        target,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert dec.verdict == "PASS"
+    assert dec.status_state == "success"
+    assert dec.reason_code == "merge_group_pass_reused"

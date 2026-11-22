@@ -125,7 +125,11 @@ class _EvidenceError(Exception):
 
 
 class _GitQueryError(Exception):
-    """内部异常：隔离 bare 仓库初始化或 Git 查询失败。"""
+    """内部异常：隔离 bare 仓库初始化、Git 信号中止或环境查询失败。"""
+
+
+class _OverlapQueryError(Exception):
+    """内部异常：合并后重叠文件 diff-tree 非零退出（非信号中止）。"""
 
 
 def _split_lines_strict(text: str) -> list[str]:
@@ -701,7 +705,7 @@ def _run_git(
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     run_env = dict(env) if env is not None else _git_env()
-    return subprocess.run(
+    completed = subprocess.run(
         [
             "git",
             "-c",
@@ -719,6 +723,9 @@ def _run_git(
         capture_output=True,
         check=False,
     )
+    if completed.returncode < 0:
+        raise _GitQueryError(f"git 进程被信号中止（returncode={completed.returncode}）")
+    return completed
 
 
 def _inspect_source_repo(source_repo: Path) -> tuple[Path, str]:
@@ -848,7 +855,7 @@ def _collect_touched_paths(
     )
     if diff_proc.returncode != 0:
         stderr = diff_proc.stderr.decode("utf-8", errors="replace").strip()
-        raise _GitQueryError(
+        raise _OverlapQueryError(
             f"重叠文件查询 diff-tree 失败（exit={diff_proc.returncode}）：{stderr}"
         )
     paths: set[str] = set()
@@ -1036,7 +1043,7 @@ def _verify_merge_group_tree_in_repo(
                 step_tree_sha,
                 env=replay_env,
             )
-        except _GitQueryError as exc:
+        except _OverlapQueryError as exc:
             return TreeVerificationResult(
                 matched=False,
                 reason_code="overlap_query_failed",
@@ -1325,9 +1332,10 @@ def _safe_read_text_lines(
     check_ownership: bool,
     max_bytes: int | None = None,
 ) -> list[str]:
+    """专用于读取 events.jsonl：保留防软链与字节上限，按 str.splitlines() 分行以对齐 external_review.py:386,681。"""
     limit = MAX_LOG_EVIDENCE_BYTES if max_bytes is None else max_bytes
     text = _safe_read_text(root, path, check_ownership=check_ownership, max_bytes=limit)
-    return _split_lines_strict(text)
+    return text.splitlines()
 
 
 def _safe_read_first_line(
@@ -1588,6 +1596,48 @@ def _run_is_settled(run: _RunRecord) -> bool:
     return not any(worker.launch is not None and worker.receipt is None for worker in run.workers.values())
 
 
+def _parse_and_validate_events(
+    events_lines: Sequence[str],
+    *,
+    run_id: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    """统一解析并校验 events.jsonl 事件结构（直审事件核验与历史 BLOCK 扫描共用）。"""
+    parsed_events: list[dict[str, Any]] = []
+    for raw_line in events_lines:
+        if not raw_line.strip():
+            continue
+        try:
+            event = json.loads(raw_line)
+        except (ValueError, TypeError, RecursionError, MemoryError) as exc:
+            raise _EvidenceError(
+                f"run {run_id} 模型 {model} events.jsonl JSON 损坏或截断（{type(exc).__name__}）"
+            ) from None
+        if not isinstance(event, dict):
+            raise _EvidenceError(
+                f"run {run_id} 模型 {model} events.jsonl 事件不是 JSON 对象"
+            )
+        kind = event.get("type")
+        if kind == "item.completed":
+            item = event.get("item")
+            if not isinstance(item, dict):
+                raise _EvidenceError(
+                    f"run {run_id} 模型 {model} events.jsonl 中 item.completed 缺少合法 item 对象"
+                )
+            if item.get("type") == "agent_message" and not isinstance(item.get("text"), str):
+                raise _EvidenceError(
+                    f"run {run_id} 模型 {model} events.jsonl agent_message.text 不是字符串"
+                )
+        elif kind == "error":
+            raw_msg = event.get("message", "")
+            if not isinstance(raw_msg, str):
+                raise _EvidenceError(
+                    f"run {run_id} 模型 {model} events.jsonl 中 error 事件 message 不是字符串"
+                )
+        parsed_events.append(event)
+    return parsed_events
+
+
 def _run_has_block(run: _RunRecord) -> bool:
     if run.outcome is not None:
         if run.outcome.get("verdict") == "BLOCK":
@@ -1624,32 +1674,22 @@ def _run_has_block(run: _RunRecord) -> bool:
                     if _message_blocks(payload_json):
                         return True
         if worker.events_lines is not None:
+            parsed_events = _parse_and_validate_events(
+                worker.events_lines,
+                run_id=run.run_id,
+                model=worker.model,
+            )
             final_text: str | None = None
-            for line in worker.events_lines:
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except (ValueError, TypeError, RecursionError, MemoryError) as exc:
-                    raise _EvidenceError(
-                        f"run {run.run_id} 模型 {worker.model} events.jsonl JSON 损坏或截断（{type(exc).__name__}）"
-                    ) from None
-                if not isinstance(event, dict):
-                    raise _EvidenceError(
-                        f"run {run.run_id} 模型 {worker.model} events.jsonl 事件不是 JSON 对象"
-                    )
-                item = event.get("item")
-                if (
-                    event.get("type") == "item.completed"
-                    and isinstance(item, dict)
-                    and item.get("type") == "agent_message"
-                ):
-                    raw_text = item.get("text")
-                    if not isinstance(raw_text, str):
-                        raise _EvidenceError(
-                            f"run {run.run_id} 模型 {worker.model} events.jsonl agent_message.text 不是字符串"
-                        )
-                    final_text = raw_text
+            for event in parsed_events:
+                if event.get("type") == "item.completed":
+                    item = event.get("item")
+                    if isinstance(item, dict) and item.get("type") == "agent_message":
+                        raw_text = item.get("text")
+                        if not isinstance(raw_text, str):
+                            raise _EvidenceError(
+                                f"run {run.run_id} 模型 {worker.model} events.jsonl agent_message.text 不是字符串"
+                            )
+                        final_text = raw_text
             if final_text is not None and _message_blocks(final_text):
                 return True
     return False
@@ -2006,17 +2046,11 @@ def _verify_direct_pass_run(
 
         if worker.events_lines is None:
             return ("member_events_invalid", f"run {run.run_id} 缺少模型 {model} 的 events.jsonl")
-        parsed_events: list[dict[str, Any]] = []
-        for raw_line in worker.events_lines:
-            if not raw_line.strip():
-                continue
-            try:
-                event = json.loads(raw_line)
-            except (ValueError, TypeError, RecursionError, MemoryError):
-                return ("member_evidence_corrupted", f"run {run.run_id} 模型 {model} events.jsonl JSON 行损坏")
-            if not isinstance(event, dict):
-                return ("member_evidence_corrupted", f"run {run.run_id} 模型 {model} events.jsonl 事件不是 JSON 对象")
-            parsed_events.append(event)
+        parsed_events = _parse_and_validate_events(
+            worker.events_lines,
+            run_id=run.run_id,
+            model=model,
+        )
 
         if frozen_candidate_patch is None:
             raw_attempt = run.target.get("attempt")
@@ -2047,7 +2081,11 @@ def _verify_direct_pass_run(
             )
             try:
                 frozen_candidate_patch = _frozen_patch(replay_repo, review_target)
-            except subprocess.CalledProcessError:
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode < 0:
+                    raise _GitQueryError(
+                        f"git 进程被信号中止（returncode={exc.returncode}）"
+                    ) from None
                 return ("member_patch_id_mismatch", f"run {run.run_id} 无法从隔离对象库提取冻结候选补丁")
 
         turn_completed = False
@@ -2059,8 +2097,12 @@ def _verify_direct_pass_run(
             if kind == "thread.started":
                 thread_ids.add(event.get("thread_id"))
             elif kind == "error":
-                raw_msg = event.get("message")
-                reconnect = _RECONNECT_ERROR_RE.fullmatch(raw_msg) if isinstance(raw_msg, str) else None
+                raw_msg = event.get("message", "")
+                if not isinstance(raw_msg, str):
+                    raise _EvidenceError(
+                        f"run {run.run_id} 模型 {model} events.jsonl 中 error 事件 message 不是字符串"
+                    )
+                reconnect = _RECONNECT_ERROR_RE.fullmatch(raw_msg)
                 if reconnect is None or int(reconnect.group(1)) > int(reconnect.group(2)):
                     return (
                         "member_events_invalid",
@@ -2077,23 +2119,30 @@ def _verify_direct_pass_run(
                 turn_completed = True
             elif kind == "item.completed":
                 item = event.get("item")
-                if isinstance(item, dict):
-                    item_type = item.get("type")
-                    if item_type == "agent_message":
-                        raw_text = item.get("text")
-                        final_text = raw_text if isinstance(raw_text, str) else None
-                    elif item_type == "command_execution":
-                        item_status = item.get("status")
-                        item_exit = item.get("exit_code")
-                        if item_status == "completed" and type(item_exit) is int and item_exit == 0:
-                            cmd_raw = item.get("command")
-                            agg_raw = item.get("aggregated_output")
-                            if _reads_candidate_patch(
-                                str(cmd_raw) if cmd_raw is not None else "",
-                                str(agg_raw) if agg_raw is not None else "",
-                                frozen_candidate_patch,
-                            ):
-                                patch_reads += 1
+                if not isinstance(item, dict):
+                    raise _EvidenceError(
+                        f"run {run.run_id} 模型 {model} events.jsonl 中 item.completed 缺少合法 item 对象"
+                    )
+                item_type = item.get("type")
+                if item_type == "agent_message":
+                    raw_text = item.get("text")
+                    if not isinstance(raw_text, str):
+                        raise _EvidenceError(
+                            f"run {run.run_id} 模型 {model} events.jsonl agent_message.text 不是字符串"
+                        )
+                    final_text = raw_text
+                elif item_type == "command_execution":
+                    item_status = item.get("status")
+                    item_exit = item.get("exit_code")
+                    if item_status == "completed" and type(item_exit) is int and item_exit == 0:
+                        cmd_raw = item.get("command")
+                        agg_raw = item.get("aggregated_output")
+                        if _reads_candidate_patch(
+                            str(cmd_raw) if cmd_raw is not None else "",
+                            str(agg_raw) if agg_raw is not None else "",
+                            frozen_candidate_patch,
+                        ):
+                            patch_reads += 1
 
         if not turn_completed:
             return ("member_events_invalid", f"run {run.run_id} 模型 {model} events.jsonl 缺少 turn.completed")
