@@ -1,5 +1,5 @@
 import { rustReplacement } from "./at18-code.ts";
-import { cargoContext, enabledRustItem } from "./at18-cargo.ts";
+import { cargoContext, cargoTarget, enabledRustItem } from "./at18-cargo.ts";
 import { at14CiSteps } from "./at18-at14-ci.ts";
 import { deliveredProducts } from "./at18-products.ts";
 import assert from "node:assert/strict";
@@ -708,6 +708,54 @@ test("R7/H3：正式 CLI 按冻结选择器核验实际执行、公开接入与 
   });
 });
 
+test("R8/H3：正式 CLI 只接受生产接入的同一承接导出", {
+  skip: !pathExistsGit, timeout: 180_000,
+}, async t => {
+  const feed = "trading_system.at18_fixture_feed";
+  const route = "def route(granularity, sources, events):\n    return events\n";
+  const label = "def format_label(label):\n    return label.strip().upper()\n";
+  const onlyLabel = `from ${feed} import format_label\ndef test_route():\n    assert format_label(' dx ') == 'DX'\n`;
+  const feedIntegration = "\nfrom .at18_fixture_feed import Feed\ndef select_feed(sources, events):\n" +
+    "    feed = Feed()\n    return feed.route('1min', sources, events)\n";
+  const feedClass = "class Feed:\n    def route(self, granularity, sources, events):\n        yield from events\n" +
+    "    def format_label(self, label):\n        return label.strip().upper()\n";
+  const wire = (from: string, body: string) =>
+    `use newchan_rust::${from};\n#[test]\nfn check_connection() { ${body} }\n`;
+  const handshake = "at18_fixture_wire::probe::handshake";
+  const invoke = 'assert!(handshake("HELLO"));';
+  const wireProbe = 'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }\n' +
+    "pub fn unrelated() -> bool { true }\n";
+  for (const [id, mutation, accepts] of [
+    ["python-broken-route-unrelated-test", { feedReplacement: route.replace("return events", "return []") + label, feedTest: onlyLabel }, false],
+    ["python-healthy-route-unrelated-test", { feedReplacement: route + label, feedTest: onlyLabel }, false],
+    ["python-same-named-local", { feedTest: `from ${feed} import route\ndef test_route():\n` +
+      "    def route(*args): return [1, 2]\n    assert route() == [1, 2]\n" }, false],
+    ["python-direct-route", { feedReplacement: route + label }, true],
+    ["python-consume-through-production", { feedReplacement: route + label,
+      feedTest: "from trading_system import select_feed\ndef test_route():\n    assert list(select_feed({}, [1, 2])) == [1, 2]\n" }, true],
+    ["python-instance-method", { feedReplacement: feedClass, feedIntegration,
+      feedTest: `from ${feed} import Feed\ndef test_route():\n    assert list(Feed().route('1min', {}, [1, 2])) == [1, 2]\n` }, true],
+    ["python-unrelated-instance-method", { feedReplacement: feedClass, feedIntegration,
+      feedTest: `from ${feed} import Feed\ndef test_route():\n    assert Feed().format_label(' dx ') == 'DX'\n` }, false],
+    ["rust-pointer-only", { wireTest: wire(handshake, "let _signature: fn(&str) -> bool = handshake;") }, false],
+    ["rust-direct", { wireTest: wire(handshake, invoke) }, true],
+    ["rust-reexport-alias", { wireModule: "mod probe; pub use probe::handshake as accept_banner;\n",
+      wireTest: wire("at18_fixture_wire::accept_banner as check", 'assert!(check("HELLO"));') }, true],
+    ["rust-call-local-binding", { wireTest: wire(handshake, 'let f = handshake; assert!(f("HELLO"));') }, true],
+    ["rust-unrelated-same-file", { wireCase: "public-entry", wireProbe,
+      wireTest: wire("at18_fixture_wire::probe::unrelated", "assert!(unrelated());") }, false],
+    ["rust-shadowed-call", { wireTest: wire(handshake, 'let handshake = |_: &str| true; ' + invoke) }, false],
+  ] as const) await t.test(id, async () => {
+    const { report } = await control(mutation, "R8/feed/" + id);
+    assert.equal(legacyRow(report, 1319).disposition_valid, accepts);
+    if (accepts) positive(report);
+    else {
+      reportFail(report, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE");
+      assert.equal(report.failed_checks.length, 1);
+    }
+  });
+});
+
 test("R7/H3：#1942 与 #2021 的真实 Cargo 闭包不随冗余显式特性变化", { skip: !pathExistsGit }, () => {
   const s = new At18Repository(root);
   const testPath = "rust/tests/at18_review_local.rs";
@@ -750,6 +798,37 @@ crate = []
     ")", ",", "not", "(", ...feature("crate"), ")", ",", ")"));
   assert.equal(cfg("not", "(", ...feature("leaf"), ")"), false);
   assert.equal(cfg("any", "(", ...feature("wire"), ",", ...feature("remote"), ")"), false);
+});
+
+test("R8/H3：真实 X runtime::WIRE 的平台 cfg 归入同一递归求值", { skip: !pathExistsGit }, () => {
+  const s = new At18Repository(root);
+  const F = "b9d898dccf46c2a716115eaa1215bc39c458a959";
+  const entry = "rust/src/history_simulation/mod.rs", testPath = "rust/tests/at18_review_cfg.rs";
+  const read = s.blob.bind(s);
+  const original = read(F, entry).toString();
+  assert.match(original, /#\[cfg\(unix\)\]\r?\npub mod runtime;/);
+  const testSource = Buffer.from('#[test]\nfn actual_wire() { assert_eq!(newchan_rust::history_simulation::runtime::WIRE, "x-exact-simulation/1"); }\n');
+  assert.equal(cargoTarget(["ubuntu-latest"]), "linux");
+  assert.equal(cargoTarget(["self-hosted", "macOS"]), "macos");
+  assert.equal(cargoTarget(["windows-2022"]), "windows");
+  assert.equal(cargoTarget(["linux", "windows"]), undefined);
+  for (const [guard, targets] of [
+    ["unix", [true, true, false, false]],
+    ["all(unix)", [true, true, false, false]],
+    ["any(unix)", [true, true, false, false]],
+    ["not(not(unix))", [true, true, false, false]],
+    ["windows", [false, false, true, false]],
+    ["all(windows)", [false, false, true, false]],
+    ["not(unix)", [false, false, true, false]],
+    ['target_family = "unix"', [true, true, false, false]],
+    ['target_os = "linux"', [true, false, false, false]],
+  ] as const) {
+    s.blob = (F, path) => path === testPath ? testSource : path === entry ?
+      Buffer.from(original.replace("#[cfg(unix)]", "#[cfg(" + guard + ")]")) : read(F, path);
+    const actual = [["ubuntu-latest"], ["macos-latest"], ["self-hosted", "Windows"], ["p1-isolated"]]
+      .map(labels => rustReplacement(s, F, entry, testPath, "actual_wire", ["production_session"], cargoTarget(labels)));
+    assert.deepEqual(actual, targets, guard);
+  }
 });
 
 test("R7/H9：UTC 同时刻的两个拼写满十年，少一分钟仍拒", {

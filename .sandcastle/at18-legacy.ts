@@ -1,4 +1,5 @@
 import { pythonReplacement } from "./at18-python-run.ts";
+import { cargoTarget } from "./at18-cargo.ts";
 import { rustReplacement } from "./at18-code.ts";
 import { z } from "zod";
 import { findAt14 } from "./at18-at14.ts";
@@ -9,7 +10,7 @@ import { byteSha256, dispositions, heavy, legacyTickets, parseJsonObject,
   repoPath, sha, text, type ArtifactRef, type At18Report } from "./at18-format.ts";
 import { type External } from "./at18-evidence.ts";
 import { type Row } from "./at18-github.ts";
-import { type AcceptedReview, type ReviewRef, type Tracker } from "./at18-integrations.ts";
+import { type AcceptedReview, type Job, type ReviewRef, type Tracker } from "./at18-integrations.ts";
 import { type At18Repository, type Diagnostics, repoRef, refs, sorted, utf8, valueAt } from "./at18-source.ts";
 
 // #1319 的 884568065c 收口记录（SPEC 旧票处置档）给出两项候选；
@@ -44,7 +45,8 @@ const legacyAtoms = new Map<number, string[]>([
 ]);
 
 export async function legacyDispositions(s: At18Repository, F: string, adapter: Adapter | undefined, tracker: Tracker,
-  pureGraph: boolean, tb: Map<Slice, boolean>, b: Bindings, groupPass: Set<string>, permission: boolean, external: External[], used: Set<External>,
+  pureGraph: boolean, tb: Map<Slice, boolean>, b: Bindings, groupPass: Set<string>, checkJobs: ReadonlyMap<string, Job>,
+  permission: boolean, external: External[], used: Set<External>,
   reviewed: ReadonlyMap<string, AcceptedReview>, reviews: ReviewRef[], diag: Diagnostics) {
   const atoms = new Map<number, Set<string>>();
   const inGraph = new Map<number, boolean>();
@@ -149,7 +151,8 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
             const selector = /^(?:test:)?([\w-]+)(?:\+([\w,-]+))?\/([\w:]+)$/.exec(check.selector);
             if (check.runner !== "cargo-test" || integration !== "rust/src/lib.rs" || !selector ||
                 ![`rust/tests/${selector[1]}.rs`, `rust/tests/${selector[1]}/main.rs`].includes(check.source.path) ||
-                !rustReplacement(s, F, replacement, check.source.path, selector[3], selector[2]?.split(",") ?? [])) return false;
+                !rustReplacement(s, F, replacement, check.source.path, selector[3], selector[2]?.split(",") ?? [],
+                  cargoTarget(checkJobs.get(check.group)?.labels))) return false;
           } else {
             if (!replacement.endsWith(".py") || check.runner !== "pytest" ||
                 !pythonReplacement(s, F, replacement, integration, check.source.path, check.selector, check.expected_count)) return false;

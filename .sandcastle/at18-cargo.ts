@@ -22,7 +22,20 @@ export function cargoContext(toml: string | undefined, explicit: string[]) {
     edition: config.package?.edition ?? "2024", features };
 }
 
-export function enabledRustItem(attributes: string[], features: ReadonlySet<string>) {
+export type CargoTarget = "linux" | "macos" | "windows";
+
+export function cargoTarget(labels: readonly string[] = []): CargoTarget | undefined {
+  const targets = new Set<CargoTarget>();
+  for (const label of labels) {
+    if (/^(?:linux|ubuntu-(?:latest|\d{2}\.\d{2}))$/i.test(label)) targets.add("linux");
+    else if (/^macos(?:-(?:latest|\d+))?$/i.test(label)) targets.add("macos");
+    else if (/^windows(?:-(?:latest|\d{4}))?$/i.test(label)) targets.add("windows");
+  }
+  return targets.size === 1 ? [...targets][0] : undefined;
+}
+
+export function enabledRustItem(attributes: string[], features: ReadonlySet<string>, target?: CargoTarget) {
+  const family = target === undefined ? undefined : target === "windows" ? "windows" : "unix";
   function cfg(tokens: string[]) {
     let i = 0;
     function predicate(): boolean | undefined {
@@ -30,9 +43,17 @@ export function enabledRustItem(attributes: string[], features: ReadonlySet<stri
       if (tokens[i] === "=") {
         i++;
         const value = tokens[i++];
-        return name === "feature" && value?.startsWith('"') ? features.has(JSON.parse(value)) : undefined;
+        if (!value?.startsWith('"')) return undefined;
+        const literal: unknown = JSON.parse(value);
+        if (typeof literal !== "string") return undefined;
+        if (name === "feature") return features.has(literal);
+        if (name === "target_os" && target !== undefined) return target === literal;
+        if (name === "target_family" && family !== undefined) return family === literal;
+        return undefined;
       }
-      if (tokens[i] !== "(") return undefined;
+      if (tokens[i] !== "(") {
+        return family !== undefined && (name === "unix" || name === "windows") ? family === name : undefined;
+      }
       i++;
       const children: (boolean | undefined)[] = [];
       while (tokens[i] !== ")" && i < tokens.length) {
@@ -47,7 +68,6 @@ export function enabledRustItem(attributes: string[], features: ReadonlySet<stri
       return undefined;
     }
     if (tokens[0] !== "(" || tokens.at(-1) !== ")") return false;
-    if (tokens.length === 3 && ["unix", "windows"].includes(tokens[1])) return true;
     i++;
     return predicate() === true && i === tokens.length - 1;
   }

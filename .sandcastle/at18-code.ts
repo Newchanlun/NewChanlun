@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cargoContext, enabledRustItem } from "./at18-cargo.ts";
+import { cargoContext, type CargoTarget, enabledRustItem } from "./at18-cargo.ts";
 import { type At18Repository, utf8 } from "./at18-source.ts";
 
 // Rust 只做语法与源码接入核验，仍由登记的真实 Cargo 作业提供运行结果。
@@ -130,19 +130,68 @@ function rustImports(code: string[]) {
   return imports;
 }
 
-function rustReferences(code: string[], body: string[], callsOnly = false) {
-  const imports = rustImports(code);
-  return body.flatMap((token, i) => {
-    if (!/^[A-Za-z_]\w*$/.test(token) || body[i - 1] === "::") return [];
-    const names = [token];
-    for (let j = i + 1; body[j] === "::" && /^[A-Za-z_]\w*$/.test(body[j + 1] ?? ""); j += 2) names.push(body[j + 1]);
-    if (callsOnly && body[i + 2 * names.length - 1] !== "(") return [];
-    const from = imports.filter(item => item.alias === token);
-    return from.length ? from.map(item => [...item.path, ...names.slice(1)]) : [names];
-  });
+type RustAccess = "call" | "value" | "export";
+
+// 函数引用可绑定给局部变量，但只有后续调用才构成行为证据。
+function* rustReferences(imports: ReturnType<typeof rustImports>, body: string[], observeValues: boolean) {
+  const scopes: Map<string, string[] | null>[] = [new Map()];
+  const pending = new Map<number, [string, string[] | null]>();
+  const identifier = /^[A-Za-z_]\w*$/;
+  let assertedTo = -1;
+  function pathAt(i: number) {
+    const parts: string[] = [];
+    while (identifier.test(body[i] ?? "")) {
+      parts.push(body[i++]);
+      if (body[i] !== "::" || !identifier.test(body[i + 1] ?? "")) break;
+      i++;
+    }
+    return { parts, end: i };
+  }
+  function resolve([first, ...rest]: string[]) {
+    if (!first) return [];
+    for (let i = scopes.length - 1; i >= 0; i--) {
+      const scope = scopes[i];
+      if (scope.has(first)) {
+        const path = scope.get(first);
+        return path ? [...path, ...rest] : [];
+      }
+    }
+    const imported = imports.find(item => item.alias === first);
+    return [...(imported?.path ?? [first]), ...rest];
+  }
+  for (let i = 0; i < body.length; i++) {
+    const token = body[i];
+    const scope = scopes.at(-1)!;
+    if (token === "{") scopes.push(new Map());
+    if (token === "}") scopes.pop();
+    if (token === "let") {
+      const nameAt = i + (body[i + 1] === "mut" ? 2 : 1);
+      const semi = body.indexOf(";", nameAt);
+      const eq = body.indexOf("=", nameAt);
+      if (semi > nameAt && identifier.test(body[nameAt]) && ["=", ":", ";"].includes(body[nameAt + 1])) {
+        const rhs = eq > nameAt && eq < semi ? pathAt(eq + 1) : undefined;
+        const path = rhs?.end === semi ? resolve(rhs.parts) : [];
+        pending.set(semi, [body[nameAt], path.length ? path : null]);
+      }
+    }
+    const binding = pending.get(i);
+    if (binding) scope.set(...binding);
+    if (observeValues && ["assert", "assert_eq", "assert_ne"].includes(token) && body[i + 1] === "!") {
+      const open = body[i + 2], close = open === "(" ? ")" : open === "[" ? "]" : open === "{" ? "}" : "";
+      if (close) assertedTo = Math.max(assertedTo, closing(body, i + 2, open, close));
+    }
+    if (!identifier.test(token) || ["::", ".", "fn"].includes(body[i - 1])) continue;
+    const { parts, end } = pathAt(i);
+    const call = body[end] === "(";
+    if (call || i < assertedTo) {
+      const access: RustAccess = call ? "call" : "value";
+      yield { path: resolve(parts), access };
+    }
+  }
 }
 
-export function rustReplacement(s: At18Repository, F: string, entry: string, checkPath: string, selector: string, explicit: string[]) {
+export function rustReplacement(s: At18Repository, F: string, entry: string, checkPath: string, selector: string,
+  explicit: string[], target?: CargoTarget) {
   const base = "rust/src/";
   if (!entry.startsWith(base)) return false;
   const modulePath = entry.slice(base.length).replace(/(?:\/mod)?\.rs$/, "").split("/");
@@ -167,7 +216,7 @@ export function rustReplacement(s: At18Repository, F: string, entry: string, che
       for (const name of modules) {
         const code = read(path);
         if (![...rustItems(code)].some(item => item.kind === "mod" && code[item.index + 1] === name &&
-            code[item.index + 2] === ";" && enabledRustItem(item.prefix, features))) return;
+            code[item.index + 2] === ";" && enabledRustItem(item.prefix, features, target))) return;
         const dir = path === lib ? base : path.replace(/(?:\/mod)?\.rs$/, "") + "/";
         const found = [dir + name + ".rs", dir + name + "/mod.rs"].filter(p => tree.has(p));
         if (found.length !== 1) return;
@@ -182,52 +231,71 @@ export function rustReplacement(s: At18Repository, F: string, entry: string, che
       if (start === "self") return [...modules, ...rest];
       return start === undefined ? modules : [...modules, start, ...rest];
     }
-    function reaches(modules: string[], [name, ...tail]: string[], external: boolean, viaEntry: boolean, seen: Set<string>): boolean {
-      if (!name) return false;
-      const key = JSON.stringify([modules, name, tail, external, viaEntry]);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      const path = walk(modules);
-      if (!path) return false;
-      const code = read(path);
-      // 生产封装可以把内部调用直接解析到替代模块的子模块，不必逐段从入口再走一遍。
-      const entered = viaEntry || modulePath.every((part, i) => modules[i] === part);
-      const items = [...rustItems(code)].filter(item => enabledRustItem(item.prefix, features));
-      if (tail.length && items.some(item => item.kind === "mod" && code[item.index + 1] === name && (!external || item.public)) &&
-          reaches([...modules, name], tail, external, entered, seen)) return true;
-      for (const item of items) {
-        if (external && !item.public) continue;
-        if (item.kind === "use") {
-          const end = code.indexOf(";", item.index);
-          for (const imported of rustImports(code.slice(item.index, end + 1))) {
-            if (imported.alias !== name) continue;
-            const qualified = qualify(modules, imported.path);
-            if (reaches(qualified.slice(0, -1), [...qualified.slice(-1), ...tail], false, entered, seen)) return true;
-          }
-        } else if (!tail.length && code[item.index + 1] === name && item.kind !== "mod") {
-          if (item.kind !== "fn") {
-            if (entered) return true;
-            continue;
-          }
-          const body = rustFunction(code, item.index);
-          if (!body || !substantiveRust(body)) continue;
-          if (entered) return true;
-          const imports = items.filter(it => it.kind === "use").flatMap(it =>
-            code.slice(it.index, code.indexOf(";", it.index) + 1));
-          for (const ref of rustReferences(imports, body, true)) {
-            const qualified = qualify(modules, ref);
-            if (reaches(qualified.slice(0, -1), qualified.slice(-1), false, false, seen)) return true;
+    function active(code: string[]) {
+      return [...rustItems(code)].filter(item => enabledRustItem(item.prefix, features, target));
+    }
+    function importsOf(code: string[], items: ReturnType<typeof active>) {
+      return items.filter(item => item.kind === "use").flatMap(item =>
+        rustImports(code.slice(item.index, code.indexOf(";", item.index) + 1)));
+    }
+    function targets(paths: { path: string[]; access: RustAccess }[], external: boolean) {
+      const found = new Set<string>(), seen = new Set<string>();
+      function visit(modules: string[], [name, ...tail]: string[], external: boolean, access: RustAccess) {
+        if (!name) return;
+        const key = JSON.stringify([modules, name, tail, external, access]);
+        if (seen.has(key)) return;
+        seen.add(key);
+        const path = walk(modules);
+        if (!path) return;
+        const code = read(path);
+        const items = active(code);
+        const inReplacement = modulePath.every((part, i) => modules[i] === part);
+        function follow(path: string[], tail: string[], access: RustAccess) {
+          const qualified = qualify(modules, path);
+          visit(qualified.slice(0, -1), [...qualified.slice(-1), ...tail], false, access);
+        }
+        for (const item of items) {
+          if (external && !item.public) continue;
+          if (item.kind === "use") {
+            const end = code.indexOf(";", item.index);
+            for (const imported of rustImports(code.slice(item.index, end + 1))) {
+              if (imported.alias === name) follow(imported.path, tail, access);
+            }
+          } else if (code[item.index + 1] === name) {
+            if (item.kind === "mod" && tail.length) visit([...modules, name], tail, external, access);
+            if (tail.length || item.kind === "mod") continue;
+            if (item.kind === "fn" && access !== "value") {
+              const body = rustFunction(code, item.index);
+              if (!body || !substantiveRust(body)) continue;
+              if (inReplacement) found.add(path + ":" + name);
+              else for (const ref of rustReferences(importsOf(code, items), body, false)) follow(ref.path, [], ref.access);
+            } else if (inReplacement && access !== "call" && ["const", "static"].includes(item.kind)) {
+              found.add(path + ":" + name);
+            }
           }
         }
       }
-      return false;
+      for (const { path, access } of paths) visit([], path, external, access);
+      return found;
     }
     const code = read(checkPath);
     const name = selector.split("::").at(-1) ?? "";
     const body = rustTestBody(code, name, selector);
     const root = checkPath.startsWith("rust/tests/") ? crate : "crate";
-    return !!body && !!root && rustReferences(code, body).some(([from, ...path]) =>
-      from === root && reaches([], path, root !== "crate", false, new Set<string>()));
+    if (!body || !root) return false;
+
+    // 根中具名封装和重导出明确接线时，只接受它们到达的导出。
+    // 只有纯模块公开的接入方式，才从其可公开访问的路径判定。
+    const libCode = read(lib), libItems = active(libCode);
+    const production = targets(libItems.flatMap((item): { path: string[]; access: RustAccess }[] => {
+      if (!item.public) return [];
+      if (item.kind === "fn") return [{ path: [libCode[item.index + 1]], access: "call" }];
+      if (item.kind === "use") return importsOf(libCode, [item]).map(({ alias }) => ({ path: [alias], access: "export" }));
+      return [];
+    }), true);
+    const tested = targets([...rustReferences(rustImports(code), body, true)]
+      .filter(ref => ref.path[0] === root).map(ref => ({ path: ref.path.slice(1), access: ref.access })), root !== "crate");
+    return [...tested].some(symbol => !production.size || production.has(symbol));
   } catch { return false; }
 }
 

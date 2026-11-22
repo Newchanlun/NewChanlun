@@ -49,6 +49,10 @@ export type Mutation = {
   at14Ci?: "ignored" | "skip-ci" | "dispatch-only" | "ignored-only" | "unrecorded" | "comment" | "wrong-step" | "qualified-selector" | "sibling-selector";
   feedReplacement?: string;
   feedTest?: string;
+  feedIntegration?: string;
+  wireModule?: string;
+  wireProbe?: string;
+  wireTest?: string;
   wireCase?: "incomplete" | "public-entry";
   feedCase?: "isolated" | "no-coverage" | "missing-child" | "wrong-test-symbol" | "reexport";
   recordLexeme?: (record: Row, bytes: Buffer) => Buffer;
@@ -382,24 +386,24 @@ export function makeFixture(mutation: Mutation = {}) {
   put(feedReplacement, feedSource);
   const rootInit = src.tree(G0).has(feedIntegration) ? utf8(src.blob(G0, feedIntegration)) : "";
   put(feedIntegration, rootInit + (mutation.feedCase === "isolated" ? "" :
-    "\nfrom .at18_fixture_feed import route\n\ndef select_feed(sources, events):\n    return route('1min', sources, events)\n"));
-  put(wireReplacement, mutation.feedCase === "isolated"
+    mutation.feedIntegration ?? "\nfrom .at18_fixture_feed import route\n\ndef select_feed(sources, events):\n    return route('1min', sources, events)\n"));
+  put(wireReplacement, mutation.wireModule ?? (mutation.feedCase === "isolated"
     ? 'pub fn wire_price(raw: u64) -> String { format!("{}", raw) }\n'
     : mutation.feedCase === "reexport" ? "mod probe; pub use probe::handshake;\n" :
-    "pub mod probe;\n" + (mutation.wireCase === "incomplete" ? "pub fn unfinished(\n" : ""));
+    "pub mod probe;\n" + (mutation.wireCase === "incomplete" ? "pub fn unfinished(\n" : "")));
   put(wireIntegration, utf8(src.blob(G0, wireIntegration)) +
     (mutation.feedCase === "isolated" ? "" : "\npub mod at18_fixture_wire;\n") +
     (mutation.wireCase === "public-entry" ? 'pub fn select_wire(banner: &str) -> bool { at18_fixture_wire::probe::handshake(banner) }\n' : ""));
   if (mutation.feedCase !== "missing-child") put("rust/src/at18_fixture_wire/probe.rs",
-    'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }\n');
+    mutation.wireProbe ?? 'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }\n');
   const feedTest = "trading_system/tests/test_at18_fixture_feed.py";
   const wireTest = "rust/tests/at18_fixture_wire.rs";
   const feedTestSource = mutation.feedTest ?? ("from trading_system.at18_fixture_feed import route\n\ndef test_route():\n" +
     (mutation.feedCase === "no-coverage" ? "    assert True\n" : "    assert list(route('1min', {'1min': 'ohlcv'}, [1, 2])) == [1, 2]\n"));
-  const wireTestSource = mutation.wireCase === "public-entry"
+  const wireTestSource = mutation.wireTest ?? (mutation.wireCase === "public-entry"
     ? 'use newchan_rust::select_wire;\n#[test]\nfn check_connection() { assert!(select_wire("HELLO")); }\n'
     : "use newchan_rust::at18_fixture_wire::" + (mutation.feedCase === "reexport" ? "" : "probe::") + "handshake;\n#[test]\nfn check_connection() { " +
-    (mutation.feedCase === "wrong-test-symbol" ? 'assert!(true);' : 'assert!(handshake("HELLO"));') + " }\n";
+    (mutation.feedCase === "wrong-test-symbol" ? 'assert!(true);' : 'assert!(handshake("HELLO"));') + " }\n");
   for (const [id, path, code, runner, selector] of [
     [feedCheck, feedTest, feedTestSource, "pytest", "test_route"],
     [wireCheck, wireTest, wireTestSource, "cargo-test", "test:at18_fixture_wire+production_session/check_connection"],

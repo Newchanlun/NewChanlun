@@ -21,12 +21,14 @@ def module(path):
     return path.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
 
 
-def names(node):
+def names(node, bindings):
     if isinstance(node, ast.Name):
-        return [node.id]
+        return bindings.get(node.id, (node.id,))
     if isinstance(node, ast.Attribute):
-        return [*names(node.value), node.attr]
-    return []
+        receiver = node.value.func if isinstance(node.value, ast.Call) else node.value
+        base = names(receiver, bindings)
+        return (*base, node.attr) if base else ()
+    return ()
 
 
 def imports(tree, path):
@@ -49,65 +51,102 @@ def imports(tree, path):
                     yield [*prefix, alias.name], [alias.asname or alias.name]
 
 
-def definitions(tree):
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and substantive(node):
-            yield node
-        elif isinstance(node, ast.ClassDef):
-            yield from definitions(node)
+FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+DEFINITIONS = (*FUNCTIONS, ast.ClassDef)
+
+
+def definition(tree, symbol):
+    for i, name in enumerate(symbol):
+        if i and not isinstance(tree, ast.ClassDef):
+            return None
+        node = next((n for n in reversed(tree.body) if isinstance(n, DEFINITIONS) and n.name == name), None)
+        if node is None:
+            return None
+        tree = node
+    return tree
 
 
 def line(node):
     return min((d.lineno for d in node.decorator_list), default=node.lineno)
 
 
-def integration_reaches(entry, start, exports):
+def calls(node):
+    if isinstance(node, ast.Call):
+        yield node
+    if not isinstance(node, (*DEFINITIONS, ast.Lambda)):
+        for child in ast.iter_child_nodes(node):
+            yield from calls(child)
+
+
+def integration_targets(entry, start):
     paths = {}
     for file in Path("trading_system").rglob("*.py"):
         if "tests" in file.parts:
             continue
         path = file.as_posix()
         paths.setdefault(module(path), []).append(path)
-    seen = set()
+    seen, targets = set(), set()
 
     @cache
     def parsed(path):
-        tree = ast.parse(Path(path).read_bytes(), path)
-        return tree, list(imports(tree, path))
+        return ast.parse(Path(path).read_bytes(), path)
 
     def walk(path, symbol):
+        if not symbol or (path, symbol) in seen:
+            return
+        seen.add((path, symbol))
+        tree = parsed(path)
+        local = definition(tree, symbol)
         if path == entry:
-            return symbol in exports
-        key = (path, symbol)
-        if key in seen:
-            return False
-        seen.add(key)
-        tree, bindings = parsed(path)
-        local = [node for node in tree.body
-                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == symbol]
-        if not local:
-            # 只沿实际被上游调用的重导出继续，不把孤立的 import 当作接入。
-            return any(resolve(path, origin) for origin, alias in bindings if alias == [symbol])
-        for node in ast.walk(local[-1]):
-            if not isinstance(node, ast.Call):
+            # 构造函数和类上的其他方法是不同的轨迹目标。
+            found = (definition(local, (name,)) for name in ("__new__", "__init__")) if isinstance(local, ast.ClassDef) else (local,)
+            targets.update(node for node in found if isinstance(node, FUNCTIONS) and substantive(node))
+            return
+        if isinstance(local, ast.ClassDef):
+            for name in ("__new__", "__init__"):
+                walk(path, (*symbol, name))
+        elif isinstance(local, FUNCTIONS):
+            params = [*local.args.posonlyargs, *local.args.args, *local.args.kwonlyargs,
+                      local.args.vararg, local.args.kwarg]
+            bindings = {arg.arg: () for arg in params if arg}
+            positional = [*local.args.posonlyargs, *local.args.args]
+            if len(symbol) > 1 and positional and not any(
+                isinstance(d, ast.Name) and d.id == "staticmethod" for d in local.decorator_list
+            ):
+                bindings[positional[0].arg] = symbol[:-1]
+            for statement in local.body:
+                for call in calls(statement):
+                    walk(path, names(call.func, bindings))
+                if isinstance(statement, ast.Assign):
+                    value = statement.value.func if isinstance(statement.value, ast.Call) else statement.value
+                    bound = names(value, bindings)
+                    for target in statement.targets:
+                        if isinstance(target, ast.Name):
+                            bindings[target.id] = bound
+        else:
+            # 只有上游调用了该名字，才沿重导出继续；孤立的 import 不构成接入。
+            imported(path, symbol)
+
+    def imported(path, symbol):
+        for origin, alias in imports(parsed(path), path):
+            if tuple(alias) != symbol[:len(alias)]:
                 continue
-            use = names(node.func)
-            if len(use) == 1 and walk(path, use[0]):
-                return True
-            if any(resolve(path, origin + use[len(alias):]) for origin, alias in bindings if use[:len(alias)] == alias):
-                return True
-        return False
+            qualified = [*origin, *symbol[len(alias):]]
+            for end in range(len(qualified) - 1, 0, -1):
+                hits = paths.get(".".join(qualified[:end]), [])
+                if len(hits) == 1 and hits[0] != path:
+                    walk(hits[0], tuple(qualified[end:]))
+                    break
 
-    def resolve(path, qualified):
-        for end in range(len(qualified) - 1, 0, -1):
-            hits = paths.get(".".join(qualified[:end]), [])
-            if len(hits) == 1 and hits[0] != path:
-                return walk(hits[0], qualified[end])
-        return False
-
-    tree, _ = parsed(start)
-    return any(walk(start, node.name) for node in tree.body
-               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and not node.name.startswith("_"))
+    tree = parsed(start)
+    for node in tree.body:
+        if isinstance(node, DEFINITIONS) and not node.name.startswith("_"):
+            walk(start, (node.name,))
+            if isinstance(node, ast.ClassDef):
+                for method in node.body:
+                    if isinstance(method, FUNCTIONS) and not method.name.startswith("_"):
+                        walk(start, (node.name, method.name))
+    return targets
 
 
 def code_objects(code):
@@ -135,11 +174,8 @@ def proves(doc, scratch):
         return False
     source = Path(entry).read_bytes()
     source_path, test_path = str(Path(entry).resolve()), str(Path(path).resolve())
-    source_tree = ast.parse(source, source_path)
-    targets = list(definitions(source_tree))
-    exports = {node.name for node in source_tree.body
-               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and substantive(node)}
-    if not targets or not integration_reaches(entry, integration, exports):
+    targets = integration_targets(entry, integration)
+    if not targets:
         return False
     positions = {(line(node), node.name) for node in targets}
     test_position = (line(test), test.name)

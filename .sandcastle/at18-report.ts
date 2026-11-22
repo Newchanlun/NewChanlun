@@ -267,7 +267,8 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   }
   const allCurrent = main && reviewOK && pre.ok && sourcesOK && scopeOK && permitted && migrated && post.valid &&
     [...coverage.keys.values()].every(k => keyResults.get(k.id)?.status !== "FAIL") && tbIds.every(slice => tbPass.get(slice)) && !diag.size;
-  const legacy = await legacyDispositions(s, F, contract, tracker, allCurrent, tbPass, bindings, execution.passed, permitted, allExternal, used, finalReviews.accepted, finalReviews.reviews, diag);
+  const legacy = await legacyDispositions(s, F, contract, tracker, allCurrent, tbPass, bindings, execution.passed,
+    execution.checkJobs, permitted, allExternal, used, finalReviews.accepted, finalReviews.reviews, diag);
   for (const error of heavyDiagnostics.all()) diag.add(error.check_id, error.scope, error.evidence_ref);
   if (legacy.deferredHeavy) gaps.defer(heavy, "simulation", "MEASUREMENT_NOT_COMPLETED", "ticket:1320");
 
