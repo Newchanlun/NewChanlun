@@ -322,7 +322,7 @@
     }
     return { byId, effective };
   }
-  async function shapeRecord(record) {
+  async function shapeRecord(record, captureSources) {
     await keys(
       record,
       [
@@ -349,7 +349,7 @@
       ],
       "CC006完整记录",
     );
-    await typed.validateTB02ShapeRefs(record);
+    const sources = await typed.validateTB02ShapeRefs(record, captureSources);
     need((await s(record, "object_revision")) === "1", "CC006修订错误");
     const first = await i(record, "first_known_generation", true);
     need(
@@ -371,8 +371,7 @@
       need(
         BigInt(withdrawn) > first &&
           (await s(record, "lifecycle")) === "withdrawn" &&
-          ["fact_removed", "superseded_by_revision"].includes(reason) &&
-          (reason === "fact_removed") === (sup === null),
+          reason === withdrawalReason("CC-006.local_shape", sup),
         "CC006撤回不闭合",
       );
     need(
@@ -407,6 +406,7 @@
       );
       index++;
     }
+    return sources;
   }
   // #1393 W：W 字段中的原始 bar 必须逐值等于其八键引用的原始修订；逐发生边界核同 cut 初始化链接。
   // #1393×#1419：typed 对象的规则版本绑定与内容身份（单对象判据；候选全量校验与公开入口共用）。
@@ -442,7 +442,10 @@
     const wPolicy = typed.resolveRule(await s(snapshot, "rule_revision")).w !== null;
     for (const r of wRecords) {
       const refs = new Map(r.input_refs.map((x) => [x.source_coord, x])), p = r.payload, bars = [];
-      if (r.kind === "CC-004.undetermined_raw") bars.push(p.raw);
+      if (r.kind === "CC-004.undetermined_raw") {
+        need(r.source_coords.length === 1 && r.source_coords[0] === p.raw.source_coord, "B8 W 未定原件来源不是自身坐标");
+        bars.push(p.raw);
+      }
       if (r.kind === "CC-004.initialization" && p.first_raw_pair !== null)
         bars.push(p.first_raw_pair.previous_acc, p.first_raw_pair.incoming);
       if (r.kind === "CC-005.inclusion_group")
@@ -475,7 +478,7 @@
     const initial = records.filter((r) => r.kind === "CC-004.initialization");
     need(initial.length === 1, "同 cut 缺少唯一初始化对象");
     const p = initial[0].payload, initialRefs = new Map(initial[0].input_refs.map((r) => [r.source_coord, r]));
-    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const same = typed.Center.sameValue;
     for (const record of records) {
       if (record.kind === "CC-005.inclusion_group") {
         need(p.direction_state === "Established" && same(record.payload.initial_direction_evidence, p.first_raw_pair), "组初始化证据与同 cut 初始化对象不一致");
@@ -499,63 +502,138 @@
       (r.kind === "CC-005.inclusion_group" && Object.hasOwn(r.payload, "initialization_policy_revision")));
     await bindInitialization(of(plainSnapshot), { byId }, wRecords);
   }
-  async function bindW2Replacements(snapshot) {
-    const pending = [], groups = [], initializations = [], superseded = [], replaces = [], kinds = new Map(), objects = new Map();
-    for (const family of ["objects", "withdrawn_objects"])
-      for await (const record of (await f(snapshot, family)).items()) {
-        const object_id = await t(record, "object_id"), kind = await t(record, "kind"),
-          first_known_generation = await s(record, "first_known_generation"),
-          withdrawn_generation = await (await f(record, "withdrawn_generation")).scalar(),
-          superseded_by = await (await f(record, "superseded_by")).scalar(),
-          withdrawal_reason = await (await f(record, "withdrawal_reason")).scalar(),
-          slot = (await record.has("fact_key"))
-            ? await t(record, "fact_key")
-            : JSON.stringify(["CC-006.local_shape", await s(record, "window_start"), await s(record, "window_mid"), await s(record, "window_end")]);
-        need(!objects.has(object_id), "W2对象身份重复");
-        kinds.set(object_id, kind);
-        const entry = {object_id, kind, slot, first_known_generation, withdrawn_generation, withdrawal_reason, superseded_by};
-        objects.set(object_id, entry);
-        if (superseded_by !== null) superseded.push(entry);
-        if (kind === "CC-004.initialization") {
-          const source_coords = [];
-          for await (const c of (await f(record, "source_coords")).items()) source_coords.push(await S(c));
-          initializations.push({object_id, source_coords, first_known_generation, withdrawn_generation});
-        }
-        if (kind === "CC-004.undetermined_raw")
-          pending.push({object_id, coord: await s(await f(await f(record, "payload"), "raw"), "source_coord"),
-            first_known_generation, withdrawn_generation, withdrawal_reason, superseded_by});
-        if (kind === "CC-005.inclusion_group") {
-          const payload = await f(record, "payload"), members = [];
-          for await (const c of (await f(payload, "members")).items()) members.push(await S(c));
-          groups.push({object_id, members, direction: await (await f(payload, "direction")).scalar(), first_known_generation, withdrawn_generation});
-        }
+  // 同一投影用于生命周期、目录及结构活动图；大型 development_batch 不展开为普通树。
+  async function cutObject(record, kind, structurePayload, cut, active) {
+    const get = k => s(record, k);
+    const row = {
+      kind,
+      object_id: await get("object_id"),
+      object_revision: await get("object_revision"),
+      first_known_generation: await get("first_known_generation"),
+      published_generation: await get("published_generation"),
+      withdrawn_generation: await (await f(record, "withdrawn_generation")).scalar(),
+      withdrawal_reason: await (await f(record, "withdrawal_reason")).scalar(),
+      superseded_by: await (await f(record, "superseded_by")).scalar(),
+    };
+    if (kind === "CC-006.local_shape") {
+      for (const k of ["window_start", "window_mid", "window_end"]) row[k] = await get(k);
+      row.slot = JSON.stringify([kind, [row.window_start, row.window_mid, row.window_end]]);
+    } else {
+      row.slot = row.fact_key = await get("fact_key");
+      if (structurePayload || (cut.structure && kind === "CC-010.bi") ||
+          (cut.w !== null && (typed.INITIALIZATION_KINDS.includes(kind) || kind === "CC-005.inclusion_group")) ||
+          (active && ["CC-004.inclusion_step", "CC-005.inclusion_group", "CC-054.knowledge_state"].includes(kind))) {
+        row.payload = structurePayload ?? await typed.plain(await f(record, "payload"));
+        row.source_coords = await typed.plain(await f(record, "source_coords"));
+      } else if (cut.w !== null && kind === "CC-054.knowledge_state") {
+        // 历史初始化只查宣布的方向，不再次展开该代整份知识请求。
+        row.payload = {direction_state: await s(await f(record, "payload"), "direction_state")};
       }
-    for await (const r of (await f(snapshot, "relations")).items())
-      if ((await t(r, "relation_type")) === "replaces") replaces.push({subject: await t(r, "subject"), object: await t(r, "object")});
-    typed.w2Replacements({pending, groups, initializations, superseded, replaces, kinds, objects});
+    }
+    return row;
+  }
+  function withdrawalReason(kind, supersededBy) {
+    return supersededBy !== null ? "superseded_by_revision"
+      : kind === "CC-006.local_shape" ? "window_removed" : "fact_removed";
+  }
+  function withdrawalOrder(a, b) {
+    const aShape = a.kind === "CC-006.local_shape", bShape = b.kind === "CC-006.local_shape";
+    if (aShape !== bShape) return aShape ? -1 : 1;
+    // Rust 同起点用对象索引插入序：每代追加出生，且同代每起点至多发布一个窗口。
+    // 由此平局按出生代重建，不依赖 JSON 数组次序或 s-record-order/2 的 ID 次序。
+    return aShape ? compareTuples([BigInt(a.window_start)], [BigInt(b.window_start)]) ||
+        compareTuples([BigInt(a.first_known_generation)], [BigInt(b.first_known_generation)])
+      : compareTuples([a.kind, a.fact_key, a.object_id, BigInt(a.object_revision)],
+        [b.kind, b.fact_key, b.object_id, BigInt(b.object_revision)]);
+  }
+  async function bindWithdrawalEvidence(evidence, deaths, check = () => {}, charge = () => {}) {
+    const ordered = [...deaths].sort(withdrawalOrder), withdrawals = [], replaces = [];
+    let previous;
+    for (const r of ordered) {
+      check();
+      const {object_id, kind, withdrawal_reason: reason, superseded_by} = r;
+      need(kind !== "CC-006.local_shape" || previous?.kind !== kind ||
+        previous.window_start !== r.window_start || previous.first_known_generation !== r.first_known_generation,
+        "CC-056 同起点形态同代出生，无法绑定活动原序");
+      previous = r;
+      need(reason === withdrawalReason(kind, superseded_by), "CC-056 原件撤回原因/替代不符");
+      withdrawals.push({object_id, reason, superseded_by, ...(kind === "CC-006.local_shape"
+        ? {window_start: r.window_start, window_mid: r.window_mid, window_end: r.window_end}
+        : {fact_key: r.fact_key})});
+      if (superseded_by !== null) replaces.push({old_object_id: object_id, new_object_id: superseded_by});
+    }
+    for (const [key, want] of [["withdrawals", withdrawals], ["replaces", replaces]]) {
+      const actual = await f(evidence, key);
+      need(actual.kind === "array" && await actual.length() === BigInt(want.length), "CC-056 " + key + " 数量与本代撤回原件不符");
+      let i = 0;
+      for await (const got of actual.items()) {
+        charge();
+        check();
+        need(await equal(got, want[i++]), "CC-056 " + key + " 内容/上一代活动主序与本代撤回原件不符");
+      }
+    }
+    return replaces.length;
+  }
+  async function bindCutDirectory(snapshot, life, current, generation, check, charge) {
+    const catalog = await f(snapshot, "catalog_evidence");
+    const evidence = await f(await f(await f(catalog, "axes"), "CC-056"), "evidence");
+    const deaths = [];
+    for (const row of life) {
+      if (row.withdrawn_generation === generation) deaths.push(row);
+      check();
+    }
+    // 先独立对拍来源集合；即使目录计数、轴和 Delta 复写彼此一致也不能覆盖缺失行。
+    const replaces = await bindWithdrawalEvidence(evidence, deaths, check, charge);
+    for (const [name, n] of [
+      ["classified_objects", current.length],
+      ["merged_bars", current.filter(r => r.kind === "CC-005.inclusion_group").length],
+      ["withdrawals", deaths.length],
+      ["replaces", replaces],
+    ])
+      need(await s(catalog, name) === String(n), "目录 " + name + " 与独立原件计数不同");
+  }
+  async function bindReplacementEdges(snapshot, life, w, check, charge) {
+    const replaces = [];
+    for await (const r of (await f(snapshot, "relations")).items()) {
+      if ((await t(r, "relation_type")) === "replaces") {
+        charge();
+        replaces.push({subject: await t(r, "subject"), object: await t(r, "object")});
+      }
+      check();
+    }
+    typed.validateReplacements(life, replaces, w === typed.W2_POLICY, check);
   }
   // #1491：`layout` 由调用方从本 cut 的 rule_revision 布局组件取得（ADR 0037 §六，按版本分派）。
   // 未给出 ⟹ 调用方读的是 v1/v2 快照（ADR 0037 之前的写者，按定义 layout/1）。
-  async function bindSources(snapshot, charge = () => {}, layout = typed.LAYOUTS.LAYOUT1) {
+  async function bindSources(snapshot, charge = () => {}, layout = typed.LAYOUTS.LAYOUT1, cut = null) {
     const raw = await auditRaw(snapshot, charge),
       groups = new Map(),
       shapes = new Map(),
       records = [],
       wRecords = [],
-      pendingCoords = [];
+      pendingCoords = [], life = [], originalRefs = new Map();
     for (const family of ["objects", "withdrawn_objects"])
       for await (const record of (await f(snapshot, family)).items()) {
         charge();
         records.push(record);
         const kind = await t(record, "kind");
-        if (typed.TB02_KINDS.includes(kind)) await typed.validateTyped(record, layout);
+        const active = (await s(record, "lifecycle")) === "active";
+        let structurePayload, shapeSources;
+        if (typed.TB02_KINDS.includes(kind)) structurePayload = await typed.validateTyped(record, layout);
         else {
           // 未声明 kind 不得落入 CC-006 形态判据（#1419 独审 P1）。
           need(kind === "CC-006.local_shape", "未声明的对象 kind");
-          await shapeRecord(record);
+          shapeSources = await shapeRecord(record, cut !== null && active);
         }
-        const refs = await f(record, "input_refs"),
-          active = (await s(record, "lifecycle")) === "active";
+        const refs = await f(record, "input_refs");
+        const projection = cut === null ? null : await cutObject(record, kind, structurePayload, cut, active);
+        if (projection) {
+          if (shapeSources) projection.source_coords = shapeSources;
+          need(BigInt(projection.first_known_generation) <= BigInt(cut.generation), "对象首次获知来自未来cut");
+          need(projection.withdrawn_generation === null || BigInt(projection.withdrawn_generation) <= BigInt(cut.generation), "撤回来自未来cut");
+          life.push(projection);
+          cut.check();
+        }
         async function checkRef(ref) {
           await keys(ref, RAWREF, "来源八键");
           const r = raw.byId.get(
@@ -564,20 +642,10 @@
               await s(ref, "revision"),
             ]),
           );
-          need(
-            r && (await equal(ref, await rawReference(r))),
-            "对象八键来源未绑定独立完整原始历史",
-          );
-          if (active)
-            need(
-              await equal(
-                ref,
-                await rawReference(
-                  raw.effective.get(await s(ref, "source_coord")) || {},
-                ),
-              ),
-              "活动对象使用旧修订",
-            );
+          if (r && !originalRefs.has(r)) originalRefs.set(r, await rawReference(r));
+          need(r && await equal(ref, originalRefs.get(r)), "对象八键来源未绑定独立完整原始历史");
+          // 上式已逐字段相等；同一份原始对象是否是该坐标的生效版本只需查原账赢家。
+          if (active) need(r === raw.effective.get(await s(ref, "source_coord")), "活动对象使用旧修订");
           return r;
         }
         if (typed.TB02_KINDS.includes(kind)) {
@@ -626,7 +694,7 @@
         if (typed.INITIALIZATION_KINDS.includes(kind) || kind === "CC-054.knowledge_state" ||
             (kind === "CC-005.inclusion_group" && await of(await f(record, "payload")).has("initialization_policy_revision"))) {
           // #1393 W：初始化相关对象收原件，供下方 raw 值绑定与逐发生边界链接校验。
-          wRecords.push(await typed.plain(record));
+          wRecords.push(projection ? {...projection, input_refs: kind === "CC-054.knowledge_state" ? [] : await typed.plain(refs)} : await typed.plain(record));
         }
         if (kind === "CC-004.undetermined_raw" && active)
           pendingCoords.push(await s(await f(await f(record, "payload"), "raw"), "source_coord"));
@@ -746,7 +814,7 @@
     }
     // #1491 bounded-layout/1、/2：CC-007 三跳只读绑定（分型对象 → 批记录 entry → 单元序列）。
     await typed.bindDevelopmentBatches(records, layout);
-    return { raw, records, shapes, bound };
+    return { raw, records, shapes, bound, life };
   }
   async function shapeIdentity(
     record,
@@ -1567,14 +1635,19 @@
           "cut规则目录轴",
         );
       await catalogValidate(catalog, snapshot);
-      const binding = await bindSources(
-        snapshot,
-        charge,
-        typed.splitRule(rule).layout,
-      );
-      await bindSegmentSequences(snapshot);
-      await bindCenterFamily(snapshot, generation, typed.CENTER_RULES.has(baseRule));
-      if (typed.resolveRule(rule).w === typed.W2_POLICY) await bindW2Replacements(snapshot);
+      const policy = typed.resolveRule(rule), s3 = protocol === "s-session/3",
+        structure = s3 && typed.CENTER_RULES.has(baseRule);
+      const binding = await bindSources(snapshot, charge, policy.layout, s3 ? {structure, generation, check, w: policy.w} : null);
+      if (s3 && generation !== "0") {
+        const {life} = binding, current = life.filter(r => r.withdrawn_generation === null);
+        if (structure) typed.Center.validateStructureHistory(life, typed.isStructureKind, generation, check, charge);
+        const sources = typed.validateCutSources(current, binding.raw.effective, policy, check, charge);
+        typed.validateKnowledgeRequests(current, sources, rule, structure, check, charge);
+        await bindReplacementEdges(snapshot, life, policy.w, check, charge);
+        await bindCutDirectory(snapshot, life, current, generation, check, charge);
+      }
+      await bindSegmentSequences(snapshot, structure ? binding.life : null);
+      await bindCenterFamily(snapshot, generation, structure ? binding.life : null);
       for (const record of binding.records) {
         charge();
         let want;
@@ -1612,27 +1685,36 @@
       }
       await auditWitnesses(snapshot, binding, charge);
       check();
-      return binding;
+      const {raw, records, shapes, bound} = binding;
+      return {raw, records, shapes, bound};
     }
     // #1414/#1420：同 cut 活动集内 s-segment/2、/3 段与其 FIRST/SECOND 序列对象互绑；判据逐字同 main
     // validateTB02Candidate（payload 已由 typed 完整校验，此处在同一原件上做跨对象绑定）。
-    async function bindSegmentSequences(snapshot) {
+    async function bindSegmentSequences(snapshot, life) {
       const equalPlain = (a, b) => api.canonical(a) === api.canonical(b);
       const activeValues = new Map();
-      for await (const record of (await f(snapshot, "objects")).items())
+      if (life) {
+        for (const row of life) if (row.withdrawn_generation === null && typed.isStructureKind(row.kind))
+          activeValues.set(row.object_id, row);
+      } else for await (const record of (await f(snapshot, "objects")).items())
         activeValues.set(await t(record, "object_id"), record);
       for (const value of activeValues.values()) {
-        if ((await s(value, "kind")) !== "CC-013.segment") continue;
-        const r = await typed.plain(value);
+        if ((life ? value.kind : await s(value, "kind")) !== "CC-013.segment") continue;
+        const r = life ? value : await typed.plain(value);
         if (!["s-segment/2", "s-segment/3", "s-segment/4", "s-segment/5"].includes(r.payload.schema_revision)) continue;
         const d = r.payload.data;
         need(d.second_sequence_id !== null || d.fact_vector.scan_complete, "未完成扫描缺SECOND资源证据");
         for (const [prefix, role] of [["sequence", "FIRST_SEQUENCE"], ["second_sequence", "SECOND_SEQUENCE"]]) {
           const oid = d[prefix + "_object_id"]; if (oid === null) continue;
-          const qValue = activeValues.get(oid), q = qValue ? await typed.plain(qValue) : undefined;
-          need(q && q.kind === "CC-012.feature_sequence" && q.payload.schema_revision === r.payload.schema_revision, "段引用缺同cut序列对象");
+          const qValue = activeValues.get(oid), q = qValue ? (life ? qValue : await typed.plain(qValue)) : undefined;
+          // 结构域的对象/实体/角色互绑已在统一历史图执行（包括当前 cut）；其余旧读者仍有原链。
+          if (!life) {
+            need(q?.kind === "CC-012.feature_sequence", "段引用缺同cut序列对象");
+            const v = q.payload.data;
+            need(v.entity_id === d[prefix + "_id"] && v.segment_id === d.entity_id && v.role === role, "段序列引用身份/角色不符");
+          }
+          need(q.payload.schema_revision === r.payload.schema_revision, "段引用缺同cut序列对象");
           const v = q.payload.data;
-          need(v.entity_id === d[prefix + "_id"] && v.segment_id === d.entity_id && v.role === role, "段序列引用身份/角色不符");
           need(q.source_coords.every(c => r.source_coords.includes(c)), "段缺序列实际来源");
           if (role === "FIRST_SEQUENCE" && d.strict !== null) need(v.facts.checks.some(c => equalPlain(c.elements, d.strict.elements)), "strict未绑定FIRST检查");
           if (role === "SECOND_SEQUENCE") need(d.fact_vector.scan_complete !== (v.facts.resource_truncated && v.facts.matched === null), "段事实可知性未绑定SECOND扫描证据");
@@ -1644,8 +1726,8 @@
           // #1493 §7.1 第 6 条：段端门失败 fail-closed——同 cut 段版本与逐轴证据必须带阻断标记。
           const versions = [];
           for (const x of activeValues.values()) {
-            if ((await s(x, "kind")) !== "CC-056.segment_version") continue;
-            const pv = await typed.plain(x);
+            if ((life ? x.kind : await s(x, "kind")) !== "CC-056.segment_version") continue;
+            const pv = life ? x : await typed.plain(x);
             if (pv.payload.schema_revision === r.payload.schema_revision) versions.push(pv);
           }
           need(versions.length > 0 && versions.every(x => x.payload.data.waiting_reasons.includes(typed.PARSE_INVALID_REASON)), "段端门失败未在段版本标阻断");
@@ -1656,30 +1738,12 @@
     }
     // #1419/#1424：同 cut 活动集上的中枢族跨对象链接（seed/中枢/角色/归属/游标、对/位置/边/版本、22 轴对象绑定），
     // 以及全史中枢对出生/修订/撤回与变化事件的逐发生边界闭合。payload 已由 typed 逐对象校验；此处只取所需普通原件。
-    // #1855 B5：S3 结构规则（Rust is_structure_rule）的非零代 cut，活动集须各恰一个三类结构版本根
-    // （Rust source_structure::audit_full）；零代与非结构规则不要求。
-    async function bindCenterFamily(snapshot, generation, structureRule) {
-      const family = new Set([...typed.CENTER_KINDS, ...typed.PAIR_KINDS]),
-        history = new Set([typed.PAIR_KINDS[1], typed.PAIR_KINDS[3]]),
-        roots = new Map(["CC-056.segment_version", "CC-056.center_version", "CC-056.pair_version"].map((k) => [k, 0])),
-        active = [],
-        pairs = [];
-      let any = false;
-      for (const name of ["objects", "withdrawn_objects"])
-        for await (const record of (await f(snapshot, name)).items()) {
-          const kind = await s(record, "kind");
-          if (name === "objects" && roots.has(kind)) roots.set(kind, roots.get(kind) + 1);
-          if (!family.has(kind) && !(name === "objects" && kind === "CC-013.segment")) continue;
-          const r = await typed.plain(record);
-          if (family.has(kind)) any = true;
-          if (name === "objects") active.push(r);
-          if (history.has(kind)) pairs.push(r);
-        }
-      const axesValue = generation === "0" ? null : await f(await f(snapshot, "catalog_evidence"), "axes"),
-        axes = axesValue === null || !(await axesValue.has("CC-016")) ? null : await typed.plain(axesValue);
-      if (structureRule && generation !== "0")
-        need([...roots.values()].every((n) => n === 1), "结构域版本根缺失或重复");
-      if (!any && axes === null) return;
+    async function bindCenterFamily(snapshot, generation, life) {
+      if (life === null || generation === "0") return;
+      const family = new Set([...typed.CENTER_KINDS, ...typed.PAIR_KINDS, "CC-013.segment"]);
+      const active = life.filter(r => r.withdrawn_generation === null && family.has(r.kind));
+      const pairs = life.filter(r => r.kind === typed.PAIR_KINDS[1] || r.kind === typed.PAIR_KINDS[3]);
+      const axes = await typed.plain(await f(await f(snapshot, "catalog_evidence"), "axes"));
       typed.Center.validateCenterFamilyCut(active, axes);
       typed.Center.validatePairHistory(pairs);
     }
@@ -1847,8 +1911,7 @@
         const reason = await t(w, "reason"),
           sup = await (await f(w, "superseded_by")).scalar();
         need(
-          ["fact_removed", "superseded_by_revision"].includes(reason) &&
-            (reason === "fact_removed") === (sup === null),
+          reason === withdrawalReason(hasFact ? null : "CC-006.local_shape", sup),
           "撤回原因/替代不符",
         );
         if (sup !== null)
@@ -1893,6 +1956,9 @@
           await equal(await f(dd, dk), await f(snapshot, sk)),
           "Delta/Snapshot字段不同：" + sk,
         );
+      const changes = await f(await f(await f(await f(snapshot, "catalog_evidence"), "axes"), "CC-056"), "evidence");
+      for (const k of ["withdrawals", "replaces"])
+        need(await equal(await f(dd, k), await f(changes, k)), "Delta/CC-056 原件内容或活动主序不同：" + k);
       for (const k of ["profile_id", "profile_hash", "scope"])
         need(
           await equal(
@@ -3106,6 +3172,7 @@
       validateState: validateStateOnce,
       validateTB02Catalog: (catalog) => catalogValidate(catalog, null),
       validateDelta,
+      bindWithdrawalEvidence,
       comparePublication,
       rowKey,
       tuple,

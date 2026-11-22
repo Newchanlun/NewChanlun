@@ -80,17 +80,17 @@ test('公开Q3零代入口保留具名历史规则并拒绝未知规则', async 
 });
 // 单个完整 typed 端点对象的 cut；内容身份按该 cut 的会话规则闭合，使合同代际绑定成为唯一可能的拒因。
 async function endpointCut(generation, rule, protocol = 's-session/2') {
+  const batch = protocol === 's-session/3' ? 'batch3-' + 'b'.repeat(64) : 'batch-1';
   const payload = {...(generation === 2 ? V2 : V1), view_role:'main', object_generation:'1', slot:'fx:1:5', data:generation === 2 ? top : asV1(top, '5')};
-  const record = {object_id:null, object_revision:'1', kind:'CC-008.endpoint', batch_id:'batch-1', fact_key:API.canonical(['CC-008.endpoint', payload.slot]), payload,
+  const record = {object_id:null, object_revision:'1', kind:'CC-008.endpoint', batch_id:batch, fact_key:API.canonical(['CC-008.endpoint', payload.slot]), payload,
     input_refs:[], source_coords:[], first_known_generation:'1', first_known_cut:'cut-1', published_generation:'1',
     withdrawn_generation:null, withdrawal_reason:null, superseded_by:null, lifecycle:'active'};
   const identity = {kind:record.kind, fact_key:record.fact_key, payload, input_refs:[], profile_id:PROFILE, rule_revision:rule};
   record.object_id = protocol === 's-session/3' ? await API.Q3.V.identity(0x20, identity, 'obj3-') : 'obj-' + await API.sha256(identity);
-  if (protocol === 's-session/3') record.batch_id = 'batch3-' + 'b'.repeat(64);
   const scope = {structure:'CompleteCut', economic:'not_started'};
   const profile_hash = 'a'.repeat(64);
   const axes = rule.endsWith('segment-second/1') ? AXES : AXES.slice(0, 13);
-  const evidence = {profile_id:PROFILE, profile_hash, rule_revision:rule, structure_cut:'cut-1', scope, batch_id:'batch-1',
+  const evidence = {profile_id:PROFILE, profile_hash, rule_revision:rule, structure_cut:'cut-1', scope, batch_id:batch,
     ...Object.fromEntries(['classified_objects','windows_total','merged_bars','effective_source_positions','withdrawals','replaces','insufficient_knowledge','domain_not_satisfied'].map(k=>[k,'0'])),
     axes:Object.fromEntries(axes.map(a => {
       const segment = ['CC-011','CC-012','CC-013','CC-014'].includes(a);
@@ -102,9 +102,21 @@ async function endpointCut(generation, rule, protocol = 's-session/2') {
       }}];
     }))};
   const shared = {session_id:'contract', generation:'1', structure_cut:'cut-1', catalog_revision:API.TB02_CATALOG.catalog_revision,
-    index_frontier:'batch-1', scope, input_frontier:'-1', seq_range:{from:'0',to:'-1'}, catalog_run_status:'not_run', catalog_evidence:evidence};
+    index_frontier:batch, scope, input_frontier:'-1', seq_range:{from:'0',to:'-1'}, catalog_run_status:'not_run', catalog_evidence:evidence};
   const snapshot = {...shared, profile_id:PROFILE, profile_hash, rule_revision:rule, history_mode:'AsKnown', as_of_generation:'1',
     objects:[record], withdrawn_objects:[], witnesses:[], relations:[], observations:[], raw_history:[]};
+  if (protocol === 's-session/3') {
+    const kind = 'CC-054.knowledge_state', fact_key = API.canonical([kind,'TB-02-A']);
+    // 裸规则不发布中枢族，但非零代 S3 仍有零组的 CC-006 待决槽。
+    const reason = 'fewer_than_three_merged_bars';
+    const payload = {scope:'TB-02-A',input_frontier:'-1',known_facts:['raw_ohlc','inclusion_trace','group_provenance'],waiting_reasons:[reason],
+      requests:[{request_id:API.canonical(['CC-006.local_shape','pending']),subject_id:null,source_coords:[],reasons:[reason],
+        axes:{input_quality:'INSUFFICIENT',applicability:'DOMAIN_PROOF_MISSING',computation:'INCOMPLETE',validity:'CURRENT'}}],
+      domain:rule.includes('new-bi/2')?'established_direction_with_extreme_root_sets':'established_direction_without_extreme_identity_competition'};
+    const object_id = await API.Q3.V.identity(0x20, {kind,fact_key,payload,input_refs:[],profile_id:PROFILE,rule_revision:rule}, 'obj3-');
+    snapshot.objects.push({...record,kind,fact_key,payload,object_id});
+    evidence.classified_objects = String(snapshot.objects.length);
+  }
   const catalog = {...frozenCatalog(),...shared};
   for (const item of catalog.items) if (evidence.axes[item.id]) item.evidence = evidence.axes[item.id].evidence;
   return [{catalog, snapshot, cut:shared}, protocol];
@@ -137,16 +149,35 @@ test('v3知识域绑定完整规则且拒绝历史域混入新规则', async () 
   for (const version of [1,2]) {
     const rule = 's2-axis-quantifiers+new-bi/' + version;
     const [state, protocol] = await endpointCut(version, rule, 's-session/3');
-    const r = state.snapshot.objects[0];
-    r.kind = 'CC-054.knowledge_state';
-    r.fact_key = API.canonical([r.kind, 'TB-02-A']);
-    r.payload = {scope:'TB-02-A',input_frontier:'-1',known_facts:['raw_ohlc','inclusion_trace','group_provenance'],waiting_reasons:[],requests:[],
-      domain:version===1?'established_direction_without_extreme_identity_competition':'established_direction_with_extreme_root_sets'};
+    const r = state.snapshot.objects.find(r => r.kind === 'CC-054.knowledge_state');
     const identify = async () => { r.object_id = await API.Q3.V.identity(0x20, {kind:r.kind,fact_key:r.fact_key,payload:r.payload,input_refs:[],profile_id:PROFILE,rule_revision:rule}, 'obj3-'); };
     await identify(); await API.Q3.validateState(state, protocol);
     r.payload.domain = version===2?'established_direction_without_extreme_identity_competition':'established_direction_with_extreme_root_sets';
     await identify();
     await assert.rejects(API.Q3.validateState(state, protocol), /知识域与cut规则版本不符/);
+  }
+});
+
+test('#2072 B3 段变更空值门不作用于 S2、非结构 S3（含公开 Client）', async () => {
+  for (const protocol of ['s-session/2', 's-session/3']) {
+    const [st] = await endpointCut(1, RULE_NEW_BI_1, protocol);
+    const kind = 'CC-055.segment_change', entity = 'segment:1:0';
+    const slot = ['1', entity, 'formed'];
+    const known_at = {generation:'1', input_frontier:'-1', receipt_id:null, received_at:null, semantic_commit_ns:null};
+    const payload = {schema_revision:'s-segment/2', semantic_version:'segment-second/1', policy_version:'seed_closed_strict_second',
+      view_role:'main', object_generation:'1', slot,
+      data:{entity_id:entity, change:'formed', before:null, after:null, known_at, object_id:null}};
+    const fact_key = API.canonical([kind, slot]);
+    const identity = {kind, fact_key, payload, input_refs:[], profile_id:PROFILE, rule_revision:RULE_NEW_BI_1};
+    const object_id = protocol === 's-session/3' ? await API.Q3.V.identity(0x20, identity, 'obj3-') : 'obj-' + await API.sha256(identity);
+    st.snapshot.objects.push({...st.snapshot.objects[0], kind, fact_key, payload, object_id});
+    st.snapshot.catalog_evidence.classified_objects = String(st.snapshot.objects.length);
+    await API.Q3.validateState(st, protocol);
+    if (protocol === 's-session/3') {
+      const H = require('./q3_complete_fixture.cjs'), server = await H.serverFromState(st), client = H.makeClient(server);
+      await client.load(H.discovery(server), 'AsKnown', '1');
+      assert.equal(client.committed.cursor.after_generation, '1');
+    }
   }
 });
 
