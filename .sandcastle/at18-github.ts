@@ -52,7 +52,8 @@ export function at18GitHub(root: string, origin: string): At18GitHub {
     repo,
     jobLog(id) {
       if (!Number.isSafeInteger(id) || id <= 0) throw new Error("job identity");
-      return request(["repos/" + repo + "/actions/jobs/" + id + "/logs"]);
+      // GitHub emits ANSI colors in cargo logs; read into a pipe, never a terminal.
+      return request(["--allow-escape-sequences", "repos/" + repo + "/actions/jobs/" + id + "/logs"]);
     },
     async get(route, fresh) { return object(await call(route, false, fresh)); },
     async list(route, key, fresh) {

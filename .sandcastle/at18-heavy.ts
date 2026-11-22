@@ -1,8 +1,8 @@
-import { heavySeries, heavyWindow as window } from "./at18-heavy-input.ts";
+import { heavySeries, heavyWindow as window, matchesHeavySnapshot, snapshotSymbol, type HeavyInputChunk } from "./at18-heavy-input.ts";
 import { z } from "zod";
 import { type External } from "./at18-evidence.ts";
 import { byteSha256, canonicalizeJcs, digest, heavy, integer, parseJsonObject, repoPath, sha, text, utc } from "./at18-format.ts";
-import { object, type Row } from "./at18-github.ts";
+import { isRow, object, type Row } from "./at18-github.ts";
 import { type AcceptedReview, type Tracker, utcBefore } from "./at18-integrations.ts";
 import { type At18Repository, type Diagnostics, repoRef } from "./at18-source.ts";
 import { unique } from "./at18-coverage.ts";
@@ -17,8 +17,15 @@ const pinnedFile = z.strictObject({ commit: sha, path: repoPath, sha256: digest 
 const arm = z.strictObject({ id: armId, definition_sha256: digest });
 const control = arm.extend({ seed: z.literal(20260625), replications: z.literal(1000) });
 const plan = z.strictObject({
-  schema_version: z.literal("at18-heavy-preregistration/1"), ticket: z.literal(1320),
+  schema_version: z.literal("at18-heavy-preregistration/2"), ticket: z.literal(1320),
   protocol_sha256: digest, windows_sha256: digest, design: z.literal("FROZEN_PREREGISTERED_DUAL_CONTROLS"),
+  snapshot: z.strictObject({
+    basis: z.discriminatedUnion("kind", [
+      z.strictObject({ kind: z.literal("FROZEN_WINDOWS_V0") }),
+      z.strictObject({ kind: z.literal("APPROVED_REPLACEMENT"), source: text, rationale: text }),
+    ]),
+    symbols: z.array(snapshotSymbol).length(7),
+  }),
   symbols: z.array(z.string()), interval: z.literal("1min"), trials: z.array(arm).min(1), controls: z.array(control).length(2),
 });
 const rollup = z.strictObject({ schema_version: z.literal("at18-heavy-measurement/1"), head: sha,
@@ -75,6 +82,15 @@ function tenYears(from: string, to: string) {
 const sameWindow = (a: z.infer<typeof window>, b: z.infer<typeof window>) =>
   a.first_bar_at === b.first_bar_at && a.last_bar_at === b.last_bar_at && a.bars === b.bars;
 
+function matchesOriginalWindows(windows: Buffer, rows: z.infer<typeof snapshotSymbol>[]) {
+  const table = [...windows.toString("utf8").matchAll(/^\| (\w+) \| [^|]+ \| ([\d,]+) \| (\d{4}-\d\d-\d\d) \| (\d{4}-\d\d-\d\d) \|$/gm)];
+  return rows.every(row => {
+    const hits = table.filter(match => match[1] === row.symbol);
+    return hits.length === 1 && Number(hits[0][2].replaceAll(",", "")) === row.bars &&
+      hits[0][3] === row.first_bar_at.slice(0, 10) && hits[0][4] === row.last_bar_at.slice(0, 10);
+  });
+}
+
 export function measuredHeavy(s: At18Repository, F: string, sources: External[], reviewed: ReadonlyMap<string, AcceptedReview>, windows: Buffer | undefined) {
   if (!windows) return undefined;
   const candidates = sources.filter(e => e.ref.ticket === 1320 && e.json.schema_version === "at18-heavy-measurement/1");
@@ -97,14 +113,17 @@ export function measuredHeavy(s: At18Repository, F: string, sources: External[],
         !unique(frozen.trials.map(a => a.id)) || !unique([...frozen.trials, ...frozen.controls].map(a => a.id)) ||
         !heavySymbols.every(x => frozen.symbols.includes(x)) || frozen.symbols.length !== heavySymbols.length ||
         !controlIds.every(x => frozen.controls.some(c => c.id === x)) ||
-        !heavySymbols.every(x => summary.symbols.some(e => e.symbol === x))) return undefined;
+        !heavySymbols.every(x => summary.symbols.some(e => e.symbol === x) &&
+          frozen.snapshot.symbols.some(e => e.symbol === x)) ||
+        (frozen.snapshot.basis.kind === "FROZEN_WINDOWS_V0" && !matchesOriginalWindows(windows, frozen.snapshot.symbols))) return undefined;
 
     const evidence = sources.filter(e => e.ref.ticket === 1320 && e.ref.head === F && e.json.head === F);
     if (!unique(evidence.map(e => e.ref.sha256))) return undefined;
     const records = new Map(evidence.map(e => [e.ref.sha256, e]));
     const consumed = new Set(candidates);
     for (const row of summary.symbols) {
-      if (!tenYears(row.first_bar_at, row.last_bar_at) || !utcBefore(row.last_bar_at, summary.started_at)) return undefined;
+      const snapshot = frozen.snapshot.symbols.find(e => e.symbol === row.symbol);
+      if (!snapshot || !sameWindow(row, snapshot) || !tenYears(snapshot.first_bar_at, snapshot.last_bar_at) || !utcBefore(row.last_bar_at, summary.started_at)) return undefined;
       const item = records.get(row.result_sha256);
       if (!item) return undefined;
       const data = symbolResult.parse(item.json);
@@ -115,18 +134,15 @@ export function measuredHeavy(s: At18Repository, F: string, sources: External[],
       if (!input || consumed.has(input)) return undefined;
       const series = heavySeries.parse(input.json);
       if (series.symbol !== row.symbol || !sameWindow(series, row) || !unique(series.chunks)) return undefined;
-      let bars = 0;
-      let previous: string | undefined;
+      const chunks: HeavyInputChunk[] = [];
       for (const digest of series.chunks) {
         const original = records.get(digest);
         const chunk = original?.chunk;
-        if (!original || !chunk || consumed.has(original) || chunk.symbol !== row.symbol ||
-            (previous === undefined ? chunk.first_bar_at !== row.first_bar_at : !utcBefore(previous, chunk.first_bar_at))) return undefined;
-        previous = chunk.last_bar_at;
-        bars += chunk.bars;
+        if (!original || !chunk || consumed.has(original) || chunk.symbol !== row.symbol) return undefined;
+        chunks.push(chunk);
         consumed.add(original);
       }
-      if (previous !== row.last_bar_at || bars !== row.bars) return undefined;
+      if (!matchesHeavySnapshot(snapshot, chunks)) return undefined;
       consumed.add(input);
 
       const replayItem = records.get(data.replay_sha256);
@@ -182,6 +198,25 @@ export function measuredHeavy(s: At18Repository, F: string, sources: External[],
   } catch { return undefined; }
 }
 
+const retirementChange = z.discriminatedUnion("disposition", [
+  z.strictObject({ disposition: z.literal("REVOKE"), decision_ticket: integer, ticket: z.literal(1320),
+    obligation: z.literal(heavy), decision_sha256: digest, approval_comment_id: integer }),
+  z.strictObject({ disposition: z.literal("REPLACE"), decision_ticket: integer, ticket: z.literal(1320),
+    obligation: z.literal(heavy), decision_sha256: digest, approval_comment_id: integer, replacement_sha256: digest }),
+]);
+function revokes(comment: Row, issueUrl: string, ticket: number, approval: number, digest: string) {
+  if (!integer.safeParse(comment.id).success || Number(comment.id) <= approval ||
+      comment.issue_url !== issueUrl || comment.author_association !== "OWNER" ||
+      typeof comment.body !== "string" || !isRow(comment.user) || comment.user.type !== "User") return false;
+  const fence = /^```at18-heavy-retirement-change\/1\r?\n([\s\S]+?)\r?\n```\s*$/.exec(comment.body);
+  if (!fence) return false;
+  try {
+    const change = retirementChange.parse(parseJsonObject(Buffer.from(fence[1])));
+    return change.decision_ticket === ticket && change.decision_sha256 === digest && change.approval_comment_id === approval &&
+      (change.disposition === "REVOKE" || change.replacement_sha256 !== digest);
+  } catch { return false; }
+}
+
 export async function authorizedHeavyRetirement(s: At18Repository, F: string, sources: External[],
   reviewed: ReadonlyMap<string, Row>, tracker: Tracker, diag: Diagnostics) {
   const candidates = sources.filter(e => e.ref.ticket === 1320 && e.json.schema_version === "at18-heavy-retirement-reference/1");
@@ -205,10 +240,11 @@ export async function authorizedHeavyRetirement(s: At18Repository, F: string, so
     }) + "\n```";
     const approval = reviews?.find(c => c.id === d.authorization_comment_id);
     const approvedBeforeMerge = approval && utcBefore(approval.updated_at, reviewed.get(p.commit)?.merged_at);
-    if (!approval || approval.issue_url !== `https://api.github.com/repos/${s.github.repo}/issues/${d.decision_ticket}` ||
+    const issueUrl = `https://api.github.com/repos/${s.github.repo}/issues/${d.decision_ticket}`;
+    if (!approval || approval.issue_url !== issueUrl ||
         approval.author_association !== "OWNER" || object(approval.user).type !== "User" ||
         !approvedBeforeMerge || approval.body !== expected ||
-        reviews?.some(c => typeof c.id !== "number" || c.id > d.authorization_comment_id)) return undefined;
+        reviews?.some(c => revokes(c, issueUrl, d.decision_ticket, d.authorization_comment_id, p.sha256))) return undefined;
     return { used: candidates[0], ruling: repoRef(p.commit, p.path, bytes, "LEGACY_SOURCE") };
   } catch { return undefined; }
 }

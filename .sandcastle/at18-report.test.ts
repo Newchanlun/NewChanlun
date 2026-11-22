@@ -1,3 +1,4 @@
+import { at14CiSteps } from "./at18-at14-ci.ts";
 import { deliveredProducts } from "./at18-products.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type SpawnOptions } from "node:child_process";
@@ -180,7 +181,7 @@ test("正式 CLI 正控：同一 Git 图／API 原件／已登记实体得到 PA
   mkdirSync(producer);
   const aae = "aae6abf9234eca663fc3e59484e90f644c12899e";
   const repository = new At18Repository(root);
-  for (const name of ["adapter.py", "common.py"]) {
+  for (const name of ["adapter.py", "common.py", "run_checks.py"]) {
     writeFileSync(join(producer, name), repository.blob(aae, "scripts/at18/" + name));
   }
   writeFileSync(join(producer, "adapter-contract.json"), s.blob(f.F, at18 + "adapter-contract.json"));
@@ -391,6 +392,22 @@ test("R4/H3,H5,H6,H8/M2,M3：单点破坏精确落到实体、逐键、产品、
   const cases: [string, Mutation, (report: At18Report) => void][] = [
     ["comment-replacement：匹配字节的纯注释不算收编", { feedReplacement: "/* mod fake { fn run() {} } */\n// no implementation" },
       r => reportFail(r, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE")],
+    ...(["isolated", "no-coverage", "missing-child", "wrong-test-symbol"] as const)
+      .map((feedCase): [string, Mutation, (report: At18Report) => void] =>
+        ["#1319 " + feedCase, { feedCase }, r => reportFail(r, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE")]),
+    ...["# comment only", '"""docstring only"""', "", "def route():\n    pass"].map(
+      (feedReplacement): [string, Mutation, (report: At18Report) => void] =>
+        ["#1319 空壳: " + JSON.stringify(feedReplacement), { feedReplacement },
+          r => reportFail(r, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE")]),
+    ["#1319 Python yield from 与 Rust pub mod 接入且有 TB-08 验证", {}, r => {
+      positive(r);
+      const paths = legacyRow(r, 1319).evidence_refs.map(ref => ref.path);
+      assert.ok(paths.includes("trading_system/at18_fixture_feed.py"));
+      assert.ok(paths.includes("rust/src/at18_fixture_wire/mod.rs"));
+      assert.ok(paths.includes("trading_system/tests/test_at18_fixture_feed.py"));
+      assert.ok(paths.includes("rust/tests/at18_fixture_wire.rs"));
+    }],
+    ["#1319 Rust pub use 追到真实子模块", { feedCase: "reexport" }, positive],
     ["opaque_extra：R07 不投影掉未知 TB 记录业务键", { records: r => {
       if (r.record === "tb.simulation.TB-01") object(r.payload).opaque_extra = "unexpected";
     } }, r => {
@@ -509,14 +526,14 @@ test("R4/H4：AT-14 合同缺字段、缺摘要／不一致、Node 冒充 Rust �
     } }],
     ["contradiction", { at14: row => { object(row.assumption_counts).stochastic_l1_count = 1; } }],
     ["wrong-policy-version", { at14: row => { object(row.dual_run_tuple).policy_version = "funding@2"; } }],
-    ...(["ignored", "skip-ci", "dispatch-only", "ignored-only", "unrecorded"] as const)
+    ...(["ignored", "skip-ci", "dispatch-only", "ignored-only", "unrecorded", "wrong-step", "comment", "qualified-selector", "sibling-selector"] as const)
       .map((at14Ci): [string, Mutation] => [at14Ci, { at14Ci }]),
     ["qualified-policy", { at14: row => { object(row.dual_run_tuple).policy_version = "funding@1"; } }],
   ];
   await Promise.all(cases.map(([name, mutation]) =>
     t.test(name, { timeout: 90_000 }, async () => {
       const { report } = await control(mutation, name);
-      (name === "qualified-policy" ? positive : at14Fail)(report);
+      (["qualified-policy", "comment", "qualified-selector"].includes(name) ? positive : at14Fail)(report);
     })));
 });
 
@@ -535,13 +552,14 @@ test("R4/H9/M1：重测、废弃及延期相互独立；图外状态不影响 #1
   skip: !pathExistsGit, timeout: 240_000, concurrency: 2,
 }, async t => {
   await Promise.all((["measured", "short", "missing-control", "wrong-trial", "retired", "unapproved-retirement", "one-bar", "late-review",
-    "malformed-heavy", "input-unregistered", "second-run-missing", "output-diverges", undefined] as const)
+    "malformed-heavy", "input-unregistered", "second-run-missing", "output-diverges", "sparse", "unapproved-gap", "wrong-count", "wrong-chunk",
+    "retired-thanks", "retired-owner-revoke", "retired-nonowner-revoke", undefined] as const)
     .map(heavyCase => t.test(heavyCase ?? "未测先关 #1320", async () => {
       const { report } = await control({ heavyCase, api: api => close(api, 1320) }, "heavy/" + (heavyCase ?? "unmeasured"));
       const disposition = legacyRow(report, 1320);
       assert.equal(legacyRow(report, 1279).disposition_valid, true);
       assert.equal(report.destinations[5].result, "PASS");
-      if (heavyCase === "measured" || heavyCase === "retired") {
+      if (["measured", "retired", "retired-thanks", "retired-nonowner-revoke"].some(x => x === heavyCase)) {
         positive(report);
         assert.equal(disposition.disposition_valid, true);
         assert.equal(report.unexecuted.some(row => row.obligation === heavy), false);
@@ -599,4 +617,65 @@ test("R5/H6：R09 绑定真实 PR #1942 的旧 head，无新 fence 仍归 #1381"
   assert.deepEqual(deliveredProducts(s, claim(1404, path), new Map(), R09.accepted), []);
   assert.deepEqual(deliveredProducts(s, claim(1381, "README.md"), new Map(), R09.accepted), []);
   assert.deepEqual(deliveredProducts(s, claim(1381, path), new Map(), new Map()), []);
+});
+
+test("R6/H4：真实 CI 的 pull_request 行尾注释不改变目标；拒被过滤的 PR", { skip: !pathExistsGit }, () => {
+  const s = new At18Repository(root);
+  const workflow = s.blob("b9d898dccf46c2a716115eaa1215bc39c458a959", workflows[0]).toString("utf8");
+  const lock = { name: "dual_run_determinism_h1", target: "production_session_entry" };
+  const expected = at14CiSteps(workflow, [lock]);
+  assert.ok(expected.some(step => step.jobName === "rust-test-production-session" && step.index === 3));
+  const commented = workflow.replace(/^  pull_request:$/m, "  pull_request: # comment");
+  assert.notEqual(commented, workflow);
+  assert.deepEqual(at14CiSteps(commented, [lock]), expected);
+  const quoteName = commented.replace("（纯生产构建）", "（纯生产构建） # inline");
+  assert.deepEqual(at14CiSteps(quoteName, [lock]), expected);
+  const filtered = commented.replace(/^(  pull_request:.*)$/m, "$1\n    paths: ['rust/**']");
+  assert.deepEqual(at14CiSteps(filtered, [lock]), []);
+});
+
+test("R6/H1：正式 CLI 依据原始 JSON 数字类型；大整数不按 Number 取整", {
+  skip: !pathExistsGit, timeout: 180_000, concurrency: 2,
+}, async t => {
+  for (const [field, literal, accepts] of [
+    ["processes", "1.0", false], ["processes", "1e0", false], ["processes", "9007199254740992", true],
+    ["processes", "9007199254740993", true], ["processes", "1" + "0".repeat(400), true],
+    ["run_attempt", "2.0", false],
+  ] as const) await t.test(field + "=" + (literal.length > 60 ? "401 位整数" : literal), async () => {
+    const { report } = await control({ recordLexeme: (r, bytes) => {
+      if (r.record !== "tb.simulation.TB-01") return bytes;
+      return Buffer.from(bytes.toString("utf8").replace('"'+field+'":2', '"'+field+'":'+literal));
+    } }, "R6/numbers/" + field + "/" + (literal.length > 60 ? "401digits" : literal));
+    if (accepts) positive(report);
+    else {
+      reportFail(report, "RECORD_UNSEALED", "slot:tb.simulation.TB-01");
+      assert.equal(report.tb_summaries[0].entity_reports.length, 0);
+    }
+  });
+});
+
+test("R6/H9：旧三根跨十年输入保持 #1320 OPEN，延期非图内必需", { skip: !pathExistsGit, timeout: 90_000 }, async () => {
+  const { report } = await control({ heavyCase: "sparse" }, "R6/heavy/sparse-open");
+  positive(report);
+  const row = legacyRow(report, 1320);
+  assert.equal(row.ticket_state, "OPEN");
+  assert.ok(row.remaining_obligations.includes(heavy));
+  assert.equal(report.unexecuted.find(row => row.obligation === heavy)?.required, false);
+});
+
+test("R6/H6：真实 #2021 路径提交的自然位置票号归 #1407，仍要求 R09 和实际差异", { skip: !pathExistsGit }, () => {
+  const s = new At18Repository(root);
+  const commit = "b9d898dccf46c2a716115eaa1215bc39c458a959";
+  const path = "rust/src/economic_session/exact_command.rs";
+  const head = s.string("rev-parse", commit + "^2");
+  assert.equal(head, "fdda2200fbe8caf4e400faa1b7c12e8bd7143258");
+  const reviewed = new Map([[commit, { number: 2021, head: { sha: head, ref: "opus/1407-c1-e-release" } }]]);
+  const claim = (number: number, p: string): Ticket => ({
+    number, state: "CLOSED", reason: "COMPLETED", labels: [], updated_at: null,
+    data: { body: "```at18-product-delivery/1\n" + JSON.stringify({ ticket: number, products: [{ commit, path: p }] }) + "\n```" },
+  });
+  assert.deepEqual(deliveredProducts(s, claim(1407, path), new Map(), reviewed), [commit]);
+  assert.deepEqual(deliveredProducts(s, claim(1404, path), new Map(), reviewed), []);
+  assert.deepEqual(deliveredProducts(s, claim(1407, "README.md"), new Map(), reviewed), []);
+  assert.deepEqual(deliveredProducts(s, claim(1407, path), new Map(), new Map()), []);
 });

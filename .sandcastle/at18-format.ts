@@ -189,9 +189,22 @@ export class At18BootstrapError extends Error {
 
 export const byteSha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-export function parseJsonObject(bytes: Uint8Array): Record<string, unknown> {
+// JSON.parse 负责语法；对同一棵树保留数字原词，避免将 1.0、1e0 和 1 判成同一个 Python int。
+const numberTokens = new WeakMap<object, Map<string, string>>();
+const intToken = /^-?(?:0|[1-9][0-9]*)$/;
+export function jsonInteger(parent: unknown, key: string, value: unknown): bigint | undefined {
+  const token = typeof parent === "object" && parent !== null ? numberTokens.get(parent)?.get(key) : undefined;
+  if (token !== undefined) return intToken.test(token) ? BigInt(token) : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : undefined;
+}
+export function jsonNumber(parent: unknown, key: string, value: unknown) {
+  return (typeof value === "number" && Number.isFinite(value)) || jsonInteger(parent, key, value) !== undefined;
+}
+
+export function parseJsonObject(bytes: Uint8Array, numbers: "jcs" | "producer" = "jcs"): Record<string, unknown> {
   let source: string;
   let value: unknown;
+  const bad = (message: string): never => { throw new At18DerivationError("JSON_PARSE", message); };
   try {
     source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
@@ -199,21 +212,46 @@ export function parseJsonObject(bytes: Uint8Array): Record<string, unknown> {
   }
   try { value = JSON.parse(source); }
   catch { throw new At18DerivationError("JSON_PARSE", "文件不符合 JSON 语法。"); }
-  if (!isRow(value)) {
-    throw new At18DerivationError("JSON_PARSE", "JSON 顶层须为对象。");
+  if (!isRow(value)) throw new At18DerivationError("JSON_PARSE", "JSON 顶层须为对象。");
+  const tokens = source.matchAll(/"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}\[\]:,]|true|false|null/gs);
+  const next = () => tokens.next().value?.[0];
+  const unicode = (s: string) => { if (/[\uD800-\uDFFF]/u.test(s)) bad("JSON 含孤立代理码点。"); };
+  function scan(item: unknown, parent: object | undefined, key: string, token = next()): void {
+    if (token === "{") {
+      const keys = new Set<string>();
+      for (let field = next(); field !== undefined && field !== "}"; field = next()) {
+        if (field === ",") continue;
+        const name: string = JSON.parse(field);
+        if (keys.has(name)) bad("JSON 含重复键。");
+        keys.add(name);
+        if (numbers === "producer") unicode(name);
+        next(); // 冒号已由 JSON.parse 验证
+        scan(isRow(item) ? item[name] : undefined, isRow(item) ? item : undefined, name);
+      }
+    } else if (token === "[") {
+      let index = 0;
+      for (let element = next(); element !== undefined && element !== "]"; element = next()) {
+        if (element !== ",") {
+          scan(Array.isArray(item) ? item[index] : undefined, Array.isArray(item) ? item : undefined, String(index), element);
+          index++;
+        }
+      }
+    } else if (typeof item === "number" && token !== undefined && parent) {
+      let fields = numberTokens.get(parent);
+      if (!fields) { fields = new Map(); numberTokens.set(parent, fields); }
+      fields.set(key, token);
+      // CPython strict_json 的 float 必须有限；int 不经过 IEEE 754。
+      if (numbers === "producer") {
+        if (!intToken.test(token) && !Number.isFinite(item)) bad("JSON 浮点数必须有限。");
+        // 与 CPython 生产入口默认的十进制解析上限一致；不设 IEEE 754 安全整数上限。
+        if (intToken.test(token) && token.length - Number(token.startsWith("-")) > 4300) bad("JSON 整数字面量超过生产入口上限。");
+      }
+    } else if (numbers === "producer" && typeof item === "string") unicode(item);
   }
-  // 语法由 JSON.parse 核验；扫描原 token，以免重复键（包括转义后同名）被覆盖。
-  const stack: (Set<string> | null)[] = [];
-  for (const [token] of source.matchAll(/"(?:[^"\\]|\\.)*"[\x20\t\r\n]*:?|[{}\[\]]/gs)) {
-    if (token === "{") stack.push(new Set());
-    else if (token === "[") stack.push(null);
-    else if (token === "}" || token === "]") stack.pop();
-    else if (token.endsWith(":")) {
-      const name: string = JSON.parse(token.slice(0, -1));
-      const keys = stack.at(-1)!;
-      if (keys.has(name)) throw new At18DerivationError("JSON_PARSE", "JSON 含重复键。");
-      keys.add(name);
-    }
+  try { scan(value, undefined, ""); }
+  catch (e) {
+    if (e instanceof At18DerivationError) throw e;
+    throw new At18DerivationError("JSON_PARSE", "JSON 嵌套无法读取。");
   }
   return value;
 }

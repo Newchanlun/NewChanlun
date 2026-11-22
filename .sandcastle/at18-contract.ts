@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { byteSha256, canonicalizeJcs, digest, evidenceClass, integer, repoPath, sha, tbId, text, utc } from "./at18-format.ts";
+import { byteSha256, canonicalizeJcs, digest, evidenceClass, integer, jsonInteger, jsonNumber, repoPath, sha, tbId, text, utc } from "./at18-format.ts";
 import { isRow, object, rows, type Row } from "./at18-github.ts";
 import { valueAt } from "./at18-source.ts";
 
@@ -119,21 +119,39 @@ export function typed(value: unknown, type: string): boolean {
     "decimal-string": z.string().regex(/^-?(0|[1-9]\d*)(\.\d+)?$/) };
   return schemas[type]?.safeParse(value).success ?? false;
 }
+function producerTyped(value: unknown, type: string, parent: unknown, key: string): boolean {
+  if (type.startsWith("nullable-")) return value === null || producerTyped(value, type.slice(9), parent, key);
+  if (type.endsWith("-array")) return Array.isArray(value) &&
+    value.every((item, index) => producerTyped(item, type.slice(0, -6), value, String(index)));
+  if (type === "positive-integer") {
+    const integer = jsonInteger(parent, key, value);
+    return integer !== undefined && integer > 0n;
+  }
+  return typed(value, type);
+}
 type FieldRules = z.infer<typeof fieldsSchema>;
-export function decodeFields(contract: Adapter, fields: FieldRules, input: unknown, depth = 0): Row {
+export function decodeFields(contract: Adapter, fields: FieldRules, input: unknown, depth = 0, producer = false): Row {
   if (depth > 8) throw new Error("SCHEMA");
   return Object.fromEntries(Object.entries(fields).map(([name, rule]) => {
     const value = valueAt(input, rule.pointer);
-    if (!typed(value, rule.type)) throw new Error("SCHEMA");
+    const slash = rule.pointer.lastIndexOf("/");
+    const parent = valueAt(input, rule.pointer.slice(0, slash));
+    const key = rule.pointer.slice(slash + 1).replaceAll("~1", "/").replaceAll("~0", "~");
+    if (!(producer ? producerTyped(value, rule.type, parent, key) : typed(value, rule.type))) throw new Error("SCHEMA");
     const nested = rule.decode_as && contract.item_sources[rule.decode_as];
     if (rule.decode_as && !nested) throw new Error("SCHEMA");
     return [name, !nested ? value : Array.isArray(value)
-      ? value.map(v => decodeFields(contract, nested, v, depth + 1)) : decodeFields(contract, nested, value, depth + 1)];
+      ? value.map(v => decodeFields(contract, nested, v, depth + 1, producer)) : decodeFields(contract, nested, value, depth + 1, producer)];
   }));
 }
 // 同 #2131 adapter.py 的公开业务容器；嵌套数组不是数值样本。
-export const tbConditions = z.strictObject({ processes: integer.optional() });
-export const tbOutput = z.strictObject({ samples: z.array(z.number().finite()).optional() });
+export function validateTbContainers(data: Row) {
+  const { conditions, output } = data;
+  if (!isRow(conditions) || !isRow(output) ||
+      !Object.keys(conditions).every(k => k === "processes" && producerTyped(conditions[k], "positive-integer", conditions, k)) ||
+      !Object.keys(output).every(k => k === "samples" && Array.isArray(output[k]) &&
+        output[k].every((n, i) => jsonNumber(output[k], String(i), n)))) throw new Error("SCHEMA");
+}
 // #2131 _public_fields：先对原件按登记指针检查完整键树，随后才能投影。
 function closedRecord(contract: Adapter, fields: FieldRules, input: unknown, versionPointer?: string, depth = 0) {
   type Shape = { children: Map<string, Shape>; decoder?: string };
@@ -170,11 +188,8 @@ export function decodeRecord(contract: Adapter, record: string, payload: Row): R
   const rule = contract.run_records[record] ?? contract.run_records.tb;
   if (valueAt(payload, rule.version_pointer) !== rule.version) throw new Error("SCHEMA");
   if (rule === contract.run_records.tb) closedRecord(contract, rule.fields, payload, rule.version_pointer);
-  const data = decodeFields(contract, rule.fields, payload);
-  if (rule === contract.run_records.tb) {
-    tbConditions.parse(data.conditions);
-    tbOutput.parse(data.output);
-  }
+  const data = decodeFields(contract, rule.fields, payload, 0, true);
+  if (rule === contract.run_records.tb) validateTbContainers(data);
   return data;
 }
 export function sameDigest(bytes: Buffer, hash: string) { return byteSha256(bytes) === hash; }

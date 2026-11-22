@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { at18, At18Repository, Diagnostics, G0, P0, sorted } from "./at18-source.ts";
+import { at18, At18Repository, Diagnostics, G0, P0, sorted, utf8 } from "./at18-source.ts";
 import { basisId, readCoverage } from "./at18-coverage.ts";
 import { adapter as decodeAdapter, type Registry } from "./at18-contract.ts";
 import {
@@ -12,6 +12,7 @@ import { object, rows, type Row } from "./at18-github.ts";
 import { acceptedAt14, at14Summary, AT14_LOCKS } from "./at18-at14.ts";
 import { feedWirePaths } from "./at18-legacy.ts";
 import { r11Checks, r11Source, verifyPregateHistory } from "./at18-pregate.ts";
+import { heavyInputChunk } from "./at18-heavy-input.ts";
 import { heavySymbols } from "./at18-heavy.ts";
 
 const specCommit = "b9d898dccf46c2a716115eaa1215bc39c458a959";
@@ -45,8 +46,10 @@ export type Mutation = {
   enabledWithoutFirstActivation?: boolean;
   at14?: (record: Row) => void;
   at14Node?: boolean;
-  at14Ci?: "ignored" | "skip-ci" | "dispatch-only" | "ignored-only" | "unrecorded";
+  at14Ci?: "ignored" | "skip-ci" | "dispatch-only" | "ignored-only" | "unrecorded" | "comment" | "wrong-step" | "qualified-selector" | "sibling-selector";
   feedReplacement?: string;
+  feedCase?: "isolated" | "no-coverage" | "missing-child" | "wrong-test-symbol" | "reexport";
+  recordLexeme?: (record: Row, bytes: Buffer) => Buffer;
   historicProducts?: "correct" | "swapped";
   emptyProduct?: boolean;
   summary?: "missing" | "inconsistent";
@@ -54,8 +57,48 @@ export type Mutation = {
   feedWire?: (entries: Row[]) => Row[];
   historicalCures?: "all" | "missing" | "failed" | "empty-node" | "empty-step" | "empty-rust";
   heavyCase?: "measured" | "short" | "missing-control" | "wrong-trial" | "retired" | "unapproved-retirement" | "one-bar" | "late-review" |
-    "malformed-heavy" | "input-unregistered" | "second-run-missing" | "output-diverges";
+    "malformed-heavy" | "input-unregistered" | "second-run-missing" | "output-diverges" |
+    "sparse" | "unapproved-gap" | "wrong-count" | "wrong-chunk" |
+    "retired-thanks" | "retired-owner-revoke" | "retired-nonowner-revoke";
 };
+
+const dayMs = 86_400_000;
+const iso = (at: number) => new Date(at).toISOString().replace(".000Z", "Z");
+const periodic = [1, 2, 3, 4, 5].map(weekday => ({ weekday, start_minute: 0, end_minute: 23 * 60 }));
+const closure = { from: "2019-06-24T00:00:00Z", until: "2019-06-26T00:00:00Z", reason: "合成交易所维护（两日停市）" };
+function fixtureSnapshot(symbol: string, variant: Mutation["heavyCase"]) {
+  const first_bar_at = "2015-01-01T00:00:00Z";
+  const last_bar_at = variant === "short" ? "2024-12-31T22:59:00Z" : "2025-01-01T00:00:00Z";
+  const days: { at: string; minutes: number; open: number; low: number; high: number; close: number; volume: number }[] = [];
+  const values = { open: 100, low: 99, high: 102, close: 101, volume: 12 };
+  if (variant === "sparse") {
+    for (const at of [first_bar_at, "2020-01-01T00:00:00Z", last_bar_at]) days.push({ at, minutes: 1, ...values });
+  } else {
+    for (let at = Date.parse(first_bar_at); at <= Date.parse(last_bar_at); at += dayMs) {
+      const weekday = new Date(at).getUTCDay();
+      if (!weekday || weekday === 6 || (at >= Date.parse(closure.from) && at < Date.parse(closure.until))) continue;
+      if (variant === "one-bar" && days.length) break;
+      days.push({ at: iso(at), minutes: variant === "one-bar" ? 1 : Math.min(23 * 60, (Date.parse(last_bar_at) - at) / 60_000 + 1), ...values });
+    }
+  }
+  const chunkDocs = [];
+  const batch = variant === "sparse" ? 1 : 70;
+  for (let i = 0; i < days.length; i += batch) {
+    chunkDocs.push({ schema_version: "at18-heavy-input-chunk/1", symbol, interval: "1min", runs: days.slice(i, i + batch) });
+  }
+  const chunks = chunkDocs.map(doc => {
+    const { first_bar_at, last_bar_at, bars, data_sha256 } = heavyInputChunk({ ...doc, head: specCommit });
+    return { first_bar_at, last_bar_at, bars, data_sha256 };
+  });
+  const bars = chunks.reduce((sum, c) => sum + c.bars, 0);
+  const snapshot = { symbol, first_bar_at, last_bar_at, bars: bars + (variant === "wrong-count" ? 1 : 0), chunks,
+    calendar: { source: "合成交易所冻结日历：周一至周五交易 23 小时", sessions: [{
+      effective_from: first_bar_at, effective_to: iso(Date.parse(last_bar_at) + 60_000), week: periodic,
+    }] },
+    approved_gaps: variant === "unapproved-gap" ? [] : [closure],
+  };
+  return { snapshot, chunkDocs, bars };
+}
 
 export function canMakeFixture() {
   try {
@@ -297,8 +340,10 @@ export function makeFixture(mutation: Mutation = {}) {
   groups.set("control.cures", "simulation");
   const at14Target = "at18_fixture_at14";
   const at14Source = `rust/tests/${at14Target}.rs`;
+  const nestedAt14 = mutation.at14Ci === "qualified-selector" || mutation.at14Ci === "sibling-selector";
   const at14Carrier = [
     '#![cfg(feature = "production_session")]',
+    ...(nestedAt14 ? ['mod replay {'] : []),
     'use std::process::Command;',
     ...AT14_LOCKS.flatMap(name => [
       "#[test]", ...(mutation.at14Ci === "ignored" ? ["#[ignore]"] : []), `fn ${name}() {`,
@@ -306,6 +351,7 @@ export function makeFixture(mutation: Mutation = {}) {
       `    let run = Command::new(fixture).arg("${name}").status().expect("official AT-14 fixture");`,
       '    assert!(run.success());', '}',
     ]),
+    ...(nestedAt14 ? ["}"] : []),
   ].join("\n") + "\n";
   put(at14Source, at14Carrier);
   const nodeLockPath = ".sandcastle/fixtures/at18/at14-node-locks.mjs";
@@ -314,11 +360,43 @@ export function makeFixture(mutation: Mutation = {}) {
   AT14_LOCKS.forEach((selector, i) => checks.push({
     check_id: "at14.h" + (i + 1), group: "control.at14", evidence_class: "simulation", profile_id: null,
     runner: mutation.at14Node ? "node-test" : "cargo-test",
-    selector: mutation.at14Node ? selector : `test:${at14Target}+production_session/${selector}`,
+    selector: mutation.at14Node ? selector : `test:${at14Target}+production_session/${nestedAt14 ? "replay::" : ""}${selector}`,
     expected_count: 1, key_aware: true, record: null,
     source: mutation.at14Node ? { path: nodeLockPath, sha256: note(nodeLocks) } : { path: at14Source, sha256: note(at14Carrier) },
   }));
   groups.set("control.at14", "simulation");
+
+  const feedReplacement = "trading_system/at18_fixture_feed.py", wireReplacement = "rust/src/at18_fixture_wire/mod.rs";
+  const feedIntegration = "trading_system/__init__.py", wireIntegration = "rust/src/lib.rs";
+  const feedCheck = "feed-wire.route", wireCheck = "feed-wire.probe";
+  const feedSource = mutation.feedReplacement ?? (mutation.feedCase === "isolated"
+    ? "def normalize(price):\n    return price > 0\n"
+    : "def route(granularity, sources, events):\n    if granularity not in sources:\n        raise ValueError(granularity)\n    yield from events\n");
+  put(feedReplacement, feedSource);
+  const rootInit = src.tree(G0).has(feedIntegration) ? utf8(src.blob(G0, feedIntegration)) : "";
+  put(feedIntegration, rootInit + (mutation.feedCase === "isolated" ? "" :
+    "\nfrom .at18_fixture_feed import route\n\ndef select_feed(sources, events):\n    return route('1min', sources, events)\n"));
+  put(wireReplacement, mutation.feedCase === "isolated"
+    ? 'pub fn wire_price(raw: u64) -> String { format!("{}", raw) }\n'
+    : mutation.feedCase === "reexport" ? "mod probe; pub use probe::handshake;\n" : "pub mod probe;\n");
+  put(wireIntegration, utf8(src.blob(G0, wireIntegration)) +
+    (mutation.feedCase === "isolated" ? "" : "\npub mod at18_fixture_wire;\n"));
+  if (mutation.feedCase !== "missing-child") put("rust/src/at18_fixture_wire/probe.rs",
+    'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }\n');
+  const feedTest = "trading_system/tests/test_at18_fixture_feed.py";
+  const wireTest = "rust/tests/at18_fixture_wire.rs";
+  const feedTestSource = "from trading_system.at18_fixture_feed import route\n\ndef test_route():\n" +
+    (mutation.feedCase === "no-coverage" ? "    assert True\n" : "    assert list(route('1min', {'1min': 'ohlcv'}, [1, 2])) == [1, 2]\n");
+  const wireTestSource = "use newchan_rust::at18_fixture_wire::" + (mutation.feedCase === "reexport" ? "" : "probe::") + "handshake;\n#[test]\nfn check_connection() { " +
+    (mutation.feedCase === "wrong-test-symbol" ? 'assert!(true);' : 'assert!(handshake("HELLO"));') + " }\n";
+  for (const [id, path, code, runner, selector] of [
+    [feedCheck, feedTest, feedTestSource, "pytest", "test_route"],
+    [wireCheck, wireTest, wireTestSource, "cargo-test", "test:at18_fixture_wire+production_session/check_connection"],
+  ] as const) {
+    put(path, code);
+    checks.push({ check_id: id, group: "control.TB-08", evidence_class: "experiment", profile_id: profile,
+      runner, selector, expected_count: 1, key_aware: true, source: { path, sha256: note(code) }, record: null });
+  }
 
   const map = new Map<string, Registry["bindings"][number]>();
   for (const key of coverage.keys.values()) {
@@ -343,6 +421,7 @@ export function makeFixture(mutation: Mutation = {}) {
     }
   }
   [...map.values()].find(x => x.slice_id === "TB-07")!.domains[0].checks.push(...AT14_LOCKS.map((_, i) => "at14.h" + (i + 1)));
+  [...map.values()].find(x => x.slice_id === "TB-08")!.domains[0].checks.push(feedCheck, wireCheck);
   const adapterBytes = raw(r);
   const registry: Registry = {
     schema_version: "at18-registry/1", crosswalk_sha256: byteSha256(documents.get(specPaths.crosswalk_ref)!),
@@ -392,9 +471,10 @@ export function makeFixture(mutation: Mutation = {}) {
   const at14Filter = mutation.at14Ci === "skip-ci" ? " -- " + AT14_LOCKS.map(name => "--skip " + name).join(" ") :
     mutation.at14Ci === "ignored-only" ? " -- --ignored" : "";
   const at14Command = `cargo test --locked --features production_session --test ${at14Target}${at14Filter}`;
-  const prTrigger = mutation.at14Ci === "dispatch-only" ? "" : "  pull_request:\n    branches: [main]\n";
+  const prTrigger = mutation.at14Ci === "dispatch-only" ? "" :
+    "  pull_request:" + (mutation.at14Ci === "comment" ? " # ordinary comment" : "") + "\n    branches: [main]\n";
   put(workflows[0], dispatch + prTrigger + "jobs:\n  at18-registry-lint:\n    runs-on: ubuntu-latest\n  ci-ok:\n    needs: at18-registry-lint\n    runs-on: ubuntu-latest\n    steps:\n" +
-    `      - name: ${stepName}\n        run: ${at14Command}\n`);
+    "      - run: echo setup\n" + `      - name: ${stepName}\n        run: ${at14Command}\n`);
   put(workflows[1], dispatch + "jobs:\n  devskim:\n    name: DevSkim\n    runs-on: ubuntu-latest\n");
   for (const i of [2, 3]) put(workflows[i], dispatch + [
     "jobs:", "  plan:", "    runs-on: ubuntu-latest", "  checks:", "    runs-on: ubuntu-latest",
@@ -404,23 +484,27 @@ export function makeFixture(mutation: Mutation = {}) {
     "    strategy:", "      matrix: ${{ fromJSON(needs.seal_plan.outputs.seals) }}",
     "    steps:", "      - run: python scripts/at18/workflow.py seal --group=${{ matrix.group }}",
   ].join("\n") + "\n");
-  const feedReplacement = "rust/src/at18_fixture_feed.rs", wireReplacement = "rust/src/at18_fixture_wire.rs";
-  put(feedReplacement, mutation.feedReplacement ?? "pub fn normalize(price: f64) -> Option<f64> { (price > 0.0).then_some(price) }\n");
-  put(wireReplacement, "pub fn wire_price(raw: u64) -> String { format!(\"{}.{}\", raw / 100, raw % 100) }\n");
   const legacyBasis = at18 + "pregate/fixture-1319-disposition.json";
   const oldFeedWire = [...feedWirePaths.feed, ...feedWirePaths.wire].filter(path => !src.tree(G0).has(path));
-  put(legacyBasis, raw({ schema_version: "feed-wire-disposition/1", ticket: 1319,
-    dispositions: [...feedWirePaths.feed, ...feedWirePaths.wire].map(path => ({
-      path, replacement: oldFeedWire.includes(path) ? null : feedWirePaths.feed.includes(path) ? feedReplacement : wireReplacement,
-      rationale: oldFeedWire.includes(path) ? "旧原型未进主线，正式能力另行交付。" : "按 TB-08 重新接入对应能力。",
-    })) }));
+  put(legacyBasis, raw({ schema_version: "feed-wire-disposition/2", ticket: 1319,
+    dispositions: [...feedWirePaths.feed, ...feedWirePaths.wire].map(path => {
+      const feed = feedWirePaths.feed.includes(path);
+      return oldFeedWire.includes(path)
+        ? { path, disposition: "RETIRED", rationale: "旧原型未进主线，正式能力另行交付。" }
+        : { path, disposition: "INCORPORATED", replacement: feed ? feedReplacement : wireReplacement,
+          integration: feed ? feedIntegration : wireIntegration, check_id: feed ? feedCheck : wireCheck,
+          rationale: feed ? "统一由行情路由选择周期及数据源。" : "连接验证从模块公开入口接管。" };
+    }) }));
   let heavyPlan: { path: string; bytes: Buffer } | undefined;
   const heavyControls = ["random-entry", "direction-shuffle"].map(id => ({
     id, definition_sha256: note(id + "/v1"), seed: 20260625, replications: 1000,
   }));
   const heavyTrial = { id: "reference-theta-v0", definition_sha256: note("reference-theta-v0/v1") };
   let heavyRuling: { path: string; bytes: Buffer } | undefined;
-  if (mutation.heavyCase?.endsWith("retirement") || mutation.heavyCase === "retired") {
+  const retirementCase = mutation.heavyCase?.startsWith("retired") || mutation.heavyCase === "unapproved-retirement";
+  const snapshots = !retirementCase && mutation.heavyCase
+    ? heavySymbols.map(symbol => fixtureSnapshot(symbol, mutation.heavyCase === "sparse" || symbol === "ES" ? mutation.heavyCase : undefined)) : [];
+  if (retirementCase) {
     const path = at18 + "pregate/fixture-1320-retirement.json";
     const bytes = raw({ schema_version: "at18-heavy-retirement/1", ticket: 1320,
       obligation: "ISSUE_1320_HEAVY_MEASUREMENT", decision_ticket: 39004, authorization_comment_id: 39004001,
@@ -431,14 +515,26 @@ export function makeFixture(mutation: Mutation = {}) {
     const approval = { ...comment(39004001, 39004, "```at18-heavy-retirement-approval/1\n" + canonicalizeJcs({
       decision_ticket: 39004, ticket: 1320, obligation: "ISSUE_1320_HEAVY_MEASUREMENT", disposition: "RETIRE",
       decision_sha256: byteSha256(bytes),
-    }) + "\n```"), author_association: mutation.heavyCase === "retired" ? "OWNER" : "CONTRIBUTOR",
+    }) + "\n```"), author_association: mutation.heavyCase === "unapproved-retirement" ? "CONTRIBUTOR" : "OWNER",
       user: { type: "User" }, updated_at: "2026-11-01T07:00:00Z" };
-    api["issues/39004/comments?per_page=100"] = [approval];
+    const later = mutation.heavyCase === "retired-thanks" ? [
+      { ...comment(39004002, 39004, "收到，谢谢。"), author_association: "CONTRIBUTOR", user: { type: "User" } },
+      { ...comment(39004003, 39004, "仅补充讨论。"), author_association: "OWNER", user: { type: "User" } },
+    ] : mutation.heavyCase?.endsWith("-revoke") ? [{
+      ...comment(39004002, 39004, "```at18-heavy-retirement-change/1\n" + canonicalizeJcs({
+        decision_ticket: 39004, ticket: 1320, obligation: "ISSUE_1320_HEAVY_MEASUREMENT", disposition: "REVOKE",
+        decision_sha256: byteSha256(bytes), approval_comment_id: 39004001,
+      }) + "\n```"),
+      author_association: mutation.heavyCase === "retired-owner-revoke" ? "OWNER" : "CONTRIBUTOR", user: { type: "User" },
+    }] : [];
+    api["issues/39004/comments?per_page=100"] = [approval, ...later];
   } else if (mutation.heavyCase) {
     const path = at18 + "pregate/fixture-1320-prereg.json";
-    const bytes = raw({ schema_version: "at18-heavy-preregistration/1", ticket: 1320, design: "FROZEN_PREREGISTERED_DUAL_CONTROLS",
+    const bytes = raw({ schema_version: "at18-heavy-preregistration/2", ticket: 1320, design: "FROZEN_PREREGISTERED_DUAL_CONTROLS",
       protocol_sha256: byteSha256(src.blob("7fa4a278eec54704637dd68dcb6101d6dbccdd6a", "docs/backtest-protocol-v0.md")),
       windows_sha256: byteSha256(src.blob(G0, "docs/backtest-prereg-windows-v0.md")),
+      snapshot: { basis: { kind: "APPROVED_REPLACEMENT", source: "合成行情交易所/冻结批次",
+        rationale: "合成测试用新的 10 年快照，非真实 BRN/DX 旧数据。" }, symbols: snapshots.map(x => x.snapshot) },
       symbols: heavySymbols, interval: "1min", trials: [heavyTrial], controls: heavyControls });
     put(path, bytes);
     heavyPlan = { path, bytes };
@@ -453,6 +549,7 @@ export function makeFixture(mutation: Mutation = {}) {
   for (const [ticket, commit] of fixed) {
     const h = history.find(row => row.commit === commit)!;
     const path = src.changed(h.parents[0], commit).find(path => {
+      if (!path.startsWith(`.chanlun/review-results/issue${ticket}-`)) return false;
       try { return src.blob(commit, path).length > 0; } catch { return false; }
     });
     if (!path) throw new Error("fixture: historical product missing");
@@ -530,12 +627,17 @@ export function makeFixture(mutation: Mutation = {}) {
     ? officialSummary.replace("- verdict: `PASS`", "- verdict: `FAIL`") : officialSummary);
   api["actions/runs/49010"] = { id: 49010, run_attempt: 1, head_sha: b, path: workflows[0], status: "completed",
     conclusion: "success", event: "pull_request", repository: githubRepo, head_repository: githubRepo };
+  const extraRunner = mutation.at14Ci === "comment" ? [{ name: "Set up runner", number: 2,
+    status: "completed", conclusion: "success" }] : [];
+  const locksAt = 3 + extraRunner.length;
   const lockJob = { id: 58980, run_id: 49010, run_attempt: 1, head_sha: b, name: "ci-ok",
-    status: "completed", conclusion: "success", steps: [{ name: stepName, number: 1, status: "completed", conclusion: "success" }] };
+    status: "completed", conclusion: "success", steps: [{ name: "Set up job", number: 1, status: "completed", conclusion: "success" },
+      ...extraRunner, { name: "Run echo setup", number: locksAt - 1, status: "completed", conclusion: "success" },
+      { name: stepName, number: mutation.at14Ci === "wrong-step" ? locksAt + 1 : locksAt, status: "completed", conclusion: "success" }] };
   api["actions/runs/49010/attempts/1/jobs?per_page=100"] = { total_count: 1, jobs: [lockJob] };
-  api["actions/jobs/58980/logs"] = ["##[group]Run " + at14Command, "##[endgroup]",
+  api["actions/jobs/58980/logs"] = ["##[group]Run echo setup", "##[endgroup]", "##[group]Run " + at14Command, "##[endgroup]",
     `     Running tests/${at14Target}.rs (target/debug/deps/${at14Target}-e1)`, "running 4 tests", ...AT14_LOCKS.slice(0, mutation.at14Ci === "unrecorded" ? 3 : 4)
-    .map(name => `test ${name} ... ok`), "test result: ok."].join("\n");
+    .map(name => `test ${nestedAt14 ? mutation.at14Ci === "sibling-selector" ? "other::" : "replay::" : ""}${name} ... ok`), "test result: ok."].join("\n");
   const F = merge(parent, 39003, "#1418 fixture entity publication", "impl/1418-publication");
   git(["update-ref", "refs/remotes/origin/main", F]);
   api["git/ref/heads/main"] = { ref: "refs/heads/main", object: { sha: F, type: "commit" } };
@@ -568,7 +670,8 @@ export function makeFixture(mutation: Mutation = {}) {
       profile_id: check.profile_id, head: F, run_id: runId(i), run_attempt: 2, payload };
     mutation.records?.(content);
     const omitted = mutation.omitRecord?.(content) ?? false;
-    const bytes = raw(content);
+    const original = raw(content);
+    const bytes = mutation.recordLexeme?.(content, original) ?? original;
     const hash = omitted ? byteSha256(bytes) : artifact(1391, check.record + suffix + ".json", bytes);
     job(i, `at18-seal ${check.record} ${check.profile_id ?? "none"} ${S} ${hash}`);
   }
@@ -639,16 +742,17 @@ export function makeFixture(mutation: Mutation = {}) {
     decision: { commit: a, path: heavyRuling.path, sha256: byteSha256(heavyRuling.bytes) } }));
   if (heavyPlan) {
     const preregistration_sha256 = byteSha256(heavyPlan.bytes);
-    const symbols = heavySymbols.map(symbol => {
-      const first_bar_at = "2015-01-01T00:00:00Z";
-      const last_bar_at = mutation.heavyCase === "short" && symbol === "ES" ? "2024-12-31T23:59:00Z" : "2025-01-01T00:00:00Z";
+    const symbols = snapshots.map(({ snapshot, chunkDocs, bars }) => {
+      const { symbol, first_bar_at, last_bar_at } = snapshot;
       const at = "2020-01-01T00:00:00Z";
-      const stamps = mutation.heavyCase === "one-bar" && symbol === "ES" ? [first_bar_at] : [first_bar_at, at, last_bar_at];
-      const scope = { head: F, symbol, interval: "1min", first_bar_at, last_bar_at, bars: stamps.length };
-      const chunks = stamps.map((time, i) => artifact(1320, `heavy-${symbol}-input-${i}.json`, raw({
-        schema_version: "at18-heavy-input-chunk/1", head: F, symbol, interval: "1min",
-        bars: [{ at: time, open: 100 + i, low: 99 + i, high: 102 + i, close: 101 + i, volume: 12 }],
-      })));
+      const scope = { head: F, symbol, interval: "1min", first_bar_at, last_bar_at, bars };
+      const chunks = chunkDocs.map(({ runs, ...id }, i) => {
+        const data = mutation.heavyCase === "sparse"
+          ? { bars: runs.map(({ minutes: _duration, ...bar }) => bar) }
+          : { runs: mutation.heavyCase === "wrong-chunk" && symbol === "ES" && i === 0
+            ? runs.map((run, j) => j === 0 ? { ...run, volume: run.volume + 1 } : run) : runs };
+        return artifact(1320, `heavy-${symbol}-input-${i}.json`, raw({ ...id, head: F, ...data }));
+      });
       const series = raw({ ...scope, schema_version: "at18-heavy-input-series/1", chunks });
       const input_sha256 = mutation.heavyCase === "input-unregistered" && symbol === "ES" ? note(symbol + " unregistered") :
         artifact(1320, `heavy-${symbol}-input.json`, series);

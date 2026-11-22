@@ -1,4 +1,4 @@
-import { substantiveReplacement } from "./at18-code.ts";
+import { pythonReplacement, rustReplacement } from "./at18-code.ts";
 import { z } from "zod";
 import { findAt14 } from "./at18-at14.ts";
 import { authorizedHeavyRetirement, measuredHeavy } from "./at18-heavy.ts";
@@ -22,8 +22,12 @@ const feedWireRow = z.discriminatedUnion("disposition", [
   z.strictObject({ path: repoPath, disposition: z.literal("RETIRED"), basis: repoPath, anchor: sha }),
 ]);
 const feedWireInventory = z.strictObject({ schema_version: z.literal("feed-wire-inventory/1"), head: sha, entries: z.array(feedWireRow) });
-const feedWireDecision = z.strictObject({ schema_version: z.literal("feed-wire-disposition/1"),
-  ticket: z.literal(1319), dispositions: z.array(z.strictObject({ path: repoPath, replacement: repoPath.nullable(), rationale: text })).min(1) });
+const feedWireDecision = z.strictObject({ schema_version: z.literal("feed-wire-disposition/2"),
+  ticket: z.literal(1319), dispositions: z.array(z.discriminatedUnion("disposition", [
+    z.strictObject({ path: repoPath, disposition: z.literal("RETIRED"), rationale: text }),
+    z.strictObject({ path: repoPath, disposition: z.literal("INCORPORATED"), replacement: repoPath,
+      integration: repoPath, check_id: text, rationale: text }),
+  ])).min(1) });
 
 const closeoutEntity = z.object({ schema_version: text, head: sha });
 const inventoryRow = z.strictObject({ path: repoPath, disposition: z.enum(["FROZEN", "INCORPORATED", "RETIRED"]),
@@ -126,17 +130,32 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
         if (!changed.includes(row.basis)) return false;
         const decision = s.blob(row.anchor, row.basis);
         const ruling = feedWireDecision.parse(parseJsonObject(decision));
+        const claim = ruling.dispositions.find(r => r.path === row.path);
         if (!decision.equals(s.blob(F, row.basis)) || !unique(ruling.dispositions.map(r => r.path)) ||
-            !ruling.dispositions.some(r => r.path === row.path &&
-              r.replacement === (row.disposition === "RETIRED" ? null : row.replacement))) return false;
+            !claim || claim.disposition !== row.disposition) return false;
         refsFound.push(repoRef(row.anchor, row.basis, decision, "LEGACY_SOURCE"));
-        if (row.disposition === "RETIRED") {
+        if (claim.disposition === "RETIRED") {
           if (current.has(row.path)) return false;
-        } else {
-          if (!changed.includes(row.replacement) || !/^(?:rust|trading_system)\/.+\.(?:rs|py)$/.test(row.replacement)) return false;
-          const source = s.blob(F, row.replacement);
-          if (!substantiveReplacement(row.replacement, utf8(source)) || !source.equals(s.blob(row.anchor, row.replacement))) return false;
-          refsFound.push(repoRef(row.anchor, row.replacement, source, "LEGACY_SOURCE"));
+        } else if (row.disposition === "INCORPORATED") {
+          const { replacement, integration } = claim;
+          if (row.replacement !== replacement || !changed.includes(replacement)) return false;
+          const check = b.checks.get(claim.check_id);
+          if (!check || !groupPass.has(check.group) ||
+              ![...(b.activeByCheck.get(check.check_id)?.values() ?? [])].some(use => use.key.slice === "TB-08")) return false;
+          const source = s.blob(F, replacement), checkSource = s.blob(F, check.source.path);
+          if (!source.equals(s.blob(row.anchor, replacement)) || byteSha256(checkSource) !== check.source.sha256) return false;
+          if (replacement.endsWith(".rs")) {
+            const selector = /^(?:test:)?([\w-]+)(?:\+([\w,-]+))?\/([\w:]+)$/.exec(check.selector);
+            if (check.runner !== "cargo-test" || integration !== "rust/src/lib.rs" || !selector ||
+                ![`rust/tests/${selector[1]}.rs`, `rust/tests/${selector[1]}/main.rs`].includes(check.source.path) ||
+                !rustReplacement(s, F, replacement, check.source.path, selector[3], selector[2]?.split(",") ?? [])) return false;
+          } else {
+            if (!replacement.endsWith(".py") || check.runner !== "pytest" ||
+                !pythonReplacement(s, F, replacement, integration, check.source.path, check.selector)) return false;
+          }
+          refsFound.push(repoRef(F, replacement, source, "LEGACY_SOURCE"),
+            repoRef(F, integration, s.blob(F, integration), "LEGACY_SOURCE"),
+            repoRef(F, check.source.path, checkSource, "LEGACY_SOURCE"));
         }
       }
       return true;

@@ -21,36 +21,62 @@ const deliveryFences = (body: string) => [...body.matchAll(/^```at18-product-del
 // R5 开工时已合入的主线快照是旧格式的上界。只有这条祖先链可用旧证据，
 // 新 head 即使自填早日期也必须提供当前 PR 和获审 head 两份一致的逐票归属。
 const preFenceMain = "b9d898dccf46c2a716115eaa1215bc39c458a959";
-// #1906 批次没有逐票 fence；以下是该合入 Git blob 首部标明的逐票验证器。
-const batchedProducts = new Map([
-  ["s_session/tests/tb02b_verify.py", [1392, 1405]],
-  ["s_session/tests/tb02c_verify.py", [1404]],
-  ["s_session/tests/tb02d_verify.py", [1414]],
-]);
-const batch1906 = "3d61fb72944f577ea3b758b54001c2a7544b04dc";
-const history1942 = "3cd162ea4c3c8c73a0d6b8c6866894a0204e78bc";
-const legacyProduct = { commit: history1942, path: "rust/src/history_simulation/mod.rs" };
-
+// 仅取该路径上不可变的主张：提交标题、显式交付 trailer，或文件开头的归属声明。
+const ticketMentions = (line: string) => [...line.matchAll(/(?:^|[^\w#])#([1-9]\d*)(?![\w])/g)].map(m => Number(m[1]));
 function commitPathOwners(s: At18Repository, base: string, head: string, path: string) {
-  const subjects = s.string("log", "--no-merges", "--format=%s", base + ".." + head, "--", path);
-  return new Set([...subjects.matchAll(/^[\w-]+\(#([1-9]\d*)\)!?:/gm)].map(m => Number(m[1])));
+  const owners = new Set<number>();
+  const history = s.string("log", "--full-history", "--no-merges", "--format=%s%x00%b%x00", base + ".." + head, "--", path);
+  const fields = history.split("\0");
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    for (const number of ticketMentions(fields[i])) owners.add(number);
+    for (const line of fields[i + 1].split("\n")) {
+      if (/^\s*(?:Fix(?:e[sd])?|Clos(?:e[sd]?|ing)|Resolv(?:e[sd]?|ing)|Ticket|Refs)[: ]/i.test(line)) {
+        for (const number of ticketMentions(line)) owners.add(number);
+      }
+    }
+  }
+  return owners;
 }
-
-function oldReviewedProduct(s: At18Repository, merge: string, parent: string, H: string, pr: Row, path: string, ticket: number) {
-  if (!s.ancestor(merge, preFenceMain) || s.string("rev-parse", merge + "^2") !== H) return false;
+function headerOwners(bytes: Buffer) {
+  const head = bytes.toString("utf8").split(/\r?\n/).find(line => line.trim() && !line.startsWith("#!"));
+  const primary = /^\s*(?:[ru]?(?:"""|''')|\/\/+!?|\/\*+|#)\s*(#[1-9]\d*(?:\s*[/、,]\s*#[1-9]\d*)*)(?:[：:\s]|$)/.exec(head ?? "");
+  return new Set(ticketMentions(primary?.[1] ?? ""));
+}
+function branchScope(branch: string, ticket: number, path: string) {
+  const scoped = new RegExp(`(?:^|/)(?:issue[-/]?)?${ticket}-([a-z0-9-]+?)(?:-r[0-9]+)?$`, "i").exec(branch)?.[1];
+  if (!scoped || !scoped.includes("-")) return false;
+  const namespace = scoped.replaceAll("-", "_");
+  return path.startsWith("rust/src/" + namespace + "/") ||
+    new RegExp(`^rust/tests/${namespace}(?:_[a-z0-9]+)*\\.(?:rs|py)$`).test(path);
+}
+function oldRange(s: At18Repository, merge: string, parent: string, H: string, pr: Row) {
+  if (!s.ancestor(merge, preFenceMain) || s.string("rev-parse", merge + "^2") !== H) return undefined;
   const body = s.string("show", "-s", "--format=%B", merge);
   const origin = /^Merge pull request #(\d+) from [\w.-]+\/([^\s]+)$/m.exec(body);
-  if (!origin || Number(origin[1]) !== pr.number || object(pr.head).ref !== origin[2]) return false;
-  const base = s.string("merge-base", parent, H);
-  if (!s.changed(base, H).includes(path)) return false;
-  const owners = commitPathOwners(s, base, H, path);
-  if (owners.size > 0) return owners.size === 1 && owners.has(ticket);
+  if (!origin || Number(origin[1]) !== pr.number || object(pr.head).ref !== origin[2]) return undefined;
+  return { base: s.string("merge-base", parent, H), branch: origin[2] };
+}
+function oldReviewedProduct(s: At18Repository, merge: string, parent: string, H: string, pr: Row, path: string, ticket: number) {
+  const origin = oldRange(s, merge, parent, H, pr);
+  if (!origin || !s.changed(origin.base, H).includes(path)) return false;
+  const header = headerOwners(s.blob(merge, path));
+  if (header.size) return header.has(ticket);
+  const owners = commitPathOwners(s, origin.base, H, path);
+  if (owners.size) return owners.size === 1 && owners.has(ticket);
+  // 分支票号单独不足以归属文件；还须命中实际变更中的同名代码命名空间。
+  return branchScope(origin.branch, ticket, path);
+}
 
-  // #1942 的最后一个 head 是同步 main；首个实际产品 commit 未带 #1381
-  // 标记。只让 Git 中冻结的 #1381 专用路径和已获审的真实 PR diff 补足归属。
-  return merge === history1942 && pr.number === 1942 &&
-    origin[2] === "codex/1381-history-simulation-r6" && ticket === 1381 &&
-    (/^rust\/src\/history_simulation\//.test(path) || /^rust\/tests\/history_simulation_entry\.(?:rs|py)$/.test(path));
+function implicitOldProducts(s: At18Repository, number: number, reviewed: ReadonlyMap<string, Row>) {
+  return [...reviewed].flatMap(([commit, pr]) => {
+    if (!ownedPr(pr, number) || !s.ancestor(commit, preFenceMain)) return [];
+    const parent = s.string("rev-parse", commit + "^1");
+    const head = sha.parse(object(pr.head).sha);
+    // 无路径声明时，仅推导唯一的、可逐路径归属的模块根。
+    const roots = s.changed(parent, commit).filter(path => /^rust\/src\/[^/]+\/mod\.rs$/.test(path) &&
+      oldReviewedProduct(s, commit, parent, head, pr, path, number));
+    return roots.length === 1 ? [{ commit, path: roots[0] }] : [];
+  });
 }
 
 function fencedProduct(body: string, path: string, ticket: number) {
@@ -66,11 +92,9 @@ export function deliveredProducts(s: At18Repository, ticket: Ticket, historical:
   try {
     const declarations = deliveryFences(ticket.data.body);
     if (declarations.length > 1) return [];
-    // #1942 已合入时还没有逐票协议；缺新格式声明时只解析已固定的主产品。
     const data = declarations.length === 1 ? productDelivery.parse(declarations[0]) :
-      ticket.number === 1381 && reviewed.has(history1942) ? { ticket: 1381, products: [legacyProduct] } : undefined;
-    if (!data) return [];
-    if (data.ticket !== ticket.number) return [];
+      { ticket: ticket.number, products: implicitOldProducts(s, ticket.number, reviewed) };
+    if (data.ticket !== ticket.number || !data.products.length) return [];
     const seen = new Set<string>();
     for (const { commit, path } of data.products) {
       const key = commit + "\0" + path;
@@ -87,11 +111,19 @@ export function deliveredProducts(s: At18Repository, ticket: Ticket, historical:
         if (head.includes("```at18-product-delivery/1")) {
           if (!fencedProduct(head, path, ticket.number) || !fencedProduct(pr, path, ticket.number)) return [];
         } else if (!oldReviewedProduct(s, commit, parent, H, current, path, ticket.number)) return [];
-      } else if (commit === batch1906) {
-        if (!batchedProducts.get(path)?.includes(ticket.number)) return [];
-      } else if (owners && owners.size > 1) {
-        const pathOwners = commitPathOwners(s, parent, commit, path);
-        if (pathOwners.size !== 1 || !pathOwners.has(ticket.number)) return [];
+      } else {
+        const header = headerOwners(s.blob(commit, path));
+        if (header.size) {
+          if (!header.has(ticket.number)) return [];
+        } else {
+          const scope = /^\.chanlun\/review-results\/issue([1-9]\d*)(?:-|\/)/.exec(path);
+          if (scope) {
+            if (Number(scope[1]) !== ticket.number) return [];
+          } else {
+            const pathOwners = commitPathOwners(s, parent, commit, path);
+            if (pathOwners.size !== 1 || !pathOwners.has(ticket.number)) return [];
+          }
+        }
       }
       seen.add(key);
     }

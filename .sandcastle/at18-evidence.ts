@@ -1,7 +1,7 @@
 import { heavyInputChunk, type HeavyInputChunk } from "./at18-heavy-input.ts";
 import { z } from "zod";
 import {
-  type Adapter, type Check, decodeFields, decodeRecord, envelope, profileId, tbConditions, tbOutput,
+  type Adapter, type Check, decodeFields, decodeRecord, envelope, profileId, validateTbContainers,
 } from "./at18-contract.ts";
 import {
   basisId, type Bindings, keyBasis, keyDomain, keyId, type Gap, type Blocked, type Key, type KeyDomain, unique,
@@ -172,7 +172,7 @@ export function runRecords(s: At18Repository, F: string, own: Own, b: Bindings, 
     if (!("storage" in report) || !report.path.endsWith(".json")) continue;
     const bytes = own.registered.get(report.path)!;
     let raw: Row;
-    try { raw = parseJsonObject(bytes); canonicalizeJcs(raw); }
+    try { raw = parseJsonObject(bytes, "producer"); }
     catch (e) { diag.add(derivationCode(e), "/acceptance_jobs"); continue; }
     if (raw.schema_version !== "at18-run-record/1" && !Object.hasOwn(raw, "record")) continue;
     const parsed = envelope.safeParse(raw);
@@ -191,9 +191,10 @@ export function runRecords(s: At18Repository, F: string, own: Own, b: Bindings, 
     }
     found.add(sealName);
     try {
-      const decodedEnvelope = decodeFields(contract, contract.run_record_envelope, raw);
-      if (canonicalizeJcs(decodedEnvelope) !== canonicalizeJcs(raw)) throw new Error("envelope projection");
-      const data = decodeRecord(contract, r.record, r.payload);
+      const decodedEnvelope = decodeFields(contract, contract.run_record_envelope, raw, 0, true);
+      if (Object.keys(decodedEnvelope).length !== Object.keys(raw).length ||
+          Object.entries(decodedEnvelope).some(([key, value]) => !Object.hasOwn(raw, key) || !Object.is(value, raw[key]))) throw new Error("envelope projection");
+      const data = decodeRecord(contract, r.record, object(raw.payload));
       const info = byRecord.get(name) ?? [];
       info.push({ ref: extRef(own.manifest, report.path, bytes, "RUN_RECORD"), data, check: producer });
       byRecord.set(name, info);
@@ -488,8 +489,7 @@ export function validateTbEntities(record: string, profile: string | null, recor
       const keys = rows(data.keys).map(k => keyBasis(keyId(String(k.slice_id), String(k.kind), String(k.id)),
         { path: String(k.basis_path), pointer: String(k.basis_pointer) }));
       if (!keys.length || !unique(keys) || keys.some(k => !expected.has(k) || !ownKeys.has(k))) throw new Error("keys");
-      tbConditions.parse(data.conditions);
-      tbOutput.parse(data.output);
+      validateTbContainers(data);
       for (const k of keys) seen.add(k);
       valid.push({ ref, checkId: check.check_id, keys: new Set(keys) });
     } catch { diag.add("TB_REPORT", scope, ref); }

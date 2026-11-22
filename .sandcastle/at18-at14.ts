@@ -151,21 +151,23 @@ export async function findAt14(s: At18Repository, F: string, b: Bindings, groupP
     const tb07 = [...b.activeByCheck].filter(([, uses]) => [...uses.values()].some(use => use.key.slice === "TB-07"));
     const locks: RustLock[] = [];
     for (const name of AT14_LOCKS) {
-      const targets = new Set<string>();
+      const targets = new Map<string, RustLock>();
       for (const [id] of tb07) {
         const check = b.checks.get(id);
         if (!check || check.expected_count !== 1 || check.runner !== "cargo-test" ||
             check.evidence_class !== "simulation" || !groupPass.has(check.group)) continue;
-        const selection = /^(?:test:)?([\w-]+)\+([\w,-]+)\/(?:[\w]+::)*([\w]+)$/.exec(check.selector);
-        if (!selection || selection[3] !== name) continue;
-        const [, target, features] = selection;
+        const selection = /^(?:test:)?([\w-]+)\+([\w,-]+)\/((?:[\w]+::)*[\w]+)$/.exec(check.selector);
+        if (!selection || selection[3].split("::").at(-1) !== name) continue;
+        const [, target, features, selector] = selection;
         const enabled = features.split(",");
         if (!enabled.includes("production_session") || enabled.some(f => ["production_session_testonly", "backtest_bin"].includes(f)) ||
             ![`rust/tests/${target}.rs`, `rust/tests/${target}/main.rs`].includes(check.source.path)) continue;
-        if (rustTest(utf8(s.blob(F, check.source.path)), name)) targets.add(target);
+        if (rustTest(utf8(s.blob(F, check.source.path)), name, selector)) {
+          targets.set([target, selector, ...enabled.sort()].join("/"), { target, name, selector, features: enabled });
+        }
       }
       if (targets.size !== 1) return [];
-      for (const target of targets) locks.push({ target, name });
+      locks.push(...targets.values());
     }
     const found = [...s.tree(F).keys()].filter(path => AT14.test(path));
     const candidates = found.flatMap(path => {
