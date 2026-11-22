@@ -9428,3 +9428,243 @@ def test_r26_failure_scenario_html_blocks_verbatim_and_block_end_trailing_ws_str
         assert f1.finding_id != f2.finding_id
         assert len(merged) == 2
         assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+
+
+# ── R27 精准返修与系统性边界加固（CommonMark §6.5 行内链接/图片括号栈 + §4.7 链接引用定义边界） ────
+
+
+def test_r27_codex_r24_repros_inline_link_backtick_and_refdef_trailing_ws() -> None:
+    """R27 精准回归：锁定 Codex R24 两项原始复现、跨 HEAD 回复隔离、跨轮不重复贴报与渲染侧单行空格保护。"""
+    # 1. Important 1 精确复现：链接标题中的反引号不得与后续代码跨度配对，不同列名必须保持 2 条独立发现
+    cat = '[schema](/doc "literal `") column `unit price`'
+    cat_2sp = cat.replace("unit price", "unit  price")
+    a = Finding(Severity.IMPORTANT, "importer.py", 10, cat, "Column dropped", "复核通过")
+    b = Finding(Severity.IMPORTANT, "importer.py", 10, cat_2sp, "Column dropped", "复核通过")
+    assert a.finding_id != b.finding_id
+    merged_ab = merge_and_dedupe_findings([("gpt-6-astra", [a, b])])
+    assert len(merged_ab) == 2
+    assert {item.finding_id for item in merged_ab} == {a.finding_id, b.finding_id}
+
+    # 跨 HEAD 回复不得将针对 a 的不修回复误匹配到同坐标的 b
+    a_r1 = dataclasses.replace(a, source_models=("gpt-6-astra",))
+    b_r2 = dataclasses.replace(b, source_models=("gpt-6-astra",))
+    e1_a = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({a_r1.finding_id}),
+        (a_r1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r27-r1-a1", "r27-r1-a2"}),
+    )
+    cand_r2_ab = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([b_r2], round_number=2, head_sha=HEAD_2),
+        history=(e1_a,),
+    )
+    assert len(cand_r2_ab.findings) == 2
+    assert {item.finding_id for item in cand_r2_ab.findings} == {a.finding_id, b.finding_id}
+    assert a.finding_id in cand_r2_ab.stale_location_fingerprints
+
+    replies_by_id = parse_wontfix_replies(
+        [{"id": "c-r27-a", "user": {"login": "alice"}, "body": f"[{a.finding_id}] 不修：旧列已废弃"}],
+        allowed_authors=["alice"],
+    )
+    bound_id = bind_author_replies(
+        cand_r2_ab.findings,
+        replies_by_id,
+        stale_location_fingerprints=cand_r2_ab.stale_location_fingerprints,
+    )
+    assert list(bound_id.keys()) == [a.finding_id]
+    assert b.finding_id not in bound_id
+
+    replies_by_loc = parse_wontfix_replies(
+        [{"id": "c-r27-loc", "user": {"login": "alice"}, "body": "importer.py:10 不修：旧列忽略"}],
+        allowed_authors=["alice"],
+    )
+    bound_loc = bind_author_replies(
+        cand_r2_ab.findings,
+        replies_by_loc,
+        stale_location_fingerprints=cand_r2_ab.stale_location_fingerprints,
+    )
+    assert bound_loc == {}
+
+    # 渲染侧 _single_line 同样保护链接标题反引号后的代码跨度双空格
+    assert _single_line(cat_2sp) == cat_2sp
+    assert _single_line('[schema](/doc "a  b")') == '[schema](/doc "a  b")'
+
+    # 2. Important 2 精确复现：段落前置链接引用定义行尾空格剥离，跨轮待贴数为 0
+    s_clean = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV", "[spec]: /csv\nSee [spec]", "复核通过")
+    s_trail = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV", "[spec]: /csv  \nSee [spec]", "复核通过")
+    assert s_clean.finding_id == s_trail.finding_id
+    vf_trail = _verified(s_trail, VerificationVerdict.CONFIRMED, verifier_evidence="仍存在")
+    assert len(select_postable_findings([vf_trail], frozenset({s_clean.finding_id}))) == 0
+
+    s_clean_r1 = dataclasses.replace(s_clean, source_models=("gpt-6-astra",))
+    s_trail_r2 = dataclasses.replace(s_trail, source_models=("gpt-6-astra",))
+    e1_s = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({s_clean_r1.finding_id}),
+        (s_clean_r1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r27-r1-s1", "r27-r1-s2"}),
+    )
+    cand_r2_s = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([s_trail_r2], round_number=2, head_sha=HEAD_2),
+        history=(e1_s,),
+    )
+    assert len(cand_r2_s.findings) == 1
+    assert cand_r2_s.findings[0].finding_id == s_clean.finding_id
+    vr_r2_s = parse_verifier_output(
+        _verifier_payload(
+            cand_r2_s,
+            [{"finding_id": s_clean.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}],
+        ),
+        cand_r2_s,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2_s = evaluate_round(vr_r2_s)
+    assert len(dec_r2_s.postable_findings) == 0
+    assert len(dec_r2_s.blocking_findings) == 1
+
+
+def test_r27_inline_link_image_bracket_stack_matrix() -> None:
+    """R27：CommonMark §6.5 单遍括号栈行内链接/图片边界矩阵（含嵌套括号、代码优先、HTML/代码内闭括号与链接禁嵌套）。"""
+    distinct_inline_categories: tuple[tuple[str, str], ...] = (
+        # img_title_bt_code
+        ('![schema](/doc "literal `") column `unit price`', '![schema](/doc "literal `") column `unit  price`'),
+        # nested_bracket_link
+        ('[a [b] c](/doc "literal `") `unit price`', '[a [b] c](/doc "literal `") `unit  price`'),
+        # code_beats_link
+        ('`[a](/doc "`") `unit price`', '`[a](/doc "`") `unit  price`'),
+        # link_title_2sp (双引号 / 单引号 / 圆括号)
+        ('[schema](/doc "a  b")', '[schema](/doc "a b")'),
+        ("[schema](/doc 'a  b')", "[schema](/doc 'a b')"),
+        ("[schema](/doc (a  b))", "[schema](/doc (a b))"),
+        # link_title_nl
+        ('[schema](/doc "a\nb")', '[schema](/doc "a b")'),
+        # link_dest_angle_2sp
+        ("[schema](<a  b>)", "[schema](<a b>)"),
+        # link_dest_bt & link_dest_bare_bt
+        ("[schema](</doc`>) `unit price`", "[schema](</doc`>) `unit  price`"),
+        ("[schema](/doc`) `unit price`", "[schema](/doc`) `unit  price`"),
+        # img_in_link_active
+        ('[a ![b](/x) c](/doc "literal `") `unit price`', '[a ![b](/x) c](/doc "literal `") `unit  price`'),
+        # link_with_html_bracket
+        (
+            '[a <span data-x="]">b</span>](/doc "literal `") `unit price`',
+            '[a <span data-x="]">b</span>](/doc "literal `") `unit  price`',
+        ),
+        # link_with_code_bracket
+        ('[a `]` b](/doc "literal `") `unit price`', '[a `]` b](/doc "literal `") `unit  price`'),
+        # nested_unmatched_bracket_in_link
+        ('[a [b c](/doc "literal `") `unit price`', '[a [b c](/doc "literal `") `unit  price`'),
+        # image wrapping nested unmatched bracket link
+        ('![a [b c](/doc "literal `") `unit price`]', '![a [b c](/doc "literal `") `unit  price`]'),
+    )
+    for left, right in distinct_inline_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id != f2.finding_id, f"unexpected inline link collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    # link_in_link_inactive：外层链接按 CommonMark §6.5 被内层链接停用，反引号配对导致 unit  price 退回普通文本
+    l_in_l_a = '[a [b](/x) c](/doc "literal `") `unit price`'
+    l_in_l_b = '[a [b](/x) c](/doc "literal `") `unit  price`'
+    fl1, fl2, merged_ll = _r21_probe(l_in_l_a, l_in_l_b, category=True)
+    assert fl1.finding_id == fl2.finding_id
+    assert len(merged_ll) == 1
+    assert merged_ll[0].finding_id == fl1.finding_id
+
+
+def test_r27_category_block_structures_and_hard_breaks() -> None:
+    """R27：category 内块级原样结构、链接引用定义、多块隔离、硬换行保护与普通空白正向归并。"""
+    distinct_block_categories: tuple[tuple[str, str], ...] = (
+        # cat_hard_break (两空格硬换行与反斜杠硬换行)
+        ("a  \nb", "a\nb"),
+        ("a\\\nb", "a\nb"),
+        # cat_list_5sp_code & cat_bq_5sp_code
+        ("-     a  b", "-     a b"),
+        (">     a  b", ">     a b"),
+        # cat_fenced_code_2sp & cat_indented_code_2sp & cat_pre_2sp
+        ("```\na  b\n```", "```\na b\n```"),
+        ("Intro\n\n    a  b", "Intro\n\n    a b"),
+        ("<pre>a  b</pre>", "<pre>a b</pre>"),
+        # refdef_in_cat_title_2sp & refdef_in_cat_bt_title
+        ('[spec]: /csv "a  b"\nSee [spec]', '[spec]: /csv "a b"\nSee [spec]'),
+        ('[spec]: /csv "literal `"\nSee [spec] `unit price`', '[spec]: /csv "literal `"\nSee [spec] `unit  price`'),
+        # 多块绝不跨块折叠
+        ("- a\n- b", "- a - b"),
+        ("> a\n> b", "> a > b"),
+        ("# h\nbody", "# h body"),
+        ('> [schema](/doc "a  b\n> c")', '> [schema](/doc "a b\n> c")'),
+    )
+    for left, right in distinct_block_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id != f2.finding_id, f"unexpected block category collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+
+    # 正向规范化与归并 ID 不变量
+    for raw_a, raw_b in (
+        ("  Race  Condition ", "Race Condition"),
+        ("Race\nCondition", "Race Condition"),
+        ("[spec]: /csv  \nSee [spec]", "[spec]: /csv\nSee [spec]"),
+    ):
+        fa, fb, merged_eq = _r21_probe(raw_a, raw_b, category=True)
+        assert fa.finding_id == fb.finding_id
+        assert len(merged_eq) == 1
+        assert merged_eq[0].finding_id == fa.finding_id
+
+
+def test_r27_failure_scenario_refdef_boundaries_and_container_blank_lines() -> None:
+    """R27：failure_scenario 前置链接引用定义尾随空白精确剥离、多行标题内部保护、非定义行保护与容器空行归一。"""
+    equivalent_refdef_scenarios: tuple[tuple[str, str], ...] = (
+        # refdef_trailing_sp
+        ("[spec]: /csv\nSee [spec]", "[spec]: /csv  \nSee [spec]"),
+        # refdef_after_colon_sp
+        ("[spec]:\n/csv\nSee [spec]", "[spec]:  \n/csv\nSee [spec]"),
+        # refdef_after_dest_sp
+        ('[spec]: /csv\n"title"\nSee [spec]', '[spec]: /csv  \n"title"\nSee [spec]'),
+        # refdef_after_title_sp & 多行标题闭合引号行尾空格
+        ('[spec]: /csv "title"\nSee [spec]', '[spec]: /csv "title"  \nSee [spec]'),
+        ('[spec]: /csv "line1\nline2"\nSee [spec]', '[spec]: /csv "line1\nline2"  \nSee [spec]'),
+        # refdef_two_defs
+        ("[a]: /a\n[b]: /b\nSee [a] [b]", "[a]: /a  \n[b]: /b  \nSee [a] [b]"),
+        # refdef_in_bq
+        ("> [spec]: /csv\n> See [spec]", "> [spec]: /csv  \n> See [spec]"),
+        # scen_refdef_multiline_label
+        ("[my\nspec]: /csv\nSee [my spec]", "[my  \nspec]: /csv\nSee [my spec]"),
+        # scen_setext_after_refdef & 纯 refdef 后接分隔线
+        ("[spec]: /csv\nHeading\n===", "[spec]: /csv  \nHeading  \n===  "),
+        ("[spec]: /csv\n---\nSee [spec]", "[spec]: /csv  \n---  \nSee [spec]"),
+        # 容器开启空行
+        (">\n> bar", ">   \n> bar"),
+        ("-\n- bar", "-   \n- bar"),
+    )
+    for clean, trailing in equivalent_refdef_scenarios:
+        f1, f2, merged = _r21_probe(clean, trailing)
+        assert f1.finding_id == f2.finding_id, f"unexpected split for {clean!r} vs {trailing!r}"
+        assert len(merged) == 1
+        assert merged[0].finding_id == f1.finding_id
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 0
+
+    # 严禁误剥离：多行标题严格内部行尾空格、段落非开头伪引用定义（实际为硬换行）
+    preserved_refdef_scenarios: tuple[tuple[str, str], ...] = (
+        # refdef_multiline_title_trailing_sp
+        ('[spec]: /csv "line1 \nline2"\nSee [spec]', '[spec]: /csv "line1\nline2"\nSee [spec]'),
+        # scen_refdef_after_para_not_def
+        ("hello\n[spec]: /csv  \nworld", "hello\n[spec]: /csv\nworld"),
+    )
+    for left, right in preserved_refdef_scenarios:
+        f1, f2, merged = _r21_probe(left, right)
+        assert f1.finding_id != f2.finding_id, f"unexpected collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
