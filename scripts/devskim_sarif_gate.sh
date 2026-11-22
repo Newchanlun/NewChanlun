@@ -157,7 +157,14 @@ if [[ -n "$false_positives_path" ]]; then
     printf '%s\n' "$reviewed_result" >&2
     reviewed_result=''
   else
-    excluded_count="$(jq -er '.excluded_results' <<< "$reviewed_result")"
+    rev_parsed="$(jq -er '(.excluded_results | tostring), .keys[]' <<< "$reviewed_result")"
+    if [[ "$rev_parsed" == *$'\n'* ]]; then
+      excluded_count="${rev_parsed%%$'\n'*}"
+      reviewed_keys="${rev_parsed#*$'\n'}"
+    else
+      excluded_count="$rev_parsed"
+      reviewed_keys=''
+    fi
   fi
 elif [[ -n "$source_root" ]]; then
   add_error '--source-root requires --false-positives.'
@@ -171,96 +178,132 @@ if [[ ! -f "$sarif_path" ]]; then
 elif ! command -v jq >/dev/null 2>&1; then
   add_error 'jq is unavailable, so the SARIF cannot be parsed.'
 else
-  schema_filter='length == 1 and (.[0] |
-    type == "object" and
-    .version == "2.1.0" and
-    (.runs | type == "array" and length > 0 and all(.[];
+  need_sarif_keys=0
+  if [[ -n "$baseline_path" && -f "$baseline_path" && -z "$reviewed_result" ]]; then
+    need_sarif_keys=1
+  fi
+  # Single jq pass over SARIF: validate 2.1.0 schema and emit tool name, version,
+  # finding count, and (when needed for baseline diff) unique sorted keys.
+  sarif_filter='if (length == 1 and (.[0] |
       type == "object" and
-      (.tool | type == "object") and
-      (.tool.driver | type == "object") and
-      (.tool.driver.name | type == "string" and length > 0) and
-      (.results | type == "array")
-    )))'
-  schema_error=''
-  if ! schema_error="$(jq -e --slurp "$schema_filter" "$sarif_path" 2>&1)"; then
+      .version == "2.1.0" and
+      (.runs | type == "array" and length > 0 and all(.[];
+        type == "object" and
+        (.tool | type == "object") and
+        (.tool.driver | type == "object") and
+        (.tool.driver.name | type == "string" and length > 0) and
+        (.results | type == "array")
+      )))) then
+      .[0] as $doc |
+      ([$doc.runs[].tool.driver.name] | unique) as $names |
+      ([$doc.runs[].tool.driver.version] | unique) as $vers |
+      ([$doc.runs[] | (.results // [])[]] | length) as $cnt |
+      (if ($names | length == 1 and (.[0] | type == "string" and length > 0))
+       then "OK\t" + $names[0] else "ERR\texpected exactly one non-empty tool.driver.name" end),
+      (if ($vers | length == 1 and (.[0] | type == "string" and length > 0))
+       then "OK\t" + $vers[0] else "ERR\texpected exactly one non-empty tool.driver.version" end),
+      ($cnt | tostring),
+      (if $need_keys == "1" then
+        [$doc.runs[] | (.results // [])[]
+          | (.ruleId // "?") + "|" +
+            ((.locations[0].physicalLocation.artifactLocation.uri // "?") | sub("^file://"; "")) + "|" +
+            (((.locations[0].physicalLocation.region.startLine // 0) | tostring))]
+        | unique | .[]
+      else empty end)
+    else empty | halt_error(1) end'
+  sarif_out=''
+  if ! sarif_out="$(jq -r --slurp --arg need_keys "$need_sarif_keys" "$sarif_filter" "$sarif_path" 2>&1)"; then
     add_error 'SARIF JSON parsing or required 2.1.0 runs/tool.driver/results structure failed.'
-    if [[ -n "$schema_error" ]]; then
-      printf '%s\n' "$schema_error" >&2
+    if [[ -n "$sarif_out" ]]; then
+      printf '%s\n' "$sarif_out" >&2
     fi
   else
-    if ! tool_name="$(jq -er '[.runs[].tool.driver.name] | unique |
-      if (length == 1 and (.[0] | type == "string" and length > 0))
-      then .[0]
-      else error("expected exactly one non-empty tool.driver.name")
-      end' "$sarif_path" 2>&1)"; then
+    name_line="${sarif_out%%$'\n'*}"
+    rest="${sarif_out#*$'\n'}"
+    ver_line="${rest%%$'\n'*}"
+    rest="${rest#*$'\n'}"
+    if [[ "$rest" == *$'\n'* ]]; then
+      finding_count="${rest%%$'\n'*}"
+      sarif_keys="${rest#*$'\n'}"
+    else
+      finding_count="$rest"
+      sarif_keys=''
+    fi
+
+    if [[ "$name_line" == OK$'\t'* ]]; then
+      tool_name="${name_line#OK$'\t'}"
+      if [[ -n "$expected_tool_name" && "$tool_name" != "$expected_tool_name" ]]; then
+        add_error "SARIF DevSkim tool name was \`$tool_name\`, expected \`$expected_tool_name\`."
+      fi
+    else
       add_error 'SARIF DevSkim tool name is missing or inconsistent across runs.'
-      printf '%s\n' "$tool_name" >&2
+      printf '%s\n' "${name_line#ERR$'\t'}" >&2
       tool_name='unknown'
-    elif [[ -n "$expected_tool_name" && "$tool_name" != "$expected_tool_name" ]]; then
-      add_error "SARIF DevSkim tool name was \`$tool_name\`, expected \`$expected_tool_name\`."
     fi
 
-    if ! tool_version="$(jq -er '[.runs[].tool.driver.version] | unique |
-      if (length == 1 and (.[0] | type == "string" and length > 0))
-      then .[0]
-      else error("expected exactly one non-empty tool.driver.version")
-      end' "$sarif_path" 2>&1)"; then
+    if [[ "$ver_line" == OK$'\t'* ]]; then
+      tool_version="${ver_line#OK$'\t'}"
+      if [[ -n "$expected_tool_version" && "$tool_version" != "$expected_tool_version" ]]; then
+        add_error "SARIF DevSkim tool version was \`$tool_version\`, expected \`$expected_tool_version\`."
+      fi
+    else
       add_error 'SARIF DevSkim tool version is missing or inconsistent across runs.'
-      printf '%s\n' "$tool_version" >&2
+      printf '%s\n' "${ver_line#ERR$'\t'}" >&2
       tool_version='unknown'
-    elif [[ -n "$expected_tool_version" && "$tool_version" != "$expected_tool_version" ]]; then
-      add_error "SARIF DevSkim tool version was \`$tool_version\`, expected \`$expected_tool_version\`."
     fi
 
-    if ! finding_count="$(jq -er '[.runs[] | (.results // [])[]] | length' "$sarif_path" 2>&1)"; then
-      add_error 'SARIF findings could not be counted.'
-      printf '%s\n' "$finding_count" >&2
-      finding_count='unknown'
-    elif [[ ! "$finding_count" =~ ^[0-9]+$ ]]; then
+    if [[ ! "$finding_count" =~ ^[0-9]+$ ]]; then
       add_error "SARIF finding count is not an integer: \`$finding_count\`."
     elif [[ -n "$baseline_path" ]]; then
       # #1194 基线语义：只拦基线外新增；消失键只作信息行。
       if [[ ! -f "$baseline_path" ]]; then
         add_error "Baseline file is missing: \`$baseline_path\`."
       else
-        extract_current_keys() {
-          if [[ -n "$reviewed_result" ]]; then
-            jq -r '.keys[]' <<< "$reviewed_result"
-          else
-            jq -r '[.runs[] | (.results // [])[]
-              | (.ruleId // "?") + "|" +
-                ((.locations[0].physicalLocation.artifactLocation.uri // "?") | sub("^file://"; "")) + "|" +
-                (((.locations[0].physicalLocation.region.startLine // 0) | tostring))]
-              | unique | .[]' "$sarif_path"
-          fi
-        }
-        if ! current_keys="$(extract_current_keys 2>&1)"; then
-          add_error 'SARIF finding keys could not be extracted.'
-          printf '%s\n' "$current_keys" >&2
+        keys_ok=1
+        if [[ -n "$reviewed_result" ]]; then
+          current_keys="$reviewed_keys"
         else
-          if ! baseline_ok="$(jq -er '
-            .schema == "devskim-baseline/v1"
-            and (.findings | type == "array")
-            and ([.findings[] | type == "string"] | all)
-          ' "$baseline_path" 2>&1)"; then
+          current_keys="$sarif_keys"
+        fi
+        if [[ "$keys_ok" == 1 ]]; then
+          # Single jq pass validates baseline schema and computes set diff vs current_keys.
+          baseline_diff_filter='if (.schema == "devskim-baseline/v1"
+              and (.findings | type == "array")
+              and ([.findings[] | type == "string"] | all)) then
+              (reduce .findings[] as $k ({}; .[$k] = true)) as $base_set |
+              (($cur_raw | split("\n") | map(select(length > 0)) | unique)) as $cur_keys |
+              (reduce $cur_keys[] as $k ({}; .[$k] = true)) as $cur_set |
+              ([.findings[] | select($cur_set[.] | not)] | length) as $fixed |
+              ([$cur_keys[] | select($base_set[.] | not)]) as $new |
+              ($fixed | tostring),
+              ($new | length | tostring),
+              ($new[] | "-   - `" + . + "`")
+            else "invalid baseline schema\n" | halt_error(1) end'
+          if ! diff_out="$(jq -r --rawfile cur_raw <(printf '%s' "$current_keys") "$baseline_diff_filter" "$baseline_path" 2>&1)"; then
             add_error "Baseline schema mismatch or unreadable: \`$baseline_path\`."
-            printf '%s\n' "$baseline_ok" >&2
+            printf '%s\n' "$diff_out" >&2
           else
-            baseline_list="$(jq -r '.findings[]' "$baseline_path")"
-            new_findings="$(comm -13 \
-              <(printf '%s\n' "$baseline_list" | sort) \
-              <(printf '%s\n' "$current_keys" | sort))"
-            fixed_count="$(comm -23 \
-              <(printf '%s\n' "$baseline_list" | sort) \
-              <(printf '%s\n' "$current_keys" | sort) | wc -l | tr -d ' ')"
-            fixed_count="${fixed_count:-0}"
-            if [[ -n "$new_findings" ]]; then
-              new_count="$(printf '%s\n' "$new_findings" | wc -l | tr -d ' ')"
+            fixed_count="${diff_out%%$'\n'*}"
+            rest="${diff_out#*$'\n'}"
+            if [[ "$rest" == *$'\n'* ]]; then
+              new_count="${rest%%$'\n'*}"
+              new_rows_text="${rest#*$'\n'}"
+            else
+              new_count="$rest"
+              new_rows_text=''
+            fi
+            if [[ "$new_count" != "0" ]]; then
               add_error "SARIF contains $new_count finding(s) not in the baseline (total $finding_count). New findings:"
               new_rows_start=${#error_lines[@]}
-              while IFS= read -r key; do
-                add_error "  - \`$key\`"
-              done <<< "$new_findings"
+              old_ifs="$IFS"
+              IFS=$'\n'
+              set -f
+              # shellcheck disable=SC2206
+              new_rows_arr=($new_rows_text)
+              set +f
+              IFS="$old_ifs"
+              error_lines+=("${new_rows_arr[@]}")
+              unset new_rows_arr
               new_rows_count=$(( ${#error_lines[@]} - new_rows_start ))
             fi
             if [[ "$fixed_count" != "0" ]]; then
