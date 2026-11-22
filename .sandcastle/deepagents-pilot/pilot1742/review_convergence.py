@@ -666,20 +666,47 @@ def _merge_active_duplicate_aliases(
     prior: Mapping[str, str],
     incoming: Mapping[str, str],
 ) -> dict[str, str]:
-    """合并历史与本轮去重别名，始终将链式别名归约至根规范项，保持单跳无环。"""
-    merged = dict(prior)
-    for src, dst in incoming.items():
-        root = merged.get(dst, dst)
-        if root == src:
+    """合并历史与本轮去重别名：本轮新边严格优先于冲突旧边，破坏环时仅撤除历史边，并归约至单跳无环。"""
+    if not incoming:
+        return dict(prior)
+    merged: dict[str, str] = {src: dst for src, dst in prior.items() if src not in incoming}
+    merged.update(incoming)
+
+    # 在出度 <= 1 的函数图中识别全部有向环；仅撤除落在环上的历史边，确保本轮规范项交换（如 R1 D->A、R2 A->D）
+    # 严格优先于冲突旧边，同时保留无冲突的跨轮链式归约（如历史 D->A 与本轮 D2->D 归约为 D->A、D2->A）。
+    state: dict[str, int] = {}
+    cycle_nodes: set[str] = set()
+    for start in merged:
+        if state.get(start, 0) != 0:
             continue
-        for k, v in list(merged.items()):
-            if v == src:
-                if k == root:
-                    del merged[k]
-                else:
-                    merged[k] = root
-        merged[src] = root
-    return merged
+        path: list[str] = []
+        path_index: dict[str, int] = {}
+        cur: str | None = start
+        while cur is not None and cur in merged and state.get(cur, 0) == 0:
+            state[cur] = 1
+            path_index[cur] = len(path)
+            path.append(cur)
+            cur = merged[cur]
+        if cur is not None and state.get(cur) == 1:
+            cycle_nodes.update(path[path_index[cur] :])
+        for node in path:
+            state[node] = 2
+
+    if cycle_nodes:
+        for node in cycle_nodes:
+            if node not in incoming:
+                merged.pop(node, None)
+
+    compressed: dict[str, str] = {}
+    for src in merged:
+        root = merged[src]
+        seen = {src}
+        while root in merged and root not in seen:
+            seen.add(root)
+            root = merged[root]
+        if root != src:
+            compressed[src] = root
+    return compressed
 
 
 def _compute_effective_duplicate_aliases(
@@ -699,6 +726,19 @@ def _compute_effective_duplicate_aliases(
         else history_aliases
     )
     return _merge_active_duplicate_aliases(surviving_history_aliases, round_duplicate_aliases)
+
+
+def _build_consumed_alias_maps(
+    effective_aliases: Mapping[str, str],
+    history_aliases: Mapping[str, str] | None = None,
+) -> tuple[Mapping[str, str], ...]:
+    """构造单跳查表用的已消费判定别名序列：同时保留本轮有效规范项与清边前历史直接规范项，严禁拼接链式别名。"""
+    maps: list[Mapping[str, str]] = []
+    if effective_aliases:
+        maps.append(effective_aliases)
+    if history_aliases and history_aliases != effective_aliases:
+        maps.append(history_aliases)
+    return tuple(maps)
 
 
 def _real_source_models(models: Sequence[str]) -> tuple[str, ...]:
@@ -3418,9 +3458,10 @@ def _merge_author_replies(
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
     duplicate_aliases: Mapping[str, str] | Collection[tuple[str, str]] = (),
+    history_duplicate_aliases: Mapping[str, str] | Collection[tuple[str, str]] = (),
 ) -> tuple[AuthorReply, ...]:
     """合并 VerifiedRound 持久化的回复与调用方额外传入的回复：
-    先过滤整条已排除回复（reply_key、comment_id 或全长 finding_id 及其活跃规范项的 resolved 键已排除），
+    先过滤整条已排除回复（reply_key、comment_id 或全长 finding_id 及其本轮/历史直接规范项的 resolved 键已排除），
     仅对仍有资格参与评估的未排除回复按 reply_key 校验一致性并按最后出现位置去重。
     """
     norm_verified = _dedupe_author_replies_keep_last(verified_replies, "verified.author_replies")
@@ -3436,7 +3477,12 @@ def _merge_author_replies(
         else frozenset()
     )
     alias_map = _normalize_duplicate_aliases(duplicate_aliases, "duplicate_aliases") if duplicate_aliases else {}
-    alias_maps: tuple[Mapping[str, str], ...] = (alias_map,) if alias_map else ()
+    history_alias_map = (
+        _normalize_duplicate_aliases(history_duplicate_aliases, "history_duplicate_aliases")
+        if history_duplicate_aliases
+        else {}
+    )
+    alias_maps = _build_consumed_alias_maps(alias_map, history_alias_map)
 
     def _is_eligible(reply: AuthorReply) -> bool:
         if reply.comment_id.strip() in excluded_cids:
@@ -3475,6 +3521,7 @@ def _analyze_author_replies_detailed(
     stale_location_fingerprints: Collection[str] = (),
     bound_reply_targets: Mapping[str, str] | Collection[tuple[str, str]] = (),
     duplicate_aliases: Mapping[str, str] | Collection[tuple[str, str]] = (),
+    history_duplicate_aliases: Mapping[str, str] | Collection[tuple[str, str]] = (),
     same_head_pinned_keys: Collection[str] = (),
 ) -> _AuthorReplyAnalysis:
     """单遍完整分析作者回复：唯一绑定、关联回复键、因过期被拒回复键以及短前缀原始候选命中集。"""
@@ -3498,6 +3545,12 @@ def _analyze_author_replies_detailed(
     )
     pinned_targets = _normalize_bound_reply_targets(bound_reply_targets, "bound_reply_targets")
     alias_map = _normalize_duplicate_aliases(duplicate_aliases, "duplicate_aliases")
+    history_alias_map = (
+        _normalize_duplicate_aliases(history_duplicate_aliases, "history_duplicate_aliases")
+        if history_duplicate_aliases
+        else {}
+    )
+    consumed_alias_maps = _build_consumed_alias_maps(alias_map, history_alias_map)
     same_head_keys = _validate_consumed_reply_keys(same_head_pinned_keys, "same_head_pinned_keys")
 
     validated_replies = _dedupe_author_replies_keep_last(replies, "replies")
@@ -3562,7 +3615,7 @@ def _analyze_author_replies_detailed(
                             raw_hit_ids=(pinned_fid,),
                             consumed_reply_keys=consumed_keys,
                             consumed_comment_ids=consumed_cids,
-                            alias_maps=(alias_map,),
+                            alias_maps=consumed_alias_maps,
                         ):
                             norm_reason = _normalize_fingerprint_text(
                                 reply.reason,
@@ -3588,7 +3641,7 @@ def _analyze_author_replies_detailed(
                 raw_hit_ids=raw_hit_ids,
                 consumed_reply_keys=consumed_keys,
                 consumed_comment_ids=consumed_cids,
-                alias_maps=(alias_map,),
+                alias_maps=consumed_alias_maps,
             ):
                 consumed_targets.add(matched_fid)
             else:
@@ -4342,9 +4395,11 @@ def _validate_new_explicit_bound_targets(
     author_replies: Sequence[AuthorReply],
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
+    history_aliases: Mapping[str, str] | None = None,
 ) -> None:
     """校验上游显式传入的新增回复锁：必须有真实 author_replies 来源、对目标未消费，禁止指向 DUPLICATE 或非候选指纹，且坐标/前缀必须相容。"""
     author_reply_keys = {r.reply_key for r in author_replies}
+    consumed_alias_maps = _build_consumed_alias_maps(effective_aliases, history_aliases)
     for rk, target_fid in explicit_bound_targets.items():
         if rk in history_bound_targets:
             continue
@@ -4355,7 +4410,7 @@ def _validate_new_explicit_bound_targets(
             target_fid,
             consumed_reply_keys=consumed_reply_keys,
             consumed_comment_ids=consumed_comment_ids,
-            alias_maps=(effective_aliases,),
+            alias_maps=consumed_alias_maps,
         ):
             raise ConvergenceError(
                 f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 对目标发现 {target_fid!r} 已消费，禁止建立显式锁"
@@ -4401,7 +4456,7 @@ def _validate_new_explicit_bound_targets(
                     matched_f.finding_id,
                     consumed_reply_keys=consumed_reply_keys,
                     consumed_comment_ids=consumed_comment_ids,
-                    alias_maps=(effective_aliases,),
+                    alias_maps=consumed_alias_maps,
                 ):
                     raise ConvergenceError(
                         f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 对原始命中发现 {matched_f.finding_id!r}"
@@ -4433,7 +4488,7 @@ def _validate_new_explicit_bound_targets(
                         matched_f.finding_id,
                         consumed_reply_keys=consumed_reply_keys,
                         consumed_comment_ids=consumed_comment_ids,
-                        alias_maps=(effective_aliases,),
+                        alias_maps=consumed_alias_maps,
                     ):
                         raise ConvergenceError(
                             f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 对原始命中发现 {matched_f.finding_id!r}"
@@ -4606,6 +4661,7 @@ class VerifiedRound:
             author_replies=active_author_replies,
             consumed_reply_keys=effective_consumed,
             consumed_comment_ids=ext_consumed_cids,
+            history_aliases=history_aliases,
         )
 
         # 严格仅用独立保存的 self.author_replies 与合并后唯一有效别名表 effective_aliases 重算回复匹配，禁止从 verdicts 反抽补造证据
@@ -4617,6 +4673,7 @@ class VerifiedRound:
             stale_location_fingerprints=self.candidates.stale_location_fingerprints,
             bound_reply_targets=effective_bound_targets,
             duplicate_aliases=effective_aliases,
+            history_duplicate_aliases=history_aliases,
             same_head_pinned_keys=same_head_pinned_keys,
         )
         expected_related_keys = _compute_folded_related_reply_keys(
@@ -4876,6 +4933,7 @@ def parse_verifier_output(
         author_replies=active_author_replies,
         consumed_reply_keys=effective_consumed,
         consumed_comment_ids=consumed_cids_norm,
+        history_aliases=history_aliases,
     )
 
     reply_analysis = _analyze_author_replies_detailed(
@@ -4886,6 +4944,7 @@ def parse_verifier_output(
         stale_location_fingerprints=candidates.stale_location_fingerprints,
         bound_reply_targets=effective_bound_targets,
         duplicate_aliases=effective_aliases,
+        history_duplicate_aliases=history_aliases,
         same_head_pinned_keys=same_head_pinned_keys,
     )
     bound_replies = reply_analysis.bound_replies
@@ -5227,6 +5286,7 @@ def _derive_round_reply_pins_and_consumed(
     consumed_comment_ids: frozenset[str] = frozenset(),
     seed_bound_targets: Mapping[str, str],
     effective_aliases: Mapping[str, str],
+    history_aliases: Mapping[str, str] | None = None,
     cleared_alias_ids: frozenset[str] = frozenset(),
     same_head_pinned_keys: frozenset[str],
     pre_verdict_stale: frozenset[str],
@@ -5241,6 +5301,7 @@ def _derive_round_reply_pins_and_consumed(
         stale_location_fingerprints=pre_verdict_stale,
         bound_reply_targets=seed_bound_targets,
         duplicate_aliases=effective_aliases,
+        history_duplicate_aliases=history_aliases or {},
         same_head_pinned_keys=same_head_pinned_keys,
     )
     matched_keys_by_id = analysis.matched_keys_by_id
@@ -5275,7 +5336,7 @@ def _derive_round_reply_pins_and_consumed(
 
     # 1. 短前缀 finding 回复在完整候选集上先判原始命中集（折叠 duplicate_of 之前）：
     #    唯一命中且对目标未消费 -> 锁定原始 16 位指纹（即使裁为 DUPLICATE，也不转绑规范项）；多项命中 -> 立即消费。
-    alias_maps_effective: tuple[Mapping[str, str], ...] = (effective_aliases,)
+    consumed_alias_maps = _build_consumed_alias_maps(effective_aliases, history_aliases)
     for rk, hit_fids in analysis.raw_short_prefix_hits.items():
         if rk in bound_targets:
             pinned = bound_targets[rk]
@@ -5292,7 +5353,7 @@ def _derive_round_reply_pins_and_consumed(
                 only_fid,
                 consumed_reply_keys=history_consumed,
                 consumed_comment_ids=consumed_comment_ids,
-                alias_maps=alias_maps_effective,
+                alias_maps=consumed_alias_maps,
             ):
                 continue
             bound_targets[rk] = only_fid
@@ -5327,7 +5388,7 @@ def _derive_round_reply_pins_and_consumed(
                     raw_hit_ids=raw_hit_ids,
                     consumed_reply_keys=history_consumed,
                     consumed_comment_ids=consumed_comment_ids,
-                    alias_maps=alias_maps_effective,
+                    alias_maps=consumed_alias_maps,
                 ) or _is_reply_hit_consumed(
                     rk,
                     rk_cid,
@@ -5335,7 +5396,7 @@ def _derive_round_reply_pins_and_consumed(
                     raw_hit_ids=raw_hit_ids,
                     consumed_reply_keys=history_consumed,
                     consumed_comment_ids=consumed_comment_ids,
-                    alias_maps=alias_maps_effective,
+                    alias_maps=consumed_alias_maps,
                 ):
                     consumed_pin_targets.setdefault(rk, set()).add(target_for_rk)
                 round_pin_targets.setdefault(rk, (kind, set()))[1].add(target_for_rk)
@@ -5348,7 +5409,7 @@ def _derive_round_reply_pins_and_consumed(
                     fid,
                     consumed_reply_keys=history_consumed,
                     consumed_comment_ids=consumed_comment_ids,
-                    alias_maps=alias_maps_effective,
+                    alias_maps=consumed_alias_maps,
                 ):
                     consumed_pin_targets.setdefault(rk, set()).add(fid)
                 round_pin_targets.setdefault(rk, (kind, set()))[1].add(fid)
@@ -5507,6 +5568,7 @@ def _derive_round_decision_payload(
         consumed_reply_keys=effective_consumed,
         consumed_comment_ids=effective_consumed_cids,
         duplicate_aliases=effective_aliases,
+        history_duplicate_aliases=history_aliases,
     )
     history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(history)
     same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == head_sha)
@@ -5531,6 +5593,7 @@ def _derive_round_decision_payload(
         consumed_comment_ids=effective_consumed_cids,
         seed_bound_targets=effective_bound_targets,
         effective_aliases=effective_aliases,
+        history_aliases=history_aliases,
         cleared_alias_ids=cleared_alias_ids,
         same_head_pinned_keys=same_head_pinned_keys,
         pre_verdict_stale=pre_verdict_stale,
