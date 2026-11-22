@@ -138,19 +138,21 @@ type RustAccess = "call" | "drive" | "value" | "export";
 type RustReference = { path: string[]; access: RustAccess };
 type RustBinding = { kind: "path" | "call-result"; path: string[] } | RustRoutine |
   { kind: "pending"; routine: RustRoutine; args: (RustBinding | undefined)[]; driver: "await" | "iterate" | "async-iterate" } |
-  { kind: "ready"; value?: RustBinding } | { kind: "suspended" } |
+  { kind: "ready"; value?: RustBinding } | { kind: "pending-future" } |
   { kind: "literal"; value: boolean | bigint | string } | RustElements | RustEnum | RustTypeAlias |
   { kind: "constructor"; tag: string; shape: VariantShape; family: RustEnum } |
   { kind: "variant"; tag: string; tuple?: RustElements; fields?: Map<string, RustBinding | undefined> };
 type RustElements = { kind: "tuple" | "array"; elements: (RustBinding | undefined)[] };
 type VariantShape = { form: "unit" | "record" } | { form: "tuple"; arity: number };
 type RustEnum = { kind: "enum"; owner: string; variants: Map<string, VariantShape> };
-type AliasDefinition = { params: string[]; target: string[] };
+type AliasParameter = { name: string; fallback?: string[] };
+type AliasDefinition = { params: AliasParameter[]; target: string[] };
 type RustTypeAlias = { kind: "type-alias"; scope: RustScope } & AliasDefinition;
 type EnumArgument = (depth: number) => RustEnum | undefined;
 type EnumResolver = (path: string[], args?: EnumArgument[], depth?: number) => RustEnum | undefined;
 type RustConstructor = Extract<RustBinding, { kind: "constructor" }>;
 type RustTruth = boolean | undefined;
+type Driven = { kind: "pending" } | { kind: "ready"; value?: RustBinding };
 class RustExit {
   constructor(readonly reason: "return" | "suspended" | "break" | "continue",
     readonly value?: RustBinding, readonly label?: string) {}
@@ -289,12 +291,20 @@ function typeArguments(code: string[], start: number, end: number): string[][] {
 
 function aliasDefinition(code: string[], start: number): AliasDefinition | undefined {
   let index = start + 2;
-  let params: string[] = [];
+  let params: AliasParameter[] = [];
   if (code[index] === "<") {
     const close = genericEnd(code, index);
     if (close < 0) return;
-    params = typeArguments(code, index + 1, close).map(([first, second]) =>
-      first === "const" ? second : first === "'" ? "'" + second : first);
+    params = typeArguments(code, index + 1, close).map(param => {
+      const [first, second] = param;
+      const name = first === "const" ? second : first === "'" ? "'" + second : first;
+      let eq = 0;
+      for (; eq < param.length && param[eq] !== "="; eq++) {
+        const end = param[eq] === "<" ? genericEnd(param, eq) : groupEnd(param, eq);
+        if (end > eq) eq = end;
+      }
+      return { name, fallback: eq < param.length ? param.slice(eq + 1) : undefined };
+    });
     index = close + 1;
   }
   const end = separator(code, index, code.length, ";");
@@ -331,7 +341,13 @@ function resolveType(code: string[], resolve: EnumResolver, depth: number,
 }
 
 function resolveAlias({ params, target }: AliasDefinition, resolve: EnumResolver, args: EnumArgument[], depth: number) {
-  return resolveType(target, resolve, depth, new Map(params.map((name, i) => [name, args[i]])));
+  const parameters = new Map<string, EnumArgument | undefined>();
+  for (const [i, { name, fallback }] of params.entries()) {
+    // 默认值按声明次序取得前序实参，未声明的名字仍走别名自身的词法作用域。
+    const earlier = new Map(parameters);
+    parameters.set(name, args[i] ?? (fallback && (at => resolveType(fallback, resolve, at, earlier))));
+  }
+  return resolveType(target, resolve, depth, parameters);
 }
 
 function lookup(scope: RustScope, [first, ...rest]: string[]): RustBinding | undefined {
@@ -651,10 +667,15 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
 
   function ifBranch(truth: RustTruth, condition: string[], scope: RustScope) {
     if (truth !== undefined) return truth;
-    const inverted = condition[0] === "!";
-    const name = condition[Number(inverted)];
+    let start = 0, end = condition.length, inverted = false;
+    while (start < end) {
+      if (condition[start] === "!") { inverted = !inverted; start++; }
+      else if (condition[start] === "(" && groupEnd(condition, start) === end - 1) { start++; end--; }
+      else break;
+    }
+    const name = condition[start];
     const chosen = decide(undefined);
-    if (condition.length === 1 + Number(inverted) && identifier.test(name ?? "")) {
+    if (end === start + 1 && identifier.test(name ?? "")) {
       for (let layer: RustScope | undefined = scope; layer; layer = layer.parent) {
         if (!layer.values.has(name)) continue;
         if (layer.immutable.has(name)) layer.values.set(name, boolean(chosen !== inverted));
@@ -670,11 +691,6 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
       if (error instanceof RustExit) return { value: error.value, exit: error.reason };
       throw error;
     }
-  }
-
-  function complete(run: () => RustBinding | undefined): RustBinding | undefined {
-    const { value, exit } = outcome(run);
-    return exit === "suspended" ? { kind: "suspended" } : value;
   }
 
   function possible(run: () => RustBinding | undefined) {
@@ -727,11 +743,11 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
   };
 
   function evaluateRoutine(routine: RustRoutine, args: (RustBinding | undefined)[]) {
-    if (running.has(routine.body)) return;
+    if (running.has(routine.body)) return { value: undefined, exit: undefined };
     running.add(routine.body);
     try {
       const scope = parameterScope(routine.scope, routine.params, args);
-      return complete(() => routine.block ? block(routine.body, scope) :
+      return outcome(() => routine.block ? block(routine.body, scope) :
         scan(routine.body, 0, routine.body.length, scope));
     } finally {
       running.delete(routine.body);
@@ -741,12 +757,12 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
   function invoke(value: RustBinding | undefined, args: (RustBinding | undefined)[]): RustBinding | undefined {
     if (value?.kind === "routine") {
       if (value.asynchronous) return { kind: "pending", routine: value, args, driver: "await" };
-      return evaluateRoutine(value, args);
+      return evaluateRoutine(value, args).value;
     }
     if (value?.kind === "path") {
       note(value, "call");
       if (["std::future::pending", "core::future::pending", "future::pending"].includes(value.path.join("::"))) {
-        return { kind: "suspended" };
+        return { kind: "pending-future" };
       }
       if (["std::future::ready", "core::future::ready", "future::ready"].includes(value.path.join("::"))) {
         return { kind: "ready", value: args[0] };
@@ -758,29 +774,32 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     }
   }
 
-  function drive(value: RustBinding | undefined, driver: "await" | "iterate" | "async-iterate") {
-    if (value?.kind === "ready" && driver === "await") return value.value;
-    if (value?.kind === "suspended" && driver === "await") return value;
-    if (value?.kind === "pending" && value.driver === driver) return evaluateRoutine(value.routine, value.args);
+  function drive(value: RustBinding | undefined, driver: "await" | "iterate" | "async-iterate"): Driven | undefined {
+    if (value?.kind === "ready" && driver === "await") return { kind: "ready", value: value.value };
+    if (value?.kind === "pending-future" && driver === "await") return { kind: "pending" };
+    if (value?.kind === "pending" && value.driver === driver) {
+      const result = evaluateRoutine(value.routine, value.args);
+      return result.exit === "suspended" ? { kind: "pending" } : { kind: "ready", value: result.value };
+    }
     if (value?.kind === "call-result" && driver === "await") recordReference(value.path, "drive");
   }
 
   function poll(value: RustBinding | undefined): RustBinding | undefined {
     const result = drive(value, "await");
-    if (result?.kind === "suspended") return { kind: "variant", tag: pollVariants.owner + "::Pending" };
-    if (value?.kind === "ready" || value?.kind === "pending" && value.driver === "await") {
+    if (result?.kind === "pending") return { kind: "variant", tag: pollVariants.owner + "::Pending" };
+    if (result?.kind === "ready") {
       return { kind: "variant", tag: pollVariants.owner + "::Ready",
-        tuple: { kind: "tuple", elements: [result] } };
+        tuple: { kind: "tuple", elements: [result.value] } };
     }
   }
 
   function awaitValue(value: RustBinding | undefined) {
     const result = drive(value, "await");
-    if (!latent && (result?.kind === "suspended" ||
+    if (!latent && (result?.kind === "pending" ||
         (value === undefined || value.kind === "call-result" || value.kind === "path") && decide(undefined))) {
       throw new RustExit("suspended");
     }
-    return result;
+    if (result?.kind === "ready") return result.value;
   }
 
   function afterAttributes(code: string[], start: number) {
@@ -1407,18 +1426,22 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
               ["is_ready", "is_pending"].includes(method) && code[next + 2] === "(" && code[next + 3] === ")") {
             value = boolean(value.tag.endsWith("::Ready") === (method === "is_ready"));
             next += 4;
-          } else if ((value?.kind === "pending" || value?.kind === "call-result" || value?.kind === "ready" || value?.kind === "suspended") &&
+          } else if ((value?.kind === "pending" || value?.kind === "call-result" || value?.kind === "ready" || value?.kind === "pending-future") &&
               method === "as_mut" && code[next + 2] === "(" && code[next + 3] === ")") {
             next += 4;
           } else if (code[next + 2] === "(" &&
-              (method === "poll" && (value?.kind === "call-result" || value?.kind === "ready" || value?.kind === "suspended" || value?.kind === "pending" && value.driver === "await") ||
+              (method === "poll" && (value?.kind === "call-result" || value?.kind === "ready" || value?.kind === "pending-future" || value?.kind === "pending" && value.driver === "await") ||
                value?.kind === "pending" &&
                  ((value.driver === "iterate" && ["next", "nth", "collect", "count", "last", "fold", "for_each"].includes(method)) ||
                   (value.driver === "async-iterate" && method === "poll_next")))) {
             const close = groupEnd(code, next + 2);
             if (close <= next + 2 || close >= end) break;
             argumentsOf(code, next + 3, close, scope, observed);
-            value = method === "poll" ? poll(value) : drive(value, value?.kind === "pending" ? value.driver : "await");
+            if (method === "poll") value = poll(value);
+            else {
+              const result = drive(value, value?.kind === "pending" ? value.driver : "await");
+              value = result?.kind === "ready" ? result.value : undefined;
+            }
             next = close + 1;
           } else {
             value = undefined;
@@ -1434,11 +1457,8 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
   }
 
   const paramsOfBody = parametersOf(params);
-  function run() {
-    return complete(() => block(body, parameterScope(module, paramsOfBody, [])));
-  }
   if (latent) {
-    const returned = run();
+    const returned = possible(() => block(body, parameterScope(module, paramsOfBody, [])));
     if (driveReturn) drive(returned, "await");
     return [[...refs.values()]];
   }

@@ -9,16 +9,19 @@ const absolute = z.string().refine(isAbsolute);
 const runtime = z.object({ executable: absolute, base: absolute, prefix: absolute, paths: z.array(absolute) });
 const receipt = "AT18_PYTHON_COVERED\n";
 const driver = ".at18-python-source.py";
+const pythonTimeout = 45_000;
 
 function isolatedPython(work: string, scratch: string, input: unknown) {
   const python = runtime.parse(JSON.parse(execFileSync("python3", ["-I", "-B", "-c",
     "import json, site, sys; print(json.dumps(dict(executable=sys.executable, base=sys.base_prefix, prefix=sys.prefix, paths=[*sys.path, *site.getsitepackages()])))"],
-  { encoding: "utf8", timeout: 5_000, env: { PATH: process.env.PATH }, stdio: ["ignore", "pipe", "ignore"] })));
+  // 解释器发现也会争用进程启动和磁盘，不能在沙盒启动前以更短的时限误判覆盖。
+  { encoding: "utf8", timeout: pythonTimeout, killSignal: "SIGKILL", env: { PATH: process.env.PATH },
+    stdio: ["ignore", "pipe", "ignore"] })));
   const framework = join(python.base, "Resources/Python.app/Contents/MacOS/Python");
   const argv = [python.executable, "-I", "-B", join(work, driver), scratch];
   const options: ExecFileSyncOptionsWithStringEncoding = {
     cwd: work, env: { HOME: scratch, TMPDIR: scratch, PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1" },
-    input: JSON.stringify(input), encoding: "utf8", timeout: 45_000, killSignal: "SIGKILL",
+    input: JSON.stringify(input), encoding: "utf8", timeout: pythonTimeout, killSignal: "SIGKILL",
     stdio: ["pipe", "pipe", "ignore"],
   };
   if (process.platform === "darwin") {

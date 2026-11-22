@@ -1057,6 +1057,117 @@ test("R10/#1319：Python 声明目标、延迟体驱动和 CPython 生产调用�
   });
 });
 
+test("R15/#1319：Python 公开承接、初始化排除与显式等待", { timeout: 180_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const production = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const imported = "from .at18_fixture_feed import route\n";
+  const direct = "from trading_system.at18_fixture_feed import route\n" +
+    "def test_route():\n    assert route([1, 2]) == [1, 2]\n";
+  const through = "from trading_system import select_feed\ndef test_route():\n    assert select_feed([1, 2]) == [1, 2]\n";
+  const through_async = "import asyncio\nfrom trading_system import select_feed\n" +
+    "def test_route():\n    assert asyncio.run(select_feed([1, 2])) == [1, 2]\n";
+  const implementations = "def _copy(events):\n    return list(events)\n" +
+    "def route(events):\n    return _copy(events)\ndef preview(events):\n    return _copy(events)\n";
+  const ordinary = imported + "def select_feed(events):\n    return route(events)\n";
+  const reload = "from importlib import reload\nimport trading_system\n" +
+    "def test_route():\n    assert reload(trading_system).cached == [1, 2]\n";
+  const init = imported + "class Feed:\n    def __init__(self, events):\n        self.cached = self.read(events)\n" +
+    "    def read(self, events):\n        return self.cached if hasattr(self, 'cached') else route(events)\n";
+  const construct = "from trading_system import Feed\ndef test_route():\n" +
+    "    assert Feed([1, 2]).read([]) == [1, 2]\n";
+  const async_code = (body: string) => "import asyncio\n" + imported +
+    "async def _child(events):\n    return route(events)\nasync def select_feed(events):\n" +
+    body.split("\n").map(s => "    " + s).join("\n") + "\n";
+  const check = (impl: string, wire: string, registered: string, expected: boolean) => {
+    const repo = feedSource({ [entry]: impl, [production]: wire, [path]: registered });
+    assert.equal(pythonReplacement(repo, G0, entry, production, path, "test_route", 1), expected);
+  };
+  for (const [name, impl, wire, registered, expected] of [
+    ["私有助手交集不算承接", implementations, ordinary, direct.replace("assert route(", "assert preview(").replace("import route", "import preview"), false],
+    ["同一公开导出经过私有助手", implementations, ordinary, direct, true],
+    ["字面 __all__ 排除公开命名的函数", implementations + "__all__ = ['preview']\n", ordinary, direct, false],
+    ["字面 __all__ 可显式导出下划线函数", implementations + "__all__ = ('_copy',)\n",
+      ordinary.replaceAll("route", "_copy"), direct.replace("assert route(", "assert _copy(").replace("import route", "import _copy"), true],
+    ["实现公开类方法", "class Route:\n    @classmethod\n    def route(cls, events):\n        return list(events)\n",
+      ordinary.replace("import route", "import Route").replace("return route(", "return Route.route("),
+      direct.replace("import route", "import Route").replace("assert route(", "assert Route.route("), true],
+    ["仅初始化重载", implementations, ordinary + "cached = select_feed([1, 2])\n", reload, false],
+    ["重载结束后的测试调用", implementations, ordinary + "cached = select_feed([1, 2])\n",
+      reload.replace("assert reload(trading_system).cached", "assert reload(trading_system).select_feed([1, 2])"), true],
+    ["仅通过 __init__ 记入的缓存", implementations, init, construct, false],
+    ["公开入口正常进入后可以调用构造器", implementations,
+      init + "def select_feed(events):\n    return Feed(events).cached\n", through, true],
+    ["仅通过 __new__ 记入的缓存", implementations,
+      imported + "class Feed:\n    def __new__(cls, events):\n        self = object.__new__(cls)\n" +
+      "        self.cached = self.read(events)\n        return self\n" +
+      "    def read(self, events):\n        return self.cached if hasattr(self, 'cached') else route(events)\n", construct, false],
+    ["try else 的定义进入公开集合", implementations,
+      "try:\n    " + imported + "except ImportError:\n    raise\nelse:\n" +
+      "    def select_feed(events):\n        return route(events)\n", through, true],
+    ["with match 中的公开类静态方法", implementations,
+      "from contextlib import nullcontext\n" + imported + "with nullcontext():\n    match 1:\n" +
+      "        case 1:\n            class Feed:\n                if True:\n                    @staticmethod\n" +
+      "                    def read(events):\n                        return route(events)\n", direct, true],
+    ["同一源定义仍以公开别名存在", implementations,
+      ordinary + "template = select_feed\ndef select_feed(events):\n    return []\n",
+      through.replaceAll("select_feed", "template"), true],
+    ["不计被覆盖而不再导出的定义", implementations,
+      ordinary + "_template = select_feed\ndef select_feed(events):\n    return []\n",
+      through.replaceAll("select_feed", "_template"), false],
+    ["生产 __all__ 排除测试调用的入口", implementations, ordinary + "__all__ = []\n", through, false],
+  ] as const) await t.test(name, () => check(impl, wire, registered, expected));
+  const variants = [
+    ["gather", "return (await asyncio.gather(_child(events)))[0]", true],
+    ["task", "task = asyncio.create_task(_child(events))\nreturn await task", true],
+    ["already-done task", "task = asyncio.create_task(_child(events))\nawait asyncio.sleep(0)\nreturn await task", true],
+    ["wait", "task = asyncio.create_task(_child(events))\nawait asyncio.wait({task})\nreturn task.result()", true],
+    ["TaskGroup", "async with asyncio.TaskGroup() as group:\n    task = group.create_task(_child(events))\nreturn task.result()", true],
+    ["transitive", "async def relay():\n    return await asyncio.create_task(_child(events))\n" +
+      "return (await asyncio.gather(relay()))[0]", true],
+    ["dropped task runs anyway", "asyncio.create_task(_child(events))\nawait asyncio.sleep(0)\nreturn events", false],
+    ["dropped gather runs anyway", "asyncio.gather(_child(events))\nawait asyncio.sleep(0)\nreturn events", false],
+    ["wait does not consume its uncompleted task", "gate = asyncio.Event()\nasync def delayed():\n" +
+      "    await gate.wait()\n    return await _child(events)\ntask = asyncio.create_task(delayed())\n" +
+      "await asyncio.wait({task}, timeout=0)\ngate.set()\nawait asyncio.sleep(0)\nreturn events", false],
+    ["awaited parent cannot vouch for its orphan", "async def relay():\n    asyncio.create_task(_child(events))\n" +
+      "    await asyncio.sleep(0)\n    return events\nreturn await asyncio.create_task(relay())", false],
+  ] as const;
+  for (const [name, body, expected] of variants) {
+    await t.test("补跑：" + name, () => check(implementations, async_code(body), direct, expected));
+    await t.test("登记：" + name, () => check(implementations, async_code(body), through_async, expected));
+  }
+});
+
+test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
+  const f = makeFixture({ feedIntegration: `from .at18_fixture_feed import route
+def select_feed(sources, events):
+    cursor = iter([1, 1])
+    next(cursor)
+    try:
+        next(cursor)
+    except StopIteration:
+        return []
+    return route('1min', sources, events)
+` });
+  const python = execFileSync("which", ["python3"], { encoding: "utf8" }).trim();
+  writeFileSync(join(f.bin, "python3"), `#!/bin/sh
+case "$4" in *site.getsitepackages*) sleep 6;; esac
+exec '${python.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o700 });
+  await Promise.all([0, 1, 2].map(async i => {
+    const output = join(f.dir, "slow-discovery-" + i);
+    mkdirSync(output);
+    const r = await execute([f.root, f.manifest, output, ...f.upstream], { env: {
+      ...process.env, PATH: f.bin + ":" + process.env.PATH, AT18_TEST_GITHUB: f.apiFile,
+    } });
+    assert.equal(r.code, 0, r.stderr);
+    const report = at18ReportSchema.parse(parseJsonObject(readFileSync(join(output, "at18-report.json"))));
+    assert.equal(report.overall_result, "PASS", JSON.stringify(report.failed_checks));
+    assert.deepEqual(report.failed_checks, []);
+  }));
+});
+
 test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
   timeout: 180_000,
 }, async t => {
@@ -1319,6 +1430,14 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
       if flag { ${call} } let flag = std::hint::black_box(false); if !flag { ${call} }`, false],
     ["r14-complementary-mutable-binding", `let mut flag = std::hint::black_box(false);
       if flag { ${call} } flag = std::hint::black_box(true); if !flag { ${call} }`, false],
+    ["r15-boolean-parentheses-and-not-parity", `let flag = std::hint::black_box(false);
+      if !!((flag)) { ${call} } if (!(!( !flag ))) { ${call} }`, true],
+    ["r15-boolean-parentheses-do-not-equate-bindings", `let a = std::hint::black_box(false);
+      let b = std::hint::black_box(false); if ((a)) { ${call} } if !(b) { ${call} }`, false],
+    ["r15-boolean-parity-does-not-remove-shadowing", `let flag = std::hint::black_box(false);
+      if ((flag)) { ${call} } let flag = std::hint::black_box(false); if (!(flag)) { ${call} }`, false],
+    ["r15-boolean-parity-does-not-refine-mutable", `let mut flag = std::hint::black_box(false);
+      if !!flag { ${call} } flag = std::hint::black_box(true); if (!(flag)) { ${call} }`, false],
     ["r14-ready-match", `use std::task::Poll; use std::future::Future;
       let mut fut = std::pin::pin!(std::future::ready(true));
       let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -1340,6 +1459,28 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
     ["r14-ready-is-not-pending", `let mut fut = std::pin::pin!(std::future::ready(()));
       let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
       if std::future::Future::poll(fut.as_mut(), &mut cx).is_pending() { ${call} }`, false],
+    ["r15-poll-ready-payload-is-not-pending", `use std::future::{pending, ready, Future};
+      let mut fut = std::pin::pin!(ready(pending::<()>()));
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      if fut.as_mut().poll(&mut cx).is_pending() { ${call} }`, false],
+    ["r15-poll-ready-payload-is-ready", `use std::future::{pending, ready, Future};
+      let mut fut = std::pin::pin!(ready(pending::<()>()));
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      if fut.as_mut().poll(&mut cx).is_ready() { ${call} }`, true],
+    ["r15-poll-only-drives-inner-after-unwrapping", `use std::future::{pending, Future}; use std::task::Poll;
+      let mut outer = std::pin::pin!(async { pending::<()>() });
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      let Poll::Ready(inner) = outer.as_mut().poll(&mut cx) else { return; };
+      let mut inner = std::pin::pin!(inner);
+      if inner.as_mut().poll(&mut cx).is_pending() { ${call} }`, true],
+    ["r15-await-outer-ready-does-not-drive-inner", poll + `drive(async {
+      let _inner = std::future::ready(std::future::pending::<()>()).await;
+      ${call}
+    });`, true],
+    ["r15-await-explicitly-drives-inner-pending", poll + `drive(async {
+      std::future::ready(std::future::pending::<()>()).await.await;
+      ${call}
+    });`, false],
     ["r14-mixed-is-not-always-ready", `use std::future::Future;
       let mut fut = std::pin::pin!(async {
         if std::hint::black_box(false) { core::future::pending::<()>().await; }
@@ -1349,6 +1490,15 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
     ["r14-generic-alias-nested-argument", `enum Phase<T, U> { Live(T, U), Dry }
       type Id<T> = T; type State = Id<Id<Phase<u8, (u8, u8)>>>;
       match State::Live(1, (2, 3)) { Phase::Live(_, _) => { ${call} } Phase::Dry => (), }`, true],
+    ["r15-type-alias-default-with-prior-argument", `enum Phase { Live, Dry }
+      type Select<A, B = A> = B; type State = Select<Phase>;
+      match State::Live { Phase::Live => { ${call} } Phase::Dry => (), }`, true],
+    ["r15-type-alias-explicit-override", `enum Phase { Live, Dry } enum Other { Live, Dry }
+      type Id<T = Phase> = T; type State = Id<Other>;
+      match State::Live { Other::Live => { ${call} } Other::Dry => (), }`, true],
+    ["r15-type-alias-default-does-not-reach-dead-arm", `enum Phase { Live, Dry }
+      type Id<T = Phase> = T; type State = Id;
+      match State::Dry { Phase::Live => { ${call} } Phase::Dry => (), }`, false],
     ["r11-if-let-some", `if let Some(f) = Some(handshake) { assert!(f("HELLO")); }`, true],
     ["r11-if-let-none", `if let Some(f) = None::<fn(&str) -> bool> { ${call} let _ = f; }`, false],
     ["r11-while-let-none", `while let Some(_) = None::<i32> { ${call} break; }`, false],
@@ -1397,6 +1547,11 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
     type State = crate::aliases::Id<Local>;
     match State::Live { Local::Live => { ${call} } Local::Dry => (), }
   `, true, "mod aliases { pub type Id<T> = T; }\n"));
+  await t.test("r15-cascading-defaults-resolve-in-declaration-scope", () => check("", `
+    enum Phase { Live, Dry }
+    type State = crate::aliases::Select;
+    match State::Live { crate::aliases::Phase::Live => { ${call} } crate::aliases::Phase::Dry => (), }
+  `, true, "mod aliases { pub enum Phase { Live, Dry } pub type Select<A = Phase, B = A, C = B> = C; }\n"));
   await t.test("r13-qualified-module-alias-chain", () => check("", `
     type Local = crate::state::State<fn(&str) -> bool>;
     match Local::Live(handshake) {

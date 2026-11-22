@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType
 
@@ -26,7 +27,6 @@ def module(path):
 
 
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
-DEFINITIONS = (*FUNCTIONS, ast.ClassDef)
 
 
 def line(node):
@@ -79,9 +79,283 @@ def arguments(fn, samples):
 
 DEFERRED_FRAMES = {GeneratorType: "gi_frame", AsyncGeneratorType: "ag_frame", CoroutineType: "cr_frame"}
 PROBE_STEPS = 1000
+RELOAD_CODE = importlib.reload.__code__
 
 
-def public_probe(integration, integration_path, public_codes, source_path, test_entered_codes, samples):
+def statements(body):
+    """展开同一词法层的控制流块，不进入函数或类的内部作用域。"""
+    for stmt in body:
+        yield stmt
+        if isinstance(stmt, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            yield from statements(stmt.body)
+            yield from statements(stmt.orelse)
+        elif isinstance(stmt, (ast.Try, ast.TryStar)):
+            yield from statements(stmt.body)
+            for handler in stmt.handlers:
+                yield from statements(handler.body)
+            yield from statements(stmt.orelse)
+            yield from statements(stmt.finalbody)
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            yield from statements(stmt.body)
+        elif isinstance(stmt, ast.Match):
+            for case in stmt.cases:
+                yield from statements(case.body)
+
+
+class Exports:
+    def __init__(self, path, require_body=False):
+        self.path = str(Path(path).resolve())
+        raw = Path(path).read_bytes()
+        top = list(statements(ast.parse(raw, path).body))
+        self.literal_all = any(
+            isinstance(stmt, (ast.Assign, ast.AnnAssign)) and
+            any(isinstance(target, ast.Name) and target.id == "__all__" for target in
+                (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target])) and
+            isinstance(stmt.value, (ast.List, ast.Tuple)) and
+            all(isinstance(value, ast.Constant) and type(value.value) is str for value in stmt.value.elts)
+            for stmt in top)
+        functions = {(line(stmt), stmt.name) for stmt in top if isinstance(stmt, FUNCTIONS)
+                     and (not require_body or substantive(stmt))}
+        classes = {(line(stmt), stmt.name) for stmt in top if isinstance(stmt, ast.ClassDef)}
+        methods = {(line(method), method.name) for cls in top if isinstance(cls, ast.ClassDef)
+                   for method in statements(cls.body) if isinstance(method, FUNCTIONS) and
+                   not method.name.startswith("_") and (not require_body or substantive(method))}
+        codes = list(code_objects(compile(raw, self.path, "exec")))
+        self.classes = {c for c in codes if (c.co_firstlineno, c.co_name) in classes}
+        self.functions = {c for c in codes if (c.co_firstlineno, c.co_name) in functions}
+        self.methods = {c for c in codes if (c.co_firstlineno, c.co_name) in methods}
+        self.codes = self.functions | self.methods
+
+    def members(self, namespace):
+        explicit = self.literal_all and "__all__" in namespace
+        if explicit:
+            export_list = namespace["__all__"]
+            if type(export_list) not in (tuple, list) or not all(type(name) is str for name in export_list):
+                return
+            names = export_list
+        else:
+            names = [name for name in namespace if not name.startswith("_")]
+        for name in names:
+            value = namespace.get(name)
+            if type(value) is FunctionType and value.__code__ in self.functions:
+                if explicit or not value.__code__.co_name.startswith("_"):
+                    yield None, value
+            elif isinstance(value, type) and value.__module__ == namespace.get("__name__"):
+                if not explicit and value.__name__.startswith("_"):
+                    continue
+                for name, member in vars(value).items():
+                    if name.startswith("_"):
+                        continue
+                    fn = member.__func__ if type(member) in (staticmethod, classmethod) else member
+                    if type(fn) is FunctionType and fn.__code__ in self.methods:
+                        yield value, member
+
+    def contains(self, frame):
+        code = frame.f_code
+        if code.co_filename != self.path or code not in self.codes:
+            return False
+        return any((member.__func__ if type(member) in (staticmethod, classmethod) else member).__code__ is code
+                   for _, member in self.members(frame.f_globals))
+
+    def initialized(self, frame):
+        while frame is not None:
+            code = frame.f_code
+            if code.co_filename == self.path and (code.co_name in ("<module>", "__init__", "__new__") or
+                                                   code in self.classes):
+                return False
+            # reload() 的目标必须是这个模块；重载别的模块不改变本模块的公开边界。
+            if code is RELOAD_CODE:
+                target = frame.f_locals.get("module")
+                if inspect.ismodule(target) and vars(target).get("__file__") == self.path:
+                    return False
+            frame = frame.f_back
+        return True
+
+
+class Invocation:
+    """调用只能继承自己显式消费过的任务，任务继承上下文本身不提供证明。"""
+    def __init__(self):
+        self.owner = current_task()
+        self.joined = {}
+
+    def reachable(self):
+        reached, todo = set(), [self.owner]
+        while todo:
+            task = todo.pop()
+            if task not in reached:
+                reached.add(task)
+                todo.extend(self.joined.get(task, ()))
+        return reached
+
+
+active = ContextVar("at18-active-invocations", default=())
+returns = {dis.opmap[name] for name in ("RETURN_VALUE", "RETURN_CONST") if name in dis.opmap}
+
+
+def current_task():
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
+def joined(scopes, waiter, tasks):
+    if not scopes:
+        return
+    done = [task for task in tasks if isinstance(task, native_task) and task.done() and not task.cancelled()]
+    for scope in scopes:
+        scope.joined.setdefault(waiter, set()).update(done)
+
+
+native_task = asyncio.Task
+
+
+def observe_waits():
+    """在原生等待完成的位置记因果边；不推进本来没有被调用者等待的任务。"""
+    class TracedTask(native_task):
+        def __await__(self):
+            scopes, waiter = active.get(), current_task()
+            try:
+                return (yield from super().__await__())
+            finally:
+                joined(scopes, waiter, (self,))
+
+        __iter__ = __await__
+
+    # 保留原生 Future 接口和 gather 的调度、取消、异常语义。
+    class TracedGather(asyncio.tasks._GatheringFuture):
+        def __await__(self):
+            scopes, waiter = active.get(), current_task()
+            try:
+                return (yield from super().__await__())
+            finally:
+                if self.done() and not self.cancelled():
+                    joined(scopes, waiter, self._children)
+
+        __iter__ = __await__
+
+    native_wait = asyncio.wait
+
+    async def traced_wait(*args, **kwargs):
+        scopes, waiter = active.get(), current_task()
+        done, pending = await native_wait(*args, **kwargs)
+        joined(scopes, waiter, done)
+        return done, pending
+
+    class TracedGroup(asyncio.TaskGroup):
+        def __init__(self):
+            super().__init__()
+            self.children = []
+
+        def create_task(self, *args, **kwargs):
+            task = super().create_task(*args, **kwargs)
+            self.children.append(task)
+            return task
+
+        async def __aexit__(self, *args):
+            scopes, waiter = active.get(), current_task()
+            try:
+                result = await super().__aexit__(*args)
+                joined(scopes, waiter, self.children)
+                return result
+            finally:
+                self.children.clear()
+
+    native_run = asyncio.BaseEventLoop.run_until_complete
+    cleanup = (asyncio.BaseEventLoop.shutdown_asyncgens.__code__,
+               asyncio.BaseEventLoop.shutdown_default_executor.__code__)
+
+    def traced_run(loop, future):
+        scopes = active.get()
+        if not scopes or (type(future) is CoroutineType and future.cr_code in cleanup):
+            return native_run(loop, future)
+        # asyncio.run 的主任务由 run_until_complete 显式驱动；循环清理不计。
+        if not asyncio.isfuture(future):
+            loop._check_closed()
+            loop._check_running()
+            future = asyncio.ensure_future(future, loop=loop)
+        try:
+            return native_run(loop, future)
+        finally:
+            joined(scopes, None, (future,))
+
+    asyncio.Task = asyncio.tasks.Task = TracedTask
+    asyncio.tasks._GatheringFuture = TracedGather
+    asyncio.wait = asyncio.tasks.wait = traced_wait
+    asyncio.TaskGroup = asyncio.taskgroups.TaskGroup = TracedGroup
+    asyncio.BaseEventLoop.run_until_complete = traced_run
+
+
+class Trace:
+    def __init__(self, production, targets, *, test=None, probe=None):
+        self.production, self.targets = production, targets
+        self.test, self.probe = test, probe
+        self.test_scope = None
+        self.deferred = set()
+        self.scopes = {}
+        self.activations = {}
+        self.hits = []
+
+    def profile(self, frame, event, arg):
+        code = frame.f_code
+        if event == "return" and frame in self.activations:
+            active.reset(self.activations.pop(frame))
+            if self.scopes[frame] is not self.test_scope and code.co_code[frame.f_lasti] in returns:
+                attr = DEFERRED_FRAMES.get(type(arg))
+                if attr and (child := getattr(arg, attr)) is not None:
+                    self.deferred.add(child)
+            return
+        if event != "call":
+            return
+        scopes = active.get()
+        scope = None
+        if self.test and (code.co_filename, code.co_firstlineno, code.co_name) == self.test:
+            if frame not in self.scopes:
+                self.scopes[frame] = Invocation()
+            scope = self.test_scope = self.scopes[frame]
+        elif ((self.probe is not None and (frame in self.deferred or
+                frame.f_back is self.probe and self.production.contains(frame))) or
+                (self.test_scope in scopes and (frame in self.deferred or self.production.contains(frame)))):
+            if not self.production.initialized(frame):
+                return
+            if frame not in self.scopes:
+                self.scopes[frame] = Invocation()
+            scope = self.scopes[frame]
+        if scope is not None:
+            scopes = (*scopes, scope)
+            self.activations[frame] = active.set(scopes)
+        if scopes and self.targets.contains(frame):
+            # 只排除入口外层的初始化；正常公开调用自身可以再构造对象。
+            if any(scope is not self.test_scope for scope in scopes) or self.production.initialized(frame):
+                self.hits.append((code, current_task(), scopes, self.samples(frame) if self.test else {}))
+
+    @staticmethod
+    def samples(frame):
+        code = frame.f_code
+        args = {}
+        for name in code.co_varnames[:code.co_argcount + code.co_kwonlyargcount]:
+            try:
+                args[name] = sample(frame.f_locals[name])
+            except (KeyError, ValueError):
+                pass
+        return args
+
+    def accepted(self):
+        reach = {}
+        for code, task, scopes, samples in self.hits:
+            for scope in scopes:
+                if scope not in reach:
+                    reach[scope] = scope.reachable()
+            if self.test_scope and task not in reach.get(self.test_scope, ()):
+                continue
+            via_public = any(scope is not self.test_scope and task in reach[scope] for scope in scopes)
+            yield code, samples, via_public
+
+    def covers(self, expected):
+        return any(via_public and code in expected for code, _, via_public in self.accepted())
+
+
+def public_probe(integration, production, targets, test_entered_codes, samples):
     # pytest 可能已加载或修改受验模块；用同一冻结副本重新导入，且导入不记覆盖。
     root = Path.cwd().resolve()
     for name, loaded in list(sys.modules.items()):
@@ -89,63 +363,38 @@ def public_probe(integration, integration_path, public_codes, source_path, test_
         if isinstance(filename, str) and Path(filename).resolve().is_relative_to(root):
             sys.modules.pop(name, None)
     try:
-        production = importlib.import_module(module(integration))
-        if Path(production.__file__).resolve() != Path(integration_path):
+        loaded = importlib.import_module(module(integration))
+        if Path(loaded.__file__).resolve() != Path(production.path):
             return False
     except (Exception, SystemExit):
         return False
 
-    def local_public(fn):
-        return (type(fn) is FunctionType and fn.__code__.co_filename == integration_path and
-                fn.__code__ in public_codes)
+    instances = {}
+    for owner, member in production.members(vars(loaded)):
+        try:
+            if owner is None:
+                fn = member
+            elif type(member) in (staticmethod, classmethod):
+                fn = member.__get__(None, owner)
+            else:
+                if owner not in instances:
+                    instances[owner] = None  # 构造器异常也只试一次。
+                    args, kwargs = arguments(owner, samples)
+                    instances[owner] = owner(*args, **kwargs)
+                if instances[owner] is None:
+                    continue
+                fn = member.__get__(instances[owner], owner)
+            args, kwargs = arguments(fn, samples)
+        except (Exception, SystemExit):
+            continue
 
-    def entries():
-        for name, value in list(vars(production).items()):
-            if name.startswith("_"):
-                continue
-            if local_public(value):
-                yield value
-            elif isinstance(value, type) and value.__module__ == production.__name__:
-                instance = None
-                tried = False
-                for method, member in list(vars(value).items()):
-                    if method.startswith("_"):
-                        continue
-                    if type(member) in (staticmethod, classmethod):
-                        if local_public(member.__func__):
-                            yield member.__get__(None, value)
-                    elif local_public(member):
-                        if not tried:
-                            tried = True
-                            try:
-                                args, kwargs = arguments(value, samples)
-                                instance = value(*args, **kwargs)
-                            except (Exception, SystemExit):
-                                continue
-                        if instance is not None:
-                            yield member.__get__(instance, value)
-
-    for fn in entries():
-        covered = False
-        returned_frame = None
+        trace = Trace(production, targets, probe=sys._getframe())
         result = None
-        public_code = fn.__code__
-
-        def profile(frame, event, arg):
-            nonlocal covered
-            code = frame.f_code
-            if event != "call" or code.co_filename != source_path or code not in test_entered_codes:
-                return
-            while frame is not None:
-                if frame.f_code is public_code or frame is returned_frame:
-                    covered = True
-                    return
-                frame = frame.f_back
 
         async def consume_async_generator(generator):
             try:
                 for _ in range(PROBE_STEPS):
-                    if covered:
+                    if trace.covers(test_entered_codes):
                         break
                     try:
                         await anext(generator)
@@ -156,20 +405,19 @@ def public_probe(integration, integration_path, public_codes, source_path, test_
                 sys.setprofile(None)
 
         try:
-            args, kwargs = arguments(fn, samples)
-            sys.setprofile(profile)
+            sys.setprofile(trace.profile)
             result = fn(*args, **kwargs)
-            member = DEFERRED_FRAMES.get(type(result))
-            if not covered and member:
+            attr = DEFERRED_FRAMES.get(type(result))
+            if attr and not trace.covers(test_entered_codes):
                 # 只驱动公开返回值；不查找或推进函数内部未返回的生成器。
-                returned_frame = getattr(result, member)
+                trace.deferred.add(getattr(result, attr))
                 if type(result) is CoroutineType:
                     asyncio.run(result)
                 elif type(result) is AsyncGeneratorType:
                     asyncio.run(consume_async_generator(result))
                 else:
                     for _ in range(PROBE_STEPS):
-                        if covered:
+                        if trace.covers(test_entered_codes):
                             break
                         next(result)
         except (Exception, SystemExit):
@@ -178,7 +426,7 @@ def public_probe(integration, integration_path, public_codes, source_path, test_
         finally:
             sys.setprofile(None)
             result = None
-        if covered:
+        if trace.covers(test_entered_codes):
             return True
     return False
 
@@ -188,98 +436,43 @@ def proves(doc, scratch):
     test = selected_test(path, selector)
     if test is None:
         return False
-    def positions(nodes):
-        return {(line(node), node.name) for node in nodes}
+    production, targets = Exports(integration), Exports(entry, require_body=True)
+    position = str(Path(path).resolve()), line(test), test.name
 
-    def file_codes(path, selected):
-        filename = str(Path(path).resolve())
-        source = Path(path).read_bytes()
-        return filename, {code for code in code_objects(compile(source, filename, "exec"))
-                          if (code.co_firstlineno, code.co_name) in selected}
-
-    def public_functions(body):
-        for node in body:
-            if isinstance(node, DEFINITIONS) and not node.name.startswith("_"):
-                if isinstance(node, ast.ClassDef):
-                    yield from public_functions(node.body)
-                else:
-                    yield node
-            elif isinstance(node, ast.If):
-                yield from public_functions(node.body)
-                yield from public_functions(node.orelse)
-
-    integration_tree = ast.parse(Path(integration).read_bytes(), integration)
-    entry_tree = ast.parse(Path(entry).read_bytes(), entry)
-    substantive_positions = positions(node for node in ast.walk(entry_tree) if isinstance(node, FUNCTIONS) and substantive(node))
-    source_path, entry_codes = file_codes(entry, substantive_positions)
-    integration_path, public_codes = file_codes(integration, positions(public_functions(integration_tree.body)))
-    test_path, test_position = str(Path(path).resolve()), (line(test), test.name)
-    # profile emits "return" on suspension too; a yield is not an exported return value.
-    returns = {dis.opmap[name] for name in ("RETURN_VALUE", "RETURN_CONST") if name in dis.opmap}
-
-    class Trace:
-        covered = False
-        passed = 0
-        nonpass = False
+    class Registration:
+        covered, passed, nonpass = False, 0, False
 
         def __init__(self):
-            self.returned = set()
-            self.test_entered_codes = set()
+            self.entered = set()
             self.samples = {}
-
-        def ancestry(self, frame):
-            public = False
-            while frame is not None:
-                code = frame.f_code
-                if code.co_filename == test_path and (code.co_firstlineno, code.co_name) == test_position:
-                    return True, public
-                public |= (code.co_filename == integration_path and code in public_codes) or frame in self.returned
-                frame = frame.f_back
-            return False, False
-
-        def profile(self, frame, event, arg):
-            code = frame.f_code
-            if (event == "return" and
-                ((code.co_filename == integration_path and code in public_codes) or frame in self.returned)):
-                member = DEFERRED_FRAMES.get(type(arg))
-                if member and code.co_code[frame.f_lasti] in returns and self.ancestry(frame.f_back)[0]:
-                    child = getattr(arg, member)
-                    if child is not None:
-                        self.returned.add(child)
-            if event != "call" or code.co_filename != source_path or code not in entry_codes:
-                return
-            in_test, via_public = self.ancestry(frame.f_back)
-            if in_test:
-                self.covered |= via_public or frame in self.returned
-                self.test_entered_codes.add(code)
-                for name in code.co_varnames[:code.co_argcount + code.co_kwonlyargcount]:
-                    if name not in self.samples and name in frame.f_locals:
-                        try:
-                            self.samples[name] = sample(frame.f_locals[name])
-                        except ValueError:
-                            pass
 
         @pytest.hookimpl(wrapper=True, trylast=True)
         def pytest_runtest_call(self, item):
-            sys.setprofile(self.profile)
+            trace = Trace(production, targets, test=position)
+            sys.setprofile(trace.profile)
             try:
                 return (yield)
             finally:
                 sys.setprofile(None)
-                self.returned.clear()
+                for code, samples, via_public in trace.accepted():
+                    self.entered.add(code)
+                    self.covered |= via_public
+                    for key, value in samples.items():
+                        self.samples.setdefault(key, value)
 
         def pytest_runtest_logreport(self, report):
             self.nonpass |= not report.passed or hasattr(report, "wasxfail")
             if report.when == "call" and report.passed:
                 self.passed += 1
 
-    trace = Trace()
+    registration = Registration()
+    observe_waits()
     sys.path.insert(0, str(Path.cwd()))
     result = pytest.main(["-p", "no:cacheprovider", "-p", "no:terminal", "--basetemp", scratch + "/pytest",
-                          path + "::" + selector], plugins=[trace])
-    return (result == pytest.ExitCode.OK and not trace.nonpass and trace.passed == doc["count"] and
-            (trace.covered or bool(trace.test_entered_codes) and
-             public_probe(integration, integration_path, public_codes, source_path, trace.test_entered_codes, trace.samples)))
+                          path + "::" + selector], plugins=[registration])
+    return (result == pytest.ExitCode.OK and not registration.nonpass and registration.passed == doc["count"] and
+            (registration.covered or bool(registration.entered) and
+             public_probe(integration, production, targets, registration.entered, registration.samples)))
 
 
 if __name__ == "__main__":
