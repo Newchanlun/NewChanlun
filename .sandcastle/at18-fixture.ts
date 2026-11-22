@@ -52,6 +52,7 @@ export type Mutation = {
   feedIntegration?: string;
   wireModule?: string;
   wireProbe?: string;
+  wireIntegration?: string;
   wireTest?: string;
   wireCase?: "incomplete" | "public-entry";
   feedCase?: "isolated" | "no-coverage" | "missing-child" | "wrong-test-symbol" | "reexport";
@@ -393,7 +394,8 @@ export function makeFixture(mutation: Mutation = {}) {
     "pub mod probe;\n" + (mutation.wireCase === "incomplete" ? "pub fn unfinished(\n" : "")));
   put(wireIntegration, utf8(src.blob(G0, wireIntegration)) +
     (mutation.feedCase === "isolated" ? "" : "\npub mod at18_fixture_wire;\n") +
-    (mutation.wireCase === "public-entry" ? 'pub fn select_wire(banner: &str) -> bool { at18_fixture_wire::probe::handshake(banner) }\n' : ""));
+    (mutation.wireIntegration ?? (mutation.wireCase === "public-entry"
+      ? 'pub fn select_wire(banner: &str) -> bool { at18_fixture_wire::probe::handshake(banner) }\n' : "")));
   if (mutation.feedCase !== "missing-child") put("rust/src/at18_fixture_wire/probe.rs",
     mutation.wireProbe ?? 'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }\n');
   const feedTest = "trading_system/tests/test_at18_fixture_feed.py";

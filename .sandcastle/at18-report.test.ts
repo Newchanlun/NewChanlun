@@ -756,6 +756,100 @@ test("R8/H3：正式 CLI 只接受生产接入的同一承接导出", {
   });
 });
 
+test("R9/#1319：Python 生产调用按词法绑定，定义不等于调用", {
+  skip: !pathExistsGit, timeout: 360_000,
+}, async t => {
+  const feedReplacement = "def route(granularity, sources, events):\n    return events\n\n" +
+    "def discard(granularity, sources, events):\n    return []\n";
+  const select = (code: string, global = false) =>
+    (global ? "\nfrom .at18_fixture_feed import route\n" : "\n") + "\ndef select_feed(sources, events):\n" +
+    code.split("\n").map(line => "    " + line).join("\n") + "\n";
+  const publicTest = "from trading_system import select_feed\n\ndef test_route():\n" +
+    "    assert list(select_feed({}, [1, 2])) == [1, 2]\n";
+  const route = "return route('1min', sources, events)";
+  const discard = select("from .at18_fixture_feed import discard as route\n" + route, true);
+  for (const [id, feedIntegration, feedTest, accepts] of [
+    ["py-local-import-direct", discard, undefined, false],
+    ["py-local-import-public", discard, publicTest, false],
+    ["py-local-only-valid", select("from .at18_fixture_feed import route\n" + route), publicTest, true],
+    ["py-local-module-import", select("from . import at18_fixture_feed as mod\n" + route.replace("route(", "mod.route(")), publicTest, true],
+    ["py-dotted-module-import", select("import trading_system.at18_fixture_feed\n" +
+      route.replace("route(", "trading_system.at18_fixture_feed.route(")), publicTest, true],
+    ["py-import-module-alias", select("import trading_system.at18_fixture_feed as mod\n" +
+      route.replace("route(", "mod.route(")), publicTest, true],
+    ["py-dead-def", select("def unused():\n    " + route + "\nreturn []", true), undefined, false],
+    ["py-dead-lambda", select("unused = lambda: " + route.slice(7) + "\nreturn []", true), undefined, false],
+    ["py-called-def", select("def dispatch():\n    from .at18_fixture_feed import route\n    " + route + "\nreturn dispatch()"), publicTest, true],
+    ["py-called-lambda", select("dispatch = lambda: " + route.slice(7) + "\nreturn dispatch()", true), publicTest, true],
+    ["py-inner-shadow-does-not-escape", select("def unused():\n    from .at18_fixture_feed import discard as route\n    " + route + "\n" + route, true), publicTest, true],
+    ["py-local-def-shadows-import", select("def route(*args):\n    return []\n" + route, true), undefined, false],
+    ["py-local-class-method", select("class Router:\n    def run(self):\n        " + route + "\nreturn Router().run()", true), publicTest, true],
+    ["py-unbound-before-local", select(route + "\nfrom .at18_fixture_feed import route", true), undefined, false],
+    ["py-del-does-not-restore", select("from .at18_fixture_feed import route\ndel route\n" + route, true), undefined, false],
+    ["py-loop-rebind", select("from .at18_fixture_feed import discard\nfor route in [discard]:\n    " + route, true), undefined, false],
+    ["py-with-rebind", select("from contextlib import nullcontext\nwith nullcontext(None) as route:\n    " + route, true), undefined, false],
+    ["py-uncalled-async", select("async def dispatch():\n    " + route + "\n_dispatch = dispatch()\nreturn []", true), undefined, false],
+    ["py-handler-rebind", select("try:\n    raise ValueError()\nexcept ValueError as route:\n    " + route, true), undefined, false],
+  ] as const) await t.test(id, async () => {
+    const { report } = await control({ feedReplacement, feedIntegration, feedTest }, "R9/feed/" + id);
+    feedWireResult(report, accepts);
+  });
+});
+
+function feedWireResult(report: At18Report, accepts: boolean) {
+  assert.equal(legacyRow(report, 1319).disposition_valid, accepts);
+  if (accepts) positive(report);
+  else {
+    assert.equal(report.overall_result, "FAIL");
+    assert.deepEqual(report.failed_checks.map(row => [row.check_id, row.scope]),
+      [["LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE"]]);
+  }
+}
+
+test("R9/#1319：Rust 块作用域与闭包、局部 fn 调用分别核验", {
+  skip: !pathExistsGit, timeout: 360_000,
+}, async t => {
+  const wire = (body: string) => "use newchan_rust::at18_fixture_wire::probe::handshake;\n#[test]\n" +
+    "fn check_connection() {\n    " + body + "\n}\n";
+  const invoke = 'assert!(handshake("HELLO"));';
+  const wireProbe = 'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }\n' +
+    'pub fn other(_: &str) -> bool { false }\n';
+  for (const [id, body, accepts] of [
+    ["rs-local-fn", 'fn handshake(_: &str) -> bool { false }\n    assert!(!handshake("HELLO"));', false],
+    ["rs-deferred", 'let _on_banner = || handshake("HELLO");', false],
+    ["rs-wildcard-closure", 'let _ = move || handshake("HELLO");', false],
+    ["rs-unused-async-closure", 'let _ = async move || handshake("HELLO");', false],
+    ["rs-uninvoked-fn", 'fn dead() { handshake("HELLO"); }', false],
+    ["rs-closure-parameter", 'let f = |handshake: fn(&str) -> bool| handshake("HELLO"); assert!(!f(|_| false));', false],
+    ["rs-destructured-parameter", 'let f = |(handshake, _): (fn(&str) -> bool, bool)| handshake("HELLO"); assert!(!f((|_| false, true)));', false],
+    ["rs-fn-parameter", 'fn run(handshake: fn(&str) -> bool) { assert!(!handshake("HELLO")); } run(|_| false);', false],
+    ["rs-local-use", '{ assert!(!handshake("HELLO")); use newchan_rust::at18_fixture_wire::probe::other as handshake; }', false],
+    ["rs-shadow-until-block-end", "{ fn handshake(_: &str) -> bool { false } } " + invoke, true],
+    ["rs-local-use-positive", '{ use newchan_rust::at18_fixture_wire::probe::handshake as check; assert!(check("HELLO")); }', true],
+    ["rs-immediate-closure", 'assert!((|| handshake("HELLO"))());', true],
+    ["rs-bound-closure", 'let f = || { handshake("HELLO") }; assert!(f());', true],
+    ["rs-called-local-fn", 'run(); fn run() { assert!(handshake("HELLO")); }', true],
+    ["rs-passes-closure-to-local-fn", 'fn run(f: impl FnOnce() -> bool) -> bool { f() } assert!(run(|| handshake("HELLO")));', true],
+    ["rs-passes-closure-to-dead-argument", 'fn run(_: impl FnOnce() -> bool) -> bool { true } assert!(run(|| handshake("HELLO")));', false],
+    ["rs-unknown-macro-does-not-evaluate", 'macro_rules! discard { ($e:expr) => { true } } assert!(discard!(handshake("HELLO")));', false],
+    ["rs-qualified-direct", 'assert!(newchan_rust::at18_fixture_wire::probe::handshake("HELLO"));', true],
+  ] as const) await t.test(id, async () => {
+    const { report } = await control({ wireCase: "public-entry", wireProbe, wireTest: wire(body) }, "R9/wire/" + id);
+    feedWireResult(report, accepts);
+  });
+  for (const [id, body, accepts] of [
+    ["rs-production-unused-closure", "let _ = || accept(banner); false", false],
+    ["rs-production-unused-fn", 'fn dead() { accept("HELLO"); } false', false],
+    ["rs-production-called-closure", "let call = || accept(banner); call()", true],
+    ["rs-production-called-fn", "fn call(b: &str) -> bool { accept(b) } call(banner)", true],
+  ] as const) await t.test(id, async () => {
+    const wireIntegration = "use at18_fixture_wire::probe::handshake as accept;\n" +
+      "pub fn select_wire(banner: &str) -> bool { " + body + " }\n";
+    const { report } = await control({ wireIntegration, wireTest: wire(invoke) }, "R9/wire/" + id);
+    feedWireResult(report, accepts);
+  });
+});
+
 test("R7/H3：#1942 与 #2021 的真实 Cargo 闭包不随冗余显式特性变化", { skip: !pathExistsGit }, () => {
   const s = new At18Repository(root);
   const testPath = "rust/tests/at18_review_local.rs";
