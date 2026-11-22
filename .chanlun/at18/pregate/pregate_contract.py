@@ -18,14 +18,34 @@ REGULAR_MODES = BLOB_MODES[:2]
 OID = re.compile(r"[0-9a-f]{40}")
 REMEDIATION = ".chanlun/at18/pregate-remediation.json"
 REMEDIATION_SCHEMA = "at18-pregate-remediation/1"
-ARTIFACT_ARCHIVE_SECTIONS = {"reports", "receipts", "runs", "review", "reviews"}
-ARCHIVE_INPUT_SECTIONS = {("payload", "spec"), ("view", "spec"), ("payload", "inputs")}
+REVIEW_ARCHIVE = ".chanlun/review-results/"
+# 按 #1339/#1340 的归档清单只开放具名规范。索引的 role 同时标记了规范和独评，
+# 不能拿来放行；签署稿与阅读版须各按自己的 Git 路径/字节判定。
+ARCHIVE_BASIS_STEMS = {
+    ("issue1339-r2-spec-20260909", "spec"): {
+        "ARCHITECTURE-ADOPTION", "EFFECTIVE-CONTRACTS", "IMPLEMENTATION-CROSSWALK", "SPEC",
+        "inputs/RESIDUAL-DECISIONS", "inputs/SPEC-COVERAGE-INPUT", "inputs/TEST-SEAMS",
+    },
+    ("issue1340-publication-20260909", "inputs"): {
+        "LEGACY-TICKET-DISPOSITION", "RD-17-MODEL-PLAN", "RESIDUAL-TICKET-PLAN",
+        "TB01-EXECUTION-SLICES", "TB01-PARENT-CONTRIBUTION",
+        "TB02-06-EXECUTION-SLICES", "TB07-11-EXECUTION-SLICES",
+    },
+}
+ARCHIVE_SPEC_FILES = {
+    "payload": {"INTERFACE-CONTRACTS.md", "PUBLICATION-PREPARATION.md", "PLANNED-DAG.json"},
+    "view": {"INTERFACE-CONTRACTS.md", "PUBLICATION-PREPARATION.md"},
+}
+EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 ARTIFACT_BASIS_ERROR = "verification_basis cannot cite remediation, report or receipt"
 # 版本化的验收产物，即使改名也不是缺陷本身的验证依据。
 ARTIFACT_SCHEMA_FAMILIES = {
     "at18-report", "at18-input-bundle", "at18-verification", "at18-pregate-remediation",
     "at18-pregate-review", "at18-landing-census", "at18-run-record", "at18-group-execution",
     "at18-scaffold-seal", "at18-diagnostic", "at18-tb-entity", "at18-key-witness",
+    "newchanlun.1323.protocol-spec-review", "newchanlun.1323.scope-spec-review",
+    "newchanlun.1323.tb01-dispatch-review", "newchanlun.1323.published-graph-verify",
+    "newchanlun.1323.full-leaf-published-verify",
     # #1372 TB-01-C 运行、交付和独审包使用 schema（.v1 和 /1 均有）。
     "tb01c.commit_check_inventory", "tb01c.devskim_evidence_index", "tb01c.devskim_pr1451_triage",
     "tb01c.final_ac3_independent_review", "tb01c.final_bounded_independent_review",
@@ -167,20 +187,71 @@ def classify_review(rows, final_tree):
 
 
 def is_artifact_archive_path(path):
-    parts = path.split("/")
-    if parts[:2] != [".chanlun", "review-results"]:
+    if not path.startswith(REVIEW_ARCHIVE):
         return False
-    # 只在 bundle 的归档布局中认这些目录；规范与输入可含同名子目录。
-    for index in range(3, len(parts) - 1):
-        if tuple(parts[index:index + 2]) in ARCHIVE_INPUT_SECTIONS:
-            return False
-        if parts[index] in ARTIFACT_ARCHIVE_SECTIONS:
-            return True
-    return False
+    parts = path.removeprefix(REVIEW_ARCHIVE).split("/", 3)
+    if len(parts) != 4:
+        return True
+    bundle, edition, area, leaf = parts
+    if edition not in ("payload", "view"):
+        return True
+    if (bundle, area) == ("issue1339-r2-spec-20260909", "spec") and leaf in ARCHIVE_SPEC_FILES[edition]:
+        return False
+    stem, _, extension = leaf.rpartition(".")
+    allowed = ARCHIVE_BASIS_STEMS.get((bundle, area), ())
+    return not (stem in allowed and (extension == "md" or (edition == "payload" and extension == "json")))
+
+
+def archive_artifact_blobs(final_tree, head, *, cwd):
+    forbidden = {
+        entry.blob for path, entry in final_tree.items()
+        if entry.kind == "blob" and entry.mode in REGULAR_MODES and is_artifact_archive_path(path)
+    }
+    # 两侧都收：删除/移动保留旧身份；合入提交与其第一父比较，不走第二父。
+    raw = git("log", "--first-parent", "--full-history", "--diff-merges=first-parent",
+              "--no-renames", "--no-abbrev", "--raw", "-z", "--format=", head, "--",
+              REVIEW_ARCHIVE, cwd=cwd)
+    records = iter(raw.split(b"\0")[:-1])
+    for metadata, path in zip(records, records, strict=True):
+        if not is_artifact_archive_path(path.decode("utf-8", errors="surrogateescape")):
+            continue
+        old_mode, new_mode, old_blob, new_blob, _ = metadata.decode("ascii").split()
+        if old_mode[1:] in REGULAR_MODES:
+            forbidden.add(old_blob)
+        if new_mode in REGULAR_MODES:
+            forbidden.add(new_blob)
+    forbidden.discard(EMPTY_BLOB)
+    return forbidden
 
 
 def is_git_sha(value):
     return isinstance(value, str) and OID.fullmatch(value) is not None
+
+
+def has_outcome(value):
+    return (isinstance(value, str)
+            and re.fullmatch(r"(?:PASS(?:ED)?|FAIL(?:ED)?|BLOCK(?:ED)?|REJECT(?:ED)?)(?:_[A-Z0-9]+)*",
+                             value.upper()) is not None)
+
+
+def is_independent_artifact(obj):
+    keys = obj.keys()
+    if (any(has_outcome(obj.get(key)) for key in ("conclusion", "verdict", "status"))
+            and any(isinstance(obj.get(key), str) and obj[key].strip() for key in ("reviewer", "reviewer_role"))
+            and keys & {"round", "review_round", "phase", "findings", "checks"}):
+        return True
+    # 有门禁对象与执行结果的回执；孤立的 status/result 或同名文件不是证据。
+    if (isinstance(obj.get("gate"), str) and obj["gate"].strip()
+            and any(has_outcome(obj.get(key)) for key in ("status", "result", "verdict", "conclusion"))
+            and (isinstance(obj.get("checks"), (list, dict)) or type(obj.get("exit_code")) is int)):
+        return True
+    # 无版本号的独立运行回执（含 #1372 队列复验）：提交、运行状态、实际命令退出记录。
+    commands = obj.get("commands")
+    return (any(is_git_sha(obj.get(key)) for key in ("source_commit", "head", "commit", "candidate_commit"))
+            and isinstance(obj.get("status"), str) and bool(obj["status"].strip())
+            and isinstance(commands, list) and bool(commands)
+            and all(isinstance(command, dict) and type(command.get("exit_code")) is int
+                    and isinstance(command.get("command"), (list, str)) for command in commands))
 
 
 def is_json_artifact(obj):
@@ -189,6 +260,8 @@ def is_json_artifact(obj):
         version = re.fullmatch(r"(.+)(?:/|\.v)[1-9][0-9]*", value) if isinstance(value, str) else None
         if version and version[1] in ARTIFACT_SCHEMA_FAMILIES:
             return True
+    if is_independent_artifact(obj):
+        return True
     # deliveryManifestSchema 的票号在外层业务约束，不是清单身份的一部分。
     if (MANIFEST_FIELDS <= obj.keys() and type(obj["schemaVersion"]) is int
             and obj["schemaVersion"] == 1 and type(obj["ticket"]) is int and obj["ticket"] > 0
@@ -233,7 +306,7 @@ def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):
     fail(isinstance(item, dict) and item.keys() == BASIS_KEYS, "invalid verification_basis keys")
     path, blob, start, end = (item[k] for k in ("path", "blob", "line_start", "line_end"))
     fail(valid_path(path), "invalid verification_basis path")
-    fail(path != REMEDIATION, ARTIFACT_BASIS_ERROR)
+    fail(path != REMEDIATION and not is_artifact_archive_path(path), ARTIFACT_BASIS_ERROR)
     entry = final_tree.get(path)
     fail(entry is not None and entry.kind == "blob" and entry.mode in REGULAR_MODES
          and entry.blob == blob, "verification_basis must bind a regular F blob")
@@ -298,12 +371,7 @@ def check_remediation(review_rows, classes, final_tree, p0, chain, *, cwd=None, 
     if not rows:
         return changed
     changes = changes_on_window(p0, chain, changed, cwd=cwd)
-    # F 中的同一 blob 即同一产物；改路径或扩展名不会改变身份。
-    archived_artifacts = {
-        entry.blob for path, entry in final_tree.items()
-        if path.startswith(".chanlun/review-results/") and entry.kind == "blob"
-        and entry.mode in REGULAR_MODES and is_artifact_archive_path(path)
-    }
+    archived_artifacts = archive_artifact_blobs(final_tree, chain[-1], cwd=cwd)
     cache = {}
     for path, row in rows.items():
         def fail(condition, detail):

@@ -600,6 +600,12 @@ FEE_RULE = '{\n  "unit": "cent",\n  "low_fraction": "round_up"\n}'
     ("spec/copied-review.json", {"schema_version": "at18-pregate-review/1"}, False),
     ("spec/copied-seal.json", {"schema_version": "at18-scaffold-seal/1"}, False),
     ("spec/copied-report.data", {"schema_version": "at18-report/1"}, False),
+    ("spec/independent.json", {"review_round": "R2", "reviewer": "reader",
+                               "conclusion": "PASS_WITH_GATES"}, False),
+    ("spec/queue.json", {"gate": "queue", "status": "passed", "checks": [], "exit_code": 0}, False),
+    ("spec/fee-rounding.json", {"gate": "rounding", "status": "specified",
+                                "checks": [{"input": "0.1", "result": "1"}]}, True),
+    ("spec/fee-rounding.json", {"unit": "cent", "result": "round_up", "status": "PASS"}, True),
     ("spec/local-receipt.txt", f"Reviewed head: {RUN_HEAD}\nVerdict: PASS\n", False),
     ("spec/local-run.txt", f"Commit: {RUN_HEAD}\nExit code: 0\nRun result: PASS\n", False),
     ("spec/receipt-format.md", f"# 回执的格式\n\n```text\nHead: {RUN_HEAD}\nVerdict: PASS\n```\n", True),
@@ -633,9 +639,6 @@ def test_verification_basis_checks_artifact_identity(history, options, path, doc
     ("spec/at18-input-bundle.json", FEE_RULE, 2),
     ("spec/at18-verification.json", FEE_RULE, 2),
     ("docs/reports/settlement.md", SETTLEMENT_RULE, 3),
-    (".chanlun/review-results/topic/payload/spec/rules.md", SETTLEMENT_RULE, 3),
-    (".chanlun/review-results/topic/view/spec/rules.md", SETTLEMENT_RULE, 3),
-    (".chanlun/review-results/topic/payload/inputs/receipts/rules.md", SETTLEMENT_RULE, 3),
 ])
 def test_verification_basis_accepts_rules_not_named_artifacts(history, options, path, doc, line):
     h = history
@@ -661,11 +664,11 @@ TB_ROOT = ".chanlun/review-results/issue1372-tb01c-20260913/reports/"
 @pytest.mark.parametrize(("mode", "source", "blob", "line"), [
     ("archive", TB_REPORT_PATH, TB_REPORT_BLOB, 3),
     ("copy", TB_REPORT_PATH, TB_REPORT_BLOB, 3),
-    ("move", TB_REPORT_PATH, TB_REPORT_BLOB, 3),
-    ("move", TB_ROOT + "legacy-query-callers-audit/REPORT.json", "154af3f5240d8b90657274ac2bd303e463d26b8d", 3),
-    ("move", TB_ROOT + "runtime/trajectory-r5-a/FACTS.json", "f845d2bbb066b9798dcc07067c9c711b3097efe1", 3),
-    ("move", TB_ROOT + "q-memo-independent/REVIEW.md", "ad2b826a02d3246a8f364729133adc05862ec16e", 3),
-    ("move", TB_ROOT + "browser-continuation-performance/final-run-results/MANIFEST.json",
+    ("isolated", TB_REPORT_PATH, TB_REPORT_BLOB, 3),
+    ("isolated", TB_ROOT + "legacy-query-callers-audit/REPORT.json", "154af3f5240d8b90657274ac2bd303e463d26b8d", 3),
+    ("isolated", TB_ROOT + "runtime/trajectory-r5-a/FACTS.json", "f845d2bbb066b9798dcc07067c9c711b3097efe1", 3),
+    ("isolated", TB_ROOT + "q-memo-independent/REVIEW.md", "ad2b826a02d3246a8f364729133adc05862ec16e", 3),
+    ("isolated", TB_ROOT + "browser-continuation-performance/final-run-results/MANIFEST.json",
      "bae060f976620d1158bb510b8a157d605bce4ee1", 3),
 ])
 def test_verification_basis_rejects_actual_tb_artifacts(history, options, mode, source, blob, line):
@@ -712,3 +715,173 @@ def test_verification_basis_accepts_archived_spec_view(history, options):
     result = h.probe(options)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["validated"] == [BLOCKED]
+
+
+ARCHIVE = ".chanlun/review-results/"
+SPEC_PACKAGE = ARCHIVE + "issue1339-r2-spec-20260909/"
+PUBLICATION = ARCHIVE + "issue1340-publication-20260909/"
+DELIVERY = ARCHIVE + "issue1719-recovery-20261026/REPORT.md"
+QUEUE_RESULT = TB_ROOT + "rust-p4-independent/queue-fix-recheck/RESULT.json"
+PROTOCOL_REVIEW_JSON = SPEC_PACKAGE + "payload/spec/review/PROTOCOL-SPEC-REVIEW.json"
+SPEC_INTERFACE = SPEC_PACKAGE + "view/spec/INTERFACE-CONTRACTS.md"
+ADR_DESIGN = "docs/adr/0008-bsp-bridge-object-and-structural-key-v2.md"
+R3_HEAD = "16698eaefb3854b6e91fc0541e0af09ebb8f35ff"
+BASIS_ERROR = "verification_basis cannot cite remediation, report or receipt"
+
+
+def git_at_r3(*args):
+    return subprocess.check_output(["git", *args], cwd=ROOT)
+
+
+def archive_source(path):
+    # 固定真实原件。临时仓库只含本例加入的文件及历史。
+    return git_at_r3("show", f"{R3_HEAD}:{path}")
+
+
+def check_basis(history, options, path, *, allowed, line=1):
+    row = history.row(basis=path)
+    row["verification_basis"][0].update(line_start=line, line_end=line)
+    history.artifact([row])
+    result = history.probe(options)
+    if allowed:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["validated"] == [BLOCKED]
+    else:
+        assert result.returncode == 1 and not result.stdout
+        assert BASIS_ERROR in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["archive", "copy", "move"])
+@pytest.mark.parametrize(("source", "line"), [
+    (PROTOCOL_REVIEW_JSON, 8),
+    (SPEC_PACKAGE + "payload/spec/review/PROTOCOL-SPEC-REVIEW.md", 3),
+    (SPEC_PACKAGE + "view/spec/review/PROTOCOL-SPEC-REVIEW.md", 5),
+    (DELIVERY, 3),
+    (QUEUE_RESULT, 2),
+], ids=["protocol-json", "protocol-original", "protocol-view", "delivery", "queue"])
+def test_verification_basis_rejects_named_archive_cases(history, options, source, line, mode):
+    h = history
+    raw = archive_source(source)
+    h.write(source, raw)
+    h.p0 = h.commit("Archive original before the R10 window")
+    h.gate()
+    path = source
+    if mode != "archive":
+        path = "spec/neutral-note.dat"
+        if mode == "move":
+            h.remove(source)
+        h.write(path, raw)
+        h.commit("Reuse the original bytes at a neutral path")
+        assert h.blob("HEAD", path) == h.blob(h.p0, source)
+        if mode == "move":
+            assert not h.git("ls-tree", "HEAD", "--", source)
+    check_basis(h, options, path, allowed=False, line=line)
+
+
+@pytest.mark.parametrize("source", [QUEUE_RESULT, PROTOCOL_REVIEW_JSON])
+def test_verification_basis_rejects_unarchived_independent_json(history, options, source):
+    h = history
+    path = "spec/neutral-note.dat"
+    h.write(path, archive_source(source))
+    h.gate()
+    assert not h.git("log", "--all", "--format=%H", "--", ARCHIVE)
+    check_basis(h, options, path, allowed=False, line=2)
+
+
+@pytest.mark.parametrize(("source", "allowed"), [
+    (SPEC_PACKAGE + "payload/spec/SPEC.json", True),
+    (SPEC_PACKAGE + "payload/spec/IMPLEMENTATION-CROSSWALK.json", True),
+    (SPEC_PACKAGE + "payload/spec/inputs/SPEC-COVERAGE-INPUT.json", True),
+    (SPEC_INTERFACE, True),
+    (SPEC_PACKAGE + "APPROVAL.json", False),
+    (SPEC_PACKAGE + "ARCHIVE-INDEX.json", False),
+    (SPEC_PACKAGE + "ARCHIVE-VALIDATION.json", False),
+    (SPEC_PACKAGE + "payload/spec/evidence/DOC-VALIDATION-S2.json", False),
+    (SPEC_PACKAGE + "payload/spec/snapshots/s1-initial-reviews/PROTOCOL-SPEC-REVIEW.md", False),
+    (SPEC_PACKAGE + "payload/sources/newchanlun-1339-requirements-20260908/evidence/DOCUMENT-CHECK.json", False),
+    (PUBLICATION + "payload/inputs/TB01-DISPATCH-REVIEW.json", False),
+    (PUBLICATION + "payload/inputs/PUBLISHED-GRAPH-VERIFY.json", False),
+    (PUBLICATION + "view/inputs/FULL-LEAF-PUBLISHED-VERIFY.md", False),
+    (PUBLICATION + "payload/inputs/TB01-EXECUTION-SLICES.json", True),
+    (PUBLICATION + "view/inputs/TB07-11-EXECUTION-SLICES.md", True),
+    (ADR_DESIGN, True),
+])
+def test_verification_basis_archive_allows_only_specification_originals(history, options, source, allowed):
+    h = history
+    raw = archive_source(source)
+    h.write(source, raw)
+    h.gate()
+    check_basis(h, options, source, allowed=allowed, line=2)
+
+
+@pytest.mark.parametrize("integrated", [False, True], ids=["side-only", "first-parent-merge"])
+def test_verification_basis_archive_blob_requires_first_parent_provenance(history, options, integrated):
+    h = history
+    path = "spec/neutral-note.txt"
+    archived = ARCHIVE + "unknown-bundle/payload/spec/unclassified\toutput.md"
+    raw = "不含机器标记的记录。\n".encode()
+    h.gate()
+    h.git("switch", "-q", "-c", "review-side")
+    h.write(archived, raw)
+    h.commit("Only the review side writes the archive first")
+    h.git("switch", "-q", "main")
+    strategy = [] if integrated else ["-s", "ours"]
+    h.git("merge", "-q", "--no-ff", "--no-gpg-sign", *strategy, "-m", "Merge", "review-side")
+    if integrated:
+        h.remove(archived)
+    h.write(path, raw)
+    h.commit("The final tree only has the neutral name")
+    check_basis(h, options, path, allowed=not integrated)
+
+
+def test_verification_basis_keeps_specification_identity_after_move(history, options):
+    h = history
+    raw = archive_source(SPEC_INTERFACE)
+    h.write(SPEC_INTERFACE, raw)
+    h.gate()
+    h.remove(SPEC_INTERFACE)
+    path = "spec/interface.md"
+    h.write(path, raw)
+    h.commit("Move the specification out of the archive")
+    check_basis(h, options, path, allowed=True, line=9)
+
+
+@pytest.fixture(scope="module")
+def archive_preview(tmp_path_factory):
+    root = tmp_path_factory.mktemp("archive-preview")
+    rows = json.loads(git_at_r3("show", f"{R3_HEAD}:{REVIEW}"))["rows"]
+    entries = []
+    for row in rows:
+        if row["verdict"] != "BLOCK":
+            continue
+        entry = git_at_r3("ls-tree", R3_HEAD, "--", row["path"]).split()
+        if not entry or entry[2].decode() == row["blob"]:
+            continue
+        last = git_at_r3("log", "-1", "--first-parent", "--format=%H", R3_HEAD,
+                         "--", row["path"]).decode().strip()
+        entries.append({"path": row["path"], "p0_blob": row["blob"], "p0_mode": row["mode"],
+                        "f_blob": entry[2].decode(), "f_mode": entry[0].decode(),
+                        "remediation_commits": [last], "remediation_ticket": 2132,
+                        "verdict": "REMEDIATED", "defect_summary": "测试真实 F 上的复核依据身份。"})
+    assert len(entries) == 5
+    previews = {}
+    for path, line, count in [(PROTOCOL_REVIEW_JSON, 8, 0), (SPEC_INTERFACE, 9, 5), (QUEUE_RESULT, 2, 0)]:
+        blob = git_at_r3("rev-parse", f"{R3_HEAD}:{path}").decode().strip()
+        basis = {"path": path, "blob": blob, "line_start": line, "line_end": line}
+        doc = {"schema_version": "at18-pregate-remediation/1", "owner_ticket": 2132,
+               "rows": [dict(entry, verification_basis=[basis]) for entry in entries]}
+        target = root / f"{count}-{Path(path).stem}.json"
+        target.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        previews[path] = (target, count)
+    return previews
+
+
+@pytest.mark.parametrize("path", [PROTOCOL_REVIEW_JSON, SPEC_INTERFACE, QUEUE_RESULT],
+                         ids=["protocol-review", "interface", "queue-result"])
+def test_census_archive_preview_validates_only_specifications(options, archive_preview, path):
+    preview, count = archive_preview[path]
+    result = census(options, "--head", R3_HEAD, "--remediation", str(preview))
+    assert result.returncode == 1, result.stderr
+    assert ("42 hard BLOCK / 5 changed BLOCK / 0 deleted BLOCK; "
+            f"{count} locally validated remediation rows; 0 released") in result.stdout, result.stderr
+    assert (BASIS_ERROR in result.stderr) == (count == 0)
