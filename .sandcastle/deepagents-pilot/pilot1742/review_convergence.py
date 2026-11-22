@@ -998,45 +998,127 @@ def _resolved_reply_key(comment_id: str, finding_fingerprint: str) -> str:
     return f"comment:{cid}:resolved:{fp}"
 
 
-def _propagate_consumed_resolved_keys_for_aliases(
-    consumed_reply_keys: Collection[str],
-    effective_aliases: Mapping[str, str],
-    history_aliases: Mapping[str, str] | None = None,
-) -> frozenset[str]:
-    """按单跳别名演化同步 resolved 级消费键，严禁整条评论级消费、严禁恢复旧边、严禁二次链式串联。
+@dataclass(frozen=True)
+class _ConsumedReplyState:
+    """消费回复内部两层状态：严格区分可向新规范项传播的规范消费与仅约束自身的旧别名/脱离别名消费。"""
 
-    - 仅处理 kind == "resolved" 的 `comment:<cid>:resolved:<payload>`：
-      1. 活跃别名正向同步：若 payload 在 effective_aliases 中指向 canon_fp != payload，
-         同步生成 `comment:<cid>:resolved:<canon_fp>`（尚未在输入集合中时）；
-      2. 脱离原规范项的历史别名保留：若 history_aliases 中存在 `(alias_fp, old_canon)` 满足
-         `old_canon == payload`、`alias_fp != old_canon` 且 `alias_fp not in effective_aliases`，
-         同步生成 `comment:<cid>:resolved:<alias_fp>`（尚未在输入集合中时）。
+    propagatable_resolved: frozenset[tuple[str, str]] = frozenset()
+    self_only_resolved: frozenset[tuple[str, str]] = frozenset()
+    non_resolved_keys: frozenset[str] = frozenset()
+
+    @property
+    def all_keys(self) -> frozenset[str]:
+        return self.non_resolved_keys | frozenset(
+            _resolved_reply_key(cid, fp)
+            for cid, fp in (self.propagatable_resolved | self.self_only_resolved)
+        )
+
+
+def _propagate_consumed_state_for_aliases(
+    state: _ConsumedReplyState,
+    prior_aliases: Mapping[str, str],
+    next_aliases: Mapping[str, str],
+) -> _ConsumedReplyState:
+    """Phase A 纯状态转移：仅按前轮状态与别名演化推进消费状态，严禁读取本轮新增 consumed_reply_keys。
+
+    - Step 1（规范消费正向移交 + 旧节点降级）：仅遍历 propagatable_resolved；若 next_aliases[fp] == canon_fp != fp，
+      将 (cid, fp) 降级为 self_only_resolved，同时将 (cid, canon_fp) 升入 propagatable_resolved。
+    - Step 2（脱离历史规范项的别名保留为 self_only）：对 prior_aliases 中已不在 next_aliases 的 alias_fp -> old_canon，
+      若 (cid, old_canon) 处于 Step 1 后的活跃消费集（next_prop | next_self）且 (cid, alias_fp) 不在 next_prop，
+      将 (cid, alias_fp) 加入 self_only_resolved（绝不加入 propagatable_resolved）。
     """
-    if not consumed_reply_keys or (not effective_aliases and not history_aliases):
-        return frozenset()
-    input_keys = frozenset(consumed_reply_keys)
-    detached_aliases_by_old_canon: dict[str, list[str]] = {}
-    if history_aliases:
-        for alias_fp, old_canon in history_aliases.items():
-            if alias_fp != old_canon and alias_fp not in effective_aliases:
-                detached_aliases_by_old_canon.setdefault(old_canon, []).append(alias_fp)
+    if (not state.propagatable_resolved and not state.self_only_resolved) or (
+        not prior_aliases and not next_aliases
+    ):
+        return state
 
-    propagated: set[str] = set()
-    for rk in input_keys:
-        cid, kind, payload = _parse_consumed_reply_key(rk, "consumed_reply_keys[]")
-        if kind != "resolved":
-            continue
-        canon_fp = effective_aliases.get(payload)
-        if canon_fp is not None and canon_fp != payload:
-            canon_key = _resolved_reply_key(cid, canon_fp)
-            if canon_key not in input_keys:
-                propagated.add(canon_key)
+    next_prop = set(state.propagatable_resolved)
+    next_self = set(state.self_only_resolved)
+
+    if next_aliases and state.propagatable_resolved:
+        for cid, fp in state.propagatable_resolved:
+            canon_fp = next_aliases.get(fp)
+            if canon_fp is not None and canon_fp != fp:
+                next_prop.discard((cid, fp))
+                next_self.add((cid, fp))
+                next_self.discard((cid, canon_fp))
+                next_prop.add((cid, canon_fp))
+
+    if prior_aliases:
+        detached_aliases_by_old_canon: dict[str, list[str]] = {}
+        for alias_fp, old_canon in prior_aliases.items():
+            if alias_fp != old_canon and alias_fp not in next_aliases:
+                detached_aliases_by_old_canon.setdefault(old_canon, []).append(alias_fp)
         if detached_aliases_by_old_canon:
-            for alias_fp in detached_aliases_by_old_canon.get(payload, ()):
-                alias_key = _resolved_reply_key(cid, alias_fp)
-                if alias_key not in input_keys:
-                    propagated.add(alias_key)
-    return frozenset(propagated)
+            active_pairs = next_prop | next_self
+            for cid, fp in active_pairs:
+                for alias_fp in detached_aliases_by_old_canon.get(fp, ()):
+                    pair = (cid, alias_fp)
+                    if pair not in next_prop:
+                        next_self.add(pair)
+
+    return _ConsumedReplyState(
+        propagatable_resolved=frozenset(next_prop),
+        self_only_resolved=frozenset(next_self),
+        non_resolved_keys=state.non_resolved_keys,
+    )
+
+
+def _apply_round_new_consumed_keys(
+    pre_state: _ConsumedReplyState,
+    new_keys: Collection[str],
+    prior_aliases: Mapping[str, str],
+    next_aliases: Mapping[str, str],
+) -> _ConsumedReplyState:
+    """Phase B 本轮新增消费并入：忽略所有已可由 Phase A 重建的键，并保持脱离别名保留键不误升格。"""
+    if not new_keys:
+        return pre_state
+
+    existing_keys = pre_state.all_keys
+    unseen_non_resolved: set[str] = set()
+    unseen_resolved: set[tuple[str, str]] = set()
+    for rk in new_keys:
+        if rk in existing_keys:
+            continue
+        cid, kind, payload = _parse_consumed_reply_key(rk, "consumed_reply_keys[]")
+        if kind == "resolved":
+            unseen_resolved.add((cid, payload))
+        else:
+            unseen_non_resolved.add(rk)
+
+    if not unseen_non_resolved and not unseen_resolved:
+        return pre_state
+
+    added_prop: set[tuple[str, str]] = set()
+    added_self: set[tuple[str, str]] = set()
+    if unseen_resolved:
+        detached_alias_to_old_canon: dict[str, str] = {
+            alias_fp: old_canon
+            for alias_fp, old_canon in prior_aliases.items()
+            if alias_fp != old_canon and alias_fp not in next_aliases
+        }
+        projected_active: set[tuple[str, str]] = set(pre_state.propagatable_resolved) | set(
+            pre_state.self_only_resolved
+        )
+        for cid, fp in unseen_resolved:
+            if fp not in detached_alias_to_old_canon:
+                projected_active.add((cid, fp))
+                canon_fp = next_aliases.get(fp)
+                if canon_fp is not None and canon_fp != fp:
+                    projected_active.add((cid, canon_fp))
+        for cid, fp in unseen_resolved:
+            old_canon = detached_alias_to_old_canon.get(fp)
+            if old_canon is not None and (cid, old_canon) in projected_active:
+                added_self.add((cid, fp))
+            else:
+                added_prop.add((cid, fp))
+
+    seeded = _ConsumedReplyState(
+        propagatable_resolved=pre_state.propagatable_resolved | frozenset(added_prop),
+        self_only_resolved=(pre_state.self_only_resolved - frozenset(added_prop)) | frozenset(added_self),
+        non_resolved_keys=pre_state.non_resolved_keys | frozenset(unseen_non_resolved),
+    )
+    return _propagate_consumed_state_for_aliases(seeded, prior_aliases, next_aliases)
 
 
 def _is_reply_consumed_for_target(
@@ -4076,7 +4158,7 @@ def _validate_history_chain(
     """校验连续轮次历史链的完整性、会话唯一性、跨轮异家族核实、解除依据、回复目标锁定与未解除 Important 守恒。"""
     allowed_historical_finders: set[str] = set()
     historical_session_ids: set[str] = set()
-    historical_consumed_reply_keys: set[str] = set()
+    consumed_state = _ConsumedReplyState()
     historical_bound_targets: dict[str, str] = {}
     active_aliases: dict[str, str] = {}
     prev_entry: RoundHistoryEntry | None = None
@@ -4188,6 +4270,25 @@ def _validate_history_chain(
             parsed_entry_consumed.append((rk, cid, kind, payload))
         validated_entry_consumed = frozenset(rk for rk, _, _, _ in parsed_entry_consumed)
 
+        cleared_in_round = (
+            (prev_unresolved_ids - seen_hist_ids)
+            | {fp.strip().lower() for fp in entry.resolved_fingerprints}
+            | {fp.strip().lower() for fp in entry.rejected_fingerprints}
+        )
+        prior_aliases = active_aliases
+        next_aliases = _compute_effective_duplicate_aliases(
+            prior_aliases,
+            entry_aliases,
+            cleared_in_round,
+        )
+        pre_state = _propagate_consumed_state_for_aliases(
+            consumed_state,
+            prior_aliases,
+            next_aliases,
+        )
+        pre_consumed_keys = pre_state.all_keys
+        consumed_alias_maps = _build_consumed_alias_maps(next_aliases, prior_aliases)
+
         for raw_fp in entry.resolved_fingerprints:
             norm_fp = raw_fp.strip().lower()
             can_resolve_by_fix = (
@@ -4196,14 +4297,15 @@ def _validate_history_chain(
                 and entry.head_sha != prev_entry.head_sha
             )
             if not can_resolve_by_fix:
-                canon_fp = active_aliases.get(norm_fp)
                 has_wontfix_proof = any(
                     kind == "resolved"
                     and payload == norm_fp
-                    and rk not in historical_consumed_reply_keys
-                    and (
-                        canon_fp is None
-                        or _resolved_reply_key(cid, canon_fp) not in historical_consumed_reply_keys
+                    and not _is_reply_consumed_for_target(
+                        rk,
+                        cid,
+                        norm_fp,
+                        consumed_reply_keys=pre_consumed_keys,
+                        alias_maps=consumed_alias_maps,
                     )
                     for rk, cid, kind, payload in parsed_entry_consumed
                 )
@@ -4220,25 +4322,13 @@ def _validate_history_chain(
                 f"历史第 {idx} 轮遗漏了前轮未解除的 Important 发现（无结转/解除/驳回记录）：{sorted(unaccounted)!r}"
             )
 
-        cleared_in_round = (
-            (prev_unresolved_ids - seen_hist_ids)
-            | {fp.strip().lower() for fp in entry.resolved_fingerprints}
-            | {fp.strip().lower() for fp in entry.rejected_fingerprints}
-        )
-        prior_aliases = active_aliases
-        active_aliases = _compute_effective_duplicate_aliases(
+        consumed_state = _apply_round_new_consumed_keys(
+            pre_state,
+            validated_entry_consumed,
             prior_aliases,
-            entry_aliases,
-            cleared_in_round,
+            next_aliases,
         )
-        historical_consumed_reply_keys.update(validated_entry_consumed)
-        historical_consumed_reply_keys.update(
-            _propagate_consumed_resolved_keys_for_aliases(
-                historical_consumed_reply_keys,
-                active_aliases,
-                history_aliases=prior_aliases,
-            )
-        )
+        active_aliases = next_aliases
         prev_entry = entry
         if entry.outcome == RoundOutcome.PASS:
             prev_unresolved_sources = {}
@@ -4606,8 +4696,7 @@ class VerifiedRound:
 
         candidates_by_id = {f.finding_id: f for f in self.candidates.findings}
         prior_important_ids = frozenset(f.finding_id for f in self.candidates.prior_important)
-        _, _, history_aliases, history_consumed = _replay_history_state(self.candidates.history)
-        base_effective_consumed = history_consumed | ext_consumed_keys
+        _, _, history_aliases, prior_consumed_state = _replay_history_state(self.candidates.history)
         history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(self.candidates.history)
         same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == self.candidates.head_sha)
         explicit_bound_targets = _validate_bound_reply_targets_frozenset(
@@ -4703,11 +4792,18 @@ class VerifiedRound:
             round_duplicate_aliases,
             cleared_ids,
         )
-        effective_consumed = base_effective_consumed | _propagate_consumed_resolved_keys_for_aliases(
-            base_effective_consumed,
+        pre_state = _propagate_consumed_state_for_aliases(
+            prior_consumed_state,
+            history_aliases,
             effective_aliases,
-            history_aliases=history_aliases,
         )
+        input_state = _apply_round_new_consumed_keys(
+            pre_state,
+            ext_consumed_keys,
+            history_aliases,
+            effective_aliases,
+        )
+        effective_consumed = input_state.all_keys
         for fid, vf in verdicts_by_id.items():
             for rk in vf.related_reply_keys:
                 pinned_for_rk = effective_bound_targets.get(rk)
@@ -4894,9 +4990,8 @@ def parse_verifier_output(
         ordered_ids.append(cid)
         candidate_list.append(candidate)
 
-    _, _, history_aliases, history_consumed = _replay_history_state(candidates.history)
+    _, _, history_aliases, prior_consumed_state = _replay_history_state(candidates.history)
     extra_consumed = _validate_consumed_reply_keys(consumed_reply_keys, "consumed_reply_keys")
-    base_effective_consumed = history_consumed | extra_consumed
     consumed_cids_norm = _validate_consumed_comment_ids(consumed_comment_ids, "consumed_comment_ids")
     history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(candidates.history)
     same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == candidates.head_sha)
@@ -4993,11 +5088,18 @@ def parse_verifier_output(
         duplicate_of_map,
         cleared_ids,
     )
-    effective_consumed = base_effective_consumed | _propagate_consumed_resolved_keys_for_aliases(
-        base_effective_consumed,
+    pre_state = _propagate_consumed_state_for_aliases(
+        prior_consumed_state,
+        history_aliases,
         effective_aliases,
-        history_aliases=history_aliases,
     )
+    input_state = _apply_round_new_consumed_keys(
+        pre_state,
+        extra_consumed,
+        history_aliases,
+        effective_aliases,
+    )
+    effective_consumed = input_state.all_keys
     active_author_replies = tuple(
         r
         for r in persisted_replies
@@ -5148,24 +5250,22 @@ def _expand_cleared_equivalence_classes(
 
 def _replay_history_state(
     history: Sequence[RoundHistoryEntry],
-) -> tuple[frozenset[str], frozenset[str], dict[str, str], frozenset[str]]:
-    """单遍回放历史轮次的活跃已贴指纹、活跃已贴 Important 指纹、活跃去重别名与累计有效已消费回复键。
+) -> tuple[frozenset[str], frozenset[str], dict[str, str], _ConsumedReplyState]:
+    """单遍回放历史轮次的活跃已贴指纹、活跃已贴 Important 指纹、活跃去重别名与两层消费状态。
 
     当某轮解除或驳回规范项时，在删除指向该规范项的别名边之前先按旧等价类整体移出曾贴出别名，
-    并在每轮更新别名后同步传播 resolved 级消费键（即使手造历史条目漏写迁移键也能兜底），
+    并在每轮更新别名后严格按 Phase A（纯别名传播）-> Phase B（本轮新增消费并入）推进消费状态，
     同时保持早期历史条目自身不可变。
     """
     active_posted: set[str] = set()
     active_posted_important: set[str] = set()
     active_aliases: dict[str, str] = {}
-    active_consumed: set[str] = set()
+    consumed_state = _ConsumedReplyState()
     prev_unresolved: set[str] = set()
     for entry in history:
         current_unresolved = {f.finding_id for f in entry.unresolved_important}
         cleared_in_round = (
             (prev_unresolved - current_unresolved)
-            | set(entry.resolved_fingerprints)
-            | set(entry.rejected_fingerprints)
             | {fp.strip().lower() for fp in entry.resolved_fingerprints}
             | {fp.strip().lower() for fp in entry.rejected_fingerprints}
         )
@@ -5178,25 +5278,29 @@ def _replay_history_state(
         assert entry_posted_important is not None
         active_posted_important.update(entry_posted_important)
         entry_aliases = dict(entry.duplicate_aliases)
-        active_aliases = _compute_effective_duplicate_aliases(
+        next_aliases = _compute_effective_duplicate_aliases(
             prior_aliases,
             entry_aliases,
             cleared_in_round,
         )
-        active_consumed.update(entry.consumed_reply_keys)
-        active_consumed.update(
-            _propagate_consumed_resolved_keys_for_aliases(
-                active_consumed,
-                active_aliases,
-                history_aliases=prior_aliases,
-            )
+        pre_state = _propagate_consumed_state_for_aliases(
+            consumed_state,
+            prior_aliases,
+            next_aliases,
         )
+        consumed_state = _apply_round_new_consumed_keys(
+            pre_state,
+            entry.consumed_reply_keys,
+            prior_aliases,
+            next_aliases,
+        )
+        active_aliases = next_aliases
         prev_unresolved = current_unresolved
     return (
         frozenset(active_posted),
         frozenset(active_posted_important),
         active_aliases,
-        frozenset(active_consumed),
+        consumed_state,
     )
 
 
@@ -5222,8 +5326,8 @@ def _active_duplicate_aliases(history: Sequence[RoundHistoryEntry]) -> dict[str,
 
 def _active_consumed_reply_keys(history: Sequence[RoundHistoryEntry]) -> frozenset[str]:
     """回放历史轮次的累计有效已消费回复键（含跨轮别名交换、上移与清除后单跳同步的 resolved 消费键）。"""
-    _, _, _, active_consumed = _replay_history_state(history)
-    return active_consumed
+    _, _, _, consumed_state = _replay_history_state(history)
+    return consumed_state.all_keys
 
 
 def _is_reply_obviously_consumed(
@@ -5283,7 +5387,8 @@ def plan_next_round(
 
     prev = history_tuple[-1]
     round_number = prev.round_number + 1
-    already_posted, _, active_aliases, consumed_reply_keys = _replay_history_state(history_tuple)
+    already_posted, _, active_aliases, consumed_state = _replay_history_state(history_tuple)
+    consumed_reply_keys = consumed_state.all_keys
     active_replies = tuple(
         reply
         for reply in author_replies
@@ -5596,7 +5701,7 @@ def _derive_round_decision_payload(
     head_sha = verified.head_sha
     panel = verified.panel
     history = verified.history
-    already_posted, already_posted_important, history_aliases, replayed_history_consumed = _replay_history_state(
+    already_posted, already_posted_important, history_aliases, prior_consumed_state = _replay_history_state(
         history
     )
     pending_non_blocking = history[-1].pending_non_blocking if history else ()
@@ -5668,14 +5773,18 @@ def _derive_round_decision_payload(
     )
     unresolved_important = tuple(vf.finding for vf in blocking)
 
-    raw_history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history))
-    base_effective_consumed = replayed_history_consumed | verified.external_consumed_reply_keys
-    propagated_input_consumed = _propagate_consumed_resolved_keys_for_aliases(
-        base_effective_consumed,
+    pre_state = _propagate_consumed_state_for_aliases(
+        prior_consumed_state,
+        history_aliases,
         effective_aliases,
-        history_aliases=history_aliases,
     )
-    effective_consumed = base_effective_consumed | propagated_input_consumed
+    input_state = _apply_round_new_consumed_keys(
+        pre_state,
+        verified.external_consumed_reply_keys,
+        history_aliases,
+        effective_aliases,
+    )
+    effective_consumed = input_state.all_keys
     effective_consumed_cids = verified.external_consumed_comment_ids
     merged_author_replies = _merge_author_replies(
         verified.author_replies,
@@ -5725,20 +5834,13 @@ def _derive_round_decision_payload(
                 f"RoundDecision 发现 {fid} 的 resolved_by_wontfix 回复与本轮最终作者回复分析选定结果不一致"
             )
 
-    propagated_round_consumed = _propagate_consumed_resolved_keys_for_aliases(
+    final_state = _apply_round_new_consumed_keys(
+        input_state,
         consumed_keys,
+        history_aliases,
         effective_aliases,
-        history_aliases=history_aliases,
     )
-    consumed_reply_keys = frozenset(consumed_keys) | (
-        (
-            replayed_history_consumed
-            | propagated_input_consumed
-            | propagated_round_consumed
-            | verified.external_consumed_reply_keys
-        )
-        - raw_history_consumed
-    )
+    consumed_reply_keys = frozenset(consumed_keys) | (final_state.all_keys - prior_consumed_state.all_keys)
     bound_reply_targets = frozenset(bound_targets.items())
     finder_session_ids = frozenset(b.session_id for b in verified.candidates.finder_batches)
     unresolved_ids = frozenset(f.finding_id for f in unresolved_important)
