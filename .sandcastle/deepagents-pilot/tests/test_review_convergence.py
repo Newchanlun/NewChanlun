@@ -12384,3 +12384,689 @@ def test_r30_important4_and_5_round_decision_rejects_reversed_aliases_and_forged
             dec_nit_r2,
             bound_reply_targets=dec_nit_r2.bound_reply_targets | frozenset({(new_loc_key, f_nit_d.finding_id)}),
         )
+
+
+def test_r31_important1_stale_alias_location_reply_consumed_immediately() -> None:
+    """Codex R31 Important 1：坐标/行内回复命中活跃别名但规范项已过期时，单遍匹配立即消费该回复键，防后续轮次复活解除无关发现。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_stale_alias.py",
+        line=10,
+        category="规范缺陷A",
+        failure_scenario="第 10 行状态校验缺失",
+        source_models=("gpt-6-astra",),
+    )
+    f_d = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_stale_alias.py",
+        line=20,
+        category="别名缺陷D",
+        failure_scenario="第 20 行同源状态校验缺失",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_x = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_stale_alias.py",
+        line=20,
+        category="全新缺陷X",
+        failure_scenario="第 20 行新引入的空指针访问",
+        source_models=("gpt-6-astra",),
+    )
+
+    # R1 (HEAD_1): A@10 confirmed, D@20 -> A, 无回复
+    cand_r1 = _candidates([f_a, f_d], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {
+                    "finding_id": f_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "D 折入 A",
+                },
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+    assert e1.duplicate_aliases == ((f_d.finding_id, f_a.finding_id),)
+
+    # R2 (HEAD_2): 仅重定位 D@20，A@10 过期；作者在第 20 行回复（同时覆盖显式坐标与行内锚定）
+    reply_loc_20 = AuthorReply(None, "pilot1742/r31_stale_alias.py", 20, "第 20 行暂不修改", "c3101", "alice")
+    reply_inline_20 = AuthorReply(
+        None,
+        "pilot1742/r31_stale_alias.py",
+        20,
+        "行内确认第 20 行保留",
+        "c3102",
+        "alice",
+        is_inline_anchor=True,
+    )
+    cand_r2 = _candidates([f_d], round_number=2, head_sha=HEAD_2, history=(e1,))
+    assert cand_r2.stale_location_fingerprints == frozenset({f_a.finding_id})
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍存在"},
+                {
+                    "finding_id": f_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "D 仍折入 A",
+                },
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_loc_20, reply_inline_20],
+    )
+    # 故意不向 evaluate_round 重复传 author_replies，验证单阶段传入即可立即消费
+    dec_r2 = evaluate_round(ver_r2)
+    assert reply_loc_20.reply_key not in dict(dec_r2.bound_reply_targets)
+    assert reply_inline_20.reply_key not in dict(dec_r2.bound_reply_targets)
+    assert reply_loc_20.reply_key in dec_r2.consumed_reply_keys
+    assert reply_inline_20.reply_key in dec_r2.consumed_reply_keys
+    e2 = dec_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_r2))
+    assert reply_loc_20.reply_key in e2.consumed_reply_keys
+    assert reply_inline_20.reply_key in e2.consumed_reply_keys
+
+    # R3 (HEAD_3): 修复 A 并在第 20 行引入无关 Important X -> 旧回复已消费，严禁解除 X 得 PASS
+    cand_r3 = _candidates([f_x], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    for stale_old_reply in (reply_loc_20, reply_inline_20):
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand_r3,
+                    [
+                        {"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"},
+                        {
+                            "finding_id": f_x.finding_id,
+                            "verdict": "resolved_by_wontfix",
+                            "verifier_evidence": "试图借旧第 20 行回复解除无关 X",
+                        },
+                    ],
+                ),
+                cand_r3,
+                verifier_model="claude-opus-5-5",
+                author_replies=[stale_old_reply],
+            )
+    ver_r3_ok = parse_verifier_output(
+        _verifier_payload(
+            cand_r3,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"},
+                {"finding_id": f_x.finding_id, "verdict": "confirmed", "verifier_evidence": "X 为新阻断项"},
+            ],
+        ),
+        cand_r3,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_loc_20, reply_inline_20],
+    )
+    dec_r3_ok = evaluate_round(ver_r3_ok)
+    assert dec_r3_ok.outcome is RoundOutcome.BLOCKED
+    assert [vf.finding.finding_id for vf in dec_r3_ok.blocking_findings] == [f_x.finding_id]
+
+
+def test_r31_important2_short_prefix_duplicate_pin_and_single_stage_ambiguity_consumption() -> None:
+    """Codex R31 Important 2：短前缀命中 DUPLICATE 锁定原始 16 位指纹、多命中单阶段传回复即消费，且 evaluate_round 自动继承回复。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_short.py",
+        line=5,
+        category="主规范缺陷A",
+        failure_scenario="主路径缺少校验",
+        source_models=("gpt-6-astra",),
+    )
+    f1 = _finding(category="775")
+    f2 = _finding(category="1043")
+    assert f1.finding_id == "3961db7e35f93ace"
+    assert f2.finding_id == "3961dba0026e7a78"
+
+    short_reply_a = AuthorReply("3961db", None, None, "按设计保留该行为", "c3201", "alice")
+    short_reply_b = AuthorReply("3961db", None, None, "另一条短前缀回复", "c3202", "alice")
+
+    # 反例 A：R1 [3961db] 唯一命中 f1（裁为 DUPLICATE -> f_a），evaluate_round 不重传 author_replies
+    cand_a_r1 = _candidates([f_a, f1], round_number=1, head_sha=HEAD_1)
+    ver_a_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_a_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {
+                    "finding_id": f1.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "f1 与 A 同源",
+                },
+            ],
+        ),
+        cand_a_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[short_reply_a],
+    )
+    assert ver_a_r1.author_replies == (short_reply_a,)
+    dec_a_r1 = evaluate_round(ver_a_r1)
+    assert dict(dec_a_r1.bound_reply_targets).get(short_reply_a.reply_key) == f1.finding_id
+    e_a_r1 = dec_a_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_a_r1))
+    assert dict(e_a_r1.bound_reply_targets).get(short_reply_a.reply_key) == f1.finding_id
+
+    # 外部凭空手工传入指向 DUPLICATE 的无关锁仍必须拒绝
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_a_r1,
+                [
+                    {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                    {
+                        "finding_id": f1.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_a.finding_id,
+                        "verifier_evidence": "f1 与 A 同源",
+                    },
+                ],
+            ),
+            cand_a_r1,
+            verifier_model="claude-opus-5-5",
+            bound_reply_targets={short_reply_a.reply_key: f1.finding_id},
+        )
+
+    # R2：修复 A 并引入同前缀 f2 -> 短前缀已锁原始 16 位 f1，严禁解除 f2 得 PASS
+    cand_a_r2 = _candidates([f2], round_number=2, head_sha=HEAD_2, history=(e_a_r1,))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_a_r2,
+                [
+                    {"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"},
+                    {"finding_id": f2.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图借短前缀解除 f2"},
+                ],
+            ),
+            cand_a_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[short_reply_a],
+        )
+
+    # 反例 B：R1 [3961db] 同时命中 f1（DUPLICATE -> f_a）与 f2（CONFIRMED），仅 parse_verifier_output 传入回复
+    cand_b_r1 = _candidates([f_a, f1, f2], round_number=1, head_sha=HEAD_1)
+    ver_b_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_b_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {
+                    "finding_id": f1.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "f1 折入 A",
+                },
+                {"finding_id": f2.finding_id, "verdict": "confirmed", "verifier_evidence": "f2 成立"},
+            ],
+        ),
+        cand_b_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[short_reply_b],
+    )
+    dec_b_r1 = evaluate_round(ver_b_r1)
+    assert short_reply_b.reply_key not in dict(dec_b_r1.bound_reply_targets)
+    assert short_reply_b.reply_key in dec_b_r1.consumed_reply_keys
+    e_b_r1 = dec_b_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_b_r1))
+
+    # R2：f1 离场仅剩 f2 -> 歧义键已在 R1 消费，严禁复活解除 f2
+    cand_b_r2 = _candidates([f2], round_number=2, head_sha=HEAD_2, history=(e_b_r1,))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_b_r2,
+                [
+                    {"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"},
+                    {"finding_id": f2.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图复活已消费歧义短前缀"},
+                ],
+            ),
+            cand_b_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[short_reply_b],
+        )
+
+    # evaluate_round 传入与 verified.author_replies 同一 reply_key 但内容不一致的回复必须抛 ConvergenceError
+    conflicting_reply_a = AuthorReply("3961db", None, None, "被篡改的不同理由", "c3201", "alice")
+    with pytest.raises(ConvergenceError):
+        evaluate_round(ver_a_r1, author_replies=[conflicting_reply_a])
+
+
+def test_r31_important3_upgraded_canonical_important_posts_details_and_alias_summary_never_lies() -> None:
+    """Codex R31 Important 3：Nit D 升级为 Important A 时必须完整贴出 A 并标注升级来源；Important D 别名沿用不得谎称 A 自身已贴出。"""
+    f_nit_d = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r31_upgrade.py",
+        line=12,
+        category="旧Nit提示D",
+        failure_scenario="第 12 行校验风格欠佳",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_imp_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_upgrade.py",
+        line=10,
+        category="升级阻断缺陷A",
+        failure_scenario="第 10 行缺少边界校验导致越界崩溃",
+        source_models=("gpt-6-astra",),
+    )
+
+    # 1. Codex R31 精确反例：R1 仅贴出 Nit D；R2 首次确认 Important A 并裁定 D -> A
+    cand_r1 = _candidates([f_nit_d], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_nit_d.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 仅 Nit D"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+    assert e1.posted_fingerprints == frozenset({f_nit_d.finding_id})
+    assert e1.posted_important_fingerprints == frozenset()
+
+    cand_r2 = _candidates([f_imp_a, f_nit_d], round_number=2, head_sha=HEAD_2, history=(e1,))
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {"finding_id": f_imp_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 确认为阻断越界缺陷"},
+                {
+                    "finding_id": f_nit_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_imp_a.finding_id,
+                    "verifier_evidence": "D 合并升级至 A",
+                },
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2 = evaluate_round(ver_r2)
+    assert dec_r2.outcome is RoundOutcome.BLOCKED
+    assert [vf.finding.finding_id for vf in dec_r2.blocking_findings] == [f_imp_a.finding_id]
+    assert [vf.finding.finding_id for vf in dec_r2.postable_findings] == [f_imp_a.finding_id]
+
+    ren_r2 = render_findings_comment(1928, HEAD_2, dec_r2)
+    assert "1 项 Important，0 项 Nit，0 项 Pre-existing" in ren_r2.body
+    assert "前轮已贴出且仍未解除" not in ren_r2.body
+    assert f_imp_a.finding_id in ren_r2.body
+    assert "升级阻断缺陷A" in ren_r2.body
+    assert "第 10 行缺少边界校验导致越界崩溃" in ren_r2.body
+    assert "A 确认为阻断越界缺陷" in ren_r2.body
+    assert f"由前轮已贴出别名 `[{f_nit_d.finding_id}]` 合并并升级为 Important" in ren_r2.body
+
+    e2 = dec_r2.to_history_entry(rendered=ren_r2)
+    assert e2.posted_important_fingerprints == frozenset({f_imp_a.finding_id})
+
+    # R3：A 仍未解除 -> 此时 A 自身已在 R2 贴出，摘要区如实标为「前轮已贴出且仍未解除」且不重贴全文
+    cand_r3 = _candidates([f_imp_a], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    ver_r3 = parse_verifier_output(
+        _verifier_payload(
+            cand_r3,
+            [{"finding_id": f_imp_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍未修复"}],
+        ),
+        cand_r3,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r3 = evaluate_round(ver_r3)
+    assert dec_r3.postable_findings == ()
+    ren_r3 = render_findings_comment(1928, HEAD_3, dec_r3)
+    assert f"- 前轮已贴出且仍未解除：`[{f_imp_a.finding_id}]`" in ren_r3.body
+
+    # 2. 对照场景：前轮实际贴出的是 Important D、本轮规范项为 Important A 且 D -> A
+    #    保持单次阻断计数 = 1、不重贴全文，但绝不谎称 A 自身曾贴出，须明确标注「前轮以别名 D 贴出，仍未解除」
+    f_imp_d = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_alias_imp.py",
+        line=20,
+        category="前轮Important别名D",
+        failure_scenario="第 20 行前轮贴出的 Important 描述",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_imp_canon = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_alias_imp.py",
+        line=18,
+        category="规范ImportantA",
+        failure_scenario="第 18 行规范 Important 描述",
+        source_models=("gpt-6-astra",),
+    )
+    e1_imp_alias = RoundHistoryEntry(
+        round_number=1,
+        head_sha=HEAD_1,
+        posted_fingerprints=frozenset({f_imp_d.finding_id}),
+        posted_important_fingerprints=frozenset({f_imp_d.finding_id}),
+        unresolved_important=(f_imp_canon,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r31-imp-alias-1", "r31-imp-alias-2"}),
+        duplicate_aliases=((f_imp_d.finding_id, f_imp_canon.finding_id),),
+    )
+    cand_imp_r2 = _candidates([f_imp_canon], round_number=2, head_sha=HEAD_2, history=(e1_imp_alias,))
+    ver_imp_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_imp_r2,
+            [{"finding_id": f_imp_canon.finding_id, "verdict": "confirmed", "verifier_evidence": "规范项仍未修复"}],
+        ),
+        cand_imp_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_imp_r2 = evaluate_round(ver_imp_r2)
+    assert [vf.finding.finding_id for vf in dec_imp_r2.blocking_findings] == [f_imp_canon.finding_id]
+    assert dec_imp_r2.postable_findings == ()
+    ren_imp_r2 = render_findings_comment(1928, HEAD_2, dec_imp_r2)
+    assert "前轮已贴出且仍未解除" not in ren_imp_r2.body
+    assert f"`[{f_imp_canon.finding_id}]`" in ren_imp_r2.body
+    assert f"（前轮以别名 `[{f_imp_d.finding_id}]` 贴出，仍未解除）" in ren_imp_r2.body
+    e2_imp_alias = dec_imp_r2.to_history_entry(rendered=ren_imp_r2)
+    assert e2_imp_alias.posted_important_fingerprints == frozenset({f_imp_d.finding_id})
+
+
+def test_r31_important4_resolving_canonical_ends_posted_alias_suppression_cycle() -> None:
+    """Codex R31 Important 4：规范项 A 解除后，按旧等价类同步结束曾贴出别名 D 的已贴抑制周期，R4 独立重现 D 可完整贴出。"""
+    f_nit_a = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r31_cycle.py",
+        line=10,
+        category="规范NitA",
+        failure_scenario="第 10 行变量命名规范建议",
+        source_models=("gpt-6-astra",),
+    )
+    f_nit_d = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r31_cycle.py",
+        line=14,
+        category="别名NitD",
+        failure_scenario="第 14 行同变量命名提示",
+        source_models=("gpt-6.1-sol",),
+    )
+
+    # R1：仅确认并贴出 Nit D
+    cand_r1 = _candidates([f_nit_d], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_nit_d.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 贴出 D"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+    assert e1.posted_fingerprints == frozenset({f_nit_d.finding_id})
+
+    # R2：确认 A 并裁定 D -> A（不重贴 A，保持历史仅贴 D）
+    cand_r2 = _candidates([f_nit_a, f_nit_d], round_number=2, head_sha=HEAD_2, history=(e1,))
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {"finding_id": f_nit_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {
+                    "finding_id": f_nit_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_nit_a.finding_id,
+                    "verifier_evidence": "D 折入 A",
+                },
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2 = evaluate_round(ver_r2)
+    assert dec_r2.postable_findings == ()
+    e2 = dec_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_r2))
+    assert e2.duplicate_aliases == ((f_nit_d.finding_id, f_nit_a.finding_id),)
+    assert e2.posted_fingerprints == frozenset({f_nit_d.finding_id})
+
+    # R3：作者显式解除 A -> 别名边清除且旧等价类 {A, D} 的已贴抑制周期同步结束
+    reply_a = AuthorReply(f_nit_a.finding_id, None, None, "按对外接口契约保留命名", "c3401", "alice")
+    cand_r3 = _candidates([f_nit_a], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    ver_r3 = parse_verifier_output(
+        _verifier_payload(
+            cand_r3,
+            [{"finding_id": f_nit_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信不修理由"}],
+        ),
+        cand_r3,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_a],
+    )
+    dec_r3 = evaluate_round(ver_r3)
+    assert dec_r3.duplicate_aliases == ()
+    assert dec_r3.retained_posted_fingerprints == frozenset()
+    e3 = dec_r3.to_history_entry(rendered=render_findings_comment(1928, HEAD_3, dec_r3))
+    assert e3.posted_fingerprints == frozenset()
+    assert e1.posted_fingerprints == frozenset({f_nit_d.finding_id})
+
+    # R4：单独重新确认 D -> 不再受已结束周期压制，必须完整进入 postable_findings 与评论正文
+    cand_r4 = _candidates([f_nit_d], round_number=4, head_sha=HEAD_4, history=(e1, e2, e3))
+    ver_r4 = parse_verifier_output(
+        _verifier_payload(
+            cand_r4,
+            [{"finding_id": f_nit_d.finding_id, "verdict": "confirmed", "verifier_evidence": "新周期独立确认 D"}],
+        ),
+        cand_r4,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r4 = evaluate_round(ver_r4)
+    assert [vf.finding.finding_id for vf in dec_r4.postable_findings] == [f_nit_d.finding_id]
+    ren_r4 = render_findings_comment(1928, HEAD_4, dec_r4)
+    assert f_nit_d.finding_id in ren_r4.body
+    assert ren_r4.posted_fingerprints == frozenset({f_nit_d.finding_id})
+
+
+def test_r31_important5_round_decision_rejects_unbacked_bound_reply_target_to_real_candidate() -> None:
+    """Codex R31 Important 5：封堵 RoundDecision.bound_reply_targets 凭空注入指向真实候选的无关坐标锁。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_forge_pin.py",
+        line=10,
+        category="真实阻断缺陷A",
+        failure_scenario="第 10 行未校验输入长度",
+        source_models=("gpt-6-astra",),
+    )
+    cand_r1 = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    assert dec_r1.author_replies == ()
+    assert dec_r1.bound_reply_targets == frozenset()
+
+    forged_unrelated_key = "comment:c10:loc:pilot1742/unrelated.py:99"
+    # Codex R31 精确反例：凭空注入指向真实候选 A 的无关坐标锁
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(
+            dec_r1,
+            bound_reply_targets=frozenset({(forged_unrelated_key, f_a.finding_id)}),
+        )
+
+    # 即使同时塞入一条无关坐标的伪造 AuthorReply，因与 A 真实坐标不匹配仍必须拒收
+    unrelated_reply = AuthorReply(None, "pilot1742/unrelated.py", 99, "无关坐标不修", "c10", "alice")
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(
+            dec_r1,
+            author_replies=(unrelated_reply,),
+            bound_reply_targets=frozenset({(unrelated_reply.reply_key, f_a.finding_id)}),
+        )
+
+    # 若本轮存在歧义坐标回复（同时命中 A 与 B），亦不得通过 replace 凭空将其锁定到 A
+    f_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_forge_pin.py",
+        line=10,
+        category="同坐标另一缺陷B",
+        failure_scenario="第 10 行同时存在类型截断",
+        source_models=("gpt-6.1-sol",),
+    )
+    ambig_reply = AuthorReply(None, "pilot1742/r31_forge_pin.py", 10, "第 10 行保持现状", "c11", "alice")
+    cand_ab = _candidates([f_a, f_b], round_number=1, head_sha=HEAD_1)
+    ver_ab = parse_verifier_output(
+        _verifier_payload(
+            cand_ab,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "B 成立"},
+            ],
+        ),
+        cand_ab,
+        verifier_model="claude-opus-5-5",
+        author_replies=[ambig_reply],
+    )
+    dec_ab = evaluate_round(ver_ab)
+    assert dec_ab.bound_reply_targets == frozenset()
+    assert ambig_reply.reply_key in dec_ab.consumed_reply_keys
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(
+            dec_ab,
+            bound_reply_targets=frozenset({(ambig_reply.reply_key, f_a.finding_id)}),
+        )
+
+
+def test_r31_important6_round_decision_uses_pre_verdict_stale_for_pinned_and_wontfix() -> None:
+    """Codex R31 Important 6：RoundDecision 复核 author_reply_pinned=True 与 resolved_by_wontfix 必须使用裁决前完整候选过期集合。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_pre_stale.py",
+        line=10,
+        category="规范缺陷A",
+        failure_scenario="第 10 行缺少锁保护",
+        source_models=("gpt-6-astra",),
+    )
+    f_d = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r31_pre_stale.py",
+        line=20,
+        category="别名缺陷D",
+        failure_scenario="第 20 行同一竞态路径",
+        source_models=("gpt-6.1-sol",),
+    )
+
+    # 1. R1 (HEAD_1): A@10 confirmed, D@20 -> A，无锁
+    cand_r1 = _candidates([f_a, f_d], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {
+                    "finding_id": f_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "D 折入 A",
+                },
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+
+    # R2 (HEAD_2): 仅重定位 D@20，A@10 在候选阶段明确过期；先用显式 [A] 合法解除 A 并驳回 D 得 PASS
+    reply_id_a = AuthorReply(f_a.finding_id, None, None, "单线程上下文无需加锁", "c3601", "alice")
+    cand_r2 = _candidates([f_d], round_number=2, head_sha=HEAD_2, history=(e1,))
+    assert cand_r2.stale_location_fingerprints == frozenset({f_a.finding_id})
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信显式 ID 理由"},
+                {"finding_id": f_d.finding_id, "verdict": "rejected", "verifier_evidence": "D 驳回"},
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_id_a],
+    )
+    dec_r2 = evaluate_round(ver_r2)
+    assert dec_r2.outcome is RoundOutcome.PASS
+    assert dec_r2.stale_location_fingerprints == frozenset()
+    assert dec_r2.relocated_fingerprints == frozenset()
+
+    vf_a = next(vf for vf in dec_r2.verified_findings if vf.finding.finding_id == f_a.finding_id)
+    vf_d = next(vf for vf in dec_r2.verified_findings if vf.finding.finding_id == f_d.finding_id)
+
+    # Codex R31 精确反例：replace 将解除依据换成 file:20 + author_reply_pinned=True，必须被裁决前 pre_verdict_stale 拦截
+    reply_loc_20 = AuthorReply(None, "pilot1742/r31_pre_stale.py", 20, "试图用别名坐标绕过跨 HEAD 过期守卫", "c3602", "alice")
+    fake_vf_a_pinned = dataclasses.replace(vf_a, author_reply=reply_loc_20, author_reply_pinned=True)
+    for forged_replies in (dec_r2.author_replies, (reply_loc_20,)):
+        with pytest.raises(ConvergenceError):
+            dataclasses.replace(
+                dec_r2,
+                verified_findings=(fake_vf_a_pinned, vf_d),
+                resolved_findings=(fake_vf_a_pinned,),
+                author_replies=forged_replies,
+            )
+
+    # 即使换成 A 自身旧坐标 file:10（author_reply_pinned=False），因 A 在裁决前过期同样必须拦截
+    reply_loc_10 = AuthorReply(None, "pilot1742/r31_pre_stale.py", 10, "试图用旧行号解除过期 A", "c3603", "alice")
+    fake_vf_a_direct = dataclasses.replace(vf_a, author_reply=reply_loc_10, author_reply_pinned=False)
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(
+            dec_r2,
+            verified_findings=(fake_vf_a_direct, vf_d),
+            resolved_findings=(fake_vf_a_direct,),
+            author_replies=(reply_loc_10,),
+        )
+
+    # 2. 即使 R1 已在 HEAD_1 锁定了 reply_loc_20 -> A，切到 HEAD_2 且 A 过期时，replace 为 pinned=True 同样必须拒绝
+    ver_r1_pinned = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {
+                    "finding_id": f_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "D 折入 A",
+                },
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_loc_20],
+    )
+    dec_r1_pinned = evaluate_round(ver_r1_pinned)
+    e1_pinned = dec_r1_pinned.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1_pinned))
+    assert dict(e1_pinned.bound_reply_targets).get(reply_loc_20.reply_key) == f_a.finding_id
+
+    cand_r2_pinned = _candidates([f_d], round_number=2, head_sha=HEAD_2, history=(e1_pinned,))
+    assert cand_r2_pinned.stale_location_fingerprints == frozenset({f_a.finding_id})
+    ver_r2_pinned = parse_verifier_output(
+        _verifier_payload(
+            cand_r2_pinned,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "显式 ID 合法解除"},
+                {"finding_id": f_d.finding_id, "verdict": "rejected", "verifier_evidence": "D 驳回"},
+            ],
+        ),
+        cand_r2_pinned,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_id_a],
+    )
+    dec_r2_pinned = evaluate_round(ver_r2_pinned)
+    vf_a_p = next(vf for vf in dec_r2_pinned.verified_findings if vf.finding.finding_id == f_a.finding_id)
+    vf_d_p = next(vf for vf in dec_r2_pinned.verified_findings if vf.finding.finding_id == f_d.finding_id)
+    fake_vf_a_cross_head = dataclasses.replace(vf_a_p, author_reply=reply_loc_20, author_reply_pinned=True)
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(
+            dec_r2_pinned,
+            verified_findings=(fake_vf_a_cross_head, vf_d_p),
+            resolved_findings=(fake_vf_a_cross_head,),
+            author_replies=(reply_loc_20,),
+        )
+
