@@ -42,7 +42,7 @@ pub(super) fn validate_config(manifest: &Value) -> Result<(), String> {
         return Ok(());
     };
     exact(v, &["schema_revision", "authorities"])?;
-    if v["schema_revision"] != "voice-binding/1" || manifest["clock"]["kind"] != "TestOnly" {
+    if v["schema_revision"] != "voice-binding/1" || !super::store::component_clock(manifest) {
         return Err("SchemaUnsupported：Voice 证据仅显式 TestOnly voice-binding/1".into());
     }
     let authorities = v["authorities"]

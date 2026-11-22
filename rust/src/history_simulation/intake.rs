@@ -153,3 +153,83 @@ pub(crate) fn verify_capture(manifest: &Value, envelope: &Value, raw: &str) -> R
     }
     Ok(())
 }
+
+/// #1375：从 E 已冻结的 X 只读库核验一批已提交原件。调用者须指定批身份，
+/// 不能用最新读数主张故障结束；此结果也不证明任何事实已经济核清。
+pub(crate) fn committed_capture_batch(
+    manifest: &Value,
+    batch_id: &str,
+    receipt_digest: &str,
+    x_id: &str,
+    x_epoch: i64,
+) -> Result<Value, String> {
+    let binding = &manifest["history_simulation_source"];
+    if !binding.is_object() {
+        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
+    }
+    let db = Path::new(required(binding, "x_db")?);
+    if !db.is_absolute() {
+        return Err("InvalidDomain：X 原件库须为冻结绝对路径".into());
+    }
+    let mut c =
+        Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(failure)?;
+    c.busy_timeout(std::time::Duration::from_secs(2))
+        .map_err(failure)?;
+    let tx = c.transaction().map_err(failure)?;
+    let x_meta = |key| -> Result<String, String> {
+        tx.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
+            .map_err(failure)
+    };
+    let revision = x_meta("profile_revision")?;
+    if x_meta("profile_mode")? != "simulation"
+        || x_meta("history_simulation")? != "true"
+        || x_meta("writer_epoch")? != x_epoch.to_string()
+    {
+        return Err("IdentityConflict：指定 X 模型或当前 writer epoch 不符".into());
+    }
+    super::runtime::check_inner_revision(&tx, &revision)?;
+    let raw_profile: String = tx
+        .query_row(
+            "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(failure)?;
+    let parsed = super::runtime::parse_archive_profile(&revision, &raw_profile)?;
+    let identity = parsed.identity(revision, x_epoch);
+    if identity.session_id != required(manifest, "session_id")?
+        || identity.session_generation != required(manifest, "session_generation")?
+    {
+        return Err("IdentityConflict：X 与 E 的会话或化身不同".into());
+    }
+    if identity.source_namespace != required(binding, "source_namespace")?
+        || identity.source_epoch != required(binding, "source_epoch")?
+    {
+        return Err("IdentityConflict：X 持久来源与 E 冻结来源不同".into());
+    }
+    if identity.x_id != x_id
+        || identity.model_content_hash != required(binding, "model_content_hash")?
+    {
+        return Err("IdentityConflict：X 身份或模型与冻结范围不同".into());
+    }
+    let raw: String = tx
+        .query_row(
+            "SELECT result FROM x_sim_batches WHERE id=?1",
+            [batch_id],
+            |r| r.get(0),
+        )
+        .map_err(failure)?;
+    let receipt = strict_json(raw.as_bytes())?;
+    if canonical_json(&receipt) != raw
+        || receipt["request_id"] != batch_id
+        || sha256_hex(raw.as_bytes()) != receipt_digest
+    // DevSkim: ignore DS197836 内容寻址摘要
+    {
+        return Err("IdentityConflict：指定 X 批的完整回执摘要不同".into());
+    }
+    // 复用正式 X 恢复入口的只读部分：批重演之外，还核接纳、原 Release 与
+    // S 执行证据。只核原件相符不能证明该批由正式命令产生。
+    parsed.audit(&tx, x_epoch)?;
+    tx.commit().map_err(failure)?;
+    Ok(receipt)
+}
