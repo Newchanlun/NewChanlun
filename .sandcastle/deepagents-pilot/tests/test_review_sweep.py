@@ -2583,3 +2583,51 @@ def test_rearmed_auto_merge_invalidates_prior_withdrawn_so_fail_closed_withdraws
     assert github.calls == [("disable", 1810), ("disable", 1810)]
     assert any(a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw" and a.get("auto_merge_withdrawn") is True
                for a in caught.value.actions)
+
+
+def test_preflight_induced_quota_pause_before_pending_does_not_burn_resume_and_recovers(lane, monkeypatch):
+    """R22（Sol P1）：新 attempt 预检成功并记账 2*4096 token 后恰把 24h 额度推到上限，导致 review_pr 在发 pending
+    与建工蜂目录前触发 quota-paused：sweep 在额度未回落前不得消耗唯一 .resumes 机会，额度回落后须自动恢复并完成 PASS。"""
+    from pilot1742 import external_review as ext
+    from pilot1742.delivery import EffectPending
+
+    cap = len(ext.MODELS) * ext.PREFLIGHT_TOKENS_PER_PROBE
+    monkeypatch.setenv(ext.DAILY_INPUT_CAP_ENV, str(cap))
+
+    github = FakeGitHub(lane)
+    spawned: list[tuple[int, int]] = []
+
+    def child(number, attempt, head, log, base=None):
+        spawned.append((number, attempt))
+        try:
+            lane.review_pr(number, attempt, expect_head=head, expect_base=base)
+        except EffectPending:
+            pass
+        return 5000 + len(spawned)
+
+    sweep = Sweep(github, lane, child, state_root=lane.state_root, rows=lambda: [], max_running=3)
+    # 第 1 轮：额度为 0 < cap -> 派发 attempt 1 -> 预检记账 cap -> review_pr 在 pending 前因 quota-paused 退出
+    first = sweep.tick()
+    assert acts(first) == ["launch"] and len(spawned) == 1
+    row = lane.status(1810)[0]
+    assert row["outcome"] is None
+    folder = lane.state_root / "runs" / ext.ReviewTarget(**row["target"]).key
+    assert (folder / ext.QUOTA_PAUSED_FILE).exists()
+    assert not (folder / "effects" / "status-pending.json").exists()
+
+    # 第 2、3 轮：额度仍在上限 -> sweep 报 quota-paused，不派必死子进程、不消耗 .resumes，绝不掉进 needs-operator
+    for _ in range(2):
+        paused = sweep.tick()
+        assert acts(paused) == ["quota-paused"]
+    assert len(spawned) == 1
+    assert not list((lane.state_root / "sweep").glob("*.resumes"))
+
+    # 模拟额度恢复后（如次日或提额），并且清掉 launch-backoff 窗口：sweep 自动续跑完成 PASS，不卡在 needs-operator
+    monkeypatch.setenv(ext.DAILY_INPUT_CAP_ENV, str(cap * 100))
+    for marker in (lane.state_root / "sweep").glob("*.launched"):
+        marker.unlink()
+    recovered = sweep.tick()
+    assert acts(recovered) == ["launch"] and len(spawned) == 2
+    assert lane.status(1810)[0]["outcome"]["verdict"] == "PASS"
+    assert not (folder / ext.QUOTA_PAUSED_FILE).exists()
+    assert not list((lane.state_root / "sweep").glob("*.resumes"))

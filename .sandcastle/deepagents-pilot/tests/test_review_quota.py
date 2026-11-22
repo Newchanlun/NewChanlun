@@ -278,7 +278,7 @@ def test_container_start_failure_marks_not_sent_and_charges_zero_tokens(lane, mo
             lambda _cmd, _t, ec=exit_code, **kw: subprocess.CompletedProcess([], ec, b"", b"docker failed"),
         )
         trip = review_preflight.round_trip(
-            "http://host.docker.internal:8318", "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
+            module.FORMAL_PROXY_URL, "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
             review_preflight.Deadline(10), container_image="sha256:" + "1" * 64,
         )
         assert trip["ok"] is False and "not_sent" in trip["error"]
@@ -297,7 +297,47 @@ def test_container_start_failure_marks_not_sent_and_charges_zero_tokens(lane, mo
 
     monkeypatch.setattr(review_preflight, "run_bounded", raise_oserror)
     trip_os = review_preflight.round_trip(
-        "http://host.docker.internal:8318", "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
+        module.FORMAL_PROXY_URL, "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
         review_preflight.Deadline(10), container_image="sha256:" + "1" * 64,
     )
     assert trip_os["ok"] is False and "not_sent" in trip_os["error"]
+
+
+def test_preflight_usage_ledger_fails_closed_when_daily_cap_enabled(tmp_path, monkeypatch):
+    """R22（Astra P2）：启用 DAILY_INPUT_CAP_ENV 时，预检用量账本缺失计 0；但一旦存在且权限不符、为符号链接、
+    损坏或写入失败，admit_quota / _record_preflight_usage 必须以 quota-unverifiable 失败闭合，绝不静默折算为 0。"""
+    root = tmp_path.resolve()
+    lane = ExternalReview(None, state_root=root)
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    lane.admit_quota()  # 文件不存在时正常按 0 放行
+
+    usage_path = root / module.PREFLIGHT_USAGE_FILE
+    # 1. 权限过宽（0o644）-> admit_quota 与 _record_preflight_usage 均失败闭合
+    usage_path.write_text(json.dumps({"at": time.time(), "probes": 2, "tokens": 8192}) + "\n", encoding="utf-8")
+    os.chmod(usage_path, 0o644)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.admit_quota()
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane._record_preflight_usage(2)
+
+    # 2. 损坏 JSON 行 -> 失败闭合
+    os.chmod(usage_path, 0o600)
+    usage_path.write_text("{corrupt\n", encoding="utf-8")
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.admit_quota()
+
+    # 3. 符号链接 -> 失败闭合
+    target_file = root / "real.jsonl"
+    target_file.write_text(json.dumps({"at": time.time(), "probes": 1, "tokens": 4096}) + "\n", encoding="utf-8")
+    os.chmod(target_file, 0o600)
+    usage_path.unlink()
+    usage_path.symlink_to(target_file)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.admit_quota()
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane._record_preflight_usage(1)
+
+    # 4. 未启用每日额度闸时，不因损坏账本阻断主流程
+    monkeypatch.delenv(DAILY_INPUT_CAP_ENV)
+    lane._record_preflight_usage(1)
+    lane.admit_quota()

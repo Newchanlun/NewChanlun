@@ -3689,3 +3689,21 @@ def test_publish_success_reconciles_existing_remote_status_even_if_allow_auto_me
     reconciled2 = lane.review_pr(1810, 1)
     assert reconciled2["verdict"] == "PASS" and "publication" in reconciled2
     assert lane.gateway.sent == before_sent
+
+
+def test_validate_review_rejects_missing_admitted_image_id_on_current_policy(lane):
+    """R22（Astra P1）：当前 POLICY 的非沿用 target.json 若缺少预检准入冻结的 admitted_image_id，
+    validate_review 必须失败闭合，即使 launch.json 与 receipt.json 带有相同镜像 Id 也不放行。"""
+    from dataclasses import replace
+
+    passed = lane.review_pr(1810, 1)
+    assert passed["verdict"] == "PASS"
+    target = ReviewTarget(**passed["target"])
+    worker = lane.state_root / "runs" / target.key / MODELS[0]
+    launch = json.loads((worker / "launch.json").read_text())
+    receipt = json.loads((worker / "receipt.json").read_text())
+    assert launch["image_id"] == receipt["image_id"] and target.admitted_image_id == launch["image_id"]
+
+    missing_target = replace(target, admitted_image_id="")
+    outcome = validate_review(missing_target, launch, receipt, worker, lane.source)
+    assert outcome.verdict == "FAILED" and "缺少预检准入冻结的镜像 Id" in outcome.reason

@@ -1368,18 +1368,19 @@ index 85ae6d6..69a1d19 100644
 +	return func() bool { return snapshot != nil && len(snapshot.records) == 0 && h.Snapshot() == snapshot }
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..d5486ba 100644
+index 6074124..d0ba531 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
-@@ -15,6 +15,7 @@ import (
+@@ -15,6 +15,8 @@ import (
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
  	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
  	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
  	log "github.com/sirupsen/logrus"
  )
-@@ -154,7 +155,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -154,7 +156,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
@@ -1392,11 +1393,19 @@ index 6074124..d5486ba 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -445,11 +450,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,12 +450,27 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 		}
  	}
  	go func() {
- 		defer close(out)
--		defer func() {
+-		defer close(out)
++		var stopDeliverySupport func()
+ 		defer func() {
++			if stopDeliverySupport != nil {
++				_, _ = coreusage.WaitStreamDelivery(ctx)
++				stopDeliverySupport()
++			}
++		}()
++		defer close(out)
 +		bodyClosed := false
 +		closeBody := func() {
 +			if bodyClosed {
@@ -1414,7 +1423,7 @@ index 6074124..d5486ba 100644
  		for scanner.Scan() {
  			line := scanner.Bytes()
  			var translatedLine []byte
-@@ -465,6 +478,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -465,6 +486,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				translatedLine = append([]byte("data: "), data...)
  				eventType := ojson.GetBytesNoCopy(data, "type").String()
  				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
@@ -1426,7 +1435,7 @@ index 6074124..d5486ba 100644
  					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
  						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
  						reporter.PublishFailure(ctx, errClearReplay)
-@@ -521,6 +539,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -521,6 +547,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  			}
  
  			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
@@ -1452,7 +1461,7 @@ index 6074124..d5486ba 100644
  			for i := range chunks {
  				select {
  				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent}:
-@@ -546,6 +583,31 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -546,6 +591,52 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
@@ -1468,16 +1477,37 @@ index 6074124..d5486ba 100644
 +			}
 +		}
 +		if sawStrictTerminal {
-+			// Close and verify upstream body EOF BEFORE exposing response.completed downstream.
++			// Close and verify upstream body EOF BEFORE exposing response.completed downstream,
++			// and coalesce all terminal/trailing payloads into a single chunk so a downstream
++			// ChunkDone() cancel cannot race ahead of trailing frames.
 +			closeBody()
-+			for _, pending := range pendingStrictTerminal {
-+				select {
-+				case out <- pending:
-+					if len(pending.Payload) > 0 {
-+						emittedCount++
++			if len(pendingStrictTerminal) > 0 {
++				var combined bytes.Buffer
++				incomplete := false
++				for _, pending := range pendingStrictTerminal {
++					if pending.Incomplete {
++						incomplete = true
 +					}
-+				case <-ctx.Done():
-+					return
++					if len(pending.Payload) > 0 {
++						if combined.Len() > 0 && !bytes.HasSuffix(combined.Bytes(), []byte{'\n'}) {
++							combined.WriteByte('\n')
++						}
++						combined.Write(pending.Payload)
++					}
++				}
++				if combined.Len() > 0 || incomplete {
++					if !incomplete {
++						stopDeliverySupport = coreusage.SupportStreamDelivery(ctx)
++					}
++					merged := cliproxyexecutor.StreamChunk{Payload: combined.Bytes(), Incomplete: incomplete}
++					select {
++					case out <- merged:
++						if len(merged.Payload) > 0 {
++							emittedCount++
++						}
++					case <-ctx.Done():
++						return
++					}
 +				}
 +			}
 +			return
@@ -2017,10 +2047,10 @@ index 47f87de..3a1a2d4 100644
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-index e69de29..bdcfb5a 100644
+index e69de29..4d07cdf 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,195 @@
 +package auth
 +
 +import (
@@ -2120,27 +2150,45 @@ index e69de29..bdcfb5a 100644
 +
 +func wrapPreflightStream(ctx context.Context, lease *preflightreceipt.Execution, original <-chan execution.StreamChunk) <-chan execution.StreamChunk {
 +	out := make(chan execution.StreamChunk)
++	deliverySupportedAtStart := coreusage.StreamDeliverySupported(ctx)
 +	go func() {
 +		canceled := false
++		postEOFCancel := false
 +		defer func() {
-+			if !canceled {
++			if !canceled && !postEOFCancel {
 +				// Release the execution lease BEFORE exposing EOF on out so an immediate
 +				// serial retry on the same Collector never observes stale active > 0.
 +				lease.End()
 +				close(out)
 +				return
 +			}
++			// Capture producer delivery opt-in BEFORE closing out so an executor that does
++			// not support early terminal delivery (e.g. ClaudeExecutor) cannot accidentally
++			// slip through on a racy post-disconnect cancel(nil).
++			deliverySupported := deliverySupportedAtStart || coreusage.StreamDeliverySupported(ctx)
 +			// On cancellation, close out first so WaitStreamDelivery cannot deadlock
 +			// waiting for a consumer blocked on reading out.
 +			close(out)
 +			c := preflightreceipt.From(ctx)
-+			if c != nil && c.StrictCodex() {
++			if postEOFCancel && c != nil && c.StrictCodex() {
++				// Upstream HTTP body already reached true io.EOF and response.completed was delivered
++				// downstream (e.g. OpenAIResponsesAPIHandler ChunkDone() -> cancel(nil)). Drain any
++				// remaining already-queued chunks on original to observe trailing errors/duplicates,
++				// and accept only when downstream delivery acknowledged nil error.
++				for chunk := range original {
++					c.ObserveStreamChunk(chunk.Payload)
++				}
++				deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
++				if !tracked || deliveryErr != nil {
++					c.Reject()
++				}
++			} else if c != nil && c.StrictCodex() {
 +				// Formal review launches must observe upstream EOF; stopping early on client
 +				// cancellation could hide trailing duplicate terminal events or errors.
 +				c.Reject()
 +			} else {
 +				deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
-+				if !tracked || deliveryErr != nil {
++				if !tracked || !deliverySupported || deliveryErr != nil {
 +					c.Reject()
 +				}
 +			}
@@ -2149,12 +2197,20 @@ index e69de29..bdcfb5a 100644
 +		for {
 +			select {
 +			case <-ctx.Done():
-+				canceled = true
++				if c := preflightreceipt.From(ctx); c != nil && c.StrictCodex() && c.UpstreamEOF() && c.ObservedCompleted() {
++					postEOFCancel = true
++				} else {
++					canceled = true
++				}
 +				return
 +			case chunk, ok := <-original:
 +				if !ok {
 +					if ctx.Err() != nil {
-+						canceled = true
++						if c := preflightreceipt.From(ctx); c != nil && c.StrictCodex() && c.UpstreamEOF() && c.ObservedCompleted() {
++							postEOFCancel = true
++						} else {
++							canceled = true
++						}
 +					}
 +					return
 +				}
@@ -2464,10 +2520,10 @@ index 0000000..6de513e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000..bfa7948
+index 0000000..b3c5902
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,263 @@
 +package auth
 +
 +import (
@@ -2629,6 +2685,106 @@ index 0000000..bfa7948
 +	// and never recorded a sealable request.
 +	if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
 +		t.Fatalf("SealReview after early stream cancel = %v, want SealRejected", st)
++	}
++}
++
++type status200StreamTestRT struct {
++	tlsState *tls.ConnectionState
++	body     string
++}
++
++func (rt status200StreamTestRT) RoundTrip(req *http.Request) (*http.Response, error) {
++	return &http.Response{
++		StatusCode: http.StatusOK,
++		Header:     make(http.Header),
++		Body:       io.NopCloser(strings.NewReader(rt.body)),
++		TLS:        rt.tlsState,
++	}, nil
++}
++
++func TestPreflightReceiptStrictCodexPostEOFClientCancelPreservesReceipt(t *testing.T) {
++	// Sol P1 + Astra P1 (R22): OpenAIResponsesAPIHandler cancels the execution context with
++	// finishDelivery(nil) immediately upon receiving response.completed (ChunkDone). When
++	// CodexExecutor has already drained and closed the upstream HTTP body at true io.EOF
++	// (UpstreamEOF() == true) before emitting response.completed, that post-EOF cancel MUST
++	// preserve the receipt. Conversely, a failed deliveryError or a trailing error chunk on
++	// original MUST still reject/taint.
++	root := filepath.Join(t.TempDir(), "receipts")
++	tlsState := testVerifiedTLS(t, "chatgpt.com")
++	sse := `data: {"type":"response.completed","response":{"id":"resp_post_eof","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass"}]}]}}` + "\n\n"
++
++	runCase := func(t *testing.T, launch, session string, deliveryErr error, trailingChunk string, closeOrigBeforeCancel bool) preflightreceipt.SealStatus {
++		t.Helper()
++		deliveryCtx, finishDelivery := coreusage.WithStreamDelivery(context.Background())
++		reqCtx, cancel := context.WithCancel(deliveryCtx)
++		defer cancel()
++
++		ctx, c, err := preflightreceipt.BeginReview(reqCtx, root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		execCtx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(execCtx, &http.Client{Transport: status200StreamTestRT{tlsState: tlsState, body: sse}})
++		req, _ := http.NewRequestWithContext(execCtx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses",
++			strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		// Simulate CodexExecutor draining upstream to true io.EOF and closing resp.Body BEFORE emitting response.completed.
++		if _, err := io.ReadAll(resp.Body); err != nil {
++			t.Fatal(err)
++		}
++		if err := resp.Body.Close(); err != nil {
++			t.Fatal(err)
++		}
++		if !c.UpstreamEOF() {
++			t.Fatalf("expected UpstreamEOF() == true after clean EOF body close")
++		}
++
++		orig := make(chan executor.StreamChunk, 2)
++		orig <- executor.StreamChunk{Payload: []byte(sse)}
++		if trailingChunk != "" {
++			orig <- executor.StreamChunk{Payload: []byte(trailingChunk)}
++		}
++		if closeOrigBeforeCancel {
++			close(orig)
++		}
++		out := wrapPreflightStream(execCtx, lease, orig)
++		if _, ok := <-out; !ok {
++			t.Fatalf("expected response.completed chunk")
++		}
++		// Simulate ChunkDone() cancelling cliCtx immediately upon receiving response.completed.
++		finishDelivery(deliveryErr)
++		cancel()
++		if !closeOrigBeforeCancel {
++			close(orig)
++		}
++		for range out {
++		}
++		c.Complete(deliveryErr == nil)
++		c.HandlerDone(true)
++		return preflightreceipt.SealReview(root, launch, session)
++	}
++
++	// 1. Clean ChunkDone() cancel while orig closes right after -> MUST seal cleanly.
++	if st := runCase(t, "review-88881111-2222-4333-8444-999999999911", "019d0000-0000-7000-8000-999999999911", nil, "", false); st != preflightreceipt.SealOK {
++		t.Fatalf("post-EOF ChunkDone cancel (orig closes after cancel) = %v, want SealOK", st)
++	}
++	// 2. Clean ChunkDone() cancel when orig already closed -> MUST seal cleanly.
++	if st := runCase(t, "review-88881111-2222-4333-8444-999999999912", "019d0000-0000-7000-8000-999999999912", nil, "", true); st != preflightreceipt.SealOK {
++		t.Fatalf("post-EOF ChunkDone cancel (orig already closed) = %v, want SealOK", st)
++	}
++	// 3. Downstream write/cancel failure (deliveryErr != nil) -> MUST reject.
++	if st := runCase(t, "review-88881111-2222-4333-8444-999999999913", "019d0000-0000-7000-8000-999999999913", context.Canceled, "", false); st != preflightreceipt.SealRejected {
++		t.Fatalf("post-EOF failed delivery cancel = %v, want SealRejected", st)
++	}
++	// 4. Trailing error frame queued on original -> drain observes and taints -> MUST reject.
++	if st := runCase(t, "review-88881111-2222-4333-8444-999999999914", "019d0000-0000-7000-8000-999999999914", nil, `data: {"type":"error"}`+"\n\n", false); st != preflightreceipt.SealRejected {
++		t.Fatalf("post-EOF trailing error chunk = %v, want SealRejected", st)
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
@@ -2859,10 +3015,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..0f12aab 100644
+index e69de29..281ffef 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1575 @@
+@@ -0,0 +1,1684 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3031,6 +3187,7 @@ index e69de29..0f12aab 100644
 +	review                                      *reviewEntry
 +	reviewReleased                              bool
 +	observedCompleted                           bool
++	upstreamEOF                                 bool
 +	modelMismatch                               bool
 +	lastResponseIDSHA                           string
 +	lastOutputSHA                               string
@@ -3067,6 +3224,33 @@ index e69de29..0f12aab 100644
 +	return c != nil && c.strictCodex
 +}
 +
++func (c *Collector) MarkUpstreamEOF() {
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	c.upstreamEOF = true
++	c.mu.Unlock()
++}
++
++func (c *Collector) UpstreamEOF() bool {
++	if c == nil {
++		return false
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return c.upstreamEOF
++}
++
++func (c *Collector) ObservedCompleted() bool {
++	if c == nil {
++		return false
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return c.observedCompleted
++}
++
 +// Begin binds the inbound nonce. Disk reservation waits for authenticated execution.
 +// The directory must be private to the proxy, outside the credential/state volume.
 +func Begin(ctx context.Context, root, session string) (context.Context, *Collector, error) {
@@ -3101,13 +3285,57 @@ index e69de29..0f12aab 100644
 +	return s == "" || isSHA256Hex(s)
 +}
 +
++type responseOutputContentPart struct {
++	Type string `json:"type"`
++	Text string `json:"text"`
++}
++
++type rawResponseOutputItem struct {
++	Type    string          `json:"type"`
++	Role    string          `json:"role"`
++	Content json.RawMessage `json:"content"`
++}
++
 +type responseOutputItem struct {
-+	Type    string `json:"type"`
-+	Role    string `json:"role"`
-+	Content []struct {
-+		Type string `json:"type"`
-+		Text string `json:"text"`
-+	} `json:"content"`
++	Type    string                      `json:"type"`
++	Role    string                      `json:"role"`
++	Content []responseOutputContentPart `json:"content"`
++}
++
++func decodeAssistantContentParts(raw json.RawMessage) ([]responseOutputContentPart, bool) {
++	trimmed := bytes.TrimSpace(raw)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
++		return nil, true
++	}
++	var parts []responseOutputContentPart
++	if err := json.Unmarshal(trimmed, &parts); err != nil {
++		return nil, false
++	}
++	return parts, true
++}
++
++func decodeResponseOutputItems(raw json.RawMessage) ([]responseOutputItem, bool) {
++	trimmed := bytes.TrimSpace(raw)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
++		return nil, true
++	}
++	var rawItems []rawResponseOutputItem
++	if err := json.Unmarshal(trimmed, &rawItems); err != nil {
++		return nil, false
++	}
++	items := make([]responseOutputItem, 0, len(rawItems))
++	for _, ri := range rawItems {
++		item := responseOutputItem{Type: ri.Type, Role: ri.Role}
++		if ri.Type == "message" && ri.Role == "assistant" {
++			parts, ok := decodeAssistantContentParts(ri.Content)
++			if !ok {
++				return nil, false
++			}
++			item.Content = parts
++		}
++		items = append(items, item)
++	}
++	return items, true
 +}
 +
 +func extractAssistantOutputText(items []responseOutputItem) string {
@@ -3174,6 +3402,16 @@ index e69de29..0f12aab 100644
 +	c.mu.Unlock()
 +}
 +
++func (c *Collector) taintStreamAnomaly() {
++	c.mu.Lock()
++	c.modelMismatch = true
++	c.invalid = true
++	c.lastItemOutputSHA = ""
++	c.lastItemResponseID = ""
++	c.mu.Unlock()
++	c.Taint()
++}
++
 +// ObserveStreamChunk records SHA-256 hashes of the upstream response ID and final assistant output text
 +// and verifies the upstream response.model matches the bound review model without persisting any free text.
 +func (c *Collector) ObserveStreamChunk(payload []byte) {
@@ -3182,49 +3420,60 @@ index e69de29..0f12aab 100644
 +	}
 +	for _, rawLine := range bytes.Split(payload, []byte{'\n'}) {
 +		line := bytes.TrimSpace(rawLine)
-+		if len(line) == 0 {
++		if len(line) == 0 || line[0] == ':' {
 +			continue
 +		}
++		if bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) {
++			continue
++		}
++		isDataLine := false
 +		if bytes.HasPrefix(line, []byte("data:")) {
++			isDataLine = true
 +			line = bytes.TrimSpace(line[5:])
 +		}
-+		if len(line) == 0 || line[0] != '{' {
++		if len(line) == 0 || bytes.Equal(line, []byte("[DONE]")) {
 +			continue
 +		}
++		if !isDataLine && line[0] != '{' {
++			continue
++		}
++		// Two-stage json.RawMessage decode: error detection runs before optional item/output
++		// decoding, non-assistant items never break unmarshaling, and malformed data frames fail closed.
 +		var ev struct {
-+			Type       string               `json:"type"`
-+			Object     string               `json:"object"`
-+			ID         string               `json:"id"`
-+			ResponseID string               `json:"response_id"`
-+			Model      string               `json:"model"`
-+			Status     string               `json:"status"`
-+			Error      json.RawMessage      `json:"error"`
-+			Output     []responseOutputItem `json:"output"`
-+			Item       responseOutputItem   `json:"item"`
-+			Response   struct {
-+				ID     string               `json:"id"`
-+				Model  string               `json:"model"`
-+				Status string               `json:"status"`
-+				Error  json.RawMessage      `json:"error"`
-+				Output []responseOutputItem `json:"output"`
-+			} `json:"response"`
++			Type       string          `json:"type"`
++			ResponseID string          `json:"response_id"`
++			Error      json.RawMessage `json:"error"`
++			Item       json.RawMessage `json:"item"`
++			Response   json.RawMessage `json:"response"`
 +		}
 +		if err := json.Unmarshal(line, &ev); err != nil {
++			c.taintStreamAnomaly()
 +			continue
 +		}
-+		if hasResponseError(ev.Error) || hasResponseError(ev.Response.Error) {
-+			c.mu.Lock()
-+			c.modelMismatch = true
-+			c.invalid = true
-+			c.lastItemOutputSHA = ""
-+			c.lastItemResponseID = ""
-+			c.mu.Unlock()
-+			c.Taint()
++		if hasResponseError(ev.Error) {
++			c.taintStreamAnomaly()
 +			continue
++		}
++		var resp struct {
++			ID     string          `json:"id"`
++			Model  string          `json:"model"`
++			Status string          `json:"status"`
++			Error  json.RawMessage `json:"error"`
++			Output json.RawMessage `json:"output"`
++		}
++		if hasResponseError(ev.Response) {
++			if err := json.Unmarshal(ev.Response, &resp); err != nil {
++				c.taintStreamAnomaly()
++				continue
++			}
++			if hasResponseError(resp.Error) {
++				c.taintStreamAnomaly()
++				continue
++			}
 +		}
 +		switch ev.Type {
 +		case "response.created", "response.in_progress":
-+			if rid := strings.TrimSpace(ev.Response.ID); rid != "" {
++			if rid := strings.TrimSpace(resp.ID); rid != "" {
 +				c.mu.Lock()
 +				if c.streamResponseID != "" && c.streamResponseID != rid {
 +					c.lastItemOutputSHA = ""
@@ -3234,40 +3483,51 @@ index e69de29..0f12aab 100644
 +				c.mu.Unlock()
 +			}
 +		case "response.output_item.done":
-+			if ev.Item.Type == "message" && ev.Item.Role == "assistant" {
-+				var b strings.Builder
-+				for _, part := range ev.Item.Content {
-+					if part.Type == "" || part.Type == "output_text" {
-+						b.WriteString(part.Text)
-+					}
++			if hasResponseError(ev.Item) {
++				var rawItem rawResponseOutputItem
++				if err := json.Unmarshal(ev.Item, &rawItem); err != nil {
++					c.taintStreamAnomaly()
++					continue
 +				}
-+				if b.Len() > 0 {
-+					h := sha256Hex(b.String())
-+					rid := strings.TrimSpace(ev.ResponseID)
-+					if rid == "" {
-+						rid = strings.TrimSpace(ev.Response.ID)
++				if rawItem.Type == "message" && rawItem.Role == "assistant" {
++					parts, ok := decodeAssistantContentParts(rawItem.Content)
++					if !ok {
++						c.taintStreamAnomaly()
++						continue
 +					}
-+					c.mu.Lock()
-+					if rid == "" {
-+						rid = c.streamResponseID
++					var b strings.Builder
++					for _, part := range parts {
++						if part.Type == "" || part.Type == "output_text" {
++							b.WriteString(part.Text)
++						}
 +					}
-+					if rid != "" {
-+						c.lastItemOutputSHA = h
-+						c.lastItemResponseID = rid
++					if b.Len() > 0 {
++						h := sha256Hex(b.String())
++						rid := strings.TrimSpace(ev.ResponseID)
++						if rid == "" {
++							rid = strings.TrimSpace(resp.ID)
++						}
++						c.mu.Lock()
++						if rid == "" {
++							rid = c.streamResponseID
++						}
++						if rid != "" {
++							c.lastItemOutputSHA = h
++							c.lastItemResponseID = rid
++						}
++						c.mu.Unlock()
 +					}
-+					c.mu.Unlock()
 +				}
 +			}
 +		case "response.completed":
-+			c.recordCompletedResponse(ev.Response.ID, ev.Response.Model, ev.Response.Status, ev.Response.Error, ev.Response.Output)
++			output, ok := decodeResponseOutputItems(resp.Output)
++			if !ok {
++				c.taintStreamAnomaly()
++				continue
++			}
++			c.recordCompletedResponse(resp.ID, resp.Model, resp.Status, resp.Error, output)
 +		case "response.done":
-+			c.mu.Lock()
-+			c.modelMismatch = true
-+			c.invalid = true
-+			c.lastItemOutputSHA = ""
-+			c.lastItemResponseID = ""
-+			c.mu.Unlock()
-+			c.Taint()
++			c.taintStreamAnomaly()
 +		case "response.failed", "response.incomplete", "error":
 +			c.mu.Lock()
 +			c.invalid = true
@@ -3877,6 +4137,7 @@ index e69de29..0f12aab 100644
 +	}
 +	c.active++
 +	c.executions++
++	c.upstreamEOF = false
 +	c.streamResponseID = ""
 +	c.lastItemResponseID = ""
 +	c.lastItemOutputSHA = ""
@@ -4212,6 +4473,7 @@ index e69de29..0f12aab 100644
 +			ReadCloser: resp.Body,
 +			finish:     finish,
 +			reject:     c.Reject,
++			markEOF:    c.MarkUpstreamEOF,
 +			requireEOF: strict && resp.StatusCode >= 200 && resp.StatusCode < 300,
 +			ctx:        req.Context(),
 +		}
@@ -4224,6 +4486,7 @@ index e69de29..0f12aab 100644
 +	once       sync.Once
 +	finish     func()
 +	reject     func()
++	markEOF    func()
 +	requireEOF bool
 +	ctx        context.Context
 +	sawEOF     atomic.Bool
@@ -4250,6 +4513,8 @@ index e69de29..0f12aab 100644
 +	err := b.ReadCloser.Close()
 +	if err != nil || (b.requireEOF && (b.readErr.Load() || !b.sawEOF.Load())) {
 +		b.reject()
++	} else if b.requireEOF && b.markEOF != nil {
++		b.markEOF()
 +	}
 +	b.once.Do(b.finish)
 +	return err
@@ -4439,10 +4704,10 @@ index e69de29..0f12aab 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..c5c3290 100644
+index e69de29..50baebb 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1725 @@
+@@ -0,0 +1,1793 @@
 +package preflightreceipt
 +
 +import (
@@ -6166,5 +6431,73 @@ index e69de29..c5c3290 100644
 +				t.Fatalf("SealReview accepted launch after post-completed %s: %v", tc.name, st)
 +			}
 +		})
++	}
++}
++
++func TestReviewReceiptMalformedOrTypeMismatchedEventCannotProduceCleanReceipt(t *testing.T) {
++	// Astra P1 (R22): malformed JSON data lines or frames with non-null error + type-mismatched
++	// sibling fields MUST NOT be silently skipped by ObserveStreamChunk; they must invalidate and taint.
++	// Meanwhile, legitimate OpenAI Responses non-message items (e.g. reasoning/function_call without
++	// array content) must continue to pass cleanly.
++	root := filepath.Join(t.TempDir(), "receipts")
++
++	runTurn := func(t *testing.T, launch, session string, chunks []string) (SealStatus, ReviewReceipt) {
++		t.Helper()
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, ch := range chunks {
++			c.ObserveStreamChunk([]byte(ch))
++		}
++		_ = resp.Body.Close()
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReview(root, launch, session), readReviewReceiptFile(t, root, launch)
++	}
++
++	// 1. Frame with non-null error AND type-mismatched sibling field (item is string, not object),
++	// followed by a clean response.completed -> MUST taint and reject.
++	st1, r1 := runTurn(t, "review-eeee1111-2222-4333-8444-555555555931", "019d0000-0000-7000-8000-000000000931", []string{
++		`data: {"type":"error","error":{"message":"boom"},"item":"unexpected-string"}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_m1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	})
++	if st1 != SealRejected || !r1.Tainted {
++		t.Fatalf("error + type-mismatched sibling failed to taint: st=%v r=%+v", st1, r1)
++	}
++
++	// 2. Truncated/corrupt JSON data frame -> MUST taint and reject even if response.completed follows.
++	st2, r2 := runTurn(t, "review-eeee1111-2222-4333-8444-555555555932", "019d0000-0000-7000-8000-000000000932", []string{
++		`data: {"type":"error","message":` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_m2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	})
++	if st2 != SealRejected || !r2.Tainted {
++		t.Fatalf("malformed JSON data line failed to taint: st=%v r=%+v", st2, r2)
++	}
++
++	// 3. Legitimate SSE comments, event headers, [DONE], and non-message items (reasoning/function_call)
++	// with non-array content shapes MUST continue to seal cleanly.
++	st3, r3 := runTurn(t, "review-eeee1111-2222-4333-8444-555555555933", "019d0000-0000-7000-8000-000000000933", []string{
++		": keep-alive\n\nevent: response.created\n" + `data: {"type":"response.created","response":{"id":"resp_m3"}}` + "\n\n",
++		`data: {"type":"response.output_item.done","item":{"type":"reasoning","summary":[],"content":"raw-encrypted"}}` + "\n\n",
++		`data: {"type":"response.output_item.done","item":{"type":"function_call","name":"shell","arguments":"{}"}}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_m3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"reasoning","content":"x"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"verified"}]}]}}` + "\n\n",
++		"data: [DONE]\n\n",
++	})
++	if st3 != SealOK || r3.Tainted || !r3.Complete || r3.LastOutputSHA256 != sha256Hex("verified") {
++		t.Fatalf("legitimate non-message items / SSE framing rejected: st=%v r=%+v", st3, r3)
 +	}
 +}

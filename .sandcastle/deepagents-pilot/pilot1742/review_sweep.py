@@ -74,12 +74,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from .delivery import EffectPending
 from .external_review import (
     DEFAULT_IDENTITY,
     IDENTITY_CONFIG,
     MODELS,
     POLICY,
+    PREFLIGHT_ADMITTED_FILE,
     PREFLIGHT_RATE_LIMIT_FILE,
+    QUOTA_PAUSED_FILE,
     REVIEW_CONTRACT,
     STATE_ROOT,
     ExternalReview,
@@ -471,17 +474,29 @@ class Sweep:
         target = row["target"]
         return target.get("policy_version") == POLICY and target.get("review_contract") == REVIEW_CONTRACT
 
-    def _pre_dispatch_reuse_fallback(self, row: dict) -> bool:
-        """沿用登记后在预检放行、发 pending 与建工蜂目录前即被拦下：尚未开始审查，按 launch-backoff 重试而不消耗唯一续跑机会。"""
-        if row.get("outcome") or not row["target"].get("reuse_planned"):
-            return False
+    def _run_folder(self, row: dict) -> Path:
         target = row["target"]
         key = (f"r{target['repository_id']}-p{target['pr_number']}-{target['base_sha']}"
                f"-{target['head_sha']}-{target['policy_version']}-a{target['attempt']}")
-        folder = self.lane.state_root / "runs" / key
-        if (folder / "preflight-admitted.json").exists() or (folder / "effects" / "status-pending.json").exists():
+        return self.lane.state_root / "runs" / key
+
+    def _needs_model_dispatch(self, row: dict | None) -> bool:
+        if row is None:
+            return True
+        folder = self._run_folder(row)
+        return any(not (folder / model / "launch.json").exists() for model in MODELS)
+
+    def _pre_dispatch_reuse_fallback(self, row: dict) -> bool:
+        """在发 pending 与建工蜂目录前即被拦下（沿用退回尚未过预检，或预检记账后触发 quota-paused）：
+        尚未开始审查，按 launch-backoff 重试而不消耗唯一续跑机会。"""
+        if row.get("outcome"):
             return False
-        return not any((folder / model).exists() for model in MODELS)
+        folder = self._run_folder(row)
+        if (folder / "effects" / "status-pending.json").exists() or any((folder / model).exists() for model in MODELS):
+            return False
+        if (folder / QUOTA_PAUSED_FILE).exists():
+            return True
+        return bool(row["target"].get("reuse_planned")) and not (folder / PREFLIGHT_ADMITTED_FILE).exists()
 
     def _launch_with_backoff(self, number: int, head: str, base: str, attempt: int) -> tuple[str, dict | None]:
         marker = self.folder / f"p{number}-{head}-{base}-a{attempt}.launched"
@@ -577,12 +592,31 @@ class Sweep:
         if sync_err is not None:
             return sync_err
         current = [r for r in runs if r["target"].get("base_sha") == base]
+        pr_target_data = {
+            "repository_id": pr["base"]["repo"]["id"], "pr_number": number,
+            "base_repository_id": pr["base"]["repo"]["id"], "base_ref": pr["base"]["ref"],
+            "base_sha": base, "head_repository_id": pr["head"]["repo"]["id"],
+            "head_ref": pr["head"]["ref"], "head_sha": head,
+        }
         if latest is not None and not latest["outcome"] and latest["target"].get("base_sha") == base:  # 最新登记的未完结 attempt
             if not self._resumable(latest):
                 return "needs-operator", None
-            if self._pre_dispatch_reuse_fallback(latest):  # 沿用退回、尚未发 pending/建工蜂目录：走 launch-backoff，不耗尽唯一续跑机会
+            if (self._needs_model_dispatch(latest)
+                    and not (latest["target"].get("reuse_planned")
+                             and not (self._run_folder(latest) / PREFLIGHT_ADMITTED_FILE).exists()
+                             and self.lane.would_reuse(pr_target_data))):
+                try:
+                    self.lane.admit_quota()
+                except EffectPending as error:
+                    return "quota-paused", {"reason": str(error)}
+            if self._pre_dispatch_reuse_fallback(latest):  # 尚未发 pending/建工蜂目录：走 launch-backoff，不耗尽唯一续跑机会
                 return self._launch_with_backoff(number, head, base, latest["target"]["attempt"])
             return self._resume_once(number, head, base, latest["target"]["attempt"], "review")
+        if not self.lane.would_reuse(pr_target_data):
+            try:
+                self.lane.admit_quota()
+            except EffectPending as error:
+                return "quota-paused", {"reason": str(error)}
         attempt = max((r["target"]["attempt"] for r in current), default=0) + 1
         # 子进程在登记前就退出（读 PR 失败、App 身份未就绪、controller 不干净）时同一 attempt 会原样再派；
         # 退避一段时间，免得每轮都派一个必死的子进程。

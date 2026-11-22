@@ -66,6 +66,7 @@ PREFLIGHT_LOG_READER = Path(__file__).resolve().parents[1] / "_review_preflight_
 PREFLIGHT_RATE_LIMIT_FILE = "preflight-rate-limits.json"
 PREFLIGHT_USAGE_FILE = "preflight-usage.jsonl"
 PREFLIGHT_ADMITTED_FILE = "preflight-admitted.json"
+QUOTA_PAUSED_FILE = "quota-paused.json"
 SESSION_RECEIPT_TIMEOUT_SECONDS = 5.0
 PREFLIGHT_ENV_CONTAINER = "REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER"
 PREFLIGHT_ENV_CONTAINER_DIR = "REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR"
@@ -406,12 +407,20 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             expected_image = _read_preflight_admitted(folder.parent, target)
         except IdentityError as error:
             return failed(str(error))
-    frozen_image = expected_image or launch.get("image_id")
-    if frozen_image:
-        if expected_image and launch.get("image_id") != expected_image:
+    if target.policy_version == POLICY:
+        if not isinstance(expected_image, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", expected_image):
+            return failed("当前审查合同缺少预检准入冻结的镜像 Id")
+        if launch.get("image_id") != expected_image:
             return failed("launch 镜像 Id 与预检准入冻结值不符")
-        if receipt.get("image_id") != frozen_image:
+        if receipt.get("image_id") != expected_image:
             return failed("监督回执镜像 Id 与预检准入冻结值不符")
+    else:
+        frozen_image = expected_image or launch.get("image_id")
+        if frozen_image:
+            if expected_image and launch.get("image_id") != expected_image:
+                return failed("launch 镜像 Id 与预检准入冻结值不符")
+            if receipt.get("image_id") != frozen_image:
+                return failed("监督回执镜像 Id 与预检准入冻结值不符")
     if (receipt.get("status") != "completed" or receipt.get("mode") != "review"
             or receipt.get("sandbox") != "docker-read-only" or receipt.get("exit_code") != 0
             or not receipt.get("turn_completed") or not re.fullmatch(r"sha256:[a-f0-9]{64}", receipt.get("image_id", ""))
@@ -1254,14 +1263,21 @@ class ExternalReview:
                 sent += 1
         return sent
 
+    @staticmethod
+    def _daily_cap_enabled() -> bool:
+        return bool(os.environ.get(DAILY_INPUT_CAP_ENV, "").strip())
+
     def _record_preflight_usage(self, probes: int) -> None:
-        """把预检发出的上游探针折算 token 追加写入 state_root/preflight-usage.jsonl，纳入每日额度闸。"""
+        """把预检发出的上游探针折算 token 追加写入 state_root/preflight-usage.jsonl，纳入每日额度闸。
+        启用每日额度闸时，账本类型/权限不符或持久化失败按 quota-unverifiable 失败闭合，绝不静默丢弃。"""
         if probes <= 0:
             return
-        self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        usage_path = self.state_root / PREFLIGHT_USAGE_FILE
-        lock_fd = os.open(self.state_root / "preflight-usage.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        strict = self._daily_cap_enabled()
+        lock_fd = -1
         try:
+            self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            usage_path = self.state_root / PREFLIGHT_USAGE_FILE
+            lock_fd = os.open(self.state_root / "preflight-usage.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             now = time.time()
             row = json.dumps({"at": now, "probes": probes, "tokens": probes * PREFLIGHT_TOKENS_PER_PROBE}) + "\n"
@@ -1269,6 +1285,8 @@ class ExternalReview:
             try:
                 st = os.fstat(fd)
                 if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077):
+                    if strict:
+                        raise EffectPending("quota-unverifiable：预检用量账本类型、属主或权限不符，暂停派发以防绕过每日额度闸")
                     return
                 os.write(fd, row.encode("utf-8"))
                 size = st.st_size + len(row)
@@ -1302,10 +1320,14 @@ class ExternalReview:
                     os.replace(tmp, usage_path)
                 except OSError:
                     pass
-        except OSError:
-            pass
+        except OSError as error:
+            if strict:
+                raise EffectPending(
+                    f"quota-unverifiable：无法持久化预检用量账本（{type(error).__name__}），暂停派发以防绕过每日额度闸"
+                ) from None
         finally:
-            os.close(lock_fd)
+            if lock_fd >= 0:
+                os.close(lock_fd)
 
     def admit_preflight(self, target: ReviewTarget, *, pre_dispatch: bool = False) -> dict:
         """新 attempt 登记与沿用退回共用的启动前预检闸：任一路由或模型证明失败即拒，不发状态。"""
@@ -1609,10 +1631,11 @@ class ExternalReview:
         finally:
             os.close(fd)
 
-    def recent_input_tokens(self, window_seconds: int = 86400) -> int:
+    def recent_input_tokens(self, window_seconds: int = 86400, *, strict_preflight: bool = False) -> int:
         """近 window 内结束的 reviewer 回执里记下的输入 token 合计（worker 写入 receipt.usage）。读不了的回执跳过；
         没有 usage 字段的旧回执（本闸上线前）记 0。用量未报的（usage.reported 为 false：被关停的独审）按命令数估算，
-        不记 0——额度闸最要拦的正是这类失控的独审。"""
+        不记 0——额度闸最要拦的正是这类失控的独审。strict_preflight=True 时（由 admit_quota 传入），
+        预检用量账本缺失记 0，但不可读/权限不符/符号链接/超限/损坏一律以 quota-unverifiable 失败闭合。"""
         cutoff = time.time() - window_seconds
         reported, unreported_commands, reported_commands = 0, 0, 0
         for path in (self.state_root / "runs").glob("*/*/receipt.json"):
@@ -1633,31 +1656,51 @@ class ExternalReview:
         rate = reported // reported_commands if reported_commands else UNREPORTED_TOKENS_PER_COMMAND
         preflight_tokens = 0
         usage_path = self.state_root / PREFLIGHT_USAGE_FILE
+
+        def _unverifiable(reason: str) -> None:
+            if strict_preflight:
+                raise EffectPending(f"quota-unverifiable：预检用量账本{reason}，暂停派发以防绕过每日额度闸")
+
+        rfd = -1
         try:
             rfd = os.open(usage_path, os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError:
+        except FileNotFoundError:
+            rfd = -1
+        except OSError as error:
+            _unverifiable(f"不可读或为符号链接（{type(error).__name__}）")
             rfd = -1
         if rfd >= 0:
             try:
                 st = os.fstat(rfd)
-                if (stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid()
-                        and not (st.st_mode & 0o077) and st.st_size <= 2_097_152):
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077):
+                    _unverifiable("类型、属主或权限不符")
+                elif st.st_size > 2_097_152:
+                    _unverifiable("体积超限")
+                else:
                     with os.fdopen(rfd, "r", encoding="utf-8", errors="replace") as handle:
                         rfd = -1
-                        for line in handle:
+                        for raw_line in handle:
+                            line = raw_line.strip()
+                            if not line:
+                                continue
                             try:
                                 item = json.loads(line)
                             except ValueError:
+                                _unverifiable("存在损坏 JSON 行")
                                 continue
                             if not isinstance(item, dict):
+                                _unverifiable("记录格式无效")
                                 continue
                             at = item.get("at")
                             tokens = item.get("tokens")
-                            if (isinstance(at, (int, float)) and at >= cutoff
-                                    and type(tokens) is int and tokens > 0):
+                            if (not isinstance(at, (int, float)) or isinstance(at, bool)
+                                    or type(tokens) is not int or tokens <= 0):
+                                _unverifiable("记录字段无效")
+                                continue
+                            if at >= cutoff:
                                 preflight_tokens += tokens
-            except OSError:
-                pass
+            except OSError as error:
+                _unverifiable(f"读取失败（{type(error).__name__}）")
             finally:
                 if rfd >= 0:
                     os.close(rfd)
@@ -1675,7 +1718,7 @@ class ExternalReview:
             cap = 0
         if cap <= 0:
             raise ValueError(f"{DAILY_INPUT_CAP_ENV} 必须是正整数 token 数（如 400000000），当前值无效；未派模型")
-        used = self.recent_input_tokens()
+        used = self.recent_input_tokens(strict_preflight=True)
         if used >= cap:
             raise EffectPending(f"quota-paused：近 24 小时独审输入 {used} tokens ≥ 上限 {cap}（{DAILY_INPUT_CAP_ENV}）；"
                                 "本 run 未派新模型，额度回落后用同一 attempt 重跑")
@@ -2229,11 +2272,19 @@ class ExternalReview:
                                                 "image_id": preflight_report["admitted_image_id"]})
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
                     raise Stale("同 head 已有更晚登记的 attempt，本 run 不再派发")
+                quota_marker = folder / QUOTA_PAUSED_FILE
                 if any(not (folder / model / "launch.json").exists() for model in MODELS):
                     # 本 run 还要派发新模型（全新派发，或恢复时有 reviewer 尚无 launch）就先过额度闸。
                     # 不按 worker 目录判断：目录在不等于已派发（prepare 中断时目录在、launch 不在）。
                     # 已派发的 reviewer 在自己的进程里照常跑到终态，额度回落后的重跑收养它。
-                    self.admit_quota()
+                    try:
+                        self.admit_quota()
+                    except EffectPending:
+                        if (not (folder / "effects" / "status-pending.json").exists()
+                                and not any((folder / model).exists() for model in MODELS)):
+                            _save(quota_marker, {"paused_at": time.time(), "run_id": target.run_id})
+                        raise
+                quota_marker.unlink(missing_ok=True)
                 publisher.publish("pending")
                 outcomes = self.run_reviewers(target, folder)
                 if self._dispatched_unfinished(folder):  # 不变量：已派发 reviewer 全部到终态才汇总
