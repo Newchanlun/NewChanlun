@@ -1597,6 +1597,68 @@ route = _choose()
 `, dispatch.replace("f.route(events)", "f.route([13])"), basic, false);
 });
 
+test("R21/#1319：精确透传调用点、结果变换与位置专用实参", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const wire = "from . import at18_fixture_feed as f\n";
+  const registered = (expr: string, expected: string) => `import asyncio
+from trading_system import at18_fixture_feed as f
+async def take(iterator): return await anext(iterator)
+def test_route(): assert ${expr} == ${expected}
+`;
+  const support = "def order(events): return sorted(events)\nasync def order_async(events): return sorted(events)\n" +
+    "def order_stream(events): yield sorted(events)\nasync def order_async_stream(events): yield sorted(events)\n";
+  const dispatch = wire + "def dispatch(events): return f.route(events)\n";
+  const check = async (name: string, impl: string, prod: string, test: string, expected: boolean) => {
+    await t.test(name, () => {
+      const repo = feedSource({ [entry]: impl, [integration]: prod, [path]: test, "trading_system/support.py": support });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  const log = "from . import support\nlog = []\ndef _record(*values): log.append(values)\n";
+  for (const [name, relay, body, foreign, expr] of [
+    ["前置同步", "_record(); return fn(*args, **kwargs)", "def leaf(events): return sorted(events)", "order", "CALL"],
+    ["同行后置同步", "out = fn(*args, **kwargs); _record(out); return out", "def leaf(events): return sorted(events)", "order", "CALL"],
+    ["finally 协程", "try: return fn(*args, **kwargs)\n        finally: _record()", "async def leaf(events): return sorted(events)", "order_async", "asyncio.run(CALL)"],
+    ["嵌套 await", "_record(); return await fn(*args, **kwargs)", "async def leaf(events): return sorted(events)", "order_async", "asyncio.run(CALL)"],
+    ["yield 单项结果", "_record(); yield fn(*args, **kwargs)", "def leaf(events): return sorted(events)", "order", "next(CALL)"],
+    ["yield from", "_record(); yield from fn(*args, **kwargs)", "def leaf(events): yield sorted(events)", "order_stream", "next(CALL)"],
+    ["for 原样产出", "for out in fn(*args, **kwargs): _record(out); yield out", "def leaf(events): yield sorted(events)", "order_stream", "next(CALL)"],
+    ["async for 原样产出", "async for out in fn(*args, **kwargs): _record(out); yield out", "async def leaf(events): yield sorted(events)", "order_async_stream", "asyncio.run(take(CALL))"],
+  ] as const) {
+    const prefix = relay.includes("await") || relay.startsWith("async for") ? "async " : "";
+    const wrap = log + `def wrap(fn):
+    ${prefix}def relay(*args, **kwargs):
+        ${relay}
+    return relay
+__all__ = ('route',)
+`;
+    const alias = (fn: string) => "\nroute = " + (name === "嵌套 await" ? `wrap(wrap(${fn}))` : `wrap(${fn})`) + "\n";
+    const selection = expr.replace("CALL", "f.route([21, 13])");
+    await check(name + "：记录不替外来实现作证", wrap + alias(`support.${foreign}`), dispatch,
+      registered(selection, "[13, 21]"), false);
+    await check(name + "：本地实现仍计入", wrap + body + alias("leaf"), dispatch,
+      registered(selection, "[13, 21]"), true);
+  }
+  await check("记录不替空桩作证", log + `def leaf(events): pass
+def route(*args, **kwargs):
+    _record(); out = leaf(*args, **kwargs); _record(); return out
+`, dispatch, registered("f.route([21, 13])", "None"), false);
+  await check("星号调用外部排序后本地过滤", log + `def route(*args, **kwargs):
+    raw = support.order(*args, **kwargs)
+    return [value for value in raw if value > 0]
+`, dispatch, registered("f.route([-4, 21, 13])", "[13, 21]"), true);
+  const wrap = "def wrap(fn):\n    def relay(*args, **kwargs): return fn(*args, **kwargs)\n    return relay\n";
+  for (const layers of [1, 2]) {
+    const decorated = "@wrap\n".repeat(layers);
+    const route = wrap + decorated + "def route(events, /, *, reverse): return sorted(events, reverse=reverse)\n";
+    const prod = wire + wrap + decorated + "def dispatch(events, /, *, reverse): return f.route(events, reverse=reverse)\n";
+    await check(`${layers} 层：位置专用列表与关键字专用开关`, route, prod,
+      registered("f.route([21, 13], reverse=False)", "[13, 21]"), true);
+  }
+});
+
 test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
   const f = makeFixture({ feedIntegration: `from .at18_fixture_feed import route
 def select_feed(sources, events):

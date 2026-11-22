@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import sys
+from collections import namedtuple
 from contextvars import ContextVar
 from pathlib import Path
 from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType, MethodType
@@ -196,6 +197,10 @@ class Binding:
         self.function = underlying(member)
         self.wrapper, self.variadic = wrapper, variadic
 
+    @property
+    def has_receiver(self):
+        return type(self.member) is MethodType or self.owner is not None and type(self.member) is not staticmethod
+
     def matches_receiver(self, receiver):
         kind = type(self.member)
         if kind is MethodType:
@@ -219,11 +224,25 @@ class Binding:
         if instances[key] is not None:
             return self.member.__get__(instances[key], self.owner)
 
-    def arguments(self, fn, samples):
+    def arguments(self, fn, named, shapes):
         signature = self.signature
         if type(fn) is MethodType:
             signature = MethodType(signature, fn.__self__)
-        return arguments(signature, samples, self.variadic)
+        fallback = arguments(signature, named, self.variadic)
+        choices = []
+        params = inspect.signature(signature, follow_wrapped=False)
+        if self.variadic:
+            for args, kwargs in shapes:
+                try:
+                    params.bind(*args, **kwargs)
+                except TypeError:
+                    continue
+                if (args, kwargs) not in choices:
+                    choices.append((tuple(sample(v) for v in args), {k: sample(v) for k, v in kwargs.items()}))
+        args, kwargs = fallback
+        if (tuple(args), kwargs) not in choices:
+            choices.append((tuple(args), kwargs))
+        return choices
 
 
 builtin_callables = {id(obj) for obj in vars(builtins).values() if callable(obj)}
@@ -236,11 +255,32 @@ def scope_nodes(node):
             yield from scope_nodes(child)
 
 
+def span(node):
+    return node.lineno, node.end_lineno, node.col_offset, node.end_col_offset
+
+
+ForwardSite = namedtuple("ForwardSite", "call consumes schedules spreads capture")
+ForwardPlan = namedtuple("ForwardPlan", "sites exits all_exits discarded")
+NO_FORWARDING = ForwardPlan((), (), False, False)
+
+
 def forwarding(node):
-    """识别本函数内原样透传参数的调用；不递归猜测捕获对象的内容。"""
+    """先从实际返回/产出值反查调用，不把同一函数体中的其它调用算入透传。"""
     params = node.args
+    names = {p.arg for p in (*params.posonlyargs, *params.args, *params.kwonlyargs)}
     vararg = params.vararg and params.vararg.arg
     kwarg = params.kwarg and params.kwarg.arg
+    scope = tuple(scope_nodes(node))
+    stores, assigned, iterations = {}, {}, {}
+    for stmt in scope:
+        if isinstance(stmt, ast.Name) and isinstance(stmt.ctx, (ast.Store, ast.Del)):
+            stores[stmt.id] = stores.get(stmt.id, 0) + 1
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            for target in stmt.targets if isinstance(stmt, ast.Assign) else (stmt.target,):
+                if isinstance(target, ast.Name) and stmt.value is not None:
+                    assigned[target.id] = stmt.value
+        if isinstance(stmt, (ast.For, ast.AsyncFor)) and isinstance(stmt.target, ast.Name):
+            iterations[stmt.target.id] = stmt
 
     def spreads(call):
         return (any(isinstance(a, ast.Starred) and isinstance(a.value, ast.Name) and a.value.id == vararg
@@ -248,28 +288,78 @@ def forwarding(node):
                 any(k.arg is None and isinstance(k.value, ast.Name) and k.value.id == kwarg
                     for k in call.keywords))
 
+    def origin(value, bridges=(), scheduled=()):
+        if isinstance(value, ast.Name) and stores.get(value.id) == 1 and value.id in assigned:
+            earlier = assigned[value.id]
+            if (earlier.lineno, earlier.col_offset) < (value.lineno, value.col_offset):
+                return origin(earlier, bridges, scheduled)
+        if isinstance(value, (ast.Await, ast.YieldFrom)):
+            return origin(value.value, (*bridges, span(value)), scheduled)
+        if not isinstance(value, ast.Call):
+            return None
+        callee = value.func
+        label = callee.attr if isinstance(callee, ast.Attribute) else callee.id if isinstance(callee, ast.Name) else None
+        if label in ("create_task", "ensure_future") and value.args:
+            return origin(value.args[0], bridges, (*scheduled, span(value)))
+        star = spreads(value)
+        args = [*value.args, *(k.value for k in value.keywords)]
+        if not star and not all(isinstance(a, ast.Name) and a.id in names for a in args):
+            return None
+        while isinstance(callee, (ast.Attribute, ast.Subscript)):
+            callee = callee.value
+        capture = (callee.id, callee is not value.func) if isinstance(callee, ast.Name) else None
+        return ForwardSite(span(value), bridges, scheduled, star, capture)
+
+    sites, exits, returns_ = set(), set(), 0
     if isinstance(node, ast.Lambda):
-        body = [node.body]
-        expression = node.body
+        if site := origin(node.body):
+            sites.add(site)
+            exits.add(span(node.body))
+        values = [node.body]
     else:
-        body = node.body
-        statements = [s for s in body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
-        expression = statements[0].value if len(statements) == 1 and isinstance(statements[0], ast.Return) else None
-    scope = (stmt for stmt in body if not isinstance(stmt, (*FUNCTIONS, ast.Lambda, ast.ClassDef)))
-    if any(isinstance(n, ast.Call) and spreads(n) for stmt in scope for n in (stmt, *scope_nodes(stmt))):
-        return True, None
-    if isinstance(expression, ast.Await):
-        expression = expression.value
-    if not isinstance(expression, ast.Call):
-        return False, None
-    names = {p.arg for p in (*params.posonlyargs, *params.args, *params.kwonlyargs)}
-    values = [*expression.args, *(k.value for k in expression.keywords)]
-    if not all(isinstance(a, ast.Name) and a.id in names for a in values):
-        return False, None
-    callee = expression.func
-    while isinstance(callee, (ast.Attribute, ast.Subscript)):
-        callee = callee.value
-    return False, (callee.id, callee is not expression.func) if isinstance(callee, ast.Name) else None
+        values = []
+        for stmt in scope:
+            if isinstance(stmt, ast.Return):
+                returns_ += 1
+                values.append(stmt.value)
+                if site := origin(stmt.value):
+                    sites.add(site)
+                    exits.add(span(stmt))
+            elif isinstance(stmt, ast.YieldFrom):
+                values.append(stmt)
+                if site := origin(stmt):
+                    sites.add(site)
+            elif isinstance(stmt, ast.Yield):
+                values.append(stmt.value)
+                if site := origin(stmt.value):
+                    sites.add(site)
+                elif isinstance(stmt.value, ast.Name) and stores.get(stmt.value.id) == 1:
+                    loop = iterations.get(stmt.value.id)
+                    if loop and any(stmt is n for s in loop.body for n in (s, *scope_nodes(s))):
+                        consumption = span(loop if isinstance(loop, ast.AsyncFor) else loop.iter)
+                        if site := origin(loop.iter, (consumption,)):
+                            sites.add(site)
+
+    def transformed(value, seen=()):
+        if value is None:
+            return False
+        for item in (value, *scope_nodes(value)):
+            if isinstance(item, ast.Call) and spreads(item):
+                return True
+            if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id not in seen:
+                loop = iterations.get(item.id)
+                earlier = assigned.get(item.id, loop.iter if loop else None)
+                if transformed(earlier, (*seen, item.id)):
+                    return True
+        return False
+
+    # 已丢弃的星号调用（例如未等待任务）不构成有证据的叶；若返回值
+    # 确实由调用结果变换而来，则计算发生在本地，不是透传。
+    discarded = (not any(site.spreads for site in sites) and any(isinstance(n, ast.Call) and spreads(n) for n in scope)
+                 and not any(transformed(v) for v in values))
+    # CPython 可把 try:return 的 RETURN_VALUE 标在收尾语句上。只有所有
+    # 显式返回都已关联透传时，才允许从该种实际返回转交延迟结果。
+    return ForwardPlan(sites, exits, bool(returns_ and returns_ == len(exits)), discarded)
 
 
 def captures(fn, name):
@@ -319,15 +409,23 @@ class Exports:
     def wrapper(self, fn):
         if "__wrapped__" in vars(fn):
             return True
-        spreads, callee = self.forwarding.get(fn.__code__, (False, None))
-        if spreads or callee is None:
-            return spreads
-        name, selector = callee
-        value = captures(fn, name)
-        if value is not MISSING:
-            return (selector or callable(value)) and id(value) not in builtin_callables
-        # 可调用对象的这一层 __call__ 只是中转；普通绑定方法的接收者不是闭包捕获。
-        return selector and fn.__code__.co_name == "__call__" and fn.__code__.co_varnames[:1] == (name,)
+        plan = self.forwarding.get(fn.__code__, NO_FORWARDING)
+        if plan.discarded:
+            return True
+        for site in plan.sites:
+            if site.spreads:
+                return True
+            if site.capture is None:
+                continue
+            name, selector = site.capture
+            value = captures(fn, name)
+            if value is not MISSING:
+                if (selector or callable(value)) and id(value) not in builtin_callables:
+                    return True
+            # __call__ 可只是中转；普通绑定方法的接收者不等于闭包捕获。
+            elif selector and fn.__code__.co_name == "__call__" and fn.__code__.co_varnames[:1] == (name,):
+                return True
+        return False
 
     def owns_fn(self, fn):
         return (type(fn) is FunctionType and fn.__globals__ is self.globals and
@@ -368,7 +466,7 @@ class Exports:
         signature = self.signature(fn)
         if signature is not None:
             return Binding(key, member, signature, owner, wrapper=self.wrapper(fn),
-                           variadic=self.forwarding.get(signature.__code__, (False, None))[0])
+                           variadic=bool(signature.__code__.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS)))
 
     def local_members(self, bindings):
         for export_name, value in bindings.items():
@@ -406,7 +504,7 @@ class Invocation:
     def __init__(self, call=None, parent=None, *, wrapper=False):
         self.call, self.parent = call, parent
         self.origin = parent.origin if parent is not None else self
-        self.visits = [] if wrapper else None
+        self.wrapper = wrapper
         self.returned = set()
         self.owner = current_task()
         self.joined = {}
@@ -562,7 +660,7 @@ def observe_waits():
 class Call:
     """候选 code 仅用于分流，实际计入的键必须有精确的函数和接收者。"""
     def __init__(self, frame, bindings, receiver, function=None):
-        self.frame, self.function = frame, function
+        self.frame, self.function, self.receiver = frame, function, receiver
         self.bindings = tuple(b for b in bindings if b.matches_receiver(receiver))
         self.matched = None
 
@@ -587,6 +685,16 @@ def public(scope):
     return bool(scope.call.matches())
 
 
+task_creators = {asyncio.create_task.__code__: "coro", asyncio.ensure_future.__code__: "coro_or_future"}
+
+
+class ForwardCall:
+    def __init__(self, call, task, scopes, samples, bound):
+        self.call, self.task, self.scopes = call, task, scopes
+        self.samples, self.bound = samples, bound
+        self.children = []
+
+
 class Trace:
     def __init__(self, production, targets, *, test=None, probe=None):
         self.production, self.targets = production, targets
@@ -596,6 +704,10 @@ class Trace:
         self.suspended_calls = {}
         self.scopes = {}
         self.wrappers = {}
+        self.forward_calls = {}
+        self.forward_results = {}
+        self.foreign_calls = set()
+        self.positions = {}
         self.resumed = {}
         self.activations = {}
         self.hits = []
@@ -614,12 +726,53 @@ class Trace:
         receiver, fn = self.suspended_calls[frame]
         return Call(frame, bindings, receiver, fn)
 
+    def position(self, frame):
+        code = frame.f_code
+        if code not in self.positions:
+            self.positions[code] = tuple(code.co_positions())
+        return self.positions[code][frame.f_lasti // 2] if frame.f_lasti >= 0 else None
+
+    def forwarding_parent(self, frame):
+        if not (parent := self.forward_calls.get(frame.f_back)):
+            return None
+        caller = frame.f_back
+        sites = self.targets.forwarding.get(caller.f_code, NO_FORWARDING).sites
+        if sites:
+            # 匹配字节码位置而非行号或范围相交：同一行、甚至实参中
+            # 的日志调用各有自己的位置。延迟体则从消费令牌进入。
+            position = self.position(caller)
+            if any(position == site.call or frame.f_code.co_flags & DEFERRED_FLAGS and position in site.consumes
+                   for site in sites):
+                return parent
+            if parameter := task_creators.get(frame.f_code):
+                if any(position in site.schedules for site in sites):
+                    coroutine = frame.f_locals.get(parameter)
+                    if type(coroutine) is CoroutineType and coroutine.cr_frame is not None:
+                        self.forward_results.setdefault(coroutine.cr_frame, parent)
+        return None
+
+    def forward_return(self, frame, arg):
+        # 内层已交接的同一对象保留内层归属，不能从外层直接跳过内层包装器。
+        if inherits(type(arg), native_task):
+            arg = native_task.get_coro(arg)
+        attr = DEFERRED_FRAMES.get(type(arg))
+        if not attr or (child := getattr(arg, attr)) is None or child in self.forward_results:
+            return
+        visit = self.forward_calls.get(frame)
+        plan = self.targets.forwarding.get(frame.f_code, NO_FORWARDING)
+        self.forward_results[child] = visit if visit and (plan.all_exits or self.position(frame) in plan.exits) else None
+
     def profile(self, frame, event, arg):
         code = frame.f_code
         if event == "c_call" and code in wait_result_codes and arg.__name__ == "result":
             joined(active.get(), current_task(), (arg.__self__,))
-        if event == "return" and (frame in self.activations or code is RELOAD_CODE):
+        if event == "return" and (frame in self.activations or frame in self.forward_calls
+                                  or frame in self.foreign_calls or code is RELOAD_CODE):
             normal_return = code.co_code[frame.f_lasti] in returns if frame.f_lasti >= 0 else False
+            if frame in self.forward_calls or frame in self.foreign_calls:
+                if normal_return:
+                    self.forward_return(frame, arg)
+                self.foreign_calls.discard(frame)
             if frame in self.activations:
                 token, local = self.activations.pop(frame)
                 active.reset(token)
@@ -630,7 +783,7 @@ class Trace:
                         parents.update((s.origin, s) for s in local if s is not self.test_scope)
                     elif inherits(type(arg), native_task):
                         for scope in local:
-                            if scope.origin.visits is not None:
+                            if scope.origin.wrapper:
                                 scope.origin.returned.add(arg)
             if code is RELOAD_CODE and normal_return and inspect.ismodule(arg):
                 # 按每次实际加载的精确绑定匹配；老对象不能替换新一轮的公开绑定。
@@ -663,16 +816,22 @@ class Trace:
         scopes = (*inherited, *local)
         # 生产公开入口可主动调用生产构造器；导入、重载、类体以及承接侧
         # 构造器仍是初始化。裸生产构造器也不能替登记测试形成直接证据。
-        if (scopes and self.targets.owns_frame(frame) and self.production.initialized(frame, constructors=False)
-                and self.targets.initialized(frame)):
+        parent = (self.forward_results[frame] if frame in self.forward_results
+                  else self.forwarding_parent(frame))
+        if parent and not self.targets.owns_frame(frame):
+            # 外来 Python 中间层若返回延迟对象，不让本地外层越过它认领该对象。
+            self.foreign_calls.add(frame)
+        if ((scopes or parent) and self.targets.owns_frame(frame)
+                and self.production.initialized(frame, constructors=False) and self.targets.initialized(frame)):
             bindings = self.targets.candidates(frame)
-            wrappers = [s for s in scopes if s.origin.visits is not None]
-            if bindings or wrappers:
-                call = self.call(frame, bindings)
-                task = current_task()
-                samples = self.samples(frame) if self.test else {}
-                for scope in wrappers:
-                    scope.origin.visits.append((scope, call, task, samples))
+            if bindings or parent:
+                visit = self.forward_calls.get(frame)
+                if visit is None:
+                    call = self.call(frame, bindings)
+                    samples, bound = self.samples(frame, call, parent) if self.test else (({}, ((), {})), False)
+                    visit = self.forward_calls[frame] = ForwardCall(call, current_task(), scopes, samples, bound)
+                    if parent:
+                        parent.children.append(visit)
                 if bindings:
                     wrapper = None
                     if any(b.wrapper for b in bindings):
@@ -681,29 +840,43 @@ class Trace:
                         wrapper = self.wrappers[frame]
                         local.append(wrapper)
                     direct = in_test and self.production.initialized(frame)
-                    self.hits.append((call, task, scopes, samples, wrapper, direct))
+                    self.hits.append((visit, current_task(), scopes, wrapper, direct))
         if local:
             self.activations[frame] = active.set((*inherited, *local)), local
 
     @staticmethod
-    def samples(frame):
+    def samples(frame, call, parent):
         code = frame.f_code
-        count = code.co_argcount + code.co_kwonlyargcount
         locals_ = frame.f_locals
-        items = [(name, locals_[name]) for name in code.co_varnames[:count] if name in locals_]
-        if code.co_flags & inspect.CO_VARKEYWORDS:
-            offset = count + bool(code.co_flags & inspect.CO_VARARGS)
-            kwargs = locals_.get(code.co_varnames[offset])
-            if type(kwargs) is dict:
-                items.extend(kwargs.items())
-        args = {}
-        for name, value in items:
+        count = code.co_argcount + code.co_kwonlyargcount
+        varargs = bool(code.co_flags & inspect.CO_VARARGS)
+        bound = any(binding.has_receiver for binding in call.bindings) or (
+            parent is not None and parent.call.receiver is call.receiver and parent.bound)
+        offset = int(bound and code.co_argcount > 0)
+        items = [(name, locals_[name]) for name in code.co_varnames[offset:count] if name in locals_]
+        extra = locals_.get(code.co_varnames[count + varargs], {}) if code.co_flags & inspect.CO_VARKEYWORDS else {}
+        named = {}
+        for name, value in (*items, *extra.items()):
             if type(name) is str:
                 try:
-                    args.setdefault(name, sample(value))
+                    named.setdefault(name, sample(value))
                 except ValueError:
                     pass
-        return args
+        # *args/**kwargs 保留外层实收形状；普通帧已完成绑定，只能确认
+        # / 和 * 的方向，其余具名槽在没有实际 *args 时可按名称复用。
+        rest = locals_.get(code.co_varnames[count], ()) if varargs else ()
+        if bound and not code.co_argcount:
+            rest = rest[1:]
+        end = code.co_argcount if rest else code.co_posonlyargcount
+        positional = []
+        positional_names = code.co_varnames[offset:end]
+        for value in (*(locals_[name] for name in positional_names), *rest):
+            try:
+                positional.append(sample(value))
+            except ValueError:
+                break  # 不能让后面的参数滑进被滤掉的位置。
+        keywords = {k: v for k, v in named.items() if k not in positional_names}
+        return (named, (tuple(positional), keywords)), bound
 
     def accepted(self):
         reach = {}
@@ -713,38 +886,41 @@ class Trace:
                 reach[scope] = scope.reachable()
             return task in reach[scope]
 
-        for call, task, scopes, samples, wrapper, direct in self.hits:
-            matched = call.matches()
+        for root, task, scopes, wrapper, direct in self.hits:
+            matched = root.call.matches()
             if not matched or self.test_scope and not reachable(self.test_scope, task):
                 continue
-            via_public = any(scope is not self.test_scope and scope.origin.visits is None
+            via_public = any(scope is not self.test_scope and not scope.origin.wrapper
                              and reachable(scope, task) and public(scope) for scope in scopes)
             if not via_public and not direct:
                 continue
-            direct = [b.key for b in matched if not b.wrapper]
-            if direct:
-                yield frozenset(direct), samples, via_public
+            ordinary = [b.key for b in matched if not b.wrapper]
+            if ordinary:
+                yield frozenset(ordinary), (root.samples,), via_public
             if wrapper is None or not any(b.wrapper for b in matched):
                 continue
-            collected, reached_leaf = dict(samples), False
-            for scope, visit, visit_task, inner in wrapper.visits:
-                if self.test_scope and not reachable(self.test_scope, visit_task):
+            stack = [(child, (root.samples,)) for child in reversed(root.children)]
+            while stack:
+                child, previous = stack.pop()
+                if self.test_scope and not reachable(self.test_scope, child.task):
                     continue
-                if not reachable(scope, visit_task) and not (
-                        visit_task in wrapper.returned and any(reachable(s, visit_task) for s in scopes)):
+                if not any(s.origin is wrapper and reachable(s, child.task) for s in (wrapper, *child.scopes)) and not (
+                        child.task in wrapper.returned and any(reachable(s, child.task) for s in scopes)):
                     continue
-                if (fn := visit.actual()) is not None:
-                    reached_leaf |= not self.targets.wrapper(fn)
-                    for name, value in inner.items():
-                        collected.setdefault(name, value)
-            if reached_leaf:
-                yield frozenset(b.key for b in matched if b.wrapper), collected, via_public
+                fn = child.call.actual()
+                if fn is None:
+                    continue
+                path = (*previous, child.samples)
+                if self.targets.wrapper(fn):
+                    stack.extend((visit, path) for visit in reversed(child.children))
+                else:
+                    yield frozenset(b.key for b in matched if b.wrapper), path, via_public
 
     def covers(self, expected):
         return any(via_public and not keys.isdisjoint(expected) for keys, _, via_public in self.accepted())
 
 
-def public_probe(production, targets, origins, test_entered, samples):
+def public_probe(production, targets, origins, test_entered, samples, shapes):
     # pytest 可能已加载或修改受验模块；用同一冻结副本重新导入，且导入不记覆盖。
     root = Path.cwd().resolve()
     for name, loaded in list(sys.modules.items()):
@@ -764,53 +940,57 @@ def public_probe(production, targets, origins, test_entered, samples):
             if identity in tried:
                 continue
             tried.add(identity)
-            args, kwargs = binding.arguments(fn, samples)
+            choices = binding.arguments(fn, samples, shapes)
         except (Exception, SystemExit):
             continue
 
-        trace = Trace(production, targets, probe=sys._getframe())
-        result = None
+        if any(probe_call(production, targets, test_entered, fn, args, kwargs) for args, kwargs in choices):
+            return True
+    return False
 
-        async def consume_async_generator(generator):
-            try:
+
+def probe_call(production, targets, test_entered, fn, args, kwargs):
+    trace = Trace(production, targets, probe=sys._getframe())
+    result = None
+
+    async def consume_async_generator(generator):
+        try:
+            for _ in range(PROBE_STEPS):
+                if trace.covers(test_entered):
+                    break
+                try:
+                    await anext(generator)
+                except StopAsyncIteration:
+                    break
+        finally:
+            # asyncio.run 关闭事件循环时的隐式 aclose 不属于公开消费。
+            sys.setprofile(None)
+
+    try:
+        sys.setprofile(trace.profile)
+        result = fn(*args, **kwargs)
+        attr = DEFERRED_FRAMES.get(type(result))
+        if attr and not trace.covers(test_entered):
+            # 只驱动公开返回值；不查找或推进函数内部未返回的生成器。
+            parents = trace.deferred.setdefault(getattr(result, attr), {})
+            if not parents:
+                parents[None] = None
+            if type(result) is CoroutineType:
+                asyncio.run(result)
+            elif type(result) is AsyncGeneratorType:
+                asyncio.run(consume_async_generator(result))
+            else:
                 for _ in range(PROBE_STEPS):
                     if trace.covers(test_entered):
                         break
-                    try:
-                        await anext(generator)
-                    except StopAsyncIteration:
-                        break
-            finally:
-                # asyncio.run 关闭事件循环时的隐式 aclose 不属于公开消费。
-                sys.setprofile(None)
-
-        try:
-            sys.setprofile(trace.profile)
-            result = fn(*args, **kwargs)
-            attr = DEFERRED_FRAMES.get(type(result))
-            if attr and not trace.covers(test_entered):
-                # 只驱动公开返回值；不查找或推进函数内部未返回的生成器。
-                parents = trace.deferred.setdefault(getattr(result, attr), {})
-                if not parents:
-                    parents[None] = None
-                if type(result) is CoroutineType:
-                    asyncio.run(result)
-                elif type(result) is AsyncGeneratorType:
-                    asyncio.run(consume_async_generator(result))
-                else:
-                    for _ in range(PROBE_STEPS):
-                        if trace.covers(test_entered):
-                            break
-                        next(result)
-        except (Exception, SystemExit):
-            # 只承认异常前实际进入的导出；不因一次探针异常停止其他公开入口。
-            pass
-        finally:
-            sys.setprofile(None)
-            result = None
-        if trace.covers(test_entered):
-            return True
-    return False
+                    next(result)
+    except (Exception, SystemExit):
+        # 只承认异常前实际进入的导出；不因一次探针异常停止其他公开入口。
+        pass
+    finally:
+        sys.setprofile(None)
+        result = None
+    return trace.covers(test_entered)
 
 
 def proves(doc, scratch):
@@ -827,6 +1007,7 @@ def proves(doc, scratch):
         def __init__(self):
             self.entered = set()
             self.samples = {}
+            self.shapes = []
 
         @pytest.hookimpl(wrapper=True, trylast=True)
         def pytest_runtest_call(self, item):
@@ -839,11 +1020,14 @@ def proves(doc, scratch):
                 return (yield)
             finally:
                 sys.setprofile(None)
-                for keys, samples, via_public in trace.accepted():
+                for keys, path, via_public in trace.accepted():
                     self.entered.update(keys)
                     self.covered |= via_public
-                    for key, value in samples.items():
-                        self.samples.setdefault(key, value)
+                    for samples, shape in path:
+                        if shape not in self.shapes:
+                            self.shapes.append(shape)
+                        for key, value in samples.items():
+                            self.samples.setdefault(key, value)
 
         def pytest_runtest_logreport(self, report):
             self.nonpass |= not report.passed or hasattr(report, "wasxfail")
@@ -860,7 +1044,7 @@ def proves(doc, scratch):
                               path + "::" + selector], plugins=[registration])
         return (result == pytest.ExitCode.OK and not registration.nonpass and registration.passed == doc["count"] and
                 (registration.covered or bool(registration.entered) and
-                 public_probe(production, targets, origins, registration.entered, registration.samples)))
+                 public_probe(production, targets, origins, registration.entered, registration.samples, registration.shapes)))
 
 
 if __name__ == "__main__":
