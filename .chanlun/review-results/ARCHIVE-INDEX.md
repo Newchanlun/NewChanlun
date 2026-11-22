@@ -152,11 +152,21 @@ tar -xpf /Volumes/AgentStorage/restart-20261107/slim/remaining-archive/history14
 
 ## #1742：#1954 历史报告
 
-本批迁出 13 件历史过程稿，原路径和文件模式不变。仍被 goal 事件、已结算谱系、产品或在用检查引用的证据留仓。不改原草稿未结事项。
+本批迁出 7 件无现役引用的历史过程稿，原路径和文件模式不变。仍被 goal 契约、事件、源码或保留诊断报告引用的证据（含原 13 件中核出的 6 件）均留仓。
 
 - 来源提交：`b9d898dccf46c2a716115eaa1215bc39c458a959`。
-- 归档：`/Volumes/AgentStorage/restart-20261107/slim/1954-reconcile.AjX4Gc/originals.tar`。同目录 `manifest.tsv` 列出精确原路径、字节数和模式。
-- 恢复：用 `tar -xpf <归档包> -C <空目录>`，或按清单中的原路径用 `git show b9d898dccf46c2a716115eaa1215bc39c458a959:<原路径>` 读取单件。
+- 归档：`/Volumes/AgentStorage/restart-20261107/slim/1954-reconcile-7files/originals.tar`（同目录 `manifest.tsv` 含完整 SHA-256）。
+- 恢复：执行 `tar -xpf /Volumes/AgentStorage/restart-20261107/slim/1954-reconcile-7files/originals.tar -C <空目录>`，或按下方清单逐件执行 `git show b9d898dccf46c2a716115eaa1215bc39c458a959:<原路径>`。
+
+| 原路径 | 模式 | 字节数 | SHA-256 前 16 位 |
+| --- | --- | ---: | --- |
+| `.chanlun/diagnostics/acceptance4-4f-candidate-prune-L2.md` | `100644` | 3433 | `7e825046f9e1fe78` |
+| `.chanlun/diagnostics/acceptance4-4f-plan.md` | `100644` | 4891 | `bae13ad27706fc35` |
+| `.chanlun/diagnostics/broken-dependency-chains-v224.md` | `100644` | 14294 | `2b6d0161c7e3f4fe` |
+| `.chanlun/diagnostics/goal-autoexec-result.md` | `100644` | 3030 | `88631b58a222f8be` |
+| `.chanlun/diagnostics/goal-usability-result.md` | `100644` | 2944 | `09de23b5609e0a7f` |
+| `.chanlun/pdf-review/soros-full-spec.md` | `100644` | 13371 | `411ea74c8d237a01` |
+| `.chanlun/pdf-review/v71-soros-book-baseline.md` | `100644` | 28212 | `96c4a8dc04ff50ce` |
 
 
 ## 历史层归档（#1920）
