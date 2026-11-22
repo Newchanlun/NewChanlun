@@ -56,8 +56,9 @@ use super::{
 };
 use serde_json::{Map as JsonMap, Value as JsonNode};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -363,6 +364,7 @@ impl CheckedNodeUsage {
         })
     }
 
+    #[inline]
     pub fn digest(&self) -> &NodeDigest {
         &self.digest
     }
@@ -577,19 +579,23 @@ impl CheckedFrame {
     }
 
     /// 本帧核出相符的那枚摘要（不是「本次请求的摘要」；请求侧须自行对照）。
+    #[inline]
     pub fn digest(&self) -> &NodeDigest {
         &self.usage.digest
     }
 
+    #[inline]
     pub fn tag(&self) -> u8 {
         self.tag
     }
 
+    #[inline]
     pub fn body(&self) -> &[u8] {
         &self.body
     }
 
     /// 同一次核验导出的不可变计费值；重放它不代替对当前字节的核验。
+    #[inline]
     pub fn usage(&self) -> &CheckedNodeUsage {
         &self.usage
     }
@@ -617,8 +623,47 @@ static JOB_IDS: AtomicU64 = AtomicU64::new(0);
 ///
 /// 一个 job 从用户开始重建或一次 Watch 调用开始，覆盖其全部同代 Snapshot 对拍；
 /// 跨分页、片段、证明重传、同代对拍及重试累计，**同一个余额、同一个绝对期限**。
+#[derive(Default)]
+struct FastKeyHasher(u64);
+
+impl Hasher for FastKeyHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        if bytes.len() >= 8 {
+            self.0 = u64::from_ne_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+        } else {
+            let mut h = self.0;
+            for &b in bytes {
+                h = h.wrapping_mul(0x100_0000_01b3) ^ u64::from(b);
+            }
+            self.0 = h;
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct FastKeyBuildHasher;
+
+impl BuildHasher for FastKeyBuildHasher {
+    type Hasher = FastKeyHasher;
+    #[inline]
+    fn build_hasher(&self) -> FastKeyHasher {
+        FastKeyHasher(0)
+    }
+}
+
 enum AcceptedNodes {
-    Ordinary(BTreeSet<NodeDigest>),
+    Ordinary(HashSet<NodeDigest, FastKeyBuildHasher>),
     Mixed {
         binding: super::capture_allocation::scratch::NativeReservation,
         content: super::capture_allocation::native_tree::NativeTree<NodeDigest, u64>,
@@ -627,7 +672,7 @@ enum AcceptedNodes {
 }
 
 enum OpenReservations {
-    Ordinary(BTreeMap<u64, (SpaceKind, u64)>),
+    Ordinary(HashMap<u64, (SpaceKind, u64), FastKeyBuildHasher>),
     Mixed(super::capture_allocation::native_tree::NativeTree<u64, (SpaceKind, u64)>),
 }
 impl OpenReservations {
@@ -749,7 +794,7 @@ impl Job {
             nodes: 0,
             records: 0,
             requests: 0,
-            accepted: AcceptedNodes::Ordinary(BTreeSet::new()),
+            accepted: AcceptedNodes::Ordinary(HashSet::with_hasher(FastKeyBuildHasher)),
             staged: Space {
                 // 构造时 exposure = baseline + 0 + 0，所以峰值就是实测基线本身。
                 baseline: u128::from(existing.staged_bytes),
@@ -761,7 +806,7 @@ impl Job {
                 peak: u128::from(existing.store_bytes),
                 ..Space::default()
             },
-            open: OpenReservations::Ordinary(BTreeMap::new()),
+            open: OpenReservations::Ordinary(HashMap::with_hasher(FastKeyBuildHasher)),
             next_grant: 1,
         })
     }
@@ -790,6 +835,7 @@ impl Job {
     /// 首次读取开始：**幂等**，重复调用不会续期（§5.6.1「不能逐片续期」）。
     ///
     /// adapter 在第一个字节真正开始流动时调用；`charge_*`／`accept_node` 与读包装也会代为开始。
+    #[inline]
     pub fn begin_first_read(&mut self) -> Result<(), CodecError> {
         self.gate()?;
         if self.started.is_none() {
@@ -799,6 +845,7 @@ impl Job {
     }
 
     /// 只读期限门：已停止或已过绝对期限即 `Err`。adapter 可在排队、分片边界显式调用。
+    #[inline]
     pub fn check_deadline(&self) -> Result<(), CodecError> {
         if let Some(err) = self.stopped_err() {
             return Err(err);
@@ -834,6 +881,7 @@ impl Job {
     ///
     /// 通过本口只说明「此刻尚未停止、尚未过期」，不是无限开工许可：I/O 结束后仍必须按实际字节
     /// [`Job::charge_wire_bytes`]；停止后本口即拒绝后续 I/O。
+    #[inline]
     pub fn pre_io_check(&mut self) -> Result<(), CodecError> {
         self.gate()
     }
@@ -846,6 +894,7 @@ impl Job {
     ///
     /// 已停止的 job 不再接纳任何新字节——本口按停止原因拒绝，**不**把入账当成重新开工的许可。
     /// 首次调用即起绝对期限的钟（等价于 [`Job::begin_first_read`]），后续调用只检查不续期。
+    #[inline]
     pub fn charge_wire_bytes(&mut self, actual_bytes: u64) -> Result<(), CodecError> {
         if let Some(err) = self.stopped_err() {
             return Err(err);
@@ -880,6 +929,7 @@ impl Job {
     }
 
     /// 显式 charge：顶层记录访问次数（同一记录重访照实再计）。首次调用即起钟，不续期。
+    #[inline]
     pub fn charge_records(&mut self, accesses: u64) -> Result<(), CodecError> {
         self.begin_first_read()?;
         let cap = self.limits.max_total_records;
@@ -938,6 +988,7 @@ impl Job {
     /// 这里仍执行本 Job 的期限、停止状态、去重和节点预算门；它不重新声称核验了
     /// 当前内容图；它不接收或核对本次节点字节。调用方必须另外证明复用原件及判据上下文
     /// 未变；有新字节时仍须调用 `accept_node`，不能拿旧用量票据替代当前摘要核对。
+    #[inline]
     pub fn accept_checked_usage(
         &mut self,
         usage: &CheckedNodeUsage,
@@ -946,6 +997,7 @@ impl Job {
         self.accept_checked_usage_inner(usage)
     }
 
+    #[inline]
     fn accept_checked_usage_inner(
         &mut self,
         usage: &CheckedNodeUsage,
@@ -1089,6 +1141,7 @@ impl Job {
         job.check_deadline()?;
         Ok(job)
     }
+    #[inline]
     pub fn accept_checked_usage_mixed(
         &mut self,
         usage: &CheckedNodeUsage,
@@ -1126,6 +1179,7 @@ impl Job {
         self.node_bytes = bytes;
         Ok(NodeAcceptance::FirstAccept)
     }
+    #[inline]
     pub fn accept_legacy_evidence(
         &mut self,
         row: &super::legacy_evidence::CheckedLegacyEvidenceRow,
@@ -1472,6 +1526,7 @@ impl Job {
         self.store.record_peak(store);
     }
 
+    #[inline]
     fn elapsed(&self) -> Option<Duration> {
         self.started
             .map(|started| self.clock.now().saturating_duration_since(started))
@@ -1551,6 +1606,7 @@ impl Job {
         }
     }
 
+    #[inline]
     fn stopped_err(&self) -> Option<CodecError> {
         self.stopped.as_ref().map(|(code, detail)| {
             Self::error_detail(
@@ -1560,6 +1616,7 @@ impl Job {
         })
     }
 
+    #[inline]
     fn deadline_gate(&self) -> Result<(), CodecError> {
         let Some(elapsed) = self.elapsed() else {
             return Ok(());
@@ -1578,6 +1635,7 @@ impl Job {
     }
 
     /// 变更入口的统一门：已停止即原样报停止原因；期限已过则**就此停止**。
+    #[inline]
     fn gate(&mut self) -> Result<(), CodecError> {
         if let Some(err) = self.stopped_err() {
             return Err(err);
