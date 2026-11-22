@@ -163,19 +163,48 @@ fn balance(left: Rc<CoordNode>, right: Rc<CoordNode>) -> Rc<CoordNode> {
 }
 
 fn join(left: Rc<CoordNode>, right: Rc<CoordNode>) -> Rc<CoordNode> {
-    if height(&left) > height(&right) + 1 {
+    let hl = height(&left);
+    let hr = height(&right);
+    if hl > hr + 1 {
         let CoordNode::Concat(a, b, _) = left.as_ref() else {
             unreachable!()
         };
-        return balance(a.clone(), join(b.clone(), right));
+        return balance(a.clone(), join_right_owned(b, right, hr));
     }
-    if height(&right) > height(&left) + 1 {
+    if hr > hl + 1 {
         let CoordNode::Concat(a, b, _) = right.as_ref() else {
             unreachable!()
         };
-        return balance(join(left, a.clone()), b.clone());
+        return balance(join_left_owned(left, hl, a), b.clone());
     }
     branch(left, right)
+}
+
+fn join_right_owned(left: &Rc<CoordNode>, right: Rc<CoordNode>, hr: u32) -> Rc<CoordNode> {
+    if height(left) > hr + 1 {
+        let CoordNode::Concat(a, b, _) = left.as_ref() else {
+            unreachable!()
+        };
+        return balance(a.clone(), join_right_owned(b, right, hr));
+    }
+    branch(left.clone(), right)
+}
+
+fn join_left_owned(left: Rc<CoordNode>, hl: u32, right: &Rc<CoordNode>) -> Rc<CoordNode> {
+    if height(right) > hl + 1 {
+        let CoordNode::Concat(a, b, _) = right.as_ref() else {
+            unreachable!()
+        };
+        return balance(join_left_owned(left, hl, a), b.clone());
+    }
+    branch(left, right.clone())
+}
+
+fn append_leaf(left: &Rc<CoordNode>, leaf: Rc<CoordNode>) -> Rc<CoordNode> {
+    match left.as_ref() {
+        CoordNode::Concat(a, b, h) if *h > 2 => balance(a.clone(), append_leaf(b, leaf)),
+        _ => branch(left.clone(), leaf),
+    }
 }
 
 fn node_max(node: &Rc<CoordNode>) -> usize {
@@ -364,7 +393,11 @@ impl CoordsRef {
 
     /// 追加一个**严格大于**当前最大坐标的坐标（空集时等价于 [`CoordsRef::single`]）。
     pub fn append_greater(&self, coord: usize) -> Self {
-        CoordsRef::concat(self, &CoordsRef::single(coord))
+        let leaf = Rc::new(CoordNode::Leaf(coord));
+        match &self.0 {
+            None => CoordsRef(Some(leaf)),
+            Some(l) => CoordsRef(Some(append_leaf(l, leaf))),
+        }
     }
 
     /// #1488：撤回最大坐标，沿 AVL 最右路径重建；未变子树与旧快照保持共享。
@@ -425,15 +458,15 @@ impl CoordsRef {
             return Vec::new();
         };
         let mut out: Vec<usize> = Vec::new();
-        let mut stack: Vec<&Rc<CoordNode>> = vec![root];
+        let mut stack = InlineNodeStack::with_root(root.as_ref());
         while let Some(node) = stack.pop() {
             bump_iter();
-            match node.as_ref() {
+            match node {
                 CoordNode::Leaf(coord) => out.push(*coord),
                 // 先压右后压左：左子树整体先于右子树展开（LIFO）。
                 CoordNode::Concat(left, right, _) => {
-                    stack.push(right);
-                    stack.push(left);
+                    stack.push(right.as_ref());
+                    stack.push(left.as_ref());
                 }
             }
         }
@@ -457,14 +490,14 @@ impl CoordsRef {
             return 0;
         };
         let mut total = 0usize;
-        let mut stack: Vec<&Rc<CoordNode>> = vec![root];
+        let mut stack = InlineNodeStack::with_root(root.as_ref());
         while let Some(node) = stack.pop() {
             bump_iter();
-            match node.as_ref() {
+            match node {
                 CoordNode::Leaf(_) => total += 1,
                 CoordNode::Concat(left, right, _) => {
-                    stack.push(right);
-                    stack.push(left);
+                    stack.push(right.as_ref());
+                    stack.push(left.as_ref());
                 }
             }
         }
@@ -525,8 +558,8 @@ impl SourceCoords {
         match &self.0 {
             SourceRepr::Flat(items) => SourceCoordsIter::Flat(items.iter()),
             SourceRepr::Shared(coords) => SourceCoordsIter::Tree(match coords.root_node() {
-                Some(root) => vec![root.as_ref()],
-                None => Vec::new(),
+                Some(root) => InlineNodeStack::with_root(root.as_ref()),
+                None => InlineNodeStack::empty(),
             }),
         }
     }
@@ -559,9 +592,12 @@ impl SourceCoords {
         self.iter().any(|c| c == coord)
     }
 
-    /// 首元素。
+    /// 首元素（共享形态沿最左路径下行，O(log n)）。
     pub fn first(&self) -> Option<usize> {
-        self.iter().next().copied()
+        match &self.0 {
+            SourceRepr::Flat(items) => items.first().copied(),
+            SourceRepr::Shared(coords) => coords.root_node().map(node_min),
+        }
     }
 
     /// 末元素（共享形态沿最右路径下行，O(log n)）。
@@ -596,10 +632,62 @@ impl FromIterator<usize> for SourceCoords {
     }
 }
 
+const INLINE_NODE_STACK: usize = 48;
+
+pub struct InlineNodeStack<'a> {
+    inline: [Option<&'a CoordNode>; INLINE_NODE_STACK],
+    len: usize,
+    overflow: Vec<&'a CoordNode>,
+}
+
+impl<'a> InlineNodeStack<'a> {
+    #[inline]
+    fn empty() -> Self {
+        Self {
+            inline: [None; INLINE_NODE_STACK],
+            len: 0,
+            overflow: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn with_root(root: &'a CoordNode) -> Self {
+        let mut inline = [None; INLINE_NODE_STACK];
+        inline[0] = Some(root);
+        Self {
+            inline,
+            len: 1,
+            overflow: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, node: &'a CoordNode) {
+        if self.len < INLINE_NODE_STACK {
+            self.inline[self.len] = Some(node);
+            self.len += 1;
+        } else {
+            self.overflow.push(node);
+        }
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<&'a CoordNode> {
+        if !self.overflow.is_empty() {
+            return self.overflow.pop();
+        }
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        self.inline[self.len]
+    }
+}
+
 /// [`SourceCoords::iter`] 的迭代器。
 pub enum SourceCoordsIter<'a> {
     Flat(std::slice::Iter<'a, usize>),
-    Tree(Vec<&'a CoordNode>),
+    Tree(InlineNodeStack<'a>),
 }
 
 impl<'a> Iterator for SourceCoordsIter<'a> {
@@ -634,9 +722,29 @@ impl<'a> IntoIterator for &'a SourceCoords {
 }
 
 impl std::fmt::Debug for SourceCoords {
-    /// 与 `Vec<usize>` 的 `Debug` 逐字相同（`debug_list`，含 `{:#?}` 换行缩进）。
+    /// 与 `Vec<usize>` 的 `Debug` 逐字相同（含 `{:?}`、`{:x?}`、`{:#?}` 换行缩进）。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.iter()).finish()
+        let mut iter = self.iter();
+        let Some(first) = iter.next() else {
+            return f.write_str("[]");
+        };
+        if f.alternate() {
+            f.write_str("[\n    ")?;
+            std::fmt::Debug::fmt(first, f)?;
+            for coord in iter {
+                f.write_str(",\n    ")?;
+                std::fmt::Debug::fmt(coord, f)?;
+            }
+            f.write_str(",\n]")
+        } else {
+            f.write_str("[")?;
+            std::fmt::Debug::fmt(first, f)?;
+            for coord in iter {
+                f.write_str(", ")?;
+                std::fmt::Debug::fmt(coord, f)?;
+            }
+            f.write_str("]")
+        }
     }
 }
 
@@ -654,14 +762,17 @@ impl serde::Serialize for SourceCoords {
 
 impl PartialEq for SourceCoords {
     fn eq(&self, other: &Self) -> bool {
-        if let (SourceRepr::Shared(a), SourceRepr::Shared(b)) = (&self.0, &other.0) {
-            if let (Some(x), Some(y)) = (a.root_node(), b.root_node()) {
-                if Rc::ptr_eq(x, y) {
-                    return true;
+        match (&self.0, &other.0) {
+            (SourceRepr::Flat(a), SourceRepr::Flat(b)) => a == b,
+            (SourceRepr::Shared(a), SourceRepr::Shared(b)) => {
+                match (a.root_node(), b.root_node()) {
+                    (None, None) => true,
+                    (None, Some(_)) | (Some(_), None) => false,
+                    (Some(x), Some(y)) => Rc::ptr_eq(x, y) || self.iter().eq(other.iter()),
                 }
             }
+            _ => self.iter().eq(other.iter()),
         }
-        self.iter().eq(other.iter())
     }
 }
 impl Eq for SourceCoords {}
