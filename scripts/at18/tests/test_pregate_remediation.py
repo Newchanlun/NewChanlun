@@ -1540,3 +1540,168 @@ def test_r8_keeps_original_plans_despite_real_run_references(history, options, p
     history.write(path, git_at_r3("show", f"{R7_HEAD}:{path}"))
     history.gate()
     check_basis(history, options, path, allowed=True)
+
+
+R8_HEAD = "09b29405edf91f7a30a085b182758c93d82e370d"
+R9_REPORTS = (
+    ("analysis/engine_c_segment_fix.md", 27),
+    ("analysis/theta_relative_full_revalidation.md", 20),
+    ("analysis/fugue_adaptive_ph_backtest_1min.md", 22),
+    ("analysis/urs_phase0_recursive_confirm_results.md", 30),
+    ("analysis/session_trading_analysis_comprehensive.md", 17),
+    ("analysis/brn_upleg_settle.md", 28),
+    ("analysis/mos_analysis.md", 13),
+    ("analysis/qqq_soxx_settle.md", 26),
+    ("analysis/bsp_engine_sublevel_fix.md", 14),
+    ("docs/memory_snapshot/project_c_segment_fix.md", 48),
+    ("docs/memory_snapshot/project_alpha_diagnosis.md", 18),
+    ("docs/memory_snapshot/project_session2_organic_fugue.md", 13),
+)
+
+
+@pytest.mark.parametrize(("source", "line"), R9_REPORTS)
+def test_r9_run_results_rejected_at_original_and_neutral_path(history, options, source, line):
+    raw = git_at_r3("show", f"{R8_HEAD}:{source}")
+    paths = (source, "spec/neutral-note.md")
+    for path in paths:
+        history.write(path, raw)
+    history.gate()
+    for path in paths:
+        check_basis(history, options, path, allowed=False, line=line)
+
+
+@pytest.mark.parametrize(("path", "line"), [
+    ("docs/unified_fix_proposal.md", 12),
+    ("docs/spec/tightness_selection_l2.md", 19),
+    (".chanlun/scene-ledger.md", 4),
+])
+def test_r9_run_references_inside_a_design_are_not_a_report(history, options, path, line):
+    history.write(path, git_at_r3("show", f"{R8_HEAD}:{path}"))
+    history.gate()
+    check_basis(history, options, path, allowed=True, line=line)
+
+
+R9_JS_CASES = [
+    ("catch-explicit", '''
+let p;
+try {
+  p = path.join(__dirname, "fixtures", "vectors.json");
+  throw new SyntaxError("not JSON");
+} catch {
+  console.log(Object.keys(JSON.parse(fs.readFileSync(p, "utf8"))));
+}
+''', {"vectors.json"}),
+    ("catch-parser", '''
+let p;
+try {
+  p = path.join(__dirname, "fixtures", "vectors.json");
+  JSON.parse("not JSON");
+  p = path.join(__dirname, "fixtures", "units.json");
+} catch {
+  console.log(Object.keys(JSON.parse(fs.readFileSync(p, "utf8"))));
+}
+''', {"vectors.json"}),
+    ("catch-killed-path", '''
+let p;
+try {
+  p = path.join(__dirname, "fixtures/vectors.json");
+  p = null;
+  JSON.parse("not JSON");
+} catch {
+  try { fs.readFileSync(p); } catch {}
+}
+''', set()),
+    ("catch-unreachable-assignment", '''
+let p;
+try {
+  throw new Error("stop");
+  p = path.join(__dirname, "fixtures/vectors.json");
+} catch {
+  try { fs.readFileSync(p); } catch {}
+}
+''', set()),
+    ("catch-nested-call-writes", '''
+let p;
+function init() {
+  p = path.join(__dirname, "fixtures/vectors.json");
+  ({ }).missing.value;
+}
+try { init(); }
+catch { fs.readFileSync(p); }
+''', {"vectors.json"}),
+    ("catch-no-throw", '''
+const p = path.join(__dirname, "fixtures/vectors.json");
+try { JSON.parse("{}"); } catch { fs.readFileSync(p); }
+''', set()),
+    ("function-after-const", '''
+const p = path.join(__dirname, "fixtures/vectors.json");
+function readVector() { fs.readFileSync(p); }
+readVector();
+''', {"vectors.json"}),
+    ("function-before-const", '''
+function readVector() { fs.readFileSync(p); }
+const p = path.join(__dirname, "fixtures/vectors.json");
+readVector();
+''', {"vectors.json"}),
+    ("hoisted-call", '''
+const p = path.join(__dirname, "fixtures/vectors.json");
+readVector();
+function readVector() { fs.readFileSync(p); }
+''', {"vectors.json"}),
+    ("hoisted-var-rebind", '''
+function load() { fs.readFileSync(path.join(__dirname, "fixtures/units.json")); }
+var load = () => fs.readFileSync(path.join(__dirname, "fixtures/vectors.json"));
+load();
+''', {"vectors.json"}),
+    ("function-true-tdz", '''
+function readVector() { fs.readFileSync(p); }
+try { readVector(); } catch (err) { console.log(err.name); }
+const p = path.join(__dirname, "fixtures/vectors.json");
+''', set()),
+    ("dead-function-and-arrow", '''
+const p = path.join(__dirname, "fixtures/vectors.json");
+function readVector() { fs.readFileSync(p); }
+const arrow = () => fs.readFileSync(p);
+const plain = function () { fs.readFileSync(p); };
+''', set()),
+    ("arrow-known-arg-captured-rebind", '''
+let p = path.join(__dirname, "fixtures/units.json");
+const load = (wantVector) => fs.readFileSync(wantVector ? p
+  : path.join(__dirname, "fixtures/units.json"));
+p = path.join(__dirname, "fixtures/vectors.json");
+load(true);
+''', {"vectors.json"}),
+    ("named-function-parameter-path", '''
+const load = function inner(p) { fs.readFileSync(p); };
+const p = path.join(__dirname, "fixtures/vectors.json");
+{ const fs = {}; load(p); }
+''', {"vectors.json"}),
+    ("node-test-callback", '''
+const {test} = require("node:test");
+function readVector() { fs.readFileSync(p); }
+const p = path.join(__dirname, "fixtures/vectors.json");
+test("actual vector", readVector);
+''', {"vectors.json"}),
+    ("overwritten-export", '''
+function readVector() { fs.readFileSync(p); }
+exports.run = readVector;
+const p = path.join(__dirname, "fixtures/vectors.json");
+module.exports = () => {};
+exports.alsoDead = readVector;
+''', set()),
+    ("final-module-export", '''
+module.exports = { run: () => fs.readFileSync(p) };
+const p = path.join(__dirname, "fixtures/vectors.json");
+''', {"vectors.json"}),
+]
+
+
+@pytest.mark.parametrize(("case", "code", "loaded"), R9_JS_CASES, ids=[case[0] for case in R9_JS_CASES])
+def test_r9_reads_only_on_live_exception_and_closure_edges(history, options, case, code, loaded):
+    raw = git_at_r3("show", f"{R8_HEAD}:{VECTOR}")
+    fixtures = {"vectors.json": raw, "units.json": b'{"unit":"ticks"}\n'}
+    migrate_fixtures(history, fixtures, JS_MODULES + code.encode())
+    history.write("tests/fixtures/alias.json", raw)
+    history.commit("Retain an unread same-blob alias")
+    for leaf in (*fixtures, "alias.json"):
+        check_basis(history, options, "tests/fixtures/" + leaf, allowed=leaf in loaded)

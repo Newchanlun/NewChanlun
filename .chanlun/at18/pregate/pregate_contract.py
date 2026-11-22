@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import cache
+import json
 from pathlib import Path, PurePosixPath
 import posixpath
 import re
@@ -146,9 +148,56 @@ EXECUTION_KEY = re.compile(
     r"(?:测试|运行|实测)?退出码|产出文件|reviewed head|reviewer|review target|exit code", re.I
 )
 TABLE_RULE = re.compile(r":?-{3,}:?")
+RUN_TABLE_RULE = re.compile(r":?-+:?")
 RUN_METRIC = re.compile(r"\d[\d,]*(?:[.]\d+)?\s*(?:%|pp\b|ms\b|bars?\b|笔|组|例)|"
                         r"(?:[^\s=:]+)\s*=\s*-?\d", re.I)
 RUN_COLUMN = re.compile(r"回报|收益|覆盖率|复利|胜率|耗时|交易数|实测|bars|sharpe|drawdown|ms/bar|trades|MDD|BH|P&L|年化|回测|bps|卖飞率", re.I)
+
+RUN_TITLE = re.compile(r"重验|重测|重跑|首跑|复跑|复验|回测|实测|实证|对拍|验收|修复|测量")
+NORMATIVE_TITLE = re.compile(
+    RULE_TITLE.pattern + r"|规划|路线图|总纲领|现场台账|交接台账|草案|\b(?:proposal|plan|spec|draft|roadmap)\b", re.I
+)
+RUN_EXECUTION = re.compile(
+    r"\b(?:cargo test|pytest)[ \t`]+\d+|"
+    r"\d+/\d+\s*(?:标的|通过|PASS\b|FAIL\b)|"
+    r"回测重跑|终态对照|全标的重验|md5\s*验证|\d[\d,.]*[kKmM]?\s*bars?\b|"
+    r"(?:回测|运行|总)耗时[：:\s]+[~≈]?\d|"
+    r"汇总(?:本次|本轮|本 session)[^\n]{0,24}实验报告|"
+    r"(?:测试|运行)[^\n]{0,12}(?:全过|全绿)|真实数据回测|"
+    r"\d+/\d+\s*(?:[a-z]+\s*)?(?:测试通过|标的)|"
+    r"(?:真实数据|实跑|复跑|重跑|首跑|重测|实测).{0,10}(?:已完成|已合并|结果|交叉验证)|"
+    r"(?:数据|守卫)对账[^\n]{0,20}(?:全|均)\s*PASS", re.I
+)
+BEFORE_AFTER = re.compile(r"修复前\s*(?:→|->|vs\.?|/|\|)\s*修复后", re.I)
+RUN_DECISION_TABLE = re.compile(r"(?:全标的|多标的|实测)(?:判决|对照)表")
+RUN_DATA_COLUMN = re.compile(
+    RUN_COLUMN.pattern + r"|bars? 数|\b(?:BH|P\d+|基线)%|p\d+\b|净现金|盈亏|延迟|滞后|"
+    r"样本数|涨幅|跌破价|顶价|回撤|bar 数|\b(?:precision|recall|counters|bsp|div|trades|corr|nf|gap|settle|avg_span)\b|"
+    r"计数|匹配率|通过率", re.I
+)
+RUN_OBSERVATION = re.compile(r"(?:Buy[- ]and[- ]hold|回测耗时|运行耗时)\s*[:：]\s*[+−~-]?\d", re.I)
+RUN_SOURCE = re.compile(r"\b\w+_results\.json\b|(?:脚本|驱动|数据源|采样|落盘)\s*[:：]|"
+                        r"(?:产出|输出|结果)[:： ]+`[^\n`]+\.json`|生成时间[:：]\s*\d{4}-\d{2}-\d{2}")
+RUN_SAMPLE = re.compile(r"(?:\d+\s*(?:标的|个样本|个交易日|根)|样本[：:]|本次新拉|真实数据|官方盘|\bn\s*=\s*\d+|yfinance.{0,14}日线)")
+RUN_RECORDED = re.compile(r"(?:实测裁决|数据对账|跨标的汇总|真实读数|已逐根验证|"
+                          r"(?:本次|三标的|全标的)(?:重跑|复跑|重验)|"
+                          r"\b(?:hold|MDD)(?:\s+|\s*[:：]\s*)[+−-]?\d|"
+                          r"(?:几个|\d+\s*个?|[一二三四五六七八九]个)关键数字)", re.I)
+RUN_VALUE = re.compile(r"(?<![\w/])[+−-]?\d[\d,.]*(?![\w/])")
+RUN_SUMMARY_HEADING = re.compile(
+    r"^#{1,6} [^\n]{0,46}(?:session(?:全局|核心|全局核心)?(?:成果(?:总览|清单|链)|终局)|决定性结果|下游重验)",
+    re.I | re.M,
+)
+RUN_SUMMARY_VALUE = re.compile(
+    r"[+−-]\d+(?:[.]\d+)?\s*(?:%|pp(?![a-z]))|"
+    r"\d+(?:[.]\d+)?\s*→\s*\d+(?:[.]\d+)?\s*(?:%|s\b)"
+)
+NUMERIC_CHANGE = re.compile(r"\d[^|\n]{0,65}(?:→|->)\s*[+-]?\d")
+RUN_RESULT_COUNT = re.compile(
+    r"\b(?:cargo test|pytest)[ \t`]+\d+[^\n]{0,30}(?:全过|通过|PASS\b|FAIL\b)|"
+    r"\d+/\d+\s*(?:标的\s*)?(?:通过|PASS\b|FAIL\b)", re.I
+)
+SELF_REPORT = re.compile(r"(?:^|[（(，。；;：:\s])本报告(?:的|所|中|为|记载|记录|只产出|不再|\s|[，。])", re.M)
 
 
 
@@ -356,17 +405,49 @@ JS_MUTATION = re.compile(r"\+\+|--|" + JS_ASSIGNMENTS)
 JS_CONTINUATION = {".", "?.", ",", "in", "instanceof", "as", "satisfies", "of"}
 JS_CONTROL = {"if", "else", "while", "for", "switch", "catch", "with"}
 JS_UNKNOWN = frozenset()
+JS_TEST_CALLS = {"test", "it", "describe"}
 
 
 class JSAtom(Enum):
     TDZ = auto()
     FS = auto()
     PATH = auto()
+    TEST = auto()
 
 
-class JSScope(NamedTuple):
+class JSConstant(NamedTuple):
+    kind: str
+    value: str | bool | int | float | None
+
+
+@dataclass
+class JSScope:
     function: bool
-    bindings: dict[str, frozenset[str] | JSAtom]
+    bindings: dict
+    # 分支快照复制绑定，但不改变词法帧身份。
+    key: object = field(default_factory=object, compare=False)
+
+
+@dataclass(frozen=True)
+class JSClosure:
+    span: tuple[int, int]
+    params: tuple[tuple[tuple[str, ...], bool], ...]
+    expression: bool
+    name: str | None
+    captured: tuple[JSScope, ...] = field(compare=False)
+    keys: tuple[object, ...] = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "keys", tuple(frame.key for frame in self.captured))
+
+
+@dataclass(frozen=True)
+class JSObject:
+    members: dict
+
+
+class JSThrown(Exception):
+    """已知不能正常完成的表达式；异常边已记下。"""
 
 
 class JSStatement(NamedTuple):
@@ -385,14 +466,18 @@ def js_join_values(values):
 def js_join(*scopes):
     """同一程序点的路径取并集；内建模块须在各分支保持相同来源。"""
     return tuple(JSScope(frames[0].function, {
-        name: js_join_values([frame.bindings[name] for frame in frames])
-        for name in frames[0].bindings
-    }) for frames in zip(*scopes))
+        name: js_join_values([frame.bindings.get(name, JS_UNKNOWN) for frame in frames])
+        for name in set().union(*(frame.bindings for frame in frames))
+    }, frames[0].key) for frames in zip(*scopes))
 
 
 def js_merge(target, source):
     for completion, env in source.items():
         target[completion] = js_join(target[completion], env) if completion in target else env
+
+
+def reject_js_json_constant(value):
+    raise ValueError(value)
 
 
 class JSFixtureReads:
@@ -411,6 +496,8 @@ class JSFixtureReads:
             elif token in pairs and stack and tokens[stack[-1]] == pairs[token]:
                 self.groups[stack.pop()] = i
         self.reads = set()
+        self.throw_edges = []
+        self.calls = set()
 
     def level(self, lo, hi):
         """只遍历当前括号层；表达式中的内部逗号、冒号和花括号各归其主。"""
@@ -540,9 +627,9 @@ class JSFixtureReads:
         for lo, hi in self.split(*span):
             equal = next((i for i in self.level(lo, hi) if self.t[i] == "="), hi)
             names = tuple(self.binding_pattern(lo, equal))
-            yield names, (min(equal + 1, hi), hi), lo < equal and JS_NAME.fullmatch(self.t[lo])
+            yield names, (min(equal + 1, hi), hi), (lo, equal)
 
-    def locals(self, nodes):
+    def locals(self, nodes, *, block_functions=True):
         names = {}
         for node in nodes:
             if node.kind in {"let", "const"}:
@@ -552,7 +639,10 @@ class JSFixtureReads:
                 lo, hi = node.span
                 i = lo + (2 if self.t[lo + 1:lo + 2] == ["*"] else 1)
                 if i < hi and JS_NAME.fullmatch(self.t[i]):
-                    names[self.t[i]] = JS_UNKNOWN if self.t[lo] == "function" else JSAtom.TDZ
+                    if self.t[lo] == "class":
+                        names[self.t[i]] = JSAtom.TDZ
+                    elif block_functions:
+                        names[self.t[i]] = JS_UNKNOWN
         return names
 
     def hoisted(self, nodes):
@@ -588,11 +678,11 @@ class JSFixtureReads:
             token = t[0]
             if token in self.literals:
                 # 对路径不解码转义，对真值只有空字面串是假。
-                return ("str", self.literals[token])
+                return JSConstant("str", self.literals[token])
             if token in {"false", "true"}:
-                return ("bool", token == "true")
+                return JSConstant("bool", token == "true")
             if token == "null" or token == "undefined" and self.lookup(env, token) is None:
-                return (token, None)
+                return JSConstant(token, None)
         if len(t) == 1 or len(t) == 2 and t[0] in {"-", "+"}:
             number = "".join(t).replace("_", "")
             if JS_NUMBER.fullmatch(number.lstrip("+-")):
@@ -600,23 +690,101 @@ class JSFixtureReads:
                     value = int(number, 0) if number.lower().lstrip("+-").startswith(("0x", "0b", "0o")) else float(number)
                 except ValueError:
                     return None
-                return ("num", value)
+                return JSConstant("num", value)
         return None
 
-    def truth(self, lo, hi, env):
-        literal = self.literal(lo, hi, env)
-        return bool(literal[1]) if literal is not None else None
-
-    def function(self, body, end, params, env, name=None):
-        nodes = self.sequence(body + 1, end)
-        bindings = dict.fromkeys(self.hoisted(nodes), JS_UNKNOWN)
-        bindings.update(dict.fromkeys(params, JS_UNKNOWN))
-        if name:
-            bindings[name] = JS_UNKNOWN
-        self.block(nodes, (*js_join(env), JSScope(True, bindings)))
+    @staticmethod
+    def truth(value):
+        if isinstance(value, JSConstant):
+            return bool(value.value)
+        if isinstance(value, (JSClosure, JSObject)):
+            return True
+        return None
 
     def parameters(self, lo, hi):
-        return (name for start, end in self.split(lo, hi) for name in self.binding_pattern(start, end))
+        return tuple((tuple(self.binding_pattern(start, end)), JS_NAME.fullmatch(self.t[start]) is not None)
+                     for start, end in self.split(lo, hi) if start < end)
+
+    def note_throw(self, env, *, definite=False):
+        if self.throw_edges:
+            origin, result = self.throw_edges[-1]
+            current = {frame.key: frame for frame in env}
+            js_merge(result, {"throw": js_join(tuple(current.get(frame.key, frame) for frame in origin))})
+        if definite:
+            raise JSThrown
+
+    @staticmethod
+    def update_frames(env, state):
+        by_key = {frame.key: frame.bindings for frame in state}
+        for frame in env:
+            if frame.key in by_key:
+                frame.bindings.update(by_key[frame.key])
+
+    def invoke(self, closure, args, env):
+        if closure.span in self.calls:
+            # 递归边不再次进入同一函数体。
+            self.note_throw(env)
+            return JS_UNKNOWN
+        current = {frame.key: frame for frame in env}
+        captures = tuple(current.get(frame.key, frame) for frame in closure.captured)
+        bindings = {}
+        for i, (names, simple) in enumerate(closure.params):
+            bindings.update(dict.fromkeys(names, JS_UNKNOWN))
+            if simple and i < len(args):
+                bindings[names[0]] = args[i]
+        if closure.name:
+            bindings.setdefault(closure.name, closure)
+        self.calls.add(closure.span)
+        try:
+            if closure.expression:
+                nodes = (JSStatement("return", closure.span),)
+            else:
+                nodes = self.sequence(*closure.span)
+            for name in self.hoisted(nodes):
+                bindings.setdefault(name, JS_UNKNOWN)
+            result = self.block(nodes, (*js_join(captures), JSScope(True, bindings)), function_body=True)
+        finally:
+            self.calls.remove(closure.span)
+        if "throw" in result:
+            # 调用者捕获时看到的是异常前已经完成的闭包写入。
+            exceptional = js_join(env)
+            self.update_frames(exceptional, result["throw"])
+            self.note_throw(exceptional)
+        normal = [result[k] for k in ("next", "return") if k in result]
+        if not normal and "throw" in result:
+            raise JSThrown
+        if normal:
+            state = js_join(*normal)
+            self.update_frames(captures, state)
+            return state[-1].bindings.get("return value", JS_UNKNOWN) if "next" not in result else JS_UNKNOWN
+        return JS_UNKNOWN
+
+    def function_value(self, lo, hi, env, *, declaration=False):
+        t = self.t
+        start = lo + (t[lo] == "async" and t[lo + 1:lo + 2] != ["=>"])
+        if t[start:start + 1] == ["function"]:
+            start += 1
+            if t[start:start + 1] == ["*"]:
+                # 生成器调用只构造迭代器，并未进入函数体。
+                return None
+            name = t[start] if start < hi and JS_NAME.fullmatch(t[start]) else None
+            start += name is not None
+            close = self.groups.get(start) if t[start:start + 1] == ["("] else None
+            if close is not None:
+                body = self.after_params(close, hi)
+                if t[body:body + 1] == ["{"] and self.groups.get(body) == hi - 1:
+                    return JSClosure((body + 1, hi - 1), self.parameters(start + 1, close),
+                                     False, None if declaration else name, env)
+        else:
+            close = self.groups.get(start) if t[start:start + 1] == ["("] else None
+            arrow = self.after_params(close, hi) if close is not None else start + 1
+            if arrow < hi and t[arrow] == "=>":
+                params = self.parameters(start + 1, close) if close is not None else (((t[start],), True),)
+                body = arrow + 1
+                if t[body:body + 1] == ["{"] and self.groups.get(body) == hi - 1:
+                    return JSClosure((body + 1, hi - 1), params, False, None, env)
+                return JSClosure((body, hi), params, True, None, env)
+        return None
 
     def after_params(self, close, hi):
         body = close + 1
@@ -639,6 +807,76 @@ class JSFixtureReads:
                     return question, i
         return None
 
+    def join_path(self, lo, hi, env):
+        t = self.t
+        if (t[lo + 1:lo + 5] in ([".", "join", "(", "__dirname"], [".", "resolve", "(", "__dirname"])
+                and self.groups.get(lo + 3) == hi - 1 and self.value(env, t[lo]) is JSAtom.PATH
+                and self.lookup(env, "__dirname") is None and t[lo + 5:lo + 6] == [","]):
+            spans = list(self.split(lo + 6, hi - 1))
+            if spans[-1][0] == spans[-1][1]:
+                spans.pop()
+            parts = [self.literals.get(t[a]) if b == a + 1 else None for a, b in spans]
+            if parts and all(part is not None and not part.startswith("/") for part in parts):
+                return frozenset({"/".join(part for part in parts if part)})
+        return None
+
+    def alternatives(self, env, *branches):
+        states, values = [], []
+        for branch in branches:
+            state = js_join(env)
+            try:
+                values.append(branch(state))
+            except JSThrown:
+                continue
+            states.append(state)
+        if not states:
+            raise JSThrown
+        self.update_frames(env, js_join(*states))
+        return js_join_values(values)
+
+    def object_value(self, lo, hi, env):
+        members = {}
+        for start, end in self.split(lo, hi):
+            if start == end:
+                continue
+            key = self.literals.get(self.t[start], self.t[start])
+            if self.t[start + 1:start + 2] == [":"] and start + 2 < end:
+                members[key] = self.expr(start + 2, end, env)
+            elif end == start + 1:
+                members[key] = self.expr(start, end, env)
+            elif self.t[start + 1:start + 2] == ["("] and (close := self.groups.get(start + 1)) is not None:
+                body = self.after_params(close, end)
+                if self.t[body:body + 1] == ["{"] and self.groups.get(body) == end - 1:
+                    members[key] = JSClosure((body + 1, end - 1), self.parameters(start + 2, close),
+                                             False, None, env)
+        return JSObject(members)
+
+    def export_target(self, lo, hi, env):
+        t = self.t
+        if t[lo:lo + 3] == ["module", ".", "exports"] and self.lookup(env, "module") is None:
+            start = lo + 3
+        elif t[lo] == "exports" and self.lookup(env, "exports") is None:
+            start = lo + 1
+        else:
+            return None
+        if start < hi and t[start] == "=":
+            return start, None
+        if t[start:start + 1] == ["."] and start + 2 < hi and t[start + 2] == "=":
+            return start + 2, t[start + 1]
+        return None
+
+    def set_export(self, target, member, value, env):
+        scope = env[0].bindings
+        if "module.exports" not in scope:  # 不把其他词法对象的属性写入当作模块导出。
+            return
+        if member is None:
+            if target == "module":
+                scope["module.exports"] = value
+            scope["exports linked"] = JS_UNKNOWN
+        elif target == "module" or scope["exports linked"] == JSConstant("bool", True):
+            old = scope["module.exports"]
+            scope["module.exports"] = JSObject((old.members if isinstance(old, JSObject) else {}) | {member: value})
+
     def expr(self, lo, hi, env):
         lo, hi = self.unwrap(lo, hi)
         if lo >= hi:
@@ -650,130 +888,194 @@ class JSFixtureReads:
             for start, end in parts:
                 value = self.expr(start, end, env)
             return value
+        if target := self.export_target(lo, hi, env):
+            equal, member = target
+            value = self.expr(equal + 1, hi, env)
+            self.set_export(first, member, value, env)
+            return value
         if JS_NAME.fullmatch(first) and lo + 1 < hi:
             op = t[lo + 1]
             if op == "=" or JS_MUTATION.fullmatch(op):
                 scope = self.lookup(env, first)
-                value = self.expr(lo + 2, hi, env) if op != "++" and op != "--" else JS_UNKNOWN
-                if scope is not None and scope[first] is not JSAtom.TDZ:
+                value = self.expr(lo + 2, hi, env) if op not in {"++", "--"} else JS_UNKNOWN
+                if scope is not None:
+                    if scope[first] is JSAtom.TDZ:
+                        self.note_throw(env, definite=True)
                     scope[first] = value if op == "=" else JS_UNKNOWN
                     return scope[first]
+                self.note_throw(env)
                 return JS_UNKNOWN
         if first in {"++", "--"} and hi == lo + 2:
             scope = self.lookup(env, t[lo + 1])
-            if scope is not None and scope[t[lo + 1]] is not JSAtom.TDZ:
+            if scope is not None:
+                if scope[t[lo + 1]] is JSAtom.TDZ:
+                    self.note_throw(env, definite=True)
                 scope[t[lo + 1]] = JS_UNKNOWN
             return JS_UNKNOWN
 
-        # 箭头体有自己的函数帧，形参不从外部调用表达式推值。
-        arrow_start = lo + (first == "async" and t[lo + 1:lo + 2] != ["=>"])
-        arrow_end = self.groups.get(arrow_start, arrow_start)
-        arrow = self.after_params(arrow_end, hi) if t[arrow_start:arrow_start + 1] == ["("] else arrow_end + 1
-        if arrow < hi and t[arrow] == "=>":
-            params = self.parameters(arrow_start + 1, arrow_end) if t[arrow_start] == "(" else (t[arrow_start],)
-            body = arrow + 1
-            if t[body:body + 1] == ["{"] and body in self.groups:
-                self.function(body, self.groups[body], params, env)
-            else:
-                self.expr(body, hi, (*js_join(env), JSScope(True, dict.fromkeys(params, JS_UNKNOWN))))
-            return JS_UNKNOWN
-
+        if closure := self.function_value(lo, hi, env):
+            return closure
+        if first in {"function", "class"}:
+            return JS_UNKNOWN  # 声明/生成器/类中的未调用方法不是读点。
         if conditional := self.conditional(lo, hi):
             question, colon = conditional
-            self.expr(lo, question, env)
-            truth = self.truth(lo, question, env)
+            truth = self.truth(self.expr(lo, question, env))
             if truth is not None:
                 return self.expr(question + 1, colon, env) if truth else self.expr(colon + 1, hi, env)
-            left, right = js_join(env), js_join(env)
-            a, b = self.expr(question + 1, colon, left), self.expr(colon + 1, hi, right)
-            for original, merged in zip(env, js_join(left, right)):
-                original.bindings.update(merged.bindings)
-            return js_join_values((a, b))
+            return self.alternatives(env, lambda state: self.expr(question + 1, colon, state),
+                                     lambda state: self.expr(colon + 1, hi, state))
         for op in ("||", "&&", "??"):
             points = list(self.split(lo, hi, op))
             if len(points) > 1:
                 start, end = points[0]
                 left = self.expr(start, end, env)
                 if op == "??":
-                    literal = self.literal(start, end, env)
-                    skip = None if literal is None else literal[0] not in {"null", "undefined"}
+                    skip = left.kind not in {"null", "undefined"} if isinstance(left, JSConstant) else None
                 else:
-                    truth = self.truth(start, end, env)
+                    truth = self.truth(left)
                     skip = None if truth is None else truth == (op == "||")
                 if skip is True:
                     return left
                 if skip is False:
                     return self.expr(end + 1, hi, env)
-                right = js_join(env)
-                self.expr(end + 1, hi, right)
-                for original, merged in zip(env, js_join(env, right)):
-                    original.bindings.update(merged.bindings)
-                return JS_UNKNOWN
+                return self.alternatives(env, lambda _: left, lambda state: self.expr(end + 1, hi, state))
 
+        equality = {"==", "!=", "===", "!=="}
+        operators = [i for i in self.level(lo, hi) if t[i] in equality]
+        if len(operators) == 1:
+            op = operators[0]
+            a, b = self.expr(lo, op, env), self.expr(op + 1, hi, env)
+            if isinstance(a, JSConstant) and isinstance(b, JSConstant):
+                exact = t[op] in {"===", "!=="}
+                if exact or a.kind == b.kind:
+                    return JSConstant("bool", (a == b) != t[op].startswith("!"))
+            return JS_UNKNOWN
+        if first == "!":
+            tail, end = self.unwrap(lo + 1, hi)
+            # 只折叠确定为一元的操作数，不把 !a + b 当成 !(a + b)。
+            if end == tail + 1 or self.groups.get(lo + 1) == hi - 1:
+                truth = self.truth(self.expr(lo + 1, hi, env))
+                return JS_UNKNOWN if truth is None else JSConstant("bool", not truth)
+        literal = self.literal(lo, hi, env)
+        if literal is not None:
+            return literal
+        if first == "{" and self.groups.get(lo) == hi - 1:
+            return self.object_value(lo + 1, hi - 1, env)
         if hi == lo + 1:
             value = self.value(env, first)
-            return JS_UNKNOWN if value is JSAtom.TDZ else value
-        if (first == "require" and hi == lo + 4 and t[lo + 1] == "(" and t[lo + 3] == ")"
-                and self.lookup(env, first) is None):
-            module = self.literals.get(t[lo + 2], "").removeprefix("node:")
-            return {"fs": JSAtom.FS, "path": JSAtom.PATH}.get(module, JS_UNKNOWN)
-        if (t[lo + 1:lo + 5] in ([".", "join", "(", "__dirname"], [".", "resolve", "(", "__dirname"])
-                and self.groups.get(lo + 3) == hi - 1 and self.value(env, first) is JSAtom.PATH
-                and self.lookup(env, "__dirname") is None and t[lo + 5:lo + 6] == [","]):
-            spans = list(self.split(lo + 6, hi - 1))
-            if spans[-1][0] == spans[-1][1]:
-                spans.pop()
-            parts = [self.literals.get(t[a]) if b == a + 1 else None for a, b in spans]
-            if parts and all(part is not None and not part.startswith("/") for part in parts):
-                return frozenset({"/".join(part for part in parts if part)})
+            if value is JSAtom.TDZ:
+                self.note_throw(env, definite=True)
+            return value
 
+        value = JS_UNKNOWN
         i = lo
         while i < hi:
             token = t[i]
             previous = t[i - 1] if i > lo else ""
-            # 只认真实名称绑定上的读，不把 obj.fs.readFileSync 当成内建 fs。
-            if (previous not in {".", "?."} and self.value(env, token) is JSAtom.FS
-                    and t[i + 1:i + 4] == [".", "readFileSync", "("] and i + 3 in self.groups):
-                close = self.groups[i + 3]
-                for j, (a, b) in enumerate(self.split(i + 4, close)):
-                    value = self.expr(a, b, env)
-                    if j == 0 and isinstance(value, frozenset):
-                        self.reads.update(value)
-                i = close + 1
-                continue
-            if token == "class" and previous not in {".", "?."}:
-                name = t[i + 1] if t[i + 1:i + 2] and JS_NAME.fullmatch(t[i + 1]) and t[i + 1] != "extends" else None
-                body = next((j for j in self.level(i + 1, hi) if t[j] == "{"), None)
-                if body is not None and body in self.groups:
-                    local = (*js_join(env), JSScope(False, {name: JS_UNKNOWN} if name else {}))
-                    self.expr(body + 1, self.groups[body], local)
-                    i = self.groups[body] + 1
+            if JS_NAME.fullmatch(token) and previous not in {".", "?."}:
+                base = self.value(env, token)
+                if base is JSAtom.TDZ:
+                    self.note_throw(env, definite=True)
+                start = i + 1
+                member = None
+                if t[start:start + 1] in (["."], ["?."]) and start + 1 < hi:
+                    if isinstance(base, JSConstant) and base.kind in {"null", "undefined"}:
+                        if t[start] == "?.":
+                            return JSConstant("undefined", None)
+                        self.note_throw(env, definite=True)
+                    member = t[start + 1]
+                    start += 2
+                close = self.groups.get(start) if t[start:start + 1] == ["("] else None
+                if close is not None and close < hi:
+                    value = self.call(i, start, close, env, token, base, member)
+                    if i == lo and close == hi - 1:
+                        return value
+                    i = close + 1
                     continue
+                if member is not None:
+                    if not isinstance(base, JSObject):
+                        self.note_throw(env)
+                    i = start
+                    continue
+            if token in {".", "?.", "new"}:
+                self.note_throw(env)
             if token in {"(", "[", "{"} and i in self.groups:
                 close = self.groups[i]
-                body = self.after_params(close, hi)
-                # 普通函数、对象/类方法的参数括号紧接其函数体。
-                if (token == "(" and previous not in JS_CONTROL and body < hi and t[body] == "{"
-                        and body in self.groups and i > lo and (JS_NAME.fullmatch(previous) or previous in {"*", "]"})):
-                    name = previous if t[max(lo, i - 3):i].count("function") and previous != "function" else None
-                    self.function(body, self.groups[body], self.parameters(i + 1, close), env, name)
-                    i = self.groups[body] + 1
-                    continue
-                if token == "{":
-                    for a, b in self.split(i + 1, close):
-                        # 对象属性值也可能是箭头函数；方法的参数不是属性键。
-                        colon = next((j for j in self.level(a, b) if t[j] in {":", "(", "=", "?"}), b)
-                        self.expr(colon + 1 if colon < b and t[colon] == ":" else a, b, env)
-                else:
-                    self.expr(i + 1, close, env)
+                grouped = self.expr(i + 1, close, env)
+                if token == "(" and isinstance(grouped, JSClosure) and t[close + 1:close + 2] == ["("]:
+                    end = self.groups.get(close + 1)
+                    if end is not None and end < hi:
+                        args = [self.expr(a, b, env) for a, b in self.split(close + 2, end) if a < b]
+                        result = self.invoke(grouped, args, env)
+                        if i == lo and end == hi - 1:
+                            return result
+                        i = end + 1
+                        continue
+                if token == "[" and i != lo:
+                    self.note_throw(env)
                 i = close
             i += 1
         return JS_UNKNOWN
 
-    def block(self, nodes, env, params=()):
-        local = dict.fromkeys(params, JS_UNKNOWN) | self.locals(nodes)
-        result = self.run(nodes, (*env, JSScope(False, local)))
+    def call(self, lo, start, close, env, name, base, member):
+        unbound = self.lookup(env, name) is None
+        target = base if member is None else base.members.get(member) if isinstance(base, JSObject) else None
+        if member in {"join", "resolve"} and (path := self.join_path(lo, close + 1, env)) is not None:
+            return path
+        if member is not None and not (base in (JSAtom.FS, JSAtom.PATH, JSAtom.TEST)
+                                       or isinstance(base, JSObject) or name == "JSON" and unbound):
+            # 属性访问先于参数求值。
+            self.note_throw(env)
+        spans = [(a, b) for a, b in self.split(start + 1, close) if a < b]
+        args = [self.expr(a, b, env) for a, b in spans]
+        if name == "require" and unbound and member is None and len(args) == 1 and isinstance(args[0], JSConstant):
+            module = str(args[0].value).removeprefix("node:")
+            builtins = {"fs": JSAtom.FS, "path": JSAtom.PATH}
+            if module in builtins:
+                return builtins[module]
+            if args[0].value == "node:test":
+                return JSAtom.TEST
+        if base is JSAtom.FS and member == "readFileSync" and args:
+            if isinstance(args[0], frozenset):
+                self.reads.update(args[0])
+            elif isinstance(args[0], JSConstant) and args[0].kind in {"null", "undefined", "bool"}:
+                self.note_throw(env, definite=True)
+        if isinstance(target, JSClosure):
+            return self.invoke(target, args, env)
+        if (base is JSAtom.TEST and (member is None or member in JS_TEST_CALLS)
+                or member is None and unbound and name in JS_TEST_CALLS):
+            if args and isinstance(args[-1], JSClosure):
+                self.invoke(args[-1], [], env)
+        if name == "JSON" and unbound and member == "parse" and len(args) == 1:
+            arg = args[0]
+            if isinstance(arg, JSConstant) and arg.kind == "str" and "\\" not in arg.value:
+                try:
+                    json.loads(arg.value, parse_int=float, parse_constant=reject_js_json_constant)
+                except ValueError:
+                    self.note_throw(env, definite=True)
+                return JS_UNKNOWN
+        self.note_throw(env)
+        return JS_UNKNOWN
+
+    def block(self, nodes, env, params=(), *, function_body=False):
+        local = dict.fromkeys(params, JS_UNKNOWN) | self.locals(nodes, block_functions=not function_body)
+        inside = (*env, JSScope(False, local))
+        self.declare_functions(nodes, inside, function_body=function_body)
+        result = self.run(nodes, inside)
+        if len(result) == 1:
+            # 作用域退出后，逃逸闭包仍持有该帧的最后活绑定。
+            self.update_frames(inside, next(iter(result.values())))
         return {exit: state[:-1] for exit, state in result.items()}
+
+    def declare_functions(self, nodes, env, *, function_body=False):
+        # 函数体及模块顶层的声明与同名 var/形参共用绑定；嵌套块单独遮蔽。
+        scope = env[-2 if function_body else -1].bindings
+        for node in nodes:
+            lo, hi = node.span
+            if node.kind == "function-decl" and self.t[lo] == "function":
+                name = lo + (2 if self.t[lo + 1:lo + 2] == ["*"] else 1)
+                if name < hi and JS_NAME.fullmatch(self.t[name]):
+                    scope[self.t[name]] = self.function_value(lo, hi, env, declaration=True) or JS_UNKNOWN
 
     def run(self, nodes, env):
         flow = {"next": env}
@@ -783,23 +1085,46 @@ class JSFixtureReads:
             js_merge(flow, self.execute(node, flow.pop("next")))
         return flow
 
+    def test_bindings(self, lo):
+        if self.t[lo] == "{" and lo in self.groups:
+            for start, end in self.split(lo + 1, self.groups[lo]):
+                if start == end or self.t[start] not in JS_TEST_CALLS:
+                    continue
+                if self.t[start + 1:start + 2] == [":"]:
+                    start += 2
+                if start < end and JS_NAME.fullmatch(self.t[start]):
+                    yield self.t[start]
+
     def declare(self, kind, span, env):
         scope = next(frame.bindings for frame in reversed(env) if frame.function) if kind == "var" else env[-1].bindings
-        for names, (lo, hi), simple in self.declarations(span):
+        for names, (lo, hi), (pattern, equal) in self.declarations(span):
             if kind != "var" or lo < hi:
                 value = self.expr(lo, hi, env)
+                simple = pattern < equal and JS_NAME.fullmatch(self.t[pattern])
+                test_bindings = set(self.test_bindings(pattern)) if value is JSAtom.TEST and not simple else ()
                 for name in names:
-                    scope[name] = value if simple else JS_UNKNOWN
+                    scope[name] = value if simple or name in test_bindings else JS_UNKNOWN
 
     def execute(self, node, env):
+        exceptional = {}
+        self.throw_edges.append((env, exceptional))
+        try:
+            result = self.step(node, env)
+        except JSThrown:
+            result = {}
+        finally:
+            self.throw_edges.pop()
+        js_merge(result, exceptional)
+        return result
+
+    def step(self, node, env):
         kind, (lo, hi), children = node
         if kind == "block":
             return self.block(children, env)
         if kind in {"var", "const", "let"}:
             self.declare(kind, (lo, hi), env)
         elif kind == "if":
-            self.expr(lo, hi, env)
-            choice = self.truth(lo, hi, env)
+            choice = self.truth(self.expr(lo, hi, env))
             other = children[1] if len(children) == 2 else JSStatement("empty", (hi, hi))
             if choice is not None:
                 return self.execute(children[0] if choice else other, env)
@@ -814,23 +1139,27 @@ class JSFixtureReads:
             return self.loop(node, env)
         elif kind in {"return", "throw", "break", "continue"}:
             if kind in {"return", "throw"}:
-                self.expr(lo, hi, env)
+                value = self.expr(lo, hi, env)
+                if kind == "return":
+                    frame = next(frame for frame in reversed(env) if frame.function)
+                    frame.bindings["return value"] = value
             return {kind: env}
-        elif kind in {"expr", "function-decl"}:
+        elif kind == "expr":
             self.expr(lo, hi, env)
-            if kind == "function-decl" and self.t[lo] == "class" and lo + 1 < hi:
-                env[-1].bindings[self.t[lo + 1]] = JS_UNKNOWN
+        elif kind == "function-decl" and self.t[lo] == "class" and lo + 1 < hi:
+            env[-1].bindings[self.t[lo + 1]] = JS_UNKNOWN
         return {"next": env}
 
     def switch(self, cases, span, env):
-        self.expr(*span, env)
-        literal = self.literal(*span, env)
+        value = self.expr(*span, env)
+        literal = value if isinstance(value, JSConstant) else None
         values = [self.literal(*case.span, env) if case.kind == "case" else None for case in cases]
         default = next((i for i, case in enumerate(cases) if case.kind == "default"), None)
         known = literal is not None and all(value is not None or i == default for i, value in enumerate(values))
         entry = next((i for i, value in enumerate(values) if value == literal), default) if known else None
         locals_ = self.locals(stmt for case in cases for stmt in case.children)
         inside = (*env, JSScope(False, locals_))
+        self.declare_functions((stmt for case in cases for stmt in case.children), inside)
         exits, flow = {}, {}
         if (known and entry is None) or (not known and default is None):
             exits["next"] = js_join(inside)
@@ -853,10 +1182,11 @@ class JSFixtureReads:
         result = self.execute(handlers[0], js_join(env))
         for handler in handlers[1:]:
             if handler.kind == "catch":
-                # Opaque calls may throw; explicit throw also propagates preceding writes to catch.
+                # throw 边来自实际可达的显式 throw 或可抛表达式，纯赋值不制造入口。
                 thrown = result.pop("throw", None)
-                catch_env = js_join(env, thrown) if thrown is not None else js_join(env)
-                js_merge(result, self.block(handler.children, catch_env, self.parameters(*handler.span)))
+                if thrown is not None:
+                    params = (name for names, _ in self.parameters(*handler.span) for name in names)
+                    js_merge(result, self.block(handler.children, thrown, params))
             else:
                 final = {}
                 for completion, state in result.items():
@@ -898,8 +1228,7 @@ class JSFixtureReads:
             elif condition[0] == condition[1]:
                 truth = True
             else:
-                self.expr(*condition, head)
-                truth = self.truth(*condition, head)
+                truth = self.truth(self.expr(*condition, head))
             if truth is not True:
                 js_merge(exits, {"next": js_join(head)})
             if truth is False:
@@ -921,7 +1250,21 @@ class JSFixtureReads:
 
     def extract(self):
         nodes = self.sequence(0, len(self.t))
-        self.block(nodes, (JSScope(True, dict.fromkeys(self.hoisted(nodes), JS_UNKNOWN)),))
+        top = dict.fromkeys(self.hoisted(nodes), JS_UNKNOWN)
+        top.update({"module.exports": JSObject({}), "exports linked": JSConstant("bool", True)})
+        env = (JSScope(True, top), JSScope(False, self.locals(nodes, block_functions=False)))
+        self.declare_functions(nodes, env, function_body=True)
+        result = self.run(nodes, env)
+        if "next" in result:
+            state = result["next"]
+            exported = state[0].bindings["module.exports"]
+            values = exported.members.values() if isinstance(exported, JSObject) else (exported,)
+            for value in values:
+                if isinstance(value, JSClosure):
+                    try:
+                        self.invoke(value, [], state)
+                    except JSThrown:
+                        pass
         return self.reads
 
 
@@ -1195,11 +1538,11 @@ def is_json_artifact(obj):
             and all(isinstance(file, dict) and {"path", "bytes", "sha256"} <= file.keys() for file in files))
 
 
-def report_preamble(content):
+def report_preamble(content, limit=40):
     """保留 Markdown 段落结构；围栏内部的示例不提供前导证据。"""
     lines = []
     fence = None
-    for raw in content.split("\n", 40)[:40]:
+    for raw in content.split("\n", limit)[:limit]:
         line = MD_QUOTE.sub("", raw.strip())
         if marker := re.match(r"`{3,}|~{3,}", line):
             if fence is None:
@@ -1230,17 +1573,24 @@ def report_title(label):
     return bool(role(label) if secondary is None else secondary)
 
 
-def report_table(lines):
+def report_table(lines, *, measured=False):
     def cells(line):
         return [cell.strip() for cell in line.strip("|").split("|")] if "|" in line else []
 
+    rule_pattern = RUN_TABLE_RULE if measured else TABLE_RULE
+    metric_column = RUN_DATA_COLUMN if measured else RUN_COLUMN
     for i, line in enumerate(lines[:-2]):
         header, rule = cells(line), cells(lines[i + 1])
-        if len(header) != len(rule) or not rule or not all(map(TABLE_RULE.fullmatch, rule)):
+        if len(header) != len(rule) or not rule or not all(map(rule_pattern.fullmatch, rule)):
             continue
         columns = [j for j, name in enumerate(header)
                    if OUTCOME_KEY.fullmatch(name) or name in {"状态", "实测", "认识论等级"}]
-        metrics = [j for j, name in enumerate(header) if RUN_COLUMN.search(name)]
+        metrics = [j for j, name in enumerate(header) if metric_column.search(name)]
+        numeric_rows = 0
+        sampled_table = measured and (
+            header[0] in {"标的", "日期", "指标", "项", "regime", "维度", "级别", "id"}
+            or header[0] == "" and len(header) >= 3
+        )
         for row in lines[i + 2:]:
             data = cells(row)
             if len(data) != len(header):
@@ -1251,7 +1601,52 @@ def report_table(lines):
                     or sum(bool(re.search(r"\d", data[j])) for j in metrics) >= 2
                     or sum(bool(re.match(r"[✓✗✅❌]", cell)) for cell in data) >= 2):
                 return True
+            if sampled_table and sum(bool(RUN_VALUE.search(cell)) for cell in data[1:]) >= 2:
+                numeric_rows += 1
+                if numeric_rows >= 2:
+                    return True
     return False
+
+
+def measured_report(title, content, *, draft):
+    """无「报告」名分时，查是否记录已执行的结果，而非制定验证方法。"""
+    if draft or title and NORMATIVE_TITLE.search(title):
+        return False
+    # YAML 的「来源 commit」等字段是文档溯源，不是正文宣称的本次执行。
+    if content.startswith(("---\n", "---\r\n")):
+        metadata = re.match(r"---\r?\n(?=[^\n]*:[^\n]*\n).*?\r?\n(?:---|\.\.\.)\r?\n", content, re.S)
+        if metadata:
+            content = content[metadata.end():]
+    lines = report_preamble(content, limit=90)
+    preamble = "\n".join(lines)
+    table = report_table(lines, measured=True) or RUN_DECISION_TABLE.search(preamble)
+    measured_change = BEFORE_AFTER.search(preamble) and NUMERIC_CHANGE.search(preamble)
+    execution = (REPORT_SUBJECT.search(preamble) or RUN_EXECUTION.search(preamble)
+                 or RUN_SOURCE.search(preamble) and RUN_SAMPLE.search(preamble))
+    if execution and (table or measured_change or RUN_OBSERVATION.search(preamble) or RUN_RECORDED.search(preamble)):
+        return True
+    self_report = SELF_REPORT.search(preamble)
+    explicit_result = re.search(r"^本报告(?:结论先行[:：]|只产出)|^本报告为 .{0,24}(?:诊断|结果|实测)", preamble, re.M)
+    if (self_report and (RUN_RECORDED.search(preamble) or explicit_result and table)
+            or explicit_result and re.search(r"^#{2,6} .{0,10}(?:结论|判决|结果)", preamble, re.M)):
+        return True
+    # 复盘摘要也可能用带单位的读数列项目，而不复印原报告的表。
+    if RUN_SUMMARY_HEADING.search(preamble) and (table or len(RUN_SUMMARY_VALUE.findall(preamble)) >= 2):
+        return True
+    if not title or not RUN_TITLE.search(title):
+        return False
+    if (REPORT_SUBJECT.search(preamble) or RUN_RESULT_COUNT.search(preamble)
+            or MEASUREMENT.search(preamble) or measured_change
+            or RUN_RECORDED.search(preamble) and execution):
+        return True
+    # 探针、基准也可能先报采样口径，随后只用数字表给出读数。
+    if RUN_SAMPLE.search(preamble) and table:
+        return True
+    result_heading = any(
+        OUTCOME_KEY.fullmatch(re.sub(r"^\d+\.\s*", "", heading[1]).split("（", 1)[0])
+        for line in lines if (heading := MD_HEADING.fullmatch(line))
+    )
+    return bool(result_heading and SELF_REPORT.search(content))
 
 
 def is_report_artifact(raw, text):
@@ -1277,8 +1672,8 @@ def is_report_artifact(raw, text):
                                      or EXECUTION_KEY.fullmatch(first_field["key"]))
     metadata = "\n".join(lines)
     declaration = re.compile(r"^状态\s*[:：]\s*(?:设计(?:稿|草案)|规范草案|预注册)(?=$|[\s（(。])")
-    declared = bool(title and not title_is_field and report_title(title[1])
-                    and not any(declaration.match(MD_LIST.sub("", line)) for line in lines[:12]))
+    draft = any(declaration.match(MD_LIST.sub("", line)) for line in lines[:12])
+    declared = bool(title and not title_is_field and report_title(title[1]) and not draft)
     bound = RECEIPT_COMMIT.search(metadata) is not None
     if bound and (RECEIPT_VERDICT.search(metadata) or (RUN_EXIT_CODE.search(metadata) and RUN_RESULT.search(metadata))):
         return True
@@ -1311,7 +1706,8 @@ def is_report_artifact(raw, text):
                 outcome |= bool(DISPOSITION.search(line) or MEASUREMENT.search(line) or RUN_METRIC.search(line))
             execution |= bool(declared and (REPORT_SUBJECT.search(line) or MEASUREMENT.search(line)
                                             or re.search(r"本次.{0,24}(?:实跑|实测|执行)|生成：\d{4}-\d{2}-\d{2}", line)))
-    return (declared and (execution or outcome or report_table(body))) or (bound and outcome)
+    return ((declared and (execution or outcome or report_table(body))) or (bound and outcome)
+            or measured_report(title[1] if title and not title_is_field else None, content, draft=draft))
 
 
 def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):
