@@ -26,6 +26,7 @@ from pilot1742.review_convergence import (
     VerificationVerdict,
     VerifiedFinding,
     VerifiedRound,
+    _analyze_author_replies,
     _clip_formatted_inline,
     _collapse_prose_whitespace,
     _contains_raw_html_outside_code,
@@ -10129,3 +10130,115 @@ def test_r29_container_ownership_and_padding_matrix() -> None:
     assert _normalize_fingerprint_text("  Race  Condition ", "category") == "Race Condition"
     assert _normalize_fingerprint_text("---", "category") == "---"
     assert "\x00" not in _normalize_fingerprint_text("Race Condition", "category")
+
+
+# ── R30 精准返修（Codex R27 唯一 Important：列表项空白行达 padding 时扣除缩进） ────
+
+
+def test_r30_list_item_blank_line_padding_in_fenced_indented_and_html_blocks() -> None:
+    """R30 精准回归：列表项内空白行仅在 indent_ahead() >= padding 时扣除 padding，不误伤短空白行或吞掉正文缩进。"""
+
+    def doc(pad: int, mid: str = "    ") -> str:
+        p = " " * pad
+        m = "-" + " " * (pad - 1)
+        return f"{m}~~~\n{p}a\n{mid}\n{p}b\n{p}~~~"
+
+    def doc_findent(pad: int, findent: int, mid: str) -> str:
+        p = " " * pad
+        fi = " " * findent
+        m = "-" + " " * (pad - 1)
+        return f"{m}x\n\n{p}{fi}~~~\n{p}{fi}a\n{mid}\n{p}{fi}b\n{p}{fi}~~~"
+
+    def doc_pre(pad: int, mid: str = "    ") -> str:
+        p = " " * pad
+        m = "-" + " " * (pad - 1)
+        return f"{m}<pre>\n{p}a\n{mid}\n{p}b\n{p}</pre>"
+
+    # 1. Codex R27 精确复现：doc(2)（中间行保留 2 空格）vs doc(4)（中间行扣除 4 空格为空）-> False 2 1，旧显式 ID 回复不误绑
+    f_d2, f_d4, merged_repro = _r21_probe(doc(2), doc(4), category=True)
+    assert (f_d2.finding_id == f_d4.finding_id) is False
+    assert len(merged_repro) == 2
+    assert {item.finding_id for item in merged_repro} == {f_d2.finding_id, f_d4.finding_id}
+    postable_repro = select_postable_findings([_verified(f_d4, VerificationVerdict.CONFIRMED)], frozenset({f_d2.finding_id}))
+    assert len(postable_repro) == 1
+
+    old_reply = AuthorReply(f_d2.finding_id, None, None, "旧发现不修", "3001", "alice")
+    bound_repro, _ = _analyze_author_replies([f_d4], [old_reply])
+    assert (f_d4.finding_id in bound_repro) is False
+
+    # 2. pad=4 与 pad=2 中间行空格数 0..6 精确等价/区分矩阵（严格对齐 CommonMark §5.2，非 min()）
+    ids_pad4 = [
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 10, doc(4, " " * sp), "boom", "e").finding_id
+        for sp in range(7)
+    ]
+    assert ids_pad4[0] == ids_pad4[4]
+    assert ids_pad4[1] == ids_pad4[5]
+    assert ids_pad4[2] == ids_pad4[6]
+    assert ids_pad4[2] != ids_pad4[0]
+    assert ids_pad4[3] != ids_pad4[4]
+    assert len({ids_pad4[0], ids_pad4[1], ids_pad4[2], ids_pad4[3]}) == 4
+
+    ids_pad2 = [
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 10, doc(2, " " * sp), "boom", "e").finding_id
+        for sp in range(7)
+    ]
+    assert ids_pad2[0] == ids_pad2[2]
+    assert ids_pad2[1] == ids_pad2[3]
+    assert ids_pad2[2] != ids_pad2[4]
+    assert ids_pad2[4] == ids_pad4[2]
+    assert ids_pad2[5] == ids_pad4[3]
+    assert ids_pad2[2] == ids_pad4[4]
+    assert len({ids_pad2[2], ids_pad2[3], ids_pad2[4], ids_pad2[5], ids_pad2[6]}) == 5
+
+    # 3. Tab 空白行：4 列制表位下 doc(2, "\t") 剩余 2 空格，doc(4, "\t") 剩余 0 空格
+    f_tab2, f_tab4, merged_tab = _r21_probe(doc(2, "\t"), doc(4, "\t"), category=True)
+    assert f_tab2.finding_id != f_tab4.finding_id
+    assert len(merged_tab) == 2
+    assert len(select_postable_findings([_verified(f_tab4, VerificationVerdict.CONFIRMED)], frozenset({f_tab2.finding_id}))) == 1
+
+    f_tab2_eq, f_4sp2_eq, merged_tab_eq = _r21_probe(doc(2, "\t"), doc(2, "    "), category=True)
+    assert f_tab2_eq.finding_id == f_4sp2_eq.finding_id
+    assert len(merged_tab_eq) == 1
+    assert len(select_postable_findings([_verified(f_4sp2_eq, VerificationVerdict.CONFIRMED)], frozenset({f_tab2_eq.finding_id}))) == 0
+
+    f_tab4_eq, f_4sp4_eq, merged_tab4_eq = _r21_probe(doc(4, "\t"), doc(4, "    "), category=True)
+    assert f_tab4_eq.finding_id == f_4sp4_eq.finding_id
+    assert len(merged_tab4_eq) == 1
+
+    # 4. pad=2, findent=2 围栏代码块内空白行 spaces=0..6：0..4 等价，5 与 6 依次多出 1/2 空格
+    ids_fi2 = [
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 10, doc_findent(2, 2, " " * sp), "boom", "e").finding_id
+        for sp in range(7)
+    ]
+    assert len(set(ids_fi2[:5])) == 1
+    assert ids_fi2[5] != ids_fi2[4]
+    assert ids_fi2[6] != ids_fi2[5]
+    assert ids_fi2[6] != ids_fi2[4]
+    assert ids_fi2[5] == Finding(
+        Severity.IMPORTANT, "pilot1742/demo.py", 10, doc_findent(2, 0, " " * 3), "boom", "e"
+    ).finding_id
+    assert ids_fi2[6] == Finding(
+        Severity.IMPORTANT, "pilot1742/demo.py", 10, doc_findent(2, 0, " " * 4), "boom", "e"
+    ).finding_id
+
+    # 5. 列表项内缩进代码块与 <pre> HTML 块内空白行
+    ind_8sp = "-     a\n        \n      b"
+    ind_6sp = "-     a\n      \n      b"
+    ind_0sp = "-     a\n\n      b"
+    f_ind8, f_ind6, merged_ind = _r21_probe(ind_8sp, ind_6sp, category=True)
+    assert f_ind8.finding_id != f_ind6.finding_id
+    assert len(merged_ind) == 2
+    assert len(select_postable_findings([_verified(f_ind6, VerificationVerdict.CONFIRMED)], frozenset({f_ind8.finding_id}))) == 1
+
+    f_ind6_eq, f_ind0_eq, merged_ind_eq = _r21_probe(ind_6sp, ind_0sp, category=True)
+    assert f_ind6_eq.finding_id == f_ind0_eq.finding_id
+    assert len(merged_ind_eq) == 1
+
+    f_pre2, f_pre4, merged_pre = _r21_probe(doc_pre(2, "    "), doc_pre(4, "    "), category=True)
+    assert f_pre2.finding_id != f_pre4.finding_id
+    assert len(merged_pre) == 2
+    assert len(select_postable_findings([_verified(f_pre4, VerificationVerdict.CONFIRMED)], frozenset({f_pre2.finding_id}))) == 1
+
+    f_pre4_4sp, f_pre4_0sp, merged_pre_eq = _r21_probe(doc_pre(4, "    "), doc_pre(4, ""), category=True)
+    assert f_pre4_4sp.finding_id == f_pre4_0sp.finding_id
+    assert len(merged_pre_eq) == 1

@@ -2592,6 +2592,8 @@ def _parse_commonmark_blocks(
                 if cursor.is_blank():
                     if not container.has_content:
                         break
+                    if cursor.indent_ahead() >= container.padding:
+                        cursor.advance_cols(container.padding)
                     matched += 1
                     continue
                 if cursor.indent_ahead() >= container.padding:
