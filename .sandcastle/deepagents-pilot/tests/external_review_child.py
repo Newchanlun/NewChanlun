@@ -6,12 +6,15 @@ import sys
 import uuid
 from pathlib import Path
 
+isolation_contract = ("2" if os.environ.get("SANDCASTLE_APPARMOR_ABSENT") == "accept" else "1") * 64
+
 if sys.argv[1:] == ["--admission-only"]:  # 部署准入替身：controller=cwd 的 HEAD；.git/fake-admission 可注入失败或换镜像
     head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     override = Path(".git/fake-admission").read_text().strip() if Path(".git/fake-admission").exists() else ""
     if override == "fail":
         sys.exit(2)
-    print(json.dumps({"controller_code_head": head, "image_id": override or "sha256:" + "1" * 64}))
+    print(json.dumps({"controller_code_head": head, "image_id": override or "sha256:" + "1" * 64,
+                      "isolation_contract": isolation_contract}))
     sys.exit(0)
 folder = Path(sys.argv[sys.argv.index("--output-dir") + 1])
 launch = json.loads((folder / "launch.json").read_text())
@@ -41,7 +44,7 @@ events = [{"type": "thread.started", "thread_id": session}, *tool,
 (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
 (folder / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": session}}) + "\n")
 record = {**launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0, "container_closed": True,
-          "image_id": "sha256:" + "1" * 64, "container_id": "a" * 64,
+          "image_id": "sha256:" + "1" * 64, "isolation_contract": isolation_contract, "container_id": "a" * 64,
           "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT"},
           "session_id": session, "turn_completed": True, "result": output,
           "before": {"head": launch["head_sha"], "branch": "HEAD", "status": ""},
