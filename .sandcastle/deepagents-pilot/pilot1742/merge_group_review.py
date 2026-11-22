@@ -26,8 +26,21 @@ from typing import Any, Literal
 
 _external_review_module: Any = importlib.import_module(".external_review", package=__package__ or "pilot1742")
 _controller_message_blocks: Callable[[str], bool] = _external_review_module._message_blocks
-if not callable(_controller_message_blocks):
-    raise ImportError("pilot1742.external_review._message_blocks 不可调用")
+_unwrap_json_fence: Callable[[str], str] = _external_review_module.unwrap_json_fence
+_frozen_patch: Callable[[Path, Any], Any] = _external_review_module.frozen_patch
+_ReviewTarget: Any = _external_review_module.ReviewTarget
+if (
+    not callable(_controller_message_blocks)
+    or not callable(_unwrap_json_fence)
+    or not callable(_frozen_patch)
+    or not callable(_ReviewTarget)
+):
+    raise ImportError("pilot1742.external_review 必需接口不可调用")
+
+_patch_read_module: Any = importlib.import_module(".patch_read", package=__package__ or "pilot1742")
+_reads_candidate_patch: Callable[[str, str, Any], bool] = _patch_read_module.reads_candidate_patch
+if not callable(_reads_candidate_patch):
+    raise ImportError("pilot1742.patch_read.reads_candidate_patch 不可调用")
 
 MERGE_GROUP_STATUS_CONTEXT = "deepagents/review"
 DEFAULT_EXPECTED_MODELS: tuple[str, ...] = ("kimi-k3.1-pro", "claude-opus-5-5")
@@ -55,6 +68,10 @@ _MERGE_GROUP_REF_RE = re.compile(
     r"(?P<base_sha>[0-9a-fA-F]{40}|[0-9a-fA-F]{64})"
 )
 _RUN_DIR_PREFIX_RE = re.compile(r"r(?P<repo>[1-9][0-9]*)-p(?P<pr>[1-9][0-9]*)-.*")
+_RECONNECT_ERROR_RE = re.compile(
+    r"Reconnecting\.\.\. ([1-9]\d*)/([1-9]\d*) \([^\r\n]+\)",
+    re.ASCII,
+)
 
 _REASON_DESCRIPTIONS: dict[str, str] = {
     "merge_group_pass_reused": "顺序合并树与成员 PASS 核验通过",
@@ -64,6 +81,7 @@ _REASON_DESCRIPTIONS: dict[str, str] = {
     "head_tree_id_mismatch": "head_sha 树哈希与载荷声明不符",
     "merge_conflict": "顺序合并存在冲突",
     "merge_failed": "顺序合并重放失败",
+    "replay_env_error": "隔离重放环境或 Git 执行故障",
     "overlap_query_failed": "跨成员重叠文件查询失败",
     "tree_mismatch": "顺序合并结果树与队列头不一致",
     "overlapping_files_rejected": "策略拒收跨成员重叠文件",
@@ -87,6 +105,7 @@ _REASON_DESCRIPTIONS: dict[str, str] = {
     "member_missing_receipt": "成员缺少审查回执",
     "member_receipt_invalid": "成员审查回执绑定或探针校验失败",
     "member_session_invalid": "成员独立 session 证据缺失或不符",
+    "member_events_invalid": "成员审查事件流缺失或校验未通过",
     "member_reuse_not_allowed": "策略禁止单跳沿用 PASS",
     "member_chained_reuse_not_allowed": "禁止多跳或自引用沿用 PASS",
     "member_reuse_origin_missing": "找不到单跳沿用的原件审查 run",
@@ -123,10 +142,12 @@ def _first_line_strict(text: str) -> str:
 
 
 def _message_blocks(text: str) -> bool:
-    """直接复用现役 external_review._message_blocks 判定 BLOCK（异常时 fail-closed 返回 True）。"""
+    """直接复用现役 external_review._message_blocks 判定 BLOCK；资源超限异常归因为证据损坏。"""
     try:
         return bool(_controller_message_blocks(text))
-    except (RecursionError, MemoryError, ValueError, TypeError):
+    except (RecursionError, MemoryError) as exc:
+        raise _EvidenceError(f"消息 BLOCK 判定解码超限：{type(exc).__name__}") from None
+    except (ValueError, TypeError):
         return True
 
 
@@ -161,8 +182,8 @@ def _parse_branch_name(raw: object, *, field: str = "base_branch") -> str:
         raise MergeGroupError(f"{field} 含有非法字符或路径穿越段：{raw!r}")
     segments = raw.split("/")
     for seg in segments:
-        if not seg or seg.startswith(".") or seg.endswith(".") or seg.endswith(".lock"):
-            raise MergeGroupError(f"{field} 含非法路径段（以 '.' 开头/结尾或以 '.lock' 结尾）：{raw!r}")
+        if not seg or seg.startswith(".") or seg.endswith(".lock"):
+            raise MergeGroupError(f"{field} 含非法路径段（以 '.' 开头或以 '.lock' 结尾）：{raw!r}")
     return raw
 
 
@@ -788,8 +809,8 @@ def compute_patch_identity(source_repo: Path, merge_base_sha: str, head_sha: str
     try:
         with _isolated_replay_repo(source_repo) as replay_repo:
             return _compute_patch_identity_in_repo(replay_repo, mb, head)
-    except _GitQueryError as exc:
-        raise MergeGroupError(f"无法初始化隔离对象库计算补丁身份：{exc}") from None
+    except (_GitQueryError, OSError, subprocess.SubprocessError) as exc:
+        raise MergeGroupError(f"无法初始化隔离对象库计算补丁身份：{type(exc).__name__}") from None
 
 
 @dataclass(frozen=True)
@@ -808,21 +829,12 @@ class TreeVerificationResult:
 
 def _collect_touched_paths(
     replay_repo: Path,
-    current_commit: str,
-    member_head_sha: str,
+    before_tree_sha: str,
+    after_tree_sha: str,
     *,
     env: Mapping[str, str],
 ) -> set[str]:
-    """统计成员相对 merge-base(current_commit, member_head_sha) 改动的文件路径；查询失败立即抛错。"""
-    mb_proc = _run_git(replay_repo, "merge-base", current_commit, member_head_sha, env=env)
-    if mb_proc.returncode != 0:
-        stderr = mb_proc.stderr.decode("utf-8", errors="replace").strip()
-        raise _GitQueryError(
-            f"重叠文件查询 merge-base 失败（exit={mb_proc.returncode}）：{stderr}"
-        )
-    mb_raw = _first_line_strict(mb_proc.stdout.decode("utf-8", errors="replace")).strip()
-    if not _COMMIT_SHA_RE.fullmatch(mb_raw):
-        raise _GitQueryError(f"重叠文件查询返回非法 merge-base：{mb_raw!r}")
+    """统计本步合并前后树对象之间实际引入/改动的文件路径；查询失败立即抛错。"""
     diff_proc = _run_git(
         replay_repo,
         "diff-tree",
@@ -830,8 +842,8 @@ def _collect_touched_paths(
         "--name-only",
         "-z",
         "--no-renames",
-        mb_raw.lower(),
-        member_head_sha,
+        before_tree_sha,
+        after_tree_sha,
         env=env,
     )
     if diff_proc.returncode != 0:
@@ -966,6 +978,7 @@ def _verify_merge_group_tree_in_repo(
         return tuple(sorted(path for path, prs in touched_by_path.items() if len(prs) >= 2))
 
     current_commit = target.base_sha
+    current_tree_sha = base_tree_sha
     for idx, member in enumerate(target.members):
         merge_proc = _run_git(
             replay_repo,
@@ -1015,12 +1028,12 @@ def _verify_merge_group_tree_in_repo(
                 overlapping_files=_current_overlaps(),
             )
 
-        # merge-tree 成功后统计改动路径；任何查询失败均 fail-closed 报 overlap_query_failed
+        # merge-tree 成功后直接对比本步合入前后树差异；任何查询失败均 fail-closed 报 overlap_query_failed
         try:
             touched_paths = _collect_touched_paths(
                 replay_repo,
-                current_commit,
-                member.head_sha,
+                current_tree_sha,
+                step_tree_sha,
                 env=replay_env,
             )
         except _GitQueryError as exc:
@@ -1038,6 +1051,7 @@ def _verify_merge_group_tree_in_repo(
             touched_by_path.setdefault(touched_path, set()).add(member.pr_number)
 
         step_trees.append((member.pr_number, step_tree_sha))
+        current_tree_sha = step_tree_sha
 
         if idx + 1 < len(target.members):
             commit_proc = _run_git(
@@ -1119,11 +1133,11 @@ def verify_merge_group_tree(
     try:
         with _isolated_replay_repo(source_repo) as replay_repo:
             return _verify_merge_group_tree_in_repo(target, replay_repo=replay_repo)
-    except _GitQueryError as exc:
+    except (_GitQueryError, OSError, subprocess.SubprocessError) as exc:
         return TreeVerificationResult(
             matched=False,
-            reason_code="merge_failed",
-            detail=str(exc),
+            reason_code="replay_env_error",
+            detail=f"隔离重放环境或 Git 执行故障：{type(exc).__name__}",
             base_tree_sha=None,
             actual_tree_sha=None,
             expected_tree_sha=None,
@@ -1304,6 +1318,18 @@ def _safe_read_text(
         raise _EvidenceError(f"证据文本 UTF-8 解码失败：{path}（{exc}）") from None
 
 
+def _safe_read_text_lines(
+    root: Path,
+    path: Path,
+    *,
+    check_ownership: bool,
+    max_bytes: int | None = None,
+) -> list[str]:
+    limit = MAX_LOG_EVIDENCE_BYTES if max_bytes is None else max_bytes
+    text = _safe_read_text(root, path, check_ownership=check_ownership, max_bytes=limit)
+    return _split_lines_strict(text)
+
+
 def _safe_read_first_line(
     root: Path,
     path: Path,
@@ -1372,7 +1398,7 @@ class _WorkerEvidence:
     launch: dict[str, Any] | None
     receipt: dict[str, Any] | None
     session_first_line: str | None
-    events_text: str | None
+    events_lines: tuple[str, ...] | None
 
 
 @dataclass(frozen=True)
@@ -1470,20 +1496,22 @@ def _load_run_record(
                 check_ownership=check_ownership,
             )
         events_path = worker_dir / "events.jsonl"
-        events_text: str | None = None
+        events_lines: tuple[str, ...] | None = None
         if os.path.lexists(events_path):
-            events_text = _safe_read_text(
-                state_root,
-                events_path,
-                check_ownership=check_ownership,
-                max_bytes=MAX_LOG_EVIDENCE_BYTES,
+            events_lines = tuple(
+                _safe_read_text_lines(
+                    state_root,
+                    events_path,
+                    check_ownership=check_ownership,
+                    max_bytes=MAX_LOG_EVIDENCE_BYTES,
+                )
             )
         workers[model] = _WorkerEvidence(
             model=model,
             launch=launch_data,
             receipt=receipt_data,
             session_first_line=session_first_line,
-            events_text=events_text,
+            events_lines=events_lines,
         )
 
     return _RunRecord(
@@ -1567,9 +1595,11 @@ def _run_has_block(run: _RunRecord) -> bool:
         reviews = run.outcome.get("reviews")
         if reviews is not None:
             if not isinstance(reviews, list):
-                return True
+                raise _EvidenceError(f"run {run.run_id} outcome.reviews 不是列表")
             for review in reviews:
-                if not isinstance(review, dict) or review.get("verdict") == "BLOCK":
+                if not isinstance(review, dict):
+                    raise _EvidenceError(f"run {run.run_id} outcome.reviews 含非对象条目")
+                if review.get("verdict") == "BLOCK":
                     return True
 
     for worker in run.workers.values():
@@ -1587,21 +1617,27 @@ def _run_has_block(run: _RunRecord) -> bool:
                             {"status": result.get("status"), "summary": summary},
                             ensure_ascii=False,
                         )
-                    except (TypeError, ValueError, RecursionError, MemoryError):
-                        return True
+                    except (TypeError, ValueError, RecursionError, MemoryError) as exc:
+                        raise _EvidenceError(
+                            f"run {run.run_id} 模型 {worker.model} receipt.result 序列化失败（{type(exc).__name__}）"
+                        ) from None
                     if _message_blocks(payload_json):
                         return True
-        if worker.events_text is not None:
+        if worker.events_lines is not None:
             final_text: str | None = None
-            for line in _split_lines_strict(worker.events_text):
+            for line in worker.events_lines:
                 if not line.strip():
                     continue
                 try:
                     event = json.loads(line)
-                except (ValueError, TypeError, RecursionError, MemoryError):
-                    return True
+                except (ValueError, TypeError, RecursionError, MemoryError) as exc:
+                    raise _EvidenceError(
+                        f"run {run.run_id} 模型 {worker.model} events.jsonl JSON 损坏或截断（{type(exc).__name__}）"
+                    ) from None
                 if not isinstance(event, dict):
-                    return True
+                    raise _EvidenceError(
+                        f"run {run.run_id} 模型 {worker.model} events.jsonl 事件不是 JSON 对象"
+                    )
                 item = event.get("item")
                 if (
                     event.get("type") == "item.completed"
@@ -1610,7 +1646,9 @@ def _run_has_block(run: _RunRecord) -> bool:
                 ):
                     raw_text = item.get("text")
                     if not isinstance(raw_text, str):
-                        return True
+                        raise _EvidenceError(
+                            f"run {run.run_id} 模型 {worker.model} events.jsonl agent_message.text 不是字符串"
+                        )
                     final_text = raw_text
             if final_text is not None and _message_blocks(final_text):
                 return True
@@ -1678,13 +1716,19 @@ def _verify_outcome_target_binding(
     outcome_target = outcome.get("target")
     if not isinstance(outcome_target, dict):
         return ("member_outcome_invalid", f"run {run.run_id} outcome.target 缺失或不是对象")
+    outcome_reg_ns = outcome_target.get("registered_at_ns")
     if (
         type(outcome_target.get("pr_number")) is not int
         or outcome_target.get("pr_number") != run.pr_number
         or type(outcome_target.get("repository_id")) is not int
         or outcome_target.get("repository_id") != run.repository_id
+        or type(outcome_reg_ns) is not int
+        or outcome_reg_ns != run.registered_at_ns
     ):
-        return ("member_outcome_invalid", f"run {run.run_id} outcome.target 仓库或 PR 编号不匹配")
+        return (
+            "member_outcome_invalid",
+            f"run {run.run_id} outcome.target 仓库、PR 编号或 registered_at_ns 不匹配",
+        )
     expected_str_fields: dict[str, str] = {
         "run_id": run.run_id,
         "head_sha": run.head_sha,
@@ -1737,15 +1781,18 @@ def _verify_publication_binding(
     if not valid_id:
         return ("member_publication_invalid", f"run {run.run_id} publication.id 缺失或非法")
     pub_desc = publication.get("description")
-    if not isinstance(pub_desc, str) or not pub_desc.strip():
-        return ("member_publication_invalid", f"run {run.run_id} publication.description 缺失或为空")
-    expected_desc_token = f"run={run.run_id} b={run.base_sha[:12]} h={run.head_sha[:12]} success"
-    if expected_desc_token not in pub_desc:
-        return ("member_publication_invalid", f"run {run.run_id} publication.description 缺少 run/base/head 绑定")
-    if reuse_origin_run_id is not None:
-        expected_reuse_token = f"reuse={reuse_origin_run_id} p={patch_id[7:19]}"
-        if expected_reuse_token not in pub_desc:
-            return ("member_publication_invalid", f"run {run.run_id} publication.description 缺少 reuse/patch 绑定")
+    if reuse_origin_run_id is None:
+        expected_desc = f"run={run.run_id} b={run.base_sha[:12]} h={run.head_sha[:12]} success"
+    else:
+        expected_desc = (
+            f"run={run.run_id} b={run.base_sha[:12]} h={run.head_sha[:12]} success "
+            f"reuse={reuse_origin_run_id} p={patch_id[7:19]}"
+        )
+    if not isinstance(pub_desc, str) or pub_desc != expected_desc:
+        return (
+            "member_publication_invalid",
+            f"run {run.run_id} publication.description 与预期绑定不精确一致",
+        )
     return None
 
 
@@ -1822,6 +1869,7 @@ def _verify_direct_pass_run(
 
     seen_launch_ids: set[str] = set()
     seen_session_ids: set[str] = set()
+    frozen_candidate_patch: Any | None = None
     for model in policy.expected_models:
         worker = run.workers.get(model)
         if worker is None or worker.launch is None:
@@ -1908,13 +1956,23 @@ def _verify_direct_pass_run(
             return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 文件隔离探针缺失或未通过")
 
         result_obj = receipt.get("result")
-        if not isinstance(result_obj, dict) or result_obj.get("status") != "completed":
-            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执 result 非 completed")
-        summary = result_obj.get("summary")
-        if not isinstance(summary, str) or _first_line_strict(summary) != "VERDICT: PASS":
+        if (
+            not isinstance(result_obj, dict)
+            or set(result_obj) != {"status", "summary", "findings", "validation"}
+            or result_obj.get("status") != "completed"
+            or not isinstance(result_obj.get("summary"), str)
+            or not all(
+                isinstance(result_obj.get(k), list)
+                and all(isinstance(x, str) for x in result_obj[k])
+                for k in ("findings", "validation")
+            )
+        ):
+            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执 result 不符合协议")
+        summary = result_obj["summary"]
+        if _first_line_strict(summary) != "VERDICT: PASS":
             return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执 summary 首行非 VERDICT: PASS")
         try:
-            result_json = json.dumps({"status": result_obj.get("status"), "summary": summary}, ensure_ascii=False)
+            result_json = json.dumps(result_obj, ensure_ascii=False)
         except (TypeError, ValueError, RecursionError, MemoryError):
             return ("member_evidence_corrupted", f"run {run.run_id} 模型 {model} 回执 result 序列化失败")
         if _message_blocks(result_json):
@@ -1945,6 +2003,126 @@ def _verify_direct_pass_run(
             or payload_obj.get("id") != session_id
         ):
             return ("member_session_invalid", f"run {run.run_id} 模型 {model} session.jsonl 身份与 receipt 不符")
+
+        if worker.events_lines is None:
+            return ("member_events_invalid", f"run {run.run_id} 缺少模型 {model} 的 events.jsonl")
+        parsed_events: list[dict[str, Any]] = []
+        for raw_line in worker.events_lines:
+            if not raw_line.strip():
+                continue
+            try:
+                event = json.loads(raw_line)
+            except (ValueError, TypeError, RecursionError, MemoryError):
+                return ("member_evidence_corrupted", f"run {run.run_id} 模型 {model} events.jsonl JSON 行损坏")
+            if not isinstance(event, dict):
+                return ("member_evidence_corrupted", f"run {run.run_id} 模型 {model} events.jsonl 事件不是 JSON 对象")
+            parsed_events.append(event)
+
+        if frozen_candidate_patch is None:
+            raw_attempt = run.target.get("attempt")
+            attempt_val = raw_attempt if type(raw_attempt) is int and raw_attempt > 0 else 1
+            raw_base_ref = run.target.get("base_ref")
+            base_ref_val = raw_base_ref if isinstance(raw_base_ref, str) and raw_base_ref else "main"
+            raw_head_ref = run.target.get("head_ref")
+            head_ref_val = (
+                raw_head_ref if isinstance(raw_head_ref, str) and raw_head_ref else f"pr-{run.pr_number}"
+            )
+            review_target = _ReviewTarget(
+                repository_id=run.repository_id,
+                pr_number=run.pr_number,
+                base_repository_id=run.repository_id,
+                base_ref=base_ref_val,
+                base_sha=run.base_sha,
+                head_repository_id=run.repository_id,
+                head_ref=head_ref_val,
+                head_sha=run.head_sha,
+                merge_base_sha=run.merge_base_sha,
+                run_id=run.run_id,
+                attempt=attempt_val,
+                policy_version=policy.policy_version,
+                controller_code_head=policy.controller_code_head,
+                registered_at_ns=run.registered_at_ns,
+                patch_id=recorded_patch_id,
+                review_contract=policy.review_contract,
+            )
+            try:
+                frozen_candidate_patch = _frozen_patch(replay_repo, review_target)
+            except subprocess.CalledProcessError:
+                return ("member_patch_id_mismatch", f"run {run.run_id} 无法从隔离对象库提取冻结候选补丁")
+
+        turn_completed = False
+        final_text: str | None = None
+        patch_reads = 0
+        thread_ids: set[object] = set()
+        for event in parsed_events:
+            kind = event.get("type")
+            if kind == "thread.started":
+                thread_ids.add(event.get("thread_id"))
+            elif kind == "error":
+                raw_msg = event.get("message")
+                reconnect = _RECONNECT_ERROR_RE.fullmatch(raw_msg) if isinstance(raw_msg, str) else None
+                if reconnect is None or int(reconnect.group(1)) > int(reconnect.group(2)):
+                    return (
+                        "member_events_invalid",
+                        f"run {run.run_id} 模型 {model} events.jsonl 含非重连 error 事件",
+                    )
+                turn_completed = False
+                final_text = None
+            elif kind in ("turn.failed", "turn.cancelled"):
+                return (
+                    "member_events_invalid",
+                    f"run {run.run_id} 模型 {model} events.jsonl 含失败终态 {kind}",
+                )
+            elif kind == "turn.completed":
+                turn_completed = True
+            elif kind == "item.completed":
+                item = event.get("item")
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                    if item_type == "agent_message":
+                        raw_text = item.get("text")
+                        final_text = raw_text if isinstance(raw_text, str) else None
+                    elif item_type == "command_execution":
+                        item_status = item.get("status")
+                        item_exit = item.get("exit_code")
+                        if item_status == "completed" and type(item_exit) is int and item_exit == 0:
+                            cmd_raw = item.get("command")
+                            agg_raw = item.get("aggregated_output")
+                            if _reads_candidate_patch(
+                                str(cmd_raw) if cmd_raw is not None else "",
+                                str(agg_raw) if agg_raw is not None else "",
+                                frozen_candidate_patch,
+                            ):
+                                patch_reads += 1
+
+        if not turn_completed:
+            return ("member_events_invalid", f"run {run.run_id} 模型 {model} events.jsonl 缺少 turn.completed")
+        if thread_ids != {session_id}:
+            return (
+                "member_events_invalid",
+                f"run {run.run_id} 模型 {model} events.jsonl thread.started 与 session_id 不符",
+            )
+        if patch_reads == 0:
+            return (
+                "member_events_invalid",
+                f"run {run.run_id} 模型 {model} events.jsonl 未读取冻结候选补丁",
+            )
+        if final_text is None:
+            return ("member_events_invalid", f"run {run.run_id} 模型 {model} events.jsonl 缺少最终 agent_message")
+        if _message_blocks(final_text):
+            return ("member_blocked", f"run {run.run_id} 模型 {model} events.jsonl 最终消息判定为 BLOCK")
+        try:
+            parsed_final = json.loads(_unwrap_json_fence(final_text))
+        except (ValueError, TypeError, RecursionError, MemoryError):
+            return (
+                "member_evidence_corrupted",
+                f"run {run.run_id} 模型 {model} events.jsonl 最终消息 JSON 解析失败",
+            )
+        if parsed_final != result_obj:
+            return (
+                "member_events_invalid",
+                f"run {run.run_id} 模型 {model} events.jsonl 最终消息与 receipt.result 不符",
+            )
 
     patch_check = _verify_and_compute_patch_id(replay_repo, run)
     if not patch_check.ok:
@@ -2015,6 +2193,18 @@ def _verify_member_pass_in_repo(
                     "member_unsettled_run",
                     f"PR #{member.pr_number} 在当前 head 存在未完结 run（run={run.run_id}）",
                 )
+
+        # 用 registered_at_ns 做新旧排序与取代判断前，强制核验同 PR 下所有含 outcome.json 的 run 时间戳强绑定
+        for run in pr_runs:
+            if run.outcome is not None:
+                outcome_target = run.outcome.get("target")
+                if not isinstance(outcome_target, dict):
+                    raise _EvidenceError(f"run {run.run_id} outcome.target 缺失或不是对象")
+                outcome_reg_ns = outcome_target.get("registered_at_ns")
+                if type(outcome_reg_ns) is not int or outcome_reg_ns != run.registered_at_ns:
+                    raise _EvidenceError(
+                        f"run {run.run_id} outcome.target.registered_at_ns 与 target.json 不一致"
+                    )
 
         head_runs_sorted = sorted(head_runs, key=lambda r: (r.registered_at_ns, r.run_id), reverse=True)
         latest = head_runs_sorted[0]
@@ -2205,16 +2395,44 @@ def _verify_member_pass_in_repo(
                         f"run {latest.run_id} reused_from 来源 SHA 与原件 run={origin.run_id} 不一致",
                     )
 
+                assert origin.outcome is not None
+                origin_pub = origin.outcome.get("publication")
+                if not isinstance(origin_pub, dict):
+                    return fail(
+                        "member_reuse_binding_invalid",
+                        f"run {latest.run_id} 原件 run={origin.run_id} 缺少合法 publication",
+                    )
                 reused_pub = reused_from.get("publication")
+                if not isinstance(reused_pub, dict):
+                    return fail(
+                        "member_reuse_binding_invalid",
+                        f"run {latest.run_id} reused_from.publication 缺失或不是对象",
+                    )
+                reused_pub_id = reused_pub.get("id")
+                reused_pub_sha = reused_pub.get("sha")
+                reused_pub_state = reused_pub.get("state")
+                reused_pub_desc = reused_pub.get("description")
+                origin_pub_id = origin_pub.get("id")
+                origin_pub_sha = origin_pub.get("sha")
+                origin_pub_state = origin_pub.get("state")
+                origin_pub_desc = origin_pub.get("description")
                 if (
-                    not isinstance(reused_pub, dict)
-                    or reused_pub.get("state") != "success"
-                    or not isinstance(reused_pub.get("sha"), str)
-                    or reused_pub["sha"].lower() != origin.head_sha
+                    type(reused_pub_id) is not type(origin_pub_id)
+                    or reused_pub_id != origin_pub_id
+                    or not isinstance(reused_pub_sha, str)
+                    or not isinstance(origin_pub_sha, str)
+                    or reused_pub_sha.lower() != origin_pub_sha.lower()
+                    or reused_pub_state != origin_pub_state
+                    or reused_pub_desc != origin_pub_desc
                 ):
                     return fail(
                         "member_reuse_binding_invalid",
-                        f"run {latest.run_id} reused_from.publication 缺失或与原件不符",
+                        f"run {latest.run_id} reused_from.publication 与原件 run={origin.run_id} 不一致",
+                    )
+                if reused_from.get("reviews") != origin.outcome.get("reviews"):
+                    return fail(
+                        "member_reuse_binding_invalid",
+                        f"run {latest.run_id} reused_from.reviews 与原件 run={origin.run_id} 不一致",
                     )
 
                 for run in same_patch_runs:
@@ -2261,11 +2479,10 @@ def _verify_member_pass_in_repo(
             return _evaluate_with_replay(replay_repo)
         with _isolated_replay_repo(source_repo) as isolated_repo:
             return _evaluate_with_replay(isolated_repo)
-    except _GitQueryError as exc:
-        return fail("member_merge_base_mismatch", str(exc))
+    except (_GitQueryError, OSError, subprocess.SubprocessError) as exc:
+        return fail("replay_env_error", f"隔离重放环境或 Git 执行故障：{type(exc).__name__}")
     except (
         _EvidenceError,
-        OSError,
         ValueError,
         TypeError,
         KeyError,
@@ -2291,15 +2508,25 @@ def verify_member_pass(
     if not isinstance(policy, MergeGroupPolicy):
         raise MergeGroupError("policy 必须是 MergeGroupPolicy 实例")
     _parse_positive_int(repository_id, field="repository_id")
-    return _verify_member_pass_in_repo(
-        member,
-        repository_id=repository_id,
-        replay_repo=None,
-        source_repo=source_repo,
-        state_root=state_root,
-        policy=policy,
-        published_statuses=published_statuses,
-    )
+    try:
+        return _verify_member_pass_in_repo(
+            member,
+            repository_id=repository_id,
+            replay_repo=None,
+            source_repo=source_repo,
+            state_root=state_root,
+            policy=policy,
+            published_statuses=published_statuses,
+        )
+    except (_GitQueryError, OSError, subprocess.SubprocessError) as exc:
+        return MemberPassVerification(
+            passed=False,
+            pr_number=member.pr_number,
+            head_sha=member.head_sha,
+            reason_code="replay_env_error",
+            detail=f"隔离重放环境或 Git 执行故障：{type(exc).__name__}",
+            proof=None,
+        )
 
 
 def _truncate_description(text: str, *, limit: int = MAX_STATUS_DESCRIPTION_LEN) -> str:
@@ -2488,25 +2715,11 @@ def evaluate_merge_group(
                 else:
                     failed_members.append((member.pr_number, verification.reason_code, verification.detail))
             tree_result = _verify_merge_group_tree_in_repo(target, replay_repo=replay_repo)
-    except _GitQueryError as exc:
-        for member in target.members:
-            verification = _verify_member_pass_in_repo(
-                member,
-                repository_id=target.repository_id,
-                replay_repo=None,
-                source_repo=source_repo,
-                state_root=state_root,
-                policy=policy,
-                published_statuses=published_statuses,
-            )
-            if verification.passed and verification.proof is not None:
-                member_proofs.append(verification.proof)
-            else:
-                failed_members.append((member.pr_number, verification.reason_code, verification.detail))
+    except (_GitQueryError, OSError, subprocess.SubprocessError) as exc:
         tree_result = TreeVerificationResult(
             matched=False,
-            reason_code="merge_failed",
-            detail=str(exc),
+            reason_code="replay_env_error",
+            detail=f"隔离重放环境或 Git 执行故障：{type(exc).__name__}",
             base_tree_sha=None,
             actual_tree_sha=None,
             expected_tree_sha=None,
