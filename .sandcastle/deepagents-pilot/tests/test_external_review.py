@@ -1450,12 +1450,47 @@ def test_reuse_requires_current_deployment_admission(lane, env, change):
     assert "reused_from" not in result and len(result["reviews"]) == len(MODELS)
 
 
-def test_reuse_records_admission(lane, env):
+@pytest.mark.parametrize("policy,digest", [(None, "1" * 64), ("accept", "2" * 64)])
+def test_reuse_records_admission(lane, env, monkeypatch, policy, digest):
+    if policy is None:
+        monkeypatch.delenv("SANDCASTLE_APPARMOR_ABSENT", raising=False)
+    else:
+        monkeypatch.setenv("SANDCASTLE_APPARMOR_ABSENT", policy)
     lane.review_pr(1810)
     _advance_main(lane, env)
     result = lane.review_pr(1810)
     assert result["reused_from"]["admission"] == {"controller_code_head": git(lane.source, "rev-parse", "HEAD"),
-                                                  "image_id": "sha256:" + "1" * 64}
+                                                  "image_id": "sha256:" + "1" * 64, "isolation_contract": digest}
+
+
+@pytest.mark.parametrize("change", ["policy", "legacy-receipt"])
+def test_reuse_requires_both_receipts_to_match_isolation_contract(lane, env, monkeypatch, change):
+    monkeypatch.setenv("SANDCASTLE_APPARMOR_ABSENT", "accept")
+    first = lane.review_pr(1810)
+    if change == "policy":
+        monkeypatch.delenv("SANDCASTLE_APPARMOR_ABSENT")
+    else:
+        old = ReviewTarget(**first["target"])
+        path = lane.state_root / "runs" / old.key / MODELS[1] / "receipt.json"
+        receipt = json.loads(path.read_text())
+        del receipt["isolation_contract"]
+        path.write_text(json.dumps(receipt))
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS"
+    assert "reused_from" not in result
+    assert [r["model"] for r in result["reviews"]] == list(MODELS)
+
+
+@pytest.mark.parametrize("digest", [None, "a" * 63, "A" * 64, 10**63])
+def test_deployment_admission_rejects_missing_or_invalid_isolation_contract(lane, monkeypatch, digest):
+    head = git(lane.source, "rev-parse", "HEAD")
+    output = {"controller_code_head": head, "image_id": "sha256:" + "1" * 64}
+    if digest is not None:
+        output["isolation_contract"] = digest
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps(output)))
+    assert lane._deployment_admission(head) is None
 
 
 
