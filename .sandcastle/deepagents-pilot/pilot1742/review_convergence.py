@@ -1078,6 +1078,82 @@ def _extract_wontfix_reply_keys(
     )
 
 
+def _recover_legacy_wontfix_reply_keys(
+    *,
+    resolved_fingerprints: Collection[str],
+    consumed_reply_keys: Collection[str],
+    pre_consumed_keys: frozenset[str],
+    bound_reply_targets: Mapping[str, str],
+    prior_aliases: Mapping[str, str],
+    next_aliases: Mapping[str, str],
+    consumed_alias_maps: Sequence[Mapping[str, str]],
+) -> frozenset[tuple[str, str]]:
+    """从旧格式历史条目（wontfix_reply_keys=None）的已消费键与已核验目标锁定中恢复可唯一归属的直接 wontfix 证据。"""
+    resolved_set = frozenset(fp.strip().lower() for fp in resolved_fingerprints)
+    if not resolved_set:
+        return frozenset()
+
+    parsed: list[tuple[str, str, str, str]] = []
+    for rk in consumed_reply_keys:
+        cid, kind, payload = _parse_consumed_reply_key(rk, "consumed_reply_keys[]")
+        parsed.append((rk, cid, kind, payload))
+
+    resolved_pairs = {
+        (cid, payload)
+        for _, cid, kind, payload in parsed
+        if kind == "resolved" and payload in resolved_set
+    }
+    if not resolved_pairs:
+        return frozenset()
+
+    candidates_by_fid: dict[str, list[tuple[str, str]]] = {}
+    for rk, cid, kind, payload in parsed:
+        if kind == "resolved":
+            continue
+        target_fid: str | None = None
+        if kind == "finding" and len(payload) == 16:
+            target_fid = payload if payload in resolved_set else None
+        elif kind == "finding" and len(payload) < 16:
+            pinned = bound_reply_targets.get(rk)
+            if pinned is not None and pinned in resolved_set and pinned.startswith(payload):
+                target_fid = pinned
+        elif kind in ("loc", "inline"):
+            pinned = bound_reply_targets.get(rk)
+            if pinned is not None:
+                matches = [
+                    fid
+                    for fid in resolved_set
+                    if pinned == fid or prior_aliases.get(pinned) == fid or next_aliases.get(pinned) == fid
+                ]
+                if len(matches) == 1:
+                    target_fid = matches[0]
+        if (
+            target_fid is not None
+            and (cid, target_fid) in resolved_pairs
+            and not _is_reply_consumed_for_target(
+                rk,
+                cid,
+                target_fid,
+                consumed_reply_keys=pre_consumed_keys,
+                alias_maps=consumed_alias_maps,
+            )
+        ):
+            candidates_by_fid.setdefault(target_fid, []).append((cid, rk))
+
+    recovered: set[tuple[str, str]] = set()
+    used_rks: set[str] = set()
+    for fid, entries in sorted(candidates_by_fid.items()):
+        cids = {cid for cid, _ in entries}
+        if len(cids) != 1:
+            continue
+        chosen_rk = sorted(rk for _, rk in entries)[0]
+        if chosen_rk in used_rks:
+            continue
+        used_rks.add(chosen_rk)
+        recovered.add((fid, chosen_rk))
+    return frozenset(recovered)
+
+
 @dataclass(frozen=True)
 class _ConsumedReplyState:
     """消费回复内部两层状态：严格区分可向新规范项传播的规范消费与仅约束自身的旧别名/脱离别名消费。"""
@@ -4430,10 +4506,11 @@ def _validate_history_chain(
         consumed_alias_maps = _build_consumed_alias_maps(next_aliases, prior_aliases)
 
         wontfix_by_fid: dict[str, str] = {}
+        recovered_by_fid: dict[str, str] = {}
         if validated_entry_wontfix is not None:
             wontfix_by_fid = dict(validated_entry_wontfix)
             for fid, rk in wontfix_by_fid.items():
-                cid, kind, _ = _parse_consumed_reply_key(rk, f"history[{idx - 1}].wontfix_reply_keys[][1]")
+                cid, kind, payload = _parse_consumed_reply_key(rk, f"history[{idx - 1}].wontfix_reply_keys[][1]")
                 if _is_reply_consumed_for_target(
                     rk,
                     cid,
@@ -4445,8 +4522,13 @@ def _validate_history_chain(
                         f"历史第 {idx} 轮 wontfix_reply_keys 中发现 {fid} 关联的回复键 {rk!r} "
                         "已被前轮或本轮外部消费，禁止复用"
                     )
-                pinned_fid = historical_bound_targets.get(rk)
-                if pinned_fid is not None:
+                if kind in ("loc", "inline") or (kind == "finding" and len(payload) < 16):
+                    pinned_fid = historical_bound_targets.get(rk)
+                    if pinned_fid is None:
+                        raise ConvergenceError(
+                            f"历史第 {idx} 轮 wontfix_reply_keys 中非全长 finding 回复键 {rk!r} "
+                            f"缺少已核验的目标锁定（bound_reply_targets），不得作为发现 {fid!r} 的直接不修证明"
+                        )
                     if kind == "finding":
                         pin_ok = pinned_fid == fid
                     else:
@@ -4460,6 +4542,19 @@ def _validate_history_chain(
                             f"历史第 {idx} 轮 wontfix_reply_keys 中回复键 {rk!r} 已锁定到发现 {pinned_fid!r}，"
                             f"与声称解除的发现 {fid!r} 不匹配"
                         )
+            effective_wontfix: frozenset[tuple[str, str]] = validated_entry_wontfix
+        else:
+            recovered_legacy_wontfix = _recover_legacy_wontfix_reply_keys(
+                resolved_fingerprints=entry.resolved_fingerprints,
+                consumed_reply_keys=validated_entry_consumed,
+                pre_consumed_keys=pre_consumed_keys,
+                bound_reply_targets=historical_bound_targets,
+                prior_aliases=prior_aliases,
+                next_aliases=next_aliases,
+                consumed_alias_maps=consumed_alias_maps,
+            )
+            effective_wontfix = recovered_legacy_wontfix
+            recovered_by_fid = dict(recovered_legacy_wontfix)
 
         for raw_fp in entry.resolved_fingerprints:
             norm_fp = raw_fp.strip().lower()
@@ -4483,23 +4578,23 @@ def _validate_history_chain(
                         and old_canon != norm_fp
                         and norm_fp not in next_aliases
                     )
-                    has_wontfix_proof = any(
-                        kind == "resolved"
-                        and payload == norm_fp
-                        and not (
-                            is_detached_alias
-                            and old_canon is not None
-                            and _resolved_reply_key(cid, old_canon) in validated_entry_consumed
+                    if is_detached_alias:
+                        has_wontfix_proof = norm_fp in recovered_by_fid
+                    elif norm_fp in recovered_by_fid:
+                        has_wontfix_proof = True
+                    else:
+                        has_wontfix_proof = any(
+                            kind == "resolved"
+                            and payload == norm_fp
+                            and not _is_reply_consumed_for_target(
+                                rk,
+                                cid,
+                                norm_fp,
+                                consumed_reply_keys=pre_consumed_keys,
+                                alias_maps=consumed_alias_maps,
+                            )
+                            for rk, cid, kind, payload in parsed_entry_consumed
                         )
-                        and not _is_reply_consumed_for_target(
-                            rk,
-                            cid,
-                            norm_fp,
-                            consumed_reply_keys=pre_consumed_keys,
-                            alias_maps=consumed_alias_maps,
-                        )
-                        for rk, cid, kind, payload in parsed_entry_consumed
-                    )
                     if not has_wontfix_proof:
                         raise ConvergenceError(
                             f"历史第 {idx} 轮将发现 {norm_fp} 标为已解除（resolved_fingerprints），"
@@ -4515,7 +4610,7 @@ def _validate_history_chain(
 
         after_wontfix_state = _apply_round_new_consumed_keys(
             input_state,
-            _wontfix_direct_consumed_keys(validated_entry_wontfix),
+            _wontfix_direct_consumed_keys(effective_wontfix),
             prior_aliases,
             next_aliases,
             treat_detached_as_derived=False,
@@ -5461,9 +5556,19 @@ def _replay_history_state(
     active_posted: set[str] = set()
     active_posted_important: set[str] = set()
     active_aliases: dict[str, str] = {}
+    historical_bound_targets: dict[str, str] = {}
     consumed_state = _ConsumedReplyState()
     prev_unresolved: set[str] = set()
-    for entry in history:
+    for idx, entry in enumerate(history):
+        entry_bound_targets = _validate_bound_reply_targets_frozenset(
+            entry.bound_reply_targets,
+            f"history[{idx}].bound_reply_targets",
+        )
+        _merge_bound_reply_targets(
+            historical_bound_targets,
+            entry_bound_targets,
+            f"history[{idx}].bound_reply_targets",
+        )
         current_unresolved = {f.finding_id for f in entry.unresolved_important}
         cleared_in_round = (
             (prev_unresolved - current_unresolved)
@@ -5496,9 +5601,21 @@ def _replay_history_state(
             next_aliases,
             treat_detached_as_derived=False,
         )
+        if entry.wontfix_reply_keys is not None:
+            effective_wontfix = entry.wontfix_reply_keys
+        else:
+            effective_wontfix = _recover_legacy_wontfix_reply_keys(
+                resolved_fingerprints=entry.resolved_fingerprints,
+                consumed_reply_keys=entry.consumed_reply_keys,
+                pre_consumed_keys=input_state.all_keys,
+                bound_reply_targets=historical_bound_targets,
+                prior_aliases=prior_aliases,
+                next_aliases=next_aliases,
+                consumed_alias_maps=_build_consumed_alias_maps(next_aliases, prior_aliases),
+            )
         after_wontfix_state = _apply_round_new_consumed_keys(
             input_state,
-            _wontfix_direct_consumed_keys(entry.wontfix_reply_keys),
+            _wontfix_direct_consumed_keys(effective_wontfix),
             prior_aliases,
             next_aliases,
             treat_detached_as_derived=False,
@@ -5899,13 +6016,14 @@ class _RoundDecisionPayload:
     duplicate_aliases: tuple[tuple[str, str], ...]
     history: tuple[RoundHistoryEntry, ...]
     author_replies: tuple[AuthorReply, ...]
+    final_consumed_state: _ConsumedReplyState
 
 
 def _derive_round_decision_payload(
     verified: VerifiedRound,
     *,
-    author_replies: Sequence[AuthorReply],
-    max_auto_rounds: int,
+    author_replies: Sequence[AuthorReply] = (),
+    max_auto_rounds: int = MAX_AUTO_ROUNDS,
 ) -> _RoundDecisionPayload:
     """单一真相源纯推导函数：由 (VerifiedRound, author_replies, max_auto_rounds) 确定性算出 RoundDecision 全部派生字段。"""
     if not isinstance(verified, VerifiedRound):
@@ -6125,6 +6243,7 @@ def _derive_round_decision_payload(
         duplicate_aliases=duplicate_aliases_tuple,
         history=history,
         author_replies=merged_author_replies,
+        final_consumed_state=final_state,
     )
 
 
