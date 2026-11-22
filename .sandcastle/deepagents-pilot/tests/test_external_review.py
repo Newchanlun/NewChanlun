@@ -2596,6 +2596,7 @@ def test_run_preflight_requires_admission_before_probe_and_filters_env(lane, mon
     env = seen[0]["env"]
     assert cmd[cmd.index("--image") + 1] == admitted
     assert cmd[cmd.index("--proxy-url") + 1] == module.FORMAL_PROXY_URL
+    assert cmd[cmd.index("--review-seal-url") + 1] == module.FORMAL_SEAL_URL
     assert "--probe-in-container" in cmd
     assert cmd[cmd.index("--credential-mode") + 1] == "worker-env"
     assert env["DOCKER_CONTEXT"] == "orbstack" and env["CLIPROXY_LOCAL_KEY"] == "fixture-worker-key"
@@ -2669,11 +2670,19 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
         out_sha = hashlib.sha256(b"earlier-turn-tool-call").hexdigest() if stale_output else hashlib.sha256(
             (final_text or "").encode("utf-8")).hexdigest()
         rid = f"resp_{launch['model']}_final"
-        kept = [line for line in (folder / "session.jsonl").read_text().splitlines()
-                if line.strip() and json.loads(line).get("type") != "token_usage_record"]
-        if not drop_response_ids:
-            kept.append(json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_1"}}))
-            kept.append(json.dumps({"type": "token_usage_record", "payload": {"response_id": rid}}))
+        raw_lines = [line for line in (folder / "session.jsonl").read_text().splitlines() if line.strip()]
+        tur_indices = [i for i, line in enumerate(raw_lines) if json.loads(line).get("type") == "token_usage_record"]
+        if drop_response_ids:
+            kept = [line for i, line in enumerate(raw_lines) if i not in tur_indices]
+        else:
+            kept = list(raw_lines)
+            if len(tur_indices) >= 2:
+                kept[tur_indices[0]] = json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_1"}})
+                kept[tur_indices[-1]] = json.dumps({"type": "token_usage_record", "payload": {"response_id": rid}})
+            else:
+                kept = [line for i, line in enumerate(raw_lines) if i not in tur_indices]
+                kept.append(json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_1"}}))
+                kept.append(json.dumps({"type": "token_usage_record", "payload": {"response_id": rid}}))
         (folder / "session.jsonl").write_text("\n".join(kept) + "\n")
         resp_sha = hashlib.sha256(b"resp_earlier").hexdigest() if bad_resp_id else hashlib.sha256(rid.encode("utf-8")).hexdigest()
         first_rid_sha = hashlib.sha256(f"resp_{launch['model']}_1".encode("utf-8")).hexdigest()
@@ -2999,6 +3008,30 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
     rejected = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
     assert rejected.verdict == "FAILED" and "response_id" in rejected.reason
 
+    # R15：工具调用轮整条 token_usage_record 缺失（仅保留终答轮）：即使终答与代理子序列匹配，也必须判 FAILED
+    records_missing_tool_tur = [
+        r for r in fixture["session_records"]
+        if not (r.get("type") == "token_usage_record"
+                and (r.get("payload") or {}).get("response_id") == fixture["response_ids"][0])
+    ]
+    (worker / "session.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records_missing_tool_tur) + "\n"
+    )
+    missing_tool_tur = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
+    assert missing_tool_tur.verdict == "FAILED" and "闭合" in missing_tool_tur.reason
+
+    # R15：session.jsonl 去掉工具调用 response_item 与其 token_usage_record，仅留终答轮，而 events.jsonl 仍有 command_execution：必须判 FAILED
+    records_missing_fc = [
+        r for r in records_missing_tool_tur
+        if not (r.get("type") == "response_item"
+                and (r.get("payload") or {}).get("type") in ("function_call", "function_call_output"))
+    ]
+    (worker / "session.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records_missing_fc) + "\n"
+    )
+    missing_fc = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
+    assert missing_fc.verdict == "FAILED" and "response_item" in missing_fc.reason
+
 
 def test_publish_and_resume_reverify_sealed_receipts_and_reject_post_first_taint(lane):
     """首位 reviewer 通过后，若在汇总发布前或未发布结果续发前其代理收据变为污染/未封存，
@@ -3147,3 +3180,69 @@ def test_slow_preflight_rechecks_live_target_under_pr_lock_and_rereview_intent_b
     lane.preflight = _fake_preflight_pass
     t2 = lane.target(1810, 2)
     assert t2.attempt == 2 and lane.has_pending_rereview_intent(1810, head, old_base) is False
+
+
+def test_pending_rereview_intent_blocks_pass_reuse_on_rebased_same_patch_and_seal_enforces_wall_timeout(
+        lane, env, tmp_path, monkeypatch):
+    """R15：1. 旧 PASS 存在未承接重审意图时，即使 PR 推进到同 patch_id 新 head 也不得沿用旧 PASS；
+    2. _seal_session_receipt 面对慢滴响应在总墙钟期限内强杀子进程并返回 False，绝不拖住 reviewer 线程。"""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    # 1. A1 PASS -> A2 预检失败留下重审意图（未写 target.json）-> main 前进并追平到同 patch_id 新 head -> 不得沿用 A1 PASS
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    lane.preflight = lambda _t: {"returncode": 2, "report": None, "image_id": "sha256:" + "1" * 64}
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 2)
+    _advance_main(lane, env)
+    lane.preflight = _fake_preflight_pass
+    assert lane.would_reuse(load_target(lane.gateway, 1810)) is False
+    rebased_target = lane.target(1810, 1)
+    assert rebased_target.reuse_planned is False
+    rebased_res = lane.review_pr(1810, 1)
+    assert rebased_res["verdict"] == "PASS" and "reused_from" not in rebased_res
+
+    # 2. 慢滴封存服务端（每 0.25s 吐 1 字节，持续远超 0.8s 预算）：_seal_session_receipt 必须在总墙钟上限内强杀并返回 False
+    stop_drip = threading.Event()
+
+    class SlowDripSealHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "1024")
+            self.end_headers()
+            try:
+                for _ in range(40):
+                    if stop_drip.is_set():
+                        break
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    time.sleep(0.25)
+            except OSError:
+                pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), SlowDripSealHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    srv_url = f"http://127.0.0.1:{srv.server_address[1]}/v1/review-receipts/seal"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    t_srv = threading.Thread(target=srv.serve_forever, daemon=True)
+    t_srv.start()
+    monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(tmp_path))
+    monkeypatch.delenv(module.PREFLIGHT_ENV_CONTAINER, raising=False)
+    monkeypatch.setenv("CLIPROXY_LOCAL_KEY", "test-seal-key")
+    try:
+        started = time.monotonic()
+        ok = lane._seal_session_receipt(
+            "11111111-2222-4333-8444-555555555559",
+            "019d0000-0000-7000-8000-000000000559",
+            timeout=0.8,
+            seal_url=srv_url,
+        )
+        elapsed = time.monotonic() - started
+        assert ok is False and elapsed < 2.0
+    finally:
+        stop_drip.set()
+        srv.shutdown()
+        srv.server_close()

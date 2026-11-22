@@ -63,14 +63,15 @@ PROTOCOL_FIELDS = frozenset({
     "checkout_root", "free_bytes", "required_bytes", "per_snapshot_bytes", "snapshots",
     "image", "nonce_match", "docker_rc", "stderr",
     "scrubbed_env", "source", "proven_by", "error",
-    "expected", "actual", "log_found", "session",
+    "expected", "actual", "log_found", "session", "launch", "sealed",
     "http_status", "terminal", "status", "returned_model", "length", "sha256_12", "exception", "errno", "not_sent"})
 PROTOCOL_VALUES = frozenset({
     "review-preflight", "review-preflight-help",
     "checkout_root_free_space", "checkout_root_container_mount", "credential:codex-host", "credential:worker-env",
     "probe_cleanup", "preflight_internal", *MODELS,
-    *(f"{kind}:{model}" for kind in ("route", "roundtrip") for model in MODELS),
-    "space", "mount", "credential", "route", "roundtrip", "cleanup", "tool",
+    *(f"{kind}:{model}" for kind in ("route", "roundtrip", "seal") for model in MODELS),
+    "space", "mount", "credential", "route", "roundtrip", "seal", "cleanup", "tool",
+    "sealed", "in_flight", "rejected", "unavailable",
     *TERMINAL_EVENTS, *RESPONSE_STATUSES, "other", *(label for _, label in ERROR_CLASSES), "unclassified",
     *(f"{provider}@{host}" for provider, host in KNOWN_ROUTES), *CREDENTIAL_SOURCES})
 
@@ -427,13 +428,16 @@ def sanitize(value, secrets, limit: int = 500):
 
 def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline, *,
                container_image: str | None = None, review_docker_context: str | None = None,
-               cleanup_out: list[str] | None = None) -> dict:
+               cleanup_out: list[str] | None = None, review_launch: str | None = None) -> dict:
     """整个 HTTP 请求在独立进程组中运行，绝对工作期限到达后先回收再返回。
     提供 container_image 时，在审阅镜像容器内沿正式 worker 同一网络路径发起请求，密钥仅经 stdin 传入。"""
     work_left = deadline.work_left()
     if work_left <= 0:
         return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
-    payload = json.dumps([url, key, model, session, work_left]).encode()
+    raw_args: list = [url, key, model, session, work_left]
+    if review_launch:
+        raw_args.append(review_launch)
+    payload = json.dumps(raw_args).encode()
     if not container_image:
         try:
             result = run_bounded([sys.executable, "-I", str(_HTTP_WORKER)], work_left, deadline=deadline, data=payload)
@@ -538,33 +542,142 @@ def route_from_host_receipt(directory: str, session: str, since: float, wait: fl
         return None
 
 
+def seal_review(url: str, key: str, launch: str, session: str, deadline: Deadline) -> dict:
+    """在宿主侧独立进程组中调用代理封存端点 POST /v1/review-receipts/seal，验证与容器往返共用同一代理实例且受总期限强约束。"""
+    work_left = deadline.work_left()
+    if work_left <= 0:
+        return {"http_status": None, "status": None, "ok": False, "error": {"not_sent": "总时限已到"}}
+    budget = min(5.0, work_left)
+    payload = json.dumps([url, key, launch, session, budget]).encode()
+    try:
+        result = run_bounded([sys.executable, "-I", str(_HTTP_WORKER), "--seal"], budget, deadline=deadline, data=payload)
+        if result.returncode:
+            raise RuntimeError("Seal HTTP worker failed")
+        return json.loads(result.stdout)
+    except Exception as error:
+        return {"http_status": None, "status": None, "ok": False,
+                "error": {"exception": type(error).__name__, "errno": None}}
+
+
+def _decode_review_routes(raw: bytes, launch: str, session: str, labels: dict) -> list[tuple[str, str]] | None:
+    payload = json.loads(raw, object_pairs_hook=_log_module._unique_object)
+    hex64 = re.compile(r"[0-9a-f]{64}")
+    if (not isinstance(payload, dict)
+            or set(payload) != {"launch", "session", "complete_stable", "sealed", "routes", "requests",
+                                "response_id_sha256s", "last_response_id_sha256", "last_output_sha256"}
+            or payload["launch"] != launch or payload["session"] != session
+            or payload["complete_stable"] is not True or payload["sealed"] is not True
+            or type(payload["requests"]) is not int or not 1 <= payload["requests"] <= 512
+            or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
+            or not isinstance(payload["routes"][0], str) or payload["routes"][0] not in labels
+            or not isinstance(payload["response_id_sha256s"], list)
+            or len(payload["response_id_sha256s"]) != payload["requests"]
+            or any(not isinstance(item, str) or not hex64.fullmatch(item) for item in payload["response_id_sha256s"])
+            or not isinstance(payload["last_response_id_sha256"], str)
+            or not hex64.fullmatch(payload["last_response_id_sha256"])
+            or payload["response_id_sha256s"][-1] != payload["last_response_id_sha256"]):
+        return None
+    return [labels[payload["routes"][0]]]
+
+
+def review_route_from_container(args, launch: str, session: str, since: float, wait: float,
+                                deadline: Deadline) -> list[tuple[str, str]] | None:
+    budget = min(wait, deadline.work_left() - 0.25)
+    receipt = getattr(args, "proxy_receipt_container", None)
+    if budget <= 0 or not receipt:
+        return None
+    labels = {"@".join(route): route for route in KNOWN_ROUTES}
+    cmd = [*docker_command(args.proxy_docker_context), "exec", receipt,
+           "python3", "-I", "-c", _LOG_READER.read_text(),
+           "--review-receipt", args.proxy_container_receipt_dir,
+           launch, session, str(since), str(time.time() + budget), str(budget), json.dumps(sorted(KNOWN_ROUTES))]
+    try:
+        result = run_bounded(cmd, budget, env=docker_env(args.proxy_docker_context))
+        if result.returncode or result.stderr:
+            return None
+        return _decode_review_routes(result.stdout, launch, session, labels)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def review_route_from_host_receipt(directory: str, launch: str, session: str, since: float, wait: float,
+                                   deadline: Deadline) -> list[tuple[str, str]] | None:
+    budget = min(wait, deadline.work_left() - 0.25)
+    if budget <= 0:
+        return None
+    labels = {"@".join(route): route for route in KNOWN_ROUTES}
+    try:
+        result = run_bounded([sys.executable, "-I", "-c", _LOG_READER.read_text(), "--review-receipt", directory,
+                              launch, session, str(since), str(time.time() + budget), str(budget),
+                              json.dumps(sorted(KNOWN_ROUTES))], budget)
+        if result.returncode or result.stderr:
+            return None
+        return _decode_review_routes(result.stdout, launch, session, labels)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
 def probe_model(args, model: str, key: str, deadline: Deadline, cleanup_out: list[str] | None = None) -> list[dict]:
-    session = f"preflight-{uuid.uuid4()}"
+    seal_url = getattr(args, "review_seal_url", None)
+    if seal_url:
+        launch = f"review-{uuid.uuid4()}"
+        session = str(uuid.uuid4())
+    else:
+        launch = None
+        session = f"preflight-{uuid.uuid4()}"
     since = time.time()
     if getattr(args, "probe_in_container", False):
+        extra = {"review_launch": launch} if launch is not None else {}
         trip = round_trip(
             args.proxy_url, key, model, session, deadline,
             container_image=args.image,
             review_docker_context=getattr(args, "review_docker_context", None),
             cleanup_out=cleanup_out,
+            **extra,
         )
+    elif launch is not None:
+        trip = round_trip(args.proxy_url, key, model, session, deadline, review_launch=launch)
     else:
         trip = round_trip(args.proxy_url, key, model, session, deadline)
+    seal_res: dict | None = None
+    if seal_url and launch is not None:
+        if trip["ok"]:
+            seal_res = seal_review(seal_url, key, launch, session, deadline)
+        else:
+            seal_res = {"http_status": None, "status": None, "ok": False, "error": {"not_sent": "往返失败，未封存"}}
     # 成功后等生产者完成收尾并原子发布；往返失败时只给证据读取 0.3 秒。
     wait = max(0.0, deadline.work_left() - 0.25)
-    if not trip["ok"]:
+    if not trip["ok"] or (seal_res is not None and not seal_res["ok"]):
         wait = min(wait, 0.3)
-    if getattr(args, "proxy_log_container", None) or getattr(args, "proxy_receipt_container", None):
+    if seal_url and launch is not None:
+        if getattr(args, "proxy_receipt_container", None):
+            attempts = review_route_from_container(args, launch, session, since, wait, deadline)
+        elif getattr(args, "proxy_receipt_dir", None):
+            attempts = review_route_from_host_receipt(args.proxy_receipt_dir, launch, session, since, wait, deadline)
+        else:
+            attempts = None
+    elif getattr(args, "proxy_log_container", None) or getattr(args, "proxy_receipt_container", None):
         attempts = route_from_container(args, session, since, wait, deadline)
     elif getattr(args, "proxy_receipt_dir", None):
         attempts = route_from_host_receipt(args.proxy_receipt_dir, session, since, wait, deadline)
     else:
         attempts = route_from_log(Path(args.proxy_log_dir), session, since, wait)
     expected = ROUTES[model]
-    return [{"name": f"route:{model}", "class": "route", "ok": bool(attempts) and all(a in expected for a in attempts),
-             "detail": {"expected": sorted("@".join(route) for route in expected), "actual": [f"{p}@{h}" if (p, h) in KNOWN_ROUTES else "other" for p, h in attempts or []],
-                        "log_found": attempts is not None, "session": session}},
-            {"name": f"roundtrip:{model}", "class": "roundtrip", "ok": trip["ok"], "detail": trip}]
+    route_detail: dict = {
+        "expected": sorted("@".join(route) for route in expected),
+        "actual": [f"{p}@{h}" if (p, h) in KNOWN_ROUTES else "other" for p, h in attempts or []],
+        "log_found": attempts is not None,
+        "session": session,
+    }
+    if launch is not None:
+        route_detail["launch"] = launch
+        route_detail["sealed"] = attempts is not None
+    checks = [{"name": f"route:{model}", "class": "route", "ok": bool(attempts) and all(a in expected for a in attempts),
+               "detail": route_detail}]
+    if seal_res is not None:
+        checks.append({"name": f"seal:{model}", "class": "seal", "ok": bool(seal_res.get("ok")), "detail": seal_res})
+    checks.append({"name": f"roundtrip:{model}", "class": "roundtrip", "ok": trip["ok"], "detail": trip})
+    return checks
 
 
 def _guarded(name: str, kind: str, fn) -> dict:
@@ -629,6 +742,8 @@ def main(argv=None) -> int:
                     help="codex-host 校验宿主 config.toml；worker-env 与正式 worker 一致取 CLIPROXY_LOCAL_KEY/launchctl")
     ap.add_argument("--probe-in-container", action="store_true",
                     help="在审阅镜像容器内发起 HTTP 往返探针（验证 host.docker.internal 实际容器网络路径）")
+    ap.add_argument("--review-seal-url", default=None,
+                    help="可选：启用正式 review-<uuid> launch 探针并从宿主调用该代理封存端点，校验往返/封存/收据同属同一代理实例")
     ap.add_argument("--deadline", type=_deadline, default=55.0, help="总墙钟上限（秒，0 < x ≤ 60），超时的检查判失败")
     args = ap.parse_args(argv)
     if args.proxy_receipt_container:

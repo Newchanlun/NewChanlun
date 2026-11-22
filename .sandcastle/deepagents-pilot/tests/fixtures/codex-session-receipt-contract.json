@@ -1,5 +1,5 @@
 {
-  "contract_note": "脱敏样本源自已部署审阅镜像 sandcastle:newchanlun 中 codex-cli 0.169.0 的真实正式独审会话（session_meta/turn_context/token_usage_record/events.jsonl）与 cliproxy-review-v1 收据字段映射；自由正文已脱敏为固定回归载荷。",
+  "contract_note": "脱敏样本源自已部署审阅镜像 sandcastle:newchanlun 中 codex-cli 0.169.0 的真实正式独审会话（session_meta/turn_context/response_item/token_usage_record/events.jsonl）与 cliproxy-review-v1 收据字段映射；自由正文已脱敏为固定回归载荷。",
   "codex_cli_version": "0.169.0",
   "session_id": "01a203e5-7eee-7aa1-81bb-b475181103f4",
   "launch_id": "11111111-2222-4333-8444-555555555551",
@@ -29,6 +29,16 @@
       }
     },
     {
+      "timestamp": "2026-11-22T15:35:04.500Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "exec_command",
+        "call_id": "call_01",
+        "arguments": "{\"cmd\":\"git diff --no-ext-diff --no-textconv\"}"
+      }
+    },
+    {
       "timestamp": "2026-11-22T15:35:05.000Z",
       "type": "token_usage_record",
       "payload": {
@@ -40,6 +50,29 @@
         "usage": {"input_tokens": 1200, "output_tokens": 80},
         "turn_token_usage": {"input_tokens": 1200, "output_tokens": 80},
         "thread_token_usage": {"input_tokens": 1200, "output_tokens": 80}
+      }
+    },
+    {
+      "timestamp": "2026-11-22T15:35:06.000Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_01",
+        "output": "diff --git a/x b/x"
+      }
+    },
+    {
+      "timestamp": "2026-11-22T15:35:09.500Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "{\"status\": \"completed\", \"summary\": \"VERDICT: PASS\\n脱敏真实契约夹具通过。\", \"findings\": [], \"validation\": [\"codex-cli 0.169.0 真实脱敏日志契约样本\"]}"
+          }
+        ]
       }
     },
     {

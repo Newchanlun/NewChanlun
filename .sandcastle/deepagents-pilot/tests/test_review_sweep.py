@@ -2342,3 +2342,27 @@ def test_ineligible_prs_withdraw_armed_auto_merge_independently_of_review_dispat
     assert github.calls == [("disable", 1810)]
     assert any(a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw" and a.get("auto_merge_withdrawn") is True
                for a in caught.value.actions)
+
+
+def test_recheck_discovers_auto_merge_then_checks_error_still_withdraws(lane):
+    """R15：首次读 pr() 时 auto_merge=False，_plan_one 复核 pr() 发现变为 True，随后 checks() 报非超时 API 错误：
+    异常分支必须读取最新 state["auto_merge"] 并执行 disable_auto_merge。"""
+    github = FakeGitHub(lane)
+    github.states[1810] = {"auto_merge": False}
+    orig_pr = github.pr
+    reads = []
+
+    def pr_turns_armed_on_recheck(number):
+        reads.append(number)
+        st = orig_pr(number)
+        if len(reads) >= 2:
+            st["auto_merge"] = True
+        return st
+
+    github.pr = pr_turns_armed_on_recheck
+    github.checks = _raise
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    ev = next(a for a in actions if a.get("pr") == 1810 and a["action"] == "evidence-insufficient")
+    assert ev.get("auto_merge_withdrawn") is True
+    assert github.calls == [("disable", 1810)]

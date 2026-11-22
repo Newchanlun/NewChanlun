@@ -42,11 +42,29 @@ events = [{"type": "thread.started", "thread_id": session}, *tool,
           {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
           {"type": "turn.completed"}]
 (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
-(folder / "session.jsonl").write_text(
-    json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}) + "\n"
-    + json.dumps({"type": "turn_context", "payload": {"model": launch["model"]}}) + "\n"
-    + json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_{session}"}}) + "\n"
-)
+session_lines = [
+    json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}),
+    json.dumps({"type": "turn_context", "payload": {"model": launch["model"]}}),
+]
+if tool:
+    call_id = f"call_{launch['model']}_{session[:8]}"
+    session_lines.extend([
+        json.dumps({"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "call_id": call_id, "arguments": json.dumps({"cmd": read}),
+        }}),
+        json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_tool_{session}"}}),
+        json.dumps({"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": call_id, "output": "ok",
+        }}),
+    ])
+session_lines.extend([
+    json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": text if isinstance(text, str) else json.dumps(text)}],
+    }}),
+    json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_{session}"}}),
+])
+(folder / "session.jsonl").write_text("\n".join(session_lines) + "\n")
 record = {**launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0, "container_closed": True,
           "observed_provider": "cliproxy-local", "observed_model": launch["model"],
           "image_id": "sha256:" + "1" * 64, "isolation_contract": isolation_contract, "container_id": "a" * 64,

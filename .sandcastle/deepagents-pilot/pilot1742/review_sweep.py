@@ -887,9 +887,12 @@ class Sweep:
             except SourceUnreadable:
                 raise
             except Exception as error:  # 单个 PR 隔离；不明即不合入，并撤原生 auto-merge（失败关闭）
+                armed = states[number].get("auto_merge") is not False
                 kind = "evidence-insufficient" if isinstance(error, EvidenceInsufficient) else "error"
                 reason = str(error) if kind == "evidence-insufficient" else f"{type(error).__name__}: {error}"
                 result, write = {"action": kind, "reason": reason}, ("disable" if armed else None)
+            else:
+                armed = states[number].get("auto_merge") is not False
             head_free = head_free and not claimed
             plan.append((entry, result, write, armed))
         for entry, result, write, armed in plan:

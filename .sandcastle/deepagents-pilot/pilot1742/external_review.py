@@ -19,14 +19,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -58,6 +57,7 @@ POLICY = "external-pr-v2-gpt62"
 FORMAL_PROXY_URL = "http://host.docker.internal:8318"  # DevSkim: ignore DS137138,DS162092 有意使用本机容器网关（与正式审阅容器端点一致），非明文外网流量
 FORMAL_SEAL_URL = "http://127.0.0.1:8318/v1/review-receipts/seal"  # DevSkim: ignore DS137138,DS162092 仅访问本机回环代理封存端点，非明文外网流量
 PREFLIGHT_SCRIPT = Path(__file__).resolve().parents[1] / "review_preflight.py"
+PREFLIGHT_HTTP_WORKER = Path(__file__).resolve().parents[1] / "_review_preflight_http.py"
 PREFLIGHT_LOG_READER = Path(__file__).resolve().parents[1] / "_review_preflight_log.py"
 PREFLIGHT_RATE_LIMIT_FILE = "preflight-rate-limits.json"
 PREFLIGHT_ADMITTED_FILE = "preflight-admitted.json"
@@ -566,11 +566,6 @@ class TargetDrifted(IdentityError):
     """PR 实时 head 或 base 已偏离派发时冻结的目标，不登记、不预检、不消费额度。"""
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect disabled", headers, fp)
-
-
 def _load_cliproxy_key() -> str:
     value = os.environ.get("CLIPROXY_LOCAL_KEY", "").strip()
     if value:
@@ -652,6 +647,7 @@ class ExternalReview:
                "--checkout-root", str(self.checkout_root),
                "--image", image,
                "--proxy-url", FORMAL_PROXY_URL,
+               "--review-seal-url", FORMAL_SEAL_URL,
                "--probe-in-container",
                "--credential-mode", "worker-env"]
         if container:
@@ -700,9 +696,12 @@ class ExternalReview:
             result[key] = value
         return result
 
-    def _seal_session_receipt(self, launch_id: str, session_id: str) -> bool:
+    def _seal_session_receipt(self, launch_id: str, session_id: str, *,
+                              timeout: float = SESSION_RECEIPT_TIMEOUT_SECONDS,
+                              seal_url: str = FORMAL_SEAL_URL) -> bool:
         """向本机代理发起已认证的终态封存请求（POST /v1/review-receipts/seal），等待所有在途请求结束并落盘 sealed=true。
-        绝不绕过有界读取器直接阻塞读磁盘文件（避免 FIFO 挂起）。"""
+        整个连接、响应头、读取与 409 in_flight 重试在独立进程组内共享同一硬墙钟期限，超时立即强杀进程组，
+        密钥仅通过 stdin 管道传入，绝不进 argv/env，也不绕过有界读取器直接阻塞读磁盘文件。"""
         if (not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", launch_id)
                 or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id)):
             return False
@@ -713,34 +712,38 @@ class ExternalReview:
         key = _load_cliproxy_key()
         if not key:
             return False
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-        deadline = time.monotonic() + SESSION_RECEIPT_TIMEOUT_SECONDS
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "X-NewChanlun-Review-Launch": f"review-{launch_id}",
-            "Session-Id": session_id,
-        }
-        while True:
-            req = urllib.request.Request(FORMAL_SEAL_URL, data=b"", headers=headers, method="POST")
-            remaining = max(0.5, deadline - time.monotonic())
+        budget = max(0.2, float(timeout))
+        payload = json.dumps([seal_url, key, f"review-{launch_id}", session_id, budget]).encode()
+        env = {k: os.environ[k] for k in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL")
+               if k in os.environ}
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", str(PREFLIGHT_HTTP_WORKER), "--seal"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, start_new_session=True,
+            )
+        except OSError:
+            return False
+        try:
+            out, _ = proc.communicate(payload, timeout=budget)
+        except subprocess.TimeoutExpired:
+            return False
+        finally:
             try:
-                with opener.open(req, timeout=min(5.0, remaining)) as resp:
-                    body = json.loads(resp.read(4096).decode("utf-8"))
-                    return resp.status == 200 and isinstance(body, dict) and body.get("status") == "sealed"
-            except urllib.error.HTTPError as err:
-                status_word = ""
-                try:
-                    parsed = json.loads(err.read(4096).decode("utf-8"))
-                    if isinstance(parsed, dict):
-                        status_word = str(parsed.get("status", ""))
-                except Exception:
-                    pass
-                if err.code == 409 and status_word == "in_flight" and time.monotonic() < deadline:
-                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-                    continue
-                return False
-            except (OSError, ValueError, urllib.error.URLError):
-                return False
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream:
+                    stream.close()
+        if proc.returncode != 0:
+            return False
+        try:
+            parsed = json.loads(out)
+        except ValueError:
+            return False
+        return isinstance(parsed, dict) and parsed.get("ok") is True and parsed.get("status") == "sealed"
 
     def _read_session_receipt(
         self, model: str, launch_id: str, session_id: str, since: float, *,
@@ -839,42 +842,89 @@ class ExternalReview:
                 pass
         since = min(candidates) if candidates else 0.0
         final_text: str | None = None
+        ev_cmd_count = 0
+        ev_am_count = 0
         response_ids: list[str] = []
+        sess_fc_count = 0
+        sess_am_count = 0
+        last_assistant_text: str | None = None
+        pending_model_output = False
         try:
             for line in (worker / "events.jsonl").read_text().splitlines():
                 if not line.strip():
                     continue
                 ev = json.loads(line)
-                if ev.get("type") == "item.completed" and (ev.get("item") or {}).get("type") == "agent_message":
-                    text = ev["item"].get("text")
-                    final_text = text if isinstance(text, str) else None
+                item = ev.get("item") if isinstance(ev.get("item"), dict) else {}
+                if ev.get("type") == "item.completed":
+                    if item.get("type") == "command_execution":
+                        ev_cmd_count += 1
+                    elif item.get("type") == "agent_message":
+                        ev_am_count += 1
+                        text = item.get("text")
+                        final_text = text if isinstance(text, str) else None
             with open(worker / "session.jsonl", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as stream:
                 for line in stream:
                     if not line.strip():
                         continue
                     row = json.loads(line)
-                    if row.get("type") == "token_usage_record":
-                        payload = row.get("payload")
-                        rid = payload.get("response_id") if isinstance(payload, dict) else None
+                    rtype = row.get("type")
+                    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                    if rtype == "response_item":
+                        pt = payload.get("type")
+                        role = payload.get("role")
+                        if pt in ("function_call", "custom_tool_call", "local_shell_call", "web_search_call"):
+                            sess_fc_count += 1
+                            pending_model_output = True
+                        elif pt == "message" and role == "assistant":
+                            sess_am_count += 1
+                            pending_model_output = True
+                            content = payload.get("content")
+                            if isinstance(content, list):
+                                parts = [
+                                    str(part.get("text", ""))
+                                    for part in content
+                                    if isinstance(part, dict) and part.get("type") in (None, "", "output_text")
+                                ]
+                                joined = "".join(parts)
+                                if joined:
+                                    last_assistant_text = joined
+                        elif pt in ("function_call_output", "custom_tool_call_output") or (
+                                pt == "message" and role == "user"):
+                            if pending_model_output:
+                                return ReviewOutcome(
+                                    outcome.model, "FAILED", outcome.session_id,
+                                    "session.jsonl 存在未由 token_usage_record.response_id 闭合的工具调用/助手响应轮，PASS/BLOCK 均不采信",
+                                )
+                    elif rtype == "token_usage_record":
+                        rid = payload.get("response_id")
                         if not isinstance(rid, str) or not rid.strip():
                             return ReviewOutcome(
                                 outcome.model, "FAILED", outcome.session_id,
                                 "session.jsonl 含缺失或为空的 token_usage_record.response_id，PASS/BLOCK 均不采信",
                             )
                         response_ids.append(rid.strip())
+                        pending_model_output = False
         except (OSError, ValueError, TypeError):
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "无法读取 events.jsonl/session.jsonl 核验代理侧最终响应绑定，PASS/BLOCK 均不采信")
         if final_text is None:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "缺少最终 agent_message 文本，无法核验代理侧最终响应绑定")
+        if pending_model_output:
+            return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
+                                 "session.jsonl 末轮模型输出缺少闭合的 token_usage_record.response_id，PASS/BLOCK 均不采信")
+        if sess_fc_count < ev_cmd_count or sess_am_count < ev_am_count or sess_am_count == 0:
+            return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
+                                 "session.jsonl 缺少与 events.jsonl 工具调用或助手消息对应的 response_item 证据，PASS/BLOCK 均不采信")
+        if last_assistant_text != final_text:
+            return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
+                                 "session.jsonl 末条助手正文与 events.jsonl 终答不一致，PASS/BLOCK 均不采信")
         if not response_ids:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "session.jsonl 缺少可核验的 token_usage_record.response_id，PASS/BLOCK 均不采信")
         expected = f"codex:{outcome.model}@chatgpt.com"
         expected_out_sha = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
-        dedup_rids = [rid for i, rid in enumerate(response_ids) if i == 0 or rid != response_ids[i - 1]]
-        expected_rid_shas = [hashlib.sha256(rid.encode("utf-8")).hexdigest() for rid in dedup_rids]
+        expected_rid_shas = [hashlib.sha256(rid.encode("utf-8")).hexdigest() for rid in response_ids]
         expected_rid_sha = expected_rid_shas[-1]
         launch_id = str(launch.get("launch_id", ""))
         session_id = str(outcome.session_id or "")
@@ -1069,6 +1119,7 @@ class ExternalReview:
                 "pr_number": target.pr_number,
                 "base_sha": target.base_sha,
                 "head_sha": target.head_sha,
+                "patch_id": target.patch_id,
                 "attempt": target.attempt,
                 "recorded_at_ns": recorded_at_ns,
             })
@@ -1442,6 +1493,19 @@ class ExternalReview:
             if any(registered(other) > registered(row) and (other["outcome"] or {}).get("verdict") != "PASS"
                    for other in same):
                 return None
+            # 沿用来源自身存在尚未承接的重审意图，或同补丁存在不早于该来源登记的重审意图（含损坏意图文件，失败闭合）时，
+            # 旧 PASS 已被待重审取代，不得沿用。
+            if self.has_pending_rereview_intent(target.pr_number, old["head_sha"], old["base_sha"]):
+                return None
+            for intent_path in (self.state_root / "rereview-intents").glob(f"r*-p{target.pr_number}-*.json"):
+                try:
+                    intent_data = _read(intent_path)
+                    intent_patch = intent_data.get("patch_id")
+                    intent_ts = int(intent_data["recorded_at_ns"])
+                except (OSError, ValueError, TypeError, KeyError, IdentityError):
+                    return None
+                if intent_patch in (target.patch_id, None) and intent_ts >= registered(row):
+                    return None
             return saved
         return None
 

@@ -59,7 +59,8 @@ def _error_info(body: str, *, code: str | None = None) -> dict:
     }
 
 
-def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> dict:
+def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
+                     *, review_launch: str | None = None) -> dict:
     """最小连通探针采用 JSON schema，不验证真实审阅或工具调用。"""
     if hasattr(deadline, "work_left"):
         work_left = deadline.work_left
@@ -96,17 +97,20 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> 
             }
         },
     }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Session-Id": session,
+        "X-Client-Request-Id": session,
+    }
+    if review_launch:
+        headers["X-NewChanlun-Review-Launch"] = review_launch
     request = urllib.request.Request(
         url.rstrip("/") + "/v1/responses",
         data=json.dumps(body).encode(),
         method="POST",
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "Session-Id": session,
-            "X-Client-Request-Id": session,
-        },
+        headers=headers,
     )
     timeout = work_left()  # 只受总工作时限约束，不另设更短的固定上限
     if timeout <= 0:
@@ -195,6 +199,72 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> 
         }
 
 
+def _seal_review_http(url: str, key: str, launch: str, session: str, timeout_seconds: float) -> dict:
+    """向宿主侧代理封存端点发起已认证 POST /v1/review-receipts/seal（禁用代理与重定向），
+    在独立子进程组中运行以受父进程总墙钟期限强约束。"""
+    end = time.monotonic() + max(0.0, float(timeout_seconds))
+    seal_url = url.rstrip("/")
+    if not seal_url.endswith("/v1/review-receipts/seal"):
+        seal_url = seal_url + "/v1/review-receipts/seal"
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "X-NewChanlun-Review-Launch": launch,
+        "Session-Id": session,
+    }
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return {"http_status": None, "status": None, "ok": False, "error": {"not_sent": "总时限已到"}}
+        request = urllib.request.Request(seal_url, data=b"", method="POST", headers=headers)
+        try:
+            with _open_http(request, timeout=remaining) as response:
+                raw = response.read(4096).decode("utf-8", "replace")
+                parsed = json.loads(raw)
+                status = parsed.get("status") if isinstance(parsed, dict) and isinstance(parsed.get("status"), str) else None
+                ok = response.status == 200 and status == "sealed"
+                return {
+                    "http_status": response.status,
+                    "status": "sealed" if ok else ("other" if status is not None else None),
+                    "ok": ok,
+                    "error": None if ok else _error_info(raw),
+                }
+        except urllib.error.HTTPError as error:
+            raw = error.read(4096).decode("utf-8", "replace")
+            status_word = ""
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and isinstance(parsed.get("status"), str):
+                    status_word = parsed["status"]
+            except ValueError:
+                pass
+            if error.code == 409 and status_word == "in_flight" and time.monotonic() < end:
+                time.sleep(min(0.05, max(0.0, end - time.monotonic())))
+                continue
+            return {
+                "http_status": error.code,
+                "status": status_word if status_word in ("in_flight", "rejected", "unavailable") else None,
+                "ok": False,
+                "error": _error_info(raw),
+            }
+        except Exception as error:
+            reason = getattr(error, "reason", None)
+            return {
+                "http_status": None,
+                "status": None,
+                "ok": False,
+                "error": {"exception": type(error).__name__, "errno": getattr(reason, "errno", getattr(error, "errno", None))},
+            }
+
+
 if __name__ == "__main__":
-    url, key, model, session, work_seconds = json.load(sys.stdin)
-    print(json.dumps(_round_trip_http(url, key, model, session, work_seconds)))
+    if sys.argv[1:] == ["--seal"]:
+        url, key, launch, session, timeout_seconds = json.load(sys.stdin)
+        print(json.dumps(_seal_review_http(url, key, launch, session, timeout_seconds)))
+    else:
+        payload = json.load(sys.stdin)
+        if len(payload) == 6:
+            url, key, model, session, work_seconds, review_launch = payload
+            print(json.dumps(_round_trip_http(url, key, model, session, work_seconds, review_launch=review_launch)))
+        else:
+            url, key, model, session, work_seconds = payload
+            print(json.dumps(_round_trip_http(url, key, model, session, work_seconds)))

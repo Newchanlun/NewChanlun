@@ -1239,6 +1239,117 @@ def test_round_trip_rejects_mixed_response_done_and_midstream_errors(monkeypatch
     assert trip["ok"] is False and trip["error"]["class"] == expected_class
 
 
+def test_formal_review_seal_url_proves_same_proxy_and_blocks_mismatched_seal_host(tmp_path):
+    """R15：传 --review-seal-url 时预检发送正式 X-NewChanlun-Review-Launch 请求、从宿主调用封存端点，
+    并核验已封存 cliproxy-review-v1 收据；若封存端点指向不同实例或不可达则直接拦截。"""
+    import hashlib
+    from types import SimpleNamespace
+
+    receipt_root = tmp_path / "receipts"
+    receipt_root.mkdir(mode=0o700)
+    seen_launches: dict[str, tuple[str, str]] = {}
+
+    class SameProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            launch = self.headers.get("X-NewChanlun-Review-Launch", "")
+            session = self.headers.get("Session-Id", "")
+            if self.path == "/v1/responses":
+                req_model = json.loads(raw)["model"]
+                seen_launches[launch] = (session, req_model)
+                out_text = '{"ok": true}'
+                rid = f"resp_{req_model}_1"
+                ev = {
+                    "type": "response.completed",
+                    "response": {
+                        "id": rid, "status": "completed", "model": req_model,
+                        "output": [{"type": "message", "role": "assistant",
+                                    "content": [{"type": "output_text", "text": out_text}]}],
+                    },
+                }
+                body = f"data: {json.dumps(ev)}\n\n".encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/v1/review-receipts/seal":
+                if launch not in seen_launches or seen_launches[launch][0] != session:
+                    resp = json.dumps({"status": "rejected"}).encode()
+                    self.send_response(409)
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.end_headers()
+                    self.wfile.write(resp)
+                    return
+                _, req_model = seen_launches[launch]
+                now = time.time_ns()
+                rid_sha = hashlib.sha256(f"resp_{req_model}_1".encode()).hexdigest()
+                out_sha = hashlib.sha256(b'{"ok": true}').hexdigest()
+                d = receipt_root / launch
+                d.mkdir(parents=True, exist_ok=True, mode=0o700)
+                (d / "receipt.json").write_text(json.dumps({
+                    "schema": "cliproxy-review-v1", "launch": launch, "session": session,
+                    "started_ns": now - 1_000_000, "finished_ns": now, "sealed_at_ns": now,
+                    "complete": True, "sealed": True, "tainted": False, "requests": 1,
+                    "routes": [f"codex:{req_model}@chatgpt.com"],
+                    "response_id_sha256s": [rid_sha],
+                    "last_response_id_sha256": rid_sha, "last_output_sha256": out_sha,
+                }))
+                resp = json.dumps({"status": "sealed"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    class OtherProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            resp = json.dumps({"status": "rejected"}).encode()
+            self.send_response(409)
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+    same = ThreadingHTTPServer(("127.0.0.1", 0), SameProxyHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    other = ThreadingHTTPServer(("127.0.0.1", 0), OtherProxyHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    same_url = f"http://127.0.0.1:{same.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    other_url = f"http://127.0.0.1:{other.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    threading.Thread(target=same.serve_forever, daemon=True).start()
+    threading.Thread(target=other.serve_forever, daemon=True).start()
+    try:
+        args_ok = SimpleNamespace(proxy_url=same_url, review_seal_url=same_url,
+                                  proxy_receipt_dir=str(receipt_root), probe_in_container=False)
+        checks_ok = preflight.probe_model(args_ok, SOL, KEY, preflight.Deadline(10))
+        by_name_ok = {c["name"]: c for c in checks_ok}
+        assert by_name_ok[f"roundtrip:{SOL}"]["ok"] is True
+        assert by_name_ok[f"seal:{SOL}"]["ok"] is True
+        assert by_name_ok[f"route:{SOL}"]["ok"] is True and by_name_ok[f"route:{SOL}"]["detail"]["sealed"] is True
+
+        # 封存端点指向另一实例：seal 409 rejected，整项预检拦截
+        args_bad = SimpleNamespace(proxy_url=same_url, review_seal_url=other_url,
+                                   proxy_receipt_dir=str(receipt_root), probe_in_container=False)
+        checks_bad = preflight.probe_model(args_bad, SOL, KEY, preflight.Deadline(10))
+        by_name_bad = {c["name"]: c for c in checks_bad}
+        assert by_name_bad[f"roundtrip:{SOL}"]["ok"] is True
+        assert by_name_bad[f"seal:{SOL}"]["ok"] is False
+        assert by_name_bad[f"route:{SOL}"]["ok"] is False
+    finally:
+        same.shutdown()
+        same.server_close()
+        other.shutdown()
+        other.server_close()
+
+
 def test_probe_in_container_runs_admitted_image_over_stdin_without_leaking_key(env, capsys, tmp_path, monkeypatch):
     """--probe-in-container 在审阅镜像容器内执行 HTTP 探针，密钥只走 stdin，不进 argv 或容器 env。"""
     monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")

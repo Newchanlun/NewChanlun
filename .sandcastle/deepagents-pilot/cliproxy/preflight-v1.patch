@@ -113,10 +113,10 @@ index 0000000..2b8a7a8
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
 new file mode 100644
-index 0000000..ef56780
+index 0000000..653e3c5
 --- /dev/null
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1002 @@
+@@ -0,0 +1,1016 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -187,7 +187,6 @@ index 0000000..ef56780
 +	srv.StartTLS()
 +	roots := x509.NewCertPool()
 +	roots.AddCert(leaf)
-+	t.Cleanup(auth.RegisterPreflightTestRootCAsForTest(roots))
 +	// No ServerName override: Go's TLS client MUST verify req.URL.Hostname() against the peer certificate SAN.
 +	tr := &http.Transport{
 +		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
@@ -195,6 +194,7 @@ index 0000000..ef56780
 +			return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
 +		},
 +	}
++	t.Cleanup(auth.RegisterPreflightTestTransportForTest(tr))
 +	return srv, tr
 +}
 +
@@ -271,6 +271,12 @@ index 0000000..ef56780
 +type preflightTransportProvider struct{ transport http.RoundTripper }
 +
 +func (p preflightTransportProvider) RoundTripperFor(*auth.Auth) http.RoundTripper { return p.transport }
++
++type preflightFakeAltProtoRT struct{}
++
++func (preflightFakeAltProtoRT) RoundTrip(r *http.Request) (*http.Response, error) {
++	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++}
 +
 +func TestPreflightReceiptNativeClaudeHTTP(t *testing.T) {
 +	testPreflightReceiptNativeClaudeHTTP(t, "recorder")
@@ -855,6 +861,14 @@ index 0000000..ef56780
 +					},
 +				}
 +			}},
++			{"register-protocol-https", "review-12345678-1234-4234-8234-123456789ae7", func() *http.Transport {
++				tr := &http.Transport{}
++				tr.RegisterProtocol("https", preflightFakeAltProtoRT{})
++				return tr
++			}},
++			{"unregistered-standard-transport", "review-12345678-1234-4234-8234-123456789ae8", func() *http.Transport {
++				return &http.Transport{}
++			}},
 +		} {
 +			t.Run(tc.name, func(t *testing.T) {
 +				isoServer := newTestServer(t)
@@ -1203,6 +1217,45 @@ index 85ae6d6..69a1d19 100644
 +	snapshot := h.Snapshot()
 +	return func() bool { return snapshot != nil && len(snapshot.records) == 0 && h.Snapshot() == snapshot }
 +}
+diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
+index cd725e8..c02be99 100644
+--- a/internal/runtime/executor/helps/proxy_helpers.go
++++ b/internal/runtime/executor/helps/proxy_helpers.go
+@@ -15,6 +15,7 @@ import (
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
+ 	log "github.com/sirupsen/logrus"
+ )
+@@ -43,6 +44,26 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
+ 	// Priority: request override, then auth.ProxyURL, then cfg.ProxyURL.
+ 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
+ 
++	// On preflight / formal-review paths, NEVER clone http.DefaultTransport or fall through
++	// to an arbitrary pooled transport: strictly use a proxy-controlled transport (or registered offline test transport).
++	if preflightreceipt.From(ctx) != nil {
++		if ctx != nil {
++			if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
++				if proxyURL == "" || cliproxyauth.IsTestPreflightTransport(rt) {
++					httpClient.Transport = rt
++					return httpClient
++				}
++			}
++		}
++		controlled, errCtrl := cliproxyauth.ControlledTransportForProxy(proxyURL)
++		if errCtrl != nil || controlled == nil {
++			httpClient.Transport = cliproxyauth.NewPreflightTransportError(preflightreceipt.ErrUnavailable)
++			return httpClient
++		}
++		httpClient.Transport = controlled
++		return httpClient
++	}
++
+ 	// Priority 1 & 2: Explicit proxy URL takes precedence over context RoundTripper.
+ 	if proxyURL != "" {
+ 		if transport := pooledProxyTransport(proxyURL, cfg, auth); transport != nil {
 diff --git a/sdk/api/handlers/handlers.go b/sdk/api/handlers/handlers.go
 index 2f1b89a..d20e37b 100644
 --- a/sdk/api/handlers/handlers.go
@@ -1622,10 +1675,10 @@ index 47f87de..3a1a2d4 100644
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
 new file mode 100644
-index 0000000..d89d713
+index 0000000..5b0c4e6
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,154 @@
 +package auth
 +
 +import (
@@ -1638,25 +1691,15 @@ index 0000000..d89d713
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
 +
-+// isUnsafePreflightTransport reports whether an injected RoundTripper attempts to bypass
-+// standard *http.Transport TLS verification or substitute trust roots outside production policy.
-+func isUnsafePreflightTransport(rt any) bool {
++// isTrustedPreflightTransport reports whether rt is a proxy-controlled transport
++// (or, solely in `-tags preflight_test_roots` builds, an explicitly registered offline test transport).
++// Arbitrary externally constructed *http.Transport instances are rejected because they can carry
++// custom RootCAs, verification callbacks, DialTLS hooks, or RegisterProtocol("https", ...) handlers.
++func isTrustedPreflightTransport(rt any) bool {
 +	if rt == nil {
 +		return false
 +	}
-+	stdTransport, standardTransport := rt.(*http.Transport)
-+	if !standardTransport || stdTransport == nil || stdTransport.DialTLS != nil || stdTransport.DialTLSContext != nil {
-+		return true
-+	}
-+	if cfg := stdTransport.TLSClientConfig; cfg != nil {
-+		badRootCAs := cfg.RootCAs != nil && !isAllowedTestRootCAs(cfg.RootCAs)
-+		return cfg.InsecureSkipVerify ||
-+			cfg.ServerName != "" ||
-+			cfg.VerifyPeerCertificate != nil ||
-+			cfg.VerifyConnection != nil ||
-+			badRootCAs
-+	}
-+	return false
++	return isControlledPreflightTransport(rt) || isAllowedTestTransport(rt)
 +}
 +
 +// This fixed-revision allowlist is deliberately by concrete implementation, not
@@ -1682,11 +1725,23 @@ index 0000000..d89d713
 +			}
 +		}
 +	}
-+	// An injected transport may forward elsewhere or substitute trust roots;
-+	// production builds strictly require system trust roots (RootCAs == nil) and standard TLS dialing.
-+	if !supported || auth == nil || isUnsafePreflightTransport(ctx.Value("cliproxy.roundtripper")) {
++	if !supported || auth == nil {
 +		c.Taint()
 +		return ctx, nil, preflightreceipt.ErrUnavailable
++	}
++	rt := ctx.Value("cliproxy.roundtripper")
++	if rt != nil {
++		if !isTrustedPreflightTransport(rt) {
++			c.Taint()
++			return ctx, nil, preflightreceipt.ErrUnavailable
++		}
++	} else {
++		controlled, err := ControlledTransportForProxy(auth.ProxyURL)
++		if err != nil {
++			c.Taint()
++			return ctx, nil, preflightreceipt.ErrUnavailable
++		}
++		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(controlled))
 +	}
 +	return c.Start(ctx, auth.Provider, model)
 +}
@@ -1716,32 +1771,24 @@ index 0000000..d89d713
 +	return executor.CountTokens(ctx, auth, req, opts)
 +}
 +
-+func preflightStream(executor ProviderExecutor, ctx context.Context, auth *Auth, req execution.Request, opts execution.Options) (*execution.StreamResult, error) {
-+	ctx, lease, err := preflightStart(ctx, executor, auth, req.Model)
-+	if err != nil {
-+		return nil, err
-+	}
-+	result, err := executor.ExecuteStream(ctx, auth, req, opts)
-+	if lease == nil {
-+		return result, err
-+	}
-+	if err != nil || result == nil || result.Chunks == nil {
-+		lease.End()
-+		return result, err
-+	}
++func wrapPreflightStream(ctx context.Context, lease *preflightreceipt.Execution, original <-chan execution.StreamChunk) <-chan execution.StreamChunk {
 +	out := make(chan execution.StreamChunk)
-+	original := result.Chunks
-+	copyResult := *result
-+	copyResult.Chunks = out
 +	go func() {
 +		canceled := false
 +		defer func() {
++			if !canceled {
++				// Release the execution lease BEFORE exposing EOF on out so an immediate
++				// serial retry on the same Collector never observes stale active > 0.
++				lease.End()
++				close(out)
++				return
++			}
++			// On cancellation, close out first so WaitStreamDelivery cannot deadlock
++			// waiting for a consumer blocked on reading out.
 +			close(out)
-+			if canceled {
-+				deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
-+				if !tracked || deliveryErr != nil {
-+					preflightreceipt.From(ctx).Reject()
-+				}
++			deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
++			if !tracked || deliveryErr != nil {
++				preflightreceipt.From(ctx).Reject()
 +			}
 +			lease.End()
 +		}()
@@ -1766,14 +1813,32 @@ index 0000000..d89d713
 +			}
 +		}
 +	}()
++	return out
++}
++
++func preflightStream(executor ProviderExecutor, ctx context.Context, auth *Auth, req execution.Request, opts execution.Options) (*execution.StreamResult, error) {
++	ctx, lease, err := preflightStart(ctx, executor, auth, req.Model)
++	if err != nil {
++		return nil, err
++	}
++	result, err := executor.ExecuteStream(ctx, auth, req, opts)
++	if lease == nil {
++		return result, err
++	}
++	if err != nil || result == nil || result.Chunks == nil {
++		lease.End()
++		return result, err
++	}
++	copyResult := *result
++	copyResult.Chunks = wrapPreflightStream(ctx, lease, result.Chunks)
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
 new file mode 100644
-index 0000000..5276a45
+index 0000000..ef7d3b0
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,70 @@
 +//go:build !preflight_test_roots
 +
 +package auth
@@ -1795,27 +1860,37 @@ index 0000000..5276a45
 +}
 +
 +func TestPreflightReceiptProductionTransportTrust(t *testing.T) {
-+	// Standard deployment-controlled system trust root transports MUST be allowed.
-+	for _, safe := range []struct {
-+		name string
-+		rt   any
-+	}{
-+		{"nil-roundtripper", nil},
-+		{"default-transport", &http.Transport{}},
-+		{"system-roots-tls12", &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}},
-+	} {
-+		if isUnsafePreflightTransport(safe.rt) {
-+			t.Fatalf("safe production transport %s was rejected", safe.name)
++	// Proxy-owned controlled transports constructed via ControlledTransportForProxy MUST be trusted.
++	for _, proxyURL := range []string{"", "direct", "http://127.0.0.1:8080", "socks5://127.0.0.1:1080"} {
++		tr, err := ControlledTransportForProxy(proxyURL)
++		if err != nil || tr == nil {
++			t.Fatalf("ControlledTransportForProxy(%q) failed: tr=%v err=%v", proxyURL, tr, err)
++		}
++		if !isTrustedPreflightTransport(tr) {
++			t.Fatalf("controlled transport for %q was rejected", proxyURL)
++		}
++	}
++	// Unsupported https:// proxy (requires DialTLSContext) and malformed proxy URLs MUST fail closed.
++	for _, badProxy := range []string{"https://127.0.0.1:8443", "ftp://127.0.0.1:21", "://bad"} {
++		if tr, err := ControlledTransportForProxy(badProxy); err == nil || tr != nil {
++			t.Fatalf("ControlledTransportForProxy(%q) escaped guard: tr=%v err=%v", badProxy, tr, err)
 +		}
 +	}
 +
-+	// Custom trust roots, verification callbacks, TLS dialers, typed-nil, and non-standard RoundTrippers MUST be rejected.
++	// Any externally constructed *http.Transport (even default-looking, or carrying RegisterProtocol("https", ...),
++	// custom RootCAs, callbacks, DialTLS*, typed-nil, or non-standard RoundTripper) MUST be rejected in production.
 +	customRoots := x509.NewCertPool()
 +	var typedNil *http.Transport
++	altProtoTr := &http.Transport{}
++	altProtoTr.RegisterProtocol("https", nonStandardRoundTripper{})
++
 +	for _, bad := range []struct {
 +		name string
 +		rt   any
 +	}{
++		{"nil-roundtripper", nil},
++		{"external-empty-transport", &http.Transport{}},
++		{"register-protocol-https", altProtoTr},
 +		{"custom-root-cas", &http.Transport{TLSClientConfig: &tls.Config{RootCAs: customRoots, MinVersion: tls.VersionTLS12}}},
 +		{"insecure-skip-verify", &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}}},
 +		{"servername-override", &http.Transport{TLSClientConfig: &tls.Config{ServerName: "example.com", MinVersion: tls.VersionTLS12}}},
@@ -1826,85 +1901,375 @@ index 0000000..5276a45
 +		{"typed-nil-transport", typedNil},
 +		{"non-standard-roundtripper", nonStandardRoundTripper{}},
 +	} {
-+		if !isUnsafePreflightTransport(bad.rt) {
-+			t.Fatalf("unsafe transport %s escaped production trust check", bad.name)
++		if isTrustedPreflightTransport(bad.rt) {
++			t.Fatalf("external/unsafe transport %s escaped production trust check", bad.name)
 +		}
 +	}
-+
-+	if isAllowedTestRootCAs(customRoots) {
-+		t.Fatal("production build accepted custom test RootCAs")
++	if IsTestPreflightTransport(altProtoTr) {
++		t.Fatal("production build accepted test transport")
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_prod.go b/sdk/cliproxy/auth/preflight_roots_prod.go
 new file mode 100644
-index 0000000..e525a7f
+index 0000000..26bea8d
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_roots_prod.go
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,8 @@
 +//go:build !preflight_test_roots
 +
 +package auth
 +
-+import "crypto/x509"
-+
-+// Production builds bind preflight and formal-review TLS verification strictly
-+// to the deployment's OS trust store (TLSClientConfig.RootCAs == nil).
-+func isAllowedTestRootCAs(*x509.CertPool) bool {
++// Production builds never trust externally injected transports on preflight or formal-review paths.
++func isAllowedTestTransport(any) bool {
 +	return false
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_test_hook.go b/sdk/cliproxy/auth/preflight_roots_test_hook.go
 new file mode 100644
-index 0000000..e937d5f
+index 0000000..6de513e
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_roots_test_hook.go
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,59 @@
 +//go:build preflight_test_roots
 +
 +package auth
 +
 +import (
-+	"crypto/x509"
++	"net/http"
 +	"sync"
 +)
 +
 +var (
-+	preflightTestRootsMu sync.RWMutex
-+	preflightTestRoots   = make(map[*x509.CertPool]int)
++	preflightTestTransportsMu sync.RWMutex
++	preflightTestTransports   = make(map[*http.Transport]int)
 +)
 +
-+// RegisterPreflightTestRootCAsForTest registers an offline test server root pool
++// RegisterPreflightTestTransportForTest registers an offline test *http.Transport
 +// exclusively in test builds compiled with `-tags preflight_test_roots`.
 +// Production builds omit this file entirely.
-+func RegisterPreflightTestRootCAsForTest(pool *x509.CertPool) func() {
-+	if pool == nil {
++func RegisterPreflightTestTransportForTest(tr *http.Transport) func() {
++	if tr == nil {
 +		return func() {}
 +	}
-+	preflightTestRootsMu.Lock()
-+	preflightTestRoots[pool]++
-+	preflightTestRootsMu.Unlock()
++	preflightTestTransportsMu.Lock()
++	preflightTestTransports[tr]++
++	preflightTestTransportsMu.Unlock()
 +	var once sync.Once
 +	return func() {
 +		once.Do(func() {
-+			preflightTestRootsMu.Lock()
-+			if preflightTestRoots[pool] <= 1 {
-+				delete(preflightTestRoots, pool)
++			preflightTestTransportsMu.Lock()
++			if preflightTestTransports[tr] <= 1 {
++				delete(preflightTestTransports, tr)
 +			} else {
-+				preflightTestRoots[pool]--
++				preflightTestTransports[tr]--
 +			}
-+			preflightTestRootsMu.Unlock()
++			preflightTestTransportsMu.Unlock()
 +		})
 +	}
 +}
 +
-+func isAllowedTestRootCAs(pool *x509.CertPool) bool {
-+	if pool == nil {
++func isAllowedTestTransport(rt any) bool {
++	tr, ok := rt.(*http.Transport)
++	if !ok || tr == nil {
 +		return false
 +	}
-+	preflightTestRootsMu.RLock()
-+	allowed := preflightTestRoots[pool] > 0
-+	preflightTestRootsMu.RUnlock()
-+	return allowed
++	preflightTestTransportsMu.RLock()
++	allowed := preflightTestTransports[tr] > 0
++	preflightTestTransportsMu.RUnlock()
++	if !allowed {
++		return false
++	}
++	if tr.DialTLS != nil || tr.DialTLSContext != nil {
++		return false
++	}
++	if cfg := tr.TLSClientConfig; cfg != nil {
++		if cfg.InsecureSkipVerify || cfg.ServerName != "" || cfg.VerifyPeerCertificate != nil || cfg.VerifyConnection != nil {
++			return false
++		}
++	}
++	return true
 +}
+diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
+new file mode 100644
+index 0000000..94e96e0
+--- /dev/null
++++ b/sdk/cliproxy/auth/preflight_stream_test.go
+@@ -0,0 +1,109 @@
++package auth
++
++import (
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"fmt"
++	"io"
++	"math/big"
++	"net/http"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++func testVerifiedTLS(t *testing.T, host string) *tls.ConnectionState {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		Subject:      pkix.Name{CommonName: host},
++		DNSNames:     []string{host},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(time.Hour),
++		KeyUsage:     x509.KeyUsageDigitalSignature,
++		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	leaf, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return &tls.ConnectionState{
++		HandshakeComplete: true,
++		ServerName:        host,
++		VerifiedChains:    [][]*x509.Certificate{{leaf}},
++	}
++}
++
++type streamTestRT struct {
++	tlsState *tls.ConnectionState
++}
++
++func (rt streamTestRT) RoundTrip(req *http.Request) (*http.Response, error) {
++	return &http.Response{
++		StatusCode: http.StatusServiceUnavailable,
++		Header:     make(http.Header),
++		Body:       io.NopCloser(strings.NewReader("")),
++		TLS:        rt.tlsState,
++	}, nil
++}
++
++func TestPreflightReceiptStreamEndsLeaseBeforeEOF(t *testing.T) {
++	// Verify wrapPreflightStream releases the execution lease BEFORE closing out on normal EOF,
++	// so an immediate serial retry on the same strict Codex Collector never fails with active > 0.
++	root := filepath.Join(t.TempDir(), "receipts")
++	tlsState := testVerifiedTLS(t, "chatgpt.com")
++	for i := 0; i < 60; i++ {
++		launch := fmt.Sprintf("review-88881111-2222-4333-8444-%012d", i)
++		session := fmt.Sprintf("019d0000-0000-7000-8000-%012d", i)
++		ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		execCtx1, lease1, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		// Perform one TLS-verified attempt so lease1.End() keeps the Collector valid for serial retry.
++		cl := httptransport.Decorate(execCtx1, &http.Client{Transport: streamTestRT{tlsState: tlsState}})
++		req, _ := http.NewRequestWithContext(execCtx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses",
++			strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_ = resp.Body.Close()
++
++		// Upstream closes stream immediately without emitting any chunks.
++		orig := make(chan executor.StreamChunk)
++		close(orig)
++		out := wrapPreflightStream(execCtx1, lease1, orig)
++		for range out {
++		}
++		// Immediately upon observing EOF on out, a serial retry on the same Collector MUST succeed.
++		_, lease2, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("iteration %d: serial retry immediately after stream EOF failed (lease still active?): %v", i, err)
++		}
++		lease2.End()
++		c.Complete(false)
++		c.HandlerDone(false)
++	}
++}
+diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
+new file mode 100644
+index 0000000..9663265
+--- /dev/null
++++ b/sdk/cliproxy/auth/preflight_transport.go
+@@ -0,0 +1,136 @@
++package auth
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/http"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
++	"golang.org/x/net/proxy"
++)
++
++var (
++	controlledTransportMu      sync.RWMutex
++	controlledTransportByProxy = make(map[string]*http.Transport)
++	controlledTransportPtrs    = make(map[*http.Transport]struct{})
++)
++
++func newFreshStandardTransport() *http.Transport {
++	// Constructed directly without cloning http.DefaultTransport so an external
++	// RegisterProtocol("https", ...) or TLSClientConfig mutation on DefaultTransport
++	// can never affect formal review or preflight TLS verification.
++	dialer := &net.Dialer{
++		Timeout:   30 * time.Second,
++		KeepAlive: 30 * time.Second,
++	}
++	return &http.Transport{
++		Proxy:                 http.ProxyFromEnvironment,
++		DialContext:           dialer.DialContext,
++		ForceAttemptHTTP2:     true,
++		MaxIdleConns:          100,
++		IdleConnTimeout:       90 * time.Second,
++		TLSHandshakeTimeout:   10 * time.Second,
++		ExpectContinueTimeout: 1 * time.Second,
++	}
++}
++
++// ControlledTransportForProxy returns a proxy-owned *http.Transport bound strictly to
++// OS system trust roots (TLSClientConfig == nil, no DialTLS/DialTLSContext, no RegisterProtocol).
++// Unsupported schemes such as https:// proxy (which require DialTLSContext) fail closed.
++func ControlledTransportForProxy(raw string) (*http.Transport, error) {
++	trimmed := strings.TrimSpace(raw)
++	controlledTransportMu.RLock()
++	if existing := controlledTransportByProxy[trimmed]; existing != nil {
++		controlledTransportMu.RUnlock()
++		return existing, nil
++	}
++	controlledTransportMu.RUnlock()
++
++	setting, errParse := proxyutil.Parse(trimmed)
++	if errParse != nil {
++		return nil, preflightreceipt.ErrUnavailable
++	}
++	tr := newFreshStandardTransport()
++	switch setting.Mode {
++	case proxyutil.ModeInherit:
++		// Keeps ProxyFromEnvironment with clean OS trust roots.
++	case proxyutil.ModeDirect:
++		tr.Proxy = nil
++	case proxyutil.ModeProxy:
++		switch setting.URL.Scheme {
++		case "http":
++			tr.Proxy = http.ProxyURL(setting.URL)
++		case "socks5", "socks5h":
++			var proxyAuth *proxy.Auth
++			if setting.URL.User != nil {
++				username := setting.URL.User.Username()
++				password, _ := setting.URL.User.Password()
++				proxyAuth = &proxy.Auth{User: username, Password: password}
++			}
++			forwardDialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
++			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, forwardDialer)
++			if errSOCKS5 != nil {
++				return nil, preflightreceipt.ErrUnavailable
++			}
++			tr.Proxy = nil
++			tr.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
++				return dialer.Dial(network, addr)
++			}
++		default:
++			return nil, preflightreceipt.ErrUnavailable
++		}
++	default:
++		return nil, preflightreceipt.ErrUnavailable
++	}
++
++	controlledTransportMu.Lock()
++	if existing := controlledTransportByProxy[trimmed]; existing != nil {
++		controlledTransportMu.Unlock()
++		return existing, nil
++	}
++	controlledTransportByProxy[trimmed] = tr
++	controlledTransportPtrs[tr] = struct{}{}
++	controlledTransportMu.Unlock()
++	return tr, nil
++}
++
++func isControlledPreflightTransport(rt any) bool {
++	tr, ok := rt.(*http.Transport)
++	if !ok || tr == nil {
++		return false
++	}
++	controlledTransportMu.RLock()
++	_, owned := controlledTransportPtrs[tr]
++	controlledTransportMu.RUnlock()
++	if !owned {
++		return false
++	}
++	return tr.DialTLS == nil && tr.DialTLSContext == nil && tr.TLSClientConfig == nil
++}
++
++type failClosedRoundTripper struct {
++	err error
++}
++
++func (f failClosedRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
++	if f.err != nil {
++		return nil, f.err
++	}
++	return nil, errors.New("preflight transport unavailable")
++}
++
++// NewPreflightTransportError returns a RoundTripper that fails closed without network I/O.
++func NewPreflightTransportError(err error) http.RoundTripper {
++	return failClosedRoundTripper{err: err}
++}
++
++// IsTestPreflightTransport reports whether rt is an offline test transport registered
++// exclusively in `-tags preflight_test_roots` builds. Production builds always return false.
++func IsTestPreflightTransport(rt any) bool {
++	return isAllowedTestTransport(rt)
++}
+diff --git a/sdk/cliproxy/rtprovider.go b/sdk/cliproxy/rtprovider.go
+index ddbd342..a9e5bec 100644
+--- a/sdk/cliproxy/rtprovider.go
++++ b/sdk/cliproxy/rtprovider.go
+@@ -36,10 +36,16 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
+ 	if rt != nil {
+ 		return rt
+ 	}
+-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
+-	if errBuild != nil {
+-		log.Errorf("%v", errBuild)
+-		return nil
++	var transport *http.Transport
++	if controlled, errControlled := coreauth.ControlledTransportForProxy(proxyStr); errControlled == nil && controlled != nil {
++		transport = controlled
++	} else {
++		var errBuild error
++		transport, _, errBuild = proxyutil.BuildHTTPTransport(proxyStr)
++		if errBuild != nil {
++			log.Errorf("%v", errBuild)
++			return nil
++		}
+ 	}
+ 	if transport == nil {
+ 		return nil
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 new file mode 100644
 index 0000000..8867033
