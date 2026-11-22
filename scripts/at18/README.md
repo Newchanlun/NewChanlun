@@ -8,7 +8,7 @@ scripts/at18/at18-registry-lint
 pytest -p no:cacheprovider scripts/at18/tests/test_at18_harness.py -v
 ```
 
-PR 上的同一入口额外计算真正的 merge-base，禁止原有键、basis 或域消失，也不允许把已有运行域改成延期。当前登记册只钉住 r5 入口摘要；正式清册、历史 cure 和 PRE 由 #2132 登记，骨架允许键尚未登记；一个键一旦加入，必须同时交齐 R03 的全部 basis，缺任何一项报 `BASIS_INCOMPLETE`。正式验收还要核所有必需键和域，不把骨架通过当成覆盖。
+PR 上的同一入口额外计算真正的 merge-base，禁止原有键、basis 或域消失，也不允许把已有运行域改成延期。闸前清册与历史 cure 的来源及复跑见[闸前清册](../../.chanlun/at18/pregate/README.md)。PRE 是独立非作者复审原件。骨架允许键尚未登记；一个键一旦加入，必须同时交齐 R03 的全部 basis，缺任何一项报 `BASIS_INCOMPLETE`。正式验收还要核所有必需键和域，不把骨架通过当成覆盖。
 
 ## 登记一条检查
 
@@ -17,7 +17,7 @@ PR 上的同一入口额外计算真正的 merge-base，禁止原有键、basis 
 | runner | selector 示例 | 执行口径 |
 |---|---|---|
 | `pytest` | `TestContract::test_retry` | 相对登记文件的节点 ID；未指定参数 ID 时包括该定义的全部参数实例，实例须使用稳定的 ASCII 标识（不要将参数值写入 ID）。 |
-| `node-test` | `restarts and resumes` | 文件内唯一的顶层字面 `test` 或 `it` 名，按原名匹配；Node 22。 |
+| `node-test` | `restarts and resumes` | 文件内唯一的顶层字面 `test` 或 `it` 名，按原名匹配；Node 22，TypeScript 源用原生 `--experimental-transform-types`，保留实际测试定义的行身份。 |
 | `cargo-test` | `x_execution+production_session/replay::resumes` | `target[+feature,feature]/完整用例路径`；`lib` 选库，`bin:<name>` 选二进制，`test:<name>` 或裸名称选集成测试。从 Cargo target 根沿普通模块声明定位实际定义文件，只接受直接 `#[test]`；不接受路径重写、item 宏展开或自定义 harness。Linux 用锁文件和 libtest 精确运行。 |
 | `command` | `scripts/check-example` | 直接执行登记的可执行文件，不经 shell 拼接，不接受额外参数。期望一次运行，必须键感知。 |
 

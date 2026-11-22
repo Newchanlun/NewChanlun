@@ -3,7 +3,1397 @@
   "crosswalk_sha256": "0d31d68e75a6d672c948e8708bfb261549029c7310f7ad4dbb326c087157ce5d",
   "adapter_contract_sha256": "cd8808cfe052afde9ee3d3576ab76f6c324d4e21ead4b150c89017d5697ead99",
   "experiment_profile_id": null,
-  "checks": [],
+  "checks": [
+    {
+      "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments",
+      "group": "r11-backtest",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib+backtest_bin/theta_v0::backtest::tick::tests::calibration_sweep_finds_non_collapsed_segments",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/theta_v0/backtest/tick.rs",
+        "sha256": "dd7229486cf0dac54e1d5d9ca9f670857f9bab37274eb0b140578f5769ef374b"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.backtest.incremental_macd_append_is_o1_scaling",
+      "group": "r11-backtest",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib+backtest_bin/theta_v0::classifier::divergence::tests::incremental_macd_append_is_o1_scaling",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/theta_v0/classifier/divergence.rs",
+        "sha256": "729d46b63ef21542aa10d001d8de6f1ec74b8f02152f33ec6f808651154e73e2"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.backtest.m3_partition_synthetic_holds",
+      "group": "r11-backtest",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib+backtest_bin/theta_v0::backtest::l3_delta_r_alpha::tests::m3_partition_synthetic_holds",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/theta_v0/backtest/l3_delta_r_alpha.rs",
+        "sha256": "6b6076e017ba2c9f3965c1d9d30295bdd37e0ac95c5f07da2346413f18f888a0"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure",
+      "group": "r11-backtest",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib+backtest_bin/theta_v0::backtest::tick::tests::seam_btc_tick_bars_yield_non_trivial_structure",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/theta_v0/backtest/tick.rs",
+        "sha256": "dd7229486cf0dac54e1d5d9ca9f670857f9bab37274eb0b140578f5769ef374b"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments",
+      "group": "r11-default",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib/theta_v0::backtest::tick::tests::calibration_sweep_finds_non_collapsed_segments",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/theta_v0/backtest/tick.rs",
+        "sha256": "dd7229486cf0dac54e1d5d9ca9f670857f9bab37274eb0b140578f5769ef374b"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.default.m3_partition_synthetic_holds",
+      "group": "r11-default",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib/theta_v0::backtest::l3_delta_r_alpha::tests::m3_partition_synthetic_holds",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/theta_v0/backtest/l3_delta_r_alpha.rs",
+        "sha256": "6b6076e017ba2c9f3965c1d9d30295bdd37e0ac95c5f07da2346413f18f888a0"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure",
+      "group": "r11-default",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib/theta_v0::backtest::tick::tests::seam_btc_tick_bars_yield_non_trivial_structure",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/theta_v0/backtest/tick.rs",
+        "sha256": "dd7229486cf0dac54e1d5d9ca9f670857f9bab37274eb0b140578f5769ef374b"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.install-elan",
+      "group": "r11-elan",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "command",
+      "selector": "scripts/at18/cures/install-elan",
+      "expected_count": 1,
+      "key_aware": true,
+      "source": {
+        "path": "scripts/at18/cures/install-elan",
+        "sha256": "a6174281b6bb702e06e1a21caa2830ee01057dac87ad9391b8280f22574ad0c1"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.owned-pyo3",
+      "group": "r11-owned",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "command",
+      "selector": "scripts/at18/cures/owned-pyo3",
+      "expected_count": 1,
+      "key_aware": true,
+      "source": {
+        "path": "scripts/at18/cures/owned-pyo3",
+        "sha256": "5eaf5550fa65fdf052f84af55a29266b4854b5dae530792477e9fdb0878212b6"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.rustfmt",
+      "group": "r11-fmt",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "command",
+      "selector": "scripts/at18/cures/rustfmt",
+      "expected_count": 1,
+      "key_aware": true,
+      "source": {
+        "path": "scripts/at18/cures/rustfmt",
+        "sha256": "27e7a76fe477706ee048cdce102c55c8a610f68e758168cfc47138ec6c77843d"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.session.each_signed_record_window_gates_alone",
+      "group": "r11-session",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib+s_session/economic_session::tb03c_funding_tests::each_signed_record_window_gates_alone",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/economic_session/tb03c_funding_tests.rs",
+        "sha256": "75cb6095e5de24c17036172c1c9ba586d39ad6d0933f7d2ef74ba310c1222da5"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic",
+      "group": "r11-session",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib+s_session/economic_session::tb03c_funding_tests::opening_batch_negative_controls_are_typed_and_deterministic",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/economic_session/tb03c_funding_tests.rs",
+        "sha256": "75cb6095e5de24c17036172c1c9ba586d39ad6d0933f7d2ef74ba310c1222da5"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.session.strict_request_reply_and_two_attempts_share_real_wire_and_request_budget",
+      "group": "r11-session",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib+s_session/economic_session::finance_transport::financial_reader_tests::strict_request_reply_and_two_attempts_share_real_wire_and_request_budget",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/economic_session/finance_transport.rs",
+        "sha256": "6dbb617d3a3c9f94552723e242de3058363b906ded043c649c9693ff44a5feb0"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays",
+      "group": "r11-session",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "cargo-test",
+      "selector": "lib+s_session/economic_session::tb03c_funding_tests::v2_domain_binds_revision_waits_in_e_and_replays",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": "rust/src/economic_session/tb03c_funding_tests.rs",
+        "sha256": "75cb6095e5de24c17036172c1c9ba586d39ad6d0933f7d2ef74ba310c1222da5"
+      },
+      "record": null
+    },
+    {
+      "check_id": "r11.swarm-route-preflight",
+      "group": "r11-node",
+      "evidence_class": "simulation",
+      "profile_id": null,
+      "runner": "node-test",
+      "selector": "冲突路径 14/15：模型预检失败不写 used / resume / cp，随后仍可占用；占用后同一检查点重入才记 resume",
+      "expected_count": 1,
+      "key_aware": false,
+      "source": {
+        "path": ".sandcastle/swarm-route.test.mts",
+        "sha256": "26dcf3f6d0a1082444a0f76bd25ace7000e2d9c91f9434ba9e8cad989774e49b"
+      },
+      "record": null
+    }
+  ],
   "bindings": [],
-  "pregate": {"census_sha256": "36c76a9cfa4ec39f518184ba91d61988027a775b0e319ea9eb719012ad0a3a00", "landings": []}
+  "pregate": {
+    "census_sha256": "2c80aa32f406a73d089729d5d414367a2635846f4a42438c960ec0dc48cea8cd",
+    "landings": [
+      {
+        "attribution_scopes": [
+          "TB-01"
+        ],
+        "commits": [
+          "65298686cf3e7c9e94e0b9ceeb83aebad2b5530b"
+        ],
+        "ticket": 1359,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-08"
+        ],
+        "commits": [
+          "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
+          "bb635ab26a33108130e4c4d63140d94f6e431d49"
+        ],
+        "ticket": 1366,
+        "cure_checks": [
+          {
+            "commit": "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
+            "run_id": 39034285362,
+            "kind": "step",
+            "target": "cargo fmt --check（#611：归零后防回潮）",
+            "check_id": "r11.rustfmt"
+          },
+          {
+            "commit": "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
+            "run_id": 39034285362,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
+            "run_id": 39034285362,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
+            "run_id": 39034285362,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-10"
+        ],
+        "commits": [
+          "344d4da15d59b520b0aee6f4332d9a14a48f7d1a"
+        ],
+        "ticket": 1368,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-01"
+        ],
+        "commits": [
+          "2212eba31e0b7419907e622e79f02f7c2cc37706"
+        ],
+        "ticket": 1370,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-01"
+        ],
+        "commits": [
+          "d2219e8e014a5d55c091f8eda62ffb9dd8154953",
+          "e46cf3bca6a67da821f9ab046507563b8133f6d9"
+        ],
+        "ticket": 1371,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-01"
+        ],
+        "commits": [
+          "21b145250ec0d65e7d7148eed32594490dc763cc",
+          "21b7898a19baa4d17c5885d122ea57ed882e4f73",
+          "65298686cf3e7c9e94e0b9ceeb83aebad2b5530b"
+        ],
+        "ticket": 1372,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "2706d87f7306d03afac2148297eb7a7be579cbf8"
+        ],
+        "ticket": 1373,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "abf5c0f8491fc066a0f2bc47ab4defdb120035c1",
+          "c65f021959b0caec1f385459de3d6049f99f7244"
+        ],
+        "ticket": 1374,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-08"
+        ],
+        "commits": [
+          "6dc7cd0c87e9d5222d721d3a4941897dcc1eabb7",
+          "9636ccb5f718cf9e6a7246774d79dc13957ebe37"
+        ],
+        "ticket": 1381,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "3d61fb72944f577ea3b758b54001c2a7544b04dc",
+          "8619a20f2800095e6bb9ec20ba2607a744740f91"
+        ],
+        "ticket": 1392,
+        "cure_checks": [
+          {
+            "commit": "8619a20f2800095e6bb9ec20ba2607a744740f91",
+            "run_id": null,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "8619a20f2800095e6bb9ec20ba2607a744740f91",
+            "run_id": 37545808487,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "8619a20f2800095e6bb9ec20ba2607a744740f91",
+            "run_id": 37545808487,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "8619a20f2800095e6bb9ec20ba2607a744740f91",
+            "run_id": 37545808487,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "6badaa60494740702c217abc9921809de3899ce0",
+          "b0a21955109643c9f325687f77485f99aa619049",
+          "d2f20aaca866f7a649a950fd3a829238214dcd82"
+        ],
+        "ticket": 1394,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "2517b126252a39a3d000ec83e15d171bcb91b648",
+          "3d61fb72944f577ea3b758b54001c2a7544b04dc",
+          "f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9"
+        ],
+        "ticket": 1404,
+        "cure_checks": [
+          {
+            "commit": "2517b126252a39a3d000ec83e15d171bcb91b648",
+            "run_id": 39245752214,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "2517b126252a39a3d000ec83e15d171bcb91b648",
+            "run_id": 39245752214,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9",
+            "run_id": null,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9",
+            "run_id": 38201220739,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9",
+            "run_id": 38201220739,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9",
+            "run_id": 38201220739,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "210b4094045adc999ec938a9bf99ac80d5eecc82",
+          "21b145250ec0d65e7d7148eed32594490dc763cc",
+          "28df886697b90b9aa83f8803418f3ae40b8ac2b2",
+          "b34b0278ee780c03f3c49c9cf027bbd2545d1134"
+        ],
+        "ticket": 1405,
+        "cure_checks": [
+          {
+            "commit": "210b4094045adc999ec938a9bf99ac80d5eecc82",
+            "run_id": 39223502349,
+            "kind": "step",
+            "target": "cargo fmt --check（#611：归零后防回潮）",
+            "check_id": "r11.rustfmt"
+          },
+          {
+            "commit": "210b4094045adc999ec938a9bf99ac80d5eecc82",
+            "run_id": 39223502349,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "210b4094045adc999ec938a9bf99ac80d5eecc82",
+            "run_id": 39223502349,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "b34b0278ee780c03f3c49c9cf027bbd2545d1134",
+            "run_id": 39321352559,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "b34b0278ee780c03f3c49c9cf027bbd2545d1134",
+            "run_id": 39321352559,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "02b5b571eb872e92a5325f5bd02f966097f27cf9",
+          "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+          "67e9c42205e4b98af137f203cdbc0cae66fe3d30",
+          "75022b3b9c6757b7ff39a0aa20b200606afbe8e6",
+          "a54d1ced816745748b5482229c748be05cc75749"
+        ],
+        "ticket": 1406,
+        "cure_checks": [
+          {
+            "commit": "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+            "run_id": 38677450584,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+            "run_id": 38677450584,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+            "run_id": 38677450584,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+            "run_id": 38677450584,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+            "run_id": 38677450584,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+          },
+          {
+            "commit": "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+            "run_id": 38677450584,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+          },
+          {
+            "commit": "a54d1ced816745748b5482229c748be05cc75749",
+            "run_id": 38515293378,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "a54d1ced816745748b5482229c748be05cc75749",
+            "run_id": 38515293378,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "a54d1ced816745748b5482229c748be05cc75749",
+            "run_id": 38515293378,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "a54d1ced816745748b5482229c748be05cc75749",
+            "run_id": 38515293378,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "a54d1ced816745748b5482229c748be05cc75749",
+            "run_id": 38515293378,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+          },
+          {
+            "commit": "a54d1ced816745748b5482229c748be05cc75749",
+            "run_id": 38515293378,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "2517b126252a39a3d000ec83e15d171bcb91b648",
+          "3d61fb72944f577ea3b758b54001c2a7544b04dc",
+          "465174240b989a1d99f99a047fbb46b3ee215f49"
+        ],
+        "ticket": 1414,
+        "cure_checks": [
+          {
+            "commit": "2517b126252a39a3d000ec83e15d171bcb91b648",
+            "run_id": 39245752214,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "2517b126252a39a3d000ec83e15d171bcb91b648",
+            "run_id": 39245752214,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "465174240b989a1d99f99a047fbb46b3ee215f49",
+            "run_id": null,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+          },
+          {
+            "commit": "465174240b989a1d99f99a047fbb46b3ee215f49",
+            "run_id": 38406287284,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "465174240b989a1d99f99a047fbb46b3ee215f49",
+            "run_id": 38406287284,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "465174240b989a1d99f99a047fbb46b3ee215f49",
+            "run_id": 38406287284,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "6a97845bf19f302b7b247b3d9c2c6ace9f31cddb",
+          "b63a3fd5869fda266f11613b6bc9f02fb3d77bfb"
+        ],
+        "ticket": 1420,
+        "cure_checks": [
+          {
+            "commit": "6a97845bf19f302b7b247b3d9c2c6ace9f31cddb",
+            "run_id": 42437400612,
+            "kind": "test",
+            "target": "strict_request_reply_and_two_attempts_share_real_wire_and_request_budget",
+            "check_id": "r11.session.strict_request_reply_and_two_attempts_share_real_wire_and_request_budget"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "3654ba8189eae85415671e4233832bfe0234f0c9",
+          "38256274f3785c1117d89501c3e62276921c5c38",
+          "457902e3c371d1f1c9611bb083415067f061f4d2",
+          "6be589b842a1cd7f084b39efe66fa8c8a01f36f5",
+          "71df2ae749664714e6bff10f8f71d9e15cc4c815",
+          "9c0e4e90cef5bf493732f371882f47c1e8c948d2"
+        ],
+        "ticket": 1481,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02",
+          "TB-03"
+        ],
+        "commits": [
+          "67e9c42205e4b98af137f203cdbc0cae66fe3d30",
+          "6cd2f8a5f84d257d026096385bf58a13c938edb9",
+          "8bbe4499d983e674d435261b207a6556715600b4",
+          "ce7b29c52bfc01abe4fe80cf3b1f70a11aa1cf32",
+          "da03a10ee028fdb1f31ed0db2b5b42184e52ac54",
+          "fcfdb0f71042d7634bb44002d8b915de414ee6e5"
+        ],
+        "ticket": 1488,
+        "cure_checks": [
+          {
+            "commit": "6cd2f8a5f84d257d026096385bf58a13c938edb9",
+            "run_id": 42467231009,
+            "kind": "step",
+            "target": "Install elan",
+            "check_id": "r11.install-elan"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-02",
+          "TB-03"
+        ],
+        "commits": [
+          "0bace7c395ca92bb1be12f698fc31930bfefd69c",
+          "5123c9e2736573dd1c1232311c9c63ba0a1abc80"
+        ],
+        "ticket": 1491,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "24c2fa068fc546aa47ddbcf68583641e8b31d732"
+        ],
+        "ticket": 1493,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "3315ed1d59ba31ffbad3f0b959702eaa92f4ddbd",
+          "fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6"
+        ],
+        "ticket": 1495,
+        "cure_checks": [
+          {
+            "commit": "3315ed1d59ba31ffbad3f0b959702eaa92f4ddbd",
+            "run_id": 39091453686,
+            "kind": "step",
+            "target": "cargo fmt --check（#611：归零后防回潮）",
+            "check_id": "r11.rustfmt"
+          },
+          {
+            "commit": "3315ed1d59ba31ffbad3f0b959702eaa92f4ddbd",
+            "run_id": 39091453686,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "3315ed1d59ba31ffbad3f0b959702eaa92f4ddbd",
+            "run_id": 39091453686,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "3315ed1d59ba31ffbad3f0b959702eaa92f4ddbd",
+            "run_id": 39091453686,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+          },
+          {
+            "commit": "fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6",
+            "run_id": 38685059094,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6",
+            "run_id": 38685059094,
+            "kind": "test",
+            "target": "calibration_sweep_finds_non_collapsed_segments",
+            "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+          },
+          {
+            "commit": "fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6",
+            "run_id": 38685059094,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.backtest.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6",
+            "run_id": 38685059094,
+            "kind": "test",
+            "target": "m3_partition_synthetic_holds",
+            "check_id": "r11.default.m3_partition_synthetic_holds"
+          },
+          {
+            "commit": "fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6",
+            "run_id": 38685059094,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+          },
+          {
+            "commit": "fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6",
+            "run_id": 38685059094,
+            "kind": "test",
+            "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+            "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-09"
+        ],
+        "commits": [
+          "5dc1eb9435c32bee6f9ead274ee3c87cac694ef8"
+        ],
+        "ticket": 1523,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "06dd4a3fa8a703b5248786331d309e16b5c27996",
+          "6fe5ebea8cdb6c3b434d3c10b6e2e089437b91ca",
+          "784bc6d77016a216d085d0a63564c7937e325ed1",
+          "aa1c3885f8adc1d79c08641424b3ce30a15536f1",
+          "beec08218e1cd74e8f619cad14e71acce1a81681"
+        ],
+        "ticket": 1527,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "6d18ed82a610916d0f928da898ec47cb78bbcf6f"
+        ],
+        "ticket": 1552,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-10"
+        ],
+        "commits": [
+          "262f8c863e1f84d134633aaba8c14fb10cef9a9e",
+          "66c409e7e3236617e4020c27144049ab7c380e15"
+        ],
+        "ticket": 1576,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "084ebd700fedc74ddb531ac4da4f13196c07fb29",
+          "66c409e7e3236617e4020c27144049ab7c380e15",
+          "7835d593f37a51f08f8e61df734f29360d9e9114"
+        ],
+        "ticket": 1581,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "7744d59079517f024d93d7471db68c0ca625d07b",
+          "7fe402cd79b0afdad87ed2a828d6d75fb8ade07b"
+        ],
+        "ticket": 1585,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "0a96a09bde89e50b7c4102b4ca898b716cd219c0",
+          "a46ab454a83db3a3d1ad5fc3f54ca2db1b394d87",
+          "d7bd79ca185b76b038d0484ed4e05d96c98b58d5"
+        ],
+        "ticket": 1601,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "75568405c87f561fd8c7d2c1217d378b0b66c431",
+          "b0bab458f04d2afea3282475c56e6134236c8a52"
+        ],
+        "ticket": 1602,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "11532aaf62119aaf698317a28ab556c425e3099f",
+          "7835d593f37a51f08f8e61df734f29360d9e9114"
+        ],
+        "ticket": 1603,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "7010949cbdd4d8e208a937bbf4b43eb3640e5c4a"
+        ],
+        "ticket": 1604,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "025d2eb5a717811cd9f8b3bcaa35a19da7478ba0",
+          "d02410fc8703ab40b7afc69d10bb793f22574396"
+        ],
+        "ticket": 1605,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "5c341d8047722ca4dd4e3c25b78f2c6d637af7f9"
+        ],
+        "ticket": 1606,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "b0a21955109643c9f325687f77485f99aa619049"
+        ],
+        "ticket": 1608,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "e67def13a172b9b9fc05e762900930630d5c9184"
+        ],
+        "ticket": 1620,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "13ed4d45c8ff85175819ca987690328ab2a247a4",
+          "31cdcdf2adeccc82da8dd4301458d4c14155e0cf",
+          "3a6866ad15c9e3f4f51ba26c7dc7b63a749c9107"
+        ],
+        "ticket": 1621,
+        "cure_checks": [
+          {
+            "commit": "31cdcdf2adeccc82da8dd4301458d4c14155e0cf",
+            "run_id": 39983013376,
+            "kind": "test",
+            "target": "each_signed_record_window_gates_alone",
+            "check_id": "r11.session.each_signed_record_window_gates_alone"
+          },
+          {
+            "commit": "31cdcdf2adeccc82da8dd4301458d4c14155e0cf",
+            "run_id": 39983013376,
+            "kind": "test",
+            "target": "opening_batch_negative_controls_are_typed_and_deterministic",
+            "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic"
+          },
+          {
+            "commit": "31cdcdf2adeccc82da8dd4301458d4c14155e0cf",
+            "run_id": 39983013376,
+            "kind": "test",
+            "target": "v2_domain_binds_revision_waits_in_e_and_replays",
+            "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "13ed4d45c8ff85175819ca987690328ab2a247a4",
+          "3a6866ad15c9e3f4f51ba26c7dc7b63a749c9107"
+        ],
+        "ticket": 1622,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "6c6acd5fe08d80f7bfd08b796d4dfebac5cabfdf",
+          "7ab832241e39456bd0330cd03dea63e7e6068c0a",
+          "df7beb0c8da5d8f3b6053f85813b86613dcc6849"
+        ],
+        "ticket": 1626,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-07"
+        ],
+        "commits": [
+          "7835d593f37a51f08f8e61df734f29360d9e9114",
+          "d4e6a20230b801d2656eb37899f0faf0863051e1",
+          "da537bfbcb38712914d8c0054746f871f1143515"
+        ],
+        "ticket": 1629,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-07"
+        ],
+        "commits": [
+          "5797d2269e0bd78b4284409aff7420b81ce99c73"
+        ],
+        "ticket": 1630,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02",
+          "TB-03"
+        ],
+        "commits": [
+          "6d4d066058c978bfcd1471bd68aef2a3a79628d5",
+          "7d720616d3ac03eca0584844df3bb322001fbfc6",
+          "ba3ad68112f2304453583c50c0e55382c6f3670f",
+          "cefef5be6cf19c7907874112f310ad4291c77000"
+        ],
+        "ticket": 1640,
+        "cure_checks": [
+          {
+            "commit": "7d720616d3ac03eca0584844df3bb322001fbfc6",
+            "run_id": 41213375682,
+            "kind": "test",
+            "target": "冲突路径 14/15：模型预检失败不写 used / resume / cp，随后仍可占用；占用后同一检查点重入才记 resume",
+            "check_id": "r11.swarm-route-preflight"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "3654ba8189eae85415671e4233832bfe0234f0c9",
+          "6be589b842a1cd7f084b39efe66fa8c8a01f36f5"
+        ],
+        "ticket": 1647,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02",
+          "TB-10"
+        ],
+        "commits": [
+          "66c409e7e3236617e4020c27144049ab7c380e15"
+        ],
+        "ticket": 1653,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-01",
+          "TB-02"
+        ],
+        "commits": [
+          "3087582e45a7504825af5b6464b22b949d91b903",
+          "df0ec357ab804a04b7a2e9ae77e50391c7c7317a"
+        ],
+        "ticket": 1657,
+        "cure_checks": [
+          {
+            "commit": "3087582e45a7504825af5b6464b22b949d91b903",
+            "run_id": 40698673032,
+            "kind": "step",
+            "target": "cargo test — v3 history Owned 分配原型（s_allocation_json_testonly，#1394）",
+            "check_id": "r11.owned-pyo3"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-01",
+          "TB-02"
+        ],
+        "commits": [
+          "a74b3b9db5b7b3df0aeab938a45e4d50b9df8d8f"
+        ],
+        "ticket": 1666,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "7cacd14135d12e2339fce58cd1c87cd0ee132ee0",
+          "d02410fc8703ab40b7afc69d10bb793f22574396"
+        ],
+        "ticket": 1669,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "bea0a169f99293e90429ec834b69cb6a34a1958f"
+        ],
+        "ticket": 1670,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "4a9c4073a19b1f74f4e0768dca34dba35282aea4"
+        ],
+        "ticket": 1671,
+        "cure_checks": [
+          {
+            "commit": "4a9c4073a19b1f74f4e0768dca34dba35282aea4",
+            "run_id": 40003423344,
+            "kind": "test",
+            "target": "each_signed_record_window_gates_alone",
+            "check_id": "r11.session.each_signed_record_window_gates_alone"
+          },
+          {
+            "commit": "4a9c4073a19b1f74f4e0768dca34dba35282aea4",
+            "run_id": 40003423344,
+            "kind": "test",
+            "target": "opening_batch_negative_controls_are_typed_and_deterministic",
+            "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic"
+          },
+          {
+            "commit": "4a9c4073a19b1f74f4e0768dca34dba35282aea4",
+            "run_id": 40003423344,
+            "kind": "test",
+            "target": "v2_domain_binds_revision_waits_in_e_and_replays",
+            "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "b9a84b01467772d847f9d222207a305136761bf4",
+          "f7f57ce42ea5738c0e7bbe8815e296ec33f28b05"
+        ],
+        "ticket": 1672,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "92dc58eafcb8cd71b51b0a2b5ed8a4406e1ea581",
+          "d02410fc8703ab40b7afc69d10bb793f22574396"
+        ],
+        "ticket": 1674,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "3ff38accdd93a3fddac6e1a5274b7cb7d192ac0f",
+          "88ed1628b10b40324e165d3305d69a52d1914be6",
+          "99df2ed762201236b89f0e81c0276cb3aa847f0a",
+          "f8072dc9cbe34b34b468a9aa05772693d0acf187"
+        ],
+        "ticket": 1678,
+        "cure_checks": [
+          {
+            "commit": "3ff38accdd93a3fddac6e1a5274b7cb7d192ac0f",
+            "run_id": 40005878482,
+            "kind": "test",
+            "target": "each_signed_record_window_gates_alone",
+            "check_id": "r11.session.each_signed_record_window_gates_alone"
+          },
+          {
+            "commit": "3ff38accdd93a3fddac6e1a5274b7cb7d192ac0f",
+            "run_id": 40005878482,
+            "kind": "test",
+            "target": "opening_batch_negative_controls_are_typed_and_deterministic",
+            "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic"
+          },
+          {
+            "commit": "3ff38accdd93a3fddac6e1a5274b7cb7d192ac0f",
+            "run_id": 40005878482,
+            "kind": "test",
+            "target": "v2_domain_binds_revision_waits_in_e_and_replays",
+            "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays"
+          },
+          {
+            "commit": "99df2ed762201236b89f0e81c0276cb3aa847f0a",
+            "run_id": 40233909763,
+            "kind": "test",
+            "target": "incremental_macd_append_is_o1_scaling",
+            "check_id": "r11.backtest.incremental_macd_append_is_o1_scaling"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "3ca3a362795cce29edbdf49424828b9009e2b779"
+        ],
+        "ticket": 1683,
+        "cure_checks": [
+          {
+            "commit": "3ca3a362795cce29edbdf49424828b9009e2b779",
+            "run_id": 40003451021,
+            "kind": "test",
+            "target": "each_signed_record_window_gates_alone",
+            "check_id": "r11.session.each_signed_record_window_gates_alone"
+          },
+          {
+            "commit": "3ca3a362795cce29edbdf49424828b9009e2b779",
+            "run_id": 40003451021,
+            "kind": "test",
+            "target": "opening_batch_negative_controls_are_typed_and_deterministic",
+            "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic"
+          },
+          {
+            "commit": "3ca3a362795cce29edbdf49424828b9009e2b779",
+            "run_id": 40003451021,
+            "kind": "test",
+            "target": "v2_domain_binds_revision_waits_in_e_and_replays",
+            "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays"
+          }
+        ]
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "0fe8e2f3c91a9df22128214ed6232bdf9f68b700"
+        ],
+        "ticket": 1715,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "3b1a1841cd11898174983ebf092e11273bb63994",
+          "cf72a9f91050a4b6af7ac4b6e0c2b9f0364a2584"
+        ],
+        "ticket": 1716,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "499841b59265c5395ccdd40b92684b5864802f4f"
+        ],
+        "ticket": 1717,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "4c10229eacaa21a8744e57d409b579359ca7cd97"
+        ],
+        "ticket": 1718,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "60133aca03773ce8d338243f46accea7ca891a2b"
+        ],
+        "ticket": 1719,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-03"
+        ],
+        "commits": [
+          "00fdf0dd4ada8dcdcc886359f56573889ea63d54",
+          "d310c46dd2710c6faf3c946e8e3e05b48f1034de"
+        ],
+        "ticket": 1737,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-08"
+        ],
+        "commits": [
+          "ca5a8b16ae085306feaf42417bcb225e6c833911"
+        ],
+        "ticket": 1768,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-09"
+        ],
+        "commits": [
+          "6fe5ebea8cdb6c3b434d3c10b6e2e089437b91ca",
+          "9de18e606b2c0330162a83e2a030898b46c3690f",
+          "9e6eb6f46c3a1f686d6da8a016738999daa5a4b4",
+          "b0db7a8d71f929318e539a57c9dd42161f4fbec6",
+          "c5da72d0efae6e9bbedad91c326e95bbbcc4c477"
+        ],
+        "ticket": 1769,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "GRAPH"
+        ],
+        "commits": [
+          "67df861ee909efae902450b8f02b88e957f3a74c",
+          "eab5dd106c42daf1ee5cbc3898a08898479e7f9b"
+        ],
+        "ticket": 1845,
+        "cure_checks": []
+      },
+      {
+        "attribution_scopes": [
+          "TB-02"
+        ],
+        "commits": [
+          "722b1da086a354baa1f63946f6951b619cbd9b6e"
+        ],
+        "ticket": 1978,
+        "cure_checks": []
+      }
+    ]
+  }
 }

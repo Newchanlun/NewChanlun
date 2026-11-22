@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R11：重跑 rust-check 的同一格式门；历史补救不承担 AT-18 业务键。
+set -euo pipefail
+test "$(cat "$AT18_KEYS_FILE")" = '[]'
+(cd rust && cargo fmt --check)
+printf '%s\n' '{"schema_version":"at18-key-witness/1","entries":[]}' > "$AT18_WITNESS_FILE"
