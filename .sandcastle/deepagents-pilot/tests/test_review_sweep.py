@@ -2281,3 +2281,64 @@ def test_retarget_to_non_main_same_sha_is_blocked_and_failed_rereview_blocks_old
     assert "rereview-pending" in module.STUCK_REVIEW
     assert "base-ref-moved" in module.STUCK_REVIEW
     assert github3.calls == []
+
+
+def test_timeout_after_planning_waiting_or_behind_still_withdraws_armed_auto_merge(lane):
+    """R14：先规划的普通 waiting / behind-waiting PR 挂着原生 auto-merge，若后续 PR 读超时，fail_closed 仍必须撤回它。"""
+    for mergeable_state in ("clean", "behind"):
+        github = FakeGitHub(lane)
+        _more_pulls(lane, github, [1805])
+        github.extra_pulls[0]["auto_merge"] = {"merge_method": "merge"}
+        github.states[1805] = {"auto_merge": True, "mergeable_state": mergeable_state}
+        github.files[1805] = [{"filename": "src/ordinary.py", "status": "modified", "changes": 1}]
+        lane.gateway.pr["auto_merge"] = None
+        github.states[1810] = {"auto_merge": False}
+
+        orig_files = github.pr_files
+        github.pr_files = lambda n, orig=orig_files: _hang() if n == 1810 else orig(n)
+
+        sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+        with pytest.raises(SourceUnreadable) as caught:
+            sweep.tick()
+        assert github.calls == [("disable", 1805)]
+        assert any(a.get("pr") == 1805 and a["action"] == "fail-closed-withdraw" and a.get("auto_merge_withdrawn") is True
+                   for a in caught.value.actions)
+
+
+@pytest.mark.parametrize("change", ["draft", "foreign", "stale"])
+def test_ineligible_prs_withdraw_armed_auto_merge_independently_of_review_dispatch(lane, change):
+    """R14：draft/foreign-head/stale-pr 跳过派审但独立撤回已挂原生 auto-merge（正常轮与超时 fail_closed 皆然）；明确无 auto_merge 时零额外调用。"""
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1811])
+    armed_pr = lane.gateway.pr
+    unarmed_pr = github.extra_pulls[0]
+    for target_pr in (armed_pr, unarmed_pr):
+        if change == "draft":
+            target_pr["draft"] = True
+        elif change == "foreign":
+            target_pr["head"]["repo"]["id"] = 1
+        else:
+            target_pr["updated_at"] = "2026-01-01T00:00:00Z"
+    armed_pr["auto_merge"] = {"merge_method": "merge"}
+    unarmed_pr["auto_merge"] = None
+
+    pr_reads = []
+    orig_pr = github.pr
+    github.pr = lambda n: pr_reads.append(n) or orig_pr(n)
+
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True,
+                          now=lambda: datetime(2026, 11, 7, tzinfo=timezone.utc))
+    actions = sweep.tick()
+    assert host.spawned == [] and pr_reads == []
+    assert github.calls == [("disable", 1810)]
+    withdraw = next(a for a in actions if a.get("pr") == 1810 and a["action"] == "auto-merge-withdraw")
+    assert withdraw["auto_merge_withdrawn"] is True
+
+    # 中途超时时 fail_closed 同样对跳过派审且挂着原生 auto-merge 的 PR 撤回，明确 auto_merge=None 的跳过
+    github.calls.clear()
+    github.required_checks = _hang
+    with pytest.raises(SourceUnreadable) as caught:
+        sweep.tick()
+    assert github.calls == [("disable", 1810)]
+    assert any(a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw" and a.get("auto_merge_withdrawn") is True
+               for a in caught.value.actions)

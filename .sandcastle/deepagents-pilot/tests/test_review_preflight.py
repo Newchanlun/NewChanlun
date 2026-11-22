@@ -1202,6 +1202,43 @@ def test_round_trip_classifies_http_200_sse_structured_rate_limit_codes(monkeypa
     assert trip["ok"] is False and trip["http_status"] == 200 and trip["error"]["class"] == "rate_limit"
 
 
+@pytest.mark.parametrize("events,expected_class", [
+    ([
+        {"type": "response.done", "response": {"status": "completed", "model": SOL}},
+        {"type": "response.completed", "response": {"status": "completed", "model": SOL}},
+    ], "unclassified"),
+    ([
+        {"type": "response.completed", "response": {"status": "completed", "model": SOL}},
+        {"type": "response.done", "response": {"status": "completed", "model": SOL}},
+    ], "unclassified"),
+    ([
+        {"type": "response.in_progress", "error": {"code": "rate_limit_exceeded", "message": "429"}},
+        {"type": "response.completed", "response": {"status": "completed", "model": SOL}},
+    ], "rate_limit"),
+    ([
+        {"type": "response.created", "response": {"status": "in_progress", "error": {"message": "upstream failure"}}},
+        {"type": "response.completed", "response": {"status": "completed", "model": SOL}},
+    ], "unclassified"),
+])
+def test_round_trip_rejects_mixed_response_done_and_midstream_errors(monkeypatch, events, expected_class):
+    """混合 response.done + response.completed 或中间事件携带非空 error/response.error 时，后续 response.completed 绝不可覆盖为成功。"""
+    import io
+
+    class FakeResp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    raw = "".join("data: " + json.dumps(ev) + "\n\n" for ev in events).encode()
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: FakeResp(raw))
+    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-r14-stream", preflight.Deadline(10))
+    assert trip["ok"] is False and trip["error"]["class"] == expected_class
+
+
 def test_probe_in_container_runs_admitted_image_over_stdin_without_leaking_key(env, capsys, tmp_path, monkeypatch):
     """--probe-in-container 在审阅镜像容器内执行 HTTP 探针，密钥只走 stdin，不进 argv 或容器 env。"""
     monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")

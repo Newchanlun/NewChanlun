@@ -113,10 +113,12 @@ index 0000000..2b8a7a8
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
 new file mode 100644
-index 0000000..6d3ae25
+index 0000000..ef56780
 --- /dev/null
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,958 @@
+@@ -0,0 +1,1002 @@
++//go:build preflight_test_roots
++
 +package api
 +
 +import (
@@ -185,6 +187,7 @@ index 0000000..6d3ae25
 +	srv.StartTLS()
 +	roots := x509.NewCertPool()
 +	roots.AddCert(leaf)
++	t.Cleanup(auth.RegisterPreflightTestRootCAsForTest(roots))
 +	// No ServerName override: Go's TLS client MUST verify req.URL.Hostname() against the peer certificate SAN.
 +	tr := &http.Transport{
 +		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
@@ -799,23 +802,64 @@ index 0000000..6d3ae25
 +	})
 +
 +	t.Run("tls-servername-override-or-insecure-transport-rejected-and-tainted", func(t *testing.T) {
++		unregisteredRoots := x509.NewCertPool()
 +		for _, tc := range []struct {
-+			name   string
-+			launch string
-+			tlsCfg *tls.Config
++			name      string
++			launch    string
++			transport func() *http.Transport
 +		}{
-+			{"servername-override", "review-12345678-1234-4234-8234-123456789ae1", &tls.Config{ServerName: "example.com", MinVersion: tls.VersionTLS12}},
-+			{"insecure-skip-verify", "review-12345678-1234-4234-8234-123456789ae2", &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}},
-+		} {
-+			t.Run(tc.name, func(t *testing.T) {
-+				isoServer := newTestServer(t)
-+				isoManager := isoServer.handlers.AuthManager
-+				badTransport := &http.Transport{
-+					TLSClientConfig: tc.tlsCfg,
++			{"servername-override", "review-12345678-1234-4234-8234-123456789ae1", func() *http.Transport {
++				return &http.Transport{
++					TLSClientConfig: &tls.Config{ServerName: "example.com", MinVersion: tls.VersionTLS12},
 +					DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 +						return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
 +					},
 +				}
++			}},
++			{"insecure-skip-verify", "review-12345678-1234-4234-8234-123456789ae2", func() *http.Transport {
++				return &http.Transport{
++					TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
++					DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
++						return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
++					},
++				}
++			}},
++			{"unregistered-custom-root-cas", "review-12345678-1234-4234-8234-123456789ae3", func() *http.Transport {
++				return &http.Transport{
++					TLSClientConfig: &tls.Config{RootCAs: unregisteredRoots, MinVersion: tls.VersionTLS12},
++					DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
++						return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
++					},
++				}
++			}},
++			{"verify-peer-certificate", "review-12345678-1234-4234-8234-123456789ae4", func() *http.Transport {
++				return &http.Transport{
++					TLSClientConfig: &tls.Config{
++						MinVersion:            tls.VersionTLS12,
++						VerifyPeerCertificate: func([][]byte, [][]*x509.Certificate) error { return nil },
++					},
++				}
++			}},
++			{"verify-connection", "review-12345678-1234-4234-8234-123456789ae5", func() *http.Transport {
++				return &http.Transport{
++					TLSClientConfig: &tls.Config{
++						MinVersion:       tls.VersionTLS12,
++						VerifyConnection: func(tls.ConnectionState) error { return nil },
++					},
++				}
++			}},
++			{"custom-dial-tls-context", "review-12345678-1234-4234-8234-123456789ae6", func() *http.Transport {
++				return &http.Transport{
++					DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
++						return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
++					},
++				}
++			}},
++		} {
++			t.Run(tc.name, func(t *testing.T) {
++				isoServer := newTestServer(t)
++				isoManager := isoServer.handlers.AuthManager
++				badTransport := tc.transport()
 +				defer badTransport.CloseIdleConnections()
 +				isoManager.SetRoundTripperProvider(preflightTransportProvider{badTransport})
 +				isoManager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(isoServer.cfg))
@@ -1578,10 +1622,10 @@ index 47f87de..3a1a2d4 100644
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
 new file mode 100644
-index 0000000..3a5aa78
+index 0000000..d89d713
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,142 @@
 +package auth
 +
 +import (
@@ -1593,6 +1637,27 @@ index 0000000..3a5aa78
 +	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
++
++// isUnsafePreflightTransport reports whether an injected RoundTripper attempts to bypass
++// standard *http.Transport TLS verification or substitute trust roots outside production policy.
++func isUnsafePreflightTransport(rt any) bool {
++	if rt == nil {
++		return false
++	}
++	stdTransport, standardTransport := rt.(*http.Transport)
++	if !standardTransport || stdTransport == nil || stdTransport.DialTLS != nil || stdTransport.DialTLSContext != nil {
++		return true
++	}
++	if cfg := stdTransport.TLSClientConfig; cfg != nil {
++		badRootCAs := cfg.RootCAs != nil && !isAllowedTestRootCAs(cfg.RootCAs)
++		return cfg.InsecureSkipVerify ||
++			cfg.ServerName != "" ||
++			cfg.VerifyPeerCertificate != nil ||
++			cfg.VerifyConnection != nil ||
++			badRootCAs
++	}
++	return false
++}
 +
 +// This fixed-revision allowlist is deliberately by concrete implementation, not
 +// Identifier(): a plugin can advertise the same provider without this coverage.
@@ -1617,12 +1682,9 @@ index 0000000..3a5aa78
 +			}
 +		}
 +	}
-+	// An injected transport may forward elsewhere; it has no coverage contract.
-+	rt := ctx.Value("cliproxy.roundtripper")
-+	stdTransport, standardTransport := rt.(*http.Transport)
-+	badTLSConfig := standardTransport && stdTransport.TLSClientConfig != nil &&
-+		(stdTransport.TLSClientConfig.InsecureSkipVerify || stdTransport.TLSClientConfig.ServerName != "")
-+	if !supported || auth == nil || (rt != nil && (!standardTransport || badTLSConfig)) {
++	// An injected transport may forward elsewhere or substitute trust roots;
++	// production builds strictly require system trust roots (RootCAs == nil) and standard TLS dialing.
++	if !supported || auth == nil || isUnsafePreflightTransport(ctx.Value("cliproxy.roundtripper")) {
 +		c.Taint()
 +		return ctx, nil, preflightreceipt.ErrUnavailable
 +	}
@@ -1708,81 +1770,147 @@ index 0000000..3a5aa78
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
 new file mode 100644
-index 0000000..eb42c3f
+index 0000000..5276a45
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,61 @@
++//go:build !preflight_test_roots
++
 +package auth
 +
 +import (
 +	"context"
-+	"go/ast"
-+	"go/parser"
-+	"go/token"
-+	"os"
-+	"path/filepath"
-+	"strings"
++	"crypto/tls"
++	"crypto/x509"
++	"errors"
++	"net"
++	"net/http"
 +	"testing"
-+
-+	execution "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
 +
-+func TestPreflightReceiptUnsupportedExecutorIsNotCalled(t *testing.T) {
-+	ctx, c, err := preflightreceipt.Begin(context.Background(), filepath.Join(t.TempDir(), "receipts"), "preflight-12345678-1234-4234-8234-123456789abc")
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	// Nil and all non-native implementations must be rejected before any method call.
-+	if _, _, err = preflightStart(ctx, nil, &Auth{Provider: "claude"}, "test-model"); err == nil {
-+		t.Fatal("uncovered executor admitted")
-+	}
-+	if _, err = preflightCount(nil, ctx, nil, execution.Request{}, execution.Options{}); err == nil {
-+		t.Fatal("count admitted")
-+	}
-+	c.Complete(true)
-+	c.HandlerDone(true)
++type nonStandardRoundTripper struct{}
++
++func (nonStandardRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
++	return nil, errors.New("unused")
 +}
 +
-+// Complement behavior tests with a coverage tripwire for this pinned dispatcher.
-+// Any new direct execution path must pass through the same preflight boundary.
-+func TestPreflightReceiptAuthDispatchCoverage(t *testing.T) {
-+	entries, err := os.ReadDir(".")
-+	if err != nil {
-+		t.Fatal(err)
++func TestPreflightReceiptProductionTransportTrust(t *testing.T) {
++	// Standard deployment-controlled system trust root transports MUST be allowed.
++	for _, safe := range []struct {
++		name string
++		rt   any
++	}{
++		{"nil-roundtripper", nil},
++		{"default-transport", &http.Transport{}},
++		{"system-roots-tls12", &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}},
++	} {
++		if isUnsafePreflightTransport(safe.rt) {
++			t.Fatalf("safe production transport %s was rejected", safe.name)
++		}
 +	}
-+	for _, entry := range entries {
-+		name := entry.Name()
-+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "preflight_execution.go" {
-+			continue
++
++	// Custom trust roots, verification callbacks, TLS dialers, typed-nil, and non-standard RoundTrippers MUST be rejected.
++	customRoots := x509.NewCertPool()
++	var typedNil *http.Transport
++	for _, bad := range []struct {
++		name string
++		rt   any
++	}{
++		{"custom-root-cas", &http.Transport{TLSClientConfig: &tls.Config{RootCAs: customRoots, MinVersion: tls.VersionTLS12}}},
++		{"insecure-skip-verify", &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}}},
++		{"servername-override", &http.Transport{TLSClientConfig: &tls.Config{ServerName: "example.com", MinVersion: tls.VersionTLS12}}},
++		{"verify-peer-cert", &http.Transport{TLSClientConfig: &tls.Config{VerifyPeerCertificate: func([][]byte, [][]*x509.Certificate) error { return nil }}}},
++		{"verify-connection", &http.Transport{TLSClientConfig: &tls.Config{VerifyConnection: func(tls.ConnectionState) error { return nil }}}},
++		{"custom-dial-tls", &http.Transport{DialTLS: func(network, addr string) (net.Conn, error) { return nil, errors.New("blocked") }}},
++		{"custom-dial-tls-context", &http.Transport{DialTLSContext: func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("blocked") }}},
++		{"typed-nil-transport", typedNil},
++		{"non-standard-roundtripper", nonStandardRoundTripper{}},
++	} {
++		if !isUnsafePreflightTransport(bad.rt) {
++			t.Fatalf("unsafe transport %s escaped production trust check", bad.name)
 +		}
-+		file, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
-+		if err != nil {
-+			t.Fatal(err)
-+		}
-+		ast.Inspect(file, func(node ast.Node) bool {
-+			call, ok := node.(*ast.CallExpr)
-+			if !ok {
-+				return true
++	}
++
++	if isAllowedTestRootCAs(customRoots) {
++		t.Fatal("production build accepted custom test RootCAs")
++	}
++}
+diff --git a/sdk/cliproxy/auth/preflight_roots_prod.go b/sdk/cliproxy/auth/preflight_roots_prod.go
+new file mode 100644
+index 0000000..e525a7f
+--- /dev/null
++++ b/sdk/cliproxy/auth/preflight_roots_prod.go
+@@ -0,0 +1,11 @@
++//go:build !preflight_test_roots
++
++package auth
++
++import "crypto/x509"
++
++// Production builds bind preflight and formal-review TLS verification strictly
++// to the deployment's OS trust store (TLSClientConfig.RootCAs == nil).
++func isAllowedTestRootCAs(*x509.CertPool) bool {
++	return false
++}
+diff --git a/sdk/cliproxy/auth/preflight_roots_test_hook.go b/sdk/cliproxy/auth/preflight_roots_test_hook.go
+new file mode 100644
+index 0000000..e937d5f
+--- /dev/null
++++ b/sdk/cliproxy/auth/preflight_roots_test_hook.go
+@@ -0,0 +1,47 @@
++//go:build preflight_test_roots
++
++package auth
++
++import (
++	"crypto/x509"
++	"sync"
++)
++
++var (
++	preflightTestRootsMu sync.RWMutex
++	preflightTestRoots   = make(map[*x509.CertPool]int)
++)
++
++// RegisterPreflightTestRootCAsForTest registers an offline test server root pool
++// exclusively in test builds compiled with `-tags preflight_test_roots`.
++// Production builds omit this file entirely.
++func RegisterPreflightTestRootCAsForTest(pool *x509.CertPool) func() {
++	if pool == nil {
++		return func() {}
++	}
++	preflightTestRootsMu.Lock()
++	preflightTestRoots[pool]++
++	preflightTestRootsMu.Unlock()
++	var once sync.Once
++	return func() {
++		once.Do(func() {
++			preflightTestRootsMu.Lock()
++			if preflightTestRoots[pool] <= 1 {
++				delete(preflightTestRoots, pool)
++			} else {
++				preflightTestRoots[pool]--
 +			}
-+			selector, ok := call.Fun.(*ast.SelectorExpr)
-+			if !ok {
-+				return true
-+			}
-+			switch selector.Sel.Name {
-+			case "Execute", "ExecuteStream", "CountTokens":
-+				t.Errorf("unguarded execution call in %s", name)
-+			}
-+			return true
++			preflightTestRootsMu.Unlock()
 +		})
 +	}
 +}
++
++func isAllowedTestRootCAs(pool *x509.CertPool) bool {
++	if pool == nil {
++		return false
++	}
++	preflightTestRootsMu.RLock()
++	allowed := preflightTestRoots[pool] > 0
++	preflightTestRootsMu.RUnlock()
++	return allowed
++}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 new file mode 100644
-index 0000000..36bbd60
+index 0000000..8867033
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1443 @@
+@@ -0,0 +1,1451 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -2179,6 +2307,14 @@ index 0000000..36bbd60
 +			}
 +		case "response.completed":
 +			c.recordCompletedResponse(ev.Response.ID, ev.Response.Model, ev.Response.Status, ev.Response.Error, ev.Response.Output)
++		case "response.done":
++			c.mu.Lock()
++			c.modelMismatch = true
++			c.invalid = true
++			c.lastItemOutputSHA = ""
++			c.lastItemResponseID = ""
++			c.mu.Unlock()
++			c.Taint()
 +		case "response.failed", "response.incomplete", "error":
 +			c.mu.Lock()
 +			c.invalid = true
@@ -2310,7 +2446,7 @@ index 0000000..36bbd60
 +				continue
 +			}
 +			v.mu.Lock()
-+			evictable := v.sealed || (v.tainted && v.taintedPersisted) || now.Sub(v.touched) > ReviewTurnLifetime
++			evictable := !(v.tainted && !v.taintedPersisted) && (v.sealed || v.tainted || now.Sub(v.touched) > ReviewTurnLifetime)
 +			v.mu.Unlock()
 +			if !evictable {
 +				continue
@@ -3228,10 +3364,10 @@ index 0000000..36bbd60
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
 new file mode 100644
-index 0000000..05aec5e
+index 0000000..6ddbeae
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1285 @@
+@@ -0,0 +1,1360 @@
 +package preflightreceipt
 +
 +import (
@@ -4054,6 +4190,69 @@ index 0000000..05aec5e
 +	}
 +}
 +
++func TestReviewReceiptUnpersistedTaintNeverEvictedAfterLifetime(t *testing.T) {
++	reviewMu.Lock()
++	oldCap := maxReviewLedgerEntries
++	oldLedger := reviewLedger
++	oldOverflow := taintWriteOverflow
++	maxReviewLedgerEntries = 1
++	reviewLedger = make(map[string]*reviewEntry)
++	taintWriteOverflow = false
++	reviewMu.Unlock()
++	t.Cleanup(func() {
++		reviewMu.Lock()
++		maxReviewLedgerEntries = oldCap
++		reviewLedger = oldLedger
++		taintWriteOverflow = oldOverflow
++		reviewMu.Unlock()
++	})
++
++	// Give root permissive mode (0755) so os.Lstat(dir) sees ENOENT (entry enters reviewLedger)
++	// while reservePrivateDir refuses to create the launch dir (even as root on Linux):
++	// entry becomes tainted=true with taintedPersisted=false and zero disk footprint.
++	base := t.TempDir()
++	root := filepath.Join(base, "receipts")
++	if err := os.Mkdir(root, 0755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(root, 0755); err != nil {
++		t.Fatal(err)
++	}
++	lTainted := "review-9999aaaa-2222-4333-8444-555555555501"
++	sTainted := "019d0000-0000-7000-8000-000000000901"
++	TaintReview(root, lTainted)
++
++	// Storage recovers to valid 0700 private dir and the entry ages past 2 * ReviewTurnLifetime.
++	if err := os.Chmod(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if _, statErr := os.Stat(filepath.Join(root, lTainted)); !os.IsNotExist(statErr) {
++		t.Fatalf("expected zero disk footprint for failed taint persist, got %v", statErr)
++	}
++	reviewMu.Lock()
++	ent := reviewLedger[root+"\x00"+lTainted]
++	if ent == nil || !ent.tainted || ent.taintedPersisted {
++		reviewMu.Unlock()
++		t.Fatalf("expected unpersisted tainted entry in ledger, got %+v", ent)
++	}
++	ent.touched = time.Now().Add(-2 * ReviewTurnLifetime)
++	reviewMu.Unlock()
++
++	// Another launch MUST NOT evict the unpersisted tainted entry even after ReviewTurnLifetime.
++	lOther := "review-9999aaaa-2222-4333-8444-555555555502"
++	sOther := "019d0000-0000-7000-8000-000000000902"
++	if _, _, err := BeginReview(context.Background(), root, lOther, sOther, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("expired unpersisted taint was evicted for new launch: err=%v", err)
++	}
++	// Re-presenting the tainted launch itself MUST still fail closed and never become sealable.
++	if _, _, err := BeginReview(context.Background(), root, lTainted, sTainted, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("tainted launch resurrected after storage recovery: err=%v", err)
++	}
++	if st := SealReview(root, lTainted, sTainted); st != SealRejected {
++		t.Fatalf("SealReview accepted unpersisted tainted launch: %v", st)
++	}
++}
++
 +func TestReviewReceiptSealImmutabilityAndReadOnlyTaintFailure(t *testing.T) {
 +	root := filepath.Join(t.TempDir(), "receipts")
 +
@@ -4368,11 +4567,23 @@ index 0000000..05aec5e
 +		return &r
 +	}
 +
-+	// 1. response.done is NOT accepted as terminal completion.
++	// 1. response.done alone AND mixed response.done + response.completed (either order) MUST taint and reject.
 +	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555501", "019d0000-0000-7000-8000-000000000501", []string{
 +		`data: {"type":"response.done","response":{"id":"resp_done","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
-+	}); r != nil && r.Complete {
-+		t.Fatalf("response.done accepted as complete: %+v", r)
++	}); r == nil || !r.Tainted || r.Complete {
++		t.Fatalf("response.done did not taint: %+v", r)
++	}
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555511", "019d0000-0000-7000-8000-000000000511", []string{
++		`data: {"type":"response.done","response":{"id":"resp_done_first","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_after_done","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r == nil || !r.Tainted || r.Complete {
++		t.Fatalf("response.done followed by response.completed did not taint: %+v", r)
++	}
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555512", "019d0000-0000-7000-8000-000000000512", []string{
++		`data: {"type":"response.completed","response":{"id":"resp_before_done","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++		`data: {"type":"response.done","response":{"id":"resp_done_second","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r == nil || !r.Tainted || r.Complete {
++		t.Fatalf("response.completed followed by response.done did not taint: %+v", r)
 +	}
 +	// 2. Empty response.status -> tainted.
 +	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555502", "019d0000-0000-7000-8000-000000000502", []string{

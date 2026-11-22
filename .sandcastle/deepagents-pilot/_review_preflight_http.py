@@ -14,7 +14,7 @@ import urllib.request
 
 MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 RESPONSE_STATUSES = ("completed", "incomplete", "failed", "cancelled", "in_progress", "queued")
-TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed", "error")
+TERMINAL_EVENTS = ("response.completed", "response.done", "response.incomplete", "response.failed", "error")
 # 上游错误只按固定词表分类，不把原文抄进报告（原文可能回显 key，且转义形态无法穷举）
 ERROR_CLASSES = (
     ("tool_choice", "tool_choice_unsupported"),
@@ -114,6 +114,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> 
     try:
         with _open_http(request, timeout=timeout) as response:
             terminal, detail, error_code, status, returned_model = None, "流在终态事件前结束", None, None, None
+            stream_error, stream_error_code = None, None
             for raw in response.read().splitlines():
                 if work_left() <= 0:
                     detail = "总时限内无终态事件"
@@ -121,29 +122,35 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> 
                 line = raw.decode("utf-8", "replace").strip()
                 if line.startswith("data:"):
                     event = json.loads(line[5:]) if line[5:].strip().startswith("{") else {}
+                    inner = event.get("response") if isinstance(event.get("response"), dict) else {}
+                    inner_err = inner.get("error")
+                    event_err = event.get("error")
+                    ev_code = next(
+                        (value for value in (
+                            inner_err.get("code") if isinstance(inner_err, dict) else None,
+                            event_err.get("code") if isinstance(event_err, dict) else None,
+                            inner.get("code"),
+                            event.get("code"),
+                        ) if isinstance(value, str) and value),
+                        None,
+                    )
+                    if stream_error is None and (inner_err is not None or event_err is not None):
+                        stream_error = inner_err if inner_err is not None else event_err
+                        stream_error_code = ev_code
                     if event.get("type") in TERMINAL_EVENTS:
                         if terminal is not None:
                             detail = "终态事件后出现另一终态"
+                            if error_code is None and ev_code is not None:
+                                error_code = ev_code
                             break
                         terminal = event.get("type")
-                        inner = event.get("response") if isinstance(event.get("response"), dict) else {}
                         # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
                         status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
                             None if inner.get("status") is None else "other")
                         raw_model = inner.get("model")
                         returned_model = raw_model if raw_model in MODELS else (
                             None if raw_model is None else "other")
-                        inner_err = inner.get("error")
-                        event_err = event.get("error")
-                        error_code = next(
-                            (value for value in (
-                                inner_err.get("code") if isinstance(inner_err, dict) else None,
-                                event_err.get("code") if isinstance(event_err, dict) else None,
-                                inner.get("code"),
-                                event.get("code"),
-                            ) if isinstance(value, str) and value),
-                            None,
-                        )
+                        error_code = ev_code
                         detail = next(
                             (value for value in (inner_err, event_err, event.get("message"), error_code)
                              if value is not None),
@@ -152,11 +159,16 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> 
                         # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
             if work_left() <= 0:
                 detail = "总时限内流未收尾"
+            elif stream_error is not None:
+                if detail is None:
+                    detail = stream_error
+                if error_code is None:
+                    error_code = stream_error_code
             elif detail is None and terminal == "response.completed" and status == "completed" and returned_model != model:
                 detail = "响应模型与请求模型不符"
-            # 只接受唯一 completed 终态、内层 completed、精确响应模型匹配、无错误及完整 HTTP 消息。
+            # 只接受唯一 completed 终态、内层 completed、精确响应模型匹配、全流无错误及完整 HTTP 消息。
             ok = (response.status == 200 and terminal == "response.completed" and status == "completed"
-                  and returned_model == model and detail is None)
+                  and returned_model == model and detail is None and stream_error is None)
             text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail is not None else ""
             return {
                 "http_status": response.status,
