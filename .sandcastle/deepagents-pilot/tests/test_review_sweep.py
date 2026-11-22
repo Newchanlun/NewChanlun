@@ -2444,3 +2444,55 @@ def test_pr_state_timeout_marks_unreadable_so_fail_closed_withdraws_despite_stal
         sweep2.tick()
     assert github2.calls == [("disable", 1810)]
     assert any(a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw" for a in caught2.value.actions)
+
+
+def test_recheck_pr_non_timeout_error_marks_unknown_and_withdraws_auto_merge(lane):
+    """R17（Astra P1）：首次 pr() 返回 auto_merge=False，_plan_one 复核 pr() 遇 HTTP 502 等非超时错误：
+    必须同样将状态视为未知并执行 disable_auto_merge，不沿用旧 False 跳过撤回。"""
+    github = FakeGitHub(lane)
+    github.states[1810] = {"auto_merge": False}
+    orig_pr = github.pr
+    calls = []
+
+    def pr_502_on_recheck(number):
+        calls.append(number)
+        if len(calls) >= 2:
+            raise RuntimeError("gh api HTTP 502 Bad Gateway")
+        return orig_pr(number)
+
+    github.pr = pr_502_on_recheck
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    ev = next(a for a in actions if a.get("pr") == 1810 and a["action"] == "evidence-insufficient")
+    assert ev.get("auto_merge_withdrawn") is True
+    assert github.calls == [("disable", 1810)]
+
+
+def test_stale_rereview_attempt_keeps_rereview_pending_instead_of_reverting_to_old_pass_done(lane, env):
+    """R17（Astra P1）：A1 已发布 PASS -> A2 预检失败写重审意图 -> A2 登记后因控制器切换变 STALE：
+    重审意图不得在登记时被删，sweep 必须继续报 rereview-pending，绝不把旧 A1 判 done。"""
+    from pilot1742 import external_review as ext
+    from pilot1742.delivery import EffectPending
+
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+    orig_preflight = lane.preflight
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+
+    lane.preflight = lambda _t: {"returncode": 2, "report": None, "image_id": "sha256:" + "1" * 64}
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 2)
+    assert lane.has_pending_rereview_intent(1810, head, base) is True
+
+    lane.preflight = orig_preflight
+    t2 = lane.target(1810, 2)
+    folder2 = lane.state_root / "runs" / t2.key
+    ext._save(folder2 / "outcome.json", {"run_id": t2.run_id, "verdict": "STALE", "reason": "controller switched"})
+    assert lane.has_pending_rereview_intent(1810, head, base) is True
+
+    github = FakeGitHub(lane)
+    green(github, head)
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert acts(actions) == ["rereview-pending", "waiting"]
+    assert actions[-1]["queue_head"] is False

@@ -235,6 +235,9 @@ class RepoGateway:
     def get_pr(self, number: int) -> dict[str, Any]:
         return self.client.api("GET", self._p(f"/pulls/{number}")).data
 
+    def get_repo(self) -> dict[str, Any]:
+        return self.client.api("GET", self._p("")).data
+
     def statuses(self, sha: str) -> list[dict[str, Any]]:
         return self.client.paginate(self._p(f"/commits/{sha}/statuses"))
 

@@ -510,7 +510,7 @@ class StatusPublisher:
         self.gateway, self.target, self.folder, self.locks = gateway, target, folder, locks
         self.controller = controller or target.controller_code_head
 
-    def check_current(self) -> None:
+    def check_current(self, *, state: str | None = None) -> None:
         try:
             check_controller(self.controller)
         except IdentityError as error:
@@ -526,6 +526,23 @@ class StatusPublisher:
             raise Stale(str(error)) from error
         if any(getattr(self.target, key) != value for key, value in current.items()):
             raise Stale("PR base、head 或目标已漂移")
+        if state == "success":
+            # 共用发布门（手动、自动、沿用、恢复、迁移统一受控）：发布 success 前必须在同一把 head_status 锁内
+            # 确认 PR 未挂原生 auto-merge 且仓库 allow_auto_merge=false，防绕过人工确认自动合入。
+            if "auto_merge" not in pr or pr.get("auto_merge") is not None:
+                raise EffectPending(
+                    "PR 已挂起或未确认关闭原生 auto-merge，拒绝发布 success 以防绕过人工确认；撤回后用同一 attempt 补发"
+                )
+            try:
+                repo = self.gateway.get_repo()
+            except (IdentityError, AttributeError) as error:
+                raise EffectPending(
+                    f"{error}；读取仓库设置 allow_auto_merge 失败，拒绝发布 success，恢复后用同一 attempt 补发"
+                ) from error
+            if not isinstance(repo, dict) or repo.get("allow_auto_merge") is not False:
+                raise EffectPending(
+                    "仓库设置 allow_auto_merge 未显式关闭（false），拒绝发布 success 以防原生自动合入绕过人工确认；关闭后用同一 attempt 补发"
+                )
 
     def publish(self, state: str, reused_from: str | None = None) -> dict:
         target = self.target
@@ -541,7 +558,7 @@ class StatusPublisher:
                 return {"id": latest["id"], "sha": target.head_sha, "state": state, "description": description}
             return None
         with head_status(self.locks, target.repository_id, target.head_sha) as ownership:
-            self.check_current()
+            self.check_current(state=state)
             journal = Journal(self.folder / "effects")
             effect = f"status-{state}"
             owner = ownership.owner()
@@ -825,6 +842,10 @@ class ExternalReview:
             "last_output_sha256": payload["last_output_sha256"],
         }
 
+    _SHELL_TOOL_NAMES = frozenset({"exec_command", "shell", "shell_command", "container.exec", "bash"})
+    _CONTINUATION_TOOL_NAMES = frozenset({"write_stdin"})
+    _PARALLEL_TOOL_NAMES = frozenset({"multi_tool_use.parallel", "parallel"})
+
     @staticmethod
     def _unwrap_shell_command(raw: str) -> str:
         try:
@@ -836,33 +857,84 @@ class ExternalReview:
         return raw
 
     @classmethod
-    def _extract_session_tool_command(cls, payload: dict[str, Any]) -> str | None:
+    def _extract_cmd_from_params(cls, params: dict[str, Any]) -> str | None:
+        raw = params.get("cmd") if "cmd" in params else params.get("command")
+        if isinstance(raw, str) and raw.strip():
+            return cls._unwrap_shell_command(raw)
+        if isinstance(raw, list) and raw and all(isinstance(x, str) for x in raw):
+            if len(raw) >= 3 and raw[0].endswith(("bash", "sh")) and raw[1] in ("-c", "-lc"):
+                return raw[2]
+            return " ".join(raw)
+        return None
+
+    @classmethod
+    def _extract_session_tool_calls(cls, payload: dict[str, Any]) -> tuple[list[str], list[int]] | None:
+        """按工具名解析 response_item 工具调用：返回 (启动的 shell 命令列表, 续读 write_stdin 的 session_id 列表)。
+        非命令类只读工具（如 write_stdin/web_search/update_plan）返回空命令列表但不判非法，仍须由 token_usage_record 闭合；
+        命令工具或并行包装参数损坏时返回 None 失败闭合。"""
         pt = payload.get("type")
-        if pt in ("function_call", "custom_tool_call"):
-            args = payload.get("arguments")
-            if isinstance(args, str):
-                try:
-                    parsed = json.loads(args)
-                except ValueError:
-                    return None
-                if isinstance(parsed, dict):
-                    cmd = parsed.get("cmd") if isinstance(parsed.get("cmd"), str) else parsed.get("command")
-                    if isinstance(cmd, str):
-                        return cls._unwrap_shell_command(cmd)
-            if pt == "custom_tool_call" and isinstance(payload.get("input"), str):
-                return cls._unwrap_shell_command(payload["input"])
-            return None
+        if pt == "web_search_call":
+            return [], []
         if pt == "local_shell_call":
             action = payload.get("action")
             if isinstance(action, dict):
-                raw_cmd = action.get("command")
-                if isinstance(raw_cmd, list) and raw_cmd:
-                    parts = [str(x) for x in raw_cmd]
-                    if len(parts) >= 3 and parts[0].endswith(("bash", "sh")) and parts[1] in ("-c", "-lc"):
-                        return parts[2]
-                    return " ".join(parts)
-                if isinstance(raw_cmd, str):
-                    return cls._unwrap_shell_command(raw_cmd)
+                cmd = cls._extract_cmd_from_params(action)
+                if cmd is not None:
+                    return [cmd], []
+            return None
+        if pt in ("function_call", "custom_tool_call"):
+            name = str(payload.get("name") or "")
+            args = payload.get("arguments")
+            parsed: dict[str, Any] | None = None
+            if isinstance(args, str):
+                try:
+                    loaded = json.loads(args)
+                except ValueError:
+                    return None
+                if not isinstance(loaded, dict):
+                    return None
+                parsed = loaded
+            elif pt == "custom_tool_call" and isinstance(payload.get("input"), str):
+                if name in cls._SHELL_TOOL_NAMES or not name:
+                    return [cls._unwrap_shell_command(payload["input"])], []
+                return [], []
+            else:
+                return None
+            if name in cls._CONTINUATION_TOOL_NAMES:
+                sid = parsed.get("session_id")
+                if type(sid) is not int:
+                    return None
+                return [], [sid]
+            if name in cls._PARALLEL_TOOL_NAMES:
+                tool_uses = parsed.get("tool_uses")
+                if not isinstance(tool_uses, list) or not tool_uses:
+                    return None
+                cmds: list[str] = []
+                cont_sids: list[int] = []
+                for sub in tool_uses:
+                    if not isinstance(sub, dict):
+                        return None
+                    rec_name = str(sub.get("recipient_name") or "").split(".")[-1]
+                    params = sub.get("parameters")
+                    if not isinstance(params, dict):
+                        return None
+                    if rec_name in cls._CONTINUATION_TOOL_NAMES:
+                        sid = params.get("session_id")
+                        if type(sid) is not int:
+                            return None
+                        cont_sids.append(sid)
+                    elif rec_name in cls._SHELL_TOOL_NAMES or "cmd" in params or "command" in params:
+                        cmd = cls._extract_cmd_from_params(params)
+                        if cmd is None:
+                            return None
+                        cmds.append(cmd)
+                return cmds, cont_sids
+            if name in cls._SHELL_TOOL_NAMES or "cmd" in parsed or "command" in parsed:
+                cmd = cls._extract_cmd_from_params(parsed)
+                if cmd is None:
+                    return None
+                return [cmd], []
+            return [], []
         return None
 
     def _verify_session_receipt(self, target: ReviewTarget, launch: dict, receipt: dict, worker: Path,
@@ -889,8 +961,11 @@ class ExternalReview:
         response_ids: list[str] = []
         sess_cmds: list[str] = []
         sess_ams: list[str] = []
-        pending_calls: dict[str, str] = {}
-        closed_calls: dict[str, str] = {}
+        pending_calls: dict[str, list[str]] = {}
+        closed_calls: dict[str, list[str]] = {}
+        pending_cont: dict[str, list[int]] = {}
+        closed_cont: dict[str, list[int]] = {}
+        exec_sessions: dict[int, tuple[str, str]] = {}
         sess_patch_reads = 0
         pending_model_output = False
         try:
@@ -926,17 +1001,20 @@ class ExternalReview:
                         role = payload.get("role")
                         if pt in ("function_call", "custom_tool_call", "local_shell_call", "web_search_call"):
                             pending_model_output = True
-                            if pt != "web_search_call":
-                                cmd = self._extract_session_tool_command(payload)
-                                if cmd is None:
-                                    return ReviewOutcome(
-                                        outcome.model, "FAILED", outcome.session_id,
-                                        "session.jsonl 含无法解析命令的 response_item 工具调用，PASS/BLOCK 均不采信",
-                                    )
-                                sess_cmds.append(cmd)
-                                cid = payload.get("call_id")
-                                if isinstance(cid, str) and cid.strip():
-                                    pending_calls[cid] = cmd
+                            parsed_call = self._extract_session_tool_calls(payload)
+                            if parsed_call is None:
+                                return ReviewOutcome(
+                                    outcome.model, "FAILED", outcome.session_id,
+                                    "session.jsonl 含无法解析参数的 response_item 工具调用，PASS/BLOCK 均不采信",
+                                )
+                            cmds, cont_sids = parsed_call
+                            sess_cmds.extend(cmds)
+                            cid = payload.get("call_id")
+                            if isinstance(cid, str) and cid.strip():
+                                if cmds:
+                                    pending_calls[cid] = cmds
+                                if cont_sids:
+                                    pending_cont[cid] = cont_sids
                         elif pt == "message" and role == "assistant":
                             pending_model_output = True
                             content = payload.get("content")
@@ -958,11 +1036,26 @@ class ExternalReview:
                                 cid = payload.get("call_id")
                                 out_text = str(payload.get("output") or "")
                                 if isinstance(cid, str) and cid in closed_calls:
-                                    call_cmd = closed_calls.pop(cid)
+                                    call_cmds = closed_calls.pop(cid)
                                     exit_m = re.search(r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text)
                                     ok_exit = exit_m is None or exit_m.group(1) == "0"
-                                    if ok_exit and reads_candidate_patch(call_cmd, out_text, patch):
+                                    if ok_exit and any(reads_candidate_patch(c, out_text, patch) for c in call_cmds):
                                         sess_patch_reads += 1
+                                    sess_m = re.search(r"Process running with session ID (\d+)", out_text)
+                                    if sess_m and len(call_cmds) == 1:
+                                        exec_sessions[int(sess_m.group(1))] = (call_cmds[0], out_text)
+                                if isinstance(cid, str) and cid in closed_cont:
+                                    for sid in closed_cont.pop(cid):
+                                        if sid in exec_sessions:
+                                            prev_cmd, prev_out = exec_sessions[sid]
+                                            combined = prev_out + "\n" + out_text
+                                            exec_sessions[sid] = (prev_cmd, combined)
+                                            exit_m = re.search(
+                                                r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text
+                                            )
+                                            ok_exit = exit_m is None or exit_m.group(1) == "0"
+                                            if ok_exit and reads_candidate_patch(prev_cmd, combined, patch):
+                                                sess_patch_reads += 1
                     elif rtype == "token_usage_record":
                         rid = payload.get("response_id")
                         if not isinstance(rid, str) or not rid.strip():
@@ -973,6 +1066,8 @@ class ExternalReview:
                         response_ids.append(rid.strip())
                         closed_calls.update(pending_calls)
                         pending_calls.clear()
+                        closed_cont.update(pending_cont)
+                        pending_cont.clear()
                         pending_model_output = False
         except (OSError, ValueError, TypeError, subprocess.CalledProcessError):
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
@@ -1310,12 +1405,23 @@ class ExternalReview:
                             pass
                     target = replace(target, registered_at_ns=max(time.time_ns(), prev_max + 1))
                     _save(folder / "target.json", asdict(target))
-                    if intent_file.exists():
-                        try:
-                            intent_file.unlink()
-                        except OSError:
-                            pass
+                    # 保留重审意图文件直至非 STALE 的重审产生并发布终态：若本 attempt 在发出 pending 前因控制器切换等
+                    # 变 STALE，has_pending_rereview_intent 会自动跳过 STALE run 并恢复阻断旧 PASS。
         return target
+
+    def _clear_rereview_intent(self, target: ReviewTarget) -> None:
+        """非 STALE 的重审已产生并发布有效终态后，清理早于本 attempt 登记时刻的重审意图文件。"""
+        intent_file = self._rereview_intent_path(
+            target.repository_id, target.pr_number, target.base_sha, target.head_sha
+        )
+        if not intent_file.exists():
+            return
+        try:
+            recorded = int(_read(intent_file).get("recorded_at_ns", 0))
+            if recorded < target.registered_at_ns:
+                intent_file.unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError, IdentityError):
+            pass
 
     def _frozen(self, data: dict[str, Any], attempt: int) -> ReviewTarget:
         """按 load_target 的结果冻结出 ReviewTarget（merge-base、补丁身份、controller 身份），不登记。"""
@@ -1575,9 +1681,13 @@ class ExternalReview:
                     intent_data = _read(intent_path)
                     intent_patch = intent_data.get("patch_id")
                     intent_ts = int(intent_data["recorded_at_ns"])
+                    intent_head = str(intent_data.get("head_sha") or "")
+                    intent_base = str(intent_data.get("base_sha") or "")
                 except (OSError, ValueError, TypeError, KeyError, IdentityError):
                     return None
-                if intent_patch in (target.patch_id, None) and intent_ts >= registered(row):
+                if (intent_patch in (target.patch_id, None) and intent_ts >= registered(row)
+                        and (not intent_head or not intent_base
+                             or self.has_pending_rereview_intent(target.pr_number, intent_head, intent_base))):
                     return None
             return saved
         return None
@@ -1853,7 +1963,9 @@ class ExternalReview:
             if self._superseded_on_head(target):
                 raise Stale("同 head 已有更晚登记的 attempt，本 run 结论不再发布")
             result["publication"] = publisher.publish(result["state"])
-        _save(folder / "outcome.json", result)
+            _save(folder / "outcome.json", result)
+            if result.get("verdict") in ("PASS", "BLOCK", "FAILED"):
+                self._clear_rereview_intent(target)
         return result
 
     def _resume_publication(self, target: ReviewTarget, folder: Path, publisher: StatusPublisher, saved: dict) -> dict:
@@ -1869,6 +1981,8 @@ class ExternalReview:
             saved["publication"] = publisher.publish(saved["state"], reused.get("run_id"))
             # 认回后落盘，与正常发布同构；否则 outcome 缺 publication，沿用判定（_reuse_source）永远选不到本 run。
             _save(folder / "outcome.json", saved)
+            if saved.get("verdict") in ("PASS", "BLOCK", "FAILED"):
+                self._clear_rereview_intent(target)
             return saved
         if not reused:
             return self._publish_final(target, folder, publisher, saved)
@@ -1902,6 +2016,7 @@ class ExternalReview:
         _save(folder / "outcome.json", result)
         result["publication"] = publisher.publish("success", source["run_id"])
         _save(folder / "outcome.json", result)
+        self._clear_rereview_intent(target)
         return result
 
     def run_reviewers(self, target: ReviewTarget, folder: Path) -> list[ReviewOutcome]:

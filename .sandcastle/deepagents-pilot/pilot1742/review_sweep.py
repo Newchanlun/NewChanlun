@@ -613,10 +613,22 @@ class Sweep:
         deferred_armed: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
         drifted: set[int] = set()
         repo_native: tuple[bool, str] | None = None
+        pr_errors: dict[int, str] = {}
         try:
             if self.auto_merge:
-                # 先核验仓库级 allow_auto_merge：为 true 或读不到时禁止派发任何可能发布 success 的审查/续跑任务，
-                # 防止快速沿用 PASS 在撤回原生 auto-merge 前触发 GitHub 自动合入。
+                # 先读取全部合格 PR 的实时状态，再核验仓库级 allow_auto_merge；两者均在任何 decide() 派发前完成。
+                # 这样 allow_auto_merge 超时时 fail_closed 已有实时 auto_merge 状态，且不安全时零子进程被派发。
+                for pr in pulls:
+                    if self._eligible(pr):
+                        continue
+                    try:
+                        states[pr["number"]] = self.github.pr(pr["number"])
+                    except SourceUnreadable:  # 实时 PR 状态读取超时：记未知，让 fail_closed 兜底撤原生 auto-merge
+                        unreadable.add(pr["number"])
+                        raise
+                    except Exception as error:  # 单个 PR 隔离：不派审，合入阶段按失败关闭撤原生 auto-merge
+                        unreadable.add(pr["number"])
+                        pr_errors[pr["number"]] = f"{type(error).__name__}: {error}"
                 try:
                     native = self.github.allow_auto_merge()
                 except SourceUnreadable:
@@ -633,17 +645,12 @@ class Sweep:
                     if skip:  # 闲置/草稿/跨仓 PR 不派审、不读文件与检查；原生 auto-merge 撤销独立在 merge_actions/fail_closed 执行
                         actions.append({**entry, "action": skip})
                         continue
-                    behind = False
-                    if self.auto_merge:
-                        try:
-                            states[pr["number"]] = self.github.pr(pr["number"])
-                        except SourceUnreadable:  # 实时 PR 状态读取超时：记未知，让 fail_closed 兜底撤原生 auto-merge
-                            unreadable.add(pr["number"])
-                            raise
-                        except Exception:  # 状态读不到：不派审，合入阶段按失败关闭处理（撤原生 auto-merge）
-                            unreadable.add(pr["number"])
-                            raise
-                        behind = states[pr["number"]]["mergeable_state"] == "behind"
+                    if pr["number"] in pr_errors:
+                        action = "error"
+                        actions.append({**entry, "action": action, "reason": pr_errors[pr["number"]]})
+                        review_actions[pr["number"]] = action
+                        continue
+                    behind = states[pr["number"]]["mergeable_state"] == "behind" if pr["number"] in states else False
                     if pr["number"] in states and not self._target_branch_valid(pr, states[pr["number"]]):
                         action = "base-ref-moved"
                         actions.append({
@@ -783,6 +790,8 @@ class Sweep:
             state["auto_merge"] = True
             raise
         except Exception as error:
+            # 非超时复核失败（如 HTTP 502 / gh 非零退出）同样无法排除期间新挂原生 auto-merge，统一置为未知并走撤回路径。
+            state["auto_merge"] = True
             raise EvidenceInsufficient(f"复核 head 失败：{type(error).__name__}: {error}") from None
         armed = bool(state["auto_merge"] or again["auto_merge"])
         if armed:

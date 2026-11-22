@@ -1906,10 +1906,10 @@ index e69de29..5b0c4e6 100644
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-index e69de29..0802e77 100644
+index e69de29..2e76deb 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,188 @@
 +//go:build !preflight_test_roots
 +
 +package auth
@@ -1924,6 +1924,7 @@ index e69de29..0802e77 100644
 +	"net/http"
 +	"net/http/httptest"
 +	"testing"
++	"time"
 +)
 +
 +type nonStandardRoundTripper struct{}
@@ -2021,6 +2022,48 @@ index e69de29..0802e77 100644
 +	}
 +	if proxyHits != 2 {
 +		t.Fatalf("proxyHits = %d, want 2", proxyHits)
++	}
++
++	// SOCKS5 controlled transport MUST honor request context cancellation even when the proxy
++	// accepts TCP and stalls during the SOCKS5 handshake (no leaked dial goroutine/connection).
++	ln, errListen := net.Listen("tcp", "127.0.0.1:0")
++	if errListen != nil {
++		t.Fatalf("listen stalled socks5: %v", errListen)
++	}
++	defer ln.Close()
++	accepted := make(chan net.Conn, 1)
++	go func() {
++		conn, errAccept := ln.Accept()
++		if errAccept == nil {
++			accepted <- conn
++		}
++	}()
++	socksRT, errSocks := ControlledTransportForProxy("socks5://" + ln.Addr().String())
++	if errSocks != nil || socksRT == nil {
++		t.Fatalf("ControlledTransportForProxy(socks5) failed: rt=%v err=%v", socksRT, errSocks)
++	}
++	reqCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
++	defer cancel()
++	reqSocks, errReqSocks := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://chatgpt.com/backend-api/codex/responses", nil)
++	if errReqSocks != nil {
++		t.Fatalf("new socks request: %v", errReqSocks)
++	}
++	started := time.Now()
++	respSocks, errRoundTrip := socksRT.RoundTrip(reqSocks)
++	elapsed := time.Since(started)
++	if respSocks != nil && respSocks.Body != nil {
++		_ = respSocks.Body.Close()
++	}
++	if errRoundTrip == nil {
++		t.Fatal("stalled SOCKS5 proxy unexpectedly succeeded")
++	}
++	if elapsed > 3*time.Second {
++		t.Fatalf("stalled SOCKS5 dial ignored context deadline: elapsed=%v err=%v", elapsed, errRoundTrip)
++	}
++	select {
++	case conn := <-accepted:
++		_ = conn.Close()
++	case <-time.After(time.Second):
 +	}
 +
 +	// Any externally constructed *http.Transport (even default-looking, or carrying RegisterProtocol("https", ...),
@@ -2251,10 +2294,10 @@ index 0000000..94e96e0
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..0a88f01
+index 0000000..36692d6
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,154 @@
 +package auth
 +
 +import (
@@ -2348,9 +2391,15 @@ index 0000000..0a88f01
 +			if errSOCKS5 != nil {
 +				return nil, preflightreceipt.ErrUnavailable
 +			}
++			ctxDialer, ok := dialer.(proxy.ContextDialer)
++			if !ok {
++				return nil, preflightreceipt.ErrUnavailable
++			}
 +			tr.Proxy = nil
-+			tr.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
-+				return dialer.Dial(network, addr)
++			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++				dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++				defer cancel()
++				return ctxDialer.DialContext(dialCtx, network, addr)
 +			}
 +		default:
 +			return nil, preflightreceipt.ErrUnavailable

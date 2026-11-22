@@ -35,7 +35,11 @@ class ExternalGateway:
         repo = self.client.identity.repository_id
         pr["base"].update(sha=self.base, repo={"id": repo})
         pr["head"]["repo"]["id"] = repo
+        pr.setdefault("auto_merge", None)
         return pr
+
+    def get_repo(self):
+        return {"allow_auto_merge": False}
 
     def statuses(self, sha):
         return self.inner.statuses(sha)

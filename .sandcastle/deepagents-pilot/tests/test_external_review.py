@@ -42,14 +42,18 @@ class Gateway:
     bot = "newchanlun-deepagents-1742[bot]"
     def __init__(self, env):
         self.client = SimpleNamespace(identity=SimpleNamespace(repository_id=1150335160))
-        self.pr = {"number": 1810, "state": "open", "draft": False, "user": {"login": "business-owner"},
+        self.pr = {"number": 1810, "state": "open", "draft": False, "auto_merge": None,
+                   "user": {"login": "business-owner"},
                    "base": {"repo": {"id": 1150335160}, "ref": "main", "sha": env.base},
                    "head": {"repo": {"id": 1150335160}, "ref": "feature/business", "sha": git(env.source, "rev-parse", "HEAD")}}
+        self.repo = {"allow_auto_merge": False}
         self.rows, self.sent = [], []
         self.fault, self.hide, self.after_write = False, False, None
     def get_pr(self, number):
         assert number == 1810
         return copy.deepcopy(self.pr)
+    def get_repo(self):
+        return copy.deepcopy(self.repo)
     def statuses(self, sha):
         if self.hide:
             return []
@@ -3271,3 +3275,182 @@ def test_pending_rereview_intent_blocks_pass_reuse_on_rebased_same_patch_and_sea
         stop_drip.set()
         srv.shutdown()
         srv.server_close()
+
+
+def test_session_receipt_accepts_write_stdin_continuation_and_parallel_tool_calls(lane, tmp_path, monkeypatch):
+    """R17（Sol+Astra P1）：合法的 write_stdin 续读（含切分输出续读补丁）与 multi_tool_use.parallel 并行工具包装
+    不得被误判为非法 shell 命令；缺失或伪造补丁读取命令仍判 FAILED。"""
+    import time
+
+    result = lane.review_pr(1810, 1)
+    target = ReviewTarget(**result["target"])
+    worker = lane.state_root / "runs" / target.key / MODELS[0]
+    launch = module._read(worker / "launch.json")
+    receipt = module._read(worker / "receipt.json")
+    session_id = "01a204f8-2a11-7720-baca-0bff89db9901"
+    diff_cmd = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
+    patch = git(lane.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha)
+    final_obj = {"status": "completed", "summary": "VERDICT: PASS\n含续读与并行工具调用回归通过。",
+                 "findings": [], "validation": ["write_stdin + parallel"]}
+    final_text = json.dumps(final_obj, ensure_ascii=False)
+    updated_receipt = {**receipt, "session_id": session_id, "result": final_obj,
+                       "observed_provider": "cliproxy-local", "observed_model": MODELS[0]}
+
+    receipt_root = tmp_path / "proxy-receipts"
+    launch_hdr = f"review-{launch['launch_id']}"
+    rec_dir = receipt_root / launch_hdr
+    rec_dir.mkdir(parents=True, mode=0o700)
+    monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(receipt_root))
+    strict = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
+                            checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01,
+                            preflight=_fake_preflight_pass)
+
+    def _write_proxy(rids: list[str]) -> None:
+        now = time.time_ns()
+        shas = [hashlib.sha256(r.encode("utf-8")).hexdigest() for r in rids]
+        (rec_dir / "receipt.json").write_text(json.dumps({
+            "schema": "cliproxy-review-v1",
+            "launch": launch_hdr,
+            "session": session_id,
+            "started_ns": now - 1_000_000,
+            "finished_ns": now,
+            "sealed_at_ns": now,
+            "complete": True,
+            "sealed": True,
+            "tainted": False,
+            "requests": len(shas),
+            "routes": [f"codex:{MODELS[0]}@chatgpt.com"],
+            "response_id_sha256s": shas,
+            "last_response_id_sha256": shas[-1],
+            "last_output_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
+        }))
+
+    # 1. exec_command 启动 git diff 后由 write_stdin(session_id=42) 续读补丁输出，两轮均由 token_usage_record 闭合
+    events_stdin = [
+        {"type": "thread.started", "thread_id": session_id},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc '{diff_cmd}'",
+                                            "aggregated_output": patch, "status": "completed", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": final_text}},
+        {"type": "turn.completed"},
+    ]
+    rids_stdin = ["resp_r17_exec_1", "resp_r17_stdin_2", "resp_r17_final_3"]
+    sess_stdin = [
+        {"type": "session_meta", "payload": {"id": session_id, "model_provider": "cliproxy-local"}},
+        {"type": "turn_context", "payload": {"model": MODELS[0]}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "c1",
+                                              "arguments": json.dumps({"cmd": diff_cmd})}},
+        {"type": "token_usage_record", "payload": {"response_id": rids_stdin[0]}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1",
+                                              "output": "Chunk ID: a1\nProcess running with session ID 42\nOutput:\n"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "write_stdin", "call_id": "c2",
+                                              "arguments": json.dumps({"session_id": 42, "chars": ""})}},
+        {"type": "token_usage_record", "payload": {"response_id": rids_stdin[1]}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c2",
+                                              "output": f"Process exited with code 0\nOutput:\n{patch}"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                                              "content": [{"type": "output_text", "text": final_text}]}},
+        {"type": "token_usage_record", "payload": {"response_id": rids_stdin[2]}},
+    ]
+    (worker / "events.jsonl").write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in events_stdin) + "\n")
+    (worker / "session.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in sess_stdin) + "\n")
+    _write_proxy(rids_stdin)
+    outcome = validate_review(target, launch, updated_receipt, worker, lane.source)
+    assert outcome.verdict == "PASS"
+    assert strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome).verdict == "PASS"
+
+    # 2. multi_tool_use.parallel 包装两条 exec_command（补丁读取 + git status），同样逐项对齐并通过
+    events_par = [
+        {"type": "thread.started", "thread_id": session_id},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "/bin/bash -lc 'git status --short'",
+                                            "aggregated_output": "", "status": "completed", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc '{diff_cmd}'",
+                                            "aggregated_output": patch, "status": "completed", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": final_text}},
+        {"type": "turn.completed"},
+    ]
+    rids_par = ["resp_r17_par_1", "resp_r17_par_final_2"]
+    sess_par = [
+        {"type": "session_meta", "payload": {"id": session_id, "model_provider": "cliproxy-local"}},
+        {"type": "turn_context", "payload": {"model": MODELS[0]}},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "multi_tool_use.parallel", "call_id": "p1",
+            "arguments": json.dumps({"tool_uses": [
+                {"recipient_name": "functions.exec_command", "parameters": {"cmd": diff_cmd}},
+                {"recipient_name": "functions.exec_command", "parameters": {"cmd": "git status --short"}},
+            ]}),
+        }},
+        {"type": "token_usage_record", "payload": {"response_id": rids_par[0]}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "p1",
+                                              "output": f"Process exited with code 0\nOutput:\n{patch}"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                                              "content": [{"type": "output_text", "text": final_text}]}},
+        {"type": "token_usage_record", "payload": {"response_id": rids_par[1]}},
+    ]
+    (worker / "events.jsonl").write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in events_par) + "\n")
+    (worker / "session.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in sess_par) + "\n")
+    _write_proxy(rids_par)
+    outcome_par = validate_review(target, launch, updated_receipt, worker, lane.source)
+    assert outcome_par.verdict == "PASS"
+    assert strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome_par).verdict == "PASS"
+
+
+def test_publish_success_refuses_when_native_auto_merge_enabled_on_repo_or_pr(lane, env):
+    """R17（Sol P1）：手动审阅、沿用与补发共用 StatusPublisher.publish("success") 门禁：
+    若仓库 allow_auto_merge 未显式为 false 或 PR 挂着原生 auto-merge，一律拒绝写 success（抛 EffectPending）；
+    关闭后用同一 attempt 补发即可成功。"""
+    # 1. 手动审阅完成时仓库允许原生 auto-merge：拒绝发布 success，只留 pending
+    lane.gateway.repo["allow_auto_merge"] = True
+    with pytest.raises(EffectPending, match="allow_auto_merge"):
+        lane.review_pr(1810, 1)
+    assert lane.gateway.sent == ["pending"]
+
+    # 2. 仓库关闭但 PR 仍挂着原生 auto-merge：同 attempt 补发依然拒绝写 success
+    lane.gateway.repo["allow_auto_merge"] = False
+    lane.gateway.pr["auto_merge"] = {"merge_method": "merge"}
+    with pytest.raises(EffectPending, match="原生 auto-merge"):
+        lane.review_pr(1810, 1)
+    assert lane.gateway.sent == ["pending"]
+
+    # 3. 撤回 PR 原生 auto-merge 后，同一 attempt 补发立即发布 success（零重跑模型）
+    lane.gateway.pr["auto_merge"] = None
+    first = lane.review_pr(1810, 1)
+    assert first["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
+
+    # 4. 沿用路径同样受发布门约束：仓库重开 allow_auto_merge 时拒绝发布沿用 success
+    _advance_main(lane, env)
+    lane.gateway.repo["allow_auto_merge"] = True
+    with pytest.raises(EffectPending, match="allow_auto_merge"):
+        lane.review_pr(1810, 1)
+    assert lane.gateway.sent[-1] == "pending"
+    lane.gateway.repo["allow_auto_merge"] = False
+    reused = lane.review_pr(1810, 1)
+    assert reused["verdict"] == "PASS" and "reused_from" in reused and lane.gateway.sent[-1] == "success"
+
+
+def test_stale_rereview_attempt_preserves_intent_and_blocks_pass_reuse_until_settled(lane, env):
+    """R17（Astra P1）：A1 PASS -> A2 预检失败留下重审意图 -> A2 登记后变 STALE：
+    意图文件必须保留并继续阻断旧 A1 的沿用；直到新非 STALE attempt 真正发布终态才清理意图。"""
+    head = lane.gateway.pr["head"]["sha"]
+    old_base = lane.gateway.pr["base"]["sha"]
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+
+    lane.preflight = lambda _t: {"returncode": 2, "report": None, "image_id": "sha256:" + "1" * 64}
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 2)
+    assert lane.has_pending_rereview_intent(1810, head, old_base) is True
+
+    # A2 登记（尚未终态）：意图文件仍在磁盘，待 A2 变 STALE 后自动恢复阻断
+    lane.preflight = _fake_preflight_pass
+    t2 = lane.target(1810, 2)
+    folder2 = lane.state_root / "runs" / t2.key
+    module._save(folder2 / "outcome.json", {"run_id": t2.run_id, "verdict": "STALE", "reason": "controller switched"})
+    assert lane.has_pending_rereview_intent(1810, head, old_base) is True
+
+    # 同 patch_id 追平到新 head 时，因重审意图未由非 STALE 终态收口，绝不得沿用 A1 PASS
+    _advance_main(lane, env)
+    assert lane.would_reuse(load_target(lane.gateway, 1810)) is False
+    # 回到原 head 上由 A3 完成并发布非 STALE 终态后，意图被清理
+    lane.gateway.pr["base"]["sha"] = old_base
+    lane.gateway.pr["head"]["sha"] = head
+    a3 = lane.review_pr(1810, 3)
+    assert a3["verdict"] == "PASS" and lane.has_pending_rereview_intent(1810, head, old_base) is False
