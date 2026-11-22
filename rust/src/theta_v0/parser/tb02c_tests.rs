@@ -639,44 +639,69 @@ pub(super) fn tb1493_polyline(seed: u64, n: usize, distinct: bool) -> Vec<i64> {
     }
 }
 
+fn tb1493_workers(items: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(4)
+        .min(items)
+        .max(1)
+}
+
 #[test]
 fn tb1493_first_break_equals_067_on_distinct_prices() {
     // 义务 8(e)：端点价互异 ⟹ 先破判据与 067 严格谓词的终结序列逐位相同；含并列 ⟹ 差异全部落在
     // 「c 的 P 侧极值 = P」的候选上。
     let cfg = &ThetaConfig::default().parse;
-    let run = |ss: &[Stroke], oracle: bool| {
-        feature_seq::CASE_ONE_ORACLE_067.with(|o| o.set(oracle));
-        let r = segment::divide_segments_with_facts(ss, cfg);
-        feature_seq::CASE_ONE_ORACLE_067.with(|o| o.set(false));
-        r
-    };
-    let mut tie_diffs = 0usize;
-    for g in 0..400u64 {
-        for distinct in [true, false] {
-            let ss = chain(&tb1493_polyline(0x1493_0000 + g, 300, distinct));
-            let (a, _, fa) = run(&ss, false);
-            let (b, _, _) = run(&ss, true);
-            if distinct {
-                assert_eq!(a, b, "组 {g}：端点价互异时两判据须逐位相同");
+    let total = 400usize;
+    let workers = tb1493_workers(total);
+    let chunk = total.div_ceil(workers);
+    let tie_diffs: usize = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for w in 0..workers {
+            let start = w * chunk;
+            let end = (start + chunk).min(total);
+            if start >= end {
                 continue;
             }
-            let Some(j) = (0..a.len().max(b.len())).find(|&j| a.get(j) != b.get(j)) else {
-                continue;
-            };
-            tie_diffs += 1;
-            let w = fa.candidates[j]
-                .strict
-                .as_ref()
-                .unwrap_or_else(|| panic!("组 {g}：首个差异段 {j} 须是先破判据侧的第一种终结"));
-            let up = ss[fa.candidates[j].start_stroke].direction == Direction::Up;
-            let (bp, cp) = if up {
-                (w.elements[1].high, w.elements[2].high)
-            } else {
-                (w.elements[1].low, w.elements[2].low)
-            };
-            assert_eq!(bp, cp, "组 {g}：差异须落在 c 的 P 侧极值 = P 的候选上");
+            handles.push(scope.spawn(move || {
+                let run = |ss: &[Stroke], oracle: bool| {
+                    feature_seq::CASE_ONE_ORACLE_067.with(|o| o.set(oracle));
+                    let r = segment::divide_segments_with_facts(ss, cfg);
+                    feature_seq::CASE_ONE_ORACLE_067.with(|o| o.set(false));
+                    r
+                };
+                let mut tie_diffs = 0usize;
+                for g in start as u64..end as u64 {
+                    for distinct in [true, false] {
+                        let ss = chain(&tb1493_polyline(0x1493_0000 + g, 300, distinct));
+                        let (a, _, fa) = run(&ss, false);
+                        let (b, _, _) = run(&ss, true);
+                        if distinct {
+                            assert_eq!(a, b, "组 {g}：端点价互异时两判据须逐位相同");
+                            continue;
+                        }
+                        let Some(j) = (0..a.len().max(b.len())).find(|&j| a.get(j) != b.get(j))
+                        else {
+                            continue;
+                        };
+                        tie_diffs += 1;
+                        let w = fa.candidates[j].strict.as_ref().unwrap_or_else(|| {
+                            panic!("组 {g}：首个差异段 {j} 须是先破判据侧的第一种终结")
+                        });
+                        let up = ss[fa.candidates[j].start_stroke].direction == Direction::Up;
+                        let (bp, cp) = if up {
+                            (w.elements[1].high, w.elements[2].high)
+                        } else {
+                            (w.elements[1].low, w.elements[2].low)
+                        };
+                        assert_eq!(bp, cp, "组 {g}：差异须落在 c 的 P 侧极值 = P 的候选上");
+                    }
+                }
+                tie_diffs
+            }));
         }
-    }
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
     eprintln!("tb1493 性质锁：并列输入差异组数 {tie_diffs}/400");
 }
 
@@ -684,24 +709,44 @@ fn tb1493_first_break_equals_067_on_distinct_prices() {
 fn tb1493_random_full_eq_incremental_and_no_gate_failure_after_first() {
     // 义务 8(g)：随机折线上全量 ≡ 逐笔增量。#1493 裁定 3：流首段之外门失败计数 = 0、非流首段
     // 最少笔数不足（MinCount）计数 = 0（`seg_min_strokes=3` 时 MinCount 只可能出现在流首段）。
-    let mut later_failures = 0usize;
-    let mut later_min_count = 0usize;
-    for g in 0..60u64 {
-        for distinct in [true, false] {
-            let ss = chain(&tb1493_polyline(0x1493_8000 + g, 120, distinct));
-            tb1493_full_eq_incremental(&ss);
-            let (_, _, facts) =
-                segment::divide_segments_with_facts(&ss, &ThetaConfig::default().parse);
-            for c in facts.candidates.iter().skip(1) {
-                if c.parse_invalid_from.is_some() || c.result == "FAILED_GEOMETRY" {
-                    later_failures += 1;
-                }
-                if c.termination_attempts.iter().any(|a| !a.minimum_count_met) {
-                    later_min_count += 1;
-                }
+    let cfg = &ThetaConfig::default().parse;
+    let total = 60usize;
+    let workers = tb1493_workers(total);
+    let chunk = total.div_ceil(workers);
+    let (later_failures, later_min_count) = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for w in 0..workers {
+            let start = w * chunk;
+            let end = (start + chunk).min(total);
+            if start >= end {
+                continue;
             }
+            handles.push(scope.spawn(move || {
+                let mut later_failures = 0usize;
+                let mut later_min_count = 0usize;
+                for g in start as u64..end as u64 {
+                    for distinct in [true, false] {
+                        let ss = chain(&tb1493_polyline(0x1493_8000 + g, 120, distinct));
+                        tb1493_full_eq_incremental(&ss);
+                        let (_, _, facts) = segment::divide_segments_with_facts(&ss, cfg);
+                        for c in facts.candidates.iter().skip(1) {
+                            if c.parse_invalid_from.is_some() || c.result == "FAILED_GEOMETRY" {
+                                later_failures += 1;
+                            }
+                            if c.termination_attempts.iter().any(|a| !a.minimum_count_met) {
+                                later_min_count += 1;
+                            }
+                        }
+                    }
+                }
+                (later_failures, later_min_count)
+            }));
         }
-    }
+        handles.into_iter().fold((0usize, 0usize), |(lf, lm), h| {
+            let (cf, cm) = h.join().unwrap();
+            (lf + cf, lm + cm)
+        })
+    });
     assert_eq!(
         later_failures, 0,
         "流首段之外段端门失败须为 0（#1493 裁定 3）"
@@ -825,54 +870,91 @@ fn tb1493_ruling2_three_way_comparison() {
     }
     inputs.push(("e1_real".into(), tb1493_real(TB1493_E1_REAL)));
     inputs.push(("e2_real".into(), tb1493_real(TB1493_E2_REAL)));
-    for (tag, ss) in &inputs {
-        groups += 1;
-        let r: Vec<_> = (0..3u8).map(|arm| tb1493_arm_run(ss, arm)).collect();
-        for (k, (x, y)) in [(0, 1), (0, 2), (1, 2)].into_iter().enumerate() {
-            if r[x].0 != r[y].0 {
-                diff[k] += 1;
+    let workers = tb1493_workers(inputs.len());
+    let chunk = inputs.len().div_ceil(workers);
+    let partials: Vec<(
+        usize,
+        [usize; 3],
+        [usize; 3],
+        [usize; 3],
+        [usize; 3],
+        Vec<String>,
+    )> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for slice in inputs.chunks(chunk) {
+            handles.push(scope.spawn(move || {
+                    let mut c_diff = [0usize; 3];
+                    let mut c_off = [0usize; 3];
+                    let mut c_inv = [0usize; 3];
+                    let mut c_nx = [0usize; 3];
+                    let mut c_groups = 0usize;
+                    let mut hand_lines = Vec::new();
+                    for (tag, ss) in slice {
+                        c_groups += 1;
+                        let r: Vec<_> = (0..3u8).map(|arm| tb1493_arm_run(ss, arm)).collect();
+                        for (k, (x, y)) in [(0, 1), (0, 2), (1, 2)].into_iter().enumerate() {
+                            if r[x].0 != r[y].0 {
+                                c_diff[k] += 1;
+                            }
+                        }
+                        if r[0].0 != r[2].0 && hand_lines.len() < 3 {
+                            let j = (0..r[0].0.len().max(r[2].0.len()))
+                                .find(|&j| r[0].0.get(j) != r[2].0.get(j))
+                                .unwrap();
+                            let sp0 = tb1493_spans(ss, &r[0].0);
+                            let sp2 = tb1493_spans(ss, &r[2].0);
+                            let lo = sp0.get(j).map_or(0, |x| x.0);
+                            let hi = (sp0.get(j).map_or(lo, |x| x.1) + 8).min(ss.len() - 1);
+                            let pts: Vec<i64> = std::iter::once(ss[lo].start_price)
+                                .chain(ss[lo..=hi].iter().map(|x| x.end_price))
+                                .collect();
+                            hand_lines.push(format!(
+                                "TB1493 RULING2 HAND {tag} seg#{j} ruling={:?} window={:?} oldG2={:?} strokes s{lo}..s{hi} points={pts:?}",
+                                sp0.get(j),
+                                tb1493_spans(ss, &r[1].0).get(j),
+                                sp2.get(j)
+                            ));
+                        }
+                        for arm in 0..3 {
+                            if r[arm].1 > 0 {
+                                c_off[arm] += 1;
+                            }
+                            if r[arm].2 > 0 {
+                                c_inv[arm] += 1;
+                            }
+                            if r[arm].3 > 0 {
+                                c_nx[arm] += 1;
+                            }
+                        }
+                        if r[0].1 > 0 || r[0].3 > 0 {
+                            let sp = tb1493_spans(ss, &r[0].0);
+                            eprintln!(
+                                "TB1493 RULING2 OFF {tag} off_p={} not_extreme={} spans={sp:?}",
+                                r[0].1, r[0].3
+                            );
+                        }
+                        assert_eq!(r[0].1, 0, "{tag}：本裁定段端点不在分型极值 P");
+                        assert_eq!(r[0].2, 0, "{tag}：本裁定段端门失败");
+                    }
+                    (c_groups, c_diff, c_off, c_inv, c_nx, hand_lines)
+                }));
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (c_groups, c_diff, c_off, c_inv, c_nx, hand_lines) in partials {
+        groups += c_groups;
+        for k in 0..3 {
+            diff[k] += c_diff[k];
+            off[k] += c_off[k];
+            inv[k] += c_inv[k];
+            nx[k] += c_nx[k];
+        }
+        for line in hand_lines {
+            if shown < 3 {
+                shown += 1;
+                eprintln!("{line}");
             }
         }
-        // 手算核对用：前 3 组「本裁定 vs 旧 G-2」差异打印首个差异段与该处原始笔。
-        if r[0].0 != r[2].0 && shown < 3 {
-            shown += 1;
-            let j = (0..r[0].0.len().max(r[2].0.len()))
-                .find(|&j| r[0].0.get(j) != r[2].0.get(j))
-                .unwrap();
-            let sp0 = tb1493_spans(ss, &r[0].0);
-            let sp2 = tb1493_spans(ss, &r[2].0);
-            let lo = sp0.get(j).map_or(0, |x| x.0);
-            let hi = (sp0.get(j).map_or(lo, |x| x.1) + 8).min(ss.len() - 1);
-            let pts: Vec<i64> = std::iter::once(ss[lo].start_price)
-                .chain(ss[lo..=hi].iter().map(|x| x.end_price))
-                .collect();
-            eprintln!(
-                "TB1493 RULING2 HAND {tag} seg#{j} ruling={:?} window={:?} oldG2={:?} strokes s{lo}..s{hi} points={pts:?}",
-                sp0.get(j),
-                tb1493_spans(ss, &r[1].0).get(j),
-                sp2.get(j)
-            );
-        }
-        for arm in 0..3 {
-            if r[arm].1 > 0 {
-                off[arm] += 1;
-            }
-            if r[arm].2 > 0 {
-                inv[arm] += 1;
-            }
-            if r[arm].3 > 0 {
-                nx[arm] += 1;
-            }
-        }
-        if r[0].1 > 0 || r[0].3 > 0 {
-            let sp = tb1493_spans(ss, &r[0].0);
-            eprintln!(
-                "TB1493 RULING2 OFF {tag} off_p={} not_extreme={} spans={sp:?}",
-                r[0].1, r[0].3
-            );
-        }
-        assert_eq!(r[0].1, 0, "{tag}：本裁定段端点不在分型极值 P");
-        assert_eq!(r[0].2, 0, "{tag}：本裁定段端门失败");
     }
     eprintln!(
         "TB1493 RULING2 groups={groups} diff[ruling~window,ruling~oldG2,window~oldG2]={diff:?} \
@@ -921,18 +1003,39 @@ fn tb1493_production_incremental_has_no_fail_closed_marker() {
     // #1493 裁定 4b 计数锁（X-37 合入前「下游不得在其上构造」由此承担）：生产配置逐 bar 增量解析在
     // 合成 K 线上全程无段端门 fail-closed 标记。#1581 在裁定 1 落地前的 HEAD 36adc7c7c8 上于
     // seed=0x1581_0004 bar 1999–2035 测到 Some(100)（第二种候选 OPEN 期间更晚候选门失败）。
-    let cfg = ThetaConfig::default();
-    let mut marked = Vec::new();
-    for seed in 0..6u64 {
-        let bars = tb1493_synthetic_bars(0x1581_0000 + seed, 4_000);
-        let mut incr = ParseLayerIncr::new(&cfg);
-        for (i, bar) in bars.iter().enumerate() {
-            let _ = incr.append(*bar);
-            if let Some(p) = incr.segments_parse_invalid_from() {
-                marked.push((seed, i, p));
+    let cfg = &ThetaConfig::default();
+    let total = 6usize;
+    let workers = tb1493_workers(total);
+    let chunk = total.div_ceil(workers);
+    let marked: Vec<(u64, usize, usize)> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for w in 0..workers {
+            let start = w * chunk;
+            let end = (start + chunk).min(total);
+            if start >= end {
+                continue;
             }
+            handles.push(scope.spawn(move || {
+                let mut local = Vec::new();
+                for seed in start as u64..end as u64 {
+                    let bars = tb1493_synthetic_bars(0x1581_0000 + seed, 4_000);
+                    let mut incr = ParseLayerIncr::new(cfg);
+                    for (i, bar) in bars.iter().enumerate() {
+                        let _ = incr.append(*bar);
+                        if let Some(p) = incr.segments_parse_invalid_from() {
+                            local.push((seed, i, p));
+                        }
+                    }
+                }
+                local
+            }));
         }
-    }
+        let mut all = Vec::new();
+        for h in handles {
+            all.extend(h.join().unwrap());
+        }
+        all
+    });
     assert!(
         marked.is_empty(),
         "生产增量路径出现 fail-closed 标记 (seed,bar,seg_start)：{:?}",
