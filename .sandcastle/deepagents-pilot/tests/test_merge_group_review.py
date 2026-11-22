@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from pilot1742 import external_review
+from pilot1742 import merge_group_review as mgr
 from pilot1742.merge_group_review import (
     DEFAULT_EXPECTED_MODELS,
     MAX_STATUS_DESCRIPTION_LEN,
@@ -74,9 +78,10 @@ class MergeQueueFixture:
     """离线本地 git 仓库 + 审查状态目录测试夹具。"""
 
     def __init__(self, tmp_path: Path) -> None:
-        self.root = tmp_path
-        self.repo = tmp_path / "repo"
-        self.state_root = tmp_path / "state"
+        resolved_root = tmp_path.resolve()
+        self.root = resolved_root
+        self.repo = resolved_root / "repo"
+        self.state_root = resolved_root / "state"
         self.repo.mkdir(mode=0o700)
         self.state_root.mkdir(mode=0o700)
         _run_git(self.repo, "init", "-q", "-b", "main")
@@ -209,13 +214,27 @@ class MergeQueueFixture:
         self._write_json(folder / "target.json", target_data)
 
         reviews = []
+        safe_rid = re.sub(r"[^a-zA-Z0-9-]", "-", rid)[:80]
         for idx, model in enumerate(models, start=1):
             worker = folder / model
             worker.mkdir(parents=True, exist_ok=True, mode=0o700)
             launch_id = f"launch-{rid}-{idx}"
+            session_id = f"sess-{safe_rid}-{idx}"
             self._write_json(
                 worker / "launch.json",
-                {"run_id": rid, "launch_id": launch_id, "model": model, "head_sha": head_sha},
+                {
+                    "run_id": rid,
+                    "launch_id": launch_id,
+                    "pr_number": pr_number,
+                    "model": model,
+                    "head_sha": head_sha,
+                    "base_sha": base_sha,
+                    "merge_base_sha": mb,
+                    "controller_code_head": ctrl,
+                    "checkout": str(self.root / "checkouts" / rid / model),
+                    "prompt": f"review PR #{pr_number}",
+                    "mode": "review",
+                },
             )
             result_status = "completed" if verdict == "PASS" else ("blocked" if verdict == "BLOCK" else "failed")
             summary = f"VERDICT: {verdict}\n审查完成"
@@ -231,7 +250,20 @@ class MergeQueueFixture:
                     "controller_code_head": ctrl,
                     "status": "completed",
                     "mode": "review",
+                    "sandbox": "docker-read-only",
+                    "exit_code": 0,
+                    "turn_completed": True,
                     "image_id": image_id,
+                    "container_id": f"{idx:012x}" + ("a" * 52),
+                    "session_id": session_id,
+                    "before": {"head": head_sha, "status": "", "branch": "HEAD"},
+                    "after": {"head": head_sha, "status": "", "branch": "HEAD"},
+                    "filesystem": {
+                        "source_write": "EROFS",
+                        "git_write": "EROFS",
+                        "host_read": "ENOENT",
+                        "state_write": "EROFS",
+                    },
                     "result": {
                         "status": result_status,
                         "summary": summary,
@@ -240,7 +272,13 @@ class MergeQueueFixture:
                     },
                 },
             )
-            reviews.append({"model": model, "verdict": verdict, "session_id": f"sess-{idx}", "reason": summary})
+            session_path = worker / "session.jsonl"
+            session_path.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": session_id}}) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(session_path, 0o600)
+            reviews.append({"model": model, "verdict": verdict, "session_id": session_id, "reason": summary})
 
         outcome: dict[str, Any] = {
             "run_id": rid,
@@ -250,11 +288,30 @@ class MergeQueueFixture:
             "reviews": reviews,
         }
         if publication_state is not None:
-            outcome["publication"] = {"state": publication_state, "sha": head_sha}
+            outcome["publication"] = {
+                "id": 900_000 + registered_at_ns,
+                "state": publication_state,
+                "sha": head_sha,
+                "description": f"run={rid} b={base_sha[:12]} h={head_sha[:12]} {publication_state}",
+            }
         if extra_outcome:
             outcome.update(extra_outcome)
         self._write_json(folder / "outcome.json", outcome)
         return folder, rid, pid
+
+    def _find_run_artifacts(self, run_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        runs_dir = self.state_root / "runs"
+        if not runs_dir.is_dir():
+            return None
+        for child in runs_dir.iterdir():
+            target_file = child / "target.json"
+            outcome_file = child / "outcome.json"
+            if target_file.is_file() and outcome_file.is_file():
+                target_obj = json.loads(target_file.read_text(encoding="utf-8"))
+                if target_obj.get("run_id") == run_id:
+                    outcome_obj = json.loads(outcome_file.read_text(encoding="utf-8"))
+                    return target_obj, outcome_obj
+        return None
 
     def write_reused_pass_run(
         self,
@@ -273,6 +330,11 @@ class MergeQueueFixture:
         controller_code_head: str | None = None,
         admission_image_id: str = IMAGE_ID,
         registered_at_ns: int | None = None,
+        origin_head_sha: str | None = None,
+        origin_base_sha: str | None = None,
+        origin_merge_base_sha: str | None = None,
+        origin_publication: dict[str, Any] | None = None,
+        include_admission: bool = True,
     ) -> tuple[Path, str]:
         mb = merge_base_sha or _run_git(self.repo, "merge-base", base_sha, head_sha)
         rid = run_id or f"reuse-pr{pr_number}-a{attempt}"
@@ -283,6 +345,26 @@ class MergeQueueFixture:
         key = f"r{repository_id}-p{pr_number}-{base_sha}-{head_sha}-{policy_version}-a{attempt}"
         folder = self.state_root / "runs" / key
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        found_origin = self._find_run_artifacts(origin_run_id)
+        if found_origin is not None:
+            orig_target, orig_outcome = found_origin
+            resolved_orig_head = origin_head_sha or str(orig_target["head_sha"])
+            resolved_orig_base = origin_base_sha or str(orig_target["base_sha"])
+            resolved_orig_mb = origin_merge_base_sha or str(orig_target["merge_base_sha"])
+            resolved_orig_pub = origin_publication or dict(orig_outcome.get("publication") or {})
+            resolved_orig_reviews = list(orig_outcome.get("reviews") or [])
+        else:
+            resolved_orig_head = origin_head_sha or head_sha
+            resolved_orig_base = origin_base_sha or base_sha
+            resolved_orig_mb = origin_merge_base_sha or mb
+            resolved_orig_pub = origin_publication or {
+                "id": 800_000 + registered_at_ns,
+                "state": "success",
+                "sha": resolved_orig_head,
+                "description": f"run={origin_run_id} b={resolved_orig_base[:12]} h={resolved_orig_head[:12]} success",
+            }
+            resolved_orig_reviews = []
 
         target_data = {
             "repository_id": repository_id,
@@ -303,19 +385,33 @@ class MergeQueueFixture:
             "review_contract": review_contract,
         }
         self._write_json(folder / "target.json", target_data)
-        outcome = {
+        reused_from: dict[str, Any] = {
+            "run_id": origin_run_id,
+            "reviews": resolved_orig_reviews,
+            "publication": resolved_orig_pub,
+            "head_sha": resolved_orig_head,
+            "base_sha": resolved_orig_base,
+            "merge_base_sha": resolved_orig_mb,
+            "patch_id": origin_patch_id,
+        }
+        if include_admission:
+            reused_from["admission"] = {"controller_code_head": ctrl, "image_id": admission_image_id}
+        outcome: dict[str, Any] = {
             "run_id": rid,
             "verdict": "PASS",
             "state": "success",
             "target": target_data,
             "reviews": [],
-            "publication": {"state": "success", "sha": head_sha},
-            "admission": {"controller_code_head": ctrl, "image_id": admission_image_id},
-            "reused_from": {
-                "run_id": origin_run_id,
-                "patch_id": origin_patch_id,
-                "admission": {"controller_code_head": ctrl, "image_id": admission_image_id},
+            "publication": {
+                "id": 900_000 + registered_at_ns,
+                "state": "success",
+                "sha": head_sha,
+                "description": (
+                    f"run={rid} b={base_sha[:12]} h={head_sha[:12]} success "
+                    f"reuse={origin_run_id} p={origin_patch_id[7:19]}"
+                ),
             },
+            "reused_from": reused_from,
         }
         self._write_json(folder / "outcome.json", outcome)
         return folder, rid
@@ -810,7 +906,7 @@ def test_git_worktree_source_repo_zero_pollution(mq_fixture: MergeQueueFixture, 
     mq_fixture.write_direct_pass_run(pr_number=2, base_sha=mq_fixture.base_sha, head_sha=pr2_head)
     queue_head = mq_fixture.create_queue_head(base_sha=mq_fixture.base_sha, member_heads=[pr1_head, pr2_head])
 
-    worktree_dir = tmp_path / "linked-wt"
+    worktree_dir = mq_fixture.root / "linked-wt"
     _run_git(mq_fixture.repo, "worktree", "add", "-q", "--detach", str(worktree_dir), mq_fixture.base_sha)
 
     before_objects = _snapshot_objects(mq_fixture.repo / ".git")
@@ -1213,7 +1309,7 @@ def test_filesystem_security_checks_fail_closed(
     )
     outcome_path = folder / "outcome.json"
     if tamper == "symlink_outcome":
-        external = tmp_path / "external_outcome.json"
+        external = mq_fixture.root / "external_outcome.json"
         external.write_text(outcome_path.read_text(encoding="utf-8"), encoding="utf-8")
         outcome_path.unlink()
         outcome_path.symlink_to(external)
@@ -1674,3 +1770,574 @@ def test_symlink_mode_tampering_in_queue_tree_rejected(mq_fixture: MergeQueueFix
     assert decision.status_state == "error"
     assert decision.reason_code == "tree_mismatch"
 
+
+
+# ---------------------------------------------------------------------------
+# 5. Codex R1 全量 10 项 Important + 1 项 Nit 专项离线回归测试
+# ---------------------------------------------------------------------------
+
+
+def test_source_repo_local_merge_config_isolated(mq_fixture: MergeQueueFixture) -> None:
+    """Important 1：源仓 local .git/config（如 merge.default=binary）绝不得影响隔离重放。"""
+    orig_text = (mq_fixture.repo / "shared.txt").read_text(encoding="utf-8")
+    pr1_head = mq_fixture.create_branch_commit(
+        "pr-cfg-1",
+        from_ref=mq_fixture.base_sha,
+        files={"shared.txt": orig_text.replace("line1", "line1-updated")},
+    )
+    pr2_head = mq_fixture.create_branch_commit(
+        "pr-cfg-2",
+        from_ref=mq_fixture.base_sha,
+        files={"shared.txt": orig_text.replace("line8", "line8-updated")},
+    )
+    queue_head = mq_fixture.create_queue_head(
+        base_sha=mq_fixture.base_sha,
+        member_heads=[pr1_head, pr2_head],
+    )
+    target = mq_fixture.make_target(
+        base_sha=mq_fixture.base_sha,
+        head_sha=queue_head,
+        members=[MergeGroupMember(1, pr1_head), MergeGroupMember(2, pr2_head)],
+    )
+
+    baseline = verify_merge_group_tree(target, source_repo=mq_fixture.repo)
+    assert baseline.matched is True
+    assert baseline.reason_code == "tree_matched"
+
+    # 污染源仓 local .git/config：merge.default=binary 与自定义 merge driver
+    _run_git(mq_fixture.repo, "config", "merge.default", "binary")
+    _run_git(mq_fixture.repo, "config", "merge.evil.driver", "false")
+    before_objects = _snapshot_objects(mq_fixture.repo / ".git")
+
+    isolated = verify_merge_group_tree(target, source_repo=mq_fixture.repo)
+    assert isolated.matched is True
+    assert isolated.reason_code == "tree_matched"
+    assert isolated.expected_tree_sha == baseline.expected_tree_sha
+    assert _snapshot_objects(mq_fixture.repo / ".git") == before_objects
+
+    # bare 仓同样兼容且零写入
+    bare_repo = mq_fixture.root / "bare-source.git"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--bare", str(mq_fixture.repo), str(bare_repo)],
+        check=True,
+    )
+    bare_before = _snapshot_objects(bare_repo)
+    bare_res = verify_merge_group_tree(target, source_repo=bare_repo)
+    assert bare_res.matched is True
+    assert bare_res.reason_code == "tree_matched"
+    assert _snapshot_objects(bare_repo) == bare_before
+
+
+def test_member_merge_base_tampered_and_non_unique_rejected(mq_fixture: MergeQueueFixture) -> None:
+    """Important 2：重算 patch_id 前必须核验 (base_sha, head_sha) 的真实唯一 merge-base。"""
+    base1 = mq_fixture.create_branch_commit(
+        "main",
+        from_ref=mq_fixture.base_sha,
+        files={"advance.txt": "step1\n"},
+    )
+    pr1_head = mq_fixture.create_branch_commit(
+        "pr-mb-1",
+        from_ref=base1,
+        files={"mb_feat.py": "OK = 1\n"},
+    )
+    # 篡改 merge_base_sha 指向更早祖先 base0（即便 patch_id 按虚假范围算出匹配也必须拒绝）
+    fake_pid = compute_patch_identity(mq_fixture.repo, mq_fixture.base_sha, pr1_head)
+    mq_fixture.write_direct_pass_run(
+        pr_number=1,
+        base_sha=base1,
+        head_sha=pr1_head,
+        merge_base_sha=mq_fixture.base_sha,
+        patch_id_override=fake_pid,
+    )
+    tampered = verify_member_pass(
+        MergeGroupMember(1, pr1_head),
+        repository_id=REPO_ID,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert tampered.passed is False
+    assert tampered.reason_code == "member_merge_base_mismatch"
+
+    # Criss-cross 双 merge-base（merge-base --all 返回 2 个提交）必须拒绝
+    left = mq_fixture.create_branch_commit("cc-left", from_ref=base1, files={"cc_l.txt": "L\n"})
+    right = mq_fixture.create_branch_commit("cc-right", from_ref=base1, files={"cc_r.txt": "R\n"})
+    merged_q = mq_fixture.create_queue_head(base_sha=left, member_heads=[right], branch_name="cc-tmp")
+    merged_tree = _run_git(mq_fixture.repo, "rev-parse", f"{merged_q}^{{tree}}")
+    x_commit = _run_git(mq_fixture.repo, "commit-tree", merged_tree, "-p", left, "-p", right, "-m", "cc-x")
+    y_commit = _run_git(mq_fixture.repo, "commit-tree", merged_tree, "-p", right, "-p", left, "-m", "cc-y")
+    mq_fixture.write_direct_pass_run(
+        pr_number=2,
+        base_sha=x_commit,
+        head_sha=y_commit,
+        merge_base_sha=left,
+        patch_id_override=compute_patch_identity(mq_fixture.repo, left, y_commit),
+    )
+    criss_cross = verify_member_pass(
+        MergeGroupMember(2, y_commit),
+        repository_id=REPO_ID,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert criss_cross.passed is False
+    assert criss_cross.reason_code == "member_merge_base_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("tamper_case", "expected_code"),
+    [
+        ("missing_launch", "member_launch_invalid"),
+        ("launch_pr_mismatch", "member_launch_invalid"),
+        ("launch_mode_mismatch", "member_launch_invalid"),
+        ("launch_base_sha_mismatch", "member_launch_invalid"),
+        ("launch_id_duplicate", "member_launch_invalid"),
+        ("receipt_launch_id_mismatch", "member_receipt_invalid"),
+        ("receipt_base_sha_mismatch", "member_receipt_invalid"),
+        ("receipt_merge_base_mismatch", "member_receipt_invalid"),
+        ("receipt_controller_mismatch", "member_receipt_invalid"),
+        ("receipt_sandbox_mismatch", "member_receipt_invalid"),
+        ("receipt_exit_code_bool", "member_receipt_invalid"),
+        ("receipt_turn_not_completed", "member_receipt_invalid"),
+        ("receipt_container_id_invalid", "member_receipt_invalid"),
+        ("receipt_before_drift", "member_receipt_invalid"),
+        ("receipt_after_drift", "member_receipt_invalid"),
+        ("receipt_filesystem_missing", "member_receipt_invalid"),
+        ("receipt_session_collision", "member_session_invalid"),
+        ("missing_session_jsonl", "member_session_invalid"),
+        ("session_jsonl_id_mismatch", "member_session_invalid"),
+        ("outcome_run_id_mismatch", "member_outcome_invalid"),
+        ("outcome_target_head_mismatch", "member_outcome_invalid"),
+        ("publication_sha_mismatch", "member_publication_invalid"),
+        ("publication_id_missing", "member_publication_invalid"),
+        ("publication_desc_mismatch", "member_publication_invalid"),
+    ],
+)
+def test_direct_pass_full_evidence_binding_tamper_matrix(
+    mq_fixture: MergeQueueFixture,
+    tamper_case: str,
+    expected_code: str,
+) -> None:
+    """Important 3：直审证据（launch/receipt/session/outcome/publication）全字段强绑定负测。"""
+    pr1_head = mq_fixture.create_branch_commit("pr-bind", from_ref=mq_fixture.base_sha, files={"bind.py": "X = 1\n"})
+    folder, _, _ = mq_fixture.write_direct_pass_run(
+        pr_number=1,
+        base_sha=mq_fixture.base_sha,
+        head_sha=pr1_head,
+    )
+    m0, m1 = DEFAULT_EXPECTED_MODELS[0], DEFAULT_EXPECTED_MODELS[1]
+
+    def mutate_json(path: Path, updater: Any) -> None:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        updater(data)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+
+    if tamper_case == "missing_launch":
+        (folder / m0 / "launch.json").unlink()
+    elif tamper_case == "launch_pr_mismatch":
+        mutate_json(folder / m0 / "launch.json", lambda d: d.__setitem__("pr_number", 999))
+    elif tamper_case == "launch_mode_mismatch":
+        mutate_json(folder / m0 / "launch.json", lambda d: d.__setitem__("mode", "execute"))
+    elif tamper_case == "launch_base_sha_mismatch":
+        mutate_json(folder / m0 / "launch.json", lambda d: d.__setitem__("base_sha", LOW_ENTROPY_SHA_A))
+    elif tamper_case == "launch_id_duplicate":
+        l0 = json.loads((folder / m0 / "launch.json").read_text(encoding="utf-8"))["launch_id"]
+        mutate_json(folder / m1 / "launch.json", lambda d: d.__setitem__("launch_id", l0))
+        mutate_json(folder / m1 / "receipt.json", lambda d: d.__setitem__("launch_id", l0))
+    elif tamper_case == "receipt_launch_id_mismatch":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.__setitem__("launch_id", "wrong-launch"))
+    elif tamper_case == "receipt_base_sha_mismatch":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.__setitem__("base_sha", LOW_ENTROPY_SHA_A))
+    elif tamper_case == "receipt_merge_base_mismatch":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.__setitem__("merge_base_sha", LOW_ENTROPY_SHA_A))
+    elif tamper_case == "receipt_controller_mismatch":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.__setitem__("controller_code_head", LOW_ENTROPY_SHA_A))
+    elif tamper_case == "receipt_sandbox_mismatch":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.__setitem__("sandbox", "host-rw"))
+    elif tamper_case == "receipt_exit_code_bool":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.__setitem__("exit_code", False))
+    elif tamper_case == "receipt_turn_not_completed":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.__setitem__("turn_completed", False))
+    elif tamper_case == "receipt_container_id_invalid":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.__setitem__("container_id", "not-hex"))
+    elif tamper_case == "receipt_before_drift":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d["before"].__setitem__("status", "M bind.py"))
+    elif tamper_case == "receipt_after_drift":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d["after"].__setitem__("branch", "main"))
+    elif tamper_case == "receipt_filesystem_missing":
+        mutate_json(folder / m0 / "receipt.json", lambda d: d.pop("filesystem", None))
+    elif tamper_case == "receipt_session_collision":
+        s0 = json.loads((folder / m0 / "receipt.json").read_text(encoding="utf-8"))["session_id"]
+        mutate_json(folder / m1 / "receipt.json", lambda d: d.__setitem__("session_id", s0))
+        (folder / m1 / "session.jsonl").write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": s0}}) + "\n",
+            encoding="utf-8",
+        )
+        mutate_json(folder / "outcome.json", lambda d: d["reviews"][1].__setitem__("session_id", s0))
+    elif tamper_case == "missing_session_jsonl":
+        (folder / m0 / "session.jsonl").unlink()
+    elif tamper_case == "session_jsonl_id_mismatch":
+        (folder / m0 / "session.jsonl").write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": "other-session"}}) + "\n",
+            encoding="utf-8",
+        )
+    elif tamper_case == "outcome_run_id_mismatch":
+        mutate_json(folder / "outcome.json", lambda d: d.__setitem__("run_id", "other-run"))
+    elif tamper_case == "outcome_target_head_mismatch":
+        mutate_json(folder / "outcome.json", lambda d: d["target"].__setitem__("head_sha", LOW_ENTROPY_SHA_A))
+    elif tamper_case == "publication_sha_mismatch":
+        mutate_json(folder / "outcome.json", lambda d: d["publication"].__setitem__("sha", LOW_ENTROPY_SHA_B))
+    elif tamper_case == "publication_id_missing":
+        mutate_json(folder / "outcome.json", lambda d: d["publication"].pop("id", None))
+    elif tamper_case == "publication_desc_mismatch":
+        mutate_json(folder / "outcome.json", lambda d: d["publication"].__setitem__("description", "forged success"))
+
+    res = verify_member_pass(
+        MergeGroupMember(1, pr1_head),
+        repository_id=REPO_ID,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert res.passed is False
+    assert res.reason_code == expected_code
+
+
+@pytest.mark.parametrize(
+    ("tamper_case", "expected_code"),
+    [
+        ("missing_admission", "member_reuse_admission_missing"),
+        ("wrong_admission_image", "member_image_mismatch"),
+        ("wrong_admission_controller", "member_controller_mismatch"),
+        ("wrong_origin_head_sha", "member_reuse_binding_invalid"),
+        ("wrong_origin_base_sha", "member_reuse_binding_invalid"),
+        ("wrong_origin_merge_base", "member_reuse_binding_invalid"),
+        ("wrong_origin_pub_sha", "member_reuse_binding_invalid"),
+        ("member_pub_missing_reuse_desc", "member_publication_invalid"),
+    ],
+)
+def test_single_hop_reuse_admission_and_source_binding_enforced(
+    mq_fixture: MergeQueueFixture,
+    tamper_case: str,
+    expected_code: str,
+) -> None:
+    """Important 4：1 跳 reused_from 强制校验生产格式 reused_from.admission 与完整来源绑定。"""
+    pr1_v1 = mq_fixture.create_branch_commit("pr-r-v1", from_ref=mq_fixture.base_sha, files={"r.py": "V = 1\n"})
+    _, orig_run_id, orig_patch_id = mq_fixture.write_direct_pass_run(
+        pr_number=1,
+        base_sha=mq_fixture.base_sha,
+        head_sha=pr1_v1,
+        run_id="orig-reuse-1",
+    )
+    base1 = mq_fixture.create_branch_commit("main", from_ref=mq_fixture.base_sha, files={"m2.txt": "adv\n"})
+    pr1_v2 = mq_fixture.create_branch_commit("pr-r-v2", from_ref=base1, files={"r.py": "V = 1\n"})
+    folder, _ = mq_fixture.write_reused_pass_run(
+        pr_number=1,
+        base_sha=base1,
+        head_sha=pr1_v2,
+        origin_run_id=orig_run_id,
+        origin_patch_id=orig_patch_id,
+        run_id="hop1-reuse",
+    )
+    outcome_path = folder / "outcome.json"
+    data = json.loads(outcome_path.read_text(encoding="utf-8"))
+    if tamper_case == "missing_admission":
+        data["reused_from"].pop("admission", None)
+        # 即便顶层放了非生产 admission，也绝不可替代 reused_from.admission
+        data["admission"] = {"controller_code_head": mq_fixture.controller_head, "image_id": IMAGE_ID}
+    elif tamper_case == "wrong_admission_image":
+        data["reused_from"]["admission"]["image_id"] = ALT_IMAGE_ID
+    elif tamper_case == "wrong_admission_controller":
+        data["reused_from"]["admission"]["controller_code_head"] = LOW_ENTROPY_SHA_A
+    elif tamper_case == "wrong_origin_head_sha":
+        data["reused_from"]["head_sha"] = LOW_ENTROPY_SHA_A
+    elif tamper_case == "wrong_origin_base_sha":
+        data["reused_from"]["base_sha"] = LOW_ENTROPY_SHA_A
+    elif tamper_case == "wrong_origin_merge_base":
+        data["reused_from"]["merge_base_sha"] = LOW_ENTROPY_SHA_A
+    elif tamper_case == "wrong_origin_pub_sha":
+        data["reused_from"]["publication"]["sha"] = LOW_ENTROPY_SHA_A
+    elif tamper_case == "member_pub_missing_reuse_desc":
+        data["publication"]["description"] = (
+            f"run=hop1-reuse b={base1[:12]} h={pr1_v2[:12]} success"
+        )
+    outcome_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(outcome_path, 0o600)
+
+    res = verify_member_pass(
+        MergeGroupMember(1, pr1_v2),
+        repository_id=REPO_ID,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert res.passed is False
+    assert res.reason_code == expected_code
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\u0085"])
+def test_unicode_line_separator_block_aligned_with_external_review(
+    mq_fixture: MergeQueueFixture,
+    sep: str,
+) -> None:
+    """Important 5：含 Unicode 行分隔符的 BLOCK 判定与 external_review._message_blocks 逐案一致。"""
+    msg = json.dumps({"status": "completed", "summary": f"VERDICT: BLOCK{sep}follow-up"}, ensure_ascii=False)
+    assert external_review._message_blocks(msg) is True
+    assert mgr._message_blocks(msg) is True
+
+    pr1_head = mq_fixture.create_branch_commit("pr-uni", from_ref=mq_fixture.base_sha, files={"uni.txt": "1\n"})
+    folder, _, _ = mq_fixture.write_direct_pass_run(
+        pr_number=1,
+        base_sha=mq_fixture.base_sha,
+        head_sha=pr1_head,
+    )
+    events_path = folder / DEFAULT_EXPECTED_MODELS[0] / "events.jsonl"
+    events_path.write_text(
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": msg}}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(events_path, 0o600)
+
+    res = verify_member_pass(
+        MergeGroupMember(1, pr1_head),
+        repository_id=REPO_ID,
+        source_repo=mq_fixture.repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert res.passed is False
+    assert res.reason_code == "member_blocked"
+
+
+def test_ancestor_symlink_above_state_root_rejected(mq_fixture: MergeQueueFixture) -> None:
+    """Important 6：state_root 上方祖先路径含软链（root/alias/state）必须拒绝。"""
+    pr1_head = mq_fixture.create_branch_commit("pr-anc", from_ref=mq_fixture.base_sha, files={"anc.txt": "1\n"})
+    mq_fixture.write_direct_pass_run(pr_number=1, base_sha=mq_fixture.base_sha, head_sha=pr1_head)
+
+    alias = mq_fixture.root / "alias"
+    alias.symlink_to(mq_fixture.root, target_is_directory=True)
+    aliased_state = alias / "state"
+    assert not aliased_state.is_symlink()
+    assert aliased_state.is_dir()
+
+    res = verify_member_pass(
+        MergeGroupMember(1, pr1_head),
+        repository_id=REPO_ID,
+        source_repo=mq_fixture.repo,
+        state_root=aliased_state,
+        policy=mq_fixture.policy(),
+    )
+    assert res.passed is False
+    assert res.reason_code == "member_evidence_corrupted"
+
+
+def test_parse_merge_queue_entries_tail_null_commits_and_tail_pagination() -> None:
+    """Important 7：允许目标前缀之后的合法队尾条目 commit 为 null，且前缀已满时不因队尾 hasNextPage 误拒。"""
+    n1 = {
+        "position": 1,
+        "state": "AWAITING_CHECKS",
+        "baseCommit": {"oid": LOW_ENTROPY_SHA_A},
+        "headCommit": {"oid": LOW_ENTROPY_SHA_B},
+        "pullRequest": {"number": 11, "headRefOid": LOW_ENTROPY_SHA_C},
+    }
+    n2_tail_null = {
+        "position": 2,
+        "state": "QUEUED",
+        "baseCommit": None,
+        "headCommit": None,
+        "headRefName": None,
+        "pullRequest": {"number": 12, "headRefOid": "5" * 40},
+    }
+    payload_with_tail = {
+        "databaseId": REPO_ID,
+        "nameWithOwner": REPO_NAME,
+        "mergeQueue": {
+            "entries": {
+                "pageInfo": {"hasNextPage": True},
+                "nodes": [n1, n2_tail_null],
+            }
+        },
+    }
+    target = parse_merge_queue_entries(payload_with_tail, target_head_sha=LOW_ENTROPY_SHA_B)
+    assert [(m.pr_number, m.head_sha) for m in target.members] == [(11, LOW_ENTROPY_SHA_C)]
+
+    # 若空 commit 出现在必需前缀内（position=1 为 null，目标在 position=2），必须拒绝
+    n1_null = {
+        "position": 1,
+        "state": "QUEUED",
+        "baseCommit": None,
+        "headCommit": None,
+        "pullRequest": {"number": 11, "headRefOid": LOW_ENTROPY_SHA_C},
+    }
+    n2_target = {
+        "position": 2,
+        "state": "AWAITING_CHECKS",
+        "baseCommit": {"oid": LOW_ENTROPY_SHA_A},
+        "headCommit": {"oid": LOW_ENTROPY_SHA_B},
+        "pullRequest": {"number": 12, "headRefOid": "5" * 40},
+    }
+    bad_prefix_payload = {
+        "databaseId": REPO_ID,
+        "nameWithOwner": REPO_NAME,
+        "mergeQueue": {"entries": {"nodes": [n1_null, n2_target]}},
+    }
+    with pytest.raises(MergeGroupError, match="baseCommit"):
+        parse_merge_queue_entries(bad_prefix_payload, target_head_sha=LOW_ENTROPY_SHA_B)
+
+
+def test_overlap_query_failure_fails_closed(mq_fixture: MergeQueueFixture) -> None:
+    """Important 8：重叠文件查询失败绝不得静默返回 set()，必须 fail-closed 裁为 overlap_query_failed。"""
+    pr1_head = mq_fixture.create_branch_commit("pr-ovf", from_ref=mq_fixture.base_sha, files={"ovf.txt": "1\n"})
+    mq_fixture.write_direct_pass_run(pr_number=1, base_sha=mq_fixture.base_sha, head_sha=pr1_head)
+    queue_head = mq_fixture.create_queue_head(base_sha=mq_fixture.base_sha, member_heads=[pr1_head])
+    target = mq_fixture.make_target(
+        base_sha=mq_fixture.base_sha,
+        head_sha=queue_head,
+        members=[MergeGroupMember(1, pr1_head)],
+    )
+
+    real_run_git = mgr._run_git
+
+    def fail_overlap_diff(repo: Path, *args: str, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        if args and args[0] == "diff-tree" and "--name-only" in args:
+            return subprocess.CompletedProcess(list(args), 128, b"", b"fatal: object read failed")
+        return real_run_git(repo, *args, **kwargs)
+
+    with patch.object(mgr, "_run_git", fail_overlap_diff):
+        tree_res = verify_merge_group_tree(target, source_repo=mq_fixture.repo)
+        assert tree_res.matched is False
+        assert tree_res.reason_code == "overlap_query_failed"
+
+        decision = evaluate_merge_group(
+            target,
+            source_repo=mq_fixture.repo,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(reject_overlapping_files=True),
+        )
+        assert decision.verdict == "ERROR"
+        assert decision.status_state == "error"
+        assert decision.reason_code == "overlap_query_failed"
+
+
+def test_public_status_description_never_leaks_git_stderr_or_local_paths(
+    mq_fixture: MergeQueueFixture,
+) -> None:
+    """Important 9：远端 GitHub status_description 严禁泄漏 Git stderr、本地路径或异常原文。"""
+    pr1_head = mq_fixture.create_branch_commit("pr-leak", from_ref=mq_fixture.base_sha, files={"leak.txt": "1\n"})
+    mq_fixture.write_direct_pass_run(pr_number=1, base_sha=mq_fixture.base_sha, head_sha=pr1_head)
+    target = mq_fixture.make_target(
+        base_sha=mq_fixture.base_sha,
+        head_sha=pr1_head,
+        members=[MergeGroupMember(1, pr1_head)],
+    )
+
+    real_run_git = mgr._run_git
+
+    def fake_merge_tree_error(repo: Path, *args: str, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        if args and args[0] == "merge-tree":
+            return subprocess.CompletedProcess(
+                list(args),
+                128,
+                b"",
+                b"LOCAL_DIAGNOSTIC_ONLY /private/secret/host/path",
+            )
+        return real_run_git(repo, *args, **kwargs)
+
+    with patch.object(mgr, "_run_git", fake_merge_tree_error):
+        decision = evaluate_merge_group(
+            target,
+            source_repo=mq_fixture.repo,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+    payload = decision.to_status_payload()
+    assert payload["state"] == "error"
+    assert len(payload["description"]) <= MAX_STATUS_DESCRIPTION_LEN
+    assert "LOCAL_DIAGNOSTIC_ONLY" not in payload["description"]
+    assert "/private/secret/host/path" not in payload["description"]
+    assert str(mq_fixture.root) not in payload["description"]
+    assert "merge_failed" in payload["description"]
+
+
+def test_evidence_recursion_error_and_oversized_file_fail_closed(
+    mq_fixture: MergeQueueFixture,
+) -> None:
+    """Important 10：证据解码 RecursionError 与超限文件均不得逃逸，统一转为 member_evidence_corrupted。"""
+    pr1_head = mq_fixture.create_branch_commit("pr-rec", from_ref=mq_fixture.base_sha, files={"rec.txt": "1\n"})
+    mq_fixture.write_direct_pass_run(pr_number=1, base_sha=mq_fixture.base_sha, head_sha=pr1_head)
+    queue_head = mq_fixture.create_queue_head(base_sha=mq_fixture.base_sha, member_heads=[pr1_head])
+    target = mq_fixture.make_target(
+        base_sha=mq_fixture.base_sha,
+        head_sha=queue_head,
+        members=[MergeGroupMember(1, pr1_head)],
+    )
+
+    with patch.object(mgr.json, "loads", side_effect=RecursionError("decoder depth exceeded")):
+        member_res = verify_member_pass(
+            MergeGroupMember(1, pr1_head),
+            repository_id=REPO_ID,
+            source_repo=mq_fixture.repo,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert member_res.passed is False
+        assert member_res.reason_code == "member_evidence_corrupted"
+
+        decision = evaluate_merge_group(
+            target,
+            source_repo=mq_fixture.repo,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert decision.verdict == "ERROR"
+        assert decision.status_state == "error"
+        assert decision.reason_code == "member_evidence_corrupted"
+
+    # 超过 MAX_JSON_EVIDENCE_BYTES 的证据文件必须被拒绝（不加载整文件）
+    with patch.object(mgr, "MAX_JSON_EVIDENCE_BYTES", 64):
+        oversized_res = verify_member_pass(
+            MergeGroupMember(1, pr1_head),
+            repository_id=REPO_ID,
+            source_repo=mq_fixture.repo,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert oversized_res.passed is False
+        assert oversized_res.reason_code == "member_evidence_corrupted"
+
+
+@pytest.mark.parametrize(
+    "bad_branch",
+    [
+        ".hidden",
+        "dir/.hidden",
+        "name.lock",
+        "dir/name.lock",
+        "main.",
+        "dir./branch",
+        "main..dev",
+        "main@{0}",
+        "@",
+        "main~1",
+        "main^2",
+        "a:b",
+        "a?b",
+        "a*b",
+        "a[b",
+        "a\\b",
+        "/main",
+        "main/",
+        "a//b",
+        "main\x01",
+        "main branch",
+    ],
+)
+def test_branch_name_rejects_git_check_ref_format_violations(bad_branch: str) -> None:
+    """Nit：严格按 Git check-ref-format 规则拒绝非法分支名。"""
+    with pytest.raises(MergeGroupError):
+        parse_merge_group_ref(
+            f"gh-readonly-queue/{bad_branch}/pr-1-{LOW_ENTROPY_SHA_A}",
+            expected_base_branch=bad_branch,
+        )

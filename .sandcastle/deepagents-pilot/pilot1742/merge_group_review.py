@@ -3,27 +3,37 @@
 核心不变量（Fail-Closed）：
 1. 队列中每一位成员在自己的 head 上都必须具备经完整复验的正式 PASS 证据（直审或单跳 reused_from）；
 2. 队列批次 head_sha 对应的树必须与「按队列顺序把各成员依次合入 base_sha」产生的树逐字节一致；
-3. 顺序合并重放全程在临时对象目录执行，绝不向 source_repo 写入任何 git 对象、ref、index 或工作树文件；
+3. 所有 Git 查询与顺序合并重放均在独立临时 bare 仓库中执行（通过 alternates 只读挂接源对象库），
+   既不向 source_repo 写入任何对象或引用，也不加载 source_repo 的本地 .git/config；
 4. 任一条件不满足、对象缺失、存在冲突、证据损坏或不可核实，一律返回 verdict="ERROR" / status_state="error"。
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
 import stat
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+_external_review_module: Any = importlib.import_module(".external_review", package=__package__ or "pilot1742")
+_controller_message_blocks: Callable[[str], bool] = _external_review_module._message_blocks
+if not callable(_controller_message_blocks):
+    raise ImportError("pilot1742.external_review._message_blocks 不可调用")
+
 MERGE_GROUP_STATUS_CONTEXT = "deepagents/review"
 DEFAULT_EXPECTED_MODELS: tuple[str, ...] = ("kimi-k3.1-pro", "claude-opus-5-5")
 MAX_STATUS_DESCRIPTION_LEN = 140
+MAX_JSON_EVIDENCE_BYTES = 16 * 1024 * 1024
+MAX_LOG_EVIDENCE_BYTES = 64 * 1024 * 1024
 
 _ALLOWED_QUEUE_ENTRY_STATES: frozenset[str] = frozenset(
     {"QUEUED", "AWAITING_CHECKS", "MERGEABLE", "LOCKED"}
@@ -31,7 +41,11 @@ _ALLOWED_QUEUE_ENTRY_STATES: frozenset[str] = frozenset(
 _COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 _PATCH_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_CONTAINER_ID_RE = re.compile(r"[a-f0-9]{12,64}")
+_SESSION_ID_RE = re.compile(r"[a-zA-Z0-9-]{1,100}")
+_OBJECT_FORMAT_RE = re.compile(r"[a-z0-9]+")
 _BRANCH_RE = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
+_FORBIDDEN_REF_CHARS: frozenset[str] = frozenset("~^:?*[\\")
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 _MODEL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 _MERGE_GROUP_REF_RE = re.compile(
@@ -41,8 +55,46 @@ _MERGE_GROUP_REF_RE = re.compile(
     r"(?P<base_sha>[0-9a-fA-F]{40}|[0-9a-fA-F]{64})"
 )
 _RUN_DIR_PREFIX_RE = re.compile(r"r(?P<repo>[1-9][0-9]*)-p(?P<pr>[1-9][0-9]*)-.*")
-_JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
-_BLOCK_VERDICT_RE = re.compile(r"VERDICT:\s*BLOCK")
+
+_REASON_DESCRIPTIONS: dict[str, str] = {
+    "merge_group_pass_reused": "顺序合并树与成员 PASS 核验通过",
+    "missing_object": "缺少所需提交或树对象",
+    "not_commit": "目标或成员对象非提交",
+    "base_not_ancestor": "base_sha 非 head_sha 祖先",
+    "head_tree_id_mismatch": "head_sha 树哈希与载荷声明不符",
+    "merge_conflict": "顺序合并存在冲突",
+    "merge_failed": "顺序合并重放失败",
+    "overlap_query_failed": "跨成员重叠文件查询失败",
+    "tree_mismatch": "顺序合并结果树与队列头不一致",
+    "overlapping_files_rejected": "策略拒收跨成员重叠文件",
+    "member_missing_pass": "成员缺少有效 PASS 证据",
+    "member_migrated_not_allowed": "禁止沿用 migrated 结论",
+    "member_blocked": "成员存在 BLOCK 阻断证据",
+    "member_unsettled_run": "成员存在未完结审查 run",
+    "member_pass_superseded": "成员旧 PASS 已被更晚登记记录取代",
+    "member_repository_mismatch": "成员仓库身份不匹配",
+    "member_policy_mismatch": "成员审查策略版本不匹配",
+    "member_contract_mismatch": "成员审查合同不匹配",
+    "member_controller_mismatch": "成员控制器代码版本不匹配",
+    "member_image_mismatch": "成员审查镜像与部署策略不匹配",
+    "member_merge_base_mismatch": "成员冻结 merge-base 与仓库历史不符",
+    "member_patch_id_mismatch": "成员补丁身份与现场重算不符",
+    "member_not_published_success": "成员未发布 success 终态",
+    "member_publication_invalid": "成员发布记录绑定校验失败",
+    "member_outcome_invalid": "成员 outcome 身份绑定校验失败",
+    "member_models_mismatch": "成员双审模型集合不匹配",
+    "member_launch_invalid": "成员 launch 证据缺失或绑定不符",
+    "member_missing_receipt": "成员缺少审查回执",
+    "member_receipt_invalid": "成员审查回执绑定或探针校验失败",
+    "member_session_invalid": "成员独立 session 证据缺失或不符",
+    "member_reuse_not_allowed": "策略禁止单跳沿用 PASS",
+    "member_chained_reuse_not_allowed": "禁止多跳或自引用沿用 PASS",
+    "member_reuse_origin_missing": "找不到单跳沿用的原件审查 run",
+    "member_reuse_admission_missing": "单跳沿用缺少部署准入记录",
+    "member_reuse_binding_invalid": "单跳沿用来源绑定校验失败",
+    "member_status_not_success": "成员远端已发布状态非 success",
+    "member_evidence_corrupted": "成员审查证据损坏、越界或权限不安全",
+}
 
 
 class MergeGroupError(ValueError):
@@ -50,7 +102,11 @@ class MergeGroupError(ValueError):
 
 
 class _EvidenceError(Exception):
-    """内部异常：本地审查证据目录、权限、软链或 JSON 内容异常。"""
+    """内部异常：本地审查证据目录、权限、软链、大小或 JSON 内容异常。"""
+
+
+class _GitQueryError(Exception):
+    """内部异常：隔离 bare 仓库初始化或 Git 查询失败。"""
 
 
 def _split_lines_strict(text: str) -> list[str]:
@@ -66,22 +122,12 @@ def _first_line_strict(text: str) -> str:
     return _split_lines_strict(text)[0]
 
 
-def _unwrap_json_fence(text: str) -> str:
-    fenced = _JSON_FENCE_RE.fullmatch(text.strip())
-    return fenced.group(1) if fenced else text
-
-
 def _message_blocks(text: str) -> bool:
-    """判定 agent 最终消息是否为 BLOCK（与 external_review._message_blocks 同口径）。"""
+    """直接复用现役 external_review._message_blocks 判定 BLOCK（异常时 fail-closed 返回 True）。"""
     try:
-        value = json.loads(_unwrap_json_fence(text))
-    except ValueError:
-        return _BLOCK_VERDICT_RE.search(text) is not None
-    if not isinstance(value, dict):
-        return _BLOCK_VERDICT_RE.search(text) is not None
-    summary = value.get("summary")
-    first_line = _first_line_strict(summary) if isinstance(summary, str) else ""
-    return value.get("status") == "blocked" or first_line == "VERDICT: BLOCK"
+        return bool(_controller_message_blocks(text))
+    except (RecursionError, MemoryError, ValueError, TypeError):
+        return True
 
 
 def _parse_positive_int(raw: object, *, field: str) -> int:
@@ -99,11 +145,24 @@ def _parse_commit_sha(raw: object, *, field: str) -> str:
 def _parse_branch_name(raw: object, *, field: str = "base_branch") -> str:
     if not isinstance(raw, str) or not raw or raw != raw.strip():
         raise MergeGroupError(f"{field} 必须是非空分支名且不含前导或尾随空白：{raw!r}")
-    if ".." in raw or not _BRANCH_RE.fullmatch(raw):
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch.isspace() or ch in _FORBIDDEN_REF_CHARS for ch in raw):
+        raise MergeGroupError(f"{field} 含有 Git check-ref-format 禁止的字符：{raw!r}")
+    if (
+        raw == "@"
+        or ".." in raw
+        or "@{" in raw
+        or "//" in raw
+        or raw.startswith("/")
+        or raw.endswith("/")
+        or raw.endswith(".")
+    ):
+        raise MergeGroupError(f"{field} 不符合 Git check-ref-format 规则：{raw!r}")
+    if not _BRANCH_RE.fullmatch(raw):
         raise MergeGroupError(f"{field} 含有非法字符或路径穿越段：{raw!r}")
     segments = raw.split("/")
-    if any(seg in (".", "..") for seg in segments):
-        raise MergeGroupError(f"{field} 不能包含 '.' 或 '..' 路径段：{raw!r}")
+    for seg in segments:
+        if not seg or seg.startswith(".") or seg.endswith(".") or seg.endswith(".lock"):
+            raise MergeGroupError(f"{field} 含非法路径段（以 '.' 开头/结尾或以 '.lock' 结尾）：{raw!r}")
     return raw
 
 
@@ -393,9 +452,7 @@ def _extract_graphql_repo_identity(
     return repo_id, repo_name
 
 
-def _parse_single_queue_entry(raw_entry: object, index: int) -> _ParsedQueueEntry:
-    if not isinstance(raw_entry, Mapping):
-        raise MergeGroupError(f"entries.nodes[{index}] 必须是映射对象")
+def _parse_single_queue_entry(raw_entry: Mapping[str, Any], index: int) -> _ParsedQueueEntry:
     position = _parse_positive_int(raw_entry.get("position"), field=f"entries.nodes[{index}].position")
     state = raw_entry.get("state")
     if not isinstance(state, str) or not state:
@@ -460,7 +517,11 @@ def parse_merge_queue_entries(
     expected_repository_id: int | None = None,
     expected_repository: str | None = None,
 ) -> MergeGroupTarget:
-    """解析 GitHub GraphQL mergeQueue.entries 响应并提取完整连续前缀。"""
+    """两阶段解析 GitHub GraphQL mergeQueue.entries 响应并提取完整连续前缀。
+
+    阶段 1：最小定位目标条目 T（全量校验映射类型、正整数 position 唯一性，仅在 headCommit 非 None 时匹配 oid）；
+    阶段 2：仅对必需前缀 1..T.position 执行严格校验，允许 T 之后尚未生成 commit 的合法队尾条目为 null。
+    """
     target_sha = _parse_commit_sha(target_head_sha, field="target_head_sha")
     base_branch = _parse_branch_name(expected_base_branch, field="expected_base_branch")
     repo_node = _extract_graphql_repository_node(payload)
@@ -503,37 +564,50 @@ def parse_merge_queue_entries(
             raise MergeGroupError("mergeQueue.entries.nodes 为空且 pageInfo.hasNextPage=true，列表被截断")
         raise MergeGroupError("mergeQueue.entries.nodes 为空，找不到目标队列条目")
 
-    parsed_entries: list[_ParsedQueueEntry] = []
-    seen_positions: set[int] = set()
+    # 阶段 1：全量最小定位
+    raw_by_position: dict[int, tuple[int, Mapping[str, Any]]] = {}
+    matched_positions: list[int] = []
     for idx, raw_entry in enumerate(nodes):
-        entry = _parse_single_queue_entry(raw_entry, idx)
-        if entry.position in seen_positions:
-            raise MergeGroupError(f"mergeQueue 存在重复 position={entry.position}")
-        seen_positions.add(entry.position)
-        parsed_entries.append(entry)
+        if not isinstance(raw_entry, Mapping):
+            raise MergeGroupError(f"entries.nodes[{idx}] 必须是映射对象")
+        position = _parse_positive_int(raw_entry.get("position"), field=f"entries.nodes[{idx}].position")
+        if position in raw_by_position:
+            raise MergeGroupError(f"mergeQueue 存在重复 position={position}")
+        raw_by_position[position] = (idx, raw_entry)
 
-    matches = [entry for entry in parsed_entries if entry.head_oid == target_sha]
-    if not matches:
+        head_commit = raw_entry.get("headCommit")
+        if head_commit is not None:
+            if not isinstance(head_commit, Mapping):
+                raise MergeGroupError(f"entries.nodes[{idx}].headCommit 必须是映射对象或 null")
+            raw_head_oid = head_commit.get("oid")
+            if raw_head_oid is not None:
+                head_oid = _parse_commit_sha(raw_head_oid, field=f"entries.nodes[{idx}].headCommit.oid")
+                if head_oid == target_sha:
+                    matched_positions.append(position)
+
+    if not matched_positions:
         if has_next_page:
             raise MergeGroupError(
                 f"未找到 target_head_sha={target_sha} 且 pageInfo.hasNextPage=true，队列列表被截断"
             )
         raise MergeGroupError(f"在 mergeQueue.entries 中未找到 target_head_sha={target_sha}")
-    if len(matches) > 1:
+    if len(matched_positions) > 1:
         raise MergeGroupError(f"在 mergeQueue.entries 中发现多个重复的 target_head_sha={target_sha}")
-    target_entry = matches[0]
+    target_position = matched_positions[0]
 
-    by_position = {entry.position: entry for entry in parsed_entries}
+    # 阶段 2：仅对必需前缀 1..target_position 执行连续性与严格字段校验
     prefix: list[_ParsedQueueEntry] = []
-    for pos in range(1, target_entry.position + 1):
-        entry_at_pos = by_position.get(pos)
-        if entry_at_pos is None:
+    for pos in range(1, target_position + 1):
+        slot = raw_by_position.get(pos)
+        if slot is None:
             truncation_hint = "（pageInfo.hasNextPage=true，疑似分页截断）" if has_next_page else ""
             raise MergeGroupError(
-                f"合并队列前缀不连续：缺少 position={pos}（目标 position={target_entry.position}）{truncation_hint}"
+                f"合并队列前缀不连续：缺少 position={pos}（目标 position={target_position}）{truncation_hint}"
             )
-        prefix.append(entry_at_pos)
+        idx, raw_entry = slot
+        prefix.append(_parse_single_queue_entry(raw_entry, idx))
 
+    target_entry = prefix[-1]
     seen_prs: set[int] = set()
     for entry in prefix:
         if entry.state not in _ALLOWED_QUEUE_ENTRY_STATES:
@@ -582,11 +656,7 @@ def parse_merge_queue_entries(
     )
 
 
-def _git_env(
-    *,
-    object_dir: Path | None = None,
-    alternate_object_dirs: Sequence[str] = (),
-) -> dict[str, str]:
+def _git_env() -> dict[str, str]:
     env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "TMPDIR") if k in os.environ}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
@@ -601,10 +671,6 @@ def _git_env(
         GIT_COMMITTER_EMAIL="merge-group-verifier@invalid.local",
         GIT_COMMITTER_DATE="1700000000 +0000",
     )
-    if object_dir is not None:
-        env["GIT_OBJECT_DIRECTORY"] = str(object_dir)
-    if alternate_object_dirs:
-        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = os.pathsep.join(alternate_object_dirs)
     return env
 
 
@@ -634,12 +700,71 @@ def _run_git(
     )
 
 
-def compute_patch_identity(source_repo: Path, merge_base_sha: str, head_sha: str) -> str:
-    """用 git plumbing 重算补丁身份（与 external_review.patch_identity 逐字节一致）。"""
+def _inspect_source_repo(source_repo: Path) -> tuple[Path, str]:
+    """仅读取源仓 common objects 目录与对象哈希格式，不执行任何合并或 diff 命令。"""
+    env = _git_env()
+    common_proc = _run_git(
+        source_repo,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+        env=env,
+    )
+    if common_proc.returncode != 0:
+        raise _GitQueryError(f"无法解析源仓库 git-common-dir：{source_repo}")
+    common_dir_raw = _first_line_strict(common_proc.stdout.decode("utf-8", errors="replace")).strip()
+    if not common_dir_raw or "\n" in common_dir_raw or "\r" in common_dir_raw:
+        raise _GitQueryError(f"源仓库 git-common-dir 非法：{source_repo}")
+    objects_dir = Path(common_dir_raw) / "objects"
+    if not objects_dir.is_dir():
+        raise _GitQueryError(f"源仓库 objects 目录不存在：{objects_dir}")
+
+    fmt_proc = _run_git(source_repo, "rev-parse", "--show-object-format", env=env)
+    if fmt_proc.returncode != 0:
+        raise _GitQueryError(f"无法解析源仓库 object-format：{source_repo}")
+    obj_format = _first_line_strict(fmt_proc.stdout.decode("utf-8", errors="replace")).strip()
+    if not _OBJECT_FORMAT_RE.fullmatch(obj_format):
+        raise _GitQueryError(f"源仓库 object-format 非法：{obj_format!r}")
+    return objects_dir, obj_format
+
+
+@contextmanager
+def _isolated_replay_repo(source_repo: Path) -> Iterator[Path]:
+    """在临时目录构造独立空 bare 仓，通过 alternates 只读挂接源对象库，彻底隔离源仓 local .git/config。"""
+    source_objects, obj_format = _inspect_source_repo(source_repo)
+    alternates: list[str] = [str(source_objects)]
+    existing_alternates = os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES", "")
+    if existing_alternates:
+        for entry in existing_alternates.split(os.pathsep):
+            if entry and "\n" not in entry and "\r" not in entry and entry not in alternates:
+                alternates.append(entry)
+
+    env = _git_env()
+    with tempfile.TemporaryDirectory(prefix="merge-group-replay-") as tmp_root:
+        replay_repo = Path(tmp_root) / "replay.git"
+        replay_repo.mkdir(mode=0o700)
+        init_proc = _run_git(
+            replay_repo,
+            "init",
+            "--bare",
+            "--quiet",
+            "--template=",
+            f"--object-format={obj_format}",
+            env=env,
+        )
+        if init_proc.returncode != 0:
+            raise _GitQueryError(f"初始化隔离 bare 仓库失败（exit={init_proc.returncode}）")
+        alternates_file = replay_repo / "objects" / "info" / "alternates"
+        alternates_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        alternates_file.write_text("\n".join(alternates) + "\n", encoding="utf-8")
+        yield replay_repo
+
+
+def _compute_patch_identity_in_repo(replay_repo: Path, merge_base_sha: str, head_sha: str) -> str:
     mb = _parse_commit_sha(merge_base_sha, field="merge_base_sha")
     head = _parse_commit_sha(head_sha, field="head_sha")
     proc = _run_git(
-        source_repo,
+        replay_repo,
         "diff-tree",
         "-r",
         "--raw",
@@ -648,11 +773,23 @@ def compute_patch_identity(source_repo: Path, merge_base_sha: str, head_sha: str
         "--no-abbrev",
         mb,
         head,
+        env=_git_env(),
     )
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace").strip()
         raise MergeGroupError(f"无法计算补丁身份（{mb}..{head}）：{stderr}")
     return "sha256:" + hashlib.sha256(proc.stdout).hexdigest()
+
+
+def compute_patch_identity(source_repo: Path, merge_base_sha: str, head_sha: str) -> str:
+    """在隔离 bare 仓中用 git plumbing 重算补丁身份（与 external_review.patch_identity 逐字节一致）。"""
+    mb = _parse_commit_sha(merge_base_sha, field="merge_base_sha")
+    head = _parse_commit_sha(head_sha, field="head_sha")
+    try:
+        with _isolated_replay_repo(source_repo) as replay_repo:
+            return _compute_patch_identity_in_repo(replay_repo, mb, head)
+    except _GitQueryError as exc:
+        raise MergeGroupError(f"无法初始化隔离对象库计算补丁身份：{exc}") from None
 
 
 @dataclass(frozen=True)
@@ -670,21 +807,24 @@ class TreeVerificationResult:
 
 
 def _collect_touched_paths(
-    source_repo: Path,
+    replay_repo: Path,
     current_commit: str,
     member_head_sha: str,
     *,
     env: Mapping[str, str],
 ) -> set[str]:
-    """统计成员相对 merge-base(current_commit, member_head_sha) 改动的文件路径。"""
-    mb_proc = _run_git(source_repo, "merge-base", current_commit, member_head_sha, env=env)
+    """统计成员相对 merge-base(current_commit, member_head_sha) 改动的文件路径；查询失败立即抛错。"""
+    mb_proc = _run_git(replay_repo, "merge-base", current_commit, member_head_sha, env=env)
     if mb_proc.returncode != 0:
-        return set()
+        stderr = mb_proc.stderr.decode("utf-8", errors="replace").strip()
+        raise _GitQueryError(
+            f"重叠文件查询 merge-base 失败（exit={mb_proc.returncode}）：{stderr}"
+        )
     mb_raw = _first_line_strict(mb_proc.stdout.decode("utf-8", errors="replace")).strip()
     if not _COMMIT_SHA_RE.fullmatch(mb_raw):
-        return set()
+        raise _GitQueryError(f"重叠文件查询返回非法 merge-base：{mb_raw!r}")
     diff_proc = _run_git(
-        source_repo,
+        replay_repo,
         "diff-tree",
         "-r",
         "--name-only",
@@ -695,7 +835,10 @@ def _collect_touched_paths(
         env=env,
     )
     if diff_proc.returncode != 0:
-        return set()
+        stderr = diff_proc.stderr.decode("utf-8", errors="replace").strip()
+        raise _GitQueryError(
+            f"重叠文件查询 diff-tree 失败（exit={diff_proc.returncode}）：{stderr}"
+        )
     paths: set[str] = set()
     for raw_path in diff_proc.stdout.split(b"\x00"):
         if raw_path:
@@ -703,42 +846,12 @@ def _collect_touched_paths(
     return paths
 
 
-def _resolve_source_objects_dir(source_repo: Path) -> Path | None:
-    proc = _run_git(source_repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    if proc.returncode != 0:
-        return None
-    common_dir_raw = _first_line_strict(proc.stdout.decode("utf-8", errors="replace")).strip()
-    if not common_dir_raw:
-        return None
-    objects_dir = Path(common_dir_raw) / "objects"
-    if not objects_dir.is_dir():
-        return None
-    return objects_dir
-
-
-def verify_merge_group_tree(
+def _verify_merge_group_tree_in_repo(
     target: MergeGroupTarget,
     *,
-    source_repo: Path,
+    replay_repo: Path,
 ) -> TreeVerificationResult:
-    """在完全只读隔离环境中顺序重放合并，并比对最终树与 head_sha^{tree} 是否逐字节一致。"""
-    if not isinstance(target, MergeGroupTarget):
-        raise MergeGroupError("target 必须是 MergeGroupTarget 实例")
-
-    source_objects = _resolve_source_objects_dir(source_repo)
-    if source_objects is None:
-        return TreeVerificationResult(
-            matched=False,
-            reason_code="merge_failed",
-            detail=f"无法解析源仓库 git common objects 目录：{source_repo}",
-            base_tree_sha=None,
-            actual_tree_sha=None,
-            expected_tree_sha=None,
-            step_trees=(),
-            overlapping_files=(),
-        )
-
-    read_env = _git_env()
+    replay_env = _git_env()
 
     # 1. 验证 base_sha、head_sha 与全部成员 head_sha 均为真实 commit 对象
     required_commits: list[tuple[str, str]] = [
@@ -750,12 +863,12 @@ def verify_merge_group_tree(
     for label, sha in required_commits:
         if sha in checked_shas:
             continue
-        cat_proc = _run_git(source_repo, "cat-file", "-t", sha, env=read_env)
+        cat_proc = _run_git(replay_repo, "cat-file", "-t", sha, env=replay_env)
         if cat_proc.returncode != 0:
             return TreeVerificationResult(
                 matched=False,
                 reason_code="missing_object",
-                detail=f"源仓库缺少对象 {label}={sha}",
+                detail=f"对象库缺少对象 {label}={sha}",
                 base_tree_sha=None,
                 actual_tree_sha=None,
                 expected_tree_sha=None,
@@ -777,7 +890,7 @@ def verify_merge_group_tree(
         checked_shas.add(sha)
 
     # 2. 验证 base_sha 是 head_sha 的祖先
-    anc_proc = _run_git(source_repo, "merge-base", "--is-ancestor", target.base_sha, target.head_sha, env=read_env)
+    anc_proc = _run_git(replay_repo, "merge-base", "--is-ancestor", target.base_sha, target.head_sha, env=replay_env)
     if anc_proc.returncode == 1:
         return TreeVerificationResult(
             matched=False,
@@ -803,8 +916,8 @@ def verify_merge_group_tree(
         )
 
     # 3. 解析 base_tree_sha 与 actual_tree_sha，并校验可选 expected_head_tree_sha
-    base_tree_proc = _run_git(source_repo, "rev-parse", f"{target.base_sha}^{{tree}}", env=read_env)
-    actual_tree_proc = _run_git(source_repo, "rev-parse", f"{target.head_sha}^{{tree}}", env=read_env)
+    base_tree_proc = _run_git(replay_repo, "rev-parse", f"{target.base_sha}^{{tree}}", env=replay_env)
+    actual_tree_proc = _run_git(replay_repo, "rev-parse", f"{target.head_sha}^{{tree}}", env=replay_env)
     if base_tree_proc.returncode != 0 or actual_tree_proc.returncode != 0:
         return TreeVerificationResult(
             matched=False,
@@ -845,124 +958,127 @@ def verify_merge_group_tree(
             overlapping_files=(),
         )
 
-    # 4. 在临时对象库中顺序重放合并（严禁写入 source_repo）
-    alternates: list[str] = [str(source_objects)]
-    existing_alternates = os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES", "")
-    if existing_alternates:
-        for entry in existing_alternates.split(os.pathsep):
-            if entry and entry not in alternates:
-                alternates.append(entry)
-
+    # 4. 在独立 bare 仓中顺序重放合并（零写 source_repo，零读 source_repo/.git/config）
     step_trees: list[tuple[int, str]] = []
     touched_by_path: dict[str, set[int]] = {}
 
     def _current_overlaps() -> tuple[str, ...]:
         return tuple(sorted(path for path, prs in touched_by_path.items() if len(prs) >= 2))
 
-    with tempfile.TemporaryDirectory(prefix="merge-group-objects-") as tmp_root:
-        tmp_objects = Path(tmp_root) / "objects"
-        tmp_objects.mkdir(mode=0o700)
-        isolated_env = _git_env(object_dir=tmp_objects, alternate_object_dirs=alternates)
-        current_commit = target.base_sha
-
-        for idx, member in enumerate(target.members):
-            for touched_path in _collect_touched_paths(
-                source_repo,
-                current_commit,
-                member.head_sha,
-                env=isolated_env,
-            ):
-                touched_by_path.setdefault(touched_path, set()).add(member.pr_number)
-
-            merge_proc = _run_git(
-                source_repo,
-                "merge-tree",
-                "--write-tree",
-                "--no-messages",
-                current_commit,
-                member.head_sha,
-                env=isolated_env,
+    current_commit = target.base_sha
+    for idx, member in enumerate(target.members):
+        merge_proc = _run_git(
+            replay_repo,
+            "merge-tree",
+            "--write-tree",
+            "--no-messages",
+            current_commit,
+            member.head_sha,
+            env=replay_env,
+        )
+        if merge_proc.returncode == 1:
+            return TreeVerificationResult(
+                matched=False,
+                reason_code="merge_conflict",
+                detail=f"按队列顺序合入 PR #{member.pr_number}（{member.head_sha[:12]}）时发生合并冲突",
+                base_tree_sha=base_tree_sha,
+                actual_tree_sha=actual_tree_sha,
+                expected_tree_sha=None,
+                step_trees=tuple(step_trees),
+                overlapping_files=_current_overlaps(),
             )
-            if merge_proc.returncode == 1:
-                return TreeVerificationResult(
-                    matched=False,
-                    reason_code="merge_conflict",
-                    detail=f"按队列顺序合入 PR #{member.pr_number}（{member.head_sha[:12]}）时发生合并冲突",
-                    base_tree_sha=base_tree_sha,
-                    actual_tree_sha=actual_tree_sha,
-                    expected_tree_sha=None,
-                    step_trees=tuple(step_trees),
-                    overlapping_files=_current_overlaps(),
-                )
-            if merge_proc.returncode != 0:
-                stderr = merge_proc.stderr.decode("utf-8", errors="replace").strip()
+        if merge_proc.returncode != 0:
+            stderr = merge_proc.stderr.decode("utf-8", errors="replace").strip()
+            return TreeVerificationResult(
+                matched=False,
+                reason_code="merge_failed",
+                detail=f"合入 PR #{member.pr_number} 时 git merge-tree 失败（exit={merge_proc.returncode}）：{stderr}",
+                base_tree_sha=base_tree_sha,
+                actual_tree_sha=actual_tree_sha,
+                expected_tree_sha=None,
+                step_trees=tuple(step_trees),
+                overlapping_files=_current_overlaps(),
+            )
+
+        step_tree_sha = _first_line_strict(
+            merge_proc.stdout.decode("utf-8", errors="replace")
+        ).strip().lower()
+        if not _COMMIT_SHA_RE.fullmatch(step_tree_sha):
+            return TreeVerificationResult(
+                matched=False,
+                reason_code="merge_failed",
+                detail=f"合入 PR #{member.pr_number} 返回了非法 tree SHA：{step_tree_sha!r}",
+                base_tree_sha=base_tree_sha,
+                actual_tree_sha=actual_tree_sha,
+                expected_tree_sha=None,
+                step_trees=tuple(step_trees),
+                overlapping_files=_current_overlaps(),
+            )
+
+        # merge-tree 成功后统计改动路径；任何查询失败均 fail-closed 报 overlap_query_failed
+        try:
+            touched_paths = _collect_touched_paths(
+                replay_repo,
+                current_commit,
+                member.head_sha,
+                env=replay_env,
+            )
+        except _GitQueryError as exc:
+            return TreeVerificationResult(
+                matched=False,
+                reason_code="overlap_query_failed",
+                detail=f"PR #{member.pr_number} 重叠文件统计失败：{exc}",
+                base_tree_sha=base_tree_sha,
+                actual_tree_sha=actual_tree_sha,
+                expected_tree_sha=None,
+                step_trees=tuple(step_trees),
+                overlapping_files=_current_overlaps(),
+            )
+        for touched_path in touched_paths:
+            touched_by_path.setdefault(touched_path, set()).add(member.pr_number)
+
+        step_trees.append((member.pr_number, step_tree_sha))
+
+        if idx + 1 < len(target.members):
+            commit_proc = _run_git(
+                replay_repo,
+                "commit-tree",
+                step_tree_sha,
+                "-p",
+                current_commit,
+                "-p",
+                member.head_sha,
+                "-m",
+                "merge-group-step",
+                env=replay_env,
+            )
+            if commit_proc.returncode != 0:
+                stderr = commit_proc.stderr.decode("utf-8", errors="replace").strip()
                 return TreeVerificationResult(
                     matched=False,
                     reason_code="merge_failed",
-                    detail=f"合入 PR #{member.pr_number} 时 git merge-tree 失败（exit={merge_proc.returncode}）：{stderr}",
+                    detail=f"创建临时合并提交失败（PR #{member.pr_number}）：{stderr}",
                     base_tree_sha=base_tree_sha,
                     actual_tree_sha=actual_tree_sha,
                     expected_tree_sha=None,
                     step_trees=tuple(step_trees),
                     overlapping_files=_current_overlaps(),
                 )
-
-            step_tree_sha = _first_line_strict(
-                merge_proc.stdout.decode("utf-8", errors="replace")
+            next_commit = _first_line_strict(
+                commit_proc.stdout.decode("utf-8", errors="replace")
             ).strip().lower()
-            if not _COMMIT_SHA_RE.fullmatch(step_tree_sha):
+            if not _COMMIT_SHA_RE.fullmatch(next_commit):
                 return TreeVerificationResult(
                     matched=False,
                     reason_code="merge_failed",
-                    detail=f"合入 PR #{member.pr_number} 返回了非法 tree SHA：{step_tree_sha!r}",
+                    detail=f"git commit-tree 返回非法提交 SHA：{next_commit!r}",
                     base_tree_sha=base_tree_sha,
                     actual_tree_sha=actual_tree_sha,
                     expected_tree_sha=None,
                     step_trees=tuple(step_trees),
                     overlapping_files=_current_overlaps(),
                 )
-            step_trees.append((member.pr_number, step_tree_sha))
-
-            if idx + 1 < len(target.members):
-                commit_proc = _run_git(
-                    source_repo,
-                    "commit-tree",
-                    step_tree_sha,
-                    "-p",
-                    current_commit,
-                    "-p",
-                    member.head_sha,
-                    "-m",
-                    "merge-group-step",
-                    env=isolated_env,
-                )
-                if commit_proc.returncode != 0:
-                    stderr = commit_proc.stderr.decode("utf-8", errors="replace").strip()
-                    return TreeVerificationResult(
-                        matched=False,
-                        reason_code="merge_failed",
-                        detail=f"创建临时合并提交失败（PR #{member.pr_number}）：{stderr}",
-                        base_tree_sha=base_tree_sha,
-                        actual_tree_sha=actual_tree_sha,
-                        expected_tree_sha=None,
-                        step_trees=tuple(step_trees),
-                        overlapping_files=_current_overlaps(),
-                    )
-                next_commit = _first_line_strict(
-                    commit_proc.stdout.decode("utf-8", errors="replace")
-                ).strip().lower()
-                if not _COMMIT_SHA_RE.fullmatch(next_commit):
-                    return TreeVerificationResult(
-                        matched=False,
-                        reason_code="merge_failed",
-                        detail=f"git commit-tree 返回非法提交 SHA：{next_commit!r}",
-                        base_tree_sha=base_tree_sha,
-                        actual_tree_sha=actual_tree_sha,
-                        expected_tree_sha=None,
-                        step_trees=tuple(step_trees),
-                        overlapping_files=_current_overlaps(),
-                    )
-                current_commit = next_commit
+            current_commit = next_commit
 
     expected_tree_sha = step_trees[-1][1]
     overlaps = _current_overlaps()
@@ -990,6 +1106,30 @@ def verify_merge_group_tree(
         step_trees=tuple(step_trees),
         overlapping_files=overlaps,
     )
+
+
+def verify_merge_group_tree(
+    target: MergeGroupTarget,
+    *,
+    source_repo: Path,
+) -> TreeVerificationResult:
+    """在独立临时 bare 仓中顺序重放合并，并比对最终树与 head_sha^{tree} 是否逐字节一致。"""
+    if not isinstance(target, MergeGroupTarget):
+        raise MergeGroupError("target 必须是 MergeGroupTarget 实例")
+    try:
+        with _isolated_replay_repo(source_repo) as replay_repo:
+            return _verify_merge_group_tree_in_repo(target, replay_repo=replay_repo)
+    except _GitQueryError as exc:
+        return TreeVerificationResult(
+            matched=False,
+            reason_code="merge_failed",
+            detail=str(exc),
+            base_tree_sha=None,
+            actual_tree_sha=None,
+            expected_tree_sha=None,
+            step_trees=(),
+            overlapping_files=(),
+        )
 
 
 @dataclass(frozen=True)
@@ -1066,7 +1206,23 @@ class MemberPassVerification:
     proof: MemberPassProof | None = None
 
 
+def _check_no_ancestor_symlinks(path: Path) -> None:
+    """核验路径自身及直至根目录的全部祖先组件不含任何符号链接（对齐 external_review.py:147,174）。"""
+    try:
+        abs_path = path.absolute()
+        for ancestor in (abs_path, *abs_path.parents):
+            if ancestor.is_symlink():
+                raise _EvidenceError(f"路径或其祖先含符号链接：{path}")
+        if path.is_symlink() or abs_path.resolve() != abs_path:
+            raise _EvidenceError(f"路径解析经过符号链接：{path}")
+    except _EvidenceError:
+        raise
+    except OSError as exc:
+        raise _EvidenceError(f"无法核验路径祖先：{path}（{exc}）") from None
+
+
 def _check_safe_directory(path: Path, *, check_ownership: bool) -> None:
+    _check_no_ancestor_symlinks(path)
     try:
         info = os.lstat(path)
     except OSError as exc:
@@ -1078,8 +1234,9 @@ def _check_safe_directory(path: Path, *, check_ownership: bool) -> None:
 
 
 def _check_safe_path_chain(root: Path, target_path: Path, *, check_ownership: bool) -> None:
-    """从 root 到 target_path.parent 逐级检查非符号链接与目录权限/属主。"""
+    """检查 root 完整祖先无软链，并从 root 到 target_path.parent 逐级检查非符号链接与目录权限/属主。"""
     _check_safe_directory(root, check_ownership=check_ownership)
+    _check_no_ancestor_symlinks(target_path.parent)
     try:
         rel = target_path.relative_to(root)
     except ValueError:
@@ -1090,8 +1247,15 @@ def _check_safe_path_chain(root: Path, target_path: Path, *, check_ownership: bo
         _check_safe_directory(cursor, check_ownership=check_ownership)
 
 
-def _safe_read_text(root: Path, path: Path, *, check_ownership: bool) -> str:
+def _safe_read_bytes(
+    root: Path,
+    path: Path,
+    *,
+    check_ownership: bool,
+    max_bytes: int,
+) -> bytes:
     _check_safe_path_chain(root, path, check_ownership=check_ownership)
+    _check_no_ancestor_symlinks(path)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
@@ -1104,14 +1268,19 @@ def _safe_read_text(root: Path, path: Path, *, check_ownership: bool) -> str:
             raise _EvidenceError(f"证据文件不是常规文件：{path}")
         if check_ownership and (info.st_uid != os.getuid() or bool(info.st_mode & 0o022)):
             raise _EvidenceError(f"证据文件属主或权限不安全：{path}")
-        stream = os.fdopen(fd, "r", encoding="utf-8")
+        if info.st_size > max_bytes:
+            raise _EvidenceError(f"证据文件超过大小上限（{info.st_size} > {max_bytes}）：{path}")
+        stream = os.fdopen(fd, "rb")
         owned_fd = None
         with stream:
-            return stream.read()
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise _EvidenceError(f"证据文件读取字节超过上限（>{max_bytes}）：{path}")
+        return data
     except _EvidenceError:
         raise
-    except (OSError, UnicodeDecodeError) as exc:
-        raise _EvidenceError(f"读取证据文本失败：{path}（{exc}）") from None
+    except (OSError, MemoryError) as exc:
+        raise _EvidenceError(f"读取证据文件失败：{path}（{exc}）") from None
     finally:
         if owned_fd is not None:
             try:
@@ -1120,12 +1289,78 @@ def _safe_read_text(root: Path, path: Path, *, check_ownership: bool) -> str:
                 pass
 
 
-def _safe_read_json_dict(root: Path, path: Path, *, check_ownership: bool) -> dict[str, Any]:
-    raw_text = _safe_read_text(root, path, check_ownership=check_ownership)
+def _safe_read_text(
+    root: Path,
+    path: Path,
+    *,
+    check_ownership: bool,
+    max_bytes: int | None = None,
+) -> str:
+    limit = MAX_JSON_EVIDENCE_BYTES if max_bytes is None else max_bytes
+    raw = _safe_read_bytes(root, path, check_ownership=check_ownership, max_bytes=limit)
+    try:
+        return raw.decode("utf-8")
+    except (UnicodeDecodeError, MemoryError) as exc:
+        raise _EvidenceError(f"证据文本 UTF-8 解码失败：{path}（{exc}）") from None
+
+
+def _safe_read_first_line(
+    root: Path,
+    path: Path,
+    *,
+    check_ownership: bool,
+    max_file_bytes: int | None = None,
+    max_line_bytes: int | None = None,
+) -> str:
+    file_limit = MAX_LOG_EVIDENCE_BYTES if max_file_bytes is None else max_file_bytes
+    line_limit = MAX_JSON_EVIDENCE_BYTES if max_line_bytes is None else max_line_bytes
+    _check_safe_path_chain(root, path, check_ownership=check_ownership)
+    _check_no_ancestor_symlinks(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise _EvidenceError(f"无法安全打开日志文件（可能为符号链接或不可读）：{path}（{exc}）") from None
+    owned_fd: int | None = fd
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise _EvidenceError(f"日志文件不是常规文件：{path}")
+        if check_ownership and (info.st_uid != os.getuid() or bool(info.st_mode & 0o022)):
+            raise _EvidenceError(f"日志文件属主或权限不安全：{path}")
+        if info.st_size > file_limit:
+            raise _EvidenceError(f"日志文件超过大小上限（{info.st_size} > {file_limit}）：{path}")
+        stream = os.fdopen(fd, "rb")
+        owned_fd = None
+        with stream:
+            raw_line = stream.readline(line_limit + 1)
+        if len(raw_line) > line_limit:
+            raise _EvidenceError(f"日志首行超过大小上限（>{line_limit}）：{path}")
+        return raw_line.decode("utf-8").rstrip("\r\n")
+    except _EvidenceError:
+        raise
+    except (OSError, UnicodeDecodeError, MemoryError) as exc:
+        raise _EvidenceError(f"读取日志首行失败：{path}（{exc}）") from None
+    finally:
+        if owned_fd is not None:
+            try:
+                os.close(owned_fd)
+            except OSError:
+                pass
+
+
+def _safe_read_json_dict(
+    root: Path,
+    path: Path,
+    *,
+    check_ownership: bool,
+    max_bytes: int | None = None,
+) -> dict[str, Any]:
+    raw_text = _safe_read_text(root, path, check_ownership=check_ownership, max_bytes=max_bytes)
     try:
         parsed = json.loads(raw_text)
-    except ValueError as exc:
-        raise _EvidenceError(f"证据 JSON 损坏：{path}（{exc}）") from None
+    except (ValueError, TypeError, RecursionError, MemoryError) as exc:
+        raise _EvidenceError(f"证据 JSON 损坏或解码超限：{path}（{type(exc).__name__}）") from None
     if not isinstance(parsed, dict):
         raise _EvidenceError(f"证据 JSON 顶层不是对象：{path}")
     return parsed
@@ -1134,8 +1369,9 @@ def _safe_read_json_dict(root: Path, path: Path, *, check_ownership: bool) -> di
 @dataclass(frozen=True)
 class _WorkerEvidence:
     model: str
-    has_launch: bool
+    launch: dict[str, Any] | None
     receipt: dict[str, Any] | None
+    session_first_line: str | None
     events_text: str | None
 
 
@@ -1145,6 +1381,7 @@ class _RunRecord:
     run_id: str
     repository_id: int
     pr_number: int
+    base_sha: str
     head_sha: str
     merge_base_sha: str
     registered_at_ns: int
@@ -1174,6 +1411,7 @@ def _load_run_record(
     try:
         repo_id = _parse_positive_int(target_data.get("repository_id"), field="target.repository_id")
         pr_number = _parse_positive_int(target_data.get("pr_number"), field="target.pr_number")
+        base_sha = _parse_commit_sha(target_data.get("base_sha"), field="target.base_sha")
         head_sha = _parse_commit_sha(target_data.get("head_sha"), field="target.head_sha")
         merge_base_sha = _parse_commit_sha(target_data.get("merge_base_sha"), field="target.merge_base_sha")
     except MergeGroupError as exc:
@@ -1216,21 +1454,35 @@ def _load_run_record(
         worker_dir = folder / model
         _check_safe_directory(worker_dir, check_ownership=check_ownership)
         launch_path = worker_dir / "launch.json"
-        has_launch = os.path.lexists(launch_path)
-        if has_launch:
-            _safe_read_json_dict(state_root, launch_path, check_ownership=check_ownership)
+        launch_data: dict[str, Any] | None = None
+        if os.path.lexists(launch_path):
+            launch_data = _safe_read_json_dict(state_root, launch_path, check_ownership=check_ownership)
         receipt_path = worker_dir / "receipt.json"
         receipt_data: dict[str, Any] | None = None
         if os.path.lexists(receipt_path):
             receipt_data = _safe_read_json_dict(state_root, receipt_path, check_ownership=check_ownership)
+        session_path = worker_dir / "session.jsonl"
+        session_first_line: str | None = None
+        if os.path.lexists(session_path):
+            session_first_line = _safe_read_first_line(
+                state_root,
+                session_path,
+                check_ownership=check_ownership,
+            )
         events_path = worker_dir / "events.jsonl"
         events_text: str | None = None
         if os.path.lexists(events_path):
-            events_text = _safe_read_text(state_root, events_path, check_ownership=check_ownership)
+            events_text = _safe_read_text(
+                state_root,
+                events_path,
+                check_ownership=check_ownership,
+                max_bytes=MAX_LOG_EVIDENCE_BYTES,
+            )
         workers[model] = _WorkerEvidence(
             model=model,
-            has_launch=has_launch,
+            launch=launch_data,
             receipt=receipt_data,
+            session_first_line=session_first_line,
             events_text=events_text,
         )
 
@@ -1239,6 +1491,7 @@ def _load_run_record(
         run_id=raw_run_id,
         repository_id=repo_id,
         pr_number=pr_number,
+        base_sha=base_sha,
         head_sha=head_sha,
         merge_base_sha=merge_base_sha,
         registered_at_ns=registered_at_ns,
@@ -1290,7 +1543,6 @@ def _scan_pr_runs(
                 )
             matched_runs.append(record)
         else:
-            # 非标准命名目录：按 fail-closed 尝试核验；如非目录/软链/损坏直接报错
             record = _load_run_record(
                 state_root,
                 child,
@@ -1305,7 +1557,7 @@ def _scan_pr_runs(
 def _run_is_settled(run: _RunRecord) -> bool:
     if run.outcome is None:
         return False
-    return not any(worker.has_launch and worker.receipt is None for worker in run.workers.values())
+    return not any(worker.launch is not None and worker.receipt is None for worker in run.workers.values())
 
 
 def _run_has_block(run: _RunRecord) -> bool:
@@ -1327,11 +1579,18 @@ def _run_has_block(run: _RunRecord) -> bool:
                 if result.get("status") == "blocked":
                     return True
                 summary = result.get("summary")
-                if isinstance(summary, str) and (
-                    _first_line_strict(summary) == "VERDICT: BLOCK"
-                    or summary.startswith("VERDICT: BLOCK")
-                ):
-                    return True
+                if isinstance(summary, str):
+                    if summary.startswith("VERDICT: BLOCK"):
+                        return True
+                    try:
+                        payload_json = json.dumps(
+                            {"status": result.get("status"), "summary": summary},
+                            ensure_ascii=False,
+                        )
+                    except (TypeError, ValueError, RecursionError, MemoryError):
+                        return True
+                    if _message_blocks(payload_json):
+                        return True
         if worker.events_text is not None:
             final_text: str | None = None
             for line in _split_lines_strict(worker.events_text):
@@ -1339,7 +1598,7 @@ def _run_has_block(run: _RunRecord) -> bool:
                     continue
                 try:
                     event = json.loads(line)
-                except ValueError:
+                except (ValueError, TypeError, RecursionError, MemoryError):
                     return True
                 if not isinstance(event, dict):
                     return True
@@ -1358,11 +1617,136 @@ def _run_has_block(run: _RunRecord) -> bool:
     return False
 
 
-def _try_compute_patch_id(source_repo: Path, run: _RunRecord) -> str | None:
+@dataclass(frozen=True)
+class _PatchIdentityCheck:
+    ok: bool
+    patch_id: str | None
+    reason_code: str
+    detail: str
+
+
+def _verify_and_compute_patch_id(replay_repo: Path, run: _RunRecord) -> _PatchIdentityCheck:
+    """先验证 (base_sha, head_sha) 的真实唯一 merge-base == run.merge_base_sha，再重算 patch_id。"""
+    mb_proc = _run_git(
+        replay_repo,
+        "merge-base",
+        "--all",
+        run.base_sha,
+        run.head_sha,
+        env=_git_env(),
+    )
+    if mb_proc.returncode != 0:
+        return _PatchIdentityCheck(
+            ok=False,
+            patch_id=None,
+            reason_code="member_merge_base_mismatch",
+            detail=f"run {run.run_id} 无法计算真实 merge-base",
+        )
+    bases = [
+        line.strip().lower()
+        for line in _split_lines_strict(mb_proc.stdout.decode("utf-8", errors="replace"))
+        if line.strip()
+    ]
+    if len(bases) != 1 or not _COMMIT_SHA_RE.fullmatch(bases[0]) or bases[0] != run.merge_base_sha:
+        return _PatchIdentityCheck(
+            ok=False,
+            patch_id=None,
+            reason_code="member_merge_base_mismatch",
+            detail=f"run {run.run_id} 冻结 merge_base_sha 与仓库真实唯一 merge-base 不一致",
+        )
     try:
-        return compute_patch_identity(source_repo, run.merge_base_sha, run.head_sha)
+        computed = _compute_patch_identity_in_repo(replay_repo, run.merge_base_sha, run.head_sha)
     except MergeGroupError:
-        return None
+        return _PatchIdentityCheck(
+            ok=False,
+            patch_id=None,
+            reason_code="member_patch_id_mismatch",
+            detail=f"run {run.run_id} 无法重算 patch_id",
+        )
+    return _PatchIdentityCheck(ok=True, patch_id=computed, reason_code="ok", detail="")
+
+
+def _verify_outcome_target_binding(
+    run: _RunRecord,
+    outcome: dict[str, Any],
+    *,
+    policy: MergeGroupPolicy,
+    expected_patch_id: str,
+) -> tuple[str, str] | None:
+    if outcome.get("run_id") != run.run_id:
+        return ("member_outcome_invalid", f"run {run.run_id} outcome.run_id 与 target.run_id 不一致")
+    outcome_target = outcome.get("target")
+    if not isinstance(outcome_target, dict):
+        return ("member_outcome_invalid", f"run {run.run_id} outcome.target 缺失或不是对象")
+    if (
+        type(outcome_target.get("pr_number")) is not int
+        or outcome_target.get("pr_number") != run.pr_number
+        or type(outcome_target.get("repository_id")) is not int
+        or outcome_target.get("repository_id") != run.repository_id
+    ):
+        return ("member_outcome_invalid", f"run {run.run_id} outcome.target 仓库或 PR 编号不匹配")
+    expected_str_fields: dict[str, str] = {
+        "run_id": run.run_id,
+        "head_sha": run.head_sha,
+        "base_sha": run.base_sha,
+        "merge_base_sha": run.merge_base_sha,
+        "policy_version": policy.policy_version,
+        "review_contract": policy.review_contract,
+        "controller_code_head": policy.controller_code_head,
+        "patch_id": expected_patch_id,
+    }
+    for key, expected_val in expected_str_fields.items():
+        actual_val = outcome_target.get(key)
+        target_val = run.target.get(key)
+        if key in ("head_sha", "base_sha", "merge_base_sha", "controller_code_head"):
+            if (
+                not isinstance(actual_val, str)
+                or actual_val.lower() != expected_val
+                or not isinstance(target_val, str)
+                or target_val.lower() != expected_val
+            ):
+                return (
+                    "member_outcome_invalid",
+                    f"run {run.run_id} outcome.target.{key} 与 target.json 不一致",
+                )
+        else:
+            if actual_val != expected_val or target_val != expected_val:
+                return (
+                    "member_outcome_invalid",
+                    f"run {run.run_id} outcome.target.{key} 与 target.json 不一致",
+                )
+    return None
+
+
+def _verify_publication_binding(
+    run: _RunRecord,
+    publication: object,
+    *,
+    patch_id: str,
+    reuse_origin_run_id: str | None,
+) -> tuple[str, str] | None:
+    if not isinstance(publication, dict) or publication.get("state") != "success":
+        return ("member_not_published_success", f"run {run.run_id} 未发布 success")
+    pub_sha = publication.get("sha")
+    if not isinstance(pub_sha, str) or pub_sha.lower() != run.head_sha:
+        return ("member_publication_invalid", f"run {run.run_id} publication.sha 与 head_sha 不一致")
+    pub_id = publication.get("id")
+    valid_id = (type(pub_id) is int and pub_id > 0) or (
+        isinstance(pub_id, str) and bool(pub_id.strip())
+    )
+    if not valid_id:
+        return ("member_publication_invalid", f"run {run.run_id} publication.id 缺失或非法")
+    pub_desc = publication.get("description")
+    if not isinstance(pub_desc, str) or not pub_desc.strip():
+        return ("member_publication_invalid", f"run {run.run_id} publication.description 缺失或为空")
+    expected_desc_token = f"run={run.run_id} b={run.base_sha[:12]} h={run.head_sha[:12]} success"
+    if expected_desc_token not in pub_desc:
+        return ("member_publication_invalid", f"run {run.run_id} publication.description 缺少 run/base/head 绑定")
+    if reuse_origin_run_id is not None:
+        expected_reuse_token = f"reuse={reuse_origin_run_id} p={patch_id[7:19]}"
+        if expected_reuse_token not in pub_desc:
+            return ("member_publication_invalid", f"run {run.run_id} publication.description 缺少 reuse/patch 绑定")
+    return None
 
 
 def _verify_direct_pass_run(
@@ -1370,96 +1754,203 @@ def _verify_direct_pass_run(
     *,
     repository_id: int,
     policy: MergeGroupPolicy,
-    source_repo: Path,
-) -> tuple[str, str, str] | None:
-    """校验单条真实双审 PASS run。成功返回 None，失败返回 (reason_code, detail, '')。"""
+    replay_repo: Path,
+) -> tuple[str, str] | None:
+    """校验单条真实双审 PASS run。成功返回 None，失败返回 (reason_code, detail)。"""
     if run.repository_id != repository_id:
-        return ("member_repository_mismatch", f"run {run.run_id} repository_id 不匹配", "")
+        return ("member_repository_mismatch", f"run {run.run_id} repository_id 不匹配")
     if run.target.get("policy_version") != policy.policy_version:
         return (
             "member_policy_mismatch",
             f"run {run.run_id} policy_version 不匹配：{run.target.get('policy_version')!r}",
-            "",
         )
     if run.target.get("review_contract") != policy.review_contract:
-        return ("member_contract_mismatch", f"run {run.run_id} review_contract 不匹配", "")
-    if run.target.get("controller_code_head") != policy.controller_code_head:
-        return (
-            "member_controller_mismatch",
-            f"run {run.run_id} controller_code_head 不匹配",
-            "",
-        )
+        return ("member_contract_mismatch", f"run {run.run_id} review_contract 不匹配")
+    target_ctrl = run.target.get("controller_code_head")
+    if not isinstance(target_ctrl, str) or target_ctrl.lower() != policy.controller_code_head:
+        return ("member_controller_mismatch", f"run {run.run_id} controller_code_head 不匹配")
 
     outcome = run.outcome
     if outcome is None:
-        return ("member_unsettled_run", f"run {run.run_id} 缺少 outcome.json", "")
+        return ("member_unsettled_run", f"run {run.run_id} 缺少 outcome.json")
     if "migrated" in outcome:
-        return ("member_migrated_not_allowed", f"run {run.run_id} 为 migrated 结论，禁止沿用", "")
+        return ("member_migrated_not_allowed", f"run {run.run_id} 为 migrated 结论，禁止沿用")
     if "reused_from" in outcome:
-        return ("member_chained_reuse_not_allowed", f"原件 run {run.run_id} 本身含 reused_from，禁止多跳沿用", "")
+        return ("member_chained_reuse_not_allowed", f"原件 run {run.run_id} 本身含 reused_from，禁止多跳沿用")
     if outcome.get("verdict") != "PASS" or outcome.get("state") != "success":
-        return (
-            "member_not_published_success",
-            f"run {run.run_id} verdict/state 非 PASS/success",
-            "",
-        )
-    publication = outcome.get("publication")
-    if not isinstance(publication, dict) or publication.get("state") != "success":
-        return ("member_not_published_success", f"run {run.run_id} 未发布 success", "")
+        return ("member_not_published_success", f"run {run.run_id} verdict/state 非 PASS/success")
+
+    recorded_patch_id = run.target.get("patch_id")
+    if not isinstance(recorded_patch_id, str) or not _PATCH_ID_RE.fullmatch(recorded_patch_id):
+        return ("member_patch_id_mismatch", f"run {run.run_id} target.patch_id 缺失或格式非法")
+
+    outcome_err = _verify_outcome_target_binding(
+        run,
+        outcome,
+        policy=policy,
+        expected_patch_id=recorded_patch_id,
+    )
+    if outcome_err is not None:
+        return outcome_err
+
+    pub_err = _verify_publication_binding(
+        run,
+        outcome.get("publication"),
+        patch_id=recorded_patch_id,
+        reuse_origin_run_id=None,
+    )
+    if pub_err is not None:
+        return pub_err
 
     reviews = outcome.get("reviews")
     if not isinstance(reviews, list) or len(reviews) != len(policy.expected_models):
-        return ("member_models_mismatch", f"run {run.run_id} reviews 数量与期望模型不符", "")
-    seen_review_models: set[str] = set()
+        return ("member_models_mismatch", f"run {run.run_id} reviews 数量与期望模型不符")
+    review_by_model: dict[str, dict[str, Any]] = {}
     for review in reviews:
         if not isinstance(review, dict):
-            return ("member_models_mismatch", f"run {run.run_id} reviews 含非法条目", "")
+            return ("member_models_mismatch", f"run {run.run_id} reviews 含非法条目")
         model = review.get("model")
         verdict = review.get("verdict")
-        if not isinstance(model, str) or model in seen_review_models or verdict != "PASS":
+        if not isinstance(model, str) or model in review_by_model or verdict != "PASS":
             return (
                 "member_models_mismatch",
                 f"run {run.run_id} 模型评审条目非法或非 PASS：{model!r}={verdict!r}",
-                "",
             )
-        seen_review_models.add(model)
-    if seen_review_models != set(policy.expected_models):
-        return ("member_models_mismatch", f"run {run.run_id} 未精确覆盖期望双审模型", "")
+        review_by_model[model] = review
+    if set(review_by_model) != set(policy.expected_models):
+        return ("member_models_mismatch", f"run {run.run_id} 未精确覆盖期望双审模型")
 
+    seen_launch_ids: set[str] = set()
+    seen_session_ids: set[str] = set()
     for model in policy.expected_models:
         worker = run.workers.get(model)
-        if worker is None or worker.receipt is None:
-            return ("member_missing_receipt", f"run {run.run_id} 缺少模型 {model} 的 receipt.json", "")
+        if worker is None or worker.launch is None:
+            return ("member_launch_invalid", f"run {run.run_id} 缺少模型 {model} 的 launch.json")
+        launch = worker.launch
+        launch_id = launch.get("launch_id")
+        if (
+            not isinstance(launch_id, str)
+            or not launch_id
+            or launch_id != launch_id.strip()
+            or launch_id in seen_launch_ids
+        ):
+            return ("member_launch_invalid", f"run {run.run_id} 模型 {model} launch_id 缺失、非法或重复")
+        if (
+            launch.get("run_id") != run.run_id
+            or type(launch.get("pr_number")) is not int
+            or launch.get("pr_number") != run.pr_number
+            or launch.get("model") != model
+            or not isinstance(launch.get("head_sha"), str)
+            or launch["head_sha"].lower() != run.head_sha
+            or not isinstance(launch.get("base_sha"), str)
+            or launch["base_sha"].lower() != run.base_sha
+            or not isinstance(launch.get("merge_base_sha"), str)
+            or launch["merge_base_sha"].lower() != run.merge_base_sha
+            or not isinstance(launch.get("controller_code_head"), str)
+            or launch["controller_code_head"].lower() != policy.controller_code_head
+            or launch.get("mode") != "review"
+        ):
+            return ("member_launch_invalid", f"run {run.run_id} 模型 {model} launch.json 身份绑定不符")
+        seen_launch_ids.add(launch_id)
+
+        if worker.receipt is None:
+            return ("member_missing_receipt", f"run {run.run_id} 缺少模型 {model} 的 receipt.json")
         receipt = worker.receipt
-        if receipt.get("status") != "completed" or receipt.get("mode") != "review":
-            return (
-                "member_receipt_invalid",
-                f"run {run.run_id} 模型 {model} 回执 status/mode 不符",
-                "",
-            )
-        if "model" in receipt and receipt.get("model") != model:
-            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执 model 字段不符", "")
-        if "run_id" in receipt and receipt.get("run_id") != run.run_id:
-            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执 run_id 不符", "")
-        if "head_sha" in receipt and str(receipt.get("head_sha", "")).lower() != run.head_sha:
-            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执 head_sha 不符", "")
         if receipt.get("image_id") != policy.deployment_image_id:
             return (
                 "member_image_mismatch",
                 f"run {run.run_id} 模型 {model} 镜像 ID 与部署策略不符",
-                "",
             )
+        if (
+            receipt.get("run_id") != run.run_id
+            or receipt.get("launch_id") != launch_id
+            or receipt.get("model") != model
+            or not isinstance(receipt.get("head_sha"), str)
+            or receipt["head_sha"].lower() != run.head_sha
+            or not isinstance(receipt.get("base_sha"), str)
+            or receipt["base_sha"].lower() != run.base_sha
+            or not isinstance(receipt.get("merge_base_sha"), str)
+            or receipt["merge_base_sha"].lower() != run.merge_base_sha
+            or not isinstance(receipt.get("controller_code_head"), str)
+            or receipt["controller_code_head"].lower() != policy.controller_code_head
+            or receipt.get("status") != "completed"
+            or receipt.get("mode") != "review"
+            or receipt.get("sandbox") != "docker-read-only"
+            or type(receipt.get("exit_code")) is not int
+            or receipt.get("exit_code") != 0
+            or receipt.get("turn_completed") is not True
+        ):
+            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执绑定或状态不符")
 
-    recorded_patch_id = run.target.get("patch_id")
-    if not isinstance(recorded_patch_id, str) or not _PATCH_ID_RE.fullmatch(recorded_patch_id):
-        return ("member_patch_id_mismatch", f"run {run.run_id} target.patch_id 缺失或格式非法", "")
-    computed_patch_id = _try_compute_patch_id(source_repo, run)
-    if computed_patch_id != recorded_patch_id:
-        return (
-            "member_patch_id_mismatch",
-            f"run {run.run_id} 现场重算 patch_id 与记录不符",
-            "",
-        )
+        container_id = receipt.get("container_id")
+        if not isinstance(container_id, str) or not _CONTAINER_ID_RE.fullmatch(container_id):
+            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} container_id 非法")
+
+        for phase in ("before", "after"):
+            snapshot = receipt.get(phase)
+            if (
+                not isinstance(snapshot, dict)
+                or not isinstance(snapshot.get("head"), str)
+                or snapshot["head"].lower() != run.head_sha
+                or snapshot.get("status") != ""
+                or snapshot.get("branch") != "HEAD"
+            ):
+                return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} {phase} 快照漂移或缺失")
+
+        fs_probe = receipt.get("filesystem")
+        if (
+            not isinstance(fs_probe, dict)
+            or fs_probe.get("source_write") != "EROFS"
+            or fs_probe.get("git_write") != "EROFS"
+            or fs_probe.get("host_read") not in ("ENOENT", "EACCES")
+            or fs_probe.get("state_write") not in ("ENOENT", "EACCES", "EROFS")
+        ):
+            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 文件隔离探针缺失或未通过")
+
+        result_obj = receipt.get("result")
+        if not isinstance(result_obj, dict) or result_obj.get("status") != "completed":
+            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执 result 非 completed")
+        summary = result_obj.get("summary")
+        if not isinstance(summary, str) or _first_line_strict(summary) != "VERDICT: PASS":
+            return ("member_receipt_invalid", f"run {run.run_id} 模型 {model} 回执 summary 首行非 VERDICT: PASS")
+        try:
+            result_json = json.dumps({"status": result_obj.get("status"), "summary": summary}, ensure_ascii=False)
+        except (TypeError, ValueError, RecursionError, MemoryError):
+            return ("member_evidence_corrupted", f"run {run.run_id} 模型 {model} 回执 result 序列化失败")
+        if _message_blocks(result_json):
+            return ("member_blocked", f"run {run.run_id} 模型 {model} 回执 result 判定为 BLOCK")
+
+        session_id = receipt.get("session_id")
+        if (
+            not isinstance(session_id, str)
+            or not _SESSION_ID_RE.fullmatch(session_id)
+            or session_id in seen_session_ids
+        ):
+            return ("member_session_invalid", f"run {run.run_id} 模型 {model} session_id 缺失、非法或重复")
+        if review_by_model[model].get("session_id") != session_id:
+            return ("member_session_invalid", f"run {run.run_id} 模型 {model} outcome.reviews.session_id 不一致")
+        seen_session_ids.add(session_id)
+
+        if worker.session_first_line is None:
+            return ("member_session_invalid", f"run {run.run_id} 缺少模型 {model} 的 session.jsonl")
+        try:
+            session_meta = json.loads(worker.session_first_line)
+        except (ValueError, TypeError, RecursionError, MemoryError):
+            return ("member_evidence_corrupted", f"run {run.run_id} 模型 {model} session.jsonl 首行损坏")
+        payload_obj = session_meta.get("payload") if isinstance(session_meta, dict) else None
+        if (
+            not isinstance(session_meta, dict)
+            or session_meta.get("type") != "session_meta"
+            or not isinstance(payload_obj, dict)
+            or payload_obj.get("id") != session_id
+        ):
+            return ("member_session_invalid", f"run {run.run_id} 模型 {model} session.jsonl 身份与 receipt 不符")
+
+    patch_check = _verify_and_compute_patch_id(replay_repo, run)
+    if not patch_check.ok:
+        return (patch_check.reason_code, patch_check.detail)
+    if patch_check.patch_id != recorded_patch_id:
+        return ("member_patch_id_mismatch", f"run {run.run_id} 现场重算 patch_id 与记录不符")
     return None
 
 
@@ -1469,36 +1960,26 @@ def _check_admission_binding(
     policy: MergeGroupPolicy,
     run_id: str,
 ) -> tuple[str, str] | None:
-    if admission is None:
-        return None
     if not isinstance(admission, dict):
-        return ("member_image_mismatch", f"run {run_id} admission 不是合法对象")
+        return ("member_reuse_admission_missing", f"run {run_id} reused_from.admission 缺失或不是对象")
     if admission.get("image_id") != policy.deployment_image_id:
         return ("member_image_mismatch", f"run {run_id} admission.image_id 与策略不符")
-    if (
-        "controller_code_head" in admission
-        and str(admission.get("controller_code_head", "")).lower() != policy.controller_code_head
-    ):
+    adm_ctrl = admission.get("controller_code_head")
+    if not isinstance(adm_ctrl, str) or adm_ctrl.lower() != policy.controller_code_head:
         return ("member_controller_mismatch", f"run {run_id} admission.controller_code_head 与策略不符")
     return None
 
 
-def verify_member_pass(
+def _verify_member_pass_in_repo(
     member: MergeGroupMember,
     *,
     repository_id: int,
+    replay_repo: Path | None,
     source_repo: Path,
     state_root: Path,
     policy: MergeGroupPolicy,
     published_statuses: Mapping[str, str] | None = None,
 ) -> MemberPassVerification:
-    """严格核验单个队列成员在当前 head_sha 上的正式 PASS 证据。"""
-    if not isinstance(member, MergeGroupMember):
-        raise MergeGroupError("member 必须是 MergeGroupMember 实例")
-    if not isinstance(policy, MergeGroupPolicy):
-        raise MergeGroupError("policy 必须是 MergeGroupPolicy 实例")
-    _parse_positive_int(repository_id, field="repository_id")
-
     def fail(code: str, detail: str) -> MemberPassVerification:
         return MemberPassVerification(
             passed=False,
@@ -1517,226 +1998,307 @@ def verify_member_pass(
             expected_models=policy.expected_models,
             check_ownership=policy.check_file_ownership,
         )
-    except _EvidenceError as exc:
-        return fail("member_evidence_corrupted", str(exc))
 
-    head_runs = [run for run in pr_runs if run.head_sha == member.head_sha]
-    if not head_runs:
-        return fail(
-            "member_missing_pass",
-            f"PR #{member.pr_number} 在 head={member.head_sha[:12]} 上没有任何审查记录",
-        )
-
-    # 先检查当前 head_sha 上是否存在 BLOCK 或未完结 run
-    for run in head_runs:
-        if _run_has_block(run):
-            return fail("member_blocked", f"PR #{member.pr_number} 在当前 head 存在 BLOCK 证据（run={run.run_id}）")
-    for run in head_runs:
-        if not _run_is_settled(run):
+        head_runs = [run for run in pr_runs if run.head_sha == member.head_sha]
+        if not head_runs:
             return fail(
-                "member_unsettled_run",
-                f"PR #{member.pr_number} 在当前 head 存在未完结 run（run={run.run_id}）",
+                "member_missing_pass",
+                f"PR #{member.pr_number} 在 head={member.head_sha[:12]} 上没有任何审查记录",
             )
 
-    head_runs_sorted = sorted(head_runs, key=lambda r: (r.registered_at_ns, r.run_id), reverse=True)
-    latest = head_runs_sorted[0]
-    assert latest.outcome is not None
-
-    if latest.outcome.get("verdict") != "PASS":
-        had_earlier_pass = any(
-            r.outcome is not None and r.outcome.get("verdict") == "PASS"
-            for r in head_runs_sorted[1:]
-        )
-        if had_earlier_pass:
-            return fail(
-                "member_pass_superseded",
-                f"PR #{member.pr_number} 当前 head 的旧 PASS 已被更晚登记的 {latest.outcome.get('verdict')!r} 取代",
-            )
-        return fail(
-            "member_missing_pass",
-            f"PR #{member.pr_number} 当前 head 最新结论为 {latest.outcome.get('verdict')!r}，非 PASS",
-        )
-
-    if "migrated" in latest.outcome:
-        return fail(
-            "member_migrated_not_allowed",
-            f"PR #{member.pr_number} 的 PASS 属于 migrated 迁移结论，禁止沿用",
-        )
-
-    # 校验当前成员的 patch_id 并现场重算
-    recorded_patch_id = latest.target.get("patch_id")
-    if not isinstance(recorded_patch_id, str) or not _PATCH_ID_RE.fullmatch(recorded_patch_id):
-        return fail("member_patch_id_mismatch", f"PR #{member.pr_number} target.patch_id 缺失或非法")
-    computed_patch_id = _try_compute_patch_id(source_repo, latest)
-    if computed_patch_id != recorded_patch_id:
-        return fail(
-            "member_patch_id_mismatch",
-            f"PR #{member.pr_number} 现场重算 patch_id 与记录不符",
-        )
-
-    # 筛出同 PR 中同一 patch_id 的全部历史 run（算不出 patch_id 且未记录的按同补丁保守纳入）
-    same_patch_runs: list[_RunRecord] = []
-    for run in pr_runs:
-        other_recorded = run.target.get("patch_id")
-        other_computed = _try_compute_patch_id(source_repo, run)
-        is_same_patch = (
-            run.head_sha == member.head_sha
-            or other_recorded == recorded_patch_id
-            or other_computed == recorded_patch_id
-            or (not other_recorded and other_computed is None)
-        )
-        if is_same_patch:
-            same_patch_runs.append(run)
-
-    for run in same_patch_runs:
-        if _run_has_block(run):
-            return fail(
-                "member_blocked",
-                f"PR #{member.pr_number} 同补丁历史上存在 BLOCK 证据（run={run.run_id}）",
-            )
-    for run in same_patch_runs:
-        if not _run_is_settled(run):
-            return fail(
-                "member_unsettled_run",
-                f"PR #{member.pr_number} 同补丁存在未完结 run（run={run.run_id}）",
-            )
-    for run in same_patch_runs:
-        if (
-            run.registered_at_ns > latest.registered_at_ns
-            and (run.outcome is None or run.outcome.get("verdict") != "PASS")
-        ):
-            return fail(
-                "member_pass_superseded",
-                f"PR #{member.pr_number} 同补丁存在更晚登记的非 PASS run（run={run.run_id}）",
-            )
-
-    # 分流：直审 PASS vs 1 跳 reused_from PASS
-    if "reused_from" not in latest.outcome:
-        err = _verify_direct_pass_run(
-            latest,
-            repository_id=repository_id,
-            policy=policy,
-            source_repo=source_repo,
-        )
-        if err is not None:
-            return fail(err[0], err[1])
-        source_run_id = latest.run_id
-        reused = False
-    else:
-        if not policy.allow_single_hop_reused_pass:
-            return fail(
-                "member_reuse_not_allowed",
-                f"策略禁止沿用单跳 reused_from PASS（PR #{member.pr_number}）",
-            )
-        # 先核验成员自身 run 的政策与发布状态
-        if latest.repository_id != repository_id:
-            return fail("member_repository_mismatch", f"run {latest.run_id} repository_id 不匹配")
-        if latest.target.get("policy_version") != policy.policy_version:
-            return fail("member_policy_mismatch", f"run {latest.run_id} policy_version 不匹配")
-        if latest.target.get("review_contract") != policy.review_contract:
-            return fail("member_contract_mismatch", f"run {latest.run_id} review_contract 不匹配")
-        if latest.target.get("controller_code_head") != policy.controller_code_head:
-            return fail("member_controller_mismatch", f"run {latest.run_id} controller_code_head 不匹配")
-        if latest.outcome.get("state") != "success":
-            return fail("member_not_published_success", f"run {latest.run_id} state 非 success")
-        publication = latest.outcome.get("publication")
-        if not isinstance(publication, dict) or publication.get("state") != "success":
-            return fail("member_not_published_success", f"run {latest.run_id} 未发布 success")
-
-        reused_from = latest.outcome.get("reused_from")
-        if not isinstance(reused_from, dict):
-            return fail("member_evidence_corrupted", f"run {latest.run_id} reused_from 不是合法对象")
-
-        # 校验 admission.image_id（支持 outcome.admission 与 outcome.reused_from.admission 两处）
-        for adm_candidate in (latest.outcome.get("admission"), reused_from.get("admission")):
-            adm_err = _check_admission_binding(adm_candidate, policy=policy, run_id=latest.run_id)
-            if adm_err is not None:
-                return fail(adm_err[0], adm_err[1])
-
-        origin_run_id = reused_from.get("run_id")
-        if not isinstance(origin_run_id, str) or not origin_run_id.strip():
-            return fail("member_reuse_origin_missing", f"run {latest.run_id} reused_from.run_id 缺失")
-        if origin_run_id == latest.run_id:
-            return fail("member_chained_reuse_not_allowed", f"run {latest.run_id} reused_from 自引用")
-
-        origin_matches = [run for run in pr_runs if run.run_id == origin_run_id]
-        if not origin_matches:
-            return fail(
-                "member_reuse_origin_missing",
-                f"找不到同 PR 的原件 run={origin_run_id}",
-            )
-        if len(origin_matches) > 1:
-            return fail("member_evidence_corrupted", f"存在重复的原件 run_id={origin_run_id}")
-        origin = origin_matches[0]
-
-        if _run_has_block(origin):
-            return fail("member_blocked", f"沿用原件 run={origin.run_id} 存在 BLOCK 证据")
-        if not _run_is_settled(origin):
-            return fail("member_unsettled_run", f"沿用原件 run={origin.run_id} 未完结")
-
-        origin_err = _verify_direct_pass_run(
-            origin,
-            repository_id=repository_id,
-            policy=policy,
-            source_repo=source_repo,
-        )
-        if origin_err is not None:
-            return fail(origin_err[0], origin_err[1])
-
-        # 三方 patch_id 一致性校验（当前重算 == 原件重算 == 原件记录 == 当前记录）
-        origin_recorded_patch_id = origin.target.get("patch_id")
-        origin_computed_patch_id = _try_compute_patch_id(source_repo, origin)
-        reused_recorded_patch_id = reused_from.get("patch_id")
-        if (
-            origin_recorded_patch_id != recorded_patch_id
-            or origin_computed_patch_id != recorded_patch_id
-            or (reused_recorded_patch_id is not None and reused_recorded_patch_id != recorded_patch_id)
-        ):
-            return fail(
-                "member_patch_id_mismatch",
-                f"PR #{member.pr_number} 沿用原件与当前成员的 patch_id 不一致",
-            )
-
-        # 原件之后同补丁若有非 PASS 登记，原件已被取代
-        for run in same_patch_runs:
-            if (
-                run.registered_at_ns > origin.registered_at_ns
-                and (run.outcome is None or run.outcome.get("verdict") != "PASS")
-            ):
+        for run in head_runs:
+            if _run_has_block(run):
+                return fail("member_blocked", f"PR #{member.pr_number} 在当前 head 存在 BLOCK 证据（run={run.run_id}）")
+        for run in head_runs:
+            if not _run_is_settled(run):
                 return fail(
-                    "member_pass_superseded",
-                    f"PR #{member.pr_number} 原件 PASS 之后存在非 PASS 重审（run={run.run_id}）",
+                    "member_unsettled_run",
+                    f"PR #{member.pr_number} 在当前 head 存在未完结 run（run={run.run_id}）",
                 )
 
-        source_run_id = origin.run_id
-        reused = True
+        head_runs_sorted = sorted(head_runs, key=lambda r: (r.registered_at_ns, r.run_id), reverse=True)
+        latest = head_runs_sorted[0]
+        assert latest.outcome is not None
 
-    # 可选外部已绑定 App commit status 核验
-    if published_statuses is not None:
-        observed_state = published_statuses.get(member.head_sha)
-        if observed_state != "success":
+        if latest.outcome.get("verdict") != "PASS":
+            had_earlier_pass = any(
+                r.outcome is not None and r.outcome.get("verdict") == "PASS"
+                for r in head_runs_sorted[1:]
+            )
+            if had_earlier_pass:
+                return fail(
+                    "member_pass_superseded",
+                    f"PR #{member.pr_number} 当前 head 的旧 PASS 已被更晚登记的 {latest.outcome.get('verdict')!r} 取代",
+                )
             return fail(
-                "member_status_not_success",
-                f"PR #{member.pr_number} head={member.head_sha[:12]} 远端已发布状态为 {observed_state!r}，非 'success'",
+                "member_missing_pass",
+                f"PR #{member.pr_number} 当前 head 最新结论为 {latest.outcome.get('verdict')!r}，非 PASS",
             )
 
-    proof = MemberPassProof(
-        pr_number=member.pr_number,
-        head_sha=member.head_sha,
-        source_run_id=source_run_id,
-        member_run_id=latest.run_id,
-        patch_id=recorded_patch_id,
-        reused=reused,
-        reviewer_models=policy.expected_models,
-        image_id=policy.deployment_image_id,
-    )
-    return MemberPassVerification(
-        passed=True,
-        pr_number=member.pr_number,
-        head_sha=member.head_sha,
-        reason_code="member_pass_verified",
-        detail=f"PR #{member.pr_number} PASS 核验通过（source_run={source_run_id}）",
-        proof=proof,
+        if "migrated" in latest.outcome:
+            return fail(
+                "member_migrated_not_allowed",
+                f"PR #{member.pr_number} 的 PASS 属于 migrated 迁移结论，禁止沿用",
+            )
+
+        recorded_patch_id = latest.target.get("patch_id")
+        if not isinstance(recorded_patch_id, str) or not _PATCH_ID_RE.fullmatch(recorded_patch_id):
+            return fail("member_patch_id_mismatch", f"PR #{member.pr_number} target.patch_id 缺失或非法")
+
+        def _evaluate_with_replay(active_replay: Path) -> MemberPassVerification:
+            assert latest.outcome is not None
+            latest_patch_check = _verify_and_compute_patch_id(active_replay, latest)
+            if not latest_patch_check.ok:
+                return fail(latest_patch_check.reason_code, latest_patch_check.detail)
+            if latest_patch_check.patch_id != recorded_patch_id:
+                return fail(
+                    "member_patch_id_mismatch",
+                    f"PR #{member.pr_number} 现场重算 patch_id 与记录不符",
+                )
+
+            same_patch_runs: list[_RunRecord] = []
+            for run in pr_runs:
+                other_recorded = run.target.get("patch_id")
+                other_check = _verify_and_compute_patch_id(active_replay, run)
+                other_computed = other_check.patch_id if other_check.ok else None
+                is_same_patch = (
+                    run.head_sha == member.head_sha
+                    or other_recorded == recorded_patch_id
+                    or other_computed == recorded_patch_id
+                    or (not other_recorded and other_computed is None)
+                )
+                if is_same_patch:
+                    same_patch_runs.append(run)
+
+            for run in same_patch_runs:
+                if _run_has_block(run):
+                    return fail(
+                        "member_blocked",
+                        f"PR #{member.pr_number} 同补丁历史上存在 BLOCK 证据（run={run.run_id}）",
+                    )
+            for run in same_patch_runs:
+                if not _run_is_settled(run):
+                    return fail(
+                        "member_unsettled_run",
+                        f"PR #{member.pr_number} 同补丁存在未完结 run（run={run.run_id}）",
+                    )
+            for run in same_patch_runs:
+                if (
+                    run.registered_at_ns > latest.registered_at_ns
+                    and (run.outcome is None or run.outcome.get("verdict") != "PASS")
+                ):
+                    return fail(
+                        "member_pass_superseded",
+                        f"PR #{member.pr_number} 同补丁存在更晚登记的非 PASS run（run={run.run_id}）",
+                    )
+
+            if "reused_from" not in latest.outcome:
+                err = _verify_direct_pass_run(
+                    latest,
+                    repository_id=repository_id,
+                    policy=policy,
+                    replay_repo=active_replay,
+                )
+                if err is not None:
+                    return fail(err[0], err[1])
+                source_run_id = latest.run_id
+                reused = False
+            else:
+                if not policy.allow_single_hop_reused_pass:
+                    return fail(
+                        "member_reuse_not_allowed",
+                        f"策略禁止沿用单跳 reused_from PASS（PR #{member.pr_number}）",
+                    )
+                if latest.repository_id != repository_id:
+                    return fail("member_repository_mismatch", f"run {latest.run_id} repository_id 不匹配")
+                if latest.target.get("policy_version") != policy.policy_version:
+                    return fail("member_policy_mismatch", f"run {latest.run_id} policy_version 不匹配")
+                if latest.target.get("review_contract") != policy.review_contract:
+                    return fail("member_contract_mismatch", f"run {latest.run_id} review_contract 不匹配")
+                latest_ctrl = latest.target.get("controller_code_head")
+                if not isinstance(latest_ctrl, str) or latest_ctrl.lower() != policy.controller_code_head:
+                    return fail("member_controller_mismatch", f"run {latest.run_id} controller_code_head 不匹配")
+                if latest.outcome.get("state") != "success":
+                    return fail("member_not_published_success", f"run {latest.run_id} state 非 success")
+
+                latest_outcome_err = _verify_outcome_target_binding(
+                    latest,
+                    latest.outcome,
+                    policy=policy,
+                    expected_patch_id=recorded_patch_id,
+                )
+                if latest_outcome_err is not None:
+                    return fail(latest_outcome_err[0], latest_outcome_err[1])
+
+                reused_from = latest.outcome.get("reused_from")
+                if not isinstance(reused_from, dict):
+                    return fail("member_evidence_corrupted", f"run {latest.run_id} reused_from 不是合法对象")
+
+                adm_err = _check_admission_binding(
+                    reused_from.get("admission"),
+                    policy=policy,
+                    run_id=latest.run_id,
+                )
+                if adm_err is not None:
+                    return fail(adm_err[0], adm_err[1])
+
+                origin_run_id = reused_from.get("run_id")
+                if not isinstance(origin_run_id, str) or not origin_run_id.strip():
+                    return fail("member_reuse_origin_missing", f"run {latest.run_id} reused_from.run_id 缺失")
+                if origin_run_id == latest.run_id:
+                    return fail("member_chained_reuse_not_allowed", f"run {latest.run_id} reused_from 自引用")
+
+                origin_matches = [run for run in pr_runs if run.run_id == origin_run_id]
+                if not origin_matches:
+                    return fail("member_reuse_origin_missing", f"找不到同 PR 的原件 run={origin_run_id}")
+                if len(origin_matches) > 1:
+                    return fail("member_evidence_corrupted", f"存在重复的原件 run_id={origin_run_id}")
+                origin = origin_matches[0]
+
+                member_pub_err = _verify_publication_binding(
+                    latest,
+                    latest.outcome.get("publication"),
+                    patch_id=recorded_patch_id,
+                    reuse_origin_run_id=origin.run_id,
+                )
+                if member_pub_err is not None:
+                    return fail(member_pub_err[0], member_pub_err[1])
+
+                if _run_has_block(origin):
+                    return fail("member_blocked", f"沿用原件 run={origin.run_id} 存在 BLOCK 证据")
+                if not _run_is_settled(origin):
+                    return fail("member_unsettled_run", f"沿用原件 run={origin.run_id} 未完结")
+
+                origin_err = _verify_direct_pass_run(
+                    origin,
+                    repository_id=repository_id,
+                    policy=policy,
+                    replay_repo=active_replay,
+                )
+                if origin_err is not None:
+                    return fail(origin_err[0], origin_err[1])
+
+                origin_recorded_patch_id = origin.target.get("patch_id")
+                reused_recorded_patch_id = reused_from.get("patch_id")
+                if (
+                    origin_recorded_patch_id != recorded_patch_id
+                    or reused_recorded_patch_id != recorded_patch_id
+                ):
+                    return fail(
+                        "member_patch_id_mismatch",
+                        f"PR #{member.pr_number} 沿用原件与当前成员的 patch_id 不一致",
+                    )
+
+                reused_head = reused_from.get("head_sha")
+                reused_base = reused_from.get("base_sha")
+                reused_mb = reused_from.get("merge_base_sha")
+                if (
+                    not isinstance(reused_head, str)
+                    or reused_head.lower() != origin.head_sha
+                    or not isinstance(reused_base, str)
+                    or reused_base.lower() != origin.base_sha
+                    or not isinstance(reused_mb, str)
+                    or reused_mb.lower() != origin.merge_base_sha
+                ):
+                    return fail(
+                        "member_reuse_binding_invalid",
+                        f"run {latest.run_id} reused_from 来源 SHA 与原件 run={origin.run_id} 不一致",
+                    )
+
+                reused_pub = reused_from.get("publication")
+                if (
+                    not isinstance(reused_pub, dict)
+                    or reused_pub.get("state") != "success"
+                    or not isinstance(reused_pub.get("sha"), str)
+                    or reused_pub["sha"].lower() != origin.head_sha
+                ):
+                    return fail(
+                        "member_reuse_binding_invalid",
+                        f"run {latest.run_id} reused_from.publication 缺失或与原件不符",
+                    )
+
+                for run in same_patch_runs:
+                    if (
+                        run.registered_at_ns > origin.registered_at_ns
+                        and (run.outcome is None or run.outcome.get("verdict") != "PASS")
+                    ):
+                        return fail(
+                            "member_pass_superseded",
+                            f"PR #{member.pr_number} 原件 PASS 之后存在非 PASS 重审（run={run.run_id}）",
+                        )
+
+                source_run_id = origin.run_id
+                reused = True
+
+            if published_statuses is not None:
+                observed_state = published_statuses.get(member.head_sha)
+                if observed_state != "success":
+                    return fail(
+                        "member_status_not_success",
+                        f"PR #{member.pr_number} head={member.head_sha[:12]} 远端已发布状态为 {observed_state!r}，非 'success'",
+                    )
+
+            proof = MemberPassProof(
+                pr_number=member.pr_number,
+                head_sha=member.head_sha,
+                source_run_id=source_run_id,
+                member_run_id=latest.run_id,
+                patch_id=recorded_patch_id,
+                reused=reused,
+                reviewer_models=policy.expected_models,
+                image_id=policy.deployment_image_id,
+            )
+            return MemberPassVerification(
+                passed=True,
+                pr_number=member.pr_number,
+                head_sha=member.head_sha,
+                reason_code="member_pass_verified",
+                detail=f"PR #{member.pr_number} PASS 核验通过（source_run={source_run_id}）",
+                proof=proof,
+            )
+
+        if replay_repo is not None:
+            return _evaluate_with_replay(replay_repo)
+        with _isolated_replay_repo(source_repo) as isolated_repo:
+            return _evaluate_with_replay(isolated_repo)
+    except _GitQueryError as exc:
+        return fail("member_merge_base_mismatch", str(exc))
+    except (
+        _EvidenceError,
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        UnicodeDecodeError,
+        RecursionError,
+        MemoryError,
+    ) as exc:
+        return fail("member_evidence_corrupted", f"审查证据读取或解析异常：{type(exc).__name__}")
+
+
+def verify_member_pass(
+    member: MergeGroupMember,
+    *,
+    repository_id: int,
+    source_repo: Path,
+    state_root: Path,
+    policy: MergeGroupPolicy,
+    published_statuses: Mapping[str, str] | None = None,
+) -> MemberPassVerification:
+    """严格核验单个队列成员在当前 head_sha 上的正式 PASS 证据。"""
+    if not isinstance(member, MergeGroupMember):
+        raise MergeGroupError("member 必须是 MergeGroupMember 实例")
+    if not isinstance(policy, MergeGroupPolicy):
+        raise MergeGroupError("policy 必须是 MergeGroupPolicy 实例")
+    _parse_positive_int(repository_id, field="repository_id")
+    return _verify_member_pass_in_repo(
+        member,
+        repository_id=repository_id,
+        replay_repo=None,
+        source_repo=source_repo,
+        state_root=state_root,
+        policy=policy,
+        published_statuses=published_statuses,
     )
 
 
@@ -1745,6 +2307,61 @@ def _truncate_description(text: str, *, limit: int = MAX_STATUS_DESCRIPTION_LEN)
     if len(single_line) <= limit:
         return single_line
     return single_line[: limit - 1] + "…"
+
+
+def _format_public_status_description(
+    *,
+    verdict: Literal["PASS", "ERROR"],
+    reason_code: str,
+    target: MergeGroupTarget,
+    member_proofs: Sequence[MemberPassProof],
+    failed_members: Sequence[tuple[int, str, str]],
+    tree_result: TreeVerificationResult,
+) -> str:
+    """仅使用白名单原因码模板与已校验公开标识构造远端 GitHub status 描述，绝不拼入本地路径或 Git stderr。"""
+    base_short = target.base_sha[:12]
+    head_short = target.head_sha[:12]
+    if verdict == "PASS":
+        pr_list = ",".join(f"#{proof.pr_number}" for proof in member_proofs)
+        tree_short = (tree_result.actual_tree_sha or "")[:12]
+        return _truncate_description(
+            f"合并队列核验通过：沿用 {len(member_proofs)} 个成员 PASS（{pr_list}），树 {tree_short} 一致"
+        )
+
+    safe_code = reason_code if reason_code in _REASON_DESCRIPTIONS else "member_evidence_corrupted"
+    template = _REASON_DESCRIPTIONS[safe_code]
+    if failed_members:
+        safe_failed_parts = [
+            f"#{pr}:{code if code in _REASON_DESCRIPTIONS else 'member_evidence_corrupted'}"
+            for pr, code, _ in failed_members
+        ]
+        failed_summary = ", ".join(safe_failed_parts)
+        if not tree_result.matched:
+            tree_code = (
+                tree_result.reason_code
+                if tree_result.reason_code in _REASON_DESCRIPTIONS
+                else "merge_failed"
+            )
+            raw_desc = (
+                f"合并队列拒绝放行：{len(failed_members)} 个成员未通过（{failed_summary}），"
+                f"且树核验失败（{tree_code}，b={base_short} h={head_short}）"
+            )
+        else:
+            raw_desc = (
+                f"合并队列拒绝放行：{len(failed_members)} 个成员未通过（{failed_summary}，"
+                f"b={base_short} h={head_short}）"
+            )
+        return _truncate_description(raw_desc)
+
+    if not tree_result.matched:
+        raw_desc = f"合并队列拒绝放行（{safe_code}）：{template}（b={base_short} h={head_short}）"
+        return _truncate_description(raw_desc)
+
+    raw_desc = (
+        f"合并队列拒绝放行（{safe_code}）：{template}，"
+        f"共 {len(tree_result.overlapping_files)} 个重叠文件（b={base_short} h={head_short}）"
+    )
+    return _truncate_description(raw_desc)
 
 
 @dataclass(frozen=True)
@@ -1854,32 +2471,59 @@ def evaluate_merge_group(
     member_proofs: list[MemberPassProof] = []
     failed_members: list[tuple[int, str, str]] = []
 
-    # 1. 不短路核验全部成员 PASS，完整收集失败明细便于排障
-    for member in target.members:
-        verification = verify_member_pass(
-            member,
-            repository_id=target.repository_id,
-            source_repo=source_repo,
-            state_root=state_root,
-            policy=policy,
-            published_statuses=published_statuses,
+    try:
+        with _isolated_replay_repo(source_repo) as replay_repo:
+            for member in target.members:
+                verification = _verify_member_pass_in_repo(
+                    member,
+                    repository_id=target.repository_id,
+                    replay_repo=replay_repo,
+                    source_repo=source_repo,
+                    state_root=state_root,
+                    policy=policy,
+                    published_statuses=published_statuses,
+                )
+                if verification.passed and verification.proof is not None:
+                    member_proofs.append(verification.proof)
+                else:
+                    failed_members.append((member.pr_number, verification.reason_code, verification.detail))
+            tree_result = _verify_merge_group_tree_in_repo(target, replay_repo=replay_repo)
+    except _GitQueryError as exc:
+        for member in target.members:
+            verification = _verify_member_pass_in_repo(
+                member,
+                repository_id=target.repository_id,
+                replay_repo=None,
+                source_repo=source_repo,
+                state_root=state_root,
+                policy=policy,
+                published_statuses=published_statuses,
+            )
+            if verification.passed and verification.proof is not None:
+                member_proofs.append(verification.proof)
+            else:
+                failed_members.append((member.pr_number, verification.reason_code, verification.detail))
+        tree_result = TreeVerificationResult(
+            matched=False,
+            reason_code="merge_failed",
+            detail=str(exc),
+            base_tree_sha=None,
+            actual_tree_sha=None,
+            expected_tree_sha=None,
+            step_trees=(),
+            overlapping_files=(),
         )
-        if verification.passed and verification.proof is not None:
-            member_proofs.append(verification.proof)
-        else:
-            failed_members.append((member.pr_number, verification.reason_code, verification.detail))
 
-    # 2. 执行只读零污染顺序合并树等价核验
-    tree_result = verify_merge_group_tree(target, source_repo=source_repo)
-
-    # 3. 仅当全部成员 PASS 且树一致且（未因重叠文件策略拒收）时放行
     if not failed_members and tree_result.matched and not (
         policy.reject_overlapping_files and tree_result.overlapping_files
     ):
-        pr_list = ",".join(f"#{proof.pr_number}" for proof in member_proofs)
-        tree_short = (tree_result.actual_tree_sha or "")[:12]
-        description = _truncate_description(
-            f"合并队列核验通过：沿用 {len(member_proofs)} 个成员 PASS（{pr_list}），树 {tree_short} 一致"
+        description = _format_public_status_description(
+            verdict="PASS",
+            reason_code="merge_group_pass_reused",
+            target=target,
+            member_proofs=member_proofs,
+            failed_members=failed_members,
+            tree_result=tree_result,
         )
         return MergeGroupDecision(
             verdict="PASS",
@@ -1903,30 +2547,24 @@ def evaluate_merge_group(
 
     if failed_members:
         reason_code = failed_members[0][1]
-        failed_summary = ", ".join(f"#{pr}:{code}" for pr, code, _ in failed_members)
-        if not tree_result.matched:
-            raw_desc = (
-                f"合并队列拒绝放行：{len(failed_members)} 个成员未通过（{failed_summary}），"
-                f"且树核验失败（{tree_result.reason_code}）"
-            )
-        else:
-            raw_desc = f"合并队列拒绝放行：{len(failed_members)} 个成员未通过 PASS 核验（{failed_summary}）"
     elif not tree_result.matched:
         reason_code = tree_result.reason_code
-        raw_desc = f"合并队列拒绝放行：顺序合并树核验失败（{tree_result.reason_code}）：{tree_result.detail}"
     else:
         reason_code = "overlapping_files_rejected"
-        overlap_preview = ", ".join(tree_result.overlapping_files[:3])
-        raw_desc = (
-            f"合并队列拒绝放行：检测到 {len(tree_result.overlapping_files)} 个跨成员重叠文件"
-            f"（{overlap_preview}）"
-        )
 
+    description = _format_public_status_description(
+        verdict="ERROR",
+        reason_code=reason_code,
+        target=target,
+        member_proofs=member_proofs,
+        failed_members=failed_members,
+        tree_result=tree_result,
+    )
     return MergeGroupDecision(
         verdict="ERROR",
         status_context=MERGE_GROUP_STATUS_CONTEXT,
         status_state="error",
-        status_description=_truncate_description(raw_desc),
+        status_description=description,
         reason_code=reason_code,
         head_sha=target.head_sha,
         base_sha=target.base_sha,
