@@ -96,6 +96,8 @@ NON_INPUT_DATA_DIRS = OUTPUT_DIRS | {
 }
 NON_INPUT_DATA_FILES = {
     ".chanlun/morse_landscape.json", ".chanlun/concept_registry.json", "scripts/.corpus_ingest_resume.json",
+    ".chanlun/at18/pregate/historical-runs.json", ".chanlun/at18/pregate/historical-deviations.json",
+    "scripts/inputs/real-data-multi-tf-validation.json",
 }
 INFERENCE_TREES = (
     ".chanlun/tower-construction/", "docs/architecture/",
@@ -626,7 +628,64 @@ def is_morse_experiment_output(obj):
             and {"total_steps", "total_jumps", "final_snapshot", "jumps", "snapshots"} <= obj.keys())
 
 
+def is_workflow_path(value):
+    return isinstance(value, str) and re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", value) is not None
+
+
+def is_ci_deviation(row):
+    return (isinstance(row, dict) and type(row.get("ticket")) is int and row["ticket"] > 0
+            and is_git_sha(row.get("commit")) and is_workflow_path(row.get("workflow"))
+            and isinstance(row.get("observed"), str) and bool(row["observed"].strip())
+            and "run_id" in row
+            and (row["run_id"] is None or (type(row["run_id"]) is int and row["run_id"] > 0)))
+
+
+def is_ci_run(row):
+    return (isinstance(row, dict) and type(row.get("id")) is int and row["id"] > 0
+            and type(row.get("attempt")) is int and row["attempt"] > 0
+            and isinstance(row.get("status"), str) and bool(row["status"].strip())
+            and "conclusion" in row and (row["conclusion"] is None or isinstance(row["conclusion"], str))
+            and isinstance(row.get("url"), str) and bool(row["url"].strip()))
+
+
+def is_historical_ci_run_table(obj):
+    # rebuild_pregate.py：提交 → 工作流路径 → 运行列表。单个工作流可以没有运行。
+    saw_run = False
+    for sha, workflows in obj.items():
+        if not is_git_sha(sha.lower()) or not isinstance(workflows, dict) or not workflows:
+            return False
+        for workflow, runs in workflows.items():
+            if not is_workflow_path(workflow) or not isinstance(runs, list) or not all(map(is_ci_run, runs)):
+                return False
+            saw_run = saw_run or bool(runs)
+    return saw_run
+
+
+def is_multi_tf_validation_output(obj):
+    # SPY 实测汇总：两组周期都有管线、可达性和背驰读数，summary 汇总实际结果。
+    summary = obj.get("summary")
+    if not (isinstance(summary, dict) and type(summary.get("t6_reachable_any")) is bool
+            and all(type(summary.get(key)) is int
+                    for key in ("directional_divergences_total", "amplitude_divergences_total"))
+            and isinstance(summary.get("ker_d_operational_significance"), str)):
+        return False
+    for key in ("daily_weekly", "60min_daily"):
+        section = obj.get(key)
+        if not (isinstance(section, dict)
+                and all(isinstance(section.get(field), str) for field in ("dataset", "low_tf", "high_tf"))
+                and all(isinstance(section.get(field), dict)
+                        for field in ("t6_reachability", "divergences", "pipeline_stages"))):
+            return False
+    return True
+
+
 def is_json_artifact(obj):
+    if isinstance(obj, list):
+        return bool(obj) and all(map(is_ci_deviation, obj))
+    if not isinstance(obj, dict):
+        return False
+    if is_historical_ci_run_table(obj) or is_multi_tf_validation_output(obj):
+        return True
     for key in ("format", "schema_version", "schema"):
         value = obj.get(key)
         version = VERSIONED_FORMAT.fullmatch(value) if isinstance(value, str) else None
@@ -682,11 +741,11 @@ def is_basis_path(path, extension):
 
 
 def has_eligible_structure(raw, extension):
-    """JSON 数据必须可解析，复核/运行对象即使改成其他后缀也不能引用。"""
+    """JSON 数据必须可解析；改名不改变结构化产物的身份。"""
     content = raw.removeprefix(b"\xef\xbb\xbf")
     if extension == ".jsonl":
         records = content.removesuffix(b"\n").split(b"\n")
-    elif extension == ".json" or content.lstrip().startswith(b"{"):
+    elif extension == ".json" or content.lstrip().startswith((b"{", b"[")):
         records = (content,)
     else:
         return True
@@ -695,7 +754,7 @@ def has_eligible_structure(raw, extension):
             obj = decode_json(record)
         except ValueError:
             return extension not in DATA_EXTENSIONS
-        if isinstance(obj, dict) and is_json_artifact(obj):
+        if is_json_artifact(obj):
             return False
     return True
 

@@ -45,7 +45,10 @@ UTF-8 文本文件，填写精确 Git blob 和实际行段（`1 <= line_start <=
 - **结构化数据**：可解析的 `.json` 或逐条可解析的 `.jsonl`。推论、诊断、报告、运行和输出目录，
   以及 `experiments`、`data_cache`、`handoff`、`goals`、`block-topology` 目录与具名拓扑/断点转储均禁引。
   报告、复核、审批、运行回执的结构化信封和 DM1/DM2 实验结果即使改名也不可引用；
-  审批信任根、数据夹具、手算账簿和冻结规范 JSON 仍可引用。
+  [历史 CI 运行表](historical-runs.json)、[偏差数组](historical-deviations.json)及
+  [SPY 多周期实测汇总](../../../scripts/inputs/real-data-multi-tf-validation.json)也一样：
+  原路径与同字节副本均禁引，原件仍供冻结回放、R11 对账和诊断读取。数组、嵌套对象或单独的
+  `status`、`summary` 不是产物身份；审批信任根、数据夹具、手算账簿和冻结规范 JSON 仍可引用。
 - **代码、测试、证明与配置**：`.rs`、`.py`、`.ts`、`.mts`、`.tsx`、`.js`、`.mjs`、`.cjs`、`.sh`、`.yml`、
   `.yaml`、`.toml`、`.lean`、`.sql`、`.cfg`、`.ini`，以及 `Dockerfile`、`Makefile`。
   `analysis/p3_random_gate_control.py` 这类代码不因位于 `analysis/` 失去资格。

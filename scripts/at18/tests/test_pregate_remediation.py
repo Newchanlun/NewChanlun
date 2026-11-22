@@ -1698,3 +1698,42 @@ def test_r13_only_exclusions_ignore_directory_case(history, options, path, allow
     history.write(path, b'{"fixture":1}\n')
     history.gate()
     check_basis(history, options, path, allowed=allowed)
+
+
+R13_HEAD = "b82a246ef8bd945fbf6f01912108ae882f5fe80f"
+
+
+@pytest.mark.parametrize(("source", "start", "end"), [
+    ("scripts/inputs/real-data-multi-tf-validation.json", 209, 217),
+    (".chanlun/at18/pregate/historical-runs.json", 5, 9),
+    (".chanlun/at18/pregate/historical-deviations.json", 3, 7),
+])
+@pytest.mark.parametrize("neutral", [False, True], ids=["original", "neutral"])
+def test_r14_rejects_actual_historical_observations(history, options, source, start, end, neutral):
+    path = "fixtures/sample.json" if neutral else source
+    history.write(path, git_at_r3("show", f"{R13_HEAD}:{source}"))
+    history.gate()
+    check_basis(history, options, path, allowed=False, line=start, line_end=end)
+
+
+@pytest.mark.parametrize("path", [
+    ".chanlun/.crystallization-debt.json",
+    "rust/tests/fixtures/btc_agg_trades_20000.json",
+])
+def test_r14_keeps_actual_array_inputs(history, options, path):
+    history.write(path, git_at_r3("show", f"{R13_HEAD}:{path}"))
+    history.gate()
+    check_basis(history, options, path, allowed=True)
+
+
+@pytest.mark.parametrize("data", [
+    {"daily_weekly": {"period": "1w"}, "60min_daily": {"period": "1d"},
+     "summary": {"source": "SPY", "status": "configured"}},
+    {"a" * 40: {".github/workflows/ci.yml": [{"status": "required", "conclusion": "success"}]}},
+    {"a" * 40: {".github/workflows/ci.yml": []}},
+], ids=["summary-config", "sha-mapped-ci-rule", "no-run-records"])
+def test_r14_keeps_data_without_measured_results(history, options, data):
+    path = "fixtures/sample.json"
+    history.write(path, json.dumps(data).encode())
+    history.gate()
+    check_basis(history, options, path, allowed=True)
