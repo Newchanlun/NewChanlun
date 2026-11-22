@@ -247,7 +247,7 @@ def check_census_cli(python_options, replay, *flags):
 
 
 def test_pregate_census_reports_frozen_blocks_without_rewriting_history(pregate_replay, python_options):
-    result = check_census_cli(python_options, pregate_replay, "--head", "b9d898dc")
+    result = check_census_cli(python_options, pregate_replay)
     assert result.returncode == 1
     assert "115 unique landings, 1025 exact PRE paths" in result.stdout
     assert "1025 exact path/blob/mode matches; 978 PASS / 47 BLOCK" in result.stdout

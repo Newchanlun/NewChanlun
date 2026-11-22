@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -9,7 +10,12 @@ import sys
 import pytest
 
 
-PREGATE = Path(__file__).resolve().parents[3] / ".chanlun/at18/pregate"
+ROOT = Path(__file__).resolve().parents[3]
+PREGATE = ROOT / ".chanlun/at18/pregate"
+REVIEW = ".chanlun/at18/pregate-review.json"
+PRE_FIRST = "d896e31be8353a9445af46629737be6a4d6363e5"
+FIRST = "c5cbb9ae12ee74233dd877ba99197f9e65b36ad2"
+ORIGINAL = "1aed53fd7a1e0be271de949d7c37c0ac81aefc1b"
 ARTIFACT = ".chanlun/at18/pregate-remediation.json"
 BLOCKED = "bad.txt"
 SECOND = "第二.txt"
@@ -421,3 +427,183 @@ def test_f_must_be_on_g0_first_parent(history, options):
     h.commit("F outside G0 first parent")
     result = h.probe(options, {PASSED: "PASS"})
     assert result.returncode == 1 and "F must descend from G0 on the first-parent chain" in result.stderr
+
+
+@pytest.fixture(scope="module")
+def review_history(tmp_path_factory):
+    # 用真正的首载与 P0 构造 F，但所有新对象与索引留在夹具库。
+    root = tmp_path_factory.mktemp("review-history")
+    objects = subprocess.check_output(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "objects"], cwd=ROOT, text=True).strip()
+    repo = root / "history.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(repo)], check=True)
+    env = dict(os.environ, GIT_DIR=str(repo), GIT_WORK_TREE=str(root), GIT_ALTERNATE_OBJECT_DIRECTORIES=objects,
+               GIT_INDEX_FILE=str(root / "index"), GIT_AUTHOR_NAME="AT-18 synthetic",
+               GIT_AUTHOR_EMAIL="at18-synthetic@example.invalid", GIT_COMMITTER_NAME="AT-18 synthetic",
+               GIT_COMMITTER_EMAIL="at18-synthetic@example.invalid")
+
+    def git(*args, raw=None):
+        return subprocess.check_output(["git", *args], cwd=root, env=env, input=raw)
+
+    def snapshot(parent, document, *, remove=None, restore=None, merge=False):
+        git("read-tree", parent)
+        if remove:
+            git("update-index", "--force-remove", "--", remove)
+        if restore:
+            git("update-index", "--add", "--cacheinfo", f"{restore['mode']},{restore['blob']},{restore['path']}")
+        raw = document if isinstance(document, bytes) else json.dumps(document, ensure_ascii=False).encode()
+        blob = git("hash-object", "-w", "--stdin", raw=raw).decode().strip()
+        git("update-index", "--add", "--cacheinfo", f"100644,{blob},{REVIEW}")
+        tree = git("write-tree").decode().strip()
+        args = ["commit-tree", tree, "-p", parent]
+        if merge:
+            # 与第二父同树，仍必须按第一父差异看到登记变化。
+            side = git(*args, "-m", "Synthetic side").decode().strip()
+            args += ["-p", side]
+        return git(*args, "-m", "Synthetic F").decode().strip(), raw
+
+    original_raw = git("cat-file", "blob", ORIGINAL)
+    original = json.loads(original_raw)
+    rows = original["rows"]
+    drop = "docs/reference-theta-v0.md"
+    reduced = dict(original, rows=[row for row in rows if row["path"] != drop])
+    reduced_head, reduced_raw = snapshot(FIRST, reduced, remove=drop, merge=True)
+    override = root / "current-1024-review.json"
+    override.write_bytes(reduced_raw)
+    original_copy = root / "historic-original.json"
+    original_copy.write_bytes(original_raw)
+
+    block = next(row for row in rows if row["verdict"] == "BLOCK")
+    # 退出后恢复 F 实际的 mode/blob，不以 P0 blob 代替。
+    entry = git("ls-tree", FIRST, "--", block["path"]).decode().split()
+    restore = dict(path=block["path"], blob=entry[2], mode=entry[0])
+    edited = dict(original, rows=[dict(row, verdict="PASS") if row == block else row for row in rows])
+    flipped, _ = snapshot(FIRST, edited)
+    exited, _ = snapshot(FIRST, dict(original, rows=[row for row in rows if row != block]), remove=block["path"])
+    faithful_reentry, _ = snapshot(exited, original, restore=restore, merge=True)
+    washed_reentry, _ = snapshot(exited, edited, restore=restore, merge=True)
+    first_wrong, _ = snapshot(PRE_FIRST, edited)
+    wrong_then_restored, _ = snapshot(first_wrong, original_raw)
+    damaged, _ = snapshot(FIRST, b"{")
+
+    path = ".chanlun/review-results/issue1394-content-v3-20260916/inputs/content-format-vectors.json"
+    census_doc = json.loads((PREGATE.parent / "landing-census.json").read_bytes())
+    mode, _, blob = git("ls-tree", census_doc["p0"], "--", path).decode().split("\t")[0].split()
+    new_row = dict(path=path, blob=blob, mode=mode, verdict="BLOCK")
+    new_registration = dict(original, rows=sorted([*rows, new_row], key=lambda row: row["path"]))
+    expanded, _ = snapshot(FIRST, new_registration, restore=new_row)
+    new_row["verdict"] = "PASS"
+    new_verdict_flip, _ = snapshot(expanded, new_registration)
+    return env, {"reduced": reduced_head, "reduced_override": override, "preview": original_copy,
+                 "flipped": flipped, "faithful_reentry": faithful_reentry, "washed_reentry": washed_reentry,
+                 "wrong_then_restored": wrong_then_restored, "damaged": damaged, "block_path": block["path"],
+                 "expanded": expanded, "new_verdict_flip": new_verdict_flip, "new_path": path}
+
+
+def census(options, *args, env=None):
+    return subprocess.run([sys.executable, *options, str(PREGATE / "check_census.py"), *args],
+                          cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+
+
+@pytest.mark.parametrize("case", ["before", "explicit-frozen", "first", "reduced", "reduced_override", "preview",
+                                  "flipped", "faithful_reentry", "washed_reentry", "wrong_then_restored",
+                                  "damaged", "stale_override", "expanded", "new_verdict_flip"])
+def test_review_distinguishes_current_f_from_immutable_first_parent_review(review_history, options, case):
+    env, data = review_history
+    head = {"before": PRE_FIRST, "preview": PRE_FIRST, "explicit-frozen": "b9d898dc", "first": FIRST,
+            "reduced_override": data["reduced"], "stale_override": data["reduced"]}.get(case, data.get(case))
+    flags = ["--review", str({
+        "reduced_override": data["reduced_override"], "stale_override": data["preview"],
+        "preview": data["preview"], "damaged": data["preview"],
+    }[case])] if case in ("reduced_override", "stale_override", "preview", "damaged") else []
+    result = census(options, "--head", head, *flags, env=env)
+    assert result.returncode == 1, result.stderr
+    missing = f"PREGATE_REVIEW: pre:{REVIEW}: missing"
+    if case in ("before", "explicit-frozen", "wrong_then_restored"):
+        assert missing in result.stderr and not result.stdout
+    elif case in ("flipped", "washed_reentry", "new_verdict_flip"):
+        path = data["new_path"] if case == "new_verdict_flip" else data["block_path"]
+        assert f"pre:{path}: historical verdict mismatch: BLOCK -> PASS" in result.stderr
+        assert not result.stdout
+    elif case in ("damaged", "stale_override"):
+        reason = "invalid UTF-8 JSON" if case == "damaged" else "local review differs from the fixed F artifact"
+        assert reason in result.stderr and not result.stdout
+    else:
+        if case == "preview":
+            assert f"{missing} in F; --review is a local preview only" in result.stdout
+            assert "F review: first-parent introduction" not in result.stdout
+        else:
+            assert f"F review: first-parent introduction {FIRST}; original blob {ORIGINAL}" in result.stdout
+        matches = {
+            "reduced": (1024, 977, 47, 42), "reduced_override": (1024, 977, 47, 42),
+            "expanded": (1026, 978, 48, 43),
+        }
+        count, passed, blocked, hard = matches.get(case, (1025, 978, 47, 42))
+        assert f"{count} exact path/blob/mode matches; {passed} PASS / {blocked} BLOCK" in result.stdout
+        assert f"{hard} hard BLOCK / 5 changed BLOCK / 0 deleted BLOCK" in result.stdout
+        assert "0 released" in result.stdout and "path coverage mismatch" not in result.stderr
+
+
+@pytest.mark.parametrize("number", [b"1" + b"0" * 400, b"1e400", b"-1" + b"0" * 400, b"-1e400", b"NaN",
+                                    b"Infinity", b"-Infinity"],
+                         ids=["int", "exp", "negative-int", "negative-exp", "nan", "inf", "negative-inf"])
+@pytest.mark.parametrize("field", ["ticket", "line", "nested"])
+def test_jcs_numeric_domain_precedes_remediation_shape(history, options, number, field):
+    h = history
+    h.gate()
+    marker = b'"JCS_OVERFLOW"'
+    row = h.row()
+    if field == "ticket":
+        row["remediation_ticket"] = "JCS_OVERFLOW"
+    elif field == "line":
+        row["verification_basis"][0]["line_end"] = "JCS_OVERFLOW"
+    else:
+        row["extra"] = {"nested": [{"value": "JCS_OVERFLOW"}]}
+    h.artifact([row], transform=lambda raw: raw.replace(marker, number))
+    result = h.probe(options)
+    assert result.returncode == 1 and not result.stdout
+    assert f"pre:{ARTIFACT}: JCS_CANONICALIZE: number outside finite IEEE 754 binary64" in result.stderr
+
+
+@pytest.mark.parametrize("number", [b"1" + b"0" * 400, b"1e400"], ids=["integer-token", "exponent-token"])
+def test_census_uses_jcs_domain_on_other_strict_json_inputs(options, tmp_path, number):
+    path = tmp_path / "registry.json"
+    path.write_bytes(b'{"pregate":{"nested":[{"extra":' + number + b'}]}}')
+    result = census(options, "--registry", str(path))
+    assert result.returncode == 1 and not result.stdout
+    assert "PREGATE_CENSUS: registry.json: JCS_CANONICALIZE: number outside finite IEEE 754 binary64" in result.stderr
+
+
+RENDERED_SUMMARY = "# AT-18 整图验收\n\n结论：**FAIL**\n\n主线提交：`" + "1" * 40 + "`\n"
+
+
+@pytest.mark.parametrize(("path", "doc", "allowed"), [
+    ("spec/plain.md", "费率表：每百元三分，取整到分。\n", True),
+    ("spec/summary.md", "费率表：每百元三分，取整到分。\n", True),
+    ("out/summary.md", RENDERED_SUMMARY, False),
+    ("spec/copied-report.md", RENDERED_SUMMARY, False),
+    ("out/at18-report.json", {"schema_version": "at18-report/1"}, False),
+    ("out/at18-verification.json", {"schema_version": "at18-verification/1"}, False),
+    ("spec/copied-receipt.json", {"schema_version": "at18-verification/1"}, False),
+    ("spec/copied-input.json", {"schema_version": "at18-input-bundle/1"}, False),
+    ("spec/copied-run.json", {"schema_version": "at18-run-record/1"}, False),
+    ("spec/copied-remediation.json", {"schema_version": "at18-pregate-remediation/1"}, False),
+    ("spec/copied-manifest.json", {"schemaVersion": 1, "ticket": 1391, "base": "1" * 40, "head": "2" * 40,
+                                  "productDiff": [], "requiredReports": [], "reports": [], "reviews": [],
+                                  "requiredChecks": [], "checks": [], "scan": {"status": "not_run"}}, False),
+])
+def test_verification_basis_checks_artifact_identity(history, options, path, doc, allowed):
+    h = history
+    h.gate()
+    if not isinstance(doc, str):
+        doc = json.dumps(doc)
+    h.write(path, doc.encode())
+    h.commit("Add verification evidence")
+    h.artifact([h.row(basis=path)])
+    result = h.probe(options)
+    if allowed:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["validated"] == [BLOCKED]
+    else:
+        assert result.returncode == 1 and not result.stdout
+        assert "verification_basis cannot cite remediation, report or receipt" in result.stderr

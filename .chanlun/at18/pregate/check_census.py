@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 from pregate_contract import (
-    BLOB_MODES, OID, changes_on_window, check_remediation, classify_review, diff_paths,
+    BLOB_MODES, OID, REGULAR_MODES, Entry, changes_on_window, check_remediation, classify_review, diff_paths,
     final_blob_changed, git, git_tree, pre_scope, read_json, require, require_blob,
     strict_json, valid_path, window,
 )
@@ -19,6 +19,8 @@ from rebuild_pregate import G0, landing_scopes
 AT18 = Path(__file__).resolve().parents[1]
 ROOT = AT18.parents[1]
 FROZEN_F = "b9d898dccf46c2a716115eaa1215bc39c458a959"
+REVIEW = ".chanlun/at18/pregate-review.json"
+REVIEW_SCOPE = f"pre:{REVIEW}"
 HISTORICAL_REVIEW_BLOB = "1aed53fd7a1e0be271de949d7c37c0ac81aefc1b"
 VERDICTS = ("PASS", "BLOCK")
 
@@ -43,7 +45,10 @@ def retained(shas, p0, f, *, cwd=None):
 
 def p0_rows(p0, paths, *, cwd=None, tree=None):
     """只读 P0 Git 树；符号链接使用链接自身的 blob。"""
-    before = git_tree(p0, cwd=cwd) if tree is None else tree
+    return p0_tree_rows(git_tree(p0, cwd=cwd) if tree is None else tree, paths)
+
+
+def p0_tree_rows(before, paths):
     require(paths <= before.keys(), "PREGATE_REVIEW", "missing paths in P0")
     rows = []
     for path in sorted(paths, key=str.encode):
@@ -98,6 +103,84 @@ def match_review(review, expected_rows):
         if actual[name] != identity:
             raise ValueError(f"PREGATE_REVIEW: P0 blob/mode mismatch at {name!r}")
     return counts
+
+
+def original_review(raw, blob, expected, identity):
+    review = strict_json(raw, "PREGATE_REVIEW", identity)
+    counts = match_review(review, expected)
+    require(blob == HISTORICAL_REVIEW_BLOB and counts == {"PASS": 978, "BLOCK": 47},
+            "PREGATE_REVIEW", "original review Git blob or historical verdict counts mismatch")
+    return review, counts
+
+
+def tree_review_entry(commit, *, cwd):
+    record = git("ls-tree", "-z", commit, "--", REVIEW, cwd=cwd)
+    if not record:
+        return None
+    metadata, _ = record.split(b"\t", 1)
+    return Entry(*metadata.decode("ascii").split())
+
+
+def tree_review_bytes(entry, *, cwd):
+    require(entry.kind == "blob" and entry.mode in REGULAR_MODES, "PREGATE_REVIEW",
+            f"{REVIEW_SCOPE}: expected a regular review file in F history")
+    return git("cat-file", "blob", entry.blob, cwd=cwd)
+
+
+def record_verdicts(review, verdicts, *, introduce):
+    for row in review["rows"]:
+        path, mode, blob, verdict = (row[key] for key in ("path", "mode", "blob", "verdict"))
+        key = path, mode, blob
+        if introduce:
+            verdicts.setdefault(key, verdict)
+        prior = verdicts.get(key)
+        require(prior is not None, "PREGATE_REVIEW", f"{pre_scope(path)}: no verdict in first-parent review history")
+        require(prior == verdict, "PREGATE_REVIEW",
+                f"{pre_scope(path)}: historical verdict mismatch: {prior} -> {verdict}")
+
+
+def check_head_review(head, tree, before, touched, frozen_rows, *, cwd, override=None):
+    """从 F 及第一父链取本地 Git 事实；R09 正式采信另验。"""
+    entry = tree.get(REVIEW)
+    require(entry is not None or override is not None, "PREGATE_REVIEW", f"{REVIEW_SCOPE}: missing")
+    commits = git("log", "--first-parent", "--full-history", "--root", "--format=%H",
+                  head, "--", REVIEW, cwd=cwd).decode().splitlines()
+    first = None
+    verdicts = {}
+    for commit in reversed(commits):
+        at_commit = tree_review_entry(commit, cwd=cwd)
+        if at_commit is None:
+            continue  # 文件退出不清除任何路径的历史判词。
+        if first is None:
+            require(at_commit.blob == HISTORICAL_REVIEW_BLOB, "PREGATE_REVIEW",
+                    f"{REVIEW_SCOPE}: missing (first-parent introduction is not the original review blob)")
+        raw = tree_review_bytes(at_commit, cwd=cwd)
+        if first is None:
+            first = commit
+            review, _ = original_review(raw, at_commit.blob, frozen_rows, REVIEW_SCOPE)
+        else:
+            review = strict_json(raw, "PREGATE_REVIEW", REVIEW_SCOPE)
+        recorded_tree = tree if commit == head else git_tree(commit, cwd=cwd)
+        match_review(review, p0_tree_rows(before, pre_paths(touched, before, recorded_tree)))
+        record_verdicts(review, verdicts, introduce=True)
+
+    if entry is None:
+        # 首载前只能用固定原件约束预检，不把候选行视为历史裁定。
+        if first is None:
+            original = git("cat-file", "blob", HISTORICAL_REVIEW_BLOB, cwd=cwd)
+            review, _ = original_review(original, HISTORICAL_REVIEW_BLOB, frozen_rows, REVIEW_SCOPE)
+            record_verdicts(review, verdicts, introduce=True)
+        raw = review_bytes(override)
+    else:
+        require(first is not None, "PREGATE_REVIEW", f"{REVIEW_SCOPE}: missing (no first-parent introduction)")
+        raw = tree_review_bytes(entry, cwd=cwd)
+    review = strict_json(raw, "PREGATE_REVIEW", REVIEW_SCOPE)
+    counts = match_review(review, p0_tree_rows(before, pre_paths(touched, before, tree)))
+    record_verdicts(review, verdicts, introduce=False)
+    if entry is not None and override is not None:
+        require(review_bytes(override) == raw, "PREGATE_REVIEW",
+                f"{REVIEW_SCOPE}: local review differs from the fixed F artifact")
+    return review, counts, first, verdicts
 
 
 def check_landings(registered, ledger, issues, attributions):
@@ -203,9 +286,9 @@ def main():
     parser.add_argument("replay", nargs="?", type=Path, help="可选：同时核对 rebuild_pregate.py 的输出")
     parser.add_argument("--sources", type=Path, default=AT18 / "pregate")
     parser.add_argument("--registry", type=Path, default=AT18 / "registry.json")
-    parser.add_argument("--review", type=Path, default=AT18 / "pregate-review.json",
-                        help="待校验的复审原件（默认使用仓内 pregate-review.json）")
-    parser.add_argument("--head", help="F 的 Git 提交或引用（默认冻结观察窗，提供重放时默认重放头）")
+    parser.add_argument("--review", type=Path,
+                        help="本地预检候选；已有 F 原件时须与其逐字节相同")
+    parser.add_argument("--head", help="F 的 Git 提交或引用（显式指定时只认 F 树原件；省略时可回放冻结窗）")
     parser.add_argument("--remediation", type=Path, help="本地预检用原件（默认从 F 的固定路径读 Git blob）")
     args = parser.parse_args()
 
@@ -239,13 +322,25 @@ def main():
     before, frozen_tree = git_tree(p0, cwd=ROOT), git_tree(FROZEN_F, cwd=ROOT)
     final_tree = frozen_tree if head == FROZEN_F else git_tree(head, cwd=ROOT)
     pre = pre_paths(touched, before, frozen_tree)
-    expected = p0_rows(p0, pre, tree=before)
-    raw = review_bytes(args.review)
-    review = strict_json(raw, "PREGATE_REVIEW", args.review.name)
-    counts = match_review(review, expected)
-    require(git("hash-object", "--stdin", input=raw, cwd=ROOT).decode().strip() == HISTORICAL_REVIEW_BLOB
-            and counts == {"PASS": 978, "BLOCK": 47}, "PREGATE_REVIEW",
-            "original review Git blob or historical verdict counts mismatch")
+    frozen_rows = p0_tree_rows(before, pre)
+    current = pre_paths(touched, before, final_tree)
+    frozen_replay = args.head is None and head == FROZEN_F
+    if frozen_replay:
+        source = args.review or ROOT / REVIEW
+        raw = review_bytes(source)
+        blob = git("hash-object", "--stdin", input=raw, cwd=ROOT).decode().strip()
+        review, counts = original_review(raw, blob, frozen_rows, source.name)
+        deleted = 0
+        inventory_source = "Frozen replay: local historical review; not an F registration"
+    else:
+        review, counts, first, verdicts = check_head_review(
+            head, final_tree, before, touched, frozen_rows, cwd=ROOT, override=args.review)
+        deleted = sum(verdict == "BLOCK" and path not in final_tree
+                      for (path, _, _), verdict in verdicts.items())
+        if REVIEW in final_tree:
+            inventory_source = f"F review: first-parent introduction {first}; original blob {HISTORICAL_REVIEW_BLOB}"
+        else:
+            inventory_source = f"PREGATE_REVIEW: {REVIEW_SCOPE}: missing in F; --review is a local preview only"
 
     replay = None
     if args.replay:
@@ -267,18 +362,14 @@ def main():
         else:
             window(p0, G0, replay_head, cwd=ROOT)
             replay_tree = git_tree(replay_head, cwd=ROOT)
-        require(rows == p0_rows(p0, pre_paths(touched, before, replay_tree), tree=before),
+        require(rows == p0_tree_rows(before, pre_paths(touched, before, replay_tree)),
                 "PREGATE_REVIEW", "pre.json differs from retained P0 path/blob/mode")
 
-    current = pre_paths(touched, before, final_tree)
-    new_paths = current - pre
-    if new_paths:
-        path = min(new_paths, key=str.encode)
-        raise ValueError(f"PREGATE_REVIEW: {pre_scope(path)}: no verdict in frozen historical review")
     check_r3(by_tkt, ledger, r3, runs, p0, pre, before, frozen_tree, frozen_chain, issues, replay)
 
     print(f'R5 full evidence: {len(commits)} unique landings, {len(pre)} exact PRE paths')
-    print(f'P0 review inventory: {len(expected)} exact path/blob/mode matches; '
+    print(inventory_source)
+    print(f'P0 review inventory: {len(current)} exact path/blob/mode matches; '
           f'{counts["PASS"]} PASS / {counts["BLOCK"]} BLOCK')
 
     rows = review["rows"]
@@ -286,7 +377,6 @@ def main():
     passed = sum(state == "pass" for state in classes.values())
     hard = [path for path, state in classes.items() if state == "hard"]
     changed = [path for path, state in classes.items() if state == "changed"]
-    deleted = sum(row["verdict"] == "BLOCK" and classes[row["path"]] == "deleted" for row in rows)
     valid = set()
     failed = False
     try:

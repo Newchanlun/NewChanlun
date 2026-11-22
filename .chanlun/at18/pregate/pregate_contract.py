@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
-import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import sys
 from typing import NamedTuple
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from scripts.at18.common import decode_json
 
 
 BLOB_MODES = ("100644", "100755", "120000")
@@ -14,8 +18,15 @@ REGULAR_MODES = BLOB_MODES[:2]
 OID = re.compile(r"[0-9a-f]{40}")
 REMEDIATION = ".chanlun/at18/pregate-remediation.json"
 REMEDIATION_SCHEMA = "at18-pregate-remediation/1"
-REPORT_FILES = {"at18-report.json", "at18-verification.json", "summary.md"}
-REPORT_SCHEMAS = {"at18-report/1", "at18-verification/1", REMEDIATION_SCHEMA}
+REPORT_FILES = {"at18-report.json", "at18-input-bundle.json", "at18-verification.json"}
+# 版本化的验收产物，即使改名也不是缺陷本身的验证依据。
+ARTIFACT_SCHEMA_FAMILIES = {
+    "at18-report", "at18-input-bundle", "at18-verification", "at18-pregate-remediation",
+    "at18-pregate-review", "at18-landing-census", "at18-run-record", "at18-group-execution",
+    "at18-scaffold-seal", "at18-diagnostic", "at18-tb-entity", "at18-key-witness",
+}
+MANIFEST_FIELDS = {"schemaVersion", "ticket", "base", "head", "productDiff", "requiredReports",
+                   "reports", "reviews", "requiredChecks", "checks", "scan"}
 ROW_KEYS = {"path", "p0_blob", "p0_mode", "f_blob", "f_mode", "remediation_commits",
             "remediation_ticket", "verdict", "defect_summary", "verification_basis"}
 BASIS_KEYS = {"path", "blob", "line_start", "line_end"}
@@ -41,24 +52,10 @@ def git(*args, cwd=None, input=None):
 
 
 def strict_json(raw, code, identity):
-    def unique_keys(pairs):
-        result = dict(pairs)
-        require(len(result) == len(pairs), code, f"{identity}: duplicate JSON key")
-        return result
-
-    def invalid_constant(_token):
-        raise ContractError(f"{code}: {identity}: non-JSON number")
-
     try:
-        result = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_keys,
-                            parse_constant=invalid_constant)
-        # 检查转义产生的孤立代理码点，以及解析溢出得到的非有限数值。
-        json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")
-    except ContractError:
-        raise
-    except (ValueError, RecursionError) as error:
-        raise ContractError(f"{code}: {identity}: invalid UTF-8 JSON") from error
-    return result
+        return decode_json(raw)
+    except ValueError as error:
+        raise ContractError(f"{code}: {identity}: {error}") from error
 
 
 def read_json(path, code="PREGATE_CENSUS"):
@@ -134,6 +131,27 @@ def classify_review(rows, final_tree):
     return result
 
 
+def is_report_artifact(raw, text):
+    # #1391 的 renderSummary 固定首行；文件名与目录无关。
+    lines = text.lstrip("\ufeff \t\r\n").split("\n", 1)
+    if lines[0].rstrip() == "# AT-18 整图验收":
+        return True
+    if not text.lstrip().startswith("{"):
+        return False
+    try:
+        obj = strict_json(raw, "PREGATE_REVIEW", "verification_basis")
+    except ValueError:
+        return False  # 普通源码片段无需是 JSON。
+    version = obj.get("schema_version")
+    if isinstance(version, str):
+        family, _, revision = version.partition("/")
+        if family in ARTIFACT_SCHEMA_FAMILIES and re.fullmatch(r"[1-9][0-9]*", revision):
+            return True
+    # deliveryManifestSchema 使用驼峰版本键，没有 AT-18 schema_version。
+    return (MANIFEST_FIELDS <= obj.keys() and type(obj["schemaVersion"]) is int
+            and obj["schemaVersion"] == 1 and obj["ticket"] in (1391, 1403))
+
+
 def basis_key(item, final_tree, cache, fail, *, cwd):
     fail(isinstance(item, dict) and item.keys() == BASIS_KEYS, "invalid verification_basis keys")
     path, blob, start, end = (item[k] for k in ("path", "blob", "line_start", "line_end"))
@@ -150,16 +168,7 @@ def basis_key(item, final_tree, cache, fail, *, cwd):
         except UnicodeError:
             fail(False, "verification_basis must be UTF-8 text")
         fail("\0" not in text, "verification_basis must be UTF-8 text")
-        # 也拒绝改名后的正式报告/回执，不把它们当验证原件。
-        if text.lstrip().startswith("{"):
-            try:
-                value = strict_json(raw, "PREGATE_REVIEW", "verification_basis")
-            except ValueError:
-                pass  # 源码片段无需是 JSON。
-            else:
-                version = value.get("schema_version") if isinstance(value, dict) else None
-                fail(not isinstance(version, str) or version not in REPORT_SCHEMAS,
-                     "verification_basis cannot cite remediation, report or receipt")
+        fail(not is_report_artifact(raw, text), "verification_basis cannot cite remediation, report or receipt")
         cache[blob] = text.count("\n") + bool(text and not text.endswith("\n"))
     fail(type(start) is int and type(end) is int and 1 <= start <= end <= cache[blob],
          "verification_basis line range outside F text")
