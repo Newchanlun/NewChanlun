@@ -1057,7 +1057,7 @@ test("R10/#1319：Python 声明目标、延迟体驱动和 CPython 生产调用�
   });
 });
 
-test("R15/#1319：Python 公开承接、初始化排除与显式等待", { timeout: 180_000 }, async t => {
+test("R15–R16/#1319：Python 公开承接、初始化排除与显式等待", { timeout: 180_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const production = "trading_system/__init__.py";
   const path = "trading_system/tests/test_at18_fixture_feed.py";
@@ -1087,6 +1087,24 @@ test("R15/#1319：Python 公开承接、初始化排除与显式等待", { timeo
     ["私有助手交集不算承接", implementations, ordinary, direct.replace("assert route(", "assert preview(").replace("import route", "import preview"), false],
     ["同一公开导出经过私有助手", implementations, ordinary, direct, true],
     ["字面 __all__ 排除公开命名的函数", implementations + "__all__ = ['preview']\n", ordinary, direct, false],
+    ["解包 __all__ 排除承接函数", implementations + "PUBLIC = ['preview']\n__all__ = [*PUBLIC]\n", ordinary, direct, false],
+    ["拼接 __all__ 排除承接函数", implementations + "BASE = []\n__all__ = BASE + ['preview']\n", ordinary, direct, false],
+    ["拼接 __all__ 保留承接函数", implementations + "BASE = ['preview']\n__all__ = BASE + ['route']\n", ordinary, direct, true],
+    ["推导和 tuple 动态隐藏生产入口", implementations,
+      ordinary + "__all__ = tuple(name for name in ['route'])\n", through, false],
+    ["函数返回的 __all__ 排除承接函数", implementations +
+      "def _public():\n    return ('preview',)\n__all__ = _public()\n", ordinary, direct, false],
+    ["函数返回的 __all__ 保留生产入口", implementations,
+      ordinary + "def _public():\n    return ('select_feed',)\n__all__ = _public()\n", through, true],
+    ["非法 __all__ 类型不退回默认公开名", implementations + "__all__ = 1\n", ordinary, direct, false],
+    ["非字符串 __all__ 元素使整张生产清单失效", implementations,
+      ordinary + "__all__ = ['select_feed', None]\n", through, false],
+    ["__all__ 读取异常使整张清单失效", implementations + "class _Exports:\n" +
+      "    def __getitem__(self, i):\n        if i == 0:\n            return 'route'\n        raise ValueError()\n__all__ = _Exports()\n",
+      ordinary, direct, false],
+    ["__all__ 按 CPython 的整数下标读取", implementations + "class _Exports:\n" +
+      "    def __getitem__(self, i):\n        return ('route',)[i]\n" +
+      "    def __iter__(self):\n        return iter(('preview',))\n__all__ = _Exports()\n", ordinary, direct, true],
     ["字面 __all__ 可显式导出下划线函数", implementations + "__all__ = ('_copy',)\n",
       ordinary.replaceAll("route", "_copy"), direct.replace("assert route(", "assert _copy(").replace("import route", "import _copy"), true],
     ["实现公开类方法", "class Route:\n    @classmethod\n    def route(cls, events):\n        return list(events)\n",
@@ -1119,6 +1137,19 @@ test("R15/#1319：Python 公开承接、初始化排除与显式等待", { timeo
   ] as const) await t.test(name, () => check(impl, wire, registered, expected));
   const variants = [
     ["gather", "return (await asyncio.gather(_child(events)))[0]", true],
+    ["gather of gather", "return (await asyncio.gather(asyncio.gather(_child(events))))[0][0]", true],
+    ["wait for a gather", "batch = asyncio.gather(_child(events))\n" +
+      "done, _ = await asyncio.wait({batch})\nreturn done.pop().result()[0]", true],
+    ["shield wraps a gather", "return (await asyncio.shield(asyncio.gather(_child(events))))[0]", true],
+    ["a gather waits on shield", "return (await asyncio.gather(asyncio.shield(_child(events))))[0]", true],
+    ["wait_for wraps a shielded gather", "batch = asyncio.shield(asyncio.gather(_child(events)))\n" +
+      "return (await asyncio.wait_for(batch, 1))[0]", true],
+    ["wait_for consumes a completed gather with zero timeout", "batch = asyncio.gather(_child(events))\n" +
+      "while not batch.done():\n    await asyncio.sleep(0)\nreturn (await asyncio.wait_for(batch, 0))[0]", true],
+    ["as_completed consumes a gather", "batch = asyncio.gather(_child(events))\n" +
+      "for item in asyncio.as_completed([batch]):\n    return (await item)[0]", true],
+    ["TaskGroup task awaits a gather", "async def relay():\n    return (await asyncio.gather(_child(events)))[0]\n" +
+      "async with asyncio.TaskGroup() as group:\n    task = group.create_task(relay())\nreturn task.result()", true],
     ["task", "task = asyncio.create_task(_child(events))\nreturn await task", true],
     ["already-done task", "task = asyncio.create_task(_child(events))\nawait asyncio.sleep(0)\nreturn await task", true],
     ["wait", "task = asyncio.create_task(_child(events))\nawait asyncio.wait({task})\nreturn task.result()", true],
@@ -1127,6 +1158,25 @@ test("R15/#1319：Python 公开承接、初始化排除与显式等待", { timeo
       "return (await asyncio.gather(relay()))[0]", true],
     ["dropped task runs anyway", "asyncio.create_task(_child(events))\nawait asyncio.sleep(0)\nreturn events", false],
     ["dropped gather runs anyway", "asyncio.gather(_child(events))\nawait asyncio.sleep(0)\nreturn events", false],
+    ["a joined gather cannot vouch for a parallel discarded gather", "asyncio.gather(_child(events))\n" +
+      "await asyncio.gather(asyncio.sleep(0))\nreturn events", false],
+    ["a timed-out wait does not vouch for a late gather", "gate = asyncio.Event()\nasync def delayed():\n" +
+      "    await gate.wait()\n    return await _child(events)\nbatch = asyncio.gather(delayed())\n" +
+      "done, pending = await asyncio.wait({batch}, timeout=0)\nassert not done and batch in pending\n" +
+      "gate.set()\nwhile not batch.done():\n    await asyncio.sleep(0)\nreturn events", false],
+    ["an as_completed item left unawaited cannot vouch for its gather", "gate = asyncio.Event()\nasync def delayed():\n" +
+      "    await gate.wait()\n    return await _child(events)\nbatch = asyncio.gather(delayed())\n" +
+      "items = iter(asyncio.as_completed([asyncio.sleep(0), batch]))\nawait next(items)\n" +
+      "next(items).close()\ngate.set()\nwhile not batch.done():\n    await asyncio.sleep(0)\nreturn events", false],
+    ["a wait_for timeout does not consume the shielded gather", "gate = asyncio.Event()\nasync def delayed():\n" +
+      "    await gate.wait()\n    return await _child(events)\nbatch = asyncio.gather(delayed())\n" +
+      "try:\n    await asyncio.wait_for(asyncio.shield(batch), 0)\nexcept TimeoutError:\n    pass\n" +
+      "gate.set()\nwhile not batch.done():\n    await asyncio.sleep(0)\nreturn events", false],
+    ["a failed gather does not consume late siblings", "gate = asyncio.Event()\nasync def delayed():\n" +
+      "    await gate.wait()\n    return await _child(events)\nasync def fail():\n    raise ValueError()\n" +
+      "task = asyncio.create_task(delayed())\nbatch = asyncio.gather(fail(), task)\n" +
+      "while not batch.done():\n    await asyncio.sleep(0)\ngate.set()\n" +
+      "while not task.done():\n    await asyncio.sleep(0)\ntry:\n    await batch\nexcept ValueError:\n    pass\nreturn events", false],
     ["wait does not consume its uncompleted task", "gate = asyncio.Event()\nasync def delayed():\n" +
       "    await gate.wait()\n    return await _child(events)\ntask = asyncio.create_task(delayed())\n" +
       "await asyncio.wait({task}, timeout=0)\ngate.set()\nawait asyncio.sleep(0)\nreturn events", false],

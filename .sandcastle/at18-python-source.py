@@ -8,8 +8,10 @@ import json
 import os
 import sys
 from contextvars import ContextVar
+from itertools import count
 from pathlib import Path
 from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType
+from weakref import WeakKeyDictionary
 
 import pytest
 
@@ -102,18 +104,29 @@ def statements(body):
                 yield from statements(case.body)
 
 
+def export_names(namespace):
+    if "__all__" not in namespace:
+        return [name for name in namespace if not name.startswith("_")]
+    # CPython 的 import * 用整数下标读到 IndexError，不调用 __iter__。
+    exports = namespace["__all__"]
+    names = []
+    for i in count():
+        try:
+            name = exports[i]
+        except IndexError:
+            return names
+        except (Exception, SystemExit):
+            return []
+        if not isinstance(name, str):
+            return []
+        names.append(str.__str__(name))
+
+
 class Exports:
     def __init__(self, path, require_body=False):
         self.path = str(Path(path).resolve())
         raw = Path(path).read_bytes()
         top = list(statements(ast.parse(raw, path).body))
-        self.literal_all = any(
-            isinstance(stmt, (ast.Assign, ast.AnnAssign)) and
-            any(isinstance(target, ast.Name) and target.id == "__all__" for target in
-                (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target])) and
-            isinstance(stmt.value, (ast.List, ast.Tuple)) and
-            all(isinstance(value, ast.Constant) and type(value.value) is str for value in stmt.value.elts)
-            for stmt in top)
         functions = {(line(stmt), stmt.name) for stmt in top if isinstance(stmt, FUNCTIONS)
                      and (not require_body or substantive(stmt))}
         classes = {(line(stmt), stmt.name) for stmt in top if isinstance(stmt, ast.ClassDef)}
@@ -127,15 +140,8 @@ class Exports:
         self.codes = self.functions | self.methods
 
     def members(self, namespace):
-        explicit = self.literal_all and "__all__" in namespace
-        if explicit:
-            export_list = namespace["__all__"]
-            if type(export_list) not in (tuple, list) or not all(type(name) is str for name in export_list):
-                return
-            names = export_list
-        else:
-            names = [name for name in namespace if not name.startswith("_")]
-        for name in names:
+        explicit = "__all__" in namespace
+        for name in export_names(namespace):
             value = namespace.get(name)
             if type(value) is FunctionType and value.__code__ in self.functions:
                 if explicit or not value.__code__.co_name.startswith("_"):
@@ -199,40 +205,78 @@ def current_task():
         return None
 
 
-def joined(scopes, waiter, tasks):
+native_task = asyncio.Task
+native_future = asyncio.Future
+children_of = WeakKeyDictionary()
+
+
+def joined(scopes, waiter, futures):
     if not scopes:
         return
-    done = [task for task in tasks if isinstance(task, native_task) and task.done() and not task.cancelled()]
+    # 只在显式等待完成时展开；之后自行完成的任务不得补入已消费集合。
+    done, seen, pending = set(), set(), list(futures)
+    while pending:
+        future = pending.pop()
+        if not isinstance(future, native_future) or future in seen or not future.done() or future.cancelled():
+            continue
+        seen.add(future)
+        if isinstance(future, native_task):
+            done.add(future)
+        pending.extend(children_of.get(future, ()))
     for scope in scopes:
         scope.joined.setdefault(waiter, set()).update(done)
 
 
-native_task = asyncio.Task
+# wait_for 的部分分支以及同步 as_completed 项通过 result() 取结果，不走 __await__。
+wait_result_codes = {asyncio.wait_for.__code__}
+completion_iterator = getattr(asyncio.tasks, "_AsCompletedIterator", None)
+if completion_iterator is not None:
+    wait_result_codes.add(completion_iterator._wait_for_one.__code__)
+else:
+    wait_result_codes.update(code for code in code_objects(asyncio.as_completed.__code__)
+                             if code.co_name == "_wait_for_one")
 
 
 def observe_waits():
     """在原生等待完成的位置记因果边；不推进本来没有被调用者等待的任务。"""
-    class TracedTask(native_task):
+    class ObservedAwait:
         def __await__(self):
             scopes, waiter = active.get(), current_task()
             try:
                 return (yield from super().__await__())
+            except asyncio.CancelledError:
+                scopes = ()
+                raise
             finally:
                 joined(scopes, waiter, (self,))
 
         __iter__ = __await__
 
-    # 保留原生 Future 接口和 gather 的调度、取消、异常语义。
-    class TracedGather(asyncio.tasks._GatheringFuture):
-        def __await__(self):
-            scopes, waiter = active.get(), current_task()
-            try:
-                return (yield from super().__await__())
-            finally:
-                if self.done() and not self.cancelled():
-                    joined(scopes, waiter, self._children)
+    class TracedTask(ObservedAwait, native_task):
+        pass
 
-        __iter__ = __await__
+    class TracedFuture(ObservedAwait, native_future):
+        pass
+
+    # 保留原生 Future 接口和 gather 的调度、取消、异常语义。
+    class TracedGather(ObservedAwait, asyncio.tasks._GatheringFuture):
+        def __init__(self, children, *, loop):
+            super().__init__(children, loop=loop)
+            children_of[self] = tuple(children)
+
+        def set_exception(self, exception):
+            super().set_exception(exception)
+            # gather 可提前抛错；此时未完成的兄弟任务不属于已等待的批次。
+            children_of[self] = tuple(child for child in children_of[self] if child.done())
+
+    native_shield = asyncio.shield
+
+    def traced_shield(arg):
+        inner = asyncio.ensure_future(arg)
+        outer = native_shield(inner)
+        if outer is not inner:
+            children_of[outer] = (inner,)
+        return outer
 
     native_wait = asyncio.wait
 
@@ -280,7 +324,9 @@ def observe_waits():
             joined(scopes, None, (future,))
 
     asyncio.Task = asyncio.tasks.Task = TracedTask
+    asyncio.BaseEventLoop.create_future = lambda loop: TracedFuture(loop=loop)
     asyncio.tasks._GatheringFuture = TracedGather
+    asyncio.shield = asyncio.tasks.shield = traced_shield
     asyncio.wait = asyncio.tasks.wait = traced_wait
     asyncio.TaskGroup = asyncio.taskgroups.TaskGroup = TracedGroup
     asyncio.BaseEventLoop.run_until_complete = traced_run
@@ -298,6 +344,8 @@ class Trace:
 
     def profile(self, frame, event, arg):
         code = frame.f_code
+        if event == "c_call" and code in wait_result_codes and arg.__name__ == "result":
+            joined(active.get(), current_task(), (arg.__self__,))
         if event == "return" and frame in self.activations:
             active.reset(self.activations.pop(frame))
             if self.scopes[frame] is not self.test_scope and code.co_code[frame.f_lasti] in returns:
