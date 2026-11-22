@@ -1,10 +1,11 @@
 """ADR 0064 r6 的 R10 Git 对象与补救原件本地核验。"""
 from __future__ import annotations
 
+import ast
 from collections import defaultdict
 from functools import cache
-from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import subprocess
 import sys
@@ -22,10 +23,10 @@ REMEDIATION = ".chanlun/at18/pregate-remediation.json"
 REMEDIATION_SCHEMA = "at18-pregate-remediation/1"
 REVIEW_ARCHIVE = ".chanlun/review-results/"
 INPUT_MANIFEST = "INPUT-MANIFEST.json"
-OUTPUT_DIRS = frozenset({
-    "report", "reports", "receipt", "receipts", "review", "reviews", "audit", "audits", "verify", "runs",
-})
-OUTPUT_NAME = re.compile(r"(?:^|[-_.])(?:report|result|receipt|audit|review|verify)(?:\.|$)")
+OUTPUT_TOKEN = re.compile(
+    r"(?:^|[^a-z0-9])(?:reviews?|reports?|results?|receipts?|audits?|verify|verification|"
+    r"evidence|summary|summaries|verdicts?|runs)(?=$|[^a-z0-9])"
+)
 REGULAR_RAW_MODES = tuple(mode.encode() for mode in REGULAR_MODES)
 # 按 #1339/#1340 的归档清单只开放具名规范。索引的 role 同时标记了规范和独评，
 # 不能拿来放行；签署稿与阅读版须各按自己的 Git 路径/字节判定。
@@ -94,11 +95,25 @@ RECEIPT_VERDICT = re.compile(
 RUN_EXIT_CODE = re.compile(r"(?mi)^(?:[-*] )?(?:Exit code|退出码)[:：][ \t]*[0-9]+[ \t]*\r?$")
 RUN_RESULT = re.compile(r"(?mi)^(?:[-*] )?(?:Run result|运行结果)[:：][ \t]*(?:PASS|FAIL)[ \t]*\r?$")
 
+REPORT_HEADING = re.compile(r"^#{1,6}[ \t]+[^\r\n]*(?:验收|复核|复验|评审|报告)")
+REPORT_OUTCOME = re.compile(
+    r"(?mi)^(?:[-*][ \t]+)?(?:\*\*)?(?:结果|结论|判定)[:：][ \t]*(?:\*\*)?"
+    r"(?:PASS|FAIL|BLOCK|REJECT|CHANGES_REQUIRED)(?=$|[ \t*。，、；,;.!\r])"
+)
+REPORT_EXECUTION = re.compile(
+    rf"(?:固定|受审|候选|冻结)提交[ \t：:]+`?{GIT_SHA}\b|(?:运行器)?进程退出(?:码)?[ \t：:]+[0-9]+\b"
+)
+
 
 class Entry(NamedTuple):
     mode: str
     kind: str
     blob: str
+
+
+class ArchivedArtifacts(NamedTuple):
+    blobs: set[str]
+    loaded_inputs: set[tuple[str, str]]
 
 
 class ContractError(ValueError):
@@ -211,58 +226,165 @@ def is_artifact_archive_path(path):
     return not (stem in allowed and (extension == "md" or (edition == "payload" and extension == "json")))
 
 
-def input_manifest_paths(raw):
+def frozen_copies(raw):
     try:
         doc = decode_json(raw)
     except ValueError:
-        return set()
-    if not isinstance(doc, dict):
-        return set()
-    paths = set()
-    inputs = doc.get("inputs")
-    if isinstance(inputs, list):
-        paths.update(path for path in inputs if valid_path(path))
-    copies = doc.get("frozen_copies")
-    if isinstance(copies, dict):
-        paths.update(path for path, source in copies.items()
-                     if valid_path(path) and isinstance(source, str) and source.strip())
-    files = doc.get("files_sha256")
-    if isinstance(files, dict):
-        paths.update(path for path, digest in files.items()
-                     if valid_path(path) and isinstance(digest, str) and re.fullmatch("[0-9a-fA-F]{64}", digest))
-    return paths
+        return {}
+    copies = doc.get("frozen_copies") if isinstance(doc, dict) else None
+    return copies if isinstance(copies, dict) else {}
 
 
-def archive_input_blobs(blobs, *, cwd):
-    """批量检查候选输入正文，保留报告与回执的内容禁用。"""
-    if not blobs:
-        return set()
-    response = git("cat-file", "--batch", cwd=cwd, input=b"\n".join(sorted(blobs)) + b"\n")
-    stream = BytesIO(response)
-    artifacts = set()
-    while header := stream.readline():
-        oid, _, size = header.split()
-        raw = stream.read(int(size))
-        stream.read(1)  # Git 在每份正文后另加一个 LF。
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeError:  # 二进制不是可引用的依据。
+def is_archive_output(path):
+    relative = path.removeprefix(REVIEW_ARCHIVE)
+    return (relative.rsplit("/", 1)[-1].lower() == INPUT_MANIFEST.lower()
+            or OUTPUT_TOKEN.search(relative.lower()) is not None)
+
+
+# 只认有确定锚点的读取式，不把文件路径字符串本身当成加载证据。
+JS_SUFFIXES = (".js", ".cjs", ".mjs", ".ts", ".mts", ".cts")
+SOURCE_SUFFIXES = (*JS_SUFFIXES, ".rs", ".py")
+BLOCK_DELIMITER = re.compile(r"/\*|\*/")
+COMMON_TOKENS = (
+    r'(?P<comment>//[^\r\n]*|/\*)|(?P<string>"(?:\\[^\r\n]|[^"\\\r\n])*")'
+    r'|[A-Za-z_$][\w$]*|[^\s]'
+)
+RUST_TOKENS = re.compile(r'(?:br|r)(?P<hashes>\#*)"(?s:.*?)"(?P=hashes)|\'(?:\\.|[^\'\\\r\n])\'|'
+                         + COMMON_TOKENS)
+JS_TOKENS = re.compile(
+    r'(?P<single>\'(?:\\[^\r\n]|[^\'\\\r\n])*\')|`(?:\\[\s\S]|[^`\\])*`'
+    r'|/(?![/*])(?:\\[^\r\n]|\[(?:\\.|[^\]\\\r\n])*\]|[^/\\[\r\n])+/[dgimsuvy]*|'
+    + COMMON_TOKENS
+)
+
+
+def source_tokens(text, *, rust):
+    """去掉注释，把字符串/模板/正则作为不可拆分的词元。"""
+    scan = RUST_TOKENS if rust else JS_TOKENS
+    literals, tokens = {}, []
+    end = 0
+    while match := scan.search(text, end):
+        token = match[0]
+        end = match.end()
+        if match["comment"]:
+            if token == "/*":
+                depth = 1
+                for delimiter in BLOCK_DELIMITER.finditer(text, end):
+                    if rust or delimiter[0] == "*/":
+                        depth += 1 if delimiter[0] == "/*" else -1
+                    if depth == 0:
+                        end = delimiter.end()
+                        break
+                else:
+                    break
             continue
-        if is_report_artifact(raw, text):
-            artifacts.add(oid.decode())
-    return artifacts
+        if match["string"] or (not rust and match["single"]):
+            # 不解码转义：只承认可逐字对到仓库相对路径的字符串。
+            key = f"@{len(literals)}"
+            literals[key] = token[1:-1]
+            tokens.append(key)
+        else:
+            tokens.append(token if re.fullmatch(r"[\w$]+|[.:=(),;!{}]", token) else "~")
+    return " ".join(tokens), literals
+
+
+def source_relative_reads(text, suffix):
+    if suffix == ".py":
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            return
+        if not any(isinstance(stmt, ast.ImportFrom) and stmt.module == "pathlib" and stmt.level == 0
+                   and any(n.name == "Path" and n.asname is None for n in stmt.names) for stmt in tree.body):
+            return
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            joined = node.func.value
+            if node.func.attr not in {"read_bytes", "read_text"} or not isinstance(joined, ast.BinOp):
+                continue
+            if not isinstance(joined.op, ast.Div) or not isinstance(joined.right, ast.Constant):
+                continue
+            parent = joined.left
+            if not isinstance(parent, ast.Attribute) or parent.attr != "parent":
+                continue
+            anchor = parent.value
+            if (isinstance(anchor, ast.Call) and isinstance(anchor.func, ast.Name)
+                    and anchor.func.id == "Path" and len(anchor.args) == 1 and not anchor.keywords
+                    and isinstance(anchor.args[0], ast.Name) and anchor.args[0].id == "__file__"
+                    and isinstance(joined.right.value, str)):
+                yield joined.right.value
+        return
+
+    rust = suffix == ".rs"
+    tokens, literals = source_tokens(text, rust=rust)
+    if rust:
+        for read in re.finditer(r"(?<!\S)include_(?:str|bytes) ! \( (@[0-9]+)(?: ,)? \)", tokens):
+            yield literals[read[1]]
+        return
+
+    # Node CommonJS: 先核两个内建模块，再核 readFileSync 的直接实参或 const 路径绑定。
+    modules = defaultdict(set)
+    for binding in re.finditer(r"(?:^| )(?:const|,) ([\w$]+) = require \( (@[0-9]+) \)", tokens):
+        modules[literals[binding[2]]].add(binding[1])
+    for fs in modules["node:fs"] | modules["fs"]:
+        for path in modules["node:path"] | modules["path"]:
+            joined = rf"{re.escape(path)} \. join \( __dirname , (@[0-9]+)(?: ,)? \)"
+            load = rf"(?<!\S)(?<!\. ){re.escape(fs)} \. readFileSync \( "
+            for read in re.finditer(load + joined + r"(?= [,)])", tokens):
+                yield literals[read[1]]
+            variables = {m[1]: m[2] for m in re.finditer(rf"(?<!\S)const ([\w$]+) = {joined} ;", tokens)}
+            for read in re.finditer(load + r"([\w$]+)(?= [,)])", tokens):
+                if read[1] in variables:
+                    yield literals[variables[read[1]]]
+
+
+def loaded_archive_inputs(final_tree, head, candidates, forbidden, *, cwd):
+    if not candidates:
+        return set()
+    names = sorted({posixpath.basename(path) for path in candidates if "\n" not in path})
+    if not names:
+        return set()
+    patterns = [part for name in names for part in ("-e", name)]
+    matches = subprocess.run(
+        ["git", "grep", "-IlzF", "--no-textconv", *patterns, head, "--",
+         *(f"*{suffix}" for suffix in SOURCE_SUFFIXES)],
+        cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, check=False,
+    )
+    if matches.returncode == 1:
+        return set()
+    matches.check_returncode()
+    loaded = set()
+    for record in matches.stdout.split(b"\0")[:-1]:
+        path = record.split(b":", 1)[1].decode("utf-8")
+        entry = final_tree.get(path)
+        if (entry is None or entry.kind != "blob" or entry.mode not in REGULAR_MODES
+                or path.startswith(REVIEW_ARCHIVE) or entry.blob in forbidden):
+            continue
+        # 读取 F 中的已跟踪普通文件，不查看工作树或执行被检查的代码。
+        try:
+            text = git("cat-file", "blob", f"{head}:{path}", cwd=cwd).decode("utf-8")
+        except UnicodeError:
+            continue
+        for relative in source_relative_reads(text, PurePosixPath(path).suffix):
+            if not relative or relative.startswith("/") or "\\" in relative or "\0" in relative:
+                continue
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(path), relative))
+            if target in candidates:
+                loaded.add((target, candidates[target]))
+    return loaded
 
 
 def archive_artifact_blobs(final_tree, head, *, cwd):
-    """只在 F 的首父历史定起源，供本次补救校验的所有条目共用。"""
+    """在 F 的首父历史拒绝归档 blob；迁出的夹具只放行其被加载的路径。"""
     # 根快照及新增/变更足以覆盖已删除的产出；合并只与第一父比较。
     raw = git("log", "--root", "--first-parent", "--diff-merges=first-parent",
               "--no-renames", "--no-abbrev", "--raw", "-z", "--format=%x00%H",
               "--diff-filter=AMT", "--reverse", head, cwd=cwd)
-    candidates = {
-        entry.blob.encode() for path, entry in final_tree.items()
-        if entry.kind == "blob" and entry.mode in REGULAR_MODES and is_artifact_archive_path(path)
-    }
+    archive_paths = defaultdict(set)
+    for path, entry in final_tree.items():
+        if entry.kind == "blob" and entry.mode in REGULAR_MODES and is_artifact_archive_path(path):
+            archive_paths[entry.blob.encode()].add(path)
     manifests = set()
     # 先限定候选；不为从未在受禁归档出现的 blob 建历史索引。
     marker = b"\0" + REVIEW_ARCHIVE.encode()
@@ -278,10 +400,10 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
             if relative.endswith("/" + INPUT_MANIFEST):
                 manifests.add(text_path)
             if is_artifact_archive_path(text_path):
-                candidates.add(blob)
-    candidates.discard(EMPTY_BLOB.encode())
-    if not candidates:
-        return set()
+                archive_paths[blob].add(text_path)
+    archive_paths.pop(EMPTY_BLOB.encode(), None)
+    if not archive_paths:
+        return ArchivedArtifacts(set(), set())
 
     origins = {}
     records = iter(raw.split(b"\0")[:-1])
@@ -291,7 +413,7 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
             continue
         path = next(records)
         _, mode, _, blob, _ = metadata.split()
-        if blob in candidates and mode in REGULAR_RAW_MODES:
+        if blob in archive_paths and mode in REGULAR_RAW_MODES:
             first, paths = origins.setdefault(blob, (commit, []))
             if first == commit:
                 paths.append(path.decode("utf-8", errors="surrogateescape"))
@@ -299,49 +421,78 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
     manifest_dirs = tuple(path.rsplit("/", 1)[0] + "/" for path in manifests)
 
     @cache
-    def manifest_inputs(blob):
-        return input_manifest_paths(git("cat-file", "blob", blob, cwd=cwd))
+    def manifest_copies(blob):
+        return frozen_copies(git("cat-file", "blob", blob, cwd=cwd))
 
     @cache
     def declared_inputs(commit):
-        # 用最早提交的清单；声明不能靠同名条目或后续递交改写。
-        raw = git("--literal-pathspecs", "ls-tree", "--full-tree", "-rz", commit.decode(),
-                  "--", *sorted(manifests), cwd=cwd)
-        declared = set()
-        for record in raw.split(b"\0")[:-1]:
+        # 只读首见提交的清单；仅索引 frozen_copies，不认文件列表或摘要表。
+        raw_manifests = git("--literal-pathspecs", "ls-tree", "--full-tree", "-rz", commit,
+                            "--", *sorted(manifests), cwd=cwd)
+        declared = defaultdict(list)
+        for record in raw_manifests.split(b"\0")[:-1]:
             metadata, path = record.split(b"\t", 1)
             mode, kind, blob = metadata.decode().split()
             if kind == "blob" and mode in REGULAR_MODES:
                 directory = path.decode("utf-8", errors="surrogateescape").rsplit("/", 1)[0]
-                declared.update(f"{directory}/{item}" for item in manifest_inputs(blob))
+                for item, source in manifest_copies(blob).items():
+                    if valid_path(item) and isinstance(source, str):
+                        declared[f"{directory}/{item}"].append(source)
         return declared
 
-    def input_path(path, commit):
-        _, separator, relative = path.removeprefix(REVIEW_ARCHIVE).partition("/")
-        if not separator:
+    @cache
+    def tree_at(commit):
+        return git_tree(commit, cwd=cwd)
+
+    def frozen_source_matches(source, blob, commit):
+        path, separator, ref = source.strip().partition(" @ ")
+        if not valid_path(path) or path.startswith(REVIEW_ARCHIVE) or path == REMEDIATION:
             return False
-        *dirs, leaf = relative.lower().split("/")
-        if (leaf == INPUT_MANIFEST.lower() or OUTPUT_NAME.search(leaf)
-                or not OUTPUT_DIRS.isdisjoint(dirs)):
-            return False
-        return ("inputs" in dirs
-                or (path.startswith(manifest_dirs) and path in declared_inputs(commit)))
+        if separator:
+            # 可钉住该提交的祖先对象，不能跟随可变引用或仓外路径。
+            match = re.fullmatch(r"(?:[\w./-]+ )?([0-9a-f]{7,40})", ref)
+            if not match:
+                return False
+            revision = match[1]
+            if subprocess.run(["git", "merge-base", "--is-ancestor", revision, commit],
+                              cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              check=False).returncode != 0:
+                return False
+            commit = revision
+        entry = tree_at(commit).get(path)
+        return entry is not None and entry.kind == "blob" and entry.mode in REGULAR_MODES and entry.blob == blob
+
+    def declared_copy(path, blob, commit):
+        return (path.startswith(manifest_dirs) and not is_archive_output(path)
+                and any(frozen_source_matches(source, blob, commit)
+                        for source in declared_inputs(commit).get(path, ())))
 
     forbidden = set()
-    inspect_bodies = set()
-    for blob in candidates:
-        if blob not in origins:
-            # 若传入树额外带有历史中不存在的归档项，保留它的归档身份。
-            forbidden.add(blob.decode())
+    migrated = set()
+    for raw_blob, history in archive_paths.items():
+        blob = raw_blob.decode()
+        if raw_blob not in origins:
+            forbidden.add(blob)
             continue
-        commit, paths = origins[blob]
-        # 同一提交出现现役别名或输入副本，不足以推翻该提交内的归档产出。
+        commit, paths = origins[raw_blob]
+        if REMEDIATION in paths:
+            forbidden.add(blob)
+            continue
         restricted = [path for path in paths if is_artifact_archive_path(path)]
-        if REMEDIATION in paths or any(not input_path(path, commit) for path in restricted):
-            forbidden.add(blob.decode())
-        elif restricted:
-            inspect_bodies.add(blob)
-    return forbidden | archive_input_blobs(inspect_bodies, cwd=cwd)
+        # 首父上已存在的现役/具名规范原件，不会被后来的归档副本污染。
+        if not restricted or all(declared_copy(path, blob, commit.decode()) for path in restricted):
+            continue
+        forbidden.add(blob)
+        # 同期的中性别名不是起源证明；只有归档中的所有旧路径已经迁出才考虑夹具。
+        if (all(path.startswith(REVIEW_ARCHIVE) for path in paths)
+                and all(path not in final_tree and not is_archive_output(path) for path in history)):
+            migrated.add(blob)
+    candidates = {
+        path: entry.blob for path, entry in final_tree.items()
+        if entry.kind == "blob" and entry.mode in REGULAR_MODES and entry.blob in migrated
+        and not path.startswith(REVIEW_ARCHIVE)
+    }
+    return ArchivedArtifacts(forbidden, loaded_archive_inputs(final_tree, head, candidates, forbidden, cwd=cwd))
 
 
 def is_git_sha(value):
@@ -350,7 +501,7 @@ def is_git_sha(value):
 
 def has_outcome(value):
     return (isinstance(value, str)
-            and re.fullmatch(r"(?:PASS(?:ED)?|FAIL(?:ED)?|BLOCK(?:ED)?|REJECT(?:ED)?)(?:_[A-Z0-9]+)*",
+            and re.fullmatch(r"(?:PASS(?:ED)?|FAIL(?:ED)?|BLOCK(?:ED)?|REJECT(?:ED)?|CHANGES_REQUIRED)(?:_[A-Z0-9]+)*",
                              value.upper()) is not None)
 
 
@@ -399,6 +550,10 @@ def is_json_artifact(obj):
     if ({"argv", "expected_pids", "exit", "stdout", "stderr", "at_utc"} <= obj.keys()
             or {"ticket", "baseline", "report_kind", "platform", "ac"} <= obj.keys()):
         return True
+    # 执行对拍同时记录运行时、退出状态和计数，不是只有输入/期望值的向量。
+    if ({"issue", "status", "runtime", "source_basis", "exit_code", "counts"} <= obj.keys()
+            and type(obj["exit_code"]) is int and isinstance(obj["counts"], dict)):
+        return True
     files = obj.get("files")
     return ({"utc", "scope", "files"} <= obj.keys() and isinstance(files, list) and bool(files)
             and all(isinstance(file, dict) and {"path", "bytes", "sha256"} <= file.keys() for file in files))
@@ -417,6 +572,8 @@ def is_report_artifact(raw, text):
         return True
     preamble = "\n".join(content.split("\n", 12)[:12])
     metadata = re.split(r"(?m)^[ \t]*(?:```|~~~)", preamble, maxsplit=1)[0]
+    if REPORT_HEADING.match(metadata) and REPORT_OUTCOME.search(metadata) and REPORT_EXECUTION.search(metadata):
+        return True
     return bool(RECEIPT_COMMIT.search(metadata)
                 and (RECEIPT_VERDICT.search(metadata)
                      or (RUN_EXIT_CODE.search(metadata) and RUN_RESULT.search(metadata))))
@@ -430,7 +587,8 @@ def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):
     entry = final_tree.get(path)
     fail(entry is not None and entry.kind == "blob" and entry.mode in REGULAR_MODES
          and entry.blob == blob, "verification_basis must bind a regular F blob")
-    fail(blob not in archived_artifacts, ARTIFACT_BASIS_ERROR)
+    fail(blob not in archived_artifacts.blobs or (path, blob) in archived_artifacts.loaded_inputs,
+         ARTIFACT_BASIS_ERROR)
     if blob not in cache:
         raw = git("cat-file", "blob", entry.blob, cwd=cwd)
         try:

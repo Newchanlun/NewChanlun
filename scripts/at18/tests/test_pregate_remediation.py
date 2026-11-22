@@ -910,14 +910,16 @@ def test_basis_keeps_rules_first_published_outside_archive(history, options, lea
 
 
 @pytest.mark.parametrize(("kind", "leaf", "raw", "allowed"), [
-    ("directory", "inputs/vectors.json", FEE_RULE, True),
+    ("directory", "inputs/vectors.json", FEE_RULE, False),
     ("same-dir", "frozen/material.json", FEE_RULE, True),
-    ("manifest-inputs", "frozen/material.json", FEE_RULE, True),
+    ("manifest-inputs", "frozen/material.json", FEE_RULE, False),
     ("package", "frozen/material.json", FEE_RULE, True),
-    ("digest-list", "frozen/material.json", FEE_RULE, True),
+    ("digest-list", "frozen/material.json", FEE_RULE, False),
     ("archive-root", "frozen/material.json", FEE_RULE, False),
     ("wrong-path", "frozen/material.json", FEE_RULE, False),
     ("late", "frozen/material.json", FEE_RULE, False),
+    ("wrong-blob", "frozen/material.json", FEE_RULE, False),
+    ("archive-source", "frozen/material.json", FEE_RULE, False),
     ("late", "old/result-copy.txt", "Unstructured delivery record\n", False),
     ("same-dir", "frozen/REPORT.md", "Unstructured delivery record\n", False),
     ("directory", "inputs/NODE-RESULT.json", FEE_RULE, False),
@@ -927,8 +929,9 @@ def test_basis_keeps_rules_first_published_outside_archive(history, options, lea
     ("same-dir", "frozen/material.json", '{"schema_version":"at18-report/1"}', False),
     ("directory", "inputs/material.txt", f"Reviewed head: {RUN_HEAD}\nVerdict: PASS\n", False),
 ], ids=[
-    "pure-input", "sibling-manifest", "inputs-list", "package-manifest", "digest-list",
-    "archive-root-manifest", "same-basename-not-exact", "late-declaration", "late-input-alias",
+    "bare-input-dir", "sibling-manifest", "inputs-list", "package-manifest", "digest-list",
+    "archive-root-manifest", "same-basename-not-exact", "late-declaration", "wrong-blob",
+    "archive-source", "late-input-alias",
     "manifest-names-report", "result-under-inputs", "receipt-dir-under-inputs",
     "review-under-inputs", "verify-under-inputs", "report-content-in-manifest", "receipt-content-under-inputs",
 ])
@@ -948,11 +951,16 @@ def test_basis_promotes_only_archive_inputs(history, options, kind, leaf, raw, a
     elif kind == "digest-list":
         declaration = {"files_sha256": {relative: "a" * 64}}
     else:
-        declaration = {"frozen_copies": {relative: "source @ snapshot"}}
+        source = (package if kind == "archive-source" else "inputs/") + "origin.dat"
+        # 首次归档和活源同提交出现，不能靠条件 A 通过。
+        if kind != "late":
+            h.write(source, b"different bytes" if kind == "wrong-blob" else raw.encode())
+        declaration = {"frozen_copies": {relative: source}}
     if kind not in ("directory", "late"):
         h.write(manifest, json.dumps(declaration).encode())
     h.commit("Archive the original")
     if kind == "late":
+        h.write(source, raw.encode())
         h.write(manifest, json.dumps(declaration).encode())
         h.write(package + "inputs/late-copy.txt", raw.encode())
         h.commit("A later input declaration cannot change origin")
@@ -1044,3 +1052,136 @@ def test_real_history_separates_live_inputs_from_deleted_reports(options):
         "slices": ["accepted"] * 9,
         "old_report": BASIS_ERROR,
     }
+
+
+R5_HEAD = "3aff72dd0c274f33ace1286927ece96b0b32401d"
+DURABILITY = ARCHIVE + "issue1370-tb01-a/acceptance/payload/inputs/tb01-post-repair-durability/REVIEW-9a.md"
+BROWSER = ARCHIVE + "issue1394-financial-owner-20260930/inputs/ECONOMIC-BROWSER-RESULTS.md"
+VECTOR_RESULT = ARCHIVE + "issue1394-content-v3-20260916/inputs/historical-independent-vector-result.json"
+VECTOR = "s_session/tests/fixtures/s-content-v3/content-format-vectors.json"
+
+
+@pytest.mark.parametrize(("ref", "source", "line", "move"), [
+    (R5_HEAD, DURABILITY, 3, "archive"),
+    (R5_HEAD, DURABILITY, 3, "copy"),
+    (R5_HEAD, DURABILITY, 3, "body"),
+    ("6badaa60494740702c217abc9921809de3899ce0", BROWSER, 3, "move"),
+    ("6badaa60494740702c217abc9921809de3899ce0", BROWSER, 3, "body"),
+    (R5_HEAD, VECTOR_RESULT, 2, "copy"),
+    (R5_HEAD, VECTOR_RESULT, 2, "move"),
+    (R5_HEAD, VECTOR_RESULT, 2, "body"),
+    (S86_REMOVAL + "^1", S86_REPORT, 1, "move"),
+], ids=["durability-original", "durability-copy", "durability-body", "browser-restored",
+        "browser-body", "vector-result-copy", "vector-result-restored", "vector-result-body",
+        "s86-restored"])
+def test_real_archive_reports_never_become_inputs(history, options, ref, source, line, move):
+    h = history
+    raw = git_at_r3("show", f"{ref}:{source}")
+    path = "spec/retained-note.md" if move == "body" else source
+    h.write(path, raw)
+    h.gate()
+    if move in ("copy", "move"):
+        path = "spec/retained-note.md"
+        if move == "move":
+            h.remove(source)
+        h.write(path, raw)
+        h.commit("Reuse the genuine archive bytes under a neutral name")
+        assert h.blob("HEAD", path) == git_at_r3("rev-parse", f"{ref}:{source}").decode().strip()
+    check_basis(h, options, path, allowed=False, line=line)
+
+
+JS_LOADER = b"""const fs = require("node:fs"), path = require("node:path");
+const vectors = fs.readFileSync(path.join(__dirname, "fixtures/vectors.json"));
+"""
+PY_LOADER = b"""from pathlib import Path
+vectors = (Path(__file__).parent / "fixtures/vectors.json").read_bytes()
+"""
+RUST_LOADER = b'const VECTORS: &str = include_str!("fixtures/vectors.json");\n'
+
+
+@pytest.mark.parametrize(("scenario", "allowed"), [
+    ("node", True), ("node-binding", True), ("python", True), ("rust", True),
+    ("same-blob-alias", False), ("same-commit-loaded", False),
+    ("retained-archive", False), ("report-name", False), ("old-output-name", False),
+    ("report-body", False), ("comment", False), ("string", False), ("doc", False),
+    ("path-variable-only", False), ("wrong-reader", False), ("wrong-dir", False), ("no-loader", False),
+    ("wrong-f", False),
+])
+def test_basis_promotes_only_the_migrated_path_loaded_in_f(history, options, scenario, allowed):
+    h = history
+    package = ARCHIVE + "generic-bundle/"
+    archived = package + "inputs/" + ("VECTOR-RESULTS.json" if scenario == "report-name" else "vectors.json")
+    path = "tests/fixtures/vectors.json"
+    raw = FEE_RULE.encode()
+    if scenario == "report-body":
+        raw = git_at_r3("show", f"{R5_HEAD}:{DURABILITY}")
+    h.gate()
+    h.write(archived, raw)
+    if scenario == "same-commit-loaded":
+        h.write(path, raw)
+    old_output = h.root / (package + "old-VERIFY-round/vectors.json")
+    if scenario == "old-output-name":
+        h.write(str(old_output.relative_to(h.root)), raw)
+    h.commit("First appearance in archived collection")
+    if scenario == "old-output-name":
+        old_output.rename(h.root.parent / "old-output")
+        h.commit("Remove the older output alias")
+        archived = package + "inputs/vectors.json"
+    if scenario != "retained-archive":
+        h.remove(archived)
+    h.write(path, raw)
+    code_path, code = "tests/test_vectors.cjs", JS_LOADER
+    if scenario == "node-binding":
+        code = code.replace(b'const vectors = fs.readFileSync(path.join(__dirname, "fixtures/vectors.json"));',
+                            b'const vectorPath = path.join(__dirname, "fixtures/vectors.json",);\n'
+                            b'const vectors = fs.readFileSync(vectorPath, "utf8");')
+    if scenario == "python":
+        code_path, code = "tests/test_vectors.py", PY_LOADER
+    if scenario == "rust":
+        code_path, code = "tests/test_vectors.rs", RUST_LOADER
+    if scenario == "comment":
+        code = b"/*\n" + code + b"*/\n"
+    if scenario == "string":
+        code = b"const example = `\n" + code + b"`;\n"
+    if scenario == "doc":
+        code_path = "tests/example.md"
+    if scenario == "path-variable-only":
+        code = code.replace(b"fs.readFileSync(", b"String(")
+    if scenario == "wrong-reader":
+        code = code.replace(b"fs.readFileSync(", b"other.fs.readFileSync(")
+    if scenario == "wrong-dir":
+        code_path = "other/test_vectors.cjs"
+    if scenario not in ("no-loader", "wrong-f"):
+        h.write(code_path, code)
+    if scenario == "same-blob-alias":
+        path = "spec/retained-note.md"
+        h.write(path, raw)
+    h.commit("Retain the selected fixture outside the archive")
+    if scenario == "wrong-f":
+        h.artifact([h.row(basis=path)])
+        # 未写入 F 的现役加载器不能影响归档身份。
+        h.write(code_path, code)
+        result = h.probe(options)
+        assert result.returncode == 1 and not result.stdout and BASIS_ERROR in result.stderr
+        return
+    check_basis(h, options, path, allowed=allowed)
+
+
+@pytest.mark.parametrize(("path", "line", "count"), [
+    ("s_session/profiles/ohlc_integer_tb02a_v1.json", 5, 5),
+    ("s_session/README.md", 166, 5),
+    (VECTOR, 2, 5),
+    (DURABILITY, 3, 0),
+])
+def test_census_r5_previews_keep_live_inputs_and_refuse_report(options, archive_preview, tmp_path, path, line, count):
+    original, _ = archive_preview[SPEC_INTERFACE]
+    preview = json.loads(original.read_bytes())
+    blob = git_at_r3("rev-parse", f"{R5_HEAD}:{path}").decode().strip()
+    for row in preview["rows"]:
+        row["verification_basis"] = [dict(path=path, blob=blob, line_start=line, line_end=line)]
+    remediation = tmp_path / "preview.json"
+    remediation.write_text(json.dumps(preview, ensure_ascii=False), encoding="utf-8")
+    result = census(options, "--head", R5_HEAD, "--remediation", str(remediation))
+    assert result.returncode == 1, result.stderr
+    assert f"{count} locally validated remediation rows; 0 released" in result.stdout
+    assert (BASIS_ERROR in result.stderr) == (count == 0)
