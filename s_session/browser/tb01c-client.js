@@ -2600,7 +2600,7 @@ if (typeof module !== 'object' || !module.exports) {
   });
 });
 
-/* exact source q3-center.js SHA256 01420991ff33964d1fd8ad4961b8e938305de1990425fe1e6557a58bc2577db2 */
+/* exact source q3-center.js SHA256 97194e7b5adf75b9497f7d6f2ac3fd736c285de32531248dac3d95ff3818ccaf */
 /* #1419/#1424：TB-02-E 中枢（s-center/1）与 TB-02-F 相邻中枢对（s-center-pair/1）的 typed 判据。
  * 判据与原因码逐字移植自旧非拆分客户端（c74a0efa28:s_session/browser/tb01c-client.js，分支 codex/1424-center-pair-20261014），
  * 与当时 s_tb02_contract.py 同序同原因码；按 #1394 拆分风格独立成模块，只在完整普通原件（q3-typed.plain）上执行，
@@ -2803,8 +2803,7 @@ if (typeof module !== 'object' || !module.exports) {
       keysE(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind);
       textE(d.entity_id, "entity_id");
       needE(["formed", "member_added", "roles_updated", "settled", "upgrade_pending", "withdrawn"].includes(d.change), "SHAPE", "未声明中枢变化");
-      const withdrawn = d.change === "withdrawn";
-      needE((d.after === null) === withdrawn && (d.object_id === null) === withdrawn && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
+      needE(changeNulls(d) && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
       if (d.object_id !== null) textE(d.object_id, "object_id");
       knownE(d.known_at);
     } else if (kind === CENTER_KINDS[6]) {
@@ -3122,8 +3121,7 @@ if (typeof module !== 'object' || !module.exports) {
       keysF(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind);
       textF(d.entity_id, "entity_id");
       needF(PAIR_CHANGES.includes(d.change), "SHAPE", "未声明中枢对变化");
-      const withdrawn = d.change === "withdrawn";
-      needF((d.after === null) === withdrawn && (d.object_id === null) === withdrawn && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
+      needF(changeNulls(d) && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
       if (d.object_id !== null) textF(d.object_id, "object_id");
       knownF(d.known_at);
       validatePairChange(d, p);
@@ -3325,6 +3323,244 @@ if (typeof module !== 'object' || !module.exports) {
   }
   const AXIS_KINDS = [["CC-016", CENTER_KINDS.slice(0, 2), needE], ["CC-017", CENTER_KINDS.slice(2, 3), needE], ["CC-022", CENTER_KINDS.slice(3, 4), needE],
     ["CC-018", PAIR_KINDS.slice(0, 1), needF], ["CC-020", PAIR_KINDS.slice(1, 2), needF]];
+  // ADR 0075：活动图只核已发布的端点、版本与来源。读取端点的同一操作登记逆依赖，
+  // 因而不需要另维护一份「哪些字段影响判据」的清单。
+  const STRUCTURE_ROOTS = ["CC-056.segment_version", "CC-056.center_version", "CC-056.pair_version"];
+  const CHANGE_KIND = new Map([
+    ["CC-055.segment_change", "CC-013.segment"],
+    ["CC-055.center_change", "CC-016.center"],
+    ["CC-055.pair_change", "CC-020.center_pair"],
+  ]);
+  const itsData = record => record.payload.data;
+  const relationKind = kind => kind.startsWith("CC-055.") && kind.endsWith("_relation");
+  const structureNeed = (ok, part, reason) => needE(ok, part, reason);
+  function changeNulls(d) {
+    const withdrawn = d.change === "withdrawn";
+    return (d.after === null) === withdrawn && (d.object_id === null) === withdrawn;
+  }
+  function* objectReferences(data) {
+    if (Array.isArray(data)) {
+      for (const item of data) yield* objectReferences(item);
+    } else if (object(data)) {
+      for (const k of ["sequence_object_id", "second_sequence_object_id", "unit_object_id", "witness_object_id", "object_id"])
+        if (Object.hasOwn(data, k) && data[k] !== null) yield data[k];
+      for (const k of ["unit", "units", "after"])
+        if (Object.hasOwn(data, k)) yield* objectReferences(data[k]);
+    }
+  }
+  function validateStructureRelation(record, endpoint, byObject, must) {
+    const {source_id: from, target_id: to, relation_kind: type, version, witness_object_id} = itsData(record);
+    const witness = byObject(witness_object_id), w = itsData(witness);
+    let expected = witness.source_coords;
+    switch (record.kind + ":" + type) {
+      case "CC-055.segment_relation:derived_from": {
+        const seq = endpoint(from, "CC-012.feature_sequence"), seg = endpoint(to, "CC-013.segment");
+        must(witness === seg && w.entity_id === to && version === w.entity_revision, "derived_from 目标/版本错绑");
+        must(["sequence", "second_sequence"].some(key => w[key + "_id"] === from && w[key + "_object_id"] === seq.object_id), "derived_from 源序列错绑");
+        break;
+      }
+      case "CC-055.segment_relation:member_of": {
+        const seq = endpoint(to, "CC-012.feature_sequence"), bi = endpoint(from, "CC-010.bi");
+        must(witness.kind === "CC-013.segment" && w.entity_id === itsData(seq).segment_id && version === w.entity_revision, "笔 member_of 见证段/版本错绑");
+        must([w.sequence_object_id, w.second_sequence_object_id].includes(seq.object_id), "笔 member_of 序列不是见证段的序列");
+        const d = itsData(seq);
+        must(d.stroke_refs.some(stroke => stroke.entity_id === from && d.facts.raw_elements.some(e => e.stroke_idx === stroke.stroke_index)), "笔 member_of 未绑定序列真实成员");
+        const {start, end} = itsData(bi);
+        expected = [...new Set([...start.source_coords, ...end.source_coords])].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
+        break;
+      }
+      case "CC-055.center_relation:attempted_from":
+        endpoint(to, "CC-013.segment");
+        must(witness === endpoint(from, "CC-016.center_seed_attempt") && w.entity_id === from && w.units[0]?.unit_id === to && version === "1", "attempted_from 端点/版本错绑");
+        break;
+      case "CC-055.center_relation:member_of": {
+        const unit = endpoint(from, "CC-013.segment");
+        must(witness === endpoint(to, "CC-016.center") && w.entity_id === to && w.members.includes(from) && w.status !== "UPGRADE_PENDING_TB02H" && version === w.entity_revision, "中枢 member_of 端点/成员/版本错绑");
+        expected = unit.source_coords;
+        break;
+      }
+      case "CC-055.center_relation:connects_left":
+      case "CC-055.center_relation:connects_right": {
+        const unit = endpoint(from, "CC-013.segment"), center = endpoint(to, "CC-016.center");
+        const side = type === "connects_left" ? "left_center_id" : "right_center_id";
+        must(witness.kind === "CC-022.unit_assignment" && w.unit.unit_id === from && w.unit.unit_object_id === unit.object_id && w[side] === to && version === itsData(center).entity_revision, type + " 端点/版本错绑");
+        expected = unit.source_coords;
+        break;
+      }
+      case "CC-055.pair_relation:position_of":
+      case "CC-055.pair_relation:position_against":
+        must(witness === endpoint(from, "CC-018.unit_core_position") && w.entity_id === from && version === w.center_revision, type + " 主体/版本错绑");
+        if (type === "position_of") {
+          const unit = endpoint(to, "CC-013.segment");
+          must(w.unit.unit_id === to && w.unit.unit_object_id === unit.object_id, "position_of 目标错绑");
+          expected = unit.source_coords;
+        } else {
+          endpoint(to, "CC-016.center");
+          must(w.center_id === to, "position_against 目标错绑");
+        }
+        break;
+      case "CC-055.pair_relation:pair_from":
+      case "CC-055.pair_relation:pair_to":
+        must(witness === endpoint(from, "CC-020.center_pair") && w.entity_id === from && w[type === "pair_from" ? "a_center_id" : "b_center_id"] === to && version === w.entity_revision, type + " 端点/版本错绑");
+        validatePairSides(w, endpoint, must);
+        break;
+      default:
+        must(false, "未声明的关系类型");
+    }
+    must(equal(record.source_coords, expected), type + " 来源与见证投影不同");
+  }
+  function validatePairSides(d, endpoint, must) {
+    for (const side of ["a", "b"])
+      must(d[side + "_revision"] === itsData(endpoint(d[side + "_center_id"], "CC-016.center")).entity_revision, "中枢对端点版本与当前中枢不符");
+  }
+  function validateStructureLinks(record, byObject, byEntity, generation) {
+    const d = itsData(record), kind = record.kind;
+    const part = CHANGE_KIND.has(kind) ? "B3" : "B2";
+    const must = (ok, reason) => structureNeed(ok, part, "cut-" + generation + " " + kind + " " + reason);
+    const endpoint = (id, expectedKind) => {
+      const r = byEntity(id);
+      must(r?.kind === expectedKind, "实体端点缺失或种类错绑：" + expectedKind);
+      return r;
+    };
+    for (const id of objectReferences(d)) {
+      must(typeof id === "string" && id.startsWith("obj3-") && id !== record.object_id, "结构对象边身份错误或自引用");
+      const child = byObject(id);
+      must(child, "结构对象子边/见证悬空");
+      if (relationKind(kind))
+        must(child.source_coords && record.source_coords.every(c => child.source_coords.includes(c)), "结构关系来源不在见证中");
+    }
+    if (kind === "CC-013.segment") {
+      for (const [prefix, role] of [["sequence", "FIRST_SEQUENCE"], ["second_sequence", "SECOND_SEQUENCE"]]) {
+        const id = d[prefix + "_object_id"], entity = d[prefix + "_id"];
+        must((id === null) === (entity === null), "段序列对象/实体边缺失不一致");
+        if (id === null) continue;
+        const sequence = byObject(id);
+        must(sequence.kind === "CC-012.feature_sequence", "段序列对象种类不符");
+        const s = itsData(sequence);
+        must(s.entity_id === entity && s.segment_id === d.entity_id && s.role === role, "段序列实体/角色错绑");
+      }
+    }
+    for (const unit of [ ...(d.unit === undefined ? [] : [d.unit]), ...(d.units ?? []) ]) {
+      const child = byObject(unit.unit_object_id);
+      must(child?.kind === "CC-013.segment" && itsData(child).entity_id === unit.unit_id, "单元实体/对象错绑");
+    }
+    const target = (id, expectedKind) => itsData(endpoint(id, expectedKind));
+    const center = id => target(id, "CC-016.center");
+    const segment = id => target(id, "CC-013.segment");
+    switch (kind) {
+      case "CC-016.center_seed_attempt":
+        if (d.center_id !== null) must(center(d.center_id).seed_attempt_id === d.entity_id, "seed attempt 与中枢互指错绑");
+        break;
+      case "CC-016.center": {
+        const attempt = target(d.seed_attempt_id, "CC-016.center_seed_attempt");
+        must(attempt.center_id === d.entity_id && equal(attempt.units.map(u => u.unit_id), d.seed_units), "中枢 seed attempt 或单元互绑错误");
+        for (const id of [...d.seed_units, ...d.members, ...d.zn_members, d.break_unit, d.next_tested_unit, d.resume_anchor?.after_unit_id])
+          if (id != null) segment(id);
+        must(target(d.roles_id, "CC-017.center_roles").center_id === d.entity_id, "中枢 roles 互指错绑");
+        break;
+      }
+      case "CC-017.center_roles":
+        must(center(d.center_id).roles_id === d.entity_id, "孤立 roles 或中枢互指错绑");
+        break;
+      case "CC-022.unit_assignment":
+        if (d.center_id !== null) must(center(d.center_id).members.includes(d.unit.unit_id), "成员归属不在当前中枢成员中");
+        if (d.left_center_id !== null) center(d.left_center_id);
+        if (d.right_center_id !== null) center(d.right_center_id);
+        break;
+      case "CC-018.unit_core_position":
+        must(BigInt(d.center_revision) <= BigInt(center(d.center_id).entity_revision), "位置中心修订超出当前中枢");
+        break;
+      case "CC-020.center_pair":
+        validatePairSides(d, endpoint, must);
+        break;
+    }
+    if (relationKind(kind)) validateStructureRelation(record, endpoint, byObject, must);
+    if (CHANGE_KIND.has(kind)) {
+      must(record.first_known_generation === generation && record.published_generation === generation &&
+        record.payload.slot[0] === generation && d.known_at.generation === generation, "change 须只在发生代活动");
+      must(changeNulls(d), "change 撤回与 after/object_id 空值不符");
+      if (d.change === "withdrawn") {
+        must(d.before?.entity_id === d.entity_id && !byEntity(d.entity_id), "withdrawn 历史快照或当前缺席不符");
+      } else {
+        const expected = kind === "CC-055.center_change" && d.change === "roles_updated" ? "CC-017.center_roles" : CHANGE_KIND.get(kind);
+        const child = endpoint(d.entity_id, expected);
+        must(child.object_id === d.object_id && equal(d.after, itsData(child)), "change 后件与发生代对象原件不符");
+      }
+    }
+  }
+  function validateStructureHistory(records, isStructureKind, generation, check, charge) {
+    const versions = new Map(STRUCTURE_ROOTS.map(k => [k, 0]));
+    const events = new Map(), active = new Map(), entities = new Map();
+    const readers = new Map(), dependencies = new Map();
+    const boundary = at => {
+      if (!events.has(at)) events.set(at, {births: [], deaths: []});
+      return events.get(at);
+    };
+    boundary("1");
+    boundary(generation);
+    for (const record of records) {
+      const first = record.first_known_generation, death = record.withdrawn_generation;
+      if (CHANGE_KIND.has(record.kind))
+        structureNeed(first === generation ? death === null : death === (BigInt(first) + 1n).toString(), "B3", "结构 change 撤回代不是发生代后第一代");
+      boundary(first).births.push(record);
+      if (death !== null) boundary(death).deaths.push(record);
+      check();
+    }
+    const entityOf = record => record.kind === "CC-010.bi" ||
+      (isStructureKind(record.kind) && !record.kind.startsWith("CC-055.") && !versions.has(record.kind)) ? itsData(record).entity_id : undefined;
+    function detach(record) {
+      for (const key of dependencies.get(record) ?? []) {
+        const set = readers.get(key);
+        set.delete(record);
+        if (set.size === 0) readers.delete(key);
+      }
+      dependencies.delete(record);
+    }
+    for (const [cut, {births, deaths}] of [...events].sort(([a], [b]) => BigInt(a) < BigInt(b) ? -1 : 1)) {
+      const dirty = new Set();
+      const invalidate = (key) => {
+        for (const dependent of readers.get(key) ?? []) dirty.add(dependent);
+      };
+      for (const [rows, remove] of [[deaths, true], [births, false]]) for (const record of rows) {
+        const {object_id: id, kind} = record, entity = entityOf(record);
+        invalidate("o:" + id);
+        if (entity !== undefined) invalidate("e:" + entity);
+        if (versions.has(kind)) versions.set(kind, versions.get(kind) + (remove ? -1 : 1));
+        if (remove) {
+          active.delete(id);
+          if (entity !== undefined) entities.delete(entity);
+          detach(record);
+          dirty.delete(record);
+        } else {
+          structureNeed(!active.has(id), "B4", "同 cut 对象身份重复");
+          active.set(id, record);
+          if (entity !== undefined) {
+            structureNeed(!entities.has(entity), "B4", "同 cut 结构实体身份重复");
+            entities.set(entity, record);
+          }
+          if (isStructureKind(kind)) dirty.add(record);
+        }
+        check();
+      }
+      structureNeed([...versions.values()].every(n => n === 1), "B4", "cut-" + cut + " 结构域版本根缺失或重复");
+      for (const record of dirty) {
+        charge();
+        check();
+        detach(record);
+        const own = new Set();
+        const read = (prefix, map) => id => {
+          const key = prefix + id;
+          own.add(key);
+          let set = readers.get(key);
+          if (set === undefined) readers.set(key, set = new Set());
+          set.add(record);
+          return map.get(id);
+        };
+        validateStructureLinks(record, read("o:", active), read("e:", entities), cut);
+        dependencies.set(record, own);
+      }
+    }
+  }
   // 同 cut 活动集（含 CC-013.segment 普通原件）的完整中枢族链接：旧 validatePairCut 去掉规则分支后的同序组合。
   function validateCenterFamilyCut(records, axes = null) {
     for (const r of records) needE(!isCenterFamily(r.kind) || CENTER_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢 kind（不发 candidate）");
@@ -3341,10 +3577,11 @@ if (typeof module !== 'object' || !module.exports) {
   }
   return Object.freeze({CENTER_KINDS: Object.freeze(CENTER_KINDS), PAIR_KINDS: Object.freeze(PAIR_KINDS), CENTER_TUPLE, PAIR_TUPLE,
     TB02E_DELIVERED, TB02E_DEFERRED, TB02F_DELIVERED, TB02F_DEFERRED,
-    validateCenterPayload, validatePairPayload, validatePairPublication, validatePairHistory, validateCenterFamilyCut});
+    validateCenterPayload, validatePairPayload, validatePairPublication, validatePairHistory, validateCenterFamilyCut,
+    STRUCTURE_ROOTS: Object.freeze(STRUCTURE_ROOTS), sameValue: equal, changeNulls, validateStructureHistory});
 });
 
-/* exact source q3-typed.js SHA256 c71b834217f1e1e3376bed5ec617cd84e753fae483f397036300d8c0d31c0ea0 */
+/* exact source q3-typed.js SHA256 728bd9fd1f958db51afd61e2ef8d9b49055781c09322c81e17e5145bbd3b0b06 */
 /* #1394：typed 与形态来源的同一判据；只把访问迁为完整异步 Value 遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -3438,84 +3675,85 @@ if (typeof module !== 'object' || !module.exports) {
     need(protocols.includes(protocol), reason + "：未获准的完整规则组合");
     return base;
   }
-  function w2Replacements({pending, groups, initializations = [], superseded, replaces, kinds, objects}) {
-    const raws = new Map(pending.map(p => [p.object_id, p])), byGroup = new Map(groups.map(g => [g.object_id, g]));
-    const slotOf = (id, obj) => {
-      if (typeof obj?.slot === "string") return obj.slot;
-      const kind = kinds.get(id);
-      if (kind === "CC-004.undetermined_raw" && typeof obj?.coord === "string") return JSON.stringify([kind, obj.coord]);
-      if (kind === "CC-005.inclusion_group" && Array.isArray(obj?.members) && obj.members.length > 0) return JSON.stringify([kind, obj.members[0]]);
-      return null;
+  // ADR 0075：公边与寿命一一对应；W2 只在同槽缺席时增设唯一定向组资格。
+  function validateReplacements(records, replaces, w2, check = () => {}) {
+    const rows = Array.isArray(records) ? records : [...records];
+    const objects = new Map(), bySlot = new Map(), byGroupCoord = new Map(), initializations = [];
+    const expected = new Map(), successor = new Map();
+    const alive = (obj, at) => BigInt(obj.first_known_generation) <= at &&
+      (obj.withdrawn_generation === null || BigInt(obj.withdrawn_generation) > at);
+    const add = (map, key, row) => {
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(row);
     };
-    const edges = new Set(replaces.map(r => JSON.stringify([r.subject, r.object])));
-    need(edges.size === replaces.length, "W2重复公开replaces关系");
-    const alive = (obj, at) => BigInt(obj.first_known_generation) <= at && (obj.withdrawn_generation === null || BigInt(obj.withdrawn_generation) > at);
-    // W/2 只让定向组替代未定原件，direction=null 的组不替代（Rust w2_group_contains、w2_audit_group_contains 同判据）。
-    const directedMember = (g, coord) => ["UP", "DOWN"].includes(g.direction) && g.members.includes(coord);
-    const bySlot = new Map();
-    for (const [id, obj] of objects) {
-      const slot = slotOf(id, obj);
-      if (slot === null) continue;
-      if (!bySlot.has(slot)) bySlot.set(slot, []);
-      bySlot.get(slot).push({id, obj});
+    for (const r of rows) {
+      check();
+      need(!objects.has(r.object_id), w2 ? "W2对象身份重复" : "替代生命周期对象身份重复");
+      objects.set(r.object_id, r);
+      if (!w2 || r.slot === null) continue;
+      add(bySlot, r.slot, r);
+      if (r.kind === "CC-005.inclusion_group" && ["UP", "DOWN"].includes(r.payload?.direction))
+        for (const c of r.payload.members) add(byGroupCoord, c, r);
+      if (r.kind === "CC-004.initialization") initializations.push(r);
     }
-    for (const list of bySlot.values()) {
-      list.sort((a, b) => {
-        const x = BigInt(a.obj.first_known_generation), y = BigInt(b.obj.first_known_generation);
-        return x < y ? -1 : x > y ? 1 : 0;
-      });
-      for (let idx = 1; idx < list.length; idx++) {
-        const prev = list[idx - 1].obj, cur = list[idx].obj;
-        need(prev.withdrawn_generation !== null && BigInt(prev.withdrawn_generation) <= BigInt(cur.first_known_generation), "W2同槽位对象生命周期重叠");
+    for (const items of bySlot.values()) {
+      check();
+      items.sort((a, b) => coordOrder(a.first_known_generation, b.first_known_generation));
+      for (let i = 1; i < items.length; i++) {
+        const old = items[i - 1], next = items[i];
+        need(old.withdrawn_generation !== null && BigInt(old.withdrawn_generation) <= BigInt(next.first_known_generation), "W2同槽位对象生命周期重叠");
+        if (old.withdrawn_generation === next.first_known_generation) successor.set(old, next);
       }
     }
-    for (const [id, obj] of objects) {
-      if (obj.withdrawn_generation === null || kinds.get(id) === "CC-004.undetermined_raw") continue;
-      if (obj.superseded_by === null) {
-        const slot = slotOf(id, obj), at = BigInt(obj.withdrawn_generation);
-        need(slot === null || !(bySlot.get(slot) || []).some(e => e.id !== id && alive(e.obj, at)), "W2同槽位存在替代目标却按fact_removed撤回");
-      }
-    }
-    const withdrawn = new Map(superseded.map(w => [w.object_id, w]));
-    for (const u of pending) {
-      if (u.withdrawn_generation === null) { need(u.superseded_by === null, "活动未定原件不得声明superseded_by"); continue; }
-      const at = BigInt(u.withdrawn_generation);
-      const replaced = pending.some(r => r.object_id !== u.object_id && r.coord === u.coord && alive(r, at)) ||
-        groups.some(g => alive(g, at) && directedMember(g, u.coord)) ||
-        initializations.some(init => alive(init, at) && init.source_coords.includes(u.coord));
-      if (u.withdrawal_reason === "fact_removed") {
-        need(u.superseded_by === null && !replaced, "W2未定原件存在替代目标却按fact_removed撤回");
+    for (const old of rows) {
+      check();
+      if (old.withdrawn_generation === null) continue;
+      const death = BigInt(old.withdrawn_generation);
+      const sameSlot = successor.get(old);
+      const pending = w2 && old.kind === "CC-004.undetermined_raw";
+      const coord = pending ? old.payload.raw.source_coord : null;
+      const directed = pending && !sameSlot ? (byGroupCoord.get(coord) ?? []).filter(r => alive(r, death)) : [];
+      if (old.superseded_by === null) {
+        if (w2) need(!sameSlot && (!pending || directed.length === 0 &&
+          !initializations.some(r => alive(r, death) && r.source_coords.includes(coord))),
+        pending ? "W2未定原件存在替代目标却按fact_removed撤回" : "W2同槽位存在替代目标却按fact_removed撤回");
         continue;
       }
-      need(u.withdrawal_reason === "superseded_by_revision", "W2撤回原因不符");
-      const revision = raws.get(u.superseded_by), group = byGroup.get(u.superseded_by);
-      need((revision && revision.object_id !== u.object_id && revision.coord === u.coord && alive(revision, at)) ||
-        (group && alive(group, at) && directedMember(group, u.coord)), "W2逐原件替代目标不满足坐标、种类或生命周期");
-      // #1855 B6：撤回时刻在世的同槽位 raw 修订优先（Rust object_diff Superseded）；没有修订才看在世定向组，
-      // 多于一个即拒（Rust w2_replacing_group、审计「未定原件有多个替代候选」）。
-      const sameSlot = pending.find(r => r.object_id !== u.object_id && r.coord === u.coord && alive(r, at));
-      const directed = groups.filter(g => alive(g, at) && directedMember(g, u.coord));
-      need(sameSlot || directed.length === 1, "W2未定原件有多个定向替代候选");
-      need(u.superseded_by === (sameSlot || directed[0]).object_id, "W2逐原件替代目标须为撤回时刻同槽位修订或唯一定向组");
-      need(edges.has(JSON.stringify([u.superseded_by, u.object_id])), "W2逐原件替代缺公开replaces关系");
-    }
-    for (const w of superseded) need(edges.has(JSON.stringify([w.superseded_by, w.object_id])), "W2替代撤回缺公开replaces关系");
-    for (const r of replaces) {
-      const target = withdrawn.get(r.object);
-      need(target && target.superseded_by === r.subject, "W2公开replaces关系缺对应撤回或superseded_by不符");
-      const replacement = objects.get(r.subject);
-      need(replacement, "W2替代目标不存在或生命周期不符");
-      const newKind = kinds.get(r.subject), oldKind = target.kind;
-      if (newKind !== oldKind) {
-        need(oldKind === "CC-004.undetermined_raw" && newKind === "CC-005.inclusion_group", "W2跨kind替代未获准");
-        const raw = raws.get(r.object), group = byGroup.get(r.subject);
-        need(raw && group && directedMember(group, raw.coord), "W2逐原件替代目标不满足坐标、种类或生命周期");
+      const target = objects.get(old.superseded_by);
+      need(target && target !== old && alive(target, death), pending ? "W2逐原件替代目标不满足坐标、种类或生命周期" : "CC-056 替代目标不存在或生命周期不符");
+      if (pending && !sameSlot) {
+        need(directed.length > 0 && directed.includes(target), "W2逐原件替代目标不满足坐标、种类或生命周期");
+        need(directed.length === 1, "W2未定原件有多个定向替代候选");
       } else {
-        const oldSlot = slotOf(r.object, objects.get(r.object) || target), newSlot = slotOf(r.subject, replacement);
-        need(oldSlot !== null && oldSlot === newSlot, "W2同kind替代槽位不符");
+        if (pending && sameSlot) need(sameSlot === target, "W2逐原件替代目标须为撤回时刻同槽位修订或唯一定向组");
+        need(old.kind === target.kind, w2 ? "W2跨kind替代未获准" : "CC-056 替代槽位不符");
+        need(old.slot !== null && old.slot === target.slot, w2 ? "W2同kind替代槽位不符" : "CC-056 替代槽位不符");
       }
-      need(r.subject !== r.object && target.withdrawn_generation !== null && target.withdrawn_generation !== undefined && alive(replacement, BigInt(target.withdrawn_generation)), "W2替代目标不存在或生命周期不符");
+      expected.set(old.object_id, target.object_id);
     }
+    const seen = new Set();
+    for (const r of replaces) {
+      check();
+      const key = JSON.stringify([r.subject, r.object]);
+      need(!seen.has(key), "重复公开replaces关系");
+      seen.add(key);
+      need(expected.get(r.object) === r.subject, "公开replaces关系缺对应撤回或superseded_by不符");
+      expected.delete(r.object);
+    }
+    need(expected.size === 0, "替代撤回缺公开replaces关系");
+  }
+  // 原具名 W2 入口的试件投影保留，生产和试件最终运行同一谓词。
+  function w2Replacements({pending, groups, initializations = [], superseded, replaces, kinds, objects}) {
+    const rows = new Map();
+    const merge = row => rows.set(row.object_id, {...rows.get(row.object_id), ...row});
+    for (const [id, row] of objects) merge({object_id:id, kind:kinds.get(id), superseded_by:null, slot:null, ...row});
+    for (const row of superseded) merge({withdrawn_generation:null, ...rows.get(row.object_id), ...row});
+    for (const row of superseded) if (!objects.has(row.object_id) && !pending.some(r => r.object_id === row.object_id))
+      need(kinds.get(row.superseded_by) === row.kind, "W2跨kind替代未获准");
+    for (const r of pending) merge({...r, kind:"CC-004.undetermined_raw", slot:JSON.stringify(["CC-004.undetermined_raw", r.coord]), payload:{raw:{source_coord:r.coord}}});
+    for (const r of groups) merge({...r, kind:"CC-005.inclusion_group", slot:rows.get(r.object_id)?.slot ?? JSON.stringify(["CC-005.inclusion_group", r.members[0]]), payload:{members:r.members,direction:r.direction}});
+    for (const r of initializations) merge({...r, kind:"CC-004.initialization"});
+    validateReplacements(rows.values(), replaces, true);
   }
   async function initializationPolicy(p) { need(await eqField(p, "initialization_policy_revision", INITIALIZATION_POLICY), "初始化政策版本未声明"); }
   async function directionState(p) { await enumValue(await field(p, "direction_state"), ["Undetermined", "Established"], "初始化方向状态未声明"); }
@@ -3618,11 +3856,15 @@ if (typeof module !== 'object' || !module.exports) {
     }
     need((await coordIterator.next()).done, "typed 源引用/坐标不一一对应");
     const p = await field(record, "payload");
-    if (SEGMENT_KINDS.includes(kind)) validateSegmentPayload(kind, await plain(p));
-    else if (CENTER_KINDS.includes(kind)) Center.validateCenterPayload(kind, await plain(p));
-    else if (PAIR_KINDS.includes(kind)) {
-      Center.validatePairPayload(kind, await plain(p));
-      if (kind === PAIR_KINDS[1] || kind === PAIR_KINDS[3]) Center.validatePairPublication({payload: await plain(p)}, await S(await field(record, "first_known_generation")));
+    let structurePayload;
+    if (STRUCTURE_KINDS.has(kind)) {
+      structurePayload = await plain(p);
+      if (SEGMENT_KINDS.includes(kind)) validateSegmentPayload(kind, structurePayload);
+      else if (CENTER_KINDS.includes(kind)) Center.validateCenterPayload(kind, structurePayload);
+      else {
+        Center.validatePairPayload(kind, structurePayload);
+        if (kind === PAIR_KINDS[1] || kind === PAIR_KINDS[3]) Center.validatePairPublication({payload: structurePayload}, first.toString());
+      }
     }
     else if (BI_KINDS.includes(kind)) await validateBiPayload(kind, p);
     else if (kind === "CC-004.initialization") {
@@ -3739,6 +3981,7 @@ if (typeof module !== 'object' || !module.exports) {
     }
     const slot = kind === "CC-004.initialization" ? "W" : kind === "CC-004.undetermined_raw" ? await field(await field(p, "raw"), "source_coord") : [...BI_KINDS, ...SEGMENT_KINDS, ...CENTER_KINDS, ...PAIR_KINDS].includes(kind) ? await field(p, "slot") : kind === TB02_KINDS[0] ? await field(await field(p, "incoming"), "source_coord") : kind === TB02_KINDS[1] ? await field(p, "group_anchor") : kind === TB02_KINDS[2] ? await field(p, "window") : kind === DEVELOPMENT_BATCH_KIND ? await field(await field(p, "bar"), "source_coord") : "TB-02-A";
     need(await canonicalMatches([kind, slot], await S(await field(record, "fact_key"))), "事实语义槽未绑定 payload");
+    return structurePayload;
   }
   // #1404/#1414/#1420：s-segment/1、/2、/3 段合同沿用已审同步判据（单一实现，含 K1 游标）。
   // 调用面两处：导出给既有观察器/合同测试的同步入口；validateTyped 在该 payload 的完整原件上调用（见 plain）。
@@ -4094,6 +4337,7 @@ if (typeof module !== 'object' || !module.exports) {
       } else if (kind === SEGMENT_KINDS[4]) {
         keys(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind); known(d.known_at);
         need(["formed", "updated", "terminated", "withdrawn"].includes(d.change), "段变化未声明");
+        need(Center.changeNulls(d), "B3 段变更撤回与 after/object_id 空值不符");
         for (const k of ["before", "after"]) if (d[k] !== null) validateSegmentPayload(SEGMENT_KINDS[2], {...p, slot:d[k].entity_id, object_generation:d[k].entity_id.split(":")[1], data:d[k]});
       } else {
         keys(d, ["input_frontier", "waiting_reasons", "known_at", "delivered_scope", "deferred_scope", ...(v3 ? ["scan_budget", "scan_cursors"] : [])], kind); integer(d.input_frontier, false, true); known(d.known_at); texts(d.waiting_reasons);
@@ -4296,6 +4540,210 @@ if (typeof module !== 'object' || !module.exports) {
       }
     }
   }
+  // ADR 0075 B7：从已发事实列举地址；地址表既用于覆盖检查，也决定每条请求的证据。
+  const STRUCTURE_KINDS = new Set([...SEGMENT_KINDS, ...CENTER_KINDS, ...PAIR_KINDS]);
+  const isStructureKind = kind => STRUCTURE_KINDS.has(kind);
+  const STEP_KIND = "CC-004.inclusion_step", GROUP_KIND = "CC-005.inclusion_group";
+  const KNOWLEDGE_KIND = "CC-054.knowledge_state";
+  const INITIAL_WAIT = "initial_direction_unsettled";
+  const partNeed = (ok, part, message) => need(ok, part + " " + message);
+  const coordOrder = (a, b) => a === b ? 0 : BigInt(a) < BigInt(b) ? -1 : 1;
+  const sameCoords = (a, b, size = b.length) => a.length === size && a.every((c, i) => c === b[i]);
+  function requestAxes(input, domain, computation) {
+    return {input_quality: input, applicability: domain, computation, validity: "CURRENT"};
+  }
+  const REQUEST_STATES = [
+    requestAxes("SUFFICIENT", "IN_DOMAIN", "COMPLETE"),
+    requestAxes("SUFFICIENT", "OUTSIDE_DOMAIN", "COMPLETE"),
+    requestAxes("INSUFFICIENT", "DOMAIN_PROOF_MISSING", "INCOMPLETE"),
+    requestAxes("SUFFICIENT", "IN_DOMAIN", "INCOMPLETE"),
+  ];
+  function structureRequests(record, active, add) {
+    const d = record.payload.data;
+    const at = (cc, axis, path, state = 0, reason = null) =>
+      add([JSON.parse(record.fact_key), [cc, axis, "structure-classification/1", path, record.object_id]],
+        record, REQUEST_STATES[state], reason === null ? [] : [reason]);
+    const construction = (c, path) => {
+      at("CC-011", "length", path);
+      const vector = c.vector, odd = c.length === "odd_ge3";
+      if (vector === null) {
+        const state = odd ? 2 : 1, reason = odd ? "construction_conditions_not_evaluated" : "construction_length_outside_domain";
+        for (const axis of ["construction_conditions", "direction"]) at("CC-011", axis, path, state, reason);
+      } else {
+        at("CC-011", "construction_conditions", path);
+        if (!vector.every(Boolean)) at("CC-011", "direction", path, 1, "construction_conditions_failed");
+        else if (c.direction === null) at("CC-011", "direction", path, 2, "construction_direction_not_evaluated");
+        else at("CC-011", "direction", path);
+      }
+    };
+    switch (record.kind) {
+      case "CC-011.segment_seed":
+      case "CC-011.seed_candidate":
+        construction(d.construction, "construction");
+        break;
+      case "CC-013.segment": {
+        construction(d.construction, "construction");
+        d.termination_attempts.forEach((attempt, i) => construction(attempt.construction, ["termination_attempts", String(i), "construction"]));
+        const second = active.get(d.second_sequence_object_id)?.payload.data;
+        const truncated = second && !["FAILED_GEOMETRY", "CASE_ONE", "CASE_TWO", "KILLED_CASE_TWO"].includes(d.result)
+          && second.scan.resource_truncated && second.facts.matched === null;
+        if (truncated) at("CC-013", "semantic_termination_result", "result", 3, "second_sequence_resource_bound");
+        else at("CC-013", "semantic_termination_result", "result");
+        if (d.fact_vector.new_segment_formed === null || d.fact_vector.segment_broken === null)
+          at("CC-014", "known_fact_vector", "fact_vector", 3, "break_facts_scan_incomplete");
+        else at("CC-014", "known_fact_vector", "fact_vector");
+        at("CC-014", "scan_coverage", "fact_vector");
+        break;
+      }
+      case "CC-016.center_seed_attempt":
+        if (d.vector.strict === null) at("CC-016", "seed_condition_vector", "vector", 2, "seed_strict_not_evaluated");
+        else at("CC-016", "seed_condition_vector", "vector");
+        at("CC-016", "core_order", "core_order");
+        break;
+      case "CC-018.unit_core_position":
+        at("CC-018", "unit_core_position", "position");
+        break;
+      case "CC-020.center_pair":
+        if (d.leaf === null) at("CC-020", "center_pair_development", "leaf", 2, "PENDING_UPGRADE_TB02H");
+        else at("CC-020", "center_pair_development", "leaf");
+        break;
+      case "CC-022.unit_assignment":
+        at("CC-022", "assignment_status", "status");
+        break;
+    }
+  }
+  function validateCutSources(records, effective, {w}, check, charge) {
+    const ordered = [...effective.keys()].sort(coordOrder);
+    const steps = new Map(), groups = [], undetermined = new Map();
+    let init, knowledge;
+    const must = (ok, reason) => partNeed(ok, "B8", reason);
+    for (const r of records) {
+      const p = r.payload;
+      switch (r.kind) {
+        case STEP_KIND:
+          must(!steps.has(p.incoming.source_coord), "CC004 步骤坐标重复");
+          steps.set(p.incoming.source_coord, r);
+          break;
+        case GROUP_KIND: {
+          groups.push(r);
+          const union = new Set([...p.members, ...(p.direction_evidence?.source_coords ?? []), ...(p.confirmation_evidence?.source_coords ?? [])]);
+          must(r.source_coords.length === union.size && r.source_coords.every(c => union.has(c)), "组来源不是成员、方向及封口证据并集");
+          break;
+        }
+        case INITIALIZATION_KINDS[0]:
+          must(!init, "W 同 cut 初始化重复");
+          init = r;
+          break;
+        case INITIALIZATION_KINDS[1]:
+          must(!undetermined.has(p.raw.source_coord) && sameCoords(r.source_coords, [p.raw.source_coord]), "W 未定原件重复或来源不是自身坐标");
+          undetermined.set(p.raw.source_coord, r);
+          break;
+        case KNOWLEDGE_KIND:
+          must(!knowledge && sameCoords(r.source_coords, ordered), "CC054 知识态重复或来源不是同 cut 全部生效原始账");
+          knowledge = r;
+          break;
+        default:
+          if (Center.STRUCTURE_ROOTS.includes(r.kind))
+            must(sameCoords(r.source_coords, ordered), r.kind + " 来源不是同 cut 全部生效原始账");
+      }
+      check();
+    }
+    must(knowledge, "同 cut 缺 CC054 知识原件");
+    const waiting = w !== null && steps.size === 0;
+    let e = 0;
+    if (w !== null) {
+      must(init && knowledge.payload.direction_state === init.payload.direction_state, "W 初始化与知识方向不符");
+      const p = init.payload;
+      if (waiting) {
+        must(p.direction_state === "Undetermined" && p.first_raw_pair === null && groups.length === 0, "W 等待期不得发布正式步骤或组");
+        must(sameCoords(init.source_coords, ordered), "W 等待期初始化来源不是完整原始账");
+        must(undetermined.size === ordered.length && ordered.every(c => undetermined.has(c)), "W 未定原件未逐坐标覆盖原始账");
+      } else {
+        must(p.direction_state === "Established" && p.first_raw_pair && undetermined.size === 0, "W 建立期初始化状态错误或仍有未定原件");
+        const pair = p.first_raw_pair;
+        e = ordered.indexOf(pair.incoming.source_coord);
+        must(e > 0 && sameCoords(init.source_coords, ordered, e + 1) && sameCoords(pair.source_coords, ordered, e + 1), "W 初始化和首对来源不是精确建立前缀");
+        const seed = steps.get(ordered[0]);
+        must(seed && Center.sameValue(seed.payload.direction_evidence, pair), "W seed 与初始化首对证据不同");
+      }
+    }
+    if (!waiting) {
+      must(steps.size === ordered.length, "CC004 步骤未一一覆盖生效原始账");
+      for (const [i, coord] of ordered.entries()) {
+        charge();
+        check();
+        const row = steps.get(coord);
+        must(row && sameCoords(row.source_coords, ordered, Math.max(i, e) + 1), "CC004 步骤坐标或来源闭前缀不符");
+        const p = row.payload;
+        must((p.action === "seed") === (i === 0), "CC004 仅首步须为 seed");
+        if (i === 0) {
+          must(Center.sameValue(p.incoming, p.acc_after) && p.acc_before === null && p.contains === null,
+            "CC004 首步累积状态不是原件 seed");
+          must(w === null ? p.direction === null && p.direction_evidence === null
+            : p.direction !== null && p.direction_evidence !== null, "CC004 首步方向证据与规则不符");
+        }
+        if (w !== null) must(p.action !== "waiting", "W 不得发布 CC004 waiting 步");
+      }
+    }
+    return {knowledge, steps, groups, init, undetermined, ordered, waiting};
+  }
+  function validateKnowledgeRequests(records, cut, rule, structureRule, check, charge) {
+    const {knowledge, steps, init, undetermined, ordered, waiting} = cut;
+    const active = new Map(records.map(r => [r.object_id, r])), expected = new Map(), seen = new Set();
+    const must = (ok, reason) => partNeed(ok, "B7", reason);
+    const add = (key, record, axes, reasons) => expected.set(JSON.stringify(key), {
+      subject: record?.object_id ?? null,
+      sources: record?.source_coords ?? ordered,
+      axes,
+      reasons,
+    });
+    const equalIsEvidence = ruleContract(rule)?.[2] === KNOWLEDGE_DOMAINS[1] || resolveRule(rule).w !== null;
+    for (const r of steps.values()) {
+      const p = r.payload, reasons = p.waiting_reasons.filter(t => !equalIsEvidence || t !== "equal_extreme_identity");
+      if (!reasons.length && p.direction_evidence === null) reasons.push("direction_not_yet_established");
+      const incomplete = reasons.length > 0;
+      const insufficient = reasons.some(t => ["fewer_than_three_merged_bars", "no_subsequent_bar", "direction_not_yet_established"].includes(t));
+      add(JSON.parse(r.fact_key), r, requestAxes(insufficient ? "INSUFFICIENT" : "SUFFICIENT",
+        incomplete ? "DOMAIN_PROOF_MISSING" : "IN_DOMAIN", incomplete ? "INCOMPLETE" : "COMPLETE"), reasons);
+    }
+    if (init) {
+      add(JSON.parse(init.fact_key), init, REQUEST_STATES[waiting ? 2 : 0], waiting ? [INITIAL_WAIT] : []);
+      for (const r of undetermined.values()) add(JSON.parse(r.fact_key), r, REQUEST_STATES[2], [INITIAL_WAIT]);
+      if (waiting) add([GROUP_KIND, "pending"], null, REQUEST_STATES[2], [INITIAL_WAIT]);
+    }
+    if (structureRule) for (const r of records) {
+      check();
+      if (STRUCTURE_KINDS.has(r.kind)) structureRequests(r, active, add);
+    }
+    for (const request of knowledge.payload.requests) {
+      charge();
+      check();
+      const id = request.request_id;
+      let key;
+      try { key = JSON.parse(id); } catch { /* 统一报告规范键错误 */ }
+      must(Array.isArray(key) && key.length === 2 && JSON.stringify(key) === id, "请求键不是规范二元槽位");
+      must(!seen.has(id), "同 cut 知识请求键重复");
+      seen.add(id);
+      const want = expected.get(id);
+      if (want) {
+        must(request.subject_id === want.subject, "请求主体 ID、kind 或 fact_key 错绑：" + id);
+        must(sameCoords(request.source_coords, want.sources), "请求来源错绑：" + id);
+        must(Center.sameValue(request.axes, want.axes) && Center.sameValue(request.reasons, want.reasons), "请求四轴或等待原因与事实不符：" + id);
+        expected.delete(id);
+        continue;
+      }
+      // 其它合法请求由组/形态各自的槽承接；不让未声明具名结构地址或换槽主体落入此分支。
+      const subject = active.get(request.subject_id);
+      const group = key[0] === GROUP_KIND && (subject?.kind === GROUP_KIND && subject.fact_key === id ||
+        !init && key[1] === "pending" && request.subject_id === null);
+      const shape = key[0] === "CC-006.local_shape" && (subject?.kind === key[0] && subject.slot === id || key[1] === "pending" && request.subject_id === null);
+      const fractal = key[0]?.[0] === "CC-007.fractal_description" &&
+        ["shape_description", "descriptive_labels", "subsequent_development"].includes(key[1]) &&
+        subject?.kind === "CC-007.fractal_description" && JSON.stringify(key[0]) === subject.fact_key;
+      must(group || shape || fractal, "未声明或错槽的知识请求：" + id);
+    }
+    must(expected.size === 0, "缺一一绑定的具名知识请求：" + (expected.keys().next().value ?? ""));
+  }
   // #1491：bounded-layout/1、/2 的 CC-007 三跳只读——分型对象 → 批记录 entry → 单元序列（§5.6 分片由
   // Value 读取器按需取）。只核单元确实是该分型的（参考价、bar 四价逐项相同），不重算 order（#804）。
   async function bindDevelopmentBatches(records, layout) {
@@ -4342,11 +4790,12 @@ if (typeof module !== 'object' || !module.exports) {
     if (layout !== LAYOUTS.LAYOUT1) await bindDevelopmentPrefixes(records);
     return last;
   }
-  return Object.freeze({RULE_CONTRACTS, protocolRule, resolveRule, splitRule, W2_POLICY, W2_DOCTRINE, W2_PUBLICATION_RULE, W2_ARCHIVED_RULE, w2Replacements, ruleContract, LAYOUTS, DEVELOPMENT_BATCH_KIND, bindDevelopmentBatches, W1_BASE_STRUCTURE_RULE, V3_STRUCTURE_RULE, W_STRUCTURE_RULE, CENTER_RULES, CENTER_KINDS, PAIR_KINDS, Center, INITIALIZATION_POLICY, INITIALIZATION_KINDS, W_KNOWLEDGE_DOMAIN, validateTyped, validateBiPayload, validateSegmentPayload, turnLinks: (d, f) => segmentTurnLinks(d, f), PARSE_INVALID_REASON, RESULT_SEMANTIC_BRANCH, validateTB02ShapeRefs, plain,
+  return Object.freeze({RULE_CONTRACTS, protocolRule, resolveRule, splitRule, W2_POLICY, W2_DOCTRINE, W2_PUBLICATION_RULE, W2_ARCHIVED_RULE, w2Replacements, validateReplacements, ruleContract, LAYOUTS, DEVELOPMENT_BATCH_KIND, bindDevelopmentBatches, W1_BASE_STRUCTURE_RULE, V3_STRUCTURE_RULE, W_STRUCTURE_RULE, CENTER_RULES, CENTER_KINDS, PAIR_KINDS, Center, INITIALIZATION_POLICY, INITIALIZATION_KINDS, W_KNOWLEDGE_DOMAIN, validateTyped, validateBiPayload, validateSegmentPayload, turnLinks: (d, f) => segmentTurnLinks(d, f), PARSE_INVALID_REASON, RESULT_SEMANTIC_BRANCH, validateTB02ShapeRefs, plain,
+    isStructureKind, validateCutSources, validateKnowledgeRequests,
     TB02_KINDS: Object.freeze(TB02_KINDS), BI_KINDS, SEGMENT_KINDS: Object.freeze(SEGMENT_KINDS)});
 });
 
-/* exact source q3-consumer.js SHA256 6c6aa81d618396357bab2477ffc2c84af014955939dd25d30f5abff1f41753d4 */
+/* exact source q3-consumer.js SHA256 a554947373c6fdd0c6a2fb64a976b5316b6c70e57630e4558a65030225371760 */
 /* #1394：Q3完整消费者；只供既有tb01c页面调用，没有产品路由或默认资源。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -4720,8 +5169,7 @@ if (typeof module !== 'object' || !module.exports) {
       need(
         BigInt(withdrawn) > first &&
           (await s(record, "lifecycle")) === "withdrawn" &&
-          ["fact_removed", "superseded_by_revision"].includes(reason) &&
-          (reason === "fact_removed") === (sup === null),
+          reason === withdrawalReason("CC-006.local_shape", sup),
         "CC006撤回不闭合",
       );
     need(
@@ -4791,7 +5239,10 @@ if (typeof module !== 'object' || !module.exports) {
     const wPolicy = typed.resolveRule(await s(snapshot, "rule_revision")).w !== null;
     for (const r of wRecords) {
       const refs = new Map(r.input_refs.map((x) => [x.source_coord, x])), p = r.payload, bars = [];
-      if (r.kind === "CC-004.undetermined_raw") bars.push(p.raw);
+      if (r.kind === "CC-004.undetermined_raw") {
+        need(r.source_coords.length === 1 && r.source_coords[0] === p.raw.source_coord, "B8 W 未定原件来源不是自身坐标");
+        bars.push(p.raw);
+      }
       if (r.kind === "CC-004.initialization" && p.first_raw_pair !== null)
         bars.push(p.first_raw_pair.previous_acc, p.first_raw_pair.incoming);
       if (r.kind === "CC-005.inclusion_group")
@@ -4824,7 +5275,7 @@ if (typeof module !== 'object' || !module.exports) {
     const initial = records.filter((r) => r.kind === "CC-004.initialization");
     need(initial.length === 1, "同 cut 缺少唯一初始化对象");
     const p = initial[0].payload, initialRefs = new Map(initial[0].input_refs.map((r) => [r.source_coord, r]));
-    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const same = typed.Center.sameValue;
     for (const record of records) {
       if (record.kind === "CC-005.inclusion_group") {
         need(p.direction_state === "Established" && same(record.payload.initial_direction_evidence, p.first_raw_pair), "组初始化证据与同 cut 初始化对象不一致");
@@ -4848,56 +5299,116 @@ if (typeof module !== 'object' || !module.exports) {
       (r.kind === "CC-005.inclusion_group" && Object.hasOwn(r.payload, "initialization_policy_revision")));
     await bindInitialization(of(plainSnapshot), { byId }, wRecords);
   }
-  async function bindW2Replacements(snapshot) {
-    const pending = [], groups = [], initializations = [], superseded = [], replaces = [], kinds = new Map(), objects = new Map();
-    for (const family of ["objects", "withdrawn_objects"])
-      for await (const record of (await f(snapshot, family)).items()) {
-        const object_id = await t(record, "object_id"), kind = await t(record, "kind"),
-          first_known_generation = await s(record, "first_known_generation"),
-          withdrawn_generation = await (await f(record, "withdrawn_generation")).scalar(),
-          superseded_by = await (await f(record, "superseded_by")).scalar(),
-          withdrawal_reason = await (await f(record, "withdrawal_reason")).scalar(),
-          slot = (await record.has("fact_key"))
-            ? await t(record, "fact_key")
-            : JSON.stringify(["CC-006.local_shape", await s(record, "window_start"), await s(record, "window_mid"), await s(record, "window_end")]);
-        need(!objects.has(object_id), "W2对象身份重复");
-        kinds.set(object_id, kind);
-        const entry = {object_id, kind, slot, first_known_generation, withdrawn_generation, withdrawal_reason, superseded_by};
-        objects.set(object_id, entry);
-        if (superseded_by !== null) superseded.push(entry);
-        if (kind === "CC-004.initialization") {
-          const source_coords = [];
-          for await (const c of (await f(record, "source_coords")).items()) source_coords.push(await S(c));
-          initializations.push({object_id, source_coords, first_known_generation, withdrawn_generation});
-        }
-        if (kind === "CC-004.undetermined_raw")
-          pending.push({object_id, coord: await s(await f(await f(record, "payload"), "raw"), "source_coord"),
-            first_known_generation, withdrawn_generation, withdrawal_reason, superseded_by});
-        if (kind === "CC-005.inclusion_group") {
-          const payload = await f(record, "payload"), members = [];
-          for await (const c of (await f(payload, "members")).items()) members.push(await S(c));
-          groups.push({object_id, members, direction: await (await f(payload, "direction")).scalar(), first_known_generation, withdrawn_generation});
-        }
+  // 同一投影用于生命周期、目录及结构活动图；大型 development_batch 不展开为普通树。
+  async function cutObject(record, kind, structurePayload, cut, active) {
+    const get = k => s(record, k);
+    const row = {
+      kind,
+      object_id: await get("object_id"),
+      object_revision: await get("object_revision"),
+      first_known_generation: await get("first_known_generation"),
+      published_generation: await get("published_generation"),
+      withdrawn_generation: await (await f(record, "withdrawn_generation")).scalar(),
+      withdrawal_reason: await (await f(record, "withdrawal_reason")).scalar(),
+      superseded_by: await (await f(record, "superseded_by")).scalar(),
+    };
+    if (kind === "CC-006.local_shape") {
+      for (const k of ["window_start", "window_mid", "window_end"]) row[k] = await get(k);
+      row.slot = JSON.stringify([kind, [row.window_start, row.window_mid, row.window_end]]);
+    } else {
+      row.slot = row.fact_key = await get("fact_key");
+      if (structurePayload || (cut.structure && kind === "CC-010.bi") ||
+          (cut.w !== null && (typed.INITIALIZATION_KINDS.includes(kind) || kind === "CC-005.inclusion_group")) ||
+          (active && ["CC-004.inclusion_step", "CC-005.inclusion_group", "CC-054.knowledge_state"].includes(kind))) {
+        row.payload = structurePayload ?? await typed.plain(await f(record, "payload"));
+        row.source_coords = await typed.plain(await f(record, "source_coords"));
+      } else if (cut.w !== null && kind === "CC-054.knowledge_state") {
+        // 历史初始化只查宣布的方向，不再次展开该代整份知识请求。
+        row.payload = {direction_state: await s(await f(record, "payload"), "direction_state")};
       }
-    for await (const r of (await f(snapshot, "relations")).items())
-      if ((await t(r, "relation_type")) === "replaces") replaces.push({subject: await t(r, "subject"), object: await t(r, "object")});
-    typed.w2Replacements({pending, groups, initializations, superseded, replaces, kinds, objects});
+    }
+    return row;
+  }
+  function withdrawalReason(kind, supersededBy) {
+    return supersededBy !== null ? "superseded_by_revision"
+      : kind === "CC-006.local_shape" ? "window_removed" : "fact_removed";
+  }
+  function withdrawalOrder(a, b) {
+    const aShape = a.kind === "CC-006.local_shape", bShape = b.kind === "CC-006.local_shape";
+    if (aShape !== bShape) return aShape ? -1 : 1;
+    // 与 Rust 活动 upsert 主序相同；compareTuples 的文本比较按 UTF-8 字节，不用 JS 默认 UTF-16。
+    return aShape ? compareTuples([BigInt(a.window_start)], [BigInt(b.window_start)])
+      : compareTuples([a.kind, a.fact_key, a.object_id, BigInt(a.object_revision)],
+        [b.kind, b.fact_key, b.object_id, BigInt(b.object_revision)]);
+  }
+  async function bindWithdrawalEvidence(evidence, deaths, check = () => {}, charge = () => {}) {
+    const ordered = [...deaths].sort(withdrawalOrder), withdrawals = [], replaces = [];
+    for (const r of ordered) {
+      check();
+      const {object_id, kind, withdrawal_reason: reason, superseded_by} = r;
+      need(reason === withdrawalReason(kind, superseded_by), "CC-056 原件撤回原因/替代不符");
+      withdrawals.push({object_id, reason, superseded_by, ...(kind === "CC-006.local_shape"
+        ? {window_start: r.window_start, window_mid: r.window_mid, window_end: r.window_end}
+        : {fact_key: r.fact_key})});
+      if (superseded_by !== null) replaces.push({old_object_id: object_id, new_object_id: superseded_by});
+    }
+    for (const [key, want] of [["withdrawals", withdrawals], ["replaces", replaces]]) {
+      const actual = await f(evidence, key);
+      need(actual.kind === "array" && await actual.length() === BigInt(want.length), "CC-056 " + key + " 数量与本代撤回原件不符");
+      let i = 0;
+      for await (const got of actual.items()) {
+        charge();
+        check();
+        need(await equal(got, want[i++]), "CC-056 " + key + " 内容/上一代活动主序与本代撤回原件不符");
+      }
+    }
+    return replaces.length;
+  }
+  async function bindCutDirectory(snapshot, life, current, generation, check, charge) {
+    const catalog = await f(snapshot, "catalog_evidence");
+    const evidence = await f(await f(await f(catalog, "axes"), "CC-056"), "evidence");
+    const deaths = [];
+    for (const row of life) {
+      if (row.withdrawn_generation === generation) deaths.push(row);
+      check();
+    }
+    // 先独立对拍来源集合；即使目录计数、轴和 Delta 复写彼此一致也不能覆盖缺失行。
+    const replaces = await bindWithdrawalEvidence(evidence, deaths, check, charge);
+    for (const [name, n] of [
+      ["classified_objects", current.length],
+      ["merged_bars", current.filter(r => r.kind === "CC-005.inclusion_group").length],
+      ["withdrawals", deaths.length],
+      ["replaces", replaces],
+    ])
+      need(await s(catalog, name) === String(n), "目录 " + name + " 与独立原件计数不同");
+  }
+  async function bindReplacementEdges(snapshot, life, w, check, charge) {
+    const replaces = [];
+    for await (const r of (await f(snapshot, "relations")).items()) {
+      if ((await t(r, "relation_type")) === "replaces") {
+        charge();
+        replaces.push({subject: await t(r, "subject"), object: await t(r, "object")});
+      }
+      check();
+    }
+    typed.validateReplacements(life, replaces, w === typed.W2_POLICY, check);
   }
   // #1491：`layout` 由调用方从本 cut 的 rule_revision 布局组件取得（ADR 0037 §六，按版本分派）。
   // 未给出 ⟹ 调用方读的是 v1/v2 快照（ADR 0037 之前的写者，按定义 layout/1）。
-  async function bindSources(snapshot, charge = () => {}, layout = typed.LAYOUTS.LAYOUT1) {
+  async function bindSources(snapshot, charge = () => {}, layout = typed.LAYOUTS.LAYOUT1, cut = null) {
     const raw = await auditRaw(snapshot, charge),
       groups = new Map(),
       shapes = new Map(),
       records = [],
       wRecords = [],
-      pendingCoords = [];
+      pendingCoords = [], life = [], originalRefs = new Map();
     for (const family of ["objects", "withdrawn_objects"])
       for await (const record of (await f(snapshot, family)).items()) {
         charge();
         records.push(record);
         const kind = await t(record, "kind");
-        if (typed.TB02_KINDS.includes(kind)) await typed.validateTyped(record, layout);
+        let structurePayload;
+        if (typed.TB02_KINDS.includes(kind)) structurePayload = await typed.validateTyped(record, layout);
         else {
           // 未声明 kind 不得落入 CC-006 形态判据（#1419 独审 P1）。
           need(kind === "CC-006.local_shape", "未声明的对象 kind");
@@ -4905,6 +5416,13 @@ if (typeof module !== 'object' || !module.exports) {
         }
         const refs = await f(record, "input_refs"),
           active = (await s(record, "lifecycle")) === "active";
+        const projection = cut === null ? null : await cutObject(record, kind, structurePayload, cut, active);
+        if (projection) {
+          need(BigInt(projection.first_known_generation) <= BigInt(cut.generation), "对象首次获知来自未来cut");
+          need(projection.withdrawn_generation === null || BigInt(projection.withdrawn_generation) <= BigInt(cut.generation), "撤回来自未来cut");
+          life.push(projection);
+          cut.check();
+        }
         async function checkRef(ref) {
           await keys(ref, RAWREF, "来源八键");
           const r = raw.byId.get(
@@ -4913,20 +5431,10 @@ if (typeof module !== 'object' || !module.exports) {
               await s(ref, "revision"),
             ]),
           );
-          need(
-            r && (await equal(ref, await rawReference(r))),
-            "对象八键来源未绑定独立完整原始历史",
-          );
-          if (active)
-            need(
-              await equal(
-                ref,
-                await rawReference(
-                  raw.effective.get(await s(ref, "source_coord")) || {},
-                ),
-              ),
-              "活动对象使用旧修订",
-            );
+          if (r && !originalRefs.has(r)) originalRefs.set(r, await rawReference(r));
+          need(r && await equal(ref, originalRefs.get(r)), "对象八键来源未绑定独立完整原始历史");
+          // 上式已逐字段相等；同一份原始对象是否是该坐标的生效版本只需查原账赢家。
+          if (active) need(r === raw.effective.get(await s(ref, "source_coord")), "活动对象使用旧修订");
           return r;
         }
         if (typed.TB02_KINDS.includes(kind)) {
@@ -4975,7 +5483,7 @@ if (typeof module !== 'object' || !module.exports) {
         if (typed.INITIALIZATION_KINDS.includes(kind) || kind === "CC-054.knowledge_state" ||
             (kind === "CC-005.inclusion_group" && await of(await f(record, "payload")).has("initialization_policy_revision"))) {
           // #1393 W：初始化相关对象收原件，供下方 raw 值绑定与逐发生边界链接校验。
-          wRecords.push(await typed.plain(record));
+          wRecords.push(projection ? {...projection, input_refs: kind === "CC-054.knowledge_state" ? [] : await typed.plain(refs)} : await typed.plain(record));
         }
         if (kind === "CC-004.undetermined_raw" && active)
           pendingCoords.push(await s(await f(await f(record, "payload"), "raw"), "source_coord"));
@@ -5095,7 +5603,7 @@ if (typeof module !== 'object' || !module.exports) {
     }
     // #1491 bounded-layout/1、/2：CC-007 三跳只读绑定（分型对象 → 批记录 entry → 单元序列）。
     await typed.bindDevelopmentBatches(records, layout);
-    return { raw, records, shapes, bound };
+    return { raw, records, shapes, bound, life };
   }
   async function shapeIdentity(
     record,
@@ -5916,14 +6424,19 @@ if (typeof module !== 'object' || !module.exports) {
           "cut规则目录轴",
         );
       await catalogValidate(catalog, snapshot);
-      const binding = await bindSources(
-        snapshot,
-        charge,
-        typed.splitRule(rule).layout,
-      );
-      await bindSegmentSequences(snapshot);
-      await bindCenterFamily(snapshot, generation, typed.CENTER_RULES.has(baseRule));
-      if (typed.resolveRule(rule).w === typed.W2_POLICY) await bindW2Replacements(snapshot);
+      const policy = typed.resolveRule(rule), s3 = protocol === "s-session/3",
+        structure = s3 && typed.CENTER_RULES.has(baseRule);
+      const binding = await bindSources(snapshot, charge, policy.layout, s3 ? {structure, generation, check, w: policy.w} : null);
+      if (s3 && generation !== "0") {
+        const {life} = binding, current = life.filter(r => r.withdrawn_generation === null);
+        if (structure) typed.Center.validateStructureHistory(life, typed.isStructureKind, generation, check, charge);
+        const sources = typed.validateCutSources(current, binding.raw.effective, policy, check, charge);
+        typed.validateKnowledgeRequests(current, sources, rule, structure, check, charge);
+        await bindReplacementEdges(snapshot, life, policy.w, check, charge);
+        await bindCutDirectory(snapshot, life, current, generation, check, charge);
+      }
+      await bindSegmentSequences(snapshot, structure ? binding.life : null);
+      await bindCenterFamily(snapshot, generation, structure ? binding.life : null);
       for (const record of binding.records) {
         charge();
         let want;
@@ -5961,27 +6474,36 @@ if (typeof module !== 'object' || !module.exports) {
       }
       await auditWitnesses(snapshot, binding, charge);
       check();
-      return binding;
+      const {raw, records, shapes, bound} = binding;
+      return {raw, records, shapes, bound};
     }
     // #1414/#1420：同 cut 活动集内 s-segment/2、/3 段与其 FIRST/SECOND 序列对象互绑；判据逐字同 main
     // validateTB02Candidate（payload 已由 typed 完整校验，此处在同一原件上做跨对象绑定）。
-    async function bindSegmentSequences(snapshot) {
+    async function bindSegmentSequences(snapshot, life) {
       const equalPlain = (a, b) => api.canonical(a) === api.canonical(b);
       const activeValues = new Map();
-      for await (const record of (await f(snapshot, "objects")).items())
+      if (life) {
+        for (const row of life) if (row.withdrawn_generation === null && typed.isStructureKind(row.kind))
+          activeValues.set(row.object_id, row);
+      } else for await (const record of (await f(snapshot, "objects")).items())
         activeValues.set(await t(record, "object_id"), record);
       for (const value of activeValues.values()) {
-        if ((await s(value, "kind")) !== "CC-013.segment") continue;
-        const r = await typed.plain(value);
+        if ((life ? value.kind : await s(value, "kind")) !== "CC-013.segment") continue;
+        const r = life ? value : await typed.plain(value);
         if (!["s-segment/2", "s-segment/3", "s-segment/4", "s-segment/5"].includes(r.payload.schema_revision)) continue;
         const d = r.payload.data;
         need(d.second_sequence_id !== null || d.fact_vector.scan_complete, "未完成扫描缺SECOND资源证据");
         for (const [prefix, role] of [["sequence", "FIRST_SEQUENCE"], ["second_sequence", "SECOND_SEQUENCE"]]) {
           const oid = d[prefix + "_object_id"]; if (oid === null) continue;
-          const qValue = activeValues.get(oid), q = qValue ? await typed.plain(qValue) : undefined;
-          need(q && q.kind === "CC-012.feature_sequence" && q.payload.schema_revision === r.payload.schema_revision, "段引用缺同cut序列对象");
+          const qValue = activeValues.get(oid), q = qValue ? (life ? qValue : await typed.plain(qValue)) : undefined;
+          // 结构域的对象/实体/角色互绑已在统一历史图执行（包括当前 cut）；其余旧读者仍有原链。
+          if (!life) {
+            need(q?.kind === "CC-012.feature_sequence", "段引用缺同cut序列对象");
+            const v = q.payload.data;
+            need(v.entity_id === d[prefix + "_id"] && v.segment_id === d.entity_id && v.role === role, "段序列引用身份/角色不符");
+          }
+          need(q.payload.schema_revision === r.payload.schema_revision, "段引用缺同cut序列对象");
           const v = q.payload.data;
-          need(v.entity_id === d[prefix + "_id"] && v.segment_id === d.entity_id && v.role === role, "段序列引用身份/角色不符");
           need(q.source_coords.every(c => r.source_coords.includes(c)), "段缺序列实际来源");
           if (role === "FIRST_SEQUENCE" && d.strict !== null) need(v.facts.checks.some(c => equalPlain(c.elements, d.strict.elements)), "strict未绑定FIRST检查");
           if (role === "SECOND_SEQUENCE") need(d.fact_vector.scan_complete !== (v.facts.resource_truncated && v.facts.matched === null), "段事实可知性未绑定SECOND扫描证据");
@@ -5993,8 +6515,8 @@ if (typeof module !== 'object' || !module.exports) {
           // #1493 §7.1 第 6 条：段端门失败 fail-closed——同 cut 段版本与逐轴证据必须带阻断标记。
           const versions = [];
           for (const x of activeValues.values()) {
-            if ((await s(x, "kind")) !== "CC-056.segment_version") continue;
-            const pv = await typed.plain(x);
+            if ((life ? x.kind : await s(x, "kind")) !== "CC-056.segment_version") continue;
+            const pv = life ? x : await typed.plain(x);
             if (pv.payload.schema_revision === r.payload.schema_revision) versions.push(pv);
           }
           need(versions.length > 0 && versions.every(x => x.payload.data.waiting_reasons.includes(typed.PARSE_INVALID_REASON)), "段端门失败未在段版本标阻断");
@@ -6005,30 +6527,12 @@ if (typeof module !== 'object' || !module.exports) {
     }
     // #1419/#1424：同 cut 活动集上的中枢族跨对象链接（seed/中枢/角色/归属/游标、对/位置/边/版本、22 轴对象绑定），
     // 以及全史中枢对出生/修订/撤回与变化事件的逐发生边界闭合。payload 已由 typed 逐对象校验；此处只取所需普通原件。
-    // #1855 B5：S3 结构规则（Rust is_structure_rule）的非零代 cut，活动集须各恰一个三类结构版本根
-    // （Rust source_structure::audit_full）；零代与非结构规则不要求。
-    async function bindCenterFamily(snapshot, generation, structureRule) {
-      const family = new Set([...typed.CENTER_KINDS, ...typed.PAIR_KINDS]),
-        history = new Set([typed.PAIR_KINDS[1], typed.PAIR_KINDS[3]]),
-        roots = new Map(["CC-056.segment_version", "CC-056.center_version", "CC-056.pair_version"].map((k) => [k, 0])),
-        active = [],
-        pairs = [];
-      let any = false;
-      for (const name of ["objects", "withdrawn_objects"])
-        for await (const record of (await f(snapshot, name)).items()) {
-          const kind = await s(record, "kind");
-          if (name === "objects" && roots.has(kind)) roots.set(kind, roots.get(kind) + 1);
-          if (!family.has(kind) && !(name === "objects" && kind === "CC-013.segment")) continue;
-          const r = await typed.plain(record);
-          if (family.has(kind)) any = true;
-          if (name === "objects") active.push(r);
-          if (history.has(kind)) pairs.push(r);
-        }
-      const axesValue = generation === "0" ? null : await f(await f(snapshot, "catalog_evidence"), "axes"),
-        axes = axesValue === null || !(await axesValue.has("CC-016")) ? null : await typed.plain(axesValue);
-      if (structureRule && generation !== "0")
-        need([...roots.values()].every((n) => n === 1), "结构域版本根缺失或重复");
-      if (!any && axes === null) return;
+    async function bindCenterFamily(snapshot, generation, life) {
+      if (life === null || generation === "0") return;
+      const family = new Set([...typed.CENTER_KINDS, ...typed.PAIR_KINDS, "CC-013.segment"]);
+      const active = life.filter(r => r.withdrawn_generation === null && family.has(r.kind));
+      const pairs = life.filter(r => r.kind === typed.PAIR_KINDS[1] || r.kind === typed.PAIR_KINDS[3]);
+      const axes = await typed.plain(await f(await f(snapshot, "catalog_evidence"), "axes"));
       typed.Center.validateCenterFamilyCut(active, axes);
       typed.Center.validatePairHistory(pairs);
     }
@@ -6196,8 +6700,7 @@ if (typeof module !== 'object' || !module.exports) {
         const reason = await t(w, "reason"),
           sup = await (await f(w, "superseded_by")).scalar();
         need(
-          ["fact_removed", "superseded_by_revision"].includes(reason) &&
-            (reason === "fact_removed") === (sup === null),
+          reason === withdrawalReason(hasFact ? null : "CC-006.local_shape", sup),
           "撤回原因/替代不符",
         );
         if (sup !== null)
@@ -6242,6 +6745,9 @@ if (typeof module !== 'object' || !module.exports) {
           await equal(await f(dd, dk), await f(snapshot, sk)),
           "Delta/Snapshot字段不同：" + sk,
         );
+      const changes = await f(await f(await f(await f(snapshot, "catalog_evidence"), "axes"), "CC-056"), "evidence");
+      for (const k of ["withdrawals", "replaces"])
+        need(await equal(await f(dd, k), await f(changes, k)), "Delta/CC-056 原件内容或活动主序不同：" + k);
       for (const k of ["profile_id", "profile_hash", "scope"])
         need(
           await equal(
@@ -7455,6 +7961,7 @@ if (typeof module !== 'object' || !module.exports) {
       validateState: validateStateOnce,
       validateTB02Catalog: (catalog) => catalogValidate(catalog, null),
       validateDelta,
+      bindWithdrawalEvidence,
       comparePublication,
       rowKey,
       tuple,

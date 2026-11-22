@@ -91,84 +91,85 @@
     need(protocols.includes(protocol), reason + "：未获准的完整规则组合");
     return base;
   }
-  function w2Replacements({pending, groups, initializations = [], superseded, replaces, kinds, objects}) {
-    const raws = new Map(pending.map(p => [p.object_id, p])), byGroup = new Map(groups.map(g => [g.object_id, g]));
-    const slotOf = (id, obj) => {
-      if (typeof obj?.slot === "string") return obj.slot;
-      const kind = kinds.get(id);
-      if (kind === "CC-004.undetermined_raw" && typeof obj?.coord === "string") return JSON.stringify([kind, obj.coord]);
-      if (kind === "CC-005.inclusion_group" && Array.isArray(obj?.members) && obj.members.length > 0) return JSON.stringify([kind, obj.members[0]]);
-      return null;
+  // ADR 0075：公边与寿命一一对应；W2 只在同槽缺席时增设唯一定向组资格。
+  function validateReplacements(records, replaces, w2, check = () => {}) {
+    const rows = Array.isArray(records) ? records : [...records];
+    const objects = new Map(), bySlot = new Map(), byGroupCoord = new Map(), initializations = [];
+    const expected = new Map(), successor = new Map();
+    const alive = (obj, at) => BigInt(obj.first_known_generation) <= at &&
+      (obj.withdrawn_generation === null || BigInt(obj.withdrawn_generation) > at);
+    const add = (map, key, row) => {
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(row);
     };
-    const edges = new Set(replaces.map(r => JSON.stringify([r.subject, r.object])));
-    need(edges.size === replaces.length, "W2重复公开replaces关系");
-    const alive = (obj, at) => BigInt(obj.first_known_generation) <= at && (obj.withdrawn_generation === null || BigInt(obj.withdrawn_generation) > at);
-    // W/2 只让定向组替代未定原件，direction=null 的组不替代（Rust w2_group_contains、w2_audit_group_contains 同判据）。
-    const directedMember = (g, coord) => ["UP", "DOWN"].includes(g.direction) && g.members.includes(coord);
-    const bySlot = new Map();
-    for (const [id, obj] of objects) {
-      const slot = slotOf(id, obj);
-      if (slot === null) continue;
-      if (!bySlot.has(slot)) bySlot.set(slot, []);
-      bySlot.get(slot).push({id, obj});
+    for (const r of rows) {
+      check();
+      need(!objects.has(r.object_id), w2 ? "W2对象身份重复" : "替代生命周期对象身份重复");
+      objects.set(r.object_id, r);
+      if (!w2 || r.slot === null) continue;
+      add(bySlot, r.slot, r);
+      if (r.kind === "CC-005.inclusion_group" && ["UP", "DOWN"].includes(r.payload?.direction))
+        for (const c of r.payload.members) add(byGroupCoord, c, r);
+      if (r.kind === "CC-004.initialization") initializations.push(r);
     }
-    for (const list of bySlot.values()) {
-      list.sort((a, b) => {
-        const x = BigInt(a.obj.first_known_generation), y = BigInt(b.obj.first_known_generation);
-        return x < y ? -1 : x > y ? 1 : 0;
-      });
-      for (let idx = 1; idx < list.length; idx++) {
-        const prev = list[idx - 1].obj, cur = list[idx].obj;
-        need(prev.withdrawn_generation !== null && BigInt(prev.withdrawn_generation) <= BigInt(cur.first_known_generation), "W2同槽位对象生命周期重叠");
+    for (const items of bySlot.values()) {
+      check();
+      items.sort((a, b) => coordOrder(a.first_known_generation, b.first_known_generation));
+      for (let i = 1; i < items.length; i++) {
+        const old = items[i - 1], next = items[i];
+        need(old.withdrawn_generation !== null && BigInt(old.withdrawn_generation) <= BigInt(next.first_known_generation), "W2同槽位对象生命周期重叠");
+        if (old.withdrawn_generation === next.first_known_generation) successor.set(old, next);
       }
     }
-    for (const [id, obj] of objects) {
-      if (obj.withdrawn_generation === null || kinds.get(id) === "CC-004.undetermined_raw") continue;
-      if (obj.superseded_by === null) {
-        const slot = slotOf(id, obj), at = BigInt(obj.withdrawn_generation);
-        need(slot === null || !(bySlot.get(slot) || []).some(e => e.id !== id && alive(e.obj, at)), "W2同槽位存在替代目标却按fact_removed撤回");
-      }
-    }
-    const withdrawn = new Map(superseded.map(w => [w.object_id, w]));
-    for (const u of pending) {
-      if (u.withdrawn_generation === null) { need(u.superseded_by === null, "活动未定原件不得声明superseded_by"); continue; }
-      const at = BigInt(u.withdrawn_generation);
-      const replaced = pending.some(r => r.object_id !== u.object_id && r.coord === u.coord && alive(r, at)) ||
-        groups.some(g => alive(g, at) && directedMember(g, u.coord)) ||
-        initializations.some(init => alive(init, at) && init.source_coords.includes(u.coord));
-      if (u.withdrawal_reason === "fact_removed") {
-        need(u.superseded_by === null && !replaced, "W2未定原件存在替代目标却按fact_removed撤回");
+    for (const old of rows) {
+      check();
+      if (old.withdrawn_generation === null) continue;
+      const death = BigInt(old.withdrawn_generation);
+      const sameSlot = successor.get(old);
+      const pending = w2 && old.kind === "CC-004.undetermined_raw";
+      const coord = pending ? old.payload.raw.source_coord : null;
+      const directed = pending && !sameSlot ? (byGroupCoord.get(coord) ?? []).filter(r => alive(r, death)) : [];
+      if (old.superseded_by === null) {
+        if (w2) need(!sameSlot && (!pending || directed.length === 0 &&
+          !initializations.some(r => alive(r, death) && r.source_coords.includes(coord))),
+        pending ? "W2未定原件存在替代目标却按fact_removed撤回" : "W2同槽位存在替代目标却按fact_removed撤回");
         continue;
       }
-      need(u.withdrawal_reason === "superseded_by_revision", "W2撤回原因不符");
-      const revision = raws.get(u.superseded_by), group = byGroup.get(u.superseded_by);
-      need((revision && revision.object_id !== u.object_id && revision.coord === u.coord && alive(revision, at)) ||
-        (group && alive(group, at) && directedMember(group, u.coord)), "W2逐原件替代目标不满足坐标、种类或生命周期");
-      // #1855 B6：撤回时刻在世的同槽位 raw 修订优先（Rust object_diff Superseded）；没有修订才看在世定向组，
-      // 多于一个即拒（Rust w2_replacing_group、审计「未定原件有多个替代候选」）。
-      const sameSlot = pending.find(r => r.object_id !== u.object_id && r.coord === u.coord && alive(r, at));
-      const directed = groups.filter(g => alive(g, at) && directedMember(g, u.coord));
-      need(sameSlot || directed.length === 1, "W2未定原件有多个定向替代候选");
-      need(u.superseded_by === (sameSlot || directed[0]).object_id, "W2逐原件替代目标须为撤回时刻同槽位修订或唯一定向组");
-      need(edges.has(JSON.stringify([u.superseded_by, u.object_id])), "W2逐原件替代缺公开replaces关系");
-    }
-    for (const w of superseded) need(edges.has(JSON.stringify([w.superseded_by, w.object_id])), "W2替代撤回缺公开replaces关系");
-    for (const r of replaces) {
-      const target = withdrawn.get(r.object);
-      need(target && target.superseded_by === r.subject, "W2公开replaces关系缺对应撤回或superseded_by不符");
-      const replacement = objects.get(r.subject);
-      need(replacement, "W2替代目标不存在或生命周期不符");
-      const newKind = kinds.get(r.subject), oldKind = target.kind;
-      if (newKind !== oldKind) {
-        need(oldKind === "CC-004.undetermined_raw" && newKind === "CC-005.inclusion_group", "W2跨kind替代未获准");
-        const raw = raws.get(r.object), group = byGroup.get(r.subject);
-        need(raw && group && directedMember(group, raw.coord), "W2逐原件替代目标不满足坐标、种类或生命周期");
+      const target = objects.get(old.superseded_by);
+      need(target && target !== old && alive(target, death), pending ? "W2逐原件替代目标不满足坐标、种类或生命周期" : "CC-056 替代目标不存在或生命周期不符");
+      if (pending && !sameSlot) {
+        need(directed.length > 0 && directed.includes(target), "W2逐原件替代目标不满足坐标、种类或生命周期");
+        need(directed.length === 1, "W2未定原件有多个定向替代候选");
       } else {
-        const oldSlot = slotOf(r.object, objects.get(r.object) || target), newSlot = slotOf(r.subject, replacement);
-        need(oldSlot !== null && oldSlot === newSlot, "W2同kind替代槽位不符");
+        if (pending && sameSlot) need(sameSlot === target, "W2逐原件替代目标须为撤回时刻同槽位修订或唯一定向组");
+        need(old.kind === target.kind, w2 ? "W2跨kind替代未获准" : "CC-056 替代槽位不符");
+        need(old.slot !== null && old.slot === target.slot, w2 ? "W2同kind替代槽位不符" : "CC-056 替代槽位不符");
       }
-      need(r.subject !== r.object && target.withdrawn_generation !== null && target.withdrawn_generation !== undefined && alive(replacement, BigInt(target.withdrawn_generation)), "W2替代目标不存在或生命周期不符");
+      expected.set(old.object_id, target.object_id);
     }
+    const seen = new Set();
+    for (const r of replaces) {
+      check();
+      const key = JSON.stringify([r.subject, r.object]);
+      need(!seen.has(key), "重复公开replaces关系");
+      seen.add(key);
+      need(expected.get(r.object) === r.subject, "公开replaces关系缺对应撤回或superseded_by不符");
+      expected.delete(r.object);
+    }
+    need(expected.size === 0, "替代撤回缺公开replaces关系");
+  }
+  // 原具名 W2 入口的试件投影保留，生产和试件最终运行同一谓词。
+  function w2Replacements({pending, groups, initializations = [], superseded, replaces, kinds, objects}) {
+    const rows = new Map();
+    const merge = row => rows.set(row.object_id, {...rows.get(row.object_id), ...row});
+    for (const [id, row] of objects) merge({object_id:id, kind:kinds.get(id), superseded_by:null, slot:null, ...row});
+    for (const row of superseded) merge({withdrawn_generation:null, ...rows.get(row.object_id), ...row});
+    for (const row of superseded) if (!objects.has(row.object_id) && !pending.some(r => r.object_id === row.object_id))
+      need(kinds.get(row.superseded_by) === row.kind, "W2跨kind替代未获准");
+    for (const r of pending) merge({...r, kind:"CC-004.undetermined_raw", slot:JSON.stringify(["CC-004.undetermined_raw", r.coord]), payload:{raw:{source_coord:r.coord}}});
+    for (const r of groups) merge({...r, kind:"CC-005.inclusion_group", slot:rows.get(r.object_id)?.slot ?? JSON.stringify(["CC-005.inclusion_group", r.members[0]]), payload:{members:r.members,direction:r.direction}});
+    for (const r of initializations) merge({...r, kind:"CC-004.initialization"});
+    validateReplacements(rows.values(), replaces, true);
   }
   async function initializationPolicy(p) { need(await eqField(p, "initialization_policy_revision", INITIALIZATION_POLICY), "初始化政策版本未声明"); }
   async function directionState(p) { await enumValue(await field(p, "direction_state"), ["Undetermined", "Established"], "初始化方向状态未声明"); }
@@ -271,11 +272,15 @@
     }
     need((await coordIterator.next()).done, "typed 源引用/坐标不一一对应");
     const p = await field(record, "payload");
-    if (SEGMENT_KINDS.includes(kind)) validateSegmentPayload(kind, await plain(p));
-    else if (CENTER_KINDS.includes(kind)) Center.validateCenterPayload(kind, await plain(p));
-    else if (PAIR_KINDS.includes(kind)) {
-      Center.validatePairPayload(kind, await plain(p));
-      if (kind === PAIR_KINDS[1] || kind === PAIR_KINDS[3]) Center.validatePairPublication({payload: await plain(p)}, await S(await field(record, "first_known_generation")));
+    let structurePayload;
+    if (STRUCTURE_KINDS.has(kind)) {
+      structurePayload = await plain(p);
+      if (SEGMENT_KINDS.includes(kind)) validateSegmentPayload(kind, structurePayload);
+      else if (CENTER_KINDS.includes(kind)) Center.validateCenterPayload(kind, structurePayload);
+      else {
+        Center.validatePairPayload(kind, structurePayload);
+        if (kind === PAIR_KINDS[1] || kind === PAIR_KINDS[3]) Center.validatePairPublication({payload: structurePayload}, first.toString());
+      }
     }
     else if (BI_KINDS.includes(kind)) await validateBiPayload(kind, p);
     else if (kind === "CC-004.initialization") {
@@ -392,6 +397,7 @@
     }
     const slot = kind === "CC-004.initialization" ? "W" : kind === "CC-004.undetermined_raw" ? await field(await field(p, "raw"), "source_coord") : [...BI_KINDS, ...SEGMENT_KINDS, ...CENTER_KINDS, ...PAIR_KINDS].includes(kind) ? await field(p, "slot") : kind === TB02_KINDS[0] ? await field(await field(p, "incoming"), "source_coord") : kind === TB02_KINDS[1] ? await field(p, "group_anchor") : kind === TB02_KINDS[2] ? await field(p, "window") : kind === DEVELOPMENT_BATCH_KIND ? await field(await field(p, "bar"), "source_coord") : "TB-02-A";
     need(await canonicalMatches([kind, slot], await S(await field(record, "fact_key"))), "事实语义槽未绑定 payload");
+    return structurePayload;
   }
   // #1404/#1414/#1420：s-segment/1、/2、/3 段合同沿用已审同步判据（单一实现，含 K1 游标）。
   // 调用面两处：导出给既有观察器/合同测试的同步入口；validateTyped 在该 payload 的完整原件上调用（见 plain）。
@@ -747,6 +753,7 @@
       } else if (kind === SEGMENT_KINDS[4]) {
         keys(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind); known(d.known_at);
         need(["formed", "updated", "terminated", "withdrawn"].includes(d.change), "段变化未声明");
+        need(Center.changeNulls(d), "B3 段变更撤回与 after/object_id 空值不符");
         for (const k of ["before", "after"]) if (d[k] !== null) validateSegmentPayload(SEGMENT_KINDS[2], {...p, slot:d[k].entity_id, object_generation:d[k].entity_id.split(":")[1], data:d[k]});
       } else {
         keys(d, ["input_frontier", "waiting_reasons", "known_at", "delivered_scope", "deferred_scope", ...(v3 ? ["scan_budget", "scan_cursors"] : [])], kind); integer(d.input_frontier, false, true); known(d.known_at); texts(d.waiting_reasons);
@@ -949,6 +956,210 @@
       }
     }
   }
+  // ADR 0075 B7：从已发事实列举地址；地址表既用于覆盖检查，也决定每条请求的证据。
+  const STRUCTURE_KINDS = new Set([...SEGMENT_KINDS, ...CENTER_KINDS, ...PAIR_KINDS]);
+  const isStructureKind = kind => STRUCTURE_KINDS.has(kind);
+  const STEP_KIND = "CC-004.inclusion_step", GROUP_KIND = "CC-005.inclusion_group";
+  const KNOWLEDGE_KIND = "CC-054.knowledge_state";
+  const INITIAL_WAIT = "initial_direction_unsettled";
+  const partNeed = (ok, part, message) => need(ok, part + " " + message);
+  const coordOrder = (a, b) => a === b ? 0 : BigInt(a) < BigInt(b) ? -1 : 1;
+  const sameCoords = (a, b, size = b.length) => a.length === size && a.every((c, i) => c === b[i]);
+  function requestAxes(input, domain, computation) {
+    return {input_quality: input, applicability: domain, computation, validity: "CURRENT"};
+  }
+  const REQUEST_STATES = [
+    requestAxes("SUFFICIENT", "IN_DOMAIN", "COMPLETE"),
+    requestAxes("SUFFICIENT", "OUTSIDE_DOMAIN", "COMPLETE"),
+    requestAxes("INSUFFICIENT", "DOMAIN_PROOF_MISSING", "INCOMPLETE"),
+    requestAxes("SUFFICIENT", "IN_DOMAIN", "INCOMPLETE"),
+  ];
+  function structureRequests(record, active, add) {
+    const d = record.payload.data;
+    const at = (cc, axis, path, state = 0, reason = null) =>
+      add([JSON.parse(record.fact_key), [cc, axis, "structure-classification/1", path, record.object_id]],
+        record, REQUEST_STATES[state], reason === null ? [] : [reason]);
+    const construction = (c, path) => {
+      at("CC-011", "length", path);
+      const vector = c.vector, odd = c.length === "odd_ge3";
+      if (vector === null) {
+        const state = odd ? 2 : 1, reason = odd ? "construction_conditions_not_evaluated" : "construction_length_outside_domain";
+        for (const axis of ["construction_conditions", "direction"]) at("CC-011", axis, path, state, reason);
+      } else {
+        at("CC-011", "construction_conditions", path);
+        if (!vector.every(Boolean)) at("CC-011", "direction", path, 1, "construction_conditions_failed");
+        else if (c.direction === null) at("CC-011", "direction", path, 2, "construction_direction_not_evaluated");
+        else at("CC-011", "direction", path);
+      }
+    };
+    switch (record.kind) {
+      case "CC-011.segment_seed":
+      case "CC-011.seed_candidate":
+        construction(d.construction, "construction");
+        break;
+      case "CC-013.segment": {
+        construction(d.construction, "construction");
+        d.termination_attempts.forEach((attempt, i) => construction(attempt.construction, ["termination_attempts", String(i), "construction"]));
+        const second = active.get(d.second_sequence_object_id)?.payload.data;
+        const truncated = second && !["FAILED_GEOMETRY", "CASE_ONE", "CASE_TWO", "KILLED_CASE_TWO"].includes(d.result)
+          && second.scan.resource_truncated && second.facts.matched === null;
+        if (truncated) at("CC-013", "semantic_termination_result", "result", 3, "second_sequence_resource_bound");
+        else at("CC-013", "semantic_termination_result", "result");
+        if (d.fact_vector.new_segment_formed === null || d.fact_vector.segment_broken === null)
+          at("CC-014", "known_fact_vector", "fact_vector", 3, "break_facts_scan_incomplete");
+        else at("CC-014", "known_fact_vector", "fact_vector");
+        at("CC-014", "scan_coverage", "fact_vector");
+        break;
+      }
+      case "CC-016.center_seed_attempt":
+        if (d.vector.strict === null) at("CC-016", "seed_condition_vector", "vector", 2, "seed_strict_not_evaluated");
+        else at("CC-016", "seed_condition_vector", "vector");
+        at("CC-016", "core_order", "core_order");
+        break;
+      case "CC-018.unit_core_position":
+        at("CC-018", "unit_core_position", "position");
+        break;
+      case "CC-020.center_pair":
+        if (d.leaf === null) at("CC-020", "center_pair_development", "leaf", 2, "PENDING_UPGRADE_TB02H");
+        else at("CC-020", "center_pair_development", "leaf");
+        break;
+      case "CC-022.unit_assignment":
+        at("CC-022", "assignment_status", "status");
+        break;
+    }
+  }
+  function validateCutSources(records, effective, {w}, check, charge) {
+    const ordered = [...effective.keys()].sort(coordOrder);
+    const steps = new Map(), groups = [], undetermined = new Map();
+    let init, knowledge;
+    const must = (ok, reason) => partNeed(ok, "B8", reason);
+    for (const r of records) {
+      const p = r.payload;
+      switch (r.kind) {
+        case STEP_KIND:
+          must(!steps.has(p.incoming.source_coord), "CC004 步骤坐标重复");
+          steps.set(p.incoming.source_coord, r);
+          break;
+        case GROUP_KIND: {
+          groups.push(r);
+          const union = new Set([...p.members, ...(p.direction_evidence?.source_coords ?? []), ...(p.confirmation_evidence?.source_coords ?? [])]);
+          must(r.source_coords.length === union.size && r.source_coords.every(c => union.has(c)), "组来源不是成员、方向及封口证据并集");
+          break;
+        }
+        case INITIALIZATION_KINDS[0]:
+          must(!init, "W 同 cut 初始化重复");
+          init = r;
+          break;
+        case INITIALIZATION_KINDS[1]:
+          must(!undetermined.has(p.raw.source_coord) && sameCoords(r.source_coords, [p.raw.source_coord]), "W 未定原件重复或来源不是自身坐标");
+          undetermined.set(p.raw.source_coord, r);
+          break;
+        case KNOWLEDGE_KIND:
+          must(!knowledge && sameCoords(r.source_coords, ordered), "CC054 知识态重复或来源不是同 cut 全部生效原始账");
+          knowledge = r;
+          break;
+        default:
+          if (Center.STRUCTURE_ROOTS.includes(r.kind))
+            must(sameCoords(r.source_coords, ordered), r.kind + " 来源不是同 cut 全部生效原始账");
+      }
+      check();
+    }
+    must(knowledge, "同 cut 缺 CC054 知识原件");
+    const waiting = w !== null && steps.size === 0;
+    let e = 0;
+    if (w !== null) {
+      must(init && knowledge.payload.direction_state === init.payload.direction_state, "W 初始化与知识方向不符");
+      const p = init.payload;
+      if (waiting) {
+        must(p.direction_state === "Undetermined" && p.first_raw_pair === null && groups.length === 0, "W 等待期不得发布正式步骤或组");
+        must(sameCoords(init.source_coords, ordered), "W 等待期初始化来源不是完整原始账");
+        must(undetermined.size === ordered.length && ordered.every(c => undetermined.has(c)), "W 未定原件未逐坐标覆盖原始账");
+      } else {
+        must(p.direction_state === "Established" && p.first_raw_pair && undetermined.size === 0, "W 建立期初始化状态错误或仍有未定原件");
+        const pair = p.first_raw_pair;
+        e = ordered.indexOf(pair.incoming.source_coord);
+        must(e > 0 && sameCoords(init.source_coords, ordered, e + 1) && sameCoords(pair.source_coords, ordered, e + 1), "W 初始化和首对来源不是精确建立前缀");
+        const seed = steps.get(ordered[0]);
+        must(seed && Center.sameValue(seed.payload.direction_evidence, pair), "W seed 与初始化首对证据不同");
+      }
+    }
+    if (!waiting) {
+      must(steps.size === ordered.length, "CC004 步骤未一一覆盖生效原始账");
+      for (const [i, coord] of ordered.entries()) {
+        charge();
+        check();
+        const row = steps.get(coord);
+        must(row && sameCoords(row.source_coords, ordered, Math.max(i, e) + 1), "CC004 步骤坐标或来源闭前缀不符");
+        const p = row.payload;
+        must((p.action === "seed") === (i === 0), "CC004 仅首步须为 seed");
+        if (i === 0) {
+          must(Center.sameValue(p.incoming, p.acc_after) && p.acc_before === null && p.contains === null,
+            "CC004 首步累积状态不是原件 seed");
+          must(w === null ? p.direction === null && p.direction_evidence === null
+            : p.direction !== null && p.direction_evidence !== null, "CC004 首步方向证据与规则不符");
+        }
+        if (w !== null) must(p.action !== "waiting", "W 不得发布 CC004 waiting 步");
+      }
+    }
+    return {knowledge, steps, groups, init, undetermined, ordered, waiting};
+  }
+  function validateKnowledgeRequests(records, cut, rule, structureRule, check, charge) {
+    const {knowledge, steps, init, undetermined, ordered, waiting} = cut;
+    const active = new Map(records.map(r => [r.object_id, r])), expected = new Map(), seen = new Set();
+    const must = (ok, reason) => partNeed(ok, "B7", reason);
+    const add = (key, record, axes, reasons) => expected.set(JSON.stringify(key), {
+      subject: record?.object_id ?? null,
+      sources: record?.source_coords ?? ordered,
+      axes,
+      reasons,
+    });
+    const equalIsEvidence = ruleContract(rule)?.[2] === KNOWLEDGE_DOMAINS[1] || resolveRule(rule).w !== null;
+    for (const r of steps.values()) {
+      const p = r.payload, reasons = p.waiting_reasons.filter(t => !equalIsEvidence || t !== "equal_extreme_identity");
+      if (!reasons.length && p.direction_evidence === null) reasons.push("direction_not_yet_established");
+      const incomplete = reasons.length > 0;
+      const insufficient = reasons.some(t => ["fewer_than_three_merged_bars", "no_subsequent_bar", "direction_not_yet_established"].includes(t));
+      add(JSON.parse(r.fact_key), r, requestAxes(insufficient ? "INSUFFICIENT" : "SUFFICIENT",
+        incomplete ? "DOMAIN_PROOF_MISSING" : "IN_DOMAIN", incomplete ? "INCOMPLETE" : "COMPLETE"), reasons);
+    }
+    if (init) {
+      add(JSON.parse(init.fact_key), init, REQUEST_STATES[waiting ? 2 : 0], waiting ? [INITIAL_WAIT] : []);
+      for (const r of undetermined.values()) add(JSON.parse(r.fact_key), r, REQUEST_STATES[2], [INITIAL_WAIT]);
+      if (waiting) add([GROUP_KIND, "pending"], null, REQUEST_STATES[2], [INITIAL_WAIT]);
+    }
+    if (structureRule) for (const r of records) {
+      check();
+      if (STRUCTURE_KINDS.has(r.kind)) structureRequests(r, active, add);
+    }
+    for (const request of knowledge.payload.requests) {
+      charge();
+      check();
+      const id = request.request_id;
+      let key;
+      try { key = JSON.parse(id); } catch { /* 统一报告规范键错误 */ }
+      must(Array.isArray(key) && key.length === 2 && JSON.stringify(key) === id, "请求键不是规范二元槽位");
+      must(!seen.has(id), "同 cut 知识请求键重复");
+      seen.add(id);
+      const want = expected.get(id);
+      if (want) {
+        must(request.subject_id === want.subject, "请求主体 ID、kind 或 fact_key 错绑：" + id);
+        must(sameCoords(request.source_coords, want.sources), "请求来源错绑：" + id);
+        must(Center.sameValue(request.axes, want.axes) && Center.sameValue(request.reasons, want.reasons), "请求四轴或等待原因与事实不符：" + id);
+        expected.delete(id);
+        continue;
+      }
+      // 其它合法请求由组/形态各自的槽承接；不让未声明具名结构地址或换槽主体落入此分支。
+      const subject = active.get(request.subject_id);
+      const group = key[0] === GROUP_KIND && (subject?.kind === GROUP_KIND && subject.fact_key === id ||
+        !init && key[1] === "pending" && request.subject_id === null);
+      const shape = key[0] === "CC-006.local_shape" && (subject?.kind === key[0] && subject.slot === id || key[1] === "pending" && request.subject_id === null);
+      const fractal = key[0]?.[0] === "CC-007.fractal_description" &&
+        ["shape_description", "descriptive_labels", "subsequent_development"].includes(key[1]) &&
+        subject?.kind === "CC-007.fractal_description" && JSON.stringify(key[0]) === subject.fact_key;
+      must(group || shape || fractal, "未声明或错槽的知识请求：" + id);
+    }
+    must(expected.size === 0, "缺一一绑定的具名知识请求：" + (expected.keys().next().value ?? ""));
+  }
   // #1491：bounded-layout/1、/2 的 CC-007 三跳只读——分型对象 → 批记录 entry → 单元序列（§5.6 分片由
   // Value 读取器按需取）。只核单元确实是该分型的（参考价、bar 四价逐项相同），不重算 order（#804）。
   async function bindDevelopmentBatches(records, layout) {
@@ -995,6 +1206,7 @@
     if (layout !== LAYOUTS.LAYOUT1) await bindDevelopmentPrefixes(records);
     return last;
   }
-  return Object.freeze({RULE_CONTRACTS, protocolRule, resolveRule, splitRule, W2_POLICY, W2_DOCTRINE, W2_PUBLICATION_RULE, W2_ARCHIVED_RULE, w2Replacements, ruleContract, LAYOUTS, DEVELOPMENT_BATCH_KIND, bindDevelopmentBatches, W1_BASE_STRUCTURE_RULE, V3_STRUCTURE_RULE, W_STRUCTURE_RULE, CENTER_RULES, CENTER_KINDS, PAIR_KINDS, Center, INITIALIZATION_POLICY, INITIALIZATION_KINDS, W_KNOWLEDGE_DOMAIN, validateTyped, validateBiPayload, validateSegmentPayload, turnLinks: (d, f) => segmentTurnLinks(d, f), PARSE_INVALID_REASON, RESULT_SEMANTIC_BRANCH, validateTB02ShapeRefs, plain,
+  return Object.freeze({RULE_CONTRACTS, protocolRule, resolveRule, splitRule, W2_POLICY, W2_DOCTRINE, W2_PUBLICATION_RULE, W2_ARCHIVED_RULE, w2Replacements, validateReplacements, ruleContract, LAYOUTS, DEVELOPMENT_BATCH_KIND, bindDevelopmentBatches, W1_BASE_STRUCTURE_RULE, V3_STRUCTURE_RULE, W_STRUCTURE_RULE, CENTER_RULES, CENTER_KINDS, PAIR_KINDS, Center, INITIALIZATION_POLICY, INITIALIZATION_KINDS, W_KNOWLEDGE_DOMAIN, validateTyped, validateBiPayload, validateSegmentPayload, turnLinks: (d, f) => segmentTurnLinks(d, f), PARSE_INVALID_REASON, RESULT_SEMANTIC_BRANCH, validateTB02ShapeRefs, plain,
+    isStructureKind, validateCutSources, validateKnowledgeRequests,
     TB02_KINDS: Object.freeze(TB02_KINDS), BI_KINDS, SEGMENT_KINDS: Object.freeze(SEGMENT_KINDS)});
 });

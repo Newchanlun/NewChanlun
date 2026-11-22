@@ -115,3 +115,57 @@ test("v3同一snapshot只完整验证一次：Client内部与页面钩子合计�
     assert(n > 1, "内容变化必须重新逐条验证（实际 check " + n + " 次）");
   }
 });
+
+test("#2072 同一 B7 谓词拒 GraphView 与 JSON；Client 不替换旧切面，缓存仍按原记录额度计费", async () => {
+  const {API,C,makeBase,rebuild} = require("./q3_complete_fixture.cjs");
+  const base = await makeBase(), server = await makeServer(base);
+  const make = (limits = CONFIG, clock) => new API.Client({
+    protocol:"s-session/3",fetch:server.fetch,limits,allocation:measurement(),...(clock ? {clock} : {}),
+  });
+  const client = make();
+  await client.load(discovery(server), "AsKnown", "1");
+  const before = client.committed, initialRecords = client.lastJob.snapshot().records;
+  let original = "";
+  for await (const c of V.canonicalChunks(before.state)) original += c;
+  const json = JSON.parse(original);
+  const mutate = record => {
+    const request = record.payload.requests.find(r => r.request_id.startsWith('["CC-004.inclusion_step",'));
+    assert(request);
+    request.axes.validity = "SUPERSEDED";
+  };
+  await API.Q3.validateState(json, "s-session/3");
+  mutate(json.snapshot.objects.find(r => r.kind === "CC-054.knowledge_state"));
+  await assert.rejects(API.Q3.validateState(json, "s-session/3"), /B7 请求四轴或等待原因/);
+
+  const capped = make({...CONFIG,job_limits:{...CONFIG.job_limits,max_total_records:String(BigInt(initialRecords)-1n)}});
+  await assert.rejects(capped.load(discovery(server),"AsKnown","1"), /max_total_records/);
+  assert.equal(capped.committed,null);
+  assert.equal(capped.lastJob.snapshot().stopped,"job_limit_exceeded");
+
+  let instant = 0;
+  const clocked = make(CONFIG, () => instant);
+  await clocked.load(discovery(server),"AsKnown","1");
+  const clockedBefore = clocked.committed;
+  const limit = Number(CONFIG.job_limits.max_elapsed_ms);
+  server.before = url => {
+    if (url === "/api/v3/snapshot") instant = limit-1;
+    if (url === "/api/v3/content") instant = limit;
+  };
+  await assert.rejects(clocked.load(discovery(server),"AsKnown","1"), /deadline|elapsed|期限/);
+  assert.equal(clocked.committed,clockedBefore);
+  server.before = null;
+
+  const row = base.rows.find(r => r.family === "objects" && base.graph.text(base.graph.field(r.record,"kind")) === "CC-054.knowledge_state");
+  assert(row);
+  let text = "";
+  for await (const c of base.graph.renderChunks(row.record)) text += c;
+  const record = JSON.parse(text);
+  mutate(record);
+  const encoded = await C.encode(C.fromPlain(record));
+  for (const node of encoded.nodes) base.nodes.set(node.root,node);
+  row.record = encoded.ref;
+  await rebuild(base);
+  await assert.rejects(client.load(discovery(server),"AsKnown","1"), /B7 请求四轴或等待原因/);
+  assert.equal(client.committed,before);
+  assert.equal(client.committed.cursor.after_generation,"1");
+});

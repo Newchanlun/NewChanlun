@@ -623,7 +623,7 @@ test("W/2 完整 validateState：替代目标须在撤回代已出生且在世�
   Object.assign(oldest, { object_id: "obj3-" + "e".repeat(64), withdrawn_generation: "2", withdrawal_reason: "superseded_by_revision", superseded_by: middle.object_id, lifecycle: "withdrawn" });
   laterWithdrawn.snapshot.withdrawn_objects.push(oldest, middle);
   laterWithdrawn.snapshot.relations.push({ subject: middle.object_id, relation_type: "replaces", object: oldest.object_id }, { subject: current.object_id, relation_type: "replaces", object: middle.object_id });
-  laterWithdrawn = await reid(laterWithdrawn);
+  laterWithdrawn = await reid(syncCatalog(laterWithdrawn));
   await Q3.validateState(laterWithdrawn, "s-session/3");
   t.diagnostic("F1 g1→g2→g3 历史链通过，目标后来撤回合法");
 
@@ -663,7 +663,7 @@ test("W/2 完整 validateState：替代目标须在撤回代已出生且在世�
   later.superseded_by = earlier.object_id;
   alreadyWithdrawn.snapshot.relations = alreadyWithdrawn.snapshot.relations.filter((r) => r.relation_type !== "replaces" || r.object !== later.object_id);
   alreadyWithdrawn.snapshot.relations.push({ subject: earlier.object_id, relation_type: "replaces", object: later.object_id });
-  await reject(alreadyWithdrawn, /不满足坐标、种类或生命周期/, "F1 已先撤回目标在生命周期判据拒绝");
+  await reject(syncCatalog(alreadyWithdrawn), /不满足坐标、种类或生命周期/, "F1 已先撤回目标在生命周期判据拒绝");
 
   const extraEdge = structuredClone(w2);
   const raw = extraEdge.snapshot.objects.find((r) => r.kind === "CC-004.undetermined_raw");
@@ -830,7 +830,7 @@ test("bounded-layout/2 完整 validateState：单元 source_ref 精确绑定同�
     const unit = unitOf(rawBar("3"), withSource ? rawRef("3") : null);
     st.snapshot.objects.push(record("CC-007.development_batch", JSON.stringify(["CC-007.development_batch", "3"]),
       { bar: rawBar("3"), entries: [{ fractal_object_id: "obj3-fractal31p", unit, development: { root: [unit], count: "1" } }] }, ["3"], "obj3-batch31p"));
-    return st;
+    return syncCatalog(st);
   }
   const batchOf = (st) => st.snapshot.objects.find((r) => r.kind === "CC-007.development_batch");
   const unitEdit = (st, edit) => { const p = batchOf(st).payload; edit(p.entries[0].unit); p.entries[0].development.root = [p.entries[0].unit]; return st; };
@@ -891,7 +891,7 @@ test("bounded-layout/2 完整 validateState：单元 source_ref 精确绑定同�
     entry.unit = unitOf(rawBar("4"), sourced ? rawRef("4") : null);
     entry.development = { root: [structuredClone(first.payload.entries[0].unit), entry.unit], count: "2" };
     st.snapshot.objects.push(second);
-    return st;
+    return syncCatalog(st);
   };
   const prefixOf = (st) => st.snapshot.objects.find((r) => r.kind === "CC-007.development_batch" && r.source_coords[0] === "4").payload.entries[0].development.root[0];
   await t.test("双单元公开正控及 W2+/1 归档正控", async () => {
@@ -906,7 +906,7 @@ test("bounded-layout/2 完整 validateState：单元 source_ref 精确绑定同�
       lifecycle: "withdrawn", withdrawn_generation: "5", withdrawal_reason: "fact_removed", superseded_by: null,
     });
     st.snapshot.withdrawn_objects.push(...bs);
-    return st;
+    return syncCatalog(st);
   };
   await t.test("已撤回双单元公开正控及非末项缺边、伪来源、坏关系拒绝", async () => {
     await Q3.validateState(await reid(withdrawnUnits()), "s-session/3");
@@ -991,7 +991,7 @@ test("bounded-layout/2 完整 validateState：单元 source_ref 精确绑定同�
           },
         },
       });
-      return st;
+      return syncCatalog(st);
     };
     await Q3.validateState(await reid(layout1WithFractal()), "s-session/3");
     for (const [axis, badVal] of [["open", "99999"], ["high", "99999"], ["low", "1"], ["close", "99999"]]) {
@@ -1048,7 +1048,7 @@ test("bounded-layout/2 完整 validateState：单元 source_ref 精确绑定同�
       });
       st.snapshot.withdrawn_objects.push(oldBatch);
       if (forged) st.snapshot.relations.push({ subject: curBatch.object_id, relation_type: "replaces", object: oldBatch.object_id });
-      return st;
+      return syncCatalog(st);
     };
     await Q3.validateState(await reid(makeWithdrawnCoord4(false)), "s-session/3");
     await assert.rejects(async () => Q3.validateState(await reid(makeWithdrawnCoord4(true)), "s-session/3"), /W2同kind替代槽位不符/);
@@ -1102,7 +1102,7 @@ test("bounded-layout/2 完整 validateState：单元 source_ref 精确绑定同�
         { subject: activeFractal.object_id, relation_type: "replaces", object: priorFractal.object_id },
         { subject: activeBatch.object_id, relation_type: "replaces", object: priorBatch.object_id },
       );
-      return st;
+      return syncCatalog(st);
     };
     await Q3.validateState(await reid(makeBatchRevisionChain()), "s-session/3");
 
@@ -1214,10 +1214,20 @@ function syncCatalog(st) {
   const s = st.snapshot, e = s.catalog_evidence, ids = new Set([...s.objects, ...s.withdrawn_objects].map((r) => r.object_id));
   for (const axis of Object.values(e.axes)) axis.evidence.object_ids = axis.evidence.object_ids.filter((id) => ids.has(id));
   const v = e.axes["CC-056"].evidence;
-  v.withdrawals = s.withdrawn_objects.filter((r) => r.withdrawn_generation === s.generation)
-    .map((r) => ({ fact_key: r.fact_key, object_id: r.object_id, reason: r.withdrawal_reason, superseded_by: r.superseded_by }));
-  v.replaces = v.replaces.filter((r) => ids.has(r.new_object_id) && ids.has(r.old_object_id));
-  Object.assign(e, { classified_objects: String(s.objects.length), withdrawals: String(v.withdrawals.length), replaces: String(v.replaces.length) });
+  const dead = s.withdrawn_objects.filter((r) => r.withdrawn_generation === s.generation);
+  const utf8 = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+  dead.sort((a, b) => {
+    if (a.kind === "CC-006.local_shape") return b.kind !== a.kind ? -1 : Number(BigInt(a.window_start) - BigInt(b.window_start));
+    if (b.kind === "CC-006.local_shape") return 1;
+    return utf8(a.kind, b.kind) || utf8(a.fact_key, b.fact_key) || utf8(a.object_id, b.object_id) ||
+      Number(BigInt(a.object_revision) - BigInt(b.object_revision));
+  });
+  v.withdrawals = dead.map((r) => ({object_id:r.object_id, reason:r.withdrawal_reason, superseded_by:r.superseded_by, ...(
+    r.kind === "CC-006.local_shape" ? {window_start:r.window_start, window_mid:r.window_mid, window_end:r.window_end} : {fact_key:r.fact_key})}));
+  v.replaces = dead.filter(r => r.superseded_by !== null).map(r => ({old_object_id:r.object_id, new_object_id:r.superseded_by}));
+  e.axes["CC-056"].run_status = ["withdrawals", "replaces", "raw_revisions"].some(k => v[k].length > 0) ? "run" : "not_run";
+  Object.assign(e, { classified_objects: String(s.objects.length), merged_bars:String(s.objects.filter(r => r.kind === "CC-005.inclusion_group").length),
+    withdrawals: String(v.withdrawals.length), replaces: String(v.replaces.length) });
   st.catalog.catalog_evidence = structuredClone(e);
   for (const item of st.catalog.items) if (e.axes[item.id]) item.evidence = structuredClone(e.axes[item.id].evidence);
   return st;
@@ -1278,4 +1288,373 @@ test("B6 完整 validateState：未定原件撤回代含其坐标的在世定向
     await rejected(secondGroup(asW2(await g5()), direction), /W2未定原件有多个定向替代候选/);
     t.diagnostic("第二组 " + direction + " 即拒");
   }
+});
+
+// #2072：证据由上代活动原件导出；测试故意同步复写面，不借前置一致性门代测。
+const changes056 = st => st.snapshot.catalog_evidence.axes["CC-056"].evidence;
+const deathsAt = st => st.snapshot.withdrawn_objects.filter(r => r.withdrawn_generation === st.snapshot.generation);
+function copyEvidence(st) {
+  const e = st.snapshot.catalog_evidence;
+  st.catalog.catalog_evidence = structuredClone(e);
+  for (const item of st.catalog.items) if (e.axes[item.id]) item.evidence = structuredClone(e.axes[item.id].evidence);
+}
+function recalcChanges(st) {
+  const evidence = changes056(st), e = st.snapshot.catalog_evidence;
+  evidence.replaces = evidence.withdrawals.filter(w => w.superseded_by !== null)
+    .map(w => ({old_object_id:w.object_id,new_object_id:w.superseded_by}));
+  e.withdrawals = String(evidence.withdrawals.length);
+  e.replaces = String(evidence.replaces.length);
+  copyEvidence(st);
+}
+test("#2072 CC-056 四项计数独立对拍原件", async t => {
+  const good = await g5();
+  await Q3.validateState(good, "s-session/3");
+  for (const counter of ["classified_objects", "merged_bars", "withdrawals", "replaces"])
+    await t.test(counter, async () => {
+      const st = copy(good);
+      st.snapshot.catalog_evidence[counter] = String(BigInt(st.snapshot.catalog_evidence[counter]) + 1n);
+      copyEvidence(st);
+      await assert.rejects(Q3.validateState(st, "s-session/3"), new RegExp("目录 " + counter + " 与独立原件"));
+    });
+});
+
+test("#2072 CC-056 本代撤回原件逐项对拍，复写自洽也不放行", async t => {
+  const good = await g5();
+  const tweaks = {
+    "省略并配平计数与配对": e => e.withdrawals.pop(),
+    "真实替代改合法 fact_removed，并清空替代、配平计数": e =>
+      Object.assign(e.withdrawals[0], {reason:"fact_removed",superseded_by:null}),
+    "逐字重复（数量不变）": e => { e.withdrawals[1] = copy(e.withdrawals[0]); },
+    "合法历史行冒充本代（无重复，数量不变）": (e, st) => {
+      const historic = st.snapshot.withdrawn_objects.find(r => r.fact_key && r.withdrawn_generation !== st.snapshot.generation);
+      Object.assign(e.withdrawals[0], {object_id:historic.object_id,fact_key:historic.fact_key,reason:historic.withdrawal_reason,superseded_by:historic.superseded_by});
+      assert.equal(new Set(e.withdrawals.map(r => r.object_id)).size, e.withdrawals.length);
+    },
+    "替代 ID 错绑": (e, st) => { e.withdrawals[0].superseded_by = st.snapshot.objects.find(r => r.kind === "CC-006.local_shape").object_id; },
+    "typed 槽错绑": e => { e.withdrawals[0].fact_key = e.withdrawals[1].fact_key; },
+    "本代顺序颠倒": e => e.withdrawals.reverse(),
+  };
+  for (const [label, change] of Object.entries(tweaks))
+    await t.test(label, async () => {
+      const st = copy(good);
+      change(changes056(st), st);
+      recalcChanges(st);
+      const reason = /CC-056 withdrawals (数量|内容\/上一代活动主序)与本代撤回原件不符/;
+      await assert.rejects(Q3.bindWithdrawalEvidence(changes056(st), deathsAt(st)), reason);
+      await assert.rejects(Q3.validateState(st, "s-session/3"), reason);
+    });
+  await t.test("不动撤回行，单独改替代投影", async () => {
+    const st = copy(good);
+    changes056(st).replaces.reverse();
+    copyEvidence(st);
+    await assert.rejects(Q3.validateState(st, "s-session/3"), /CC-056 replaces 内容/);
+  });
+});
+
+test("#2072 撤回主序：形态在前；同 kind 槽位以 UTF-8 而非 UTF-16 排序", async () => {
+  const a = {kind:"CC-056.version",fact_key:'["CC-056.version","\ue000"]',object_id:"obj3-a",object_revision:"1",withdrawal_reason:"fact_removed",superseded_by:null};
+  const b = {...a,fact_key:'["CC-056.version","\u{10000}"]',object_id:"obj3-b",withdrawal_reason:"superseded_by_revision",superseded_by:"obj3-b-new"};
+  const shape = (start, id) => ({kind:"CC-006.local_shape",object_id:id,window_start:start,window_mid:"20",window_end:"21",withdrawal_reason:"window_removed",superseded_by:null});
+  const snap = [b,shape("10","s10"),a,shape("2","s2")];
+  const withdrawals = [
+    {object_id:"s2",window_start:"2",window_mid:"20",window_end:"21",reason:"window_removed",superseded_by:null},
+    {object_id:"s10",window_start:"10",window_mid:"20",window_end:"21",reason:"window_removed",superseded_by:null},
+    {object_id:"obj3-a",fact_key:a.fact_key,reason:"fact_removed",superseded_by:null},
+    {object_id:"obj3-b",fact_key:b.fact_key,reason:"superseded_by_revision",superseded_by:"obj3-b-new"},
+  ];
+  const replaces = [{old_object_id:"obj3-b",new_object_id:"obj3-b-new"}];
+  assert.equal(await Q3.bindWithdrawalEvidence({withdrawals,replaces}, snap), 1);
+  [withdrawals[2],withdrawals[3]] = [withdrawals[3],withdrawals[2]];
+  await assert.rejects(Q3.bindWithdrawalEvidence({withdrawals,replaces}, snap), /活动主序/);
+});
+
+test("#2072 Snapshot 与 Watch Delta 撤回原因分别按 shape / typed 判域", async t => {
+  const st = await g5(), snap = st.snapshot;
+  const window = snap.objects.find(r => r.kind === "CC-006.local_shape");
+  snap.objects.splice(snap.objects.indexOf(window), 1);
+  snap.withdrawn_objects.push(window);
+  Object.assign(window, {lifecycle:"withdrawn",withdrawn_generation:"6",withdrawal_reason:"window_removed",superseded_by:null});
+  await Q3.bindSources(snap);
+  window.withdrawal_reason = "fact_removed";
+  await assert.rejects(Q3.bindSources(snap), /CC006撤回不闭合/);
+  const typedRow = snap.withdrawn_objects.find(r => r.withdrawal_reason === "fact_removed" && r.fact_key);
+  assert(typedRow, "真实底座有无替代 typed 撤回");
+  window.withdrawal_reason = "window_removed";
+  typedRow.withdrawal_reason = "window_removed";
+  await assert.rejects(Q3.bindSources(snap), /撤回原因\/目标不符/);
+  const outer = {
+    generation:snap.generation, session_id:snap.session_id, catalog_revision:snap.catalog_revision, base_cut:"cut-4",
+    next_cut:snap.structure_cut, seq_range:snap.seq_range, index_frontier:snap.index_frontier, input_frontier:snap.input_frontier,
+    catalog_run_status:snap.catalog_run_status, catalog_evidence:snap.catalog_evidence,
+  };
+  const shape = Object.fromEntries(["object_id","window_start","window_mid","window_end","superseded_by"].map(k => [k,window[k]]));
+  const checkDelta = async (row, replacement = null) => Q3.validateDelta({...outer,delta:{
+    ...outer,upserts:[], withdrawals:[row], replaces:replacement ? [replacement] : [],
+    witnesses:[], relations:[], observations:[], raw_history_added:[],
+  }});
+  const tr = {object_id:typedRow.object_id,fact_key:typedRow.fact_key,superseded_by:null};
+  await checkDelta({...shape,reason:"window_removed"});
+  await checkDelta({...tr,reason:"fact_removed"});
+  await checkDelta({...shape,reason:"superseded_by_revision",superseded_by:"obj3-new"}, {old_object_id:shape.object_id,new_object_id:"obj3-new"});
+  await assert.rejects(checkDelta({...shape,reason:"fact_removed"}), /撤回原因\/替代不符/);
+  await assert.rejects(checkDelta({...tr,reason:"window_removed"}), /撤回原因\/替代不符/);
+  t.diagnostic("Snapshot 同一 shapeRecord，Watch 同一 validateDelta；合法替代保留");
+});
+
+test("#2072 W1 与非 W 替代按撤回时刻同槽、公开边双射", async t => {
+  const st = await g5();
+  const old = deathsAt(st).find(r => r.superseded_by !== null);
+  const active = st.snapshot.objects.find(r => r.object_id === old.superseded_by);
+  assert(active);
+  for (const [label, modify, reason] of [
+    ["错槽", (a,b) => { b.slot = "other"; }, /替代槽位/],
+    ["目标尚未出生", (a,b) => { b.first_known_generation = "6"; }, /生命周期/],
+    ["目标已撤回", (a,b) => { b.withdrawn_generation = "5"; }, /生命周期/],
+    ["缺边", (a,b,e) => { e.splice(0); }, /缺公开replaces/],
+    ["重复", (a,b,e) => { e.push(copy(e[0])); }, /重复公开replaces/],
+    ["多边", (a,b,e) => { e.push({subject:b.object_id,object:"other"}); }, /缺对应撤回/],
+    ["错端", (a,b,e) => { e[0].subject = "other"; }, /superseded_by不符/],
+  ]) await t.test(label, () => {
+    const a = {...old,slot:old.fact_key}, b = {...active,slot:active.fact_key};
+    const edges = [{subject:b.object_id,object:a.object_id}];
+    typed.validateReplacements([a,b], edges, false);
+    modify(a,b,edges);
+    assert.throws(() => typed.validateReplacements([a,b],edges,false), reason);
+  });
+  const wrongSlot = copy(st);
+  const oldRow = deathsAt(wrongSlot).find(r => r.object_id === old.object_id);
+  const different = wrongSlot.snapshot.objects.find(r => r.kind === active.kind && r.fact_key !== active.fact_key) ||
+    wrongSlot.snapshot.objects.find(r => r.kind !== active.kind);
+  oldRow.superseded_by = different.object_id;
+  wrongSlot.snapshot.relations.find(r => r.object === old.object_id && r.relation_type === "replaces").subject = different.object_id;
+  syncCatalog(wrongSlot);
+  await assert.rejects(Q3.validateState(wrongSlot, "s-session/3"), /替代槽位/);
+});
+
+test("#2072 B4 历史活动图：笔端换版与同代换边，先撤后装、再用同一判据验", async t => {
+  const k = (kind, id, data, start = "1", end = null, coords = ["0"]) => ({
+    kind,object_id:"obj3-"+id,first_known_generation:start,published_generation:start,withdrawn_generation:end,
+    source_coords:coords,payload:{data},
+  });
+  const roots = () => C.STRUCTURE_ROOTS.map((kind,i) => k(kind,"root"+i,{}));
+  const bi = (id,start,end,coords = ["0"]) => k("CC-010.bi",id,{
+    entity_id:"bi-1",start:{source_coords:coords},end:{source_coords:coords},
+  },start,end,coords);
+  const seq = k("CC-012.feature_sequence","seq",{
+    entity_id:"first:s",segment_id:"s",role:"FIRST_SEQUENCE",stroke_refs:[{entity_id:"bi-1",stroke_index:"1"}],
+    facts:{raw_elements:[{stroke_idx:"1"}]},
+  });
+  const seg = k("CC-013.segment","s",{entity_id:"s",entity_revision:"1",sequence_id:"first:s",sequence_object_id:"obj3-seq",
+    second_sequence_id:null,second_sequence_object_id:null}, "1", null, ["0","1"]);
+  const edge = (id,start,end,coords = ["0"], witness = seg.object_id) => k("CC-055.segment_relation",id,{
+    source_id:"bi-1",relation_kind:"member_of",target_id:"first:s",version:"1",witness_object_id:witness,
+  },start,end,coords);
+  const run = (rs, g = "2") => C.validateStructureHistory(rs, typed.isStructureKind, g, () => {}, () => {});
+  const a = bi("bi1","1","2"), b = bi("bi2","2",null,["1"]);
+  const common = [...roots(),a,seq,seg];
+  run([...common,b,edge("e1","1","2"),edge("e2","2",null,["1"])]);
+  run([...roots(),bi("bi1","1",null),seq,seg,edge("e1","1",null)], "1");
+  await t.test("不改边字节但笔在边存活中换版，必须重验投影", () =>
+    assert.throws(() => run([...common,b,edge("e1","1",null)]), /cut-2.*member_of 来源/));
+  await t.test("笔端撤回，且 relation 仍在世", () =>
+    assert.throws(() => run([...common,edge("e1","1",null)]), /cut-2.*CC-010.bi/));
+  await t.test("见证换版或撤回，且 relation 仍在世", () => {
+    const dead = {...seg,withdrawn_generation:"2"};
+    const rows = [...roots(),bi("bi1","1",null),seq,dead,edge("e1","1",null)];
+    assert.throws(() => run(rows), /cut-2.*见证悬空/);
+    assert.throws(() => run([...rows,{...seg,object_id:"obj3-s2",first_known_generation:"2"}]), /cut-2.*见证悬空/);
+  });
+  await t.test("只有历史段反指错，不可用当前新段遮盖", () => {
+    const bad = copy(seq);
+    bad.payload.data.segment_id = "wrong";
+    assert.throws(() => run([...roots(), {...seg,withdrawn_generation:"2"}, {...bad,withdrawn_generation:"2"}]), /cut-1.*段序列实体/);
+  });
+  await t.test("历史重复笔实体", () =>
+    assert.throws(() => run([...roots(),a,bi("bi-dup","1","2")]), /结构实体身份重复/));
+  for (const kind of C.STRUCTURE_ROOTS) await t.test("历史缺/重 " + kind, () => {
+    const rs = roots(), row = rs.find(r => r.kind === kind), others = rs.filter(r => r !== row);
+    assert.throws(() => run([...others,{...row,first_known_generation:"2"}]), /cut-1.*版本根/);
+    assert.throws(() => run([...rs,{...row,object_id:row.object_id+"-dup",withdrawn_generation:"2"}]), /cut-1.*版本根/);
+  });
+});
+
+test("#2072 B3 三族变更单代存活、撤回缺席与非撤回精确后件", async t => {
+  for (const [name, entityKind] of [["segment","CC-013.segment"],["center","CC-016.center"],["pair","CC-020.center_pair"]])
+    await t.test(name, () => {
+      const g = "1", d = {entity_id:name};
+      const roots = C.STRUCTURE_ROOTS.map((kind,i) => ({kind,object_id:"obj3-root"+i,first_known_generation:g,withdrawn_generation:null,payload:{data:{}}}));
+      const event = {
+        kind:"CC-055."+name+"_change",object_id:"obj3-event",first_known_generation:g,published_generation:g,withdrawn_generation:"2",
+        payload:{slot:[g,name,"withdrawn"],data:{entity_id:name,change:"withdrawn",known_at:{generation:g},before:d,after:null,object_id:null}},
+      };
+      const run = (row, end = "2", extra = []) => C.validateStructureHistory([...roots,row,...extra], typed.isStructureKind, end, () => {}, () => {});
+      run(event);
+      run({...event,withdrawn_generation:null}, "1");
+      for (const death of ["3",null])
+        assert.throws(() => run({...event,withdrawn_generation:death},"3"), /B3.*撤回代/);
+      assert.throws(() => run({...event,withdrawn_generation:"2"},"1"), /B3.*撤回代/);
+      const invalid = copy(event);
+      invalid.payload.data.after = d;
+      invalid.payload.data.object_id = "obj3-after";
+      const subject = {kind:entityKind,object_id:"obj3-after",first_known_generation:g,withdrawn_generation:"2",
+        payload:{data:{...d,sequence_id:null,sequence_object_id:null,second_sequence_id:null,second_sequence_object_id:null}}};
+      assert.throws(() => run(invalid,"2",[subject]), /B3.*空值/);
+      assert.throws(() => run(event,"2",[subject]), /B3.*缺席/);
+      const badAfter = copy(invalid);
+      badAfter.payload.data.change = "formed";
+      badAfter.payload.slot[2] = "formed";
+      assert.throws(() => run(badAfter,"2",[subject]), /B3.*后件/);
+    });
+});
+
+test("#2072 B8 W 等待与建立、步骤覆盖的独立原件锁", async t => {
+  const good = await g5(), ordered = good.snapshot.raw_history.map(r => r.source_coord), raw = new Map(ordered.map(c => [c,{}]));
+  const rows = () => copy(good.snapshot.objects), policy = typed.resolveRule(W);
+  const audit = (xs, p = policy) => typed.validateCutSources(xs, raw, p, () => {}, () => {});
+  const get = (xs, kind) => xs.find(r => r.kind === kind);
+  const initKind = "CC-004.initialization", stepKind = "CC-004.inclusion_step", knowKind = "CC-054.knowledge_state";
+  const seed = xs => xs.find(r => r.kind === stepKind && r.payload.action === "seed");
+  audit(rows());
+  const waiting = () => {
+    const xs = rows().filter(r => [initKind,knowKind,...C.STRUCTURE_ROOTS].includes(r.kind));
+    Object.assign(get(xs,initKind),{source_coords:ordered,payload:{direction_state:"Undetermined",first_raw_pair:null}});
+    get(xs,knowKind).payload.direction_state = "Undetermined";
+    for (const c of ordered) xs.push({kind:"CC-004.undetermined_raw",source_coords:[c],payload:{raw:{source_coord:c}}});
+    return xs;
+  };
+  audit(waiting());
+  for (const [label, pick, mutate, reason] of [
+    ["等待期初始化缩小", waiting, xs => { get(xs,initKind).source_coords = ordered.slice(1); }, /等待期初始化来源/],
+    ["等待期未定原件扣一条", waiting, xs => { xs.pop(); }, /未逐坐标覆盖/],
+    ["等待期未定原件多坐标", waiting, xs => { xs.at(-1).source_coords = ["0","4"]; }, /来源不是自身坐标/],
+    ["建立期初始化缩小", rows, xs => { get(xs,initKind).source_coords.pop(); }, /精确建立前缀/],
+    ["建立期初始化扩大", rows, xs => { get(xs,initKind).source_coords = ordered; }, /精确建立前缀/],
+    ["seed 换证据", rows, xs => { seed(xs).payload.direction_evidence.direction = "UP" === seed(xs).payload.direction_evidence.direction ? "DOWN" : "UP"; }, /seed 与初始化/],
+    ["步骤缺失且请求同步删", rows, xs => {
+      const step = xs.findLast(r => r.kind === stepKind);
+      xs.splice(xs.indexOf(step),1);
+      get(xs,knowKind).payload.requests = get(xs,knowKind).payload.requests.filter(r => r.request_id !== step.fact_key);
+    }, /步骤未一一覆盖/],
+    ["步重复", rows, xs => { xs.push(copy(seed(xs))); }, /步骤坐标重复/],
+    ["同量步错位", rows, xs => { xs.findLast(r => r.kind === stepKind).payload.incoming.source_coord = "100"; }, /步骤坐标或来源闭前缀/],
+    ["W 仍发 waiting", rows, xs => { xs.findLast(r => r.kind === stepKind).payload.action = "waiting"; }, /不得发布 CC004 waiting/],
+  ]) await t.test(label, () => { const xs = pick(); mutate(xs); assert.throws(() => audit(xs), reason); });
+});
+
+test("#2072 B7 请求与具名地址、主体、证据、覆盖逐项对拍", async t => {
+  const base = await g5();
+  const dataOf = st => st.snapshot.objects.find(r => r.kind === "CC-054.knowledge_state").payload;
+  const structure = r => r.request_id.includes('"construction_conditions"');
+  const init = r => r.request_id.startsWith('["CC-004.initialization"');
+  const step = r => r.request_id === '["CC-004.inclusion_step","4"]';
+  const ghost = "obj3-" + "a".repeat(64);
+  for (const [label, choose, mutate, reason] of [
+    ["结构四轴",structure,r => { r.axes.applicability = "IN_DOMAIN"; }, /四轴或等待原因/],
+    ["结构原因",structure,r => { r.reasons = []; }, /四轴或等待原因/],
+    ["结构主体",structure,r => { r.subject_id = ghost; }, /主体 ID/],
+    ["结构来源",structure,r => { r.source_coords.push("0"); }, /请求来源错绑/],
+    ["结构地址",structure,r => { r.request_id = r.request_id.replace('"construction",','"other",'); }, /未声明或错槽/],
+    ["结构键非规范",structure,r => { r.request_id = " " + r.request_id; }, /规范二元槽位/],
+    ["结构缺请求",structure,(r,rs) => { rs.splice(rs.indexOf(r),1); }, /缺一一绑定/],
+    ["W 初始化四轴",init,r => { r.axes.applicability = "OUTSIDE_DOMAIN"; }, /四轴或等待原因/],
+    ["W 初始化来源",init,r => { r.source_coords.pop(); }, /请求来源错绑/],
+    ["W 初始化主体",init,r => { r.subject_id = ghost; }, /主体 ID/],
+    ["W 初始化缺请求",init,(r,rs) => { rs.splice(rs.indexOf(r),1); }, /缺一一绑定/],
+    ["步骤四轴",step,r => { r.axes.validity = "SUPERSEDED"; }, /四轴或等待原因/],
+  ]) await t.test(label, async () => {
+    const st = copy(base), rs = dataOf(st).requests;
+    const chosen = rs.find(choose);
+    assert(chosen);
+    mutate(chosen,rs);
+    await rejected(st, reason);
+  });
+});
+
+test("#2072 B2 具名关系按自身见证、端点、版本及精确来源判定", async t => {
+  const rows = () => {
+    const out = twoCenterCut();
+    for (const r of out) {
+      Object.assign(r,{first_known_generation:"1",published_generation:"1",withdrawn_generation:null,source_coords:["0"]});
+      if (r.kind === "CC-013.segment") Object.assign(r.payload.data,{
+        sequence_id:null,sequence_object_id:null,second_sequence_id:null,second_sequence_object_id:null,
+      });
+    }
+    out.push({kind:"CC-056.segment_version",object_id:"obj3-segment-root",first_known_generation:"1",withdrawn_generation:null,payload:{data:{}}});
+    const segment = out.find(r => r.kind === "CC-013.segment");
+    segment.payload.data.entity_revision = "1";
+    Object.assign(segment.payload.data,{sequence_id:"seq-first",sequence_object_id:"obj3-seq"});
+    out.push({kind:"CC-012.feature_sequence",object_id:"obj3-seq",first_known_generation:"1",withdrawn_generation:null,payload:{data:{
+      entity_id:"seq-first",segment_id:segment.payload.data.entity_id,role:"FIRST_SEQUENCE",
+    }}});
+    out.push({kind:"CC-055.segment_relation",object_id:"obj3-derived",first_known_generation:"1",withdrawn_generation:null,source_coords:["0"],payload:{data:{
+      source_id:"seq-first",target_id:segment.payload.data.entity_id,witness_object_id:segment.object_id,relation_kind:"derived_from",version:"1",
+    }}});
+    return out;
+  };
+  const run = rs => C.validateStructureHistory(rs, typed.isStructureKind, "1", () => {}, () => {});
+  run(rows());
+  for (const relation of ["derived_from","attempted_from","member_of","connects_left","connects_right","position_of","position_against","pair_from","pair_to"])
+    await t.test(relation, () => {
+      const edit = fn => {
+        const rs = rows(), r = rs.find(o => o.payload.data.relation_kind === relation);
+        assert(r, relation);
+        fn(r);
+        return rs;
+      };
+      assert.throws(() => run(edit(r => { r.payload.data.witness_object_id = "obj3-missing"; })), /cut-1.*见证悬空/);
+      assert.throws(() => run(edit(r => { r.payload.data.version = "2"; })), /版本错绑/);
+      // 空来源仍是见证来源的子集；只有该关系自身的精确投影能拒。
+      assert.throws(() => run(edit(r => { r.source_coords = []; })), /来源与见证投影不同/);
+    });
+  await t.test("roles_updated 绑定 roles，不可换成 center", () => {
+    const rs = rows(), roles = rs.find(r => r.kind === "CC-017.center_roles"),
+      {entity_id,center_id,known_at} = roles.payload.data;
+    const draft = {entity_id,known_at,change:"roles_updated",before:roles.payload.data,after:roles.payload.data,object_id:roles.object_id};
+    rs.push({kind:"CC-055.center_change",object_id:"obj3-roles-update",first_known_generation:"1",published_generation:"1",
+      withdrawn_generation:null,payload:{slot:["1",entity_id,"roles_updated"],data:draft}});
+    run(rs);
+    draft.object_id = rs.find(r => r.kind === "CC-016.center" && r.payload.data.entity_id === center_id).object_id;
+    assert.throws(() => run(rs), /B3.*后件/);
+  });
+});
+
+// 冷归档不随仓下发；有原件时可在与镜像无关的公开入口逐案重放。CI 仍运行上面的独立构造锁。
+if (process.env.Q3_2072_ORIGINALS) test("#2072 冻结 34 原件逐案重放", async t => {
+  const fs = require("node:fs"), path = require("node:path");
+  const original = process.env.Q3_2072_ORIGINALS;
+  const {cases} = JSON.parse(fs.readFileSync(path.join(original,"cases.json"),"utf8"));
+  const reasons = {
+    "positive-real-w1":null, "positive-w2-exact-request-ids":null,
+    "relation-attempted_from":/B2.*见证悬空/, "relation-connects_left":/B2.*见证悬空/,
+    "relation-connects_right":/B2.*见证悬空/, "relation-derived_from":/B2.*见证悬空/,
+    "relation-member_of":/B2.*见证悬空/, "orphan-roles":/B2.*角色|B2.*center_roles/,
+    "center-change-dangling-after":/B3.*见证悬空/, "segment-change-null-after":/B3.*空值/,
+    "history-center-relation":/B2.*cut-4.*见证悬空/, "history-pair-relation":/B2.*cut-4.*见证悬空/,
+    "missing-roots-1":/B4.*版本根/, "missing-roots-2":/B4.*版本根/,
+    "two-historical-directed-groups":/多个定向替代候选/, "wrong-layout-position":/未获准的完整规则组合/,
+    "request-axis":/B7.*四轴/, "request-subject":/B7.*未声明或错槽/, "request-source":/B7.*来源错绑/,
+    "request-address":/B7.*未声明或错槽/, "request-missing":/B7.*缺一一绑定/, "request-malformed-key":/B7.*规范二元/,
+    "source-short-CC-056.segment_version":/B8.*CC-056.segment_version 来源/,
+    "source-short-CC-056.center_version":/B8.*CC-056.center_version 来源/,
+    "source-short-CC-056.pair_version":/B8.*CC-056.pair_version 来源/,
+    "source-short-CC-054.knowledge_state":/B8.*CC054.*全部生效原始账/,
+    "w-request-axis":/B7.*四轴/, "w-request-source":/B7.*来源错绑/,
+    "w-request-subject":/B7.*主体 ID/, "w-request-missing":/B7.*缺一一绑定/,
+    "step-request-axis":/B7.*四轴/, "step-source-short":/B8.*闭前缀/,
+    "group-extra-source":/B8.*并集/, "pending-extra-source":/B8.*未定原件来源不是自身坐标/,
+  };
+  assert.deepEqual(cases.map(c => c.name).sort(), Object.keys(reasons).sort());
+  for (const {name,file} of cases) await t.test(name, async t => {
+    const state = JSON.parse(fs.readFileSync(path.join(original,file),"utf8")), reason = reasons[name];
+    if (reason === null) {
+      await Q3.validateState(state,"s-session/3");
+      t.diagnostic("ACCEPT");
+    } else {
+      await assert.rejects(Q3.validateState(state,"s-session/3"), error => {
+        t.diagnostic("REJECT " + error.message);
+        assert.match(error.message,reason);
+        return true;
+      });
+    }
+  });
 });

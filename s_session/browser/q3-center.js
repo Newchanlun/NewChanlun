@@ -200,8 +200,7 @@
       keysE(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind);
       textE(d.entity_id, "entity_id");
       needE(["formed", "member_added", "roles_updated", "settled", "upgrade_pending", "withdrawn"].includes(d.change), "SHAPE", "未声明中枢变化");
-      const withdrawn = d.change === "withdrawn";
-      needE((d.after === null) === withdrawn && (d.object_id === null) === withdrawn && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
+      needE(changeNulls(d) && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
       if (d.object_id !== null) textE(d.object_id, "object_id");
       knownE(d.known_at);
     } else if (kind === CENTER_KINDS[6]) {
@@ -519,8 +518,7 @@
       keysF(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind);
       textF(d.entity_id, "entity_id");
       needF(PAIR_CHANGES.includes(d.change), "SHAPE", "未声明中枢对变化");
-      const withdrawn = d.change === "withdrawn";
-      needF((d.after === null) === withdrawn && (d.object_id === null) === withdrawn && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
+      needF(changeNulls(d) && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
       if (d.object_id !== null) textF(d.object_id, "object_id");
       knownF(d.known_at);
       validatePairChange(d, p);
@@ -722,6 +720,244 @@
   }
   const AXIS_KINDS = [["CC-016", CENTER_KINDS.slice(0, 2), needE], ["CC-017", CENTER_KINDS.slice(2, 3), needE], ["CC-022", CENTER_KINDS.slice(3, 4), needE],
     ["CC-018", PAIR_KINDS.slice(0, 1), needF], ["CC-020", PAIR_KINDS.slice(1, 2), needF]];
+  // ADR 0075：活动图只核已发布的端点、版本与来源。读取端点的同一操作登记逆依赖，
+  // 因而不需要另维护一份「哪些字段影响判据」的清单。
+  const STRUCTURE_ROOTS = ["CC-056.segment_version", "CC-056.center_version", "CC-056.pair_version"];
+  const CHANGE_KIND = new Map([
+    ["CC-055.segment_change", "CC-013.segment"],
+    ["CC-055.center_change", "CC-016.center"],
+    ["CC-055.pair_change", "CC-020.center_pair"],
+  ]);
+  const itsData = record => record.payload.data;
+  const relationKind = kind => kind.startsWith("CC-055.") && kind.endsWith("_relation");
+  const structureNeed = (ok, part, reason) => needE(ok, part, reason);
+  function changeNulls(d) {
+    const withdrawn = d.change === "withdrawn";
+    return (d.after === null) === withdrawn && (d.object_id === null) === withdrawn;
+  }
+  function* objectReferences(data) {
+    if (Array.isArray(data)) {
+      for (const item of data) yield* objectReferences(item);
+    } else if (object(data)) {
+      for (const k of ["sequence_object_id", "second_sequence_object_id", "unit_object_id", "witness_object_id", "object_id"])
+        if (Object.hasOwn(data, k) && data[k] !== null) yield data[k];
+      for (const k of ["unit", "units", "after"])
+        if (Object.hasOwn(data, k)) yield* objectReferences(data[k]);
+    }
+  }
+  function validateStructureRelation(record, endpoint, byObject, must) {
+    const {source_id: from, target_id: to, relation_kind: type, version, witness_object_id} = itsData(record);
+    const witness = byObject(witness_object_id), w = itsData(witness);
+    let expected = witness.source_coords;
+    switch (record.kind + ":" + type) {
+      case "CC-055.segment_relation:derived_from": {
+        const seq = endpoint(from, "CC-012.feature_sequence"), seg = endpoint(to, "CC-013.segment");
+        must(witness === seg && w.entity_id === to && version === w.entity_revision, "derived_from 目标/版本错绑");
+        must(["sequence", "second_sequence"].some(key => w[key + "_id"] === from && w[key + "_object_id"] === seq.object_id), "derived_from 源序列错绑");
+        break;
+      }
+      case "CC-055.segment_relation:member_of": {
+        const seq = endpoint(to, "CC-012.feature_sequence"), bi = endpoint(from, "CC-010.bi");
+        must(witness.kind === "CC-013.segment" && w.entity_id === itsData(seq).segment_id && version === w.entity_revision, "笔 member_of 见证段/版本错绑");
+        must([w.sequence_object_id, w.second_sequence_object_id].includes(seq.object_id), "笔 member_of 序列不是见证段的序列");
+        const d = itsData(seq);
+        must(d.stroke_refs.some(stroke => stroke.entity_id === from && d.facts.raw_elements.some(e => e.stroke_idx === stroke.stroke_index)), "笔 member_of 未绑定序列真实成员");
+        const {start, end} = itsData(bi);
+        expected = [...new Set([...start.source_coords, ...end.source_coords])].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
+        break;
+      }
+      case "CC-055.center_relation:attempted_from":
+        endpoint(to, "CC-013.segment");
+        must(witness === endpoint(from, "CC-016.center_seed_attempt") && w.entity_id === from && w.units[0]?.unit_id === to && version === "1", "attempted_from 端点/版本错绑");
+        break;
+      case "CC-055.center_relation:member_of": {
+        const unit = endpoint(from, "CC-013.segment");
+        must(witness === endpoint(to, "CC-016.center") && w.entity_id === to && w.members.includes(from) && w.status !== "UPGRADE_PENDING_TB02H" && version === w.entity_revision, "中枢 member_of 端点/成员/版本错绑");
+        expected = unit.source_coords;
+        break;
+      }
+      case "CC-055.center_relation:connects_left":
+      case "CC-055.center_relation:connects_right": {
+        const unit = endpoint(from, "CC-013.segment"), center = endpoint(to, "CC-016.center");
+        const side = type === "connects_left" ? "left_center_id" : "right_center_id";
+        must(witness.kind === "CC-022.unit_assignment" && w.unit.unit_id === from && w.unit.unit_object_id === unit.object_id && w[side] === to && version === itsData(center).entity_revision, type + " 端点/版本错绑");
+        expected = unit.source_coords;
+        break;
+      }
+      case "CC-055.pair_relation:position_of":
+      case "CC-055.pair_relation:position_against":
+        must(witness === endpoint(from, "CC-018.unit_core_position") && w.entity_id === from && version === w.center_revision, type + " 主体/版本错绑");
+        if (type === "position_of") {
+          const unit = endpoint(to, "CC-013.segment");
+          must(w.unit.unit_id === to && w.unit.unit_object_id === unit.object_id, "position_of 目标错绑");
+          expected = unit.source_coords;
+        } else {
+          endpoint(to, "CC-016.center");
+          must(w.center_id === to, "position_against 目标错绑");
+        }
+        break;
+      case "CC-055.pair_relation:pair_from":
+      case "CC-055.pair_relation:pair_to":
+        must(witness === endpoint(from, "CC-020.center_pair") && w.entity_id === from && w[type === "pair_from" ? "a_center_id" : "b_center_id"] === to && version === w.entity_revision, type + " 端点/版本错绑");
+        validatePairSides(w, endpoint, must);
+        break;
+      default:
+        must(false, "未声明的关系类型");
+    }
+    must(equal(record.source_coords, expected), type + " 来源与见证投影不同");
+  }
+  function validatePairSides(d, endpoint, must) {
+    for (const side of ["a", "b"])
+      must(d[side + "_revision"] === itsData(endpoint(d[side + "_center_id"], "CC-016.center")).entity_revision, "中枢对端点版本与当前中枢不符");
+  }
+  function validateStructureLinks(record, byObject, byEntity, generation) {
+    const d = itsData(record), kind = record.kind;
+    const part = CHANGE_KIND.has(kind) ? "B3" : "B2";
+    const must = (ok, reason) => structureNeed(ok, part, "cut-" + generation + " " + kind + " " + reason);
+    const endpoint = (id, expectedKind) => {
+      const r = byEntity(id);
+      must(r?.kind === expectedKind, "实体端点缺失或种类错绑：" + expectedKind);
+      return r;
+    };
+    for (const id of objectReferences(d)) {
+      must(typeof id === "string" && id.startsWith("obj3-") && id !== record.object_id, "结构对象边身份错误或自引用");
+      const child = byObject(id);
+      must(child, "结构对象子边/见证悬空");
+      if (relationKind(kind))
+        must(child.source_coords && record.source_coords.every(c => child.source_coords.includes(c)), "结构关系来源不在见证中");
+    }
+    if (kind === "CC-013.segment") {
+      for (const [prefix, role] of [["sequence", "FIRST_SEQUENCE"], ["second_sequence", "SECOND_SEQUENCE"]]) {
+        const id = d[prefix + "_object_id"], entity = d[prefix + "_id"];
+        must((id === null) === (entity === null), "段序列对象/实体边缺失不一致");
+        if (id === null) continue;
+        const sequence = byObject(id);
+        must(sequence.kind === "CC-012.feature_sequence", "段序列对象种类不符");
+        const s = itsData(sequence);
+        must(s.entity_id === entity && s.segment_id === d.entity_id && s.role === role, "段序列实体/角色错绑");
+      }
+    }
+    for (const unit of [ ...(d.unit === undefined ? [] : [d.unit]), ...(d.units ?? []) ]) {
+      const child = byObject(unit.unit_object_id);
+      must(child?.kind === "CC-013.segment" && itsData(child).entity_id === unit.unit_id, "单元实体/对象错绑");
+    }
+    const target = (id, expectedKind) => itsData(endpoint(id, expectedKind));
+    const center = id => target(id, "CC-016.center");
+    const segment = id => target(id, "CC-013.segment");
+    switch (kind) {
+      case "CC-016.center_seed_attempt":
+        if (d.center_id !== null) must(center(d.center_id).seed_attempt_id === d.entity_id, "seed attempt 与中枢互指错绑");
+        break;
+      case "CC-016.center": {
+        const attempt = target(d.seed_attempt_id, "CC-016.center_seed_attempt");
+        must(attempt.center_id === d.entity_id && equal(attempt.units.map(u => u.unit_id), d.seed_units), "中枢 seed attempt 或单元互绑错误");
+        for (const id of [...d.seed_units, ...d.members, ...d.zn_members, d.break_unit, d.next_tested_unit, d.resume_anchor?.after_unit_id])
+          if (id != null) segment(id);
+        must(target(d.roles_id, "CC-017.center_roles").center_id === d.entity_id, "中枢 roles 互指错绑");
+        break;
+      }
+      case "CC-017.center_roles":
+        must(center(d.center_id).roles_id === d.entity_id, "孤立 roles 或中枢互指错绑");
+        break;
+      case "CC-022.unit_assignment":
+        if (d.center_id !== null) must(center(d.center_id).members.includes(d.unit.unit_id), "成员归属不在当前中枢成员中");
+        if (d.left_center_id !== null) center(d.left_center_id);
+        if (d.right_center_id !== null) center(d.right_center_id);
+        break;
+      case "CC-018.unit_core_position":
+        must(BigInt(d.center_revision) <= BigInt(center(d.center_id).entity_revision), "位置中心修订超出当前中枢");
+        break;
+      case "CC-020.center_pair":
+        validatePairSides(d, endpoint, must);
+        break;
+    }
+    if (relationKind(kind)) validateStructureRelation(record, endpoint, byObject, must);
+    if (CHANGE_KIND.has(kind)) {
+      must(record.first_known_generation === generation && record.published_generation === generation &&
+        record.payload.slot[0] === generation && d.known_at.generation === generation, "change 须只在发生代活动");
+      must(changeNulls(d), "change 撤回与 after/object_id 空值不符");
+      if (d.change === "withdrawn") {
+        must(d.before?.entity_id === d.entity_id && !byEntity(d.entity_id), "withdrawn 历史快照或当前缺席不符");
+      } else {
+        const expected = kind === "CC-055.center_change" && d.change === "roles_updated" ? "CC-017.center_roles" : CHANGE_KIND.get(kind);
+        const child = endpoint(d.entity_id, expected);
+        must(child.object_id === d.object_id && equal(d.after, itsData(child)), "change 后件与发生代对象原件不符");
+      }
+    }
+  }
+  function validateStructureHistory(records, isStructureKind, generation, check, charge) {
+    const versions = new Map(STRUCTURE_ROOTS.map(k => [k, 0]));
+    const events = new Map(), active = new Map(), entities = new Map();
+    const readers = new Map(), dependencies = new Map();
+    const boundary = at => {
+      if (!events.has(at)) events.set(at, {births: [], deaths: []});
+      return events.get(at);
+    };
+    boundary("1");
+    boundary(generation);
+    for (const record of records) {
+      const first = record.first_known_generation, death = record.withdrawn_generation;
+      if (CHANGE_KIND.has(record.kind))
+        structureNeed(first === generation ? death === null : death === (BigInt(first) + 1n).toString(), "B3", "结构 change 撤回代不是发生代后第一代");
+      boundary(first).births.push(record);
+      if (death !== null) boundary(death).deaths.push(record);
+      check();
+    }
+    const entityOf = record => record.kind === "CC-010.bi" ||
+      (isStructureKind(record.kind) && !record.kind.startsWith("CC-055.") && !versions.has(record.kind)) ? itsData(record).entity_id : undefined;
+    function detach(record) {
+      for (const key of dependencies.get(record) ?? []) {
+        const set = readers.get(key);
+        set.delete(record);
+        if (set.size === 0) readers.delete(key);
+      }
+      dependencies.delete(record);
+    }
+    for (const [cut, {births, deaths}] of [...events].sort(([a], [b]) => BigInt(a) < BigInt(b) ? -1 : 1)) {
+      const dirty = new Set();
+      const invalidate = (key) => {
+        for (const dependent of readers.get(key) ?? []) dirty.add(dependent);
+      };
+      for (const [rows, remove] of [[deaths, true], [births, false]]) for (const record of rows) {
+        const {object_id: id, kind} = record, entity = entityOf(record);
+        invalidate("o:" + id);
+        if (entity !== undefined) invalidate("e:" + entity);
+        if (versions.has(kind)) versions.set(kind, versions.get(kind) + (remove ? -1 : 1));
+        if (remove) {
+          active.delete(id);
+          if (entity !== undefined) entities.delete(entity);
+          detach(record);
+          dirty.delete(record);
+        } else {
+          structureNeed(!active.has(id), "B4", "同 cut 对象身份重复");
+          active.set(id, record);
+          if (entity !== undefined) {
+            structureNeed(!entities.has(entity), "B4", "同 cut 结构实体身份重复");
+            entities.set(entity, record);
+          }
+          if (isStructureKind(kind)) dirty.add(record);
+        }
+        check();
+      }
+      structureNeed([...versions.values()].every(n => n === 1), "B4", "cut-" + cut + " 结构域版本根缺失或重复");
+      for (const record of dirty) {
+        charge();
+        check();
+        detach(record);
+        const own = new Set();
+        const read = (prefix, map) => id => {
+          const key = prefix + id;
+          own.add(key);
+          let set = readers.get(key);
+          if (set === undefined) readers.set(key, set = new Set());
+          set.add(record);
+          return map.get(id);
+        };
+        validateStructureLinks(record, read("o:", active), read("e:", entities), cut);
+        dependencies.set(record, own);
+      }
+    }
+  }
   // 同 cut 活动集（含 CC-013.segment 普通原件）的完整中枢族链接：旧 validatePairCut 去掉规则分支后的同序组合。
   function validateCenterFamilyCut(records, axes = null) {
     for (const r of records) needE(!isCenterFamily(r.kind) || CENTER_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢 kind（不发 candidate）");
@@ -738,5 +974,6 @@
   }
   return Object.freeze({CENTER_KINDS: Object.freeze(CENTER_KINDS), PAIR_KINDS: Object.freeze(PAIR_KINDS), CENTER_TUPLE, PAIR_TUPLE,
     TB02E_DELIVERED, TB02E_DEFERRED, TB02F_DELIVERED, TB02F_DEFERRED,
-    validateCenterPayload, validatePairPayload, validatePairPublication, validatePairHistory, validateCenterFamilyCut});
+    validateCenterPayload, validatePairPayload, validatePairPublication, validatePairHistory, validateCenterFamilyCut,
+    STRUCTURE_ROOTS: Object.freeze(STRUCTURE_ROOTS), sameValue: equal, changeNulls, validateStructureHistory});
 });

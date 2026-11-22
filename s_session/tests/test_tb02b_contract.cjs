@@ -105,6 +105,14 @@ async function endpointCut(generation, rule, protocol = 's-session/2') {
     index_frontier:'batch-1', scope, input_frontier:'-1', seq_range:{from:'0',to:'-1'}, catalog_run_status:'not_run', catalog_evidence:evidence};
   const snapshot = {...shared, profile_id:PROFILE, profile_hash, rule_revision:rule, history_mode:'AsKnown', as_of_generation:'1',
     objects:[record], withdrawn_objects:[], witnesses:[], relations:[], observations:[], raw_history:[]};
+  if (protocol === 's-session/3') {
+    const kind = 'CC-054.knowledge_state', fact_key = API.canonical([kind,'TB-02-A']);
+    const payload = {scope:'TB-02-A',input_frontier:'-1',known_facts:['raw_ohlc','inclusion_trace','group_provenance'],waiting_reasons:[],requests:[],
+      domain:rule.includes('new-bi/2')?'established_direction_with_extreme_root_sets':'established_direction_without_extreme_identity_competition'};
+    const object_id = await API.Q3.V.identity(0x20, {kind,fact_key,payload,input_refs:[],profile_id:PROFILE,rule_revision:rule}, 'obj3-');
+    snapshot.objects.push({...record,kind,fact_key,payload,object_id});
+    evidence.classified_objects = String(snapshot.objects.length);
+  }
   const catalog = {...frozenCatalog(),...shared};
   for (const item of catalog.items) if (evidence.axes[item.id]) item.evidence = evidence.axes[item.id].evidence;
   return [{catalog, snapshot, cut:shared}, protocol];
@@ -137,11 +145,7 @@ test('v3知识域绑定完整规则且拒绝历史域混入新规则', async () 
   for (const version of [1,2]) {
     const rule = 's2-axis-quantifiers+new-bi/' + version;
     const [state, protocol] = await endpointCut(version, rule, 's-session/3');
-    const r = state.snapshot.objects[0];
-    r.kind = 'CC-054.knowledge_state';
-    r.fact_key = API.canonical([r.kind, 'TB-02-A']);
-    r.payload = {scope:'TB-02-A',input_frontier:'-1',known_facts:['raw_ohlc','inclusion_trace','group_provenance'],waiting_reasons:[],requests:[],
-      domain:version===1?'established_direction_without_extreme_identity_competition':'established_direction_with_extreme_root_sets'};
+    const r = state.snapshot.objects.find(r => r.kind === 'CC-054.knowledge_state');
     const identify = async () => { r.object_id = await API.Q3.V.identity(0x20, {kind:r.kind,fact_key:r.fact_key,payload:r.payload,input_refs:[],profile_id:PROFILE,rule_revision:rule}, 'obj3-'); };
     await identify(); await API.Q3.validateState(state, protocol);
     r.payload.domain = version===2?'established_direction_without_extreme_identity_competition':'established_direction_with_extreme_root_sets';
