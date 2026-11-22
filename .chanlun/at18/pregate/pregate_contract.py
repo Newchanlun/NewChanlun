@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
+from enum import Enum, auto
 from functools import cache
 from pathlib import Path, PurePosixPath
 import posixpath
@@ -105,31 +106,50 @@ RECEIPT_VERDICT = re.compile(
 RUN_EXIT_CODE = re.compile(r"(?mi)^(?:[-*] )?(?:Exit code|退出码)[:：][ \t]*[0-9]+[ \t]*\r?$")
 RUN_RESULT = re.compile(r"(?mi)^(?:[-*] )?(?:Run result|运行结果)[:：][ \t]*(?:PASS|FAIL)[ \t]*\r?$")
 
+# 名分由标题与前导证据共同决定；指南/规范中的审阅步骤不是执行记录。
 REPORT_TITLE = re.compile(
-    r"(?P<report>评审|复审|复核|复验|独审|独评|初审|[二三四五]审|真修|诊断|报告|结果|回执|审查|审计|汇报"
-    r"|\b(?:review|report|result|receipt|audit|diagnostic|verdict)\b)|验收|判定|结论", re.I
+    r"评审|复审|复核|复验|独审|独评|初审|[二三四五]审|真修|诊断结果|诊断(?:纪要|记录)?|"
+    r"报告|结果(?:包)?|回执|审查|审计|汇报|终判|判决|(?:实测|验证|检验)裁决|回测(?:对照|复验|判决)?|验证|"
+    r"\b(?:review|report|results?|receipt|audit|diagnostic|verdict)\b", re.I
 )
-REPORT_FIELD = re.compile(
-    r"^\s*(?:#{1,6}\s+|(?:[-*+]|[0-9]+\.)\s+)?(?:\*\*)?"
-    r"(?P<key>[\w /-]+?)(?:\*\*)?\s*[:：]\s*(?:\*\*)?(?P<value>\S.*)$"
+RULE_TITLE = re.compile(
+    r"指南|操作手册|预检|规范|规格|合同|协议|设计|方案|施工单|计划|提案|模板|"
+    r"\b(?:guide|handbook|preflight|specification|contract|design)\b", re.I
 )
+ADR_TITLE = re.compile(r"^ADR[ -]+\d+\b", re.I)
+MD_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
+MD_LIST = re.compile(r"^(?:[-*+]|[0-9]+[.)])\s+")
+MD_QUOTE = re.compile(r"^(?:>\s*)+")
+REPORT_FIELD = re.compile(r"^(?P<key>[^：:|]{1,48}?)\s*[:：]\s*(?P<value>\S.*)$")
 DISPOSITION = re.compile(
-    r"^(?:PASS(?:ED)?|FAIL(?:ED)?|BLOCK(?:ED)?|REJECT(?:ED)?|PWC|CHANGES_REQUIRED|"
-    r"通过|不通过|未通过|拒绝|退回|阻断)(?=$|[\s*（(。，、；,;.！!/_-])", re.I
+    r"(?<![\w-])(?:PASS(?:ED)?|FAIL(?:ED)?|BLOCK(?:ED)?|REJECT(?:ED)?|PWC|CHANGES_REQUIRED|"
+    r"VERIFIED|ACCEPTED|ERROR)(?=$|[^\w-])|"
+    r"有保留通过|不通过|未通过|通过|退回|拒绝|证伪|否证|全过|未修复|已修复|不成立|成立|实测|✅|❌", re.I
 )
 MEASUREMENT = re.compile(
     r"\bbit[- ]exact\b|\b\d+\s+(?:pass(?:ed)?|fail(?:ed)?|skip(?:ped)?)\b|"
-    r"(?:进程退出|退出码|实测退出码)[：:\s]*-?\d+\b", re.I
+    r"(?:进程退出|退出码|退出|EXIT)[：:\s]*-?\d+\b|修复项\s*=\s*\d+|全量跑通|全绿|零 panic", re.I
 )
 REPORT_SUBJECT = re.compile(
-    rf"(?:固定|受审|候选|冻结|主线)提交[ \t：:]+`?{GIT_SHA}\b|"
-    r"\bgit diff[ \t]+`?[0-9a-f]{7,40}\b|(?:尖端(?: SHA)?|SHA|commit)[ \t：:]+`?[0-9a-f]{7,40}\b", re.I
+    r"(?:固定|受审|候选|冻结|主线)提交[ \t：:]+`?[0-9a-f]{7,40}\b|"
+    r"\bgit diff[ \t]+`?[0-9a-f]{7,40}\b|(?:尖端(?: SHA)?|SHA|commit)[ \t：:]+`?[0-9a-f]{7,40}\b"
+    r"|本次(?:审计|评审|复验)内执行", re.I
 )
-OUTCOME_FIELDS = {"结论", "结果", "判定", "运行结果", "验收结果", "评审结论", "verdict", "result", "run result"}
-EXECUTION_FIELDS = {
-    "评审对象", "评审面", "评审器", "评审者", "审查对象", "实测退出码", "退出码",
-    "reviewed head", "reviewer", "review target", "exit code",
-}
+OUTCOME_KEY = re.compile(
+    r"(?:本报告的?)?(?:一句话|核心|报告|执行|审计|评审|验收|运行|调研|修复|实证|最终|总)*(?:结论|结果|判定|裁决|判决|终判|总评|执行摘要|关键发现)"
+    r"(?:提前给出|速览|摘要|汇总)?|(?:run )?result|verdict|status", re.I
+)
+EXECUTION_KEY = re.compile(
+    r"(?:审计|审查|评审|复审|复验|测试|验证|调研|诊断)(?:范围|方法|方式|对象|日期|人|者|面|器|脚本|等级)|"
+    r"任务|起点 commit|(?:固定|受审|候选|冻结|主线|评审)提交|实测|交付物|生成时间|总耗时|"
+    r"脚本|跑法|探针|样本|数据来源|信号总数|审计基准|实测日期|验证等级|认识论等级|本次修改|"
+    r"(?:测试|运行|实测)?退出码|产出文件|reviewed head|reviewer|review target|exit code", re.I
+)
+TABLE_RULE = re.compile(r":?-{3,}:?")
+RUN_METRIC = re.compile(r"\d[\d,]*(?:[.]\d+)?\s*(?:%|pp\b|ms\b|bars?\b|笔|组|例)|"
+                        r"(?:[^\s=:]+)\s*=\s*-?\d", re.I)
+RUN_COLUMN = re.compile(r"回报|收益|覆盖率|复利|胜率|耗时|交易数|实测|bars|sharpe|drawdown|ms/bar|trades|MDD|BH|P&L|年化|回测|bps|卖飞率", re.I)
+
 
 
 class Entry(NamedTuple):
@@ -284,11 +304,15 @@ COMMON_TOKENS = (
 RUST_TOKENS = re.compile(r'(?:br|r)(?P<hashes>\#*)"(?s:.*?)"(?P=hashes)|\'(?:\\.|[^\'\\\r\n])\'|'
                          + COMMON_TOKENS)
 JS_ASSIGNMENTS = r"\*\*=|<<=|>>>=|>>=|&&=|\|\|=|\?\?=|[+*/%&|^\-]="
-JS_OPERATORS = r"===|!==|==|!=|=>|\+\+|--|" + JS_ASSIGNMENTS
+JS_OPERATORS = JS_ASSIGNMENTS + r"|===|!==|==|!=|=>|\+\+|--|\.\.\.|\?\.|\?\?|\|\||&&"
+JS_NUMBER = re.compile(
+    r"0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)"
+    r"(?:[eE][+-]?[\d_]+)?"
+)
 JS_TOKENS = re.compile(
     r'(?P<single>\'(?:\\[^\r\n]|[^\'\\\r\n])*\')|`(?:\\[\s\S]|[^`\\])*`'
     r'|/(?![/*])(?:\\[^\r\n]|\[(?:\\.|[^\]\\\r\n])*\]|[^/\\[\r\n])+/[dgimsuvy]*|'
-    + JS_OPERATORS + "|" + COMMON_TOKENS
+    + JS_OPERATORS + "|" + JS_NUMBER.pattern + "|" + COMMON_TOKENS
 )
 
 
@@ -322,140 +346,591 @@ def source_tokens(text, *, rust):
             tokens.append(key)
         else:
             tokens.append(token if re.fullmatch(
-                r"[\w$]+|[.:=(),;!{}\[\]*]|" + JS_OPERATORS, token
+                r"[\w$]+|[.:=(),;!{}\[\]*?+<>|\-]|" + JS_OPERATORS + "|" + JS_NUMBER.pattern, token
             ) else "~")
     return tokens, literals, linebreaks
 
 
 JS_NAME = re.compile(r"[A-Za-z_$][\w$]*")
 JS_MUTATION = re.compile(r"\+\+|--|" + JS_ASSIGNMENTS)
+JS_CONTINUATION = {".", "?.", ",", "in", "instanceof", "as", "satisfies", "of"}
+JS_CONTROL = {"if", "else", "while", "for", "switch", "catch", "with"}
+JS_UNKNOWN = frozenset()
 
 
-def js_scope_declarations(tokens, linebreaks):
-    """先登记块里的声明名，让内层 TDZ 也能遮蔽外层值。"""
-    closes, openers = {}, []
-    pairs = {")": "(", "}": "{", "]": "["}
-    for i, token in enumerate(tokens):
-        if token in {"(", "{", "["}:
-            openers.append(i)
-        elif token in pairs and openers and tokens[openers[-1]] == pairs[token]:
-            closes[openers.pop()] = i
+class JSAtom(Enum):
+    TDZ = auto()
+    FS = auto()
+    PATH = auto()
 
-    names, declarations, blocks = defaultdict(set), {}, [-1]
-    for i, token in enumerate(tokens):
-        if token == "{":
-            blocks.append(i)
-        elif token == "}" and len(blocks) > 1:
-            blocks.pop()
-        elif token == "function":
-            # 普通函数参数也会遮蔽模块名、__dirname 或外层路径。
-            start = i + 1
-            if tokens[start:start + 1] == ["*"]:
-                start += 1
-            if start < len(tokens) and JS_NAME.fullmatch(tokens[start]):
-                start += 1
-            end = closes.get(start)
-            if end is not None and tokens[end + 1:end + 2] == ["{"]:
-                j = start + 1
-                while j < end:
-                    if JS_NAME.fullmatch(tokens[j]):
-                        names[end + 1].add(tokens[j])
-                    while j < end and tokens[j] != ",":
-                        j = closes.get(j, j) + 1
-                    j += 1
-        elif token in {"const", "let", "var"} and (not i or tokens[i - 1] != "."):
-            j = i + 1
-            while j < len(tokens) and JS_NAME.fullmatch(tokens[j]):
-                names[blocks[-1]].add(tokens[j])
-                name = j
-                j += 1
-                if (tokens[j:j + 1] == [":"] and j + 1 < len(tokens)
-                        and JS_NAME.fullmatch(tokens[j + 1])):
-                    j += 2  # 简单 TS 类型标注，如 const fixturePath: string。
-                declarations[name] = j
-                # 跳过初值里的参数/对象，不把内部逗号当成下一个声明。
-                while (j < len(tokens) and tokens[j] not in {",", ";", ")", "}"}
-                       and not (j in linebreaks and JS_NAME.fullmatch(tokens[j])
-                                and (JS_NAME.fullmatch(tokens[j - 1]) or tokens[j - 1].startswith("@")
-                                     or tokens[j - 1] in {")", "]", "}"}))):
-                    j = closes.get(j, j) + 1
-                if j == len(tokens) or tokens[j] != ",":
+
+class JSScope(NamedTuple):
+    function: bool
+    bindings: dict[str, frozenset[str] | JSAtom]
+
+
+class JSStatement(NamedTuple):
+    kind: str
+    span: tuple[int, int]
+    children: tuple[JSStatement, ...] = ()
+
+
+def js_join_values(values):
+    first, *rest = values
+    if all(value == first for value in rest):
+        return first
+    return JS_UNKNOWN.union(*(value for value in values if isinstance(value, frozenset)))
+
+
+def js_join(*scopes):
+    """同一程序点的路径取并集；内建模块须在各分支保持相同来源。"""
+    return tuple(JSScope(frames[0].function, {
+        name: js_join_values([frame.bindings[name] for frame in frames])
+        for name in frames[0].bindings
+    }) for frames in zip(*scopes))
+
+
+def js_merge(target, source):
+    for completion, env in source.items():
+        target[completion] = js_join(target[completion], env) if completion in target else env
+
+
+class JSFixtureReads:
+    """对固定 CommonJS 读式做源码级解释；不执行代码，不推断动态模块、路径或调用。"""
+
+    def __init__(self, tokens, literals, linebreaks):
+        self.t = tokens
+        self.literals = literals
+        self.linebreaks = linebreaks
+        self.groups = {}
+        stack = []
+        pairs = {")": "(", "}": "{", "]": "["}
+        for i, token in enumerate(tokens):
+            if token in pairs.values():
+                stack.append(i)
+            elif token in pairs and stack and tokens[stack[-1]] == pairs[token]:
+                self.groups[stack.pop()] = i
+        self.reads = set()
+
+    def level(self, lo, hi):
+        """只遍历当前括号层；表达式中的内部逗号、冒号和花括号各归其主。"""
+        while lo < hi:
+            yield lo
+            lo = self.groups.get(lo, lo) + 1
+
+    def split(self, lo, hi, delimiter=","):
+        for i in self.level(lo, hi):
+            if self.t[i] == delimiter:
+                yield lo, i
+                lo = i + 1
+        yield lo, hi
+
+    def statement_end(self, lo, hi):
+        for i in self.level(lo, hi):
+            token = self.t[i]
+            if token == ";" or token in {"else", "catch", "finally"}:
+                return i
+            if i > lo and i in self.linebreaks and token not in JS_CONTINUATION:
+                prior = self.t[i - 1]
+                if ((JS_NAME.fullmatch(prior) and prior not in JS_CONTROL | {"function", "new", "const", "let", "var"})
+                        or prior.startswith("@") or prior in {")", "]", "}"}):
+                    if JS_NAME.fullmatch(token) or token == "{":
+                        return i
+        return hi
+
+    def sequence(self, lo, hi):
+        result = []
+        while lo < hi:
+            node, lo = self.statement(lo, hi)
+            result.append(node)
+        return tuple(result)
+
+    def statement(self, lo, hi):
+        t = self.t
+        if lo >= hi:
+            return JSStatement("empty", (lo, lo)), lo
+        kind = t[lo]
+        if kind == ";":
+            return JSStatement("empty", (lo, lo)), lo + 1
+        if kind == "{" and lo in self.groups:
+            close = self.groups[lo]
+            return JSStatement("block", (lo + 1, close), self.sequence(lo + 1, close)), close + 1
+        if kind in {"if", "switch", "for", "while"} and t[lo + 1:lo + 2] == ["("] and lo + 1 in self.groups:
+            close = self.groups[lo + 1]
+            span = (lo + 2, close)
+            if kind == "switch" and t[close + 1:close + 2] == ["{"] and close + 1 in self.groups:
+                end = self.groups[close + 1]
+                return JSStatement(kind, span, self.cases(close + 2, end)), end + 1
+            if kind != "switch":
+                body, end = self.statement(close + 1, hi)
+                children = (body,)
+                if kind == "if" and end < hi and t[end] == "else":
+                    other, end = self.statement(end + 1, hi)
+                    children += (other,)
+                return JSStatement(kind, span, children), end
+        if kind == "try" and t[lo + 1:lo + 2] == ["{"]:
+            body, end = self.statement(lo + 1, hi)
+            handlers = [body]
+            if t[end:end + 1] == ["catch"]:
+                start = end + 1
+                close = self.groups.get(start) if t[start:start + 1] == ["("] else None
+                catch, end = self.statement(close + 1 if close is not None else start, hi)
+                params = (start + 1, close) if close is not None else (start, start)
+                handlers.append(JSStatement("catch", params, catch.children))
+            if t[end:end + 1] == ["finally"]:
+                final, end = self.statement(end + 1, hi)
+                handlers.append(JSStatement("finally", final.span, final.children))
+            return JSStatement("try", (lo, end), tuple(handlers)), end
+        # 声明的函数（含 class）在闭合大括号处结束，不吞下同一行的下一条语句。
+        prefix = lo
+        while t[prefix:prefix + 1] and t[prefix] in {"export", "default", "async"}:
+            prefix += 1
+        if t[prefix:prefix + 1] and t[prefix] in {"function", "class"}:
+            for i in self.level(prefix + 1, hi):
+                if t[i] == "{" and i in self.groups:
+                    end = self.groups[i] + 1
+                    return JSStatement("function-decl", (prefix, end)), end
+                if t[i] == ";":
                     break
-                j += 1
-    return names, declarations
+        end = self.statement_end(lo, hi)
+        if end == lo:  # 非本分析子集的孤立控制词也要推进。
+            return JSStatement("empty", (lo, lo)), lo + 1
+        after = end + (end < hi and t[end] == ";")
+        if kind in {"let", "const", "var", "return", "throw", "break", "continue"}:
+            start = lo + 1
+            if kind == "return" and start in self.linebreaks:
+                return JSStatement(kind, (start, start)), start
+            return JSStatement(kind, (start, end)), after
+        return JSStatement("expr", (lo, end)), after
+
+    def cases(self, lo, hi):
+        labels = []
+        for i in self.level(lo, hi):
+            if self.t[i] not in {"case", "default"}:
+                continue
+            depth = 0
+            for j in self.level(i + 1, hi):
+                token = self.t[j]
+                if token == ":" and not depth:
+                    labels.append((self.t[i], i + 1, j))
+                    break
+                depth += (token == "?") - (token == ":")
+        return tuple(JSStatement(kind, (start, colon), self.sequence(
+            colon + 1, labels[k + 1][1] - 1 if k + 1 < len(labels) else hi,
+        )) for k, (kind, start, colon) in enumerate(labels))
+
+    def binding_pattern(self, lo, hi):
+        # 解构可遮蔽内建名，但不从解构的值推导模块或路径。
+        if lo >= hi:
+            return
+        token = self.t[lo]
+        if token == "...":
+            yield from self.binding_pattern(lo + 1, hi)
+        elif JS_NAME.fullmatch(token):
+            yield token
+        elif token in {"{", "["} and lo in self.groups:
+            for start, end in self.split(lo + 1, self.groups[lo]):
+                if token == "{":
+                    colon = next((i for i in self.level(start, end) if self.t[i] in {":", "="}), end)
+                    if colon < end and self.t[colon] == ":":
+                        start = colon + 1
+                yield from self.binding_pattern(start, end)
+
+    def declarations(self, span):
+        for lo, hi in self.split(*span):
+            equal = next((i for i in self.level(lo, hi) if self.t[i] == "="), hi)
+            names = tuple(self.binding_pattern(lo, equal))
+            yield names, (min(equal + 1, hi), hi), lo < equal and JS_NAME.fullmatch(self.t[lo])
+
+    def locals(self, nodes):
+        names = {}
+        for node in nodes:
+            if node.kind in {"let", "const"}:
+                for keys, _, _ in self.declarations(node.span):
+                    names.update(dict.fromkeys(keys, JSAtom.TDZ))
+            elif node.kind == "function-decl":
+                lo, hi = node.span
+                i = lo + (2 if self.t[lo + 1:lo + 2] == ["*"] else 1)
+                if i < hi and JS_NAME.fullmatch(self.t[i]):
+                    names[self.t[i]] = JS_UNKNOWN if self.t[lo] == "function" else JSAtom.TDZ
+        return names
+
+    def hoisted(self, nodes):
+        for node in nodes:
+            if node.kind == "var":
+                for names, _, _ in self.declarations(node.span):
+                    yield from names
+            elif node.kind == "for":
+                lo, hi = node.span
+                if self.t[lo:lo + 1] == ["var"]:
+                    stop = next((i for i in self.level(lo + 1, hi) if self.t[i] in {";", "in", "of"}), hi)
+                    for names, _, _ in self.declarations((lo + 1, stop)):
+                        yield from names
+            yield from self.hoisted(node.children)
+
+    @staticmethod
+    def lookup(env, name):
+        return next((frame.bindings for frame in reversed(env) if name in frame.bindings), None)
+
+    def value(self, env, name):
+        scope = self.lookup(env, name)
+        return scope[name] if scope is not None else JS_UNKNOWN
+
+    def unwrap(self, lo, hi):
+        while self.t[lo:lo + 1] == ["("] and self.groups.get(lo) == hi - 1:
+            lo, hi = lo + 1, hi - 1
+        return lo, hi
+
+    def literal(self, lo, hi, env):
+        lo, hi = self.unwrap(lo, hi)
+        t = self.t[lo:hi]
+        if len(t) == 1:
+            token = t[0]
+            if token in self.literals:
+                # 对路径不解码转义，对真值只有空字面串是假。
+                return ("str", self.literals[token])
+            if token in {"false", "true"}:
+                return ("bool", token == "true")
+            if token == "null" or token == "undefined" and self.lookup(env, token) is None:
+                return (token, None)
+        if len(t) == 1 or len(t) == 2 and t[0] in {"-", "+"}:
+            number = "".join(t).replace("_", "")
+            if JS_NUMBER.fullmatch(number.lstrip("+-")):
+                try:
+                    value = int(number, 0) if number.lower().lstrip("+-").startswith(("0x", "0b", "0o")) else float(number)
+                except ValueError:
+                    return None
+                return ("num", value)
+        return None
+
+    def truth(self, lo, hi, env):
+        literal = self.literal(lo, hi, env)
+        return bool(literal[1]) if literal is not None else None
+
+    def function(self, body, end, params, env, name=None):
+        nodes = self.sequence(body + 1, end)
+        bindings = dict.fromkeys(self.hoisted(nodes), JS_UNKNOWN)
+        bindings.update(dict.fromkeys(params, JS_UNKNOWN))
+        if name:
+            bindings[name] = JS_UNKNOWN
+        self.block(nodes, (*js_join(env), JSScope(True, bindings)))
+
+    def parameters(self, lo, hi):
+        return (name for start, end in self.split(lo, hi) for name in self.binding_pattern(start, end))
+
+    def after_params(self, close, hi):
+        body = close + 1
+        if self.t[body:body + 1] == [":"]:  # TS 返回类型
+            body += 1
+            while body < hi and (JS_NAME.fullmatch(self.t[body]) or self.t[body] in {"[", "]", ".", "<", ">", "|"}):
+                body += 1
+        return body
+
+    def conditional(self, lo, hi):
+        question = None
+        depth = 0
+        for i in self.level(lo, hi):
+            if self.t[i] == "?":
+                question = i if question is None else question
+                depth += 1
+            elif self.t[i] == ":" and depth:
+                depth -= 1
+                if not depth:
+                    return question, i
+        return None
+
+    def expr(self, lo, hi, env):
+        lo, hi = self.unwrap(lo, hi)
+        if lo >= hi:
+            return JS_UNKNOWN
+        t = self.t
+        first = t[lo]
+        parts = list(self.split(lo, hi))
+        if len(parts) > 1:
+            for start, end in parts:
+                value = self.expr(start, end, env)
+            return value
+        if JS_NAME.fullmatch(first) and lo + 1 < hi:
+            op = t[lo + 1]
+            if op == "=" or JS_MUTATION.fullmatch(op):
+                scope = self.lookup(env, first)
+                value = self.expr(lo + 2, hi, env) if op != "++" and op != "--" else JS_UNKNOWN
+                if scope is not None and scope[first] is not JSAtom.TDZ:
+                    scope[first] = value if op == "=" else JS_UNKNOWN
+                    return scope[first]
+                return JS_UNKNOWN
+        if first in {"++", "--"} and hi == lo + 2:
+            scope = self.lookup(env, t[lo + 1])
+            if scope is not None and scope[t[lo + 1]] is not JSAtom.TDZ:
+                scope[t[lo + 1]] = JS_UNKNOWN
+            return JS_UNKNOWN
+
+        # 箭头体有自己的函数帧，形参不从外部调用表达式推值。
+        arrow_start = lo + (first == "async" and t[lo + 1:lo + 2] != ["=>"])
+        arrow_end = self.groups.get(arrow_start, arrow_start)
+        arrow = self.after_params(arrow_end, hi) if t[arrow_start:arrow_start + 1] == ["("] else arrow_end + 1
+        if arrow < hi and t[arrow] == "=>":
+            params = self.parameters(arrow_start + 1, arrow_end) if t[arrow_start] == "(" else (t[arrow_start],)
+            body = arrow + 1
+            if t[body:body + 1] == ["{"] and body in self.groups:
+                self.function(body, self.groups[body], params, env)
+            else:
+                self.expr(body, hi, (*js_join(env), JSScope(True, dict.fromkeys(params, JS_UNKNOWN))))
+            return JS_UNKNOWN
+
+        if conditional := self.conditional(lo, hi):
+            question, colon = conditional
+            self.expr(lo, question, env)
+            truth = self.truth(lo, question, env)
+            if truth is not None:
+                return self.expr(question + 1, colon, env) if truth else self.expr(colon + 1, hi, env)
+            left, right = js_join(env), js_join(env)
+            a, b = self.expr(question + 1, colon, left), self.expr(colon + 1, hi, right)
+            for original, merged in zip(env, js_join(left, right)):
+                original.bindings.update(merged.bindings)
+            return js_join_values((a, b))
+        for op in ("||", "&&", "??"):
+            points = list(self.split(lo, hi, op))
+            if len(points) > 1:
+                start, end = points[0]
+                left = self.expr(start, end, env)
+                if op == "??":
+                    literal = self.literal(start, end, env)
+                    skip = None if literal is None else literal[0] not in {"null", "undefined"}
+                else:
+                    truth = self.truth(start, end, env)
+                    skip = None if truth is None else truth == (op == "||")
+                if skip is True:
+                    return left
+                if skip is False:
+                    return self.expr(end + 1, hi, env)
+                right = js_join(env)
+                self.expr(end + 1, hi, right)
+                for original, merged in zip(env, js_join(env, right)):
+                    original.bindings.update(merged.bindings)
+                return JS_UNKNOWN
+
+        if hi == lo + 1:
+            value = self.value(env, first)
+            return JS_UNKNOWN if value is JSAtom.TDZ else value
+        if (first == "require" and hi == lo + 4 and t[lo + 1] == "(" and t[lo + 3] == ")"
+                and self.lookup(env, first) is None):
+            module = self.literals.get(t[lo + 2], "").removeprefix("node:")
+            return {"fs": JSAtom.FS, "path": JSAtom.PATH}.get(module, JS_UNKNOWN)
+        if (t[lo + 1:lo + 5] in ([".", "join", "(", "__dirname"], [".", "resolve", "(", "__dirname"])
+                and self.groups.get(lo + 3) == hi - 1 and self.value(env, first) is JSAtom.PATH
+                and self.lookup(env, "__dirname") is None and t[lo + 5:lo + 6] == [","]):
+            spans = list(self.split(lo + 6, hi - 1))
+            if spans[-1][0] == spans[-1][1]:
+                spans.pop()
+            parts = [self.literals.get(t[a]) if b == a + 1 else None for a, b in spans]
+            if parts and all(part is not None and not part.startswith("/") for part in parts):
+                return frozenset({"/".join(part for part in parts if part)})
+
+        i = lo
+        while i < hi:
+            token = t[i]
+            previous = t[i - 1] if i > lo else ""
+            # 只认真实名称绑定上的读，不把 obj.fs.readFileSync 当成内建 fs。
+            if (previous not in {".", "?."} and self.value(env, token) is JSAtom.FS
+                    and t[i + 1:i + 4] == [".", "readFileSync", "("] and i + 3 in self.groups):
+                close = self.groups[i + 3]
+                for j, (a, b) in enumerate(self.split(i + 4, close)):
+                    value = self.expr(a, b, env)
+                    if j == 0 and isinstance(value, frozenset):
+                        self.reads.update(value)
+                i = close + 1
+                continue
+            if token == "class" and previous not in {".", "?."}:
+                name = t[i + 1] if t[i + 1:i + 2] and JS_NAME.fullmatch(t[i + 1]) and t[i + 1] != "extends" else None
+                body = next((j for j in self.level(i + 1, hi) if t[j] == "{"), None)
+                if body is not None and body in self.groups:
+                    local = (*js_join(env), JSScope(False, {name: JS_UNKNOWN} if name else {}))
+                    self.expr(body + 1, self.groups[body], local)
+                    i = self.groups[body] + 1
+                    continue
+            if token in {"(", "[", "{"} and i in self.groups:
+                close = self.groups[i]
+                body = self.after_params(close, hi)
+                # 普通函数、对象/类方法的参数括号紧接其函数体。
+                if (token == "(" and previous not in JS_CONTROL and body < hi and t[body] == "{"
+                        and body in self.groups and i > lo and (JS_NAME.fullmatch(previous) or previous in {"*", "]"})):
+                    name = previous if t[max(lo, i - 3):i].count("function") and previous != "function" else None
+                    self.function(body, self.groups[body], self.parameters(i + 1, close), env, name)
+                    i = self.groups[body] + 1
+                    continue
+                if token == "{":
+                    for a, b in self.split(i + 1, close):
+                        # 对象属性值也可能是箭头函数；方法的参数不是属性键。
+                        colon = next((j for j in self.level(a, b) if t[j] in {":", "(", "=", "?"}), b)
+                        self.expr(colon + 1 if colon < b and t[colon] == ":" else a, b, env)
+                else:
+                    self.expr(i + 1, close, env)
+                i = close
+            i += 1
+        return JS_UNKNOWN
+
+    def block(self, nodes, env, params=()):
+        local = dict.fromkeys(params, JS_UNKNOWN) | self.locals(nodes)
+        result = self.run(nodes, (*env, JSScope(False, local)))
+        return {exit: state[:-1] for exit, state in result.items()}
+
+    def run(self, nodes, env):
+        flow = {"next": env}
+        for node in nodes:
+            if "next" not in flow:
+                break
+            js_merge(flow, self.execute(node, flow.pop("next")))
+        return flow
+
+    def declare(self, kind, span, env):
+        scope = next(frame.bindings for frame in reversed(env) if frame.function) if kind == "var" else env[-1].bindings
+        for names, (lo, hi), simple in self.declarations(span):
+            if kind != "var" or lo < hi:
+                value = self.expr(lo, hi, env)
+                for name in names:
+                    scope[name] = value if simple else JS_UNKNOWN
+
+    def execute(self, node, env):
+        kind, (lo, hi), children = node
+        if kind == "block":
+            return self.block(children, env)
+        if kind in {"var", "const", "let"}:
+            self.declare(kind, (lo, hi), env)
+        elif kind == "if":
+            self.expr(lo, hi, env)
+            choice = self.truth(lo, hi, env)
+            other = children[1] if len(children) == 2 else JSStatement("empty", (hi, hi))
+            if choice is not None:
+                return self.execute(children[0] if choice else other, env)
+            result = self.execute(children[0], js_join(env))
+            js_merge(result, self.execute(other, js_join(env)))
+            return result
+        elif kind == "switch":
+            return self.switch(children, (lo, hi), env)
+        elif kind == "try":
+            return self.try_block(children, env)
+        elif kind in {"while", "for"}:
+            return self.loop(node, env)
+        elif kind in {"return", "throw", "break", "continue"}:
+            if kind in {"return", "throw"}:
+                self.expr(lo, hi, env)
+            return {kind: env}
+        elif kind in {"expr", "function-decl"}:
+            self.expr(lo, hi, env)
+            if kind == "function-decl" and self.t[lo] == "class" and lo + 1 < hi:
+                env[-1].bindings[self.t[lo + 1]] = JS_UNKNOWN
+        return {"next": env}
+
+    def switch(self, cases, span, env):
+        self.expr(*span, env)
+        literal = self.literal(*span, env)
+        values = [self.literal(*case.span, env) if case.kind == "case" else None for case in cases]
+        default = next((i for i, case in enumerate(cases) if case.kind == "default"), None)
+        known = literal is not None and all(value is not None or i == default for i, value in enumerate(values))
+        entry = next((i for i, value in enumerate(values) if value == literal), default) if known else None
+        locals_ = self.locals(stmt for case in cases for stmt in case.children)
+        inside = (*env, JSScope(False, locals_))
+        exits, flow = {}, {}
+        if (known and entry is None) or (not known and default is None):
+            exits["next"] = js_join(inside)
+        for i, case in enumerate(cases):
+            if not known and case.kind == "case":
+                self.expr(*case.span, js_join(inside))
+            if not known or i == entry:
+                js_merge(flow, {"next": js_join(inside)})
+            if "next" in flow:
+                branch = self.run(case.children, flow.pop("next"))
+                if "break" in branch:
+                    js_merge(exits, {"next": branch.pop("break")})
+                if "next" in branch:
+                    flow["next"] = branch.pop("next")
+                js_merge(exits, branch)
+        js_merge(exits, flow)
+        return {exit: state[:-1] for exit, state in exits.items()}
+
+    def try_block(self, handlers, env):
+        result = self.execute(handlers[0], js_join(env))
+        for handler in handlers[1:]:
+            if handler.kind == "catch":
+                # Opaque calls may throw; explicit throw also propagates preceding writes to catch.
+                thrown = result.pop("throw", None)
+                catch_env = js_join(env, thrown) if thrown is not None else js_join(env)
+                js_merge(result, self.block(handler.children, catch_env, self.parameters(*handler.span)))
+            else:
+                final = {}
+                for completion, state in result.items():
+                    applied = self.block(handler.children, state)
+                    if "next" in applied:
+                        js_merge(final, {completion: applied.pop("next")})
+                    js_merge(final, applied)
+                result = final
+        return result
+
+    def loop(self, node, env):
+        lo, hi = node.span
+        condition, step, scoped = (lo, hi), (hi, hi), False
+        iteration = None
+        if node.kind == "for":
+            parts = list(self.split(lo, hi, ";"))
+            if len(parts) == 3:
+                init, condition, step = parts
+            else:
+                separator = next((i for i in self.level(lo, hi) if self.t[i] in {"in", "of"}), hi)
+                init, condition, iteration = (lo, separator), None, (min(separator + 1, hi), hi)
+            kind = self.t[lo] if lo < init[1] else ""
+            if kind in {"let", "const"}:
+                names = (name for keys, _, _ in self.declarations((lo + 1, init[1])) for name in keys)
+                env = (*env, JSScope(False, dict.fromkeys(names, JSAtom.TDZ)))
+                scoped = True
+            if kind in {"let", "const", "var"}:
+                self.declare(kind, (lo + 1, init[1]), env)
+            else:
+                self.expr(*init, env)
+            if iteration is not None:
+                self.expr(*iteration, env)
+        pre = current = js_join(env)
+        exits = {}
+        while True:
+            head = js_join(current)
+            if condition is None:
+                truth = None
+            elif condition[0] == condition[1]:
+                truth = True
+            else:
+                self.expr(*condition, head)
+                truth = self.truth(*condition, head)
+            if truth is not True:
+                js_merge(exits, {"next": js_join(head)})
+            if truth is False:
+                break
+            branch = self.execute(node.children[0], head)
+            if "break" in branch:
+                js_merge(exits, {"next": branch.pop("break")})
+            back = [branch.pop(kind) for kind in ("next", "continue") if kind in branch]
+            js_merge(exits, branch)
+            if not back:
+                break
+            tail = js_join(*back)
+            self.expr(*step, tail)
+            upcoming = js_join(pre, current, tail)
+            if upcoming == current:
+                break
+            current = upcoming
+        return {exit: state[:-1] for exit, state in exits.items()} if scoped else exits
+
+    def extract(self):
+        nodes = self.sequence(0, len(self.t))
+        self.block(nodes, (JSScope(True, dict.fromkeys(self.hoisted(nodes), JS_UNKNOWN)),))
+        return self.reads
 
 
 def js_relative_reads(tokens, literals, linebreaks):
-    """只取源码位置上能绑定到内建模块与字面量的 CommonJS 读取。"""
-    names, declarations = js_scope_declarations(tokens, linebreaks)
-    scopes = [dict.fromkeys(names[-1])]
-
-    def environment(name):
-        return next((scope for scope in reversed(scopes) if name in scope), None)
-
-    def value(name):
-        scope = environment(name)
-        return scope[name] if scope is not None else None
-
-    def joined(start):
-        if (start + 5 >= len(tokens) or value(tokens[start]) != ("module", "path")
-                or tokens[start + 1:start + 5] != [".", "join", "(", "__dirname"]
-                or environment("__dirname") is not None):
-            return None
-        j, parts = start + 5, []
-        while tokens[j:j + 1] == [","]:
-            j += 1
-            if tokens[j:j + 1] == [")"]:
-                break
-            if j == len(tokens) or tokens[j] not in literals:
-                return None
-            parts.append(literals[tokens[j]])
-            j += 1
-        if parts and not any(part.startswith("/") for part in parts) and tokens[j:j + 1] == [")"]:
-            return "/".join(part for part in parts if part), j + 1
-        return None
-
-    def complete(end):
-        return (end == len(tokens) or tokens[end] in {";", ",", ")", "}", "]"}
-                or (end in linebreaks and (tokens[end] == "{" or JS_NAME.fullmatch(tokens[end]))
-                    and tokens[end] not in {"in", "instanceof", "as", "satisfies"}))
-
-    for i, token in enumerate(tokens):
-        if token == "{":
-            scopes.append(dict.fromkeys(names[i]))
-        elif token == "}" and len(scopes) > 1:
-            scopes.pop()
-        elif JS_NAME.fullmatch(token) and (not i or tokens[i - 1] != "."):
-            operator = declarations.get(i, i + 1)
-            if tokens[operator:operator + 1] == ["="]:
-                scope = scopes[-1] if i in declarations else environment(token)
-                if scope is None:
-                    continue
-                start = operator + 1
-                binding = None
-                if (i in declarations and tokens[start:start + 2] == ["require", "("]
-                        and tokens[start + 3:start + 4] == [")"] and complete(start + 4)
-                        and environment("require") is None):
-                    module = literals.get(tokens[start + 2], "")
-                    if module in {"fs", "path", "node:fs", "node:path"}:
-                        binding = ("module", module.removeprefix("node:"))
-                elif (path := joined(start)) is not None and complete(path[1]):
-                    binding = ("path", path[0])
-                scope[token] = binding
-            elif (operator < len(tokens) and JS_MUTATION.fullmatch(tokens[operator])
-                  or i and tokens[i - 1] in {"++", "--"}):
-                if (scope := environment(token)) is not None:
-                    scope[token] = None
-            elif value(token) == ("module", "fs") and tokens[i + 1:i + 4] == [".", "readFileSync", "("]:
-                start = i + 4
-                if start == len(tokens):
-                    continue
-                argument = value(tokens[start])
-                if argument is not None and argument[0] == "path" and tokens[start + 1:start + 2] in ([","], [")"]):
-                    yield argument[1]
-                elif (path := joined(start)) is not None and tokens[path[1]:path[1] + 1] in ([","], [")"]):
-                    yield path[0]
-
+    try:
+        return JSFixtureReads(tokens, literals, linebreaks).extract()
+    except RecursionError:
+        # 深到无法分析的源码不提供证据；不保留中途观察到的路径。
+        return ()
 
 def source_relative_reads(text, suffix):
     if suffix == ".py":
@@ -720,6 +1195,65 @@ def is_json_artifact(obj):
             and all(isinstance(file, dict) and {"path", "bytes", "sha256"} <= file.keys() for file in files))
 
 
+def report_preamble(content):
+    """保留 Markdown 段落结构；围栏内部的示例不提供前导证据。"""
+    lines = []
+    fence = None
+    for raw in content.split("\n", 40)[:40]:
+        line = MD_QUOTE.sub("", raw.strip())
+        if marker := re.match(r"`{3,}|~{3,}", line):
+            if fence is None:
+                fence = marker[0]
+            elif marker[0].startswith(fence) and not line[marker.end():].strip():
+                fence = None
+            lines.append("")
+        elif fence is None:
+            lines.append(line.replace("**", ""))
+    return lines
+
+
+def report_title(label):
+    # 有身份的主标题优先；副标题提到“设计文档”不会改变“实装审计”的身份。
+    # 括注里的“诊断”或“设计”常只是主题限定，不参与主标题的角色裁定。
+    main = re.sub(r"（[^（）]*）|\([^()]*\)", "", label)
+    lead = re.split(r"：|:\s|——| [—–] ", main, maxsplit=1)[0]
+
+    def role(title):
+        marks = [(m.start(), is_report) for pattern, is_report in ((REPORT_TITLE, True), (RULE_TITLE, False))
+                 for m in pattern.finditer(title)]
+        return max(marks)[1] if marks else None
+
+    primary = role(lead)
+    if primary is not None:
+        return primary
+    secondary = role(main)
+    return bool(role(label) if secondary is None else secondary)
+
+
+def report_table(lines):
+    def cells(line):
+        return [cell.strip() for cell in line.strip("|").split("|")] if "|" in line else []
+
+    for i, line in enumerate(lines[:-2]):
+        header, rule = cells(line), cells(lines[i + 1])
+        if len(header) != len(rule) or not rule or not all(map(TABLE_RULE.fullmatch, rule)):
+            continue
+        columns = [j for j, name in enumerate(header)
+                   if OUTCOME_KEY.fullmatch(name) or name in {"状态", "实测", "认识论等级"}]
+        metrics = [j for j, name in enumerate(header) if RUN_COLUMN.search(name)]
+        for row in lines[i + 2:]:
+            data = cells(row)
+            if len(data) != len(header):
+                break
+            if len(header) == 2 and header[0] in {"字段", "项", "Field", "Key"} and EXECUTION_KEY.fullmatch(data[0]):
+                return True
+            if (any(DISPOSITION.search(data[j]) or MEASUREMENT.search(data[j]) for j in columns)
+                    or sum(bool(re.search(r"\d", data[j])) for j in metrics) >= 2
+                    or sum(bool(re.match(r"[✓✗✅❌]", cell)) for cell in data) >= 2):
+                return True
+    return False
+
+
 def is_report_artifact(raw, text):
     content = text.lstrip("\ufeff \t\r\n")
     if content.startswith("{"):
@@ -728,44 +1262,56 @@ def is_report_artifact(raw, text):
         except ValueError:
             return False  # 普通源码片段无需是 JSON。
         return isinstance(obj, dict) and is_json_artifact(obj)
-    # #1391 renderSummary 与 TB 报告核对正文中的绑定字段，不用标题或文件名代替。
     if any(pattern.match(content) for pattern in (SUMMARY_HEADER, TB_RUN_HEADER, TB_REVIEW_HEADER)):
         return True
-    preamble = "\n".join(content.split("\n", 25)[:25])
-    metadata = re.split(r"(?m)^[ \t]*(?:```|~~~)", preamble, maxsplit=1)[0]
-    if RECEIPT_COMMIT.search(metadata) and (RECEIPT_VERDICT.search(metadata)
-                                          or (RUN_EXIT_CODE.search(metadata) and RUN_RESULT.search(metadata))):
-        return True
-    lines = metadata.splitlines()
+    lines = report_preamble(content)
     if not lines:
         return False
-    title = re.match(r"^#{1,6}[ \t]+(.+)", lines[0])
-    first_field = REPORT_FIELD.match(lines[0])
-    title_is_field = first_field and first_field["key"].lower() in OUTCOME_FIELDS | EXECUTION_FIELDS
-    titles = list(REPORT_TITLE.finditer(title[1])) if title and not title_is_field else []
-    execution = RECEIPT_COMMIT.search(metadata) is not None
-    disposition = explicit_outcome = standalone_status = False
-    for line in lines[1 if title and not title_is_field else 0:]:
-        if (field := REPORT_FIELD.match(line)) is None:
-            continue
-        key, value = field["key"].lower(), field["value"].strip("`* \t")
-        # 执行信息要落在实际字段中：正文提到 bit-exact 或 git diff 不算执行记录。
-        if key in EXECUTION_FIELDS or REPORT_SUBJECT.search(value):
-            execution = True
-        if key not in OUTCOME_FIELDS:
-            continue
-        status = DISPOSITION.match(value)
-        measured = MEASUREMENT.search(value) is not None
-        execution |= measured
-        if status or measured:
-            disposition = True
-            explicit_outcome |= bool(re.match(r"\s*(?:#|[-*+]|[0-9]+\.)", line))
-        if status and not value[status.end():].strip("*。.!！ \t"):
-            standalone_status = True
-    # 单独的裁定值需有明确报告标题；仅称「验收」的正文仍需结构化裁定或执行记录。
-    return bool((titles and (execution or explicit_outcome
-                             or (standalone_status and any(m.lastgroup for m in titles))))
-                or (disposition and execution))
+    # 报告前置修订说明可能是引用段；以下取第一个实际标题，而非首物理行。
+    title_index = next((i for i, line in enumerate(lines) if MD_HEADING.fullmatch(line)), None)
+    title = MD_HEADING.fullmatch(lines[title_index]) if title_index is not None else None
+    if title and ADR_TITLE.match(title[1]):
+        return False
+    first_field = REPORT_FIELD.fullmatch(title[1]) if title else None
+    title_is_field = first_field and (OUTCOME_KEY.fullmatch(first_field["key"])
+                                     or EXECUTION_KEY.fullmatch(first_field["key"]))
+    metadata = "\n".join(lines)
+    declaration = re.compile(r"^状态\s*[:：]\s*(?:设计(?:稿|草案)|规范草案|预注册)(?=$|[\s（(。])")
+    declared = bool(title and not title_is_field and report_title(title[1])
+                    and not any(declaration.match(MD_LIST.sub("", line)) for line in lines[:12]))
+    bound = RECEIPT_COMMIT.search(metadata) is not None
+    if bound and (RECEIPT_VERDICT.search(metadata) or (RUN_EXIT_CODE.search(metadata) and RUN_RESULT.search(metadata))):
+        return True
+
+    execution = bound
+    outcome = False
+    in_outcome_section = False
+    body = [line for i, line in enumerate(lines) if i != title_index or title_is_field]
+    for line in body:
+        heading = MD_HEADING.fullmatch(line)
+        label = MD_LIST.sub("", heading[1] if heading else line)
+        label = re.sub(r"^(?:第?[一二三四五六七八九十]+[、.]|\d+[、.])\s*", "", label)
+        fields = () if label.startswith("|") else label.split(" | ")
+        for segment in fields:
+            field = REPORT_FIELD.fullmatch(segment.strip())
+            if field is None:
+                continue
+            key, value = field["key"], field["value"]
+            key = re.split(r"[（(]", key, maxsplit=1)[0].strip()
+            execution |= bool(EXECUTION_KEY.fullmatch(key) or REPORT_SUBJECT.search(value))
+            if OUTCOME_KEY.fullmatch(key):
+                outcome |= bool(DISPOSITION.search(value) or MEASUREMENT.search(value) or RUN_METRIC.search(value))
+        if heading:
+            name = re.split(r"[（(：:]", label, maxsplit=1)[0].strip()
+            in_outcome_section = bool(OUTCOME_KEY.fullmatch(name))
+            execution |= bool(EXECUTION_KEY.fullmatch(name) or REPORT_SUBJECT.search(label))
+        else:
+            # 小节正文可能先写实测再给表，或把多行结论排在同一个引用段。
+            if in_outcome_section:
+                outcome |= bool(DISPOSITION.search(line) or MEASUREMENT.search(line) or RUN_METRIC.search(line))
+            execution |= bool(declared and (REPORT_SUBJECT.search(line) or MEASUREMENT.search(line)
+                                            or re.search(r"本次.{0,24}(?:实跑|实测|执行)|生成：\d{4}-\d{2}-\d{2}", line)))
+    return (declared and (execution or outcome or report_table(body))) or (bound and outcome)
 
 
 def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):

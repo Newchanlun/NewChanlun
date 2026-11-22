@@ -1360,3 +1360,183 @@ def test_r7_cannot_promote_result_archive_via_live_reader(history, options):
     h = history
     migrate_fixtures(h, {"vectors.json": FEE_RULE.encode()}, JS_LOADER, archive=".chanlun/diagnostics/old/")
     check_basis(h, options, "tests/fixtures/vectors.json", allowed=False)
+
+
+R7_HEAD = "bf1b9dcbb5cb46330f2f3877e70182c6ca3a4477"
+R8_REPORTS = (
+    ("analysis/opus_code_audit.md", 25),
+    ("docs/twelve_contradictions_fix_report.md", 13),
+    ("docs/architecture/opus48_audit_report.md", 19),
+    ("docs/architecture/openclaw-security-audit.md", 11),
+    ("docs/rec_t_8x3_l3_verification.md", 13),
+    ("docs/theta-v0-l2-results-v0.md", 11),
+    ("formal/Tlayers/SPIRAL_RESULT.md", 3),
+    ("analysis/unn_stream_verification.md", 8),
+    ("analysis/urs_complete_system_verdict.md", 11),
+    ("analysis/1s_a0_nest_coverage_results.md", 13),
+    (".chanlun/downstream_resolution_312.md", 10),
+    ("analysis/hk_china_index_backtest_hstech.md", 11),
+    ("analysis/v2_selloff_fix_robustness.md", 9),
+)
+
+
+@pytest.mark.parametrize(("source", "line"), R8_REPORTS)
+def test_r8_report_original_and_neutral_copy_are_not_basis(history, options, source, line):
+    raw = git_at_r3("show", f"{R7_HEAD}:{source}")
+    copy = "spec/neutral-note.md"
+    history.write(source, raw)
+    history.write(copy, raw)
+    history.gate()
+    for path in (source, copy):
+        check_basis(history, options, path, allowed=False, line=line)
+
+
+@pytest.mark.parametrize(("text", "allowed"), [
+    ("# 接口独审\n\n>> - **评审对象**：候选分支\n", False),
+    ("# 验证报告\n\n" + "\n" * 28 + "> ## 1. 核心结论\n> 修复项 = 0\n", False),
+    ("# 实测终判\n\n| 断言 | **Status** |\n| :--- | ---: |\n| A | ✅ |\n", False),
+    ("# 审计操作指南\n\n| 字段 | 判定 |\n| --- | --- |\n| 模板 | PASS |\n", True),
+    ("# ADR 0999：审计报告在门禁中的处置\n\n> **审计范围**：所有客户端\n", True),
+    ("# Board review report\n\n> ```md\n> - Verdict: REJECT\n> ```\n", True),
+    ("# 独审报告\n\n> ```md\n> - 字段：示例\n> ```\n\n> **结论**：有保留通过\n", False),
+])
+def test_r8_report_preamble_distinguishes_record_from_example(history, options, text, allowed):
+    path = "spec/material.md"
+    history.write(path, text.encode())
+    history.gate()
+    check_basis(history, options, path, allowed=allowed)
+
+
+R8_JS_CASES = [
+    ("var-block", '''
+function getVectors() {
+  { var fixturePath = path.join(__dirname, "fixtures/vectors.json"); }
+  var fixturePath;
+  return JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+}
+console.log(Object.keys(getVectors()));
+''', {"vectors.json"}),
+    ("branch-two-calls", '''
+function load(wantVector) {
+  let fixturePath;
+  if (wantVector) { fixturePath = path.join(__dirname, "fixtures/vectors.json"); }
+  else { fixturePath = path.resolve(__dirname, "fixtures", "units.json"); }
+  return JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+}
+console.log(Object.keys(load(true)), load(false).unit);
+''', {"vectors.json", "units.json"}),
+    ("if-single-arm", '''
+function load(wantVector) {
+  let p = path.join(__dirname, "fixtures/units.json");
+  if (wantVector) p = path.join(__dirname, "fixtures/vectors.json");
+  return fs.readFileSync(p).length;
+}
+console.log(load(true), load(false));
+''', {"vectors.json", "units.json"}),
+    ("ternary", '''
+const load = (wantVector) => {
+  return fs.readFileSync(wantVector
+    ? path.join(__dirname, "fixtures", "vectors.json")
+    : path.resolve(__dirname, "fixtures", "units.json")).length;
+};
+console.log(load(true), load(false));
+''', {"vectors.json", "units.json"}),
+    ("static-truth", '''
+let p = path.join(__dirname, "fixtures/units.json");
+if (false) fs.readFileSync(p);
+if (0.0) fs.readFileSync(p);
+if ("") fs.readFileSync(p);
+if (null) fs.readFileSync(p);
+if (undefined) fs.readFileSync(p);
+if ("yes") { p = path.resolve(__dirname, "fixtures", "vectors.json"); }
+else fs.readFileSync(path.join(__dirname, "fixtures/units.json"));
+fs.readFileSync(-0x2 ? p : path.join(__dirname, "fixtures/units.json"));
+''', {"vectors.json"}),
+    ("switch", '''
+function load(choice) {
+  var p;
+  switch (choice) {
+    case 0: p = path.join(__dirname, "fixtures/vectors.json"); break;
+    default: p = path.join(__dirname, "fixtures/units.json");
+  }
+  return fs.readFileSync(p).length;
+}
+console.log(load(0), load(1));
+''', {"vectors.json", "units.json"}),
+    ("switch-static", '''
+let p = path.join(__dirname, "fixtures/units.json");
+switch (0) {
+    case 1: fs.readFileSync(p); break;
+    case 0: p = path.join(__dirname, "fixtures/vectors.json"); break;
+    default: fs.readFileSync(p);
+}
+fs.readFileSync(p);
+''', {"vectors.json"}),
+    ("try-join", '''
+function load(stop) {
+  let p;
+  try {
+    p = path.join(__dirname, "fixtures/vectors.json");
+    if (stop) throw Error("test");
+  } catch { p = path.join(__dirname, "fixtures/units.json"); }
+  finally { if (false) p = null; }
+  return fs.readFileSync(p).length;
+}
+console.log(load(true), load(false));
+''', {"vectors.json", "units.json"}),
+    ("finally-overwrite", '''
+let p;
+try { p = path.join(__dirname, "fixtures/units.json"); }
+catch { p = path.join(__dirname, "fixtures/units.json"); }
+finally { p = path.join(__dirname, "fixtures/vectors.json"); }
+fs.readFileSync(p);
+''', {"vectors.json"}),
+    ("function-frame-shadow", '''
+const p = path.join(__dirname, "fixtures/vectors.json");
+function local() {
+  try { fs.readFileSync(p); } catch {}
+  { var p = null; }
+}
+const anonymous = function(fs) { fs.readFileSync(p); };
+const object = { arrow: (fs) => { fs.readFileSync(p); }, method(fs) { fs.readFileSync(p); } };
+class Holder { read(fs) { fs.readFileSync(p); } }
+const fake = { readFileSync: () => "fake" };
+local(); anonymous(fake); object.arrow(fake); object.method(fake); new Holder().read(fake);
+''', set()),
+    ("block-and-loop", '''
+let p = path.join(__dirname, "fixtures/vectors.json");
+for (let p = null; false;) fs.readFileSync(p);
+while (false) p = null;
+{ const p = path.join(__dirname, "fixtures/units.json"); fs.readFileSync(p); }
+fs.readFileSync(p);
+''', {"vectors.json", "units.json"}),
+    ("unused", '''
+const unused = path.join(__dirname, "fixtures/vectors.json");
+// fs.readFileSync(unused);
+const text = "fs.readFileSync(unused)";
+''', set()),
+]
+
+
+@pytest.mark.parametrize(("case", "code", "loaded"), R8_JS_CASES, ids=[case[0] for case in R8_JS_CASES])
+def test_r8_tracks_paths_at_reads_across_control_flow(history, options, case, code, loaded):
+    raw = git_at_r3("show", f"{R7_HEAD}:{VECTOR}")
+    fixtures = {"vectors.json": raw, "units.json": b'{"unit":"ticks"}\n'}
+    migrate_fixtures(history, fixtures, JS_MODULES + code.encode())
+    history.write("tests/fixtures/alias.json", raw)
+    history.commit("Retain an unread same-blob alias")
+    for leaf in (*fixtures, "alias.json"):
+        check_basis(history, options, "tests/fixtures/" + leaf, allowed=leaf in loaded)
+
+
+@pytest.mark.parametrize("path", [
+    "docs/backtest-protocol-v0.md",
+    "docs/spec/tightness_selection_l2.md",
+    "docs/chanlun/external-consults/pi-theta-backtest-workorder-20260701.md",
+    ".chanlun/proofs/economic-positive-impl-design.md",
+    "analysis/organic_fugue_v2_design.md",
+])
+def test_r8_keeps_original_plans_despite_real_run_references(history, options, path):
+    history.write(path, git_at_r3("show", f"{R7_HEAD}:{path}"))
+    history.gate()
+    check_basis(history, options, path, allowed=True)
