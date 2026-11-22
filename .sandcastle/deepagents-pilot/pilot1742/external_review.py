@@ -702,7 +702,7 @@ class ExternalReview:
 
     def _seal_session_receipt(self, launch_id: str, session_id: str) -> bool:
         """向本机代理发起已认证的终态封存请求（POST /v1/review-receipts/seal），等待所有在途请求结束并落盘 sealed=true。
-        若宿主目录模式下磁盘收据已为 sealed=true（离线测试或代理重启后对账），直接放行；未封存则必须经代理封存成功。"""
+        绝不绕过有界读取器直接阻塞读磁盘文件（避免 FIFO 挂起）。"""
         if (not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", launch_id)
                 or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id)):
             return False
@@ -710,15 +710,6 @@ class ExternalReview:
         host_dir = os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
         if (container and host_dir) or (not container and not host_dir):
             return False
-        if host_dir and not container:
-            existing = Path(host_dir) / f"review-{launch_id}" / "receipt.json"
-            try:
-                raw = existing.read_bytes()
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict) and parsed.get("sealed") is True and parsed.get("tainted") is False:
-                    return True
-            except (OSError, ValueError):
-                pass
         key = _load_cliproxy_key()
         if not key:
             return False
@@ -754,6 +745,7 @@ class ExternalReview:
     def _read_session_receipt(
         self, model: str, launch_id: str, session_id: str, since: float, *,
         expected_response_id_sha256: str = "", expected_output_sha256: str = "", min_requests: int = 1,
+        budget: float = SESSION_RECEIPT_TIMEOUT_SECONDS,
     ) -> dict[str, Any] | None:
         """从已配置的代理收据来源读取正式独审 session 已封存（sealed=true）的 cliproxy-review-v1 收据；未封存、未配置、相对路径、冲突或污染一律返回 None。"""
         if (not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", launch_id)
@@ -767,7 +759,7 @@ class ExternalReview:
             return None
         launch = f"review-{launch_id}"
         known = [[f"codex:{m}", "chatgpt.com"] for m in MODELS]
-        budget = SESSION_RECEIPT_TIMEOUT_SECONDS
+        budget = max(0.05, float(budget))
         expires = time.time() + budget
         try:
             reader_source = PREFLIGHT_LOG_READER.read_text(encoding="utf-8")
@@ -881,15 +873,29 @@ class ExternalReview:
         session_id = str(outcome.session_id or "")
         try:
             if not self._custom_session_receipt and self.session_receipt == self._read_session_receipt:
-                if not self.seal_receipt(launch_id, session_id):
-                    evidence = None
-                else:
+                host_only = bool(os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
+                                 and not os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip())
+                evidence = None
+                if host_only and not self._custom_seal_receipt:
+                    # 宿主目录快速路径复用有界读取器（O_NOFOLLOW|O_NONBLOCK、普通文件、16KiB 与超时保护）：
+                    # 若已为 sealed=true 直接消费，否则再走已认证封存端点。
                     evidence = self._read_session_receipt(
                         outcome.model, launch_id, session_id, since,
                         expected_response_id_sha256=expected_rid_sha,
                         expected_output_sha256=expected_out_sha,
                         min_requests=len(response_ids),
+                        budget=0.2,
                     )
+                if evidence is None:
+                    if not self.seal_receipt(launch_id, session_id):
+                        evidence = None
+                    else:
+                        evidence = self._read_session_receipt(
+                            outcome.model, launch_id, session_id, since,
+                            expected_response_id_sha256=expected_rid_sha,
+                            expected_output_sha256=expected_out_sha,
+                            min_requests=len(response_ids),
+                        )
             else:
                 if self._custom_seal_receipt and not self.seal_receipt(launch_id, session_id):
                     evidence = None
@@ -1014,6 +1020,67 @@ class ExternalReview:
         self._record_preflight_rate_limit(target, rate_limited=False, models=list(MODELS))
         return {**report, "admitted_image_id": candidate_img}
 
+    def _rereview_intent_path(self, repository_id: int, pr_number: int, base_sha: str, head_sha: str) -> Path:
+        return self.state_root / "rereview-intents" / f"r{repository_id}-p{pr_number}-{base_sha}-{head_sha}.json"
+
+    def _record_rereview_intent(self, target: ReviewTarget) -> int:
+        """在旧 PASS 已存在的同一 (pr, base, head) 上启动重审但尚未过预检前，持久化待完成的重审意图。
+        不占 attempt、不写 target.json、不发 GitHub 状态，但阻止自动合入凭旧 PASS 放行。"""
+        path = self._rereview_intent_path(target.repository_id, target.pr_number, target.base_sha, target.head_sha)
+        with self._pr_lock(target.pr_number):
+            prev_max = 0
+            for existing in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
+                try:
+                    prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
+                except (OSError, ValueError, TypeError, IdentityError):
+                    continue
+            if path.exists():
+                try:
+                    prev_max = max(prev_max, int(_read(path).get("recorded_at_ns", 0)))
+                except (OSError, ValueError, TypeError, IdentityError):
+                    pass
+            recorded_at_ns = max(time.time_ns(), prev_max + 1)
+            _save(path, {
+                "repository_id": target.repository_id,
+                "pr_number": target.pr_number,
+                "base_sha": target.base_sha,
+                "head_sha": target.head_sha,
+                "attempt": target.attempt,
+                "recorded_at_ns": recorded_at_ns,
+            })
+            return recorded_at_ns
+
+    def has_pending_rereview_intent(self, number: int, head: str, base: str) -> bool:
+        """是否存在针对该 (pr, base, head) 且尚未被更晚登记的新 attempt 承接的重审意图。损坏即失败闭合返回 True。"""
+        matches = list((self.state_root / "rereview-intents").glob(f"r*-p{number}-{base}-{head}.json"))
+        if not matches:
+            return False
+        latest_reg = 0
+        for p in (self.state_root / "runs").glob(f"r*-p{number}-{base}-{head}-*/target.json"):
+            try:
+                t = _read(p)
+                if t.get("head_sha") != head or t.get("base_sha") != base:
+                    continue
+                out_path = p.with_name("outcome.json")
+                if out_path.exists():
+                    out = _read(out_path)
+                    if out.get("verdict") == "STALE":
+                        continue
+                latest_reg = max(latest_reg, int(t.get("registered_at_ns", 0)))
+            except (OSError, ValueError, TypeError, IdentityError):
+                continue
+        for path in matches:
+            try:
+                data = _read(path)
+                recorded = int(data["recorded_at_ns"])
+                if data.get("pr_number") != number or data.get("base_sha") != base or data.get("head_sha") != head:
+                    return True
+            except (OSError, ValueError, TypeError, KeyError, IdentityError):
+                return True
+            if latest_reg <= recorded:
+                return True
+        return False
+
     def target(self, number: int, attempt: int, *,
                expect_head: str | None = None, expect_base: str | None = None) -> ReviewTarget:
         if type(attempt) is not int or attempt <= 0:
@@ -1041,6 +1108,25 @@ class ExternalReview:
                     f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
                 if any(used):
                     raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
+                # 若同一 (pr, base, head) 已有非 STALE 的先前 run（如 A1 已 PASS 而人工启动 A2 重审），
+                # 在预检前持久化重审意图，防预检失败退出后下轮 sweep 仍凭旧 PASS 自动合入；
+                # 只扫同 (repo, pr, base, head) 目录，损坏的历史记录不阻断新登记。
+                prior_same = False
+                for p in (self.state_root / "runs").glob(
+                    f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*/target.json"
+                ):
+                    out_path = p.with_name("outcome.json")
+                    if not out_path.exists():
+                        prior_same = True
+                        break
+                    try:
+                        if _read(out_path).get("verdict") != "STALE":
+                            prior_same = True
+                            break
+                    except (OSError, ValueError, TypeError, IdentityError):
+                        prior_same = True
+                        break
+                intent_recorded_ns = self._record_rereview_intent(target) if prior_same else 0
                 planned = self.reusable(target) is not None
                 admitted_image = ""
                 if not planned:
@@ -1050,18 +1136,37 @@ class ExternalReview:
                     admitted_image = str(preflight_report.get("admitted_image_id", ""))
                 target = replace(target, reuse_planned=planned, admitted_image_id=admitted_image)
                 with self._pr_lock(target.pr_number):
+                    # 慢预检后落盘前再次核对实时 PR 目标，防旧 base 晚于新 base 写入 target.json 误把新审标成 STALE。
+                    live_target = load_target(self.gateway, number)
+                    if live_target["head_sha"] != target.head_sha:
+                        raise TargetDrifted(f"head-moved-not-reviewed: expected {target.head_sha}, got {live_target['head_sha']}")
+                    if live_target["base_sha"] != target.base_sha:
+                        raise TargetDrifted(f"base-moved-not-reviewed: expected {target.base_sha}, got {live_target['base_sha']}")
                     used = (self.state_root / "runs").glob(
                         f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
                     if any(used):
                         raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
-                    prev_max = 0
+                    prev_max = intent_recorded_ns
                     for existing in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
                         try:
                             prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
                         except (OSError, ValueError, TypeError, IdentityError):
                             continue
+                    intent_file = self._rereview_intent_path(
+                        target.repository_id, target.pr_number, target.base_sha, target.head_sha
+                    )
+                    if intent_file.exists():
+                        try:
+                            prev_max = max(prev_max, int(_read(intent_file).get("recorded_at_ns", 0)))
+                        except (OSError, ValueError, TypeError, IdentityError):
+                            pass
                     target = replace(target, registered_at_ns=max(time.time_ns(), prev_max + 1))
                     _save(folder / "target.json", asdict(target))
+                    if intent_file.exists():
+                        try:
+                            intent_file.unlink()
+                        except OSError:
+                            pass
         return target
 
     def _frozen(self, data: dict[str, Any], attempt: int) -> ReviewTarget:

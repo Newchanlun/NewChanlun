@@ -1816,7 +1816,7 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
     now = time.time_ns()
     base = {
         "schema": "cliproxy-review-v1", "launch": launch, "session": session,
-        "started_ns": now - 1_000_000, "finished_ns": now, "complete": True, "sealed": True,
+        "started_ns": now - 1_000_000, "finished_ns": now, "sealed_at_ns": now, "complete": True, "sealed": True,
         "tainted": False, "requests": 3, "routes": [f"codex:{SOL}@chatgpt.com"],
         "last_response_id_sha256": "a" * 64, "last_output_sha256": "b" * 64,
     }
@@ -1831,8 +1831,15 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
         "last_response_id_sha256": "a" * 64,
         "last_output_sha256": "b" * 64,
     }
+    # 延迟恢复封存（响应在 3 小时前 5 分钟内完成，此刻才封存）不得被误判超时
+    three_hours = 3 * 3600 * 10**9
+    delayed = {**base, "started_ns": now - three_hours - 300 * 10**9, "finished_ns": now - three_hours, "sealed_at_ns": now}
+    path.write_text(json.dumps(delayed))
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, (delayed["started_ns"] / 1e9) - 1, 0) is not None
+    path.write_text(json.dumps(base))
     for bad in (
-        {"tainted": True}, {"complete": False}, {"sealed": False}, {"sealed": "true"},
+        {"tainted": True}, {"complete": False}, {"sealed": False, "sealed_at_ns": 0}, {"sealed": "true"},
+        {"sealed_at_ns": now - 2_000_000}, {"sealed_at_ns": now + 10**12}, {"sealed_at_ns": "bad"},
         {"requests": 0}, {"requests": True},
         {"schema": "cliproxy-preflight-v1"}, {"session": "019d0000-0000-7000-8000-000000000ab2"},
         {"routes": ["codex@chatgpt.com"]}, {"routes": [f"codex:{SOL}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"]},
@@ -1855,12 +1862,12 @@ def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediatel
     now = time.time_ns()
     turn1 = {
         "schema": "cliproxy-review-v1", "launch": launch, "session": session,
-        "started_ns": now - 2_000_000, "finished_ns": now - 1_000_000, "complete": True, "sealed": False,
+        "started_ns": now - 2_000_000, "finished_ns": now - 1_000_000, "sealed_at_ns": 0, "complete": True, "sealed": False,
         "tainted": False, "requests": 1, "routes": [f"codex:{SOL}@chatgpt.com"],
         "last_response_id_sha256": "1" * 64, "last_output_sha256": "",
     }
     turn2 = {
-        **turn1, "finished_ns": now, "requests": 2, "sealed": True,
+        **turn1, "finished_ns": now, "sealed_at_ns": now, "requests": 2, "sealed": True,
         "last_response_id_sha256": "2" * 64, "last_output_sha256": "3" * 64,
     }
     directory = tmp_path / launch

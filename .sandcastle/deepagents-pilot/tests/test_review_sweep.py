@@ -60,8 +60,16 @@ class FakeGitHub:
         if "pr" in self.fail.get(number, ()):
             raise RuntimeError("HTTP 502")
         p = self._pr(number)
-        state = {"head": p["head"]["sha"], "base": p["base"]["sha"], "changed_files": 1,
-                 "mergeable_state": "clean", "auto_merge": False}
+        state = {
+            "head": p["head"]["sha"],
+            "base": p["base"]["sha"],
+            "base_ref": p["base"]["ref"],
+            "base_repo_id": (p["base"].get("repo") or {}).get("id"),
+            "head_repo_id": (p["head"].get("repo") or {}).get("id"),
+            "changed_files": 1,
+            "mergeable_state": "clean",
+            "auto_merge": False,
+        }
         state.update(self.states.get(number, {}))
         return state
 
@@ -2250,3 +2258,63 @@ def test_old_base_unpublished_outcome_unblocks_update_branch_and_merge_commit_is
     sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
     assert acts(sweep2.tick()) == ["done", "merged"]
     assert github2.calls == [("merge", 1810, merged_head)]
+
+
+def test_retarget_to_non_main_same_sha_is_blocked_and_failed_rereview_blocks_old_pass(lane):
+    """1. PR 改指与 main 同 SHA 的非 main 分支时（无论分类复核或锁内复核），一律报 base-ref-moved、撤原生 auto-merge、不合入；
+    2. A1 已 PASS 后手动 A2 预检失败退出，持久重审意图阻止下轮 sweep 判 done 或凭旧 PASS 自动合入。"""
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    head = lane.gateway.pr["head"]["sha"]
+
+    # 1a. 规划分类后改指非 main 分支（同 SHA）
+    github1 = FakeGitHub(lane)
+    _ordinary_armed(lane, github1)
+    orig_pr1 = github1.pr
+    reads1 = []
+
+    def retarget_after_files(number):
+        reads1.append(number)
+        st = orig_pr1(number)
+        if len(reads1) >= 2:
+            st["base_ref"] = "release"
+        return st
+
+    github1.pr = retarget_after_files
+    sweep1, _, _ = make(lane, run=False, github=github1, auto_merge=True)
+    a1 = sweep1.tick()
+    assert any(a.get("pr") == 1810 and a["action"] == "base-ref-moved" for a in a1)
+    assert github1.calls == [("disable", 1810)]
+
+    # 1b. 持 PR 锁合入前实时改指非 main 分支（同 SHA）
+    github2 = FakeGitHub(lane)
+    green(github2, head)
+    orig_pr2 = github2.pr
+    reads2 = []
+
+    def retarget_under_lock(number):
+        reads2.append(number)
+        st = orig_pr2(number)
+        if len(reads2) >= 3:
+            st["base_ref"] = "release"
+        return st
+
+    github2.pr = retarget_under_lock
+    sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
+    a2 = sweep2.tick()
+    assert github2.calls == []
+    moved = [a for a in a2 if a.get("pr") == 1810 and a["action"] == "base-ref-moved"]
+    assert moved and moved[-1].get("rechecked_under_pr_lock") is True
+
+    # 2. 手动 A2 预检失败退出（不写 target.json），下轮 sweep 不得把 A1 判 done，也不得凭旧 PASS 合入
+    lane.preflight = lambda _t: {"returncode": 2, "report": None, "image_id": "sha256:" + "1" * 64}
+    with pytest.raises(_external_review.EffectPending, match="preflight-blocked"):
+        lane.target(1810, 2)
+    github3 = FakeGitHub(lane)
+    green(github3, head)
+    sweep3, _, _ = make(lane, run=False, github=github3, auto_merge=True)
+    a3 = sweep3.tick()
+    assert acts(a3) == ["rereview-pending", "waiting"]
+    assert a3[-1]["queue_head"] is False
+    assert "rereview-pending" in module.STUCK_REVIEW
+    assert "base-ref-moved" in module.STUCK_REVIEW
+    assert github3.calls == []

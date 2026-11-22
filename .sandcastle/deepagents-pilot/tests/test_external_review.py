@@ -2678,6 +2678,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
             "session": session_override or outcome.session_id,
             "started_ns": now - 1_000_000,
             "finished_ns": now,
+            "sealed_at_ns": 0 if tainted else now,
             "complete": not tainted,
             "sealed": not tainted,
             "tainted": tainted,
@@ -2932,6 +2933,7 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
         "session": session_id,
         "started_ns": now - 1_000_000,
         "finished_ns": now,
+        "sealed_at_ns": now,
         "complete": True,
         "sealed": True,
         "tainted": False,
@@ -3051,3 +3053,66 @@ def test_target_exclusive_attempt_lock_prevents_concurrent_duplicate_preflight_a
     release.set()
     t1.join(timeout=5)
     assert "target" in out1 and preflight_calls["n"] == 1
+
+
+def test_host_dir_fifo_receipt_fails_closed_without_hanging(lane, tmp_path, monkeypatch):
+    """宿主目录快速路径复用有界读取器：收据路径意外为 FIFO 时立返 FAILED，绝不阻塞等写端。"""
+    import os
+    import time
+
+    passed = lane.review_pr(1810, 1)
+    target = ReviewTarget(**passed["target"])
+    worker = lane.state_root / "runs" / target.key / MODELS[0]
+    launch = module._read(worker / "launch.json")
+    receipt = module._read(worker / "receipt.json")
+    outcome = validate_review(target, launch, receipt, worker, lane.source)
+    assert outcome.verdict == "PASS"
+
+    fifo_root = tmp_path / "fifo-receipts"
+    launch_dir = fifo_root / f"review-{launch['launch_id']}"
+    launch_dir.mkdir(parents=True, mode=0o700)
+    os.mkfifo(launch_dir / "receipt.json", 0o600)
+    monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(fifo_root))
+    monkeypatch.delenv(module.PREFLIGHT_ENV_CONTAINER, raising=False)
+    monkeypatch.delenv("CLIPROXY_LOCAL_KEY", raising=False)
+    strict = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
+                            checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01,
+                            preflight=_fake_preflight_pass)
+    started = time.monotonic()
+    res = strict._verify_session_receipt(target, launch, receipt, worker, outcome)
+    assert res.verdict == "FAILED" and time.monotonic() - started < 2.0
+
+
+def test_slow_preflight_rechecks_live_target_under_pr_lock_and_rereview_intent_blocks_old_pass(lane, env):
+    """1. 慢预检期间 base 漂移后，锁内写入 target.json 前复核实时目标直接抛 TargetDrifted，绝不给旧 base 分配更晚 registered_at_ns；
+    2. A1 已 PASS 后手动 A2 预检失败退出：不占 attempt，但持久化的重审意图阻塞旧 PASS 自动合入直至 A2 真正登记。"""
+    # 1. 慢预检期间 base 移动
+    old_base = lane.gateway.pr["base"]["sha"]
+    head = lane.gateway.pr["head"]["sha"]
+    parent = git(env.source, "rev-parse", f"{head}~1")
+    assert parent != old_base
+
+    def move_base_during_preflight(t):
+        lane.gateway.pr["base"]["sha"] = parent
+        return _fake_preflight_pass(t)
+
+    lane.preflight = move_base_during_preflight
+    with pytest.raises(module.TargetDrifted, match="base-moved-not-reviewed"):
+        lane.target(1810, 1)
+    assert lane.status(1810) == []
+
+    # 2. A1 PASS -> A2 预检失败 -> has_pending_rereview_intent 为 True 且 A2 未写 target.json -> A2 成功后解除意图
+    lane.gateway.pr["base"]["sha"] = old_base
+    lane.preflight = _fake_preflight_pass
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    assert lane.has_pending_rereview_intent(1810, head, old_base) is False
+
+    lane.preflight = lambda _t: {"returncode": 2, "report": None, "image_id": "sha256:" + "1" * 64}
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 2)
+    assert len(lane.status(1810)) == 1
+    assert lane.has_pending_rereview_intent(1810, head, old_base) is True
+
+    lane.preflight = _fake_preflight_pass
+    t2 = lane.target(1810, 2)
+    assert t2.attempt == 2 and lane.has_pending_rereview_intent(1810, head, old_base) is False

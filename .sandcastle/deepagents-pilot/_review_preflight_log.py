@@ -116,8 +116,9 @@ def review_from_receipt(
             finally:
                 os.close(fd)
             payload = json.loads(raw, object_pairs_hook=_unique_object)
+            now_ns = time.time_ns()
             if (not isinstance(payload, dict)
-                    or set(payload) != {"schema", "launch", "session", "started_ns", "finished_ns",
+                    or set(payload) != {"schema", "launch", "session", "started_ns", "finished_ns", "sealed_at_ns",
                                         "complete", "sealed", "tainted", "requests", "routes",
                                         "last_response_id_sha256", "last_output_sha256"}
                     or payload["schema"] != REVIEW_SCHEMA or payload["launch"] != launch
@@ -126,7 +127,8 @@ def review_from_receipt(
                     or type(payload["sealed"]) is not bool
                     or type(payload["requests"]) is not int or payload["requests"] < 1
                     or type(payload["started_ns"]) is not int or type(payload["finished_ns"]) is not int
-                    or not int((since - 1) * 1e9) <= payload["started_ns"] <= payload["finished_ns"] <= time.time_ns()
+                    or type(payload["sealed_at_ns"]) is not int
+                    or not int((since - 1) * 1e9) <= payload["started_ns"] <= payload["finished_ns"] <= now_ns
                     or payload["finished_ns"] - payload["started_ns"] > MAX_REVIEW_DURATION_NS
                     or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
                     or not isinstance(payload["routes"][0], str)
@@ -137,10 +139,14 @@ def review_from_receipt(
                     or (payload["last_output_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_output_sha256"]))):
                 return None
             if payload["sealed"] is not True:
+                if payload["sealed_at_ns"] != 0:
+                    return None
                 if time.monotonic() >= end:
                     return None
                 time.sleep(min(0.02, max(0, end - time.monotonic())))
                 continue
+            if not payload["finished_ns"] <= payload["sealed_at_ns"] <= now_ns:
+                return None
             result = {
                 "routes": [tuple(payload["routes"][0].split("@"))],
                 "requests": payload["requests"],

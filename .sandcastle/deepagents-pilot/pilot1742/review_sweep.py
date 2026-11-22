@@ -153,7 +153,15 @@ HUMAN_GATED: dict[str, re.Pattern[str]] = {
         r"|(^|/)(secrets?|credentials?)\.(json|ya?ml|toml|ini)$",
         re.IGNORECASE),
 }
-STUCK_REVIEW = frozenset({"needs-operator", "needs-reconcile", "needs-source-sync", "source-unreadable", "error"})
+STUCK_REVIEW = frozenset({
+    "needs-operator",
+    "needs-reconcile",
+    "needs-source-sync",
+    "source-unreadable",
+    "rereview-pending",
+    "base-ref-moved",
+    "error",
+})
 # 没有动作的状态，不写日志。review-backoff 由本轮一行 rate-limit-backoff 汇总，不逐个 PR 记。
 QUIET = frozenset({"done", "draft", "stale-pr", "review-backoff"})
 
@@ -226,8 +234,18 @@ class GhCli:
 
     def pr(self, number: int) -> dict[str, Any]:
         data = json.loads(self._gh("api", f"repos/{self.repository}/pulls/{number}"))
-        return {"head": data["head"]["sha"], "base": data["base"]["sha"], "changed_files": data["changed_files"],
-                "mergeable_state": data["mergeable_state"], "auto_merge": data["auto_merge"] is not None}
+        base_repo = data["base"].get("repo") or {}
+        head_repo = data["head"].get("repo") or {}
+        return {
+            "head": data["head"]["sha"],
+            "base": data["base"]["sha"],
+            "base_ref": data["base"]["ref"],
+            "base_repo_id": base_repo.get("id"),
+            "head_repo_id": head_repo.get("id"),
+            "changed_files": data["changed_files"],
+            "mergeable_state": data["mergeable_state"],
+            "auto_merge": data["auto_merge"] is not None,
+        }
 
     def _bot(self, app_id: int) -> str | None:
         """App 发 commit status 时用的 bot 账号；slug 不在表里或 GET /apps/{slug} 的 id 对不上时返回 None。"""
@@ -504,11 +522,12 @@ class Sweep:
         return None
 
     def _base_server_bound(self, base: str, head: str) -> bool:
-        """服务端精确 base 绑定证明：在 strict=true、enforce_admins=true、allow_force_pushes=false、
-        allow_deletions=false 前提下，GitHub 服务端合入时仅当 base <= live_base <= head 才放行。
-        当且仅当 rev-list --ancestry-path base..head 恰为 [head]（不存在严格中间提交 base < C < head，
-        涵盖单提交 PR 与 update-branch 追平合入提交）时，服务端 strict+sha=head 数学上唯一锁定 live_base==base。
-        存在中间提交或本地缺对象时返回 False（失败关闭，不自动合入）。"""
+        """服务端精确 base SHA 绑定证明（针对目标仍为 main 的 PR）：在 main 启用 strict=true、
+        enforce_admins=true、allow_force_pushes=false、allow_deletions=false 前提下，GitHub 服务端
+        合入 main 时仅当 base <= live_base <= head 才放行；当且仅当 rev-list --ancestry-path base..head
+        恰为 [head]（无严格中间提交 base < C < head）时，strict+sha=head 唯一锁定 live_base==base。
+        注意：GitHub REST/GraphQL 合入接口本身没有服务端 expectedBaseRef 前置参数，因此本模块还在分类后
+        与持 PR 锁合入前复核实时 base.ref == main 与目标仓库 ID；存在中间提交或本地缺对象时失败关闭。"""
         if self._is_ancestor(base, head) is not True:
             return False
         done = subprocess.run(
@@ -519,6 +538,17 @@ class Sweep:
             return False
         commits = [line.strip() for line in done.stdout.splitlines() if line.strip()]
         return commits == [head]
+
+    @staticmethod
+    def _target_branch_valid(pr: dict[str, Any], state: dict[str, Any]) -> bool:
+        """确认 PR 实时目标仍指向本仓 main 且 head 仍在本仓；缺字段时不放行。"""
+        expected_repo = (pr["base"].get("repo") or {}).get("id")
+        return (
+            state.get("base_ref") == "main"
+            and expected_repo is not None
+            and state.get("base_repo_id") == expected_repo
+            and state.get("head_repo_id") == expected_repo
+        )
 
     def _latest_for_head(self, number: int, head: str) -> dict[str, Any] | None:
         runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
@@ -533,9 +563,14 @@ class Sweep:
         latest = self._latest_for_head(number, head)
         if latest is not None and latest["outcome"] and "publication" in latest["outcome"]:
             # F4：正常 main 前进使 PR 落后（behind 或 base 确非 head 祖先）时不重审旧 head，等追平；
+            # 若同一 (base, head) 上存在尚未承接的人工重审意图（例如 A2 预检失败退出），不得把旧 A1 判 done；
             # 若本地缺对象（_is_ancestor 返回 None）须先同步再判定，不可误判 done；
             # 当 main 前进到 head 已包含的提交（clean，不会触发追平）时，须为新 base 派审。
-            if latest["target"].get("base_sha") == base or behind:
+            if latest["target"].get("base_sha") == base:
+                if self.lane.has_pending_rereview_intent(number, head, base):
+                    return "rereview-pending", None
+                return "done", None
+            if behind:
                 return "done", None
             anc = self._is_ancestor(base, head)
             if anc is False:
@@ -632,6 +667,16 @@ class Sweep:
                             unreadable.add(pr["number"])
                             raise
                         behind = states[pr["number"]]["mergeable_state"] == "behind"
+                    if pr["number"] in states and not self._target_branch_valid(pr, states[pr["number"]]):
+                        action = "base-ref-moved"
+                        actions.append({
+                            **entry,
+                            "action": action,
+                            "expected_base_ref": "main",
+                            "now_base_ref": states[pr["number"]].get("base_ref"),
+                        })
+                        review_actions[pr["number"]] = action
+                        continue
                     pr_for_decide = ({**pr, "base": {**pr["base"], "sha": states[pr["number"]]["base"]}}
                                      if pr["number"] in states else pr)
                     action, record = self.decide(pr_for_decide, busy, running, behind)
@@ -696,8 +741,10 @@ class Sweep:
         return sorted(p for p in raw.decode().split("\0") if p)
 
     def _review_confirmed_published_pass(self, number: int, head: str, base: str) -> bool:
-        """正向确认：本 PR、当前 head 的最新未作废 attempt 绑定到当前精确 base 且为已发布 PASS 终态。
-        无本地记录、仍在进行、base 不符或已非 PASS 一律返回 False，禁止凭跨 PR 同 SHA 或旧 base 的旧绿灯自动合入。"""
+        """正向确认：本 PR、当前 head 的最新未作废 attempt 绑定到当前精确 base 且为已发布 PASS 终态，
+        且当前 (pr, base, head) 上不存在待完成的重审意图（防预检失败退出后凭旧 PASS 自动合入）。"""
+        if self.lane.has_pending_rereview_intent(number, head, base):
+            return False
         latest = self._latest_for_head(number, head)
         if latest is None or latest["target"].get("base_sha") != base:
             return False
@@ -710,17 +757,23 @@ class Sweep:
         """只读、不写：返回（动作，是否占队首，要做的写：merge / update / disable / None）。
         只有 head_free（前面没有 PR 占队首）且本 PR 仍可能合入时才可能追平。"""
         number, head = pr["number"], pr["head"]["sha"]
+        if not self._target_branch_valid(pr, state):
+            return ({"action": "base-ref-moved", "expected_base_ref": "main", "now_base_ref": state.get("base_ref")},
+                    False, "disable" if state["auto_merge"] else None)
         if state["head"] != head:  # 列表上的 head 与实时状态不符：新 head 没分类过，挂着的原生 auto-merge 撤掉
             return ({"action": "head-moved", "listed": head, "now": state["head"]}, False,
                     "disable" if state["auto_merge"] else None)
         files = self.complete_files(number, state)  # 证据不足抛出，由 merge_actions 失败关闭
-        # 文件清单接口不按 SHA 取：读完后再读一次 PR，head 仍是读之前那个才算这份清单属于它（分类绑定到这个 SHA）。
+        # 文件清单接口不按 SHA 取：读完后再读一次 PR，head、base SHA 与目标分支仍一致才算这份清单属于它。
         try:
             again = self.github.pr(number)
         except SourceUnreadable:
             raise
         except Exception as error:
             raise EvidenceInsufficient(f"复核 head 失败：{type(error).__name__}: {error}") from None
+        if not self._target_branch_valid(pr, again):
+            return ({"action": "base-ref-moved", "expected_base_ref": "main", "now_base_ref": again.get("base_ref")},
+                    False, "disable" if state["auto_merge"] or again["auto_merge"] else None)
         if again["head"] != head:
             return ({"action": "head-moved", "classified": head, "now": again["head"]}, False,
                     "disable" if state["auto_merge"] or again["auto_merge"] else None)
@@ -863,7 +916,7 @@ class Sweep:
                 result, claimed, write = self._plan_one(pr, states[number], gate_ok, head_free and evidence_ok,
                                                         number in reviewing_now, review_actions.get(number), bindings,
                                                         live_review=number in live_busy)
-                if result["action"] not in ("head-moved", "base-moved", "needs-human-confirm"):
+                if result["action"] not in ("head-moved", "base-moved", "base-ref-moved", "needs-human-confirm"):
                     clean.add(number)
             except SourceUnreadable:
                 raise
@@ -873,11 +926,12 @@ class Sweep:
                 result, write = {"action": kind, "reason": reason}, ("disable" if armed else None)
             head_free = head_free and not claimed
             plan.append((entry, result, write, armed))
+        pulls_by_number = {p["number"]: p for p in pulls}
         for entry, result, write, armed in plan:
             number, head = entry["pr"], entry["head"]
             try:
                 if write == "merge":
-                    # 持 PR 锁并持续独占预检在途锁至合入请求结束，复核实时 head/base/mergeable_state、在途进程与精确 PASS。
+                    # 持 PR 锁并持续独占预检在途锁至合入请求结束，复核实时 base.ref/repo/head/base/mergeable_state、在途进程与精确 PASS。
                     with self.lane._pr_lock(number), self.lane.try_exclude_inflight_review(number) as excluded:
                         if not excluded:
                             result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
@@ -888,7 +942,13 @@ class Sweep:
                                 live_now = {number}
                             live_state = self.github.pr(number)
                             classified_base = states[number]["base"]
-                            if live_state["head"] != head:
+                            if not self._target_branch_valid(pulls_by_number[number], live_state):
+                                result = {"action": "base-ref-moved", "expected_base_ref": "main",
+                                          "now_base_ref": live_state.get("base_ref"), "rechecked_under_pr_lock": True,
+                                          **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
+                                if result.get("auto_merge_withdrawn"):
+                                    withdrawn.add(number)
+                            elif live_state["head"] != head:
                                 result = {"action": "head-moved", "classified": head, "now": live_state["head"],
                                           **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
                                 if result.get("auto_merge_withdrawn"):

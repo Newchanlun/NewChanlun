@@ -1,9 +1,9 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
 new file mode 100644
-index 0000000..d8e3187
+index 0000000..f06712b
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,102 @@
 +package middleware
 +
 +import (
@@ -60,8 +60,7 @@ index 0000000..d8e3187
 +			ctx, cancel = context.WithDeadline(ctx, time.Now().Add(preflightreceipt.Lifetime))
 +			defer cancel()
 +		} else {
-+			validPath := c.Request.URL.Path == "/v1/responses" || c.Request.URL.Path == "/v1/responses/compact"
-+			if !strings.HasPrefix(launch, "review-") || c.Request.Method != http.MethodPost || !validPath || c.GetHeader("Upgrade") != "" {
++			if !strings.HasPrefix(launch, "review-") || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" {
 +				preflightreceipt.TaintReview(root, launch)
 +				c.AbortWithStatus(http.StatusBadRequest)
 +				return
@@ -109,22 +108,27 @@ index 0000000..d8e3187
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
 new file mode 100644
-index 0000000..838170f
+index 0000000..cbf03d6
 --- /dev/null
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,819 @@
+@@ -0,0 +1,887 @@
 +package api
 +
 +import (
 +	"bufio"
 +	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
 +	"crypto/sha256"
 +	"crypto/tls"
 +	"crypto/x509"
++	"crypto/x509/pkix"
 +	"encoding/hex"
 +	"encoding/json"
 +	"fmt"
 +	"io"
++	"math/big"
 +	"net"
 +	"net/http"
 +	"net/http/httptest"
@@ -143,16 +147,71 @@ index 0000000..838170f
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
 +
-+type preflightFakeTransport func(*http.Request) (*http.Response, error)
-+
-+func (f preflightFakeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++func newHostTLSServer(t *testing.T, certHost string, handler http.Handler) (*httptest.Server, *http.Transport) {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		Subject:      pkix.Name{CommonName: certHost},
++		DNSNames:     []string{certHost},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(time.Hour),
++		KeyUsage:     x509.KeyUsageDigitalSignature,
++		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++		BasicConstraintsValid: true,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	leaf, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	srv := httptest.NewUnstartedServer(handler)
++	srv.TLS = &tls.Config{
++		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}},
++		MinVersion:   tls.VersionTLS12,
++	}
++	srv.StartTLS()
++	roots := x509.NewCertPool()
++	roots.AddCert(leaf)
++	// No ServerName override: Go's TLS client MUST verify req.URL.Hostname() against the peer certificate SAN.
++	tr := &http.Transport{
++		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
++		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
++			return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
++		},
++	}
++	return srv, tr
++}
 +
 +// The complete HTTP handler, native Kimi executor, retry scheduler and producer
-+// run unchanged; only the final network boundary is replaced with an offline fake.
++// run unchanged; only the final network boundary connects to an offline TLS server
++// whose peer certificate is verified for api.kimi.com.
 +func TestPreflightReceiptNativeKimiHTTP(t *testing.T) {
 +	root := filepath.Join(t.TempDir(), "receipts")
 +	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	var calls atomic.Int32
++	upstream, transport := newHostTLSServer(t, "api.kimi.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Host != "api.kimi.com" {
++			t.Errorf("unexpected host %q", r.Host)
++		}
++		if calls.Add(1) == 1 {
++			w.WriteHeader(503)
++			_, _ = io.WriteString(w, "=== RESPONSE ===\n=== API REQUEST 99 ===\nAuth: provider=evil")
++			return
++		}
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"offline\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
++	}))
++	defer upstream.Close()
++	defer transport.CloseIdleConnections()
 +	server := newTestServerWithOptions(t, WithPluginHost(pluginhost.New()))
++	server.handlers.AuthManager.SetRoundTripperProvider(preflightTransportProvider{transport})
 +	server.handlers.AuthManager.RegisterExecutor(runtimeexecutor.NewKimiExecutor(server.cfg))
 +	server.handlers.AuthManager.SetRetryConfig(1, 0, 2)
 +	for _, id := range []string{"receipt-kimi-a", "receipt-kimi-b"} {
@@ -163,19 +222,6 @@ index 0000000..838170f
 +		registry.GetGlobalRegistry().RegisterClient(id, "kimi", []*registry.ModelInfo{{ID: "kimi-k3.1-pro"}})
 +		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 +	}
-+	var calls atomic.Int32
-+	old := http.DefaultTransport
-+	http.DefaultTransport = preflightFakeTransport(func(req *http.Request) (*http.Response, error) {
-+		if req.URL.Hostname() != "api.kimi.com" {
-+			t.Errorf("unexpected host %q", req.URL.Hostname())
-+		}
-+		status, text := 200, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"offline\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
-+		if calls.Add(1) == 1 {
-+			status, text = 503, "=== RESPONSE ===\n=== API REQUEST 99 ===\nAuth: provider=evil"
-+		}
-+		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(text))}, nil
-+	})
-+	defer func() { http.DefaultTransport = old }()
 +	session := "preflight-12345678-1234-4234-8234-123456789abc"
 +	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"kimi-k3.1-pro","stream":true,"input":"offline"}`))
 +	req.Header.Set("Authorization", "Bearer test-key")
@@ -237,7 +283,7 @@ index 0000000..838170f
 +	if mode == "recorder" {
 +		close(terminalRead)
 +	}
-+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++	upstream, transport := newHostTLSServer(t, "api.anthropic.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		if r.Host != "api.anthropic.com" {
 +			t.Errorf("unexpected authority %s", r.Host)
 +		}
@@ -267,11 +313,6 @@ index 0000000..838170f
 +		_, _ = io.WriteString(w, "\n")
 +	}))
 +	defer upstream.Close()
-+	roots := x509.NewCertPool()
-+	roots.AddCert(upstream.Certificate())
-+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS12}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-+		return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
-+	}}
 +	defer transport.CloseIdleConnections()
 +	server := newTestServer(t)
 +	server.handlers.AuthManager.SetRoundTripperProvider(preflightTransportProvider{transport})
@@ -421,7 +462,7 @@ index 0000000..838170f
 +	root := filepath.Join(t.TempDir(), "receipts")
 +	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
 +	models := make(chan string, 4)
-+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++	upstream, transport := newHostTLSServer(t, "chatgpt.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		if r.Host != "chatgpt.com" || r.URL.Path != "/backend-api/codex/responses" {
 +			t.Errorf("unexpected upstream %s%s", r.Host, r.URL.Path)
 +		}
@@ -440,14 +481,6 @@ index 0000000..838170f
 +		_, _ = fmt.Fprintf(w, `data: {"type":"response.completed","response":{"id":"offline","object":"response","status":"completed","model":%q,"output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`+"\n\n", request.Model)
 +	}))
 +	defer upstream.Close()
-+	roots := x509.NewCertPool()
-+	roots.AddCert(upstream.Certificate())
-+	transport := &http.Transport{
-+		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS12},
-+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-+			return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
-+		},
-+	}
 +	defer transport.CloseIdleConnections()
 +	server := newTestServer(t)
 +	manager := server.handlers.AuthManager
@@ -569,8 +602,8 @@ index 0000000..838170f
 +	var responseModelOverride atomic.Value
 +	responseModelOverride.Store("")
 +	var toolOnlyMode atomic.Bool
-+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-+		if r.Host != "chatgpt.com" || (r.URL.Path != "/backend-api/codex/responses" && r.URL.Path != "/backend-api/codex/responses/compact") {
++	upstream, transport := newHostTLSServer(t, "chatgpt.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Host != "chatgpt.com" || r.URL.Path != "/backend-api/codex/responses" {
 +			t.Errorf("unexpected upstream %s%s", r.Host, r.URL.Path)
 +		}
 +		var request struct {
@@ -580,11 +613,6 @@ index 0000000..838170f
 +			t.Errorf("decode upstream request: %v", err)
 +		}
 +		models <- request.Model
-+		if r.URL.Path == "/backend-api/codex/responses/compact" {
-+			w.Header().Set("Content-Type", "application/json")
-+			_, _ = fmt.Fprintf(w, `{"id":"compact","object":"response.compaction","output":[]}`)
-+			return
-+		}
 +		n := seq.Add(1)
 +		respID := fmt.Sprintf("resp_%s_%d", request.Model, n)
 +		respModel := request.Model
@@ -616,14 +644,6 @@ index 0000000..838170f
 +		_, _ = fmt.Fprintf(w, "data: %s\n\n", ev)
 +	}))
 +	defer upstream.Close()
-+	roots := x509.NewCertPool()
-+	roots.AddCert(upstream.Certificate())
-+	transport := &http.Transport{
-+		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS12},
-+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-+			return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
-+		},
-+	}
 +	defer transport.CloseIdleConnections()
 +	server := newTestServer(t)
 +	manager := server.handlers.AuthManager
@@ -704,9 +724,9 @@ index 0000000..838170f
 +		return hex.EncodeToString(h[:])
 +	}
 +
-+	for _, tc := range []struct{ model, launch, session, fixture string; compact bool }{
-+		{"gpt-6.2-sol", "review-12345678-1234-4234-8234-123456789aa1", "019d0000-0000-7000-8000-000000000aa1", "review-codex-sol", true},
-+		{"gpt-6.2-astra", "review-12345678-1234-4234-8234-123456789aa2", "019d0000-0000-7000-8000-000000000aa2", "review-codex-astra", false},
++	for _, tc := range []struct{ model, launch, session, fixture string }{
++		{"gpt-6.2-sol", "review-12345678-1234-4234-8234-123456789aa1", "019d0000-0000-7000-8000-000000000aa1", "review-codex-sol"},
++		{"gpt-6.2-astra", "review-12345678-1234-4234-8234-123456789aa2", "019d0000-0000-7000-8000-000000000aa2", "review-codex-astra"},
 +	} {
 +		t.Run(tc.model, func(t *testing.T) {
 +			res1 := post("/v1/responses", tc.model, tc.launch, tc.session)
@@ -715,15 +735,6 @@ index 0000000..838170f
 +			}
 +			if got := <-models; got != tc.model {
 +				t.Fatalf("upstream model = %q, want %q", got, tc.model)
-+			}
-+			if tc.compact {
-+				resC := post("/v1/responses/compact", tc.model, tc.launch, tc.session)
-+				if resC.Code != http.StatusOK {
-+					t.Fatalf("compact HTTP %d: %s", resC.Code, resC.Body.String())
-+				}
-+				if got := <-models; got != tc.model {
-+					t.Fatalf("compact upstream model = %q, want %q", got, tc.model)
-+				}
 +			}
 +			res2 := post("/v1/responses", tc.model, tc.launch, tc.session)
 +			if res2.Code != http.StatusOK {
@@ -756,7 +767,7 @@ index 0000000..838170f
 +			})
 +			wantRoute := "codex:" + tc.model + "@chatgpt.com"
 +			if r.Schema != preflightreceipt.ReviewSchema || r.Launch != tc.launch || r.Session != tc.session ||
-+				len(r.Routes) != 1 || r.Routes[0] != wantRoute ||
++				len(r.Routes) != 1 || r.Routes[0] != wantRoute || r.SealedAt < r.Finished ||
 +				r.LastResponseID != shaHex(wantRespID) || r.LastOutputSHA256 != shaHex(wantOutText) {
 +				t.Fatalf("wrong review receipt %+v, want route %q resp=%s out=%s", r, wantRoute, shaHex(wantRespID), shaHex(wantOutText))
 +			}
@@ -768,6 +779,62 @@ index 0000000..838170f
 +			exportFixture(t, tc.fixture, tc.launch, raw)
 +		})
 +	}
++
++	t.Run("compact-rejected-and-tainted-before-upstream", func(t *testing.T) {
++		const launch = "review-12345678-1234-4234-8234-123456789aa9"
++		const session = "019d0000-0000-7000-8000-000000000aa9"
++		res := post("/v1/responses/compact", "gpt-6.2-sol", launch, session)
++		if res.Code != http.StatusBadRequest || len(models) != 0 {
++			t.Fatalf("compact escaped formal review guard: status=%d calls=%d", res.Code, len(models))
++		}
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++	})
++
++	t.Run("tls-servername-override-or-insecure-transport-rejected-and-tainted", func(t *testing.T) {
++		for _, tc := range []struct {
++			name   string
++			launch string
++			tlsCfg *tls.Config
++		}{
++			{"servername-override", "review-12345678-1234-4234-8234-123456789ae1", &tls.Config{ServerName: "example.com", MinVersion: tls.VersionTLS12}},
++			{"insecure-skip-verify", "review-12345678-1234-4234-8234-123456789ae2", &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}},
++		} {
++			t.Run(tc.name, func(t *testing.T) {
++				isoServer := newTestServer(t)
++				isoManager := isoServer.handlers.AuthManager
++				badTransport := &http.Transport{
++					TLSClientConfig: tc.tlsCfg,
++					DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
++						return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
++					},
++				}
++				defer badTransport.CloseIdleConnections()
++				isoManager.SetRoundTripperProvider(preflightTransportProvider{badTransport})
++				isoManager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(isoServer.cfg))
++				isoID := "review-receipt-codex-tls-" + tc.name
++				cred := &auth.Auth{ID: isoID, Provider: "codex", Status: auth.StatusActive,
++					Attributes: map[string]string{auth.AttributeAuthKind: auth.AuthKindOAuth},
++					Metadata:   map[string]any{"access_token": "offline-fake", "websockets": true},
++				}
++				if _, err := isoManager.Register(context.Background(), cred); err != nil {
++					t.Fatal(err)
++				}
++				registry.GetGlobalRegistry().RegisterClient(isoID, "codex", []*registry.ModelInfo{{ID: "gpt-6.2-sol"}})
++				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(isoID) })
++				req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true,"input":"offline"}`))
++				req.Header.Set("Authorization", "Bearer test-key")
++				req.Header.Set("Content-Type", "application/json")
++				req.Header.Set(preflightreceipt.ReviewHeader, tc.launch)
++				req.Header.Set("Session-Id", "019d0000-0000-7000-8000-000000000ae1")
++				res := httptest.NewRecorder()
++				isoServer.engine.ServeHTTP(res, req)
++				if res.Code < 400 || len(models) != 0 {
++					t.Fatalf("bad TLS transport escaped guard: status=%d calls=%d", res.Code, len(models))
++				}
++				waitReceipt(t, tc.launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++			})
++		}
++	})
 +
 +	t.Run("upstream-response-model-mismatch-taints-launch", func(t *testing.T) {
 +		const launch = "review-12345678-1234-4234-8234-123456789aa6"
@@ -1435,10 +1502,10 @@ index 47f87de..3a1a2d4 100644
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
 new file mode 100644
-index 0000000..0510f63
+index 0000000..3a5aa78
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,124 @@
 +package auth
 +
 +import (
@@ -1476,8 +1543,10 @@ index 0000000..0510f63
 +	}
 +	// An injected transport may forward elsewhere; it has no coverage contract.
 +	rt := ctx.Value("cliproxy.roundtripper")
-+	_, standardTransport := rt.(*http.Transport)
-+	if !supported || auth == nil || (rt != nil && !standardTransport) {
++	stdTransport, standardTransport := rt.(*http.Transport)
++	badTLSConfig := standardTransport && stdTransport.TLSClientConfig != nil &&
++		(stdTransport.TLSClientConfig.InsecureSkipVerify || stdTransport.TLSClientConfig.ServerName != "")
++	if !supported || auth == nil || (rt != nil && (!standardTransport || badTLSConfig)) {
 +		c.Taint()
 +		return ctx, nil, preflightreceipt.ErrUnavailable
 +	}
@@ -1634,10 +1703,10 @@ index 0000000..eb42c3f
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 new file mode 100644
-index 0000000..30f9005
+index 0000000..509ec5c
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1138 @@
+@@ -0,0 +1,1199 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -1697,6 +1766,7 @@ index 0000000..30f9005
 +	Session          string   `json:"session"`
 +	Started          int64    `json:"started_ns"`
 +	Finished         int64    `json:"finished_ns"`
++	SealedAt         int64    `json:"sealed_at_ns"`
 +	Complete         bool     `json:"complete"`
 +	Sealed           bool     `json:"sealed"`
 +	Tainted          bool     `json:"tainted"`
@@ -1723,6 +1793,7 @@ index 0000000..30f9005
 +	route             string
 +	started           int64
 +	finished          int64
++	sealedAt          int64
 +	requests          int
 +	lastResponseIDSHA string
 +	lastOutputSHA     string
@@ -1735,9 +1806,10 @@ index 0000000..30f9005
 +}
 +
 +var (
-+	reviewMu     sync.Mutex
-+	reviewLedger = make(map[string]*reviewEntry)
-+	tmpSeq       atomic.Uint64
++	reviewMu           sync.Mutex
++	reviewLedger       = make(map[string]*reviewEntry)
++	taintWriteOverflow bool
++	tmpSeq             atomic.Uint64
 +)
 +
 +type Collector struct {
@@ -1748,7 +1820,6 @@ index 0000000..30f9005
 +	invalid, sealed, handlerDone, lifecycleDone bool
 +	reserved                                    bool
 +	strictCodex                                 bool
-+	isCompact                                   bool
 +	expectedModel                               string
 +	review                                      *reviewEntry
 +	reviewReleased                              bool
@@ -2000,6 +2071,7 @@ index 0000000..30f9005
 +		route:             disk.Routes[0],
 +		started:           disk.Started,
 +		finished:          disk.Finished,
++		sealedAt:          disk.SealedAt,
 +		requests:          disk.Requests,
 +		lastResponseIDSHA: disk.LastResponseID,
 +		lastOutputSHA:     disk.LastOutputSHA256,
@@ -2010,7 +2082,7 @@ index 0000000..30f9005
 +	}, true, nil
 +}
 +
-+func getOrCreateReviewEntry(root, launch, session string, now time.Time, acquire, allowOverflow bool) (*reviewEntry, error) {
++func getOrCreateReviewEntry(root, launch, session string, now time.Time, acquire bool) (*reviewEntry, error) {
 +	key := root + "\x00" + launch
 +	reviewMu.Lock()
 +	defer reviewMu.Unlock()
@@ -2020,6 +2092,9 @@ index 0000000..30f9005
 +			entry.inFlight++
 +		}
 +		return entry, nil
++	}
++	if taintWriteOverflow {
++		return nil, ErrUnavailable
 +	}
 +	dir := filepath.Join(root, launch)
 +	diskEntry, onDisk, err := loadReviewEntryFromDisk(dir, launch, session, now)
@@ -2045,7 +2120,7 @@ index 0000000..30f9005
 +		}
 +		if oldestKey != "" {
 +			delete(reviewLedger, oldestKey)
-+		} else if !allowOverflow {
++		} else {
 +			return nil, ErrUnavailable
 +		}
 +	}
@@ -2129,19 +2204,38 @@ index 0000000..30f9005
 +
 +// TaintReview permanently marks an unsealed valid review launch receipt as tainted.
 +// Already-sealed terminal receipts are immutable and unaffected.
++// The in-memory ledger stays strictly bounded at maxReviewLedgerEntries; if the ledger is full
++// and taint persistence also fails on disk, taintWriteOverflow latches fail-closed for new sessions and seals.
 +// Callers must invoke this only after request authentication.
 +func TaintReview(root, launch string) {
 +	if !reviewLaunchPattern.MatchString(launch) || !filepath.IsAbs(root) {
 +		return
 +	}
-+	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), true, true)
-+	if err != nil || entry == nil {
++	now := time.Now()
++	entry, err := getOrCreateReviewEntry(root, launch, "", now, true)
++	if err == nil && entry != nil {
++		defer releaseReview(entry)
++		entry.mu.Lock()
++		entry.taintAndPersistLocked()
++		entry.mu.Unlock()
 +		return
 +	}
-+	defer releaseReview(entry)
-+	entry.mu.Lock()
-+	entry.taintAndPersistLocked()
-+	entry.mu.Unlock()
++	dir := filepath.Join(root, launch)
++	diskEntry, onDisk, loadErr := loadReviewEntryFromDisk(dir, launch, "", now)
++	if loadErr == nil && onDisk && diskEntry != nil && diskEntry.sealed && !diskEntry.tainted {
++		return
++	}
++	temp := &reviewEntry{
++		directory: dir,
++		launch:    launch,
++		started:   now.UnixNano(),
++		tainted:   true,
++	}
++	if persistErr := temp.persistLocked(); persistErr != nil {
++		reviewMu.Lock()
++		taintWriteOverflow = true
++		reviewMu.Unlock()
++	}
 +}
 +
 +// SealReview seals a formal review launch once all in-flight requests have completed.
@@ -2154,6 +2248,7 @@ index 0000000..30f9005
 +	key := root + "\x00" + launch
 +	now := time.Now()
 +	reviewMu.Lock()
++	overflowed := taintWriteOverflow
 +	entry := reviewLedger[key]
 +	if entry != nil {
 +		if entry.inFlight > 0 {
@@ -2172,6 +2267,9 @@ index 0000000..30f9005
 +			}
 +			return SealRejected
 +		}
++		if overflowed {
++			return SealUnavailable
++		}
 +		if entry.tainted || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) {
 +			return SealRejected
 +		}
@@ -2180,8 +2278,13 @@ index 0000000..30f9005
 +			return SealRejected
 +		}
 +		entry.sealed = true
++		entry.sealedAt = now.UnixNano()
++		if entry.sealedAt < entry.finished {
++			entry.sealedAt = entry.finished
++		}
 +		if err := entry.persistLocked(); err != nil {
 +			entry.sealed = false
++			entry.sealedAt = 0
 +			return SealUnavailable
 +		}
 +		return SealOK
@@ -2210,7 +2313,7 @@ index 0000000..30f9005
 +		return ctx, nil, ErrUnavailable
 +	}
 +	now := time.Now()
-+	entry, err := getOrCreateReviewEntry(root, launch, session, now, true, false)
++	entry, err := getOrCreateReviewEntry(root, launch, session, now, true)
 +	if err != nil {
 +		return ctx, nil, ErrUnavailable
 +	}
@@ -2497,11 +2600,11 @@ index 0000000..30f9005
 +	}
 +}
 +
-+func codexOutboundModel(req *http.Request, allowCompact bool) string {
++func codexOutboundModel(req *http.Request) string {
 +	if req.Method != http.MethodPost || req.Body == nil {
 +		return ""
 +	}
-+	if req.URL == nil || (req.URL.Path != "/backend-api/codex/responses" && (!allowCompact || req.URL.Path != "/backend-api/codex/responses/compact")) {
++	if req.URL == nil || req.URL.Path != "/backend-api/codex/responses" {
 +		return ""
 +	}
 +	orig := req.Body
@@ -2524,7 +2627,7 @@ index 0000000..30f9005
 +}
 +
 +// Only enums enter the collector. URL paths, bodies and auth identifiers never do.
-+func route(provider, model string, req *http.Request, allowCompact bool) string {
++func route(provider, model string, req *http.Request) string {
 +	if req.URL == nil || req.URL.Scheme != "https" || req.URL.User != nil || (req.URL.Port() != "" && req.URL.Port() != "443") {
 +		return "other"
 +	}
@@ -2536,7 +2639,7 @@ index 0000000..30f9005
 +		if host != "chatgpt.com" || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
 +			return "other"
 +		}
-+		if codexOutboundModel(req, allowCompact) != model {
++		if codexOutboundModel(req) != model {
 +			return "other"
 +		}
 +		return "codex:" + model + "@chatgpt.com"
@@ -2565,7 +2668,7 @@ index 0000000..30f9005
 +	}
 +	strict := c.strictCodex
 +	c.mu.Unlock()
-+	observed := route(e.provider, e.model, req, strict)
++	observed := route(e.provider, e.model, req)
 +	if strict {
 +		expected := "codex:" + e.model + "@chatgpt.com"
 +		if e.provider != "codex" || (e.model != "gpt-6.2-sol" && e.model != "gpt-6.2-astra") || observed != expected {
@@ -2579,15 +2682,33 @@ index 0000000..30f9005
 +		c.mu.Unlock()
 +		return nil, ErrUnavailable
 +	}
-+	if strict && req.URL != nil && req.URL.Path == "/backend-api/codex/responses/compact" {
-+		c.isCompact = true
-+	}
 +	e.attempts++
 +	c.bodies++
 +	c.receipt.Routes = append(c.receipt.Routes, observed)
 +	c.mu.Unlock()
 +	resp, err := t.next.RoundTrip(req)
 +	finish := func() { c.mu.Lock(); defer c.mu.Unlock(); c.bodies--; c.publishLocked() }
++	if err == nil && resp != nil && observed != "other" {
++		expectedHost := strings.ToLower(req.URL.Hostname())
++		tlsOK := resp.TLS != nil &&
++			resp.TLS.HandshakeComplete &&
++			len(resp.TLS.VerifiedChains) > 0 &&
++			len(resp.TLS.VerifiedChains[0]) > 0 &&
++			strings.EqualFold(resp.TLS.ServerName, expectedHost) &&
++			resp.TLS.VerifiedChains[0][0].VerifyHostname(expectedHost) == nil
++		if !tlsOK {
++			if resp.Body != nil {
++				_ = resp.Body.Close()
++			}
++			if strict {
++				c.Taint()
++			} else {
++				c.Reject()
++			}
++			finish()
++			return nil, ErrUnavailable
++		}
++	}
 +	if err != nil || resp == nil || resp.Body == nil {
 +		finish()
 +	} else {
@@ -2658,14 +2779,27 @@ index 0000000..30f9005
 +		lastResp = e.lastResponseIDSHA
 +		lastOut = e.lastOutputSHA
 +	}
++	finished := e.finished
++	if finished == 0 {
++		finished = time.Now().UnixNano()
++	}
++	sealed := e.sealed && !e.tainted && complete
++	sealedAt := int64(0)
++	if sealed {
++		sealedAt = e.sealedAt
++		if sealedAt < finished {
++			sealedAt = finished
++		}
++	}
 +	payload := ReviewReceipt{
 +		Schema:           ReviewSchema,
 +		Launch:           e.launch,
 +		Session:          e.session,
 +		Started:          e.started,
-+		Finished:         time.Now().UnixNano(),
++		Finished:         finished,
++		SealedAt:         sealedAt,
 +		Complete:         complete,
-+		Sealed:           e.sealed && !e.tainted && complete,
++		Sealed:           sealed,
 +		Tainted:          e.tainted,
 +		Requests:         e.requests,
 +		Routes:           routes,
@@ -2714,7 +2848,6 @@ index 0000000..30f9005
 +	c.sealed = true
 +	if c.review != nil {
 +		routes := append([]string(nil), c.receipt.Routes...)
-+		isCompact := c.isCompact
 +		observedCompleted := c.observedCompleted
 +		modelMismatch := c.modelMismatch
 +		lastResp := c.lastResponseIDSHA
@@ -2740,9 +2873,6 @@ index 0000000..30f9005
 +				entry.taintAndPersistLocked()
 +				return
 +			}
-+		}
-+		if isCompact {
-+			return
 +		}
 +		if !observedCompleted || !isSHA256Hex(lastResp) {
 +			return
@@ -2778,20 +2908,27 @@ index 0000000..30f9005
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
 new file mode 100644
-index 0000000..e6e55b6
+index 0000000..9d23a18
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,791 @@
+@@ -0,0 +1,944 @@
 +package preflightreceipt
 +
 +import (
 +	"bytes"
 +	"compress/gzip"
 +	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
 +	"encoding/json"
 +	"errors"
 +	"fmt"
 +	"io"
++	"math/big"
 +	"net/http"
 +	"os"
 +	"path/filepath"
@@ -2806,9 +2943,60 @@ index 0000000..e6e55b6
 +
 +const testSession = "preflight-12345678-1234-4234-8234-123456789abc"
 +
++var (
++	testCertMu    sync.Mutex
++	testCertCache = make(map[string]*x509.Certificate)
++)
++
++func testLeafCert(host string) *x509.Certificate {
++	testCertMu.Lock()
++	defer testCertMu.Unlock()
++	if cert, ok := testCertCache[host]; ok {
++		return cert
++	}
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		panic(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		Subject:      pkix.Name{CommonName: host},
++		DNSNames:     []string{host},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(time.Hour),
++		KeyUsage:     x509.KeyUsageDigitalSignature,
++		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
++	if err != nil {
++		panic(err)
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		panic(err)
++	}
++	testCertCache[host] = cert
++	return cert
++}
++
++func verifiedTLSState(host string) *tls.ConnectionState {
++	cert := testLeafCert(host)
++	return &tls.ConnectionState{
++		HandshakeComplete: true,
++		ServerName:        host,
++		VerifiedChains:    [][]*x509.Certificate{{cert}},
++	}
++}
++
 +type fakeTransport func(*http.Request) (*http.Response, error)
 +
-+func (f fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++func (f fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
++	resp, err := f(r)
++	if err == nil && resp != nil && resp.TLS == nil && r.URL != nil && r.URL.Scheme == "https" {
++		resp.TLS = verifiedTLSState(strings.ToLower(r.URL.Hostname()))
++	}
++	return resp, err
++}
 +func beginTest(t *testing.T) (context.Context, *Collector) {
 +	t.Helper()
 +	ctx, c, err := Begin(context.Background(), filepath.Join(t.TempDir(), "receipts"), testSession)
@@ -3243,27 +3431,48 @@ index 0000000..e6e55b6
 +	if r.Schema != ReviewSchema || r.Launch != launch || r.Session != session || !r.Complete || r.Sealed || r.Tainted || r.Requests != 2 || len(r.Routes) != 1 || r.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" || r.LastResponseID != sha256Hex("resp_2") || r.LastOutputSHA256 != "" {
 +		t.Fatalf("tool-only turn mixed stale output hash or prematurely sealed: %+v", r)
 +	}
-+	// Compaction must neither bump Requests nor clobber the atomic pair.
-+	if err := runTurn("gpt-6.2-sol", "gpt-6.2-sol", "/backend-api/codex/responses/compact", "gpt-6.2-sol", "", true, "", ""); err != nil {
++	// Compaction is closed for formal review launches because upstream response.compaction has no verifiable model field.
++	launchCompact := "review-55555555-2222-4333-8444-555555555555"
++	beforeCompact := upstreamCalls
++	ctxC, cC, err := BeginReview(context.Background(), root, launchCompact, session, "gpt-6.2-sol")
++	if err != nil {
 +		t.Fatal(err)
 +	}
-+	r = readReviewReceiptFile(t, root, launch)
-+	if r.Requests != 2 || !r.Complete || r.Sealed || r.Tainted || r.LastResponseID != sha256Hex("resp_2") || r.LastOutputSHA256 != "" {
-+		t.Fatalf("compact altered completed turn receipt: %+v", r)
++	ctxC, eC, err := cC.Start(ctxC, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
 +	}
++	clientC := httptransport.Decorate(ctxC, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		upstreamCalls++
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	reqC, _ := http.NewRequestWithContext(ctxC, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses/compact", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	if _, err := clientC.Do(reqC); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("compact on formal review err = %v, want ErrUnavailable", err)
++	}
++	eC.End()
++	cC.Complete(false)
++	cC.HandlerDone(false)
++	if upstreamCalls != beforeCompact {
++		t.Fatalf("compact reached upstream on formal review")
++	}
++	if rC := readReviewReceiptFile(t, root, launchCompact); !rC.Tainted || rC.Complete || rC.Sealed {
++		t.Fatalf("compact did not taint formal review launch: %+v", rC)
++	}
++
 +	if err := runTurn("gpt-6.2-sol", "gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", true, "resp_3", "final-verdict"); err != nil {
 +		t.Fatal(err)
 +	}
-+	if upstreamCalls != 4 {
-+		t.Fatalf("upstreamCalls = %d, want 4", upstreamCalls)
++	if upstreamCalls != 3 {
++		t.Fatalf("upstreamCalls = %d, want 3", upstreamCalls)
 +	}
 +
 +	// Switching model on a subsequent turn must abort BEFORE upstream and permanently taint the launch receipt.
 +	if err := runTurn("gpt-6.2-astra", "gpt-6.2-astra", "/backend-api/codex/responses", "gpt-6.2-astra", "gpt-6.2-astra", false, "resp_bad", "bad"); err == nil {
 +		t.Fatal("model switch under same review launch succeeded")
 +	}
-+	if upstreamCalls != 4 {
-+		t.Fatalf("swapped model reached upstream: calls=%d, want 4", upstreamCalls)
++	if upstreamCalls != 3 {
++		t.Fatalf("swapped model reached upstream: calls=%d, want 3", upstreamCalls)
 +	}
 +	r = readReviewReceiptFile(t, root, launch)
 +	if !r.Tainted || r.Complete || r.Sealed || len(r.Routes) != 1 || r.Routes[0] != "other" || r.LastOutputSHA256 != "" {
@@ -3438,7 +3647,7 @@ index 0000000..e6e55b6
 +		t.Fatalf("in-flight collector overwrote tainted receipt: %+v", r1)
 +	}
 +
-+	// TaintReview must also pin and persist even when ledger is full of active entries (no split-brain eviction).
++	// TaintReview under full active ledger MUST persist taint on disk WITHOUT overflowing reviewLedger cap.
 +	_, ca, err := BeginReview(context.Background(), root, "review-bbbb1111-2222-4333-8444-555555555551", s1, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
@@ -3449,10 +3658,40 @@ index 0000000..e6e55b6
 +	}
 +	lOverflow := "review-bbbb1111-2222-4333-8444-555555555553"
 +	TaintReview(root, lOverflow)
++	reviewMu.Lock()
++	ledgerLen := len(reviewLedger)
++	reviewMu.Unlock()
++	if ledgerLen > maxReviewLedgerEntries {
++		t.Fatalf("reviewLedger exceeded hard cap: len=%d cap=%d", ledgerLen, maxReviewLedgerEntries)
++	}
 +	ca.HandlerDone(false)
 +	cb.HandlerDone(false)
 +	if ro := readReviewReceiptFile(t, root, lOverflow); !ro.Tainted || ro.Complete || ro.Sealed {
 +		t.Fatalf("TaintReview under full active ledger did not persist taint: %+v", ro)
++	}
++
++	// If taint disk write ALSO fails while ledger is full, ledger stays bounded AND taintWriteOverflow latches fail-closed.
++	t.Cleanup(func() {
++		reviewMu.Lock()
++		taintWriteOverflow = false
++		reviewMu.Unlock()
++	})
++	roRoot := filepath.Join(t.TempDir(), "not-a-dir")
++	if err := os.WriteFile(roRoot, []byte("blocker"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	for i := 0; i < 5; i++ {
++		TaintReview(roRoot, fmt.Sprintf("review-dddd1111-2222-4333-8444-55555555550%d", i))
++	}
++	reviewMu.Lock()
++	finalLen := len(reviewLedger)
++	latched := taintWriteOverflow
++	reviewMu.Unlock()
++	if finalLen > maxReviewLedgerEntries || !latched {
++		t.Fatalf("overflow taint failed cap/latch: len=%d cap=%d latched=%v", finalLen, maxReviewLedgerEntries, latched)
++	}
++	if _, _, err := BeginReview(context.Background(), root, "review-eeee1111-2222-4333-8444-555555555551", s1, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("BeginReview allowed new session after taintWriteOverflow: err=%v", err)
 +	}
 +}
 +
@@ -3484,14 +3723,25 @@ index 0000000..e6e55b6
 +	e0.End()
 +	c0.Complete(true)
 +	c0.HandlerDone(true)
-+	if r := readReviewReceiptFile(t, root, launchOK); !r.Complete || r.Sealed || r.Tainted {
-+		t.Fatalf("expected unsealed clean receipt before seal: %+v", r)
++	beforeSeal := readReviewReceiptFile(t, root, launchOK)
++	if !beforeSeal.Complete || beforeSeal.Sealed || beforeSeal.Tainted || beforeSeal.SealedAt != 0 {
++		t.Fatalf("expected unsealed clean receipt before seal: %+v", beforeSeal)
 +	}
++	// Backdate entry.started and entry.finished by 3h to verify delayed seal preserves response completion finished_ns
++	// and records the seal wall time separately in sealed_at_ns.
++	reviewMu.Lock()
++	ent := reviewLedger[root+"\x00"+launchOK]
++	reviewMu.Unlock()
++	ent.mu.Lock()
++	ent.started = time.Now().Add(-3*time.Hour - 5*time.Minute).UnixNano()
++	ent.finished = ent.started + int64(5*time.Minute)
++	wantFinished := ent.finished
++	ent.mu.Unlock()
 +	if st := SealReview(root, launchOK, sessionOK); st != SealOK {
 +		t.Fatalf("SealReview = %v, want SealOK", st)
 +	}
-+	if r := readReviewReceiptFile(t, root, launchOK); !r.Complete || !r.Sealed || r.Tainted {
-+		t.Fatalf("expected sealed clean receipt after seal: %+v", r)
++	if r := readReviewReceiptFile(t, root, launchOK); !r.Complete || !r.Sealed || r.Tainted || r.Finished != wantFinished || r.SealedAt < r.Finished {
++		t.Fatalf("delayed seal clobbered finished_ns or missed sealed_at_ns: %+v (want finished=%d)", r, wantFinished)
 +	}
 +	// Post-seal request must be blocked BEFORE routing/execution without mutating sealed receipt.
 +	if _, _, err := BeginReview(context.Background(), root, launchOK, sessionOK, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
@@ -3571,5 +3821,38 @@ index 0000000..e6e55b6
 +	}
 +	if _, _, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("post-restart BeginReview accepted surviving unsealed receipt: err=%v", err)
++	}
++}
++
++func TestReviewReceiptTLSPeerMismatchRejectsAndTaints(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-ffff1111-2222-4333-8444-555555555551"
++	session := "019d0000-0000-7000-8000-000000000401"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Peer certificate is valid for example.com, NOT chatgpt.com: must be rejected and taint the launch.
++	client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode: 200,
++			Header:     make(http.Header),
++			Body:       io.NopCloser(strings.NewReader("")),
++			TLS:        verifiedTLSState("example.com"),
++		}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	if _, err := client.Do(req); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("TLS peer mismatch err = %v, want ErrUnavailable", err)
++	}
++	e.End()
++	c.Complete(false)
++	c.HandlerDone(false)
++	if r := readReviewReceiptFile(t, root, launch); !r.Tainted || r.Complete || r.Sealed {
++		t.Fatalf("TLS peer mismatch did not taint launch: %+v", r)
 +	}
 +}
