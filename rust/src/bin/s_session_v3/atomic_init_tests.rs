@@ -207,10 +207,50 @@ fn s1568_child_init_under_rlimit() {
     }
 }
 
+fn run_parallel_ordered<T, R, F>(items: &[T], f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync,
+{
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 4))
+        .unwrap_or(1)
+        .min(items.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut results: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let next = &next;
+                let f = &f;
+                scope.spawn(move || {
+                    let mut local = Vec::new();
+                    loop {
+                        let idx = next.fetch_add(1, Ordering::Relaxed);
+                        if idx >= items.len() {
+                            break;
+                        }
+                        local.push((idx, f(&items[idx])));
+                    }
+                    local
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (idx, val) in handle.join().unwrap() {
+                results[idx] = Some(val);
+            }
+        }
+    });
+    results.into_iter().map(|r| r.unwrap()).collect()
+}
+
 #[test]
 fn disk_full_failures_leave_nothing_and_retry_succeeds() {
     // 库约 300KB；这些上限都落在建库/提交/检查点途中。
-    for limit in [4096u64, 16_384, 65_536, 131_072, 262_144] {
+    let limits = [4096u64, 16_384, 65_536, 131_072, 262_144];
+    run_parallel_ordered(&limits, |&limit| {
         let dir = Dir::new("fsize");
         let db = dir.0.join("s3.sqlite");
         let clock = write_clock(&dir.0);
@@ -225,12 +265,13 @@ fn disk_full_failures_leave_nothing_and_retry_succeeds() {
             staging_leftovers(&db)
         );
         assert_retry_from_scene(&db, &clock, &format!("fsize:{limit}"));
-    }
+    });
 }
 
 #[test]
 fn killed_mid_write_leaves_only_identifiable_staging_and_retry_succeeds() {
-    for limit in [4096u64, 65_536, 262_144] {
+    let xfsz_limits = [4096u64, 65_536, 262_144];
+    run_parallel_ordered(&xfsz_limits, |&limit| {
         let dir = Dir::new("xfsz");
         let db = dir.0.join("s3.sqlite");
         let clock = write_clock(&dir.0);
@@ -248,13 +289,13 @@ fn killed_mid_write_leaves_only_identifiable_staging_and_retry_succeeds() {
             "fsize-kill:{limit} 被杀应留下可识别暂存文件"
         );
         assert_retry_from_scene(&db, &clock, &format!("fsize-kill:{limit}"));
-    }
+    });
     // SIGKILL：先轮询到暂存文件出现（子进程已进入 init 建库），再延迟不同时长杀死，让落点散布在
     // 建库/提交/发布各处；每个落点都须满足两态并可重试。
     // #1666 L1：暂存文件只在建库开始到发布 rename 之间存在，故「被 SIGKILL 杀死 + 目标不存在 +
     // 有暂存残留」即确证命中 init 中途；至少命中一次，否则此循环没有测到东西。
-    let mut mid_init_hits = Vec::new();
-    for delay_ms in [0u64, 0, 1, 2, 5, 10, 20, 40] {
+    let delays = [0u64, 0, 1, 2, 5, 10, 20, 40];
+    let mid_init_hits: Vec<String> = run_parallel_ordered(&delays, |&delay_ms| {
         let dir = Dir::new("kill");
         let db = dir.0.join("s3.sqlite");
         let clock = write_clock(&dir.0);
@@ -270,14 +311,20 @@ fn killed_mid_write_leaves_only_identifiable_staging_and_retry_succeeds() {
         let _ = child.kill();
         let status = child.wait().unwrap();
         let label = format!("kill@staging+{delay_ms}ms");
-        if status.signal() == Some(libc::SIGKILL)
+        let hit = if status.signal() == Some(libc::SIGKILL)
             && !db.exists()
             && !staging_leftovers(&db).is_empty()
         {
-            mid_init_hits.push(label.clone());
-        }
+            Some(label.clone())
+        } else {
+            None
+        };
         assert_retry_from_scene(&db, &clock, &label);
-    }
+        hit
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     println!("S1666_KILL_MID_INIT_HITS {mid_init_hits:?}");
     assert!(
         !mid_init_hits.is_empty(),
@@ -287,14 +334,14 @@ fn killed_mid_write_leaves_only_identifiable_staging_and_retry_succeeds() {
 
 #[test]
 fn fd_exhaustion_failures_leave_nothing_and_retry_succeeds() {
-    let mut failures = Vec::new();
-    for limit in 4u64..=40 {
+    let limits: Vec<u64> = (4u64..=40).collect();
+    let failures: Vec<String> = run_parallel_ordered(&limits, |&limit| {
         let dir = Dir::new("nofile");
         let db = dir.0.join("s3.sqlite");
         let clock = write_clock(&dir.0);
         let outcome = run_child(&db, &clock, &format!("nofile:{limit}"));
         let label = format!("nofile:{limit}");
-        match child_result(&outcome) {
+        let recorded = match child_result(&outcome) {
             Some(r) if r.starts_with("err ") => {
                 assert!(!db.exists(), "{label} 失败后目标不得存在：{r}");
                 assert!(
@@ -302,14 +349,21 @@ fn fd_exhaustion_failures_leave_nothing_and_retry_succeeds() {
                     "{label} 进程内失败应自行删除暂存：{r} {:?}",
                     staging_leftovers(&db)
                 );
-                failures.push(format!("{label}: {r}"));
+                Some(format!("{label}: {r}"))
             }
-            Some(_) => assert!(target_absent_or_complete(&db), "{label} 成功却无完整库"),
+            Some(_) => {
+                assert!(target_absent_or_complete(&db), "{label} 成功却无完整库");
+                None
+            }
             // 限得太低时测试框架自身可能起不来；现场照样须满足两态。
-            None => {}
-        }
+            None => None,
+        };
         assert_retry_from_scene(&db, &clock, &label);
-    }
+        recorded
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     println!("S1568_NOFILE_FAILURES {failures:#?}");
     assert!(
         failures.iter().any(
