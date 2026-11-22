@@ -3437,3 +3437,159 @@ def test_r6_user_global_gitattributes_isolated_while_committed_attr_effective(
         assert dec_committed_pass.verdict == "PASS"
         assert dec_committed_pass.status_state == "success"
         assert dec_committed_pass.reason_code == "merge_group_pass_reused"
+
+
+# ---------------------------------------------------------------------------
+# 9. Codex R7 隔离 bare 仓 merge-tree 绑定 --attr-source=current_commit 回归
+# ---------------------------------------------------------------------------
+
+
+def test_r7_merge_tree_respects_current_commit_gitattributes_union_merge(
+    mq_fixture: MergeQueueFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """R7 回归：隔离 bare 仓重放 merge-tree 严格按每步 current_commit 读取 .gitattributes，且隔离宿主全局属性。"""
+    # 场景 A（Codex R6 复现）：共同祖先声明 *.txt merge=union，main 与分支改同一行，真实 merge 与隔离重放一致
+    ancestor_a = mq_fixture.create_branch_commit(
+        "r7-a-ancestor",
+        from_ref=mq_fixture.base_sha,
+        files={".gitattributes": "*.txt merge=union\n", "a.txt": "base\n"},
+        message="r7-a ancestor with union attr",
+    )
+    base_a = mq_fixture.create_branch_commit(
+        "main",
+        from_ref=ancestor_a,
+        files={"a.txt": "ours\n"},
+        message="r7-a ours",
+    )
+    member_a = mq_fixture.create_branch_commit(
+        "r7-a-side",
+        from_ref=ancestor_a,
+        files={"a.txt": "theirs\n"},
+        message="r7-a theirs",
+    )
+    queue_head_a = mq_fixture.create_queue_head(
+        base_sha=base_a,
+        member_heads=[member_a],
+        branch_name="queue-r7-a",
+    )
+    merged_a_content = _run_git_raw(mq_fixture.repo, "show", f"{queue_head_a}:a.txt")
+    assert "ours\n" in merged_a_content and "theirs\n" in merged_a_content
+
+    mq_fixture.write_direct_pass_run(pr_number=21, base_sha=base_a, head_sha=member_a)
+    target_a = mq_fixture.make_target(
+        base_sha=base_a,
+        head_sha=queue_head_a,
+        members=[MergeGroupMember(21, member_a)],
+    )
+    bare_a = mq_fixture.root / "repo-r7-a-bare.git"
+    _run_git(mq_fixture.root, "clone", "--bare", "-q", str(mq_fixture.repo), str(bare_a))
+
+    for repo_path in (mq_fixture.repo, bare_a):
+        tree_res_a = verify_merge_group_tree(target_a, source_repo=repo_path)
+        assert tree_res_a.matched is True
+        assert tree_res_a.reason_code == "tree_matched"
+
+        dec_a = evaluate_merge_group(
+            target_a,
+            source_repo=repo_path,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert dec_a.verdict == "PASS"
+        assert dec_a.status_state == "success"
+        assert dec_a.reason_code == "merge_group_pass_reused"
+
+    # 场景 B（多成员队列内前序成员新增 .gitattributes）：成员 1 新增 *.txt merge=union，成员 2 改同一行
+    base_b = mq_fixture.create_branch_commit(
+        "r7-b-base",
+        from_ref=mq_fixture.base_sha,
+        files={"b.txt": "base\n"},
+        message="r7-b base without gitattributes",
+    )
+    member_b1 = mq_fixture.create_branch_commit(
+        "r7-b-m1",
+        from_ref=base_b,
+        files={".gitattributes": "*.txt merge=union\n", "b.txt": "from-m1\n"},
+        message="r7-b member 1 adds union attr and edits b.txt",
+    )
+    member_b2 = mq_fixture.create_branch_commit(
+        "r7-b-m2",
+        from_ref=base_b,
+        files={"b.txt": "from-m2\n"},
+        message="r7-b member 2 edits b.txt",
+    )
+    queue_head_b = mq_fixture.create_queue_head(
+        base_sha=base_b,
+        member_heads=[member_b1, member_b2],
+        branch_name="queue-r7-b",
+    )
+    merged_b_content = _run_git_raw(mq_fixture.repo, "show", f"{queue_head_b}:b.txt")
+    assert "from-m1\n" in merged_b_content and "from-m2\n" in merged_b_content
+
+    target_b = mq_fixture.make_target(
+        base_sha=base_b,
+        head_sha=queue_head_b,
+        members=[MergeGroupMember(22, member_b1), MergeGroupMember(23, member_b2)],
+    )
+    bare_b = mq_fixture.root / "repo-r7-b-bare.git"
+    _run_git(mq_fixture.root, "clone", "--bare", "-q", str(mq_fixture.repo), str(bare_b))
+
+    for repo_path in (mq_fixture.repo, bare_b):
+        tree_res_b = verify_merge_group_tree(target_b, source_repo=repo_path)
+        assert tree_res_b.matched is True
+        assert tree_res_b.reason_code == "tree_matched"
+
+    # 场景 C（对照）：同一行冲突但提交树不含 merge=union，即使宿主 XDG attributes 写了 merge=union 仍报 merge_conflict
+    xdg_dir = tmp_path / "r7-xdg-config"
+    xdg_git_dir = xdg_dir / "git"
+    xdg_git_dir.mkdir(parents=True, mode=0o700)
+    (xdg_git_dir / "attributes").write_text("*.txt merge=union\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_dir))
+
+    base_c = mq_fixture.create_branch_commit(
+        "r7-c-base",
+        from_ref=mq_fixture.base_sha,
+        files={"c.txt": "base\n"},
+        message="r7-c base without union attr",
+    )
+    ours_c = mq_fixture.create_branch_commit(
+        "r7-c-ours",
+        from_ref=base_c,
+        files={"c.txt": "ours\n"},
+        message="r7-c ours",
+    )
+    theirs_c = mq_fixture.create_branch_commit(
+        "r7-c-theirs",
+        from_ref=base_c,
+        files={"c.txt": "theirs\n"},
+        message="r7-c theirs",
+    )
+    # 构造一个以 ours_c 为祖先的候选队列头提交（若宿主 merge=union 泄漏则会误判为 tree_matched）
+    hypothetical_union_head_c = mq_fixture.create_branch_commit(
+        "r7-c-head",
+        from_ref=ours_c,
+        files={"c.txt": "ours\ntheirs\n"},
+        message="r7-c hypothetical union result",
+    )
+    target_c = mq_fixture.make_target(
+        base_sha=ours_c,
+        head_sha=hypothetical_union_head_c,
+        members=[MergeGroupMember(24, theirs_c)],
+    )
+    bare_c = mq_fixture.root / "repo-r7-c-bare.git"
+    _run_git(mq_fixture.root, "clone", "--bare", "-q", str(mq_fixture.repo), str(bare_c))
+
+    for repo_path in (mq_fixture.repo, bare_c):
+        tree_res_c = verify_merge_group_tree(target_c, source_repo=repo_path)
+        assert tree_res_c.matched is False
+        assert tree_res_c.reason_code == "merge_conflict"
+
+    # 即便 XDG_CONFIG_HOME 透传进 git 子进程环境，-c core.attributesFile=/dev/null 仍严格阻止宿主 merge=union 泄漏
+    leaked_env = mgr._git_env() | {"XDG_CONFIG_HOME": str(xdg_dir)}
+    with patch.object(mgr, "_git_env", return_value=leaked_env):
+        for repo_path in (mq_fixture.repo, bare_c):
+            tree_res_c_leaked = verify_merge_group_tree(target_c, source_repo=repo_path)
+            assert tree_res_c_leaked.matched is False
+            assert tree_res_c_leaked.reason_code == "merge_conflict"

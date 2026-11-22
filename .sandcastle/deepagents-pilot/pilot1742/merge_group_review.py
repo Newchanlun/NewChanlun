@@ -741,16 +741,15 @@ def _run_git(
     repo: Path,
     *args: str,
     env: Mapping[str, str] | None = None,
+    attr_source: str | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     run_env = _sanitize_git_env(env) if env is not None else _git_env()
+    cmd: list[str] = ["git", *_COMMON_GIT_CONFIG_ARGS]
+    if attr_source is not None:
+        cmd.append(f"--attr-source={attr_source}")
+    cmd.extend(["-C", str(repo), *args])
     completed = subprocess.run(
-        [
-            "git",
-            *_COMMON_GIT_CONFIG_ARGS,
-            "-C",
-            str(repo),
-            *args,
-        ],
+        cmd,
         env=run_env,
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -1080,6 +1079,7 @@ def _verify_merge_group_tree_in_repo(
             current_commit,
             member.head_sha,
             env=replay_env,
+            attr_source=current_commit,
         )
         if merge_proc.returncode == 1:
             return TreeVerificationResult(
