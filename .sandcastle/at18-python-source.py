@@ -1,9 +1,10 @@
 """在隔离的 F 副本中，核验生产接入并跟踪登记的 pytest 选择器。"""
 import ast
+import dis
 import json
 import sys
 from pathlib import Path
-from types import CodeType
+from types import AsyncGeneratorType, CodeType, CoroutineType, GeneratorType
 
 import pytest
 
@@ -38,10 +39,11 @@ class Locals(ast.NodeVisitor):
 
     def __init__(self, body, args=()):
         self.bound = {arg.arg for arg in args}
-        self.external = set()
+        self.globals = set()
+        self.nonlocals = set()
         for node in body:
             self.visit(node)
-        self.bound.difference_update(self.external)
+        self.bound.difference_update(self.globals | self.nonlocals)
 
     def visit_Name(self, node):
         if isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -62,9 +64,10 @@ class Locals(ast.NodeVisitor):
         pass
 
     def visit_Global(self, node):
-        self.external.update(node.names)
+        self.globals.update(node.names)
 
-    visit_Nonlocal = visit_Global
+    def visit_Nonlocal(self, node):
+        self.nonlocals.update(node.names)
 
     def visit_ExceptHandler(self, node):
         if node.name:
@@ -85,28 +88,64 @@ class Locals(ast.NodeVisitor):
 
     def visit_ListComp(self, node):
         # 推导式目标不写入外部作用域；命名表达式除外。
-        for nested in ast.walk(node):
-            if isinstance(nested, ast.NamedExpr):
-                self.visit(nested.target)
+        self.generic_visit(node)
+
+    def visit_comprehension(self, node):
+        self.visit(node.iter)
+        for guard in node.ifs:
+            self.visit(guard)
 
     visit_SetComp = visit_DictComp = visit_GeneratorExp = visit_ListComp
 
 
 class Scope:
-    def __init__(self, path, parent=None, initial=(), is_class=False):
+    def __init__(self, path, parent=None, local=None, kind="module"):
         self.path = path
         self.parent = parent
-        self.values = dict.fromkeys(initial)
-        self.is_class = is_class
+        self.local = local
+        self.kind = kind
+        self.values = dict.fromkeys(local.bound if local and kind == "function" else ())
+        self.module = self if parent is None else parent.module
 
-    def get(self, name):
-        if name in self.values:
-            return self.values[name]
-        return self.parent.get(name) if self.parent is not None else None
+    def get(self, name, default=None):
+        scope = target_scope(self, name)
+        if name in scope.values:
+            return scope.values[name]
+        if self.local and name in self.local.globals:
+            return default
+        return scope.parent.get(name, default) if scope.parent is not None else default
 
     def lexical_parent(self):
         # 类命名空间不是方法或嵌套类的闭包。
-        return self.parent if self.is_class else self
+        return self.parent if self.kind == "class" else self
+
+    def bind(self, name, value):
+        target_scope(self, name).values[name] = value
+
+
+def target_scope(scope, name):
+    if scope.local and name in scope.local.globals:
+        return scope.module
+    if scope.local and name in scope.local.nonlocals:
+        outer = scope.parent
+        while outer is not None:
+            if outer.kind == "function" and name in outer.local.bound:
+                return outer
+            outer = outer.parent
+    return scope
+
+
+def deferred_kind(node):
+    def yields(current):
+        if isinstance(current, (*DEFINITIONS, ast.Lambda)):
+            return False
+        return isinstance(current, (ast.Yield, ast.YieldFrom)) or any(map(yields, ast.iter_child_nodes(current)))
+
+    body = [node.body] if isinstance(node, ast.Lambda) else node.body
+    generator = any(map(yields, body))
+    if isinstance(node, ast.AsyncFunctionDef):
+        return "async_gen" if generator else "coroutine"
+    return "sync_gen" if generator else None
 
 
 class Routine:
@@ -115,6 +154,7 @@ class Routine:
         self.scope = scope
         self.static = False
         self.defaults = {}
+        self.kind = deferred_kind(node)
 
 
 class Class:
@@ -123,8 +163,28 @@ class Class:
 
 
 class Pending:
-    def __init__(self, routine, args, keywords):
-        self.routine, self.args, self.keywords = routine, args, keywords
+    def __init__(self, kind, work):
+        self.kind = kind
+        self.work = work
+        self.exhausted = False
+
+
+class Consumer:
+    def __init__(self, pending, kinds):
+        self.pending, self.kinds = pending, kinds
+
+
+SYNC = ("sync_gen",)
+ASYNC = ("async_gen",)
+AWAIT = ("coroutine",)
+BUILTIN_CONSUMERS = {"list", "tuple", "set", "dict", "next", "sum", "any", "all", "min", "max", "sorted"}
+SHORT_CONSUMERS = {"next", "any", "all"}
+MISSING = object()
+
+
+class Suspend(Exception):
+    """静态分析只证明已驱动到首个 yield 的前缀；不把剩余部分当成本次执行。"""
+
 
 
 class Instance:
@@ -134,7 +194,7 @@ class Instance:
 
 def assign(node, value, scope):
     if isinstance(node, ast.Name):
-        scope.values[node.id] = value
+        scope.bind(node.id, value)
     elif isinstance(node, (ast.Tuple, ast.List)):
         for target in node.elts:
             assign(target, None, scope)
@@ -167,7 +227,7 @@ def integration_targets(entry, start):
         if "tests" not in file.parts:
             path = file.as_posix()
             paths.setdefault(module(path), []).append(path)
-    modules, active, targets = {}, set(), set()
+    modules, active, targets, stepping = {}, set(), set(), set()
 
     def load(path):
         if path not in modules:
@@ -204,9 +264,18 @@ def integration_targets(entry, start):
             return method
         if isinstance(value, Class):
             return value.values.get(name)
+        if isinstance(value, Pending):
+            if value.kind in SYNC and name in ("__next__", "send"):
+                return Consumer(value, SYNC)
+            if value.kind in ASYNC and name in ("__anext__", "asend"):
+                return Consumer(value, ASYNC)
         return None
 
-    def invoke(value, args, keywords, record, awaited=False):
+    def invoke(value, args, keywords, record, driving=False, step=False):
+        if isinstance(value, Consumer):
+            if value.kinds == ASYNC:
+                return Pending("coroutine", lambda _: force(value.pending, ASYNC, step=True))
+            return force(value.pending, SYNC, step=True)
         value = resolve(value)
         if isinstance(value, Class):
             obj = Instance(value)
@@ -219,23 +288,30 @@ def integration_targets(entry, start):
         if not isinstance(value, Routine) or value.node in active:
             return None
         node = value.node
-        if isinstance(node, ast.AsyncFunctionDef) and not awaited:
-            return Pending(value, args, keywords)
+        if value.kind and not driving:
+            return Pending(value.kind, lambda single: invoke(value, args, keywords, record, driving=True, step=single))
         if record and value.scope.path == entry and isinstance(node, FUNCTIONS) and substantive(node):
             targets.add(node)
             return None
         body = [node.body] if isinstance(node, ast.Lambda) else node.body
         params = parameters(node.args)
-        scope = Scope(value.scope.path, value.scope, Locals(body, params).bound)
+        scope = Scope(value.scope.path, value.scope, Locals(body, params), "function")
         scope.values.update(value.defaults)
         scope.values.update((param.arg, arg) for param, arg in zip([*node.args.posonlyargs, *node.args.args], args))
         scope.values.update((key, value) for key, value in keywords.items() if key in scope.values)
         active.add(node)
+        if step:
+            stepping.add(scope)
         try:
             if isinstance(node, ast.Lambda):
                 return expression(node.body, scope, record)
             return statements(body, scope, record)[1]
+        except Suspend:
+            if not step:
+                raise
+            return None
         finally:
+            stepping.discard(scope)
             active.remove(node)
 
     def routine(node, scope, record):
@@ -248,6 +324,29 @@ def integration_targets(entry, start):
                 value.defaults[arg.arg] = expression(default, scope, record)
         return value
 
+    def force(value, kinds, *, step=False):
+        if not isinstance(value, Pending) or value.kind not in kinds or value.exhausted:
+            return None
+        if not step:
+            value.exhausted = True
+        return value.work(step)
+
+    def comprehension(node, scope, record, first_value):
+        inner = Scope(scope.path, scope.lexical_parent(), kind="comprehension")
+        for index, item in enumerate(node.generators):
+            if isinstance(item.iter, (ast.List, ast.Tuple, ast.Set)) and not item.iter.elts:
+                return
+            value = expression(item.iter, inner, record) if index else first_value
+            force(value, ASYNC if item.is_async else SYNC)
+            assign(item.target, None, inner)
+            for test in item.ifs:
+                expression(test, inner, record)
+                if isinstance(test, ast.Constant) and not test.value:
+                    return
+        for field in ("elt", "key", "value"):
+            if hasattr(node, field):
+                expression(getattr(node, field), inner, record)
+
     def expression(node, scope, record):
         if isinstance(node, ast.Name):
             return scope.get(node.id)
@@ -259,15 +358,38 @@ def integration_targets(entry, start):
             callee = expression(node.func, scope, record)
             args = [expression(arg, scope, record) for arg in node.args]
             keywords = {kw.arg: expression(kw.value, scope, record) for kw in node.keywords}
+            builtin = callee[1] if isinstance(callee, tuple) and len(callee) == 2 and callee[0] == "builtins" else None
+            if isinstance(node.func, ast.Name) and scope.get(node.func.id, MISSING) is MISSING:
+                builtin = node.func.id
+            if builtin in BUILTIN_CONSUMERS and args:
+                force(args[0], SYNC, step=builtin in SHORT_CONSUMERS)
+            elif builtin == "iter" and len(args) == 1:
+                return args[0]
+            elif builtin == "anext" and args:
+                return Pending("coroutine", lambda _: force(args[0], ASYNC, step=True))
+            if callee == ("asyncio", "run") and args:
+                return force(args[0], AWAIT)
+            if (args and isinstance(node.func, ast.Attribute) and node.func.attr == "join"
+                    and isinstance(node.func.value, ast.Constant) and isinstance(node.func.value.value, str)):
+                force(args[0], SYNC)
             return invoke(callee, args, keywords, record)
         if isinstance(node, ast.Await):
+            return force(expression(node.value, scope, record), AWAIT)
+        if isinstance(node, ast.Starred):
+            return force(expression(node.value, scope, record), SYNC)
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
             value = expression(node.value, scope, record)
-            if isinstance(value, Pending):
-                return invoke(value.routine, value.args, value.keywords, record, awaited=True)
+            if isinstance(node, ast.YieldFrom):
+                force(value, SYNC, step=scope in stepping)
+            if scope in stepping:
+                raise Suspend
             return None
         if isinstance(node, ast.NamedExpr):
             value = expression(node.value, scope, record)
-            assign(node.target, value, scope)
+            containing = scope
+            while containing.kind == "comprehension":
+                containing = containing.parent
+            assign(node.target, value, containing)
             return value
         if isinstance(node, ast.IfExp):
             expression(node.test, scope, record)
@@ -283,38 +405,38 @@ def integration_targets(entry, start):
                     break
             return None
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            first, *rest = node.generators
-            expression(first.iter, scope, record)
+            first = node.generators[0]
+            outer_iter = expression(first.iter, scope, record)
             if isinstance(node, ast.GeneratorExp):
-                return None
-            inner = Scope(scope.path, scope.lexical_parent())
-            for index, item in enumerate((first, *rest)):
-                if index:
-                    expression(item.iter, inner, record)
-                assign(item.target, None, inner)
-                for test in item.ifs:
-                    expression(test, inner, record)
-            for field in ("elt", "key", "value"):
-                if hasattr(node, field):
-                    expression(getattr(node, field), inner, record)
-            return None
+                asynchronous = any(item.is_async for item in node.generators) or any(
+                    isinstance(part, ast.Await) for part in ast.walk(node))
+                return Pending("async_gen" if asynchronous else "sync_gen",
+                               lambda _: comprehension(node, scope, record, outer_iter))
+            return comprehension(node, scope, record, outer_iter)
         if node is not None:
             for child in ast.iter_child_nodes(node):
                 expression(child, scope, record)
         return None
 
     def alternatives(scope, *branches):
-        before = scope.values.copy()
+        scopes = []
+        while scope is not None:
+            scopes.append(scope)
+            scope = scope.parent
+        before = [layer.values.copy() for layer in scopes]
         continuing = []
         for run in branches:
-            scope.values.clear()
-            scope.values.update(before)
+            for layer, state in zip(scopes, before):
+                layer.values.clear()
+                layer.values.update(state)
             if not run():
-                continuing.append(scope.values.copy())
-        scope.values.clear()
-        for name in before.keys() | {key for state in continuing for key in state}:
-            bindings = [state.get(name) for state in continuing]
-            scope.values[name] = bindings[0] if bindings and all(value == bindings[0] for value in bindings) else None
+                continuing.append([layer.values.copy() for layer in scopes])
+        for index, (layer, initial) in enumerate(zip(scopes, before)):
+            layer.values.clear()
+            states = [branch[index] for branch in continuing]
+            for name in initial.keys() | {name for state in states for name in state}:
+                bindings = [state.get(name) for state in states]
+                layer.values[name] = bindings[0] if bindings and all(value == bindings[0] for value in bindings) else None
         return not continuing
 
     def statements(body, scope, record):
@@ -323,20 +445,21 @@ def integration_targets(entry, start):
 
         for node in body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                scope.values.update(import_bindings(node, scope.path))
+                for name, ref in import_bindings(node, scope.path):
+                    scope.bind(name, ref)
             elif isinstance(node, FUNCTIONS):
                 value = routine(node, scope, record)
                 known = all(isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod") for d in node.decorator_list)
                 for deco in node.decorator_list:
                     expression(deco, scope, record)
                 value.static = any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list)
-                scope.values[node.name] = value if known else None
+                scope.bind(node.name, value if known else None)
             elif isinstance(node, ast.ClassDef):
                 for expr in [*node.bases, *[kw.value for kw in node.keywords], *node.decorator_list]:
                     expression(expr, scope, record)
-                namespace = Scope(scope.path, scope.lexical_parent(), is_class=True)
+                namespace = Scope(scope.path, scope.lexical_parent(), Locals(node.body), "class")
                 statements(node.body, namespace, record)
-                scope.values[node.name] = Class(namespace) if not node.decorator_list else None
+                scope.bind(node.name, Class(namespace) if not node.decorator_list else None)
             elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 value = expression(node.value, scope, record)
                 if not isinstance(node, ast.AnnAssign) or node.value is not None:
@@ -345,8 +468,12 @@ def integration_targets(entry, start):
             elif isinstance(node, ast.Delete):
                 for target in node.targets:
                     assign(target, None, scope)
-            elif isinstance(node, (ast.Return, ast.Raise)):
-                return True, expression(node.value if isinstance(node, ast.Return) else node.exc, scope, record)
+            elif isinstance(node, ast.Return):
+                return True, expression(node.value, scope, record)
+            elif isinstance(node, ast.Raise):
+                expression(node.exc, scope, record)
+                expression(node.cause, scope, record)
+                return True, None
             elif isinstance(node, ast.If):
                 expression(node.test, scope, record)
                 if isinstance(node.test, ast.Constant):
@@ -356,7 +483,15 @@ def integration_targets(entry, start):
                 elif alternatives(scope, lambda: walk(node.body), lambda: walk(node.orelse)):
                     return True, None
             elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-                expression(node.test if isinstance(node, ast.While) else node.iter, scope, record)
+                if isinstance(node, ast.While):
+                    expression(node.test, scope, record)
+                    if isinstance(node.test, ast.Constant) and not node.test.value:
+                        stopped, result = statements(node.orelse, scope, record)
+                        if stopped:
+                            return True, result
+                        continue
+                else:
+                    force(expression(node.iter, scope, record), ASYNC if isinstance(node, ast.AsyncFor) else SYNC)
 
                 def iteration():
                     if isinstance(node, (ast.For, ast.AsyncFor)):
@@ -378,10 +513,10 @@ def integration_targets(entry, start):
                 def handler(item):
                     expression(item.type, scope, record)
                     if item.name:
-                        scope.values[item.name] = None
+                        scope.bind(item.name, None)
                     stopped = walk(item.body)
                     if item.name:
-                        scope.values[item.name] = None
+                        scope.bind(item.name, None)
                     return stopped
 
                 stopped = alternatives(scope, lambda: walk(node.body) or walk(node.orelse),
@@ -393,7 +528,7 @@ def integration_targets(entry, start):
 
                 def arm(case):
                     for name in Locals([case.pattern]).bound:
-                        scope.values[name] = None
+                        scope.bind(name, None)
                     expression(case.guard, scope, record)
                     return walk(case.body)
 
@@ -409,12 +544,12 @@ def integration_targets(entry, start):
         if name.startswith("_"):
             continue
         if isinstance(value, Routine):
-            invoke(value, [], {}, True, awaited=True)
+            force(invoke(value, [], {}, True), SYNC)
         elif isinstance(value, Class):
             instance = invoke(value, [], {}, True)
             for method in value.values:
                 if not method.startswith("_"):
-                    invoke(attribute(instance, method), [], {}, True, awaited=True)
+                    force(invoke(attribute(instance, method), [], {}, True), SYNC)
     return targets
 
 
@@ -441,32 +576,69 @@ def proves(doc, scratch):
     test = selected_test(path, selector)
     if test is None:
         return False
-    source = Path(entry).read_bytes()
-    source_path, test_path = str(Path(entry).resolve()), str(Path(path).resolve())
-    targets = integration_targets(entry, integration)
-    if not targets:
-        return False
-    positions = {(line(node), node.name) for node in targets}
-    test_position = (line(test), test.name)
-    target_codes = {code for code in code_objects(compile(source, source_path, "exec"))
-                    if (code.co_firstlineno, code.co_name) in positions}
+    def positions(nodes):
+        return {(line(node), node.name) for node in nodes}
+
+    def file_codes(path, selected):
+        filename = str(Path(path).resolve())
+        source = Path(path).read_bytes()
+        return filename, {code for code in code_objects(compile(source, filename, "exec"))
+                          if (code.co_firstlineno, code.co_name) in selected}
+
+    def public_functions(body):
+        for node in body:
+            if isinstance(node, DEFINITIONS) and not node.name.startswith("_"):
+                if isinstance(node, ast.ClassDef):
+                    yield from public_functions(node.body)
+                else:
+                    yield node
+            elif isinstance(node, ast.If):
+                yield from public_functions(node.body)
+                yield from public_functions(node.orelse)
+
+    integration_tree = ast.parse(Path(integration).read_bytes(), integration)
+    entry_tree = ast.parse(Path(entry).read_bytes(), entry)
+    static_positions = positions(integration_targets(entry, integration))
+    substantive_positions = positions(node for node in ast.walk(entry_tree) if isinstance(node, FUNCTIONS) and substantive(node))
+    source_path, entry_codes = file_codes(entry, substantive_positions)
+    static_codes = {code for code in entry_codes if (code.co_firstlineno, code.co_name) in static_positions}
+    integration_path, public_codes = file_codes(integration, positions(public_functions(integration_tree.body)))
+    test_path, test_position = str(Path(path).resolve()), (line(test), test.name)
+    deferred_frames = {GeneratorType: "gi_frame", AsyncGeneratorType: "ag_frame", CoroutineType: "cr_frame"}
+    # profile emits "return" on suspension too; a yield is not an exported return value.
+    returns = {dis.opmap[name] for name in ("RETURN_VALUE", "RETURN_CONST") if name in dis.opmap}
 
     class Trace:
         covered = False
         passed = 0
         nonpass = False
 
-        def profile(self, frame, event, _arg):
-            code = frame.f_code
-            if event != "call" or code.co_filename != source_path or code not in target_codes:
-                return
-            parent = frame.f_back
-            while parent is not None:
-                code = parent.f_code
+        def __init__(self):
+            self.returned = set()
+
+        def ancestry(self, frame):
+            public = False
+            while frame is not None:
+                code = frame.f_code
                 if code.co_filename == test_path and (code.co_firstlineno, code.co_name) == test_position:
-                    self.covered = True
-                    return
-                parent = parent.f_back
+                    return True, public
+                public |= (code.co_filename == integration_path and code in public_codes) or frame in self.returned
+                frame = frame.f_back
+            return False, False
+
+        def profile(self, frame, event, arg):
+            code = frame.f_code
+            if (event == "return" and
+                ((code.co_filename == integration_path and code in public_codes) or frame in self.returned)):
+                member = deferred_frames.get(type(arg))
+                if member and code.co_code[frame.f_lasti] in returns and self.ancestry(frame.f_back)[0]:
+                    child = getattr(arg, member)
+                    if child is not None:
+                        self.returned.add(child)
+            if event != "call" or code.co_filename != source_path or code not in entry_codes:
+                return
+            in_test, via_public = self.ancestry(frame.f_back)
+            self.covered |= in_test and (via_public or frame in self.returned or code in static_codes)
 
         @pytest.hookimpl(wrapper=True, trylast=True)
         def pytest_runtest_call(self, item):
@@ -475,6 +647,7 @@ def proves(doc, scratch):
                 return (yield)
             finally:
                 sys.setprofile(None)
+                self.returned.clear()
 
         def pytest_runtest_logreport(self, report):
             self.nonpass |= not report.passed or hasattr(report, "wasxfail")

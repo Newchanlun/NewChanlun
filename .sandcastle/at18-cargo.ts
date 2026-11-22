@@ -34,7 +34,7 @@ export function cargoTarget(labels: readonly string[] = []): CargoTarget | undef
   return targets.size === 1 ? [...targets][0] : undefined;
 }
 
-export function enabledRustItem(attributes: string[], features: ReadonlySet<string>, target?: CargoTarget) {
+export function enabledRustItem(attributes: string[], features: ReadonlySet<string>, target?: CargoTarget, testBuild?: boolean) {
   const family = target === undefined ? undefined : target === "windows" ? "windows" : "unix";
   function cfg(tokens: string[]) {
     let i = 0;
@@ -52,6 +52,8 @@ export function enabledRustItem(attributes: string[], features: ReadonlySet<stri
         return undefined;
       }
       if (tokens[i] !== "(") {
+        if (name === "test") return testBuild;
+        if (name === "true" || name === "false") return name === "true";
         return family !== undefined && (name === "unix" || name === "windows") ? family === name : undefined;
       }
       i++;

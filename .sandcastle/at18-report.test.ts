@@ -1,4 +1,5 @@
 import { rustReplacement } from "./at18-code.ts";
+import { pythonReplacement } from "./at18-python-run.ts";
 import { cargoContext, cargoTarget, enabledRustItem } from "./at18-cargo.ts";
 import { at14CiSteps } from "./at18-at14-ci.ts";
 import { deliveredProducts } from "./at18-products.ts";
@@ -847,6 +848,197 @@ test("R9/#1319：Rust 块作用域与闭包、局部 fn 调用分别核验", {
       "pub fn select_wire(banner: &str) -> bool { " + body + " }\n";
     const { report } = await control({ wireIntegration, wireTest: wire(invoke) }, "R9/wire/" + id);
     feedWireResult(report, accepts);
+  });
+});
+
+// 与正式 CLI 共用接线核验器；用最小树穷举语法分支，不重建整图证据。
+function feedSource(files: Record<string, string>) {
+  const repository = new At18Repository(root);
+  repository.tree = () => new Map(Object.keys(files).map(path => [path, { mode: "100644", kind: "blob", oid: G0 }]));
+  repository.blob = (_head, path) => {
+    if (!Object.hasOwn(files, path)) throw new Error("missing fixture path: " + path);
+    return Buffer.from(files[path]);
+  };
+  return repository;
+}
+
+test("R10/#1319：Python 声明目标、延迟体驱动和 CPython 生产调用链", {
+  timeout: 180_000,
+}, async t => {
+  const from = "from .at18_fixture_feed import ";
+  const feed = "trading_system.at18_fixture_feed";
+  const call = "route('1min', sources, events)";
+  const integration = (body: string, prefix = "") =>
+    "\n" + prefix + "\ndef select_feed(sources, events):\n" + body.split("\n").map(line => "    " + line).join("\n") + "\n";
+  const direct = `from ${feed} import route\ndef test_route():\n    assert list(route('1min', {}, [1, 2])) == [1, 2]\n`;
+  const publicTest = "from trading_system import select_feed\ndef test_route():\n    assert list(select_feed({}, [1, 2])) == [1, 2]\n";
+  const replacement = "def route(granularity, sources, events):\n    return events\n\n" +
+    "def discard(granularity, sources, events):\n    return []\n";
+  const generator = from + "route\ndef batches():\n    yield from " + call + "\ng = batches()\n";
+  const genexp = from + "route\ng = (" + call + " for _ in [0])\n";
+  const switching = (declaration: string, bind: string, initial: string, global = false) =>
+    integration((global ? "" : from + initial + "\n") +
+      "def switch():\n    " + declaration + " route\n    " + bind + "\nswitch()\nreturn " + call,
+      global ? from + initial + "\n" : "");
+  const cases: [string, string, string, boolean][] = [
+    ["nonlocal-switch", switching("nonlocal", "route = discard", "route, discard"), direct, false],
+    ["nonlocal-restore-import", switching("nonlocal", from + "route", "discard as route"), direct, true],
+    ["nonlocal-delete", switching("nonlocal", "del route", "route"), direct, false],
+    ["nonlocal-walrus", switching("nonlocal", "(route := discard)", "route, discard"), direct, false],
+    ["nonlocal-loop", switching("nonlocal", "for route in [discard]:\n        pass", "route, discard"), direct, false],
+    ["nonlocal-with", switching("nonlocal", "with nullcontext(discard) as route:\n        pass", "route, discard").replace("def switch():", "from contextlib import nullcontext\n    def switch():"), direct, false],
+    ["nonlocal-def", switching("nonlocal", "def route(*args):\n        return []", "route"), direct, false],
+    ["global-switch", switching("global", "route = discard", "route, discard", true), direct, false],
+    ["global-restore", switching("global", from + "route", "discard as route", true), direct, true],
+    ["global-delete", switching("global", "del route", "route", true), direct, false],
+    ["global-class", switching("global", "class route:\n        pass", "route", true), direct, false],
+    ["generator-discarded", integration(generator + "return []"), direct, false],
+    ["generator-next-stops-at-first-yield", integration(from + "route\ndef batches():\n    yield 0\n    " + call +
+      "\nnext(batches())\nreturn []"), direct, false],
+    ["generator-returned", integration(generator + "return g"), direct, true],
+    ["generator-consumed", integration(generator + "return list(g)"), publicTest, true],
+    ["generator-nested-yield-is-not-outer-yield",
+      integration(from + "route\ndef unused():\n    yield 1\n" + call + "\nreturn []"), direct, true],
+    ["genexp-discarded", integration(genexp + "return []"), direct, false],
+    ["genexp-eager-first-iter", integration(from + "route\ng = (x for x in " + call + ")\nreturn []"), direct, true],
+    ["genexp-empty-input", integration(from + "route\ng = (" + call + " for _ in [])\nreturn list(g)"), direct, false],
+    ["genexp-consumed", integration(genexp + "return list(g)[0]"), publicTest, true],
+    ["genexp-filter-false", integration(from + "route\nreturn list(" + call + " for _ in [0] if False)"), direct, false],
+    ["list-comprehension-eager", integration(from + "route\nreturn [" + call + " for _ in [0]]"), direct, true],
+    ["set-comprehension-eager", integration(from + "route\nreturn {tuple(" + call + ") for _ in [0]}"), direct, true],
+    ["dict-comprehension-eager", integration(from + "route\nreturn {i: " + call + " for i in [0]}"), direct, true],
+    ["literal-dead-if", integration(from + "route\nif False:\n    return " + call + "\nreturn []"), direct, false],
+    ["literal-dead-while", integration(from + "route\nwhile False:\n    " + call + "\nreturn []"), direct, false],
+    ["literal-while-else", integration(from + "route\nwhile False:\n    pass\nelse:\n    return " + call), direct, true],
+    ["async-gen-dropped", integration(from + "route\nasync def stream():\n    yield " + call + "\nstream()\nreturn []"), direct, false],
+    ["async-gen-driven", integration("import asyncio\n" + from + "route\nasync def stream():\n    yield " + call +
+      "\nasync def collect():\n    async for batch in stream():\n        return batch\nreturn asyncio.run(collect())"), direct, true],
+    ["coroutine-run", integration("from asyncio import run\n" + from + "route\nasync def dispatch():\n    return " + call +
+      "\nreturn run(dispatch())"), direct, true],
+    ["runtime-chain", integration(from + "route\nhandlers = {'read': route}\nreturn handlers['read']('1min', sources, events)"), publicTest, true],
+    ["runtime-same-file-helper-bypass", integration("return []", from + "route\ndef _read():\n    return route('1min', {}, [1, 2])\n"),
+    "from trading_system import _read\ndef test_route():\n    assert _read() == [1, 2]\n", false],
+    ["runtime-returned-generator", integration(from + "route\ndef stream():\n    handlers = [route]\n    yield from handlers[0]('1min', sources, events)\nreturn stream()"), publicTest, true],
+    ["runtime-discarded-generator-not-origin-proof", integration(from + "route\ndef stream():\n    handlers = [route]\n    yield from handlers[0]('1min', sources, events)\nstream()\nreturn []"), direct, false],
+  ];
+  for (const consume of ["list(g)", "tuple(g)", "set(g)", "sum(g)", "any(g)", "all(g)", "min(g)", "max(g)", "sorted(g)",
+    "[*g]", "(*g,)", "next(g)", "g.__next__()", "g.send(None)", "for _ in g:\n    pass"]) {
+    const body = consume.startsWith("for") ? consume + "\nreturn []" : "return " + consume;
+    cases.push(["sync-drive-" + consume.split("\n")[0], integration(generator + body), direct, true]);
+  }
+  cases.push(["sync-drive-yield-from", integration(generator + "yield from g"), direct, true],
+    ["sync-drive-dict", integration(genexp + "return dict((i, row) for i, row in enumerate(g))"), publicTest.replace(
+      "list(select_feed({}, [1, 2])) == [1, 2]", "select_feed({}, [1, 2]) == {0: [1, 2]}"), true],
+    ["sync-drive-join", integration(from + "route\ng = (str(" + call + ") for _ in [0])\nreturn ''.join(g)"), direct, true]);
+  for (const [id, feedIntegration, feedTest, accepts] of cases) await t.test(id, async () => {
+    const entry = "trading_system/at18_fixture_feed.py";
+    const production = "trading_system/__init__.py";
+    const testPath = "trading_system/tests/test_at18_fixture_feed.py";
+    const repository = feedSource({ [entry]: replacement, [production]: feedIntegration, [testPath]: feedTest });
+    assert.equal(pythonReplacement(repository, G0, entry, production, testPath, "test_route", 1), accepts);
+  });
+});
+
+test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
+  timeout: 180_000,
+}, async t => {
+  const path = "at18_fixture_wire::probe::handshake";
+  const call = 'assert!(handshake("HELLO"));';
+  const fake = "fn fake(_: &str) -> bool { false } ";
+  const pointer = "fake as fn(&str) -> bool";
+  const poll = "fn drive<F: std::future::Future>(pending: F) { let mut pinned = std::pin::pin!(pending); " +
+    "let mut cx = std::task::Context::from_waker(std::task::Waker::noop()); let _ = pinned.as_mut().poll(&mut cx); } ";
+  const wire = (body: string) => `use newchan_rust::${path};\n#[test]\nfn check_connection() { ${body} }\n`;
+  const check = (production: string, body: string, accepts: boolean) => {
+    const entry = "rust/src/at18_fixture_wire/mod.rs";
+    const testPath = "rust/tests/at18_fixture_wire.rs";
+    const repository = feedSource({
+      "rust/Cargo.toml": '[package]\nname = "newchan_rust"\nedition = "2024"\n',
+      "rust/src/lib.rs": "pub mod at18_fixture_wire;\n" + production,
+      [entry]: "pub mod probe;\n",
+      "rust/src/at18_fixture_wire/probe.rs": 'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }',
+      [testPath]: wire(body),
+    });
+    assert.equal(rustReplacement(repository, G0, entry, testPath, "check_connection", []), accepts);
+  };
+  const cases = [
+    ["async-block-dropped", `let _future = async { ${call} };`, false],
+    ["async-move-block-dropped", `let _future = async move { ${call} };`, false],
+    ["async-awaited-inline", poll + `drive(async { (async { ${call} }).await; });`, true],
+    ["async-awaited-binding", poll + `drive(async { let fut = async move { ${call} }; fut.await; });`, true],
+    ["async-known-poll", poll + `drive(async { ${call} });`, true],
+    ["async-nested-dropped", poll + `drive(async { let _future = async { ${call} }; });`, false],
+    ["gen-block-dropped", `let _generator = gen { ${call} yield 0; };`, false],
+    ["gen-move-block-driven", `let generator = gen move { ${call} yield 0; }; for _ in generator {}`, true],
+    ["async-gen-block-dropped", `let _generator = async gen move { ${call} yield 0; };`, false],
+    ["closure-paren-dropped", 'let _f = (|| handshake("HELLO"));', false],
+    ["closure-argument-dropped", 'let _f = Some(|| handshake("HELLO"));', false],
+    ["closure-array-dropped", 'let _f = [|| handshake("HELLO")];', false],
+    ["closure-field-dropped", 'struct Holder<F> { f: F } let _f = Holder { f: || handshake("HELLO") };', false],
+    ["closure-returned-dropped", 'fn helper() -> impl FnOnce() -> bool { return || handshake("HELLO"); } let _f = helper();', false],
+    ["binary-or-is-not-closure", `assert!(false | handshake("HELLO"));`, true],
+    ["binary-logical-or-is-not-closure", `assert!(false || handshake("HELLO"));`, true],
+    ["for-shadow", fake + `for handshake in [${pointer}] { assert!(!handshake("HELLO")); }`, false],
+    ["for-tuple-shadow", fake + `for (handshake, _) in [(${pointer}, 0)] { assert!(!handshake("HELLO")); }`, false],
+    ["for-iter-before-pattern", fake + `for handshake in [{ ${call} ${pointer} }] { let _ = handshake; }`, true],
+    ["for-wildcard", `for _ in [0] { ${call} }`, true],
+    ["if-let-shadow", fake + `if let Some(handshake) = Some(${pointer}) { assert!(!handshake("HELLO")); }`, false],
+    ["if-let-else-outer", fake + `if let Some(handshake) = None::<fn(&str) -> bool> { assert!(!handshake("HELLO")); } else { ${call} }`, true],
+    ["while-let-shadow", fake + `let mut f = Some(${pointer}); while let Some(handshake) = f.take() { assert!(!handshake("HELLO")); }`, false],
+    ["match-tuple-variant", fake + `match Some(${pointer}) { Some(handshake) => assert!(!handshake("HELLO")), None => () }`, false],
+    ["match-at-or-guard", fake + `match Ok::<_, fn(&str) -> bool>(${pointer}) {
+      Ok(handshake @ _) | Err(handshake) if !handshake("HELLO") => (),
+      _ => (),
+    }`, false],
+    ["match-record-guard", fake + `struct Holder { f: fn(&str) -> bool } match (Holder { f: ${pointer} }) {
+      Holder { f: handshake } if !handshake("HELLO") => (),
+      _ => (),
+    }`, false],
+    ["match-guard-outer", `match Some(0) { Some(_) if handshake("HELLO") => (), _ => () }`, true],
+    ["let-tuple-shadow", fake + `let (handshake, _) = (${pointer}, 0); assert!(!handshake("HELLO"));`, false],
+    ["let-slice-shadow", fake + `let [handshake, ..] = [${pointer}]; assert!(!handshake("HELLO"));`, false],
+    ["let-else-shadow", fake + `let Some(handshake) = Some(${pointer}) else { return; }; assert!(!handshake("HELLO"));`, false],
+    ["let-else-outer", `let Some(handshake) = None::<fn(&str) -> bool> else { ${call} return; }; let _ = handshake;`, true],
+    ["if-dead", `if false { ${call} }`, false],
+    ["while-dead", `while false { ${call} }`, false],
+    ["if-parenthesized-dead", `if (false) { ${call} }`, false],
+    ["if-else-live", `if false {} else if false {} else { ${call} }`, true],
+    ["if-else-then-statement", `if true {} else if true { ${call} } else { ${call} } let _ = 0;`, false],
+    ["cfg-false-block", `#[cfg(false)] { ${call} }`, false],
+    ["cfg-any-block", `#[cfg(any())] { ${call} }`, false],
+    ["cfg-false-statement", `#[cfg(any())] ${call} let _ = 0;`, false],
+    ["cfg-true-statement", `#[cfg(all())] ${call}`, true],
+    ["cfg-test-statement", `#[cfg(test)] ${call}`, true],
+    ["local-macro-shadows-prelude", `macro_rules! assert { ($e:expr) => { () } } ${call}`, false],
+    ["impl-method-dropped", `struct Holder; impl Holder { fn call() { ${call} } } let _ = Holder;`, false],
+    ["trait-method-dropped", `trait Holder { fn call() { ${call} } }`, false],
+    ["local-module-method-dropped", `mod other { pub fn call() { assert!(newchan_rust::${path}("HELLO")); } }`, false],
+    ["local-const-shadows-import", 'const handshake: fn(&str) -> bool = |_| false; assert!(!handshake("HELLO"));', false],
+    ["local-unsafe-fn-shadows-import", 'unsafe fn handshake(_: &str) -> bool { false } assert!(!unsafe { handshake("HELLO") });', false],
+    ["local-const-fn-shadows-import", 'const fn handshake(_: &str) -> bool { false } assert!(!handshake("HELLO"));', false],
+    ["local-extern-fn-shadows-import", 'extern "C" fn handshake(_: &str) -> bool { false } assert!(!handshake("HELLO"));', false],
+  ] as const;
+  for (const [id, body, accepts] of cases) await t.test(id, async () => {
+    check(`pub fn select_wire(banner: &str) -> bool { ${path}(banner) }\n`, body, accepts);
+  });
+  const publicAsync = `pub async fn select_wire(banner: &str) -> bool { ${path}(banner) }\n`;
+  await t.test("public-async-dropped", () => check(publicAsync, 'let _future = newchan_rust::select_wire("HELLO");', false));
+  await t.test("public-async-driven", () => check(publicAsync, poll + 'drive(async { assert!(newchan_rust::select_wire("HELLO").await); });', true));
+  const futureWrapper = `pub fn select_wire(banner: &str) -> impl std::future::Future<Output = bool> + '_ {
+    let future = async move { ${path}(banner) }; future
+  }\n`;
+  await t.test("wrapper-future-dropped", () => check(futureWrapper, 'let _f = newchan_rust::select_wire("HELLO");', false));
+  await t.test("wrapper-future-driven", () => check(futureWrapper, poll + 'drive(newchan_rust::select_wire("HELLO"));', true));
+  for (const [id, body] of [
+    ["dead-async", "let _f = async { accept(banner) }; false"],
+    ["dead-closure-argument", "let _f = Some(|| accept(banner)); false"],
+    ["shadow-pattern", "fn fake(_: &str) -> bool { false } for accept in [fake as fn(&str) -> bool] { return accept(banner); } false"],
+    ["dead-if", "if false { return accept(banner); } false"],
+    ["dead-cfg", "#[cfg(any())] { return accept(banner); } false"],
+    ["dead-impl", "struct Holder; impl Holder { fn call(b: &str) -> bool { accept(b) } } false"],
+  ] as const) await t.test("production-" + id, async () => {
+    const wireIntegration = `use ${path} as accept;\npub fn select_wire(banner: &str) -> bool { ${body} }\n`;
+    check(wireIntegration, call, false);
   });
 });
 
