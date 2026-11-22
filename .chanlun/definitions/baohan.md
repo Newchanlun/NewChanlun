@@ -2,7 +2,7 @@
 
 > 正本：本文件是 K线包含处理 的教义正本。
 > 最后裁定：[#1419 P2](https://github.com/xy7365527-lang/NewChanlun/issues/1419#issuecomment-6504760769)（2026-10-30，W/2版本分隔、逐原件替代及31P单元源修订绑定）；前次 #1565（2026-10-20，pending_since_cut）与 #1342（2026-10-13，初始方向）
-> 受影响代码清单：见正文「#1419 P2 受影响代码清单」、「#1565 受影响代码清单」与「#1342 受影响代码清单」（后者工作草稿副本 `.chanlun/review-results/issue1323-grilling-20261013/1342-AFFECTED-CODE.md`，票关后随归档出仓）
+> 受影响代码清单：见正文「#1419 P2 受影响代码清单」、其 JS 行所指「#2072」裁定稿、「#1565 受影响代码清单」与「#1342 受影响代码清单」（后者工作草稿副本 `.chanlun/review-results/issue1323-grilling-20261013/1342-AFFECTED-CODE.md`，票关后随归档出仓）
 
 **版本**: v1.9
 **状态**: 已结算
@@ -207,8 +207,14 @@ W/1原106代兼容、W/2两独立进程106代、逐断言迁移、消费者验�
 | Rust索引 | `rust/src/bin/s_session_v3/object_index.rs:1477–1498,1501–1620` | 同规则绑定的独立计划逐原件替代；单元源边经typed不可变身份进入索引，IdentityConflict及撤回拒复活门不改 |
 | Rust行为锁 | `rust/src/bin/s_session_v3/mod.rs:1036`、`source_audit.rs:2675`、`pending_source_tests.rs:103–139,168,305`、`generation.rs:5721,5771,5915,5951,6327,6929,7006,7078` | 三具名/2锁、原V6三锁与25代新/2臂；分型与CC054完整记录仅按布局差异规范化，全部请求五字段与唯一主体绑定，CC006以完整三坐标窗口、形态及来源字段对齐，typed主体须有非空fact_key；非W换窗、axes/坐标及分型来源/坐标/生命周期负控；原三pending_source用独立serde配方、目录oracle、0x07文本边推完整内容及根 |
 | Python | `s_session/s_tb02_contract.py:60–78,305` | #1768历史表仅s-session/1，不加入S3串；正式S3臂（Controller.start_q与socket decode_frame/validate_reply消费）的测试在 #1768 分支，尚未进入本分支；原双臂义务不变 |
-| JS | `s_session/browser/q3-typed.js:31–80,243–253,791–820`；`s_session/tests/build_tb01c_browser.cjs:6–17,39–44` | #1789承接精确表、unit exact、同坐标八字段source_ref、三跳绑定及生成tb01c-client.js bundle |
+| JS | `s_session/browser/q3-typed.js:31–85,248–273,349–375,914–995`；`s_session/tests/build_tb01c_browser.cjs:6–17,39–45`（#2072 基线 `9e57032b`） | #1789承接精确表、unit exact、同坐标八字段source_ref、三跳绑定及生成tb01c-client.js bundle。#2072 阶段二影响另见下节及 [ADR 0075 判据与受影响代码](../../docs/adr/0075-q3-js-reader-structural-parity.md#判据与受影响代码)（含 `q3-consumer.js`、`q3-center.js` 与 JS↔Rust 对照） |
 | Lean | `formal/Origin/RawInclusionInitialization.lean:4–9` | 初始化几何不变；本次仅S持久身份与布局，Lean无受影响定义 |
+
+### S3 的 Q3 结构校验（[#2072](https://github.com/xy7365527-lang/NewChanlun/issues/2072)，2026-11-21，`[新缠论:选择]`）
+
+**裁定稿（P 类，待异家族独审生效）**：公开 `Q3.validateState(state, "s-session/3")` 独立拒绝同 cut 悬空结构关系与孤立角色、错误变化后件、历史活动图断链、具名知识请求错绑或缺项、来源闭包不符，以及目录三项计数和 CC-056 本代撤回证据与原件不符。核验的是已发布原件之间的等式、索引和闭包，不重判包含、分型或中枢。历史图与当前图用同一链接判据，证据/期限不足即失败，不换弱档（#799）。
+
+[ADR 0075](../../docs/adr/0075-q3-js-reader-structural-parity.md) 给出裁定依据、JS↔Rust 行号与阶段二验收。范围裁定按 [#1909 / ADR 0041](../../docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md#L39-L45) 由代理独审，不是 `UserSigned`。本轮不改 W/1、W/2、31P 或任何读写代码；上列 Rust、Python、Lean 清单保持原义。
 
 ## 未定前缀上 W 对象的发布与 `pending_since_cut`（[#1565](https://github.com/xy7365527-lang/NewChanlun/issues/1565) 裁定，2026-10-20，`[新缠论:选择]`）
 
