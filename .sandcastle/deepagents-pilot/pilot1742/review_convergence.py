@@ -123,6 +123,17 @@ _AUTOLINK_EMAIL_RE = re.compile(
     r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
     r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*>"
 )
+_GFM_PROTOCOL_AUTOLINK_RE = re.compile(r"(?:https?|ftp)://[^\s<]+", re.IGNORECASE)
+_GFM_WWW_AUTOLINK_RE = re.compile(
+    r"www\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+[^\s<]*",
+    re.IGNORECASE,
+)
+_GFM_WWW_DOMAIN_PREFIX_RE = re.compile(
+    r"^www\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+",
+    re.IGNORECASE,
+)
+_GFM_AUTOLINK_TRAILING_PUNCT = frozenset("?!.,:*_~")
+_GFM_AUTOLINK_TRAILING_ENTITY_RE = re.compile(r"&[A-Za-z0-9]+;$")
 _INLINE_HTML_OPEN_TAG_PATTERN = (
     r"<[A-Za-z][A-Za-z0-9-]*"
     r"(?:[ \t\n]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t\n]*=[ \t\n]*(?:[^ \t\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
@@ -264,6 +275,55 @@ def _normalize_line(raw: Any) -> int | None:
     return raw
 
 
+def _match_gfm_extended_autolink(text: str, pos: int) -> str | None:
+    """按 GFM §6.9 在 pos 处匹配协议或 www. 扩展自动链接，并剥离末尾非 URL 标点、未配对 `)` 与尾部类实体引用。"""
+    if pos > 0:
+        prev = text[pos - 1]
+        if prev.isalnum() or prev == "_":
+            return None
+    ch = text[pos]
+    is_www = ch in ("w", "W")
+    if is_www:
+        match = _GFM_WWW_AUTOLINK_RE.match(text, pos)
+    elif ch in ("h", "H", "f", "F"):
+        match = _GFM_PROTOCOL_AUTOLINK_RE.match(text, pos)
+    else:
+        return None
+    if match is None:
+        return None
+    url = match.group(0)
+    while url:
+        if url[-1] in _GFM_AUTOLINK_TRAILING_PUNCT:
+            url = url[:-1]
+            continue
+        if url[-1] == ")" and url.count(")") > url.count("("):
+            url = url[:-1]
+            continue
+        if url[-1] == ";":
+            ent_m = _GFM_AUTOLINK_TRAILING_ENTITY_RE.search(url)
+            if ent_m is not None:
+                url = url[: ent_m.start()]
+                continue
+        break
+    if not url:
+        return None
+    if is_www:
+        if _GFM_WWW_DOMAIN_PREFIX_RE.match(url) is None:
+            return None
+    else:
+        sep = url.find("://")
+        if sep == -1 or len(url) <= sep + 3:
+            return None
+    return url
+
+
+def _decode_table_rows(block_text: str) -> list[list[str]]:
+    """解码 `_parse_commonmark_blocks` 发出的二维 GFM 表格 JSON 载荷。"""
+    raw_rows = json.loads(block_text)
+    assert isinstance(raw_rows, list)
+    return [[str(cell) for cell in row] for row in raw_rows]
+
+
 def _tokenize_inline_fingerprint(
     text: str,
     *,
@@ -276,7 +336,8 @@ def _tokenize_inline_fingerprint(
       原样保留大小写与内部全部空格，记为 ["code_span", content]；
     - CommonMark §6.3 内联链接/图片：分别递归编码 label token、原样大小写 dest 与可选 title，
       记为 ["link"|"image", label_tokens, dest, title]（绝不重拼回有歧义 Markdown 字符串）；
-    - CommonMark §6.5 URI/Email 自动链接：原样保留大小写，记为 ["autolink", inner]。
+    - CommonMark §6.5 URI/Email 自动链接与 GFM §6.9 裸 URL 扩展自动链接：原样保留大小写，记为 ["autolink", inner]；
+    - CommonMark §6.6 行内原始 HTML（标签/注释/PI/CDATA/声明）：原样保留大小写，记为 ["raw_html", raw_html]。
     """
     normalized = _COMMONMARK_LINE_ENDING_RE.sub("\n", text.replace("\x00", "\ufffd"))
     tokens: list[Any] = []
@@ -329,7 +390,8 @@ def _tokenize_inline_fingerprint(
                 continue
             html_m = _INLINE_RAW_HTML_RE.match(normalized, i)
             if html_m is not None:
-                plain_buf.append(html_m.group(0))
+                flush_plain()
+                tokens.append(["raw_html", html_m.group(0)])
                 i = html_m.end()
                 continue
         if ch == "[" or (ch == "!" and i + 1 < n and normalized[i + 1] == "["):
@@ -354,6 +416,13 @@ def _tokenize_inline_fingerprint(
                     tokens.append([token_kind, label_tokens, dest_val, title_val or None])
                     i = end_pos
                     continue
+        if ch in ("h", "H", "f", "F", "w", "W"):
+            bare_url = _match_gfm_extended_autolink(normalized, i)
+            if bare_url is not None:
+                flush_plain()
+                tokens.append(["autolink", bare_url])
+                i += len(bare_url)
+                continue
         plain_buf.append(ch)
         i += 1
 
@@ -420,6 +489,13 @@ def _normalize_fingerprint_text(
             html_text = _normalize_block_literal(block_text)
             if html_text:
                 block_entries.append(["html", html_text])
+        elif block_kind == "table":
+            table_rows = _decode_table_rows(block_text)
+            encoded_rows = [
+                [_tokenize_inline_fingerprint(cell, defined_labels=frozen_labels) for cell in row]
+                for row in table_rows
+            ]
+            block_entries.append(["table", encoded_rows])
         else:
             inline_tokens = _tokenize_inline_fingerprint(block_text, defined_labels=frozen_labels)
             if inline_tokens:
@@ -1052,6 +1128,7 @@ class _ListItem:
 class _FencedCode:
     fence_char: str
     fence_len: int
+    indent: int = 0
     lines: list[str] = field(default_factory=list)
 
 
@@ -2303,7 +2380,7 @@ def _parse_commonmark_blocks(
     include_all_visible_blocks: bool = False,
     preserve_trailing_spaces: bool = False,
     defined_link_defs_out: dict[str, tuple[str, str | None]] | None = None,
-) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code", "table_cell"], str]], frozenset[str]]:
+) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]], frozenset[str]]:
     """按 CommonMark Phase-1 容器栈/叶子块（含 GFM §4.10 管道表格）+ §4.7 链接引用定义剥离收集文档块与已定义链接标签。
 
     - preserve_trailing_spaces=False（默认）：保持段落续行 strip(" \\t") 原语义，对所有既有调用方零变动；
@@ -2314,7 +2391,7 @@ def _parse_commonmark_blocks(
     containers: list[_Container] = []
     leaf: _Leaf | None = None
     defined_labels: set[str] = set()
-    doc_blocks: list[tuple[Literal["paragraph", "heading", "html", "code", "table_cell"], str]] = []
+    doc_blocks: list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]] = []
 
     def in_blockquote() -> bool:
         return any(isinstance(c, _BlockQuote) for c in containers)
@@ -2337,11 +2414,16 @@ def _parse_commonmark_blocks(
                 doc_blocks.append(("code", "\n".join(leaf.lines)))
         elif isinstance(leaf, _Table):
             if include_all_visible_blocks and emit:
-                for cell in leaf.header_cells:
-                    doc_blocks.append(("table_cell", cell))
+                num_cols = len(leaf.header_cells)
+                padded_body_rows: list[list[str]] = []
                 for row in leaf.body_rows:
-                    for cell in row:
-                        doc_blocks.append(("table_cell", cell))
+                    padded = list(row[:num_cols])
+                    if len(padded) < num_cols:
+                        padded.extend([""] * (num_cols - len(padded)))
+                    padded_body_rows.append(padded)
+                doc_blocks.append(
+                    ("table", json.dumps([list(leaf.header_cells), *padded_body_rows], ensure_ascii=False))
+                )
         leaf = None
 
     def close_unmatched(matched_count: int) -> None:
@@ -2395,6 +2477,8 @@ def _parse_commonmark_blocks(
                         close_leaf()
                         continue
                     cursor.restore(saved)
+                if leaf.indent > 0:
+                    cursor.advance_cols(min(cursor.indent_ahead(), leaf.indent))
                 leaf.lines.append(cursor.rest_text())
                 continue
             if isinstance(leaf, _HTMLBlock):
@@ -2492,7 +2576,7 @@ def _parse_commonmark_blocks(
                 close_leaf()
                 mark_parent_has_content()
                 marker = fence_match.group(1)
-                leaf = _FencedCode(fence_char=marker[0], fence_len=len(marker))
+                leaf = _FencedCode(fence_char=marker[0], fence_len=len(marker), indent=indent)
                 line_consumed = True
                 break
 
@@ -2630,13 +2714,17 @@ def _has_visible_gfm_text(text: str) -> bool:
                 if _clean_display_reason(code_line):
                     return True
             continue
-        if block_kind == "table_cell":
+        if block_kind == "table":
             if _is_html_suppressed(html_suppress_state):
                 continue
-            for line_tokens in _scan_inline_dual(block_text, frozen_labels, html_suppress_state):
-                display_text = "".join(d_part for _, d_part in line_tokens)
-                if _clean_display_reason(display_text):
-                    return True
+            for row in _decode_table_rows(block_text):
+                for cell in row:
+                    if _is_html_suppressed(html_suppress_state):
+                        continue
+                    for line_tokens in _scan_inline_dual(cell, frozen_labels, html_suppress_state):
+                        display_text = "".join(d_part for _, d_part in line_tokens)
+                        if _clean_display_reason(display_text):
+                            return True
             continue
         for line_tokens in _scan_inline_dual(block_text, frozen_labels, html_suppress_state):
             display_text = "".join(d_part for _, d_part in line_tokens)
@@ -4323,11 +4411,13 @@ def _leaves_html_suppressed(text: str) -> bool:
             continue
         if block_kind == "code":
             continue
-        if block_kind == "table_cell":
-            if not _is_html_suppressed(state):
-                _scan_inline_dual(block_text, frozen_labels, state)
-                if _has_unclosed_inline_html_opener(block_text):
-                    return True
+        if block_kind == "table":
+            for row in _decode_table_rows(block_text):
+                for cell in row:
+                    if not _is_html_suppressed(state):
+                        _scan_inline_dual(cell, frozen_labels, state)
+                        if _has_unclosed_inline_html_opener(cell):
+                            return True
             continue
         _scan_inline_dual(block_text, frozen_labels, state)
         if not _is_html_suppressed(state) and _has_unclosed_inline_html_opener(block_text):
@@ -4366,6 +4456,12 @@ def _contains_raw_html_outside_code(text: str) -> bool:
         if block_kind == "html":
             return True
         if block_kind == "code":
+            continue
+        if block_kind == "table":
+            for row in _decode_table_rows(block_text):
+                for cell in row:
+                    if _inline_contains_raw_html(cell):
+                        return True
             continue
         if _inline_contains_raw_html(block_text):
             return True
@@ -4487,6 +4583,7 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
     """将 Markdown 字段安全格式化为单行行内文本，防止缩进代码或块级文本在单行位置丧失可见性，并隔离代码外原始 HTML 与未配对反引号。"""
     doc_blocks, _ = _parse_commonmark_blocks(text, include_all_visible_blocks=True)
     has_code_block = any(kind == "code" for kind, _ in doc_blocks)
+    has_table_block = any(kind == "table" for kind, _ in doc_blocks)
     if not has_code_block and "\n" not in text and "\r" not in text:
         candidate = _single_line(text) if collapse_whitespace else text
         visible, suppressed = _has_visible_inline_gfm_text(candidate)
@@ -4494,7 +4591,7 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
             return _escape_unmatched_backticks(candidate)
         return _wrap_markdown_code_span(_single_line(text) if collapse_whitespace else text.strip())
 
-    if has_code_block or len(doc_blocks) > 1:
+    if has_code_block or has_table_block or len(doc_blocks) > 1:
         parts: list[str] = []
         for kind, block_text in doc_blocks:
             if kind == "html":
@@ -4506,6 +4603,18 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
                 code_literal = re.sub(r"[\r\n]+", " ", block_text.strip("\r\n"))
                 if _clean_display_reason(code_literal):
                     parts.append(_wrap_markdown_code_span(code_literal))
+                continue
+            if kind == "table":
+                for row in _decode_table_rows(block_text):
+                    for cell in row:
+                        seg = _single_line(cell)
+                        if not seg:
+                            continue
+                        seg_visible, seg_suppressed = _has_visible_inline_gfm_text(seg)
+                        if seg_visible and not seg_suppressed and not _contains_raw_html_outside_code(seg):
+                            parts.append(_escape_unmatched_backticks(seg))
+                        elif seg_visible or seg_suppressed or _contains_raw_html_outside_code(seg):
+                            parts.append(_wrap_markdown_code_span(seg))
                 continue
             seg = _single_line(block_text)
             if not seg:

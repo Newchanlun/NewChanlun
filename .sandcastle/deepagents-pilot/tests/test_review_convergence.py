@@ -8946,3 +8946,227 @@ def test_r22_important3_injective_typed_json_tokens_eliminate_delimiter_collisio
     assert fingerprint("pilot1742/demo.py", "bug", "Swallows IOError silently") == fingerprint(
         "pilot1742/demo.py", "bug", "swallows   ioerror silently"
     )
+
+
+# ── R23 精准回归（Codex R21 全部 4 项 Important：围栏缩进剥离 / 二维表格位置 / 行内 HTML / GFM 裸 URL） ────
+
+
+def test_r23_important1_fenced_code_strips_opening_fence_indent() -> None:
+    """R23 Important 1：围栏代码块按 CommonMark §4.5 剥离至多起始围栏缩进列数（0–3 列），匹配 pandoc -f gfm。"""
+    # 1. Codex R21 最小复现：0 格围栏 vs 2 格缩进围栏
+    f1, f2, merged = _r21_probe("Run\n\n~~~\n  pass\n~~~", "Run\n\n  ~~~\n  pass\n  ~~~")
+    assert f1.finding_id != f2.finding_id
+    assert len(merged) == 2
+    assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+    assert json.loads(_normalize_fingerprint_text("Run\n\n~~~\n  pass\n~~~", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["paragraph", [["prose", "run"]]], ["code", "  pass"]],
+    ]
+    assert json.loads(
+        _normalize_fingerprint_text("Run\n\n  ~~~\n  pass\n  ~~~", "failure_scenario", allow_code_blocks=True)
+    ) == [
+        "blocks",
+        [["paragraph", [["prose", "run"]]], ["code", "pass"]],
+    ]
+    # 剥离 2 格缩进后与无缩进围栏内的 `pass` 完全等价
+    assert f2.finding_id == fingerprint("pilot1742/demo.py", "bug", "Run\n\n~~~\npass\n~~~")
+
+    # 2. 1 / 2 / 3 格缩进剥离与不足列数上限剥离（含反引号围栏与 Tab 展开）
+    assert json.loads(_normalize_fingerprint_text(" ```\n   pass\n ```", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["code", "  pass"]],
+    ]
+    assert json.loads(_normalize_fingerprint_text("  ```\n   pass\n  ```", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["code", " pass"]],
+    ]
+    assert json.loads(_normalize_fingerprint_text("   ```\n   pass\n   ```", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["code", "pass"]],
+    ]
+    assert json.loads(_normalize_fingerprint_text("   ```\n pass\n   ```", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["code", "pass"]],
+    ]
+    assert json.loads(_normalize_fingerprint_text("  ~~~\n\tpass\n  ~~~", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["code", "  pass"]],
+    ]
+
+
+def test_r23_important2_gfm_table_preserves_2d_cell_positions_and_short_row_padding() -> None:
+    """R23 Important 2：GFM 表格保留二维行列结构与空单元格位置，短行按表头列数补空，绝不展平。"""
+    # 1. Codex R21 最小复现：|200|| vs ||200|
+    t1 = "|Expected|Actual|\n|---|---|\n|200||"
+    t2 = "|Expected|Actual|\n|---|---|\n||200|"
+    f1, f2, merged = _r21_probe(t1, t2)
+    assert f1.finding_id != f2.finding_id
+    assert len(merged) == 2
+    assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+    assert json.loads(_normalize_fingerprint_text(t1, "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [
+            [
+                "table",
+                [
+                    [[["prose", "expected"]], [["prose", "actual"]]],
+                    [[["prose", "200"]], []],
+                ],
+            ]
+        ],
+    ]
+    assert json.loads(_normalize_fingerprint_text(t2, "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [
+            [
+                "table",
+                [
+                    [[["prose", "expected"]], [["prose", "actual"]]],
+                    [[], [["prose", "200"]]],
+                ],
+            ]
+        ],
+    ]
+
+    # 2. 短行按 GFM §4.10 补齐至表头列数，与显式空单元格写法归一到同 ID；超长行截断至表头列数
+    assert fingerprint("pilot1742/demo.py", "bug", "|Expected|Actual|\n|---|---|\n|200|") == f1.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "|A|B|C|\n|---|---|---|\n|1|") == fingerprint(
+        "pilot1742/demo.py", "bug", "|A|B|C|\n|---|---|---|\n|1|||"
+    )
+    assert fingerprint("pilot1742/demo.py", "bug", "|A|B|\n|---|---|\n|1|2|extra|") == fingerprint(
+        "pilot1742/demo.py", "bug", "|A|B|\n|---|---|\n|1|2|"
+    )
+
+    # 3. 多行多列空单元格位置精确区分（列位移与行位移均不同 ID）
+    m_c0 = "|A|B|C|\n|---|---|---|\n|200|||\n||||"
+    m_c1 = "|A|B|C|\n|---|---|---|\n||200||\n||||"
+    m_c2 = "|A|B|C|\n|---|---|---|\n|||200|\n||||"
+    m_r2 = "|A|B|C|\n|---|---|---|\n||||\n|200|||"
+    multi_ids = {fingerprint("pilot1742/demo.py", "bug", tbl) for tbl in (m_c0, m_c1, m_c2, m_r2)}
+    assert len(multi_ids) == 4
+
+    # 4. 表格可见性判定与 wontfix 跳过表格语义保持不变
+    assert _has_visible_gfm_text(t1)
+    assert not _has_visible_gfm_text("| | |\n|---|---|\n| | |")
+    assert parse_wontfix_replies(
+        [{"id": "c-tbl", "user": {"login": "alice"}, "body": "|Col|\n|---|\n|不修：表格内忽略|"}],
+        allowed_authors=["alice"],
+    ) == ()
+
+
+def test_r23_important3_inline_raw_html_preserves_case_as_typed_token() -> None:
+    """R23 Important 3：行内 HTML 标签/注释作为独立 ["raw_html", ...] token 保留原始大小写，叙述照常归一化。"""
+    # 1. Codex R21 最小复现：href="/A" vs href="/a"
+    h1 = 'GET <a href="/A">endpoint</a>'
+    h2 = 'GET <a href="/a">endpoint</a>'
+    f1, f2, merged = _r21_probe(h1, h2)
+    assert f1.finding_id != f2.finding_id
+    assert len(merged) == 2
+    assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+    assert json.loads(_normalize_fingerprint_text(h1, "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [
+            [
+                "paragraph",
+                [
+                    ["prose", "get "],
+                    ["raw_html", '<a href="/A">'],
+                    ["prose", "endpoint"],
+                    ["raw_html", "</a>"],
+                ],
+            ]
+        ],
+    ]
+
+    # 2. 对照：相同 raw_html、普通叙述大小写与空白差异仍归一到同 ID
+    f_same1, f_same2, merged_same = _r21_probe('get  <a href="/A">Endpoint</a>', h1)
+    assert f_same1.finding_id == f_same2.finding_id
+    assert len(merged_same) == 1
+
+    # 3. 行内 HTML 注释与标签名大小写同样保留
+    hc1, hc2, merged_hc = _r21_probe("Check <!-- FlagA --> value", "Check <!-- flaga --> value")
+    assert hc1.finding_id != hc2.finding_id
+    assert len(merged_hc) == 2
+
+
+def test_r23_important4_gfm_extended_bare_url_autolinks_preserve_case() -> None:
+    """R23 Important 4：识别 GFM §6.9 协议与 www. 裸 URL 扩展自动链接，保留路径大小写并按规范剥离尾标点。"""
+    # 1. Codex R21 最小复现：https://example.org/A vs https://example.org/a
+    u1, u2, merged_u = _r21_probe("GET https://example.org/A", "GET https://example.org/a")
+    assert u1.finding_id != u2.finding_id
+    assert len(merged_u) == 2
+    assert {item.finding_id for item in merged_u} == {u1.finding_id, u2.finding_id}
+    assert json.loads(_normalize_fingerprint_text("GET https://example.org/A", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["paragraph", [["prose", "get "], ["autolink", "https://example.org/A"]]]],
+    ]
+
+    # 2. www. 与 ftp:// 裸 URL 路径大小写区分
+    w1, w2, merged_w = _r21_probe("GET www.example.org/A", "GET www.example.org/a")
+    assert w1.finding_id != w2.finding_id
+    assert len(merged_w) == 2
+    assert json.loads(_normalize_fingerprint_text("GET www.example.org/A", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["paragraph", [["prose", "get "], ["autolink", "www.example.org/A"]]]],
+    ]
+
+    ftp1, ftp2, merged_ftp = _r21_probe("GET ftp://files.example.org/A", "GET ftp://files.example.org/a")
+    assert ftp1.finding_id != ftp2.finding_id
+    assert len(merged_ftp) == 2
+
+    # 3. 句末标点剥离回 prose（不污染 URL），普通叙述照常归一化
+    p1, p2, merged_p = _r21_probe("GET https://example.org/A.", "get  https://example.org/A.")
+    assert p1.finding_id == p2.finding_id
+    assert len(merged_p) == 1
+    assert json.loads(_normalize_fingerprint_text("GET https://example.org/A.", "failure_scenario", allow_code_blocks=True)) == [
+        "blocks",
+        [["paragraph", [["prose", "get "], ["autolink", "https://example.org/A"], ["prose", "."]]]],
+    ]
+    assert fingerprint("pilot1742/demo.py", "bug", "GET https://example.org/A.") != fingerprint(
+        "pilot1742/demo.py", "bug", "GET https://example.org/a."
+    )
+
+    # 4. GFM §6.9 未配对尾部 `)`、平衡括号与尾部类实体 `&amp;` 剥离规则
+    assert json.loads(
+        _normalize_fingerprint_text("See (https://example.org/A).", "failure_scenario", allow_code_blocks=True)
+    ) == [
+        "blocks",
+        [["paragraph", [["prose", "see ("], ["autolink", "https://example.org/A"], ["prose", ")."]]]],
+    ]
+    assert json.loads(
+        _normalize_fingerprint_text(
+            "See https://en.wikipedia.org/wiki/Foo_(Bar).", "failure_scenario", allow_code_blocks=True
+        )
+    ) == [
+        "blocks",
+        [
+            [
+                "paragraph",
+                [
+                    ["prose", "see "],
+                    ["autolink", "https://en.wikipedia.org/wiki/Foo_(Bar)"],
+                    ["prose", "."],
+                ],
+            ]
+        ],
+    ]
+    assert json.loads(
+        _normalize_fingerprint_text("See https://example.org/A&amp;.", "failure_scenario", allow_code_blocks=True)
+    ) == [
+        "blocks",
+        [["paragraph", [["prose", "see "], ["autolink", "https://example.org/A"], ["prose", "&amp;."]]]],
+    ]
+
+    # 5. 前一位为字母/数字/下划线时不触发扩展自动链接
+    assert json.loads(
+        _normalize_fingerprint_text("prefix_https://example.org/A", "failure_scenario", allow_code_blocks=True)
+    ) == [
+        "blocks",
+        [["paragraph", [["prose", "prefix_https://example.org/a"]]]],
+    ]
+    assert json.loads(
+        _normalize_fingerprint_text("mywww.example.org/A", "failure_scenario", allow_code_blocks=True)
+    ) == [
+        "blocks",
+        [["paragraph", [["prose", "mywww.example.org/a"]]]],
+    ]
