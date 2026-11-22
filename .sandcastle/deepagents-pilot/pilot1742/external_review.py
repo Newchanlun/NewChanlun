@@ -859,13 +859,26 @@ class ExternalReview:
     @classmethod
     def _extract_cmd_from_params(cls, params: dict[str, Any]) -> str | None:
         raw = params.get("cmd") if "cmd" in params else params.get("command")
+        # session.jsonl 中 exec_command.arguments.cmd 已是审查员提交的原始命令（未经 Codex 再包一层 /bin/bash -lc），
+        # 不得再次剥离 shell 包装，否则审查员显式执行 `bash -c '...'` 会与 events.jsonl 剥离外层后错配。
         if isinstance(raw, str) and raw.strip():
-            return cls._unwrap_shell_command(raw)
+            return raw
         if isinstance(raw, list) and raw and all(isinstance(x, str) for x in raw):
             if len(raw) >= 3 and raw[0].endswith(("bash", "sh")) and raw[1] in ("-c", "-lc"):
                 return raw[2]
             return " ".join(raw)
         return None
+
+    @staticmethod
+    def _extract_exec_output_body(raw: str) -> str:
+        """从 Codex exec_command / write_stdin 工具输出中提取 Output: 后的原始正文，供跨块续读按字节无缝重组。"""
+        if raw.startswith("Output:\n"):
+            return raw[len("Output:\n"):]
+        marker = "\nOutput:\n"
+        idx = raw.find(marker)
+        if idx != -1:
+            return raw[idx + len(marker):]
+        return raw
 
     @classmethod
     def _extract_session_tool_calls(cls, payload: dict[str, Any]) -> tuple[list[str], list[int]] | None:
@@ -896,7 +909,7 @@ class ExternalReview:
                 parsed = loaded
             elif pt == "custom_tool_call" and isinstance(payload.get("input"), str):
                 if name in cls._SHELL_TOOL_NAMES or not name:
-                    return [cls._unwrap_shell_command(payload["input"])], []
+                    return [payload["input"]], []
                 return [], []
             else:
                 return None
@@ -1037,18 +1050,19 @@ class ExternalReview:
                                 out_text = str(payload.get("output") or "")
                                 if isinstance(cid, str) and cid in closed_calls:
                                     call_cmds = closed_calls.pop(cid)
+                                    out_body = self._extract_exec_output_body(out_text)
                                     exit_m = re.search(r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text)
                                     ok_exit = exit_m is None or exit_m.group(1) == "0"
-                                    if ok_exit and any(reads_candidate_patch(c, out_text, patch) for c in call_cmds):
+                                    if ok_exit and any(reads_candidate_patch(c, out_body, patch) for c in call_cmds):
                                         sess_patch_reads += 1
                                     sess_m = re.search(r"Process running with session ID (\d+)", out_text)
                                     if sess_m and len(call_cmds) == 1:
-                                        exec_sessions[int(sess_m.group(1))] = (call_cmds[0], out_text)
+                                        exec_sessions[int(sess_m.group(1))] = (call_cmds[0], out_body)
                                 if isinstance(cid, str) and cid in closed_cont:
                                     for sid in closed_cont.pop(cid):
                                         if sid in exec_sessions:
-                                            prev_cmd, prev_out = exec_sessions[sid]
-                                            combined = prev_out + "\n" + out_text
+                                            prev_cmd, prev_body = exec_sessions[sid]
+                                            combined = prev_body + self._extract_exec_output_body(out_text)
                                             exec_sessions[sid] = (prev_cmd, combined)
                                             exit_m = re.search(
                                                 r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text

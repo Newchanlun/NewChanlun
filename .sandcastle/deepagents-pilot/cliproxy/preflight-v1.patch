@@ -111,10 +111,10 @@ index e69de29..2b8a7a8 100644
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..653e3c5 100644
+index e69de29..80f2eca 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1016 @@
+@@ -0,0 +1,1042 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -803,6 +803,32 @@ index e69de29..653e3c5 100644
 +			t.Fatalf("compact escaped formal review guard: status=%d calls=%d", res.Code, len(models))
 +		}
 +		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++	})
++
++	t.Run("non-streaming-formal-review-rejected-and-tainted-before-upstream", func(t *testing.T) {
++		for _, tc := range []struct {
++			name   string
++			launch string
++			body   string
++		}{
++			{"stream-false", "review-12345678-1234-4234-8234-123456789ab1", `{"model":"gpt-6.2-sol","stream":false,"input":"offline"}`},
++			{"stream-omitted", "review-12345678-1234-4234-8234-123456789ab2", `{"model":"gpt-6.2-sol","input":"offline"}`},
++		} {
++			t.Run(tc.name, func(t *testing.T) {
++				const session = "019d0000-0000-7000-8000-000000000ab1"
++				req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(tc.body))
++				req.Header.Set("Authorization", "Bearer test-key")
++				req.Header.Set("Content-Type", "application/json")
++				req.Header.Set(preflightreceipt.ReviewHeader, tc.launch)
++				req.Header.Set("Session-Id", session)
++				res := httptest.NewRecorder()
++				server.engine.ServeHTTP(res, req)
++				if res.Code != http.StatusBadRequest || len(models) != 0 {
++					t.Fatalf("non-streaming formal review %s escaped guard: status=%d calls=%d", tc.name, res.Code, len(models))
++				}
++				waitReceipt(t, tc.launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++			})
++		}
 +	})
 +
 +	t.Run("tls-servername-override-or-insecure-transport-rejected-and-tainted", func(t *testing.T) {
@@ -1747,10 +1773,10 @@ index 47f87de..3a1a2d4 100644
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-index e69de29..5b0c4e6 100644
+index e69de29..ddb7243 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,159 @@
 +package auth
 +
 +import (
@@ -1819,6 +1845,11 @@ index e69de29..5b0c4e6 100644
 +}
 +
 +func preflightExecute(executor ProviderExecutor, ctx context.Context, auth *Auth, req execution.Request, opts execution.Options) (execution.Response, error) {
++	if c := preflightreceipt.From(ctx); c != nil && c.StrictCodex() {
++		// Formal review launches require streaming SSE response.completed evidence; reject non-streaming Execute.
++		c.Taint()
++		return execution.Response{}, preflightreceipt.ErrUnavailable
++	}
 +	ctx, lease, err := preflightStart(ctx, executor, auth, req.Model)
 +	if err != nil {
 +		return execution.Response{}, err
@@ -2520,10 +2551,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..8867033 100644
+index e69de29..e3d03d3 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1451 @@
+@@ -0,0 +1,1511 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -2934,10 +2965,6 @@ index e69de29..8867033 100644
 +			c.lastItemOutputSHA = ""
 +			c.lastItemResponseID = ""
 +			c.mu.Unlock()
-+		case "":
-+			if ev.Object == "response" {
-+				c.recordCompletedResponse(ev.ID, ev.Model, ev.Status, ev.Error, ev.Output)
-+			}
 +		}
 +	}
 +}
@@ -3158,8 +3185,8 @@ index e69de29..8867033 100644
 +	if !ok {
 +		return "", false
 +	}
-+	model := parseTopLevelJSONModel(decoded)
-+	if model == "" {
++	model, streamTrue := parseTopLevelJSONReviewRequest(decoded)
++	if model == "" || !streamTrue {
 +		return "", false
 +	}
 +	return model, true
@@ -3588,6 +3615,70 @@ index e69de29..8867033 100644
 +	return found
 +}
 +
++func parseTopLevelJSONReviewRequest(raw []byte) (string, bool) {
++	dec := json.NewDecoder(bytes.NewReader(raw))
++	tok, err := dec.Token()
++	if err != nil {
++		return "", false
++	}
++	delim, ok := tok.(json.Delim)
++	if !ok || delim != '{' {
++		return "", false
++	}
++	foundModel := ""
++	seenModel := false
++	seenStream := false
++	streamTrue := false
++	for dec.More() {
++		keyTok, err := dec.Token()
++		if err != nil {
++			return "", false
++		}
++		key, ok := keyTok.(string)
++		if !ok {
++			return "", false
++		}
++		switch key {
++		case "model":
++			if seenModel {
++				return "", false
++			}
++			seenModel = true
++			var value string
++			if err := dec.Decode(&value); err != nil {
++				return "", false
++			}
++			foundModel = value
++		case "stream":
++			if seenStream {
++				return "", false
++			}
++			seenStream = true
++			var flag bool
++			if err := dec.Decode(&flag); err != nil {
++				return "", false
++			}
++			streamTrue = flag
++		default:
++			var skip json.RawMessage
++			if err := dec.Decode(&skip); err != nil {
++				return "", false
++			}
++		}
++	}
++	endTok, err := dec.Token()
++	if err != nil {
++		return "", false
++	}
++	if endDelim, ok := endTok.(json.Delim); !ok || endDelim != '}' {
++		return "", false
++	}
++	if _, err := dec.Token(); err != io.EOF {
++		return "", false
++	}
++	return foundModel, seenModel && seenStream && streamTrue
++}
++
 +func decodeCodexWireBody(raw []byte, encoding string) ([]byte, bool) {
 +	switch strings.ToLower(strings.TrimSpace(encoding)) {
 +	case "", "identity":
@@ -3655,7 +3746,7 @@ index e69de29..8867033 100644
 +		return "other"
 +	}
 +	if provider == "codex" {
-+		if host != "chatgpt.com" || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
++		if host != "chatgpt.com" || req.Method != http.MethodPost || req.URL.Path != "/backend-api/codex/responses" || req.URL.RawQuery != "" || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
 +			return "other"
 +		}
 +		if codexOutboundModel(req) != model {
@@ -3976,10 +4067,10 @@ index e69de29..8867033 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..6ddbeae 100644
+index e69de29..2a75b61 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1360 @@
+@@ -0,0 +1,1387 @@
 +package preflightreceipt
 +
 +import (
@@ -4565,6 +4656,33 @@ index e69de29..6ddbeae 100644
 +	}
 +	if rC := readReviewReceiptFile(t, root, launchCompact); !rC.Tainted || rC.Complete || rC.Sealed {
 +		t.Fatalf("compact did not taint formal review launch: %+v", rC)
++	}
++
++	// Plain object="response" JSON (without SSE type="response.completed") MUST NOT satisfy formal completion.
++	launchPlain := "review-55555555-2222-4333-8444-555555555556"
++	ctxP, cP, err := BeginReview(context.Background(), root, launchPlain, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxP, eP, err := cP.Start(ctxP, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clientP := httptransport.Decorate(ctxP, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	reqP, _ := http.NewRequestWithContext(ctxP, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	respP, err := clientP.Do(reqP)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cP.ObserveStreamChunk([]byte(`{"id":"resp_plain","object":"response","status":"completed","model":"gpt-6.2-sol","output":[]}`))
++	_ = respP.Body.Close()
++	eP.End()
++	cP.Complete(true)
++	cP.HandlerDone(true)
++	if status := SealReview(root, launchPlain, session); status == SealOK {
++		t.Fatalf("plain object=response without response.completed event was allowed to seal")
 +	}
 +
 +	if err := runTurn("gpt-6.2-sol", "gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", true, "resp_3", "final-verdict"); err != nil {

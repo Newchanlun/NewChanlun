@@ -3393,6 +3393,52 @@ def test_session_receipt_accepts_write_stdin_continuation_and_parallel_tool_call
     assert outcome_par.verdict == "PASS"
     assert strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome_par).verdict == "PASS"
 
+    # 3. R18（Sol P2 + Astra P2）：diff --git 文件头跨 exec_command 与 write_stdin 两个带元数据头输出块无缝重组，
+    #    且审查员显式执行 `bash -c 'git status --short'` 时不被剥离两层 shell 包装。
+    diff_pos = patch.find("diff --git ")
+    assert diff_pos >= 0
+    split_at = diff_pos + 7
+    part1, part2 = patch[:split_at], patch[split_at:]
+    explicit_bash = "bash -c 'git status --short'"
+    events_r18 = [
+        {"type": "thread.started", "thread_id": session_id},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc '{diff_cmd}'",
+                                            "aggregated_output": patch, "status": "completed", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": f'/bin/bash -lc "{explicit_bash}"',
+                                            "aggregated_output": "", "status": "completed", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": final_text}},
+        {"type": "turn.completed"},
+    ]
+    rids_r18 = ["resp_r18_exec_1", "resp_r18_stdin_2", "resp_r18_bash_3", "resp_r18_final_4"]
+    sess_r18 = [
+        {"type": "session_meta", "payload": {"id": session_id, "model_provider": "cliproxy-local"}},
+        {"type": "turn_context", "payload": {"model": MODELS[0]}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "s1",
+                                              "arguments": json.dumps({"cmd": diff_cmd})}},
+        {"type": "token_usage_record", "payload": {"response_id": rids_r18[0]}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "s1",
+                                              "output": f"Chunk ID: c1\nProcess running with session ID 99\nOutput:\n{part1}"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "write_stdin", "call_id": "s2",
+                                              "arguments": json.dumps({"session_id": 99, "chars": ""})}},
+        {"type": "token_usage_record", "payload": {"response_id": rids_r18[1]}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "s2",
+                                              "output": f"Chunk ID: c2\nProcess exited with code 0\nOutput:\n{part2}"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "s3",
+                                              "arguments": json.dumps({"cmd": explicit_bash})}},
+        {"type": "token_usage_record", "payload": {"response_id": rids_r18[2]}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "s3",
+                                              "output": "Chunk ID: c3\nProcess exited with code 0\nOutput:\n"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                                              "content": [{"type": "output_text", "text": final_text}]}},
+        {"type": "token_usage_record", "payload": {"response_id": rids_r18[3]}},
+    ]
+    (worker / "events.jsonl").write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in events_r18) + "\n")
+    (worker / "session.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in sess_r18) + "\n")
+    _write_proxy(rids_r18)
+    outcome_r18 = validate_review(target, launch, updated_receipt, worker, lane.source)
+    assert outcome_r18.verdict == "PASS"
+    assert strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome_r18).verdict == "PASS"
+
 
 def test_publish_success_refuses_when_native_auto_merge_enabled_on_repo_or_pr(lane, env):
     """R17（Sol P1）：手动审阅、沿用与补发共用 StatusPublisher.publish("success") 门禁：
@@ -3454,3 +3500,89 @@ def test_stale_rereview_attempt_preserves_intent_and_blocks_pass_reuse_until_set
     lane.gateway.pr["head"]["sha"] = head
     a3 = lane.review_pr(1810, 3)
     assert a3["verdict"] == "PASS" and lane.has_pending_rereview_intent(1810, head, old_base) is False
+
+
+def test_real_github_app_client_and_repo_gateway_publish_success_checks_repo_allow_auto_merge(env, tmp_path, monkeypatch):
+    """R18（Astra P0）：真实 GitHubAppClient + httpx.MockTransport + RepoGateway + StatusPublisher.publish('success')
+    全链路集成测试：真实路径白名单放行 GET /repos/{owner}/{repo}，allow_auto_merge=True 时拒发，False 时发布 success。"""
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    import httpx
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from pilot1742.delivery import RepoGateway
+    from pilot1742.github_app import AppIdentity, GitHubAppClient
+
+    monkeypatch.setattr(module, "SOURCE_REPO", env.source)
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = tmp_path / "review-app.pem"
+    pem.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+    ))
+    pem.chmod(0o600)
+    ident = AppIdentity(
+        5664795, 179444545, 1150335160, "Newchanlun/NewChanlun", "newchanlun-review-gate", pem,
+        installation_permissions=module.DEFAULT_IDENTITY["installation_permissions"],
+    )
+    head = git(env.source, "rev-parse", "HEAD")
+    repo_state = {"allow_auto_merge": True}
+    statuses: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/app":
+            return httpx.Response(200, json={"id": ident.app_id, "slug": ident.app_slug})
+        if path == f"/app/installations/{ident.installation_id}":
+            return httpx.Response(200, json={
+                "id": ident.installation_id, "app_id": ident.app_id, "app_slug": ident.app_slug,
+                "account": {"login": "Newchanlun"}, "repository_selection": "selected",
+                "suspended_at": None, "permissions": dict(ident.installation_permissions),
+            })
+        if path.endswith("/access_tokens"):
+            return httpx.Response(201, json={
+                "token": "mock-inst-token", "permissions": dict(module.TOKEN_PERMISSIONS),
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            })
+        if path == f"/repos/{ident.repository}":
+            return httpx.Response(200, json={
+                "id": ident.repository_id, "full_name": ident.repository,
+                "allow_auto_merge": repo_state["allow_auto_merge"],
+            })
+        if path == f"/repos/{ident.repository}/pulls/1810":
+            return httpx.Response(200, json={
+                "number": 1810, "state": "open", "draft": False, "auto_merge": None,
+                "user": {"login": "business-owner"},
+                "base": {"repo": {"id": ident.repository_id}, "ref": "main", "sha": env.base},
+                "head": {"repo": {"id": ident.repository_id}, "ref": "feature/business", "sha": head},
+            })
+        if path == f"/repos/{ident.repository}/commits/{head}/statuses":
+            return httpx.Response(200, json=statuses)
+        if path == f"/repos/{ident.repository}/statuses/{head}" and request.method == "POST":
+            body = json.loads(request.content)
+            row = {"id": len(statuses) + 1, "sha": head, "context": body["context"], "state": body["state"],
+                   "description": body["description"], "creator": {"login": f"{ident.app_slug}[bot]", "type": "Bot"}}
+            statuses.insert(0, row)
+            return httpx.Response(201, json=row)
+        raise AssertionError(f"unexpected {request.method} {path}")
+
+    with GitHubAppClient(ident, permissions=module.TOKEN_PERMISSIONS, transport=httpx.MockTransport(handler)) as client:
+        gw = RepoGateway(client)
+        target = ReviewTarget(
+            **module.load_target(gw, 1810), merge_base_sha=env.base, run_id=str(uuid.uuid4()),
+            attempt=1, policy_version=module.POLICY, controller_code_head=module.check_controller(),
+            registered_at_ns=time.time_ns(), patch_id=module.patch_identity(env.source, env.base, head),
+            review_contract=module.REVIEW_CONTRACT,
+        )
+        folder = tmp_path / "runs" / target.key
+        pub = StatusPublisher(gw, target, folder, tmp_path / "locks")
+        pub.publish("pending")
+        assert statuses[0]["state"] == "pending"
+        with pytest.raises(EffectPending, match="allow_auto_merge"):
+            pub.publish("success")
+        assert statuses[0]["state"] == "pending"
+        repo_state["allow_auto_merge"] = False
+        done = pub.publish("success")
+        assert done["state"] == "success" and statuses[0]["state"] == "success"

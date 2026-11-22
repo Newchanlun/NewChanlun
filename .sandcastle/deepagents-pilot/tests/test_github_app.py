@@ -325,3 +325,21 @@ def test_jwt_claims_are_taken_after_blocking_key_read(identity, monkeypatch):
         with pytest.raises(Signed):
             client._ensure_token()
     assert signed == [{"iat": 1_003_540, "exp": 1_004_140, "iss": str(identity.app_id)}]
+
+
+def test_api_allows_exact_get_repo_root_but_blocks_writes_and_sibling_repos(identity):
+    """R18（Astra P0）：允许精确 GET /repos/{owner}/{repo} 查询仓库配置（如 allow_auto_merge），
+    但禁止写根路径及任何前缀碰撞的相邻仓库。"""
+    fixture = GitHubFixture(identity)
+    with GitHubAppClient(identity, transport=httpx.MockTransport(fixture)) as client:
+        resp = client.api("GET", f"/repos/{identity.repository}")
+        assert resp.status == 200 and resp.data["full_name"] == identity.repository
+        for method, bad_path in (
+            ("PATCH", f"/repos/{identity.repository}"),
+            ("POST", f"/repos/{identity.repository}"),
+            ("DELETE", f"/repos/{identity.repository}"),
+            ("GET", f"/repos/{identity.repository}-evil"),
+            ("GET", f"/repos/{identity.repository}-evil/pulls/1"),
+        ):
+            with pytest.raises(IdentityError, match="已核验的仓库"):
+                client.api(method, bad_path)
