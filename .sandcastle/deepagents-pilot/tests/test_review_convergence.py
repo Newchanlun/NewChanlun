@@ -224,12 +224,28 @@ def _verified_round(
             round_number=round_number,
             head_sha=sha,
             author_reply=vf.author_reply,
-            related_reply_keys=vf.related_reply_keys,
+            related_reply_keys=(
+                vf.related_reply_keys
+                if vf.related_reply_keys
+                else (
+                    tuple(
+                        sorted(
+                            {
+                                vf.author_reply.reply_key,
+                                f"comment:{vf.author_reply.comment_id}:resolved:{vf.finding.finding_id}",
+                            }
+                        )
+                    )
+                    if vf.author_reply is not None
+                    else ()
+                )
+            ),
             duplicate_of=vf.duplicate_of,
         )
         for vf in verdicts
     )
-    return VerifiedRound(candidates=candidates, verdicts=aligned_verdicts)
+    author_replies = tuple(vf.author_reply for vf in aligned_verdicts if vf.author_reply is not None)
+    return VerifiedRound(candidates=candidates, verdicts=aligned_verdicts, author_replies=author_replies)
 
 
 # ── 1. 分级、指纹与发现合并（含全排列顺序无关性） ────────────────────────────
@@ -13507,3 +13523,306 @@ def test_r32_nit1_compact_budget_preserves_upgrade_alias_relation_at_260_chars()
     assert "升级阻断缺陷A" in ren_300.body
 
 
+# ── Codex R33 全部 5 项 Important + Nit 1 精准回归 ────────────────────────────
+
+
+def test_r33_important1_reject_wontfix_when_verified_round_author_replies_empty() -> None:
+    """Codex R33 Important 1：严禁在 VerifiedRound.author_replies 为空时从 verdicts 反抽回复绕过冲突检测。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r33_empty_replies.py",
+        line=18,
+        category="空值解引用",
+        failure_scenario="第 18 行未检查空返回值",
+        source_models=("gpt-6-astra",),
+    )
+    reply_x1 = AuthorReply(f_a.finding_id, None, None, "冲突理由一", "cx331", "alice")
+    reply_x2 = AuthorReply(f_a.finding_id, None, None, "冲突理由二", "cx331", "alice")
+
+    cand_r1 = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "同评论存在冲突理由，A 保持 confirmed"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_x1, reply_x2],
+    )
+    assert ver_r1.verdicts[0].verdict is VerificationVerdict.CONFIRMED
+
+    # R33 反例：篡改裁决为 RESOLVED_BY_WONTFIX（取 x 第一条理由）、清空 related_reply_keys 与 author_replies
+    forged_vf = dataclasses.replace(
+        ver_r1.verdicts[0],
+        verdict=VerificationVerdict.RESOLVED_BY_WONTFIX,
+        author_reply=reply_x1,
+        related_reply_keys=(),
+    )
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(ver_r1, verdicts=(forged_vf,), author_replies=())
+
+    # 即使原回复无冲突，直接以 author_replies=() 构造含 RESOLVED_BY_WONTFIX 的 VerifiedRound 也必须拒收
+    clean_reply = AuthorReply(f_a.finding_id, None, None, "单一有效理由", "cy331", "alice")
+    clean_vf = VerifiedFinding(
+        finding=f_a,
+        verdict=VerificationVerdict.RESOLVED_BY_WONTFIX,
+        verifier_model="claude-opus-5-5",
+        verifier_evidence="缺少独立 author_replies 快照",
+        round_number=1,
+        head_sha=HEAD_1,
+        author_reply=clean_reply,
+    )
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(candidates=cand_r1, verdicts=(clean_vf,), author_replies=())
+
+
+def test_r33_important2_reject_clearing_derived_author_replies_and_consumed_keys() -> None:
+    """Codex R33 Important 2：RoundDecision 独立保存 extra_author_replies，禁止 replace 清空派生 author_replies 与 consumed_reply_keys。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r33_extra_replies.py",
+        line=42,
+        category="同坐标缺陷A",
+        failure_scenario="第 42 行越界读取",
+        source_models=("gpt-6-astra",),
+    )
+    f_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r33_extra_replies.py",
+        line=42,
+        category="同坐标缺陷B",
+        failure_scenario="第 42 行未判空",
+        source_models=("gpt-6.1-sol",),
+    )
+    ambig_reply = AuthorReply(None, "pilot1742/r33_extra_replies.py", 42, "暂不处理", "c332", "alice")
+
+    cand_r1 = _candidates([f_a, f_b], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "B 成立"},
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1, author_replies=[ambig_reply])
+    assert dec_r1.extra_author_replies == (ambig_reply,)
+    assert dec_r1.author_replies == (ambig_reply,)
+    assert ambig_reply.reply_key in dec_r1.consumed_reply_keys
+
+    # R33 反例：replace 清空派生 author_replies 与 consumed_reply_keys 必须抛 ConvergenceError
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(dec_r1, author_replies=(), consumed_reply_keys=frozenset())
+
+
+def test_r33_important3_reject_forged_bound_reply_targets_via_replace_or_without_reply() -> None:
+    """Codex R33 Important 3：分离显式锁输入且要求非历史新增锁必须来自本轮真实 author_replies。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="同坐标缺陷A",
+        failure_scenario="第 42 行竞态写入",
+        source_models=("gpt-6-astra",),
+    )
+    f_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="同坐标缺陷B",
+        failure_scenario="第 42 行释放后使用",
+        source_models=("gpt-6.1-sol",),
+    )
+    cand_r1 = _candidates([f_a, f_b], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "B 成立"},
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    assert ver_r1.bound_reply_targets == frozenset()
+    assert ver_r1.explicit_bound_reply_targets == frozenset()
+
+    forged_pins = frozenset({("comment:actual:loc:pilot1742/demo.py:42", f_a.finding_id)})
+
+    # R33 反例 1：仅篡改 bound_reply_targets -> 与 explicit_bound_reply_targets 不一致，立即拒收
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(ver_r1, bound_reply_targets=forged_pins)
+
+    # R33 反例 2：即使同时篡改 explicit_bound_reply_targets，因 author_replies 无对应回复仍必须拒收
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(
+            ver_r1,
+            bound_reply_targets=forged_pins,
+            explicit_bound_reply_targets=forged_pins,
+        )
+
+    # R33 反例 3：parse_verifier_output 在未传入对应回复时凭空传新增显式锁同样拒收
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r1,
+                [
+                    {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"},
+                    {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "B 成立"},
+                ],
+            ),
+            cand_r1,
+            verifier_model="claude-opus-5-5",
+            bound_reply_targets={"comment:actual:loc:pilot1742/demo.py:42": f_a.finding_id},
+        )
+
+
+def test_r33_important4_persist_external_consumed_reply_keys_and_comment_ids() -> None:
+    """Codex R33 Important 4：VerifiedRound 持久化外部 consumed_reply_keys 与 consumed_comment_ids，解析/复核/评估同口径。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r33_ext_consumed.py",
+        line=25,
+        category="边界校验缺失",
+        failure_scenario="第 25 行未检查负数索引",
+        source_models=("gpt-6-astra",),
+    )
+    reply_y = AuthorReply(f_a.finding_id, None, None, "采信新理由 y", "cy334", "alice")
+    reply_x = AuthorReply(f_a.finding_id, None, None, "已消费旧理由 x", "cx334", "alice")
+    resolved_x_key = f"comment:cx334:resolved:{f_a.finding_id}"
+
+    # 反例 A（合法回归）：[y, x] + consumed_reply_keys={comment:cx334:resolved:<A>} 必须一致选 y 得 PASS
+    cand_r1 = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信回复 y"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_y, reply_x],
+        consumed_reply_keys={resolved_x_key},
+    )
+    assert ver_r1.external_consumed_reply_keys == frozenset({resolved_x_key})
+    assert ver_r1.verdicts[0].author_reply == reply_y
+    dec_r1 = evaluate_round(ver_r1)
+    assert dec_r1.outcome is RoundOutcome.PASS
+    assert dec_r1.resolved_findings[0].author_reply == reply_y
+
+    # 反例 B（泄漏）：parse_verifier_output 按 consumed_comment_ids 排除的坐标回复，在 evaluate_round 再传入不得生成锁
+    coord_reply = AuthorReply(None, "pilot1742/r33_ext_consumed.py", 25, "旧坐标评论", "c_old334", "alice")
+    ver_r1_cid = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[coord_reply],
+        consumed_comment_ids={"c_old334"},
+    )
+    assert ver_r1_cid.external_consumed_comment_ids == frozenset({"c_old334"})
+    dec_r1_cid = evaluate_round(ver_r1_cid, author_replies=[coord_reply])
+    assert dec_r1_cid.bound_reply_targets == frozenset()
+    assert coord_reply.reply_key not in dec_r1_cid.consumed_reply_keys
+
+
+def test_r33_important5_dedupe_author_replies_keep_last_order_consistent() -> None:
+    """Codex R33 Important 5：重复回复统一按最后出现位置去重，[x, y, x] 在 bind_author_replies 与 parse_verifier_output 均选 x。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r33_keep_last.py",
+        line=30,
+        category="资源未释放",
+        failure_scenario="第 30 行异常路径未关闭句柄",
+        source_models=("gpt-6-astra",),
+    )
+    reply_x = AuthorReply(f_a.finding_id, None, None, "理由 X", "cx335", "alice")
+    reply_y = AuthorReply(f_a.finding_id, None, None, "理由 Y", "cy335", "alice")
+
+    bound = bind_author_replies([f_a], [reply_x, reply_y, reply_x])
+    assert bound == {f_a.finding_id: reply_x}
+
+    cand_r1 = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信最新回复 X"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_x, reply_y, reply_x],
+    )
+    assert ver_r1.author_replies == (reply_y, reply_x)
+    assert ver_r1.verdicts[0].author_reply == reply_x
+    dec_r1 = evaluate_round(ver_r1, author_replies=[reply_x, reply_y, reply_x])
+    assert dec_r1.outcome is RoundOutcome.PASS
+    assert dec_r1.resolved_findings[0].author_reply == reply_x
+
+
+def test_r33_nit1_tight_budget_reserves_shortest_upgrade_relation_before_note() -> None:
+    """Codex R33 Nit 1：长文件名下 260 字符预算优先预留最短可放下的升级关系（D→A），再决定截断提示与场景文字。"""
+    long_file = "p" * 32 + ".py"
+    f_nit_d = _finding(
+        severity=Severity.NIT,
+        file=long_file,
+        line=12,
+        category="旧Nit提示D",
+        failure_scenario="第 12 行校验风格欠佳",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_imp_a = _finding(
+        severity=Severity.IMPORTANT,
+        file=long_file,
+        line=10,
+        category="升级阻断缺陷A",
+        failure_scenario="第 10 行缺少边界校验导致越界崩溃",
+        source_models=("gpt-6-astra",),
+    )
+
+    cand_r1 = _candidates([f_nit_d], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_nit_d.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 仅 Nit D"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+
+    cand_r2 = _candidates([f_imp_a, f_nit_d], round_number=2, head_sha=HEAD_2, history=(e1,))
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {"finding_id": f_imp_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 确认为阻断越界缺陷"},
+                {
+                    "finding_id": f_nit_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_imp_a.finding_id,
+                    "verifier_evidence": "D 合并升级至 A",
+                },
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2 = evaluate_round(ver_r2)
+
+    ren_260 = render_findings_comment(1928, HEAD_2, dec_r2, max_chars=260)
+    assert len(ren_260.body) <= 260
+    assert ren_260.truncated is True
+    assert f_imp_a.finding_id in ren_260.body
+    assert f_nit_d.finding_id in ren_260.body
+    assert f"{f_nit_d.finding_id}→{f_imp_a.finding_id}" in ren_260.body
+
+    ren_256 = render_findings_comment(1928, HEAD_2, dec_r2, max_chars=256)
+    assert len(ren_256.body) <= 256
+    assert ren_256.truncated is True
+    assert f"（{f_nit_d.finding_id}→{f_imp_a.finding_id}）" in ren_256.body

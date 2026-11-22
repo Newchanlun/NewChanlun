@@ -523,6 +523,18 @@ def _validate_consumed_reply_keys(values: Collection[str], field_name: str) -> f
     return frozenset(_validate_consumed_reply_key(item, f"{field_name}[]") for item in values)
 
 
+def _validate_consumed_comment_ids(values: Collection[str], field_name: str) -> frozenset[str]:
+    if not isinstance(values, Collection) or isinstance(values, (str, bytes)):
+        raise ConvergenceError(f"{field_name} 必须是字符串集合：{values!r}")
+    normalized: set[str] = set()
+    for item in values:
+        val = _require_non_empty_str(item, f"{field_name}[]")
+        if any(_is_invisible_or_ignorable_char(ch) for ch in val):
+            raise ConvergenceError(f"{field_name}[] 包含非法不可见字符：{item!r}")
+        normalized.add(val)
+    return frozenset(normalized)
+
+
 def _normalize_bound_reply_targets(
     values: Mapping[str, str] | Collection[tuple[str, str]],
     field_name: str,
@@ -3295,36 +3307,43 @@ class _AuthorReplyAnalysis:
     raw_short_prefix_hits: dict[str, frozenset[str]]
 
 
+def _dedupe_author_replies_keep_last(
+    replies: Sequence[AuthorReply],
+    field_name: str = "author_replies",
+) -> tuple[AuthorReply, ...]:
+    """校验 AuthorReply 序列并按最后出现位置对完全等价副本去重，与同优先级取最新语义保持一致。"""
+    if not isinstance(replies, Sequence) or isinstance(replies, (str, bytes)):
+        raise ConvergenceError(f"{field_name} 必须是 AuthorReply 序列")
+    validated: list[AuthorReply] = []
+    for reply in replies:
+        if not isinstance(reply, AuthorReply):
+            raise ConvergenceError(f"{field_name} 元素必须是 AuthorReply：{reply!r}")
+        _require_non_empty_str(reply.comment_id, f"{field_name}[].comment_id")
+        validated.append(reply)
+    last_index: dict[AuthorReply, int] = {}
+    for idx, reply in enumerate(validated):
+        last_index[reply] = idx
+    return tuple(reply for idx, reply in enumerate(validated) if last_index[reply] == idx)
+
+
 def _merge_author_replies(
     verified_replies: Sequence[AuthorReply],
     extra_replies: Sequence[AuthorReply],
 ) -> tuple[AuthorReply, ...]:
-    """合并 VerifiedRound 持久化的回复与调用方额外传入的回复：按 reply_key 校验一致性并保序去重。"""
-    merged: list[AuthorReply] = []
-    seen_exact: set[AuthorReply] = set()
+    """合并 VerifiedRound 持久化的回复与调用方额外传入的回复：按 reply_key 校验一致性并按最后出现位置去重。"""
+    norm_verified = _dedupe_author_replies_keep_last(verified_replies, "verified.author_replies")
+    norm_extra = _dedupe_author_replies_keep_last(extra_replies, "author_replies")
     verified_by_key: dict[str, set[AuthorReply]] = {}
-    for reply in verified_replies:
-        if not isinstance(reply, AuthorReply):
-            raise ConvergenceError(f"verified.author_replies 元素必须是 AuthorReply：{reply!r}")
-        _require_non_empty_str(reply.comment_id, "reply.comment_id")
+    for reply in norm_verified:
         verified_by_key.setdefault(reply.reply_key, set()).add(reply)
-        if reply not in seen_exact:
-            seen_exact.add(reply)
-            merged.append(reply)
 
-    for reply in extra_replies:
-        if not isinstance(reply, AuthorReply):
-            raise ConvergenceError(f"author_replies 元素必须是 AuthorReply：{reply!r}")
-        _require_non_empty_str(reply.comment_id, "reply.comment_id")
+    for reply in norm_extra:
         rk = reply.reply_key
         if rk in verified_by_key and reply not in verified_by_key[rk]:
             raise ConvergenceError(
                 f"evaluate_round 传入的 author_replies 与 verified.author_replies 在同一 reply_key={rk!r} 上不一致"
             )
-        if reply not in seen_exact:
-            seen_exact.add(reply)
-            merged.append(reply)
-    return tuple(merged)
+    return _dedupe_author_replies_keep_last((*norm_verified, *norm_extra), "author_replies")
 
 
 def _analyze_author_replies_detailed(
@@ -3351,7 +3370,7 @@ def _analyze_author_replies_detailed(
         finding_list.append(item)
 
     consumed_keys = _validate_consumed_reply_keys(consumed_reply_keys, "consumed_reply_keys")
-    consumed_cids = _normalize_str_collection(consumed_comment_ids, "consumed_comment_ids")
+    consumed_cids = _validate_consumed_comment_ids(consumed_comment_ids, "consumed_comment_ids")
     stale_fps = _normalize_str_collection(
         stale_location_fingerprints,
         "stale_location_fingerprints",
@@ -3361,12 +3380,7 @@ def _analyze_author_replies_detailed(
     alias_map = _normalize_duplicate_aliases(duplicate_aliases, "duplicate_aliases")
     same_head_keys = _validate_consumed_reply_keys(same_head_pinned_keys, "same_head_pinned_keys")
 
-    validated_replies: list[AuthorReply] = []
-    for reply in replies:
-        if not isinstance(reply, AuthorReply):
-            raise ConvergenceError(f"replies 元素必须是 AuthorReply：{reply!r}")
-        _require_non_empty_str(reply.comment_id, "reply.comment_id")
-        validated_replies.append(reply)
+    validated_replies = _dedupe_author_replies_keep_last(replies, "replies")
 
     matched_keys_by_id: dict[str, set[str]] = {}
     stale_rejected_keys: set[str] = set()
@@ -4181,10 +4195,15 @@ def _validate_new_explicit_bound_targets(
     round_duplicate_aliases: Mapping[str, str],
     author_replies: Sequence[AuthorReply],
 ) -> None:
-    """校验上游显式传入的新增回复锁：禁止指向 DUPLICATE 或候选中不存在的指纹，且键坐标/前缀必须与目标（或其活跃别名）相容。"""
+    """校验上游显式传入的新增回复锁：必须有真实 author_replies 来源，禁止指向 DUPLICATE 或非候选指纹，且坐标/前缀必须相容。"""
+    author_reply_keys = {r.reply_key for r in author_replies}
     for rk, target_fid in explicit_bound_targets.items():
         if rk in history_bound_targets:
             continue
+        if rk not in author_reply_keys:
+            raise ConvergenceError(
+                f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 缺少对应的 author_replies 来源"
+            )
         if target_fid in round_duplicate_aliases:
             raise ConvergenceError(
                 f"VerifiedRound.bound_reply_targets 禁止将回复键 {rk!r} 显式锁定到本轮 DUPLICATE 发现 {target_fid!r}"
@@ -4248,6 +4267,9 @@ class VerifiedRound:
     verdicts: tuple[VerifiedFinding, ...]
     bound_reply_targets: frozenset[tuple[str, str]] = frozenset()
     author_replies: tuple[AuthorReply, ...] = ()
+    explicit_bound_reply_targets: frozenset[tuple[str, str]] = frozenset()
+    external_consumed_reply_keys: frozenset[str] = frozenset()
+    external_consumed_comment_ids: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.candidates, RoundCandidates):
@@ -4256,23 +4278,43 @@ class VerifiedRound:
             raise ConvergenceError("VerifiedRound.verdicts 必须是 VerifiedFinding 元组")
         if not isinstance(self.author_replies, tuple):
             raise ConvergenceError("VerifiedRound.author_replies 必须是 AuthorReply 元组")
-        for reply in self.author_replies:
-            if not isinstance(reply, AuthorReply):
-                raise ConvergenceError(f"VerifiedRound.author_replies 元素必须是 AuthorReply：{reply!r}")
-            _require_non_empty_str(reply.comment_id, "VerifiedRound.author_replies[].comment_id")
+        norm_replies = _dedupe_author_replies_keep_last(self.author_replies, "VerifiedRound.author_replies")
+        object.__setattr__(self, "author_replies", norm_replies)
+        if not isinstance(self.external_consumed_reply_keys, frozenset):
+            raise ConvergenceError("VerifiedRound.external_consumed_reply_keys 必须是 frozenset[str]")
+        ext_consumed_keys = _validate_consumed_reply_keys(
+            self.external_consumed_reply_keys,
+            "VerifiedRound.external_consumed_reply_keys",
+        )
+        if not isinstance(self.external_consumed_comment_ids, frozenset):
+            raise ConvergenceError("VerifiedRound.external_consumed_comment_ids 必须是 frozenset[str]")
+        ext_consumed_cids = _validate_consumed_comment_ids(
+            self.external_consumed_comment_ids,
+            "VerifiedRound.external_consumed_comment_ids",
+        )
+        object.__setattr__(self, "external_consumed_comment_ids", ext_consumed_cids)
 
         candidates_by_id = {f.finding_id: f for f in self.candidates.findings}
         prior_important_ids = frozenset(f.finding_id for f in self.candidates.prior_important)
         history_consumed: frozenset[str] = frozenset().union(
             *(entry.consumed_reply_keys for entry in self.candidates.history)
         )
+        effective_consumed = history_consumed | ext_consumed_keys
         history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(self.candidates.history)
         same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == self.candidates.head_sha)
         history_aliases = _active_duplicate_aliases(self.candidates.history)
         explicit_bound_targets = _validate_bound_reply_targets_frozenset(
+            self.explicit_bound_reply_targets,
+            "VerifiedRound.explicit_bound_reply_targets",
+        )
+        _validate_bound_reply_targets_frozenset(
             self.bound_reply_targets,
             "VerifiedRound.bound_reply_targets",
         )
+        if self.bound_reply_targets != self.explicit_bound_reply_targets:
+            raise ConvergenceError(
+                "VerifiedRound.bound_reply_targets 必须与上游显式输入 explicit_bound_reply_targets 一致"
+            )
         effective_bound_targets = dict(history_bound_targets)
         _merge_bound_reply_targets(
             effective_bound_targets,
@@ -4352,105 +4394,65 @@ class VerifiedRound:
             for fid, vf in verdicts_by_id.items()
             if vf.verdict == VerificationVerdict.DUPLICATE and vf.duplicate_of is not None
         }
+        active_author_replies = tuple(
+            r
+            for r in self.author_replies
+            if r.reply_key not in effective_consumed and r.comment_id.strip() not in ext_consumed_cids
+        )
         _validate_new_explicit_bound_targets(
             explicit_bound_targets,
             history_bound_targets=history_bound_targets,
             candidates_by_id=candidates_by_id,
             history_aliases=history_aliases,
             round_duplicate_aliases=round_duplicate_aliases,
-            author_replies=self.author_replies,
+            author_replies=active_author_replies,
         )
 
-        # 基于 candidates.findings 独立重算作者回复匹配、冲突排除、pinned 标志与 related_reply_keys，防绕过 parse_verifier_output
-        if self.author_replies:
-            reply_analysis = _analyze_author_replies_detailed(
-                self.candidates.findings,
-                self.author_replies,
-                consumed_reply_keys=history_consumed,
-                stale_location_fingerprints=self.candidates.stale_location_fingerprints,
-                bound_reply_targets=effective_bound_targets,
-                duplicate_aliases=history_aliases,
-                same_head_pinned_keys=same_head_pinned_keys,
-            )
-            expected_related_keys = _compute_folded_related_reply_keys(
-                reply_analysis,
-                round_duplicate_aliases=round_duplicate_aliases,
-                effective_bound_targets=effective_bound_targets,
-            )
-            for vf in self.verdicts:
-                fid = vf.finding.finding_id
-                if vf.verdict == VerificationVerdict.DUPLICATE:
-                    if vf.author_reply is not None or vf.author_reply_pinned or vf.related_reply_keys:
-                        raise ConvergenceError(f"发现 {fid} 裁决为 duplicate，不得携带回复绑定或 related_reply_keys")
-                    continue
-                if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
-                    expected_reply = reply_analysis.bound_replies.get(fid)
-                    if expected_reply is None or vf.author_reply != expected_reply:
-                        raise ConvergenceError(
-                            f"发现 {fid} 裁决为 resolved_by_wontfix，但其 author_reply 与本轮独立回复分析选定的有效回复不一致"
-                        )
-                    direct_matched, _ = _match_reply_targets(expected_reply, (vf.finding,))
-                    expected_pinned = not (len(direct_matched) == 1 and direct_matched[0].finding_id == fid)
-                    if vf.author_reply_pinned != expected_pinned:
-                        raise ConvergenceError(
-                            f"发现 {fid} 的 author_reply_pinned={vf.author_reply_pinned!r} 与独立推导 {expected_pinned!r} 不一致"
-                        )
-                else:
-                    if vf.author_reply is not None or vf.author_reply_pinned:
-                        raise ConvergenceError(
-                            f"发现 {fid} 裁决为 {vf.verdict.value!r}，不得绑定 author_reply 或 author_reply_pinned"
-                        )
-                exp_rel = expected_related_keys.get(fid, ())
-                if vf.related_reply_keys != exp_rel:
+        # 严格仅用独立保存的 self.author_replies 重算回复匹配、冲突排除、pinned 标志与 related_reply_keys，禁止从 verdicts 反抽补造证据
+        reply_analysis = _analyze_author_replies_detailed(
+            self.candidates.findings,
+            self.author_replies,
+            consumed_reply_keys=effective_consumed,
+            consumed_comment_ids=ext_consumed_cids,
+            stale_location_fingerprints=self.candidates.stale_location_fingerprints,
+            bound_reply_targets=effective_bound_targets,
+            duplicate_aliases=history_aliases,
+            same_head_pinned_keys=same_head_pinned_keys,
+        )
+        expected_related_keys = _compute_folded_related_reply_keys(
+            reply_analysis,
+            round_duplicate_aliases=round_duplicate_aliases,
+            effective_bound_targets=effective_bound_targets,
+        )
+        for vf in self.verdicts:
+            fid = vf.finding.finding_id
+            if vf.verdict == VerificationVerdict.DUPLICATE:
+                if vf.author_reply is not None or vf.author_reply_pinned or vf.related_reply_keys:
+                    raise ConvergenceError(f"发现 {fid} 裁决为 duplicate，不得携带回复绑定或 related_reply_keys")
+                continue
+            if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
+                expected_reply = reply_analysis.bound_replies.get(fid)
+                if expected_reply is None or vf.author_reply != expected_reply:
                     raise ConvergenceError(
-                        f"发现 {fid} 的 related_reply_keys={vf.related_reply_keys!r} 与本轮独立推导 {exp_rel!r} 不一致"
+                        f"发现 {fid} 裁决为 resolved_by_wontfix，但其 author_reply 与本轮独立回复分析选定的有效回复不一致"
                     )
-        else:
-            implicit_replies = tuple(
-                vf.author_reply
-                for vf in self.verdicts
-                if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX and vf.author_reply is not None
-            )
-            implicit_analysis = (
-                _analyze_author_replies_detailed(
-                    self.candidates.findings,
-                    implicit_replies,
-                    consumed_reply_keys=history_consumed,
-                    stale_location_fingerprints=self.candidates.stale_location_fingerprints,
-                    bound_reply_targets=effective_bound_targets,
-                    duplicate_aliases=history_aliases,
-                    same_head_pinned_keys=same_head_pinned_keys,
-                )
-                if implicit_replies
-                else None
-            )
-            for vf in self.verdicts:
-                fid = vf.finding.finding_id
-                if vf.related_reply_keys:
+                _require_non_empty_str(vf.author_reply.author, "author_reply.author")
+                direct_matched, _ = _match_reply_targets(expected_reply, (vf.finding,))
+                expected_pinned = not (len(direct_matched) == 1 and direct_matched[0].finding_id == fid)
+                if vf.author_reply_pinned != expected_pinned:
                     raise ConvergenceError(
-                        f"VerifiedRound.author_replies 为空时，发现 {fid} 不得伪造非空 related_reply_keys={vf.related_reply_keys!r}"
+                        f"发现 {fid} 的 author_reply_pinned={vf.author_reply_pinned!r} 与独立推导 {expected_pinned!r} 不一致"
                     )
-                if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
-                    if vf.author_reply is None:
-                        raise ConvergenceError(f"发现 {fid} 裁决为 resolved_by_wontfix 但缺少 author_reply")
-                    _require_non_empty_str(vf.author_reply.author, "author_reply.author")
-                    assert implicit_analysis is not None
-                    expected_reply = implicit_analysis.bound_replies.get(fid)
-                    if expected_reply is None or vf.author_reply != expected_reply:
-                        raise ConvergenceError(
-                            f"发现 {fid} 绑定的作者不修回复（comment_id={vf.author_reply.comment_id}）"
-                            f"未通过本轮唯一匹配、历史锁定、过期与冲突校验"
-                        )
-                    direct_matched, _ = _match_reply_targets(expected_reply, (vf.finding,))
-                    expected_pinned = not (len(direct_matched) == 1 and direct_matched[0].finding_id == fid)
-                    if vf.author_reply_pinned != expected_pinned:
-                        raise ConvergenceError(
-                            f"发现 {fid} 的 author_reply_pinned={vf.author_reply_pinned!r} 与独立推导 {expected_pinned!r} 不一致"
-                        )
-                elif vf.author_reply is not None or vf.author_reply_pinned:
+            else:
+                if vf.author_reply is not None or vf.author_reply_pinned:
                     raise ConvergenceError(
                         f"发现 {fid} 裁决为 {vf.verdict.value!r}，不得绑定 author_reply 或 author_reply_pinned"
                     )
+            exp_rel = expected_related_keys.get(fid, ())
+            if vf.related_reply_keys != exp_rel:
+                raise ConvergenceError(
+                    f"发现 {fid} 的 related_reply_keys={vf.related_reply_keys!r} 与本轮独立推导 {exp_rel!r} 不一致"
+                )
 
     @property
     def duplicate_findings(self) -> tuple[VerifiedFinding, ...]:
@@ -4563,7 +4565,7 @@ def parse_verifier_output(
     history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in candidates.history))
     extra_consumed = _validate_consumed_reply_keys(consumed_reply_keys, "consumed_reply_keys")
     effective_consumed = history_consumed | extra_consumed
-    consumed_cids_norm = _normalize_str_collection(consumed_comment_ids, "consumed_comment_ids")
+    consumed_cids_norm = _validate_consumed_comment_ids(consumed_comment_ids, "consumed_comment_ids")
     history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(candidates.history)
     same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == candidates.head_sha)
     history_aliases = _active_duplicate_aliases(candidates.history)
@@ -4571,19 +4573,7 @@ def parse_verifier_output(
     effective_bound_targets = dict(history_bound_targets)
     _merge_bound_reply_targets(effective_bound_targets, extra_bound_targets, "bound_reply_targets")
 
-    extra_consumed_only = extra_consumed - history_consumed
-    persisted_replies_list: list[AuthorReply] = []
-    seen_persisted_replies: set[AuthorReply] = set()
-    for reply in author_replies:
-        if not isinstance(reply, AuthorReply):
-            raise ConvergenceError(f"author_replies 元素必须是 AuthorReply：{reply!r}")
-        _require_non_empty_str(reply.comment_id, "reply.comment_id")
-        if reply.reply_key in extra_consumed_only or reply.comment_id.strip() in consumed_cids_norm:
-            continue
-        if reply not in seen_persisted_replies:
-            seen_persisted_replies.add(reply)
-            persisted_replies_list.append(reply)
-    persisted_replies = tuple(persisted_replies_list)
+    persisted_replies = _dedupe_author_replies_keep_last(author_replies, "author_replies")
 
     reply_analysis = _analyze_author_replies_detailed(
         candidate_list,
@@ -4724,6 +4714,9 @@ def parse_verifier_output(
         verdicts=tuple(verdicts_by_id[cid] for cid in ordered_ids),
         bound_reply_targets=new_explicit_bound_targets,
         author_replies=persisted_replies,
+        explicit_bound_reply_targets=new_explicit_bound_targets,
+        external_consumed_reply_keys=extra_consumed,
+        external_consumed_comment_ids=consumed_cids_norm,
     )
 
 
@@ -4981,6 +4974,7 @@ def _derive_round_reply_pins_and_consumed(
     verified_findings: Sequence[VerifiedFinding],
     author_replies: Sequence[AuthorReply],
     history_consumed: frozenset[str],
+    consumed_comment_ids: frozenset[str] = frozenset(),
     seed_bound_targets: Mapping[str, str],
     history_aliases: Mapping[str, str],
     active_aliases: Mapping[str, str],
@@ -4994,6 +4988,7 @@ def _derive_round_reply_pins_and_consumed(
         findings,
         author_replies,
         consumed_reply_keys=history_consumed,
+        consumed_comment_ids=consumed_comment_ids,
         stale_location_fingerprints=pre_verdict_stale,
         bound_reply_targets=seed_bound_targets,
         duplicate_aliases=history_aliases,
@@ -5203,11 +5198,11 @@ def _derive_round_decision_payload(
     )
     unresolved_important = tuple(vf.finding for vf in blocking)
 
-    merged_replies_base = _merge_author_replies(verified.author_replies, author_replies)
-    wontfix_replies = tuple(vf.author_reply for vf in ordered_tuple if vf.author_reply is not None)
-    merged_author_replies = _merge_author_replies(merged_replies_base, wontfix_replies)
+    merged_author_replies = _merge_author_replies(verified.author_replies, author_replies)
 
     history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history))
+    effective_consumed = history_consumed | verified.external_consumed_reply_keys
+    effective_consumed_cids = verified.external_consumed_comment_ids
     history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(history)
     same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == head_sha)
     verified_bound_targets = _validate_bound_reply_targets_frozenset(
@@ -5227,7 +5222,8 @@ def _derive_round_decision_payload(
         findings=verified.candidates.findings,
         verified_findings=ordered_tuple,
         author_replies=merged_author_replies,
-        history_consumed=history_consumed,
+        history_consumed=effective_consumed,
+        consumed_comment_ids=effective_consumed_cids,
         seed_bound_targets=effective_bound_targets,
         history_aliases=history_aliases,
         active_aliases=active_aliases,
@@ -5336,6 +5332,7 @@ class RoundDecision:
     duplicate_aliases: tuple[tuple[str, str], ...] = ()
     history: tuple[RoundHistoryEntry, ...] = ()
     author_replies: tuple[AuthorReply, ...] = ()
+    extra_author_replies: tuple[AuthorReply, ...] = ()
     verified_round: VerifiedRound | None = None
     max_auto_rounds: int = MAX_AUTO_ROUNDS
 
@@ -5350,12 +5347,19 @@ class RoundDecision:
             if not isinstance(reply, AuthorReply):
                 raise ConvergenceError(f"RoundDecision.author_replies 元素必须是 AuthorReply：{reply!r}")
             _require_non_empty_str(reply.comment_id, "RoundDecision.author_replies[].comment_id")
+        if not isinstance(self.extra_author_replies, tuple):
+            raise ConvergenceError("RoundDecision.extra_author_replies 必须是 AuthorReply 元组")
+        norm_extra_replies = _dedupe_author_replies_keep_last(
+            self.extra_author_replies,
+            "RoundDecision.extra_author_replies",
+        )
+        object.__setattr__(self, "extra_author_replies", norm_extra_replies)
         norm_head = _normalize_commit_sha(self.head_sha, "RoundDecision.head_sha")
         object.__setattr__(self, "head_sha", norm_head)
 
         expected = _derive_round_decision_payload(
             self.verified_round,
-            author_replies=self.author_replies,
+            author_replies=self.extra_author_replies,
             max_auto_rounds=self.max_auto_rounds,
         )
         checks: tuple[tuple[str, bool], ...] = (
@@ -5560,9 +5564,10 @@ def evaluate_round(
     max_auto_rounds: int = MAX_AUTO_ROUNDS,
 ) -> RoundDecision:
     """基于经强校验绑定的 VerifiedRound 计算单轮收敛裁决（不再接受松散 round_number 与裸 verdicts）。"""
+    extra_replies = _dedupe_author_replies_keep_last(author_replies, "author_replies")
     payload = _derive_round_decision_payload(
         verified,
-        author_replies=author_replies,
+        author_replies=extra_replies,
         max_auto_rounds=max_auto_rounds,
     )
     return RoundDecision(
@@ -5591,6 +5596,7 @@ def evaluate_round(
         duplicate_aliases=payload.duplicate_aliases,
         history=payload.history,
         author_replies=payload.author_replies,
+        extra_author_replies=extra_replies,
         verified_round=verified,
         max_auto_rounds=max_auto_rounds,
     )
@@ -6344,6 +6350,61 @@ def _compact_alias_tag_candidates(
     )
 
 
+def _select_alias_tags_for_budget(
+    blocking_findings: Sequence[VerifiedFinding],
+    extra_budget: int,
+    *,
+    upgraded_lookup: Mapping[str, tuple[str, ...]],
+    prior_alias_lookup: Mapping[str, tuple[str, ...]],
+) -> tuple[dict[int, str], int, int]:
+    """在给定额外预算下为阻断项分配升级/别名标注：优先预留最短可放下的旧ID→新ID关系，再按剩余预算提升完整度。"""
+    remaining = max(0, extra_budget)
+    item_candidates: list[tuple[int, tuple[str, ...]]] = []
+    for idx, vf in enumerate(blocking_findings):
+        fid = vf.finding.finding_id
+        if fid in upgraded_lookup:
+            item_candidates.append((idx, _compact_alias_tag_candidates(fid, upgraded_lookup[fid], upgraded=True)))
+        elif fid in prior_alias_lookup:
+            item_candidates.append((idx, _compact_alias_tag_candidates(fid, prior_alias_lookup[fid], upgraded=False)))
+
+    chosen: dict[int, str] = {}
+    arrow_count = 0
+
+    for idx, cands in item_candidates:
+        arrow_cands = [tag for tag in cands if "→" in tag]
+        if not arrow_cands:
+            continue
+        shortest_arrow = min(arrow_cands, key=len)
+        if len(shortest_arrow) <= remaining:
+            chosen[idx] = shortest_arrow
+            remaining -= len(shortest_arrow)
+            arrow_count += 1
+
+    for idx, cands in item_candidates:
+        if idx in chosen:
+            continue
+        shortest_any = min(cands, key=len)
+        if len(shortest_any) <= remaining:
+            chosen[idx] = shortest_any
+            remaining -= len(shortest_any)
+
+    for idx, cands in item_candidates:
+        current = chosen.get(idx)
+        if current is None:
+            continue
+        cur_idx = cands.index(current)
+        for better_tag in cands[:cur_idx]:
+            delta = len(better_tag) - len(current)
+            if delta <= remaining:
+                chosen[idx] = better_tag
+                remaining -= delta
+                if "→" in better_tag and "→" not in current:
+                    arrow_count += 1
+                break
+
+    return chosen, remaining, arrow_count
+
+
 def _render_blocking_section_with_budget(
     header: str,
     blocking_findings: Sequence[VerifiedFinding],
@@ -6384,21 +6445,14 @@ def _render_blocking_section_with_budget(
     extra_budget = max_chars - len(base_body) - len(note)
 
     # 优先保留升级/别名对应关系（旧ID→新ID），与标题/坐标同优先级，再把剩余预算分配给失败场景与证据
-    for idx, vf in enumerate(blocking_findings):
-        if extra_budget <= 0:
-            break
-        fid = vf.finding.finding_id
-        if fid in upgraded_lookup:
-            tag_candidates = _compact_alias_tag_candidates(fid, upgraded_lookup[fid], upgraded=True)
-        elif fid in prior_alias_lookup:
-            tag_candidates = _compact_alias_tag_candidates(fid, prior_alias_lookup[fid], upgraded=False)
-        else:
-            continue
-        for tag in tag_candidates:
-            if len(tag) <= extra_budget:
-                minimal_lines[idx] += tag
-                extra_budget -= len(tag)
-                break
+    chosen_tags, extra_budget, _ = _select_alias_tags_for_budget(
+        blocking_findings,
+        extra_budget,
+        upgraded_lookup=upgraded_lookup,
+        prior_alias_lookup=prior_alias_lookup,
+    )
+    for idx, tag in chosen_tags.items():
+        minimal_lines[idx] += tag
 
     for idx, vf in enumerate(blocking_findings):
         if extra_budget <= 0:
@@ -6678,38 +6732,29 @@ def render_findings_comment(
             f"（至少需 {len(mandatory_base)} 字符）"
         )
 
-    preferred_alias_extra = 0
+    note_candidates = [
+        candidate_note
+        for candidate_note in (truncation_note, short_note, "")
+        if len(mandatory_base) + len(candidate_note) <= max_chars
+    ]
     if decision.blocking_findings and (upgraded_aliases_by_id or prior_important_aliases_by_id):
-        for vf in decision.blocking_findings:
-            fid = vf.finding.finding_id
-            if fid in upgraded_aliases_by_id:
-                preferred_alias_extra += len(
-                    _compact_alias_tag_candidates(fid, upgraded_aliases_by_id[fid], upgraded=True)[0]
-                )
-            elif fid in prior_important_aliases_by_id:
-                preferred_alias_extra += len(
-                    _compact_alias_tag_candidates(fid, prior_important_aliases_by_id[fid], upgraded=False)[0]
-                )
-
-    if preferred_alias_extra > 0:
-        if len(mandatory_base) + preferred_alias_extra + len(truncation_note) <= max_chars:
-            note = truncation_note
-        elif len(mandatory_base) + preferred_alias_extra + len(short_note) <= max_chars:
-            note = short_note
-        elif len(mandatory_base) + preferred_alias_extra <= max_chars:
-            note = ""
-        elif len(mandatory_base) + len(truncation_note) <= max_chars:
-            note = truncation_note
-        elif len(mandatory_base) + len(short_note) <= max_chars:
-            note = short_note
-        else:
-            note = ""
-    elif len(mandatory_base) + len(truncation_note) <= max_chars:
-        note = truncation_note
-    elif len(mandatory_base) + len(short_note) <= max_chars:
-        note = short_note
+        best_note = ""
+        best_score: tuple[int, int, int] = (-1, -1, -1)
+        for candidate_note in note_candidates:
+            rem_budget = max_chars - len(mandatory_base) - len(candidate_note)
+            chosen_tags, _, arrow_count = _select_alias_tags_for_budget(
+                decision.blocking_findings,
+                rem_budget,
+                upgraded_lookup=upgraded_aliases_by_id,
+                prior_alias_lookup=prior_important_aliases_by_id,
+            )
+            score = (arrow_count, len(chosen_tags), len(candidate_note))
+            if score > best_score:
+                best_score = score
+                best_note = candidate_note
+        note = best_note
     else:
-        note = ""
+        note = note_candidates[0] if note_candidates else ""
 
     if decision.blocking_findings:
         body = _render_blocking_section_with_budget(
