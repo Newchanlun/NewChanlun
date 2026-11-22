@@ -52,7 +52,7 @@ REVIEW_WORKER_ENV = (*DOCKER_ENV, "SANDCASTLE_MAIN_MODEL", "SANDCASTLE_CONFIG_FI
 MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 POLICY = "external-pr-v2-gpt62"
 # 与 codex-child.ts PROVIDER_DEFINITION.base_url 及 codex-route.mts Docker 容器端点（host.docker.internal:8318/v1）一致。
-FORMAL_PROXY_URL = "http://host.docker.internal:8318"  # DevSkim: ignore DS162092 有意使用本机容器网关（与正式审阅容器端点一致），非调试残留
+FORMAL_PROXY_URL = "http://host.docker.internal:8318"  # DevSkim: ignore DS137138,DS162092 有意使用本机容器网关（与正式审阅容器端点一致），非明文外网流量
 PREFLIGHT_SCRIPT = Path(__file__).resolve().parents[1] / "review_preflight.py"
 PREFLIGHT_RATE_LIMIT_FILE = "preflight-rate-limits.json"
 PREFLIGHT_ENV_CONTAINER = "REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER"
@@ -668,16 +668,17 @@ class ExternalReview:
                 limited.append(item["name"].removeprefix("roundtrip:"))
         return limited
 
-    def admit_preflight(self, target: ReviewTarget) -> dict:
-        """新 attempt 登记与复用退回共用的启动前预检闸：任一路由或模型证明失败即拒，不占 attempt、不发状态。"""
+    def admit_preflight(self, target: ReviewTarget, *, pre_dispatch: bool = False) -> dict:
+        """新 attempt 登记与沿用退回共用的启动前预检闸：任一路由或模型证明失败即拒，不发状态。"""
+        suffix = "未发状态、待退避重试" if pre_dispatch else "未占 attempt、未发状态"
         try:
             raw = self.preflight(target)
         except EffectPending:
             raise
         except Exception as error:
-            raise EffectPending(f"preflight-blocked：预检异常（{type(error).__name__}），未占 attempt") from None
+            raise EffectPending(f"preflight-blocked：预检异常（{type(error).__name__}），{suffix}") from None
         if not isinstance(raw, dict):
-            raise EffectPending("preflight-blocked：预检返回格式无效，未占 attempt")
+            raise EffectPending(f"preflight-blocked：预检返回格式无效，{suffix}")
         if "report" in raw:
             rc = raw.get("returncode")
             report = raw.get("report")
@@ -693,8 +694,8 @@ class ExternalReview:
                       if isinstance(c, dict) and not c.get("ok")]
             detail = ", ".join(str(name) for name in failed) if failed else f"rc={rc}"
             if limited:
-                raise EffectPending(f"preflight-blocked：预检遇到上游限流（{detail}），未占 attempt、未发状态")
-            raise EffectPending(f"preflight-blocked：预检未通过（{detail}），未占 attempt、未发状态")
+                raise EffectPending(f"preflight-blocked：预检遇到上游限流（{detail}），{suffix}")
+            raise EffectPending(f"preflight-blocked：预检未通过（{detail}），{suffix}")
         checks = {c["name"]: c for c in report.get("checks", []) if isinstance(c, dict) and isinstance(c.get("name"), str)}
         seen_routes: set[tuple[str, ...]] = set()
         seen_models: set[str] = set()
@@ -702,7 +703,7 @@ class ExternalReview:
             route = checks.get(f"route:{model}")
             rt = checks.get(f"roundtrip:{model}")
             if not route or route.get("ok") is not True or not rt or rt.get("ok") is not True:
-                raise EffectPending(f"preflight-blocked：缺少通过的 {model} 预检项，未占 attempt、未发状态")
+                raise EffectPending(f"preflight-blocked：缺少通过的 {model} 预检项，{suffix}")
             raw_route_detail = route.get("detail")
             route_detail: dict[str, Any] = raw_route_detail if isinstance(raw_route_detail, dict) else {}
             expected_routes = route_detail.get("expected")
@@ -710,18 +711,18 @@ class ExternalReview:
             if (not isinstance(expected_routes, list) or not expected_routes
                     or not isinstance(actual_routes, list) or not actual_routes
                     or any(item not in expected_routes for item in actual_routes)):
-                raise EffectPending(f"preflight-blocked：{model} 路由收据无效，未占 attempt、未发状态")
+                raise EffectPending(f"preflight-blocked：{model} 路由收据无效，{suffix}")
             if model.startswith("gpt-6.2-") and any(item != f"codex:{model}@chatgpt.com" for item in actual_routes):
-                raise EffectPending(f"preflight-blocked：{model} 路由收据未绑定精确模型，未占 attempt、未发状态")
+                raise EffectPending(f"preflight-blocked：{model} 路由收据未绑定精确模型，{suffix}")
             seen_routes.add(tuple(sorted(set(actual_routes))))
             raw_rt_detail = rt.get("detail")
             rt_detail: dict[str, Any] = raw_rt_detail if isinstance(raw_rt_detail, dict) else {}
             returned = rt_detail.get("returned_model")
             if returned != model:
-                raise EffectPending(f"preflight-blocked：{model} 响应模型不符（{returned!r}），未占 attempt、未发状态")
+                raise EffectPending(f"preflight-blocked：{model} 响应模型不符（{returned!r}），{suffix}")
             seen_models.add(returned)
         if len(seen_routes) != len(MODELS) or len(seen_models) != len(MODELS):
-            raise EffectPending("preflight-blocked：两路审查模型或路由证据未区分，未占 attempt、未发状态")
+            raise EffectPending(f"preflight-blocked：两路审查模型或路由证据未区分，{suffix}")
         self._record_preflight_rate_limit(target, rate_limited=False, models=list(MODELS))
         return report
 
@@ -1316,7 +1317,7 @@ class ExternalReview:
                 if target.reuse_planned and not any((folder / model).exists() for model in MODELS):
                     self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
                     self.admit_quota()
-                    self.admit_preflight(target)
+                    self.admit_preflight(target, pre_dispatch=True)
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
                     raise Stale("同 head 已有更晚登记的 attempt，本 run 不再派发")
                 if any(not (folder / model / "launch.json").exists() for model in MODELS):

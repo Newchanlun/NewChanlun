@@ -1179,6 +1179,29 @@ def test_round_trip_rejects_http_redirect_without_forwarding_auth_header():
     assert trap_hits == []
 
 
+@pytest.mark.parametrize("payload", [
+    {"type": "response.failed", "response": {"status": "failed", "error": {"code": "rate_limit_exceeded", "message": "Too many requests"}}},
+    {"type": "error", "code": "rate_limit_exceeded", "message": "Too many requests"},
+])
+def test_round_trip_classifies_http_200_sse_structured_rate_limit_codes(monkeypatch, payload):
+    """HTTP 200 SSE 终态带结构化错误码 rate_limit_exceeded 时归类为 rate_limit，便于接入全局限流退避。"""
+    import io
+
+    class FakeResp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    raw = ("data: " + json.dumps(payload) + "\n\n").encode()
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: FakeResp(raw))
+    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-sse-rl", preflight.Deadline(10))
+    assert trip["ok"] is False and trip["http_status"] == 200 and trip["error"]["class"] == "rate_limit"
+
+
 def test_probe_in_container_runs_admitted_image_over_stdin_without_leaking_key(env, capsys, tmp_path, monkeypatch):
     """--probe-in-container 在审阅镜像容器内执行 HTTP 探针，密钥只走 stdin，不进 argv 或容器 env。"""
     monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")

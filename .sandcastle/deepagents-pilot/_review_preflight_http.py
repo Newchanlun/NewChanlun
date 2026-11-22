@@ -25,7 +25,10 @@ ERROR_CLASSES = (
     ("invalid bearer", "auth"),
     ("unauthorized", "auth"),
     ("authentication", "auth"),
+    ("rate_limit", "rate_limit"),
     ("rate limit", "rate_limit"),
+    ("too_many_requests", "rate_limit"),
+    ("too many requests", "rate_limit"),
     ("overloaded", "overloaded"),
     ("model_not_found", "model_not_found"),
     ("not supported", "unsupported"),
@@ -42,10 +45,13 @@ def _open_http(request: urllib.request.Request, timeout: float):
     return opener.open(request, timeout=timeout)
 
 
-def _error_info(body: str) -> dict:
-    """上游错误正文只给长度、sha256 前 12 位与固定词表分类，不抄原文。"""
-    lowered = body.lower()
-    kind = next((label for needle, label in ERROR_CLASSES if needle in lowered), "unclassified")
+def _error_info(body: str, *, code: str | None = None) -> dict:
+    """上游错误正文只给长度、sha256 前 12 位与固定词表分类，不抄原文；优先按结构化错误码分类。"""
+    code_lower = code.lower() if isinstance(code, str) else ""
+    kind = next((label for needle, label in ERROR_CLASSES if needle in code_lower), None)
+    if kind is None:
+        lowered = body.lower()
+        kind = next((label for needle, label in ERROR_CLASSES if needle in lowered), "unclassified")
     return {
         "class": kind,
         "length": len(body),
@@ -107,7 +113,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> 
         return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
     try:
         with _open_http(request, timeout=timeout) as response:
-            terminal, detail, status, returned_model = None, "流在终态事件前结束", None, None
+            terminal, detail, error_code, status, returned_model = None, "流在终态事件前结束", None, None, None
             for raw in response.read().splitlines():
                 if work_left() <= 0:
                     detail = "总时限内无终态事件"
@@ -127,8 +133,19 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> 
                         raw_model = inner.get("model")
                         returned_model = raw_model if raw_model in MODELS else (
                             None if raw_model is None else "other")
+                        inner_err = inner.get("error")
+                        event_err = event.get("error")
+                        error_code = next(
+                            (value for value in (
+                                inner_err.get("code") if isinstance(inner_err, dict) else None,
+                                event_err.get("code") if isinstance(event_err, dict) else None,
+                                inner.get("code"),
+                                event.get("code"),
+                            ) if isinstance(value, str) and value),
+                            None,
+                        )
                         detail = next(
-                            (value for value in (inner.get("error"), event.get("error"), event.get("message"))
+                            (value for value in (inner_err, event_err, event.get("message"), error_code)
                              if value is not None),
                             None,
                         )
@@ -147,7 +164,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline) -> 
                 "status": status,
                 "returned_model": returned_model,
                 "ok": ok,
-                "error": None if ok else _error_info(text),
+                "error": None if ok else _error_info(text, code=error_code),
             }
     except urllib.error.HTTPError as error:
         return {

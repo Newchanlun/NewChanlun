@@ -82,6 +82,7 @@ from typing import Any, Protocol
 from .external_review import (
     DEFAULT_IDENTITY,
     IDENTITY_CONFIG,
+    MODELS,
     POLICY,
     PREFLIGHT_RATE_LIMIT_FILE,
     REVIEW_CONTRACT,
@@ -362,10 +363,12 @@ class Sweep:
         return sorted(pulls, key=key)
 
     def rate_limit_backoff(self) -> dict[str, Any] | None:
-        """限流退避是否生效：合并已完结且真派过模型的 run（outcome.json）与启动前预检限流记录
-        （preflight-rate-limits.json，不占 attempt），按时间倒序取最近 RATE_LIMIT_RUNS 条，
-        均命中限流且最新一条不足 RATE_LIMIT_BACKOFF_SECONDS 时返回日志行，否则 None。读不了的记录跳过。"""
-        events: list[tuple[float, str, bool]] = []
+        """限流退避是否生效（两条独立判定取更长退避窗口）：
+        1. 正式审阅链：最近 RATE_LIMIT_RUNS 个已完结且真派过模型的 run（outcome.json）均命中 failure_code=rate_limited，
+           轻量预检成功绝不抵消正式审阅的连续限流；
+        2. 预检+审阅合流：合并 preflight-rate-limits.json 与正式审阅记录，最近 RATE_LIMIT_RUNS 条均命中限流时同样触发退避
+           （不占 attempt；后续预检通过可解除预检侧限流）。读不了的记录跳过。"""
+        formal_events: list[tuple[float, str, bool]] = []
         for path in (self.lane.state_root / "runs").glob("*/outcome.json"):
             try:
                 mtime = path.stat().st_mtime
@@ -380,7 +383,8 @@ class Sweep:
                         continue
             except (OSError, ValueError, AttributeError):
                 continue
-            events.append((mtime, str(outcome.get("run_id")), limited))
+            formal_events.append((mtime, str(outcome.get("run_id")), limited))
+        preflight_events: list[tuple[float, str, bool]] = []
         preflight_log = self.lane.state_root / PREFLIGHT_RATE_LIMIT_FILE
         if preflight_log.is_file():
             try:
@@ -390,16 +394,23 @@ class Sweep:
                     for row in rows:
                         if (isinstance(row, dict) and isinstance(row.get("at"), int | float)
                                 and not isinstance(row.get("at"), bool) and isinstance(row.get("rate_limited"), bool)):
-                            events.append((float(row["at"]), str(row.get("id") or "preflight"), row["rate_limited"]))
+                            preflight_events.append(
+                                (float(row["at"]), str(row.get("id") or "preflight"), row["rate_limited"])
+                            )
             except (OSError, ValueError, TypeError):
                 pass
-        found = sorted(events, key=lambda item: item[0], reverse=True)[:RATE_LIMIT_RUNS]
-        if len(found) < RATE_LIMIT_RUNS or not all(limited for _, _, limited in found):
+        now_ts = self.now().timestamp()
+        active: list[tuple[float, list[str]]] = []
+        for stream in (formal_events, [*formal_events, *preflight_events]):
+            found = sorted(stream, key=lambda item: item[0], reverse=True)[:RATE_LIMIT_RUNS]
+            if len(found) == RATE_LIMIT_RUNS and all(limited for _, _, limited in found):
+                until = found[0][0] + RATE_LIMIT_BACKOFF_SECONDS
+                if now_ts < until:
+                    active.append((until, [run for _, run, _ in found]))
+        if not active:
             return None
-        until = found[0][0] + RATE_LIMIT_BACKOFF_SECONDS
-        if self.now().timestamp() >= until:
-            return None
-        return {"action": "rate-limit-backoff", "runs": [run for _, run, _ in found],
+        until, runs = max(active, key=lambda item: item[0])
+        return {"action": "rate-limit-backoff", "runs": runs,
                 "until": datetime.fromtimestamp(until, timezone.utc).isoformat()}
 
     def _resumes(self, number: int, head: str, attempt: int) -> Path:
@@ -429,6 +440,26 @@ class Sweep:
     def _resumable(row: dict) -> bool:
         target = row["target"]
         return target.get("policy_version") == POLICY and target.get("review_contract") == REVIEW_CONTRACT
+
+    def _pre_dispatch_reuse_fallback(self, row: dict) -> bool:
+        """沿用登记后在发 pending 与建工蜂目录前即被预检/空间/额度拦下：尚未开始审查，按 launch-backoff 重试而不消耗唯一续跑机会。"""
+        if row.get("outcome") or not row["target"].get("reuse_planned"):
+            return False
+        target = row["target"]
+        key = (f"r{target['repository_id']}-p{target['pr_number']}-{target['base_sha']}"
+               f"-{target['head_sha']}-{target['policy_version']}-a{target['attempt']}")
+        folder = self.lane.state_root / "runs" / key
+        if (folder / "effects" / "status-pending.json").exists():
+            return False
+        return not any((folder / model).exists() for model in MODELS)
+
+    def _launch_with_backoff(self, number: int, head: str, base: str, attempt: int) -> tuple[str, dict | None]:
+        marker = self.folder / f"p{number}-{head}-{base}-a{attempt}.launched"
+        if marker.exists() and time.time() - marker.stat().st_mtime < LAUNCH_BACKOFF_SECONDS:
+            return "launch-backoff", None
+        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker.write_text(str(time.time()))
+        return "launch", {"pid": self._launch(number, head, attempt), "attempt": attempt}
 
     def decide(self, pr: dict[str, Any], busy: set[int], running: int, behind: bool) -> tuple[str, dict | None]:
         number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["sha"]
@@ -466,19 +497,16 @@ class Sweep:
             if not self._has_commits(base, head):
                 return "needs-source-sync", None
         current = [r for r in runs if r["target"].get("base_sha") == base]
-        if latest is not None and not latest["outcome"] and latest["target"].get("base_sha") == base:  # 最新登记的未完结 attempt：续跑一次
+        if latest is not None and not latest["outcome"] and latest["target"].get("base_sha") == base:  # 最新登记的未完结 attempt
             if not self._resumable(latest):
                 return "needs-operator", None
+            if self._pre_dispatch_reuse_fallback(latest):  # 沿用退回、尚未发 pending/建工蜂目录：走 launch-backoff，不耗尽唯一续跑机会
+                return self._launch_with_backoff(number, head, base, latest["target"]["attempt"])
             return self._resume_once(number, head, latest["target"]["attempt"], "review")
         attempt = max((r["target"]["attempt"] for r in current), default=0) + 1
         # 子进程在登记前就退出（读 PR 失败、App 身份未就绪、controller 不干净）时同一 attempt 会原样再派；
         # 退避一段时间，免得每轮都派一个必死的子进程。
-        marker = self.folder / f"p{number}-{head}-{base}-a{attempt}.launched"
-        if marker.exists() and time.time() - marker.stat().st_mtime < LAUNCH_BACKOFF_SECONDS:
-            return "launch-backoff", None
-        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        marker.write_text(str(time.time()))
-        return "launch", {"pid": self._launch(number, head, attempt), "attempt": attempt}
+        return self._launch_with_backoff(number, head, base, attempt)
 
     def tick(self) -> list[dict[str, Any]]:
         try:
@@ -758,7 +786,12 @@ class Sweep:
             number, head = entry["pr"], entry["head"]
             try:
                 if write == "merge":
-                    self.github.merge(number, head)
+                    # 持与 attempt 登记共用的 PR 锁复验最新 attempt 并完成合入，防规划到合入之间新登记的 attempt 被旧 PASS 抢跑。
+                    with self.lane._pr_lock(number):
+                        if self._latest_attempt_blocks_merge(number, head):
+                            result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
+                        else:
+                            self.github.merge(number, head)
                 elif write == "update":
                     self.github.update_branch(number, head)
                 elif write == "disable":

@@ -372,6 +372,83 @@ def test_preflight_rate_limits_feed_global_sweep_backoff_without_occupying_attem
     assert sweep.rate_limit_backoff() is None
 
 
+def test_auto_merge_rechecks_latest_attempt_under_pr_lock_before_merging(lane, monkeypatch):
+    """规划后、合入写入前若同 head 新登记了 A2，合入持 PR 锁复验必须拦截，不能凭旧 A1 的 success 抢跑合入。"""
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    green(github, head)
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    with monkeypatch.context() as legacy:
+        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
+        old_target = lane.target(1810, 1)
+    (lane.state_root / "runs" / old_target.key / "outcome.json").write_text(json.dumps({
+        "verdict": "PASS", "publication": {"id": 1, "state": "success"},
+    }))
+    real_plan_one = sweep._plan_one
+    raced = {"done": False}
+    def plan_then_register(*args, **kwargs):
+        res = real_plan_one(*args, **kwargs)
+        if not raced["done"]:
+            raced["done"] = True
+            lane.target(1810, 2)  # 模拟规划与合入之间并发登记的新 attempt（未发 pending）
+        return res
+    monkeypatch.setattr(sweep, "_plan_one", plan_then_register)
+    actions = sweep.tick()
+    assert github.calls == []
+    assert any(a.get("rechecked_under_pr_lock") is True and a.get("pending_latest_attempt") is True for a in actions)
+
+
+def test_preflight_pass_does_not_mask_consecutive_formal_rate_limits(lane):
+    """预检成功记录绝不能隔断连续两次正式审查 429 触发的 30 分钟全局退避。"""
+    import time
+
+    github = FakeGitHub(lane)
+    base_t = time.time()
+    clock = {"t": base_t + 100}
+    sweep, host, _ = make(lane, run=False, github=github, now=lambda: datetime.fromtimestamp(clock["t"], timezone.utc))
+    # 历史上有过预检限流日志，随后顺序为：预检成功 -> 正式审阅 429 -> 预检成功 -> 正式审阅 429
+    finished_run(lane, "11", base_t + 20, rate_limited=True)
+    finished_run(lane, "12", base_t + 60, rate_limited=True)
+    (lane.state_root / module.PREFLIGHT_RATE_LIMIT_FILE).write_text(json.dumps({
+        "events": [
+            {"at": base_t + 1, "id": "pf-0", "rate_limited": True, "models": [MODELS[0]]},
+            {"at": base_t + 10, "id": "pf-1", "rate_limited": False, "models": list(MODELS)},
+            {"at": base_t + 50, "id": "pf-2", "rate_limited": False, "models": list(MODELS)},
+            {"at": base_t + 70, "id": "pf-3", "rate_limited": False, "models": list(MODELS)},
+        ],
+    }))
+    backoff = sweep.rate_limit_backoff()
+    assert backoff is not None and backoff["runs"] == ["run-12", "run-11"]
+    assert acts(sweep.tick(), 1810) == ["review-backoff"] and host.spawned == []
+
+
+def test_reuse_fallback_preflight_failure_uses_launch_backoff_not_one_shot_resume(lane, monkeypatch):
+    """沿用登记后来源失效且预检失败（未发 pending、未建工蜂目录）：按 launch-backoff 重试，不消耗唯一一次审查续跑。"""
+    import dataclasses
+
+    sweep, host, _ = make(lane, run=False)
+    target = dataclasses.replace(lane.target(1810, 1), reuse_planned=True)
+    folder = lane.state_root / "runs" / target.key
+    (folder / "target.json").write_text(json.dumps(dataclasses.asdict(target)))
+
+    # 1. 首轮按 launch 重派同一 attempt（非 resume-review，不写 .resumes）
+    assert acts(sweep.tick()) == ["launch"]
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 1)]
+    assert not sweep._resumes(1810, target.head_sha, 1).exists()
+
+    # 2. 若仍遇预检故障退出，退避期内报 launch-backoff，不卡死在 needs-operator
+    host.rows.clear()
+    assert acts(sweep.tick()) == ["launch-backoff"]
+    assert not sweep._resumes(1810, target.head_sha, 1).exists()
+
+    # 3. 退避期满后自动重派同一 attempt，而非永久需人工介入
+    marker = sweep.folder / f"p1810-{target.head_sha}-{target.base_sha}-a1.launched"
+    old = marker.stat().st_mtime - module.LAUNCH_BACKOFF_SECONDS - 5
+    os.utime(marker, (old, old))
+    assert acts(sweep.tick()) == ["launch"]
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 1), (1810, 1)]
+
+
 def test_explicit_reattempt_by_operator_is_left_alone(lane):
     sweep, host, _ = make(lane)
     sweep.tick()
