@@ -94,7 +94,7 @@ SPEC C11.4 要求每个条目「附替代入口、失去的生产写权、保留
      - :243 `ws_live` 收编
      - :245 OE41/42/45 不纳分母
    - 直发表：:251-253 三行冻结影子。
-   - :268「全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher。」
+   - :268「全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher。」（注：引文内 `trading_system/live/runner.py` 已删除（#1385 OE13），删前原脚本见 [runner.py@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py)；当前正式入口见 `production_session`。）
    - :272「`evidence_class` 只决定 adapter 装配：`simulation` 装受控撮合」。
    - :277「launcher 从 profile 的 `credential_scope` 指向的来源读取凭据，**只**写进 X 子进程的启动环境」。
    - :292-297 三层锁。
@@ -115,7 +115,8 @@ SPEC C11.4 要求每个条目「附替代入口、失去的生产写权、保留
    - :72「旧 Python `trading_system/config/broker_config.py` 与 `trading_system/execution/risk_controls.py` 为可收编资产（ADR 0027 裁定五），不自动成为正本。」
 6. **ADR 0030**（`docs/adr/0030-exit-authorization-and-liability-retirement.md`）:44「无法连接场所是失败态（保留最大责任、重试、不切判据、不回退旧 writer），不是另一种政策。」
 7. **ADR 0012**（`docs/adr/0012-inference-layer-document-naming.md`）:65「**不追溯更新**：一条推论被裁定覆盖之后，推论层那份原文**不动、不改、不加批注**。」
-8. **ADR 0021**（`docs/adr/0021-venue-selection-deferred.md`）:13「三条下单链**没有一条 live 跑过**；`trading_system/live/runner.py` 自述『阶段 4+ 骨架，当前不可运行』」。
+8. **ADR 0021**（`docs/adr/0021-venue-selection-deferred.md`）:13：
+   - 「三条下单链**没有一条 live 跑过**；`trading_system/live/runner.py` 自述『阶段 4+ 骨架，当前不可运行』」。（注：引文内 `trading_system/live/runner.py` 已删除（#1385 OE13），删前原脚本见 [runner.py:1@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py#L1)；当前正式入口见 `production_session`。）
 9. **ADR 0041**（`docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md`）
    - :9「本通则只管**自由度**：正本标为 `[新缠论:选择]`、或属参数类且缠师原文无定论的量」。
    - :21「签署门字段的默认值 ＝ `AwaitingPolicy`」。
@@ -337,7 +338,7 @@ ADR 0048 编号写死：origin/main `66c409e7e3` 最大 0046，预留表 adr-res
 
 ### 三、删除执行
 
-本票唯一授权执行的删除是 `trading_system/live/runner.py`，执行票 #1385。#1385 在执行中若发现任何尾责事实（旧账户、未完成 T/voice、外部尾债，OE11 :192 同类），删除即告失败并停止，事实交 #1402，不改用其他终态继续。其余所有行本票**不授权删除**：
+本票唯一授权执行的删除是 `trading_system/live/runner.py`，执行票 #1385（现已删除，#1385 OE13；删前原脚本见 [runner.py@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py)，当前正式入口见 `production_session`）。#1385 在执行中若发现任何尾责事实（旧账户、未完成 T/voice、外部尾债，OE11 :192 同类），删除即告失败并停止，事实交 #1402，不改用其他终态继续。其余所有行本票**不授权删除**：
 - `recursive_t` 与 `backtest_t_fugue.py` 归 #1096 路径；
 - `ThetaPiStream`/`PyThetaStream` 归 #1304 路径；
 - 其他冻结影子满足退场条件后，删除须另开执行票逐依赖验收（X6），并逐个记录消费者归宿（B-Q16）。
@@ -385,22 +386,24 @@ ADR 0048 编号写死：origin/main `66c409e7e3` 最大 0046，预留表 adr-res
 
 - A1 文件存在：`find docs/adr -name '*-legacy-engine-module-level-dispositions.md' | wc -l | tr -d ' '` 输出 `1`。
 - A2 可执行命令：`rg -c '^> 正本：本文件是' "$(find docs/adr -name '*-legacy-engine-module-level-dispositions.md')"` 输出 `1`。
-- A3 可执行命令，输出为空：
+- A3 可执行命令，输出为空（原单行命令见 [ADR 0048:390@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0048-legacy-engine-module-level-dispositions.md#L390)；下述按现存路径与已删路径分行，保持相同逐键核验语义）：
   ```
-  f=$(find docs/adr -name '*-legacy-engine-module-level-dispositions.md'); for k in recursive_t run_recursive_t PyTFugueStream PyRecStream backtest_t_fugue.py pi_theta_fill_loop run_theta_v0_pi theta_backtest ThetaPiStream PyThetaStream theta_rec_strategy.py theta_pi_strategy.rs backtest_engine.rs order_adapter.rs PyFugueV3Stream run_fugue_v3 PySpiralStream run_spiral run_organic run_positional PyUnnStream PyOrganicTape 'trading_system/live/runner.py' 'trading_system/backtest/runner.py' chanlun_strategy.py lmt_executor.py maker_optimizer.py broker_config.py risk_controls.py databento_live_runner.py hl_verify_sdk.py hl_verify_nautilus.py 'orchestrator/recursive.py' PyRecursiveOrchestrator PyBiEngine PyOnlineMacdState realtime_server.py FLOOR_LADDER L2_LADDER PREREG7 '#808' '#1096' '#1304' '#1385' '#1413' '#1550' '#1654' AwaitingPolicy; do rg -q -F -- "$k" "$f" || echo "MISSING $k"; done
+  f=$(find docs/adr -name '*-legacy-engine-module-level-dispositions.md'); for k in recursive_t run_recursive_t PyTFugueStream PyRecStream backtest_t_fugue.py pi_theta_fill_loop run_theta_v0_pi theta_backtest ThetaPiStream PyThetaStream theta_rec_strategy.py theta_pi_strategy.rs backtest_engine.rs order_adapter.rs PyFugueV3Stream run_fugue_v3 PySpiralStream run_spiral run_organic run_positional PyUnnStream PyOrganicTape 'trading_system/backtest/runner.py' chanlun_strategy.py lmt_executor.py maker_optimizer.py broker_config.py risk_controls.py databento_live_runner.py hl_verify_sdk.py hl_verify_nautilus.py 'orchestrator/recursive.py' PyRecursiveOrchestrator PyBiEngine PyOnlineMacdState realtime_server.py FLOOR_LADDER L2_LADDER PREREG7 '#808' '#1096' '#1304' '#1385' '#1413' '#1550' '#1654' AwaitingPolicy; do rg -q -F -- "$k" "$f" || echo "MISSING $k"; done
+  rg -q -F -- 'trading_system/live/runner.py' "$f" || echo "MISSING trading_system/live/runner.py" # 历史路径已删除（#1385 OE13），删前原脚本见 b9d898dccf46c2a716115eaa1215bc39c458a959
   ```
 - A4 可执行命令（CONTEXT.md 词义订正）：`rg -c "π 组件证据 CLI" CONTEXT.md` 输出 `1`，且 `! rg -q -F "**最小生产路径 CLI** 指" CONTEXT.md` 退出码 `0`。
 - A5 可执行命令（注释订正），输出为空：`rg -n "CLI 生产入口" rust/Cargo.toml rust/src/theta_v0/mod.rs | rg -v "历史名"`。
 - A6 可执行命令：`rg -c -F "v1/dual 已按 #499 删除" docs/adr/0004-generation-constitution.md` 输出 `1`。
 - A7 可执行命令：`rg -q "#1532" rust/src/recursive_t/DEPRECATED.md && rg -B2 "^pub mod recursive_t;" rust/src/lib.rs | rg -q "#1532"` 退出码 `0`。
 - A8 可执行命令（写权闭包未因本票变动），输出为空：ADR 0039:336 的 `diff` 命令原样执行。
-- A9 可执行命令（本票不删任何文件）：`test -e trading_system/live/runner.py && test -d rust/src/recursive_t && test -e trading_system/backtest_t_fugue.py` 退出码 `0`。
+- A9 可执行命令（T0 阶段 #1532 落地时不删任何文件；T0 原命令见 [ADR 0048:397@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0048-legacy-engine-module-level-dispositions.md#L397)）：现存对象检查 `test -d rust/src/recursive_t && test -e trading_system/backtest_t_fugue.py` 退出码 `0`；
+  T0 时点另须存在 `trading_system/live/runner.py`（复核 T0 原命令须在 T0 提交执行，或在当前仓以 `git cat-file -e b9d898dccf46c2a716115eaa1215bc39c458a959:trading_system/live/runner.py` 验证退出码 `0`；该文件 T1 已删除（#1385 OE13），删前原脚本见 [runner.py@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py)，T1 删后不存在性改由下方 B1 检查，当前正式入口见 `production_session`）。
 - A10 票状态：`gh api repos/xy7365527-lang/NewChanlun/issues/1385/dependencies/blocked_by --jq 'map(.number)|contains([1532])'` 输出 `true`。
 - A11 票状态：`gh api repos/xy7365527-lang/NewChanlun/issues/1413/dependencies/blocked_by --jq 'map(.number)|contains([1532,1523,1383])'` 输出 `true`。
 
 **B. 下游票验收（判据二值；不作关本票条件）**
 
-- B1 文件不存在（#1385）：`test ! -e trading_system/live/runner.py` 退出码 `0`。
+- B1 文件不存在（#1385，执行删除后不存在性检查；该文件已删除，删前原脚本见 [runner.py@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py)，当前正式入口见 `production_session`）：`test ! -e trading_system/live/runner.py` 退出码 `0`。
 - B2 可执行命令（#1385），输出为空：`rg -n "live/runner" trading_system`。
 - B3 票状态：`gh issue view 1413 --json state --jq .state` 输出 `CLOSED`。
 - B4 票状态：`gh issue view 1368 --json state --jq .state` 输出 `CLOSED`。
