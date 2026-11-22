@@ -158,43 +158,52 @@ fn sorted(mut xs: Vec<usize>) -> SourceCoords {
 fn shared_endpoint_sources(
     window: &[super::inclusion::InclusionGroupFact],
 ) -> Option<SourceCoords> {
-    let evidence: Vec<&SourceCoords> = window
-        .iter()
-        .flat_map(|g| [&g.direction_evidence, &g.confirmation_evidence])
-        .flatten()
-        .map(|e| &e.source_coords)
-        .collect();
-    if evidence.iter().any(|c| c.as_shared().is_none()) {
-        return None;
-    }
-    let best = (0..evidence.len()).max_by_key(|&i| evidence[i].last());
-    let empty = super::evidence::CoordsRef::empty();
-    let base = best.and_then(|i| evidence[i].as_shared()).unwrap_or(&empty);
-    // 同一棵树（如组 g 的封口证据 = 组 g+1 的方向证据，同一节点）只归并一次。
-    let mut seen: Vec<*const super::evidence::CoordNode> = base
-        .root_node()
-        .map(|r| Rc::as_ptr(r))
-        .into_iter()
-        .collect();
-    let mut distinct: Vec<&SourceCoords> = Vec::new();
-    for (i, c) in evidence.iter().enumerate() {
-        if Some(i) == best {
-            continue;
-        }
-        match c.as_shared().and_then(|t| t.root_node()) {
-            Some(root) if seen.contains(&Rc::as_ptr(root)) => {}
-            Some(root) => {
-                seen.push(Rc::as_ptr(root));
-                distinct.push(c);
+    let mut evidence: [Option<&super::evidence::CoordsRef>; 6] = [None; 6];
+    let mut ev_len = 0usize;
+    for g in window {
+        for opt in [&g.direction_evidence, &g.confirmation_evidence] {
+            if let Some(e) = opt {
+                let shared = e.source_coords.as_shared()?;
+                debug_assert!(ev_len < 6);
+                evidence[ev_len] = Some(shared);
+                ev_len += 1;
             }
-            None => {}
         }
+    }
+    let mut best: Option<usize> = None;
+    let mut best_max: Option<usize> = None;
+    for (i, slot) in evidence[..ev_len].iter().enumerate() {
+        let cur_max = slot.expect("within ev_len").max();
+        if best.is_none() || cur_max >= best_max {
+            best = Some(i);
+            best_max = cur_max;
+        }
+    }
+    let empty = super::evidence::CoordsRef::empty();
+    let base = best.and_then(|i| evidence[i]).unwrap_or(&empty);
+    // 同一棵树（如组 g 的封口证据 = 组 g+1 的方向证据，同一节点）只归并一次。
+    let mut seen: [*const super::evidence::CoordNode; 6] = [std::ptr::null(); 6];
+    let mut seen_len = 0usize;
+    if let Some(r) = base.root_node() {
+        seen[0] = Rc::as_ptr(r);
+        seen_len = 1;
     }
     // #1629：证据树之间按共享子树指针相等剪枝求并（成本只随不共享部分增长），
     // 组成员逐个持久插入（不遍历基底）。旧版把其余集合逐元素与基底有序归并，单端点 Θ(i)。
     let mut acc = base.clone();
-    for c in distinct {
-        acc = acc.union(c.as_shared().expect("上面已判共享形态"));
+    for (i, slot) in evidence[..ev_len].iter().enumerate() {
+        if Some(i) == best {
+            continue;
+        }
+        let t = slot.expect("within ev_len");
+        if let Some(root) = t.root_node() {
+            let ptr = Rc::as_ptr(root);
+            if !seen[..seen_len].contains(&ptr) {
+                seen[seen_len] = ptr;
+                seen_len += 1;
+                acc = acc.union(t);
+            }
+        }
     }
     let union = SourceCoords::from_shared(union_into(
         &acc,
@@ -213,30 +222,6 @@ fn positions_of_steps(facts: &InclusionFacts) -> BTreeMap<usize, usize> {
         .iter()
         .enumerate()
         .map(|(i, s)| (s.incoming.source_index, i))
-        .collect()
-}
-
-/// 端点扫描（唯一判据）：full 与增量共享本函数，差别只在 `positions` 的来源。
-///
-/// `merged`/`groups`/`initial_direction_unsettled` 是全部结构输入；`source_coords` 只进
-/// 证据面，不进任何判据（见 [`Endpoint`]）。
-fn endpoints_from(
-    merged: &[Bar],
-    groups: &[super::inclusion::InclusionGroupFact],
-    initial_direction_unsettled: bool,
-    positions: &BTreeMap<usize, usize>,
-) -> Vec<Endpoint> {
-    (1..merged.len().saturating_sub(1))
-        .filter_map(|mid| {
-            endpoint_at(
-                merged,
-                groups,
-                initial_direction_unsettled,
-                positions,
-                mid,
-                true,
-            )
-        })
         .collect()
 }
 
@@ -466,9 +451,18 @@ fn stroke_transition(
     if initial_direction_unsettled {
         scan.out.waiting_reasons.push("initial_direction_unsettled");
     }
-    for endpoint in endpoints_from(merged, groups, initial_direction_unsettled, positions) {
-        scan.apply(&endpoint, config);
-        scan.out.endpoints.push(endpoint);
+    for mid in 1..merged.len().saturating_sub(1) {
+        if let Some(endpoint) = endpoint_at(
+            merged,
+            groups,
+            initial_direction_unsettled,
+            positions,
+            mid,
+            true,
+        ) {
+            scan.apply(&endpoint, config);
+            scan.out.endpoints.push(endpoint);
+        }
     }
     scan.out.waiting_reasons.sort_unstable();
     scan.out.waiting_reasons.dedup();
@@ -484,16 +478,17 @@ impl ScanState {
     /// full 与增量的唯一单端点状态转移。写入至多触及转移前的最后一笔（延伸终点或冻结确认
     /// 证书），只追加不弹出（#1343 Q4：同价域没有任何未定或冻结态）。
     fn apply(&mut self, f: &Endpoint, config: &ParseConfig) {
-        let Some(a) = self.current.clone() else {
+        let Some(a_ref) = self.current.as_ref() else {
             self.current = Some(f.clone());
             return;
         };
-        let p = pair(&a, f, config);
-        if a.kind == f.kind {
+        let p = pair(a_ref, f, config);
+        if a_ref.kind == f.kind {
             // KEEP（更弱或同价，#1343 Q1）不写任何状态；REPLACE 换活动端点并延末笔。
             if p.selection == Some("REPLACE") {
+                let anchor = a_ref.group_anchor;
                 if let Some(last) = self.out.strokes.last_mut() {
-                    if last.end.group_anchor == a.group_anchor {
+                    if last.end.group_anchor == anchor {
                         let extended = pair(&last.start, f, config);
                         if extended.conditions.as_ref().is_some_and(Conditions::formed) {
                             last.end = f.clone();
@@ -504,6 +499,7 @@ impl ScanState {
                 self.current = Some(f.clone());
             }
         } else if p.conditions.as_ref().is_some_and(Conditions::formed) {
+            let a = self.current.replace(f.clone()).expect("current was Some");
             // #1392：在已选中后继笔的首次封口见证处冻结前笔证书。
             // 后继尾笔以后可延伸到尚未封口的新端点，不能因此丢掉既有前缀证据。
             if let (Some(sealed), Some(previous)) = (f.sealed_at, self.out.strokes.last_mut()) {
@@ -522,7 +518,6 @@ impl ScanState {
                 formation: p.conditions.clone().unwrap(),
                 confirmation: None,
             });
-            self.current = Some(f.clone());
         }
         // 异型不成笔（合取含 false）：确定不成笔，略过，不冻结后续候选（#1392）。
         self.out.pairs.push(p);
