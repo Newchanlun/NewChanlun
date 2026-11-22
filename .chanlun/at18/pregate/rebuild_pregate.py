@@ -18,11 +18,19 @@ from pathlib import Path
 import re
 import subprocess
 
+from pregate_contract import final_blob_changed, git_tree, read_json
+
+
 REPO = "repos/Newchanlun/NewChanlun"
 G0 = "bd54d4b28ec4f83d596837f84f1f861dd085124c"
 GRAPH = 1323
 SPEC = 1340
-TBS = tuple(range(1359, 1369))
+# ADR 0064 r6 R10：汇总票号并非 TB 序号。
+TB_BY_TICKET = {
+    1359: "TB-01", 1360: "TB-02", 1361: "TB-03", 1362: "TB-04", 1363: "TB-05",
+    1364: "TB-06", 1366: "TB-07", 1367: "TB-08", 1365: "TB-09", 1368: "TB-10",
+}
+TBS = tuple(sorted(TB_BY_TICKET))
 SPECIAL_PARENT = {1493: 1360}
 WORKFLOWS = (".github/workflows/ci.yml", ".github/workflows/devskim.yml")
 PR_HINT = re.compile(r"(?i)\b(?:merge(?: approved)? (?:pull request|PR)|pull request|PR) #([1-9][0-9]*)|\(#([1-9][0-9]*)\)\s*$")
@@ -259,17 +267,6 @@ def candidates(rows: list[dict], data: dict) -> list[dict]:
     return out
 
 
-def tree(sha: str) -> dict[str, dict]:
-    out = {}
-    for entry in git("ls-tree", "-r", "-z", sha).split(b"\0"):
-        if not entry:
-            continue
-        identity, path = entry.split(b"\t", 1)
-        mode, kind, oid = map(bytes.decode, identity.split())
-        out[path.decode("utf-8", "strict")] = dict(mode=mode, type=kind, oid=oid)
-    return out
-
-
 def changed(parent: str, sha: str) -> set[str]:
     return {p.decode("utf-8", "strict") for p in
             git("diff", "--name-only", "--no-renames", "-z", parent, sha).split(b"\0") if p}
@@ -303,7 +300,7 @@ def landing_scopes(issues: list[dict], tickets: set[int], attributions: list[dic
     # The frozen witness precedes #1493's ordered reparenting. The live R10
     # gate additionally verifies the actual move; this is a replay of the ruling.
     parents.update(SPECIAL_PARENT)
-    known = {n: f"TB-{i:02}" for i, n in enumerate(TBS, start=1)}
+    known = TB_BY_TICKET
     allowed = {"GRAPH", *known.values()}
     supplements = {}
     last = 0
@@ -377,7 +374,7 @@ def materialize(f: str, p0: str, history: list[dict], data: dict, adjudication: 
     if not members:
         raise ValueError("empty graph landing ledger")
     scopes = landing_scopes(data["issues"], set(landings), census["attributions"])
-    p_tree, f_tree = tree(p0), tree(f)
+    p_tree, f_tree = git_tree(p0), git_tree(f)
     path_origins = defaultdict(list)
     diffs = {}
     for sha in members:
@@ -395,6 +392,9 @@ def materialize(f: str, p0: str, history: list[dict], data: dict, adjudication: 
         for path in paths & path_origins.keys():
             post_changes[path].append(sha)
         prior = sha
+    def snapshot(entry):
+        return dict(mode=entry.mode, type=entry.kind, oid=entry.blob) if entry else None
+
     path_rows = []
     states = Counter()
     for path, origins in sorted(path_origins.items()):
@@ -402,11 +402,12 @@ def materialize(f: str, p0: str, history: list[dict], data: dict, adjudication: 
         state = ("ABSENT_P0" if before is None else "ABSENT_F" if at is None else
                  "SURVIVING_POSTGATE_TOUCHED" if post_changes[path] else "SURVIVING_UNTOUCHED")
         states[state] += 1
-        path_rows.append(dict(path=path, pre_gate_commits=origins, at_p0=before, at_f=at,
-                              disposition=state, post_gate_commits=post_changes[path]))
-    pre = [r for r in path_rows if r["at_p0"] and r["at_f"]]
-    if any(r["at_p0"]["type"] != "blob" or r["at_f"]["type"] != "blob" for r in pre):
-        raise ValueError("unhandled PRE object type")
+        # touched 仍是过程轨迹；补救适用性看 F 的最终 blob。
+        blob_changed = final_blob_changed(path, before, at) if before and at else None
+        path_rows.append(dict(path=path, pre_gate_commits=origins, at_p0=snapshot(before), at_f=snapshot(at),
+                              disposition=state, post_gate_commits=post_changes[path],
+                              final_blob_changed=blob_changed))
+    pre = [r for r in path_rows if r["final_blob_changed"] is not None]
     write(out_dir / "landings.json", dict(p0=p0, observation=f, gate=G0,
           by_ticket=[dict(ticket=n, commits=sorted(shas), attribution_scopes=scopes[n])
                      for n, shas in sorted(landings.items())],
@@ -485,7 +486,7 @@ def main() -> None:
         data = capture(rows, set(args.followup))
         write(args.out / "sources.json", data)
     else:
-        data = json.loads(args.source.read_bytes())
+        data = read_json(args.source)
     out = candidates(rows, data)
     (args.out / "all-first-parent.jsonl").write_text("".join(
         json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in out), encoding="utf-8")
@@ -497,9 +498,9 @@ def main() -> None:
             if row["commit"] in indexed and indexed[row["commit"]] not in row["prs"]:
                 raise ValueError(f"exact merge object omitted from PR capture: {row['commit']}")
     if args.adjudication:
-        adjudication = json.loads(args.adjudication.read_bytes())
-        observed = json.loads(args.historical_runs.read_bytes()) if args.historical_runs else None
-        census = json.loads(args.census.read_bytes())
+        adjudication = read_json(args.adjudication)
+        observed = read_json(args.historical_runs) if args.historical_runs else None
+        census = read_json(args.census)
         if (set(census) != {"schema_version", "p0", "sources", "attributions"}
                 or census["schema_version"] != "at18-landing-census/1" or census["p0"] != p0):
             raise ValueError("invalid landing census envelope")

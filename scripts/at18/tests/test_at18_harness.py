@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from collections import defaultdict
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ import yaml
 PROGRAMS = Path(__file__).resolve().parents[1]
 ROOT = PROGRAMS.parents[1]
 sys.path.insert(0, str(PROGRAMS))
+sys.path.insert(0, str(ROOT / ".chanlun/at18/pregate"))
 adapter = importlib.import_module("adapter")
 from common import ADAPTER, CROSSWALK, LEDGERS, P0, REGISTRY, Invalid, json_bytes, sha, strict_json  # noqa: E402
 from registry import OPENING_CENSUS, canonical_bases, load  # noqa: E402
@@ -221,6 +223,10 @@ def test_pregate_review_covers_actual_frozen_p0(census_checker):
     expected = census_checker.p0_rows(P0, retained, cwd=ROOT)
     counts = census_checker.check_review(PREGATE.parent / "pregate-review.json", expected)
     assert len(expected) == 1025 and counts == {"PASS": 978, "BLOCK": 47}
+    assert sh(ROOT, "git", "hash-object", str(PREGATE.parent / "pregate-review.json")).stdout.strip() == (
+        "1aed53fd7a1e0be271de949d7c37c0ac81aefc1b")
+    assert sha256((PREGATE.parent / "pregate-review.json").read_bytes()).hexdigest() == (
+        "a0a33e592c943677f631134a8a9f57d19d431f3dbb3368fe3d7378f5334e554e")
 
 
 @pytest.fixture(scope="module")
@@ -240,12 +246,51 @@ def check_census_cli(python_options, replay, *flags):
               str(replay), *flags, check=False)
 
 
-def test_pregate_census_accepts_complete_replay(pregate_replay, python_options):
-    result = check_census_cli(python_options, pregate_replay)
-    assert result.returncode == 0, result.stderr
+def test_pregate_census_reports_frozen_blocks_without_rewriting_history(pregate_replay, python_options):
+    result = check_census_cli(python_options, pregate_replay, "--head", "b9d898dc")
+    assert result.returncode == 1
     assert "115 unique landings, 1025 exact PRE paths" in result.stdout
     assert "1025 exact path/blob/mode matches; 978 PASS / 47 BLOCK" in result.stdout
     assert "Known #1405 CI failures match the exact historical run IDs" in result.stdout
+    assert "42 hard BLOCK / 5 changed BLOCK / 0 deleted BLOCK" in result.stdout
+    assert "0 released" in result.stdout
+    assert {line.split("pre:", 1)[1] for line in result.stdout.splitlines()
+            if line.startswith("R10 changed BLOCK: ")} == {
+        ".github/workflows/ci-macos.yml", ".github/workflows/ci.yml", ".github/workflows/devskim.yml",
+        ".sandcastle/deepagents-pilot/pilot1742/review_sweep.py", "rust/src/economic_session/store.rs",
+    }
+    assert "pre:.chanlun/at18/pregate-remediation.json: missing" in result.stderr
+    assert result.stderr.count("original blob; hard BLOCK") == 42
+    paths = {row["path"]: row for row in read(pregate_replay, "paths.json")}
+    blocked = {row["path"] for row in read(PREGATE.parent, "pregate-review.json")["rows"]
+               if row["verdict"] == "BLOCK"}
+    assert {path for path in blocked if paths[path]["final_blob_changed"] is True} == {
+        ".github/workflows/ci-macos.yml", ".github/workflows/ci.yml", ".github/workflows/devskim.yml",
+        ".sandcastle/deepagents-pilot/pilot1742/review_sweep.py", "rust/src/economic_session/store.rs",
+    }
+    assert sum(paths[path]["final_blob_changed"] is False for path in blocked) == 42
+
+
+def test_pregate_r6_corrects_only_five_scope_rows_and_eleven_pairs():
+    from rebuild_pregate import TB_BY_TICKET
+
+    old = json.loads(sh(ROOT, "git", "show", (
+        "87e3d5d93486bb0c3a80b9259df4f1e929a48356:.chanlun/at18/pregate/landings.json")).stdout)
+    new = read(PREGATE, "landings.json")
+    changes = {}
+    for before, after in zip(old["by_ticket"], new["by_ticket"], strict=True):
+        if before["attribution_scopes"] != after["attribution_scopes"]:
+            changes[before["ticket"]] = before["attribution_scopes"], after["attribution_scopes"], len(before["commits"])
+            before["attribution_scopes"] = after["attribution_scopes"]
+    assert changes == {
+        1366: (["TB-08"], ["TB-07"], 2), 1381: (["TB-08"], ["TB-07"], 2),
+        1768: (["TB-08"], ["TB-07"], 1), 1523: (["TB-09"], ["TB-08"], 1),
+        1769: (["TB-09"], ["TB-08"], 5),
+    }
+    assert old == new
+    assert len(new["by_ticket"]) == 62 and len(new["by_commit"]) == 115
+    assert sum(len(r["commits"]) for r in new["by_ticket"]) == 133
+    assert TB_BY_TICKET[1365] == "TB-09" and 1365 not in {r["ticket"] for r in new["by_ticket"]}
 
 
 @pytest.mark.parametrize(("damage", "reason"), [
@@ -301,6 +346,52 @@ def test_pregate_census_rejects_tampered_replay(pregate_replay, python_options, 
     assert result.returncode != 0
     assert reason in result.stderr
     assert not result.stdout
+
+
+@pytest.mark.parametrize(("scope", "ticket"), [
+    ("legacy-all", 1366), ("legacy-TB08", 1523), ("duplicate", 1366),
+    ("out-of-bounds", 1366), ("graph-with-tb", 1366), ("wrong-type", 1366),
+])
+def test_pregate_census_rejects_agreeing_but_wrong_scope(
+        pregate_replay, python_options, tmp_path, scope, ticket):
+    replay = tmp_path / "replay"
+    shutil.copytree(pregate_replay, replay)
+    ledger = read(replay, "landings.json")
+    registry = read(ROOT, REGISTRY)
+    mutations = {
+        "legacy-all": {1366: ["TB-08"], 1381: ["TB-08"], 1768: ["TB-08"],
+                       1523: ["TB-09"], 1769: ["TB-09"]},
+        "legacy-TB08": {1523: ["TB-09"]},
+        "duplicate": {1366: ["TB-07", "TB-07"]},
+        "out-of-bounds": {1366: ["TB-11"]},
+        "graph-with-tb": {1366: ["GRAPH", "TB-07"]},
+        "wrong-type": {1366: "TB-07"},
+    }[scope]
+    for rows in (ledger["by_ticket"], registry["pregate"]["landings"]):
+        for row in rows:
+            if row["ticket"] in mutations:
+                row["attribution_scopes"] = mutations[row["ticket"]]
+    write(replay, "landings.json", ledger)
+    write(tmp_path, "registry.json", registry)
+    result = check_census_cli(python_options, replay, "--registry", str(tmp_path / "registry.json"))
+    assert result.returncode == 1 and not result.stdout
+    assert f"PREGATE_LANDINGS: attribution_scopes mismatch for #{ticket}" in result.stderr
+
+
+@pytest.mark.parametrize("preserve_counts", [True, False])
+def test_pregate_census_rejects_flipped_historical_verdict(tmp_path, python_options, preserve_counts):
+    raw = (PREGATE.parent / "pregate-review.json").read_bytes()
+    if preserve_counts:
+        raw = raw.replace(b'"verdict": "PASS"', b'"verdict": "SWAP"', 1)
+    raw = raw.replace(b'"verdict": "BLOCK"', b'"verdict": "PASS"', 1)
+    if preserve_counts:
+        raw = raw.replace(b'"verdict": "SWAP"', b'"verdict": "BLOCK"', 1)
+    review = tmp_path / "review.json"
+    review.write_bytes(raw)
+    result = sh(ROOT, sys.executable, *python_options, str(PREGATE / "check_census.py"),
+                "--review", str(review), check=False)
+    assert result.returncode == 1 and not result.stdout
+    assert "original review Git blob or historical verdict counts mismatch" in result.stderr
 
 
 @pytest.fixture

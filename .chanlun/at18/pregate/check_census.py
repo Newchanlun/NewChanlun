@@ -1,80 +1,66 @@
-"""核对 R3 清册回归与 P0 闸前逐 blob 复审原件。"""
+"""核对冻结清册、P0 历史裁定与指定 F 的 R10 补救状态。"""
 from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
-import json
+from hashlib import sha256
 from pathlib import Path
-import re
 import subprocess
 import sys
 
+from pregate_contract import (
+    BLOB_MODES, OID, changes_on_window, check_remediation, classify_review, diff_paths,
+    final_blob_changed, git, git_tree, pre_scope, read_json, require, require_blob,
+    strict_json, valid_path, window,
+)
+from rebuild_pregate import G0, landing_scopes
+
 
 AT18 = Path(__file__).resolve().parents[1]
-BLOB_MODES = ("100644", "100755", "120000")
+ROOT = AT18.parents[1]
+FROZEN_F = "b9d898dccf46c2a716115eaa1215bc39c458a959"
+HISTORICAL_REVIEW_BLOB = "1aed53fd7a1e0be271de949d7c37c0ac81aefc1b"
 VERDICTS = ("PASS", "BLOCK")
 
 
-def git(*args, cwd=None):
-    return subprocess.check_output(["git", *args], cwd=cwd)
+def landing_paths(shas, *, cwd=None):
+    paths = set()
+    for sha in shas:
+        paths |= diff_paths(f"{sha}^1", sha, cwd=cwd)
+    return paths
 
 
-def names(*args, cwd=None):
-    return set(git(*args, cwd=cwd).decode().strip("\0").split("\0")) - {""}
+def pre_paths(touched, before, final):
+    paths = touched & before.keys() & final.keys()
+    for path in sorted(paths):
+        final_blob_changed(path, before[path], final[path])
+    return paths
 
 
 def retained(shas, p0, f, *, cwd=None):
-    paths = set()
-    for sha in shas:
-        paths |= names("diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z",
-                       f"{sha}^1", sha, cwd=cwd)
-    return (paths & names("ls-tree", "-r", "--name-only", "-z", p0, cwd=cwd)
-            & names("ls-tree", "-r", "--name-only", "-z", f, cwd=cwd))
+    return pre_paths(landing_paths(shas, cwd=cwd), git_tree(p0, cwd=cwd), git_tree(f, cwd=cwd))
 
 
-def p0_rows(p0, paths, *, cwd=None):
+def p0_rows(p0, paths, *, cwd=None, tree=None):
     """只读 P0 Git 树；符号链接使用链接自身的 blob。"""
-    rows = {}
-    for entry in git("ls-tree", "-r", "-z", p0, cwd=cwd).split(b"\0")[:-1]:
-        metadata, raw_path = entry.split(b"\t", 1)
-        path = raw_path.decode("utf-8")
-        if path not in paths:
-            continue
-        mode, kind, blob = metadata.decode("ascii").split()
-        if kind != "blob" or mode not in BLOB_MODES:
-            raise ValueError(f"PREGATE_REVIEW: not a P0 blob: {path!r}")
-        rows[path] = dict(path=path, mode=mode, blob=blob)
-    if rows.keys() != paths:
-        raise ValueError("PREGATE_REVIEW: missing paths in P0")
-    return [rows[path] for path in sorted(rows)]
+    before = git_tree(p0, cwd=cwd) if tree is None else tree
+    require(paths <= before.keys(), "PREGATE_REVIEW", "missing paths in P0")
+    rows = []
+    for path in sorted(paths, key=str.encode):
+        entry = before[path]
+        require_blob(entry, path, "P0")
+        rows.append(dict(path=path, mode=entry.mode, blob=entry.blob))
+    return rows
 
 
-def require(condition, code, message):
-    if not condition:
-        raise ValueError(f"{code}: {message}")
-
-
-def read_json(path, code="PREGATE_CENSUS"):
-    def unique_keys(pairs):
-        result = dict(pairs)
-        require(len(result) == len(pairs), code, f"{path.name}: duplicate JSON key")
-        return result
-
-    try:
-        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{code}: {path.name}: invalid UTF-8 JSON") from error
-
-
-def read_review(path):
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("PREGATE_REVIEW: expected a regular review file")
-    return read_json(path, "PREGATE_REVIEW")
+def review_bytes(path):
+    require(not path.is_symlink() and path.is_file(), "PREGATE_REVIEW", "expected a regular review file")
+    return path.read_bytes()
 
 
 def check_review(path, expected_rows):
-    """核验结构和精确覆盖，并返回原裁定计数。BLOCK 仍是 R10 的阻断。"""
-    return match_review(read_review(path), expected_rows)
+    """核验结构和精确覆盖，并返回原裁定计数。"""
+    return match_review(strict_json(review_bytes(path), "PREGATE_REVIEW", path.name), expected_rows)
 
 
 def match_review(review, expected_rows):
@@ -89,13 +75,13 @@ def match_review(review, expected_rows):
         if not isinstance(row, dict) or row.keys() != {"path", "blob", "mode", "verdict"}:
             raise ValueError(f"PREGATE_REVIEW: row {n}: invalid row keys")
         name, blob, mode, verdict = (row[k] for k in ("path", "blob", "mode", "verdict"))
-        if not isinstance(name, str) or not name:
+        if not valid_path(name):
             raise ValueError(f"PREGATE_REVIEW: row {n}: invalid path")
         if name in actual:
             raise ValueError(f"PREGATE_REVIEW: row {n}: duplicate path")
         if name < previous:
             raise ValueError(f"PREGATE_REVIEW: row {n}: invalid path order")
-        if not isinstance(blob, str) or not re.fullmatch(r"[0-9a-f]{40}", blob):
+        if not isinstance(blob, str) or not OID.fullmatch(blob):
             raise ValueError(f"PREGATE_REVIEW: row {n}: invalid blob")
         if mode not in BLOB_MODES:
             raise ValueError(f"PREGATE_REVIEW: row {n}: invalid mode")
@@ -114,12 +100,28 @@ def match_review(review, expected_rows):
     return counts
 
 
-def check_landings(registered, ledger):
+def check_landings(registered, ledger, issues, attributions):
     """登记册给出提交分母，回放的两张表都必须与之相符。"""
     by_ticket = [{k: row[k] for k in ("ticket", "commits", "attribution_scopes")}
                  for row in registered]
     require(by_ticket == ledger["by_ticket"], "PREGATE_LANDINGS", "registry differs from by_ticket")
-    by_tkt = {row["ticket"]: set(row["commits"]) for row in by_ticket}
+    by_tkt = {}
+    for row in by_ticket:
+        ticket, commits = row["ticket"], row["commits"]
+        require(type(ticket) is int and ticket > 0 and ticket not in by_tkt,
+                "PREGATE_LANDINGS", "invalid or duplicate registered ticket")
+        require(isinstance(commits, list) and commits
+                and all(isinstance(sha, str) and OID.fullmatch(sha) for sha in commits)
+                and commits == sorted(set(commits)), "PREGATE_LANDINGS", f"invalid commits for #{ticket}")
+        by_tkt[ticket] = set(commits)
+    try:
+        scopes = landing_scopes(issues, set(by_tkt), attributions)
+    except ValueError as error:
+        raise ValueError(f"PREGATE_LANDINGS: {error}") from error
+    for row in by_ticket:
+        ticket = row["ticket"]
+        require(row["attribution_scopes"] == scopes[ticket], "PREGATE_LANDINGS",
+                f"attribution_scopes mismatch for #{ticket}: expected {scopes[ticket]}")
     expected = defaultdict(set)
     for ticket, commits in by_tkt.items():
         for sha in commits:
@@ -139,41 +141,7 @@ def check_landings(registered, ledger):
     return by_tkt, set(expected)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("replay", type=Path, help="rebuild_pregate.py 的输出目录")
-    parser.add_argument("--sources", type=Path, default=AT18 / "pregate")
-    parser.add_argument("--registry", type=Path, default=Path(".chanlun/at18/registry.json"))
-    parser.add_argument("--review", type=Path, default=AT18 / "pregate-review.json",
-                        help="待校验的复审原件（默认使用仓内 pregate-review.json）")
-    args = parser.parse_args()
-
-    def data(name, *, frozen=False):
-        return read_json((args.sources if frozen else args.replay) / name)
-
-    report = data("summary.json")
-    census = read_json(AT18 / "landing-census.json")
-    r3 = data("r3-ticket-set.json", frozen=True)
-    ledger = data("landings.json")
-    registered = read_json(args.registry)["pregate"]["landings"]
-    paths = {row["path"]: row for row in data("paths.json")}
-    rows = data("pre.json")
-    runs = data("historical-runs.json", frozen=True)
-    review = read_review(args.review)
-    # rebuild_pregate.py 只在提供历史 run 原件时产出偏差表；逐字节一致性由 README 的 cmp 核对。
-    deviations = args.replay / "historical-deviations.json"
-    if deviations.exists():
-        read_json(deviations)
-
-    p0, f = report["p0"], report["observed_main"]
-    if p0 != census["p0"]:
-        raise ValueError("PREGATE_REVIEW: replay uses a different P0")
-    by_tkt, commits = check_landings(registered, ledger)
-    expected = p0_rows(p0, retained(commits, p0, f))
-    if rows != expected:
-        raise ValueError("PREGATE_REVIEW: pre.json differs from retained P0 path/blob/mode")
-    counts = match_review(review, expected)
-    pre = {row["path"] for row in expected}
+def check_r3(by_tkt, ledger, r3, runs, p0, pre, before, frozen_tree, chain, issues, replay=None):
     old = {sha for landings in r3["table"].values() for sha in landings}
     by_pr = {pr: row for row in ledger["by_commit"] for pr in row["prs"]}
 
@@ -189,28 +157,37 @@ def main():
     for pr, tkt in extra_prs.items():
         require(tkt in pr_tickets(pr), "R3_CENSUS", f"#{pr} must belong to #{tkt}")
     extra = {by_pr[pr]["commit"] for pr in extra_prs}
-    old_pre = retained(old, p0, f)
-    closed_pre = retained(old | extra, p0, f)
+    old_pre = pre_paths(landing_paths(old, cwd=ROOT), before, frozen_tree)
+    closed_pre = old_pre | pre_paths(landing_paths(extra, cwd=ROOT), before, frozen_tree)
     require((len(old_pre), len(closed_pre)) == (483, 493), "R3_CENSUS", "expected 483 -> 493 PRE paths")
     require(closed_pre <= pre, "R3_CENSUS", "closed historical landings absent from PRE")
-    open_landings = report["open_ticket_landings"]
-    require(1406 in pr_tickets(1616) and "1406" in open_landings,
+    open_tickets = {row["number"] for row in issues if row["state"] == "open"} & by_tkt.keys()
+    require(1406 in pr_tickets(1616) and 1406 in open_tickets,
             "R3_CENSUS", "#1616 must belong to open ticket #1406")
-    new_open = retained({by_pr[1616]["commit"]}, p0, f) - old_pre
+    landing = by_pr[1616]["commit"]
+    landed = landing_paths({landing}, cwd=ROOT)
+    new_open = pre_paths(landed, before, frozen_tree) - old_pre
     require(len(new_open) == 90 and new_open <= pre, "R3_CENSUS", "#1616 must add 90 PRE paths")
-    require(new_open <= paths.keys()
-            and sum(paths[path]["disposition"] == "SURVIVING_UNTOUCHED" for path in new_open) == 89,
-            "R3_CENSUS", "#1616 must have 89 untouched retained paths")
-    for tkt in (1381, 1481, 1491, 1527, 1715, 1716, 1717, 1718, 1719):
-        require(str(tkt) in open_landings, "R3_CENSUS", f"missing open landing for #{tkt}")
-
     path = "rust/src/economic_session/tb03c_c5_read_tests.rs"
-    for sha in (p0, f):
-        actual = git("ls-tree", sha, "--", path).decode().split()
-        require(actual[:3] == ["100644", "blob", "0bcc46e9535554ee76ec3426e29f638a147427c4"],
-                "R3_CENSUS", f"unexpected #1616 blob at {sha}: {path}")
-    require(path in paths and by_pr[1616]["commit"] in paths[path]["pre_gate_commits"]
-            and not paths[path]["post_gate_commits"], "R3_CENSUS", f"unexpected #1616 provenance: {path}")
+    post = changes_on_window(p0, chain, new_open | {path}, cwd=ROOT)
+    require(sum(not post.get(name) for name in new_open) == 89,
+            "R3_CENSUS", "#1616 must have 89 untouched retained paths")
+    require({1381, 1481, 1491, 1527, 1715, 1716, 1717, 1718, 1719} <= open_tickets,
+            "R3_CENSUS", "missing open landing")
+    expected_entry = ("100644", "blob", "0bcc46e9535554ee76ec3426e29f638a147427c4")
+    require(before.get(path) == frozen_tree.get(path) == expected_entry,
+            "R3_CENSUS", f"unexpected #1616 blob: {path}")
+    require(path in landed and not post.get(path), "R3_CENSUS", f"unexpected #1616 provenance: {path}")
+    if replay is not None:
+        report, paths = replay
+        replay_open = report["open_ticket_landings"]
+        require(all(str(tkt) in replay_open for tkt in (1406, 1381, 1481, 1491, 1527, 1715, 1716, 1717, 1718, 1719)),
+                "R3_CENSUS", "missing open landing in replay")
+        require(new_open <= paths.keys()
+                and sum(paths[name]["disposition"] == "SURVIVING_UNTOUCHED" for name in new_open) == 89,
+                "R3_CENSUS", "#1616 replay must have 89 untouched retained paths")
+        require(path in paths and landing in paths[path]["pre_gate_commits"]
+                and not paths[path]["post_gate_commits"], "R3_CENSUS", f"unexpected #1616 replay provenance: {path}")
     for pr, run_id in ((1553, 39223502349), (1571, 39321352559)):
         rs = runs.get(by_pr[pr]["commit"], {}).get(".github/workflows/ci.yml", ())
         require(any(r["id"] == run_id and r["conclusion"] == "failure" for r in rs),
@@ -219,14 +196,116 @@ def main():
     print('#1406 #1616 alone: 90 additional surviving paths over R3, of which 89 untouched')
     print('#1359 and #1372 share #1452 without duplicating paths')
     print('Known #1405 CI failures match the exact historical run IDs')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("replay", nargs="?", type=Path, help="可选：同时核对 rebuild_pregate.py 的输出")
+    parser.add_argument("--sources", type=Path, default=AT18 / "pregate")
+    parser.add_argument("--registry", type=Path, default=AT18 / "registry.json")
+    parser.add_argument("--review", type=Path, default=AT18 / "pregate-review.json",
+                        help="待校验的复审原件（默认使用仓内 pregate-review.json）")
+    parser.add_argument("--head", help="F 的 Git 提交或引用（默认冻结观察窗，提供重放时默认重放头）")
+    parser.add_argument("--remediation", type=Path, help="本地预检用原件（默认从 F 的固定路径读 Git blob）")
+    args = parser.parse_args()
+
+    census_path = AT18 / "landing-census.json"
+    census_raw = census_path.read_bytes()
+    census = strict_json(census_raw, "PREGATE_CENSUS", census_path.name)
+    registry = read_json(args.registry)["pregate"]
+    require(sha256(census_raw).hexdigest() == registry["census_sha256"], "PREGATE_LANDINGS", "census_sha256")
+    relation_path = AT18 / "pregate" / "sources.json"
+    relations = [row for row in census["sources"] if row["role"] == "relations"]
+    relation_raw = relation_path.read_bytes()
+    require(len(relations) == 1 and relations[0]["path"] == relation_path.relative_to(ROOT).as_posix()
+            and relations[0]["sha256"] == sha256(relation_raw).hexdigest(),
+            "PREGATE_LANDINGS", "frozen native relations do not match census")
+    issues = strict_json(relation_raw, "PREGATE_LANDINGS", relation_path.name)["issues"]
+
+    p0 = census["p0"]
+    ledger = read_json((args.replay or AT18 / "pregate") / "landings.json")
+    require(ledger["p0"] == p0 and ledger["gate"] == G0, "PREGATE_REVIEW", "replay uses a different P0 or G0")
+    by_tkt, commits = check_landings(registry["landings"], ledger, issues, census["attributions"])
+    r3 = read_json(args.sources / "r3-ticket-set.json")
+    runs = read_json(args.sources / "historical-runs.json")
+
+    def resolve(ref):
+        return git("rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}", cwd=ROOT).decode().strip()
+
+    head = resolve(args.head or (ledger["observation"] if args.replay else FROZEN_F))
+    chain = window(p0, G0, head, cwd=ROOT)
+    frozen_chain = chain if head == FROZEN_F else window(p0, G0, FROZEN_F, cwd=ROOT)
+    touched = landing_paths(commits, cwd=ROOT)
+    before, frozen_tree = git_tree(p0, cwd=ROOT), git_tree(FROZEN_F, cwd=ROOT)
+    final_tree = frozen_tree if head == FROZEN_F else git_tree(head, cwd=ROOT)
+    pre = pre_paths(touched, before, frozen_tree)
+    expected = p0_rows(p0, pre, tree=before)
+    raw = review_bytes(args.review)
+    review = strict_json(raw, "PREGATE_REVIEW", args.review.name)
+    counts = match_review(review, expected)
+    require(git("hash-object", "--stdin", input=raw, cwd=ROOT).decode().strip() == HISTORICAL_REVIEW_BLOB
+            and counts == {"PASS": 978, "BLOCK": 47}, "PREGATE_REVIEW",
+            "original review Git blob or historical verdict counts mismatch")
+
+    replay = None
+    if args.replay:
+        report = read_json(args.replay / "summary.json")
+        paths = {row["path"]: row for row in read_json(args.replay / "paths.json")}
+        rows = read_json(args.replay / "pre.json")
+        # 历史偏差表逐字节一致性另由 README 的 cmp 核对。
+        deviations = args.replay / "historical-deviations.json"
+        if deviations.exists():
+            read_json(deviations)
+        require(report["p0"] == p0 and report["observed_main"] == ledger["observation"],
+                "PREGATE_REVIEW", "replay summary uses a different P0 or observation")
+        replay_head = resolve(ledger["observation"])
+        if replay_head == FROZEN_F:
+            replay_tree = frozen_tree
+            replay = report, paths
+        elif replay_head == head:
+            replay_tree = final_tree
+        else:
+            window(p0, G0, replay_head, cwd=ROOT)
+            replay_tree = git_tree(replay_head, cwd=ROOT)
+        require(rows == p0_rows(p0, pre_paths(touched, before, replay_tree), tree=before),
+                "PREGATE_REVIEW", "pre.json differs from retained P0 path/blob/mode")
+
+    current = pre_paths(touched, before, final_tree)
+    new_paths = current - pre
+    if new_paths:
+        path = min(new_paths, key=str.encode)
+        raise ValueError(f"PREGATE_REVIEW: {pre_scope(path)}: no verdict in frozen historical review")
+    check_r3(by_tkt, ledger, r3, runs, p0, pre, before, frozen_tree, frozen_chain, issues, replay)
+
     print(f'R5 full evidence: {len(commits)} unique landings, {len(pre)} exact PRE paths')
     print(f'P0 review inventory: {len(expected)} exact path/blob/mode matches; '
           f'{counts["PASS"]} PASS / {counts["BLOCK"]} BLOCK')
-    return 0
+
+    rows = review["rows"]
+    classes = classify_review(rows, final_tree)
+    passed = sum(state == "pass" for state in classes.values())
+    hard = [path for path, state in classes.items() if state == "hard"]
+    changed = [path for path, state in classes.items() if state == "changed"]
+    deleted = sum(row["verdict"] == "BLOCK" and classes[row["path"]] == "deleted" for row in rows)
+    valid = set()
+    failed = False
+    try:
+        valid = check_remediation(rows, classes, final_tree, p0, chain, cwd=ROOT, override=args.remediation)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        failed = True
+    for path in hard:
+        print(f"PREGATE_REVIEW: {pre_scope(path)}: original blob; hard BLOCK", file=sys.stderr)
+    print(f'R10 F={head}: {len(current)} PRE; {passed} surviving P0 PASS; '
+          f'{len(hard)} hard BLOCK / {len(changed)} changed BLOCK / '
+          f'{deleted} deleted BLOCK; {len(valid)} locally validated remediation rows; 0 released')
+    for path in changed:
+        print(f"R10 changed BLOCK: {pre_scope(path)}")
+    return int(failed or bool(hard or changed))
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
         sys.exit(str(error))
