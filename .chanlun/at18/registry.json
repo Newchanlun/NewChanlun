@@ -246,7 +246,7 @@
       },
       {
         "attribution_scopes": [
-          "TB-08"
+          "TB-07"
         ],
         "commits": [
           "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
@@ -350,7 +350,7 @@
       },
       {
         "attribution_scopes": [
-          "TB-08"
+          "TB-07"
         ],
         "commits": [
           "6dc7cd0c87e9d5222d721d3a4941897dcc1eabb7",
@@ -833,7 +833,7 @@
       },
       {
         "attribution_scopes": [
-          "TB-09"
+          "TB-08"
         ],
         "commits": [
           "5dc1eb9435c32bee6f9ead274ee3c87cac694ef8"
@@ -1351,7 +1351,7 @@
       },
       {
         "attribution_scopes": [
-          "TB-08"
+          "TB-07"
         ],
         "commits": [
           "ca5a8b16ae085306feaf42417bcb225e6c833911"
@@ -1361,7 +1361,7 @@
       },
       {
         "attribution_scopes": [
-          "TB-09"
+          "TB-08"
         ],
         "commits": [
           "6fe5ebea8cdb6c3b434d3c10b6e2e089437b91ca",

@@ -8,8 +8,6 @@ import re
 import subprocess
 from pathlib import PurePosixPath
 
-from jsonschema import Draft202012Validator
-
 REGISTRY = ".chanlun/at18/registry.json"
 ADAPTER = ".chanlun/at18/adapter-contract.json"
 CENSUS = ".chanlun/at18/landing-census.json"
@@ -51,25 +49,36 @@ def json_bytes(value):
                        separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def strict_json(data, identity, *, object_root=True):
+def decode_json(data):
+    """严格解码并检查 JCS 输入域，保留整数类型供封闭 schema 校验。"""
     def unique(pairs):
         result = {}
         for key, value in pairs:
-            require(key not in result, "JSON_PARSE", identity)
-            key.encode("utf-8")
+            if key in result:
+                raise Invalid("duplicate JSON key")
             result[key] = value
         return result
 
-    def number(token):
-        value = float(token)
-        require(math.isfinite(value), "JSON_PARSE", identity)
-        return value
+    def number(token, convert=float):
+        binary64 = float(token)
+        require(math.isfinite(binary64), "JCS_CANONICALIZE", "number outside finite IEEE 754 binary64")
+        return binary64 if convert is float else convert(token)
 
     try:
         result = json.loads(data.decode("utf-8"), object_pairs_hook=unique, parse_float=number,
-                            parse_constant=number)
-        json_bytes(result)  # 拒绝嵌套字符串中的孤立代理码点。
-    except (ValueError, UnicodeError, RecursionError) as error:
+                            parse_int=lambda token: number(token, int), parse_constant=number)
+        json_bytes(result)  # 拒绝键和字符串中的孤立代理码点；不以此生成 JCS 摘要。
+    except Invalid:
+        raise
+    except (ValueError, RecursionError) as error:
+        raise Invalid("invalid UTF-8 JSON") from error
+    return result
+
+
+def strict_json(data, identity, *, object_root=True):
+    try:
+        result = decode_json(data)
+    except Invalid as error:
         raise Invalid(f"JSON_PARSE: {identity}") from error
     require(not object_root or isinstance(result, dict), "JSON_PARSE", identity)
     return result
@@ -130,6 +139,8 @@ def pointer(document, ptr):
 
 
 def validate_schema(root, filename, document, code, *, commit=None):
+    from jsonschema import Draft202012Validator
+
     path = f".chanlun/at18/{filename}.schema.json"
     schema = strict_json(git_blob(root, commit, path) if commit else read_regular(root, path), path)
     error = next(Draft202012Validator(schema).iter_errors(document), None)
