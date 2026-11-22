@@ -200,44 +200,69 @@ def sublevel_h0_bars(
 
     cap = max(vals) if finite_cap is None else float(finite_cap)
 
-    order = sorted(range(n), key=lambda i: vals[i])
-    uf = _UnionFind()
-    active = [False] * n
+    order = sorted(range(n), key=vals.__getitem__)
+    parent = [-1] * n
+    birth = [0.0] * n
     bars: list[Bar] = []
+    last_idx = n - 1
 
     for i in order:
         vi = vals[i]
-        uf.add(i, vi)
-        active[i] = True
+        rl = -1
+        if i > 0:
+            p = parent[i - 1]
+            if p != -1:
+                r = i - 1
+                while p != r:
+                    r = p
+                    p = parent[r]
+                x = i - 1
+                while parent[x] != r:
+                    parent[x], x = r, parent[x]
+                rl = r
+        rr = -1
+        if i < last_idx:
+            p = parent[i + 1]
+            if p != -1:
+                r = i + 1
+                while p != r:
+                    r = p
+                    p = parent[r]
+                x = i + 1
+                while parent[x] != r:
+                    parent[x], x = r, parent[x]
+                rr = r
 
-        neighbor_roots: list[int] = []
-        for j in (i - 1, i + 1):
-            if 0 <= j < n and active[j]:
-                r = uf.find(j)
-                if r not in neighbor_roots:
-                    neighbor_roots.append(r)
-
-        if not neighbor_roots:
-            continue  # 局部极小：新分量诞生
-
-        comps = [uf.find(i), *neighbor_roots]
-        comps = list(dict.fromkeys(comps))
-        elder = min(comps, key=lambda r: uf.birth[r])
-        for r in comps:
-            if r == elder:
-                continue
-            b = uf.birth[r]
-            if b < vi:  # 真实特征（年轻分量在 vi 处死亡）；诞生于 vi 的奇点 persistence=0，跳过
-                bars.append(Bar(b, vi, vi - b, 0))
-            uf.parent[r] = elder
+        if rl == -1:
+            if rr == -1:
+                parent[i] = i
+                birth[i] = vi
+            else:
+                parent[i] = rr
+        elif rr == -1 or rl == rr:
+            parent[i] = rl
+        else:
+            bl = birth[rl]
+            br = birth[rr]
+            if bl <= br:
+                if br < vi:
+                    bars.append(Bar(br, vi, vi - br, 0))
+                parent[rr] = rl
+                parent[i] = rl
+            else:
+                if bl < vi:
+                    bars.append(Bar(bl, vi, vi - bl, 0))
+                parent[rl] = rr
+                parent[i] = rr
 
     # 仍存活的分量（路径图最终全连通 → 恰好一个）死亡值封顶
-    alive_roots = {uf.find(i) for i in range(n)}
-    for r in alive_roots:
-        b = uf.birth[r]
-        bars.append(Bar(b, cap, cap - b, 0))
+    r = 0
+    while parent[r] != r:
+        r = parent[r]
+    b = birth[r]
+    bars.append(Bar(b, cap, cap - b, 0))
 
-    bars.sort(key=lambda b: b.persistence, reverse=True)
+    bars.sort(key=lambda bar: bar.persistence, reverse=True)
     return tuple(bars)
 
 
