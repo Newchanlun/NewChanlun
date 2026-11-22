@@ -25,6 +25,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -54,6 +56,7 @@ MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 POLICY = "external-pr-v2-gpt62"
 # 与 codex-child.ts PROVIDER_DEFINITION.base_url 及 codex-route.mts Docker 容器端点（host.docker.internal:8318/v1）一致。
 FORMAL_PROXY_URL = "http://host.docker.internal:8318"  # DevSkim: ignore DS137138,DS162092 有意使用本机容器网关（与正式审阅容器端点一致），非明文外网流量
+FORMAL_SEAL_URL = "http://127.0.0.1:8318/v1/review-receipts/seal"  # DevSkim: ignore DS137138,DS162092 仅访问本机回环代理封存端点，非明文外网流量
 PREFLIGHT_SCRIPT = Path(__file__).resolve().parents[1] / "review_preflight.py"
 PREFLIGHT_LOG_READER = Path(__file__).resolve().parents[1] / "_review_preflight_log.py"
 PREFLIGHT_RATE_LIMIT_FILE = "preflight-rate-limits.json"
@@ -559,6 +562,30 @@ class StatusPublisher:
             return result
 
 
+class TargetDrifted(IdentityError):
+    """PR 实时 head 或 base 已偏离派发时冻结的目标，不登记、不预检、不消费额度。"""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect disabled", headers, fp)
+
+
+def _load_cliproxy_key() -> str:
+    value = os.environ.get("CLIPROXY_LOCAL_KEY", "").strip()
+    if value:
+        return value
+    if sys.platform == "darwin":
+        try:
+            done = subprocess.run(["launchctl", "getenv", "CLIPROXY_LOCAL_KEY"],
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2.0)
+            if done.returncode == 0 and done.stdout.strip():
+                return done.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+    return ""
+
+
 class ExternalReview:
     def __init__(self, gateway: RepoGateway | None, *, state_root: Path = STATE_ROOT,
                  checkout_root: Path = CHECKOUT_ROOT, source: Path = SOURCE_REPO,
@@ -566,7 +593,8 @@ class ExternalReview:
                  docker: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
                  vm_trim: Callable[[Path], dict] | None = None,
                  preflight: Callable[[ReviewTarget], dict] | None = None,
-                 session_receipt: Callable[[str, str, str, float], dict[str, Any] | None] | None = None):
+                 session_receipt: Callable[[str, str, str, float], dict[str, Any] | None] | None = None,
+                 seal_receipt: Callable[[str, str], bool] | None = None):
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
         self.docker = docker if docker is not None else (lambda args: docker_cli(args))
         # #1986：删卷后对 Colima VM 跑 fstrim；与 TS 监督共用 checkout_root 下的节流锁与时间戳（见 vm_trim）。
@@ -577,6 +605,8 @@ class ExternalReview:
         self.preflight = preflight if preflight is not None else self._run_preflight
         self._custom_session_receipt = session_receipt is not None
         self.session_receipt = session_receipt if session_receipt is not None else self._read_session_receipt
+        self._custom_seal_receipt = seal_receipt is not None
+        self.seal_receipt = seal_receipt if seal_receipt is not None else self._seal_session_receipt
         self.poll_seconds = poll_seconds
         self._stop = threading.Event()
 
@@ -670,11 +700,62 @@ class ExternalReview:
             result[key] = value
         return result
 
+    def _seal_session_receipt(self, launch_id: str, session_id: str) -> bool:
+        """向本机代理发起已认证的终态封存请求（POST /v1/review-receipts/seal），等待所有在途请求结束并落盘 sealed=true。
+        若宿主目录模式下磁盘收据已为 sealed=true（离线测试或代理重启后对账），直接放行；未封存则必须经代理封存成功。"""
+        if (not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", launch_id)
+                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id)):
+            return False
+        container = os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip()
+        host_dir = os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
+        if (container and host_dir) or (not container and not host_dir):
+            return False
+        if host_dir and not container:
+            existing = Path(host_dir) / f"review-{launch_id}" / "receipt.json"
+            try:
+                raw = existing.read_bytes()
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and parsed.get("sealed") is True and parsed.get("tainted") is False:
+                    return True
+            except (OSError, ValueError):
+                pass
+        key = _load_cliproxy_key()
+        if not key:
+            return False
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        deadline = time.monotonic() + SESSION_RECEIPT_TIMEOUT_SECONDS
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "X-NewChanlun-Review-Launch": f"review-{launch_id}",
+            "Session-Id": session_id,
+        }
+        while True:
+            req = urllib.request.Request(FORMAL_SEAL_URL, data=b"", headers=headers, method="POST")
+            remaining = max(0.5, deadline - time.monotonic())
+            try:
+                with opener.open(req, timeout=min(5.0, remaining)) as resp:
+                    body = json.loads(resp.read(4096).decode("utf-8"))
+                    return resp.status == 200 and isinstance(body, dict) and body.get("status") == "sealed"
+            except urllib.error.HTTPError as err:
+                status_word = ""
+                try:
+                    parsed = json.loads(err.read(4096).decode("utf-8"))
+                    if isinstance(parsed, dict):
+                        status_word = str(parsed.get("status", ""))
+                except Exception:
+                    pass
+                if err.code == 409 and status_word == "in_flight" and time.monotonic() < deadline:
+                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                    continue
+                return False
+            except (OSError, ValueError, urllib.error.URLError):
+                return False
+
     def _read_session_receipt(
         self, model: str, launch_id: str, session_id: str, since: float, *,
         expected_response_id_sha256: str = "", expected_output_sha256: str = "", min_requests: int = 1,
     ) -> dict[str, Any] | None:
-        """从已配置的代理收据来源读取正式独审 session 的 cliproxy-review-v1 收据；未配置、相对路径、冲突或污染一律返回 None。"""
+        """从已配置的代理收据来源读取正式独审 session 已封存（sealed=true）的 cliproxy-review-v1 收据；未封存、未配置、相对路径、冲突或污染一律返回 None。"""
         if (not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", launch_id)
                 or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id)):
             return None
@@ -722,10 +803,10 @@ class ExternalReview:
         allowed = {f"codex:{m}@chatgpt.com" for m in MODELS}
         hex64 = re.compile(r"[0-9a-f]{64}")
         if (not isinstance(payload, dict)
-                or set(payload) != {"launch", "session", "complete_stable", "routes", "requests",
+                or set(payload) != {"launch", "session", "complete_stable", "sealed", "routes", "requests",
                                     "last_response_id_sha256", "last_output_sha256"}
                 or payload["launch"] != launch or payload["session"] != session_id
-                or payload["complete_stable"] is not True
+                or payload["complete_stable"] is not True or payload["sealed"] is not True
                 or type(payload["requests"]) is not int or payload["requests"] < 1
                 or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
                 or not isinstance(payload["routes"][0], str) or payload["routes"][0] not in allowed
@@ -737,6 +818,7 @@ class ExternalReview:
         return {
             "routes": list(payload["routes"]),
             "requests": payload["requests"],
+            "sealed": True,
             "last_response_id_sha256": payload["last_response_id_sha256"],
             "last_output_sha256": payload["last_output_sha256"],
         }
@@ -795,27 +877,35 @@ class ExternalReview:
         expected = f"codex:{outcome.model}@chatgpt.com"
         expected_out_sha = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
         expected_rid_sha = hashlib.sha256(response_ids[-1].encode("utf-8")).hexdigest()
+        launch_id = str(launch.get("launch_id", ""))
+        session_id = str(outcome.session_id or "")
         try:
             if not self._custom_session_receipt and self.session_receipt == self._read_session_receipt:
-                evidence = self._read_session_receipt(
-                    outcome.model, str(launch.get("launch_id", "")), str(outcome.session_id or ""), since,
-                    expected_response_id_sha256=expected_rid_sha,
-                    expected_output_sha256=expected_out_sha,
-                    min_requests=len(response_ids),
-                )
+                if not self.seal_receipt(launch_id, session_id):
+                    evidence = None
+                else:
+                    evidence = self._read_session_receipt(
+                        outcome.model, launch_id, session_id, since,
+                        expected_response_id_sha256=expected_rid_sha,
+                        expected_output_sha256=expected_out_sha,
+                        min_requests=len(response_ids),
+                    )
             else:
-                evidence = self.session_receipt(outcome.model, str(launch.get("launch_id", "")),
-                                                str(outcome.session_id or ""), since)
+                if self._custom_seal_receipt and not self.seal_receipt(launch_id, session_id):
+                    evidence = None
+                else:
+                    evidence = self.session_receipt(outcome.model, launch_id, session_id, since)
         except Exception:
             evidence = None
         if (not isinstance(evidence, dict)
+                or evidence.get("sealed", not self._custom_session_receipt) is not True
                 or evidence.get("routes") != [expected]
                 or type(evidence.get("requests")) is not int or evidence["requests"] < len(response_ids)
                 or evidence.get("last_response_id_sha256") != expected_rid_sha
                 or evidence.get("last_output_sha256") != expected_out_sha):
             return ReviewOutcome(
                 outcome.model, "FAILED", outcome.session_id,
-                f"代理侧正式审阅收据缺失、已污染、模型不符或未绑定同一最终上游响应（期望 {expected}），PASS/BLOCK 均不采信",
+                f"代理侧正式审阅收据缺失、未封存、已污染、模型不符或未绑定同一最终上游响应（期望 {expected}），PASS/BLOCK 均不采信",
             )
         return outcome
 
@@ -924,16 +1014,29 @@ class ExternalReview:
         self._record_preflight_rate_limit(target, rate_limited=False, models=list(MODELS))
         return {**report, "admitted_image_id": candidate_img}
 
-    def target(self, number: int, attempt: int) -> ReviewTarget:
+    def target(self, number: int, attempt: int, *,
+               expect_head: str | None = None, expect_base: str | None = None) -> ReviewTarget:
         if type(attempt) is not int or attempt <= 0:
             raise ValueError("attempt 必须为正整数")
         if self.gateway is None:
             raise IdentityError("在线独审需要宿主 App 客户端")
         with self._inflight_review(number):
-            target = self._frozen(load_target(self.gateway, number), attempt)
+            raw_target = load_target(self.gateway, number)
+            if expect_head is not None and raw_target["head_sha"] != expect_head:
+                raise TargetDrifted(f"head-moved-not-reviewed: expected {expect_head}, got {raw_target['head_sha']}")
+            if expect_base is not None and raw_target["base_sha"] != expect_base:
+                raise TargetDrifted(f"base-moved-not-reviewed: expected {expect_base}, got {raw_target['base_sha']}")
+            target = self._frozen(raw_target, attempt)
             folder = self.state_root / "runs" / target.key
-            # 以有效 target.json 判断是否已登记：_lock 会先建目录，建目录后、写 target.json 前中断时仍须准入。
-            if not (folder / "target.json").exists():
+            # 先按精确 attempt 排他持锁再判登记/预检：防止手动与 sweep 同审并发重复发付费预检或重复计限流。
+            with _lock(folder):
+                if (folder / "target.json").exists():
+                    previous = ReviewTarget(**_read(folder / "target.json"))
+                    if previous.controller_code_head != target.controller_code_head:
+                        raise IdentityError("controller 已变更，请用新 attempt 保留旧证据")
+                    if previous.review_contract != target.review_contract:
+                        raise IdentityError("审查合同已变更，请用新 attempt 保留旧证据")
+                    return previous
                 used = (self.state_root / "runs").glob(
                     f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
                 if any(used):
@@ -946,14 +1049,6 @@ class ExternalReview:
                     preflight_report = self.admit_preflight(target)
                     admitted_image = str(preflight_report.get("admitted_image_id", ""))
                 target = replace(target, reuse_planned=planned, admitted_image_id=admitted_image)
-            with _lock(folder):
-                if (folder / "target.json").exists():
-                    previous = ReviewTarget(**_read(folder / "target.json"))
-                    if previous.controller_code_head != target.controller_code_head:
-                        raise IdentityError("controller 已变更，请用新 attempt 保留旧证据")
-                    if previous.review_contract != target.review_contract:
-                        raise IdentityError("审查合同已变更，请用新 attempt 保留旧证据")
-                    return previous
                 with self._pr_lock(target.pr_number):
                     used = (self.state_root / "runs").glob(
                         f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
@@ -1457,9 +1552,37 @@ class ExternalReview:
                 continue
         return False
 
+    def _reverify_sealed_receipts(self, target: ReviewTarget, folder: Path, result: dict) -> dict:
+        """发布前终态复核（首次发布与未发布结果续发共用）：对真实双审的 PASS/BLOCK 再次校验两位 reviewer
+        均具备已封存且未污染的代理收据，防止第一位在等待第二位或中断续发期间被污染或未封存却发布 success。"""
+        if target.policy_version != POLICY or result.get("reused_from") or result.get("verdict") not in ("PASS", "BLOCK"):
+            return result
+        rechecked: list[ReviewOutcome] = []
+        for model in MODELS:
+            worker = folder / model
+            try:
+                launch = _read(worker / "launch.json")
+                receipt = _read(worker / "receipt.json")
+                outcome = validate_review(target, launch, receipt, worker, self.source)
+                outcome = self._verify_session_receipt(target, launch, receipt, worker, outcome)
+            except (OSError, ValueError, TypeError, KeyError, IdentityError) as error:
+                outcome = ReviewOutcome(model, "FAILED", None, f"发布前复核代理终态收据失败：{error}")
+            rechecked.append(outcome)
+        sessions = [o.session_id for o in rechecked if o.session_id]
+        if len(sessions) != len(set(sessions)):
+            rechecked = [ReviewOutcome(o.model, "FAILED", o.session_id, "两独审复用了 session") for o in rechecked]
+        verdict = ("FAILED" if any(o.verdict == "FAILED" for o in rechecked) else
+                   "BLOCK" if any(o.verdict == "BLOCK" for o in rechecked) else "PASS")
+        state = {"PASS": "success", "BLOCK": "failure", "FAILED": "error"}[verdict]
+        if verdict != result.get("verdict") or state != result.get("state"):
+            result = {**result, "verdict": verdict, "state": state, "reviews": [asdict(o) for o in rechecked]}
+            _save(folder / "outcome.json", result)
+        return result
+
     def _publish_final(self, target: ReviewTarget, folder: Path, publisher: StatusPublisher, result: dict) -> dict:
-        """最终发布门（新审汇总、中断续发、STALE 恢复共用）：在 PR 锁内确认同 head 没有更晚登记的
-        attempt 再发布终态；有就记 STALE（原审查明细保留），由新 attempt 接手。"""
+        """最终发布门（新审汇总、中断续发、STALE 恢复共用）：发布前先复核全部代理终态收据已封存且未污染，
+        并在 PR 锁内确认同 head 没有更晚登记的 attempt 再发布终态；有就记 STALE（原审查明细保留），由新 attempt 接手。"""
+        result = self._reverify_sealed_receipts(target, folder, result)
         with self._pr_lock(target.pr_number):
             if self._superseded_on_head(target):
                 raise Stale("同 head 已有更晚登记的 attempt，本 run 结论不再发布")
@@ -1549,8 +1672,9 @@ class ExternalReview:
             outcomes.append(future.result() if failure is None else ReviewOutcome(model, "FAILED", None, str(failure)))
         return outcomes
 
-    def review_pr(self, number: int, attempt: int = 1) -> dict:
-        target = self.target(number, attempt)
+    def review_pr(self, number: int, attempt: int = 1, *,
+                  expect_head: str | None = None, expect_base: str | None = None) -> dict:
+        target = self.target(number, attempt, expect_head=expect_head, expect_base=expect_base)
         assert self.gateway is not None
         folder = self.state_root / "runs" / target.key
         with _lock(folder):
@@ -1768,6 +1892,8 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("--pr", required=True, type=_positive)
     review.add_argument("--attempt", type=_positive, default=1)
     review.add_argument("--private-key", required=True, type=Path)
+    review.add_argument("--expect-head", default=None)
+    review.add_argument("--expect-base", default=None)
     migrate = sub.add_parser("migrate-stale", help="新部署补发旧 controller 下双审完整却未发布终态的 STALE run")
     migrate.add_argument("--pr", required=True, type=_positive)
     migrate.add_argument("--attempt", type=_positive, default=1)
@@ -1785,13 +1911,17 @@ def main(argv: list[str] | None = None) -> int:
             with GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS) as client:
                 client.verify()
                 lane = ExternalReview(RepoGateway(client))
-                result = (lane.review_pr(args.pr, args.attempt) if args.command == "review-pr"
+                result = (lane.review_pr(args.pr, args.attempt, expect_head=args.expect_head, expect_base=args.expect_base)
+                          if args.command == "review-pr"
                           else lane.migrate_stale(args.pr, args.attempt))
         else:
             lane = ExternalReview(None)  # 本地 status、对账不获取或读取任何凭据。
             result = lane.status(args.pr) if args.command == "status" else lane.reconcile(args.run_id, args.note)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if not isinstance(result, dict) or result.get("verdict", "PASS") == "PASS" else 1
+    except TargetDrifted as error:
+        print(json.dumps({"action": "target-drifted-not-reviewed", "reason": str(error)}, ensure_ascii=False))
+        return 3
     except (IdentityError, EffectPending, ValueError, OSError) as error:
         print(str(error), file=sys.stderr)
         return 2

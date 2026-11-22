@@ -88,8 +88,8 @@ def review_from_receipt(
     root: Path, launch: str, session: str, since: float, wait: float, *,
     expected_response_id_sha256: str = "", expected_output_sha256: str = "", min_requests: int = 1,
 ) -> dict | None:
-    """消费代理为正式独审 launch 原子发布的 cliproxy-review-v1 收据；缺项、污染或模型不符立即返回 None；
-    多轮收据在最终轮尚未异步落盘时在 wait 截止时间内轮询等待期望的最终响应摘要与轮数。"""
+    """消费代理为正式独审 launch 封存的不可变 cliproxy-review-v1 收据；缺项、污染或模型不符立即返回 None；
+    未封存（sealed!=True）绝不放行，仅在 wait 截止时间内轮询等待封存落盘，超时仍未封存返回 None。"""
     if not REVIEW_LAUNCH.fullmatch(launch) or not REVIEW_SESSION.fullmatch(session):
         return None
     if expected_response_id_sha256 and not SHA256_HEX.fullmatch(expected_response_id_sha256):
@@ -118,11 +118,12 @@ def review_from_receipt(
             payload = json.loads(raw, object_pairs_hook=_unique_object)
             if (not isinstance(payload, dict)
                     or set(payload) != {"schema", "launch", "session", "started_ns", "finished_ns",
-                                        "complete", "tainted", "requests", "routes",
+                                        "complete", "sealed", "tainted", "requests", "routes",
                                         "last_response_id_sha256", "last_output_sha256"}
                     or payload["schema"] != REVIEW_SCHEMA or payload["launch"] != launch
                     or payload["session"] != session
                     or payload["complete"] is not True or payload["tainted"] is not False
+                    or type(payload["sealed"]) is not bool
                     or type(payload["requests"]) is not int or payload["requests"] < 1
                     or type(payload["started_ns"]) is not int or type(payload["finished_ns"]) is not int
                     or not int((since - 1) * 1e9) <= payload["started_ns"] <= payload["finished_ns"] <= time.time_ns()
@@ -135,9 +136,15 @@ def review_from_receipt(
                     or not isinstance(payload["last_output_sha256"], str)
                     or (payload["last_output_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_output_sha256"]))):
                 return None
+            if payload["sealed"] is not True:
+                if time.monotonic() >= end:
+                    return None
+                time.sleep(min(0.02, max(0, end - time.monotonic())))
+                continue
             result = {
                 "routes": [tuple(payload["routes"][0].split("@"))],
                 "requests": payload["requests"],
+                "sealed": True,
                 "last_response_id_sha256": payload["last_response_id_sha256"],
                 "last_output_sha256": payload["last_output_sha256"],
             }
@@ -183,7 +190,8 @@ def main():
         print(json.dumps({
             "launch": launch,
             "session": session,
-            "complete_stable": info is not None,
+            "complete_stable": bool(info is not None and info.get("sealed") is True),
+            "sealed": bool(info is not None and info.get("sealed") is True),
             "routes": [known.get(route, "other") for route in (info["routes"] if info else [])],
             "requests": info["requests"] if info else 0,
             "last_response_id_sha256": info["last_response_id_sha256"] if info else "",

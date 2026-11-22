@@ -1,9 +1,9 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
 new file mode 100644
-index 0000000..8b04da3
+index 0000000..d8e3187
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,103 @@
 +package middleware
 +
 +import (
@@ -37,6 +37,10 @@ index 0000000..8b04da3
 +			c.AbortWithStatus(http.StatusBadRequest)
 +			return
 +		}
++		if hasReviewHeader && c.Request.Method == http.MethodPost && c.Request.URL.Path == "/v1/review-receipts/seal" && c.GetHeader("Upgrade") == "" {
++			c.Next()
++			return
++		}
 +		var (
 +			ctx       context.Context
 +			collector *preflightreceipt.Collector
@@ -62,7 +66,13 @@ index 0000000..8b04da3
 +				c.AbortWithStatus(http.StatusBadRequest)
 +				return
 +			}
-+			ctx, collector, err = preflightreceipt.BeginReview(c.Request.Context(), root, launch, session)
++			requestedModel, ok := preflightreceipt.ExtractInboundReviewModel(c.Request)
++			if !ok {
++				preflightreceipt.TaintReview(root, launch)
++				c.AbortWithStatus(http.StatusBadRequest)
++				return
++			}
++			ctx, collector, err = preflightreceipt.BeginReview(c.Request.Context(), root, launch, session, requestedModel)
 +			if err != nil {
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
 +				return
@@ -75,12 +85,34 @@ index 0000000..8b04da3
 +		finished = true
 +	}
 +}
++
++func SealReviewReceiptHandler() gin.HandlerFunc {
++	root := os.Getenv("CLIPROXY_PREFLIGHT_RECEIPTS")
++	return func(c *gin.Context) {
++		if root == "" {
++			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
++			return
++		}
++		launch := c.GetHeader(preflightreceipt.ReviewHeader)
++		session := c.GetHeader("Session-Id")
++		switch preflightreceipt.SealReview(root, launch, session) {
++		case preflightreceipt.SealOK:
++			c.JSON(http.StatusOK, gin.H{"status": "sealed"})
++		case preflightreceipt.SealInFlight:
++			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"status": "in_flight"})
++		case preflightreceipt.SealUnavailable:
++			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
++		default:
++			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"status": "rejected"})
++		}
++	}
++}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
 new file mode 100644
-index 0000000..f5828ac
+index 0000000..838170f
 --- /dev/null
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,784 @@
+@@ -0,0 +1,819 @@
 +package api
 +
 +import (
@@ -626,6 +658,19 @@ index 0000000..f5828ac
 +		server.engine.ServeHTTP(res, req)
 +		return res
 +	}
++	seal := func(launch, session string) *httptest.ResponseRecorder {
++		req := httptest.NewRequest(http.MethodPost, "/v1/review-receipts/seal", nil)
++		req.Header.Set("Authorization", "Bearer test-key")
++		if launch != "" {
++			req.Header.Set(preflightreceipt.ReviewHeader, launch)
++		}
++		if session != "" {
++			req.Header.Set("Session-Id", session)
++		}
++		res := httptest.NewRecorder()
++		server.engine.ServeHTTP(res, req)
++		return res
++	}
 +	waitReceipt := func(t *testing.T, launch string, check func(preflightreceipt.ReviewReceipt) bool) ([]byte, preflightreceipt.ReviewReceipt) {
 +		t.Helper()
 +		deadline := time.Now().Add(2 * time.Second)
@@ -690,14 +735,35 @@ index 0000000..f5828ac
 +			lastSeq := seq.Load()
 +			wantRespID := fmt.Sprintf("resp_%s_%d", tc.model, lastSeq)
 +			wantOutText := fmt.Sprintf(`{"status":"completed","summary":"VERDICT: PASS","model":%q,"turn":%d}`, tc.model, lastSeq)
++			waitReceipt(t, tc.launch, func(r preflightreceipt.ReviewReceipt) bool {
++				return r.Requests == 2 && r.Complete && !r.Sealed && !r.Tainted
++			})
++			// Seal the launch once all in-flight turns have finished.
++			deadline := time.Now().Add(2 * time.Second)
++			for {
++				sres := seal(tc.launch, tc.session)
++				if sres.Code == http.StatusOK {
++					break
++				}
++				if sres.Code == http.StatusConflict && strings.Contains(sres.Body.String(), "in_flight") && time.Now().Before(deadline) {
++					time.Sleep(2 * time.Millisecond)
++					continue
++				}
++				t.Fatalf("seal failed HTTP %d: %s", sres.Code, sres.Body.String())
++			}
 +			raw, r := waitReceipt(t, tc.launch, func(r preflightreceipt.ReviewReceipt) bool {
-+				return r.Requests == 2 && r.Complete && !r.Tainted
++				return r.Requests == 2 && r.Complete && r.Sealed && !r.Tainted
 +			})
 +			wantRoute := "codex:" + tc.model + "@chatgpt.com"
 +			if r.Schema != preflightreceipt.ReviewSchema || r.Launch != tc.launch || r.Session != tc.session ||
 +				len(r.Routes) != 1 || r.Routes[0] != wantRoute ||
 +				r.LastResponseID != shaHex(wantRespID) || r.LastOutputSHA256 != shaHex(wantOutText) {
 +				t.Fatalf("wrong review receipt %+v, want route %q resp=%s out=%s", r, wantRoute, shaHex(wantRespID), shaHex(wantOutText))
++			}
++			// Post-seal request must be rejected before reaching upstream without altering the sealed receipt.
++			resAfter := post("/v1/responses", tc.model, tc.launch, tc.session)
++			if resAfter.Code < 400 || len(models) != 0 {
++				t.Fatalf("post-seal request escaped guard: status=%d extraCalls=%d", resAfter.Code, len(models))
 +			}
 +			exportFixture(t, tc.fixture, tc.launch, raw)
 +		})
@@ -795,6 +861,7 @@ index 0000000..f5828ac
 +			{http.MethodGet, "/v1/responses", "review-12345678-1234-4234-8234-123456789ac2", "019d0000-0000-7000-8000-000000000ac2", "websocket"},
 +			{http.MethodPost, "/v1/responses", "review-12345678-1234-4234-8234-123456789ac3", "preflight-12345678-1234-4234-8234-123456789ac3", ""},
 +			{http.MethodPost, "/v1/responses", "review-12345678-1234-4234-8234-123456789ac4", "bad-session", ""},
++			{http.MethodPost, "/v1/review-receipts/seal", "review-12345678-1234-4234-8234-123456789ac5", "019d0000-0000-7000-8000-000000000ac5", ""},
 +		} {
 +			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{"model":"gpt-6.2-sol","stream":true,"input":"x"}`))
 +			req.Header.Set("Authorization", "Bearer invalid-key")
@@ -866,7 +933,7 @@ index 0000000..f5828ac
 +	})
 +}
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
-index e2b039a..90e7537 100644
+index e2b039a..07de86f 100644
 --- a/internal/api/server_routes.go
 +++ b/internal/api/server_routes.go
 @@ -65,6 +65,7 @@ func (s *Server) setupRoutes() {
@@ -877,7 +944,15 @@ index e2b039a..90e7537 100644
  	{
  		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
  		v1.GET("/models/*model", func(c *gin.Context) {
-@@ -111,6 +112,7 @@ func (s *Server) setupRoutes() {
+@@ -87,6 +88,7 @@ func (s *Server) setupRoutes() {
+ 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
+ 		v1.POST("/responses", openaiResponsesHandlers.Responses)
+ 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
++		v1.POST("/review-receipts/seal", middleware.SealReviewReceiptHandler())
+ 		v1.POST("/alpha/search", s.codexAlphaSearch)
+ 		v1.POST("/live", s.codexLiveHandler.Handle)
+ 		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
+@@ -111,6 +113,7 @@ func (s *Server) setupRoutes() {
  
  	openaiV1 := s.engine.Group("/openai/v1")
  	openaiV1.Use(AuthMiddleware(s.accessManager))
@@ -885,7 +960,7 @@ index e2b039a..90e7537 100644
  	{
  		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
  		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
-@@ -120,6 +122,7 @@ func (s *Server) setupRoutes() {
+@@ -120,6 +123,7 @@ func (s *Server) setupRoutes() {
  	// Codex CLI direct route aliases (chatgpt_base_url compatible)
  	codexDirect := s.engine.Group("/backend-api/codex")
  	codexDirect.Use(AuthMiddleware(s.accessManager))
@@ -893,7 +968,7 @@ index e2b039a..90e7537 100644
  	{
  		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
  		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
-@@ -130,6 +133,7 @@ func (s *Server) setupRoutes() {
+@@ -130,6 +134,7 @@ func (s *Server) setupRoutes() {
  	// Gemini compatible API routes
  	v1beta := s.engine.Group("/v1beta")
  	v1beta.Use(AuthMiddleware(s.accessManager))
@@ -1072,7 +1147,7 @@ index 16203c4..e1d1634 100644
  			completion.Error = err.Error()
  		}
 diff --git a/sdk/api/handlers/handlers_model_router_test.go b/sdk/api/handlers/handlers_model_router_test.go
-index 9c8d01a..613c54e 100644
+index 9c8d01a..b359dff 100644
 --- a/sdk/api/handlers/handlers_model_router_test.go
 +++ b/sdk/api/handlers/handlers_model_router_test.go
 @@ -2,10 +2,13 @@ package handlers
@@ -1138,7 +1213,7 @@ index 9c8d01a..613c54e 100644
 +
 +	// Non-streaming Execute must fail closed before invoking plugin executor.
 +	l1 := "review-99991111-2222-4333-8444-555555555551"
-+	ctx1, c1, err := preflightreceipt.BeginReview(context.Background(), root, l1, session)
++	ctx1, c1, err := preflightreceipt.BeginReview(context.Background(), root, l1, session, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -1154,7 +1229,7 @@ index 9c8d01a..613c54e 100644
 +
 +	// Count must fail closed before invoking plugin executor.
 +	l2 := "review-99991111-2222-4333-8444-555555555552"
-+	ctx2, c2, err := preflightreceipt.BeginReview(context.Background(), root, l2, session)
++	ctx2, c2, err := preflightreceipt.BeginReview(context.Background(), root, l2, session, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -1170,7 +1245,7 @@ index 9c8d01a..613c54e 100644
 +
 +	// Streaming ExecuteStream must fail closed before invoking plugin executor.
 +	l3 := "review-99991111-2222-4333-8444-555555555553"
-+	ctx3, c3, err := preflightreceipt.BeginReview(context.Background(), root, l3, session)
++	ctx3, c3, err := preflightreceipt.BeginReview(context.Background(), root, l3, session, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -1559,10 +1634,10 @@ index 0000000..eb42c3f
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 new file mode 100644
-index 0000000..9144cf2
+index 0000000..30f9005
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1010 @@
+@@ -0,0 +1,1138 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -1623,12 +1698,22 @@ index 0000000..9144cf2
 +	Started          int64    `json:"started_ns"`
 +	Finished         int64    `json:"finished_ns"`
 +	Complete         bool     `json:"complete"`
++	Sealed           bool     `json:"sealed"`
 +	Tainted          bool     `json:"tainted"`
 +	Requests         int      `json:"requests"`
 +	Routes           []string `json:"routes"`
 +	LastResponseID   string   `json:"last_response_id_sha256"`
 +	LastOutputSHA256 string   `json:"last_output_sha256"`
 +}
++
++type SealStatus int
++
++const (
++	SealOK SealStatus = iota
++	SealInFlight
++	SealRejected
++	SealUnavailable
++)
 +
 +type reviewEntry struct {
 +	mu                sync.Mutex
@@ -1641,7 +1726,9 @@ index 0000000..9144cf2
 +	requests          int
 +	lastResponseIDSHA string
 +	lastOutputSHA     string
++	sealed            bool
 +	tainted           bool
++	taintedPersisted  bool
 +	reserved          bool
 +	touched           time.Time
 +	inFlight          int
@@ -1888,6 +1975,7 @@ index 0000000..9144cf2
 +		disk.Launch != launch ||
 +		disk.Tainted ||
 +		!disk.Complete ||
++		!disk.Sealed ||
 +		disk.Requests < 1 ||
 +		!reviewSessionPattern.MatchString(disk.Session) ||
 +		!isSHA256Hex(disk.LastResponseID) ||
@@ -1895,13 +1983,14 @@ index 0000000..9144cf2
 +		len(disk.Routes) != 1 ||
 +		(disk.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" && disk.Routes[0] != "codex:gpt-6.2-astra@chatgpt.com") {
 +		return &reviewEntry{
-+			directory: dir,
-+			launch:    launch,
-+			session:   disk.Session,
-+			started:   now.UnixNano(),
-+			tainted:   true,
-+			reserved:  true,
-+			touched:   now,
++			directory:        dir,
++			launch:           launch,
++			session:          disk.Session,
++			started:          now.UnixNano(),
++			tainted:          true,
++			taintedPersisted: disk.Tainted,
++			reserved:         true,
++			touched:          now,
 +		}, true, nil
 +	}
 +	return &reviewEntry{
@@ -1914,6 +2003,7 @@ index 0000000..9144cf2
 +		requests:          disk.Requests,
 +		lastResponseIDSHA: disk.LastResponseID,
 +		lastOutputSHA:     disk.LastOutputSHA256,
++		sealed:            true,
 +		tainted:           false,
 +		reserved:          true,
 +		touched:           now,
@@ -1941,6 +2031,12 @@ index 0000000..9144cf2
 +		var oldestTime time.Time
 +		for k, v := range reviewLedger {
 +			if v.inFlight > 0 {
++				continue
++			}
++			v.mu.Lock()
++			evictable := v.sealed || (v.tainted && v.taintedPersisted) || now.Sub(v.touched) > ReviewTurnLifetime
++			v.mu.Unlock()
++			if !evictable {
 +				continue
 +			}
 +			if oldestKey == "" || v.touched.Before(oldestTime) {
@@ -1990,7 +2086,49 @@ index 0000000..9144cf2
 +	reviewMu.Unlock()
 +}
 +
-+// TaintReview permanently marks a valid review launch receipt as tainted on disk.
++func (e *reviewEntry) taintAndPersistLocked() {
++	if e.sealed {
++		return
++	}
++	e.tainted = true
++	if err := e.persistLocked(); err == nil {
++		e.taintedPersisted = true
++	} else {
++		e.taintedPersisted = false
++	}
++}
++
++// ExtractInboundReviewModel reads, decodes (identity/zstd/gzip), and restores req.Body
++// before routing/normalization so the launch is bound to the exact client-requested model.
++func ExtractInboundReviewModel(req *http.Request) (string, bool) {
++	if req == nil || req.Method != http.MethodPost || req.Body == nil {
++		return "", false
++	}
++	orig := req.Body
++	raw, err := io.ReadAll(io.LimitReader(orig, maxOutboundModelBody+1))
++	if err != nil {
++		req.Body = restoredBody{Reader: io.MultiReader(bytes.NewReader(raw), orig), Closer: orig}
++		return "", false
++	}
++	if len(raw) > maxOutboundModelBody {
++		req.Body = restoredBody{Reader: io.MultiReader(bytes.NewReader(raw), orig), Closer: orig}
++		return "", false
++	}
++	_ = orig.Close()
++	req.Body = io.NopCloser(bytes.NewReader(raw))
++	decoded, ok := decodeCodexWireBody(raw, req.Header.Get("Content-Encoding"))
++	if !ok {
++		return "", false
++	}
++	model := parseTopLevelJSONModel(decoded)
++	if model == "" {
++		return "", false
++	}
++	return model, true
++}
++
++// TaintReview permanently marks an unsealed valid review launch receipt as tainted.
++// Already-sealed terminal receipts are immutable and unaffected.
 +// Callers must invoke this only after request authentication.
 +func TaintReview(root, launch string) {
 +	if !reviewLaunchPattern.MatchString(launch) || !filepath.IsAbs(root) {
@@ -2002,19 +2140,72 @@ index 0000000..9144cf2
 +	}
 +	defer releaseReview(entry)
 +	entry.mu.Lock()
-+	entry.tainted = true
-+	_ = entry.persistLocked()
++	entry.taintAndPersistLocked()
 +	entry.mu.Unlock()
 +}
 +
-+// BeginReview binds a formal external-review launch and its Codex session.
-+// Every outbound request for this launch is strictly enforced to native Codex OAuth HTTP
-+// with an exact outbound JSON model match; any violation aborts the request and taints the launch receipt.
-+func BeginReview(ctx context.Context, root, launch, session string) (context.Context, *Collector, error) {
++// SealReview seals a formal review launch once all in-flight requests have completed.
++// Only an unsealed, untainted in-memory entry from the live proxy instance can be sealed;
++// an already-sealed receipt on disk returns SealOK idempotently across restarts.
++func SealReview(root, launch, session string) SealStatus {
++	if !reviewLaunchPattern.MatchString(launch) || !reviewSessionPattern.MatchString(session) || !filepath.IsAbs(root) {
++		return SealRejected
++	}
++	key := root + "\x00" + launch
++	now := time.Now()
++	reviewMu.Lock()
++	entry := reviewLedger[key]
++	if entry != nil {
++		if entry.inFlight > 0 {
++			reviewMu.Unlock()
++			return SealInFlight
++		}
++		entry.inFlight++
++		entry.touched = now
++		reviewMu.Unlock()
++		defer releaseReview(entry)
++		entry.mu.Lock()
++		defer entry.mu.Unlock()
++		if entry.sealed {
++			if !entry.tainted && entry.session == session {
++				return SealOK
++			}
++			return SealRejected
++		}
++		if entry.tainted || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) {
++			return SealRejected
++		}
++		if entry.session != session {
++			entry.taintAndPersistLocked()
++			return SealRejected
++		}
++		entry.sealed = true
++		if err := entry.persistLocked(); err != nil {
++			entry.sealed = false
++			return SealUnavailable
++		}
++		return SealOK
++	}
++	reviewMu.Unlock()
++
++	diskEntry, onDisk, err := loadReviewEntryFromDisk(filepath.Join(root, launch), launch, session, now)
++	if err != nil {
++		return SealUnavailable
++	}
++	if !onDisk || diskEntry == nil || !diskEntry.sealed || diskEntry.tainted || diskEntry.session != session {
++		return SealRejected
++	}
++	return SealOK
++}
++
++// BeginReview binds a formal external-review launch, its Codex session, and its inbound requested model
++// BEFORE routing or model normalization. Every outbound request and upstream response for this launch
++// must match that exact requested model; any violation aborts before upstream and taints the launch.
++func BeginReview(ctx context.Context, root, launch, session, requestedModel string) (context.Context, *Collector, error) {
 +	if !reviewLaunchPattern.MatchString(launch) || !filepath.IsAbs(root) {
 +		return ctx, nil, ErrUnavailable
 +	}
-+	if !reviewSessionPattern.MatchString(session) {
++	if !reviewSessionPattern.MatchString(session) || (requestedModel != "gpt-6.2-sol" && requestedModel != "gpt-6.2-astra") {
 +		TaintReview(root, launch)
 +		return ctx, nil, ErrUnavailable
 +	}
@@ -2024,16 +2215,29 @@ index 0000000..9144cf2
 +		return ctx, nil, ErrUnavailable
 +	}
 +
++	expectedRoute := "codex:" + requestedModel + "@chatgpt.com"
 +	entry.mu.Lock()
++	if entry.sealed {
++		entry.mu.Unlock()
++		releaseReview(entry)
++		return ctx, nil, ErrUnavailable
++	}
 +	if entry.tainted {
-+		_ = entry.persistLocked()
++		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
 +		releaseReview(entry)
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if entry.session != session {
-+		entry.tainted = true
-+		_ = entry.persistLocked()
++		entry.taintAndPersistLocked()
++		entry.mu.Unlock()
++		releaseReview(entry)
++		return ctx, nil, ErrUnavailable
++	}
++	if entry.route == "" {
++		entry.route = expectedRoute
++	} else if entry.route != expectedRoute {
++		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
 +		releaseReview(entry)
 +		return ctx, nil, ErrUnavailable
@@ -2041,11 +2245,12 @@ index 0000000..9144cf2
 +	entry.mu.Unlock()
 +
 +	c := &Collector{
-+		directory:   entry.directory,
-+		deadline:    now.Add(ReviewTurnLifetime),
-+		strictCodex: true,
-+		review:      entry,
-+		receipt:     Receipt{Schema: ReviewSchema, Session: session, Started: now.UnixNano()},
++		directory:     entry.directory,
++		deadline:      now.Add(ReviewTurnLifetime),
++		strictCodex:   true,
++		expectedModel: requestedModel,
++		review:        entry,
++		receipt:       Receipt{Schema: ReviewSchema, Session: session, Started: now.UnixNano()},
 +	}
 +	return context.WithValue(ctx, contextKey{}, c), c, nil
 +}
@@ -2075,8 +2280,7 @@ index 0000000..9144cf2
 +	if entry != nil {
 +		defer releaseReview(entry)
 +		entry.mu.Lock()
-+		entry.tainted = true
-+		_ = entry.persistLocked()
++		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
 +	}
 +	c.mu.Lock()
@@ -2144,21 +2348,24 @@ index 0000000..9144cf2
 +	if c.review != nil {
 +		expected := "codex:" + model + "@chatgpt.com"
 +		c.review.mu.Lock()
++		if c.review.sealed {
++			c.review.mu.Unlock()
++			c.invalid = true
++			return ctx, nil, ErrUnavailable
++		}
 +		if c.review.tainted {
 +			c.review.mu.Unlock()
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
 +		}
-+		if provider != "codex" || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
-+			c.review.tainted = true
-+			_ = c.review.persistLocked()
++		if provider != "codex" || c.expectedModel == "" || model != c.expectedModel || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
++			c.review.taintAndPersistLocked()
 +			c.review.mu.Unlock()
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
 +		}
-+		if c.review.route != "" && c.review.route != expected {
-+			c.review.tainted = true
-+			_ = c.review.persistLocked()
++		if c.review.route != expected {
++			c.review.taintAndPersistLocked()
 +			c.review.mu.Unlock()
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
@@ -2171,11 +2378,7 @@ index 0000000..9144cf2
 +			}
 +			c.review.reserved = true
 +		}
-+		if c.review.route == "" {
-+			c.review.route = expected
-+		}
 +		c.review.mu.Unlock()
-+		c.expectedModel = model
 +		c.reserved = true
 +	} else if !c.reserved {
 +		if err := reservePrivateDir(c.directory, false); err != nil {
@@ -2462,6 +2665,7 @@ index 0000000..9144cf2
 +		Started:          e.started,
 +		Finished:         time.Now().UnixNano(),
 +		Complete:         complete,
++		Sealed:           e.sealed && !e.tainted && complete,
 +		Tainted:          e.tainted,
 +		Requests:         e.requests,
 +		Routes:           routes,
@@ -2518,22 +2722,22 @@ index 0000000..9144cf2
 +		entry := c.review
 +		entry.mu.Lock()
 +		defer entry.mu.Unlock()
++		if entry.sealed {
++			return
++		}
 +		if entry.tainted || modelMismatch {
-+			entry.tainted = true
-+			_ = entry.persistLocked()
++			entry.taintAndPersistLocked()
 +			return
 +		}
 +		for _, r := range routes {
 +			if r != "codex:gpt-6.2-sol@chatgpt.com" && r != "codex:gpt-6.2-astra@chatgpt.com" {
-+				entry.tainted = true
-+				_ = entry.persistLocked()
++				entry.taintAndPersistLocked()
 +				return
 +			}
 +			if entry.route == "" {
 +				entry.route = r
 +			} else if entry.route != r {
-+				entry.tainted = true
-+				_ = entry.persistLocked()
++				entry.taintAndPersistLocked()
 +				return
 +			}
 +		}
@@ -2548,8 +2752,7 @@ index 0000000..9144cf2
 +		entry.lastOutputSHA = lastOut
 +		entry.finished = time.Now().UnixNano()
 +		if err := entry.persistLocked(); err != nil {
-+			entry.tainted = true
-+			_ = entry.persistLocked()
++			entry.taintAndPersistLocked()
 +		}
 +		return
 +	}
@@ -2575,10 +2778,10 @@ index 0000000..9144cf2
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
 new file mode 100644
-index 0000000..c016f60
+index 0000000..e6e55b6
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,700 @@
+@@ -0,0 +1,791 @@
 +package preflightreceipt
 +
 +import (
@@ -2972,8 +3175,8 @@ index 0000000..c016f60
 +	session := "019d0000-0000-7000-8000-000000000001"
 +	var upstreamCalls int
 +
-+	runTurn := func(model, path, wireModel, respModel string, useZstd bool, respID, outText string) error {
-+		ctx, c, err := BeginReview(context.Background(), root, launch, session)
++	runTurn := func(requestedModel, model, path, wireModel, respModel string, useZstd bool, respID, outText string) error {
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, requestedModel)
 +		if err != nil {
 +			return err
 +		}
@@ -3029,66 +3232,85 @@ index 0000000..c016f60
 +		return nil
 +	}
 +
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_1", "turn-1"); err != nil {
++	if err := runTurn("gpt-6.2-sol", "gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_1", "turn-1"); err != nil {
 +		t.Fatal(err)
 +	}
 +	// A subsequent tool-only turn must atomically clear LastOutputSHA256 instead of keeping turn-1's text hash.
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_2", ""); err != nil {
++	if err := runTurn("gpt-6.2-sol", "gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_2", ""); err != nil {
 +		t.Fatal(err)
 +	}
 +	r := readReviewReceiptFile(t, root, launch)
-+	if r.Schema != ReviewSchema || r.Launch != launch || r.Session != session || !r.Complete || r.Tainted || r.Requests != 2 || len(r.Routes) != 1 || r.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" || r.LastResponseID != sha256Hex("resp_2") || r.LastOutputSHA256 != "" {
-+		t.Fatalf("tool-only turn mixed stale output hash: %+v", r)
++	if r.Schema != ReviewSchema || r.Launch != launch || r.Session != session || !r.Complete || r.Sealed || r.Tainted || r.Requests != 2 || len(r.Routes) != 1 || r.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" || r.LastResponseID != sha256Hex("resp_2") || r.LastOutputSHA256 != "" {
++		t.Fatalf("tool-only turn mixed stale output hash or prematurely sealed: %+v", r)
 +	}
 +	// Compaction must neither bump Requests nor clobber the atomic pair.
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses/compact", "gpt-6.2-sol", "", true, "", ""); err != nil {
++	if err := runTurn("gpt-6.2-sol", "gpt-6.2-sol", "/backend-api/codex/responses/compact", "gpt-6.2-sol", "", true, "", ""); err != nil {
 +		t.Fatal(err)
 +	}
 +	r = readReviewReceiptFile(t, root, launch)
-+	if r.Requests != 2 || !r.Complete || r.Tainted || r.LastResponseID != sha256Hex("resp_2") || r.LastOutputSHA256 != "" {
++	if r.Requests != 2 || !r.Complete || r.Sealed || r.Tainted || r.LastResponseID != sha256Hex("resp_2") || r.LastOutputSHA256 != "" {
 +		t.Fatalf("compact altered completed turn receipt: %+v", r)
 +	}
-+	if upstreamCalls != 3 {
-+		t.Fatalf("upstreamCalls = %d, want 3", upstreamCalls)
++	if err := runTurn("gpt-6.2-sol", "gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", true, "resp_3", "final-verdict"); err != nil {
++		t.Fatal(err)
 +	}
-+
-+	// Simulate proxy restart (empty in-memory ledger): disk receipt must be restored and continue counting cleanly.
-+	reviewMu.Lock()
-+	delete(reviewLedger, root+"\x00"+launch)
-+	reviewMu.Unlock()
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", true, "resp_3", "final-verdict"); err != nil {
-+		t.Fatalf("post-restart continuation failed: %v", err)
-+	}
-+	if r = readReviewReceiptFile(t, root, launch); r.Requests != 3 || !r.Complete || r.Tainted || r.LastResponseID != sha256Hex("resp_3") || r.LastOutputSHA256 != sha256Hex("final-verdict") {
-+		t.Fatalf("bad post-restart review receipt: %+v", r)
++	if upstreamCalls != 4 {
++		t.Fatalf("upstreamCalls = %d, want 4", upstreamCalls)
 +	}
 +
 +	// Switching model on a subsequent turn must abort BEFORE upstream and permanently taint the launch receipt.
-+	if err := runTurn("gpt-6.2-astra", "/backend-api/codex/responses", "gpt-6.2-astra", "gpt-6.2-astra", false, "resp_bad", "bad"); err == nil {
++	if err := runTurn("gpt-6.2-astra", "gpt-6.2-astra", "/backend-api/codex/responses", "gpt-6.2-astra", "gpt-6.2-astra", false, "resp_bad", "bad"); err == nil {
 +		t.Fatal("model switch under same review launch succeeded")
 +	}
 +	if upstreamCalls != 4 {
 +		t.Fatalf("swapped model reached upstream: calls=%d, want 4", upstreamCalls)
 +	}
 +	r = readReviewReceiptFile(t, root, launch)
-+	if !r.Tainted || r.Complete || len(r.Routes) != 1 || r.Routes[0] != "other" || r.LastOutputSHA256 != "" {
++	if !r.Tainted || r.Complete || r.Sealed || len(r.Routes) != 1 || r.Routes[0] != "other" || r.LastOutputSHA256 != "" {
 +		t.Fatalf("expected tainted receipt after model switch: %+v", r)
 +	}
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("SealReview on tainted launch = %v, want SealRejected", st)
++	}
 +
-+	// Even after another simulated proxy restart, tainted launch on disk must never become clean again.
++	// Even after a simulated proxy restart, tainted launch on disk must never become clean or sealable again.
 +	reviewMu.Lock()
 +	delete(reviewLedger, root+"\x00"+launch)
 +	reviewMu.Unlock()
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_4", "resurrect"); err == nil {
++	if err := runTurn("gpt-6.2-sol", "gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_4", "resurrect"); err == nil {
 +		t.Fatal("tainted launch resurrected after restart")
 +	}
-+	if r = readReviewReceiptFile(t, root, launch); !r.Tainted || r.Complete {
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("SealReview resurrected tainted launch after restart: %v", st)
++	}
++	if r = readReviewReceiptFile(t, root, launch); !r.Tainted || r.Complete || r.Sealed {
 +		t.Fatalf("tainted state lost after restart: %+v", r)
++	}
++
++	// Routing normalization mismatch on Turn 1 (inbound requested astra, routing normalized to sol) MUST abort BEFORE upstream.
++	launchNorm := "review-44444444-2222-4333-8444-555555555555"
++	beforeNorm := upstreamCalls
++	ctxN, cN, err := BeginReview(context.Background(), root, launchNorm, session, "gpt-6.2-astra")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := cN.Start(ctxN, "codex", "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("routing normalization mismatch escaped Start(): err=%v", err)
++	}
++	cN.HandlerDone(false)
++	if upstreamCalls != beforeNorm {
++		t.Fatalf("routing normalization mismatch reached upstream")
++	}
++	if rN := readReviewReceiptFile(t, root, launchNorm); !rN.Tainted || rN.Complete || rN.Sealed {
++		t.Fatalf("routing normalization mismatch did not taint launch: %+v", rN)
++	}
++	if st := SealReview(root, launchNorm, session); st != SealRejected {
++		t.Fatalf("SealReview accepted normalized launch: %v", st)
 +	}
 +
 +	// Upstream response.model mismatch (e.g. silent fallback from astra to sol) must permanently taint the launch.
 +	launchMismatch := "review-33333333-2222-4333-8444-555555555555"
-+	ctxM, cM, err := BeginReview(context.Background(), root, launchMismatch, session)
++	ctxM, cM, err := BeginReview(context.Background(), root, launchMismatch, session, "gpt-6.2-astra")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -3109,13 +3331,13 @@ index 0000000..c016f60
 +	eM.End()
 +	cM.Complete(true)
 +	cM.HandlerDone(true)
-+	if rM := readReviewReceiptFile(t, root, launchMismatch); !rM.Tainted || rM.Complete || rM.LastOutputSHA256 != "" {
++	if rM := readReviewReceiptFile(t, root, launchMismatch); !rM.Tainted || rM.Complete || rM.Sealed || rM.LastOutputSHA256 != "" {
 +		t.Fatalf("upstream response.model mismatch did not taint launch: %+v", rM)
 +	}
 +
 +	// Wire body mismatch must abort BEFORE upstream and taint a fresh launch.
 +	launch2 := "review-22222222-2222-4333-8444-555555555555"
-+	ctx2, c2, err := BeginReview(context.Background(), root, launch2, session)
++	ctx2, c2, err := BeginReview(context.Background(), root, launch2, session, "gpt-6.2-astra")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -3138,7 +3360,7 @@ index 0000000..c016f60
 +	if upstreamCalls != before {
 +		t.Fatalf("wire mismatch reached upstream")
 +	}
-+	if r2 := readReviewReceiptFile(t, root, launch2); !r2.Tainted || r2.Complete {
++	if r2 := readReviewReceiptFile(t, root, launch2); !r2.Tainted || r2.Complete || r2.Sealed {
 +		t.Fatalf("wire mismatch did not taint launch: %+v", r2)
 +	}
 +}
@@ -3166,7 +3388,7 @@ index 0000000..c016f60
 +	s3 := "019d0000-0000-7000-8000-000000000103"
 +
 +	// l1 starts and stays in-flight.
-+	ctx1, c1, err := BeginReview(context.Background(), root, l1, s1)
++	ctx1, c1, err := BeginReview(context.Background(), root, l1, s1, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -3182,22 +3404,28 @@ index 0000000..c016f60
 +	if err != nil {
 +		t.Fatal(err)
 +	}
++	// Sealing while in-flight MUST return SealInFlight.
++	if st := SealReview(root, l1, s1); st != SealInFlight {
++		t.Fatalf("SealReview while in-flight = %v, want SealInFlight", st)
++	}
 +
-+	// l2 also stays in-flight -> capacity (2) is full of active entries; l3 MUST fail closed instead of evicting l1/l2.
-+	_, c2, err := BeginReview(context.Background(), root, l2, s2)
++	// l2 also stays active -> capacity (2) is full of unsealed entries; l3 MUST fail closed instead of evicting l1/l2.
++	_, c2, err := BeginReview(context.Background(), root, l2, s2, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if _, _, err := BeginReview(context.Background(), root, l3, s3); !errors.Is(err, ErrUnavailable) {
++	if _, _, err := BeginReview(context.Background(), root, l3, s3, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("active ledger overflow err = %v, want ErrUnavailable", err)
 +	}
-+	// Release l2 -> l3 can evict l2 (inFlight==0) while l1 (inFlight==1) stays the sole authoritative entry in ledger.
++	// Tainting l2 persists taint on disk, making l2 evictable while l1 stays pinned.
 +	c2.HandlerDone(false)
-+	_, c3, err := BeginReview(context.Background(), root, l3, s3)
++	TaintReview(root, l2)
++	_, c3, err := BeginReview(context.Background(), root, l3, s3, "gpt-6.2-sol")
 +	if err != nil {
-+		t.Fatalf("expected eviction of idle l2 to allow l3: %v", err)
++		t.Fatalf("expected eviction of persisted-tainted l2 to allow l3: %v", err)
 +	}
 +	c3.HandlerDone(false)
++	TaintReview(root, l3)
 +
 +	// Concurrent taint on l1 must be observed by the SAME entry held by c1; finishing c1 must NEVER overwrite taint.
 +	TaintReview(root, l1)
@@ -3206,16 +3434,16 @@ index 0000000..c016f60
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
 +	r1 := readReviewReceiptFile(t, root, l1)
-+	if !r1.Tainted || r1.Complete {
++	if !r1.Tainted || r1.Complete || r1.Sealed {
 +		t.Fatalf("in-flight collector overwrote tainted receipt: %+v", r1)
 +	}
 +
 +	// TaintReview must also pin and persist even when ledger is full of active entries (no split-brain eviction).
-+	_, ca, err := BeginReview(context.Background(), root, "review-bbbb1111-2222-4333-8444-555555555551", s1)
++	_, ca, err := BeginReview(context.Background(), root, "review-bbbb1111-2222-4333-8444-555555555551", s1, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	_, cb, err := BeginReview(context.Background(), root, "review-bbbb1111-2222-4333-8444-555555555552", s2)
++	_, cb, err := BeginReview(context.Background(), root, "review-bbbb1111-2222-4333-8444-555555555552", s2, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -3223,18 +3451,72 @@ index 0000000..c016f60
 +	TaintReview(root, lOverflow)
 +	ca.HandlerDone(false)
 +	cb.HandlerDone(false)
-+	if ro := readReviewReceiptFile(t, root, lOverflow); !ro.Tainted || ro.Complete {
++	if ro := readReviewReceiptFile(t, root, lOverflow); !ro.Tainted || ro.Complete || ro.Sealed {
 +		t.Fatalf("TaintReview under full active ledger did not persist taint: %+v", ro)
 +	}
 +}
 +
-+func TestReviewReceiptTaintWriteFailureInvalidatesPriorCleanReceipt(t *testing.T) {
++func TestReviewReceiptSealImmutabilityAndReadOnlyTaintFailure(t *testing.T) {
 +	root := filepath.Join(t.TempDir(), "receipts")
++
++	// Case 1: Clean launch -> SealReview writes sealed:true -> post-seal requests blocked without mutating receipt,
++	// and SealReview remains idempotently SealOK even after proxy restart.
++	launchOK := "review-cccc1111-2222-4333-8444-555555555550"
++	sessionOK := "019d0000-0000-7000-8000-000000000300"
++	ctx0, c0, err := BeginReview(context.Background(), root, launchOK, sessionOK, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx0, e0, err := c0.Start(ctx0, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	client0 := httptransport.Decorate(ctx0, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	req0, _ := http.NewRequestWithContext(ctx0, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp0, err := client0.Do(req0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	c0.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_sealed","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass"}]}]}}` + "\n\n"))
++	_ = resp0.Body.Close()
++	e0.End()
++	c0.Complete(true)
++	c0.HandlerDone(true)
++	if r := readReviewReceiptFile(t, root, launchOK); !r.Complete || r.Sealed || r.Tainted {
++		t.Fatalf("expected unsealed clean receipt before seal: %+v", r)
++	}
++	if st := SealReview(root, launchOK, sessionOK); st != SealOK {
++		t.Fatalf("SealReview = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, launchOK); !r.Complete || !r.Sealed || r.Tainted {
++		t.Fatalf("expected sealed clean receipt after seal: %+v", r)
++	}
++	// Post-seal request must be blocked BEFORE routing/execution without mutating sealed receipt.
++	if _, _, err := BeginReview(context.Background(), root, launchOK, sessionOK, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("post-seal BeginReview err = %v, want ErrUnavailable", err)
++	}
++	TaintReview(root, launchOK)
++	if r := readReviewReceiptFile(t, root, launchOK); !r.Complete || !r.Sealed || r.Tainted {
++		t.Fatalf("sealed receipt was mutated post-seal: %+v", r)
++	}
++	// After proxy restart, sealed receipt stays SealOK and still rejects new turns.
++	reviewMu.Lock()
++	delete(reviewLedger, root+"\x00"+launchOK)
++	reviewMu.Unlock()
++	if st := SealReview(root, launchOK, sessionOK); st != SealOK {
++		t.Fatalf("post-restart SealReview on sealed launch = %v, want SealOK", st)
++	}
++	if _, _, err := BeginReview(context.Background(), root, launchOK, sessionOK, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("post-restart BeginReview on sealed launch err = %v, want ErrUnavailable", err)
++	}
++
++	// Case 2: Taint persistence fails AND even if the prior unsealed receipt survives on disk (e.g. read-only volume),
++	// SealReview refuses in-process AND after proxy restart (even if volume becomes writable again).
 +	launch := "review-cccc1111-2222-4333-8444-555555555551"
 +	session := "019d0000-0000-7000-8000-000000000301"
-+
-+	// Turn 1 writes a clean receipt to disk.
-+	ctx, c, err := BeginReview(context.Background(), root, launch, session)
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -3255,27 +3537,39 @@ index 0000000..c016f60
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
-+	if r := readReviewReceiptFile(t, root, launch); !r.Complete || r.Tainted {
-+		t.Fatalf("expected initial clean receipt: %+v", r)
++	launchDir := filepath.Join(root, launch)
++	savedUnsealed, err := os.ReadFile(filepath.Join(launchDir, "receipt.json"))
++	if err != nil {
++		t.Fatal(err)
 +	}
 +
-+	// Simulate temp-file creation failure (works even under root in container builds) during taint persistence.
-+	launchDir := filepath.Join(root, launch)
++	// Simulate temp-file creation failure during taint persistence, AND re-plant the exact unsealed file
++	// as would happen on a read-only filesystem where persist, Truncate, and Remove all fail.
 +	blocker := filepath.Join(launchDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
 +	if err := os.Mkdir(blocker, 0700); err != nil {
 +		t.Fatal(err)
 +	}
 +	TaintReview(root, launch)
-+
-+	raw, err := os.ReadFile(filepath.Join(launchDir, "receipt.json"))
-+	if err == nil && len(raw) > 0 {
-+		t.Fatalf("stale clean receipt survived failed taint write: %s", raw)
++	if raw, readErr := os.ReadFile(filepath.Join(launchDir, "receipt.json")); readErr == nil && len(raw) > 0 {
++		t.Fatalf("stale clean receipt survived writable failed taint write: %s", raw)
 +	}
-+	// After proxy restart (clearing memory ledger), reloading this launch must stay tainted.
++	// Restore the surviving unsealed receipt as if the volume had been read-only during taint.
++	if err := os.WriteFile(filepath.Join(launchDir, "receipt.json"), savedUnsealed, 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Remove(blocker)
++	// In-process: tainted entry stays pinned in RAM -> SealReview MUST reject.
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("in-process SealReview accepted read-only surviving receipt: %v", st)
++	}
++	// After proxy restart (even with writable disk): surviving unsealed receipt from dead proxy is UNSEALABLE.
 +	reviewMu.Lock()
 +	delete(reviewLedger, root+"\x00"+launch)
 +	reviewMu.Unlock()
-+	if _, _, err := BeginReview(context.Background(), root, launch, session); !errors.Is(err, ErrUnavailable) {
-+		t.Fatalf("launch resurrected after taint write failure + restart: err=%v", err)
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("post-restart SealReview accepted surviving unsealed receipt: %v", st)
++	}
++	if _, _, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("post-restart BeginReview accepted surviving unsealed receipt: err=%v", err)
 +	}
 +}

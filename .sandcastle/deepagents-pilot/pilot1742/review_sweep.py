@@ -95,7 +95,7 @@ from .run import _ps_rows
 from .workunit import REPO
 
 Rows = list[tuple[int, int, str, str]]
-Spawn = Callable[[int, int, str, Path], int]
+Spawn = Callable[..., int]
 Sync = Callable[[int, str, str], None]
 GATE = frozenset({"deepagents/review", "ci-ok"})
 LAUNCH_BACKOFF_SECONDS = 600
@@ -258,12 +258,15 @@ class GhCli:
         return result
 
     def required_checks(self) -> dict[str, int]:
-        """main 上可信的必需检查及其绑定的来源 app_id。strict（要求 PR 先与 base 追平）或 enforce_admins 关着就
-        一个都不算：前者会拿旧 base 上的结论合入，后者让管理员身份（宿主 gh 可能就是）绕过保护。没绑定来源 app
-        的检查，任何有 statuses:write 的人都能发一条同名 success，也不算。"""
+        """main 上可信的必需检查及其绑定的来源 app_id。strict（要求 PR 先与 base 追平）、enforce_admins、
+        禁止强推（allow_force_pushes=false）与禁止删分支（allow_deletions=false）任一不满足就一个都不算：
+        它们共同保证 GitHub 服务端在合入时只允许 main 单调前进到 head 的祖先。没绑定来源 app 的检查也不算。"""
         rules = json.loads(self._gh("api", f"repos/{self.repository}/branches/main/protection"))
         checks = rules.get("required_status_checks") or {}
-        if checks.get("strict") is not True or (rules.get("enforce_admins") or {}).get("enabled") is not True:
+        if (checks.get("strict") is not True
+                or (rules.get("enforce_admins") or {}).get("enabled") is not True
+                or (rules.get("allow_force_pushes") or {}).get("enabled") is not False
+                or (rules.get("allow_deletions") or {}).get("enabled") is not False):
             return {}
         return {c["context"]: c["app_id"] for c in checks.get("checks", [])
                 if type(c.get("app_id")) is int and c["app_id"] > 0}  # bool 是 int 的子类，排除
@@ -291,9 +294,12 @@ class GhCli:
         self._gh("pr", "merge", str(number), "-R", self.repository, "--disable-auto")
 
 
-def run_review_command(number: int, attempt: int, head: str, private_key: Path) -> list[str]:
-    return [sys.executable, "-m", "pilot1742.review_sweep", "run-review", "--pr", str(number),
-            "--attempt", str(attempt), "--expect-head", head, "--private-key", str(private_key)]
+def run_review_command(number: int, attempt: int, head: str, private_key: Path, base: str | None = None) -> list[str]:
+    cmd = [sys.executable, "-m", "pilot1742.review_sweep", "run-review", "--pr", str(number),
+           "--attempt", str(attempt), "--expect-head", head, "--private-key", str(private_key)]
+    if base:
+        cmd.extend(["--expect-base", base])
+    return cmd
 
 
 _REVIEWER = re.compile(r"pilot1742\.(review_sweep run-review|external_review review-pr) --pr (\d+) ")
@@ -446,9 +452,13 @@ class Sweep:
             return "needs-source-sync", None
         return None
 
-    def _launch(self, number: int, head: str, attempt: int) -> int:
+    def _launch(self, number: int, head: str, base: str, attempt: int) -> int:
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        return self.spawn(number, attempt, head, self.folder / "logs" / f"p{number}-{head[:12]}-a{attempt}.log")
+        log = self.folder / "logs" / f"p{number}-{head[:12]}-a{attempt}.log"
+        try:
+            return self.spawn(number, attempt, head, log, base)
+        except TypeError:
+            return self.spawn(number, attempt, head, log)
 
     def _resume_once(self, number: int, head: str, base: str, attempt: int, action: str) -> tuple[str, dict | None]:
         marker = self._resumes(number, head, attempt, base)
@@ -456,7 +466,7 @@ class Sweep:
             return ("needs-reconcile" if action == "publish" else "needs-operator"), None
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         marker.write_text(str(time.time()))
-        return f"resume-{action}", {"pid": self._launch(number, head, attempt), "attempt": attempt}
+        return f"resume-{action}", {"pid": self._launch(number, head, base, attempt), "attempt": attempt}
 
     @staticmethod
     def _resumable(row: dict) -> bool:
@@ -481,7 +491,7 @@ class Sweep:
             return "launch-backoff", None
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         marker.write_text(str(time.time()))
-        return "launch", {"pid": self._launch(number, head, attempt), "attempt": attempt}
+        return "launch", {"pid": self._launch(number, head, base, attempt), "attempt": attempt}
 
     def _is_ancestor(self, ancestor: str, descendant: str) -> bool | None:
         """仅 git 退出码 0 判祖先、退出码 1 判非祖先；缺对象或其它错误返回 None，触发同步而不误判 done。"""
@@ -492,6 +502,23 @@ class Sweep:
         if done.returncode == 1:
             return False
         return None
+
+    def _base_server_bound(self, base: str, head: str) -> bool:
+        """服务端精确 base 绑定证明：在 strict=true、enforce_admins=true、allow_force_pushes=false、
+        allow_deletions=false 前提下，GitHub 服务端合入时仅当 base <= live_base <= head 才放行。
+        当且仅当 rev-list --ancestry-path base..head 恰为 [head]（不存在严格中间提交 base < C < head，
+        涵盖单提交 PR 与 update-branch 追平合入提交）时，服务端 strict+sha=head 数学上唯一锁定 live_base==base。
+        存在中间提交或本地缺对象时返回 False（失败关闭，不自动合入）。"""
+        if self._is_ancestor(base, head) is not True:
+            return False
+        done = subprocess.run(
+            ["git", "-C", str(self.lane.source), "rev-list", "--ancestry-path", f"{base}..{head}"],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            return False
+        commits = [line.strip() for line in done.stdout.splitlines() if line.strip()]
+        return commits == [head]
 
     def _latest_for_head(self, number: int, head: str) -> dict[str, Any] | None:
         runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
@@ -525,9 +552,26 @@ class Sweep:
         if running >= self.max_running:
             return "queued", None
         if latest is not None and latest["outcome"] and "publication" not in latest["outcome"]:
-            if latest["target"].get("base_sha") != base or not self._resumable(latest):
-                return "needs-reconcile", None
-            return self._resume_once(number, head, base, latest["target"]["attempt"], "publish")
+            if latest["target"].get("base_sha") == base:
+                if not self._resumable(latest):
+                    return "needs-reconcile", None
+                return self._resume_once(number, head, base, latest["target"]["attempt"], "publish")
+            # 旧 base 上尚未发布的 outcome 已被新 base 取代（原记录完整保留）：
+            # 绝不回退为 needs-reconcile 堵死追平；落后则允许追平，新 base 为 head 祖先则照常走新 base 派审。
+            if behind:
+                return "behind-awaiting-update", None
+            anc = self._is_ancestor(base, head)
+            if anc is False:
+                return "behind-awaiting-update", None
+            if anc is None:
+                sync_err = self._ensure_commits(number, base, head)
+                if sync_err is not None:
+                    return sync_err
+                anc = self._is_ancestor(base, head)
+                if anc is False:
+                    return "behind-awaiting-update", None
+                if anc is None:
+                    return "needs-source-sync", None
         if behind:  # 先追平再审：不审一个合入前必然被替换的 head
             return "behind-awaiting-update", None
         if self._backoff is not None:  # 限流退避：不派新审查（含续跑审查），本轮汇总一行日志
@@ -710,6 +754,10 @@ class Sweep:
         confirmed_pass = self._review_confirmed_published_pass(number, head, state["base"])
         pending_latest = live_review or self.lane.has_inflight_review(number) or not confirmed_pass
         if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green and not pending_latest:
+            if not self._base_server_bound(state["base"], head):
+                return ({"action": "needs-human-confirm", "gated": ["base-not-server-bound"],
+                         "reason": "base 与 head 间存在严格中间祖先提交或本地缺对象，GitHub 服务端无法绑定精确 base，不自动合入"},
+                        False, "disable" if state["auto_merge"] or again["auto_merge"] else None)
             return {"action": "merged"}, candidate, "merge"
         return {"action": "waiting", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
                 "mergeable_state": state["mergeable_state"], "queue_head": is_head,
@@ -851,6 +899,13 @@ class Sweep:
                                           **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
                                 if result.get("auto_merge_withdrawn"):
                                     withdrawn.add(number)
+                            elif not self._base_server_bound(classified_base, head):
+                                result = {"action": "needs-human-confirm", "gated": ["base-not-server-bound"],
+                                          "rechecked_under_pr_lock": True,
+                                          "reason": "base 与 head 间存在严格中间祖先提交或本地缺对象，GitHub 服务端无法绑定精确 base，不自动合入",
+                                          **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
+                                if result.get("auto_merge_withdrawn"):
+                                    withdrawn.add(number)
                             elif (number in live_busy
                                     or number in live_now
                                     or live_state.get("mergeable_state") not in ("clean", "unstable")
@@ -958,33 +1013,42 @@ def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int
 
 
 def spawner(private_key: Path) -> Spawn:
-    def spawn(number: int, attempt: int, head: str, log: Path) -> int:
+    def spawn(number: int, attempt: int, head: str, log: Path, base: str | None = None) -> int:
         log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         env = dict(os.environ)
         config = env.get("SANDCASTLE_CONFIG_FILE", "").strip()
         if config and not Path(config).is_absolute():
             env["SANDCASTLE_CONFIG_FILE"] = os.path.abspath(config)
         with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
-            return subprocess.Popen(run_review_command(number, attempt, head, private_key), stdin=subprocess.DEVNULL,
+            return subprocess.Popen(run_review_command(number, attempt, head, private_key, base), stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=out, start_new_session=True, env=env,
                                     cwd=Path(__file__).resolve().parents[1]).pid
     return spawn
 
 
 def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
-    """子进程入口：先核对 PR 仍是决策时的 head，再交给 external_review review-pr（身份由它负责）。"""
+    """子进程入口：先核对 PR 仍是决策时的 head 与 base，再把期望目标传给 external_review review-pr（登记前再次核验）。"""
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep run-review")
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--attempt", required=True, type=int)
     parser.add_argument("--expect-head", required=True)
+    parser.add_argument("--expect-base", default=None)
     parser.add_argument("--private-key", required=True, type=Path)
     args = parser.parse_args(argv)
-    if (github or GhCli()).pr(args.pr)["head"] != args.expect_head:
+    live = (github or GhCli()).pr(args.pr)
+    if live["head"] != args.expect_head:
         print(json.dumps({"pr": args.pr, "action": "head-moved-not-reviewed", "expected": args.expect_head}))
         return 3
+    if args.expect_base is not None and live["base"] != args.expect_base:
+        print(json.dumps({"pr": args.pr, "action": "base-moved-not-reviewed", "expected": args.expect_base,
+                          "now": live["base"]}))
+        return 3
     from . import external_review
-    return external_review.main(["review-pr", "--pr", str(args.pr), "--attempt", str(args.attempt),
-                                 "--private-key", str(args.private_key)])
+    cmd = ["review-pr", "--pr", str(args.pr), "--attempt", str(args.attempt),
+           "--private-key", str(args.private_key), "--expect-head", args.expect_head]
+    if args.expect_base is not None:
+        cmd.extend(["--expect-base", args.expect_base])
+    return external_review.main(cmd)
 
 
 def main(argv: list[str] | None = None) -> int:

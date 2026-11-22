@@ -122,6 +122,7 @@ def _make_fake_session_receipt(state_root: Path):
         return {
             "routes": [f"codex:{model}@chatgpt.com"],
             "requests": reqs,
+            "sealed": True,
             "last_response_id_sha256": resp_sha,
             "last_output_sha256": out_sha,
         }
@@ -1459,8 +1460,11 @@ def _second_opinion(lane, env, monkeypatch, verdicts, *, stale=False):
             _advance_main(lane, env)
         return outcomes
     monkeypatch.setattr(lane, "run_reviewers", scripted)
+    orig_reverify = lane._reverify_sealed_receipts
+    monkeypatch.setattr(lane, "_reverify_sealed_receipts", lambda _t, _f, r: r)
     second = lane.review_pr(1810, 2)
     monkeypatch.setattr(lane, "run_reviewers", real)
+    monkeypatch.setattr(lane, "_reverify_sealed_receipts", orig_reverify)
     if not stale:
         _advance_main(lane, env)
     return first, second
@@ -2675,6 +2679,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
             "started_ns": now - 1_000_000,
             "finished_ns": now,
             "complete": not tainted,
+            "sealed": not tainted,
             "tainted": tainted,
             "requests": requests_count,
             "routes": ["other"] if tainted else [route],
@@ -2758,7 +2763,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
             captured.append({"cmd": cmd, "env": kwargs.get("env")})
             return subprocess.CompletedProcess(
                 cmd, 0,
-                json.dumps({"launch": f"review-{lid}", "session": sid, "complete_stable": True,
+                json.dumps({"launch": f"review-{lid}", "session": sid, "complete_stable": True, "sealed": True,
                             "routes": [f"codex:{MODELS[0]}@chatgpt.com"], "requests": 3,
                             "last_response_id_sha256": rid_hash, "last_output_sha256": out_hash}).encode(),
                 b"",
@@ -2767,7 +2772,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
 
     monkeypatch.setattr(module.subprocess, "run", spy_container_run)
     got = strict._read_session_receipt(MODELS[0], lid, sid, time.time() - 1)
-    assert got == {"routes": [f"codex:{MODELS[0]}@chatgpt.com"], "requests": 3,
+    assert got == {"routes": [f"codex:{MODELS[0]}@chatgpt.com"], "requests": 3, "sealed": True,
                    "last_response_id_sha256": rid_hash, "last_output_sha256": out_hash} and len(captured) == 1
     assert "--review-receipt" in captured[0]["cmd"]
     assert not any(k in captured[0]["env"] for k in ("DOCKER_HOST", "DOCKER_CONFIG", "CLIPROXY_LOCAL_KEY", "DOCKER_CONTEXT"))
@@ -2928,6 +2933,7 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
         "started_ns": now - 1_000_000,
         "finished_ns": now,
         "complete": True,
+        "sealed": True,
         "tainted": False,
         "requests": len(fixture["response_ids"]),
         "routes": [f"codex:{fixture['model']}@chatgpt.com"],
@@ -2943,8 +2949,105 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
     verified = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
     assert verified.verdict == "PASS"
 
-    # 追加一条空 response_id 的末轮 token_usage_record：必须拒绝，绝不能回退采信前一条非空 response_id
+    # 未封存收据（sealed=False，即使所有摘要匹配）也必须拒绝，绝不采信
+    unsealed_payload = json.loads((rec_dir / "receipt.json").read_text())
+    unsealed_payload["sealed"] = False
+    (rec_dir / "receipt.json").write_text(json.dumps(unsealed_payload))
+    monkeypatch.setattr(strict, "seal_receipt", lambda _lid, _sid: False)
+    unsealed = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
+    assert unsealed.verdict == "FAILED" and "未封存" in unsealed.reason
+
+    # 恢复已封存收据，再追加一条空 response_id 的末轮 token_usage_record：必须拒绝，绝不能回退采信前一条非空 response_id
+    unsealed_payload["sealed"] = True
+    (rec_dir / "receipt.json").write_text(json.dumps(unsealed_payload))
+    monkeypatch.setattr(strict, "seal_receipt", lambda _lid, _sid: True)
     with open(worker / "session.jsonl", "a") as sf:
         sf.write(json.dumps({"type": "token_usage_record", "payload": {"response_id": ""}}) + "\n")
     rejected = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
     assert rejected.verdict == "FAILED" and "response_id" in rejected.reason
+
+
+def test_publish_and_resume_reverify_sealed_receipts_and_reject_post_first_taint(lane):
+    """首位 reviewer 通过后，若在汇总发布前或未发布结果续发前其代理收据变为污染/未封存，
+    _publish_final 与 _resume_publication 均不得凭缓存 PASS 发布 success，必须降级为 FAILED/error。"""
+    tainted_first = {"flag": False}
+    orig_receipt = lane.session_receipt
+
+    def dynamic_receipt(model, launch_id, session_id, since):
+        if model == MODELS[0] and tainted_first["flag"]:
+            return None
+        return orig_receipt(model, launch_id, session_id, since)
+
+    lane.session_receipt = dynamic_receipt
+
+    # 1. 首次发布前：首位完成时有效，但在汇总写 outcome 后、发布前被污染，最终发布必须降级为 error
+    orig_reverify = lane._reverify_sealed_receipts
+
+    def taint_before_publish(target, folder, result):
+        tainted_first["flag"] = True
+        return orig_reverify(target, folder, result)
+
+    lane._reverify_sealed_receipts = taint_before_publish
+    res = lane.review_pr(1810, 1)
+    assert res["verdict"] == "FAILED" and res["state"] == "error"
+    assert lane.gateway.sent[-1] == "error"
+
+    # 2. 未发布结果续发（_resume_publication）：先写一份未发布的 PASS outcome，再污染首位收据后续跑，绝不发布 success
+    tainted_first["flag"] = False
+    lane._reverify_sealed_receipts = orig_reverify
+    passed = lane.review_pr(1810, 2)
+    assert passed["verdict"] == "PASS"
+    target2 = ReviewTarget(**passed["target"])
+    folder2 = lane.state_root / "runs" / target2.key
+    unpublished = {k: v for k, v in passed.items() if k != "publication"}
+    module._save(folder2 / "outcome.json", unpublished)
+    (folder2 / "effects" / "status-success.json").unlink()
+    tainted_first["flag"] = True
+    resumed = lane.review_pr(1810, 2)
+    assert resumed["verdict"] == "FAILED" and resumed["state"] == "error"
+    assert lane.gateway.sent[-1] == "error"
+
+
+def test_target_exclusive_attempt_lock_prevents_concurrent_duplicate_preflight_and_checks_expected_base(lane):
+    """同一 attempt 的并发登记先持排他锁再执行付费预检（第二路立抛 EffectPending 且零重复预检）；
+    expect_base / expect_head 失配时在登记与预检前直接抛 TargetDrifted。"""
+    import threading
+
+    with pytest.raises(module.TargetDrifted, match="base-moved-not-reviewed"):
+        lane.target(1810, 1, expect_head=lane.gateway.pr["head"]["sha"], expect_base="0" * 40)
+    with pytest.raises(module.TargetDrifted, match="head-moved-not-reviewed"):
+        lane.target(1810, 1, expect_head="0" * 40, expect_base=lane.gateway.pr["base"]["sha"])
+
+    entered = threading.Event()
+    release = threading.Event()
+    preflight_calls = {"n": 0}
+
+    def slow_preflight(t):
+        preflight_calls["n"] += 1
+        entered.set()
+        assert release.wait(5)
+        return _fake_preflight_pass(t)
+
+    lane.preflight = slow_preflight
+    out1 = {}
+    err2 = {}
+
+    def first():
+        out1["target"] = lane.target(1810, 1)
+
+    def second():
+        try:
+            lane.target(1810, 1)
+        except Exception as exc:
+            err2["exc"] = exc
+
+    t1 = threading.Thread(target=first)
+    t1.start()
+    assert entered.wait(5)
+    t2 = threading.Thread(target=second)
+    t2.start()
+    t2.join(timeout=5)
+    assert isinstance(err2.get("exc"), EffectPending)
+    release.set()
+    t1.join(timeout=5)
+    assert "target" in out1 and preflight_calls["n"] == 1

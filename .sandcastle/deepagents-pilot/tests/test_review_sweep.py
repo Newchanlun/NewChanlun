@@ -17,7 +17,24 @@ from pilot1742.review_sweep import (
     reviewing,
 )
 
-lane = _external_review.lane  # 复用真实审查 lane 与 PR 替身
+
+@pytest.fixture
+def lane(env, monkeypatch):
+    """单提交 PR 夹具（rev-list --ancestry-path base..head == [head]，满足服务端精确 base 绑定）；
+    需测多提交中间祖先场景的用例在用例内再追加提交。"""
+    (env.source / "changed-0").write_text("0")
+    (env.source / "changed-1").write_text("1")
+    git(env.source, "add", ".")
+    git(env.source, "commit", "-qm", "change-0")
+    monkeypatch.setattr(_external_review.module, "SOURCE_REPO", env.source)
+    gateway = _external_review.Gateway(env)
+    return _external_review.ExternalReview(
+        gateway, source=env.source, state_root=env.home / "review",
+        checkout_root=env.home / "clones", poll_seconds=0.01,
+        launcher=[_external_review.sys.executable, str(_external_review.Path(__file__).with_name("external_review_child.py"))],
+        preflight=_external_review._fake_preflight_pass,
+        session_receipt=_external_review._make_fake_session_receipt(env.home / "review"),
+    )
 
 
 class FakeGitHub:
@@ -76,14 +93,14 @@ class Host:
     def __init__(self, lane, *, run=True):
         self.lane, self.run, self.rows, self.spawned, self.next_pid = lane, run, [], [], 4000
 
-    def spawn(self, number, attempt, head, log):
+    def spawn(self, number, attempt, head, log, base=None):
         self.next_pid += 1
         self.spawned.append((number, attempt, head))
         if self.run:
-            self.lane.review_pr(number, attempt)
+            self.lane.review_pr(number, attempt, expect_head=head, expect_base=base)
         else:
             self.rows.append((self.next_pid, self.next_pid, "S",
-                              " ".join(module.run_review_command(number, attempt, head, "/k")[1:])))
+                              " ".join(module.run_review_command(number, attempt, head, "/k", base)[1:])))
         return self.next_pid
 
 
@@ -593,18 +610,21 @@ def test_reviewer_identity_rejects_other_prs_zombies_and_unrelated_commands():
 
 
 def test_run_review_refuses_when_head_moved(monkeypatch):
-    """F5：子进程绑定决策时的 head；head 已变就不审（不登记、不派模型）。"""
+    """F5：子进程绑定决策时的 head 与 base；任一已变就不审（不登记、不派模型），匹配时原样透传给 external_review。"""
     called = []
     monkeypatch.setattr("pilot1742.external_review.main", lambda argv: called.append(argv) or 0)
     class GitHub:
         def pr(self, number):
-            return {"head": "b" * 40}
+            return {"head": "b" * 40, "base": "c" * 40}
     assert module.run_review(["--pr", "5", "--attempt", "1", "--expect-head", "a" * 40, "--private-key", "/k"],
                              GitHub()) == 3
+    assert module.run_review(["--pr", "5", "--attempt", "1", "--expect-head", "b" * 40,
+                              "--expect-base", "d" * 40, "--private-key", "/k"], GitHub()) == 3
     assert called == []
-    assert module.run_review(["--pr", "5", "--attempt", "1", "--expect-head", "b" * 40, "--private-key", "/k"],
-                             GitHub()) == 0
-    assert called == [["review-pr", "--pr", "5", "--attempt", "1", "--private-key", "/k"]]
+    assert module.run_review(["--pr", "5", "--attempt", "1", "--expect-head", "b" * 40,
+                              "--expect-base", "c" * 40, "--private-key", "/k"], GitHub()) == 0
+    assert called == [["review-pr", "--pr", "5", "--attempt", "1", "--private-key", "/k",
+                       "--expect-head", "b" * 40, "--expect-base", "c" * 40]]
 
 
 def test_behind_head_is_caught_up_before_review(lane):
@@ -840,14 +860,22 @@ BOUND = [{"context": "deepagents/review", "app_id": 5486877}, {"context": "ci-ok
 ])
 @pytest.mark.parametrize("enforce_admins", [True, False])
 def test_required_checks_count_only_strict_enforced_and_app_bound(monkeypatch, rules, trusted, enforce_admins):
-    """I2：strict 关着一个都不算（会拿旧 base 上的结论合入）；enforce_admins 关着也不算（管理员身份可绕过保护）；
-    没绑定来源 app 的检查谁都能伪造，不算。"""
+    """I2：strict 关着、enforce_admins 关着、允许强推或允许删分支都一个都不算；没绑定来源 app 的检查也不算。"""
     cli = module.GhCli("Newchanlun/NewChanlun")
-    protection = {"required_status_checks": rules, "enforce_admins": {"enabled": enforce_admins}}
+    protection = {
+        "required_status_checks": rules,
+        "enforce_admins": {"enabled": enforce_admins},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+    }
     calls = []
     monkeypatch.setattr(cli, "_gh", lambda *args: calls.append(args) or json.dumps(protection))
     assert cli.required_checks() == (trusted if enforce_admins else {})
     assert calls == [("api", "repos/Newchanlun/NewChanlun/branches/main/protection")]
+    for bad_key in ("allow_force_pushes", "allow_deletions"):
+        bad = {**protection, bad_key: {"enabled": True}}
+        monkeypatch.setattr(cli, "_gh", lambda *args, p=bad: json.dumps(p))
+        assert cli.required_checks() == {}
 
 
 def test_child_dying_before_registration_backs_off(lane):
@@ -1553,9 +1581,19 @@ def test_withdraw_timeout_stops_the_fail_closed_sweep(lane):
 def test_actions_done_before_a_timeout_are_still_logged(lane, capsys):
     """opus 中：本轮先合入了一个 PR、后一个写超时，已合入那条照样写日志，写超时那条记 write-unknown。"""
     github = FakeGitHub(lane)
-    _more_pulls(lane, github, [1805])
     base_1805 = lane.gateway.pr["base"]["sha"]
-    head_1805 = f"{1805:040d}"
+    orig_head = lane.gateway.pr["head"]["sha"]
+    git(lane.source, "checkout", "-qb", "pr-1805-branch", base_1805)
+    (lane.source / "pr-1805.txt").write_text("1805")
+    git(lane.source, "add", ".")
+    git(lane.source, "commit", "-qm", "pr 1805")
+    head_1805 = git(lane.source, "rev-parse", "HEAD")
+    git(lane.source, "checkout", "-q", orig_head)
+    pr_1805 = copy.deepcopy(lane.gateway.pr)
+    pr_1805["number"] = 1805
+    pr_1805["head"]["sha"] = head_1805
+    pr_1805["head"]["ref"] = "pr-1805"
+    github.extra_pulls.append(pr_1805)
     run_1805 = lane.state_root / "runs" / f"r1150335160-p1805-{base_1805}-{head_1805}-{module.POLICY}-a1"
     run_1805.mkdir(parents=True, mode=0o700)
     (run_1805 / "target.json").write_text(json.dumps({
@@ -2064,43 +2102,27 @@ def test_merge_holds_inflight_lock_exclusively_across_github_merge(lane):
 
 def test_dispatch_and_merge_share_exact_base_head_target_and_recheck_live_base(lane, env):
     """1. main 前进到 head 已包含的提交（clean，无须追平）时，派审不把旧 base 判 done，而是为新 base 派审；
-    2. 规划到合入之间实时 base 变化时，合入锁内复核实时 base 并拒合旧 PASS。"""
-    # 先在旧 base 上完成并发布 PASS
+    2. base..head 存在严格中间祖先提交时，服务端无法绑定精确 base，自动合入拒绝并撤原生 auto-merge；
+    3. 单提交 PR 规划到合入之间实时 base 变化时，合入锁内复核实时 base 并拒合旧 PASS。"""
+    # 在单提交 PR 上先测规划复核与锁内合入复核捕获实时 base 漂移
+    single_head = lane.gateway.pr["head"]["sha"]
     assert lane.review_pr(1810, 1)["verdict"] == "PASS"
-    old_base = lane.gateway.pr["base"]["sha"]
-    head = lane.gateway.pr["head"]["sha"]
-    # main 前进到 head 的直系父提交（已包含在 head 中，PR 仍为 clean）
-    parent_of_head = git(env.source, "rev-parse", f"{head}~1")
-    assert parent_of_head != old_base
-    lane.gateway.pr["base"]["sha"] = parent_of_head
-    github = FakeGitHub(lane)
-    green(github, head)
-    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
-    first = sweep.tick()
-    assert acts(first) == ["launch", "waiting"] and github.calls == []
-    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 1)]
-
-    # 规划时 old_base 是最新 PASS（因而规划 write="merge"），但锁内复核实时 PR 状态时 base 已漂移（即使新 base 亦有 PASS）-> 报 base-moved 拒合
-    lane.gateway.pr["base"]["sha"] = parent_of_head
-    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
-    lane.gateway.pr["base"]["sha"] = old_base
-    assert lane.review_pr(1810, 2)["verdict"] == "PASS"
-    github2 = FakeGitHub(lane)
-    green(github2, head)
-    orig_pr = github2.pr
+    github_lock = FakeGitHub(lane)
+    green(github_lock, single_head)
+    orig_pr = github_lock.pr
     reads = []
 
     def drift_base_on_merge_recheck(number):
         reads.append(number)
         st = orig_pr(number)
         if len(reads) >= 3:
-            st["base"] = parent_of_head
+            st["base"] = "1" * 40
         return st
 
-    github2.pr = drift_base_on_merge_recheck
-    sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
-    second = sweep2.tick()
-    assert github2.calls == []
+    github_lock.pr = drift_base_on_merge_recheck
+    sweep_lock, _, _ = make(lane, run=False, github=github_lock, auto_merge=True)
+    second = sweep_lock.tick()
+    assert github_lock.calls == []
     moved = [a for a in second if a.get("pr") == 1810 and a["action"] == "base-moved"]
     assert moved and moved[-1].get("rechecked_under_pr_lock") is True
 
@@ -2114,7 +2136,7 @@ def test_dispatch_and_merge_share_exact_base_head_target_and_recheck_live_base(l
         reads3.append(number)
         st = orig_pr3(number)
         if len(reads3) >= 2:
-            st["base"] = parent_of_head
+            st["base"] = "1" * 40
         return st
 
     github3.pr = drift_base_on_plan_recheck
@@ -2123,9 +2145,39 @@ def test_dispatch_and_merge_share_exact_base_head_target_and_recheck_live_base(l
     assert any(a.get("pr") == 1810 and a["action"] == "base-moved" for a in third)
     assert github3.calls == [("disable", 1810)]
 
+    # 追加第二笔提交形成 multi-commit PR（old_base -> single_head -> head2）
+    (env.source / "changed-2").write_text("2")
+    git(env.source, "add", ".")
+    git(env.source, "commit", "-qm", "change-1")
+    head2 = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = head2
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+
+    # 存在严格中间祖先 single_head：GitHub 合入接口无法在服务端绑定精确 base，自动合入必须拒绝并撤原生 auto-merge
+    github_mid = FakeGitHub(lane)
+    _ordinary_armed(lane, github_mid)
+    sweep_mid, _, _ = make(lane, run=False, github=github_mid, auto_merge=True)
+    mid_actions = sweep_mid.tick()
+    assert any(a.get("pr") == 1810 and a["action"] == "needs-human-confirm" and a.get("gated") == ["base-not-server-bound"]
+               for a in mid_actions)
+    assert github_mid.calls == [("disable", 1810)]
+
+    # main 前进到 head2 的直系父提交 single_head（已包含在 head2 中，PR 仍为 clean）：不把旧 base 判 done，而是为新 base 派审
+    lane.gateway.pr["base"]["sha"] = single_head
+    github = FakeGitHub(lane)
+    green(github, head2)
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    first = sweep.tick()
+    assert acts(first) == ["launch", "waiting"] and github.calls == []
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 1)]
+
 
 def test_resume_markers_are_isolated_per_base_and_missing_object_triggers_sync(lane, env):
     """1. 不同 base 的同编号 attempt 拥有独立续跑标记；2. 本地缺 base 提交对象时 _is_ancestor 不误判 done，先触发 sync。"""
+    (env.source / "changed-2").write_text("2")
+    git(env.source, "add", ".")
+    git(env.source, "commit", "-qm", "change-1")
+    lane.gateway.pr["head"]["sha"] = git(env.source, "rev-parse", "HEAD")
     old_base = lane.gateway.pr["base"]["sha"]
     head = lane.gateway.pr["head"]["sha"]
     parent_of_head = git(env.source, "rev-parse", f"{head}~1")
@@ -2151,3 +2203,50 @@ def test_resume_markers_are_isolated_per_base_and_missing_object_triggers_sync(l
     assert acts(sweep.tick()) == ["resume-review"]
     assert sweep._resumes(1810, head, 1, old_base).is_file()
     assert sweep._resumes(1810, head, 1, parent_of_head).is_file()
+
+
+def test_old_base_unpublished_outcome_unblocks_update_branch_and_merge_commit_is_server_bound(lane, env):
+    """1. 旧 base 上尚未发布的 outcome 被新 base 取代后不得卡在 needs-reconcile 堵死追平；
+    2. 多提交 PR 经 update-branch 产生追平合入提交 M=merge(multi_commit, new_base) 后，
+       rev-list --ancestry-path new_base..M == [M]（无严格中间祖先），满足服务端精确 base 绑定并正常自动合入。"""
+    # 给 PR 叠两笔提交，并制造一条旧 base 的未发布 outcome（无 publication）
+    (env.source / "changed-2").write_text("2")
+    git(env.source, "add", ".")
+    git(env.source, "commit", "-qm", "change-1")
+    multi_head = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = multi_head
+    passed = lane.review_pr(1810, 1)
+    assert passed["verdict"] == "PASS"
+    old_target = ReviewTarget(**passed["target"])
+    old_folder = lane.state_root / "runs" / old_target.key
+    unpublished = {k: v for k, v in passed.items() if k != "publication"}
+    _external_review.module._save(old_folder / "outcome.json", unpublished)
+
+    # main 前进到独立提交 new_base（PR 变为 behind）：旧 base 未发布 outcome 绝不卡在 needs-reconcile，必须允许追平
+    old_base = lane.gateway.pr["base"]["sha"]
+    git(env.source, "checkout", "-qb", "main-adv", old_base)
+    (env.source / "main-only.txt").write_text("adv")
+    git(env.source, "add", ".")
+    git(env.source, "commit", "-qm", "main advance")
+    new_base = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["base"]["sha"] = new_base
+
+    github = FakeGitHub(lane)
+    github.states[1810] = {"mergeable_state": "behind"}
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert acts(actions) == ["behind-awaiting-update", "update-branch"]
+    assert github.calls == [("update", 1810, multi_head)]
+
+    # 模拟 update-branch 合并提交 M=merge(multi_head, new_base)：新 base 到 M 无严格中间祖先，审过 PASS 后可正常自动合入
+    git(env.source, "checkout", "-q", multi_head)
+    git(env.source, "merge", "--no-ff", "-m", "update branch", new_base)
+    merged_head = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = merged_head
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+
+    github2 = FakeGitHub(lane)
+    green(github2, merged_head)
+    sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
+    assert acts(sweep2.tick()) == ["done", "merged"]
+    assert github2.calls == [("merge", 1810, merged_head)]

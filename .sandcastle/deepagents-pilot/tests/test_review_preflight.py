@@ -1792,9 +1792,10 @@ def test_generated_go_receipts_consumed_by_python():
     }
     for name, (launch, session, routes, min_reqs) in review_expected.items():
         payload = json.loads((root / name / launch / "receipt.json").read_text())
+        assert payload["sealed"] is True
         since = payload["started_ns"] / 1e9
         got = preflight._log_module.review_from_receipt(root / name, launch, session, since, 0.5)
-        assert got is not None and got["routes"] == routes and got["requests"] == min_reqs
+        assert got is not None and got["routes"] == routes and got["requests"] == min_reqs and got["sealed"] is True
         assert len(got["last_response_id_sha256"]) == 64 and len(got["last_output_sha256"]) == 64
         # 跨模型或换 session 消费必须失败闭合
         assert preflight._log_module.review_from_receipt(
@@ -1803,7 +1804,7 @@ def test_generated_go_receipts_consumed_by_python():
     tainted_launch = "review-12345678-1234-4234-8234-123456789aa3"
     tainted_session = "019d0000-0000-7000-8000-000000000aa3"
     tainted_payload = json.loads((root / "review-codex-tainted" / tainted_launch / "receipt.json").read_text())
-    assert tainted_payload["tainted"] is True and tainted_payload["complete"] is False
+    assert tainted_payload["tainted"] is True and tainted_payload["complete"] is False and tainted_payload["sealed"] is False
     assert preflight._log_module.review_from_receipt(
         root / "review-codex-tainted", tainted_launch, tainted_session, tainted_payload["started_ns"] / 1e9, 0,
     ) is None
@@ -1815,7 +1816,7 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
     now = time.time_ns()
     base = {
         "schema": "cliproxy-review-v1", "launch": launch, "session": session,
-        "started_ns": now - 1_000_000, "finished_ns": now, "complete": True,
+        "started_ns": now - 1_000_000, "finished_ns": now, "complete": True, "sealed": True,
         "tainted": False, "requests": 3, "routes": [f"codex:{SOL}@chatgpt.com"],
         "last_response_id_sha256": "a" * 64, "last_output_sha256": "b" * 64,
     }
@@ -1826,11 +1827,13 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
     assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) == {
         "routes": [(f"codex:{SOL}", "chatgpt.com")],
         "requests": 3,
+        "sealed": True,
         "last_response_id_sha256": "a" * 64,
         "last_output_sha256": "b" * 64,
     }
     for bad in (
-        {"tainted": True}, {"complete": False}, {"requests": 0}, {"requests": True},
+        {"tainted": True}, {"complete": False}, {"sealed": False}, {"sealed": "true"},
+        {"requests": 0}, {"requests": True},
         {"schema": "cliproxy-preflight-v1"}, {"session": "019d0000-0000-7000-8000-000000000ab2"},
         {"routes": ["codex@chatgpt.com"]}, {"routes": [f"codex:{SOL}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"]},
         {"routes": ["other"]}, {"extra": 1}, {"finished_ns": now + 10**12},
@@ -1846,24 +1849,26 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
 
 
 def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediately(tmp_path):
-    """多轮审阅终轮异步落盘时，读取器应在 wait 时限内等待期望终轮摘要；遇污染收据立即返回 None 不空等。"""
+    """多轮审阅终轮未封存时，读取器应在 wait 时限内等待封存与期望终轮摘要；超时仍未封存或遇污染立即返回 None。"""
     launch = "review-12345678-1234-4234-8234-123456789ab2"
     session = "019d0000-0000-7000-8000-000000000ab2"
     now = time.time_ns()
     turn1 = {
         "schema": "cliproxy-review-v1", "launch": launch, "session": session,
-        "started_ns": now - 2_000_000, "finished_ns": now - 1_000_000, "complete": True,
+        "started_ns": now - 2_000_000, "finished_ns": now - 1_000_000, "complete": True, "sealed": False,
         "tainted": False, "requests": 1, "routes": [f"codex:{SOL}@chatgpt.com"],
         "last_response_id_sha256": "1" * 64, "last_output_sha256": "",
     }
     turn2 = {
-        **turn1, "finished_ns": now, "requests": 2,
+        **turn1, "finished_ns": now, "requests": 2, "sealed": True,
         "last_response_id_sha256": "2" * 64, "last_output_sha256": "3" * 64,
     }
     directory = tmp_path / launch
     directory.mkdir(mode=0o700)
     path = directory / "receipt.json"
     path.write_text(json.dumps(turn1))
+    # 未封存且 wait=0 时必须直接拒绝（绝不采信未封存收据）
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
 
     def publish_turn2():
         time.sleep(0.08)
@@ -1883,11 +1888,12 @@ def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediatel
     assert got == {
         "routes": [(f"codex:{SOL}", "chatgpt.com")],
         "requests": 2,
+        "sealed": True,
         "last_response_id_sha256": "2" * 64,
         "last_output_sha256": "3" * 64,
     }
 
-    path.write_text(json.dumps({**turn2, "complete": False, "tainted": True, "routes": ["other"],
+    path.write_text(json.dumps({**turn2, "complete": False, "sealed": False, "tainted": True, "routes": ["other"],
                                 "last_response_id_sha256": "", "last_output_sha256": ""}))
     started = time.monotonic()
     assert preflight._log_module.review_from_receipt(
