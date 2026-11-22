@@ -364,6 +364,22 @@ def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
                                  diff.decode(errors="replace"))
 
 
+def _read_preflight_admitted(folder: Path, target: ReviewTarget) -> str:
+    """读取并校验沿用退回后的预检准入标记，损坏、失配或缺有效镜像 Id 一律失败闭合。"""
+    marker = folder / PREFLIGHT_ADMITTED_FILE
+    try:
+        data = _read(marker)
+    except (OSError, ValueError, TypeError, IdentityError) as error:
+        raise IdentityError(f"预检准入记录无法读取或已损坏：{type(error).__name__}") from None
+    image_id = data.get("image_id") if isinstance(data, dict) else None
+    if (not isinstance(data, dict)
+            or data.get("run_id") != target.run_id
+            or not isinstance(image_id, str)
+            or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id)):
+        raise IdentityError("预检准入记录缺少有效镜像 Id 或与本次 run 不符")
+    return image_id
+
+
 def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: Path, source: Path) -> ReviewOutcome:
     model = launch["model"]
     def failed(reason: str) -> ReviewOutcome:
@@ -373,9 +389,15 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
                "controller_code_head": target.controller_code_head, "launch_id": launch["launch_id"]}
     if any(receipt.get(k) != v for k, v in binding.items()):
         return failed("监督回执与本次 launch intent 不符")
-    frozen_image = launch.get("image_id") or target.admitted_image_id
+    expected_image = target.admitted_image_id
+    if not expected_image and target.reuse_planned and target.policy_version == POLICY:
+        try:
+            expected_image = _read_preflight_admitted(folder.parent, target)
+        except IdentityError as error:
+            return failed(str(error))
+    frozen_image = expected_image or launch.get("image_id")
     if frozen_image:
-        if target.admitted_image_id and launch.get("image_id") != target.admitted_image_id:
+        if expected_image and launch.get("image_id") != expected_image:
             return failed("launch 镜像 Id 与预检准入冻结值不符")
         if receipt.get("image_id") != frozen_image:
             return failed("监督回执镜像 Id 与预检准入冻结值不符")
@@ -703,7 +725,7 @@ class ExternalReview:
                 or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
                 or not isinstance(payload["routes"][0], str) or payload["routes"][0] not in allowed
                 or not isinstance(payload["last_response_id_sha256"], str)
-                or (payload["last_response_id_sha256"] != "" and not hex64.fullmatch(payload["last_response_id_sha256"]))
+                or not hex64.fullmatch(payload["last_response_id_sha256"])
                 or not isinstance(payload["last_output_sha256"], str)
                 or (payload["last_output_sha256"] != "" and not hex64.fullmatch(payload["last_output_sha256"]))):
             return None
@@ -757,6 +779,9 @@ class ExternalReview:
         if final_text is None:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "缺少最终 agent_message 文本，无法核验代理侧最终响应绑定")
+        if not response_ids:
+            return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
+                                 "session.jsonl 缺少可核验的 token_usage_record.response_id，PASS/BLOCK 均不采信")
         try:
             evidence = self.session_receipt(outcome.model, str(launch.get("launch_id", "")),
                                             str(outcome.session_id or ""), since)
@@ -764,22 +789,16 @@ class ExternalReview:
             evidence = None
         expected = f"codex:{outcome.model}@chatgpt.com"
         expected_out_sha = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
+        expected_rid_sha = hashlib.sha256(response_ids[-1].encode("utf-8")).hexdigest()
         if (not isinstance(evidence, dict)
                 or evidence.get("routes") != [expected]
-                or type(evidence.get("requests")) is not int or evidence["requests"] < 1
+                or type(evidence.get("requests")) is not int or evidence["requests"] < len(response_ids)
+                or evidence.get("last_response_id_sha256") != expected_rid_sha
                 or evidence.get("last_output_sha256") != expected_out_sha):
             return ReviewOutcome(
                 outcome.model, "FAILED", outcome.session_id,
-                f"代理侧正式审阅上游模型收据缺失、已污染、模型不符或未绑定最终输出（期望 {expected}），PASS/BLOCK 均不采信",
+                f"代理侧正式审阅收据缺失、已污染、模型不符或未绑定同一最终上游响应（期望 {expected}），PASS/BLOCK 均不采信",
             )
-        if response_ids:
-            expected_rid_sha = hashlib.sha256(response_ids[-1].encode("utf-8")).hexdigest()
-            if (evidence.get("last_response_id_sha256") != expected_rid_sha
-                    or evidence["requests"] < len(response_ids)):
-                return ReviewOutcome(
-                    outcome.model, "FAILED", outcome.session_id,
-                    "代理侧正式审阅收据末条 response_id 或请求轮数与 session.jsonl 不一致，PASS/BLOCK 均不采信",
-                )
         return outcome
 
     def _record_preflight_rate_limit(self, target: ReviewTarget, *, rate_limited: bool, models: list[str]) -> None:
@@ -881,14 +900,11 @@ class ExternalReview:
             seen_models.add(returned)
         if len(seen_routes) != len(MODELS) or len(seen_models) != len(MODELS):
             raise EffectPending(f"preflight-blocked：两路审查模型或路由证据未区分，{suffix}")
-        admitted_image = ""
-        if "image_id" in raw and raw["image_id"] is not None:
-            candidate_img = str(raw["image_id"])
-            if not re.fullmatch(r"sha256:[a-f0-9]{64}", candidate_img):
-                raise EffectPending(f"preflight-blocked：预检返回无效镜像 Id，{suffix}")
-            admitted_image = candidate_img
+        candidate_img = raw.get("image_id")
+        if not isinstance(candidate_img, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", candidate_img):
+            raise EffectPending(f"preflight-blocked：预检缺少有效镜像 Id，{suffix}")
         self._record_preflight_rate_limit(target, rate_limited=False, models=list(MODELS))
-        return {**report, **({"admitted_image_id": admitted_image} if admitted_image else {})}
+        return {**report, "admitted_image_id": candidate_img}
 
     def target(self, number: int, attempt: int) -> ReviewTarget:
         if type(attempt) is not int or attempt <= 0:
@@ -972,21 +988,33 @@ class ExternalReview:
         finally:
             os.close(fd)
 
-    def has_inflight_review(self, number: int) -> bool:
-        """当前是否有手动或自动审查进程正在该 PR 的预检/登记阶段（不占 attempt）。"""
-        path = self.state_root / "pr-locks" / f"p{number}.inflight.lock"
-        if not path.exists():
-            return False
-        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    @contextmanager
+    def try_exclude_inflight_review(self, number: int) -> Iterator[bool]:
+        """非阻塞尝试独占 PR 预检在途锁并持续持有至上下文退出：成功返回 True（阻塞新的 _inflight_review 启动），
+        已有预检在途时返回 False。与 _pr_lock 组合时因非阻塞不会死锁。"""
+        folder = self.state_root / "pr-locks"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(folder / f"p{number}.inflight.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        acquired = False
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
             except BlockingIOError:
-                return True
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            return False
+                acquired = False
+            yield acquired
         finally:
+            if acquired:
+                fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+    def has_inflight_review(self, number: int) -> bool:
+        """只读规划期探测：当前是否有手动或自动审查进程正在该 PR 的预检/登记阶段（不占 attempt）。"""
+        path = self.state_root / "pr-locks" / f"p{number}.inflight.lock"
+        if not path.exists():
+            return False
+        with self.try_exclude_inflight_review(number) as excluded:
+            return not excluded
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:
@@ -1348,11 +1376,10 @@ class ExternalReview:
             if shutil.disk_usage(checkout).free < SPACE_RESERVE:
                 raise IdentityError("空间不足：模型启动前剩余空间低于 256 MiB；未启动模型")
             frozen_image = target.admitted_image_id
-            if not frozen_image and (folder / PREFLIGHT_ADMITTED_FILE).exists():
-                try:
-                    frozen_image = str(_read(folder / PREFLIGHT_ADMITTED_FILE).get("image_id", ""))
-                except (OSError, ValueError, TypeError, IdentityError):
-                    frozen_image = ""
+            if not frozen_image and target.reuse_planned:
+                frozen_image = _read_preflight_admitted(folder, target)
+            elif not frozen_image and target.policy_version == POLICY:
+                raise IdentityError("当前审查目标缺少预检准入冻结的镜像 Id")
             launch = {"run_id": target.run_id, "launch_id": str(uuid.uuid4()), "pr_number": target.pr_number,
                       "model": model, "head_sha": target.head_sha, "base_sha": target.base_sha,
                       "merge_base_sha": target.merge_base_sha, "controller_code_head": target.controller_code_head,
@@ -1527,15 +1554,16 @@ class ExternalReview:
                         if current is not None and current["run_id"] == source["run_id"]:
                             return self._publish_reuse(target, folder, publisher, source, admission)
                 admitted_marker = folder / PREFLIGHT_ADMITTED_FILE
-                if (target.reuse_planned
-                        and not admitted_marker.exists()
-                        and not (folder / "effects" / "status-pending.json").exists()
-                        and not any((folder / model).exists() for model in MODELS)):
-                    self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
-                    self.admit_quota()
-                    preflight_report = self.admit_preflight(target, pre_dispatch=True)
-                    _save(admitted_marker, {"admitted_at": time.time(), "run_id": target.run_id,
-                                            "image_id": str(preflight_report.get("admitted_image_id", ""))})
+                if target.reuse_planned:
+                    if admitted_marker.exists():
+                        _read_preflight_admitted(folder, target)
+                    elif (not (folder / "effects" / "status-pending.json").exists()
+                            and not any((folder / model).exists() for model in MODELS)):
+                        self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
+                        self.admit_quota()
+                        preflight_report = self.admit_preflight(target, pre_dispatch=True)
+                        _save(admitted_marker, {"admitted_at": time.time(), "run_id": target.run_id,
+                                                "image_id": preflight_report["admitted_image_id"]})
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
                     raise Stale("同 head 已有更晚登记的 attempt，本 run 不再派发")
                 if any(not (folder / model / "launch.json").exists() for model in MODELS):

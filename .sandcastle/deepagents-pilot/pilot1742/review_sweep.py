@@ -461,18 +461,32 @@ class Sweep:
         marker.write_text(str(time.time()))
         return "launch", {"pid": self._launch(number, head, attempt), "attempt": attempt}
 
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        try:
+            _git(self.lane.source, "merge-base", "--is-ancestor", ancestor, descendant)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def _latest_for_head(self, number: int, head: str) -> dict[str, Any] | None:
+        runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
+        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
+        return max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
+
     def decide(self, pr: dict[str, Any], busy: set[int], running: int, behind: bool) -> tuple[str, dict | None]:
         number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["sha"]
         if number in busy:
             return "running", None
         runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
-        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
-        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
+        latest = self._latest_for_head(number, head)
         if latest is not None and latest["outcome"] and "publication" in latest["outcome"]:
-            return "done", None
+            # F4：正常 main 前进使 PR 落后（behind 或 base 不在 head 祖先链）时不重审旧 head，等追平；
+            # 但当 main 前进到 head 已包含的提交（clean，不会触发追平）时，旧 base 的结论不能代替新 base，须为新 base 派审。
+            if latest["target"].get("base_sha") == base or behind or not self._is_ancestor(base, head):
+                return "done", None
         if running >= self.max_running:
             return "queued", None
-        if latest is not None and latest["outcome"]:  # 最新未作废 attempt 有结论没发布：受管对账与发布（同一 attempt，key 要求 base 未变）
+        if latest is not None and latest["outcome"] and "publication" not in latest["outcome"]:
             if latest["target"].get("base_sha") != base or not self._resumable(latest):
                 return "needs-reconcile", None
             return self._resume_once(number, head, latest["target"]["attempt"], "publish")
@@ -549,7 +563,9 @@ class Sweep:
                             unreadable.add(pr["number"])
                             raise
                         behind = states[pr["number"]]["mergeable_state"] == "behind"
-                    action, record = self.decide(pr, busy, running, behind)
+                    pr_for_decide = ({**pr, "base": {**pr["base"], "sha": states[pr["number"]]["base"]}}
+                                     if pr["number"] in states else pr)
+                    action, record = self.decide(pr_for_decide, busy, running, behind)
                     started = action in ("launch", "resume-review", "resume-publish")
                     running += started
                     if started:
@@ -610,15 +626,11 @@ class Sweep:
                                        "本地也缺对象") from None
         return sorted(p for p in raw.decode().split("\0") if p)
 
-    def _review_confirmed_published_pass(self, number: int, head: str, base: str | None = None) -> bool:
-        """正向确认：本 PR、当前 head（及提供 base 时的精确 base）的最新未作废 attempt 已落盘且为已发布 PASS 终态。
-        无本地记录、仍在进行、或已非 PASS 一律返回 False，禁止凭跨 PR 同 SHA 的旧绿灯自动合入。"""
-        runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
-        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
-        if not non_stale:
-            return False
-        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"])
-        if base is not None and latest["target"].get("base_sha") != base:
+    def _review_confirmed_published_pass(self, number: int, head: str, base: str) -> bool:
+        """正向确认：本 PR、当前 head 的最新未作废 attempt 绑定到当前精确 base 且为已发布 PASS 终态。
+        无本地记录、仍在进行、base 不符或已非 PASS 一律返回 False，禁止凭跨 PR 同 SHA 或旧 base 的旧绿灯自动合入。"""
+        latest = self._latest_for_head(number, head)
+        if latest is None or latest["target"].get("base_sha") != base:
             return False
         outcome = latest["outcome"]
         return bool(outcome and "publication" in outcome and outcome.get("verdict") == "PASS")
@@ -789,19 +801,28 @@ class Sweep:
             number, head = entry["pr"], entry["head"]
             try:
                 if write == "merge":
-                    # 持与 attempt 登记共用的 PR 锁复验在途审查进程、不占 attempt 的预检在途锁及本 PR/base/head 的已发布 PASS。
-                    with self.lane._pr_lock(number):
-                        try:
-                            live_now = reviewing(self.rows())
-                        except Exception:
-                            live_now = {number}
-                        if (number in live_busy
-                                or number in live_now
-                                or self.lane.has_inflight_review(number)
-                                or not self._review_confirmed_published_pass(number, head, states[number]["base"])):
+                    # 持 PR 锁并持续独占预检在途锁至合入请求结束，复核实时 head/base/mergeable_state、在途进程与精确 PASS。
+                    with self.lane._pr_lock(number), self.lane.try_exclude_inflight_review(number) as excluded:
+                        if not excluded:
                             result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
                         else:
-                            self.github.merge(number, head)
+                            try:
+                                live_now = reviewing(self.rows())
+                            except Exception:
+                                live_now = {number}
+                            live_state = self.github.pr(number)
+                            if live_state["head"] != head:
+                                result = {"action": "head-moved", "classified": head, "now": live_state["head"],
+                                          **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
+                                if result.get("auto_merge_withdrawn"):
+                                    withdrawn.add(number)
+                            elif (number in live_busy
+                                    or number in live_now
+                                    or live_state.get("mergeable_state") not in ("clean", "unstable")
+                                    or not self._review_confirmed_published_pass(number, head, live_state["base"])):
+                                result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
+                            else:
+                                self.github.merge(number, head)
                 elif write == "update":
                     self.github.update_branch(number, head)
                 elif write == "disable":

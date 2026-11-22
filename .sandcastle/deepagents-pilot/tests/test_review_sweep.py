@@ -2020,3 +2020,83 @@ def test_inflight_preflight_lock_blocks_auto_merge_under_pr_lock(lane):
     assert github.calls == []
     waiting = [a for a in actions if a.get("pr") == 1810 and a["action"] == "waiting"]
     assert waiting and waiting[-1].get("pending_latest_attempt") is True
+
+
+def test_merge_holds_inflight_lock_exclusively_across_github_merge(lane):
+    """合入阶段必须持续独占预检在途锁直至 github.merge 返回，期间新人工预检无法抢跑启动。"""
+    import threading
+
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    green(github, head)
+
+    in_merge = threading.Event()
+    release_merge = threading.Event()
+    inflight_acquired = threading.Event()
+
+    orig_merge = github.merge
+
+    def slow_merge(number, h):
+        in_merge.set()
+        assert release_merge.wait(5)
+        return orig_merge(number, h)
+
+    github.merge = slow_merge
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    merge_thread = threading.Thread(target=sweep.tick)
+    merge_thread.start()
+    assert in_merge.wait(5)
+
+    def try_manual_preflight():
+        with lane._inflight_review(1810):
+            inflight_acquired.set()
+
+    manual = threading.Thread(target=try_manual_preflight)
+    manual.start()
+    assert not inflight_acquired.wait(0.2), "合入进行中人工预检竟取得了在途共享锁"
+    release_merge.set()
+    merge_thread.join(timeout=5)
+    assert inflight_acquired.wait(5)
+    manual.join(timeout=5)
+    assert github.calls == [("merge", 1810, head)]
+
+
+def test_dispatch_and_merge_share_exact_base_head_target_and_recheck_live_base(lane, env):
+    """1. main 前进到 head 已包含的提交（clean，无须追平）时，派审不把旧 base 判 done，而是为新 base 派审；
+    2. 规划到合入之间实时 base 变化时，合入锁内复核实时 base 并拒合旧 PASS。"""
+    # 先在旧 base 上完成并发布 PASS
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    old_base = lane.gateway.pr["base"]["sha"]
+    head = lane.gateway.pr["head"]["sha"]
+    # main 前进到 head 的直系父提交（已包含在 head 中，PR 仍为 clean）
+    parent_of_head = git(env.source, "rev-parse", f"{head}~1")
+    assert parent_of_head != old_base
+    lane.gateway.pr["base"]["sha"] = parent_of_head
+    github = FakeGitHub(lane)
+    green(github, head)
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    first = sweep.tick()
+    assert acts(first) == ["launch", "waiting"] and github.calls == []
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 1)]
+
+    # 切回 old_base 已有 PASS，但规划后、合入锁内复核实时 PR 状态时 base 已漂移 -> 必须拒合
+    lane.gateway.pr["base"]["sha"] = old_base
+    github2 = FakeGitHub(lane)
+    green(github2, head)
+    orig_pr = github2.pr
+    reads = []
+
+    def drift_base_on_merge_recheck(number):
+        reads.append(number)
+        st = orig_pr(number)
+        if len(reads) >= 3:
+            st["base"] = parent_of_head
+        return st
+
+    github2.pr = drift_base_on_merge_recheck
+    sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
+    second = sweep2.tick()
+    assert github2.calls == []
+    waiting = [a for a in second if a.get("pr") == 1810 and a["action"] == "waiting"]
+    assert waiting and waiting[-1].get("rechecked_under_pr_lock") is True

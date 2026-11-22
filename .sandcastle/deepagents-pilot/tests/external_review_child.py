@@ -45,6 +45,7 @@ events = [{"type": "thread.started", "thread_id": session}, *tool,
 (folder / "session.jsonl").write_text(
     json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}) + "\n"
     + json.dumps({"type": "turn_context", "payload": {"model": launch["model"]}}) + "\n"
+    + json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_{session}"}}) + "\n"
 )
 record = {**launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0, "container_closed": True,
           "observed_provider": "cliproxy-local", "observed_model": launch["model"],

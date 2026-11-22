@@ -123,7 +123,7 @@ def review_from_receipt(root: Path, launch: str, session: str, since: float, wai
                     or not isinstance(payload["routes"][0], str)
                     or payload["routes"][0] not in REVIEW_RECEIPT_ROUTES
                     or not isinstance(payload["last_response_id_sha256"], str)
-                    or (payload["last_response_id_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_response_id_sha256"]))
+                    or not SHA256_HEX.fullmatch(payload["last_response_id_sha256"])
                     or not isinstance(payload["last_output_sha256"], str)
                     or (payload["last_output_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_output_sha256"]))):
                 return None

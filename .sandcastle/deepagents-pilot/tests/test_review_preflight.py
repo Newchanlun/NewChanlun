@@ -1786,7 +1786,7 @@ def test_generated_go_receipts_consumed_by_python():
         assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, time.time(), 0.1, preflight.Deadline(3)) is None
     review_expected = {
         "review-codex-sol": ("review-12345678-1234-4234-8234-123456789aa1", "019d0000-0000-7000-8000-000000000aa1",
-                             [(f"codex:{SOL}", "chatgpt.com")], 3),
+                             [(f"codex:{SOL}", "chatgpt.com")], 2),
         "review-codex-astra": ("review-12345678-1234-4234-8234-123456789aa2", "019d0000-0000-7000-8000-000000000aa2",
                                [(f"codex:{ASTRA}", "chatgpt.com")], 2),
     }
@@ -1834,7 +1834,7 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
         {"schema": "cliproxy-preflight-v1"}, {"session": "019d0000-0000-7000-8000-000000000ab2"},
         {"routes": ["codex@chatgpt.com"]}, {"routes": [f"codex:{SOL}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"]},
         {"routes": ["other"]}, {"extra": 1}, {"finished_ns": now + 10**12},
-        {"last_output_sha256": "not-sha256"}, {"last_response_id_sha256": "ZZZZ"},
+        {"last_output_sha256": "not-sha256"}, {"last_response_id_sha256": "ZZZZ"}, {"last_response_id_sha256": ""},
     ):
         path.write_text(json.dumps({**base, **bad}))
         assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None

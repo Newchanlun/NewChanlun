@@ -77,10 +77,10 @@ index 0000000..58f9984
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
 new file mode 100644
-index 0000000..a88ec29
+index 0000000..173b2e2
 --- /dev/null
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,677 @@
+@@ -0,0 +1,734 @@
 +package api
 +
 +import (
@@ -534,6 +534,9 @@ index 0000000..a88ec29
 +	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
 +	models := make(chan string, 16)
 +	var seq atomic.Int32
++	var responseModelOverride atomic.Value
++	responseModelOverride.Store("")
++	var toolOnlyMode atomic.Bool
 +	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		if r.Host != "chatgpt.com" || (r.URL.Path != "/backend-api/codex/responses" && r.URL.Path != "/backend-api/codex/responses/compact") {
 +			t.Errorf("unexpected upstream %s%s", r.Host, r.URL.Path)
@@ -552,7 +555,20 @@ index 0000000..a88ec29
 +		}
 +		n := seq.Add(1)
 +		respID := fmt.Sprintf("resp_%s_%d", request.Model, n)
-+		outText := fmt.Sprintf(`{"status":"completed","summary":"VERDICT: PASS","model":%q,"turn":%d}`, request.Model, n)
++		respModel := request.Model
++		if override, _ := responseModelOverride.Load().(string); override != "" {
++			respModel = override
++		}
++		output := []map[string]any{}
++		if toolOnlyMode.Load() {
++			output = append(output, map[string]any{"type": "function_call", "name": "shell"})
++		} else {
++			outText := fmt.Sprintf(`{"status":"completed","summary":"VERDICT: PASS","model":%q,"turn":%d}`, request.Model, n)
++			output = append(output, map[string]any{
++				"type": "message", "role": "assistant", "status": "completed",
++				"content": []map[string]any{{"type": "output_text", "text": outText}},
++			})
++		}
 +		w.Header().Set("Content-Type", "text/event-stream")
 +		ev, _ := json.Marshal(map[string]any{
 +			"type": "response.completed",
@@ -560,12 +576,9 @@ index 0000000..a88ec29
 +				"id":     respID,
 +				"object": "response",
 +				"status": "completed",
-+				"model":  request.Model,
-+				"output": []map[string]any{{
-+					"type": "message", "role": "assistant", "status": "completed",
-+					"content": []map[string]any{{"type": "output_text", "text": outText}},
-+				}},
-+				"usage": map[string]any{"input_tokens": 1, "output_tokens": 1},
++				"model":  respModel,
++				"output": output,
++				"usage":  map[string]any{"input_tokens": 1, "output_tokens": 1},
 +			},
 +		})
 +		_, _ = fmt.Fprintf(w, "data: %s\n\n", ev)
@@ -651,32 +664,34 @@ index 0000000..a88ec29
 +		{"gpt-6.2-astra", "review-12345678-1234-4234-8234-123456789aa2", "019d0000-0000-7000-8000-000000000aa2", "review-codex-astra", false},
 +	} {
 +		t.Run(tc.model, func(t *testing.T) {
-+			var lastSeq int32
-+			for turn := 1; turn <= 2; turn++ {
-+				res := post("/v1/responses", tc.model, tc.launch, tc.session)
-+				if res.Code != http.StatusOK {
-+					t.Fatalf("turn %d HTTP %d: %s", turn, res.Code, res.Body.String())
-+				}
-+				if got := <-models; got != tc.model {
-+					t.Fatalf("upstream model = %q, want %q", got, tc.model)
-+				}
-+				lastSeq = seq.Load()
++			res1 := post("/v1/responses", tc.model, tc.launch, tc.session)
++			if res1.Code != http.StatusOK {
++				t.Fatalf("turn 1 HTTP %d: %s", res1.Code, res1.Body.String())
 +			}
-+			wantCount := 2
++			if got := <-models; got != tc.model {
++				t.Fatalf("upstream model = %q, want %q", got, tc.model)
++			}
 +			if tc.compact {
-+				res := post("/v1/responses/compact", tc.model, tc.launch, tc.session)
-+				if res.Code != http.StatusOK {
-+					t.Fatalf("compact HTTP %d: %s", res.Code, res.Body.String())
++				resC := post("/v1/responses/compact", tc.model, tc.launch, tc.session)
++				if resC.Code != http.StatusOK {
++					t.Fatalf("compact HTTP %d: %s", resC.Code, resC.Body.String())
 +				}
 +				if got := <-models; got != tc.model {
 +					t.Fatalf("compact upstream model = %q, want %q", got, tc.model)
 +				}
-+				wantCount = 3
 +			}
++			res2 := post("/v1/responses", tc.model, tc.launch, tc.session)
++			if res2.Code != http.StatusOK {
++				t.Fatalf("turn 2 HTTP %d: %s", res2.Code, res2.Body.String())
++			}
++			if got := <-models; got != tc.model {
++				t.Fatalf("upstream model = %q, want %q", got, tc.model)
++			}
++			lastSeq := seq.Load()
 +			wantRespID := fmt.Sprintf("resp_%s_%d", tc.model, lastSeq)
 +			wantOutText := fmt.Sprintf(`{"status":"completed","summary":"VERDICT: PASS","model":%q,"turn":%d}`, tc.model, lastSeq)
 +			raw, r := waitReceipt(t, tc.launch, func(r preflightreceipt.ReviewReceipt) bool {
-+				return r.Requests == wantCount && r.Complete && !r.Tainted
++				return r.Requests == 2 && r.Complete && !r.Tainted
 +			})
 +			wantRoute := "codex:" + tc.model + "@chatgpt.com"
 +			if r.Schema != preflightreceipt.ReviewSchema || r.Launch != tc.launch || r.Session != tc.session ||
@@ -687,6 +702,48 @@ index 0000000..a88ec29
 +			exportFixture(t, tc.fixture, tc.launch, raw)
 +		})
 +	}
++
++	t.Run("upstream-response-model-mismatch-taints-launch", func(t *testing.T) {
++		const launch = "review-12345678-1234-4234-8234-123456789aa6"
++		const session = "019d0000-0000-7000-8000-000000000aa6"
++		responseModelOverride.Store("gpt-6.2-sol")
++		defer responseModelOverride.Store("")
++		res := post("/v1/responses", "gpt-6.2-astra", launch, session)
++		if res.Code != http.StatusOK {
++			t.Fatalf("unexpected HTTP %d: %s", res.Code, res.Body.String())
++		}
++		if got := <-models; got != "gpt-6.2-astra" {
++			t.Fatalf("outbound model = %q, want gpt-6.2-astra", got)
++		}
++		_, r := waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete })
++		if r.LastOutputSHA256 != "" || r.LastResponseID != "" {
++			t.Fatalf("tainted receipt retained response hashes: %+v", r)
++		}
++	})
++
++	t.Run("tool-only-turn-clears-previous-output-hash", func(t *testing.T) {
++		const launch = "review-12345678-1234-4234-8234-123456789aa7"
++		const session = "019d0000-0000-7000-8000-000000000aa7"
++		res1 := post("/v1/responses", "gpt-6.2-sol", launch, session)
++		if res1.Code != http.StatusOK {
++			t.Fatalf("turn 1 HTTP %d", res1.Code)
++		}
++		<-models
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Requests == 1 && r.LastOutputSHA256 != "" })
++		toolOnlyMode.Store(true)
++		defer toolOnlyMode.Store(false)
++		res2 := post("/v1/responses", "gpt-6.2-sol", launch, session)
++		if res2.Code != http.StatusOK {
++			t.Fatalf("turn 2 HTTP %d", res2.Code)
++		}
++		<-models
++		turn2Seq := seq.Load()
++		_, r := waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Requests == 2 })
++		wantID := shaHex(fmt.Sprintf("resp_gpt-6.2-sol_%d", turn2Seq))
++		if r.LastResponseID != wantID || r.LastOutputSHA256 != "" {
++			t.Fatalf("tool-only turn kept stale output hash: %+v", r)
++		}
++	})
 +
 +	t.Run("swapped-model-taints-and-blocks-upstream", func(t *testing.T) {
 +		const launch = "review-12345678-1234-4234-8234-123456789aa3"
@@ -855,7 +912,7 @@ index 2f1b89a..d20e37b 100644
  	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
  		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
 diff --git a/sdk/api/handlers/handlers_execution.go b/sdk/api/handlers/handlers_execution.go
-index dff03be..92df51b 100644
+index dff03be..b6b20c2 100644
 --- a/sdk/api/handlers/handlers_execution.go
 +++ b/sdk/api/handlers/handlers_execution.go
 @@ -4,6 +4,7 @@ import (
@@ -866,22 +923,30 @@ index dff03be..92df51b 100644
  	"maps"
  	"net/http"
  	"strings"
-@@ -54,6 +55,9 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
+@@ -54,6 +55,13 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
  		return nil, nil, errMsg
  	}
  	if routeDecision.ExecutorPluginID != "" {
 +		if c := preflightreceipt.From(ctx); c != nil {
-+			c.Reject()
++			c.Taint()
++			return nil, nil, &interfaces.ErrorMessage{
++				StatusCode: http.StatusServiceUnavailable,
++				Error:      preflightreceipt.ErrUnavailable,
++			}
 +		}
  		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
-@@ -134,6 +138,9 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
+@@ -134,6 +142,13 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
  	originalRequestedModel := modelName
  	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
  	if routeDecision.ExecutorPluginID != "" {
 +		if c := preflightreceipt.From(ctx); c != nil {
-+			c.Reject()
++			c.Taint()
++			return nil, nil, &interfaces.ErrorMessage{
++				StatusCode: http.StatusServiceUnavailable,
++				Error:      preflightreceipt.ErrUnavailable,
++			}
 +		}
  		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
  	}
@@ -956,8 +1021,122 @@ index 16203c4..e1d1634 100644
  		if err != nil {
  			completion.Error = err.Error()
  		}
+diff --git a/sdk/api/handlers/handlers_model_router_test.go b/sdk/api/handlers/handlers_model_router_test.go
+index 9c8d01a..613c54e 100644
+--- a/sdk/api/handlers/handlers_model_router_test.go
++++ b/sdk/api/handlers/handlers_model_router_test.go
+@@ -2,10 +2,13 @@ package handlers
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"fmt"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"net/url"
++	"os"
++	"path/filepath"
+ 	"testing"
+ 	"time"
+ 
+@@ -15,6 +18,7 @@ import (
+ 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+ )
+ 
+@@ -860,3 +864,87 @@ func TestQueryFromContextNilURLDoesNotPanic(t *testing.T) {
+ 		t.Fatalf("queryFromContext() = %#v, want nil when URL is nil", got)
+ 	}
+ }
++
++func TestReviewReceiptRejectsPluginExecutorBeforeExecution(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	session := "019d0000-0000-7000-8000-000000000999"
++	host := &handlerDirectExecutorRouteHost{
++		handlerRouterOnlyTestHost: handlerRouterOnlyTestHost{
++			hasRouters: true,
++			route: func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
++				return pluginapi.ModelRouteResponse{
++					Handled:    true,
++					TargetKind: pluginapi.ModelRouteTargetExecutor,
++					Target:     "forbidden-plugin",
++					Reason:     "test",
++				}, true
++			},
++		},
++	}
++	h := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
++	h.SetModelRouterHost(host)
++
++	checkTainted := func(t *testing.T, launch string) {
++		t.Helper()
++		raw, err := os.ReadFile(filepath.Join(root, launch, "receipt.json"))
++		if err != nil {
++			t.Fatalf("missing tainted receipt for %s: %v", launch, err)
++		}
++		var r preflightreceipt.ReviewReceipt
++		if err := json.Unmarshal(raw, &r); err != nil {
++			t.Fatal(err)
++		}
++		if !r.Tainted || r.Complete {
++			t.Fatalf("receipt not tainted: %+v", r)
++		}
++	}
++
++	// Non-streaming Execute must fail closed before invoking plugin executor.
++	l1 := "review-99991111-2222-4333-8444-555555555551"
++	ctx1, c1, err := preflightreceipt.BeginReview(context.Background(), root, l1, session)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _, errMsg := h.ExecuteWithAuthManager(ctx1, "openai-response", "gpt-6.2-sol", []byte(`{"model":"gpt-6.2-sol"}`), "")
++	c1.HandlerDone(false)
++	if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
++		t.Fatalf("Execute errMsg = %+v, want 503", errMsg)
++	}
++	if host.lastPluginID != "" {
++		t.Fatalf("plugin executor ran on Execute: %q", host.lastPluginID)
++	}
++	checkTainted(t, l1)
++
++	// Count must fail closed before invoking plugin executor.
++	l2 := "review-99991111-2222-4333-8444-555555555552"
++	ctx2, c2, err := preflightreceipt.BeginReview(context.Background(), root, l2, session)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _, errMsg = h.ExecuteCountWithAuthManager(ctx2, "openai-response", "gpt-6.2-sol", []byte(`{"model":"gpt-6.2-sol"}`), "")
++	c2.HandlerDone(false)
++	if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
++		t.Fatalf("Count errMsg = %+v, want 503", errMsg)
++	}
++	if host.lastPluginID != "" {
++		t.Fatalf("plugin executor ran on Count: %q", host.lastPluginID)
++	}
++	checkTainted(t, l2)
++
++	// Streaming ExecuteStream must fail closed before invoking plugin executor.
++	l3 := "review-99991111-2222-4333-8444-555555555553"
++	ctx3, c3, err := preflightreceipt.BeginReview(context.Background(), root, l3, session)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _, errChan := h.ExecuteStreamWithAuthManager(ctx3, "openai-response", "gpt-6.2-sol", []byte(`{"model":"gpt-6.2-sol","stream":true}`), "")
++	errMsg = <-errChan
++	c3.HandlerDone(false)
++	if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
++		t.Fatalf("Stream errMsg = %+v, want 503", errMsg)
++	}
++	if host.lastPluginID != "" {
++		t.Fatalf("plugin executor ran on Stream: %q", host.lastPluginID)
++	}
++	checkTainted(t, l3)
++}
 diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
-index e04fe3b..06d3015 100644
+index e04fe3b..b25b42a 100644
 --- a/sdk/api/handlers/handlers_stream.go
 +++ b/sdk/api/handlers/handlers_stream.go
 @@ -5,6 +5,7 @@ import (
@@ -978,12 +1157,19 @@ index e04fe3b..06d3015 100644
  		return false
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
-@@ -349,6 +353,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
+@@ -349,6 +353,16 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
  		return nil, nil, errChan
  	}
  	if routeDecision.ExecutorPluginID != "" {
 +		if c := preflightreceipt.From(ctx); c != nil {
-+			c.Reject()
++			c.Taint()
++			errChan := make(chan *interfaces.ErrorMessage, 1)
++			errChan <- &interfaces.ErrorMessage{
++				StatusCode: http.StatusServiceUnavailable,
++				Error:      preflightreceipt.ErrUnavailable,
++			}
++			close(errChan)
++			return nil, nil, errChan
 +		}
  		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
  	}
@@ -1124,10 +1310,10 @@ index 47f87de..3a1a2d4 100644
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
 new file mode 100644
-index 0000000..74abe4c
+index 0000000..0510f63
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,122 @@
 +package auth
 +
 +import (
@@ -1136,6 +1322,7 @@ index 0000000..74abe4c
 +	"reflect"
 +
 +	execution "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
 +
@@ -1215,12 +1402,21 @@ index 0000000..74abe4c
 +	copyResult := *result
 +	copyResult.Chunks = out
 +	go func() {
-+		defer close(out)
-+		defer lease.End()
++		canceled := false
++		defer func() {
++			close(out)
++			if canceled {
++				deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
++				if !tracked || deliveryErr != nil {
++					preflightreceipt.From(ctx).Reject()
++				}
++			}
++			lease.End()
++		}()
 +		for {
 +			select {
 +			case <-ctx.Done():
-+				preflightreceipt.From(ctx).Reject()
++				canceled = true
 +				return
 +			case chunk, ok := <-original:
 +				if !ok {
@@ -1232,7 +1428,7 @@ index 0000000..74abe4c
 +				select {
 +				case out <- chunk:
 +				case <-ctx.Done():
-+					preflightreceipt.From(ctx).Reject()
++					canceled = true
 +					return
 +				}
 +			}
@@ -1313,10 +1509,10 @@ index 0000000..eb42c3f
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 new file mode 100644
-index 0000000..0c46d40
+index 0000000..d7b48fd
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,952 @@
+@@ -0,0 +1,998 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -1415,8 +1611,12 @@ index 0000000..0c46d40
 +	invalid, sealed, handlerDone, lifecycleDone bool
 +	reserved                                    bool
 +	strictCodex                                 bool
++	isCompact                                   bool
++	expectedModel                               string
 +	review                                      *reviewEntry
 +	reviewReleased                              bool
++	observedCompleted                           bool
++	modelMismatch                               bool
 +	lastResponseIDSHA                           string
 +	lastOutputSHA                               string
 +	lastItemOutputSHA                           string
@@ -1467,10 +1667,7 @@ index 0000000..0c46d40
 +	return hex.EncodeToString(sum[:])
 +}
 +
-+func isOptionalSHA256Hex(s string) bool {
-+	if s == "" {
-+		return true
-+	}
++func isSHA256Hex(s string) bool {
 +	if len(s) != 64 {
 +		return false
 +	}
@@ -1483,14 +1680,20 @@ index 0000000..0c46d40
 +	return true
 +}
 +
-+func extractAssistantOutputText(items []struct {
++func isOptionalSHA256Hex(s string) bool {
++	return s == "" || isSHA256Hex(s)
++}
++
++type responseOutputItem struct {
 +	Type    string `json:"type"`
 +	Role    string `json:"role"`
 +	Content []struct {
 +		Type string `json:"type"`
 +		Text string `json:"text"`
 +	} `json:"content"`
-+}) string {
++}
++
++func extractAssistantOutputText(items []responseOutputItem) string {
 +	last := ""
 +	for _, item := range items {
 +		if item.Type != "message" || item.Role != "assistant" {
@@ -1509,8 +1712,39 @@ index 0000000..0c46d40
 +	return last
 +}
 +
++func (c *Collector) recordCompletedResponse(respID, respModel, respStatus string, output []responseOutputItem) {
++	status := strings.TrimSpace(respStatus)
++	if status != "" && status != "completed" {
++		return
++	}
++	id := strings.TrimSpace(respID)
++	model := strings.TrimSpace(respModel)
++	outText := extractAssistantOutputText(output)
++
++	c.mu.Lock()
++	expected := c.expectedModel
++	if expected == "" || model != expected || id == "" {
++		c.modelMismatch = true
++		c.invalid = true
++		c.mu.Unlock()
++		c.Taint()
++		return
++	}
++	c.observedCompleted = true
++	c.lastResponseIDSHA = sha256Hex(id)
++	if outText != "" {
++		c.lastOutputSHA = sha256Hex(outText)
++	} else if c.lastItemOutputSHA != "" {
++		c.lastOutputSHA = c.lastItemOutputSHA
++	} else {
++		c.lastOutputSHA = ""
++	}
++	c.lastItemOutputSHA = ""
++	c.mu.Unlock()
++}
++
 +// ObserveStreamChunk records SHA-256 hashes of the upstream response ID and final assistant output text
-+// for formal review launches without persisting any free text.
++// and verifies the upstream response.model matches the bound review model without persisting any free text.
 +func (c *Collector) ObserveStreamChunk(payload []byte) {
 +	if c == nil || !c.strictCodex || len(payload) == 0 {
 +		return
@@ -1527,25 +1761,18 @@ index 0000000..0c46d40
 +			continue
 +		}
 +		var ev struct {
-+			Type string `json:"type"`
-+			Item struct {
-+				Type    string `json:"type"`
-+				Role    string `json:"role"`
-+				Content []struct {
-+					Type string `json:"type"`
-+					Text string `json:"text"`
-+				} `json:"content"`
-+			} `json:"item"`
++			Type     string               `json:"type"`
++			Object   string               `json:"object"`
++			ID       string               `json:"id"`
++			Model    string               `json:"model"`
++			Status   string               `json:"status"`
++			Output   []responseOutputItem `json:"output"`
++			Item     responseOutputItem   `json:"item"`
 +			Response struct {
-+				ID     string `json:"id"`
-+				Output []struct {
-+					Type    string `json:"type"`
-+					Role    string `json:"role"`
-+					Content []struct {
-+						Type string `json:"type"`
-+						Text string `json:"text"`
-+					} `json:"content"`
-+				} `json:"output"`
++				ID     string               `json:"id"`
++				Model  string               `json:"model"`
++				Status string               `json:"status"`
++				Output []responseOutputItem `json:"output"`
 +			} `json:"response"`
 +		}
 +		if err := json.Unmarshal(line, &ev); err != nil {
@@ -1568,24 +1795,11 @@ index 0000000..0c46d40
 +				}
 +			}
 +		case "response.completed", "response.done":
-+			respIDHash := ""
-+			if strings.TrimSpace(ev.Response.ID) != "" {
-+				respIDHash = sha256Hex(ev.Response.ID)
++			c.recordCompletedResponse(ev.Response.ID, ev.Response.Model, ev.Response.Status, ev.Response.Output)
++		case "":
++			if ev.Object == "response" {
++				c.recordCompletedResponse(ev.ID, ev.Model, ev.Status, ev.Output)
 +			}
-+			outHash := ""
-+			if text := extractAssistantOutputText(ev.Response.Output); text != "" {
-+				outHash = sha256Hex(text)
-+			}
-+			c.mu.Lock()
-+			if respIDHash != "" {
-+				c.lastResponseIDSHA = respIDHash
-+			}
-+			if outHash != "" {
-+				c.lastOutputSHA = outHash
-+			} else if c.lastItemOutputSHA != "" {
-+				c.lastOutputSHA = c.lastItemOutputSHA
-+			}
-+			c.mu.Unlock()
 +		}
 +	}
 +}
@@ -1626,7 +1840,7 @@ index 0000000..0c46d40
 +		!disk.Complete ||
 +		disk.Requests < 1 ||
 +		!reviewSessionPattern.MatchString(disk.Session) ||
-+		!isOptionalSHA256Hex(disk.LastResponseID) ||
++		!isSHA256Hex(disk.LastResponseID) ||
 +		!isOptionalSHA256Hex(disk.LastOutputSHA256) ||
 +		len(disk.Routes) != 1 ||
 +		(disk.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" && disk.Routes[0] != "codex:gpt-6.2-astra@chatgpt.com") {
@@ -1656,7 +1870,7 @@ index 0000000..0c46d40
 +	}, true, nil
 +}
 +
-+func getOrCreateReviewEntry(root, launch, session string, now time.Time, acquire bool) (*reviewEntry, error) {
++func getOrCreateReviewEntry(root, launch, session string, now time.Time, acquire, allowOverflow bool) (*reviewEntry, error) {
 +	key := root + "\x00" + launch
 +	reviewMu.Lock()
 +	defer reviewMu.Unlock()
@@ -1683,10 +1897,11 @@ index 0000000..0c46d40
 +				oldestKey, oldestTime = k, v.touched
 +			}
 +		}
-+		if oldestKey == "" {
++		if oldestKey != "" {
++			delete(reviewLedger, oldestKey)
++		} else if !allowOverflow {
 +			return nil, ErrUnavailable
 +		}
-+		delete(reviewLedger, oldestKey)
 +	}
 +	entry := diskEntry
 +	if !onDisk {
@@ -1703,6 +1918,15 @@ index 0000000..0c46d40
 +	}
 +	reviewLedger[key] = entry
 +	return entry, nil
++}
++
++func acquireReview(entry *reviewEntry) {
++	if entry == nil {
++		return
++	}
++	reviewMu.Lock()
++	entry.inFlight++
++	reviewMu.Unlock()
 +}
 +
 +func releaseReview(entry *reviewEntry) {
@@ -1722,10 +1946,11 @@ index 0000000..0c46d40
 +	if !reviewLaunchPattern.MatchString(launch) || !filepath.IsAbs(root) {
 +		return
 +	}
-+	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), false)
++	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), true, true)
 +	if err != nil || entry == nil {
 +		return
 +	}
++	defer releaseReview(entry)
 +	entry.mu.Lock()
 +	entry.tainted = true
 +	_ = entry.persistLocked()
@@ -1744,7 +1969,7 @@ index 0000000..0c46d40
 +		return ctx, nil, ErrUnavailable
 +	}
 +	now := time.Now()
-+	entry, err := getOrCreateReviewEntry(root, launch, session, now, true)
++	entry, err := getOrCreateReviewEntry(root, launch, session, now, true, false)
 +	if err != nil {
 +		return ctx, nil, ErrUnavailable
 +	}
@@ -1793,13 +2018,20 @@ index 0000000..0c46d40
 +	c.mu.Lock()
 +	c.invalid = true
 +	entry := c.review
++	if entry != nil {
++		acquireReview(entry)
++	}
 +	c.mu.Unlock()
 +	if entry != nil {
++		defer releaseReview(entry)
 +		entry.mu.Lock()
 +		entry.tainted = true
 +		_ = entry.persistLocked()
 +		entry.mu.Unlock()
 +	}
++	c.mu.Lock()
++	c.maybeReleaseReviewLocked()
++	c.mu.Unlock()
 +}
 +
 +func (c *Collector) HandlerDone(success bool) {
@@ -1893,6 +2125,7 @@ index 0000000..0c46d40
 +			c.review.route = expected
 +		}
 +		c.review.mu.Unlock()
++		c.expectedModel = model
 +		c.reserved = true
 +	} else if !c.reserved {
 +		if err := reservePrivateDir(c.directory, false); err != nil {
@@ -2093,6 +2326,9 @@ index 0000000..0c46d40
 +		c.mu.Unlock()
 +		return nil, ErrUnavailable
 +	}
++	if strict && req.URL != nil && req.URL.Path == "/backend-api/codex/responses/compact" {
++		c.isCompact = true
++	}
 +	e.attempts++
 +	c.bodies++
 +	c.receipt.Routes = append(c.receipt.Routes, observed)
@@ -2151,7 +2387,7 @@ index 0000000..0c46d40
 +	complete := false
 +	lastResp := ""
 +	lastOut := ""
-+	if !e.tainted && e.requests > 0 && e.route != "" {
++	if !e.tainted && e.requests > 0 && e.route != "" && isSHA256Hex(e.lastResponseIDSHA) {
 +		routes = []string{e.route}
 +		complete = true
 +		lastResp = e.lastResponseIDSHA
@@ -2212,12 +2448,16 @@ index 0000000..0c46d40
 +	c.sealed = true
 +	if c.review != nil {
 +		routes := append([]string(nil), c.receipt.Routes...)
++		isCompact := c.isCompact
++		observedCompleted := c.observedCompleted
++		modelMismatch := c.modelMismatch
 +		lastResp := c.lastResponseIDSHA
 +		lastOut := c.lastOutputSHA
 +		entry := c.review
 +		entry.mu.Lock()
 +		defer entry.mu.Unlock()
-+		if entry.tainted {
++		if entry.tainted || modelMismatch {
++			entry.tainted = true
 +			_ = entry.persistLocked()
 +			return
 +		}
@@ -2235,13 +2475,15 @@ index 0000000..0c46d40
 +				return
 +			}
 +		}
++		if isCompact {
++			return
++		}
++		if !observedCompleted || !isSHA256Hex(lastResp) {
++			return
++		}
 +		entry.requests++
-+		if lastResp != "" {
-+			entry.lastResponseIDSHA = lastResp
-+		}
-+		if lastOut != "" {
-+			entry.lastOutputSHA = lastOut
-+		}
++		entry.lastResponseIDSHA = lastResp
++		entry.lastOutputSHA = lastOut
 +		entry.finished = time.Now().UnixNano()
 +		if err := entry.persistLocked(); err != nil {
 +			entry.tainted = true
@@ -2271,10 +2513,10 @@ index 0000000..0c46d40
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
 new file mode 100644
-index 0000000..adc93cd
+index 0000000..a49937e
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,647 @@
 +package preflightreceipt
 +
 +import (
@@ -2667,7 +2909,7 @@ index 0000000..adc93cd
 +	session := "019d0000-0000-7000-8000-000000000001"
 +	var upstreamCalls int
 +
-+	runTurn := func(model, path, wireModel string, useZstd bool, respID, outText string) error {
++	runTurn := func(model, path, wireModel, respModel string, useZstd bool, respID, outText string) error {
 +		ctx, c, err := BeginReview(context.Background(), root, launch, session)
 +		if err != nil {
 +			return err
@@ -2696,15 +2938,23 @@ index 0000000..adc93cd
 +			c.HandlerDone(false)
 +			return err
 +		}
-+		if outText != "" {
++		if respID != "" {
++			output := []map[string]any{}
++			if outText != "" {
++				output = append(output, map[string]any{
++					"type": "message", "role": "assistant",
++					"content": []map[string]any{{"type": "output_text", "text": outText}},
++				})
++			} else {
++				output = append(output, map[string]any{"type": "function_call", "name": "shell"})
++			}
 +			ev, _ := json.Marshal(map[string]any{
 +				"type": "response.completed",
 +				"response": map[string]any{
-+					"id": respID,
-+					"output": []map[string]any{{
-+						"type": "message", "role": "assistant",
-+						"content": []map[string]any{{"type": "output_text", "text": outText}},
-+					}},
++					"id":     respID,
++					"status": "completed",
++					"model":  respModel,
++					"output": output,
 +				},
 +			})
 +			c.ObserveStreamChunk(append([]byte("data: "), append(ev, '\n', '\n')...))
@@ -2716,25 +2966,34 @@ index 0000000..adc93cd
 +		return nil
 +	}
 +
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", false, "resp_1", "turn-1"); err != nil {
++	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_1", "turn-1"); err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses/compact", "gpt-6.2-sol", true, "", ""); err != nil {
++	// A subsequent tool-only turn must atomically clear LastOutputSHA256 instead of keeping turn-1's text hash.
++	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_2", ""); err != nil {
 +		t.Fatal(err)
 +	}
 +	r := readReviewReceiptFile(t, root, launch)
-+	if r.Schema != ReviewSchema || r.Launch != launch || r.Session != session || !r.Complete || r.Tainted || r.Requests != 2 || len(r.Routes) != 1 || r.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" || r.LastResponseID != sha256Hex("resp_1") || r.LastOutputSHA256 != sha256Hex("turn-1") {
-+		t.Fatalf("bad multi-turn review receipt: %+v", r)
++	if r.Schema != ReviewSchema || r.Launch != launch || r.Session != session || !r.Complete || r.Tainted || r.Requests != 2 || len(r.Routes) != 1 || r.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" || r.LastResponseID != sha256Hex("resp_2") || r.LastOutputSHA256 != "" {
++		t.Fatalf("tool-only turn mixed stale output hash: %+v", r)
 +	}
-+	if upstreamCalls != 2 {
-+		t.Fatalf("upstreamCalls = %d, want 2", upstreamCalls)
++	// Compaction must neither bump Requests nor clobber the atomic pair.
++	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses/compact", "gpt-6.2-sol", "", true, "", ""); err != nil {
++		t.Fatal(err)
++	}
++	r = readReviewReceiptFile(t, root, launch)
++	if r.Requests != 2 || !r.Complete || r.Tainted || r.LastResponseID != sha256Hex("resp_2") || r.LastOutputSHA256 != "" {
++		t.Fatalf("compact altered completed turn receipt: %+v", r)
++	}
++	if upstreamCalls != 3 {
++		t.Fatalf("upstreamCalls = %d, want 3", upstreamCalls)
 +	}
 +
 +	// Simulate proxy restart (empty in-memory ledger): disk receipt must be restored and continue counting cleanly.
 +	reviewMu.Lock()
 +	delete(reviewLedger, root+"\x00"+launch)
 +	reviewMu.Unlock()
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", true, "resp_3", "final-verdict"); err != nil {
++	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", true, "resp_3", "final-verdict"); err != nil {
 +		t.Fatalf("post-restart continuation failed: %v", err)
 +	}
 +	if r = readReviewReceiptFile(t, root, launch); r.Requests != 3 || !r.Complete || r.Tainted || r.LastResponseID != sha256Hex("resp_3") || r.LastOutputSHA256 != sha256Hex("final-verdict") {
@@ -2742,11 +3001,11 @@ index 0000000..adc93cd
 +	}
 +
 +	// Switching model on a subsequent turn must abort BEFORE upstream and permanently taint the launch receipt.
-+	if err := runTurn("gpt-6.2-astra", "/backend-api/codex/responses", "gpt-6.2-astra", false, "resp_bad", "bad"); err == nil {
++	if err := runTurn("gpt-6.2-astra", "/backend-api/codex/responses", "gpt-6.2-astra", "gpt-6.2-astra", false, "resp_bad", "bad"); err == nil {
 +		t.Fatal("model switch under same review launch succeeded")
 +	}
-+	if upstreamCalls != 3 {
-+		t.Fatalf("swapped model reached upstream: calls=%d, want 3", upstreamCalls)
++	if upstreamCalls != 4 {
++		t.Fatalf("swapped model reached upstream: calls=%d, want 4", upstreamCalls)
 +	}
 +	r = readReviewReceiptFile(t, root, launch)
 +	if !r.Tainted || r.Complete || len(r.Routes) != 1 || r.Routes[0] != "other" || r.LastOutputSHA256 != "" {
@@ -2757,11 +3016,38 @@ index 0000000..adc93cd
 +	reviewMu.Lock()
 +	delete(reviewLedger, root+"\x00"+launch)
 +	reviewMu.Unlock()
-+	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", false, "resp_4", "resurrect"); err == nil {
++	if err := runTurn("gpt-6.2-sol", "/backend-api/codex/responses", "gpt-6.2-sol", "gpt-6.2-sol", false, "resp_4", "resurrect"); err == nil {
 +		t.Fatal("tainted launch resurrected after restart")
 +	}
 +	if r = readReviewReceiptFile(t, root, launch); !r.Tainted || r.Complete {
 +		t.Fatalf("tainted state lost after restart: %+v", r)
++	}
++
++	// Upstream response.model mismatch (e.g. silent fallback from astra to sol) must permanently taint the launch.
++	launchMismatch := "review-33333333-2222-4333-8444-555555555555"
++	ctxM, cM, err := BeginReview(context.Background(), root, launchMismatch, session)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxM, eM, err := cM.Start(ctxM, "codex", "gpt-6.2-astra")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clientM := httptransport.Decorate(ctxM, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	reqM, _ := http.NewRequestWithContext(ctxM, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-astra"}`))
++	respM, err := clientM.Do(reqM)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cM.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_fb","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback"}]}]}}` + "\n\n"))
++	_ = respM.Body.Close()
++	eM.End()
++	cM.Complete(true)
++	cM.HandlerDone(true)
++	if rM := readReviewReceiptFile(t, root, launchMismatch); !rM.Tainted || rM.Complete || rM.LastOutputSHA256 != "" {
++		t.Fatalf("upstream response.model mismatch did not taint launch: %+v", rM)
 +	}
 +
 +	// Wire body mismatch must abort BEFORE upstream and taint a fresh launch.
@@ -2859,5 +3145,22 @@ index 0000000..adc93cd
 +	r1 := readReviewReceiptFile(t, root, l1)
 +	if !r1.Tainted || r1.Complete {
 +		t.Fatalf("in-flight collector overwrote tainted receipt: %+v", r1)
++	}
++
++	// TaintReview must also pin and persist even when ledger is full of active entries (no split-brain eviction).
++	_, ca, err := BeginReview(context.Background(), root, "review-bbbb1111-2222-4333-8444-555555555551", s1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, cb, err := BeginReview(context.Background(), root, "review-bbbb1111-2222-4333-8444-555555555552", s2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	lOverflow := "review-bbbb1111-2222-4333-8444-555555555553"
++	TaintReview(root, lOverflow)
++	ca.HandlerDone(false)
++	cb.HandlerDone(false)
++	if ro := readReviewReceiptFile(t, root, lOverflow); !ro.Tainted || ro.Complete {
++		t.Fatalf("TaintReview under full active ledger did not persist taint: %+v", ro)
 +	}
 +}

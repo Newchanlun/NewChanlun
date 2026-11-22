@@ -82,7 +82,8 @@ def _fake_preflight_pass(_target: ReviewTarget) -> dict:
         checks.append({"name": f"roundtrip:{model}", "class": "roundtrip", "ok": True,
                        "detail": {"http_status": 200, "terminal": "response.completed", "status": "completed",
                                   "returned_model": model, "ok": True, "error": None}})
-    return {"kind": "review-preflight", "is_review_result": False, "ready": True, "checks": checks}
+    return {"kind": "review-preflight", "is_review_result": False, "ready": True, "checks": checks,
+            "image_id": "sha256:" + "1" * 64}
 
 
 def _make_fake_session_receipt(state_root: Path):
@@ -2633,7 +2634,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
                             preflight=_fake_preflight_pass)
     failed = strict.review_pr(1810, 1)
     assert failed["verdict"] == "FAILED" and lane.gateway.sent == ["pending", "error"]
-    assert all("代理侧正式审阅上游模型收据" in r["reason"] for r in failed["reviews"])
+    assert all("代理侧正式审阅收据" in r["reason"] for r in failed["reviews"])
 
     # 2. 配置宿主代理收据目录：写入有效 cliproxy-review-v1 收据后正式双审通过
     receipt_root = tmp_path / "proxy-receipts"
@@ -2642,7 +2643,8 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     orig_validate = module.validate_review
 
     def write_proxy_receipt(target, launch, receipt, folder, source, *, route_override=None, tainted=False,
-                            session_override=None, stale_output=False, bad_resp_id=False, requests_count=2):
+                            session_override=None, stale_output=False, bad_resp_id=False, requests_count=2,
+                            drop_response_ids=False):
         outcome = orig_validate(target, launch, receipt, folder, source)
         launch_hdr = f"review-{launch['launch_id']}"
         rec_dir = receipt_root / launch_hdr
@@ -2659,9 +2661,12 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
         out_sha = hashlib.sha256(b"earlier-turn-tool-call").hexdigest() if stale_output else hashlib.sha256(
             (final_text or "").encode("utf-8")).hexdigest()
         rid = f"resp_{launch['model']}_final"
-        with open(folder / "session.jsonl", "a") as sf:
-            sf.write(json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_1"}}) + "\n")
-            sf.write(json.dumps({"type": "token_usage_record", "payload": {"response_id": rid}}) + "\n")
+        kept = [line for line in (folder / "session.jsonl").read_text().splitlines()
+                if line.strip() and json.loads(line).get("type") != "token_usage_record"]
+        if not drop_response_ids:
+            kept.append(json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_1"}}))
+            kept.append(json.dumps({"type": "token_usage_record", "payload": {"response_id": rid}}))
+        (folder / "session.jsonl").write_text("\n".join(kept) + "\n")
         resp_sha = hashlib.sha256(b"resp_earlier").hexdigest() if bad_resp_id else hashlib.sha256(rid.encode("utf-8")).hexdigest()
         payload = {
             "schema": "cliproxy-review-v1",
@@ -2683,7 +2688,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     passed = strict.review_pr(1810, 2)
     assert passed["verdict"] == "PASS" and lane.gateway.sent[-2:] == ["pending", "success"]
 
-    # 3. 代理收据指向另一模型、已污染、仅有首轮陈旧输出摘要、末条 response_id 不符或轮数不足，均判 FAILED（含 BLOCK 也拒绝采信）
+    # 3. 代理收据指向另一模型、已污染、仅有首轮陈旧输出摘要、末条 response_id 不符、轮数不足或 session.jsonl 缺 response_id，均判 FAILED
     monkeypatch.setattr(
         module, "validate_review",
         lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, route_override={MODELS[1]: f"codex:{MODELS[0]}@chatgpt.com"}),
@@ -2702,6 +2707,11 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, requests_count=1))
     short_reqs = strict.review_pr(1810, 7)
     assert short_reqs["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
+
+    monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, drop_response_ids=True))
+    missing_rids = strict.review_pr(1810, 8)
+    assert missing_rids["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
+    assert all("response_id" in r["reason"] for r in missing_rids["reviews"])
 
     (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
     monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, tainted=True))
@@ -2855,3 +2865,24 @@ def test_passing_preflight_always_records_non_rate_limited_event(lane):
     assert path.is_file()
     events = json.loads(path.read_text())["events"]
     assert len(events) == 1 and events[0]["rate_limited"] is False
+
+
+def test_corrupt_preflight_admitted_marker_on_reuse_fallback_fails_closed(lane, env, monkeypatch):
+    """沿用退回双审时，损坏、run_id 失配或缺有效 image_id 的 preflight-admitted.json 必须失败闭合，绝不能当作无镜像约束放行。"""
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    _advance_main(lane, env)
+    target = lane.target(1810, 1)
+    assert target.reuse_planned is True
+    folder = lane.state_root / "runs" / target.key
+    monkeypatch.setattr(lane, "reusable", lambda _t: None)
+    marker = folder / module.PREFLIGHT_ADMITTED_FILE
+
+    for bad_content in (
+        "{not-json",
+        json.dumps({"run_id": "wrong-run-id", "image_id": "sha256:" + "1" * 64}),
+        json.dumps({"run_id": target.run_id, "image_id": ""}),
+    ):
+        marker.write_text(bad_content)
+        with pytest.raises(IdentityError, match="预检准入记录"):
+            lane.review_pr(1810, 1)
+    assert not any((folder / model).exists() for model in MODELS)
