@@ -32,34 +32,33 @@ use std::rc::Rc;
 /// 边界条件：
 /// - `merged.len() < 3` ⟹ 无分型（无完整三元组）。
 /// - 中 K 既非严格全高也非严格全低 ⟹ 非分型（跳过；含包含处理残留的非严格情形）。
+#[inline]
 pub fn detect_fractals(merged: &[Bar]) -> Vec<Fractal> {
-    (1..merged.len().saturating_sub(1))
-        .filter_map(|mid| detect_fractal_at(merged, mid))
-        .collect()
+    let mut out = Vec::with_capacity((merged.len() >= 3) as usize * (merged.len() / 4 + 1));
+    for w in merged.windows(3) {
+        if let Some(f) = classify_triple(&w[0], &w[1], &w[2]) {
+            out.push(f);
+        }
+    }
+    out
 }
 
 /// #1392：全量、分型缓存和新笔端点共用这一三元组判据，不分配临时 Vec。
-pub(crate) fn detect_fractal_at(merged: &[Bar], index: usize) -> Option<Fractal> {
-    let left = merged.get(index.checked_sub(1)?)?;
-    let mid = merged.get(index)?;
-    let right = merged.get(index.checked_add(1)?)?;
-    let is_top =
-        mid.high > left.high && mid.high > right.high && mid.low > left.low && mid.low > right.low;
-    let is_bottom =
-        mid.high < left.high && mid.high < right.high && mid.low < left.low && mid.low < right.low;
-    let (kind, price) = if is_top {
-        (FractalKind::Top, mid.high)
-    } else if is_bottom {
-        (FractalKind::Bottom, mid.low)
-    } else {
-        return None;
-    };
-    Some(Fractal {
+#[inline]
+fn classify_triple(left: &Bar, mid: &Bar, right: &Bar) -> Option<Fractal> {
+    let mk = |kind, price| Fractal {
         kind,
         source_index: mid.source_index,
         timestamp: mid.timestamp,
         price,
-    })
+    };
+    if mid.high > left.high && mid.high > right.high && mid.low > left.low && mid.low > right.low {
+        return Some(mk(FractalKind::Top, mid.high));
+    }
+    if mid.high < left.high && mid.high < right.high && mid.low < left.low && mid.low < right.low {
+        return Some(mk(FractalKind::Bottom, mid.low));
+    }
+    None
 }
 
 /// 分型供给口（T1 键域重锚 #170）：源序号 → 该处 confirmed 分型（分型管单一来源）。
@@ -67,12 +66,22 @@ pub(crate) fn detect_fractal_at(merged: &[Bar], index: usize) -> Option<Fractal>
 /// `fractals` 按 `source_index` 升序（合并序列顺序三联扫描产出）⟹ partition_point 二分
 /// O(log n)。返回分型本体（`Fractal` 为 Copy）——未命中 = 该源序号无 confirmed 分型
 /// （诚实 None，消费侧禁降级第二查法）。
+#[inline]
 pub fn fractal_at_source(fractals: &[Fractal], source_index: usize) -> Option<Fractal> {
     let i = fractals.partition_point(|f| f.source_index < source_index);
     fractals
         .get(i)
         .filter(|f| f.source_index == source_index)
         .copied()
+}
+
+/// #1392：按索引调用三元组分型判据。
+#[inline]
+pub(crate) fn detect_fractal_at(merged: &[Bar], index: usize) -> Option<Fractal> {
+    let left = merged.get(index.checked_sub(1)?)?;
+    let mid = merged.get(index)?;
+    let right = merged.get(index.checked_add(1)?)?;
+    classify_triple(left, mid, right)
 }
 
 // ============================================================================
@@ -189,7 +198,7 @@ impl IncrFractals {
         // 严格：只扫 mid ≥ confirmed_mid_bound（前缀已覆盖 mid < confirmed_mid_bound）。
         let scan_start = confirmed_mid_bound.max(1);
         for i in scan_start..n - 1 {
-            if let Some(fractal) = detect_fractal_at(merged, i) {
+            if let Some(fractal) = classify_triple(&merged[i - 1], &merged[i], &merged[i + 1]) {
                 new_fractals.push(fractal);
                 mid_indices.push(i);
             }
