@@ -876,6 +876,11 @@ test("R10/#1319：Python 声明目标、延迟体驱动和 CPython 生产调用�
     "def discard(granularity, sources, events):\n    return []\n";
   const generator = from + "route\ndef batches():\n    yield from " + call + "\ng = batches()\n";
   const genexp = from + "route\ng = (" + call + " for _ in [0])\n";
+  const batches = from + "route\ndef batches():\n    yield []\n    yield " + call + "\nit = batches()\n";
+  const nestedBatches = from + "route\ndef inner():\n    yield []\n    yield " + call +
+    "\ndef batches():\n    yield from inner()\nit = batches()\n";
+  const genexpCursor = from + "route\ndef batch(index):\n    if index:\n        return " + call +
+    "\n    return []\nit = (batch(i) for i in [0, 1])\n";
   const switching = (declaration: string, bind: string, initial: string, global = false) =>
     integration((global ? "" : from + initial + "\n") +
       "def switch():\n    " + declaration + " route\n    " + bind + "\nswitch()\nreturn " + call,
@@ -895,6 +900,15 @@ test("R10/#1319：Python 声明目标、延迟体驱动和 CPython 生产调用�
     ["generator-discarded", integration(generator + "return []"), direct, false],
     ["generator-next-stops-at-first-yield", integration(from + "route\ndef batches():\n    yield 0\n    " + call +
       "\nnext(batches())\nreturn []"), direct, false],
+    ["r11-generator-loop-break-first-yield", integration(batches + "for first in it:\n    break\nreturn first"), direct, false],
+    ["r11-generator-loop-return-first-yield", integration(batches + "for first in it:\n    return first\nreturn []"), direct, false],
+    ["r11-generator-loop-drain", integration(batches + "for last in it:\n    pass\nreturn last"), direct, true],
+    ["r11-generator-next-once", integration(batches + "return next(it)"), direct, false],
+    ["r11-generator-next-twice", integration(batches + "next(it)\nreturn next(it)"), direct, true],
+    ["r11-yield-from-next-once", integration(nestedBatches + "return next(it)"), direct, false],
+    ["r11-yield-from-next-twice", integration(nestedBatches + "next(it)\nreturn next(it)"), direct, true],
+    ["r11-genexpr-next-once", integration(genexpCursor + "return next(it)"), direct, false],
+    ["r11-genexpr-next-twice", integration(genexpCursor + "alias = it\nnext(alias)\nreturn next(it)"), direct, true],
     ["generator-returned", integration(generator + "return g"), direct, true],
     ["generator-consumed", integration(generator + "return list(g)"), publicTest, true],
     ["generator-nested-yield-is-not-outer-yield",
@@ -948,6 +962,10 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
   const pointer = "fake as fn(&str) -> bool";
   const poll = "fn drive<F: std::future::Future>(pending: F) { let mut pinned = std::pin::pin!(pending); " +
     "let mut cx = std::task::Context::from_waker(std::task::Waker::noop()); let _ = pinned.as_mut().poll(&mut cx); } ";
+  const genericPoll = (pending: boolean) =>
+    "fn drive<F: std::future::Future<Output = ()>>(f: F) { let mut pinned = std::pin::pin!(f); " +
+    "let mut cx = std::task::Context::from_waker(std::task::Waker::noop()); " +
+    `assert!(pinned.as_mut().poll(&mut cx).${pending ? "is_pending" : "is_ready"}()); } `;
   const wire = (body: string) => `use newchan_rust::${path};\n#[test]\nfn check_connection() { ${body} }\n`;
   const check = (production: string, body: string, accepts: boolean) => {
     const entry = "rust/src/at18_fixture_wire/mod.rs";
@@ -967,6 +985,14 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
     ["async-awaited-inline", poll + `drive(async { (async { ${call} }).await; });`, true],
     ["async-awaited-binding", poll + `drive(async { let fut = async move { ${call} }; fut.await; });`, true],
     ["async-known-poll", poll + `drive(async { ${call} });`, true],
+    ["r11-generic-associated-output", genericPoll(false) + `drive(async { (async move { ${call} }).await; });`, true],
+    ["r11-generic-fn-bound", `fn apply<F: Fn(&str) -> bool>(f: F) { assert!(f("HELLO")); } apply(handshake);`, true],
+    ["r11-poll-suspended", genericPoll(true) + `drive(async { std::future::pending::<()>().await; ${call} });`, false],
+    ["r11-nested-await-suspended", genericPoll(true) + `drive(async {
+      (async { core::future::pending::<()>().await }).await; ${call}
+    });`, false],
+    ["r11-call-before-suspension", genericPoll(true) + `drive(async { ${call} core::future::pending::<()>().await; });`, true],
+    ["r11-caller-continues-after-pending-poll", genericPoll(true) + `drive(core::future::pending::<()>()); ${call}`, true],
     ["async-nested-dropped", poll + `drive(async { let _future = async { ${call} }; });`, false],
     ["gen-block-dropped", `let _generator = gen { ${call} yield 0; };`, false],
     ["gen-move-block-driven", `let generator = gen move { ${call} yield 0; }; for _ in generator {}`, true],
@@ -999,6 +1025,36 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
     ["let-slice-shadow", fake + `let [handshake, ..] = [${pointer}]; assert!(!handshake("HELLO"));`, false],
     ["let-else-shadow", fake + `let Some(handshake) = Some(${pointer}) else { return; }; assert!(!handshake("HELLO"));`, false],
     ["let-else-outer", `let Some(handshake) = None::<fn(&str) -> bool> else { ${call} return; }; let _ = handshake;`, true],
+    ["r11-match-false", `match false { true => ${call.slice(0, -1)}, false => () }`, false],
+    ["r11-match-true", `match true { true => ${call.slice(0, -1)}, false => () }`, true],
+    ["r11-match-or-literal-tuple", `match (7, "wire") {
+      (4 | 7, "wire") => (),
+      _ => { ${call} }
+    }`, false],
+    ["r11-match-guard-false-then-next-arm", `match Some(7) {
+      Some(_) if false => (),
+      Some(7) => { ${call} }
+      _ => (),
+    }`, true],
+    ["r11-match-false-guard-does-not-hide-return", `match Some(7) {
+      Some(_) if false => (),
+      Some(7) => return,
+      _ => (),
+    } ${call}`, false],
+    ["r11-match-none-does-not-bind", `match None::<i32> {
+      None => { let Some(_) = None::<i32> else { return; }; ${call} }
+      Some(_) => (),
+    }`, false],
+    ["r11-let-else-some", `let Some(_) = Some(7) else { ${call} return; };`, false],
+    ["r11-let-else-none", `let Some(_) = None::<i32> else { ${call} return; };`, true],
+    ["r11-let-else-none-stops-tail", `{ let Some(_) = None::<i32> else { return; }; } ${call}`, false],
+    ["r11-if-let-some", `if let Some(f) = Some(handshake) { assert!(f("HELLO")); }`, true],
+    ["r11-if-let-none", `if let Some(f) = None::<fn(&str) -> bool> { ${call} let _ = f; }`, false],
+    ["r11-while-let-none", `while let Some(_) = None::<i32> { ${call} break; }`, false],
+    ["r11-tuple-real", `let (f, _) = (handshake, 7); assert!(f("HELLO"));`, true],
+    ["r11-tuple-fn-pointer", `let (f, _) = (handshake as fn(&str) -> bool, 7); assert!(f("HELLO"));`, true],
+    ["r11-tuple-fake", fake + `let (handshake, _) = (fake, 7); assert!(!handshake("HELLO"));`, false],
+    ["r11-array-nested-variant", `let [Ok(f), ..] = [Ok::<_, ()>(handshake)] else { return; }; assert!(f("HELLO"));`, true],
     ["if-dead", `if false { ${call} }`, false],
     ["while-dead", `while false { ${call} }`, false],
     ["if-parenthesized-dead", `if (false) { ${call} }`, false],

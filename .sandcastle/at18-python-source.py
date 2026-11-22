@@ -163,10 +163,9 @@ class Class:
 
 
 class Pending:
-    def __init__(self, kind, work):
+    def __init__(self, kind, cursor):
         self.kind = kind
-        self.work = work
-        self.exhausted = False
+        self.cursor = cursor
 
 
 class Consumer:
@@ -174,17 +173,26 @@ class Consumer:
         self.pending, self.kinds = pending, kinds
 
 
+class Sequence:
+    def __init__(self, values):
+        self.values = values
+
+
 SYNC = ("sync_gen",)
 ASYNC = ("async_gen",)
 AWAIT = ("coroutine",)
 BUILTIN_CONSUMERS = {"list", "tuple", "set", "dict", "next", "sum", "any", "all", "min", "max", "sorted"}
-SHORT_CONSUMERS = {"next", "any", "all"}
 MISSING = object()
+UNKNOWN = object()
+NONE = object()
 
 
-class Suspend(Exception):
-    """静态分析只证明已驱动到首个 yield 的前缀；不把剩余部分当成本次执行。"""
-
+def finish(cursor):
+    while True:
+        try:
+            next(cursor)
+        except StopIteration as done:
+            return done.value
 
 
 class Instance:
@@ -196,8 +204,9 @@ def assign(node, value, scope):
     if isinstance(node, ast.Name):
         scope.bind(node.id, value)
     elif isinstance(node, (ast.Tuple, ast.List)):
-        for target in node.elts:
-            assign(target, None, scope)
+        values = value.values if isinstance(value, Sequence) and len(value.values) == len(node.elts) else [None] * len(node.elts)
+        for target, member in zip(node.elts, values):
+            assign(target, member, scope)
     elif isinstance(node, ast.Starred):
         assign(node.value, None, scope)
 
@@ -227,13 +236,13 @@ def integration_targets(entry, start):
         if "tests" not in file.parts:
             path = file.as_posix()
             paths.setdefault(module(path), []).append(path)
-    modules, active, targets, stepping = {}, set(), set(), set()
+    modules, active, targets = {}, set(), set()
 
     def load(path):
         if path not in modules:
             tree = ast.parse(Path(path).read_bytes(), path)
             scope = modules[path] = Scope(path)
-            statements(tree.body, scope, False)
+            finish(statements(tree.body, scope, False))
         return modules[path]
 
     def resolve(ref):
@@ -271,11 +280,11 @@ def integration_targets(entry, start):
                 return Consumer(value, ASYNC)
         return None
 
-    def invoke(value, args, keywords, record, driving=False, step=False):
+    def invoke(value, args, keywords, record):
         if isinstance(value, Consumer):
             if value.kinds == ASYNC:
-                return Pending("coroutine", lambda _: force(value.pending, ASYNC, step=True))
-            return force(value.pending, SYNC, step=True)
+                return Pending("coroutine", next_result(value.pending, ASYNC))
+            return take(value.pending, SYNC)
         value = resolve(value)
         if isinstance(value, Class):
             obj = Instance(value)
@@ -285,13 +294,18 @@ def integration_targets(entry, start):
         if isinstance(value, list):
             value, receiver = value
             args = [receiver, *args]
-        if not isinstance(value, Routine) or value.node in active:
+        if not isinstance(value, Routine):
             return None
+        cursor = execute(value, args, keywords, record)
+        return Pending(value.kind, cursor) if value.kind else finish(cursor)
+
+    def execute(value, args, keywords, record):
         node = value.node
-        if value.kind and not driving:
-            return Pending(value.kind, lambda single: invoke(value, args, keywords, record, driving=True, step=single))
         if record and value.scope.path == entry and isinstance(node, FUNCTIONS) and substantive(node):
             targets.add(node)
+            # 接线扫描只确认进入承接实现，不推断实现的返回值。
+            if value.kind in (*SYNC, *ASYNC):
+                yield UNKNOWN
             return None
         body = [node.body] if isinstance(node, ast.Lambda) else node.body
         params = parameters(node.args)
@@ -299,74 +313,120 @@ def integration_targets(entry, start):
         scope.values.update(value.defaults)
         scope.values.update((param.arg, arg) for param, arg in zip([*node.args.posonlyargs, *node.args.args], args))
         scope.values.update((key, value) for key, value in keywords.items() if key in scope.values)
-        active.add(node)
-        if step:
-            stepping.add(scope)
-        try:
-            if isinstance(node, ast.Lambda):
-                return expression(node.body, scope, record)
-            return statements(body, scope, record)[1]
-        except Suspend:
-            if not step:
-                raise
-            return None
-        finally:
-            stepping.discard(scope)
-            active.remove(node)
+        cursor = expression(node.body, scope, record) if isinstance(node, ast.Lambda) else statements(body, scope, record)
+        # 仅在运行时阻止递归；暂停的帧不会阻止同一例程的其他实例。
+        while node not in active:
+            active.add(node)
+            try:
+                item = next(cursor)
+            except StopIteration as done:
+                return done.value if isinstance(node, ast.Lambda) else done.value[1]
+            finally:
+                active.remove(node)
+            yield item
 
     def routine(node, scope, record):
         value = Routine(node, scope.lexical_parent())
         positional = [*node.args.posonlyargs, *node.args.args]
         for arg, default in zip(positional[len(positional) - len(node.args.defaults):], node.args.defaults):
-            value.defaults[arg.arg] = expression(default, scope, record)
+            value.defaults[arg.arg] = yield from expression(default, scope, record)
         for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
             if default is not None:
-                value.defaults[arg.arg] = expression(default, scope, record)
+                value.defaults[arg.arg] = yield from expression(default, scope, record)
         return value
 
-    def force(value, kinds, *, step=False):
-        if not isinstance(value, Pending) or value.kind not in kinds or value.exhausted:
-            return None
-        if not step:
-            value.exhausted = True
-        return value.work(step)
+    def take(value, kinds, default=None):
+        if isinstance(value, Pending) and value.kind in kinds and not value.cursor.gi_running:
+            return next(value.cursor, default)
+        return default
+
+    def next_result(value, kinds):
+        # 异步单步消费者要等到 await 才推进源游标。
+        yield from ()
+        return take(value, kinds)
+
+    def force(value, kinds):
+        if isinstance(value, Pending) and value.kind in kinds and not value.cursor.gi_running:
+            return finish(value.cursor)
+
+    def items(value, kinds):
+        if isinstance(value, Pending):
+            while (item := take(value, kinds, MISSING)) is not MISSING:
+                yield item
+        elif isinstance(value, Sequence):
+            yield from value.values
+        else:
+            # 未知可迭代值保持有界的一次迭代近似。
+            yield UNKNOWN
 
     def comprehension(node, scope, record, first_value):
         inner = Scope(scope.path, scope.lexical_parent(), kind="comprehension")
-        for index, item in enumerate(node.generators):
-            if isinstance(item.iter, (ast.List, ast.Tuple, ast.Set)) and not item.iter.elts:
-                return
-            value = expression(item.iter, inner, record) if index else first_value
-            force(value, ASYNC if item.is_async else SYNC)
-            assign(item.target, None, inner)
-            for test in item.ifs:
-                expression(test, inner, record)
-                if isinstance(test, ast.Constant) and not test.value:
-                    return
-        for field in ("elt", "key", "value"):
-            if hasattr(node, field):
-                expression(getattr(node, field), inner, record)
+
+        def walk(index, value):
+            item = node.generators[index]
+            for member in items(value, ASYNC if item.is_async else SYNC):
+                assign(item.target, member, inner)
+                for test in item.ifs:
+                    guard = yield from expression(test, inner, record)
+                    if truth(guard) is False:
+                        break
+                else:
+                    if index + 1 < len(node.generators):
+                        source = yield from expression(node.generators[index + 1].iter, inner, record)
+                        yield from walk(index + 1, source)
+                    elif isinstance(node, ast.DictComp):
+                        yield from expression(node.key, inner, record)
+                        yield from expression(node.value, inner, record)
+                        yield UNKNOWN
+                    else:
+                        yield (yield from expression(node.elt, inner, record))
+
+        yield from walk(0, first_value)
+
+    def truth(value):
+        if value is NONE:
+            return False
+        if isinstance(value, Sequence):
+            return bool(value.values)
+        if type(value) in (bool, int, float, complex, str, bytes):
+            return bool(value)
+        return None
 
     def expression(node, scope, record):
+        if isinstance(node, ast.Constant):
+            return node.value if node.value is not None else NONE
         if isinstance(node, ast.Name):
             return scope.get(node.id)
         if isinstance(node, ast.Attribute):
-            return attribute(expression(node.value, scope, record), node.attr)
+            return attribute((yield from expression(node.value, scope, record)), node.attr)
         if isinstance(node, ast.Lambda):
-            return routine(node, scope, record)
+            return (yield from routine(node, scope, record))
         if isinstance(node, ast.Call):
-            callee = expression(node.func, scope, record)
-            args = [expression(arg, scope, record) for arg in node.args]
-            keywords = {kw.arg: expression(kw.value, scope, record) for kw in node.keywords}
+            callee = yield from expression(node.func, scope, record)
+            args, keywords = [], {}
+            for arg in node.args:
+                args.append((yield from expression(arg, scope, record)))
+            for kw in node.keywords:
+                keywords[kw.arg] = yield from expression(kw.value, scope, record)
             builtin = callee[1] if isinstance(callee, tuple) and len(callee) == 2 and callee[0] == "builtins" else None
             if isinstance(node.func, ast.Name) and scope.get(node.func.id, MISSING) is MISSING:
                 builtin = node.func.id
             if builtin in BUILTIN_CONSUMERS and args:
-                force(args[0], SYNC, step=builtin in SHORT_CONSUMERS)
+                if builtin == "next":
+                    return take(args[0], SYNC, args[1] if len(args) > 1 else None)
+                if builtin in ("any", "all"):
+                    for member in items(args[0], SYNC):
+                        flag = truth(member)
+                        if flag is None or flag == (builtin == "any"):
+                            return flag
+                    return builtin == "all"
+                force(args[0], SYNC)
             elif builtin == "iter" and len(args) == 1:
+                if isinstance(args[0], Sequence):
+                    return Pending("sync_gen", (item for item in args[0].values))
                 return args[0]
             elif builtin == "anext" and args:
-                return Pending("coroutine", lambda _: force(args[0], ASYNC, step=True))
+                return Pending("coroutine", next_result(args[0], ASYNC))
             if callee == ("asyncio", "run") and args:
                 return force(args[0], AWAIT)
             if (args and isinstance(node.func, ast.Attribute) and node.func.attr == "join"
@@ -374,48 +434,62 @@ def integration_targets(entry, start):
                 force(args[0], SYNC)
             return invoke(callee, args, keywords, record)
         if isinstance(node, ast.Await):
-            return force(expression(node.value, scope, record), AWAIT)
+            return force((yield from expression(node.value, scope, record)), AWAIT)
         if isinstance(node, ast.Starred):
-            return force(expression(node.value, scope, record), SYNC)
-        if isinstance(node, (ast.Yield, ast.YieldFrom)):
-            value = expression(node.value, scope, record)
-            if isinstance(node, ast.YieldFrom):
-                force(value, SYNC, step=scope in stepping)
-            if scope in stepping:
-                raise Suspend
-            return None
+            return force((yield from expression(node.value, scope, record)), SYNC)
+        if isinstance(node, ast.Yield):
+            yield (yield from expression(node.value, scope, record))
+            return UNKNOWN
+        if isinstance(node, ast.YieldFrom):
+            value = yield from expression(node.value, scope, record)
+            if isinstance(value, Pending) and value.kind in SYNC and not value.cursor.gi_running:
+                return (yield from value.cursor)
+            yield from items(value, SYNC)
+            return UNKNOWN
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            values = []
+            for part in node.elts:
+                if isinstance(part, ast.Starred):
+                    values.extend(items((yield from expression(part.value, scope, record)), SYNC))
+                else:
+                    values.append((yield from expression(part, scope, record)))
+            return Sequence(values)
         if isinstance(node, ast.NamedExpr):
-            value = expression(node.value, scope, record)
+            value = yield from expression(node.value, scope, record)
             containing = scope
             while containing.kind == "comprehension":
                 containing = containing.parent
             assign(node.target, value, containing)
             return value
         if isinstance(node, ast.IfExp):
-            expression(node.test, scope, record)
-            if isinstance(node.test, ast.Constant):
-                return expression(node.body if node.test.value else node.orelse, scope, record)
-            expression(node.body, scope, record)
-            expression(node.orelse, scope, record)
+            value = yield from expression(node.test, scope, record)
+            flag = truth(value)
+            if flag is not None:
+                return (yield from expression(node.body if flag else node.orelse, scope, record))
+            yield from expression(node.body, scope, record)
+            yield from expression(node.orelse, scope, record)
             return None
         if isinstance(node, ast.BoolOp):
+            value, uncertain = None, False
             for part in node.values:
-                expression(part, scope, record)
-                if isinstance(part, ast.Constant) and bool(part.value) == isinstance(node.op, ast.Or):
+                value = yield from expression(part, scope, record)
+                flag = truth(value)
+                uncertain |= flag is None
+                if flag == isinstance(node.op, ast.Or):
                     break
-            return None
+            return UNKNOWN if uncertain else value
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             first = node.generators[0]
-            outer_iter = expression(first.iter, scope, record)
+            outer_iter = yield from expression(first.iter, scope, record)
+            cursor = comprehension(node, scope, record, outer_iter)
             if isinstance(node, ast.GeneratorExp):
                 asynchronous = any(item.is_async for item in node.generators) or any(
                     isinstance(part, ast.Await) for part in ast.walk(node))
-                return Pending("async_gen" if asynchronous else "sync_gen",
-                               lambda _: comprehension(node, scope, record, outer_iter))
-            return comprehension(node, scope, record, outer_iter)
+                return Pending("async_gen" if asynchronous else "sync_gen", cursor)
+            return Sequence(list(cursor))
         if node is not None:
             for child in ast.iter_child_nodes(node):
-                expression(child, scope, record)
+                yield from expression(child, scope, record)
         return None
 
     def alternatives(scope, *branches):
@@ -424,44 +498,54 @@ def integration_targets(entry, start):
             scopes.append(scope)
             scope = scope.parent
         before = [layer.values.copy() for layer in scopes]
-        continuing = []
+        continuing, stopped = [], []
         for run in branches:
             for layer, state in zip(scopes, before):
                 layer.values.clear()
                 layer.values.update(state)
-            if not run():
+            flow, result = yield from run
+            if flow is None:
                 continuing.append([layer.values.copy() for layer in scopes])
+            else:
+                stopped.append((flow, result))
         for index, (layer, initial) in enumerate(zip(scopes, before)):
             layer.values.clear()
             states = [branch[index] for branch in continuing]
             for name in initial.keys() | {name for state in states for name in state}:
                 bindings = [state.get(name) for state in states]
                 layer.values[name] = bindings[0] if bindings and all(value == bindings[0] for value in bindings) else None
-        return not continuing
+        if not continuing and stopped:
+            flows = {flow for flow, _ in stopped}
+            if len(flows) == 1:
+                flow, value = stopped[0]
+                return flow, value if all(result == value for _, result in stopped) else None
+            # 所有分支都离开当前语句列表；只保留仍可能继续的外层路径。
+            return ("continue" if "continue" in flows else "break" if "break" in flows else "return"), None
+        return None, None
 
     def statements(body, scope, record):
         def walk(nodes):
-            return statements(nodes, scope, record)[0]
+            return statements(nodes, scope, record)
 
         for node in body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 for name, ref in import_bindings(node, scope.path):
                     scope.bind(name, ref)
             elif isinstance(node, FUNCTIONS):
-                value = routine(node, scope, record)
+                value = yield from routine(node, scope, record)
                 known = all(isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod") for d in node.decorator_list)
                 for deco in node.decorator_list:
-                    expression(deco, scope, record)
+                    yield from expression(deco, scope, record)
                 value.static = any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list)
                 scope.bind(node.name, value if known else None)
             elif isinstance(node, ast.ClassDef):
                 for expr in [*node.bases, *[kw.value for kw in node.keywords], *node.decorator_list]:
-                    expression(expr, scope, record)
+                    yield from expression(expr, scope, record)
                 namespace = Scope(scope.path, scope.lexical_parent(), Locals(node.body), "class")
-                statements(node.body, namespace, record)
+                yield from statements(node.body, namespace, record)
                 scope.bind(node.name, Class(namespace) if not node.decorator_list else None)
             elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                value = expression(node.value, scope, record)
+                value = yield from expression(node.value, scope, record)
                 if not isinstance(node, ast.AnnAssign) or node.value is not None:
                     for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
                         assign(target, None if isinstance(node, ast.AugAssign) else value, scope)
@@ -469,75 +553,94 @@ def integration_targets(entry, start):
                 for target in node.targets:
                     assign(target, None, scope)
             elif isinstance(node, ast.Return):
-                return True, expression(node.value, scope, record)
+                return "return", (yield from expression(node.value, scope, record))
             elif isinstance(node, ast.Raise):
-                expression(node.exc, scope, record)
-                expression(node.cause, scope, record)
-                return True, None
+                yield from expression(node.exc, scope, record)
+                yield from expression(node.cause, scope, record)
+                return "raise", None
             elif isinstance(node, ast.If):
-                expression(node.test, scope, record)
-                if isinstance(node.test, ast.Constant):
-                    stopped, result = statements(node.body if node.test.value else node.orelse, scope, record)
-                    if stopped:
-                        return True, result
-                elif alternatives(scope, lambda: walk(node.body), lambda: walk(node.orelse)):
-                    return True, None
+                flag = truth((yield from expression(node.test, scope, record)))
+                branches = walk(node.body if flag else node.orelse) if flag is not None else alternatives(
+                    scope, walk(node.body), walk(node.orelse))
+                flow, result = yield from branches
+                if flow:
+                    return flow, result
             elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
                 if isinstance(node, ast.While):
-                    expression(node.test, scope, record)
-                    if isinstance(node.test, ast.Constant) and not node.test.value:
-                        stopped, result = statements(node.orelse, scope, record)
-                        if stopped:
-                            return True, result
-                        continue
+                    flag = truth((yield from expression(node.test, scope, record)))
+                    source = Sequence([]) if flag is False else None
                 else:
-                    force(expression(node.iter, scope, record), ASYNC if isinstance(node, ast.AsyncFor) else SYNC)
+                    source = yield from expression(node.iter, scope, record)
+                    flag = True if isinstance(source, (Pending, Sequence)) else None
 
-                def iteration():
+                def iteration(item):
                     if isinstance(node, (ast.For, ast.AsyncFor)):
-                        assign(node.target, None, scope)
-                    return walk(node.body)
+                        assign(node.target, item, scope)
+                    flow, result = yield from walk(node.body)
+                    return (None, None) if flow == "continue" else (flow, result)
 
-                alternatives(scope, iteration, lambda: False)
-                if walk(node.orelse):
-                    return True, None
+                if flag is None:
+                    yield from alternatives(scope, iteration(UNKNOWN), walk([]))
+                else:
+                    for item in items(source, ASYNC if isinstance(node, ast.AsyncFor) else SYNC):
+                        flow, result = yield from iteration(item)
+                        if flow == "break":
+                            break
+                        if flow:
+                            return flow, result
+                    else:
+                        flow, result = yield from walk(node.orelse)
+                        if flow:
+                            return flow, result
+                    continue
+                flow, result = yield from walk(node.orelse)
+                if flow:
+                    return flow, result
             elif isinstance(node, (ast.With, ast.AsyncWith)):
                 for item in node.items:
-                    expression(item.context_expr, scope, record)
+                    yield from expression(item.context_expr, scope, record)
                     if item.optional_vars:
                         assign(item.optional_vars, None, scope)
-                stopped, result = statements(node.body, scope, record)
-                if stopped:
-                    return True, result
+                flow, result = yield from walk(node.body)
+                if flow:
+                    return flow, result
             elif isinstance(node, (ast.Try, ast.TryStar)):
                 def handler(item):
-                    expression(item.type, scope, record)
+                    yield from expression(item.type, scope, record)
                     if item.name:
                         scope.bind(item.name, None)
-                    stopped = walk(item.body)
+                    flow = yield from walk(item.body)
                     if item.name:
                         scope.bind(item.name, None)
-                    return stopped
+                    return flow
 
-                stopped = alternatives(scope, lambda: walk(node.body) or walk(node.orelse),
-                                       *(lambda item=item: handler(item) for item in node.handlers))
-                if walk(node.finalbody) or stopped:
-                    return True, None
+                def normal():
+                    flow = yield from walk(node.body)
+                    if not flow[0]:
+                        return (yield from walk(node.orelse))
+                    return flow
+
+                flow, result = yield from alternatives(scope, normal(), *(handler(item) for item in node.handlers))
+                final, other = yield from walk(node.finalbody)
+                if final or flow:
+                    return (final, other) if final else (flow, result)
             elif isinstance(node, ast.Match):
-                expression(node.subject, scope, record)
+                yield from expression(node.subject, scope, record)
 
                 def arm(case):
                     for name in Locals([case.pattern]).bound:
                         scope.bind(name, None)
-                    expression(case.guard, scope, record)
-                    return walk(case.body)
+                    yield from expression(case.guard, scope, record)
+                    return (yield from walk(case.body))
 
-                alternatives(scope, lambda: False, *(lambda case=case: arm(case) for case in node.cases))
-            elif isinstance(node, (ast.Break, ast.Continue)):
-                return True, None
+                yield from alternatives(scope, walk([]), *(arm(case) for case in node.cases))
+            elif isinstance(node, ast.Break):
+                return "break", None
+            elif isinstance(node, ast.Continue):
+                return "continue", None
             else:
-                expression(node, scope, record)
-        return False, None
+                yield from expression(node, scope, record)
+        return None, None
 
     for name, value in tuple(load(start).values.items()):
         # 单纯导入不构成生产接入；从公开定义的实际调用开始。
