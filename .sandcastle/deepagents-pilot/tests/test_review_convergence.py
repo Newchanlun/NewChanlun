@@ -9276,3 +9276,155 @@ def test_r25_category_code_span_spaces_and_trailing_narrative_spaces() -> None:
     assert len(merged_inv) == 1
     assert merged_inv[0].finding_id == x_nit.finding_id == y_imp.finding_id
     assert merged_inv[0].severity is Severity.IMPORTANT
+
+
+# ── R26 精准加固（HTML 块/行内 HTML 保护、非 ASCII 空白保护、CommonMark 块尾空白精确剥离） ────
+
+
+def test_r26_category_preserves_inline_html_and_unicode_whitespace_with_merge_invariance() -> None:
+    """R26：category 保护行内 HTML 属性空白/换行与 U+00A0/U+3000，并保持 parse_finder_output 与归并 ID 不变量。"""
+    # 1. 全部 5 组 category FALSE_MERGE! 对照（外加首尾 U+00A0/U+3000、注释与跨空行段落）
+    distinct_categories: tuple[tuple[str, str], ...] = (
+        ('<span title="a  b">x</span>', '<span title="a b">x</span>'),
+        ('<span title="a\nb">x</span>', '<span title="a b">x</span>'),
+        ('<a title="`a  b`">x</a>', '<a title="`a b`">x</a>'),
+        ("foo\u00a0bar", "foo bar"),
+        ("foo\u3000bar", "foo bar"),
+        ("\u00a0foo", "foo"),
+        ("foo\u00a0", "foo"),
+        ("\u3000foo\u3000", "foo"),
+        ("<!-- a  b --> x", "<!-- a b --> x"),
+        ("foo\n\nbar", "foo bar"),
+    )
+    for left, right in distinct_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id != f2.finding_id, f"unexpected category collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    # 2. 正向去重：行内 HTML 属性内 CRLF 统一、ASCII 首尾空白剥离与非 ASCII 空白保留
+    crlf_html_a, crlf_html_b, merged_html = _r21_probe(
+        '  <span title="a\r\nb">x</span>  ',
+        '<span title="a\nb">x</span>',
+        category=True,
+    )
+    assert crlf_html_a.finding_id == crlf_html_b.finding_id
+    assert len(merged_html) == 1
+    assert merged_html[0].finding_id == crlf_html_a.finding_id
+
+    # 3. 渲染侧 _single_line 同样保护行内 HTML 水平空白与非 ASCII 空白
+    assert _single_line('  <span title="a  b">x</span>  ') == '<span title="a  b">x</span>'
+    assert _single_line('  <span title="a\nb">x</span>  ') == '<span title="a b">x</span>'
+    assert _single_line("  \u00a0foo\u00a0bar\u3000  ") == "\u00a0foo\u00a0bar\u3000"
+
+    # 4. 首尾 U+00A0 / U+3000 归并 ID 不变量与 parse_finder_output 一致性
+    for raw_cat, padded_cat, expected_cat in (
+        ("\u00a0foo\u00a0", "  \t\u00a0foo\u00a0  ", "\u00a0foo\u00a0"),
+        ("\u3000bar\u3000", " \u3000bar\u3000\t ", "\u3000bar\u3000"),
+    ):
+        f_direct = Finding(Severity.IMPORTANT, "importer.py", 10, raw_cat, "boom", "e1")
+        f_padded = Finding(Severity.IMPORTANT, "importer.py", 12, padded_cat, "boom", "e2")
+        assert f_direct.finding_id == f_padded.finding_id
+
+        merged_ws = merge_and_dedupe_findings([("gpt-6-astra", [f_direct]), ("gpt-6.1-sol", [f_padded])])
+        assert len(merged_ws) == 1
+        assert merged_ws[0].category == expected_cat
+        assert merged_ws[0].finding_id == f_direct.finding_id
+
+        parsed = parse_finder_output(
+            {
+                "findings": [
+                    {
+                        "severity": "Important",
+                        "file": "importer.py",
+                        "line": 10,
+                        "category": padded_cat,
+                        "failure_scenario": "boom",
+                        "evidence": "e1",
+                    }
+                ]
+            },
+            source_model="gpt-6-astra",
+        )
+        assert len(parsed) == 1
+        assert parsed[0].category == expected_cat
+        assert parsed[0].finding_id == f_direct.finding_id
+
+    # 仅含 U+00A0 / U+3000 仍 fail-closed 拒绝
+    for empty_unicode in ("\u00a0", "\u3000", " \u00a0\u3000 "):
+        with pytest.raises(ConvergenceError):
+            parse_finder_output(
+                {
+                    "findings": [
+                        {
+                            "severity": "Important",
+                            "file": "importer.py",
+                            "line": 10,
+                            "category": empty_unicode,
+                            "failure_scenario": "boom",
+                            "evidence": "e1",
+                        }
+                    ]
+                },
+                source_model="gpt-6-astra",
+            )
+
+
+def test_r26_failure_scenario_html_blocks_verbatim_and_block_end_trailing_ws_stripped() -> None:
+    """R26：failure_scenario 原样保留全部 HTML 块（类型 1–7），并精确剥离 CommonMark 块尾不可见 ASCII 空白。"""
+    # 1. 全部 5 组 failure_scenario FALSE_MERGE!（HTML 块类型 1/2 及类型 6/7 对照）绝不误合并
+    distinct_html_scenarios: tuple[tuple[str, str], ...] = (
+        ("<pre>\nfoo\n\nbar\n</pre>", "<pre>\nfoo \n\nbar\n</pre>"),
+        ("<pre>\nfoo", "<pre>\nfoo "),
+        ("<pre>\nfoo\n   \nbar\n</pre>", "<pre>\nfoo\n\nbar\n</pre>"),
+        ("<script>\nconst s = `a\n\nb`\n</script>\nok", "<script>\nconst s = `a \n\nb`\n</script>\nok"),
+        ("<!--\nfoo\n\nbar\n-->\nok", "<!--\nfoo \n\nbar\n-->\nok"),
+        ("<div>\nfoo\n\nbar\n</div>", "<div>\nfoo \n\nbar\n</div>"),
+        ('<span class="x">\nfoo\n\nbar', '<span class="x">\nfoo \n\nbar'),
+        ("<pre>a</pre>", "<pre>a</pre> "),
+    )
+    for left, right in distinct_html_scenarios:
+        f1, f2, merged = _r21_probe(left, right)
+        assert f1.finding_id != f2.finding_id, f"unexpected HTML block collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    # 纯静默 <script> 块本身在 fingerprint / _normalize_fingerprint_text 层也原样保留（绝不误合并）
+    script_a = "<script>\nconst s = `a\n\nb`\n</script>"
+    script_b = "<script>\nconst s = `a \n\nb`\n</script>"
+    assert _normalize_fingerprint_text(script_a, "failure_scenario", allow_code_blocks=True) == script_a
+    assert _normalize_fingerprint_text(script_b, "failure_scenario", allow_code_blocks=True) == script_b
+    assert fingerprint("pilot1742/demo.py", "bug", script_a) != fingerprint("pilot1742/demo.py", "bug", script_b)
+
+    # 2. 全部 4 组 split 案例 + 其余 CommonMark 块尾行（Setext/分隔线/表格/围栏首尾/容器空行）全部归并到同指纹
+    equivalent_scenarios: tuple[tuple[str, str], ...] = (
+        ("导入空表时抛出异常\n- 详情", "导入空表时抛出异常 \n- 详情"),
+        ("导入空表时抛出异常\n```py\nx=1\n```", "导入空表时抛出异常 \n```py\nx=1\n```"),
+        ("> 导入空表时抛出异常\n>\n> 后续", "> 导入空表时抛出异常 \n>\n> 后续"),
+        ("# 标题\n正文", "# 标题 \n正文"),
+        ("标题\n===\n正文", "标题 \n=== \n正文"),
+        ("---\n正文", "--- \n正文"),
+        ("|A|B|\n|---|---|\n|1|2|\n正文", "|A|B| \n|---|---| \n|1|2| \n正文"),
+        ("```py\nx=1\n```", "```py   \t\nx=1\n```  \t"),
+        (">   \n> 后续", ">\n> 后续"),
+        ("<div>\nfoo\n</div>\n   \nbar", "<div>\nfoo\n</div>\n\nbar"),
+        (">     code\n>   \n> text", ">     code\n>\n> text"),
+    )
+    for clean, trailing in equivalent_scenarios:
+        f1, f2, merged = _r21_probe(clean, trailing)
+        assert f1.finding_id == f2.finding_id, f"unexpected split for {clean!r} vs {trailing!r}"
+        assert len(merged) == 1
+        assert merged[0].finding_id == f1.finding_id
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 0
+
+    # 3. 保护段落非末行硬换行（含 Setext 标题与块引用惰性续行内硬换行）不被误剥离
+    for left, right in (
+        ("line1  \nline2\n===", "line1\nline2\n==="),
+        ("> line1  \nline2", "> line1\nline2"),
+    ):
+        f1, f2, merged = _r21_probe(left, right)
+        assert f1.finding_id != f2.finding_id
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}

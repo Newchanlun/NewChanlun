@@ -116,6 +116,8 @@ _HTML_CLOSE_TAG_PATTERN = r"</[A-Za-z][A-Za-z0-9-]*[ \t]*>"
 _HTML_BLOCK_7_START_RE = re.compile(rf"^(?:{_HTML_OPEN_TAG_PATTERN}|{_HTML_CLOSE_TAG_PATTERN})[ \t]*$")
 
 _COMMONMARK_LINE_ENDING_RE = re.compile(r"\r\n|\n|\r")
+_ASCII_WS_CHARS = " \t\r\n\f\v"
+_ASCII_WS_RE = re.compile(r"[ \t\r\n\f\v]+")
 _ASCII_PUNCTUATION = frozenset(r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~""")
 _AUTOLINK_URI_RE = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20<>]*>")
 _AUTOLINK_EMAIL_RE = re.compile(
@@ -271,50 +273,79 @@ def _decode_table_rows(block_text: str) -> list[list[str]]:
     return [[str(cell) for cell in row] for row in raw_rows]
 
 
+def _normalize_inline_fingerprint_text(normalized: str) -> str:
+    """行内短文本（category / reason）无损指纹规范化：保护代码跨度、行内 HTML 与非 ASCII 空白。"""
+    paragraphs: list[str] = []
+    current_lines: list[str] = []
+
+    def flush_paragraph() -> None:
+        if not current_lines:
+            return
+        chunk = "\n".join(current_lines)
+        current_lines.clear()
+        out: list[str] = []
+        for kind, seg in _tokenize_inline_clip_segments(chunk):
+            if kind == "code":
+                out.append(_COMMONMARK_LINE_ENDING_RE.sub(" ", seg))
+            elif kind == "html":
+                out.append(seg)
+            else:
+                out.append(_ASCII_WS_RE.sub(" ", seg))
+        collapsed = "".join(out).strip(_ASCII_WS_CHARS)
+        if collapsed:
+            paragraphs.append(collapsed)
+
+    for line in _split_commonmark_lines(normalized):
+        if line.strip(" \t") == "":
+            flush_paragraph()
+        else:
+            current_lines.append(line)
+    flush_paragraph()
+    return "\n\n".join(paragraphs)
+
+
 def _normalize_fingerprint_text(
     raw: Any,
     field_name: str,
     *,
     allow_code_blocks: bool = False,
 ) -> str:
-    """无损指纹规范化：保留大小写与 Markdown/代码/HTML/URL 原义，避免跨语义误合并。
+    """无损指纹规范化：保留大小写与 Markdown/代码/HTML/URL/非 ASCII 空白原义，避免跨语义误合并。
 
-    - allow_code_blocks=False（category / reason 行内短文本）：使用代码跨度感知的 `_single_line`
-      折叠普通叙述中的多余空白，同时保留闭合行内反引号代码跨度内部的连续水平空格与原始大小写；
+    - allow_code_blocks=False（category / reason 行内短文本）：按空行分段后通过行内词法切分，
+      仅将代码跨度内换行转单空格，行内 HTML/自动链接原样保留，普通文本仅折叠 ASCII 空白（保留 U+00A0/U+3000）；
     - allow_code_blocks=True（failure_scenario 完整 Markdown）：规范换行符后按 CommonMark Phase-1
-      区分代码块正文行（围栏/缩进）与非代码块行：代码块正文行原样保留；非代码块中仅含 ASCII 空格/
-      制表符的空行规整为 `""`，段末与文末非代码块行剥离不可见的 ASCII 尾部空格与制表符（绝不触碰
-      U+00A0、硬换行或跨行代码跨度），最后剥离首尾非代码块空行。
+      区分原样保留行（围栏代码正文、缩进代码正文及内部空行、类型 1–7 HTML 块全部行）与可剥离尾随
+      ASCII `[ \\t]` 的块边界行（段末、ATX/Setext 标题、分隔线、围栏首尾行、表格行与容器内空行），
+      绝不触碰 U+00A0、硬换行或跨行代码跨度，最后剥离首尾非原样空行。
     """
-    text = _require_visible_text(raw, field_name)
+    _require_visible_text(raw, field_name)
     assert isinstance(raw, str)
-    if not allow_code_blocks:
-        return _single_line(text)
     normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
-    code_lines: set[int] = set()
-    _parse_commonmark_blocks(normalized, include_all_visible_blocks=True, code_line_indices_out=code_lines)
+    if not allow_code_blocks:
+        return _normalize_inline_fingerprint_text(normalized)
+    verbatim_lines: set[int] = set()
+    trailing_ws_strippable: set[int] = set()
+    _parse_commonmark_blocks(
+        normalized,
+        include_all_visible_blocks=True,
+        verbatim_line_indices_out=verbatim_lines,
+        trailing_ws_strippable_out=trailing_ws_strippable,
+    )
     lines = _split_commonmark_lines(normalized)
-    n_lines = len(lines)
     processed: list[tuple[int, str]] = []
     for idx, line in enumerate(lines):
-        if idx in code_lines:
+        if idx in verbatim_lines:
             processed.append((idx, line))
-            continue
-        if line.strip(" \t") == "":
+        elif line.strip(" \t") == "":
             processed.append((idx, ""))
-            continue
-        next_is_non_code_blank = (
-            idx + 1 < n_lines
-            and (idx + 1) not in code_lines
-            and lines[idx + 1].strip(" \t") == ""
-        )
-        if idx == n_lines - 1 or next_is_non_code_blank:
+        elif idx in trailing_ws_strippable:
             processed.append((idx, line.rstrip(" \t")))
         else:
             processed.append((idx, line))
-    while processed and processed[0][0] not in code_lines and processed[0][1] == "":
+    while processed and processed[0][0] not in verbatim_lines and processed[0][1] == "":
         processed.pop(0)
-    while processed and processed[-1][0] not in code_lines and processed[-1][1] == "":
+    while processed and processed[-1][0] not in verbatim_lines and processed[-1][1] == "":
         processed.pop()
     return "\n".join(line for _, line in processed)
 
@@ -542,7 +573,10 @@ def parse_finder_output(payload: Mapping[str, Any], *, source_model: str) -> tup
         severity = parse_severity(item.get("severity"))
         file_path = _normalize_file(item.get("file"))
         line = _normalize_line(item.get("line"))
-        category = _require_visible_text(item.get("category"), f"findings[{idx}].category")
+        raw_category = item.get("category")
+        _require_visible_text(raw_category, f"findings[{idx}].category")
+        assert isinstance(raw_category, str)
+        category = raw_category.strip(_ASCII_WS_CHARS)
         failure_scenario = _require_visible_markdown_text(
             item.get("failure_scenario"), f"findings[{idx}].failure_scenario"
         )
@@ -571,7 +605,7 @@ def parse_finder_output(payload: Mapping[str, Any], *, source_model: str) -> tup
 
 
 def _pick_best_text(values: Sequence[str]) -> str:
-    return min((v.strip() for v in values), key=lambda s: (-len(s), s))
+    return min((v.strip(_ASCII_WS_CHARS) for v in values), key=lambda s: (-len(s), s))
 
 
 def _pick_best_markdown_text(values: Sequence[str]) -> str:
@@ -2165,7 +2199,8 @@ def _parse_commonmark_blocks(
     body: str,
     *,
     include_all_visible_blocks: bool = False,
-    code_line_indices_out: set[int] | None = None,
+    verbatim_line_indices_out: set[int] | None = None,
+    trailing_ws_strippable_out: set[int] | None = None,
 ) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]], frozenset[str]]:
     """按 CommonMark Phase-1 容器栈/叶子块（含 GFM §4.10 管道表格）+ §4.7 链接引用定义剥离收集文档块与已定义链接标签。"""
     containers: list[_Container] = []
@@ -2173,14 +2208,20 @@ def _parse_commonmark_blocks(
     defined_labels: set[str] = set()
     doc_blocks: list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]] = []
     indented_pending_blank_indices: list[int] = []
+    para_last_line_idx: int | None = None
 
     def in_blockquote() -> bool:
         return any(isinstance(c, _BlockQuote) for c in containers)
 
     def close_leaf(*, emit: bool = True) -> None:
-        nonlocal leaf
+        nonlocal leaf, para_last_line_idx
+        if trailing_ws_strippable_out is not None and indented_pending_blank_indices:
+            trailing_ws_strippable_out.update(indented_pending_blank_indices)
         indented_pending_blank_indices.clear()
         if isinstance(leaf, _Paragraph):
+            if trailing_ws_strippable_out is not None and para_last_line_idx is not None:
+                trailing_ws_strippable_out.add(para_last_line_idx)
+            para_last_line_idx = None
             remaining = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
             if emit and remaining and (include_all_visible_blocks or not in_blockquote()):
                 doc_blocks.append(("paragraph", remaining))
@@ -2252,23 +2293,31 @@ def _parse_commonmark_blocks(
                     cursor.advance_cols(cursor.indent_ahead())
                     rest = cursor.rest_text()
                     if re.fullmatch(rf"{re.escape(leaf.fence_char)}{{{leaf.fence_len},}}[ \t]*", rest):
+                        if trailing_ws_strippable_out is not None:
+                            trailing_ws_strippable_out.add(line_idx)
                         close_leaf()
                         continue
                     cursor.restore(saved)
                 if leaf.indent > 0:
                     cursor.advance_cols(min(cursor.indent_ahead(), leaf.indent))
                 leaf.lines.append(cursor.rest_text())
-                if code_line_indices_out is not None:
-                    code_line_indices_out.add(line_idx)
+                if verbatim_line_indices_out is not None:
+                    verbatim_line_indices_out.add(line_idx)
                 continue
             if isinstance(leaf, _HTMLBlock):
                 if leaf.kind in (6, 7):
                     if cursor.is_blank():
                         close_leaf()
+                        if trailing_ws_strippable_out is not None:
+                            trailing_ws_strippable_out.add(line_idx)
                         continue
                     leaf.lines.append(cursor.rest_text())
+                    if verbatim_line_indices_out is not None:
+                        verbatim_line_indices_out.add(line_idx)
                     continue
                 leaf.lines.append(cursor.rest_text())
+                if verbatim_line_indices_out is not None:
+                    verbatim_line_indices_out.add(line_idx)
                 if _is_html_block_end(leaf.kind, cursor.rest_text()):
                     close_leaf()
                 continue
@@ -2281,19 +2330,23 @@ def _parse_commonmark_blocks(
                 if cursor.indent_ahead() >= 4:
                     cursor.advance_cols(4)
                     leaf.lines.append(cursor.rest_text())
-                    if code_line_indices_out is not None:
-                        code_line_indices_out.update(indented_pending_blank_indices)
-                        code_line_indices_out.add(line_idx)
+                    if verbatim_line_indices_out is not None:
+                        verbatim_line_indices_out.update(indented_pending_blank_indices)
+                        verbatim_line_indices_out.add(line_idx)
                     indented_pending_blank_indices.clear()
                     continue
                 close_leaf()
             if isinstance(leaf, _Table):
                 if cursor.is_blank():
                     close_leaf()
+                    if trailing_ws_strippable_out is not None:
+                        trailing_ws_strippable_out.add(line_idx)
                     continue
                 row_cells = _split_gfm_table_row(cursor.rest_text(), require_pipe=True)
                 if row_cells is not None:
                     leaf.body_rows.append(tuple(row_cells[: len(leaf.header_cells)]))
+                    if trailing_ws_strippable_out is not None:
+                        trailing_ws_strippable_out.add(line_idx)
                     continue
                 close_leaf()
 
@@ -2304,12 +2357,16 @@ def _parse_commonmark_blocks(
             close_unmatched(matched)
             if isinstance(leaf, _Paragraph):
                 close_leaf()
+            if trailing_ws_strippable_out is not None:
+                trailing_ws_strippable_out.add(line_idx)
             continue
 
         # 3. 按 CommonMark 优先级开启新容器或叶子块
         line_consumed = False
         while True:
             if cursor.is_blank():
+                if trailing_ws_strippable_out is not None:
+                    trailing_ws_strippable_out.add(line_idx)
                 line_consumed = True
                 break
 
@@ -2325,8 +2382,8 @@ def _parse_commonmark_blocks(
                 cursor.advance_cols(4)
                 leaf = _IndentedCode(lines=[cursor.rest_text()])
                 indented_pending_blank_indices.clear()
-                if code_line_indices_out is not None:
-                    code_line_indices_out.add(line_idx)
+                if verbatim_line_indices_out is not None:
+                    verbatim_line_indices_out.add(line_idx)
                 line_consumed = True
                 break
 
@@ -2349,6 +2406,8 @@ def _parse_commonmark_blocks(
                 close_unmatched(matched)
                 close_leaf()
                 mark_parent_has_content()
+                if trailing_ws_strippable_out is not None:
+                    trailing_ws_strippable_out.add(line_idx)
                 if include_all_visible_blocks:
                     heading_text = _extract_atx_heading_text(rest)
                     if heading_text:
@@ -2363,6 +2422,8 @@ def _parse_commonmark_blocks(
                 close_unmatched(matched)
                 close_leaf()
                 mark_parent_has_content()
+                if trailing_ws_strippable_out is not None:
+                    trailing_ws_strippable_out.add(line_idx)
                 marker = fence_match.group(1)
                 leaf = _FencedCode(fence_char=marker[0], fence_len=len(marker), indent=indent)
                 line_consumed = True
@@ -2374,6 +2435,8 @@ def _parse_commonmark_blocks(
                 close_leaf()
                 mark_parent_has_content()
                 leaf = _HTMLBlock(kind=html_kind, lines=[rest])
+                if verbatim_line_indices_out is not None:
+                    verbatim_line_indices_out.add(line_idx)
                 if html_kind in (1, 2, 3, 4, 5) and _is_html_block_end(html_kind, rest, is_opening_line=True):
                     close_leaf()
                 line_consumed = True
@@ -2383,12 +2446,20 @@ def _parse_commonmark_blocks(
                 assert isinstance(leaf, _Paragraph)
                 remaining_before_setext = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
                 if remaining_before_setext:
+                    if trailing_ws_strippable_out is not None:
+                        if para_last_line_idx is not None:
+                            trailing_ws_strippable_out.add(para_last_line_idx)
+                        trailing_ws_strippable_out.add(line_idx)
+                    para_last_line_idx = None
                     if include_all_visible_blocks:
                         doc_blocks.append(("heading", remaining_before_setext))
                     leaf = None
                     line_consumed = True
                     break
                 # 仅含链接引用定义的段落不可变成 Setext 标题：先关闭该空段落，再按普通块继续解析当前行
+                if trailing_ws_strippable_out is not None and para_last_line_idx is not None:
+                    trailing_ws_strippable_out.add(para_last_line_idx)
+                para_last_line_idx = None
                 leaf = None
                 same_container_para = False
                 any_open_para = False
@@ -2397,6 +2468,8 @@ def _parse_commonmark_blocks(
                 close_unmatched(matched)
                 close_leaf()
                 mark_parent_has_content()
+                if trailing_ws_strippable_out is not None:
+                    trailing_ws_strippable_out.add(line_idx)
                 line_consumed = True
                 break
 
@@ -2438,6 +2511,11 @@ def _parse_commonmark_blocks(
             ):
                 header_cells = _split_gfm_table_row(leaf.lines[0], require_pipe=True)
                 if header_cells and _is_gfm_table_delimiter_row(rest, len(header_cells)):
+                    if trailing_ws_strippable_out is not None:
+                        if para_last_line_idx is not None:
+                            trailing_ws_strippable_out.add(para_last_line_idx)
+                        trailing_ws_strippable_out.add(line_idx)
+                    para_last_line_idx = None
                     leaf = _Table(header_cells=tuple(header_cells))
                     line_consumed = True
                     break
@@ -2456,6 +2534,7 @@ def _parse_commonmark_blocks(
             close_unmatched(matched)
             mark_parent_has_content()
             leaf = _Paragraph(lines=[text_line])
+        para_last_line_idx = line_idx
 
     close_leaf()
     return doc_blocks, frozenset(defined_labels)
@@ -4623,14 +4702,14 @@ _COMPACT_EVIDENCE_MAX_CHARS = 200
 
 
 def _collapse_prose_whitespace(chunk: str) -> str:
-    """在单个段落/块内折叠非代码文本连续空白，完整保留 CommonMark §6.1 闭合行内代码内部水平空格（仅将换行转单空格）。"""
+    """在单个段落/块内折叠普通文本连续 ASCII 空白，保留闭合行内代码、行内 HTML 内部水平空格与非 ASCII 空白。"""
     out: list[str] = []
     for kind, raw in _tokenize_inline_clip_segments(chunk):
-        if kind == "code":
+        if kind in ("code", "html"):
             out.append(_COMMONMARK_LINE_ENDING_RE.sub(" ", raw))
         else:
-            out.append(re.sub(r"\s+", " ", raw))
-    return "".join(out).strip()
+            out.append(_ASCII_WS_RE.sub(" ", raw))
+    return "".join(out).strip(_ASCII_WS_CHARS)
 
 
 def _single_line(text: str) -> str:
