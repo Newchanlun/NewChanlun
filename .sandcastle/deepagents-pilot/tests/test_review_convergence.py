@@ -15141,3 +15141,895 @@ def test_r37_important2_canonical_swap_prefers_current_round_canonical_across_lo
     assert dict(eb2.duplicate_aliases) == expected_compressed
     plan_b3 = plan_next_round(BASE_SHA, HEAD_3, (eb1, eb2))
     assert dict(plan_b3.duplicate_aliases) == expected_compressed
+
+
+def test_r38_important1_canonical_swap_propagates_consumed_resolved_key_across_rounds() -> None:
+    """Codex R38 唯一 Important：R1 D->A + comment:42:resolved:<A>，R2 换根 A->D 后持久化 comment:42:resolved:<D>，R3 阻断 D 且不误伤无关 U。"""
+    f_a = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_swap_a.py",
+        line=10,
+        category="R38规范A",
+        failure_scenario="r38_swap_a.py:10 旧规范 Nit A",
+        source_models=("gpt-6-astra",),
+    )
+    f_d_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_swap_d.py",
+        line=20,
+        category="R38别名D",
+        failure_scenario="r38_swap_d.py:20 别名 Nit D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_d_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_swap_d.py",
+        line=20,
+        category="R38别名D",
+        failure_scenario="r38_swap_d.py:20 别名 Nit D",
+        source_models=("gpt-6.1-sol",),
+    )
+    assert f_d_imp.finding_id == f_d_nit.finding_id
+    f_i = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_swap_i.py",
+        line=5,
+        category="R38阻断I",
+        failure_scenario="r38_swap_i.py:5 维持阻断的 Important I",
+        source_models=("gpt-6-astra",),
+    )
+    f_u = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_swap_u.py",
+        line=30,
+        category="R38无关U",
+        failure_scenario="r38_swap_u.py:30 独立无关 Important U",
+        source_models=("gpt-6-astra",),
+    )
+    resolved_a_key = f"comment:42:resolved:{f_a.finding_id}"
+    resolved_d_key = f"comment:42:resolved:{f_d_nit.finding_id}"
+    resolved_u_key = f"comment:42:resolved:{f_u.finding_id}"
+
+    # R1: A/D 为 Nit 且 D->A，Important I 阻断，历史含 comment:42:resolved:<A>
+    cand_r1 = _candidates([f_a, f_d_nit, f_i], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 A 为规范项"},
+                {
+                    "finding_id": f_d_nit.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "R1 D 折入 A",
+                },
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 I 成立"},
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    assert dec_r1.outcome is RoundOutcome.BLOCKED
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+    assert e1.duplicate_aliases == ((f_d_nit.finding_id, f_a.finding_id),)
+    assert resolved_a_key in e1.consumed_reply_keys
+
+    # R2: 规范项交换 A->D、D=confirmed、I 仍阻断
+    cand_r2 = _candidates([f_a, f_d_nit, f_i], round_number=2, head_sha=HEAD_2, history=(e1,))
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {
+                    "finding_id": f_a.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_d_nit.finding_id,
+                    "verifier_evidence": "R2 改判 A 折入 D",
+                },
+                {"finding_id": f_d_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 D 为规范项"},
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 I 仍成立"},
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2 = evaluate_round(ver_r2)
+    assert dec_r2.outcome is RoundOutcome.BLOCKED
+    assert dec_r2.duplicate_aliases == ((f_a.finding_id, f_d_nit.finding_id),)
+    assert resolved_d_key in dec_r2.consumed_reply_keys
+    assert resolved_u_key not in dec_r2.consumed_reply_keys
+    assert all(k.startswith("comment:42:resolved:") for k in dec_r2.consumed_reply_keys)
+    e2 = dec_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_r2))
+    assert e2.duplicate_aliases == ((f_a.finding_id, f_d_nit.finding_id),)
+    assert resolved_d_key in e2.consumed_reply_keys
+
+    # R3: D 升为 Important、I 修复、另含无关 Important U；评论 42 同时提供全长 D 与全长 U 回复
+    reply_d_full = AuthorReply(f_d_imp.finding_id, None, None, "按旧评论不修 D", "42", "alice")
+    reply_u_full = AuthorReply(f_u.finding_id, None, None, "按设计不修无关 U", "42", "alice")
+    plan_r3 = plan_next_round(BASE_SHA, HEAD_3, (e1, e2), author_replies=[reply_d_full, reply_u_full])
+    assert resolved_d_key in plan_r3.consumed_reply_keys
+    assert plan_r3.author_replies == (reply_u_full,)
+
+    # 即使绕过 plan_next_round 直接传入两条回复，R3 对 D 裁 resolved_by_wontfix 必抛 ConvergenceError
+    cand_r3 = _candidates([f_d_imp, f_u], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r3,
+                [
+                    {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                    {
+                        "finding_id": f_d_imp.finding_id,
+                        "verdict": "resolved_by_wontfix",
+                        "verifier_evidence": "试图借已消费旧评论 42 解除换根后的 D",
+                    },
+                    {
+                        "finding_id": f_u.finding_id,
+                        "verdict": "resolved_by_wontfix",
+                        "verifier_evidence": "评论 42 合法解除无关 U",
+                    },
+                ],
+            ),
+            cand_r3,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d_full, reply_u_full],
+        )
+
+    # D 维持 confirmed、U 裁 resolved_by_wontfix 合法且返回 BLOCKED（仅 D 阻断）
+    ver_r3_blocked = parse_verifier_output(
+        _verifier_payload(
+            cand_r3,
+            [
+                {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                {"finding_id": f_d_imp.finding_id, "verdict": "confirmed", "verifier_evidence": "D 仍阻断"},
+                {
+                    "finding_id": f_u.finding_id,
+                    "verdict": "resolved_by_wontfix",
+                    "verifier_evidence": "评论 42 合法解除无关 U",
+                },
+            ],
+        ),
+        cand_r3,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d_full, reply_u_full],
+    )
+    dec_r3_blocked = evaluate_round(ver_r3_blocked)
+    assert dec_r3_blocked.outcome is RoundOutcome.BLOCKED
+    assert [vf.finding.finding_id for vf in dec_r3_blocked.blocking_findings] == [f_d_imp.finding_id]
+    assert f_u.finding_id in dec_r3_blocked.resolved_fingerprints
+
+    # 无 D 阻断时，评论 42 仍可单独合法解除无关 U 得 PASS
+    cand_r3_only_u = _candidates([f_u], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    ver_r3_pass = parse_verifier_output(
+        _verifier_payload(
+            cand_r3_only_u,
+            [
+                {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                {
+                    "finding_id": f_u.finding_id,
+                    "verdict": "resolved_by_wontfix",
+                    "verifier_evidence": "评论 42 独立合法解除无关 U",
+                },
+            ],
+        ),
+        cand_r3_only_u,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d_full, reply_u_full],
+    )
+    dec_r3_pass = evaluate_round(ver_r3_pass)
+    assert dec_r3_pass.outcome is RoundOutcome.PASS
+
+
+def test_r38_canonical_promotion_and_new_alias_propagate_consumed_resolved_key() -> None:
+    """R38 同族边界 2：三轮规范项上移（R1 D->A -> R2 A->B）持久化 comment:42:resolved:<B>，且 R2 当轮新建 A->B 立即阻断锁定/解除 B。"""
+    f_a = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_up_a.py",
+        line=10,
+        category="R38上移A",
+        failure_scenario="r38_up_a.py:10 旧规范 A",
+        source_models=("gpt-6-astra",),
+    )
+    f_d_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_up_d.py",
+        line=20,
+        category="R38上移D",
+        failure_scenario="r38_up_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_d_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_up_d.py",
+        line=20,
+        category="R38上移D",
+        failure_scenario="r38_up_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_b_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_up_b.py",
+        line=30,
+        category="R38上移B",
+        failure_scenario="r38_up_b.py:30 新规范 B",
+        source_models=("gpt-6-astra",),
+    )
+    f_b_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_up_b.py",
+        line=30,
+        category="R38上移B",
+        failure_scenario="r38_up_b.py:30 新规范 B",
+        source_models=("gpt-6-astra",),
+    )
+    f_i = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_up_i.py",
+        line=5,
+        category="R38上移I",
+        failure_scenario="r38_up_i.py:5 阻断 I",
+        source_models=("gpt-6-astra",),
+    )
+    f_u = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_up_u.py",
+        line=40,
+        category="R38上移U",
+        failure_scenario="r38_up_u.py:40 无关 U",
+        source_models=("gpt-6-astra",),
+    )
+    resolved_a_key = f"comment:42:resolved:{f_a.finding_id}"
+    resolved_b_key = f"comment:42:resolved:{f_b_nit.finding_id}"
+
+    # Part A: 三轮规范项上移（R1 D->A + comment:42:resolved:<A> -> R2 A->B -> R3 B 与 D 均拒评论 42，无关 U 可用）
+    cand_r1 = _candidates([f_a, f_d_nit, f_i], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 A 成立"},
+                {
+                    "finding_id": f_d_nit.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "R1 D 折入 A",
+                },
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 I 成立"},
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+
+    # R2 当轮新建 A->B（B=confirmed），同时验证当轮立即阻断评论 42 锁定 B（loc / short）
+    reply_b_loc = AuthorReply(None, "pilot1742/r38_up_b.py", 30, "不修 B 坐标", "42", "alice")
+    reply_b_short = AuthorReply(f_b_nit.finding_id[:8], None, None, "不修 B 短前缀", "42", "alice")
+    reply_b_full = AuthorReply(f_b_imp.finding_id, None, None, "不修 B 全长", "42", "alice")
+    reply_d_full = AuthorReply(f_d_imp.finding_id, None, None, "不修 D 全长", "42", "alice")
+    reply_u_full = AuthorReply(f_u.finding_id, None, None, "不修无关 U", "42", "alice")
+
+    cand_r2 = _candidates([f_a, f_b_nit, f_i], round_number=2, head_sha=HEAD_2, history=(e1,))
+    r2_payload = _verifier_payload(
+        cand_r2,
+        [
+            {
+                "finding_id": f_a.finding_id,
+                "verdict": "duplicate",
+                "duplicate_of": f_b_nit.finding_id,
+                "verifier_evidence": "R2 A 上移折入 B",
+            },
+            {"finding_id": f_b_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 B 为规范项"},
+            {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 I 仍成立"},
+        ],
+    )
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            r2_payload,
+            cand_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_b_loc],
+            bound_reply_targets={reply_b_loc.reply_key: f_b_nit.finding_id},
+        )
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            r2_payload,
+            cand_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_b_short],
+            bound_reply_targets={reply_b_short.reply_key: f_b_nit.finding_id},
+        )
+
+    ver_r2 = parse_verifier_output(
+        r2_payload,
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_b_loc, reply_b_short, reply_b_full],
+    )
+    dec_r2 = evaluate_round(ver_r2)
+    assert dict(dec_r2.duplicate_aliases) == {
+        f_a.finding_id: f_b_nit.finding_id,
+        f_d_nit.finding_id: f_b_nit.finding_id,
+    }
+    assert dec_r2.bound_reply_targets == frozenset()
+    assert resolved_b_key in dec_r2.consumed_reply_keys
+    e2 = dec_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_r2))
+    assert resolved_b_key in e2.consumed_reply_keys
+
+    # R3: plan_next_round 过滤 B 与 D 回复，保留无关 U 回复；绕过 plan_next_round 均拒 B/D wontfix
+    plan_r3 = plan_next_round(BASE_SHA, HEAD_3, (e1, e2), author_replies=[reply_b_full, reply_d_full, reply_u_full])
+    assert resolved_b_key in plan_r3.consumed_reply_keys
+    assert plan_r3.author_replies == (reply_u_full,)
+
+    cand_r3_b = _candidates([f_b_imp, f_u], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r3_b,
+                [
+                    {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                    {"finding_id": f_b_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "企图复用42"},
+                    {"finding_id": f_u.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "U 合法解除"},
+                ],
+            ),
+            cand_r3_b,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_b_full, reply_u_full],
+        )
+
+    cand_r3_d = _candidates([f_d_imp, f_u], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r3_d,
+                [
+                    {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                    {"finding_id": f_d_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "企图复用42"},
+                    {"finding_id": f_u.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "U 合法解除"},
+                ],
+            ),
+            cand_r3_d,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d_full, reply_u_full],
+        )
+
+    # 无关 U 在 R3 仍可合法被评论 42 解除
+    cand_r3_u = _candidates([f_u], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    ver_r3_u = parse_verifier_output(
+        _verifier_payload(
+            cand_r3_u,
+            [
+                {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                {"finding_id": f_u.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "U 合法解除"},
+            ],
+        ),
+        cand_r3_u,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_b_full, reply_d_full, reply_u_full],
+    )
+    assert evaluate_round(ver_r3_u).outcome is RoundOutcome.PASS
+
+    # Part B: 无历史边仅外部 comment:42:resolved:<A>，单轮新建 A->B 立即阻断 B 建锁且同步持久化 comment:42:resolved:<B>
+    cand_fresh = _candidates([f_a, f_b_nit, f_u], round_number=1, head_sha=HEAD_1)
+    fresh_payload = _verifier_payload(
+        cand_fresh,
+        [
+            {
+                "finding_id": f_a.finding_id,
+                "verdict": "duplicate",
+                "duplicate_of": f_b_nit.finding_id,
+                "verifier_evidence": "首轮直接将 A 折入 B",
+            },
+            {"finding_id": f_b_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "B 为规范项"},
+            {
+                "finding_id": f_u.finding_id,
+                "verdict": "resolved_by_wontfix",
+                "verifier_evidence": "评论 42 合法解除无关 U",
+            },
+        ],
+    )
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            fresh_payload,
+            cand_fresh,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_b_loc, reply_u_full],
+            consumed_reply_keys={resolved_a_key},
+            bound_reply_targets={reply_b_loc.reply_key: f_b_nit.finding_id},
+        )
+    ver_fresh = parse_verifier_output(
+        fresh_payload,
+        cand_fresh,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_b_loc, reply_b_short, reply_u_full],
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_fresh = evaluate_round(ver_fresh)
+    assert dec_fresh.outcome is RoundOutcome.PASS
+    assert dec_fresh.bound_reply_targets == frozenset()
+    assert resolved_b_key in dec_fresh.consumed_reply_keys
+
+
+def test_r38_canonical_clearance_preserves_detached_alias_consumed_key_in_next_round() -> None:
+    """R38 同族边界 3：R2 规范项 A 被清除（fix 或本轮评论 42 wontfix）后，持久化 comment:42:resolved:<D> 阻断 R3 D 复用评论 42，不伤无关 U。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_clr_a.py",
+        line=10,
+        category="R38清除A",
+        failure_scenario="r38_clr_a.py:10 规范阻断 A",
+        source_models=("gpt-6-astra",),
+    )
+    f_d_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_clr_d.py",
+        line=20,
+        category="R38清除D",
+        failure_scenario="r38_clr_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_d_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_clr_d.py",
+        line=20,
+        category="R38清除D",
+        failure_scenario="r38_clr_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_u = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_clr_u.py",
+        line=30,
+        category="R38清除U",
+        failure_scenario="r38_clr_u.py:30 无关 U",
+        source_models=("gpt-6-astra",),
+    )
+    resolved_a_key = f"comment:42:resolved:{f_a.finding_id}"
+    resolved_d_key = f"comment:42:resolved:{f_d_nit.finding_id}"
+    reply_a_full = AuthorReply(f_a.finding_id, None, None, "不修 A", "42", "alice")
+    reply_d_full = AuthorReply(f_d_imp.finding_id, None, None, "不修 D", "42", "alice")
+    reply_u_full = AuthorReply(f_u.finding_id, None, None, "不修无关 U", "42", "alice")
+
+    # 路径 A：R1 D->A + comment:42:resolved:<A> -> R2 A=resolved_by_fix（D 缺席）-> R3 D 升 Important
+    cand_a1 = _candidates([f_a, f_d_nit], round_number=1, head_sha=HEAD_1)
+    ver_a1 = parse_verifier_output(
+        _verifier_payload(
+            cand_a1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 A 阻断"},
+                {
+                    "finding_id": f_d_nit.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "R1 D 折入 A",
+                },
+            ],
+        ),
+        cand_a1,
+        verifier_model="claude-opus-5-5",
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_a1 = evaluate_round(ver_a1)
+    ea1 = dec_a1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_a1))
+
+    cand_a2 = _candidates([], round_number=2, head_sha=HEAD_2, history=(ea1,))
+    ver_a2 = parse_verifier_output(
+        _verifier_payload(
+            cand_a2,
+            [{"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "R2 A 已修复"}],
+        ),
+        cand_a2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_a2 = evaluate_round(ver_a2)
+    assert dec_a2.outcome is RoundOutcome.PASS
+    assert dec_a2.duplicate_aliases == ()
+    assert resolved_d_key in dec_a2.consumed_reply_keys
+    ea2 = dec_a2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_a2))
+    assert resolved_d_key in ea2.consumed_reply_keys
+
+    plan_a3 = plan_next_round(BASE_SHA, HEAD_3, (ea1, ea2), author_replies=[reply_d_full, reply_u_full])
+    assert resolved_d_key in plan_a3.consumed_reply_keys
+    assert plan_a3.author_replies == (reply_u_full,)
+
+    cand_a3 = _candidates([f_d_imp, f_u], round_number=3, head_sha=HEAD_3, history=(ea1, ea2))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_a3,
+                [
+                    {"finding_id": f_d_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "复用42"},
+                    {"finding_id": f_u.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "U 解除"},
+                ],
+            ),
+            cand_a3,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d_full, reply_u_full],
+        )
+    ver_a3_ok = parse_verifier_output(
+        _verifier_payload(
+            cand_a3,
+            [
+                {"finding_id": f_d_imp.finding_id, "verdict": "confirmed", "verifier_evidence": "D 阻断"},
+                {"finding_id": f_u.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "U 合法解除"},
+            ],
+        ),
+        cand_a3,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d_full, reply_u_full],
+    )
+    dec_a3_ok = evaluate_round(ver_a3_ok)
+    assert dec_a3_ok.outcome is RoundOutcome.BLOCKED
+    assert [vf.finding.finding_id for vf in dec_a3_ok.blocking_findings] == [f_d_imp.finding_id]
+    assert f_u.finding_id in dec_a3_ok.resolved_fingerprints
+
+    # 路径 B：R1 D->A（无历史消费键）-> R2 本轮 A=resolved_by_wontfix（评论 42 新消费）-> R3 D 升 Important 同样被拒
+    cand_b1 = _candidates([f_a, f_d_nit], round_number=1, head_sha=HEAD_1)
+    ver_b1 = parse_verifier_output(
+        _verifier_payload(
+            cand_b1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 A 阻断"},
+                {
+                    "finding_id": f_d_nit.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "R1 D 折入 A",
+                },
+            ],
+        ),
+        cand_b1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_b1 = evaluate_round(ver_b1)
+    eb1 = dec_b1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_b1))
+    assert eb1.consumed_reply_keys == frozenset()
+
+    cand_b2 = _candidates([], round_number=2, head_sha=HEAD_2, history=(eb1,))
+    ver_b2 = parse_verifier_output(
+        _verifier_payload(
+            cand_b2,
+            [{"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "评论 42 不修 A"}],
+        ),
+        cand_b2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_a_full],
+    )
+    dec_b2 = evaluate_round(ver_b2)
+    assert dec_b2.outcome is RoundOutcome.PASS
+    assert resolved_a_key in dec_b2.consumed_reply_keys
+    assert resolved_d_key in dec_b2.consumed_reply_keys
+    eb2 = dec_b2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_b2))
+
+    plan_b3 = plan_next_round(BASE_SHA, HEAD_3, (eb1, eb2), author_replies=[reply_d_full, reply_u_full])
+    assert resolved_d_key in plan_b3.consumed_reply_keys
+    assert plan_b3.author_replies == (reply_u_full,)
+
+    cand_b3 = _candidates([f_d_imp, f_u], round_number=3, head_sha=HEAD_3, history=(eb1, eb2))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_b3,
+                [
+                    {"finding_id": f_d_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "复用42"},
+                    {"finding_id": f_u.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "U 解除"},
+                ],
+            ),
+            cand_b3,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d_full, reply_u_full],
+        )
+    cand_b3_u = _candidates([f_u], round_number=3, head_sha=HEAD_3, history=(eb1, eb2))
+    ver_b3_u = parse_verifier_output(
+        _verifier_payload(
+            cand_b3_u,
+            [{"finding_id": f_u.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "U 合法解除"}],
+        ),
+        cand_b3_u,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d_full, reply_u_full],
+    )
+    assert evaluate_round(ver_b3_u).outcome is RoundOutcome.PASS
+
+
+def test_r38_reattribution_does_not_pollute_unrelated_canonical_x() -> None:
+    """R38 同族边界 4：R1 D->A + comment:42:resolved:<A> -> R2 改判 D->X（A=confirmed、X=confirmed）不得污染 X。"""
+    f_a = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_re_a.py",
+        line=10,
+        category="R38重归因A",
+        failure_scenario="r38_re_a.py:10 旧规范 A",
+        source_models=("gpt-6-astra",),
+    )
+    f_d = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_re_d.py",
+        line=20,
+        category="R38重归因D",
+        failure_scenario="r38_re_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_x_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_re_x.py",
+        line=30,
+        category="R38重归因X",
+        failure_scenario="r38_re_x.py:30 独立新规范 X",
+        source_models=("gpt-6-astra",),
+    )
+    f_x_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_re_x.py",
+        line=30,
+        category="R38重归因X",
+        failure_scenario="r38_re_x.py:30 独立新规范 X",
+        source_models=("gpt-6-astra",),
+    )
+    f_i = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_re_i.py",
+        line=5,
+        category="R38重归因I",
+        failure_scenario="r38_re_i.py:5 阻断 I",
+        source_models=("gpt-6-astra",),
+    )
+    resolved_a_key = f"comment:42:resolved:{f_a.finding_id}"
+    resolved_x_key = f"comment:42:resolved:{f_x_nit.finding_id}"
+    resolved_d_key = f"comment:42:resolved:{f_d.finding_id}"
+
+    # R1: D->A + comment:42:resolved:<A>，I 阻断
+    cand_r1 = _candidates([f_a, f_d, f_i], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 A 成立"},
+                {
+                    "finding_id": f_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "R1 D 折入 A",
+                },
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 I 成立"},
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+
+    # R2: D->X、X=confirmed、A=confirmed、I=confirmed；不得把 comment:42:resolved:<X> 写入消费集合
+    cand_r2 = _candidates([f_a, f_d, f_x_nit, f_i], round_number=2, head_sha=HEAD_2, history=(e1,))
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 A 仍成立"},
+                {
+                    "finding_id": f_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_x_nit.finding_id,
+                    "verifier_evidence": "R2 D 改判折入 X",
+                },
+                {"finding_id": f_x_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 X 成立"},
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 I 仍成立"},
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2 = evaluate_round(ver_r2)
+    assert dec_r2.duplicate_aliases == ((f_d.finding_id, f_x_nit.finding_id),)
+    assert resolved_x_key not in dec_r2.consumed_reply_keys
+    assert resolved_d_key not in dec_r2.consumed_reply_keys
+    e2 = dec_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_r2))
+
+    # R3: X 升为 Important，I 修复，评论 42 全长 X 仍可合法解除 X 得 PASS
+    reply_x_full = AuthorReply(f_x_imp.finding_id, None, None, "按设计不修 X", "42", "alice")
+    plan_r3 = plan_next_round(BASE_SHA, HEAD_3, (e1, e2), author_replies=[reply_x_full])
+    assert resolved_x_key not in plan_r3.consumed_reply_keys
+    assert plan_r3.author_replies == (reply_x_full,)
+
+    cand_r3 = _candidates([f_x_imp], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    ver_r3 = parse_verifier_output(
+        _verifier_payload(
+            cand_r3,
+            [
+                {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                {"finding_id": f_x_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "合法不修 X"},
+            ],
+        ),
+        cand_r3,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_x_full],
+    )
+    dec_r3 = evaluate_round(ver_r3)
+    assert dec_r3.outcome is RoundOutcome.PASS
+
+
+def test_r38_tamper_resistance_and_handcrafted_history_missing_migrated_key_rejected() -> None:
+    """R38 防御闭环：replace 清空 R2 迁移消费键必拒，手造漏写迁移键的历史链在 _validate_history_chain 与回放入口均必拒复用评论 42。"""
+    f_a = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_tamper_a.py",
+        line=10,
+        category="R38防篡改A",
+        failure_scenario="r38_tamper_a.py:10 旧规范 A",
+        source_models=("gpt-6-astra",),
+    )
+    f_d_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r38_tamper_d.py",
+        line=20,
+        category="R38防篡改D",
+        failure_scenario="r38_tamper_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_d_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_tamper_d.py",
+        line=20,
+        category="R38防篡改D",
+        failure_scenario="r38_tamper_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_i = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_tamper_i.py",
+        line=5,
+        category="R38防篡改I",
+        failure_scenario="r38_tamper_i.py:5 阻断 I",
+        source_models=("gpt-6-astra",),
+    )
+    resolved_a_key = f"comment:42:resolved:{f_a.finding_id}"
+    resolved_d_key = f"comment:42:resolved:{f_d_nit.finding_id}"
+    reply_d_full = AuthorReply(f_d_imp.finding_id, None, None, "企图复用评论 42", "42", "alice")
+
+    # 1. R1 D->A + comment:42:resolved:<A>，R2 A->D，dataclasses.replace 清空 R2 consumed_reply_keys 必拒
+    cand_r1 = _candidates([f_a, f_d_nit, f_i], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 A 成立"},
+                {
+                    "finding_id": f_d_nit.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "R1 D 折入 A",
+                },
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 I 成立"},
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+
+    cand_r2 = _candidates([f_a, f_d_nit, f_i], round_number=2, head_sha=HEAD_2, history=(e1,))
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {
+                    "finding_id": f_a.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_d_nit.finding_id,
+                    "verifier_evidence": "R2 A 折入 D",
+                },
+                {"finding_id": f_d_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 D 成立"},
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 I 成立"},
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2 = evaluate_round(ver_r2)
+    assert resolved_d_key in dec_r2.consumed_reply_keys
+    with pytest.raises(ConvergenceError):
+        dataclasses.replace(dec_r2, consumed_reply_keys=frozenset())
+
+    # 2. 手造 R2 历史条目漏写 comment:42:resolved:<D>：
+    #    (a) plan_next_round 与 parse_verifier_output 回放兜底仍过滤并拒绝评论 42 解除 D
+    e2_missing = RoundHistoryEntry(
+        round_number=2,
+        head_sha=HEAD_2,
+        posted_fingerprints=e1.posted_fingerprints,
+        unresolved_important=e1.unresolved_important,
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"hc-r2-1", "hc-r2-2"}),
+        consumed_reply_keys=frozenset(),
+        duplicate_aliases=((f_a.finding_id, f_d_nit.finding_id),),
+        posted_important_fingerprints=frozenset({f_i.finding_id}),
+    )
+    plan_r3_hc = plan_next_round(BASE_SHA, HEAD_3, (e1, e2_missing), author_replies=[reply_d_full])
+    assert resolved_d_key in plan_r3_hc.consumed_reply_keys
+    assert plan_r3_hc.author_replies == ()
+
+    cand_r3_hc = _candidates([f_d_imp], round_number=3, head_sha=HEAD_3, history=(e1, e2_missing))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r3_hc,
+                [
+                    {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                    {"finding_id": f_d_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "复用42"},
+                ],
+            ),
+            cand_r3_hc,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d_full],
+        )
+
+    #    (b) 手造 R3 历史条目声称用旧评论 42 解除 D，在 _validate_history_chain（经 plan_next_round/build_round_candidates）必抛 ConvergenceError
+    e3_forged_wontfix = RoundHistoryEntry(
+        round_number=3,
+        head_sha=HEAD_3,
+        posted_fingerprints=frozenset(),
+        unresolved_important=(),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"hc-r3-1", "hc-r3-2"}),
+        resolved_fingerprints=frozenset({f_i.finding_id, f_d_imp.finding_id}),
+        consumed_reply_keys=frozenset({resolved_d_key}),
+        outcome=RoundOutcome.PASS,
+    )
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_4, (e1, e2_missing, e3_forged_wontfix))
+    with pytest.raises(ConvergenceError):
+        _candidates([], round_number=4, head_sha=HEAD_4, history=(e1, e2_missing, e3_forged_wontfix))
+
+    # 3. 清除路径手造漏写迁移键：R1 D->A(A Important) + comment:42:resolved:<A>，R2 A=fix 漏写 resolved:<D>，R3 用评论 42 解除 D 必拒
+    f_a_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r38_tamper_a.py",
+        line=10,
+        category="R38防篡改A",
+        failure_scenario="r38_tamper_a.py:10 旧规范 A",
+        source_models=("gpt-6-astra",),
+    )
+    e1_clr = RoundHistoryEntry(
+        round_number=1,
+        head_sha=HEAD_1,
+        posted_fingerprints=frozenset({f_a_imp.finding_id}),
+        unresolved_important=(f_a_imp,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"hc-clr-r1-1", "hc-clr-r1-2"}),
+        consumed_reply_keys=frozenset({resolved_a_key}),
+        duplicate_aliases=((f_d_nit.finding_id, f_a_imp.finding_id),),
+        posted_important_fingerprints=frozenset({f_a_imp.finding_id}),
+    )
+    e2_clr_missing = RoundHistoryEntry(
+        round_number=2,
+        head_sha=HEAD_2,
+        posted_fingerprints=frozenset(),
+        unresolved_important=(),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"hc-clr-r2-1", "hc-clr-r2-2"}),
+        resolved_fingerprints=frozenset({f_a_imp.finding_id}),
+        consumed_reply_keys=frozenset(),
+        outcome=RoundOutcome.PASS,
+    )
+    e3_clr_forged = RoundHistoryEntry(
+        round_number=3,
+        head_sha=HEAD_3,
+        posted_fingerprints=frozenset(),
+        unresolved_important=(),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"hc-clr-r3-1", "hc-clr-r3-2"}),
+        resolved_fingerprints=frozenset({f_d_imp.finding_id}),
+        consumed_reply_keys=frozenset({resolved_d_key}),
+        outcome=RoundOutcome.PASS,
+    )
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_4, (e1_clr, e2_clr_missing, e3_clr_forged))
+    with pytest.raises(ConvergenceError):
+        _candidates([], round_number=4, head_sha=HEAD_4, history=(e1_clr, e2_clr_missing, e3_clr_forged))
