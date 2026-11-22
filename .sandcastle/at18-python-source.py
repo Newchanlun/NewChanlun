@@ -104,22 +104,29 @@ def statements(body):
                 yield from statements(case.body)
 
 
-def export_names(namespace):
-    if "__all__" not in namespace:
-        return [name for name in namespace if not name.startswith("_")]
-    # CPython 的 import * 用整数下标读到 IndexError，不调用 __iter__。
-    exports = namespace["__all__"]
-    names = []
+def export_values(loaded):
+    try:
+        exports = getattr(loaded, "__all__")
+    except AttributeError:
+        return False, [value for name, value in vars(loaded).items() if not name.startswith("_")]
+    except BaseException:
+        return True, []
+    # 像 CPython 的 import * 一样，逐项读取整数下标并解析属性。
+    # 必须先验证整张清单，调用者才可用其中任何一个成员作证。
+    values = []
     for i in count():
         try:
             name = exports[i]
         except IndexError:
-            return names
-        except (Exception, SystemExit):
-            return []
+            return True, values
+        except BaseException:
+            return True, []
         if not isinstance(name, str):
-            return []
-        names.append(str.__str__(name))
+            return True, []
+        try:
+            values.append(getattr(loaded, name))
+        except BaseException:
+            return True, []
 
 
 class Exports:
@@ -139,14 +146,13 @@ class Exports:
         self.methods = {c for c in codes if (c.co_firstlineno, c.co_name) in methods}
         self.codes = self.functions | self.methods
 
-    def members(self, namespace):
-        explicit = "__all__" in namespace
-        for name in export_names(namespace):
-            value = namespace.get(name)
+    def members(self, loaded):
+        explicit, values = export_values(loaded)
+        for value in values:
             if type(value) is FunctionType and value.__code__ in self.functions:
                 if explicit or not value.__code__.co_name.startswith("_"):
                     yield None, value
-            elif isinstance(value, type) and value.__module__ == namespace.get("__name__"):
+            elif isinstance(value, type) and value.__module__ == vars(loaded).get("__name__"):
                 if not explicit and value.__name__.startswith("_"):
                     continue
                 for name, member in vars(value).items():
@@ -160,8 +166,11 @@ class Exports:
         code = frame.f_code
         if code.co_filename != self.path or code not in self.codes:
             return False
+        loaded = sys.modules.get(frame.f_globals.get("__name__"))
+        if not inspect.ismodule(loaded) or vars(loaded) is not frame.f_globals:
+            return False
         return any((member.__func__ if type(member) in (staticmethod, classmethod) else member).__code__ is code
-                   for _, member in self.members(frame.f_globals))
+                   for _, member in self.members(loaded))
 
     def initialized(self, frame):
         while frame is not None:
@@ -418,7 +427,7 @@ def public_probe(integration, production, targets, test_entered_codes, samples):
         return False
 
     instances = {}
-    for owner, member in production.members(vars(loaded)):
+    for owner, member in production.members(loaded):
         try:
             if owner is None:
                 fn = member

@@ -1189,6 +1189,50 @@ test("R15–R16/#1319：Python 公开承接、初始化排除与显式等待", {
   }
 });
 
+test("R17/#1319：按运行时属性解析整张 Python 导出清单", { timeout: 60_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const production = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const route = "def route(events):\n    return list(events)\n";
+  const wire = "from .at18_fixture_feed import route\ndef select_feed(events):\n    return route(events)\n";
+  const registered = (mod: string, name: string) =>
+    `from ${mod} import ${name}\ndef test_route():\n    assert ${name}([1, 2]) == [1, 2]\n`;
+  const through = registered("trading_system", "select_feed");
+  const direct = registered("trading_system.at18_fixture_feed", "route");
+  const dynamic = (name: string) => `def __getattr__(name):
+    if name == "__all__":
+        return ["${name}"]
+    raise AttributeError(name)
+`;
+  const lazy = (name: string) => `__all__ = ["${name}"]
+def __getattr__(name):
+    if name == "${name}":
+        return _${name}
+    raise AttributeError(name)
+`;
+  for (const [name, replacement, integration, testCode, accepts] of [
+    ["承接的动态 __all__ 隐藏 route", route + dynamic("preview") + "preview = 1\n", wire, through, false],
+    ["动态 __all__ 显式导出 _route", route.replace("def route", "def _route") + dynamic("_route"),
+      wire.replace("import route", "import _route as route"), through, true],
+    ["惰性别名指向承接文件的函数", route.replace("def route", "def _route") + lazy("route"), wire, through, true],
+    ["承接清单后续缺项否决已解析的 route", route + "__all__ = ['route', 'missing']\n", wire, through, false],
+    ["生产的动态 __all__ 隐藏 select_feed", route, wire + dynamic("preview") + "preview = 1\n", through, false],
+    ["生产的动态 __all__ 导出私有入口", route,
+      wire.replace("def select_feed", "def _select_feed") + dynamic("_select_feed"), direct, true],
+    ["惰性生产入口可被独立探针调用", route,
+      wire.replace("def select_feed", "def _select_feed") + lazy("select_feed"), direct, true],
+    ["生产清单后续缺项同时否决测试路径与探针", route,
+      wire + "__all__ = ['select_feed', 'missing']\n", through, false],
+    ["读取动态清单的非 AttributeError 不触发默认导出", route,
+      wire + "def __getattr__(name):\n    raise RuntimeError(name)\n", through, false],
+    ["解析清单成员的非 AttributeError 否决整张清单", route +
+      "__all__ = ['route', 'missing']\ndef __getattr__(name):\n    raise RuntimeError(name)\n", wire, through, false],
+  ] as const) await t.test(name, () => {
+    const repository = feedSource({ [entry]: replacement, [production]: integration, [path]: testCode });
+    assert.equal(pythonReplacement(repository, G0, entry, production, path, "test_route", 1), accepts);
+  });
+});
+
 test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
   const f = makeFixture({ feedIntegration: `from .at18_fixture_feed import route
 def select_feed(sources, events):
