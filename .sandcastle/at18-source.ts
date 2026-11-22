@@ -3,7 +3,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { gitEnvironment } from "./git-environment.ts";
 import { deliveryManifestSchema, type DeliveryManifest } from "./delivery-bundle.ts";
-import { at18GitHub, type At18GitHub } from "./at18-github.ts";
+import { at18GitHub, isRow, type At18GitHub } from "./at18-github.ts";
 import {
   At18BootstrapError, byteSha256, canonicalizeJcs, deriveJson, externalPath, parseJsonObject, repoPath, sha,
   type ArtifactRef, type FailedCheck,
@@ -211,7 +211,7 @@ export function valueAt(value: unknown, pointer: string): unknown {
   for (const token of pointer.slice(1).split("/").map(t => t.replaceAll("~1", "/").replaceAll("~0", "~"))) {
     if (value === null || typeof value !== "object" || (Array.isArray(value) && !/^(0|[1-9][0-9]*)$/.test(token)) ||
         !Object.hasOwn(value, token)) return undefined;
-    value = (value as Record<string, unknown>)[token];
+    value = Array.isArray(value) ? value[Number(token)] : isRow(value) ? value[token] : undefined;
   }
   return value;
 }

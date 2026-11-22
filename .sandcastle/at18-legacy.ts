@@ -1,17 +1,29 @@
 import { z } from "zod";
+import { findAt14 } from "./at18-at14.ts";
+import { authorizedHeavyRetirement, measuredHeavy } from "./at18-heavy.ts";
 import { type Adapter, typed } from "./at18-contract.ts";
 import { type Bindings, type Slice, unique } from "./at18-coverage.ts";
-import { byteSha256, canonicalizeJcs, computeContentHash, digest, dispositions, heavy, integer, legacyTickets, parseJsonObject,
+import { byteSha256, dispositions, heavy, legacyTickets, parseJsonObject,
   repoPath, sha, text, type ArtifactRef, type At18Report } from "./at18-format.ts";
 import { type External } from "./at18-evidence.ts";
-import { object, type Row } from "./at18-github.ts";
-import { type Tracker, utcBefore } from "./at18-integrations.ts";
+import { type Row } from "./at18-github.ts";
+import { type ReviewRef, type Tracker } from "./at18-integrations.ts";
 import { type At18Repository, type Diagnostics, repoRef, refs, sorted, valueAt } from "./at18-source.ts";
 
-export const AT14_LOCKS = ["dual_run_determinism_h1", "recovery_after_kill_h2", "seek_no_future_leak_h3", "asknown_evidence_segregation_h4"];
-const AT14_FACES = ["s_structure_snapshot", "b_chong_ledgers", "e_responsibility", "orders_and_fills", "physical_positions", "external_effect_journal"];
-const W = ["ES", "GC", "CL", "ZN", "6E", "BRN", "DX"];
-const AT14 = /^\.chanlun\/review-results\/issue1304-at14-[0-9]{8}-[0-9a-f]{7,40}\/at14-report\.json$/;
+// #1319 的 884568065c 收口记录（SPEC 旧票处置档）给出两项候选；
+// #1351 受影响代码清单及 F 的 Git 树给出同一能力的留存 feed / HL wire。
+export const feedWirePaths = {
+  feed: ["rust/src/theta_v0/live/feed.rs", "trading_system/data/feed_abstraction.py"],
+  wire: ["rust/src/theta_v0/live/exec.rs", "trading_system/live/hl_verify_sdk.py", "trading_system/live/hl_verify_nautilus.py"],
+};
+const feedWireRow = z.discriminatedUnion("disposition", [
+  z.strictObject({ path: repoPath, disposition: z.literal("INCORPORATED"), replacement: repoPath, basis: repoPath, anchor: sha }),
+  z.strictObject({ path: repoPath, disposition: z.literal("RETIRED"), basis: repoPath, anchor: sha }),
+]);
+const feedWireInventory = z.strictObject({ schema_version: z.literal("feed-wire-inventory/1"), head: sha, entries: z.array(feedWireRow) });
+const feedWireDecision = z.strictObject({ schema_version: z.literal("feed-wire-disposition/1"),
+  ticket: z.literal(1319), dispositions: z.array(z.strictObject({ path: repoPath, replacement: repoPath.nullable(), rationale: text })).min(1) });
+
 const closeoutEntity = z.object({ schema_version: text, head: sha });
 const inventoryRow = z.strictObject({ path: repoPath, disposition: z.enum(["FROZEN", "INCORPORATED", "RETIRED"]),
   replacement: repoPath.nullable() });
@@ -26,8 +38,10 @@ const legacyAtoms = new Map<number, string[]>([
 ]);
 
 export async function legacyDispositions(s: At18Repository, F: string, adapter: Adapter | undefined, tracker: Tracker,
-  pureGraph: boolean, tb: Map<Slice, boolean>, b: Bindings, groupPass: Set<string>, permission: boolean, external: External[], used: Set<External>, diag: Diagnostics) {
+  pureGraph: boolean, tb: Map<Slice, boolean>, b: Bindings, groupPass: Set<string>, permission: boolean, external: External[], used: Set<External>,
+  reviewed: ReadonlyMap<string, Row>, reviews: ReviewRef[], diag: Diagnostics) {
   const atoms = new Map<number, Set<string>>();
+  const inGraph = new Map<number, boolean>();
   const knownSources = new Map<string, Promise<{ value: unknown; ref: ArtifactRef | null } | undefined>>();
   async function rawSource(name: string) {
     const rule = adapter?.legacy_sources[name];
@@ -53,6 +67,7 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
     if (!knownSources.has(name)) knownSources.set(name, rawSource(name));
     return knownSources.get(name)!;
   }
+  const at14 = findAt14(s, F, b, groupPass, reviews, diag);
   const list = await Promise.all(legacyTickets.map(async (ticket, index): Promise<At18Report["legacy_dispositions"][number]> => {
     const original = await tracker.issue(ticket);
     const scope = "ticket:" + ticket;
@@ -82,7 +97,7 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
       used.add(first);
       return first.json;
     }
-    function inventoryProof(entity: string, tickets: number[], requiredPaths: string[] = []) {
+    function inventoryProof(entity: string, tickets: number[], requiredPaths: string[]) {
       const record = pinExt(entity, tickets);
       const result = inventory.safeParse(record);
       if (!result.success || !unique(result.data.entries.map(r => r.path))) return { ok: false, deleted: false };
@@ -96,64 +111,39 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
       });
       return { ok, deleted };
     }
-    function liveAt14() {
-      if (ticket !== 1304 && ticket !== 1320) return false;
-      const tb07 = [...b.activeByCheck].filter(([, uses]) => [...uses.values()].some(use => use.key.slice === "TB-07"));
-      if (!AT14_LOCKS.every(name => tb07.some(([id]) => {
-        const check = b.checks.get(id);
-        if (!check || check.expected_count !== 1 || check.runner === "command" ||
-           check.evidence_class !== "simulation" || !groupPass.has(check.group)) return false;
-        const selector = check.selector.split("/").at(-1);
-        return selector === name || selector?.endsWith("::" + name);
-      }))) return false;
-      try {
-        const candidates: { ref: ArtifactRef; data: Row }[] = [];
-        for (const path of s.tree(F).keys()) {
-          if (!AT14.test(path)) continue;
-          const bytes = s.blob(F, path);
-          const record = parseJsonObject(bytes);
-          if (record.schema_version !== "at14-report/1" || record.content_hash !== computeContentHash(record) ||
-              !sha.safeParse(valueAt(record, "/build_fingerprint/commit")).success || valueAt(record, "/session/evidence_class") !== "simulation") continue;
-          const builtAt = sha.parse(valueAt(record, "/build_fingerprint/commit"));
-          if (!s.ancestor(builtAt, F) || s.changed(builtAt, F).some(p => !p.startsWith(path.slice(0, path.lastIndexOf("/") + 1)))) continue;
-          candidates.push({ ref: repoRef(F, path, bytes, "AT14_REPORT"), data: record });
+    function feedWireProof(record: Row | undefined) {
+      const data = feedWireInventory.parse(record);
+      const paths = [...feedWirePaths.feed, ...feedWirePaths.wire];
+      if (!unique(data.entries.map(e => e.path)) || data.entries.length !== paths.length ||
+          paths.some(path => !data.entries.some(row => row.path === path))) return false;
+      const current = s.tree(F);
+      for (const row of data.entries) {
+        const pr = reviewed.get(row.anchor);
+        if (!pr || !s.ancestor(row.anchor, F)) return false;
+        const parent = s.string("rev-parse", row.anchor + "^1");
+        const changed = s.changed(parent, row.anchor);
+        if (!changed.includes(row.basis)) return false;
+        const decision = s.blob(row.anchor, row.basis);
+        const ruling = feedWireDecision.parse(parseJsonObject(decision));
+        if (!decision.equals(s.blob(F, row.basis)) || !unique(ruling.dispositions.map(r => r.path)) ||
+            !ruling.dispositions.some(r => r.path === row.path &&
+              r.replacement === (row.disposition === "RETIRED" ? null : row.replacement))) return false;
+        refsFound.push(repoRef(row.anchor, row.basis, decision, "LEGACY_SOURCE"));
+        if (row.disposition === "RETIRED") {
+          if (current.has(row.path)) return false;
+        } else {
+          if (!changed.includes(row.replacement) || !/^(?:rust|trading_system)\/.+\.(?:rs|py)$/.test(row.replacement)) return false;
+          const source = s.blob(F, row.replacement);
+          if (!source.length || !source.equals(s.blob(row.anchor, row.replacement))) return false;
+          refsFound.push(repoRef(row.anchor, row.replacement, source, "LEGACY_SOURCE"));
         }
-        if (candidates.length !== 1) return false;
-        const { ref, data } = candidates[0];
-        refsFound.push(ref);
-        const session = object(data.session);
-        const profile = object(session.profile_echo);
-        const manifest = object(session.manifest_echo);
-        const actual = object(data.actual_load);
-        const range = object(actual.input_range);
-        const faces = object(data.six_faces);
-        const clock = valueAt(profile, "/clock/kind");
-        const hasSixDomains = ["structure", "funding", "model", "initial_positions", "scenario_contract", "clock"]
-          .every(name => Object.hasOwn(profile, name));
-        return valueAt(data, "/verdict/kind") === "PASS" && hasSixDomains &&
-          session.manifest_revision === "production-session-manifest/1" && manifest.manifest_revision === session.manifest_revision &&
-          manifest.profile === "simulation" && session.profile_revision === "history-input-profile/1" &&
-          profile.schema_revision === session.profile_revision && profile.evidence_class === "simulation" &&
-          clock === "logical-bar/1" && session.clock_kind === clock && text.safeParse(session.scheduler).success &&
-          session.manifest_hash === byteSha256(Buffer.from(canonicalizeJcs(manifest))) &&
-          session.profile_hash === byteSha256(Buffer.from(canonicalizeJcs(profile))) &&
-          valueAt(data, "/dual_run_tuple/input_profile_hash") === session.profile_hash &&
-          digest.safeParse(valueAt(data, "/build_fingerprint/lockfile_hash")).success &&
-          digest.safeParse(data.capability_manifest_hash).success &&
-          integer.safeParse(actual.bar_count).success && integer.safeParse(actual.checkpoint_count).success &&
-          Array.isArray(range.symbols) && range.symbols.length > 0 && utcBefore(range.from, range.to) &&
-          Array.isArray(data.fault_schedule) && data.fault_schedule.length > 0 &&
-          Array.isArray(data.schedule_trace) && data.schedule_trace.length > 0 &&
-          ["h1", "h2", "h3", "h4"].every((lock, index) => {
-            const rec = object(data[lock]);
-            return rec.test_name === AT14_LOCKS[index] && rec.result === "PASS" &&
-              rec.diff_count === 0 && typeof rec.diff_summary === "string";
-          }) && Object.keys(faces).length === AT14_FACES.length && AT14_FACES.every(face => {
-            const row = object(faces[face]);
-            return integer.safeParse(row.row_count).success && row.diff_count === 0;
-          }) && Array.isArray(data.unexecuted) && data.unexecuted.length === 0 &&
-          ["model_order_unspecified_count", "diagnostic_not_production_count", "input_source_unavailable_count"].every(k => data[k] === 0);
-      } catch { return false; }
+      }
+      return true;
+    }
+    async function liveAt14() {
+      const proof = await at14;
+      refsFound.push(...proof);
+      return !!proof.length;
     }
     let entry: { ok: boolean; deleted: boolean } | undefined;
     if (ticket === 1096) {
@@ -175,41 +165,38 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
             /^- \[x\] #1096 rec_t_strategy/m.test(execution.data.body);
         }
         if (atom === "ISSUE_1304_REPLAY" || atom === "ISSUE_1320_FULL_REPLAY") {
-          good &&= liveAt14();
+          good &&= await liveAt14();
         }
-        if (["ISSUE_1304_RECOVERY", "ISSUE_1304_AS_KNOWN", "ISSUE_1304_STATE_PARITY", "ISSUE_1304_AT14"].includes(atom)) good &&= liveAt14();
-        if (atom === "ISSUE_1319_FEED_WIRE") good &&= inventoryProof("feed-wire-inventory/1", [1367, 1319]).ok;
+        if (["ISSUE_1304_RECOVERY", "ISSUE_1304_AS_KNOWN", "ISSUE_1304_STATE_PARITY", "ISSUE_1304_AT14"].includes(atom)) good &&= await liveAt14();
+        if (atom === "ISSUE_1319_FEED_WIRE") good &&= feedWireProof(pinExt("feed-wire-inventory/1", [1367, 1319]));
         if (atom === "ISSUE_1319_SEND_ISOLATION") good &&= permission;
       } catch { good = false; }
       if (!good) fail(atom);
     }
+    // 图内只读重测分支之前的完整程序回放等前因子。
+    if (ticket === 1304 || ticket === 1320) inGraph.set(ticket, valid);
     if (ticket === 1320) {
-      const measured = pinExt("at18-heavy-measurement/1", [1320]);
-      let completed = false;
-      if (measured && Array.isArray(measured.symbols)) {
-        try {
-          const all = measured.symbols.map(object);
-          completed = all.length === W.length && unique(all.map(r => r.symbol)) &&
-            W.every(symbol => all.some(r => r.symbol === symbol && r.interval === "1min" && r.years === 10 &&
-              digest.safeParse(r.result_sha256).success && integer.safeParse(r.bars).success &&
-              external.some(item => {
-                if (item.ref.ticket !== 1320 || item.ref.sha256 !== r.result_sha256 ||
-                    item.json.schema_version !== "at18-heavy-symbol-result/1" || item.json.symbol !== symbol ||
-                    item.json.interval !== "1min" || item.json.years !== 10 ||
-                    item.json.head !== F || item.json.bars !== r.bars || !Array.isArray(item.json.trials) ||
-                    !item.json.trials.length || !Array.isArray(item.json.controls) || item.json.controls.length !== 2) return false;
-                used.add(item);
-                refsFound.push({ ...item.ref, bounded_scope: "AT18:LEGACY_SOURCE" });
-                return true;
-              }))) && measured.design === "FROZEN_PREREGISTERED_DUAL_CONTROLS";
-        } catch { /* 无合法完成实体则继续保留 OPEN。 */ }
-      }
-      if (!completed) {
+      const windows = (await source("prereg_windows"))?.value;
+      const measured = measuredHeavy(s, F, external, reviewed, Buffer.isBuffer(windows) ? windows : undefined);
+      const retired = measured ? undefined : await authorizedHeavyRetirement(s, F, external, reviewed, tracker, diag);
+      if (measured) {
+        refsFound.push(measured.preregistration);
+        for (const item of measured.used) {
+          used.add(item);
+          refsFound.push({ ...item.ref, bounded_scope: "AT18:LEGACY_SOURCE" });
+        }
+      } else if (retired) {
+        used.add(retired.used);
+        refsFound.push(retired.ruling, { ...retired.used.ref, bounded_scope: "AT18:LEGACY_SOURCE" });
+      } else {
         remaining.add(heavy);
         if (original.state !== "OPEN") fail(heavy);
       }
     }
-    if (ticket === 1304 && original.state === "CLOSED" && (!stateOk || remaining.size)) fail();
+    if (ticket === 1304 && original.state === "CLOSED" && (!stateOk || remaining.size)) {
+      fail();
+      inGraph.set(ticket, false);
+    }
     if (ticket === 1279) {
       const known = adapter?.issue_1279.release_disposition.known_historical_comments ?? [];
       const sourceIds = new Set(known.map(n => {
@@ -232,7 +219,7 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
       remaining_obligations: sorted(remaining), disposition_valid: valid };
   }));
   const keepOpen = list.find(row => row.ticket === 1279)!;
-  if (list.some(row => (row.ticket === 1304 || row.ticket === 1320) && !row.disposition_valid)) {
+  if (![1304, 1320].every(ticket => inGraph.get(ticket) === true)) {
     keepOpen.disposition_valid = false;
     diag.add("LEGACY_DISPOSITION", "ticket:1279");
   }

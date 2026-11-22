@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { censusSchema, type Landing, type Registry } from "./at18-contract.ts";
-import { byteSha256, canonicalizeJcs, historicalDeviation, integer, parseJsonObject, sha, text, workflows } from "./at18-format.ts";
+import { byteSha256, canonicalizeJcs, historicalDeviation, integer, parseJsonObject, sha, tbId, text, workflows } from "./at18-format.ts";
 import { mainPr, ciConclusion, Tracker } from "./at18-integrations.ts";
 import { object, type Row } from "./at18-github.ts";
 import {
@@ -8,7 +10,22 @@ import {
 } from "./at18-source.ts";
 import { unique, type Bindings } from "./at18-coverage.ts";
 
-const historyRow = z.object({ commit: sha, parents: z.array(sha), epoch: z.int(), subject: z.string(), body: z.string() });
+const historyRow = z.object({ commit: sha, parent: sha.nullable(), epoch: z.int(), subject: z.string() });
+type GitHistoryRow = z.infer<typeof historyRow> & { parents: string[]; body: string };
+
+export function verifyPregateHistory(s: At18Repository, bytes: Buffer): GitHistoryRow[] {
+  const published = utf8(bytes).trimEnd().split("\n").map(row => historyRow.parse(parseJsonObject(Buffer.from(row))));
+  const physical = s.chain(P0);
+  const fields = utf8(s.git("log", "-z", "--first-parent", "--format=%H%x00%P%x00%ct%x00%s%x00%b", P0)).split("\0");
+  if (published.length !== physical.length || fields.length !== 5 * physical.length + 1) throw new Error("full history");
+  return published.map((h, i) => {
+    const [commit, parentList, epoch, subject, body] = fields.slice(i * 5, i * 5 + 5);
+    const parents = parentList.split(" ").filter(Boolean);
+    if (h.commit !== physical[i] || h.commit !== commit || h.parent !== (physical[i + 1] ?? null) ||
+        h.parent !== (parents[0] ?? null) || h.epoch !== Number(epoch) || h.subject !== subject) throw new Error("nonmatching git history");
+    return { ...h, parents, body };
+  });
+}
 const native = z.object({ number: integer, parent: integer.nullable(), impl: z.boolean() });
 const relations = z.object({ issues: z.array(native), followups: z.array(integer),
   pull_requests: z.array(z.object({ number: integer, base: text, commit: sha.nullable(), merged_at: text.nullable(),
@@ -32,7 +49,11 @@ export async function replayPregate(s: At18Repository, F: string, registry: Regi
   const path = at18 + "landing-census.json";
   function requireAnchor(path: string) {
     const changedAt = s.anchor(path, chain);
-    if (!changedAt || !accepted.has(changedAt)) { fail("REVIEW_FINAL_PRODUCT", changedAt ? "commit:" + changedAt : scope); throw new Error("anchor"); }
+    if (!changedAt || !accepted.has(changedAt)) {
+      fail("REVIEW_FINAL_PRODUCT", changedAt ? "commit:" + changedAt : "pre:" + path);
+      fail("PREGATE_REVIEW", "pre:" + path);
+      throw new Error("anchor");
+    }
   }
   try {
     requireAnchor(path);
@@ -48,14 +69,7 @@ export async function replayPregate(s: At18Repository, F: string, registry: Regi
       if (!data.length || byteSha256(data) !== row.sha256) throw new Error("census source hash");
       return [row.role, data];
     }));
-    const history = utf8(sources.history).trimEnd().split("\n").map(row => historyRow.parse(parseJsonObject(Buffer.from(row))));
-    const physical = s.chain(P0);
-    if (history.length !== physical.length || history.some((h, i) => h.commit !== physical[i] || h.parents[0] !== physical[i + 1])) throw new Error("full history");
-    const gitHistory = utf8(s.git("log", "-z", "--first-parent", "--format=%H%x00%P%x00%ct%x00%s%x00%b", P0)).split("\0");
-    if (history.some((h, i) => {
-      const [sha, parents, epoch, subject, body] = gitHistory.slice(i * 5, i * 5 + 5);
-      return h.commit !== sha || h.parents.join(" ") !== parents || h.epoch !== Number(epoch) || h.subject !== subject || h.body !== body;
-    })) throw new Error("nonmatching git history");
+    const history = verifyPregateHistory(s, sources.history);
     const byCommit = new Map(history.map(h => [h.commit, h]));
     const relation = relations.parse(parseJsonObject(sources.relations));
     const judgment = adjudication.parse(parseJsonObject(sources.adjudication));
@@ -163,7 +177,7 @@ export async function replayPregate(s: At18Repository, F: string, registry: Regi
       if (!sourceCache.has(url)) sourceCache.set(url, resolveLocator(url));
       return sourceCache.get(url)!;
     };
-    const proves = (original: Row, ticket: number, h: z.infer<typeof historyRow>, prs: number[]) => {
+    const proves = (original: Row, ticket: number, h: GitHistoryRow, prs: number[]) => {
       const material = [original.body, original.title].filter((s): s is string => typeof s === "string").join("\n");
       const t = new RegExp(`(?:#|/issues/)${ticket}(?![0-9])`);
       const originTicket = original.number === ticket || (typeof original.issue_url === "string" && original.issue_url.endsWith("/issues/" + ticket));
@@ -225,7 +239,7 @@ export async function replayPregate(s: At18Repository, F: string, registry: Regi
         if (seen.has(cursor)) throw new Error("native cycle");
         seen.add(cursor);
         if (cursor >= 1359 && cursor <= 1368) {
-          native = ("TB-" + String(cursor - 1358).padStart(2, "0")) as Landing["attribution_scopes"][number];
+          native = tbId.exclude(["TB-11"]).parse("TB-" + String(cursor - 1358).padStart(2, "0"));
           break;
         }
         if (cursor === 1323 || cursor === 1340) break;
@@ -271,6 +285,17 @@ export async function replayPregate(s: At18Repository, F: string, registry: Regi
   } catch { fail(); verified = false; }
   return { projection, ok: verified };
 }
+
+// #2132 d896e31b 的具名失败目标是分母，不允许登记册通过删掉一项缩分母。
+const historicalTargets = z.array(z.strictObject({
+  ticket: integer, run_id: integer,
+  targets: z.array(z.strictObject({ kind: z.enum(["step", "test"]), target: text, check_id: text })).min(1),
+})).parse(JSON.parse(readFileSync(resolve(__dirname, "fixtures/at18/pregate-cure-targets.json"), "utf8")));
+const cureId = (cure: Pick<Landing["cure_checks"][number], "kind" | "target" | "check_id">) =>
+  [cure.kind, cure.target, cure.check_id].join("\0");
+const historicalDenominator = new Map(historicalTargets.map(row => [
+  `${row.ticket}/${row.run_id}`, row.targets.map(cureId),
+]));
 
 const fixed = new Map([
   [1392, ["8619a20f2800095e6bb9ec20ba2607a744740f91", "m3_partition_synthetic_holds"]],
@@ -328,8 +353,13 @@ export async function historyDeviations(s: At18Repository, landings: Pick<Landin
       rows.push({ ticket: l.ticket, commit, workflow, run_id: run.id, observed: val });
       if (val === "UNKNOWN") diag.add("SOURCE_UNAVAILABLE", scope(run.id));
       if (i !== 0 || val !== "FAILURE") continue;
-      const candidates = lookup(l.ticket, commit).filter(c => c.run_id === run.id && cured(c));
-      if (!candidates.length) { fail(l.ticket, scope(run.id)); continue; }
+      const candidates = lookup(l.ticket, commit).filter(c => c.run_id === run.id);
+      const ids = new Set(candidates.map(cureId));
+      const required = historicalDenominator.get(`${l.ticket}/${run.id}`) ?? [];
+      if (!candidates.length || ids.size !== candidates.length || required.some(id => !ids.has(id)) ||
+          candidates.some(c => !cured(c))) {
+        fail(l.ticket, scope(run.id)); continue;
+      }
       const steps = candidates.filter(c => c.kind === "step");
       if (steps.length) {
         const jobs = await diag.get(scope(run.id), () => s.github.list(`actions/runs/${run.id}/jobs?per_page=100`, "jobs"));

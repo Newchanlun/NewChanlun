@@ -1,18 +1,22 @@
 import assert from "node:assert/strict";
-import { spawn, type SpawnOptions } from "node:child_process";
+import { execFileSync, spawn, type SpawnOptions } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { adapter, registrySchema } from "./at18-contract.ts";
+import { adapter, censusSchema, decodeRecord, registrySchema } from "./at18-contract.ts";
 import { canMakeFixture, makeFixture, type Mutation, type API } from "./at18-fixture.ts";
 import { artifactRefSchema, at18InputBundleSchema, at18ReportSchema, byteSha256, canonicalizeJcs, computeContentHash,
   legacyTickets, ledgerPaths, parseJsonObject, specPaths, tbTickets, workflows, type At18Report } from "./at18-format.ts";
 import { ciNames, utcBefore } from "./at18-integrations.ts";
 import { object } from "./at18-github.ts";
 import { boundedStatement } from "./at18-report.ts";
-import { At18Repository, Diagnostics, G0, valueAt } from "./at18-source.ts";
-import { keyBasis, keyDomain, keyId, readCoverage } from "./at18-coverage.ts";
+import { at18, At18Repository, Diagnostics, G0, P0, valueAt } from "./at18-source.ts";
+import { bindCoverage, keyBasis, keyDomain, keyId, readCoverage } from "./at18-coverage.ts";
+
+import { entityRefs } from "./at18-evidence.ts";
+import { verifyPregateHistory } from "./at18-pregate.ts";
+import { feedWirePaths } from "./at18-legacy.ts";
 
 const root = resolve(__dirname, "..");
 const sandbox = resolve(root, ".sandcastle");
@@ -169,6 +173,47 @@ test("正式 CLI 正控：同一 Git 图／API 原件／已登记实体得到 PA
     assert.notEqual(valueAt(parseJsonObject(data), b.basis.pointer), undefined);
   }
   passedFixture = report;
+  const evidence = join(f.dir, "evidence");
+  const producer = join(f.dir, "producer-2131");
+  mkdirSync(producer);
+  const aae = "aae6abf9234eca663fc3e59484e90f644c12899e";
+  const repository = new At18Repository(root);
+  for (const name of ["adapter.py", "common.py"]) {
+    writeFileSync(join(producer, name), repository.blob(aae, "scripts/at18/" + name));
+  }
+  writeFileSync(join(producer, "adapter-contract.json"), s.blob(f.F, at18 + "adapter-contract.json"));
+  writeFileSync(join(producer, "registry.json"), s.blob(f.F, at18 + "registry.json"));
+  const firstRecord = parseJsonObject(readFileSync(join(evidence, "tb.simulation.TB-01.json")));
+  const actualPeer = process.env.AT18_UPSTREAM_TB01;
+  const peer = join(f.dir, "peer-tb01.json");
+  writeFileSync(peer, actualPeer ? readFileSync(actualPeer) : Buffer.from(canonicalizeJcs(firstRecord.payload) + "\n"));
+  const validated = execFileSync("python3", [join(fixtureRoot, "check-producer.py"), producer, evidence, peer], {
+    env: { ...process.env, PYTHONPATH: producer, PYTHONDONTWRITEBYTECODE: "1" }, encoding: "utf8",
+  });
+  writeFileSync(join(f.dir, "producer-check.json"), validated);
+  assert.equal(report.tb_summaries.slice(0, 10).flatMap(tb => tb.entity_reports).length, 10);
+  for (const tb of report.tb_summaries.slice(0, 10)) for (const ref of tb.entity_reports) {
+    assert.equal(byteSha256(readFileSync(ref.path)), ref.sha256);
+  }
+  // Peer 的原始字节（未改身份、样本或任一个键）直接进入同一个 R07 业务校验器。
+  const contract = adapter(parseJsonObject(s.blob(f.F, at18 + "adapter-contract.json")));
+  const diag = new Diagnostics();
+  const read = (path: string) => parseJsonObject(s.blob(f.F, path));
+  const coverage = readCoverage(read(specPaths.crosswalk_ref), read(specPaths.coverage_input_ref),
+    ledgerPaths.map(read), diag, read(specPaths.spec_ref));
+  const bindings = bindCoverage(registry, coverage, s, f.F, diag);
+  const check = registry.checks.find(c => c.check_id === firstRecord.check_id)!;
+  const original = parseJsonObject(readFileSync(peer));
+  assert.ok(typeof firstRecord.record === "string");
+  const data = decodeRecord(contract, firstRecord.record, original);
+  assert.equal(entityRefs(firstRecord.record, null, [{ data, check, ref: report.tb_summaries[0].entity_reports[0] }], bindings, diag).length, 1);
+  assert.deepEqual(diag.all(), []);
+  assert.throws(() => decodeRecord(contract, "tb.simulation.TB-01", { ...original, output: { samples: [[1, 2]] } }));
+  assert.deepEqual(report.legacy_dispositions.find(r => r.ticket === 1304)?.evidence_refs.filter(r => r.bounded_scope.startsWith("AT18:AT14"))
+    .map(r => r.path.split("/").at(-1)), ["at14-report.json", "summary.md"]);
+  writeFileSync(join(f.dir, "upstream-interop.json"), JSON.stringify({
+    producerAccepted: 10, cliAccepted: 10, peerKeys: 803, peerAccepted: 1, usedSuppliedPeer: !!actualPeer,
+  }) + "\n");
 });
 test("输出 schema 拒绝多余键、错误次序、production 槽与自指 hash 篡改", {
   skip: !pathExistsGit ? "需要完整 CLI 正控" : false,
@@ -185,16 +230,20 @@ test("输出 schema 拒绝多余键、错误次序、production 槽与自指 has
   assert.equal(artifactRefSchema.safeParse({ ...report.tb_summaries[10].input_bundle, commit: G0 }).success, false);
 });
 
+function array(value: unknown): unknown[] {
+  assert.ok(Array.isArray(value));
+  return value;
+}
 function jobs(api: API, i: number, apply: (r: Record<string, unknown>) => boolean) {
   const envelope = object(api[`actions/runs/${49000 + i}/attempts/2/jobs?per_page=100`]);
-  const after = (envelope.jobs as unknown[]).map(object).filter(apply);
+  const after = array(envelope.jobs).map(object).filter(apply);
   envelope.jobs = after;
   envelope.total_count = after.length;
 }
 const conditions: [string, Mutation, string, string?][] = [
   ["CI/独评在错误产品上", { api: api => {
     const key = Object.keys(api).find(k => k.startsWith("commits/") && k.endsWith("/statuses?per_page=100"))!;
-    const first = object((api[key] as unknown[])[0]); first.creator = { login: "not-review-gate" };
+    const first = object(array(api[key])[0]); first.creator = { login: "not-review-gate" };
   } }, "REVIEW_FINAL_PRODUCT", "commit:"],
   ["TB-11 两票产品互换，两个合入仍经正式门", { api: api => {
     const report = object(api["pulls/39001"]), verifier = object(api["pulls/39002"]);
@@ -220,7 +269,7 @@ const conditions: [string, Mutation, string, string?][] = [
     api["issues/1361/sub_issues?per_page=100"] = [{ number: 34003 }];
   } }, "SUBTICKET_INCOMPLETE", "ticket:1361"],
   ["生产范围变化／任意声明不能覆盖 P2 原件", { api: api => {
-    (api["issues/1561/comments?per_page=100"] as unknown[]).push({ id: 9999999999, body: "production 已完成首次发送" });
+    array(api["issues/1561/comments?per_page=100"]).push({ id: 9999999999, body: "production 已完成首次发送" });
   } }, "PRODUCTION_SCOPE_CHANGED", "ticket:1561"],
   ["未启用结论不能从首次启用原件缺失倒推：触达与版本均齐", { enabledWithoutFirstActivation: true },
     "SPECIAL_GATE", "first_activation"],
@@ -230,7 +279,7 @@ const conditions: [string, Mutation, string, string?][] = [
       deferred_gate: "LEGACY_OE41_DEPLOYMENT", checks: [] });
   } }, "DOMAIN_INVALID", "@production@P2-"],
   ["#1279 明示提前放行", { api: api => {
-    (api["issues/1279/comments?per_page=100"] as unknown[]).push({ id: 9999999999, body: "图前置尚缺，现宣布试运行放行" });
+    array(api["issues/1279/comments?per_page=100"]).push({ id: 9999999999, body: "图前置尚缺，现宣布试运行放行" });
   } }, "LEGACY_DISPOSITION", "ticket:1279"],
   ["#942/#1282 反处分", { api: api => {
     for (const n of [942, 1282]) { const issue = object(api["issues/" + n]); issue.state = "open"; issue.state_reason = null; }
@@ -258,16 +307,15 @@ const conditions: [string, Mutation, string, string?][] = [
   } }, "CHECK_JOB_MISSING", "control.TB-10"],
   ["缺 #2133 签名不延期", { api: api => object(api["issues/comments/440000001"]).body = "不是签署" },
     "AUTH_REQUIRED", "ticket:2133"],
-  ["覆盖计数减一不能用同步截断来源过关", { crosswalk: source => { (source.rows as unknown[]).pop(); } },
+  ["覆盖计数减一不能用同步截断来源过关", { crosswalk: source => { array(source.rows).pop(); } },
     "COVERAGE_SOURCE", "/spec_coverage"],
   ["缺 R07 封印对应外部原件照常产出 FAIL", { omitRecord: record => record.record === "permission.experiment" },
     "RECORD_UNSEALED", "at18-seal permission.experiment"],
 ];
 test("R1/R2 回归：每个单点破坏均产生具名 FAIL", {
-  skip: !pathExistsGit ? "需要 G0/P0 与发布的规范 Git 对象" : false, timeout: 420_000,
+  skip: !pathExistsGit ? "需要 G0/P0 与发布的规范 Git 对象" : false, timeout: 420_000, concurrency: 2,
 }, async t => {
-  for (const [name, mutation, check, scope] of conditions) {
-    await t.test(name, { timeout: 60_000 }, async () => {
+  await Promise.all(conditions.map(([name, mutation, check, scope]) => t.test(name, { timeout: 90_000 }, async () => {
       const { report } = await control(mutation);
       reportFail(report, check, scope);
       if (name.startsWith("#942/#1282")) reportFail(report, check, "ticket:1282@ISSUE_1282_ARCHIVE");
@@ -285,8 +333,7 @@ test("R1/R2 回归：每个单点破坏均产生具名 FAIL", {
         assert.match(report.bounded_domain_statement, /^AT18_PRODUCTION_SLOT DISABLED$/m);
       }
       if (name.startsWith("缺 #2133")) assert.ok(report.permission_blocked.some(p => p.blocker_ticket === 2133));
-    });
-  }
+  })));
 });
 
 test("固定 Destination 义务实际值不可表示时 BLOCKED/FIXED_ITEM_UNAVAILABLE，不猜测并且无产物", {
@@ -303,4 +350,161 @@ test("固定 Destination 义务实际值不可表示时 BLOCKED/FIXED_ITEM_UNAVA
   assert.equal(result.code, 1, result.stderr);
   assert.equal(valueAt(parseJsonObject(Buffer.from(result.stdout)), "/diagnostics/0/code"), "FIXED_ITEM_UNAVAILABLE");
   assert.deepEqual(readdirSync(out), []);
+});
+
+test("R4/H2：真实 #2132 清册全量 2,987 行与固定 P0 第一父链逐位、按序相等", { skip: !pathExistsGit }, () => {
+  const s = new At18Repository(root), revision = "d896e31be8353a9445af46629737be6a4d6363e5";
+  const census = censusSchema.parse(parseJsonObject(s.blob(revision, at18 + "landing-census.json")));
+  const published = census.sources.find(row => row.role === "history")!;
+  const bytes = s.blob(revision, published.path);
+  assert.equal(census.p0, P0);
+  assert.equal(byteSha256(bytes), published.sha256);
+  const history = verifyPregateHistory(s, bytes);
+  assert.equal(history.length, 2987);
+  assert.deepEqual(history.map(h => h.commit), s.chain(P0));
+  assert.equal(history.at(-1)?.parent, null);
+  assert.ok(history.some(h => h.parents.length > 1 && !!h.body));
+  assert.throws(() => verifyPregateHistory(s, Buffer.from(bytes.toString().replace(/"parent": "[0-9a-f]{40}"/, '"parent": null'))));
+});
+
+const legacyRow = (report: At18Report, ticket: number) => report.legacy_dispositions.find(row => row.ticket === ticket)!;
+const close = (api: API, ticket: number) => {
+  const data = object(api["issues/" + ticket]);
+  data.state = "closed";
+  data.state_reason = "completed";
+};
+const heavy = "ISSUE_1320_HEAVY_MEASUREMENT";
+const positive = (report: At18Report) => {
+  assert.equal(report.overall_result, "PASS", JSON.stringify(report.failed_checks.slice(0, 20)));
+  assert.deepEqual(report.failed_checks, []);
+};
+const at14Fail = (report: At18Report) => {
+  reportFail(report, "LEGACY_DISPOSITION", "ticket:1304@ISSUE_1304_AT14");
+  reportFail(report, "LEGACY_DISPOSITION", "ticket:1320@ISSUE_1320_FULL_REPLAY");
+  assert.ok([1304, 1320, 1279].every(ticket => !legacyRow(report, ticket).disposition_valid));
+};
+test("R4/H3,H5,H6,H8/M2,M3：单点破坏精确落到实体、逐键、产品、授权和原件身份", {
+  skip: !pathExistsGit, timeout: 360_000, concurrency: 2,
+}, async t => {
+  const cases: [string, Mutation, (report: At18Report) => void][] = [
+    ["无关 Cargo.toml 不能销 #1319", { feedWire: () => [{ path: "rust/Cargo.toml", disposition: "FROZEN", replacement: null }] },
+      r => reportFail(r, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE")],
+    ...[...feedWirePaths.feed, ...feedWirePaths.wire].map((missing): [string, Mutation, (report: At18Report) => void] =>
+      ["缺 " + missing, { feedWire: rows => rows.filter(row => row.path !== missing) },
+        r => reportFail(r, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE")]),
+    ["十份 TB 业务实体拒绝必须红及逐键与 TB 门", { records: r => {
+      if (String(r.record).startsWith("tb.")) object(r.payload).tb_id = "TB-11";
+    } }, r => {
+      for (const tb of r.tb_summaries.slice(0, 10)) {
+        assert.equal(tb.gate_satisfied, false);
+        assert.equal(tb.entity_reports.length, 0);
+        reportFail(r, "TB_REPORT", `ticket:${tb.ticket}`);
+      }
+      assert.equal(r.spec_coverage.stories.length, 97);
+      // US-ENG-10 只有 TB-11 前置，R12 明确不读 TB-01..10 的实体。
+      assert.deepEqual(r.spec_coverage.stories.filter(row => row.status !== "FAIL").map(row => ({
+        story_id: row.story_id, closure_slice_ids: row.closure_slice_ids, status: row.status,
+      })), [{ story_id: "US-ENG-10", closure_slice_ids: ["TB-11"], status: "VERIFIED" }]);
+      for (const [rows, count] of [[r.spec_coverage.families, 345], [r.spec_coverage.details, 496]] as const) {
+        assert.equal(rows.length, count);
+        assert.ok(rows.every(row => row.status === "FAIL"));
+      }
+      reportFail(r, "RECORD_UNSEALED", "key:TB-01/");
+    }],
+    ["同一合入 PR 的两张实施票交换产品路径也必须失败", { api: api => {
+      const a = object(api["issues/33001"]), b = object(api["issues/33002"]);
+      a.body = String(a.body).replace("scripts/probe.py", "scripts/at18-fixture/control.TB-02.mjs");
+      b.body = String(b.body).replace("scripts/at18-fixture/control.TB-02.mjs", "scripts/probe.py");
+    } }, r => {
+      reportFail(r, "SUBTICKET_INCOMPLETE", "ticket:33001");
+      reportFail(r, "SUBTICKET_INCOMPLETE", "ticket:33002");
+    }],
+    ["关票语句不能代替逐票产品原件", { api: api => {
+      object(api["pulls/39001"]).body = Array.from({ length: 10 }, (_, i) => "Closes #" + (33001 + i)).join("\n");
+    } }, r => {
+      for (let n = 33001; n <= 33010; n++) reportFail(r, "SUBTICKET_INCOMPLETE", "ticket:" + n);
+    }],
+    ["#1369 提前关票记阶段失败，TB-11 前置仍按自身条件", { api: api => close(api, 1369) }, r => {
+      reportFail(r, "CLOSEOUT_STAGE", "ticket:1369");
+      assert.equal(r.tb_summaries[10].ticket_state, "CLOSED");
+      assert.equal(r.tb_summaries[10].gate_satisfied, true);
+    }],
+    ["伪有授权的前缀 job 不能给缺标签的精确 job 借权限", { api: api => {
+      const envelope = object(api["actions/runs/49003/attempts/2/jobs?per_page=100"]);
+      const records = Array.isArray(envelope.jobs) ? envelope.jobs.map(object) : [];
+      const actual = records.find(j => String(j.name).startsWith("at18 control.TB-08 "))!;
+      envelope.jobs = [{ ...actual, id: 58999, name: "at18 control.TB-08 " + "0".repeat(64) }, ...records];
+      envelope.total_count = records.length + 1;
+      actual.labels = ["ubuntu-latest"];
+    } }, r => {
+      reportFail(r, "AUTH_REQUIRED", "key:TB-08/");
+      assert.equal(r.tb_summaries[7].gate_satisfied, false);
+    }],
+    ["PRE 最近变更未获审同时登记两个失败码", { api: api => {
+      const anchor = object(object(api["pulls/39001"]).head).sha;
+      api[`commits/${anchor}/statuses?per_page=100`] = [];
+    } }, r => {
+      reportFail(r, "REVIEW_FINAL_PRODUCT", "commit:");
+      for (const path of ["registry.json", "landing-census.json", "pregate-review.json"]) reportFail(r, "PREGATE_REVIEW", "pre:" + at18 + path);
+    }],
+    ["8 字节截断 crosswalk 报解析失败但保留字节摘要", { crosswalkBytes: Buffer.from('{"schema') }, r => {
+      reportFail(r, "JSON_PARSE", "/crosswalk_ref");
+      assert.equal(r.spec_coverage.crosswalk_sha256, byteSha256(Buffer.from('{"schema')));
+    }],
+  ];
+  await Promise.all(cases.map(([name, mutation, verify]) => t.test(name, { timeout: 90_000 }, async () => verify((await control(mutation)).report))));
+});
+
+test("R4/H4：AT-14 合同缺字段、缺摘要／不一致、Node 冒充 Rust 锁均阻断三个依赖者", {
+  skip: !pathExistsGit, timeout: 360_000, concurrency: 2,
+}, async t => {
+  const fields = ["version_set", "bounded_domain_statement", "input_source", "fu14_gates", "ci_run_id", "review_binding",
+    "model_execution", "assumption_counts", "verification_source_label"];
+  const cases: [string, Mutation][] = [
+    ...fields.map((field): [string, Mutation] => ["缺 " + field, { at14: row => { delete row[field]; } }]),
+    ["缺 summary.md", { summary: "missing" }],
+    ["summary.md 结论与 JSON 不同", { summary: "inconsistent" }],
+    ["TestOnly 入口冒充正式会话", { at14: row => {
+      const session = object(row.session), manifest = object(session.manifest_echo);
+      manifest.kind = "TestOnly";
+      session.manifest_hash = byteSha256(Buffer.from(canonicalizeJcs(manifest)));
+    } }],
+    ["四个通过的具名 Node 锁冒充 Rust", { at14Node: true }],
+  ];
+  await Promise.all(cases.map(([name, mutation]) =>
+    t.test(name, { timeout: 90_000 }, async () => at14Fail((await control(mutation)).report))));
+});
+
+test("R4/H7：同一历史失败 run 的四项 cure 缺一或败一均不通行", {
+  skip: !pathExistsGit, timeout: 180_000, concurrency: 2,
+}, async t => {
+  await Promise.all((["all", "missing", "failed"] as const).map(historicalCures => t.test(historicalCures, async () => {
+    const { report } = await control({ historicalCures });
+    assert.ok(report.historical_deviations.some(row => row.ticket === 1366 && row.run_id === 39034285362 && row.observed === "FAILURE"));
+    if (historicalCures === "all") positive(report);
+    else reportFail(report, "DEVIATION_NOT_CURED", "history:1366/8d84e21e2c9e9800a22900c2d4c67878310c1ab9/ci.yml/39034285362");
+  })));
+});
+
+test("R4/H9/M1：重测、废弃及延期相互独立；图外状态不影响 #1279 / DST-06", {
+  skip: !pathExistsGit, timeout: 240_000, concurrency: 2,
+}, async t => {
+  await Promise.all((["measured", "short", "missing-control", "wrong-trial", "retired", "unapproved-retirement", undefined] as const)
+    .map(heavyCase => t.test(heavyCase ?? "未测先关 #1320", async () => {
+      const { report } = await control({ heavyCase, api: api => close(api, 1320) });
+      const disposition = legacyRow(report, 1320);
+      assert.equal(legacyRow(report, 1279).disposition_valid, true);
+      assert.equal(report.destinations[5].result, "PASS");
+      if (heavyCase === "measured" || heavyCase === "retired") {
+        positive(report);
+        assert.equal(disposition.disposition_valid, true);
+        assert.equal(report.unexecuted.some(row => row.obligation === heavy), false);
+      } else {
+        reportFail(report, "LEGACY_DISPOSITION", "ticket:1320@" + heavy);
+        assert.equal(disposition.disposition_valid, false);
+        assert.equal(report.unexecuted.find(row => row.obligation === heavy)?.required, false);
+        assert.ok(disposition.remaining_obligations.includes(heavy));
+        assert.ok(!disposition.remaining_obligations.includes("ISSUE_1320_FULL_REPLAY"));
+      }
+    })));
 });

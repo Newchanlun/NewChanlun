@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  type Adapter, type Check, decodeFields, decodeRecord, envelope, profileId,
+  type Adapter, type Check, decodeFields, decodeRecord, envelope, profileId, tbConditions, tbOutput,
 } from "./at18-contract.ts";
 import {
   basisId, type Bindings, keyBasis, keyDomain, keyId, type Gap, type Blocked, type Key, type KeyDomain, unique,
@@ -11,7 +11,7 @@ import {
 } from "./at18-format.ts";
 import { deliveryManifestSchema } from "./delivery-bundle.ts";
 import { object, rows, type Row } from "./at18-github.ts";
-import { type JobEvidence, type Tracker, jobScope, success, utcBefore, proveExternalHead } from "./at18-integrations.ts";
+import { type Job, type JobEvidence, type Tracker, jobScope, success, utcBefore, proveExternalHead } from "./at18-integrations.ts";
 import {
   artifactBytes, type At18Repository, compare, type Diagnostics, extRef, type Own,
   refs, sorted, utf8, type TreeEntry,
@@ -35,8 +35,9 @@ export class Gaps {
   notRun(obligation: string, evidence_class: Gap["evidence_class"], reason: keyof Gaps["priority"], ...tickets: number[]) {
     const old = this.entries.get(obligation);
     const blocker = Math.min(...tickets);
-    const replace = !old || !old.required || !(old.reason in this.priority) ||
-      this.priority[reason] < this.priority[old.reason as keyof Gaps["priority"]] ||
+    const previousPriority = old && Object.entries(this.priority).find(([name]) => name === old.reason)?.[1];
+    const replace = !old || !old.required || previousPriority === undefined ||
+      this.priority[reason] < previousPriority ||
       (reason === "AUTH_REQUIRED" && old.reason === reason && blocker < Number(old.blocker_or_gap.slice(7)));
     if (replace) this.entries.set(obligation, { obligation, evidence_class, reason, required: true,
       blocker_or_gap: tickets.length ? "ticket:" + blocker : reason });
@@ -97,7 +98,7 @@ export async function productionDisabled(tracker: Tracker, diag: Diagnostics) {
   return !!disabled;
 }
 export async function authorizeExperiment(adapter: Adapter | undefined, b: Bindings, tracker: Tracker, profile: string | null,
-  now: string, evidence: JobEvidence, diag: Diagnostics) {
+  now: string, checkJobs: ReadonlyMap<string, Job>, diag: Diagnostics) {
   const missing = new Map<string, number[]>();
   const groups = [...b.groups].filter(([, c]) => c[0].evidence_class === "experiment");
   const policy = adapter?.experiment_authorization;
@@ -132,8 +133,9 @@ export async function authorizeExperiment(adapter: Adapter | undefined, b: Bindi
   for (const [group] of groups) {
     const actions = policy?.group_actions[group];
     const required: number[] = [];
-    const job = evidence.runs[3]?.jobs?.find(j => j.name.startsWith("at18 " + group + " "));
-    if (!auth || !actions?.length || !Array.isArray(auth.actions) || !actions.every(a => (auth!.actions as unknown[]).includes(a)) ||
+    const job = checkJobs.get(group);
+    const allowed = auth?.actions;
+    if (!auth || !actions?.length || !Array.isArray(allowed) || !actions.every(a => allowed.includes(a)) ||
         (job && (!job.labels?.includes("self-hosted") || !job.labels?.includes(String(auth.runner_label)) || job.runner_group_name !== auth.runner_group))) required.push(2133);
     // #2131 只接 query，逐动作发送的消费者尚未启用；不能从读授权推得发送。
     if (actions?.some(a => a !== "query")) required.push(1412);
@@ -442,17 +444,19 @@ export function postGate(records: RecordEvidence[], external: External[], adapte
   if (!valid) {
     diag.add("SPECIAL_GATE", scope, refs(records.map(r => r.ref))[0]);
     if (result.status === "TRIGGERED_AND_ENABLED" || result.status === "TRIGGERED_VERSION_AUTHORIZED") {
-      for (const field of ["gate_reached_event", "parameter_version", ...(result.status === "TRIGGERED_AND_ENABLED" ? ["first_activation"] : [])] as const) {
-        if (result[field as "gate_reached_event"] === null) diag.add("SPECIAL_GATE", "/post_gate_records/experiment/" + field);
+      const fields: ("gate_reached_event" | "parameter_version" | "first_activation")[] = ["gate_reached_event", "parameter_version"];
+      if (result.status === "TRIGGERED_AND_ENABLED") fields.push("first_activation");
+      for (const field of fields) {
+        if (result[field] === null) diag.add("SPECIAL_GATE", "/post_gate_records/experiment/" + field);
       }
     }
   }
   return { result, valid };
 }
-export function entityRefs(record: string, profile: string | null, records: RecordEvidence[], b: Bindings, diag: Diagnostics) {
+export function validateTbEntities(record: string, profile: string | null, records: RecordEvidence[], b: Bindings, diag: Diagnostics) {
   const scope = slot(record, profile);
   const [, evidenceClass, slice] = record.split(".");
-  const valid: ArtifactRef[] = [];
+  const valid: { ref: ArtifactRef; checkId: string; keys: Set<string> }[] = [];
   const seen = new Set<string>();
   const expected = new Set<string>();
   for (const bindings of b.activeByCheck.values()) for (const { key, basis } of bindings.values()) {
@@ -476,21 +480,22 @@ export function entityRefs(record: string, profile: string | null, records: Reco
       const keys = rows(data.keys).map(k => keyBasis(keyId(String(k.slice_id), String(k.kind), String(k.id)),
         { path: String(k.basis_path), pointer: String(k.basis_pointer) }));
       if (!keys.length || !unique(keys) || keys.some(k => !expected.has(k) || !ownKeys.has(k))) throw new Error("keys");
-      const conditions = object(data.conditions);
-      const output = object(data.output);
-      if (Object.keys(conditions).some(k => k !== "processes") || !integer.safeParse(conditions.processes).success ||
-          Object.keys(output).some(k => k !== "samples") || !Array.isArray(output.samples) || !output.samples.length ||
-          output.samples.some(seq => !Array.isArray(seq) || !seq.length || seq.some(v => typeof v !== "number" || !Number.isFinite(v)))) throw new Error("observations");
+      tbConditions.parse(data.conditions);
+      tbOutput.parse(data.output);
       for (const k of keys) seen.add(k);
-      valid.push(ref);
+      valid.push({ ref, checkId: check.check_id, keys: new Set(keys) });
     } catch { diag.add("TB_REPORT", scope, ref); }
   }
   if (!expected.size || !valid.length || expected.size !== seen.size) { diag.add("TB_REPORT", scope); return []; }
-  return refs(valid);
+  return valid;
+}
+
+export function entityRefs(...params: Parameters<typeof validateTbEntities>) {
+  return refs(validateTbEntities(...params).map(e => e.ref));
 }
 
 export function proveDomain(d: KeyDomain, key: Key, b: Bindings, checkPass: Set<string>, executed: Set<string>, missing: Map<string, number[]>,
-  records: Map<string, RecordEvidence[]>, post: ReturnType<typeof postGate>, p2: boolean, gaps: Gaps, diag: Diagnostics) {
+  records: Map<string, RecordEvidence[]>, entities: Map<string, ReturnType<typeof validateTbEntities>>, post: ReturnType<typeof postGate>, p2: boolean, gaps: Gaps, diag: Diagnostics) {
   const { domain, basis, checkIds } = d;
   const scope = keyDomain(keyBasis(key.id, basis), domain);
   const obligation = keyDomain(key.id, domain);
@@ -513,8 +518,12 @@ export function proveDomain(d: KeyDomain, key: Key, b: Bindings, checkPass: Set<
       if (!executed.has(c.group)) gaps.notRun(obligation, domain.evidence_class, "CHECK_NOT_RUN");
       diag.add(executed.has(c.group) ? "CHECK_JOB_FAILED" : "CHECK_JOB_MISSING", scope);
       ok = false;
-    } else if (c.record && !records.get(slot(c.record, c.profile_id))?.length) {
-      diag.add("RECORD_UNSEALED", scope); ok = false;
+    } else if (c.record) {
+      const recordSlot = slot(c.record, c.profile_id);
+      const valid = c.record.startsWith("tb.")
+        ? entities.get(recordSlot)?.some(e => e.checkId === id && e.keys.has(keyBasis(key.id, basis)))
+        : records.get(recordSlot)?.some(e => e.check.check_id === id);
+      if (!valid) { diag.add("RECORD_UNSEALED", scope); ok = false; }
     }
   }
   return ok;

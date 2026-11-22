@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
+import { isRow, type Row } from "./at18-github.ts";
 
 const repoSpec = ".chanlun/review-results/issue1339-r2-spec-20260909/payload/spec";
 export const specPaths = {
@@ -13,7 +14,8 @@ export const tbTickets = {
   "TB-01": 1359, "TB-02": 1360, "TB-03": 1361, "TB-04": 1362, "TB-05": 1363,
   "TB-06": 1364, "TB-07": 1366, "TB-08": 1367, "TB-09": 1365, "TB-10": 1368, "TB-11": 1369,
 } as const;
-export const tbIds = Object.keys(tbTickets) as (keyof typeof tbTickets)[];
+const isTb = (key: string): key is keyof typeof tbTickets => Object.hasOwn(tbTickets, key);
+export const tbIds = Object.keys(tbTickets).filter(isTb);
 export const tbId = z.enum(tbIds);
 export const legacyTickets = [942, 1096, 1282, 1304, 1319, 1320, 1279] as const;
 export const dispositions = ["PRESERVE_BOUNDED", "RETIRE_OR_INCORPORATE", "PRESERVE_ARCHIVE", "ADOPT_AT14", "INCORPORATE_FEED_WIRE", "REPLAY_AND_PRESERVE_HEAVY", "KEEP_OPEN"] as const;
@@ -197,7 +199,7 @@ export function parseJsonObject(bytes: Uint8Array): Record<string, unknown> {
   }
   try { value = JSON.parse(source); }
   catch { throw new At18DerivationError("JSON_PARSE", "文件不符合 JSON 语法。"); }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRow(value)) {
     throw new At18DerivationError("JSON_PARSE", "JSON 顶层须为对象。");
   }
   // 语法由 JSON.parse 核验；扫描原 token，以免重复键（包括转义后同名）被覆盖。
@@ -213,7 +215,7 @@ export function parseJsonObject(bytes: Uint8Array): Record<string, unknown> {
       keys.add(name);
     }
   }
-  return value as Record<string, unknown>;
+  return value;
 }
 
 export function canonicalizeJcs(value: unknown): string {
@@ -238,8 +240,9 @@ export function canonicalizeJcs(value: unknown): string {
       if (Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) {
         return bad("值不是 JSON 对象。");
       }
-      const object = item as Record<string, unknown>;
-      return `{${Object.keys(object).sort().map(key => `${string(key)}:${encode(object[key])}`).join(",")}}`;
+      const entries: [string, unknown][] = Object.entries(item);
+      return `{${entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+        .map(([key, v]) => `${string(key)}:${encode(v)}`).join(",")}}`;
     } finally { active.delete(item); }
   };
   return encode(value);
@@ -249,9 +252,9 @@ export function computeContentHash({ content_hash: _self, ...body }: Record<stri
   return byteSha256(Buffer.from(canonicalizeJcs(body), "utf8"));
 }
 
-function hashMatches(value: { content_hash: string }, ctx: z.RefinementCtx) {
+function hashMatches(value: Row & { content_hash: string }, ctx: z.RefinementCtx) {
   try {
-    if (computeContentHash(value as Record<string, unknown>) === value.content_hash) return;
+    if (computeContentHash(value) === value.content_hash) return;
   } catch (error) {
     ctx.addIssue({ code: "custom", path: ["content_hash"], message: String(error) });
     return;

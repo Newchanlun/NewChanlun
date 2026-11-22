@@ -131,9 +131,17 @@ export function decodeFields(contract: Adapter, fields: FieldRules, input: unkno
       ? value.map(v => decodeFields(contract, nested, v, depth + 1)) : decodeFields(contract, nested, value, depth + 1)];
   }));
 }
+// 同 #2131 adapter.py 的公开业务容器；嵌套数组不是数值样本。
+export const tbConditions = z.strictObject({ processes: integer.optional() });
+export const tbOutput = z.strictObject({ samples: z.array(z.number().finite()).optional() });
 export function decodeRecord(contract: Adapter, record: string, payload: Row): Row {
   const rule = contract.run_records[record] ?? contract.run_records.tb;
   if (valueAt(payload, rule.version_pointer) !== rule.version) throw new Error("SCHEMA");
-  return decodeFields(contract, rule.fields, payload);
+  const data = decodeFields(contract, rule.fields, payload);
+  if (rule === contract.run_records.tb) {
+    tbConditions.parse(data.conditions);
+    tbOutput.parse(data.output);
+  }
+  return data;
 }
 export function sameDigest(bytes: Buffer, hash: string) { return byteSha256(bytes) === hash; }

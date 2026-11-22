@@ -3,9 +3,11 @@ import { promisify } from "node:util";
 
 const execute = promisify(execFile);
 export type Row = Record<string, unknown>;
+export const isRow = (value: unknown): value is Row =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 export function object(value: unknown): Row {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("object");
-  return value as Row;
+  if (!isRow(value)) throw new Error("object");
+  return value;
 }
 export function rows(value: unknown): Row[] {
   if (!Array.isArray(value)) throw new Error("array");
@@ -30,7 +32,8 @@ export function at18GitHub(root: string, origin: string): At18GitHub {
         cwd: root, timeout: 30_000, maxBuffer: 32 * 1024 * 1024,
         env: { ...process.env, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" },
       });
-      return JSON.parse(stdout) as unknown;
+      const result: unknown = JSON.parse(stdout);
+      return result;
     } finally {
       const next = waiting.shift();
       if (next) next();

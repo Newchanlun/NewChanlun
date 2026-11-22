@@ -4,12 +4,12 @@ import {
   bindCoverage, destinationNames, keyId, preserveRegistryDomains, projectCoverage, readCoverage, resolveKeys, type Slice,
 } from "./at18-coverage.ts";
 import {
-  authorizeExperiment, entityRefs, EXP, externalSources, type External, Gaps, migration, P2, permission, postGate,
+  authorizeExperiment, validateTbEntities, EXP, externalSources, type External, Gaps, migration, P2, permission, postGate,
   PROD, productionDisabled, proveDomain, runRecords, slot,
 } from "./at18-evidence.ts";
 import {
   At18BootstrapError, at18InputBundleSchema, at18ReportSchema, byteSha256, canonicalizeJcs, heavy, ledgerPaths,
-  legacyTickets, seal, sha, specPaths, type ArtifactRef, type At18InputBundle, type At18Report, tbIds, tbTickets, workflows,
+  legacyTickets, parseJsonObject, repoPath, seal, sha, specPaths, type ArtifactRef, type At18InputBundle, type At18Report, tbIds, tbTickets, workflows,
 } from "./at18-format.ts";
 import {
   checkWorkflows, integrationReviews, JobEvidence, loadRuns, selectRun, Tracker, type Ticket,
@@ -48,6 +48,41 @@ function ownedPr(pr: Row, ticket: number) {
   if (Number(match?.[1]) === ticket) return true;
   return new RegExp(`^(?:[\\w.-]+:\\s*)?\\[?#${ticket}(?![0-9])`, "i").test(String(pr.title ?? "")) ||
     new RegExp(`^\\s*(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\\s+#${ticket}(?![0-9])`, "im").test(String(pr.body ?? ""));
+}
+
+const productDelivery = z.strictObject({ ticket: z.int().positive(),
+  products: z.array(z.strictObject({ commit: sha, path: repoPath })).min(1) });
+
+// 交付锚来自逐票原件，不由合入 PR 的关闭语句反推。
+const prDelivery = z.strictObject({ ticket: z.int().positive(), paths: z.array(repoPath).min(1) });
+const deliveryFences = (body: string) => [...body.matchAll(/^```at18-product-delivery\/1\r?\n([\s\S]*?)\r?\n^```[ \t]*$/gm)]
+  .map(match => parseJsonObject(Buffer.from(match[1])));
+function deliveredProducts(s: At18Repository, ticket: Ticket, commits: string[], reviewed: Map<string, Row>) {
+  if (ticket.state !== "CLOSED" || ticket.reason !== "COMPLETED" || !commits.length) return [];
+  if (typeof ticket.data?.body !== "string") return [];
+  try {
+    const declarations = deliveryFences(ticket.data.body);
+    if (declarations.length !== 1) return [];
+    const data = productDelivery.parse(declarations[0]);
+    if (data.ticket !== ticket.number) return [];
+    const seen = new Set<string>();
+    for (const { commit, path } of data.products) {
+      const key = commit + "\0" + path;
+      if (seen.has(key) || !commits.includes(commit) || !s.blob(commit, path).length ||
+          !s.changed(s.string("rev-parse", commit + "^1"), commit).includes(path)) return [];
+      const current = reviewed.get(commit);
+      if (current) {
+        const H = sha.parse(object(current.head).sha);
+        const anchored = (body: string) => {
+          const ownership = deliveryFences(body).map(v => prDelivery.parse(v)).filter(v => v.ticket === ticket.number);
+          return ownership.length === 1 && ownership[0].paths.includes(path);
+        };
+        if (!anchored(String(current.body ?? "")) || !anchored(s.string("show", "-s", "--format=%B", H))) return [];
+      }
+      seen.add(key);
+    }
+    return sorted(data.products.map(row => row.commit));
+  } catch { return []; }
 }
 
 function tb11Products(s: At18Repository, F: string, chain: string[], accepted: Map<string, Row>, diag: Diagnostics) {
@@ -97,7 +132,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   }
   const main = await confirmMain(false);
   const tracker = new Tracker(s, diag);
-  const tickets = Promise.all([...new Set([...Object.values(tbTickets), ...legacyTickets, 1391, 1403])]
+  const tickets = Promise.all([...new Set([...Object.values(tbTickets), ...legacyTickets, 1391, 1403, 1340, 1323])]
     .map(n => tracker.issue(n))).then(rows => new Map(rows.map(row => [row.number, row])));
   const roster = Promise.all(tbIds.slice(0, 10).map(async slice => [slice, await tracker.native(tbTickets[slice])] as const));
   const r09 = integrationReviews(s, F, diag);
@@ -109,7 +144,15 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
     catch (e) { diag.add(failCode(e), scope); return undefined; }
   }
   const specData = read(specPaths.spec_ref, "/spec_ref");
-  const crosswalk = read(specPaths.crosswalk_ref, "/crosswalk_ref");
+  let crosswalkSha: string | null = null;
+  let crosswalk: ReturnType<typeof jsonBlob> | undefined;
+  try {
+    const bytes = s.blob(F, specPaths.crosswalk_ref);
+    crosswalkSha = byteSha256(bytes);
+    const json = parseJsonObject(bytes);
+    canonicalizeJcs(json);
+    crosswalk = { bytes, json };
+  } catch (e) { diag.add(failCode(e), "/crosswalk_ref"); }
   const coverageInput = read(specPaths.coverage_input_ref, "/coverage_input_ref");
   const ledgers = ledgerPaths.map((path, index) => read(path, "/slice_ledger_refs/" + index));
   const coverage = readCoverage(crosswalk?.json, coverageInput?.json, ledgers.map(l => l?.json), diag, specData?.json);
@@ -124,13 +167,14 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   let contract: Adapter | undefined;
   try {
     reg = registrySchema.parse(regData?.json);
-    if (!contractData || !crosswalk || reg.crosswalk_sha256 !== byteSha256(crosswalk.bytes) ||
+    if (!contractData || !crosswalk || reg.crosswalk_sha256 !== crosswalkSha ||
         reg.adapter_contract_sha256 !== byteSha256(contractData.bytes)) throw new Error("reference");
     contract = adapter(contractData.json);
     for (const p of [registryPath, contractPath]) {
       const anchor = s.anchor(p, finalReviews.chain);
       if (!anchor || !finalReviews.accepted.has(anchor)) {
         diag.add("REVIEW_FINAL_PRODUCT", anchor ? "commit:" + anchor : "/registry_ref");
+        if (p === registryPath) diag.add("PREGATE_REVIEW", "pre:" + p);
         throw new Error("anchor");
       }
       if (p === registryPath) {
@@ -145,6 +189,14 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
     reg = undefined; contract = undefined;
     diag.add("REGISTRY_INVALID", "/registry_ref");
   }
+  // 即使登记内容不可解码，仍能为每个未获审的 PRE 原件单独定位。
+  for (const p of [registryPath, prePath, at18 + "landing-census.json"]) {
+    const anchor = s.anchor(p, finalReviews.chain);
+    if (!anchor || !finalReviews.accepted.has(anchor)) {
+      diag.add("REVIEW_FINAL_PRODUCT", anchor ? "commit:" + anchor : "pre:" + p);
+      diag.add("PREGATE_REVIEW", "pre:" + p);
+    }
+  }
   const prereview = pregateSchema.safeParse(preData?.json);
   if (!prereview.success) diag.add("PREGATE_REVIEW", "/pregate_review_ref");
   if (!reg || !prereview.success) diag.add("PREGATE_LANDINGS", "/pregate_review_ref");
@@ -157,7 +209,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   const registrySha = reg && regData ? byteSha256(regData.bytes) : undefined;
   const execution = checkWorkflows(s, F, jobs, bindings, registrySha);
   const profile = reg?.experiment_profile_id ?? null;
-  const auth = await authorizeExperiment(contract, bindings, tracker, profile, windowsStart, jobs, diag);
+  const auth = await authorizeExperiment(contract, bindings, tracker, profile, windowsStart, execution.checkJobs, diag);
   const runEvidence = runRecords(s, F, own, bindings, contract, registrySha, jobs, execution.passed, auth, diag);
   const previous = await historyDeviations(s, pre.projection, reg, bindings, execution.passed, diag);
   const allExternal = await external;
@@ -171,12 +223,14 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
     migrationSlot.no_resend && scopeOK;
   const post = postGate(runEvidence.get(slot("post_gate.experiment", profile)) ?? [], allExternal, contract, profile, diag, used);
   const p1Entities = new Map<string, ArtifactRef[]>();
+  const verifiedEntities = new Map<string, ReturnType<typeof validateTbEntities>>();
   for (const [id, producer] of bindings.producer) {
     if (!id.startsWith("tb.")) continue;
     const record = producer.record!;
     const s = slot(record, producer.profile_id);
-    const valid = entityRefs(record, producer.profile_id, runEvidence.get(s) ?? [], bindings, diag);
-    p1Entities.set(record, refs([...(p1Entities.get(record) ?? []), ...valid]));
+    const valid = validateTbEntities(record, producer.profile_id, runEvidence.get(s) ?? [], bindings, diag);
+    verifiedEntities.set(s, valid);
+    p1Entities.set(record, refs([...(p1Entities.get(record) ?? []), ...valid.map(e => e.ref)]));
   }
   for (const name of ["permission.experiment", "migration.experiment", "post_gate.experiment"]) {
     const obligation = slot(name, profile);
@@ -201,13 +255,17 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   const inputAvailable = Boolean(main && fixedInputs.every(Boolean) && reg && contract && prereview.success && sourcesOK && pre.ok);
   const stage = byTicket.get(1391)?.state === "OPEN" && byTicket.get(1403)?.state !== null && byTicket.get(1403) !== undefined;
   if (!stage) diag.add("TB11_PREFLIGHT", "ticket:1391");
+  // 阶段错误不反向参与 TB-11 的前置结果。
+  for (const n of [1369, 1340, 1323]) {
+    if (byTicket.get(n)?.state !== "OPEN") diag.add("CLOSEOUT_STAGE", "ticket:" + n);
+  }
   const products = tb11Products(s, F, finalReviews.chain, finalReviews.accepted, diag);
   const tb11 = stage && inputAvailable && reviewOK && products;
   if (!tb11) diag.add("TB11_PREFLIGHT", "/tb_summaries/10/input_bundle");
   const keyResults = resolveKeys(coverage, bindings, (d, k) => proveDomain(d, k, bindings, execution.passed, execution.executed,
-    auth, runEvidence, post, scopeOK, gaps, diag), tb11, diag);
+    auth, runEvidence, verifiedEntities, post, scopeOK, gaps, diag), tb11, diag);
   const tbPass = new Map<Slice, boolean>([["TB-11", tb11]]);
-  const nativeAttributions = new Map<number, Pick<At18Report["destinations"][number], "commits">["commits"]>();
+  const nativeAttributions = new Map<number, string[]>();
   const r12ByTicket = new Map<number, boolean>();
   for (const slice of tbIds.slice(0, 10)) {
     const ticket = tbTickets[slice];
@@ -223,9 +281,9 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
     for (const t of slices) {
       const historical = pre.projection.find(p => p.ticket === t.number)?.commits ?? [];
       const current = [...finalReviews.accepted].filter(([, pr]) => ownedPr(pr, t.number)).map(([commit]) => commit);
-      const commits = sorted([...historical, ...current]);
-      if (commits.length) nativeAttributions.set(t.number, commits);
-      const pass = t.state === "CLOSED" && t.reason === "COMPLETED" && commits.length > 0;
+      const products = deliveredProducts(s, t, sorted([...historical, ...current]), finalReviews.accepted);
+      if (products.length) nativeAttributions.set(t.number, products);
+      const pass = products.length > 0;
       if (!pass) diag.add("SUBTICKET_INCOMPLETE", "ticket:" + t.number);
       r12ByTicket.set(t.number, pass);
     }
@@ -246,7 +304,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   }
   const allCurrent = main && reviewOK && pre.ok && sourcesOK && scopeOK && permitted && migrated && post.valid &&
     [...coverage.keys.values()].every(k => keyResults.get(k.id)?.status !== "FAIL") && tbIds.every(slice => tbPass.get(slice)) && !diag.size;
-  const legacy = await legacyDispositions(s, F, contract, tracker, allCurrent, tbPass, bindings, execution.passed, permitted, allExternal, used, diag);
+  const legacy = await legacyDispositions(s, F, contract, tracker, allCurrent, tbPass, bindings, execution.passed, permitted, allExternal, used, finalReviews.accepted, finalReviews.reviews, diag);
   if (legacy.deferredHeavy) gaps.defer(heavy, "simulation", "MEASUREMENT_NOT_COMPLETED", "ticket:1320");
 
   function bundleRef(path: string, bytes: Buffer, role: string) { return repoRef(F, path, bytes, role); }
@@ -404,7 +462,8 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
       (id === 6 && (f.scope === "ticket:1279" || f.scope.startsWith("ticket:1304@")))) todo.add(f.check_id + "@" + f.scope);
     destinations.push({
       id, obligation: coverage.titles[i], tickets: [...tickets.values()].sort((a, b) => a.ticket - b.ticket || compare(a.scope, b.scope)),
-      commits: sorted([...(main_sha ? [F] : []), ...pre.projection.filter(p => ticketIds.includes(p.ticket)).flatMap(p => p.commits)]),
+      commits: sorted([...(main_sha ? [F] : []), ...pre.projection.filter(p => ticketIds.includes(p.ticket)).flatMap(p => p.commits),
+        ...ticketIds.flatMap(t => nativeAttributions.get(t) ?? [])]),
       independent_reviews: reviews, main_sha, ci_runs: CI,
       evidence_by_class: { simulation: refs(sim), experiment: refs(exp), production: null },
       permission_evidence: id === 5 ? { experiment: permissionSlot, production: null } : null,
@@ -424,7 +483,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
       schema_version: "at18-report/1", ...identity,
       capability_hash: { experiment: permissionSlot.capability_hash, production: null },
       destinations, tb_summaries,
-      spec_coverage: { crosswalk_sha256: crosswalk ? byteSha256(crosswalk.bytes) : null, ...projected },
+      spec_coverage: { crosswalk_sha256: crosswalkSha, ...projected },
       migration_invariants: { experiment: migrationSlot, production: null },
       post_gate_records: { experiment: post.result, production: null }, legacy_dispositions: legacy.list, unexecuted, permission_blocked,
       failed_checks: diag.all(), bounded_domain_statement: boundedStatement(previous.rows.length, post.result.status, legacy.deferredHeavy),

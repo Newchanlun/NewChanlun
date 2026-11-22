@@ -210,12 +210,14 @@ export function checkWorkflows(s: At18Repository, F: string, evidence: JobEviden
   const passed = new Set<string>();
   const failed = new Set<string>();
   const executed = new Set<string>();
+  const checkJobs = new Map<string, Job>();
   for (const [group, checks] of b.groups) {
     const i = checks[0].evidence_class === "experiment" ? 3 : 2;
     const run = evidence.runs[i];
     const name = "at18 " + group + " " + (registrySha ?? "none");
     const scope = jobScope(workflows[i], run, name);
     const job = evidence.use(i, name);
+    if (job) checkJobs.set(group, job);
     if (job && job.status === "completed" && job.conclusion !== "skipped") executed.add(group);
     if (!job) evidence.diag.add("CHECK_JOB_MISSING", scope);
     else if (!success(job) || !run || !success(run.run)) {
@@ -229,7 +231,7 @@ export function checkWorkflows(s: At18Repository, F: string, evidence: JobEviden
       if (!/^ {2}workflow_dispatch:\s*(?:\{\})?\s*$/m.test(workflow) || !evidence.runs[i] || !success(evidence.runs[i]!.run)) throw new Error("run");
     } catch { evidence.diag.add("CHECK_JOB_MISSING", `/workflow_runs/${i}`); }
   }
-  return { ci, ok, passed, failed, executed };
+  return { ci, ok, passed, failed, executed, checkJobs };
 }
 
 function repoMatches(value: unknown, repo: string) {
