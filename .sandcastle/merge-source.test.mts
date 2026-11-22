@@ -1,7 +1,7 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,36 @@ function deliver(dir: string, ticket: number, sha: string, verdict = "VERDICT: P
 /** 执行器 publish 捕获 Stale 时的实际写法：只写 stale.json，原 awaiting_merge 的 state.json 不动。 */
 const markStale = (dir: string, head: string, observed: string) =>
   write(join(dir, "delivery", "stale.json"), { head, observed, at: "2026-10-27T12:00:00+00:00" });
+
+type SeedRepo = { root: string; repo: string; remote: string; base: string; sources: Array<{ ticket: number; sha: string; branch: string }> };
+const seedCache = new Map<boolean, SeedRepo>();
+function getSeed(conflict: boolean): SeedRepo {
+  const cached = seedCache.get(conflict);
+  if (cached) return cached;
+  const root = mkdtempSync(join(tmpdir(), "nc-u6-seed-"));
+  const repo = join(root, "repo"); const remote = join(root, "remote.git");
+  mkdirSync(repo);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: "pipe" }).trim();
+  execFileSync("git", ["init", "--bare", "-b", "main", remote], { stdio: "pipe" });
+  git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+  git("remote", "add", "origin", remote);
+  writeFileSync(join(repo, "doc.md"), "base\n"); git("add", "."); git("commit", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  const sources = [11, 12].map(ticket => {
+    const branch = `codex/deepagents/t${ticket}`;
+    git("checkout", "-b", branch, base);
+    writeFileSync(join(repo, conflict ? "doc.md" : `doc${ticket}.md`), `ticket ${ticket}\n`);
+    git("add", "."); git("commit", "-m", `ticket ${ticket}`);
+    const sha = git("rev-parse", "HEAD");
+    git("push", "-q", "-u", "origin", branch);
+    return { ticket, sha, branch };
+  });
+  git("checkout", "main");
+  const created: SeedRepo = { root, repo, remote, base, sources };
+  seedCache.set(conflict, created);
+  return created;
+}
+after(() => { for (const seed of seedCache.values()) rmSync(seed.root, { recursive: true, force: true }); });
 
 function fixture(t: { after: (fn: () => void) => void }, conflict = false) {
   const root = mkdtempSync(join(tmpdir(), "nc-u6-source-"));
@@ -54,25 +84,19 @@ let ref = null; try { ref = execFileSync("git", ["--git-dir", cfg.remote, "rev-p
 process.stdout.write(JSON.stringify({ branch, ref, pulls: cfg.pulls[branch] ?? [] }));
 `);
   chmodSync(facts, 0o755);
+  const seed = getSeed(conflict);
+  cpSync(seed.remote, remote, { recursive: true });
+  cpSync(seed.repo, repo, { recursive: true });
   const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: "pipe" }).trim();
-  execFileSync("git", ["init", "--bare", "-b", "main", remote], { stdio: "pipe" });
-  git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
-  git("remote", "add", "origin", remote);
-  writeFileSync(join(repo, "doc.md"), "base\n"); git("add", "."); git("commit", "-m", "base");
-  const base = git("rev-parse", "HEAD");
+  git("remote", "set-url", "origin", remote);
+  const { base } = seed;
   const pulls: Record<string, unknown[]> = {};
-  const sources = [11, 12].map(ticket => {
-    const branch = `codex/deepagents/t${ticket}`;
-    git("checkout", "-b", branch, base);
-    writeFileSync(join(repo, conflict ? "doc.md" : `doc${ticket}.md`), `ticket ${ticket}\n`);
-    git("add", "."); git("commit", "-m", `ticket ${ticket}`);
-    const sha = git("rev-parse", "HEAD"); const dir = join(runs, `t${ticket}-1`);
-    git("push", "-q", "-u", "origin", branch);
+  const sources = seed.sources.map(({ ticket, sha, branch }) => {
+    const dir = join(runs, `t${ticket}-1`);
     deliver(dir, ticket, sha);
     pulls[branch] = [{ number: 9000 + ticket, state: "open", merged: false, head: sha, head_ref: branch }];
     return { ticket, sha, dir, branch };
   });
-  git("checkout", "main");
   const config = { remote, pulls, log: join(root, "facts.log"), fail: false };
   const saveConfig = () => write(join(pilot, "facts.json"), config); saveConfig();
   const manifest: MergeManifest = { runId: "u6", branch: "sandcastle/merge-u6", base,
@@ -81,16 +105,27 @@ process.stdout.write(JSON.stringify({ branch, ref, pulls: cfg.pulls[branch] ?? [
   const worktree = join(repo, ".sandcastle/worktrees/sandcastle-merge-u6");
   const checkpoint = join(repo, ".sandcastle/logs/merges/u6/checkpoint.json");
   const env = { DEEPAGENTS_PYTHON: facts, DEEPAGENTS_PILOT_PATH: pilot, PILOT1742_APP_PRIVATE_KEY: join(root, "app.pem"), HOME: root };
+  const runEnv = (extra: Record<string, string> = {}) => ({
+    PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, PROBE_CALLS: calls, GH_TOKEN: "user-token-canary",
+    CLIPROXY_LOCAL_KEY: "fixture-no-network", SANDCASTLE_SWARM_MERGE_MANIFEST: path, ...env, ...extra,
+  });
   const run = (extra: Record<string, string> = {}) => spawnSync(process.execPath, ["--import", loader, entry], {
-    cwd: repo, encoding: "utf8", timeout: 60_000,
-    env: { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, PROBE_CALLS: calls, GH_TOKEN: "user-token-canary",
-      CLIPROXY_LOCAL_KEY: "fixture-no-network", SANDCASTLE_SWARM_MERGE_MANIFEST: path, ...env, ...extra },
+    cwd: repo, encoding: "utf8", timeout: 60_000, env: runEnv(extra),
+  });
+  const runAsync = (extra: Record<string, string> = {}) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", loader, entry], { cwd: repo, env: runEnv(extra), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = ""; let stderr = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    child.stdout.on("data", d => { stdout += String(d); });
+    child.stderr.on("data", d => { stderr += String(d); });
+    child.on("error", err => { clearTimeout(timer); reject(err); });
+    child.on("close", status => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
   });
   const called = () => existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [];
   const factCalls = () => existsSync(config.log) ? readFileSync(config.log, "utf8").trim().split("\n").map(l => JSON.parse(l)) : [];
   const refs = () => git("for-each-ref", "--format=%(objectname) %(refname)");
   const reader = appRemoteFacts({ ...env, GH_TOKEN: "user-token-canary" });
-  return { root, repo, remote, git, base, sources, manifest, run, called, factCalls, checkpoint, worktree, refs, config, saveConfig, reader };
+  return { root, repo, remote, git, base, sources, manifest, run, runAsync, called, factCalls, checkpoint, worktree, refs, config, saveConfig, reader };
 }
 type Fixture = ReturnType<typeof fixture>;
 
@@ -133,7 +168,7 @@ test("公共 CLI：两份 DeepAgents 交付按固定 SHA 双父归并，经只�
   assert.equal(after, before);
 });
 
-test("公共 CLI：来源失效或远端事实不可得时，旧证据在任何 Git 写入前被拒绝", async t => {
+test("公共 CLI：来源失效或远端事实不可得时，旧证据在任何 Git 写入前被拒绝", { concurrency: 4 }, async t => {
   const cases: Array<[string, (f: Fixture) => Record<string, string> | void, RegExp]> = [
     ["执行器写 stale.json，state.json 仍为 awaiting_merge", f => markStale(f.sources[1]!.dir, f.sources[1]!.sha, f.base), /已被执行器判 stale/],
     ["执行器写效果仍 pending", f => write(join(f.sources[1]!.dir, "delivery", `push-${f.base}.json`), { state: "pending", what: { kind: "ref" } }), /未认回的写效果：push-/],
@@ -151,14 +186,14 @@ test("公共 CLI：来源失效或远端事实不可得时，旧证据在任何 
       const r = readJson(p); r.result.summary = "VERDICT: BLOCK\nfixture"; writeFileSync(p, JSON.stringify(r)); }, /VERDICT: PASS/],
     ["缺 deepagents/review 状态", f => { const s = f.sources[1]!; rmSync(join(s.dir, "delivery", `status-${s.sha}.json`)); }, /记录不可读/],
   ];
-  for (const [name, mutate, message] of cases) {
-    await t.test(name, t2 => {
+  await Promise.all(cases.map(([name, mutate, message]) =>
+    t.test(name, async t2 => {
       const f = fixture(t2); const extra = mutate(f) ?? {};
-      const result = f.run(extra);
+      const result = await f.runAsync(extra);
       assert.equal(result.status, 1, name); assert.match(result.stderr, message);
       assertNoWrites(f);
-    });
-  }
+    })
+  ));
 });
 
 test("公共 CLI：冲突仍先调原 Docker 检查并保留 MERGE_HEAD；之后执行器写 stale.json，重入在 Docker 前拒绝且现场不变", t => {
