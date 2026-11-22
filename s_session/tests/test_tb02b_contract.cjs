@@ -107,7 +107,11 @@ async function endpointCut(generation, rule, protocol = 's-session/2') {
     objects:[record], withdrawn_objects:[], witnesses:[], relations:[], observations:[], raw_history:[]};
   if (protocol === 's-session/3') {
     const kind = 'CC-054.knowledge_state', fact_key = API.canonical([kind,'TB-02-A']);
-    const payload = {scope:'TB-02-A',input_frontier:'-1',known_facts:['raw_ohlc','inclusion_trace','group_provenance'],waiting_reasons:[],requests:[],
+    // 裸规则不发布中枢族，但非零代 S3 仍有零组的 CC-006 待决槽。
+    const reason = 'fewer_than_three_merged_bars';
+    const payload = {scope:'TB-02-A',input_frontier:'-1',known_facts:['raw_ohlc','inclusion_trace','group_provenance'],waiting_reasons:[reason],
+      requests:[{request_id:API.canonical(['CC-006.local_shape','pending']),subject_id:null,source_coords:[],reasons:[reason],
+        axes:{input_quality:'INSUFFICIENT',applicability:'DOMAIN_PROOF_MISSING',computation:'INCOMPLETE',validity:'CURRENT'}}],
       domain:rule.includes('new-bi/2')?'established_direction_with_extreme_root_sets':'established_direction_without_extreme_identity_competition'};
     const object_id = await API.Q3.V.identity(0x20, {kind,fact_key,payload,input_refs:[],profile_id:PROFILE,rule_revision:rule}, 'obj3-');
     snapshot.objects.push({...record,kind,fact_key,payload,object_id});

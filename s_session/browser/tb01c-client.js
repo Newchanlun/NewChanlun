@@ -3582,7 +3582,7 @@ if (typeof module !== 'object' || !module.exports) {
     STRUCTURE_ROOTS: Object.freeze(STRUCTURE_ROOTS), sameValue: equal, changeNulls, validateStructureHistory});
 });
 
-/* exact source q3-typed.js SHA256 80624c09aa248103030bc829f622dd4f8aa15b695a4c45c667f0fb608a141e2d */
+/* exact source q3-typed.js SHA256 5dae2330e189f3276a977bb1de390cdf6ef01df77edd99d98c6b377864df0b4d */
 /* #1394：typed 与形态来源的同一判据；只把访问迁为完整异步 Value 遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -4695,7 +4695,7 @@ if (typeof module !== 'object' || !module.exports) {
   }
   function validateKnowledgeRequests(records, cut, rule, structureRule, check, charge) {
     const {knowledge, steps, groups, init, undetermined, ordered, waiting} = cut;
-    const active = new Map(records.map(r => [r.object_id, r])), expected = new Map(), seen = new Set();
+    const active = new Map(), expected = new Map(), seen = new Set();
     const must = (ok, reason) => partNeed(ok, "B7", reason);
     const add = (key, record, axes, reasons) => expected.set(JSON.stringify(key), {
       subject: record?.object_id ?? null,
@@ -4705,14 +4705,20 @@ if (typeof module !== 'object' || !module.exports) {
     });
     const contract = ruleContract(rule), {w} = resolveRule(rule);
     const equalIsEvidence = contract?.[2] === KNOWLEDGE_DOMAINS[1] || w !== null;
-    const shapeKind = "CC-006.local_shape", competing = new Map();
-    if (w === null && contract?.[0] === "s-new-bi/1") {
-      const byIndex = new Map(), publishedWindows = new Set();
-      const axes = requestAxes("SUFFICIENT", "DOMAIN_PROOF_MISSING", "INCOMPLETE"), reasons = ["equal_extreme_identity"];
-      for (const r of records) {
-        if (r.kind === shapeKind) publishedWindows.add(r.slot);
-        check();
+    const shapeKind = "CC-006.local_shape";
+    // 从当前对象和正式组枚举 CC-006 槽，不以收到的请求判断该不该有。
+    for (const r of records) {
+      active.set(r.object_id, r);
+      if (r.kind === shapeKind) {
+        must(!expected.has(r.slot), "同 cut 活动 CC-006 三锚槽重复：" + r.slot);
+        add(JSON.parse(r.slot), r, REQUEST_STATES[0], []);
       }
+      check();
+    }
+    if (groups.length < 3) add([shapeKind, "pending"], null, REQUEST_STATES[2], ["fewer_than_three_merged_bars"]);
+    if (w === null && contract?.[0] === "s-new-bi/1") {
+      const byIndex = new Map();
+      const axes = requestAxes("SUFFICIENT", "DOMAIN_PROOF_MISSING", "INCOMPLETE"), reasons = ["equal_extreme_identity"];
       for (const group of groups) {
         byIndex.set(group.payload.group_index, group);
         check();
@@ -4724,7 +4730,7 @@ if (typeof module !== 'object' || !module.exports) {
         const window = [byIndex.get(String(i)), byIndex.get(String(i + 1)), byIndex.get(String(i + 2))];
         if (!window.every(Boolean) || !window.some(({payload:p}) => p.high_sources.length > 1 || p.low_sources.length > 1)) continue;
         const id = JSON.stringify([shapeKind, window.map(({payload}) => payload.group_anchor)]);
-        if (!publishedWindows.has(id)) competing.set(id, {subject:null, sources:window[2].source_coords, axes, reasons});
+        if (!expected.has(id)) expected.set(id, {subject:null, sources:window[2].source_coords, axes, reasons});
       }
     }
     for (const r of steps.values()) {
@@ -4754,19 +4760,11 @@ if (typeof module !== 'object' || !module.exports) {
       must(!seen.has(id), "同 cut 知识请求键重复");
       seen.add(id);
       const subject = active.get(request.subject_id);
-      let want = expected.get(id);
-      if (key[0] === shapeKind) {
-        if (key[1] === "pending") {
-          // W 未定期没有正式组；建立后同样只看本 cut 正式组数，不用原始根数或 shape 数替代。
-          must(groups.length < 3, "CC-006 不足三组请求在已有三组时无效：" + id);
-          want = {subject:null, sources:ordered, axes:REQUEST_STATES[2], reasons:["fewer_than_three_merged_bars"]};
-        } else if (competing.has(id)) {
-          want = competing.get(id);
-        } else {
-          must(subject?.kind === shapeKind && subject.slot === id, "未声明或错槽的知识请求：" + id);
-          want = {subject:subject.object_id, sources:subject.source_coords, axes:REQUEST_STATES[0], reasons:[]};
-        }
-      }
+      const want = expected.get(id);
+      if (key[0] === shapeKind && key[1] === "pending")
+        must(groups.length < 3, "CC-006 不足三组请求在已有三组时无效：" + id);
+      if (key[0] === shapeKind && want && want.subject !== null)
+        must(subject?.kind === shapeKind && subject.slot === id, "未声明或错槽的知识请求：" + id);
       if (want) {
         must(request.subject_id === want.subject, "请求主体 ID、kind 或 fact_key 错绑：" + id);
         must(sameCoords(request.source_coords, want.sources), "请求来源错绑：" + id);

@@ -1552,7 +1552,7 @@ test("#2072 R2 B3 S3 结构域从公开入口拒绝段变更的两向空值违�
   }
 });
 
-test("#2072 R2 B7 只收历史 new-bi/1 真实竞争三锚窗及精确右组来源", () => {
+test("#2072 R2 B7 只收历史 new-bi/1 真实竞争三锚窗及精确右组来源", async t => {
   const shape = "CC-006.local_shape", old = "s2-axis-quantifiers+new-bi/1";
   const make = () => {
     const groups = [
@@ -1565,10 +1565,14 @@ test("#2072 R2 B7 只收历史 new-bi/1 真实竞争三锚窗及精确右组来�
       kind:"CC-005.inclusion_group", object_id:"group"+i, source_coords,
       payload:{group_anchor:anchor,group_index:String(i),members,high_sources:members,low_sources:members.slice(0,1)},
     }));
-    const request = {request_id:JSON.stringify([shape,["1","2","4"]]), subject_id:null,
-      source_coords:["0","1","2","3","4","5"], reasons:["equal_extreme_identity"],
-      axes:{input_quality:"SUFFICIENT",applicability:"DOMAIN_PROOF_MISSING",computation:"INCOMPLETE",validity:"CURRENT"}};
-    const knowledge = {object_id:"knowledge",kind:"CC-054.knowledge_state",payload:{requests:[request]}};
+    const wait = (left, mid, right) => ({
+      request_id:JSON.stringify([shape,[left,mid,right].map(i => groups[i].payload.group_anchor)]),
+      subject_id:null, source_coords:groups[right].source_coords, reasons:["equal_extreme_identity"],
+      axes:{input_quality:"SUFFICIENT",applicability:"DOMAIN_PROOF_MISSING",computation:"INCOMPLETE",validity:"CURRENT"},
+    });
+    // 第 2 组有竞争；包含它的三个连续窗都须登记，仍以中间窗为字段探针。
+    const request = wait(1,2,3);
+    const knowledge = {object_id:"knowledge",kind:"CC-054.knowledge_state",payload:{requests:[request,wait(0,1,2),wait(2,3,4)]}};
     return {request,cut:{knowledge,steps:new Map(),groups,init:null,undetermined:new Map(),
       ordered:["0","1","2","3","4","5","6"],waiting:false},records:[...groups,knowledge]};
   };
@@ -1593,6 +1597,16 @@ test("#2072 R2 B7 只收历史 new-bi/1 真实竞争三锚窗及精确右组来�
     edit(x);
     assert.throws(() => run(x),reason);
   }
+  await t.test("R4：三个历史竞争窗仅删中间窗的等待，仍须按键拒绝", () => {
+    const x = make();
+    x.cut.knowledge.payload.requests.shift();
+    assert.throws(() => run(x), {message:"B7 缺一一绑定的具名知识请求：" + x.request.request_id});
+  });
+  await t.test("R4：两件活动形态不能共用一个三锚完成槽", () => {
+    const x = make(), slot = x.request.request_id;
+    x.records.push(...["a","b"].map(id => ({kind:shape,object_id:"published-"+id,slot})));
+    assert.throws(() => run(x), {message:"B7 同 cut 活动 CC-006 三锚槽重复：" + slot});
+  });
 });
 
 const SHAPE_REQUEST = "CC-006.local_shape";
@@ -1620,7 +1634,8 @@ async function shapeThroughBoth(st, reason) {
   if (reason) {
     let message;
     await assert.rejects(validate, e => {
-      assert.match(e.message, reason);
+      if (typeof reason === "string") assert.equal(e.message, reason);
+      else assert.match(e.message, reason);
       message = e.message;
       return true;
     });
@@ -1672,6 +1687,32 @@ test("#2072 R3 B7 W 等待与已建立不足三组都使用同一 pending 合同
       ["错理由", r => {r.reasons = ["equal_extreme_identity"];}, /B7.*四轴或等待原因/],
     ]) await t.test(label, async () => shapeThroughBoth(await editShapeRequests(base, edit), reason));
   }
+});
+
+test("#2072 R4 B7 两入口按槽拒绝缺少完成或不足三组的 CC-006 请求", async t => {
+  const H = require("./q3_complete_fixture.cjs");
+  const server = await H.makeServer(await H.makeBase()), client = H.makeClient(server);
+  await client.load(H.discovery(server), "AsKnown", "1");
+  let json = "";
+  for await (const chunk of Q3.V.canonicalChunks(client.committed.state)) json += chunk;
+  const cases = [
+    ["S16 g3", await readWriterCut("3"), ["0","1","2"], 3, 1],
+    ["S16 g5", await readWriterCut("5"), ["0","1","2"], 5, 3],
+    ["W1 g5", await g5(), ["0","3","4"], 3, 1],
+    ["W1 g2", await readWriterCut("2", W_FIXTURE), "pending", 0, 1],
+    ["非 W onebar g1", JSON.parse(json), "pending", 1, 1],
+    ["W1 g4", await readWriterCut("4", W_FIXTURE), "pending", 2, 1],
+  ];
+  for (const [name, base, slot, groups, requests] of cases) await t.test(name, async () => {
+    const key = JSON.stringify([SHAPE_REQUEST,slot]), original = shapeRequests(base);
+    assert.equal(groupCount(base), groups);
+    assert.equal(original.length, requests);
+    assert.equal(original.filter(r => r.request_id === key).length, 1);
+    await shapeThroughBoth(base);
+    const changed = await editShapeRequests(base, (_, rs) => rs.splice(rs.findIndex(r => r.request_id === key),1));
+    assert.equal(shapeRequests(changed).length, requests - 1);
+    await shapeThroughBoth(changed, "B7 缺一一绑定的具名知识请求：" + key);
+  });
 });
 
 test("#2072 B8 W 等待与建立、步骤覆盖的独立原件锁", async t => {
