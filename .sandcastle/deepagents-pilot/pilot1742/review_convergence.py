@@ -279,21 +279,44 @@ def _normalize_fingerprint_text(
 ) -> str:
     """无损指纹规范化：保留大小写与 Markdown/代码/HTML/URL 原义，避免跨语义误合并。
 
-    - allow_code_blocks=False（category / reason 行内短文本）：去首尾空白并折叠内部连续空白，保留原始大小写；
-    - allow_code_blocks=True（failure_scenario 完整 Markdown）：仅规范换行符并去除首尾完全空行（== ""），
-      保留所有非空行的前导/尾随空白、大小写、缩进、代码块、围栏语言标识、HTML、链接与表格原貌。
+    - allow_code_blocks=False（category / reason 行内短文本）：使用代码跨度感知的 `_single_line`
+      折叠普通叙述中的多余空白，同时保留闭合行内反引号代码跨度内部的连续水平空格与原始大小写；
+    - allow_code_blocks=True（failure_scenario 完整 Markdown）：规范换行符后按 CommonMark Phase-1
+      区分代码块正文行（围栏/缩进）与非代码块行：代码块正文行原样保留；非代码块中仅含 ASCII 空格/
+      制表符的空行规整为 `""`，段末与文末非代码块行剥离不可见的 ASCII 尾部空格与制表符（绝不触碰
+      U+00A0、硬换行或跨行代码跨度），最后剥离首尾非代码块空行。
     """
     text = _require_visible_text(raw, field_name)
     assert isinstance(raw, str)
     if not allow_code_blocks:
-        return re.sub(r"\s+", " ", text)
+        return _single_line(text)
     normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
-    lines = normalized.split("\n")
-    while lines and lines[0] == "":
-        lines.pop(0)
-    while lines and lines[-1] == "":
-        lines.pop()
-    return "\n".join(lines)
+    code_lines: set[int] = set()
+    _parse_commonmark_blocks(normalized, include_all_visible_blocks=True, code_line_indices_out=code_lines)
+    lines = _split_commonmark_lines(normalized)
+    n_lines = len(lines)
+    processed: list[tuple[int, str]] = []
+    for idx, line in enumerate(lines):
+        if idx in code_lines:
+            processed.append((idx, line))
+            continue
+        if line.strip(" \t") == "":
+            processed.append((idx, ""))
+            continue
+        next_is_non_code_blank = (
+            idx + 1 < n_lines
+            and (idx + 1) not in code_lines
+            and lines[idx + 1].strip(" \t") == ""
+        )
+        if idx == n_lines - 1 or next_is_non_code_blank:
+            processed.append((idx, line.rstrip(" \t")))
+        else:
+            processed.append((idx, line))
+    while processed and processed[0][0] not in code_lines and processed[0][1] == "":
+        processed.pop(0)
+    while processed and processed[-1][0] not in code_lines and processed[-1][1] == "":
+        processed.pop()
+    return "\n".join(line for _, line in processed)
 
 
 def _normalize_str_collection(
@@ -2142,18 +2165,21 @@ def _parse_commonmark_blocks(
     body: str,
     *,
     include_all_visible_blocks: bool = False,
+    code_line_indices_out: set[int] | None = None,
 ) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]], frozenset[str]]:
     """按 CommonMark Phase-1 容器栈/叶子块（含 GFM §4.10 管道表格）+ §4.7 链接引用定义剥离收集文档块与已定义链接标签。"""
     containers: list[_Container] = []
     leaf: _Leaf | None = None
     defined_labels: set[str] = set()
     doc_blocks: list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]] = []
+    indented_pending_blank_indices: list[int] = []
 
     def in_blockquote() -> bool:
         return any(isinstance(c, _BlockQuote) for c in containers)
 
     def close_leaf(*, emit: bool = True) -> None:
         nonlocal leaf
+        indented_pending_blank_indices.clear()
         if isinstance(leaf, _Paragraph):
             remaining = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
             if emit and remaining and (include_all_visible_blocks or not in_blockquote()):
@@ -2187,7 +2213,7 @@ def _parse_commonmark_blocks(
         if containers and isinstance(containers[-1], _ListItem):
             containers[-1].has_content = True
 
-    for raw_line in _split_commonmark_lines(body):
+    for line_idx, raw_line in enumerate(_split_commonmark_lines(body)):
         cursor = _LineCursor(raw_line)
 
         # 1. 从外到内匹配已打开容器栈
@@ -2232,6 +2258,8 @@ def _parse_commonmark_blocks(
                 if leaf.indent > 0:
                     cursor.advance_cols(min(cursor.indent_ahead(), leaf.indent))
                 leaf.lines.append(cursor.rest_text())
+                if code_line_indices_out is not None:
+                    code_line_indices_out.add(line_idx)
                 continue
             if isinstance(leaf, _HTMLBlock):
                 if leaf.kind in (6, 7):
@@ -2248,10 +2276,15 @@ def _parse_commonmark_blocks(
                 if cursor.is_blank():
                     cursor.advance_cols(4)
                     leaf.lines.append(cursor.rest_text())
+                    indented_pending_blank_indices.append(line_idx)
                     continue
                 if cursor.indent_ahead() >= 4:
                     cursor.advance_cols(4)
                     leaf.lines.append(cursor.rest_text())
+                    if code_line_indices_out is not None:
+                        code_line_indices_out.update(indented_pending_blank_indices)
+                        code_line_indices_out.add(line_idx)
+                    indented_pending_blank_indices.clear()
                     continue
                 close_leaf()
             if isinstance(leaf, _Table):
@@ -2291,6 +2324,9 @@ def _parse_commonmark_blocks(
                 mark_parent_has_content()
                 cursor.advance_cols(4)
                 leaf = _IndentedCode(lines=[cursor.rest_text()])
+                indented_pending_blank_indices.clear()
+                if code_line_indices_out is not None:
+                    code_line_indices_out.add(line_idx)
                 line_consumed = True
                 break
 

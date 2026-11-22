@@ -9158,7 +9158,121 @@ def test_r24_lossless_fingerprint_prevents_all_markdown_html_url_email_case_coll
     assert merged_norm[0].severity is Severity.IMPORTANT
     assert merged_norm[0].source_models == ("gpt-6-astra", "gpt-6.1-sol")
 
-    # 首尾含空格的非空行（!= ""）不被当作完全空行剥离
-    assert _normalize_fingerprint_text("  \nfoo\n  ", "failure_scenario", allow_code_blocks=True) == "  \nfoo\n  "
+    # R25：非代码块首尾仅含 ASCII 空格/制表符的空行规整并剥离；代码块内部空行与尾随空格原样保留
+    assert _normalize_fingerprint_text("  \nfoo\n  ", "failure_scenario", allow_code_blocks=True) == "foo"
     assert _normalize_fingerprint_text("\n\nfoo\r\n", "failure_scenario", allow_code_blocks=True) == "foo"
     assert _normalize_fingerprint_text("\n    GET /A\n", "failure_scenario", allow_code_blocks=True) == "    GET /A"
+
+
+# ── R25 精准回归（Codex R23 全部 2 项 Important：category 代码跨度空格保护 + 段末/文末不可见尾随空白归一） ────
+
+
+def test_r25_category_code_span_spaces_and_trailing_narrative_spaces() -> None:
+    """R25 精准回归：锁定核实候选数与跨轮待贴数，覆盖复现 A/B、多段落、围栏尾空格、跨行代码跨度、硬换行与代码块尾空格。"""
+    # 1. 复现 A（Important 1）：category 行内反引号代码跨度内连续空格绝不折叠，核实候选数为 2
+    a = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV 列 `unit price`", "导入时该列被静默丢弃", "复核通过")
+    b = Finding(Severity.IMPORTANT, "importer.py", 20, "CSV 列 `unit  price`", "导入时该列被静默丢弃", "复核通过")
+    assert a.finding_id != b.finding_id
+    merged_ab = merge_and_dedupe_findings([("gpt-6-astra", [a, b])])
+    assert len(merged_ab) == 2
+    assert {item.finding_id for item in merged_ab} == {a.finding_id, b.finding_id}
+    cand_ab = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel(
+            [
+                dataclasses.replace(a, source_models=("gpt-6-astra",)),
+                dataclasses.replace(b, source_models=("gpt-6.1-sol",)),
+            ],
+            round_number=1,
+            head_sha=HEAD_1,
+        ),
+    )
+    assert len(cand_ab.findings) == 2
+    assert {item.finding_id for item in cand_ab.findings} == {a.finding_id, b.finding_id}
+
+    # 对照：普通叙述中的多余空白仍与 _pick_best_text 保持归并一致且 ID 恒等
+    a_ws = Finding(Severity.IMPORTANT, "importer.py", 10, "  CSV  列  `unit price`  ", "导入时该列被静默丢弃", "复核通过")
+    assert a_ws.finding_id == a.finding_id
+    merged_a_ws = merge_and_dedupe_findings([("gpt-6-astra", [a]), ("gpt-6.1-sol", [a_ws])])
+    assert len(merged_a_ws) == 1
+    assert merged_a_ws[0].finding_id == a.finding_id
+
+    # 2. 复现 B（Important 2）：failure_scenario 文末/段末 ASCII 尾随空格与制表符归一，跨轮待贴数为 0
+    x = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV 导入", "导入空表时抛出异常", "复核通过")
+    y = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV 导入", "导入空表时抛出异常 ", "复核通过")
+    y_tab = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV 导入", "导入空表时抛出异常   \t  ", "复核通过")
+    assert x.finding_id == y.finding_id == y_tab.finding_id
+    vf_y = _verified(y, VerificationVerdict.CONFIRMED, verifier_evidence="复核通过")
+    assert len(select_postable_findings([vf_y], frozenset({x.finding_id}))) == 0
+
+    # 完整 evaluate_round 跨轮验证：第 1 轮已贴出 x，第 2 轮发现 y 仅句末多空格，postable_findings 为 0
+    x_r1 = dataclasses.replace(x, source_models=("gpt-6-astra",))
+    y_r2 = dataclasses.replace(y, source_models=("gpt-6-astra",))
+    e1_x = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({x_r1.finding_id}),
+        (x_r1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r1-x-1", "r1-x-2"}),
+    )
+    cand_r2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([y_r2], round_number=2, head_sha=HEAD_2),
+        history=(e1_x,),
+    )
+    assert len(cand_r2.findings) == 1
+    assert cand_r2.findings[0].finding_id == x.finding_id
+    vr_r2 = parse_verifier_output(
+        _verifier_payload(cand_r2, [{"finding_id": x.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2 = evaluate_round(vr_r2)
+    assert len(dec_r2.postable_findings) == 0
+    assert len(dec_r2.blocking_findings) == 1
+
+    # 3. 多段落段尾空格、空行内仅空白、闭合围栏尾空格均归一到同指纹且跨轮不重贴
+    p_clean = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV 导入", "第一段\n\n第二段", "e1")
+    p_trail = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV 导入", "第一段  \n   \t \n第二段 ", "e2")
+    assert p_clean.finding_id == p_trail.finding_id
+    assert len(merge_and_dedupe_findings([("gpt-6-astra", [p_clean, p_trail])])) == 1
+    assert len(select_postable_findings([_verified(p_trail, VerificationVerdict.CONFIRMED)], frozenset({p_clean.finding_id}))) == 0
+
+    fence_clean = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV 导入", "```\ncode\n```", "e1")
+    fence_trail = Finding(Severity.IMPORTANT, "importer.py", 10, "CSV 导入", "```\ncode\n```   \t", "e2")
+    assert fence_clean.finding_id == fence_trail.finding_id
+    assert len(merge_and_dedupe_findings([("gpt-6-astra", [fence_clean, fence_trail])])) == 1
+    assert (
+        len(select_postable_findings([_verified(fence_trail, VerificationVerdict.CONFIRMED)], frozenset({fence_clean.finding_id})))
+        == 0
+    )
+
+    # 4. 严禁误伤：跨行代码跨度、硬换行、缩进/围栏代码块行尾空格、代码块内空行与 U+00A0 均保持 distinct（候选数 = 2）
+    preserved_pairs: tuple[tuple[str, str], ...] = (
+        ("Run `a  \nb`", "Run `a\nb`"),
+        ("line1  \nline2", "line1\nline2"),
+        ("    code  ", "    code"),
+        ("```\ncode  \n```", "```\ncode\n```"),
+        ("```\n  \ncode\n```", "```\ncode\n```"),
+        ("    code1\n     \n    code2", "    code1\n\n    code2"),
+        ("导入空表时抛出异常\u00a0", "导入空表时抛出异常"),
+    )
+    for left, right in preserved_pairs:
+        f1, f2, merged_pair = _r21_probe(left, right)
+        assert f1.finding_id != f2.finding_id, f"unexpected collision for {left!r} vs {right!r}"
+        assert len(merged_pair) == 2
+        assert {item.finding_id for item in merged_pair} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    # 5. merge_and_dedupe_findings 身份不变性（含 NIT + IMPORTANT 优先级交叉归约）
+    x_nit = Finding(Severity.NIT, "importer.py", 10, "CSV 导入", "导入空表时抛出异常", "e-nit")
+    y_imp = Finding(Severity.IMPORTANT, "importer.py", 12, "CSV  导入", "导入空表时抛出异常   \t", "e-imp")
+    merged_inv = merge_and_dedupe_findings([("gpt-6-astra", [x_nit]), ("gpt-6.1-sol", [y_imp])])
+    assert len(merged_inv) == 1
+    assert merged_inv[0].finding_id == x_nit.finding_id == y_imp.finding_id
+    assert merged_inv[0].severity is Severity.IMPORTANT
