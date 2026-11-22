@@ -44,8 +44,9 @@ def sh(root, *args, check=True, env=None):
     return subprocess.run(args, cwd=root, check=check, capture_output=True, text=True, env=env)
 
 
-def lint(root, *flags):
-    return sh(root, sys.executable, str(PROGRAMS / "at18-registry-lint"), "--root", str(root), *flags, check=False)
+def lint(root, *flags, python_options=()):
+    return sh(root, sys.executable, *python_options, str(PROGRAMS / "at18-registry-lint"),
+              "--root", str(root), *flags, check=False)
 
 
 def commit(root, message):
@@ -156,7 +157,12 @@ Path(os.environ["AT18_RECORD_DIR"], "actual.json").write_text(json.dumps(doc))
 """
 
 
-def test_frozen_opening(repo):
+@pytest.fixture(params=[(), ("-O",)], ids=["normal", "optimized"])
+def python_options(request):
+    return request.param
+
+
+def test_frozen_opening(repo, python_options):
     reg, contract, digest, keys, definitions = load(repo)
     basis, boundaries = canonical_bases(repo, read(repo, CROSSWALK))
     assert len(basis) == 4071 and sum(k[0] == "TB-11" for k in basis) == 113
@@ -167,7 +173,9 @@ def test_frozen_opening(repo):
     assert digest == sha((repo / REGISTRY).read_bytes())
     assert reg["adapter_contract_sha256"] == sha((repo / ADAPTER).read_bytes())
     assert contract["experiment_authorization"]["comment_id"] is None
-    assert lint(repo).returncode == 0
+    assert not (repo / ".chanlun/at18/landing-census.json").exists()
+    assert not (repo / ".chanlun/at18/pregate-review.json").exists()
+    assert lint(repo, python_options=python_options).returncode == 0
 
 
 def test_formal_pregate_replays_frozen_landing_fields_and_cure_inventory():
@@ -213,6 +221,86 @@ def test_pregate_review_covers_actual_frozen_p0(census_checker):
     expected = census_checker.p0_rows(P0, retained, cwd=ROOT)
     counts = census_checker.check_review(PREGATE.parent / "pregate-review.json", expected)
     assert len(expected) == 1025 and counts == {"PASS": 978, "BLOCK": 47}
+
+
+@pytest.fixture(scope="module")
+def pregate_replay(tmp_path_factory):
+    out = tmp_path_factory.mktemp("pregate-replay")
+    f = read(PREGATE, "landings.json")["observation"]
+    sh(ROOT, sys.executable, str(PREGATE / "rebuild_pregate.py"), "--f", f, "--main-ref", f,
+       "--out", str(out), "--source", str(PREGATE / "sources.json"),
+       "--adjudication", str(PREGATE / "adjudication.json"),
+       "--census", str(PREGATE.parent / "landing-census.json"),
+       "--historical-runs", str(PREGATE / "historical-runs.json"))
+    return out
+
+
+def check_census_cli(python_options, replay, *flags):
+    return sh(ROOT, sys.executable, *python_options, str(PREGATE / "check_census.py"),
+              str(replay), *flags, check=False)
+
+
+def test_pregate_census_accepts_complete_replay(pregate_replay, python_options):
+    result = check_census_cli(python_options, pregate_replay)
+    assert result.returncode == 0, result.stderr
+    assert "115 unique landings, 1025 exact PRE paths" in result.stdout
+    assert "1025 exact path/blob/mode matches; 978 PASS / 47 BLOCK" in result.stdout
+    assert "Known #1405 CI failures match the exact historical run IDs" in result.stdout
+
+
+@pytest.mark.parametrize(("damage", "reason"), [
+    ("missing-landing", "missing from by_commit"),
+    ("extra-landing", "unregistered commit in by_commit"),
+    ("wrong-ticket", "ticket mapping mismatch"),
+    ("history-success", "39223502349 is not recorded as a failure"),
+    ("duplicate-pre", "pre.json: duplicate JSON key"),
+    ("duplicate-deviations", "historical-deviations.json: duplicate JSON key"),
+])
+def test_pregate_census_rejects_tampered_replay(pregate_replay, python_options, tmp_path, damage, reason):
+    replay = tmp_path / "replay"
+    shutil.copytree(pregate_replay, replay)
+    flags = ()
+    if damage in {"missing-landing", "extra-landing", "wrong-ticket"}:
+        ledger = read(replay, "landings.json")
+        landing = next(row for row in ledger["by_commit"] if row["tickets"] == [1581])
+        assert landing["commit"] == "084ebd700fedc74ddb531ac4da4f13196c07fb29"
+        if damage == "missing-landing":
+            ledger["by_commit"].remove(landing)
+            path = "rust/src/theta_v0/parser/tail.rs"
+            for name in ("pre.json", "paths.json"):
+                rows = read(replay, name)
+                write(replay, name, [row for row in rows if row["path"] != path])
+            review = read(PREGATE.parent, "pregate-review.json")
+            review["rows"] = [row for row in review["rows"] if row["path"] != path]
+            write(tmp_path, "review.json", review)
+            flags = ("--review", str(tmp_path / "review.json"))
+        elif damage == "extra-landing":
+            ledger["by_commit"].append(dict(landing, commit=P0))
+        else:
+            landing["tickets"] = [1405]
+        write(replay, "landings.json", ledger)
+    elif damage == "history-success":
+        sources = tmp_path / "sources"
+        runs = read(PREGATE, "historical-runs.json")
+        run = next(run for workflows in runs.values() for run in workflows[".github/workflows/ci.yml"]
+                   if run["id"] == 39223502349)
+        assert run["conclusion"] == "failure"
+        run["conclusion"] = "success"
+        write(sources, "historical-runs.json", runs)
+        shutil.copyfile(PREGATE / "r3-ticket-set.json", sources / "r3-ticket-set.json")
+        flags = ("--sources", str(sources))
+    else:
+        name, key = (("pre.json", "blob") if damage == "duplicate-pre"
+                     else ("historical-deviations.json", "observed"))
+        target = replay / name
+        raw = target.read_bytes()
+        token = f'"{key}":'.encode()
+        assert token in raw
+        target.write_bytes(raw.replace(token, token + b'"ignored-by-default-decoder",' + token, 1))
+    result = check_census_cli(python_options, replay, *flags)
+    assert result.returncode != 0
+    assert reason in result.stderr
+    assert not result.stdout
 
 
 @pytest.fixture
