@@ -1499,7 +1499,7 @@ export function rustReplacement(s: At18Repository, F: string, entry: string, che
       const source = utf8(s.blob(F, path));
       // stdin + skip_children：仅让 Rust 语法解析器读取 F 的这一份字节，不取检出的子模块。
       execFileSync("rustfmt", ["--emit", "stdout", "--config", "skip_children=true", "--edition", edition],
-        { input: source, stdio: ["pipe", "ignore", "ignore"], timeout: 5_000 });
+        { input: source, stdio: ["pipe", "ignore", "ignore"], timeout: 45_000 });
       const code = tokens(source, true);
       parsed.set(path, code);
       return code;

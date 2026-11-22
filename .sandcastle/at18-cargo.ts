@@ -11,7 +11,7 @@ export function cargoContext(toml: string | undefined, explicit: string[]) {
   // tomllib 处理注释、多行及引号；只展开本 crate 的特性名，不把依赖名混进来。
   const config = toml === undefined ? {} : manifest.parse(JSON.parse(execFileSync("python3", ["-I", "-B", "-c",
     "import json, sys, tomllib; c = tomllib.load(sys.stdin.buffer); print(json.dumps({k: c[k] for k in ('package', 'lib', 'features') if k in c}, default=str))"],
-  { input: toml, encoding: "utf8", timeout: 5_000, stdio: ["pipe", "pipe", "ignore"] })));
+  { input: toml, encoding: "utf8", timeout: 45_000, stdio: ["pipe", "pipe", "ignore"] })));
   const features = new Set(explicit);
   for (const enabled of features) {
     for (const name of config.features && Object.hasOwn(config.features, enabled) ? config.features[enabled] : []) {

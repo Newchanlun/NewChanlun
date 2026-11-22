@@ -1233,6 +1233,73 @@ def __getattr__(name):
   });
 });
 
+test("R18/#1319：原生星号导入和冻结文件内的导出绑定", { timeout: 60_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const production = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const backtest = "trading_system/backtest/__init__.py";
+  const route = "def route(events):\n    return list(events)\n";
+  const imported = "from .at18_fixture_feed import route\n";
+  const wire = imported + "def dispatch(events):\n    return route(events)\n";
+  const registered = (mod: string, name: string) =>
+    `from ${mod} import ${name}\ndef test_route():\n    assert ${name}([13, 21]) == [13, 21]\n`;
+  const through = registered("trading_system", "dispatch");
+  const direct = registered("trading_system.at18_fixture_feed", "route");
+  const check = (impl: string, integration: string, checkCode: string, expected: boolean, support = {}) => {
+    const repo = feedSource({ ...support, [entry]: impl, [production]: integration, [path]: checkCode });
+    assert.equal(pythonReplacement(repo, G0, entry, production, path, "test_route", 1), expected);
+  };
+  const indexed = (name: string) => `
+class _Exports:
+    def __getitem__(self, index):
+        return ("${name}",)[index]
+    def __iter__(self):
+        raise TypeError("index-only table")
+__all__ = _Exports()
+`;
+  await t.test("包的 fromlist 迭代失败否决整张清单", () => check(route, wire + indexed("dispatch"), through, false));
+  await t.test("普通模块的整数下标清单有效", () => check(route + indexed("route"), wire, through, true));
+  await t.test("包在追踪开始前自动导入未预载子包", () => {
+    check(route, wire + "__all__ = ('dispatch', 'backtest')\n", through, true,
+      { [backtest]: "import sys\nassert sys.getprofile() is None\n" });
+  });
+  await t.test("星号导入子包的初始化调用不能算生产接入", () => {
+    check(route, wire.replace("return route(events)", "return []") + "__all__ = ('dispatch', 'backtest')\n",
+      direct, false, { [backtest]: "from ..at18_fixture_feed import route\nroute([13, 21])\n" });
+  });
+
+  function binding(name: string, call: string, variant: "static" | "class" | "bound" | "lazy") {
+    const [decorator, receiver, owner] = variant === "class"
+      ? ["    @classmethod\n", "cls, ", "_Adapter"]
+      : variant === "bound"
+        ? ["", "self, ", "_Adapter(42)"]
+        : ["    @staticmethod\n", "", "_Adapter"];
+    const bind = variant === "lazy"
+      ? `def __getattr__(name):\n    if name == "${name}":\n        return ${owner}._apply\n    raise AttributeError(name)\n`
+      : `${name} = ${owner}._apply\n`;
+    return "class _Adapter:\n    def __init__(self, key):\n        self.key = key\n" +
+      decorator + `    def _apply(${receiver}events):\n        return ${call}\n` + bind + `__all__ = ("${name}",)\n`;
+  }
+
+  for (const variant of ["static", "class", "bound", "lazy"] as const) {
+    await t.test("承接显式导出 " + variant, () =>
+      check(binding("route", "list(events)", variant), wire, through, true));
+    await t.test("生产显式导出 " + variant, () =>
+      check(route, imported + binding("dispatch", "route(events)", variant), through, true));
+  }
+  await t.test("独立生产探针直接调用已绑定的类方法", () =>
+    check(route, imported + binding("_api", "route(events)", "class"), direct, true));
+  await t.test("承接默认公开别名指向本文件私有定义", () =>
+    check(route.replace("def route", "def _work") + "route = _work\n", wire, through, true));
+  await t.test("生产默认公开别名也能由探针调用", () =>
+    check(route, wire.replace("def dispatch", "def _work") + "dispatch = _work\n", direct, true));
+  await t.test("显式导出外来绑定方法不算本文件入口", () => {
+    const foreign = "trading_system/foreign.py";
+    check(route, "from .foreign import dispatch\n__all__ = ('dispatch',)\n", through, false,
+      { [foreign]: imported + binding("dispatch", "route(events)", "class") });
+  });
+});
+
 test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
   const f = makeFixture({ feedIntegration: `from .at18_fixture_feed import route
 def select_feed(sources, events):

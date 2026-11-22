@@ -8,9 +8,8 @@ import json
 import os
 import sys
 from contextvars import ContextVar
-from itertools import count
 from pathlib import Path
-from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType
+from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType, MethodType
 from weakref import WeakKeyDictionary
 
 import pytest
@@ -84,93 +83,66 @@ PROBE_STEPS = 1000
 RELOAD_CODE = importlib.reload.__code__
 
 
-def statements(body):
-    """展开同一词法层的控制流块，不进入函数或类的内部作用域。"""
-    for stmt in body:
-        yield stmt
-        if isinstance(stmt, (ast.If, ast.For, ast.AsyncFor, ast.While)):
-            yield from statements(stmt.body)
-            yield from statements(stmt.orelse)
-        elif isinstance(stmt, (ast.Try, ast.TryStar)):
-            yield from statements(stmt.body)
-            for handler in stmt.handlers:
-                yield from statements(handler.body)
-            yield from statements(stmt.orelse)
-            yield from statements(stmt.finalbody)
-        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
-            yield from statements(stmt.body)
-        elif isinstance(stmt, ast.Match):
-            for case in stmt.cases:
-                yield from statements(case.body)
-
-
-def export_values(loaded):
+def exported_bindings(name, path):
+    # Git 路径转成语句前须是限定模块名，不允许路径文字成为 Python 语法。
+    if not all(part.isidentifier() for part in name.split(".")):
+        return None, {}
     try:
-        exports = getattr(loaded, "__all__")
-    except AttributeError:
-        return False, [value for name, value in vars(loaded).items() if not name.startswith("_")]
+        loaded = importlib.import_module(name)
+        if Path(loaded.__file__).resolve() != Path(path):
+            return None, {}
+        namespace = {}
+        exec(f"from {name} import *", namespace)
+        namespace.pop("__builtins__", None)
+        return vars(loaded), namespace
     except BaseException:
-        return True, []
-    # 像 CPython 的 import * 一样，逐项读取整数下标并解析属性。
-    # 必须先验证整张清单，调用者才可用其中任何一个成员作证。
-    values = []
-    for i in count():
-        try:
-            name = exports[i]
-        except IndexError:
-            return True, values
-        except BaseException:
-            return True, []
-        if not isinstance(name, str):
-            return True, []
-        try:
-            values.append(getattr(loaded, name))
-        except BaseException:
-            return True, []
+        # import * 可能已写入前缀；整张清单失败时不得使用其中任何绑定。
+        return None, {}
+
+
+def underlying(member):
+    return member.__func__ if type(member) in (MethodType, staticmethod, classmethod) else member
 
 
 class Exports:
     def __init__(self, path, require_body=False):
-        self.path = str(Path(path).resolve())
+        self.path, self.module = str(Path(path).resolve()), module(path)
         raw = Path(path).read_bytes()
-        top = list(statements(ast.parse(raw, path).body))
-        functions = {(line(stmt), stmt.name) for stmt in top if isinstance(stmt, FUNCTIONS)
-                     and (not require_body or substantive(stmt))}
-        classes = {(line(stmt), stmt.name) for stmt in top if isinstance(stmt, ast.ClassDef)}
-        methods = {(line(method), method.name) for cls in top if isinstance(cls, ast.ClassDef)
-                   for method in statements(cls.body) if isinstance(method, FUNCTIONS) and
-                   not method.name.startswith("_") and (not require_body or substantive(method))}
+        declarations = list(ast.walk(ast.parse(raw, path)))
+        functions = {(line(node), node.name) for node in declarations if isinstance(node, FUNCTIONS)
+                     and (not require_body or substantive(node))}
+        functions.update((node.lineno, "<lambda>") for node in declarations if isinstance(node, ast.Lambda))
+        classes = {(line(node), node.name) for node in declarations if isinstance(node, ast.ClassDef)}
         codes = list(code_objects(compile(raw, self.path, "exec")))
+        self.definitions = {c for c in codes if (c.co_firstlineno, c.co_name) in functions}
         self.classes = {c for c in codes if (c.co_firstlineno, c.co_name) in classes}
-        self.functions = {c for c in codes if (c.co_firstlineno, c.co_name) in functions}
-        self.methods = {c for c in codes if (c.co_firstlineno, c.co_name) in methods}
-        self.codes = self.functions | self.methods
+        self.class_names = {c.co_qualname for c in self.classes}
 
-    def members(self, loaded):
-        explicit, values = export_values(loaded)
-        for value in values:
-            if type(value) is FunctionType and value.__code__ in self.functions:
-                if explicit or not value.__code__.co_name.startswith("_"):
-                    yield None, value
-            elif isinstance(value, type) and value.__module__ == vars(loaded).get("__name__"):
-                if not explicit and value.__name__.startswith("_"):
-                    continue
+    def owns(self, fn):
+        return (type(fn) is FunctionType and fn.__globals__ is self.globals and
+                str(Path(fn.__code__.co_filename).resolve()) == self.path and fn.__code__ in self.definitions)
+
+    def load(self):
+        self.globals, bindings = exported_bindings(self.module, self.path)
+        self.members = list(self.local_members(bindings))
+        self.codes = {underlying(member).__code__ for _, member in self.members}
+
+    def local_members(self, bindings):
+        for value in bindings.values():
+            if type(value) in (FunctionType, MethodType) and self.owns(underlying(value)):
+                yield None, value
+            elif (isinstance(value, type) and value.__module__ == self.module
+                  and value.__qualname__ in self.class_names):
                 for name, member in vars(value).items():
-                    if name.startswith("_"):
-                        continue
-                    fn = member.__func__ if type(member) in (staticmethod, classmethod) else member
-                    if type(fn) is FunctionType and fn.__code__ in self.methods:
-                        yield value, member
+                    if not name.startswith("_") and type(member) in (FunctionType, staticmethod, classmethod):
+                        fn = underlying(member)
+                        if self.owns(fn) and fn.__code__.co_qualname.rpartition(".")[0] == value.__qualname__:
+                            yield value, member
 
     def contains(self, frame):
-        code = frame.f_code
-        if code.co_filename != self.path or code not in self.codes:
-            return False
-        loaded = sys.modules.get(frame.f_globals.get("__name__"))
-        if not inspect.ismodule(loaded) or vars(loaded) is not frame.f_globals:
-            return False
-        return any((member.__func__ if type(member) in (staticmethod, classmethod) else member).__code__ is code
-                   for _, member in self.members(loaded))
+        # 同一冻结定义在 reload 后可重建 code 对象；仍要求实际模块的全局字典和文件。
+        return (frame.f_globals is self.globals and frame.f_code.co_filename == self.path and
+                frame.f_code in self.codes)
 
     def initialized(self, frame):
         while frame is not None:
@@ -412,22 +384,18 @@ class Trace:
         return any(via_public and code in expected for code, _, via_public in self.accepted())
 
 
-def public_probe(integration, production, targets, test_entered_codes, samples):
+def public_probe(production, targets, test_entered_codes, samples):
     # pytest 可能已加载或修改受验模块；用同一冻结副本重新导入，且导入不记覆盖。
     root = Path.cwd().resolve()
     for name, loaded in list(sys.modules.items()):
         filename = vars(loaded).get("__file__") if inspect.ismodule(loaded) else None
         if isinstance(filename, str) and Path(filename).resolve().is_relative_to(root):
             sys.modules.pop(name, None)
-    try:
-        loaded = importlib.import_module(module(integration))
-        if Path(loaded.__file__).resolve() != Path(production.path):
-            return False
-    except (Exception, SystemExit):
-        return False
+    production.load()
+    targets.load()
 
     instances = {}
-    for owner, member in production.members(loaded):
+    for owner, member in production.members:
         try:
             if owner is None:
                 fn = member
@@ -505,6 +473,9 @@ def proves(doc, scratch):
 
         @pytest.hookimpl(wrapper=True, trylast=True)
         def pytest_runtest_call(self, item):
+            # 先完成星号导入（包括包的子模块加载及动态属性），只追踪登记调用。
+            production.load()
+            targets.load()
             trace = Trace(production, targets, test=position)
             sys.setprofile(trace.profile)
             try:
@@ -529,7 +500,7 @@ def proves(doc, scratch):
                           path + "::" + selector], plugins=[registration])
     return (result == pytest.ExitCode.OK and not registration.nonpass and registration.passed == doc["count"] and
             (registration.covered or bool(registration.entered) and
-             public_probe(integration, production, targets, registration.entered, registration.samples)))
+             public_probe(production, targets, registration.entered, registration.samples)))
 
 
 if __name__ == "__main__":
