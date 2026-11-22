@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from functools import cache
+from io import BytesIO
 from pathlib import Path
 import re
 import subprocess
@@ -19,6 +21,12 @@ OID = re.compile(r"[0-9a-f]{40}")
 REMEDIATION = ".chanlun/at18/pregate-remediation.json"
 REMEDIATION_SCHEMA = "at18-pregate-remediation/1"
 REVIEW_ARCHIVE = ".chanlun/review-results/"
+INPUT_MANIFEST = "INPUT-MANIFEST.json"
+OUTPUT_DIRS = frozenset({
+    "report", "reports", "receipt", "receipts", "review", "reviews", "audit", "audits", "verify", "runs",
+})
+OUTPUT_NAME = re.compile(r"(?:^|[-_.])(?:report|result|receipt|audit|review|verify)(?:\.|$)")
+REGULAR_RAW_MODES = tuple(mode.encode() for mode in REGULAR_MODES)
 # 按 #1339/#1340 的归档清单只开放具名规范。索引的 role 同时标记了规范和独评，
 # 不能拿来放行；签署稿与阅读版须各按自己的 Git 路径/字节判定。
 ARCHIVE_BASIS_STEMS = {
@@ -103,7 +111,8 @@ def require(condition, code, message):
 
 
 def git(*args, cwd=None, input=None):
-    return subprocess.check_output(["git", *args], cwd=cwd, input=input)
+    kwargs = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
+    return subprocess.check_output(["git", *args], cwd=cwd, **kwargs)
 
 
 def strict_json(raw, code, identity):
@@ -202,26 +211,137 @@ def is_artifact_archive_path(path):
     return not (stem in allowed and (extension == "md" or (edition == "payload" and extension == "json")))
 
 
+def input_manifest_paths(raw):
+    try:
+        doc = decode_json(raw)
+    except ValueError:
+        return set()
+    if not isinstance(doc, dict):
+        return set()
+    paths = set()
+    inputs = doc.get("inputs")
+    if isinstance(inputs, list):
+        paths.update(path for path in inputs if valid_path(path))
+    copies = doc.get("frozen_copies")
+    if isinstance(copies, dict):
+        paths.update(path for path, source in copies.items()
+                     if valid_path(path) and isinstance(source, str) and source.strip())
+    files = doc.get("files_sha256")
+    if isinstance(files, dict):
+        paths.update(path for path, digest in files.items()
+                     if valid_path(path) and isinstance(digest, str) and re.fullmatch("[0-9a-fA-F]{64}", digest))
+    return paths
+
+
+def archive_input_blobs(blobs, *, cwd):
+    """批量检查候选输入正文，保留报告与回执的内容禁用。"""
+    if not blobs:
+        return set()
+    response = git("cat-file", "--batch", cwd=cwd, input=b"\n".join(sorted(blobs)) + b"\n")
+    stream = BytesIO(response)
+    artifacts = set()
+    while header := stream.readline():
+        oid, _, size = header.split()
+        raw = stream.read(int(size))
+        stream.read(1)  # Git 在每份正文后另加一个 LF。
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeError:  # 二进制不是可引用的依据。
+            continue
+        if is_report_artifact(raw, text):
+            artifacts.add(oid.decode())
+    return artifacts
+
+
 def archive_artifact_blobs(final_tree, head, *, cwd):
-    forbidden = {
-        entry.blob for path, entry in final_tree.items()
+    """只在 F 的首父历史定起源，供本次补救校验的所有条目共用。"""
+    # 根快照及新增/变更足以覆盖已删除的产出；合并只与第一父比较。
+    raw = git("log", "--root", "--first-parent", "--diff-merges=first-parent",
+              "--no-renames", "--no-abbrev", "--raw", "-z", "--format=%x00%H",
+              "--diff-filter=AMT", "--reverse", head, cwd=cwd)
+    candidates = {
+        entry.blob.encode() for path, entry in final_tree.items()
         if entry.kind == "blob" and entry.mode in REGULAR_MODES and is_artifact_archive_path(path)
     }
-    # 两侧都收：删除/移动保留旧身份；合入提交与其第一父比较，不走第二父。
-    raw = git("log", "--first-parent", "--full-history", "--diff-merges=first-parent",
-              "--no-renames", "--no-abbrev", "--raw", "-z", "--format=", head, "--",
-              REVIEW_ARCHIVE, cwd=cwd)
+    manifests = set()
+    # 先限定候选；不为从未在受禁归档出现的 blob 建历史索引。
+    marker = b"\0" + REVIEW_ARCHIVE.encode()
+    end = 0
+    while (start := raw.find(marker, end)) != -1:
+        end = raw.index(b"\0", start + 1)
+        path = raw[start + 1:end]
+        metadata = raw[raw.rindex(b"\0", 0, start) + 1:start]
+        _, mode, _, blob, _ = metadata.split()
+        if mode in REGULAR_RAW_MODES:
+            text_path = path.decode("utf-8", errors="surrogateescape")
+            relative = text_path.removeprefix(REVIEW_ARCHIVE)
+            if relative.endswith("/" + INPUT_MANIFEST):
+                manifests.add(text_path)
+            if is_artifact_archive_path(text_path):
+                candidates.add(blob)
+    candidates.discard(EMPTY_BLOB.encode())
+    if not candidates:
+        return set()
+
+    origins = {}
     records = iter(raw.split(b"\0")[:-1])
-    for metadata, path in zip(records, records, strict=True):
-        if not is_artifact_archive_path(path.decode("utf-8", errors="surrogateescape")):
+    for metadata in records:
+        if not metadata:
+            commit = next(records)
             continue
-        old_mode, new_mode, old_blob, new_blob, _ = metadata.decode("ascii").split()
-        if old_mode[1:] in REGULAR_MODES:
-            forbidden.add(old_blob)
-        if new_mode in REGULAR_MODES:
-            forbidden.add(new_blob)
-    forbidden.discard(EMPTY_BLOB)
-    return forbidden
+        path = next(records)
+        _, mode, _, blob, _ = metadata.split()
+        if blob in candidates and mode in REGULAR_RAW_MODES:
+            first, paths = origins.setdefault(blob, (commit, []))
+            if first == commit:
+                paths.append(path.decode("utf-8", errors="surrogateescape"))
+
+    manifest_dirs = tuple(path.rsplit("/", 1)[0] + "/" for path in manifests)
+
+    @cache
+    def manifest_inputs(blob):
+        return input_manifest_paths(git("cat-file", "blob", blob, cwd=cwd))
+
+    @cache
+    def declared_inputs(commit):
+        # 用最早提交的清单；声明不能靠同名条目或后续递交改写。
+        raw = git("--literal-pathspecs", "ls-tree", "--full-tree", "-rz", commit.decode(),
+                  "--", *sorted(manifests), cwd=cwd)
+        declared = set()
+        for record in raw.split(b"\0")[:-1]:
+            metadata, path = record.split(b"\t", 1)
+            mode, kind, blob = metadata.decode().split()
+            if kind == "blob" and mode in REGULAR_MODES:
+                directory = path.decode("utf-8", errors="surrogateescape").rsplit("/", 1)[0]
+                declared.update(f"{directory}/{item}" for item in manifest_inputs(blob))
+        return declared
+
+    def input_path(path, commit):
+        _, separator, relative = path.removeprefix(REVIEW_ARCHIVE).partition("/")
+        if not separator:
+            return False
+        *dirs, leaf = relative.lower().split("/")
+        if (leaf == INPUT_MANIFEST.lower() or OUTPUT_NAME.search(leaf)
+                or not OUTPUT_DIRS.isdisjoint(dirs)):
+            return False
+        return ("inputs" in dirs
+                or (path.startswith(manifest_dirs) and path in declared_inputs(commit)))
+
+    forbidden = set()
+    inspect_bodies = set()
+    for blob in candidates:
+        if blob not in origins:
+            # 若传入树额外带有历史中不存在的归档项，保留它的归档身份。
+            forbidden.add(blob.decode())
+            continue
+        commit, paths = origins[blob]
+        # 同一提交出现现役别名或输入副本，不足以推翻该提交内的归档产出。
+        restricted = [path for path in paths if is_artifact_archive_path(path)]
+        if REMEDIATION in paths or any(not input_path(path, commit) for path in restricted):
+            forbidden.add(blob.decode())
+        elif restricted:
+            inspect_bodies.add(blob)
+    return forbidden | archive_input_blobs(inspect_bodies, cwd=cwd)
 
 
 def is_git_sha(value):

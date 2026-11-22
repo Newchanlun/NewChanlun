@@ -670,14 +670,23 @@ TB_ROOT = ".chanlun/review-results/issue1372-tb01c-20260913/reports/"
     ("isolated", TB_ROOT + "q-memo-independent/REVIEW.md", "ad2b826a02d3246a8f364729133adc05862ec16e", 3),
     ("isolated", TB_ROOT + "browser-continuation-performance/final-run-results/MANIFEST.json",
      "bae060f976620d1158bb510b8a157d605bce4ee1", 3),
+    ("move", TB_REPORT_PATH, TB_REPORT_BLOB, 3),
+    ("move", TB_ROOT + "legacy-query-callers-audit/REPORT.json", "154af3f5240d8b90657274ac2bd303e463d26b8d", 3),
+    ("move", TB_ROOT + "runtime/trajectory-r5-a/FACTS.json", "f845d2bbb066b9798dcc07067c9c711b3097efe1", 3),
+    ("move", TB_ROOT + "q-memo-independent/REVIEW.md", "ad2b826a02d3246a8f364729133adc05862ec16e", 3),
+    ("move", TB_ROOT + "browser-continuation-performance/final-run-results/MANIFEST.json",
+     "bae060f976620d1158bb510b8a157d605bce4ee1", 3),
 ])
 def test_verification_basis_rejects_actual_tb_artifacts(history, options, mode, source, blob, line):
     h = history
     h.gate()
     raw = subprocess.check_output(["git", "cat-file", "blob", blob], cwd=ROOT)
     path = source if mode == "archive" else "spec/evidence.dat"
-    if mode == "copy":
+    if mode in ("copy", "move"):
         h.write(source, raw)
+    if mode == "move":
+        h.commit("Archive the original before relocation")
+        h.remove(source)
     h.write(path, raw)
     h.commit("Add the historical artifact")
     assert h.blob("HEAD", path) == blob
@@ -885,3 +894,153 @@ def test_census_archive_preview_validates_only_specifications(options, archive_p
     assert ("42 hard BLOCK / 5 changed BLOCK / 0 deleted BLOCK; "
             f"{count} locally validated remediation rows; 0 released") in result.stdout, result.stderr
     assert (BASIS_ERROR in result.stderr) == (count == 0)
+
+
+@pytest.mark.parametrize("leaf", ["payload/spec/rules.md", "view/spec/rules.md", "payload/inputs/receipts/rules.md"])
+@pytest.mark.parametrize("cite_archive", [False, True], ids=["live-original", "archive-path"])
+def test_basis_keeps_rules_first_published_outside_archive(history, options, leaf, cite_archive):
+    h = history
+    active = "standards/" + leaf
+    frozen = ARCHIVE + "topic/" + leaf
+    h.write(active, SETTLEMENT_RULE.encode())
+    h.gate()
+    h.write(frozen, SETTLEMENT_RULE.encode())
+    h.commit("Freeze an already published rule")
+    check_basis(h, options, frozen if cite_archive else active, allowed=not cite_archive, line=3)
+
+
+@pytest.mark.parametrize(("kind", "leaf", "raw", "allowed"), [
+    ("directory", "inputs/vectors.json", FEE_RULE, True),
+    ("same-dir", "frozen/material.json", FEE_RULE, True),
+    ("manifest-inputs", "frozen/material.json", FEE_RULE, True),
+    ("package", "frozen/material.json", FEE_RULE, True),
+    ("digest-list", "frozen/material.json", FEE_RULE, True),
+    ("archive-root", "frozen/material.json", FEE_RULE, False),
+    ("wrong-path", "frozen/material.json", FEE_RULE, False),
+    ("late", "frozen/material.json", FEE_RULE, False),
+    ("late", "old/result-copy.txt", "Unstructured delivery record\n", False),
+    ("same-dir", "frozen/REPORT.md", "Unstructured delivery record\n", False),
+    ("directory", "inputs/NODE-RESULT.json", FEE_RULE, False),
+    ("directory", "inputs/receipts/material.json", FEE_RULE, False),
+    ("directory", "inputs/PROTOCOL-REVIEW.json", FEE_RULE, False),
+    ("directory", "inputs/PROTOCOL-VERIFY.md", SETTLEMENT_RULE, False),
+    ("same-dir", "frozen/material.json", '{"schema_version":"at18-report/1"}', False),
+    ("directory", "inputs/material.txt", f"Reviewed head: {RUN_HEAD}\nVerdict: PASS\n", False),
+], ids=[
+    "pure-input", "sibling-manifest", "inputs-list", "package-manifest", "digest-list",
+    "archive-root-manifest", "same-basename-not-exact", "late-declaration", "late-input-alias",
+    "manifest-names-report", "result-under-inputs", "receipt-dir-under-inputs",
+    "review-under-inputs", "verify-under-inputs", "report-content-in-manifest", "receipt-content-under-inputs",
+])
+def test_basis_promotes_only_archive_inputs(history, options, kind, leaf, raw, allowed):
+    h = history
+    package = ARCHIVE + "generic-bundle/"
+    archived = package + leaf
+    dest = "spec/promoted.dat"
+    h.gate()
+    h.write(archived, raw.encode())
+    prefixes = {"package": package, "wrong-path": package, "archive-root": ARCHIVE}
+    prefix = prefixes.get(kind, archived.rsplit("/", 1)[0] + "/")
+    manifest = prefix + "INPUT-MANIFEST.json"
+    relative = Path(archived).name if kind == "wrong-path" else archived.removeprefix(prefix)
+    if kind == "manifest-inputs":
+        declaration = {"inputs": [relative]}
+    elif kind == "digest-list":
+        declaration = {"files_sha256": {relative: "a" * 64}}
+    else:
+        declaration = {"frozen_copies": {relative: "source @ snapshot"}}
+    if kind not in ("directory", "late"):
+        h.write(manifest, json.dumps(declaration).encode())
+    h.commit("Archive the original")
+    if kind == "late":
+        h.write(manifest, json.dumps(declaration).encode())
+        h.write(package + "inputs/late-copy.txt", raw.encode())
+        h.commit("A later input declaration cannot change origin")
+    h.remove(archived)
+    h.write(dest, raw.encode())
+    h.commit("Promote the same bytes under a neutral name")
+    check_basis(h, options, dest, allowed=allowed)
+
+
+def test_basis_same_commit_input_does_not_override_archive_output(history, options):
+    h = history
+    raw = b"An unstructured output with no body signature.\n"
+    archived = ARCHIVE + "generic-bundle/"
+    active = "spec/neutral-note.txt"
+    h.gate()
+    h.write(archived + "inputs/vector.txt", raw)
+    h.write(archived + "reports/note.txt", raw)
+    h.write(active, raw)
+    h.commit("Input, neutral alias and archive output enter in one commit")
+    check_basis(h, options, active, allowed=False)
+
+
+def test_basis_rejects_report_body_even_if_first_published_outside_archive(history, options):
+    h = history
+    raw = b'{"schema_version":"at18-report/1"}'
+    active = "spec/neutral.json"
+    h.write(active, raw)
+    h.gate()
+    h.write(ARCHIVE + "generic-bundle/inputs/material.json", raw)
+    h.commit("Freeze an already published report")
+    check_basis(h, options, active, allowed=False)
+
+
+REAL_LIVE_BASES = (
+    ("s_session/profiles/ohlc_integer_tb02a_v1.json", 5),
+    ("s_session/catalog/signed-catalog.json", 2),
+    ("s_session/tests/drive_tb03c_fin2_hfs.sh", 1),
+    ("s_session/tests/fixtures/s-content-v3/content-format-vectors.json", 2),
+    ("s_session/tests/fixtures/tb03c_allocation/HAND-ORACLE.json", 2),
+    ("s_session/tests/fixtures/tb03c_allocation/RAW.json", 2),
+    (".chanlun/tower-construction/tower_continuous_axis_unify.md", 1),
+    (".chanlun/.crystallization-debt.json", 1),
+)
+R4_HEAD = "41aa16e8270b422bc2c6d5659b677d116fbd6184"
+S86_REMOVAL = "f0492560977191c8a33e0a4eb767bacbabbc04d1"
+S86_REPORT = ARCHIVE + "1488-acceptance/s86/r8/REPORT.md"
+ORIGIN_PROBE = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import pregate_contract as c
+head, deleted_report, publication = sys.argv[2:5]
+tree = c.git_tree(head)
+ban = c.archive_artifact_blobs(tree, head, cwd=None)
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+def outcome(path, line):
+    blob = tree[path].blob
+    try:
+        c.basis_key(dict(path=path, blob=blob, line_start=line, line_end=line), tree, ban, {}, require, cwd=None)
+    except ValueError as error:
+        return str(error)
+    return "accepted"
+live = {path: outcome(path, line) for path, line in json.loads(sys.argv[5])}
+reviews = [path for path, entry in tree.items() if entry.mode in c.REGULAR_MODES
+           and path.startswith(publication) and Path(path).stem.endswith(("-REVIEW", "-VERIFY"))]
+slices = [path for path, entry in tree.items() if entry.mode in c.REGULAR_MODES
+          and path.startswith(publication) and Path(path).stem in
+          ("TB01-EXECUTION-SLICES", "TB02-06-EXECUTION-SLICES", "TB07-11-EXECUTION-SLICES")]
+require(not any(entry.blob == deleted_report for entry in tree.values()), "old report still present")
+tree["spec/retained-note.md"] = c.Entry("100644", "blob", deleted_report)
+print(json.dumps(dict(live=live, reviews=[outcome(p, 2) for p in reviews],
+                      slices=[outcome(p, 2) for p in slices], old_report=outcome("spec/retained-note.md", 1))))
+"""
+
+
+def test_real_history_separates_live_inputs_from_deleted_reports(options):
+    report = git_at_r3("rev-parse", f"{S86_REMOVAL}^1:{S86_REPORT}").decode().strip()
+    result = subprocess.run(
+        [sys.executable, *options, "-c", ORIGIN_PROBE, str(PREGATE), R4_HEAD, report,
+         PUBLICATION, json.dumps(REAL_LIVE_BASES)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "live": dict.fromkeys((path for path, _ in REAL_LIVE_BASES), "accepted"),
+        "reviews": [BASIS_ERROR] * 26,
+        "slices": ["accepted"] * 9,
+        "old_report": BASIS_ERROR,
+    }
