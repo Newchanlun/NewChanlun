@@ -628,8 +628,21 @@ impl FeatureSeqState {
         self.facts.clone().unwrap_or_default()
     }
 
+    /// 零克隆移出本段事实，保留 `Some(...)` 观察标志供后续 `reset` 继续记录。
+    pub fn take_facts(&mut self) -> FeatureSequenceFacts {
+        match &mut self.facts {
+            Some(facts) => std::mem::take(facts),
+            None => FeatureSequenceFacts::default(),
+        }
+    }
+
     pub fn second_facts(&self) -> Option<SecondSequenceFacts> {
         self.second.clone()
+    }
+
+    /// 零克隆移出本段第二序列事实。
+    pub fn take_second_facts(&mut self) -> Option<SecondSequenceFacts> {
+        self.second.take()
     }
 
     /// 本状态机所读的相切口径（段层事实输出与构造门同读，#1604）。
@@ -670,29 +683,30 @@ impl FeatureSeqState {
     pub fn append(&mut self, stroke_idx: usize, high: Tick, low: Tick, strokes: &[Stroke]) {
         let _ = strokes;
         self.last_beyond = false;
-        let incoming = FeatureElement {
-            high,
-            low,
-            stroke_idx,
-            stroke_indices: if self.facts.is_some() {
-                vec![stroke_idx]
-            } else {
-                Vec::new()
-            },
-            window_members: Vec::new(),
-        };
-        let before = self.facts.as_ref().and_then(|f| f.standard.last().cloned());
-        if let Some(f) = &mut self.facts {
+        let obs = if let Some(f) = &mut self.facts {
+            let incoming = FeatureElement {
+                high,
+                low,
+                stroke_idx,
+                stroke_indices: vec![stroke_idx],
+                window_members: Vec::new(),
+            };
+            let before = f.standard.last().cloned();
             f.raw_elements.push(incoming.clone());
-        }
+            Some((incoming, before))
+        } else {
+            None
+        };
         if self.std.is_empty() {
             self.std.push(FeatElem {
                 high,
                 low,
                 stroke_idx,
             });
-            self.record_step(incoming, before, "append", None, "SAME_SEQUENCE", None);
-            self.refresh_open_turn();
+            if let Some((incoming, before)) = obs {
+                self.record_step(incoming, before, "append", None, "SAME_SEQUENCE", None);
+                self.refresh_open_turn();
+            }
             return;
         }
         let last = *self.std.last().unwrap();
@@ -715,14 +729,16 @@ impl FeatureSeqState {
                     low,
                     stroke_idx,
                 });
-                self.record_step(
-                    incoming,
-                    before,
-                    "boundary_pair",
-                    None,
-                    "TURN_HYPOTHESIS",
-                    None,
-                );
+                if let Some((incoming, before)) = obs {
+                    self.record_step(
+                        incoming,
+                        before,
+                        "boundary_pair",
+                        None,
+                        "TURN_HYPOTHESIS",
+                        None,
+                    );
+                }
             } else if right_inc && tie_extreme && !left_inc && peak && !gap_ab {
                 // 并列（无缺口）：P 侧相等不是越过，另一侧严格越过 b 终点 ⟹ 交先破判据确认。
                 self.std.push(FeatElem {
@@ -730,25 +746,29 @@ impl FeatureSeqState {
                     low,
                     stroke_idx,
                 });
-                self.record_step(
-                    incoming,
-                    before,
-                    "tie_pair",
-                    None,
-                    "TURN_HYPOTHESIS",
-                    Some(last.stroke_idx),
-                );
+                if let Some((incoming, before)) = obs {
+                    self.record_step(
+                        incoming,
+                        before,
+                        "tie_pair",
+                        None,
+                        "TURN_HYPOTHESIS",
+                        Some(last.stroke_idx),
+                    );
+                }
             } else if peak && (!gap_ab || !left_inc || gap_inclusion_arm() == 1) {
                 // R2：第一种情况（a、b 无缺口）c ⊂ b ⟹ b 的窗成员，b 区间不动（071:32，§7.1 第 3 条）；
                 // 有缺口的并列（入元素 ⊋ b、P 侧相等）同记窗成员（§7.1 第 4 条）。
-                self.record_step(
-                    incoming,
-                    before,
-                    "window_member",
-                    None,
-                    "TURN_HYPOTHESIS",
-                    None,
-                );
+                if let Some((incoming, before)) = obs {
+                    self.record_step(
+                        incoming,
+                        before,
+                        "window_member",
+                        None,
+                        "TURN_HYPOTHESIS",
+                        None,
+                    );
+                }
             } else {
                 // R3：末元素不是峰候选 ⟹ G-2 方向性合并，代表笔改为入元素。
                 // #1493 裁定 2（§7.1 第 4 条）：有缺口的峰候选 b 包含入元素（`left_inc`）⟹ 同样按 G-2
@@ -768,14 +788,16 @@ impl FeatureSeqState {
                     last_mut.stroke_idx = stroke_idx;
                 }
                 self.last_checked = self.std.len().saturating_sub(3);
-                self.record_step(
-                    incoming,
-                    before,
-                    "merge",
-                    Some(if effective_up { "UP" } else { "DOWN" }),
-                    "SAME_SEQUENCE",
-                    None,
-                );
+                if let Some((incoming, before)) = obs {
+                    self.record_step(
+                        incoming,
+                        before,
+                        "merge",
+                        Some(if effective_up { "UP" } else { "DOWN" }),
+                        "SAME_SEQUENCE",
+                        None,
+                    );
+                }
             }
         } else {
             if high > last_h && low > last_l {
@@ -788,9 +810,13 @@ impl FeatureSeqState {
                 low,
                 stroke_idx,
             });
-            self.record_step(incoming, before, "append", None, "SAME_SEQUENCE", None);
+            if let Some((incoming, before)) = obs {
+                self.record_step(incoming, before, "append", None, "SAME_SEQUENCE", None);
+            }
         }
-        self.refresh_open_turn();
+        if self.facts.is_some() {
+            self.refresh_open_turn();
+        }
     }
 
     /// 末标准元素是否峰候选：比其前一标准元素在段方向更极端（Up：high 更高；Down：low 更低）。

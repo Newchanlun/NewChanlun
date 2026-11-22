@@ -536,14 +536,14 @@ fn record_candidate(
     strokes: &[Stroke],
     start: usize,
     cursor: usize,
-    feat: &FeatureSeqState,
+    feat: &mut FeatureSeqState,
     end: Option<usize>,
     mut attempts: Vec<SegmentEndCheck>,
     min_seg: usize,
     invalid_from: Option<usize>,
 ) {
     let t = feat.tangency();
-    let first = feat.facts();
+    let first = feat.take_facts();
     let active_check = first.checks.iter().rev().find(|c| c.first_fractal);
     // 即使有 gap、尚未触发终结，当前第一分型的几何条件仍然可判。
     // CC-013 的 FAILED_GEOMETRY 优先于第二种等待，不能用等待掩盖已知失败。
@@ -559,7 +559,7 @@ fn record_candidate(
             });
         }
     }
-    let second = feat.second_facts();
+    let second = feat.take_second_facts();
     let observed_through = second
         .as_ref()
         .map_or(cursor, |s| cursor.max(s.through_stroke));
@@ -687,8 +687,8 @@ fn record_candidate(
     let termination_witness = end.and_then(|e| {
         let strict = strict.clone()?;
         let second_match = second.as_ref().and_then(|s| s.matched.clone());
-        let constructed = construction(strokes, start, e + 1, t);
         let minimum_count_met = e - start + 1 >= min_seg;
+        let constructed = built.clone();
         (constructed.valid()
             && minimum_count_met
             && (strict.effective_case == "CASE_ONE" || second_match.is_some()))
@@ -1046,7 +1046,7 @@ fn divide_segments_core(
     }
     let first_start::FirstSegment {
         published,
-        deciding,
+        mut deciding,
         store: first_store,
         ..
     } = first;
@@ -1060,7 +1060,7 @@ fn divide_segments_core(
                 strokes,
                 deciding.start,
                 n - 1,
-                &deciding.feat,
+                &mut deciding.feat,
                 None,
                 deciding.attempts,
                 min_seg,
@@ -1077,7 +1077,7 @@ fn divide_segments_core(
             strokes,
             deciding.start,
             at,
-            &deciding.feat,
+            &mut deciding.feat,
             Some(hit.k - 1),
             deciding.attempts,
             min_seg,
@@ -1165,7 +1165,7 @@ fn divide_segments_core(
                 strokes,
                 start,
                 cursor,
-                &feat,
+                &mut feat,
                 Some(end_stroke),
                 std::mem::take(&mut attempts),
                 min_seg,
@@ -1190,7 +1190,7 @@ fn divide_segments_core(
                 strokes,
                 p,
                 n - 1,
-                &feat,
+                &mut feat,
                 None,
                 attempts,
                 min_seg,
