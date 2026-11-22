@@ -574,7 +574,16 @@ def test_census_uses_jcs_domain_on_other_strict_json_inputs(options, tmp_path, n
     assert "PREGATE_CENSUS: registry.json: JCS_CANONICALIZE: number outside finite IEEE 754 binary64" in result.stderr
 
 
-RENDERED_SUMMARY = "# AT-18 整图验收\n\n结论：**FAIL**\n\n主线提交：`" + "1" * 40 + "`\n"
+SUMMARY_TITLE = "# AT-18 整图验收"
+RUN_HEAD = "17edc9cd0f909f58e6ec51caeb92742a050d7495"
+RENDERED_SUMMARY = (
+    f"{SUMMARY_TITLE}\n\n结论：**FAIL**\n\n主线提交：`{RUN_HEAD}`\n\n"
+    "覆盖账本：97 个故事、345 个 family、496 个细项。\n\n## Destination\n\n"
+    "- DST-01：FAIL\n\n## TB 关票门\n\n- TB-01 #1359：CLOSED，满足\n\n"
+    "## 失败项\n\n共 10 项。逐项 scope 和证据见同批 at18-report.json。\n"
+)
+SETTLEMENT_RULE = "\n\n计价规范：计算以分为单位，不足一分向上取整。\n"
+FEE_RULE = '{\n  "unit": "cent",\n  "low_fraction": "round_up"\n}'
 
 
 @pytest.mark.parametrize(("path", "doc", "allowed"), [
@@ -588,7 +597,13 @@ RENDERED_SUMMARY = "# AT-18 整图验收\n\n结论：**FAIL**\n\n主线提交：
     ("spec/copied-input.json", {"schema_version": "at18-input-bundle/1"}, False),
     ("spec/copied-run.json", {"schema_version": "at18-run-record/1"}, False),
     ("spec/copied-remediation.json", {"schema_version": "at18-pregate-remediation/1"}, False),
-    ("spec/copied-manifest.json", {"schemaVersion": 1, "ticket": 1391, "base": "1" * 40, "head": "2" * 40,
+    ("spec/copied-review.json", {"schema_version": "at18-pregate-review/1"}, False),
+    ("spec/copied-seal.json", {"schema_version": "at18-scaffold-seal/1"}, False),
+    ("spec/copied-report.data", {"schema_version": "at18-report/1"}, False),
+    ("spec/local-receipt.txt", f"Reviewed head: {RUN_HEAD}\nVerdict: PASS\n", False),
+    ("spec/local-run.txt", f"Commit: {RUN_HEAD}\nExit code: 0\nRun result: PASS\n", False),
+    ("spec/receipt-format.md", f"# 回执的格式\n\n```text\nHead: {RUN_HEAD}\nVerdict: PASS\n```\n", True),
+    ("spec/copied-manifest.json", {"schemaVersion": 1, "ticket": 1372, "base": "1" * 40, "head": "2" * 40,
                                   "productDiff": [], "requiredReports": [], "reports": [], "reviews": [],
                                   "requiredChecks": [], "checks": [], "scan": {"status": "not_run"}}, False),
 ])
@@ -607,3 +622,93 @@ def test_verification_basis_checks_artifact_identity(history, options, path, doc
     else:
         assert result.returncode == 1 and not result.stdout
         assert "verification_basis cannot cite remediation, report or receipt" in result.stderr
+
+
+@pytest.mark.parametrize(("path", "doc", "line"), [
+    ("spec/settlement.md", "## 费用计算规则" + SETTLEMENT_RULE, 3),
+    ("spec/settlement.md", SUMMARY_TITLE + SETTLEMENT_RULE, 3),
+    ("spec/settlement.md", SUMMARY_TITLE + "\n\n结论：**PASS**" + SETTLEMENT_RULE, 5),
+    ("spec/fee-rounding.json", FEE_RULE, 2),
+    ("spec/at18-report.json", FEE_RULE, 2),
+    ("spec/at18-input-bundle.json", FEE_RULE, 2),
+    ("spec/at18-verification.json", FEE_RULE, 2),
+    ("docs/reports/settlement.md", SETTLEMENT_RULE, 3),
+    (".chanlun/review-results/topic/payload/spec/rules.md", SETTLEMENT_RULE, 3),
+    (".chanlun/review-results/topic/view/spec/rules.md", SETTLEMENT_RULE, 3),
+    (".chanlun/review-results/topic/payload/inputs/receipts/rules.md", SETTLEMENT_RULE, 3),
+])
+def test_verification_basis_accepts_rules_not_named_artifacts(history, options, path, doc, line):
+    h = history
+    h.gate()
+    h.write(path, doc.encode())
+    h.commit("Add rule")
+    row = h.row(basis=path)
+    row["verification_basis"][0].update(line_start=line, line_end=line)
+    h.artifact([row])
+    result = h.probe(options)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["validated"] == [BLOCKED]
+
+
+TB_REPORT_PATH = (
+    ".chanlun/review-results/issue1372-tb01c-20260913/reports/"
+    "browser-continuation-performance/final-run-results/REPORT.md"
+)
+TB_REPORT_BLOB = "0f94d1625e745af8fa040cc96d8c992d83fca985"
+TB_ROOT = ".chanlun/review-results/issue1372-tb01c-20260913/reports/"
+
+
+@pytest.mark.parametrize(("mode", "source", "blob", "line"), [
+    ("archive", TB_REPORT_PATH, TB_REPORT_BLOB, 3),
+    ("copy", TB_REPORT_PATH, TB_REPORT_BLOB, 3),
+    ("move", TB_REPORT_PATH, TB_REPORT_BLOB, 3),
+    ("move", TB_ROOT + "legacy-query-callers-audit/REPORT.json", "154af3f5240d8b90657274ac2bd303e463d26b8d", 3),
+    ("move", TB_ROOT + "runtime/trajectory-r5-a/FACTS.json", "f845d2bbb066b9798dcc07067c9c711b3097efe1", 3),
+    ("move", TB_ROOT + "q-memo-independent/REVIEW.md", "ad2b826a02d3246a8f364729133adc05862ec16e", 3),
+    ("move", TB_ROOT + "browser-continuation-performance/final-run-results/MANIFEST.json",
+     "bae060f976620d1158bb510b8a157d605bce4ee1", 3),
+])
+def test_verification_basis_rejects_actual_tb_artifacts(history, options, mode, source, blob, line):
+    h = history
+    h.gate()
+    raw = subprocess.check_output(["git", "cat-file", "blob", blob], cwd=ROOT)
+    path = source if mode == "archive" else "spec/evidence.dat"
+    if mode == "copy":
+        h.write(source, raw)
+    h.write(path, raw)
+    h.commit("Add the historical artifact")
+    assert h.blob("HEAD", path) == blob
+    row = h.row(basis=path)
+    row["verification_basis"][0].update(line_start=line, line_end=line)
+    h.artifact([row])
+    result = h.probe(options)
+    assert result.returncode == 1 and not result.stdout
+    assert "verification_basis cannot cite remediation, report or receipt" in result.stderr
+
+
+@pytest.mark.parametrize("section", ["reports", "receipts", "runs", "reviews"])
+def test_verification_basis_rejects_same_blob_of_unstructured_archived_receipt(history, options, section):
+    h = history
+    h.gate()
+    path = "spec/copied-receipt.txt"
+    raw = "产物由对应工位核对。\n".encode()
+    h.write(f".chanlun/review-results/topic/{section}/sealed/receipt.txt", raw)
+    h.write(path, raw)
+    h.commit("Archive receipt and copy")
+    h.artifact([h.row(basis=path)])
+    result = h.probe(options)
+    assert result.returncode == 1 and not result.stdout
+    assert "verification_basis cannot cite remediation, report or receipt" in result.stderr
+
+
+def test_verification_basis_accepts_archived_spec_view(history, options):
+    h = history
+    h.gate()
+    path = ".chanlun/review-results/issue1339-r2-spec-20260909/view/spec/INTERFACE-CONTRACTS.md"
+    blob = "ab06de5061db7b28ef49acdcfd57e97fbd0ff66d"
+    h.write(path, subprocess.check_output(["git", "cat-file", "blob", blob], cwd=ROOT))
+    h.commit("Add the historical spec view")
+    h.artifact([h.row(basis=path)])
+    result = h.probe(options)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["validated"] == [BLOCKED]
