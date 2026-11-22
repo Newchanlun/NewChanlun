@@ -20,7 +20,7 @@ ARTIFACT = ".chanlun/at18/pregate-remediation.json"
 BLOCKED = "bad.txt"
 SECOND = "第二.txt"
 PASSED = "passed.txt"
-PROOF = "proof.txt"
+PROOF = "docs/adr/0008-bsp-bridge-object-and-structural-key-v2.md"
 PROBE = """
 import json, sys
 from pathlib import Path
@@ -268,8 +268,8 @@ def test_invalid_remediation_row(history, options, case, message):
         h.git("merge", "-q", "--no-ff", "--no-gpg-sign", "-m", "Integrate", "repair")
         commits = [side, h.git("rev-parse", "HEAD")]
     if case == "basis-symlink":
-        basis = "proof-link"
-        (h.root / basis).symlink_to(PROOF)
+        basis = "docs/adr/9999-proof-link.md"
+        (h.root / basis).symlink_to(Path(PROOF).name)
         h.commit("Symlink to proof")
     if case == "basis-bad-utf8":
         h.write(PROOF, b"\xff\n")
@@ -299,7 +299,7 @@ def test_invalid_remediation_row(history, options, case, message):
         "basis-reversed-range": {"line_start": 2, "line_end": 1},
         "basis-zero-start": {"line_start": 0}, "basis-bool": {"line_start": True},
         "basis-float": {"line_end": 1.0}, "basis-self": {"path": ARTIFACT}, "basis-extra": {"note": ""},
-        "basis-invalid-path": {"path": "./proof.txt"},
+        "basis-invalid-path": {"path": "./" + PROOF},
     }
     if case in updates:
         row.update(updates[case])
@@ -372,7 +372,7 @@ def test_remediation_presence_and_exact_f_path(history, options, case):
     elif case == "no-block-symlink":
         target = h.root / ARTIFACT
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.symlink_to("../../proof.txt")
+        target.symlink_to("../../" + PROOF)
         h.commit("Commit symlink at artifact path")
     result = h.probe(options, verdicts)
     if case in ("no-block-missing", "no-block-empty", "no-block-uncommitted"):
@@ -587,8 +587,8 @@ FEE_RULE = '{\n  "unit": "cent",\n  "low_fraction": "round_up"\n}'
 
 
 @pytest.mark.parametrize(("path", "doc", "allowed"), [
-    ("spec/plain.md", "费率表：每百元三分，取整到分。\n", True),
-    ("spec/summary.md", "费率表：每百元三分，取整到分。\n", True),
+    ("docs/spec/plain.md", "费率表：每百元三分，取整到分。\n", True),
+    ("docs/spec/summary.md", "费率表：每百元三分，取整到分。\n", True),
     ("out/summary.md", RENDERED_SUMMARY, False),
     ("spec/copied-report.md", RENDERED_SUMMARY, False),
     ("out/at18-report.json", {"schema_version": "at18-report/1"}, False),
@@ -608,7 +608,7 @@ FEE_RULE = '{\n  "unit": "cent",\n  "low_fraction": "round_up"\n}'
     ("spec/fee-rounding.json", {"unit": "cent", "result": "round_up", "status": "PASS"}, True),
     ("spec/local-receipt.txt", f"Reviewed head: {RUN_HEAD}\nVerdict: PASS\n", False),
     ("spec/local-run.txt", f"Commit: {RUN_HEAD}\nExit code: 0\nRun result: PASS\n", False),
-    ("spec/receipt-format.md", f"# 回执的格式\n\n```text\nHead: {RUN_HEAD}\nVerdict: PASS\n```\n", True),
+    ("docs/spec/receipt-format.md", f"# 回执的格式\n\n```text\nHead: {RUN_HEAD}\nVerdict: PASS\n```\n", True),
     ("spec/copied-manifest.json", {"schemaVersion": 1, "ticket": 1372, "base": "1" * 40, "head": "2" * 40,
                                   "productDiff": [], "requiredReports": [], "reports": [], "reviews": [],
                                   "requiredChecks": [], "checks": [], "scan": {"status": "not_run"}}, False),
@@ -631,14 +631,13 @@ def test_verification_basis_checks_artifact_identity(history, options, path, doc
 
 
 @pytest.mark.parametrize(("path", "doc", "line"), [
-    ("spec/settlement.md", "## 费用计算规则" + SETTLEMENT_RULE, 3),
-    ("spec/settlement.md", SUMMARY_TITLE + SETTLEMENT_RULE, 3),
-    ("spec/settlement.md", SUMMARY_TITLE + "\n\n结论：**PASS**" + SETTLEMENT_RULE, 5),
+    ("docs/spec/settlement.md", "## 费用计算规则" + SETTLEMENT_RULE, 3),
+    ("docs/spec/settlement.md", SUMMARY_TITLE + SETTLEMENT_RULE, 3),
+    ("docs/spec/settlement.md", SUMMARY_TITLE + "\n\n结论：**PASS**" + SETTLEMENT_RULE, 5),
     ("spec/fee-rounding.json", FEE_RULE, 2),
     ("spec/at18-report.json", FEE_RULE, 2),
     ("spec/at18-input-bundle.json", FEE_RULE, 2),
     ("spec/at18-verification.json", FEE_RULE, 2),
-    ("docs/reports/settlement.md", SETTLEMENT_RULE, 3),
 ])
 def test_verification_basis_accepts_rules_not_named_artifacts(history, options, path, doc, line):
     h = history
@@ -681,7 +680,7 @@ def test_verification_basis_rejects_actual_tb_artifacts(history, options, mode, 
     h = history
     h.gate()
     raw = subprocess.check_output(["git", "cat-file", "blob", blob], cwd=ROOT)
-    path = source if mode == "archive" else "spec/evidence.dat"
+    path = source if mode == "archive" else "library/material" + Path(source).suffix
     if mode in ("copy", "move"):
         h.write(source, raw)
     if mode == "move":
@@ -702,7 +701,7 @@ def test_verification_basis_rejects_actual_tb_artifacts(history, options, mode, 
 def test_verification_basis_rejects_same_blob_of_unstructured_archived_receipt(history, options, section):
     h = history
     h.gate()
-    path = "spec/copied-receipt.txt"
+    path = "docs/spec/copied-receipt.md"
     raw = "产物由对应工位核对。\n".encode()
     h.write(f".chanlun/review-results/topic/{section}/sealed/receipt.txt", raw)
     h.write(path, raw)
@@ -776,7 +775,7 @@ def test_verification_basis_rejects_named_archive_cases(history, options, source
     h.gate()
     path = source
     if mode != "archive":
-        path = "spec/neutral-note.dat"
+        path = "docs/spec/neutral-note" + Path(source).suffix
         if mode == "move":
             h.remove(source)
         h.write(path, raw)
@@ -790,7 +789,7 @@ def test_verification_basis_rejects_named_archive_cases(history, options, source
 @pytest.mark.parametrize("source", [QUEUE_RESULT, PROTOCOL_REVIEW_JSON])
 def test_verification_basis_rejects_unarchived_independent_json(history, options, source):
     h = history
-    path = "spec/neutral-note.dat"
+    path = "spec/neutral-note.json"
     h.write(path, archive_source(source))
     h.gate()
     assert not h.git("log", "--all", "--format=%H", "--", ARCHIVE)
@@ -826,7 +825,7 @@ def test_verification_basis_archive_allows_only_specification_originals(history,
 @pytest.mark.parametrize("integrated", [False, True], ids=["side-only", "first-parent-merge"])
 def test_verification_basis_archive_blob_requires_first_parent_provenance(history, options, integrated):
     h = history
-    path = "spec/neutral-note.txt"
+    path = "docs/spec/neutral-note.md"
     archived = ARCHIVE + "unknown-bundle/payload/spec/unclassified\toutput.md"
     raw = "不含机器标记的记录。\n".encode()
     h.gate()
@@ -849,7 +848,7 @@ def test_verification_basis_keeps_specification_identity_after_move(history, opt
     h.write(SPEC_INTERFACE, raw)
     h.gate()
     h.remove(SPEC_INTERFACE)
-    path = "spec/interface.md"
+    path = "docs/spec/interface.md"
     h.write(path, raw)
     h.commit("Move the specification out of the archive")
     check_basis(h, options, path, allowed=True, line=9)
@@ -900,7 +899,7 @@ def test_census_archive_preview_validates_only_specifications(options, archive_p
 @pytest.mark.parametrize("cite_archive", [False, True], ids=["live-original", "archive-path"])
 def test_basis_keeps_rules_first_published_outside_archive(history, options, leaf, cite_archive):
     h = history
-    active = "standards/" + leaf
+    active = "docs/spec/" + leaf
     frozen = ARCHIVE + "topic/" + leaf
     h.write(active, SETTLEMENT_RULE.encode())
     h.gate()
@@ -939,7 +938,7 @@ def test_basis_promotes_only_archive_inputs(history, options, kind, leaf, raw, a
     h = history
     package = ARCHIVE + "generic-bundle/"
     archived = package + leaf
-    dest = "spec/promoted.dat"
+    dest = "spec/promoted.json"
     h.gate()
     h.write(archived, raw.encode())
     prefixes = {"package": package, "wrong-path": package, "archive-root": ARCHIVE}
@@ -974,7 +973,7 @@ def test_basis_same_commit_input_does_not_override_archive_output(history, optio
     h = history
     raw = b"An unstructured output with no body signature.\n"
     archived = ARCHIVE + "generic-bundle/"
-    active = "spec/neutral-note.txt"
+    active = "docs/spec/neutral-note.md"
     h.gate()
     h.write(archived + "inputs/vector.txt", raw)
     h.write(archived + "reports/note.txt", raw)
@@ -1001,7 +1000,6 @@ REAL_LIVE_BASES = (
     ("s_session/tests/fixtures/s-content-v3/content-format-vectors.json", 2),
     ("s_session/tests/fixtures/tb03c_allocation/HAND-ORACLE.json", 2),
     ("s_session/tests/fixtures/tb03c_allocation/RAW.json", 2),
-    (".chanlun/tower-construction/tower_continuous_axis_unify.md", 1),
     (".chanlun/.crystallization-debt.json", 1),
 )
 R4_HEAD = "41aa16e8270b422bc2c6d5659b677d116fbd6184"
@@ -1034,8 +1032,8 @@ slices = [path for path, entry in tree.items() if entry.mode in c.REGULAR_MODES
 old_report = None
 if deleted_report:
     require(not any(entry.blob == deleted_report for entry in tree.values()), "old report still present")
-    tree["spec/retained-note.md"] = c.Entry("100644", "blob", deleted_report)
-    old_report = outcome("spec/retained-note.md", 1)
+    tree["docs/spec/retained-note.md"] = c.Entry("100644", "blob", deleted_report)
+    old_report = outcome("docs/spec/retained-note.md", 1)
 print(json.dumps(dict(live=live, reviews=[outcome(p, 2) for p in reviews],
                       slices=[outcome(p, 2) for p in slices], old_report=old_report)))
 """
@@ -1091,11 +1089,12 @@ VECTOR = "s_session/tests/fixtures/s-content-v3/content-format-vectors.json"
 def test_real_archive_reports_never_become_inputs(history, options, ref, source, line, move):
     h = history
     raw = git_at_r3("show", f"{ref}:{source}")
-    path = "spec/retained-note.md" if move == "body" else source
+    neutral = ("library/material.md" if move == "body" else "docs/spec/retained-note" + Path(source).suffix)
+    path = neutral if move == "body" else source
     h.write(path, raw)
     h.gate()
     if move in ("copy", "move"):
-        path = "spec/retained-note.md"
+        path = neutral
         if move == "move":
             h.remove(source)
         h.write(path, raw)
@@ -1162,7 +1161,7 @@ def test_condition_c_requires_atomic_pointer_bound_migration(history, options, s
     if scenario == "retained-archive":
         h.write(archived, raw)
     if scenario == "unlisted-alias":
-        h.write("spec/retained-note.md", raw)
+        h.write("spec/retained-note.json", raw)
 
     old = "other/vectors.json" if scenario == "wrong-old-path" else leaf
     new = {
@@ -1192,7 +1191,7 @@ def test_condition_c_requires_atomic_pointer_bound_migration(history, options, s
 
     check_basis(h, options, target, allowed=allowed or scenario == "unlisted-alias")
     if scenario == "unlisted-alias":
-        check_basis(h, options, "spec/retained-note.md", allowed=False)
+        check_basis(h, options, "spec/retained-note.json", allowed=False)
     if scenario == "atomic":
         check_basis(h, options, pointer, allowed=False)
 
@@ -1216,21 +1215,51 @@ def test_condition_c_cannot_promote_into_remediation_path(history, options):
 
 
 @pytest.mark.parametrize(("at_migration", "at_final", "accepted"), [
-    (True, True, 2),
-    (False, False, 0),
-    (False, True, 0),
-    (True, False, 0),
-], ids=["both-matched", "both-crossed", "corrected-at-f", "crossed-at-f"])
+    ("matched", "matched", 2), ("crossed", "crossed", 0),
+    ("crossed", "matched", 0), ("matched", "crossed", 0),
+    *((style, style, 2) for style in (
+        "table", "bullets", "wrapped", "comma", "ascii-comma", "semicolon",
+        "chinese-semicolon", "period", "hardbreak", "backslash",
+    )),
+    *((style, style, 0) for style in (
+        "two-origins", "comma-origins", "cross-clauses", "wrong-aside",
+    )),
+])
 def test_condition_c_keeps_both_ends_of_each_pair(history, options, at_migration, at_final, accepted):
     h = history
-    names = ("left.json", "right.json")
+    names = ("amber.json", "blue.json")
     old = [f"inputs/{name}" for name in names]
     new = [f"testdata/{name}" for name in names]
     payloads = [b'{"fixture":1}\n', b'{"fixture":2}\n']
 
-    def pointer(matched):
-        destinations = new if matched else new[::-1]
-        return "".join(f"`{src}` 原样迁到 `{dst}`。\n" for src, dst in zip(old, destinations)).encode()
+    def pointer(style):
+        destinations = new[::-1] if style in ("crossed", "wrong-aside") else new
+        pairs = [(f"`{src}`", f"`{dst}`") for src, dst in zip(old, destinations)]
+        arrows = [f"{src} → {dst}" for src, dst in pairs]
+        separators = {
+            "comma": "，", "ascii-comma": ", ", "semicolon": "; ", "chinese-semicolon": "；",
+            "period": "。", "hardbreak": "  \n", "backslash": chr(92) + "\n",
+        }
+        if style in separators:
+            text = separators[style].join(arrows) + "。"
+        elif style == "table":
+            text = "|旧路径|方向|新路径|\n|---|---|---|\n" + "\n".join(
+                f"|{src}|→|{dst}|" for src, dst in pairs)
+        elif style == "bullets":
+            text = "\n".join(f"- {src} => {dst}" for src, dst in pairs)
+        elif style == "wrapped":
+            text = "\n".join(f"{src} migrated to\n{dst}；" for src, dst in pairs)
+        elif style == "two-origins":
+            text = f"{pairs[0][0]} 和 {arrows[1]}。"
+        elif style == "comma-origins":
+            text = f"{pairs[0][0]}，{arrows[1]}。"
+        elif style == "cross-clauses":
+            text = f"{pairs[0][0]} 单列；另迁到 {pairs[0][1]}。"
+        elif style == "wrong-aside":
+            text = "\n".join(f"{arrow}。参考目录另有 {dst}。" for arrow, dst in zip(arrows, new))
+        else:
+            text = "\n".join(f"{src} moved to {dst}." for src, dst in pairs)
+        return (text + "\n").encode()
 
     h.gate()
     for src, raw in zip(old, payloads):
@@ -1326,11 +1355,11 @@ R10_REPORTS = (
 R9_HEAD = "5d485818f2e51b7c00993034354b62d99b1d4ab6"
 
 
-def test_r10_fee_provenance_is_source_material_not_a_report(history, options):
+def test_r12_inference_layer_fee_provenance_is_not_basis(history, options):
     path = "analysis/data_cache/venue_fee_provenance.md"
     history.write(path, git_at_r3("show", f"{R9_HEAD}:{path}"))
     history.gate()
-    check_basis(history, options, path, allowed=True, line=13)
+    check_basis(history, options, path, allowed=False, line=13)
 
 
 @pytest.mark.parametrize(("source", "line"), R10_REPORTS)
@@ -1342,61 +1371,28 @@ def test_r10_real_measured_and_delivery_reports_are_not_basis(history, options, 
     check_basis(history, options, dest, allowed=False, line=line)
 
 
-R10_HEAD = "fbfbe8e7100ef6cd51d634ed244d29d9a378f233"
-MIXED_RESEARCH = "analysis/trend_counter_segment_research.md"
-R11_REPORTS = (
-    (".chanlun/genealogy/settled/245-divergence-structure-analysis.md", 41),
-    (".chanlun/genealogy/settled/247-real-data-multi-tf-validation.md", 26),
-    (".chanlun/genealogy/settled/251-divergence-comparison-60min.md", 19),
-    (MIXED_RESEARCH, 150),
-)
+R11_HEAD = "5093b91a8728d1a48cfe12df4bcf7fcde5d23d83"
 
 
-@pytest.mark.parametrize(("source", "line"), R11_REPORTS)
-def test_r11_rejects_real_report_types_and_mixed_results(history, options, source, line):
-    raw = git_at_r3("show", f"{R10_HEAD}:{source}")
-    neutral = "spec/material.md"
-    for path in (source, neutral):
+@pytest.mark.parametrize(("source", "lines"), [
+    (".chanlun/genealogy/settled/245-divergence-structure-analysis.md", (41,)),
+    (".chanlun/genealogy/settled/247-real-data-multi-tf-validation.md", (26,)),
+    (".chanlun/genealogy/settled/251-divergence-comparison-60min.md", (19,)),
+    (".chanlun/genealogy/settled/279-oq5-caliber-a-verification.md", (41, 61, 70)),
+    ("analysis/trend_counter_segment_research.md", (115, 133, 150, 154, 180)),
+    ("analysis/recursive_regularization_theory.md", (171, 186, 194, 195)),
+    ("analysis/sip_consolidated_dedup_rule_draft.md", (103, 117, 121, 160)),
+    ("analysis/options_short_fixed_point_research.md", (815, 832, 1013, 1014, 1093)),
+])
+def test_r12_excludes_inference_layer_independently_of_the_referenced_line(history, options, source, lines):
+    raw = git_at_r3("show", f"{R11_HEAD}:{source}")
+    paths = (source, "library/material.md")
+    for path in paths:
         history.write(path, raw)
     history.gate()
-    for path in (source, neutral):
-        check_basis(history, options, path, allowed=False, line=line)
-        if source == MIXED_RESEARCH:
-            check_basis(history, options, path, allowed=False, line=146, line_end=150)
-            check_basis(history, options, path, allowed=False, line=154)
-            check_basis(history, options, path, allowed=True, line=115)
-            check_basis(history, options, path, allowed=True, line=133, line_end=134)
-
-
-@pytest.mark.parametrize(("source", "result", "definition"), [
-    ("analysis/recursive_regularization_theory.md", 186, 171),
-    ("analysis/sip_consolidated_dedup_rule_draft.md", 121, 103),
-    ("analysis/options_short_fixed_point_research.md", 832, 815),
-])
-def test_r11_rejects_measured_sections_without_rejecting_their_definitions(history, options, source, result, definition):
-    raw = git_at_r3("show", f"{R10_HEAD}:{source}")
-    neutral = "spec/material.md"
-    for path in (source, neutral):
-        history.write(path, raw)
-    history.gate()
-    for path in (source, neutral):
-        check_basis(history, options, path, allowed=False, line=result)
-        check_basis(history, options, path, allowed=True, line=definition)
-
-
-@pytest.mark.parametrize(("title", "kind", "body", "allowed"), [
-    ("材料", '"empirical-validation" # 类型注释', "正文", False),
-    ("材料", "'实验结果'", "正文", False),
-    ("候选复审报告", "概念发现", "结论：FAIL", False),
-    ("源概念", "公理", "type: 经验验证", True),
-    ("源概念", 'concept-separation # 曾用实验验证', "一条概念定义", True),
-])
-def test_r11_frontmatter_type_and_title_have_separate_roles(history, options, title, kind, body, allowed):
-    path = "spec/material.md"
-    preface = f"---\r\ntype: {kind}\r\n" + "tag: example\r\n" * 50 + "---\r\n\r\n"
-    history.write(path, (preface + f"# {title}\r\n\r\n{body}\r\n").encode())
-    history.gate()
-    check_basis(history, options, path, allowed=allowed, line=57)
+    for path in paths:
+        for line in lines:
+            check_basis(history, options, path, allowed=False, line=line)
 
 
 REVIEW_GUIDE = ".sandcastle/deepagents-pilot/EXTERNAL-REVIEW.md"
@@ -1454,29 +1450,11 @@ def test_r7_tracks_first_parent_origin_across_archives(history, options, source)
     h.write(source, raw)
     h.gate()
     check_basis(h, options, source, allowed=False)
-    dest = "tests/fixtures/neutral.dat"
+    dest = "tests/fixtures/neutral.py"
     h.remove(source)
     h.write(dest, raw)
     h.commit("Move an archive blob without proving it is a live input")
     check_basis(h, options, dest, allowed=False)
-
-
-@pytest.mark.parametrize(("text", "allowed"), [
-    (f"# 发布批次\n\n### 判定：BLOCK\n- Commit: {RUN_HEAD}\n", False),
-    ("# 日常运行报告\n\n" + "\n" * 15 + "- **评审对象：候选分支**\n", False),
-    ("# 回执操作指南\n\n~~~text\n- 评审对象：候选分支\n- 结论：FAIL\n~~~\n", True),
-    ("# 验收合同\n\n未满足下列条件就返回 BLOCK，而不是 PASS。\n", True),
-    ("# 评审操作指南\n\n先用 `git diff` 找到待审文件。\n", True),
-    ("# 复审：第四轮\n\n## 结论：FAIL\n", False),
-    ("# 独立评审\n\n结论：FAIL\n", False),
-    ("# 评审操作指南\n\n结论：PASS 表示可合入。\n", True),
-])
-def test_r7_uses_report_preamble_not_mentions_or_fenced_examples(history, options, text, allowed):
-    h = history
-    path = "spec/material.md"
-    h.write(path, text.encode())
-    h.gate()
-    check_basis(h, options, path, allowed=allowed)
 
 
 R7_HEAD = "bf1b9dcbb5cb46330f2f3877e70182c6ca3a4477"
@@ -1508,35 +1486,6 @@ def test_r8_report_original_and_neutral_copy_are_not_basis(history, options, sou
         check_basis(history, options, path, allowed=False, line=line)
 
 
-@pytest.mark.parametrize(("text", "allowed"), [
-    ("# 接口独审\n\n>> - **评审对象**：候选分支\n", False),
-    ("# 验证报告\n\n" + "\n" * 28 + "> ## 1. 核心结论\n> 修复项 = 0\n", False),
-    ("# 实测终判\n\n| 断言 | **Status** |\n| :--- | ---: |\n| A | ✅ |\n", False),
-    ("# 审计操作指南\n\n| 字段 | 判定 |\n| --- | --- |\n| 模板 | PASS |\n", True),
-    ("# ADR 0999：审计报告在门禁中的处置\n\n> **审计范围**：所有客户端\n", True),
-    ("# Board review report\n\n> ```md\n> - Verdict: REJECT\n> ```\n", True),
-    ("# 独审报告\n\n> ```md\n> - 字段：示例\n> ```\n\n> **结论**：有保留通过\n", False),
-])
-def test_r8_report_preamble_distinguishes_record_from_example(history, options, text, allowed):
-    path = "spec/material.md"
-    history.write(path, text.encode())
-    history.gate()
-    check_basis(history, options, path, allowed=allowed)
-
-
-@pytest.mark.parametrize("path", [
-    "docs/backtest-protocol-v0.md",
-    "docs/spec/tightness_selection_l2.md",
-    "docs/chanlun/external-consults/pi-theta-backtest-workorder-20260701.md",
-    ".chanlun/proofs/economic-positive-impl-design.md",
-    "analysis/organic_fugue_v2_design.md",
-])
-def test_r8_keeps_original_plans_despite_real_run_references(history, options, path):
-    history.write(path, git_at_r3("show", f"{R7_HEAD}:{path}"))
-    history.gate()
-    check_basis(history, options, path, allowed=True)
-
-
 R8_HEAD = "09b29405edf91f7a30a085b182758c93d82e370d"
 R9_REPORTS = (
     ("analysis/engine_c_segment_fix.md", 27),
@@ -1565,12 +1514,75 @@ def test_r9_run_results_rejected_at_original_and_neutral_path(history, options, 
         check_basis(history, options, path, allowed=False, line=line)
 
 
-@pytest.mark.parametrize(("path", "line"), [
-    ("docs/unified_fix_proposal.md", 12),
-    ("docs/spec/tightness_selection_l2.md", 19),
-    (".chanlun/scene-ledger.md", 4),
+@pytest.mark.parametrize(("path", "allowed"), [
+    (path, True) for path in (
+        "CONTEXT.md", "AGENTS.md", "README.md", "SECURITY.md", "docs/ROADMAP.md",
+        "docs/adr/README.md", "docs/adr/0012-inference-layer-document-naming.md",
+        ".chanlun/definitions/beichi.md", "docs/agents/nested/guide.md", "docs/spec/nested/contract.md",
+        "docs/chanlun/text/blog/INDEX.md", "docs/chanlun/text/chan99/INDEX.md",
+        "spec/theorems/definitions.md", ".chanlun/at18/pregate/README.md",
+        ".chanlun/at18/pregate/scope-basis.md", ".sandcastle/deepagents-pilot/EXTERNAL-REVIEW.md",
+        "s_session/README.md", "rust/a/ORACLE.md", "scripts/a/README.md", "formal/a/ORACLE.md",
+        "tests/a/README.md", "src/a/README.md", "frontend/a/README.md",
+        "trading_system/a/README.md", ".chanlun/at18/a/ORACLE.md",
+    )
+] + [
+    (path, False) for path in (
+        "docs/adr/unratified.md", "docs/adr/draft/0042-nested.md", ".chanlun/definitions/draft/nested.md",
+        "docs/specish/contract.md", "docs/chanlun/text/mindmaps/INDEX.md",
+        "docs/chanlun/text/blog/nested/INDEX.md", "spec/theorems/nested/definitions.md",
+        "analysis/p3_design.md", ".chanlun/genealogy/material.md", "docs/architecture/README.md",
+        "docs/memory_snapshot/README.md", "docs/chanlun/external-consults/README.md",
+        "docs/three_phase_unified_design.md", "STRICT-NEST-EXAMPLE-RESULT.md",
+        ".chanlun/tower-construction/tower_continuous_axis_unify.md", "formal/Tlayers/SPIRAL_RESULT.md",
+        "library/material-000.md", "spec/plain.md", "spec/copied-report.md", "s_session/named-contract.md",
+        *(".sandcastle/worker/" + segment + "/README.md" for segment in (
+            "runs", "logs", "reports", "review-results", "diagnostics", "output", "outputs", "evidence",
+        )),
+    )
 ])
-def test_r9_run_references_inside_a_design_are_not_a_report(history, options, path, line):
-    history.write(path, git_at_r3("show", f"{R8_HEAD}:{path}"))
+def test_r12_markdown_path_is_the_eligibility_boundary(history, options, path, allowed):
+    # 同一正文与 Git blob，路径是唯一变量；不猜常见标题、YAML 或结论字段。
+    history.write(path, RENDERED_SUMMARY.encode())
     history.gate()
-    check_basis(history, options, path, allowed=True, line=line)
+    check_basis(history, options, path, allowed=allowed)
+
+
+@pytest.mark.parametrize("path", [
+    "analysis/p3_random_gate_control.py", "rust/src/example.rs", "src/code.ts", "scripts/code.mts",
+    "frontend/view.tsx", "src/runtime.js", "scripts/tool.mjs", "scripts/tool.cjs", "tests/drive.sh",
+    ".github/workflows/job.yml", ".github/config.yaml", "rust/Cargo.toml", "formal/Origin.lean",
+    "scripts/query.sql", "scripts/tool.cfg", "rust/pytest.ini", "s_session/Dockerfile", "Makefile",
+])
+def test_r12_accepts_code_config_and_proofs(history, options, path):
+    history.write(path, b"# fixture\n")
+    history.gate()
+    check_basis(history, options, path, allowed=True)
+
+
+@pytest.mark.parametrize("suffix", ["txt", "log", "out", "err", "csv", "tsv", "html", "rst", "dat"])
+def test_r12_rejects_report_renamed_to_free_text(history, options, suffix):
+    path = "docs/spec/material." + suffix
+    history.write(path, RENDERED_SUMMARY.encode())
+    history.gate()
+    check_basis(history, options, path, allowed=False)
+
+
+@pytest.mark.parametrize(("path", "raw", "allowed"), [
+    ("fixtures/results.json", b'{"result": "expected"}', True),
+    ("fixtures/results.jsonl", b'{"id":1}\n{"id":2}\n', True),
+    ("fixtures/results.jsonl", b'{"id":1}\n{"schema_version":"at18-report/1"}\n', False),
+    ("fixtures/results.json", b'historical review prose\n', False),
+    ("fixtures/results.jsonl", b'{"id":1}\nhistorical review prose\n', False),
+    ("docs/spec/example.md", b'{"schema_version":"at18-report/1"}\n', False),
+    ("tests/fixture.yaml", b'{"schema_version":"at18-report/1"}\n', False),
+    *((path, b'{"result": "expected"}', False) for path in (
+        "analysis/fixture.json", ".chanlun/genealogy/fixture.json", ".chanlun/diagnostics/fixture.json",
+        "docs/memory_snapshot/fixture.json", "docs/reports/fixture.json", "reports/fixture.json",
+        ".sandcastle/pilot/logs/fixture.jsonl", "tests/evidence/fixture.json",
+    )),
+])
+def test_r12_structured_data_requires_eligible_location_and_no_artifact_envelope(history, options, path, raw, allowed):
+    history.write(path, raw)
+    history.gate()
+    check_basis(history, options, path, allowed=allowed)

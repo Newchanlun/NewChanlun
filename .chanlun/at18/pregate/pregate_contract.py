@@ -51,10 +51,7 @@ ARCHIVE_BASIS_STEMS = {
         "TB02-06-EXECUTION-SLICES", "TB07-11-EXECUTION-SLICES",
     },
 }
-ARCHIVE_SPEC_FILES = {
-    "payload": {"INTERFACE-CONTRACTS.md", "PUBLICATION-PREPARATION.md", "PLANNED-DAG.json"},
-    "view": {"INTERFACE-CONTRACTS.md", "PUBLICATION-PREPARATION.md"},
-}
+ARCHIVE_SPEC_FILES = {"INTERFACE-CONTRACTS.md", "PUBLICATION-PREPARATION.md", "PLANNED-DAG.json"}
 EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 ARTIFACT_BASIS_ERROR = "verification_basis cannot cite remediation, report or receipt"
 # 版本化的验收产物，即使改名也不是缺陷本身的验证依据。
@@ -79,172 +76,29 @@ MANIFEST_FIELDS = {"schemaVersion", "ticket", "base", "head", "productDiff", "re
 ROW_KEYS = {"path", "p0_blob", "p0_mode", "f_blob", "f_mode", "remediation_commits",
             "remediation_ticket", "verdict", "defect_summary", "verification_basis"}
 BASIS_KEYS = {"path", "blob", "line_start", "line_end"}
-GIT_SHA = OID.pattern
-NEXT_FIELD = r"[ \t]*\r?\n(?:[ \t]*\r?\n)*"
-SUMMARY_HEADER = re.compile(
-    rf"# AT-18 整图验收{NEXT_FIELD}结论：\*\*(?:PASS|FAIL)\*\*{NEXT_FIELD}"
-    rf"主线提交：`{GIT_SHA}`[ \t]*(?:\r?\n|$)"
+# ADR 0012 第三条：补救依据走权威链/正本，不从推论层原件反向引用。
+MARKDOWN_BASIS_FILES = {
+    "AGENTS.md", "README.md", "SECURITY.md", "CONTEXT.md", "docs/ROADMAP.md",
+    ".chanlun/at18/pregate/README.md", ".chanlun/at18/pregate/scope-basis.md",
+}
+MARKDOWN_BASIS_DIRS = {
+    ".chanlun/definitions", "docs/chanlun/text/blog", "docs/chanlun/text/chan99", "spec/theorems",
+}
+ADR_BASENAME = re.compile(r"(?:[0-9]{4}-[^/]+|README)\.md")
+COMPONENT_TREES = (
+    "s_session/", "rust/", "scripts/", "formal/", "tests/", "src/", "frontend/",
+    "trading_system/", ".chanlun/at18/",
 )
-TB_RUN_HEADER = re.compile(
-    r"# (?:三臂最终候选实际运行交付|最终候选 [^\r\n]+ 实际采集事实)\s+"
-    rf"(?:三臂均绑定 `{GIT_SHA}`|候选 {GIT_SHA})[^\r\n]*"
-    r"runtime(?: 与 |/)consumer (?:均退出|退出均为) [0-9]+[。 ，,；;]"
+OUTPUT_DIRS = {"runs", "logs", "reports", "review-results", "diagnostics", "output", "outputs", "evidence"}
+INFERENCE_TREES = (
+    "analysis/", ".chanlun/genealogy/", ".chanlun/tower-construction/", "docs/architecture/",
+    "docs/memory_snapshot/", "docs/chanlun/external-consults/", "docs/chanlun/text/mindmaps/",
 )
-TB_REVIEW_HEADER = re.compile(
-    r"# #[0-9]+ [^\r\n]+独立复核[^\r\n]*\s+"
-    rf"结论：\*\*(?:PASS|BLOCK|FAIL|REJECT)[A-Z0-9_-]*\*\*。固定 [^`\r\n]+`{GIT_SHA}`"
-)
-RECEIPT_COMMIT = re.compile(
-    rf"(?mi)^(?:[-*] )?(?:Reviewed head|Candidate commit|Head|Commit|评审提交|候选提交|受审提交)[:：][ \t]*"
-    rf"(?:`{GIT_SHA}`|{GIT_SHA})[ \t]*\r?$"
-)
-RECEIPT_VERDICT = re.compile(
-    r"(?mi)^(?:[-*] )?(?:Verdict|判定|结论)[:：][ \t]*"
-    r"(?:\*\*)?(?:PASS|BLOCK|FAIL|REJECT)[A-Z0-9_-]*(?:\*\*)?[ \t]*\r?$"
-)
-RUN_EXIT_CODE = re.compile(r"(?mi)^(?:[-*] )?(?:Exit code|退出码)[:：][ \t]*[0-9]+[ \t]*\r?$")
-RUN_RESULT = re.compile(r"(?mi)^(?:[-*] )?(?:Run result|运行结果)[:：][ \t]*(?:PASS|FAIL)[ \t]*\r?$")
-
-# 名分由标题与前导证据共同决定；指南/规范中的审阅步骤不是执行记录。
-REPORT_TITLE = re.compile(
-    r"评审|复审|复核|复验|独审|独评|初审|[二三四五]审|真修|诊断结果|诊断(?:纪要|记录)?|"
-    r"报告|结果(?:包)?|回执|审查|审计|汇报|终判|判决|(?:实测|验证|检验)裁决|回测(?:对照|复验|判决)?|验证|"
-    r"\b(?:review|report|results?|receipt|audit|diagnostic|verdict)\b", re.I
-)
-RULE_TITLE = re.compile(
-    r"指南|操作手册|预检|规范|规格|合同|协议|设计|方案|施工单|计划|提案|模板|"
-    r"\b(?:guide|handbook|preflight|specification|contract|design)\b", re.I
-)
-ADR_TITLE = re.compile(r"^ADR[ -]+\d+\b", re.I)
-MD_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
-MD_LIST = re.compile(r"^(?:[-*+]|[0-9]+[.)])\s+")
-MD_QUOTE = re.compile(r"^(?:>\s*)+")
-FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(?P<fields>.*?)^(?:---|\.\.\.)[ \t]*\r?(?:\n|$)", re.M | re.S)
-YAML_TYPE = re.compile(
-    r"""^type[ \t]*:[ \t]*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^#\r\n]+?))[ \t]*(?:#[^\r\n]*)?\r?$""", re.M
-)
-REPORT_TYPE = re.compile(
-    r"(?:经验|实证)验证|(?:实测|审计)(?:报告|结果|记录)?|实验(?:报告|结果|完成)|验证(?:报告|结果|记录)|"
-    r"诊断(?:分析|报告|结果|记录)?|"
-    r"(?:empirical[-_ ]validation|experiment[-_ ](?:result|report|completion)|"
-    r"(?:measurement|validation|verification|audit|diagnostic)[-_ ](?:result|report|record))s?", re.I
-)
-REPORT_FIELD = re.compile(r"^(?P<key>[^：:|]{1,48}?)\s*[:：]\s*(?P<value>\S.*)$")
-DISPOSITION = re.compile(
-    r"(?<![\w-])(?:PASS(?:ED)?|FAIL(?:ED)?|BLOCK(?:ED)?|REJECT(?:ED)?|PWC|CHANGES_REQUIRED|"
-    r"VERIFIED|ACCEPTED|ERROR)(?=$|[^\w-])|"
-    r"有保留通过|不通过|未通过|通过|退回|拒绝|证伪|否证|全过|未修复|已修复|不成立|成立|实测|✅|❌", re.I
-)
-MEASUREMENT = re.compile(
-    r"\bbit[- ]exact\b|\b\d+\s+(?:pass(?:ed)?|fail(?:ed)?|skip(?:ped)?)\b|"
-    r"(?:进程退出|退出码|退出|EXIT)[：:\s]*-?\d+\b|修复项\s*=\s*\d+|全量跑通|全绿|零 panic", re.I
-)
-REPORT_SUBJECT = re.compile(
-    r"(?:固定|受审|候选|冻结|主线)提交[ \t：:]+`?[0-9a-f]{7,40}\b|"
-    r"\bgit diff[ \t]+`?[0-9a-f]{7,40}\b|(?:尖端(?: SHA)?|SHA|commit)[ \t：:]+`?[0-9a-f]{7,40}\b"
-    r"|本次(?:审计|评审|复验)内执行", re.I
-)
-OUTCOME_KEY = re.compile(
-    r"(?:本报告的?)?(?:一句话|核心|报告|执行|审计|评审|验收|运行|调研|修复|实证|最终|总)*(?:结论|结果|判定|裁决|判决|终判|总评|执行摘要|关键发现)"
-    r"(?:提前给出|速览|摘要|汇总)?|(?:run )?result|verdict|status", re.I
-)
-EXECUTION_KEY = re.compile(
-    r"(?:审计|审查|评审|复审|复验|测试|验证|调研|诊断)(?:范围|方法|方式|对象|日期|人|者|面|器|脚本|等级)|"
-    r"任务|起点 commit|(?:固定|受审|候选|冻结|主线|评审)提交|实测|交付物|生成时间|总耗时|"
-    r"脚本|跑法|探针|样本|数据来源|信号总数|审计基准|实测日期|验证等级|认识论等级|本次修改|"
-    r"(?:测试|运行|实测)?退出码|产出文件|reviewed head|reviewer|review target|exit code", re.I
-)
-TABLE_RULE = re.compile(r":?-{3,}:?")
-RUN_TABLE_RULE = re.compile(r":?-+:?")
-RUN_METRIC = re.compile(r"\d[\d,]*(?:[.]\d+)?\s*(?:%|pp\b|ms\b|bars?\b|笔|组|例)|"
-                        r"(?:[^\s=:]+)\s*=\s*-?\d", re.I)
-RUN_COLUMN = re.compile(r"回报|收益|覆盖率|复利|胜率|耗时|交易数|实测|bars|sharpe|drawdown|ms/bar|trades|MDD|BH|P&L|年化|回测|bps|卖飞率", re.I)
-
-RUN_TITLE = re.compile(r"探针|标定记录|首验|重验|重测|重跑|首跑|复跑|复验|回测|实测|实证|对拍|验收|修复|测量|实验|结果")
-NORMATIVE_TITLE = re.compile(
-    RULE_TITLE.pattern + r"|规划|路线图|蓝图|总纲领|现场台账|交接台账|草案|\b(?:proposal|plan|spec|draft|roadmap)\b", re.I
-)
-RUN_EXECUTION = re.compile(
-    r"\b(?:cargo test|pytest)[ \t`]+\d+|"
-    r"\d+/\d+\s*(?:标的|通过|PASS\b|FAIL\b)|"
-    r"回测重跑|终态对照|全标的重验|md5\s*验证|\d[\d,.]*[kKmM]?\s*bars?\b|"
-    r"(?:回测|运行|总)耗时[：:\s]+[~≈]?\d|"
-    r"汇总(?:本次|本轮|本 session)[^\n]{0,24}实验报告|"
-    r"(?:测试|运行)[^\n]{0,12}(?:全过|全绿)|真实数据回测|"
-    r"\d+/\d+\s*(?:[a-z]+\s*)?(?:测试通过|标的)|"
-    r"(?:真实数据|实跑|复跑|重跑|首跑|重测|实测).{0,10}(?:已完成|已合并|结果|交叉验证)|"
-    r"(?:数据|守卫)对账[^\n]{0,20}(?:全|均)\s*PASS", re.I
-)
-BEFORE_AFTER = re.compile(r"修复前\s*(?:→|->|vs\.?|/|\|)\s*修复后", re.I)
-RUN_DECISION_TABLE = re.compile(r"(?:全标的|多标的|实测)(?:判决|对照)表")
-RUN_DATA_COLUMN = re.compile(
-    RUN_COLUMN.pattern + r"|bars? 数|\b(?:BH|P\d+|基线)%|p\d+\b|净现金|盈亏|延迟|滞后|"
-    r"样本数|涨幅|跌破价|顶价|回撤|bar 数|\b(?:precision|recall|counters|bsp|div|trades|corr|nf|gap|settle|avg_span)\b|"
-    r"计数|匹配率|通过率", re.I
-)
-RUN_OBSERVATION = re.compile(r"(?:Buy[- ]and[- ]hold|回测耗时|运行耗时)\s*[:：]\s*[+−~-]?\d", re.I)
-RUN_SOURCE = re.compile(r"\b\w+_results\.json\b|(?:脚本|驱动|数据源|采样|落盘)\s*[:：]|"
-                        r"(?:产出|输出|结果)[:： ]+`[^\n`]+\.json`|生成时间[:：]\s*\d{4}-\d{2}-\d{2}")
-RUN_SAMPLE = re.compile(r"(?:\d+\s*(?:标的|个样本|个交易日|根)|样本[：:]|本次新拉|真实数据|官方盘|\bn\s*=\s*\d+|yfinance.{0,14}日线)")
-RUN_RECORDED = re.compile(r"(?:实测裁决|数据对账|跨标的汇总|真实读数|已逐根验证|"
-                          r"(?:本次|三标的|全标的)(?:重跑|复跑|重验)|"
-                          r"\b(?:hold|MDD)(?:\s+|\s*[:：]\s*)[+−-]?\d|"
-                          r"(?:几个|\d+\s*个?|[一二三四五六七八九]个)关键数字)", re.I)
-RUN_VALUE = re.compile(r"(?<![\w/])[+−-]?\d[\d,.]*(?![\w/])")
-RUN_SUMMARY_HEADING = re.compile(
-    r"^#{1,6} [^\n]{0,46}(?:session(?:全局|核心|全局核心)?(?:成果(?:总览|清单|链)|终局)|决定性结果|下游重验)",
-    re.I | re.M,
-)
-RUN_SUMMARY_VALUE = re.compile(
-    r"[+−-]\d+(?:[.]\d+)?\s*(?:%|pp(?![a-z]))|"
-    r"\d+(?:[.]\d+)?\s*→\s*\d+(?:[.]\d+)?\s*(?:%|s\b)"
-)
-NUMERIC_CHANGE = re.compile(r"\d[^|\n]{0,65}(?:→|->)\s*[+-]?\d")
-RUN_RESULT_COUNT = re.compile(
-    r"\b(?:cargo test|pytest)[ \t`]+\d+[^\n]{0,30}(?:全过|通过|PASS\b|FAIL\b)|"
-    r"\d+/\d+\s*(?:标的\s*)?(?:通过|PASS\b|FAIL\b)", re.I
-)
-GENERATED_AT = re.compile(r"(?:生成(?:时间)?|Generated(?: at)?)\s*[:：]\s*\d{4}-\d{2}-\d{2}", re.I)
-EMPIRICAL_CONTEXT = re.compile(
-    r"(?:数据|本体)实测|两版真实数据|"
-    r"(?:样本|数据|数据范围)[:：][^\n]{0,120}\d[^\n]{0,50}(?:根|bars?\b|行|笔|交易日)|"
-    r"(?:样本|raw)[^\n]{0,16}\d[\d,]+\s*(?:行|笔|交易日)|"
-    r"\d[\d,.]*[万亿kKmM]?\s*(?:共同交易日|公共交易日|交易日|根(?:\s*\d+min)?|bars?\b)|"
-    r"\d{4}-\d{2}-\d{2}[^\n]{0,45}(?:~|至|\.\.)[^\n]{0,20}\d{4}-\d{2}-\d{2}", re.I
-)
-OBSERVED_FINDING = re.compile(
-    r"证伪|否证|唯一合格|有效涌现深度|\d+\s*组共享|"
-    r"\d[\d,]+\s*(?:行|笔|例|次|根)|重复率[^\n]{0,20}\d+\.?\d*%|"
-    r"(?:回测|实测|实跑|首验|重验|对拍|实验)(?:\s*结果|\s*读数)"
-)
-RUN_CELL = re.compile(r"^[*~≈ +−-]*\d[\d,.]*(?:%|s|ms|pp|x|倍|\s|$)", re.I)
-PERFORMANCE_COLUMN = re.compile(r"\b(?:BH|MDD|Sharpe|trades)\b|复利|夏普|盈亏比|胜率|净现金|耗时|收益|回撤|\bstrat(?:%|_pct)?\b|P&L|PnL|(?:多头|空头)净", re.I)
-RUN_DELIVERY = re.compile(r"实施(?:侧)?交付|本次交付|交付(?:小结|文档|记录)")
-RUN_EMPIRICAL_GRADE = re.compile(r"认识论(?:等级)?[^\n]{0,8}L[23]\b|\bepistemic levels?[^\n]{0,60}L[23]\b", re.I)
-RUN_EXECUTED = re.compile(r"实测复现|观察到的规律|本轮做的|已经查清|已确定性.{0,4}查清|"
-                          r"跑(?:了|出|过|完|决定性)[^\n]{0,25}(?:实证|回测|实验|测试)|"
-                          r"\b(?:numbers? (?:were )?re-verified|observed results|experiment results)\b", re.I)
-RUN_RESULT_SECTION = re.compile(
-    r"(?:回测|实测|首验|实验|实证)(?:结果|复现|读数|证伪|否证)|观察到的规律|结果[:：].{0,60}(?:证伪|否证)"
-)
-SECTION_SCRIPT = re.compile(r"(?:脚本|跑法|探针|script|command)\s*[:：]", re.I)
-SECTION_SAMPLE = re.compile(
-    r"\d[\d,.]*[万亿kKmM]?\s*(?:bars?\b|根|行|笔|事件|交易日|标的|records?\b|events?\b)", re.I
-)
-SECTION_READING = re.compile(r"实测|实跑|实得|测得|采得|观察到|意外发现|平均|中位|占比|成功率|\bP\d{2}\b")
-SECTION_RESULTS = re.compile(RUN_RESULT_SECTION.pattern + r"|统计|实测|实跑|实证|observed results", re.I)
-SECTION_OBSERVED = re.compile(r"(?:本(?:次|轮|体| session)|全史|全量|真实数据).{0,35}(?:实测|实跑|测得)|定稿读数", re.I)
-NUMERIC_CELL = re.compile(r"^[*~≈ +−-]*\d")
-RUN_STATISTIC = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:%|pp\b)|[+−-]\d[\d,]*(?:\.\d+)?")
-EXECUTION_RECORD = re.compile(r"(?:编译|构建|测试)[^\n]{0,45}(?:矛盾|失败|异常|报错)记录|"
-                              r"编译器暴露[^\n]{0,20}记录")
-RUN_DIGEST = re.compile(r"(?:session|本轮).{0,20}(?:关键发现链|实验结论|实测摘要)|"
-                        r"产生机制追查|工作清单.{0,20}已核实", re.I)
-
-DELIVERED = re.compile(r"(?:代码|改动|测试|修复).{0,12}(?:已落|已合入|已完成|全过|全通)|"
-                       r"(?:新增|修改)文件[：:]|(?:离线|合成|回归|单元)测试[^\n]{0,40}\d+\s*(?:项|通过)")
-SELF_REPORT = re.compile(r"(?:^|[（(，。；;：:\s])本报告(?:的|所|中|为|记载|记录|只产出|不再|\s|[，。])", re.M)
-
+DATA_EXTENSIONS = {".json", ".jsonl"}
+CODE_EXTENSIONS = {
+    ".rs", ".py", ".ts", ".mts", ".tsx", ".js", ".mjs", ".cjs", ".sh", ".yml", ".yaml",
+    ".toml", ".lean", ".sql", ".cfg", ".ini",
+}
 
 
 class Entry(NamedTuple):
@@ -365,11 +219,11 @@ def is_artifact_archive_path(path):
     bundle, edition, area, leaf = parts
     if edition not in ("payload", "view"):
         return True
-    if (bundle, area) == ("issue1339-r2-spec-20260909", "spec") and leaf in ARCHIVE_SPEC_FILES[edition]:
+    if (bundle, area) == ("issue1339-r2-spec-20260909", "spec") and leaf in ARCHIVE_SPEC_FILES:
         return False
     stem, _, extension = leaf.rpartition(".")
     allowed = ARCHIVE_BASIS_STEMS.get((bundle, area), ())
-    return not (stem in allowed and (extension == "md" or (edition == "payload" and extension == "json")))
+    return not (stem in allowed and extension in {"md", "json"})
 
 
 def frozen_copies(raw):
@@ -401,59 +255,109 @@ def fixture_pointer_locations(path):
 
 POINTER_CODE = r"(?P<tick>`+)(?P<code>[^`\r\n]+)(?P=tick)(?!`)"
 POINTER_CLAUSE = re.compile(POINTER_CODE + r"|(?P<end>[。；;！？]|[.!?](?=\s|$))")
+POINTER_COMMA = re.compile(POINTER_CODE + r"|(?P<end>[，,])")
+POINTER_ARROW = r"->|=>|→"
 POINTER_DIRECTION = re.compile(
     POINTER_CODE + r"|(?P<direction>迁移(?:至|到)|迁(?:至|到)|移(?:至|到)|搬(?:至|到)|"
-    r"\b(?:moved|migrated|renamed)\s+to\b|->|=>|→)", re.I
+    r"\b(?:moved|migrated|renamed)\s+to\b|" + POINTER_ARROW + ")", re.I
 )
 POINTER_TOKEN = re.compile(POINTER_CODE + r"""|[^\s`，。；：！？、（）「」【】<>()\[\]{}"';,:*|]+""")
+POINTER_LIST = re.compile(r"^(?:[-*+]|[0-9]+[.)])\s+")
+POINTER_HEADING = re.compile(r"^#{1,6}\s+")
+POINTER_FENCE = re.compile(r"`{3,}|~{3,}")
 # 采纳表是声明的出处，不是迁移端点（#1394 的原始指针即如此）。
 POINTER_ATTRIBUTION = re.compile(r"^`[^`\n]+`\s+的\s+`[^`\n]+`\s*表(?:中)?登记的\s*")
 POINTER_UNASSERTED = re.compile(r"(?:未(?:曾|能)?|不(?:会|再)?|拟|计划|待|尚未|\b(?:not|be|if))\s*$", re.I)
 
 
+def pointer_blocks(text):
+    """软换行保留在声明中；硬换行、列表与表格行各自成段。"""
+    block = []
+    fence = None
+    for raw in (*text.split("\n"), ""):
+        raw = raw.removesuffix("\r")
+        hard = raw.endswith(("  ", "\\"))
+        line = raw.removesuffix("\\").strip()
+        marker = POINTER_FENCE.match(line)
+        if fence is not None:
+            if marker and marker[0].startswith(fence) and not line[marker.end():].strip():
+                fence = None
+            continue
+        if not line or marker or POINTER_HEADING.match(line) or line.startswith(">"):
+            if block:
+                yield "\n".join(block)
+                block.clear()
+            if marker:
+                fence = marker[0]
+            continue
+        item = POINTER_LIST.match(line)
+        table = "|" in line
+        if (item or table) and block:
+            yield "\n".join(block)
+            block.clear()
+        block.append(line[item.end():] if item else line)
+        if hard or table:
+            yield "\n".join(block)
+            block.clear()
+
+
+def pointer_clauses(block, delimiter):
+    start = 0
+    for match in delimiter.finditer(block):
+        if match["end"]:
+            yield block[start:match.start()]
+            start = match.end()
+    yield block[start:]
+
+
+def pointer_paths(side):
+    tokens = [m["code"] or m[0] for m in POINTER_TOKEN.finditer(side)
+              if m["code"] or "/" in m[0] or "." in m[0]]
+    bare = side.strip(" \t\n|")
+    return tokens or ([bare] if re.fullmatch(r"[\w-]+", bare) else [])
+
+
+def pointer_pair(clause, *, arrow_only=False):
+    clause = POINTER_ATTRIBUTION.sub("", clause.strip())
+    directions = [m for m in POINTER_DIRECTION.finditer(clause) if m["direction"]]
+    if len(directions) != 1:
+        return None
+    direction = directions[0]
+    before = clause[:direction.start()]
+    if (arrow_only and re.fullmatch(POINTER_ARROW, direction[0]) is None) or POINTER_UNASSERTED.search(before):
+        return None
+    old, new = pointer_paths(before), pointer_paths(clause[direction.end():])
+    if len(old) == len(new) == 1 and valid_path(old[0]) and valid_path(new[0]):
+        # 软换行只能续写声明，不能先吞一行无关的正文或回执字段。
+        if "\n" not in before or pointer_paths(before.partition("\n")[0]) == old:
+            return old[0], new[0]
+    return None
+
+
 def fixture_pointer_pairs(raw):
     try:
-        text = raw.decode("utf-8")
+        text = raw.decode("utf-8-sig")
     except UnicodeError:
         return set()
-    if "\0" in text or is_report_artifact(raw, text):
+    if "\0" in text:
         return set()
-
-    def paths(side):
-        tokens = [m["code"] or m[0] for m in POINTER_TOKEN.finditer(side)
-                  if m["code"] or "/" in m[0] or "." in m[0]]
-        bare = side.strip(" \t\n|")
-        return tokens or ([bare] if re.fullmatch(r"[\w-]+", bare) else [])
-
-    def clauses(block):
-        start = 0
-        for match in POINTER_CLAUSE.finditer(block):
-            if match["end"]:
-                yield block[start:match.start()]
-                start = match.end()
-        yield block[start:]
-
     pairs = set()
-    lines = report_preamble(text.lstrip("\ufeff"), limit=text.count("\n") + 1, strip_bold=False)
-    block = []
-    for line in (*lines, ""):
-        heading = MD_HEADING.fullmatch(line)
-        if not line or heading or MD_LIST.match(line) or "|" in line or (block and "|" in block[-1]):
-            for clause in clauses("\n".join(block)):
-                clause = POINTER_ATTRIBUTION.sub("", clause.strip())
-                directions = [m for m in POINTER_DIRECTION.finditer(clause) if m["direction"]]
-                if len(directions) != 1:
-                    continue
-                direction = directions[0]
-                before = clause[:direction.start()]
-                if POINTER_UNASSERTED.search(before):
-                    continue
-                old, new = paths(before), paths(clause[direction.end():])
-                if len(old) == len(new) == 1 and valid_path(old[0]) and valid_path(new[0]):
-                    pairs.add((old[0], new[0]))
-            block = []
-        if line and not heading:
-            block.append(MD_LIST.sub("", line))
+    for block in pointer_blocks(text):
+        declared = set()
+        for clause in pointer_clauses(block, POINTER_CLAUSE):
+            parts = list(pointer_clauses(clause, POINTER_COMMA))
+            if len(parts) > 1:
+                split_pairs = [pointer_pair(part, arrow_only=True) for part in parts]
+                # 逗号也可能列举端点；只有两侧都是完整箭头声明才能分开。
+                if all(split_pairs):
+                    declared.update(split_pairs)
+                continue
+            if pair := pointer_pair(clause):
+                declared.add(pair)
+        # 指针从迁移声明开始，可有标题或表头，不从无关正文里捞配对。
+        if not declared and not pairs and not block.startswith("|"):
+            return set()
+        pairs.update(declared)
     return pairs
 
 
@@ -705,328 +609,66 @@ def is_json_artifact(obj):
             and all(isinstance(file, dict) and {"path", "bytes", "sha256"} <= file.keys() for file in files))
 
 
-def report_preamble(content, limit=40, *, strip_bold=True, keep_fenced_lines=False):
-    """保留 Markdown 段落结构；围栏内部的示例不提供前导证据。"""
-    lines = []
-    fence = None
-    for raw in content.split("\n", limit)[:limit]:
-        line = MD_QUOTE.sub("", raw.strip())
-        if marker := re.match(r"`{3,}|~{3,}", line):
-            if fence is None:
-                fence = marker[0]
-            elif marker[0].startswith(fence) and not line[marker.end():].strip():
-                fence = None
-            lines.append("")
-        elif fence is None:
-            lines.append(line.replace("**", "") if strip_bold else line)
-        elif keep_fenced_lines:
-            lines.append("")
-    return lines
-
-
-def markdown_frontmatter(text):
-    """只读开头 YAML 块，保留剥离的物理行数；正文同名字段不参与分类。"""
-    block = FRONTMATTER.match(text.removeprefix("\ufeff"))
-    if block and re.search(r"(?m)^\w[\w-]*[ \t]*:[ \t]", block["fields"]):
-        types = (next(value for value in match.groups() if value is not None).strip()
-                 for match in YAML_TYPE.finditer(block["fields"]))
-        return text[block.end() + text.startswith("\ufeff"):], block[0].count("\n"), any(
-            REPORT_TYPE.fullmatch(value) for value in types
-        )
-    return text.removeprefix("\ufeff"), 0, False
-
-
-def report_title(label):
-    # 有身份的主标题优先；副标题提到“设计文档”不会改变“实装审计”的身份。
-    # 括注里的“诊断”或“设计”常只是主题限定，不参与主标题的角色裁定。
-    main = re.sub(r"（[^（）]*）|\([^()]*\)", "", label)
-    lead = re.split(r"：|:\s|——| [—–] ", main, maxsplit=1)[0]
-
-    def role(title):
-        marks = [(m.start(), is_report) for pattern, is_report in ((REPORT_TITLE, True), (RULE_TITLE, False))
-                 for m in pattern.finditer(title)]
-        return max(marks)[1] if marks else None
-
-    primary = role(lead)
-    if primary is not None:
-        return primary
-    secondary = role(main)
-    return bool(role(label) if secondary is None else secondary)
-
-
-def markdown_tables(lines, rule_pattern):
-    def cells(line):
-        return [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip("|"))] if "|" in line else []
-
-    for i, line in enumerate(lines[:-2]):
-        header, rule = cells(line), cells(lines[i + 1])
-        if len(header) != len(rule) or not rule or not all(map(rule_pattern.fullmatch, rule)):
-            continue
-        rows = []
-        for row in lines[i + 2:]:
-            data = cells(row)
-            if len(data) != len(header):
-                break
-            rows.append(data)
-        if rows:
-            yield i, header, rows
-
-
-def report_table(lines, *, measured=False):
-    rule_pattern = RUN_TABLE_RULE if measured else TABLE_RULE
-    metric_column = RUN_DATA_COLUMN if measured else RUN_COLUMN
-    for _, header, rows in markdown_tables(lines, rule_pattern):
-        columns = [j for j, name in enumerate(header)
-                   if OUTCOME_KEY.fullmatch(name) or name in {"状态", "实测", "认识论等级"}]
-        metrics = [j for j, name in enumerate(header) if metric_column.search(name)]
-        numeric_rows = 0
-        sampled_table = measured and (
-            header[0] in {"标的", "日期", "指标", "项", "regime", "维度", "级别", "id"}
-            or header[0] == "" and len(header) >= 3
-        )
-        for data in rows:
-            if len(header) == 2 and header[0] in {"字段", "项", "Field", "Key"} and EXECUTION_KEY.fullmatch(data[0]):
-                return True
-            if (any(DISPOSITION.search(data[j]) or MEASUREMENT.search(data[j]) for j in columns)
-                    or sum(bool(re.search(r"\d", data[j])) for j in metrics) >= 2
-                    or sum(bool(re.match(r"[✓✗✅❌]", cell)) for cell in data) >= 2):
-                return True
-            if sampled_table and sum(bool(RUN_VALUE.search(cell)) for cell in data[1:]) >= 2:
-                numeric_rows += 1
-                if numeric_rows >= 2:
-                    return True
-    return False
-
-
-def observed_table(lines, *, sampled, generated, reported_run):
-    """用表头和实际数值分辨测量结果与定义、阈值或预期行为表。"""
-    for _, header, rows in markdown_tables(lines, RUN_TABLE_RULE):
-        labels = {name.casefold() for name in header}
-        numeric = {name.casefold() for j, name in enumerate(header)
-                   if any(RUN_CELL.match(row[j]) for row in rows)}
-        bars = any(re.fullmatch(r"bars?(?:\s*数)?", label) for label in numeric)
-        performance = sum(bool(PERFORMANCE_COLUMN.search(label)) for label in numeric)
-        if (bars and performance) or (reported_run and performance >= 2):
-            return True
-        if sampled and {"笔", "线段", "中枢", "走势", "买卖点"} <= numeric:
-            return True
-        if sampled and {"唯一键数", "重复率"} <= numeric and (
-            "判定" in labels or any(re.search(r"[✅❌]", cell) for row in rows for cell in row)
-        ):
-            return True
-        if generated and sampled and len(numeric) >= 2:
-            return True
-    return False
-
-
-def measured_report(title, content, *, draft):
-    """无「报告」名分时，查是否记录已执行的结果，而非制定验证方法。"""
-    if draft or title and NORMATIVE_TITLE.search(title):
+def is_basis_path(path, extension):
+    if path == REMEDIATION or is_artifact_archive_path(path):
         return False
-    lines = report_preamble(content, limit=90)
-    preamble = "\n".join(lines)
-    table = report_table(lines, measured=True) or RUN_DECISION_TABLE.search(preamble)
-    measured_change = BEFORE_AFTER.search(preamble) and NUMERIC_CHANGE.search(preamble)
-    sampled = EMPIRICAL_CONTEXT.search(preamble)
-    generated = GENERATED_AT.search("\n".join(lines[:12]))
-    run_title = bool(title and RUN_TITLE.search(title))
-    empirical_grade = RUN_EMPIRICAL_GRADE.search(preamble)
-    if observed_table(lines, sampled=sampled, generated=generated,
-                      reported_run=(run_title and sampled) or empirical_grade):
-        return True
-    if sampled and (table or OBSERVED_FINDING.search(preamble)) and (generated or run_title):
-        return True
-    if (title and re.search(r"(?:研究|调研)报告\s*$", title)
-            and re.search(r"基于[^\n]{0,120}(?:研读|调研)|(?:调研|研究)日期\s*[:：]", preamble)
-            and re.search(r"(?m)^#{2,6} [^\n]{0,45}(?:结论|评估|建议)", content)):
-        return True
-    if RUN_DELIVERY.search("\n".join(lines[:12])) and (DELIVERED.search(preamble) or RUN_EXECUTED.search(preamble)):
-        return True
-    if RUN_EXECUTED.search(preamble) and (sampled or empirical_grade) and (
-        OBSERVED_FINDING.search(preamble) or len(RUN_STATISTIC.findall(preamble)) >= 2
-    ):
-        return True
-    if title and EXECUTION_RECORD.search(title) and re.search(r"实际报错|实际失败|\bE[0-9]{4}\b", preamble):
-        return True
-    if title and RUN_DIGEST.search(title) and (
-        len(RUN_STATISTIC.findall(preamble)) >= 3
-        or len(re.findall(r"(?m)^\d+\. .*?[✅❌]", preamble)) >= 2
-    ):
-        return True
-    # 有些实验先列设计及预注册，后列实际结果；只在明确的运行结果小节内取数值。
-    if run_title or sampled or empirical_grade:
-        all_lines = report_preamble(content, limit=content.count("\n") + 1)
-        for index, line in enumerate(all_lines):
-            if not (MD_HEADING.fullmatch(line) and RUN_RESULT_SECTION.search(line)):
-                continue
-            section = all_lines[index + 1:index + 55]
-            section_text = "\n".join(section)
-            if observed_table(section, sampled=True, generated=False, reported_run=True) or (
-                (sampled or EMPIRICAL_CONTEXT.search(section_text))
-                and len(RUN_STATISTIC.findall(section_text)) >= 2
-            ):
-                return True
-            if empirical_grade and re.search(r"证伪|否证", line) and len(RUN_METRIC.findall(section_text)) >= 2:
-                return True
-    execution = (REPORT_SUBJECT.search(preamble) or RUN_EXECUTION.search(preamble)
-                 or RUN_SOURCE.search(preamble) and RUN_SAMPLE.search(preamble))
-    if execution and (table or measured_change or RUN_OBSERVATION.search(preamble) or RUN_RECORDED.search(preamble)):
-        return True
-    self_report = SELF_REPORT.search(preamble)
-    explicit_result = re.search(r"^本报告(?:结论先行[:：]|只产出)|^本报告为 .{0,24}(?:诊断|结果|实测)", preamble, re.M)
-    if (self_report and (RUN_RECORDED.search(preamble) or explicit_result and table)
-            or explicit_result and re.search(r"^#{2,6} .{0,10}(?:结论|判决|结果)", preamble, re.M)):
-        return True
-    # 复盘摘要也可能用带单位的读数列项目，而不复印原报告的表。
-    if RUN_SUMMARY_HEADING.search(preamble) and (table or len(RUN_SUMMARY_VALUE.findall(preamble)) >= 2):
-        return True
-    if not title or not RUN_TITLE.search(title):
-        return False
-    if (REPORT_SUBJECT.search(preamble) or RUN_RESULT_COUNT.search(preamble)
-            or MEASUREMENT.search(preamble) or measured_change
-            or RUN_RECORDED.search(preamble) and execution):
-        return True
-    # 探针、基准也可能先报采样口径，随后只用数字表给出读数。
-    if RUN_SAMPLE.search(preamble) and table:
-        return True
-    result_heading = any(
-        OUTCOME_KEY.fullmatch(re.sub(r"^\d+\.\s*", "", heading[1]).split("（", 1)[0])
-        for line in lines if (heading := MD_HEADING.fullmatch(line))
-    )
-    return bool(result_heading and SELF_REPORT.search(content))
+    if path.startswith(REVIEW_ARCHIVE):
+        return True  # is_artifact_archive_path 已限定两份冻结包的具名规范。
+    directory, _, name = path.rpartition("/")
+    if extension == ".md":
+        return (path in MARKDOWN_BASIS_FILES
+                or directory in MARKDOWN_BASIS_DIRS
+                or (directory == "docs/adr" and ADR_BASENAME.fullmatch(name) is not None)
+                or path.startswith(("docs/agents/", "docs/spec/"))
+                or (path.startswith(".sandcastle/") and OUTPUT_DIRS.isdisjoint(directory.split("/")))
+                or (path.startswith(COMPONENT_TREES) and name in {"README.md", "ORACLE.md"}))
+    if extension in DATA_EXTENSIONS:
+        return not path.startswith(INFERENCE_TREES) and OUTPUT_DIRS.isdisjoint(directory.split("/"))
+    return extension in CODE_EXTENSIONS or name in {"Dockerfile", "Makefile"}
 
 
-def is_report_artifact(raw, text):
-    content = text.lstrip("\ufeff \t\r\n")
-    if content.startswith("{"):
+def has_eligible_structure(raw, extension):
+    """JSON 数据必须可解析，复核/运行对象即使改成其他后缀也不能引用。"""
+    content = raw.removeprefix(b"\xef\xbb\xbf")
+    if extension == ".jsonl":
+        records = content.removesuffix(b"\n").split(b"\n")
+    elif extension == ".json" or content.lstrip().startswith(b"{"):
+        records = (content,)
+    else:
+        return True
+    for record in records:
         try:
-            obj = strict_json(raw.removeprefix(b"\xef\xbb\xbf"), "PREGATE_REVIEW", "verification_basis")
+            obj = decode_json(record)
         except ValueError:
-            return False  # 普通源码片段无需是 JSON。
-        return isinstance(obj, dict) and is_json_artifact(obj)
-    content, _, report_type = markdown_frontmatter(content)
-    content = content.lstrip("\r\n")
-    if report_type or any(pattern.match(content) for pattern in (SUMMARY_HEADER, TB_RUN_HEADER, TB_REVIEW_HEADER)):
-        return True
-    lines = report_preamble(content)
-    if not lines:
-        return False
-    # 报告前置修订说明可能是引用段；以下取第一个实际标题，而非首物理行。
-    headings = [i for i, line in enumerate(lines) if MD_HEADING.fullmatch(line)]
-    title_index = next((i for i in headings if lines[i].startswith("# ")), headings[0] if headings else None)
-    title = MD_HEADING.fullmatch(lines[title_index]) if title_index is not None else None
-    if title and ADR_TITLE.match(title[1]):
-        return False
-    first_field = REPORT_FIELD.fullmatch(title[1]) if title else None
-    title_is_field = first_field and (OUTCOME_KEY.fullmatch(first_field["key"])
-                                     or EXECUTION_KEY.fullmatch(first_field["key"]))
-    metadata = "\n".join(lines)
-    declaration = re.compile(r"^状态\s*[:：]\s*(?:设计(?:稿|草案)|规范草案|预注册)(?=$|[\s（(。])")
-    draft = any(declaration.match(MD_LIST.sub("", line)) for line in lines[:12])
-    declared = bool(title and not title_is_field and report_title(title[1]) and not draft)
-    bound = RECEIPT_COMMIT.search(metadata) is not None
-    if bound and (RECEIPT_VERDICT.search(metadata) or (RUN_EXIT_CODE.search(metadata) and RUN_RESULT.search(metadata))):
-        return True
-
-    execution = bound
-    outcome = False
-    in_outcome_section = False
-    body = [line for i, line in enumerate(lines) if i != title_index or title_is_field]
-    for line in body:
-        heading = MD_HEADING.fullmatch(line)
-        label = MD_LIST.sub("", heading[1] if heading else line)
-        label = re.sub(r"^(?:第?[一二三四五六七八九十]+[、.]|\d+[、.])\s*", "", label)
-        fields = () if label.startswith("|") else label.split(" | ")
-        for segment in fields:
-            field = REPORT_FIELD.fullmatch(segment.strip())
-            if field is None:
-                continue
-            key, value = field["key"], field["value"]
-            key = re.split(r"[（(]", key, maxsplit=1)[0].strip()
-            execution |= bool(EXECUTION_KEY.fullmatch(key) or REPORT_SUBJECT.search(value))
-            if OUTCOME_KEY.fullmatch(key):
-                outcome |= bool(DISPOSITION.search(value) or MEASUREMENT.search(value) or RUN_METRIC.search(value))
-        if heading:
-            name = re.split(r"[（(：:]", label, maxsplit=1)[0].strip()
-            in_outcome_section = bool(OUTCOME_KEY.fullmatch(name))
-            execution |= bool(EXECUTION_KEY.fullmatch(name) or REPORT_SUBJECT.search(label))
-        else:
-            # 小节正文可能先写实测再给表，或把多行结论排在同一个引用段。
-            if in_outcome_section:
-                outcome |= bool(DISPOSITION.search(line) or MEASUREMENT.search(line) or RUN_METRIC.search(line))
-            execution |= bool(declared and (REPORT_SUBJECT.search(line) or MEASUREMENT.search(line)
-                                            or re.search(r"本次.{0,24}(?:实跑|实测|执行)|生成：\d{4}-\d{2}-\d{2}", line)))
-    return ((declared and (execution or outcome or report_table(body))) or (bound and outcome)
-            or measured_report(title[1] if title and not title_is_field else None, content, draft=draft))
-
-
-def section_result_lines(text):
-    """按实际节边界找自产读数；父节的脚本/样本说明传给子节，不传给同级节。"""
-    content, offset, _ = markdown_frontmatter(text)
-    lines = report_preamble(content, limit=content.count("\n") + 1, keep_fenced_lines=True)
-    headings = [(i, len(line) - len(line.lstrip("#")), heading[1]) for i, line in enumerate(lines)
-                if (heading := MD_HEADING.fullmatch(line))]
-    title = next((label for _, level, label in headings if level == 1), "")
-    if ADR_TITLE.match(title):
-        return set()
-    normative = NORMATIVE_TITLE.search(title) and not SECTION_RESULTS.search(title)
-    run_context = []
-    result_lines = set()
-    for (index, level, label), (end, _, _) in zip(headings, headings[1:] + [(len(lines), 0, "")]):
-        while run_context and run_context[-1][0] >= level:
-            run_context.pop()
-        parent_script, parent_sample, parent_run = run_context[-1][1:] if run_context else (False, False, False)
-        body = lines[index + 1:end]
-        prose = [line for line in [label, *body] if not line.startswith("|")]
-        context = "\n".join(prose)
-        script = parent_script or bool(SECTION_SCRIPT.search(context))
-        sample = parent_sample or bool(SECTION_SAMPLE.search(context))
-        observed_sample = any(SECTION_OBSERVED.search(line) and SECTION_SAMPLE.search(line) for line in prose)
-        plain_label = re.split(r"[（(]", label, 1)[0]
-        measured_section = SECTION_RESULTS.search(plain_label) and (RUN_SAMPLE.search(context) or RUN_SOURCE.search(context))
-        own_run = parent_run or observed_sample or (not normative and sample and (script or measured_section))
-        run_context.append((level, script, sample, own_run))
-        if level < 2:
-            continue
-        first = offset + index + 2  # body[0] 的原文件 1-based 行号
-        if own_run:
-            for table, _, rows in markdown_tables(body, RUN_TABLE_RULE):
-                for row, cells in enumerate(rows, start=table + 2):
-                    if any(NUMERIC_CELL.match(cell) for cell in cells[1:]):
-                        result_lines.add(first + row)
-        for row, line in enumerate(body):
-            if line.startswith("|") or SECTION_SCRIPT.search(line) or RUN_SAMPLE.search(line):
-                continue
-            direct_reading = SECTION_OBSERVED.search(line) and RUN_METRIC.search(line)
-            scoped_reading = own_run and SECTION_READING.search(line) and (RUN_METRIC.search(line) or RUN_VALUE.search(line))
-            if direct_reading or scoped_reading:
-                result_lines.add(first + row)
-    return result_lines
+            return extension not in DATA_EXTENSIONS
+        if isinstance(obj, dict) and is_json_artifact(obj):
+            return False
+    return True
 
 
 def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):
     fail(isinstance(item, dict) and item.keys() == BASIS_KEYS, "invalid verification_basis keys")
     path, blob, start, end = (item[k] for k in ("path", "blob", "line_start", "line_end"))
     fail(valid_path(path), "invalid verification_basis path")
-    fail(path != REMEDIATION and not is_artifact_archive_path(path), ARTIFACT_BASIS_ERROR)
+    extension = PurePosixPath(path).suffix
+    fail(is_basis_path(path, extension), ARTIFACT_BASIS_ERROR)
     entry = final_tree.get(path)
     fail(entry is not None and entry.kind == "blob" and entry.mode in REGULAR_MODES
          and entry.blob == blob, "verification_basis must bind a regular F blob")
     fail(blob not in archived_artifacts.blobs or (path, blob) in archived_artifacts.migrated_inputs,
          ARTIFACT_BASIS_ERROR)
-    if blob not in cache:
+    cache_key = (blob, extension if extension in DATA_EXTENSIONS else None)
+    if cache_key not in cache:
         raw = git("cat-file", "blob", entry.blob, cwd=cwd)
         try:
             text = raw.decode("utf-8")
         except UnicodeError:
             fail(False, "verification_basis must be UTF-8 text")
         fail("\0" not in text, "verification_basis must be UTF-8 text")
-        fail(not is_report_artifact(raw, text), ARTIFACT_BASIS_ERROR)
-        cache[blob] = text.count("\n") + bool(text and not text.endswith("\n")), section_result_lines(text)
-    line_count, result_lines = cache[blob]
-    fail(type(start) is int and type(end) is int and 1 <= start <= end <= line_count,
+        fail(has_eligible_structure(raw, extension), ARTIFACT_BASIS_ERROR)
+        cache[cache_key] = text.count("\n") + bool(text and not text.endswith("\n"))
+    fail(type(start) is int and type(end) is int and 1 <= start <= end <= cache[cache_key],
          "verification_basis line range outside F text")
-    fail(not any(start <= line <= end for line in result_lines), ARTIFACT_BASIS_ERROR)
     return (path.encode("utf-8"), blob.encode("utf-8"), start, end)
 
 
