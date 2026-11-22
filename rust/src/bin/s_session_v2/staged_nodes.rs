@@ -194,42 +194,48 @@ impl<'w> StageOwner<'w> {
         self.check_live()?;
         self.puts.set(self.puts.get() + 1);
         let mut nodes = self.nodes.borrow_mut();
-        if let Some(node) = nodes.get(&d) {
-            if node.tag != t || node.body.as_slice() != b {
-                return Err(sc::CodecError::new(
-                    sc::code::NODE_DIGEST,
-                    "同暂存摘要异原件，拒绝",
-                ));
+        let next = nodes
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| sc::CodecError::new(sc::code::SOURCE, "暂存节点数溢出"))?;
+        match nodes.entry(d) {
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                let node = entry.get();
+                if node.tag != t || node.body.as_slice() != b {
+                    return Err(sc::CodecError::new(
+                        sc::code::NODE_DIGEST,
+                        "同暂存摘要异原件，拒绝",
+                    ));
+                }
             }
-        } else {
-            let next = nodes
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| sc::CodecError::new(sc::code::SOURCE, "暂存节点数溢出"))?;
-            let high_water = next.max(self.tree_high_water.get());
-            let tree = content_store::native_tree_storage::<NodeDigest, ChargedNode>(
-                self.work, high_water,
-            )?;
-            let (body, permit) = content_store::native_body_reserved(self.work, b)?;
-            let capacity = body.capacity();
-            nodes.insert(
-                d,
-                ChargedNode {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                let prev_high_water = self.tree_high_water.get();
+                let new_tree = if next > prev_high_water {
+                    Some(
+                        content_store::native_tree_storage::<NodeDigest, ChargedNode>(
+                            self.work, next,
+                        )?,
+                    )
+                } else {
+                    None
+                };
+                let (body, permit) = content_store::native_body_reserved(self.work, b)?;
+                let capacity = body.capacity();
+                slot.insert(ChargedNode {
                     tag: t,
                     body,
                     _body_permit: permit,
-                },
-            );
-            *self.tree_permit.borrow_mut() = tree;
-            self.tree_high_water.set(high_water);
-            self.live_body_capacity
-                .set(self.live_body_capacity.get() + capacity);
-            self.peak_body_capacity.set(
+                });
+                if let Some(tree) = new_tree {
+                    *self.tree_permit.borrow_mut() = tree;
+                    self.tree_high_water.set(next);
+                }
+                let live = self.live_body_capacity.get() + capacity;
+                self.live_body_capacity.set(live);
                 self.peak_body_capacity
-                    .get()
-                    .max(self.live_body_capacity.get()),
-            );
-            self.accepted.set(self.accepted.get() + 1);
+                    .set(self.peak_body_capacity.get().max(live));
+                self.accepted.set(self.accepted.get() + 1);
+            }
         }
         Ok(())
     }
@@ -308,6 +314,9 @@ impl<'w> StageOwner<'w> {
             }
         }
         drop(store);
+        if self.nodes.borrow().is_empty() {
+            return Ok(());
+        }
         let mut eager = content_store::TxStore::new(tx)
             .map_err(|e| e.to_string())?
             .with_work(self.work);
@@ -359,57 +368,73 @@ impl<'w> StageOwner<'w> {
         self.check_transaction(tx).map_err(|e| e.to_string())?;
         self.sample_heap_phase();
         let mut roots = runtime.to_vec();
-        for (table, cols) in [
+        for (sql, ncols) in [
             (
-                "s_content_publications",
-                vec!["manifest_root", "snapshot_root", "delta_root"],
+                "SELECT manifest_root, snapshot_root, delta_root FROM s_content_publications",
+                3usize,
             ),
             (
-                "s_content_objects",
-                vec![
-                    "generated_root",
-                    "internal_root",
-                    "immutable_root",
-                    "birth_wire_root",
-                ],
+                "SELECT generated_root, internal_root, immutable_root, birth_wire_root FROM s_content_objects",
+                4usize,
             ),
-            ("s_content_witnesses", vec!["generated_root", "wire_root"]),
-            ("s_content_relations", vec!["generated_root"]),
             (
-                "s_content_observations",
-                vec!["generated_root", "birth_wire_root"],
+                "SELECT generated_root, wire_root FROM s_content_witnesses",
+                2usize,
+            ),
+            ("SELECT generated_root FROM s_content_relations", 1usize),
+            (
+                "SELECT generated_root, birth_wire_root FROM s_content_observations",
+                2usize,
             ),
         ] {
-            for col in cols {
-                let mut s = tx
-                    .prepare(&format!("SELECT {col} FROM {table}"))
-                    .map_err(|e| e.to_string())?;
-                for row in s
-                    .query_map([], |r| r.get::<_, Vec<u8>>(0))
-                    .map_err(|e| e.to_string())?
-                {
+            let mut s = tx.prepare_cached(sql).map_err(|e| e.to_string())?;
+            let mut rows = s.query([]).map_err(|e| e.to_string())?;
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                for idx in 0..ncols {
+                    let blob = r
+                        .get_ref(idx)
+                        .map_err(|e| e.to_string())?
+                        .as_blob()
+                        .map_err(|e| e.to_string())?;
+                    roots.push(blob.try_into().map_err(|_| "持久root非32B")?);
+                }
+            }
+        }
+        {
+            let mut s = tx
+                .prepare_cached("SELECT delta_json, catalog_evidence_json FROM structure_deltas")
+                .map_err(|e| e.to_string())?;
+            let mut rows = s.query([]).map_err(|e| e.to_string())?;
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                for idx in 0..2 {
+                    let text = r
+                        .get_ref(idx)
+                        .map_err(|e| e.to_string())?
+                        .as_str()
+                        .map_err(|e| e.to_string())?;
+                    let v = strict_json(text.as_bytes())?;
                     roots.push(
-                        row.map_err(|e| e.to_string())?
-                            .try_into()
-                            .map_err(|_| "持久root非32B")?,
+                        sc::TransportRef::from_json_view((&v).into())
+                            .map_err(|e| e.to_string())?
+                            .digest()
+                            .map_err(|e| e.to_string())?,
                     );
                 }
             }
         }
-        for (table, col) in [
-            ("structure_deltas", "delta_json"),
-            ("structure_deltas", "catalog_evidence_json"),
-            ("catalog", "evidence_json"),
-        ] {
+        {
             let mut s = tx
-                .prepare(&format!("SELECT {col} FROM {table}"))
+                .prepare_cached("SELECT evidence_json FROM catalog")
                 .map_err(|e| e.to_string())?;
-            for row in s
-                .query_map([], |r| r.get::<_, String>(0))
-                .map_err(|e| e.to_string())?
-            {
-                let v = strict_json(row.map_err(|e| e.to_string())?.as_bytes())?;
-                if table == "catalog" && v == json!({}) {
+            let mut rows = s.query([]).map_err(|e| e.to_string())?;
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let text = r
+                    .get_ref(0)
+                    .map_err(|e| e.to_string())?
+                    .as_str()
+                    .map_err(|e| e.to_string())?;
+                let v = strict_json(text.as_bytes())?;
+                if v == json!({}) {
                     continue;
                 }
                 roots.push(
