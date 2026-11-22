@@ -2175,6 +2175,21 @@ pub(crate) fn trace_event(phase: &'static str, generation: Option<i64>) {
         }
     });
 }
+#[cfg(test)]
+pub(super) fn trace_journal_coexist_refusal(bytes: usize, requested: usize, cap: usize) {
+    AUDIT_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.events.push(json!({
+                "phase": "journal_coexist_refusal",
+                "stage": trace.stage.map(|(name, _)| name),
+                "generation": trace.stage.map(|(_, generation)| generation),
+                "bytes": bytes,
+                "requested": requested,
+                "cap": cap,
+            }));
+        }
+    });
+}
 /// #1640 D2 出生锁：完整分支（`generate_impl(None)`）一次调用及其入口标签。
 #[cfg(all(test, feature = "s_incremental"))]
 pub(super) fn trace_birth(entry: &'static str, generation: i64) {

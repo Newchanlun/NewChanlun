@@ -119,7 +119,7 @@ pub(super) fn publish_borrowed_staged(
     policy_records: &str,
     stage: &staged_nodes::StageOwner,
     runtime: &[sc::NodeDigest],
-    workspace: Option<content_manifest::PreparedManifestWorkspace>,
+    workspace: Option<content_manifest::PreparedManifestWorkspace<'_>>,
     work: Option<&WorkScope>,
     #[cfg(feature = "s_incremental")] source_manifest: Option<
         content_manifest::ManifestSourceReceipt,
@@ -155,7 +155,7 @@ pub(super) fn publish_borrowed_with_workspace(
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
     policy_records: &str,
-    workspace: Option<content_manifest::PreparedManifestWorkspace>,
+    workspace: Option<content_manifest::PreparedManifestWorkspace<'_>>,
 ) -> Result<CommitReceipt, String> {
     let m = &m.view();
     publish_borrowed_with_workspace_admitted(
@@ -180,7 +180,7 @@ pub(super) fn publish_borrowed_with_workspace_admitted(
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
     policy_records: &str,
-    workspace: Option<content_manifest::PreparedManifestWorkspace>,
+    workspace: Option<content_manifest::PreparedManifestWorkspace<'_>>,
     work: Option<&WorkScope>,
     #[cfg(feature = "s_incremental")] source_manifest: Option<
         content_manifest::ManifestSourceReceipt,
@@ -215,7 +215,7 @@ fn publish_prepared_inner(
     #[cfg(all(test, feature = "s_incremental"))] stage: Option<&staged_nodes::StageOwner>,
     #[cfg(all(test, feature = "s_incremental"))] runtime: &[sc::NodeDigest],
     #[cfg(feature = "s_incremental")] workspace: Option<
-        content_manifest::PreparedManifestWorkspace,
+        content_manifest::PreparedManifestWorkspace<'_>,
     >,
     work: Option<&WorkScope>,
     #[cfg(feature = "s_incremental")] source_manifest: Option<

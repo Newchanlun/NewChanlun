@@ -314,10 +314,10 @@ fn w2_h1_roundtrip_selected(
     for (offset, envelope) in envelopes.iter().enumerate() {
         let n = offset + 1;
         let before = state::full_audit_calls_for_test();
-        let (handled, allocations, refusal) = if lock.is_some_and(|lock| lock.name == "ef") {
+        let (handled, allocations, refusal, journal) = if lock.is_some_and(|lock| lock.name == "ef") {
             issue1642_observe(&mut online, envelope, "ef", n)
         } else {
-            (online.handle(envelope.clone()), Vec::new(), None)
+            (online.handle(envelope.clone()), Vec::new(), None, None)
         };
         let trace =
             super::SOURCE_APPEND_BOUNDARY_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
@@ -335,7 +335,9 @@ fn w2_h1_roundtrip_selected(
             Ok(reply) => reply,
             Err(error) => {
                 assert_eq!(first_refusal, Some(n), "在线第 {n} 代意外拒绝：{error}");
-                issue1642_check_parent_refusal(n, &error, &allocations, refusal).unwrap();
+                issue1642_check_journal_refusal(
+                    n, &error, &allocations, refusal, journal.as_ref(), "object_plan", 8_388_608,
+                ).unwrap();
                 let previous = issue1642_persisted_receipt(&f.db, n as i64 - 1);
                 assert_eq!(previous["status"], "Committed");
                 let pending = issue1642_persisted_receipt(&f.db, n as i64);
@@ -343,7 +345,7 @@ fn w2_h1_roundtrip_selected(
                 assert!(pending["batch_id"].is_null());
                 issue1642_assert_no_publication(&f.db, n as i64);
                 println!(
-                    "M8D_P3_RECEIPT lock={} g={n} outcome=parent_refused previous={previous} pending={pending}",
+                    "M8D_P3_RECEIPT lock={} g={n} outcome=journal_refused previous={previous} pending={pending}",
                     lock.unwrap().name,
                 );
                 break;
@@ -772,9 +774,9 @@ fn w2_h1_cold_ef_seed_pair_qualification_and_canonical_matches_online() {
     M8D_P3_LOCK.with(|l| {
         l.set(Some(M8dP3Lock {
             name: "ef",
-            // #1642：原 V 下 g76、g77 已提交，g78 来源扩容全通过后在父分域首拒。
-            // 父预算问题解决并实跑 107 代后改 None；当前锁逐位比对可发布前缀。
-            first_refusal: Some(78),
+            // #1642：原 V 下 g78–g80 已提交；g81 在原 journal 共存帽先拒。
+            // 实跑 107 代后改 None；保留在线和冷端的真实可发布前缀对拍。
+            first_refusal: Some(81),
         }))
     });
     let envelopes: Vec<_> = w2_h1_ef_rows()
@@ -806,12 +808,17 @@ fn issue1642_observe(
     Result<Value, String>,
     Vec<Value>,
     Option<super::native::ParentRefusal>,
+    Option<Value>,
 ) {
     super::SOURCE_APPEND_ALLOCATIONS.with(|p| *p.borrow_mut() = Some(Vec::new()));
     super::native::PARENT_REFUSAL.with(|p| p.set(Some(None)));
     let (result, stages, _) = state::traced(false, || driver.handle(envelope.clone()));
     let allocations = super::SOURCE_APPEND_ALLOCATIONS.with(|p| p.borrow_mut().take().unwrap());
     let refusal = super::native::PARENT_REFUSAL.with(|p| p.take().unwrap());
+    let journal = stages
+        .iter()
+        .find(|e| e["phase"] == "journal_coexist_refusal")
+        .cloned();
     if !allocations.is_empty() {
         println!(
             "SOURCE_INDEX_GROWTH lock={label} g={n} {}",
@@ -820,12 +827,44 @@ fn issue1642_observe(
     }
     if let Err(error) = &result {
         println!(
-            "SOURCE_INDEX_REFUSAL lock={label} g={n} error={error} parent={} stages={}",
+            "SOURCE_INDEX_REFUSAL lock={label} g={n} error={error} parent={} journal={} stages={}",
             json!(refusal.into_iter().collect::<Vec<_>>()),
+            json!(journal),
             state::stage_rows(&stages),
         );
     }
-    (result, allocations, refusal)
+    (result, allocations, refusal, journal)
+}
+
+fn issue1642_check_journal_refusal(
+    n: usize,
+    error: &str,
+    allocations: &[Value],
+    parent: Option<super::native::ParentRefusal>,
+    journal: Option<&Value>,
+    stage: &str,
+    expected_growth: u64,
+) -> Result<(), &'static str> {
+    const STALE: &str = "StaleWriter：construction资格失效：publication暂存资源已失效";
+    if error != STALE || parent.is_some() {
+        return Err("须是原 journal 局部超帽错误，不能混为父拒");
+    }
+    let j = journal.ok_or("缺真实 journal 共存拒绝")?;
+    if j["stage"] != stage || j["generation"] != n {
+        return Err("journal 拒绝不属于登记阶段和代");
+    }
+    if !allocations.is_empty() {
+        return Err("来源扩容已开始，与登记的 journal 先拒不符");
+    }
+    let live = j["bytes"].as_u64().ok_or("缺 journal 旧块字节")?;
+    let growth = j["requested"].as_u64().ok_or("缺 journal 新块字节")?;
+    let cap = j["cap"].as_u64().ok_or("缺 journal 局部帽")?;
+    if growth != expected_growth || live > cap
+        || !live.checked_add(growth).is_some_and(|next| next > cap)
+    {
+        return Err("没有在原局部帽内证成旧块与新块不能共存");
+    }
+    Ok(())
 }
 
 fn issue1642_check_parent_refusal(
@@ -984,9 +1023,9 @@ fn issue1424_down_123() -> Vec<Value> {
 
 #[test]
 fn issue1642_issue1424_down_newbirth_signed_budget() {
-    // #1642：原 g72 局部索引首拒消失；g75 写入越过来源扩容后在父分域首拒。
+    // #1642：g75 的发布父拒已解除；g77 在来源扩容前触及原 journal 共存帽。
     // 解开此处时仍须验证真实 cut-111/cut-123，不以几何内核成功代替发布。
-    const FIRST_REFUSAL: Option<usize> = Some(75);
+    const FIRST_REFUSAL: Option<usize> = Some(77);
     let envelopes = issue1424_down_123();
     let fixture = W2H1Fixture::new(envelopes.len());
     let mut writer = fixture.open(&fixture.db);
@@ -994,7 +1033,7 @@ fn issue1642_issue1424_down_newbirth_signed_budget() {
     for (i, envelope) in envelopes.iter().enumerate() {
         let n = i + 1;
         let before = state::full_audit_calls_for_test();
-        let (result, allocations, refusal) =
+        let (result, allocations, refusal, journal) =
             issue1642_observe(&mut writer, envelope, "down-newbirth", n);
         assert_eq!(state::full_audit_calls_for_test(), before);
         let persisted = issue1642_persisted_receipt(&fixture.db, n as i64);
@@ -1003,7 +1042,9 @@ fn issue1642_issue1424_down_newbirth_signed_budget() {
             Ok(reply) => reply,
             Err(error) => {
                 assert_eq!(FIRST_REFUSAL, Some(n), "下行第 {n} 代意外拒绝：{error}");
-                issue1642_check_parent_refusal(n, &error, &allocations, refusal).unwrap();
+                issue1642_check_journal_refusal(
+                    n, &error, &allocations, refusal, journal.as_ref(), "object_plan", 8_388_608,
+                ).unwrap();
                 assert_eq!(persisted["status"], "AcceptedPending");
                 assert!(persisted["batch_id"].is_null());
                 issue1642_assert_no_publication(&fixture.db, n as i64);
@@ -1042,13 +1083,14 @@ fn issue1642_signed_writer_still_refuses_source_growth_one_byte_over_local_cap()
     for (i, envelope) in envelopes[..8].iter().enumerate().skip(1) {
         SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(Some(1)));
         let before = state::full_audit_calls_for_test();
-        let (result, allocations, refusal) =
+        let (result, allocations, refusal, journal) =
             issue1642_observe(&mut writer, envelope, "small-cap", i + 1);
         SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(None));
         assert_eq!(state::full_audit_calls_for_test(), before);
         if let Some((growth, original_cap)) = SOURCE_APPEND_CAP_RECEIPT.with(|p| p.take()) {
             assert!(original_cap >= growth);
             assert!(refusal.is_none(), "必须是局部拒绝，不是父账拒绝");
+            assert!(journal.is_none(), "不是 journal 共存拒绝");
             assert_eq!(result.unwrap_err(), M8D_P3_RESOURCE_REFUSAL);
             let rejected = allocations.last().unwrap();
             assert_eq!(rejected["growth"], growth);
@@ -1138,7 +1180,7 @@ fn issue1642_parent_refusal_predicate_rejects_real_driver_source_index_refusal()
     let target_growth_bytes = 16_200;
     super::SOURCE_APPEND_PARENT_SHORT.with(|target| target.set(Some(target_growth_bytes)));
     let before = state::full_audit_calls_for_test();
-    let (result, allocations, refusal) =
+    let (result, allocations, refusal, journal) =
         issue1642_observe(&mut writer, &w2_h1_envelope(2, &rows[1..2]), "early-ef", 2);
     assert_eq!(
         super::SOURCE_APPEND_PARENT_SHORT.with(|target| target.take()),
@@ -1147,6 +1189,7 @@ fn issue1642_parent_refusal_predicate_rejects_real_driver_source_index_refusal()
     assert_eq!(state::full_audit_calls_for_test(), before);
     let error = result.unwrap_err();
     assert_eq!(error, M8D_P3_RESOURCE_REFUSAL);
+    assert!(journal.is_none());
     let parent = refusal.unwrap();
     assert_eq!(parent.stage, Some("prepare_source_audit"));
     assert_eq!(parent.generation, Some(2));

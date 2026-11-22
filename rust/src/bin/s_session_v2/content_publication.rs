@@ -14,8 +14,8 @@ use super::{canonical_json, content_manifest, content_store, v2};
 #[cfg(all(test, feature = "s_incremental"))]
 use crate::staged_nodes;
 use crate::v3::audit_store::HashReader;
+use crate::v3::audit_store::NativeTree;
 use crate::v3::audit_store::{CodecRead, CodecStore, NativeAdmission};
-use crate::v3::audit_store::{NativeSet, NativeTree};
 use crate::v3::audit_store::{RefFields, RefValue};
 use crate::v3::business_json;
 use crate::v3::native_shared::NativeRc as Rc;
@@ -35,11 +35,6 @@ use sc::ContextError as PublishError;
 #[cfg(test)]
 use sc::Value as V;
 use sc::ValueView as VV;
-#[allow(
-    unused_imports,
-    reason = "#1488 再合 #1608：8组合实测无调用方，保留不删"
-)]
-use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CStr;
 
 #[derive(Debug)]
@@ -81,7 +76,7 @@ pub(super) fn resolve_current_births_staged(
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
     stage: &staged_nodes::StageOwner<'_>,
-    workspace: Option<content_manifest::PreparedManifestWorkspace>,
+    workspace: Option<content_manifest::PreparedManifestWorkspace<'_>>,
     work: Option<&WorkScope>,
 ) -> Result<ResolvedTemplates, PublishError> {
     let m = &m.view();
@@ -110,7 +105,7 @@ pub(super) fn resolve_current_births_with_workspace(
     m: &(impl crate::content_manifest::MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
-    workspace: Option<content_manifest::PreparedManifestWorkspace>,
+    workspace: Option<content_manifest::PreparedManifestWorkspace<'_>>,
 ) -> Result<ResolvedTemplates, PublishError> {
     let m = &m.view();
     resolve_current_births_with_workspace_admitted(tx, token, m, roots, manifest, workspace, None)
@@ -122,7 +117,7 @@ pub(super) fn resolve_current_births_with_workspace_admitted(
     m: &(impl crate::content_manifest::MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
-    workspace: Option<content_manifest::PreparedManifestWorkspace>,
+    workspace: Option<content_manifest::PreparedManifestWorkspace<'_>>,
     work: Option<&WorkScope>,
 ) -> Result<ResolvedTemplates, PublishError> {
     let m = &m.view();
@@ -641,6 +636,7 @@ fn resolve_indexed_templates_pending_core(
     #[cfg(test)]
     crate::v3::diagnostic_s4_read_trace::end(tx, "ord_pub_resolve_born", &resolved_family);
     resolved_family?;
+    drop(objects);
     #[cfg(test)]
     crate::v3::diagnostic_s4_read_trace::begin(tx, "ord_pub_resolve_obs_snapshot");
     let resolved_family = resolve_observations(
@@ -661,6 +657,7 @@ fn resolve_indexed_templates_pending_core(
     #[cfg(test)]
     crate::v3::diagnostic_s4_read_trace::end(tx, "ord_pub_resolve_obs_delta", &resolved_family);
     resolved_family?;
+    drop(observations);
     #[cfg(test)]
     crate::v3::diagnostic_s4_read_trace::begin(tx, "ord_pub_replace");
     for root in [&mut snapshot, &mut delta] {
@@ -1077,6 +1074,58 @@ pub(crate) fn verify_current_begin_admitted(
     Ok(())
 }
 
+// #1642：独立索引在同一事务读完才供解析使用，不需要逐行树节点或逐行许可。
+// 紧凑向量的实际新旧堆块都由 CodecVec 先向父账预约；原生文本各自带原许可。
+struct BirthIndex<T>(sc::CodecVec<(NodeDigest, T)>);
+
+fn push_birth<T>(
+    rows: &mut sc::CodecVec<(NodeDigest, T)>,
+    row: (NodeDigest, T),
+    store: &(impl CodecRead + ?Sized),
+) -> Result<(), PublishError> {
+    match store.codec_work() {
+        Some(work) => rows.try_push_native(row, work),
+        None => rows.try_push(row),
+    }
+    .map_err(err)
+}
+
+impl<T> BirthIndex<T> {
+    fn finish(
+        mut rows: sc::CodecVec<(NodeDigest, T)>,
+        duplicate: &'static str,
+    ) -> Result<Self, PublishError> {
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(err(duplicate));
+        }
+        Ok(Self(rows))
+    }
+    fn expected(&self, eligible: impl Fn(&T) -> bool) -> u64 {
+        self.0.iter().filter(|(_, row)| eligible(row)).count() as u64
+    }
+    fn seen(&self, store: &(impl CodecRead + ?Sized)) -> Result<sc::CodecVec<u8>, PublishError> {
+        let bytes = self.0.len().div_ceil(8);
+        let mut bits = sc::CodecVec::default();
+        store.native_vec_room(&mut bits, bytes).map_err(err)?;
+        for _ in 0..bytes {
+            bits.try_push(0).map_err(err)?;
+        }
+        Ok(bits)
+    }
+    fn claim(&self, id: &NodeDigest, seen: &mut [u8], eligible: impl Fn(&T) -> bool) -> Option<&T> {
+        let i = self.0.binary_search_by_key(id, |(key, _)| *key).ok()?;
+        let row = &self.0[i].1;
+        let mask = 1 << (i % 8);
+        let byte = &mut seen[i / 8];
+        if !eligible(row) || *byte & mask != 0 {
+            return None;
+        }
+        *byte |= mask;
+        Some(row)
+    }
+}
+
 struct ObjectBirth {
     revision: i64,
     kind: NativeValue<String>,
@@ -1092,8 +1141,8 @@ fn object_births(
     tx: &Transaction<'_>,
     m: &MetadataView<'_>,
     store: &(impl CodecStore + ?Sized),
-) -> Result<NativeTree<NodeDigest, ObjectBirth>, PublishError> {
-    let mut out = NativeTree::default();
+) -> Result<BirthIndex<ObjectBirth>, PublishError> {
+    let mut out = sc::CodecVec::default();
     let latest = generation_admitted(tx, store)?.max(m.generation);
     {
         let mut stmt = CheckedStatement::prepare(tx, c"SELECT object_id,object_revision,kind,batch_id,first_known_generation,first_known_cut,published_generation,withdrawn_generation,withdrawal_reason,superseded_by FROM s_content_objects").map_err(err)?;
@@ -1134,17 +1183,11 @@ fn object_births(
                 b.superseded = None;
             }
             let digest = hash_view(store, VV::String(&id))?;
-            if out
-                .insert_admitted(digest, b, store)
-                .map_err(err)?
-                .is_some()
-            {
-                return Err(err("对象身份同时存在两个独立表"));
-            }
+            push_birth(&mut out, (digest, b), store)?;
         }
         stmt.finalize().map_err(err)?;
     }
-    Ok(out)
+    BirthIndex::finish(out, "对象身份同时存在两个独立表")
 }
 struct ObservationBirth {
     kind: NativeValue<String>,
@@ -1155,8 +1198,8 @@ fn observation_births(
     tx: &Transaction<'_>,
     m: &MetadataView<'_>,
     store: &(impl CodecStore + ?Sized),
-) -> Result<NativeTree<NodeDigest, ObservationBirth>, PublishError> {
-    let mut out = NativeTree::default();
+) -> Result<BirthIndex<ObservationBirth>, PublishError> {
+    let mut out = sc::CodecVec::default();
     let latest = generation_admitted(tx, store)?.max(m.generation);
     let mut stmt = CheckedStatement::prepare(
         tx,
@@ -1177,10 +1220,10 @@ fn observation_births(
             continue;
         }
         let digest = hash_view(store, VV::String(&id))?;
-        out.insert_admitted(digest, b, store).map_err(err)?;
+        push_birth(&mut out, (digest, b), store)?;
     }
     stmt.finalize().map_err(err)?;
-    Ok(out)
+    BirthIndex::finish(out, "观察身份重复")
 }
 #[derive(Clone, Copy)]
 enum ObjectFamily {
@@ -1353,7 +1396,7 @@ fn resolve_objects(
     store: &mut (impl CodecStore + ?Sized),
     root: &mut RefValue,
     name: &str,
-    births: &BTreeMap<NodeDigest, ObjectBirth>,
+    births: &BirthIndex<ObjectBirth>,
     m: &MetadataView<'_>,
     batch: &str,
     family: ObjectFamily,
@@ -1366,17 +1409,14 @@ fn resolve_objects(
         n[0] += 1;
         v.set(n);
     });
-    let mut expected = NativeSet::default();
-    for (id, _) in births.iter().filter(|(_, b)| member(b, m, family)) {
-        expected.insert_admitted(*id, store).map_err(err)?;
-    }
+    let eligible = |b: &ObjectBirth| member(b, m, family);
     // 本轮只修改其它成员的batch标量；未处理成员仍来自同一不可变模板数组。
     let array = store.lookup_field_ref(root.view(), name).map_err(err)?;
     let n = array_reference_len(&array, name)?;
-    if n != expected.len() as u64 {
+    if n != births.expected(eligible) {
         return Err(err(format!("{name} 与独立索引成员数不符")));
     }
-    let mut seen = NativeSet::default();
+    let mut seen = births.seen(store)?;
     let mut cursor = store.array_cursor(array.view()).map_err(err)?;
     for i in 0..n {
         let path = PublicationPath::new(
@@ -1406,10 +1446,9 @@ fn resolve_objects(
             .ok_or_else(|| err("缺object_id"))?
             .digest()
             .map_err(err)?;
-        if !expected.contains(&id) || !seen.insert_admitted(id, store).map_err(err)? {
-            return Err(err(format!("{name} 存在越界/重复身份")));
-        }
-        let b = &births[&id];
+        let b = births
+            .claim(&id, &mut seen, eligible)
+            .ok_or_else(|| err(format!("{name} 存在越界/重复身份")))?;
         let revision = Decimal::new(b.revision);
         let first = Decimal::new(b.first);
         let published = Decimal::new(b.published);
@@ -1478,7 +1517,7 @@ fn resolve_objects(
 fn resolve_observations(
     store: &mut (impl CodecStore + ?Sized),
     root: &mut RefValue,
-    births: &BTreeMap<NodeDigest, ObservationBirth>,
+    births: &BirthIndex<ObservationBirth>,
     m: &MetadataView<'_>,
     batch: &str,
     delta: bool,
@@ -1489,21 +1528,15 @@ fn resolve_observations(
         n[1] += 1;
         v.set(n);
     });
-    let mut expected = NativeSet::default();
-    for (id, _) in births
-        .iter()
-        .filter(|(_, b)| !delta || b.first == m.generation)
-    {
-        expected.insert_admitted(*id, store).map_err(err)?;
-    }
+    let eligible = |b: &ObservationBirth| !delta || b.first == m.generation;
     let array = store
         .lookup_field_ref(root.view(), "observations")
         .map_err(err)?;
     let n = array_reference_len(&array, "observations")?;
-    if n != expected.len() as u64 {
+    if n != births.expected(eligible) {
         return Err(err("观察与独立索引成员数不符"));
     }
-    let mut seen = NativeSet::default();
+    let mut seen = births.seen(store)?;
     let mut cursor = store.array_cursor(array.view()).map_err(err)?;
     for i in 0..n {
         let path = PublicationPath::new(
@@ -1525,10 +1558,9 @@ fn resolve_observations(
             .map_err(err)?
             .digest()
             .map_err(err)?;
-        if !expected.contains(&id) || !seen.insert_admitted(id, store).map_err(err)? {
-            return Err(err("观察有越界/重复身份"));
-        }
-        let b = &births[&id];
+        let b = births
+            .claim(&id, &mut seen, eligible)
+            .ok_or_else(|| err("观察有越界/重复身份"))?;
         match_field_view(store, record.view(), "kind", VV::String(&b.kind))?;
         resolve_record_batch(
             store,
@@ -1552,6 +1584,65 @@ mod tests {
     use rusqlite::{params, Connection};
     use sc::{NumberToken, Value as V};
     use serde_json::Value as J;
+
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn publication_birth_index_removes_real_tree_allocations_and_checks_membership() {
+        use crate::v3::audit_owner::{allocation_probe::live_bytes, native::Budget};
+
+        let parent = Budget::new(8 << 20, 0).unwrap();
+        let baseline = parent.live();
+        parent.codec_work().unwrap().run(|work| -> Result<(), PublishError> {
+            let store = NativeAdmission(Some(work));
+            let ledger_before = parent.live();
+            let heap_before = live_bytes();
+            let digest = |n: u64| {
+                let mut key = [0; 32];
+                key[..8].copy_from_slice(&n.to_be_bytes());
+                key
+            };
+            let mut tree = NativeTree::default();
+            for n in (0..1024).rev() {
+                tree.insert_admitted(digest(n), n, &store).map_err(err)?;
+            }
+            let tree_heap = live_bytes() - heap_before;
+            let tree_fee = parent.live() - ledger_before;
+            drop(tree);
+            assert_eq!(live_bytes(), heap_before);
+            assert_eq!(parent.live(), ledger_before);
+
+            let mut rows = sc::CodecVec::default();
+            for n in (0..1024).rev() {
+                push_birth(&mut rows, (digest(n), n), &store)?;
+            }
+            let births = BirthIndex::finish(rows, "重复")?;
+            let eligible = |n: &u64| n % 2 != 0;
+            assert_eq!(births.expected(eligible), 512);
+            let mut seen = births.seen(&store)?;
+            assert_eq!(births.claim(&digest(2), &mut seen, eligible), None);
+            assert_eq!(births.claim(&digest(1024), &mut seen, eligible), None);
+            for n in (1..1024).step_by(2) {
+                assert_eq!(births.claim(&digest(n), &mut seen, eligible), Some(&n));
+                assert_eq!(births.claim(&digest(n), &mut seen, eligible), None);
+            }
+            let compact_heap = live_bytes() - heap_before;
+            let compact_fee = parent.live() - ledger_before;
+            assert_eq!(compact_heap as usize, compact_fee);
+            assert!(compact_heap < tree_heap);
+            assert!(compact_fee < tree_fee);
+            drop((births, seen));
+            assert_eq!(live_bytes(), heap_before);
+            assert_eq!(parent.live(), ledger_before);
+            println!("ISSUE1642_BIRTH_LAYOUT rows=1024 tree_heap={tree_heap} compact_heap={compact_heap} tree_fee={tree_fee} compact_fee={compact_fee}");
+
+            let mut duplicate = sc::CodecVec::default();
+            push_birth(&mut duplicate, (digest(1), 1), &store)?;
+            push_birth(&mut duplicate, (digest(1), 2), &store)?;
+            assert!(BirthIndex::finish(duplicate, "重复").is_err());
+            Ok(())
+        }).unwrap();
+        assert_eq!(parent.live(), baseline);
+    }
 
     #[cfg(feature = "s_incremental")]
     #[test]

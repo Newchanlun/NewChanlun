@@ -754,7 +754,7 @@ fn diagnose_manifest_workspace(
     let _ = writeln!(std::io::stderr().lock(), "{line}");
 }
 #[cfg(feature = "s_incremental")]
-pub(crate) struct PreparedManifestWorkspace {
+pub(crate) struct PreparedManifestWorkspace<'capture> {
     revision: u32,
     format: &'static str,
     metadata: NativeMetadata,
@@ -764,12 +764,13 @@ pub(crate) struct PreparedManifestWorkspace {
     budget: crate::v3::ManifestWorkspaceBudget,
     source_cost: usize,
     originals: std::collections::BTreeMap<NodeDigest, (u8, s_content::CodecVec<u8>)>,
+    borrowed: BorrowedOriginals<'capture>,
     puts: s_content::CodecVec<NodeDigest>,
     // originals 先释放，树许可后归还；随 workspace move，不复制全池。
     tree_permit: Option<s_content::capture_allocation::scratch::NativeReservation>,
 }
 #[cfg(feature = "s_incremental")]
-impl PreparedManifestWorkspace {
+impl PreparedManifestWorkspace<'_> {
     /// Consume into a fixed, exclusive transaction phase. The private lease has no raw SQL,
     /// hook or connection access API. Nothing qualified is returned to the Commit caller.
     pub(crate) fn resolve_in_publication(
@@ -874,7 +875,7 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
     }
     fn resolve(
         self,
-        workspace: PreparedManifestWorkspace,
+        workspace: PreparedManifestWorkspace<'_>,
         metadata: &(impl MetadataSource + ?Sized),
         roots: &(impl ManifestRootSource + ?Sized),
         manifest: &UnpublishedManifest,
@@ -906,8 +907,12 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
                 && workspace.batch_id == manifest.batch_id;
             // The private helper always reads *every* actual row with SQL + F and compares
             // all bytes, even after context/material mismatch. No caller can mint its owner.
+            let owned = workspace
+                .originals
+                .iter()
+                .map(|(d, (tag, body))| (d, *tag, &body[..]));
             let equal = store
-                .rebind_originals(&workspace.originals)
+                .rebind_originals(owned.chain(workspace.borrowed.iter()))
                 .map_err(|e| PublishError::from(e).context("PublicationInvalid："))?
                 && context_equal;
             if equal {
@@ -919,21 +924,25 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
                     let (tag, body) = workspace
                         .originals
                         .get(digest)
+                        .map(|(tag, body)| (*tag, &body[..]))
+                        .or_else(|| workspace.borrowed.get(digest))
                         .expect("recorded successful put");
-                    s_content::NodeSink::put(&mut store, *digest, *tag, body)
+                    s_content::NodeSink::put(&mut store, *digest, tag, body)
                         .map_err(|e| PublishError::from(e).context("PublicationInvalid："))?;
                     record_workspace_stats(|stats| stats.replay_puts += 1);
                 }
                 if store.bind_after_replay {
                     // Move the single budgeted map; never clone a second complete pool.
                     store.originals = workspace.originals;
+                    store.borrowed = workspace.borrowed;
                     store.tree_permit = workspace.tree_permit;
                     // Even a real put which was a Noop retires its target. The next read is
                     // actual SQL/F, and remains cold here (no new unbudgeted full-node memo).
                     for digest in workspace.puts {
                         store.originals.remove(&digest);
+                        store.borrowed.rows.remove(&digest);
                     }
-                    bound_originals = store.originals.len();
+                    bound_originals = store.originals.len() + store.borrowed.rows.len();
                     owner_body_capacity = store
                         .originals
                         .values()
@@ -966,7 +975,7 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
             )
         })();
         // Qualified bytes end here, before later raw SQL and before the new keeper exists.
-        let remaining_originals = store.originals.len();
+        let remaining_originals = store.originals.len() + store.borrowed.rows.len();
         drop(store);
         if issued_owner {
             record_workspace_stats(|stats| stats.publication_owner_drops += 1);
@@ -987,9 +996,10 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
 /// Private to the fixed Native publication lease. The actual SQL rebind is the sole issuer;
 /// no constructor, serialization, transaction getter or caller-provided bool grants a base.
 #[cfg(feature = "s_incremental")]
-struct PublicationMaterialStore<'a, 'conn> {
+struct PublicationMaterialStore<'a, 'conn, 'capture> {
     tx: &'a rusqlite::Transaction<'conn>,
     originals: std::collections::BTreeMap<NodeDigest, (u8, s_content::CodecVec<u8>)>,
+    borrowed: BorrowedOriginals<'capture>,
     insert_can_preserve: bool,
     bind_after_replay: bool,
     poisoned: bool,
@@ -1003,11 +1013,12 @@ struct PublicationMaterialStore<'a, 'conn> {
     staged_puts: std::collections::BTreeSet<NodeDigest>,
 }
 #[cfg(feature = "s_incremental")]
-impl<'a, 'conn> PublicationMaterialStore<'a, 'conn> {
+impl<'a, 'conn> PublicationMaterialStore<'a, 'conn, '_> {
     fn new(tx: &'a rusqlite::Transaction<'conn>, insert_can_preserve: bool) -> Self {
         Self {
             tx,
             originals: Default::default(),
+            borrowed: Default::default(),
             insert_can_preserve,
             bind_after_replay: true,
             poisoned: false,
@@ -1028,9 +1039,14 @@ impl<'a, 'conn> PublicationMaterialStore<'a, 'conn> {
         self.work = work;
         self
     }
+    fn clear_originals(&mut self) {
+        self.originals.clear();
+        self.tree_permit = None;
+        self.borrowed.clear();
+    }
     fn check_live(&mut self) -> Result<(), CodecError> {
         if self.poisoned || self.tx.is_autocommit() {
-            self.originals.clear();
+            self.clear_originals();
             self.poisoned = true;
             return Err(CodecError::new(
                 s_content::code::SOURCE,
@@ -1039,35 +1055,31 @@ impl<'a, 'conn> PublicationMaterialStore<'a, 'conn> {
         }
         Ok(())
     }
-    fn rebind_originals(
+    fn rebind_originals<'row>(
         &mut self,
-        originals: &std::collections::BTreeMap<NodeDigest, (u8, s_content::CodecVec<u8>)>,
+        originals: impl Iterator<Item = (&'row NodeDigest, u8, &'row [u8])>,
     ) -> Result<bool, CodecError> {
         // 重绑只认真实 SQL 原件，暂存层新节点不冒充素材。
         #[cfg(all(test, feature = "s_incremental"))]
         {
             self.rebinding = true;
         }
-        let result = self.rebind_originals_inner(originals);
+        let result = (|| {
+            let mut equal = true;
+            for (digest, tag, body) in originals {
+                record_workspace_stats(|stats| stats.rebind_rows += 1);
+                match s_content::NodeSource::checked_read_scoped(self, digest)? {
+                    Some(frame) => equal &= frame.tag() == tag && frame.body() == body,
+                    None => equal = false,
+                }
+            }
+            Ok(equal)
+        })();
         #[cfg(all(test, feature = "s_incremental"))]
         {
             self.rebinding = false;
         }
         result
-    }
-    fn rebind_originals_inner(
-        &mut self,
-        originals: &std::collections::BTreeMap<NodeDigest, (u8, s_content::CodecVec<u8>)>,
-    ) -> Result<bool, CodecError> {
-        let mut equal = true;
-        for (digest, (tag, body)) in originals {
-            record_workspace_stats(|stats| stats.rebind_rows += 1);
-            match s_content::NodeSource::checked_read_scoped(self, digest)? {
-                Some(frame) => equal &= frame.tag() == *tag && frame.body() == &body[..],
-                None => equal = false,
-            }
-        }
-        Ok(equal)
     }
     fn current_checked(
         &mut self,
@@ -1082,10 +1094,15 @@ impl<'a, 'conn> PublicationMaterialStore<'a, 'conn> {
     ) -> Result<Option<s_content::job::ScopedFrame>, CodecError> {
         self.check_live()?;
         let result = (|| {
-            if let Some((tag, body)) = self.originals.get(digest) {
+            let retained = self
+                .originals
+                .get(digest)
+                .map(|(tag, body)| (*tag, &body[..]))
+                .or_else(|| self.borrowed.get(digest));
+            if let Some((tag, body)) = retained {
                 record_workspace_stats(|stats| stats.publication_reused_reads += 1);
                 let (body, permit) = super::content_store::native_body_reserved(self.work, body)?;
-                let frame = s_content::job::CheckedFrame::checked(digest, *tag, body)?;
+                let frame = s_content::job::CheckedFrame::checked(digest, tag, body)?;
                 Ok(Some(s_content::job::ScopedFrame::new(frame, permit)))
             } else {
                 record_workspace_stats(|stats| stats.publication_fallback_sql_reads += 1);
@@ -1106,14 +1123,14 @@ impl<'a, 'conn> PublicationMaterialStore<'a, 'conn> {
             }
         })();
         if result.is_err() {
-            self.originals.clear();
+            self.clear_originals();
             self.poisoned = true;
         }
         result
     }
 }
 #[cfg(feature = "s_incremental")]
-impl s_content::NodeSource for PublicationMaterialStore<'_, '_> {
+impl s_content::NodeSource for PublicationMaterialStore<'_, '_, '_> {
     fn checked_read_scoped(
         &mut self,
         d: &NodeDigest,
@@ -1140,7 +1157,7 @@ impl s_content::NodeSource for PublicationMaterialStore<'_, '_> {
     }
 }
 #[cfg(feature = "s_incremental")]
-impl s_content::NodeSink for PublicationMaterialStore<'_, '_> {
+impl s_content::NodeSink for PublicationMaterialStore<'_, '_, '_> {
     fn codec_sink_work(&self) -> Option<&s_content::capture_allocation::scratch::WorkScope> {
         self.work
     }
@@ -1149,6 +1166,7 @@ impl s_content::NodeSink for PublicationMaterialStore<'_, '_> {
         // Retire the target before every real put, even Noop. Its first subsequent read
         // cannot reuse the old owner. The original SQL and byte/digest checks are mandatory.
         self.originals.remove(&digest);
+        self.borrowed.rows.remove(&digest);
         record_workspace_stats(|stats| stats.publication_put_sql_checks += 1);
         let result = super::content_store::publication_put(
             self.tx,
@@ -1172,13 +1190,13 @@ impl s_content::NodeSink for PublicationMaterialStore<'_, '_> {
                 | super::content_store::PublicationPutEffect::InsertPreservingBase,
             ) => Ok(()),
             Ok(super::content_store::PublicationPutEffect::Unknown) => {
-                self.originals.clear();
+                self.clear_originals();
                 self.bind_after_replay = false;
                 record_workspace_stats(|stats| stats.publication_unknown_write_invalidations += 1);
                 Ok(())
             }
             Err(error) => {
-                self.originals.clear();
+                self.clear_originals();
                 self.poisoned = true;
                 Err(error)
             }
@@ -1288,13 +1306,72 @@ fn workspace_certificate_source_cost(
     }
     Some(cost)
 }
+// #1642：Prepare 只在已读 SQL 原件与同次来源捕获逐字节相同时借用。借用跨越重绑，
+// Rust 阻止在此期间换掉来源捕获；发布仍逐行读取实际 SQLite 并比对完整正文。
 #[cfg(feature = "s_incremental")]
-struct ManifestRecordingStore<'a> {
+#[derive(Default)]
+struct BorrowedOriginals<'capture> {
+    capture: Option<&'capture s_content::AuditCapture>,
+    rows: std::collections::BTreeSet<NodeDigest>,
+    fee: Option<s_content::capture_allocation::scratch::NativeReservation>,
+}
+#[cfg(feature = "s_incremental")]
+impl BorrowedOriginals<'_> {
+    fn get(&self, digest: &NodeDigest) -> Option<(u8, &[u8])> {
+        if !self.rows.contains(digest) {
+            return None;
+        }
+        self.capture.and_then(|capture| capture.original(digest))
+    }
+    fn iter(&self) -> impl Iterator<Item = (&NodeDigest, u8, &[u8])> {
+        self.rows.iter().map(|digest| {
+            let (tag, body) = self
+                .capture
+                .and_then(|capture| capture.original(digest))
+                .expect("借用索引只能记录同一捕获的原件");
+            (digest, tag, body)
+        })
+    }
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.fee = None;
+    }
+    fn record(
+        &mut self,
+        digest: NodeDigest,
+        work: Option<&s_content::capture_allocation::scratch::WorkScope>,
+    ) -> Result<(), CodecError> {
+        let admission = crate::v3::audit_store::NativeAdmission(work);
+        let len = self.rows.len();
+        let next = len
+            .checked_add(1)
+            .ok_or_else(|| admission.native_overflow())?;
+        let growth = manifest_tree_bytes::<()>(next) - manifest_tree_bytes::<()>(len);
+        let hold = work
+            .filter(|_| growth != 0)
+            .map(|w| w.reserve_native(growth))
+            .transpose()?;
+        self.rows.insert(digest);
+        if let Some(mut hold) = hold {
+            if let Some(fee) = &mut self.fee {
+                fee.merge(&mut hold)
+                    .map_err(|f| work.expect("已预约借用索引").reject(f))?;
+            } else {
+                self.fee = Some(hold);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "s_incremental")]
+struct ManifestRecordingStore<'a, 'capture> {
     inner: &'a mut dyn NodeStore,
     allowance: usize,
     certificate_cost: usize,
     source_cost: usize,
     originals: Option<std::collections::BTreeMap<NodeDigest, (u8, s_content::CodecVec<u8>)>>,
+    borrowed: BorrowedOriginals<'capture>,
     retained_capacity: usize,
     accepted_entries: usize,
     accepted_body_len: usize,
@@ -1306,25 +1383,37 @@ struct ManifestRecordingStore<'a> {
 // 单节点仍用既有 tree_slots 的11键/12边上界；不重定价其他树或S7来源合同。
 #[cfg(feature = "s_incremental")]
 fn manifest_original_tree_bytes(len: usize) -> usize {
+    manifest_tree_bytes::<(u8, s_content::CodecVec<u8>)>(len)
+}
+#[cfg(feature = "s_incremental")]
+fn manifest_tree_bytes<V>(len: usize) -> usize {
     if len == 0 {
         return 0;
     }
     let nodes = len.min(len.div_ceil(5).saturating_add(len.ilog2() as usize + 2));
-    crate::v3::audit_retention::tree_slots::<NodeDigest, (u8, s_content::CodecVec<u8>)>(nodes)
+    crate::v3::audit_retention::tree_slots::<NodeDigest, V>(nodes)
 }
 
 #[cfg(feature = "s_incremental")]
-impl ManifestRecordingStore<'_> {
+impl ManifestRecordingStore<'_, '_> {
+    fn discard_originals(&mut self) {
+        self.originals = None;
+        self.tree_permit = None;
+        self.borrowed.clear();
+        self.puts.clear();
+    }
     fn record(&mut self, digest: NodeDigest, tag: u8, body: &[u8]) -> Result<(), CodecError> {
         let Some(originals) = &mut self.originals else {
             return Ok(());
         };
-        if let Some((old_tag, old_body)) = originals.get(&digest) {
-            if *old_tag == tag && &old_body[..] == body {
-                return Ok(());
+        let prior = originals
+            .get(&digest)
+            .map(|(tag, body)| (*tag, &body[..]))
+            .or_else(|| self.borrowed.get(&digest));
+        if let Some((old_tag, old_body)) = prior {
+            if old_tag != tag || old_body != body {
+                self.discard_originals();
             }
-            self.originals = None;
-            self.puts.clear();
             return Ok(());
         }
         // Same canonical node source recipe as Keeper: body + digest/tag/proof 97B.
@@ -1333,10 +1422,29 @@ impl ManifestRecordingStore<'_> {
             .checked_add(body.len())
             .and_then(|v| v.checked_add(97));
         let Some(next) = next.filter(|v| *v <= self.allowance) else {
-            self.originals = None;
-            self.puts.clear();
+            self.discard_originals();
             return Ok(());
         };
+        if self
+            .borrowed
+            .capture
+            .and_then(|capture| capture.original(&digest))
+            == Some((tag, body))
+        {
+            let totals = self
+                .accepted_entries
+                .checked_add(1)
+                .zip(self.accepted_body_len.checked_add(body.len()));
+            let Some((entries, len)) = totals else {
+                self.discard_originals();
+                return Ok(());
+            };
+            self.borrowed.record(digest, self.inner.codec_work())?;
+            self.source_cost = next;
+            self.accepted_entries = entries;
+            self.accepted_body_len = len;
+            return Ok(());
+        }
         let admission = crate::v3::audit_store::NativeAdmission(self.inner.codec_work());
         let next_len = originals
             .len()
@@ -1361,8 +1469,7 @@ impl ManifestRecordingStore<'_> {
             .zip(self.accepted_entries.checked_add(1))
             .zip(self.accepted_body_len.checked_add(body.len()));
         let Some(((capacity, entries), len)) = totals else {
-            self.originals = None;
-            self.puts.clear();
+            self.discard_originals();
             return Ok(());
         };
         self.source_cost = next;
@@ -1384,7 +1491,7 @@ impl ManifestRecordingStore<'_> {
     }
 }
 #[cfg(feature = "s_incremental")]
-impl s_content::NodeSource for ManifestRecordingStore<'_> {
+impl s_content::NodeSource for ManifestRecordingStore<'_, '_> {
     fn checked_read_scoped(
         &mut self,
         d: &NodeDigest,
@@ -1403,8 +1510,7 @@ impl s_content::NodeSource for ManifestRecordingStore<'_> {
         match &result {
             s_content::NodeRead::Found { tag, body } => self.record(*digest, *tag, body)?,
             s_content::NodeRead::Missing => {
-                self.originals = None;
-                self.puts.clear();
+                self.discard_originals();
             }
         }
         Ok(result)
@@ -1421,7 +1527,7 @@ impl s_content::NodeSource for ManifestRecordingStore<'_> {
     }
 }
 #[cfg(feature = "s_incremental")]
-impl s_content::NodeSink for ManifestRecordingStore<'_> {
+impl s_content::NodeSink for ManifestRecordingStore<'_, '_> {
     fn codec_sink_work(&self) -> Option<&s_content::capture_allocation::scratch::WorkScope> {
         self.inner.codec_sink_work()
     }
@@ -1439,8 +1545,7 @@ impl s_content::NodeSink for ManifestRecordingStore<'_> {
                 self.puts.try_push(digest)?;
                 self.source_cost = next;
             } else {
-                self.originals = None;
-                self.puts.clear();
+                self.discard_originals();
             }
         }
         Ok(())
@@ -1452,18 +1557,31 @@ pub(crate) fn assemble_unpublished_with_workspace(
     metadata: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     budget: crate::v3::ManifestWorkspaceBudget,
-) -> Result<(UnpublishedManifest, Option<PreparedManifestWorkspace>), CodecError> {
+) -> Result<
+    (
+        UnpublishedManifest,
+        Option<PreparedManifestWorkspace<'static>>,
+    ),
+    CodecError,
+> {
     let metadata = &metadata.view();
-    assemble_workspace_units(store, metadata, roots, budget, false)
+    assemble_workspace_units(store, metadata, roots, budget, false, None)
 }
 #[cfg(feature = "s_incremental")]
-fn assemble_workspace_units(
+fn assemble_workspace_units<'capture>(
     store: &mut dyn NodeStore,
     metadata: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     budget: crate::v3::ManifestWorkspaceBudget,
     collect_units: bool,
-) -> Result<(UnpublishedManifest, Option<PreparedManifestWorkspace>), CodecError> {
+    capture: Option<&'capture s_content::AuditCapture>,
+) -> Result<
+    (
+        UnpublishedManifest,
+        Option<PreparedManifestWorkspace<'capture>>,
+    ),
+    CodecError,
+> {
     let metadata = &metadata.view();
     let reserved_certificate = workspace_certificate_source_cost(metadata, roots, None, None)
         .filter(|cost| *cost <= budget.allowance());
@@ -1473,6 +1591,10 @@ fn assemble_workspace_units(
         certificate_cost: reserved_certificate.unwrap_or(0),
         source_cost: reserved_certificate.unwrap_or(0),
         originals: reserved_certificate.map(|_| Default::default()),
+        borrowed: BorrowedOriginals {
+            capture,
+            ..Default::default()
+        },
         retained_capacity: 0,
         accepted_entries: 0,
         accepted_body_len: 0,
@@ -1502,8 +1624,7 @@ fn assemble_workspace_units(
         if let Some(cost) = cost {
             recording.source_cost = cost
         } else {
-            recording.originals = None;
-            recording.puts.clear();
+            recording.discard_originals();
         }
     }
     let workspace_source_cost = if recording.originals.is_some() {
@@ -1530,11 +1651,8 @@ fn assemble_workspace_units(
         stats.recorded_put_capacity += put_capacity;
         stats.max_recording_put_capacity = stats.max_recording_put_capacity.max(put_capacity);
         if let Some(originals) = &recording.originals {
-            stats.recorded_entries += originals.len() as u64;
-            stats.recorded_body_len += originals
-                .values()
-                .map(|(_, body)| body.len() as u64)
-                .sum::<u64>();
+            stats.recorded_entries += (originals.len() + recording.borrowed.rows.len()) as u64;
+            stats.recorded_body_len += recording.accepted_body_len as u64;
             stats.recorded_body_capacity += recording.retained_capacity as u64;
         }
     });
@@ -1553,6 +1671,7 @@ fn assemble_workspace_units(
             budget,
             source_cost: workspace_source_cost,
             originals,
+            borrowed: recording.borrowed,
             puts: recording.puts,
             tree_permit: recording.tree_permit,
         })
@@ -1674,17 +1793,18 @@ impl ManifestSourceReceipt {
 
 /// 沿用既有workspace/无workspace存储选择，只组装一次；不另跑四根Probe。
 #[cfg(feature = "s_incremental")]
-pub(crate) fn assemble_with_source(
+pub(crate) fn assemble_with_source<'capture>(
     store: &mut dyn NodeStore,
     metadata: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     source: crate::v3::audit_owner::RawReceipt,
     budget: Option<crate::v3::ManifestWorkspaceBudget>,
     collect_units: bool,
+    capture: Option<&'capture s_content::AuditCapture>,
 ) -> Result<
     (
         UnpublishedManifest,
-        Option<PreparedManifestWorkspace>,
+        Option<PreparedManifestWorkspace<'capture>>,
         ManifestSourceReceipt,
     ),
     PublishError,
@@ -1699,8 +1819,10 @@ pub(crate) fn assemble_with_source(
         roots.view().generated_state,
     )?;
     let (mut manifest, workspace) = source.with_store(store, |bounded| match budget {
-        Some(budget) => assemble_workspace_units(bounded, metadata, roots, budget, collect_units)
-            .map_err(PublishError::from),
+        Some(budget) => {
+            assemble_workspace_units(bounded, metadata, roots, budget, collect_units, capture)
+                .map_err(PublishError::from)
+        }
         None => {
             let mut view = crate::v3::audit_store::StoreView::generic(bounded);
             view.collect_manifest_units = collect_units;
@@ -2354,6 +2476,7 @@ mod tests {
                     certificate_cost: 0,
                     source_cost: 0,
                     originals: Some(Default::default()),
+                    borrowed: Default::default(),
                     retained_capacity: 0,
                     accepted_entries: 0,
                     accepted_body_len: 0,
@@ -2381,6 +2504,79 @@ mod tests {
         assert!(budget.live() < remaining);
         assert!(budget.live() > baseline, "移出原件的正文仍持原许可");
         drop(body);
+        assert_eq!(budget.live(), baseline);
+    }
+
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn borrowed_workspace_avoids_duplicate_body_and_rebinds_actual_sql() {
+        use crate::v3::audit_owner::{allocation_probe::live_bytes, native::Budget};
+        use s_content::{NodeSink, NodeSource};
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE s_protocol_meta(singleton INTEGER PRIMARY KEY,protocol_revision TEXT NOT NULL); INSERT INTO s_protocol_meta VALUES(1,'s-session/3');").unwrap();
+        let tx = conn.transaction().unwrap();
+        super::super::content_store::init_schema(&tx).unwrap();
+        let budget = Budget::new(4 << 20, 0).unwrap();
+        let baseline = budget.live();
+        budget.codec_work().unwrap().run(|work| -> Result<(), CodecError> {
+            let mut capture = s_content::AuditCapture::new(s_content::MemoryNodes::new())
+                .enable_native_frame_reuse_admitted(Some(work))?;
+            let tag = s_content::tag::BYTES_CHUNK;
+            let body = [7u8; 2048];
+            let digest = s_content::frame(tag, &body);
+            let mut retained = s_content::CodecVec::default();
+            retained.try_reserve_native(work, body.len())?;
+            retained.try_extend_bytes(&body)?;
+            assert!(capture.append_original_codec_for_owner(digest, tag, retained, usize::MAX, work)?);
+            let mut inner = super::super::content_store::TxStore::new(&tx)?.with_work(Some(work));
+            inner.put(digest, tag, &body)?;
+            let mut layouts = [0; 2];
+            let mut fees = [0; 2];
+            for (i, cap) in [None, Some(&capture)].into_iter().enumerate() {
+                let heap_before = live_bytes();
+                let ledger_before = budget.live();
+                let mut recording = ManifestRecordingStore {
+                    inner: &mut inner,
+                    allowance: 1 << 20,
+                    certificate_cost: 0,
+                    source_cost: 0,
+                    originals: Some(Default::default()),
+                    borrowed: BorrowedOriginals { capture: cap, ..Default::default() },
+                    retained_capacity: 0,
+                    accepted_entries: 0,
+                    accepted_body_len: 0,
+                    puts: Default::default(),
+                    tree_permit: None,
+                };
+                assert_eq!(recording.checked_read_scoped(&digest)?.unwrap().body(), body);
+                assert_eq!(recording.source_cost, body.len() + 97);
+                layouts[i] = live_bytes() - heap_before;
+                fees[i] = budget.live() - ledger_before;
+                if cap.is_some() {
+                    assert!(recording.originals.as_ref().unwrap().is_empty());
+                    let (_, borrowed) = recording.borrowed.get(&digest).unwrap();
+                    assert_eq!(borrowed.as_ptr(), capture.original(&digest).unwrap().1.as_ptr());
+                    let mut publication = PublicationMaterialStore::new(&tx, true).with_work(Some(work));
+                    let sql = super::super::content_store::sql_reads_on_thread();
+                    assert!(publication.rebind_originals(recording.borrowed.iter())?);
+                    assert_eq!(super::super::content_store::sql_reads_on_thread() - sql, 1);
+                    publication.borrowed = std::mem::take(&mut recording.borrowed);
+                    let sql = super::super::content_store::sql_reads_on_thread();
+                    assert_eq!(publication.checked_read_scoped(&digest)?.unwrap().body(), body);
+                    assert_eq!(super::super::content_store::sql_reads_on_thread(), sql);
+                    publication.put(digest, tag, &body)?;
+                    assert!(publication.borrowed.get(&digest).is_none());
+                }
+                drop(recording);
+                assert_eq!(live_bytes(), heap_before);
+                assert_eq!(budget.live(), ledger_before);
+            }
+            assert!(layouts[0] - layouts[1] >= body.len() as i64);
+            assert!(fees[0] - fees[1] >= body.len());
+            println!("ISSUE1642_WORKSPACE_LAYOUT copied={} borrowed={} copied_fee={} borrowed_fee={}", layouts[0], layouts[1], fees[0], fees[1]);
+            Ok(())
+        }).unwrap();
         assert_eq!(budget.live(), baseline);
     }
 
@@ -2441,6 +2637,7 @@ mod tests {
                     certificate_cost: 0,
                     source_cost: 0,
                     originals: Some(Default::default()),
+                    borrowed: Default::default(),
                     retained_capacity: 0,
                     accepted_entries: 0,
                     accepted_body_len: 0,
@@ -2513,6 +2710,7 @@ mod tests {
                     certificate_cost: 0,
                     source_cost: 0,
                     originals: Some(Default::default()),
+                    borrowed: Default::default(),
                     retained_capacity: 0,
                     accepted_entries: 0,
                     accepted_body_len: 0,
@@ -2572,7 +2770,13 @@ mod tests {
         ]);
         let sql = super::super::content_store::sql_reads_on_thread();
         let f = s_content::frame_calls_on_thread();
-        assert!(store.rebind_originals(&originals).unwrap());
+        assert!(store
+            .rebind_originals(
+                originals
+                    .iter()
+                    .map(|(d, (tag, body))| (d, *tag, &body[..])),
+            )
+            .unwrap());
         assert_eq!(super::super::content_store::sql_reads_on_thread() - sql, 2);
         assert_eq!(s_content::frame_calls_on_thread() - f, 2);
         store.originals = originals; // Test uses the same actual-SQL issuer as fixed resolve.

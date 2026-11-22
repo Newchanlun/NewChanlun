@@ -367,7 +367,14 @@ impl Journal {
         if coexist > self.cap {
             self.overflow = true;
             #[cfg(test)]
-            self.observe_failure("journal-coexist-cap", Some(new_blocks), None, None, None);
+            {
+                if self.operation == Operation::Publish && !self.unexpected {
+                    super::super::state::trace_journal_coexist_refusal(
+                        self.bytes, new_blocks, self.cap,
+                    );
+                }
+                self.observe_failure("journal-coexist-cap", Some(new_blocks), None, None, None);
+            }
             return false;
         }
         self.peak = self.peak.max(coexist);

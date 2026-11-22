@@ -831,7 +831,7 @@ impl Runtime {
         result
     }
 
-    fn prepare(
+    fn prepare<'capture>(
         &mut self,
         tx: &mut Transaction<'_>,
         token: &str,
@@ -841,7 +841,7 @@ impl Runtime {
         #[cfg(feature = "s_incremental")] bound_raw: Option<
             &super::audit_owner::BoundRawAdvance<'_>,
         >,
-        #[cfg(feature = "s_incremental")] bound_capture: Option<&mut sc::AuditCapture>,
+        #[cfg(feature = "s_incremental")] bound_capture: Option<&'capture mut sc::AuditCapture>,
         #[cfg(feature = "s_incremental")] bound_source: Option<
             &mut Option<source_audit::NativeSourceState>,
         >,
@@ -849,7 +849,7 @@ impl Runtime {
         work: Option<&WorkScope>,
         #[cfg(feature = "s_incremental")] parent: Option<&super::audit_owner::PublicationScope<'_>>,
         commit_reading: Option<&v2::CommitReadingSlot>,
-    ) -> Result<Prepared, PublishError> {
+    ) -> Result<Prepared<'capture>, PublishError> {
         #[cfg(feature = "s_incremental")]
         let workspace_budget = context
             .as_deref()
@@ -1204,6 +1204,7 @@ impl Runtime {
                         axes,
                         counts,
                         Some(source_receipt),
+                        Some(&*capture),
                         audited,
                         &metadata,
                         previous,
@@ -1421,6 +1422,8 @@ impl Runtime {
             ..input
         };
         let NodeProducts {
+            #[cfg(not(feature = "s_incremental"))]
+                capture: _,
             generated,
             objects,
             axes,
@@ -1489,6 +1492,8 @@ impl Runtime {
         }
         catalog_evidence::stage_current(tx, &mut store, &axes, metadata_view.rule_revision)?;
         Ok(Prepared {
+            #[cfg(not(feature = "s_incremental"))]
+            capture: std::marker::PhantomData,
             metadata,
             roots,
             manifest,
@@ -1514,7 +1519,7 @@ impl Runtime {
         previous: i64,
         generation: i64,
         frontier: i64,
-    ) -> Result<NodeProducts<'raw>, PublishError> {
+    ) -> Result<NodeProducts<'raw, 'static>, PublishError> {
         let metadata = &metadata.view();
         sc::write_value(store, scope_value).map_err(publish_err)?;
         let generator = self
@@ -1647,6 +1652,8 @@ impl Runtime {
             counts,
             #[cfg(feature = "s_incremental")]
             source_receipt,
+            #[cfg(feature = "s_incremental")]
+            None,
             audited,
             metadata,
             previous,
@@ -1654,7 +1661,7 @@ impl Runtime {
             generation,
         )
     }
-    fn finish_node_products<'raw, S: NodeStore>(
+    fn finish_node_products<'raw, 'capture, S: NodeStore>(
         &mut self,
         store: &mut BusinessTxStore<S>,
         #[cfg_attr(
@@ -1675,12 +1682,13 @@ impl Runtime {
         #[cfg(feature = "s_incremental")] mut source_receipt: Option<
             source_audit::source_receipt::RawReceipt,
         >,
+        #[cfg(feature = "s_incremental")] capture: Option<&'capture sc::AuditCapture>,
         audited: &state::AuditedState,
         metadata: &(impl crate::content_manifest::MetadataSource + ?Sized),
         previous: i64,
         frontier: i64,
         generation: i64,
-    ) -> Result<NodeProducts<'raw>, PublishError> {
+    ) -> Result<NodeProducts<'raw, 'capture>, PublishError> {
         let metadata = &metadata.view();
         #[cfg(test)]
         state::trace_stage("assemble_manifest", "-", generation);
@@ -1789,6 +1797,7 @@ impl Runtime {
                     receipt,
                     enabled_budget,
                     self.queued_audit_facts.is_some(),
+                    capture,
                 )?;
                 (manifest, workspace, Some(proof))
             }
@@ -1815,6 +1824,8 @@ impl Runtime {
             state::trace_event("s4_manifest_workspace", Some(generation));
         }
         Ok(NodeProducts {
+            #[cfg(not(feature = "s_incremental"))]
+            capture: std::marker::PhantomData,
             generated,
             objects,
             axes,
@@ -1834,7 +1845,9 @@ impl Runtime {
 
 // Raw lifetime is audited input, never the lease. These owners existed through legacy stage
 // already; retaining them avoids changing Owned peak/drop timing while separating Native SQL.
-struct NodeProducts<'raw> {
+struct NodeProducts<'raw, 'capture> {
+    #[cfg(not(feature = "s_incremental"))]
+    capture: std::marker::PhantomData<&'capture ()>,
     generated: generation::Generated<'raw>,
     objects: object_index::Plan,
     axes: sc::capture_allocation::native_owned::NativeValue<sc::ContentRef>,
@@ -1845,7 +1858,7 @@ struct NodeProducts<'raw> {
     roots: NativeManifestRoots,
     manifest: UnpublishedManifest,
     #[cfg(feature = "s_incremental")]
-    workspace: Option<content_manifest::PreparedManifestWorkspace>,
+    workspace: Option<content_manifest::PreparedManifestWorkspace<'capture>>,
     #[cfg(feature = "s_incremental")]
     source_manifest: Option<content_manifest::ManifestSourceReceipt>,
 }
@@ -1897,13 +1910,15 @@ impl CutLabel {
         std::str::from_utf8(&self.buf[..len]).map_err(publish_err)
     }
 }
-struct Prepared {
+struct Prepared<'capture> {
+    #[cfg(not(feature = "s_incremental"))]
+    capture: std::marker::PhantomData<&'capture ()>,
     metadata: PreparedMetadata,
     roots: NativeManifestRoots,
     manifest: UnpublishedManifest,
     policy_records: String,
     #[cfg(feature = "s_incremental")]
-    workspace: Option<content_manifest::PreparedManifestWorkspace>,
+    workspace: Option<content_manifest::PreparedManifestWorkspace<'capture>>,
     #[cfg(feature = "s_incremental")]
     source_manifest: Option<content_manifest::ManifestSourceReceipt>,
 }
@@ -2126,6 +2141,8 @@ pub(crate) mod tests {
                     None,
                 )?;
                 let Prepared {
+                    #[cfg(not(feature = "s_incremental"))]
+                        capture: _,
                     metadata,
                     roots,
                     manifest,
