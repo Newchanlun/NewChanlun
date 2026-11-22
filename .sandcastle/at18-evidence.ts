@@ -1,3 +1,4 @@
+import { heavyInputChunk, type HeavyInputChunk } from "./at18-heavy-input.ts";
 import { z } from "zod";
 import {
   type Adapter, type Check, decodeFields, decodeRecord, envelope, profileId, tbConditions, tbOutput,
@@ -20,7 +21,7 @@ import {
 type Migration = NonNullable<At18Report["migration_invariants"]["experiment"]>;
 type PostGate = NonNullable<At18Report["post_gate_records"]["experiment"]>;
 type Permission = NonNullable<NonNullable<At18Report["destinations"][number]["permission_evidence"]>["experiment"]>;
-export type External = { ref: ArtifactRef; manifest: ManifestRef; json: Row };
+export type External = { ref: ArtifactRef; manifest: ManifestRef; json: Row; chunk?: HeavyInputChunk };
 export type RecordEvidence = { ref: ArtifactRef; check: Check; data: Row };
 export const slot = (record: string, profile: string | null) => "slot:" + record + "@" + (profile ?? "none");
 export const P2 = "ISSUE_1561_P2_FIRST_SEND", EXP = "ADR_0036_POST_GATE_EXPERIMENT", PROD = "ADR_0036_POST_GATE_PRODUCTION";
@@ -50,7 +51,7 @@ export class Gaps {
   blocked() { return [...this.auth.values()].sort((a, b) => compare(a.obligation, b.obligation) ||
     a.blocker_ticket - b.blocker_ticket || compare(a.evidence_class, b.evidence_class)); }
 }
-export async function externalSources(s: At18Repository, F: string, paths: string[], own: Own, diag: Diagnostics) {
+export async function externalSources(s: At18Repository, F: string, paths: string[], own: Own, diag: Diagnostics, heavyDiagnostics = diag) {
   const manifests = await Promise.all(sorted(paths).map(async path => {
     let bytes: Buffer;
     try { bytes = s.external(path); }
@@ -65,17 +66,24 @@ export async function externalSources(s: At18Repository, F: string, paths: strin
     const ref = manifestRefSchema.parse({ ticket: m.ticket, base: m.base, head: m.head,
       manifest_path: path, manifest_sha256: byteSha256(bytes) });
     const records: External[] = [];
+    const artifactDiag = m.ticket === 1320 ? heavyDiagnostics : diag;
     if (!unique(m.reports.map(r => r.path))) { diag.add("SCHEMA", "/external_manifests"); return []; }
     for (const report of m.reports) {
       if (!("storage" in report) || !report.path.endsWith(".json")) continue;
       let data: Buffer;
       try { data = artifactBytes(s, m, report); }
-      catch { diag.add("ARTIFACT_REF", "ticket:" + m.ticket); continue; }
+      catch { artifactDiag.add("ARTIFACT_REF", "ticket:" + m.ticket); continue; }
       try {
         const json = parseJsonObject(data);
-        canonicalizeJcs(json);
-        records.push({ manifest: ref, ref: extRef(m, report.path, data, "AUTHORIZATION"), json });
-      } catch (e) { diag.add(derivationCode(e), "ticket:" + m.ticket); }
+        const artifact = extRef(m, report.path, data, "AUTHORIZATION");
+        if (m.ticket === 1320 && json.schema_version === "at18-heavy-input-chunk/1") {
+          const chunk = heavyInputChunk(json);
+          records.push({ manifest: ref, ref: artifact, json: { schema_version: chunk.schema_version, head: chunk.head }, chunk });
+        } else {
+          canonicalizeJcs(json);
+          records.push({ manifest: ref, ref: artifact, json });
+        }
+      } catch (e) { artifactDiag.add(derivationCode(e), "ticket:" + m.ticket); }
     }
     return records;
   }));

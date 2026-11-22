@@ -8,5 +8,5 @@ if (args[0] !== "api" || !Object.hasOwn(routes, route)) {
   process.exitCode = 1;
 } else {
   const value = routes[route];
-  process.stdout.write(JSON.stringify(args.includes("--paginate") ? [value] : value));
+  process.stdout.write(route.endsWith("/logs") ? value : JSON.stringify(args.includes("--paginate") ? [value] : value));
 }

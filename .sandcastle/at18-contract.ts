@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { byteSha256, canonicalizeJcs, digest, evidenceClass, integer, repoPath, sha, tbId, text, utc } from "./at18-format.ts";
-import { object, rows, type Row } from "./at18-github.ts";
+import { isRow, object, rows, type Row } from "./at18-github.ts";
 import { valueAt } from "./at18-source.ts";
 
 const token = z.string().regex(/^[A-Za-z0-9._-]+$/);
@@ -134,9 +134,42 @@ export function decodeFields(contract: Adapter, fields: FieldRules, input: unkno
 // 同 #2131 adapter.py 的公开业务容器；嵌套数组不是数值样本。
 export const tbConditions = z.strictObject({ processes: integer.optional() });
 export const tbOutput = z.strictObject({ samples: z.array(z.number().finite()).optional() });
+// #2131 _public_fields：先对原件按登记指针检查完整键树，随后才能投影。
+function closedRecord(contract: Adapter, fields: FieldRules, input: unknown, versionPointer?: string, depth = 0) {
+  type Shape = { children: Map<string, Shape>; decoder?: string };
+  const root: Shape = { children: new Map() };
+  const add = (pointer: string, decoder?: string) => {
+    let branch = root;
+    for (const part of pointer.split("/").slice(1)) {
+      const key = part.replaceAll("~1", "/").replaceAll("~0", "~");
+      let child = branch.children.get(key);
+      if (!child) { child = { children: new Map() }; branch.children.set(key, child); }
+      branch = child;
+    }
+    branch.decoder = decoder;
+  };
+  if (depth > 8) throw new Error("SCHEMA");
+  if (versionPointer) add(versionPointer);
+  for (const field of Object.values(fields)) add(field.pointer, field.decode_as);
+  const walk = (shape: Shape, value: unknown) => {
+    if (shape.children.size) {
+      if (!isRow(value) || Object.keys(value).length !== shape.children.size) throw new Error("SCHEMA");
+      for (const [key, nested] of shape.children) {
+        if (!Object.hasOwn(value, key)) throw new Error("SCHEMA");
+        walk(nested, value[key]);
+      }
+    } else if (shape.decoder) {
+      const rules = contract.item_sources[shape.decoder];
+      if (!rules) throw new Error("SCHEMA");
+      for (const row of Array.isArray(value) ? value : [value]) closedRecord(contract, rules, row, undefined, depth + 1);
+    }
+  };
+  walk(root, input);
+}
 export function decodeRecord(contract: Adapter, record: string, payload: Row): Row {
   const rule = contract.run_records[record] ?? contract.run_records.tb;
   if (valueAt(payload, rule.version_pointer) !== rule.version) throw new Error("SCHEMA");
+  if (rule === contract.run_records.tb) closedRecord(contract, rule.fields, payload, rule.version_pointer);
   const data = decodeFields(contract, rule.fields, payload);
   if (rule === contract.run_records.tb) {
     tbConditions.parse(data.conditions);

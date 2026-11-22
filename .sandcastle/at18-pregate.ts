@@ -1,7 +1,8 @@
+import { nodeTest, rustTest } from "./at18-code.ts";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { censusSchema, type Landing, type Registry } from "./at18-contract.ts";
+import { censusSchema, registrySchema, type Landing, type Registry } from "./at18-contract.ts";
 import { byteSha256, canonicalizeJcs, historicalDeviation, integer, parseJsonObject, sha, tbId, text, workflows } from "./at18-format.ts";
 import { mainPr, ciConclusion, Tracker } from "./at18-integrations.ts";
 import { object, type Row } from "./at18-github.ts";
@@ -302,17 +303,55 @@ const fixed = new Map([
   [1404, ["f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9", "calibration_sweep_finds_non_collapsed_segments"]],
   [1414, ["465174240b989a1d99f99a047fbb46b3ee215f49", "seam_btc_tick_bars_yield_non_trivial_structure"]],
 ]);
-export async function historyDeviations(s: At18Repository, landings: Pick<Landing, "ticket" | "commits">[], reg: Registry | undefined,
+export const r11Source = "d896e31be8353a9445af46629737be6a4d6363e5";
+export function r11Checks(s: At18Repository) {
+  return registrySchema.parse(parseJsonObject(s.blob(r11Source, at18 + "registry.json"))).checks;
+}
+
+function elanInstallStep(ci: string) {
+  const job = /^  fixture-drift:\s*\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/m.exec(ci)?.[1];
+  const scripts = job && [...job.matchAll(/^ {6}- name: Install elan\s*\n([\s\S]*?)(?=^ {6}- |$(?![\s\S]))/gm)];
+  if (!scripts || scripts.length !== 1) return;
+  const lines = scripts[0][1].split("\n");
+  const block = lines.indexOf("        run: |");
+  if (block < 0) return;
+  const end = lines.findIndex((line, i) => i > block && /^ {0,9}\S/.test(line));
+  return lines.slice(block + 1, end < 0 ? lines.length : end).join("\n").trimEnd();
+}
+
+export async function historyDeviations(s: At18Repository, F: string, landings: Pick<Landing, "ticket" | "commits">[], reg: Registry | undefined,
   b: Bindings, passed: Set<string>, diag: Diagnostics) {
   const rows: z.infer<typeof historicalDeviation>[] = [];
   const failedTickets = new Set<number>();
   const lookup = (ticket: number, commit: string) => reg?.pregate.landings.find(l => l.ticket === ticket)?.cure_checks.filter(c => c.commit === commit) ?? [];
-  const cured = (cure: Landing["cure_checks"][number]) => {
+  const originalChecks = new Map<string, Registry["checks"][number]>();
+  try {
+    for (const check of r11Checks(s)) originalChecks.set(check.check_id, check);
+  } catch { /* 原始目标缺失时不能判定已补救。 */ }
+  const cured = (cure: Landing["cure_checks"][number], originalId = cure.check_id) => {
     const check = b.checks.get(cure.check_id);
-    if (!check || check.expected_count !== 1 || !passed.has(check.group)) return false;
-    if (cure.kind === "step") return check.runner === "command" && check.key_aware;
-    const selected = check.runner === "cargo-test" ? check.selector.split("/").at(-1) : check.selector;
-    return check.runner !== "command" && (selected === cure.target || selected?.endsWith("::" + cure.target));
+    const original = originalChecks.get(originalId);
+    if (!check || !original || check.expected_count !== 1 || !passed.has(check.group) ||
+        check.runner !== original.runner || check.selector !== original.selector ||
+        check.source.path !== original.source.path || check.key_aware !== original.key_aware ||
+        check.evidence_class !== original.evidence_class || check.profile_id !== original.profile_id) return false;
+    try {
+      const path = check.source.path;
+      const bytes = s.blob(F, path);
+      if (cure.kind === "step") {
+        // 这些步骤的受审实现就是 #2132 登记的脚本，不用任意命令替代原失败步骤。
+        if (check.runner !== "command" || s.tree(F).get(path)?.mode !== "100755" || !bytes.equals(s.blob(r11Source, path))) return false;
+        if (originalId === "r11.install-elan") {
+          const originalStep = elanInstallStep(utf8(s.blob(r11Source, workflows[0])));
+          return !!originalStep && originalStep === elanInstallStep(utf8(s.blob(F, workflows[0])));
+        }
+        return true;
+      }
+      const source = utf8(bytes);
+      if (check.runner !== "cargo-test") return check.runner === "node-test" && nodeTest(source, cure.target);
+      const selected = check.selector.split("/").at(-1);
+      return selected?.split("::").at(-1) === cure.target && rustTest(source, cure.target);
+    } catch { return false; }
   };
   const fail = (ticket: number, scope: string) => {
     diag.add("DEVIATION_NOT_CURED", scope);
@@ -320,7 +359,7 @@ export async function historyDeviations(s: At18Repository, landings: Pick<Landin
   };
   for (const [ticket, [commit, target]] of fixed) {
     if (!landings.some(l => l.ticket === ticket && l.commits.includes(commit)) ||
-        !lookup(ticket, commit).some(c => c.run_id === null && c.kind === "test" && c.target === target && cured(c))) {
+        !lookup(ticket, commit).some(c => c.run_id === null && c.kind === "test" && c.target === target && cured(c, "r11.backtest." + target))) {
       fail(ticket, `history:${ticket}/${commit}/ci.yml/none`);
     }
   }
@@ -356,7 +395,7 @@ export async function historyDeviations(s: At18Repository, landings: Pick<Landin
       const candidates = lookup(l.ticket, commit).filter(c => c.run_id === run.id);
       const ids = new Set(candidates.map(cureId));
       const required = historicalDenominator.get(`${l.ticket}/${run.id}`) ?? [];
-      if (!candidates.length || ids.size !== candidates.length || required.some(id => !ids.has(id)) ||
+      if (!required.length || !candidates.length || ids.size !== candidates.length || required.some(id => !ids.has(id)) ||
           candidates.some(c => !cured(c))) {
         fail(l.ticket, scope(run.id)); continue;
       }

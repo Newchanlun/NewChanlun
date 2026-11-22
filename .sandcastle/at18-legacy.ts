@@ -1,3 +1,4 @@
+import { substantiveReplacement } from "./at18-code.ts";
 import { z } from "zod";
 import { findAt14 } from "./at18-at14.ts";
 import { authorizedHeavyRetirement, measuredHeavy } from "./at18-heavy.ts";
@@ -7,8 +8,8 @@ import { byteSha256, dispositions, heavy, legacyTickets, parseJsonObject,
   repoPath, sha, text, type ArtifactRef, type At18Report } from "./at18-format.ts";
 import { type External } from "./at18-evidence.ts";
 import { type Row } from "./at18-github.ts";
-import { type ReviewRef, type Tracker } from "./at18-integrations.ts";
-import { type At18Repository, type Diagnostics, repoRef, refs, sorted, valueAt } from "./at18-source.ts";
+import { type AcceptedReview, type ReviewRef, type Tracker } from "./at18-integrations.ts";
+import { type At18Repository, type Diagnostics, repoRef, refs, sorted, utf8, valueAt } from "./at18-source.ts";
 
 // #1319 的 884568065c 收口记录（SPEC 旧票处置档）给出两项候选；
 // #1351 受影响代码清单及 F 的 Git 树给出同一能力的留存 feed / HL wire。
@@ -39,7 +40,7 @@ const legacyAtoms = new Map<number, string[]>([
 
 export async function legacyDispositions(s: At18Repository, F: string, adapter: Adapter | undefined, tracker: Tracker,
   pureGraph: boolean, tb: Map<Slice, boolean>, b: Bindings, groupPass: Set<string>, permission: boolean, external: External[], used: Set<External>,
-  reviewed: ReadonlyMap<string, Row>, reviews: ReviewRef[], diag: Diagnostics) {
+  reviewed: ReadonlyMap<string, AcceptedReview>, reviews: ReviewRef[], diag: Diagnostics) {
   const atoms = new Map<number, Set<string>>();
   const inGraph = new Map<number, boolean>();
   const knownSources = new Map<string, Promise<{ value: unknown; ref: ArtifactRef | null } | undefined>>();
@@ -134,7 +135,7 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
         } else {
           if (!changed.includes(row.replacement) || !/^(?:rust|trading_system)\/.+\.(?:rs|py)$/.test(row.replacement)) return false;
           const source = s.blob(F, row.replacement);
-          if (!source.length || !source.equals(s.blob(row.anchor, row.replacement))) return false;
+          if (!substantiveReplacement(row.replacement, utf8(source)) || !source.equals(s.blob(row.anchor, row.replacement))) return false;
           refsFound.push(repoRef(row.anchor, row.replacement, source, "LEGACY_SOURCE"));
         }
       }

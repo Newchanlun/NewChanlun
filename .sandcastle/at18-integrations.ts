@@ -19,6 +19,7 @@ export type Job = z.infer<typeof rawJob>;
 export type Selected = { run: z.infer<typeof runShape>; jobs: Job[] | undefined };
 export type JobRef = z.infer<typeof acceptanceJob>;
 export type ReviewRef = z.infer<typeof review>;
+export type AcceptedReview = Row & { review_approved_at: string };
 
 export const ciConclusion = (raw: string | null) => {
   const r = conclusion.safeParse(raw?.toUpperCase());
@@ -248,8 +249,8 @@ export async function integrationReviews(s: At18Repository, F: string, diag: Dia
     if (s.string("rev-parse", "--is-shallow-repository") !== "false") throw new Error("history");
     chain = s.chain(F, P0);
     if (chain.at(-1) !== G0 || s.string("rev-parse", G0 + "^1") !== P0) throw new Error("G0");
-  } catch { diag.add("REVIEW_FINAL_PRODUCT", "/head"); return { chain: [], accepted: new Map<string, Row>(), reviews: [], ok: false }; }
-  const accepted = new Map<string, Row>();
+  } catch { diag.add("REVIEW_FINAL_PRODUCT", "/head"); return { chain: [], accepted: new Map<string, AcceptedReview>(), reviews: [], ok: false }; }
+  const accepted = new Map<string, AcceptedReview>();
   const refs = await Promise.all(chain.map(async (M, i) => {
     const scope = "commit:" + M;
     const fail = () => { diag.add("REVIEW_FINAL_PRODUCT", scope); return undefined; };
@@ -274,7 +275,7 @@ export async function integrationReviews(s: At18Repository, F: string, diag: Dia
     if (!parsed.success || !utcBefore(parsed.data.created_at, pr.merged_at)) return fail();
     const { id, state, creator } = parsed.data;
     if (state !== "success" || creator.login !== "newchanlun-review-gate[bot]") fail();
-    else accepted.set(M, pr);
+    else accepted.set(M, { ...pr, review_approved_at: parsed.data.created_at });
     return { pr: integer.parse(pr.number), reviewed_head: H, merge_commit: M, status_id: id, creator: creator.login, state };
   }));
   return { chain, accepted,

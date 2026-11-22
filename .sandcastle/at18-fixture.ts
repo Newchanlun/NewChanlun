@@ -11,7 +11,7 @@ import {
 import { object, rows, type Row } from "./at18-github.ts";
 import { acceptedAt14, at14Summary, AT14_LOCKS } from "./at18-at14.ts";
 import { feedWirePaths } from "./at18-legacy.ts";
-import { verifyPregateHistory } from "./at18-pregate.ts";
+import { r11Checks, r11Source, verifyPregateHistory } from "./at18-pregate.ts";
 import { heavySymbols } from "./at18-heavy.ts";
 
 const specCommit = "b9d898dccf46c2a716115eaa1215bc39c458a959";
@@ -45,11 +45,16 @@ export type Mutation = {
   enabledWithoutFirstActivation?: boolean;
   at14?: (record: Row) => void;
   at14Node?: boolean;
+  at14Ci?: "ignored" | "skip-ci" | "dispatch-only" | "ignored-only" | "unrecorded";
+  feedReplacement?: string;
+  historicProducts?: "correct" | "swapped";
+  emptyProduct?: boolean;
   summary?: "missing" | "inconsistent";
   crosswalkBytes?: Buffer;
   feedWire?: (entries: Row[]) => Row[];
-  historicalCures?: "all" | "missing" | "failed";
-  heavyCase?: "measured" | "short" | "missing-control" | "wrong-trial" | "retired" | "unapproved-retirement";
+  historicalCures?: "all" | "missing" | "failed" | "empty-node" | "empty-step" | "empty-rust";
+  heavyCase?: "measured" | "short" | "missing-control" | "wrong-trial" | "retired" | "unapproved-retirement" | "one-bar" | "late-review" |
+    "malformed-heavy" | "input-unregistered" | "second-run-missing" | "output-diverges";
 };
 
 export function canMakeFixture() {
@@ -208,6 +213,16 @@ export function makeFixture(mutation: Mutation = {}) {
   issue(1323, "open"); issue(1340, "open");
   children(1323, []); children(1340, []);
   for (const n of [1493, ...fixed.map(f => f[0])]) children(n, []);
+  const shared = "3d61fb72944f577ea3b758b54001c2a7544b04dc";
+  const historicalPaths = ["s_session/tests/tb02b_verify.py", "s_session/tests/tb02c_verify.py"];
+  if (mutation.historicProducts) for (const [i, ticket] of [1392, 1404].entries()) {
+    const id = 89000 + ticket;
+    comment(id, ticket, "实际交付 " + shared + " " + historicalPaths[i]);
+    if (!observed.get(ticket)?.includes(shared)) {
+      add(ticket, shared);
+      additions.push({ ticket, commit: shared, source: `https://github.com/${repoId}/issues/${ticket}#issuecomment-${id}` });
+    }
+  }
   const censusFiles = new Map([
     ["history", { path: censusDir + "all-first-parent.jsonl", bytes: historyBytes }],
     ["relations", { path: censusDir + "sources.json", bytes: raw({ issues: links, followups: [], pull_requests: [], issue_evidence: {} }) }],
@@ -271,12 +286,13 @@ export function makeFixture(mutation: Mutation = {}) {
     groups.set(id, "experiment");
     object(permissions.group_actions)[id] = ["query"];
   }
-  const curePath = ".sandcastle/fixtures/at18/control-cures.mjs";
-  const cureSource = fixed.map(f => f[2]).map(test => `test("${test}", () => {});\n`).join("");
-  put(curePath, cureSource);
-  for (const [t, , selector] of fixed) {
-    checks.push({ check_id: "cure." + t, group: "control.cures", evidence_class: "simulation", profile_id: null,
-      runner: "node-test", selector, expected_count: 1, key_aware: true, source: { path: curePath, sha256: note(cureSource) }, record: null });
+  const originalCures = r11Checks(src);
+  for (const [t, , target] of fixed) {
+    const original = originalCures.find(c => c.check_id === "r11.backtest." + target)!;
+    const bytes = src.blob(r11Source, original.source.path);
+    put(original.source.path, bytes);
+    checks.push({ ...original, check_id: "cure." + t, group: "control.cures",
+      source: { path: original.source.path, sha256: byteSha256(bytes) }, record: null });
   }
   groups.set("control.cures", "simulation");
   const at14Target = "at18_fixture_at14";
@@ -285,7 +301,7 @@ export function makeFixture(mutation: Mutation = {}) {
     '#![cfg(feature = "production_session")]',
     'use std::process::Command;',
     ...AT14_LOCKS.flatMap(name => [
-      "#[test]", `fn ${name}() {`,
+      "#[test]", ...(mutation.at14Ci === "ignored" ? ["#[ignore]"] : []), `fn ${name}() {`,
       '    let fixture = std::env::var("AT14_ORACLE_FIXTURE").expect("AT-14 oracle fixture");',
       `    let run = Command::new(fixture).arg("${name}").status().expect("official AT-14 fixture");`,
       '    assert!(run.success());', '}',
@@ -341,15 +357,29 @@ export function makeFixture(mutation: Mutation = {}) {
       const checkId = "r11.backtest." + target;
       const original = checks.find(check => check.check_id === "cure." + ticket)!;
       const group = "control.history." + ticket;
-      checks.push({ ...original, check_id: checkId, group });
+      if (mutation.historicalCures === "empty-node") {
+        const path = "scripts/at18-fixture/fake-cure-" + ticket + ".mjs";
+        const source = `test(${JSON.stringify(target)}, () => {});\n`;
+        put(path, source);
+        checks.push({ ...original, check_id: checkId, group, runner: "node-test", selector: target,
+          source: { path, sha256: note(source) } });
+      } else if (mutation.historicalCures === "empty-rust") {
+        const source = fixed.filter(([t]) => t === 1392 ? ticket === 1392 : ticket !== 1392)
+          .map(([, , name]) => `#[test]\nfn ${name}() { /* 没有验证 */ }\n`).join("");
+        put(original.source.path, source);
+        const sourceRef = { path: original.source.path, sha256: note(source) };
+        for (const check of checks.filter(c => c.source.path === original.source.path)) check.source = sourceRef;
+        checks.push({ ...original, check_id: checkId, group, source: sourceRef });
+      } else checks.push({ ...original, check_id: checkId, group });
       groups.set(group, "simulation");
       owner.cure_checks.push({ commit: failedCommit, run_id: failedRun, kind: "test", target, check_id: checkId });
     }
     const checkId = "r11.rustfmt";
-    const path = "scripts/at18-fixture/rustfmt.mjs";
-    put(path, command, "100755");
+    const path = "scripts/at18/cures/rustfmt";
+    const script = mutation.historicalCures === "empty-step" ? Buffer.from("#!/usr/bin/env bash\n# no command\n") : src.blob(r11Source, path);
+    put(path, script, "100755");
     checks.push({ check_id: checkId, group: "control.history.rustfmt", evidence_class: "simulation", profile_id: null,
-      runner: "command", selector: path, source: { path, sha256: note(command) }, expected_count: 1, key_aware: true, record: null });
+      runner: "command", selector: path, source: { path, sha256: byteSha256(script) }, expected_count: 1, key_aware: true, record: null });
     groups.set("control.history.rustfmt", "simulation");
     owner.cure_checks.push({ commit: failedCommit, run_id: failedRun, kind: "step", target: failedStep, check_id: checkId });
   }
@@ -358,8 +388,13 @@ export function makeFixture(mutation: Mutation = {}) {
   put(at18 + "registry.json", registryBytes);
   put(at18 + "adapter-contract.json", adapterBytes);
   const dispatch = "on:\n  workflow_dispatch:\n";
-  put(workflows[0], dispatch + "jobs:\n  at18-registry-lint:\n    runs-on: ubuntu-latest\n  ci-ok:\n    needs: at18-registry-lint\n    runs-on: ubuntu-latest\n    steps:\n" +
-    `      - run: cargo test --locked --features production_session --test ${at14Target}\n`);
+  const stepName = "production_session AT-14 H1–H4";
+  const at14Filter = mutation.at14Ci === "skip-ci" ? " -- " + AT14_LOCKS.map(name => "--skip " + name).join(" ") :
+    mutation.at14Ci === "ignored-only" ? " -- --ignored" : "";
+  const at14Command = `cargo test --locked --features production_session --test ${at14Target}${at14Filter}`;
+  const prTrigger = mutation.at14Ci === "dispatch-only" ? "" : "  pull_request:\n    branches: [main]\n";
+  put(workflows[0], dispatch + prTrigger + "jobs:\n  at18-registry-lint:\n    runs-on: ubuntu-latest\n  ci-ok:\n    needs: at18-registry-lint\n    runs-on: ubuntu-latest\n    steps:\n" +
+    `      - name: ${stepName}\n        run: ${at14Command}\n`);
   put(workflows[1], dispatch + "jobs:\n  devskim:\n    name: DevSkim\n    runs-on: ubuntu-latest\n");
   for (const i of [2, 3]) put(workflows[i], dispatch + [
     "jobs:", "  plan:", "    runs-on: ubuntu-latest", "  checks:", "    runs-on: ubuntu-latest",
@@ -370,7 +405,7 @@ export function makeFixture(mutation: Mutation = {}) {
     "    steps:", "      - run: python scripts/at18/workflow.py seal --group=${{ matrix.group }}",
   ].join("\n") + "\n");
   const feedReplacement = "rust/src/at18_fixture_feed.rs", wireReplacement = "rust/src/at18_fixture_wire.rs";
-  put(feedReplacement, "pub fn normalize(price: f64) -> Option<f64> { (price > 0.0).then_some(price) }\n");
+  put(feedReplacement, mutation.feedReplacement ?? "pub fn normalize(price: f64) -> Option<f64> { (price > 0.0).then_some(price) }\n");
   put(wireReplacement, "pub fn wire_price(raw: u64) -> String { format!(\"{}.{}\", raw / 100, raw % 100) }\n");
   const legacyBasis = at18 + "pregate/fixture-1319-disposition.json";
   const oldFeedWire = [...feedWirePaths.feed, ...feedWirePaths.wire].filter(path => !src.tree(G0).has(path));
@@ -423,8 +458,27 @@ export function makeFixture(mutation: Mutation = {}) {
     if (!path) throw new Error("fixture: historical product missing");
     object(api["issues/" + ticket]).body = "实现交付 " + commit + "\n\n" + fence({ ticket, products: [{ commit, path }] });
   }
+  if (mutation.historicProducts) for (const [i, ticket] of [1392, 1404].entries()) {
+    const row = object(api["issues/" + ticket]);
+    row.body = String(row.body).split("\n\n")[0] + "\n\n" + fence({ ticket, products: [{
+      commit: shared, path: historicalPaths[mutation.historicProducts === "swapped" ? 1 - i : i],
+    }] });
+  }
+  if (mutation.heavyCase === "late-review") {
+    object(api["pulls/39001"]).merged_at = "2026-11-03T11:00:00Z";
+    const head = object(object(api["pulls/39001"]).head).sha;
+    const status = rows(api[`commits/${head}/statuses?per_page=100`])[0];
+    status.created_at = "2026-11-03T10:00:00Z";
+  }
   put(ownPaths[1], "export const verification = 'fixture verification';\n");
   const b = merge(a, 39002, "#1403 fixture verification", "impl/1403-verification");
+  let parent = b;
+  if (mutation.emptyProduct) {
+    const [child] = childIds;
+    parent = merge(b, 39005, "#33001 close only", "fixture/33001-close-only",
+      `Closes #${child.ticket}\n\n${fence({ ticket: child.ticket, paths: [child.path] })}`);
+    object(api["issues/" + child.ticket]).body = fence({ ticket: child.ticket, products: [{ commit: parent, path: child.path }] });
+  }
   const profileEcho = { schema_revision: "history-input-profile/1", evidence_class: "simulation", input_source: "massive-stock-tick/1",
     clock: { kind: "logical-bar/1", known_frontier_cut: "bar_close" }, funding: { policy_refs: ["funding/1"] },
     structure: { source_ref: "fixture" }, model: { input_domain: ["control"] }, initial_positions: ["fixture-position"],
@@ -466,14 +520,23 @@ export function makeFixture(mutation: Mutation = {}) {
     bounded_domain_statement: "仅证有界受测域", ci_run_id: "49010", review_binding: reviewBinding,
   };
   const at14Dir = `.chanlun/review-results/issue1304-at14-20261101-${b.slice(0, 7)}/`;
-  const officialSummary = at14Summary(acceptedAt14.parse({ ...at14, content_hash: computeContentHash(at14) }));
+  const unmutated = acceptedAt14.parse({ ...at14, content_hash: computeContentHash(at14) });
   mutation.at14?.(at14);
-  put(at14Dir + "at14-report.json", raw({ ...at14, content_hash: computeContentHash(at14) }));
+  const sealed = { ...at14, content_hash: computeContentHash(at14) };
+  const accepted = acceptedAt14.safeParse(sealed);
+  const officialSummary = at14Summary(accepted.success ? accepted.data : unmutated);
+  put(at14Dir + "at14-report.json", raw(sealed));
   if (mutation.summary !== "missing") put(at14Dir + "summary.md", mutation.summary === "inconsistent"
     ? officialSummary.replace("- verdict: `PASS`", "- verdict: `FAIL`") : officialSummary);
-  api["actions/runs/49010"] = { id: 49010, head_sha: b, path: workflows[0], status: "completed", conclusion: "success",
-    event: "workflow_dispatch", repository: githubRepo, head_repository: githubRepo };
-  const F = merge(b, 39003, "#1418 fixture entity publication", "impl/1418-publication");
+  api["actions/runs/49010"] = { id: 49010, run_attempt: 1, head_sha: b, path: workflows[0], status: "completed",
+    conclusion: "success", event: "pull_request", repository: githubRepo, head_repository: githubRepo };
+  const lockJob = { id: 58980, run_id: 49010, run_attempt: 1, head_sha: b, name: "ci-ok",
+    status: "completed", conclusion: "success", steps: [{ name: stepName, number: 1, status: "completed", conclusion: "success" }] };
+  api["actions/runs/49010/attempts/1/jobs?per_page=100"] = { total_count: 1, jobs: [lockJob] };
+  api["actions/jobs/58980/logs"] = ["##[group]Run " + at14Command, "##[endgroup]",
+    `     Running tests/${at14Target}.rs (target/debug/deps/${at14Target}-e1)`, "running 4 tests", ...AT14_LOCKS.slice(0, mutation.at14Ci === "unrecorded" ? 3 : 4)
+    .map(name => `test ${name} ... ok`), "test result: ok."].join("\n");
+  const F = merge(parent, 39003, "#1418 fixture entity publication", "impl/1418-publication");
   git(["update-ref", "refs/remotes/origin/main", F]);
   api["git/ref/heads/main"] = { ref: "refs/heads/main", object: { sha: F, type: "commit" } };
   const runId = (i: number) => 49000 + i;
@@ -577,19 +640,38 @@ export function makeFixture(mutation: Mutation = {}) {
   if (heavyPlan) {
     const preregistration_sha256 = byteSha256(heavyPlan.bytes);
     const symbols = heavySymbols.map(symbol => {
-      const scope = { head: F, symbol, interval: "1min", first_bar_at: "2015-01-01T00:00:00Z",
-        last_bar_at: mutation.heavyCase === "short" && symbol === "ES" ? "2024-12-31T23:59:00Z" : "2025-01-01T00:00:00Z",
-        bars: 3_600_000 };
-      const common = { ...scope, preregistration_sha256, input_sha256: note(symbol + " ten year data") };
+      const first_bar_at = "2015-01-01T00:00:00Z";
+      const last_bar_at = mutation.heavyCase === "short" && symbol === "ES" ? "2024-12-31T23:59:00Z" : "2025-01-01T00:00:00Z";
       const at = "2020-01-01T00:00:00Z";
+      const stamps = mutation.heavyCase === "one-bar" && symbol === "ES" ? [first_bar_at] : [first_bar_at, at, last_bar_at];
+      const scope = { head: F, symbol, interval: "1min", first_bar_at, last_bar_at, bars: stamps.length };
+      const chunks = stamps.map((time, i) => artifact(1320, `heavy-${symbol}-input-${i}.json`, raw({
+        schema_version: "at18-heavy-input-chunk/1", head: F, symbol, interval: "1min",
+        bars: [{ at: time, open: 100 + i, low: 99 + i, high: 102 + i, close: 101 + i, volume: 12 }],
+      })));
+      const series = raw({ ...scope, schema_version: "at18-heavy-input-series/1", chunks });
+      const input_sha256 = mutation.heavyCase === "input-unregistered" && symbol === "ES" ? note(symbol + " unregistered") :
+        artifact(1320, `heavy-${symbol}-input.json`, series);
+      const common = { ...scope, preregistration_sha256, input_sha256 };
       const outputs = {
         trades: [{ id: "trade-1", opened_at: at, closed_at: "2020-01-01T00:01:00Z", pnl: -1, drawdown: 1 }],
         voice_lifecycle: [{ at, voice_id: "voice-1", transition: "created" }],
         center_transitions: [{ at, center_id: "center-1", transition: "entered" }],
       };
+      const runs = ["replay-a", "replay-b"].map((id, i) => {
+        const divergence = mutation.heavyCase === "output-diverges" && symbol === "ES" && i === 1;
+        const output_sha256 = artifact(1320, `heavy-${symbol}-${id}-output.json`, raw({
+          schema_version: "at18-heavy-replay-output/1", head: F, symbol, run_id: id,
+          outputs: divergence ? { ...outputs, voice_lifecycle: [{ at, voice_id: "voice-1", transition: "terminated" }] } : outputs,
+        }));
+        const receipt = raw({ ...common, schema_version: "at18-heavy-replay-run/1", run_id: id,
+          started_at: `2026-11-02T0${i}:00:00Z`, finished_at: `2026-11-02T0${i}:30:00Z`, output_sha256 });
+        const result_sha256 = mutation.heavyCase === "second-run-missing" && i === 1 ? byteSha256(receipt) :
+          artifact(1320, `heavy-${symbol}-${id}-run.json`, receipt);
+        return { id, result_sha256 };
+      });
       const replay_sha256 = artifact(1320, `heavy-${symbol}-replay.json`, raw({
-        ...common, schema_version: "at18-heavy-replay/1", first_run: "replay-a", second_run: "replay-b",
-        outputs, second_output_sha256: note(canonicalizeJcs(outputs)),
+        ...common, schema_version: "at18-heavy-replay/1", runs,
       }));
       const trials = [heavyTrial].map(t => {
         const id = mutation.heavyCase === "wrong-trial" && symbol === "ES" ? "other-trial" : t.id;
@@ -610,7 +692,7 @@ export function makeFixture(mutation: Mutation = {}) {
       const { head: _head, ...index } = scope;
       return { ...index, years: 10, result_sha256 };
     });
-    artifact(1320, "heavy-measurement.json", raw({ schema_version: "at18-heavy-measurement/1", head: F,
+    artifact(1320, "heavy-measurement.json", mutation.heavyCase === "malformed-heavy" ? Buffer.from('{"schema') : raw({ schema_version: "at18-heavy-measurement/1", head: F,
       design: "FROZEN_PREREGISTERED_DUAL_CONTROLS", preregistration: { commit: a, path: heavyPlan.path, sha256: preregistration_sha256 },
       started_at: "2026-11-02T00:00:00Z", finished_at: "2026-11-03T00:00:00Z", symbols }));
   }

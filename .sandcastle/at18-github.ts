@@ -15,6 +15,7 @@ export function rows(value: unknown): Row[] {
 }
 export interface At18GitHub {
   repo: string;
+  jobLog(id: number): Promise<string>;
   get(route: string, fresh?: boolean): Promise<Row>;
   list(route: string, key?: string, fresh?: boolean): Promise<Row[]>;
 }
@@ -32,8 +33,7 @@ export function at18GitHub(root: string, origin: string): At18GitHub {
         cwd: root, timeout: 30_000, maxBuffer: 32 * 1024 * 1024,
         env: { ...process.env, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" },
       });
-      const result: unknown = JSON.parse(stdout);
-      return result;
+      return stdout;
     } finally {
       const next = waiting.shift();
       if (next) next();
@@ -43,12 +43,17 @@ export function at18GitHub(root: string, origin: string): At18GitHub {
   function call(route: string, paginate: boolean, fresh = false) {
     const key = (paginate ? "list:" : "get:") + route;
     if (fresh || !cached.has(key)) {
-      cached.set(key, request([...(paginate ? ["--paginate", "--slurp"] : []), "repos/" + repo + "/" + route]));
+      cached.set(key, request([...(paginate ? ["--paginate", "--slurp"] : []), "repos/" + repo + "/" + route])
+        .then((stdout): unknown => JSON.parse(stdout)));
     }
     return cached.get(key)!;
   }
   return {
     repo,
+    jobLog(id) {
+      if (!Number.isSafeInteger(id) || id <= 0) throw new Error("job identity");
+      return request(["repos/" + repo + "/actions/jobs/" + id + "/logs"]);
+    },
     async get(route, fresh) { return object(await call(route, false, fresh)); },
     async list(route, key, fresh) {
       const pages = await call(route, true, fresh);

@@ -1,8 +1,9 @@
+import { heavySeries, heavyWindow as window } from "./at18-heavy-input.ts";
 import { z } from "zod";
 import { type External } from "./at18-evidence.ts";
 import { byteSha256, canonicalizeJcs, digest, heavy, integer, parseJsonObject, repoPath, sha, text, utc } from "./at18-format.ts";
 import { object, type Row } from "./at18-github.ts";
-import { type Tracker, utcBefore } from "./at18-integrations.ts";
+import { type AcceptedReview, type Tracker, utcBefore } from "./at18-integrations.ts";
 import { type At18Repository, type Diagnostics, repoRef } from "./at18-source.ts";
 import { unique } from "./at18-coverage.ts";
 
@@ -13,7 +14,6 @@ const protocolPath = "docs/backtest-protocol-v0.md";
 const controlIds = ["random-entry", "direction-shuffle"];
 const armId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$/);
 const pinnedFile = z.strictObject({ commit: sha, path: repoPath, sha256: digest });
-const window = z.strictObject({ first_bar_at: utc, last_bar_at: utc, bars: integer });
 const arm = z.strictObject({ id: armId, definition_sha256: digest });
 const control = arm.extend({ seed: z.literal(20260625), replications: z.literal(1000) });
 const plan = z.strictObject({
@@ -27,15 +27,21 @@ const rollup = z.strictObject({ schema_version: z.literal("at18-heavy-measuremen
   symbols: z.array(window.extend({ symbol: text, interval: z.literal("1min"), years: integer.optional(), result_sha256: digest })).length(7),
 });
 const index = z.strictObject({ id: armId, result_sha256: digest });
-const replay = window.extend({
-  schema_version: z.literal("at18-heavy-replay/1"), head: sha, preregistration_sha256: digest, input_sha256: digest,
-  symbol: text, interval: z.literal("1min"),
-  first_run: armId, second_run: armId, second_output_sha256: digest,
+const replayOutput = z.strictObject({
+  schema_version: z.literal("at18-heavy-replay-output/1"), head: sha, symbol: text, run_id: armId,
   outputs: z.strictObject({
     trades: z.array(z.strictObject({ id: armId, opened_at: utc, closed_at: utc, pnl: z.number(), drawdown: z.number() })),
     voice_lifecycle: z.array(z.strictObject({ at: utc, voice_id: armId, transition: text })).min(1),
     center_transitions: z.array(z.strictObject({ at: utc, center_id: armId, transition: text })).min(1),
   }),
+});
+const replay = window.extend({
+  schema_version: z.literal("at18-heavy-replay/1"), head: sha, preregistration_sha256: digest, input_sha256: digest,
+  symbol: text, interval: z.literal("1min"), runs: z.tuple([index, index]),
+});
+const replayRun = window.extend({
+  schema_version: z.literal("at18-heavy-replay-run/1"), head: sha, preregistration_sha256: digest, input_sha256: digest,
+  symbol: text, interval: z.literal("1min"), run_id: armId, started_at: utc, finished_at: utc, output_sha256: digest,
 });
 const symbolResult = window.extend({
   schema_version: z.literal("at18-heavy-symbol-result/1"), head: sha, preregistration_sha256: digest, symbol: text,
@@ -69,16 +75,18 @@ function tenYears(from: string, to: string) {
 const sameWindow = (a: z.infer<typeof window>, b: z.infer<typeof window>) =>
   a.first_bar_at === b.first_bar_at && a.last_bar_at === b.last_bar_at && a.bars === b.bars;
 
-export function measuredHeavy(s: At18Repository, F: string, sources: External[], reviewed: ReadonlyMap<string, Row>, windows: Buffer | undefined) {
+export function measuredHeavy(s: At18Repository, F: string, sources: External[], reviewed: ReadonlyMap<string, AcceptedReview>, windows: Buffer | undefined) {
   if (!windows) return undefined;
   const candidates = sources.filter(e => e.ref.ticket === 1320 && e.json.schema_version === "at18-heavy-measurement/1");
   if (candidates.length !== 1) return undefined;
   try {
     const summary = rollup.parse(candidates[0].json);
     const p = summary.preregistration;
+    const review = reviewed.get(p.commit);
     if (summary.head !== F || !utcBefore(summary.started_at, summary.finished_at) ||
-        !reviewed.has(p.commit) || !s.ancestor(p.commit, F) ||
-        !utcBefore(s.string("show", "-s", "--format=%cI", p.commit).replace(/\+00:00$/, "Z"), summary.started_at)) return undefined;
+        !review || !s.ancestor(p.commit, F) ||
+        !utcBefore(review.review_approved_at, summary.started_at) || !utcBefore(review.merged_at, summary.started_at) ||
+        !utcBefore(new Date(s.string("show", "-s", "--format=%cI", p.commit)).toISOString(), summary.started_at)) return undefined;
     const bytes = s.blob(p.commit, p.path);
     if (byteSha256(bytes) !== p.sha256 || !s.changed(s.string("rev-parse", p.commit + "^1"), p.commit).includes(p.path)) return undefined;
     const frozen = plan.parse(parseJsonObject(bytes));
@@ -91,8 +99,9 @@ export function measuredHeavy(s: At18Repository, F: string, sources: External[],
         !controlIds.every(x => frozen.controls.some(c => c.id === x)) ||
         !heavySymbols.every(x => summary.symbols.some(e => e.symbol === x))) return undefined;
 
-    const records = new Map(sources.filter(e => e.ref.ticket === 1320 && e.ref.head && e.json.head === F)
-      .map(e => [e.ref.sha256, e]));
+    const evidence = sources.filter(e => e.ref.ticket === 1320 && e.ref.head === F && e.json.head === F);
+    if (!unique(evidence.map(e => e.ref.sha256))) return undefined;
+    const records = new Map(evidence.map(e => [e.ref.sha256, e]));
     const consumed = new Set(candidates);
     for (const row of summary.symbols) {
       if (!tenYears(row.first_bar_at, row.last_bar_at) || !utcBefore(row.last_bar_at, summary.started_at)) return undefined;
@@ -101,18 +110,55 @@ export function measuredHeavy(s: At18Repository, F: string, sources: External[],
       const data = symbolResult.parse(item.json);
       if (data.symbol !== row.symbol || !sameWindow(row, data) || data.preregistration_sha256 !== p.sha256) return undefined;
       consumed.add(item);
+      // 摘要必须命中登记原件字节；计数与窗口从时间有序的分钟数据重算。
+      const input = records.get(data.input_sha256);
+      if (!input || consumed.has(input)) return undefined;
+      const series = heavySeries.parse(input.json);
+      if (series.symbol !== row.symbol || !sameWindow(series, row) || !unique(series.chunks)) return undefined;
+      let bars = 0;
+      let previous: string | undefined;
+      for (const digest of series.chunks) {
+        const original = records.get(digest);
+        const chunk = original?.chunk;
+        if (!original || !chunk || consumed.has(original) || chunk.symbol !== row.symbol ||
+            (previous === undefined ? chunk.first_bar_at !== row.first_bar_at : !utcBefore(previous, chunk.first_bar_at))) return undefined;
+        previous = chunk.last_bar_at;
+        bars += chunk.bars;
+        consumed.add(original);
+      }
+      if (previous !== row.last_bar_at || bars !== row.bars) return undefined;
+      consumed.add(input);
+
       const replayItem = records.get(data.replay_sha256);
       if (!replayItem || consumed.has(replayItem)) return undefined;
       const replayed = replay.parse(replayItem.json);
-      const { outputs } = replayed;
+      if (replayed.symbol !== row.symbol || !sameWindow(row, replayed) ||
+          replayed.preregistration_sha256 !== p.sha256 || replayed.input_sha256 !== data.input_sha256 ||
+          !unique(replayed.runs.map(r => r.id))) return undefined;
+      consumed.add(replayItem);
+      const results: z.infer<typeof replayOutput>["outputs"][] = [];
+      for (const run of replayed.runs) {
+        const original = records.get(run.result_sha256);
+        if (!original || consumed.has(original)) return undefined;
+        const receipt = replayRun.parse(original.json);
+        if (receipt.run_id !== run.id || receipt.symbol !== row.symbol || !sameWindow(row, receipt) ||
+            receipt.preregistration_sha256 !== p.sha256 || receipt.input_sha256 !== data.input_sha256 ||
+            utcBefore(receipt.started_at, summary.started_at) || !utcBefore(receipt.started_at, receipt.finished_at) ||
+            utcBefore(summary.finished_at, receipt.finished_at)) return undefined;
+        consumed.add(original);
+        const output = records.get(receipt.output_sha256);
+        if (!output || consumed.has(output)) return undefined;
+        const replayedOutput = replayOutput.parse(output.json);
+        if (replayedOutput.run_id !== run.id || replayedOutput.symbol !== row.symbol) return undefined;
+        results.push(replayedOutput.outputs);
+        consumed.add(output);
+      }
+      const [outputs, other] = results;
+      if (canonicalizeJcs(outputs) !== canonicalizeJcs(other)) return undefined;
       const inside = (stamp: string) => !utcBefore(stamp, row.first_bar_at) && !utcBefore(row.last_bar_at, stamp);
-      if (replayed.symbol !== row.symbol || !sameWindow(row, replayed) || replayed.preregistration_sha256 !== p.sha256 ||
-          replayed.input_sha256 !== data.input_sha256 || replayed.first_run === replayed.second_run ||
-          byteSha256(Buffer.from(canonicalizeJcs(outputs))) !== replayed.second_output_sha256 ||
-          !unique(outputs.trades.map(t => t.id)) || outputs.trades.some(t => !inside(t.opened_at) ||
+      if (!unique(outputs.trades.map(t => t.id)) || outputs.trades.some(t => !inside(t.opened_at) ||
             !inside(t.closed_at) || utcBefore(t.closed_at, t.opened_at)) ||
           [...outputs.voice_lifecycle, ...outputs.center_transitions].some(e => !inside(e.at))) return undefined;
-      consumed.add(replayItem);
       for (const kind of ["trial", "control"] as const) {
         const expected = kind === "trial" ? frozen.trials : frozen.controls;
         const observed = kind === "trial" ? data.trials : data.controls;

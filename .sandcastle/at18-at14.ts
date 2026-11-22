@@ -1,3 +1,5 @@
+import { at14CiSteps, recordedAt14Steps, type RustLock } from "./at18-at14-ci.ts";
+import { rustTest } from "./at18-code.ts";
 import { z } from "zod";
 import { type Bindings, unique } from "./at18-coverage.ts";
 import { byteSha256, canonicalizeJcs, computeContentHash, digest, integer, parseJsonObject,
@@ -105,10 +107,20 @@ export function at14Summary(d: At14) {
   ].join("\n");
 }
 
+// #1418 reject_shadow_producer 对 manifest/profile 中可回读的五个来源字段同口径。
+const shadowSources = ["backtest_bin", "theta_backtest", "theta_replay", "theta_accept", "replay_compare",
+  "MinimalEngine", "ThetaPiStream", "PyThetaStream", "run_theta_v0_pi"];
+const sourceFields = ["provenance", "evidence_kind", "producer", "launcher", "engine"];
+const notShadow = (doc: Record<string, unknown>) => sourceFields.every(key => {
+  const value = doc[key];
+  return typeof value !== "string" || (value !== "shadow" && value !== "component_evidence" &&
+    !shadowSources.some(shadow => value.includes(shadow)));
+});
+
 function validSession(d: At14) {
   const { session, build_fingerprint: build, dual_run_tuple: tuple, version_set: versions, model_execution: model } = d;
   const { manifest_echo: manifest, profile_echo: profile } = session;
-  return manifest.manifest_revision === session.manifest_revision && manifest.profile === "simulation" &&
+  return notShadow(manifest) && notShadow(profile) && manifest.manifest_revision === session.manifest_revision && manifest.profile === "simulation" &&
     profile.schema_revision === session.profile_revision && profile.evidence_class === "simulation" &&
     profile.input_source === d.input_source && text.safeParse(manifest.state_dir).success &&
     text.safeParse(valueAt(manifest, "/s/db")).success && text.safeParse(valueAt(manifest, "/economic/manifest")).success &&
@@ -124,7 +136,8 @@ function validSession(d: At14) {
     tuple.fault_schedule_hash === jcsHash(d.fault_schedule) && tuple.schedule_trace_hash === jcsHash(d.schedule_trace) &&
     tuple.model_id === model.model_id && tuple.model_id === versions.model_ref.model_id &&
     tuple.model_revision === versions.model_ref.revision && tuple.seed === model.seed && model.seed === "none" &&
-    versions.policy_refs.some(p => p.version === tuple.policy_version) &&
+    versions.policy_refs.some(p => p.version === tuple.policy_version || p.policy_id + "@" + p.version === tuple.policy_version) &&
+    d.assumption_counts.stochastic_l1_count === 0 && d.assumption_counts.bar_volume_derived_l0_count === 0 &&
     unique(build.features) && build.features.includes("production_session") &&
     !build.features.some(f => f === "production_session_testonly" || f === "backtest_bin") &&
     d.verification_source_label === (d.input_source === "databento-equs-mini-tick/1" ? "校验源" : null) &&
@@ -135,29 +148,25 @@ function validSession(d: At14) {
 export async function findAt14(s: At18Repository, F: string, b: Bindings, groupPass: Set<string>,
   reviews: ReviewRef[], diag: Diagnostics) {
   try {
-    const ci = utf8(s.blob(F, workflows[0]));
-    const ciCommands = ci.split("\n").flatMap(line => /^\s*(?:-\s*)?run:\s*(.*)$/.exec(line)?.[1] ?? []);
     const tb07 = [...b.activeByCheck].filter(([, uses]) => [...uses.values()].some(use => use.key.slice === "TB-07"));
-    if (!AT14_LOCKS.every(name => tb07.some(([id]) => {
-      const check = b.checks.get(id);
-      if (!check || check.expected_count !== 1 || check.runner !== "cargo-test" ||
-          check.evidence_class !== "simulation" || !groupPass.has(check.group)) return false;
-      const selection = /^(?:test:)?([\w-]+)\+([\w,-]+)\/(?:[\w]+::)*([\w]+)$/.exec(check.selector);
-      if (!selection || selection[3] !== name) return false;
-      const [, target, features] = selection;
-      const enabled = features.split(",");
-      if (!enabled.includes("production_session") || enabled.some(f => ["production_session_testonly", "backtest_bin"].includes(f)) ||
-          ![`rust/tests/${target}.rs`, `rust/tests/${target}/main.rs`].includes(check.source.path)) return false;
-      const source = utf8(s.blob(F, check.source.path));
-      return new RegExp(`#\\[test\\]\\s*(?:#\\[[^\\]\\n]+\\]\\s*)*(?:pub\\s+)?fn\\s+${name}\\(`).test(source) &&
-        ciCommands.some(cmd => {
-          const features = /(?:^|\s)--features[=\s]+["']?([\w,-]+)/.exec(cmd)?.[1].split(",") ?? [];
-          const executes = /^(?:(?:\.\.?\/)*(?:\.github\/scripts\/)?run-cargo-with-telemetry\.sh\s+)?cargo\s+test\b/.test(cmd);
-          return executes && features.includes("production_session") &&
-            !features.some(f => ["production_session_testonly", "backtest_bin"].includes(f)) &&
-            new RegExp(`(?:^|\\s)--test[=\\s]+${target}(?:\\s|$)`).test(cmd) && !/--(?:no-run|ignore)\b/.test(cmd);
-        });
-    }))) return [];
+    const locks: RustLock[] = [];
+    for (const name of AT14_LOCKS) {
+      const targets = new Set<string>();
+      for (const [id] of tb07) {
+        const check = b.checks.get(id);
+        if (!check || check.expected_count !== 1 || check.runner !== "cargo-test" ||
+            check.evidence_class !== "simulation" || !groupPass.has(check.group)) continue;
+        const selection = /^(?:test:)?([\w-]+)\+([\w,-]+)\/(?:[\w]+::)*([\w]+)$/.exec(check.selector);
+        if (!selection || selection[3] !== name) continue;
+        const [, target, features] = selection;
+        const enabled = features.split(",");
+        if (!enabled.includes("production_session") || enabled.some(f => ["production_session_testonly", "backtest_bin"].includes(f)) ||
+            ![`rust/tests/${target}.rs`, `rust/tests/${target}/main.rs`].includes(check.source.path)) continue;
+        if (rustTest(utf8(s.blob(F, check.source.path)), name)) targets.add(target);
+      }
+      if (targets.size !== 1) return [];
+      for (const target of targets) locks.push({ target, name });
+    }
     const found = [...s.tree(F).keys()].filter(path => AT14.test(path));
     const candidates = found.flatMap(path => {
       const bytes = s.blob(F, path);
@@ -185,11 +194,14 @@ export async function findAt14(s: At18Repository, F: string, b: Bindings, groupP
     const scoped = "ticket:1304@ISSUE_1304_AT14";
     const approved = await diag.get(scoped, async () => {
       const run = await s.github.get("actions/runs/" + d.ci_run_id);
-      return String(run.id) === d.ci_run_id && run.path === workflows[0] &&
+      if (!(String(run.id) === d.ci_run_id && run.path === workflows[0] &&
         run.head_sha === d.build_fingerprint.commit && object(run.repository).full_name === s.github.repo &&
         object(run.head_repository).full_name === s.github.repo && run.status === "completed" &&
         (run.event === "workflow_dispatch" || run.event === "push" || run.event === "pull_request") &&
-        success({ status: run.status, conclusion: typeof run.conclusion === "string" ? run.conclusion : null });
+        success({ status: run.status, conclusion: typeof run.conclusion === "string" ? run.conclusion : null }))) return false;
+      const steps = at14CiSteps(utf8(s.blob(d.build_fingerprint.commit, workflows[0])), locks);
+      if (locks.some(lock => !steps.some(step => step.locks.includes(lock)))) return false;
+      return recordedAt14Steps(s, integer.parse(run.id), integer.parse(run.run_attempt), d.build_fingerprint.commit, steps, locks);
     });
     return approved ? [repoRef(F, path, bytes, "AT14_REPORT"), repoRef(F, summaryPath, summary, "AT14_SUMMARY")] : [];
   } catch { return []; }

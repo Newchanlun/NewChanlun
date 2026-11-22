@@ -1,3 +1,4 @@
+import { deliveredProducts } from "./at18-products.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type SpawnOptions } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
@@ -8,7 +9,7 @@ import { adapter, censusSchema, decodeRecord, registrySchema } from "./at18-cont
 import { canMakeFixture, makeFixture, type Mutation, type API } from "./at18-fixture.ts";
 import { artifactRefSchema, at18InputBundleSchema, at18ReportSchema, byteSha256, canonicalizeJcs, computeContentHash,
   legacyTickets, ledgerPaths, parseJsonObject, specPaths, tbTickets, workflows, type At18Report } from "./at18-format.ts";
-import { ciNames, utcBefore } from "./at18-integrations.ts";
+import { ciNames, integrationReviews, utcBefore, type Ticket } from "./at18-integrations.ts";
 import { object } from "./at18-github.ts";
 import { boundedStatement } from "./at18-report.ts";
 import { at18, At18Repository, Diagnostics, G0, P0, valueAt } from "./at18-source.ts";
@@ -36,8 +37,9 @@ function execute(args: string[], options: SpawnOptions = {}) {
 }
 const pathExistsGit = canMakeFixture();
 let passedFixture: At18Report | undefined;
-async function control(mutation: Mutation = {}) {
+async function control(mutation: Mutation = {}, name?: string) {
   const f = makeFixture(mutation);
+  if (name) writeFileSync(join(f.dir, "case.txt"), name + "\n");
   const output = join(f.dir, "output");
   mkdirSync(output);
   const r = await execute([f.root, f.manifest, output, ...f.upstream], {
@@ -150,7 +152,7 @@ test("R02 实际主线规范：97/345/496 行、4,071 键、113 个 TB-11、OE42
 test("正式 CLI 正控：同一 Git 图／API 原件／已登记实体得到 PASS，双份产物与全部 locator 可核", {
   skip: !pathExistsGit ? "需要 G0/P0 与发布的规范 Git 对象" : false, timeout: 180_000,
 }, async () => {
-  const { f, report, output } = await control();
+  const { f, report, output } = await control({}, "official-positive");
   assert.equal(report.overall_result, "PASS", f.dir + ": " + JSON.stringify(report.failed_checks.slice(0, 40)));
   assert.deepEqual(report.failed_checks, []);
   const bytes = readFileSync(join(output, "at18-input-bundle.json"));
@@ -387,6 +389,30 @@ test("R4/H3,H5,H6,H8/M2,M3：单点破坏精确落到实体、逐键、产品、
   skip: !pathExistsGit, timeout: 360_000, concurrency: 2,
 }, async t => {
   const cases: [string, Mutation, (report: At18Report) => void][] = [
+    ["comment-replacement：匹配字节的纯注释不算收编", { feedReplacement: "/* mod fake { fn run() {} } */\n// no implementation" },
+      r => reportFail(r, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE")],
+    ["opaque_extra：R07 不投影掉未知 TB 记录业务键", { records: r => {
+      if (r.record === "tb.simulation.TB-01") object(r.payload).opaque_extra = "unexpected";
+    } }, r => {
+      assert.equal(r.tb_summaries[0].entity_reports.length, 0);
+      reportFail(r, "TB_REPORT", "ticket:1359");
+    }],
+    ["R07 不投影掉嵌在 tests 中的未知键", { records: r => {
+      if (r.record !== "tb.simulation.TB-01") return;
+      const tests = object(r.payload).tests;
+      assert.ok(Array.isArray(tests));
+      object(tests[0]).opaque_extra = "unexpected";
+    } }, r => {
+      assert.equal(r.tb_summaries[0].entity_reports.length, 0);
+      reportFail(r, "TB_REPORT", "ticket:1359");
+    }],
+    ["历史 PR #1906：真归属接受", { historicProducts: "correct" }, positive],
+    ["历史 PR #1906：#1392↔#1404 互换拒收", { historicProducts: "swapped" }, r => {
+      reportFail(r, "SUBTICKET_INCOMPLETE", "ticket:1392");
+      reportFail(r, "SUBTICKET_INCOMPLETE", "ticket:1404");
+    }],
+    ["已审 head 中含 fence 的空差异 Closes 仍然拒收", { emptyProduct: true },
+      r => reportFail(r, "SUBTICKET_INCOMPLETE", "ticket:33001")],
     ["无关 Cargo.toml 不能销 #1319", { feedWire: () => [{ path: "rust/Cargo.toml", disposition: "FROZEN", replacement: null }] },
       r => reportFail(r, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE")],
     ...[...feedWirePaths.feed, ...feedWirePaths.wire].map((missing): [string, Mutation, (report: At18Report) => void] =>
@@ -452,7 +478,7 @@ test("R4/H3,H5,H6,H8/M2,M3：单点破坏精确落到实体、逐键、产品、
       assert.equal(r.spec_coverage.crosswalk_sha256, byteSha256(Buffer.from('{"schema')));
     }],
   ];
-  await Promise.all(cases.map(([name, mutation, verify]) => t.test(name, { timeout: 90_000 }, async () => verify((await control(mutation)).report))));
+  await Promise.all(cases.map(([name, mutation, verify]) => t.test(name, { timeout: 90_000 }, async () => verify((await control(mutation, name)).report))));
 });
 
 test("R4/H4：AT-14 合同缺字段、缺摘要／不一致、Node 冒充 Rust 锁均阻断三个依赖者", {
@@ -470,16 +496,35 @@ test("R4/H4：AT-14 合同缺字段、缺摘要／不一致、Node 冒充 Rust �
       session.manifest_hash = byteSha256(Buffer.from(canonicalizeJcs(manifest)));
     } }],
     ["四个通过的具名 Node 锁冒充 Rust", { at14Node: true }],
+    ["shadow", { at14: row => {
+      const session = object(row.session), manifest = object(session.manifest_echo);
+      manifest.launcher = "theta_replay";
+      session.manifest_hash = byteSha256(Buffer.from(canonicalizeJcs(manifest)));
+    } }],
+    ["profile launcher shadow", { at14: row => {
+      const session = object(row.session), profile = object(session.profile_echo);
+      profile.launcher = "theta_replay";
+      session.profile_hash = byteSha256(Buffer.from(canonicalizeJcs(profile)));
+      object(row.dual_run_tuple).input_profile_hash = session.profile_hash;
+    } }],
+    ["contradiction", { at14: row => { object(row.assumption_counts).stochastic_l1_count = 1; } }],
+    ["wrong-policy-version", { at14: row => { object(row.dual_run_tuple).policy_version = "funding@2"; } }],
+    ...(["ignored", "skip-ci", "dispatch-only", "ignored-only", "unrecorded"] as const)
+      .map((at14Ci): [string, Mutation] => [at14Ci, { at14Ci }]),
+    ["qualified-policy", { at14: row => { object(row.dual_run_tuple).policy_version = "funding@1"; } }],
   ];
   await Promise.all(cases.map(([name, mutation]) =>
-    t.test(name, { timeout: 90_000 }, async () => at14Fail((await control(mutation)).report))));
+    t.test(name, { timeout: 90_000 }, async () => {
+      const { report } = await control(mutation, name);
+      (name === "qualified-policy" ? positive : at14Fail)(report);
+    })));
 });
 
 test("R4/H7：同一历史失败 run 的四项 cure 缺一或败一均不通行", {
   skip: !pathExistsGit, timeout: 180_000, concurrency: 2,
 }, async t => {
-  await Promise.all((["all", "missing", "failed"] as const).map(historicalCures => t.test(historicalCures, async () => {
-    const { report } = await control({ historicalCures });
+  await Promise.all((["all", "missing", "failed", "empty-node", "empty-step", "empty-rust"] as const).map(historicalCures => t.test(historicalCures, async () => {
+    const { report } = await control({ historicalCures }, "R11/" + historicalCures);
     assert.ok(report.historical_deviations.some(row => row.ticket === 1366 && row.run_id === 39034285362 && row.observed === "FAILURE"));
     if (historicalCures === "all") positive(report);
     else reportFail(report, "DEVIATION_NOT_CURED", "history:1366/8d84e21e2c9e9800a22900c2d4c67878310c1ab9/ci.yml/39034285362");
@@ -489,9 +534,10 @@ test("R4/H7：同一历史失败 run 的四项 cure 缺一或败一均不通行"
 test("R4/H9/M1：重测、废弃及延期相互独立；图外状态不影响 #1279 / DST-06", {
   skip: !pathExistsGit, timeout: 240_000, concurrency: 2,
 }, async t => {
-  await Promise.all((["measured", "short", "missing-control", "wrong-trial", "retired", "unapproved-retirement", undefined] as const)
+  await Promise.all((["measured", "short", "missing-control", "wrong-trial", "retired", "unapproved-retirement", "one-bar", "late-review",
+    "malformed-heavy", "input-unregistered", "second-run-missing", "output-diverges", undefined] as const)
     .map(heavyCase => t.test(heavyCase ?? "未测先关 #1320", async () => {
-      const { report } = await control({ heavyCase, api: api => close(api, 1320) });
+      const { report } = await control({ heavyCase, api: api => close(api, 1320) }, "heavy/" + (heavyCase ?? "unmeasured"));
       const disposition = legacyRow(report, 1320);
       assert.equal(legacyRow(report, 1279).disposition_valid, true);
       assert.equal(report.destinations[5].result, "PASS");
@@ -501,10 +547,56 @@ test("R4/H9/M1：重测、废弃及延期相互独立；图外状态不影响 #1
         assert.equal(report.unexecuted.some(row => row.obligation === heavy), false);
       } else {
         reportFail(report, "LEGACY_DISPOSITION", "ticket:1320@" + heavy);
+        if (heavyCase === "malformed-heavy") reportFail(report, "JSON_PARSE", "ticket:1320");
         assert.equal(disposition.disposition_valid, false);
         assert.equal(report.unexecuted.find(row => row.obligation === heavy)?.required, false);
         assert.ok(disposition.remaining_obligations.includes(heavy));
         assert.ok(!disposition.remaining_obligations.includes("ISSUE_1320_FULL_REPLAY"));
       }
     })));
+});
+
+test("R5/H6：R09 绑定真实 PR #1942 的旧 head，无新 fence 仍归 #1381", { skip: !pathExistsGit }, async () => {
+  const s = new At18Repository(root);
+  const merge = "3cd162ea4c3c8c73a0d6b8c6866894a0204e78bc";
+  const pull = new Map<string, object>();
+  const merged = new Map<string, number>();
+  const reviewed = new Set<string>();
+  for (const M of s.chain(merge, P0)) {
+    const H = s.string("rev-parse", M + "^2");
+    const subject = s.string("show", "-s", "--format=%s", M);
+    const match = /^Merge pull request #(\d+) from [\w.-]+\/(.+)$/.exec(subject);
+    assert.ok(match, subject);
+    const n = Number(match[1]);
+    pull.set("pulls/" + n, { number: n, merged: true, merged_at: "2026-11-10T00:00:00Z", merge_commit_sha: M,
+      base: { ref: "main", repo: { full_name: s.github.repo } }, head: { sha: H, ref: match[2] }, body: "既有交付" });
+    merged.set(`commits/${M}/pulls?per_page=100`, n);
+    reviewed.add(`commits/${H}/statuses?per_page=100`);
+  }
+  s.github.get = async route => object(pull.get(route));
+  s.github.list = async route => {
+    const number = merged.get(route);
+    if (number) {
+      const pr = object(pull.get("pulls/" + number));
+      return [{ number, merge_commit_sha: pr.merge_commit_sha }];
+    }
+    if (reviewed.has(route)) return [{ id: 1, state: "success", context: "deepagents/review",
+      creator: { login: "newchanlun-review-gate[bot]" }, created_at: "2026-11-09T10:00:00Z" }];
+    throw new Error(route);
+  };
+  const R09 = await integrationReviews(s, merge, new Diagnostics());
+  assert.ok(R09.ok);
+  const H = s.string("rev-parse", merge + "^2");
+  assert.doesNotMatch(s.string("show", "-s", "--format=%B", H), /at18-product-delivery/);
+  const path = "rust/src/history_simulation/mod.rs";
+  const ticket: Ticket = { number: 1381, state: "CLOSED", reason: "COMPLETED", labels: [], updated_at: null,
+    data: { body: "既有票面，没有新 fence" } };
+  const claim = (number: number, p: string): Ticket => ({ ...ticket, number, data: {
+    body: "```at18-product-delivery/1\n" + JSON.stringify({ ticket: number, products: [{ commit: merge, path: p }] }) + "\n```",
+  } });
+  assert.deepEqual(deliveredProducts(s, ticket, new Map(), R09.accepted), [merge]);
+  assert.deepEqual(deliveredProducts(s, claim(1381, path), new Map(), R09.accepted), [merge]);
+  assert.deepEqual(deliveredProducts(s, claim(1404, path), new Map(), R09.accepted), []);
+  assert.deepEqual(deliveredProducts(s, claim(1381, "README.md"), new Map(), R09.accepted), []);
+  assert.deepEqual(deliveredProducts(s, claim(1381, path), new Map(), new Map()), []);
 });

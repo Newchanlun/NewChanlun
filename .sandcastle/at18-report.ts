@@ -1,3 +1,4 @@
+import { deliveredProducts, ownedPr } from "./at18-products.ts";
 import { z } from "zod";
 import { adapter, pregateSchema, registrySchema, type Adapter, type Registry } from "./at18-contract.ts";
 import {
@@ -9,7 +10,7 @@ import {
 } from "./at18-evidence.ts";
 import {
   At18BootstrapError, at18InputBundleSchema, at18ReportSchema, byteSha256, canonicalizeJcs, heavy, ledgerPaths,
-  legacyTickets, parseJsonObject, repoPath, seal, sha, specPaths, type ArtifactRef, type At18InputBundle, type At18Report, tbIds, tbTickets, workflows,
+  legacyTickets, parseJsonObject, seal, sha, specPaths, type ArtifactRef, type At18InputBundle, type At18Report, tbIds, tbTickets, workflows,
 } from "./at18-format.ts";
 import {
   checkWorkflows, integrationReviews, JobEvidence, loadRuns, selectRun, Tracker, type Ticket,
@@ -42,49 +43,6 @@ export function boundedStatement(deviations: number, status: NonNullable<At18Rep
   ].join("\n");
 }
 
-function ownedPr(pr: Row, ticket: number) {
-  const branch = String(object(pr.head).ref ?? "");
-  const match = /(?:^|\/)(?:issue[-/]?)?(\d+)(?:[-_/]|$)/.exec(branch);
-  if (Number(match?.[1]) === ticket) return true;
-  return new RegExp(`^(?:[\\w.-]+:\\s*)?\\[?#${ticket}(?![0-9])`, "i").test(String(pr.title ?? "")) ||
-    new RegExp(`^\\s*(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\\s+#${ticket}(?![0-9])`, "im").test(String(pr.body ?? ""));
-}
-
-const productDelivery = z.strictObject({ ticket: z.int().positive(),
-  products: z.array(z.strictObject({ commit: sha, path: repoPath })).min(1) });
-
-// 交付锚来自逐票原件，不由合入 PR 的关闭语句反推。
-const prDelivery = z.strictObject({ ticket: z.int().positive(), paths: z.array(repoPath).min(1) });
-const deliveryFences = (body: string) => [...body.matchAll(/^```at18-product-delivery\/1\r?\n([\s\S]*?)\r?\n^```[ \t]*$/gm)]
-  .map(match => parseJsonObject(Buffer.from(match[1])));
-function deliveredProducts(s: At18Repository, ticket: Ticket, commits: string[], reviewed: Map<string, Row>) {
-  if (ticket.state !== "CLOSED" || ticket.reason !== "COMPLETED" || !commits.length) return [];
-  if (typeof ticket.data?.body !== "string") return [];
-  try {
-    const declarations = deliveryFences(ticket.data.body);
-    if (declarations.length !== 1) return [];
-    const data = productDelivery.parse(declarations[0]);
-    if (data.ticket !== ticket.number) return [];
-    const seen = new Set<string>();
-    for (const { commit, path } of data.products) {
-      const key = commit + "\0" + path;
-      if (seen.has(key) || !commits.includes(commit) || !s.blob(commit, path).length ||
-          !s.changed(s.string("rev-parse", commit + "^1"), commit).includes(path)) return [];
-      const current = reviewed.get(commit);
-      if (current) {
-        const H = sha.parse(object(current.head).sha);
-        const anchored = (body: string) => {
-          const ownership = deliveryFences(body).map(v => prDelivery.parse(v)).filter(v => v.ticket === ticket.number);
-          return ownership.length === 1 && ownership[0].paths.includes(path);
-        };
-        if (!anchored(String(current.body ?? "")) || !anchored(s.string("show", "-s", "--format=%B", H))) return [];
-      }
-      seen.add(key);
-    }
-    return sorted(data.products.map(row => row.commit));
-  } catch { return []; }
-}
-
 function tb11Products(s: At18Repository, F: string, chain: string[], accepted: Map<string, Row>, diag: Diagnostics) {
   let ok = true;
   for (const [ticket, path] of postgateApi) {
@@ -110,6 +68,7 @@ function tb11Products(s: At18Repository, F: string, chain: string[], accepted: M
 export async function generateAt18(s: At18Repository, own: Own, manifestPaths: string[], inputBundlePath: string,
   windowsStart = new Date().toISOString()) {
   const diag = new Diagnostics();
+  const heavyDiagnostics = new Diagnostics();
   const gaps = new Gaps();
   const { manifest } = own;
   const F = manifest.head;
@@ -138,7 +97,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   const r09 = integrationReviews(s, F, diag);
   const selectedRuns = loadRuns(s, F, diag);
   const p2 = productionDisabled(tracker, diag);
-  const external = externalSources(s, F, manifestPaths, own, diag);
+  const external = externalSources(s, F, manifestPaths, own, diag, heavyDiagnostics);
   function read(path: string, scope: string) {
     try { return jsonBlob(s, F, path); }
     catch (e) { diag.add(failCode(e), scope); return undefined; }
@@ -211,7 +170,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   const profile = reg?.experiment_profile_id ?? null;
   const auth = await authorizeExperiment(contract, bindings, tracker, profile, windowsStart, execution.checkJobs, diag);
   const runEvidence = runRecords(s, F, own, bindings, contract, registrySha, jobs, execution.passed, auth, diag);
-  const previous = await historyDeviations(s, pre.projection, reg, bindings, execution.passed, diag);
+  const previous = await historyDeviations(s, F, pre.projection, reg, bindings, execution.passed, diag);
   const allExternal = await external;
   const used = new Set<External>();
   const p2Disabled = await p2;
@@ -265,6 +224,12 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   const keyResults = resolveKeys(coverage, bindings, (d, k) => proveDomain(d, k, bindings, execution.passed, execution.executed,
     auth, runEvidence, verifiedEntities, post, scopeOK, gaps, diag), tb11, diag);
   const tbPass = new Map<Slice, boolean>([["TB-11", tb11]]);
+  const historicalOwners = new Map<string, Set<number>>();
+  for (const { ticket, commits } of pre.projection) for (const commit of commits) {
+    let owners = historicalOwners.get(commit);
+    if (!owners) { owners = new Set(); historicalOwners.set(commit, owners); }
+    owners.add(ticket);
+  }
   const nativeAttributions = new Map<number, string[]>();
   const r12ByTicket = new Map<number, boolean>();
   for (const slice of tbIds.slice(0, 10)) {
@@ -279,9 +244,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
     const complete = !!children && childSources.every(a => a.state !== null) && slices.length > 0;
     if (!complete) diag.add("SUBTICKET_INCOMPLETE", scope);
     for (const t of slices) {
-      const historical = pre.projection.find(p => p.ticket === t.number)?.commits ?? [];
-      const current = [...finalReviews.accepted].filter(([, pr]) => ownedPr(pr, t.number)).map(([commit]) => commit);
-      const products = deliveredProducts(s, t, sorted([...historical, ...current]), finalReviews.accepted);
+      const products = deliveredProducts(s, t, historicalOwners, finalReviews.accepted);
       if (products.length) nativeAttributions.set(t.number, products);
       const pass = products.length > 0;
       if (!pass) diag.add("SUBTICKET_INCOMPLETE", "ticket:" + t.number);
@@ -305,6 +268,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
   const allCurrent = main && reviewOK && pre.ok && sourcesOK && scopeOK && permitted && migrated && post.valid &&
     [...coverage.keys.values()].every(k => keyResults.get(k.id)?.status !== "FAIL") && tbIds.every(slice => tbPass.get(slice)) && !diag.size;
   const legacy = await legacyDispositions(s, F, contract, tracker, allCurrent, tbPass, bindings, execution.passed, permitted, allExternal, used, finalReviews.accepted, finalReviews.reviews, diag);
+  for (const error of heavyDiagnostics.all()) diag.add(error.check_id, error.scope, error.evidence_ref);
   if (legacy.deferredHeavy) gaps.defer(heavy, "simulation", "MEASUREMENT_NOT_COMPLETED", "ticket:1320");
 
   function bundleRef(path: string, bytes: Buffer, role: string) { return repoRef(F, path, bytes, role); }
@@ -373,6 +337,7 @@ export async function generateAt18(s: At18Repository, own: Own, manifestPaths: s
     if (r?.status === "FAIL") remaining.get(key.slice)?.add(key.id);
     for (const d of r?.deferred ?? []) remaining.get(key.slice)?.add(d);
   }
+  for (const error of heavyDiagnostics.all()) diag.add(error.check_id, error.scope, error.evidence_ref);
   if (legacy.deferredHeavy) remaining.get("TB-11")?.add(heavy);
   const CI = execution.ci;
   const reviews = finalReviews.reviews;
