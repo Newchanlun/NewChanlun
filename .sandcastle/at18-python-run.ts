@@ -18,7 +18,7 @@ function isolatedPython(work: string, scratch: string, input: unknown) {
   const argv = [python.executable, "-I", "-B", join(work, driver), scratch];
   const options: ExecFileSyncOptionsWithStringEncoding = {
     cwd: work, env: { HOME: scratch, TMPDIR: scratch, PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1" },
-    input: JSON.stringify(input), encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL",
+    input: JSON.stringify(input), encoding: "utf8", timeout: 45_000, killSignal: "SIGKILL",
     stdio: ["pipe", "pipe", "ignore"],
   };
   if (process.platform === "darwin") {

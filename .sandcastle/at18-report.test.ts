@@ -1023,6 +1023,31 @@ test("R10/#1319：Python 声明目标、延迟体驱动和 CPython 生产调用�
   ] as const) {
     cases.push(["r13-" + id, exhaust("it = iter(" + expr + ")", "next(it)", "except StopIteration:"), direct, accepts]);
   }
+  const dictionaryKey = (key: string, normal: boolean) => integration(from + "route\ntry:\n    keys = {" +
+    key + ": 0}\nexcept TypeError:\n    return " + (normal ? "[]" : call) + "\nreturn " + (normal ? call : "[]"));
+  cases.push(
+    ["r14-frozenset-normal", dictionaryKey("frozenset([1])", true), direct, true],
+    ["r14-frozenset-except", dictionaryKey("frozenset([1])", false), direct, false],
+    ["r14-set-normal", dictionaryKey("set([1])", true), direct, false],
+    ["r14-set-except", dictionaryKey("set([1])", false), direct, true],
+    ["r14-named-exception-tuple", reraised("raise stop", "handled").replace("    try:", "    handled = (IndexError, StopIteration)\n    try:"), direct, true],
+    ["r14-yield-from-none", integration(from + "route\ndef inner():\n    if False:\n        yield\n    return None\n" +
+      "def outer():\n    if (yield from inner()):\n        yield " + call + "\nreturn list(outer())"), direct, false],
+    ["r14-production-raises-after-entry", integration(from + "route\n" + call + "\nraise RuntimeError()"), direct, true],
+    ["r14-production-stdout-is-not-the-receipt", integration("print('selecting feed')\n" +
+      "os.write(1, b'low-level feed log\\n')\nreturn " + call, "import os\n" + from + "route\n" +
+      "print('feed imported')\n"), direct, true],
+    ["r14-import-time-dispatch", from + "route\nroute('1min', {}, [])\ndef select_feed():\n    return []", direct, false],
+    ["r14-imported-export-not-a-public-entry", from + "route as select_feed", direct, false],
+    ["r14-private-class-constructor", from + "route\nclass Feed:\n    def __init__(self):\n        route('1min', {}, [])\n" +
+      "    def select_feed(self):\n        return []", direct, false],
+    ["r14-public-static-async", from + "route\nclass Feed:\n    @staticmethod\n" +
+      "    async def select_feed(sources, /, *, events):\n        if events[0] == 1:\n            return " + call, direct, true],
+    ["r14-public-async-generator-return", integration(from + "route\nasync def batches():\n    yield " + call + "\nreturn batches()"), direct, true],
+    ["r14-container-is-not-a-generator-return", integration(generator + "return (g,)"), direct, false],
+    ["r14-returned-generator-test-never-consumes", integration(generator + "return g"),
+      "from trading_system import select_feed\ndef test_route():\n    assert select_feed({}, [1, 2]) is not None", false],
+  );
   for (const [id, feedIntegration, feedTest, accepts] of cases) await t.test(id, async () => {
     const entry = "trading_system/at18_fixture_feed.py";
     const production = "trading_system/__init__.py";
@@ -1280,6 +1305,50 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
         Phase::Live(n, _) | State::Live(_, n) if n == 2 => { ${call} }
         _ => (),
       }`, true],
+    ["r14-canonical-before-test-intersection", `if std::hint::black_box(false) {
+      assert!(newchan_rust::select_wire("HELLO")); return;
+    } ${call}`, true],
+    ["r14-canonical-does-not-hide-empty-path", `if std::hint::black_box(false) {
+      assert!(newchan_rust::select_wire("HELLO"));
+    }`, false],
+    ["r14-complementary-immutable-conditions", `let flag = std::hint::black_box(false);
+      if flag { ${call} } if !flag { ${call} }`, true],
+    ["r14-complementary-different-bindings", `let a = std::hint::black_box(false);
+      let b = std::hint::black_box(false); if a { ${call} } if !b { ${call} }`, false],
+    ["r14-complementary-shadowed-binding", `let flag = std::hint::black_box(false);
+      if flag { ${call} } let flag = std::hint::black_box(false); if !flag { ${call} }`, false],
+    ["r14-complementary-mutable-binding", `let mut flag = std::hint::black_box(false);
+      if flag { ${call} } flag = std::hint::black_box(true); if !flag { ${call} }`, false],
+    ["r14-ready-match", `use std::task::Poll; use std::future::Future;
+      let mut fut = std::pin::pin!(std::future::ready(true));
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(true) => { ${call} }
+        Poll::Ready(false) | Poll::Pending => (),
+      }`, true],
+    ["r14-pending-is-pending", `use std::future::Future;
+      let mut fut = std::pin::pin!(std::future::pending::<()>());
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      if fut.as_mut().poll(&mut cx).is_pending() { ${call} }`, true],
+    ["r14-pending-is-not-ready", `use std::future::Future;
+      let mut fut = std::pin::pin!(std::future::pending::<()>());
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      if fut.as_mut().poll(&mut cx).is_ready() { ${call} }`, false],
+    ["r14-ready-is-ready", `let mut fut = std::pin::pin!(std::future::ready(()));
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      if std::future::Future::poll(fut.as_mut(), &mut cx).is_ready() { ${call} }`, true],
+    ["r14-ready-is-not-pending", `let mut fut = std::pin::pin!(std::future::ready(()));
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      if std::future::Future::poll(fut.as_mut(), &mut cx).is_pending() { ${call} }`, false],
+    ["r14-mixed-is-not-always-ready", `use std::future::Future;
+      let mut fut = std::pin::pin!(async {
+        if std::hint::black_box(false) { core::future::pending::<()>().await; }
+      });
+      let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+      if fut.as_mut().poll(&mut cx).is_ready() { ${call} }`, false],
+    ["r14-generic-alias-nested-argument", `enum Phase<T, U> { Live(T, U), Dry }
+      type Id<T> = T; type State = Id<Id<Phase<u8, (u8, u8)>>>;
+      match State::Live(1, (2, 3)) { Phase::Live(_, _) => { ${call} } Phase::Dry => (), }`, true],
     ["r11-if-let-some", `if let Some(f) = Some(handshake) { assert!(f("HELLO")); }`, true],
     ["r11-if-let-none", `if let Some(f) = None::<fn(&str) -> bool> { ${call} let _ = f; }`, false],
     ["r11-while-let-none", `while let Some(_) = None::<i32> { ${call} break; }`, false],
@@ -1316,6 +1385,18 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
       crate::switches::Mode::Dry => (),
     }
   `, true, "mod switches { pub enum Mode { Dry, Live } }\n"));
+  await t.test("r14-canonical-before-production-intersection", () => check(`
+    fn encapsulated(banner: &str) -> bool { ${path}(banner) }
+    pub fn select_wire(banner: &str) -> bool {
+      if std::hint::black_box(false) { return encapsulated(banner); }
+      ${path}(banner)
+    }
+  `, call, true));
+  await t.test("r14-generic-module-alias-keeps-argument-scope", () => check("", `
+    enum Local { Live, Dry }
+    type State = crate::aliases::Id<Local>;
+    match State::Live { Local::Live => { ${call} } Local::Dry => (), }
+  `, true, "mod aliases { pub type Id<T> = T; }\n"));
   await t.test("r13-qualified-module-alias-chain", () => check("", `
     type Local = crate::state::State<fn(&str) -> bool>;
     match Local::Live(handshake) {

@@ -145,7 +145,10 @@ type RustBinding = { kind: "path" | "call-result"; path: string[] } | RustRoutin
 type RustElements = { kind: "tuple" | "array"; elements: (RustBinding | undefined)[] };
 type VariantShape = { form: "unit" | "record" } | { form: "tuple"; arity: number };
 type RustEnum = { kind: "enum"; owner: string; variants: Map<string, VariantShape> };
-type RustTypeAlias = { kind: "type-alias"; target: string[]; scope: RustScope };
+type AliasDefinition = { params: string[]; target: string[] };
+type RustTypeAlias = { kind: "type-alias"; scope: RustScope } & AliasDefinition;
+type EnumArgument = (depth: number) => RustEnum | undefined;
+type EnumResolver = (path: string[], args?: EnumArgument[], depth?: number) => RustEnum | undefined;
 type RustConstructor = Extract<RustBinding, { kind: "constructor" }>;
 type RustTruth = boolean | undefined;
 class RustExit {
@@ -161,6 +164,7 @@ type RustScope = {
   items: Map<string, RustBinding | undefined>;
   macros: Set<string>;
   values: Map<string, RustBinding | undefined>;
+  immutable: Set<string>;
 };
 type RustParameter = string[];
 const rustPathLimit = 32;
@@ -269,25 +273,65 @@ function pathAt(code: string[], i: number) {
   return { parts, end: i };
 }
 
-// 类型位置允许 Path<T>，不要求表达式位置的 ::<T>。
-function aliasTarget(code: string[], start: number): string[] | undefined {
+function typeArguments(code: string[], start: number, end: number): string[][] {
+  const args: string[][] = [];
+  let from = start;
+  for (let i = start; i < end; i++) {
+    if (code[i] === ",") { args.push(code.slice(from, i)); from = i + 1; }
+    else {
+      const close = code[i] === "<" ? genericEnd(code, i) : groupEnd(code, i);
+      if (close > i) i = close;
+    }
+  }
+  if (from < end) args.push(code.slice(from, end));
+  return args;
+}
+
+function aliasDefinition(code: string[], start: number): AliasDefinition | undefined {
   let index = start + 2;
-  if (code[index] === "<") index = genericEnd(code, index) + 1;
+  let params: string[] = [];
+  if (code[index] === "<") {
+    const close = genericEnd(code, index);
+    if (close < 0) return;
+    params = typeArguments(code, index + 1, close).map(([first, second]) =>
+      first === "const" ? second : first === "'" ? "'" + second : first);
+    index = close + 1;
+  }
   const end = separator(code, index, code.length, ";");
-  index = separator(code, index, end, "=") + 1;
-  if (code[index] === "::") index++;
+  for (; index < end && code[index] !== "="; index++) {
+    const close = code[index] === "<" ? genericEnd(code, index) : groupEnd(code, index);
+    if (close > index) index = close;
+  }
+  if (index + 1 < end) return { params, target: code.slice(index + 1, end) };
+}
+
+// 实参保留调用方作用域；别名目标按声明处词法环境解析。
+function resolveType(code: string[], resolve: EnumResolver, depth: number,
+  parameters = new Map<string, EnumArgument | undefined>()): RustEnum | undefined {
+  if (depth > 32) return;
+  let index = Number(code[0] === "::");
   const path: string[] = [];
-  while (index < end && identifier.test(code[index] ?? "")) {
+  let args: EnumArgument[] = [];
+  while (identifier.test(code[index] ?? "")) {
     path.push(code[index++]);
     if (code[index] === "::" && code[index + 1] === "<") index++;
     if (code[index] === "<") {
       const close = genericEnd(code, index);
-      if (close <= index || close >= end) return;
+      if (close < 0) return;
+      args = typeArguments(code, index + 1, close).map(arg => at => resolveType(arg, resolve, at, parameters));
       index = close + 1;
     }
-    if (index === end || code[index] === "where") return path;
+    if (index === code.length || code[index] === "where") {
+      if (path.length === 1 && parameters.has(path[0])) return parameters.get(path[0])?.(depth + 1);
+      return resolve(path, args, depth + 1);
+    }
     if (code[index++] !== "::") return;
+    args = [];
   }
+}
+
+function resolveAlias({ params, target }: AliasDefinition, resolve: EnumResolver, args: EnumArgument[], depth: number) {
+  return resolveType(target, resolve, depth, new Map(params.map((name, i) => [name, args[i]])));
 }
 
 function lookup(scope: RustScope, [first, ...rest]: string[]): RustBinding | undefined {
@@ -343,11 +387,14 @@ const optionVariants: RustEnum = { kind: "enum", owner: "prelude::Option",
   variants: new Map<string, VariantShape>([["Some", { form: "tuple", arity: 1 }], ["None", { form: "unit" }]]) };
 const resultVariants: RustEnum = { kind: "enum", owner: "prelude::Result",
   variants: new Map<string, VariantShape>([["Ok", { form: "tuple", arity: 1 }], ["Err", { form: "tuple", arity: 1 }]]) };
+const pollVariants: RustEnum = { kind: "enum", owner: "core::task::Poll",
+  variants: new Map<string, VariantShape>([["Ready", { form: "tuple", arity: 1 }], ["Pending", { form: "unit" }]]) };
 
 function builtinEnum(path: string[]): RustEnum | undefined {
   const owner = path.at(-1);
-  if (owner !== "Option" && owner !== "Result") return;
   const qualifiers = path.slice(0, -1).join("::");
+  if (owner === "Poll" && (!qualifiers || qualifiers === "std::task" || qualifiers === "core::task")) return pollVariants;
+  if (owner !== "Option" && owner !== "Result") return;
   if (!qualifiers || ["std", "core"].some(root => qualifiers === `${root}::${owner.toLowerCase()}`)) {
     return owner === "Option" ? optionVariants : resultVariants;
   }
@@ -507,6 +554,7 @@ function captured(scope: RustScope, includeValues: boolean): RustScope {
     items: scope.items,
     macros: scope.macros,
     values: includeValues ? new Map(scope.values) : new Map(),
+    immutable: includeValues ? new Set(scope.immutable) : new Set(),
   };
 }
 
@@ -514,11 +562,12 @@ function captured(scope: RustScope, includeValues: boolean): RustScope {
 // 生产接线另查未执行的具名引用，防止把空封装误降级成纯模块公开。
 function rustReferences(imports: ReturnType<typeof rustImports>, body: string[], params: string[],
   observeValues: boolean, itemEnabled: (prefix: string[]) => boolean, latent = false, driveReturn = false,
-  moduleEnum: (path: string[]) => RustEnum | undefined = () => undefined): RustReference[] {
+  moduleEnum: EnumResolver = () => undefined): RustReference[][] {
   const module: RustScope = {
     items: new Map(imports.map(({ alias, path }) => [alias, { kind: "path", path }])),
     macros: new Set(),
     values: new Map(),
+    immutable: new Set(),
   };
   const running = new Set<string[]>();
   let localEnum = 0;
@@ -549,19 +598,19 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     const key = access + ":" + path.join("::");
     if (!refs.has(key)) refs.set(key, { path, access });
   }
-  function resolveEnum(scope: RustScope, path: string[], seen = new Set<RustTypeAlias>()): RustEnum | undefined {
+  function resolveEnum(scope: RustScope, path: string[], args: EnumArgument[] = [], depth = 0): RustEnum | undefined {
+    if (depth > 32) return;
     if (path.length === 1) {
       for (let layer: RustScope | undefined = scope; layer; layer = layer.parent) {
         if (!layer.items.has(path[0])) continue;
         const value = layer.items.get(path[0]);
         if (value?.kind === "enum") return value;
-        if (value?.kind === "path") return builtinEnum(value.path) ?? moduleEnum(value.path);
-        if (value?.kind !== "type-alias" || seen.has(value)) return;
-        seen.add(value);
-        return resolveEnum(value.scope, value.target, seen);
+        if (value?.kind === "path") return moduleEnum(value.path, args, depth + 1) ?? builtinEnum(value.path);
+        if (value?.kind !== "type-alias") return;
+        return resolveAlias(value, (named, actual, at) => resolveEnum(value.scope, named, actual, at), args, depth + 1);
       }
     }
-    return moduleEnum(path) ?? builtinEnum(path);
+    return moduleEnum(path, args, depth + 1) ?? builtinEnum(path);
   }
 
   function constructorOf(value: RustBinding | undefined, scope: RustScope): RustConstructor | undefined {
@@ -577,7 +626,7 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     return builtinConstructor(path);
   }
   const childScope = (parent: RustScope): RustScope =>
-    ({ parent, items: new Map(), macros: new Set(), values: new Map() });
+    ({ parent, items: new Map(), macros: new Set(), values: new Map(), immutable: new Set() });
 
   function localMacro(scope: RustScope | undefined, name: string): boolean {
     for (; scope; scope = scope.parent) if (scope.macros.has(name)) return true;
@@ -586,7 +635,10 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
   function bindMatch(scope: RustScope, pattern: RustParameter, matched?: RustMatch) {
     for (const name of patternNames(pattern)) {
       // 单元变体（如 None 或经 use 导入的别名）不是新的局部名。
-      if (!constructorOf(lookup(scope, [name]), scope)) scope.values.set(name, matched?.bindings.get(name));
+      if (!constructorOf(lookup(scope, [name]), scope)) {
+        scope.values.set(name, matched?.bindings.get(name));
+        scope.immutable.delete(name);
+      }
     }
   }
 
@@ -595,6 +647,21 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     const selected = latent ? matches[0] : matches.find(match => decide(match.truth));
     bindMatch(scope, pattern, selected);
     return selected ? latent ? selected.truth : true : false;
+  }
+
+  function ifBranch(truth: RustTruth, condition: string[], scope: RustScope) {
+    if (truth !== undefined) return truth;
+    const inverted = condition[0] === "!";
+    const name = condition[Number(inverted)];
+    const chosen = decide(undefined);
+    if (condition.length === 1 + Number(inverted) && identifier.test(name ?? "")) {
+      for (let layer: RustScope | undefined = scope; layer; layer = layer.parent) {
+        if (!layer.values.has(name)) continue;
+        if (layer.immutable.has(name)) layer.values.set(name, boolean(chosen !== inverted));
+        break;
+      }
+    }
+    return chosen;
   }
 
   function outcome(run: () => RustBinding | undefined) {
@@ -698,6 +765,15 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     if (value?.kind === "call-result" && driver === "await") recordReference(value.path, "drive");
   }
 
+  function poll(value: RustBinding | undefined): RustBinding | undefined {
+    const result = drive(value, "await");
+    if (result?.kind === "suspended") return { kind: "variant", tag: pollVariants.owner + "::Pending" };
+    if (value?.kind === "ready" || value?.kind === "pending" && value.driver === "await") {
+      return { kind: "variant", tag: pollVariants.owner + "::Ready",
+        tuple: { kind: "tuple", elements: [result] } };
+    }
+  }
+
   function awaitValue(value: RustBinding | undefined) {
     const result = drive(value, "await");
     if (!latent && (result?.kind === "suspended" ||
@@ -784,8 +860,8 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
               scope.items.set(item.name, enumDefinition(code, item.opaqueBody, item.end - 1,
                 `block:${localEnum++}:${item.name}`, itemEnabled));
             } else if (code[item.index] === "type") {
-              const target = aliasTarget(code, item.index);
-              scope.items.set(item.name, target ? { kind: "type-alias", target, scope: captured(scope, false) } : undefined);
+              const alias = aliasDefinition(code, item.index);
+              scope.items.set(item.name, alias ? { kind: "type-alias", ...alias, scope: captured(scope, false) } : undefined);
             } else scope.items.set(item.name, undefined);
           }
           if (latent && item.opaqueBody !== undefined) opaque.push(code.slice(item.opaqueBody + 1, item.end - 1));
@@ -1138,6 +1214,7 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
         } else {
           bind(scope, pattern, value);
         }
+        if (pattern.length === 1 && scope.values.has(pattern[0])) scope.immutable.add(pattern[0]);
         i = expressionStart = last + 1;
         continue;
       }
@@ -1215,7 +1292,8 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
               next = code[other] === "if" ? ifEnd(code, other, end) : groupEnd(code, other) + 1;
             }
             const no = () => next > other ? scan(code, other, next, scope, observed) : undefined;
-            value = latent ? branch(() => then(inner), no) : decide(truth) ? then(inner) : no();
+            value = latent ? branch(() => then(inner), no) :
+              ifBranch(truth, code.slice(i + 1, brace), scope) ? then(inner) : no();
           }
         }
         next = Math.max(next, tail + 1);
@@ -1279,6 +1357,7 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
           if (layer) {
             const last = separator(code, next + 1, end, ";");
             layer.values.set(parts[0], scan(code, next + 1, last, scope, observed));
+            layer.immutable.delete(parts[0]);
             i = expressionStart = last + 1;
             continue;
           }
@@ -1315,10 +1394,7 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
           const args = argumentsOf(code, next + 1, close, scope, observed);
           const path = value?.kind === "path" ? value.path.join("::") : "";
           if (["std::pin::Pin::new", "core::pin::Pin::new", "std::boxed::Box::pin", "Box::pin"].includes(path)) value = args[0];
-          else if (["std::future::Future::poll", "core::future::Future::poll"].includes(path)) {
-            drive(args[0], "await");
-            value = undefined;
-          }
+          else if (["std::future::Future::poll", "core::future::Future::poll"].includes(path)) value = poll(args[0]);
           else value = invoke(value, args);
           invoked = true;
           next = close + 1;
@@ -1327,6 +1403,10 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
           if (method === "await") {
             value = awaitValue(value);
             next += 2;
+          } else if (value?.kind === "variant" && value.tag.startsWith(pollVariants.owner + "::") &&
+              ["is_ready", "is_pending"].includes(method) && code[next + 2] === "(" && code[next + 3] === ")") {
+            value = boolean(value.tag.endsWith("::Ready") === (method === "is_ready"));
+            next += 4;
           } else if ((value?.kind === "pending" || value?.kind === "call-result" || value?.kind === "ready" || value?.kind === "suspended") &&
               method === "as_mut" && code[next + 2] === "(" && code[next + 3] === ")") {
             next += 4;
@@ -1338,8 +1418,7 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
             const close = groupEnd(code, next + 2);
             if (close <= next + 2 || close >= end) break;
             argumentsOf(code, next + 3, close, scope, observed);
-            const result = drive(value, value?.kind === "pending" ? value.driver : "await");
-            value = method === "poll" ? undefined : result;
+            value = method === "poll" ? poll(value) : drive(value, value?.kind === "pending" ? value.driver : "await");
             next = close + 1;
           } else {
             value = undefined;
@@ -1361,7 +1440,7 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
   if (latent) {
     const returned = run();
     if (driveReturn) drive(returned, "await");
-    return [...refs.values()];
+    return [[...refs.values()]];
   }
 
   const flow: RustFlow<RustTerminal> = { fallthrough: [], exits: [], suspended: [] };
@@ -1381,10 +1460,7 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
       states.push(terminal);
     }
   }
-  const terminals = [...flow.fallthrough, ...flow.exits, ...flow.suspended];
-  const first = terminals[0];
-  return first ? [...first.references].flatMap(([key, ref]) =>
-    terminals.every(terminal => terminal.references.has(key)) ? [ref] : []) : [];
+  return [...flow.fallthrough, ...flow.exits, ...flow.suspended].map(terminal => [...terminal.references.values()]);
 }
 
 export function rustReplacement(s: At18Repository, F: string, entry: string, checkPath: string, selector: string,
@@ -1436,21 +1512,21 @@ export function rustReplacement(s: At18Repository, F: string, entry: string, che
         rustImports(code.slice(item.index, code.indexOf(";", item.index) + 1)));
     }
     const itemEnabled = (prefix: string[]) => enabledRustItem(prefix, features, target);
-    function enumResolver(current: string[], modules: string[], enabled: typeof itemEnabled, testRoot?: string[]) {
-      const cache = new Map<string, RustEnum | undefined>();
-      function resolve(path: string[], context: string[], namespace: "test" | "lib"): RustEnum | undefined {
+    function enumResolver(current: string[], modules: string[], enabled: typeof itemEnabled, testRoot?: string[]): EnumResolver {
+      const enumCache = new Map<string, RustEnum>();
+      function resolve(path: string[], context: string[], namespace: "test" | "lib", args: EnumArgument[],
+        depth: number): RustEnum | undefined {
+        if (depth > 32) return;
         if (namespace === "test" && root !== "crate" && path[0] === root) {
-          return qualifiedEnum("lib", path.slice(1));
+          return qualifiedEnum("lib", path.slice(1), args, depth);
         }
-        return qualifiedEnum(namespace, qualify(context, path)) ?? builtinEnum(path);
+        return qualifiedEnum(namespace, qualify(context, path), args, depth) ?? builtinEnum(path);
       }
 
-      function qualifiedEnum(namespace: "test" | "lib", qualified: string[]): RustEnum | undefined {
+      function qualifiedEnum(namespace: "test" | "lib", qualified: string[], args: EnumArgument[], depth: number): RustEnum | undefined {
         const name = qualified.at(-1), owner = qualified.slice(0, -1);
         const key = namespace + "::" + qualified.join("::");
-        if (!name || cache.has(key)) return cache.get(key);
-        // 标记正在解析的别名，互相引用不允许递归成一个伪枚举。
-        cache.set(key, undefined);
+        if (!name || enumCache.has(key)) return enumCache.get(key);
         const sameModule = namespace === (testRoot ? "test" : "lib") && owner.join("::") === modules.join("::");
         let source = sameModule ? current : namespace === "test" ? testRoot : read(lib);
         if (!sameModule) {
@@ -1470,68 +1546,81 @@ export function rustReplacement(s: At18Repository, F: string, entry: string, che
         }
         if (!source) return;
         const items = active(source, enabled);
-        let definition: RustEnum | undefined;
         const declaration = items.find(item => (item.kind === "enum" || item.kind === "type") && source?.[item.index + 1] === name);
         if (declaration?.kind === "enum") {
           const brace = separator(source, declaration.index + 2, source.length, "{");
           const close = groupEnd(source, brace);
-          if (close > brace) definition = enumDefinition(source, brace, close, key, enabled);
+          if (close > brace) {
+            const definition = enumDefinition(source, brace, close, key, enabled);
+            enumCache.set(key, definition);
+            return definition;
+          }
         } else if (declaration?.kind === "type") {
-          const target = aliasTarget(source, declaration.index);
-          if (target) definition = resolve(target, owner, namespace);
+          const alias = aliasDefinition(source, declaration.index);
+          if (alias) return resolveAlias(alias,
+            (path, actual = [], at = depth + 1) => resolve(path, owner, namespace, actual, at), args, depth + 1);
         } else {
           const imported = importsOf(source, items).find(item => item.alias === name);
-          if (imported) definition = resolve(imported.path, owner, namespace);
+          if (imported) return resolve(imported.path, owner, namespace, args, depth + 1);
         }
-        cache.set(key, definition);
-        return definition;
       }
 
-      return (path: string[]) => resolve(path, modules, testRoot ? "test" : "lib");
+      return (path, args = [], depth = 0) => resolve(path, modules, testRoot ? "test" : "lib", args, depth);
     }
-    function targets(paths: RustReference[], external: boolean, latent = false) {
-      const found = new Set<string>(), seen = new Set<string>();
-      function visit(modules: string[], [name, ...tail]: string[], external: boolean, access: RustAccess) {
-        if (!name) return;
+    function terminalTargets(paths: RustReference[][], external: boolean, latent = false) {
+      const resolving = new Set<string>();
+      function intersect(paths: RustReference[][], resolve: (ref: RustReference) => string[]): string[] {
+        const sets = paths.map(terminal => new Set(terminal.flatMap(resolve)));
+        return [...(sets[0] ?? [])].filter(symbol => sets.every(terminal => terminal.has(symbol)));
+      }
+
+      function visit(modules: string[], [name, ...tail]: string[], external: boolean, access: RustAccess): string[] {
+        if (!name) return [];
         const key = JSON.stringify([modules, name, tail, external, access]);
-        if (seen.has(key)) return;
-        seen.add(key);
+        if (resolving.has(key)) return [];
         const path = walk(modules);
-        if (!path) return;
+        if (!path) return [];
+        const found: string[] = [];
         const code = read(path);
         const items = active(code);
         const inReplacement = modulePath.every((part, i) => modules[i] === part);
         function follow(path: string[], tail: string[], access: RustAccess) {
           const qualified = qualify(modules, path);
-          visit(qualified.slice(0, -1), [...qualified.slice(-1), ...tail], false, access);
+          return visit(qualified.slice(0, -1), [...qualified.slice(-1), ...tail], false, access);
         }
-        for (const item of items) {
-          if (external && !item.public) continue;
-          if (item.kind === "use") {
-            const end = code.indexOf(";", item.index);
-            for (const imported of rustImports(code.slice(item.index, end + 1))) {
-              if (imported.alias === name) follow(imported.path, tail, access);
-            }
-          } else if (code[item.index + 1] === name) {
-            if (item.kind === "mod" && tail.length) visit([...modules, name], tail, external, access);
-            if (tail.length || item.kind === "mod") continue;
-            if (item.kind === "fn" && access !== "value") {
-              const fn = rustFunction(code, item.index);
-              if (!fn || !substantiveRust(fn.body) ||
-                  (!latent && access === "call" && item.prefix.includes("async"))) continue;
-              if (inReplacement) found.add(path + ":" + name);
-              else for (const ref of rustReferences(importsOf(code, items), fn.body, fn.args, false, itemEnabled, latent,
-                access === "drive" && !item.prefix.includes("async"), enumResolver(code, modules, itemEnabled))) {
-                follow(ref.path, [], ref.access);
+        resolving.add(key);
+        try {
+          for (const item of items) {
+            if (external && !item.public) continue;
+            if (item.kind === "use") {
+              const end = code.indexOf(";", item.index);
+              for (const imported of rustImports(code.slice(item.index, end + 1))) {
+                if (imported.alias === name) found.push(...follow(imported.path, tail, access));
               }
-            } else if (inReplacement && access !== "call" && ["const", "static"].includes(item.kind)) {
-              found.add(path + ":" + name);
+            } else if (code[item.index + 1] === name) {
+              if (item.kind === "mod" && tail.length) found.push(...visit([...modules, name], tail, external, access));
+              if (tail.length || item.kind === "mod") continue;
+              if (item.kind === "fn" && access !== "value") {
+                const fn = rustFunction(code, item.index);
+                if (!fn || !substantiveRust(fn.body) ||
+                    (!latent && access === "call" && item.prefix.includes("async"))) continue;
+                if (inReplacement) found.push(path + ":" + name);
+                else {
+                  const branches = rustReferences(importsOf(code, items), fn.body, fn.args, false, itemEnabled, latent,
+                    access === "drive" && !item.prefix.includes("async"), enumResolver(code, modules, itemEnabled));
+                  found.push(...intersect(branches, ref => follow(ref.path, [], ref.access)));
+                }
+              } else if (inReplacement && access !== "call" && ["const", "static"].includes(item.kind)) {
+                found.push(path + ":" + name);
+              }
             }
           }
+        } finally {
+          resolving.delete(key);
         }
+        return found;
       }
-      for (const { path, access } of paths) visit([], path, external, access);
-      return found;
+      return new Set(intersect(paths, ref => visit([], ref.path, external, ref.access)));
     }
     const code = read(checkPath);
     const name = selector.split("::").at(-1) ?? "";
@@ -1552,12 +1641,13 @@ export function rustReplacement(s: At18Repository, F: string, entry: string, che
     const testReferences = rustReferences(importsOf(registered.module, active(registered.module, testItemEnabled)),
       registered.fn.body, registered.fn.args, true, testItemEnabled, false, false,
       enumResolver(registered.module, registered.parents, testItemEnabled, code))
-      .filter(ref => ref.path[0] === root).map(ref => ({ path: ref.path.slice(1), access: ref.access }));
-    const drivenWrappers = testReferences.filter(ref => ref.access === "drive" && ref.path.length === 1 &&
+      .map(terminal => terminal.filter(ref => ref.path[0] === root).map(ref => ({ path: ref.path.slice(1), access: ref.access })));
+    const drivenWrappers = testReferences.flat().filter(ref => ref.access === "drive" && ref.path.length === 1 &&
       roots.some(candidate => candidate.path[0] === ref.path[0]));
-    const production = targets([...roots, ...drivenWrappers], true);
-    const moduleOnly = !production.size && !targets(roots, true, true).size;
-    const tested = targets(testReferences, root !== "crate");
+    // 先把每条终态的调用解析到承接导出；封装与直接调用才可在交集里相遇。
+    const production = terminalTargets([[...roots, ...drivenWrappers]], true);
+    const moduleOnly = !production.size && !terminalTargets([roots], true, true).size;
+    const tested = terminalTargets(testReferences, root !== "crate");
     return [...tested].some(symbol => moduleOnly || production.has(symbol));
   } catch { return false; }
 }
