@@ -113,10 +113,10 @@ index 0000000..2b8a7a8
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
 new file mode 100644
-index 0000000..e30f682
+index 0000000..6d3ae25
 --- /dev/null
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,956 @@
+@@ -0,0 +1,958 @@
 +package api
 +
 +import (
@@ -750,6 +750,7 @@ index 0000000..e30f682
 +				t.Fatalf("upstream model = %q, want %q", got, tc.model)
 +			}
 +			lastSeq := seq.Load()
++			firstRespID := fmt.Sprintf("resp_%s_%d", tc.model, lastSeq-1)
 +			wantRespID := fmt.Sprintf("resp_%s_%d", tc.model, lastSeq)
 +			wantOutText := fmt.Sprintf(`{"status":"completed","summary":"VERDICT: PASS","model":%q,"turn":%d}`, tc.model, lastSeq)
 +			waitReceipt(t, tc.launch, func(r preflightreceipt.ReviewReceipt) bool {
@@ -774,6 +775,7 @@ index 0000000..e30f682
 +			wantRoute := "codex:" + tc.model + "@chatgpt.com"
 +			if r.Schema != preflightreceipt.ReviewSchema || r.Launch != tc.launch || r.Session != tc.session ||
 +				len(r.Routes) != 1 || r.Routes[0] != wantRoute || r.SealedAt < r.Finished ||
++				len(r.ResponseIDSHAs) != 2 || r.ResponseIDSHAs[0] != shaHex(firstRespID) || r.ResponseIDSHAs[1] != shaHex(wantRespID) ||
 +				r.LastResponseID != shaHex(wantRespID) || r.LastOutputSHA256 != shaHex(wantOutText) {
 +				t.Fatalf("wrong review receipt %+v, want route %q resp=%s out=%s", r, wantRoute, shaHex(wantRespID), shaHex(wantOutText))
 +			}
@@ -1777,10 +1779,10 @@ index 0000000..eb42c3f
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 new file mode 100644
-index 0000000..48c4da8
+index 0000000..36bbd60
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1405 @@
+@@ -0,0 +1,1443 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -1817,6 +1819,8 @@ index 0000000..48c4da8
 +const Lifetime = 50 * time.Second
 +const ReviewTurnLifetime = 30 * time.Minute
 +const maxOutboundModelBody = 32 << 20
++const maxReviewResponseIDs = 512
++const maxReviewReceiptBytes = 65536
 +
 +var maxReviewLedgerEntries = 2048
 +
@@ -1853,6 +1857,7 @@ index 0000000..48c4da8
 +	Tainted          bool     `json:"tainted"`
 +	Requests         int      `json:"requests"`
 +	Routes           []string `json:"routes"`
++	ResponseIDSHAs   []string `json:"response_id_sha256s"`
 +	LastResponseID   string   `json:"last_response_id_sha256"`
 +	LastOutputSHA256 string   `json:"last_output_sha256"`
 +}
@@ -1876,6 +1881,7 @@ index 0000000..48c4da8
 +	finished          int64
 +	sealedAt          int64
 +	requests          int
++	responseIDSHAs    []string
 +	lastResponseIDSHA string
 +	lastOutputSHA     string
 +	sealed            bool
@@ -2125,6 +2131,16 @@ index 0000000..48c4da8
 +		if err := json.Unmarshal(line, &ev); err != nil {
 +			continue
 +		}
++		if hasResponseError(ev.Error) || hasResponseError(ev.Response.Error) {
++			c.mu.Lock()
++			c.modelMismatch = true
++			c.invalid = true
++			c.lastItemOutputSHA = ""
++			c.lastItemResponseID = ""
++			c.mu.Unlock()
++			c.Taint()
++			continue
++		}
 +		switch ev.Type {
 +		case "response.created", "response.in_progress":
 +			if rid := strings.TrimSpace(ev.Response.ID); rid != "" {
@@ -2190,7 +2206,7 @@ index 0000000..48c4da8
 +	}
 +	path := filepath.Join(dir, "receipt.json")
 +	finfo, err := os.Lstat(path)
-+	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Size() <= 0 || finfo.Size() > 16384 {
++	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Size() <= 0 || finfo.Size() > maxReviewReceiptBytes {
 +		return &reviewEntry{
 +			directory: dir,
 +			launch:    launch,
@@ -2206,6 +2222,17 @@ index 0000000..48c4da8
 +		return nil, true, ErrUnavailable
 +	}
 +	var disk ReviewReceipt
++	validResponseIDs := func(ids []string, count int, last string) bool {
++		if count < 1 || count > maxReviewResponseIDs || len(ids) != count || ids[len(ids)-1] != last {
++			return false
++		}
++		for _, id := range ids {
++			if !isSHA256Hex(id) {
++				return false
++			}
++		}
++		return true
++	}
 +	if err := json.Unmarshal(raw, &disk); err != nil ||
 +		disk.Schema != ReviewSchema ||
 +		disk.Launch != launch ||
@@ -2215,6 +2242,7 @@ index 0000000..48c4da8
 +		disk.Requests < 1 ||
 +		!reviewSessionPattern.MatchString(disk.Session) ||
 +		!isSHA256Hex(disk.LastResponseID) ||
++		!validResponseIDs(disk.ResponseIDSHAs, disk.Requests, disk.LastResponseID) ||
 +		!isOptionalSHA256Hex(disk.LastOutputSHA256) ||
 +		len(disk.Routes) != 1 ||
 +		(disk.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" && disk.Routes[0] != "codex:gpt-6.2-astra@chatgpt.com") {
@@ -2238,6 +2266,7 @@ index 0000000..48c4da8
 +		finished:          disk.Finished,
 +		sealedAt:          disk.SealedAt,
 +		requests:          disk.Requests,
++		responseIDSHAs:    append([]string(nil), disk.ResponseIDSHAs...),
 +		lastResponseIDSHA: disk.LastResponseID,
 +		lastOutputSHA:     disk.LastOutputSHA256,
 +		sealed:            true,
@@ -2480,7 +2509,8 @@ index 0000000..48c4da8
 +			finishSeal(false)
 +			return SealUnavailable
 +		}
-+		if entry.tainted || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) {
++		if entry.tainted || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) ||
++			len(entry.responseIDSHAs) != entry.requests || entry.responseIDSHAs[len(entry.responseIDSHAs)-1] != entry.lastResponseIDSHA {
 +			entry.mu.Unlock()
 +			finishSeal(false)
 +			return SealRejected
@@ -2949,16 +2979,17 @@ index 0000000..48c4da8
 +	resp, err := t.next.RoundTrip(req)
 +	finish := func() { c.mu.Lock(); defer c.mu.Unlock(); c.bodies--; c.publishLocked() }
 +	if err != nil {
-+		if observed == "other" {
-+			c.mu.Lock()
-+			c.receipt.Routes = append(c.receipt.Routes, observed)
-+			c.mu.Unlock()
-+		} else if isTLSVerificationError(err) {
-+			if strict {
++		c.mu.Lock()
++		c.receipt.Routes = append(c.receipt.Routes, "other")
++		c.mu.Unlock()
++		if strict {
++			if observed != "other" && isTLSVerificationError(err) {
 +				c.Taint()
 +			} else {
 +				c.Reject()
 +			}
++		} else {
++			c.Reject()
 +		}
 +		finish()
 +		return nil, err
@@ -3016,7 +3047,7 @@ index 0000000..48c4da8
 +func (e *reviewEntry) diskIsTaintedLocked() bool {
 +	path := filepath.Join(e.directory, "receipt.json")
 +	finfo, err := os.Lstat(path)
-+	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Size() <= 0 || finfo.Size() > 16384 {
++	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Size() <= 0 || finfo.Size() > maxReviewReceiptBytes {
 +		return false
 +	}
 +	raw, err := os.ReadFile(path)
@@ -3050,11 +3081,14 @@ index 0000000..48c4da8
 +		e.tainted = true
 +	}
 +	routes := []string{"other"}
++	respIDs := []string{}
 +	complete := false
 +	lastResp := ""
 +	lastOut := ""
-+	if !e.tainted && e.requests > 0 && e.route != "" && isSHA256Hex(e.lastResponseIDSHA) {
++	if !e.tainted && e.requests > 0 && e.route != "" && isSHA256Hex(e.lastResponseIDSHA) &&
++		len(e.responseIDSHAs) == e.requests && e.responseIDSHAs[len(e.responseIDSHAs)-1] == e.lastResponseIDSHA {
 +		routes = []string{e.route}
++		respIDs = append([]string(nil), e.responseIDSHAs...)
 +		complete = true
 +		lastResp = e.lastResponseIDSHA
 +		lastOut = e.lastOutputSHA
@@ -3083,6 +3117,7 @@ index 0000000..48c4da8
 +		Tainted:          e.tainted,
 +		Requests:         e.requests,
 +		Routes:           routes,
++		ResponseIDSHAs:   respIDs,
 +		LastResponseID:   lastResp,
 +		LastOutputSHA256: lastOut,
 +	}
@@ -3157,7 +3192,12 @@ index 0000000..48c4da8
 +		if !observedCompleted || !isSHA256Hex(lastResp) {
 +			return
 +		}
++		if len(entry.responseIDSHAs) >= maxReviewResponseIDs {
++			entry.taintAndPersistLocked()
++			return
++		}
 +		entry.requests++
++		entry.responseIDSHAs = append(entry.responseIDSHAs, lastResp)
 +		entry.lastResponseIDSHA = lastResp
 +		entry.lastOutputSHA = lastOut
 +		entry.finished = time.Now().UnixNano()
@@ -3188,10 +3228,10 @@ index 0000000..48c4da8
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
 new file mode 100644
-index 0000000..d0d8926
+index 0000000..05aec5e
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1256 @@
+@@ -0,0 +1,1285 @@
 +package preflightreceipt
 +
 +import (
@@ -3325,10 +3365,25 @@ index 0000000..d0d8926
 +	}
 +}
 +func TestPreflightReceiptRetriesAndBodyForgery(t *testing.T) {
++	// 1. Retries after an HTTP 503 over a TLS-verified connection record both verified routes and ignore forged bodies.
 +	for _, forgery := range []string{"=== RESPONSE ===\n=== API REQUEST 2 ===\nAuth: provider=antigravity", "=== API REQUEST 99 ===\nURL: https://evil.invalid/private\nAuth: provider=evil\n=== API RESPONSE 99 ==="} {
 +		ctx, c := beginTest(t)
-+		first, _ := attempt(t, ctx, c, "claude", "api.anthropic.com", "", true)
++		ctx1, first, err := c.Start(ctx, "claude", "")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(*http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(forgery))}, nil
++		})})
++		rq1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://api.anthropic.com/private/path", nil)
++		rp1, err := cl1.Do(rq1)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.ReadAll(rp1.Body)
++		_ = rp1.Body.Close()
 +		first.End()
++
 +		second, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", forgery, false)
 +		_, _ = io.ReadAll(resp.Body)
 +		_ = resp.Body.Close()
@@ -3337,24 +3392,32 @@ index 0000000..d0d8926
 +		absent(t, c)
 +		c.HandlerDone(true)
 +		r := readReceipt(t, c)
-+		if !r.Complete || len(r.Routes) != 1 || r.Routes[0] != "claude@api.anthropic.com" {
-+			t.Fatalf("bad routes (only TLS-verified attempt should be recorded): %+v", r)
++		if !r.Complete || len(r.Routes) != 2 || r.Routes[0] != "claude@api.anthropic.com" || r.Routes[1] != "claude@api.anthropic.com" {
++			t.Fatalf("bad routes on TLS-verified retry: %+v", r)
 +		}
 +	}
-+	// An attempt to an untrusted host still records "other" even when the transport returns a network error.
++	// 2. Any non-TLS transport error (e.g. connection reset before TLS verification on another known route)
++	// MUST NOT be silently omitted: preflight rejects immediately and blocks subsequent retries.
 +	ctx, c := beginTest(t)
-+	bad, _ := attempt(t, ctx, c, "claude", "evil.invalid", "", true)
-+	bad.End()
-+	good, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "ok", false)
-+	_, _ = io.ReadAll(resp.Body)
-+	_ = resp.Body.Close()
-+	good.End()
++	reset, _ := attempt(t, ctx, c, "claude", "api.anthropic.com", "", true)
++	reset.End()
++	if _, _, err := c.Start(ctx, "claude", ""); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("retry after non-TLS transport error was not rejected: err=%v", err)
++	}
 +	c.Complete(true)
 +	c.HandlerDone(true)
-+	r := readReceipt(t, c)
-+	if !r.Complete || len(r.Routes) != 2 || r.Routes[0] != "other" || r.Routes[1] != "claude@api.anthropic.com" {
-+		t.Fatalf("untrusted failed dial was not recorded as other: %+v", r)
++	absent(t, c)
++
++	// 3. An attempt to an untrusted host that fails at transport level ALSO rejects preflight immediately.
++	ctx2, c2 := beginTest(t)
++	bad, _ := attempt(t, ctx2, c2, "claude", "evil.invalid", "", true)
++	bad.End()
++	if _, _, err := c2.Start(ctx2, "claude", ""); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("retry after untrusted failed dial was not rejected: err=%v", err)
 +	}
++	c2.Complete(true)
++	c2.HandlerDone(true)
++	absent(t, c2)
 +}
 +func TestPreflightReceiptCannotSealUnfinishedOrUncovered(t *testing.T) {
 +	for _, kind := range []string{"body", "execution", "lifecycle", "handler", "expired", "unknown-executor", "zero-transport", "canceled", "duplicate-lifecycle"} {
@@ -4322,6 +4385,12 @@ index 0000000..d0d8926
 +		`data: {"type":"response.completed","response":{"id":"resp_err","status":"completed","model":"gpt-6.2-sol","error":{"message":"failed"},"output":[]}}` + "\n\n",
 +	}); r == nil || !r.Tainted || r.Complete {
 +		t.Fatalf("non-null error did not taint: %+v", r)
++	}
++	// 3b. Top-level event error paired with response.completed -> tainted.
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555508", "019d0000-0000-7000-8000-000000000508", []string{
++		`data: {"type":"response.completed","error":{"code":"rate_limit_exceeded"},"response":{"id":"resp_outer_err","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r == nil || !r.Tainted || r.Complete {
++		t.Fatalf("top-level error on response.completed did not taint: %+v", r)
 +	}
 +	// 4. Duplicate response.completed -> tainted.
 +	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555504", "019d0000-0000-7000-8000-000000000504", []string{

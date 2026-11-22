@@ -796,14 +796,18 @@ class ExternalReview:
         hex64 = re.compile(r"[0-9a-f]{64}")
         if (not isinstance(payload, dict)
                 or set(payload) != {"launch", "session", "complete_stable", "sealed", "routes", "requests",
-                                    "last_response_id_sha256", "last_output_sha256"}
+                                    "response_id_sha256s", "last_response_id_sha256", "last_output_sha256"}
                 or payload["launch"] != launch or payload["session"] != session_id
                 or payload["complete_stable"] is not True or payload["sealed"] is not True
-                or type(payload["requests"]) is not int or payload["requests"] < 1
+                or type(payload["requests"]) is not int or not 1 <= payload["requests"] <= 512
                 or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
                 or not isinstance(payload["routes"][0], str) or payload["routes"][0] not in allowed
+                or not isinstance(payload["response_id_sha256s"], list)
+                or len(payload["response_id_sha256s"]) != payload["requests"]
+                or any(not isinstance(item, str) or not hex64.fullmatch(item) for item in payload["response_id_sha256s"])
                 or not isinstance(payload["last_response_id_sha256"], str)
                 or not hex64.fullmatch(payload["last_response_id_sha256"])
+                or payload["response_id_sha256s"][-1] != payload["last_response_id_sha256"]
                 or not isinstance(payload["last_output_sha256"], str)
                 or (payload["last_output_sha256"] != "" and not hex64.fullmatch(payload["last_output_sha256"]))):
             return None
@@ -811,6 +815,7 @@ class ExternalReview:
             "routes": list(payload["routes"]),
             "requests": payload["requests"],
             "sealed": True,
+            "response_id_sha256s": list(payload["response_id_sha256s"]),
             "last_response_id_sha256": payload["last_response_id_sha256"],
             "last_output_sha256": payload["last_output_sha256"],
         }
@@ -868,7 +873,9 @@ class ExternalReview:
                                  "session.jsonl 缺少可核验的 token_usage_record.response_id，PASS/BLOCK 均不采信")
         expected = f"codex:{outcome.model}@chatgpt.com"
         expected_out_sha = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
-        expected_rid_sha = hashlib.sha256(response_ids[-1].encode("utf-8")).hexdigest()
+        dedup_rids = [rid for i, rid in enumerate(response_ids) if i == 0 or rid != response_ids[i - 1]]
+        expected_rid_shas = [hashlib.sha256(rid.encode("utf-8")).hexdigest() for rid in dedup_rids]
+        expected_rid_sha = expected_rid_shas[-1]
         launch_id = str(launch.get("launch_id", ""))
         session_id = str(outcome.session_id or "")
         try:
@@ -877,13 +884,13 @@ class ExternalReview:
                                  and not os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip())
                 evidence = None
                 if host_only and not self._custom_seal_receipt:
-                    # 宿主目录快速路径复用有界读取器（O_NOFOLLOW|O_NONBLOCK、普通文件、16KiB 与超时保护）：
+                    # 宿主目录快速路径复用有界读取器（O_NOFOLLOW|O_NONBLOCK、普通文件、64KiB 与超时保护）：
                     # 若已为 sealed=true 直接消费，否则再走已认证封存端点。
                     evidence = self._read_session_receipt(
                         outcome.model, launch_id, session_id, since,
                         expected_response_id_sha256=expected_rid_sha,
                         expected_output_sha256=expected_out_sha,
-                        min_requests=len(response_ids),
+                        min_requests=len(expected_rid_shas),
                         budget=0.2,
                     )
                 if evidence is None:
@@ -894,7 +901,7 @@ class ExternalReview:
                             outcome.model, launch_id, session_id, since,
                             expected_response_id_sha256=expected_rid_sha,
                             expected_output_sha256=expected_out_sha,
-                            min_requests=len(response_ids),
+                            min_requests=len(expected_rid_shas),
                         )
             else:
                 if self._custom_seal_receipt and not self.seal_receipt(launch_id, session_id):
@@ -903,15 +910,32 @@ class ExternalReview:
                     evidence = self.session_receipt(outcome.model, launch_id, session_id, since)
         except Exception:
             evidence = None
+        receipt_rids = evidence.get("response_id_sha256s") if isinstance(evidence, dict) else None
+        hex64 = re.compile(r"[0-9a-f]{64}")
+
+        def _ordered_subsequence(needles: list[str], haystack: list[str]) -> bool:
+            it = iter(haystack)
+            return all(any(item == needle for item in it) for needle in needles)
+
+        rids_valid = (
+            isinstance(receipt_rids, list)
+            and isinstance(evidence, dict)
+            and type(evidence.get("requests")) is int
+            and len(receipt_rids) == evidence["requests"]
+            and len(receipt_rids) >= len(expected_rid_shas)
+            and all(isinstance(item, str) and bool(hex64.fullmatch(item)) for item in receipt_rids)
+            and receipt_rids[-1] == expected_rid_sha
+            and _ordered_subsequence(expected_rid_shas, receipt_rids)
+        )
         if (not isinstance(evidence, dict)
                 or evidence.get("sealed", not self._custom_session_receipt) is not True
                 or evidence.get("routes") != [expected]
-                or type(evidence.get("requests")) is not int or evidence["requests"] < len(response_ids)
+                or not rids_valid
                 or evidence.get("last_response_id_sha256") != expected_rid_sha
                 or evidence.get("last_output_sha256") != expected_out_sha):
             return ReviewOutcome(
                 outcome.model, "FAILED", outcome.session_id,
-                f"代理侧正式审阅收据缺失、未封存、已污染、模型不符或未绑定同一最终上游响应（期望 {expected}），PASS/BLOCK 均不采信",
+                f"代理侧正式审阅收据缺失、未封存、已污染、模型不符或各轮上游响应序列不匹配（期望 {expected}），PASS/BLOCK 均不采信",
             )
         return outcome
 

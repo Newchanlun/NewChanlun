@@ -645,13 +645,13 @@ def test_run_review_refuses_when_head_moved(monkeypatch):
 
 
 def test_behind_head_is_caught_up_before_review(lane):
-    """F4：启用合入时，落后的 PR 先追平、再审新 head，不审一个合入前必然被替换的 head。"""
+    """F4：启用合入前分类时，落后的 PR 不重审旧 head（behind-awaiting-update），因 update-branch 缺 expected_base_ref 报 behind-waiting 且不自动写 PR 分支。"""
     github = FakeGitHub(lane)
     github.states[1810] = {"mergeable_state": "behind"}
     sweep, host, _ = make(lane, github=github, auto_merge=True)
     actions = sweep.tick()
-    assert acts(actions) == ["behind-awaiting-update", "update-branch"] and host.spawned == []
-    assert github.calls == [("update", 1810, lane.gateway.pr["head"]["sha"])]
+    assert acts(actions) == ["behind-awaiting-update", "behind-waiting"] and host.spawned == []
+    assert actions[-1]["queue_head"] is True and github.calls == []
 
 
 # ---- 合入 ----
@@ -819,7 +819,7 @@ def test_main_advance_then_catch_up_costs_no_extra_model_calls(lane, env):
     lane.gateway.pr["head"]["sha"] = first               # update 落地前：PR 仍是旧 head，落后
     github.states[1810] = {"mergeable_state": "behind"}
     actions = sweep.tick()
-    assert acts(actions) == ["done", "update-branch"]    # 不重审旧 head；先追平
+    assert acts(actions) == ["done", "behind-waiting"]    # 不重审旧 head；不自动写 PR 分支，等外部追平
     lane.gateway.pr["head"]["sha"] = caught_up
     github.states[1810] = {"mergeable_state": "clean"}
     actions = sweep.tick()
@@ -854,11 +854,13 @@ def _stale_mid_flight(lane, github, **kwargs):
 
 
 def test_stale_mid_flight_behind_pr_is_caught_up_not_deadlocked(lane):
-    """I1：GitHub 上停住的 pending 不再挡追平；本地没有在途审查就追平，追平后的新 head 由下一轮重审。"""
+    """I1：GitHub 上停住的 pending 不再挡队列识别；本地无在途审查时标为队首 behind-waiting 且不自动写 PR 分支。"""
     github = FakeGitHub(lane)
     sweep, host, head = _stale_mid_flight(lane, github, auto_merge=True)
-    assert acts(sweep.tick()) == ["behind-awaiting-update", "update-branch"]
-    assert github.calls == [("update", 1810, head)] and len(host.spawned) == 1
+    actions = sweep.tick()
+    assert acts(actions) == ["behind-awaiting-update", "behind-waiting"]
+    assert actions[-1]["reviewing"] is False and actions[-1]["queue_head"] is True
+    assert github.calls == [] and len(host.spawned) == 1
 
 
 def test_live_local_reviewer_still_blocks_catch_up(lane):
@@ -982,26 +984,27 @@ def updates(github):
 
 
 def test_only_queue_head_is_caught_up(lane):
-    """三个落后的 PR：只追平号码最小的那个；队首追平后在等 CI（不落后）时，后面的仍不追平。"""
+    """三个落后的 PR：仅号码最小的标为 queue_head=True（不自动写分支）；队首在等 CI（不落后）时仍占队首。"""
     github = FakeGitHub(lane)
     _more_pulls(lane, github, [1811, 1812])
-    head = lane.gateway.pr["head"]["sha"]
     for number in (1810, 1811, 1812):
         github.states[number] = {"mergeable_state": "behind"}
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
     actions = sweep.tick()
-    assert updates(github) == [("update", 1810, head)]
-    assert acts(actions, 1811)[-1] == "behind-waiting" and acts(actions, 1812)[-1] == "behind-waiting"
-    github.calls.clear()
+    assert github.calls == []
+    assert next(a for a in actions if a.get("pr") == 1810 and a["action"] == "behind-waiting")["queue_head"] is True
+    assert next(a for a in actions if a.get("pr") == 1811 and a["action"] == "behind-waiting")["queue_head"] is False
+    assert next(a for a in actions if a.get("pr") == 1812 and a["action"] == "behind-waiting")["queue_head"] is False
     github.states[1810] = {"mergeable_state": "blocked"}  # 队首已追平，CI 在跑
     actions = sweep.tick()
-    assert updates(github) == []
+    assert github.calls == []
     assert next(a for a in actions if a.get("pr") == 1810 and a["action"] == "waiting")["queue_head"] is True
+    assert next(a for a in actions if a.get("pr") == 1811 and a["action"] == "behind-waiting")["queue_head"] is False
 
 
 @pytest.mark.parametrize("stuck", ["review-failure", "dirty", "ci-failure", "needs-operator"])
 def test_stuck_pr_does_not_hold_the_queue_head(lane, stuck):
-    """队首卡住（独审已判失败、冲突、不落后却 CI 失败、审查要操作员处理）时，下一个落后的 PR 接替队首被追平。"""
+    """队首卡住（独审已判失败、冲突、不落后却 CI 失败、审查要操作员处理）时，下一个落后的 PR 接替 queue_head=True。"""
     github = FakeGitHub(lane)
     _more_pulls(lane, github, [1811])
     head = lane.gateway.pr["head"]["sha"]
@@ -1015,8 +1018,9 @@ def test_stuck_pr_does_not_hold_the_queue_head(lane, stuck):
     if stuck == "needs-operator":
         sweep.decide = lambda pr, *rest: (("needs-operator", None) if pr["number"] == 1810
                                           else ("behind-awaiting-update", None))
-    sweep.tick()
-    assert updates(github) == [("update", 1811, f"{1811:040d}")]
+    actions = sweep.tick()
+    assert github.calls == []
+    assert next(a for a in actions if a.get("pr") == 1811 and a["action"] == "behind-waiting")["queue_head"] is True
 
 
 def test_never_merges_without_both_required_checks_green_on_exact_head(lane):
@@ -1480,10 +1484,9 @@ def test_gh_calls_have_a_timeout_and_a_timeout_is_an_unreadable_source(monkeypat
         raise subprocess.TimeoutExpired(command, kwargs["timeout"])
     monkeypatch.setattr(module.subprocess, "run", run)
     cli = module.GhCli("Newchanlun/NewChanlun", timeout=7)
-    assert not hasattr(cli, "merge")
+    assert not hasattr(cli, "merge") and not hasattr(cli, "update_branch")
     for call in (cli.open_pulls, lambda: cli.pr(5), lambda: cli.checks("a" * 40, BINDINGS), cli.required_checks,
-                 lambda: cli.pr_files(5), lambda: cli.update_branch(5, "a" * 40),
-                 lambda: cli.disable_auto_merge(5)):
+                 lambda: cli.pr_files(5), lambda: cli.disable_auto_merge(5)):
         with pytest.raises(SourceUnreadable) as caught:
             call()
         assert "timed out after 7s" in str(caught.value) and caught.value.source.startswith("github")
@@ -1521,7 +1524,8 @@ def test_green_but_unmergeable_pr_does_not_hold_the_queue_head(lane):
     green(github, lane.gateway.pr["head"]["sha"])
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
     actions = sweep.tick()
-    assert updates(github) == [("update", 1811, f"{1811:040d}")]
+    assert github.calls == []
+    assert next(a for a in actions if a.get("pr") == 1811 and a["action"] == "behind-waiting")["queue_head"] is True
     assert next(a for a in actions if a.get("pr") == 1810 and a["action"] == "waiting")["queue_head"] is False
 
 
@@ -1602,25 +1606,27 @@ def test_withdraw_timeout_stops_the_fail_closed_sweep(lane):
 
 
 def test_actions_done_before_a_timeout_are_still_logged(lane, capsys):
-    """opus 中：本轮先完成了一个 PR 的写操作、后一个写超时，已做那条照样写日志，写超时那条记 write-unknown。"""
+    """opus 中：本轮先完成了一个 PR 的撤原生 auto-merge、后一个写超时，已做那条照样写日志，写超时那条记 write-unknown。"""
     github = FakeGitHub(lane)
     _more_pulls(lane, github, [1805])
-    github.states[1805] = {"mergeable_state": "behind"}
+    github.states[1805] = {"auto_merge": True}
+    github.files[1805] = [{"filename": "src/ordinary.py", "status": "modified", "changes": 1}]
     _sensitive_armed(lane, github)
-    updated = []
-    orig_update = github.update_branch
+    disabled = []
+    orig_disable = github.disable_auto_merge
 
-    def record_update(number, head):
-        updated.append(number)
-        orig_update(number, head)
+    def disable_then_hang(number):
+        if number == 1810:
+            _hang()
+        disabled.append(number)
+        orig_disable(number)
 
-    github.update_branch = record_update
-    github.disable_auto_merge = _hang
+    github.disable_auto_merge = disable_then_hang
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
     assert ServeRound(sweep, clock=Clock())() is None
     lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
-    assert updated == [1805]
-    assert any(a.get("pr") == 1805 and a["action"] == "update-branch" for a in lines)
+    assert disabled == [1805]
+    assert any(a.get("pr") == 1805 and a.get("auto_merge_withdrawn") is True for a in lines)
     assert any(a.get("pr") == 1810 and a["action"] == "write-unknown" for a in lines)
     assert lines[-1]["action"] == "round-skipped"
 
@@ -1679,13 +1685,13 @@ def test_head_recheck_read_failure_fails_closed(lane):
 
 
 def test_writes_carry_the_classified_head():
-    """追平带 expected_head_sha：head 已变时由 GitHub 服务端拒绝；GhCli 不暴露无 base_ref 绑定的自动合入写接口。"""
+    """GhCli 不暴露无服务端 expected_base_ref 绑定的 merge 与 update_branch 写分支接口，仅保留收紧性的 disable_auto_merge。"""
     sent = []
     cli = module.GhCli("Newchanlun/NewChanlun")
     cli._gh = lambda *args: sent.append(args) or ""
-    assert not hasattr(cli, "merge")
-    cli.update_branch(5, "b" * 40)
-    assert f"expected_head_sha={'b' * 40}" in sent[0]
+    assert not hasattr(cli, "merge") and not hasattr(cli, "update_branch")
+    cli.disable_auto_merge(5)
+    assert sent == [("pr", "merge", "5", "-R", "Newchanlun/NewChanlun", "--disable-auto")]
 
 
 def test_fetch_failure_is_an_unreadable_source_and_never_reviewed(lane, tmp_path):
@@ -1728,8 +1734,10 @@ def test_repo_allowing_native_auto_merge_blocks_all_merges_and_updates(lane, set
     必须是 false：为 true 或读不到时本轮谁都不合入、不追平，记 native-auto-merge-enabled；撤 auto-merge 照常做。"""
     github = FakeGitHub(lane)
     _more_pulls(lane, github, [1805, 1811])
-    green(github, f"{1805:040d}")                                   # 本可合入
-    github.states[1811] = {"mergeable_state": "behind"}             # 本可追平
+    green(github, f"{1805:040d}", **{"ci-ok": "pending"})            # 普通 PR 挂原生 auto-merge 且 CI pending
+    github.states[1805] = {"auto_merge": True}
+    github.files[1805] = [{"filename": "src/ordinary.py", "status": "modified", "changes": 1}]
+    github.states[1811] = {"mergeable_state": "behind", "auto_merge": True}  # behind 且挂原生 auto-merge
     _sensitive_armed(lane, github)                                  # 1810：须撤 auto-merge
     if setting == "enabled":
         github.allow_auto_merge = lambda: True
@@ -1739,7 +1747,8 @@ def test_repo_allowing_native_auto_merge_blocks_all_merges_and_updates(lane, set
     actions = sweep.tick()
     flagged = next(a for a in actions if a["action"] == "native-auto-merge-enabled")
     assert ("allow_auto_merge=true" in flagged["reason"]) == (setting == "enabled")
-    assert github.calls == [("disable", 1810)]                     # 只撤，不合入、不追平
+    # 无论 gate_ok=False、普通 waiting PR、behind PR 还是敏感 PR，凡挂着原生 auto-merge 一律无条件撤回
+    assert github.calls == [("disable", 1805), ("disable", 1810), ("disable", 1811)]
 
 
 def test_repo_with_native_auto_merge_disabled_merges_normally(lane):
@@ -2205,8 +2214,8 @@ def test_old_base_unpublished_outcome_unblocks_update_branch_and_merge_commit_is
     github.states[1810] = {"mergeable_state": "behind"}
     sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
     actions = sweep.tick()
-    assert acts(actions) == ["behind-awaiting-update", "update-branch"]
-    assert github.calls == [("update", 1810, multi_head)]
+    assert acts(actions) == ["behind-awaiting-update", "behind-waiting"]
+    assert actions[-1]["queue_head"] is True and github.calls == []
 
     # 模拟 update-branch 合并提交 M=merge(multi_head, new_base)：新 base 到 M 无严格中间祖先，审过 PASS 后可正常自动合入
     git(env.source, "checkout", "-q", multi_head)

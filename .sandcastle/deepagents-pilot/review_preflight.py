@@ -209,13 +209,13 @@ def check_mount(args, deadline: Deadline) -> tuple[dict, list[str]]:
                         rm_helper = run_bounded([*dcmd, "rm", "-f", helper], deadline.work_left(), env=denv)
                         helper_removed = rm_helper.returncode == 0
                         docker_called = True
-                        # 与正式审阅容器相同，以宿主 uid:gid 只读挂载已灌入的命名卷
-                        result = run_bounded([*dcmd, "run", "--rm", "--name", container, "--network", "none",
+                        # 与正式审阅容器相同，以宿主 uid:gid 只读挂载已灌入的命名卷；不用 --rm，由 finally 的 docker rm -f 统一清理（防标准 Docker 双删报错）
+                        result = run_bounded([*dcmd, "run", "--name", container, "--network", "none",
                                               "--read-only", "--user", owner, "-v", f"{volume}:/review:ro",
                                               "--entrypoint", "cat", args.image, "/review/nonce"],
                                              deadline.work_left(), env=denv)
                         seen = result.stdout.decode("utf-8", "replace").strip()
-                        # docker 约定：125 是 docker 自身出错（容器可能没跑完）；其余退出码来自容器里的命令，容器已跑完、--rm 已删
+                        # docker 约定：125 是 docker 自身出错（容器可能没跑完）；其余退出码来自容器里的命令，随后由 finally 的 docker rm -f 删除
                         container_done = result.returncode >= 0 and result.returncode != 125
                         ok = result.returncode == 0 and seen == nonce
                         detail.update(docker_rc=result.returncode, nonce_match=seen == nonce,
@@ -449,8 +449,9 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline,
     owner = f"{os.getuid()}:{os.getgid()}"
     container_done = False
     try:
+        # 不用 --rm，由 finally 的 docker rm -f 确定性删除，避免标准 Docker 下 --rm 自动清理后二次 rm -f 返回 No such container
         result = run_bounded(
-            [*dcmd, "run", "--rm", "-i", "--name", container, "--read-only", "--user", owner,
+            [*dcmd, "run", "-i", "--name", container, "--read-only", "--user", owner,
              "--entrypoint", "python3", container_image, "-I", "-c", _HTTP_WORKER.read_text()],
             work_left, data=payload, env=denv, deadline=deadline)
         container_done = result.returncode >= 0 and result.returncode != 125

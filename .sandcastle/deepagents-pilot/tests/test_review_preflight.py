@@ -1239,14 +1239,30 @@ if args[0] == "cp":
     for item in src.iterdir():
         shutil.copy2(item, vols / vol / item.name)
     sys.exit(0)
-if args[0] in ("start", "rm"):
+if args[0] == "start":
     sys.exit(0)
+if args[0] == "rm":
+    target = args[-1]
+    marker = vols / f".container-{{target}}"
+    helper_marker = vols / f".helper-{{target}}"
+    if marker.exists():
+        marker.unlink()
+        sys.exit(0)
+    if helper_marker.exists():
+        helper_marker.unlink()
+        sys.exit(0)
+    print(f"Error response from daemon: No such container: {{target}}", file=sys.stderr)
+    sys.exit(1)
 assert args[0] == "run"
+name = args[args.index("--name") + 1]
+if "--rm" not in args:
+    (vols / f".container-{{name}}").write_text("exited")
 if "--entrypoint" in args and args[args.index("--entrypoint") + 1] == "python3":
-    assert "-i" in args and "--read-only" in args and {admitted!r} in args
+    assert "-i" in args and "--read-only" in args and "--rm" not in args and {admitted!r} in args
     code = args[args.index("-c") + 1]
     proc = subprocess.run([{sys.executable!r}, "-I", "-c", code], stdin=sys.stdin)
     sys.exit(proc.returncode)
+assert "--rm" not in args
 vol = args[args.index("-v") + 1].split(":", 1)[0]
 print((vols / vol / args[-1].removeprefix("/review/")).read_text(), end="")
 """)
@@ -1796,6 +1812,7 @@ def test_generated_go_receipts_consumed_by_python():
         since = payload["started_ns"] / 1e9
         got = preflight._log_module.review_from_receipt(root / name, launch, session, since, 0.5)
         assert got is not None and got["routes"] == routes and got["requests"] == min_reqs and got["sealed"] is True
+        assert len(got["response_id_sha256s"]) == min_reqs and got["response_id_sha256s"][-1] == got["last_response_id_sha256"]
         assert len(got["last_response_id_sha256"]) == 64 and len(got["last_output_sha256"]) == 64
         # 跨模型或换 session 消费必须失败闭合
         assert preflight._log_module.review_from_receipt(
@@ -1818,6 +1835,7 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
         "schema": "cliproxy-review-v1", "launch": launch, "session": session,
         "started_ns": now - 1_000_000, "finished_ns": now, "sealed_at_ns": now, "complete": True, "sealed": True,
         "tainted": False, "requests": 3, "routes": [f"codex:{SOL}@chatgpt.com"],
+        "response_id_sha256s": ["1" * 64, "2" * 64, "a" * 64],
         "last_response_id_sha256": "a" * 64, "last_output_sha256": "b" * 64,
     }
     directory = tmp_path / launch
@@ -1828,6 +1846,7 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
         "routes": [(f"codex:{SOL}", "chatgpt.com")],
         "requests": 3,
         "sealed": True,
+        "response_id_sha256s": ["1" * 64, "2" * 64, "a" * 64],
         "last_response_id_sha256": "a" * 64,
         "last_output_sha256": "b" * 64,
     }
@@ -1844,6 +1863,9 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
         {"schema": "cliproxy-preflight-v1"}, {"session": "019d0000-0000-7000-8000-000000000ab2"},
         {"routes": ["codex@chatgpt.com"]}, {"routes": [f"codex:{SOL}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"]},
         {"routes": ["other"]}, {"extra": 1}, {"finished_ns": now + 10**12},
+        {"response_id_sha256s": ["1" * 64, "a" * 64]},
+        {"response_id_sha256s": ["1" * 64, "2" * 64, "c" * 64]},
+        {"response_id_sha256s": ["1" * 64, "not-hex", "a" * 64]},
         {"last_output_sha256": "not-sha256"}, {"last_response_id_sha256": "ZZZZ"}, {"last_response_id_sha256": ""},
     ):
         path.write_text(json.dumps({**base, **bad}))
@@ -1864,10 +1886,12 @@ def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediatel
         "schema": "cliproxy-review-v1", "launch": launch, "session": session,
         "started_ns": now - 2_000_000, "finished_ns": now - 1_000_000, "sealed_at_ns": 0, "complete": True, "sealed": False,
         "tainted": False, "requests": 1, "routes": [f"codex:{SOL}@chatgpt.com"],
+        "response_id_sha256s": ["1" * 64],
         "last_response_id_sha256": "1" * 64, "last_output_sha256": "",
     }
     turn2 = {
         **turn1, "finished_ns": now, "sealed_at_ns": now, "requests": 2, "sealed": True,
+        "response_id_sha256s": ["1" * 64, "2" * 64],
         "last_response_id_sha256": "2" * 64, "last_output_sha256": "3" * 64,
     }
     directory = tmp_path / launch
@@ -1896,12 +1920,13 @@ def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediatel
         "routes": [(f"codex:{SOL}", "chatgpt.com")],
         "requests": 2,
         "sealed": True,
+        "response_id_sha256s": ["1" * 64, "2" * 64],
         "last_response_id_sha256": "2" * 64,
         "last_output_sha256": "3" * 64,
     }
 
     path.write_text(json.dumps({**turn2, "complete": False, "sealed": False, "tainted": True, "routes": ["other"],
-                                "last_response_id_sha256": "", "last_output_sha256": ""}))
+                                "response_id_sha256s": [], "last_response_id_sha256": "", "last_output_sha256": ""}))
     started = time.monotonic()
     assert preflight._log_module.review_from_receipt(
         tmp_path, launch, session, time.time() - 5, 3.0,

@@ -114,8 +114,11 @@ def _make_fake_session_receipt(state_root: Path):
                             if isinstance(rid, str) and rid:
                                 rids.append(rid)
                     if rids:
-                        resp_sha = hashlib.sha256(rids[-1].encode("utf-8")).hexdigest()
-                        reqs = max(reqs, len(rids))
+                        rid_shas = [hashlib.sha256(r.encode("utf-8")).hexdigest() for r in rids]
+                        resp_sha = rid_shas[-1]
+                        reqs = len(rid_shas)
+                    else:
+                        rid_shas = [resp_sha]
                     break
             except (OSError, ValueError):
                 continue
@@ -123,6 +126,7 @@ def _make_fake_session_receipt(state_root: Path):
             "routes": [f"codex:{model}@chatgpt.com"],
             "requests": reqs,
             "sealed": True,
+            "response_id_sha256s": rid_shas if rids else [resp_sha] * reqs,
             "last_response_id_sha256": resp_sha,
             "last_output_sha256": out_sha,
         }
@@ -2672,6 +2676,10 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
             kept.append(json.dumps({"type": "token_usage_record", "payload": {"response_id": rid}}))
         (folder / "session.jsonl").write_text("\n".join(kept) + "\n")
         resp_sha = hashlib.sha256(b"resp_earlier").hexdigest() if bad_resp_id else hashlib.sha256(rid.encode("utf-8")).hexdigest()
+        first_rid_sha = hashlib.sha256(f"resp_{launch['model']}_1".encode("utf-8")).hexdigest()
+        rid_list = ([first_rid_sha, *[hashlib.sha256(f"resp_extra_{i}".encode("utf-8")).hexdigest()
+                                      for i in range(max(0, requests_count - 2))], resp_sha]
+                    if requests_count >= 2 else [resp_sha])
         payload = {
             "schema": "cliproxy-review-v1",
             "launch": launch_hdr,
@@ -2684,6 +2692,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
             "tainted": tainted,
             "requests": requests_count,
             "routes": ["other"] if tainted else [route],
+            "response_id_sha256s": [] if tainted else rid_list[:requests_count],
             "last_response_id_sha256": "" if tainted else resp_sha,
             "last_output_sha256": "" if tainted else out_sha,
         }
@@ -2766,6 +2775,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
                 cmd, 0,
                 json.dumps({"launch": f"review-{lid}", "session": sid, "complete_stable": True, "sealed": True,
                             "routes": [f"codex:{MODELS[0]}@chatgpt.com"], "requests": 3,
+                            "response_id_sha256s": ["1" * 64, "2" * 64, rid_hash],
                             "last_response_id_sha256": rid_hash, "last_output_sha256": out_hash}).encode(),
                 b"",
             )
@@ -2774,6 +2784,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     monkeypatch.setattr(module.subprocess, "run", spy_container_run)
     got = strict._read_session_receipt(MODELS[0], lid, sid, time.time() - 1)
     assert got == {"routes": [f"codex:{MODELS[0]}@chatgpt.com"], "requests": 3, "sealed": True,
+                   "response_id_sha256s": ["1" * 64, "2" * 64, rid_hash],
                    "last_response_id_sha256": rid_hash, "last_output_sha256": out_hash} and len(captured) == 1
     assert "--review-receipt" in captured[0]["cmd"]
     assert not any(k in captured[0]["env"] for k in ("DOCKER_HOST", "DOCKER_CONFIG", "CLIPROXY_LOCAL_KEY", "DOCKER_CONTEXT"))
@@ -2927,6 +2938,7 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
     rec_dir = receipt_root / launch_hdr
     rec_dir.mkdir(parents=True, mode=0o700)
     now = time.time_ns()
+    fixture_rid_shas = [hashlib.sha256(r.encode("utf-8")).hexdigest() for r in fixture["response_ids"]]
     (rec_dir / "receipt.json").write_text(json.dumps({
         "schema": "cliproxy-review-v1",
         "launch": launch_hdr,
@@ -2937,9 +2949,10 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
         "complete": True,
         "sealed": True,
         "tainted": False,
-        "requests": len(fixture["response_ids"]),
+        "requests": len(fixture_rid_shas),
         "routes": [f"codex:{fixture['model']}@chatgpt.com"],
-        "last_response_id_sha256": hashlib.sha256(fixture["response_ids"][-1].encode("utf-8")).hexdigest(),
+        "response_id_sha256s": fixture_rid_shas,
+        "last_response_id_sha256": fixture_rid_shas[-1],
         "last_output_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
     }))
     monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(receipt_root))
@@ -2950,6 +2963,24 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
     assert outcome.verdict == "PASS"
     verified = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
     assert verified.verdict == "PASS"
+
+    # 中间轮 response_id 被替换（即使总轮数与末条 response_id/终答摘要完全一致），必须判 FAILED
+    if len(fixture_rid_shas) >= 2:
+        tampered = json.loads((rec_dir / "receipt.json").read_text())
+        tampered["response_id_sha256s"] = ["f" * 64, *fixture_rid_shas[1:]]
+        (rec_dir / "receipt.json").write_text(json.dumps(tampered))
+        mid_rejected = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
+        assert mid_rejected.verdict == "FAILED"
+        # 允许代理侧多记一次重试轮（session.jsonl 仍为严格有序子序列且末条一致）
+        with_retry = json.loads((rec_dir / "receipt.json").read_text())
+        with_retry["response_id_sha256s"] = ["e" * 64, *fixture_rid_shas]
+        with_retry["requests"] = len(with_retry["response_id_sha256s"])
+        (rec_dir / "receipt.json").write_text(json.dumps(with_retry))
+        assert strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome).verdict == "PASS"
+        # 恢复原始收据继续后续用例
+        with_retry["response_id_sha256s"] = fixture_rid_shas
+        with_retry["requests"] = len(fixture_rid_shas)
+        (rec_dir / "receipt.json").write_text(json.dumps(with_retry))
 
     # 未封存收据（sealed=False，即使所有摘要匹配）也必须拒绝，绝不采信
     unsealed_payload = json.loads((rec_dir / "receipt.json").read_text())

@@ -29,6 +29,8 @@ RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astr
 REVIEW_RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astra@chatgpt.com"})
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 MAX_REVIEW_DURATION_NS = 7_200_000_000_000
+MAX_REVIEW_RECEIPT_BYTES = 65536
+MAX_REVIEW_RESPONSE_IDS = 512
 
 
 def _unique_object(pairs):
@@ -110,9 +112,9 @@ def review_from_receipt(
                 os.close(directory)
             try:
                 info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 16384:
+                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_REVIEW_RECEIPT_BYTES:
                     return None
-                raw = os.read(fd, 16385)
+                raw = os.read(fd, MAX_REVIEW_RECEIPT_BYTES + 1)
             finally:
                 os.close(fd)
             payload = json.loads(raw, object_pairs_hook=_unique_object)
@@ -120,12 +122,12 @@ def review_from_receipt(
             if (not isinstance(payload, dict)
                     or set(payload) != {"schema", "launch", "session", "started_ns", "finished_ns", "sealed_at_ns",
                                         "complete", "sealed", "tainted", "requests", "routes",
-                                        "last_response_id_sha256", "last_output_sha256"}
+                                        "response_id_sha256s", "last_response_id_sha256", "last_output_sha256"}
                     or payload["schema"] != REVIEW_SCHEMA or payload["launch"] != launch
                     or payload["session"] != session
                     or payload["complete"] is not True or payload["tainted"] is not False
                     or type(payload["sealed"]) is not bool
-                    or type(payload["requests"]) is not int or payload["requests"] < 1
+                    or type(payload["requests"]) is not int or not 1 <= payload["requests"] <= MAX_REVIEW_RESPONSE_IDS
                     or type(payload["started_ns"]) is not int or type(payload["finished_ns"]) is not int
                     or type(payload["sealed_at_ns"]) is not int
                     or not int((since - 1) * 1e9) <= payload["started_ns"] <= payload["finished_ns"] <= now_ns
@@ -133,8 +135,13 @@ def review_from_receipt(
                     or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
                     or not isinstance(payload["routes"][0], str)
                     or payload["routes"][0] not in REVIEW_RECEIPT_ROUTES
+                    or not isinstance(payload["response_id_sha256s"], list)
+                    or len(payload["response_id_sha256s"]) != payload["requests"]
+                    or any(not isinstance(item, str) or not SHA256_HEX.fullmatch(item)
+                           for item in payload["response_id_sha256s"])
                     or not isinstance(payload["last_response_id_sha256"], str)
                     or not SHA256_HEX.fullmatch(payload["last_response_id_sha256"])
+                    or payload["response_id_sha256s"][-1] != payload["last_response_id_sha256"]
                     or not isinstance(payload["last_output_sha256"], str)
                     or (payload["last_output_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_output_sha256"]))):
                 return None
@@ -151,6 +158,7 @@ def review_from_receipt(
                 "routes": [tuple(payload["routes"][0].split("@"))],
                 "requests": payload["requests"],
                 "sealed": True,
+                "response_id_sha256s": list(payload["response_id_sha256s"]),
                 "last_response_id_sha256": payload["last_response_id_sha256"],
                 "last_output_sha256": payload["last_output_sha256"],
             }
@@ -200,6 +208,7 @@ def main():
             "sealed": bool(info is not None and info.get("sealed") is True),
             "routes": [known.get(route, "other") for route in (info["routes"] if info else [])],
             "requests": info["requests"] if info else 0,
+            "response_id_sha256s": info["response_id_sha256s"] if info else [],
             "last_response_id_sha256": info["last_response_id_sha256"] if info else "",
             "last_output_sha256": info["last_output_sha256"] if info else "",
         }), flush=True)
