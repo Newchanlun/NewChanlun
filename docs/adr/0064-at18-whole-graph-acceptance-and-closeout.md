@@ -2,7 +2,7 @@
 
 > 正本：本文件是 #1323 AT-18 六项 Destination 逐项核验、TB-01..11 关票门、旧关联票去向与整图报告的正本。
 > 最后裁定：以 PR #2065 合入 head 的正式门 `deepagents/review` 双审 PASS 为准（#1551，P 类，依 #1909 代理独审裁定，ADR 0041:41）
-> 受影响代码清单：本 ADR 不直接改产品代码；#2131 负责登记册、lint、运行器和 workflow，#2132 负责 TB-01 绑定及闸前复审，#1391/#1403 负责生成与独立总验，#1366/#1418 保留 TB-07/AT-14 合同。
+> 受影响代码清单：本 ADR 不直接改产品代码；#2131 负责登记册、lint、运行器和 workflow，#2132 负责 TB-01 绑定、闸前清册和历史复审登记；各缺陷归属票负责补救原件，#1391/#1403 分别生成与独立复算 R10，#1366/#1418 保留 TB-07/AT-14 合同。
 
 ## 一、范围与现状
 
@@ -87,13 +87,14 @@ ADR 0063 的迁移协议合入不等于 #1368 与 #1402 的非空迁移、回退
 
 `at18-input-bundle/1` 顶层 13 键：`{schema_version: "at18-input-bundle/1", content_hash: Sha256Hex, ticket: integer, base: GitCommitSha, head: GitCommitSha, generated_at: UtcTimestamp, spec_ref: ArtifactRef, crosswalk_ref: ArtifactRef, coverage_input_ref: ArtifactRef, registry_ref: ArtifactRef, pregate_review_ref: ArtifactRef, slice_ledger_refs: ArtifactRef[], external_manifests: ManifestRef[]}`。身份取本票 manifest；#1391 票号固定为 1391。规范三件分别为 `.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/` 下 `SPEC.json`、`IMPLEMENTATION-CROSSWALK.json`、`inputs/SPEC-COVERAGE-INPUT.json`；登记册和 PRE 路径见 R03。切片账按 `TB01-EXECUTION-SLICES.json`、`TB02-06-EXECUTION-SLICES.json`、`TB07-11-EXECUTION-SLICES.json`、`TB01-PARENT-CONTRIBUTION.json` 顺序，均在 `.chanlun/review-results/issue1340-publication-20260909/payload/inputs/`。以上全部以 `in_repo`、`commit=head` 读取。缺任一所需文件、非法引用或无合法摘要则没有有效输入包；`external_manifests` 仅列报告引用的上游仓外清单，无重复，按票号与路径排序。
 
-F 上两份登记原件的封闭合同（签名不新增）：
+F 上登记原件的封闭合同（补救原件由 R03/R10 定位，不改三份仓外记录的键集）：
 
 - `at18-registry/1 = {schema_version, crosswalk_sha256: Sha256Hex, adapter_contract_sha256: Sha256Hex, experiment_profile_id: string|null, checks: Check[], bindings: Binding[], pregate: {census_sha256: Sha256Hex, landings: Landing[]}}`；`schema_version` 固定为 `"at18-registry/1"`，骨架的 profile 可 null，正式通过须有有效 P1 profile；`adapter_contract_sha256` 按 R03 绑定 F 上的规范适配器数据合同。R10 清册由 #2132 在 .chanlun/ 下的 `at18` 目录交付，清册入口文件名为 `landing-census.json`；`census_sha256` 须等于 F 上该入口文件字节摘要，入口只含 `schema_version="at18-landing-census/1"`、`p0`、`sources:{role,path,sha256}[]`、`attributions:ScopeAttribution[]` 四键，`p0` 固定为 R09 的 P0。`role` 按 `history,relations,signals,adjudication` 各恰一份；路径均指向 F 的获审原件、逐份核其字节摘要，未知或重复角色失败。实际落地与留存结果从这些原件及 Git 重算，而非以清册自报结果替代。
 - `Check = {check_id:string, group:string, evidence_class:EvidenceClass, profile_id:string|null, runner:"cargo-test"|"node-test"|"pytest"|"command", selector:string, expected_count:integer, key_aware:boolean, source:{path:string,sha256:Sha256Hex}, record:string|null}`。`check_id` 唯一，组、profile 和 ID 使用 ASCII 字母/数字/点/下划线/连字符的非空单词；`none` 保留作空 profile 编码，不得作为实际 profile ID。record 只接受 R07 具名槽；`selector` 是 runner 的受审选择器，不拼成 shell 或从 dispatch 传入。
 - `Binding = {binding_id:string, slice_id:string, basis:{path:string,sha256:Sha256Hex,pointer:string}, keys:{kind:"story"|"family"|"detail",id:string}[], domains:Domain[]}`；`binding_id` 唯一，keys 非空无重复。`Domain = {evidence_class:EvidenceClass,profile_id:string|null,result:"VERIFIED"|"PRESERVED_BOUNDARY"|"BOUNDED_DEFERRED",deferred_gate:string|null,checks:string[]}`；checks 无重复，检查和域必须有实际引用关系；专用或历史 cure 检查可由 R07/R11 引用。
 - `Landing = {ticket:integer,commits:GitCommitSha[],attribution_scopes:LandingScope[],cure_checks:{commit:GitCommitSha,run_id:integer|null,kind:"test"|"step",target:string,check_id:string}[]}`。`LandingScope` 仅为 `TB-01..TB-10` 或 `GRAPH`；`attribution_scopes` 非空、按 ASCII 升序去重，`GRAPH` 不与 TB 混用。清册 `ScopeAttribution = {ticket:integer,attribution_scopes:LandingScope[],sources:string[]}`，只登记非原生归属（可为已有原生 TB 增补其他 TB）；按票号唯一升序，`sources` 为证明每项归属的非空出处定位串集合，按 UTF-8 字节升序去重，核查时不得从说明文字推断作用域。生成及核验按 R10。测试类型 cure 锁须用 selector 唯一命中所指具名测试（允许引擎完整路径，末段同名且唯一），实跑 1 次；步骤类型 cure 按 R11 定位失败步骤并复跑同一步骤、同一失败条件；警告或拒绝不算。R11 中同票同提交的具名锁不可删。
 - `at18-pregate-review/1 = {schema_version:"at18-pregate-review/1",owner_ticket:integer,rows:{path:string,blob:GitCommitSha,mode:"100644"|"100755"|"120000",verdict:"PASS"|"BLOCK"}[]}`。path 是 Git 仓内相对路径；blob 字段用 Git SHA-1 的格式，语义为 blob 对象，不是提交。
+- `at18-pregate-remediation/1` 顶层恰为 `{schema_version:"at18-pregate-remediation/1",owner_ticket:integer,rows:RemediationRow[]}`，`owner_ticket` 固定为 2132（登记责任，不替代实际缺陷归属）。`RemediationRow` 恰为 `{path:string,p0_blob:GitCommitSha,p0_mode:BlobMode,f_blob:GitCommitSha,f_mode:BlobMode,remediation_commits:GitCommitSha[],remediation_ticket:integer,verdict:"REMEDIATED",defect_summary:string,verification_basis:RemediationBasis[]}`；`BlobMode = "100644"|"100755"|"120000"`，两个 blob 字段只借用 Git SHA-1 格式，语义为 blob 对象。行按 `path` 的 UTF-8 字节序唯一升序；路径须为能逐字节匹配 Git 的规范仓内相对路径（无空段、`.`、`..`、NUL）。`remediation_commits` 非空、按第一父链从旧到新、无重复；`remediation_ticket` 为本仓实际承接该缺陷的正整数票号。原阻断缺陷摘要 `defect_summary` 须为含非空白内容的字符串。复核依据 `verification_basis` 非空，每项恰为 `{path:string,blob:GitCommitSha,line_start:integer,line_end:integer}`，按 `(path,blob,line_start,line_end)` 唯一升序（字符串按 UTF-8 字节，行号按数值）；路径规则同上，`blob` 必须等于该路径在 F 上的普通文件 Git blob，行号从 1 起，首尾均含且须在该 UTF-8 文本的实际行范围内（LF 分行，末尾 LF 不增加空行）。禁止引用补救原件自身、报告或回执作为复核依据；摘要和依据中的文字只供核对原缺陷与验证范围，不进入机器诊断。
 
 工作流与历史观测类型：`WorkflowRun = {workflow:string,run_id:integer|null,run_attempt:integer|null}`；`AcceptanceJob = {workflow:string,run_id:integer,run_attempt:integer,head_sha:GitCommitSha,job:string,conclusion:CiConclusion|null}`；`HistoricalDeviation = {ticket:integer,commit:GitCommitSha,workflow:string,run_id:integer|null,observed:CiConclusion|"NO_RUN"|"INCOMPLETE"|"UNKNOWN"}`。工作流用仓内路径；服务端结论转大写，已识别为尚未完成的历史运行记 INCOMPLETE，未知结论记 UNKNOWN（同时报来源失败），不得翻成 PASS。当前轮未知结论在对应作业记录填 null 并失败。正整数用于所有票、run、attempt、测试数与 PR/status id。
 
@@ -133,9 +134,11 @@ TB-11（#1369）、SPEC #1340 与 #1323 的关票须在 #1391 已生成 `overall
 
 ### R03　绑定必须覆盖出处
 
-承接 #2131 的登记册与 #2132 的闸前复审均读 F：以仓根 .chanlun/ 下的 `at18` 子目录为父目录，文件名分别为 `registry.json` 和 `pregate-review.json`；四份切片账路径见第五节。登记册 `crosswalk_sha256` 与 F 的实际字节相等。按键求必需 basis 集：
+承接 #2131 的登记册与 #2132 的闸前复审均读 F：以仓根 .chanlun/ 下的 `at18` 子目录为父目录，文件名分别为 `registry.json` 和 `pregate-review.json`；四份切片账路径见第五节。登记册 `crosswalk_sha256` 与 F 的实际字节相等。补救原件也从同一目录读取，固定文件名 `pregate-remediation.json`，只认 F 树普通非空 blob，按第五节严格 JSON、JCS 与封闭合同校验；是否必需、R09 锚及逐行事实由 R10 裁定。输入包已有的 `head=F` 唯一绑定该路径与字节，不另加引用键，不借 `registry_ref` 或 `pregate_review_ref` 表示补救。R10 确定该原件必需但无可读、形状合法的输入时，不生成输入包；原件可读、形状合法而 R10 判定失败时，仍按第五节记录失败。
 
 #2131 在同一仓根目录 `.chanlun/` 下的 `at18` 子目录交付唯一 F 版规范适配器数据合同，文件名 `adapter-contract.json`，`schema_version="at18-adapter-contract/1"`。从 F 读该普通非空 Git blob，以原始字节重算 SHA-256，必须等于同一 F 的登记册 `adapter_contract_sha256`；输入包既有 `registry_ref` 绑定登记册全字节，因而传递绑定适配器，无第二份适配器引用。合同只提供 R07/R13 消费的固定来源角色、字段身份、RFC 6901 提取指针或固定文书/票面定位和预期类型；一个字段只有一条取值规则，同角色的多个合法原件按第八节取全量。两端先独立验文件、封闭版本合同及摘要，再按 R09 核登记册和本文件在 F 第一父链上各自最近一次引入或改变该路径条目的提交（从 F 向 P0 比较相邻提交的路径 mode/blob；两者都须在 G0..F）；无锚、非普通文件、缺失、坏合同或摘要漂移记 `REGISTRY_INVALID`，锚的集成门不通过另记 `REVIEW_FINAL_PRODUCT`。任一失败不消费该合同、不生成有效输入包，不从工作区、旧 F、报告或其他适配器补值。
+
+按键求必需 basis 集：
 
 1. 三份切片账的 `/units/<i>`，若 `parent_tb=Key.slice_id` 且按 kind 在 `story_ids|family_entry_ids|detailed_acceptance_ids` 命中，**所有**命中各需一个绑定。
 2. 无命中时，TB-01 family/detail 若在贡献档 `/rows/<i>` 中按 `family_entry_id|parent_detailed_acceptance_ids` 命中，取所有匹配行；否则取 crosswalk 中该键的唯一展开原节点。贡献档仅是分工出处。coverage input 用于规范语义的指针解读（含 OE42），不能替代上述 basis。
@@ -194,13 +197,41 @@ G0 = PR #1915 的落地提交 `bd54d4b28ec4f83d596837f84f1f861dd085124c`（含 G
 
 清册须归档（1）遍历的完整 P0 第一父链；（2）原生范围、源码与 GitHub 关联出处；（3）逐一处置命中的候选或交付声明，及对范围内没有归属标记的新增/替换路径与未分配用途的交付扫尾结果；（4）全量 `(ticket,M)` 与每个 M 的原始第一父差异。结构化关联优先采用 GitHub 实际合并记录与明确指向交付物的 Git/票面原件；非结构化命中由 #2132 在获审清册逐条给出处及纳入/排除裁决。#2132 的正式独审须逐 TB 对已落主线的成果对账，交叉检查 PR 与票面原件，并核无归属标记的历史改动；名字、目录、搜索结果或旧表都不能证明完备。图外票的正式承接用对应 TB／图的实际义务归并，独立列来源票；不把图外整票改成阻塞边。发现新出处或歧义先记 `PREGATE_LANDINGS`；由 #2132 在正式合入门补齐清册及复审，不得由调用方覆盖。每端自行从固定来源原件、P0 与 F 核销清册覆盖及重算差异；只给一列 SHA 或 PRE 打满 PASS 不够。#1493 缺已裁的改挂也记 `PREGATE_LANDINGS`。
 
-每端先独立重算实际落地票／提交全集，再逐来源票生成 `attribution_scopes`：从票自身沿清册已钉住的原生父链取第一个 `#1359..#1368`（含汇总票本身），按公式 `#1359 → TB-01, …, #1368 → TB-10` 得原生 scope；#1493 的改挂必须按上段核实。将原生 scope 与清册 `attributions` 中该票的已裁非原生 scope 取并集；无原生 TB 必须恰有一条显式映射，只有有据可查的图级/联合义务或仍不可分切的图直属产品可裁为 `["GRAPH"]`，不是漏映射的默认值。清册行不得给原生 TB 票填 `GRAPH` 或重列其原生 scope。多 TB 是已裁的多个 TB scope，不折叠为 GRAPH。由 #2132 非作者正式独审逐项核现有产品的归属及出处；不得从代码目录、关键词、共享提交、关联声明的自由文本或当前票态推导 scope。映射缺失、多余、重复、超域、原生父链矛盾/循环或出处不成立，均记 `PREGATE_LANDINGS`；无法核实归属的票不进 Destination 投影，不删除其 R10 落地或留存路径。在同一已核原件上，任何状态翻转都不得改变票／提交关系、scope 或 PRE 路径。
+每端先独立重算实际落地票／提交全集，再逐来源票生成 `attribution_scopes`：从票自身沿清册已钉住的原生父链取第一个 `#1359..#1368`（含汇总票本身）；#1493 的改挂必须按上段核实。原生 scope 只查此表，不按票号连续推导：
 
-对每一唯一 M 取 `git diff --no-renames --name-only -z` 的第一父差异并取并集；以 Git 路径字节作键，不按目录或后缀排除。与 P0 和 F 的叶路径集相交得到 PRE；P0 的 `(path,mode,blob)` 逐项核对，F 的对象与 G0..F 对该路径的第一父变更只作来源分类：未改仍验 P0，改过也验 P0 且所有相关闸后集成另过 R09，已删除则不进入 PRE（仍保留历史差异）。非 blob 留红；符号链接验链接自身的 blob。注册的 `pregate.landings` 对齐重算的票／提交全集与逐票 `attribution_scopes`（scope 错配记 `PREGATE_LANDINGS`）；PRE 的路径集必须与重算结果全等、无重复、逐条 PASS。清册、登记、PRE 在 F 第一父链最近新增或修改的提交均须通过 R09；`owner_ticket=2132` 且 #2132 为 `CLOSED/COMPLETED`。缺项或不合记 `PREGATE_REVIEW`；#2132 的关票验收与登记 PR 的正式合入门担保非作者复审身份。F 删除或新增需要核对的路径时先正式更正登记再取验收 F。
+| 汇总票 | 原生 scope |
+|---|---|
+| #1359 | TB-01 |
+| #1360 | TB-02 |
+| #1361 | TB-03 |
+| #1362 | TB-04 |
+| #1363 | TB-05 |
+| #1364 | TB-06 |
+| #1366 | TB-07 |
+| #1367 | TB-08 |
+| #1365 | TB-09 |
+| #1368 | TB-10 |
+
+将原生 scope 与清册 `attributions` 中该票的已裁非原生 scope 取并集；无原生 TB 必须恰有一条显式映射，只有有据可查的图级/联合义务或仍不可分切的图直属产品可裁为 `["GRAPH"]`，不是漏映射的默认值。清册行不得给原生 TB 票填 `GRAPH` 或重列其原生 scope。多 TB 是已裁的多个 TB scope，不折叠为 GRAPH。由 #2132 非作者正式独审逐项核现有产品的归属及出处；不得从代码目录、关键词、共享提交、关联声明的自由文本或当前票态推导 scope。映射缺失、多余、重复、超域、原生父链矛盾/循环或出处不成立，均记 `PREGATE_LANDINGS`；无法核实归属的票不进 Destination 投影，不删除其 R10 落地或留存路径。在同一已核原件上，任何状态翻转都不得改变票／提交关系、scope 或 PRE 路径。
+
+对每一唯一 M 取 `git diff --no-renames --name-only -z` 的第一父差异并取并集；以 Git 路径字节作键，不按目录或后缀排除。与 P0 和 F 的叶路径集相交得到 PRE。P0 或 F 的非 blob/非法 mode 留红；符号链接只核链接自身的 blob，不跟随目标。已删除路径不进入 PRE，差异仍保留在清册及 R11。注册的 `pregate.landings` 对齐重算的票／提交全集与逐票 `attribution_scopes`（scope 错配记 `PREGATE_LANDINGS`）。清册、登记与两类复审原件（补救原件在 F 存在时）各自在 F 第一父链最近一次新增或修改的提交均须通过 R09；`owner_ticket=2132` 且 #2132 为 `CLOSED/COMPLETED`。缺项或不合记 `PREGATE_REVIEW`。
+
+**历史裁定只验 P0，不随 F 重判。** F 上的 `pregate-review.json` 必须与重算 PRE 路径集一一对应，无缺项、多余或重复；`(path,mode,blob)` 逐项等于 P0。其首次正式引入须保留 [#2132 非作者复审原件](https://github.com/Newchanlun/NewChanlun/blob/87e3d5d93486bb0c3a80b9259df4f1e929a48356/.chanlun/at18/pregate-review.json)的原始 Git blob `1aed53fd7a1e0be271de949d7c37c0ac81aefc1b`，并通过 R09。由 #2132 的关票验收与正式合入门担保复审身份。之后遇到 PRE 增减，先经正式合入更正当窗登记，再取验收 F；原始字节仍在首次合入的 Git 对象中。对每个 `(path,mode,blob@P0)`，首次经 R09 正式合入且封闭合同、P0 身份合法的记录确定其历史裁定；两端沿 F 第一父链核对此首载，行退出再重入也必须沿用该裁定。任何 P0 的 `"BLOCK"` 均不得翻写为 `"PASS"`，也不得借删除后重挂丢失。结构、覆盖、P0 身份、首载或裁定保真不合一律记 `PREGATE_REVIEW`。
+
+**逐路径闭环。** 完成上面的历史核验后，只按 P0 原裁及 F 的实际对象选择以下互斥分支：
+
+- P0 为 `"PASS"`：照原规则验 P0；若闸后曾触及该路径，按 R09 的第一父集成分母（含 G0）核全部相关集成。最终字节与 P0 相同也不能免除已经发生的集成。
+- P0 为 `"BLOCK"`，且 F 的 blob 与 P0 相同：硬阻断 `PREGATE_REVIEW`，包括 mode 有变但 blob 未变、或先改再还原。任何复审、补救行或注释均不得放行。
+- P0 为 `"BLOCK"`，且 F 为合法普通文件或符号链接、blob 与 P0 不同：只有以下三门同时成立才核销这条留存路径的阻断：
+  1. 在 R09 的第一父集成分母（含 G0）中，所有相对第一父增删或改变该路径 mode/blob 的提交都过 R09。不得只挑一个获审提交。
+  2. R03 固定的补救原件有且仅有此路径一条记录，P0 和 F 两组 mode/blob 精确匹配。其最近新增或改动的 R09 同树合入中，非作者以 #2132 原始独审的逐路径发现核对全部原缺陷（不得用补救方自述替代），核实本仓承接票、提交、F 字节及依据，确认全部原缺陷已消除。每个 `remediation_commits[]` 成员均为该路径实际变更且获审的上述第一父集成，至少包括最后一次变更该路径的集成。先合入改动、再登记补救，不预填将来的提交 ID。两端据当前 F 重算 mode/blob；任何漂移即时失效，记 `PREGATE_REVIEW`，不得复用旧 F 的补救。
+  3. 同一路径有关的 R02–R08 与 R11 义务仍逐项独立成立；补救签审不抵覆盖、绑定、执行、CI 或历史复跑。
+
+只要 PRE 有任一 P0 BLOCK，补救原件即为必需，即使所有 BLOCK 都未改；否则原件可缺。原件存在就核其封闭形状、R09 锚与精确行集：只列 PRE 中 P0 BLOCK 且 F 合法 blob 字节已变的路径，每条恰一次；不能收录未改、已删除或 P0 PASS 路径。整份原件缺失或不合法时定位原件路径；逐路径缺行、多行、证据失配、非法对象或硬阻断定位受验路径，均记 `PREGATE_REVIEW`。相关 R09 失败仍按 R09 另记。R10 输出历史分母及前两门的路径结果；第三门在整图合取时核，不反向参与 R10 分母或路径判定。R11 仍消费全部历史分母，即使某路径的 R10 补救失败。
 
 边界反例：PR #1553、#1571 均归 #1405，不被其关票尾件 #1574 吞掉；#1394 的 #1583 是正式尾件；#1359 与 #1372 可共指同一主线提交。#1406 的 PR #1616 在 P0 第一父链上，即使 #1406 尚 OPEN 也必须纳入；后续恢复、校验或补修产品按同一规则重算。任何示例和作者快照的计数都不是分母上限。#2132 的清册及 PRE 是整图共用门；`GRAPH` 来源仍走同一整图门，并按第八节列作所有 Destination 的出处，不成为任一 TB 自身的原生子票。
 
-**#799 / #804 举证。** `postLanding(M)` 是 G0 起的集成事件，证明送入 main 的完整树经过正式应用门；`preResidue(path,mode,blob@P0)` 是仍在 F 留存路径上的历史基准字节，证明经承接非作者复审。两份输入由 Git 与来源清册先算、分别验、最后取合取。即使某一闸后 M 触及同一路径或同 blob，缺其 App 状态依然失败；同样，闸后全绿也不补 PRE。相同 AT-18 行为义务在 F 上统一执行 R02–R08，不按历史或 TB 级别切换判据（`docs/agents/doctrine-rules.md:43-55, :61-79`）。
+**#799 / #804 举证。** R09 判主线集成事件，R10 判留存路径：P0 的基准字节有不可变历史裁定；只有 P0 BLOCK 且 F blob 已变，才另验该缺陷是否从当前 F 字节消除。P0 与 F 是两个对象，历史裁定、F 补救与正式集成取合取，任何一项失败都不能换一条判据再判。P0 BLOCK 原字节硬阻断；闸后集成全绿也不能单独核销它。相同的 R02–R08/R11 判据仍在同一 F 上执行，不因 TB 或历史裁定切换（`docs/agents/doctrine-rules.md:43-55, :61-79`）。
 
 ### R11　把历史留在历史
 
@@ -232,7 +263,7 @@ TB-01..10 逐 TB 要求：汇总票及每张带 `wayfinder:impl` 原生子票口
 
 对每个 DST 取 crosswalk 的 `story_ids|family_entry_ids|detailed_acceptance_ids`，三集引用均须可解析；关联条目全部非 FAIL，其全部关闭切片满足相应 R12 门；应用该 Destination 的第二节专用门，DST-06 另应用 #1304、#1279 合法去向。R08/R09 不成立也不得给任何 DST PASS，失败记 `DESTINATION_AGGREGATE`。第四节 #1279 本图义务条件只消费这些 **聚合前因子**，不读取任何 Destination 的成品结论，也不读自身 `disposition_valid`。要关的 #1369、#1340、#1323 均不是报告前置。
 
-**拓扑顺序**：R01 → R02 → R03 → R05 静态核 → R06/R08/R09 取服务端事实；R06 → R07 专用原件与非激活事实 → R04 延期最终核（R04 静态域先于执行，不能由执行结果改变）；R09 → R10，R05/R06/R10 → R11；R01/R08/R09 → TB-11 前置；R03–R07 + TB-11 前置 → 键 → 各规范条目；键 + R07–R11 → TB-01..10；条目、TB 门与专用因子 → 旧票（含 #1279） → Destination → 整图报告 → #1391 → #1403 → #1369、#1340、#1323。任一处失败不改规则或集合重判。
+**拓扑顺序**：R01 → R02 → R03 → R05 静态核 → R06/R08/R09 取服务端事实；R06 → R07 专用原件与非激活事实 → R04 延期最终核（R04 静态域先于执行，不能由执行结果改变）；R09 → R10；R05/R06/R10 历史分母 → R11；R03 读件 + R10 的补救原件必需性 → 输入包；R01/R08/R09 + 输入包 → TB-11 前置；R03–R07 + TB-11 前置 → 键 → 各规范条目；键 + R07–R11 → TB-01..10；条目、TB 门与专用因子 → 旧票（含 #1279） → Destination → 整图报告 → #1391 → #1403 → #1369、#1340、#1323。任一处失败不改规则或集合重判。
 
 ### R14　失败是可消费的数据
 
@@ -240,7 +271,7 @@ TB-01..10 逐 TB 要求：汇总票及每张带 `wayfinder:impl` 原生子票口
 
 ## 七、实施归属与图边
 
-承接票 #2131、#2132、#2133 均在 #1369 下，不另开同用途票。#2131 交付登记册合同、lint、运行器、两个验收 workflow 与 DevSkim 的 dispatch；#2132 交付全 TB 闸前底册、PRE、具名复跑锁及 TB-01 键。#1360..#1368 各汇总 owner 负责本 TB 剩余键、实体与实际主线运行；#1366 下 #1381/#1399/#1411 分别保留输入与 profile、seek/AsKnown、双进程与恢复，#1418 仍按 ADR 0058 交 AT-14 原件和锁。#1391 生成、#1403 独立总验，均不充当登记的独审者。#2133 用户签署原有效域，不派代理代签。
+承接票 #2131、#2132、#2133 均在 #1369 下，不另开同用途票。#2131 交付登记册合同、lint、运行器、两个验收 workflow 与 DevSkim 的 dispatch；#2132 交付全 TB 闸前底册、PRE、具名复跑锁及 TB-01 键，并按 R10 登记各缺陷归属票的非作者补救原件；不得代缺陷归属票认定修复。#1360..#1368 各汇总 owner 负责本 TB 剩余键、实体与实际主线运行；#1366 下 #1381/#1399/#1411 分别保留输入与 profile、seek/AsKnown、双进程与恢复，#1418 仍按 ADR 0058 交 AT-14 原件和锁。#1391 生成、#1403 独立总验，均不充当登记的独审者。#2133 用户签署原有效域，不派代理代签。
 
 沿用现有边 #1551→#2131→#2132、#1551→#1369、TB-01..10→#1391、#1359/#1391→#1403；落地时补 #2131→#1360..#1368、#2132→#1391、#2133→#1365/#1367/#1368。#1403 经 #1391 消费全部 TB，无须重复接边。#1359 已关，#2131 的依赖经 #2132 兑现，不对 #1359 回挂阻塞或重开；不变更切片间既有排程。#1493 从 #1323 直属改挂 #1360，保留其已关记录和原依赖。主控同时在 #1391 写 R01 操作窗口，在受影响的 open 汇总票加本 TB 绑定与一次主线 dispatch AC。旧关联票不设为逆向整票 blocker。
 
@@ -253,19 +284,19 @@ TB-01..10 逐 TB 要求：汇总票及每张带 `wayfinder:impl` 原生子票口
 - 各文档的 `schema_version` 取对应常量，`ticket/base/head` 取本票通过引导的 manifest；#1403 用 #1391 报告对应 manifest 重算后者的三个值。报告 `generated_at` 与回执 `verified_at` 分别为写出时 UTC，统一用 RFC 3339 的 `YYYY-MM-DDTHH:mm:ss.sssZ`（有更高精度截到毫秒）。原件时间另用同一格式转换；比较业务时序用原始精度，不因展示截断给出通过。对报告先验时间合法且在窗口内，再以该已验证时间放回独立重算的对象，重算 `content_hash`；比较完整 JCS 对象，包括重新算出的摘要，而不是让两个写入时钟相等。输入包引用从 #1391 manifest 的唯一标准文件条目按实际字节求得，独立核包的所有字段与该包自己的时刻/摘要；不重新生成一个带不同时刻的包去替代。
 - 数组默认按下述主键升序、去精确重复。数字按数值、字符串按未经 Unicode 归一化的 UTF-8 字节序、`null` 在先、布尔 `false` 在先。主键相同而内容冲突时记 `SCHEMA`，冲突元素不入数组，不选择先到者。保留第五节固定位置的 Destination、TB、旧票、workflow、切片账，以及 SPEC 覆盖数组原行序；其余字符串数组按值，整数数组按值；不能用 GitHub 分页或并发完成顺序决定结果。
 - 引用数组键：`ArtifactRef=(storage,path,commit,ticket,base,head,sha256,bounded_scope)`；`ManifestRef=(ticket,manifest_path)`；`ReviewRef=(merge_commit,pr,status_id)`；`CiRunRef=(workflow,run_id,run_attempt)`；`AcceptanceJob=(workflow,run_id,run_attempt,job)`；`HistoricalDeviation=(ticket,commit,workflow,run_id)`；切片及下游票用 `ticket`；`TicketScopeRef=(ticket,scope)`；延期用 `obligation`；权限阻塞用 `(obligation,blocker_ticket,evidence_class)`；诊断用 `(check_id,scope,detail,evidence_ref)`（引用按其键）。不排序结构语义所需的时间序列。
-- 仓内 ArtifactRef 的路径/提交用对应规则钉住的 Git 路径和 SHA，仓外身份和绝对路径只用匹配 manifest 的原始条目，不取本机别名、自报路径或自报范围。所有 ArtifactRef 的 `bounded_scope` 恒为 ASCII `AT18:<role>`；每个引用位置按用途取唯一角色：五种输入按 `SPEC/CROSSWALK/COVERAGE_INPUT/REGISTRY/PREGATE`，切片账用 `SLICE_LEDGER`，输入包及报告用 `INPUT_BUNDLE/REPORT`，R07 封印原件用 `RUN_RECORD`，签署用 `AUTHORIZATION`，旧票规范出处用 `LEGACY_SOURCE`，ADR 0058 合法仓内实体用 `AT14_REPORT`。`PostGateSlot.gate_reached_event`、`first_activation` 和 `non_activation_evidence[]` 固定为 `AT18:RUN_RECORD`，必须来自 R07 封印；`parameter_version` 在任何非空引用中固定为 `AT18:AUTHORIZATION`，指用户已授权的参数版本原件，封印的运行原件证明其关联但不得替代其授权引用。同一对象在证据数组中保留生产它的这些角色，不因转入另一数组重命名。运行槽、裁定和用途边界由原规则求值，不从角色字符串反推。
+- 仓内 ArtifactRef 的路径/提交用对应规则钉住的 Git 路径和 SHA，仓外身份和绝对路径只用匹配 manifest 的原始条目，不取本机别名、自报路径或自报范围。所有 ArtifactRef 的 `bounded_scope` 恒为 ASCII `AT18:<role>`；每个引用位置按用途取唯一角色：五种输入按 `SPEC/CROSSWALK/COVERAGE_INPUT/REGISTRY/PREGATE`，R10 补救原件用 `PREGATE_REMEDIATION`，切片账用 `SLICE_LEDGER`，输入包及报告用 `INPUT_BUNDLE/REPORT`，R07 封印原件用 `RUN_RECORD`，签署用 `AUTHORIZATION`，旧票规范出处用 `LEGACY_SOURCE`，ADR 0058 合法仓内实体用 `AT14_REPORT`。`PostGateSlot.gate_reached_event`、`first_activation` 和 `non_activation_evidence[]` 固定为 `AT18:RUN_RECORD`，必须来自 R07 封印；`parameter_version` 在任何非空引用中固定为 `AT18:AUTHORIZATION`，指用户已授权的参数版本原件，封印的运行原件证明其关联但不得替代其授权引用。同一对象在证据数组中保留生产它的这些角色，不因转入另一数组重命名。运行槽、裁定和用途边界由原规则求值，不从角色字符串反推。
 - `ReviewRef` 逐字段取 R09 实际 PR、H、M 与最新精确 context 的状态记录；`CiRunRef` 取 R08 所选 run 的 workflow 路径、id、attempt、head_sha、结论、`html_url`；运行、作业和历史偏差只取 R06–R11 的服务端字段（作业名取 Jobs API 的 `name`，结论按第五节枚举），不得从日志摘词。GitHub 票态取 API `state` 大写，已知 `state_reason` 只取 `COMPLETED|NOT_PLANNED|REOPENED|DUPLICATE`，无值填 null，未知值留红不照录。TB-11 的 `slices` 只列 #1391 与 #1403，两行写报告生成时刻的实际状态；OPEN 时 `state_reason=null`。#1403 用实际创建、关闭/重开事件重放这两票的报告时态，不用封包后的新票态；报告时 #1391 非 OPEN 或两票阶段无法证成，按第三节留红。其余票态取同窗观测，状态发生改变则按 R01 作废；包括签署、历史 CI 原件、绑定规则和上游实体在内的决策输入不得在同窗换源。服务端查询失败不等于已知缺失。
 
 ### 投影表
 
 | 字段 | 唯一来源／投影 |
 |---|---|
-| 输入包引用、`external_manifests` | 第五节固定仓内对象及顺序；上游只列下面规则实际消费的、由有效原件匹配的 manifest，去掉本次报告发布才追加的目标包/报告条目。 |
+| 输入包引用、`external_manifests` | 第五节固定仓内对象及顺序；上游只列下面规则实际消费的、由有效原件匹配的 manifest，去掉本次报告发布才追加的目标包/报告条目。R10 补救原件由 `head=F` 的固定路径定位。原件自身合法且被某项失败核验消费时，以既有 `FailedCheck.evidence_ref` 规则参与引用选择（`storage="in_repo"`、`commit=F`、原件字节摘要和本节固定角色）；缺件、坏件不造引用。通过时由 F 树及其 R09 合入记录回读，不把补救变成 SPEC、旧票或运行证据，不增设任何 `evidence_refs` 槽。 |
 | `destinations[].obligation` | F 的 SPEC JSON 中 `stories` 唯一 `id="US-DST-0<n>"` 的 `observable_result` 原字符串（不改写空白）；缺失用 `DST-0<n>` 作身份并报 `COVERAGE_SOURCE`。 |
 | Destination 的 `tickets/commits/downstream_status` | 从该 DST crosswalk 三集取所有对应 closure TB；其汇总和 R12 原生实施子票进入 `tickets`，`scope` 固定该 TB 的 ID；再按 R10 重算的 `Landing.attribution_scopes` 逐对加入 `(ticket,scope)`：具体 TB 仅进 closure 含该 TB 的 DST，`(ticket,"GRAPH")` 进入全部六项，只列历史出处，不扩 R12 子票或 R13 义务。DST-06 另加 `(1304,"LEGACY")`、`(1279,"LEGACY")`。对最终 `tickets` 的每个票号取其全部 R10 历史提交，与可确认的 F 一起取并集写 `commits`（共享提交只列一次）；`downstream_status` 对同一票号集合逐票只列一次实际状态，查询不到按第五节取 null 并留诊断。 |
 | Destination/TB 的主线、CI 和审查 | `main_sha` 为 R01 确认的 F，无法确认时 null；两类记录均列 R08 的两个通用 CI 及 R09 观察到的全部集成审查（含 PRE 锚的有效合入记录）。这些门对整图适用，不能按作者猜测裁切。 |
 | Destination/TB 的证据 | TB-01..10 的 `evidence_by_class[c]` 恰为该 TB 的全部合法、R07 封印的 `tb.<c>.TB-xx` 实体引用；`entity_reports` 为两启用类的并集，不混入专用槽。DST 取其 closure TB 的同类数组并集，experiment 仅另并入以下实际、合法且封印的 `AT18:RUN_RECORD` 引用：DST-05 的 `permission_evidence.experiment.runtime_verification` 非空值，DST-02/03/05 的 `migration_invariants.experiment.non_empty_evidence_refs[]`。权限授权声明、能力元组、场所权限事实均不进两类 `evidence_by_class`；`post_gate_records` 专用引用只留顶层（`destination_ids=[]`），不额外并入任何 TB 或 DST。simulation 不并专用引用；启用类无引用为 `[]`，production 本版固定 `null`；TB-11 按第三节固定空实体、启用类空数组及输入包引用。 |
-| Destination/TB 的未完义务 | 合法延期只按表后闭集加入。必跑未跑键 ID 与失败键的基 ID 按该键归属（TB 为 `slice`；DST 同时要求该 TB 属其 closure、键的 `(kind,id)` 在 R13 对应三集中）。专用槽必跑未跑按第二节适用 DST，并归 R12 明确依赖该槽的 TB；后闸专用槽的必跑未跑只归 TB-11 的整图对账，不因 closure 传播。未完成必需票写 `ticket:<n>`，按 R12 原生子票与 R13 专用旧票的实际义务关系投影；未到关票阶段的 TB-11 不写未完。失败诊断在其被检对象的义务范围内投影为 `check_id+"@"+scope`：键与票同上，专用槽同其必跑未跑范围，整图门失败适用于全部。各项取并集、排序去重。TB `tb_id/ticket` 固定 TB-01..11 对应 #1359..#1369，`slices` 来自 R12 原生实施分母；`result/gate_satisfied` 分别取 R13/R12。 |
+| Destination/TB 的未完义务 | 合法延期只按表后闭集加入。必跑未跑键 ID 与失败键的基 ID 按该键归属（TB 为 `slice`；DST 同时要求该 TB 属其 closure、键的 `(kind,id)` 在 R13 对应三集中）。专用槽必跑未跑按第二节适用 DST，并归 R12 明确依赖该槽的 TB；后闸专用槽的必跑未跑只归 TB-11 的整图对账，不因 closure 传播。未完成必需票写 `ticket:<n>`，按 R12 原生子票与 R13 专用旧票的实际义务关系投影；未到关票阶段的 TB-11 不写未完。失败诊断在其被检对象的义务范围内投影为 `check_id+"@"+scope`：键与票同上，专用槽同其必跑未跑范围，整图门失败适用于全部。各项取并集、排序去重。TB `tb_id/ticket` 固定采用 R10 的 TB-01..10 映射，TB-11 固定 #1369，`slices` 来自 R12 原生实施分母；`result/gate_satisfied` 分别取 R13/R12。 |
 | 权限、能力、迁移、后闸 | 第二节与 R07 的三类记录。每槽从其应取的合法来源取引用：运行引用仅取 R07 封印来源，签署和场所依据按第二节、R07 及本节角色读其各自原件，单值槽若有多条候选仅在对同一业务身份互证且无冲突后取引用排序第一项，否则缺值并留红；能力三元组版本取实际能力记录规范版本字段、两个摘要取能力记录与场所 profile 的原始字节；场所来源 URL、取回时间取 #1770 来源字段；后闸时间只取所配对的实际三记录时间字段。布尔值与状态从 R07 重算，不从文件的结论键照录。Destination ⑤ 槽的能力值原样投影到顶层。 |
 | `spec_coverage` | 标识、族、闭包切片与 DST 从 R02 各对应 crosswalk 行的字段逐值投影；family 的 `entry_mode` 按第五节；`status` 按 R12。条目证据只列适用的登记册引用（有通过的非 TB-11 键）及输入包引用（有通过的 TB-11 键）；`deferred_gates` 取该条目获准延期域 ID 并集，无则空。 |
 | `legacy_dispositions[]` | 固定票序。`disposition` 按票依序固定为 `PRESERVE_BOUNDED/RETIRE_OR_INCORPORATE/PRESERVE_ARCHIVE/ADOPT_AT14/INCORPORATE_FEED_WIRE/REPLAY_AND_PRESERVE_HEAVY/KEEP_OPEN`（逐票一值）。证据取 R13 固定解码器实际消费的来源引用及该票专用实体，不列交叉票的所有产物。`remaining_obligations` 取未证成的 R13 义务 ID；#1279 自有义务用 `ISSUE_1279:<规范原件 JSON Pointer 或固定评论 ID 和条目序号>`，从 R13 固定检查单取，不复制说明文字。本图义务失败留 R13 诊断，不列到 #1279 的自有清单。状态及 `disposition_valid` 只取 R13。 |
