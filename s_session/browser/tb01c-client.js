@@ -3582,7 +3582,7 @@ if (typeof module !== 'object' || !module.exports) {
     STRUCTURE_ROOTS: Object.freeze(STRUCTURE_ROOTS), sameValue: equal, changeNulls, validateStructureHistory});
 });
 
-/* exact source q3-typed.js SHA256 56709a798c821975377e7141b0a05a5c3cb64b204f6ee283818f2f03194fad53 */
+/* exact source q3-typed.js SHA256 80624c09aa248103030bc829f622dd4f8aa15b695a4c45c667f0fb608a141e2d */
 /* #1394：typed 与形态来源的同一判据；只把访问迁为完整异步 Value 遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -4476,7 +4476,7 @@ if (typeof module !== 'object' || !module.exports) {
       kind === BI_KINDS[5] ? [await field(await field(d, "known_at"), "generation"), await field(d, "entity_id"), await field(d, "change")] : "TB-02-B";
     need(await equal(await field(p, "slot"), slot), "新笔 slot 未绑定其具名对象身份");
   }
-  async function validateTB02ShapeRefs(shape) {
+  async function validateTB02ShapeRefs(shape, captureSources = false) {
     shape = V.of(shape);
     const refs = await field(shape, "input_refs"); need(await eqField(shape, "kind", "CC-006.local_shape") && refs.kind === "array" && await refs.length() === 3n, "OHLC形态缺完整三组");
     const anchors = [await field(shape, "window_start"), await field(shape, "window_mid"), await field(shape, "window_end")], all = new Set(); let previousIndex = null, index = 0;
@@ -4500,7 +4500,13 @@ if (typeof module !== 'object' || !module.exports) {
     const coords = await coordinates(await field(shape, "source_coords"));
     // source_coords 已严格递增，等长加每项属于完整并集等价于原排序后全数组比较。
     need(await coords.length() === BigInt(all.size), "形态来源不是成员与构造/边界依据并集");
-    for await (const coord of coords.items()) need(all.has(await S(coord)), "形态来源不是成员与构造/边界依据并集");
+    const sources = captureSources ? [] : undefined;
+    for await (const coord of coords.items()) {
+      const value = await S(coord);
+      need(all.has(value), "形态来源不是成员与构造/边界依据并集");
+      sources?.push(value);
+    }
+    return sources;
   }
   async function bindDevelopmentPrefixes(records) {
     const versions = new Map(), entries = [];
@@ -4747,7 +4753,20 @@ if (typeof module !== 'object' || !module.exports) {
       must(Array.isArray(key) && key.length === 2 && JSON.stringify(key) === id, "请求键不是规范二元槽位");
       must(!seen.has(id), "同 cut 知识请求键重复");
       seen.add(id);
-      const want = expected.get(id) ?? competing.get(id);
+      const subject = active.get(request.subject_id);
+      let want = expected.get(id);
+      if (key[0] === shapeKind) {
+        if (key[1] === "pending") {
+          // W 未定期没有正式组；建立后同样只看本 cut 正式组数，不用原始根数或 shape 数替代。
+          must(groups.length < 3, "CC-006 不足三组请求在已有三组时无效：" + id);
+          want = {subject:null, sources:ordered, axes:REQUEST_STATES[2], reasons:["fewer_than_three_merged_bars"]};
+        } else if (competing.has(id)) {
+          want = competing.get(id);
+        } else {
+          must(subject?.kind === shapeKind && subject.slot === id, "未声明或错槽的知识请求：" + id);
+          want = {subject:subject.object_id, sources:subject.source_coords, axes:REQUEST_STATES[0], reasons:[]};
+        }
+      }
       if (want) {
         must(request.subject_id === want.subject, "请求主体 ID、kind 或 fact_key 错绑：" + id);
         must(sameCoords(request.source_coords, want.sources), "请求来源错绑：" + id);
@@ -4755,15 +4774,13 @@ if (typeof module !== 'object' || !module.exports) {
         expected.delete(id);
         continue;
       }
-      // 其它合法请求由组/形态各自的槽承接；不让未声明具名结构地址或换槽主体落入此分支。
-      const subject = active.get(request.subject_id);
+      // 其余请求沿用组与分型描述各自的槽。
       const group = key[0] === GROUP_KIND && (subject?.kind === GROUP_KIND && subject.fact_key === id ||
         !init && key[1] === "pending" && request.subject_id === null);
-      const shape = key[0] === shapeKind && (subject?.kind === key[0] && subject.slot === id || key[1] === "pending" && request.subject_id === null);
       const fractal = key[0]?.[0] === "CC-007.fractal_description" &&
         ["shape_description", "descriptive_labels", "subsequent_development"].includes(key[1]) &&
         subject?.kind === "CC-007.fractal_description" && JSON.stringify(key[0]) === subject.fact_key;
-      must(group || shape || fractal, "未声明或错槽的知识请求：" + id);
+      must(group || fractal, "未声明或错槽的知识请求：" + id);
     }
     must(expected.size === 0, "缺一一绑定的具名知识请求：" + (expected.keys().next().value ?? ""));
   }
@@ -4818,7 +4835,7 @@ if (typeof module !== 'object' || !module.exports) {
     TB02_KINDS: Object.freeze(TB02_KINDS), BI_KINDS, SEGMENT_KINDS: Object.freeze(SEGMENT_KINDS)});
 });
 
-/* exact source q3-consumer.js SHA256 29ed51f46a1b0673499a706cb63a23d0bcd8eecb338fea23c5285f8bbcb3bec8 */
+/* exact source q3-consumer.js SHA256 db04a0ac76c7f5a1255130cc232afd28b4f4d88b06f0b326342ab44a3e150d52 */
 /* #1394：Q3完整消费者；只供既有tb01c页面调用，没有产品路由或默认资源。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -5143,7 +5160,7 @@ if (typeof module !== 'object' || !module.exports) {
     }
     return { byId, effective };
   }
-  async function shapeRecord(record) {
+  async function shapeRecord(record, captureSources) {
     await keys(
       record,
       [
@@ -5170,7 +5187,7 @@ if (typeof module !== 'object' || !module.exports) {
       ],
       "CC006完整记录",
     );
-    await typed.validateTB02ShapeRefs(record);
+    const sources = await typed.validateTB02ShapeRefs(record, captureSources);
     need((await s(record, "object_revision")) === "1", "CC006修订错误");
     const first = await i(record, "first_known_generation", true);
     need(
@@ -5227,6 +5244,7 @@ if (typeof module !== 'object' || !module.exports) {
       );
       index++;
     }
+    return sources;
   }
   // #1393 W：W 字段中的原始 bar 必须逐值等于其八键引用的原始修订；逐发生边界核同 cut 初始化链接。
   // #1393×#1419：typed 对象的规则版本绑定与内容身份（单对象判据；候选全量校验与公开入口共用）。
@@ -5437,17 +5455,18 @@ if (typeof module !== 'object' || !module.exports) {
         charge();
         records.push(record);
         const kind = await t(record, "kind");
-        let structurePayload;
+        const active = (await s(record, "lifecycle")) === "active";
+        let structurePayload, shapeSources;
         if (typed.TB02_KINDS.includes(kind)) structurePayload = await typed.validateTyped(record, layout);
         else {
           // 未声明 kind 不得落入 CC-006 形态判据（#1419 独审 P1）。
           need(kind === "CC-006.local_shape", "未声明的对象 kind");
-          await shapeRecord(record);
+          shapeSources = await shapeRecord(record, cut !== null && active);
         }
-        const refs = await f(record, "input_refs"),
-          active = (await s(record, "lifecycle")) === "active";
+        const refs = await f(record, "input_refs");
         const projection = cut === null ? null : await cutObject(record, kind, structurePayload, cut, active);
         if (projection) {
+          if (shapeSources) projection.source_coords = shapeSources;
           need(BigInt(projection.first_known_generation) <= BigInt(cut.generation), "对象首次获知来自未来cut");
           need(projection.withdrawn_generation === null || BigInt(projection.withdrawn_generation) <= BigInt(cut.generation), "撤回来自未来cut");
           life.push(projection);

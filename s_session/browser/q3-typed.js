@@ -891,7 +891,7 @@
       kind === BI_KINDS[5] ? [await field(await field(d, "known_at"), "generation"), await field(d, "entity_id"), await field(d, "change")] : "TB-02-B";
     need(await equal(await field(p, "slot"), slot), "新笔 slot 未绑定其具名对象身份");
   }
-  async function validateTB02ShapeRefs(shape) {
+  async function validateTB02ShapeRefs(shape, captureSources = false) {
     shape = V.of(shape);
     const refs = await field(shape, "input_refs"); need(await eqField(shape, "kind", "CC-006.local_shape") && refs.kind === "array" && await refs.length() === 3n, "OHLC形态缺完整三组");
     const anchors = [await field(shape, "window_start"), await field(shape, "window_mid"), await field(shape, "window_end")], all = new Set(); let previousIndex = null, index = 0;
@@ -915,7 +915,13 @@
     const coords = await coordinates(await field(shape, "source_coords"));
     // source_coords 已严格递增，等长加每项属于完整并集等价于原排序后全数组比较。
     need(await coords.length() === BigInt(all.size), "形态来源不是成员与构造/边界依据并集");
-    for await (const coord of coords.items()) need(all.has(await S(coord)), "形态来源不是成员与构造/边界依据并集");
+    const sources = captureSources ? [] : undefined;
+    for await (const coord of coords.items()) {
+      const value = await S(coord);
+      need(all.has(value), "形态来源不是成员与构造/边界依据并集");
+      sources?.push(value);
+    }
+    return sources;
   }
   async function bindDevelopmentPrefixes(records) {
     const versions = new Map(), entries = [];
@@ -1162,7 +1168,20 @@
       must(Array.isArray(key) && key.length === 2 && JSON.stringify(key) === id, "请求键不是规范二元槽位");
       must(!seen.has(id), "同 cut 知识请求键重复");
       seen.add(id);
-      const want = expected.get(id) ?? competing.get(id);
+      const subject = active.get(request.subject_id);
+      let want = expected.get(id);
+      if (key[0] === shapeKind) {
+        if (key[1] === "pending") {
+          // W 未定期没有正式组；建立后同样只看本 cut 正式组数，不用原始根数或 shape 数替代。
+          must(groups.length < 3, "CC-006 不足三组请求在已有三组时无效：" + id);
+          want = {subject:null, sources:ordered, axes:REQUEST_STATES[2], reasons:["fewer_than_three_merged_bars"]};
+        } else if (competing.has(id)) {
+          want = competing.get(id);
+        } else {
+          must(subject?.kind === shapeKind && subject.slot === id, "未声明或错槽的知识请求：" + id);
+          want = {subject:subject.object_id, sources:subject.source_coords, axes:REQUEST_STATES[0], reasons:[]};
+        }
+      }
       if (want) {
         must(request.subject_id === want.subject, "请求主体 ID、kind 或 fact_key 错绑：" + id);
         must(sameCoords(request.source_coords, want.sources), "请求来源错绑：" + id);
@@ -1170,15 +1189,13 @@
         expected.delete(id);
         continue;
       }
-      // 其它合法请求由组/形态各自的槽承接；不让未声明具名结构地址或换槽主体落入此分支。
-      const subject = active.get(request.subject_id);
+      // 其余请求沿用组与分型描述各自的槽。
       const group = key[0] === GROUP_KIND && (subject?.kind === GROUP_KIND && subject.fact_key === id ||
         !init && key[1] === "pending" && request.subject_id === null);
-      const shape = key[0] === shapeKind && (subject?.kind === key[0] && subject.slot === id || key[1] === "pending" && request.subject_id === null);
       const fractal = key[0]?.[0] === "CC-007.fractal_description" &&
         ["shape_description", "descriptive_labels", "subsequent_development"].includes(key[1]) &&
         subject?.kind === "CC-007.fractal_description" && JSON.stringify(key[0]) === subject.fact_key;
-      must(group || shape || fractal, "未声明或错槽的知识请求：" + id);
+      must(group || fractal, "未声明或错槽的知识请求：" + id);
     }
     must(expected.size === 0, "缺一一绑定的具名知识请求：" + (expected.keys().next().value ?? ""));
   }

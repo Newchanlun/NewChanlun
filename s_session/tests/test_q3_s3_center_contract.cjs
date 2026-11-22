@@ -1188,16 +1188,23 @@ test("W/2 完整 validateState：direction=null 的在世组不得作替代目�
 // 把坐标 0..2 的三条未定原件替代到首组并补 replaces 边。增删对象后同步目录证据（各轴对象引用、本代撤回清单、
 // 替代清单与三项计数），使拒因只能是被测判据。
 let g5Base = null;
+const W_FIXTURE = "q3-real-s3-w-recover-revise.json";
+async function readWriterCut(generation, file) {
+  const H = require("./q3_complete_fixture.cjs");
+  const b = await H.makeS16Base(generation, file);
+  const graph = await H.C.GraphView.create([...b.nodes.values()]);
+  async function plain(ref) {
+    let text = "";
+    for await (const chunk of graph.renderChunks(ref)) text += chunk;
+    return JSON.parse(text);
+  }
+  const snapshot = await plain(graph.header(b.publication.snapshot_root)), catalog = await plain(b.catalog);
+  snapshot.rule_revision = b.fixed.rule_revision;
+  const cut = Object.fromEntries(["session_id", "generation", "structure_cut", "catalog_revision", "index_frontier"].map(k => [k,snapshot[k]]));
+  return { snapshot, catalog, cut };
+}
 async function g5() {
-  g5Base ??= (async () => {
-    const H = require("./q3_complete_fixture.cjs");
-    const b = await H.makeS16Base("5", "q3-real-s3-w-recover-revise.json");
-    b.graph = await H.C.GraphView.create([...b.nodes.values()]);
-    async function plain(ref) { let s = ""; for await (const c of b.graph.renderChunks(ref)) s += c; return JSON.parse(s); }
-    const snapshot = await plain(b.graph.header(b.publication.snapshot_root)), catalog = await plain(b.catalog);
-    snapshot.rule_revision = b.fixed.rule_revision;
-    return { snapshot, catalog, cut: Object.fromEntries(["session_id", "generation", "structure_cut", "catalog_revision", "index_frontier"].map((k) => [k, snapshot[k]])) };
-  })();
+  g5Base ??= readWriterCut("5", W_FIXTURE);
   return structuredClone(await g5Base);
 }
 const withRule = (st, rule) => { st.snapshot.rule_revision = st.snapshot.catalog_evidence.rule_revision = st.catalog.catalog_evidence.rule_revision = rule; return st; };
@@ -1585,6 +1592,85 @@ test("#2072 R2 B7 只收历史 new-bi/1 真实竞争三锚窗及精确右组来�
     const x = make();
     edit(x);
     assert.throws(() => run(x),reason);
+  }
+});
+
+const SHAPE_REQUEST = "CC-006.local_shape";
+const SHAPE_PENDING = JSON.stringify([SHAPE_REQUEST, "pending"]);
+const knowledgeOf = st => st.snapshot.objects.find(r => r.kind === "CC-054.knowledge_state");
+const shapeRequests = st => knowledgeOf(st).payload.requests.filter(r => JSON.parse(r.request_id)[0] === SHAPE_REQUEST);
+const groupCount = st => st.snapshot.objects.filter(r => r.kind === "CC-005.inclusion_group").length;
+
+// 只变更 CC-054 请求，重绑内容身份及各副本的引用；其它事实和三锚不变。
+async function editShapeRequests(base, edit) {
+  const st = copy(base), record = knowledgeOf(st), old = record.object_id;
+  edit(shapeRequests(st)[0], record.payload.requests);
+  const {kind, fact_key, payload, input_refs} = record;
+  const {profile_id, rule_revision} = st.snapshot;
+  const fresh = await Q3.V.identity(0x20, {kind, fact_key, payload, input_refs, profile_id, rule_revision}, "obj3-");
+  assert.notEqual(fresh, old);
+  return JSON.parse(JSON.stringify(st).replaceAll(old, fresh));
+}
+async function shapeThroughBoth(st, reason) {
+  const H = require("./q3_complete_fixture.cjs");
+  const validate = () => Q3.validateState(st, "s-session/3");
+  const server = await H.serverFromState(st), client = H.makeClient(server);
+  const {history_mode, as_of_generation} = st.snapshot;
+  const load = () => client.load(H.discovery(server), history_mode, as_of_generation);
+  if (reason) {
+    let message;
+    await assert.rejects(validate, e => {
+      assert.match(e.message, reason);
+      message = e.message;
+      return true;
+    });
+    await assert.rejects(load, {message});
+    assert.equal(client.committed, null);
+  } else {
+    await validate();
+    await load();
+    assert.equal(client.committed.cursor.after_generation, st.cut.generation);
+  }
+}
+
+test("#2072 R3 B7 完成形态不接受等待借槽，三组时不得换槽或追加 pending", async t => {
+  const tie = {input_quality:"SUFFICIENT", applicability:"DOMAIN_PROOF_MISSING", computation:"INCOMPLETE", validity:"CURRENT"};
+  const wait = r => Object.assign(r, {axes:tie, reasons:["equal_extreme_identity"]});
+  for (const [name, base] of [["S16 cut 3", await readWriterCut("3")], ["W1 cut 5", await g5()]]) {
+    const [r] = shapeRequests(base);
+    assert.equal(groupCount(base), 3);
+    assert(base.snapshot.objects.some(o => o.kind === SHAPE_REQUEST && o.object_id === r.subject_id));
+    await t.test(name + " 原样完成", () => shapeThroughBoth(base));
+    for (const [label, edit, reason] of [
+      ["同三锚、同发布主体却宣告竞争等待", wait, /B7.*四轴或等待原因/],
+      ["同三锚、主体为空却宣告竞争等待", r => Object.assign(wait(r),{subject_id:null}), /B7.*错槽/],
+      ["改键 pending 且置空主体", r => Object.assign(wait(r),{request_id:SHAPE_PENDING,subject_id:null}), /B7.*已有三组/],
+      ["保留全部原请求，仅追加伪 pending", (r,rs) => rs.push({request_id:SHAPE_PENDING,subject_id:null,
+        axes:tie,reasons:["equal_extreme_identity"],source_coords:r.source_coords.slice(-1)}), /B7.*已有三组/],
+      ["pending 字段全对也不能越过三组前提", r => Object.assign(r,{request_id:SHAPE_PENDING,subject_id:null,
+        axes:{...tie,input_quality:"INSUFFICIENT"},reasons:["fewer_than_three_merged_bars"]}), /B7.*已有三组/],
+      ["完成请求来源缺一坐标", r => {r.source_coords.pop();}, /B7.*请求来源错绑/],
+      ["完成四轴不变但理由非空", r => {r.reasons = ["equal_extreme_identity"];}, /B7.*四轴或等待原因/],
+    ]) await t.test(name + " " + label, async () => shapeThroughBoth(await editShapeRequests(base, edit), reason));
+  }
+});
+
+test("#2072 R3 B7 W 等待与已建立不足三组都使用同一 pending 合同", async t => {
+  for (const [generation, count] of [["2",0], ["4",2]]) {
+    const base = await readWriterCut(generation, W_FIXTURE);
+    const [r] = shapeRequests(base);
+    assert.equal(groupCount(base), count);
+    assert.equal(r.request_id, SHAPE_PENDING);
+    assert.deepEqual(r.source_coords, base.snapshot.raw_history.map(r => r.source_coord));
+    await t.test("W1 g" + generation + " 原样 pending", () => shapeThroughBoth(base));
+    // 用已建立但只有两组的切面做负控，原始前缀有四根，不能用组数截断来源。
+    if (count !== 2) continue;
+    for (const [label, edit, reason] of [
+      ["错主体", r => {r.subject_id = base.snapshot.objects.find(o => o.kind === "CC-005.inclusion_group").object_id;}, /B7.*主体 ID/],
+      ["少一原始坐标", r => {r.source_coords.pop();}, /B7.*请求来源错绑/],
+      ["错四轴", r => {r.axes.input_quality = "SUFFICIENT";}, /B7.*四轴或等待原因/],
+      ["错理由", r => {r.reasons = ["equal_extreme_identity"];}, /B7.*四轴或等待原因/],
+    ]) await t.test(label, async () => shapeThroughBoth(await editShapeRequests(base, edit), reason));
   }
 });
 

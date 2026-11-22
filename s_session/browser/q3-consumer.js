@@ -322,7 +322,7 @@
     }
     return { byId, effective };
   }
-  async function shapeRecord(record) {
+  async function shapeRecord(record, captureSources) {
     await keys(
       record,
       [
@@ -349,7 +349,7 @@
       ],
       "CC006完整记录",
     );
-    await typed.validateTB02ShapeRefs(record);
+    const sources = await typed.validateTB02ShapeRefs(record, captureSources);
     need((await s(record, "object_revision")) === "1", "CC006修订错误");
     const first = await i(record, "first_known_generation", true);
     need(
@@ -406,6 +406,7 @@
       );
       index++;
     }
+    return sources;
   }
   // #1393 W：W 字段中的原始 bar 必须逐值等于其八键引用的原始修订；逐发生边界核同 cut 初始化链接。
   // #1393×#1419：typed 对象的规则版本绑定与内容身份（单对象判据；候选全量校验与公开入口共用）。
@@ -616,17 +617,18 @@
         charge();
         records.push(record);
         const kind = await t(record, "kind");
-        let structurePayload;
+        const active = (await s(record, "lifecycle")) === "active";
+        let structurePayload, shapeSources;
         if (typed.TB02_KINDS.includes(kind)) structurePayload = await typed.validateTyped(record, layout);
         else {
           // 未声明 kind 不得落入 CC-006 形态判据（#1419 独审 P1）。
           need(kind === "CC-006.local_shape", "未声明的对象 kind");
-          await shapeRecord(record);
+          shapeSources = await shapeRecord(record, cut !== null && active);
         }
-        const refs = await f(record, "input_refs"),
-          active = (await s(record, "lifecycle")) === "active";
+        const refs = await f(record, "input_refs");
         const projection = cut === null ? null : await cutObject(record, kind, structurePayload, cut, active);
         if (projection) {
+          if (shapeSources) projection.source_coords = shapeSources;
           need(BigInt(projection.first_known_generation) <= BigInt(cut.generation), "对象首次获知来自未来cut");
           need(projection.withdrawn_generation === null || BigInt(projection.withdrawn_generation) <= BigInt(cut.generation), "撤回来自未来cut");
           life.push(projection);
