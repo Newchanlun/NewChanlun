@@ -761,7 +761,7 @@ class ExternalReview:
 
     def _deployment_admission(self, controller: str) -> dict | None:
         """与正式派发同一组部署准入（worker --admission-only，在正在执行的代码所在仓库运行）：controller 已提交、
-        head 等于 controller，当前镜像有 accepted 记录。不通过返回 None。"""
+        head 等于 controller，当前镜像和隔离合同有 accepted 记录。不通过返回 None。"""
         env = {k: os.environ[k] for k in DOCKER_ENV if k in os.environ}
         try:
             done = subprocess.run([*self.launcher, "--admission-only"], env=env, cwd=SOURCE_REPO, stdin=subprocess.DEVNULL,
@@ -772,21 +772,26 @@ class ExternalReview:
         if (not isinstance(admission, dict) or admission.get("controller_code_head") != controller
                 or not re.fullmatch(r"sha256:[a-f0-9]{64}", str(admission.get("image_id", "")))):
             return None
-        return {"controller_code_head": controller, "image_id": admission["image_id"]}
+        contract = admission.get("isolation_contract")
+        if not isinstance(contract, str) or not re.fullmatch(r"[a-f0-9]{64}", contract):
+            return None
+        return {"controller_code_head": controller, "image_id": admission["image_id"], "isolation_contract": contract}
 
     def reuse_admission(self, target: ReviewTarget, source: dict) -> dict | None:
-        """沿用前过一遍与正式派发相同的部署准入，并要求准入镜像与原 run 两份回执的镜像相同。任一不符就不沿用，照常双审。"""
+        """沿用前重做部署准入：原 run 两份回执的镜像和隔离合同都须一致，缺失或不符则照常双审。"""
         admission = self._deployment_admission(target.controller_code_head)
         if admission is None:
             return None
         try:
             old_folder = self.state_root / "runs" / ReviewTarget(**source["target"]).key
-            images = {_read(old_folder / model / "receipt.json").get("image_id") for model in MODELS}
+            receipts = [_read(old_folder / model / "receipt.json") for model in MODELS]
+            images = {receipt.get("image_id") for receipt in receipts}
+            contracts = {receipt.get("isolation_contract") for receipt in receipts}
         except (OSError, ValueError, TypeError, IdentityError):
             return None
-        if images != {admission["image_id"]}:
+        if images != {admission["image_id"]} or contracts != {admission["isolation_contract"]}:
             return None
-        return {"controller_code_head": admission["controller_code_head"], "image_id": admission["image_id"]}
+        return admission
 
     def cleanup_checkout(self, target: ReviewTarget, model: str, folder: Path, *, preparing: bool = False) -> bool:
         worker = folder / model
