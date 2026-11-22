@@ -444,6 +444,9 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline,
             if result.returncode:
                 raise RuntimeError("HTTP worker failed")
             return json.loads(result.stdout)
+        except OSError as error:
+            return {"http_status": None, "terminal": None, "ok": False,
+                    "error": {"not_sent": type(error).__name__}}
         except Exception as error:
             return {"http_status": None, "terminal": None, "ok": False,
                     "error": {"exception": type(error).__name__, "errno": None}}
@@ -459,9 +462,16 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline,
              "--entrypoint", "python3", container_image, "-I", "-c", _HTTP_WORKER.read_text()],
             work_left, data=payload, env=denv, deadline=deadline)
         container_done = result.returncode >= 0 and result.returncode != 125
+        if result.returncode in (125, 126, 127):
+            # Docker 标准退出码 125/126/127 表示容器或入口进程未能启动，HTTP 探针确定未发出。
+            return {"http_status": None, "terminal": None, "ok": False,
+                    "error": {"not_sent": f"docker_exit_{result.returncode}"}}
         if result.returncode:
             raise RuntimeError("Container HTTP worker failed")
         return json.loads(result.stdout)
+    except OSError as error:
+        return {"http_status": None, "terminal": None, "ok": False,
+                "error": {"not_sent": type(error).__name__}}
     except Exception as error:
         return {"http_status": None, "terminal": None, "ok": False,
                 "error": {"exception": type(error).__name__, "errno": None}}

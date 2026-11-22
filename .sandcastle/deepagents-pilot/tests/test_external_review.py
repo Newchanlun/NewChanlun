@@ -2649,10 +2649,12 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     assert failed["verdict"] == "FAILED" and lane.gateway.sent == ["pending", "error"]
     assert all("代理侧正式审阅收据" in r["reason"] for r in failed["reviews"])
 
-    # 2. 配置宿主代理收据目录：写入有效 cliproxy-review-v1 收据后正式双审通过
+    # 2. 配置宿主代理收据目录：写入私有权限的 cliproxy-review-v1 收据并经已认证封存替身确认后，正式双审通过
     receipt_root = tmp_path / "proxy-receipts"
     receipt_root.mkdir(mode=0o700)
+    receipt_root.chmod(0o700)
     monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(receipt_root))
+    monkeypatch.setattr(strict, "seal_receipt", lambda _lid, _sid: True)
     orig_validate = module.validate_review
 
     def write_proxy_receipt(target, launch, receipt, folder, source, *, route_override=None, tainted=False,
@@ -2662,6 +2664,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
         launch_hdr = f"review-{launch['launch_id']}"
         rec_dir = receipt_root / launch_hdr
         rec_dir.mkdir(mode=0o700, exist_ok=True)
+        rec_dir.chmod(0o700)
         now = time.time_ns()
         route = route_override.get(launch["model"], f"codex:{launch['model']}@chatgpt.com") if route_override else f"codex:{launch['model']}@chatgpt.com"
         final_text = None
@@ -2709,7 +2712,9 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
             "last_response_id_sha256": "" if tainted else resp_sha,
             "last_output_sha256": "" if tainted else out_sha,
         }
-        (rec_dir / "receipt.json").write_text(json.dumps(payload))
+        rec_file = rec_dir / "receipt.json"
+        rec_file.write_text(json.dumps(payload))
+        rec_file.chmod(0o600)
         return outcome
 
     monkeypatch.setattr(module, "validate_review", write_proxy_receipt)
@@ -3306,18 +3311,22 @@ def test_session_receipt_accepts_write_stdin_continuation_and_parallel_tool_call
                        "observed_provider": "cliproxy-local", "observed_model": MODELS[0]}
 
     receipt_root = tmp_path / "proxy-receipts"
+    receipt_root.mkdir(parents=True, mode=0o700)
+    receipt_root.chmod(0o700)
     launch_hdr = f"review-{launch['launch_id']}"
     rec_dir = receipt_root / launch_hdr
     rec_dir.mkdir(parents=True, mode=0o700)
+    rec_dir.chmod(0o700)
     monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(receipt_root))
     strict = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
                             checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01,
-                            preflight=_fake_preflight_pass)
+                            preflight=_fake_preflight_pass, seal_receipt=lambda _lid, _sid: True)
 
     def _write_proxy(rids: list[str]) -> None:
         now = time.time_ns()
         shas = [hashlib.sha256(r.encode("utf-8")).hexdigest() for r in rids]
-        (rec_dir / "receipt.json").write_text(json.dumps({
+        rf = rec_dir / "receipt.json"
+        rf.write_text(json.dumps({
             "schema": "cliproxy-review-v1",
             "launch": launch_hdr,
             "session": session_id,
@@ -3333,6 +3342,7 @@ def test_session_receipt_accepts_write_stdin_continuation_and_parallel_tool_call
             "last_response_id_sha256": shas[-1],
             "last_output_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
         }))
+        rf.chmod(0o600)
 
     # 1. exec_command 启动 git diff 后由 write_stdin(session_id=42) 续读补丁输出，两轮均由 token_usage_record 闭合
     events_stdin = [

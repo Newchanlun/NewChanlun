@@ -263,3 +263,41 @@ def test_real_preflight_missing_creds_charges_zero_and_internal_error_preserves_
     with pytest.raises(EffectPending, match="preflight-blocked"):
         lane.target(1810, 1)
     assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+
+
+def test_container_start_failure_marks_not_sent_and_charges_zero_tokens(lane, monkeypatch):
+    """R21（Astra P2）：docker run 退出码 125/126/127 或 OSError 表示容器探针确定未启动，
+    round_trip 须报 error.not_sent，额度统计计 0，反复重试不会耗尽当日审阅额度。"""
+    import subprocess
+
+    import review_preflight
+
+    for exit_code in (125, 126, 127):
+        monkeypatch.setattr(
+            review_preflight, "run_bounded",
+            lambda _cmd, _t, ec=exit_code, **kw: subprocess.CompletedProcess([], ec, b"", b"docker failed"),
+        )
+        trip = review_preflight.round_trip(
+            "http://host.docker.internal:8318", "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
+            review_preflight.Deadline(10), container_image="sha256:" + "1" * 64,
+        )
+        assert trip["ok"] is False and "not_sent" in trip["error"]
+        report = {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [{"name": f"roundtrip:{MODELS[0]}", "class": "roundtrip", "ok": False,
+                        "detail": {**trip, "sent": False}}],
+        }
+        lane.preflight = lambda _t, rep=report: {"returncode": 2, "report": rep, "image_id": "sha256:" + "1" * 64}
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 1)
+    assert lane.recent_input_tokens() == 0
+
+    def raise_oserror(_cmd, _t, **kw):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(review_preflight, "run_bounded", raise_oserror)
+    trip_os = review_preflight.round_trip(
+        "http://host.docker.internal:8318", "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
+        review_preflight.Deadline(10), container_image="sha256:" + "1" * 64,
+    )
+    assert trip_os["ok"] is False and "not_sent" in trip_os["error"]

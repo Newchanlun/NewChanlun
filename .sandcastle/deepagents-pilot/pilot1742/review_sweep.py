@@ -801,7 +801,9 @@ class Sweep:
 
     def _plan_one(self, pr: dict[str, Any], state: dict[str, Any], gate_ok: bool, head_free: bool,
                   reviewing_now: bool = False, review_action: str | None = None,
-                  bindings: dict[str, int] | None = None, live_review: bool = False) -> tuple[dict[str, Any], bool, str | None]:
+                  bindings: dict[str, int] | None = None, live_review: bool = False,
+                  withdrawn: set[int] | None = None,
+                  early_withdraw: dict[int, dict[str, Any]] | None = None) -> tuple[dict[str, Any], bool, str | None]:
         """只读、不写：返回（动作，是否占队首，要做的写：merge / update / disable / None）。
         只有 head_free（前面没有 PR 占队首）且本 PR 仍可能合入时才可能追平。"""
         number, head = pr["number"], pr["head"]["sha"]
@@ -816,13 +818,27 @@ class Sweep:
         try:
             again = self.github.pr(number)
         except SourceUnreadable:
-            # 复核实时 PR 状态超时：此后是否新挂原生 auto-merge 未知，置为待撤让 fail_closed 兜底。
+            # 复核实时 PR 状态超时：此后是否新挂原生 auto-merge 未知，立即作废旧撤回记录并置待撤让 fail_closed 兜底。
             state["auto_merge"] = True
+            if withdrawn is not None:
+                withdrawn.discard(number)
+            if early_withdraw is not None:
+                early_withdraw.pop(number, None)
             raise
         except Exception as error:
-            # 非超时复核失败（如 HTTP 502 / gh 非零退出）同样无法排除期间新挂原生 auto-merge，统一置为未知并走撤回路径。
+            # 非超时复核失败（如 HTTP 502 / gh 非零退出）同样无法排除期间新挂原生 auto-merge，作废旧撤回记录并走撤回路径。
             state["auto_merge"] = True
+            if withdrawn is not None:
+                withdrawn.discard(number)
+            if early_withdraw is not None:
+                early_withdraw.pop(number, None)
             raise EvidenceInsufficient(f"复核 head 失败：{type(error).__name__}: {error}") from None
+        if again.get("auto_merge"):
+            # 复核发现本轮早期撤回后又被重新挂起：立即作废旧撤回记录，防止后续任意读取超时时 fail_closed 跳过它。
+            if withdrawn is not None:
+                withdrawn.discard(number)
+            if early_withdraw is not None:
+                early_withdraw.pop(number, None)
         armed = bool(state["auto_merge"] or again["auto_merge"])
         if armed:
             state["auto_merge"] = True
@@ -987,7 +1003,8 @@ class Sweep:
             try:
                 result, claimed, write = self._plan_one(pr, states[number], gate_ok, head_free and evidence_ok,
                                                         number in reviewing_now, review_actions.get(number), bindings,
-                                                        live_review=number in live_busy)
+                                                        live_review=number in live_busy,
+                                                        withdrawn=withdrawn, early_withdraw=early_withdraw)
             except SourceUnreadable:
                 raise
             except Exception as error:  # 单个 PR 隔离；不明即不合入，并撤原生 auto-merge（失败关闭）

@@ -111,10 +111,10 @@ index e69de29..2b8a7a8 100644
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..1c1a7b3 100644
+index e69de29..21ca169 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1084 @@
+@@ -0,0 +1,1169 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -1142,16 +1142,23 @@ index e69de29..1c1a7b3 100644
 +	})
 +
 +	t.Run("trailing-error-after-completed-observed-and-taints-on-eof-drain", func(t *testing.T) {
-+		// Sol P1 (R19): real CodexAutoExecutor MUST drain the upstream SSE response to true io.EOF
-+		// on strict review launches instead of closing immediately after response.completed, so a
-+		// trailing duplicate terminal or error event in the same HTTP response is observed and taints.
-+		launch := "review-12345678-1234-4234-8234-123456789ae1"
-+		session := "019d0000-0000-7000-8000-000000000ae1"
++		// Sol P1 + Astra P1/P2 (R20): use a fresh unique launch, complete a clean Turn 1 first,
++		// then verify Turn 2 with response.completed + trailing bare error hits upstream and
++		// permanently taints the launch so Turn 1 cannot be sealed.
++		launch := "review-12345678-1234-4234-8234-123456789af9"
++		session := "019d0000-0000-7000-8000-000000000af9"
++		var upstreamHits atomic.Int32
 +		trailServer, trailTransport := newHostTLSServer(t, "chatgpt.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			hit := upstreamHits.Add(1)
 +			w.Header().Set("Content-Type", "text/event-stream")
++			if hit == 1 {
++				_, _ = io.WriteString(w,
++					`data: {"type":"response.completed","response":{"id":"resp_clean_turn1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"step1"}]}]}}`+"\n\n")
++				return
++			}
 +			_, _ = io.WriteString(w,
-+				`data: {"type":"response.completed","response":{"id":"resp_ok_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"+
-+					`data: {"type":"error","error":{"message":"trailing-upstream-error"}}`+"\n\n")
++				`data: {"type":"response.completed","response":{"id":"resp_ok_turn2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"+
++					`data: {"type":"error"}`+"\n\n")
 +		}))
 +		defer trailServer.Close()
 +		defer trailTransport.CloseIdleConnections()
@@ -1170,16 +1177,94 @@ index e69de29..1c1a7b3 100644
 +		registry.GetGlobalRegistry().RegisterClient(tid, "codex", []*registry.ModelInfo{{ID: "gpt-6.2-sol"}})
 +		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(tid) })
 +
-+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true,"input":"trail"}`))
-+		req.Header.Set("Authorization", "Bearer test-key")
-+		req.Header.Set("Content-Type", "application/json")
-+		req.Header.Set(preflightreceipt.ReviewHeader, launch)
-+		req.Header.Set("Session-Id", session)
-+		res := httptest.NewRecorder()
-+		srv.engine.ServeHTTP(res, req)
++		sendTurn := func(input string) *httptest.ResponseRecorder {
++			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true,"input":"`+input+`"}`))
++			req.Header.Set("Authorization", "Bearer test-key")
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set(preflightreceipt.ReviewHeader, launch)
++			req.Header.Set("Session-Id", session)
++			res := httptest.NewRecorder()
++			srv.engine.ServeHTTP(res, req)
++			return res
++		}
++		res1 := sendTurn("turn1")
++		if res1.Code != http.StatusOK || upstreamHits.Load() != 1 {
++			t.Fatalf("turn 1 failed: status=%d hits=%d body=%s", res1.Code, upstreamHits.Load(), res1.Body.String())
++		}
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Complete && !r.Tainted && r.Requests == 1 })
++
++		_ = sendTurn("turn2")
++		if upstreamHits.Load() != 2 {
++			t.Fatalf("turn 2 did not reach upstream handler: hits=%d", upstreamHits.Load())
++		}
 +		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
 +		if sealRes := seal(launch, session); sealRes.Code != http.StatusConflict || !strings.Contains(sealRes.Body.String(), "rejected") {
-+			t.Fatalf("SealReview accepted trailing-error stream: %d %s", sealRes.Code, sealRes.Body.String())
++			t.Fatalf("SealReview accepted trailing-error stream after clean Turn 1: %d %s", sealRes.Code, sealRes.Body.String())
++		}
++	})
++
++	t.Run("client-disconnect-right-after-completed-still-seals", func(t *testing.T) {
++		// Sol P1 (R20): CodexExecutor holds response.completed until upstream reaches true io.EOF.
++		// Even when upstream delays EOF 40ms after emitting response.completed and the client closes
++		// TCP immediately upon seeing response.completed, the review turn MUST succeed and seal.
++		launch := "review-12345678-1234-4234-8234-123456789afa"
++		session := "019d0000-0000-7000-8000-000000000afa"
++		delayedServer, delayedTransport := newHostTLSServer(t, "chatgpt.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			w.Header().Set("Content-Type", "text/event-stream")
++			_, _ = io.WriteString(w,
++				`data: {"type":"response.completed","response":{"id":"resp_delayed_eof","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n")
++			if fl, ok := w.(http.Flusher); ok {
++				fl.Flush()
++			}
++			time.Sleep(40 * time.Millisecond)
++		}))
++		defer delayedServer.Close()
++		defer delayedTransport.CloseIdleConnections()
++		srv := newTestServer(t)
++		mgr := srv.handlers.AuthManager
++		mgr.SetRoundTripperProvider(preflightTransportProvider{delayedTransport})
++		mgr.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(srv.cfg))
++		const did = "review-receipt-codex-delayed-eof"
++		cred := &auth.Auth{ID: did, Provider: "codex", Status: auth.StatusActive,
++			Attributes: map[string]string{auth.AttributeAuthKind: auth.AuthKindOAuth},
++			Metadata:   map[string]any{"access_token": "offline-fake", "websockets": true},
++		}
++		if _, err := mgr.Register(context.Background(), cred); err != nil {
++			t.Fatal(err)
++		}
++		registry.GetGlobalRegistry().RegisterClient(did, "codex", []*registry.ModelInfo{{ID: "gpt-6.2-sol"}})
++		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(did) })
++
++		proxy := httptest.NewServer(srv.engine)
++		defer proxy.Close()
++		clientReq, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses",
++			strings.NewReader(`{"model":"gpt-6.2-sol","stream":true,"input":"delayed-eof"}`))
++		if err != nil {
++			t.Fatal(err)
++		}
++		clientReq.Header.Set("Authorization", "Bearer test-key")
++		clientReq.Header.Set("Content-Type", "application/json")
++		clientReq.Header.Set(preflightreceipt.ReviewHeader, launch)
++		clientReq.Header.Set("Session-Id", session)
++		resp, err := proxy.Client().Do(clientReq)
++		if err != nil {
++			t.Fatal(err)
++		}
++		scanner := bufio.NewScanner(resp.Body)
++		sawCompleted := false
++		for scanner.Scan() {
++			if strings.Contains(scanner.Text(), `"type":"response.completed"`) {
++				sawCompleted = true
++				break // Simulate Codex closing immediately upon observing response.completed.
++			}
++		}
++		_ = resp.Body.Close()
++		if !sawCompleted {
++			t.Fatalf("client never received response.completed (status=%d)", resp.StatusCode)
++		}
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Complete && !r.Tainted && r.Requests == 1 })
++		if sealRes := seal(launch, session); sealRes.Code != http.StatusOK {
++			t.Fatalf("SealReview after immediate post-completed client close = %d %s, want 200", sealRes.Code, sealRes.Body.String())
 +		}
 +	})
 +}
@@ -1283,7 +1368,7 @@ index 85ae6d6..69a1d19 100644
 +	return func() bool { return snapshot != nil && len(snapshot.records) == 0 && h.Snapshot() == snapshot }
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..a58fa27 100644
+index 6074124..d5486ba 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -15,6 +15,7 @@ import (
@@ -1307,34 +1392,74 @@ index 6074124..a58fa27 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -450,6 +455,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -445,11 +450,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 	}
+ 	go func() {
+ 		defer close(out)
+-		defer func() {
++		bodyClosed := false
++		closeBody := func() {
++			if bodyClosed {
++				return
++			}
++			bodyClosed = true
+ 			if errClose := httpResp.Body.Close(); errClose != nil {
  				log.Errorf("codex executor: close response body error: %v", errClose)
  			}
- 		}()
+-		}()
++		}
++		defer closeBody()
 +		sawStrictTerminal := false
++		var pendingStrictTerminal []cliproxyexecutor.StreamChunk
  		for scanner.Scan() {
  			line := scanner.Bytes()
  			var translatedLine []byte
-@@ -538,7 +544,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
- 					case <-ctx.Done():
- 					}
- 				}
--				return
-+				if !strictReview {
+@@ -465,6 +478,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 				translatedLine = append([]byte("data: "), data...)
+ 				eventType := ojson.GetBytesNoCopy(data, "type").String()
+ 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
++					if strictReview && sawStrictTerminal {
++						if pc := preflightreceipt.From(ctx); pc != nil {
++							pc.Taint()
++						}
++					}
+ 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+ 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+ 						reporter.PublishFailure(ctx, errClearReplay)
+@@ -521,6 +539,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 			}
+ 
+ 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
++			if strictReview && (terminalSuccess || sawStrictTerminal) {
++				// Hold terminal and any trailing chunks until the upstream HTTP response reaches
++				// true io.EOF and closes cleanly, so a client disconnecting immediately after
++				// receiving response.completed cannot race with upstream EOF or mask trailing errors.
++				for i := range chunks {
++					pendingStrictTerminal = append(pendingStrictTerminal, cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent})
++				}
++				if terminalSuccess && isIncompleteEvent && len(chunks) == 0 {
++					pendingStrictTerminal = append(pendingStrictTerminal, cliproxyexecutor.StreamChunk{Incomplete: true})
++				}
++				sawStrictTerminal = true
++				if len(pendingStrictTerminal) > 64 {
++					if pc := preflightreceipt.From(ctx); pc != nil {
++						pc.Taint()
++					}
 +					return
 +				}
-+				// Formal review launches drain the upstream SSE response to true io.EOF so
-+				// trailing duplicate terminal events or errors are always observed and the
-+				// transport receipt verifies full body delivery.
-+				sawStrictTerminal = true
- 			}
- 		}
- 		if errScan := scanner.Err(); errScan != nil {
-@@ -546,6 +558,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
++				continue
++			}
+ 			for i := range chunks {
+ 				select {
+ 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent}:
+@@ -546,6 +583,31 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 +			if sawStrictTerminal {
++				if pc := preflightreceipt.From(ctx); pc != nil {
++					pc.Reject()
++				}
 +				select {
 +				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 +				case <-ctx.Done():
@@ -1343,6 +1468,18 @@ index 6074124..a58fa27 100644
 +			}
 +		}
 +		if sawStrictTerminal {
++			// Close and verify upstream body EOF BEFORE exposing response.completed downstream.
++			closeBody()
++			for _, pending := range pendingStrictTerminal {
++				select {
++				case out <- pending:
++					if len(pending.Payload) > 0 {
++						emittedCount++
++					}
++				case <-ctx.Done():
++					return
++				}
++			}
 +			return
  		}
  		if emittedCount == 0 {
@@ -2722,10 +2859,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..847c4c8 100644
+index e69de29..0f12aab 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1571 @@
+@@ -0,0 +1,1575 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3136,7 +3273,11 @@ index e69de29..847c4c8 100644
 +			c.invalid = true
 +			c.lastItemOutputSHA = ""
 +			c.lastItemResponseID = ""
++			alreadyCompleted := c.observedCompleted
 +			c.mu.Unlock()
++			if alreadyCompleted {
++				c.Taint()
++			}
 +		}
 +	}
 +}
@@ -4298,10 +4439,10 @@ index e69de29..847c4c8 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..ad6db5d 100644
+index e69de29..c5c3290 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1647 @@
+@@ -0,0 +1,1725 @@
 +package preflightreceipt
 +
 +import (
@@ -5947,5 +6088,83 @@ index e69de29..ad6db5d 100644
 +	c3.HandlerDone(true)
 +	if st := SealReview(root, launchOK, sessionOK); st != SealOK {
 +		t.Fatalf("SealReview rejected cleanly EOF-drained body: %v", st)
++	}
++}
++
++func TestReviewReceiptPostCompletedErrorOrIncompleteTaintsPriorTurn(t *testing.T) {
++	// Astra P1 (R20): if a launch already has a clean Turn 1 and Turn 2 sees response.completed
++	// followed by an error (without nested error object) or response.incomplete, the entire launch
++	// MUST be permanently tainted so SealReview cannot seal the earlier clean turn.
++	root := filepath.Join(t.TempDir(), "receipts")
++	cases := []struct {
++		name  string
++		trail string
++		id    string
++	}{
++		{name: "trailing-bare-error", trail: `data: {"type":"error"}` + "\n\n", id: "1"},
++		{name: "trailing-response-incomplete", trail: `data: {"type":"response.incomplete","response":{"id":"resp_t2","status":"incomplete","model":"gpt-6.2-sol"}}` + "\n\n", id: "2"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			launch := "review-eeee1111-2222-4333-8444-55555555592" + tc.id
++			session := "019d0000-0000-7000-8000-00000000092" + tc.id
++			// Turn 1: clean completed turn persisted unsealed.
++			ctx1, c1, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++			})})
++			req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++			resp1, err := cl1.Do(req1)
++			if err != nil {
++				t.Fatal(err)
++			}
++			c1.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_t1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++			_ = resp1.Body.Close()
++			e1.End()
++			c1.Complete(true)
++			c1.HandlerDone(true)
++			before := readReviewReceiptFile(t, root, launch)
++			if !before.Complete || before.Tainted || before.Requests != 1 {
++				t.Fatalf("expected clean Turn 1 receipt before Turn 2: %+v", before)
++			}
++
++			// Turn 2: response.completed followed by bare error / response.incomplete MUST taint launch.
++			ctx2, c2, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx2, e2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++			})})
++			req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++			resp2, err := cl2.Do(req2)
++			if err != nil {
++				t.Fatal(err)
++			}
++			c2.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_t2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n" + tc.trail))
++			_ = resp2.Body.Close()
++			e2.End()
++			c2.Complete(true)
++			c2.HandlerDone(true)
++
++			after := readReviewReceiptFile(t, root, launch)
++			if !after.Tainted || after.Complete || after.Sealed {
++				t.Fatalf("post-completed %s failed to taint launch: %+v", tc.name, after)
++			}
++			if st := SealReview(root, launch, session); st != SealRejected {
++				t.Fatalf("SealReview accepted launch after post-completed %s: %v", tc.name, st)
++			}
++		})
 +	}
 +}

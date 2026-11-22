@@ -2558,3 +2558,28 @@ def test_armed_pr_withdrawn_immediately_before_classification_and_other_pr_reads
         idx_disable = events.index(f"disable:{pr_num}")
         for later in ("allow_auto_merge", "required_checks", "pr_files:1805", "pr_files:1810", "checks", "spawn:1810"):
             assert later in events and idx_disable < events.index(later), (events, pr_num, later)
+
+
+def test_rearmed_auto_merge_invalidates_prior_withdrawn_so_fail_closed_withdraws_again(lane):
+    """R21（Sol P1 / Astra P1）：本轮早期成功撤回 1810 后，复核 pr() 发现它被重新挂起原生 auto-merge，
+    随后 checks() 超时导致未执行计划写阶段：必须立即作废旧 withdrawn 记录，fail_closed 再次撤回 1810。"""
+    github = FakeGitHub(lane)
+    github.states[1810] = {"auto_merge": True}
+    orig_pr = github.pr
+    reads = []
+
+    def pr_rearmed_on_recheck(number):
+        reads.append(number)
+        st = orig_pr(number)
+        if len(reads) >= 2:
+            st["auto_merge"] = True
+        return st
+
+    github.pr = pr_rearmed_on_recheck
+    github.checks = _hang
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    with pytest.raises(SourceUnreadable) as caught:
+        sweep.tick()
+    assert github.calls == [("disable", 1810), ("disable", 1810)]
+    assert any(a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw" and a.get("auto_merge_withdrawn") is True
+               for a in caught.value.actions)
