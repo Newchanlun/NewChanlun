@@ -180,25 +180,70 @@ class Closing:
         self.value = value
 
 
+MISSING = object()
+UNKNOWN = object()
+NONE = object()
+
+
 class Raised(Exception):
     """被模拟代码的异常；不要让宿主生成器把 StopIteration 改写成 RuntimeError。"""
 
-    def __init__(self, kind):
+    def __init__(self, kind, *args):
         self.kind = kind
+        self.args_model = Tuple(list(args))
+        self.value = args[0] if args and kind is StopIteration else NONE
 
 
 class Sequence:
-    def __init__(self, values):
+    def __init__(self, values, *, uncertain_tail=False):
         self.values = values
+        self.uncertain_tail = uncertain_tail
+
+
+class Tuple(Sequence):
+    pass
+
+
+class Dictionary(Sequence):
+    pass
+
+
+class IndeterminateIteration(Exception):
+    """未知键可能与已知键相等；不能凭空证明又取到了一项或已经耗尽。"""
+
+
+def hash_key(value):
+    if value is NONE or type(value) in (bool, int, float, complex, str, bytes):
+        return value
+    if isinstance(value, Tuple):
+        members = tuple(map(hash_key, value.values))
+        return UNKNOWN if any(member is UNKNOWN for member in members) else members
+    if isinstance(value, Sequence):
+        raise Raised(TypeError)
+    return UNKNOWN
+
+
+def unique_items(values, *, dictionary=False):
+    seen = set()
+    keys = []
+    uncertain = False
+    for value in values:
+        key = hash_key(value)
+        if key is UNKNOWN:
+            uncertain = True
+        elif key not in seen:
+            seen.add(key)
+            keys.append(value)
+    if uncertain or not dictionary and len(keys) > 1:
+        # 集合迭代顺序不是构造顺序；未知键也可能改变字典的迭代次序。
+        keys = [UNKNOWN] * len(keys)
+    return (Dictionary if dictionary else Sequence)(keys, uncertain_tail=uncertain)
 
 
 SYNC = ("sync_gen", "iterator")
 ASYNC = ("async_gen",)
 AWAIT = ("coroutine",)
-BUILTIN_CONSUMERS = {"list", "tuple", "set", "dict", "next", "sum", "any", "all", "min", "max", "sorted"}
-MISSING = object()
-UNKNOWN = object()
-NONE = object()
+BUILTIN_CONSUMERS = {"list", "tuple", "set", "frozenset", "dict", "next", "sum", "any", "all", "min", "max", "sorted"}
 
 
 def finish(cursor):
@@ -251,6 +296,7 @@ def integration_targets(entry, start):
             path = file.as_posix()
             paths.setdefault(module(path), []).append(path)
     modules, active, targets = {}, set(), set()
+    error_frames = [[]]
 
     def load(path):
         if path not in modules:
@@ -278,6 +324,11 @@ def integration_targets(entry, start):
         return None if isinstance(ref, tuple) else ref
 
     def attribute(value, name):
+        if isinstance(value, Raised):
+            if name == "value" and value.kind is StopIteration:
+                return value.value
+            if name == "args":
+                return value.args_model
         if isinstance(value, tuple):
             return (*value, name)
         if isinstance(value, Instance):
@@ -334,19 +385,27 @@ def integration_targets(entry, start):
         scope.values.update((key, value) for key, value in keywords.items() if key in scope.values)
         cursor = expression(node.body, scope, record) if isinstance(node, ast.Lambda) else statements(body, scope, record)
         # 仅在运行时阻止递归；暂停的帧不会阻止同一例程的其他实例。
-        injected = None
+        injected, active_errors = None, []
         while node not in active:
             active.add(node)
+            # 暂停帧保留自己的异常栈，但只有运行时才参与裸 raise 的查找。
+            error_frames.append(active_errors)
             try:
                 item = next(cursor) if injected is None else cursor.throw(injected)
                 injected = None
             except StopIteration as done:
-                return done.value if isinstance(node, ast.Lambda) else done.value[1]
+                if isinstance(node, ast.Lambda):
+                    return done.value
+                flow, result = done.value
+                if value.kind == "sync_gen" and (flow is None or result is NONE):
+                    return None
+                return result if flow == "return" else NONE
             except Raised as error:
                 if value.kind == "sync_gen" and error.kind is StopIteration:
                     raise Raised(RuntimeError) from None
                 raise
             finally:
+                error_frames.pop()
                 active.remove(node)
             try:
                 yield item
@@ -368,12 +427,12 @@ def integration_targets(entry, start):
     def take(value, kinds, default=NO_DEFAULT):
         if not isinstance(value, Pending) or value.kind not in kinds or value.cursor.gi_running:
             return UNKNOWN if default is NO_DEFAULT else default
-        member = next(value.cursor, MISSING)
-        if member is not MISSING:
-            return member
-        if default is NO_DEFAULT:
-            raise Raised(StopIteration)
-        return default
+        try:
+            return next(value.cursor)
+        except StopIteration as stop:
+            if default is NO_DEFAULT:
+                raise Raised(StopIteration, *stop.args) from None
+            return default
 
     def close(value):
         if not isinstance(value, Pending) or value.kind != "sync_gen":
@@ -409,6 +468,8 @@ def integration_targets(entry, start):
                 yield item
         elif isinstance(value, Sequence):
             yield from value.values
+            if value.uncertain_tail:
+                raise IndeterminateIteration
         elif type(value) in (str, bytes):
             yield from value
         else:
@@ -431,9 +492,9 @@ def integration_targets(entry, start):
                         source = yield from expression(node.generators[index + 1].iter, inner, record)
                         yield from walk(index + 1, source)
                     elif isinstance(node, ast.DictComp):
-                        yield from expression(node.key, inner, record)
+                        key = yield from expression(node.key, inner, record)
                         yield from expression(node.value, inner, record)
-                        yield UNKNOWN
+                        yield key
                     else:
                         yield (yield from expression(node.elt, inner, record))
 
@@ -443,18 +504,36 @@ def integration_targets(entry, start):
         if value is NONE:
             return False
         if isinstance(value, Sequence):
-            return bool(value.values)
+            return True if value.values else None if value.uncertain_tail else False
         if type(value) in (bool, int, float, complex, str, bytes):
             return bool(value)
         return None
 
     def expression(node, scope, record):
+        if node is None:
+            return NONE
         if isinstance(node, ast.Constant):
             return node.value if node.value is not None else NONE
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = yield from expression(node.operand, scope, record)
+            if type(value) in (bool, int, float, complex):
+                return +value if isinstance(node.op, ast.UAdd) else -value
+            return UNKNOWN
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+            left = yield from expression(node.left, scope, record)
+            right = yield from expression(node.right, scope, record)
+            if type(left) in (bool, int, float, complex) and type(right) in (bool, int, float, complex):
+                try:
+                    return left + right if isinstance(node.op, ast.Add) else left - right
+                except OverflowError:
+                    raise Raised(OverflowError) from None
+            return UNKNOWN
         if isinstance(node, ast.Name):
-            return scope.get(node.id)
+            value = scope.get(node.id, MISSING)
+            return builtin_exception(node.id) if value is MISSING else value
         if isinstance(node, ast.Attribute):
-            return attribute((yield from expression(node.value, scope, record)), node.attr)
+            value = yield from expression(node.value, scope, record)
+            return attribute(value, node.attr)
         if isinstance(node, ast.Lambda):
             return (yield from routine(node, scope, record))
         if isinstance(node, ast.Call):
@@ -467,6 +546,9 @@ def integration_targets(entry, start):
             builtin = callee[1] if isinstance(callee, tuple) and len(callee) == 2 and callee[0] == "builtins" else None
             if isinstance(node.func, ast.Name) and scope.get(node.func.id, MISSING) is MISSING:
                 builtin = node.func.id
+            kind = exception_type(callee)
+            if kind is not None:
+                return Raised(kind, *args)
             if builtin in BUILTIN_CONSUMERS and args:
                 if builtin == "next":
                     return take(args[0], SYNC, *args[1:2])
@@ -476,11 +558,17 @@ def integration_targets(entry, start):
                         if flag is None or flag == (builtin == "any"):
                             return flag
                     return builtin == "all"
-                if builtin in ("list", "tuple", "set", "sorted"):
-                    return Sequence(list(items(args[0], SYNC)))
+                if builtin in ("list", "tuple", "sorted"):
+                    return (Tuple if builtin == "tuple" else Sequence)(list(items(args[0], SYNC)))
+                if builtin in ("set", "frozenset"):
+                    return unique_items(items(args[0], SYNC))
+                if builtin == "dict" and isinstance(args[0], Dictionary) and not keywords:
+                    return args[0]
                 force(args[0], SYNC)
-            elif builtin in ("list", "tuple", "set") and not args:
-                return Sequence([])
+            elif builtin in ("list", "tuple", "set", "frozenset", "dict") and not args:
+                if builtin == "dict":
+                    return unique_items(keywords, dictionary=True)
+                return (Tuple if builtin == "tuple" else Sequence)([])
             elif builtin == "iter" and len(args) == 1:
                 if isinstance(args[0], Sequence) or type(args[0]) in (str, bytes):
                     return Pending("iterator", (item for item in items(args[0], SYNC)))
@@ -507,7 +595,7 @@ def integration_targets(entry, start):
             if isinstance(value, Pending) and value.kind in SYNC and not value.cursor.gi_running:
                 return (yield from value.cursor)
             yield from items(value, SYNC)
-            return UNKNOWN
+            return NONE if isinstance(value, Sequence) or type(value) in (str, bytes) else UNKNOWN
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
             values = []
             for part in node.elts:
@@ -515,7 +603,32 @@ def integration_targets(entry, start):
                     values.extend(items((yield from expression(part.value, scope, record)), SYNC))
                 else:
                     values.append((yield from expression(part, scope, record)))
-            return Sequence(values)
+            if isinstance(node, ast.Set):
+                return unique_items(values)
+            return (Tuple if isinstance(node, ast.Tuple) else Sequence)(values)
+        if isinstance(node, ast.Dict):
+            keys = []
+            for key, expr in zip(node.keys, node.values):
+                if key is not None:
+                    keys.append((yield from expression(key, scope, record)))
+                value = yield from expression(expr, scope, record)
+                if key is None:
+                    if not isinstance(value, Dictionary):
+                        keys.append(UNKNOWN)
+                    else:
+                        keys.extend(value.values)
+                        if value.uncertain_tail:
+                            keys.append(UNKNOWN)
+            return unique_items(keys, dictionary=True)
+        if isinstance(node, ast.Subscript):
+            value = yield from expression(node.value, scope, record)
+            index = yield from expression(node.slice, scope, record)
+            if isinstance(value, Tuple) and type(index) is int:
+                try:
+                    return value.values[index]
+                except IndexError:
+                    raise Raised(IndexError) from None
+            return UNKNOWN
         if isinstance(node, ast.NamedExpr):
             value = yield from expression(node.value, scope, record)
             containing = scope
@@ -548,31 +661,33 @@ def integration_targets(entry, start):
                 asynchronous = any(item.is_async for item in node.generators) or any(
                     isinstance(part, ast.Await) for part in ast.walk(node))
                 return Pending("async_gen" if asynchronous else "sync_gen", cursor)
+            if isinstance(node, (ast.SetComp, ast.DictComp)):
+                return unique_items(cursor, dictionary=isinstance(node, ast.DictComp))
             return Sequence(list(cursor))
         if node is not None:
             for child in ast.iter_child_nodes(node):
                 yield from expression(child, scope, record)
         return None
 
-    def exception_kind(node, scope):
-        name = None
-        if isinstance(node, ast.Name) and scope.get(node.id, MISSING) is MISSING:
-            name = node.id
-        elif isinstance(node, (ast.Name, ast.Attribute)):
-            ref = scope.get(node.id) if isinstance(node, ast.Name) else (
-                attribute(scope.get(node.value.id), node.attr) if isinstance(node.value, ast.Name) else None)
-            if isinstance(ref, tuple) and len(ref) == 2 and ref[0] == "builtins":
-                name = ref[1]
-        value = getattr(builtins, name, None) if name is not None else None
+    def exception_type(value):
+        if isinstance(value, tuple) and len(value) == 2 and value[0] == "builtins":
+            return builtin_exception(value[1])
         return value if isinstance(value, type) and issubclass(value, BaseException) else None
 
-    def catches(node, scope, kind):
+    def builtin_exception(name):
+        value = getattr(builtins, name, None)
+        return value if isinstance(value, type) and issubclass(value, BaseException) else None
+
+    def catches(node, scope, kind, record):
         if node is None:
             return True
         if isinstance(node, ast.Tuple):
-            return any(catches(member, scope, kind) for member in node.elts)
-        handler_kind = exception_kind(node, scope)
-        return handler_kind is not None and issubclass(kind, handler_kind)
+            for member in node.elts:
+                if (yield from catches(member, scope, kind, record)):
+                    return True
+            return False
+        handler_type = exception_type((yield from expression(node, scope, record)))
+        return handler_type is not None and issubclass(kind, handler_type)
 
     def alternatives(scope, *branches):
         scopes = []
@@ -590,7 +705,7 @@ def integration_targets(entry, start):
             except Raised as error:
                 if error.kind is GeneratorExit:
                     raise
-                flow, result = "raise", error.kind
+                flow, result = "raise", error
             if flow is None:
                 continuing.append([layer.values.copy() for layer in scopes])
             else:
@@ -607,7 +722,16 @@ def integration_targets(entry, start):
                 flow, value = stopped[0]
                 result = value if all(result == value for _, result in stopped) else None
                 if flow == "raise":
-                    raise Raised(result)
+                    errors = [error for _, error in stopped]
+                    if all(error is errors[0] for error in errors):
+                        raise errors[0]
+                    kind = errors[0].kind
+                    if all(error.kind is kind for error in errors):
+                        args = errors[0].args_model.values
+                        if all(error.args_model.values == args for error in errors):
+                            raise errors[0]
+                        raise Raised(kind, UNKNOWN)
+                    raise Raised(None)
                 return flow, result
             # 所有分支都离开当前语句列表；只保留仍可能继续的外层路径。
             return ("continue" if "continue" in flows else "break" if "break" in flows else "return"), None
@@ -645,9 +769,20 @@ def integration_targets(entry, start):
             elif isinstance(node, ast.Return):
                 return "return", (yield from expression(node.value, scope, record))
             elif isinstance(node, ast.Raise):
-                yield from expression(node.exc, scope, record)
-                yield from expression(node.cause, scope, record)
-                raise Raised(exception_kind(node.exc.func if isinstance(node.exc, ast.Call) else node.exc, scope))
+                if node.exc is None:
+                    for active_errors in reversed(error_frames):
+                        if active_errors:
+                            raise active_errors[-1]
+                    raise Raised(RuntimeError)
+                error = yield from expression(node.exc, scope, record)
+                if node.cause is not None:
+                    yield from expression(node.cause, scope, record)
+                if isinstance(error, Raised):
+                    raise error
+                kind = exception_type(error)
+                if kind is None and (error is NONE or type(error) in (bool, int, float, complex, str, bytes)):
+                    kind = TypeError
+                raise Raised(kind)
             elif isinstance(node, ast.If):
                 flag = truth((yield from expression(node.test, scope, record)))
                 branches = walk(node.body if flag else node.orelse) if flag is not None else alternatives(
@@ -711,9 +846,12 @@ def integration_targets(entry, start):
                 def handler(item, error):
                     if item.name:
                         scope.bind(item.name, error)
+                    active_errors = error_frames[-1]
+                    active_errors.append(error)
                     try:
                         return (yield from walk(item.body))
                     finally:
+                        active_errors.pop()
                         if item.name:
                             scope.bind(item.name, None)
 
@@ -726,7 +864,7 @@ def integration_targets(entry, start):
                             flow, result = yield from alternatives(scope, *(handler(item, error) for item in node.handlers))
                         else:
                             for item in node.handlers:
-                                if not isinstance(node, ast.TryStar) and catches(item.type, scope, error.kind):
+                                if not isinstance(node, ast.TryStar) and (yield from catches(item.type, scope, error.kind, record)):
                                     flow, result = yield from handler(item, error)
                                     break
                             else:
@@ -737,7 +875,14 @@ def integration_targets(entry, start):
                 except Raised as error:
                     raised = error
 
-                final, other = yield from walk(node.finalbody)
+                active_errors = error_frames[-1]
+                if raised is not None:
+                    active_errors.append(raised)
+                try:
+                    final, other = yield from walk(node.finalbody)
+                finally:
+                    if raised is not None:
+                        active_errors.pop()
                 if final:
                     return final, other
                 if raised is not None:
@@ -769,7 +914,7 @@ def integration_targets(entry, start):
         def call(routine):
             try:
                 return force(invoke(routine, [], {}, True), SYNC)
-            except Raised:
+            except (Raised, IndeterminateIteration):
                 return None
 
         if isinstance(value, Routine):
@@ -777,7 +922,7 @@ def integration_targets(entry, start):
         elif isinstance(value, Class):
             try:
                 instance = invoke(value, [], {}, True)
-            except Raised:
+            except (Raised, IndeterminateIteration):
                 continue
             for method in value.values:
                 if not method.startswith("_"):

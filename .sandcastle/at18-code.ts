@@ -139,16 +139,18 @@ type RustReference = { path: string[]; access: RustAccess };
 type RustBinding = { kind: "path" | "call-result"; path: string[] } | RustRoutine |
   { kind: "pending"; routine: RustRoutine; args: (RustBinding | undefined)[]; driver: "await" | "iterate" | "async-iterate" } |
   { kind: "ready"; value?: RustBinding } | { kind: "suspended" } |
-  { kind: "literal"; value: boolean | bigint | string } | RustElements | RustEnum |
+  { kind: "literal"; value: boolean | bigint | string } | RustElements | RustEnum | RustTypeAlias |
   { kind: "constructor"; tag: string; shape: VariantShape; family: RustEnum } |
   { kind: "variant"; tag: string; tuple?: RustElements; fields?: Map<string, RustBinding | undefined> };
 type RustElements = { kind: "tuple" | "array"; elements: (RustBinding | undefined)[] };
 type VariantShape = { form: "unit" | "record" } | { form: "tuple"; arity: number };
 type RustEnum = { kind: "enum"; owner: string; variants: Map<string, VariantShape> };
+type RustTypeAlias = { kind: "type-alias"; target: string[]; scope: RustScope };
 type RustConstructor = Extract<RustBinding, { kind: "constructor" }>;
 type RustTruth = boolean | undefined;
 class RustExit {
-  constructor(readonly reason: "return" | "suspended" | "break" | "continue", readonly value?: RustBinding) {}
+  constructor(readonly reason: "return" | "suspended" | "break" | "continue",
+    readonly value?: RustBinding, readonly label?: string) {}
 }
 type RustRoutine = {
   kind: "routine"; body: string[]; params: RustParameter[]; scope: RustScope;
@@ -161,6 +163,18 @@ type RustScope = {
   values: Map<string, RustBinding | undefined>;
 };
 type RustParameter = string[];
+const rustPathLimit = 32;
+class RustPathLimit extends Error {}
+
+type RustTerminal = {
+  value: RustBinding | undefined;
+  references: Map<string, RustReference>;
+};
+type RustFlow<T> = {
+  fallthrough: T[];
+  exits: T[];
+  suspended: T[];
+};
 const identifier = /^[A-Za-z_]\w*$/;
 const delimiters: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
 
@@ -255,6 +269,27 @@ function pathAt(code: string[], i: number) {
   return { parts, end: i };
 }
 
+// 类型位置允许 Path<T>，不要求表达式位置的 ::<T>。
+function aliasTarget(code: string[], start: number): string[] | undefined {
+  let index = start + 2;
+  if (code[index] === "<") index = genericEnd(code, index) + 1;
+  const end = separator(code, index, code.length, ";");
+  index = separator(code, index, end, "=") + 1;
+  if (code[index] === "::") index++;
+  const path: string[] = [];
+  while (index < end && identifier.test(code[index] ?? "")) {
+    path.push(code[index++]);
+    if (code[index] === "::" && code[index + 1] === "<") index++;
+    if (code[index] === "<") {
+      const close = genericEnd(code, index);
+      if (close <= index || close >= end) return;
+      index = close + 1;
+    }
+    if (index === end || code[index] === "where") return path;
+    if (code[index++] !== "::") return;
+  }
+}
+
 function lookup(scope: RustScope, [first, ...rest]: string[]): RustBinding | undefined {
   if (!first) return;
   for (let layer: RustScope | undefined = scope; layer; layer = layer.parent) {
@@ -263,6 +298,7 @@ function lookup(scope: RustScope, [first, ...rest]: string[]): RustBinding | und
     const value = bindings.get(first);
     if (!rest.length) return value;
     if (value?.kind === "path") return { kind: "path", path: [...value.path, ...rest] };
+    if (value?.kind === "type-alias") return { kind: "path", path: [first, ...rest] };
     if (value?.kind === "enum" && rest.length === 1) return enumConstructor(value, rest[0]);
     return;
   }
@@ -308,17 +344,21 @@ const optionVariants: RustEnum = { kind: "enum", owner: "prelude::Option",
 const resultVariants: RustEnum = { kind: "enum", owner: "prelude::Result",
   variants: new Map<string, VariantShape>([["Ok", { form: "tuple", arity: 1 }], ["Err", { form: "tuple", arity: 1 }]]) };
 
+function builtinEnum(path: string[]): RustEnum | undefined {
+  const owner = path.at(-1);
+  if (owner !== "Option" && owner !== "Result") return;
+  const qualifiers = path.slice(0, -1).join("::");
+  if (!qualifiers || ["std", "core"].some(root => qualifiers === `${root}::${owner.toLowerCase()}`)) {
+    return owner === "Option" ? optionVariants : resultVariants;
+  }
+}
+
 function builtinConstructor(path: string[]): RustConstructor | undefined {
   const name = path.at(-1);
   if (!name) return;
-  const owner = name === "Some" || name === "None" ? "Option" :
-    name === "Ok" || name === "Err" ? "Result" : undefined;
-  if (!owner) return;
-  const qualifiers = path.slice(0, -1).join("::");
-  if (!qualifiers || qualifiers === owner || ["std", "core"].some(root =>
-    qualifiers === `${root}::${owner.toLowerCase()}::${owner}`)) {
-    return enumConstructor(owner === "Option" ? optionVariants : resultVariants, name);
-  }
+  const family = path.length === 1 ?
+    optionVariants.variants.has(name) ? optionVariants : resultVariants : builtinEnum(path.slice(0, -1));
+  return family && enumConstructor(family, name);
 }
 
 function enumDefinition(code: string[], start: number, end: number, owner: string,
@@ -353,52 +393,56 @@ function splitAt(code: string[], delimiter: string) {
   return parts;
 }
 
+type RustMatch = {
+  truth: true | undefined;
+  bindings: Map<string, RustBinding | undefined>;
+};
+
 function rustPattern(pattern: string[], value: RustBinding | undefined, scope: RustScope,
-  constructorOf: (value: RustBinding | undefined, scope: RustScope) => RustConstructor | undefined) {
-  type Match = { truth: RustTruth; binds?: Map<string, RustBinding | undefined> };
-  const combine = (parts: Match[]): Match => ({
-    truth: parts.some(p => p.truth === false) ? false : parts.every(p => p.truth === true) ? true : undefined,
-    binds: new Map(parts.flatMap(p => [...(p.binds ?? [])])),
-  });
-  function match(pat: string[], member: RustBinding | undefined): Match {
+  constructorOf: (value: RustBinding | undefined, scope: RustScope) => RustConstructor | undefined): RustMatch[] {
+  const one = (truth: RustTruth, bindings = new Map<string, RustBinding | undefined>()): RustMatch[] =>
+    truth === false ? [] : [{ truth, bindings }];
+  function cartesian(parts: RustMatch[][]) {
+    let matches = one(true);
+    for (const part of parts) {
+      if (matches.length * part.length > rustPathLimit) throw new RustPathLimit();
+      matches = matches.flatMap(left => part.map(right => ({
+        truth: left.truth && right.truth,
+        bindings: new Map([...left.bindings, ...right.bindings]),
+      })));
+    }
+    return matches;
+  }
+  const maybe = (matches: RustMatch[], exact: boolean) =>
+    exact ? matches : matches.map(result => ({ ...result, truth: undefined }));
+
+  function match(pat: string[], member: RustBinding | undefined): RustMatch[] {
     const ors = splitAt(pat, "|");
     if (ors.length > 1 || pat[0] === "|") {
-      const possible: Match[] = [];
-      for (const option of ors.filter(part => part.length)) {
-        const result = match(option, member);
-        if (result.truth !== false) possible.push(result);
-        if (result.truth === true) break;
-      }
-      if (possible.length <= 1) return possible[0] ?? { truth: false };
-      const binds = new Map(possible[0].binds);
-      for (const [name, binding] of binds) {
-        if (possible.some(option => option.binds?.get(name) !== binding)) binds.delete(name);
-      }
-      return { binds, truth: possible.some(option => option.truth === true) ? true : undefined };
+      const results = ors.filter(part => part.length).flatMap(part => match(part, member));
+      if (results.length > rustPathLimit) throw new RustPathLimit();
+      return results;
     }
     const at = separator(pat, 0, pat.length, "@");
-    if (at < pat.length) return combine([match(pat.slice(0, at), member), match(pat.slice(at + 1), member)]);
-    if (pat.length === 1 && pat[0] === "_") return { truth: true };
+    if (at < pat.length) return cartesian([match(pat.slice(0, at), member), match(pat.slice(at + 1), member)]);
+    if (pat.length === 1 && pat[0] === "_") return one(true);
     const expected = literal(pat);
-    if (expected) return { truth: member?.kind === "literal" ? expected.value === member.value : undefined };
+    if (expected) return one(member?.kind === "literal" ? expected.value === member.value : undefined);
     const { parts, end } = pathAt(pat, 0);
-    const resolved = lookup(scope, parts);
-    const ctor = constructorOf(resolved, scope);
+    const ctor = constructorOf(lookup(scope, parts), scope);
     if (ctor) {
       const variant = member?.kind === "variant" ? member : undefined;
-      if (variant && variant.tag !== ctor.tag) return { truth: false };
-      if (ctor.shape.form === "unit" && end === pat.length) return { truth: variant ? true : undefined };
+      if (variant && variant.tag !== ctor.tag) return [];
+      if (ctor.shape.form === "unit" && end === pat.length) return one(variant ? true : undefined);
       if (ctor.shape.form === "tuple" && pat[end] === "(" && groupEnd(pat, end) === pat.length - 1) {
-        const matched = matchElements(splitAt(pat.slice(end + 1, -1), ","), variant?.tuple?.elements);
-        return { ...matched, truth: variant ? matched.truth : undefined };
+        return maybe(matchElements(splitAt(pat.slice(end + 1, -1), ","), variant?.tuple?.elements), !!variant);
       }
       if (ctor.shape.form === "record" && pat[end] === "{" && groupEnd(pat, end) === pat.length - 1) {
-        const matched = combine(splitAt(pat.slice(end + 1, -1), ",").filter(field => field[0] !== "..").map(field => {
+        const fields = splitAt(pat.slice(end + 1, -1), ",").filter(field => field[0] !== "..");
+        return maybe(cartesian(fields.map(field => {
           const colon = separator(field, 0, field.length, ":");
-          const name = field[colon - 1];
-          return match(colon < field.length ? field.slice(colon + 1) : field, variant?.fields?.get(name));
-        }));
-        return { ...matched, truth: variant ? matched.truth : undefined };
+          return match(colon < field.length ? field.slice(colon + 1) : field, variant?.fields?.get(field[colon - 1]));
+        })), !!variant);
       }
     }
     if (["(", "["].includes(pat[0]) && groupEnd(pat, 0) === pat.length - 1) {
@@ -410,27 +454,18 @@ function rustPattern(pattern: string[], value: RustBinding | undefined, scope: R
     const binding = pat.findIndex(token => token !== "ref" && token !== "mut");
     const name = binding === pat.length - 1 ? pat[binding] : "";
     if (identifier.test(name) && !patternKeywords.has(name) && !/^[A-Z]/.test(name)) {
-      return { truth: true, binds: new Map([[name, member]]) };
+      return one(true, new Map([[name, member]]));
     }
-    return { truth: undefined };
+    return one(undefined);
   }
-  function matchElements(fields: string[][], elements: RustElements["elements"] | undefined): Match {
+  function matchElements(fields: string[][], elements: RustElements["elements"] | undefined): RustMatch[] {
     const rest = fields.findIndex(field => field.length === 1 && field[0] === "..");
-    if (elements && (rest < 0 ? elements.length !== fields.length : elements.length < fields.length - 1)) {
-      return { truth: false };
-    }
-    const matched = combine(fields.flatMap((field, index) => index === rest ? [] : [match(field,
+    if (elements && (rest < 0 ? elements.length !== fields.length : elements.length < fields.length - 1)) return [];
+    const matched = cartesian(fields.flatMap((field, index) => index === rest ? [] : [match(field,
       elements?.[rest >= 0 && index > rest ? elements.length - fields.length + index : index])]));
-    return { ...matched, truth: elements ? matched.truth : undefined };
+    return maybe(matched, !!elements);
   }
-  const { truth, binds } = match(pattern, value);
-  const bindings = new Map<string, RustBinding | undefined>();
-  for (const name of patternNames(pattern)) {
-    const existing = lookup(scope, [name]);
-    // 单元变体（如 None 或它的导入别名）是模式常量，不是新的局部变量。
-    if (!constructorOf(existing, scope)) bindings.set(name, binds?.get(name));
-  }
-  return { truth, bindings };
+  return match(pattern, value);
 }
 
 function fnPointerEnd(code: string[], start: number, end: number) {
@@ -480,7 +515,6 @@ function captured(scope: RustScope, includeValues: boolean): RustScope {
 function rustReferences(imports: ReturnType<typeof rustImports>, body: string[], params: string[],
   observeValues: boolean, itemEnabled: (prefix: string[]) => boolean, latent = false, driveReturn = false,
   moduleEnum: (path: string[]) => RustEnum | undefined = () => undefined): RustReference[] {
-  const refs: RustReference[] = [];
   const module: RustScope = {
     items: new Map(imports.map(({ alias, path }) => [alias, { kind: "path", path }])),
     macros: new Set(),
@@ -488,17 +522,57 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
   };
   const running = new Set<string[]>();
   let localEnum = 0;
+  let refs = new Map<string, RustReference>();
+  const pendingPaths: number[][] = [[]];
+  let path: number[] = [], cursor = 0, pathCount = 1;
+
+  // 按决策前缀重放同一求值器，不复制捕获的作用域或把不同路径的值混成一个。
+  // 一条路径上，只有正常结果会继续扫描；return 与挂起沿当前调用栈传播到所属边界。
+  function selectPath<T>(choices: readonly T[]): T {
+    if (choices.length === 1) return choices[0];
+    if (!choices.length) throw new RustPathLimit();
+    const index = cursor++;
+    if (index < path.length) return choices[path[index]];
+    pathCount += choices.length - 1;
+    // 未枚举的分支不能被当成已经验证的执行路径。
+    if (pathCount > rustPathLimit) throw new RustPathLimit();
+    for (let i = choices.length - 1; i > 0; i--) pendingPaths.push([...path, i]);
+    path.push(0);
+    return choices[0];
+  }
+
+  function decide(truth: RustTruth) {
+    return truth ?? selectPath([false, true]);
+  }
+
+  function recordReference(path: string[], access: RustAccess) {
+    const key = access + ":" + path.join("::");
+    if (!refs.has(key)) refs.set(key, { path, access });
+  }
+  function resolveEnum(scope: RustScope, path: string[], seen = new Set<RustTypeAlias>()): RustEnum | undefined {
+    if (path.length === 1) {
+      for (let layer: RustScope | undefined = scope; layer; layer = layer.parent) {
+        if (!layer.items.has(path[0])) continue;
+        const value = layer.items.get(path[0]);
+        if (value?.kind === "enum") return value;
+        if (value?.kind === "path") return builtinEnum(value.path) ?? moduleEnum(value.path);
+        if (value?.kind !== "type-alias" || seen.has(value)) return;
+        seen.add(value);
+        return resolveEnum(value.scope, value.target, seen);
+      }
+    }
+    return moduleEnum(path) ?? builtinEnum(path);
+  }
+
   function constructorOf(value: RustBinding | undefined, scope: RustScope): RustConstructor | undefined {
     if (value?.kind === "constructor") return value;
     if (value?.kind !== "path") return;
     const path = value.path, name = path.at(-1);
     if (!name) return;
     if (path.length > 1) {
-      const ownerPath = path.slice(0, -1);
-      const owner = ownerPath.length === 1 ? lookup(scope, ownerPath) : undefined;
-      if (owner?.kind === "enum") return enumConstructor(owner, name);
-      const definition = moduleEnum(ownerPath);
+      const definition = resolveEnum(scope, path.slice(0, -1));
       if (definition) return enumConstructor(definition, name);
+      return;
     }
     return builtinConstructor(path);
   }
@@ -509,10 +583,18 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     for (; scope; scope = scope.parent) if (scope.macros.has(name)) return true;
     return false;
   }
+  function bindMatch(scope: RustScope, pattern: RustParameter, matched?: RustMatch) {
+    for (const name of patternNames(pattern)) {
+      // 单元变体（如 None 或经 use 导入的别名）不是新的局部名。
+      if (!constructorOf(lookup(scope, [name]), scope)) scope.values.set(name, matched?.bindings.get(name));
+    }
+  }
+
   function bind(scope: RustScope, pattern: RustParameter, value?: RustBinding) {
-    const matched = rustPattern(pattern, value, scope, constructorOf);
-    for (const [name, member] of matched.bindings) scope.values.set(name, member);
-    return matched.truth;
+    const matches = rustPattern(pattern, value, scope, constructorOf);
+    const selected = latent ? matches[0] : matches.find(match => decide(match.truth));
+    bindMatch(scope, pattern, selected);
+    return selected ? latent ? selected.truth : true : false;
   }
 
   function outcome(run: () => RustBinding | undefined) {
@@ -546,42 +628,26 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     return a.kind === "constructor" && b.kind === a.kind && a.tag === b.tag;
   }
 
-  function branches(scope: RustScope, ...runs: (() => RustBinding | undefined)[]): RustBinding | undefined {
+  function branch(...runs: (() => RustBinding | undefined)[]): RustBinding | undefined {
     if (latent) {
       for (const run of runs) possible(run);
       return;
     }
-    const layers: RustScope[] = [];
-    for (let layer: RustScope | undefined = scope; layer; layer = layer.parent) layers.push(layer);
-    const initial = layers.map(layer => new Map(layer.values));
-    const mark = refs.length;
-    const results = runs.map(run => {
-      const flow = outcome(run);
-      const references = refs.splice(mark);
-      const values = layers.map(layer => new Map(layer.values));
-      layers.forEach((layer, i) => { layer.values = new Map(initial[i]); });
-      return { ...flow, values, references };
-    });
-    const first = results[0];
-    const keys = results.slice(1).map(result => new Set(result.references.map(ref => ref.access + ":" + ref.path.join("::"))));
-    for (const ref of first.references) {
-      const key = ref.access + ":" + ref.path.join("::");
-      if (keys.every(path => path.has(key))) refs.push(ref);
-    }
-    const exits = results.map(result => result.exit);
-    const value = results.every(result => sameValue(first.value, result.value)) ? first.value : undefined;
-    if (exits.includes("suspended")) throw new RustExit("suspended");
-    // 存在提前退出的路径时，块内后续语句不再是必然执行。
-    if (exits.some(exit => exit !== undefined)) {
-      throw new RustExit(exits.every(exit => exit === first.exit) ? first.exit ?? "return" : "return", value);
-    }
-    layers.forEach((layer, i) => {
-      for (const name of new Set(results.flatMap(result => [...result.values[i].keys()]))) {
-        const binding = first.values[i].get(name);
-        layer.values.set(name, results.every(result => sameValue(binding, result.values[i].get(name))) ? binding : undefined);
-      }
-    });
-    return value;
+    return selectPath(runs)();
+  }
+
+  function sameBindings(a: Map<string, RustBinding | undefined>, b: Map<string, RustBinding | undefined>) {
+    return a.size === b.size && [...a].every(([name, value]) => b.has(name) && sameValue(value, b.get(name)));
+  }
+
+  function scopeSnapshot(scope: RustScope): Map<string, RustBinding | undefined>[] {
+    const layers: Map<string, RustBinding | undefined>[] = [];
+    for (let layer: RustScope | undefined = scope; layer; layer = layer.parent) layers.push(new Map(layer.values));
+    return layers;
+  }
+
+  function unchanged(scope: RustScope, snapshot: Map<string, RustBinding | undefined>[]) {
+    return scopeSnapshot(scope).every((values, i) => sameBindings(values, snapshot[i]));
   }
 
   function parameterScope(parent: RustScope, params: RustParameter[], args: (RustBinding | undefined)[]): RustScope {
@@ -590,7 +656,7 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     return scope;
   }
   const note = (value: RustBinding | undefined, access: RustAccess) => {
-    if (value?.kind === "path") refs.push({ path: value.path, access });
+    if (value?.kind === "path") recordReference(value.path, access);
   };
 
   function evaluateRoutine(routine: RustRoutine, args: (RustBinding | undefined)[]) {
@@ -629,12 +695,15 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     if (value?.kind === "ready" && driver === "await") return value.value;
     if (value?.kind === "suspended" && driver === "await") return value;
     if (value?.kind === "pending" && value.driver === driver) return evaluateRoutine(value.routine, value.args);
-    if (value?.kind === "call-result" && driver === "await") refs.push({ path: value.path, access: "drive" });
+    if (value?.kind === "call-result" && driver === "await") recordReference(value.path, "drive");
   }
 
   function awaitValue(value: RustBinding | undefined) {
     const result = drive(value, "await");
-    if (result?.kind === "suspended" && !latent) throw new RustExit("suspended");
+    if (!latent && (result?.kind === "suspended" ||
+        (value === undefined || value.kind === "call-result" || value.kind === "path") && decide(undefined))) {
+      throw new RustExit("suspended");
+    }
     return result;
   }
 
@@ -714,6 +783,9 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
             else if (code[item.index] === "enum" && item.opaqueBody !== undefined) {
               scope.items.set(item.name, enumDefinition(code, item.opaqueBody, item.end - 1,
                 `block:${localEnum++}:${item.name}`, itemEnabled));
+            } else if (code[item.index] === "type") {
+              const target = aliasTarget(code, item.index);
+              scope.items.set(item.name, target ? { kind: "type-alias", target, scope: captured(scope, false) } : undefined);
             } else scope.items.set(item.name, undefined);
           }
           if (latent && item.opaqueBody !== undefined) opaque.push(code.slice(item.opaqueBody + 1, item.end - 1));
@@ -834,7 +906,12 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     return last > start ? last + 1 : end;
   }
 
+  function labelAt(code: string[], start: number) {
+    if (code[start] === "'" && identifier.test(code[start + 1] ?? "")) return code[start + 1];
+  }
+
   function bracedExpressionEnd(code: string[], start: number, end: number) {
+    if (labelAt(code, start) && code[start + 2] === ":") start += 3;
     const token = code[start];
     if (token === "if") return ifEnd(code, start, end);
     const brace = ["match", "for", "while"].includes(token) ? controlBody(code, start + 1, end) :
@@ -862,14 +939,9 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
         }
         return scan(code, start, stop, inner, observed);
       };
-      let part: RustTruth;
-      if (truth === undefined && !latent) {
-        let success: Map<string, RustBinding | undefined> | undefined;
-        branches(inner, () => { part = flag(evaluate()); success = new Map(inner.values); }, () => undefined);
-        if (success) inner.values = success;
-      } else part = flag(evaluate());
-      if (part === false) return { inner, truth: false };
-      if (part === undefined) truth = undefined;
+      const part = flag(evaluate());
+      if (latent ? part === false : !decide(part)) return { inner, truth: false };
+      if (part === undefined && latent) truth = undefined;
       start = stop + 1;
     }
     return { inner, truth };
@@ -932,10 +1004,8 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
         if (latent) possible(right);
         return { value: boolean(stop) };
       }
-      if (lhs !== undefined) return { value: boolean(flag(right())) };
-      let rhs: RustTruth;
-      branches(scope, () => { rhs = flag(right()); }, () => undefined);
-      return { value: boolean(rhs === stop ? stop : undefined) };
+      if (latent || (lhs ?? decide(undefined)) !== stop) return { value: boolean(flag(right())) };
+      return { value: boolean(stop) };
     }
     const target = right();
     if (left?.kind !== "literal" || target?.kind !== "literal" || typeof left.value !== typeof target.value) {
@@ -967,32 +1037,26 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
       start = stop;
     }
 
-    let budget = 256;
-    function select(index: number, value: RustBinding | undefined): RustBinding | undefined {
-      // 嵌套守卫可能重复分叉；分析预算用尽不能充当执行证据。
-      if (--budget < 0) throw new RustExit("suspended");
-      for (; index < arms.length; index++) {
-        const { pattern, guard, arrow, arm, stop } = arms[index];
-        const inner = childScope(scope), matches = bind(inner, pattern, value);
-        if (!latent && matches === false) continue;
-        const rest = () => select(index + 1, value);
-        const attempt = () => {
+    function select(value: RustBinding | undefined): RustBinding | undefined {
+      for (const { pattern, guard, arrow, arm, stop } of arms) {
+        const matches = rustPattern(pattern, value, scope, constructorOf);
+        // guard.next：结构匹配不结束搜索；守卫不成立时在同一臂试下一个绑定。
+        for (const matched of latent && !matches.length ? [undefined] : matches) {
+          if (!latent && !decide(matched?.truth)) continue;
+          const inner = childScope(scope);
+          bindMatch(inner, pattern, matched);
           const condition = guard < arrow ? conditions(code, guard + 1, arrow, inner, observed) : undefined;
           const run = () => scan(code, arm, stop, condition?.inner ?? inner, observed);
-          if (latent) return possible(run);
-          if (!condition || condition.truth === true) return run();
-          if (condition.truth === false) return rest();
-          return branches(inner, run, rest);
-        };
-        if (latent) possible(attempt);
-        else return matches === true ? attempt() : branches(scope, attempt, rest);
+          if (latent) possible(run);
+          else if (!condition || decide(condition.truth)) return run();
+        }
       }
     }
     if (!latent && (scrutinee === undefined || scrutinee.kind === "path" || scrutinee.kind === "call-result")) {
       const values = partition();
-      if (values.length) return branches(scope, ...values.map(value => () => select(0, value)));
+      if (values.length) return select(selectPath(values));
     }
-    return select(0, scrutinee);
+    return select(scrutinee);
 
     function partition(): RustBinding[] {
       const unguarded = arms.flatMap(({ pattern, guard, arrow }) => guard === arrow ? [pattern] : []);
@@ -1010,20 +1074,22 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
         const value: RustBinding = shape.form === "tuple" ?
           { kind: "variant", tag, tuple: { kind: "tuple", elements: Array<RustBinding | undefined>(shape.arity).fill(undefined) } } :
           { kind: "variant", tag };
-        if (!unguarded.some(pattern => rustPattern(pattern, value, scope, constructorOf).truth === true)) return [];
+        if (!unguarded.some(pattern => rustPattern(pattern, value, scope, constructorOf).some(match => match.truth))) return [];
         values.push(value);
       }
       return values;
     }
   }
 
-  function loopBody(run: () => RustBinding | undefined) {
+  function loopBody(run: () => RustBinding | undefined, label?: string) {
     try { run(); }
     catch (error) {
-      if (error instanceof RustExit && (error.reason === "break" || error.reason === "continue")) return error.reason === "break";
+      if (error instanceof RustExit && (error.label === undefined || error.label === label)) {
+        if (error.reason === "break") return error;
+        if (error.reason === "continue") return;
+      }
       throw error;
     }
-    return false;
   }
 
   function scan(code: string[], start: number, end: number, scope: RustScope, observed = false,
@@ -1031,6 +1097,11 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     let result: RustBinding | undefined, expressionStart = start;
     if (code[start] === "&") return scan(code, start + (code[start + 1] === "mut" ? 2 : 1), end, scope, observed, skip);
     for (let i = start; i < end;) {
+      const label = code[i + 2] === ":" ? labelAt(code, i) : undefined;
+      if (label) {
+        if (i === expressionStart) expressionStart += 3;
+        i += 3;
+      }
       const token = code[i], itemEnd = skip.get(i);
       if (itemEnd !== undefined && itemEnd > i) { i = expressionStart = itemEnd; continue; }
       if (token === ";") { i++; expressionStart = i; continue; }
@@ -1055,20 +1126,25 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
         const other = initializerElse(code, eq + 1, last);
         const value = scan(code, eq + 1, other, scope, observed);
         if (other < last) {
-          const matched = rustPattern(pattern, value, scope, constructorOf).truth;
+          const matches = rustPattern(pattern, value, scope, constructorOf);
+          const matched = latent ? matches[0] : matches.find(match => decide(match.truth));
           const otherwise = () => scan(code, other + 1, last, scope, observed);
-          if (matched === false && !latent) {
+          if (latent) possible(otherwise);
+          else if (!matched) {
             otherwise();
             throw new RustExit("return");
           }
-          if (latent || matched === undefined) branches(scope, otherwise, () => undefined);
+          bindMatch(scope, pattern, matched);
+        } else {
+          bind(scope, pattern, value);
         }
-        bind(scope, pattern, value);
         i = expressionStart = last + 1;
         continue;
       }
       if (token === "return" || token === "break" || token === "continue") {
-        throw new RustExit(token, scan(code, i + 1, separator(code, i + 1, end, ";"), scope, observed));
+        const destination = token === "return" ? undefined : labelAt(code, i + 1);
+        const from = i + (destination ? 3 : 1);
+        throw new RustExit(token, scan(code, from, separator(code, from, end, ";"), scope, observed), destination);
       }
       if (i === expressionStart && !["if", "match", "while", "for", "loop", "yield"].includes(token) &&
           !delayedBlockStart(code, i) && !closureStart(code, i)) {
@@ -1099,11 +1175,20 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
             const iterate = (member?: RustBinding) => {
               const inner = childScope(scope);
               bind(inner, pattern, member);
-              return loopBody(() => block(code.slice(brace + 1, tail), inner));
+              return loopBody(() => block(code.slice(brace + 1, tail), inner), label);
             };
-            if (!latent && iter?.kind === "array") {
+            if (latent) possible(() => { iterate(); });
+            else if (iter?.kind === "array") {
               for (const member of iter.elements) if (iterate(member)) break;
-            } else branches(scope, () => { iterate(); }, () => undefined);
+            } else {
+              // 未知长度必须包括空迭代；状态回到同一个循环头后，后续各分支
+              // 已在更短的路径覆盖（重复已有调用不会增加必达集合）。
+              for (let iterations = 0; decide(undefined); iterations++) {
+                if (iterations >= 64) throw new RustPathLimit();
+                const before = scopeSnapshot(scope);
+                if (iterate() || unchanged(scope, before)) break;
+              }
+            }
           }
         } else if (token === "match") {
           const scrutinee = scan(code, i + 1, brace, scope, observed);
@@ -1111,37 +1196,54 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
         } else {
           const condition = () => conditions(code, i + 1, brace, scope, observed);
           const then = (inner: RustScope) => block(code.slice(brace + 1, tail), inner);
-          const { inner, truth } = condition();
           if (token === "while") {
-            if (latent || truth === undefined) branches(scope, () => { loopBody(() => then(inner)); }, () => undefined);
-            else if (truth === true) {
-              let current = inner;
+            if (latent) possible(() => { loopBody(() => then(condition().inner), label); });
+            else {
               for (let iterations = 0;; iterations++) {
-                if (loopBody(() => then(current))) break;
-                const repeat = condition();
-                if (repeat.truth === false) break;
-                if (repeat.truth === undefined || iterations >= 63) throw new RustExit("suspended");
-                current = repeat.inner;
+                const before = scopeSnapshot(scope);
+                const { inner, truth } = condition();
+                if (!decide(truth) || loopBody(() => then(inner), label)) break;
+                // 同一循环头的退出/返回已在更短路径被枚举。保留不退出的路径，
+                // 不把无限循环后的语句记为已执行。
+                if (unchanged(scope, before) || iterations >= 63) throw new RustExit("suspended");
               }
             }
           } else {
+            const { inner, truth } = condition();
             const other = tail + 2;
             if (code[tail + 1] === "else") {
               next = code[other] === "if" ? ifEnd(code, other, end) : groupEnd(code, other) + 1;
             }
             const no = () => next > other ? scan(code, other, next, scope, observed) : undefined;
-            value = latent || truth === undefined ? branches(scope, () => then(inner), no) : truth ? then(inner) : no();
+            value = latent ? branch(() => then(inner), no) : decide(truth) ? then(inner) : no();
           }
         }
         next = Math.max(next, tail + 1);
+      } else if (token === "loop" && code[i + 1] === "{" && groupEnd(code, i + 1) < end) {
+        const close = groupEnd(code, i + 1);
+        const iteration = () => loopBody(() => block(code.slice(i + 2, close), scope), label);
+        next = close + 1;
+        if (latent) possible(() => iteration()?.value);
+        else {
+          for (let iterations = 0;; iterations++) {
+            const before = scopeSnapshot(scope), stopped = iteration();
+            if (stopped) { value = stopped.value; break; }
+            if (unchanged(scope, before) || iterations >= 63) throw new RustExit("suspended");
+          }
+        }
       } else if (delayed) {
         ({ value, end: next } = delayed);
         if (latent && value.kind === "routine") evaluateRoutine(value, []);
       } else if (token === "(" || token === "[" || token === "{") {
         const close = groupEnd(code, i);
         if (close < i || close >= end) break;
-        if (token === "{") value = block(code.slice(i + 1, close), scope);
-        else if (token === "[" && separator(code, i + 1, close, ";") < close) {
+        if (token === "{") {
+          try { value = block(code.slice(i + 1, close), scope); }
+          catch (error) {
+            if (!label || !(error instanceof RustExit) || error.reason !== "break" || error.label !== label) throw error;
+            value = error.value;
+          }
+        } else if (token === "[" && separator(code, i + 1, close, ";") < close) {
           // 重复数组不是逐项列表；扫描元素求值，但不从语法推定长度。
           scan(code, i + 1, close, scope, observed);
         } else {
@@ -1252,9 +1354,37 @@ function rustReferences(imports: ReturnType<typeof rustImports>, body: string[],
     return result;
   }
 
-  const returned = complete(() => block(body, parameterScope(module, parametersOf(params), [])));
-  if (driveReturn) drive(returned, "await");
-  return refs;
+  const paramsOfBody = parametersOf(params);
+  function run() {
+    return complete(() => block(body, parameterScope(module, paramsOfBody, [])));
+  }
+  if (latent) {
+    const returned = run();
+    if (driveReturn) drive(returned, "await");
+    return [...refs.values()];
+  }
+
+  const flow: RustFlow<RustTerminal> = { fallthrough: [], exits: [], suspended: [] };
+  for (let trace = pendingPaths.pop(); trace; trace = pendingPaths.pop()) {
+    path = trace;
+    cursor = localEnum = 0;
+    refs = new Map();
+    const scope = parameterScope(module, paramsOfBody, []);
+    const result = outcome(() => block(body, scope));
+    // 返回 Future 的同步封装：先离开函数，再 poll 返回值；不是在 return 前 poll。
+    const driven = driveReturn && result.exit !== "suspended" ? outcome(() => awaitValue(result.value)) : result;
+    const states = driven.exit === "suspended" ? flow.suspended :
+      result.exit === undefined ? flow.fallthrough : flow.exits;
+    const terminal = { value: driven.value, references: refs };
+    if (!states.some(other => sameValue(other.value, terminal.value) &&
+        other.references.size === refs.size && [...refs.keys()].every(key => other.references.has(key)))) {
+      states.push(terminal);
+    }
+  }
+  const terminals = [...flow.fallthrough, ...flow.exits, ...flow.suspended];
+  const first = terminals[0];
+  return first ? [...first.references].flatMap(([key, ref]) =>
+    terminals.every(terminal => terminal.references.has(key)) ? [ref] : []) : [];
 }
 
 export function rustReplacement(s: At18Repository, F: string, entry: string, checkPath: string, selector: string,
@@ -1306,24 +1436,29 @@ export function rustReplacement(s: At18Repository, F: string, entry: string, che
         rustImports(code.slice(item.index, code.indexOf(";", item.index) + 1)));
     }
     const itemEnabled = (prefix: string[]) => enabledRustItem(prefix, features, target);
-    function enumResolver(current: string[], modules: string[], enabled: typeof itemEnabled,
-      testRoot?: string[]) {
+    function enumResolver(current: string[], modules: string[], enabled: typeof itemEnabled, testRoot?: string[]) {
       const cache = new Map<string, RustEnum | undefined>();
-      return (path: string[]): RustEnum | undefined => {
-        const isExternalCrate = testRoot && root !== "crate" && path[0] === root;
-        const qualified = isExternalCrate ? path.slice(1) : qualify(modules, path);
-        const namespace = testRoot && !isExternalCrate ? "test" : "lib";
-        const key = qualified.join("::");
-        if (cache.has(namespace + key)) return cache.get(namespace + key);
+      function resolve(path: string[], context: string[], namespace: "test" | "lib"): RustEnum | undefined {
+        if (namespace === "test" && root !== "crate" && path[0] === root) {
+          return qualifiedEnum("lib", path.slice(1));
+        }
+        return qualifiedEnum(namespace, qualify(context, path)) ?? builtinEnum(path);
+      }
+
+      function qualifiedEnum(namespace: "test" | "lib", qualified: string[]): RustEnum | undefined {
         const name = qualified.at(-1), owner = qualified.slice(0, -1);
-        let source: string[] | undefined = current;
-        if (isExternalCrate || owner.join("::") !== modules.join("::")) {
-          source = namespace === "test" ? testRoot : read(lib);
+        const key = namespace + "::" + qualified.join("::");
+        if (!name || cache.has(key)) return cache.get(key);
+        // 标记正在解析的别名，互相引用不允许递归成一个伪枚举。
+        cache.set(key, undefined);
+        const sameModule = namespace === (testRoot ? "test" : "lib") && owner.join("::") === modules.join("::");
+        let source = sameModule ? current : namespace === "test" ? testRoot : read(lib);
+        if (!sameModule) {
           let local: string[] = [];
           for (const part of owner) {
             const mod: ReturnType<typeof active>[number] | undefined = source && active(source, enabled)
               .find(item => item.kind === "mod" && source?.[item.index + 1] === part);
-            if (!source || !mod) { source = undefined; break; }
+            if (!source || !mod) return;
             local = [...local, part];
             const brace = mod.index + 2;
             if (source[brace] === "{") source = source.slice(brace + 1, groupEnd(source, brace));
@@ -1333,16 +1468,26 @@ export function rustReplacement(s: At18Repository, F: string, entry: string, che
             }
           }
         }
+        if (!source) return;
+        const items = active(source, enabled);
         let definition: RustEnum | undefined;
-        if (source) for (const item of active(source, enabled)) {
-          if (item.kind !== "enum" || source[item.index + 1] !== name) continue;
-          const brace = separator(source, item.index + 2, source.length, "{");
+        const declaration = items.find(item => (item.kind === "enum" || item.kind === "type") && source?.[item.index + 1] === name);
+        if (declaration?.kind === "enum") {
+          const brace = separator(source, declaration.index + 2, source.length, "{");
           const close = groupEnd(source, brace);
-          if (close > brace) definition = enumDefinition(source, brace, close, namespace + "::" + key, enabled);
+          if (close > brace) definition = enumDefinition(source, brace, close, key, enabled);
+        } else if (declaration?.kind === "type") {
+          const target = aliasTarget(source, declaration.index);
+          if (target) definition = resolve(target, owner, namespace);
+        } else {
+          const imported = importsOf(source, items).find(item => item.alias === name);
+          if (imported) definition = resolve(imported.path, owner, namespace);
         }
-        cache.set(namespace + key, definition);
+        cache.set(key, definition);
         return definition;
-      };
+      }
+
+      return (path: string[]) => resolve(path, modules, testRoot ? "test" : "lib");
     }
     function targets(paths: RustReference[], external: boolean, latent = false) {
       const found = new Set<string>(), seen = new Set<string>();

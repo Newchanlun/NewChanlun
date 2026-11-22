@@ -980,6 +980,49 @@ test("R10/#1319：Python 声明目标、延迟体驱动和 CPython 生产调用�
     ["r12-close-delegated-finally", integration(cleanup.replace("it = stream()", "def outer():\n    yield from stream()\nit = outer()") +
       "next(it)\nit.close()\nreturn out"), direct, true],
   );
+  const stop = from + "route\ndef stream():\n    if False:\n        yield\n    return route\n";
+  const relay = "def relay():\n    return (yield from stream())\n";
+  const readStop = "try:\n    next(it)\nexcept StopIteration as stop:\n    return stop.value('1min', sources, events)";
+  const reraised = (rethrow: string, caught: string) => integration(from + "route\n" +
+    "try:\n    try:\n        next(iter([]))\n    except StopIteration as stop:\n        " + rethrow +
+    "\nexcept " + caught + ":\n    return " + call + "\nexcept Exception:\n    return []");
+  cases.push(
+    ["r13-bare-reraise-skips-other", reraised("raise", "IndexError"), direct, false],
+    ["r13-bare-reraise-keeps-kind", reraised("raise", "StopIteration"), direct, true],
+    ["r13-named-reraise-skips-other", reraised("raise stop", "IndexError"), direct, false],
+    ["r13-reraise-inside-finally", integration(from + "route\ntry:\n    try:\n        raise StopIteration(route)\n" +
+      "    finally:\n        raise\nexcept StopIteration as stop:\n    return stop.value('1min', sources, events)"), direct, true],
+    ["r13-raised-instance-args", integration(from + "route\nfrom builtins import StopIteration as Finish\nDone = Finish\n" +
+      "error = Done(route)\ntry:\n    raise error\nexcept Done as stop:\n    return stop.args[0]('1min', sources, events)"), direct, true],
+    ["r13-generator-stop-value", integration(stop + "it = stream()\n" + readStop), direct, true],
+    ["r13-delegated-stop-value-after-reraise", integration(stop + relay + "it = relay()\n" +
+      "try:\n    try:\n        it.__next__()\n    except StopIteration as stop:\n        raise stop\n" +
+      "except StopIteration as stop:\n    return stop.value('1min', sources, events)"), direct, true],
+    ["r13-exhausted-generator-loses-old-value", integration(stop +
+      "it = stream()\nnext(it, None)\n" + readStop), direct, false],
+    ["r13-suspended-except-does-not-leak", integration(from + "route\n" +
+      "def stream():\n    try:\n        raise StopIteration\n    except StopIteration:\n        yield 1\n" +
+      "it = stream()\nnext(it)\ntry:\n    raise\nexcept StopIteration:\n    return []\n" +
+      "except RuntimeError:\n    return " + call), direct, true],
+    ["r13-restores-generator-exception", integration(from + "route\n" +
+      "def stream():\n    try:\n        try:\n            raise IndexError(route)\n" +
+      "        except IndexError:\n            yield 1\n            raise\n" +
+      "    except IndexError as error:\n        yield error.args[0]\n" +
+      "it = stream()\nnext(it)\nreturn next(it)('1min', sources, events)"), direct, true],
+  );
+  for (const [id, expr, accepts] of [
+    ["set-equivalent-numbers", "set([1, True, 1.0, 1+0j])", false],
+    ["set-tuple-equality", "set([(None, 1), (None, True)])", false],
+    ["frozenset-duplicates", "frozenset([b'x', b'x'])", false],
+    ["literal-set", "{-1, -1.0}", false],
+    ["dict-duplicate-keys", "{1: 'a', True: 'b'}", false],
+    ["dict-order-not-set-order", "{1: 'a', '1': 'b'}", true],
+    ["set-two-distinct", "set([(1, None), (1, False)])", true],
+    ["list-keeps-repeats", "[1, 1]", true],
+    ["set-unknown-cannot-prove-extra", "set([1, events[0]])", false],
+  ] as const) {
+    cases.push(["r13-" + id, exhaust("it = iter(" + expr + ")", "next(it)", "except StopIteration:"), direct, accepts]);
+  }
   for (const [id, feedIntegration, feedTest, accepts] of cases) await t.test(id, async () => {
     const entry = "trading_system/at18_fixture_feed.py";
     const production = "trading_system/__init__.py";
@@ -1156,6 +1199,87 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
       Some(_) if handshake("HELLO") => (),
       _ => (),
     }`, false],
+    ["r13-if-return-and-tail", `if std::hint::black_box(false) { ${call} return; } ${call}`, true],
+    ["r13-match-return-and-tail", `match std::hint::black_box(false) {
+      true => { ${call} return; }
+      false => (),
+    } ${call}`, true],
+    ["r13-let-else-return-and-tail", `let Some(_) = std::hint::black_box(Some(1)) else {
+      ${call} return;
+    }; ${call}`, true],
+    ["r13-let-else-return-skips-tail", `let Some(_) = std::hint::black_box(Some(1)) else {
+      return;
+    }; ${call}`, false],
+    ["r13-for-continue-path-and-tail", `for _ in [0, 1] {
+      if std::hint::black_box(false) { ${call} continue; }
+      ${call}
+    }`, true],
+    ["r13-for-break-skips-body", `for _ in [0, 1] {
+      if std::hint::black_box(false) { break; }
+      ${call}
+    }`, false],
+    ["r13-labelled-break-exits-outer-loop", `'outer: loop {
+      loop { break 'outer; } ${call} break;
+    }`, false],
+    ["r13-labelled-continue-skips-outer-body", `'outer: for _ in [0, 1] {
+      for _ in [0] { continue 'outer; } ${call}
+    }`, false],
+    ["r13-let-else-break-to-block-with-value", fake + `let f = 'pick: {
+      let Some(_) = None::<u8> else { break 'pick handshake as fn(&str) -> bool; };
+      fake as fn(&str) -> bool
+    }; assert!(f("HELLO"));`, true],
+    ["r13-loop-break-value", `let f = loop { break handshake as fn(&str) -> bool; }; assert!(f("HELLO"));`, true],
+    ["r13-while-mixed-break-return", `while true {
+      if std::hint::black_box(false) { ${call} return; }
+      break;
+    } ${call}`, true],
+    ["r13-while-continue-can-diverge", `while true {
+      if std::hint::black_box(false) { break; }
+      continue;
+    } ${call}`, false],
+    ["r13-let-chain-short-circuit", `if let Some(_) = std::hint::black_box(Some(1)) && handshake("HELLO") {
+      let _ = 1;
+    }`, false],
+    ["r13-await-mixed-poll", poll + `async fn gate(go: bool) {
+      if go { return; }
+      core::future::pending::<()>().await;
+    } drive(async { gate(std::hint::black_box(false)).await; ${call} });`, false],
+    ["r13-await-both-poll-paths-execute", poll + `async fn gate(go: bool, f: fn(&str) -> bool) {
+      if go { return; }
+      assert!(f("HELLO"));
+      core::future::pending::<()>().await;
+    } drive(async { gate(std::hint::black_box(true), handshake).await; ${call} });`, true],
+    ["r13-poll-mixed-does-not-suspend-caller", poll + `drive(async {
+      if std::hint::black_box(false) { return; }
+      core::future::pending::<()>().await;
+    }); ${call}`, true],
+    ["r13-guard-second-or", `match (1_u8, 2_u8) {
+      (n, _) | (_, n) if n == 2 => { ${call} }
+      _ => (),
+    }`, true],
+    ["r13-guard-second-nested-or", `match ((1_u8, 2_u8), handshake as fn(&str) -> bool) {
+      ((n, _) | (_, n), f) if n == 2 => { assert!(f("HELLO")); }
+      _ => (),
+    }`, true],
+    ["r13-guard-all-failed-resumes-next-arm", `match (1_u8, 2_u8) {
+      (n, _) | (_, n) if n == 3 => return,
+      _ => { ${call} }
+    }`, true],
+    ["r13-first-successful-guard-wins", `match (1_u8, 2_u8) {
+      (n, _) | (_, n) if n > 0 => { if n == 2 { ${call} } }
+      _ => (),
+    }`, false],
+    ["r13-alias-chain-block", `enum Phase { Live, Dry }
+      type First = Phase; type State = First;
+      match State::Live { Phase::Live => { ${call} } Phase::Dry => (), }`, true],
+    ["r13-alias-generic-prelude", `type Receiver<T> = core::option::Option<T>;
+      let Receiver::Some(f) = Some(handshake) else { return; };
+      assert!(f("HELLO"));`, true],
+    ["r13-guard-or-alias-value-and-pattern", `enum Phase { Live(u8, u8), Dry }
+      type State = Phase; match State::Live(1, 2) {
+        Phase::Live(n, _) | State::Live(_, n) if n == 2 => { ${call} }
+        _ => (),
+      }`, true],
     ["r11-if-let-some", `if let Some(f) = Some(handshake) { assert!(f("HELLO")); }`, true],
     ["r11-if-let-none", `if let Some(f) = None::<fn(&str) -> bool> { ${call} let _ = f; }`, false],
     ["r11-while-let-none", `while let Some(_) = None::<i32> { ${call} break; }`, false],
@@ -1192,6 +1316,20 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
       crate::switches::Mode::Dry => (),
     }
   `, true, "mod switches { pub enum Mode { Dry, Live } }\n"));
+  await t.test("r13-qualified-module-alias-chain", () => check("", `
+    type Local = crate::state::State<fn(&str) -> bool>;
+    match Local::Live(handshake) {
+      self::phase::Phase::Live(f) => { assert!(f("HELLO")); }
+      phase::Phase::Dry => (),
+    }
+  `, true, `
+    mod phase { pub enum Phase<T> { Live(T), Dry } }
+    mod state {
+      use super::phase::Phase as Imported;
+      pub type Alias<T> = Imported<T>;
+      pub type State<T> = self::Alias<T>;
+    }
+  `));
   const publicAsync = `pub async fn select_wire(banner: &str) -> bool { ${path}(banner) }\n`;
   await t.test("public-async-dropped", () => check(publicAsync, 'let _future = newchan_rust::select_wire("HELLO");', false));
   await t.test("public-async-driven", () => check(publicAsync, poll + 'drive(async { assert!(newchan_rust::select_wire("HELLO").await); });', true));
