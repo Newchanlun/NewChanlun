@@ -1586,3 +1586,115 @@ def test_r12_structured_data_requires_eligible_location_and_no_artifact_envelope
     history.write(path, raw)
     history.gate()
     check_basis(history, options, path, allowed=allowed)
+
+
+@pytest.mark.parametrize(("m", "f", "accepted"), [
+    ("two", "two", ()), ("two", "one", ()), ("one", "two", ()),
+    ("reverse", "one", ()), ("one", "reverse", ()),
+    ("repeat", "repeat", (0,)), ("distinct", "distinct", (0, 1)),
+    ("nested", "one", ()), ("one", "nested", ()), ("nested-repeat", "one", (0,)),
+])
+def test_r13_condition_c_requires_one_to_one_mapping(history, options, m, f, accepted):
+    h = history
+    old = ("inputs/amber.json", "inputs/blue.json")
+    new = ("testdata/amber.json", "testdata/blue.json")
+    payloads = (b'{"input":"amber"}\n', b'{"input":"blue"}\n')
+    h.gate()
+    for path, raw in zip(old, payloads):
+        h.write(MIGRATION_PACKAGE + path, raw)
+    h.commit("Archive both fixtures")
+    for path in old:
+        (h.root / (MIGRATION_PACKAGE + path)).rename(h.root.parent / Path(path).name)
+    h.write(new[0], payloads[0])
+    h.write(new[1], payloads[1] if m == "distinct" else payloads[0])
+
+    nested = MIGRATION_PACKAGE + "inputs/FIXTURE-MOVED.md"
+
+    def write_declarations(style):
+        pairs = [(old[0], new[0])]
+        if extra := {"two": (old[0], new[1]), "reverse": (old[1], new[0]),
+                     "repeat": pairs[0], "distinct": (old[1], new[1])}.get(style):
+            pairs.append(extra)
+        h.write(MIGRATION_POINTER, "".join(f"`{src}` → `{dst}`。\n" for src, dst in pairs).encode())
+        if style in ("nested", "nested-repeat"):
+            target = new[1] if style == "nested" else new[0]
+            h.write(nested, f"`amber.json` → `{target}`。\n".encode())
+        elif (h.root / nested).exists():
+            (h.root / nested).rename(h.root.parent / "m-only-pointer.md")
+
+    write_declarations(m)
+    h.commit("Move both fixtures and declare their targets")
+    if f != m:
+        write_declarations(f)
+        h.commit("Change declarations at F")
+    for i, path in enumerate(new):
+        check_basis(h, options, path, allowed=i in accepted)
+
+
+R12_HEAD = "38d0000a7c1065180c75909a506b1f22066c40c4"
+SWIFT_FIXTURES = ".sandcastle/approval-signing/tests/fixtures/swift/"
+
+
+@pytest.mark.parametrize(("source", "start", "end"), [
+    ("experiments/discrete_morse/dm1_results.json", 46, 46),
+    ("experiments/discrete_morse/dm2_results.json", 2, 8),
+    *((SWIFT_FIXTURES + path, 1, 1) for path in (
+        "receipt-1-approve.json", "receipt-2-reject.json",
+        "authority/0123456789abcdef0123456789abcdef/1.json",
+        "authority/0123456789abcdef0123456789abcdef/2.json",
+    )),
+])
+@pytest.mark.parametrize("neutral", [False, True], ids=["original", "neutral"])
+def test_r13_rejects_actual_experiment_outputs_and_approval_receipts(history, options, source, start, end, neutral):
+    path = "fixtures/topology-input.json" if neutral else source
+    history.write(path, git_at_r3("show", f"{R12_HEAD}:{source}"))
+    history.gate()
+    check_basis(history, options, path, allowed=False, line=start, line_end=end)
+
+
+@pytest.mark.parametrize("path", [
+    ".chanlun/handoff/current.json", ".chanlun/handoff/history/2026-03-10-2034.json",
+    ".chanlun/goals/events.jsonl", "trading_system/data_cache/fugue_v3_ES.json",
+    ".chanlun/block-topology/relations.jsonl", ".chanlun/block-topology/meta.json",
+    ".chanlun/morse_landscape.json", ".chanlun/concept_registry.json", "scripts/.corpus_ingest_resume.json",
+])
+def test_r13_rejects_actual_non_input_data(history, options, path):
+    history.write(path, git_at_r3("show", f"{R12_HEAD}:{path}"))
+    history.gate()
+    check_basis(history, options, path, allowed=False)
+
+
+@pytest.mark.parametrize(("key", "value", "allowed"), [
+    ("format", "newchanlun-approval-trust/v1", True),
+    ("schema_version", "tb02a/hand-oracle/1", True),
+    ("format", "sample-receipt/v1", False),
+    ("schema_version", "sample-approval/2", False),
+    ("schema", "sample.report.v1", False),
+    ("format", "sample-review/v2", False),
+    ("format", "sample-verdict/10", False),
+])
+def test_r13_versioned_artifact_envelope_keeps_input_formats(history, options, key, value, allowed):
+    path = "fixtures/sequence.jsonl"
+    # 共同的业务字段不是拒绝理由；逐条检查第二条记录的协议身份。
+    data = {key: value, "status": "PASS", "result": "expected", "reports": []}
+    history.write(path, b'{"id":1}\n' + json.dumps(data).encode() + b"\n")
+    history.gate()
+    check_basis(history, options, path, allowed=allowed, line=2)
+
+
+@pytest.mark.parametrize(("path", "allowed"), [
+    *((path, False) for path in (
+        ".sandcastle/runs/note.md", ".sandcastle/RUNS/note.md",
+        "reports/data.json", "REPORTS/data.json", "analysis/data.json", "Analysis/data.json",
+        "experiments/dm1_results.json", "EXPERIMENTS/dm1_results.json", "DATA_CACHE/x.json",
+        "HANDOFF/x.json", "GOALS/x.jsonl", ".chanlun/BLOCK-TOPOLOGY/x.json",
+        ".chanlun/REVIEW-RESULTS/bundle/rules.py", "CHANLUN/REVIEW-RESULTS/bundle/data.json",
+        "EXTERNAL/K4-SOROS-REPORTS/rules.py", "docs/MEMORY_SNAPSHOT/probe.json",
+        "README.MD", "README.Md", "readme.md", "docs/adr/0001-a/b.md", "docs/SPEC/contract.md",
+    )),
+    ("analysis/p3_random_gate_control.py", True),
+])
+def test_r13_only_exclusions_ignore_directory_case(history, options, path, allowed):
+    history.write(path, b'{"fixture":1}\n')
+    history.gate()
+    check_basis(history, options, path, allowed=allowed)

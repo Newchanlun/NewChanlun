@@ -42,12 +42,15 @@ UTF-8 文本文件，填写精确 Git blob 和实际行段（`1 <= line_start <=
   不得穿过 `runs`、`logs`、`reports`、`review-results`、`diagnostics`、`output`、`outputs` 或 `evidence` 目录。
 - **组件入口 Markdown**：`s_session/`、`rust/`、`scripts/`、`formal/`、`tests/`、`src/`、`frontend/`、
   `trading_system/`、`.chanlun/at18/` 下仅 `README.md` 和 `ORACLE.md`。
-- **结构化数据**：可解析的 `.json` 或逐条可解析的 `.jsonl`，不得位于推论、诊断或产物目录。
-  报告、复核、审批与运行回执的 JSON 信封不可引用；纯数据夹具和冻结规范 JSON 可引用。
+- **结构化数据**：可解析的 `.json` 或逐条可解析的 `.jsonl`。推论、诊断、报告、运行和输出目录，
+  以及 `experiments`、`data_cache`、`handoff`、`goals`、`block-topology` 目录与具名拓扑/断点转储均禁引。
+  报告、复核、审批、运行回执的结构化信封和 DM1/DM2 实验结果即使改名也不可引用；
+  审批信任根、数据夹具、手算账簿和冻结规范 JSON 仍可引用。
 - **代码、测试、证明与配置**：`.rs`、`.py`、`.ts`、`.mts`、`.tsx`、`.js`、`.mjs`、`.cjs`、`.sh`、`.yml`、
   `.yaml`、`.toml`、`.lean`、`.sql`、`.cfg`、`.ini`，以及 `Dockerfile`、`Makefile`。
   `analysis/p3_random_gate_control.py` 这类代码不因位于 `analysis/` 失去资格。
 
+禁引目录段和归档前缀不区分大小写；Git 路径、正本白名单和冻结规范的具名豁免仍精确匹配。
 其他 Markdown（如 `analysis/`、`.chanlun/genealogy/`、未列名的 `docs/`、无指定名分的副本）和自由文本、日志、
 表格、网页转储一律拒绝。若推论有助于解释缺陷，先在票内重过推理链并裁入正本，再引用正本。
 本地校验只判定文件名分与 Git 事实，不猜标题、YAML 或句子的含义；依据的语义真伪、相关性与充分性由 R09 正式双审合入门核定。
@@ -55,6 +58,8 @@ UTF-8 文本文件，填写精确 Git blob 和实际行段（`1 <= line_start <=
 所有允许的类型仍须过归档 blob 溯源。首见于现役路径的原件和同期清单声明的冻结副本沿用原规则。
 条件 C 要求夹具在第一父链上由同一提交以同一 blob 原子迁出，且所有旧归档路径都已从 F 消失。
 迁移提交和 F 中，同一个包内的普通 `FIXTURE-MOVED.md` 都须以有向声明精确配对旧归档相对路径与新仓库路径。
+两端分别核唯一性：同一旧路径只可声明一个新路径，该新路径也只可对应这一个旧路径，且两端配对相同。
+重复书写同一对不算歧义；不同夹具可各自迁往不同目标。
 软换行可续写同一声明，硬换行可分隔声明；同一行也可用标点分隔完整箭头配对。相邻声明不能借用彼此的端点。
 迁移只认可该目标路径；别名、指针本身和归档产物不能借迁移取得资格。
 

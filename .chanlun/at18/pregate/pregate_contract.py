@@ -21,7 +21,6 @@ OID = re.compile(r"[0-9a-f]{40}")
 REMEDIATION = ".chanlun/at18/pregate-remediation.json"
 REMEDIATION_SCHEMA = "at18-pregate-remediation/1"
 REVIEW_ARCHIVE = ".chanlun/review-results/"
-REVIEW_TREE = re.compile(r"(?:^|/)review-results/")
 RESULT_TREE = (
     ".chanlun/diagnostics/", ".chanlun/reports/", "analysis/reports/", "analysis/audit_logs/",
     "analysis/dual_settle_results/", "external/k4-soros-reports/",
@@ -71,6 +70,8 @@ ARTIFACT_SCHEMA_FAMILIES = {
     "tb01c.query_encoding_memo_delivery", "tb01c.r4_independent_review",
     "tb01c.r9_r10_compatibility_increment_review",
 }
+VERSIONED_FORMAT = re.compile(r"(.+?)(?:/v?|\.v)[0-9]+(?:\.[0-9]+)*")
+ARTIFACT_FORMAT_SUFFIX = re.compile(r"[-_.](?:receipt|approval|report|review|verdict)$")
 MANIFEST_FIELDS = {"schemaVersion", "ticket", "base", "head", "productDiff", "requiredReports",
                    "reports", "reviews", "requiredChecks", "checks", "scan"}
 ROW_KEYS = {"path", "p0_blob", "p0_mode", "f_blob", "f_mode", "remediation_commits",
@@ -90,9 +91,15 @@ COMPONENT_TREES = (
     "trading_system/", ".chanlun/at18/",
 )
 OUTPUT_DIRS = {"runs", "logs", "reports", "review-results", "diagnostics", "output", "outputs", "evidence"}
+NON_INPUT_DATA_DIRS = OUTPUT_DIRS | {
+    "analysis", "genealogy", "memory_snapshot", "experiments", "data_cache", "handoff", "goals", "block-topology",
+}
+NON_INPUT_DATA_FILES = {
+    ".chanlun/morse_landscape.json", ".chanlun/concept_registry.json", "scripts/.corpus_ingest_resume.json",
+}
 INFERENCE_TREES = (
-    "analysis/", ".chanlun/genealogy/", ".chanlun/tower-construction/", "docs/architecture/",
-    "docs/memory_snapshot/", "docs/chanlun/external-consults/", "docs/chanlun/text/mindmaps/",
+    ".chanlun/tower-construction/", "docs/architecture/",
+    "docs/chanlun/external-consults/", "docs/chanlun/text/mindmaps/",
 )
 DATA_EXTENSIONS = {".json", ".jsonl"}
 CODE_EXTENSIONS = {
@@ -206,13 +213,26 @@ def classify_review(rows, final_tree):
     return result
 
 
+def review_archive_end(path):
+    """首个归档目录结束的位置；比较目录段时不改写 Git 路径。"""
+    if "review-results/" in path.lower():
+        end = 0
+        for part in path.split("/")[:-1]:
+            end += len(part) + 1
+            if part.lower() == "review-results":
+                return end
+    return 0
+
+
 def is_result_archive_path(path):
-    return path.startswith(RESULT_TREE) or RESULT_PATH.fullmatch(path) is not None
+    directory, slash, name = path.rpartition("/")
+    prefix = directory.lower() + slash
+    return prefix.startswith(RESULT_TREE) or RESULT_PATH.fullmatch(prefix + name) is not None
 
 
 def is_artifact_archive_path(path):
     if not path.startswith(REVIEW_ARCHIVE):
-        return REVIEW_TREE.search(path) is not None or is_result_archive_path(path)
+        return bool(review_archive_end(path)) or is_result_archive_path(path)
     parts = path.removeprefix(REVIEW_ARCHIVE).split("/", 3)
     if len(parts) != 4:
         return True
@@ -236,21 +256,9 @@ def frozen_copies(raw):
 
 
 def is_archive_output(path):
-    review = REVIEW_TREE.search(path)
-    relative = path[review.end():] if review else path
+    relative = path[review_archive_end(path):]
     return (relative.rsplit("/", 1)[-1].lower() == INPUT_MANIFEST.lower()
             or OUTPUT_TOKEN.search(relative.lower()) is not None)
-
-
-def fixture_pointer_locations(path):
-    """包根以下、旧路径的祖先目录；同时给出相对于指针所在目录的旧路径。"""
-    archive = REVIEW_TREE.search(path)
-    if archive is None:
-        return
-    end = path.find("/", archive.end())
-    while end != -1:
-        yield path[:end] + "/" + FIXTURE_POINTER, path[end + 1:]
-        end = path.find("/", end + 1)
 
 
 POINTER_CODE = r"(?P<tick>`+)(?P<code>[^`\r\n]+)(?P=tick)(?!`)"
@@ -361,19 +369,53 @@ def fixture_pointer_pairs(raw):
     return pairs
 
 
+def fixture_pointer_dirs(path):
+    if path.endswith("/" + FIXTURE_POINTER) and (end := review_archive_end(path)):
+        bundle_end = path.find("/", end)
+        if bundle_end != -1:
+            return path.rsplit("/", 1)[0] + "/", path[:bundle_end + 1]
+    return None
+
+
 def atomic_fixture_migrations(records, final_tree, candidates, *, cwd):
     """从同一份 raw log 取 D+A 与迁移时的指针版本；F 工作树不参与。"""
+    if not candidates:
+        return set()
+
+    dirs = cache(fixture_pointer_dirs)
     pointers = {
-        path.encode(): entry.blob for path, entry in final_tree.items()
-        if path.endswith("/" + FIXTURE_POINTER) and REVIEW_TREE.search(path)
-        and entry.kind == "blob" and entry.mode in REGULAR_MODES
+        path: entry.blob for path, entry in final_tree.items()
+        if entry.kind == "blob" and entry.mode in REGULAR_MODES and dirs(path)
     }
-    if not candidates or not pointers:
+    if not pointers:
         return set()
 
     @cache
     def pairs(blob):
         return fixture_pointer_pairs(git("cat-file", "blob", blob, cwd=cwd))
+
+    known_sources = {path.decode("utf-8", errors="surrogateescape")
+                     for _, paths in candidates.values() for path in paths}
+
+    def unique_claims(snapshot):
+        targets, sources = defaultdict(set), defaultdict(set)
+        claims = set()
+        for pointer, blob in snapshot.items():
+            directory, bundle = dirs(pointer)
+            for old, target in pairs(blob):
+                local, rooted = directory + old, bundle + old
+                # 深层指针可用包根或所在目录拼写，但仅能指认该目录下的旧夹具。
+                names = {local, rooted} if rooted.startswith(directory) else {local}
+                for source in (names & known_sources) or {local}:
+                    targets[source].add(target)
+                    sources[target].add(source)
+                    claims.add((source, target, pointer))
+        return {(old, new, pointer) for old, new, pointer in claims
+                if len(targets[old]) == len(sources[new]) == 1}
+
+    final_claims = unique_claims(pointers)
+    if not final_claims:
+        return set()
 
     current_pointers = {}
     migrated = set()
@@ -381,11 +423,13 @@ def atomic_fixture_migrations(records, final_tree, candidates, *, cwd):
         removed = defaultdict(list)
         added = []
         for _, path, old_mode, mode, old_blob, blob, status in changes:
-            if path in pointers:
-                if mode in REGULAR_RAW_MODES:
-                    current_pointers[path] = blob.decode()
-                else:
-                    current_pointers.pop(path, None)
+            if path.endswith(b"/" + FIXTURE_POINTER.encode()):
+                pointer = path.decode("utf-8", errors="surrogateescape")
+                if dirs(pointer):
+                    if mode in REGULAR_RAW_MODES:
+                        current_pointers[pointer] = blob.decode()
+                    else:
+                        current_pointers.pop(pointer, None)
             if status == b"D" and old_mode in REGULAR_RAW_MODES and old_blob in candidates:
                 first, old_paths = candidates[old_blob]
                 if commit != first and path in old_paths:
@@ -394,19 +438,15 @@ def atomic_fixture_migrations(records, final_tree, candidates, *, cwd):
                     and (entry := final_tree.get(path.decode("utf-8", errors="surrogateescape")))
                     and entry.mode in REGULAR_MODES and entry.blob.encode() == blob):
                 target = path.decode("utf-8")
-                if target != REMEDIATION and not (REVIEW_TREE.search(target) or is_result_archive_path(target)):
+                if target != REMEDIATION and not (review_archive_end(target) or is_result_archive_path(target)):
                     added.append((target, blob))
+        if not added or not removed:
+            continue
+        # 同一份指针须在 M 和 F 分别见证已经通过各自双向唯一性检查的配对。
+        approved = {(old, new) for old, new, _ in unique_claims(current_pointers) & final_claims}
         for target, blob in added:
-            for path in removed.get(blob, ()):
-                locations = list(fixture_pointer_locations(path))
-                for pointer, relative_old in locations:
-                    key = pointer.encode()
-                    if key not in current_pointers:
-                        continue
-                    # 深一层的指针可以用所在目录或包根作为源路径锚点。
-                    expected = {(relative_old, target), (locations[0][1], target)}
-                    if expected & pairs(current_pointers[key]) & pairs(pointers[key]):
-                        migrated.add((target, blob.decode()))
+            if any((path, target) in approved for path in removed.get(blob, ())):
+                migrated.add((target, blob.decode()))
     return migrated
 
 
@@ -441,11 +481,11 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
         if mode not in REGULAR_RAW_MODES and mode != b"120000":
             continue
         text_path = path.decode("utf-8", errors="surrogateescape")
-        review = REVIEW_TREE.search(text_path)
+        review = review_archive_end(text_path)
         # 归档根自身的清单从来不是某个包的输入声明。
         if review:
             review_paths[blob].add(text_path)
-            if mode in REGULAR_RAW_MODES and text_path[review.end():].endswith("/" + INPUT_MANIFEST):
+            if mode in REGULAR_RAW_MODES and text_path[review:].endswith("/" + INPUT_MANIFEST):
                 manifests.add(text_path)
         if mode in REGULAR_RAW_MODES and is_artifact_archive_path(text_path):
             archive_paths[blob].add(text_path)
@@ -497,7 +537,7 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
 
     def frozen_source_matches(source, blob, commit):
         path, separator, ref = source.strip().partition(" @ ")
-        if not valid_path(path) or REVIEW_TREE.search(path) or is_result_archive_path(path) or path == REMEDIATION:
+        if not valid_path(path) or review_archive_end(path) or is_result_archive_path(path) or path == REMEDIATION:
             return False
         if separator:
             # 可钉住该提交的祖先对象，不能跟随可变引用或仓外路径。
@@ -514,7 +554,7 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
         return entry is not None and entry.kind == "blob" and entry.mode in REGULAR_MODES and entry.blob == blob
 
     def declared_copy(path, blob, commit):
-        return (REVIEW_TREE.search(path) and path.startswith(manifest_dirs) and not is_archive_output(path)
+        return (review_archive_end(path) and path.startswith(manifest_dirs) and not is_archive_output(path)
                 and any(frozen_source_matches(source, blob, commit)
                         for source in declared_inputs(commit).get(path, ())))
 
@@ -538,8 +578,8 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
         # C1/C2：只考虑首见全在审查归档、无产物名且全部旧路径已经消失的 blob。
         first, appearances = blob_origins[raw_blob]
         all_paths = history | review_paths[raw_blob]
-        if (blob in final_blobs and all(REVIEW_TREE.search(path) for path in appearances)
-                and all(REVIEW_TREE.search(path) and path not in final_tree and not is_archive_output(path)
+        if (blob in final_blobs and all(review_archive_end(path) for path in appearances)
+                and all(review_archive_end(path) and path not in final_tree and not is_archive_output(path)
                         for path in all_paths)):
             candidates[raw_blob] = (first, {path.encode("utf-8", errors="surrogateescape") for path in all_paths})
     return ArchivedArtifacts(forbidden, atomic_fixture_migrations(records(), final_tree, candidates, cwd=cwd))
@@ -575,13 +615,24 @@ def is_independent_artifact(obj):
                     and isinstance(command.get("command"), (list, str)) for command in commands))
 
 
+def is_morse_experiment_output(obj):
+    # 两个生产者的输出字段组合，不把任意带 verification 或 experiment 的数据判成报告。
+    verification = obj.get("verification")
+    if ({"complex", "betti", "morse"} <= obj.keys() and isinstance(verification, dict)
+            and {"weak_morse_0", "strong_morse_1", "euler_equality"} <= verification.keys()
+            and type(verification.get("all_pass")) is bool):
+        return True
+    return (obj.get("experiment") == "DM2" and type(obj.get("all_morse_pass")) is bool
+            and {"total_steps", "total_jumps", "final_snapshot", "jumps", "snapshots"} <= obj.keys())
+
+
 def is_json_artifact(obj):
-    for key in ("schema_version", "schema"):
+    for key in ("format", "schema_version", "schema"):
         value = obj.get(key)
-        version = re.fullmatch(r"(.+)(?:/|\.v)[1-9][0-9]*", value) if isinstance(value, str) else None
-        if version and version[1] in ARTIFACT_SCHEMA_FAMILIES:
+        version = VERSIONED_FORMAT.fullmatch(value) if isinstance(value, str) else None
+        if version and (version[1] in ARTIFACT_SCHEMA_FAMILIES or ARTIFACT_FORMAT_SUFFIX.search(version[1])):
             return True
-    if is_independent_artifact(obj):
+    if is_independent_artifact(obj) or is_morse_experiment_output(obj):
         return True
     # deliveryManifestSchema 的票号在外层业务约束，不是清单身份的一部分。
     if (MANIFEST_FIELDS <= obj.keys() and type(obj["schemaVersion"]) is int
@@ -614,16 +665,19 @@ def is_basis_path(path, extension):
         return False
     if path.startswith(REVIEW_ARCHIVE):
         return True  # is_artifact_archive_path 已限定两份冻结包的具名规范。
-    directory, _, name = path.rpartition("/")
+    directory, slash, name = path.rpartition("/")
     if extension == ".md":
         return (path in MARKDOWN_BASIS_FILES
                 or directory in MARKDOWN_BASIS_DIRS
                 or (directory == "docs/adr" and ADR_BASENAME.fullmatch(name) is not None)
                 or path.startswith(("docs/agents/", "docs/spec/"))
-                or (path.startswith(".sandcastle/") and OUTPUT_DIRS.isdisjoint(directory.split("/")))
+                or (path.startswith(".sandcastle/") and OUTPUT_DIRS.isdisjoint(directory.lower().split("/")))
                 or (path.startswith(COMPONENT_TREES) and name in {"README.md", "ORACLE.md"}))
     if extension in DATA_EXTENSIONS:
-        return not path.startswith(INFERENCE_TREES) and OUTPUT_DIRS.isdisjoint(directory.split("/"))
+        directory = directory.lower()
+        prefix = directory + slash
+        return (not prefix.startswith(INFERENCE_TREES) and prefix + name not in NON_INPUT_DATA_FILES
+                and NON_INPUT_DATA_DIRS.isdisjoint(directory.split("/")))
     return extension in CODE_EXTENSIONS or name in {"Dockerfile", "Makefile"}
 
 
