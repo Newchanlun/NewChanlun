@@ -682,6 +682,25 @@ def _merge_active_duplicate_aliases(
     return merged
 
 
+def _compute_effective_duplicate_aliases(
+    history_aliases: Mapping[str, str],
+    round_duplicate_aliases: Mapping[str, str],
+    cleared_ids: Collection[str] = (),
+) -> dict[str, str]:
+    """计算本轮唯一的合并后有效去重别名表：先排除本轮已解除/驳回的失效历史别名，再合并本轮新边归约至单跳无环。"""
+    cleared = frozenset(cleared_ids)
+    surviving_history_aliases: Mapping[str, str] = (
+        {
+            alias_fp: canon_fp
+            for alias_fp, canon_fp in history_aliases.items()
+            if alias_fp not in cleared and canon_fp not in cleared
+        }
+        if cleared
+        else history_aliases
+    )
+    return _merge_active_duplicate_aliases(surviving_history_aliases, round_duplicate_aliases)
+
+
 def _real_source_models(models: Sequence[str]) -> tuple[str, ...]:
     real = {
         m.strip()
@@ -3201,7 +3220,7 @@ def _match_reply_targets_detailed(
         if target_f is None:
             return [], 0, False, {}
         target_id = target_f.finding_id
-        if pinned_fid in stale or target_id in stale:
+        if pinned_fid in stale or canonical_pinned in stale or target_id in stale:
             return [], 0, False, {}
         if raw_matched:
             direct_or_alias_hits = {
@@ -4318,7 +4337,7 @@ def _validate_new_explicit_bound_targets(
     *,
     history_bound_targets: Mapping[str, str],
     candidates_by_id: Mapping[str, Finding],
-    history_aliases: Mapping[str, str],
+    effective_aliases: Mapping[str, str],
     round_duplicate_aliases: Mapping[str, str],
     author_replies: Sequence[AuthorReply],
     consumed_reply_keys: Collection[str] = (),
@@ -4336,7 +4355,7 @@ def _validate_new_explicit_bound_targets(
             target_fid,
             consumed_reply_keys=consumed_reply_keys,
             consumed_comment_ids=consumed_comment_ids,
-            alias_maps=(history_aliases, round_duplicate_aliases),
+            alias_maps=(effective_aliases,),
         ):
             raise ConvergenceError(
                 f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 对目标发现 {target_fid!r} 已消费，禁止建立显式锁"
@@ -4348,7 +4367,7 @@ def _validate_new_explicit_bound_targets(
         if target_fid in round_duplicate_aliases:
             raise ConvergenceError(
                 f"VerifiedRound.bound_reply_targets 禁止将回复键 {rk!r} 显式锁定到本轮 DUPLICATE 发现 {target_fid!r}"
-                f"（请锁定到规范发现 {round_duplicate_aliases[target_fid]!r}）"
+                f"（请锁定到规范发现 {effective_aliases.get(target_fid, round_duplicate_aliases[target_fid])!r}）"
             )
         target_finding = candidates_by_id.get(target_fid)
         if target_finding is None:
@@ -4359,12 +4378,7 @@ def _validate_new_explicit_bound_targets(
         for cand_fid, cand_finding in candidates_by_id.items():
             if cand_fid == target_fid:
                 continue
-            hist_canon = history_aliases.get(cand_fid, cand_fid)
-            if (
-                hist_canon == target_fid
-                or round_duplicate_aliases.get(cand_fid) == target_fid
-                or round_duplicate_aliases.get(hist_canon) == target_fid
-            ):
+            if effective_aliases.get(cand_fid) == target_fid:
                 equiv_findings.append(cand_finding)
 
         if kind == "loc":
@@ -4387,7 +4401,7 @@ def _validate_new_explicit_bound_targets(
                     matched_f.finding_id,
                     consumed_reply_keys=consumed_reply_keys,
                     consumed_comment_ids=consumed_comment_ids,
-                    alias_maps=(history_aliases, round_duplicate_aliases),
+                    alias_maps=(effective_aliases,),
                 ):
                     raise ConvergenceError(
                         f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 对原始命中发现 {matched_f.finding_id!r}"
@@ -4419,7 +4433,7 @@ def _validate_new_explicit_bound_targets(
                         matched_f.finding_id,
                         consumed_reply_keys=consumed_reply_keys,
                         consumed_comment_ids=consumed_comment_ids,
-                        alias_maps=(history_aliases, round_duplicate_aliases),
+                        alias_maps=(effective_aliases,),
                     ):
                         raise ConvergenceError(
                             f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 对原始命中发现 {matched_f.finding_id!r}"
@@ -4538,19 +4552,6 @@ class VerifiedRound:
                         f"发现 {fid} 所在轮次 head_sha={self.candidates.head_sha!r} 与上一轮相同（无新提交），"
                         "禁止标记为 resolved_by_fix"
                     )
-            for rk in vf.related_reply_keys:
-                pinned_for_rk = effective_bound_targets.get(rk)
-                if pinned_for_rk is not None:
-                    _, rk_kind, _ = _parse_consumed_reply_key(rk, "related_reply_keys[]")
-                    expected_pinned_for_rk = (
-                        history_aliases.get(pinned_for_rk, pinned_for_rk)
-                        if rk_kind in ("loc", "inline")
-                        else pinned_for_rk
-                    )
-                    if pinned_for_rk != fid and expected_pinned_for_rk != fid:
-                        raise ConvergenceError(
-                            f"发现 {fid} 的 related_reply_keys 包含已锁定到发现 {pinned_for_rk} 的回复键 {rk!r}"
-                        )
             verdicts_by_id[fid] = vf
 
         missing = [f.finding_id for f in self.candidates.findings if f.finding_id not in verdicts_by_id]
@@ -4562,6 +4563,35 @@ class VerifiedRound:
             for fid, vf in verdicts_by_id.items()
             if vf.verdict == VerificationVerdict.DUPLICATE and vf.duplicate_of is not None
         }
+        cleared_ids = frozenset(
+            fid
+            for fid, vf in verdicts_by_id.items()
+            if vf.verdict
+            in (
+                VerificationVerdict.RESOLVED_BY_FIX,
+                VerificationVerdict.RESOLVED_BY_WONTFIX,
+                VerificationVerdict.REJECTED,
+            )
+        )
+        effective_aliases = _compute_effective_duplicate_aliases(
+            history_aliases,
+            round_duplicate_aliases,
+            cleared_ids,
+        )
+        for fid, vf in verdicts_by_id.items():
+            for rk in vf.related_reply_keys:
+                pinned_for_rk = effective_bound_targets.get(rk)
+                if pinned_for_rk is not None:
+                    _, rk_kind, _ = _parse_consumed_reply_key(rk, "related_reply_keys[]")
+                    expected_pinned_for_rk = (
+                        effective_aliases.get(pinned_for_rk, pinned_for_rk)
+                        if rk_kind in ("loc", "inline")
+                        else pinned_for_rk
+                    )
+                    if pinned_for_rk != fid and expected_pinned_for_rk != fid:
+                        raise ConvergenceError(
+                            f"发现 {fid} 的 related_reply_keys 包含已锁定到发现 {pinned_for_rk} 的回复键 {rk!r}"
+                        )
         active_author_replies = tuple(
             r
             for r in self.author_replies
@@ -4571,14 +4601,14 @@ class VerifiedRound:
             explicit_bound_targets,
             history_bound_targets=history_bound_targets,
             candidates_by_id=candidates_by_id,
-            history_aliases=history_aliases,
+            effective_aliases=effective_aliases,
             round_duplicate_aliases=round_duplicate_aliases,
             author_replies=active_author_replies,
             consumed_reply_keys=effective_consumed,
             consumed_comment_ids=ext_consumed_cids,
         )
 
-        # 严格仅用独立保存的 self.author_replies 重算回复匹配、冲突排除、pinned 标志与 related_reply_keys，禁止从 verdicts 反抽补造证据
+        # 严格仅用独立保存的 self.author_replies 与合并后唯一有效别名表 effective_aliases 重算回复匹配，禁止从 verdicts 反抽补造证据
         reply_analysis = _analyze_author_replies_detailed(
             self.candidates.findings,
             self.author_replies,
@@ -4586,7 +4616,7 @@ class VerifiedRound:
             consumed_comment_ids=ext_consumed_cids,
             stale_location_fingerprints=self.candidates.stale_location_fingerprints,
             bound_reply_targets=effective_bound_targets,
-            duplicate_aliases=history_aliases,
+            duplicate_aliases=effective_aliases,
             same_head_pinned_keys=same_head_pinned_keys,
         )
         expected_related_keys = _compute_folded_related_reply_keys(
@@ -4740,40 +4770,13 @@ def parse_verifier_output(
     same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == candidates.head_sha)
     history_aliases = _active_duplicate_aliases(candidates.history)
     extra_bound_targets = _normalize_bound_reply_targets(bound_reply_targets, "bound_reply_targets")
-    for rk, target_fid in extra_bound_targets.items():
-        if rk in history_bound_targets:
-            continue
-        rk_cid, _, _ = _parse_consumed_reply_key(rk, "bound_reply_targets[]")
-        if _is_reply_consumed_for_target(
-            rk,
-            rk_cid,
-            target_fid,
-            consumed_reply_keys=effective_consumed,
-            consumed_comment_ids=consumed_cids_norm,
-            alias_maps=(history_aliases,),
-        ):
-            raise ConvergenceError(
-                f"bound_reply_targets 中新增显式锁回复键 {rk!r} 对目标发现 {target_fid!r} 已消费，禁止建立显式锁"
-            )
     effective_bound_targets = dict(history_bound_targets)
     _merge_bound_reply_targets(effective_bound_targets, extra_bound_targets, "bound_reply_targets")
 
     persisted_replies = _dedupe_author_replies_keep_last(author_replies, "author_replies")
 
-    reply_analysis = _analyze_author_replies_detailed(
-        candidate_list,
-        persisted_replies,
-        consumed_reply_keys=effective_consumed,
-        consumed_comment_ids=consumed_cids_norm,
-        stale_location_fingerprints=candidates.stale_location_fingerprints,
-        bound_reply_targets=effective_bound_targets,
-        duplicate_aliases=history_aliases,
-        same_head_pinned_keys=same_head_pinned_keys,
-    )
-    bound_replies = reply_analysis.bound_replies
-
     prior_important_ids = frozenset(f.finding_id for f in candidates.prior_important)
-    parsed_records: dict[str, tuple[Finding, VerificationVerdict, str, AuthorReply | None, str | None]] = {}
+    parsed_raw: dict[str, tuple[Finding, VerificationVerdict, str, str | None]] = {}
     duplicate_of_map: dict[str, str] = {}
     for idx, item in enumerate(raw_verdicts):
         if not isinstance(item, Mapping):
@@ -4781,7 +4784,7 @@ def parse_verifier_output(
         fid = _require_non_empty_str(item.get("finding_id"), f"verdicts[{idx}].finding_id").lower()
         if fid not in candidates_by_id:
             raise ConvergenceError(f"核实者不得引入候选清单外的新发现：{fid}")
-        if fid in parsed_records:
+        if fid in parsed_raw:
             raise ConvergenceError(f"核实者对同一发现重复裁决：{fid}")
         verdict = parse_verification_verdict(item.get("verdict"))
         raw_evidence = item["verifier_evidence"] if "verifier_evidence" in item else item.get("evidence")
@@ -4823,24 +4826,16 @@ def parse_verifier_output(
                     "禁止标记为 resolved_by_fix"
                 )
         finding = candidates_by_id[fid]
-        matched_reply: AuthorReply | None = None
-        if verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
-            matched_reply = bound_replies.get(fid)
-            if matched_reply is None:
-                raise ConvergenceError(
-                    f"发现 {fid} 裁决为 resolved_by_wontfix，但缺少唯一匹配且未消费的作者不修回复"
-                )
-            _require_non_empty_str(matched_reply.author, "author_reply.author")
-        parsed_records[fid] = (finding, verdict, verifier_evidence, matched_reply, duplicate_of)
+        parsed_raw[fid] = (finding, verdict, verifier_evidence, duplicate_of)
 
-    missing = [cid for cid in ordered_ids if cid not in parsed_records]
+    missing = [cid for cid in ordered_ids if cid not in parsed_raw]
     if missing:
         raise ConvergenceError(f"核实者遗漏候选发现：{', '.join(missing)}")
 
-    # 先校验 DUPLICATE 指向与严重度单调性，再按 canonical 身份折叠未锁定坐标/行内回复键
+    # 先校验 DUPLICATE 指向与严重度单调性，再计算本轮唯一合并后有效别名表 effective_aliases
     for dup_fid, target_fid in duplicate_of_map.items():
-        dup_finding, _, _, _, _ = parsed_records[dup_fid]
-        target_finding, target_verdict, _, _, _ = parsed_records[target_fid]
+        dup_finding, _, _, _ = parsed_raw[dup_fid]
+        target_finding, target_verdict, _, _ = parsed_raw[target_fid]
         if target_verdict != VerificationVerdict.CONFIRMED:
             raise ConvergenceError(
                 f"发现 {dup_fid} 的 duplicate_of={target_fid!r} 目标裁决为 {target_verdict.value!r}，"
@@ -4852,12 +4847,61 @@ def parse_verifier_output(
                 f"更低严重度的目标 {target_fid!r}（{target_finding.severity.value}）"
             )
 
-    for rk, target_fid in extra_bound_targets.items():
-        if rk not in history_bound_targets and target_fid in duplicate_of_map:
-            raise ConvergenceError(
-                f"bound_reply_targets 禁止将回复键 {rk!r} 显式锁定到本轮 DUPLICATE 发现 {target_fid!r}"
-                f"（请锁定到规范发现 {duplicate_of_map[target_fid]!r}）"
-            )
+    cleared_ids = frozenset(
+        fid
+        for fid, (_, verdict, _, _) in parsed_raw.items()
+        if verdict
+        in (
+            VerificationVerdict.RESOLVED_BY_FIX,
+            VerificationVerdict.RESOLVED_BY_WONTFIX,
+            VerificationVerdict.REJECTED,
+        )
+    )
+    effective_aliases = _compute_effective_duplicate_aliases(
+        history_aliases,
+        duplicate_of_map,
+        cleared_ids,
+    )
+    active_author_replies = tuple(
+        r
+        for r in persisted_replies
+        if r.reply_key not in effective_consumed and r.comment_id.strip() not in consumed_cids_norm
+    )
+    _validate_new_explicit_bound_targets(
+        extra_bound_targets,
+        history_bound_targets=history_bound_targets,
+        candidates_by_id=candidates_by_id,
+        effective_aliases=effective_aliases,
+        round_duplicate_aliases=duplicate_of_map,
+        author_replies=active_author_replies,
+        consumed_reply_keys=effective_consumed,
+        consumed_comment_ids=consumed_cids_norm,
+    )
+
+    reply_analysis = _analyze_author_replies_detailed(
+        candidate_list,
+        persisted_replies,
+        consumed_reply_keys=effective_consumed,
+        consumed_comment_ids=consumed_cids_norm,
+        stale_location_fingerprints=candidates.stale_location_fingerprints,
+        bound_reply_targets=effective_bound_targets,
+        duplicate_aliases=effective_aliases,
+        same_head_pinned_keys=same_head_pinned_keys,
+    )
+    bound_replies = reply_analysis.bound_replies
+
+    parsed_records: dict[str, tuple[Finding, VerificationVerdict, str, AuthorReply | None, str | None]] = {}
+    for cid in ordered_ids:
+        finding, verdict, verifier_evidence, duplicate_of = parsed_raw[cid]
+        matched_reply: AuthorReply | None = None
+        if verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
+            matched_reply = bound_replies.get(cid)
+            if matched_reply is None:
+                raise ConvergenceError(
+                    f"发现 {cid} 裁决为 resolved_by_wontfix，但缺少唯一匹配且未消费的作者不修回复"
+                )
+            _require_non_empty_str(matched_reply.author, "author_reply.author")
+        parsed_records[cid] = (finding, verdict, verifier_evidence, matched_reply, duplicate_of)
 
     folded_related_keys = _compute_folded_related_reply_keys(
         reply_analysis,
@@ -5182,9 +5226,8 @@ def _derive_round_reply_pins_and_consumed(
     history_consumed: frozenset[str],
     consumed_comment_ids: frozenset[str] = frozenset(),
     seed_bound_targets: Mapping[str, str],
-    history_aliases: Mapping[str, str],
-    active_aliases: Mapping[str, str],
-    round_duplicate_aliases: Mapping[str, str],
+    effective_aliases: Mapping[str, str],
+    cleared_alias_ids: frozenset[str] = frozenset(),
     same_head_pinned_keys: frozenset[str],
     pre_verdict_stale: frozenset[str],
     cleared_ids: frozenset[str],
@@ -5197,7 +5240,7 @@ def _derive_round_reply_pins_and_consumed(
         consumed_comment_ids=consumed_comment_ids,
         stale_location_fingerprints=pre_verdict_stale,
         bound_reply_targets=seed_bound_targets,
-        duplicate_aliases=history_aliases,
+        duplicate_aliases=effective_aliases,
         same_head_pinned_keys=same_head_pinned_keys,
     )
     matched_keys_by_id = analysis.matched_keys_by_id
@@ -5218,15 +5261,21 @@ def _derive_round_reply_pins_and_consumed(
 
     for rk, pinned_fid in seed_bound_targets.items():
         _, rk_kind, _ = _parse_consumed_reply_key(rk, "bound_reply_targets[]")
-        effective_target = history_aliases.get(pinned_fid, pinned_fid) if rk_kind in ("loc", "inline") else pinned_fid
-        if pinned_fid in cleared_ids or effective_target in cleared_ids:
+        effective_target = (
+            effective_aliases.get(pinned_fid, pinned_fid) if rk_kind in ("loc", "inline") else pinned_fid
+        )
+        if (
+            pinned_fid in cleared_ids
+            or effective_target in cleared_ids
+            or (rk_kind in ("loc", "inline") and pinned_fid in cleared_alias_ids)
+        ):
             consumed_keys.add(rk)
 
     bound_targets: dict[str, str] = dict(seed_bound_targets)
 
     # 1. 短前缀 finding 回复在完整候选集上先判原始命中集（折叠 duplicate_of 之前）：
     #    唯一命中且对目标未消费 -> 锁定原始 16 位指纹（即使裁为 DUPLICATE，也不转绑规范项）；多项命中 -> 立即消费。
-    alias_maps_all = (history_aliases, round_duplicate_aliases, active_aliases)
+    alias_maps_effective: tuple[Mapping[str, str], ...] = (effective_aliases,)
     for rk, hit_fids in analysis.raw_short_prefix_hits.items():
         if rk in bound_targets:
             pinned = bound_targets[rk]
@@ -5243,7 +5292,7 @@ def _derive_round_reply_pins_and_consumed(
                 only_fid,
                 consumed_reply_keys=history_consumed,
                 consumed_comment_ids=consumed_comment_ids,
-                alias_maps=alias_maps_all,
+                alias_maps=alias_maps_effective,
             ):
                 continue
             bound_targets[rk] = only_fid
@@ -5252,12 +5301,12 @@ def _derive_round_reply_pins_and_consumed(
         else:
             consumed_keys.add(rk)
 
-    # 2. loc / inline 坐标回复按规范目标归并锁定或消费（严格以真实 AuthorReply 分析结果为准，绝不信任 related_reply_keys 凭空造锁）
+    # 2. loc / inline 坐标回复按合并后唯一有效规范目标归并锁定或消费（严格以真实 AuthorReply 分析结果为准，绝不信任 related_reply_keys 凭空造锁）
     round_pin_targets: dict[str, tuple[str, set[str]]] = {}
     consumed_pin_targets: dict[str, set[str]] = {}
     for vf in verified_findings:
         fid = vf.finding.finding_id
-        canonical_fid = round_duplicate_aliases.get(fid, fid)
+        canonical_fid = effective_aliases.get(fid, fid)
         candidate_rks: set[str] = set(matched_keys_by_id.get(fid, ()))
         if vf.author_reply is not None:
             candidate_rks.add(vf.author_reply.reply_key)
@@ -5278,7 +5327,7 @@ def _derive_round_reply_pins_and_consumed(
                     raw_hit_ids=raw_hit_ids,
                     consumed_reply_keys=history_consumed,
                     consumed_comment_ids=consumed_comment_ids,
-                    alias_maps=alias_maps_all,
+                    alias_maps=alias_maps_effective,
                 ) or _is_reply_hit_consumed(
                     rk,
                     rk_cid,
@@ -5286,7 +5335,7 @@ def _derive_round_reply_pins_and_consumed(
                     raw_hit_ids=raw_hit_ids,
                     consumed_reply_keys=history_consumed,
                     consumed_comment_ids=consumed_comment_ids,
-                    alias_maps=alias_maps_all,
+                    alias_maps=alias_maps_effective,
                 ):
                     consumed_pin_targets.setdefault(rk, set()).add(target_for_rk)
                 round_pin_targets.setdefault(rk, (kind, set()))[1].add(target_for_rk)
@@ -5299,7 +5348,7 @@ def _derive_round_reply_pins_and_consumed(
                     fid,
                     consumed_reply_keys=history_consumed,
                     consumed_comment_ids=consumed_comment_ids,
-                    alias_maps=alias_maps_all,
+                    alias_maps=alias_maps_effective,
                 ):
                     consumed_pin_targets.setdefault(rk, set()).add(fid)
                 round_pin_targets.setdefault(rk, (kind, set()))[1].add(fid)
@@ -5309,8 +5358,7 @@ def _derive_round_reply_pins_and_consumed(
             pinned = bound_targets[rk]
             allowed_targets = {pinned}
             if kind in ("loc", "inline"):
-                allowed_targets.add(active_aliases.get(pinned, pinned))
-                allowed_targets.add(history_aliases.get(pinned, pinned))
+                allowed_targets.add(effective_aliases.get(pinned, pinned))
             if any(fid not in allowed_targets for fid in target_fids):
                 raise ConvergenceError(
                     f"回复键 {rk!r} 已锁定到发现 {pinned!r}，不得改绑到 {sorted(target_fids)!r}"
@@ -5426,15 +5474,19 @@ def _derive_round_decision_payload(
         for vf in ordered_tuple
         if vf.verdict == VerificationVerdict.DUPLICATE and vf.duplicate_of is not None
     }
-    surviving_history_aliases = {
-        alias_fp: canon_fp
+    effective_aliases = _compute_effective_duplicate_aliases(
+        history_aliases,
+        round_duplicate_aliases,
+        cleared_ids,
+    )
+    cleared_alias_ids = frozenset(
+        alias_fp
         for alias_fp, canon_fp in history_aliases.items()
-        if alias_fp not in cleared_ids and canon_fp not in cleared_ids
-    }
-    active_aliases = _merge_active_duplicate_aliases(surviving_history_aliases, round_duplicate_aliases)
-    duplicate_aliases_tuple = tuple(sorted(active_aliases.items()))
+        if canon_fp in cleared_ids and alias_fp not in effective_aliases
+    )
+    duplicate_aliases_tuple = tuple(sorted(effective_aliases.items()))
 
-    canonical_confirmed = _select_canonical_confirmed_findings(effective_verified, active_aliases)
+    canonical_confirmed = _select_canonical_confirmed_findings(effective_verified, effective_aliases)
     blocking = tuple(vf for vf in canonical_confirmed if vf.is_blocking)
     non_blocking = tuple(vf for vf in canonical_confirmed if not vf.is_blocking)
 
@@ -5454,7 +5506,7 @@ def _derive_round_decision_payload(
         author_replies,
         consumed_reply_keys=effective_consumed,
         consumed_comment_ids=effective_consumed_cids,
-        duplicate_aliases=history_aliases,
+        duplicate_aliases=effective_aliases,
     )
     history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(history)
     same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == head_sha)
@@ -5478,9 +5530,8 @@ def _derive_round_decision_payload(
         history_consumed=effective_consumed,
         consumed_comment_ids=effective_consumed_cids,
         seed_bound_targets=effective_bound_targets,
-        history_aliases=history_aliases,
-        active_aliases=active_aliases,
-        round_duplicate_aliases=round_duplicate_aliases,
+        effective_aliases=effective_aliases,
+        cleared_alias_ids=cleared_alias_ids,
         same_head_pinned_keys=same_head_pinned_keys,
         pre_verdict_stale=pre_verdict_stale,
         cleared_ids=cleared_ids,

@@ -14523,3 +14523,268 @@ def test_r35_important2_merge_filters_full_id_reply_consumed_via_canonical_alias
     )
     with pytest.raises(ConvergenceError):
         evaluate_round(ver_r2_unconsumed, author_replies=(reply_two,))
+
+
+def test_r36_important1_overridden_alias_chain_blocks_stale_explicit_lock_to_old_target() -> None:
+    """Codex R36 Important 1：R1 建立 D->A，R2 改判 A->B 且 D->X 时，统一使用合并后有效别名表，拒绝 D.py:42->B 显式锁并归属 X。"""
+    f_a = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r36_a.py",
+        line=10,
+        category="旧规范NitA",
+        failure_scenario="r36_a.py:10 旧规范提示 A",
+        source_models=("gpt-6-astra",),
+    )
+    f_d = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r36_d.py",
+        line=42,
+        category="别名NitD",
+        failure_scenario="r36_d.py:42 别名提示 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_b = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r36_b.py",
+        line=20,
+        category="新规范NitB",
+        failure_scenario="r36_b.py:20 新规范提示 B",
+        source_models=("gpt-6-astra",),
+    )
+    f_x = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r36_x.py",
+        line=30,
+        category="新规范NitX",
+        failure_scenario="r36_x.py:30 新规范提示 X",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_i = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r36_i.py",
+        line=5,
+        category="独立阻断I",
+        failure_scenario="r36_i.py:5 独立阻断缺陷 I",
+        source_models=("gpt-6-astra",),
+    )
+
+    # R1: D -> A，独立 Important I 维持阻断
+    cand_r1 = _candidates([f_a, f_d, f_i], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 A 成立"},
+                {
+                    "finding_id": f_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "R1 D 折入 A",
+                },
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 I 成立"},
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    assert dec_r1.outcome is RoundOutcome.BLOCKED
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+    assert e1.duplicate_aliases == ((f_d.finding_id, f_a.finding_id),)
+
+    # R2: 改判 A -> B 且 D -> X；仅提供命中 D.py:42 的坐标与行内回复
+    reply_d = AuthorReply(None, "pilot1742/r36_d.py", 42, "保留 D 所在实现", "c361", "alice")
+    reply_d_inline = AuthorReply(
+        None,
+        "pilot1742/r36_d.py",
+        42,
+        "行内保留 D 实现",
+        "c361",
+        "alice",
+        is_inline_anchor=True,
+    )
+    cand_r2 = _candidates([f_a, f_d, f_b, f_x, f_i], round_number=2, head_sha=HEAD_2, history=(e1,))
+    r2_payload = _verifier_payload(
+        cand_r2,
+        [
+            {
+                "finding_id": f_a.finding_id,
+                "verdict": "duplicate",
+                "duplicate_of": f_b.finding_id,
+                "verifier_evidence": "R2 A 改判折入 B",
+            },
+            {
+                "finding_id": f_d.finding_id,
+                "verdict": "duplicate",
+                "duplicate_of": f_x.finding_id,
+                "verifier_evidence": "R2 D 改判折入 X",
+            },
+            {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 B 成立"},
+            {"finding_id": f_x.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 X 成立"},
+            {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 I 仍成立"},
+        ],
+    )
+
+    # 1. 反例：显式锁定 D.py:42 -> B（loc 与 inline）必须抛 ConvergenceError，禁止借被覆盖旧边 D->A 拼成 D->A->B
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            r2_payload,
+            cand_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d],
+            bound_reply_targets={reply_d.reply_key: f_b.finding_id},
+        )
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            r2_payload,
+            cand_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d_inline],
+            bound_reply_targets={reply_d_inline.reply_key: f_b.finding_id},
+        )
+
+    # 2. 正例：显式锁定 D.py:42 -> X（loc 与 inline）合法通过并归属 X
+    ver_r2_explicit_x = parse_verifier_output(
+        r2_payload,
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d],
+        bound_reply_targets={reply_d.reply_key: f_x.finding_id},
+    )
+    dec_r2_explicit_x = evaluate_round(ver_r2_explicit_x)
+    assert dict(dec_r2_explicit_x.duplicate_aliases) == {
+        f_a.finding_id: f_b.finding_id,
+        f_d.finding_id: f_x.finding_id,
+    }
+    assert dict(dec_r2_explicit_x.bound_reply_targets) == {reply_d.reply_key: f_x.finding_id}
+
+    ver_r2_inline_x = parse_verifier_output(
+        r2_payload,
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d_inline],
+        bound_reply_targets={reply_d_inline.reply_key: f_x.finding_id},
+    )
+    dec_r2_inline_x = evaluate_round(ver_r2_inline_x)
+    assert dict(dec_r2_inline_x.bound_reply_targets) == {reply_d_inline.reply_key: f_x.finding_id}
+
+    # 3. 自动回复匹配（无显式锁）同样归属 X 而非 B，并防止 R3 将 B 升为 Important 时被 D 的回复误解除得 PASS
+    ver_r2_auto = parse_verifier_output(
+        r2_payload,
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d],
+    )
+    ver_r2_by_id = {vf.finding.finding_id: vf for vf in ver_r2_auto.verdicts}
+    assert reply_d.reply_key in ver_r2_by_id[f_x.finding_id].related_reply_keys
+    assert reply_d.reply_key not in ver_r2_by_id[f_b.finding_id].related_reply_keys
+    dec_r2_auto = evaluate_round(ver_r2_auto)
+    assert dict(dec_r2_auto.bound_reply_targets) == {reply_d.reply_key: f_x.finding_id}
+    e2 = dec_r2_auto.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_r2_auto))
+
+    f_b_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r36_b.py",
+        line=20,
+        category="新规范NitB",
+        failure_scenario="r36_b.py:20 新规范提示 B",
+        source_models=("gpt-6-astra",),
+    )
+    assert f_b_imp.finding_id == f_b.finding_id
+    cand_r3 = _candidates([f_b_imp], round_number=3, head_sha=HEAD_3, history=(e1, e2))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r3,
+                [
+                    {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                    {
+                        "finding_id": f_b_imp.finding_id,
+                        "verdict": "resolved_by_wontfix",
+                        "verifier_evidence": "试图借仅针对 D 的回复解除升级后的 B",
+                    },
+                ],
+            ),
+            cand_r3,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d],
+        )
+    ver_r3_blocked = parse_verifier_output(
+        _verifier_payload(
+            cand_r3,
+            [
+                {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "I 已修复"},
+                {"finding_id": f_b_imp.finding_id, "verdict": "confirmed", "verifier_evidence": "B 升为阻断且无有效回复"},
+            ],
+        ),
+        cand_r3,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d],
+    )
+    dec_r3_blocked = evaluate_round(ver_r3_blocked)
+    assert dec_r3_blocked.outcome is RoundOutcome.BLOCKED
+    assert [vf.finding.finding_id for vf in dec_r3_blocked.blocking_findings] == [f_b_imp.finding_id]
+
+
+def test_r36_important2_first_round_duplicate_alias_filters_full_id_reply_before_cross_source_merge() -> None:
+    """Codex R36 Important 2：空历史首轮 D->A 与 comment:c:resolved:<A> 下，跨来源合并前先按本轮有效别名过滤已消费全长 D 回复。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r36_merge_a.py",
+        line=15,
+        category="空历史规范A",
+        failure_scenario="r36_merge_a.py:15 规范缺陷 A",
+        source_models=("gpt-6-astra",),
+    )
+    f_d = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r36_merge_d.py",
+        line=45,
+        category="空历史别名D",
+        failure_scenario="r36_merge_d.py:45 重复缺陷 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    resolved_a_key = f"comment:c362:resolved:{f_a.finding_id}"
+    reply_one = AuthorReply(f_d.finding_id, None, None, "one", "c362", "alice")
+    reply_two = AuthorReply(f_d.finding_id, None, None, "two", "c362", "alice")
+
+    cand_r1 = _candidates([f_a, f_d], round_number=1, head_sha=HEAD_1)
+    r1_payload = _verifier_payload(
+        cand_r1,
+        [
+            {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "首轮 A 为规范项"},
+            {
+                "finding_id": f_d.finding_id,
+                "verdict": "duplicate",
+                "duplicate_of": f_a.finding_id,
+                "verifier_evidence": "首轮 D 折入 A",
+            },
+        ],
+    )
+
+    # 1. 正例：保留消费键 comment:c362:resolved:<A> 时，两条全长 D 回复均按本轮有效别名 D->A 过滤，A 正常保持 BLOCKED
+    ver_r1 = parse_verifier_output(
+        r1_payload,
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_one],
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_r1 = evaluate_round(ver_r1, author_replies=(reply_two,))
+    assert dec_r1.outcome is RoundOutcome.BLOCKED
+    assert [vf.finding.finding_id for vf in dec_r1.blocking_findings] == [f_a.finding_id]
+    assert dec_r1.duplicate_aliases == ((f_d.finding_id, f_a.finding_id),)
+    assert dec_r1.author_replies == ()
+    assert dec_r1.bound_reply_targets == frozenset()
+    assert ver_r1.author_replies == (reply_one,)
+    assert dec_r1.extra_author_replies == (reply_two,)
+
+    # 2. 反向对照：移除消费键后，验证端与 evaluate_round 同键不同理由仍必须抛 ConvergenceError
+    ver_r1_unconsumed = parse_verifier_output(
+        r1_payload,
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_one],
+    )
+    with pytest.raises(ConvergenceError):
+        evaluate_round(ver_r1_unconsumed, author_replies=(reply_two,))
