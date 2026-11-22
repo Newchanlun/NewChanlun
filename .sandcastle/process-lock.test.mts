@@ -89,20 +89,20 @@ test("真实子进程拿锁后被 SIGKILL：同一把锁自动接管", async () 
 });
 
 test("两个并发重入争同一把残留锁：只有一个成功，另一个拒绝；不误搬对方的新锁", async () => {
+  const d = dir(); const lock = join(d, "c.lock");
   const pid = deadPid(); await waitDead(pid);
-  await Promise.all([0, 1, 2].map(async (round) => {
-    const d = dir(); const lock = join(d, "c.lock");
-    const script = join(d, "contend.mts");
-    writeFileSync(script, `import { acquireLock } from ${JSON.stringify(here + "process-lock.mts")};
+  const script = join(d, "contend.mts");
+  writeFileSync(script, `import { acquireLock } from ${JSON.stringify(here + "process-lock.mts")};
 try { const h = acquireLock(${JSON.stringify(lock)}, "/c"); console.log("WON"); setTimeout(() => { h.release(); }, 1500); } catch (e) { console.log("LOST " + (e instanceof Error ? e.message.slice(0, 80) : e)); }`);
+  for (let round = 0; round < 3; round++) {
     write(lock, { pid, start: "Mon Jan  1 00:00:00 2024", host: hostname(), token: "old" + round, cwd: "/x" });
-    const run = () => new Promise<string>((res) => { let out = ""; const c = spawn(process.execPath, ["--import", loader, script], { stdio: ["ignore", "pipe", "inherit"] }); c.stdout.on("data", (b) => (out += b)); c.on("exit", () => res(out)); });
+    const run = () => new Promise<string>((res) => { let out = ""; const c = spawn(process.execPath, ["--import", loader, script], { stdio: ["ignore", "pipe", "inherit"] }); c.stdout.on("data", (b) => (out += b)); c.on("close", () => res(out)); });
     const results = await Promise.all([run(), run(), run()]);
     assert.equal(results.filter((r) => r.startsWith("WON")).length, 1, JSON.stringify(results));
     assert.equal(results.filter((r) => r.startsWith("LOST")).length, 2, JSON.stringify(results));
     assert.ok(!existsSync(`${lock}.takeover`), "守卫已释放");
     assert.equal(existsSync(lock), false, "赢家退出时释放自己的锁");
-  }));
+  }
 });
 
 // —— 通过 runManagedMerge 的端到端：宿主归并（无冲突）与冲突（Docker 门禁所在回调）两条路径 ——
