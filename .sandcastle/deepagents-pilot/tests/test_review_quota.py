@@ -166,3 +166,48 @@ def test_quota_gate_blocks_before_paid_preflight_on_new_attempt(lane, monkeypatc
     with pytest.raises(EffectPending, match="quota-paused"):
         lane.review_pr(1810, 1)
     assert preflight_calls == [] and lane.status(1810) == [] and lane.gateway.sent == []
+
+
+def test_failed_preflight_probes_accumulate_into_recent_input_tokens_and_trip_quota(lane, monkeypatch):
+    """R19（Astra P2）：预检发出上游往返探针后因封存/收据等后续项失败时，仍须折算输入 token 计入 24h 额度并在触顶后触发 quota-paused；
+    未发出探针（not_sent 或前置检查失败）的预检记 0。"""
+    no_send_report = {
+        "returncode": 2,
+        "image_id": "sha256:" + "1" * 64,
+        "report": {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [
+                {"name": "models", "ok": False, "detail": {"reason": "down"}},
+                {"name": "roundtrip:gpt-6.2-sol", "ok": False, "detail": {"error": {"not_sent": "总时限已到"}}},
+            ],
+        },
+    }
+    lane.preflight = lambda _t: no_send_report
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 1)
+    assert lane.recent_input_tokens() == 0
+
+    sent_then_seal_failed = {
+        "returncode": 2,
+        "image_id": "sha256:" + "1" * 64,
+        "report": {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [
+                {"name": "roundtrip:gpt-6.2-sol", "ok": True, "detail": {"http_status": 200, "returned_model": "gpt-6.2-sol"}},
+                {"name": "roundtrip:gpt-6.2-astra", "ok": True, "detail": {"http_status": 200, "returned_model": "gpt-6.2-astra"}},
+                {"name": "seal:gpt-6.2-sol", "ok": False, "detail": {"reason": "unavailable"}},
+            ],
+        },
+    }
+    calls = []
+    lane.preflight = lambda t: (calls.append(t.head_sha), sent_then_seal_failed)[1]
+    cap = 3 * 2 * module.PREFLIGHT_TOKENS_PER_PROBE
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, str(cap))
+    for _ in range(3):
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 1)
+    assert len(calls) == 3
+    assert lane.recent_input_tokens() == cap
+    with pytest.raises(EffectPending, match="quota-paused"):
+        lane.target(1810, 1)
+    assert len(calls) == 3

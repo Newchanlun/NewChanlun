@@ -618,13 +618,15 @@ class Sweep:
             if self.auto_merge:
                 # 先读取全部合格 PR 的实时状态，再核验仓库级 allow_auto_merge；两者均在任何 decide() 派发前完成。
                 # 这样 allow_auto_merge 超时时 fail_closed 已有实时 auto_merge 状态，且不安全时零子进程被派发。
-                for pr in pulls:
+                for idx, pr in enumerate(pulls):
                     if self._eligible(pr):
                         continue
                     try:
                         states[pr["number"]] = self.github.pr(pr["number"])
-                    except SourceUnreadable:  # 实时 PR 状态读取超时：记未知，让 fail_closed 兜底撤原生 auto-merge
-                        unreadable.add(pr["number"])
+                    except SourceUnreadable:  # 实时 PR 状态读取超时：本条及余下尚未读取的合格 PR 均记未知，让 fail_closed 兜底撤原生 auto-merge
+                        for rem in pulls[idx:]:
+                            if not self._eligible(rem):
+                                unreadable.add(rem["number"])
                         raise
                     except Exception as error:  # 单个 PR 隔离：不派审，合入阶段按失败关闭撤原生 auto-merge
                         unreadable.add(pr["number"])

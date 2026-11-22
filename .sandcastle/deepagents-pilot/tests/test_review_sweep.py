@@ -2496,3 +2496,29 @@ def test_stale_rereview_attempt_keeps_rereview_pending_instead_of_reverting_to_o
     actions = sweep.tick()
     assert acts(actions) == ["rereview-pending", "waiting"]
     assert actions[-1]["queue_head"] is False
+
+
+def test_multi_pr_state_timeout_marks_all_remaining_eligible_prs_unreadable_in_fail_closed(lane):
+    """R19（Astra P1）：open_pulls 快照中多个合格 PR 均显示 auto_merge=None；1805 实时读回 False，1810 超时后
+    1815 尚未读取，fail_closed 必须把 1810 与余下未读的 1815 全部记未知并撤回原生 auto-merge，不误撤已确认 False 的 1805。"""
+    lane.gateway.pr["auto_merge"] = None
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1805, 1815])
+    for extra in github.extra_pulls:
+        extra["auto_merge"] = None
+    github.states[1805] = {"auto_merge": False}
+    orig_pr = github.pr
+
+    def pr_hang_on_1810(number):
+        if number == 1810:
+            _hang()
+        return orig_pr(number)
+
+    github.pr = pr_hang_on_1810
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    with pytest.raises(SourceUnreadable) as caught:
+        sweep.tick()
+    assert host.spawned == []
+    assert github.calls == [("disable", 1810), ("disable", 1815)]
+    withdrawn_prs = [a["pr"] for a in caught.value.actions if a["action"] == "fail-closed-withdraw"]
+    assert withdrawn_prs == [1810, 1815]

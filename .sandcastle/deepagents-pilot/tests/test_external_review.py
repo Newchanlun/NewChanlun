@@ -3547,6 +3547,10 @@ def test_real_github_app_client_and_repo_gateway_publish_success_checks_repo_all
                 "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
             })
         if path == f"/repos/{ident.repository}":
+            if repo_state.get("mode") == "connect_error":
+                raise httpx.ConnectError("network down", request=request)
+            if repo_state.get("mode") == "http_502":
+                return httpx.Response(502, text="bad gateway")
             return httpx.Response(200, json={
                 "id": ident.repository_id, "full_name": ident.repository,
                 "allow_auto_merge": repo_state["allow_auto_merge"],
@@ -3583,6 +3587,59 @@ def test_real_github_app_client_and_repo_gateway_publish_success_checks_repo_all
         with pytest.raises(EffectPending, match="allow_auto_merge"):
             pub.publish("success")
         assert statuses[0]["state"] == "pending"
+        for mode in ("connect_error", "http_502"):
+            repo_state["mode"] = mode
+            with pytest.raises(EffectPending, match="allow_auto_merge"):
+                pub.publish("success")
+            assert statuses[0]["state"] == "pending"
+        repo_state.pop("mode", None)
         repo_state["allow_auto_merge"] = False
         done = pub.publish("success")
         assert done["state"] == "success" and statuses[0]["state"] == "success"
+
+
+def test_resume_publication_acquires_pr_lock_before_clearing_rereview_intent(lane, monkeypatch):
+    """R19（Sol P1 / Astra P1）：_resume_publication 在对账已发出的终态后清理重审意图时必须持有 _pr_lock，
+    与 _record_rereview_intent 串行化，防止并发删除新写入的重审意图。"""
+    from contextlib import contextmanager
+
+    passed = lane.review_pr(1810, 1)
+    assert passed["verdict"] == "PASS"
+    target = ReviewTarget(**passed["target"])
+    folder = lane.state_root / "runs" / target.key
+    # 模拟重审意图早于本 attempt 登记时刻，且 outcome.json 尚未写回 publication 而 journal 已 done
+    intent_path = lane._rereview_intent_path(target.repository_id, target.pr_number, target.base_sha, target.head_sha)
+    module._save(intent_path, {
+        "repository_id": target.repository_id, "pr_number": target.pr_number,
+        "base_sha": target.base_sha, "head_sha": target.head_sha,
+        "patch_id": target.patch_id, "attempt": 1,
+        "recorded_at_ns": target.registered_at_ns - 1,
+    })
+    saved = {k: v for k, v in passed.items() if k != "publication"}
+    module._save(folder / "outcome.json", saved)
+
+    held = {"active": False, "saw_locked_clear": False}
+    orig_lock = lane._pr_lock
+    orig_clear = lane._clear_rereview_intent_locked
+
+    @contextmanager
+    def tracked_lock(pr_num):
+        with orig_lock(pr_num):
+            held["active"] = True
+            try:
+                yield
+            finally:
+                held["active"] = False
+
+    def tracked_clear(t):
+        assert held["active"], "_clear_rereview_intent_locked called without _pr_lock!"
+        held["saw_locked_clear"] = True
+        return orig_clear(t)
+
+    monkeypatch.setattr(lane, "_pr_lock", tracked_lock)
+    monkeypatch.setattr(lane, "_clear_rereview_intent_locked", tracked_clear)
+
+    resumed = lane.review_pr(1810, 1)
+    assert resumed["verdict"] == "PASS" and "publication" in resumed
+    assert held["saw_locked_clear"] is True
+    assert not intent_path.exists()

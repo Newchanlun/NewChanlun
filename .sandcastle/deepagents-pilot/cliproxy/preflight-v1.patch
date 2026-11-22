@@ -1773,10 +1773,10 @@ index 47f87de..3a1a2d4 100644
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-index e69de29..ddb7243 100644
+index e69de29..bdcfb5a 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,169 @@
 +package auth
 +
 +import (
@@ -1889,9 +1889,16 @@ index e69de29..ddb7243 100644
 +			// On cancellation, close out first so WaitStreamDelivery cannot deadlock
 +			// waiting for a consumer blocked on reading out.
 +			close(out)
-+			deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
-+			if !tracked || deliveryErr != nil {
-+				preflightreceipt.From(ctx).Reject()
++			c := preflightreceipt.From(ctx)
++			if c != nil && c.StrictCodex() {
++				// Formal review launches must observe upstream EOF; stopping early on client
++				// cancellation could hide trailing duplicate terminal events or errors.
++				c.Reject()
++			} else {
++				deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
++				if !tracked || deliveryErr != nil {
++					c.Reject()
++				}
 +			}
 +			lease.End()
 +		}()
@@ -1902,6 +1909,9 @@ index e69de29..ddb7243 100644
 +				return
 +			case chunk, ok := <-original:
 +				if !ok {
++					if ctx.Err() != nil {
++						canceled = true
++					}
 +					return
 +				}
 +				if c := preflightreceipt.From(ctx); c != nil {
@@ -2210,10 +2220,10 @@ index 0000000..6de513e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000..94e96e0
+index 0000000..bfa7948
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,163 @@
 +package auth
 +
 +import (
@@ -2234,6 +2244,7 @@ index 0000000..94e96e0
 +	"time"
 +
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
@@ -2321,6 +2332,59 @@ index 0000000..94e96e0
 +		lease2.End()
 +		c.Complete(false)
 +		c.HandlerDone(false)
++	}
++}
++
++func TestPreflightReceiptStrictCodexStreamCancelRejectsDespiteCleanStreamDelivery(t *testing.T) {
++	// Formal review launches (StrictCodex) must observe upstream EOF; if ctx is canceled before
++	// original closes, wrapPreflightStream MUST reject the collector even when WaitStreamDelivery
++	// reports deliveryErr == nil (which only applies to non-strict preflight streams).
++	root := filepath.Join(t.TempDir(), "receipts")
++	tlsState := testVerifiedTLS(t, "chatgpt.com")
++	launch := "review-88881111-2222-4333-8444-999999999901"
++	session := "019d0000-0000-7000-8000-999999999901"
++
++	deliveryCtx, finishDelivery := coreusage.WithStreamDelivery(context.Background())
++	reqCtx, cancel := context.WithCancel(deliveryCtx)
++	defer cancel()
++
++	ctx, c, err := preflightreceipt.BeginReview(reqCtx, root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	execCtx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(execCtx, &http.Client{Transport: streamTestRT{tlsState: tlsState}})
++	req, _ := http.NewRequestWithContext(execCtx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses",
++		strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	orig := make(chan executor.StreamChunk, 1)
++	orig <- executor.StreamChunk{
++		Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp_early_cancel","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass"}]}]}}` + "\n\n"),
++	}
++	out := wrapPreflightStream(execCtx, lease, orig)
++	if _, ok := <-out; !ok {
++		t.Fatalf("expected first chunk before cancel")
++	}
++	// Acknowledge clean downstream delivery and cancel ctx BEFORE upstream closes orig.
++	finishDelivery(nil)
++	cancel()
++	for range out {
++	}
++	_ = resp.Body.Close()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	// Because the stream was canceled before upstream EOF, Collector must have been rejected
++	// and never recorded a sealable request.
++	if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++		t.Fatalf("SealReview after early stream cancel = %v, want SealRejected", st)
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
@@ -2551,10 +2615,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..e3d03d3 100644
+index e69de29..b48aed0 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1511 @@
+@@ -0,0 +1,1541 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3118,16 +3182,46 @@ index e69de29..e3d03d3 100644
 +	return entry, nil
 +}
 +
-+// ReserveReview atomically checks that the launch is neither sealed nor sealing and registers
++// ReserveReview atomically checks that the launch is neither sealed nor sealing, persists the
++// initial unsealed reservation marker on disk before admitting the first request, and registers
 +// an in-flight request before reading or parsing the HTTP request body.
 +func ReserveReview(root, launch string) (*ReviewReservation, error) {
 +	if !reviewLaunchPattern.MatchString(launch) || !filepath.IsAbs(root) {
 +		return nil, ErrUnavailable
 +	}
++	key := root + "\x00" + launch
 +	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), true, true)
 +	if err != nil {
 +		return nil, ErrUnavailable
 +	}
++	entry.mu.Lock()
++	if entry.sealed {
++		entry.mu.Unlock()
++		releaseReview(entry)
++		return nil, ErrUnavailable
++	}
++	if entry.tainted {
++		entry.taintAndPersistLocked()
++		entry.mu.Unlock()
++		releaseReview(entry)
++		return nil, ErrUnavailable
++	}
++	if !entry.reserved {
++		if persistErr := entry.persistLocked(); persistErr != nil {
++			canEvict := !entry.tainted && entry.requests == 0
++			entry.mu.Unlock()
++			reviewMu.Lock()
++			if entry.inFlight > 0 {
++				entry.inFlight--
++			}
++			if canEvict && entry.inFlight == 0 && reviewLedger[key] == entry {
++				delete(reviewLedger, key)
++			}
++			reviewMu.Unlock()
++			return nil, ErrUnavailable
++		}
++	}
++	entry.mu.Unlock()
 +	return &ReviewReservation{entry: entry}, nil
 +}
 +
@@ -4067,10 +4161,10 @@ index e69de29..e3d03d3 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..2a75b61 100644
+index e69de29..a67f57d 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1387 @@
+@@ -0,0 +1,1459 @@
 +package preflightreceipt
 +
 +import (
@@ -5456,5 +5550,77 @@ index e69de29..2a75b61 100644
 +			c1.Complete(false)
 +			c1.HandlerDone(false)
 +		}
++	}
++}
++
++func TestReviewReceiptReservePersistsMarkerBeforeFirstRequest(t *testing.T) {
++	// 1. Unwritable storage on ReserveReview MUST fail closed with ErrUnavailable before admitting
++	// request #1 and must not leak an unreserved entry into reviewLedger.
++	badRoot := filepath.Join(t.TempDir(), "permissive-receipts")
++	if err := os.Mkdir(badRoot, 0755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(badRoot, 0755); err != nil {
++		t.Fatal(err)
++	}
++	launchBad := "review-eeee1111-2222-4333-8444-555555555901"
++	if _, err := ReserveReview(badRoot, launchBad); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveReview on unwritable 0755 root = %v, want ErrUnavailable", err)
++	}
++	reviewMu.Lock()
++	_, leaked := reviewLedger[badRoot+"\x00"+launchBad]
++	reviewMu.Unlock()
++	if leaked {
++		t.Fatalf("failed ReserveReview leaked entry into reviewLedger")
++	}
++
++	// 2. Writable ReserveReview writes an initial unsealed receipt.json BEFORE request #1 reads body
++	// or calls upstream. Even if storage refuses writes during Taint() (simulated root-safely with a
++	// temp-file blocker directory + re-planting the surviving initial receipt, as on a read-only mount)
++	// and the proxy later restarts after storage recovery, loadReviewEntryFromDisk MUST treat the
++	// unsealed disk marker as tainted and refuse both new requests and SealReview.
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-eeee1111-2222-4333-8444-555555555902"
++	session := "019d0000-0000-7000-8000-000000000992"
++	res, err := ReserveReview(root, launch)
++	if err != nil {
++		t.Fatalf("ReserveReview on writable root failed: %v", err)
++	}
++	initial := readReviewReceiptFile(t, root, launch)
++	if initial.Complete || initial.Sealed || initial.Tainted || initial.Requests != 0 {
++		t.Fatalf("unexpected initial reservation receipt: %+v", initial)
++	}
++	dir := filepath.Join(root, launch)
++	savedInitial, err := os.ReadFile(filepath.Join(dir, "receipt.json"))
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	// Simulate taint write failure (works even when running as root in Linux Docker), then restore
++	// the surviving initial reservation receipt as if the volume were read-only during taint.
++	blocker := filepath.Join(dir, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
++	if err := os.Mkdir(blocker, 0700); err != nil {
++		t.Fatal(err)
++	}
++	res.Taint()
++	res.Release()
++	if err := os.WriteFile(filepath.Join(dir, "receipt.json"), savedInitial, 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Remove(blocker)
++
++	// Simulate proxy restart + storage recovery: clear reviewLedger.
++	reviewMu.Lock()
++	delete(reviewLedger, root+"\x00"+launch)
++	reviewMu.Unlock()
++
++	if _, err := ReserveReview(root, launch); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("post-restart ReserveReview resurrected tainted launch: err=%v", err)
++	}
++	if _, _, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("post-restart BeginReview resurrected tainted launch: err=%v", err)
++	}
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("post-restart SealReview accepted launch: %v", st)
 +	}
 +}

@@ -229,8 +229,7 @@ class GitHubAppClient:
 
         写请求只有两种结果能证明没有副作用：RequestNotSent（没发出）与 WriteRejected（4xx）。
         写请求得到 2xx 但正文不可读时报 OutcomeUnknown，因为写可能已经生效。"""
-        repo_root = "/repos/" + self.identity.repository
-        if not (path.startswith(repo_root + "/") or (method == "GET" and path == repo_root)):
+        if not path.startswith("/repos/" + self.identity.repository + "/"):
             raise IdentityError("App 客户端只访问已核验的仓库")
         writes = method != "GET"
         response = self._send(method, path, self._ensure_token(), json=json, params=params)
