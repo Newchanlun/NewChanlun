@@ -27,6 +27,7 @@ RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astr
                             "kimi@api.kimi.com", "kimi-ai@api.kimi.ai", "claude@api.anthropic.com",
                             "antigravity@daily-cloudcode-pa.googleapis.com", "other"})
 REVIEW_RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astra@chatgpt.com"})
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 MAX_REVIEW_DURATION_NS = 7_200_000_000_000
 
 
@@ -83,7 +84,7 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
             return None
 
 
-def review_from_receipt(root: Path, launch: str, session: str, since: float, wait: float) -> list[tuple[str, str]] | None:
+def review_from_receipt(root: Path, launch: str, session: str, since: float, wait: float) -> dict | None:
     """消费代理为正式独审 launch 原子发布的 cliproxy-review-v1 收据；缺项、污染或模型不符均返回 None。"""
     if not REVIEW_LAUNCH.fullmatch(launch) or not REVIEW_SESSION.fullmatch(session):
         return None
@@ -109,7 +110,8 @@ def review_from_receipt(root: Path, launch: str, session: str, since: float, wai
             payload = json.loads(raw, object_pairs_hook=_unique_object)
             if (not isinstance(payload, dict)
                     or set(payload) != {"schema", "launch", "session", "started_ns", "finished_ns",
-                                        "complete", "tainted", "requests", "routes"}
+                                        "complete", "tainted", "requests", "routes",
+                                        "last_response_id_sha256", "last_output_sha256"}
                     or payload["schema"] != REVIEW_SCHEMA or payload["launch"] != launch
                     or payload["session"] != session
                     or payload["complete"] is not True or payload["tainted"] is not False
@@ -119,9 +121,18 @@ def review_from_receipt(root: Path, launch: str, session: str, since: float, wai
                     or payload["finished_ns"] - payload["started_ns"] > MAX_REVIEW_DURATION_NS
                     or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
                     or not isinstance(payload["routes"][0], str)
-                    or payload["routes"][0] not in REVIEW_RECEIPT_ROUTES):
+                    or payload["routes"][0] not in REVIEW_RECEIPT_ROUTES
+                    or not isinstance(payload["last_response_id_sha256"], str)
+                    or (payload["last_response_id_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_response_id_sha256"]))
+                    or not isinstance(payload["last_output_sha256"], str)
+                    or (payload["last_output_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_output_sha256"]))):
                 return None
-            return [tuple(payload["routes"][0].split("@"))]
+            return {
+                "routes": [tuple(payload["routes"][0].split("@"))],
+                "requests": payload["requests"],
+                "last_response_id_sha256": payload["last_response_id_sha256"],
+                "last_output_sha256": payload["last_output_sha256"],
+            }
         except FileNotFoundError:
             if time.monotonic() >= end:
                 return None
@@ -141,9 +152,16 @@ def main():
         signal.signal(signal.SIGALRM, lambda *_: os._exit(2))
         signal.setitimer(signal.ITIMER_REAL, remaining)
         known = {tuple(route): "@".join(route) for route in json.loads(known_json)}
-        attempts = review_from_receipt(Path(log_dir), launch, session, float(since), remaining)
-        print(json.dumps({"launch": launch, "session": session, "complete_stable": attempts is not None,
-                          "routes": [known.get(route, "other") for route in attempts or []]}), flush=True)
+        info = review_from_receipt(Path(log_dir), launch, session, float(since), remaining)
+        print(json.dumps({
+            "launch": launch,
+            "session": session,
+            "complete_stable": info is not None,
+            "routes": [known.get(route, "other") for route in (info["routes"] if info else [])],
+            "requests": info["requests"] if info else 0,
+            "last_response_id_sha256": info["last_response_id_sha256"] if info else "",
+            "last_output_sha256": info["last_output_sha256"] if info else "",
+        }), flush=True)
         return 0
     receipt_mode = arguments[:1] == ["--receipt"]
     if receipt_mode:

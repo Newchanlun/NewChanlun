@@ -592,3 +592,31 @@ elif sys.argv[1] == "ps":
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("launch 冻结 image_id 时 worker 在启动前核对镜像一致并拒绝非法格式", async () => {
+  const f = fixture("gpt-6.2-sol");
+  try {
+    writeFileSync(join(f.folder, "launch.json"), JSON.stringify({ ...f.launch, image_id: "sandcastle:newchanlun" }), { mode: 0o600 });
+    assert.throws(() => readLaunch(f.folder), /image_id/);
+
+    const expectedImage = "sha256:" + "9".repeat(64);
+    writeFileSync(join(f.folder, "launch.json"), JSON.stringify({ ...f.launch, image_id: expectedImage }), { mode: 0o600 });
+    assert.equal(readLaunch(f.folder).image_id, expectedImage);
+
+    const fake = fakeVolumes();
+    const deps: WorkerDependencies = {
+      identity: () => ({ head: f.launch.controller_code_head, dirty: "" }),
+      ready: () => image, // 标签漂移到了不同的已准入镜像
+      sandbox: () => { throw new Error("镜像漂移不应启动容器"); },
+      inspect: () => { throw new Error("镜像漂移不应 inspect"); },
+      volumes: fake.volumes,
+      imageEnv: () => [],
+      timeoutMs: 10_000,
+    };
+    await runExternalReview(f.folder, deps);
+    const receipt = JSON.parse(readFileSync(join(f.folder, "receipt.json"), "utf8"));
+    assert.equal(receipt.status, "failed");
+    assert.equal(receipt.phase, "admission");
+    assert.deepEqual(fake.calls, []);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});

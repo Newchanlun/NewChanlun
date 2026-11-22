@@ -610,26 +610,18 @@ class Sweep:
                                        "本地也缺对象") from None
         return sorted(p for p in raw.decode().split("\0") if p)
 
-    def _review_confirmed_published_pass(self, number: int, head: str) -> bool:
-        """同 head 最新未作废 attempt 已落盘且为已发布 PASS 终态（同步桩或子进程已完结时为真）。"""
+    def _review_confirmed_published_pass(self, number: int, head: str, base: str | None = None) -> bool:
+        """正向确认：本 PR、当前 head（及提供 base 时的精确 base）的最新未作废 attempt 已落盘且为已发布 PASS 终态。
+        无本地记录、仍在进行、或已非 PASS 一律返回 False，禁止凭跨 PR 同 SHA 的旧绿灯自动合入。"""
         runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
         non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
         if not non_stale:
             return False
         latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"])
+        if base is not None and latest["target"].get("base_sha") != base:
+            return False
         outcome = latest["outcome"]
         return bool(outcome and "publication" in outcome and outcome.get("verdict") == "PASS")
-
-    def _latest_attempt_blocks_merge(self, number: int, head: str) -> bool:
-        """同 head 本地已登记最新未作废 attempt 但尚未发布 PASS 终态（排队、退避、中断、未发布结论或已非 PASS）时，
-        远端现有的 success 只能属于已被取代的旧 attempt，禁止自动合入。"""
-        runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
-        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
-        if not non_stale:
-            return False
-        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"])
-        outcome = latest["outcome"]
-        return not (outcome and "publication" in outcome and outcome.get("verdict") == "PASS")
 
     def _plan_one(self, pr: dict[str, Any], state: dict[str, Any], gate_ok: bool, head_free: bool,
                   reviewing_now: bool = False, review_action: str | None = None,
@@ -675,9 +667,8 @@ class Sweep:
                 return {"action": "update-branch"}, True, "update"
             return {"action": "behind-waiting", "review": review, "reviewing": reviewing_now,
                     "queue_head": is_head}, candidate, None
-        pending_latest = (live_review
-                          or (reviewing_now and not self._review_confirmed_published_pass(number, head))
-                          or self._latest_attempt_blocks_merge(number, head))
+        confirmed_pass = self._review_confirmed_published_pass(number, head, state["base"])
+        pending_latest = live_review or self.lane.has_inflight_review(number) or not confirmed_pass
         if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green and not pending_latest:
             return {"action": "merged"}, candidate, "merge"
         return {"action": "waiting", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
@@ -798,11 +789,16 @@ class Sweep:
             number, head = entry["pr"], entry["head"]
             try:
                 if write == "merge":
-                    # 持与 attempt 登记共用的 PR 锁复验最新 attempt 与在途审查并完成合入，防规划到合入之间新启动/登记的 attempt 被旧 PASS 抢跑。
+                    # 持与 attempt 登记共用的 PR 锁复验在途审查进程、不占 attempt 的预检在途锁及本 PR/base/head 的已发布 PASS。
                     with self.lane._pr_lock(number):
+                        try:
+                            live_now = reviewing(self.rows())
+                        except Exception:
+                            live_now = {number}
                         if (number in live_busy
-                                or (number in reviewing_now and not self._review_confirmed_published_pass(number, head))
-                                or self._latest_attempt_blocks_merge(number, head)):
+                                or number in live_now
+                                or self.lane.has_inflight_review(number)
+                                or not self._review_confirmed_published_pass(number, head, states[number]["base"])):
                             result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
                         else:
                             self.github.merge(number, head)

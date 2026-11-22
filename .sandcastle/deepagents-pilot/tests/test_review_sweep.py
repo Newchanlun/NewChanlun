@@ -537,6 +537,12 @@ def test_stale_and_reused_runs_are_not_completed_reviews_for_backoff(lane):
 
 
 def test_merges_and_withdrawals_continue_during_rate_limit_backoff(lane):
+    passed = lane.review_pr(1810, 1)
+    assert passed["verdict"] == "PASS"
+    pass_target = ReviewTarget(**passed["target"])
+    pass_outcome = lane.state_root / "runs" / pass_target.key / "outcome.json"
+    os.utime(pass_outcome, (T0 - 1200, T0 - 1200))
+    (lane.state_root / module.PREFLIGHT_RATE_LIMIT_FILE).unlink(missing_ok=True)
     github = FakeGitHub(lane)
     head = lane.gateway.pr["head"]["sha"]
     gated = copy.deepcopy(lane.gateway.pr)
@@ -1548,7 +1554,24 @@ def test_actions_done_before_a_timeout_are_still_logged(lane, capsys):
     """opus 中：本轮先合入了一个 PR、后一个写超时，已合入那条照样写日志，写超时那条记 write-unknown。"""
     github = FakeGitHub(lane)
     _more_pulls(lane, github, [1805])
-    green(github, f"{1805:040d}")
+    base_1805 = lane.gateway.pr["base"]["sha"]
+    head_1805 = f"{1805:040d}"
+    run_1805 = lane.state_root / "runs" / f"r1150335160-p1805-{base_1805}-{head_1805}-{module.POLICY}-a1"
+    run_1805.mkdir(parents=True, mode=0o700)
+    (run_1805 / "target.json").write_text(json.dumps({
+        "repository_id": 1150335160, "pr_number": 1805, "base_repository_id": 1150335160,
+        "base_ref": "main", "base_sha": base_1805, "head_repository_id": 1150335160,
+        "head_ref": "pr-1805", "head_sha": head_1805, "merge_base_sha": base_1805,
+        "run_id": "1805-pass-run", "attempt": 1, "policy_version": module.POLICY,
+        "controller_code_head": "a" * 40, "registered_at_ns": 1,
+    }))
+    (run_1805 / "outcome.json").write_text(json.dumps({
+        "run_id": "1805-pass-run", "verdict": "PASS", "state": "success",
+        "publication": {"state": "success"},
+    }))
+    os.chmod(run_1805 / "target.json", 0o600)
+    os.chmod(run_1805 / "outcome.json", 0o600)
+    green(github, head_1805)
     green(github, lane.gateway.pr["head"]["sha"])
     merges = []
     def merge(number, head):
@@ -1932,3 +1955,68 @@ def test_formal_429_then_passing_preflight_then_preflight_429_does_not_false_bac
 
     sweep, _, _ = make(lane, run=False)
     assert sweep.rate_limit_backoff() is None
+
+
+def test_preflight_failure_next_tick_in_launch_backoff_never_merges_on_cross_pr_green_sha(lane):
+    """预检失败不写 target.json、只留 launch-backoff 标记；下一轮无活进程且不重派时，绝不能凭跨 PR 同 SHA 的旧绿灯自动合入。"""
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    green(github, head)
+    lane.preflight = lambda _t: {"returncode": 2, "report": {"kind": "review-preflight", "is_review_result": False,
+                                                             "ready": False, "checks": [{"name": f"route:{MODELS[0]}", "ok": False}]}}
+    def failing_spawn(number, attempt, h, log):
+        try:
+            lane.review_pr(number, attempt)
+        except Exception:
+            pass
+        return 4100
+
+    sweep = Sweep(github, lane, failing_spawn, state_root=lane.state_root, rows=lambda: [],
+                  auto_merge=True, review_app=lambda: 5664795)
+    # 第一轮：派审后预检失败，无 target.json，且本轮不合入
+    first = sweep.tick()
+    assert acts(first) == ["launch", "waiting"] and lane.status(1810) == [] and github.calls == []
+    # 第二轮：处于 launch-backoff（无活进程、不派工），仍必须拒绝合入
+    second = sweep.tick()
+    assert acts(second) == ["launch-backoff", "waiting"] and github.calls == []
+    waiting = next(a for a in second if a.get("pr") == 1810 and a["action"] == "waiting")
+    assert waiting.get("pending_latest_attempt") is True
+
+
+def test_inflight_preflight_lock_blocks_auto_merge_under_pr_lock(lane):
+    """已有 A1 已发布 PASS 后，人工重审 A2 若在 tick 快照之后进入预检（持不占 attempt 的在途锁、尚未写 target.json），合入锁内必须拦截。"""
+    import threading
+
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    green(github, head)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_preflight():
+        with lane._inflight_review(1810):
+            entered.set()
+            assert release.wait(5)
+
+    # 在规划前已有 A1 PASS；但在进入合入写阶段前，另一线程进入预检持在途锁
+    orig_checks = github.checks
+    holder = threading.Thread(target=hold_preflight)
+
+    def checks_then_start_manual_preflight(h, bindings):
+        res = orig_checks(h, bindings)
+        if not holder.is_alive():
+            holder.start()
+            assert entered.wait(5)
+        return res
+
+    github.checks = checks_then_start_manual_preflight
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    try:
+        actions = sweep.tick()
+    finally:
+        release.set()
+        holder.join(timeout=5)
+    assert github.calls == []
+    waiting = [a for a in actions if a.get("pr") == 1810 and a["action"] == "waiting"]
+    assert waiting and waiting[-1].get("pending_latest_attempt") is True

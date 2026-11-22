@@ -123,6 +123,7 @@ class ReviewTarget:
     patch_id: str = ""
     review_contract: str = ""
     reuse_planned: bool = False  # 登记时判定可沿用（因而跳过总空间准入）；派发时只在此为真时才考虑沿用
+    admitted_image_id: str = ""  # 预检准入时冻结的不可变镜像 ID；正式 worker 启动前核对，防标签漂移
 
     @property
     def key(self) -> str:
@@ -372,6 +373,12 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
                "controller_code_head": target.controller_code_head, "launch_id": launch["launch_id"]}
     if any(receipt.get(k) != v for k, v in binding.items()):
         return failed("监督回执与本次 launch intent 不符")
+    frozen_image = launch.get("image_id") or target.admitted_image_id
+    if frozen_image:
+        if target.admitted_image_id and launch.get("image_id") != target.admitted_image_id:
+            return failed("launch 镜像 Id 与预检准入冻结值不符")
+        if receipt.get("image_id") != frozen_image:
+            return failed("监督回执镜像 Id 与预检准入冻结值不符")
     if (receipt.get("status") != "completed" or receipt.get("mode") != "review"
             or receipt.get("sandbox") != "docker-read-only" or receipt.get("exit_code") != 0
             or not receipt.get("turn_completed") or not re.fullmatch(r"sha256:[a-f0-9]{64}", receipt.get("image_id", ""))
@@ -537,7 +544,7 @@ class ExternalReview:
                  docker: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
                  vm_trim: Callable[[Path], dict] | None = None,
                  preflight: Callable[[ReviewTarget], dict] | None = None,
-                 session_receipt: Callable[[str, str, str, float], list[str] | None] | None = None):
+                 session_receipt: Callable[[str, str, str, float], dict[str, Any] | None] | None = None):
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
         self.docker = docker if docker is not None else (lambda args: docker_cli(args))
         # #1986：删卷后对 Colima VM 跑 fstrim；与 TS 监督共用 checkout_root 下的节流锁与时间戳（见 vm_trim）。
@@ -583,6 +590,9 @@ class ExternalReview:
         if not container and not host_dir:
             raise EffectPending(
                 f"preflight-blocked：未配置可信代理收据来源（{PREFLIGHT_ENV_CONTAINER} 或 {PREFLIGHT_ENV_HOST_DIR}），未占 attempt")
+        if host_dir and not Path(host_dir).is_absolute():
+            raise EffectPending(
+                f"preflight-blocked：{PREFLIGHT_ENV_HOST_DIR} 必须是绝对路径，未占 attempt")
         cmd = [sys.executable, "-I", str(PREFLIGHT_SCRIPT),
                "--source", str(self.source),
                "--base", target.base_sha, "--head", target.head_sha, "--merge-base", target.merge_base_sha,
@@ -626,7 +636,7 @@ class ExternalReview:
             report = json.loads(lines[-1]) if lines else None
         except ValueError:
             report = None
-        return {"returncode": done.returncode, "report": report}
+        return {"returncode": done.returncode, "report": report, "image_id": admission["image_id"]}
 
     @staticmethod
     def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -637,14 +647,16 @@ class ExternalReview:
             result[key] = value
         return result
 
-    def _read_session_receipt(self, model: str, launch_id: str, session_id: str, since: float) -> list[str] | None:
-        """从已配置的代理收据来源读取正式独审 session 的 cliproxy-review-v1 收据；未配置、冲突或污染一律返回 None。"""
+    def _read_session_receipt(self, model: str, launch_id: str, session_id: str, since: float) -> dict[str, Any] | None:
+        """从已配置的代理收据来源读取正式独审 session 的 cliproxy-review-v1 收据；未配置、相对路径、冲突或污染一律返回 None。"""
         if (not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", launch_id)
                 or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id)):
             return None
         container = os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip()
         host_dir = os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
         if (container and host_dir) or (not container and not host_dir):
+            return None
+        if host_dir and not Path(host_dir).is_absolute():
             return None
         launch = f"review-{launch_id}"
         known = [[f"codex:{m}", "chatgpt.com"] for m in MODELS]
@@ -681,18 +693,31 @@ class ExternalReview:
         except ValueError:
             return None
         allowed = {f"codex:{m}@chatgpt.com" for m in MODELS}
+        hex64 = re.compile(r"[0-9a-f]{64}")
         if (not isinstance(payload, dict)
-                or set(payload) != {"launch", "session", "complete_stable", "routes"}
+                or set(payload) != {"launch", "session", "complete_stable", "routes", "requests",
+                                    "last_response_id_sha256", "last_output_sha256"}
                 or payload["launch"] != launch or payload["session"] != session_id
                 or payload["complete_stable"] is not True
+                or type(payload["requests"]) is not int or payload["requests"] < 1
                 or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
-                or not isinstance(payload["routes"][0], str) or payload["routes"][0] not in allowed):
+                or not isinstance(payload["routes"][0], str) or payload["routes"][0] not in allowed
+                or not isinstance(payload["last_response_id_sha256"], str)
+                or (payload["last_response_id_sha256"] != "" and not hex64.fullmatch(payload["last_response_id_sha256"]))
+                or not isinstance(payload["last_output_sha256"], str)
+                or (payload["last_output_sha256"] != "" and not hex64.fullmatch(payload["last_output_sha256"]))):
             return None
-        return list(payload["routes"])
+        return {
+            "routes": list(payload["routes"]),
+            "requests": payload["requests"],
+            "last_response_id_sha256": payload["last_response_id_sha256"],
+            "last_output_sha256": payload["last_output_sha256"],
+        }
 
     def _verify_session_receipt(self, target: ReviewTarget, launch: dict, receipt: dict, worker: Path,
                                 outcome: ReviewOutcome) -> ReviewOutcome:
-        """正式双审的每一次有效结论（PASS/BLOCK）都必须绑定代理侧未污染的 cliproxy-review-v1 精确上游模型收据。"""
+        """正式双审的每一次有效结论（PASS/BLOCK）都必须绑定代理侧未污染的 cliproxy-review-v1 收据，
+        且终答文本摘要（及 session.jsonl 末条 response_id 与轮数）与代理观测到的最终上游响应一致。"""
         if target.policy_version != POLICY or outcome.verdict not in ("PASS", "BLOCK"):
             return outcome
         candidates: list[float] = []
@@ -707,17 +732,54 @@ class ExternalReview:
             except ValueError:
                 pass
         since = min(candidates) if candidates else 0.0
+        final_text: str | None = None
+        response_ids: list[str] = []
         try:
-            routes = self.session_receipt(outcome.model, str(launch.get("launch_id", "")),
-                                          str(outcome.session_id or ""), since)
+            for line in (worker / "events.jsonl").read_text().splitlines():
+                if not line.strip():
+                    continue
+                ev = json.loads(line)
+                if ev.get("type") == "item.completed" and (ev.get("item") or {}).get("type") == "agent_message":
+                    text = ev["item"].get("text")
+                    final_text = text if isinstance(text, str) else None
+            with open(worker / "session.jsonl", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if row.get("type") == "token_usage_record":
+                        rid = (row.get("payload") or {}).get("response_id")
+                        if isinstance(rid, str) and rid.strip():
+                            response_ids.append(rid)
+        except (OSError, ValueError, TypeError):
+            return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
+                                 "无法读取 events.jsonl/session.jsonl 核验代理侧最终响应绑定，PASS/BLOCK 均不采信")
+        if final_text is None:
+            return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
+                                 "缺少最终 agent_message 文本，无法核验代理侧最终响应绑定")
+        try:
+            evidence = self.session_receipt(outcome.model, str(launch.get("launch_id", "")),
+                                            str(outcome.session_id or ""), since)
         except Exception:
-            routes = None
+            evidence = None
         expected = f"codex:{outcome.model}@chatgpt.com"
-        if not isinstance(routes, list) or routes != [expected]:
+        expected_out_sha = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
+        if (not isinstance(evidence, dict)
+                or evidence.get("routes") != [expected]
+                or type(evidence.get("requests")) is not int or evidence["requests"] < 1
+                or evidence.get("last_output_sha256") != expected_out_sha):
             return ReviewOutcome(
                 outcome.model, "FAILED", outcome.session_id,
-                f"代理侧正式审阅上游模型收据缺失、已污染或模型不符（期望 {expected}，实得 {routes!r}），PASS/BLOCK 均不采信",
+                f"代理侧正式审阅上游模型收据缺失、已污染、模型不符或未绑定最终输出（期望 {expected}），PASS/BLOCK 均不采信",
             )
+        if response_ids:
+            expected_rid_sha = hashlib.sha256(response_ids[-1].encode("utf-8")).hexdigest()
+            if (evidence.get("last_response_id_sha256") != expected_rid_sha
+                    or evidence["requests"] < len(response_ids)):
+                return ReviewOutcome(
+                    outcome.model, "FAILED", outcome.session_id,
+                    "代理侧正式审阅收据末条 response_id 或请求轮数与 session.jsonl 不一致，PASS/BLOCK 均不采信",
+                )
         return outcome
 
     def _record_preflight_rate_limit(self, target: ReviewTarget, *, rate_limited: bool, models: list[str]) -> None:
@@ -819,49 +881,58 @@ class ExternalReview:
             seen_models.add(returned)
         if len(seen_routes) != len(MODELS) or len(seen_models) != len(MODELS):
             raise EffectPending(f"preflight-blocked：两路审查模型或路由证据未区分，{suffix}")
+        admitted_image = ""
+        if "image_id" in raw and raw["image_id"] is not None:
+            candidate_img = str(raw["image_id"])
+            if not re.fullmatch(r"sha256:[a-f0-9]{64}", candidate_img):
+                raise EffectPending(f"preflight-blocked：预检返回无效镜像 Id，{suffix}")
+            admitted_image = candidate_img
         self._record_preflight_rate_limit(target, rate_limited=False, models=list(MODELS))
-        return report
+        return {**report, **({"admitted_image_id": admitted_image} if admitted_image else {})}
 
     def target(self, number: int, attempt: int) -> ReviewTarget:
         if type(attempt) is not int or attempt <= 0:
             raise ValueError("attempt 必须为正整数")
         if self.gateway is None:
             raise IdentityError("在线独审需要宿主 App 客户端")
-        target = self._frozen(load_target(self.gateway, number), attempt)
-        folder = self.state_root / "runs" / target.key
-        # 以有效 target.json 判断是否已登记：_lock 会先建目录，建目录后、写 target.json 前中断时仍须准入。
-        if not (folder / "target.json").exists():
-            used = (self.state_root / "runs").glob(
-                f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
-            if any(used):
-                raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
-            planned = self.reusable(target) is not None
-            if not planned:
-                self.admit_space(target)
-                self.admit_quota()
-                self.admit_preflight(target)
-            target = replace(target, reuse_planned=planned)
-        with _lock(folder):
-            if (folder / "target.json").exists():
-                previous = ReviewTarget(**_read(folder / "target.json"))
-                if previous.controller_code_head != target.controller_code_head:
-                    raise IdentityError("controller 已变更，请用新 attempt 保留旧证据")
-                if previous.review_contract != target.review_contract:
-                    raise IdentityError("审查合同已变更，请用新 attempt 保留旧证据")
-                return previous
-            with self._pr_lock(target.pr_number):
+        with self._inflight_review(number):
+            target = self._frozen(load_target(self.gateway, number), attempt)
+            folder = self.state_root / "runs" / target.key
+            # 以有效 target.json 判断是否已登记：_lock 会先建目录，建目录后、写 target.json 前中断时仍须准入。
+            if not (folder / "target.json").exists():
                 used = (self.state_root / "runs").glob(
                     f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
                 if any(used):
                     raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
-                prev_max = 0
-                for existing in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
-                    try:
-                        prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
-                    except (OSError, ValueError, TypeError, IdentityError):
-                        continue
-                target = replace(target, registered_at_ns=max(time.time_ns(), prev_max + 1))
-                _save(folder / "target.json", asdict(target))
+                planned = self.reusable(target) is not None
+                admitted_image = ""
+                if not planned:
+                    self.admit_space(target)
+                    self.admit_quota()
+                    preflight_report = self.admit_preflight(target)
+                    admitted_image = str(preflight_report.get("admitted_image_id", ""))
+                target = replace(target, reuse_planned=planned, admitted_image_id=admitted_image)
+            with _lock(folder):
+                if (folder / "target.json").exists():
+                    previous = ReviewTarget(**_read(folder / "target.json"))
+                    if previous.controller_code_head != target.controller_code_head:
+                        raise IdentityError("controller 已变更，请用新 attempt 保留旧证据")
+                    if previous.review_contract != target.review_contract:
+                        raise IdentityError("审查合同已变更，请用新 attempt 保留旧证据")
+                    return previous
+                with self._pr_lock(target.pr_number):
+                    used = (self.state_root / "runs").glob(
+                        f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
+                    if any(used):
+                        raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
+                    prev_max = 0
+                    for existing in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
+                        try:
+                            prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
+                        except (OSError, ValueError, TypeError, IdentityError):
+                            continue
+                    target = replace(target, registered_at_ns=max(time.time_ns(), prev_max + 1))
+                    _save(folder / "target.json", asdict(target))
         return target
 
     def _frozen(self, data: dict[str, Any], attempt: int) -> ReviewTarget:
@@ -887,6 +958,35 @@ class ExternalReview:
             return self.reuse_source(self._frozen(data, 0)) is not None  # attempt 0 从不登记，撞不上已有 run 目录
         except (OSError, ValueError, KeyError, TypeError, IdentityError, subprocess.CalledProcessError):
             return False
+
+    @contextmanager
+    def _inflight_review(self, number: int) -> Iterator[None]:
+        """不占 attempt 的在途审查标记（内核共享 flock）：在预检开始前持有至 target.json 落盘，
+        崩溃/SIGKILL 时内核自动释放，不留陈旧文件。合入锁内以非阻塞独占锁探测，防登记前抢跑合入。"""
+        folder = self.state_root / "pr-locks"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(folder / f"p{number}.inflight.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(fd)
+
+    def has_inflight_review(self, number: int) -> bool:
+        """当前是否有手动或自动审查进程正在该 PR 的预检/登记阶段（不占 attempt）。"""
+        path = self.state_root / "pr-locks" / f"p{number}.inflight.lock"
+        if not path.exists():
+            return False
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:
@@ -1247,10 +1347,17 @@ class ExternalReview:
                 raise EffectPending("控制器中断：未派发，prepare 留待同键重跑回收")
             if shutil.disk_usage(checkout).free < SPACE_RESERVE:
                 raise IdentityError("空间不足：模型启动前剩余空间低于 256 MiB；未启动模型")
+            frozen_image = target.admitted_image_id
+            if not frozen_image and (folder / PREFLIGHT_ADMITTED_FILE).exists():
+                try:
+                    frozen_image = str(_read(folder / PREFLIGHT_ADMITTED_FILE).get("image_id", ""))
+                except (OSError, ValueError, TypeError, IdentityError):
+                    frozen_image = ""
             launch = {"run_id": target.run_id, "launch_id": str(uuid.uuid4()), "pr_number": target.pr_number,
                       "model": model, "head_sha": target.head_sha, "base_sha": target.base_sha,
                       "merge_base_sha": target.merge_base_sha, "controller_code_head": target.controller_code_head,
-                      "checkout": str(checkout), "prompt": frozen.prompt, "mode": "review"}
+                      "checkout": str(checkout), "prompt": frozen.prompt, "mode": "review",
+                      **({"image_id": frozen_image} if frozen_image else {})}
             _save(worker / "launch.json", launch)
             env = self._worker_env(include_key=True)
             with open(worker / "supervisor.log", "ab", opener=lambda p, f: os.open(p, f, 0o600)) as log:
@@ -1426,8 +1533,9 @@ class ExternalReview:
                         and not any((folder / model).exists() for model in MODELS)):
                     self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
                     self.admit_quota()
-                    self.admit_preflight(target, pre_dispatch=True)
-                    _save(admitted_marker, {"admitted_at": time.time(), "run_id": target.run_id})
+                    preflight_report = self.admit_preflight(target, pre_dispatch=True)
+                    _save(admitted_marker, {"admitted_at": time.time(), "run_id": target.run_id,
+                                            "image_id": str(preflight_report.get("admitted_image_id", ""))})
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
                     raise Stale("同 head 已有更晚登记的 attempt，本 run 不再派发")
                 if any(not (folder / model / "launch.json").exists() for model in MODELS):

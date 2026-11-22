@@ -85,8 +85,46 @@ def _fake_preflight_pass(_target: ReviewTarget) -> dict:
     return {"kind": "review-preflight", "is_review_result": False, "ready": True, "checks": checks}
 
 
-def _fake_session_receipt_pass(model: str, _launch_id: str, _session_id: str, _since: float) -> list[str]:
-    return [f"codex:{model}@chatgpt.com"]
+def _make_fake_session_receipt(state_root: Path):
+    def fake(model: str, launch_id: str, _session_id: str, _since: float) -> dict:
+        out_sha = ""
+        resp_sha = ""
+        reqs = 1
+        for path in (state_root / "runs").glob(f"*/{model}/launch.json"):
+            try:
+                if json.loads(path.read_text()).get("launch_id") == launch_id:
+                    worker = path.parent
+                    final_text = None
+                    for line in (worker / "events.jsonl").read_text().splitlines():
+                        if not line.strip():
+                            continue
+                        ev = json.loads(line)
+                        if ev.get("type") == "item.completed" and (ev.get("item") or {}).get("type") == "agent_message":
+                            final_text = ev["item"].get("text")
+                    if isinstance(final_text, str):
+                        out_sha = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
+                    rids = []
+                    for line in (worker / "session.jsonl").read_text().splitlines():
+                        if not line.strip():
+                            continue
+                        row = json.loads(line)
+                        if row.get("type") == "token_usage_record":
+                            rid = (row.get("payload") or {}).get("response_id")
+                            if isinstance(rid, str) and rid:
+                                rids.append(rid)
+                    if rids:
+                        resp_sha = hashlib.sha256(rids[-1].encode("utf-8")).hexdigest()
+                        reqs = max(reqs, len(rids))
+                    break
+            except (OSError, ValueError):
+                continue
+        return {
+            "routes": [f"codex:{model}@chatgpt.com"],
+            "requests": reqs,
+            "last_response_id_sha256": resp_sha,
+            "last_output_sha256": out_sha,
+        }
+    return fake
 
 
 @pytest.fixture
@@ -101,7 +139,7 @@ def lane(env, monkeypatch):
                           checkout_root=env.home / "clones", poll_seconds=0.01,
                           launcher=[sys.executable, str(Path(__file__).with_name("external_review_child.py"))],
                           preflight=_fake_preflight_pass,
-                          session_receipt=_fake_session_receipt_pass)
+                          session_receipt=_make_fake_session_receipt(env.home / "review"))
 
 
 def test_business_owner_multi_commit_pr_and_idempotent_resume(lane):
@@ -2603,13 +2641,28 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(receipt_root))
     orig_validate = module.validate_review
 
-    def write_proxy_receipt(target, launch, receipt, folder, source, *, route_override=None, tainted=False, session_override=None):
+    def write_proxy_receipt(target, launch, receipt, folder, source, *, route_override=None, tainted=False,
+                            session_override=None, stale_output=False, bad_resp_id=False, requests_count=2):
         outcome = orig_validate(target, launch, receipt, folder, source)
         launch_hdr = f"review-{launch['launch_id']}"
         rec_dir = receipt_root / launch_hdr
         rec_dir.mkdir(mode=0o700, exist_ok=True)
         now = time.time_ns()
         route = route_override.get(launch["model"], f"codex:{launch['model']}@chatgpt.com") if route_override else f"codex:{launch['model']}@chatgpt.com"
+        final_text = None
+        for line in (folder / "events.jsonl").read_text().splitlines():
+            if not line.strip():
+                continue
+            ev = json.loads(line)
+            if ev.get("type") == "item.completed" and (ev.get("item") or {}).get("type") == "agent_message":
+                final_text = ev["item"].get("text")
+        out_sha = hashlib.sha256(b"earlier-turn-tool-call").hexdigest() if stale_output else hashlib.sha256(
+            (final_text or "").encode("utf-8")).hexdigest()
+        rid = f"resp_{launch['model']}_final"
+        with open(folder / "session.jsonl", "a") as sf:
+            sf.write(json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_1"}}) + "\n")
+            sf.write(json.dumps({"type": "token_usage_record", "payload": {"response_id": rid}}) + "\n")
+        resp_sha = hashlib.sha256(b"resp_earlier").hexdigest() if bad_resp_id else hashlib.sha256(rid.encode("utf-8")).hexdigest()
         payload = {
             "schema": "cliproxy-review-v1",
             "launch": launch_hdr,
@@ -2618,8 +2671,10 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
             "finished_ns": now,
             "complete": not tainted,
             "tainted": tainted,
-            "requests": 2,
+            "requests": requests_count,
             "routes": ["other"] if tainted else [route],
+            "last_response_id_sha256": "" if tainted else resp_sha,
+            "last_output_sha256": "" if tainted else out_sha,
         }
         (rec_dir / "receipt.json").write_text(json.dumps(payload))
         return outcome
@@ -2628,13 +2683,25 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     passed = strict.review_pr(1810, 2)
     assert passed["verdict"] == "PASS" and lane.gateway.sent[-2:] == ["pending", "success"]
 
-    # 3. 代理收据指向另一模型（Sol 冒充 Astra）或已被污染，均判 FAILED（含 BLOCK 也拒绝采信）
+    # 3. 代理收据指向另一模型、已污染、仅有首轮陈旧输出摘要、末条 response_id 不符或轮数不足，均判 FAILED（含 BLOCK 也拒绝采信）
     monkeypatch.setattr(
         module, "validate_review",
         lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, route_override={MODELS[1]: f"codex:{MODELS[0]}@chatgpt.com"}),
     )
     swapped = strict.review_pr(1810, 3)
     assert swapped["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
+
+    monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, stale_output=True))
+    stale_out = strict.review_pr(1810, 5)
+    assert stale_out["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
+
+    monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, bad_resp_id=True))
+    bad_rid = strict.review_pr(1810, 6)
+    assert bad_rid["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
+
+    monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, requests_count=1))
+    short_reqs = strict.review_pr(1810, 7)
+    assert short_reqs["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
 
     (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
     monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, tainted=True))
@@ -2654,7 +2721,13 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     refused = strict.review_pr(1810, 2)
     assert refused["verdict"] == "STALE" and "重验结果与原记录不一致" in refused.get("recovery_refused", "")
 
-    # 5. 容器收据后端：使用过滤后的 Docker 环境执行有界 --review-receipt 读取
+    # 5. 相对宿主收据路径在预检与正式收据读取两侧均明确拒绝
+    monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, "relative/receipts")
+    with pytest.raises(EffectPending, match="绝对路径"):
+        strict._preflight_args(stale_target, image="sha256:" + "1" * 64)
+    assert strict._read_session_receipt(MODELS[0], str(uuid.uuid4()), str(uuid.uuid4()), time.time() - 1) is None
+
+    # 6. 容器收据后端：使用过滤后的 Docker 环境执行有界 --review-receipt 读取
     monkeypatch.delenv(module.PREFLIGHT_ENV_HOST_DIR, raising=False)
     monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER, "blackhole-cliproxy")
     monkeypatch.setenv(module.PREFLIGHT_ENV_PROXY_CONTEXT, "orbstack")
@@ -2665,6 +2738,8 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
     monkeypatch.setenv("DOCKER_CONTEXT", "wrong-ctx")
     lid = str(uuid.uuid4())
     sid = str(uuid.uuid4())
+    out_hash = "a" * 64
+    rid_hash = "b" * 64
     captured = []
     real_run = subprocess.run
 
@@ -2674,16 +2749,33 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
             return subprocess.CompletedProcess(
                 cmd, 0,
                 json.dumps({"launch": f"review-{lid}", "session": sid, "complete_stable": True,
-                            "routes": [f"codex:{MODELS[0]}@chatgpt.com"]}).encode(),
+                            "routes": [f"codex:{MODELS[0]}@chatgpt.com"], "requests": 3,
+                            "last_response_id_sha256": rid_hash, "last_output_sha256": out_hash}).encode(),
                 b"",
             )
         return real_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(module.subprocess, "run", spy_container_run)
     got = strict._read_session_receipt(MODELS[0], lid, sid, time.time() - 1)
-    assert got == [f"codex:{MODELS[0]}@chatgpt.com"] and len(captured) == 1
+    assert got == {"routes": [f"codex:{MODELS[0]}@chatgpt.com"], "requests": 3,
+                   "last_response_id_sha256": rid_hash, "last_output_sha256": out_hash} and len(captured) == 1
     assert "--review-receipt" in captured[0]["cmd"]
     assert not any(k in captured[0]["env"] for k in ("DOCKER_HOST", "DOCKER_CONFIG", "CLIPROXY_LOCAL_KEY", "DOCKER_CONTEXT"))
+
+
+def test_preflight_admitted_image_id_is_frozen_into_target_launch_and_validated(lane):
+    """预检准入取得的不可变镜像 ID 冻结进 target.json 与 launch.json；回执镜像与冻结值不符时判 FAILED。"""
+    admitted = "sha256:" + "1" * 64
+    lane.preflight = lambda t: {"returncode": 0, "report": _fake_preflight_pass(t), "image_id": admitted}
+    result = lane.review_pr(1810, 1)
+    assert result["verdict"] == "PASS"
+    target = ReviewTarget(**result["target"])
+    assert target.admitted_image_id == admitted
+    worker = lane.state_root / "runs" / target.key / MODELS[0]
+    launch = module._read(worker / "launch.json")
+    receipt = module._read(worker / "receipt.json")
+    assert launch["image_id"] == admitted
+    assert validate_review(target, launch, {**receipt, "image_id": "sha256:" + "2" * 64}, worker, lane.source).verdict == "FAILED"
 
 
 def test_registered_at_ns_is_strictly_monotonic_under_pr_lock_across_slow_preflight(lane, monkeypatch):

@@ -15,7 +15,7 @@ import { gitEnvironment } from "./git-environment.ts";
 export interface ReviewLaunch {
   run_id: string; launch_id: string; pr_number: number; model: ChildModel;
   base_sha: string; merge_base_sha: string; head_sha: string; controller_code_head: string;
-  checkout: string; prompt: string; mode: "review";
+  checkout: string; prompt: string; mode: "review"; image_id?: string;
 }
 export const REVIEW_IMAGE = "sandcastle:newchanlun";
 /** #1968：kimi 在 codex exec --output-schema 下把开场白当成终答、零工具调用就结束（PR #1966 实测 3/3）；
@@ -41,6 +41,9 @@ export function readLaunch(folder: string): ReviewLaunch {
     throw new Error("只接受独立无凭据 clone，不接受 linked worktree");
   }
   if (inside(launch.checkout, folder) || inside(folder, launch.checkout)) throw new Error("源码与宿主回执目录重叠");
+  if (launch.image_id !== undefined && (typeof launch.image_id !== "string" || !IMAGE_ID.test(launch.image_id))) {
+    throw new Error("launch image_id 无效");
+  }
   if (existsSync(join(launch.checkout, ".codex", "config.toml"))) throw new Error("候选项目 Codex 配置未获准入");
   return launch;
 }
@@ -320,6 +323,9 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     if (before.head !== launch.head_sha || before.status || before.branch !== "HEAD") throw new Error("checkout 不干净或 head 不符");
     record.phase = "admission";
     const image = deps.ready(REVIEW_IMAGE); record.image_id = image;
+    if (launch.image_id && image !== launch.image_id) {
+      throw new Error("当前审阅镜像 Id 与预检准入时冻结的镜像 Id 不一致");
+    }
     record.isolation_contract = (deps.contract ?? contractDigest)();
     const sandbox = deps.sandbox(image);
     record.phase = "volume";
