@@ -998,6 +998,86 @@ def _resolved_reply_key(comment_id: str, finding_fingerprint: str) -> str:
     return f"comment:{cid}:resolved:{fp}"
 
 
+def _validate_wontfix_reply_keys(
+    values: Any,
+    field_name: str,
+    *,
+    resolved_fingerprints: Collection[str],
+    consumed_reply_keys: Collection[str],
+) -> frozenset[tuple[str, str]]:
+    """严格校验本轮实际采信的 (finding_id, reply_key) 直接 wontfix 证据集合。"""
+    if not isinstance(values, frozenset):
+        raise ConvergenceError(f"{field_name} 必须是 frozenset[tuple[str, str]]")
+    norm_resolved = frozenset(fp.strip().lower() for fp in resolved_fingerprints)
+    consumed_set = frozenset(consumed_reply_keys)
+    seen_fids: set[str] = set()
+    seen_reply_keys: set[str] = set()
+    normalized: set[tuple[str, str]] = set()
+    for item in values:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise ConvergenceError(
+                f"{field_name}[] 必须是长度为 2 的 (finding_id, reply_key) 元组：{item!r}"
+            )
+        raw_fid, raw_rk = item
+        if not isinstance(raw_fid, str) or not _CONSUMED_DIGEST_HEX_RE.fullmatch(raw_fid):
+            raise ConvergenceError(
+                f"{field_name} 的 finding_id 必须是 16 位小写十六进制指纹：{raw_fid!r}"
+            )
+        if raw_fid not in norm_resolved:
+            raise ConvergenceError(
+                f"{field_name} 中的发现 {raw_fid!r} 不在 resolved_fingerprints 中"
+            )
+        if raw_fid in seen_fids:
+            raise ConvergenceError(f"{field_name} 中发现 {raw_fid!r} 重复绑定了多个 wontfix 回复键")
+        cid, kind, payload = _parse_consumed_reply_key(raw_rk, f"{field_name}[][1]")
+        assert isinstance(raw_rk, str)
+        if kind not in ("finding", "loc", "inline"):
+            raise ConvergenceError(
+                f"{field_name} 仅允许直接作者回复键（finding/loc/inline），禁止 {kind!r}：{raw_rk!r}"
+            )
+        if raw_rk in seen_reply_keys:
+            raise ConvergenceError(f"{field_name} 中同一回复键 {raw_rk!r} 不得绑定给多个不同发现")
+        if kind == "finding" and not raw_fid.startswith(payload):
+            raise ConvergenceError(
+                f"{field_name} 中 finding 回复键 {raw_rk!r} 的前缀 {payload!r} 与目标发现 {raw_fid!r} 不匹配"
+            )
+        resolved_rk = _resolved_reply_key(cid, raw_fid)
+        if raw_rk not in consumed_set or resolved_rk not in consumed_set:
+            raise ConvergenceError(
+                f"{field_name} 中 ({raw_fid!r}, {raw_rk!r}) 的直接回复键与 {resolved_rk!r} "
+                "均必须存在于 consumed_reply_keys 中"
+            )
+        seen_fids.add(raw_fid)
+        seen_reply_keys.add(raw_rk)
+        normalized.add((raw_fid, raw_rk))
+    return frozenset(normalized)
+
+
+def _wontfix_direct_consumed_keys(
+    wontfix_reply_keys: Collection[tuple[str, str]] | None,
+) -> frozenset[str]:
+    """将本轮实际采信的 (finding_id, reply_key) 展开为直接消费键集合 {reply_key, comment:<cid>:resolved:<fid>}。"""
+    if not wontfix_reply_keys:
+        return frozenset()
+    direct: set[str] = set()
+    for fid, rk in wontfix_reply_keys:
+        cid, _, _ = _parse_consumed_reply_key(rk, "wontfix_reply_keys[][1]")
+        direct.add(rk)
+        direct.add(_resolved_reply_key(cid, fid))
+    return frozenset(direct)
+
+
+def _extract_wontfix_reply_keys(
+    verified_findings: Sequence[VerifiedFinding],
+) -> frozenset[tuple[str, str]]:
+    """从核实结果中抽取本轮实际采信的 RESOLVED_BY_WONTFIX 直接证据 (finding_id, reply_key)。"""
+    return frozenset(
+        (vf.finding.finding_id, vf.author_reply.reply_key)
+        for vf in verified_findings
+        if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX and vf.author_reply is not None
+    )
+
+
 @dataclass(frozen=True)
 class _ConsumedReplyState:
     """消费回复内部两层状态：严格区分可向新规范项传播的规范消费与仅约束自身的旧别名/脱离别名消费。"""
@@ -4003,6 +4083,7 @@ class RoundHistoryEntry:
     duplicate_aliases: tuple[tuple[str, str], ...] = ()
     posted_important_fingerprints: frozenset[str] | None = None
     external_consumed_reply_keys: frozenset[str] = frozenset()
+    wontfix_reply_keys: frozenset[tuple[str, str]] | None = None
 
     def __post_init__(self) -> None:
         if type(self.round_number) is not int or self.round_number <= 0:
@@ -4091,6 +4172,20 @@ class RoundHistoryEntry:
             raise ConvergenceError(
                 "RoundHistoryEntry.external_consumed_reply_keys 必须是 consumed_reply_keys 的子集"
             )
+        if self.wontfix_reply_keys is not None:
+            if not isinstance(self.wontfix_reply_keys, frozenset):
+                raise ConvergenceError(
+                    "RoundHistoryEntry.wontfix_reply_keys 必须是 frozenset[tuple[str, str]] 或 None"
+                )
+            if not self.panel.require_verifier and self.wontfix_reply_keys:
+                raise ConvergenceError("快审直通轮次无独立核实者，禁止记录 wontfix_reply_keys")
+            validated_wontfix = _validate_wontfix_reply_keys(
+                self.wontfix_reply_keys,
+                "RoundHistoryEntry.wontfix_reply_keys",
+                resolved_fingerprints=self.resolved_fingerprints,
+                consumed_reply_keys=self.consumed_reply_keys,
+            )
+            object.__setattr__(self, "wontfix_reply_keys", validated_wontfix)
         if not isinstance(self.finder_session_ids, frozenset):
             raise ConvergenceError("finder_session_ids 必须是 frozenset[str]")
         norm_sessions = frozenset(_require_non_empty_str(sid, "finder_session_ids[]") for sid in self.finder_session_ids)
@@ -4293,6 +4388,20 @@ def _validate_history_chain(
             raise ConvergenceError(
                 f"history[{idx - 1}].external_consumed_reply_keys 必须是 consumed_reply_keys 的子集"
             )
+        validated_entry_wontfix: frozenset[tuple[str, str]] | None
+        if entry.wontfix_reply_keys is None:
+            validated_entry_wontfix = None
+        else:
+            if not entry.panel.require_verifier and entry.wontfix_reply_keys:
+                raise ConvergenceError(
+                    f"历史第 {idx} 轮为快审直通模式（无独立核实者），禁止记录 wontfix_reply_keys"
+                )
+            validated_entry_wontfix = _validate_wontfix_reply_keys(
+                entry.wontfix_reply_keys,
+                f"history[{idx - 1}].wontfix_reply_keys",
+                resolved_fingerprints=entry.resolved_fingerprints,
+                consumed_reply_keys=validated_entry_consumed,
+            )
 
         cleared_in_round = (
             (prev_unresolved_ids - seen_hist_ids)
@@ -4320,6 +4429,38 @@ def _validate_history_chain(
         pre_consumed_keys = input_state.all_keys
         consumed_alias_maps = _build_consumed_alias_maps(next_aliases, prior_aliases)
 
+        wontfix_by_fid: dict[str, str] = {}
+        if validated_entry_wontfix is not None:
+            wontfix_by_fid = dict(validated_entry_wontfix)
+            for fid, rk in wontfix_by_fid.items():
+                cid, kind, _ = _parse_consumed_reply_key(rk, f"history[{idx - 1}].wontfix_reply_keys[][1]")
+                if _is_reply_consumed_for_target(
+                    rk,
+                    cid,
+                    fid,
+                    consumed_reply_keys=pre_consumed_keys,
+                    alias_maps=consumed_alias_maps,
+                ):
+                    raise ConvergenceError(
+                        f"历史第 {idx} 轮 wontfix_reply_keys 中发现 {fid} 关联的回复键 {rk!r} "
+                        "已被前轮或本轮外部消费，禁止复用"
+                    )
+                pinned_fid = historical_bound_targets.get(rk)
+                if pinned_fid is not None:
+                    if kind == "finding":
+                        pin_ok = pinned_fid == fid
+                    else:
+                        pin_ok = (
+                            pinned_fid == fid
+                            or prior_aliases.get(pinned_fid) == fid
+                            or next_aliases.get(pinned_fid) == fid
+                        )
+                    if not pin_ok:
+                        raise ConvergenceError(
+                            f"历史第 {idx} 轮 wontfix_reply_keys 中回复键 {rk!r} 已锁定到发现 {pinned_fid!r}，"
+                            f"与声称解除的发现 {fid!r} 不匹配"
+                        )
+
         for raw_fp in entry.resolved_fingerprints:
             norm_fp = raw_fp.strip().lower()
             can_resolve_by_fix = (
@@ -4328,24 +4469,43 @@ def _validate_history_chain(
                 and entry.head_sha != prev_entry.head_sha
             )
             if not can_resolve_by_fix:
-                has_wontfix_proof = any(
-                    kind == "resolved"
-                    and payload == norm_fp
-                    and not _is_reply_consumed_for_target(
-                        rk,
-                        cid,
-                        norm_fp,
-                        consumed_reply_keys=pre_consumed_keys,
-                        alias_maps=consumed_alias_maps,
+                if validated_entry_wontfix is not None:
+                    if norm_fp not in wontfix_by_fid:
+                        raise ConvergenceError(
+                            f"历史第 {idx} 轮将发现 {norm_fp} 标为已解除（resolved_fingerprints），"
+                            "但既不满足新提交修复条件（须为前轮结转项且 head_sha 相对前轮有新提交），"
+                            "也缺少 wontfix_reply_keys 中的直接作者不修回复证据"
+                        )
+                else:
+                    old_canon = prior_aliases.get(norm_fp)
+                    is_detached_alias = (
+                        old_canon is not None
+                        and old_canon != norm_fp
+                        and norm_fp not in next_aliases
                     )
-                    for rk, cid, kind, payload in parsed_entry_consumed
-                )
-                if not has_wontfix_proof:
-                    raise ConvergenceError(
-                        f"历史第 {idx} 轮将发现 {norm_fp} 标为已解除（resolved_fingerprints），"
-                        "但既不满足新提交修复条件（须为前轮结转项且 head_sha 相对前轮有新提交），"
-                        "也缺少未被前轮或本轮外部消费过的作者不修回复消费记录（comment:<id>:resolved:<fp>）"
+                    has_wontfix_proof = any(
+                        kind == "resolved"
+                        and payload == norm_fp
+                        and not (
+                            is_detached_alias
+                            and old_canon is not None
+                            and _resolved_reply_key(cid, old_canon) in validated_entry_consumed
+                        )
+                        and not _is_reply_consumed_for_target(
+                            rk,
+                            cid,
+                            norm_fp,
+                            consumed_reply_keys=pre_consumed_keys,
+                            alias_maps=consumed_alias_maps,
+                        )
+                        for rk, cid, kind, payload in parsed_entry_consumed
                     )
+                    if not has_wontfix_proof:
+                        raise ConvergenceError(
+                            f"历史第 {idx} 轮将发现 {norm_fp} 标为已解除（resolved_fingerprints），"
+                            "但既不满足新提交修复条件（须为前轮结转项且 head_sha 相对前轮有新提交），"
+                            "也缺少未被前轮或本轮外部消费过的作者不修回复消费记录（comment:<id>:resolved:<fp>）"
+                        )
 
         unaccounted = prev_unresolved_ids - (seen_hist_ids | entry.resolved_fingerprints | entry.rejected_fingerprints)
         if unaccounted:
@@ -4353,8 +4513,15 @@ def _validate_history_chain(
                 f"历史第 {idx} 轮遗漏了前轮未解除的 Important 发现（无结转/解除/驳回记录）：{sorted(unaccounted)!r}"
             )
 
-        consumed_state = _apply_round_new_consumed_keys(
+        after_wontfix_state = _apply_round_new_consumed_keys(
             input_state,
+            _wontfix_direct_consumed_keys(validated_entry_wontfix),
+            prior_aliases,
+            next_aliases,
+            treat_detached_as_derived=False,
+        )
+        consumed_state = _apply_round_new_consumed_keys(
+            after_wontfix_state,
             validated_entry_consumed,
             prior_aliases,
             next_aliases,
@@ -5329,8 +5496,15 @@ def _replay_history_state(
             next_aliases,
             treat_detached_as_derived=False,
         )
-        consumed_state = _apply_round_new_consumed_keys(
+        after_wontfix_state = _apply_round_new_consumed_keys(
             input_state,
+            _wontfix_direct_consumed_keys(entry.wontfix_reply_keys),
+            prior_aliases,
+            next_aliases,
+            treat_detached_as_derived=False,
+        )
+        consumed_state = _apply_round_new_consumed_keys(
+            after_wontfix_state,
             entry.consumed_reply_keys,
             prior_aliases,
             next_aliases,
@@ -5877,8 +6051,16 @@ def _derive_round_decision_payload(
                 f"RoundDecision 发现 {fid} 的 resolved_by_wontfix 回复与本轮最终作者回复分析选定结果不一致"
             )
 
-    final_state = _apply_round_new_consumed_keys(
+    wontfix_reply_keys = _extract_wontfix_reply_keys(resolved)
+    after_wontfix_state = _apply_round_new_consumed_keys(
         input_state,
+        _wontfix_direct_consumed_keys(wontfix_reply_keys),
+        history_aliases,
+        effective_aliases,
+        treat_detached_as_derived=False,
+    )
+    final_state = _apply_round_new_consumed_keys(
+        after_wontfix_state,
         consumed_keys,
         history_aliases,
         effective_aliases,
@@ -6201,6 +6383,7 @@ class RoundDecision:
             duplicate_aliases=self.duplicate_aliases,
             posted_important_fingerprints=self.retained_posted_important_fingerprints | posted_important_this_round,
             external_consumed_reply_keys=external_consumed_this_round,
+            wontfix_reply_keys=_extract_wontfix_reply_keys(self.resolved_findings),
         )
 
 
