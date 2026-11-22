@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { resolve } from "node:path";
+import { cargoContext, enabledRustItem } from "./at18-cargo.ts";
 import { type At18Repository, utf8 } from "./at18-source.ts";
 
-// 只判读源文本，不执行受验提交。保留 token，注释和字符串中的伪声明不作证。
+// Rust 只做语法与源码接入核验，仍由登记的真实 Cargo 作业提供运行结果。
 function tokens(source: string, rust: boolean): string[] {
   const out: string[] = [];
   const quote = rust ? /'(?:\\[^]|[^'\\\r\n])'/ : /'(?:\\[^]|[^'\\\r\n])*'/;
@@ -85,35 +85,18 @@ export function rustTest(source: string, name: string, selector?: string) {
   return !!rustTestBody(tokens(source, true), name, selector);
 }
 
-function pythonAst(input: unknown) {
-  try {
-    execFileSync("python3", ["-I", resolve(__dirname, "at18-python-source.py")],
-      { input: JSON.stringify(input), stdio: ["pipe", "ignore", "ignore"], timeout: 5_000 });
-    return true;
-  } catch { return false; }
-}
-
-function rustModules(code: string[], features: string[]) {
-  const modules: string[] = [];
+function* rustItems(code: string[]) {
   let depth = 0, start = 0;
   for (let i = 0; i < code.length; i++) {
-    if (depth === 0 && code[i] === "mod" && /^[A-Za-z_]\w*$/.test(code[i + 1] ?? "") && code[i + 2] === ";") {
-      const attributes = code.slice(start, i);
-      // 非测试模块可能受平台或 Cargo feature 约束；未知路径重定向不能靠文件名猜。
-      if (!attributes.some((t, j) => {
-        if (t !== "#" || attributes[j + 1] !== "[") return false;
-        if (["path", "cfg_attr"].includes(attributes[j + 2])) return true;
-        if (attributes[j + 2] !== "cfg") return false;
-        const end = closing(attributes, j + 1, "[", "]");
-        const cfg = attributes.slice(j + 3, end).join("");
-        return !["(unix)", "(windows)"].includes(cfg) && !features.some(feature => cfg === `(feature=${JSON.stringify(feature)})`);
-      })) modules.push(code[i + 1]);
+    const t = code[i];
+    if (!depth && ["mod", "use", "fn", "type", "struct", "enum", "trait", "const", "static", "union"].includes(t)) {
+      yield { index: i, kind: t, prefix: code.slice(start, i), public: code[i - 1] === "pub" ||
+        (t === "fn" && /(?:^| )pub(?: (?:async|unsafe|const))*$/.test(code.slice(start, i).join(" "))) };
     }
-    if (code[i] === "{") depth++;
-    if (code[i] === "}") depth--;
-    if (depth === 0 && (code[i] === ";" || code[i] === "}")) start = i + 1;
+    if (["{", "(", "["].includes(t)) depth++;
+    if (["}", ")", "]"].includes(t)) depth--;
+    if (!depth && [";", "}"].includes(t)) start = i + 1;
   }
-  return modules;
 }
 
 function rustImports(code: string[]) {
@@ -147,87 +130,105 @@ function rustImports(code: string[]) {
   return imports;
 }
 
-function rustReferences(code: string[], body: string[]) {
+function rustReferences(code: string[], body: string[], callsOnly = false) {
   const imports = rustImports(code);
   return body.flatMap((token, i) => {
     if (!/^[A-Za-z_]\w*$/.test(token) || body[i - 1] === "::") return [];
     const names = [token];
     for (let j = i + 1; body[j] === "::" && /^[A-Za-z_]\w*$/.test(body[j + 1] ?? ""); j += 2) names.push(body[j + 1]);
+    if (callsOnly && body[i + 2 * names.length - 1] !== "(") return [];
     const from = imports.filter(item => item.alias === token);
     return from.length ? from.map(item => [...item.path, ...names.slice(1)]) : [names];
   });
 }
 
-function rustDefinition(code: string[], name: string) {
-  return code.some((t, i) => {
-    if (code[i + 1] !== name) return false;
-    if (t === "fn") {
-      const body = rustFunction(code, i);
-      return !!body && body.some(token => !["{", "}", "(", ")", ";", ",", "return"].includes(token)) &&
-        !body.some((token, j) => ["todo", "unimplemented"].includes(token) && body[j + 1] === "!");
-    }
-    return ["type", "struct", "enum", "trait", "const", "static", "union"].includes(t);
-  });
-}
-
-export function rustReplacement(s: At18Repository, F: string, entry: string, checkPath: string, selector: string, features: string[]) {
+export function rustReplacement(s: At18Repository, F: string, entry: string, checkPath: string, selector: string, explicit: string[]) {
   const base = "rust/src/";
   if (!entry.startsWith(base)) return false;
   const modulePath = entry.slice(base.length).replace(/(?:\/mod)?\.rs$/, "").split("/");
   if (modulePath.some(p => !/^[A-Za-z_]\w*$/.test(p)) || ["lib", "main"].includes(modulePath[0])) return false;
-  const tree = s.tree(F);
-  const read = (path: string) => utf8(s.blob(F, path));
-  function child(parent: string, name: string) {
-    const dir = parent === base + "lib.rs" ? base : parent.replace(/(?:\/mod)?\.rs$/, "") + "/";
-    const found = [dir + name + ".rs", dir + name + "/mod.rs"].filter(p => tree.has(p));
-    return found.length === 1 ? found[0] : undefined;
-  }
-  const lib = base + "lib.rs";
-  function walk(modules: string[]) {
-    let path = lib;
-    for (const name of modules) {
-      if (!rustModules(tokens(read(path), true), features).includes(name)) return undefined;
-      const next = child(path, name);
-      if (!next) return undefined;
-      path = next;
+  try {
+    const tree = s.tree(F), lib = base + "lib.rs", cargo = "rust/Cargo.toml";
+    const { crate, edition, features } = cargoContext(tree.has(cargo) ? utf8(s.blob(F, cargo)) : undefined, explicit);
+    const parsed = new Map<string, string[]>();
+    function read(path: string) {
+      const cached = parsed.get(path);
+      if (cached) return cached;
+      const source = utf8(s.blob(F, path));
+      // stdin + skip_children：仅让 Rust 语法解析器读取 F 的这一份字节，不取检出的子模块。
+      execFileSync("rustfmt", ["--emit", "stdout", "--config", "skip_children=true", "--edition", edition],
+        { input: source, stdio: ["pipe", "ignore", "ignore"], timeout: 5_000 });
+      const code = tokens(source, true);
+      parsed.set(path, code);
+      return code;
     }
-    return path;
-  }
-  if (walk(modulePath) !== entry) return false;
-  function resolves(modules: string[], names: string[], seen = new Set<string>()): boolean {
-    if (!names.length) return false;
-    const key = modules.join("::") + "/" + names.join("::");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    const current = walk(modules);
-    if (!current) return false;
-    const code = tokens(read(current), true);
-    const [name, ...tail] = names;
-    if (tail.length ? resolves([...modules, name], tail, seen) : rustDefinition(code, name)) return true;
-    return rustImports(code).filter(item => item.alias === name && item.exported).some(({ path }) => {
-      const [start, ...rest] = path;
-      const qualified = start === "crate" ? rest : start === "super" ? [...modules.slice(0, -1), ...rest] :
-        [...modules, ...(start === "self" ? rest : path)];
-      return resolves(qualified.slice(0, -1), [...qualified.slice(-1), ...tail], seen);
-    });
-  }
-  const cargo = read("rust/Cargo.toml");
-  const crate = /(?:^|\n)\[lib\]([^]*?)(?:\n\[|$)/.exec(cargo)?.[1].match(/^name\s*=\s*"([\w-]+)"/m)?.[1] ??
-    /(?:^|\n)\[package\]([^]*?)(?:\n\[|$)/.exec(cargo)?.[1].match(/^name\s*=\s*"([\w-]+)"/m)?.[1];
-  const code = tokens(read(checkPath), true);
-  const name = selector.split("::").at(-1) ?? "";
-  const body = rustTestBody(code, name, selector);
-  const root = checkPath.startsWith("rust/tests/") ? crate?.replaceAll("-", "_") : "crate";
-  return !!body && !!root && rustReferences(code, body).some(([from, ...path]) =>
-    from === root && modulePath.every((name, i) => path[i] === name) && resolves(modulePath, path.slice(modulePath.length)));
-}
-
-export function pythonReplacement(s: At18Repository, F: string, entry: string, integration: string, checkPath: string, selector: string) {
-  if (!entry.startsWith("trading_system/") || !integration.startsWith("trading_system/") ||
-      !integration.endsWith(".py") || !checkPath.endsWith(".py") ||
-      integration.split("/").includes("tests") || integration === checkPath || entry === integration) return false;
-  const read = (path: string) => utf8(s.blob(F, path));
-  return pythonAst({ source: read(entry), entry, integration, caller: read(integration), checkPath, test: read(checkPath), selector });
+    function walk(modules: string[]) {
+      let path = lib;
+      for (const name of modules) {
+        const code = read(path);
+        if (![...rustItems(code)].some(item => item.kind === "mod" && code[item.index + 1] === name &&
+            code[item.index + 2] === ";" && enabledRustItem(item.prefix, features))) return;
+        const dir = path === lib ? base : path.replace(/(?:\/mod)?\.rs$/, "") + "/";
+        const found = [dir + name + ".rs", dir + name + "/mod.rs"].filter(p => tree.has(p));
+        if (found.length !== 1) return;
+        path = found[0];
+      }
+      return path;
+    }
+    if (walk(modulePath) !== entry || !read(entry).length) return false;
+    function qualify(modules: string[], [start, ...rest]: string[]) {
+      if (start === "crate") return rest;
+      if (start === "super") return qualify(modules.slice(0, -1), rest);
+      if (start === "self") return [...modules, ...rest];
+      return start === undefined ? modules : [...modules, start, ...rest];
+    }
+    function reaches(modules: string[], [name, ...tail]: string[], external: boolean, viaEntry: boolean, seen: Set<string>): boolean {
+      if (!name) return false;
+      const key = JSON.stringify([modules, name, tail, external, viaEntry]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      const path = walk(modules);
+      if (!path) return false;
+      const code = read(path);
+      // 生产封装可以把内部调用直接解析到替代模块的子模块，不必逐段从入口再走一遍。
+      const entered = viaEntry || modulePath.every((part, i) => modules[i] === part);
+      const items = [...rustItems(code)].filter(item => enabledRustItem(item.prefix, features));
+      if (tail.length && items.some(item => item.kind === "mod" && code[item.index + 1] === name && (!external || item.public)) &&
+          reaches([...modules, name], tail, external, entered, seen)) return true;
+      for (const item of items) {
+        if (external && !item.public) continue;
+        if (item.kind === "use") {
+          const end = code.indexOf(";", item.index);
+          for (const imported of rustImports(code.slice(item.index, end + 1))) {
+            if (imported.alias !== name) continue;
+            const qualified = qualify(modules, imported.path);
+            if (reaches(qualified.slice(0, -1), [...qualified.slice(-1), ...tail], false, entered, seen)) return true;
+          }
+        } else if (!tail.length && code[item.index + 1] === name && item.kind !== "mod") {
+          if (item.kind !== "fn") {
+            if (entered) return true;
+            continue;
+          }
+          const body = rustFunction(code, item.index);
+          if (!body || !substantiveRust(body)) continue;
+          if (entered) return true;
+          const imports = items.filter(it => it.kind === "use").flatMap(it =>
+            code.slice(it.index, code.indexOf(";", it.index) + 1));
+          for (const ref of rustReferences(imports, body, true)) {
+            const qualified = qualify(modules, ref);
+            if (reaches(qualified.slice(0, -1), qualified.slice(-1), false, false, seen)) return true;
+          }
+        }
+      }
+      return false;
+    }
+    const code = read(checkPath);
+    const name = selector.split("::").at(-1) ?? "";
+    const body = rustTestBody(code, name, selector);
+    const root = checkPath.startsWith("rust/tests/") ? crate : "crate";
+    return !!body && !!root && rustReferences(code, body).some(([from, ...path]) =>
+      from === root && reaches([], path, root !== "crate", false, new Set<string>()));
+  } catch { return false; }
 }
 
 export function nodeTest(source: string, name: string) {

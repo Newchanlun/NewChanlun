@@ -48,6 +48,8 @@ export type Mutation = {
   at14Node?: boolean;
   at14Ci?: "ignored" | "skip-ci" | "dispatch-only" | "ignored-only" | "unrecorded" | "comment" | "wrong-step" | "qualified-selector" | "sibling-selector";
   feedReplacement?: string;
+  feedTest?: string;
+  wireCase?: "incomplete" | "public-entry";
   feedCase?: "isolated" | "no-coverage" | "missing-child" | "wrong-test-symbol" | "reexport";
   recordLexeme?: (record: Row, bytes: Buffer) => Buffer;
   historicProducts?: "correct" | "swapped";
@@ -58,7 +60,7 @@ export type Mutation = {
   historicalCures?: "all" | "missing" | "failed" | "empty-node" | "empty-step" | "empty-rust";
   heavyCase?: "measured" | "short" | "missing-control" | "wrong-trial" | "retired" | "unapproved-retirement" | "one-bar" | "late-review" |
     "malformed-heavy" | "input-unregistered" | "second-run-missing" | "output-diverges" |
-    "sparse" | "unapproved-gap" | "wrong-count" | "wrong-chunk" |
+    "sparse" | "unapproved-gap" | "wrong-count" | "wrong-chunk" | "utc-equivalent" | "utc-short-minute" |
     "retired-thanks" | "retired-owner-revoke" | "retired-nonowner-revoke";
 };
 
@@ -67,8 +69,10 @@ const iso = (at: number) => new Date(at).toISOString().replace(".000Z", "Z");
 const periodic = [1, 2, 3, 4, 5].map(weekday => ({ weekday, start_minute: 0, end_minute: 23 * 60 }));
 const closure = { from: "2019-06-24T00:00:00Z", until: "2019-06-26T00:00:00Z", reason: "合成交易所维护（两日停市）" };
 function fixtureSnapshot(symbol: string, variant: Mutation["heavyCase"]) {
-  const first_bar_at = "2015-01-01T00:00:00Z";
-  const last_bar_at = variant === "short" ? "2024-12-31T22:59:00Z" : "2025-01-01T00:00:00Z";
+  const finalDay = "2024-12-31T00:00:00Z";
+  const first_bar_at = variant?.startsWith("utc-") ? "2015-01-01T00:00:00.000Z" : "2015-01-01T00:00:00Z";
+  const last_bar_at = variant === "short" ? "2024-12-31T22:59:00Z" :
+    variant === "utc-short-minute" ? "2024-12-31T23:59:00Z" : "2025-01-01T00:00:00Z";
   const days: { at: string; minutes: number; open: number; low: number; high: number; close: number; volume: number }[] = [];
   const values = { open: 100, low: 99, high: 102, close: 101, volume: 12 };
   if (variant === "sparse") {
@@ -78,7 +82,8 @@ function fixtureSnapshot(symbol: string, variant: Mutation["heavyCase"]) {
       const weekday = new Date(at).getUTCDay();
       if (!weekday || weekday === 6 || (at >= Date.parse(closure.from) && at < Date.parse(closure.until))) continue;
       if (variant === "one-bar" && days.length) break;
-      days.push({ at: iso(at), minutes: variant === "one-bar" ? 1 : Math.min(23 * 60, (Date.parse(last_bar_at) - at) / 60_000 + 1), ...values });
+      const sessionMinutes = variant === "utc-short-minute" && iso(at) === finalDay ? 1440 : 23 * 60;
+      days.push({ at: iso(at), minutes: variant === "one-bar" ? 1 : Math.min(sessionMinutes, (Date.parse(last_bar_at) - at) / 60_000 + 1), ...values });
     }
   }
   const chunkDocs = [];
@@ -93,8 +98,10 @@ function fixtureSnapshot(symbol: string, variant: Mutation["heavyCase"]) {
   const bars = chunks.reduce((sum, c) => sum + c.bars, 0);
   const snapshot = { symbol, first_bar_at, last_bar_at, bars: bars + (variant === "wrong-count" ? 1 : 0), chunks,
     calendar: { source: "合成交易所冻结日历：周一至周五交易 23 小时", sessions: [{
-      effective_from: first_bar_at, effective_to: iso(Date.parse(last_bar_at) + 60_000), week: periodic,
-    }] },
+      effective_from: first_bar_at, effective_to: variant === "utc-short-minute" ? finalDay : iso(Date.parse(last_bar_at) + 60_000),
+      week: periodic,
+    }, ...(variant === "utc-short-minute" ? [{ effective_from: finalDay, effective_to: "2025-01-01T00:00:00Z",
+      week: periodic.map(day => day.weekday === 2 ? { ...day, end_minute: 1440 } : day) }] : [])] },
     approved_gaps: variant === "unapproved-gap" ? [] : [closure],
   };
   return { snapshot, chunkDocs, bars };
@@ -378,16 +385,20 @@ export function makeFixture(mutation: Mutation = {}) {
     "\nfrom .at18_fixture_feed import route\n\ndef select_feed(sources, events):\n    return route('1min', sources, events)\n"));
   put(wireReplacement, mutation.feedCase === "isolated"
     ? 'pub fn wire_price(raw: u64) -> String { format!("{}", raw) }\n'
-    : mutation.feedCase === "reexport" ? "mod probe; pub use probe::handshake;\n" : "pub mod probe;\n");
+    : mutation.feedCase === "reexport" ? "mod probe; pub use probe::handshake;\n" :
+    "pub mod probe;\n" + (mutation.wireCase === "incomplete" ? "pub fn unfinished(\n" : ""));
   put(wireIntegration, utf8(src.blob(G0, wireIntegration)) +
-    (mutation.feedCase === "isolated" ? "" : "\npub mod at18_fixture_wire;\n"));
+    (mutation.feedCase === "isolated" ? "" : "\npub mod at18_fixture_wire;\n") +
+    (mutation.wireCase === "public-entry" ? 'pub fn select_wire(banner: &str) -> bool { at18_fixture_wire::probe::handshake(banner) }\n' : ""));
   if (mutation.feedCase !== "missing-child") put("rust/src/at18_fixture_wire/probe.rs",
     'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }\n');
   const feedTest = "trading_system/tests/test_at18_fixture_feed.py";
   const wireTest = "rust/tests/at18_fixture_wire.rs";
-  const feedTestSource = "from trading_system.at18_fixture_feed import route\n\ndef test_route():\n" +
-    (mutation.feedCase === "no-coverage" ? "    assert True\n" : "    assert list(route('1min', {'1min': 'ohlcv'}, [1, 2])) == [1, 2]\n");
-  const wireTestSource = "use newchan_rust::at18_fixture_wire::" + (mutation.feedCase === "reexport" ? "" : "probe::") + "handshake;\n#[test]\nfn check_connection() { " +
+  const feedTestSource = mutation.feedTest ?? ("from trading_system.at18_fixture_feed import route\n\ndef test_route():\n" +
+    (mutation.feedCase === "no-coverage" ? "    assert True\n" : "    assert list(route('1min', {'1min': 'ohlcv'}, [1, 2])) == [1, 2]\n"));
+  const wireTestSource = mutation.wireCase === "public-entry"
+    ? 'use newchan_rust::select_wire;\n#[test]\nfn check_connection() { assert!(select_wire("HELLO")); }\n'
+    : "use newchan_rust::at18_fixture_wire::" + (mutation.feedCase === "reexport" ? "" : "probe::") + "handshake;\n#[test]\nfn check_connection() { " +
     (mutation.feedCase === "wrong-test-symbol" ? 'assert!(true);' : 'assert!(handshake("HELLO"));') + " }\n";
   for (const [id, path, code, runner, selector] of [
     [feedCheck, feedTest, feedTestSource, "pytest", "test_route"],

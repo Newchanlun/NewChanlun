@@ -1,4 +1,5 @@
-import { pythonReplacement, rustReplacement } from "./at18-code.ts";
+import { pythonReplacement } from "./at18-python-run.ts";
+import { rustReplacement } from "./at18-code.ts";
 import { z } from "zod";
 import { findAt14 } from "./at18-at14.ts";
 import { authorizedHeavyRetirement, measuredHeavy } from "./at18-heavy.ts";
@@ -151,7 +152,7 @@ export async function legacyDispositions(s: At18Repository, F: string, adapter: 
                 !rustReplacement(s, F, replacement, check.source.path, selector[3], selector[2]?.split(",") ?? [])) return false;
           } else {
             if (!replacement.endsWith(".py") || check.runner !== "pytest" ||
-                !pythonReplacement(s, F, replacement, integration, check.source.path, check.selector)) return false;
+                !pythonReplacement(s, F, replacement, integration, check.source.path, check.selector, check.expected_count)) return false;
           }
           refsFound.push(repoRef(F, replacement, source, "LEGACY_SOURCE"),
             repoRef(F, integration, s.blob(F, integration), "LEGACY_SOURCE"),

@@ -1,3 +1,5 @@
+import { rustReplacement } from "./at18-code.ts";
+import { cargoContext, enabledRustItem } from "./at18-cargo.ts";
 import { at14CiSteps } from "./at18-at14-ci.ts";
 import { deliveredProducts } from "./at18-products.ts";
 import assert from "node:assert/strict";
@@ -678,4 +680,90 @@ test("R6/H6：真实 #2021 路径提交的自然位置票号归 #1407，仍要�
   assert.deepEqual(deliveredProducts(s, claim(1404, path), new Map(), reviewed), []);
   assert.deepEqual(deliveredProducts(s, claim(1407, "README.md"), new Map(), reviewed), []);
   assert.deepEqual(deliveredProducts(s, claim(1407, path), new Map(), new Map()), []);
+});
+
+test("R7/H3：正式 CLI 按冻结选择器核验实际执行、公开接入与 Rust 完整语法", {
+  skip: !pathExistsGit, timeout: 180_000,
+}, async t => {
+  const imported = "from trading_system.at18_fixture_feed import route\n";
+  const call = "list(route('1min', {'1min': 'ohlcv'}, [1, 2]))";
+  for (const [id, mutation, accepts] of [
+    ["callable-only", { feedTest: imported + "def test_route():\n    assert callable(route)\n" }, false],
+    ["generator-not-consumed", { feedTest: imported + "def test_route():\n    assert route('1min', {}, []) is not None\n" }, false],
+    ["outside-test", { feedTest: imported + call + "\ndef test_route():\n    assert True\n" }, false],
+    ["failed-after-execution", { feedTest: imported + "def test_route():\n    assert " + call + " == []\n" }, false],
+    ["public-feed", { feedTest: "from trading_system import select_feed\ndef test_route():\n" +
+      "    assert list(select_feed({'1min': 'ohlcv'}, [1, 2])) == [1, 2]\n" }, true],
+    ["yield-from", { feedReplacement: "def route(granularity, sources, events):\n    yield from events\n" }, true],
+    ["public-wire", { wireCase: "public-entry" }, true],
+    ["incomplete-wire", { wireCase: "incomplete" }, false],
+  ] as const) await t.test(id, async () => {
+    const { report } = await control(mutation, "R7/feed/" + id);
+    assert.equal(legacyRow(report, 1319).disposition_valid, accepts);
+    if (accepts) positive(report);
+    else {
+      reportFail(report, "LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE");
+      assert.equal(report.failed_checks.length, 1);
+    }
+  });
+});
+
+test("R7/H3：#1942 与 #2021 的真实 Cargo 闭包不随冗余显式特性变化", { skip: !pathExistsGit }, () => {
+  const s = new At18Repository(root);
+  const testPath = "rust/tests/at18_review_local.rs";
+  const original = s.blob.bind(s);
+  for (const [commit, entry, body] of [
+    ["3cd162ea4c3c8c73a0d6b8c6866894a0204e78bc", "rust/src/history_simulation/mod.rs",
+      'assert_eq!(newchan_rust::history_simulation::model::MODEL_ID, "history-sim/bar-batch-known-frontier/1");'],
+    ["b9d898dccf46c2a716115eaa1215bc39c458a959", "rust/src/economic_session/mod.rs",
+      "assert!(newchan_rust::economic_session::cli(false).is_err());"],
+  ]) {
+    // 只替换测试文件；Cargo.toml 和全部生产模块读取真实合入树。
+    s.blob = (F, path) => path === testPath ? Buffer.from("#[test]\nfn review_local() { " + body + " }\n") : original(F, path);
+    for (const features of [["production_session"], ["production_session", "s_session"]]) {
+      assert.ok(rustReplacement(s, commit, entry, testPath, "review_local", features), entry + " / " + features);
+    }
+    assert.equal(rustReplacement(s, commit, entry, testPath, "review_local", []), false);
+  }
+});
+
+test("R7/H3：Cargo 多行、传递与循环；cfg all/any/not 不借用依赖特性", () => {
+  const { features } = cargoContext(`[features]
+production = [
+  "linked", # 继续传递
+  'dep:wire',
+  "extension?/transport",
+  "crate/remote",
+]
+linked = ["leaf"]
+leaf = ["production"]
+wire = []
+extension = []
+crate = []
+`, ["production"]);
+  assert.deepEqual([...features].sort(), ["leaf", "linked", "production"]);
+  assert.deepEqual([...cargoContext(undefined, ["given"]).features], ["given"]);
+  assert.deepEqual([...cargoContext("[package]\nname = 'local'\n", ["given"]).features], ["given"]);
+  const cfg = (...body: string[]) => enabledRustItem(["#", "[", "cfg", "(", ...body, ")", "]"], features);
+  const feature = (name: string) => ["feature", "=", JSON.stringify(name)];
+  assert.ok(cfg("all", "(", ...feature("leaf"), ",", "any", "(", ...feature("linked"), ",", ...feature("wire"),
+    ")", ",", "not", "(", ...feature("crate"), ")", ",", ")"));
+  assert.equal(cfg("not", "(", ...feature("leaf"), ")"), false);
+  assert.equal(cfg("any", "(", ...feature("wire"), ",", ...feature("remote"), ")"), false);
+});
+
+test("R7/H9：UTC 同时刻的两个拼写满十年，少一分钟仍拒", {
+  skip: !pathExistsGit, timeout: 120_000,
+}, async t => {
+  for (const [heavyCase, accepts] of [["utc-equivalent", true], ["utc-short-minute", false]] as const) {
+    await t.test(heavyCase, async () => {
+      const { report } = await control({ heavyCase, api: routes => close(routes, 1320) }, "R7/heavy/" + heavyCase);
+      assert.equal(legacyRow(report, 1320).disposition_valid, accepts);
+      if (accepts) positive(report);
+      else {
+        reportFail(report, "LEGACY_DISPOSITION", "ticket:1320@" + heavy);
+        assert.equal(report.failed_checks.length, 1);
+      }
+    });
+  }
 });

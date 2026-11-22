@@ -77,7 +77,7 @@ function tenYears(from: string, to: string) {
   const lastDay = new Date(Date.UTC(anniversaryYear, Number(month), 0)).getUTCDate();
   const anniversary = String(anniversaryYear).padStart(4, "0") + "-" + month + "-" +
     String(Math.min(Number(day), lastDay)).padStart(2, "0") + time;
-  return anniversary === to || utcBefore(anniversary, to);
+  return utc.safeParse(anniversary).success && Date.parse(to) >= Date.parse(anniversary);
 }
 const sameWindow = (a: z.infer<typeof window>, b: z.infer<typeof window>) =>
   a.first_bar_at === b.first_bar_at && a.last_bar_at === b.last_bar_at && a.bars === b.bars;
