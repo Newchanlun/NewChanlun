@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { drainRequested, DrainFrozenError, LockBusyError, withFileLock, withFrozenAdmission, withLegacyAdmission } from "./drain-control.mts";
 
+const execFileAsync = promisify(execFile);
 const helper = fileURLToPath(new URL("./drain-control.py", import.meta.url));
 const temp = () => mkdtempSync(join(tmpdir(), "nc-drain-"));
-const cli = (root: string, command: string, ...args: string[]) => JSON.parse(execFileSync("python3", [helper, command, "--root", root, ...args], { encoding: "utf8" }));
+const cli = async (root: string, command: string, ...args: string[]) => JSON.parse((await execFileAsync("python3", [helper, command, "--root", root, ...args], { encoding: "utf8" })).stdout);
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function freeze(root: string): Promise<number | null> {
@@ -17,18 +19,19 @@ function freeze(root: string): Promise<number | null> {
   return new Promise((resolve, reject) => { child.on("error", reject); child.on("exit", resolve); });
 }
 
+describe("drain-control", { concurrency: 4 }, () => {
 test("无标记时旧调用继续，重复freeze/resume保持同代次", async () => {
   const root = temp();
   assert.equal(drainRequested(root), false);
   assert.equal(await withLegacyAdmission(() => 7, root), 7);
-  assert.deepEqual(cli(root, "freeze"), { v: 1, mode: "draining", generation: 1 });
+  assert.deepEqual(await cli(root, "freeze"), { v: 1, mode: "draining", generation: 1 });
   assert.equal(drainRequested(root), true);
-  assert.equal(cli(root, "freeze").generation, 1);
+  assert.equal((await cli(root, "freeze")).generation, 1);
   await assert.rejects(withLegacyAdmission(() => assert.fail("不能派发"), root), DrainFrozenError);
-  assert.throws(() => cli(root, "resume", "--generation", "0"));
+  await assert.rejects(cli(root, "resume", "--generation", "0"));
   assert.equal(drainRequested(root), true);
-  assert.equal(cli(root, "resume", "--generation", "1").mode, "open");
-  assert.equal(cli(root, "resume", "--generation", "1").generation, 1);
+  assert.equal((await cli(root, "resume", "--generation", "1")).mode, "open");
+  assert.equal((await cli(root, "resume", "--generation", "1")).generation, 1);
 });
 
 test("freeze和选择到首次副作用共用锁，已admit的工蜂不被终止", async () => {
@@ -54,7 +57,7 @@ test("freeze和选择到首次副作用共用锁，已admit的工蜂不被终止
 });
 
 test("冻结后所有门禁副作用拒绝，包括heal/requeue和手工claim", async () => {
-  const root = temp(); cli(root, "freeze");
+  const root = temp(); await cli(root, "freeze");
   for (const effect of ["claim", "heal", "requeue", "release", "manual-review"]) {
     await assert.rejects(withLegacyAdmission(() => assert.fail(effect), root), DrainFrozenError);
   }
@@ -67,8 +70,8 @@ test("未知或半写状态失败关闭，恢复不能用旧代次重开新冻�
   writeFileSync(join(root, "state.json"), JSON.stringify({ v: 99, mode: "open", generation: 0 }));
   await assert.rejects(withLegacyAdmission(() => assert.fail(), root), DrainFrozenError);
   writeFileSync(join(root, "state.json"), JSON.stringify({ v: 1, mode: "open", generation: 1 }));
-  cli(root, "freeze");
-  assert.throws(() => cli(root, "resume", "--generation", "1"));
+  await cli(root, "freeze");
+  await assert.rejects(cli(root, "resume", "--generation", "1"));
   assert.equal(JSON.parse(readFileSync(join(root, "state.json"), "utf8")).generation, 2);
 });
 
@@ -128,17 +131,17 @@ test("#1867 冻结专用准入：只认 draining 且代次一致，open/错代�
   const root = temp(); const control = join(root, "control.lock");
   const frozen = (generation: number) => withFrozenAdmission(() => "admitted", { generation, control, root });
   await assert.rejects(frozen(1), DrainFrozenError, "open 时专用入口拒绝");
-  cli(root, "freeze");
+  await cli(root, "freeze");
   assert.equal(await frozen(1), "admitted");
   await assert.rejects(frozen(2), DrainFrozenError, "代次不符");
   await assert.rejects(withLegacyAdmission(() => assert.fail("普通入口冻结"), root), DrainFrozenError);
-  assert.deepEqual(cli(root, "status"), { v: 1, mode: "draining", generation: 1 });
+  assert.deepEqual(await cli(root, "status"), { v: 1, mode: "draining", generation: 1 });
   writeFileSync(join(root, "state.json"), "{");
   await assert.rejects(frozen(1), DrainFrozenError, "未知状态失败关闭");
 });
 
 test("#1867 控制锁：消费者共享持有期间排他控制命令等待；控制命令持锁期间新准入等待；运行锁非阻塞被占即 LockBusyError", async () => {
-  const root = temp(); const control = join(root, "control.lock"); cli(root, "freeze");
+  const root = temp(); const control = join(root, "control.lock"); await cli(root, "freeze");
   let release!: () => void; const held = new Promise<void>((r) => { release = r; });
   let entered!: () => void; const inside = new Promise<void>((r) => { entered = r; });
   const consumer = withFrozenAdmission(async () => { entered(); await held; }, { generation: 1, control, root });
@@ -157,4 +160,5 @@ test("#1867 控制锁：消费者共享持有期间排他控制命令等待；�
   await holding;
   await assert.rejects(withFileLock(run, () => assert.fail("不能并行"), { nonblock: true }), LockBusyError);
   unlock(); await first;
+});
 });
