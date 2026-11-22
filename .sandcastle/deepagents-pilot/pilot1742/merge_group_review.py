@@ -27,20 +27,23 @@ from typing import Any, Literal
 _external_review_module: Any = importlib.import_module(".external_review", package=__package__ or "pilot1742")
 _controller_message_blocks: Callable[[str], bool] = _external_review_module._message_blocks
 _unwrap_json_fence: Callable[[str], str] = _external_review_module.unwrap_json_fence
-_frozen_patch: Callable[[Path, Any], Any] = _external_review_module.frozen_patch
 _ReviewTarget: Any = _external_review_module.ReviewTarget
 if (
     not callable(_controller_message_blocks)
     or not callable(_unwrap_json_fence)
-    or not callable(_frozen_patch)
     or not callable(_ReviewTarget)
 ):
     raise ImportError("pilot1742.external_review 必需接口不可调用")
 
 _patch_read_module: Any = importlib.import_module(".patch_read", package=__package__ or "pilot1742")
+_FrozenPatch: Any = _patch_read_module.FrozenPatch
 _reads_candidate_patch: Callable[[str, str, Any], bool] = _patch_read_module.reads_candidate_patch
-if not callable(_reads_candidate_patch):
-    raise ImportError("pilot1742.patch_read.reads_candidate_patch 不可调用")
+if (
+    not callable(_reads_candidate_patch)
+    or not callable(_FrozenPatch)
+    or not callable(getattr(_FrozenPatch, "from_diff", None))
+):
+    raise ImportError("pilot1742.patch_read 必需接口不可调用")
 
 MERGE_GROUP_STATUS_CONTEXT = "deepagents/review"
 DEFAULT_EXPECTED_MODELS: tuple[str, ...] = ("kimi-k3.1-pro", "claude-opus-5-5")
@@ -807,6 +810,63 @@ def _compute_patch_identity_in_repo(replay_repo: Path, merge_base_sha: str, head
         stderr = proc.stderr.decode("utf-8", errors="replace").strip()
         raise MergeGroupError(f"无法计算补丁身份（{mb}..{head}）：{stderr}")
     return "sha256:" + hashlib.sha256(proc.stdout).hexdigest()
+
+
+def _frozen_patch(replay_repo: Path, target: Any) -> Any:
+    """在隔离 bare 仓中以 --attr-source=<head_sha> 提取冻结候选补丁。
+
+    通过不可变提交树 target.head_sha 读取根及子目录 .gitattributes，
+    保证在无工作区的 bare 仓、不同分支检出或 worktree 中均产出与审查容器一致的补丁。
+    """
+    head_sha = _parse_commit_sha(target.head_sha, field="target.head_sha")
+    merge_base_sha = _parse_commit_sha(target.merge_base_sha, field="target.merge_base_sha")
+    base_sha = _parse_commit_sha(target.base_sha, field="target.base_sha")
+    cmd = [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "gc.auto=0",
+        f"--attr-source={head_sha}",
+        "-C",
+        str(replay_repo),
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "-U0",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        merge_base_sha,
+        head_sha,
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            env=_git_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _GitQueryError(f"执行 git diff 提取冻结补丁失败：{type(exc).__name__}") from None
+    if completed.returncode < 0:
+        raise _GitQueryError(f"git 进程被信号中止（returncode={completed.returncode}）")
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            cmd,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+    return _FrozenPatch.from_diff(
+        head_sha,
+        merge_base_sha,
+        base_sha,
+        completed.stdout.decode(errors="replace"),
+    )
 
 
 def compute_patch_identity(source_repo: Path, merge_base_sha: str, head_sha: str) -> str:

@@ -3066,9 +3066,9 @@ def test_r3_git_signal_exit_mapped_to_replay_env_error(mq_fixture: MergeQueueFix
         assert dec_pos.verdict == "ERROR"
         assert dec_pos.reason_code == "member_patch_id_mismatch"
 
-    # 3. _run_git 内部 subprocess.run 返回负退出码 -15（跨 cat-file / merge-base / merge-tree / diff-tree 全路径）-> replay_env_error
+    # 3. _run_git / _frozen_patch 内部 subprocess.run 返回负退出码 -15（跨 cat-file / merge-base / merge-tree / diff-tree / diff 全路径）-> replay_env_error
     real_subprocess_run = mgr.subprocess.run
-    for target_cmd in ("cat-file", "merge-base", "merge-tree", "diff-tree"):
+    for target_cmd in ("cat-file", "merge-base", "merge-tree", "diff-tree", "diff"):
         def _kill_on_cmd(
             cmd: list[str],
             *args: Any,
@@ -3092,13 +3092,32 @@ def test_r3_git_signal_exit_mapped_to_replay_env_error(mq_fixture: MergeQueueFix
 
 
 def test_r3_gitattributes_nodiff_positive_regression(mq_fixture: MergeQueueFixture) -> None:
-    """R3 正向回归：仓库含 .gitattributes (*.dat -diff) 时 external_review 与 merge_group 均正常 PASS。"""
+    """R3/R5 回归：.gitattributes (*.dat -diff) 在 main 真正生效时，普通仓与 bare 仓均 PASS，伪造/删除二进制 diff 仍 fail-closed。"""
     base = mq_fixture.create_branch_commit(
-        "rules-attr", from_ref=mq_fixture.base_sha, files={".gitattributes": "*.dat -diff\n"}
+        "main",
+        from_ref=mq_fixture.base_sha,
+        files={".gitattributes": "*.dat -diff\n", "text.dat": "initial line\n"},
     )
     head = mq_fixture.create_branch_commit("doc-attr", from_ref=base, files={"text.dat": "first normal changed line\n"})
+
+    # 生成直审证据前，显式断言 -diff 在当前工作区真正生效
+    attr_status = _run_git(mq_fixture.repo, "check-attr", "diff", "--", "text.dat")
+    assert attr_status.endswith("diff: unset"), f"预期 diff: unset，实际：{attr_status!r}"
+
     folder, _, _ = mq_fixture.write_direct_pass_run(pr_number=1, base_sha=base, head_sha=head)
     worker = folder / DEFAULT_EXPECTED_MODELS[0]
+
+    # 显式断言 events.jsonl 补丁输出为 Git 二进制 diff 而非文本 hunk
+    events_lines = (worker / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    cmd_outputs = [
+        str(ev["item"]["aggregated_output"])
+        for line in events_lines
+        if (ev := json.loads(line)).get("type") == "item.completed"
+        and ev.get("item", {}).get("type") == "command_execution"
+    ]
+    assert len(cmd_outputs) == 1
+    assert "Binary files a/text.dat and b/text.dat differ" in cmd_outputs[0]
+    assert "+first normal changed line" not in cmd_outputs[0]
 
     target_json = json.loads((folder / "target.json").read_text(encoding="utf-8"))
     ext_outcome = external_review.validate_review(
@@ -3120,3 +3139,102 @@ def test_r3_gitattributes_nodiff_positive_regression(mq_fixture: MergeQueueFixtu
     assert dec.verdict == "PASS"
     assert dec.status_state == "success"
     assert dec.reason_code == "merge_group_pass_reused"
+
+    # bare 克隆仓无工作区 .gitattributes，同样通过 --attr-source=<head_sha> 准确 PASS
+    bare_repo = mq_fixture.root / "repo-attr-bare.git"
+    _run_git(mq_fixture.root, "clone", "--bare", "-q", str(mq_fixture.repo), str(bare_repo))
+    dec_bare = evaluate_merge_group(
+        target,
+        source_repo=bare_repo,
+        state_root=mq_fixture.state_root,
+        policy=mq_fixture.policy(),
+    )
+    assert dec_bare.verdict == "PASS"
+    assert dec_bare.status_state == "success"
+    assert dec_bare.reason_code == "merge_group_pass_reused"
+
+    # 负向断言：删除/替换 events.jsonl 中的二进制 diff 输出后，补丁读取证明仍严格拒绝
+    tampered_lines: list[str] = []
+    for line in events_lines:
+        ev = json.loads(line)
+        if ev.get("type") == "item.completed" and ev.get("item", {}).get("type") == "command_execution":
+            ev["item"]["aggregated_output"] = "unrelated output without patch header\n"
+        tampered_lines.append(json.dumps(ev, ensure_ascii=False))
+    events_path = worker / "events.jsonl"
+    events_path.write_text("\n".join(tampered_lines) + "\n", encoding="utf-8")
+    os.chmod(events_path, 0o600)
+
+    for repo_path in (mq_fixture.repo, bare_repo):
+        dec_tampered = evaluate_merge_group(
+            target,
+            source_repo=repo_path,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert dec_tampered.verdict == "ERROR"
+        assert dec_tampered.status_state == "error"
+        assert dec_tampered.reason_code == "member_events_invalid"
+
+
+def test_r5_subdir_gitattributes_on_non_main_branch_isolated_bare(mq_fixture: MergeQueueFixture) -> None:
+    """R5 加固：非 main 分支（含子目录 sub/.gitattributes）下，--attr-source=<head_sha> 在普通仓与 bare 仓均精确生效。"""
+    # main 不含 sub/.gitattributes；分支基线引入 sub/.gitattributes 与 sub/data.dat，PR 仅修改 sub/data.dat
+    branch_base = mq_fixture.create_branch_commit(
+        "feature-base",
+        from_ref=mq_fixture.base_sha,
+        files={"sub/.gitattributes": "*.dat -diff\n", "sub/data.dat": "before\n"},
+    )
+    head = mq_fixture.create_branch_commit(
+        "feature-pr",
+        from_ref=branch_base,
+        files={"sub/data.dat": "after subdir change\n"},
+    )
+
+    # 确认 main 工作区无 sub/.gitattributes（check-attr 为 unspecified），而 head 树中生效（diff: unset）
+    assert _run_git(mq_fixture.repo, "check-attr", "diff", "--", "sub/data.dat").endswith("diff: unspecified")
+    assert _run_git(mq_fixture.repo, "--attr-source=" + head, "check-attr", "diff", "--", "sub/data.dat").endswith(
+        "diff: unset"
+    )
+
+    # 模拟真实审查容器（检出于 target.head_sha）产出的二进制 diff 证据
+    container_diff = _run_git_raw(
+        mq_fixture.repo,
+        f"--attr-source={head}",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        branch_base,
+        head,
+    )
+    assert "Binary files a/sub/data.dat and b/sub/data.dat differ" in container_diff
+    assert "+after subdir change" not in container_diff
+
+    folder, _, _ = mq_fixture.write_direct_pass_run(pr_number=2, base_sha=branch_base, head_sha=head)
+    for model in DEFAULT_EXPECTED_MODELS:
+        ev_path = folder / model / "events.jsonl"
+        updated: list[str] = []
+        for line in ev_path.read_text(encoding="utf-8").splitlines():
+            ev = json.loads(line)
+            if ev.get("type") == "item.completed" and ev.get("item", {}).get("type") == "command_execution":
+                ev["item"]["aggregated_output"] = container_diff
+            updated.append(json.dumps(ev, ensure_ascii=False))
+        ev_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        os.chmod(ev_path, 0o600)
+
+    bare_repo = mq_fixture.root / "repo-subdir-attr-bare.git"
+    _run_git(mq_fixture.root, "clone", "--bare", "-q", str(mq_fixture.repo), str(bare_repo))
+
+    target = mq_fixture.make_target(base_sha=branch_base, head_sha=head, members=[MergeGroupMember(2, head)])
+    for repo_path in (mq_fixture.repo, bare_repo):
+        dec = evaluate_merge_group(
+            target,
+            source_repo=repo_path,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert dec.verdict == "PASS"
+        assert dec.status_state == "success"
+        assert dec.reason_code == "merge_group_pass_reused"
