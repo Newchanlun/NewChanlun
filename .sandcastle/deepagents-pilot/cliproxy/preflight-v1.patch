@@ -1,9 +1,9 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
 new file mode 100644
-index 0000000..f06712b
+index 0000000..2b8a7a8
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,107 @@
 +package middleware
 +
 +import (
@@ -32,11 +32,6 @@ index 0000000..f06712b
 +			c.AbortWithStatus(http.StatusServiceUnavailable)
 +			return
 +		}
-+		if isPreflight && hasReviewHeader {
-+			preflightreceipt.TaintReview(root, launch)
-+			c.AbortWithStatus(http.StatusBadRequest)
-+			return
-+		}
 +		if hasReviewHeader && c.Request.Method == http.MethodPost && c.Request.URL.Path == "/v1/review-receipts/seal" && c.GetHeader("Upgrade") == "" {
 +			c.Next()
 +			return
@@ -46,7 +41,34 @@ index 0000000..f06712b
 +			collector *preflightreceipt.Collector
 +			err       error
 +		)
-+		if isPreflight {
++		if hasReviewHeader {
++			if !preflightreceipt.ValidReviewLaunch(launch) {
++				c.AbortWithStatus(http.StatusBadRequest)
++				return
++			}
++			res, resErr := preflightreceipt.ReserveReview(root, launch)
++			if resErr != nil {
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
++			defer res.Release()
++			if isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" {
++				res.Taint()
++				c.AbortWithStatus(http.StatusBadRequest)
++				return
++			}
++			requestedModel, ok := preflightreceipt.ExtractInboundReviewModel(c.Request)
++			if !ok {
++				res.Taint()
++				c.AbortWithStatus(http.StatusBadRequest)
++				return
++			}
++			ctx, collector, err = preflightreceipt.BeginReviewReserved(c.Request.Context(), res, session, requestedModel)
++			if err != nil {
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
++		} else {
 +			if c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" {
 +				c.AbortWithStatus(http.StatusBadRequest)
 +				return
@@ -59,23 +81,6 @@ index 0000000..f06712b
 +			var cancel context.CancelFunc
 +			ctx, cancel = context.WithDeadline(ctx, time.Now().Add(preflightreceipt.Lifetime))
 +			defer cancel()
-+		} else {
-+			if !strings.HasPrefix(launch, "review-") || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" {
-+				preflightreceipt.TaintReview(root, launch)
-+				c.AbortWithStatus(http.StatusBadRequest)
-+				return
-+			}
-+			requestedModel, ok := preflightreceipt.ExtractInboundReviewModel(c.Request)
-+			if !ok {
-+				preflightreceipt.TaintReview(root, launch)
-+				c.AbortWithStatus(http.StatusBadRequest)
-+				return
-+			}
-+			ctx, collector, err = preflightreceipt.BeginReview(c.Request.Context(), root, launch, session, requestedModel)
-+			if err != nil {
-+				c.AbortWithStatus(http.StatusServiceUnavailable)
-+				return
-+			}
 +		}
 +		c.Request = c.Request.WithContext(ctx)
 +		finished := false
@@ -108,10 +113,10 @@ index 0000000..f06712b
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
 new file mode 100644
-index 0000000..cbf03d6
+index 0000000..e30f682
 --- /dev/null
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,887 @@
+@@ -0,0 +1,956 @@
 +package api
 +
 +import (
@@ -135,6 +140,7 @@ index 0000000..cbf03d6
 +	"os"
 +	"path/filepath"
 +	"strings"
++	"sync"
 +	"sync/atomic"
 +	"testing"
 +	"time"
@@ -949,6 +955,58 @@ index 0000000..cbf03d6
 +		}
 +	})
 +
++	t.Run("seal-blocked-while-inbound-body-parsing", func(t *testing.T) {
++		const launch = "review-12345678-1234-4234-8234-123456789af1"
++		const session = "019d0000-0000-7000-8000-000000000af1"
++		res1 := post("/v1/responses", "gpt-6.2-sol", launch, session)
++		if res1.Code != http.StatusOK {
++			t.Fatalf("turn 1 HTTP %d: %s", res1.Code, res1.Body.String())
++		}
++		<-models
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Requests == 1 && r.Complete && !r.Sealed })
++
++		pr, pw := io.Pipe()
++		readingStarted := make(chan struct{})
++		var notifyOnce sync.Once
++		bodyReader := &notifyOnReadReader{r: pr, onRead: func() { notifyOnce.Do(func() { close(readingStarted) }) }}
++		reqDone := make(chan *httptest.ResponseRecorder, 1)
++		go func() {
++			req := httptest.NewRequest(http.MethodPost, "/v1/responses", bodyReader)
++			req.Header.Set("Authorization", "Bearer test-key")
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set(preflightreceipt.ReviewHeader, launch)
++			req.Header.Set("Session-Id", session)
++			rec := httptest.NewRecorder()
++			server.engine.ServeHTTP(rec, req)
++			reqDone <- rec
++		}()
++
++		// Deterministically wait until ExtractInboundReviewModel has begun reading req.Body
++		// (AFTER ReserveReview registered in-flight).
++		select {
++		case <-readingStarted:
++		case <-time.After(3 * time.Second):
++			_ = pw.Close()
++			t.Fatalf("inbound request did not reach body read in time")
++		}
++		sealDuring := seal(launch, session)
++		if sealDuring.Code != http.StatusConflict || !strings.Contains(sealDuring.Body.String(), "in_flight") {
++			_ = pw.Close()
++			t.Fatalf("SealReview during body read = %d %s, want 409 in_flight", sealDuring.Code, sealDuring.Body.String())
++		}
++		// Now deliver a mismatched model body; request must fail and taint the unsealed receipt.
++		_, _ = pw.Write([]byte(`{"model":"gpt-6.2-astra","stream":true,"input":"swap"}`))
++		_ = pw.Close()
++		res2 := <-reqDone
++		if res2.Code < 400 || len(models) != 0 {
++			t.Fatalf("mismatched slow body escaped guard: status=%d calls=%d", res2.Code, len(models))
++		}
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++		if sealAfter := seal(launch, session); sealAfter.Code != http.StatusConflict || !strings.Contains(sealAfter.Body.String(), "rejected") {
++			t.Fatalf("SealReview after tainted slow body = %d %s, want 409 rejected", sealAfter.Code, sealAfter.Body.String())
++		}
++	})
++
 +	t.Run("missing-receipt-dir-blocks-tagged-requests-and-passes-ordinary", func(t *testing.T) {
 +		t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", "")
 +		noDirServer := newTestServer(t)
@@ -998,6 +1056,22 @@ index 0000000..cbf03d6
 +			t.Fatalf("ordinary traffic upstream model = %q", got)
 +		}
 +	})
++}
++
++type notifyOnReadReader struct {
++	r      io.ReadCloser
++	onRead func()
++}
++
++func (n *notifyOnReadReader) Read(p []byte) (int, error) {
++	if n.onRead != nil {
++		n.onRead()
++	}
++	return n.r.Read(p)
++}
++
++func (n *notifyOnReadReader) Close() error {
++	return n.r.Close()
 +}
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
 index e2b039a..07de86f 100644
@@ -1703,10 +1777,10 @@ index 0000000..eb42c3f
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 new file mode 100644
-index 0000000..509ec5c
+index 0000000..48c4da8
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1199 @@
+@@ -0,0 +1,1405 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -1716,6 +1790,8 @@ index 0000000..509ec5c
 +	"compress/gzip"
 +	"context"
 +	"crypto/sha256"
++	"crypto/tls"
++	"crypto/x509"
 +	"encoding/hex"
 +	"encoding/json"
 +	"errors"
@@ -1745,9 +1821,14 @@ index 0000000..509ec5c
 +var maxReviewLedgerEntries = 2048
 +
 +var ErrUnavailable = errors.New("preflight evidence unavailable")
++var errReviewSealed = errors.New("review receipt sealed or sealing")
 +var sessionPattern = regexp.MustCompile(`^preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 +var reviewLaunchPattern = regexp.MustCompile(`^review-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 +var reviewSessionPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
++
++func ValidReviewLaunch(launch string) bool {
++	return reviewLaunchPattern.MatchString(launch)
++}
 +
 +type contextKey struct{}
 +
@@ -1803,6 +1884,45 @@ index 0000000..509ec5c
 +	reserved          bool
 +	touched           time.Time
 +	inFlight          int
++	sealing           bool
++	sealedFlag        bool
++}
++
++type ReviewReservation struct {
++	entry *reviewEntry
++	once  sync.Once
++}
++
++func (r *ReviewReservation) Release() {
++	if r == nil {
++		return
++	}
++	r.once.Do(func() {
++		releaseReview(r.entry)
++	})
++}
++
++func (r *ReviewReservation) Taint() {
++	if r == nil || r.entry == nil {
++		return
++	}
++	r.entry.mu.Lock()
++	r.entry.taintAndPersistLocked()
++	r.entry.mu.Unlock()
++}
++
++func (r *ReviewReservation) transfer() (*reviewEntry, bool) {
++	if r == nil || r.entry == nil {
++		return nil, false
++	}
++	transferred := false
++	r.once.Do(func() {
++		transferred = true
++	})
++	if !transferred {
++		return nil, false
++	}
++	return r.entry, true
 +}
 +
 +var (
@@ -1827,8 +1947,10 @@ index 0000000..509ec5c
 +	modelMismatch                               bool
 +	lastResponseIDSHA                           string
 +	lastOutputSHA                               string
++	streamResponseID                            string
++	lastItemResponseID                          string
 +	lastItemOutputSHA                           string
-+	executions, active, bodies                  int
++	executions, active, bodies, attempts        int
 +}
 +
 +type Execution struct {
@@ -1920,20 +2042,33 @@ index 0000000..509ec5c
 +	return last
 +}
 +
-+func (c *Collector) recordCompletedResponse(respID, respModel, respStatus string, output []responseOutputItem) {
++func hasResponseError(raw json.RawMessage) bool {
++	trimmed := bytes.TrimSpace(raw)
++	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
++}
++
++func (c *Collector) recordCompletedResponse(respID, respModel, respStatus string, respErr json.RawMessage, output []responseOutputItem) {
 +	status := strings.TrimSpace(respStatus)
-+	if status != "" && status != "completed" {
-+		return
-+	}
 +	id := strings.TrimSpace(respID)
 +	model := strings.TrimSpace(respModel)
 +	outText := extractAssistantOutputText(output)
 +
 +	c.mu.Lock()
++	if status != "completed" || hasResponseError(respErr) || c.observedCompleted {
++		c.modelMismatch = true
++		c.invalid = true
++		c.lastItemOutputSHA = ""
++		c.lastItemResponseID = ""
++		c.mu.Unlock()
++		c.Taint()
++		return
++	}
 +	expected := c.expectedModel
 +	if expected == "" || model != expected || id == "" {
 +		c.modelMismatch = true
 +		c.invalid = true
++		c.lastItemOutputSHA = ""
++		c.lastItemResponseID = ""
 +		c.mu.Unlock()
 +		c.Taint()
 +		return
@@ -1942,12 +2077,13 @@ index 0000000..509ec5c
 +	c.lastResponseIDSHA = sha256Hex(id)
 +	if outText != "" {
 +		c.lastOutputSHA = sha256Hex(outText)
-+	} else if c.lastItemOutputSHA != "" {
++	} else if c.lastItemOutputSHA != "" && c.lastItemResponseID != "" && c.lastItemResponseID == id {
 +		c.lastOutputSHA = c.lastItemOutputSHA
 +	} else {
 +		c.lastOutputSHA = ""
 +	}
 +	c.lastItemOutputSHA = ""
++	c.lastItemResponseID = ""
 +	c.mu.Unlock()
 +}
 +
@@ -1969,17 +2105,20 @@ index 0000000..509ec5c
 +			continue
 +		}
 +		var ev struct {
-+			Type     string               `json:"type"`
-+			Object   string               `json:"object"`
-+			ID       string               `json:"id"`
-+			Model    string               `json:"model"`
-+			Status   string               `json:"status"`
-+			Output   []responseOutputItem `json:"output"`
-+			Item     responseOutputItem   `json:"item"`
-+			Response struct {
++			Type       string               `json:"type"`
++			Object     string               `json:"object"`
++			ID         string               `json:"id"`
++			ResponseID string               `json:"response_id"`
++			Model      string               `json:"model"`
++			Status     string               `json:"status"`
++			Error      json.RawMessage      `json:"error"`
++			Output     []responseOutputItem `json:"output"`
++			Item       responseOutputItem   `json:"item"`
++			Response   struct {
 +				ID     string               `json:"id"`
 +				Model  string               `json:"model"`
 +				Status string               `json:"status"`
++				Error  json.RawMessage      `json:"error"`
 +				Output []responseOutputItem `json:"output"`
 +			} `json:"response"`
 +		}
@@ -1987,6 +2126,16 @@ index 0000000..509ec5c
 +			continue
 +		}
 +		switch ev.Type {
++		case "response.created", "response.in_progress":
++			if rid := strings.TrimSpace(ev.Response.ID); rid != "" {
++				c.mu.Lock()
++				if c.streamResponseID != "" && c.streamResponseID != rid {
++					c.lastItemOutputSHA = ""
++					c.lastItemResponseID = ""
++				}
++				c.streamResponseID = rid
++				c.mu.Unlock()
++			}
 +		case "response.output_item.done":
 +			if ev.Item.Type == "message" && ev.Item.Role == "assistant" {
 +				var b strings.Builder
@@ -1997,16 +2146,32 @@ index 0000000..509ec5c
 +				}
 +				if b.Len() > 0 {
 +					h := sha256Hex(b.String())
++					rid := strings.TrimSpace(ev.ResponseID)
++					if rid == "" {
++						rid = strings.TrimSpace(ev.Response.ID)
++					}
 +					c.mu.Lock()
-+					c.lastItemOutputSHA = h
++					if rid == "" {
++						rid = c.streamResponseID
++					}
++					if rid != "" {
++						c.lastItemOutputSHA = h
++						c.lastItemResponseID = rid
++					}
 +					c.mu.Unlock()
 +				}
 +			}
-+		case "response.completed", "response.done":
-+			c.recordCompletedResponse(ev.Response.ID, ev.Response.Model, ev.Response.Status, ev.Response.Output)
++		case "response.completed":
++			c.recordCompletedResponse(ev.Response.ID, ev.Response.Model, ev.Response.Status, ev.Response.Error, ev.Response.Output)
++		case "response.failed", "response.incomplete", "error":
++			c.mu.Lock()
++			c.invalid = true
++			c.lastItemOutputSHA = ""
++			c.lastItemResponseID = ""
++			c.mu.Unlock()
 +		case "":
 +			if ev.Object == "response" {
-+				c.recordCompletedResponse(ev.ID, ev.Model, ev.Status, ev.Output)
++				c.recordCompletedResponse(ev.ID, ev.Model, ev.Status, ev.Error, ev.Output)
 +			}
 +		}
 +	}
@@ -2076,17 +2241,21 @@ index 0000000..509ec5c
 +		lastResponseIDSHA: disk.LastResponseID,
 +		lastOutputSHA:     disk.LastOutputSHA256,
 +		sealed:            true,
++		sealedFlag:        true,
 +		tainted:           false,
 +		reserved:          true,
 +		touched:           now,
 +	}, true, nil
 +}
 +
-+func getOrCreateReviewEntry(root, launch, session string, now time.Time, acquire bool) (*reviewEntry, error) {
++func getOrCreateReviewEntry(root, launch, session string, now time.Time, acquire, rejectSealed bool) (*reviewEntry, error) {
 +	key := root + "\x00" + launch
 +	reviewMu.Lock()
 +	defer reviewMu.Unlock()
 +	if entry := reviewLedger[key]; entry != nil {
++		if rejectSealed && (entry.sealedFlag || entry.sealing) {
++			return nil, errReviewSealed
++		}
 +		entry.touched = now
 +		if acquire {
 +			entry.inFlight++
@@ -2101,11 +2270,14 @@ index 0000000..509ec5c
 +	if err != nil {
 +		return nil, err
 +	}
++	if rejectSealed && onDisk && diskEntry != nil && diskEntry.sealedFlag {
++		return nil, errReviewSealed
++	}
 +	if len(reviewLedger) >= maxReviewLedgerEntries {
 +		var oldestKey string
 +		var oldestTime time.Time
 +		for k, v := range reviewLedger {
-+			if v.inFlight > 0 {
++			if v.inFlight > 0 || v.sealing {
 +				continue
 +			}
 +			v.mu.Lock()
@@ -2139,6 +2311,19 @@ index 0000000..509ec5c
 +	}
 +	reviewLedger[key] = entry
 +	return entry, nil
++}
++
++// ReserveReview atomically checks that the launch is neither sealed nor sealing and registers
++// an in-flight request before reading or parsing the HTTP request body.
++func ReserveReview(root, launch string) (*ReviewReservation, error) {
++	if !reviewLaunchPattern.MatchString(launch) || !filepath.IsAbs(root) {
++		return nil, ErrUnavailable
++	}
++	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), true, true)
++	if err != nil {
++		return nil, ErrUnavailable
++	}
++	return &ReviewReservation{entry: entry}, nil
 +}
 +
 +func acquireReview(entry *reviewEntry) {
@@ -2212,7 +2397,10 @@ index 0000000..509ec5c
 +		return
 +	}
 +	now := time.Now()
-+	entry, err := getOrCreateReviewEntry(root, launch, "", now, true)
++	entry, err := getOrCreateReviewEntry(root, launch, "", now, true, true)
++	if errors.Is(err, errReviewSealed) {
++		return
++	}
 +	if err == nil && entry != nil {
 +		defer releaseReview(entry)
 +		entry.mu.Lock()
@@ -2239,8 +2427,8 @@ index 0000000..509ec5c
 +}
 +
 +// SealReview seals a formal review launch once all in-flight requests have completed.
-+// Only an unsealed, untainted in-memory entry from the live proxy instance can be sealed;
-+// an already-sealed receipt on disk returns SealOK idempotently across restarts.
++// Checking inFlight == 0 and entering the sealing barrier happen atomically under reviewMu
++// so no concurrent request can be admitted after SealReview checks quiescence.
 +func SealReview(root, launch, session string) SealStatus {
 +	if !reviewLaunchPattern.MatchString(launch) || !reviewSessionPattern.MatchString(session) || !filepath.IsAbs(root) {
 +		return SealRejected
@@ -2251,30 +2439,56 @@ index 0000000..509ec5c
 +	overflowed := taintWriteOverflow
 +	entry := reviewLedger[key]
 +	if entry != nil {
-+		if entry.inFlight > 0 {
++		if entry.sealedFlag {
++			reviewMu.Unlock()
++			entry.mu.Lock()
++			defer entry.mu.Unlock()
++			if entry.sealed && !entry.tainted && entry.session == session {
++				return SealOK
++			}
++			return SealRejected
++		}
++		if entry.sealing || entry.inFlight > 0 {
 +			reviewMu.Unlock()
 +			return SealInFlight
 +		}
-+		entry.inFlight++
++		entry.sealing = true
 +		entry.touched = now
 +		reviewMu.Unlock()
-+		defer releaseReview(entry)
++
++		finishSeal := func(markSealed bool) {
++			reviewMu.Lock()
++			entry.sealing = false
++			if markSealed {
++				entry.sealedFlag = true
++			}
++			reviewMu.Unlock()
++		}
++
 +		entry.mu.Lock()
-+		defer entry.mu.Unlock()
 +		if entry.sealed {
-+			if !entry.tainted && entry.session == session {
++			ok := !entry.tainted && entry.session == session
++			entry.mu.Unlock()
++			finishSeal(true)
++			if ok {
 +				return SealOK
 +			}
 +			return SealRejected
 +		}
 +		if overflowed {
++			entry.mu.Unlock()
++			finishSeal(false)
 +			return SealUnavailable
 +		}
 +		if entry.tainted || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) {
++			entry.mu.Unlock()
++			finishSeal(false)
 +			return SealRejected
 +		}
 +		if entry.session != session {
 +			entry.taintAndPersistLocked()
++			entry.mu.Unlock()
++			finishSeal(false)
 +			return SealRejected
 +		}
 +		entry.sealed = true
@@ -2285,8 +2499,12 @@ index 0000000..509ec5c
 +		if err := entry.persistLocked(); err != nil {
 +			entry.sealed = false
 +			entry.sealedAt = 0
++			entry.mu.Unlock()
++			finishSeal(false)
 +			return SealUnavailable
 +		}
++		entry.mu.Unlock()
++		finishSeal(true)
 +		return SealOK
 +	}
 +	reviewMu.Unlock()
@@ -2301,23 +2519,22 @@ index 0000000..509ec5c
 +	return SealOK
 +}
 +
-+// BeginReview binds a formal external-review launch, its Codex session, and its inbound requested model
-+// BEFORE routing or model normalization. Every outbound request and upstream response for this launch
-+// must match that exact requested model; any violation aborts before upstream and taints the launch.
-+func BeginReview(ctx context.Context, root, launch, session, requestedModel string) (context.Context, *Collector, error) {
-+	if !reviewLaunchPattern.MatchString(launch) || !filepath.IsAbs(root) {
++// BeginReviewReserved transfers an already-reserved in-flight review launch into a Collector
++// without ever dropping inFlight to zero between middleware admission and collector completion.
++func BeginReviewReserved(ctx context.Context, res *ReviewReservation, session, requestedModel string) (context.Context, *Collector, error) {
++	if res == nil || res.entry == nil {
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if !reviewSessionPattern.MatchString(session) || (requestedModel != "gpt-6.2-sol" && requestedModel != "gpt-6.2-astra") {
-+		TaintReview(root, launch)
++		res.Taint()
++		res.Release()
++		return ctx, nil, ErrUnavailable
++	}
++	entry, ok := res.transfer()
++	if !ok {
 +		return ctx, nil, ErrUnavailable
 +	}
 +	now := time.Now()
-+	entry, err := getOrCreateReviewEntry(root, launch, session, now, true)
-+	if err != nil {
-+		return ctx, nil, ErrUnavailable
-+	}
-+
 +	expectedRoute := "codex:" + requestedModel + "@chatgpt.com"
 +	entry.mu.Lock()
 +	if entry.sealed {
@@ -2331,7 +2548,9 @@ index 0000000..509ec5c
 +		releaseReview(entry)
 +		return ctx, nil, ErrUnavailable
 +	}
-+	if entry.session != session {
++	if entry.session == "" {
++		entry.session = session
++	} else if entry.session != session {
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
 +		releaseReview(entry)
@@ -2356,6 +2575,17 @@ index 0000000..509ec5c
 +		receipt:       Receipt{Schema: ReviewSchema, Session: session, Started: now.UnixNano()},
 +	}
 +	return context.WithValue(ctx, contextKey{}, c), c, nil
++}
++
++// BeginReview binds a formal external-review launch, its Codex session, and its inbound requested model
++// BEFORE routing or model normalization. Every outbound request and upstream response for this launch
++// must match that exact requested model; any violation aborts before upstream and taints the launch.
++func BeginReview(ctx context.Context, root, launch, session, requestedModel string) (context.Context, *Collector, error) {
++	res, err := ReserveReview(root, launch)
++	if err != nil {
++		return ctx, nil, ErrUnavailable
++	}
++	return BeginReviewReserved(ctx, res, session, requestedModel)
 +}
 +
 +func (c *Collector) Reject() {
@@ -2448,6 +2678,10 @@ index 0000000..509ec5c
 +		c.invalid = true
 +		return ctx, nil, ErrUnavailable
 +	}
++	if c.strictCodex && c.active > 0 {
++		c.invalid = true
++		return ctx, nil, ErrUnavailable
++	}
 +	if c.review != nil {
 +		expected := "codex:" + model + "@chatgpt.com"
 +		c.review.mu.Lock()
@@ -2492,6 +2726,9 @@ index 0000000..509ec5c
 +	}
 +	c.active++
 +	c.executions++
++	c.streamResponseID = ""
++	c.lastItemResponseID = ""
++	c.lastItemOutputSHA = ""
 +	e := &Execution{c: c, provider: provider, model: model}
 +	ctx = httptransport.WithDecorator(ctx, func(next http.RoundTripper) http.RoundTripper { return &transport{next: next, execution: e} })
 +	return ctx, e, nil
@@ -2507,6 +2744,9 @@ index 0000000..509ec5c
 +	}
 +	e.ended = true
 +	c.active--
++	c.streamResponseID = ""
++	c.lastItemResponseID = ""
++	c.lastItemOutputSHA = ""
 +	if e.attempts == 0 {
 +		c.invalid = true
 +	}
@@ -2658,10 +2898,30 @@ index 0000000..509ec5c
 +	execution *Execution
 +}
 +
++func isTLSVerificationError(err error) bool {
++	if err == nil {
++		return false
++	}
++	var certVerifyErr *tls.CertificateVerificationError
++	var recordHeaderErr tls.RecordHeaderError
++	var hostnameErr x509.HostnameError
++	var unknownAuthErr x509.UnknownAuthorityError
++	var certInvalidErr x509.CertificateInvalidError
++	var systemRootsErr x509.SystemRootsError
++	var constraintErr x509.ConstraintViolationError
++	return errors.As(err, &certVerifyErr) ||
++		errors.As(err, &recordHeaderErr) ||
++		errors.As(err, &hostnameErr) ||
++		errors.As(err, &unknownAuthErr) ||
++		errors.As(err, &certInvalidErr) ||
++		errors.As(err, &systemRootsErr) ||
++		errors.As(err, &constraintErr)
++}
++
 +func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 +	e, c := t.execution, t.execution.c
 +	c.mu.Lock()
-+	if c.invalid || c.sealed || e.ended || time.Now().After(c.deadline) || len(c.receipt.Routes) >= MaxAttempts {
++	if c.invalid || c.sealed || e.ended || time.Now().After(c.deadline) || c.attempts >= MaxAttempts {
 +		c.invalid = true
 +		c.mu.Unlock()
 +		return nil, ErrUnavailable
@@ -2677,18 +2937,33 @@ index 0000000..509ec5c
 +		}
 +	}
 +	c.mu.Lock()
-+	if c.invalid || c.sealed || e.ended || time.Now().After(c.deadline) || len(c.receipt.Routes) >= MaxAttempts {
++	if c.invalid || c.sealed || e.ended || time.Now().After(c.deadline) || c.attempts >= MaxAttempts {
 +		c.invalid = true
 +		c.mu.Unlock()
 +		return nil, ErrUnavailable
 +	}
++	c.attempts++
 +	e.attempts++
 +	c.bodies++
-+	c.receipt.Routes = append(c.receipt.Routes, observed)
 +	c.mu.Unlock()
 +	resp, err := t.next.RoundTrip(req)
 +	finish := func() { c.mu.Lock(); defer c.mu.Unlock(); c.bodies--; c.publishLocked() }
-+	if err == nil && resp != nil && observed != "other" {
++	if err != nil {
++		if observed == "other" {
++			c.mu.Lock()
++			c.receipt.Routes = append(c.receipt.Routes, observed)
++			c.mu.Unlock()
++		} else if isTLSVerificationError(err) {
++			if strict {
++				c.Taint()
++			} else {
++				c.Reject()
++			}
++		}
++		finish()
++		return nil, err
++	}
++	if resp != nil && observed != "other" {
 +		expectedHost := strings.ToLower(req.URL.Hostname())
 +		tlsOK := resp.TLS != nil &&
 +			resp.TLS.HandshakeComplete &&
@@ -2709,12 +2984,17 @@ index 0000000..509ec5c
 +			return nil, ErrUnavailable
 +		}
 +	}
-+	if err != nil || resp == nil || resp.Body == nil {
++	if resp != nil {
++		c.mu.Lock()
++		c.receipt.Routes = append(c.receipt.Routes, observed)
++		c.mu.Unlock()
++	}
++	if resp == nil || resp.Body == nil {
 +		finish()
 +	} else {
 +		resp.Body = &body{ReadCloser: resp.Body, finish: finish, reject: c.Reject}
 +	}
-+	return resp, err
++	return resp, nil
 +}
 +
 +type body struct {
@@ -2908,10 +3188,10 @@ index 0000000..509ec5c
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
 new file mode 100644
-index 0000000..9d23a18
+index 0000000..d0d8926
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,944 @@
+@@ -0,0 +1,1256 @@
 +package preflightreceipt
 +
 +import (
@@ -2929,7 +3209,9 @@ index 0000000..9d23a18
 +	"fmt"
 +	"io"
 +	"math/big"
++	"net"
 +	"net/http"
++	"net/http/httptest"
 +	"os"
 +	"path/filepath"
 +	"strings"
@@ -3055,9 +3337,23 @@ index 0000000..9d23a18
 +		absent(t, c)
 +		c.HandlerDone(true)
 +		r := readReceipt(t, c)
-+		if !r.Complete || len(r.Routes) != 2 || r.Routes[0] != "claude@api.anthropic.com" || r.Routes[1] != r.Routes[0] {
-+			t.Fatalf("bad routes: %+v", r)
++		if !r.Complete || len(r.Routes) != 1 || r.Routes[0] != "claude@api.anthropic.com" {
++			t.Fatalf("bad routes (only TLS-verified attempt should be recorded): %+v", r)
 +		}
++	}
++	// An attempt to an untrusted host still records "other" even when the transport returns a network error.
++	ctx, c := beginTest(t)
++	bad, _ := attempt(t, ctx, c, "claude", "evil.invalid", "", true)
++	bad.End()
++	good, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "ok", false)
++	_, _ = io.ReadAll(resp.Body)
++	_ = resp.Body.Close()
++	good.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	r := readReceipt(t, c)
++	if !r.Complete || len(r.Routes) != 2 || r.Routes[0] != "other" || r.Routes[1] != "claude@api.anthropic.com" {
++		t.Fatalf("untrusted failed dial was not recorded as other: %+v", r)
 +	}
 +}
 +func TestPreflightReceiptCannotSealUnfinishedOrUncovered(t *testing.T) {
@@ -3854,5 +4150,301 @@ index 0000000..9d23a18
 +	c.HandlerDone(false)
 +	if r := readReviewReceiptFile(t, root, launch); !r.Tainted || r.Complete || r.Sealed {
 +		t.Fatalf("TLS peer mismatch did not taint launch: %+v", r)
++	}
++}
++
++func makeHostTLSServer(t *testing.T, host string) (*httptest.Server, *x509.CertPool) {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		Subject:      pkix.Name{CommonName: host},
++		DNSNames:     []string{host},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(time.Hour),
++		KeyUsage:     x509.KeyUsageDigitalSignature,
++		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pool := x509.NewCertPool()
++	pool.AddCert(cert)
++	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusOK)
++	}))
++	srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
++	srv.StartTLS()
++	t.Cleanup(srv.Close)
++	return srv, pool
++}
++
++func TestReviewReceiptTLSHandshakeErrorTaintsBeforeRouteAppend(t *testing.T) {
++	wrongSrv, wrongPool := makeHostTLSServer(t, "wrong.example.test")
++	rightSrv, rightPool := makeHostTLSServer(t, "chatgpt.com")
++	combinedPool := wrongPool.Clone()
++	for _, raw := range rightSrv.TLS.Certificates[0].Certificate {
++		c, err := x509.ParseCertificate(raw)
++		if err != nil {
++			t.Fatal(err)
++		}
++		combinedPool.AddCert(c)
++	}
++	_ = rightPool
++
++	// Formal review: first attempt fails real Go TLS hostname verification (resp == nil),
++	// retry hits valid chatgpt.com. Launch MUST be tainted and never record trusted route.
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-ffff1111-2222-4333-8444-555555555552"
++	session := "019d0000-0000-7000-8000-000000000402"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	attempt := 0
++	realTr := &http.Transport{
++		TLSClientConfig: &tls.Config{RootCAs: combinedPool},
++		DialContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
++			attempt++
++			target := wrongSrv.Listener.Addr().String()
++			if attempt > 1 {
++				target = rightSrv.Listener.Addr().String()
++			}
++			return (&net.Dialer{}).DialContext(dialCtx, network, target)
++		},
++	}
++	defer realTr.CloseIdleConnections()
++	client := httptransport.Decorate(ctx, &http.Client{Transport: realTr})
++	req1, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	if _, err := client.Do(req1); err == nil {
++		t.Fatalf("expected TLS hostname error from standard http.Transport")
++	}
++	// Retry against valid server must NOT produce a clean receipt.
++	req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	if _, err := client.Do(req2); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("retry after TLS handshake failure err = %v, want ErrUnavailable", err)
++	}
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if r := readReviewReceiptFile(t, root, launch); !r.Tainted || r.Complete || r.Sealed {
++		t.Fatalf("TLS handshake error did not taint launch: %+v", r)
++	}
++
++	// Preflight: TLS handshake error rejects collector so subsequent retry cannot produce a valid receipt.
++	pCtx, pc := beginTest(t)
++	pCtx, pe, err := pc.Start(pCtx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	attempt = 0
++	pClient := httptransport.Decorate(pCtx, &http.Client{Transport: realTr})
++	pReq1, _ := http.NewRequestWithContext(pCtx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	if _, err := pClient.Do(pReq1); err == nil {
++		t.Fatalf("expected preflight TLS hostname error")
++	}
++	pReq2, _ := http.NewRequestWithContext(pCtx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	if _, err := pClient.Do(pReq2); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("preflight retry after TLS failure err = %v, want ErrUnavailable", err)
++	}
++	pe.End()
++	pc.Complete(true)
++	pc.HandlerDone(true)
++	if _, statErr := os.Stat(filepath.Join(pc.directory, "receipt.json")); !os.IsNotExist(statErr) {
++		t.Fatalf("preflight wrote receipt despite TLS handshake error: %v", statErr)
++	}
++}
++
++func TestReviewReceiptStrictCompletionAndCrossExecutionOutputIsolation(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	runSingle := func(t *testing.T, launch, session string, chunks []string) *ReviewReceipt {
++		t.Helper()
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++		resp, err := client.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, ch := range chunks {
++			c.ObserveStreamChunk([]byte(ch))
++		}
++		_ = resp.Body.Close()
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		raw, err := os.ReadFile(filepath.Join(root, launch, "receipt.json"))
++		if err != nil {
++			return nil
++		}
++		var r ReviewReceipt
++		if err := json.Unmarshal(raw, &r); err != nil {
++			t.Fatal(err)
++		}
++		return &r
++	}
++
++	// 1. response.done is NOT accepted as terminal completion.
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555501", "019d0000-0000-7000-8000-000000000501", []string{
++		`data: {"type":"response.done","response":{"id":"resp_done","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r != nil && r.Complete {
++		t.Fatalf("response.done accepted as complete: %+v", r)
++	}
++	// 2. Empty response.status -> tainted.
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555502", "019d0000-0000-7000-8000-000000000502", []string{
++		`data: {"type":"response.completed","response":{"id":"resp_nostatus","status":"","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r == nil || !r.Tainted || r.Complete {
++		t.Fatalf("empty status did not taint: %+v", r)
++	}
++	// 3. Non-null response.error -> tainted.
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555503", "019d0000-0000-7000-8000-000000000503", []string{
++		`data: {"type":"response.completed","response":{"id":"resp_err","status":"completed","model":"gpt-6.2-sol","error":{"message":"failed"},"output":[]}}` + "\n\n",
++	}); r == nil || !r.Tainted || r.Complete {
++		t.Fatalf("non-null error did not taint: %+v", r)
++	}
++	// 4. Duplicate response.completed -> tainted.
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555504", "019d0000-0000-7000-8000-000000000504", []string{
++		`data: {"type":"response.completed","response":{"id":"resp_dup1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_dup2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r == nil || !r.Tainted || r.Complete {
++		t.Fatalf("duplicate response.completed did not taint: %+v", r)
++	}
++	// 5. Unattributed output_item.done without response.created is NOT adopted.
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555505", "019d0000-0000-7000-8000-000000000505", []string{
++		`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"unattributed"}]}}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_no_created","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r == nil || !r.Complete || r.LastOutputSHA256 != "" {
++		t.Fatalf("unattributed output_item.done leaked into receipt: %+v", r)
++	}
++	// 6. Matching response.created + output_item.done + response.completed IS adopted.
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555506", "019d0000-0000-7000-8000-000000000506", []string{
++		`data: {"type":"response.created","response":{"id":"resp_bound"}}` + "\n\n",
++		`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"bound-text"}]}}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_bound","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r == nil || !r.Complete || r.LastOutputSHA256 != sha256Hex("bound-text") {
++		t.Fatalf("bound output_item.done not adopted: %+v", r)
++	}
++	// 7. Execution 1 aborted after output_item.done MUST NOT leak into retry Execution 2's response.completed.
++	launchIso := "review-eeee1111-2222-4333-8444-555555555507"
++	sessionIso := "019d0000-0000-7000-8000-000000000507"
++	ctx, c, err := BeginReview(context.Background(), root, launchIso, sessionIso, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	rq1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	rp1, err := cl1.Do(rq1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	c.ObserveStreamChunk([]byte(`data: {"type":"response.created","response":{"id":"resp_aborted"}}` + "\n\n"))
++	c.ObserveStreamChunk([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"leaked-from-exec1"}]}}` + "\n\n"))
++	_ = rp1.Body.Close()
++	e1.End()
++
++	ctx2, e2, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	rq2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	rp2, err := cl2.Do(rq2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	c.ObserveStreamChunk([]byte(`data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"))
++	c.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++	_ = rp2.Body.Close()
++	e2.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if r := readReviewReceiptFile(t, root, launchIso); !r.Complete || r.Tainted || r.LastOutputSHA256 != "" || r.LastResponseID != sha256Hex("resp_retry") {
++		t.Fatalf("cross-execution output hash leaked: %+v", r)
++	}
++}
++
++func TestReviewReceiptAtomicSealVsConcurrentBeginRace(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	for i := 0; i < 40; i++ {
++		launch := fmt.Sprintf("review-dddd1111-2222-4333-8444-%012d", i)
++		session := fmt.Sprintf("019d0000-0000-7000-8000-%012d", i)
++		ctx, c0, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e0, err := c0.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		c0.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_race","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++		_ = resp.Body.Close()
++		e0.End()
++		c0.Complete(true)
++		c0.HandlerDone(true)
++
++		start := make(chan struct{})
++		var sealStatus SealStatus
++		var beginErr error
++		var c1 *Collector
++		var wg sync.WaitGroup
++		wg.Add(2)
++		go func() {
++			defer wg.Done()
++			<-start
++			sealStatus = SealReview(root, launch, session)
++		}()
++		go func() {
++			defer wg.Done()
++			<-start
++			_, c1, beginErr = BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		}()
++		close(start)
++		wg.Wait()
++
++		// Mutual exclusion invariant: NEVER both SealOK and beginErr == nil.
++		if sealStatus == SealOK && beginErr == nil {
++			t.Fatalf("iteration %d: BOTH SealReview succeeded and BeginReview admitted concurrently!", i)
++		}
++		if beginErr == nil && c1 != nil {
++			c1.Complete(false)
++			c1.HandlerDone(false)
++		}
 +	}
 +}

@@ -19,21 +19,18 @@ head 提交早于 48 小时的垫底；只改先后，不改派不派。合入�
 发起前 base、head 提交须已在宿主对象库（EXTERNAL-REVIEW.md：入口和 reviewer 都不 fetch）；缺失时调用 owner 注入的
 sync(number, base, head)，未注入报 needs-source-sync。
 
-合入（--auto-merge，用宿主 gh 凭据；本模块不构造 App 身份，审查身份归 external_review）：不预先挂 auto-merge。
-只有同时满足下列条件才合入，用 REST PUT /pulls/{n}/merge 并带 sha=<该 head>，由 GitHub 服务端拒绝 head 不符（409）：
-- main 的分支保护 strict 开着，且必需检查同时含 deepagents/review 与 ci-ok，两者都绑定了来源 app（没绑定的谁都能发同名 success）；
-- deepagents/review 绑定的是 IDENTITY_CONFIG 配的审查专用 App，且不是执行器 App 5486877（执行器交付时自写
-  deepagents/review=success；绑定它时 draft 一标 ready，同一轮刚派出的正式审查还没发 pending 就会被合入）；
-  不满足或身份文件缺失、读不了时记 auto-merge-unsafe，本轮不合入；
-- 该精确 head 上 deepagents/review、ci-ok、DevSkim 都是 success，且 GitHub 判定可合入（clean/unstable）；
-- 该 head 的完整改动清单可判定且不触及人工确认两类（HUMAN_GATED：实盘下单或资金、密钥或凭证）。
+合入（--auto-merge，用宿主 gh 凭据；本模块不构造 App 身份，审查身份归 external_review）：不预先挂 auto-merge，
+且因 GitHub REST/GraphQL 合入接口不支持服务端 `expected_base_ref` 绑定（读后合入前若 PR 改指同仓非 main 分支，本机锁无法阻止远端改指），
+本模块关闭自动发起 `PUT /pulls/{n}/merge`；满足全部准入条件（分支保护 strict/enforce_admins/禁止强推删分支、必需检查绑定审查专用 App、
+仓库 allow_auto_merge=false、精确 head 三项检查全绿、已发布 PASS 且无在途/待完成重审意图、改动清单不触及人工确认两类）的 PR
+一律输出 `needs-human-confirm`（`gated: ["base-ref-not-server-bound"]`）并撤掉挂着的原生 auto-merge，由人工或外部带目标核验流程合入。
+--auto-merge 仍负责队首追平（`PUT /pulls/{n}/update-branch`，带 `expected_head_sha`）、分支保护与 `allow_auto_merge` 核验、
+人工确认两类（HUMAN_GATED：实盘下单或资金、密钥或凭证）分类与失败关闭撤原生 auto-merge。
 两类的出处：用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
-唯一的自动合入路径是本模块带 sha 的 REST 合入：仓库设置 allow_auto_merge 已关（GET /repos/{owner}/{repo} 的
-allow_auto_merge=false，2026-11-09 由主控关闭），GitHub 原生 auto-merge 根本挂不上，所以有写权限的人也不能在两轮之间给
-触及两类的 PR 挂原生 auto-merge、等检查转绿由 GitHub 自己合入。sweep 每轮读这个设置：为 true 或读不到时本轮一律不合入、
-不追平，记 native-auto-merge-enabled；撤原生 auto-merge 的逻辑保留，作为纵深防御。
-合入在代码里默认关；只给 --review-sweep 时只派审。#1915 合入后（main 的合入不设人工批准），部署模板加了
---review-sweep-auto-merge；关掉的方法见 EXECUTOR.md「附带正式审查」。
+仓库设置 allow_auto_merge 已关（GET /repos/{owner}/{repo} 的 allow_auto_merge=false，2026-11-09 由主控关闭），
+GitHub 原生 auto-merge 根本挂不上；sweep 每轮读这个设置：为 true 或读不到时本轮一律不追平，记 native-auto-merge-enabled；
+撤原生 auto-merge 的逻辑保留，作为纵深防御。
+该模式在代码里默认关；只给 --review-sweep 时只派审。关掉的方法见 EXECUTOR.md「附带正式审查」。
 完整清单：files 接口最多 3000 个且需与 changed_files 相符；否则用本地精确 diff；两者都拿不到报 evidence-insufficient
 （下轮重试），不合入，也不升级成人工确认。
 触及两类的报 needs-human-confirm，不合入、不追平；这类 PR 上若挂着 GitHub 原生 auto-merge 会撤掉。
@@ -95,7 +92,7 @@ from .run import _ps_rows
 from .workunit import REPO
 
 Rows = list[tuple[int, int, str, str]]
-Spawn = Callable[..., int]
+Spawn = Callable[[int, int, str, Path, str | None], int]
 Sync = Callable[[int, str, str], None]
 GATE = frozenset({"deepagents/review", "ci-ok"})
 LAUNCH_BACKOFF_SECONDS = 600
@@ -198,7 +195,6 @@ class GitHubPort(Protocol):
     def required_checks(self) -> dict[str, int]: ...
     def allow_auto_merge(self) -> bool: ...
     def pr_files(self, number: int) -> list[dict[str, Any]]: ...
-    def merge(self, number: int, head: str) -> None: ...
     def update_branch(self, number: int, head: str) -> None: ...
     def disable_auto_merge(self, number: int) -> None: ...
 
@@ -297,11 +293,6 @@ class GhCli:
     def pr_files(self, number: int) -> list[dict[str, Any]]:
         return self._json_lines("api", "--paginate", f"repos/{self.repository}/pulls/{number}/files?per_page=100",
                                 "--jq", ".[] | {filename, previous_filename, status, changes} | @json")
-
-    def merge(self, number: int, head: str) -> None:
-        # REST 文档：sha 是「PR head 必须与之匹配才允许合入」，不符返回 409。
-        self._gh("api", "-X", "PUT", f"repos/{self.repository}/pulls/{number}/merge",
-                 "-f", f"sha={head}", "-f", "merge_method=merge")
 
     def update_branch(self, number: int, head: str) -> None:
         # REST 文档：expected_head_sha 与 PR head 不符返回 422。
@@ -473,10 +464,7 @@ class Sweep:
     def _launch(self, number: int, head: str, base: str, attempt: int) -> int:
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         log = self.folder / "logs" / f"p{number}-{head[:12]}-a{attempt}.log"
-        try:
-            return self.spawn(number, attempt, head, log, base)
-        except TypeError:
-            return self.spawn(number, attempt, head, log)
+        return self.spawn(number, attempt, head, log, base)
 
     def _resume_once(self, number: int, head: str, base: str, attempt: int, action: str) -> tuple[str, dict | None]:
         marker = self._resumes(number, head, attempt, base)
@@ -520,24 +508,6 @@ class Sweep:
         if done.returncode == 1:
             return False
         return None
-
-    def _base_server_bound(self, base: str, head: str) -> bool:
-        """服务端精确 base SHA 绑定证明（针对目标仍为 main 的 PR）：在 main 启用 strict=true、
-        enforce_admins=true、allow_force_pushes=false、allow_deletions=false 前提下，GitHub 服务端
-        合入 main 时仅当 base <= live_base <= head 才放行；当且仅当 rev-list --ancestry-path base..head
-        恰为 [head]（无严格中间提交 base < C < head）时，strict+sha=head 唯一锁定 live_base==base。
-        注意：GitHub REST/GraphQL 合入接口本身没有服务端 expectedBaseRef 前置参数，因此本模块还在分类后
-        与持 PR 锁合入前复核实时 base.ref == main 与目标仓库 ID；存在中间提交或本地缺对象时失败关闭。"""
-        if self._is_ancestor(base, head) is not True:
-            return False
-        done = subprocess.run(
-            ["git", "-C", str(self.lane.source), "rev-list", "--ancestry-path", f"{base}..{head}"],
-            capture_output=True, text=True,
-        )
-        if done.returncode != 0:
-            return False
-        commits = [line.strip() for line in done.stdout.splitlines() if line.strip()]
-        return commits == [head]
 
     @staticmethod
     def _target_branch_valid(pr: dict[str, Any], state: dict[str, Any]) -> bool:
@@ -807,11 +777,11 @@ class Sweep:
         confirmed_pass = self._review_confirmed_published_pass(number, head, state["base"])
         pending_latest = live_review or self.lane.has_inflight_review(number) or not confirmed_pass
         if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green and not pending_latest:
-            if not self._base_server_bound(state["base"], head):
-                return ({"action": "needs-human-confirm", "gated": ["base-not-server-bound"],
-                         "reason": "base 与 head 间存在严格中间祖先提交或本地缺对象，GitHub 服务端无法绑定精确 base，不自动合入"},
-                        False, "disable" if state["auto_merge"] or again["auto_merge"] else None)
-            return {"action": "merged"}, candidate, "merge"
+            # GitHub REST/GraphQL 合入接口均无服务端 expected_base_ref 前置参数，无法在读后防远端改指非 main 分支；
+            # 因此全部门禁就绪的 PR 一律失败闭合转人工确认，并撤掉挂着的原生 auto-merge，不自动发起 PUT /pulls/{n}/merge。
+            return ({"action": "needs-human-confirm", "gated": ["base-ref-not-server-bound"],
+                     "reason": "GitHub 合入接口不支持服务端 expected_base_ref 绑定，无法原子防远端改指非 main 分支，改交人工确认合入"},
+                    False, "disable" if state["auto_merge"] or again["auto_merge"] else None)
         return {"action": "waiting", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
                 "mergeable_state": state["mergeable_state"], "queue_head": is_head,
                 **({"pending_latest_attempt": True} if pending_latest else {}),
@@ -926,54 +896,10 @@ class Sweep:
                 result, write = {"action": kind, "reason": reason}, ("disable" if armed else None)
             head_free = head_free and not claimed
             plan.append((entry, result, write, armed))
-        pulls_by_number = {p["number"]: p for p in pulls}
         for entry, result, write, armed in plan:
             number, head = entry["pr"], entry["head"]
             try:
-                if write == "merge":
-                    # 持 PR 锁并持续独占预检在途锁至合入请求结束，复核实时 base.ref/repo/head/base/mergeable_state、在途进程与精确 PASS。
-                    with self.lane._pr_lock(number), self.lane.try_exclude_inflight_review(number) as excluded:
-                        if not excluded:
-                            result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
-                        else:
-                            try:
-                                live_now = reviewing(self.rows())
-                            except Exception:
-                                live_now = {number}
-                            live_state = self.github.pr(number)
-                            classified_base = states[number]["base"]
-                            if not self._target_branch_valid(pulls_by_number[number], live_state):
-                                result = {"action": "base-ref-moved", "expected_base_ref": "main",
-                                          "now_base_ref": live_state.get("base_ref"), "rechecked_under_pr_lock": True,
-                                          **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
-                                if result.get("auto_merge_withdrawn"):
-                                    withdrawn.add(number)
-                            elif live_state["head"] != head:
-                                result = {"action": "head-moved", "classified": head, "now": live_state["head"],
-                                          **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
-                                if result.get("auto_merge_withdrawn"):
-                                    withdrawn.add(number)
-                            elif live_state["base"] != classified_base:
-                                result = {"action": "base-moved", "classified_base": classified_base,
-                                          "now_base": live_state["base"], "rechecked_under_pr_lock": True,
-                                          **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
-                                if result.get("auto_merge_withdrawn"):
-                                    withdrawn.add(number)
-                            elif not self._base_server_bound(classified_base, head):
-                                result = {"action": "needs-human-confirm", "gated": ["base-not-server-bound"],
-                                          "rechecked_under_pr_lock": True,
-                                          "reason": "base 与 head 间存在严格中间祖先提交或本地缺对象，GitHub 服务端无法绑定精确 base，不自动合入",
-                                          **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
-                                if result.get("auto_merge_withdrawn"):
-                                    withdrawn.add(number)
-                            elif (number in live_busy
-                                    or number in live_now
-                                    or live_state.get("mergeable_state") not in ("clean", "unstable")
-                                    or not self._review_confirmed_published_pass(number, head, classified_base)):
-                                result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
-                            else:
-                                self.github.merge(number, head)
-                elif write == "update":
+                if write == "update":
                     self.github.update_branch(number, head)
                 elif write == "disable":
                     result = {**result, **self._withdraw(number, True)}
@@ -1121,7 +1047,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--loop", type=float, default=0,
                         help=f"0 只跑一轮；循环时间隔至少 {MIN_LOOP_SECONDS:g} 秒（每轮每个 PR 约 4 次读接口，受 GitHub 核心限额约束）")
     parser.add_argument("--auto-merge", action="store_true",
-                        help="默认关。用宿主 gh 凭据追平队首与合入（须 ci-ok 为必需检查；人工确认两类除外）")
+                        help="默认关。用宿主 gh 凭据追平队首、分类人工确认并撤原生 auto-merge（不自动发起 PUT /pulls/{n}/merge）")
     args = parser.parse_args(argv)
     if not math.isfinite(args.loop) or not (args.loop == 0 or args.loop >= MIN_LOOP_SECONDS):  # 挡住负数、nan、inf
         parser.error(f"--loop 须为 0 或至少 {MIN_LOOP_SECONDS:g} 秒")

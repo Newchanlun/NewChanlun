@@ -332,14 +332,15 @@ def test_auto_merge_blocks_old_success_while_newer_gpt_attempt_is_pending(lane, 
     assert acts(actions2) == ["needs-operator", "waiting"]
     assert github.calls == []
 
-    # 3. 直到 A2 完结并发布 PASS 后才允许合入
+    # 3. 直到 A2 完结并发布 PASS 后才不再 waiting，因服务端不支持 expected_base_ref 转人工确认且不发起自动合入
     new_folder = lane.state_root / "runs" / new_target.key
     (new_folder / "outcome.json").write_text(json.dumps({
         "verdict": "PASS", "state": "success", "publication": {"id": 2, "state": "success"},
     }))
     actions3 = sweep.tick()
-    assert acts(actions3) == ["done", "merged"]
-    assert github.calls == [("merge", 1810, head)]
+    assert acts(actions3) == ["done", "needs-human-confirm"]
+    assert actions3[-1]["gated"] == ["base-ref-not-server-bound"]
+    assert github.calls == []
 
 
 def test_recovery_branch_selects_latest_registered_attempt_even_with_lower_number(lane, monkeypatch):
@@ -398,7 +399,8 @@ def test_preflight_rate_limits_feed_global_sweep_backoff_without_occupying_attem
 
 
 def test_auto_merge_rechecks_latest_attempt_under_pr_lock_before_merging(lane, monkeypatch):
-    """规划后、合入写入前若同 head 新登记了 A2，合入持 PR 锁复验必须拦截，不能凭旧 A1 的 success 抢跑合入。"""
+    """同 head 新登记了 A2 时，即使旧 A1 已有 PASS，规划也必须报 waiting(pending_latest_attempt=True)；
+    即使在规划之后并发登记 A2，因关闭自动发起 PUT /pulls/{n}/merge，也绝不会凭旧 A1 抢跑合入。"""
     github = FakeGitHub(lane)
     head = lane.gateway.pr["head"]["sha"]
     green(github, head)
@@ -415,12 +417,16 @@ def test_auto_merge_rechecks_latest_attempt_under_pr_lock_before_merging(lane, m
         res = real_plan_one(*args, **kwargs)
         if not raced["done"]:
             raced["done"] = True
-            lane.target(1810, 2)  # 模拟规划与合入之间并发登记的新 attempt（未发 pending）
+            lane.target(1810, 2)  # 模拟规划之后并发登记的新 attempt（未发 pending）
         return res
     monkeypatch.setattr(sweep, "_plan_one", plan_then_register)
     actions = sweep.tick()
     assert github.calls == []
-    assert any(a.get("rechecked_under_pr_lock") is True and a.get("pending_latest_attempt") is True for a in actions)
+    assert any(a["action"] == "needs-human-confirm" and a.get("gated") == ["base-ref-not-server-bound"] for a in actions)
+    # 下一轮（已存在未完结 A2）：直接进入 waiting(pending_latest_attempt=True)
+    actions2 = sweep.tick()
+    assert github.calls == []
+    assert any(a["action"] == "waiting" and a.get("pending_latest_attempt") is True for a in actions2)
 
 
 def test_preflight_pass_does_not_mask_consecutive_formal_rate_limits(lane):
@@ -582,8 +588,11 @@ def test_merges_and_withdrawals_continue_during_rate_limit_backoff(lane):
     finished_run(lane, "02", T0 - 300)
     actions = sweep.tick()
     assert any(a["action"] == "rate-limit-backoff" for a in actions) and host.spawned == []
-    assert "merged" in acts(actions, 1810) and "needs-human-confirm" in acts(actions, 1811)
-    assert github.calls == [("merge", 1810, head), ("disable", 1811)]
+    a1810 = next(a for a in actions if a.get("pr") == 1810 and a["action"] == "needs-human-confirm")
+    a1811 = next(a for a in actions if a.get("pr") == 1811 and a["action"] == "needs-human-confirm")
+    assert a1810["gated"] == ["base-ref-not-server-bound"]
+    assert a1811["gated"] == {"secrets-or-credentials": [".env"]}
+    assert github.calls == [("disable", 1811)]
 
 
 @pytest.mark.parametrize("change", ["draft", "foreign", "stale"])
@@ -657,7 +666,8 @@ def test_no_merge_unless_ci_ok_is_required(lane):
 
 
 def test_merges_only_exact_head_with_review_ci_ok_and_devskim_green(lane):
-    """F1：不预挂 auto-merge；精确 head 三项全绿、清单可判定且非人工确认类时，带 sha 直接合入。"""
+    """F1：不预挂 auto-merge；三项未全绿时 waiting；三项全绿、清单可判定且非人工确认两类时，
+    因 GitHub 合入接口不支持服务端 expected_base_ref，输出 needs-human-confirm 并撤原生 auto-merge，不自动合入。"""
     github = FakeGitHub(lane)
     head = lane.gateway.pr["head"]["sha"]
     sweep, _, _ = make(lane, github=github, auto_merge=True)
@@ -665,8 +675,11 @@ def test_merges_only_exact_head_with_review_ci_ok_and_devskim_green(lane):
     assert "waiting" in acts(sweep.tick())
     assert github.calls == []
     green(github, head)
-    assert "merged" in acts(sweep.tick())
-    assert github.calls == [("merge", 1810, head)]
+    github.states[1810] = {"auto_merge": True}
+    actions = sweep.tick()
+    confirm = next(a for a in actions if a.get("pr") == 1810 and a["action"] == "needs-human-confirm")
+    assert confirm["gated"] == ["base-ref-not-server-bound"]
+    assert github.calls == [("disable", 1810)]
 
 
 def test_moved_head_is_not_merged(lane):
@@ -752,7 +765,8 @@ def test_one_prs_failure_does_not_stop_others(lane):
     actions = sweep.tick()
     assert acts(actions, 1805) == ["error", "evidence-insufficient"]   # 状态读不到：失败关闭
     assert ("disable", 1805) in github.calls
-    assert "merged" in acts(actions, 1810)
+    assert any(a.get("pr") == 1810 and a["action"] == "needs-human-confirm"
+               and a.get("gated") == ["base-ref-not-server-bound"] for a in actions)
 
 
 def test_main_loop_survives_tick_errors(monkeypatch, capsys):
@@ -921,16 +935,16 @@ CI_ONLY = [".github/workflows/ci.yml", ".github/workflows/devskim.yml", ".github
 
 @pytest.mark.parametrize("path", CI_ONLY)
 def test_ci_only_pr_auto_merges(lane, path):
-    """负控（在 #1939 的 main 上失败：那里这些路径报 needs-human-confirm）：只改 CI 或 DevSkim 配置的 PR，
-    精确 head 双门全绿时和普通代码一样带 sha 合入，不撤 auto-merge，不交人工确认。"""
+    """负控：只改 CI 或 DevSkim 配置的 PR 不命中人工确认两类（human_gated 为空），
+    最终仅因 GitHub 合入接口缺 expected_base_ref 转人工确认而非命中两类。"""
     github = FakeGitHub(lane)
     head = lane.gateway.pr["head"]["sha"]
     github.files[1810] = [{"filename": path, "status": "modified", "changes": 3}]
     green(github, head)
     sweep, _, _ = make(lane, github=github, auto_merge=True)
-    actions = acts(sweep.tick())
-    assert "needs-human-confirm" not in actions and "merged" in actions
-    assert github.calls == [("merge", 1810, head)]
+    result = next(a for a in sweep.tick() if a.get("pr") == 1810 and a["action"] == "needs-human-confirm")
+    assert result["gated"] == ["base-ref-not-server-bound"]
+    assert github.calls == []
     assert human_gated([path]) == {}
 
 
@@ -1055,7 +1069,7 @@ def test_serve_round_runs_one_sweep_per_round_and_logs_one_line_per_action(lane,
     assert len(ticks) == 3
     lines = capsys.readouterr().out.splitlines()
     assert [json.loads(line.removeprefix("review-sweep ")) for line in lines] == logged
-    assert all(line.startswith("review-sweep {") for line in lines) and "merged" in [a["action"] for a in logged]
+    assert all(line.startswith("review-sweep {") for line in lines) and "needs-human-confirm" in [a["action"] for a in logged]
 
 
 def test_serve_round_respects_interval_across_restarts(lane):
@@ -1286,7 +1300,7 @@ def test_space_admission_refusal_holds_with_concurrency(lane, monkeypatch):
     monkeypatch.setattr(lane, "admit_space", no_space)
     host = Host(lane)
 
-    def child(number, attempt, head, log):  # 子进程：review-pr 失败即退出，sweep 只拿到 pid
+    def child(number, attempt, head, log, base=None):  # 子进程：review-pr 失败即退出，sweep 只拿到 pid
         host.spawned.append((number, attempt, head))
         with pytest.raises(IdentityError):
             lane.review_pr(number, attempt)
@@ -1466,8 +1480,9 @@ def test_gh_calls_have_a_timeout_and_a_timeout_is_an_unreadable_source(monkeypat
         raise subprocess.TimeoutExpired(command, kwargs["timeout"])
     monkeypatch.setattr(module.subprocess, "run", run)
     cli = module.GhCli("Newchanlun/NewChanlun", timeout=7)
+    assert not hasattr(cli, "merge")
     for call in (cli.open_pulls, lambda: cli.pr(5), lambda: cli.checks("a" * 40, BINDINGS), cli.required_checks,
-                 lambda: cli.pr_files(5), lambda: cli.merge(5, "a" * 40), lambda: cli.update_branch(5, "a" * 40),
+                 lambda: cli.pr_files(5), lambda: cli.update_branch(5, "a" * 40),
                  lambda: cli.disable_auto_merge(5)):
         with pytest.raises(SourceUnreadable) as caught:
             call()
@@ -1494,7 +1509,7 @@ def test_timeout_mid_round_skips_the_round_without_merging(lane, capsys, where):
     assert not [c for c in github.calls if c[0] == "merge"]
     setattr(github, where, healthy)
     clock.now += module.MIN_LOOP_SECONDS
-    assert "merged" in [a["action"] for a in hook()]
+    assert "needs-human-confirm" in [a["action"] for a in hook()]
 
 
 def test_green_but_unmergeable_pr_does_not_hold_the_queue_head(lane):
@@ -1587,49 +1602,25 @@ def test_withdraw_timeout_stops_the_fail_closed_sweep(lane):
 
 
 def test_actions_done_before_a_timeout_are_still_logged(lane, capsys):
-    """opus 中：本轮先合入了一个 PR、后一个写超时，已合入那条照样写日志，写超时那条记 write-unknown。"""
+    """opus 中：本轮先完成了一个 PR 的写操作、后一个写超时，已做那条照样写日志，写超时那条记 write-unknown。"""
     github = FakeGitHub(lane)
-    base_1805 = lane.gateway.pr["base"]["sha"]
-    orig_head = lane.gateway.pr["head"]["sha"]
-    git(lane.source, "checkout", "-qb", "pr-1805-branch", base_1805)
-    (lane.source / "pr-1805.txt").write_text("1805")
-    git(lane.source, "add", ".")
-    git(lane.source, "commit", "-qm", "pr 1805")
-    head_1805 = git(lane.source, "rev-parse", "HEAD")
-    git(lane.source, "checkout", "-q", orig_head)
-    pr_1805 = copy.deepcopy(lane.gateway.pr)
-    pr_1805["number"] = 1805
-    pr_1805["head"]["sha"] = head_1805
-    pr_1805["head"]["ref"] = "pr-1805"
-    github.extra_pulls.append(pr_1805)
-    run_1805 = lane.state_root / "runs" / f"r1150335160-p1805-{base_1805}-{head_1805}-{module.POLICY}-a1"
-    run_1805.mkdir(parents=True, mode=0o700)
-    (run_1805 / "target.json").write_text(json.dumps({
-        "repository_id": 1150335160, "pr_number": 1805, "base_repository_id": 1150335160,
-        "base_ref": "main", "base_sha": base_1805, "head_repository_id": 1150335160,
-        "head_ref": "pr-1805", "head_sha": head_1805, "merge_base_sha": base_1805,
-        "run_id": "1805-pass-run", "attempt": 1, "policy_version": module.POLICY,
-        "controller_code_head": "a" * 40, "registered_at_ns": 1,
-    }))
-    (run_1805 / "outcome.json").write_text(json.dumps({
-        "run_id": "1805-pass-run", "verdict": "PASS", "state": "success",
-        "publication": {"state": "success"},
-    }))
-    os.chmod(run_1805 / "target.json", 0o600)
-    os.chmod(run_1805 / "outcome.json", 0o600)
-    green(github, head_1805)
-    green(github, lane.gateway.pr["head"]["sha"])
-    merges = []
-    def merge(number, head):
-        if number == 1810:
-            _hang()
-        merges.append(number)
-    github.merge = merge
-    sweep, _, _ = make(lane, run=True, github=github, auto_merge=True)
+    _more_pulls(lane, github, [1805])
+    github.states[1805] = {"mergeable_state": "behind"}
+    _sensitive_armed(lane, github)
+    updated = []
+    orig_update = github.update_branch
+
+    def record_update(number, head):
+        updated.append(number)
+        orig_update(number, head)
+
+    github.update_branch = record_update
+    github.disable_auto_merge = _hang
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
     assert ServeRound(sweep, clock=Clock())() is None
     lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
-    assert merges == [1805]
-    assert any(a.get("pr") == 1805 and a["action"] == "merged" for a in lines)
+    assert updated == [1805]
+    assert any(a.get("pr") == 1805 and a["action"] == "update-branch" for a in lines)
     assert any(a.get("pr") == 1810 and a["action"] == "write-unknown" for a in lines)
     assert lines[-1]["action"] == "round-skipped"
 
@@ -1688,13 +1679,13 @@ def test_head_recheck_read_failure_fails_closed(lane):
 
 
 def test_writes_carry_the_classified_head():
-    """合入带 sha、追平带 expected_head_sha：head 已变时由 GitHub 服务端拒绝。"""
+    """追平带 expected_head_sha：head 已变时由 GitHub 服务端拒绝；GhCli 不暴露无 base_ref 绑定的自动合入写接口。"""
     sent = []
     cli = module.GhCli("Newchanlun/NewChanlun")
     cli._gh = lambda *args: sent.append(args) or ""
-    cli.merge(5, "a" * 40)
+    assert not hasattr(cli, "merge")
     cli.update_branch(5, "b" * 40)
-    assert f"sha={'a' * 40}" in sent[0] and f"expected_head_sha={'b' * 40}" in sent[1]
+    assert f"expected_head_sha={'b' * 40}" in sent[0]
 
 
 def test_fetch_failure_is_an_unreadable_source_and_never_reviewed(lane, tmp_path):
@@ -1756,7 +1747,9 @@ def test_repo_with_native_auto_merge_disabled_merges_normally(lane):
     green(github, lane.gateway.pr["head"]["sha"])
     sweep, _, _ = make(lane, github=github, auto_merge=True)
     actions = sweep.tick()
-    assert "native-auto-merge-enabled" not in [a["action"] for a in actions] and "merged" in acts(actions)
+    assert "native-auto-merge-enabled" not in [a["action"] for a in actions]
+    assert any(a["action"] == "needs-human-confirm" and a.get("gated") == ["base-ref-not-server-bound"] for a in actions)
+    assert github.calls == []
 
 
 @pytest.mark.parametrize(("payload", "allowed"), [({"allow_auto_merge": False}, False), ({"allow_auto_merge": True}, True),
@@ -1865,13 +1858,15 @@ def test_review_binding_not_the_configured_reviewer_app_never_merges(lane, bound
 
 
 def test_reviewer_app_binding_merges_when_green(lane):
-    """对照：绑定审查专用 App 且与身份文件一致时，精确 head 双门全绿照常合入。"""
+    """对照：绑定审查专用 App 且与身份文件一致时，不报 auto-merge-unsafe，精确 head 全绿后因缺 expected_base_ref 转人工确认且不自动合入。"""
     github = FakeGitHub(lane)
     head = lane.gateway.pr["head"]["sha"]
     green(github, head)
     sweep, _, _ = make(lane, github=github, auto_merge=True)
-    sweep.tick()
-    assert ("merge", 1810, head) in github.calls
+    actions = sweep.tick()
+    assert not any(a["action"] == "auto-merge-unsafe" for a in actions)
+    assert any(a["action"] == "needs-human-confirm" and a.get("gated") == ["base-ref-not-server-bound"] for a in actions)
+    assert github.calls == []
 
 
 def test_executor_app_status_alone_does_not_satisfy_reviewer_binding(monkeypatch):
@@ -2010,7 +2005,7 @@ def test_preflight_failure_next_tick_in_launch_backoff_never_merges_on_cross_pr_
     green(github, head)
     lane.preflight = lambda _t: {"returncode": 2, "report": {"kind": "review-preflight", "is_review_result": False,
                                                              "ready": False, "checks": [{"name": f"route:{MODELS[0]}", "ok": False}]}}
-    def failing_spawn(number, attempt, h, log):
+    def failing_spawn(number, attempt, h, log, base=None):
         try:
             lane.review_pr(number, attempt)
         except Exception:
@@ -2068,73 +2063,40 @@ def test_inflight_preflight_lock_blocks_auto_merge_under_pr_lock(lane):
     assert waiting and waiting[-1].get("pending_latest_attempt") is True
 
 
-def test_merge_holds_inflight_lock_exclusively_across_github_merge(lane):
-    """合入阶段必须持续独占预检在途锁直至 github.merge 返回，期间新人工预检无法抢跑启动。"""
-    import threading
+def test_spawn_type_error_propagates_without_retry_and_no_auto_merge_write(lane):
+    """1. _launch 统一使用五参数 Spawn 接口，spawn 内部抛出 TypeError 时直接上报为 error，绝不二次重调去掉 base；
+    2. 全绿 PR 在 --auto-merge 下也绝不自动发起 PUT /pulls/{n}/merge，改报 needs-human-confirm 并撤原生 auto-merge。"""
+    calls = []
+
+    def broken_spawn(number, attempt, head, log, base=None):
+        calls.append((number, attempt, head, base))
+        raise TypeError("internal callback bug")
+
+    github = FakeGitHub(lane)
+    sweep = Sweep(github, lane, broken_spawn, state_root=lane.state_root, rows=lambda: [],
+                  auto_merge=False, review_app=lambda: 5664795)
+    actions = sweep.tick()
+    assert len(calls) == 1 and calls[0][3] == lane.gateway.pr["base"]["sha"]
+    assert acts(actions) == ["error"] and "TypeError: internal callback bug" in actions[0]["reason"]
 
     assert lane.review_pr(1810, 1)["verdict"] == "PASS"
-    github = FakeGitHub(lane)
-    head = lane.gateway.pr["head"]["sha"]
-    green(github, head)
-
-    in_merge = threading.Event()
-    release_merge = threading.Event()
-    inflight_acquired = threading.Event()
-
-    orig_merge = github.merge
-
-    def slow_merge(number, h):
-        in_merge.set()
-        assert release_merge.wait(5)
-        return orig_merge(number, h)
-
-    github.merge = slow_merge
-    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
-    merge_thread = threading.Thread(target=sweep.tick)
-    merge_thread.start()
-    assert in_merge.wait(5)
-
-    def try_manual_preflight():
-        with lane._inflight_review(1810):
-            inflight_acquired.set()
-
-    manual = threading.Thread(target=try_manual_preflight)
-    manual.start()
-    assert not inflight_acquired.wait(0.2), "合入进行中人工预检竟取得了在途共享锁"
-    release_merge.set()
-    merge_thread.join(timeout=5)
-    assert inflight_acquired.wait(5)
-    manual.join(timeout=5)
-    assert github.calls == [("merge", 1810, head)]
+    github2 = FakeGitHub(lane)
+    _ordinary_armed(lane, github2)
+    sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
+    actions2 = sweep2.tick()
+    confirm = next(a for a in actions2 if a.get("pr") == 1810 and a["action"] == "needs-human-confirm")
+    assert confirm["gated"] == ["base-ref-not-server-bound"]
+    assert github2.calls == [("disable", 1810)]
 
 
 def test_dispatch_and_merge_share_exact_base_head_target_and_recheck_live_base(lane, env):
-    """1. main 前进到 head 已包含的提交（clean，无须追平）时，派审不把旧 base 判 done，而是为新 base 派审；
-    2. base..head 存在严格中间祖先提交时，服务端无法绑定精确 base，自动合入拒绝并撤原生 auto-merge；
-    3. 单提交 PR 规划到合入之间实时 base 变化时，合入锁内复核实时 base 并拒合旧 PASS。"""
-    # 在单提交 PR 上先测规划复核与锁内合入复核捕获实时 base 漂移
+    """1. 文件清单分类后、规划复核时实时 base 漂移：报 base-moved 并撤原生 auto-merge；
+    2. 全部门禁就绪但无服务端 expected_base_ref 时转人工确认并撤原生 auto-merge；
+    3. main 前进到 head 已包含的提交（clean，无须追平）时，派审不把旧 base 判 done，而是为新 base 派审。"""
     single_head = lane.gateway.pr["head"]["sha"]
     assert lane.review_pr(1810, 1)["verdict"] == "PASS"
-    github_lock = FakeGitHub(lane)
-    green(github_lock, single_head)
-    orig_pr = github_lock.pr
-    reads = []
 
-    def drift_base_on_merge_recheck(number):
-        reads.append(number)
-        st = orig_pr(number)
-        if len(reads) >= 3:
-            st["base"] = "1" * 40
-        return st
-
-    github_lock.pr = drift_base_on_merge_recheck
-    sweep_lock, _, _ = make(lane, run=False, github=github_lock, auto_merge=True)
-    second = sweep_lock.tick()
-    assert github_lock.calls == []
-    moved = [a for a in second if a.get("pr") == 1810 and a["action"] == "base-moved"]
-    assert moved and moved[-1].get("rechecked_under_pr_lock") is True
-
-    # 文件清单分类后、规划复核时 base 漂移：同样报 base-moved 并撤掉原生 auto-merge
+    # 文件清单分类后、规划复核时 base 漂移：报 base-moved 并撤掉原生 auto-merge
     github3 = FakeGitHub(lane)
     _ordinary_armed(lane, github3)
     orig_pr3 = github3.pr
@@ -2161,12 +2123,12 @@ def test_dispatch_and_merge_share_exact_base_head_target_and_recheck_live_base(l
     lane.gateway.pr["head"]["sha"] = head2
     assert lane.review_pr(1810, 1)["verdict"] == "PASS"
 
-    # 存在严格中间祖先 single_head：GitHub 合入接口无法在服务端绑定精确 base，自动合入必须拒绝并撤原生 auto-merge
+    # 全绿但 GitHub 合入接口缺服务端 expected_base_ref 绑定：转人工确认并撤原生 auto-merge
     github_mid = FakeGitHub(lane)
     _ordinary_armed(lane, github_mid)
     sweep_mid, _, _ = make(lane, run=False, github=github_mid, auto_merge=True)
     mid_actions = sweep_mid.tick()
-    assert any(a.get("pr") == 1810 and a["action"] == "needs-human-confirm" and a.get("gated") == ["base-not-server-bound"]
+    assert any(a.get("pr") == 1810 and a["action"] == "needs-human-confirm" and a.get("gated") == ["base-ref-not-server-bound"]
                for a in mid_actions)
     assert github_mid.calls == [("disable", 1810)]
 
@@ -2256,13 +2218,15 @@ def test_old_base_unpublished_outcome_unblocks_update_branch_and_merge_commit_is
     github2 = FakeGitHub(lane)
     green(github2, merged_head)
     sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
-    assert acts(sweep2.tick()) == ["done", "merged"]
-    assert github2.calls == [("merge", 1810, merged_head)]
+    actions2 = sweep2.tick()
+    assert acts(actions2) == ["done", "needs-human-confirm"]
+    assert actions2[-1]["gated"] == ["base-ref-not-server-bound"]
+    assert github2.calls == []
 
 
 def test_retarget_to_non_main_same_sha_is_blocked_and_failed_rereview_blocks_old_pass(lane):
-    """1. PR 改指与 main 同 SHA 的非 main 分支时（无论分类复核或锁内复核），一律报 base-ref-moved、撤原生 auto-merge、不合入；
-    2. A1 已 PASS 后手动 A2 预检失败退出，持久重审意图阻止下轮 sweep 判 done 或凭旧 PASS 自动合入。"""
+    """1. PR 改指与 main 同 SHA 的非 main 分支时（首次读取与分类复核），一律报 base-ref-moved、不派审、撤原生 auto-merge；
+    2. A1 已 PASS 后手动 A2 预检失败退出，持久重审意图阻止下轮 sweep 判 done 或放行就绪，且不占队首。"""
     assert lane.review_pr(1810, 1)["verdict"] == "PASS"
     head = lane.gateway.pr["head"]["sha"]
 
@@ -2285,25 +2249,15 @@ def test_retarget_to_non_main_same_sha_is_blocked_and_failed_rereview_blocks_old
     assert any(a.get("pr") == 1810 and a["action"] == "base-ref-moved" for a in a1)
     assert github1.calls == [("disable", 1810)]
 
-    # 1b. 持 PR 锁合入前实时改指非 main 分支（同 SHA）
+    # 1b. 列 PR 后首次读 pr() 即发现已改指非 main 分支：既不派审也撤原生 auto-merge
     github2 = FakeGitHub(lane)
-    green(github2, head)
-    orig_pr2 = github2.pr
-    reads2 = []
-
-    def retarget_under_lock(number):
-        reads2.append(number)
-        st = orig_pr2(number)
-        if len(reads2) >= 3:
-            st["base_ref"] = "release"
-        return st
-
-    github2.pr = retarget_under_lock
-    sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
+    _ordinary_armed(lane, github2)
+    github2.states[1810]["base_ref"] = "release"
+    sweep2, host2, _ = make(lane, run=False, github=github2, auto_merge=True)
     a2 = sweep2.tick()
-    assert github2.calls == []
-    moved = [a for a in a2 if a.get("pr") == 1810 and a["action"] == "base-ref-moved"]
-    assert moved and moved[-1].get("rechecked_under_pr_lock") is True
+    assert host2.spawned == []
+    assert acts(a2) == ["base-ref-moved", "base-ref-moved"]
+    assert github2.calls == [("disable", 1810)]
 
     # 2. 手动 A2 预检失败退出（不写 target.json），下轮 sweep 不得把 A1 判 done，也不得凭旧 PASS 合入
     lane.preflight = lambda _t: {"returncode": 2, "report": None, "image_id": "sha256:" + "1" * 64}
