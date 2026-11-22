@@ -3,10 +3,10 @@
  * 夹具：临时 git 仓 + 超大 diff 分支（全量 diff 远超上限，复现 #1406 形态）。
  * 跑法：npx tsx --test .sandcastle/review-context.test.mts
  */
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -32,7 +32,9 @@ const BRANCH = "sandcastle/issue-9999";
 const MARKER = "HUGE_DIFF_BODY_MARKER";
 
 /** 临时仓：main 一个基线文件；分支 3 个提交，各加一个 ~400k 字符的大文件（diff 正文带 MARKER）。 */
+let cachedHugeDiffRepo: string | undefined;
 function hugeDiffRepo(): string {
+  if (cachedHugeDiffRepo) return cachedHugeDiffRepo;
   const dir = mkdtempSync(join(tmpdir(), "nc-review-ctx-"));
   const git = (...args: string[]) =>
     execFileSync("git", args, {
@@ -52,8 +54,10 @@ function hugeDiffRepo(): string {
     git("commit", "-q", "-m", `feat: #9999——第 ${c} 个大改动 !\`echo injected\``);
   }
   git("checkout", "-q", "main");
+  cachedHugeDiffRepo = dir;
   return dir;
 }
+after(() => { if (cachedHugeDiffRepo) rmSync(cachedHugeDiffRepo, { recursive: true, force: true }); });
 
 const fetchIssue = (n: number) => JSON.stringify({ title: `测试票 ${n}`, body: "正文含 {{BRANCH}} 与 !`rm -rf /` 字样" });
 
@@ -357,8 +361,11 @@ function commitFile(dir: string, file: string, msg: string): string {
  * origin（裸仓）← host（宿主，main 停在 A）；other 克隆往 origin/main 推了别线提交 B，并从 B 分出 feature。
  * host 只取了 feature 分支，本地 main 与 refs/remotes/origin/main 都还停在 A（= 宿主 main 落后）。
  */
-function staleHostFixture() {
-  const root = mkdtempSync(join(tmpdir(), "nc-review-base-"));
+type StaleHostSeed = { root: string; origin: string; host: string; other: string; a: string; b: string };
+let cachedStaleHostSeed: StaleHostSeed | undefined;
+function getStaleHostSeed(): StaleHostSeed {
+  if (cachedStaleHostSeed) return cachedStaleHostSeed;
+  const root = mkdtempSync(join(tmpdir(), "nc-review-base-seed-"));
   const origin = join(root, "origin.git");
   const host = join(root, "host");
   const other = join(root, "other");
@@ -374,7 +381,28 @@ function staleHostFixture() {
   commitFile(other, "feature.txt", "feat: 本票提交");
   gitIn(other)("push", "-q", "origin", "feature");
   gitIn(host)("fetch", "-q", "origin", "+refs/heads/feature:refs/heads/feature");
-  return { root, origin, host, other, a, b };
+  cachedStaleHostSeed = { root, origin, host, other, a, b };
+  return cachedStaleHostSeed;
+}
+const staleHostRoots: string[] = [];
+after(() => {
+  if (cachedStaleHostSeed) rmSync(cachedStaleHostSeed.root, { recursive: true, force: true });
+  for (const r of staleHostRoots) rmSync(r, { recursive: true, force: true });
+});
+
+function staleHostFixture() {
+  const seed = getStaleHostSeed();
+  const root = mkdtempSync(join(tmpdir(), "nc-review-base-"));
+  staleHostRoots.push(root);
+  const origin = join(root, "origin.git");
+  const host = join(root, "host");
+  const other = join(root, "other");
+  cpSync(seed.origin, origin, { recursive: true });
+  cpSync(seed.host, host, { recursive: true });
+  cpSync(seed.other, other, { recursive: true });
+  gitIn(host)("remote", "set-url", "origin", origin);
+  gitIn(other)("remote", "set-url", "origin", origin);
+  return { root, origin, host, other, a: seed.a, b: seed.b };
 }
 
 test("N3 复现：宿主 main 落后时，旧做法 main...feature 把别线提交混进摘要", () => {
