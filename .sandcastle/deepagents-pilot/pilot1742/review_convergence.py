@@ -1098,10 +1098,15 @@ def _recover_legacy_wontfix_reply_keys(
         cid, kind, payload = _parse_consumed_reply_key(rk, "consumed_reply_keys[]")
         parsed.append((rk, cid, kind, payload))
 
-    resolved_pairs = {
+    all_resolved_pairs = {
         (cid, payload)
         for _, cid, kind, payload in parsed
-        if kind == "resolved" and payload in resolved_set
+        if kind == "resolved"
+    }
+    resolved_pairs = {
+        (cid, payload)
+        for cid, payload in all_resolved_pairs
+        if payload in resolved_set
     }
     if not resolved_pairs:
         return frozenset()
@@ -1120,13 +1125,9 @@ def _recover_legacy_wontfix_reply_keys(
         elif kind in ("loc", "inline"):
             pinned = bound_reply_targets.get(rk)
             if pinned is not None:
-                matches = [
-                    fid
-                    for fid in resolved_set
-                    if pinned == fid or prior_aliases.get(pinned) == fid or next_aliases.get(pinned) == fid
-                ]
-                if len(matches) == 1:
-                    target_fid = matches[0]
+                effective_pinned = next_aliases.get(pinned, pinned)
+                if effective_pinned in resolved_set:
+                    target_fid = effective_pinned
         if (
             target_fid is not None
             and (cid, target_fid) in resolved_pairs
@@ -1143,10 +1144,16 @@ def _recover_legacy_wontfix_reply_keys(
     recovered: set[tuple[str, str]] = set()
     used_rks: set[str] = set()
     for fid, entries in sorted(candidates_by_fid.items()):
-        cids = {cid for cid, _ in entries}
+        old_canon = prior_aliases.get(fid)
+        if old_canon is not None and old_canon != fid and fid not in next_aliases:
+            non_derivable = [(cid, rk) for cid, rk in entries if (cid, old_canon) not in all_resolved_pairs]
+            selected_entries = non_derivable if non_derivable else entries
+        else:
+            selected_entries = entries
+        cids = {cid for cid, _ in selected_entries}
         if len(cids) != 1:
             continue
-        chosen_rk = sorted(rk for _, rk in entries)[0]
+        chosen_rk = sorted(rk for _, rk in selected_entries)[0]
         if chosen_rk in used_rks:
             continue
         used_rks.add(chosen_rk)
@@ -4532,11 +4539,7 @@ def _validate_history_chain(
                     if kind == "finding":
                         pin_ok = pinned_fid == fid
                     else:
-                        pin_ok = (
-                            pinned_fid == fid
-                            or prior_aliases.get(pinned_fid) == fid
-                            or next_aliases.get(pinned_fid) == fid
-                        )
+                        pin_ok = next_aliases.get(pinned_fid, pinned_fid) == fid
                     if not pin_ok:
                         raise ConvergenceError(
                             f"历史第 {idx} 轮 wontfix_reply_keys 中回复键 {rk!r} 已锁定到发现 {pinned_fid!r}，"
