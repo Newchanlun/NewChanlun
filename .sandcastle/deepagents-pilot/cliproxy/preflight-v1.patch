@@ -1,6 +1,6 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
 new file mode 100644
-index 0000000..58f9984
+index 0000000..8b04da3
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,71 @@
@@ -20,16 +20,16 @@ index 0000000..58f9984
 +func PreflightReceipt() gin.HandlerFunc {
 +	root := os.Getenv("CLIPROXY_PREFLIGHT_RECEIPTS")
 +	return func(c *gin.Context) {
-+		if root == "" {
-+			c.Next()
-+			return
-+		}
 +		session := c.GetHeader("Session-Id")
 +		launch := c.GetHeader(preflightreceipt.ReviewHeader)
 +		isPreflight := strings.HasPrefix(session, "preflight-")
 +		hasReviewHeader := launch != ""
 +		if !isPreflight && !hasReviewHeader {
 +			c.Next()
++			return
++		}
++		if root == "" {
++			c.AbortWithStatus(http.StatusServiceUnavailable)
 +			return
 +		}
 +		if isPreflight && hasReviewHeader {
@@ -77,10 +77,10 @@ index 0000000..58f9984
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
 new file mode 100644
-index 0000000..173b2e2
+index 0000000..f5828ac
 --- /dev/null
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,734 @@
+@@ -0,0 +1,784 @@
 +package api
 +
 +import (
@@ -814,6 +814,56 @@ index 0000000..173b2e2
 +			t.Fatalf("unauthenticated requests created receipt directory or files: %v", err)
 +		}
 +	})
++
++	t.Run("missing-receipt-dir-blocks-tagged-requests-and-passes-ordinary", func(t *testing.T) {
++		t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", "")
++		noDirServer := newTestServer(t)
++		noDirManager := noDirServer.handlers.AuthManager
++		noDirManager.SetRoundTripperProvider(preflightTransportProvider{transport})
++		noDirManager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(noDirServer.cfg))
++		const noDirID = "review-receipt-codex-nodir"
++		cred := &auth.Auth{ID: noDirID, Provider: "codex", Status: auth.StatusActive,
++			Attributes: map[string]string{auth.AttributeAuthKind: auth.AuthKindOAuth},
++			Metadata:   map[string]any{"access_token": "offline-fake", "websockets": true},
++		}
++		if _, err := noDirManager.Register(context.Background(), cred); err != nil {
++			t.Fatal(err)
++		}
++		registry.GetGlobalRegistry().RegisterClient(noDirID, "codex", []*registry.ModelInfo{{ID: "gpt-6.2-sol"}})
++		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(noDirID) })
++
++		send := func(launch, session string) *httptest.ResponseRecorder {
++			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true,"input":"offline"}`))
++			req.Header.Set("Authorization", "Bearer test-key")
++			req.Header.Set("Content-Type", "application/json")
++			if launch != "" {
++				req.Header.Set(preflightreceipt.ReviewHeader, launch)
++			}
++			if session != "" {
++				req.Header.Set("Session-Id", session)
++			}
++			res := httptest.NewRecorder()
++			noDirServer.engine.ServeHTTP(res, req)
++			return res
++		}
++		// Formal review and preflight requests MUST fail closed (503) before reaching upstream.
++		resRev := send("review-12345678-1234-4234-8234-123456789ad1", "019d0000-0000-7000-8000-000000000ad1")
++		if resRev.Code != http.StatusServiceUnavailable || len(models) != 0 {
++			t.Fatalf("review request escaped when receipt dir unset: status=%d calls=%d", resRev.Code, len(models))
++		}
++		resPre := send("", "preflight-12345678-1234-4234-8234-123456789ad2")
++		if resPre.Code != http.StatusServiceUnavailable || len(models) != 0 {
++			t.Fatalf("preflight request escaped when receipt dir unset: status=%d calls=%d", resPre.Code, len(models))
++		}
++		// Ordinary untagged traffic continues working unchanged.
++		resOrd := send("", "ordinary-session")
++		if resOrd.Code != http.StatusOK {
++			t.Fatalf("ordinary traffic broken when receipt dir unset: status=%d body=%s", resOrd.Code, resOrd.Body.String())
++		}
++		if got := <-models; got != "gpt-6.2-sol" {
++			t.Fatalf("ordinary traffic upstream model = %q", got)
++		}
++	})
 +}
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
 index e2b039a..90e7537 100644
@@ -1509,10 +1559,10 @@ index 0000000..eb42c3f
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 new file mode 100644
-index 0000000..d7b48fd
+index 0000000..9144cf2
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,998 @@
+@@ -0,0 +1,1010 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -2373,10 +2423,22 @@ index 0000000..d7b48fd
 +	return json.Unmarshal(raw, &disk) == nil && disk.Tainted
 +}
 +
++func (e *reviewEntry) invalidateDiskReceiptLocked() {
++	finalPath := filepath.Join(e.directory, "receipt.json")
++	_ = os.Truncate(finalPath, 0)
++	_ = os.Remove(finalPath)
++}
++
 +func (e *reviewEntry) persistLocked() error {
++	fail := func(err error) error {
++		if e.tainted {
++			e.invalidateDiskReceiptLocked()
++		}
++		return err
++	}
 +	if !e.reserved {
 +		if err := reservePrivateDir(e.directory, true); err != nil {
-+			return err
++			return fail(err)
 +		}
 +		e.reserved = true
 +	}
@@ -2408,23 +2470,23 @@ index 0000000..d7b48fd
 +	}
 +	data, err := json.Marshal(payload)
 +	if err != nil {
-+		return err
++		return fail(err)
 +	}
 +	tmp := filepath.Join(e.directory, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Add(1)))
 +	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 +	if err != nil {
-+		return err
++		return fail(err)
 +	}
 +	_, errWrite := f.Write(data)
 +	errSync := f.Sync()
 +	errClose := f.Close()
 +	if errWrite != nil || errSync != nil || errClose != nil {
 +		_ = os.Remove(tmp)
-+		return ErrUnavailable
++		return fail(ErrUnavailable)
 +	}
 +	if err := os.Rename(tmp, filepath.Join(e.directory, "receipt.json")); err != nil {
 +		_ = os.Remove(tmp)
-+		return err
++		return fail(err)
 +	}
 +	return nil
 +}
@@ -2513,10 +2575,10 @@ index 0000000..d7b48fd
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
 new file mode 100644
-index 0000000..a49937e
+index 0000000..c016f60
 --- /dev/null
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,700 @@
 +package preflightreceipt
 +
 +import (
@@ -2525,6 +2587,7 @@ index 0000000..a49937e
 +	"context"
 +	"encoding/json"
 +	"errors"
++	"fmt"
 +	"io"
 +	"net/http"
 +	"os"
@@ -3162,5 +3225,57 @@ index 0000000..a49937e
 +	cb.HandlerDone(false)
 +	if ro := readReviewReceiptFile(t, root, lOverflow); !ro.Tainted || ro.Complete {
 +		t.Fatalf("TaintReview under full active ledger did not persist taint: %+v", ro)
++	}
++}
++
++func TestReviewReceiptTaintWriteFailureInvalidatesPriorCleanReceipt(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-cccc1111-2222-4333-8444-555555555551"
++	session := "019d0000-0000-7000-8000-000000000301"
++
++	// Turn 1 writes a clean receipt to disk.
++	ctx, c, err := BeginReview(context.Background(), root, launch, session)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp, err := client.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	c.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_clean","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	_ = resp.Body.Close()
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if r := readReviewReceiptFile(t, root, launch); !r.Complete || r.Tainted {
++		t.Fatalf("expected initial clean receipt: %+v", r)
++	}
++
++	// Simulate temp-file creation failure (works even under root in container builds) during taint persistence.
++	launchDir := filepath.Join(root, launch)
++	blocker := filepath.Join(launchDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
++	if err := os.Mkdir(blocker, 0700); err != nil {
++		t.Fatal(err)
++	}
++	TaintReview(root, launch)
++
++	raw, err := os.ReadFile(filepath.Join(launchDir, "receipt.json"))
++	if err == nil && len(raw) > 0 {
++		t.Fatalf("stale clean receipt survived failed taint write: %s", raw)
++	}
++	// After proxy restart (clearing memory ledger), reloading this launch must stay tainted.
++	reviewMu.Lock()
++	delete(reviewLedger, root+"\x00"+launch)
++	reviewMu.Unlock()
++	if _, _, err := BeginReview(context.Background(), root, launch, session); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("launch resurrected after taint write failure + restart: err=%v", err)
 +	}
 +}

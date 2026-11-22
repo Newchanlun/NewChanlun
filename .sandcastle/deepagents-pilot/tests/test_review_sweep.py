@@ -434,12 +434,12 @@ def test_reuse_fallback_preflight_failure_uses_launch_backoff_not_one_shot_resum
     # 1. 首轮按 launch 重派同一 attempt（非 resume-review，不写 .resumes）
     assert acts(sweep.tick()) == ["launch"]
     assert [(s[0], s[1]) for s in host.spawned] == [(1810, 1)]
-    assert not sweep._resumes(1810, target.head_sha, 1).exists()
+    assert not sweep._resumes(1810, target.head_sha, 1, target.base_sha).exists()
 
     # 2. 若仍遇预检故障退出，退避期内报 launch-backoff，不卡死在 needs-operator
     host.rows.clear()
     assert acts(sweep.tick()) == ["launch-backoff"]
-    assert not sweep._resumes(1810, target.head_sha, 1).exists()
+    assert not sweep._resumes(1810, target.head_sha, 1, target.base_sha).exists()
 
     # 3. 退避期满后自动重派同一 attempt，而非永久需人工介入
     marker = sweep.folder / f"p1810-{target.head_sha}-{target.base_sha}-a1.launched"
@@ -2080,8 +2080,11 @@ def test_dispatch_and_merge_share_exact_base_head_target_and_recheck_live_base(l
     assert acts(first) == ["launch", "waiting"] and github.calls == []
     assert [(s[0], s[1]) for s in host.spawned] == [(1810, 1)]
 
-    # 切回 old_base 已有 PASS，但规划后、合入锁内复核实时 PR 状态时 base 已漂移 -> 必须拒合
+    # 规划时 old_base 是最新 PASS（因而规划 write="merge"），但锁内复核实时 PR 状态时 base 已漂移（即使新 base 亦有 PASS）-> 报 base-moved 拒合
+    lane.gateway.pr["base"]["sha"] = parent_of_head
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
     lane.gateway.pr["base"]["sha"] = old_base
+    assert lane.review_pr(1810, 2)["verdict"] == "PASS"
     github2 = FakeGitHub(lane)
     green(github2, head)
     orig_pr = github2.pr
@@ -2098,5 +2101,53 @@ def test_dispatch_and_merge_share_exact_base_head_target_and_recheck_live_base(l
     sweep2, _, _ = make(lane, run=False, github=github2, auto_merge=True)
     second = sweep2.tick()
     assert github2.calls == []
-    waiting = [a for a in second if a.get("pr") == 1810 and a["action"] == "waiting"]
-    assert waiting and waiting[-1].get("rechecked_under_pr_lock") is True
+    moved = [a for a in second if a.get("pr") == 1810 and a["action"] == "base-moved"]
+    assert moved and moved[-1].get("rechecked_under_pr_lock") is True
+
+    # 文件清单分类后、规划复核时 base 漂移：同样报 base-moved 并撤掉原生 auto-merge
+    github3 = FakeGitHub(lane)
+    _ordinary_armed(lane, github3)
+    orig_pr3 = github3.pr
+    reads3 = []
+
+    def drift_base_on_plan_recheck(number):
+        reads3.append(number)
+        st = orig_pr3(number)
+        if len(reads3) >= 2:
+            st["base"] = parent_of_head
+        return st
+
+    github3.pr = drift_base_on_plan_recheck
+    sweep3, _, _ = make(lane, run=False, github=github3, auto_merge=True)
+    third = sweep3.tick()
+    assert any(a.get("pr") == 1810 and a["action"] == "base-moved" for a in third)
+    assert github3.calls == [("disable", 1810)]
+
+
+def test_resume_markers_are_isolated_per_base_and_missing_object_triggers_sync(lane, env):
+    """1. 不同 base 的同编号 attempt 拥有独立续跑标记；2. 本地缺 base 提交对象时 _is_ancestor 不误判 done，先触发 sync。"""
+    old_base = lane.gateway.pr["base"]["sha"]
+    head = lane.gateway.pr["head"]["sha"]
+    parent_of_head = git(env.source, "rev-parse", f"{head}~1")
+
+    # 旧 base 的 A1 登记后中断并消耗一次续跑，随后完成发布
+    lane.target(1810, 1)
+    sweep, host, _ = make(lane, run=False)
+    assert acts(sweep.tick()) == ["resume-review"]
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+
+    # base 改为本地尚未拉取的未知对象：绝不误判 done，必须触发 sync（无 sync 时报 needs-source-sync）
+    lane.gateway.pr["base"]["sha"] = "f" * 40
+    sync_calls = []
+    sweep_sync, _, _ = make(lane, run=False)
+    sweep_sync.sync = lambda n, b, h: sync_calls.append((n, b, h))
+    assert acts(sweep_sync.tick()) == ["needs-source-sync"]
+    assert sync_calls == [(1810, "f" * 40, head)]
+
+    # base 前进到 head 祖先 parent_of_head：新 base 的 A1 中断后必须拥有独立的首次续跑机会
+    lane.gateway.pr["base"]["sha"] = parent_of_head
+    lane.target(1810, 1)
+    host.rows.clear()
+    assert acts(sweep.tick()) == ["resume-review"]
+    assert sweep._resumes(1810, head, 1, old_base).is_file()
+    assert sweep._resumes(1810, head, 1, parent_of_head).is_file()

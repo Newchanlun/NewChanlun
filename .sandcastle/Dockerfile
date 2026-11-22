@@ -76,8 +76,8 @@ COPY --chown=${AGENT_UID}:${AGENT_GID} .sandcastle/image/prime-agent-settings.js
 
 # ---------- /#1010 ----------
 
-# 主控同型 Codex（Claude 仅供显式 legacy）（独立末层，保留上方重型工具链缓存；#1617）。
-RUN npm install -g @openai/codex @anthropic-ai/claude-code
+# 主控同型 Codex（锁定与正式审阅 session.jsonl 契约核验一致的版本；Claude 仅供显式 legacy；#1617/#1742）。
+RUN npm install -g @openai/codex@0.169.0 @anthropic-ai/claude-code
 
 WORKDIR /home/agent
 

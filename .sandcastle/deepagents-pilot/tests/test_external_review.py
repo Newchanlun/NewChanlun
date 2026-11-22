@@ -2886,3 +2886,65 @@ def test_corrupt_preflight_admitted_marker_on_reuse_fallback_fails_closed(lane, 
         with pytest.raises(IdentityError, match="预检准入记录"):
             lane.review_pr(1810, 1)
     assert not any((folder / model).exists() for model in MODELS)
+
+
+def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane, tmp_path, monkeypatch):
+    """基于已部署 sandcastle:newchanlun 镜像（codex-cli 0.169.0）脱敏真实日志夹具验证代理收据绑定；
+    末条 token_usage_record 缺 response_id 时必须判 FAILED，绝不回退到前轮非空 response_id。"""
+    import time
+
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "codex-session-receipt-contract.json").read_text())
+    result = lane.review_pr(1810, 1)
+    target = ReviewTarget(**result["target"])
+    worker = lane.state_root / "runs" / target.key / MODELS[0]
+    launch = module._read(worker / "launch.json")
+    receipt = module._read(worker / "receipt.json")
+    session_id = fixture["session_id"]
+    final_text = json.dumps(fixture["final_result"], ensure_ascii=False)
+    diff_cmd = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
+    patch = git(lane.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha)
+    events = [
+        {"type": "thread.started", "thread_id": session_id},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc '{diff_cmd}'",
+                                            "aggregated_output": patch, "status": "completed", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": final_text}},
+        {"type": "turn.completed"},
+    ]
+    (worker / "events.jsonl").write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n")
+    (worker / "session.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in fixture["session_records"]) + "\n"
+    )
+    updated_receipt = {**receipt, "session_id": session_id, "result": fixture["final_result"],
+                       "observed_provider": fixture["provider"], "observed_model": fixture["model"]}
+    receipt_root = tmp_path / "proxy-receipts"
+    launch_hdr = f"review-{launch['launch_id']}"
+    rec_dir = receipt_root / launch_hdr
+    rec_dir.mkdir(parents=True, mode=0o700)
+    now = time.time_ns()
+    (rec_dir / "receipt.json").write_text(json.dumps({
+        "schema": "cliproxy-review-v1",
+        "launch": launch_hdr,
+        "session": session_id,
+        "started_ns": now - 1_000_000,
+        "finished_ns": now,
+        "complete": True,
+        "tainted": False,
+        "requests": len(fixture["response_ids"]),
+        "routes": [f"codex:{fixture['model']}@chatgpt.com"],
+        "last_response_id_sha256": hashlib.sha256(fixture["response_ids"][-1].encode("utf-8")).hexdigest(),
+        "last_output_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
+    }))
+    monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(receipt_root))
+    strict = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
+                            checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01,
+                            preflight=_fake_preflight_pass)
+    outcome = validate_review(target, launch, updated_receipt, worker, lane.source)
+    assert outcome.verdict == "PASS"
+    verified = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
+    assert verified.verdict == "PASS"
+
+    # 追加一条空 response_id 的末轮 token_usage_record：必须拒绝，绝不能回退采信前一条非空 response_id
+    with open(worker / "session.jsonl", "a") as sf:
+        sf.write(json.dumps({"type": "token_usage_record", "payload": {"response_id": ""}}) + "\n")
+    rejected = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
+    assert rejected.verdict == "FAILED" and "response_id" in rejected.reason

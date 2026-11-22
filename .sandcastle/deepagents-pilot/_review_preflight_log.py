@@ -84,9 +84,17 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
             return None
 
 
-def review_from_receipt(root: Path, launch: str, session: str, since: float, wait: float) -> dict | None:
-    """消费代理为正式独审 launch 原子发布的 cliproxy-review-v1 收据；缺项、污染或模型不符均返回 None。"""
+def review_from_receipt(
+    root: Path, launch: str, session: str, since: float, wait: float, *,
+    expected_response_id_sha256: str = "", expected_output_sha256: str = "", min_requests: int = 1,
+) -> dict | None:
+    """消费代理为正式独审 launch 原子发布的 cliproxy-review-v1 收据；缺项、污染或模型不符立即返回 None；
+    多轮收据在最终轮尚未异步落盘时在 wait 截止时间内轮询等待期望的最终响应摘要与轮数。"""
     if not REVIEW_LAUNCH.fullmatch(launch) or not REVIEW_SESSION.fullmatch(session):
+        return None
+    if expected_response_id_sha256 and not SHA256_HEX.fullmatch(expected_response_id_sha256):
+        return None
+    if expected_output_sha256 and not SHA256_HEX.fullmatch(expected_output_sha256):
         return None
     end = time.monotonic() + max(0, wait)
     while True:
@@ -127,12 +135,20 @@ def review_from_receipt(root: Path, launch: str, session: str, since: float, wai
                     or not isinstance(payload["last_output_sha256"], str)
                     or (payload["last_output_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_output_sha256"]))):
                 return None
-            return {
+            result = {
                 "routes": [tuple(payload["routes"][0].split("@"))],
                 "requests": payload["requests"],
                 "last_response_id_sha256": payload["last_response_id_sha256"],
                 "last_output_sha256": payload["last_output_sha256"],
             }
+            matched = (
+                payload["requests"] >= max(1, min_requests)
+                and (not expected_response_id_sha256 or payload["last_response_id_sha256"] == expected_response_id_sha256)
+                and (not expected_output_sha256 or payload["last_output_sha256"] == expected_output_sha256)
+            )
+            if matched or time.monotonic() >= end:
+                return result
+            time.sleep(min(0.02, max(0, end - time.monotonic())))
         except FileNotFoundError:
             if time.monotonic() >= end:
                 return None
@@ -145,14 +161,25 @@ def main():
     # 绝对到期时间也约束 daemon 延迟启动的 exec；SIGALRM 覆盖阻塞读取与输出。
     arguments = sys.argv[1:]
     if arguments[:1] == ["--review-receipt"]:
-        log_dir, launch, session, since, expires, budget, known_json = arguments[1:]
+        rest = arguments[1:]
+        if len(rest) == 7:
+            log_dir, launch, session, since, expires, budget, known_json = rest
+            expected_rid, expected_out, min_reqs = "", "", 1
+        elif len(rest) == 10:
+            log_dir, launch, session, since, expires, budget, known_json, expected_rid, expected_out, raw_min = rest
+            min_reqs = int(raw_min)
+        else:
+            return 2
         remaining = float(expires) - time.time()
         if not 0 < remaining <= float(budget):
             return 2
         signal.signal(signal.SIGALRM, lambda *_: os._exit(2))
         signal.setitimer(signal.ITIMER_REAL, remaining)
         known = {tuple(route): "@".join(route) for route in json.loads(known_json)}
-        info = review_from_receipt(Path(log_dir), launch, session, float(since), remaining)
+        info = review_from_receipt(
+            Path(log_dir), launch, session, float(since), remaining,
+            expected_response_id_sha256=expected_rid, expected_output_sha256=expected_out, min_requests=min_reqs,
+        )
         print(json.dumps({
             "launch": launch,
             "session": session,

@@ -575,6 +575,7 @@ class ExternalReview:
         self.launcher = launcher or [str(SOURCE_REPO / "node_modules" / ".bin" / "tsx"),
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
         self.preflight = preflight if preflight is not None else self._run_preflight
+        self._custom_session_receipt = session_receipt is not None
         self.session_receipt = session_receipt if session_receipt is not None else self._read_session_receipt
         self.poll_seconds = poll_seconds
         self._stop = threading.Event()
@@ -669,7 +670,10 @@ class ExternalReview:
             result[key] = value
         return result
 
-    def _read_session_receipt(self, model: str, launch_id: str, session_id: str, since: float) -> dict[str, Any] | None:
+    def _read_session_receipt(
+        self, model: str, launch_id: str, session_id: str, since: float, *,
+        expected_response_id_sha256: str = "", expected_output_sha256: str = "", min_requests: int = 1,
+    ) -> dict[str, Any] | None:
         """从已配置的代理收据来源读取正式独审 session 的 cliproxy-review-v1 收据；未配置、相对路径、冲突或污染一律返回 None。"""
         if (not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", launch_id)
                 or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id)):
@@ -688,6 +692,7 @@ class ExternalReview:
             reader_source = PREFLIGHT_LOG_READER.read_text(encoding="utf-8")
         except OSError:
             return None
+        tail_args = [expected_response_id_sha256, expected_output_sha256, str(max(1, min_requests))]
         if container:
             proxy_ctx = os.environ.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
             container_dir = os.environ.get(PREFLIGHT_ENV_CONTAINER_DIR, "").strip()
@@ -696,12 +701,12 @@ class ExternalReview:
                 return None
             cmd = ["docker", "--context", proxy_ctx, "exec", container, "python3", "-I", "-c", reader_source,
                    "--review-receipt", container_dir, launch, session_id, str(since), str(expires), str(budget),
-                   json.dumps(known)]
+                   json.dumps(known), *tail_args]
             env = {k: os.environ[k] for k in DOCKER_ENV if k in os.environ and k != "DOCKER_CONTEXT"}
         else:
             cmd = [sys.executable, "-I", "-c", reader_source,
                    "--review-receipt", host_dir, launch, session_id, str(since), str(expires), str(budget),
-                   json.dumps(known)]
+                   json.dumps(known), *tail_args]
             env = {k: os.environ[k] for k in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL")
                    if k in os.environ}
         try:
@@ -770,9 +775,14 @@ class ExternalReview:
                         continue
                     row = json.loads(line)
                     if row.get("type") == "token_usage_record":
-                        rid = (row.get("payload") or {}).get("response_id")
-                        if isinstance(rid, str) and rid.strip():
-                            response_ids.append(rid)
+                        payload = row.get("payload")
+                        rid = payload.get("response_id") if isinstance(payload, dict) else None
+                        if not isinstance(rid, str) or not rid.strip():
+                            return ReviewOutcome(
+                                outcome.model, "FAILED", outcome.session_id,
+                                "session.jsonl 含缺失或为空的 token_usage_record.response_id，PASS/BLOCK 均不采信",
+                            )
+                        response_ids.append(rid.strip())
         except (OSError, ValueError, TypeError):
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "无法读取 events.jsonl/session.jsonl 核验代理侧最终响应绑定，PASS/BLOCK 均不采信")
@@ -782,14 +792,22 @@ class ExternalReview:
         if not response_ids:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "session.jsonl 缺少可核验的 token_usage_record.response_id，PASS/BLOCK 均不采信")
-        try:
-            evidence = self.session_receipt(outcome.model, str(launch.get("launch_id", "")),
-                                            str(outcome.session_id or ""), since)
-        except Exception:
-            evidence = None
         expected = f"codex:{outcome.model}@chatgpt.com"
         expected_out_sha = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
         expected_rid_sha = hashlib.sha256(response_ids[-1].encode("utf-8")).hexdigest()
+        try:
+            if not self._custom_session_receipt and self.session_receipt == self._read_session_receipt:
+                evidence = self._read_session_receipt(
+                    outcome.model, str(launch.get("launch_id", "")), str(outcome.session_id or ""), since,
+                    expected_response_id_sha256=expected_rid_sha,
+                    expected_output_sha256=expected_out_sha,
+                    min_requests=len(response_ids),
+                )
+            else:
+                evidence = self.session_receipt(outcome.model, str(launch.get("launch_id", "")),
+                                                str(outcome.session_id or ""), since)
+        except Exception:
+            evidence = None
         if (not isinstance(evidence, dict)
                 or evidence.get("routes") != [expected]
                 or type(evidence.get("requests")) is not int or evidence["requests"] < len(response_ids)

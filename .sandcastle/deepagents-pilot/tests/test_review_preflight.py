@@ -1845,6 +1845,58 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
     assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
 
 
+def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediately(tmp_path):
+    """多轮审阅终轮异步落盘时，读取器应在 wait 时限内等待期望终轮摘要；遇污染收据立即返回 None 不空等。"""
+    launch = "review-12345678-1234-4234-8234-123456789ab2"
+    session = "019d0000-0000-7000-8000-000000000ab2"
+    now = time.time_ns()
+    turn1 = {
+        "schema": "cliproxy-review-v1", "launch": launch, "session": session,
+        "started_ns": now - 2_000_000, "finished_ns": now - 1_000_000, "complete": True,
+        "tainted": False, "requests": 1, "routes": [f"codex:{SOL}@chatgpt.com"],
+        "last_response_id_sha256": "1" * 64, "last_output_sha256": "",
+    }
+    turn2 = {
+        **turn1, "finished_ns": now, "requests": 2,
+        "last_response_id_sha256": "2" * 64, "last_output_sha256": "3" * 64,
+    }
+    directory = tmp_path / launch
+    directory.mkdir(mode=0o700)
+    path = directory / "receipt.json"
+    path.write_text(json.dumps(turn1))
+
+    def publish_turn2():
+        time.sleep(0.08)
+        tmp = directory / "pending"
+        tmp.write_text(json.dumps(turn2))
+        os.replace(tmp, path)
+
+    t = threading.Thread(target=publish_turn2)
+    t.start()
+    try:
+        got = preflight._log_module.review_from_receipt(
+            tmp_path, launch, session, time.time() - 5, 2.0,
+            expected_response_id_sha256="2" * 64, expected_output_sha256="3" * 64, min_requests=2,
+        )
+    finally:
+        t.join(timeout=2)
+    assert got == {
+        "routes": [(f"codex:{SOL}", "chatgpt.com")],
+        "requests": 2,
+        "last_response_id_sha256": "2" * 64,
+        "last_output_sha256": "3" * 64,
+    }
+
+    path.write_text(json.dumps({**turn2, "complete": False, "tainted": True, "routes": ["other"],
+                                "last_response_id_sha256": "", "last_output_sha256": ""}))
+    started = time.monotonic()
+    assert preflight._log_module.review_from_receipt(
+        tmp_path, launch, session, time.time() - 5, 3.0,
+        expected_response_id_sha256="2" * 64, expected_output_sha256="3" * 64, min_requests=2,
+    ) is None
+    assert time.monotonic() - started < 0.5
+
+
 def test_unscoped_codex_receipt_and_mismatched_roundtrip_model_are_rejected(tmp_path, env, capsys):
     _receipt(tmp_path, routes=["codex@chatgpt.com"])
     assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None

@@ -413,7 +413,9 @@ class Sweep:
         return {"action": "rate-limit-backoff", "runs": runs,
                 "until": datetime.fromtimestamp(until, timezone.utc).isoformat()}
 
-    def _resumes(self, number: int, head: str, attempt: int) -> Path:
+    def _resumes(self, number: int, head: str, attempt: int, base: str | None = None) -> Path:
+        if base:
+            return self.folder / f"p{number}-{head}-{base}-a{attempt}.resumes"
         return self.folder / f"p{number}-{head}-a{attempt}.resumes"
 
     def _has_commits(self, *shas: str) -> bool:
@@ -424,12 +426,32 @@ class Sweep:
             return False
         return True
 
+    def _ensure_commits(self, number: int, base: str, head: str) -> tuple[str, dict | None] | None:
+        if self._has_commits(base, head):
+            return None
+        if self.sync is None:
+            return "needs-source-sync", None
+        source = f"git fetch {REPO} main pull/{number}/head"
+        if self._sync_failed:  # 一轮里 fetch 失败过就不再试，免得超时逐个累加
+            return "source-unreadable", {"unreadable": source, "reason": "本轮 fetch 已失败过，下轮再试"}
+        try:
+            self.sync(number, base, head)
+        except Exception as error:  # 读不到对象：不派审、不算通过，写明读不到哪个源
+            self._sync_failed = True
+            detail = getattr(error, "stderr", b"") or b""
+            detail = detail.decode(errors="replace") if isinstance(detail, bytes) else str(detail)
+            return "source-unreadable", {"unreadable": source,
+                                         "reason": f"{type(error).__name__}: {detail.strip()[:200] or error}"}
+        if not self._has_commits(base, head):
+            return "needs-source-sync", None
+        return None
+
     def _launch(self, number: int, head: str, attempt: int) -> int:
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         return self.spawn(number, attempt, head, self.folder / "logs" / f"p{number}-{head[:12]}-a{attempt}.log")
 
-    def _resume_once(self, number: int, head: str, attempt: int, action: str) -> tuple[str, dict | None]:
-        marker = self._resumes(number, head, attempt)
+    def _resume_once(self, number: int, head: str, base: str, attempt: int, action: str) -> tuple[str, dict | None]:
+        marker = self._resumes(number, head, attempt, base)
         if marker.exists():
             return ("needs-reconcile" if action == "publish" else "needs-operator"), None
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -461,12 +483,15 @@ class Sweep:
         marker.write_text(str(time.time()))
         return "launch", {"pid": self._launch(number, head, attempt), "attempt": attempt}
 
-    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
-        try:
-            _git(self.lane.source, "merge-base", "--is-ancestor", ancestor, descendant)
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool | None:
+        """仅 git 退出码 0 判祖先、退出码 1 判非祖先；缺对象或其它错误返回 None，触发同步而不误判 done。"""
+        done = subprocess.run(["git", "-C", str(self.lane.source), "merge-base", "--is-ancestor", ancestor, descendant],
+                              capture_output=True)
+        if done.returncode == 0:
             return True
-        except subprocess.CalledProcessError:
+        if done.returncode == 1:
             return False
+        return None
 
     def _latest_for_head(self, number: int, head: str) -> dict[str, Any] | None:
         runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
@@ -480,43 +505,43 @@ class Sweep:
         runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
         latest = self._latest_for_head(number, head)
         if latest is not None and latest["outcome"] and "publication" in latest["outcome"]:
-            # F4：正常 main 前进使 PR 落后（behind 或 base 不在 head 祖先链）时不重审旧 head，等追平；
-            # 但当 main 前进到 head 已包含的提交（clean，不会触发追平）时，旧 base 的结论不能代替新 base，须为新 base 派审。
-            if latest["target"].get("base_sha") == base or behind or not self._is_ancestor(base, head):
+            # F4：正常 main 前进使 PR 落后（behind 或 base 确非 head 祖先）时不重审旧 head，等追平；
+            # 若本地缺对象（_is_ancestor 返回 None）须先同步再判定，不可误判 done；
+            # 当 main 前进到 head 已包含的提交（clean，不会触发追平）时，须为新 base 派审。
+            if latest["target"].get("base_sha") == base or behind:
                 return "done", None
+            anc = self._is_ancestor(base, head)
+            if anc is False:
+                return "done", None
+            if anc is None:
+                sync_err = self._ensure_commits(number, base, head)
+                if sync_err is not None:
+                    return sync_err
+                anc = self._is_ancestor(base, head)
+                if anc is False:
+                    return "done", None
+                if anc is None:
+                    return "needs-source-sync", None
         if running >= self.max_running:
             return "queued", None
         if latest is not None and latest["outcome"] and "publication" not in latest["outcome"]:
             if latest["target"].get("base_sha") != base or not self._resumable(latest):
                 return "needs-reconcile", None
-            return self._resume_once(number, head, latest["target"]["attempt"], "publish")
+            return self._resume_once(number, head, base, latest["target"]["attempt"], "publish")
         if behind:  # 先追平再审：不审一个合入前必然被替换的 head
             return "behind-awaiting-update", None
         if self._backoff is not None:  # 限流退避：不派新审查（含续跑审查），本轮汇总一行日志
             return "review-backoff", None
-        if not self._has_commits(base, head):
-            if self.sync is None:
-                return "needs-source-sync", None
-            source = f"git fetch {REPO} main pull/{number}/head"
-            if self._sync_failed:  # 一轮里 fetch 失败过就不再试，免得超时逐个累加
-                return "source-unreadable", {"unreadable": source, "reason": "本轮 fetch 已失败过，下轮再试"}
-            try:
-                self.sync(number, base, head)
-            except Exception as error:  # 读不到对象：不派审、不算通过，写明读不到哪个源
-                self._sync_failed = True
-                detail = getattr(error, "stderr", b"") or b""
-                detail = detail.decode(errors="replace") if isinstance(detail, bytes) else str(detail)
-                return "source-unreadable", {"unreadable": source,
-                                             "reason": f"{type(error).__name__}: {detail.strip()[:200] or error}"}
-            if not self._has_commits(base, head):
-                return "needs-source-sync", None
+        sync_err = self._ensure_commits(number, base, head)
+        if sync_err is not None:
+            return sync_err
         current = [r for r in runs if r["target"].get("base_sha") == base]
         if latest is not None and not latest["outcome"] and latest["target"].get("base_sha") == base:  # 最新登记的未完结 attempt
             if not self._resumable(latest):
                 return "needs-operator", None
             if self._pre_dispatch_reuse_fallback(latest):  # 沿用退回、尚未发 pending/建工蜂目录：走 launch-backoff，不耗尽唯一续跑机会
                 return self._launch_with_backoff(number, head, base, latest["target"]["attempt"])
-            return self._resume_once(number, head, latest["target"]["attempt"], "review")
+            return self._resume_once(number, head, base, latest["target"]["attempt"], "review")
         attempt = max((r["target"]["attempt"] for r in current), default=0) + 1
         # 子进程在登记前就退出（读 PR 失败、App 身份未就绪、controller 不干净）时同一 attempt 会原样再派；
         # 退避一段时间，免得每轮都派一个必死的子进程。
@@ -655,6 +680,9 @@ class Sweep:
         if again["head"] != head:
             return ({"action": "head-moved", "classified": head, "now": again["head"]}, False,
                     "disable" if state["auto_merge"] or again["auto_merge"] else None)
+        if again["base"] != state["base"]:
+            return ({"action": "base-moved", "classified_base": state["base"], "now_base": again["base"]}, False,
+                    "disable" if state["auto_merge"] or again["auto_merge"] else None)
         gated = human_gated(files)
         if gated:
             return ({"action": "needs-human-confirm", "gated": gated}, False,
@@ -787,7 +815,7 @@ class Sweep:
                 result, claimed, write = self._plan_one(pr, states[number], gate_ok, head_free and evidence_ok,
                                                         number in reviewing_now, review_actions.get(number), bindings,
                                                         live_review=number in live_busy)
-                if result["action"] not in ("head-moved", "needs-human-confirm"):
+                if result["action"] not in ("head-moved", "base-moved", "needs-human-confirm"):
                     clean.add(number)
             except SourceUnreadable:
                 raise
@@ -811,15 +839,22 @@ class Sweep:
                             except Exception:
                                 live_now = {number}
                             live_state = self.github.pr(number)
+                            classified_base = states[number]["base"]
                             if live_state["head"] != head:
                                 result = {"action": "head-moved", "classified": head, "now": live_state["head"],
+                                          **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
+                                if result.get("auto_merge_withdrawn"):
+                                    withdrawn.add(number)
+                            elif live_state["base"] != classified_base:
+                                result = {"action": "base-moved", "classified_base": classified_base,
+                                          "now_base": live_state["base"], "rechecked_under_pr_lock": True,
                                           **self._withdraw(number, armed or bool(live_state.get("auto_merge")))}
                                 if result.get("auto_merge_withdrawn"):
                                     withdrawn.add(number)
                             elif (number in live_busy
                                     or number in live_now
                                     or live_state.get("mergeable_state") not in ("clean", "unstable")
-                                    or not self._review_confirmed_published_pass(number, head, live_state["base"])):
+                                    or not self._review_confirmed_published_pass(number, head, classified_base)):
                                 result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
                             else:
                                 self.github.merge(number, head)
