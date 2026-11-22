@@ -1078,19 +1078,18 @@ def _extract_wontfix_reply_keys(
     )
 
 
-def _recover_legacy_wontfix_reply_keys(
+def _collect_direct_cleared_reply_keys(
     *,
-    resolved_fingerprints: Collection[str],
+    cleared_fingerprints: Collection[str],
     consumed_reply_keys: Collection[str],
     pre_consumed_keys: frozenset[str],
     bound_reply_targets: Mapping[str, str],
-    prior_aliases: Mapping[str, str],
     next_aliases: Mapping[str, str],
     consumed_alias_maps: Sequence[Mapping[str, str]],
 ) -> frozenset[tuple[str, str]]:
-    """从旧格式历史条目（wontfix_reply_keys=None）的已消费键与已核验目标锁定中恢复可唯一归属的直接 wontfix 证据。"""
-    resolved_set = frozenset(fp.strip().lower() for fp in resolved_fingerprints)
-    if not resolved_set:
+    """无启发式纯函数：收集本轮所有精确归属于已清除发现且未前置消费的直接作者回复 (target_fid, reply_key)。"""
+    cleared_set = frozenset(fp.strip().lower() for fp in cleared_fingerprints)
+    if not cleared_set:
         return frozenset()
 
     parsed: list[tuple[str, str, str, str]] = []
@@ -1098,35 +1097,30 @@ def _recover_legacy_wontfix_reply_keys(
         cid, kind, payload = _parse_consumed_reply_key(rk, "consumed_reply_keys[]")
         parsed.append((rk, cid, kind, payload))
 
-    all_resolved_pairs = {
-        (cid, payload)
-        for _, cid, kind, payload in parsed
-        if kind == "resolved"
-    }
     resolved_pairs = {
         (cid, payload)
-        for cid, payload in all_resolved_pairs
-        if payload in resolved_set
+        for _, cid, kind, payload in parsed
+        if kind == "resolved" and payload in cleared_set
     }
     if not resolved_pairs:
         return frozenset()
 
-    candidates_by_fid: dict[str, list[tuple[str, str]]] = {}
+    collected: set[tuple[str, str]] = set()
     for rk, cid, kind, payload in parsed:
         if kind == "resolved":
             continue
         target_fid: str | None = None
         if kind == "finding" and len(payload) == 16:
-            target_fid = payload if payload in resolved_set else None
+            target_fid = payload if payload in cleared_set else None
         elif kind == "finding" and len(payload) < 16:
             pinned = bound_reply_targets.get(rk)
-            if pinned is not None and pinned in resolved_set and pinned.startswith(payload):
+            if pinned is not None and pinned in cleared_set and pinned.startswith(payload):
                 target_fid = pinned
         elif kind in ("loc", "inline"):
             pinned = bound_reply_targets.get(rk)
             if pinned is not None:
                 effective_pinned = next_aliases.get(pinned, pinned)
-                if effective_pinned in resolved_set:
+                if effective_pinned in cleared_set:
                     target_fid = effective_pinned
         if (
             target_fid is not None
@@ -1139,26 +1133,8 @@ def _recover_legacy_wontfix_reply_keys(
                 alias_maps=consumed_alias_maps,
             )
         ):
-            candidates_by_fid.setdefault(target_fid, []).append((cid, rk))
-
-    recovered: set[tuple[str, str]] = set()
-    used_rks: set[str] = set()
-    for fid, entries in sorted(candidates_by_fid.items()):
-        old_canon = prior_aliases.get(fid)
-        if old_canon is not None and old_canon != fid and fid not in next_aliases:
-            non_derivable = [(cid, rk) for cid, rk in entries if (cid, old_canon) not in all_resolved_pairs]
-            selected_entries = non_derivable if non_derivable else entries
-        else:
-            selected_entries = entries
-        cids = {cid for cid, _ in selected_entries}
-        if len(cids) != 1:
-            continue
-        chosen_rk = sorted(rk for _, rk in selected_entries)[0]
-        if chosen_rk in used_rks:
-            continue
-        used_rks.add(chosen_rk)
-        recovered.add((fid, chosen_rk))
-    return frozenset(recovered)
+            collected.add((target_fid, rk))
+    return frozenset(collected)
 
 
 @dataclass(frozen=True)
@@ -4513,7 +4489,7 @@ def _validate_history_chain(
         consumed_alias_maps = _build_consumed_alias_maps(next_aliases, prior_aliases)
 
         wontfix_by_fid: dict[str, str] = {}
-        recovered_by_fid: dict[str, str] = {}
+        direct_resolved_fids: frozenset[str] = frozenset()
         if validated_entry_wontfix is not None:
             wontfix_by_fid = dict(validated_entry_wontfix)
             for fid, rk in wontfix_by_fid.items():
@@ -4545,19 +4521,16 @@ def _validate_history_chain(
                             f"历史第 {idx} 轮 wontfix_reply_keys 中回复键 {rk!r} 已锁定到发现 {pinned_fid!r}，"
                             f"与声称解除的发现 {fid!r} 不匹配"
                         )
-            effective_wontfix: frozenset[tuple[str, str]] = validated_entry_wontfix
         else:
-            recovered_legacy_wontfix = _recover_legacy_wontfix_reply_keys(
-                resolved_fingerprints=entry.resolved_fingerprints,
+            direct_resolved = _collect_direct_cleared_reply_keys(
+                cleared_fingerprints=entry.resolved_fingerprints,
                 consumed_reply_keys=validated_entry_consumed,
                 pre_consumed_keys=pre_consumed_keys,
                 bound_reply_targets=historical_bound_targets,
-                prior_aliases=prior_aliases,
                 next_aliases=next_aliases,
                 consumed_alias_maps=consumed_alias_maps,
             )
-            effective_wontfix = recovered_legacy_wontfix
-            recovered_by_fid = dict(recovered_legacy_wontfix)
+            direct_resolved_fids = frozenset(fid for fid, _ in direct_resolved)
 
         for raw_fp in entry.resolved_fingerprints:
             norm_fp = raw_fp.strip().lower()
@@ -4582,8 +4555,8 @@ def _validate_history_chain(
                         and norm_fp not in next_aliases
                     )
                     if is_detached_alias:
-                        has_wontfix_proof = norm_fp in recovered_by_fid
-                    elif norm_fp in recovered_by_fid:
+                        has_wontfix_proof = norm_fp in direct_resolved_fids
+                    elif norm_fp in direct_resolved_fids:
                         has_wontfix_proof = True
                     else:
                         has_wontfix_proof = any(
@@ -4611,9 +4584,19 @@ def _validate_history_chain(
                 f"历史第 {idx} 轮遗漏了前轮未解除的 Important 发现（无结转/解除/驳回记录）：{sorted(unaccounted)!r}"
             )
 
+        direct_cleared_reply_keys = (
+            validated_entry_wontfix or frozenset()
+        ) | _collect_direct_cleared_reply_keys(
+            cleared_fingerprints=cleared_in_round,
+            consumed_reply_keys=validated_entry_consumed,
+            pre_consumed_keys=pre_consumed_keys,
+            bound_reply_targets=historical_bound_targets,
+            next_aliases=next_aliases,
+            consumed_alias_maps=consumed_alias_maps,
+        )
         after_wontfix_state = _apply_round_new_consumed_keys(
             input_state,
-            _wontfix_direct_consumed_keys(effective_wontfix),
+            _wontfix_direct_consumed_keys(direct_cleared_reply_keys),
             prior_aliases,
             next_aliases,
             treat_detached_as_derived=False,
@@ -5604,21 +5587,19 @@ def _replay_history_state(
             next_aliases,
             treat_detached_as_derived=False,
         )
-        if entry.wontfix_reply_keys is not None:
-            effective_wontfix = entry.wontfix_reply_keys
-        else:
-            effective_wontfix = _recover_legacy_wontfix_reply_keys(
-                resolved_fingerprints=entry.resolved_fingerprints,
-                consumed_reply_keys=entry.consumed_reply_keys,
-                pre_consumed_keys=input_state.all_keys,
-                bound_reply_targets=historical_bound_targets,
-                prior_aliases=prior_aliases,
-                next_aliases=next_aliases,
-                consumed_alias_maps=_build_consumed_alias_maps(next_aliases, prior_aliases),
-            )
+        direct_cleared_reply_keys = (
+            entry.wontfix_reply_keys or frozenset()
+        ) | _collect_direct_cleared_reply_keys(
+            cleared_fingerprints=cleared_in_round,
+            consumed_reply_keys=entry.consumed_reply_keys,
+            pre_consumed_keys=input_state.all_keys,
+            bound_reply_targets=historical_bound_targets,
+            next_aliases=next_aliases,
+            consumed_alias_maps=_build_consumed_alias_maps(next_aliases, prior_aliases),
+        )
         after_wontfix_state = _apply_round_new_consumed_keys(
             input_state,
-            _wontfix_direct_consumed_keys(effective_wontfix),
+            _wontfix_direct_consumed_keys(direct_cleared_reply_keys),
             prior_aliases,
             next_aliases,
             treat_detached_as_derived=False,
@@ -6173,9 +6154,18 @@ def _derive_round_decision_payload(
             )
 
     wontfix_reply_keys = _extract_wontfix_reply_keys(resolved)
+    consumed_alias_maps = _build_consumed_alias_maps(effective_aliases, history_aliases)
+    direct_cleared_reply_keys = wontfix_reply_keys | _collect_direct_cleared_reply_keys(
+        cleared_fingerprints=cleared_ids,
+        consumed_reply_keys=consumed_keys,
+        pre_consumed_keys=input_state.all_keys,
+        bound_reply_targets=bound_targets,
+        next_aliases=effective_aliases,
+        consumed_alias_maps=consumed_alias_maps,
+    )
     after_wontfix_state = _apply_round_new_consumed_keys(
         input_state,
-        _wontfix_direct_consumed_keys(wontfix_reply_keys),
+        _wontfix_direct_consumed_keys(direct_cleared_reply_keys),
         history_aliases,
         effective_aliases,
         treat_detached_as_derived=False,
@@ -6188,6 +6178,30 @@ def _derive_round_decision_payload(
         treat_detached_as_derived=True,
     )
     consumed_reply_keys = frozenset(consumed_keys) | (final_state.all_keys - prior_consumed_state.all_keys)
+    fixed_direct_cleared_reply_keys = wontfix_reply_keys | _collect_direct_cleared_reply_keys(
+        cleared_fingerprints=cleared_ids,
+        consumed_reply_keys=consumed_reply_keys,
+        pre_consumed_keys=input_state.all_keys,
+        bound_reply_targets=bound_targets,
+        next_aliases=effective_aliases,
+        consumed_alias_maps=consumed_alias_maps,
+    )
+    if fixed_direct_cleared_reply_keys != direct_cleared_reply_keys:
+        after_wontfix_state = _apply_round_new_consumed_keys(
+            input_state,
+            _wontfix_direct_consumed_keys(fixed_direct_cleared_reply_keys),
+            history_aliases,
+            effective_aliases,
+            treat_detached_as_derived=False,
+        )
+        final_state = _apply_round_new_consumed_keys(
+            after_wontfix_state,
+            consumed_reply_keys,
+            history_aliases,
+            effective_aliases,
+            treat_detached_as_derived=True,
+        )
+        consumed_reply_keys = frozenset(consumed_keys) | (final_state.all_keys - prior_consumed_state.all_keys)
     bound_reply_targets = frozenset(bound_targets.items())
     finder_session_ids = frozenset(b.session_id for b in verified.candidates.finder_batches)
     unresolved_ids = frozenset(f.finding_id for f in unresolved_important)

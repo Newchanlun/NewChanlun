@@ -18261,8 +18261,8 @@ def test_r43_finding1_legacy_loc_and_inline_pins_resolve_detached_alias_via_next
         assert evaluate_round(ver_r4_ok).outcome is RoundOutcome.PASS
 
 
-def test_r43_finding2_legacy_dual_comment_prioritizes_non_derivable_proof_and_reverse_control() -> None:
-    """R43 Finding 2 回归：旧格式双评论 [42:A, 42:D, 43:D] 精确恢复 (43, D) 并保留 (42, D) 为 self_only；逆序对照精确恢复 (42, D)。"""
+def test_r43_finding2_dual_comment_direct_cleared_equivalence_and_controls() -> None:
+    """R44 Important 1 回归：正序 [42:A, 42:D, 43:D]、逆序 [43:D, 42:A, 42:D] 与无直接 42:D 对照 [42:A, 43:D] 在实时/新格式/旧格式三者逐位一致。"""
     f_a_imp = _finding(
         severity=Severity.IMPORTANT,
         file="pilot1742/r43_f2_a.py",
@@ -18321,6 +18321,7 @@ def test_r43_finding2_legacy_dual_comment_prioritizes_non_derivable_proof_and_re
     reply_d_imp_42 = AuthorReply(f_d_imp.finding_id, None, None, "复用评论 42 不修 D", "42", "alice")
     reply_x_42 = AuthorReply(f_x_imp.finding_id, None, None, "评论 42 不修 X", "42", "alice")
     reply_x_43 = AuthorReply(f_x_imp.finding_id, None, None, "评论 43 不修 X", "43", "alice")
+    reply_x_45 = AuthorReply(f_x_imp.finding_id, None, None, "未消费评论 45 不修 X", "45", "alice")
 
     # R1: Nit D->A，A、I 阻断
     cand_r1 = _candidates([f_a_imp, f_d_nit, f_i], round_number=1, head_sha=HEAD_1)
@@ -18344,117 +18345,110 @@ def test_r43_finding2_legacy_dual_comment_prioritizes_non_derivable_proof_and_re
     dec_r1 = evaluate_round(ver_r1)
     r1_entry = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
 
-    # 主实验 R2: I 保持阻断，回复序列 [42:finding:A, 42:finding:D, 43:finding:D]
-    cand_r2 = _candidates([f_d_nit], round_number=2, head_sha=HEAD_2, history=(r1_entry,))
-    ver_r2 = parse_verifier_output(
+    def _run_r3_r4_expect_reject_42_and_43(r2_hist_entry: RoundHistoryEntry) -> None:
+        cand_r3 = _candidates([f_d_nit, f_x_nit], round_number=3, head_sha=HEAD_3, history=(r1_entry, r2_hist_entry))
+        ver_r3 = parse_verifier_output(
+            _verifier_payload(
+                cand_r3,
+                [
+                    {
+                        "finding_id": f_d_nit.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_x_nit.finding_id,
+                        "verifier_evidence": "R3 D 折入 X",
+                    },
+                    {"finding_id": f_x_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "R3 X 成立"},
+                    {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R3 I 仍阻断"},
+                ],
+            ),
+            cand_r3,
+            verifier_model="claude-opus-5-5",
+        )
+        dec_r3 = evaluate_round(ver_r3)
+        assert {resolved_x_42, resolved_x_43} <= dec_r3.consumed_reply_keys
+        r3_entry = dec_r3.to_history_entry(rendered=render_findings_comment(1928, HEAD_3, dec_r3))
+        assert {resolved_x_42, resolved_x_43} <= r3_entry.consumed_reply_keys
+
+        plan_r4 = plan_next_round(
+            BASE_SHA,
+            HEAD_4,
+            (r1_entry, r2_hist_entry, r3_entry),
+            author_replies=[reply_x_42, reply_x_43, reply_x_45],
+        )
+        assert {resolved_x_42, resolved_x_43} <= plan_r4.consumed_reply_keys
+        assert plan_r4.author_replies == (reply_x_45,)
+
+        cand_r4 = _candidates([f_x_imp], round_number=4, head_sha=HEAD_4, history=(r1_entry, r2_hist_entry, r3_entry))
+        r4_payload = _verifier_payload(
+            cand_r4,
+            [
+                {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "R4 I 修复"},
+                {"finding_id": f_x_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "R4 X 不修"},
+            ],
+        )
+        for rejected_reply in (reply_x_42, reply_x_43):
+            with pytest.raises(ConvergenceError):
+                parse_verifier_output(
+                    r4_payload,
+                    cand_r4,
+                    verifier_model="claude-opus-5-5",
+                    author_replies=[rejected_reply],
+                )
+        ver_r4_ok = parse_verifier_output(
+            r4_payload,
+            cand_r4,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_x_45],
+        )
+        assert evaluate_round(ver_r4_ok).outcome is RoundOutcome.PASS
+
+    expected_both_prop = frozenset(
+        {("42", f_a_imp.finding_id), ("42", f_d_nit.finding_id), ("43", f_d_nit.finding_id)}
+    )
+
+    # 1. 正序 [42:finding:A, 42:finding:D, 43:finding:D]：42 直接命中并消费于 D，实时/新格式/旧格式三者完全一致
+    cand_fwd_r2 = _candidates([f_d_nit], round_number=2, head_sha=HEAD_2, history=(r1_entry,))
+    ver_fwd_r2 = parse_verifier_output(
         _verifier_payload(
-            cand_r2,
+            cand_fwd_r2,
             [
                 {"finding_id": f_a_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "R2 42 解除 A"},
                 {"finding_id": f_d_nit.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "R2 43 解除 D"},
                 {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 I 仍阻断"},
             ],
         ),
-        cand_r2,
+        cand_fwd_r2,
         verifier_model="claude-opus-5-5",
         author_replies=[reply_a_42, reply_d_42, reply_d_43],
     )
-    dec_r2 = evaluate_round(ver_r2)
-    r2_entry = dec_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_r2))
-    assert {reply_d_42.reply_key, resolved_d_42, reply_d_43.reply_key, resolved_d_43} <= r2_entry.consumed_reply_keys
-
-    expected_prop = frozenset({("42", f_a_imp.finding_id), ("43", f_d_nit.finding_id)})
-    expected_self = frozenset({("42", f_d_nit.finding_id)})
-    live_state = _derive_round_decision_payload(ver_r2).final_consumed_state
-    assert live_state.propagatable_resolved == expected_prop
-    assert live_state.self_only_resolved == expected_self
-
-    # 降级旧格式 wontfix_reply_keys=None：可合法续跑 R3，且两层内部集合与实时逐位一致
-    r2_legacy = dataclasses.replace(r2_entry, wontfix_reply_keys=None)
-    assert plan_next_round(BASE_SHA, HEAD_3, (r1_entry, r2_legacy)).round_number == 3
-    _, _, _, replayed_state = _replay_history_state((r1_entry, r2_legacy))
-    assert replayed_state.propagatable_resolved == expected_prop
-    assert replayed_state.self_only_resolved == expected_self
-    assert replayed_state == live_state
-
-    # R3: D->X 仅传播 comment:43:resolved:<X>，不传播 comment:42:resolved:<X>
-    cand_r3 = _candidates([f_d_nit, f_x_nit], round_number=3, head_sha=HEAD_3, history=(r1_entry, r2_legacy))
-    ver_r3 = parse_verifier_output(
-        _verifier_payload(
-            cand_r3,
-            [
-                {
-                    "finding_id": f_d_nit.finding_id,
-                    "verdict": "duplicate",
-                    "duplicate_of": f_x_nit.finding_id,
-                    "verifier_evidence": "R3 D 折入 X",
-                },
-                {"finding_id": f_x_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "R3 X 成立"},
-                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R3 I 仍阻断"},
-            ],
-        ),
-        cand_r3,
-        verifier_model="claude-opus-5-5",
+    dec_fwd_r2 = evaluate_round(ver_fwd_r2)
+    fwd_r2_entry = dec_fwd_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_fwd_r2))
+    assert {reply_d_42.reply_key, resolved_d_42, reply_d_43.reply_key, resolved_d_43} <= fwd_r2_entry.consumed_reply_keys
+    assert fwd_r2_entry.wontfix_reply_keys == frozenset(
+        {
+            (f_a_imp.finding_id, reply_a_42.reply_key),
+            (f_d_nit.finding_id, reply_d_43.reply_key),
+        }
     )
-    dec_r3 = evaluate_round(ver_r3)
-    assert resolved_x_43 in dec_r3.consumed_reply_keys
-    assert resolved_x_42 not in dec_r3.consumed_reply_keys
-    r3_entry = dec_r3.to_history_entry(rendered=render_findings_comment(1928, HEAD_3, dec_r3))
-    assert resolved_x_43 in r3_entry.consumed_reply_keys
-    assert resolved_x_42 not in r3_entry.consumed_reply_keys
 
-    # R4: X 升 Important、I 修复；评论 43 解除 X 被拒，评论 42 解除 X 得 PASS，且评论 42 对 D 仍被拒
-    plan_r4 = plan_next_round(
-        BASE_SHA,
-        HEAD_4,
-        (r1_entry, r2_legacy, r3_entry),
-        author_replies=[reply_x_43, reply_x_42, reply_d_imp_42],
-    )
-    assert resolved_x_43 in plan_r4.consumed_reply_keys
-    assert resolved_x_42 not in plan_r4.consumed_reply_keys
-    assert resolved_d_42 in plan_r4.consumed_reply_keys
-    assert plan_r4.author_replies == (reply_x_42,)
+    live_fwd_state = _derive_round_decision_payload(ver_fwd_r2).final_consumed_state
+    assert live_fwd_state.propagatable_resolved == expected_both_prop
+    assert live_fwd_state.self_only_resolved == frozenset()
 
-    cand_r4_x = _candidates([f_x_imp], round_number=4, head_sha=HEAD_4, history=(r1_entry, r2_legacy, r3_entry))
-    r4_x_payload = _verifier_payload(
-        cand_r4_x,
-        [
-            {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "R4 I 修复"},
-            {"finding_id": f_x_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "R4 X 不修"},
-        ],
-    )
-    with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            r4_x_payload,
-            cand_r4_x,
-            verifier_model="claude-opus-5-5",
-            author_replies=[reply_x_43],
-        )
-    ver_r4_x_ok = parse_verifier_output(
-        r4_x_payload,
-        cand_r4_x,
-        verifier_model="claude-opus-5-5",
-        author_replies=[reply_x_42],
-    )
-    assert evaluate_round(ver_r4_x_ok).outcome is RoundOutcome.PASS
+    _, _, _, fwd_new_replayed = _replay_history_state((r1_entry, fwd_r2_entry))
+    assert fwd_new_replayed == live_fwd_state
 
-    cand_r4_d = _candidates([f_d_imp], round_number=4, head_sha=HEAD_4, history=(r1_entry, r2_legacy, r3_entry))
-    with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            _verifier_payload(
-                cand_r4_d,
-                [
-                    {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "R4 I 修复"},
-                    {"finding_id": f_d_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "复用42解除D"},
-                ],
-            ),
-            cand_r4_d,
-            verifier_model="claude-opus-5-5",
-            author_replies=[reply_d_imp_42],
-        )
+    fwd_r2_legacy = dataclasses.replace(fwd_r2_entry, wontfix_reply_keys=None)
+    assert plan_next_round(BASE_SHA, HEAD_3, (r1_entry, fwd_r2_legacy)).round_number == 3
+    _, _, _, fwd_legacy_replayed = _replay_history_state((r1_entry, fwd_r2_legacy))
+    assert fwd_legacy_replayed.propagatable_resolved == expected_both_prop
+    assert fwd_legacy_replayed.self_only_resolved == frozenset()
+    assert fwd_legacy_replayed == live_fwd_state
 
-    # 逆序对照 1：[43:finding:D, 42:finding:A, 42:finding:D]（42 胜出 D，但 43 同样命中 D 故 43:resolved:D 亦入 consumed）
-    # 新格式由 wontfix_reply_keys 精确区分；旧格式（wontfix_reply_keys=None）与正序旧格式字段同构，仍可合法续跑 R3
+    _run_r3_r4_expect_reject_42_and_43(fwd_r2_entry)
+    _run_r3_r4_expect_reject_42_and_43(fwd_r2_legacy)
+
+    # 2. 逆序 [43:finding:D, 42:finding:A, 42:finding:D]：实时/新格式/旧格式三者逐位一致，绝不退化为 PASS
     cand_rev_r2 = _candidates([f_d_nit], round_number=2, head_sha=HEAD_2, history=(r1_entry,))
     ver_rev_r2 = parse_verifier_output(
         _verifier_payload(
@@ -18479,21 +18473,136 @@ def test_r43_finding2_legacy_dual_comment_prioritizes_non_derivable_proof_and_re
     )
     assert {resolved_d_42, resolved_d_43} <= rev_r2_entry.consumed_reply_keys
 
-    expected_rev_prop = frozenset({("42", f_a_imp.finding_id), ("42", f_d_nit.finding_id), ("43", f_d_nit.finding_id)})
     live_rev_state = _derive_round_decision_payload(ver_rev_r2).final_consumed_state
-    assert live_rev_state.propagatable_resolved == expected_rev_prop
+    assert live_rev_state.propagatable_resolved == expected_both_prop
     assert live_rev_state.self_only_resolved == frozenset()
     _, _, _, rev_new_replayed = _replay_history_state((r1_entry, rev_r2_entry))
     assert rev_new_replayed == live_rev_state
 
     rev_r2_legacy = dataclasses.replace(rev_r2_entry, wontfix_reply_keys=None)
-    assert rev_r2_legacy.consumed_reply_keys == r2_legacy.consumed_reply_keys
+    assert rev_r2_legacy.consumed_reply_keys == fwd_r2_legacy.consumed_reply_keys
     assert plan_next_round(BASE_SHA, HEAD_3, (r1_entry, rev_r2_legacy)).round_number == 3
     _, _, _, rev_legacy_replayed = _replay_history_state((r1_entry, rev_r2_legacy))
-    assert rev_legacy_replayed.propagatable_resolved == expected_prop
-    assert rev_legacy_replayed.self_only_resolved == expected_self
+    assert rev_legacy_replayed.propagatable_resolved == expected_both_prop
+    assert rev_legacy_replayed.self_only_resolved == frozenset()
+    assert rev_legacy_replayed == live_rev_state
 
-    # 逆序对照 2：当 43 已被外部消费（故 43:resolved:D 不存在）、42 胜出 D 时，旧格式精确恢复 (42, D) ∈ propagatable_resolved
+    _run_r3_r4_expect_reject_42_and_43(rev_r2_entry)
+    _run_r3_r4_expect_reject_42_and_43(rev_r2_legacy)
+
+    # 3. 无直接 42:D 对照 [42:finding:A, 43:finding:D]：42 未直接命中 D，三者一致保留 (42, D) ∈ self_only_resolved
+    cand_ctrl_r2 = _candidates([f_d_nit], round_number=2, head_sha=HEAD_2, history=(r1_entry,))
+    ver_ctrl_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_ctrl_r2,
+            [
+                {"finding_id": f_a_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "对照 42 解除 A"},
+                {"finding_id": f_d_nit.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "对照 43 解除 D"},
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "对照 I 仍阻断"},
+            ],
+        ),
+        cand_ctrl_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_a_42, reply_d_43],
+    )
+    dec_ctrl_r2 = evaluate_round(ver_ctrl_r2)
+    ctrl_r2_entry = dec_ctrl_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_ctrl_r2))
+    expected_ctrl_prop = frozenset({("42", f_a_imp.finding_id), ("43", f_d_nit.finding_id)})
+    expected_ctrl_self = frozenset({("42", f_d_nit.finding_id)})
+    live_ctrl_state = _derive_round_decision_payload(ver_ctrl_r2).final_consumed_state
+    assert live_ctrl_state.propagatable_resolved == expected_ctrl_prop
+    assert live_ctrl_state.self_only_resolved == expected_ctrl_self
+
+    _, _, _, ctrl_new_replayed = _replay_history_state((r1_entry, ctrl_r2_entry))
+    assert ctrl_new_replayed == live_ctrl_state
+
+    ctrl_r2_legacy = dataclasses.replace(ctrl_r2_entry, wontfix_reply_keys=None)
+    assert plan_next_round(BASE_SHA, HEAD_3, (r1_entry, ctrl_r2_legacy)).round_number == 3
+    _, _, _, ctrl_legacy_replayed = _replay_history_state((r1_entry, ctrl_r2_legacy))
+    assert ctrl_legacy_replayed.propagatable_resolved == expected_ctrl_prop
+    assert ctrl_legacy_replayed.self_only_resolved == expected_ctrl_self
+    assert ctrl_legacy_replayed == live_ctrl_state
+
+    for ctrl_hist_entry in (ctrl_r2_entry, ctrl_r2_legacy):
+        cand_r3 = _candidates([f_d_nit, f_x_nit], round_number=3, head_sha=HEAD_3, history=(r1_entry, ctrl_hist_entry))
+        ver_r3 = parse_verifier_output(
+            _verifier_payload(
+                cand_r3,
+                [
+                    {
+                        "finding_id": f_d_nit.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_x_nit.finding_id,
+                        "verifier_evidence": "R3 D 折入 X",
+                    },
+                    {"finding_id": f_x_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "R3 X 成立"},
+                    {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R3 I 仍阻断"},
+                ],
+            ),
+            cand_r3,
+            verifier_model="claude-opus-5-5",
+        )
+        dec_r3 = evaluate_round(ver_r3)
+        assert resolved_x_43 in dec_r3.consumed_reply_keys
+        assert resolved_x_42 not in dec_r3.consumed_reply_keys
+        r3_entry = dec_r3.to_history_entry(rendered=render_findings_comment(1928, HEAD_3, dec_r3))
+        assert resolved_x_43 in r3_entry.consumed_reply_keys
+        assert resolved_x_42 not in r3_entry.consumed_reply_keys
+
+        plan_r4 = plan_next_round(
+            BASE_SHA,
+            HEAD_4,
+            (r1_entry, ctrl_hist_entry, r3_entry),
+            author_replies=[reply_x_43, reply_x_42, reply_d_imp_42],
+        )
+        assert resolved_x_43 in plan_r4.consumed_reply_keys
+        assert resolved_x_42 not in plan_r4.consumed_reply_keys
+        assert resolved_d_42 in plan_r4.consumed_reply_keys
+        assert plan_r4.author_replies == (reply_x_42,)
+
+        cand_r4_x = _candidates([f_x_imp], round_number=4, head_sha=HEAD_4, history=(r1_entry, ctrl_hist_entry, r3_entry))
+        r4_x_payload = _verifier_payload(
+            cand_r4_x,
+            [
+                {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "R4 I 修复"},
+                {"finding_id": f_x_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "R4 X 不修"},
+            ],
+        )
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                r4_x_payload,
+                cand_r4_x,
+                verifier_model="claude-opus-5-5",
+                author_replies=[reply_x_43],
+            )
+        ver_r4_x_ok = parse_verifier_output(
+            r4_x_payload,
+            cand_r4_x,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_x_42],
+        )
+        assert evaluate_round(ver_r4_x_ok).outcome is RoundOutcome.PASS
+
+        cand_r4_d = _candidates([f_d_imp], round_number=4, head_sha=HEAD_4, history=(r1_entry, ctrl_hist_entry, r3_entry))
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand_r4_d,
+                    [
+                        {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "R4 I 修复"},
+                        {
+                            "finding_id": f_d_imp.finding_id,
+                            "verdict": "resolved_by_wontfix",
+                            "verifier_evidence": "复用42解除D",
+                        },
+                    ],
+                ),
+                cand_r4_d,
+                verifier_model="claude-opus-5-5",
+                author_replies=[reply_d_imp_42],
+            )
+
+    # 4. 逆序外消对照：当 43 已被外部消费（故 43:resolved:D 不存在）、42 胜出 D 时，旧格式精确恢复 (42, D) ∈ propagatable_resolved
     cand_rev_no43 = _candidates([f_d_nit], round_number=2, head_sha=HEAD_2, history=(r1_entry,))
     ver_rev_no43 = parse_verifier_output(
         _verifier_payload(
@@ -18525,3 +18634,204 @@ def test_r43_finding2_legacy_dual_comment_prioritizes_non_derivable_proof_and_re
     assert rev_no43_replayed.propagatable_resolved == expected_no43_prop
     assert rev_no43_replayed.self_only_resolved == frozenset()
     assert rev_no43_replayed == live_no43_state
+
+
+def test_r44_preexisting_multi_direct_candidates_legacy_replay_and_equivalence() -> None:
+    """R44 Pre-existing 回归：[42:A, 43:D, 44:D] 多直接候选在旧格式下正常续跑，且实时/新格式/旧格式三者完全一致。"""
+    f_a_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r44_pre_a.py",
+        line=10,
+        category="R44Pre规范A",
+        failure_scenario="r44_pre_a.py:10 规范项 A",
+        source_models=("gpt-6-astra",),
+    )
+    f_d_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r44_pre_d.py",
+        line=20,
+        category="R44Pre别名D",
+        failure_scenario="r44_pre_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_d_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r44_pre_d.py",
+        line=20,
+        category="R44Pre别名D",
+        failure_scenario="r44_pre_d.py:20 别名 D",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_x_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/r44_pre_x.py",
+        line=30,
+        category="R44Pre规范X",
+        failure_scenario="r44_pre_x.py:30 规范项 X",
+        source_models=("gpt-6-astra",),
+    )
+    f_x_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r44_pre_x.py",
+        line=30,
+        category="R44Pre规范X",
+        failure_scenario="r44_pre_x.py:30 规范项 X",
+        source_models=("gpt-6-astra",),
+    )
+    f_i = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r44_pre_i.py",
+        line=5,
+        category="R44Pre阻断I",
+        failure_scenario="r44_pre_i.py:5 阻断 I",
+        source_models=("gpt-6-astra",),
+    )
+    resolved_x_42 = f"comment:42:resolved:{f_x_nit.finding_id}"
+    resolved_x_43 = f"comment:43:resolved:{f_x_nit.finding_id}"
+    resolved_x_44 = f"comment:44:resolved:{f_x_nit.finding_id}"
+    resolved_d_42 = f"comment:42:resolved:{f_d_nit.finding_id}"
+    reply_a_42 = AuthorReply(f_a_imp.finding_id, None, None, "评论 42 显式不修 A", "42", "alice")
+    reply_d_43 = AuthorReply(f_d_nit.finding_id, None, None, "评论 43 显式不修 D", "43", "alice")
+    reply_d_44 = AuthorReply(f_d_nit.finding_id, None, None, "评论 44 显式不修 D", "44", "alice")
+    reply_d_imp_42 = AuthorReply(f_d_imp.finding_id, None, None, "复用评论 42 不修 D", "42", "alice")
+    reply_x_42 = AuthorReply(f_x_imp.finding_id, None, None, "评论 42 不修 X", "42", "alice")
+    reply_x_43 = AuthorReply(f_x_imp.finding_id, None, None, "评论 43 不修 X", "43", "alice")
+    reply_x_44 = AuthorReply(f_x_imp.finding_id, None, None, "评论 44 不修 X", "44", "alice")
+
+    # R1: Nit D->A，A、I 阻断
+    cand_r1 = _candidates([f_a_imp, f_d_nit, f_i], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [
+                {"finding_id": f_a_imp.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 A 阻断"},
+                {
+                    "finding_id": f_d_nit.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a_imp.finding_id,
+                    "verifier_evidence": "R1 D 折入 A",
+                },
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 I 阻断"},
+            ],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    r1_entry = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+
+    # R2: 回复 [42:finding:A, 43:finding:D, 44:finding:D]，I 阻断
+    cand_r2 = _candidates([f_d_nit], round_number=2, head_sha=HEAD_2, history=(r1_entry,))
+    ver_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {"finding_id": f_a_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "R2 42 解除 A"},
+                {"finding_id": f_d_nit.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "R2 44 解除 D"},
+                {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 I 仍阻断"},
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_a_42, reply_d_43, reply_d_44],
+    )
+    dec_r2 = evaluate_round(ver_r2)
+    r2_entry = dec_r2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec_r2))
+    r2_legacy = dataclasses.replace(r2_entry, wontfix_reply_keys=None)
+
+    expected_prop = frozenset(
+        {("42", f_a_imp.finding_id), ("43", f_d_nit.finding_id), ("44", f_d_nit.finding_id)}
+    )
+    expected_self = frozenset({("42", f_d_nit.finding_id)})
+    live_state = _derive_round_decision_payload(ver_r2).final_consumed_state
+    assert live_state.propagatable_resolved == expected_prop
+    assert live_state.self_only_resolved == expected_self
+
+    _, _, _, new_replayed = _replay_history_state((r1_entry, r2_entry))
+    assert new_replayed == live_state
+
+    assert plan_next_round(BASE_SHA, HEAD_3, (r1_entry, r2_legacy)).round_number == 3
+    _, _, _, legacy_replayed = _replay_history_state((r1_entry, r2_legacy))
+    assert legacy_replayed.propagatable_resolved == expected_prop
+    assert legacy_replayed.self_only_resolved == expected_self
+    assert legacy_replayed == live_state
+
+    # R3 D->X -> R4 修复 I：新旧格式下评论 43/44 解除 X 均被拒，评论 42 解除 X 得 PASS，同时 42 解除 D 仍被拒
+    for hist_r2 in (r2_entry, r2_legacy):
+        cand_r3 = _candidates([f_d_nit, f_x_nit], round_number=3, head_sha=HEAD_3, history=(r1_entry, hist_r2))
+        ver_r3 = parse_verifier_output(
+            _verifier_payload(
+                cand_r3,
+                [
+                    {
+                        "finding_id": f_d_nit.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_x_nit.finding_id,
+                        "verifier_evidence": "R3 D 折入 X",
+                    },
+                    {"finding_id": f_x_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "R3 X 成立"},
+                    {"finding_id": f_i.finding_id, "verdict": "confirmed", "verifier_evidence": "R3 I 仍阻断"},
+                ],
+            ),
+            cand_r3,
+            verifier_model="claude-opus-5-5",
+        )
+        dec_r3 = evaluate_round(ver_r3)
+        assert {resolved_x_43, resolved_x_44} <= dec_r3.consumed_reply_keys
+        assert resolved_x_42 not in dec_r3.consumed_reply_keys
+        r3_entry = dec_r3.to_history_entry(rendered=render_findings_comment(1928, HEAD_3, dec_r3))
+        assert {resolved_x_43, resolved_x_44} <= r3_entry.consumed_reply_keys
+        assert resolved_x_42 not in r3_entry.consumed_reply_keys
+
+        plan_r4 = plan_next_round(
+            BASE_SHA,
+            HEAD_4,
+            (r1_entry, hist_r2, r3_entry),
+            author_replies=[reply_x_43, reply_x_44, reply_x_42, reply_d_imp_42],
+        )
+        assert {resolved_x_43, resolved_x_44, resolved_d_42} <= plan_r4.consumed_reply_keys
+        assert resolved_x_42 not in plan_r4.consumed_reply_keys
+        assert plan_r4.author_replies == (reply_x_42,)
+
+        cand_r4_x = _candidates([f_x_imp], round_number=4, head_sha=HEAD_4, history=(r1_entry, hist_r2, r3_entry))
+        r4_x_payload = _verifier_payload(
+            cand_r4_x,
+            [
+                {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "R4 I 修复"},
+                {"finding_id": f_x_imp.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "R4 X 不修"},
+            ],
+        )
+        for rejected_reply in (reply_x_43, reply_x_44):
+            with pytest.raises(ConvergenceError):
+                parse_verifier_output(
+                    r4_x_payload,
+                    cand_r4_x,
+                    verifier_model="claude-opus-5-5",
+                    author_replies=[rejected_reply],
+                )
+        ver_r4_x_ok = parse_verifier_output(
+            r4_x_payload,
+            cand_r4_x,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_x_42],
+        )
+        assert evaluate_round(ver_r4_x_ok).outcome is RoundOutcome.PASS
+
+        cand_r4_d = _candidates([f_d_imp], round_number=4, head_sha=HEAD_4, history=(r1_entry, hist_r2, r3_entry))
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand_r4_d,
+                    [
+                        {"finding_id": f_i.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "R4 I 修复"},
+                        {
+                            "finding_id": f_d_imp.finding_id,
+                            "verdict": "resolved_by_wontfix",
+                            "verifier_evidence": "复用42解除D",
+                        },
+                    ],
+                ),
+                cand_r4_d,
+                verifier_model="claude-opus-5-5",
+                author_replies=[reply_d_imp_42],
+            )
