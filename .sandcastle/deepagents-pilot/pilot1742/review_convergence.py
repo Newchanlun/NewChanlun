@@ -527,7 +527,7 @@ def _normalize_bound_reply_targets(
     values: Mapping[str, str] | Collection[tuple[str, str]],
     field_name: str,
 ) -> dict[str, str]:
-    """严格校验坐标/行内回复目标锁定集合，禁止非 loc/inline 键、非法指纹或同一键绑定到不同目标。"""
+    """严格校验回复目标锁定集合：允许 loc / inline 与短前缀（<16 位）finding 键，禁止非法指纹或冲突绑定。"""
     if isinstance(values, Mapping):
         items: Collection[Any] = tuple(values.items())
     elif isinstance(values, Collection) and not isinstance(values, (str, bytes)):
@@ -540,12 +540,19 @@ def _normalize_bound_reply_targets(
         if not isinstance(item, tuple) or len(item) != 2:
             raise ConvergenceError(f"{field_name}[] 必须是长度为 2 的 (reply_key, target_finding_id) 元组：{item!r}")
         raw_key, raw_target = item
-        _, kind, _ = _parse_consumed_reply_key(raw_key, f"{field_name}[][0]")
+        _, kind, payload = _parse_consumed_reply_key(raw_key, f"{field_name}[][0]")
         assert isinstance(raw_key, str)
-        if kind not in ("loc", "inline"):
-            raise ConvergenceError(f"{field_name} 仅允许锁定 loc 或 inline 回复键，收到 {kind!r}：{raw_key!r}")
+        is_short_finding = kind == "finding" and len(payload) < 16
+        if kind not in ("loc", "inline") and not is_short_finding:
+            raise ConvergenceError(
+                f"{field_name} 仅允许锁定 loc、inline 或短前缀 finding 回复键，收到 {kind!r}：{raw_key!r}"
+            )
         if not isinstance(raw_target, str) or not _CONSUMED_DIGEST_HEX_RE.fullmatch(raw_target):
             raise ConvergenceError(f"{field_name} 的 target_finding_id 必须是 16 位小写十六进制指纹：{raw_target!r}")
+        if is_short_finding and not raw_target.startswith(payload):
+            raise ConvergenceError(
+                f"{field_name} 中短前缀回复键 {raw_key!r} 锁定的目标指纹 {raw_target!r} 与前缀 {payload!r} 不匹配"
+            )
         existing = mapping.get(raw_key)
         if existing is not None and existing != raw_target:
             raise ConvergenceError(
@@ -571,14 +578,25 @@ def _merge_bound_reply_targets(base: dict[str, str], incoming: Mapping[str, str]
         base[rk] = target_fid
 
 
-def _collect_history_bound_targets(history: Sequence[RoundHistoryEntry]) -> dict[str, str]:
+def _collect_history_bound_targets_with_heads(
+    history: Sequence[RoundHistoryEntry],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """收集历史链中的全部回复目标锁定映射，以及每个回复键首次建立锁定时的 head_sha。"""
     merged: dict[str, str] = {}
+    origin_heads: dict[str, str] = {}
     for idx, entry in enumerate(history):
         entry_targets = _validate_bound_reply_targets_frozenset(
             entry.bound_reply_targets,
             f"history[{idx}].bound_reply_targets",
         )
         _merge_bound_reply_targets(merged, entry_targets, f"history[{idx}].bound_reply_targets")
+        for rk in entry_targets:
+            origin_heads.setdefault(rk, entry.head_sha)
+    return merged, origin_heads
+
+
+def _collect_history_bound_targets(history: Sequence[RoundHistoryEntry]) -> dict[str, str]:
+    merged, _ = _collect_history_bound_targets_with_heads(history)
     return merged
 
 
@@ -3075,17 +3093,28 @@ def _match_reply_targets(
     *,
     stale_location_fingerprints: Collection[str] = (),
     bound_reply_targets: Mapping[str, str] | None = None,
+    duplicate_aliases: Mapping[str, str] | None = None,
+    same_head_pinned_keys: Collection[str] = (),
 ) -> tuple[list[Finding], int]:
     """唯一作者回复目标匹配规则（由 bind_author_replies、VerifiedFinding 与 VerifiedRound 共同复用）。
 
+    - 显式 finding_id 严格绑定其所引 finding_id（绝不经 duplicate_aliases 映射到规范项）；若短前缀已在
+      bound_reply_targets 中锁定到完整 16 位指纹，则仅允许匹配该锁定指纹，禁止跨轮改绑同前缀新发现。
     - 对属于 stale_location_fingerprints 的跨 HEAD 结转且未在新 HEAD 重新定位的发现，
       仅允许显式 reply.finding_id 匹配，严禁按 (file, line) / 行内锚定或文件坐标绑定。
     - 对无显式 finding_id 且未在 bound_reply_targets 中显式锁定到非过期目标的坐标/行内回复，
-      只要其坐标也命中了任何过期结转发现，即判为跨 HEAD 坐标歧义并返回空匹配，严禁排掉过期发现后把同坐标新发现当作唯一目标。
-    - 对已在 bound_reply_targets 中锁定目标指纹的 loc / inline 回复，仅允许匹配该锁定指纹，禁止改绑其他发现。
+      只要其坐标也命中了任何过期结转发现，即判为跨 HEAD 坐标歧义并返回空匹配，严禁排掉过期发现后把同坐标新发现当作唯一目标；
+      若存在活跃 duplicate_aliases，按完整候选集匹配后归并至规范目标（同位置 {A, D} 归为 A；{D, X} 归为 {A, X} 判歧义）。
+    - 对已在 bound_reply_targets 中锁定目标指纹的 loc / inline 回复，仅允许匹配该锁定指纹（或其活跃规范目标），
+      当原始坐标仍命中规范目标/活跃别名或处于首次锁定同一 HEAD（same_head_pinned_keys）且目标未过期时保持有效，禁止改绑其他发现。
     """
     if reply.finding_id is not None:
         prefix = reply.finding_id.strip().lower()
+        pinned_fid = bound_reply_targets.get(reply.reply_key) if bound_reply_targets else None
+        if pinned_fid is not None:
+            if not pinned_fid.startswith(prefix):
+                return [], 0
+            return [f for f in findings if f.finding_id == pinned_fid], 3
         return [f for f in findings if f.finding_id.startswith(prefix)], 3
     stale = (
         frozenset(fp.strip().lower() for fp in stale_location_fingerprints)
@@ -3093,17 +3122,56 @@ def _match_reply_targets(
         else frozenset()
     )
     pinned_fid = bound_reply_targets.get(reply.reply_key) if bound_reply_targets else None
+    aliases = duplicate_aliases or {}
+    same_head_keys = frozenset(same_head_pinned_keys) if same_head_pinned_keys else frozenset()
+    findings_by_id = {f.finding_id: f for f in findings}
     raw_matched, specificity = _match_reply_location(reply, findings)
+
+    if pinned_fid is not None:
+        if reply.is_inline_anchor and (reply.file is None or reply.line is None):
+            return [], 0
+        canonical_pinned = aliases.get(pinned_fid, pinned_fid)
+        target_f = findings_by_id.get(canonical_pinned) or findings_by_id.get(pinned_fid)
+        if target_f is None:
+            return [], 0
+        target_id = target_f.finding_id
+        if pinned_fid in stale or target_id in stale:
+            return [], 0
+        if raw_matched:
+            has_direct_or_alias_hit = any(
+                f.finding_id not in stale
+                and (
+                    f.finding_id == target_id
+                    or f.finding_id == pinned_fid
+                    or aliases.get(f.finding_id, f.finding_id) == target_id
+                )
+                for f in raw_matched
+            )
+            if has_direct_or_alias_hit:
+                return [target_f], specificity
+        if reply.reply_key in same_head_keys:
+            base_specificity = 2 if (reply.is_inline_anchor or reply.line is not None) else (1 if reply.file is not None else 0)
+            if base_specificity > 0:
+                return [target_f], base_specificity
+        return [], 0
+
     if not raw_matched:
         return [], 0
-    if pinned_fid is not None:
-        if pinned_fid in stale:
-            return [], 0
-        matched = [f for f in raw_matched if f.finding_id == pinned_fid]
-        return matched, specificity
     if stale and any(f.finding_id in stale for f in raw_matched):
         return [], 0
-    return raw_matched, specificity
+    if not aliases:
+        return raw_matched, specificity
+    collapsed: list[Finding] = []
+    seen_collapsed: set[str] = set()
+    for matched_f in raw_matched:
+        c_id = aliases.get(matched_f.finding_id, matched_f.finding_id)
+        if c_id in stale:
+            return [], 0
+        rep = findings_by_id.get(c_id, matched_f)
+        if rep.finding_id not in seen_collapsed:
+            seen_collapsed.add(rep.finding_id)
+            collapsed.append(rep)
+    return collapsed, specificity
 
 
 def parse_wontfix_replies(
@@ -3200,17 +3268,19 @@ def _analyze_author_replies(
     consumed_comment_ids: Collection[str] = (),
     stale_location_fingerprints: Collection[str] = (),
     bound_reply_targets: Mapping[str, str] | Collection[tuple[str, str]] = (),
+    duplicate_aliases: Mapping[str, str] | Collection[tuple[str, str]] = (),
+    same_head_pinned_keys: Collection[str] = (),
 ) -> tuple[dict[str, AuthorReply], dict[str, frozenset[str]]]:
     """同时计算唯一绑定回复与每个发现关联的全部未消费回复键（含 reply_key 与 comment:resolved:fp）。"""
     finding_list: list[Finding] = []
-    seen_ids: set[str] = set()
+    findings_by_id: dict[str, Finding] = {}
     for item in findings:
         if not isinstance(item, Finding):
             raise ConvergenceError(f"findings 元素必须是 Finding：{item!r}")
         fid = item.finding_id
-        if fid in seen_ids:
+        if fid in findings_by_id:
             raise ConvergenceError(f"findings 含重复指纹 {fid}，请先合并去重")
-        seen_ids.add(fid)
+        findings_by_id[fid] = item
         finding_list.append(item)
 
     consumed_keys = _validate_consumed_reply_keys(consumed_reply_keys, "consumed_reply_keys")
@@ -3221,6 +3291,8 @@ def _analyze_author_replies(
         lowercase=True,
     )
     pinned_targets = _normalize_bound_reply_targets(bound_reply_targets, "bound_reply_targets")
+    alias_map = _normalize_duplicate_aliases(duplicate_aliases, "duplicate_aliases")
+    same_head_keys = _validate_consumed_reply_keys(same_head_pinned_keys, "same_head_pinned_keys")
 
     validated_replies: list[AuthorReply] = []
     for reply in replies:
@@ -3244,13 +3316,37 @@ def _analyze_author_replies(
             finding_list,
             stale_location_fingerprints=stale_fps,
             bound_reply_targets=pinned_targets,
+            duplicate_aliases=alias_map,
+            same_head_pinned_keys=same_head_keys,
         )
         if not matches:
-            if reply.finding_id is None and reply.reply_key not in pinned_targets and stale_fps:
-                raw_loc_matches, _ = _match_reply_location(reply, finding_list)
-                if any(f.finding_id in stale_fps for f in raw_loc_matches):
-                    for loc_finding in raw_loc_matches:
-                        matched_keys_by_id.setdefault(loc_finding.finding_id, set()).add(reply.reply_key)
+            if reply.finding_id is None:
+                pinned_fid = pinned_targets.get(reply.reply_key)
+                if pinned_fid is not None:
+                    # 即使原坐标跨 HEAD 移位或过期而失去单独解除资格，只要锁定规范目标仍在候选集中，
+                    # 仍保留其对目标的归属并纳入同评论理由冲突检测，防同评论内另一条回复绕过冲突放行。
+                    canonical_pinned = alias_map.get(pinned_fid, pinned_fid)
+                    pinned_target_fid = (
+                        canonical_pinned
+                        if canonical_pinned in findings_by_id
+                        else (pinned_fid if pinned_fid in findings_by_id else None)
+                    )
+                    if pinned_target_fid is not None:
+                        keys_set = matched_keys_by_id.setdefault(pinned_target_fid, set())
+                        keys_set.add(reply.reply_key)
+                        keys_set.add(_resolved_reply_key(cid, pinned_target_fid))
+                        if _resolved_reply_key(cid, pinned_target_fid) not in consumed_keys:
+                            norm_reason = _normalize_fingerprint_text(
+                                reply.reason,
+                                "reason",
+                                allow_code_blocks=False,
+                            )
+                            comment_target_reasons.setdefault((cid, pinned_target_fid), set()).add(norm_reason)
+                elif stale_fps:
+                    raw_loc_matches, _ = _match_reply_location(reply, finding_list)
+                    if any(f.finding_id in stale_fps for f in raw_loc_matches):
+                        for loc_finding in raw_loc_matches:
+                            matched_keys_by_id.setdefault(loc_finding.finding_id, set()).add(reply.reply_key)
             continue
 
         norm_reason = _normalize_fingerprint_text(reply.reason, "reason", allow_code_blocks=False)
@@ -3296,12 +3392,14 @@ def bind_author_replies(
     consumed_comment_ids: Collection[str] = (),
     stale_location_fingerprints: Collection[str] = (),
     bound_reply_targets: Mapping[str, str] | Collection[tuple[str, str]] = (),
+    duplicate_aliases: Mapping[str, str] | Collection[tuple[str, str]] = (),
+    same_head_pinned_keys: Collection[str] = (),
 ) -> dict[str, AuthorReply]:
     """面向整个候选集合做作者回复唯一绑定。
 
     规则：
     - 忽略已消费（consumed_reply_keys / consumed_comment_ids）的历史回复；
-    - 对已在 bound_reply_targets 中锁定目标的 loc / inline 回复，仅允许匹配其锁定指纹；
+    - 对已在 bound_reply_targets 中锁定目标的 loc / inline / 短前缀 finding 回复，仅允许匹配其锁定指纹；
     - 对属于 stale_location_fingerprints 的发现，仅允许显式 finding_id 绑定，禁止按坐标锚定；
     - 任一条回复若命中超过 1 个活跃候选，视为歧义，拒绝绑定到任何发现；
     - 同一评论中的多条回复若各自唯一指向不同发现，可分别绑定；
@@ -3314,6 +3412,8 @@ def bind_author_replies(
         consumed_comment_ids=consumed_comment_ids,
         stale_location_fingerprints=stale_location_fingerprints,
         bound_reply_targets=bound_reply_targets,
+        duplicate_aliases=duplicate_aliases,
+        same_head_pinned_keys=same_head_pinned_keys,
     )
     return bound
 
@@ -3329,6 +3429,7 @@ class VerifiedFinding:
     author_reply: AuthorReply | None = None
     related_reply_keys: tuple[str, ...] = ()
     duplicate_of: str | None = None
+    author_reply_pinned: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.finding, Finding):
@@ -3343,6 +3444,8 @@ class VerifiedFinding:
         object.__setattr__(self, "head_sha", norm_head)
         if self.author_reply is not None and not isinstance(self.author_reply, AuthorReply):
             raise ConvergenceError("VerifiedFinding.author_reply 必须是 AuthorReply 或 None")
+        if type(self.author_reply_pinned) is not bool:
+            raise ConvergenceError(f"VerifiedFinding.author_reply_pinned 必须是 bool：{self.author_reply_pinned!r}")
         if not isinstance(self.related_reply_keys, tuple):
             raise ConvergenceError("VerifiedFinding.related_reply_keys 必须是字符串元组")
         for rk in self.related_reply_keys:
@@ -3366,17 +3469,29 @@ class VerifiedFinding:
             raise ConvergenceError(
                 f"仅 verdict=duplicate 允许设置 duplicate_of，当前 verdict={self.verdict.value!r} 收到 {self.duplicate_of!r}"
             )
+        if self.verdict != VerificationVerdict.RESOLVED_BY_WONTFIX and self.author_reply_pinned:
+            raise ConvergenceError("仅 verdict=resolved_by_wontfix 允许设置 author_reply_pinned=True")
         if self.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
             if self.author_reply is None:
                 raise ConvergenceError("verdict=resolved_by_wontfix 时必须绑定非空 author_reply")
             _require_non_empty_str(self.author_reply.comment_id, "author_reply.comment_id")
             _require_non_empty_str(self.author_reply.author, "author_reply.author")
-            matched, _ = _match_reply_targets(self.author_reply, (self.finding,))
-            if len(matched) != 1 or matched[0].finding_id != self.finding.finding_id:
-                raise ConvergenceError(
-                    f"verdict=resolved_by_wontfix 绑定的 author_reply（comment_id={self.author_reply.comment_id}）"
-                    f"与发现 {self.finding.finding_id} 不匹配"
-                )
+            if self.author_reply_pinned:
+                if self.author_reply.finding_id is not None:
+                    raise ConvergenceError("author_reply_pinned=True 仅允许用于无显式 finding_id 的历史锁定坐标/行内回复")
+                if self.round_number < 2:
+                    raise ConvergenceError("首轮不存在跨轮锁定别名坐标，禁止设置 author_reply_pinned=True")
+                if self.author_reply.is_inline_anchor and (
+                    self.author_reply.file is None or self.author_reply.line is None
+                ):
+                    raise ConvergenceError("过期的行内回复（缺少 file 或 line）不得用于 resolved_by_wontfix")
+            else:
+                matched, _ = _match_reply_targets(self.author_reply, (self.finding,))
+                if len(matched) != 1 or matched[0].finding_id != self.finding.finding_id:
+                    raise ConvergenceError(
+                        f"verdict=resolved_by_wontfix 绑定的 author_reply（comment_id={self.author_reply.comment_id}）"
+                        f"与发现 {self.finding.finding_id} 不匹配"
+                    )
 
     @property
     def is_blocking(self) -> bool:
@@ -3925,7 +4040,9 @@ class VerifiedRound:
         history_consumed: frozenset[str] = frozenset().union(
             *(entry.consumed_reply_keys for entry in self.candidates.history)
         )
-        history_bound_targets = _collect_history_bound_targets(self.candidates.history)
+        history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(self.candidates.history)
+        same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == self.candidates.head_sha)
+        history_aliases = _active_duplicate_aliases(self.candidates.history)
         explicit_bound_targets = _validate_bound_reply_targets_frozenset(
             self.bound_reply_targets,
             "VerifiedRound.bound_reply_targets",
@@ -3987,25 +4104,40 @@ class VerifiedRound:
                     )
             for rk in vf.related_reply_keys:
                 pinned_for_rk = effective_bound_targets.get(rk)
-                if pinned_for_rk is not None and pinned_for_rk != fid:
-                    raise ConvergenceError(
-                        f"发现 {fid} 的 related_reply_keys 包含已锁定到发现 {pinned_for_rk} 的回复键 {rk!r}"
+                if pinned_for_rk is not None:
+                    _, rk_kind, _ = _parse_consumed_reply_key(rk, "related_reply_keys[]")
+                    expected_pinned_for_rk = (
+                        history_aliases.get(pinned_for_rk, pinned_for_rk)
+                        if rk_kind in ("loc", "inline")
+                        else pinned_for_rk
                     )
+                    if pinned_for_rk != fid and expected_pinned_for_rk != fid:
+                        raise ConvergenceError(
+                            f"发现 {fid} 的 related_reply_keys 包含已锁定到发现 {pinned_for_rk} 的回复键 {rk!r}"
+                        )
             if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
                 if vf.author_reply is None:
                     raise ConvergenceError(f"发现 {fid} 裁决为 resolved_by_wontfix 但缺少 author_reply")
                 _require_non_empty_str(vf.author_reply.author, "author_reply.author")
                 pinned_fid = effective_bound_targets.get(vf.author_reply.reply_key)
-                if pinned_fid is not None and pinned_fid != fid:
-                    raise ConvergenceError(
-                        f"发现 {fid} 绑定的作者不修回复（{vf.author_reply.reply_key}）"
-                        f"已锁定到发现 {pinned_fid}，禁止改绑到其他指纹"
+                if pinned_fid is not None:
+                    expected_pinned = (
+                        history_aliases.get(pinned_fid, pinned_fid)
+                        if vf.author_reply.finding_id is None
+                        else pinned_fid
                     )
+                    if pinned_fid != fid and expected_pinned != fid:
+                        raise ConvergenceError(
+                            f"发现 {fid} 绑定的作者不修回复（{vf.author_reply.reply_key}）"
+                            f"已锁定到发现 {pinned_fid}，禁止改绑到其他指纹"
+                        )
                 matched_targets, _ = _match_reply_targets(
                     vf.author_reply,
                     self.candidates.findings,
                     stale_location_fingerprints=self.candidates.stale_location_fingerprints,
                     bound_reply_targets=effective_bound_targets,
+                    duplicate_aliases=history_aliases,
+                    same_head_pinned_keys=same_head_pinned_keys,
                 )
                 if len(matched_targets) != 1 or matched_targets[0].finding_id != fid:
                     raise ConvergenceError(
@@ -4146,7 +4278,9 @@ def parse_verifier_output(
     history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in candidates.history))
     extra_consumed = _validate_consumed_reply_keys(consumed_reply_keys, "consumed_reply_keys")
     effective_consumed = history_consumed | extra_consumed
-    history_bound_targets = _collect_history_bound_targets(candidates.history)
+    history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(candidates.history)
+    same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == candidates.head_sha)
+    history_aliases = _active_duplicate_aliases(candidates.history)
     extra_bound_targets = _normalize_bound_reply_targets(bound_reply_targets, "bound_reply_targets")
     effective_bound_targets = dict(history_bound_targets)
     _merge_bound_reply_targets(effective_bound_targets, extra_bound_targets, "bound_reply_targets")
@@ -4158,6 +4292,8 @@ def parse_verifier_output(
         consumed_comment_ids=consumed_comment_ids,
         stale_location_fingerprints=candidates.stale_location_fingerprints,
         bound_reply_targets=effective_bound_targets,
+        duplicate_aliases=history_aliases,
+        same_head_pinned_keys=same_head_pinned_keys,
     )
 
     prior_important_ids = frozenset(f.finding_id for f in candidates.prior_important)
@@ -4247,6 +4383,16 @@ def parse_verifier_output(
                 f"（请锁定到规范发现 {duplicate_of_map[target_fid]!r}）"
             )
 
+    short_key_hits: dict[str, set[str]] = {}
+    for matched_fid, keys in matched_keys_by_id.items():
+        for rk in keys:
+            _, kind, rk_payload = _parse_consumed_reply_key(rk, "related_reply_keys[]")
+            if kind == "finding" and len(rk_payload) < 16:
+                short_key_hits.setdefault(rk, set()).add(matched_fid)
+    ambiguous_short_with_dup = {
+        rk for rk, hit_fids in short_key_hits.items() if len(hit_fids) > 1 and bool(hit_fids & set(duplicate_of_map))
+    }
+
     folded_related_keys: dict[str, set[str]] = {}
     for matched_fid, keys in matched_keys_by_id.items():
         if matched_fid in duplicate_of_map:
@@ -4256,7 +4402,10 @@ def parse_verifier_output(
                 if kind in ("loc", "inline") and rk not in effective_bound_targets:
                     folded_related_keys.setdefault(canonical_fid, set()).add(rk)
         else:
-            folded_related_keys.setdefault(matched_fid, set()).update(keys)
+            for rk in keys:
+                if rk in ambiguous_short_with_dup:
+                    continue
+                folded_related_keys.setdefault(matched_fid, set()).add(rk)
 
     verdicts_by_id: dict[str, VerifiedFinding] = {}
     for cid in ordered_ids:
@@ -4266,6 +4415,10 @@ def parse_verifier_output(
             if verdict == VerificationVerdict.DUPLICATE
             else tuple(sorted(folded_related_keys.get(cid, ())))
         )
+        author_reply_pinned = False
+        if verdict == VerificationVerdict.RESOLVED_BY_WONTFIX and matched_reply is not None:
+            direct_matched, _ = _match_reply_targets(matched_reply, (finding,))
+            author_reply_pinned = not (len(direct_matched) == 1 and direct_matched[0].finding_id == cid)
         verdicts_by_id[cid] = VerifiedFinding(
             finding=finding,
             verdict=verdict,
@@ -4276,6 +4429,7 @@ def parse_verifier_output(
             author_reply=matched_reply,
             related_reply_keys=related_keys,
             duplicate_of=duplicate_of,
+            author_reply_pinned=author_reply_pinned,
         )
     _validate_duplicate_verdicts(verdicts_by_id, prior_important_ids=prior_important_ids)
 
@@ -4421,11 +4575,12 @@ def plan_next_round(
     active_replies = tuple(
         reply for reply in author_replies if not _is_reply_obviously_consumed(reply, consumed_reply_keys)
     )
+    covered_canonicals = frozenset(active_aliases.get(fp, fp) for fp in already_posted)
     pending_non_blocking = tuple(
         vf
         for vf in prev.pending_non_blocking
         if vf.finding.finding_id not in already_posted
-        and active_aliases.get(vf.finding.finding_id, vf.finding.finding_id) not in already_posted
+        and active_aliases.get(vf.finding.finding_id, vf.finding.finding_id) not in covered_canonicals
     )
     unresolved_prior = () if prev.outcome == RoundOutcome.PASS else prev.unresolved_important
     return RoundPlan(
@@ -4445,6 +4600,32 @@ def plan_next_round(
     )
 
 
+def _select_canonical_confirmed_findings(
+    verified: Sequence[VerifiedFinding],
+    active_aliases: Mapping[str, str],
+) -> tuple[VerifiedFinding, ...]:
+    """按活跃去重规范身份归并 CONFIRMED 发现：同一规范身份只计一次，严守严重度不降级并优先保留规范项本身。"""
+    grouped: dict[str, list[VerifiedFinding]] = {}
+    for vf in verified:
+        if vf.verdict != VerificationVerdict.CONFIRMED:
+            continue
+        fid = vf.finding.finding_id
+        canon_id = active_aliases.get(fid, fid)
+        grouped.setdefault(canon_id, []).append(vf)
+
+    chosen_ids: set[str] = set()
+    for canon_id, members in grouped.items():
+        max_rank = max(_SEVERITY_STRICTNESS[vf.finding.severity] for vf in members)
+        top_members = [vf for vf in members if _SEVERITY_STRICTNESS[vf.finding.severity] == max_rank]
+        canonical_member = next((vf for vf in top_members if vf.finding.finding_id == canon_id), None)
+        winner = canonical_member if canonical_member is not None else top_members[0]
+        chosen_ids.add(winner.finding.finding_id)
+
+    return tuple(
+        vf for vf in verified if vf.verdict == VerificationVerdict.CONFIRMED and vf.finding.finding_id in chosen_ids
+    )
+
+
 def select_postable_findings(
     verified: Sequence[VerifiedFinding],
     already_posted: frozenset[str],
@@ -4452,7 +4633,7 @@ def select_postable_findings(
     resolved_fingerprints: frozenset[str] = frozenset(),
     duplicate_aliases: Mapping[str, str] | Collection[tuple[str, str]] = (),
 ) -> tuple[VerifiedFinding, ...]:
-    """筛选本轮应新贴出的核实成立发现：同指纹或其活跃去重规范项已贴过且未曾解除者不重复贴。"""
+    """筛选本轮应新贴出的核实成立发现：同指纹或其活跃去重等价类已有任意成员贴过且未曾解除者不重复贴。"""
     alias_map = _normalize_duplicate_aliases(duplicate_aliases, "duplicate_aliases")
     effective_posted = already_posted - resolved_fingerprints
     active_aliases = {
@@ -4460,18 +4641,13 @@ def select_postable_findings(
         for alias_fp, canon_fp in alias_map.items()
         if alias_fp not in resolved_fingerprints and canon_fp not in resolved_fingerprints
     }
-    confirmed_ids = {
-        vf.finding.finding_id for vf in verified if vf.verdict == VerificationVerdict.CONFIRMED
-    }
+    covered_canonicals = frozenset(active_aliases.get(fp, fp) for fp in effective_posted)
+    canonical_confirmed = _select_canonical_confirmed_findings(verified, active_aliases)
     selected: list[VerifiedFinding] = []
-    for vf in verified:
-        if vf.verdict != VerificationVerdict.CONFIRMED:
-            continue
+    for vf in canonical_confirmed:
         fid = vf.finding.finding_id
         canonical_fid = active_aliases.get(fid, fid)
-        if fid in effective_posted or canonical_fid in effective_posted:
-            continue
-        if canonical_fid != fid and canonical_fid in confirmed_ids:
+        if fid in effective_posted or canonical_fid in covered_canonicals:
             continue
         selected.append(vf)
     return tuple(selected)
@@ -4502,6 +4678,7 @@ class RoundDecision:
     relocated_fingerprints: frozenset[str] = frozenset()
     bound_reply_targets: frozenset[tuple[str, str]] = frozenset()
     duplicate_aliases: tuple[tuple[str, str], ...] = ()
+    history: tuple[RoundHistoryEntry, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.round_number) is not int or self.round_number < 1:
@@ -4517,6 +4694,23 @@ class RoundDecision:
         _require_non_empty_str(self.description, "RoundDecision.description")
         if type(self.stop_auto_rereview) is not bool:
             raise ConvergenceError(f"RoundDecision.stop_auto_rereview 必须是 bool：{self.stop_auto_rereview!r}")
+
+        if not isinstance(self.history, tuple):
+            raise ConvergenceError("RoundDecision.history 必须是 RoundHistoryEntry 元组")
+        if len(self.history) != self.round_number - 1:
+            raise ConvergenceError(
+                f"RoundDecision.history 长度必须等于 round_number - 1：期望 {self.round_number - 1}，实际 {len(self.history)}"
+            )
+        _, _, history_bound_targets = _validate_history_chain(self.history)
+        _, pin_origin_heads = _collect_history_bound_targets_with_heads(self.history)
+        same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == norm_head)
+        history_aliases = _active_duplicate_aliases(self.history)
+        history_posted = _active_posted_fingerprints(self.history)
+        prior_important_ids = (
+            frozenset()
+            if not self.history or self.history[-1].outcome == RoundOutcome.PASS
+            else frozenset(f.finding_id for f in self.history[-1].unresolved_important)
+        )
 
         if not isinstance(self.verified_findings, tuple):
             raise ConvergenceError("RoundDecision.verified_findings 必须是 VerifiedFinding 元组")
@@ -4541,12 +4735,8 @@ class RoundDecision:
             if fid in verdicts_by_id:
                 raise ConvergenceError(f"RoundDecision.verified_findings 含重复指纹：{fid}")
             verdicts_by_id[fid] = vf
-        _validate_duplicate_verdicts(verdicts_by_id, prior_important_ids=())
+        _validate_duplicate_verdicts(verdicts_by_id, prior_important_ids=prior_important_ids)
 
-        expected_blocking = tuple(vf for vf in self.verified_findings if vf.is_blocking)
-        expected_non_blocking = tuple(
-            vf for vf in self.verified_findings if vf.verdict == VerificationVerdict.CONFIRMED and not vf.is_blocking
-        )
         expected_resolved = tuple(
             vf
             for vf in self.verified_findings
@@ -4555,16 +4745,6 @@ class RoundDecision:
         expected_rejected = tuple(
             vf for vf in self.verified_findings if vf.verdict == VerificationVerdict.REJECTED
         )
-        expected_unresolved_important = tuple(vf.finding for vf in expected_blocking)
-
-        if not isinstance(self.blocking_findings, tuple) or self.blocking_findings != expected_blocking:
-            raise ConvergenceError(
-                "RoundDecision.blocking_findings 必须严格等于 verified_findings 中全部 is_blocking 项（顺序与内容一致）"
-            )
-        if not isinstance(self.non_blocking_findings, tuple) or self.non_blocking_findings != expected_non_blocking:
-            raise ConvergenceError(
-                "RoundDecision.non_blocking_findings 必须严格等于 verified_findings 中全部核实成立的非阻断项"
-            )
         if not isinstance(self.resolved_findings, tuple) or self.resolved_findings != expected_resolved:
             raise ConvergenceError(
                 "RoundDecision.resolved_findings 必须严格等于 verified_findings 中全部已解除项"
@@ -4572,10 +4752,6 @@ class RoundDecision:
         if not isinstance(self.rejected_findings, tuple) or self.rejected_findings != expected_rejected:
             raise ConvergenceError(
                 "RoundDecision.rejected_findings 必须严格等于 verified_findings 中全部已驳回项"
-            )
-        if not isinstance(self.unresolved_important, tuple) or self.unresolved_important != expected_unresolved_important:
-            raise ConvergenceError(
-                "RoundDecision.unresolved_important 必须严格等于 tuple(vf.finding for vf in blocking_findings)"
             )
 
         expected_resolved_ids = frozenset(vf.finding.finding_id for vf in expected_resolved)
@@ -4590,32 +4766,50 @@ class RoundDecision:
             raise ConvergenceError("RoundDecision.retained_posted_fingerprints 必须是 frozenset[str]")
         for fp in self.retained_posted_fingerprints:
             _require_non_empty_str(fp, "retained_posted_fingerprints[]")
-        if self.retained_posted_fingerprints & cleared_ids:
-            raise ConvergenceError("RoundDecision.retained_posted_fingerprints 不得与已解除/驳回指纹重叠")
+        expected_retained_posted = history_posted - cleared_ids
+        if self.retained_posted_fingerprints != expected_retained_posted:
+            raise ConvergenceError(
+                "RoundDecision.retained_posted_fingerprints 必须严格等于由 history 派生的活跃已贴指纹减去本轮已解除/驳回指纹："
+                f"期望 {sorted(expected_retained_posted)!r}，实际 {sorted(self.retained_posted_fingerprints)!r}"
+            )
 
         norm_aliases = _validate_duplicate_aliases_tuple(self.duplicate_aliases, "RoundDecision.duplicate_aliases")
-        alias_sources = {src for src, _ in norm_aliases}
-        alias_targets = {dst for _, dst in norm_aliases}
-        if alias_targets & cleared_ids:
+        round_duplicate_aliases: dict[str, str] = {
+            vf.finding.finding_id: vf.duplicate_of
+            for vf in self.verified_findings
+            if vf.verdict == VerificationVerdict.DUPLICATE and vf.duplicate_of is not None
+        }
+        surviving_history_aliases = {
+            alias_fp: canon_fp
+            for alias_fp, canon_fp in history_aliases.items()
+            if alias_fp not in cleared_ids and canon_fp not in cleared_ids
+        }
+        expected_aliases_map = _merge_active_duplicate_aliases(surviving_history_aliases, round_duplicate_aliases)
+        expected_aliases = tuple(sorted(expected_aliases_map.items()))
+        if norm_aliases != expected_aliases:
             raise ConvergenceError(
-                "RoundDecision.duplicate_aliases 不得把本轮已解除/驳回的发现作为活跃规范目标："
-                f"{sorted(alias_targets & cleared_ids)!r}"
+                "RoundDecision.duplicate_aliases 必须严格等于由 history 与本轮 verified_findings 推导的活跃别名表："
+                f"期望 {expected_aliases!r}，实际 {norm_aliases!r}"
             )
-        if alias_sources & cleared_ids:
-            raise ConvergenceError(
-                "RoundDecision.duplicate_aliases 不得保留本轮已解除/驳回的别名指纹："
-                f"{sorted(alias_sources & cleared_ids)!r}"
-            )
-        alias_map = dict(norm_aliases)
-        for vf in self.verified_findings:
-            if vf.verdict == VerificationVerdict.DUPLICATE and vf.duplicate_of is not None:
-                fid = vf.finding.finding_id
-                expected_root = alias_map.get(vf.duplicate_of, vf.duplicate_of)
-                if expected_root != fid and alias_map.get(fid) != expected_root:
-                    raise ConvergenceError(
-                        f"RoundDecision.duplicate_aliases 遗漏或篡改了本轮 DUPLICATE 发现 {fid!r} -> {expected_root!r} 的别名记录"
-                    )
         object.__setattr__(self, "duplicate_aliases", norm_aliases)
+
+        expected_confirmed = _select_canonical_confirmed_findings(self.verified_findings, expected_aliases_map)
+        expected_blocking = tuple(vf for vf in expected_confirmed if vf.is_blocking)
+        expected_non_blocking = tuple(vf for vf in expected_confirmed if not vf.is_blocking)
+        expected_unresolved_important = tuple(vf.finding for vf in expected_blocking)
+
+        if not isinstance(self.blocking_findings, tuple) or self.blocking_findings != expected_blocking:
+            raise ConvergenceError(
+                "RoundDecision.blocking_findings 必须严格等于按活跃规范身份去重后的全部 is_blocking 项（顺序与内容一致）"
+            )
+        if not isinstance(self.non_blocking_findings, tuple) or self.non_blocking_findings != expected_non_blocking:
+            raise ConvergenceError(
+                "RoundDecision.non_blocking_findings 必须严格等于按活跃规范身份去重后的全部核实成立非阻断项"
+            )
+        if not isinstance(self.unresolved_important, tuple) or self.unresolved_important != expected_unresolved_important:
+            raise ConvergenceError(
+                "RoundDecision.unresolved_important 必须严格等于 tuple(vf.finding for vf in blocking_findings)"
+            )
 
         expected_postable = select_postable_findings(
             self.verified_findings,
@@ -4667,7 +4861,45 @@ class RoundDecision:
         if not (norm_relocated <= unresolved_ids):
             raise ConvergenceError("RoundDecision.relocated_fingerprints 必须是 unresolved_important 指纹的子集")
         object.__setattr__(self, "relocated_fingerprints", norm_relocated)
-        _validate_bound_reply_targets_frozenset(self.bound_reply_targets, "RoundDecision.bound_reply_targets")
+
+        decision_bound_targets = _validate_bound_reply_targets_frozenset(
+            self.bound_reply_targets,
+            "RoundDecision.bound_reply_targets",
+        )
+        for rk, hist_target in history_bound_targets.items():
+            if decision_bound_targets.get(rk) != hist_target:
+                raise ConvergenceError(
+                    f"RoundDecision.bound_reply_targets 遗漏或篡改了历史回复锁定 {rk!r} -> {hist_target!r}"
+                )
+        for rk, target_fid in decision_bound_targets.items():
+            if rk in history_bound_targets:
+                continue
+            if target_fid in round_duplicate_aliases:
+                raise ConvergenceError(
+                    f"RoundDecision.bound_reply_targets 禁止新增锁定指向本轮 DUPLICATE 发现 {target_fid!r}（键 {rk!r}）"
+                )
+            if target_fid not in verdicts_by_id:
+                raise ConvergenceError(
+                    f"RoundDecision.bound_reply_targets 新增锁定 {rk!r} -> {target_fid!r} 不指向本轮任何候选发现"
+                )
+
+        all_round_findings = tuple(vf.finding for vf in self.verified_findings)
+        for vf in self.verified_findings:
+            if vf.author_reply_pinned:
+                assert vf.author_reply is not None
+                matched_pinned, _ = _match_reply_targets(
+                    vf.author_reply,
+                    all_round_findings,
+                    stale_location_fingerprints=norm_stale,
+                    bound_reply_targets=history_bound_targets,
+                    duplicate_aliases=history_aliases,
+                    same_head_pinned_keys=same_head_pinned_keys,
+                )
+                if len(matched_pinned) != 1 or matched_pinned[0].finding_id != vf.finding.finding_id:
+                    raise ConvergenceError(
+                        f"RoundDecision.verified_findings 发现 {vf.finding.finding_id} 的 author_reply_pinned=True "
+                        "缺少真实历史锁定或活跃别名支撑"
+                    )
 
     @property
     def cleared_fingerprints(self) -> frozenset[str]:
@@ -4704,11 +4936,12 @@ class RoundDecision:
         non_blocking_ids = frozenset(vf.finding.finding_id for vf in self.non_blocking_findings)
         valid_active_ids = blocking_ids | non_blocking_ids
         alias_map = dict(self.duplicate_aliases)
+        covered_canonicals = frozenset(alias_map.get(fp, fp) for fp in self.retained_posted_fingerprints)
         suppressed_non_blocking = frozenset(
             fid
             for fid in non_blocking_ids
             if fid in self.retained_posted_fingerprints
-            or alias_map.get(fid, fid) in self.retained_posted_fingerprints
+            or alias_map.get(fid, fid) in covered_canonicals
             or (alias_map.get(fid, fid) != fid and alias_map.get(fid, fid) in valid_active_ids)
         )
         expected_non_blocking = non_blocking_ids - suppressed_non_blocking
@@ -4789,6 +5022,7 @@ def evaluate_round(
         seen.add(fid)
         ordered.append(vf)
 
+    history_covered_canonicals = frozenset(history_aliases.get(fp, fp) for fp in already_posted)
     pending_seen: set[str] = set()
     carried_non_blocking: list[VerifiedFinding] = []
     for vf in pending_non_blocking:
@@ -4797,15 +5031,11 @@ def evaluate_round(
             raise ConvergenceError(f"pending_non_blocking 含重复指纹：{fid}")
         pending_seen.add(fid)
         canon_fid = history_aliases.get(fid, fid)
-        if fid in seen or fid in already_posted or canon_fid in already_posted:
+        if fid in seen or fid in already_posted or canon_fid in history_covered_canonicals:
             continue
         carried_non_blocking.append(vf)
 
     effective_verified = tuple(ordered) + tuple(carried_non_blocking)
-    blocking = tuple(vf for vf in effective_verified if vf.is_blocking)
-    non_blocking = tuple(
-        vf for vf in effective_verified if vf.verdict == VerificationVerdict.CONFIRMED and not vf.is_blocking
-    )
     resolved = tuple(
         vf
         for vf in effective_verified
@@ -4831,6 +5061,10 @@ def evaluate_round(
     active_aliases = _merge_active_duplicate_aliases(surviving_history_aliases, round_duplicate_aliases)
     duplicate_aliases_tuple = tuple(sorted(active_aliases.items()))
 
+    canonical_confirmed = _select_canonical_confirmed_findings(effective_verified, active_aliases)
+    blocking = tuple(vf for vf in canonical_confirmed if vf.is_blocking)
+    non_blocking = tuple(vf for vf in canonical_confirmed if not vf.is_blocking)
+
     postable = select_postable_findings(
         effective_verified,
         already_posted,
@@ -4840,7 +5074,8 @@ def evaluate_round(
     unresolved_important = tuple(vf.finding for vf in blocking)
 
     history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history))
-    history_bound_targets = _collect_history_bound_targets(history)
+    history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(history)
+    same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == head_sha)
     verified_bound_targets = _validate_bound_reply_targets_frozenset(
         verified.bound_reply_targets,
         "verified.bound_reply_targets",
@@ -4860,7 +5095,9 @@ def evaluate_round(
             consumed_keys.add(_resolved_reply_key(vf.author_reply.comment_id, fid))
         consumed_keys.update(vf.related_reply_keys)
     for rk, pinned_fid in effective_bound_targets.items():
-        if pinned_fid in cleared_ids:
+        _, rk_kind, _ = _parse_consumed_reply_key(rk, "bound_reply_targets[]")
+        effective_target = history_aliases.get(pinned_fid, pinned_fid) if rk_kind in ("loc", "inline") else pinned_fid
+        if pinned_fid in cleared_ids or effective_target in cleared_ids:
             consumed_keys.add(rk)
     matched_keys_by_id: dict[str, frozenset[str]] = {}
     if author_replies:
@@ -4870,13 +5107,15 @@ def evaluate_round(
             consumed_reply_keys=history_consumed,
             stale_location_fingerprints=verified.candidates.stale_location_fingerprints,
             bound_reply_targets=effective_bound_targets,
+            duplicate_aliases=history_aliases,
+            same_head_pinned_keys=same_head_pinned_keys,
         )
         for fid in cleared_ids:
             consumed_keys.update(matched_keys_by_id.get(fid, ()))
 
     bound_targets: dict[str, str] = dict(effective_bound_targets)
     stale_fps = verified.candidates.stale_location_fingerprints
-    round_loc_inline_targets: dict[str, set[str]] = {}
+    round_pin_targets: dict[str, tuple[str, set[str]]] = {}
     for vf in effective_verified:
         fid = vf.finding.finding_id
         canonical_fid = round_duplicate_aliases.get(fid, fid)
@@ -4886,29 +5125,40 @@ def evaluate_round(
         if matched_keys_by_id:
             candidate_rks.update(matched_keys_by_id.get(fid, ()))
         for rk in candidate_rks:
-            _, kind, _ = _parse_consumed_reply_key(rk, "related_reply_keys[]")
-            if kind not in ("loc", "inline"):
-                continue
-            if vf.verdict == VerificationVerdict.DUPLICATE and bound_targets.get(rk) == fid:
-                round_loc_inline_targets.setdefault(rk, set()).add(fid)
-            else:
-                round_loc_inline_targets.setdefault(rk, set()).add(canonical_fid)
-    for rk, target_fids in round_loc_inline_targets.items():
+            _, kind, payload = _parse_consumed_reply_key(rk, "related_reply_keys[]")
+            if kind in ("loc", "inline"):
+                if vf.verdict == VerificationVerdict.DUPLICATE and bound_targets.get(rk) == fid:
+                    target_for_rk = fid
+                else:
+                    target_for_rk = canonical_fid
+                round_pin_targets.setdefault(rk, (kind, set()))[1].add(target_for_rk)
+            elif kind == "finding" and len(payload) < 16:
+                # 显式短 ID 严格绑定其原始 finding_id（绝不折入规范项）
+                round_pin_targets.setdefault(rk, (kind, set()))[1].add(fid)
+    for rk, (kind, target_fids) in round_pin_targets.items():
         if rk in bound_targets:
             pinned = bound_targets[rk]
-            if any(fid != pinned for fid in target_fids):
+            allowed_targets = {pinned}
+            if kind in ("loc", "inline"):
+                allowed_targets.add(active_aliases.get(pinned, pinned))
+                allowed_targets.add(history_aliases.get(pinned, pinned))
+            if any(fid not in allowed_targets for fid in target_fids):
                 raise ConvergenceError(
                     f"回复键 {rk!r} 已锁定到发现 {pinned!r}，不得改绑到 {sorted(target_fids)!r}"
                 )
         elif len(target_fids) == 1:
             only_fid = next(iter(target_fids))
-            if only_fid not in stale_fps:
+            if kind == "finding":
+                # 显式短 ID 不受坐标 stale 影响，但严禁新增锁定到本轮 DUPLICATE 项
+                if only_fid not in round_duplicate_aliases:
+                    bound_targets[rk] = only_fid
+            elif only_fid not in stale_fps:
                 bound_targets[rk] = only_fid
             else:
                 # 跨 HEAD 坐标/行内回复仅命中未在前轮锁定的过期发现，立即消费以防后续轮次过期发现移位后复活误绑新发现
                 consumed_keys.add(rk)
         else:
-            # 同一 loc/inline 回复在本轮同时命中多个发现属歧义回复，标记为已消费以防后续轮次改绑新发现
+            # 同一 loc/inline 或短前缀回复在本轮同时命中多个发现属歧义回复，标记为已消费以防后续轮次改绑新发现
             consumed_keys.add(rk)
 
     consumed_reply_keys = frozenset(consumed_keys)
@@ -4965,6 +5215,7 @@ def evaluate_round(
         relocated_fingerprints=relocated_unresolved,
         bound_reply_targets=bound_reply_targets,
         duplicate_aliases=duplicate_aliases_tuple,
+        history=history,
     )
 
 
