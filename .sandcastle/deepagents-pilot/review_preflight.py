@@ -19,11 +19,12 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+
+import tomllib
 
 # 与 pilot1742.external_review.SPACE_RESERVE 相同；预检不导入控制器，避免改变其加载面。
 SPACE_RESERVE = 256 * 1024 * 1024
