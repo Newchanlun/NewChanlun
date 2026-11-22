@@ -8,7 +8,6 @@
   credential:codex-host          #1323：宿主进程缺 CLIPROXY_LOCAL_KEY
 """
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -19,17 +18,24 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from pathlib import Path
 
 import tomllib
 
+# -I 不把脚本目录放入 sys.path；按当前脚本相邻路径加载唯一 HTTP 往返实现（宿主与审阅容器共用）。
+_HTTP_WORKER = Path(__file__).with_name("_review_preflight_http.py")
+_http_spec = importlib.util.spec_from_file_location("_review_preflight_http", _HTTP_WORKER)
+_http_module = importlib.util.module_from_spec(_http_spec)
+_http_spec.loader.exec_module(_http_module)
+_error_info = _http_module._error_info
+_round_trip_http = _http_module._round_trip_http
+_open_http = _http_module._open_http
+
 # 与 pilot1742.external_review.SPACE_RESERVE 相同；预检不导入控制器，避免改变其加载面。
 SPACE_RESERVE = 256 * 1024 * 1024
 # 与 pilot1742.external_review.MODELS 相同（测试核对）。
-MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
+MODELS = _http_module.MODELS
 CLIPROXY_LOG_DIR = Path.home() / "Library/Application Support/CLIProxyLocal/auth/logs"
 # 两位 GPT 只接受绑定到精确出站模型的 Codex OAuth 路由；旧路线保留在报告词表中用于诊断，不得放行。
 ROUTES = {model: {(f"codex:{model}", "chatgpt.com")} for model in MODELS}
@@ -39,17 +45,13 @@ KNOWN_ROUTES = {*(route for routes in ROUTES.values() for route in routes),
 PROVIDER = "cliproxy-local"
 SCRUBBED_ENV = "CLIPROXY_LOCAL_KEY"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-RESPONSE_STATUSES = ("completed", "incomplete", "failed", "cancelled", "in_progress", "queued")
+RESPONSE_STATUSES = _http_module.RESPONSE_STATUSES
 CLEANUP_RESERVE = 3.0  # 总时限里留给回收与输出报告的秒数
 OUTPUT_MARGIN = 0.5  # 回收之后杀进程组、删目录、输出报告所留的秒数（机器忙时也够）
-# 上游错误只按固定词表分类，不把原文抄进报告（原文可能回显 key，且转义形态无法穷举）
-ERROR_CLASSES = (("tool_choice", "tool_choice_unsupported"), ("预扣额度", "quota"), ("quota", "quota"),
-                 ("insufficient", "quota"), ("invalid api key", "auth"), ("invalid bearer", "auth"), ("unauthorized", "auth"),
-                 ("authentication", "auth"), ("rate limit", "rate_limit"), ("overloaded", "overloaded"),
-                 ("model_not_found", "model_not_found"), ("not supported", "unsupported"))
+ERROR_CLASSES = _http_module.ERROR_CLASSES
 
 
-TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed", "error")
+TERMINAL_EVENTS = _http_module.TERMINAL_EVENTS
 CREDENTIAL_SOURCES = ("auth.command", "experimental_bearer_token", "env_key",
                       "env:CLIPROXY_LOCAL_KEY", "launchctl:CLIPROXY_LOCAL_KEY")
 CREDENTIAL_MODES = ("codex-host", "worker-env")
@@ -423,90 +425,56 @@ def sanitize(value, secrets, limit: int = 500):
     return value
 
 
-def _error_info(body: str) -> dict:
-    """上游错误正文只给长度、sha256 前 12 位与固定词表分类，不抄原文。"""
-    lowered = body.lower()
-    kind = next((label for needle, label in ERROR_CLASSES if needle in lowered), "unclassified")
-    return {"class": kind, "length": len(body), "sha256_12": hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()[:12]}
-
-
-def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
-    """整个 HTTP 请求在独立进程组中运行，绝对工作期限到达后先回收再返回。"""
-    if deadline.work_left() <= 0:
+def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline, *,
+               container_image: str | None = None, review_docker_context: str | None = None,
+               cleanup_out: list[str] | None = None) -> dict:
+    """整个 HTTP 请求在独立进程组中运行，绝对工作期限到达后先回收再返回。
+    提供 container_image 时，在审阅镜像容器内沿正式 worker 同一网络路径发起请求，密钥仅经 stdin 传入。"""
+    work_left = deadline.work_left()
+    if work_left <= 0:
         return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
+    payload = json.dumps([url, key, model, session, work_left]).encode()
+    if not container_image:
+        try:
+            result = run_bounded([sys.executable, "-I", str(_HTTP_WORKER)], work_left, deadline=deadline, data=payload)
+            if result.returncode:
+                raise RuntimeError("HTTP worker failed")
+            return json.loads(result.stdout)
+        except Exception as error:
+            return {"http_status": None, "terminal": None, "ok": False,
+                    "error": {"exception": type(error).__name__, "errno": None}}
+    dcmd = docker_command(review_docker_context)
+    denv = docker_env(review_docker_context)
+    container = f"preflight-http-{uuid.uuid4().hex[:16]}"
+    owner = f"{os.getuid()}:{os.getgid()}"
+    container_done = False
     try:
         result = run_bounded(
-            [sys.executable, "-I", str(Path(__file__).resolve()), "--http-worker"],
-            deadline.work_left(), deadline=deadline,
-            data=json.dumps([url, key, model, session, deadline.work, deadline.total]).encode())
+            [*dcmd, "run", "--rm", "-i", "--name", container, "--read-only", "--user", owner,
+             "--entrypoint", "python3", container_image, "-I", "-c", _HTTP_WORKER.read_text()],
+            work_left, data=payload, env=denv, deadline=deadline)
+        container_done = result.returncode >= 0 and result.returncode != 125
         if result.returncode:
-            raise RuntimeError("HTTP worker failed")
+            raise RuntimeError("Container HTTP worker failed")
         return json.loads(result.stdout)
     except Exception as error:
         return {"http_status": None, "terminal": None, "ok": False,
                 "error": {"exception": type(error).__name__, "errno": None}}
-
-
-def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
-    """最小连通探针采用 JSON schema，不验证真实审阅或工具调用。"""
-    body = {"model": model, "stream": True, "store": False, "reasoning": {"effort": "low"},
-            "instructions": "Preflight connectivity check. Do not call tools.",
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": 'Return {"ok": true}.'}]}],
-            "tools": [{"type": "function", "name": "noop", "description": "Never call this.", "strict": False,
-                       "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}],
-            "tool_choice": "auto", "parallel_tool_calls": True,
-            "text": {"format": {"type": "json_schema", "name": "preflight", "strict": True,
-                                "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}},
-                                           "required": ["ok"], "additionalProperties": False}}}}
-    request = urllib.request.Request(url.rstrip("/") + "/v1/responses", data=json.dumps(body).encode(), method="POST",
-                                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-                                              "Accept": "text/event-stream", "Session-Id": session,
-                                              "X-Client-Request-Id": session})
-    timeout = deadline.work_left()  # 只受总工作时限约束，不另设更短的固定上限
-    if timeout <= 0:
-        return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            terminal, detail, status, returned_model = None, "流在终态事件前结束", None, None
-            for raw in response.read().splitlines():
-                if deadline.work_left() <= 0:
-                    detail = "总时限内无终态事件"
-                    break
-                line = raw.decode("utf-8", "replace").strip()
-                if line.startswith("data:"):
-                    event = json.loads(line[5:]) if line[5:].strip().startswith("{") else {}
-                    if event.get("type") in TERMINAL_EVENTS:
-                        if terminal is not None:
-                            detail = "终态事件后出现另一终态"
-                            break
-                        terminal = event.get("type")
-                        inner = event.get("response") if isinstance(event.get("response"), dict) else {}
-                        # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
-                        status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
-                            None if inner.get("status") is None else "other")
-                        raw_model = inner.get("model")
-                        returned_model = raw_model if raw_model in MODELS else (
-                            None if raw_model is None else "other")
-                        detail = next((value for value in (inner.get("error"), event.get("error"),
-                                                            event.get("message")) if value is not None), None)
-                        # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
-            if deadline.work_left() <= 0:
-                detail = "总时限内流未收尾"
-            elif detail is None and terminal == "response.completed" and status == "completed" and returned_model != model:
-                detail = "响应模型与请求模型不符"
-            # 只接受唯一 completed 终态、内层 completed、精确响应模型匹配、无错误及完整 HTTP 消息。
-            ok = (response.status == 200 and terminal == "response.completed" and status == "completed"
-                  and returned_model == model and detail is None)
-            text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail is not None else ""
-            return {"http_status": response.status, "terminal": terminal, "status": status,
-                    "returned_model": returned_model, "ok": ok, "error": None if ok else _error_info(text)}
-    except urllib.error.HTTPError as error:
-        return {"http_status": error.code, "terminal": None, "ok": False,
-                "error": _error_info(error.read()[:65536].decode("utf-8", "replace"))}
-    except Exception as error:  # 连接、协议等任何异常都只记类型与 errno，不带异常原文
-        reason = getattr(error, "reason", None)
-        return {"http_status": None, "terminal": None, "ok": False,
-                "error": {"exception": type(error).__name__, "errno": getattr(reason, "errno", getattr(error, "errno", None))}}
+    finally:
+        if cleanup_out is not None:
+            try:
+                removed = run_bounded([*dcmd, "rm", "-f", container], deadline.total_left() - OUTPUT_MARGIN, env=denv)
+                if removed.returncode:
+                    cleanup_out.append(f"docker rm -f {container} 退出 {removed.returncode}")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                cleanup_out.append(f"docker rm -f {container} {type(error).__name__}")
+            if not container_done:
+                cleanup_out.append(f"容器 HTTP 探针未正常结束，daemon 可能稍后仍建出容器 {container}；请稍后 docker rm -f {container} 确认")
+        else:
+            try:
+                run_bounded([*dcmd, "rm", "-f", container], max(0.5, deadline.total_left() - OUTPUT_MARGIN), env=denv)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
 
 # -I 不把脚本目录放入 sys.path；按当前脚本的相邻路径加载唯一解析实现。
@@ -569,10 +537,18 @@ def route_from_host_receipt(directory: str, session: str, since: float, wait: fl
         return None
 
 
-def probe_model(args, model: str, key: str, deadline: Deadline) -> list[dict]:
+def probe_model(args, model: str, key: str, deadline: Deadline, cleanup_out: list[str] | None = None) -> list[dict]:
     session = f"preflight-{uuid.uuid4()}"
     since = time.time()
-    trip = round_trip(args.proxy_url, key, model, session, deadline)
+    if getattr(args, "probe_in_container", False):
+        trip = round_trip(
+            args.proxy_url, key, model, session, deadline,
+            container_image=args.image,
+            review_docker_context=getattr(args, "review_docker_context", None),
+            cleanup_out=cleanup_out,
+        )
+    else:
+        trip = round_trip(args.proxy_url, key, model, session, deadline)
     # 成功后等生产者完成收尾并原子发布；往返失败时只给证据读取 0.3 秒。
     wait = max(0.0, deadline.work_left() - 0.25)
     if not trip["ok"]:
@@ -650,6 +626,8 @@ def main(argv=None) -> int:
     ap.add_argument("--codex-bin", default="codex", help="宿主使用的 codex 可执行文件，用于离线校验 provider 配置")
     ap.add_argument("--credential-mode", choices=CREDENTIAL_MODES, default="codex-host",
                     help="codex-host 校验宿主 config.toml；worker-env 与正式 worker 一致取 CLIPROXY_LOCAL_KEY/launchctl")
+    ap.add_argument("--probe-in-container", action="store_true",
+                    help="在审阅镜像容器内发起 HTTP 往返探针（验证 host.docker.internal 实际容器网络路径）")
     ap.add_argument("--deadline", type=_deadline, default=55.0, help="总墙钟上限（秒，0 < x ≤ 60），超时的检查判失败")
     args = ap.parse_args(argv)
     if args.proxy_receipt_container:
@@ -687,23 +665,29 @@ def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
     checks = [credential]
     # HTTP 子进程与挂载探针共享工作期限；线程须完成子进程回收后才能返回。
     probes: dict = {}
+    probe_cleanups: dict[str, list[str]] = {model: [] for model in MODELS}
+    cleanup: list[str] = []
     threads = []
     try:
         if key is not None:
             for model in MODELS:
                 def probe(m=model):
-                    probes[m] = _guarded(f"roundtrip:{m}", "roundtrip", lambda: probe_model(args, m, key, deadline))
+                    probes[m] = _guarded(
+                        f"roundtrip:{m}", "roundtrip",
+                        lambda: probe_model(args, m, key, deadline, probe_cleanups[m]),
+                    )
                 thread = threading.Thread(target=probe)
                 thread.start()
                 threads.append(thread)
         checks.append(_guarded("checkout_root_free_space", "space", lambda: check_space(args, deadline)))
         mount, cleanup = check_mount(args, deadline)
         checks.append(mount)
-        if cleanup:
-            checks.append({"name": "probe_cleanup", "class": "cleanup", "ok": False, "detail": cleanup})
     finally:
         for thread in threads:
             thread.join()  # 各外部操作有界；包括异常出口也须先回收请求。
+    all_cleanup = [*cleanup, *(item for model in MODELS for item in probe_cleanups[model])]
+    if all_cleanup:
+        checks.append({"name": "probe_cleanup", "class": "cleanup", "ok": False, "detail": all_cleanup})
     for model in MODELS:
         result = probes.get(model)
         if result is None:

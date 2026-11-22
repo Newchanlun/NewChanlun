@@ -2430,9 +2430,9 @@ def test_new_attempt_and_reuse_fallback_enforce_preflight_fail_closed(lane, env,
             lane.review_pr(1810, 1)
         assert lane.status(1810) == [] and lane.gateway.sent == []
 
-    # 3. 预检参数与端点合同：固定对齐 codex-child.ts 代理地址，拒绝 REVIEW_PREFLIGHT_PROXY_URL 分叉，强制传已准入镜像 ID 与 worker-env
-    codex_child_ts = (Path(__file__).resolve().parents[2] / "codex-child.ts").read_text()
-    assert f'base_url: "{module.FORMAL_PROXY_URL}/v1"' in codex_child_ts
+    # 3. 预检参数与端点合同：固定对齐 codex-route.mts 容器代理地址，拒绝 REVIEW_PREFLIGHT_PROXY_URL 分叉，强制传已准入镜像 ID、容器探测与 worker-env
+    codex_route_mts = (Path(__file__).resolve().parents[2] / "codex-route.mts").read_text()
+    assert f'"{module.FORMAL_PROXY_URL}/v1"' in codex_route_mts
     monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER, "blackhole-cliproxy")
     monkeypatch.setenv(module.PREFLIGHT_ENV_PROXY_CONTEXT, "orbstack")
     monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER_DIR, "/tmp/cliproxy-preflight-receipts")
@@ -2442,11 +2442,12 @@ def test_new_attempt_and_reuse_fallback_enforce_preflight_fail_closed(lane, env,
     cmd = unconfigured._preflight_args(probe_target, image=admitted_image)
     assert "--image" in cmd and cmd[cmd.index("--image") + 1] == admitted_image
     assert "--proxy-url" in cmd and cmd[cmd.index("--proxy-url") + 1] == module.FORMAL_PROXY_URL
+    assert "--probe-in-container" in cmd
     assert "--credential-mode" in cmd and cmd[cmd.index("--credential-mode") + 1] == "worker-env"
     assert "--proxy-receipt-container" in cmd and "blackhole-cliproxy" in cmd
     assert "--proxy-docker-context" in cmd and "--review-docker-context" in cmd
     assert "--proxy-container-receipt-dir" in cmd and "/tmp/cliproxy-preflight-receipts" in cmd
-    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_URL", "http://127.0.0.1:9999")  # DevSkim: ignore DS162092 测试用的本地回环地址
     with pytest.raises(EffectPending, match="REVIEW_PREFLIGHT_PROXY_URL"):
         unconfigured._preflight_args(probe_target, image=admitted_image)
     monkeypatch.delenv("REVIEW_PREFLIGHT_PROXY_URL", raising=False)
@@ -2543,6 +2544,7 @@ def test_run_preflight_requires_admission_before_probe_and_filters_env(lane, mon
     env = seen[0]["env"]
     assert cmd[cmd.index("--image") + 1] == admitted
     assert cmd[cmd.index("--proxy-url") + 1] == module.FORMAL_PROXY_URL
+    assert "--probe-in-container" in cmd
     assert cmd[cmd.index("--credential-mode") + 1] == "worker-env"
     assert env["DOCKER_CONTEXT"] == "orbstack" and env["CLIPROXY_LOCAL_KEY"] == "fixture-worker-key"
     assert not any(k in env for k in ("DOCKER_HOST", "DOCKER_CONFIG", "SECRET_TOKEN"))

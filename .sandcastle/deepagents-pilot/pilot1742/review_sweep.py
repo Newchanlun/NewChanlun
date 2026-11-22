@@ -83,6 +83,7 @@ from .external_review import (
     DEFAULT_IDENTITY,
     IDENTITY_CONFIG,
     POLICY,
+    PREFLIGHT_RATE_LIMIT_FILE,
     REVIEW_CONTRACT,
     STATE_ROOT,
     ExternalReview,
@@ -361,18 +362,13 @@ class Sweep:
         return sorted(pulls, key=key)
 
     def rate_limit_backoff(self) -> dict[str, Any] | None:
-        """限流退避是否生效：按 outcome.json 的写入时间取最近 RATE_LIMIT_RUNS 个已完结且真派过模型的 run（有逐位结论、
-        不是 STALE；沿用 run 不调模型，不算），都有 reviewer 回执记 failure_code=rate_limited、且最后一个完结不足
-        RATE_LIMIT_BACKOFF_SECONDS 时返回日志行，否则 None。读不了的 run 跳过。"""
-        found: list[tuple[float, str, bool]] = []
-        stamped: list[tuple[float, Path]] = []
+        """限流退避是否生效：合并已完结且真派过模型的 run（outcome.json）与启动前预检限流记录
+        （preflight-rate-limits.json，不占 attempt），按时间倒序取最近 RATE_LIMIT_RUNS 条，
+        均命中限流且最新一条不足 RATE_LIMIT_BACKOFF_SECONDS 时返回日志行，否则 None。读不了的记录跳过。"""
+        events: list[tuple[float, str, bool]] = []
         for path in (self.lane.state_root / "runs").glob("*/outcome.json"):
             try:
-                stamped.append((path.stat().st_mtime, path))
-            except OSError:
-                continue
-        for mtime, path in sorted(stamped, reverse=True):
-            try:
+                mtime = path.stat().st_mtime
                 outcome = json.loads(path.read_text())
                 if outcome.get("verdict") not in ("PASS", "BLOCK", "FAILED") or not outcome.get("reviews"):
                     continue
@@ -384,9 +380,20 @@ class Sweep:
                         continue
             except (OSError, ValueError, AttributeError):
                 continue
-            found.append((mtime, str(outcome.get("run_id")), limited))
-            if len(found) == RATE_LIMIT_RUNS:
-                break
+            events.append((mtime, str(outcome.get("run_id")), limited))
+        preflight_log = self.lane.state_root / PREFLIGHT_RATE_LIMIT_FILE
+        if preflight_log.is_file():
+            try:
+                loaded = json.loads(preflight_log.read_text())
+                rows = loaded.get("events") if isinstance(loaded, dict) else None
+                if isinstance(rows, list):
+                    for row in rows:
+                        if (isinstance(row, dict) and isinstance(row.get("at"), int | float)
+                                and not isinstance(row.get("at"), bool) and isinstance(row.get("rate_limited"), bool)):
+                            events.append((float(row["at"]), str(row.get("id") or "preflight"), row["rate_limited"]))
+            except (OSError, ValueError, TypeError):
+                pass
+        found = sorted(events, key=lambda item: item[0], reverse=True)[:RATE_LIMIT_RUNS]
         if len(found) < RATE_LIMIT_RUNS or not all(limited for _, _, limited in found):
             return None
         until = found[0][0] + RATE_LIMIT_BACKOFF_SECONDS
@@ -459,12 +466,10 @@ class Sweep:
             if not self._has_commits(base, head):
                 return "needs-source-sync", None
         current = [r for r in runs if r["target"].get("base_sha") == base]
-        live = [r for r in current if not r["outcome"]]
-        if live:  # 中断：同一 attempt 续跑一次
-            row = max(live, key=lambda r: r["target"]["attempt"])
-            if not self._resumable(row):
+        if latest is not None and not latest["outcome"] and latest["target"].get("base_sha") == base:  # 最新登记的未完结 attempt：续跑一次
+            if not self._resumable(latest):
                 return "needs-operator", None
-            return self._resume_once(number, head, row["target"]["attempt"], "review")
+            return self._resume_once(number, head, latest["target"]["attempt"], "review")
         attempt = max((r["target"]["attempt"] for r in current), default=0) + 1
         # 子进程在登记前就退出（读 PR 失败、App 身份未就绪、controller 不干净）时同一 attempt 会原样再派；
         # 退避一段时间，免得每轮都派一个必死的子进程。
@@ -533,7 +538,7 @@ class Sweep:
                                 "held": [n for n, a in review_actions.items() if a == "review-backoff"]})
             if self.auto_merge:
                 self.merge_actions(pulls, states, reviewing_now, review_actions, unreadable,
-                                   out=actions, clean=clean, withdrawn=withdrawn)
+                                   out=actions, clean=clean, withdrawn=withdrawn, live_busy=busy)
         except SourceUnreadable as error:
             # 超时（或整轮输入源读不到）：本轮不再合入、不再追平；凡不能确认不触及两类的 PR 都撤原生 auto-merge，
             # 否则它会在检查转绿后由 GitHub 自己合入、绕过 HUMAN_GATED。已做的动作随异常带出，照常写日志。
@@ -577,9 +582,20 @@ class Sweep:
                                        "本地也缺对象") from None
         return sorted(p for p in raw.decode().split("\0") if p)
 
+    def _latest_attempt_blocks_merge(self, number: int, head: str) -> bool:
+        """同 head 本地已登记最新未作废 attempt 但尚未发布 PASS 终态（排队、退避、中断、未发布结论或已非 PASS）时，
+        远端现有的 success 只能属于已被取代的旧 attempt，禁止自动合入。"""
+        runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
+        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
+        if not non_stale:
+            return False
+        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"])
+        outcome = latest["outcome"]
+        return not (outcome and "publication" in outcome and outcome.get("verdict") == "PASS")
+
     def _plan_one(self, pr: dict[str, Any], state: dict[str, Any], gate_ok: bool, head_free: bool,
                   reviewing_now: bool = False, review_action: str | None = None,
-                  bindings: dict[str, int] | None = None) -> tuple[dict[str, Any], bool, str | None]:
+                  bindings: dict[str, int] | None = None, live_review: bool = False) -> tuple[dict[str, Any], bool, str | None]:
         """只读、不写：返回（动作，是否占队首，要做的写：merge / update / disable / None）。
         只有 head_free（前面没有 PR 占队首）且本 PR 仍可能合入时才可能追平。"""
         number, head = pr["number"], pr["head"]["sha"]
@@ -621,10 +637,12 @@ class Sweep:
                 return {"action": "update-branch"}, True, "update"
             return {"action": "behind-waiting", "review": review, "reviewing": reviewing_now,
                     "queue_head": is_head}, candidate, None
-        if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green:
+        pending_latest = live_review or self._latest_attempt_blocks_merge(number, head)
+        if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green and not pending_latest:
             return {"action": "merged"}, candidate, "merge"
         return {"action": "waiting", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
                 "mergeable_state": state["mergeable_state"], "queue_head": is_head,
+                **({"pending_latest_attempt": True} if pending_latest else {}),
                 **({} if gate_ok else {"gate": "ci-ok 未设为必需检查"})}, candidate, None
 
     def _withdraw(self, number: int, armed: bool) -> dict[str, Any]:
@@ -666,7 +684,8 @@ class Sweep:
                       review_actions: dict[int, str] | None = None,
                       unreadable: set[int] | frozenset[int] = frozenset(), *,
                       out: list[dict[str, Any]] | None = None, clean: set[int] | None = None,
-                      withdrawn: set[int] | None = None) -> list[dict[str, Any]]:
+                      withdrawn: set[int] | None = None,
+                      live_busy: set[int] | frozenset[int] = frozenset()) -> list[dict[str, Any]]:
         """两段：先把每个 PR 的证据读完并定好动作（只读），全部读完才按序执行写（合入、追平、撤 auto-merge）。
         读阶段任何超时都在写之前抛出，本轮一个 PR 也不合入、不追平。动作逐条追加到 out，超时时已做的也不丢。"""
         actions = [] if out is None else out
@@ -723,7 +742,8 @@ class Sweep:
             write: str | None
             try:
                 result, claimed, write = self._plan_one(pr, states[number], gate_ok, head_free and evidence_ok,
-                                                        number in reviewing_now, review_actions.get(number), bindings)
+                                                        number in reviewing_now, review_actions.get(number), bindings,
+                                                        live_review=number in live_busy)
                 if result["action"] not in ("head-moved", "needs-human-confirm"):
                     clean.add(number)
             except SourceUnreadable:

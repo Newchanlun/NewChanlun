@@ -616,7 +616,7 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
 
     response = Response()
     deadline = preflight.Deadline(3)
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda *a, **kw: response)
     response.read = lambda: b"".join(response)
     result = preflight._round_trip_http(LOCAL, KEY, ASTRA, "preflight-test", deadline)
     assert result["ok"] is (tail == "eof")
@@ -666,8 +666,7 @@ def test_proxy_down_blocks_without_waiting_out_the_log_window(env, capsys):
 
 
 def test_no_probe_is_sent_once_the_work_deadline_has_passed(monkeypatch):
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("不应发送"))
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda *a, **k: pytest.fail("不应发送"))
     deadline = preflight.Deadline(0.002)
     time.sleep(0.01)
     assert preflight.round_trip(LOCAL, KEY, SOL, "s", deadline)["error"] == {"not_sent": "总时限已到"}
@@ -847,7 +846,6 @@ def test_broken_codex_config_never_crashes_the_report(env, capsys, tmp_path, con
 def test_structured_sse_error_never_reaches_the_report(monkeypatch):
     """SSE 错误体（含二次转义的 key）不抄进报告，只留分类与摘要。"""
     import io
-    import urllib.request
 
     key = 'secret"key"12345'
     line = "data: " + json.dumps({"type": "error", "error": {"message": json.dumps({"e": f"invalid Bearer {key}"})}}) + "\n\n"
@@ -861,7 +859,7 @@ def test_structured_sse_error_never_reaches_the_report(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResp(line.encode()))
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: FakeResp(line.encode()))
     trip = preflight._round_trip_http(LOCAL, key, SOL, "s", preflight.Deadline(30))
     out = json.dumps(preflight.sanitize(trip, [key]), ensure_ascii=True)
     assert "secret" not in out and "12345" not in out and trip["error"]["class"] == "auth"
@@ -970,7 +968,6 @@ def test_usage_error_and_help_print_json(capsys):
 def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkeypatch, capsys):
     """上游把 key 放进 response.status 字典的键里：status 只收字符串，报告的键也脱敏。"""
     import io
-    import urllib.request
 
     key = "isolated-fake-host-key"
     event = {"type": "response.completed", "response": {"status": {key: "diagnostic"}}}
@@ -984,7 +981,7 @@ def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkey
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen",
+    monkeypatch.setattr(preflight._http_module, "_open_http",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
     trip = preflight._round_trip_http(LOCAL, key, SOL, "s", preflight.Deadline(5))
     preflight._emit(trip, [key])
@@ -1025,7 +1022,6 @@ def test_container_created_by_the_daemon_after_a_failed_client_and_rm_is_reporte
 def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeypatch, status):
     """独审十六：status 只报已知枚举；双重 JSON 编码、倒序等任意形态的 key 都不进报告。"""
     import io
-    import urllib.request
 
     key = 'isolated"host"key1742'
     event = {"type": "response.completed", "response": {"status": status(key)}}
@@ -1039,7 +1035,7 @@ def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeyp
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen",
+    monkeypatch.setattr(preflight._http_module, "_open_http",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
     trip = preflight._round_trip_http(LOCAL, key, SOL, "s", preflight.Deadline(5))
     assert trip["status"] == "other" and "1742" not in json.dumps(preflight.sanitize(trip, [key]))
@@ -1116,7 +1112,6 @@ def test_auth_command_sees_the_checked_codex_home(env, capsys, tmp_path, monkeyp
 def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypatch):
     """独审二十一 B-2：往返只受总工作时限约束；比旧的固定 45 秒更慢但在时限内完成的往返不误报。"""
     import io
-    import urllib.request
 
     seen = {}
 
@@ -1133,9 +1128,116 @@ def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypa
         seen["timeout"] = timeout
         return FakeResp(('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": SOL}}) + '\n\n').encode())
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(preflight._http_module, "_open_http", urlopen)
     trip = preflight._round_trip_http(LOCAL, KEY, SOL, "s", preflight.Deadline(60))
     assert trip["ok"] and seen["timeout"] > 50
+
+
+def test_round_trip_rejects_http_redirect_without_forwarding_auth_header():
+    """301/302/303 重定向一律拒绝，Authorization 密钥不得随重定向发往其他主机。"""
+    trap_hits = []
+
+    class TrapHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            trap_hits.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def do_GET(self):
+            trap_hits.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+    trap = ThreadingHTTPServer(("127.0.0.1", 0), TrapHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    trap_url = f"http://127.0.0.1:{trap.server_address[1]}/steal"  # DevSkim: ignore DS162092 测试用的本地回环地址
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", trap_url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    redir = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    redir_url = f"http://127.0.0.1:{redir.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    threading.Thread(target=trap.serve_forever, daemon=True).start()
+    threading.Thread(target=redir.serve_forever, daemon=True).start()
+    try:
+        trip = preflight._round_trip_http(redir_url, KEY, SOL, "preflight-redir", preflight.Deadline(10))
+    finally:
+        redir.shutdown()
+        redir.server_close()
+        trap.shutdown()
+        trap.server_close()
+    assert trip["ok"] is False and trip["http_status"] == 302
+    assert trap_hits == []
+
+
+def test_probe_in_container_runs_admitted_image_over_stdin_without_leaking_key(env, capsys, tmp_path, monkeypatch):
+    """--probe-in-container 在审阅镜像容器内执行 HTTP 探针，密钥只走 stdin，不进 argv 或容器 env。"""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")
+    monkeypatch.setenv("DOCKER_CONFIG", "/tmp/forbidden-docker")
+    monkeypatch.setenv("CLIPROXY_LOCAL_KEY", KEY)
+    calls = tmp_path / "container-http-calls.jsonl"
+    docker = tmp_path / "bin" / "docker"
+    volumes = tmp_path / "volumes"
+    admitted = "sha256:" + "c" * 64
+    docker.write_text(f"""#!{sys.executable}
+import json, os, shutil, subprocess, sys
+from pathlib import Path
+assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "CLIPROXY_LOCAL_KEY"))
+assert {KEY!r} not in " ".join(sys.argv)
+args = sys.argv[1:]
+with open({str(calls)!r}, "a") as f:
+    f.write(json.dumps(args[:8]) + "\\n")
+assert args[:2] == ["--context", "review-orbstack"]
+args = args[2:]
+vols = Path({str(volumes)!r})
+if args[0] == "volume" and args[1] == "create":
+    (vols / args[2]).mkdir(parents=True, exist_ok=True)
+    sys.exit(0)
+if args[0] == "volume" and args[1] == "rm":
+    shutil.rmtree(vols / args[-1], ignore_errors=True)
+    sys.exit(0)
+if args[0] == "create":
+    name = args[args.index("--name") + 1]
+    vol = args[args.index("-v") + 1].split(":", 1)[0]
+    (vols / f".helper-{{name}}").write_text(vol)
+    sys.exit(0)
+if args[0] == "cp":
+    src = Path(args[1][:-2] if args[1].endswith("/.") else args[1])
+    vol = (vols / f".helper-{{args[2].split(':', 1)[0]}}").read_text()
+    for item in src.iterdir():
+        shutil.copy2(item, vols / vol / item.name)
+    sys.exit(0)
+if args[0] in ("start", "rm"):
+    sys.exit(0)
+assert args[0] == "run"
+if "--entrypoint" in args and args[args.index("--entrypoint") + 1] == "python3":
+    assert "-i" in args and "--read-only" in args and {admitted!r} in args
+    code = args[args.index("-c") + 1]
+    proc = subprocess.run([{sys.executable!r}, "-I", "-c", code], stdin=sys.stdin)
+    sys.exit(proc.returncode)
+vol = args[args.index("-v") + 1].split(":", 1)[0]
+print((vols / vol / args[-1].removeprefix("/review/")).read_text(), end="")
+""")
+    docker.chmod(0o755)
+    code, report, out, proxy = env(capsys=capsys, extra=(
+        "--image", admitted, "--review-docker-context", "review-orbstack",
+        "--credential-mode", "worker-env", "--probe-in-container"))
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    assert KEY not in out
+    assert check(report, f"roundtrip:{SOL}")["ok"] and check(report, f"roundtrip:{ASTRA}")["ok"]
+    recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+    http_runs = [r for r in recorded if r[2] == "run" and "-i" in r]
+    assert len(http_runs) == 2
+    assert sum(r[2] == "rm" and r[4].startswith("preflight-http-") for r in recorded) == 2
 
 
 def test_every_subprocess_wait_comes_from_the_deadline_alone(tmp_path, monkeypatch):

@@ -278,6 +278,100 @@ def test_spawner_normalizes_relative_sandcastle_config_file_before_chdir(tmp_pat
     assert Path(captured["cwd"]).name == "deepagents-pilot"
 
 
+def test_auto_merge_blocks_old_success_while_newer_gpt_attempt_is_pending(lane, monkeypatch):
+    """旧合同 A1 已发布 success、新 GPT A2 登记后在发 pending 前中断，auto-merge 不得凭 A1 绿灯合入。"""
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    green(github, head)
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    with monkeypatch.context() as legacy:
+        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
+        old_target = lane.target(1810, 1)
+    old_folder = lane.state_root / "runs" / old_target.key
+    (old_folder / "outcome.json").write_text(json.dumps({
+        "verdict": "PASS", "publication": {"id": 1, "state": "success"},
+    }))
+    new_target = lane.target(1810, 2)
+    assert new_target.registered_at_ns > old_target.registered_at_ns
+
+    # 1. 首轮续跑 A2，绝不凭旧 A1 的 success 合入
+    actions = sweep.tick()
+    assert acts(actions) == ["resume-review", "waiting"]
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 2)]
+    assert github.calls == []
+    assert any(a.get("pending_latest_attempt") is True for a in actions)
+
+    # 2. 次轮 A2 仍未完结（needs-operator），依然绝不合入
+    host.rows.clear()
+    actions2 = sweep.tick()
+    assert acts(actions2) == ["needs-operator", "waiting"]
+    assert github.calls == []
+
+    # 3. 直到 A2 完结并发布 PASS 后才允许合入
+    new_folder = lane.state_root / "runs" / new_target.key
+    (new_folder / "outcome.json").write_text(json.dumps({
+        "verdict": "PASS", "state": "success", "publication": {"id": 2, "state": "success"},
+    }))
+    actions3 = sweep.tick()
+    assert acts(actions3) == ["done", "merged"]
+    assert github.calls == [("merge", 1810, head)]
+
+
+def test_recovery_branch_selects_latest_registered_attempt_even_with_lower_number(lane, monkeypatch):
+    """先登记旧合同 A3、再登记新合同 A2（编号更小但 registered_at_ns 更新）均中断时，恢复分支选最新的 A2。"""
+    sweep, host, _ = make(lane, run=False)
+    with monkeypatch.context() as legacy:
+        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
+        older = lane.target(1810, 3)
+    newer = lane.target(1810, 2)
+    assert newer.registered_at_ns > older.registered_at_ns
+    assert acts(sweep.tick()) == ["resume-review"]
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 2)]
+
+
+def test_preflight_rate_limits_feed_global_sweep_backoff_without_occupying_attempt(lane, monkeypatch):
+    """预检命中 HTTP 429/rate_limit 时不占 attempt、不发状态，但纳入全局限流退避，拦住后续排队 PR。"""
+    import time
+
+    from pilot1742.delivery import EffectPending
+
+    github = FakeGitHub(lane)
+    second = copy.deepcopy(lane.gateway.pr)
+    second["number"] = 1811
+    github.extra_pulls = [second]
+    t_now = time.time()
+    clock = {"t": t_now + 5}
+    sweep, host, _ = make(lane, run=False, github=github, now=lambda: datetime.fromtimestamp(clock["t"], timezone.utc))
+
+    rate_limited_report = {
+        "returncode": 2,
+        "report": {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [
+                {"name": f"roundtrip:{MODELS[0]}", "ok": False,
+                 "detail": {"http_status": 429, "error": {"class": "rate_limit"}}},
+            ],
+        },
+    }
+    lane.preflight = lambda _t: rate_limited_report
+    for _ in range(2):
+        with pytest.raises(EffectPending, match="上游限流"):
+            lane.review_pr(1810, 1)
+    assert lane.status(1810) == [] and lane.gateway.sent == []
+
+    # 连续 2 次预检限流触发全局退避：两张 PR 均 review-backoff，不再派子进程
+    actions = sweep.tick()
+    assert acts(actions, 1810) == acts(actions, 1811) == ["review-backoff"] and host.spawned == []
+    assert any(a.get("action") == "rate-limit-backoff" for a in actions)
+
+    # 后续预检通过后解除退避
+    lane.preflight = _external_review._fake_preflight_pass
+    target = lane.target(1810, 1)
+    assert target.attempt == 1
+    clock["t"] = time.time() + 10
+    assert sweep.rate_limit_backoff() is None
+
+
 def test_explicit_reattempt_by_operator_is_left_alone(lane):
     sweep, host, _ = make(lane)
     sweep.tick()

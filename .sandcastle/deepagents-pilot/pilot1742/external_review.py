@@ -51,9 +51,10 @@ REVIEW_WORKER_ENV = (*DOCKER_ENV, "SANDCASTLE_MAIN_MODEL", "SANDCASTLE_CONFIG_FI
 # 正式 GPT 双审（EXTERNAL-REVIEW.md）；不同模型各走独立 checkout、进程与 session。
 MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 POLICY = "external-pr-v2-gpt62"
-# 与 codex-child.ts PROVIDER_DEFINITION.base_url（http://127.0.0.1:8318/v1）及 codex-route.mts 容器端点一致。
-FORMAL_PROXY_URL = "http://127.0.0.1:8318"  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy），非调试残留
+# 与 codex-child.ts PROVIDER_DEFINITION.base_url 及 codex-route.mts Docker 容器端点（host.docker.internal:8318/v1）一致。
+FORMAL_PROXY_URL = "http://host.docker.internal:8318"  # DevSkim: ignore DS162092 有意使用本机容器网关（与正式审阅容器端点一致），非调试残留
 PREFLIGHT_SCRIPT = Path(__file__).resolve().parents[1] / "review_preflight.py"
+PREFLIGHT_RATE_LIMIT_FILE = "preflight-rate-limits.json"
 PREFLIGHT_ENV_CONTAINER = "REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER"
 PREFLIGHT_ENV_CONTAINER_DIR = "REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR"
 PREFLIGHT_ENV_PROXY_CONTEXT = "REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT"
@@ -582,6 +583,7 @@ class ExternalReview:
                "--checkout-root", str(self.checkout_root),
                "--image", image,
                "--proxy-url", FORMAL_PROXY_URL,
+               "--probe-in-container",
                "--credential-mode", "worker-env"]
         if container:
             proxy_ctx = os.environ.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
@@ -620,6 +622,52 @@ class ExternalReview:
             report = None
         return {"returncode": done.returncode, "report": report}
 
+    def _record_preflight_rate_limit(self, target: ReviewTarget, *, rate_limited: bool, models: list[str]) -> None:
+        """把预检 429/rate_limit（以及后续恢复通过）写入共享状态根，供 review_sweep 全局限流退避消费；不占 attempt。"""
+        path = self.state_root / PREFLIGHT_RATE_LIMIT_FILE
+        if not rate_limited and not path.exists():
+            return
+        self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(self.state_root / "preflight-rate-limits.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            events: list[dict[str, Any]] = []
+            if path.exists():
+                try:
+                    loaded = _read(path)
+                    raw_events = loaded.get("events") if isinstance(loaded, dict) else None
+                    if isinstance(raw_events, list):
+                        events = [row for row in raw_events if isinstance(row, dict)]
+                except (OSError, ValueError, IdentityError):
+                    events = []
+            events.append({
+                "at": time.time(),
+                "id": f"preflight-p{target.pr_number}-{time.time_ns()}",
+                "rate_limited": rate_limited,
+                "models": models,
+            })
+            _save(path, {"events": events[-16:]})
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _preflight_rate_limited_models(report: Any) -> list[str]:
+        if not isinstance(report, dict) or not isinstance(report.get("checks"), list):
+            return []
+        limited: list[str] = []
+        for item in report["checks"]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                continue
+            if not item["name"].startswith("roundtrip:"):
+                continue
+            detail = item.get("detail")
+            if not isinstance(detail, dict):
+                continue
+            err = detail.get("error")
+            if detail.get("http_status") == 429 or (isinstance(err, dict) and err.get("class") == "rate_limit"):
+                limited.append(item["name"].removeprefix("roundtrip:"))
+        return limited
+
     def admit_preflight(self, target: ReviewTarget) -> dict:
         """新 attempt 登记与复用退回共用的启动前预检闸：任一路由或模型证明失败即拒，不占 attempt、不发状态。"""
         try:
@@ -636,11 +684,16 @@ class ExternalReview:
         else:
             rc = 0
             report = raw
+        limited = self._preflight_rate_limited_models(report)
+        if limited:
+            self._record_preflight_rate_limit(target, rate_limited=True, models=limited)
         if (rc != 0 or not isinstance(report, dict) or report.get("kind") != "review-preflight"
                 or report.get("is_review_result") is not False or report.get("ready") is not True):
             failed = [c.get("name", "?") for c in (report.get("checks", []) if isinstance(report, dict) else [])
                       if isinstance(c, dict) and not c.get("ok")]
             detail = ", ".join(str(name) for name in failed) if failed else f"rc={rc}"
+            if limited:
+                raise EffectPending(f"preflight-blocked：预检遇到上游限流（{detail}），未占 attempt、未发状态")
             raise EffectPending(f"preflight-blocked：预检未通过（{detail}），未占 attempt、未发状态")
         checks = {c["name"]: c for c in report.get("checks", []) if isinstance(c, dict) and isinstance(c.get("name"), str)}
         seen_routes: set[tuple[str, ...]] = set()
@@ -669,6 +722,7 @@ class ExternalReview:
             seen_models.add(returned)
         if len(seen_routes) != len(MODELS) or len(seen_models) != len(MODELS):
             raise EffectPending("preflight-blocked：两路审查模型或路由证据未区分，未占 attempt、未发状态")
+        self._record_preflight_rate_limit(target, rate_limited=False, models=list(MODELS))
         return report
 
     def target(self, number: int, attempt: int) -> ReviewTarget:
