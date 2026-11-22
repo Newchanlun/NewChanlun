@@ -1,4 +1,4 @@
-"""ADR 0064 r6 的 R10 Git 对象与补救原件本地核验。"""
+"""ADR 0064 r6 的 Git 对象与补救原件本地核验。"""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -119,6 +119,16 @@ ADR_TITLE = re.compile(r"^ADR[ -]+\d+\b", re.I)
 MD_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
 MD_LIST = re.compile(r"^(?:[-*+]|[0-9]+[.)])\s+")
 MD_QUOTE = re.compile(r"^(?:>\s*)+")
+FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(?P<fields>.*?)^(?:---|\.\.\.)[ \t]*\r?(?:\n|$)", re.M | re.S)
+YAML_TYPE = re.compile(
+    r"""^type[ \t]*:[ \t]*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^#\r\n]+?))[ \t]*(?:#[^\r\n]*)?\r?$""", re.M
+)
+REPORT_TYPE = re.compile(
+    r"(?:经验|实证)验证|(?:实测|审计)(?:报告|结果|记录)?|实验(?:报告|结果|完成)|验证(?:报告|结果|记录)|"
+    r"诊断(?:分析|报告|结果|记录)?|"
+    r"(?:empirical[-_ ]validation|experiment[-_ ](?:result|report|completion)|"
+    r"(?:measurement|validation|verification|audit|diagnostic)[-_ ](?:result|report|record))s?", re.I
+)
 REPORT_FIELD = re.compile(r"^(?P<key>[^：:|]{1,48}?)\s*[:：]\s*(?P<value>\S.*)$")
 DISPOSITION = re.compile(
     r"(?<![\w-])(?:PASS(?:ED)?|FAIL(?:ED)?|BLOCK(?:ED)?|REJECT(?:ED)?|PWC|CHANGES_REQUIRED|"
@@ -217,6 +227,14 @@ RUN_EXECUTED = re.compile(r"实测复现|观察到的规律|本轮做的|已经�
 RUN_RESULT_SECTION = re.compile(
     r"(?:回测|实测|首验|实验|实证)(?:结果|复现|读数|证伪|否证)|观察到的规律|结果[:：].{0,60}(?:证伪|否证)"
 )
+SECTION_SCRIPT = re.compile(r"(?:脚本|跑法|探针|script|command)\s*[:：]", re.I)
+SECTION_SAMPLE = re.compile(
+    r"\d[\d,.]*[万亿kKmM]?\s*(?:bars?\b|根|行|笔|事件|交易日|标的|records?\b|events?\b)", re.I
+)
+SECTION_READING = re.compile(r"实测|实跑|实得|测得|采得|观察到|意外发现|平均|中位|占比|成功率|\bP\d{2}\b")
+SECTION_RESULTS = re.compile(RUN_RESULT_SECTION.pattern + r"|统计|实测|实跑|实证|observed results", re.I)
+SECTION_OBSERVED = re.compile(r"(?:本(?:次|轮|体| session)|全史|全量|真实数据).{0,35}(?:实测|实跑|测得)|定稿读数", re.I)
+NUMERIC_CELL = re.compile(r"^[*~≈ +−-]*\d")
 RUN_STATISTIC = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:%|pp\b)|[+−-]\d[\d,]*(?:\.\d+)?")
 EXECUTION_RECORD = re.compile(r"(?:编译|构建|测试)[^\n]{0,45}(?:矛盾|失败|异常|报错)记录|"
                               r"编译器暴露[^\n]{0,20}记录")
@@ -381,17 +399,62 @@ def fixture_pointer_locations(path):
         end = path.find("/", end + 1)
 
 
-def fixture_pointer_paths(raw):
+POINTER_CODE = r"(?P<tick>`+)(?P<code>[^`\r\n]+)(?P=tick)(?!`)"
+POINTER_CLAUSE = re.compile(POINTER_CODE + r"|(?P<end>[。；;！？]|[.!?](?=\s|$))")
+POINTER_DIRECTION = re.compile(
+    POINTER_CODE + r"|(?P<direction>迁移(?:至|到)|迁(?:至|到)|移(?:至|到)|搬(?:至|到)|"
+    r"\b(?:moved|migrated|renamed)\s+to\b|->|=>|→)", re.I
+)
+POINTER_TOKEN = re.compile(POINTER_CODE + r"""|[^\s`，。；：！？、（）「」【】<>()\[\]{}"';,:*|]+""")
+# 采纳表是声明的出处，不是迁移端点（#1394 的原始指针即如此）。
+POINTER_ATTRIBUTION = re.compile(r"^`[^`\n]+`\s+的\s+`[^`\n]+`\s*表(?:中)?登记的\s*")
+POINTER_UNASSERTED = re.compile(r"(?:未(?:曾|能)?|不(?:会|再)?|拟|计划|待|尚未|\b(?:not|be|if))\s*$", re.I)
+
+
+def fixture_pointer_pairs(raw):
     try:
         text = raw.decode("utf-8")
     except UnicodeError:
         return set()
     if "\0" in text or is_report_artifact(raw, text):
         return set()
-    # 按完整 Markdown 行内代码或独立词元取路径，绝不靠子串匹配。
-    tokens = re.compile(r"""`+([^`]+)`+|[^\s`，。；：！、（）「」【】<>()\[\]{}"'，;,:*]+""")
-    return {match[1] or match[0] for line in report_preamble(text.lstrip("\ufeff"), limit=text.count("\n") + 1, strip_bold=False)
-            for match in tokens.finditer(line)}
+
+    def paths(side):
+        tokens = [m["code"] or m[0] for m in POINTER_TOKEN.finditer(side)
+                  if m["code"] or "/" in m[0] or "." in m[0]]
+        bare = side.strip(" \t\n|")
+        return tokens or ([bare] if re.fullmatch(r"[\w-]+", bare) else [])
+
+    def clauses(block):
+        start = 0
+        for match in POINTER_CLAUSE.finditer(block):
+            if match["end"]:
+                yield block[start:match.start()]
+                start = match.end()
+        yield block[start:]
+
+    pairs = set()
+    lines = report_preamble(text.lstrip("\ufeff"), limit=text.count("\n") + 1, strip_bold=False)
+    block = []
+    for line in (*lines, ""):
+        heading = MD_HEADING.fullmatch(line)
+        if not line or heading or MD_LIST.match(line) or "|" in line or (block and "|" in block[-1]):
+            for clause in clauses("\n".join(block)):
+                clause = POINTER_ATTRIBUTION.sub("", clause.strip())
+                directions = [m for m in POINTER_DIRECTION.finditer(clause) if m["direction"]]
+                if len(directions) != 1:
+                    continue
+                direction = directions[0]
+                before = clause[:direction.start()]
+                if POINTER_UNASSERTED.search(before):
+                    continue
+                old, new = paths(before), paths(clause[direction.end():])
+                if len(old) == len(new) == 1 and valid_path(old[0]) and valid_path(new[0]):
+                    pairs.add((old[0], new[0]))
+            block = []
+        if line and not heading:
+            block.append(MD_LIST.sub("", line))
+    return pairs
 
 
 def atomic_fixture_migrations(records, final_tree, candidates, *, cwd):
@@ -405,8 +468,8 @@ def atomic_fixture_migrations(records, final_tree, candidates, *, cwd):
         return set()
 
     @cache
-    def tokens(blob):
-        return fixture_pointer_paths(git("cat-file", "blob", blob, cwd=cwd))
+    def pairs(blob):
+        return fixture_pointer_pairs(git("cat-file", "blob", blob, cwd=cwd))
 
     current_pointers = {}
     migrated = set()
@@ -437,11 +500,8 @@ def atomic_fixture_migrations(records, final_tree, candidates, *, cwd):
                     if key not in current_pointers:
                         continue
                     # 深一层的指针可以用所在目录或包根作为源路径锚点。
-                    old_tokens = {relative_old, locations[0][1]}
-                    at_migration = tokens(current_pointers[key])
-                    at_final = tokens(pointers[key])
-                    if (target in at_migration and target in at_final
-                            and old_tokens & at_migration and old_tokens & at_final):
+                    expected = {(relative_old, target), (locations[0][1], target)}
+                    if expected & pairs(current_pointers[key]) & pairs(pointers[key]):
                         migrated.add((target, blob.decode()))
     return migrated
 
@@ -645,7 +705,7 @@ def is_json_artifact(obj):
             and all(isinstance(file, dict) and {"path", "bytes", "sha256"} <= file.keys() for file in files))
 
 
-def report_preamble(content, limit=40, *, strip_bold=True):
+def report_preamble(content, limit=40, *, strip_bold=True, keep_fenced_lines=False):
     """保留 Markdown 段落结构；围栏内部的示例不提供前导证据。"""
     lines = []
     fence = None
@@ -659,7 +719,21 @@ def report_preamble(content, limit=40, *, strip_bold=True):
             lines.append("")
         elif fence is None:
             lines.append(line.replace("**", "") if strip_bold else line)
+        elif keep_fenced_lines:
+            lines.append("")
     return lines
+
+
+def markdown_frontmatter(text):
+    """只读开头 YAML 块，保留剥离的物理行数；正文同名字段不参与分类。"""
+    block = FRONTMATTER.match(text.removeprefix("\ufeff"))
+    if block and re.search(r"(?m)^\w[\w-]*[ \t]*:[ \t]", block["fields"]):
+        types = (next(value for value in match.groups() if value is not None).strip()
+                 for match in YAML_TYPE.finditer(block["fields"]))
+        return text[block.end() + text.startswith("\ufeff"):], block[0].count("\n"), any(
+            REPORT_TYPE.fullmatch(value) for value in types
+        )
+    return text.removeprefix("\ufeff"), 0, False
 
 
 def report_title(label):
@@ -695,13 +769,13 @@ def markdown_tables(lines, rule_pattern):
                 break
             rows.append(data)
         if rows:
-            yield header, rows
+            yield i, header, rows
 
 
 def report_table(lines, *, measured=False):
     rule_pattern = RUN_TABLE_RULE if measured else TABLE_RULE
     metric_column = RUN_DATA_COLUMN if measured else RUN_COLUMN
-    for header, rows in markdown_tables(lines, rule_pattern):
+    for _, header, rows in markdown_tables(lines, rule_pattern):
         columns = [j for j, name in enumerate(header)
                    if OUTCOME_KEY.fullmatch(name) or name in {"状态", "实测", "认识论等级"}]
         metrics = [j for j, name in enumerate(header) if metric_column.search(name)]
@@ -726,7 +800,7 @@ def report_table(lines, *, measured=False):
 
 def observed_table(lines, *, sampled, generated, reported_run):
     """用表头和实际数值分辨测量结果与定义、阈值或预期行为表。"""
-    for header, rows in markdown_tables(lines, RUN_TABLE_RULE):
+    for _, header, rows in markdown_tables(lines, RUN_TABLE_RULE):
         labels = {name.casefold() for name in header}
         numeric = {name.casefold() for j, name in enumerate(header)
                    if any(RUN_CELL.match(row[j]) for row in rows)}
@@ -749,11 +823,6 @@ def measured_report(title, content, *, draft):
     """无「报告」名分时，查是否记录已执行的结果，而非制定验证方法。"""
     if draft or title and NORMATIVE_TITLE.search(title):
         return False
-    # YAML 的「来源 commit」等字段是文档溯源，不是正文宣称的本次执行。
-    if content.startswith(("---\n", "---\r\n")):
-        metadata = re.match(r"---\r?\n(?=[^\n]*:[^\n]*\n).*?\r?\n(?:---|\.\.\.)\r?\n", content, re.S)
-        if metadata:
-            content = content[metadata.end():]
     lines = report_preamble(content, limit=90)
     preamble = "\n".join(lines)
     table = report_table(lines, measured=True) or RUN_DECISION_TABLE.search(preamble)
@@ -835,13 +904,16 @@ def is_report_artifact(raw, text):
         except ValueError:
             return False  # 普通源码片段无需是 JSON。
         return isinstance(obj, dict) and is_json_artifact(obj)
-    if any(pattern.match(content) for pattern in (SUMMARY_HEADER, TB_RUN_HEADER, TB_REVIEW_HEADER)):
+    content, _, report_type = markdown_frontmatter(content)
+    content = content.lstrip("\r\n")
+    if report_type or any(pattern.match(content) for pattern in (SUMMARY_HEADER, TB_RUN_HEADER, TB_REVIEW_HEADER)):
         return True
     lines = report_preamble(content)
     if not lines:
         return False
     # 报告前置修订说明可能是引用段；以下取第一个实际标题，而非首物理行。
-    title_index = next((i for i, line in enumerate(lines) if MD_HEADING.fullmatch(line)), None)
+    headings = [i for i, line in enumerate(lines) if MD_HEADING.fullmatch(line)]
+    title_index = next((i for i in headings if lines[i].startswith("# ")), headings[0] if headings else None)
     title = MD_HEADING.fullmatch(lines[title_index]) if title_index is not None else None
     if title and ADR_TITLE.match(title[1]):
         return False
@@ -888,6 +960,50 @@ def is_report_artifact(raw, text):
             or measured_report(title[1] if title and not title_is_field else None, content, draft=draft))
 
 
+def section_result_lines(text):
+    """按实际节边界找自产读数；父节的脚本/样本说明传给子节，不传给同级节。"""
+    content, offset, _ = markdown_frontmatter(text)
+    lines = report_preamble(content, limit=content.count("\n") + 1, keep_fenced_lines=True)
+    headings = [(i, len(line) - len(line.lstrip("#")), heading[1]) for i, line in enumerate(lines)
+                if (heading := MD_HEADING.fullmatch(line))]
+    title = next((label for _, level, label in headings if level == 1), "")
+    if ADR_TITLE.match(title):
+        return set()
+    normative = NORMATIVE_TITLE.search(title) and not SECTION_RESULTS.search(title)
+    run_context = []
+    result_lines = set()
+    for (index, level, label), (end, _, _) in zip(headings, headings[1:] + [(len(lines), 0, "")]):
+        while run_context and run_context[-1][0] >= level:
+            run_context.pop()
+        parent_script, parent_sample, parent_run = run_context[-1][1:] if run_context else (False, False, False)
+        body = lines[index + 1:end]
+        prose = [line for line in [label, *body] if not line.startswith("|")]
+        context = "\n".join(prose)
+        script = parent_script or bool(SECTION_SCRIPT.search(context))
+        sample = parent_sample or bool(SECTION_SAMPLE.search(context))
+        observed_sample = any(SECTION_OBSERVED.search(line) and SECTION_SAMPLE.search(line) for line in prose)
+        plain_label = re.split(r"[（(]", label, 1)[0]
+        measured_section = SECTION_RESULTS.search(plain_label) and (RUN_SAMPLE.search(context) or RUN_SOURCE.search(context))
+        own_run = parent_run or observed_sample or (not normative and sample and (script or measured_section))
+        run_context.append((level, script, sample, own_run))
+        if level < 2:
+            continue
+        first = offset + index + 2  # body[0] 的原文件 1-based 行号
+        if own_run:
+            for table, _, rows in markdown_tables(body, RUN_TABLE_RULE):
+                for row, cells in enumerate(rows, start=table + 2):
+                    if any(NUMERIC_CELL.match(cell) for cell in cells[1:]):
+                        result_lines.add(first + row)
+        for row, line in enumerate(body):
+            if line.startswith("|") or SECTION_SCRIPT.search(line) or RUN_SAMPLE.search(line):
+                continue
+            direct_reading = SECTION_OBSERVED.search(line) and RUN_METRIC.search(line)
+            scoped_reading = own_run and SECTION_READING.search(line) and (RUN_METRIC.search(line) or RUN_VALUE.search(line))
+            if direct_reading or scoped_reading:
+                result_lines.add(first + row)
+    return result_lines
+
+
 def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):
     fail(isinstance(item, dict) and item.keys() == BASIS_KEYS, "invalid verification_basis keys")
     path, blob, start, end = (item[k] for k in ("path", "blob", "line_start", "line_end"))
@@ -906,9 +1022,11 @@ def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):
             fail(False, "verification_basis must be UTF-8 text")
         fail("\0" not in text, "verification_basis must be UTF-8 text")
         fail(not is_report_artifact(raw, text), ARTIFACT_BASIS_ERROR)
-        cache[blob] = text.count("\n") + bool(text and not text.endswith("\n"))
-    fail(type(start) is int and type(end) is int and 1 <= start <= end <= cache[blob],
+        cache[blob] = text.count("\n") + bool(text and not text.endswith("\n")), section_result_lines(text)
+    line_count, result_lines = cache[blob]
+    fail(type(start) is int and type(end) is int and 1 <= start <= end <= line_count,
          "verification_basis line range outside F text")
+    fail(not any(start <= line <= end for line in result_lines), ARTIFACT_BASIS_ERROR)
     return (path.encode("utf-8"), blob.encode("utf-8"), start, end)
 
 

@@ -747,9 +747,9 @@ def archive_source(path):
     return git_at_r3("show", f"{R3_HEAD}:{path}")
 
 
-def check_basis(history, options, path, *, allowed, line=1):
+def check_basis(history, options, path, *, allowed, line=1, line_end=None):
     row = history.row(basis=path)
-    row["verification_basis"][0].update(line_start=line, line_end=line)
+    row["verification_basis"][0].update(line_start=line, line_end=line if line_end is None else line_end)
     history.artifact([row])
     result = history.probe(options)
     if allowed:
@@ -1215,6 +1215,65 @@ def test_condition_c_cannot_promote_into_remediation_path(history, options):
     assert json.loads(result)["live"][ARTIFACT] == BASIS_ERROR
 
 
+@pytest.mark.parametrize(("at_migration", "at_final", "accepted"), [
+    (True, True, 2),
+    (False, False, 0),
+    (False, True, 0),
+    (True, False, 0),
+], ids=["both-matched", "both-crossed", "corrected-at-f", "crossed-at-f"])
+def test_condition_c_keeps_both_ends_of_each_pair(history, options, at_migration, at_final, accepted):
+    h = history
+    names = ("left.json", "right.json")
+    old = [f"inputs/{name}" for name in names]
+    new = [f"testdata/{name}" for name in names]
+    payloads = [b'{"fixture":1}\n', b'{"fixture":2}\n']
+
+    def pointer(matched):
+        destinations = new if matched else new[::-1]
+        return "".join(f"`{src}` 原样迁到 `{dst}`。\n" for src, dst in zip(old, destinations)).encode()
+
+    h.gate()
+    for src, raw in zip(old, payloads):
+        h.write(MIGRATION_PACKAGE + src, raw)
+    h.commit("Archive distinct fixtures")
+    for (src, dst), raw in zip(zip(old, new), payloads):
+        h.remove(MIGRATION_PACKAGE + src)
+        h.write(dst, raw)
+    h.write(MIGRATION_POINTER, pointer(at_migration))
+    h.commit("Atomically move both fixtures")
+    if at_final != at_migration:
+        h.write(MIGRATION_POINTER, pointer(at_final))
+        h.commit("Revise the pointer after the move")
+    for path in new:
+        check_basis(h, options, path, allowed=(accepted == 2))
+
+
+@pytest.mark.parametrize(("declaration", "allowed"), [
+    ("`vectors.json` migrated to\n`tests/fixtures/vectors.json`", True),
+    ("| vectors.json | => | tests/fixtures/vectors.json |", True),
+    ("`orphan.json`。`vectors.json` moved to `tests/fixtures/vectors.json`", True),
+    ("`vectors.json` 和 `other.json` 迁至 `tests/fixtures/vectors.json`", False),
+    ("`vectors.json` renamed to `other.json` / `tests/fixtures/vectors.json`", False),
+    ("`vectors.json` 未迁至 `tests/fixtures/vectors.json`", False),
+    ("`vectors.json` mentioned; moved to `tests/fixtures/vectors.json`", False),
+    ("`vectors.json` moved to\n\n`tests/fixtures/vectors.json`", False),
+    ("- `vectors.json` moved to\n- `tests/fixtures/vectors.json`", False),
+    ("| `vectors.json` moved to |\n| `tests/fixtures/vectors.json` |", False),
+    ("`tests/fixtures/vectors.json` -> `vectors.json`", False),
+])
+def test_condition_c_migration_declaration_is_one_unambiguous_clause(history, options, declaration, allowed):
+    h = history
+    h.gate()
+    source = MIGRATION_PACKAGE + "vectors.json"
+    h.write(source, b'{"fixture":1}\n')
+    h.commit("Archive fixture")
+    h.remove(source)
+    h.write(MIGRATION_TARGET, b'{"fixture":1}\n')
+    h.write(MIGRATION_POINTER, declaration.encode())
+    h.commit("Move fixture with declaration")
+    check_basis(h, options, MIGRATION_TARGET, allowed=allowed)
+
+
 @pytest.mark.parametrize(("path", "line", "count"), [
     ("s_session/profiles/ohlc_integer_tb02a_v1.json", 5, 5),
     ("s_session/README.md", 166, 5),
@@ -1281,6 +1340,63 @@ def test_r10_real_measured_and_delivery_reports_are_not_basis(history, options, 
     history.write(dest, git_at_r3("show", f"{R9_HEAD}:{source}"))
     history.gate()
     check_basis(history, options, dest, allowed=False, line=line)
+
+
+R10_HEAD = "fbfbe8e7100ef6cd51d634ed244d29d9a378f233"
+MIXED_RESEARCH = "analysis/trend_counter_segment_research.md"
+R11_REPORTS = (
+    (".chanlun/genealogy/settled/245-divergence-structure-analysis.md", 41),
+    (".chanlun/genealogy/settled/247-real-data-multi-tf-validation.md", 26),
+    (".chanlun/genealogy/settled/251-divergence-comparison-60min.md", 19),
+    (MIXED_RESEARCH, 150),
+)
+
+
+@pytest.mark.parametrize(("source", "line"), R11_REPORTS)
+def test_r11_rejects_real_report_types_and_mixed_results(history, options, source, line):
+    raw = git_at_r3("show", f"{R10_HEAD}:{source}")
+    neutral = "spec/material.md"
+    for path in (source, neutral):
+        history.write(path, raw)
+    history.gate()
+    for path in (source, neutral):
+        check_basis(history, options, path, allowed=False, line=line)
+        if source == MIXED_RESEARCH:
+            check_basis(history, options, path, allowed=False, line=146, line_end=150)
+            check_basis(history, options, path, allowed=False, line=154)
+            check_basis(history, options, path, allowed=True, line=115)
+            check_basis(history, options, path, allowed=True, line=133, line_end=134)
+
+
+@pytest.mark.parametrize(("source", "result", "definition"), [
+    ("analysis/recursive_regularization_theory.md", 186, 171),
+    ("analysis/sip_consolidated_dedup_rule_draft.md", 121, 103),
+    ("analysis/options_short_fixed_point_research.md", 832, 815),
+])
+def test_r11_rejects_measured_sections_without_rejecting_their_definitions(history, options, source, result, definition):
+    raw = git_at_r3("show", f"{R10_HEAD}:{source}")
+    neutral = "spec/material.md"
+    for path in (source, neutral):
+        history.write(path, raw)
+    history.gate()
+    for path in (source, neutral):
+        check_basis(history, options, path, allowed=False, line=result)
+        check_basis(history, options, path, allowed=True, line=definition)
+
+
+@pytest.mark.parametrize(("title", "kind", "body", "allowed"), [
+    ("材料", '"empirical-validation" # 类型注释', "正文", False),
+    ("材料", "'实验结果'", "正文", False),
+    ("候选复审报告", "概念发现", "结论：FAIL", False),
+    ("源概念", "公理", "type: 经验验证", True),
+    ("源概念", 'concept-separation # 曾用实验验证', "一条概念定义", True),
+])
+def test_r11_frontmatter_type_and_title_have_separate_roles(history, options, title, kind, body, allowed):
+    path = "spec/material.md"
+    preface = f"---\r\ntype: {kind}\r\n" + "tag: example\r\n" * 50 + "---\r\n\r\n"
+    history.write(path, (preface + f"# {title}\r\n\r\n{body}\r\n").encode())
+    history.gate()
+    check_basis(history, options, path, allowed=allowed, line=57)
 
 
 REVIEW_GUIDE = ".sandcastle/deepagents-pilot/EXTERNAL-REVIEW.md"
