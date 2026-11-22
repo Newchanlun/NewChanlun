@@ -19,13 +19,14 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 ROOT = PROGRAMS.parents[1]
 sys.path.insert(0, str(PROGRAMS))
 adapter = importlib.import_module("adapter")
-from common import ADAPTER, CROSSWALK, LEDGERS, REGISTRY, Invalid, json_bytes, sha, strict_json  # noqa: E402
+from common import ADAPTER, CROSSWALK, LEDGERS, P0, REGISTRY, Invalid, json_bytes, sha, strict_json  # noqa: E402
 from registry import OPENING_CENSUS, canonical_bases, load  # noqa: E402
 from run_checks import execute, run_group, run_identity  # noqa: E402
 from workflow import (_manifest, authority_comment, bundle_name, plan, producer_anchors,
                       producer_job_name, seal_matrix, seal_scaffold)  # noqa: E402
 
 DATA = ROOT / "tests/fixtures/at18"
+PREGATE = ROOT / ".chanlun/at18/pregate"
 IDENTITY = run_identity("d" * 40, 104, 2)
 
 
@@ -194,6 +195,86 @@ def test_formal_pregate_replays_frozen_landing_fields_and_cure_inventory():
     assert {entry[:5] for entry in actual if entry[2] is None} == fixed
     assert {entry for entry in actual if entry[2] is not None} == expected
     assert all(row["jobs"] and row["targets"] for row in catalog)
+
+
+@pytest.fixture(scope="module")
+def census_checker():
+    spec = importlib.util.spec_from_file_location("check_census", PREGATE / "check_census.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_pregate_review_covers_actual_frozen_p0(census_checker):
+    frozen = read(PREGATE, "landings.json")
+    assert frozen["p0"] == P0
+    commits = {row["commit"] for row in frozen["by_commit"]}
+    retained = census_checker.retained(commits, P0, frozen["observation"], cwd=ROOT)
+    expected = census_checker.p0_rows(P0, retained, cwd=ROOT)
+    counts = census_checker.check_review(PREGATE.parent / "pregate-review.json", expected)
+    assert len(expected) == 1025 and counts == {"PASS": 978, "BLOCK": 47}
+
+
+@pytest.fixture
+def pregate_review():
+    expected = [{"path": f"fixture/{i}", "blob": str(i) * 40, "mode": mode}
+                for i, mode in enumerate(("100644", "100755", "120000"), 1)]
+    review = {"schema_version": "at18-pregate-review/1", "owner_ticket": 2132,
+              "rows": [dict(row, verdict=verdict) for row, verdict in zip(
+                  expected, ("PASS", "BLOCK", "PASS"), strict=True)]}
+    return expected, review
+
+
+def test_pregate_review_accepts_historical_block(census_checker, tmp_path, pregate_review):
+    expected, review = pregate_review
+    write(tmp_path, "review.json", review)
+    assert census_checker.check_review(tmp_path / "review.json", expected) == {"PASS": 2, "BLOCK": 1}
+
+
+@pytest.mark.parametrize(("damage", "reason"), [
+    ("missing", "path coverage"), ("extra", "path coverage"), ("duplicate", "duplicate path"),
+    ("order", "path order"), ("blob-drift", "blob/mode mismatch"), ("mode-drift", "blob/mode mismatch"),
+    ("bad-blob", "invalid blob"), ("bad-mode", "invalid mode"), ("bad-verdict", "invalid verdict"),
+    ("extra-row-key", "row keys"), ("extra-root-key", "envelope"), ("wrong-version", "envelope"),
+    ("wrong-owner", "envelope"), ("duplicate-key", "duplicate JSON key"),
+])
+def test_pregate_review_rejects_invalid_artifact(census_checker, tmp_path, pregate_review, damage, reason):
+    expected, review = pregate_review
+    rows = review["rows"]
+    if damage == "missing":
+        rows.pop()
+    elif damage == "extra":
+        rows.append(dict(rows[-1], path="fixture/4"))
+    elif damage == "duplicate":
+        rows.insert(0, dict(rows[0]))
+    elif damage == "order":
+        rows[0], rows[1] = rows[1], rows[0]
+    elif damage == "blob-drift":
+        rows[0]["blob"] = rows[1]["blob"]
+    elif damage == "mode-drift":
+        rows[0]["mode"] = rows[1]["mode"]
+    elif damage == "bad-blob":
+        rows[0]["blob"] = "not-a-sha1"
+    elif damage == "bad-mode":
+        rows[0]["mode"] = "160000"
+    elif damage == "bad-verdict":
+        rows[0]["verdict"] = "SKIPPED"
+    elif damage == "extra-row-key":
+        rows[0]["notes"] = "unexpected"
+    elif damage == "extra-root-key":
+        review["notes"] = "unexpected"
+    elif damage == "wrong-version":
+        review["schema_version"] = "at18-pregate-review/2"
+    elif damage == "wrong-owner":
+        review["owner_ticket"] = 2132.0  # 数值相等不等于 JSON 整数。
+
+    path = tmp_path / "review.json"
+    raw = json_bytes(review)
+    if damage == "duplicate-key":
+        raw = raw.replace(b'"verdict":"BLOCK"', b'"verdict":"PASS","verdict":"BLOCK"', 1)
+    path.write_bytes(raw)
+    with pytest.raises(ValueError, match=f"PREGATE_REVIEW: .*{reason}"):
+        census_checker.check_review(path, expected)
 
 
 def test_typescript_node_selector_preserves_definition_line(repo):

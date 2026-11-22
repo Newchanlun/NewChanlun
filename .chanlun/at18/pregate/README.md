@@ -21,7 +21,10 @@ cmp "$P/unattributed-window-audit.json" "$O/unattributed-window-audit.json"
 
 对 r5 观测提交，重放应得到 62 张票、115 个唯一落地提交和 1,025 条 PRE 路径。
 `check_census.py` 中的 R3 回归断言以 r5 观测窗为前提；F 推进后，路径/留存关系以重新计算为准。
-输出的 `pre.json` 是待复审分母，不含审核人或审查结论。`paths.json`、
+输出的 `pre.json` 只列复审分母。`check_census.py` 将它和 [非作者复审原件](../pregate-review.json)
+逐条与 P0 的 `(path, blob, mode)` 对齐，并报告裁定计数。r5 的 **978 PASS / 47 BLOCK**
+均照录；本地结构与覆盖核验通过不改变 47 条历史 BLOCK，它们仍阻断 R10。
+`paths.json`、
 `postgate-path-history.json` 和 `unattributed-window-audit.json` 保留过程差异与归属扫尾。
 
 [历史偏差](historical-deviations.json)照录 r5 原观察；[补救定位](cure-sources.json)列出 CI 原失败
