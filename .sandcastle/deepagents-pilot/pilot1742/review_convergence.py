@@ -1265,6 +1265,67 @@ def _apply_round_new_consumed_keys(
     return _propagate_consumed_state_for_aliases(seeded, prior_aliases, next_aliases)
 
 
+def _advance_round_consumed_post_verdict(
+    *,
+    input_state: _ConsumedReplyState,
+    wontfix_reply_keys: Collection[tuple[str, str]] | None,
+    round_consumed_keys: Collection[str],
+    cleared_fingerprints: Collection[str],
+    bound_reply_targets: Mapping[str, str],
+    prior_aliases: Mapping[str, str],
+    next_aliases: Mapping[str, str],
+) -> _ConsumedReplyState:
+    """裁决后消费状态转移（Stage 3 + Stage 4，两遍精确不动点）：实时决策、历史回放与历史链校验共用。"""
+    explicit_wontfix: frozenset[tuple[str, str]] = (
+        frozenset(wontfix_reply_keys) if wontfix_reply_keys else frozenset()
+    )
+    consumed_alias_maps = _build_consumed_alias_maps(next_aliases, prior_aliases)
+    raw_consumed = frozenset(round_consumed_keys)
+    pre_consumed_keys = input_state.all_keys
+
+    def _run_stages(
+        direct_keys: frozenset[tuple[str, str]],
+        keys_for_post: frozenset[str],
+    ) -> _ConsumedReplyState:
+        after_wontfix = _apply_round_new_consumed_keys(
+            input_state,
+            _wontfix_direct_consumed_keys(direct_keys),
+            prior_aliases,
+            next_aliases,
+            treat_detached_as_derived=False,
+        )
+        return _apply_round_new_consumed_keys(
+            after_wontfix,
+            keys_for_post,
+            prior_aliases,
+            next_aliases,
+            treat_detached_as_derived=True,
+        )
+
+    direct_1 = explicit_wontfix | _collect_direct_cleared_reply_keys(
+        cleared_fingerprints=cleared_fingerprints,
+        consumed_reply_keys=raw_consumed,
+        pre_consumed_keys=pre_consumed_keys,
+        bound_reply_targets=bound_reply_targets,
+        next_aliases=next_aliases,
+        consumed_alias_maps=consumed_alias_maps,
+    )
+    state_1 = _run_stages(direct_1, raw_consumed)
+
+    rebuilt_consumed = raw_consumed | (state_1.all_keys - pre_consumed_keys)
+    direct_2 = explicit_wontfix | _collect_direct_cleared_reply_keys(
+        cleared_fingerprints=cleared_fingerprints,
+        consumed_reply_keys=rebuilt_consumed,
+        pre_consumed_keys=pre_consumed_keys,
+        bound_reply_targets=bound_reply_targets,
+        next_aliases=next_aliases,
+        consumed_alias_maps=consumed_alias_maps,
+    )
+    if direct_2 == direct_1:
+        return state_1
+    return _run_stages(direct_2, rebuilt_consumed)
+
+
 def _is_reply_consumed_for_target(
     reply_key: str,
     comment_id: str,
@@ -4584,29 +4645,14 @@ def _validate_history_chain(
                 f"历史第 {idx} 轮遗漏了前轮未解除的 Important 发现（无结转/解除/驳回记录）：{sorted(unaccounted)!r}"
             )
 
-        direct_cleared_reply_keys = (
-            validated_entry_wontfix or frozenset()
-        ) | _collect_direct_cleared_reply_keys(
+        consumed_state = _advance_round_consumed_post_verdict(
+            input_state=input_state,
+            wontfix_reply_keys=validated_entry_wontfix,
+            round_consumed_keys=validated_entry_consumed,
             cleared_fingerprints=cleared_in_round,
-            consumed_reply_keys=validated_entry_consumed,
-            pre_consumed_keys=pre_consumed_keys,
             bound_reply_targets=historical_bound_targets,
+            prior_aliases=prior_aliases,
             next_aliases=next_aliases,
-            consumed_alias_maps=consumed_alias_maps,
-        )
-        after_wontfix_state = _apply_round_new_consumed_keys(
-            input_state,
-            _wontfix_direct_consumed_keys(direct_cleared_reply_keys),
-            prior_aliases,
-            next_aliases,
-            treat_detached_as_derived=False,
-        )
-        consumed_state = _apply_round_new_consumed_keys(
-            after_wontfix_state,
-            validated_entry_consumed,
-            prior_aliases,
-            next_aliases,
-            treat_detached_as_derived=True,
         )
         active_aliases = next_aliases
         prev_entry = entry
@@ -5587,29 +5633,14 @@ def _replay_history_state(
             next_aliases,
             treat_detached_as_derived=False,
         )
-        direct_cleared_reply_keys = (
-            entry.wontfix_reply_keys or frozenset()
-        ) | _collect_direct_cleared_reply_keys(
+        consumed_state = _advance_round_consumed_post_verdict(
+            input_state=input_state,
+            wontfix_reply_keys=entry.wontfix_reply_keys,
+            round_consumed_keys=entry.consumed_reply_keys,
             cleared_fingerprints=cleared_in_round,
-            consumed_reply_keys=entry.consumed_reply_keys,
-            pre_consumed_keys=input_state.all_keys,
             bound_reply_targets=historical_bound_targets,
+            prior_aliases=prior_aliases,
             next_aliases=next_aliases,
-            consumed_alias_maps=_build_consumed_alias_maps(next_aliases, prior_aliases),
-        )
-        after_wontfix_state = _apply_round_new_consumed_keys(
-            input_state,
-            _wontfix_direct_consumed_keys(direct_cleared_reply_keys),
-            prior_aliases,
-            next_aliases,
-            treat_detached_as_derived=False,
-        )
-        consumed_state = _apply_round_new_consumed_keys(
-            after_wontfix_state,
-            entry.consumed_reply_keys,
-            prior_aliases,
-            next_aliases,
-            treat_detached_as_derived=True,
         )
         active_aliases = next_aliases
         prev_unresolved = current_unresolved
@@ -6154,54 +6185,16 @@ def _derive_round_decision_payload(
             )
 
     wontfix_reply_keys = _extract_wontfix_reply_keys(resolved)
-    consumed_alias_maps = _build_consumed_alias_maps(effective_aliases, history_aliases)
-    direct_cleared_reply_keys = wontfix_reply_keys | _collect_direct_cleared_reply_keys(
+    final_state = _advance_round_consumed_post_verdict(
+        input_state=input_state,
+        wontfix_reply_keys=wontfix_reply_keys,
+        round_consumed_keys=consumed_keys,
         cleared_fingerprints=cleared_ids,
-        consumed_reply_keys=consumed_keys,
-        pre_consumed_keys=input_state.all_keys,
         bound_reply_targets=bound_targets,
+        prior_aliases=history_aliases,
         next_aliases=effective_aliases,
-        consumed_alias_maps=consumed_alias_maps,
-    )
-    after_wontfix_state = _apply_round_new_consumed_keys(
-        input_state,
-        _wontfix_direct_consumed_keys(direct_cleared_reply_keys),
-        history_aliases,
-        effective_aliases,
-        treat_detached_as_derived=False,
-    )
-    final_state = _apply_round_new_consumed_keys(
-        after_wontfix_state,
-        consumed_keys,
-        history_aliases,
-        effective_aliases,
-        treat_detached_as_derived=True,
     )
     consumed_reply_keys = frozenset(consumed_keys) | (final_state.all_keys - prior_consumed_state.all_keys)
-    fixed_direct_cleared_reply_keys = wontfix_reply_keys | _collect_direct_cleared_reply_keys(
-        cleared_fingerprints=cleared_ids,
-        consumed_reply_keys=consumed_reply_keys,
-        pre_consumed_keys=input_state.all_keys,
-        bound_reply_targets=bound_targets,
-        next_aliases=effective_aliases,
-        consumed_alias_maps=consumed_alias_maps,
-    )
-    if fixed_direct_cleared_reply_keys != direct_cleared_reply_keys:
-        after_wontfix_state = _apply_round_new_consumed_keys(
-            input_state,
-            _wontfix_direct_consumed_keys(fixed_direct_cleared_reply_keys),
-            history_aliases,
-            effective_aliases,
-            treat_detached_as_derived=False,
-        )
-        final_state = _apply_round_new_consumed_keys(
-            after_wontfix_state,
-            consumed_reply_keys,
-            history_aliases,
-            effective_aliases,
-            treat_detached_as_derived=True,
-        )
-        consumed_reply_keys = frozenset(consumed_keys) | (final_state.all_keys - prior_consumed_state.all_keys)
     bound_reply_targets = frozenset(bound_targets.items())
     finder_session_ids = frozenset(b.session_id for b in verified.candidates.finder_batches)
     unresolved_ids = frozenset(f.finding_id for f in unresolved_important)
