@@ -85,6 +85,10 @@ def _fake_preflight_pass(_target: ReviewTarget) -> dict:
     return {"kind": "review-preflight", "is_review_result": False, "ready": True, "checks": checks}
 
 
+def _fake_session_receipt_pass(model: str, _launch_id: str, _session_id: str, _since: float) -> list[str]:
+    return [f"codex:{model}@chatgpt.com"]
+
+
 @pytest.fixture
 def lane(env, monkeypatch):
     for i in range(2):
@@ -96,7 +100,8 @@ def lane(env, monkeypatch):
     return ExternalReview(gateway, source=env.source, state_root=env.home / "review",
                           checkout_root=env.home / "clones", poll_seconds=0.01,
                           launcher=[sys.executable, str(Path(__file__).with_name("external_review_child.py"))],
-                          preflight=_fake_preflight_pass)
+                          preflight=_fake_preflight_pass,
+                          session_receipt=_fake_session_receipt_pass)
 
 
 def test_business_owner_multi_commit_pr_and_idempotent_resume(lane):
@@ -2574,3 +2579,187 @@ runpy.run_path({lane.launcher[1]!r}, run_name="__main__")
     assert len(rows) == 3 and sum(r["admission"] for r in rows) == 1
     assert {r["cfg"] for r in rows} == {expected}
     assert {Path(r["cwd"]).resolve() for r in rows} == {lane.source.resolve()}
+
+
+def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypatch, tmp_path):
+    """正式双审的 PASS/BLOCK 必须绑定代理侧未污染 cliproxy-review-v1 收据；缺失、污染、换模型或未配置均失败闭合。"""
+    import time
+
+    for key in (module.PREFLIGHT_ENV_CONTAINER, module.PREFLIGHT_ENV_CONTAINER_DIR,
+                module.PREFLIGHT_ENV_PROXY_CONTEXT, module.PREFLIGHT_ENV_HOST_DIR):
+        monkeypatch.delenv(key, raising=False)
+
+    # 1. 未配置代理收据源时默认实路径失败闭合，绝不发布 success
+    strict = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
+                            checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01,
+                            preflight=_fake_preflight_pass)
+    failed = strict.review_pr(1810, 1)
+    assert failed["verdict"] == "FAILED" and lane.gateway.sent == ["pending", "error"]
+    assert all("代理侧正式审阅上游模型收据" in r["reason"] for r in failed["reviews"])
+
+    # 2. 配置宿主代理收据目录：写入有效 cliproxy-review-v1 收据后正式双审通过
+    receipt_root = tmp_path / "proxy-receipts"
+    receipt_root.mkdir(mode=0o700)
+    monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(receipt_root))
+    orig_validate = module.validate_review
+
+    def write_proxy_receipt(target, launch, receipt, folder, source, *, route_override=None, tainted=False, session_override=None):
+        outcome = orig_validate(target, launch, receipt, folder, source)
+        launch_hdr = f"review-{launch['launch_id']}"
+        rec_dir = receipt_root / launch_hdr
+        rec_dir.mkdir(mode=0o700, exist_ok=True)
+        now = time.time_ns()
+        route = route_override.get(launch["model"], f"codex:{launch['model']}@chatgpt.com") if route_override else f"codex:{launch['model']}@chatgpt.com"
+        payload = {
+            "schema": "cliproxy-review-v1",
+            "launch": launch_hdr,
+            "session": session_override or outcome.session_id,
+            "started_ns": now - 1_000_000,
+            "finished_ns": now,
+            "complete": not tainted,
+            "tainted": tainted,
+            "requests": 2,
+            "routes": ["other"] if tainted else [route],
+        }
+        (rec_dir / "receipt.json").write_text(json.dumps(payload))
+        return outcome
+
+    monkeypatch.setattr(module, "validate_review", write_proxy_receipt)
+    passed = strict.review_pr(1810, 2)
+    assert passed["verdict"] == "PASS" and lane.gateway.sent[-2:] == ["pending", "success"]
+
+    # 3. 代理收据指向另一模型（Sol 冒充 Astra）或已被污染，均判 FAILED（含 BLOCK 也拒绝采信）
+    monkeypatch.setattr(
+        module, "validate_review",
+        lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, route_override={MODELS[1]: f"codex:{MODELS[0]}@chatgpt.com"}),
+    )
+    swapped = strict.review_pr(1810, 3)
+    assert swapped["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
+
+    (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
+    monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, tainted=True))
+    tainted_block = strict.review_pr(1810, 4)
+    assert tainted_block["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
+    (lane.state_root / "runs" / "fake-mode").unlink()
+    monkeypatch.setattr(module, "validate_review", orig_validate)
+
+    # 4. recover_stale 同样复验代理侧正式收据：收据被删或污染时拒绝恢复
+    stale_target = ReviewTarget(**passed["target"])
+    stale_folder = lane.state_root / "runs" / stale_target.key
+    saved_stale = {**passed, "verdict": "STALE", "reason": "simulated"}
+    saved_stale.pop("publication", None)
+    module._save(stale_folder / "outcome.json", saved_stale)
+    launch0 = module._read(stale_folder / MODELS[0] / "launch.json")
+    (receipt_root / f"review-{launch0['launch_id']}" / "receipt.json").unlink()
+    refused = strict.review_pr(1810, 2)
+    assert refused["verdict"] == "STALE" and "重验结果与原记录不一致" in refused.get("recovery_refused", "")
+
+    # 5. 容器收据后端：使用过滤后的 Docker 环境执行有界 --review-receipt 读取
+    monkeypatch.delenv(module.PREFLIGHT_ENV_HOST_DIR, raising=False)
+    monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER, "blackhole-cliproxy")
+    monkeypatch.setenv(module.PREFLIGHT_ENV_PROXY_CONTEXT, "orbstack")
+    monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER_DIR, "/tmp/cliproxy-preflight-receipts")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")
+    monkeypatch.setenv("DOCKER_CONFIG", "/tmp/forbidden-cfg")
+    monkeypatch.setenv("CLIPROXY_LOCAL_KEY", "must-not-leak")
+    monkeypatch.setenv("DOCKER_CONTEXT", "wrong-ctx")
+    lid = str(uuid.uuid4())
+    sid = str(uuid.uuid4())
+    captured = []
+    real_run = subprocess.run
+
+    def spy_container_run(cmd, *args, **kwargs):
+        if cmd[:4] == ["docker", "--context", "orbstack", "exec"]:
+            captured.append({"cmd": cmd, "env": kwargs.get("env")})
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                json.dumps({"launch": f"review-{lid}", "session": sid, "complete_stable": True,
+                            "routes": [f"codex:{MODELS[0]}@chatgpt.com"]}).encode(),
+                b"",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", spy_container_run)
+    got = strict._read_session_receipt(MODELS[0], lid, sid, time.time() - 1)
+    assert got == [f"codex:{MODELS[0]}@chatgpt.com"] and len(captured) == 1
+    assert "--review-receipt" in captured[0]["cmd"]
+    assert not any(k in captured[0]["env"] for k in ("DOCKER_HOST", "DOCKER_CONFIG", "CLIPROXY_LOCAL_KEY", "DOCKER_CONTEXT"))
+
+
+def test_registered_at_ns_is_strictly_monotonic_under_pr_lock_across_slow_preflight(lane, monkeypatch):
+    """两路并发 attempt 即使先冻结的慢预检晚于后冻结的快预检完成，锁内登记的 registered_at_ns 仍按实际登记顺序严格单调递增。"""
+    import threading
+
+    entered_slow = threading.Event()
+    release_slow = threading.Event()
+    calls = {"n": 0}
+
+    def slow_first(t):
+        calls["n"] += 1
+        if t.attempt == 1:
+            entered_slow.set()
+            assert release_slow.wait(5)
+        return _fake_preflight_pass(t)
+
+    lane.preflight = slow_first
+    results = {}
+
+    def register(attempt):
+        results[attempt] = lane.target(1810, attempt)
+
+    t1 = threading.Thread(target=register, args=(1,))
+    t1.start()
+    assert entered_slow.wait(5)
+    t2 = threading.Thread(target=register, args=(2,))
+    t2.start()
+    t2.join(timeout=5)
+    assert 2 in results
+    release_slow.set()
+    t1.join(timeout=5)
+    assert 1 in results
+    assert results[1].registered_at_ns > results[2].registered_at_ns
+
+
+def test_reuse_fallback_persists_preflight_admitted_marker_and_skips_re_preflight_on_resume(lane, env, monkeypatch):
+    """沿用登记后退回双审时，预检通过即落盘 preflight-admitted.json；若在发 pending 或建工蜂目录前中断，续跑不再重复预检。"""
+    first = lane.review_pr(1810, 1)
+    assert first["verdict"] == "PASS"
+    _advance_main(lane, env)
+    target = lane.target(1810, 1)
+    assert target.reuse_planned is True
+    folder = lane.state_root / "runs" / target.key
+    monkeypatch.setattr(lane, "reusable", lambda _t: None)
+
+    preflight_calls = []
+    lane.preflight = lambda t: (preflight_calls.append(t.run_id), _fake_preflight_pass(t))[1]
+
+    # 第一次：预检通过并写入 preflight-admitted.json，但在发 pending 前模拟中断
+    real_publish = StatusPublisher.publish
+
+    def interrupt_before_pending(self, state, *a, **kw):
+        if state == "pending" and len(preflight_calls) == 1:
+            raise EffectPending("simulated crash before pending")
+        return real_publish(self, state, *a, **kw)
+
+    monkeypatch.setattr(StatusPublisher, "publish", interrupt_before_pending)
+    with pytest.raises(EffectPending, match="simulated crash before pending"):
+        lane.review_pr(1810, 1)
+    assert len(preflight_calls) == 1
+    assert (folder / module.PREFLIGHT_ADMITTED_FILE).is_file()
+    assert not (folder / "effects" / "status-pending.json").exists()
+
+    # 第二次续跑：看到 preflight-admitted.json，不重复跑预检，直接完成双审
+    monkeypatch.setattr(StatusPublisher, "publish", real_publish)
+    resumed = lane.review_pr(1810, 1)
+    assert resumed["verdict"] == "PASS" and len(preflight_calls) == 1
+
+
+def test_passing_preflight_always_records_non_rate_limited_event(lane):
+    """预检通过即使在 preflight-rate-limits.json 尚不存在时也写入 rate_limited=False，防止夹在正式 429 与后续预检 429 之间误判连续限流。"""
+    path = lane.state_root / module.PREFLIGHT_RATE_LIMIT_FILE
+    assert not path.exists()
+    target = lane.target(1810, 1)
+    assert target.attempt == 1
+    assert path.is_file()
+    events = json.loads(path.read_text())["events"]
+    assert len(events) == 1 and events[0]["rate_limited"] is False

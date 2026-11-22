@@ -358,7 +358,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     record.filesystem = await probeReviewFilesystem(handle, folder);
     save(folder, "supervisor.json", record);
     record.phase = "provider";
-    const provider = codexWorker({ docker: true, model: launch.model, effort: "xhigh" });
+    const provider = codexWorker({ docker: true, model: launch.model, effort: "xhigh", reviewLaunchId: launch.launch_id });
     const schema = join(folder, "output-schema.json");
     writeFileSync(schema, JSON.stringify(OUTPUT_SCHEMA), { mode: 0o600 });
     await handle.copyFileIn(schema, "/tmp/external-review-schema.json");

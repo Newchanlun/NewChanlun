@@ -1556,7 +1556,7 @@ def test_actions_done_before_a_timeout_are_still_logged(lane, capsys):
             _hang()
         merges.append(number)
     github.merge = merge
-    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    sweep, _, _ = make(lane, run=True, github=github, auto_merge=True)
     assert ServeRound(sweep, clock=Clock())() is None
     lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
     assert merges == [1805]
@@ -1884,3 +1884,51 @@ def test_manual_loop_logs_actions_taken_before_a_timeout(lane, monkeypatch, caps
     assert module.main(["--private-key", "/k"]) == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [a["action"] for a in lines] == ["merged", "round-skipped"]
+
+
+def test_newly_launched_async_review_in_same_tick_blocks_auto_merge_before_target_json(lane):
+    """本轮刚异步派出的审查尚未写 target.json 时，即使远端同 SHA 已有绿灯（如跨 PR 旧 status），本轮合入也必须阻塞等待。"""
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    green(github, head)
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert acts(actions) == ["launch", "waiting"]
+    waiting = next(a for a in actions if a.get("pr") == 1810 and a["action"] == "waiting")
+    assert waiting.get("pending_latest_attempt") is True
+    assert len(host.spawned) == 1 and github.calls == []
+
+
+def test_reuse_fallback_after_preflight_admitted_uses_resume_once_not_launch_backoff(lane, env):
+    """沿用登记后一旦写出 preflight-admitted.json，即使尚未发 pending 或建工蜂目录，也不再算预检前退回，改为受管 resume-review。"""
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    _external_review._advance_main(lane, env)
+    target = lane.target(1810, 1)
+    assert target.reuse_planned is True
+    folder = lane.state_root / "runs" / target.key
+    (folder / "preflight-admitted.json").write_text(json.dumps({"run_id": target.run_id}))
+    sweep, host, _ = make(lane, run=False)
+    actions = sweep.tick()
+    assert acts(actions) == ["resume-review"] and len(host.spawned) == 1
+
+
+def test_formal_429_then_passing_preflight_then_preflight_429_does_not_false_backoff(lane):
+    """正式 run 命中 rate_limited 后，若中间有一次预检通过，即使此前尚无 preflight-rate-limits.json，后续单次预检 429 也不应误触发 30 分钟退避。"""
+    import time
+
+    t0 = time.time() - 20
+    run_dir = lane.state_root / "runs" / "r1-p1810-formal-429"
+    (run_dir / MODELS[0]).mkdir(parents=True)
+    outcome = run_dir / "outcome.json"
+    outcome.write_text(json.dumps({"run_id": "formal-429-1", "verdict": "FAILED",
+                                   "reviews": [{"model": MODELS[0], "verdict": "FAILED"}]}))
+    (run_dir / MODELS[0] / "receipt.json").write_text(json.dumps({"failure_code": "rate_limited"}))
+    os.utime(outcome, (t0, t0))
+
+    # 中间一次预检通过（此时 preflight-rate-limits.json 原本不存在）
+    target = lane.target(1810, 1)
+    # 随后一次预检 429
+    lane._record_preflight_rate_limit(target, rate_limited=True, models=[MODELS[0]])
+
+    sweep, _, _ = make(lane, run=False)
+    assert sweep.rate_limit_backoff() is None

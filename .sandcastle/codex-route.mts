@@ -17,10 +17,17 @@ export function codexRouteEnv(lookup?: KeyLookup): Record<string, string> {
   return { CLIPROXY_LOCAL_KEY: env.CLIPROXY_LOCAL_KEY };
 }
 
-export function codexWorker(options: { docker?: boolean; model?: ChildModel; effort?: "low" | "medium" | "high" | "xhigh" } = {}): AgentProvider {
+const REVIEW_LAUNCH_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export function codexWorker(options: {
+  docker?: boolean; model?: ChildModel; effort?: "low" | "medium" | "high" | "xhigh"; reviewLaunchId?: string;
+} = {}): AgentProvider {
   const docker = options.docker;
   const model = options.model ?? MAIN_MODEL;
   assertRoute(model);
+  if (options.reviewLaunchId !== undefined && !REVIEW_LAUNCH_ID.test(options.reviewLaunchId)) {
+    throw new Error("reviewLaunchId 必须是 UUIDv4");
+  }
   const home = mkdtempSync(join(tmpdir(), "sandcastle-codex-"));
   const workerHome = docker ? `/tmp/${home.split("/").at(-1)}` : home;
   const sessions = join(home, "sessions");
@@ -35,6 +42,11 @@ export function codexWorker(options: { docker?: boolean; model?: ChildModel; eff
   });
   const overrides = providerOverrides().map((entry) => docker
     ? entry.replace("http://127.0.0.1:8318/v1", "http://host.docker.internal:8318/v1") : entry);
+  if (options.reviewLaunchId !== undefined) {
+    overrides.push(
+      `model_providers.cliproxy-local.http_headers={"X-NewChanlun-Review-Launch"=${JSON.stringify(`review-${options.reviewLaunchId}`)}}`,
+    );
+  }
   return {
     ...provider,
     buildPrintCommand(options) {

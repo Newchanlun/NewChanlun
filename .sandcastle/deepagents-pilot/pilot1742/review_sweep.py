@@ -442,14 +442,14 @@ class Sweep:
         return target.get("policy_version") == POLICY and target.get("review_contract") == REVIEW_CONTRACT
 
     def _pre_dispatch_reuse_fallback(self, row: dict) -> bool:
-        """沿用登记后在发 pending 与建工蜂目录前即被预检/空间/额度拦下：尚未开始审查，按 launch-backoff 重试而不消耗唯一续跑机会。"""
+        """沿用登记后在预检放行、发 pending 与建工蜂目录前即被拦下：尚未开始审查，按 launch-backoff 重试而不消耗唯一续跑机会。"""
         if row.get("outcome") or not row["target"].get("reuse_planned"):
             return False
         target = row["target"]
         key = (f"r{target['repository_id']}-p{target['pr_number']}-{target['base_sha']}"
                f"-{target['head_sha']}-{target['policy_version']}-a{target['attempt']}")
         folder = self.lane.state_root / "runs" / key
-        if (folder / "effects" / "status-pending.json").exists():
+        if (folder / "preflight-admitted.json").exists() or (folder / "effects" / "status-pending.json").exists():
             return False
         return not any((folder / model).exists() for model in MODELS)
 
@@ -610,6 +610,16 @@ class Sweep:
                                        "本地也缺对象") from None
         return sorted(p for p in raw.decode().split("\0") if p)
 
+    def _review_confirmed_published_pass(self, number: int, head: str) -> bool:
+        """同 head 最新未作废 attempt 已落盘且为已发布 PASS 终态（同步桩或子进程已完结时为真）。"""
+        runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
+        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
+        if not non_stale:
+            return False
+        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"])
+        outcome = latest["outcome"]
+        return bool(outcome and "publication" in outcome and outcome.get("verdict") == "PASS")
+
     def _latest_attempt_blocks_merge(self, number: int, head: str) -> bool:
         """同 head 本地已登记最新未作废 attempt 但尚未发布 PASS 终态（排队、退避、中断、未发布结论或已非 PASS）时，
         远端现有的 success 只能属于已被取代的旧 attempt，禁止自动合入。"""
@@ -665,7 +675,9 @@ class Sweep:
                 return {"action": "update-branch"}, True, "update"
             return {"action": "behind-waiting", "review": review, "reviewing": reviewing_now,
                     "queue_head": is_head}, candidate, None
-        pending_latest = live_review or self._latest_attempt_blocks_merge(number, head)
+        pending_latest = (live_review
+                          or (reviewing_now and not self._review_confirmed_published_pass(number, head))
+                          or self._latest_attempt_blocks_merge(number, head))
         if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green and not pending_latest:
             return {"action": "merged"}, candidate, "merge"
         return {"action": "waiting", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
@@ -786,9 +798,11 @@ class Sweep:
             number, head = entry["pr"], entry["head"]
             try:
                 if write == "merge":
-                    # 持与 attempt 登记共用的 PR 锁复验最新 attempt 并完成合入，防规划到合入之间新登记的 attempt 被旧 PASS 抢跑。
+                    # 持与 attempt 登记共用的 PR 锁复验最新 attempt 与在途审查并完成合入，防规划到合入之间新启动/登记的 attempt 被旧 PASS 抢跑。
                     with self.lane._pr_lock(number):
-                        if self._latest_attempt_blocks_merge(number, head):
+                        if (number in live_busy
+                                or (number in reviewing_now and not self._review_confirmed_published_pass(number, head))
+                                or self._latest_attempt_blocks_merge(number, head)):
                             result = {"action": "waiting", "pending_latest_attempt": True, "rechecked_under_pr_lock": True}
                         else:
                             self.github.merge(number, head)

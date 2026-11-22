@@ -1784,6 +1784,58 @@ def test_generated_go_receipts_consumed_by_python():
             assert not all(r in preflight.ROUTES[SOL] for r in actual)
     for name in ("unfinished", "forgery-tail", "native-claude-disconnect"):
         assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, time.time(), 0.1, preflight.Deadline(3)) is None
+    review_expected = {
+        "review-codex-sol": ("review-12345678-1234-4234-8234-123456789aa1", "019d0000-0000-7000-8000-000000000aa1",
+                             [(f"codex:{SOL}", "chatgpt.com")]),
+        "review-codex-astra": ("review-12345678-1234-4234-8234-123456789aa2", "019d0000-0000-7000-8000-000000000aa2",
+                               [(f"codex:{ASTRA}", "chatgpt.com")]),
+    }
+    for name, (launch, session, routes) in review_expected.items():
+        payload = json.loads((root / name / launch / "receipt.json").read_text())
+        since = payload["started_ns"] / 1e9
+        assert preflight._log_module.review_from_receipt(root / name, launch, session, since, 0.5) == routes
+        # 跨模型或换 session 消费必须失败闭合
+        assert preflight._log_module.review_from_receipt(
+            root / name, launch, "019d0000-0000-7000-8000-000000000fff", since, 0,
+        ) is None
+    tainted_launch = "review-12345678-1234-4234-8234-123456789aa3"
+    tainted_session = "019d0000-0000-7000-8000-000000000aa3"
+    tainted_payload = json.loads((root / "review-codex-tainted" / tainted_launch / "receipt.json").read_text())
+    assert tainted_payload["tainted"] is True and tainted_payload["complete"] is False
+    assert preflight._log_module.review_from_receipt(
+        root / "review-codex-tainted", tainted_launch, tainted_session, tainted_payload["started_ns"] / 1e9, 0,
+    ) is None
+
+
+def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
+    launch = "review-12345678-1234-4234-8234-123456789ab1"
+    session = "019d0000-0000-7000-8000-000000000ab1"
+    now = time.time_ns()
+    base = {
+        "schema": "cliproxy-review-v1", "launch": launch, "session": session,
+        "started_ns": now - 1_000_000, "finished_ns": now, "complete": True,
+        "tainted": False, "requests": 3, "routes": [f"codex:{SOL}@chatgpt.com"],
+    }
+    directory = tmp_path / launch
+    directory.mkdir(mode=0o700)
+    path = directory / "receipt.json"
+    path.write_text(json.dumps(base))
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) == [
+        (f"codex:{SOL}", "chatgpt.com")
+    ]
+    for bad in (
+        {"tainted": True}, {"complete": False}, {"requests": 0}, {"requests": True},
+        {"schema": "cliproxy-preflight-v1"}, {"session": "019d0000-0000-7000-8000-000000000ab2"},
+        {"routes": ["codex@chatgpt.com"]}, {"routes": [f"codex:{SOL}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"]},
+        {"routes": ["other"]}, {"extra": 1}, {"finished_ns": now + 10**12},
+    ):
+        path.write_text(json.dumps({**base, **bad}))
+        assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+    path.unlink()
+    target = tmp_path / "secret.json"
+    target.write_text(json.dumps(base))
+    path.symlink_to(target)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
 
 
 def test_unscoped_codex_receipt_and_mismatched_roundtrip_model_are_rejected(tmp_path, env, capsys):

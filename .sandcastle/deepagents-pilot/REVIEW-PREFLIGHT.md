@@ -64,8 +64,10 @@ Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude/Codex
 
 本仓 `cliproxy/preflight-v1.patch` 与 `cliproxy/build.py` 已包含原生 `CodexAutoExecutor` OAuth HTTP（`gpt-6.2-sol`、`gpt-6.2-astra`）及历史 Kimi/Claude 的可信收据支持。
 
-- 仅显式开启收据目录、且请求头为严格 `preflight-<UUIDv4>` 的 `POST /v1/responses` 启用。普通 session 的路由、传输和返回行为保持原样。收据功能未开启时不产生证据。
-- 本次固定源码仅允许具体的原生 `KimiExecutor`、`ClaudeExecutor`、`AntigravityExecutor` 以及限定为原生 OAuth HTTP（非 API key、非上下游 WebSocket）且目标模型为 `gpt-6.2-sol` 或 `gpt-6.2-astra` 的 `CodexAutoExecutor`，不靠可冒名的 `Identifier()` 判覆盖。对于 Codex，收据在 HTTP `RoundTrip` 边界校对发往 `https://chatgpt.com/backend-api/codex/responses` 的未压缩 JSON 顶层唯一 `"model"` 字段与执行模型一致后，才记录 `codex:gpt-6.2-sol@chatgpt.com` 或 `codex:gpt-6.2-astra@chatgpt.com`，否则记 `other`。插件 executor、未列模型、count-tokens、裸 `HttpRequest`、非标准自定义 RoundTripper、WebSocket/其他入口不在本补丁支持范围，不能得到成功证明。
+- 仅显式开启收据目录、且请求满足以下两类之一时启用，普通流量原样透传：
+  1. 预检：`Session-Id` 为严格 `preflight-<UUIDv4>` 的 `POST /v1/responses`，原子发布 `cliproxy-preflight-v1`；
+  2. 正式独审：`X-NewChanlun-Review-Launch` 为严格 `review-<UUIDv4>` 且携带 UUID `Session-Id` 的 `POST /v1/responses` 或 `POST /v1/responses/compact`，跨多轮原子更新 `cliproxy-review-v1` 收据，且在发往上游前硬拦截任何非原生 Codex OAuth HTTP、模型切换、出站模型不符、非预期端点或插件干预并永久标记 `tainted=true`（重启后磁盘恢复仍保持不可清零）。
+- 本次固定源码仅允许具体的原生 `KimiExecutor`、`ClaudeExecutor`、`AntigravityExecutor`（仅预检）以及限定为原生 OAuth HTTP（非 API key、非上下游 WebSocket）且目标模型为 `gpt-6.2-sol` 或 `gpt-6.2-astra` 的 `CodexAutoExecutor`，不靠可冒名的 `Identifier()` 判覆盖。对于 Codex，收据在 HTTP `RoundTrip` 边界解码出站请求体（明文 / `zstd` / `gzip`，上限 32 MiB）并校对发往 `https://chatgpt.com/backend-api/codex/responses`（正式独审另允许 `/backend-api/codex/responses/compact`）的 JSON 顶层唯一 `"model"` 字段与执行模型一致后，才记录 `codex:gpt-6.2-sol@chatgpt.com` 或 `codex:gpt-6.2-astra@chatgpt.com`，否则记 `other`（正式独审直接拒绝上游请求并永久污染收据）。插件 executor、未列模型、count-tokens、裸 `HttpRequest`、非标准自定义 RoundTripper、WebSocket/其他入口不在本补丁支持范围，不能得到成功证明。
 - 默认空插件宿主可用；活跃插件或请求期间插件快照变化使证据失效。原生标准 HTTP transport 保留原 TLS、代理和连接池策略。收据记录 HTTP `RoundTrip` 边界的 provider 与请求 authority，不声称证明代理后的物理出口 IP；底层 TCP 重传不作为另一个模型请求。OAuth 刷新不是模型尝试。
 - collector 从入站头绑定 nonce 与服务端起点，并跨 handler bootstrap 重试共享。全部 Manager 执行调用经过同一 guard；没有任何被观察 HTTP 传输的执行也拒绝证明。传输开始前分配全局序号，失败请求、重定向及重复路线不去重。只存固定枚举，不存正文、URL 路径、auth_id、token 或错误字符串。
 - 成功发布要求：HTTP handler 成功结束、请求 lifecycle 成功、所有执行租约结束、全部响应体关闭、至少一个尝试、没有覆盖缺口。最多 64 次传输、50 秒生命周期，超限失败闭合。流式执行在上游 channel 关闭前持有租约；正文里的 `=== RESPONSE ===` 或 `API REQUEST 99` 不参与判定。

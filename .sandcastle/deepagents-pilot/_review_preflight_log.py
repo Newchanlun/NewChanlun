@@ -19,10 +19,15 @@ def route_from_log(log_dir: Path, session: str, since: float, wait: float) -> li
 
 
 SCHEMA = "cliproxy-preflight-v1"
+REVIEW_SCHEMA = "cliproxy-review-v1"
 SESSION = re.compile(r"preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+REVIEW_LAUNCH = re.compile(r"review-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+REVIEW_SESSION = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astra@chatgpt.com",
                             "kimi@api.kimi.com", "kimi-ai@api.kimi.ai", "claude@api.anthropic.com",
                             "antigravity@daily-cloudcode-pa.googleapis.com", "other"})
+REVIEW_RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astra@chatgpt.com"})
+MAX_REVIEW_DURATION_NS = 7_200_000_000_000
 
 
 def _unique_object(pairs):
@@ -78,9 +83,68 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
             return None
 
 
+def review_from_receipt(root: Path, launch: str, session: str, since: float, wait: float) -> list[tuple[str, str]] | None:
+    """消费代理为正式独审 launch 原子发布的 cliproxy-review-v1 收据；缺项、污染或模型不符均返回 None。"""
+    if not REVIEW_LAUNCH.fullmatch(launch) or not REVIEW_SESSION.fullmatch(session):
+        return None
+    end = time.monotonic() + max(0, wait)
+    while True:
+        try:
+            parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                directory = os.open(launch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            finally:
+                os.close(parent)
+            try:
+                fd = os.open("receipt.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            finally:
+                os.close(directory)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 16384:
+                    return None
+                raw = os.read(fd, 16385)
+            finally:
+                os.close(fd)
+            payload = json.loads(raw, object_pairs_hook=_unique_object)
+            if (not isinstance(payload, dict)
+                    or set(payload) != {"schema", "launch", "session", "started_ns", "finished_ns",
+                                        "complete", "tainted", "requests", "routes"}
+                    or payload["schema"] != REVIEW_SCHEMA or payload["launch"] != launch
+                    or payload["session"] != session
+                    or payload["complete"] is not True or payload["tainted"] is not False
+                    or type(payload["requests"]) is not int or payload["requests"] < 1
+                    or type(payload["started_ns"]) is not int or type(payload["finished_ns"]) is not int
+                    or not int((since - 1) * 1e9) <= payload["started_ns"] <= payload["finished_ns"] <= time.time_ns()
+                    or payload["finished_ns"] - payload["started_ns"] > MAX_REVIEW_DURATION_NS
+                    or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
+                    or not isinstance(payload["routes"][0], str)
+                    or payload["routes"][0] not in REVIEW_RECEIPT_ROUTES):
+                return None
+            return [tuple(payload["routes"][0].split("@"))]
+        except FileNotFoundError:
+            if time.monotonic() >= end:
+                return None
+            time.sleep(min(0.02, max(0, end - time.monotonic())))
+        except (OSError, ValueError, TypeError):
+            return None
+
+
 def main():
     # 绝对到期时间也约束 daemon 延迟启动的 exec；SIGALRM 覆盖阻塞读取与输出。
     arguments = sys.argv[1:]
+    if arguments[:1] == ["--review-receipt"]:
+        log_dir, launch, session, since, expires, budget, known_json = arguments[1:]
+        remaining = float(expires) - time.time()
+        if not 0 < remaining <= float(budget):
+            return 2
+        signal.signal(signal.SIGALRM, lambda *_: os._exit(2))
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+        known = {tuple(route): "@".join(route) for route in json.loads(known_json)}
+        attempts = review_from_receipt(Path(log_dir), launch, session, float(since), remaining)
+        print(json.dumps({"launch": launch, "session": session, "complete_stable": attempts is not None,
+                          "routes": [known.get(route, "other") for route in attempts or []]}), flush=True)
+        return 0
     receipt_mode = arguments[:1] == ["--receipt"]
     if receipt_mode:
         arguments = arguments[1:]

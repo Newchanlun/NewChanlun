@@ -30,6 +30,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +55,10 @@ POLICY = "external-pr-v2-gpt62"
 # 与 codex-child.ts PROVIDER_DEFINITION.base_url 及 codex-route.mts Docker 容器端点（host.docker.internal:8318/v1）一致。
 FORMAL_PROXY_URL = "http://host.docker.internal:8318"  # DevSkim: ignore DS137138,DS162092 有意使用本机容器网关（与正式审阅容器端点一致），非明文外网流量
 PREFLIGHT_SCRIPT = Path(__file__).resolve().parents[1] / "review_preflight.py"
+PREFLIGHT_LOG_READER = Path(__file__).resolve().parents[1] / "_review_preflight_log.py"
 PREFLIGHT_RATE_LIMIT_FILE = "preflight-rate-limits.json"
+PREFLIGHT_ADMITTED_FILE = "preflight-admitted.json"
+SESSION_RECEIPT_TIMEOUT_SECONDS = 5.0
 PREFLIGHT_ENV_CONTAINER = "REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER"
 PREFLIGHT_ENV_CONTAINER_DIR = "REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR"
 PREFLIGHT_ENV_PROXY_CONTEXT = "REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT"
@@ -532,7 +536,8 @@ class ExternalReview:
                  launcher: list[str] | None = None, poll_seconds: float = 1,
                  docker: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
                  vm_trim: Callable[[Path], dict] | None = None,
-                 preflight: Callable[[ReviewTarget], dict] | None = None):
+                 preflight: Callable[[ReviewTarget], dict] | None = None,
+                 session_receipt: Callable[[str, str, str, float], list[str] | None] | None = None):
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
         self.docker = docker if docker is not None else (lambda args: docker_cli(args))
         # #1986：删卷后对 Colima VM 跑 fstrim；与 TS 监督共用 checkout_root 下的节流锁与时间戳（见 vm_trim）。
@@ -541,6 +546,7 @@ class ExternalReview:
         self.launcher = launcher or [str(SOURCE_REPO / "node_modules" / ".bin" / "tsx"),
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
         self.preflight = preflight if preflight is not None else self._run_preflight
+        self.session_receipt = session_receipt if session_receipt is not None else self._read_session_receipt
         self.poll_seconds = poll_seconds
         self._stop = threading.Event()
 
@@ -622,11 +628,101 @@ class ExternalReview:
             report = None
         return {"returncode": done.returncode, "report": report}
 
+    @staticmethod
+    def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate field")
+            result[key] = value
+        return result
+
+    def _read_session_receipt(self, model: str, launch_id: str, session_id: str, since: float) -> list[str] | None:
+        """从已配置的代理收据来源读取正式独审 session 的 cliproxy-review-v1 收据；未配置、冲突或污染一律返回 None。"""
+        if (not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", launch_id)
+                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id)):
+            return None
+        container = os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip()
+        host_dir = os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
+        if (container and host_dir) or (not container and not host_dir):
+            return None
+        launch = f"review-{launch_id}"
+        known = [[f"codex:{m}", "chatgpt.com"] for m in MODELS]
+        budget = SESSION_RECEIPT_TIMEOUT_SECONDS
+        expires = time.time() + budget
+        try:
+            reader_source = PREFLIGHT_LOG_READER.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        if container:
+            proxy_ctx = os.environ.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
+            container_dir = os.environ.get(PREFLIGHT_ENV_CONTAINER_DIR, "").strip()
+            if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container)
+                    or not proxy_ctx or not container_dir or not container_dir.startswith("/")):
+                return None
+            cmd = ["docker", "--context", proxy_ctx, "exec", container, "python3", "-I", "-c", reader_source,
+                   "--review-receipt", container_dir, launch, session_id, str(since), str(expires), str(budget),
+                   json.dumps(known)]
+            env = {k: os.environ[k] for k in DOCKER_ENV if k in os.environ and k != "DOCKER_CONTEXT"}
+        else:
+            cmd = [sys.executable, "-I", "-c", reader_source,
+                   "--review-receipt", host_dir, launch, session_id, str(since), str(expires), str(budget),
+                   json.dumps(known)]
+            env = {k: os.environ[k] for k in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL")
+                   if k in os.environ}
+        try:
+            done = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=budget + 1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if done.returncode != 0 or done.stderr:
+            return None
+        try:
+            payload = json.loads(done.stdout, object_pairs_hook=self._unique_object)
+        except ValueError:
+            return None
+        allowed = {f"codex:{m}@chatgpt.com" for m in MODELS}
+        if (not isinstance(payload, dict)
+                or set(payload) != {"launch", "session", "complete_stable", "routes"}
+                or payload["launch"] != launch or payload["session"] != session_id
+                or payload["complete_stable"] is not True
+                or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
+                or not isinstance(payload["routes"][0], str) or payload["routes"][0] not in allowed):
+            return None
+        return list(payload["routes"])
+
+    def _verify_session_receipt(self, target: ReviewTarget, launch: dict, receipt: dict, worker: Path,
+                                outcome: ReviewOutcome) -> ReviewOutcome:
+        """正式双审的每一次有效结论（PASS/BLOCK）都必须绑定代理侧未污染的 cliproxy-review-v1 精确上游模型收据。"""
+        if target.policy_version != POLICY or outcome.verdict not in ("PASS", "BLOCK"):
+            return outcome
+        candidates: list[float] = []
+        try:
+            candidates.append((worker / "launch.json").stat().st_mtime)
+        except OSError:
+            pass
+        started_raw = receipt.get("started_at")
+        if isinstance(started_raw, str) and started_raw:
+            try:
+                candidates.append(datetime.fromisoformat(started_raw.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                pass
+        since = min(candidates) if candidates else 0.0
+        try:
+            routes = self.session_receipt(outcome.model, str(launch.get("launch_id", "")),
+                                          str(outcome.session_id or ""), since)
+        except Exception:
+            routes = None
+        expected = f"codex:{outcome.model}@chatgpt.com"
+        if not isinstance(routes, list) or routes != [expected]:
+            return ReviewOutcome(
+                outcome.model, "FAILED", outcome.session_id,
+                f"代理侧正式审阅上游模型收据缺失、已污染或模型不符（期望 {expected}，实得 {routes!r}），PASS/BLOCK 均不采信",
+            )
+        return outcome
+
     def _record_preflight_rate_limit(self, target: ReviewTarget, *, rate_limited: bool, models: list[str]) -> None:
         """把预检 429/rate_limit（以及后续恢复通过）写入共享状态根，供 review_sweep 全局限流退避消费；不占 attempt。"""
         path = self.state_root / PREFLIGHT_RATE_LIMIT_FILE
-        if not rate_limited and not path.exists():
-            return
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(self.state_root / "preflight-rate-limits.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
@@ -758,6 +854,13 @@ class ExternalReview:
                     f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
                 if any(used):
                     raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
+                prev_max = 0
+                for existing in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
+                    try:
+                        prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
+                    except (OSError, ValueError, TypeError, IdentityError):
+                        continue
+                target = replace(target, registered_at_ns=max(time.time_ns(), prev_max + 1))
                 _save(folder / "target.json", asdict(target))
         return target
 
@@ -1184,7 +1287,9 @@ class ExternalReview:
             time.sleep(self.poll_seconds)
         if process is not None:
             process.wait()
-        outcome = validate_review(target, launch, _read(worker / "receipt.json"), worker, self.source)
+        receipt = _read(worker / "receipt.json")
+        outcome = validate_review(target, launch, receipt, worker, self.source)
+        outcome = self._verify_session_receipt(target, launch, receipt, worker, outcome)
         self.cleanup_checkout(target, model, folder)
         return outcome
 
@@ -1314,10 +1419,15 @@ class ExternalReview:
                         current = self.reuse_source(target)
                         if current is not None and current["run_id"] == source["run_id"]:
                             return self._publish_reuse(target, folder, publisher, source, admission)
-                if target.reuse_planned and not any((folder / model).exists() for model in MODELS):
+                admitted_marker = folder / PREFLIGHT_ADMITTED_FILE
+                if (target.reuse_planned
+                        and not admitted_marker.exists()
+                        and not (folder / "effects" / "status-pending.json").exists()
+                        and not any((folder / model).exists() for model in MODELS)):
                     self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
                     self.admit_quota()
                     self.admit_preflight(target, pre_dispatch=True)
+                    _save(admitted_marker, {"admitted_at": time.time(), "run_id": target.run_id})
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
                     raise Stale("同 head 已有更晚登记的 attempt，本 run 不再派发")
                 if any(not (folder / model / "launch.json").exists() for model in MODELS):
@@ -1380,8 +1490,10 @@ class ExternalReview:
             worker = folder / model
             if not (worker / "launch.json").exists() or not (worker / "receipt.json").exists():
                 return refuse(f"{model} 缺少 launch.json 或 receipt.json，无法重验")
-            outcomes.append(validate_review(target, _read(worker / "launch.json"), _read(worker / "receipt.json"), worker,
-                                            self.source))
+            launch = _read(worker / "launch.json")
+            receipt = _read(worker / "receipt.json")
+            outcome = validate_review(target, launch, receipt, worker, self.source)
+            outcomes.append(self._verify_session_receipt(target, launch, receipt, worker, outcome))
         if [(o.model, o.verdict) for o in outcomes] != recorded:
             return refuse("重验结果与原记录不一致")
         sessions = [o.session_id for o in outcomes if o.session_id]
