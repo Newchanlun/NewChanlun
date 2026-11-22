@@ -58,6 +58,7 @@ from pilot1742.review_convergence import (
     parse_comment_marker,
     parse_finder_output,
     parse_severity,
+    parse_verification_verdict,
     parse_verifier_output,
     parse_wontfix_replies,
     plan_next_round,
@@ -177,6 +178,7 @@ def _verified(
     round_number: int = 1,
     head_sha: str | None = None,
     author_reply: AuthorReply | None = None,
+    duplicate_of: str | None = None,
 ) -> VerifiedFinding:
     sha = head_sha or (HEAD_1 if round_number == 1 else f"{round_number}" * 40)
     return VerifiedFinding(
@@ -187,6 +189,7 @@ def _verified(
         round_number=round_number,
         head_sha=sha,
         author_reply=author_reply,
+        duplicate_of=duplicate_of,
     )
 
 
@@ -222,6 +225,7 @@ def _verified_round(
             head_sha=sha,
             author_reply=vf.author_reply,
             related_reply_keys=vf.related_reply_keys,
+            duplicate_of=vf.duplicate_of,
         )
         for vf in verdicts
     )
@@ -10242,3 +10246,750 @@ def test_r30_list_item_blank_line_padding_in_fenced_indented_and_html_blocks() -
     f_pre4_4sp, f_pre4_0sp, merged_pre_eq = _r21_probe(doc_pre(4, "    "), doc_pre(4, ""), category=True)
     assert f_pre4_4sp.finding_id == f_pre4_0sp.finding_id
     assert len(merged_pre_eq) == 1
+
+
+# ── #1928 Verifier 语义去重（VerificationVerdict.DUPLICATE + duplicate_of） ────
+
+
+def test_parse_verification_verdict_supports_duplicate_and_rejects_aliases() -> None:
+    assert parse_verification_verdict("duplicate") is VerificationVerdict.DUPLICATE
+    assert parse_verification_verdict("  DUPLICATE  ") is VerificationVerdict.DUPLICATE
+    assert parse_verification_verdict(VerificationVerdict.DUPLICATE) is VerificationVerdict.DUPLICATE
+    for bad in ("", "   ", "dup", "dedup", "duplicate_of", "merged", None, 123):
+        with pytest.raises(ConvergenceError):
+            parse_verification_verdict(bad)
+
+
+def test_verified_finding_duplicate_of_strict_invariants() -> None:
+    f_canon = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/dup_target.py",
+        line=10,
+        category="空指针",
+        failure_scenario="缺失判空导致 AttributeError",
+        source_models=("gpt-6-astra",),
+    )
+    f_dup = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/dup_target.py",
+        line=11,
+        category="None 访问",
+        failure_scenario="未校验 None 直接读取字段崩溃",
+        source_models=("gpt-6.1-sol",),
+    )
+    assert f_canon.finding_id != f_dup.finding_id
+
+    # 合法 DUPLICATE：规范去空白转小写，且 is_blocking 恒为 False
+    vf_dup = VerifiedFinding(
+        finding=f_dup,
+        verdict=VerificationVerdict.DUPLICATE,
+        verifier_model="claude-opus-5-5",
+        verifier_evidence="与规范项同源",
+        round_number=1,
+        head_sha=HEAD_1,
+        duplicate_of=f"  {f_canon.finding_id.upper()}  ",
+    )
+    assert vf_dup.duplicate_of == f_canon.finding_id
+    assert vf_dup.is_blocking is False
+    assert is_blocking_finding(vf_dup) is False
+
+    # DUPLICATE 缺少、非法格式、非字符串或自指均 fail-closed 拒绝
+    for bad_dup in (None, "", "   ", 12345, "abcdef12", "z" * 16, "0" * 15, "0" * 17, f_dup.finding_id):
+        with pytest.raises(ConvergenceError):
+            VerifiedFinding(
+                finding=f_dup,
+                verdict=VerificationVerdict.DUPLICATE,
+                verifier_model="claude-opus-5-5",
+                verifier_evidence="同源",
+                round_number=1,
+                head_sha=HEAD_1,
+                duplicate_of=bad_dup,  # type: ignore[arg-type]
+            )
+
+    # DUPLICATE 禁止绑定 author_reply 或 related_reply_keys
+    reply_for_dup = AuthorReply(f_dup.finding_id, None, None, "设计如此", "c900", "alice")
+    with pytest.raises(ConvergenceError):
+        VerifiedFinding(
+            finding=f_dup,
+            verdict=VerificationVerdict.DUPLICATE,
+            verifier_model="claude-opus-5-5",
+            verifier_evidence="同源",
+            round_number=1,
+            head_sha=HEAD_1,
+            author_reply=reply_for_dup,
+            duplicate_of=f_canon.finding_id,
+        )
+    with pytest.raises(ConvergenceError):
+        VerifiedFinding(
+            finding=f_dup,
+            verdict=VerificationVerdict.DUPLICATE,
+            verifier_model="claude-opus-5-5",
+            verifier_evidence="同源",
+            round_number=1,
+            head_sha=HEAD_1,
+            related_reply_keys=(reply_for_dup.reply_key,),
+            duplicate_of=f_canon.finding_id,
+        )
+
+    # 非 DUPLICATE 裁决传入任何非 None duplicate_of 均拒绝
+    reply_for_canon = AuthorReply(f_canon.finding_id, None, None, "业务允许", "c901", "alice")
+    for non_dup_verdict, reply in (
+        (VerificationVerdict.CONFIRMED, None),
+        (VerificationVerdict.REJECTED, None),
+        (VerificationVerdict.RESOLVED_BY_FIX, None),
+        (VerificationVerdict.RESOLVED_BY_WONTFIX, reply_for_canon),
+    ):
+        for bad_target in (f_dup.finding_id, "", "   "):
+            with pytest.raises(ConvergenceError):
+                VerifiedFinding(
+                    finding=f_canon,
+                    verdict=non_dup_verdict,
+                    verifier_model="claude-opus-5-5",
+                    verifier_evidence="核实完成",
+                    round_number=1,
+                    head_sha=HEAD_1,
+                    author_reply=reply,
+                    duplicate_of=bad_target,
+                )
+
+
+def test_verifier_semantic_dedup_dual_finder_important_and_rendering_isolation() -> None:
+    """双 Finder 对同一缺陷用不同措辞产出两条 Important：Verifier 折叠后只阻断 1 项且不污染评论与历史。"""
+    f1 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/worker.py",
+        line=88,
+        category="竞态条件",
+        failure_scenario="并发写入共享状态文件缺少文件锁导致 JSON 截断",
+        evidence="第 88 行直接 open(..., 'w') 覆写",
+        source_models=("gpt-6-astra",),
+    )
+    f2 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/worker.py",
+        line=90,
+        category="并发写冲突",
+        failure_scenario="两个进程同时刷新同一 state.json 时发生半写损坏",
+        evidence="第 90 行未使用临时文件原子替换",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_nit_same = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/worker.py",
+        line=91,
+        category="写入健壮性",
+        failure_scenario="建议改用原子写避免中断时留下半成品文件",
+        evidence="第 91 行写入逻辑",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_pre_other = _finding(
+        severity=Severity.PRE_EXISTING,
+        file="pilot1742/legacy.py",
+        line=12,
+        category="历史超时缺失",
+        failure_scenario="旧客户端调用未设置请求超时",
+        evidence="legacy.py:12 原本就没有 timeout",
+        source_models=("gpt-6-astra",),
+    )
+    f_nit_folded_to_pre = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/legacy.py",
+        line=13,
+        category="缺少超时参数",
+        failure_scenario="HTTP 调用未传 timeout 可能挂起",
+        evidence="legacy.py:13 同一处调用",
+        source_models=("gpt-6.1-sol",),
+    )
+
+    cand = _candidates([f1, f2, f_nit_same, f_pre_other, f_nit_folded_to_pre])
+    assert len(cand.findings) == 5
+
+    # 显式传入 duplicate_of=None 给非 duplicate 裁决也应放行（兼容结构化输出 schema null）
+    payload = _verifier_payload(
+        cand,
+        [
+            {
+                "finding_id": f1.finding_id,
+                "verdict": "confirmed",
+                "verifier_evidence": "确认为真实并发写损坏缺陷",
+                "duplicate_of": None,
+            },
+            {
+                "finding_id": f2.finding_id,
+                "verdict": "duplicate",
+                "duplicate_of": f1.finding_id.upper(),
+                "verifier_evidence": f"与 {f1.finding_id} 指向同一处无锁覆写根因",
+            },
+            {
+                "finding_id": f_nit_same.finding_id,
+                "verdict": "duplicate",
+                "duplicate_of": f1.finding_id,
+                "verifier_evidence": f"Nit -> Important 合法向上折叠至 {f1.finding_id}",
+            },
+            {
+                "finding_id": f_pre_other.finding_id,
+                "verdict": "confirmed",
+                "verifier_evidence": "确认为历史遗留无超时调用",
+            },
+            {
+                "finding_id": f_nit_folded_to_pre.finding_id,
+                "verdict": "duplicate",
+                "duplicate_of": f_pre_other.finding_id,
+                "verifier_evidence": f"Nit -> Pre-existing 合法折叠至 {f_pre_other.finding_id}",
+            },
+        ],
+    )
+    verified = parse_verifier_output(payload, cand, verifier_model="claude-opus-5-5")
+    assert {vf.finding.finding_id for vf in verified.duplicate_findings} == {
+        f2.finding_id,
+        f_nit_same.finding_id,
+        f_nit_folded_to_pre.finding_id,
+    }
+    by_id = {vf.finding.finding_id: vf for vf in verified.verdicts}
+    assert by_id[f2.finding_id].duplicate_of == f1.finding_id
+
+    # select_postable_findings 严格排除 DUPLICATE
+    postable_direct = select_postable_findings(verified.verdicts, frozenset())
+    assert {vf.finding.finding_id for vf in postable_direct} == {f1.finding_id, f_pre_other.finding_id}
+
+    decision = evaluate_round(verified)
+    assert decision.outcome is RoundOutcome.BLOCKED
+    assert decision.github_state == "failure"
+    assert decision.description == "发现 1 项未解除的 Important 问题（第 1/3 轮）"
+    assert [vf.finding.finding_id for vf in decision.blocking_findings] == [f1.finding_id]
+    assert [vf.finding.finding_id for vf in decision.non_blocking_findings] == [f_pre_other.finding_id]
+    assert decision.resolved_findings == ()
+    assert decision.rejected_findings == ()
+    assert [f.finding_id for f in decision.unresolved_important] == [f1.finding_id]
+    assert {vf.finding.finding_id for vf in decision.postable_findings} == {f1.finding_id, f_pre_other.finding_id}
+    assert {vf.finding.finding_id for vf in decision.duplicate_findings} == {
+        f2.finding_id,
+        f_nit_same.finding_id,
+        f_nit_folded_to_pre.finding_id,
+    }
+
+    rendered = render_findings_comment(1928, HEAD_1, decision)
+    assert "1 项 Important，0 项 Nit，1 项 Pre-existing" in rendered.body
+    assert f1.finding_id in rendered.body
+    assert f_pre_other.finding_id in rendered.body
+    assert f2.finding_id not in rendered.body
+    assert f_nit_same.finding_id not in rendered.body
+    assert f_nit_folded_to_pre.finding_id not in rendered.body
+    assert "### 已解除与核实驳回摘要" not in rendered.body
+    assert rendered.posted_fingerprints == frozenset({f1.finding_id, f_pre_other.finding_id})
+    assert rendered.omitted_non_blocking == ()
+
+    entry = decision.to_history_entry(rendered=rendered)
+    assert entry.posted_fingerprints == frozenset({f1.finding_id, f_pre_other.finding_id})
+    assert [f.finding_id for f in entry.unresolved_important] == [f1.finding_id]
+    assert entry.resolved_fingerprints == frozenset()
+    assert entry.rejected_fingerprints == frozenset()
+    assert entry.pending_non_blocking == ()
+
+
+def test_parse_verifier_output_rejects_invalid_duplicate_graphs_and_downgrades() -> None:
+    f_imp_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/g.py",
+        line=10,
+        category="缺陷A",
+        failure_scenario="场景A触发异常",
+        source_models=("gpt-6-astra",),
+    )
+    f_imp_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/g.py",
+        line=11,
+        category="缺陷B",
+        failure_scenario="场景B触发异常",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_pre = _finding(
+        severity=Severity.PRE_EXISTING,
+        file="pilot1742/g.py",
+        line=12,
+        category="历史问题",
+        failure_scenario="原本就存在的问题",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/g.py",
+        line=13,
+        category="细节建议",
+        failure_scenario="命名不够直观",
+        source_models=("gpt-6.1-sol",),
+    )
+
+    # 1. 非法降级折叠：Important -> Nit / Important -> Pre-existing / Pre-existing -> Nit
+    for stricter, looser in ((f_imp_a, f_nit), (f_imp_a, f_pre), (f_pre, f_nit)):
+        cand_deg = _candidates([stricter, looser])
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand_deg,
+                    [
+                        {
+                            "finding_id": stricter.finding_id,
+                            "verdict": "duplicate",
+                            "duplicate_of": looser.finding_id,
+                            "verifier_evidence": "试图向下折叠严重度",
+                        },
+                        {
+                            "finding_id": looser.finding_id,
+                            "verdict": "confirmed",
+                            "verifier_evidence": "确认较宽项",
+                        },
+                    ],
+                ),
+                cand_deg,
+                verifier_model="claude-opus-5-5",
+            )
+
+    # 2. 自指环：A -> A
+    cand_one = _candidates([f_imp_a])
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_one,
+                [
+                    {
+                        "finding_id": f_imp_a.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_imp_a.finding_id,
+                        "verifier_evidence": "自指",
+                    }
+                ],
+            ),
+            cand_one,
+            verifier_model="claude-opus-5-5",
+        )
+
+    # 3. 悬空 duplicate_of（合法 16 位十六进制但不在本轮候选中）
+    dangling_id = "0" * 16 if f_imp_a.finding_id != "0" * 16 else "1" * 16
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_one,
+                [
+                    {
+                        "finding_id": f_imp_a.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": dangling_id,
+                        "verifier_evidence": "指向不存在的发现",
+                    }
+                ],
+            ),
+            cand_one,
+            verifier_model="claude-opus-5-5",
+        )
+
+    # 4. 链式 DUPLICATE -> DUPLICATE -> CONFIRMED 与双节点互指环 A <-> B
+    cand_three = _candidates([f_imp_a, f_imp_b, f_nit])
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_three,
+                [
+                    {"finding_id": f_imp_a.finding_id, "verdict": "confirmed", "verifier_evidence": "规范项"},
+                    {
+                        "finding_id": f_imp_b.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_imp_a.finding_id,
+                        "verifier_evidence": "一级重复",
+                    },
+                    {
+                        "finding_id": f_nit.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_imp_b.finding_id,
+                        "verifier_evidence": "链式指向另一个 duplicate",
+                    },
+                ],
+            ),
+            cand_three,
+            verifier_model="claude-opus-5-5",
+        )
+
+    cand_two = _candidates([f_imp_a, f_imp_b])
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_two,
+                [
+                    {
+                        "finding_id": f_imp_a.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_imp_b.finding_id,
+                        "verifier_evidence": "互指 A->B",
+                    },
+                    {
+                        "finding_id": f_imp_b.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_imp_a.finding_id,
+                        "verifier_evidence": "互指 B->A",
+                    },
+                ],
+            ),
+            cand_two,
+            verifier_model="claude-opus-5-5",
+        )
+
+    # 5. 指向 REJECTED 目标拒绝
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_two,
+                [
+                    {"finding_id": f_imp_a.finding_id, "verdict": "rejected", "verifier_evidence": "误报"},
+                    {
+                        "finding_id": f_imp_b.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_imp_a.finding_id,
+                        "verifier_evidence": "折叠进已驳回项",
+                    },
+                ],
+            ),
+            cand_two,
+            verifier_model="claude-opus-5-5",
+        )
+
+    # 6. 非 DUPLICATE 携带非 None duplicate_of 拒绝（含空串）
+    for bad_dup in (f_imp_b.finding_id, ""):
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand_two,
+                    [
+                        {
+                            "finding_id": f_imp_a.finding_id,
+                            "verdict": "confirmed",
+                            "duplicate_of": bad_dup,
+                            "verifier_evidence": "确认成立",
+                        },
+                        {"finding_id": f_imp_b.finding_id, "verdict": "confirmed", "verifier_evidence": "确认成立"},
+                    ],
+                ),
+                cand_two,
+                verifier_model="claude-opus-5-5",
+            )
+
+
+def test_duplicate_prior_important_rules_and_resolved_targets() -> None:
+    """跨轮规则：禁止将 prior_important 标为 duplicate；允许新发现折叠进 CONFIRMED 的 prior_important；禁止折叠进已解除目标。"""
+    f_prior = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/multi.py",
+        line=20,
+        category="缺失事务回滚",
+        failure_scenario="写入中途异常后未回滚造成脏状态",
+        source_models=("gpt-6-astra",),
+    )
+    cand_r1 = _candidates([f_prior], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_prior.finding_id, "verdict": "confirmed", "verifier_evidence": "第 1 轮确认"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    ren_r1 = render_findings_comment(1928, HEAD_1, dec_r1)
+    hist1 = (dec_r1.to_history_entry(rendered=ren_r1),)
+
+    f_new_rephrased = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/multi.py",
+        line=22,
+        category="异常未回滚",
+        failure_scenario="失败分支遗漏 rollback 留下部分提交",
+        source_models=("gpt-6.1-sol",),
+    )
+    cand_r2 = _candidates([f_new_rephrased], round_number=2, head_sha=HEAD_2, history=hist1)
+
+    # 1. 允许：新发现折叠进 prior_important（后者为 CONFIRMED），不重复张贴
+    ver_r2_ok = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [
+                {"finding_id": f_prior.finding_id, "verdict": "confirmed", "verifier_evidence": "新提交仍未修复"},
+                {
+                    "finding_id": f_new_rephrased.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_prior.finding_id,
+                    "verifier_evidence": "与前轮遗留项同源",
+                },
+            ],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2_ok = evaluate_round(ver_r2_ok)
+    assert [vf.finding.finding_id for vf in dec_r2_ok.blocking_findings] == [f_prior.finding_id]
+    assert dec_r2_ok.postable_findings == ()
+    assert [vf.finding.finding_id for vf in dec_r2_ok.duplicate_findings] == [f_new_rephrased.finding_id]
+    ren_r2_ok = render_findings_comment(1928, HEAD_2, dec_r2_ok)
+    assert f_prior.finding_id in ren_r2_ok.body
+    assert f_new_rephrased.finding_id not in ren_r2_ok.body
+    assert ren_r2_ok.posted_fingerprints == frozenset({f_prior.finding_id})
+
+    # 2. 拒绝：将 prior_important 标为 duplicate（即使指向 CONFIRMED 新发现也不允许）
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r2,
+                [
+                    {
+                        "finding_id": f_prior.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_new_rephrased.finding_id,
+                        "verifier_evidence": "试图把历史项折叠进新项",
+                    },
+                    {"finding_id": f_new_rephrased.finding_id, "verdict": "confirmed", "verifier_evidence": "确认新项"},
+                ],
+            ),
+            cand_r2,
+            verifier_model="claude-opus-5-5",
+        )
+
+    # 3. 拒绝：duplicate 指向 RESOLVED_BY_FIX 的 prior_important
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r2,
+                [
+                    {"finding_id": f_prior.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "新提交已修复"},
+                    {
+                        "finding_id": f_new_rephrased.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_prior.finding_id,
+                        "verifier_evidence": "折叠进已修复项",
+                    },
+                ],
+            ),
+            cand_r2,
+            verifier_model="claude-opus-5-5",
+        )
+
+    # 4. 拒绝：duplicate 指向 RESOLVED_BY_WONTFIX 的 prior_important
+    wontfix_reply = AuthorReply(f_prior.finding_id, None, None, "已有外层事务保证", "c201", "alice")
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r2,
+                [
+                    {
+                        "finding_id": f_prior.finding_id,
+                        "verdict": "resolved_by_wontfix",
+                        "verifier_evidence": "作者不修理由成立",
+                    },
+                    {
+                        "finding_id": f_new_rephrased.finding_id,
+                        "verdict": "duplicate",
+                        "duplicate_of": f_prior.finding_id,
+                        "verifier_evidence": "折叠进已确认不修项",
+                    },
+                ],
+            ),
+            cand_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[wontfix_reply],
+        )
+
+
+def test_duplicate_does_not_consume_or_pollute_author_replies() -> None:
+    """DUPLICATE 裁决不消费任何作者回复，也不干扰规范 CONFIRMED 项的坐标绑定。"""
+    f_canon = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/reply_iso.py",
+        line=42,
+        category="缺少鉴权",
+        failure_scenario="接口未校验权限令牌直接放行",
+        source_models=("gpt-6-astra",),
+    )
+    f_dup_same_line = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/reply_iso.py",
+        line=42,
+        category="权限绕过",
+        failure_scenario="未做 token 验证导致未授权访问",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_dup_other_line = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/reply_iso.py",
+        line=45,
+        category="鉴权提示",
+        failure_scenario="第 45 行依赖未鉴权的上下文对象",
+        source_models=("gpt-6.1-sol",),
+    )
+    cand = _candidates([f_canon, f_dup_same_line, f_dup_other_line])
+
+    reply_explicit_dup = AuthorReply(f_dup_same_line.finding_id, None, None, "故意豁免", "c501", "alice")
+    reply_loc_other_dup = AuthorReply(None, "pilot1742/reply_iso.py", 45, "此处仅内部调用", "c502", "alice")
+    reply_loc_shared = AuthorReply(None, "pilot1742/reply_iso.py", 42, "路由层已鉴权", "c503", "alice")
+    replies = [reply_explicit_dup, reply_loc_other_dup, reply_loc_shared]
+
+    verified = parse_verifier_output(
+        _verifier_payload(
+            cand,
+            [
+                {"finding_id": f_canon.finding_id, "verdict": "confirmed", "verifier_evidence": "确认缺失鉴权"},
+                {
+                    "finding_id": f_dup_same_line.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_canon.finding_id,
+                    "verifier_evidence": "与规范项同源",
+                },
+                {
+                    "finding_id": f_dup_other_line.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_canon.finding_id,
+                    "verifier_evidence": "与规范项同源",
+                },
+            ],
+        ),
+        cand,
+        verifier_model="claude-opus-5-5",
+        author_replies=replies,
+    )
+    for vf in verified.duplicate_findings:
+        assert vf.author_reply is None
+        assert vf.related_reply_keys == ()
+
+    decision = evaluate_round(verified, author_replies=replies)
+    # 针对 duplicate 的显式 ID 回复与独立坐标回复均未被消费，也未被锁定到 duplicate 指纹
+    assert reply_explicit_dup.reply_key not in decision.consumed_reply_keys
+    assert reply_loc_other_dup.reply_key not in decision.consumed_reply_keys
+    assert reply_loc_shared.reply_key not in decision.consumed_reply_keys
+    bound_map = dict(decision.bound_reply_targets)
+    assert reply_loc_other_dup.reply_key not in bound_map
+    assert bound_map.get(reply_loc_shared.reply_key) == f_canon.finding_id
+
+
+def test_direct_verified_round_construction_enforces_duplicate_graph_invariants() -> None:
+    """绕过 parse_verifier_output 直接构造 VerifiedRound 时，同样强制执行全部 DUPLICATE 图不变式。"""
+    f_imp_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/direct.py",
+        line=10,
+        category="缺陷1",
+        failure_scenario="路径1崩溃",
+        source_models=("gpt-6-astra",),
+    )
+    f_imp_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/direct.py",
+        line=11,
+        category="缺陷2",
+        failure_scenario="路径2崩溃",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/direct.py",
+        line=12,
+        category="细节3",
+        failure_scenario="路径3命名问题",
+        source_models=("gpt-6.1-sol",),
+    )
+
+    # 合法手工构造放行
+    ok_round = _verified_round(
+        [
+            _verified(f_imp_a, VerificationVerdict.CONFIRMED),
+            _verified(f_nit, VerificationVerdict.DUPLICATE, duplicate_of=f_imp_a.finding_id),
+        ]
+    )
+    assert len(ok_round.duplicate_findings) == 1
+
+    # 1. 悬空 duplicate_of
+    dangling_id = "f" * 16 if f_imp_a.finding_id != "f" * 16 else "e" * 16
+    with pytest.raises(ConvergenceError):
+        _verified_round([_verified(f_imp_a, VerificationVerdict.DUPLICATE, duplicate_of=dangling_id)])
+
+    # 2. 指向 REJECTED
+    with pytest.raises(ConvergenceError):
+        _verified_round(
+            [
+                _verified(f_imp_a, VerificationVerdict.REJECTED),
+                _verified(f_imp_b, VerificationVerdict.DUPLICATE, duplicate_of=f_imp_a.finding_id),
+            ]
+        )
+
+    # 3. 链式 DUPLICATE -> DUPLICATE -> CONFIRMED
+    with pytest.raises(ConvergenceError):
+        _verified_round(
+            [
+                _verified(f_imp_a, VerificationVerdict.CONFIRMED),
+                _verified(f_imp_b, VerificationVerdict.DUPLICATE, duplicate_of=f_imp_a.finding_id),
+                _verified(f_nit, VerificationVerdict.DUPLICATE, duplicate_of=f_imp_b.finding_id),
+            ]
+        )
+
+    # 4. 严重度降级 Important -> Nit
+    with pytest.raises(ConvergenceError):
+        _verified_round(
+            [
+                _verified(f_nit, VerificationVerdict.CONFIRMED),
+                _verified(f_imp_a, VerificationVerdict.DUPLICATE, duplicate_of=f_nit.finding_id),
+            ]
+        )
+
+    # 5. 将 prior_important 标为 DUPLICATE
+    r1_dec = evaluate_round(_verified_round([_verified(f_imp_a, VerificationVerdict.CONFIRMED)]))
+    r1_hist = (r1_dec.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, r1_dec)),)
+    with pytest.raises(ConvergenceError):
+        _verified_round(
+            [
+                _verified(f_imp_a, VerificationVerdict.DUPLICATE, round_number=2, duplicate_of=f_imp_b.finding_id),
+                _verified(f_imp_b, VerificationVerdict.CONFIRMED, round_number=2),
+            ],
+            round_number=2,
+            head_sha=HEAD_2,
+            history=r1_hist,
+        )
+
+    # 6. 指向 RESOLVED_BY_FIX 的 prior_important
+    with pytest.raises(ConvergenceError):
+        _verified_round(
+            [
+                _verified(f_imp_a, VerificationVerdict.RESOLVED_BY_FIX, round_number=2),
+                _verified(f_imp_b, VerificationVerdict.DUPLICATE, round_number=2, duplicate_of=f_imp_a.finding_id),
+            ],
+            round_number=2,
+            head_sha=HEAD_2,
+            history=r1_hist,
+        )
+
+    # 7. 快审直通模式（require_verifier=False）禁止 DUPLICATE
+    fast_panel = ReviewPanel(finder_models=("gpt-6-astra",), verifier_model=None, require_verifier=False)
+    f_fast_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/fast.py",
+        line=1,
+        category="a",
+        failure_scenario="sa",
+        source_models=("gpt-6-astra",),
+    )
+    f_fast_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/fast.py",
+        line=2,
+        category="b",
+        failure_scenario="sb",
+        source_models=("gpt-6-astra",),
+    )
+    with pytest.raises(ConvergenceError):
+        _verified_round(
+            [
+                _verified(f_fast_a, VerificationVerdict.CONFIRMED, verifier_model="quick-pass:gpt-6-astra"),
+                _verified(
+                    f_fast_b,
+                    VerificationVerdict.DUPLICATE,
+                    verifier_model="quick-pass:gpt-6-astra",
+                    duplicate_of=f_fast_a.finding_id,
+                ),
+            ],
+            panel=fast_panel,
+        )

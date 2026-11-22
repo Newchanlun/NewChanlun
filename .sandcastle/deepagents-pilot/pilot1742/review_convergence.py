@@ -64,6 +64,7 @@ class VerificationVerdict(Enum):
     REJECTED = "rejected"
     RESOLVED_BY_FIX = "resolved_by_fix"
     RESOLVED_BY_WONTFIX = "resolved_by_wontfix"
+    DUPLICATE = "duplicate"
 
 
 _VERDICT_VALUES: dict[str, VerificationVerdict] = {
@@ -3257,6 +3258,7 @@ class VerifiedFinding:
     head_sha: str
     author_reply: AuthorReply | None = None
     related_reply_keys: tuple[str, ...] = ()
+    duplicate_of: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.finding, Finding):
@@ -3271,6 +3273,29 @@ class VerifiedFinding:
         object.__setattr__(self, "head_sha", norm_head)
         if self.author_reply is not None and not isinstance(self.author_reply, AuthorReply):
             raise ConvergenceError("VerifiedFinding.author_reply 必须是 AuthorReply 或 None")
+        if not isinstance(self.related_reply_keys, tuple):
+            raise ConvergenceError("VerifiedFinding.related_reply_keys 必须是字符串元组")
+        for rk in self.related_reply_keys:
+            _validate_consumed_reply_key(rk, "related_reply_keys[]")
+        if self.verdict == VerificationVerdict.DUPLICATE:
+            if self.duplicate_of is None:
+                raise ConvergenceError("verdict=duplicate 时必须提供非空 duplicate_of 指向规范发现指纹")
+            norm_dup = _require_non_empty_str(self.duplicate_of, "VerifiedFinding.duplicate_of").lower()
+            if not _CONSUMED_DIGEST_HEX_RE.fullmatch(norm_dup):
+                raise ConvergenceError(
+                    f"VerifiedFinding.duplicate_of 必须是 16 位十六进制 finding_id：{self.duplicate_of!r}"
+                )
+            if norm_dup == self.finding.finding_id:
+                raise ConvergenceError(f"VerifiedFinding.duplicate_of 不得指向自身：{norm_dup!r}")
+            object.__setattr__(self, "duplicate_of", norm_dup)
+            if self.author_reply is not None:
+                raise ConvergenceError("verdict=duplicate 时不得绑定 author_reply")
+            if self.related_reply_keys:
+                raise ConvergenceError("verdict=duplicate 时不得绑定 related_reply_keys")
+        elif self.duplicate_of is not None:
+            raise ConvergenceError(
+                f"仅 verdict=duplicate 允许设置 duplicate_of，当前 verdict={self.verdict.value!r} 收到 {self.duplicate_of!r}"
+            )
         if self.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
             if self.author_reply is None:
                 raise ConvergenceError("verdict=resolved_by_wontfix 时必须绑定非空 author_reply")
@@ -3282,14 +3307,42 @@ class VerifiedFinding:
                     f"verdict=resolved_by_wontfix 绑定的 author_reply（comment_id={self.author_reply.comment_id}）"
                     f"与发现 {self.finding.finding_id} 不匹配"
                 )
-        if not isinstance(self.related_reply_keys, tuple):
-            raise ConvergenceError("VerifiedFinding.related_reply_keys 必须是字符串元组")
-        for rk in self.related_reply_keys:
-            _validate_consumed_reply_key(rk, "related_reply_keys[]")
 
     @property
     def is_blocking(self) -> bool:
         return self.verdict == VerificationVerdict.CONFIRMED and self.finding.severity == Severity.IMPORTANT
+
+
+def _validate_duplicate_verdicts(
+    verdicts_by_id: Mapping[str, VerifiedFinding],
+    *,
+    prior_important_ids: Collection[str],
+) -> None:
+    """校验整轮 DUPLICATE 裁决图不变式：禁标 prior_important、目标存在且严格为 CONFIRMED、严重度单调不降级。"""
+    for fid, vf in verdicts_by_id.items():
+        if vf.verdict != VerificationVerdict.DUPLICATE:
+            continue
+        if fid in prior_important_ids:
+            raise ConvergenceError(
+                f"发现 {fid} 属于前轮结转的 prior_important，禁止标记为 duplicate"
+                "（必须显式裁决为 confirmed / resolved_by_fix / resolved_by_wontfix / rejected）"
+            )
+        target_id = vf.duplicate_of
+        if target_id is None or target_id == fid:
+            raise ConvergenceError(f"发现 {fid} 裁决为 duplicate 但 duplicate_of={target_id!r} 非法")
+        target = verdicts_by_id.get(target_id)
+        if target is None:
+            raise ConvergenceError(f"发现 {fid} 的 duplicate_of={target_id!r} 不在本轮候选发现清单中")
+        if target.verdict != VerificationVerdict.CONFIRMED:
+            raise ConvergenceError(
+                f"发现 {fid} 的 duplicate_of={target_id!r} 目标裁决为 {target.verdict.value!r}，"
+                "必须严格指向 verdict=confirmed 的规范发现（禁止指向 rejected/resolved 或链式 duplicate）"
+            )
+        if _SEVERITY_STRICTNESS[target.finding.severity] < _SEVERITY_STRICTNESS[vf.finding.severity]:
+            raise ConvergenceError(
+                f"发现 {fid}（{vf.finding.severity.value}）不得作为 duplicate 折叠进"
+                f"更低严重度的目标 {target_id!r}（{target.finding.severity.value}）"
+            )
 
 
 def is_blocking_finding(verified_finding: VerifiedFinding) -> bool:
@@ -3805,7 +3858,7 @@ class VerifiedRound:
             expected_verifier = f"quick-pass:{panel.finder_models[0].strip()}"
             verifier_family = None
 
-        seen_ids: set[str] = set()
+        verdicts_by_id: dict[str, VerifiedFinding] = {}
         for vf in self.verdicts:
             if not isinstance(vf, VerifiedFinding):
                 raise ConvergenceError(f"VerifiedRound.verdicts 元素必须是 VerifiedFinding：{vf!r}")
@@ -3817,7 +3870,7 @@ class VerifiedRound:
                 )
             if fid not in candidates_by_id:
                 raise ConvergenceError(f"VerifiedRound 包含候选清单外的发现：{fid}")
-            if fid in seen_ids:
+            if fid in verdicts_by_id:
                 raise ConvergenceError(f"VerifiedRound 含重复裁决指纹：{fid}")
             if vf.finding != candidates_by_id[fid]:
                 raise ConvergenceError(f"VerifiedRound 发现 {fid} 与 candidates.findings 不一致")
@@ -3878,11 +3931,16 @@ class VerifiedRound:
                     raise ConvergenceError(
                         f"发现 {fid} 绑定的作者不修回复（comment_id={vf.author_reply.comment_id}）已在历史轮次被消费，禁止复用"
                     )
-            seen_ids.add(fid)
+            verdicts_by_id[fid] = vf
 
-        missing = [f.finding_id for f in self.candidates.findings if f.finding_id not in seen_ids]
+        missing = [f.finding_id for f in self.candidates.findings if f.finding_id not in verdicts_by_id]
         if missing:
             raise ConvergenceError(f"VerifiedRound 遗漏候选发现：{', '.join(missing)}")
+        _validate_duplicate_verdicts(verdicts_by_id, prior_important_ids=prior_important_ids)
+
+    @property
+    def duplicate_findings(self) -> tuple[VerifiedFinding, ...]:
+        return tuple(vf for vf in self.verdicts if vf.verdict == VerificationVerdict.DUPLICATE)
 
     @property
     def round_number(self) -> int:
@@ -4018,6 +4076,31 @@ def parse_verifier_output(
         verdict = parse_verification_verdict(item.get("verdict"))
         raw_evidence = item["verifier_evidence"] if "verifier_evidence" in item else item.get("evidence")
         verifier_evidence = _require_visible_markdown_text(raw_evidence, f"verdicts[{idx}].verifier_evidence")
+        raw_duplicate_of = item.get("duplicate_of")
+        duplicate_of: str | None = None
+        if verdict == VerificationVerdict.DUPLICATE:
+            if fid in prior_important_ids:
+                raise ConvergenceError(
+                    f"发现 {fid} 属于前轮结转的 prior_important，禁止标记为 duplicate"
+                    "（必须显式裁决为 confirmed / resolved_by_fix / resolved_by_wontfix / rejected）"
+                )
+            if raw_duplicate_of is None:
+                raise ConvergenceError(f"verdicts[{idx}] 裁决为 duplicate 但缺少 duplicate_of")
+            duplicate_of = _require_non_empty_str(raw_duplicate_of, f"verdicts[{idx}].duplicate_of").lower()
+            if not _CONSUMED_DIGEST_HEX_RE.fullmatch(duplicate_of):
+                raise ConvergenceError(
+                    f"verdicts[{idx}].duplicate_of 必须是 16 位十六进制 finding_id：{raw_duplicate_of!r}"
+                )
+            if duplicate_of == fid:
+                raise ConvergenceError(f"verdicts[{idx}].duplicate_of 不得指向自身：{fid}")
+            if duplicate_of not in candidates_by_id:
+                raise ConvergenceError(
+                    f"verdicts[{idx}].duplicate_of={duplicate_of!r} 不在本轮候选发现清单中"
+                )
+        elif raw_duplicate_of is not None:
+            raise ConvergenceError(
+                f"verdicts[{idx}] 裁决为 {verdict.value!r}，禁止传入非 None 的 duplicate_of={raw_duplicate_of!r}"
+            )
         if verdict == VerificationVerdict.RESOLVED_BY_FIX:
             if fid not in prior_important_ids:
                 raise ConvergenceError(
@@ -4037,6 +4120,11 @@ def parse_verifier_output(
                     f"发现 {fid} 裁决为 resolved_by_wontfix，但缺少唯一匹配且未消费的作者不修回复"
                 )
             _require_non_empty_str(matched_reply.author, "author_reply.author")
+        related_keys = (
+            ()
+            if verdict == VerificationVerdict.DUPLICATE
+            else tuple(sorted(matched_keys_by_id.get(fid, ())))
+        )
         verdicts_by_id[fid] = VerifiedFinding(
             finding=finding,
             verdict=verdict,
@@ -4045,12 +4133,14 @@ def parse_verifier_output(
             round_number=candidates.round_number,
             head_sha=candidates.head_sha,
             author_reply=matched_reply,
-            related_reply_keys=tuple(sorted(matched_keys_by_id.get(fid, ()))),
+            related_reply_keys=related_keys,
+            duplicate_of=duplicate_of,
         )
 
     missing = [cid for cid in ordered_ids if cid not in verdicts_by_id]
     if missing:
         raise ConvergenceError(f"核实者遗漏候选发现：{', '.join(missing)}")
+    _validate_duplicate_verdicts(verdicts_by_id, prior_important_ids=prior_important_ids)
 
     return VerifiedRound(
         candidates=candidates,
@@ -4250,6 +4340,10 @@ class RoundDecision:
     def cleared_fingerprints(self) -> frozenset[str]:
         return self.resolved_fingerprints | self.rejected_fingerprints
 
+    @property
+    def duplicate_findings(self) -> tuple[VerifiedFinding, ...]:
+        return tuple(vf for vf in self.verified_findings if vf.verdict == VerificationVerdict.DUPLICATE)
+
     def to_history_entry(
         self,
         head_sha: str | None = None,
@@ -4406,10 +4500,13 @@ def evaluate_round(
     for rk, pinned_fid in effective_bound_targets.items():
         if pinned_fid in cleared_ids:
             consumed_keys.add(rk)
+    non_duplicate_verified = tuple(
+        vf for vf in effective_verified if vf.verdict != VerificationVerdict.DUPLICATE
+    )
     matched_keys_by_id: dict[str, frozenset[str]] = {}
     if author_replies:
         _, matched_keys_by_id = _analyze_author_replies(
-            [vf.finding for vf in effective_verified],
+            [vf.finding for vf in non_duplicate_verified],
             author_replies,
             consumed_reply_keys=history_consumed,
             stale_location_fingerprints=verified.candidates.stale_location_fingerprints,
@@ -4421,7 +4518,7 @@ def evaluate_round(
     bound_targets: dict[str, str] = dict(effective_bound_targets)
     stale_fps = verified.candidates.stale_location_fingerprints
     round_loc_inline_targets: dict[str, set[str]] = {}
-    for vf in effective_verified:
+    for vf in non_duplicate_verified:
         fid = vf.finding.finding_id
         candidate_rks: set[str] = set(vf.related_reply_keys)
         if vf.author_reply is not None:
