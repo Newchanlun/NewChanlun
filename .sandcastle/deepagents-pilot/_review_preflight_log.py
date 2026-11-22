@@ -42,6 +42,15 @@ def _unique_object(pairs):
     return result
 
 
+def _trusted_fd(fd: int, *, is_dir: bool) -> os.stat_result | None:
+    """校验已打开描述符的属主与私有权限（仅当前有效用户可读写，禁止 group/other 任何位），防止非受信账户伪造收据。"""
+    info = os.fstat(fd)
+    ok_type = stat.S_ISDIR(info.st_mode) if is_dir else stat.S_ISREG(info.st_mode)
+    if not ok_type or info.st_uid != os.geteuid() or (info.st_mode & 0o077):
+        return None
+    return info
+
+
 def route_from_receipt(root: Path, session: str, since: float, wait: float) -> list[tuple[str, str]] | None:
     """仅消费生产者原子发布的私有收据；正式调用在有截止时间的子进程中执行。"""
     if not SESSION.fullmatch(session):
@@ -49,19 +58,23 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
     end = time.monotonic() + max(0, wait)
     while True:
         try:
-            # 逐层禁止 symlink；不跟随轮转目录或读取 FIFO/设备。
+            # 逐层禁止 symlink 并核验已打开 fd 的受信属主与私有权限；不跟随轮转目录或读取 FIFO/设备。
             parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
+                if _trusted_fd(parent, is_dir=True) is None:
+                    return None
                 directory = os.open(session, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             finally:
                 os.close(parent)
             try:
+                if _trusted_fd(directory, is_dir=True) is None:
+                    return None
                 fd = os.open("receipt.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             finally:
                 os.close(directory)
             try:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 16384:
+                info = _trusted_fd(fd, is_dir=False)
+                if info is None or not 0 < info.st_size <= 16384:
                     return None
                 raw = os.read(fd, 16385)
             finally:
@@ -103,16 +116,20 @@ def review_from_receipt(
         try:
             parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
+                if _trusted_fd(parent, is_dir=True) is None:
+                    return None
                 directory = os.open(launch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             finally:
                 os.close(parent)
             try:
+                if _trusted_fd(directory, is_dir=True) is None:
+                    return None
                 fd = os.open("receipt.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             finally:
                 os.close(directory)
             try:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_REVIEW_RECEIPT_BYTES:
+                info = _trusted_fd(fd, is_dir=False)
+                if info is None or not 0 < info.st_size <= MAX_REVIEW_RECEIPT_BYTES:
                     return None
                 raw = os.read(fd, MAX_REVIEW_RECEIPT_BYTES + 1)
             finally:

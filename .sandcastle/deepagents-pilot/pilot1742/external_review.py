@@ -564,7 +564,7 @@ class StatusPublisher:
                 return {"id": latest["id"], "sha": target.head_sha, "state": state, "description": description}
             return None
         with head_status(self.locks, target.repository_id, target.head_sha) as ownership:
-            self.check_current(state=state)
+            self.check_current()
             journal = Journal(self.folder / "effects")
             effect = f"status-{state}"
             owner = ownership.owner()
@@ -580,9 +580,12 @@ class StatusPublisher:
                     raise EffectPending("该 run 的状态已被覆盖，不能复用旧 done 或重写")
                 result = found
             else:
-                result = journal.converge(effect, probe,
+                result = journal.converge(
+                    effect, probe,
                     lambda: self.gateway.set_status(target.head_sha, CONTEXT, state, description),
-                    idempotent=False, what={"target": asdict(target), "context": CONTEXT, "state": state})
+                    idempotent=False, what={"target": asdict(target), "context": CONTEXT, "state": state},
+                    prepare=(lambda: self.check_current(state="success")) if state == "success" else None,
+                )
             self.check_current()
             return result
 
@@ -1122,29 +1125,17 @@ class ExternalReview:
         session_id = str(outcome.session_id or "")
         try:
             if not self._custom_session_receipt and self.session_receipt == self._read_session_receipt:
-                host_only = bool(os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
-                                 and not os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip())
-                evidence = None
-                if host_only and not self._custom_seal_receipt:
-                    # 宿主目录快速路径复用有界读取器（O_NOFOLLOW|O_NONBLOCK、普通文件、64KiB 与超时保护）：
-                    # 若已为 sealed=true 直接消费，否则再走已认证封存端点。
+                # 无论容器目录还是宿主目录，绝不凭磁盘文件自报 sealed=true 跳过已认证的代理封存端点：
+                # 始终先向受信代理发起 POST /v1/review-receipts/seal（幂等），确认代理封存后再读取收据。
+                if not self.seal_receipt(launch_id, session_id):
+                    evidence = None
+                else:
                     evidence = self._read_session_receipt(
                         outcome.model, launch_id, session_id, since,
                         expected_response_id_sha256=expected_rid_sha,
                         expected_output_sha256=expected_out_sha,
                         min_requests=len(expected_rid_shas),
-                        budget=0.2,
                     )
-                if evidence is None:
-                    if not self.seal_receipt(launch_id, session_id):
-                        evidence = None
-                    else:
-                        evidence = self._read_session_receipt(
-                            outcome.model, launch_id, session_id, since,
-                            expected_response_id_sha256=expected_rid_sha,
-                            expected_output_sha256=expected_out_sha,
-                            min_requests=len(expected_rid_shas),
-                        )
             else:
                 if self._custom_seal_receipt and not self.seal_receipt(launch_id, session_id):
                     evidence = None
@@ -1233,6 +1224,14 @@ class ExternalReview:
         checks = report.get("checks")
         if not isinstance(checks, list):
             return len(MODELS)
+        for item in checks:
+            if isinstance(item, dict) and item.get("name") == "preflight_internal":
+                detail = item.get("detail")
+                if isinstance(detail, dict) and type(detail.get("probes_sent")) is int and detail["probes_sent"] >= 0:
+                    return detail["probes_sent"]
+                if type(report.get("probes_sent")) is int and report["probes_sent"] >= 0:
+                    return report["probes_sent"]
+                return len(MODELS)
         sent = 0
         for item in checks:
             if not isinstance(item, dict) or not isinstance(item.get("name"), str):
@@ -1240,10 +1239,19 @@ class ExternalReview:
             if not item["name"].startswith("roundtrip:"):
                 continue
             detail = item.get("detail")
-            err = detail.get("error") if isinstance(detail, dict) else None
-            if isinstance(err, dict) and "not_sent" in err:
-                continue
-            sent += 1
+            if isinstance(detail, dict):
+                if detail.get("sent") is False:
+                    continue
+                err = detail.get("error")
+                if isinstance(err, dict) and "not_sent" in err:
+                    continue
+                sent += 1
+            elif isinstance(detail, str):
+                if "未发探测" in detail:
+                    continue
+                sent += 1
+            else:
+                sent += 1
         return sent
 
     def _record_preflight_usage(self, probes: int) -> None:

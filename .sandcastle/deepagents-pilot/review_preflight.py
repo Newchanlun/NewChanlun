@@ -58,13 +58,13 @@ CREDENTIAL_MODES = ("codex-host", "worker-env")
 # 报告协议词表：字段名与枚举值都由本脚本写死、与 key 无关，原样输出不透露 key 的任何信息。
 # 合法 key 可以是任意可见 ASCII（如 "ok"），与它们相同或是其子串时，脱敏也不能改写它们（调用方按字段与枚举读结论）。
 PROTOCOL_FIELDS = frozenset({
-    "kind", "is_review_result", "ready", "checks", "wall_seconds", "usage", "usage_error",
+    "kind", "is_review_result", "ready", "checks", "probes_sent", "wall_seconds", "usage", "usage_error",
     "name", "class", "ok", "detail",
     "checkout_root", "free_bytes", "required_bytes", "per_snapshot_bytes", "snapshots",
     "image", "nonce_match", "docker_rc", "stderr",
-    "scrubbed_env", "source", "proven_by", "error",
+    "scrubbed_env", "source", "proven_by", "error", "reason",
     "expected", "actual", "log_found", "session", "launch", "sealed",
-    "http_status", "terminal", "status", "returned_model", "length", "sha256_12", "exception", "errno", "not_sent"})
+    "http_status", "terminal", "status", "returned_model", "sent", "length", "sha256_12", "exception", "errno", "not_sent"})
 PROTOCOL_VALUES = frozenset({
     "review-preflight", "review-preflight-help",
     "checkout_root_free_space", "checkout_root_container_mount", "credential:codex-host", "credential:worker-env",
@@ -676,7 +676,10 @@ def probe_model(args, model: str, key: str, deadline: Deadline, cleanup_out: lis
                "detail": route_detail}]
     if seal_res is not None:
         checks.append({"name": f"seal:{model}", "class": "seal", "ok": bool(seal_res.get("ok")), "detail": seal_res})
-    checks.append({"name": f"roundtrip:{model}", "class": "roundtrip", "ok": trip["ok"], "detail": trip})
+    trip_err = trip.get("error") if isinstance(trip, dict) else None
+    trip_sent = not (isinstance(trip_err, dict) and "not_sent" in trip_err)
+    trip_detail = {**trip, "sent": trip_sent} if isinstance(trip, dict) else trip
+    checks.append({"name": f"roundtrip:{model}", "class": "roundtrip", "ok": trip["ok"], "detail": trip_detail})
     return checks
 
 
@@ -765,17 +768,19 @@ def main(argv=None) -> int:
     t0 = time.monotonic()
     deadline = Deadline(args.deadline)
     secrets = [os.environ.get(SCRUBBED_ENV)]
+    probe_state = {"started": 0}
     try:
-        checks = run_checks(args, deadline, secrets)
-    except Exception as error:  # 主流程意外异常也要给出合法报告，退出码仍是 2
-        checks = [{"name": "preflight_internal", "class": "tool", "ok": False, "detail": type(error).__name__}]
+        checks = run_checks(args, deadline, secrets, probe_state=probe_state)
+    except Exception as error:  # 主流程意外异常也要给出合法报告，退出码仍是 2；保留已启动探针计数供额度记账
+        checks = [{"name": "preflight_internal", "class": "tool", "ok": False,
+                   "detail": {"error": type(error).__name__, "probes_sent": probe_state["started"]}}]
     ready = all(c["ok"] for c in checks)
     _emit({"kind": "review-preflight", "is_review_result": False, "ready": ready, "checks": checks,
-           "wall_seconds": round(time.monotonic() - t0, 3)}, secrets)
+           "probes_sent": probe_state["started"], "wall_seconds": round(time.monotonic() - t0, 3)}, secrets)
     return 0 if ready else 2
 
 
-def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
+def run_checks(args, deadline: Deadline, secrets: list, *, probe_state: dict[str, int] | None = None) -> list[dict]:
     credential, key = check_credential(args, deadline)
     secrets.append(key)
     checks = [credential]
@@ -792,6 +797,8 @@ def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
                         f"roundtrip:{m}", "roundtrip",
                         lambda: probe_model(args, m, key, deadline, probe_cleanups[m]),
                     )
+                if probe_state is not None:
+                    probe_state["started"] += 1
                 thread = threading.Thread(target=probe)
                 thread.start()
                 threads.append(thread)
@@ -807,8 +814,13 @@ def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
     for model in MODELS:
         result = probes.get(model)
         if result is None:
-            reason = "凭据不可用，未发探测" if key is None else "总时限内未完成"
-            result = [{"name": f"roundtrip:{model}", "class": "roundtrip", "ok": False, "detail": reason}]
+            if key is None:
+                detail: dict = {"http_status": None, "terminal": None, "ok": False, "sent": False,
+                                "error": {"not_sent": "凭据不可用，未发探测"}}
+            else:
+                detail = {"http_status": None, "terminal": None, "ok": False, "sent": True,
+                          "error": {"reason": "总时限内未完成"}}
+            result = [{"name": f"roundtrip:{model}", "class": "roundtrip", "ok": False, "detail": detail}]
         checks.extend(result if isinstance(result, list) else [result])
     return checks
 

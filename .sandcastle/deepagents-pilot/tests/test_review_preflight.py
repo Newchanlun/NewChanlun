@@ -1290,9 +1290,13 @@ def test_formal_review_seal_url_proves_same_proxy_and_blocks_mismatched_seal_hos
                 now = time.time_ns()
                 rid_sha = hashlib.sha256(f"resp_{req_model}_1".encode()).hexdigest()
                 out_sha = hashlib.sha256(b'{"ok": true}').hexdigest()
+                receipt_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                os.chmod(receipt_root, 0o700)
                 d = receipt_root / launch
                 d.mkdir(parents=True, exist_ok=True, mode=0o700)
-                (d / "receipt.json").write_text(json.dumps({
+                os.chmod(d, 0o700)
+                rf = d / "receipt.json"
+                rf.write_text(json.dumps({
                     "schema": "cliproxy-review-v1", "launch": launch, "session": session,
                     "started_ns": now - 1_000_000, "finished_ns": now, "sealed_at_ns": now,
                     "complete": True, "sealed": True, "tainted": False, "requests": 1,
@@ -1300,6 +1304,7 @@ def test_formal_review_seal_url_proves_same_proxy_and_blocks_mismatched_seal_hos
                     "response_id_sha256s": [rid_sha],
                     "last_response_id_sha256": rid_sha, "last_output_sha256": out_sha,
                 }))
+                os.chmod(rf, 0o600)
                 resp = json.dumps({"status": "sealed"}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(resp)))
@@ -1855,10 +1860,13 @@ def _receipt(tmp_path, routes=None, **changes):
                "started_ns": now - 1_000_000, "finished_ns": now, "complete": True,
                "routes": routes if routes is not None else ["claude@api.anthropic.com", "claude@api.anthropic.com"]}
     payload.update(changes)
+    os.chmod(tmp_path, 0o700)
     directory = tmp_path / RECEIPT_SESSION
-    directory.mkdir(exist_ok=True)
+    directory.mkdir(exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
     path = directory / "receipt.json"
     path.write_text(json.dumps(payload))
+    os.chmod(path, 0o600)
     return path
 
 
@@ -1898,6 +1906,7 @@ def test_receipt_partial_rotation_and_delayed_publish(tmp_path):
     data = path.read_bytes()
     path.unlink()
     pending.write_bytes(data)
+    os.chmod(pending, 0o600)
     timer = threading.Timer(0.03, lambda: pending.rename(path))
     timer.start()
     try:
@@ -1986,10 +1995,13 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
         "response_id_sha256s": ["1" * 64, "2" * 64, "a" * 64],
         "last_response_id_sha256": "a" * 64, "last_output_sha256": "b" * 64,
     }
+    os.chmod(tmp_path, 0o700)
     directory = tmp_path / launch
     directory.mkdir(mode=0o700)
+    os.chmod(directory, 0o700)
     path = directory / "receipt.json"
     path.write_text(json.dumps(base))
+    os.chmod(path, 0o600)
     assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) == {
         "routes": [(f"codex:{SOL}", "chatgpt.com")],
         "requests": 3,
@@ -2025,6 +2037,53 @@ def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
     assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
 
 
+def test_receipt_reader_rejects_permissive_mode_or_untrusted_uid(tmp_path, monkeypatch):
+    """R20（Astra P1）：route_from_receipt 与 review_from_receipt 在已打开 fd 上核验属主与私有权限（无 group/other 位），
+    根目录、launch/session 目录或 receipt.json 任一层权限放宽或属主不符均拒收。"""
+    p_path = _receipt(tmp_path)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is not None
+    os.chmod(p_path, 0o644)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    os.chmod(p_path, 0o600)
+    os.chmod(p_path.parent, 0o755)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    os.chmod(p_path.parent, 0o700)
+    os.chmod(tmp_path, 0o755)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    os.chmod(tmp_path, 0o700)
+
+    launch = "review-12345678-1234-4234-8234-123456789af1"
+    session = "019d0000-0000-7000-8000-000000000af1"
+    now = time.time_ns()
+    rec_dir = tmp_path / launch
+    rec_dir.mkdir(mode=0o700)
+    os.chmod(rec_dir, 0o700)
+    r_path = rec_dir / "receipt.json"
+    r_path.write_text(json.dumps({
+        "schema": "cliproxy-review-v1", "launch": launch, "session": session,
+        "started_ns": now - 1_000_000, "finished_ns": now, "sealed_at_ns": now, "complete": True, "sealed": True,
+        "tainted": False, "requests": 1, "routes": [f"codex:{SOL}@chatgpt.com"],
+        "response_id_sha256s": ["a" * 64], "last_response_id_sha256": "a" * 64, "last_output_sha256": "b" * 64,
+    }))
+    os.chmod(r_path, 0o600)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is not None
+    os.chmod(r_path, 0o644)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+    os.chmod(r_path, 0o600)
+    os.chmod(rec_dir, 0o755)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+    os.chmod(rec_dir, 0o700)
+    os.chmod(tmp_path, 0o755)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+    os.chmod(tmp_path, 0o700)
+
+    # 属主不符（模拟非当前有效用户拥有目录/文件）时拒收
+    other_uid = os.geteuid() + 1
+    monkeypatch.setattr(preflight._log_module.os, "geteuid", lambda: other_uid)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+
+
 def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediately(tmp_path):
     """多轮审阅终轮未封存时，读取器应在 wait 时限内等待封存与期望终轮摘要；超时仍未封存或遇污染立即返回 None。"""
     launch = "review-12345678-1234-4234-8234-123456789ab2"
@@ -2042,10 +2101,13 @@ def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediatel
         "response_id_sha256s": ["1" * 64, "2" * 64],
         "last_response_id_sha256": "2" * 64, "last_output_sha256": "3" * 64,
     }
+    os.chmod(tmp_path, 0o700)
     directory = tmp_path / launch
     directory.mkdir(mode=0o700)
+    os.chmod(directory, 0o700)
     path = directory / "receipt.json"
     path.write_text(json.dumps(turn1))
+    os.chmod(path, 0o600)
     # 未封存且 wait=0 时必须直接拒绝（绝不采信未封存收据）
     assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
 
@@ -2053,6 +2115,7 @@ def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediatel
         time.sleep(0.08)
         tmp = directory / "pending"
         tmp.write_text(json.dumps(turn2))
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
 
     t = threading.Thread(target=publish_turn2)

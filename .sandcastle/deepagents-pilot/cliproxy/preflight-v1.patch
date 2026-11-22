@@ -111,10 +111,10 @@ index e69de29..2b8a7a8 100644
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..80f2eca 100644
+index e69de29..1c1a7b3 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1042 @@
+@@ -0,0 +1,1084 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -1140,6 +1140,48 @@ index e69de29..80f2eca 100644
 +			t.Fatalf("ordinary traffic upstream model = %q", got)
 +		}
 +	})
++
++	t.Run("trailing-error-after-completed-observed-and-taints-on-eof-drain", func(t *testing.T) {
++		// Sol P1 (R19): real CodexAutoExecutor MUST drain the upstream SSE response to true io.EOF
++		// on strict review launches instead of closing immediately after response.completed, so a
++		// trailing duplicate terminal or error event in the same HTTP response is observed and taints.
++		launch := "review-12345678-1234-4234-8234-123456789ae1"
++		session := "019d0000-0000-7000-8000-000000000ae1"
++		trailServer, trailTransport := newHostTLSServer(t, "chatgpt.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			w.Header().Set("Content-Type", "text/event-stream")
++			_, _ = io.WriteString(w,
++				`data: {"type":"response.completed","response":{"id":"resp_ok_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"+
++					`data: {"type":"error","error":{"message":"trailing-upstream-error"}}`+"\n\n")
++		}))
++		defer trailServer.Close()
++		defer trailTransport.CloseIdleConnections()
++		srv := newTestServer(t)
++		mgr := srv.handlers.AuthManager
++		mgr.SetRoundTripperProvider(preflightTransportProvider{trailTransport})
++		mgr.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(srv.cfg))
++		const tid = "review-receipt-codex-trail"
++		cred := &auth.Auth{ID: tid, Provider: "codex", Status: auth.StatusActive,
++			Attributes: map[string]string{auth.AttributeAuthKind: auth.AuthKindOAuth},
++			Metadata:   map[string]any{"access_token": "offline-fake", "websockets": true},
++		}
++		if _, err := mgr.Register(context.Background(), cred); err != nil {
++			t.Fatal(err)
++		}
++		registry.GetGlobalRegistry().RegisterClient(tid, "codex", []*registry.ModelInfo{{ID: "gpt-6.2-sol"}})
++		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(tid) })
++
++		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true,"input":"trail"}`))
++		req.Header.Set("Authorization", "Bearer test-key")
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set(preflightreceipt.ReviewHeader, launch)
++		req.Header.Set("Session-Id", session)
++		res := httptest.NewRecorder()
++		srv.engine.ServeHTTP(res, req)
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++		if sealRes := seal(launch, session); sealRes.Code != http.StatusConflict || !strings.Contains(sealRes.Body.String(), "rejected") {
++			t.Fatalf("SealReview accepted trailing-error stream: %d %s", sealRes.Code, sealRes.Body.String())
++		}
++	})
 +}
 +
 +type notifyOnReadReader struct {
@@ -1240,6 +1282,71 @@ index 85ae6d6..69a1d19 100644
 +	snapshot := h.Snapshot()
 +	return func() bool { return snapshot != nil && len(snapshot.records) == 0 && h.Snapshot() == snapshot }
 +}
+diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
+index 6074124..a58fa27 100644
+--- a/internal/runtime/executor/codex_executor_stream.go
++++ b/internal/runtime/executor/codex_executor_stream.go
+@@ -15,6 +15,7 @@ import (
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+ 	log "github.com/sirupsen/logrus"
+ )
+@@ -154,7 +155,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
+-	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
++	strictReview := false
++	if pc := preflightreceipt.From(ctx); pc != nil && pc.StrictCodex() {
++		strictReview = true
++	}
++	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering && !strictReview
+ 	var bootstrapTimeout time.Duration
+ 	var bootstrapStart time.Time
+ 	if buffering {
+@@ -450,6 +455,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 				log.Errorf("codex executor: close response body error: %v", errClose)
+ 			}
+ 		}()
++		sawStrictTerminal := false
+ 		for scanner.Scan() {
+ 			line := scanner.Bytes()
+ 			var translatedLine []byte
+@@ -538,7 +544,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 					case <-ctx.Done():
+ 					}
+ 				}
+-				return
++				if !strictReview {
++					return
++				}
++				// Formal review launches drain the upstream SSE response to true io.EOF so
++				// trailing duplicate terminal events or errors are always observed and the
++				// transport receipt verifies full body delivery.
++				sawStrictTerminal = true
+ 			}
+ 		}
+ 		if errScan := scanner.Err(); errScan != nil {
+@@ -546,6 +558,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 				return
+ 			}
+ 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
++			if sawStrictTerminal {
++				select {
++				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
++				case <-ctx.Done():
++				}
++				return
++			}
++		}
++		if sawStrictTerminal {
++			return
+ 		}
+ 		if emittedCount == 0 {
+ 			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
 index cd725e8..c02be99 100644
 --- a/internal/runtime/executor/helps/proxy_helpers.go
@@ -2615,10 +2722,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..b48aed0 100644
+index e69de29..847c4c8 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1541 @@
+@@ -0,0 +1,1571 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -2724,6 +2831,7 @@ index e69de29..b48aed0 100644
 +	tainted           bool
 +	taintedPersisted  bool
 +	reserved          bool
++	markerPersisted   bool
 +	touched           time.Time
 +	inFlight          int
 +	sealing           bool
@@ -3094,6 +3202,7 @@ index e69de29..b48aed0 100644
 +			tainted:          true,
 +			taintedPersisted: disk.Tainted,
 +			reserved:         true,
++			markerPersisted:  true,
 +			touched:          now,
 +		}, true, nil
 +	}
@@ -3113,6 +3222,7 @@ index e69de29..b48aed0 100644
 +		sealedFlag:        true,
 +		tainted:           false,
 +		reserved:          true,
++		markerPersisted:   true,
 +		touched:           now,
 +	}, true, nil
 +}
@@ -3206,9 +3316,9 @@ index e69de29..b48aed0 100644
 +		releaseReview(entry)
 +		return nil, ErrUnavailable
 +	}
-+	if !entry.reserved {
++	if !entry.markerPersisted {
 +		if persistErr := entry.persistLocked(); persistErr != nil {
-+			canEvict := !entry.tainted && entry.requests == 0
++			canEvict := !entry.markerPersisted && !entry.tainted && entry.requests == 0
 +			entry.mu.Unlock()
 +			reviewMu.Lock()
 +			if entry.inFlight > 0 {
@@ -3957,21 +4067,47 @@ index e69de29..b48aed0 100644
 +	if resp == nil || resp.Body == nil {
 +		finish()
 +	} else {
-+		resp.Body = &body{ReadCloser: resp.Body, finish: finish, reject: c.Reject}
++		resp.Body = &body{
++			ReadCloser: resp.Body,
++			finish:     finish,
++			reject:     c.Reject,
++			requireEOF: strict && resp.StatusCode >= 200 && resp.StatusCode < 300,
++			ctx:        req.Context(),
++		}
 +	}
 +	return resp, nil
 +}
 +
 +type body struct {
 +	io.ReadCloser
-+	once   sync.Once
-+	finish func()
-+	reject func()
++	once       sync.Once
++	finish     func()
++	reject     func()
++	requireEOF bool
++	ctx        context.Context
++	sawEOF     atomic.Bool
++	readErr    atomic.Bool
++}
++
++func (b *body) Read(p []byte) (int, error) {
++	n, err := b.ReadCloser.Read(p)
++	if errors.Is(err, io.EOF) {
++		b.sawEOF.Store(true)
++	} else if err != nil {
++		b.readErr.Store(true)
++	}
++	return n, err
 +}
 +
 +func (b *body) Close() error {
++	if b.requireEOF && !b.sawEOF.Load() && !b.readErr.Load() && (b.ctx == nil || b.ctx.Err() == nil) {
++		var probe [1]byte
++		if n, rerr := b.ReadCloser.Read(probe[:]); n == 0 && errors.Is(rerr, io.EOF) {
++			b.sawEOF.Store(true)
++		}
++	}
 +	err := b.ReadCloser.Close()
-+	if err != nil {
++	if err != nil || (b.requireEOF && (b.readErr.Load() || !b.sawEOF.Load())) {
 +		b.reject()
 +	}
 +	b.once.Do(b.finish)
@@ -4075,6 +4211,7 @@ index e69de29..b48aed0 100644
 +		_ = os.Remove(tmp)
 +		return fail(err)
 +	}
++	e.markerPersisted = true
 +	return nil
 +}
 +
@@ -4161,10 +4298,10 @@ index e69de29..b48aed0 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..a67f57d 100644
+index e69de29..ad6db5d 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1459 @@
+@@ -0,0 +1,1647 @@
 +package preflightreceipt
 +
 +import (
@@ -5622,5 +5759,193 @@ index e69de29..a67f57d 100644
 +	}
 +	if st := SealReview(root, launch, session); st != SealRejected {
 +		t.Fatalf("post-restart SealReview accepted launch: %v", st)
++	}
++}
++
++func TestReviewReceiptReserveConcurrentWriteFailureNeverAdmitsWithoutMarker(t *testing.T) {
++	// Sol P1 (R19): if persistLocked creates the launch dir (entry.reserved=true) and then fails
++	// writing/renaming receipt.json while a concurrent request holds inFlight > 0, the second request
++	// MUST NOT skip marker persistence and MUST also fail closed with ErrUnavailable.
++	root := filepath.Join(t.TempDir(), "receipts")
++	if err := os.MkdirAll(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	launch := "review-eeee1111-2222-4333-8444-555555555903"
++	launchDir := filepath.Join(root, launch)
++	if err := os.Mkdir(launchDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	// Pre-register a clean in-memory entry with inFlight=1 (simulating a concurrent waiter already
++	// attached to the same entry before persistLocked runs), while blocking the next two pending tmp files.
++	now := time.Now()
++	key := root + "\x00" + launch
++	entry := &reviewEntry{directory: launchDir, launch: launch, started: now.UnixNano(), touched: now, inFlight: 1}
++	reviewMu.Lock()
++	reviewLedger[key] = entry
++	reviewMu.Unlock()
++	t.Cleanup(func() {
++		reviewMu.Lock()
++		delete(reviewLedger, key)
++		reviewMu.Unlock()
++	})
++	baseSeq := tmpSeq.Load()
++	b1 := filepath.Join(launchDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), baseSeq+1))
++	b2 := filepath.Join(launchDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), baseSeq+2))
++	if err := os.Mkdir(b1, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(b2, 0700); err != nil {
++		t.Fatal(err)
++	}
++
++	if _, err := ReserveReview(root, launch); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("first ReserveReview with blocked receipt write = %v, want ErrUnavailable", err)
++	}
++	entry.mu.Lock()
++	dirReserved := entry.reserved
++	markerOK := entry.markerPersisted
++	entry.mu.Unlock()
++	if !dirReserved || markerOK {
++		t.Fatalf("expected reserved=true, markerPersisted=false after write failure; got reserved=%v marker=%v", dirReserved, markerOK)
++	}
++	// Second concurrent request arrives while entry is still in reviewLedger with reserved=true, markerPersisted=false.
++	if _, err := ReserveReview(root, launch); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("second ReserveReview bypassed missing marker persistence: err=%v", err)
++	}
++	_ = os.Remove(b1)
++	_ = os.Remove(b2)
++	releaseReview(entry)
++}
++
++type partialBodyReader struct {
++	data    []byte
++	offset  int
++	errTail error
++}
++
++func (r *partialBodyReader) Read(p []byte) (int, error) {
++	if r.offset < len(r.data) {
++		n := copy(p, r.data[r.offset:])
++		r.offset += n
++		return n, nil
++	}
++	if r.errTail != nil {
++		return 0, r.errTail
++	}
++	return 0, io.EOF
++}
++
++func (r *partialBodyReader) Close() error { return nil }
++
++func TestReviewReceiptStrictBodyMustReachEOF(t *testing.T) {
++	// Sol P1 (R19): strict Codex transport body wrapper MUST reject if the executor closes resp.Body
++	// before reading to true io.EOF (unread trailing bytes or mid-stream read error).
++	root := filepath.Join(t.TempDir(), "receipts")
++	sse := `data: {"type":"response.completed","response":{"id":"resp_eof","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"
++
++	// 1. Executor closes early leaving unread trailing bytes on resp.Body -> MUST reject and refuse SealReview.
++	launchEarly := "review-eeee1111-2222-4333-8444-555555555911"
++	sessionEarly := "019d0000-0000-7000-8000-000000000911"
++	ctx1, c1, err := BeginReview(context.Background(), root, launchEarly, sessionEarly, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode: 200, Header: make(http.Header),
++			Body: &partialBodyReader{data: []byte(sse + "data: {\"type\":\"error\"}\n\n")},
++		}, nil
++	})})
++	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp1, err := cl1.Do(req1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	buf := make([]byte, len(sse))
++	if _, err := io.ReadFull(resp1.Body, buf); err != nil {
++		t.Fatal(err)
++	}
++	c1.ObserveStreamChunk(buf)
++	// Close WITHOUT draining the trailing bytes to io.EOF.
++	_ = resp1.Body.Close()
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++	if st := SealReview(root, launchEarly, sessionEarly); st != SealRejected {
++		t.Fatalf("SealReview accepted early-closed body with unread tail: %v", st)
++	}
++
++	// 2. Upstream returns io.ErrUnexpectedEOF after response.completed -> MUST reject.
++	launchErr := "review-eeee1111-2222-4333-8444-555555555912"
++	sessionErr := "019d0000-0000-7000-8000-000000000912"
++	ctx2, c2, err := BeginReview(context.Background(), root, launchErr, sessionErr, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx2, e2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode: 200, Header: make(http.Header),
++			Body: &partialBodyReader{data: []byte(sse), errTail: io.ErrUnexpectedEOF},
++		}, nil
++	})})
++	req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp2, err := cl2.Do(req2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	raw2, readErr2 := io.ReadAll(resp2.Body)
++	if !errors.Is(readErr2, io.ErrUnexpectedEOF) {
++		t.Fatalf("expected ErrUnexpectedEOF, got %v", readErr2)
++	}
++	c2.ObserveStreamChunk(raw2)
++	_ = resp2.Body.Close()
++	e2.End()
++	c2.Complete(true)
++	c2.HandlerDone(true)
++	if st := SealReview(root, launchErr, sessionErr); st != SealRejected {
++		t.Fatalf("SealReview accepted body ending with ErrUnexpectedEOF: %v", st)
++	}
++
++	// 3. Full drain to io.EOF -> SealReview MUST succeed.
++	launchOK := "review-eeee1111-2222-4333-8444-555555555913"
++	sessionOK := "019d0000-0000-7000-8000-000000000913"
++	ctx3, c3, err := BeginReview(context.Background(), root, launchOK, sessionOK, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx3, e3, err := c3.Start(ctx3, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl3 := httptransport.Decorate(ctx3, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode: 200, Header: make(http.Header),
++			Body: &partialBodyReader{data: []byte(sse)},
++		}, nil
++	})})
++	req3, _ := http.NewRequestWithContext(ctx3, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp3, err := cl3.Do(req3)
++	if err != nil {
++		t.Fatal(err)
++	}
++	raw3, err := io.ReadAll(resp3.Body)
++	if err != nil {
++		t.Fatal(err)
++	}
++	c3.ObserveStreamChunk(raw3)
++	_ = resp3.Body.Close()
++	e3.End()
++	c3.Complete(true)
++	c3.HandlerDone(true)
++	if st := SealReview(root, launchOK, sessionOK); st != SealOK {
++		t.Fatalf("SealReview rejected cleanly EOF-drained body: %v", st)
 +	}
 +}

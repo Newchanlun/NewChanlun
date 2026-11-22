@@ -211,3 +211,55 @@ def test_failed_preflight_probes_accumulate_into_recent_input_tokens_and_trip_qu
     with pytest.raises(EffectPending, match="quota-paused"):
         lane.target(1810, 1)
     assert len(calls) == 3
+
+
+def test_real_preflight_missing_creds_charges_zero_and_internal_error_preserves_probes_sent(lane, monkeypatch, capsys):
+    """R20（Sol P2 / Astra P2）：用 review_preflight.main 真实输出报告回归两条路径：
+    1) 凭据缺失未启动探针时，预检报告带 sent=False/not_sent，额度记 0，绝不因重试耗尽本地额度；
+    2) 已启动探针后主流程抛内部异常（preflight_internal）时，报告保留 probes_sent，额度照实计入。"""
+    import review_preflight
+
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+    argv = [
+        "--source", str(lane.source),
+        "--base", base, "--head", head, "--merge-base", base,
+        "--checkout-root", str(lane.checkout_root),
+        "--credential-mode", "worker-env",
+        "--deadline", "10",
+    ]
+    monkeypatch.setattr(review_preflight, "check_credential", lambda _a, _d: (
+        {"name": "credential", "class": "credential", "ok": False, "detail": "missing"}, None
+    ))
+    monkeypatch.setattr(review_preflight, "check_space", lambda _a, _d: {
+        "name": "checkout_root_free_space", "class": "space", "ok": True, "detail": {},
+    })
+    monkeypatch.setattr(review_preflight, "check_mount", lambda _a, _d: (
+        {"name": "mount", "class": "mount", "ok": True, "detail": {}}, []
+    ))
+    rc = review_preflight.main(argv)
+    assert rc == 2
+    missing_report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    lane.preflight = lambda _t: {"returncode": rc, "report": missing_report, "image_id": "sha256:" + "1" * 64}
+    for _ in range(3):
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 1)
+    assert lane.recent_input_tokens() == 0
+
+    # 模拟凭据有效、已启动两路探针线程，随后 check_mount 抛出未预期内部异常进入 preflight_internal
+    monkeypatch.setattr(review_preflight, "check_credential", lambda _a, _d: (
+        {"name": "credential", "class": "credential", "ok": True, "detail": {}}, "fake-key"
+    ))
+    monkeypatch.setattr(review_preflight, "probe_model", lambda _a, m, _k, _d, _c=None: [
+        {"name": f"roundtrip:{m}", "class": "roundtrip", "ok": True, "detail": {"http_status": 200, "sent": True}}
+    ])
+    monkeypatch.setattr(review_preflight, "check_mount", lambda _a, _d: (_ for _ in ()).throw(RuntimeError("boom")))
+    rc2 = review_preflight.main(argv)
+    assert rc2 == 2
+    crash_report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert crash_report["checks"][0]["name"] == "preflight_internal"
+    assert crash_report["checks"][0]["detail"]["probes_sent"] == len(MODELS)
+    lane.preflight = lambda _t: {"returncode": rc2, "report": crash_report, "image_id": "sha256:" + "1" * 64}
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 1)
+    assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE

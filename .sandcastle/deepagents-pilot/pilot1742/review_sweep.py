@@ -610,27 +610,70 @@ class Sweep:
         unreadable: set[int] = set()
         review_actions: dict[int, str] = {}
         withdrawn: set[int] = set()   # 本轮已确认撤掉原生 auto-merge 的 PR
-        deferred_armed: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+        early_withdraw: dict[int, dict[str, Any]] = {}  # 已在读/派审前即时撤回（或尝试撤回）的结果
+        early_logged: set[int] = set()
         drifted: set[int] = set()
         repo_native: tuple[bool, str] | None = None
         pr_errors: dict[int, str] = {}
         try:
             if self.auto_merge:
-                # 先读取全部合格 PR 的实时状态，再核验仓库级 allow_auto_merge；两者均在任何 decide() 派发前完成。
-                # 这样 allow_auto_merge 超时时 fail_closed 已有实时 auto_merge 状态，且不安全时零子进程被派发。
+                # 1. 先读取全部合格 PR 的实时状态；对任何已知挂起或状态不明的 PR（含不合格 PR）立刻撤回原生 auto-merge，
+                #    不等后面的 allow_auto_merge / decide / pr_files / checks 全轮读完，最小化 GitHub 抢跑合入窗口。
                 for idx, pr in enumerate(pulls):
-                    if self._eligible(pr):
+                    number = pr["number"]
+                    entry = {"pr": number, "head": pr["head"]["sha"]}
+                    skip = self._eligible(pr)
+                    if skip:
+                        if pr.get("auto_merge", True) is not None:
+                            try:
+                                wres = self._withdraw(number, True)
+                            except SourceUnreadable as error:
+                                for rem in pulls[idx + 1:]:
+                                    if not self._eligible(rem):
+                                        unreadable.add(rem["number"])
+                                actions.append({**entry, "action": "write-unknown", "write": "disable", "reason": str(error)})
+                                raise
+                            early_withdraw[number] = wres
+                            if wres.get("auto_merge_withdrawn"):
+                                withdrawn.add(number)
+                            actions.append({**entry, "action": "auto-merge-withdraw", "reason": skip, **wres})
+                            early_logged.add(number)
                         continue
                     try:
-                        states[pr["number"]] = self.github.pr(pr["number"])
+                        states[number] = self.github.pr(number)
                     except SourceUnreadable:  # 实时 PR 状态读取超时：本条及余下尚未读取的合格 PR 均记未知，让 fail_closed 兜底撤原生 auto-merge
                         for rem in pulls[idx:]:
                             if not self._eligible(rem):
                                 unreadable.add(rem["number"])
                         raise
-                    except Exception as error:  # 单个 PR 隔离：不派审，合入阶段按失败关闭撤原生 auto-merge
-                        unreadable.add(pr["number"])
-                        pr_errors[pr["number"]] = f"{type(error).__name__}: {error}"
+                    except Exception as error:  # 单个 PR 隔离：不派审，并立刻尝试撤回原生 auto-merge
+                        unreadable.add(number)
+                        pr_errors[number] = f"{type(error).__name__}: {error}"
+                        try:
+                            wres = self._withdraw(number, True)
+                        except SourceUnreadable as werr:
+                            for rem in pulls[idx + 1:]:
+                                if not self._eligible(rem):
+                                    unreadable.add(rem["number"])
+                            actions.append({**entry, "action": "write-unknown", "write": "disable", "reason": str(werr)})
+                            raise
+                        early_withdraw[number] = wres
+                        if wres.get("auto_merge_withdrawn"):
+                            withdrawn.add(number)
+                        continue
+                    if states[number].get("auto_merge") is not False:
+                        try:
+                            wres = self._withdraw(number, True)
+                        except SourceUnreadable as error:
+                            for rem in pulls[idx + 1:]:
+                                if not self._eligible(rem):
+                                    unreadable.add(rem["number"])
+                            actions.append({**entry, "action": "write-unknown", "write": "disable", "reason": str(error)})
+                            raise
+                        early_withdraw[number] = wres
+                        if wres.get("auto_merge_withdrawn"):
+                            withdrawn.add(number)
+                            states[number]["auto_merge"] = False
                 try:
                     native = self.github.allow_auto_merge()
                 except SourceUnreadable:
@@ -641,10 +684,10 @@ class Sweep:
                     why = "仓库设置 allow_auto_merge=true：原生 auto-merge 可在两轮之间被挂上，绕过人工确认两类"
                 repo_native = (native, why)
             for pr in self.launch_order(pulls, busy):  # 审查按 launch_order；合入、追平、兜底撤销仍按 PR 号
-                entry: dict[str, Any] = {"pr": pr["number"], "head": pr["head"]["sha"]}
+                entry = {"pr": pr["number"], "head": pr["head"]["sha"]}
                 try:
                     skip = self._eligible(pr)
-                    if skip:  # 闲置/草稿/跨仓 PR 不派审、不读文件与检查；原生 auto-merge 撤销独立在 merge_actions/fail_closed 执行
+                    if skip:  # 闲置/草稿/跨仓 PR 不派审、不读文件与检查；原生 auto-merge 已在上游即时撤回
                         actions.append({**entry, "action": skip})
                         continue
                     if pr["number"] in pr_errors:
@@ -671,9 +714,10 @@ class Sweep:
                         review_actions[pr["number"]] = action
                         continue
                     if self.auto_merge and states[pr["number"]].get("auto_merge") is not False:
-                        # 已挂（或状态不明）原生 auto-merge 的 PR 推迟到 merge_actions 确认撤回后再派发，
-                        # 绝不允许快速沿用 PASS 先于 disable_auto_merge 发布 success。
-                        deferred_armed.append((pr_for_decide, entry, behind))
+                        # 已挂原生 auto-merge 且即时撤回失败：绝不派发审查或沿用（防发布 success 触发合入）。
+                        action = "held-auto-merge-withdraw-failed"
+                        actions.append({**entry, "action": action})
+                        review_actions[pr["number"]] = action
                         continue
                     action, record = self.decide(pr_for_decide, busy, running, behind)
                     started = action in ("launch", "resume-review", "resume-publish")
@@ -690,37 +734,21 @@ class Sweep:
             if self.auto_merge:
                 self.merge_actions(pulls, states, reviewing_now, review_actions, unreadable,
                                    out=actions, withdrawn=withdrawn, live_busy=busy,
-                                   repo_native=repo_native, drifted=drifted)
-                if deferred_armed and not (repo_native and repo_native[0]):
-                    for pr_for_decide, entry, behind in deferred_armed:
-                        number = pr_for_decide["number"]
-                        if number in drifted:
-                            continue
-                        if number not in withdrawn:
-                            action = "held-auto-merge-withdraw-failed"
-                            actions.append({**entry, "action": action})
-                            review_actions[number] = action
-                            continue
-                        try:
-                            action, record = self.decide(pr_for_decide, busy, running, behind)
-                            started = action in ("launch", "resume-review", "resume-publish")
-                            running += started
-                            if started:
-                                reviewing_now.add(number)
-                            actions.append({**entry, "action": action, **(record or {})})
-                        except SourceUnreadable:
-                            raise
-                        except Exception as error:
-                            action = "error"
-                            actions.append({**entry, "action": action, "reason": f"{type(error).__name__}: {error}"})
-                        review_actions[number] = action
+                                   repo_native=repo_native, drifted=drifted,
+                                   early_withdraw=early_withdraw, early_logged=early_logged)
             if self._backoff is not None:
                 actions.append({**self._backoff,
                                 "held": [n for n, a in review_actions.items() if a == "review-backoff"]})
         except SourceUnreadable as error:
-            # 超时（或整轮输入源读不到）：本轮不再合入、不再追平；凡尚未确认撤回且挂着（或不知道挂没挂）
-            # 原生 auto-merge 的 PR（含跳过派审的 PR）都撤原生 auto-merge。已做的动作随异常带出，照常写日志。
+            # 超时（或整轮输入源读不到）：本轮不再合入、不再追平；先补记已即时撤回但尚未由 merge_actions 落日志的条目，
+            # 再对尚未确认撤回且挂着（或不知道挂没挂）原生 auto-merge 的 PR（含跳过派审的 PR）兜底撤回。
             if self.auto_merge:
+                for pr in pulls:
+                    number = pr["number"]
+                    if number in early_withdraw and number not in early_logged:
+                        actions.append({"pr": number, "head": pr["head"]["sha"],
+                                        "action": "auto-merge-withdraw", **early_withdraw[number]})
+                        early_logged.add(number)
                 actions += self.fail_closed(pulls, states, withdrawn, unreadable)
             error.actions = actions
             raise
@@ -886,12 +914,16 @@ class Sweep:
                       withdrawn: set[int] | None = None,
                       live_busy: set[int] | frozenset[int] = frozenset(),
                       repo_native: tuple[bool, str] | None = None,
-                      drifted: set[int] | None = None) -> list[dict[str, Any]]:
+                      drifted: set[int] | None = None,
+                      early_withdraw: dict[int, dict[str, Any]] | None = None,
+                      early_logged: set[int] | None = None) -> list[dict[str, Any]]:
         """两段：先把每个 PR 的证据读完并定好动作（只读），全部读完才按序执行撤原生 auto-merge 写操作。
         读阶段任何超时都在写之前抛出，并由 fail_closed 按已确认撤回集合兜底撤销；动作逐条追加到 out，超时时已做的也不丢。"""
         actions = [] if out is None else out
         withdrawn = set() if withdrawn is None else withdrawn
         review_actions = review_actions or {}
+        early_withdraw = early_withdraw or {}
+        early_logged = set() if early_logged is None else early_logged
         evidence_ok = True
         required: dict[str, int] = {}
         try:
@@ -935,12 +967,16 @@ class Sweep:
         for pr in pulls:  # 与 tick 同序（PR 号升序）：队首是第一个仍可能合入的 PR
             number = pr["number"]
             entry = {"pr": number, "head": pr["head"]["sha"]}
-            if number in unreadable:  # 状态读不到，不知道挂没挂原生 auto-merge：照撤
-                plan.append((entry, {"action": "evidence-insufficient", "reason": "读取 PR 状态失败"}, "disable", True))
+            if number in unreadable:  # 状态读不到，不知道挂没挂原生 auto-merge：若前期未成功撤回则再撤
+                need_withdraw = "disable" if number not in withdrawn else None
+                plan.append((entry, {"action": "evidence-insufficient", "reason": "读取 PR 状态失败"},
+                             need_withdraw, number not in withdrawn))
                 continue
             if number not in states:
                 # 派审资格过滤（draft/stale-pr/foreign-head）独立于原生 auto-merge 撤销：
-                # 仅当列表载荷表明已挂或未知时安排撤回，明确为 None 时零额外 API 调用。
+                # 若在 tick 前期已即时撤回并落日志则跳过；仅当未撤回且列表载荷表明已挂或未知时撤回。
+                if number in early_logged:
+                    continue
                 if pr.get("auto_merge", True) is not None:
                     skip = self._eligible(pr) or "ineligible"
                     plan.append((entry, {"action": "auto-merge-withdraw", "reason": skip}, "disable", True))
@@ -972,6 +1008,8 @@ class Sweep:
                     result = {**result, **self._withdraw(number, True)}
                     if result.get("auto_merge_withdrawn"):
                         withdrawn.add(number)
+                elif number in early_withdraw:
+                    result = {**result, **early_withdraw[number]}
             except SourceUnreadable as error:  # 写超时：结果不明，本轮余下的写不再做
                 actions.append({**entry, "action": "write-unknown", "write": write, "reason": str(error)})
                 raise
@@ -985,6 +1023,7 @@ class Sweep:
                                         "withdraw_error": str(timeout)})
                         raise
             actions.append({**entry, **result})
+            early_logged.add(number)
         return actions
 
 

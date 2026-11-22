@@ -94,6 +94,8 @@ class FakeGitHub:
 
     def disable_auto_merge(self, number):
         self.calls.append(("disable", number))
+        if number in self.states:
+            self.states[number]["auto_merge"] = False
 
 
 class Host:
@@ -1578,8 +1580,10 @@ def test_timeout_withdraws_native_auto_merge_and_merges_nothing(lane, capsys, wh
     assert ServeRound(sweep, clock=Clock())() is None
     lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
     assert lines[-1]["action"] == "round-skipped"
-    assert {"pr": 1810, "action": "fail-closed-withdraw", "auto_merge_withdrawn": True}.items() <= next(
-        a for a in lines if a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw").items()
+    withdrawn_row = next(
+        a for a in lines if a.get("pr") == 1810 and a["action"] in ("auto-merge-withdraw", "fail-closed-withdraw")
+    )
+    assert withdrawn_row.get("auto_merge_withdrawn") is True
     assert github.calls == [("disable", 1810)]          # 只撤 auto-merge；1805 也没合入
 
 
@@ -1681,7 +1685,7 @@ def test_head_recheck_read_failure_fails_closed(lane):
     github.pr = pr
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
     result = next(a for a in sweep.tick() if a.get("pr") == 1810 and a["action"] == "evidence-insufficient")
-    assert "复核 head" in result["reason"] and github.calls == [("disable", 1810)]
+    assert "复核 head" in result["reason"] and ("disable", 1810) in github.calls and all(c == ("disable", 1810) for c in github.calls)
 
 
 def test_writes_carry_the_classified_head():
@@ -1777,8 +1781,8 @@ def test_allow_auto_merge_timeout_skips_the_round(lane):
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
     with pytest.raises(SourceUnreadable) as caught:
         sweep.tick()
-    assert github.calls == [("disable", 1810)]                     # 超时：整轮作废，失败关闭照撤
-    assert caught.value.actions[-1]["action"] == "fail-closed-withdraw"
+    assert github.calls == [("disable", 1810)]                     # 超时：整轮作废，原生 auto-merge 已撤
+    assert caught.value.actions[-1]["action"] in ("auto-merge-withdraw", "fail-closed-withdraw")
 
 
 # ---- 第六轮（1354bc7c，run cfbc868b）：检查结论绑定来源 App；serve 的审查私钥单独给 ----
@@ -2301,8 +2305,8 @@ def test_timeout_after_planning_waiting_or_behind_still_withdraws_armed_auto_mer
         with pytest.raises(SourceUnreadable) as caught:
             sweep.tick()
         assert github.calls == [("disable", 1805)]
-        assert any(a.get("pr") == 1805 and a["action"] == "fail-closed-withdraw" and a.get("auto_merge_withdrawn") is True
-                   for a in caught.value.actions)
+        assert any(a.get("pr") == 1805 and a["action"] in ("auto-merge-withdraw", "fail-closed-withdraw")
+                   and a.get("auto_merge_withdrawn") is True for a in caught.value.actions)
 
 
 @pytest.mark.parametrize("change", ["draft", "foreign", "stale"])
@@ -2340,8 +2344,8 @@ def test_ineligible_prs_withdraw_armed_auto_merge_independently_of_review_dispat
     with pytest.raises(SourceUnreadable) as caught:
         sweep.tick()
     assert github.calls == [("disable", 1810)]
-    assert any(a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw" and a.get("auto_merge_withdrawn") is True
-               for a in caught.value.actions)
+    assert any(a.get("pr") == 1810 and a["action"] in ("auto-merge-withdraw", "fail-closed-withdraw")
+               and a.get("auto_merge_withdrawn") is True for a in caught.value.actions)
 
 
 def test_recheck_discovers_auto_merge_then_checks_error_still_withdraws(lane):
@@ -2522,3 +2526,35 @@ def test_multi_pr_state_timeout_marks_all_remaining_eligible_prs_unreadable_in_f
     assert github.calls == [("disable", 1810), ("disable", 1815)]
     withdrawn_prs = [a["pr"] for a in caught.value.actions if a["action"] == "fail-closed-withdraw"]
     assert withdrawn_prs == [1810, 1815]
+
+
+def test_armed_pr_withdrawn_immediately_before_classification_and_other_pr_reads(lane):
+    """R20（Astra P1）：一旦实时状态发现 PR 挂着原生 auto-merge，必须立即撤回，
+    排在 allow_auto_merge、required_checks、pr_files、checks 与派审之前，绝不拖延到整轮规划结束。"""
+    events: list[str] = []
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1805])
+    github.states[1805] = {"auto_merge": True}
+    github.states[1810] = {"auto_merge": True}
+    orig_disable = github.disable_auto_merge
+    orig_allow = github.allow_auto_merge
+    orig_req = github.required_checks
+    orig_files = github.pr_files
+    orig_checks = github.checks
+
+    github.disable_auto_merge = lambda n: (events.append(f"disable:{n}"), orig_disable(n))[1]
+    github.allow_auto_merge = lambda: (events.append("allow_auto_merge"), orig_allow())[1]
+    github.required_checks = lambda: (events.append("required_checks"), orig_req())[1]
+    github.pr_files = lambda n: (events.append(f"pr_files:{n}"), orig_files(n))[1]
+    github.checks = lambda sha, *a: (events.append("checks"), orig_checks(sha, *a))[1]
+
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True, max_running=2)
+    orig_spawn = sweep.spawn
+    sweep.spawn = lambda n, *a, **kw: (events.append(f"spawn:{n}"), orig_spawn(n, *a, **kw))[1]
+
+    sweep.tick()
+    for pr_num in (1805, 1810):
+        assert f"disable:{pr_num}" in events
+        idx_disable = events.index(f"disable:{pr_num}")
+        for later in ("allow_auto_merge", "required_checks", "pr_files:1805", "pr_files:1810", "checks", "spawn:1810"):
+            assert later in events and idx_disable < events.index(later), (events, pr_num, later)

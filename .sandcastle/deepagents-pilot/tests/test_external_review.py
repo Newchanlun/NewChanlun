@@ -2962,12 +2962,16 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
     updated_receipt = {**receipt, "session_id": session_id, "result": fixture["final_result"],
                        "observed_provider": fixture["provider"], "observed_model": fixture["model"]}
     receipt_root = tmp_path / "proxy-receipts"
+    receipt_root.mkdir(parents=True, mode=0o700)
+    receipt_root.chmod(0o700)
     launch_hdr = f"review-{launch['launch_id']}"
     rec_dir = receipt_root / launch_hdr
     rec_dir.mkdir(parents=True, mode=0o700)
+    rec_dir.chmod(0o700)
     now = time.time_ns()
     fixture_rid_shas = [hashlib.sha256(r.encode("utf-8")).hexdigest() for r in fixture["response_ids"]]
-    (rec_dir / "receipt.json").write_text(json.dumps({
+    rec_file = rec_dir / "receipt.json"
+    rec_file.write_text(json.dumps({
         "schema": "cliproxy-review-v1",
         "launch": launch_hdr,
         "session": session_id,
@@ -2983,12 +2987,17 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
         "last_response_id_sha256": fixture_rid_shas[-1],
         "last_output_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
     }))
+    rec_file.chmod(0o600)
     monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(receipt_root))
     strict = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
                             checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01,
                             preflight=_fake_preflight_pass)
     outcome = validate_review(target, launch, updated_receipt, worker, lane.source)
     assert outcome.verdict == "PASS"
+    # R20（Astra P1）：即使宿主目录收据文件自报 sealed=true，若未获已认证封存端点确认，必须失败闭合拒收
+    monkeypatch.setattr(strict, "seal_receipt", lambda _lid, _sid: False)
+    assert strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome).verdict == "FAILED"
+    monkeypatch.setattr(strict, "seal_receipt", lambda _lid, _sid: True)
     verified = strict._verify_session_receipt(target, launch, updated_receipt, worker, outcome)
     assert verified.verdict == "PASS"
 
@@ -3643,3 +3652,30 @@ def test_resume_publication_acquires_pr_lock_before_clearing_rereview_intent(lan
     assert resumed["verdict"] == "PASS" and "publication" in resumed
     assert held["saw_locked_clear"] is True
     assert not intent_path.exists()
+
+
+def test_publish_success_reconciles_existing_remote_status_even_if_allow_auto_merge_changes(lane):
+    """R20（Astra P2）：若 GitHub 已接受本 run 的 success、控制器在落本地回执前中断，
+    随后仓库 allow_auto_merge 改变或 /repos 接口暂不可读，只读对账仍须成功认回既有远端状态（且不重发新状态），
+    而真正发送新的 success 仍受 allow_auto_merge 门禁阻断。"""
+    passed = lane.review_pr(1810, 1)
+    assert passed["verdict"] == "PASS"
+    target = ReviewTarget(**passed["target"])
+    folder = lane.state_root / "runs" / target.key
+    # 模拟 status-success 已发往远端并生效，但本地 journal 停在 pending 且 outcome 未写 publication
+    module._save(folder / "effects" / "status-success.json", {"state": "pending", "what": {"state": "success"}})
+    module._save(folder / "outcome.json", {k: v for k, v in passed.items() if k != "publication"})
+
+    lane.gateway.repo["allow_auto_merge"] = True
+    lane.gateway.pr["auto_merge"] = {"merge_method": "merge"}
+    before_sent = list(lane.gateway.sent)
+    reconciled = lane.review_pr(1810, 1)
+    assert reconciled["verdict"] == "PASS" and "publication" in reconciled
+    assert lane.gateway.sent == before_sent  # 纯只读认回，未重发
+
+    # 再验证 journal 已 done 但 outcome 缺 publication 且 /repos 抛错时，只读对账同样成功
+    module._save(folder / "outcome.json", {k: v for k, v in passed.items() if k != "publication"})
+    lane.gateway.get_repo = lambda: (_ for _ in ()).throw(IdentityError("HTTP 502"))
+    reconciled2 = lane.review_pr(1810, 1)
+    assert reconciled2["verdict"] == "PASS" and "publication" in reconciled2
+    assert lane.gateway.sent == before_sent
