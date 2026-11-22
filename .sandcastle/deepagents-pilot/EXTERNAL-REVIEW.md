@@ -18,21 +18,21 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 审阅冻结 base、head 和 merge-base，范围为 `merge_base..head` 的完整修改，不只审最后一次提交。对象必须已在当前 controller 的本地对象库；缺失时返回 `needs_source_sync`，由原 owner 按其既有同步授权补齐。入口和 reviewer 都不 fetch。
 
-两位 reviewer 固定请求 GPT‑6.2 Sol（`gpt-6.2-sol`）和 Astra（`gpt-6.2-astra`）。两者同属 GPT，但各自使用独立 checkout、进程和新 session，必须对同一冻结 base、head、merge-base 各交一份真实有效的 PASS，才能由现有 GitHub App 发布 success。模型字段记录 launcher 的请求；[预检](REVIEW-PREFLIGHT.md)用代理的可信收据核实实际路由。
+两位 reviewer 固定请求 GPT‑6.2 Sol（`gpt-6.2-sol`）和 Astra（`gpt-6.2-astra`）。两者同属 GPT，但各自使用独立 checkout、进程和新 session，必须对同一冻结 base、head、merge-base 各交一份真实有效的 PASS，才能由现有 GitHub App 发布 success。监督进程与控制器同时校验 `session.jsonl` 中的 `model_provider=cliproxy-local` 与全部 `turn_context.model` 与请求模型一致、两路模型与 session 均不重复；[预检](REVIEW-PREFLIGHT.md)用代理在出站 HTTP 边界签发、绑定到精确出站模型的收据（`codex:gpt-6.2-sol@chatgpt.com` / `codex:gpt-6.2-astra@chatgpt.com`）及响应模型回显核实实际路由（预检仍是启动前快照，若代理配置在预检与实际审阅之间变更属残余风险）。
 
 ## 指定 Docker context
 
 需要在 Colima 验收和审阅、但全局默认是 OrbStack 时，在启动 controller 的环境中设置 `DOCKER_CONTEXT=colima`，不修改全局默认。该值沿部署准入、监督、容器/卷检查与回收、VM trim 传递；不存在或不可用的显式 context 按原失败路径处理，不重试默认 daemon。未设置时仍由 Docker 使用原默认 context。launchd 托管时，在实际加载的 `com.newchanlun.deepagents-executor.plist` 的 `EnvironmentVariables` 中设置该值；部署验收命令也须显式使用同一 context。
 
-这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定。`SANDCASTLE_MAIN_MODEL` 仅传给宿主的准入与监督进程，用于按部署的起草模型核对验收独审是否异家族；它不选择审查模型，也不进入审阅容器。正式审阅准入不调用主控模型探针。
+这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定。`SANDCASTLE_MAIN_MODEL` 与 `SANDCASTLE_CONFIG_FILE` 仅传给宿主的准入与监督进程，用于按部署的起草模型（含配置文件覆盖）核对验收独审是否异家族；它们不选择审查模型，不扩大 `DOCKER_ENV` 回收环境，也不进入审阅容器。正式审阅准入不调用主控模型探针。
 
 同一部署的派发、恢复与回收须使用同一 context；旧 run 没有持久化 context 绑定，不能换 daemon 后接管。部署新代码后，部署 owner 必须按新 controller head 重新绑定 Docker 准入，不能沿用旧 controller head 的验收。隔离 fake 测试不代替这一步。
 
 ## 换用 GPT 双臂后的旧记录
 
-新 attempt 使用合同 `external-pr-v2-gpt62`；模型与提示词一并进入 `REVIEW_CONTRACT`。旧合同的 PASS 不能沿用，旧合同的 STALE 不迁移；旧 run 的回执、已发布结论和 BLOCK 证据保留。原 base/head 上的新 attempt 使用下一个未占用的编号。自动 sweep 不把旧合同中断的 run 当成 GPT 派发：待发布终态交对账，未完结的 run 交操作员。
+新 attempt 使用合同 `external-pr-v2-gpt62`；模型与提示词一并进入 `REVIEW_CONTRACT`。旧合同的 PASS 不能沿用，旧合同的 STALE 不迁移；旧 run 的回执、已发布结论和 BLOCK 证据保留。原 base/head 上的新 attempt 使用下一个未占用的编号。自动 sweep 按同 head 最新未作废 attempt 决定恢复动作，不把旧合同中断的 run 当成 GPT 派发，也不会让已过时的旧终态遮蔽更新的 GPT 中断续跑：最新仍是旧合同待发布终态时交对账，最新仍是旧合同未完结 run 时交操作员。
 
-审查模型不依赖 `SANDCASTLE_MAIN_MODEL`。两位 GPT 走原有结构化输出 schema；Kimi 的历史 `prompt` 模式仍可用于读旧回执。Claude 或 Kimi 不再作为新正式审查的替补；任一 GPT 路由未过预检就不启动新 attempt。
+审查模型不依赖 `SANDCASTLE_MAIN_MODEL`。两位 GPT 走原有结构化输出 schema；Kimi 的历史 `prompt` 模式仍可用于读旧回执。Claude 或 Kimi 不再作为新正式审查的替补。手动 `review-pr` 与自动 `review_sweep` 共用的新 attempt 登记路径及沿用退回双审路径均强制执行 `review_preflight.py` 预检闸（通过 `REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER` + `REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT` + `REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR`，或宿主 `REVIEW_PREFLIGHT_PROXY_RECEIPT_DIR` 显式配置可信收据源；缺配置或任一 GPT 路由/响应模型未过预检时失败闭合，不占 attempt、不写 `target.json`、不发 `pending`）。已有 attempt 的中断恢复和有效 PASS 沿用不重跑预检。
 
 ## 启用前完成部署验收
 

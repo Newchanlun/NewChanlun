@@ -45,12 +45,20 @@ from .patch_read import FrozenPatch, reads_candidate_patch
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 from .vm_trim import DOCKER_ENV, trim_vm_disk
 
-# Worker 准入复验依部署的起草模型校验异家族；不扩大宿主 Docker 回收环境。
-REVIEW_WORKER_ENV = (*DOCKER_ENV, "SANDCASTLE_MAIN_MODEL")
+# Worker 准入与监督复验依部署的起草模型（含配置文件）校验异家族；不扩大宿主 Docker 回收或容器环境。
+REVIEW_WORKER_ENV = (*DOCKER_ENV, "SANDCASTLE_MAIN_MODEL", "SANDCASTLE_CONFIG_FILE")
 
 # 正式 GPT 双审（EXTERNAL-REVIEW.md）；不同模型各走独立 checkout、进程与 session。
 MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 POLICY = "external-pr-v2-gpt62"
+PREFLIGHT_SCRIPT = Path(__file__).resolve().parents[1] / "review_preflight.py"
+PREFLIGHT_ENV_CONTAINER = "REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER"
+PREFLIGHT_ENV_CONTAINER_DIR = "REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR"
+PREFLIGHT_ENV_PROXY_CONTEXT = "REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT"
+PREFLIGHT_ENV_HOST_DIR = "REVIEW_PREFLIGHT_PROXY_RECEIPT_DIR"
+PREFLIGHT_ENV_PROXY_URL = "REVIEW_PREFLIGHT_PROXY_URL"
+PREFLIGHT_ENV_CODEX_BIN = "REVIEW_PREFLIGHT_CODEX_BIN"
+PREFLIGHT_ENV_DEADLINE = "REVIEW_PREFLIGHT_DEADLINE"
 CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
 REPOSITORY_ID = 1150335160
@@ -380,9 +388,21 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         return failed("缺少独立 session")
     try:
         with open(folder / "session.jsonl", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as stream:
-            first = json.loads(stream.readline())
+            session_rows = [json.loads(line) for line in stream if line.strip()]
+        if not session_rows:
+            return failed("session 日志为空")
+        first = session_rows[0]
         if first.get("type") != "session_meta" or first.get("payload", {}).get("id") != session:
             return failed("session 日志与 stdout 身份不符")
+        if target.policy_version == POLICY:
+            if first.get("payload", {}).get("model_provider") != "cliproxy-local":
+                return failed("session 日志 provider 与路由合同不符")
+            turn_models = [row.get("payload", {}).get("model") for row in session_rows
+                           if row.get("type") == "turn_context"]
+            if not turn_models or any(m != model for m in turn_models):
+                return failed("session 日志模型与请求模型不符")
+            if receipt.get("observed_provider") != "cliproxy-local" or receipt.get("observed_model") != model:
+                return failed("监督回执观测模型与请求模型不符")
         if not (folder / "events.jsonl").is_file() or (folder / "events.jsonl").is_symlink():
             return failed("缺少宿主 stdout 日志")
         events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines() if line.strip()]
@@ -510,7 +530,8 @@ class ExternalReview:
                  checkout_root: Path = CHECKOUT_ROOT, source: Path = SOURCE_REPO,
                  launcher: list[str] | None = None, poll_seconds: float = 1,
                  docker: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
-                 vm_trim: Callable[[Path], dict] | None = None):
+                 vm_trim: Callable[[Path], dict] | None = None,
+                 preflight: Callable[[ReviewTarget], dict] | None = None):
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
         self.docker = docker if docker is not None else (lambda args: docker_cli(args))
         # #1986：删卷后对 Colima VM 跑 fstrim；与 TS 监督共用 checkout_root 下的节流锁与时间戳（见 vm_trim）。
@@ -518,8 +539,111 @@ class ExternalReview:
         # worker 与 controller 同源：都取正在执行的代码所在仓库（SOURCE_REPO），不随对象来源 source 变化。
         self.launcher = launcher or [str(SOURCE_REPO / "node_modules" / ".bin" / "tsx"),
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
+        self.preflight = preflight if preflight is not None else self._run_preflight
         self.poll_seconds = poll_seconds
         self._stop = threading.Event()
+
+    def _preflight_args(self, target: ReviewTarget) -> list[str]:
+        container = os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip()
+        host_dir = os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
+        if container and host_dir:
+            raise EffectPending("preflight-blocked：代理收据容器与宿主目录配置冲突，未占 attempt")
+        if not container and not host_dir:
+            raise EffectPending(
+                f"preflight-blocked：未配置可信代理收据来源（{PREFLIGHT_ENV_CONTAINER} 或 {PREFLIGHT_ENV_HOST_DIR}），未占 attempt")
+        cmd = [sys.executable, "-I", str(PREFLIGHT_SCRIPT),
+               "--source", str(self.source),
+               "--base", target.base_sha, "--head", target.head_sha, "--merge-base", target.merge_base_sha,
+               "--checkout-root", str(self.checkout_root)]
+        if container:
+            proxy_ctx = os.environ.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
+            container_dir = os.environ.get(PREFLIGHT_ENV_CONTAINER_DIR, "").strip()
+            if not proxy_ctx or not container_dir:
+                raise EffectPending(
+                    f"preflight-blocked：缺少 {PREFLIGHT_ENV_PROXY_CONTEXT} 或 {PREFLIGHT_ENV_CONTAINER_DIR}，未占 attempt")
+            cmd.extend(["--proxy-receipt-container", container,
+                        "--proxy-docker-context", proxy_ctx,
+                        "--proxy-container-receipt-dir", container_dir])
+        else:
+            cmd.extend(["--proxy-receipt-dir", host_dir])
+        review_ctx = os.environ.get("DOCKER_CONTEXT", "").strip()
+        if review_ctx:
+            cmd.extend(["--review-docker-context", review_ctx])
+        proxy_url = os.environ.get(PREFLIGHT_ENV_PROXY_URL, "").strip()
+        if proxy_url:
+            cmd.extend(["--proxy-url", proxy_url])
+        codex_bin = os.environ.get(PREFLIGHT_ENV_CODEX_BIN, "").strip()
+        if codex_bin:
+            cmd.extend(["--codex-bin", codex_bin])
+        deadline = os.environ.get(PREFLIGHT_ENV_DEADLINE, "").strip()
+        if deadline:
+            cmd.extend(["--deadline", deadline])
+        return cmd
+
+    def _run_preflight(self, target: ReviewTarget) -> dict:
+        cmd = self._preflight_args(target)
+        try:
+            done = subprocess.run(cmd, cwd=SOURCE_REPO, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=65)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EffectPending(f"preflight-blocked：预检进程失败（{type(error).__name__}），未占 attempt") from None
+        lines = [line for line in done.stdout.splitlines() if line.strip()]
+        try:
+            report = json.loads(lines[-1]) if lines else None
+        except ValueError:
+            report = None
+        return {"returncode": done.returncode, "report": report}
+
+    def admit_preflight(self, target: ReviewTarget) -> dict:
+        """新 attempt 登记与复用退回共用的启动前预检闸：任一路由或模型证明失败即拒，不占 attempt、不发状态。"""
+        try:
+            raw = self.preflight(target)
+        except EffectPending:
+            raise
+        except Exception as error:
+            raise EffectPending(f"preflight-blocked：预检异常（{type(error).__name__}），未占 attempt") from None
+        if not isinstance(raw, dict):
+            raise EffectPending("preflight-blocked：预检返回格式无效，未占 attempt")
+        if "report" in raw:
+            rc = raw.get("returncode")
+            report = raw.get("report")
+        else:
+            rc = 0
+            report = raw
+        if (rc != 0 or not isinstance(report, dict) or report.get("kind") != "review-preflight"
+                or report.get("is_review_result") is not False or report.get("ready") is not True):
+            failed = [c.get("name", "?") for c in (report.get("checks", []) if isinstance(report, dict) else [])
+                      if isinstance(c, dict) and not c.get("ok")]
+            detail = ", ".join(str(name) for name in failed) if failed else f"rc={rc}"
+            raise EffectPending(f"preflight-blocked：预检未通过（{detail}），未占 attempt、未发状态")
+        checks = {c["name"]: c for c in report.get("checks", []) if isinstance(c, dict) and isinstance(c.get("name"), str)}
+        seen_routes: set[tuple[str, ...]] = set()
+        seen_models: set[str] = set()
+        for model in MODELS:
+            route = checks.get(f"route:{model}")
+            rt = checks.get(f"roundtrip:{model}")
+            if not route or route.get("ok") is not True or not rt or rt.get("ok") is not True:
+                raise EffectPending(f"preflight-blocked：缺少通过的 {model} 预检项，未占 attempt、未发状态")
+            raw_route_detail = route.get("detail")
+            route_detail: dict[str, Any] = raw_route_detail if isinstance(raw_route_detail, dict) else {}
+            expected_routes = route_detail.get("expected")
+            actual_routes = route_detail.get("actual")
+            if (not isinstance(expected_routes, list) or not expected_routes
+                    or not isinstance(actual_routes, list) or not actual_routes
+                    or any(item not in expected_routes for item in actual_routes)):
+                raise EffectPending(f"preflight-blocked：{model} 路由收据无效，未占 attempt、未发状态")
+            if model.startswith("gpt-6.2-") and any(item != f"codex:{model}@chatgpt.com" for item in actual_routes):
+                raise EffectPending(f"preflight-blocked：{model} 路由收据未绑定精确模型，未占 attempt、未发状态")
+            seen_routes.add(tuple(sorted(set(actual_routes))))
+            raw_rt_detail = rt.get("detail")
+            rt_detail: dict[str, Any] = raw_rt_detail if isinstance(raw_rt_detail, dict) else {}
+            returned = rt_detail.get("returned_model")
+            if returned != model:
+                raise EffectPending(f"preflight-blocked：{model} 响应模型不符（{returned!r}），未占 attempt、未发状态")
+            seen_models.add(returned)
+        if len(seen_routes) != len(MODELS) or len(seen_models) != len(MODELS):
+            raise EffectPending("preflight-blocked：两路审查模型或路由证据未区分，未占 attempt、未发状态")
+        return report
 
     def target(self, number: int, attempt: int) -> ReviewTarget:
         if type(attempt) is not int or attempt <= 0:
@@ -530,9 +654,14 @@ class ExternalReview:
         folder = self.state_root / "runs" / target.key
         # 以有效 target.json 判断是否已登记：_lock 会先建目录，建目录后、写 target.json 前中断时仍须准入。
         if not (folder / "target.json").exists():
+            used = (self.state_root / "runs").glob(
+                f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
+            if any(used):
+                raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
             planned = self.reusable(target) is not None
             if not planned:
                 self.admit_space(target)
+                self.admit_preflight(target)
             target = replace(target, reuse_planned=planned)
         with _lock(folder):
             if (folder / "target.json").exists():
@@ -1105,6 +1234,7 @@ class ExternalReview:
                             return self._publish_reuse(target, folder, publisher, source, admission)
                 if target.reuse_planned and not any((folder / model).exists() for model in MODELS):
                     self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
+                    self.admit_preflight(target)
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
                     raise Stale("同 head 已有更晚登记的 attempt，本 run 不再派发")
                 if any(not (folder / model / "launch.json").exists() for model in MODELS):
@@ -1119,6 +1249,8 @@ class ExternalReview:
                 sessions = [o.session_id for o in outcomes if o.session_id]
                 if len(sessions) != len(set(sessions)):
                     outcomes = [ReviewOutcome(o.model, "FAILED", o.session_id, "两独审复用了 session") for o in outcomes]
+                if {o.model for o in outcomes} != set(MODELS) or len({o.model for o in outcomes}) != len(MODELS):
+                    outcomes = [ReviewOutcome(o.model, "FAILED", o.session_id, "两独审模型未区分") for o in outcomes]
                 verdict = ("FAILED" if any(o.verdict == "FAILED" for o in outcomes) else
                            "BLOCK" if any(o.verdict == "BLOCK" for o in outcomes) else "PASS")
                 state = {"PASS": "success", "BLOCK": "failure", "FAILED": "error"}[verdict]

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import git
-from test_external_review import Gateway
+from test_external_review import Gateway, _fake_preflight_pass
 
 from pilot1742 import external_review as module
 from pilot1742.delivery import EffectPending
@@ -94,7 +94,8 @@ def lane(env, monkeypatch):
     monkeypatch.setattr(module, "SOURCE_REPO", env.source)
     return ExternalReview(Gateway(env), source=env.source, state_root=env.home / "review",
                           checkout_root=env.home / "clones", poll_seconds=0.01,
-                          launcher=[sys.executable, str(Path(__file__).with_name("external_review_child.py"))])
+                          launcher=[sys.executable, str(Path(__file__).with_name("external_review_child.py"))],
+                          preflight=_fake_preflight_pass)
 
 
 def _launches(lane):

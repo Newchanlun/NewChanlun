@@ -72,6 +72,19 @@ def vm_trims(monkeypatch):
     return calls
 
 
+def _fake_preflight_pass(_target: ReviewTarget) -> dict:
+    checks = []
+    for model in module.MODELS:
+        route = f"codex:{model}@chatgpt.com" if model.startswith("gpt-6.2-") else (
+            "kimi@api.kimi.com" if "kimi" in model else "claude@api.anthropic.com" if "claude" in model else f"{model}@example.test")
+        checks.append({"name": f"route:{model}", "class": "route", "ok": True,
+                       "detail": {"expected": [route], "actual": [route], "log_found": True}})
+        checks.append({"name": f"roundtrip:{model}", "class": "roundtrip", "ok": True,
+                       "detail": {"http_status": 200, "terminal": "response.completed", "status": "completed",
+                                  "returned_model": model, "ok": True, "error": None}})
+    return {"kind": "review-preflight", "is_review_result": False, "ready": True, "checks": checks}
+
+
 @pytest.fixture
 def lane(env, monkeypatch):
     for i in range(2):
@@ -82,7 +95,8 @@ def lane(env, monkeypatch):
     gateway = Gateway(env)
     return ExternalReview(gateway, source=env.source, state_root=env.home / "review",
                           checkout_root=env.home / "clones", poll_seconds=0.01,
-                          launcher=[sys.executable, str(Path(__file__).with_name("external_review_child.py"))])
+                          launcher=[sys.executable, str(Path(__file__).with_name("external_review_child.py"))],
+                          preflight=_fake_preflight_pass)
 
 
 def test_business_owner_multi_commit_pr_and_idempotent_resume(lane):
@@ -221,8 +235,12 @@ def test_reconnect_protocol_matches_child_supervision(lane, scenario):
     events = [{"type": "thread.started", "thread_id": session},
               _command(f"git diff {target.merge_base_sha} {target.head_sha}"), *scenario["events"]]
     (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
-    (folder / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": session}}) + "\n")
-    receipt.update(session_id=session, result=scenario["result"], exit_code=scenario["exit_code"])
+    (folder / "session.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}) + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"model": launch["model"]}}) + "\n"
+    )
+    receipt.update(session_id=session, result=scenario["result"], exit_code=scenario["exit_code"],
+                   observed_provider="cliproxy-local", observed_model=launch["model"])
     outcome = validate_review(target, launch, receipt, folder, lane.source)
     assert outcome.verdict == scenario["verdict"], outcome.reason
     assert outcome.session_id == (None if scenario["verdict"] == "FAILED" else session)
@@ -1783,7 +1801,8 @@ def test_registration_waits_for_inflight_reuse_publication(lane, env, monkeypatc
     other_gateway.pr = copy.deepcopy(lane.gateway.pr)
     other_gateway.pr["head"]["sha"] = h1
     other = ExternalReview(other_gateway, source=lane.source, state_root=lane.state_root,
-                           checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01)
+                           checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01,
+                           preflight=lane.preflight)
     registered = {}
     def register():
         registered["target"] = other.target(1810, 2)
@@ -2316,6 +2335,7 @@ def test_docker_context_at_admission_supervisor_and_recovery_boundaries(lane, mo
     for key in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN"):
         monkeypatch.setenv(key, "fixture-must-not-pass")
     monkeypatch.setenv("SANDCASTLE_MAIN_MODEL", "kimi-k3.1-pro")
+    monkeypatch.setenv("SANDCASTLE_CONFIG_FILE", "/tmp/deploy-scheduler-config.json")
     monkeypatch.setenv("CLIPROXY_LOCAL_KEY", "fixture-worker-only")
     monkeypatch.setenv("SANDCASTLE_APPARMOR_ABSENT", "accept")  # #2071：部署的 AppArmor 策略声明要到准入与监督子进程
     trace = tmp_path / "docker-calls.jsonl"
@@ -2327,6 +2347,7 @@ import json, os, sys
 assert os.environ.get("DOCKER_CONTEXT") == {context!r}
 assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN"))
 assert os.environ.get("SANDCASTLE_MAIN_MODEL") == ("kimi-k3.1-pro" if sys.argv[1:] == ["info"] else None)
+assert os.environ.get("SANDCASTLE_CONFIG_FILE") == ("/tmp/deploy-scheduler-config.json" if sys.argv[1:] == ["info"] else None)
 with open({str(trace)!r}, "a") as f:
     f.write(json.dumps({{"context": os.environ.get("DOCKER_CONTEXT", "orbstack"), "args": sys.argv[1:]}}) + "\\n")
 if os.environ.get("DOCKER_CONTEXT") == "missing-context":
@@ -2345,6 +2366,7 @@ from pathlib import Path
 assert os.environ.get("DOCKER_CONTEXT") == {context!r}
 assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN"))
 assert os.environ.get("SANDCASTLE_MAIN_MODEL") == "kimi-k3.1-pro"
+assert os.environ.get("SANDCASTLE_CONFIG_FILE") == "/tmp/deploy-scheduler-config.json"
 admission = sys.argv[1:] == ["--admission-only"]
 assert os.environ.get("SANDCASTLE_APPARMOR_ABSENT") == "accept"
 assert os.environ.get("CLIPROXY_LOCAL_KEY") == (None if admission else "fixture-worker-only")
@@ -2371,3 +2393,102 @@ runpy.run_path({lane.launcher[1]!r}, run_name="__main__")
     assert bool(destructive) == (context != "missing-context")
     if destructive:
         assert [row["args"] for row in destructive] == [["rm", "-f", "a" * 64], ["volume", "rm", volume]]
+
+
+def test_new_attempt_and_reuse_fallback_enforce_preflight_fail_closed(lane, env, monkeypatch):
+    """手动与自动入口共用的新 attempt 登记与复用退回路径均执行预检闸；失败不占 attempt、不发 pending。"""
+    for key in (module.PREFLIGHT_ENV_CONTAINER, module.PREFLIGHT_ENV_CONTAINER_DIR,
+                module.PREFLIGHT_ENV_PROXY_CONTEXT, module.PREFLIGHT_ENV_HOST_DIR):
+        monkeypatch.delenv(key, raising=False)
+    # 1. 缺可信代理收据配置时默认实路径失败闭合，不写 target.json，不发状态
+    unconfigured = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
+                                  checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01)
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        unconfigured.review_pr(1810, 1)
+    assert lane.status(1810) == [] and lane.gateway.sent == []
+
+    # 2. 预检返回失败、旧未绑定路由或两路响应模型撞车，均阻断且不占 attempt
+    bad_reports = [
+        {"returncode": 2, "report": {"kind": "review-preflight", "is_review_result": False, "ready": False,
+                                     "checks": [{"name": f"route:{MODELS[0]}", "ok": False}]}},
+        {"kind": "review-preflight", "is_review_result": False, "ready": True, "checks": [
+            {"name": f"route:{m}", "ok": True, "detail": {"expected": ["codex@chatgpt.com"], "actual": ["codex@chatgpt.com"]}}
+            for m in MODELS
+        ] + [
+            {"name": f"roundtrip:{m}", "ok": True, "detail": {"returned_model": m}} for m in MODELS
+        ]},
+        {"kind": "review-preflight", "is_review_result": False, "ready": True, "checks": [
+            {"name": f"route:{m}", "ok": True, "detail": {"expected": [f"codex:{m}@chatgpt.com"], "actual": [f"codex:{m}@chatgpt.com"]}}
+            for m in MODELS
+        ] + [
+            {"name": f"roundtrip:{m}", "ok": True, "detail": {"returned_model": MODELS[0]}} for m in MODELS
+        ]},
+    ]
+    for bad in bad_reports:
+        lane.preflight = lambda _t, payload=bad: payload
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.review_pr(1810, 1)
+        assert lane.status(1810) == [] and lane.gateway.sent == []
+
+    # 3. 预检参数透传：配置容器收据与 DOCKER_CONTEXT 后构造正确 CLI 参数
+    monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER, "blackhole-cliproxy")
+    monkeypatch.setenv(module.PREFLIGHT_ENV_PROXY_CONTEXT, "orbstack")
+    monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER_DIR, "/tmp/cliproxy-preflight-receipts")
+    monkeypatch.setenv("DOCKER_CONTEXT", "orbstack")
+    probe_target = unconfigured._frozen(load_target(lane.gateway, 1810), 1)
+    cmd = unconfigured._preflight_args(probe_target)
+    assert "--proxy-receipt-container" in cmd and "blackhole-cliproxy" in cmd
+    assert "--proxy-docker-context" in cmd and "--review-docker-context" in cmd
+    assert "--proxy-container-receipt-dir" in cmd and "/tmp/cliproxy-preflight-receipts" in cmd
+
+    # 4. 正常通过后：已有 attempt 续跑与有效 PASS 沿用不重跑预检；沿用退回双审时补跑预检
+    calls = []
+    lane.preflight = lambda t: (calls.append(t.head_sha), _fake_preflight_pass(t))[1]
+    first = lane.review_pr(1810, 1)
+    assert first["verdict"] == "PASS" and len(calls) == 1
+    assert lane.review_pr(1810, 1)["run_id"] == first["run_id"] and len(calls) == 1
+    _advance_main(lane, env)
+    reused = lane.review_pr(1810, 1)
+    assert reused["reused_from"]["run_id"] == first["run_id"] and len(calls) == 1
+
+    # 沿用登记后在发布前来源失效：退回双审前强制再过预检
+    _advance_main(lane, env)
+    target = lane.target(1810, 1)
+    assert target.reuse_planned is True and len(calls) == 1
+    lane.preflight = lambda _t: {"returncode": 2, "report": {"kind": "review-preflight", "is_review_result": False,
+                                                             "ready": False, "checks": [{"name": f"route:{MODELS[1]}", "ok": False}]}}
+    monkeypatch.setattr(lane, "reusable", lambda _t: None)
+    sent_before = list(lane.gateway.sent)
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.review_pr(1810, 1)
+    assert lane.gateway.sent == sent_before
+
+
+def test_validate_review_rejects_mismatched_session_model_or_provider(lane):
+    """当前 GPT 合同下，session.jsonl 的 provider 或 turn_context.model 不符均判 FAILED。"""
+    result = lane.review_pr(1810)
+    target = ReviewTarget(**result["target"])
+    folder = lane.state_root / "runs" / target.key / MODELS[1]
+    launch = json.loads((folder / "launch.json").read_text())
+    receipt = json.loads((folder / "receipt.json").read_text())
+    session = receipt["session_id"]
+
+    # 1. turn_context.model 实际为另一路模型
+    (folder / "session.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}) + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"model": MODELS[0]}}) + "\n"
+    )
+    assert validate_review(target, launch, receipt, folder, lane.source).verdict == "FAILED"
+
+    # 2. session_meta.model_provider 非 cliproxy-local
+    (folder / "session.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "other-provider"}}) + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"model": MODELS[1]}}) + "\n"
+    )
+    assert validate_review(target, launch, receipt, folder, lane.source).verdict == "FAILED"
+
+    # 3. 缺 turn_context
+    (folder / "session.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}) + "\n"
+    )
+    assert validate_review(target, launch, receipt, folder, lane.source).verdict == "FAILED"

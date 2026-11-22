@@ -429,8 +429,22 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
       sessionId: transcript.sessionId!, handle });
     const log = await provider.sessionStorage.readHostSession(launch.checkout, transcript.sessionId!);
     if (!log) throw new Error("缺少真实 session 日志");
-    const first = JSON.parse(log.split("\n")[0]!);
-    if (first.type !== "session_meta" || first.payload?.id !== transcript.sessionId) throw new Error("session 日志身份不符");
+    const sessionRows = log.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as {
+      type?: unknown; payload?: { id?: unknown; model_provider?: unknown; model?: unknown };
+    });
+    const first = sessionRows[0];
+    if (!first || first.type !== "session_meta" || first.payload?.id !== transcript.sessionId) {
+      throw new Error("session 日志身份不符");
+    }
+    if (first.payload?.model_provider !== "cliproxy-local") {
+      throw new Error("session 日志 provider 不符");
+    }
+    const turnModels = sessionRows.filter((row) => row.type === "turn_context").map((row) => row.payload?.model);
+    if (!turnModels.length || turnModels.some((m) => m !== launch!.model)) {
+      throw new Error("session 日志模型与请求不符");
+    }
+    record.observed_provider = "cliproxy-local";
+    record.observed_model = launch.model;
     writeFileSync(join(folder, "session.jsonl"), log, { mode: 0o600, flag: "wx" });
     record.phase = "checkout-after";
     record.after = deps.volumes.snapshot(volume, image, launch.launch_id);

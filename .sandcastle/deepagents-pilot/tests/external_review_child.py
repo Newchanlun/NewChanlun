@@ -42,8 +42,12 @@ events = [{"type": "thread.started", "thread_id": session}, *tool,
           {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
           {"type": "turn.completed"}]
 (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
-(folder / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": session}}) + "\n")
+(folder / "session.jsonl").write_text(
+    json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}) + "\n"
+    + json.dumps({"type": "turn_context", "payload": {"model": launch["model"]}}) + "\n"
+)
 record = {**launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0, "container_closed": True,
+          "observed_provider": "cliproxy-local", "observed_model": launch["model"],
           "image_id": "sha256:" + "1" * 64, "isolation_contract": isolation_contract, "container_id": "a" * 64,
           "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT"},
           "session_id": session, "turn_completed": True, "result": output,

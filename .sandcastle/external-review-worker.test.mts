@@ -228,7 +228,8 @@ test("两位 GPT 独立建会话；历史显式模型仍可用", () => {
   assert.throws(() => verifyReviewAdmission({ imageId: image, consume() {} }));
 });
 
-const modes = ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "bind-mount", "volume-mismatch",
+const modes = ["PASS", "BLOCK", "failed", "missing-log", "wrong-session-model", "wrong-session-provider",
+  "missing-completed", "write", "bad-mount", "bind-mount", "volume-mismatch",
   "volume-remove-fails", "secret-env", "bad-filesystem",
   "over-budget", "over-budget-reject", "timeout-reject", "rate-limited-hang", "rate-limited-final", "rate-limited-exit", "rate-limited-stderr",
   "reconnect-429-recovers"] as const;
@@ -317,7 +318,11 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       async copyFileOut(_src, dest) {
         if (mode === "missing-log") throw new Error("missing session");
         mkdirSync(dirname(dest), { recursive: true });
-        writeFileSync(dest, JSON.stringify({ type: "session_meta", payload: { id: session, cwd: "/review" } }) + "\n");
+        const providerName = mode === "wrong-session-provider" ? "other-provider" : "cliproxy-local";
+        const recordedModel = mode === "wrong-session-model" ? "gpt-6.2-astra" : model;
+        writeFileSync(dest,
+          JSON.stringify({ type: "session_meta", payload: { id: session, cwd: "/review", model_provider: providerName } }) + "\n"
+          + JSON.stringify({ type: "turn_context", payload: { model: recordedModel } }) + "\n");
       },
       async close() { closed = true; },
     };
@@ -371,6 +376,8 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
         assert.equal(receipt.result.summary, `VERDICT: ${mode}`);
         assert.equal(receipt.failure_code, undefined);
         assert.equal(receipt.session_id, session);
+        assert.equal(receipt.observed_provider, "cliproxy-local");
+        assert.equal(receipt.observed_model, model);
         assert(receipt.turn_completed);
         assert.equal(receipt.container_id, container);
         assert.equal(receipt.output_contract, schemaless ? "prompt" : "schema");

@@ -433,11 +433,12 @@ class Sweep:
             return "done", None
         if running >= self.max_running:
             return "queued", None
-        if final:  # 有结论没发布：受管对账与发布（同一 attempt，key 要求 base 未变）
-            row = max(final, key=lambda r: r["target"]["registered_at_ns"])
-            if row["target"].get("base_sha") != base or not self._resumable(row):
+        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
+        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
+        if latest is not None and latest["outcome"]:  # 最新未作废 attempt 有结论没发布：受管对账与发布（同一 attempt，key 要求 base 未变）
+            if latest["target"].get("base_sha") != base or not self._resumable(latest):
                 return "needs-reconcile", None
-            return self._resume_once(number, head, row["target"]["attempt"], "publish")
+            return self._resume_once(number, head, latest["target"]["attempt"], "publish")
         if behind:  # 先追平再审：不审一个合入前必然被替换的 head
             return "behind-awaiting-update", None
         if self._backoff is not None:  # 限流退避：不派新审查（含续跑审查），本轮汇总一行日志

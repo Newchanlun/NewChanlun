@@ -36,7 +36,7 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 宿主部署的补丁代理可显式使用 `--proxy-receipt-dir <私有收据目录>`；它也在受总 deadline 约束的子进程中读取，防止文件读取阻塞拖住宿主。原 `--proxy-log-dir`、`--proxy-log-container` 和 `--proxy-container-log-dir` 仍表示**旧文本日志**，不能将收据路径填进去冒充迁移。这些旧入口不读取文本并返回无证明，不静默切换格式。
 
-容器外始终只有 `{session, complete_stable, routes}`。`complete_stable=true` 表示生产者收据已封口并原子发布，不再表示两次文件大小相同。routes 是全部有序 HTTP 尝试的白名单枚举或 `other`，保留重复项；两路 GPT 的每次尝试都必须是 `codex@chatgpt.com`。宿主继续拒绝多余字段、重复 JSON 字段、不匹配 session、自由文本和异常退出。不存在从失败收据降级回文本的路径。报告的既有 `log_found` 字段表示取得可用路由证据，不证明文本文件存在。
+容器外始终只有 `{session, complete_stable, routes}`。`complete_stable=true` 表示生产者收据已封口并原子发布，不再表示两次文件大小相同。routes 是全部有序 HTTP 尝试的白名单枚举或 `other`，保留重复项；两路 GPT 的每次尝试都必须分别匹配各自精确出站模型枚举 `codex:gpt-6.2-sol@chatgpt.com` 与 `codex:gpt-6.2-astra@chatgpt.com`（不绑定模型的旧 `codex@chatgpt.com` 不再放行），且 `roundtrip` 同时校验 `response.completed` 的 `response.model` 与请求模型一致。宿主继续拒绝多余字段、重复 JSON 字段、不匹配 session、自由文本和异常退出。不存在从失败收据降级回文本的路径。报告的既有 `log_found` 字段表示取得可用路由证据，不证明文本文件存在。
 
 ### 成功终态之后仍须读到 EOF
 
@@ -58,14 +58,14 @@ python -m ruff check --select F,E9,B,I .
 
 `build.py` 使用 Python ≥ 3.12 下载固定 commit，应用 `cliproxy/preflight-v1.patch`；不复制本机配置、凭据或日志。Dockerfile 固定 Go 镜像及摘要，首次准备公开依赖需要网络，测试和 Linux 编译都使用 `RUN --network=none`。输出目录必须不存在，产物为 `cli-proxy-api`（当前构建宿主的 Linux 架构）、`version.txt`、`runtime.txt`、`go-test.txt` 和 fake 生成的 `receipts/`。构建还在 Blackhole 同款 `debian:bookworm-slim` 基础镜像内以 UID 1000、无网络运行 `--help`，确认动态链接和非 root 启动。Blackhole 现有 Dockerfile 下载官方 linux_aarch64 压缩包；主控需让其交付链使用此补丁二进制，并核对目标架构。本脚本不部署、不改 Blackhole、不加载产物到生产容器。
 
-Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude executor 和失败后重试；只将出站网络替换为本地 fake，分别导出双 attempt 成功收据。Python 直接消费这些 Go 产物，验证成功路径及 `other`、未收尾、正文伪造尾部的拒绝路径。未提供 `CLIPROXY_OFFLINE_RECEIPTS` 时跨语言测试会 skip，不能把这种运行报告为端到端通过。
+Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude/Codex executor 和失败后重试；只将出站网络替换为本地 fake，分别导出双 attempt Kimi/Claude 成功收据及精确绑定出站模型的 Sol/Astra Codex 收据。Python 直接消费这些 Go 产物，验证成功路径以及别名碰撞、`other`、未收尾、正文伪造尾部的拒绝路径。未提供 `CLIPROXY_OFFLINE_RECEIPTS` 时跨语言测试会 skip，不能把这种运行报告为端到端通过。
 
 ### 生产者支持范围与完成合同
 
-下列固定构建用于复跑 #2055 的历史 Kimi/Claude 生产者回归。正式 GPT 预检需要含原生 Codex 收据支持的代理候选；不要部署本节的历史构建来验 GPT。
+本仓 `cliproxy/preflight-v1.patch` 与 `cliproxy/build.py` 已包含原生 `CodexAutoExecutor` OAuth HTTP（`gpt-6.2-sol`、`gpt-6.2-astra`）及历史 Kimi/Claude 的可信收据支持。
 
 - 仅显式开启收据目录、且请求头为严格 `preflight-<UUIDv4>` 的 `POST /v1/responses` 启用。普通 session 的路由、传输和返回行为保持原样。收据功能未开启时不产生证据。
-- 本次固定源码仅允许具体的原生 `KimiExecutor`、`ClaudeExecutor`、`AntigravityExecutor`，不靠可冒名的 `Identifier()` 判覆盖。Antigravity 的真实尝试可被记录，但 Opus 的原 allowlist 仍拒绝它。Codex、插件 executor、count-tokens、裸 `HttpRequest`、非标准自定义 RoundTripper、WebSocket/其他入口不在本补丁支持范围，不能得到成功证明。
+- 本次固定源码仅允许具体的原生 `KimiExecutor`、`ClaudeExecutor`、`AntigravityExecutor` 以及限定为原生 OAuth HTTP（非 API key、非上下游 WebSocket）且目标模型为 `gpt-6.2-sol` 或 `gpt-6.2-astra` 的 `CodexAutoExecutor`，不靠可冒名的 `Identifier()` 判覆盖。对于 Codex，收据在 HTTP `RoundTrip` 边界校对发往 `https://chatgpt.com/backend-api/codex/responses` 的未压缩 JSON 顶层唯一 `"model"` 字段与执行模型一致后，才记录 `codex:gpt-6.2-sol@chatgpt.com` 或 `codex:gpt-6.2-astra@chatgpt.com`，否则记 `other`。插件 executor、未列模型、count-tokens、裸 `HttpRequest`、非标准自定义 RoundTripper、WebSocket/其他入口不在本补丁支持范围，不能得到成功证明。
 - 默认空插件宿主可用；活跃插件或请求期间插件快照变化使证据失效。原生标准 HTTP transport 保留原 TLS、代理和连接池策略。收据记录 HTTP `RoundTrip` 边界的 provider 与请求 authority，不声称证明代理后的物理出口 IP；底层 TCP 重传不作为另一个模型请求。OAuth 刷新不是模型尝试。
 - collector 从入站头绑定 nonce 与服务端起点，并跨 handler bootstrap 重试共享。全部 Manager 执行调用经过同一 guard；没有任何被观察 HTTP 传输的执行也拒绝证明。传输开始前分配全局序号，失败请求、重定向及重复路线不去重。只存固定枚举，不存正文、URL 路径、auth_id、token 或错误字符串。
 - 成功发布要求：HTTP handler 成功结束、请求 lifecycle 成功、所有执行租约结束、全部响应体关闭、至少一个尝试、没有覆盖缺口。最多 64 次传输、50 秒生命周期，超限失败闭合。流式执行在上游 channel 关闭前持有租约；正文里的 `=== RESPONSE ===` 或 `API REQUEST 99` 不参与判定。
@@ -93,8 +93,8 @@ Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude execu
 |---|---|---|
 | `checkout_root_free_space` | PR1866 A1/A2、PR1868 A3（f9）：快照需 2.60GB，HOME 只剩 1.40–1.65GB | 逐字节复刻 `prepare_review` 的快照字节公式，要求 checkout_root 所在卷剩余 ≥ 2 份（两位 reviewer） |
 | `checkout_root_container_mount` | PR1868 A1：checkout 在未共享进 colima 的路径，容器里看到的是 VM 本地空目录 | 在 checkout_root 写一次性 nonce，用审阅镜像 `--network none --read-only` 只读 bind 挂载 checkout_root 读回；读不到或不一致即拦。探针目录与容器随即删除，删不掉报 `probe_cleanup`；`docker run` 超时或 docker 自身出错（退出 125）时，daemon 可能在 `rm -f` 之后才建出容器，也报 `probe_cleanup`（回收未确认） |
-| `route:<model>` | 旧会话被派到非预期上游 | 两位 GPT 都要求每次尝试有可信收据且是 `codex@chatgpt.com`；旧文本和缺收据都拦截 |
-| `roundtrip:<model>` | 上游 400、响应不完整或线程未退出 | 每位一次最小 `/v1/responses` 往返；HTTP 200、唯一完成终态、内层完成无错误、HTTP 消息完整读完 |
+| `route:<model>` | 旧会话被派到非预期上游或两别名撞同模型 | 两位 GPT 分别要求每次尝试有可信收据且精确匹配 `codex:gpt-6.2-sol@chatgpt.com` / `codex:gpt-6.2-astra@chatgpt.com`；不绑定模型的旧 `codex@chatgpt.com`、旧文本和缺收据都拦截 |
+| `roundtrip:<model>` | 上游 400、响应不完整、响应模型不符或线程未退出 | 每位一次最小 `/v1/responses` 往返；HTTP 200、唯一完成终态、内层完成且 `response.model` 与请求模型一致、无错误、HTTP 消息完整读完 |
 | `credential:codex-host` | #1323：宿主缺 `CLIPROXY_LOCAL_KEY`，回合在调模型前报 `Missing environment variable` | 去掉该环境变量后，按 `$CODEX_HOME/config.toml` 的 `model_providers.cliproxy-local` 取 key（`auth.command` / `env_key`）。provider 配置是否合法以宿主自己的 codex 为准：先离线跑一次 `codex features list`（约 50ms，不发请求），Codex 拒绝加载就拦（如 `auth` 与 `env_key` 并存），报告只取 Codex 报错里的字段名。两家往返都用这把 key，所以通过即证明没有该变量时 provider 也能完成往返 |
 
 模型探测每家只发一次、提示极短（effort=low），这是预检唯一的模型花费。

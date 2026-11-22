@@ -210,6 +210,23 @@ def test_old_contract_is_never_dispatched_as_a_gpt_resume(lane, monkeypatch, pub
     assert external_review.POLICY == "external-pr-v2-gpt62"
 
 
+def test_old_unpublished_outcome_does_not_shadow_newer_gpt_attempt_recovery(lane, monkeypatch):
+    """旧合同 A1 有未发布终态，操作员启动 GPT A2 后中断，sweep 应续跑 A2 而非被 A1 遮蔽。"""
+    sweep, host, _ = make(lane, run=False)
+    with monkeypatch.context() as legacy:
+        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
+        old_target = lane.target(1810, 1)
+    old_folder = lane.state_root / "runs" / old_target.key
+    (old_folder / "outcome.json").write_text(json.dumps({"verdict": "FAILED"}))
+    # 操作员按新合同启动 A2 并中断（仅有 target.json，无 outcome.json）
+    new_target = lane.target(1810, 2)
+    assert new_target.registered_at_ns > old_target.registered_at_ns
+    assert acts(sweep.tick()) == ["resume-review"]
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 2)]
+    host.rows.clear()
+    assert acts(sweep.tick()) == ["needs-operator"]
+
+
 def test_explicit_reattempt_by_operator_is_left_alone(lane):
     sweep, host, _ = make(lane)
     sweep.tick()

@@ -1,3 +1,5 @@
+diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
+index e69de29..f6086cd 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,39 @@
@@ -40,9 +42,11 @@
 +		finished = true
 +	}
 +}
+diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
+index e69de29..cd04f51 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,445 @@
 +package api
 +
 +import (
@@ -51,6 +55,7 @@
 +	"crypto/tls"
 +	"crypto/x509"
 +	"encoding/json"
++	"fmt"
 +	"io"
 +	"net"
 +	"net/http"
@@ -343,9 +348,155 @@
 +		t.Fatal("uncovered receipt published")
 +	}
 +}
++
++func TestPreflightReceiptNativeCodexHTTP(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	models := make(chan string, 4)
++	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Host != "chatgpt.com" || r.URL.Path != "/backend-api/codex/responses" {
++			t.Errorf("unexpected upstream %s%s", r.Host, r.URL.Path)
++		}
++		var request struct {
++			Model string `json:"model"`
++		}
++		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
++			t.Errorf("decode upstream request: %v", err)
++		}
++		select {
++		case models <- request.Model:
++		default:
++			t.Error("unexpected extra upstream request")
++		}
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = fmt.Fprintf(w, `data: {"type":"response.completed","response":{"id":"offline","object":"response","status":"completed","model":%q,"output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`+"\n\n", request.Model)
++	}))
++	defer upstream.Close()
++	roots := x509.NewCertPool()
++	roots.AddCert(upstream.Certificate())
++	transport := &http.Transport{
++		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS12},
++		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
++			return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
++		},
++	}
++	defer transport.CloseIdleConnections()
++	server := newTestServer(t)
++	manager := server.handlers.AuthManager
++	manager.SetRoundTripperProvider(preflightTransportProvider{transport})
++	manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(server.cfg))
++	const id = "receipt-codex"
++	credential := &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive,
++		Attributes: map[string]string{auth.AttributeAuthKind: auth.AuthKindOAuth},
++		Metadata:   map[string]any{"access_token": "offline-fake", "websockets": true},
++	}
++	if _, err := manager.Register(context.Background(), credential); err != nil {
++		t.Fatal(err)
++	}
++	registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "gpt-6.2-sol"}, {ID: "gpt-6.2-astra"}, {ID: "gpt-6.1-sol"}})
++	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
++	request := func(model, session string) *httptest.ResponseRecorder {
++		req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":%q,"stream":true,"input":"offline"}`, model)))
++		req.Header.Set("Authorization", "Bearer test-key")
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("Session-Id", session)
++		res := httptest.NewRecorder()
++		server.engine.ServeHTTP(res, req)
++		return res
++	}
++	requireUpstreamModel := func(t *testing.T, expected string) {
++		t.Helper()
++		select {
++		case actual := <-models:
++			if actual != expected {
++				t.Fatalf("upstream model = %q, want %q", actual, expected)
++			}
++		default:
++			t.Fatal("no upstream request")
++		}
++	}
++	requireNoReceipt := func(t *testing.T, session string) {
++		t.Helper()
++		if _, err := os.Stat(filepath.Join(root, session, "receipt.json")); !os.IsNotExist(err) {
++			t.Fatalf("unexpected receipt or stat error: %v", err)
++		}
++	}
++
++	for _, tc := range []struct{ model, session, fixture string }{
++		{"gpt-6.2-sol", "preflight-12345678-1234-4234-8234-123456789abd", "native-codex-sol"},
++		{"gpt-6.2-astra", "preflight-12345678-1234-4234-8234-123456789abe", "native-codex-astra"},
++	} {
++		t.Run(tc.model, func(t *testing.T) {
++			res := request(tc.model, tc.session)
++			if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "response.completed") {
++				t.Fatalf("HTTP %d: %s", res.Code, res.Body.String())
++			}
++			requireUpstreamModel(t, tc.model)
++			// The stream lifecycle finalizes in its goroutine after the handler returns.
++			ticker := time.NewTicker(time.Millisecond)
++			defer ticker.Stop()
++			timeout := time.NewTimer(2 * time.Second)
++			defer timeout.Stop()
++			var raw []byte
++			for {
++				data, err := os.ReadFile(filepath.Join(root, tc.session, "receipt.json"))
++				if err == nil {
++					raw = data
++					break
++				}
++				if !os.IsNotExist(err) {
++					t.Fatal(err)
++				}
++				select {
++				case <-ticker.C:
++				case <-timeout.C:
++					t.Fatal("completed stream did not publish a receipt")
++				}
++			}
++			var receipt preflightreceipt.Receipt
++			if err := json.Unmarshal(raw, &receipt); err != nil {
++				t.Fatal(err)
++			}
++			wantRoute := "codex:" + tc.model + "@chatgpt.com"
++			if receipt.Schema != "cliproxy-preflight-v1" || receipt.Session != tc.session ||
++				!receipt.Complete || len(receipt.Routes) != 1 || receipt.Routes[0] != wantRoute {
++				t.Fatalf("wrong evidence %+v, want route %q", receipt, wantRoute)
++			}
++			if export := os.Getenv("PREFLIGHT_FIXTURES"); export != "" {
++				dir := filepath.Join(export, tc.fixture, tc.session)
++				if err := os.MkdirAll(dir, 0700); err != nil {
++					t.Fatal(err)
++				}
++				if err := os.WriteFile(filepath.Join(dir, "receipt.json"), raw, 0600); err != nil {
++					t.Fatal(err)
++				}
++			}
++		})
++	}
++
++	t.Run("ordinary-unlisted-model", func(t *testing.T) {
++		const session = "ordinary-codex"
++		res := request("gpt-6.1-sol", session)
++		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "response.completed") {
++			t.Fatalf("ordinary HTTP %d: %s", res.Code, res.Body.String())
++		}
++		requireUpstreamModel(t, "gpt-6.1-sol")
++		requireNoReceipt(t, session)
++	})
++	t.Run("unlisted-model", func(t *testing.T) {
++		const session = "preflight-12345678-1234-4234-8234-123456789abf"
++		res := request("gpt-6.1-sol", session)
++		if res.Code < 400 || len(models) != 0 {
++			t.Fatalf("out-of-scope model escaped preflight guard: status=%d calls=%d", res.Code, len(models))
++		}
++		requireNoReceipt(t, session)
++	})
++}
+diff --git a/internal/api/server.go b/internal/api/server.go
+index 099b5dd..728bd9e 100644
 --- a/internal/api/server.go
 +++ b/internal/api/server.go
-@@ -172,6 +172,7 @@
+@@ -172,6 +172,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
  	// Add middleware
  	engine.Use(logging.GinLogrusLogger())
  	engine.Use(logging.CPATraceIDMiddleware())
@@ -353,6 +504,8 @@
  	engine.Use(s.maxRequestBodyBytesMiddleware())
  
  	// Add request logging middleware before recovery and extra middleware so that
+diff --git a/internal/pluginhost/preflight_receipt_test.go b/internal/pluginhost/preflight_receipt_test.go
+index e69de29..6cebb36 100644
 --- a/internal/pluginhost/preflight_receipt_test.go
 +++ b/internal/pluginhost/preflight_receipt_test.go
 @@ -0,0 +1,19 @@
@@ -375,9 +528,11 @@
 +		t.Fatal("nonempty host accepted")
 +	}
 +}
+diff --git a/internal/pluginhost/snapshot.go b/internal/pluginhost/snapshot.go
+index 85ae6d6..69a1d19 100644
 --- a/internal/pluginhost/snapshot.go
 +++ b/internal/pluginhost/snapshot.go
-@@ -192,3 +192,10 @@
+@@ -192,3 +192,10 @@ func cloneConfigFieldValue(value any) any {
  	visited := make(map[metadataCloneVisit]reflect.Value)
  	return cloneInterceptorMetadataAny(reflect.ValueOf(value), visited)
  }
@@ -388,9 +543,11 @@
 +	snapshot := h.Snapshot()
 +	return func() bool { return snapshot != nil && len(snapshot.records) == 0 && h.Snapshot() == snapshot }
 +}
+diff --git a/sdk/api/handlers/handlers.go b/sdk/api/handlers/handlers.go
+index 2f1b89a..d20e37b 100644
 --- a/sdk/api/handlers/handlers.go
 +++ b/sdk/api/handlers/handlers.go
-@@ -7,6 +7,7 @@
+@@ -7,6 +7,7 @@ import (
  	"bytes"
  	"encoding/json"
  	"fmt"
@@ -398,7 +555,7 @@
  	"net"
  	"net/http"
  	"reflect"
-@@ -635,6 +636,7 @@
+@@ -635,6 +636,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
  
  	if requestCtx != nil {
  		parentCtx = httptransport.InheritDecorator(parentCtx, requestCtx)
@@ -406,9 +563,11 @@
  	}
  	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
  		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
+diff --git a/sdk/api/handlers/handlers_execution.go b/sdk/api/handlers/handlers_execution.go
+index dff03be..92df51b 100644
 --- a/sdk/api/handlers/handlers_execution.go
 +++ b/sdk/api/handlers/handlers_execution.go
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,7 @@ import (
  	"encoding/json"
  	"errors"
  	"fmt"
@@ -416,7 +575,7 @@
  	"maps"
  	"net/http"
  	"strings"
-@@ -54,6 +55,9 @@
+@@ -54,6 +55,9 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
  		return nil, nil, errMsg
  	}
  	if routeDecision.ExecutorPluginID != "" {
@@ -426,7 +585,7 @@
  		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
-@@ -134,6 +138,9 @@
+@@ -134,6 +138,9 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
  	originalRequestedModel := modelName
  	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
  	if routeDecision.ExecutorPluginID != "" {
@@ -436,9 +595,11 @@
  		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+diff --git a/sdk/api/handlers/handlers_interceptors.go b/sdk/api/handlers/handlers_interceptors.go
+index 16203c4..3261e7d 100644
 --- a/sdk/api/handlers/handlers_interceptors.go
 +++ b/sdk/api/handlers/handlers_interceptors.go
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,7 @@ package handlers
  
  import (
  	"encoding/json"
@@ -446,7 +607,7 @@
  	"maps"
  	"net/http"
  	"strings"
-@@ -109,20 +110,35 @@
+@@ -109,20 +110,35 @@ func webSocketResponseObserversEnabled(host PluginInterceptorHost) bool {
  }
  
  type requestLifecycleTracker struct {
@@ -490,7 +651,7 @@
  		completion: pluginapi.RequestCompletion{
  			RequestID:      requestID,
  			TraceID:        traceID,
-@@ -152,6 +168,9 @@
+@@ -152,6 +168,9 @@ func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOu
  		completion.Outcome = outcome
  		completion.StatusCode = statusCode
  		completion.CompletedAt = time.Now()
@@ -500,9 +661,11 @@
  		if err != nil {
  			completion.Error = err.Error()
  		}
+diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
+index e04fe3b..06d3015 100644
 --- a/sdk/api/handlers/handlers_stream.go
 +++ b/sdk/api/handlers/handlers_stream.go
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,7 @@ import (
  	"encoding/json"
  	"errors"
  	"fmt"
@@ -510,7 +673,7 @@
  	"net/http"
  
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
-@@ -38,6 +39,9 @@
+@@ -38,6 +39,9 @@ func (h *BaseAPIHandler) HasAlternativeExecutionTarget(ctx context.Context, hand
  		routeDecision = h.applyModelRouter(ctx, handlerType, modelName, rawJSON, true, execOptions)
  	}
  	if routeDecision.ExecutorPluginID != "" {
@@ -520,7 +683,7 @@
  		return false
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
-@@ -349,6 +353,9 @@
+@@ -349,6 +353,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
  		return nil, nil, errChan
  	}
  	if routeDecision.ExecutorPluginID != "" {
@@ -530,9 +693,11 @@
  		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
+index b1a8e8c..36aa7f7 100644
 --- a/sdk/cliproxy/auth/conductor_execution.go
 +++ b/sdk/cliproxy/auth/conductor_execution.go
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,7 @@ import (
  	"context"
  	"errors"
  	"fmt"
@@ -540,7 +705,7 @@
  	"io"
  	"maps"
  	"net/http"
-@@ -673,7 +674,7 @@
+@@ -673,7 +674,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
  			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
  			executionSeq := m.nextExecutionSeq()
  			startExec := time.Now()
@@ -549,7 +714,7 @@
  			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
  			durationExec := time.Since(startExec)
  			if errExec != nil {
-@@ -691,7 +692,7 @@
+@@ -691,7 +692,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
  					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
  					executionSeq = m.nextExecutionSeq()
  					startRetry := time.Now()
@@ -558,7 +723,7 @@
  					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
  					durationRetry := time.Since(startRetry)
  					if errExec != nil {
-@@ -891,7 +892,7 @@
+@@ -891,7 +892,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
  			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
  			executionSeq := m.nextExecutionSeq()
  			startExec := time.Now()
@@ -567,7 +732,7 @@
  			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
  			durationExec := time.Since(startExec)
  			if errExec != nil {
-@@ -909,7 +910,7 @@
+@@ -909,7 +910,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
  					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
  					executionSeq = m.nextExecutionSeq()
  					startRetry := time.Now()
@@ -576,7 +741,7 @@
  					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
  					durationRetry := time.Since(startRetry)
  					if errExec != nil {
-@@ -2195,6 +2196,10 @@
+@@ -2195,6 +2196,10 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
  	if exec == nil {
  		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
  	}
@@ -587,7 +752,7 @@
  	return exec.HttpRequest(ctx, auth, req)
  }
  
-@@ -2360,12 +2365,12 @@
+@@ -2360,12 +2365,12 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
  	credVersion := auth.CredentialVersion
  	regEpoch := auth.RegistrationEpoch
  
@@ -602,9 +767,11 @@
  			rerrExec := resultErrorFromError(errExec)
  			if rerrExec != nil {
  				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)
+diff --git a/sdk/cliproxy/auth/conductor_home.go b/sdk/cliproxy/auth/conductor_home.go
+index 26e8511..ceafacb 100644
 --- a/sdk/cliproxy/auth/conductor_home.go
 +++ b/sdk/cliproxy/auth/conductor_home.go
-@@ -1513,7 +1513,7 @@
+@@ -1513,7 +1513,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
  			execReq.Model = upstreamModel
  			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
  			executionSeq := m.nextExecutionSeq()
@@ -613,24 +780,27 @@
  			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts, CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
  			if errExec != nil {
  				result.Error = resultErrorFromError(errExec)
+diff --git a/sdk/cliproxy/auth/conductor_home_execution.go b/sdk/cliproxy/auth/conductor_home_execution.go
+index 8bccc58..d0e2374 100644
 --- a/sdk/cliproxy/auth/conductor_home_execution.go
 +++ b/sdk/cliproxy/auth/conductor_home_execution.go
-@@ -243,9 +243,9 @@
+@@ -243,9 +243,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
  			executor := executorForAuth(selection.Executor, preparedAuth)
  			execute := func() (cliproxyexecutor.Response, error) {
  				if countTokens {
 -					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
--				}
--				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
 +					return preflightCount(executor, executorCtx, preparedAuth, execReq, execOpts)
-+				}
+ 				}
+-				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
 +				return preflightExecute(executor, execCtx, preparedAuth, execReq, execOpts)
  			}
  			startHomeExec := time.Now()
  			response, errExecute = execute()
+diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
+index 47f87de..3a1a2d4 100644
 --- a/sdk/cliproxy/auth/conductor_stream.go
 +++ b/sdk/cliproxy/auth/conductor_stream.go
-@@ -438,7 +438,7 @@
+@@ -438,7 +438,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
  		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
  		executionSeq := m.nextExecutionSeq()
  		startStream := time.Now()
@@ -639,7 +809,7 @@
  		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
  		if hasUpstreamExecutionAttempt(errStream) {
  			upstreamErr = errStream
-@@ -460,7 +460,7 @@
+@@ -460,7 +460,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
  					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
  					executionSeq = m.nextExecutionSeq()
  					startRetry := time.Now()
@@ -648,7 +818,7 @@
  					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
  					if hasUpstreamExecutionAttempt(errStream) {
  						upstreamErr = errStream
-@@ -541,7 +541,7 @@
+@@ -541,7 +541,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
  					ctx = newUpstreamAttemptContext(ctx)
  					executionSeq = m.nextExecutionSeq()
  					startRetry := time.Now()
@@ -657,9 +827,11 @@
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
+diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
+index e69de29..0ddf9eb 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,103 @@
 +package auth
 +
 +import (
@@ -673,7 +845,7 @@
 +
 +// This fixed-revision allowlist is deliberately by concrete implementation, not
 +// Identifier(): a plugin can advertise the same provider without this coverage.
-+func preflightStart(ctx context.Context, executor ProviderExecutor, auth *Auth) (context.Context, *preflightreceipt.Execution, error) {
++func preflightStart(ctx context.Context, executor ProviderExecutor, auth *Auth, model string) (context.Context, *preflightreceipt.Execution, error) {
 +	c := preflightreceipt.From(ctx)
 +	if c == nil {
 +		return ctx, nil, nil
@@ -686,6 +858,11 @@
 +			switch typ.Name() {
 +			case "KimiExecutor", "ClaudeExecutor", "AntigravityExecutor":
 +				supported = true
++			case "CodexAutoExecutor":
++				// Only the native OAuth HTTP route is covered by the transport receipt.
++				supported = (model == "gpt-6.2-sol" || model == "gpt-6.2-astra") && auth != nil && auth.Provider == "codex" &&
++					auth.AuthKind() == AuthKindOAuth && authAttribute(auth, AttributeAPIKey) == "" &&
++					!execution.DownstreamWebsocket(ctx) && !execution.RequiredUpstreamWebsocket(ctx)
 +			}
 +		}
 +	}
@@ -696,11 +873,11 @@
 +		c.Reject()
 +		return ctx, nil, preflightreceipt.ErrUnavailable
 +	}
-+	return c.Start(ctx, auth.Provider)
++	return c.Start(ctx, auth.Provider, model)
 +}
 +
 +func preflightExecute(executor ProviderExecutor, ctx context.Context, auth *Auth, req execution.Request, opts execution.Options) (execution.Response, error) {
-+	ctx, lease, err := preflightStart(ctx, executor, auth)
++	ctx, lease, err := preflightStart(ctx, executor, auth, req.Model)
 +	if err != nil {
 +		return execution.Response{}, err
 +	}
@@ -719,7 +896,7 @@
 +}
 +
 +func preflightStream(executor ProviderExecutor, ctx context.Context, auth *Auth, req execution.Request, opts execution.Options) (*execution.StreamResult, error) {
-+	ctx, lease, err := preflightStart(ctx, executor, auth)
++	ctx, lease, err := preflightStart(ctx, executor, auth, req.Model)
 +	if err != nil {
 +		return nil, err
 +	}
@@ -758,6 +935,8 @@
 +	}()
 +	return &copyResult, nil
 +}
+diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
+index e69de29..eb42c3f 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
 @@ -0,0 +1,65 @@
@@ -783,7 +962,7 @@
 +		t.Fatal(err)
 +	}
 +	// Nil and all non-native implementations must be rejected before any method call.
-+	if _, _, err = preflightStart(ctx, nil, &Auth{Provider: "claude"}); err == nil {
++	if _, _, err = preflightStart(ctx, nil, &Auth{Provider: "claude"}, "test-model"); err == nil {
 +		t.Fatal("uncovered executor admitted")
 +	}
 +	if _, err = preflightCount(nil, ctx, nil, execution.Request{}, execution.Options{}); err == nil {
@@ -826,14 +1005,17 @@
 +		})
 +	}
 +}
+diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
+index e69de29..a46be35 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,354 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions, never for ordinary traffic.
 +package preflightreceipt
 +
 +import (
++	"bytes"
 +	"context"
 +	"encoding/json"
 +	"errors"
@@ -852,6 +1034,7 @@
 +const Schema = "cliproxy-preflight-v1"
 +const MaxAttempts = 64
 +const Lifetime = 50 * time.Second
++const maxOutboundModelBody = 1 << 20
 +
 +var ErrUnavailable = errors.New("preflight evidence unavailable")
 +var sessionPattern = regexp.MustCompile(`^preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -880,6 +1063,7 @@
 +type Execution struct {
 +	c        *Collector
 +	provider string
++	model    string
 +	ended    bool
 +	attempts int
 +}
@@ -948,7 +1132,7 @@
 +}
 +
 +// Start is called by the auth execution guard, not by an asynchronous usage sink.
-+func (c *Collector) Start(ctx context.Context, provider string) (context.Context, *Execution, error) {
++func (c *Collector) Start(ctx context.Context, provider, model string) (context.Context, *Execution, error) {
 +	c.mu.Lock()
 +	defer c.mu.Unlock()
 +	if c.invalid || c.sealed || c.handlerDone || c.lifecycleDone || time.Now().After(c.deadline) {
@@ -974,7 +1158,7 @@
 +	}
 +	c.active++
 +	c.executions++
-+	e := &Execution{c: c, provider: provider}
++	e := &Execution{c: c, provider: provider, model: model}
 +	ctx = httptransport.WithDecorator(ctx, func(next http.RoundTripper) http.RoundTripper { return &transport{next: next, execution: e} })
 +	return ctx, e, nil
 +}
@@ -995,14 +1179,101 @@
 +	c.publishLocked()
 +}
 +
++type restoredBody struct {
++	io.Reader
++	io.Closer
++}
++
++func parseTopLevelJSONModel(raw []byte) string {
++	dec := json.NewDecoder(bytes.NewReader(raw))
++	tok, err := dec.Token()
++	if err != nil {
++		return ""
++	}
++	delim, ok := tok.(json.Delim)
++	if !ok || delim != '{' {
++		return ""
++	}
++	found := ""
++	seenModel := false
++	for dec.More() {
++		keyTok, err := dec.Token()
++		if err != nil {
++			return ""
++		}
++		key, ok := keyTok.(string)
++		if !ok {
++			return ""
++		}
++		if key == "model" {
++			if seenModel {
++				return ""
++			}
++			seenModel = true
++			var value string
++			if err := dec.Decode(&value); err != nil {
++				return ""
++			}
++			found = value
++		} else {
++			var skip json.RawMessage
++			if err := dec.Decode(&skip); err != nil {
++				return ""
++			}
++		}
++	}
++	endTok, err := dec.Token()
++	if err != nil {
++		return ""
++	}
++	if endDelim, ok := endTok.(json.Delim); !ok || endDelim != '}' {
++		return ""
++	}
++	if _, err := dec.Token(); err != io.EOF {
++		return ""
++	}
++	return found
++}
++
++func codexOutboundModel(req *http.Request) string {
++	if req.Method != http.MethodPost || req.Body == nil || req.Header.Get("Content-Encoding") != "" {
++		return ""
++	}
++	if req.URL == nil || req.URL.Path != "/backend-api/codex/responses" {
++		return ""
++	}
++	orig := req.Body
++	raw, err := io.ReadAll(io.LimitReader(orig, maxOutboundModelBody+1))
++	if err != nil {
++		req.Body = restoredBody{Reader: io.MultiReader(bytes.NewReader(raw), orig), Closer: orig}
++		return ""
++	}
++	if len(raw) > maxOutboundModelBody {
++		req.Body = restoredBody{Reader: io.MultiReader(bytes.NewReader(raw), orig), Closer: orig}
++		return ""
++	}
++	_ = orig.Close()
++	req.Body = io.NopCloser(bytes.NewReader(raw))
++	return parseTopLevelJSONModel(raw)
++}
++
 +// Only enums enter the collector. URL paths, bodies and auth identifiers never do.
-+func route(provider string, req *http.Request) string {
++func route(provider, model string, req *http.Request) string {
 +	if req.URL == nil || req.URL.Scheme != "https" || req.URL.User != nil || (req.URL.Port() != "" && req.URL.Port() != "443") {
 +		return "other"
 +	}
 +	host := strings.ToLower(req.URL.Hostname())
 +	if req.Host != "" && !strings.EqualFold(req.Host, req.URL.Host) {
 +		return "other"
++	}
++	if provider == "codex" {
++		if host != "chatgpt.com" || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
++			return "other"
++		}
++		if codexOutboundModel(req) != model {
++			return "other"
++		}
++		return "codex:" + model + "@chatgpt.com"
 +	}
 +	value := provider + "@" + host
 +	switch value {
@@ -1026,9 +1297,17 @@
 +		c.mu.Unlock()
 +		return nil, ErrUnavailable
 +	}
++	c.mu.Unlock()
++	observed := route(e.provider, e.model, req)
++	c.mu.Lock()
++	if c.invalid || c.sealed || e.ended || time.Now().After(c.deadline) || len(c.receipt.Routes) >= MaxAttempts {
++		c.invalid = true
++		c.mu.Unlock()
++		return nil, ErrUnavailable
++	}
 +	e.attempts++
 +	c.bodies++
-+	c.receipt.Routes = append(c.receipt.Routes, route(e.provider, req))
++	c.receipt.Routes = append(c.receipt.Routes, observed)
 +	c.mu.Unlock()
 +	resp, err := t.next.RoundTrip(req)
 +	finish := func() { c.mu.Lock(); defer c.mu.Unlock(); c.bodies--; c.publishLocked() }
@@ -1085,9 +1364,11 @@
 +	}
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
+diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
+index e69de29..6655f77 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,299 @@
 +package preflightreceipt
 +
 +import (
@@ -1121,7 +1402,7 @@
 +}
 +func attempt(t *testing.T, ctx context.Context, c *Collector, provider, host, text string, failure bool) (*Execution, *http.Response) {
 +	t.Helper()
-+	ctx, e, err := c.Start(ctx, provider)
++	ctx, e, err := c.Start(ctx, provider, "")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -1192,7 +1473,7 @@
 +				c.Reject()
 +			}
 +			if kind == "zero-transport" {
-+				_, empty, err := c.Start(ctx, "claude")
++				_, empty, err := c.Start(ctx, "claude", "")
 +				if err != nil {
 +					t.Fatal(err)
 +				}
@@ -1225,7 +1506,7 @@
 +	if got := readReceipt(t, c).Routes; len(got) != 2 || got[1] != "antigravity@daily-cloudcode-pa.googleapis.com" {
 +		t.Fatal(got)
 +	}
-+	if _, _, err := c.Start(ctx, "claude"); err == nil {
++	if _, _, err := c.Start(ctx, "claude", ""); err == nil {
 +		t.Fatal("post-seal execution accepted")
 +	}
 +	ctx, c = beginTest(t)
@@ -1256,7 +1537,7 @@
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if _, _, err := duplicate.Start(duplicateCtx, "claude"); err == nil {
++	if _, _, err := duplicate.Start(duplicateCtx, "claude", ""); err == nil {
 +		t.Fatal("duplicate nonce accepted")
 +	}
 +	c.Complete(true)
@@ -1311,7 +1592,7 @@
 +}
 +func TestPreflightReceiptRedirectsKeepEveryRoute(t *testing.T) {
 +	ctx, c := beginTest(t)
-+	ctx, e, err := c.Start(ctx, "claude")
++	ctx, e, err := c.Start(ctx, "claude", "")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -1333,5 +1614,57 @@
 +	r := readReceipt(t, c)
 +	if len(r.Routes) != 2 || r.Routes[0] != "claude@api.anthropic.com" || r.Routes[1] != "other" {
 +		t.Fatal(r.Routes)
++	}
++}
++
++func TestPreflightReceiptCodexOutboundModelBinding(t *testing.T) {
++	cases := []struct {
++		name     string
++		model    string
++		path     string
++		encoding string
++		body     string
++		want     string
++	}{
++		{"sol-exact", "gpt-6.2-sol", "/backend-api/codex/responses", "", `{"model":"gpt-6.2-sol","stream":true}`, "codex:gpt-6.2-sol@chatgpt.com"},
++		{"astra-exact", "gpt-6.2-astra", "/backend-api/codex/responses", "", `{"model":"gpt-6.2-astra","stream":true}`, "codex:gpt-6.2-astra@chatgpt.com"},
++		{"body-mismatch", "gpt-6.2-astra", "/backend-api/codex/responses", "", `{"model":"gpt-6.2-sol","stream":true}`, "other"},
++		{"duplicate-model-key", "gpt-6.2-astra", "/backend-api/codex/responses", "", `{"model":"gpt-6.2-astra","model":"gpt-6.2-sol"}`, "other"},
++		{"compressed-body", "gpt-6.2-sol", "/backend-api/codex/responses", "zstd", `{"model":"gpt-6.2-sol"}`, "other"},
++		{"wrong-path", "gpt-6.2-sol", "/v1/responses", "", `{"model":"gpt-6.2-sol"}`, "other"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			ctx, c := beginTest(t)
++			ctx, e, err := c.Start(ctx, "codex", tc.model)
++			if err != nil {
++				t.Fatal(err)
++			}
++			var seenBody string
++			client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++				b, _ := io.ReadAll(req.Body)
++				seenBody = string(b)
++				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++			})})
++			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com"+tc.path, strings.NewReader(tc.body))
++			if tc.encoding != "" {
++				req.Header.Set("Content-Encoding", tc.encoding)
++			}
++			resp, err := client.Do(req)
++			if err != nil {
++				t.Fatal(err)
++			}
++			_ = resp.Body.Close()
++			e.End()
++			c.Complete(true)
++			c.HandlerDone(true)
++			if seenBody != tc.body {
++				t.Fatalf("downstream body = %q, want %q", seenBody, tc.body)
++			}
++			r := readReceipt(t, c)
++			if !r.Complete || len(r.Routes) != 1 || r.Routes[0] != tc.want {
++				t.Fatalf("routes = %+v, want [%s]", r.Routes, tc.want)
++			}
++		})
 +	}
 +}

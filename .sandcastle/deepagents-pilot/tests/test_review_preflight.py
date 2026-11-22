@@ -99,7 +99,12 @@ class FakeProxy:
                 elif code != 200:
                     payload = b'{"error":{"message":"tool_choice: type \\"tool\\" and \\"any\\" are not supported"}}'
                 else:
-                    payload = terminal or b'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+                    payload = terminal or (
+                        'event: response.completed\ndata: '
+                        + json.dumps({"type": "response.completed",
+                                      "response": {"status": "completed", "model": body["model"]}})
+                        + "\n\n"
+                    ).encode()
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -394,7 +399,9 @@ def test_sol_on_third_party_route_blocks(env, capsys):
 def test_old_kimi_log_is_not_route_evidence_for_gpt(env, capsys):
     code, report, *_ = env(routes={**OFFICIAL, SOL: ("kimi-ai", "https://api.kimi.ai/coding/v1/responses")}, capsys=capsys)
     assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
-    assert check(report, f"route:{SOL}")["detail"]["expected"] == ["codex@chatgpt.com"]
+    assert check(report, f"route:{SOL}")["detail"]["expected"] == [f"codex:{SOL}@chatgpt.com"]
+    assert check(report, f"route:{ASTRA}")["detail"]["expected"] == [f"codex:{ASTRA}@chatgpt.com"]
+    assert check(report, f"route:{SOL}")["detail"]["expected"] != check(report, f"route:{ASTRA}")["detail"]["expected"]
 
 
 def test_preflight_probes_the_controller_reviewer_pair():
@@ -463,7 +470,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
         return process
 
     monkeypatch.setattr(preflight.subprocess, "Popen", track)
-    payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    payload = ('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": ASTRA}}) + '\n\n').encode()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -531,7 +538,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
 
 @pytest.mark.parametrize("tail", ("eof", "read-error", "second-terminal", "deadline"))
 def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
-    terminal = b'data: {"type":"response.completed","response":{"status":"completed"}}\n'
+    terminal = ('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": ASTRA}}) + '\n').encode()
 
     class Response:
         status = 200
@@ -1071,7 +1078,7 @@ def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypa
 
     def urlopen(req, timeout=None):
         seen["timeout"] = timeout
-        return FakeResp(b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
+        return FakeResp(('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": SOL}}) + '\n\n').encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     trip = preflight._round_trip_http(LOCAL, KEY, SOL, "s", preflight.Deadline(60))
@@ -1407,9 +1414,10 @@ def test_unframed_text_cannot_prove_attempts_or_completion(tmp_path, container_r
 
 
 @pytest.mark.parametrize("routes,ok", [
-    (["codex@chatgpt.com", "codex@chatgpt.com"], True),
-    (["codex@chatgpt.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
-    (["other", "codex@chatgpt.com"], False),
+    ([f"codex:{ASTRA}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"], True),
+    ([f"codex:{SOL}@chatgpt.com"], False),
+    ([f"codex:{ASTRA}@chatgpt.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
+    (["other", f"codex:{ASTRA}@chatgpt.com"], False),
     (["claude@api.anthropic.com"], False),
     (["kimi-ai@api.kimi.ai"], False),
 ])
@@ -1508,17 +1516,42 @@ def test_generated_go_receipts_consumed_by_python():
     if not root:
         pytest.skip("需要 cliproxy/build.py 导出的离线生产者收据")
     root = Path(root)
-    expected = {"success": [("claude", "api.anthropic.com")] * 2,
-                "other": [("claude", "api.anthropic.com"), ("other", "other")],
-                "native-kimi": [("kimi", "api.kimi.com")] * 2,
-                "native-claude": [("claude", "api.anthropic.com")] * 2,
-                "native-claude-eof": [("claude", "api.anthropic.com")] * 2}
-    for name, routes in expected.items():
-        payload = json.loads((root / name / RECEIPT_SESSION / "receipt.json").read_text())
+    expected = {"success": (RECEIPT_SESSION, [("claude", "api.anthropic.com")] * 2),
+                "other": (RECEIPT_SESSION, [("claude", "api.anthropic.com"), ("other", "other")]),
+                "native-kimi": (RECEIPT_SESSION, [("kimi", "api.kimi.com")] * 2),
+                "native-claude": (RECEIPT_SESSION, [("claude", "api.anthropic.com")] * 2),
+                "native-claude-eof": (RECEIPT_SESSION, [("claude", "api.anthropic.com")] * 2),
+                "native-codex-sol": ("preflight-12345678-1234-4234-8234-123456789abd", [(f"codex:{SOL}", "chatgpt.com")]),
+                "native-codex-astra": ("preflight-12345678-1234-4234-8234-123456789abe", [(f"codex:{ASTRA}", "chatgpt.com")])}
+    for name, (session, routes) in expected.items():
+        payload = json.loads((root / name / session / "receipt.json").read_text())
         since = payload["started_ns"] / 1e9
-        assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, since, 1, preflight.Deadline(3)) == routes
+        actual = preflight.route_from_host_receipt(str(root / name), session, since, 1, preflight.Deadline(3))
+        assert actual == routes
+        if name == "native-codex-sol":
+            assert all(r in preflight.ROUTES[SOL] for r in actual)
+            assert not all(r in preflight.ROUTES[ASTRA] for r in actual)
+        if name == "native-codex-astra":
+            assert all(r in preflight.ROUTES[ASTRA] for r in actual)
+            assert not all(r in preflight.ROUTES[SOL] for r in actual)
     for name in ("unfinished", "forgery-tail", "native-claude-disconnect"):
         assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, time.time(), 0.1, preflight.Deadline(3)) is None
+
+
+def test_unscoped_codex_receipt_and_mismatched_roundtrip_model_are_rejected(tmp_path, env, capsys):
+    _receipt(tmp_path, routes=["codex@chatgpt.com"])
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    bad = ('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": SOL}}) + '\n\n').encode()
+    code, report, *_ = env(terminal=bad, capsys=capsys)
+    assert code == 2
+    assert check(report, f"roundtrip:{SOL}")["ok"] is True
+    assert check(report, f"roundtrip:{SOL}")["detail"]["returned_model"] == SOL
+    assert check(report, f"roundtrip:{ASTRA}")["ok"] is False
+    assert check(report, f"roundtrip:{ASTRA}")["detail"]["returned_model"] == SOL
+    leaked = ('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": f"secret-{KEY}"}}) + '\n\n').encode()
+    code2, report2, *_ = env(terminal=leaked, capsys=capsys)
+    assert code2 == 2 and KEY not in json.dumps(report2)
+    assert check(report2, f"roundtrip:{SOL}")["detail"]["returned_model"] == "other"
 
 
 @pytest.mark.parametrize("failure", [None, "read", "timeout", "text"])
@@ -1551,9 +1584,10 @@ def test_receipt_container_backend_is_explicit_and_bounded(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("routes,ok", [
-    (["codex@chatgpt.com", "codex@chatgpt.com"], True),
-    (["codex@chatgpt.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
-    (["other", "codex@chatgpt.com"], False),
+    ([f"codex:{ASTRA}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"], True),
+    ([f"codex:{SOL}@chatgpt.com"], False),
+    ([f"codex:{ASTRA}@chatgpt.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
+    (["other", f"codex:{ASTRA}@chatgpt.com"], False),
     (["claude@api.anthropic.com"], False),
     (["kimi-ai@api.kimi.ai"], False),
 ])

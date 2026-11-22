@@ -31,10 +31,10 @@ SPACE_RESERVE = 256 * 1024 * 1024
 # 与 pilot1742.external_review.MODELS 相同（测试核对）。
 MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 CLIPROXY_LOG_DIR = Path.home() / "Library/Application Support/CLIProxyLocal/auth/logs"
-# 两位 GPT 只接受 Codex OAuth；旧路线保留在报告词表中用于诊断，不得放行。
-CODEX_ROUTE = ("codex", "chatgpt.com")
-ROUTES = {model: {CODEX_ROUTE} for model in MODELS}
-KNOWN_ROUTES = {CODEX_ROUTE, ("kimi", "api.kimi.com"), ("kimi-ai", "api.kimi.ai"),
+# 两位 GPT 只接受绑定到精确出站模型的 Codex OAuth 路由；旧路线保留在报告词表中用于诊断，不得放行。
+ROUTES = {model: {(f"codex:{model}", "chatgpt.com")} for model in MODELS}
+KNOWN_ROUTES = {*(route for routes in ROUTES.values() for route in routes),
+                ("kimi", "api.kimi.com"), ("kimi-ai", "api.kimi.ai"),
                 ("claude", "api.anthropic.com"), ("antigravity", "daily-cloudcode-pa.googleapis.com")}
 PROVIDER = "cliproxy-local"
 SCRUBBED_ENV = "CLIPROXY_LOCAL_KEY"
@@ -60,11 +60,11 @@ PROTOCOL_FIELDS = frozenset({
     "image", "nonce_match", "docker_rc", "stderr",
     "scrubbed_env", "source", "proven_by", "error",
     "expected", "actual", "log_found", "session",
-    "http_status", "terminal", "status", "length", "sha256_12", "exception", "errno", "not_sent"})
+    "http_status", "terminal", "status", "returned_model", "length", "sha256_12", "exception", "errno", "not_sent"})
 PROTOCOL_VALUES = frozenset({
     "review-preflight", "review-preflight-help",
     "checkout_root_free_space", "checkout_root_container_mount", "credential:codex-host", "probe_cleanup",
-    "preflight_internal", *(f"{kind}:{model}" for kind in ("route", "roundtrip") for model in MODELS),
+    "preflight_internal", *MODELS, *(f"{kind}:{model}" for kind in ("route", "roundtrip") for model in MODELS),
     "space", "mount", "credential", "route", "roundtrip", "cleanup", "tool",
     *TERMINAL_EVENTS, *RESPONSE_STATUSES, "other", *(label for _, label in ERROR_CLASSES), "unclassified",
     *(f"{provider}@{host}" for provider, host in KNOWN_ROUTES), *CREDENTIAL_SOURCES})
@@ -370,7 +370,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
         return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            terminal, detail, status = None, "流在终态事件前结束", None
+            terminal, detail, status, returned_model = None, "流在终态事件前结束", None, None
             for raw in response.read().splitlines():
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
@@ -387,16 +387,22 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                         # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
                         status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
                             None if inner.get("status") is None else "other")
+                        raw_model = inner.get("model")
+                        returned_model = raw_model if raw_model in MODELS else (
+                            None if raw_model is None else "other")
                         detail = next((value for value in (inner.get("error"), event.get("error"),
                                                             event.get("message")) if value is not None), None)
                         # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
-            # 只接受唯一 completed 终态、内层 completed、无错误及完整 HTTP 消息。
-            ok = response.status == 200 and terminal == "response.completed" and status == "completed" and detail is None
+            elif detail is None and terminal == "response.completed" and status == "completed" and returned_model != model:
+                detail = "响应模型与请求模型不符"
+            # 只接受唯一 completed 终态、内层 completed、精确响应模型匹配、无错误及完整 HTTP 消息。
+            ok = (response.status == 200 and terminal == "response.completed" and status == "completed"
+                  and returned_model == model and detail is None)
             text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail is not None else ""
-            return {"http_status": response.status, "terminal": terminal, "status": status, "ok": ok,
-                    "error": None if ok else _error_info(text)}
+            return {"http_status": response.status, "terminal": terminal, "status": status,
+                    "returned_model": returned_model, "ok": ok, "error": None if ok else _error_info(text)}
     except urllib.error.HTTPError as error:
         return {"http_status": error.code, "terminal": None, "ok": False,
                 "error": _error_info(error.read()[:65536].decode("utf-8", "replace"))}

@@ -20,7 +20,8 @@ def route_from_log(log_dir: Path, session: str, since: float, wait: float) -> li
 
 SCHEMA = "cliproxy-preflight-v1"
 SESSION = re.compile(r"preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-RECEIPT_ROUTES = frozenset({"codex@chatgpt.com", "kimi@api.kimi.com", "kimi-ai@api.kimi.ai", "claude@api.anthropic.com",
+RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astra@chatgpt.com",
+                            "kimi@api.kimi.com", "kimi-ai@api.kimi.ai", "claude@api.anthropic.com",
                             "antigravity@daily-cloudcode-pa.googleapis.com", "other"})
 
 
