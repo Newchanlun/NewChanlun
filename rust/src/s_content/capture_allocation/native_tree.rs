@@ -66,37 +66,80 @@ impl<K: Ord, V> NativeTree<K, V> {
                 "Native树操作缺当前工作域",
             ));
         }
-        if !self.tree.contains_key(key) && self.tree.len() >= self.high_water {
-            if let Some(work) = admission.codec_work() {
-                let depth = usize::BITS as usize - self.tree.len().leading_zeros() as usize + 2;
-                let bytes = std::mem::size_of::<(K, V)>()
-                    .checked_mul(11)
-                    .and_then(|n| n.checked_add(16 * std::mem::size_of::<usize>()))
-                    .and_then(|n| n.checked_mul(depth))
-                    .ok_or_else(|| {
-                        work.reject(sc::capture_allocation::scratch::ScratchFailure::Budget)
-                    })?;
-                self.permits.try_reserve_native(work, 1)?;
-                let permit = work.reserve_native(bytes)?;
-                self.permits.try_push(permit)?;
-            }
-            self.high_water = self.tree.len() + 1;
+        if self.tree.len() >= self.high_water && !self.tree.contains_key(key) {
+            self.grow_high_water(self.tree.len(), admission.codec_work())?;
         }
         Ok(())
     }
+    #[inline]
+    fn grow_high_water(
+        &mut self,
+        len: usize,
+        work: Option<&sc::capture_allocation::scratch::WorkScope>,
+    ) -> Result<(), CodecError> {
+        if let Some(work) = work {
+            let depth = usize::BITS as usize - len.leading_zeros() as usize + 2;
+            let bytes = std::mem::size_of::<(K, V)>()
+                .checked_mul(11)
+                .and_then(|n| n.checked_add(16 * std::mem::size_of::<usize>()))
+                .and_then(|n| n.checked_mul(depth))
+                .ok_or_else(|| {
+                    work.reject(sc::capture_allocation::scratch::ScratchFailure::Budget)
+                })?;
+            self.permits.try_reserve_native(work, 1)?;
+            let permit = work.reserve_native(bytes)?;
+            self.permits.try_push(permit)?;
+        }
+        self.high_water = len + 1;
+        Ok(())
+    }
+    #[inline]
     pub fn insert_reserved(&mut self, key: K, value: V) -> Option<V> {
-        assert!(self.tree.contains_key(&key) || self.tree.len() < self.high_water);
+        assert!(self.tree.len() < self.high_water || self.tree.contains_key(&key));
         self.tree.insert(key, value)
     }
+    #[inline]
     pub fn insert_admitted(
         &mut self,
         key: K,
         value: V,
         admission: &(impl sc::NodeSource + ?Sized),
     ) -> Result<Option<V>, CodecError> {
-        self.reserve_entry_admitted(&key, admission)?;
-        Ok(self.insert_reserved(key, value))
+        let work = admission.codec_work();
+        if let Some(work) = work {
+            self.permits.try_reserve_native(work, 0)?;
+        } else if self.permits.is_native_bound() {
+            return Err(CodecError::new(
+                sc::capture_allocation::INCOMPLETE,
+                "Native树操作缺当前工作域",
+            ));
+        }
+        let len = self.tree.len();
+        match self.tree.entry(key) {
+            std::collections::btree_map::Entry::Occupied(mut slot) => Ok(Some(slot.insert(value))),
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                if len >= self.high_water {
+                    if let Some(work) = work {
+                        let depth = usize::BITS as usize - len.leading_zeros() as usize + 2;
+                        let bytes = std::mem::size_of::<(K, V)>()
+                            .checked_mul(11)
+                            .and_then(|n| n.checked_add(16 * std::mem::size_of::<usize>()))
+                            .and_then(|n| n.checked_mul(depth))
+                            .ok_or_else(|| {
+                                work.reject(sc::capture_allocation::scratch::ScratchFailure::Budget)
+                            })?;
+                        self.permits.try_reserve_native(work, 1)?;
+                        let permit = work.reserve_native(bytes)?;
+                        self.permits.try_push(permit)?;
+                    }
+                    self.high_water = len + 1;
+                }
+                slot.insert(value);
+                Ok(None)
+            }
+        }
     }
+    #[inline]
     pub fn remove<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<V>
     where
         K: std::borrow::Borrow<Q>,
@@ -104,6 +147,7 @@ impl<K: Ord, V> NativeTree<K, V> {
         self.tree.remove(key)
     }
     /// 仅借出既有值；值的动态增长仍必须由其持费接口准入，不能改变树键或容量。
+    #[inline]
     pub fn get_mut<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: std::borrow::Borrow<Q>,
@@ -111,6 +155,7 @@ impl<K: Ord, V> NativeTree<K, V> {
         self.tree.get_mut(key)
     }
     /// 移出键值及其各自许可；树节点的保守高水位费仍留到 clear/drop。
+    #[inline]
     pub fn remove_entry<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<(K, V)>
     where
         K: std::borrow::Borrow<Q>,
@@ -165,6 +210,7 @@ impl<K: Ord, V> NativeTree<K, V> {
 }
 impl<K, V> std::ops::Deref for NativeTree<K, V> {
     type Target = std::collections::BTreeMap<K, V>;
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.tree
     }
@@ -216,6 +262,7 @@ impl<K: Ord> NativeSet<K> {
     {
         self.values.range(range).map(|(key, _)| key)
     }
+    #[inline]
     pub fn insert_admitted(
         &mut self,
         key: K,
@@ -225,27 +272,32 @@ impl<K: Ord> NativeSet<K> {
             .insert_admitted(key, (), admission)
             .map(|old| old.is_none())
     }
+    #[inline]
     pub fn contains<Q: Ord + ?Sized>(&self, key: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
     {
         self.values.contains_key(key)
     }
+    #[inline]
     pub fn take<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<K>
     where
         K: std::borrow::Borrow<Q>,
     {
         self.values.remove_entry(key).map(|(key, ())| key)
     }
+    #[inline]
     pub fn remove<Q: Ord + ?Sized>(&mut self, key: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
     {
         self.take(key).is_some()
     }
+    #[inline]
     pub fn clear(&mut self) {
         self.values.clear();
     }
+    #[inline]
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -253,6 +305,7 @@ impl<K: Ord> NativeSet<K> {
         not(feature = "s_incremental"),
         allow(dead_code, reason = "#1488 再合 #1608：非 s_incremental 构建不触达")
     )]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
