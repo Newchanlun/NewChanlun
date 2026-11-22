@@ -1185,3 +1185,178 @@ def test_census_r5_previews_keep_live_inputs_and_refuse_report(options, archive_
     assert result.returncode == 1, result.stderr
     assert f"{count} locally validated remediation rows; 0 released" in result.stdout
     assert (BASIS_ERROR in result.stderr) == (count == 0)
+
+
+R6_HEAD = "491e074427686376ab23d2cf36598d8cb1d4883b"
+R6_REPORTS = (
+    ("chanlun/review-results/code-review-issue550-spec-20260728.md", 7),
+    ("chanlun/review-results/shadow-668-review3-20260729.md", 12),
+    (".chanlun/diagnostics/acceptance4-4f-result.md", 3),
+)
+REVIEW_GUIDE = ".sandcastle/deepagents-pilot/EXTERNAL-REVIEW.md"
+
+
+@pytest.mark.parametrize(("source", "line"), R6_REPORTS)
+@pytest.mark.parametrize("placement", ["original", "copy", "body-only"])
+def test_r7_rejects_real_review_and_diagnostic_results(history, options, source, line, placement):
+    h = history
+    raw = git_at_r3("show", f"{R6_HEAD}:{source}")
+    if placement != "body-only":
+        h.write(source, raw)
+    h.gate()
+    path = source
+    if placement != "original":
+        path = "spec/neutral-note.dat"
+        h.write(path, raw)
+        h.commit("Copy the historical bytes under a neutral name")
+    check_basis(h, options, path, allowed=False, line=line)
+
+
+@pytest.mark.parametrize("source", [REVIEW_GUIDE, "docs/adr/0024-total-ledger-convention.md"])
+def test_r7_keeps_guides_and_decisions_that_mention_review_or_measurement(history, options, source):
+    h = history
+    h.write(source, git_at_r3("show", f"{R6_HEAD}:{source}"))
+    h.gate()
+    check_basis(h, options, source, allowed=True, line=3)
+
+
+@pytest.mark.parametrize("source", [
+    "review-results/old/material.dat",
+    "chanlun/review-results/old/material.dat",
+    "rust/.chanlun/review-results/old/material.dat",
+    ".rtas/review-results/old/material.dat",
+    "topological-computation/.chanlun/review-results/old/material.dat",
+    ".chanlun/diagnostics/old/material.dat",
+    ".chanlun/reports/old/material.dat",
+    ".chanlun/agent-roster-example.md",
+    "chanlun/agent-roster-example.md",
+    ".chanlun/codex-local-verdict-r7.md",
+    ".chanlun/codex-cli-dual-decide-result.md",
+    ".chanlun/codex-strict-fix-acceptance4-2026-06-30.md",
+    ".chanlun/at18/pregate-review.json",
+    ".chanlun/at18/pregate/unattributed-window-audit.json",
+    "analysis/reports/old/material.dat",
+    "analysis/audit_logs/old/material.dat",
+    "analysis/dual_settle_results/old/material.dat",
+    "external/k4-soros-reports/old/material.dat",
+    "STRICT-NEST-EXAMPLE-RESULT.md",
+    "STRICT-NEST-EXAMPLE-CHECK.md",
+])
+def test_r7_tracks_first_parent_origin_across_archives(history, options, source):
+    h = history
+    raw = b"No report signature in the body.\n"
+    h.write(source, raw)
+    h.gate()
+    check_basis(h, options, source, allowed=False)
+    dest = "tests/fixtures/neutral.dat"
+    h.remove(source)
+    h.write(dest, raw)
+    h.commit("Move an archive blob without proving it is a live input")
+    check_basis(h, options, dest, allowed=False)
+
+
+@pytest.mark.parametrize(("text", "allowed"), [
+    (f"# 发布批次\n\n### 判定：BLOCK\n- Commit: {RUN_HEAD}\n", False),
+    ("# 日常运行报告\n\n" + "\n" * 15 + "- **评审对象：候选分支**\n", False),
+    ("# 回执操作指南\n\n~~~text\n- 评审对象：候选分支\n- 结论：FAIL\n~~~\n", True),
+    ("# 验收合同\n\n未满足下列条件就返回 BLOCK，而不是 PASS。\n", True),
+    ("# 评审操作指南\n\n先用 `git diff` 找到待审文件。\n", True),
+    ("# 复审：第四轮\n\n## 结论：FAIL\n", False),
+    ("# 独立评审\n\n结论：FAIL\n", False),
+    ("# 评审操作指南\n\n结论：PASS 表示可合入。\n", True),
+])
+def test_r7_uses_report_preamble_not_mentions_or_fenced_examples(history, options, text, allowed):
+    h = history
+    path = "spec/material.md"
+    h.write(path, text.encode())
+    h.gate()
+    check_basis(h, options, path, allowed=allowed)
+
+
+JS_MODULES = b'const fs = require("node:fs"), path = require("node:path");\n'
+DUAL_JS_LOADER = JS_MODULES + b"""
+function readVectors() {
+  const fixturePath = path.join(__dirname, "fixtures/vectors.json");
+  return JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+}
+function readUnits() {
+  const fixturePath = path.join(__dirname, "fixtures/units.json");
+  return JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+}
+console.log(JSON.stringify({vectorKeys: Object.keys(readVectors()), units: readUnits()}));
+"""
+
+
+def migrate_fixtures(h, files, code, *, archive=ARCHIVE + "generic-bundle/inputs/", suffix=".cjs"):
+    h.gate()
+    for leaf, raw in files.items():
+        h.write(archive + leaf, raw)
+    h.commit("Fixture bytes first appear in the archive")
+    for leaf, raw in files.items():
+        (h.root / (archive + leaf)).rename(h.root.parent / leaf)
+        h.write("tests/fixtures/" + leaf, raw)
+    h.write("tests/input" + suffix, code)
+    h.commit("Migrate fixture and commit consumer in F")
+
+
+def test_r7_both_local_const_reads_are_basis_but_unread_alias_is_not(history, options):
+    h = history
+    raw = git_at_r3("show", f"{R6_HEAD}:{VECTOR}")
+    migrate_fixtures(h, {"vectors.json": raw, "units.json": b'{"unit":"ticks"}\n'}, DUAL_JS_LOADER)
+    h.write("tests/fixtures/alias.json", raw)
+    h.commit("Same blob at an unread path")
+    check_basis(h, options, "tests/fixtures/vectors.json", allowed=True, line=2)
+    check_basis(h, options, "tests/fixtures/units.json", allowed=True)
+    check_basis(h, options, "tests/fixtures/alias.json", allowed=False, line=2)
+
+
+@pytest.mark.parametrize(("code", "allowed"), [
+    ('''let fixturePath = path.join(__dirname, "fixtures", "vectors.json")
+{ const fixturePath = null; }
+fs.readFileSync(fixturePath, "utf8")''', True),
+    ('''let fixturePath = path.join(__dirname, "other.json");
+{ fixturePath = path.join(__dirname, "fixtures", "vectors.json",); }
+fs.readFileSync(fixturePath);''', True),
+    ('''let fixturePath = path.join(__dirname, "fixtures/vectors.json");
+fixturePath == other; fixturePath === other; fixturePath != other; fixturePath !== other;
+fs.readFileSync(fixturePath);''', True),
+    ('''const fixturePath = path.join(__dirname, "fixtures/vectors.json");
+{ const fixturePath = String("elsewhere"); fs.readFileSync(fixturePath); }''', False),
+    ('''const fixturePath = path.join(__dirname, "fixtures/vectors.json");
+{ fs.readFileSync(fixturePath); const fixturePath = String("elsewhere"); }''', False),
+    ('''fs.readFileSync(fixturePath);
+const fixturePath = path.join(__dirname, "fixtures/vectors.json");''', False),
+    ('''let fixturePath = path.join(__dirname, "fixtures/vectors.json");
+{ fixturePath = String("elsewhere"); }
+fs.readFileSync(fixturePath);''', False),
+    ('''let fixturePath = path.join(__dirname, "fixtures/vectors.json");
+let value = null, second = fs.readFileSync(fixturePath);
+''', True),
+    ('''let fixturePath = path.join(__dirname, "fixtures/vectors.json");
+{ let dummy = {}, fixturePath = null; fs.readFileSync(fixturePath); }''', False),
+    ('''const fixturePath = path.join(__dirname, "fixtures/vectors.json");
+{ const fs = require("./not-fs"); fs.readFileSync(fixturePath); }''', False),
+    ('''{ const path = require("./not-path"); fs.readFileSync(path.join(__dirname, "fixtures/vectors.json")); }''',
+     False),
+    ('''const fixturePath = path.join(__dirname, "fixtures/vectors.json");
+fs.readFileSync(fixturePath + ".other");''', False),
+    ('''const fixturePath: string = path.join(__dirname, "fixtures/vectors.json");
+fs.readFileSync(fixturePath);''', True),
+    ('''const fixturePath = path.join(__dirname, "fixtures/vectors.json");
+function run(fs) { fs.readFileSync(fixturePath); }''', False),
+    ('''let fixturePath = path.join(__dirname, "fixtures/vectors.json");
+fixturePath += ".other";
+fs.readFileSync(fixturePath);''', False),
+], ids=["scope-pop-asi", "rebind", "comparison", "shadow", "nested-tdz", "tdz", "invalidate",
+        "read-in-declaration", "comma-shadow", "fake-fs", "fake-path", "not-exact-argument",
+        "ts-type", "parameter-shadow", "compound-assignment"])
+def test_r7_checks_js_bindings_at_the_read_position(history, options, code, allowed):
+    h = history
+    migrate_fixtures(h, {"vectors.json": FEE_RULE.encode()}, JS_MODULES + code.encode(), suffix=".ts")
+    check_basis(h, options, "tests/fixtures/vectors.json", allowed=allowed)
+
+
+def test_r7_cannot_promote_result_archive_via_live_reader(history, options):
+    h = history
+    migrate_fixtures(h, {"vectors.json": FEE_RULE.encode()}, JS_LOADER, archive=".chanlun/diagnostics/old/")
+    check_basis(h, options, "tests/fixtures/vectors.json", allowed=False)

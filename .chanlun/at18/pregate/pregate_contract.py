@@ -22,6 +22,16 @@ OID = re.compile(r"[0-9a-f]{40}")
 REMEDIATION = ".chanlun/at18/pregate-remediation.json"
 REMEDIATION_SCHEMA = "at18-pregate-remediation/1"
 REVIEW_ARCHIVE = ".chanlun/review-results/"
+REVIEW_TREE = re.compile(r"(?:^|/)review-results/")
+RESULT_TREE = (
+    ".chanlun/diagnostics/", ".chanlun/reports/", "analysis/reports/", "analysis/audit_logs/",
+    "analysis/dual_settle_results/", "external/k4-soros-reports/",
+)
+RESULT_PATH = re.compile(
+    r"(?:\.?chanlun/agent-roster-[^/]*\.md|\.chanlun/codex-(?:[^/]*-verdict-[^/]*|"
+    r"cli-dual-decide-result|strict-fix-acceptance4-2026-06-30)\.md|"
+    r"\.chanlun/at18/(?:pregate-review|pregate/unattributed-window-audit)\.json|STRICT-NEST-[^/]*(?:-RESULT|CHECK)\.md)"
+)
 INPUT_MANIFEST = "INPUT-MANIFEST.json"
 OUTPUT_TOKEN = re.compile(
     r"(?:^|[^a-z0-9])(?:reviews?|reports?|results?|receipts?|audits?|verify|verification|"
@@ -95,14 +105,31 @@ RECEIPT_VERDICT = re.compile(
 RUN_EXIT_CODE = re.compile(r"(?mi)^(?:[-*] )?(?:Exit code|退出码)[:：][ \t]*[0-9]+[ \t]*\r?$")
 RUN_RESULT = re.compile(r"(?mi)^(?:[-*] )?(?:Run result|运行结果)[:：][ \t]*(?:PASS|FAIL)[ \t]*\r?$")
 
-REPORT_HEADING = re.compile(r"^#{1,6}[ \t]+[^\r\n]*(?:验收|复核|复验|评审|报告)")
-REPORT_OUTCOME = re.compile(
-    r"(?mi)^(?:[-*][ \t]+)?(?:\*\*)?(?:结果|结论|判定)[:：][ \t]*(?:\*\*)?"
-    r"(?:PASS|FAIL|BLOCK|REJECT|CHANGES_REQUIRED)(?=$|[ \t*。，、；,;.!\r])"
+REPORT_TITLE = re.compile(
+    r"(?P<report>评审|复审|复核|复验|独审|独评|初审|[二三四五]审|真修|诊断|报告|结果|回执|审查|审计|汇报"
+    r"|\b(?:review|report|result|receipt|audit|diagnostic|verdict)\b)|验收|判定|结论", re.I
 )
-REPORT_EXECUTION = re.compile(
-    rf"(?:固定|受审|候选|冻结)提交[ \t：:]+`?{GIT_SHA}\b|(?:运行器)?进程退出(?:码)?[ \t：:]+[0-9]+\b"
+REPORT_FIELD = re.compile(
+    r"^\s*(?:#{1,6}\s+|(?:[-*+]|[0-9]+\.)\s+)?(?:\*\*)?"
+    r"(?P<key>[\w /-]+?)(?:\*\*)?\s*[:：]\s*(?:\*\*)?(?P<value>\S.*)$"
 )
+DISPOSITION = re.compile(
+    r"^(?:PASS(?:ED)?|FAIL(?:ED)?|BLOCK(?:ED)?|REJECT(?:ED)?|PWC|CHANGES_REQUIRED|"
+    r"通过|不通过|未通过|拒绝|退回|阻断)(?=$|[\s*（(。，、；,;.！!/_-])", re.I
+)
+MEASUREMENT = re.compile(
+    r"\bbit[- ]exact\b|\b\d+\s+(?:pass(?:ed)?|fail(?:ed)?|skip(?:ped)?)\b|"
+    r"(?:进程退出|退出码|实测退出码)[：:\s]*-?\d+\b", re.I
+)
+REPORT_SUBJECT = re.compile(
+    rf"(?:固定|受审|候选|冻结|主线)提交[ \t：:]+`?{GIT_SHA}\b|"
+    r"\bgit diff[ \t]+`?[0-9a-f]{7,40}\b|(?:尖端(?: SHA)?|SHA|commit)[ \t：:]+`?[0-9a-f]{7,40}\b", re.I
+)
+OUTCOME_FIELDS = {"结论", "结果", "判定", "运行结果", "验收结果", "评审结论", "verdict", "result", "run result"}
+EXECUTION_FIELDS = {
+    "评审对象", "评审面", "评审器", "评审者", "审查对象", "实测退出码", "退出码",
+    "reviewed head", "reviewer", "review target", "exit code",
+}
 
 
 class Entry(NamedTuple):
@@ -210,9 +237,13 @@ def classify_review(rows, final_tree):
     return result
 
 
+def is_result_archive_path(path):
+    return path.startswith(RESULT_TREE) or RESULT_PATH.fullmatch(path) is not None
+
+
 def is_artifact_archive_path(path):
     if not path.startswith(REVIEW_ARCHIVE):
-        return False
+        return REVIEW_TREE.search(path) is not None or is_result_archive_path(path)
     parts = path.removeprefix(REVIEW_ARCHIVE).split("/", 3)
     if len(parts) != 4:
         return True
@@ -236,7 +267,8 @@ def frozen_copies(raw):
 
 
 def is_archive_output(path):
-    relative = path.removeprefix(REVIEW_ARCHIVE)
+    review = REVIEW_TREE.search(path)
+    relative = path[review.end():] if review else path
     return (relative.rsplit("/", 1)[-1].lower() == INPUT_MANIFEST.lower()
             or OUTPUT_TOKEN.search(relative.lower()) is not None)
 
@@ -251,18 +283,20 @@ COMMON_TOKENS = (
 )
 RUST_TOKENS = re.compile(r'(?:br|r)(?P<hashes>\#*)"(?s:.*?)"(?P=hashes)|\'(?:\\.|[^\'\\\r\n])\'|'
                          + COMMON_TOKENS)
+JS_ASSIGNMENTS = r"\*\*=|<<=|>>>=|>>=|&&=|\|\|=|\?\?=|[+*/%&|^\-]="
+JS_OPERATORS = r"===|!==|==|!=|=>|\+\+|--|" + JS_ASSIGNMENTS
 JS_TOKENS = re.compile(
     r'(?P<single>\'(?:\\[^\r\n]|[^\'\\\r\n])*\')|`(?:\\[\s\S]|[^`\\])*`'
     r'|/(?![/*])(?:\\[^\r\n]|\[(?:\\.|[^\]\\\r\n])*\]|[^/\\[\r\n])+/[dgimsuvy]*|'
-    + COMMON_TOKENS
+    + JS_OPERATORS + "|" + COMMON_TOKENS
 )
 
 
 def source_tokens(text, *, rust):
     """去掉注释，把字符串/模板/正则作为不可拆分的词元。"""
     scan = RUST_TOKENS if rust else JS_TOKENS
-    literals, tokens = {}, []
-    end = 0
+    literals, tokens, linebreaks = {}, [], set()
+    end = tail = 0
     while match := scan.search(text, end):
         token = match[0]
         end = match.end()
@@ -278,14 +312,149 @@ def source_tokens(text, *, rust):
                 else:
                     break
             continue
+        if not rust and ("\n" in text[tail:match.start()] or "\r" in text[tail:match.start()]):
+            linebreaks.add(len(tokens))
+        tail = end
         if match["string"] or (not rust and match["single"]):
             # 不解码转义：只承认可逐字对到仓库相对路径的字符串。
             key = f"@{len(literals)}"
             literals[key] = token[1:-1]
             tokens.append(key)
         else:
-            tokens.append(token if re.fullmatch(r"[\w$]+|[.:=(),;!{}]", token) else "~")
-    return " ".join(tokens), literals
+            tokens.append(token if re.fullmatch(
+                r"[\w$]+|[.:=(),;!{}\[\]*]|" + JS_OPERATORS, token
+            ) else "~")
+    return tokens, literals, linebreaks
+
+
+JS_NAME = re.compile(r"[A-Za-z_$][\w$]*")
+JS_MUTATION = re.compile(r"\+\+|--|" + JS_ASSIGNMENTS)
+
+
+def js_scope_declarations(tokens, linebreaks):
+    """先登记块里的声明名，让内层 TDZ 也能遮蔽外层值。"""
+    closes, openers = {}, []
+    pairs = {")": "(", "}": "{", "]": "["}
+    for i, token in enumerate(tokens):
+        if token in {"(", "{", "["}:
+            openers.append(i)
+        elif token in pairs and openers and tokens[openers[-1]] == pairs[token]:
+            closes[openers.pop()] = i
+
+    names, declarations, blocks = defaultdict(set), {}, [-1]
+    for i, token in enumerate(tokens):
+        if token == "{":
+            blocks.append(i)
+        elif token == "}" and len(blocks) > 1:
+            blocks.pop()
+        elif token == "function":
+            # 普通函数参数也会遮蔽模块名、__dirname 或外层路径。
+            start = i + 1
+            if tokens[start:start + 1] == ["*"]:
+                start += 1
+            if start < len(tokens) and JS_NAME.fullmatch(tokens[start]):
+                start += 1
+            end = closes.get(start)
+            if end is not None and tokens[end + 1:end + 2] == ["{"]:
+                j = start + 1
+                while j < end:
+                    if JS_NAME.fullmatch(tokens[j]):
+                        names[end + 1].add(tokens[j])
+                    while j < end and tokens[j] != ",":
+                        j = closes.get(j, j) + 1
+                    j += 1
+        elif token in {"const", "let", "var"} and (not i or tokens[i - 1] != "."):
+            j = i + 1
+            while j < len(tokens) and JS_NAME.fullmatch(tokens[j]):
+                names[blocks[-1]].add(tokens[j])
+                name = j
+                j += 1
+                if (tokens[j:j + 1] == [":"] and j + 1 < len(tokens)
+                        and JS_NAME.fullmatch(tokens[j + 1])):
+                    j += 2  # 简单 TS 类型标注，如 const fixturePath: string。
+                declarations[name] = j
+                # 跳过初值里的参数/对象，不把内部逗号当成下一个声明。
+                while (j < len(tokens) and tokens[j] not in {",", ";", ")", "}"}
+                       and not (j in linebreaks and JS_NAME.fullmatch(tokens[j])
+                                and (JS_NAME.fullmatch(tokens[j - 1]) or tokens[j - 1].startswith("@")
+                                     or tokens[j - 1] in {")", "]", "}"}))):
+                    j = closes.get(j, j) + 1
+                if j == len(tokens) or tokens[j] != ",":
+                    break
+                j += 1
+    return names, declarations
+
+
+def js_relative_reads(tokens, literals, linebreaks):
+    """只取源码位置上能绑定到内建模块与字面量的 CommonJS 读取。"""
+    names, declarations = js_scope_declarations(tokens, linebreaks)
+    scopes = [dict.fromkeys(names[-1])]
+
+    def environment(name):
+        return next((scope for scope in reversed(scopes) if name in scope), None)
+
+    def value(name):
+        scope = environment(name)
+        return scope[name] if scope is not None else None
+
+    def joined(start):
+        if (start + 5 >= len(tokens) or value(tokens[start]) != ("module", "path")
+                or tokens[start + 1:start + 5] != [".", "join", "(", "__dirname"]
+                or environment("__dirname") is not None):
+            return None
+        j, parts = start + 5, []
+        while tokens[j:j + 1] == [","]:
+            j += 1
+            if tokens[j:j + 1] == [")"]:
+                break
+            if j == len(tokens) or tokens[j] not in literals:
+                return None
+            parts.append(literals[tokens[j]])
+            j += 1
+        if parts and not any(part.startswith("/") for part in parts) and tokens[j:j + 1] == [")"]:
+            return "/".join(part for part in parts if part), j + 1
+        return None
+
+    def complete(end):
+        return (end == len(tokens) or tokens[end] in {";", ",", ")", "}", "]"}
+                or (end in linebreaks and (tokens[end] == "{" or JS_NAME.fullmatch(tokens[end]))
+                    and tokens[end] not in {"in", "instanceof", "as", "satisfies"}))
+
+    for i, token in enumerate(tokens):
+        if token == "{":
+            scopes.append(dict.fromkeys(names[i]))
+        elif token == "}" and len(scopes) > 1:
+            scopes.pop()
+        elif JS_NAME.fullmatch(token) and (not i or tokens[i - 1] != "."):
+            operator = declarations.get(i, i + 1)
+            if tokens[operator:operator + 1] == ["="]:
+                scope = scopes[-1] if i in declarations else environment(token)
+                if scope is None:
+                    continue
+                start = operator + 1
+                binding = None
+                if (i in declarations and tokens[start:start + 2] == ["require", "("]
+                        and tokens[start + 3:start + 4] == [")"] and complete(start + 4)
+                        and environment("require") is None):
+                    module = literals.get(tokens[start + 2], "")
+                    if module in {"fs", "path", "node:fs", "node:path"}:
+                        binding = ("module", module.removeprefix("node:"))
+                elif (path := joined(start)) is not None and complete(path[1]):
+                    binding = ("path", path[0])
+                scope[token] = binding
+            elif (operator < len(tokens) and JS_MUTATION.fullmatch(tokens[operator])
+                  or i and tokens[i - 1] in {"++", "--"}):
+                if (scope := environment(token)) is not None:
+                    scope[token] = None
+            elif value(token) == ("module", "fs") and tokens[i + 1:i + 4] == [".", "readFileSync", "("]:
+                start = i + 4
+                if start == len(tokens):
+                    continue
+                argument = value(tokens[start])
+                if argument is not None and argument[0] == "path" and tokens[start + 1:start + 2] in ([","], [")"]):
+                    yield argument[1]
+                elif (path := joined(start)) is not None and tokens[path[1]:path[1] + 1] in ([","], [")"]):
+                    yield path[0]
 
 
 def source_relative_reads(text, suffix):
@@ -317,26 +486,13 @@ def source_relative_reads(text, suffix):
         return
 
     rust = suffix == ".rs"
-    tokens, literals = source_tokens(text, rust=rust)
+    tokens, literals, linebreaks = source_tokens(text, rust=rust)
     if rust:
-        for read in re.finditer(r"(?<!\S)include_(?:str|bytes) ! \( (@[0-9]+)(?: ,)? \)", tokens):
+        for read in re.finditer(r"(?<!\S)include_(?:str|bytes) ! \( (@[0-9]+)(?: ,)? \)", " ".join(tokens)):
             yield literals[read[1]]
         return
 
-    # Node CommonJS: 先核两个内建模块，再核 readFileSync 的直接实参或 const 路径绑定。
-    modules = defaultdict(set)
-    for binding in re.finditer(r"(?:^| )(?:const|,) ([\w$]+) = require \( (@[0-9]+) \)", tokens):
-        modules[literals[binding[2]]].add(binding[1])
-    for fs in modules["node:fs"] | modules["fs"]:
-        for path in modules["node:path"] | modules["path"]:
-            joined = rf"{re.escape(path)} \. join \( __dirname , (@[0-9]+)(?: ,)? \)"
-            load = rf"(?<!\S)(?<!\. ){re.escape(fs)} \. readFileSync \( "
-            for read in re.finditer(load + joined + r"(?= [,)])", tokens):
-                yield literals[read[1]]
-            variables = {m[1]: m[2] for m in re.finditer(rf"(?<!\S)const ([\w$]+) = {joined} ;", tokens)}
-            for read in re.finditer(load + r"([\w$]+)(?= [,)])", tokens):
-                if read[1] in variables:
-                    yield literals[variables[read[1]]]
+    yield from js_relative_reads(tokens, literals, linebreaks)
 
 
 def loaded_archive_inputs(final_tree, head, candidates, forbidden, *, cwd):
@@ -359,7 +515,8 @@ def loaded_archive_inputs(final_tree, head, candidates, forbidden, *, cwd):
         path = record.split(b":", 1)[1].decode("utf-8")
         entry = final_tree.get(path)
         if (entry is None or entry.kind != "blob" or entry.mode not in REGULAR_MODES
-                or path.startswith(REVIEW_ARCHIVE) or entry.blob in forbidden):
+                or REVIEW_TREE.search(path) or is_result_archive_path(path)
+                or entry.blob in forbidden):
             continue
         # 读取 F 中的已跟踪普通文件，不查看工作树或执行被检查的代码。
         try:
@@ -381,39 +538,42 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
     raw = git("log", "--root", "--first-parent", "--diff-merges=first-parent",
               "--no-renames", "--no-abbrev", "--raw", "-z", "--format=%x00%H",
               "--diff-filter=AMT", "--reverse", head, cwd=cwd)
+    fields = raw.split(b"\0")
+    fields.pop()
+    del raw
+
+    def additions():
+        records = iter(fields)
+        for metadata in records:
+            if not metadata:
+                commit = next(records)
+                continue
+            path = next(records)
+            _, mode, _, blob, _ = metadata.split()
+            if mode in REGULAR_RAW_MODES:
+                yield commit, path, blob
+
     archive_paths = defaultdict(set)
     for path, entry in final_tree.items():
         if entry.kind == "blob" and entry.mode in REGULAR_MODES and is_artifact_archive_path(path):
             archive_paths[entry.blob.encode()].add(path)
     manifests = set()
     # 先限定候选；不为从未在受禁归档出现的 blob 建历史索引。
-    marker = b"\0" + REVIEW_ARCHIVE.encode()
-    end = 0
-    while (start := raw.find(marker, end)) != -1:
-        end = raw.index(b"\0", start + 1)
-        path = raw[start + 1:end]
-        metadata = raw[raw.rindex(b"\0", 0, start) + 1:start]
-        _, mode, _, blob, _ = metadata.split()
-        if mode in REGULAR_RAW_MODES:
-            text_path = path.decode("utf-8", errors="surrogateescape")
-            relative = text_path.removeprefix(REVIEW_ARCHIVE)
-            if relative.endswith("/" + INPUT_MANIFEST):
-                manifests.add(text_path)
-            if is_artifact_archive_path(text_path):
-                archive_paths[blob].add(text_path)
+    for _, path, blob in additions():
+        text_path = path.decode("utf-8", errors="surrogateescape")
+        review = REVIEW_TREE.search(text_path)
+        # 归档根自身的清单从来不是某个包的输入声明。
+        if review and text_path[review.end():].endswith("/" + INPUT_MANIFEST):
+            manifests.add(text_path)
+        if is_artifact_archive_path(text_path):
+            archive_paths[blob].add(text_path)
     archive_paths.pop(EMPTY_BLOB.encode(), None)
     if not archive_paths:
         return ArchivedArtifacts(set(), set())
 
     origins = {}
-    records = iter(raw.split(b"\0")[:-1])
-    for metadata in records:
-        if not metadata:
-            commit = next(records)
-            continue
-        path = next(records)
-        _, mode, _, blob, _ = metadata.split()
-        if blob in archive_paths and mode in REGULAR_RAW_MODES:
+    for commit, path, blob in additions():
+        if blob in archive_paths:
             first, paths = origins.setdefault(blob, (commit, []))
             if first == commit:
                 paths.append(path.decode("utf-8", errors="surrogateescape"))
@@ -446,7 +606,7 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
 
     def frozen_source_matches(source, blob, commit):
         path, separator, ref = source.strip().partition(" @ ")
-        if not valid_path(path) or path.startswith(REVIEW_ARCHIVE) or path == REMEDIATION:
+        if not valid_path(path) or REVIEW_TREE.search(path) or is_result_archive_path(path) or path == REMEDIATION:
             return False
         if separator:
             # 可钉住该提交的祖先对象，不能跟随可变引用或仓外路径。
@@ -463,7 +623,7 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
         return entry is not None and entry.kind == "blob" and entry.mode in REGULAR_MODES and entry.blob == blob
 
     def declared_copy(path, blob, commit):
-        return (path.startswith(manifest_dirs) and not is_archive_output(path)
+        return (REVIEW_TREE.search(path) and path.startswith(manifest_dirs) and not is_archive_output(path)
                 and any(frozen_source_matches(source, blob, commit)
                         for source in declared_inputs(commit).get(path, ())))
 
@@ -484,13 +644,14 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
             continue
         forbidden.add(blob)
         # 同期的中性别名不是起源证明；只有归档中的所有旧路径已经迁出才考虑夹具。
-        if (all(path.startswith(REVIEW_ARCHIVE) for path in paths)
-                and all(path not in final_tree and not is_archive_output(path) for path in history)):
+        if (all(REVIEW_TREE.search(path) for path in paths)
+                and all(REVIEW_TREE.search(path) and path not in final_tree and not is_archive_output(path)
+                        for path in history)):
             migrated.add(blob)
     candidates = {
         path: entry.blob for path, entry in final_tree.items()
         if entry.kind == "blob" and entry.mode in REGULAR_MODES and entry.blob in migrated
-        and not path.startswith(REVIEW_ARCHIVE)
+        and not REVIEW_TREE.search(path) and not is_result_archive_path(path)
     }
     return ArchivedArtifacts(forbidden, loaded_archive_inputs(final_tree, head, candidates, forbidden, cwd=cwd))
 
@@ -570,13 +731,41 @@ def is_report_artifact(raw, text):
     # #1391 renderSummary 与 TB 报告核对正文中的绑定字段，不用标题或文件名代替。
     if any(pattern.match(content) for pattern in (SUMMARY_HEADER, TB_RUN_HEADER, TB_REVIEW_HEADER)):
         return True
-    preamble = "\n".join(content.split("\n", 12)[:12])
+    preamble = "\n".join(content.split("\n", 25)[:25])
     metadata = re.split(r"(?m)^[ \t]*(?:```|~~~)", preamble, maxsplit=1)[0]
-    if REPORT_HEADING.match(metadata) and REPORT_OUTCOME.search(metadata) and REPORT_EXECUTION.search(metadata):
+    if RECEIPT_COMMIT.search(metadata) and (RECEIPT_VERDICT.search(metadata)
+                                          or (RUN_EXIT_CODE.search(metadata) and RUN_RESULT.search(metadata))):
         return True
-    return bool(RECEIPT_COMMIT.search(metadata)
-                and (RECEIPT_VERDICT.search(metadata)
-                     or (RUN_EXIT_CODE.search(metadata) and RUN_RESULT.search(metadata))))
+    lines = metadata.splitlines()
+    if not lines:
+        return False
+    title = re.match(r"^#{1,6}[ \t]+(.+)", lines[0])
+    first_field = REPORT_FIELD.match(lines[0])
+    title_is_field = first_field and first_field["key"].lower() in OUTCOME_FIELDS | EXECUTION_FIELDS
+    titles = list(REPORT_TITLE.finditer(title[1])) if title and not title_is_field else []
+    execution = RECEIPT_COMMIT.search(metadata) is not None
+    disposition = explicit_outcome = standalone_status = False
+    for line in lines[1 if title and not title_is_field else 0:]:
+        if (field := REPORT_FIELD.match(line)) is None:
+            continue
+        key, value = field["key"].lower(), field["value"].strip("`* \t")
+        # 执行信息要落在实际字段中：正文提到 bit-exact 或 git diff 不算执行记录。
+        if key in EXECUTION_FIELDS or REPORT_SUBJECT.search(value):
+            execution = True
+        if key not in OUTCOME_FIELDS:
+            continue
+        status = DISPOSITION.match(value)
+        measured = MEASUREMENT.search(value) is not None
+        execution |= measured
+        if status or measured:
+            disposition = True
+            explicit_outcome |= bool(re.match(r"\s*(?:#|[-*+]|[0-9]+\.)", line))
+        if status and not value[status.end():].strip("*。.!！ \t"):
+            standalone_status = True
+    # 单独的裁定值需有明确报告标题；仅称「验收」的正文仍需结构化裁定或执行记录。
+    return bool((titles and (execution or explicit_outcome
+                             or (standalone_status and any(m.lastgroup for m in titles))))
+                or (disposition and execution))
 
 
 def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):
