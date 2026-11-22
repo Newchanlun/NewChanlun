@@ -1463,6 +1463,140 @@ __all__ = ('dispatch', 'Adapter')
   await check("reload 后的旧持有引用不能冒充当前公开对象", closure, dispatch, reloaded("old"), false);
 });
 
+test("R20/#1319：透传只认本次调用实际执行的本地实现", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const production = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const wire = "from . import at18_fixture_feed as f\n";
+  const dispatch = wire + "def dispatch(events): return f.route(events)\n";
+  const direct = (body: string) =>
+    "import asyncio, importlib\nfrom trading_system import at18_fixture_feed as f\nfrom trading_system import dispatch\n" +
+    "async def take(gen): return await anext(gen)\ndef test_route():\n" + body.split("\n").map(line => "    " + line + "\n").join("");
+  const check = async (name: string, impl: string, integration: string, registered: string, expected: boolean) => {
+    await t.test(name, () => {
+      const repo = feedSource({ [entry]: impl, [production]: integration, [path]: registered,
+        "trading_system/support.py": "def foreign(events): return list(events)\ndef clean(v): return v * 2\n" });
+      assert.equal(pythonReplacement(repo, G0, entry, production, path, "test_route", 1), expected);
+    });
+  };
+  const plain = "def route(events): return list(events)\n";
+  const basic = direct("assert f.route([13, 21]) == [13, 21]");
+  for (const [name, carrier] of [
+    ["partial", "relay = partial(fn)\n    return lambda *a, **kw: relay(*a, **kw)"],
+    ["自定义对象", "relay = _Carrier(fn)\n    return lambda events: relay(events)"],
+    ["字典", "relay = {'call': fn}\n    return lambda events: relay['call'](events)"],
+  ] as const) {
+    const preamble = `from functools import partial
+from .support import foreign
+class _Carrier:
+    def __init__(self, callback): self.callback = callback
+    def __call__(self, events): return self.callback(events)
+def _wrap(fn):
+    ${carrier}
+__all__ = ('route',)
+`;
+    await check(name + "：本地非空实现", preamble + plain + "route = _wrap(route)\n", dispatch, basic, true);
+    await check(name + "：本地空桩", preamble + "def route(events): pass\nroute = _wrap(route)\n",
+      dispatch, direct("assert dispatch([13, 21]) is None"), false);
+    await check(name + "：外来实现", preamble + "route = _wrap(foreign)\n", dispatch, basic, false);
+  }
+  await check("本地绑定方法可执行其接收者上的内建转换", `class _Adapter:
+    def __init__(self, convert): self.convert = convert
+    def read(self, events): return self.convert(events)
+route = _Adapter(list).read
+`, dispatch, basic, true);
+  const defaultBridge = "def _forward(events, fn=backend): return fn(events)\nroute = _forward\n";
+  await check("默认可调用参数透传到本地实现", plain + "backend = route\n" + defaultBridge, dispatch, basic, true);
+  await check("默认可调用参数透传到外来实现", "from .support import foreign as backend\n" + defaultBridge,
+    dispatch, basic, false);
+  await check("闭包执行本地计算而非透传", `from .support import clean
+def _make(transform):
+    def route(events): return [transform(v) for v in events if v > 0]
+    return route
+route = _make(clean)
+`, dispatch, direct("assert f.route([-1, 13, 21]) == [26, 42]"), true);
+  const warm = "if 'route' in globals(): cache = route([13, 21])\n" + plain;
+  await check("reload 只预热", warm, dispatch, direct("importlib.reload(f)\nassert f.cache == [13, 21]"), false);
+  await check("reload 后显式进入新绑定", warm, dispatch,
+    direct("importlib.reload(f)\nassert f.route([13, 21]) == [13, 21]"), true);
+
+  for (const [name, constructor] of [
+    ["__init__", "def __init__(self, events): self.cache = route(events)"],
+    ["__new__", "def __new__(cls, events):\n        self = super().__new__(cls)\n        self.cache = route(events)\n        return self"],
+  ] as const) {
+    await check("生产公开调用内的承接侧 " + name + " 仍是初始化", plain +
+      `class Cache:\n    ${constructor}\n__all__ = ('route',)\n`,
+      wire + "def dispatch(events): return f.Cache(events).cache\n",
+      direct("assert dispatch([13, 21]) == [13, 21]"), false);
+  }
+
+  const layers = `def _wrap(fn):
+    def relay(*args, **kwargs): return fn(*args, **kwargs)
+    return relay
+`;
+  const strictDispatch = wire + "def dispatch(events):\n    if events == [13, 21]: return f.route(events)\n";
+  for (const [kind, slot, receiver, call] of [
+    ["实例", "", "self, ", "Adapter().read"],
+    ["类", "    @classmethod\n", "cls, ", "Adapter.read"],
+    ["静态", "    @staticmethod\n", "", "Adapter.read"],
+  ] as const) {
+    const impl = layers + `class Adapter:
+${slot}    @_wrap
+    @_wrap
+    def read(${receiver}events): return list(events)
+`;
+    const wired = strictDispatch.replace("f.route(events)", `f.${call}(events)`);
+    for (const arg of ["[13, 21]", "events=[13, 21]"]) {
+      await check(kind + "两层透传采样：" + arg, impl, wired,
+        direct(`assert f.${call}(${arg}) == [13, 21]`), true);
+    }
+  }
+  await check("中间包装器的具名样本在叶更名时仍可复用", layers + `def _make(leaf):
+    def named(events): return leaf(events)
+    return _wrap(named)
+def _leaf(batch): return list(batch)
+route = _make(_leaf)
+`, strictDispatch, basic, true);
+  for (const [kind, impl, consume] of [
+    ["协程", "async def route(events): return list(events)\n", "asyncio.run(CALL)"],
+    ["生成器", "def route(events): yield list(events)\n", "next(CALL)"],
+    ["异步生成器", "async def route(events): yield list(events)\n", "asyncio.run(take(CALL))"],
+  ] as const) {
+    const replacement = layers + "@_wrap\n" + impl;
+    await check(kind + "：消费返回值时进入本地叶", replacement, strictDispatch,
+      direct("assert " + consume.replace("CALL", "f.route([13, 21])") + " == [13, 21]"), true);
+    await check(kind + "：只取得返回值不计覆盖", replacement, strictDispatch,
+      direct("assert f.route([13, 21]) is not None"), false);
+  }
+  const asyncImpl = `import asyncio
+async def _leaf(events): return list(events)
+def _wrap(fn):
+    async def relay(*a, **kw):
+        task = asyncio.create_task(fn(*a, **kw))
+        ACTION
+    return relay
+route = _wrap(_leaf)
+`;
+  const asyncWired = wire + "async def dispatch(events): return await f.route(events)\n";
+  await check("包装器等待新任务的本地叶", asyncImpl.replace("ACTION", "return await task"), asyncWired,
+    direct("assert asyncio.run(dispatch([13, 21])) == [13, 21]"), true);
+  await check("调用者显式等待包装器返回的那一个任务",
+    asyncImpl.replace("async def relay", "def relay").replace("ACTION", "return task"), asyncWired,
+    direct("assert asyncio.run(dispatch([13, 21])) == [13, 21]"), true);
+  await check("未等待的任务即使跑完也不能证明本地叶",
+    asyncImpl.replace("ACTION", "await asyncio.sleep(0)\n        return list(a[0])"), asyncWired,
+    direct("assert asyncio.run(dispatch([13, 21])) == [13, 21]"), false);
+  await check("独立探针必须实际触达本地叶", `from .support import foreign
+def _choose():
+    def local(events): return list(events)
+    def relay(*a, **kw):
+        backend = local if len(a[0]) == 2 else foreign
+        return backend(*a, **kw)
+    return relay
+route = _choose()
+`, dispatch.replace("f.route(events)", "f.route([13])"), basic, false);
+});
+
 test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
   const f = makeFixture({ feedIntegration: `from .at18_fixture_feed import route
 def select_feed(sources, events):
