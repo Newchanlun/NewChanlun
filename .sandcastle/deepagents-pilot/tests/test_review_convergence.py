@@ -255,13 +255,19 @@ def test_parse_severity_rejects_invalid_values(raw: object) -> None:
 
 
 def test_fingerprint_normalizes_path_whitespace_and_case() -> None:
-    fp1 = fingerprint("./pilot1742\\sub//a.py", "Race  Condition", "Concurrent   Write loses update")
-    fp2 = fingerprint("pilot1742/sub/a.py", "race condition", "concurrent write loses update")
-    fp3 = fingerprint("pilot1742/sub/b.py", "race condition", "concurrent write loses update")
+    fp1 = fingerprint(
+        "./pilot1742\\sub//a.py",
+        "  Race  Condition ",
+        "\r\nConcurrent Write loses update\r\n",
+    )
+    fp2 = fingerprint("pilot1742/sub/a.py", "Race Condition", "Concurrent Write loses update")
+    fp3 = fingerprint("pilot1742/sub/b.py", "Race Condition", "Concurrent Write loses update")
+    fp_case = fingerprint("pilot1742/sub/a.py", "race condition", "Concurrent Write loses update")
     assert fp1 == fp2
     assert len(fp1) == 16
     assert all(c in "0123456789abcdef" for c in fp1)
     assert fp1 != fp3
+    assert fp1 != fp_case
 
 
 def test_parse_finder_output_strict_validation() -> None:
@@ -331,8 +337,8 @@ def test_merge_and_dedupe_prefers_stricter_severity_and_richer_details() -> None
         severity=Severity.IMPORTANT,
         file="pilot1742/x.py",
         line=18,
-        category="error  handling",
-        failure_scenario="swallows   ioerror silently",
+        category="Error  Handling",
+        failure_scenario="Swallows IOError silently\r\n",
         evidence="第 18-24 行捕获 OSError 后返回空字典，导致状态丢失",
         class_scope="pilot1742 下其余 2 个持久化读取函数存在同类问题",
         source_models=("gpt-6-astra",),
@@ -388,18 +394,18 @@ def test_merge_and_dedupe_is_completely_order_invariant_across_all_permutations(
         severity=Severity.NIT,
         file="./pilot1742/order.py",
         line=9,
-        category="race condition",
-        failure_scenario="shared cache mutated without lock",
+        category="  Race  Condition ",
+        failure_scenario="Shared cache mutated without lock\r\n",
         evidence="第 9 行直接修改共享字典导致并发竞态丢更新",
         class_scope=None,
         source_models=("gpt-6.1-sol",),
     )
     f_nit_20 = _finding(
         severity=Severity.NIT,
-        file="pilot1742/order.py",
+        file="pilot1742//order.py",
         line=20,
-        category="RACE CONDITION",
-        failure_scenario="SHARED CACHE MUTATED WITHOUT LOCK",
+        category="Race   Condition",
+        failure_scenario="\nShared cache mutated without lock\n",
         evidence="第 20 行同样访问",
         class_scope="pilot1742 缓存模块共 3 处无锁修改",
         source_models=("kimi-k3.1-pro",),
@@ -1596,11 +1602,11 @@ def test_bind_author_replies_rejects_ambiguous_and_supports_multi_reply_comment(
     assert bound_ambig == {}
 
     # 2) 短 ID 前缀命中超过 1 个发现 -> 歧义，拒绝绑定到任何发现（确定性 6 位前缀碰撞对）
-    f_col_1 = _finding(file="pilot1742/c.py", line=10, category="cat", failure_scenario="scen-5391")
-    f_col_2 = _finding(file="pilot1742/c.py", line=20, category="cat", failure_scenario="scen-7019")
-    assert f_col_1.finding_id[:6] == f_col_2.finding_id[:6] == "70c8f5"
+    f_col_1 = _finding(file="pilot1742/c.py", line=10, category="cat", failure_scenario="scen-6730")
+    f_col_2 = _finding(file="pilot1742/c.py", line=20, category="cat", failure_scenario="scen-12471")
+    assert f_col_1.finding_id[:6] == f_col_2.finding_id[:6] == "e72ae7"
     assert f_col_1.finding_id != f_col_2.finding_id
-    ambig_prefix_reply = AuthorReply("70c8f5", None, None, "短前缀歧义", "201", "alice")
+    ambig_prefix_reply = AuthorReply("e72ae7", None, None, "短前缀歧义", "201", "alice")
     assert bind_author_replies([f_col_1, f_col_2], [ambig_prefix_reply]) == {}
 
     # 3) 同一评论含多条分别唯一指向不同发现的回复 -> 各自成功绑定；且支持 consumed_comment_ids 过滤
@@ -6228,9 +6234,9 @@ def test_r13_important2_reject_non_canonical_reply_keys_like_commnet_typo() -> N
 
 def test_r13_important3_loc_key_cannot_masquerade_as_resolved_proof_in_history_chain() -> None:
     """R12 Important 3：按结构化键类型判断 resolved 凭证，禁止 comment:<cid>:loc:resolved:<fp> 伪装 resolved。"""
-    f_numeric_fp = _finding(category="1777")
+    f_numeric_fp = _finding(category="2944")
     fp = f_numeric_fp.finding_id
-    assert fp == "1099444305205076"
+    assert fp == "5435290667808544"
 
     e1 = RoundHistoryEntry(
         1,
@@ -8421,7 +8427,7 @@ def test_r19_single_line_preserves_inline_code_span_whitespace_in_compact_mode()
 
 
 def test_r20_important1_fingerprint_preserves_code_case_and_whitespace() -> None:
-    """R20 Important 1：指纹归一化保留行内代码与代码块大小写及内部水平空格，仅对普通叙述折叠空白并转小写。"""
+    """R20 Important 1（R24 无损契约）：指纹归一化无损保留大小写、空格与代码块结构，仅规范路径、类别多余空白、换行与首尾空行。"""
     # 1. Codex R18 最小复现：GET `/A` returns 500 (line 10) 与 GET `/a` returns 500 (line 42) 不得误合并
     f_upper = _finding(
         severity=Severity.IMPORTANT,
@@ -8445,23 +8451,24 @@ def test_r20_important1_fingerprint_preserves_code_case_and_whitespace() -> None
     assert {item.line for item in merged_distinct} == {10, 42}
     assert {item.failure_scenario for item in merged_distinct} == {"GET `/A` returns 500", "GET `/a` returns 500"}
 
-    # 2. 叙述文本大小写与多空白仍正常去重
-    f_upper_prose_variant = _finding(
+    # 2. 同语义变体（./路径、类别首尾空白、CRLF 与首尾空行）仍正常去重；大小写差异不误合并
+    f_upper_norm_variant = _finding(
         severity=Severity.IMPORTANT,
-        file="pilot1742/routes.py",
+        file="./pilot1742/routes.py",
         line=10,
-        category="HTTP-500",
-        failure_scenario="get  `/A`  Returns   500",
+        category="  http-500  ",
+        failure_scenario="\r\nGET `/A` returns 500\r\n",
         evidence="same uppercase route",
     )
-    assert f_upper.finding_id == f_upper_prose_variant.finding_id
+    assert f_upper.finding_id == f_upper_norm_variant.finding_id
     merged_same = merge_and_dedupe_findings(
-        [("gpt-6-astra", [f_upper]), ("gpt-6.1-sol", [f_upper_prose_variant])]
+        [("gpt-6-astra", [f_upper]), ("gpt-6.1-sol", [f_upper_norm_variant])]
     )
     assert len(merged_same) == 1
     assert merged_same[0].source_models == ("gpt-6-astra", "gpt-6.1-sol")
+    assert fingerprint("pilot1742/routes.py", "HTTP-500", "GET `/A` returns 500") != f_upper.finding_id
 
-    # 3. 缩进代码块与围栏代码块保留大小写与内部水平空格
+    # 3. 缩进代码块与围栏代码块保留大小写、内部水平空格及各自原始形态（不再有损折叠）
     indented_a = '    assert "A" == "a"'
     indented_b = '    assert "a" == "a"'
     assert fingerprint("pilot1742/a.py", "bug", indented_a) != fingerprint("pilot1742/a.py", "bug", indented_b)
@@ -8469,32 +8476,26 @@ def test_r20_important1_fingerprint_preserves_code_case_and_whitespace() -> None
     fenced_a = '```\nassert "A" == "a"\n```'
     fenced_b = '```\nassert "a" == "a"\n```'
     assert fingerprint("pilot1742/a.py", "bug", fenced_a) != fingerprint("pilot1742/a.py", "bug", fenced_b)
-    assert fingerprint("pilot1742/a.py", "bug", indented_a) == fingerprint("pilot1742/a.py", "bug", fenced_a)
+    assert fingerprint("pilot1742/a.py", "bug", indented_a) != fingerprint("pilot1742/a.py", "bug", fenced_a)
 
     assert fingerprint("pilot1742/a.py", "bug", '    assert "a  b"') != fingerprint(
         "pilot1742/a.py", "bug", '    assert "a b"'
     )
 
-    # 4. 行内代码保留内部水平空格，且 CommonMark §6.1 等价定界符归一到同指纹
+    # 4. 行内代码保留内部水平空格与原文大小写
     assert fingerprint("pilot1742/a.py", "bug", 'Run `assert "a  b"`') != fingerprint(
         "pilot1742/a.py", "bug", 'Run `assert "a b"`'
     )
-    assert fingerprint("pilot1742/a.py", "bug", "GET `/A` returns 500") == fingerprint(
+    assert fingerprint("pilot1742/a.py", "bug", "GET `/A` returns 500") != fingerprint(
         "pilot1742/a.py", "bug", "get `` /A `` returns 500"
     )
 
-    # 5. 普通纯叙述与退化分隔线输入保持既有归一化语义（结构化 JSON token 等价/不等价）
-    assert _normalize_fingerprint_text("Race  Condition", "category") == _normalize_fingerprint_text(
+    # 5. category 行内无损归一化：折叠内部多余空白、去首尾空白、保留大小写
+    assert _normalize_fingerprint_text("  Race  Condition ", "category") == "Race Condition"
+    assert _normalize_fingerprint_text("Race  Condition", "category") != _normalize_fingerprint_text(
         "race condition", "category"
     )
-    assert json.loads(_normalize_fingerprint_text("Race  Condition", "category")) == [
-        "inline",
-        [["prose", "race condition"]],
-    ]
-    assert json.loads(_normalize_fingerprint_text("---", "category")) == [
-        "inline",
-        [["prose", "---"]],
-    ]
+    assert _normalize_fingerprint_text("---", "category") == "---"
     assert _normalize_fingerprint_text("---", "category") != _normalize_fingerprint_text("***", "category")
 
 
@@ -8704,7 +8705,7 @@ def _r21_probe(a: str, b: str, *, category: bool = False) -> tuple[Finding, Find
 
 
 def test_r21_important1_multiline_code_span_preserves_trailing_spaces_before_newline() -> None:
-    """R21 Important 1：跨行代码跨度保留换行前空格（匹配 pandoc -f gfm），且保持既有行内代码大小写与空白语义。"""
+    """R21 Important 1（R24 无损契约）：跨行代码跨度完整保留换行前空格与续行空格，仅统一换行符与首尾空行。"""
     # 1. Codex R19 原例：Run `a  \nb` (3 spaces) vs Run `a\nb` (1 space)
     f1, f2, merged = _r21_probe("Run `a  \nb`", "Run `a\nb`")
     assert f1.finding_id != f2.finding_id
@@ -8712,29 +8713,29 @@ def test_r21_important1_multiline_code_span_preserves_trailing_spaces_before_new
     assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
     norm_3sp = _normalize_fingerprint_text("Run `a  \nb`", "failure_scenario", allow_code_blocks=True)
     norm_1sp = _normalize_fingerprint_text("Run `a\nb`", "failure_scenario", allow_code_blocks=True)
-    assert norm_3sp != norm_1sp
-    assert json.loads(norm_3sp) == ["blocks", [["paragraph", [["prose", "run "], ["code_span", "a   b"]]]]]
-    assert json.loads(norm_1sp) == ["blocks", [["paragraph", [["prose", "run "], ["code_span", "a b"]]]]]
+    assert norm_3sp == "Run `a  \nb`"
+    assert norm_1sp == "Run `a\nb`"
 
-    # 2. CRLF 与 CommonMark §4.8 段落续行前导空格规整（匹配 pandoc -f gfm）
+    # 2. CRLF 与首尾空行规整到同指纹，非空行内前导/尾随空格原样保留
     assert fingerprint("pilot1742/demo.py", "bug", "Run `a  \r\nb`") == f1.finding_id
     assert fingerprint("pilot1742/demo.py", "bug", "Run `a\r\nb`") == f2.finding_id
-    assert fingerprint("pilot1742/demo.py", "bug", "Run `a\n  b`") == f2.finding_id
-    assert fingerprint("pilot1742/demo.py", "bug", "Run `a  \n  b`") == f1.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "\nRun `a\nb`\r\n\r\n") == f2.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "Run `a\n  b`") != f2.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "Run `a  \n  b`") != f1.finding_id
 
-    # 3. 既有单行代码大小写区分与叙述空白折叠回归校验
+    # 3. 既有单行代码大小写区分与无损去重回归校验
     fa, fb, merged_ab = _r21_probe("GET `/A` returns 500", "GET `/a` returns 500")
     assert fa.finding_id != fb.finding_id
     assert len(merged_ab) == 2
 
-    fc1, fc2, merged_same = _r21_probe("GET `/A` returns 500", "get  `/A`  Returns 500")
+    fc1, fc2, merged_same = _r21_probe("GET `/A` returns 500", "\r\nGET `/A` returns 500\r\n")
     assert fc1.finding_id == fc2.finding_id
     assert len(merged_same) == 1
     assert merged_same[0].finding_id == fc1.finding_id
 
 
 def test_r21_important2_link_reference_definitions_and_inline_link_targets_preserved() -> None:
-    """R21 Important 2：链接引用定义绝不剥离，且引用定义、内联链接与自动链接目标严格保留大小写。"""
+    """R21 Important 2（R24 无损契约）：链接引用定义、内联链接与自动链接目标原样保留，绝不因剥离或小写折叠误合并。"""
     # 1. Codex R19 原例：[endpoint]: /v1/users vs /v2/users
     f1, f2, merged = _r21_probe(
         "GET [endpoint] fails\n\n[endpoint]: /v1/users",
@@ -8753,16 +8754,19 @@ def test_r21_important2_link_reference_definitions_and_inline_link_targets_prese
     assert len(merged_case) == 2
     assert {item.finding_id for item in merged_case} == {f_up.finding_id, f_lo.finding_id}
 
-    # 3. 链接引用定义标签大小写不敏感、尖括号等价与多行写法归一到同 ID
+    # 3. 无损契约：CRLF 变体归一到同 ID，写法/大小写差异不再有损折并
+    assert fingerprint(
+        "pilot1742/demo.py", "bug", "GET [endpoint] fails\r\n\r\n[endpoint]: /v1/A\r\n"
+    ) == f_up.finding_id
     assert fingerprint(
         "pilot1742/demo.py", "bug", "GET [endpoint] fails\n\n[ENDPOINT]:\n  </v1/A>"
-    ) == f_up.finding_id
+    ) != f_up.finding_id
 
-    # 4. 内联链接目标保留大小写，叙述与链接文字照常折叠空白转小写
+    # 4. 内联链接目标保留大小写
     il_up, il_lo, merged_il = _r21_probe("GET [ep](/v1/A) fails", "GET [ep](/v1/a) fails")
     assert il_up.finding_id != il_lo.finding_id
     assert len(merged_il) == 2
-    assert fingerprint("pilot1742/demo.py", "bug", "get  [EP](</v1/A>)  Fails") == il_up.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "GET [ep](/v1/A) fails\r\n") == il_up.finding_id
 
     # 5. 自动链接 URI 保留路径大小写
     auto_up, auto_lo, merged_auto = _r21_probe(
@@ -8774,14 +8778,19 @@ def test_r21_important2_link_reference_definitions_and_inline_link_targets_prese
 
 
 def test_r21_important3_category_vs_indented_code_and_merge_id_invariance() -> None:
-    """R21 Important 3：category 按行内标签归一化与输入/归并 100% 一致，failure_scenario 缩进代码块保留大小写，归并永不突变 ID。"""
-    # 1. Codex R19 原例：category="    GET /A" vs "    GET /a" -> 输入、指纹、归并语义完全一致，合并为 1 条且 ID 不变
-    c1, c2, merged_cat = _r21_probe("    GET /A", "    GET /a", category=True)
-    assert c1.finding_id == c2.finding_id
-    assert len(merged_cat) == 1
-    assert merged_cat[0].finding_id == c1.finding_id
-    assert merged_cat[0].category == "GET /A"
-    assert fingerprint("pilot1742/demo.py", "GET /A", "boom") == c1.finding_id
+    """R21 Important 3（R24 无损契约）：category 去首尾/折多余空白且保留大小写，failure_scenario 保留缩进与大小写，归并永不突变 ID。"""
+    # 1. category="    GET /A" 与 "GET /A" 完全一致（输入/指纹/归并 100% 统一），且与 "    GET /a" 绝不误合并
+    c1, c2, merged_cat_distinct = _r21_probe("    GET /A", "    GET /a", category=True)
+    assert c1.finding_id != c2.finding_id
+    assert len(merged_cat_distinct) == 2
+    assert {item.finding_id for item in merged_cat_distinct} == {c1.finding_id, c2.finding_id}
+
+    cs1, cs2, merged_cat_same = _r21_probe("    GET /A", "GET  /A", category=True)
+    assert cs1.finding_id == cs2.finding_id
+    assert len(merged_cat_same) == 1
+    assert merged_cat_same[0].finding_id == cs1.finding_id
+    assert merged_cat_same[0].category == "GET  /A"
+    assert fingerprint("pilot1742/demo.py", "GET /A", "boom") == cs1.finding_id
 
     # 与 parse_finder_output 入口解析出的 Finding 指纹完全一致
     parsed_cat = parse_finder_output(
@@ -8807,16 +8816,16 @@ def test_r21_important3_category_vs_indented_code_and_merge_id_invariance() -> N
     assert len(merged_cat_code) == 2
     assert {item.finding_id for item in merged_cat_code} == {cc1.finding_id, cc2.finding_id}
 
-    # 2. failure_scenario 4 空格 / Tab 缩进代码块保留大小写，且归并后保留 2 条且 ID 不变
+    # 2. failure_scenario 4 空格 / Tab 缩进代码块均保留大小写与原始缩进，归并后保留 2 条且 ID 不变
     s1, s2, merged_scen = _r21_probe("    GET /A", "    GET /a", category=False)
     assert s1.finding_id != s2.finding_id
     assert len(merged_scen) == 2
     assert {item.finding_id for item in merged_scen} == {s1.finding_id, s2.finding_id}
-    assert fingerprint("pilot1742/demo.py", "bug", "\tGET /A") == s1.finding_id
-    assert fingerprint("pilot1742/demo.py", "bug", "\tGET /a") == s2.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "\tGET /A") != fingerprint("pilot1742/demo.py", "bug", "\tGET /a")
+    assert fingerprint("pilot1742/demo.py", "bug", "\tGET /A") != s1.finding_id
 
-    # 段落内 4 空格续行不开启缩进代码块，空行后与 ATX 标题后开启缩进代码块
-    assert fingerprint("pilot1742/demo.py", "bug", "Intro\n    GET /A") == fingerprint(
+    # 各类上下文中大小写差异均不误合并
+    assert fingerprint("pilot1742/demo.py", "bug", "Intro\n    GET /A") != fingerprint(
         "pilot1742/demo.py", "bug", "intro get /a"
     )
     assert fingerprint("pilot1742/demo.py", "bug", "Intro\n\n    GET /A") != fingerprint(
@@ -8829,7 +8838,7 @@ def test_r21_important3_category_vs_indented_code_and_merge_id_invariance() -> N
     # 3. 混合批量归并不变量：输出 ID 集合与输入分组 ID 集合严格相等、永不突变、永不重复
     mixed = [
         Finding(Severity.IMPORTANT, "pilot1742/demo.py", 10, "    GET /A", "boom", "e1"),
-        Finding(Severity.NIT, "pilot1742/demo.py", 11, "  get /a  ", "boom", "e2"),
+        Finding(Severity.NIT, "pilot1742/demo.py", 11, "  GET  /A  ", "boom\r\n", "e2"),
         Finding(Severity.IMPORTANT, "pilot1742/demo.py", 12, "    GET `/A`", "Run `a  \nb`", "e3"),
         Finding(Severity.IMPORTANT, "pilot1742/demo.py", 13, "    GET `/a`", "Run `a\nb`", "e4"),
         Finding(Severity.IMPORTANT, "pilot1742/demo.py", 14, "bug", "    GET /A", "e5"),
@@ -8844,18 +8853,18 @@ def test_r21_important3_category_vs_indented_code_and_merge_id_invariance() -> N
     assert set(merged_ids) == expected_ids
 
 
-# ── R22 精准回归（Codex R20 全部 3 项 Important：复用唯一权威块解析器 + 注入式类型化 JSON token） ───────
+# ── R22 精准回归（Codex R20 全部 3 项 Important：R24 无损指纹契约保持全部异义区分） ────────
 
 
 def test_r22_important1_thematic_break_and_container_indented_code_reuse_canonical_parser() -> None:
-    """R22 Important 1：复用 _parse_commonmark_blocks(preserve_trailing_spaces=True)，准确识别分隔线/容器后缩进代码块并保全跨行代码跨度。"""
-    # 1. Codex R20 复现①：分隔线 --- 后接缩进代码块必须保留大小写，不再误折叠
+    """R22 Important 1（R24 无损契约）：分隔线/容器后缩进代码块均不误合并，且权威块解析器默认语义不受影响。"""
+    # 1. Codex R20 复现①：分隔线 --- 后接缩进代码块保留大小写，绝不误合并
     f1, f2, merged = _r21_probe("Run\n\n---\n    GET /A", "Run\n\n---\n    GET /a")
     assert f1.finding_id != f2.finding_id
     assert len(merged) == 2
     assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
 
-    # 2. Setext 标题下划线、块引用与列表项内的缩进代码块均由同一权威解析器准确识别
+    # 2. Setext 标题下划线、块引用与列表项内的缩进代码块均严格区分大小写
     for upper_case, lower_case in (
         ("Run\n---\n    GET /A", "Run\n---\n    GET /a"),
         ("Run\n\n>     GET /A", "Run\n\n>     GET /a"),
@@ -8865,20 +8874,16 @@ def test_r22_important1_thematic_break_and_container_indented_code_reuse_canonic
         assert fa.finding_id != fb.finding_id
         assert len(m) == 2
 
-    # 3. 与围栏代码块同内容归一到同 ID，同时不影响默认 _parse_commonmark_blocks 调用语义
-    assert fingerprint("pilot1742/demo.py", "bug", "Run\n\n---\n    GET /A") == fingerprint(
+    # 3. 缩进代码块与围栏代码块保持各自指纹（不再有损折叠），且默认 _parse_commonmark_blocks 调用语义不变
+    assert fingerprint("pilot1742/demo.py", "bug", "Run\n\n---\n    GET /A") != fingerprint(
         "pilot1742/demo.py", "bug", "Run\n\n---\n```\nGET /A\n```"
     )
     default_blocks, _ = _parse_commonmark_blocks("Run `a  \nb`", include_all_visible_blocks=True)
     assert default_blocks == [("paragraph", "Run `a\nb`")]
-    preserved_blocks, _ = _parse_commonmark_blocks(
-        "Run `a  \nb`", include_all_visible_blocks=True, preserve_trailing_spaces=True
-    )
-    assert preserved_blocks == [("paragraph", "Run `a  \nb`")]
 
 
 def test_r22_important2_container_link_reference_definitions_and_titles_captured() -> None:
-    """R22 Important 2：块引用、列表项及嵌套容器内的链接引用定义均由权威解析器捕获（遵循首次定义生效且区分 title）。"""
+    """R22 Important 2（R24 无损契约）：块引用、列表项及嵌套容器内的链接引用定义与 title 完整保留、绝不误合并。"""
     # 1. Codex R20 复现②：块引用内链接引用定义 > [ep]: /A vs > [ep]: /a
     fq1, fq2, merged_q = _r21_probe("See [ep].\n\n> [ep]: /A", "See [ep].\n\n> [ep]: /a")
     assert fq1.finding_id != fq2.finding_id
@@ -8895,10 +8900,9 @@ def test_r22_important2_container_link_reference_definitions_and_titles_captured
     assert fn1.finding_id != fn2.finding_id
     assert len(merged_n) == 2
 
-    # 3. 遵循 CommonMark §4.7 首次定义生效语义
-    assert fingerprint(
-        "pilot1742/demo.py", "bug", "See [ep].\n\n> [ep]: /A\n\n- [ep]: /B"
-    ) == fq1.finding_id
+    # 3. CRLF 变体归一到同 ID，附加链接定义不再被静默忽略
+    assert fingerprint("pilot1742/demo.py", "bug", "See [ep].\r\n\r\n> [ep]: /A\r\n") == fq1.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "See [ep].\n\n> [ep]: /A\n\n- [ep]: /B") != fq1.finding_id
 
     # 4. 链接引用定义 title 区分（大小写敏感、不同 title 与无 title 均不碰撞）
     ft1, ft2, merged_t = _r21_probe('See [ep].\n\n> [ep]: /A "TitleA"', 'See [ep].\n\n> [ep]: /A "TitleB"')
@@ -8911,20 +8915,16 @@ def test_r22_important2_container_link_reference_definitions_and_titles_captured
 
 
 def test_r22_important3_injective_typed_json_tokens_eliminate_delimiter_collisions() -> None:
-    """R22 Important 3：注入式类型化 JSON token 彻底杜绝内联链接/定界符/标题/自动链接碰撞。"""
-    # 1. Codex R20 复现③：GET [ep](</A)b>) vs GET [ep](/A)b) 结构化编码绝不碰撞
+    """R22 Important 3（R24 无损契约）：无损文本 + 注入式 JSON 数组指纹杜绝内联链接、字段分隔符与自动链接碰撞。"""
+    # 1. Codex R20 复现③：GET [ep](</A)b>) vs GET [ep](/A)b) 绝不碰撞
     f1, f2, merged = _r21_probe("GET [ep](</A)b>)", "GET [ep](/A)b)")
     assert f1.finding_id != f2.finding_id
     assert len(merged) == 2
     assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
-    assert json.loads(_normalize_fingerprint_text("GET [ep](</A)b>)", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["paragraph", [["prose", "get "], ["link", [["prose", "ep"]], "/A)b", None]]]],
-    ]
-    assert json.loads(_normalize_fingerprint_text("GET [ep](/A)b)", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["paragraph", [["prose", "get "], ["link", [["prose", "ep"]], "/A", None], ["prose", "b)"]]]],
-    ]
+    assert _normalize_fingerprint_text("GET [ep](</A)b>)", "failure_scenario", allow_code_blocks=True) == "GET [ep](</A)b>)"
+    assert _normalize_fingerprint_text("GET [ep](/A)b)", "failure_scenario", allow_code_blocks=True) == "GET [ep](/A)b)"
+    # 字段间含分隔符字符 `|` 绝不发生跨字段碰撞
+    assert fingerprint("pilot1742/a|b.py", "cat", "scen") != fingerprint("pilot1742/a", "b.py|cat", "scen")
 
     # 2. 内联链接 title 区分、图片与链接区分、自动链接 Email/URI 大小写保留
     lt1, lt2, merged_lt = _r21_probe('GET [ep](/A "T1")', 'GET [ep](/A "T2")')
@@ -8942,60 +8942,44 @@ def test_r22_important3_injective_typed_json_tokens_eliminate_delimiter_collisio
     assert em1.finding_id != em2.finding_id
     assert len(merged_em) == 2
 
-    # 3. 叙述与空白折叠既有不变量保持成立
-    assert fingerprint("pilot1742/demo.py", "bug", "Swallows IOError silently") == fingerprint(
+    # 3. 无损契约：CRLF 变体归一到同 ID，大小写/空白改动不再有损折叠
+    assert fingerprint("pilot1742/demo.py", "bug", "Swallows IOError silently\r\n") == fingerprint(
+        "pilot1742/demo.py", "bug", "Swallows IOError silently"
+    )
+    assert fingerprint("pilot1742/demo.py", "bug", "Swallows IOError silently") != fingerprint(
         "pilot1742/demo.py", "bug", "swallows   ioerror silently"
     )
 
 
-# ── R23 精准回归（Codex R21 全部 4 项 Important：围栏缩进剥离 / 二维表格位置 / 行内 HTML / GFM 裸 URL） ────
+# ── R23 精准回归（Codex R21 全部 4 项 Important：保留块解析器精度 + R24 无损指纹去重） ────
 
 
 def test_r23_important1_fenced_code_strips_opening_fence_indent() -> None:
-    """R23 Important 1：围栏代码块按 CommonMark §4.5 剥离至多起始围栏缩进列数（0–3 列），匹配 pandoc -f gfm。"""
+    """R23 Important 1：_parse_commonmark_blocks 围栏代码块按 CommonMark §4.5 剥离起始围栏缩进，且无损指纹不误合并。"""
     # 1. Codex R21 最小复现：0 格围栏 vs 2 格缩进围栏
     f1, f2, merged = _r21_probe("Run\n\n~~~\n  pass\n~~~", "Run\n\n  ~~~\n  pass\n  ~~~")
     assert f1.finding_id != f2.finding_id
     assert len(merged) == 2
     assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
-    assert json.loads(_normalize_fingerprint_text("Run\n\n~~~\n  pass\n~~~", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["paragraph", [["prose", "run"]]], ["code", "  pass"]],
-    ]
-    assert json.loads(
-        _normalize_fingerprint_text("Run\n\n  ~~~\n  pass\n  ~~~", "failure_scenario", allow_code_blocks=True)
-    ) == [
-        "blocks",
-        [["paragraph", [["prose", "run"]]], ["code", "pass"]],
-    ]
-    # 剥离 2 格缩进后与无缩进围栏内的 `pass` 完全等价
-    assert f2.finding_id == fingerprint("pilot1742/demo.py", "bug", "Run\n\n~~~\npass\n~~~")
 
-    # 2. 1 / 2 / 3 格缩进剥离与不足列数上限剥离（含反引号围栏与 Tab 展开）
-    assert json.loads(_normalize_fingerprint_text(" ```\n   pass\n ```", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["code", "  pass"]],
+    # 2. _parse_commonmark_blocks 对 0/1/2/3 格围栏与 Tab 展开保持 CommonMark §4.5 精确缩进剥离
+    assert _parse_commonmark_blocks("Run\n\n~~~\n  pass\n~~~", include_all_visible_blocks=True)[0] == [
+        ("paragraph", "Run"),
+        ("code", "  pass"),
     ]
-    assert json.loads(_normalize_fingerprint_text("  ```\n   pass\n  ```", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["code", " pass"]],
+    assert _parse_commonmark_blocks("Run\n\n  ~~~\n  pass\n  ~~~", include_all_visible_blocks=True)[0] == [
+        ("paragraph", "Run"),
+        ("code", "pass"),
     ]
-    assert json.loads(_normalize_fingerprint_text("   ```\n   pass\n   ```", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["code", "pass"]],
-    ]
-    assert json.loads(_normalize_fingerprint_text("   ```\n pass\n   ```", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["code", "pass"]],
-    ]
-    assert json.loads(_normalize_fingerprint_text("  ~~~\n\tpass\n  ~~~", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["code", "  pass"]],
-    ]
+    assert _parse_commonmark_blocks(" ```\n   pass\n ```", include_all_visible_blocks=True)[0] == [("code", "  pass")]
+    assert _parse_commonmark_blocks("  ```\n   pass\n  ```", include_all_visible_blocks=True)[0] == [("code", " pass")]
+    assert _parse_commonmark_blocks("   ```\n   pass\n   ```", include_all_visible_blocks=True)[0] == [("code", "pass")]
+    assert _parse_commonmark_blocks("   ```\n pass\n   ```", include_all_visible_blocks=True)[0] == [("code", "pass")]
+    assert _parse_commonmark_blocks("  ~~~\n\tpass\n  ~~~", include_all_visible_blocks=True)[0] == [("code", "  pass")]
 
 
 def test_r23_important2_gfm_table_preserves_2d_cell_positions_and_short_row_padding() -> None:
-    """R23 Important 2：GFM 表格保留二维行列结构与空单元格位置，短行按表头列数补空，绝不展平。"""
+    """R23 Important 2：_parse_commonmark_blocks 二维 GFM 表格结构完整保留，且无损指纹不误合并任意行列位移。"""
     # 1. Codex R21 最小复现：|200|| vs ||200|
     t1 = "|Expected|Actual|\n|---|---|\n|200||"
     t2 = "|Expected|Actual|\n|---|---|\n||200|"
@@ -9003,39 +8987,16 @@ def test_r23_important2_gfm_table_preserves_2d_cell_positions_and_short_row_padd
     assert f1.finding_id != f2.finding_id
     assert len(merged) == 2
     assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
-    assert json.loads(_normalize_fingerprint_text(t1, "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [
-            [
-                "table",
-                [
-                    [[["prose", "expected"]], [["prose", "actual"]]],
-                    [[["prose", "200"]], []],
-                ],
-            ]
-        ],
-    ]
-    assert json.loads(_normalize_fingerprint_text(t2, "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [
-            [
-                "table",
-                [
-                    [[["prose", "expected"]], [["prose", "actual"]]],
-                    [[], [["prose", "200"]]],
-                ],
-            ]
-        ],
-    ]
 
-    # 2. 短行按 GFM §4.10 补齐至表头列数，与显式空单元格写法归一到同 ID；超长行截断至表头列数
-    assert fingerprint("pilot1742/demo.py", "bug", "|Expected|Actual|\n|---|---|\n|200|") == f1.finding_id
-    assert fingerprint("pilot1742/demo.py", "bug", "|A|B|C|\n|---|---|---|\n|1|") == fingerprint(
-        "pilot1742/demo.py", "bug", "|A|B|C|\n|---|---|---|\n|1|||"
-    )
-    assert fingerprint("pilot1742/demo.py", "bug", "|A|B|\n|---|---|\n|1|2|extra|") == fingerprint(
-        "pilot1742/demo.py", "bug", "|A|B|\n|---|---|\n|1|2|"
-    )
+    # 2. _parse_commonmark_blocks 精确输出二维表格行列结构并按表头列数补空/截断
+    b1, _ = _parse_commonmark_blocks(t1, include_all_visible_blocks=True)
+    b2, _ = _parse_commonmark_blocks(t2, include_all_visible_blocks=True)
+    assert b1[0][0] == "table" and json.loads(b1[0][1]) == [["Expected", "Actual"], ["200", ""]]
+    assert b2[0][0] == "table" and json.loads(b2[0][1]) == [["Expected", "Actual"], ["", "200"]]
+    b_short, _ = _parse_commonmark_blocks("|A|B|C|\n|---|---|---|\n|1|", include_all_visible_blocks=True)
+    assert json.loads(b_short[0][1]) == [["A", "B", "C"], ["1", "", ""]]
+    b_long, _ = _parse_commonmark_blocks("|A|B|\n|---|---|\n|1|2|extra|", include_all_visible_blocks=True)
+    assert json.loads(b_long[0][1]) == [["A", "B"], ["1", "2"]]
 
     # 3. 多行多列空单元格位置精确区分（列位移与行位移均不同 ID）
     m_c0 = "|A|B|C|\n|---|---|---|\n|200|||\n||||"
@@ -9055,7 +9016,7 @@ def test_r23_important2_gfm_table_preserves_2d_cell_positions_and_short_row_padd
 
 
 def test_r23_important3_inline_raw_html_preserves_case_as_typed_token() -> None:
-    """R23 Important 3：行内 HTML 标签/注释作为独立 ["raw_html", ...] token 保留原始大小写，叙述照常归一化。"""
+    """R23 Important 3（R24 无损契约）：行内 HTML 标签、属性与注释严格保留原始大小写。"""
     # 1. Codex R21 最小复现：href="/A" vs href="/a"
     h1 = 'GET <a href="/A">endpoint</a>'
     h2 = 'GET <a href="/a">endpoint</a>'
@@ -9063,23 +9024,10 @@ def test_r23_important3_inline_raw_html_preserves_case_as_typed_token() -> None:
     assert f1.finding_id != f2.finding_id
     assert len(merged) == 2
     assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
-    assert json.loads(_normalize_fingerprint_text(h1, "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [
-            [
-                "paragraph",
-                [
-                    ["prose", "get "],
-                    ["raw_html", '<a href="/A">'],
-                    ["prose", "endpoint"],
-                    ["raw_html", "</a>"],
-                ],
-            ]
-        ],
-    ]
+    assert _normalize_fingerprint_text(h1, "failure_scenario", allow_code_blocks=True) == h1
 
-    # 2. 对照：相同 raw_html、普通叙述大小写与空白差异仍归一到同 ID
-    f_same1, f_same2, merged_same = _r21_probe('get  <a href="/A">Endpoint</a>', h1)
+    # 2. 对照：CRLF/首尾空行变体归一到同 ID，大小写差异保持区分
+    f_same1, f_same2, merged_same = _r21_probe(f"\r\n{h1}\r\n", h1)
     assert f_same1.finding_id == f_same2.finding_id
     assert len(merged_same) == 1
 
@@ -9090,83 +9038,127 @@ def test_r23_important3_inline_raw_html_preserves_case_as_typed_token() -> None:
 
 
 def test_r23_important4_gfm_extended_bare_url_autolinks_preserve_case() -> None:
-    """R23 Important 4：识别 GFM §6.9 协议与 www. 裸 URL 扩展自动链接，保留路径大小写并按规范剥离尾标点。"""
+    """R23 Important 4（R24 无损契约）：任意裸 URL、带前后缀 URL 与标点上下文均无损保留大小写。"""
     # 1. Codex R21 最小复现：https://example.org/A vs https://example.org/a
     u1, u2, merged_u = _r21_probe("GET https://example.org/A", "GET https://example.org/a")
     assert u1.finding_id != u2.finding_id
     assert len(merged_u) == 2
     assert {item.finding_id for item in merged_u} == {u1.finding_id, u2.finding_id}
-    assert json.loads(_normalize_fingerprint_text("GET https://example.org/A", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["paragraph", [["prose", "get "], ["autolink", "https://example.org/A"]]]],
-    ]
+    assert (
+        _normalize_fingerprint_text("GET https://example.org/A", "failure_scenario", allow_code_blocks=True)
+        == "GET https://example.org/A"
+    )
 
     # 2. www. 与 ftp:// 裸 URL 路径大小写区分
     w1, w2, merged_w = _r21_probe("GET www.example.org/A", "GET www.example.org/a")
     assert w1.finding_id != w2.finding_id
     assert len(merged_w) == 2
-    assert json.loads(_normalize_fingerprint_text("GET www.example.org/A", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["paragraph", [["prose", "get "], ["autolink", "www.example.org/A"]]]],
-    ]
 
     ftp1, ftp2, merged_ftp = _r21_probe("GET ftp://files.example.org/A", "GET ftp://files.example.org/a")
     assert ftp1.finding_id != ftp2.finding_id
     assert len(merged_ftp) == 2
 
-    # 3. 句末标点剥离回 prose（不污染 URL），普通叙述照常归一化
-    p1, p2, merged_p = _r21_probe("GET https://example.org/A.", "get  https://example.org/A.")
+    # 3. 句末标点与括号上下文均保持大小写区分，CRLF 变体仍正常去重
+    p1, p2, merged_p = _r21_probe("GET https://example.org/A.", "GET https://example.org/A.\r\n")
     assert p1.finding_id == p2.finding_id
     assert len(merged_p) == 1
-    assert json.loads(_normalize_fingerprint_text("GET https://example.org/A.", "failure_scenario", allow_code_blocks=True)) == [
-        "blocks",
-        [["paragraph", [["prose", "get "], ["autolink", "https://example.org/A"], ["prose", "."]]]],
-    ]
     assert fingerprint("pilot1742/demo.py", "bug", "GET https://example.org/A.") != fingerprint(
         "pilot1742/demo.py", "bug", "GET https://example.org/a."
     )
+    assert fingerprint("pilot1742/demo.py", "bug", "See (https://example.org/A).") != fingerprint(
+        "pilot1742/demo.py", "bug", "See (https://example.org/a)."
+    )
+    assert fingerprint("pilot1742/demo.py", "bug", "See https://example.org/A&amp;.") != fingerprint(
+        "pilot1742/demo.py", "bug", "See https://example.org/a&amp;."
+    )
+    assert fingerprint("pilot1742/demo.py", "bug", "prefix_https://example.org/A") != fingerprint(
+        "pilot1742/demo.py", "bug", "prefix_https://example.org/a"
+    )
+    assert fingerprint("pilot1742/demo.py", "bug", "mywww.example.org/A") != fingerprint(
+        "pilot1742/demo.py", "bug", "mywww.example.org/a"
+    )
 
-    # 4. GFM §6.9 未配对尾部 `)`、平衡括号与尾部类实体 `&amp;` 剥离规则
-    assert json.loads(
-        _normalize_fingerprint_text("See (https://example.org/A).", "failure_scenario", allow_code_blocks=True)
-    ) == [
-        "blocks",
-        [["paragraph", [["prose", "see ("], ["autolink", "https://example.org/A"], ["prose", ")."]]]],
-    ]
-    assert json.loads(
-        _normalize_fingerprint_text(
-            "See https://en.wikipedia.org/wiki/Foo_(Bar).", "failure_scenario", allow_code_blocks=True
-        )
-    ) == [
-        "blocks",
-        [
-            [
-                "paragraph",
-                [
-                    ["prose", "see "],
-                    ["autolink", "https://en.wikipedia.org/wiki/Foo_(Bar)"],
-                    ["prose", "."],
-                ],
-            ]
-        ],
-    ]
-    assert json.loads(
-        _normalize_fingerprint_text("See https://example.org/A&amp;.", "failure_scenario", allow_code_blocks=True)
-    ) == [
-        "blocks",
-        [["paragraph", [["prose", "see "], ["autolink", "https://example.org/A"], ["prose", "&amp;."]]]],
-    ]
 
-    # 5. 前一位为字母/数字/下划线时不触发扩展自动链接
-    assert json.loads(
-        _normalize_fingerprint_text("prefix_https://example.org/A", "failure_scenario", allow_code_blocks=True)
-    ) == [
-        "blocks",
-        [["paragraph", [["prose", "prefix_https://example.org/a"]]]],
-    ]
-    assert json.loads(
-        _normalize_fingerprint_text("mywww.example.org/A", "failure_scenario", allow_code_blocks=True)
-    ) == [
-        "blocks",
-        [["paragraph", [["prose", "mywww.example.org/a"]]]],
-    ]
+# ── R24 架构简化与根因收口（无损指纹契约：全量消除 Markdown/HTML/URL/邮箱/标志大小写误合并） ────
+
+
+def test_r24_lossless_fingerprint_prevents_all_markdown_html_url_email_case_collisions() -> None:
+    """R24 根治回归：覆盖 Codex R22 全部 5 组复现 + R18–R21 碰撞反例 + 裸路径/HTML/标志 + 正向去重与 ID 不变量。"""
+    distinct_pairs: tuple[tuple[str, str], ...] = (
+        # Codex R22 全部 5 组最小复现
+        ("GET _https://example.org/A_", "GET _https://example.org/a_"),
+        ("GET www.dev/A", "GET www.dev/a"),
+        ("Send Alice@example.org", "Send alice@example.org"),
+        ("Run <code>git add -A</code>", "Run <code>git add -a</code>"),
+        ("Run\n\n~~~python2\nprint(1/2)\n~~~", "Run\n\n~~~python3\nprint(1/2)\n~~~"),
+        # Codex R18–R21 全部代表性碰撞反例
+        ("GET `/A` returns 500", "GET `/a` returns 500"),
+        ("Run `a  \nb`", "Run `a\nb`"),
+        ("GET [endpoint] fails\n\n[endpoint]: /v1/users", "GET [endpoint] fails\n\n[endpoint]: /v2/users"),
+        ("    GET /A", "    GET /a"),
+        ("Run\n\n---\n    GET /A", "Run\n\n---\n    GET /a"),
+        ("See [ep].\n\n> [ep]: /A", "See [ep].\n\n> [ep]: /a"),
+        ("GET [ep](</A)b>)", "GET [ep](/A)b)"),
+        ("Run\n\n~~~\n  pass\n~~~", "Run\n\n  ~~~\n  pass\n  ~~~"),
+        ("|Expected|Actual|\n|---|---|\n|200||", "|Expected|Actual|\n|---|---|\n||200|"),
+        ('GET <a href="/A">endpoint</a>', 'GET <a href="/a">endpoint</a>'),
+        ("GET https://example.org/A", "GET https://example.org/a"),
+        # 新增裸路径 / HTML <kbd> / CLI 标志反例
+        ("GET /A", "GET /a"),
+        ("Press <kbd>Ctrl+A</kbd>", "Press <kbd>Ctrl+a</kbd>"),
+        ("Pass flag -A to sync", "Pass flag -a to sync"),
+    )
+    for left, right in distinct_pairs:
+        f1, f2, merged = _r21_probe(left, right)
+        assert f1.finding_id != f2.finding_id, f"unexpected collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+
+    # category 行内无损边界：首尾与内部多余空白归一，大小写严格保留
+    c_eq1, c_eq2, m_ceq = _r21_probe("    GET /A", "GET /A", category=True)
+    assert c_eq1.finding_id == c_eq2.finding_id
+    assert len(m_ceq) == 1
+    assert m_ceq[0].finding_id == c_eq1.finding_id
+    assert m_ceq[0].category == "GET /A"
+
+    c_sp1, c_sp2, m_csp = _r21_probe("Error  Handling", "Error Handling", category=True)
+    assert c_sp1.finding_id == c_sp2.finding_id
+    assert len(m_csp) == 1
+    assert m_csp[0].finding_id == c_sp1.finding_id
+
+    for cat_a, cat_b in (("    GET /A", "    GET /a"), ("GET `/A`", "GET `/a`")):
+        ca, cb, mc = _r21_probe(cat_a, cat_b, category=True)
+        assert ca.finding_id != cb.finding_id
+        assert len(mc) == 2
+        assert {item.finding_id for item in mc} == {ca.finding_id, cb.finding_id}
+
+    # 正向去重对照：CRLF/CR/LF、首尾完全空行、./path 规范化均稳定命中同指纹，非空行空白不被剥离
+    f_lf = _finding(
+        severity=Severity.NIT,
+        file="./pilot1742//demo.py",
+        line=12,
+        category="  Error  Handling  ",
+        failure_scenario="Run\n\n~~~python3\n  print(1/2)\n~~~",
+        evidence="lf",
+        source_models=("gpt-6.1-sol",),
+    )
+    f_crlf = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=10,
+        category="Error Handling",
+        failure_scenario="\r\n\r\nRun\r\n\r\n~~~python3\r\n  print(1/2)\r\n~~~\r\n",
+        evidence="crlf",
+        source_models=("gpt-6-astra",),
+    )
+    assert f_lf.finding_id == f_crlf.finding_id
+    merged_norm = merge_and_dedupe_findings([("gpt-6.1-sol", [f_lf]), ("gpt-6-astra", [f_crlf])])
+    assert len(merged_norm) == 1
+    assert merged_norm[0].finding_id == f_lf.finding_id
+    assert merged_norm[0].severity is Severity.IMPORTANT
+    assert merged_norm[0].source_models == ("gpt-6-astra", "gpt-6.1-sol")
+
+    # 首尾含空格的非空行（!= ""）不被当作完全空行剥离
+    assert _normalize_fingerprint_text("  \nfoo\n  ", "failure_scenario", allow_code_blocks=True) == "  \nfoo\n  "
+    assert _normalize_fingerprint_text("\n\nfoo\r\n", "failure_scenario", allow_code_blocks=True) == "foo"
+    assert _normalize_fingerprint_text("\n    GET /A\n", "failure_scenario", allow_code_blocks=True) == "    GET /A"
