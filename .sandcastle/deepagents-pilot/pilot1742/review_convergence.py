@@ -243,7 +243,7 @@ def _normalize_commit_sha(raw: Any, field_name: str) -> str:
     value = _require_non_empty_str(raw, field_name)
     if not _COMMIT_SHA_HEX_RE.fullmatch(value):
         raise ConvergenceError(
-            f"{field_name} 必须是完整的 40 位（SHA-1）或 64 位（SHA-256）十六进制 Git 提交 SHA：{raw!r}"
+            f"{field_name} 必须是完整的 40 位或 64 位十六进制 Git 提交 SHA：{raw!r}"
         )
     return value.lower()
 

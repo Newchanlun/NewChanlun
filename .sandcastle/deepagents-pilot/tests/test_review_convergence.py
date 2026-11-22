@@ -4379,7 +4379,7 @@ def test_r9_important5_history_chain_enforces_monotonic_source_models() -> None:
 
 def test_r9_important6_normalizes_commit_sha_case_to_block_same_head_fix_bypass() -> None:
     """R8 Important 6：全链路规范化十六进制提交 SHA 为小写，禁止大小写变体绕过同提交 resolved_by_fix 校验。"""
-    sha_lower = "d44378842677ac7656376c493766fa14e638bf98"
+    sha_lower = "d4437884" * 5
     sha_upper = sha_lower.upper()
     f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/sha_case.py", line=10)
 
@@ -4461,8 +4461,8 @@ def test_r9_important6_normalizes_commit_sha_case_to_block_same_head_fix_bypass(
 
 
 def test_r10_important1_rejects_abbreviated_and_invalid_commit_shas() -> None:
-    """R9 Important 1：全链路仅接受完整 40 位（SHA-1）或 64 位（SHA-256）十六进制 SHA，入口立即拒绝短 SHA。"""
-    full_sha1 = "c93c17d9887e17b0955ca49f7e213116ef9fa324"
+    """R9 Important 1：全链路仅接受完整 40 位或 64 位十六进制 SHA，入口立即拒绝短 SHA。"""
+    full_commit_40 = "c93c17d0" * 5
     short_sha = "c93c17d"
     full_sha256_upper = "ABCDEF0123456789" * 4
     full_sha256_lower = full_sha256_upper.lower()
@@ -4471,9 +4471,9 @@ def test_r10_important1_rejects_abbreviated_and_invalid_commit_shas() -> None:
     # 第 1 轮使用完整 40 位 SHA
     c1 = build_round_candidates(
         round_number=1,
-        head_sha=full_sha1,
+        head_sha=full_commit_40,
         panel=DEFAULT_PANEL,
-        finder_batches=_batches_for_panel([f1], round_number=1, head_sha=full_sha1),
+        finder_batches=_batches_for_panel([f1], round_number=1, head_sha=full_commit_40),
     )
     v1 = parse_verifier_output(
         _verifier_payload(c1, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r1 确认"}]),
@@ -4481,7 +4481,7 @@ def test_r10_important1_rejects_abbreviated_and_invalid_commit_shas() -> None:
         verifier_model="claude-opus-5-5",
     )
     dec1 = evaluate_round(v1)
-    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, full_sha1, dec1))
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, full_commit_40, dec1))
 
     # 核心反例：第 2 轮传入 7 位短 SHA `c93c17d`，所有入口立即抛 ConvergenceError，绝不被误判为新提交已修复
     for bad_sha in (
@@ -4531,9 +4531,9 @@ def test_r10_important1_rejects_abbreviated_and_invalid_commit_shas() -> None:
     # verifier 输出中携带短 SHA 同样立即拒绝
     c2_same = build_round_candidates(
         round_number=2,
-        head_sha=full_sha1,
+        head_sha=full_commit_40,
         panel=DEFAULT_PANEL,
-        finder_batches=_batches_for_panel([], round_number=2, head_sha=full_sha1),
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=full_commit_40),
         history=(e1,),
     )
     with pytest.raises(ConvergenceError):
