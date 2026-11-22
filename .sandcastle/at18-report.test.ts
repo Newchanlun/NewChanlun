@@ -944,6 +944,42 @@ test("R10/#1319：Python 声明目标、延迟体驱动和 CPython 生产调用�
     ["sync-drive-dict", integration(genexp + "return dict((i, row) for i, row in enumerate(g))"), publicTest.replace(
       "list(select_feed({}, [1, 2])) == [1, 2]", "select_feed({}, [1, 2]) == {0: [1, 2]}"), true],
     ["sync-drive-join", integration(from + "route\ng = (str(" + call + ") for _ in [0])\nreturn ''.join(g)"), direct, true]);
+  const exhaust = (source: string, step: string, handler: string, onError = "return []") =>
+    integration(from + "route\n" + source +
+      "\ntry:\n    next(it)\n    " + step + "\n    return " + call + "\n" + handler + "\n    " + onError);
+  const oneGenerator = "def stream():\n    yield 0\nit = stream()";
+  for (const [id, source] of [["list", "it = iter([0])"], ["tuple", "it = iter(tuple([0]))"],
+    ["generator", oneGenerator]] as const) {
+    cases.push(
+      ["r12-exhaust-" + id, exhaust(source, "next(it)", "except StopIteration:"), direct, false],
+      ["r12-exhaust-default-" + id, exhaust(source, "next(it, 0)", "except StopIteration:"), direct, true],
+    );
+  }
+  const cleanup = from + "route\nout = []\ndef stream():\n    try:\n        yield 0\n" +
+    "    finally:\n        out.extend(" + call + ")\nit = stream()\n";
+  cases.push(
+    ["r12-exhaust-dunder-bare", exhaust(oneGenerator, "it.__next__()", "except:"), direct, false],
+    ["r12-exhaust-catches-exception", exhaust(oneGenerator, "it.__next__()", "except (TypeError, Exception):"), direct, false],
+    ["r12-exhaust-skips-wrong-handler", exhaust(oneGenerator, "it.__next__()", "except IndexError:", "return " + call), direct, false],
+    ["r12-exhaust-handler-runs", exhaust(oneGenerator, "it.__next__()", "except StopIteration:",
+      "return " + call).replace("    return " + call + "\nexcept", "    return []\nexcept"), direct, true],
+    ["r12-exhaust-finally-runs", integration(from + "route\n" + oneGenerator +
+      "\ntry:\n    next(it)\n    next(it)\n    return []\nfinally:\n    " + call), direct, true],
+    ["r12-close-created", integration(cleanup + "it.close()\nreturn out"), direct, false],
+    ["r12-close-suspended", integration(cleanup + "next(it)\nit.close()\nreturn out"), direct, true],
+    ["r12-close-after-break", integration(cleanup + "for _ in it:\n    break\nit.close()\nreturn out"), direct, true],
+    ["r12-break-without-close", integration(cleanup + "for _ in it:\n    break\nreturn (out, it)"), direct, false],
+    ["r12-with-closing-created", integration(cleanup +
+      "from contextlib import closing\nwith closing(it):\n    pass\nreturn out"), direct, false],
+    ["r12-with-closing-suspended", integration(cleanup +
+      "import contextlib as ctx\nwith ctx.closing(it) as cursor:\n    next(cursor)\nreturn out"), direct, true],
+    ["r12-close-nested-finally-order", integration(from + "route, discard\nout = []\n" +
+      "def stream():\n    chosen = discard\n    try:\n        try:\n            yield 0\n" +
+      "        finally:\n            chosen = route\n    finally:\n        out.extend(chosen('1min', sources, events))\n" +
+      "it = stream()\nnext(it)\nit.close()\nreturn out"), direct, true],
+    ["r12-close-delegated-finally", integration(cleanup.replace("it = stream()", "def outer():\n    yield from stream()\nit = outer()") +
+      "next(it)\nit.close()\nreturn out"), direct, true],
+  );
   for (const [id, feedIntegration, feedTest, accepts] of cases) await t.test(id, async () => {
     const entry = "trading_system/at18_fixture_feed.py";
     const production = "trading_system/__init__.py";
@@ -967,7 +1003,7 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
     "let mut cx = std::task::Context::from_waker(std::task::Waker::noop()); " +
     `assert!(pinned.as_mut().poll(&mut cx).${pending ? "is_pending" : "is_ready"}()); } `;
   const wire = (body: string) => `use newchan_rust::${path};\n#[test]\nfn check_connection() { ${body} }\n`;
-  const check = (production: string, body: string, accepts: boolean) => {
+  const check = (production: string, body: string, accepts: boolean, moduleItems = "") => {
     const entry = "rust/src/at18_fixture_wire/mod.rs";
     const testPath = "rust/tests/at18_fixture_wire.rs";
     const repository = feedSource({
@@ -975,7 +1011,7 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
       "rust/src/lib.rs": "pub mod at18_fixture_wire;\n" + production,
       [entry]: "pub mod probe;\n",
       "rust/src/at18_fixture_wire/probe.rs": 'pub fn handshake(banner: &str) -> bool { banner.starts_with("HELLO") }',
-      [testPath]: wire(body),
+      [testPath]: moduleItems + wire(body),
     });
     assert.equal(rustReplacement(repository, G0, entry, testPath, "check_connection", []), accepts);
   };
@@ -1048,6 +1084,78 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
     ["r11-let-else-some", `let Some(_) = Some(7) else { ${call} return; };`, false],
     ["r11-let-else-none", `let Some(_) = None::<i32> else { ${call} return; };`, true],
     ["r11-let-else-none-stops-tail", `{ let Some(_) = None::<i32> else { return; }; } ${call}`, false],
+    ["r12-ready-false", poll + `drive(async { if std::future::ready(false).await { ${call} } });`, false],
+    ["r12-async-tail-false", poll + `drive(async { if (async { false }).await { ${call} } });`, false],
+    ["r12-async-return-flag", poll + `drive(async { if (async { return true; }).await { ${call} } });`, true],
+    ["r12-await-int-and-callable", poll + `drive(async {
+      let f = core::future::ready(handshake).await;
+      if (async { 0x10_i32 }).await >= 16 { assert!(f("HELLO")); }
+    });`, true],
+    ["r12-await-variant", poll + `drive(async {
+      enum Mode { Dry, Live }
+      match (async { core::future::ready(Mode::Dry).await }).await {
+        Mode::Live => { ${call} }
+        Mode::Dry => (),
+      }
+    });`, false],
+    ["r12-enum-dry", `enum Mode { Live, Dry } match Mode::Dry { Mode::Live => { ${call} } _ => () }`, false],
+    ["r12-enum-live", `enum Mode { Live, Dry } match Mode::Live { Mode::Live => { ${call} } _ => () }`, true],
+    ["r12-tuple-enum-or-pattern", `enum State { Empty, Ok(fn(&str) -> bool, usize), Good(fn(&str) -> bool, usize) }
+      match State::Good(handshake, 2) {
+        State::Ok(f, 0) | State::Good(f, 2) => { assert!(f("HELLO")); }
+        _ => (),
+      }`, true],
+    ["r12-record-enum-let-else", `enum State { Empty, Code { value: i32, f: fn(&str) -> bool } }
+      let State::Code { value: 2, f } = (State::Code { value: 2, f: handshake }) else { return; };
+      assert!(f("HELLO"));`, true],
+    ["r12-record-enum-if-let", `enum State { Empty, Code { value: i32 } }
+      if let State::Code { value: 1 } = (State::Code { value: 2 }) { ${call} }`, false],
+    ["r12-enum-while-let", `enum Mode { Live, Dry } while let Mode::Live = Mode::Dry { ${call} break; }`, false],
+    ["r12-guard-most-specific", `match Some(1u8) {
+      Some(n) if n == 2 => (),
+      Some(n) if n != 2 && n < 2 => { ${call} }
+      _ => (),
+    }`, true],
+    ["r12-guard-char-string-bool", `match (2_usize, 'a', "wire", true) {
+      (n, c, s, ok) if ok && n <= 2 && c < 'b' && s == r"wire" => { ${call} }
+      _ => (),
+    }`, true],
+    ["r12-guard-short-circuits", `match Some(0x10_i32) {
+      Some(n) if !(n >= 0x10) && handshake("HELLO") => (),
+      _ => (),
+    }`, false],
+    ["r12-guard-runtime-disjunction-not-evidence", `let flag = std::hint::black_box(false);
+      assert!(flag || handshake("HELLO"));`, false],
+    ["r12-cast-hrtb-called", `let f = handshake as for<'a> fn(&'a str) -> bool; assert!(f("HELLO"));`, true],
+    ["r12-cast-hrtb-stored", `let _f = (handshake as for<'a> fn(&'a str) -> bool, 0);`, false],
+    ["r12-cast-hrtb-args-and-output", `fn adapt<'a>(s: &'a str, _: &str) -> &'a str { assert!(handshake(s)); s }
+      let (f, _) = (adapt as for<'a, 'b> fn(&'a str, &'b str) -> &'a str, 0); assert_eq!(f("HELLO", ""), "HELLO");`, true],
+    ["r12-unknown-if-single-arm", `if std::hint::black_box(false) { ${call} }`, false],
+    ["r12-unknown-if-both-arms", `if std::hint::black_box(true) { ${call} } else { ${call} }`, true],
+    ["r12-unknown-if-tail", `if std::hint::black_box(false) { let _ = 2; } ${call}`, true],
+    ["r12-unknown-early-return-blocks-tail", `if std::hint::black_box(true) { return; } ${call}`, false],
+    ["r12-unknown-if-conditional-rebind", `let mut f: fn(&str) -> bool = |_| false;
+      if std::hint::black_box(false) { f = handshake; } let _ = f("HELLO");`, false],
+    ["r12-unknown-if-both-rebind", `let mut f: fn(&str) -> bool = |_| false;
+      if std::hint::black_box(false) { f = handshake; } else { f = handshake; } assert!(f("HELLO"));`, true],
+    ["r12-unknown-if-let-single", `if let Some(_) = std::hint::black_box(None::<i32>) { ${call} }`, false],
+    ["r12-unknown-if-let-both", `if let Some(_) = std::hint::black_box(None::<i32>) { ${call} } else { ${call} }`, true],
+    ["r12-unknown-while-let-single", `while let Some(_) = std::hint::black_box(None::<i32>) { ${call} break; }`, false],
+    ["r12-unknown-match-single", `match std::hint::black_box(false) { true => { ${call} } false => (), }`, false],
+    ["r12-unknown-match-all", `match std::hint::black_box(false) { true => { ${call} } false => { ${call} } }`, true],
+    ["r12-unknown-option-match-all", `match std::hint::black_box(None::<i32>) {
+      Some(_) => { ${call} } None => { ${call} }
+    }`, true],
+    ["r12-unknown-enum-match-payload", `enum Status { Code(u8), Missing }
+      match std::hint::black_box(Status::Code(2)) {
+        Status::Code(1) | Status::Missing => { ${call} }
+        Status::Code(_) => (),
+      }`, false],
+    ["r12-unknown-match-wildcard-intersection", `match std::hint::black_box(2) { 1 => { ${call} } _ => { ${call} } }`, true],
+    ["r12-unknown-match-may-not-run-guard", `match std::hint::black_box(None::<i32>) {
+      Some(_) if handshake("HELLO") => (),
+      _ => (),
+    }`, false],
     ["r11-if-let-some", `if let Some(f) = Some(handshake) { assert!(f("HELLO")); }`, true],
     ["r11-if-let-none", `if let Some(f) = None::<fn(&str) -> bool> { ${call} let _ = f; }`, false],
     ["r11-while-let-none", `while let Some(_) = None::<i32> { ${call} break; }`, false],
@@ -1077,6 +1185,13 @@ test("R10/#1319：Rust 延迟体、模式作用域与禁用控制体", {
   for (const [id, body, accepts] of cases) await t.test(id, async () => {
     check(`pub fn select_wire(banner: &str) -> bool { ${path}(banner) }\n`, body, accepts);
   });
+  await t.test("r12-canonical-module-enum", () => check("", `
+    use crate::switches::Mode as Switch;
+    match self::switches::Mode::Live {
+      Switch::Live => { ${call} }
+      crate::switches::Mode::Dry => (),
+    }
+  `, true, "mod switches { pub enum Mode { Dry, Live } }\n"));
   const publicAsync = `pub async fn select_wire(banner: &str) -> bool { ${path}(banner) }\n`;
   await t.test("public-async-dropped", () => check(publicAsync, 'let _future = newchan_rust::select_wire("HELLO");', false));
   await t.test("public-async-driven", () => check(publicAsync, poll + 'drive(async { assert!(newchan_rust::select_wire("HELLO").await); });', true));
