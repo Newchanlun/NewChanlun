@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import math
 from dataclasses import dataclass
 from typing import Mapping
@@ -355,11 +356,13 @@ _230_CONFIG_COUNTS: dict[tuple[int, int, int], int] = {
 }
 
 
+@lru_cache(maxsize=1)
 def default_connection() -> Connection:
     """从 230号数据校准的默认联络。"""
     return calibrate_connection(_230_CONFIG_COUNTS)
 
 
+@lru_cache(maxsize=1)
 def default_fiber_bundle() -> FiberBundleConfigSpace:
     """使用 230号数据联络的默认纤维丛配置空间。"""
     return FiberBundleConfigSpace(default_connection())
