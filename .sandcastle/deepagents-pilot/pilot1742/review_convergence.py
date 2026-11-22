@@ -961,6 +961,39 @@ def _is_reply_consumed_for_target(
     return False
 
 
+def _is_reply_hit_consumed(
+    reply_key: str,
+    comment_id: str,
+    target_id: str,
+    *,
+    raw_hit_ids: Collection[str] = (),
+    consumed_reply_keys: Collection[str],
+    consumed_comment_ids: Collection[str] = (),
+    alias_maps: Sequence[Mapping[str, str]] = (),
+) -> bool:
+    """判定一次命中是否已消费：同时检查折叠后规范目标与所有实际命中的原始指纹，任一已消费即拒。"""
+    if _is_reply_consumed_for_target(
+        reply_key,
+        comment_id,
+        target_id,
+        consumed_reply_keys=consumed_reply_keys,
+        consumed_comment_ids=consumed_comment_ids,
+        alias_maps=alias_maps,
+    ):
+        return True
+    for raw_fid in raw_hit_ids:
+        if raw_fid != target_id and _is_reply_consumed_for_target(
+            reply_key,
+            comment_id,
+            raw_fid,
+            consumed_reply_keys=consumed_reply_keys,
+            consumed_comment_ids=consumed_comment_ids,
+            alias_maps=alias_maps,
+        ):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class AuthorReply:
     finding_id: str | None
@@ -3129,21 +3162,26 @@ def _match_reply_targets_detailed(
     bound_reply_targets: Mapping[str, str] | None = None,
     duplicate_aliases: Mapping[str, str] | None = None,
     same_head_pinned_keys: Collection[str] = (),
-) -> tuple[list[Finding], int, bool]:
-    """唯一作者回复目标匹配核心实现，同时返回是否因命中过期目标（含活跃别名指向过期规范项）而被拒。
+) -> tuple[list[Finding], int, bool, dict[str, frozenset[str]]]:
+    """唯一作者回复目标匹配核心实现，同时返回是否因命中过期目标（含活跃别名指向过期规范项）而被拒，
+    以及每个返回目标指纹对应的实际原始命中指纹集合。
 
-    返回值 `(matches, specificity, stale_rejected)`：
+    返回值 `(matches, specificity, stale_rejected, raw_hits_by_target)`：
     - `stale_rejected=True` 仅在无显式 finding_id、未在 bound_reply_targets 中锁定且原始坐标命中
       过期发现或其活跃规范目标落入 stale_location_fingerprints 时置位，供单次匹配 pass 直接消费该回复键。
+    - `raw_hits_by_target` 将每个折叠后的规范目标指纹映射到本次实际命中的原始发现指纹集合，
+      供下游消费判定同时核查原始目标与规范目标两个身份。
     """
     if reply.finding_id is not None:
         prefix = reply.finding_id.strip().lower()
         pinned_fid = bound_reply_targets.get(reply.reply_key) if bound_reply_targets else None
         if pinned_fid is not None:
             if not pinned_fid.startswith(prefix):
-                return [], 0, False
-            return [f for f in findings if f.finding_id == pinned_fid], 3, False
-        return [f for f in findings if f.finding_id.startswith(prefix)], 3, False
+                return [], 0, False, {}
+            matched = [f for f in findings if f.finding_id == pinned_fid]
+            return matched, 3, False, {f.finding_id: frozenset({f.finding_id}) for f in matched}
+        matched = [f for f in findings if f.finding_id.startswith(prefix)]
+        return matched, 3, False, {f.finding_id: frozenset({f.finding_id}) for f in matched}
     stale = (
         frozenset(fp.strip().lower() for fp in stale_location_fingerprints)
         if stale_location_fingerprints
@@ -3157,49 +3195,57 @@ def _match_reply_targets_detailed(
 
     if pinned_fid is not None:
         if reply.is_inline_anchor and (reply.file is None or reply.line is None):
-            return [], 0, False
+            return [], 0, False, {}
         canonical_pinned = aliases.get(pinned_fid, pinned_fid)
         target_f = findings_by_id.get(canonical_pinned) or findings_by_id.get(pinned_fid)
         if target_f is None:
-            return [], 0, False
+            return [], 0, False, {}
         target_id = target_f.finding_id
         if pinned_fid in stale or target_id in stale:
-            return [], 0, False
+            return [], 0, False, {}
         if raw_matched:
-            has_direct_or_alias_hit = any(
-                f.finding_id not in stale
+            direct_or_alias_hits = {
+                f.finding_id
+                for f in raw_matched
+                if f.finding_id not in stale
                 and (
                     f.finding_id == target_id
                     or f.finding_id == pinned_fid
                     or aliases.get(f.finding_id, f.finding_id) == target_id
                 )
-                for f in raw_matched
-            )
-            if has_direct_or_alias_hit:
-                return [target_f], specificity, False
+            }
+            if direct_or_alias_hits:
+                return [target_f], specificity, False, {target_id: frozenset(direct_or_alias_hits | {pinned_fid})}
         if reply.reply_key in same_head_keys:
             base_specificity = 2 if (reply.is_inline_anchor or reply.line is not None) else (1 if reply.file is not None else 0)
             if base_specificity > 0:
-                return [target_f], base_specificity, False
-        return [], 0, False
+                return [target_f], base_specificity, False, {target_id: frozenset({pinned_fid, target_id})}
+        return [], 0, False, {}
 
     if not raw_matched:
-        return [], 0, False
+        return [], 0, False, {}
     if stale and any(f.finding_id in stale for f in raw_matched):
-        return [], 0, True
+        return [], 0, True, {}
     if not aliases:
-        return raw_matched, specificity, False
+        return raw_matched, specificity, False, {f.finding_id: frozenset({f.finding_id}) for f in raw_matched}
     collapsed: list[Finding] = []
     seen_collapsed: set[str] = set()
+    raw_hits_by_target: dict[str, set[str]] = {}
     for matched_f in raw_matched:
         c_id = aliases.get(matched_f.finding_id, matched_f.finding_id)
         if c_id in stale:
-            return [], 0, True
+            return [], 0, True, {}
         rep = findings_by_id.get(c_id, matched_f)
+        raw_hits_by_target.setdefault(rep.finding_id, set()).add(matched_f.finding_id)
         if rep.finding_id not in seen_collapsed:
             seen_collapsed.add(rep.finding_id)
             collapsed.append(rep)
-    return collapsed, specificity, False
+    return (
+        collapsed,
+        specificity,
+        False,
+        {fid: frozenset(raw_ids) for fid, raw_ids in raw_hits_by_target.items()},
+    )
 
 
 def _match_reply_targets(
@@ -3224,7 +3270,7 @@ def _match_reply_targets(
     - 对已在 bound_reply_targets 中锁定目标指纹的 loc / inline 回复，仅允许匹配该锁定指纹（或其活跃规范目标），
       当原始坐标仍命中规范目标/活跃别名或处于首次锁定同一 HEAD（same_head_pinned_keys）且目标未过期时保持有效，禁止改绑其他发现。
     """
-    matches, specificity, _ = _match_reply_targets_detailed(
+    matches, specificity, _, _ = _match_reply_targets_detailed(
         reply,
         findings,
         stale_location_fingerprints=stale_location_fingerprints,
@@ -3324,6 +3370,7 @@ class _AuthorReplyAnalysis:
     matched_keys_by_id: dict[str, frozenset[str]]
     stale_rejected_keys: frozenset[str]
     raw_short_prefix_hits: dict[str, frozenset[str]]
+    raw_hits_by_reply_target: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
 
 
 def _dedupe_author_replies_keep_last(
@@ -3351,9 +3398,10 @@ def _merge_author_replies(
     *,
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
+    duplicate_aliases: Mapping[str, str] | Collection[tuple[str, str]] = (),
 ) -> tuple[AuthorReply, ...]:
     """合并 VerifiedRound 持久化的回复与调用方额外传入的回复：
-    先过滤整条已排除回复（reply_key、comment_id 或全长 finding_id 的 resolved 键已排除），
+    先过滤整条已排除回复（reply_key、comment_id 或全长 finding_id 及其活跃规范项的 resolved 键已排除），
     仅对仍有资格参与评估的未排除回复按 reply_key 校验一致性并按最后出现位置去重。
     """
     norm_verified = _dedupe_author_replies_keep_last(verified_replies, "verified.author_replies")
@@ -3368,11 +3416,18 @@ def _merge_author_replies(
         if consumed_comment_ids
         else frozenset()
     )
+    alias_map = _normalize_duplicate_aliases(duplicate_aliases, "duplicate_aliases") if duplicate_aliases else {}
+    alias_maps: tuple[Mapping[str, str], ...] = (alias_map,) if alias_map else ()
 
     def _is_eligible(reply: AuthorReply) -> bool:
         if reply.comment_id.strip() in excluded_cids:
             return False
-        if _is_reply_obviously_consumed(reply, excluded_keys):
+        if _is_reply_obviously_consumed(
+            reply,
+            excluded_keys,
+            consumed_comment_ids=excluded_cids,
+            alias_maps=alias_maps,
+        ):
             return False
         return True
 
@@ -3431,6 +3486,7 @@ def _analyze_author_replies_detailed(
     matched_keys_by_id: dict[str, set[str]] = {}
     stale_rejected_keys: set[str] = set()
     raw_short_prefix_hits: dict[str, set[str]] = {}
+    raw_hits_by_reply_target: dict[tuple[str, str], set[str]] = {}
     comment_target_reasons: dict[tuple[str, str], set[str]] = {}
     resolved_entries: list[tuple[str, str, int, AuthorReply]] = []
     for reply in validated_replies:
@@ -3450,7 +3506,7 @@ def _analyze_author_replies_detailed(
             if raw_hits:
                 raw_short_prefix_hits.setdefault(reply.reply_key, set()).update(raw_hits)
 
-        matches, specificity, stale_rejected = _match_reply_targets_detailed(
+        matches, specificity, stale_rejected, raw_hits_by_target = _match_reply_targets_detailed(
             reply,
             finding_list,
             stale_location_fingerprints=stale_fps,
@@ -3477,10 +3533,14 @@ def _analyze_author_replies_detailed(
                         keys_set = matched_keys_by_id.setdefault(pinned_target_fid, set())
                         keys_set.add(reply.reply_key)
                         keys_set.add(_resolved_reply_key(cid, pinned_target_fid))
-                        if not _is_reply_consumed_for_target(
+                        raw_hits_by_reply_target.setdefault((reply.reply_key, pinned_target_fid), set()).update(
+                            {pinned_fid, pinned_target_fid}
+                        )
+                        if not _is_reply_hit_consumed(
                             reply.reply_key,
                             cid,
                             pinned_target_fid,
+                            raw_hit_ids=(pinned_fid,),
                             consumed_reply_keys=consumed_keys,
                             consumed_comment_ids=consumed_cids,
                             alias_maps=(alias_map,),
@@ -3494,19 +3554,25 @@ def _analyze_author_replies_detailed(
             continue
 
         norm_reason = _normalize_fingerprint_text(reply.reason, "reason", allow_code_blocks=False)
+        consumed_targets: set[str] = set()
         for matched_finding in matches:
             matched_fid = matched_finding.finding_id
+            raw_hit_ids = raw_hits_by_target.get(matched_fid, frozenset({matched_fid}))
+            raw_hits_by_reply_target.setdefault((reply.reply_key, matched_fid), set()).update(raw_hit_ids)
             keys_set = matched_keys_by_id.setdefault(matched_fid, set())
             keys_set.add(reply.reply_key)
             keys_set.add(_resolved_reply_key(cid, matched_fid))
-            if not _is_reply_consumed_for_target(
+            if _is_reply_hit_consumed(
                 reply.reply_key,
                 cid,
                 matched_fid,
+                raw_hit_ids=raw_hit_ids,
                 consumed_reply_keys=consumed_keys,
                 consumed_comment_ids=consumed_cids,
                 alias_maps=(alias_map,),
             ):
+                consumed_targets.add(matched_fid)
+            else:
                 comment_target_reasons.setdefault((cid, matched_fid), set()).add(norm_reason)
 
         # 命中 0 个或超过 1 个活跃候选均拒绝绑定（绝不让一条歧义回复解除多个发现）
@@ -3514,14 +3580,7 @@ def _analyze_author_replies_detailed(
             continue
 
         target_id = matches[0].finding_id
-        if _is_reply_consumed_for_target(
-            reply.reply_key,
-            cid,
-            target_id,
-            consumed_reply_keys=consumed_keys,
-            consumed_comment_ids=consumed_cids,
-            alias_maps=(alias_map,),
-        ):
+        if target_id in consumed_targets:
             continue
 
         resolved_entries.append((cid, target_id, specificity, reply))
@@ -3541,6 +3600,7 @@ def _analyze_author_replies_detailed(
         matched_keys_by_id={fid: frozenset(keys) for fid, keys in matched_keys_by_id.items()},
         stale_rejected_keys=frozenset(stale_rejected_keys),
         raw_short_prefix_hits={rk: frozenset(fids) for rk, fids in raw_short_prefix_hits.items()},
+        raw_hits_by_reply_target={pair: frozenset(raw_ids) for pair, raw_ids in raw_hits_by_reply_target.items()},
     )
 
 
@@ -4299,9 +4359,11 @@ def _validate_new_explicit_bound_targets(
         for cand_fid, cand_finding in candidates_by_id.items():
             if cand_fid == target_fid:
                 continue
+            hist_canon = history_aliases.get(cand_fid, cand_fid)
             if (
-                history_aliases.get(cand_fid) == target_fid
+                hist_canon == target_fid
                 or round_duplicate_aliases.get(cand_fid) == target_fid
+                or round_duplicate_aliases.get(hist_canon) == target_fid
             ):
                 equiv_findings.append(cand_finding)
 
@@ -4309,15 +4371,28 @@ def _validate_new_explicit_bound_targets(
             if ":" in payload:
                 file_part, line_str = payload.rsplit(":", 1)
                 line_num = int(line_str)
-                compatible = any(
-                    _normalize_file(f.file) == file_part and f.line == line_num for f in equiv_findings
-                )
+                matched_equiv = [
+                    f for f in equiv_findings if _normalize_file(f.file) == file_part and f.line == line_num
+                ]
             else:
-                compatible = any(_normalize_file(f.file) == payload for f in equiv_findings)
-            if not compatible:
+                matched_equiv = [f for f in equiv_findings if _normalize_file(f.file) == payload]
+            if not matched_equiv:
                 raise ConvergenceError(
                     f"VerifiedRound.bound_reply_targets 中坐标回复键 {rk!r} 与目标发现 {target_fid!r}（及其活跃别名）坐标不匹配"
                 )
+            for matched_f in matched_equiv:
+                if _is_reply_consumed_for_target(
+                    rk,
+                    rk_cid,
+                    matched_f.finding_id,
+                    consumed_reply_keys=consumed_reply_keys,
+                    consumed_comment_ids=consumed_comment_ids,
+                    alias_maps=(history_aliases, round_duplicate_aliases),
+                ):
+                    raise ConvergenceError(
+                        f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 对原始命中发现 {matched_f.finding_id!r}"
+                        f"（规范目标 {target_fid!r}）已消费，禁止建立显式锁"
+                    )
         elif kind == "inline":
             matching_inline = [r for r in author_replies if r.reply_key == rk]
             if not matching_inline:
@@ -4325,18 +4400,31 @@ def _validate_new_explicit_bound_targets(
                     f"VerifiedRound.bound_reply_targets 中新增行内回复键 {rk!r} 缺少对应的 author_replies 佐证"
                 )
             for reply in matching_inline:
-                if (
-                    not reply.is_inline_anchor
-                    or reply.file is None
-                    or reply.line is None
-                    or not any(
-                        _normalize_file(f.file) == _normalize_file(reply.file) and f.line == reply.line
-                        for f in equiv_findings
-                    )
-                ):
+                if not reply.is_inline_anchor or reply.file is None or reply.line is None:
                     raise ConvergenceError(
                         f"VerifiedRound.bound_reply_targets 中行内回复键 {rk!r} 与目标发现 {target_fid!r}（及其活跃别名）坐标不匹配"
                     )
+                norm_reply_file = _normalize_file(reply.file)
+                matched_equiv = [
+                    f for f in equiv_findings if _normalize_file(f.file) == norm_reply_file and f.line == reply.line
+                ]
+                if not matched_equiv:
+                    raise ConvergenceError(
+                        f"VerifiedRound.bound_reply_targets 中行内回复键 {rk!r} 与目标发现 {target_fid!r}（及其活跃别名）坐标不匹配"
+                    )
+                for matched_f in matched_equiv:
+                    if _is_reply_consumed_for_target(
+                        rk,
+                        rk_cid,
+                        matched_f.finding_id,
+                        consumed_reply_keys=consumed_reply_keys,
+                        consumed_comment_ids=consumed_comment_ids,
+                        alias_maps=(history_aliases, round_duplicate_aliases),
+                    ):
+                        raise ConvergenceError(
+                            f"VerifiedRound.bound_reply_targets 中新增显式锁回复键 {rk!r} 对原始命中发现 {matched_f.finding_id!r}"
+                            f"（规范目标 {target_fid!r}）已消费，禁止建立显式锁"
+                        )
 
 
 @dataclass(frozen=True)
@@ -4926,12 +5014,27 @@ def _active_duplicate_aliases(history: Sequence[RoundHistoryEntry]) -> dict[str,
     return active_aliases
 
 
-def _is_reply_obviously_consumed(reply: AuthorReply, consumed_reply_keys: frozenset[str]) -> bool:
+def _is_reply_obviously_consumed(
+    reply: AuthorReply,
+    consumed_reply_keys: frozenset[str],
+    *,
+    consumed_comment_ids: Collection[str] = (),
+    alias_maps: Sequence[Mapping[str, str]] = (),
+) -> bool:
+    if reply.comment_id.strip() in consumed_comment_ids:
+        return True
     if reply.reply_key in consumed_reply_keys:
         return True
-    if reply.finding_id is not None and len(reply.finding_id.strip()) == 16:
-        if _resolved_reply_key(reply.comment_id, reply.finding_id) in consumed_reply_keys:
-            return True
+    target_fid = reply.target_finding_id
+    if target_fid is not None and len(target_fid) == 16:
+        return _is_reply_consumed_for_target(
+            reply.reply_key,
+            reply.comment_id,
+            target_fid,
+            consumed_reply_keys=consumed_reply_keys,
+            consumed_comment_ids=consumed_comment_ids,
+            alias_maps=alias_maps,
+        )
     return False
 
 
@@ -4972,7 +5075,13 @@ def plan_next_round(
     active_aliases = _active_duplicate_aliases(history_tuple)
     consumed_reply_keys: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history_tuple))
     active_replies = tuple(
-        reply for reply in author_replies if not _is_reply_obviously_consumed(reply, consumed_reply_keys)
+        reply
+        for reply in author_replies
+        if not _is_reply_obviously_consumed(
+            reply,
+            consumed_reply_keys,
+            alias_maps=(active_aliases,) if active_aliases else (),
+        )
     )
     covered_canonicals = frozenset(active_aliases.get(fp, fp) for fp in already_posted)
     pending_non_blocking = tuple(
@@ -5161,17 +5270,20 @@ def _derive_round_reply_pins_and_consumed(
                     target_for_rk = fid
                 else:
                     target_for_rk = canonical_fid
-                if _is_reply_consumed_for_target(
+                raw_hit_ids = analysis.raw_hits_by_reply_target.get((rk, fid), ())
+                if _is_reply_hit_consumed(
                     rk,
                     rk_cid,
                     fid,
+                    raw_hit_ids=raw_hit_ids,
                     consumed_reply_keys=history_consumed,
                     consumed_comment_ids=consumed_comment_ids,
                     alias_maps=alias_maps_all,
-                ) or _is_reply_consumed_for_target(
+                ) or _is_reply_hit_consumed(
                     rk,
                     rk_cid,
                     target_for_rk,
+                    raw_hit_ids=raw_hit_ids,
                     consumed_reply_keys=history_consumed,
                     consumed_comment_ids=consumed_comment_ids,
                     alias_maps=alias_maps_all,
@@ -5342,6 +5454,7 @@ def _derive_round_decision_payload(
         author_replies,
         consumed_reply_keys=effective_consumed,
         consumed_comment_ids=effective_consumed_cids,
+        duplicate_aliases=history_aliases,
     )
     history_bound_targets, pin_origin_heads = _collect_history_bound_targets_with_heads(history)
     same_head_pinned_keys = frozenset(rk for rk, h in pin_origin_heads.items() if h == head_sha)
