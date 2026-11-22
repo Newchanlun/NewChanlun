@@ -1300,6 +1300,169 @@ __all__ = _Exports()
   });
 });
 
+test("R19/#1319：精确导出对象、接收者和重载后的公开键", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const production = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const dependency = "trading_system/support.py";
+  const route = "def route(events): return list(events)\n";
+  const wire = "from .at18_fixture_feed import route\n";
+  const dispatch = wire + "def dispatch(events): return route(events)\n";
+  const via = (expr: string, prelude = "") => prelude + "import trading_system as p\n" +
+    `def test_route():\n    assert ${expr} == [13, 21]\n`;
+  const through = via("p.dispatch([13, 21])");
+  const direct = via("f.route([13, 21])", "from trading_system import at18_fixture_feed as f\n");
+  const check = async (name: string, impl: string, integration: string, registered: string, expected: boolean,
+    support: Record<string, string> = {}) => {
+    await t.test(name, () => {
+      const repo = feedSource({ ...support, [entry]: impl, [production]: integration, [path]: registered });
+      assert.equal(pythonReplacement(repo, G0, entry, production, path, "test_route", 1), expected);
+    });
+  };
+
+  const factories = [
+    ["零自由变量", "def make():\n    def f(events): return list(events)\n    return f\n", "make()", "make()"],
+    ["相同闭包值", "def make(copy):\n    def f(events): return copy(events)\n    return f\n", "make(list)", "make(list)"],
+    ["位置默认参数不同", "def make(tag):\n    def f(events, _tag=tag): return list(events)\n    return f\n", "make(1)", "make(2)"],
+    ["关键字默认参数不同", "def make(tag):\n    def f(events, *, _tag=tag): return list(events)\n    return f\n", "make(1)", "make(2)"],
+  ] as const;
+  const fromEntry = "from trading_system import at18_fixture_feed as f\n";
+  for (const [name, factory, real, sibling] of factories) {
+    const impl = factory + `route = ${real}\npreview = ${sibling}\nalias = route\n__all__ = ('route', 'preview', 'alias')\n`;
+    await check(name + "：另一导出不是承接", impl, dispatch, via("f.preview([13, 21])", fromEntry), false);
+    await check(name + "：真别名与原导出相交", impl, dispatch, via("f.alias([13, 21])", fromEntry), true);
+  }
+  for (const [name, invoke, prelude] of [
+    ["普通调用", (expr: string) => `${expr}([13, 21])`, ""],
+    ["map 的 C 回调", (expr: string) => `list(map(${expr}, [[13, 21]]))[0]`, ""],
+    ["partial 的 C 回调", (expr: string) => `partial(${expr})([13, 21])`, "from functools import partial\n"],
+  ] as const) {
+    const impl = `class _Adapter:
+    def run(self, events): return self.backend(events)
+_a, _b = _Adapter(), _Adapter()
+_a.backend = list
+_b.backend = route
+dispatch = _a.run
+__all__ = ('dispatch',)
+`;
+    await check(name + "：私有接收者不冒充公开绑定", route, wire + impl, via(invoke("p._b.run"), prelude), false);
+    await check(name + "：重新取出同一接收者的方法", route, wire + impl.replace("dispatch = _a.run", "dispatch = _b.run"),
+      via(invoke("p._b.run"), prelude), true);
+    const entryImpl = "def make():\n    def run(events): return list(events)\n    return run\n" +
+      "route = make()\npreview = make()\n";
+    await check(name + "：同体闭包不混算", entryImpl, dispatch, via(invoke("f.preview"), fromEntry + prelude), false);
+    await check(name + "：同一闭包可追踪", entryImpl, dispatch, via(invoke("f.route"), fromEntry + prelude), true);
+  }
+
+  for (const [name, method, asynchronous, harness] of [
+    ["协程/create_task", "async def run(self, events): return self.backend(events)", true,
+      "import asyncio\nasync def consume(fn): return await asyncio.create_task(fn([13, 21]))\n"],
+    ["生成器", "def run(self, events): yield self.backend(events)", false, "def consume(fn): return next(fn([13, 21]))\n"],
+    ["异步生成器", "async def run(self, events): yield self.backend(events)", true,
+      "import asyncio\nasync def consume(fn): return await anext(fn([13, 21]))\n"],
+  ] as const) {
+    const impl = wire + `class _Adapter:
+    ${method}
+_a, _b = _Adapter(), _Adapter()
+_a.backend, _b.backend = list, route
+dispatch = _a.run
+__all__ = ('dispatch',)
+`;
+    const run = (expr: string) => asynchronous ? `asyncio.run(consume(${expr}))` : `consume(${expr})`;
+    await check(name + "：执行另一个接收者不算覆盖", route, impl, via(run("p._b.run"), harness), false);
+    await check(name + "：已消费的精确绑定计入", route, impl.replace("dispatch = _a.run", "dispatch = _b.run"),
+      via(run("p._b.run"), harness), true);
+  }
+
+  const decorate = (wraps: boolean) => `from functools import wraps
+def _observe(fn):
+    ${wraps ? "@wraps(fn)\n    " : ""}def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return wrapper
+`;
+  for (const [kind, descriptor, receiver, member] of [
+    ["实例", "", "self, ", "Adapter().run"],
+    ["静态", "    @staticmethod\n", "", "Adapter.run"],
+    ["类", "    @classmethod\n", "cls, ", "Adapter.run"],
+  ] as const) {
+    for (const wraps of [true, false]) {
+      const head = decorate(wraps) + `class Adapter:\n${descriptor}    @_observe\n    @_observe\n`;
+      const signature = `    def run(${receiver}events): `;
+      const label = kind + (wraps ? "/wraps" : "/不声明 wraps");
+      const adapted = (obj: string) => `${member.replace("Adapter", obj + ".Adapter")}([13, 21])`;
+      await check(label + "：多层透传的生产方法可由独立探针调用", route,
+        wire + head + signature + "return route(events)\n", direct, true);
+      const wired = `from .at18_fixture_feed import Adapter\ndef dispatch(events): return ${member}(events)\n`;
+      await check(label + "：多层透传的承接方法", head + signature + "return list(events)\n", wired, through, true);
+      await check(label + "：装饰器不能给 pass 桩生成证据", head + signature + "pass\n", wired,
+        via(`${adapted("f")} is None and [13, 21]`, fromEntry), false);
+    }
+  }
+  const external = "class Worker: pass\ndef run(events): return list(events)\n";
+  const wiredClass = "from .at18_fixture_feed import Adapter\ndef dispatch(events): return Adapter.run(events)\n";
+  for (const wraps of [true, false]) {
+    const foreign = decorate(wraps) + "from .support import run\nclass Adapter:\n    run = staticmethod(_observe(run))\n";
+    await check("外来实现经过本地类装饰器/" + wraps, foreign, wiredClass, through, false,
+      { [dependency]: external });
+    const stub = decorate(wraps) + "@_observe\ndef route(events): pass\n";
+    await check("模块装饰器也不能包裹空桩/" + wraps, stub, dispatch,
+      via("f.route([13, 21]) is None and [13, 21]", fromEntry), false);
+  }
+  const spoof = decorate(true) + "from .support import run\n" +
+    "def local(events): return list(events)\nclass Adapter:\n    run = staticmethod(_observe(run))\n" +
+    "Adapter.run.__wrapped__ = local\n";
+  await check("伪造 __wrapped__ 不会改变闭包里的外来实现", spoof, wiredClass, through, false,
+    { [dependency]: external });
+  const cycle = decorate(true) + "class Adapter:\n    @staticmethod\n    @_observe\n" +
+    "    def run(events): return list(events)\nAdapter.run.__wrapped__ = Adapter.run\n";
+  await check("带环 __wrapped__ 不能证明承接", cycle, wiredClass, through, false);
+  const foreignReceiver = wire + `from .support import Worker
+from types import MethodType
+class _Local: pass
+def _call(receiver, events): return route(events)
+Worker.__module__ = __name__
+Worker.__qualname__ = '_Local'
+dispatch = MethodType(_call, Worker())
+__all__ = ('dispatch',)
+`;
+  await check("外来类的模块名和限定名均可伪造", route, foreignReceiver, through, false, { [dependency]: external });
+  await check("本地声明的子类仍是本地接收者", route,
+    foreignReceiver.replace("Worker.__module__ = __name__\nWorker.__qualname__ = '_Local'", "class _Derived(Worker): pass")
+      .replace("Worker())", "_Derived())"), through, true, { [dependency]: external });
+  await check("外来子类不能替代未导出的本地类接收者", route,
+    foreignReceiver.replace("from .support import Worker\n", "")
+      .replace("Worker.__module__ = __name__\nWorker.__qualname__ = '_Local'", "from .support import Derived")
+      .replace("Worker())", "Derived())"), through, false,
+    { [dependency]: "from . import _Local\nclass Derived(_Local): pass\n" });
+  const realClass = wire + `class Adapter:
+    @classmethod
+    def run(cls, events): return cls._backend(events)
+    _backend = staticmethod(list)
+class _Derived(Adapter):
+    _backend = staticmethod(route)
+dispatch = Adapter.run
+__all__ = ('dispatch', 'Adapter')
+`;
+  await check("公开基类方法覆盖真实子类的绑定", route, realClass, via("p._Derived.run([13, 21])"), true);
+  await check("隐藏基类后只承认别名包含的精确接收者", route,
+    realClass.replace("('dispatch', 'Adapter')", "('dispatch',)"), via("p._Derived.run([13, 21])"), false);
+  const asyncEntry = "async def route(events): return list(events)\n";
+  for (const gate of ["gather", "wait"] as const) {
+    const consume = gate === "gather" ? "(await asyncio.gather(child))[0]" :
+      "(await asyncio.wait((child,)))[0].pop().result()";
+    const asyncProduction = "import asyncio\n" + wire +
+      `async def dispatch(events):\n    child = asyncio.create_task(route(events))\n    return ${consume}\n`;
+    await check("复合 Future 仍须等到精确承接：" + gate, asyncEntry, asyncProduction,
+      via("asyncio.run(p.dispatch([13, 21]))", "import asyncio\n"), true);
+  }
+  const reloaded = (expr: string) => "import importlib\n" + fromEntry +
+    `def test_route():\n    old = f.route\n    importlib.reload(f)\n    assert ${expr}([13, 21]) == [13, 21]\n`;
+  const closure = factories[0][1] + "route, preview = make(), make()\n";
+  await check("reload 后的新对象仍对齐独立探针的规范键", closure, dispatch, reloaded("f.route"), true);
+  await check("reload 后 preview 不与 route 对齐", closure, dispatch, reloaded("f.preview"), false);
+  await check("reload 后的旧持有引用不能冒充当前公开对象", closure, dispatch, reloaded("old"), false);
+});
+
 test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
   const f = makeFixture({ feedIntegration: `from .at18_fixture_feed import route
 def select_feed(sources, events):

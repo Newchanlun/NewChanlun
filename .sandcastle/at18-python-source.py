@@ -1,7 +1,9 @@
 """在隔离的 F 副本中，核验生产接入并跟踪登记的 pytest 选择器。"""
 import ast
 import asyncio
+import builtins
 import dis
+import gc
 import importlib
 import inspect
 import json
@@ -104,9 +106,142 @@ def underlying(member):
     return member.__func__ if type(member) in (MethodType, staticmethod, classmethod) else member
 
 
+class ClassOrigins:
+    """类的归属取自实际执行的类体，不信任可改写的 __module__/__qualname__。"""
+    def __init__(self, *modules):
+        self.modules = {m.path: m.classes for m in modules}
+        self.classes = {}
+        self.native = builtins.__build_class__
+
+    def __enter__(self):
+        builtins.__build_class__ = self.build
+        return self
+
+    def __exit__(self, *error):
+        builtins.__build_class__ = self.native
+
+    def build(self, body, name, /, *bases, **kwargs):
+        local = (type(body) is FunctionType and
+                 body.__code__ in self.modules.get(body.__code__.co_filename, ()))
+        # 自定义元类可能原样返回已存在的外来类；只记录此次类语句新建的对象。
+        previous = ()
+        if local and (kwargs.get("metaclass", type) is not type or any(type(base) is not type for base in bases)):
+            previous = {id(cls): cls for cls in gc.get_objects() if is_class(cls)}
+        cls = self.native(body, name, *bases, **kwargs)
+        if local and is_class(cls) and gc.is_tracked(cls) and id(cls) not in previous:
+            self.classes[id(cls)] = (cls, body)
+        return cls
+
+
+MISSING = object()
+FRAME_OWNER = getattr(type(sys._getframe()), "f_generator", None)
+DEFERRED_FLAGS = inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
+
+
+def frame_function(frame, owner=None):
+    # CPython 3.12–3.14 的 _PyFrame_Traverse 先访问函数对象，紧接实际 code，
+    # 然后才访问局部变量/值栈。普通帧须在退栈后读取；暂停帧由生成器等持有。
+    referents = gc.get_referents(owner if owner is not None else frame)
+    for previous, obj in zip(referents, referents[1:]):
+        if obj is frame.f_code:
+            return previous if type(previous) is FunctionType else None
+    return None
+
+
+def deferred_owner(frame):
+    if FRAME_OWNER is not None:
+        return FRAME_OWNER.__get__(frame)
+    # 3.12/3.13 尚未暴露 f_generator；只在候选暂停帧首次进入时反查原生所有者。
+    return next((obj for obj in gc.get_referrers(frame)
+                 if (attr := DEFERRED_FRAMES.get(type(obj))) and getattr(obj, attr) is frame), None)
+
+
+def receiver_at_entry(frame):
+    code = frame.f_code
+    if code.co_argcount:
+        return frame.f_locals.get(code.co_varnames[0], MISSING)
+    if code.co_flags & inspect.CO_VARARGS:
+        args = frame.f_locals.get(code.co_varnames[code.co_kwonlyargcount], ())
+        if args:
+            return args[0]
+    return MISSING
+
+
+def inherits(actual, owner):
+    # 用真实 MRO，不执行受验对象的 __class__ 或元类的 __instancecheck__。
+    return any(base is owner for base in type.__getattribute__(actual, "__mro__"))
+
+
+def is_class(obj):
+    return inherits(type(obj), type)
+
+
+def class_members(cls):
+    return type.__dict__["__dict__"].__get__(cls).items()
+
+
+class Binding:
+    def __init__(self, key, member, signature, owner=None):
+        self.key, self.member, self.signature, self.owner = key, member, signature, owner
+        self.function = underlying(member)
+
+    def matches_receiver(self, receiver):
+        kind = type(self.member)
+        if kind is MethodType:
+            return receiver is self.member.__self__
+        if kind is staticmethod or self.owner is None:
+            return True
+        if kind is classmethod:
+            return is_class(receiver) and inherits(receiver, self.owner)
+        return receiver is not MISSING and inherits(type(receiver), self.owner)
+
+    def callable(self, instances, samples):
+        if self.owner is None:
+            return self.member
+        if type(self.member) in (staticmethod, classmethod):
+            return self.member.__get__(None, self.owner)
+        key = id(self.owner)
+        if key not in instances:
+            instances[key] = None  # 构造器异常也只试一次。
+            args, kwargs = arguments(self.owner, samples)
+            instances[key] = self.owner(*args, **kwargs)
+        if instances[key] is not None:
+            return self.member.__get__(instances[key], self.owner)
+
+    def arguments(self, fn, samples):
+        signature = self.signature
+        if type(fn) is MethodType:
+            signature = MethodType(signature, fn.__self__)
+        return arguments(signature, samples)
+
+
+def captured_functions(fn):
+    """只查看冻结包装器的捕获对象；不访问任意对象属性或运行用户代码。"""
+    pending = [fn.__defaults__, fn.__kwdefaults__]
+    for cell in fn.__closure__ or ():
+        try:
+            pending.append(cell.cell_contents)
+        except ValueError:
+            pass
+    visited = set()
+    while pending:
+        obj = pending.pop()
+        if id(obj) in visited:
+            continue
+        visited.add(id(obj))
+        kind = type(obj)
+        if kind in (FunctionType, MethodType):
+            yield obj
+        elif kind in (tuple, list, set, frozenset):
+            pending.extend(obj)
+        elif kind is dict:
+            pending.extend(obj.values())
+
+
 class Exports:
     def __init__(self, path, require_body=False):
         self.path, self.module = str(Path(path).resolve()), module(path)
+        self.require_body = require_body
         raw = Path(path).read_bytes()
         declarations = list(ast.walk(ast.parse(raw, path)))
         functions = {(line(node), node.name) for node in declarations if isinstance(node, FUNCTIONS)
@@ -116,33 +251,90 @@ class Exports:
         codes = list(code_objects(compile(raw, self.path, "exec")))
         self.definitions = {c for c in codes if (c.co_firstlineno, c.co_name) in functions}
         self.classes = {c for c in codes if (c.co_firstlineno, c.co_name) in classes}
-        self.class_names = {c.co_qualname for c in self.classes}
 
-    def owns(self, fn):
+    def owns_fn(self, fn):
         return (type(fn) is FunctionType and fn.__globals__ is self.globals and
-                str(Path(fn.__code__.co_filename).resolve()) == self.path and fn.__code__ in self.definitions)
+                fn.__code__.co_filename == self.path and fn.__code__ in self.definitions)
 
-    def load(self):
+    def class_body(self, cls):
+        record = self.origins.classes.get(id(cls))
+        if record is not None:
+            _, body = record
+            if body.__globals__ is self.globals and body.__code__ in self.classes:
+                return body.__code__
+
+    def owns_receiver(self, receiver):
+        cls = receiver if is_class(receiver) else type(receiver)
+        return self.class_body(cls) is not None
+
+    def signature(self, fn, declared=(), *, inspect_captures=False):
+        # __wrapped__ 是线索，不是归属证明。无该属性时，支持通过闭包/默认参数
+        # 透传的本地装饰；元数据被重写也不能盖过捕获到的实际包装目标。
+        def validate(current, path):
+            if not self.owns_fn(current) or current in path:
+                return None
+            path = path | {current}
+            explicit = vars(current).get("__wrapped__", MISSING)
+            explicit_signature = current if explicit is MISSING else validate(explicit, path)
+            if explicit_signature is None or not inspect_captures or current.__code__ in declared:
+                return explicit_signature
+            captures = tuple(obj for obj in captured_functions(current) if obj is not current)
+            if not captures:
+                return explicit_signature
+            originals = tuple(obj for obj in captures if underlying(obj).__code__ in declared)
+            if originals:
+                captures = originals  # 其它捕获（如日志回调）不是该方法的被包装定义。
+            signatures = [validate(obj, path) for obj in captures]
+            if any(signature is None for signature in signatures):
+                return None
+            if len(signatures) == 1:
+                return signatures[0]
+            return explicit_signature
+
+        return validate(fn, set())
+
+    def load(self, origins):
+        self.origins = origins
         self.globals, bindings = exported_bindings(self.module, self.path)
-        self.members = list(self.local_members(bindings))
-        self.codes = {underlying(member).__code__ for _, member in self.members}
+        self.members = tuple(self.local_members(bindings))
+        self.by_code = {}
+        for binding in self.members:
+            self.by_code.setdefault(id(binding.function.__code__), []).append(binding)
+
+    def class_signature(self, cls, name, fn):
+        code = self.class_body(cls)
+        declared = [c for c in code.co_consts if type(c) is CodeType and c.co_name == name]
+        if declared and not any(c in self.definitions for c in declared):
+            return None
+        return self.signature(fn, declared, inspect_captures=True)
 
     def local_members(self, bindings):
-        for value in bindings.values():
-            if type(value) in (FunctionType, MethodType) and self.owns(underlying(value)):
-                yield None, value
-            elif (isinstance(value, type) and value.__module__ == self.module
-                  and value.__qualname__ in self.class_names):
-                for name, member in vars(value).items():
+        for export_name, value in bindings.items():
+            if type(value) is FunctionType:
+                if (signature := self.signature(value, inspect_captures=self.require_body)) is not None:
+                    yield Binding(("module", export_name), value, signature)
+            elif type(value) is MethodType and self.owns_receiver(value.__self__):
+                fn = value.__func__
+                cls = value.__self__ if is_class(value.__self__) else type(value.__self__)
+                # 显式别名也不能替被装饰的类槽跳过实现检查。
+                slots = [(base, name) for base in type.__getattribute__(cls, "__mro__")
+                         if self.class_body(base) is not None for name, member in class_members(base)
+                         if type(member) in (FunctionType, classmethod, staticmethod) and underlying(member) is fn]
+                signatures = [self.class_signature(base, name, fn) for base, name in slots]
+                signature = next((s for s in signatures if s is not None), None) if slots else self.signature(fn, inspect_captures=self.require_body)
+                if signature is not None:
+                    yield Binding(("module", export_name), value, signature)
+            elif is_class(value) and self.class_body(value) is not None:
+                for name, member in class_members(value):
                     if not name.startswith("_") and type(member) in (FunctionType, staticmethod, classmethod):
-                        fn = underlying(member)
-                        if self.owns(fn) and fn.__code__.co_qualname.rpartition(".")[0] == value.__qualname__:
-                            yield value, member
+                        if (signature := self.class_signature(value, name, underlying(member))) is not None:
+                            # 两个类即使由同一个工厂生成，公开名仍可区分它们。
+                            yield Binding(("class", export_name, name), member, signature, value)
 
-    def contains(self, frame):
-        # 同一冻结定义在 reload 后可重建 code 对象；仍要求实际模块的全局字典和文件。
-        return (frame.f_globals is self.globals and frame.f_code.co_filename == self.path and
-                frame.f_code in self.codes)
+    def candidates(self, frame):
+        if frame.f_globals is self.globals:
+            return self.by_code.get(id(frame.f_code), ())
+        return ()
 
     def initialized(self, frame):
         while frame is not None:
@@ -161,7 +353,8 @@ class Exports:
 
 class Invocation:
     """调用只能继承自己显式消费过的任务，任务继承上下文本身不提供证明。"""
-    def __init__(self):
+    def __init__(self, call=None, parent=None):
+        self.call, self.parent = call, parent
         self.owner = current_task()
         self.joined = {}
 
@@ -313,26 +506,76 @@ def observe_waits():
     asyncio.BaseEventLoop.run_until_complete = traced_run
 
 
+class Call:
+    """候选 code 仅用于分流，实际计入的键必须有精确的函数和接收者。"""
+    def __init__(self, frame, bindings, receiver, function=None):
+        self.frame, self.function = frame, function
+        self.bindings = tuple(b for b in bindings if b.matches_receiver(receiver))
+        self.matched = None
+
+    def keys(self):
+        if self.matched is not None:
+            return self.matched
+        if not self.bindings:
+            return frozenset()
+        fn = self.function or frame_function(self.frame)
+        if fn is None:
+            return frozenset()
+        self.matched = frozenset(b.key for b in self.bindings if b.function is fn)
+        return self.matched
+
+
+def public(scope):
+    while scope.call is None:
+        if scope.parent is None:
+            return True  # 独立探针显式驱动已返回的生成器/协程。
+        scope = scope.parent
+    return bool(scope.call.keys())
+
+
 class Trace:
     def __init__(self, production, targets, *, test=None, probe=None):
         self.production, self.targets = production, targets
         self.test, self.probe = test, probe
         self.test_scope = None
-        self.deferred = set()
+        self.deferred = {}
+        self.suspended_calls = {}
         self.scopes = {}
         self.activations = {}
         self.hits = []
+
+    def call(self, frame, bindings):
+        code = frame.f_code
+        if not code.co_flags & DEFERRED_FLAGS:
+            return Call(frame, bindings, receiver_at_entry(frame))
+        if frame not in self.suspended_calls:
+            owner = deferred_owner(frame)
+            bytecode = code.co_code
+            start = bytecode[frame.f_lasti:frame.f_lasti + 2] == bytes((dis.opmap["RESUME"], 0))
+            # 恢复时局部变量可已改写；不知道首入的接收者时，不证实绑定方法。
+            self.suspended_calls[frame] = (receiver_at_entry(frame) if start else MISSING,
+                                           frame_function(frame, owner) if owner is not None else None)
+        receiver, fn = self.suspended_calls[frame]
+        return Call(frame, bindings, receiver, fn)
 
     def profile(self, frame, event, arg):
         code = frame.f_code
         if event == "c_call" and code in wait_result_codes and arg.__name__ == "result":
             joined(active.get(), current_task(), (arg.__self__,))
-        if event == "return" and frame in self.activations:
-            active.reset(self.activations.pop(frame))
-            if self.scopes[frame] is not self.test_scope and code.co_code[frame.f_lasti] in returns:
-                attr = DEFERRED_FRAMES.get(type(arg))
-                if attr and (child := getattr(arg, attr)) is not None:
-                    self.deferred.add(child)
+        if event == "return" and (frame in self.activations or code is RELOAD_CODE):
+            normal_return = code.co_code[frame.f_lasti] in returns if frame.f_lasti >= 0 else False
+            if frame in self.activations:
+                active.reset(self.activations.pop(frame))
+                scope = self.scopes[frame]
+                if scope is not self.test_scope and normal_return:
+                    attr = DEFERRED_FRAMES.get(type(arg))
+                    if attr and (child := getattr(arg, attr)) is not None:
+                        self.deferred[child] = scope
+            if code is RELOAD_CODE and normal_return and inspect.ismodule(arg):
+                # 按每次实际加载的精确绑定匹配；老对象不能替换新一轮的公开绑定。
+                for exports in (self.production, self.targets):
+                    if vars(arg) is exports.globals and arg is frame.f_locals.get("module"):
+                        exports.load(exports.origins)
             return
         if event != "call":
             return
@@ -342,21 +585,26 @@ class Trace:
             if frame not in self.scopes:
                 self.scopes[frame] = Invocation()
             scope = self.test_scope = self.scopes[frame]
-        elif ((self.probe is not None and (frame in self.deferred or
-                frame.f_back is self.probe and self.production.contains(frame))) or
-                (self.test_scope in scopes and (frame in self.deferred or self.production.contains(frame)))):
-            if not self.production.initialized(frame):
-                return
-            if frame not in self.scopes:
-                self.scopes[frame] = Invocation()
-            scope = self.scopes[frame]
+        elif (self.probe is not None and (frame.f_back is self.probe or
+                                          frame in self.deferred or frame in self.scopes) or
+              self.test_scope in scopes):
+            bindings = self.production.candidates(frame)
+            if bindings or frame in self.deferred or frame in self.scopes:
+                if not self.production.initialized(frame):
+                    return
+                if frame not in self.scopes:
+                    if frame in self.deferred:
+                        self.scopes[frame] = Invocation(parent=self.deferred[frame])
+                    else:
+                        self.scopes[frame] = Invocation(call=self.call(frame, bindings))
+                scope = self.scopes[frame]
         if scope is not None:
             scopes = (*scopes, scope)
             self.activations[frame] = active.set(scopes)
-        if scopes and self.targets.contains(frame):
-            # 只排除入口外层的初始化；正常公开调用自身可以再构造对象。
-            if any(scope is not self.test_scope for scope in scopes) or self.production.initialized(frame):
-                self.hits.append((code, current_task(), scopes, self.samples(frame) if self.test else {}))
+        if scopes and (bindings := self.targets.candidates(frame)):
+            direct = self.test_scope in scopes and self.production.initialized(frame)
+            self.hits.append((self.call(frame, bindings), current_task(), scopes,
+                              self.samples(frame) if self.test else {}, direct))
 
     @staticmethod
     def samples(frame):
@@ -371,45 +619,45 @@ class Trace:
 
     def accepted(self):
         reach = {}
-        for code, task, scopes, samples in self.hits:
+        for call, task, scopes, samples, direct in self.hits:
+            keys = call.keys()
+            if not keys:
+                continue
             for scope in scopes:
                 if scope not in reach:
                     reach[scope] = scope.reachable()
             if self.test_scope and task not in reach.get(self.test_scope, ()):
                 continue
-            via_public = any(scope is not self.test_scope and task in reach[scope] for scope in scopes)
-            yield code, samples, via_public
+            via_public = any(scope is not self.test_scope and task in reach[scope] and public(scope)
+                             for scope in scopes)
+            if direct or via_public:
+                yield keys, samples, via_public
 
     def covers(self, expected):
-        return any(via_public and code in expected for code, _, via_public in self.accepted())
+        return any(via_public and not keys.isdisjoint(expected) for keys, _, via_public in self.accepted())
 
 
-def public_probe(production, targets, test_entered_codes, samples):
+def public_probe(production, targets, origins, test_entered, samples):
     # pytest 可能已加载或修改受验模块；用同一冻结副本重新导入，且导入不记覆盖。
     root = Path.cwd().resolve()
     for name, loaded in list(sys.modules.items()):
         filename = vars(loaded).get("__file__") if inspect.ismodule(loaded) else None
         if isinstance(filename, str) and Path(filename).resolve().is_relative_to(root):
             sys.modules.pop(name, None)
-    production.load()
-    targets.load()
+    production.load(origins)
+    targets.load(origins)
 
-    instances = {}
-    for owner, member in production.members:
+    instances, tried = {}, set()
+    for binding in production.members:
         try:
-            if owner is None:
-                fn = member
-            elif type(member) in (staticmethod, classmethod):
-                fn = member.__get__(None, owner)
-            else:
-                if owner not in instances:
-                    instances[owner] = None  # 构造器异常也只试一次。
-                    args, kwargs = arguments(owner, samples)
-                    instances[owner] = owner(*args, **kwargs)
-                if instances[owner] is None:
-                    continue
-                fn = member.__get__(instances[owner], owner)
-            args, kwargs = arguments(fn, samples)
+            fn = binding.callable(instances, samples)
+            if fn is None:
+                continue
+            identity = (id(fn.__func__), id(fn.__self__)) if type(fn) is MethodType else (id(fn),)
+            if identity in tried:
+                continue
+            tried.add(identity)
+            args, kwargs = binding.arguments(fn, samples)
         except (Exception, SystemExit):
             continue
 
@@ -419,7 +667,7 @@ def public_probe(production, targets, test_entered_codes, samples):
         async def consume_async_generator(generator):
             try:
                 for _ in range(PROBE_STEPS):
-                    if trace.covers(test_entered_codes):
+                    if trace.covers(test_entered):
                         break
                     try:
                         await anext(generator)
@@ -433,16 +681,16 @@ def public_probe(production, targets, test_entered_codes, samples):
             sys.setprofile(trace.profile)
             result = fn(*args, **kwargs)
             attr = DEFERRED_FRAMES.get(type(result))
-            if attr and not trace.covers(test_entered_codes):
+            if attr and not trace.covers(test_entered):
                 # 只驱动公开返回值；不查找或推进函数内部未返回的生成器。
-                trace.deferred.add(getattr(result, attr))
+                trace.deferred.setdefault(getattr(result, attr), None)
                 if type(result) is CoroutineType:
                     asyncio.run(result)
                 elif type(result) is AsyncGeneratorType:
                     asyncio.run(consume_async_generator(result))
                 else:
                     for _ in range(PROBE_STEPS):
-                        if trace.covers(test_entered_codes):
+                        if trace.covers(test_entered):
                             break
                         next(result)
         except (Exception, SystemExit):
@@ -451,7 +699,7 @@ def public_probe(production, targets, test_entered_codes, samples):
         finally:
             sys.setprofile(None)
             result = None
-        if trace.covers(test_entered_codes):
+        if trace.covers(test_entered):
             return True
     return False
 
@@ -474,16 +722,16 @@ def proves(doc, scratch):
         @pytest.hookimpl(wrapper=True, trylast=True)
         def pytest_runtest_call(self, item):
             # 先完成星号导入（包括包的子模块加载及动态属性），只追踪登记调用。
-            production.load()
-            targets.load()
+            production.load(origins)
+            targets.load(origins)
             trace = Trace(production, targets, test=position)
             sys.setprofile(trace.profile)
             try:
                 return (yield)
             finally:
                 sys.setprofile(None)
-                for code, samples, via_public in trace.accepted():
-                    self.entered.add(code)
+                for keys, samples, via_public in trace.accepted():
+                    self.entered.update(keys)
                     self.covered |= via_public
                     for key, value in samples.items():
                         self.samples.setdefault(key, value)
@@ -496,11 +744,14 @@ def proves(doc, scratch):
     registration = Registration()
     observe_waits()
     sys.path.insert(0, str(Path.cwd()))
-    result = pytest.main(["-p", "no:cacheprovider", "-p", "no:terminal", "--basetemp", scratch + "/pytest",
-                          path + "::" + selector], plugins=[registration])
-    return (result == pytest.ExitCode.OK and not registration.nonpass and registration.passed == doc["count"] and
-            (registration.covered or bool(registration.entered) and
-             public_probe(production, targets, registration.entered, registration.samples)))
+    if sys.implementation.name != "cpython" or not (3, 12) <= sys.version_info[:2] <= (3, 14):
+        return False
+    with ClassOrigins(production, targets) as origins:
+        result = pytest.main(["-p", "no:cacheprovider", "-p", "no:terminal", "--basetemp", scratch + "/pytest",
+                              path + "::" + selector], plugins=[registration])
+        return (result == pytest.ExitCode.OK and not registration.nonpass and registration.passed == doc["count"] and
+                (registration.covered or bool(registration.entered) and
+                 public_probe(production, targets, origins, registration.entered, registration.samples)))
 
 
 if __name__ == "__main__":
