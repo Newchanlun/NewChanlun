@@ -1,14 +1,10 @@
 """ADR 0064 r6 的 R10 Git 对象与补救原件本地核验。"""
 from __future__ import annotations
 
-import ast
 from collections import defaultdict
-from dataclasses import dataclass, field
-from enum import Enum, auto
 from functools import cache
-import json
+from itertools import groupby
 from pathlib import Path, PurePosixPath
-import posixpath
 import re
 import subprocess
 import sys
@@ -36,6 +32,7 @@ RESULT_PATH = re.compile(
     r"\.chanlun/at18/(?:pregate-review|pregate/unattributed-window-audit)\.json|STRICT-NEST-[^/]*(?:-RESULT|CHECK)\.md)"
 )
 INPUT_MANIFEST = "INPUT-MANIFEST.json"
+FIXTURE_POINTER = "FIXTURE-MOVED.md"
 OUTPUT_TOKEN = re.compile(
     r"(?:^|[^a-z0-9])(?:reviews?|reports?|results?|receipts?|audits?|verify|verification|"
     r"evidence|summary|summaries|verdicts?|runs)(?=$|[^a-z0-9])"
@@ -153,9 +150,9 @@ RUN_METRIC = re.compile(r"\d[\d,]*(?:[.]\d+)?\s*(?:%|pp\b|ms\b|bars?\b|笔|组|�
                         r"(?:[^\s=:]+)\s*=\s*-?\d", re.I)
 RUN_COLUMN = re.compile(r"回报|收益|覆盖率|复利|胜率|耗时|交易数|实测|bars|sharpe|drawdown|ms/bar|trades|MDD|BH|P&L|年化|回测|bps|卖飞率", re.I)
 
-RUN_TITLE = re.compile(r"重验|重测|重跑|首跑|复跑|复验|回测|实测|实证|对拍|验收|修复|测量")
+RUN_TITLE = re.compile(r"探针|标定记录|首验|重验|重测|重跑|首跑|复跑|复验|回测|实测|实证|对拍|验收|修复|测量|实验|结果")
 NORMATIVE_TITLE = re.compile(
-    RULE_TITLE.pattern + r"|规划|路线图|总纲领|现场台账|交接台账|草案|\b(?:proposal|plan|spec|draft|roadmap)\b", re.I
+    RULE_TITLE.pattern + r"|规划|路线图|蓝图|总纲领|现场台账|交接台账|草案|\b(?:proposal|plan|spec|draft|roadmap)\b", re.I
 )
 RUN_EXECUTION = re.compile(
     r"\b(?:cargo test|pytest)[ \t`]+\d+|"
@@ -197,6 +194,37 @@ RUN_RESULT_COUNT = re.compile(
     r"\b(?:cargo test|pytest)[ \t`]+\d+[^\n]{0,30}(?:全过|通过|PASS\b|FAIL\b)|"
     r"\d+/\d+\s*(?:标的\s*)?(?:通过|PASS\b|FAIL\b)", re.I
 )
+GENERATED_AT = re.compile(r"(?:生成(?:时间)?|Generated(?: at)?)\s*[:：]\s*\d{4}-\d{2}-\d{2}", re.I)
+EMPIRICAL_CONTEXT = re.compile(
+    r"(?:数据|本体)实测|两版真实数据|"
+    r"(?:样本|数据|数据范围)[:：][^\n]{0,120}\d[^\n]{0,50}(?:根|bars?\b|行|笔|交易日)|"
+    r"(?:样本|raw)[^\n]{0,16}\d[\d,]+\s*(?:行|笔|交易日)|"
+    r"\d[\d,.]*[万亿kKmM]?\s*(?:共同交易日|公共交易日|交易日|根(?:\s*\d+min)?|bars?\b)|"
+    r"\d{4}-\d{2}-\d{2}[^\n]{0,45}(?:~|至|\.\.)[^\n]{0,20}\d{4}-\d{2}-\d{2}", re.I
+)
+OBSERVED_FINDING = re.compile(
+    r"证伪|否证|唯一合格|有效涌现深度|\d+\s*组共享|"
+    r"\d[\d,]+\s*(?:行|笔|例|次|根)|重复率[^\n]{0,20}\d+\.?\d*%|"
+    r"(?:回测|实测|实跑|首验|重验|对拍|实验)(?:\s*结果|\s*读数)"
+)
+RUN_CELL = re.compile(r"^[*~≈ +−-]*\d[\d,.]*(?:%|s|ms|pp|x|倍|\s|$)", re.I)
+PERFORMANCE_COLUMN = re.compile(r"\b(?:BH|MDD|Sharpe|trades)\b|复利|夏普|盈亏比|胜率|净现金|耗时|收益|回撤|\bstrat(?:%|_pct)?\b|P&L|PnL|(?:多头|空头)净", re.I)
+RUN_DELIVERY = re.compile(r"实施(?:侧)?交付|本次交付|交付(?:小结|文档|记录)")
+RUN_EMPIRICAL_GRADE = re.compile(r"认识论(?:等级)?[^\n]{0,8}L[23]\b|\bepistemic levels?[^\n]{0,60}L[23]\b", re.I)
+RUN_EXECUTED = re.compile(r"实测复现|观察到的规律|本轮做的|已经查清|已确定性.{0,4}查清|"
+                          r"跑(?:了|出|过|完|决定性)[^\n]{0,25}(?:实证|回测|实验|测试)|"
+                          r"\b(?:numbers? (?:were )?re-verified|observed results|experiment results)\b", re.I)
+RUN_RESULT_SECTION = re.compile(
+    r"(?:回测|实测|首验|实验|实证)(?:结果|复现|读数|证伪|否证)|观察到的规律|结果[:：].{0,60}(?:证伪|否证)"
+)
+RUN_STATISTIC = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:%|pp\b)|[+−-]\d[\d,]*(?:\.\d+)?")
+EXECUTION_RECORD = re.compile(r"(?:编译|构建|测试)[^\n]{0,45}(?:矛盾|失败|异常|报错)记录|"
+                              r"编译器暴露[^\n]{0,20}记录")
+RUN_DIGEST = re.compile(r"(?:session|本轮).{0,20}(?:关键发现链|实验结论|实测摘要)|"
+                        r"产生机制追查|工作清单.{0,20}已核实", re.I)
+
+DELIVERED = re.compile(r"(?:代码|改动|测试|修复).{0,12}(?:已落|已合入|已完成|全过|全通)|"
+                       r"(?:新增|修改)文件[：:]|(?:离线|合成|回归|单元)测试[^\n]{0,40}\d+\s*(?:项|通过)")
 SELF_REPORT = re.compile(r"(?:^|[（(，。；;：:\s])本报告(?:的|所|中|为|记载|记录|只产出|不再|\s|[，。])", re.M)
 
 
@@ -209,7 +237,7 @@ class Entry(NamedTuple):
 
 class ArchivedArtifacts(NamedTuple):
     blobs: set[str]
-    loaded_inputs: set[tuple[str, str]]
+    migrated_inputs: set[tuple[str, str]]
 
 
 class ContractError(ValueError):
@@ -342,1059 +370,140 @@ def is_archive_output(path):
             or OUTPUT_TOKEN.search(relative.lower()) is not None)
 
 
-# 只认有确定锚点的读取式，不把文件路径字符串本身当成加载证据。
-JS_SUFFIXES = (".js", ".cjs", ".mjs", ".ts", ".mts", ".cts")
-SOURCE_SUFFIXES = (*JS_SUFFIXES, ".rs", ".py")
-BLOCK_DELIMITER = re.compile(r"/\*|\*/")
-COMMON_TOKENS = (
-    r'(?P<comment>//[^\r\n]*|/\*)|(?P<string>"(?:\\[^\r\n]|[^"\\\r\n])*")'
-    r'|[A-Za-z_$][\w$]*|[^\s]'
-)
-RUST_TOKENS = re.compile(r'(?:br|r)(?P<hashes>\#*)"(?s:.*?)"(?P=hashes)|\'(?:\\.|[^\'\\\r\n])\'|'
-                         + COMMON_TOKENS)
-JS_ASSIGNMENTS = r"\*\*=|<<=|>>>=|>>=|&&=|\|\|=|\?\?=|[+*/%&|^\-]="
-JS_OPERATORS = JS_ASSIGNMENTS + r"|===|!==|==|!=|=>|\+\+|--|\.\.\.|\?\.|\?\?|\|\||&&"
-JS_NUMBER = re.compile(
-    r"0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)"
-    r"(?:[eE][+-]?[\d_]+)?"
-)
-JS_TOKENS = re.compile(
-    r'(?P<single>\'(?:\\[^\r\n]|[^\'\\\r\n])*\')|`(?:\\[\s\S]|[^`\\])*`'
-    r'|/(?![/*])(?:\\[^\r\n]|\[(?:\\.|[^\]\\\r\n])*\]|[^/\\[\r\n])+/[dgimsuvy]*|'
-    + JS_OPERATORS + "|" + JS_NUMBER.pattern + "|" + COMMON_TOKENS
-)
-
-
-def source_tokens(text, *, rust):
-    """去掉注释，把字符串/模板/正则作为不可拆分的词元。"""
-    scan = RUST_TOKENS if rust else JS_TOKENS
-    literals, tokens, linebreaks = {}, [], set()
-    end = tail = 0
-    while match := scan.search(text, end):
-        token = match[0]
-        end = match.end()
-        if match["comment"]:
-            if token == "/*":
-                depth = 1
-                for delimiter in BLOCK_DELIMITER.finditer(text, end):
-                    if rust or delimiter[0] == "*/":
-                        depth += 1 if delimiter[0] == "/*" else -1
-                    if depth == 0:
-                        end = delimiter.end()
-                        break
-                else:
-                    break
-            continue
-        if not rust and ("\n" in text[tail:match.start()] or "\r" in text[tail:match.start()]):
-            linebreaks.add(len(tokens))
-        tail = end
-        if match["string"] or (not rust and match["single"]):
-            # 不解码转义：只承认可逐字对到仓库相对路径的字符串。
-            key = f"@{len(literals)}"
-            literals[key] = token[1:-1]
-            tokens.append(key)
-        else:
-            tokens.append(token if re.fullmatch(
-                r"[\w$]+|[.:=(),;!{}\[\]*?+<>|\-]|" + JS_OPERATORS + "|" + JS_NUMBER.pattern, token
-            ) else "~")
-    return tokens, literals, linebreaks
-
-
-JS_NAME = re.compile(r"[A-Za-z_$][\w$]*")
-JS_MUTATION = re.compile(r"\+\+|--|" + JS_ASSIGNMENTS)
-JS_CONTINUATION = {".", "?.", ",", "in", "instanceof", "as", "satisfies", "of"}
-JS_CONTROL = {"if", "else", "while", "for", "switch", "catch", "with"}
-JS_UNKNOWN = frozenset()
-JS_TEST_CALLS = {"test", "it", "describe"}
-
-
-class JSAtom(Enum):
-    TDZ = auto()
-    FS = auto()
-    PATH = auto()
-    TEST = auto()
-
-
-class JSConstant(NamedTuple):
-    kind: str
-    value: str | bool | int | float | None
-
-
-@dataclass
-class JSScope:
-    function: bool
-    bindings: dict
-    # 分支快照复制绑定，但不改变词法帧身份。
-    key: object = field(default_factory=object, compare=False)
-
-
-@dataclass(frozen=True)
-class JSClosure:
-    span: tuple[int, int]
-    params: tuple[tuple[tuple[str, ...], bool], ...]
-    expression: bool
-    name: str | None
-    captured: tuple[JSScope, ...] = field(compare=False)
-    keys: tuple[object, ...] = field(init=False)
-
-    def __post_init__(self):
-        object.__setattr__(self, "keys", tuple(frame.key for frame in self.captured))
-
-
-@dataclass(frozen=True)
-class JSObject:
-    members: dict
-
-
-class JSThrown(Exception):
-    """已知不能正常完成的表达式；异常边已记下。"""
-
-
-class JSStatement(NamedTuple):
-    kind: str
-    span: tuple[int, int]
-    children: tuple[JSStatement, ...] = ()
-
-
-def js_join_values(values):
-    first, *rest = values
-    if all(value == first for value in rest):
-        return first
-    return JS_UNKNOWN.union(*(value for value in values if isinstance(value, frozenset)))
-
-
-def js_join(*scopes):
-    """同一程序点的路径取并集；内建模块须在各分支保持相同来源。"""
-    return tuple(JSScope(frames[0].function, {
-        name: js_join_values([frame.bindings.get(name, JS_UNKNOWN) for frame in frames])
-        for name in set().union(*(frame.bindings for frame in frames))
-    }, frames[0].key) for frames in zip(*scopes))
-
-
-def js_merge(target, source):
-    for completion, env in source.items():
-        target[completion] = js_join(target[completion], env) if completion in target else env
-
-
-def reject_js_json_constant(value):
-    raise ValueError(value)
-
-
-class JSFixtureReads:
-    """对固定 CommonJS 读式做源码级解释；不执行代码，不推断动态模块、路径或调用。"""
-
-    def __init__(self, tokens, literals, linebreaks):
-        self.t = tokens
-        self.literals = literals
-        self.linebreaks = linebreaks
-        self.groups = {}
-        stack = []
-        pairs = {")": "(", "}": "{", "]": "["}
-        for i, token in enumerate(tokens):
-            if token in pairs.values():
-                stack.append(i)
-            elif token in pairs and stack and tokens[stack[-1]] == pairs[token]:
-                self.groups[stack.pop()] = i
-        self.reads = set()
-        self.throw_edges = []
-        self.calls = set()
-
-    def level(self, lo, hi):
-        """只遍历当前括号层；表达式中的内部逗号、冒号和花括号各归其主。"""
-        while lo < hi:
-            yield lo
-            lo = self.groups.get(lo, lo) + 1
-
-    def split(self, lo, hi, delimiter=","):
-        for i in self.level(lo, hi):
-            if self.t[i] == delimiter:
-                yield lo, i
-                lo = i + 1
-        yield lo, hi
-
-    def statement_end(self, lo, hi):
-        for i in self.level(lo, hi):
-            token = self.t[i]
-            if token == ";" or token in {"else", "catch", "finally"}:
-                return i
-            if i > lo and i in self.linebreaks and token not in JS_CONTINUATION:
-                prior = self.t[i - 1]
-                if ((JS_NAME.fullmatch(prior) and prior not in JS_CONTROL | {"function", "new", "const", "let", "var"})
-                        or prior.startswith("@") or prior in {")", "]", "}"}):
-                    if JS_NAME.fullmatch(token) or token == "{":
-                        return i
-        return hi
-
-    def sequence(self, lo, hi):
-        result = []
-        while lo < hi:
-            node, lo = self.statement(lo, hi)
-            result.append(node)
-        return tuple(result)
-
-    def statement(self, lo, hi):
-        t = self.t
-        if lo >= hi:
-            return JSStatement("empty", (lo, lo)), lo
-        kind = t[lo]
-        if kind == ";":
-            return JSStatement("empty", (lo, lo)), lo + 1
-        if kind == "{" and lo in self.groups:
-            close = self.groups[lo]
-            return JSStatement("block", (lo + 1, close), self.sequence(lo + 1, close)), close + 1
-        if kind in {"if", "switch", "for", "while"} and t[lo + 1:lo + 2] == ["("] and lo + 1 in self.groups:
-            close = self.groups[lo + 1]
-            span = (lo + 2, close)
-            if kind == "switch" and t[close + 1:close + 2] == ["{"] and close + 1 in self.groups:
-                end = self.groups[close + 1]
-                return JSStatement(kind, span, self.cases(close + 2, end)), end + 1
-            if kind != "switch":
-                body, end = self.statement(close + 1, hi)
-                children = (body,)
-                if kind == "if" and end < hi and t[end] == "else":
-                    other, end = self.statement(end + 1, hi)
-                    children += (other,)
-                return JSStatement(kind, span, children), end
-        if kind == "try" and t[lo + 1:lo + 2] == ["{"]:
-            body, end = self.statement(lo + 1, hi)
-            handlers = [body]
-            if t[end:end + 1] == ["catch"]:
-                start = end + 1
-                close = self.groups.get(start) if t[start:start + 1] == ["("] else None
-                catch, end = self.statement(close + 1 if close is not None else start, hi)
-                params = (start + 1, close) if close is not None else (start, start)
-                handlers.append(JSStatement("catch", params, catch.children))
-            if t[end:end + 1] == ["finally"]:
-                final, end = self.statement(end + 1, hi)
-                handlers.append(JSStatement("finally", final.span, final.children))
-            return JSStatement("try", (lo, end), tuple(handlers)), end
-        # 声明的函数（含 class）在闭合大括号处结束，不吞下同一行的下一条语句。
-        prefix = lo
-        while t[prefix:prefix + 1] and t[prefix] in {"export", "default", "async"}:
-            prefix += 1
-        if t[prefix:prefix + 1] and t[prefix] in {"function", "class"}:
-            for i in self.level(prefix + 1, hi):
-                if t[i] == "{" and i in self.groups:
-                    end = self.groups[i] + 1
-                    return JSStatement("function-decl", (prefix, end)), end
-                if t[i] == ";":
-                    break
-        end = self.statement_end(lo, hi)
-        if end == lo:  # 非本分析子集的孤立控制词也要推进。
-            return JSStatement("empty", (lo, lo)), lo + 1
-        after = end + (end < hi and t[end] == ";")
-        if kind in {"let", "const", "var", "return", "throw", "break", "continue"}:
-            start = lo + 1
-            if kind == "return" and start in self.linebreaks:
-                return JSStatement(kind, (start, start)), start
-            return JSStatement(kind, (start, end)), after
-        return JSStatement("expr", (lo, end)), after
-
-    def cases(self, lo, hi):
-        labels = []
-        for i in self.level(lo, hi):
-            if self.t[i] not in {"case", "default"}:
-                continue
-            depth = 0
-            for j in self.level(i + 1, hi):
-                token = self.t[j]
-                if token == ":" and not depth:
-                    labels.append((self.t[i], i + 1, j))
-                    break
-                depth += (token == "?") - (token == ":")
-        return tuple(JSStatement(kind, (start, colon), self.sequence(
-            colon + 1, labels[k + 1][1] - 1 if k + 1 < len(labels) else hi,
-        )) for k, (kind, start, colon) in enumerate(labels))
-
-    def binding_pattern(self, lo, hi):
-        # 解构可遮蔽内建名，但不从解构的值推导模块或路径。
-        if lo >= hi:
-            return
-        token = self.t[lo]
-        if token == "...":
-            yield from self.binding_pattern(lo + 1, hi)
-        elif JS_NAME.fullmatch(token):
-            yield token
-        elif token in {"{", "["} and lo in self.groups:
-            for start, end in self.split(lo + 1, self.groups[lo]):
-                if token == "{":
-                    colon = next((i for i in self.level(start, end) if self.t[i] in {":", "="}), end)
-                    if colon < end and self.t[colon] == ":":
-                        start = colon + 1
-                yield from self.binding_pattern(start, end)
-
-    def declarations(self, span):
-        for lo, hi in self.split(*span):
-            equal = next((i for i in self.level(lo, hi) if self.t[i] == "="), hi)
-            names = tuple(self.binding_pattern(lo, equal))
-            yield names, (min(equal + 1, hi), hi), (lo, equal)
-
-    def locals(self, nodes, *, block_functions=True):
-        names = {}
-        for node in nodes:
-            if node.kind in {"let", "const"}:
-                for keys, _, _ in self.declarations(node.span):
-                    names.update(dict.fromkeys(keys, JSAtom.TDZ))
-            elif node.kind == "function-decl":
-                lo, hi = node.span
-                i = lo + (2 if self.t[lo + 1:lo + 2] == ["*"] else 1)
-                if i < hi and JS_NAME.fullmatch(self.t[i]):
-                    if self.t[lo] == "class":
-                        names[self.t[i]] = JSAtom.TDZ
-                    elif block_functions:
-                        names[self.t[i]] = JS_UNKNOWN
-        return names
-
-    def hoisted(self, nodes):
-        for node in nodes:
-            if node.kind == "var":
-                for names, _, _ in self.declarations(node.span):
-                    yield from names
-            elif node.kind == "for":
-                lo, hi = node.span
-                if self.t[lo:lo + 1] == ["var"]:
-                    stop = next((i for i in self.level(lo + 1, hi) if self.t[i] in {";", "in", "of"}), hi)
-                    for names, _, _ in self.declarations((lo + 1, stop)):
-                        yield from names
-            yield from self.hoisted(node.children)
-
-    @staticmethod
-    def lookup(env, name):
-        return next((frame.bindings for frame in reversed(env) if name in frame.bindings), None)
-
-    def value(self, env, name):
-        scope = self.lookup(env, name)
-        return scope[name] if scope is not None else JS_UNKNOWN
-
-    def unwrap(self, lo, hi):
-        while self.t[lo:lo + 1] == ["("] and self.groups.get(lo) == hi - 1:
-            lo, hi = lo + 1, hi - 1
-        return lo, hi
-
-    def literal(self, lo, hi, env):
-        lo, hi = self.unwrap(lo, hi)
-        t = self.t[lo:hi]
-        if len(t) == 1:
-            token = t[0]
-            if token in self.literals:
-                # 对路径不解码转义，对真值只有空字面串是假。
-                return JSConstant("str", self.literals[token])
-            if token in {"false", "true"}:
-                return JSConstant("bool", token == "true")
-            if token == "null" or token == "undefined" and self.lookup(env, token) is None:
-                return JSConstant(token, None)
-        if len(t) == 1 or len(t) == 2 and t[0] in {"-", "+"}:
-            number = "".join(t).replace("_", "")
-            if JS_NUMBER.fullmatch(number.lstrip("+-")):
-                try:
-                    value = int(number, 0) if number.lower().lstrip("+-").startswith(("0x", "0b", "0o")) else float(number)
-                except ValueError:
-                    return None
-                return JSConstant("num", value)
-        return None
-
-    @staticmethod
-    def truth(value):
-        if isinstance(value, JSConstant):
-            return bool(value.value)
-        if isinstance(value, (JSClosure, JSObject)):
-            return True
-        return None
-
-    def parameters(self, lo, hi):
-        return tuple((tuple(self.binding_pattern(start, end)), JS_NAME.fullmatch(self.t[start]) is not None)
-                     for start, end in self.split(lo, hi) if start < end)
-
-    def note_throw(self, env, *, definite=False):
-        if self.throw_edges:
-            origin, result = self.throw_edges[-1]
-            current = {frame.key: frame for frame in env}
-            js_merge(result, {"throw": js_join(tuple(current.get(frame.key, frame) for frame in origin))})
-        if definite:
-            raise JSThrown
-
-    @staticmethod
-    def update_frames(env, state):
-        by_key = {frame.key: frame.bindings for frame in state}
-        for frame in env:
-            if frame.key in by_key:
-                frame.bindings.update(by_key[frame.key])
-
-    def invoke(self, closure, args, env):
-        if closure.span in self.calls:
-            # 递归边不再次进入同一函数体。
-            self.note_throw(env)
-            return JS_UNKNOWN
-        current = {frame.key: frame for frame in env}
-        captures = tuple(current.get(frame.key, frame) for frame in closure.captured)
-        bindings = {}
-        for i, (names, simple) in enumerate(closure.params):
-            bindings.update(dict.fromkeys(names, JS_UNKNOWN))
-            if simple and i < len(args):
-                bindings[names[0]] = args[i]
-        if closure.name:
-            bindings.setdefault(closure.name, closure)
-        self.calls.add(closure.span)
-        try:
-            if closure.expression:
-                nodes = (JSStatement("return", closure.span),)
-            else:
-                nodes = self.sequence(*closure.span)
-            for name in self.hoisted(nodes):
-                bindings.setdefault(name, JS_UNKNOWN)
-            result = self.block(nodes, (*js_join(captures), JSScope(True, bindings)), function_body=True)
-        finally:
-            self.calls.remove(closure.span)
-        if "throw" in result:
-            # 调用者捕获时看到的是异常前已经完成的闭包写入。
-            exceptional = js_join(env)
-            self.update_frames(exceptional, result["throw"])
-            self.note_throw(exceptional)
-        normal = [result[k] for k in ("next", "return") if k in result]
-        if not normal and "throw" in result:
-            raise JSThrown
-        if normal:
-            state = js_join(*normal)
-            self.update_frames(captures, state)
-            return state[-1].bindings.get("return value", JS_UNKNOWN) if "next" not in result else JS_UNKNOWN
-        return JS_UNKNOWN
-
-    def function_value(self, lo, hi, env, *, declaration=False):
-        t = self.t
-        start = lo + (t[lo] == "async" and t[lo + 1:lo + 2] != ["=>"])
-        if t[start:start + 1] == ["function"]:
-            start += 1
-            if t[start:start + 1] == ["*"]:
-                # 生成器调用只构造迭代器，并未进入函数体。
-                return None
-            name = t[start] if start < hi and JS_NAME.fullmatch(t[start]) else None
-            start += name is not None
-            close = self.groups.get(start) if t[start:start + 1] == ["("] else None
-            if close is not None:
-                body = self.after_params(close, hi)
-                if t[body:body + 1] == ["{"] and self.groups.get(body) == hi - 1:
-                    return JSClosure((body + 1, hi - 1), self.parameters(start + 1, close),
-                                     False, None if declaration else name, env)
-        else:
-            close = self.groups.get(start) if t[start:start + 1] == ["("] else None
-            arrow = self.after_params(close, hi) if close is not None else start + 1
-            if arrow < hi and t[arrow] == "=>":
-                params = self.parameters(start + 1, close) if close is not None else (((t[start],), True),)
-                body = arrow + 1
-                if t[body:body + 1] == ["{"] and self.groups.get(body) == hi - 1:
-                    return JSClosure((body + 1, hi - 1), params, False, None, env)
-                return JSClosure((body, hi), params, True, None, env)
-        return None
-
-    def after_params(self, close, hi):
-        body = close + 1
-        if self.t[body:body + 1] == [":"]:  # TS 返回类型
-            body += 1
-            while body < hi and (JS_NAME.fullmatch(self.t[body]) or self.t[body] in {"[", "]", ".", "<", ">", "|"}):
-                body += 1
-        return body
-
-    def conditional(self, lo, hi):
-        question = None
-        depth = 0
-        for i in self.level(lo, hi):
-            if self.t[i] == "?":
-                question = i if question is None else question
-                depth += 1
-            elif self.t[i] == ":" and depth:
-                depth -= 1
-                if not depth:
-                    return question, i
-        return None
-
-    def join_path(self, lo, hi, env):
-        t = self.t
-        if (t[lo + 1:lo + 5] in ([".", "join", "(", "__dirname"], [".", "resolve", "(", "__dirname"])
-                and self.groups.get(lo + 3) == hi - 1 and self.value(env, t[lo]) is JSAtom.PATH
-                and self.lookup(env, "__dirname") is None and t[lo + 5:lo + 6] == [","]):
-            spans = list(self.split(lo + 6, hi - 1))
-            if spans[-1][0] == spans[-1][1]:
-                spans.pop()
-            parts = [self.literals.get(t[a]) if b == a + 1 else None for a, b in spans]
-            if parts and all(part is not None and not part.startswith("/") for part in parts):
-                return frozenset({"/".join(part for part in parts if part)})
-        return None
-
-    def alternatives(self, env, *branches):
-        states, values = [], []
-        for branch in branches:
-            state = js_join(env)
-            try:
-                values.append(branch(state))
-            except JSThrown:
-                continue
-            states.append(state)
-        if not states:
-            raise JSThrown
-        self.update_frames(env, js_join(*states))
-        return js_join_values(values)
-
-    def object_value(self, lo, hi, env):
-        members = {}
-        for start, end in self.split(lo, hi):
-            if start == end:
-                continue
-            key = self.literals.get(self.t[start], self.t[start])
-            if self.t[start + 1:start + 2] == [":"] and start + 2 < end:
-                members[key] = self.expr(start + 2, end, env)
-            elif end == start + 1:
-                members[key] = self.expr(start, end, env)
-            elif self.t[start + 1:start + 2] == ["("] and (close := self.groups.get(start + 1)) is not None:
-                body = self.after_params(close, end)
-                if self.t[body:body + 1] == ["{"] and self.groups.get(body) == end - 1:
-                    members[key] = JSClosure((body + 1, end - 1), self.parameters(start + 2, close),
-                                             False, None, env)
-        return JSObject(members)
-
-    def export_target(self, lo, hi, env):
-        t = self.t
-        if t[lo:lo + 3] == ["module", ".", "exports"] and self.lookup(env, "module") is None:
-            start = lo + 3
-        elif t[lo] == "exports" and self.lookup(env, "exports") is None:
-            start = lo + 1
-        else:
-            return None
-        if start < hi and t[start] == "=":
-            return start, None
-        if t[start:start + 1] == ["."] and start + 2 < hi and t[start + 2] == "=":
-            return start + 2, t[start + 1]
-        return None
-
-    def set_export(self, target, member, value, env):
-        scope = env[0].bindings
-        if "module.exports" not in scope:  # 不把其他词法对象的属性写入当作模块导出。
-            return
-        if member is None:
-            if target == "module":
-                scope["module.exports"] = value
-            scope["exports linked"] = JS_UNKNOWN
-        elif target == "module" or scope["exports linked"] == JSConstant("bool", True):
-            old = scope["module.exports"]
-            scope["module.exports"] = JSObject((old.members if isinstance(old, JSObject) else {}) | {member: value})
-
-    def expr(self, lo, hi, env):
-        lo, hi = self.unwrap(lo, hi)
-        if lo >= hi:
-            return JS_UNKNOWN
-        t = self.t
-        first = t[lo]
-        parts = list(self.split(lo, hi))
-        if len(parts) > 1:
-            for start, end in parts:
-                value = self.expr(start, end, env)
-            return value
-        if target := self.export_target(lo, hi, env):
-            equal, member = target
-            value = self.expr(equal + 1, hi, env)
-            self.set_export(first, member, value, env)
-            return value
-        if JS_NAME.fullmatch(first) and lo + 1 < hi:
-            op = t[lo + 1]
-            if op == "=" or JS_MUTATION.fullmatch(op):
-                scope = self.lookup(env, first)
-                value = self.expr(lo + 2, hi, env) if op not in {"++", "--"} else JS_UNKNOWN
-                if scope is not None:
-                    if scope[first] is JSAtom.TDZ:
-                        self.note_throw(env, definite=True)
-                    scope[first] = value if op == "=" else JS_UNKNOWN
-                    return scope[first]
-                self.note_throw(env)
-                return JS_UNKNOWN
-        if first in {"++", "--"} and hi == lo + 2:
-            scope = self.lookup(env, t[lo + 1])
-            if scope is not None:
-                if scope[t[lo + 1]] is JSAtom.TDZ:
-                    self.note_throw(env, definite=True)
-                scope[t[lo + 1]] = JS_UNKNOWN
-            return JS_UNKNOWN
-
-        if closure := self.function_value(lo, hi, env):
-            return closure
-        if first in {"function", "class"}:
-            return JS_UNKNOWN  # 声明/生成器/类中的未调用方法不是读点。
-        if conditional := self.conditional(lo, hi):
-            question, colon = conditional
-            truth = self.truth(self.expr(lo, question, env))
-            if truth is not None:
-                return self.expr(question + 1, colon, env) if truth else self.expr(colon + 1, hi, env)
-            return self.alternatives(env, lambda state: self.expr(question + 1, colon, state),
-                                     lambda state: self.expr(colon + 1, hi, state))
-        for op in ("||", "&&", "??"):
-            points = list(self.split(lo, hi, op))
-            if len(points) > 1:
-                start, end = points[0]
-                left = self.expr(start, end, env)
-                if op == "??":
-                    skip = left.kind not in {"null", "undefined"} if isinstance(left, JSConstant) else None
-                else:
-                    truth = self.truth(left)
-                    skip = None if truth is None else truth == (op == "||")
-                if skip is True:
-                    return left
-                if skip is False:
-                    return self.expr(end + 1, hi, env)
-                return self.alternatives(env, lambda _: left, lambda state: self.expr(end + 1, hi, state))
-
-        equality = {"==", "!=", "===", "!=="}
-        operators = [i for i in self.level(lo, hi) if t[i] in equality]
-        if len(operators) == 1:
-            op = operators[0]
-            a, b = self.expr(lo, op, env), self.expr(op + 1, hi, env)
-            if isinstance(a, JSConstant) and isinstance(b, JSConstant):
-                exact = t[op] in {"===", "!=="}
-                if exact or a.kind == b.kind:
-                    return JSConstant("bool", (a == b) != t[op].startswith("!"))
-            return JS_UNKNOWN
-        if first == "!":
-            tail, end = self.unwrap(lo + 1, hi)
-            # 只折叠确定为一元的操作数，不把 !a + b 当成 !(a + b)。
-            if end == tail + 1 or self.groups.get(lo + 1) == hi - 1:
-                truth = self.truth(self.expr(lo + 1, hi, env))
-                return JS_UNKNOWN if truth is None else JSConstant("bool", not truth)
-        literal = self.literal(lo, hi, env)
-        if literal is not None:
-            return literal
-        if first == "{" and self.groups.get(lo) == hi - 1:
-            return self.object_value(lo + 1, hi - 1, env)
-        if hi == lo + 1:
-            value = self.value(env, first)
-            if value is JSAtom.TDZ:
-                self.note_throw(env, definite=True)
-            return value
-
-        value = JS_UNKNOWN
-        i = lo
-        while i < hi:
-            token = t[i]
-            previous = t[i - 1] if i > lo else ""
-            if JS_NAME.fullmatch(token) and previous not in {".", "?."}:
-                base = self.value(env, token)
-                if base is JSAtom.TDZ:
-                    self.note_throw(env, definite=True)
-                start = i + 1
-                member = None
-                if t[start:start + 1] in (["."], ["?."]) and start + 1 < hi:
-                    if isinstance(base, JSConstant) and base.kind in {"null", "undefined"}:
-                        if t[start] == "?.":
-                            return JSConstant("undefined", None)
-                        self.note_throw(env, definite=True)
-                    member = t[start + 1]
-                    start += 2
-                close = self.groups.get(start) if t[start:start + 1] == ["("] else None
-                if close is not None and close < hi:
-                    value = self.call(i, start, close, env, token, base, member)
-                    if i == lo and close == hi - 1:
-                        return value
-                    i = close + 1
-                    continue
-                if member is not None:
-                    if not isinstance(base, JSObject):
-                        self.note_throw(env)
-                    i = start
-                    continue
-            if token in {".", "?.", "new"}:
-                self.note_throw(env)
-            if token in {"(", "[", "{"} and i in self.groups:
-                close = self.groups[i]
-                grouped = self.expr(i + 1, close, env)
-                if token == "(" and isinstance(grouped, JSClosure) and t[close + 1:close + 2] == ["("]:
-                    end = self.groups.get(close + 1)
-                    if end is not None and end < hi:
-                        args = [self.expr(a, b, env) for a, b in self.split(close + 2, end) if a < b]
-                        result = self.invoke(grouped, args, env)
-                        if i == lo and end == hi - 1:
-                            return result
-                        i = end + 1
-                        continue
-                if token == "[" and i != lo:
-                    self.note_throw(env)
-                i = close
-            i += 1
-        return JS_UNKNOWN
-
-    def call(self, lo, start, close, env, name, base, member):
-        unbound = self.lookup(env, name) is None
-        target = base if member is None else base.members.get(member) if isinstance(base, JSObject) else None
-        if member in {"join", "resolve"} and (path := self.join_path(lo, close + 1, env)) is not None:
-            return path
-        if member is not None and not (base in (JSAtom.FS, JSAtom.PATH, JSAtom.TEST)
-                                       or isinstance(base, JSObject) or name == "JSON" and unbound):
-            # 属性访问先于参数求值。
-            self.note_throw(env)
-        spans = [(a, b) for a, b in self.split(start + 1, close) if a < b]
-        args = [self.expr(a, b, env) for a, b in spans]
-        if name == "require" and unbound and member is None and len(args) == 1 and isinstance(args[0], JSConstant):
-            module = str(args[0].value).removeprefix("node:")
-            builtins = {"fs": JSAtom.FS, "path": JSAtom.PATH}
-            if module in builtins:
-                return builtins[module]
-            if args[0].value == "node:test":
-                return JSAtom.TEST
-        if base is JSAtom.FS and member == "readFileSync" and args:
-            if isinstance(args[0], frozenset):
-                self.reads.update(args[0])
-            elif isinstance(args[0], JSConstant) and args[0].kind in {"null", "undefined", "bool"}:
-                self.note_throw(env, definite=True)
-        if isinstance(target, JSClosure):
-            return self.invoke(target, args, env)
-        if (base is JSAtom.TEST and (member is None or member in JS_TEST_CALLS)
-                or member is None and unbound and name in JS_TEST_CALLS):
-            if args and isinstance(args[-1], JSClosure):
-                self.invoke(args[-1], [], env)
-        if name == "JSON" and unbound and member == "parse" and len(args) == 1:
-            arg = args[0]
-            if isinstance(arg, JSConstant) and arg.kind == "str" and "\\" not in arg.value:
-                try:
-                    json.loads(arg.value, parse_int=float, parse_constant=reject_js_json_constant)
-                except ValueError:
-                    self.note_throw(env, definite=True)
-                return JS_UNKNOWN
-        self.note_throw(env)
-        return JS_UNKNOWN
-
-    def block(self, nodes, env, params=(), *, function_body=False):
-        local = dict.fromkeys(params, JS_UNKNOWN) | self.locals(nodes, block_functions=not function_body)
-        inside = (*env, JSScope(False, local))
-        self.declare_functions(nodes, inside, function_body=function_body)
-        result = self.run(nodes, inside)
-        if len(result) == 1:
-            # 作用域退出后，逃逸闭包仍持有该帧的最后活绑定。
-            self.update_frames(inside, next(iter(result.values())))
-        return {exit: state[:-1] for exit, state in result.items()}
-
-    def declare_functions(self, nodes, env, *, function_body=False):
-        # 函数体及模块顶层的声明与同名 var/形参共用绑定；嵌套块单独遮蔽。
-        scope = env[-2 if function_body else -1].bindings
-        for node in nodes:
-            lo, hi = node.span
-            if node.kind == "function-decl" and self.t[lo] == "function":
-                name = lo + (2 if self.t[lo + 1:lo + 2] == ["*"] else 1)
-                if name < hi and JS_NAME.fullmatch(self.t[name]):
-                    scope[self.t[name]] = self.function_value(lo, hi, env, declaration=True) or JS_UNKNOWN
-
-    def run(self, nodes, env):
-        flow = {"next": env}
-        for node in nodes:
-            if "next" not in flow:
-                break
-            js_merge(flow, self.execute(node, flow.pop("next")))
-        return flow
-
-    def test_bindings(self, lo):
-        if self.t[lo] == "{" and lo in self.groups:
-            for start, end in self.split(lo + 1, self.groups[lo]):
-                if start == end or self.t[start] not in JS_TEST_CALLS:
-                    continue
-                if self.t[start + 1:start + 2] == [":"]:
-                    start += 2
-                if start < end and JS_NAME.fullmatch(self.t[start]):
-                    yield self.t[start]
-
-    def declare(self, kind, span, env):
-        scope = next(frame.bindings for frame in reversed(env) if frame.function) if kind == "var" else env[-1].bindings
-        for names, (lo, hi), (pattern, equal) in self.declarations(span):
-            if kind != "var" or lo < hi:
-                value = self.expr(lo, hi, env)
-                simple = pattern < equal and JS_NAME.fullmatch(self.t[pattern])
-                test_bindings = set(self.test_bindings(pattern)) if value is JSAtom.TEST and not simple else ()
-                for name in names:
-                    scope[name] = value if simple or name in test_bindings else JS_UNKNOWN
-
-    def execute(self, node, env):
-        exceptional = {}
-        self.throw_edges.append((env, exceptional))
-        try:
-            result = self.step(node, env)
-        except JSThrown:
-            result = {}
-        finally:
-            self.throw_edges.pop()
-        js_merge(result, exceptional)
-        return result
-
-    def step(self, node, env):
-        kind, (lo, hi), children = node
-        if kind == "block":
-            return self.block(children, env)
-        if kind in {"var", "const", "let"}:
-            self.declare(kind, (lo, hi), env)
-        elif kind == "if":
-            choice = self.truth(self.expr(lo, hi, env))
-            other = children[1] if len(children) == 2 else JSStatement("empty", (hi, hi))
-            if choice is not None:
-                return self.execute(children[0] if choice else other, env)
-            result = self.execute(children[0], js_join(env))
-            js_merge(result, self.execute(other, js_join(env)))
-            return result
-        elif kind == "switch":
-            return self.switch(children, (lo, hi), env)
-        elif kind == "try":
-            return self.try_block(children, env)
-        elif kind in {"while", "for"}:
-            return self.loop(node, env)
-        elif kind in {"return", "throw", "break", "continue"}:
-            if kind in {"return", "throw"}:
-                value = self.expr(lo, hi, env)
-                if kind == "return":
-                    frame = next(frame for frame in reversed(env) if frame.function)
-                    frame.bindings["return value"] = value
-            return {kind: env}
-        elif kind == "expr":
-            self.expr(lo, hi, env)
-        elif kind == "function-decl" and self.t[lo] == "class" and lo + 1 < hi:
-            env[-1].bindings[self.t[lo + 1]] = JS_UNKNOWN
-        return {"next": env}
-
-    def switch(self, cases, span, env):
-        value = self.expr(*span, env)
-        literal = value if isinstance(value, JSConstant) else None
-        values = [self.literal(*case.span, env) if case.kind == "case" else None for case in cases]
-        default = next((i for i, case in enumerate(cases) if case.kind == "default"), None)
-        known = literal is not None and all(value is not None or i == default for i, value in enumerate(values))
-        entry = next((i for i, value in enumerate(values) if value == literal), default) if known else None
-        locals_ = self.locals(stmt for case in cases for stmt in case.children)
-        inside = (*env, JSScope(False, locals_))
-        self.declare_functions((stmt for case in cases for stmt in case.children), inside)
-        exits, flow = {}, {}
-        if (known and entry is None) or (not known and default is None):
-            exits["next"] = js_join(inside)
-        for i, case in enumerate(cases):
-            if not known and case.kind == "case":
-                self.expr(*case.span, js_join(inside))
-            if not known or i == entry:
-                js_merge(flow, {"next": js_join(inside)})
-            if "next" in flow:
-                branch = self.run(case.children, flow.pop("next"))
-                if "break" in branch:
-                    js_merge(exits, {"next": branch.pop("break")})
-                if "next" in branch:
-                    flow["next"] = branch.pop("next")
-                js_merge(exits, branch)
-        js_merge(exits, flow)
-        return {exit: state[:-1] for exit, state in exits.items()}
-
-    def try_block(self, handlers, env):
-        result = self.execute(handlers[0], js_join(env))
-        for handler in handlers[1:]:
-            if handler.kind == "catch":
-                # throw 边来自实际可达的显式 throw 或可抛表达式，纯赋值不制造入口。
-                thrown = result.pop("throw", None)
-                if thrown is not None:
-                    params = (name for names, _ in self.parameters(*handler.span) for name in names)
-                    js_merge(result, self.block(handler.children, thrown, params))
-            else:
-                final = {}
-                for completion, state in result.items():
-                    applied = self.block(handler.children, state)
-                    if "next" in applied:
-                        js_merge(final, {completion: applied.pop("next")})
-                    js_merge(final, applied)
-                result = final
-        return result
-
-    def loop(self, node, env):
-        lo, hi = node.span
-        condition, step, scoped = (lo, hi), (hi, hi), False
-        iteration = None
-        if node.kind == "for":
-            parts = list(self.split(lo, hi, ";"))
-            if len(parts) == 3:
-                init, condition, step = parts
-            else:
-                separator = next((i for i in self.level(lo, hi) if self.t[i] in {"in", "of"}), hi)
-                init, condition, iteration = (lo, separator), None, (min(separator + 1, hi), hi)
-            kind = self.t[lo] if lo < init[1] else ""
-            if kind in {"let", "const"}:
-                names = (name for keys, _, _ in self.declarations((lo + 1, init[1])) for name in keys)
-                env = (*env, JSScope(False, dict.fromkeys(names, JSAtom.TDZ)))
-                scoped = True
-            if kind in {"let", "const", "var"}:
-                self.declare(kind, (lo + 1, init[1]), env)
-            else:
-                self.expr(*init, env)
-            if iteration is not None:
-                self.expr(*iteration, env)
-        pre = current = js_join(env)
-        exits = {}
-        while True:
-            head = js_join(current)
-            if condition is None:
-                truth = None
-            elif condition[0] == condition[1]:
-                truth = True
-            else:
-                truth = self.truth(self.expr(*condition, head))
-            if truth is not True:
-                js_merge(exits, {"next": js_join(head)})
-            if truth is False:
-                break
-            branch = self.execute(node.children[0], head)
-            if "break" in branch:
-                js_merge(exits, {"next": branch.pop("break")})
-            back = [branch.pop(kind) for kind in ("next", "continue") if kind in branch]
-            js_merge(exits, branch)
-            if not back:
-                break
-            tail = js_join(*back)
-            self.expr(*step, tail)
-            upcoming = js_join(pre, current, tail)
-            if upcoming == current:
-                break
-            current = upcoming
-        return {exit: state[:-1] for exit, state in exits.items()} if scoped else exits
-
-    def extract(self):
-        nodes = self.sequence(0, len(self.t))
-        top = dict.fromkeys(self.hoisted(nodes), JS_UNKNOWN)
-        top.update({"module.exports": JSObject({}), "exports linked": JSConstant("bool", True)})
-        env = (JSScope(True, top), JSScope(False, self.locals(nodes, block_functions=False)))
-        self.declare_functions(nodes, env, function_body=True)
-        result = self.run(nodes, env)
-        if "next" in result:
-            state = result["next"]
-            exported = state[0].bindings["module.exports"]
-            values = exported.members.values() if isinstance(exported, JSObject) else (exported,)
-            for value in values:
-                if isinstance(value, JSClosure):
-                    try:
-                        self.invoke(value, [], state)
-                    except JSThrown:
-                        pass
-        return self.reads
-
-
-def js_relative_reads(tokens, literals, linebreaks):
+def fixture_pointer_locations(path):
+    """包根以下、旧路径的祖先目录；同时给出相对于指针所在目录的旧路径。"""
+    archive = REVIEW_TREE.search(path)
+    if archive is None:
+        return
+    end = path.find("/", archive.end())
+    while end != -1:
+        yield path[:end] + "/" + FIXTURE_POINTER, path[end + 1:]
+        end = path.find("/", end + 1)
+
+
+def fixture_pointer_paths(raw):
     try:
-        return JSFixtureReads(tokens, literals, linebreaks).extract()
-    except RecursionError:
-        # 深到无法分析的源码不提供证据；不保留中途观察到的路径。
-        return ()
-
-def source_relative_reads(text, suffix):
-    if suffix == ".py":
-        try:
-            tree = ast.parse(text)
-        except (SyntaxError, ValueError):
-            return
-        if not any(isinstance(stmt, ast.ImportFrom) and stmt.module == "pathlib" and stmt.level == 0
-                   and any(n.name == "Path" and n.asname is None for n in stmt.names) for stmt in tree.body):
-            return
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            joined = node.func.value
-            if node.func.attr not in {"read_bytes", "read_text"} or not isinstance(joined, ast.BinOp):
-                continue
-            if not isinstance(joined.op, ast.Div) or not isinstance(joined.right, ast.Constant):
-                continue
-            parent = joined.left
-            if not isinstance(parent, ast.Attribute) or parent.attr != "parent":
-                continue
-            anchor = parent.value
-            if (isinstance(anchor, ast.Call) and isinstance(anchor.func, ast.Name)
-                    and anchor.func.id == "Path" and len(anchor.args) == 1 and not anchor.keywords
-                    and isinstance(anchor.args[0], ast.Name) and anchor.args[0].id == "__file__"
-                    and isinstance(joined.right.value, str)):
-                yield joined.right.value
-        return
-
-    rust = suffix == ".rs"
-    tokens, literals, linebreaks = source_tokens(text, rust=rust)
-    if rust:
-        for read in re.finditer(r"(?<!\S)include_(?:str|bytes) ! \( (@[0-9]+)(?: ,)? \)", " ".join(tokens)):
-            yield literals[read[1]]
-        return
-
-    yield from js_relative_reads(tokens, literals, linebreaks)
-
-
-def loaded_archive_inputs(final_tree, head, candidates, forbidden, *, cwd):
-    if not candidates:
+        text = raw.decode("utf-8")
+    except UnicodeError:
         return set()
-    names = sorted({posixpath.basename(path) for path in candidates if "\n" not in path})
-    if not names:
+    if "\0" in text or is_report_artifact(raw, text):
         return set()
-    patterns = [part for name in names for part in ("-e", name)]
-    matches = subprocess.run(
-        ["git", "grep", "-IlzF", "--no-textconv", *patterns, head, "--",
-         *(f"*{suffix}" for suffix in SOURCE_SUFFIXES)],
-        cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, check=False,
-    )
-    if matches.returncode == 1:
+    # 按完整 Markdown 行内代码或独立词元取路径，绝不靠子串匹配。
+    tokens = re.compile(r"""`+([^`]+)`+|[^\s`，。；：！、（）「」【】<>()\[\]{}"'，;,:*]+""")
+    return {match[1] or match[0] for line in report_preamble(text.lstrip("\ufeff"), limit=text.count("\n") + 1, strip_bold=False)
+            for match in tokens.finditer(line)}
+
+
+def atomic_fixture_migrations(records, final_tree, candidates, *, cwd):
+    """从同一份 raw log 取 D+A 与迁移时的指针版本；F 工作树不参与。"""
+    pointers = {
+        path.encode(): entry.blob for path, entry in final_tree.items()
+        if path.endswith("/" + FIXTURE_POINTER) and REVIEW_TREE.search(path)
+        and entry.kind == "blob" and entry.mode in REGULAR_MODES
+    }
+    if not candidates or not pointers:
         return set()
-    matches.check_returncode()
-    loaded = set()
-    for record in matches.stdout.split(b"\0")[:-1]:
-        path = record.split(b":", 1)[1].decode("utf-8")
-        entry = final_tree.get(path)
-        if (entry is None or entry.kind != "blob" or entry.mode not in REGULAR_MODES
-                or REVIEW_TREE.search(path) or is_result_archive_path(path)
-                or entry.blob in forbidden):
-            continue
-        # 读取 F 中的已跟踪普通文件，不查看工作树或执行被检查的代码。
-        try:
-            text = git("cat-file", "blob", f"{head}:{path}", cwd=cwd).decode("utf-8")
-        except UnicodeError:
-            continue
-        for relative in source_relative_reads(text, PurePosixPath(path).suffix):
-            if not relative or relative.startswith("/") or "\\" in relative or "\0" in relative:
-                continue
-            target = posixpath.normpath(posixpath.join(posixpath.dirname(path), relative))
-            if target in candidates:
-                loaded.add((target, candidates[target]))
-    return loaded
+
+    @cache
+    def tokens(blob):
+        return fixture_pointer_paths(git("cat-file", "blob", blob, cwd=cwd))
+
+    current_pointers = {}
+    migrated = set()
+    for commit, changes in groupby(records, key=lambda record: record[0]):
+        removed = defaultdict(list)
+        added = []
+        for _, path, old_mode, mode, old_blob, blob, status in changes:
+            if path in pointers:
+                if mode in REGULAR_RAW_MODES:
+                    current_pointers[path] = blob.decode()
+                else:
+                    current_pointers.pop(path, None)
+            if status == b"D" and old_mode in REGULAR_RAW_MODES and old_blob in candidates:
+                first, old_paths = candidates[old_blob]
+                if commit != first and path in old_paths:
+                    removed[old_blob].append(path.decode("utf-8"))
+            if (status == b"A" and mode in REGULAR_RAW_MODES and blob in candidates
+                    and (entry := final_tree.get(path.decode("utf-8", errors="surrogateescape")))
+                    and entry.mode in REGULAR_MODES and entry.blob.encode() == blob):
+                target = path.decode("utf-8")
+                if target != REMEDIATION and not (REVIEW_TREE.search(target) or is_result_archive_path(target)):
+                    added.append((target, blob))
+        for target, blob in added:
+            for path in removed.get(blob, ()):
+                locations = list(fixture_pointer_locations(path))
+                for pointer, relative_old in locations:
+                    key = pointer.encode()
+                    if key not in current_pointers:
+                        continue
+                    # 深一层的指针可以用所在目录或包根作为源路径锚点。
+                    old_tokens = {relative_old, locations[0][1]}
+                    at_migration = tokens(current_pointers[key])
+                    at_final = tokens(pointers[key])
+                    if (target in at_migration and target in at_final
+                            and old_tokens & at_migration and old_tokens & at_final):
+                        migrated.add((target, blob.decode()))
+    return migrated
 
 
 def archive_artifact_blobs(final_tree, head, *, cwd):
-    """在 F 的首父历史拒绝归档 blob；迁出的夹具只放行其被加载的路径。"""
-    # 根快照及新增/变更足以覆盖已删除的产出；合并只与第一父比较。
+    """按 F 的首父历史区分原件、冻结副本和有明确指针的原子迁移。"""
+    # 根快照提供首见记录，合并只与第一父比较；一次读出所有增、删、改、换类。
     raw = git("log", "--root", "--first-parent", "--diff-merges=first-parent",
               "--no-renames", "--no-abbrev", "--raw", "-z", "--format=%x00%H",
-              "--diff-filter=AMT", "--reverse", head, cwd=cwd)
+              "--diff-filter=ADMT", "--reverse", head, cwd=cwd)
     fields = raw.split(b"\0")
     fields.pop()
     del raw
 
-    def additions():
+    def records():
         records = iter(fields)
         for metadata in records:
             if not metadata:
                 commit = next(records)
                 continue
             path = next(records)
-            _, mode, _, blob, _ = metadata.split()
-            if mode in REGULAR_RAW_MODES:
-                yield commit, path, blob
+            old_mode, mode, old_blob, blob, status = metadata.split()
+            yield commit, path, old_mode[1:], mode, old_blob, blob, status
 
     archive_paths = defaultdict(set)
     for path, entry in final_tree.items():
         if entry.kind == "blob" and entry.mode in REGULAR_MODES and is_artifact_archive_path(path):
             archive_paths[entry.blob.encode()].add(path)
+    review_paths = defaultdict(set)
     manifests = set()
     # 先限定候选；不为从未在受禁归档出现的 blob 建历史索引。
-    for _, path, blob in additions():
+    for _, path, _, mode, _, blob, _ in records():
+        if mode not in REGULAR_RAW_MODES and mode != b"120000":
+            continue
         text_path = path.decode("utf-8", errors="surrogateescape")
         review = REVIEW_TREE.search(text_path)
         # 归档根自身的清单从来不是某个包的输入声明。
-        if review and text_path[review.end():].endswith("/" + INPUT_MANIFEST):
-            manifests.add(text_path)
-        if is_artifact_archive_path(text_path):
+        if review:
+            review_paths[blob].add(text_path)
+            if mode in REGULAR_RAW_MODES and text_path[review.end():].endswith("/" + INPUT_MANIFEST):
+                manifests.add(text_path)
+        if mode in REGULAR_RAW_MODES and is_artifact_archive_path(text_path):
             archive_paths[blob].add(text_path)
     archive_paths.pop(EMPTY_BLOB.encode(), None)
     if not archive_paths:
         return ArchivedArtifacts(set(), set())
 
     origins = {}
-    for commit, path, blob in additions():
-        if blob in archive_paths:
+    # A/B 保持原有的普通文件首见口径；C 另核首见的全部 blob 路径（包括符号链接）。
+    blob_origins = {}
+    for commit, path, _, mode, _, blob, _ in records():
+        if blob not in archive_paths:
+            continue
+        text_path = path.decode("utf-8", errors="surrogateescape")
+        if mode in REGULAR_RAW_MODES or mode == b"120000":
+            first, paths = blob_origins.setdefault(blob, (commit, []))
+            if first == commit:
+                paths.append(text_path)
+        if mode in REGULAR_RAW_MODES:
             first, paths = origins.setdefault(blob, (commit, []))
             if first == commit:
-                paths.append(path.decode("utf-8", errors="surrogateescape"))
+                paths.append(text_path)
 
     manifest_dirs = tuple(path.rsplit("/", 1)[0] + "/" for path in manifests)
 
@@ -1446,7 +555,8 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
                         for source in declared_inputs(commit).get(path, ())))
 
     forbidden = set()
-    migrated = set()
+    candidates = {}
+    final_blobs = {entry.blob for entry in final_tree.values() if entry.mode in REGULAR_MODES}
     for raw_blob, history in archive_paths.items():
         blob = raw_blob.decode()
         if raw_blob not in origins:
@@ -1461,17 +571,14 @@ def archive_artifact_blobs(final_tree, head, *, cwd):
         if not restricted or all(declared_copy(path, blob, commit.decode()) for path in restricted):
             continue
         forbidden.add(blob)
-        # 同期的中性别名不是起源证明；只有归档中的所有旧路径已经迁出才考虑夹具。
-        if (all(REVIEW_TREE.search(path) for path in paths)
+        # C1/C2：只考虑首见全在审查归档、无产物名且全部旧路径已经消失的 blob。
+        first, appearances = blob_origins[raw_blob]
+        all_paths = history | review_paths[raw_blob]
+        if (blob in final_blobs and all(REVIEW_TREE.search(path) for path in appearances)
                 and all(REVIEW_TREE.search(path) and path not in final_tree and not is_archive_output(path)
-                        for path in history)):
-            migrated.add(blob)
-    candidates = {
-        path: entry.blob for path, entry in final_tree.items()
-        if entry.kind == "blob" and entry.mode in REGULAR_MODES and entry.blob in migrated
-        and not REVIEW_TREE.search(path) and not is_result_archive_path(path)
-    }
-    return ArchivedArtifacts(forbidden, loaded_archive_inputs(final_tree, head, candidates, forbidden, cwd=cwd))
+                        for path in all_paths)):
+            candidates[raw_blob] = (first, {path.encode("utf-8", errors="surrogateescape") for path in all_paths})
+    return ArchivedArtifacts(forbidden, atomic_fixture_migrations(records(), final_tree, candidates, cwd=cwd))
 
 
 def is_git_sha(value):
@@ -1538,7 +645,7 @@ def is_json_artifact(obj):
             and all(isinstance(file, dict) and {"path", "bytes", "sha256"} <= file.keys() for file in files))
 
 
-def report_preamble(content, limit=40):
+def report_preamble(content, limit=40, *, strip_bold=True):
     """保留 Markdown 段落结构；围栏内部的示例不提供前导证据。"""
     lines = []
     fence = None
@@ -1551,7 +658,7 @@ def report_preamble(content, limit=40):
                 fence = None
             lines.append("")
         elif fence is None:
-            lines.append(line.replace("**", ""))
+            lines.append(line.replace("**", "") if strip_bold else line)
     return lines
 
 
@@ -1573,16 +680,28 @@ def report_title(label):
     return bool(role(label) if secondary is None else secondary)
 
 
-def report_table(lines, *, measured=False):
+def markdown_tables(lines, rule_pattern):
     def cells(line):
-        return [cell.strip() for cell in line.strip("|").split("|")] if "|" in line else []
+        return [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip("|"))] if "|" in line else []
 
-    rule_pattern = RUN_TABLE_RULE if measured else TABLE_RULE
-    metric_column = RUN_DATA_COLUMN if measured else RUN_COLUMN
     for i, line in enumerate(lines[:-2]):
         header, rule = cells(line), cells(lines[i + 1])
         if len(header) != len(rule) or not rule or not all(map(rule_pattern.fullmatch, rule)):
             continue
+        rows = []
+        for row in lines[i + 2:]:
+            data = cells(row)
+            if len(data) != len(header):
+                break
+            rows.append(data)
+        if rows:
+            yield header, rows
+
+
+def report_table(lines, *, measured=False):
+    rule_pattern = RUN_TABLE_RULE if measured else TABLE_RULE
+    metric_column = RUN_DATA_COLUMN if measured else RUN_COLUMN
+    for header, rows in markdown_tables(lines, rule_pattern):
         columns = [j for j, name in enumerate(header)
                    if OUTCOME_KEY.fullmatch(name) or name in {"状态", "实测", "认识论等级"}]
         metrics = [j for j, name in enumerate(header) if metric_column.search(name)]
@@ -1591,10 +710,7 @@ def report_table(lines, *, measured=False):
             header[0] in {"标的", "日期", "指标", "项", "regime", "维度", "级别", "id"}
             or header[0] == "" and len(header) >= 3
         )
-        for row in lines[i + 2:]:
-            data = cells(row)
-            if len(data) != len(header):
-                break
+        for data in rows:
             if len(header) == 2 and header[0] in {"字段", "项", "Field", "Key"} and EXECUTION_KEY.fullmatch(data[0]):
                 return True
             if (any(DISPOSITION.search(data[j]) or MEASUREMENT.search(data[j]) for j in columns)
@@ -1605,6 +721,27 @@ def report_table(lines, *, measured=False):
                 numeric_rows += 1
                 if numeric_rows >= 2:
                     return True
+    return False
+
+
+def observed_table(lines, *, sampled, generated, reported_run):
+    """用表头和实际数值分辨测量结果与定义、阈值或预期行为表。"""
+    for header, rows in markdown_tables(lines, RUN_TABLE_RULE):
+        labels = {name.casefold() for name in header}
+        numeric = {name.casefold() for j, name in enumerate(header)
+                   if any(RUN_CELL.match(row[j]) for row in rows)}
+        bars = any(re.fullmatch(r"bars?(?:\s*数)?", label) for label in numeric)
+        performance = sum(bool(PERFORMANCE_COLUMN.search(label)) for label in numeric)
+        if (bars and performance) or (reported_run and performance >= 2):
+            return True
+        if sampled and {"笔", "线段", "中枢", "走势", "买卖点"} <= numeric:
+            return True
+        if sampled and {"唯一键数", "重复率"} <= numeric and (
+            "判定" in labels or any(re.search(r"[✅❌]", cell) for row in rows for cell in row)
+        ):
+            return True
+        if generated and sampled and len(numeric) >= 2:
+            return True
     return False
 
 
@@ -1621,6 +758,47 @@ def measured_report(title, content, *, draft):
     preamble = "\n".join(lines)
     table = report_table(lines, measured=True) or RUN_DECISION_TABLE.search(preamble)
     measured_change = BEFORE_AFTER.search(preamble) and NUMERIC_CHANGE.search(preamble)
+    sampled = EMPIRICAL_CONTEXT.search(preamble)
+    generated = GENERATED_AT.search("\n".join(lines[:12]))
+    run_title = bool(title and RUN_TITLE.search(title))
+    empirical_grade = RUN_EMPIRICAL_GRADE.search(preamble)
+    if observed_table(lines, sampled=sampled, generated=generated,
+                      reported_run=(run_title and sampled) or empirical_grade):
+        return True
+    if sampled and (table or OBSERVED_FINDING.search(preamble)) and (generated or run_title):
+        return True
+    if (title and re.search(r"(?:研究|调研)报告\s*$", title)
+            and re.search(r"基于[^\n]{0,120}(?:研读|调研)|(?:调研|研究)日期\s*[:：]", preamble)
+            and re.search(r"(?m)^#{2,6} [^\n]{0,45}(?:结论|评估|建议)", content)):
+        return True
+    if RUN_DELIVERY.search("\n".join(lines[:12])) and (DELIVERED.search(preamble) or RUN_EXECUTED.search(preamble)):
+        return True
+    if RUN_EXECUTED.search(preamble) and (sampled or empirical_grade) and (
+        OBSERVED_FINDING.search(preamble) or len(RUN_STATISTIC.findall(preamble)) >= 2
+    ):
+        return True
+    if title and EXECUTION_RECORD.search(title) and re.search(r"实际报错|实际失败|\bE[0-9]{4}\b", preamble):
+        return True
+    if title and RUN_DIGEST.search(title) and (
+        len(RUN_STATISTIC.findall(preamble)) >= 3
+        or len(re.findall(r"(?m)^\d+\. .*?[✅❌]", preamble)) >= 2
+    ):
+        return True
+    # 有些实验先列设计及预注册，后列实际结果；只在明确的运行结果小节内取数值。
+    if run_title or sampled or empirical_grade:
+        all_lines = report_preamble(content, limit=content.count("\n") + 1)
+        for index, line in enumerate(all_lines):
+            if not (MD_HEADING.fullmatch(line) and RUN_RESULT_SECTION.search(line)):
+                continue
+            section = all_lines[index + 1:index + 55]
+            section_text = "\n".join(section)
+            if observed_table(section, sampled=True, generated=False, reported_run=True) or (
+                (sampled or EMPIRICAL_CONTEXT.search(section_text))
+                and len(RUN_STATISTIC.findall(section_text)) >= 2
+            ):
+                return True
+            if empirical_grade and re.search(r"证伪|否证", line) and len(RUN_METRIC.findall(section_text)) >= 2:
+                return True
     execution = (REPORT_SUBJECT.search(preamble) or RUN_EXECUTION.search(preamble)
                  or RUN_SOURCE.search(preamble) and RUN_SAMPLE.search(preamble))
     if execution and (table or measured_change or RUN_OBSERVATION.search(preamble) or RUN_RECORDED.search(preamble)):
@@ -1718,7 +896,7 @@ def basis_key(item, final_tree, archived_artifacts, cache, fail, *, cwd):
     entry = final_tree.get(path)
     fail(entry is not None and entry.kind == "blob" and entry.mode in REGULAR_MODES
          and entry.blob == blob, "verification_basis must bind a regular F blob")
-    fail(blob not in archived_artifacts.blobs or (path, blob) in archived_artifacts.loaded_inputs,
+    fail(blob not in archived_artifacts.blobs or (path, blob) in archived_artifacts.migrated_inputs,
          ARTIFACT_BASIS_ERROR)
     if blob not in cache:
         raw = git("cat-file", "blob", entry.blob, cwd=cwd)
