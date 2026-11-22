@@ -152,8 +152,12 @@ def _tracked() -> list[str]:
     return [f for f in out.split("\0") if f and (ROOT / f).is_file()]
 
 
+_HIST_EXACT = frozenset(k for k in HISTORICAL if not k.endswith("/"))
+_HIST_PREFIXES = tuple(k for k in HISTORICAL if k.endswith("/"))
+
+
 def _historical(f: str) -> bool:
-    return any(f == k or (k.endswith("/") and f.startswith(k)) for k in HISTORICAL)
+    return f in _HIST_EXACT or f.startswith(_HIST_PREFIXES)
 
 
 def _lines(f: str):
@@ -211,29 +215,55 @@ def _exists_from(f: str, target: str, tree: tuple[set[str], set[str]]) -> bool:
 def _repo_path_tokens(line: str, pat: re.Pattern):
     for m in pat.finditer(line):
         tok = m.group(1)
-        tok = re.sub(r"#.*$", "", tok)            # anchors
+        hash_idx = tok.find("#")
+        if hash_idx != -1:
+            tok = tok[:hash_idx]                  # anchors
         tok = tok.rstrip(".")                      # sentence punctuation
         if PLACEHOLDER.search(tok):
             continue
         last = tok.rsplit("/", 1)[-1]
-        if not (tok.endswith("/") or re.search(r"\.[A-Za-z0-9]{1,8}$", last)):
+        if not (tok.endswith("/") or _EXT_TAIL_RE.search(last)):
             continue                               # not a file or explicit dir
         yield tok
 
 
+_CODE_EXT_TUPLE = tuple(CODE_EXT)
+_DOC_EXT_TUPLE = tuple(DOC_EXT)
+_FAKE_BY_ID: dict[str, tuple[str, ...]] = {}
+for _fp, _fk in FAKE_GENEALOGY_IDS:
+    _FAKE_BY_ID[_fk] = _FAKE_BY_ID.get(_fk, ()) + (_fp,)
+
+
 def _checks_genealogy(f: str) -> bool:
-    if Path(f).suffix in CODE_EXT:
+    if f.endswith(_CODE_EXT_TUPLE):
         return True
-    if Path(f).suffix in DOC_EXT and not _historical(f):
+    if f.endswith(_DOC_EXT_TUPLE) and not _historical(f):
         return f in LIVE_DOC_FILES or f.startswith(LIVE_DOC_PREFIXES)
     return False
 
 
 def cited_ids(line: str) -> list[str]:
     """Every genealogy id a line cites, including each id in a cited list."""
+    has_hao = "号" in line
+    has_puxi = "谱系" in line
+    lower = line.lower()
+    has_gen = "genealogy" in lower
+    has_settled = "settled/" in lower
+    if not (has_hao or has_puxi or has_gen or has_settled):
+        return []
     out = []
-    for pat in GENEALOGY_CITE:
-        for m in pat.finditer(line):
+    if has_hao:
+        for m in GENEALOGY_CITE[0].finditer(line):
+            out += _ID_RE.findall(m.group(1))
+    if has_puxi:
+        for pat in (GENEALOGY_CITE[1], GENEALOGY_CITE[2]):
+            for m in pat.finditer(line):
+                out += _ID_RE.findall(m.group(1))
+    if has_gen:
+        for m in GENEALOGY_CITE[3].finditer(line):
+            out += _ID_RE.findall(m.group(1))
+    if has_settled:
+        for m in GENEALOGY_CITE[4].finditer(line):
             out += _ID_RE.findall(m.group(1))
     return list(dict.fromkeys(out))
 
@@ -244,10 +274,23 @@ def missing_genealogy_refs(files: list[str]) -> list[str]:
     for f in files:
         if not _checks_genealogy(f):
             continue
-        for ln, line in enumerate(_lines(f), 1):
-            for n in cited_ids(line):
-                if n in present or any(f.startswith(p) and n == k
-                                       for (p, k) in FAKE_GENEALOGY_IDS):
+        try:
+            text = (ROOT / f).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if ("号" not in text and "谱系" not in text):
+            lower = text.lower()
+            if "genealogy" not in lower and "settled/" not in lower:
+                continue
+        for ln, line in enumerate(text.split("\n"), 1):
+            ids = cited_ids(line)
+            if not ids:
+                continue
+            for n in ids:
+                if n in present:
+                    continue
+                fake_prefixes = _FAKE_BY_ID.get(n)
+                if fake_prefixes and f.startswith(fake_prefixes):
                     continue
                 bad.append(f"{f}:{ln}: cites genealogy {n}, not under .chanlun/genealogy/")
     return bad
@@ -256,7 +299,7 @@ def missing_genealogy_refs(files: list[str]) -> list[str]:
 def _link_targets(line: str, is_html: bool):
     for m in LINK.finditer(line):
         t = unquote(m.group(1) or m.group(2))
-        if re.match(r"^(?:[a-z][a-z0-9+.-]*:|#|\{|<)", t, re.I) or "..." in t:
+        if _SCHEME_RE.match(t) or "..." in t:
             continue
         t = t.split("#")[0].split("?")[0]
         if not t or ("/" not in t and "." not in t):
@@ -275,28 +318,44 @@ def _git_ignored(paths: list[str]) -> set[str]:
     return set(proc.stdout.split("\n")) - {""}
 
 
+_EXT_TAIL_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+_SCHEME_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#|\{|<)", re.I)
+
+
 def broken_doc_refs(files: list[str], tree: tuple[set[str], set[str]] | None = None) -> list[str]:
     tree = tree or _tree(files)
-    path_re = _repo_path_re(tree[1] | RETIRED_TOP_DIRS)
+    file_set, dir_set = tree
+    path_re = _repo_path_re(dir_set | RETIRED_TOP_DIRS)
     pending: list[tuple[str, str]] = []  # (finding, path) checked against .gitignore last
     bad = []
     for f in files:
-        if Path(f).suffix not in DOC_EXT or _historical(f):
+        if not f.endswith(_DOC_EXT_TUPLE) or _historical(f):
             continue
         is_html = f.endswith(".html")
+        f_dir = os.path.dirname(f)
         for ln, line in enumerate(_lines(f), 1):
-            noted = bool(RETIRED_NOTE.search(line))
-            for p in ([] if noted else _repo_path_tokens(line, path_re)):
-                if not _exists_from(f, p, tree):
-                    pending.append((f"{f}:{ln}: names missing path {p}", p))
-            for m in ([] if noted else SLASH.finditer(line)):
-                bad.append(f"{f}:{ln}: tells reader to use retired /{m.group(1)} "
-                           f"({RETIRED_COMMANDS[m.group(1)]})")
-            for t in _link_targets(line, is_html):
-                rel = os.path.normpath(os.path.join(os.path.dirname(f), t))
-                if not any(c in tree[0] or c in tree[1]
-                           for c in (rel, os.path.normpath(t.rstrip("/")))):
-                    bad.append(f"{f}:{ln}: links to missing path {t}")
+            noted: bool | None = None
+            if "/" in line:
+                for p in _repo_path_tokens(line, path_re):
+                    if not _exists_from(f, p, tree):
+                        if noted is None:
+                            noted = bool(RETIRED_NOTE.search(line))
+                        if not noted:
+                            pending.append((f"{f}:{ln}: names missing path {p}", p))
+                if "/ceremony" in line or any(f"/{cmd}" in line for cmd in RETIRED_COMMANDS):
+                    for m in SLASH.finditer(line):
+                        if noted is None:
+                            noted = bool(RETIRED_NOTE.search(line))
+                        if not noted:
+                            bad.append(f"{f}:{ln}: tells reader to use retired /{m.group(1)} "
+                                       f"({RETIRED_COMMANDS[m.group(1)]})")
+            if "](" in line or 'href="' in line:
+                for t in _link_targets(line, is_html):
+                    rel = os.path.normpath(os.path.join(f_dir, t))
+                    if rel not in file_set and rel not in dir_set:
+                        t_norm = os.path.normpath(t.rstrip("/"))
+                        if t_norm not in file_set and t_norm not in dir_set:
+                            bad.append(f"{f}:{ln}: links to missing path {t}")
     ignored = _git_ignored(sorted({p for _, p in pending}))
     bad += [msg for msg, p in pending if p not in ignored and p.rstrip("/") not in ignored]
     return bad
