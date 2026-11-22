@@ -13826,3 +13826,420 @@ def test_r33_nit1_tight_budget_reserves_shortest_upgrade_relation_before_note() 
     assert len(ren_256.body) <= 256
     assert ren_256.truncated is True
     assert f"（{f_nit_d.finding_id}→{f_imp_a.finding_id}）" in ren_256.body
+
+
+# ── Codex R34 全部 3 项 Important + Nit 1 精准回归 ────────────────────────────
+
+
+def test_r34_important1_block_explicit_and_auto_pins_for_per_target_resolved_consumed_reply() -> None:
+    """Codex R34 Important 1（R33-3）：按 (回复, 目标) 校验 comment:<cid>:resolved:<fid> 已消费状态，阻断显式锁与自动建锁且不误伤同评论其他发现。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r34_per_target.py",
+        line=42,
+        category="空值解引用",
+        failure_scenario="第 42 行缺陷 A 未判空",
+        source_models=("gpt-6-astra",),
+    )
+    f_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r34_other.py",
+        line=18,
+        category="越界访问",
+        failure_scenario="第 18 行缺陷 B 索引越界",
+        source_models=("gpt-6.1-sol",),
+    )
+    reply_a = AuthorReply(None, "pilot1742/r34_per_target.py", 42, "保留 A 现有行为", "c341", "alice")
+    reply_b = AuthorReply(None, "pilot1742/r34_other.py", 18, "保留 B 现有行为", "c341", "alice")
+    resolved_a_key = f"comment:c341:resolved:{f_a.finding_id}"
+
+    cand_a = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+
+    # 1. 显式传 bound_reply_targets={reply_a.reply_key: A} 时必须抛 ConvergenceError（parse_verifier_output 与直接 VerifiedRound 均拦截）
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_a,
+                [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"}],
+            ),
+            cand_a,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_a],
+            consumed_reply_keys={resolved_a_key},
+            bound_reply_targets={reply_a.reply_key: f_a.finding_id},
+        )
+
+    vf_a_confirmed = VerifiedFinding(
+        finding=f_a,
+        verdict=VerificationVerdict.CONFIRMED,
+        verifier_model="claude-opus-5-5",
+        verifier_evidence="A 仍成立",
+        round_number=1,
+        head_sha=HEAD_1,
+        related_reply_keys=(reply_a.reply_key, resolved_a_key),
+    )
+    forged_pin = frozenset({(reply_a.reply_key, f_a.finding_id)})
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(
+            candidates=cand_a,
+            verdicts=(vf_a_confirmed,),
+            bound_reply_targets=forged_pin,
+            author_replies=(reply_a,),
+            explicit_bound_reply_targets=forged_pin,
+            external_consumed_reply_keys=frozenset({resolved_a_key}),
+        )
+
+    # 2. 不传显式锁时自动评估不得生成 reply_a -> A 锁，且保留 resolved_a_key 到历史条目，下轮重传 reply_a 仍不能让 A 变 PASS
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_a,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"}],
+        ),
+        cand_a,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_a],
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_r1 = evaluate_round(ver_r1)
+    assert dec_r1.outcome is RoundOutcome.BLOCKED
+    assert dec_r1.bound_reply_targets == frozenset()
+    assert resolved_a_key in dec_r1.consumed_reply_keys
+
+    e1 = dec_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_r1))
+    assert e1.bound_reply_targets == frozenset()
+    assert resolved_a_key in e1.consumed_reply_keys
+
+    cand_r2 = _candidates([f_a], round_number=2, head_sha=HEAD_2, history=(e1,))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_r2,
+                [{"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图复放已消费坐标回复"}],
+            ),
+            cand_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_a],
+        )
+
+    ver_r2_conf = parse_verifier_output(
+        _verifier_payload(
+            cand_r2,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 A 仍阻断"}],
+        ),
+        cand_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_a],
+    )
+    dec_r2_conf = evaluate_round(ver_r2_conf)
+    assert dec_r2_conf.outcome is RoundOutcome.BLOCKED
+    assert dec_r2_conf.bound_reply_targets == frozenset()
+
+    # 3. 正向对照：同一评论 c341 指向无关发现 B 的有效坐标回复仍正常建锁与解除，绝不误伤
+    cand_ab = _candidates([f_a, f_b], round_number=1, head_sha=HEAD_1)
+    ver_ab_conf = parse_verifier_output(
+        _verifier_payload(
+            cand_ab,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"},
+                {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "B 仍成立"},
+            ],
+        ),
+        cand_ab,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_a, reply_b],
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_ab_conf = evaluate_round(ver_ab_conf)
+    assert dec_ab_conf.bound_reply_targets == frozenset({(reply_b.reply_key, f_b.finding_id)})
+
+    ver_ab_resolve_b = parse_verifier_output(
+        _verifier_payload(
+            cand_ab,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍阻断"},
+                {"finding_id": f_b.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信同评论对 B 的有效回复"},
+            ],
+        ),
+        cand_ab,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_a, reply_b],
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_ab_resolve_b = evaluate_round(ver_ab_resolve_b)
+    assert dec_ab_resolve_b.outcome is RoundOutcome.BLOCKED
+    assert [vf.finding.finding_id for vf in dec_ab_resolve_b.resolved_findings] == [f_b.finding_id]
+    assert dec_ab_resolve_b.resolved_findings[0].author_reply == reply_b
+    assert all(k != reply_a.reply_key for k, _ in dec_ab_resolve_b.bound_reply_targets)
+
+    # 4. 活跃别名对照：D 经历史别名映射到规范项 A 且 comment:c341:resolved:<A> 已消费时，针对 D 的坐标回复同样不得建锁
+    f_d = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r34_alias_d.py",
+        line=55,
+        category="别名缺陷D",
+        failure_scenario="第 55 行与 A 重复的竞态路径",
+        source_models=("gpt-6.1-sol",),
+    )
+    reply_d = AuthorReply(None, "pilot1742/r34_alias_d.py", 55, "保留 D", "c341", "alice")
+    cand_alias_r1 = _candidates([f_a, f_d], round_number=1, head_sha=HEAD_1)
+    ver_alias_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_alias_r1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 为规范项"},
+                {
+                    "finding_id": f_d.finding_id,
+                    "verdict": "duplicate",
+                    "duplicate_of": f_a.finding_id,
+                    "verifier_evidence": "D 折入 A",
+                },
+            ],
+        ),
+        cand_alias_r1,
+        verifier_model="claude-opus-5-5",
+        consumed_reply_keys={resolved_a_key},
+    )
+    dec_alias_r1 = evaluate_round(ver_alias_r1)
+    e_alias_r1 = dec_alias_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec_alias_r1))
+    cand_alias_r2 = _candidates([f_a, f_d], round_number=2, head_sha=HEAD_2, history=(e_alias_r1,))
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_alias_r2,
+                [
+                    {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"},
+                    {"finding_id": f_d.finding_id, "verdict": "confirmed", "verifier_evidence": "D 仍成立"},
+                ],
+            ),
+            cand_alias_r2,
+            verifier_model="claude-opus-5-5",
+            author_replies=[reply_d],
+            bound_reply_targets={reply_d.reply_key: f_d.finding_id},
+        )
+    ver_alias_r2 = parse_verifier_output(
+        _verifier_payload(
+            cand_alias_r2,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"},
+                {"finding_id": f_d.finding_id, "verdict": "confirmed", "verifier_evidence": "D 仍成立"},
+            ],
+        ),
+        cand_alias_r2,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_d],
+    )
+    dec_alias_r2 = evaluate_round(ver_alias_r2)
+    assert dec_alias_r2.bound_reply_targets == frozenset()
+
+
+def test_r34_important2_cross_source_consistency_ignores_wholly_excluded_replies() -> None:
+    """Codex R34 Important 2（R33-4）：跨来源同键一致性检查仅针对未排除回复，已排除回复编辑理由不触发误报，未消费回复冲突仍抛错。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r34_excluded_merge.py",
+        line=27,
+        category="边界校验缺失",
+        failure_scenario="第 27 行未校验空数组",
+        source_models=("gpt-6-astra",),
+    )
+    reply_x = AuthorReply(None, "pilot1742/r34_excluded_merge.py", 27, "初始理由", "c342", "alice")
+    reply_x_edited = dataclasses.replace(reply_x, reason="编辑理由")
+    cand_r1 = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+
+    # 1. consumed_comment_ids={"c342"} 排除整条评论：evaluate_round 传入编辑后的同键回复 -> 正常 BLOCKED 且不新增锁
+    ver_by_cid = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_x],
+        consumed_comment_ids={"c342"},
+    )
+    dec_by_cid = evaluate_round(ver_by_cid, author_replies=(reply_x_edited,))
+    assert dec_by_cid.outcome is RoundOutcome.BLOCKED
+    assert dec_by_cid.bound_reply_targets == frozenset()
+    assert ver_by_cid.author_replies == (reply_x,)
+    assert dec_by_cid.extra_author_replies == (reply_x_edited,)
+
+    # 2. consumed_reply_keys={reply_x.reply_key} 排除该回复键：evaluate_round 传入编辑后的同键回复 -> 正常 BLOCKED 且不新增锁
+    ver_by_key = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_x],
+        consumed_reply_keys={reply_x.reply_key},
+    )
+    dec_by_key = evaluate_round(ver_by_key, author_replies=(reply_x_edited,))
+    assert dec_by_key.outcome is RoundOutcome.BLOCKED
+    assert dec_by_key.bound_reply_targets == frozenset()
+    assert reply_x.reply_key in dec_by_key.consumed_reply_keys
+    assert ver_by_key.author_replies == (reply_x,)
+    assert dec_by_key.extra_author_replies == (reply_x_edited,)
+
+    # 3. 反向对照：未排除的回复出现跨来源同键不同理由时仍必须抛 ConvergenceError
+    ver_active = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 仍成立"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_x],
+    )
+    with pytest.raises(ConvergenceError):
+        evaluate_round(ver_active, author_replies=(reply_x_edited,))
+
+
+def test_r34_important3_parse_wontfix_replies_dedupes_keeping_last_occurrence() -> None:
+    """Codex R34 Important 3（R33-5）：parse_wontfix_replies 按最后出现位置去重，三行 [short]/[full]/[short] 全链路一致选中短键。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r34_dedupe_last.py",
+        line=14,
+        category="兼容逻辑保留",
+        failure_scenario="第 14 行保留旧协议分支",
+        source_models=("gpt-6-astra",),
+    )
+    full_id = f_a.finding_id
+    short_id = full_id[:6]
+    expected_short_key = f"comment:34301:finding:{short_id}"
+    expected_full_key = f"comment:34301:finding:{full_id}"
+
+    comments = [
+        {
+            "id": 34301,
+            "user": {"login": "alice", "type": "User"},
+            "body": (
+                f"[{short_id}] 不修：保留兼容\n"
+                f"[{full_id}] 不修：保留兼容\n"
+                f"[{short_id}] 不修：保留兼容\n"
+            ),
+        }
+    ]
+    parsed = parse_wontfix_replies(comments, allowed_authors={"alice"})
+    assert [r.reply_key for r in parsed] == [expected_full_key, expected_short_key]
+
+    direct_replies = (
+        AuthorReply(short_id, None, None, "保留兼容", "34301", "alice"),
+        AuthorReply(full_id, None, None, "保留兼容", "34301", "alice"),
+        AuthorReply(short_id, None, None, "保留兼容", "34301", "alice"),
+    )
+    bound_parsed = bind_author_replies([f_a], parsed)
+    bound_direct = bind_author_replies([f_a], direct_replies)
+    assert bound_parsed[full_id].reply_key == expected_short_key
+    assert bound_direct[full_id].reply_key == expected_short_key
+    assert bound_parsed[full_id].reply_key == bound_direct[full_id].reply_key
+
+    cand_r1 = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+    ver_parsed = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": full_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信保留兼容理由"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=parsed,
+    )
+    ver_direct = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": full_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信保留兼容理由"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+        author_replies=direct_replies,
+    )
+    assert ver_parsed.verdicts[0].author_reply is not None
+    assert ver_direct.verdicts[0].author_reply is not None
+    assert ver_parsed.verdicts[0].author_reply.reply_key == expected_short_key
+    assert ver_direct.verdicts[0].author_reply.reply_key == expected_short_key
+
+    # 同键不同理由仍全部保留并交由下游整组冲突拒收
+    conflict_comments = [
+        {
+            "id": 34302,
+            "user": {"login": "alice", "type": "User"},
+            "body": (
+                f"[{short_id}] 不修：理由一\n"
+                f"[{short_id}] 不修：理由二\n"
+                f"[{short_id}] 不修：理由一\n"
+            ),
+        }
+    ]
+    parsed_conflict = parse_wontfix_replies(conflict_comments, allowed_authors={"alice"})
+    assert len(parsed_conflict) == 2
+    assert bind_author_replies([f_a], parsed_conflict) == {}
+
+
+def test_r34_nit1_round_decision_and_verified_round_positional_backwards_compat() -> None:
+    """Codex R34 Nit 1：按 2b030f392 位置字段顺序调用 RoundDecision(*args) 与 VerifiedRound(*args) 保持向后兼容。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/r34_pos_compat.py",
+        line=9,
+        category="空值解引用",
+        failure_scenario="第 9 行未检查空指针",
+        source_models=("gpt-6-astra",),
+    )
+    cand_r1 = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+    ver_r1 = parse_verifier_output(
+        _verifier_payload(
+            cand_r1,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 成立"}],
+        ),
+        cand_r1,
+        verifier_model="claude-opus-5-5",
+    )
+    # 1. VerifiedRound 按 2b030f392 的 4 个位置参数构造（新增字段位于末尾）
+    ver_pos = VerifiedRound(cand_r1, ver_r1.verdicts, frozenset(), ())
+    assert ver_pos == ver_r1
+    assert [f.name for f in dataclasses.fields(VerifiedRound)][-3:] == [
+        "explicit_bound_reply_targets",
+        "external_consumed_reply_keys",
+        "external_consumed_comment_ids",
+    ]
+
+    # 2. RoundDecision 按 2b030f392 的 27 个位置参数顺序构造（extra_author_replies 位于最末尾）
+    dec_ref = evaluate_round(ver_r1)
+    assert [f.name for f in dataclasses.fields(RoundDecision)][-3:] == [
+        "verified_round",
+        "max_auto_rounds",
+        "extra_author_replies",
+    ]
+    legacy_positional_args = (
+        dec_ref.round_number,
+        dec_ref.head_sha,
+        dec_ref.panel,
+        dec_ref.outcome,
+        dec_ref.github_state,
+        dec_ref.description,
+        dec_ref.stop_auto_rereview,
+        dec_ref.verified_findings,
+        dec_ref.blocking_findings,
+        dec_ref.non_blocking_findings,
+        dec_ref.resolved_findings,
+        dec_ref.rejected_findings,
+        dec_ref.postable_findings,
+        dec_ref.unresolved_important,
+        dec_ref.retained_posted_fingerprints,
+        dec_ref.resolved_fingerprints,
+        dec_ref.rejected_fingerprints,
+        dec_ref.consumed_reply_keys,
+        dec_ref.finder_session_ids,
+        dec_ref.stale_location_fingerprints,
+        dec_ref.relocated_fingerprints,
+        dec_ref.bound_reply_targets,
+        dec_ref.duplicate_aliases,
+        dec_ref.history,
+        dec_ref.author_replies,
+        dec_ref.verified_round,
+        dec_ref.max_auto_rounds,
+    )
+    dec_pos = RoundDecision(*legacy_positional_args)
+    assert dec_pos == dec_ref
+    assert dec_pos.extra_author_replies == ()
