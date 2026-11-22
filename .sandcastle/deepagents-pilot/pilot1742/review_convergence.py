@@ -118,9 +118,7 @@ _HTML_BLOCK_7_START_RE = re.compile(rf"^(?:{_HTML_OPEN_TAG_PATTERN}|{_HTML_CLOSE
 _COMMONMARK_LINE_ENDING_RE = re.compile(r"\r\n|\n|\r")
 _ASCII_WS_CHARS = " \t\r\n\f\v"
 _ASCII_WS_RE = re.compile(r"[ \t\r\n\f\v]+")
-_ASCII_HWS_RE = re.compile(r"[ \t]+")
 _HARD_LINE_BREAK_RE = re.compile(r"[ \t]* {2,}\n[ \t]*")
-_SOFT_NEWLINE_WS_RE = re.compile(r"[ \t]*\n[ \t]*")
 _ASCII_PUNCTUATION = frozenset(r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~""")
 _AUTOLINK_URI_RE = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20<>]*>")
 _AUTOLINK_EMAIL_RE = re.compile(
@@ -276,42 +274,62 @@ def _decode_table_rows(block_text: str) -> list[list[str]]:
     return [[str(cell) for cell in row] for row in raw_rows]
 
 
-def _normalize_inline_prose_segment(seg: str, *, preserve_newlines: bool = False) -> str:
+def _normalize_inline_prose_segment(seg: str) -> str:
     """规范化普通行内文本中的 ASCII 空白：保留 CommonMark §6.7 两空格硬换行与非 ASCII 空白（U+00A0/U+3000）。"""
-    parts = _HARD_LINE_BREAK_RE.split(seg)
-    if preserve_newlines:
-        normalized_parts = [
-            "\n".join(_ASCII_HWS_RE.sub(" ", subline) for subline in _SOFT_NEWLINE_WS_RE.split(part))
-            for part in parts
-        ]
-    else:
-        normalized_parts = [_ASCII_WS_RE.sub(" ", part) for part in parts]
-    return "  \n".join(normalized_parts)
+    return "  \n".join(_ASCII_WS_RE.sub(" ", part) for part in _HARD_LINE_BREAK_RE.split(seg))
+
+
+def _normalize_inline_chunk(chunk: str, defined_labels: frozenset[str] = frozenset()) -> str:
+    """按 CommonMark §6.5 规范化单个行内块或表格单元格：折叠普通 ASCII 空白，保护代码跨度、链接尾、HTML、硬换行与非 ASCII 空白。"""
+    out_parts: list[str] = []
+    for kind, seg in _scan_inline_commonmark_segments(chunk, defined_labels):
+        if kind == "code":
+            out_parts.append(_COMMONMARK_LINE_ENDING_RE.sub(" ", seg))
+        elif kind == "raw":
+            out_parts.append(seg)
+        else:
+            out_parts.append(_normalize_inline_prose_segment(seg))
+    return "".join(out_parts).strip(_ASCII_WS_CHARS)
+
+
+def _normalize_gfm_table_row_inline(content: str, defined_labels: frozenset[str]) -> str:
+    """按 GFM §4.10 先在未转义 `|` 处切分单元格，再逐格独立行内规范化，阻断跨格未闭合语法吞噬并规整单元格填充空格。"""
+    split_result = _split_gfm_table_row_raw_cells(content, require_pipe=False)
+    assert split_result is not None
+    has_leading_pipe, raw_cells, has_trailing_pipe = split_result
+    if not raw_cells:
+        return "|" if has_leading_pipe else ""
+    norm_cells = [_normalize_inline_chunk(cell.strip(" \t"), defined_labels) for cell in raw_cells]
+    body = " | ".join(norm_cells)
+    if has_leading_pipe:
+        body = f"| {body}"
+    if has_trailing_pipe:
+        body = f"{body} |"
+    return body
 
 
 def _normalize_inline_fingerprint_text(normalized: str) -> str:
-    """行内短文本（category / reason）无损指纹规范化：按 CommonMark 块与 §6.5 行内语法保护原样结构、硬换行、链接与代码跨度。"""
+    """行内短文本（category / reason）无损指纹规范化：按 CommonMark 块、GFM 表格单元格与 §6.5 行内语法保护原样结构。"""
     stripped = normalized.strip(_ASCII_WS_CHARS)
     if not stripped:
         return ""
     verbatim_lines: set[int] = set()
     trailing_ws_strippable: set[int] = set()
     ref_def_lines: set[int] = set()
-    para_groups: list[tuple[int, ...]] = []
-    inline_block_groups: list[tuple[tuple[int, int], ...]] = []
+    inline_block_groups: list[_InlineBlockGroup] = []
+    table_row_lines: dict[int, int] = {}
     _, defined_labels = _parse_commonmark_blocks(
         stripped,
         include_all_visible_blocks=True,
         verbatim_line_indices_out=verbatim_lines,
         trailing_ws_strippable_out=trailing_ws_strippable,
         ref_def_line_indices_out=ref_def_lines,
-        paragraph_groups_out=para_groups,
         inline_block_groups_out=inline_block_groups,
+        table_row_lines_out=table_row_lines,
     )
     lines = _split_commonmark_lines(stripped)
-    para_by_start: dict[int, tuple[int, ...]] = {group[0]: group for group in para_groups if group}
-    inline_by_start: dict[int, tuple[tuple[int, int], ...]] = {
-        group[0][0]: group for group in inline_block_groups if group
+    inline_by_start: dict[int, _InlineBlockGroup] = {
+        group.lines[0][0]: group for group in inline_block_groups if group.lines
     }
 
     out_lines: list[tuple[bool, str]] = []
@@ -327,44 +345,25 @@ def _normalize_inline_fingerprint_text(normalized: str) -> str:
             out_lines.append((False, line.rstrip(" \t") if idx in trailing_ws_strippable else line))
             idx += 1
             continue
-        para_group = para_by_start.get(idx)
-        if para_group is not None:
-            chunk = "\n".join(
-                lines[i].rstrip(" \t") if i in trailing_ws_strippable else lines[i] for i in para_group
-            )
-            out_parts: list[str] = []
-            for kind, seg in _scan_inline_commonmark_segments(chunk, defined_labels):
-                if kind == "code":
-                    out_parts.append(_COMMONMARK_LINE_ENDING_RE.sub(" ", seg))
-                elif kind == "raw":
-                    out_parts.append(seg)
-                else:
-                    out_parts.append(_normalize_inline_prose_segment(seg, preserve_newlines=False))
-            collapsed = "".join(out_parts).strip(_ASCII_WS_CHARS)
-            if collapsed:
-                out_lines.append((False, collapsed))
-            idx = para_group[-1] + 1
+        table_prefix_end = table_row_lines.get(idx)
+        if table_prefix_end is not None:
+            raw_prefix = line[:table_prefix_end]
+            content = line[table_prefix_end:]
+            out_lines.append((False, f"{raw_prefix}{_normalize_gfm_table_row_inline(content, defined_labels)}"))
+            idx += 1
             continue
         inline_group = inline_by_start.get(idx)
         if inline_group is not None:
-            prefixes: list[str] = []
             contents: list[str] = []
-            for line_i, prefix_end in inline_group:
-                raw_line = lines[line_i]
-                prefixes.append(raw_line[:prefix_end])
-                content = raw_line[prefix_end:]
+            for line_i, prefix_end in inline_group.lines:
+                content = lines[line_i][prefix_end:].lstrip(" \t")
                 contents.append(content.rstrip(" \t") if line_i in trailing_ws_strippable else content)
-            inner_chunk = "\n".join(contents)
-            in_parts: list[str] = []
-            for kind, seg in _scan_inline_commonmark_segments(inner_chunk, defined_labels):
-                if kind in ("code", "raw"):
-                    in_parts.append(seg)
-                else:
-                    in_parts.append(_normalize_inline_prose_segment(seg, preserve_newlines=True))
-            rebuilt_contents = "".join(in_parts).split("\n")
-            for prefix, rebuilt_content in zip(prefixes, rebuilt_contents, strict=True):
-                out_lines.append((False, f"{prefix}{rebuilt_content}"))
-            idx = inline_group[-1][0] + 1
+            rebuilt = _normalize_inline_chunk("\n".join(contents), defined_labels)
+            if rebuilt or inline_group.first_prefix:
+                for line_offset, rebuilt_line in enumerate(rebuilt.split("\n")):
+                    prefix = inline_group.first_prefix if line_offset == 0 else inline_group.cont_prefix
+                    out_lines.append((False, f"{prefix}{rebuilt_line}"))
+            idx = inline_group.lines[-1][0] + 1
             continue
         if line.strip(" \t") == "":
             if not out_lines or out_lines[-1] != (False, ""):
@@ -1040,6 +1039,15 @@ class _BlockQuote:
 class _ListItem:
     padding: int
     has_content: bool = False
+    marker: str = ""
+    opened_line: int = -1
+
+
+@dataclass(frozen=True)
+class _InlineBlockGroup:
+    lines: tuple[tuple[int, int], ...]
+    first_prefix: str
+    cont_prefix: str
 
 
 @dataclass
@@ -1364,7 +1372,8 @@ def _find_code_span_end(text: str, start: int) -> tuple[int, int]:
     return tick_end, -1
 
 
-def _match_inline_link_dest_title(text: str, pos: int) -> int | None:
+def _match_and_canonicalize_inline_link_tail(text: str, pos: int) -> tuple[int, str] | None:
+    """按 CommonMark §6.5 解析行内链接/图片尾 `(...)`：原样保留 destination 与 title 本体，规范外侧排版空白。"""
     n = len(text)
     if pos >= n or text[pos] != "(":
         return None
@@ -1372,25 +1381,58 @@ def _match_inline_link_dest_title(text: str, pos: int) -> int | None:
     while i < n and text[i] in (" ", "\t", "\n"):
         i += 1
     if i < n and text[i] == ")":
-        return i + 1
-    dest_end = _parse_link_destination(text, i)
+        return i + 1, "]()"
+    dest_start = i
+    dest_end = _parse_link_destination(text, dest_start)
     if dest_end is None:
         return None
+    dest_raw = text[dest_start:dest_end]
     i = dest_end
     ws_start = i
     while i < n and text[i] in (" ", "\t", "\n"):
         i += 1
     if i < n and text[i] == ")":
-        return i + 1
+        return i + 1, f"]({dest_raw})"
     if i > ws_start:
-        title_end = _parse_link_title(text, i)
+        title_start = i
+        title_end = _parse_link_title(text, title_start)
         if title_end is None:
             return None
+        title_raw = text[title_start:title_end]
         i = title_end
         while i < n and text[i] in (" ", "\t", "\n"):
             i += 1
         if i < n and text[i] == ")":
-            return i + 1
+            return i + 1, f"]({dest_raw} {title_raw})"
+    return None
+
+
+def _match_and_canonicalize_link_tail(
+    text: str,
+    open_bracket: int,
+    close_bracket: int,
+    defined_labels: frozenset[str],
+) -> tuple[int, str] | None:
+    """在 `]` 之后匹配并规范化行内 `(dest title)` 或引用 `[label]` / `[]` / 简写引用尾，返回 `(end_pos, canonical_tail)`。"""
+    n = len(text)
+    after = close_bracket + 1
+    if after < n and text[after] == "(":
+        inline_match = _match_and_canonicalize_inline_link_tail(text, after)
+        if inline_match is not None:
+            return inline_match
+    if defined_labels:
+        if after < n and text[after] == "[":
+            if after + 1 < n and text[after + 1] == "]":
+                self_label = _match_link_label_brackets(text, open_bracket)
+                if self_label is not None and self_label[0] == close_bracket + 1 and self_label[1] in defined_labels:
+                    return after + 2, "][]"
+            ref_label = _match_link_label_brackets(text, after)
+            if ref_label is not None and ref_label[1] in defined_labels:
+                return ref_label[0], f"][{ref_label[1]}]"
+        else:
+            self_label = _match_link_label_brackets(text, open_bracket)
+            if self_label is not None and self_label[0] == close_bracket + 1 and self_label[1] in defined_labels:
+                return close_bracket + 1, "]"
     return None
 
 
@@ -1400,27 +1442,9 @@ def _match_link_tail(
     close_bracket: int,
     defined_labels: frozenset[str],
 ) -> int | None:
-    """在 `]` 之后匹配行内 `(dest title)` 或引用 `[label]` / `[]` / 简写引用。"""
-    n = len(text)
-    after = close_bracket + 1
-    if after < n and text[after] == "(":
-        inline_end = _match_inline_link_dest_title(text, after)
-        if inline_end is not None:
-            return inline_end
-    if defined_labels:
-        if after < n and text[after] == "[":
-            if after + 1 < n and text[after + 1] == "]":
-                self_label = _match_link_label_brackets(text, open_bracket)
-                if self_label is not None and self_label[0] == close_bracket + 1 and self_label[1] in defined_labels:
-                    return after + 2
-            ref_label = _match_link_label_brackets(text, after)
-            if ref_label is not None and ref_label[1] in defined_labels:
-                return ref_label[0]
-        else:
-            self_label = _match_link_label_brackets(text, open_bracket)
-            if self_label is not None and self_label[0] == close_bracket + 1 and self_label[1] in defined_labels:
-                return close_bracket + 1
-    return None
+    """在 `]` 之后匹配行内 `(dest title)` 或引用 `[label]` / `[]` / 简写引用，仅返回闭合结束偏移。"""
+    matched = _match_and_canonicalize_link_tail(text, open_bracket, close_bracket, defined_labels)
+    return matched[0] if matched is not None else None
 
 
 def _scan_inline_commonmark_segments(
@@ -1489,9 +1513,10 @@ def _scan_inline_commonmark_segments(
                 continue
             opener = brackets.pop()
             if opener.active:
-                tail_end = _match_link_tail(chunk, opener.start_char, i, defined_labels)
-                if tail_end is not None:
-                    segments.append(("raw", chunk[i:tail_end]))
+                tail_match = _match_and_canonicalize_link_tail(chunk, opener.start_char, i, defined_labels)
+                if tail_match is not None:
+                    tail_end, canonical_tail = tail_match
+                    segments.append(("raw", canonical_tail))
                     if not opener.is_image:
                         for prior in brackets:
                             if not prior.is_image:
@@ -2330,6 +2355,46 @@ def _extract_atx_heading_text(rest: str) -> str:
     return content
 
 
+def _split_gfm_table_row_raw_cells(
+    line: str,
+    *,
+    require_pipe: bool = True,
+) -> tuple[bool, list[str], bool] | None:
+    """按 GFM §4.10 / `pandoc -f gfm` 规则在未转义 `|` 处切分原始单元格片段，返回 `(has_leading_pipe, raw_cells, has_trailing_pipe)`。"""
+    stripped = line.strip(" \t")
+    if not stripped:
+        return None if require_pipe else (False, [], False)
+    pipe_positions: list[int] = [
+        idx
+        for idx, ch in enumerate(stripped)
+        if ch == "|" and not (idx > 0 and stripped[idx - 1] == "\\")
+    ]
+    if not pipe_positions:
+        return None if require_pipe else (False, [stripped], False)
+    if len(pipe_positions) == 1 and len(stripped) == 1:
+        return True, [], False
+    start = 0
+    end = len(stripped)
+    inner_pipes = pipe_positions
+    has_leading_pipe = False
+    has_trailing_pipe = False
+    if inner_pipes and inner_pipes[0] == 0:
+        has_leading_pipe = True
+        start = 1
+        inner_pipes = inner_pipes[1:]
+    if inner_pipes and inner_pipes[-1] == len(stripped) - 1:
+        has_trailing_pipe = True
+        end = len(stripped) - 1
+        inner_pipes = inner_pipes[:-1]
+    raw_cells: list[str] = []
+    seg_start = start
+    for p in inner_pipes:
+        raw_cells.append(stripped[seg_start:p])
+        seg_start = p + 1
+    raw_cells.append(stripped[seg_start:end])
+    return has_leading_pipe, raw_cells, has_trailing_pipe
+
+
 def _split_gfm_table_row(line: str, *, require_pipe: bool = True) -> list[str] | None:
     """按 GFM §4.10 / `pandoc -f gfm` 规则将表格行拆分为单元格列表。
 
@@ -2339,34 +2404,11 @@ def _split_gfm_table_row(line: str, *, require_pipe: bool = True) -> list[str] |
     - 剥离首部单个未转义 `|` 与尾部单个未转义 `|`（尾部紧邻 `\\` 的 `|` 不剥离）；
     - 按剩余未转义 `|` 切分单元格，每格去除首尾 ASCII 空格/制表符并将 `\\|` 还原为 `|`。
     """
-    stripped = line.strip(" \t")
-    if not stripped:
-        return None if require_pipe else []
-    pipe_positions: list[int] = [
-        idx
-        for idx, ch in enumerate(stripped)
-        if ch == "|" and not (idx > 0 and stripped[idx - 1] == "\\")
-    ]
-    if require_pipe and not pipe_positions:
+    split_result = _split_gfm_table_row_raw_cells(line, require_pipe=require_pipe)
+    if split_result is None:
         return None
-    if len(pipe_positions) == 1 and len(stripped) == 1:
-        return []
-    start = 0
-    end = len(stripped)
-    inner_pipes = pipe_positions
-    if inner_pipes and inner_pipes[0] == 0:
-        start = 1
-        inner_pipes = inner_pipes[1:]
-    if inner_pipes and inner_pipes[-1] == len(stripped) - 1:
-        end = len(stripped) - 1
-        inner_pipes = inner_pipes[:-1]
-    cells: list[str] = []
-    seg_start = start
-    for p in inner_pipes:
-        cells.append(stripped[seg_start:p].strip(" \t").replace("\\|", "|"))
-        seg_start = p + 1
-    cells.append(stripped[seg_start:end].strip(" \t").replace("\\|", "|"))
-    return cells
+    _, raw_cells, _ = split_result
+    return [cell.strip(" \t").replace("\\|", "|") for cell in raw_cells]
 
 
 def _is_gfm_table_delimiter_row(line: str, expected_cols: int) -> bool:
@@ -2398,8 +2440,8 @@ def _parse_commonmark_blocks(
     verbatim_line_indices_out: set[int] | None = None,
     trailing_ws_strippable_out: set[int] | None = None,
     ref_def_line_indices_out: set[int] | None = None,
-    paragraph_groups_out: list[tuple[int, ...]] | None = None,
-    inline_block_groups_out: list[tuple[tuple[int, int], ...]] | None = None,
+    inline_block_groups_out: list[_InlineBlockGroup] | None = None,
+    table_row_lines_out: dict[int, int] | None = None,
 ) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code", "table"], str]], frozenset[str]]:
     """按 CommonMark Phase-1 容器栈/叶子块（含 GFM §4.10 管道表格）+ §4.7 链接引用定义剥离收集文档块与已定义链接标签。"""
     containers: list[_Container] = []
@@ -2410,6 +2452,21 @@ def _parse_commonmark_blocks(
 
     def in_blockquote() -> bool:
         return any(isinstance(c, _BlockQuote) for c in containers)
+
+    def format_container_prefixes(start_line_idx: int) -> tuple[str, str]:
+        first_parts: list[str] = []
+        cont_parts: list[str] = []
+        for container in containers:
+            if isinstance(container, _BlockQuote):
+                first_parts.append("> ")
+                cont_parts.append("> ")
+            else:
+                if container.opened_line == start_line_idx:
+                    first_parts.append(f"{container.marker} ")
+                else:
+                    first_parts.append("  ")
+                cont_parts.append("  ")
+        return "".join(first_parts), "".join(cont_parts)
 
     def close_leaf(*, emit: bool = True) -> None:
         nonlocal leaf
@@ -2434,23 +2491,21 @@ def _parse_commonmark_blocks(
                 for rel in ref_def_rel:
                     ref_def_line_indices_out.add(leaf.line_indices[rel])
             if remaining:
-                if not containers:
-                    if paragraph_groups_out is not None:
-                        rem_indices = tuple(
-                            leaf.line_indices[r]
-                            for r in range(len(leaf.line_indices))
-                            if r not in ref_def_rel
-                        )
-                        if rem_indices:
-                            paragraph_groups_out.append(rem_indices)
-                elif inline_block_groups_out is not None:
+                if inline_block_groups_out is not None:
                     rem_inline = tuple(
                         (leaf.line_indices[r], leaf.prefix_ends[r])
                         for r in range(len(leaf.line_indices))
                         if r not in ref_def_rel
                     )
                     if rem_inline:
-                        inline_block_groups_out.append(rem_inline)
+                        first_prefix, cont_prefix = format_container_prefixes(rem_inline[0][0])
+                        inline_block_groups_out.append(
+                            _InlineBlockGroup(
+                                lines=rem_inline,
+                                first_prefix=first_prefix,
+                                cont_prefix=cont_prefix,
+                            )
+                        )
                 if emit and (include_all_visible_blocks or not in_blockquote()):
                     doc_blocks.append(("paragraph", remaining))
         elif isinstance(leaf, _HTMLBlock):
@@ -2575,8 +2630,8 @@ def _parse_commonmark_blocks(
                     leaf.body_rows.append(tuple(row_cells[: len(leaf.header_cells)]))
                     if trailing_ws_strippable_out is not None:
                         trailing_ws_strippable_out.add(line_idx)
-                    if inline_block_groups_out is not None:
-                        inline_block_groups_out.append(((line_idx, cursor.pos),))
+                    if table_row_lines_out is not None:
+                        table_row_lines_out[line_idx] = cursor.pos
                     continue
                 close_leaf()
 
@@ -2639,7 +2694,14 @@ def _parse_commonmark_blocks(
                 if trailing_ws_strippable_out is not None:
                     trailing_ws_strippable_out.add(line_idx)
                 if inline_block_groups_out is not None:
-                    inline_block_groups_out.append(((line_idx, saved[0]),))
+                    first_prefix, cont_prefix = format_container_prefixes(line_idx)
+                    inline_block_groups_out.append(
+                        _InlineBlockGroup(
+                            lines=((line_idx, saved[0]),),
+                            first_prefix=first_prefix,
+                            cont_prefix=cont_prefix,
+                        )
+                    )
                 if include_all_visible_blocks:
                     heading_text = _extract_atx_heading_text(rest)
                     if heading_text:
@@ -2702,7 +2764,14 @@ def _parse_commonmark_blocks(
                             if r not in ref_def_rel
                         )
                         if rem_inline:
-                            inline_block_groups_out.append(rem_inline)
+                            first_prefix, cont_prefix = format_container_prefixes(rem_inline[0][0])
+                            inline_block_groups_out.append(
+                                _InlineBlockGroup(
+                                    lines=rem_inline,
+                                    first_prefix=first_prefix,
+                                    cont_prefix=cont_prefix,
+                                )
+                            )
                     if include_all_visible_blocks:
                         doc_blocks.append(("heading", remaining_before_setext))
                     leaf = None
@@ -2747,7 +2816,14 @@ def _parse_commonmark_blocks(
                             padding = indent + marker_width + spaces_after
                             cursor.advance_cols(spaces_after)
                     mark_parent_has_content()
-                    containers.append(_ListItem(padding=padding, has_content=False))
+                    containers.append(
+                        _ListItem(
+                            padding=padding,
+                            has_content=False,
+                            marker=rest[:marker_width],
+                            opened_line=line_idx,
+                        )
+                    )
                     matched = len(containers)
                     continue
                 cursor.restore(after_marker_state)
@@ -2764,8 +2840,8 @@ def _parse_commonmark_blocks(
                         if leaf.line_indices:
                             trailing_ws_strippable_out.add(leaf.line_indices[-1])
                         trailing_ws_strippable_out.add(line_idx)
-                    if inline_block_groups_out is not None and leaf.line_indices:
-                        inline_block_groups_out.append(((leaf.line_indices[0], leaf.prefix_ends[0]),))
+                    if table_row_lines_out is not None and leaf.line_indices:
+                        table_row_lines_out[leaf.line_indices[0]] = leaf.prefix_ends[0]
                     leaf = _Table(header_cells=tuple(header_cells))
                     line_consumed = True
                     break

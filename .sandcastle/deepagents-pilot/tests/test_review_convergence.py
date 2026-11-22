@@ -9668,3 +9668,261 @@ def test_r27_failure_scenario_refdef_boundaries_and_container_blank_lines() -> N
         assert len(merged) == 2
         assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
         assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+
+# ── R28 精准返修（Codex R25 全部 3 项 Important：GFM 表格逐格隔离 + 链接尾空白规范化 + 容器/标题软折行折叠） ────
+
+
+def test_r28_codex_r25_repros_table_cell_link_tail_and_container_wrap() -> None:
+    """R28 精准回归：锁定 Codex R25 全部 3 项最小复现（finding_id / merge_and_dedupe / select_postable / evaluate_round）。"""
+    # 1. Important 1：GFM 表格跨单元格未闭合链接不得吞噬下一格代码跨度反引号（期望 False 2 1）
+    row = '| Col | Field |\n| --- | --- |\n| [doc](/a " | `hint")unit price` |'
+    row_2sp = row.replace("unit price", "unit  price")
+    t1, t2, merged_tbl = _r21_probe(row, row_2sp, category=True)
+    assert t1.finding_id != t2.finding_id
+    assert len(merged_tbl) == 2
+    assert {item.finding_id for item in merged_tbl} == {t1.finding_id, t2.finding_id}
+    assert len(select_postable_findings([_verified(t2, VerificationVerdict.CONFIRMED)], frozenset({t1.finding_id}))) == 1
+
+    # 2. Important 2：链接目的地外侧排版空格归一（期望 True 1 0，跨轮不重复贴报）
+    l1, l2, merged_link = _r21_probe("[spec]( /csv)", "[spec](  /csv)", category=True)
+    assert l1.finding_id == l2.finding_id
+    assert len(merged_link) == 1
+    assert merged_link[0].finding_id == l1.finding_id
+    assert len(select_postable_findings([_verified(l2, VerificationVerdict.CONFIRMED)], frozenset({l1.finding_id}))) == 0
+
+    l1_r1 = dataclasses.replace(l1, source_models=("gpt-6-astra",))
+    l2_r2 = dataclasses.replace(l2, source_models=("gpt-6-astra",))
+    e1_l = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({l1_r1.finding_id}),
+        (l1_r1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r28-r1-l1", "r28-r1-l2"}),
+    )
+    cand_r2_l = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([l2_r2], round_number=2, head_sha=HEAD_2),
+        history=(e1_l,),
+    )
+    assert len(cand_r2_l.findings) == 1
+    assert cand_r2_l.findings[0].finding_id == l1.finding_id
+    vr_r2_l = parse_verifier_output(
+        _verifier_payload(cand_r2_l, [{"finding_id": l1.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]),
+        cand_r2_l,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2_l = evaluate_round(vr_r2_l)
+    assert len(dec_r2_l.postable_findings) == 0
+    assert len(dec_r2_l.blocking_findings) == 1
+
+    # 3. Important 3：引用块段落惰性软折行折叠（期望 True 1 0，跨轮不重复贴报）
+    q1, q2, merged_bq = _r21_probe("> Race\nCondition", "> Race Condition", category=True)
+    assert q1.finding_id == q2.finding_id
+    assert len(merged_bq) == 1
+    assert merged_bq[0].finding_id == q1.finding_id
+    assert len(select_postable_findings([_verified(q2, VerificationVerdict.CONFIRMED)], frozenset({q1.finding_id}))) == 0
+
+    q1_r1 = dataclasses.replace(q1, source_models=("gpt-6-astra",))
+    q2_r2 = dataclasses.replace(q2, source_models=("gpt-6-astra",))
+    e1_q = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({q1_r1.finding_id}),
+        (q1_r1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r28-r1-q1", "r28-r1-q2"}),
+    )
+    cand_r2_q = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([q2_r2], round_number=2, head_sha=HEAD_2),
+        history=(e1_q,),
+    )
+    assert len(cand_r2_q.findings) == 1
+    assert cand_r2_q.findings[0].finding_id == q1.finding_id
+    vr_r2_q = parse_verifier_output(
+        _verifier_payload(cand_r2_q, [{"finding_id": q1.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]),
+        cand_r2_q,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_r2_q = evaluate_round(vr_r2_q)
+    assert len(dec_r2_q.postable_findings) == 0
+    assert len(dec_r2_q.blocking_findings) == 1
+
+
+def test_r28_gfm_table_cell_isolation_and_padding_matrix() -> None:
+    """R28：GFM 表格表头/表体逐单元格独立行内解析、转义管道符保护、单元格填充空格归一与容器内表格覆盖。"""
+    distinct_table_categories: tuple[tuple[str, str], ...] = (
+        # 表头跨格未闭合链接
+        (
+            '| [doc](/a " | `hint")unit price` |\n| --- | --- |\n| a | b |',
+            '| [doc](/a " | `hint")unit  price` |\n| --- | --- |\n| a | b |',
+        ),
+        # 表体跨格未闭合反引号与未闭合 HTML 属性
+        ("| Col | Field |\n| --- | --- |\n| `open | `unit price` |", "| Col | Field |\n| --- | --- |\n| `open | `unit  price` |"),
+        (
+            '| Col | Field |\n| --- | --- |\n| <span title=" | ">`unit price` |',
+            '| Col | Field |\n| --- | --- |\n| <span title=" | ">`unit  price` |',
+        ),
+        # 单元格内转义管道符（含 `\|` 与 `\\|` 代码跨度及尾 `\|`）
+        ("| Col | Field |\n| --- | --- |\n| `a\\|b` | x |", "| Col | Field |\n| --- | --- |\n| `a\\|  b` | x |"),
+        ("| Col | Field |\n| --- | --- |\n| `a\\\\|b` | x |", "| Col | Field |\n| --- | --- |\n| `a\\\\|  b` | x |"),
+        ("| Col | Field |\n| --- | --- |\n| a | `unit price`\\|", "| Col | Field |\n| --- | --- |\n| a | `unit  price`\\|"),
+        # 引用块内表格跨格隔离
+        (
+            '> | Col | Field |\n> | --- | --- |\n> | [doc](/a " | `hint")unit price` |',
+            '> | Col | Field |\n> | --- | --- |\n> | [doc](/a " | `hint")unit  price` |',
+        ),
+        # 单元格内 U+00A0 与空单元格列位移保留
+        ("| Col | Field |\n| --- | --- |\n| \u00a0x | y |", "| Col | Field |\n| --- | --- |\n| x | y |"),
+        ("|Expected|Actual|\n|---|---|\n|200||", "|Expected|Actual|\n|---|---|\n||200|"),
+    )
+    for left, right in distinct_table_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id != f2.finding_id, f"unexpected table category collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    equivalent_table_categories: tuple[tuple[str, str], ...] = (
+        ("|  Col  |  Field  |\n| --- | --- |\n|  x  |  y  |", "| Col | Field |\n| --- | --- |\n| x | y |"),
+        ("|Col|Field|\n| --- | --- |\n|x|y|", "| Col | Field |\n| --- | --- |\n| x | y |"),
+        ("Col | Field\n--- | ---\n  x  |  y  ", "Col | Field\n--- | ---\nx | y"),
+        ("> |  Col  |  Field  |\n> | --- | --- |\n> |  x  |  y  |", "> | Col | Field |\n> | --- | --- |\n> | x | y |"),
+        ("| Col | Field |\n| --- | --- |\n| [spec](  /csv ) | x |", "| Col | Field |\n| --- | --- |\n| [spec](/csv) | x |"),
+        (
+            "[ref 1]: /csv\n\n| Col | Field |\n| --- | --- |\n| [foo][ref  1] | x |",
+            "[ref 1]: /csv\n\n| Col | Field |\n| --- | --- |\n| [foo][ref 1] | x |",
+        ),
+    )
+    for left, right in equivalent_table_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id == f2.finding_id, f"unexpected table category split for {left!r} vs {right!r}"
+        assert len(merged) == 1
+        assert merged[0].finding_id == f1.finding_id
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 0
+
+
+def test_r28_link_and_image_tail_whitespace_canonicalization_matrix() -> None:
+    """R28：CommonMark §6.5 行内/引用链接与图片尾排版空白规范化，同时原样保护 destination 与 title 本体。"""
+    equivalent_link_categories: tuple[tuple[str, str], ...] = (
+        ("[spec](   )", "[spec]()"),
+        ("[spec](\n )", "[spec]()"),
+        ("[spec]( <> )", "[spec](<>)"),
+        ("[spec]( /csv)", "[spec](/csv)"),
+        ("[spec](/csv  )", "[spec](/csv)"),
+        ("[spec](  /csv  )", "[spec](/csv)"),
+        ("[spec](\n/csv\n)", "[spec](/csv)"),
+        ("[spec](\t/csv\t)", "[spec](/csv)"),
+        ('[spec](/csv   "t"  )', '[spec](/csv "t")'),
+        ('[spec](/csv\n"t"\n)', '[spec](/csv "t")'),
+        ("[spec]( /csv   't  2'  )", "[spec](/csv 't  2')"),
+        ("[spec]( /csv   (t  2)  )", "[spec](/csv (t  2))"),
+        ('[spec]( /csv  "a\nb"  )', '[spec](/csv "a\nb")'),
+        ("[spec](  <a  b>  )", "[spec](<a  b>)"),
+        ("[spec](  /doc(a(b))  )", "[spec](/doc(a(b)))"),
+        ("![alt](  /img.png  )", "![alt](/img.png)"),
+        ('![alt]( /img.png   "a  b"  )', '![alt](/img.png "a  b")'),
+        ("![alt [sub]( /a )]( /b )", "![alt [sub](/a)](/b)"),
+        ("[ref 1]: /csv\n[foo][ref  1]", "[ref 1]: /csv\n[foo][ref 1]"),
+        ("[ref 1]: /csv\n[foo][ref\n1]", "[ref 1]: /csv\n[foo][ref 1]"),
+        ("[ref 1]: /csv\n[foo][REF 1]", "[ref 1]: /csv\n[foo][ref 1]"),
+        ("[ref 1]: /img.png\n![foo][ref  1]", "[ref 1]: /img.png\n![foo][ref 1]"),
+        ("[ref 1]: /csv\n[ref  1][]", "[ref 1]: /csv\n[ref 1][]"),
+        ("[ref 1]: /csv\n[ref  1]", "[ref 1]: /csv\n[ref 1]"),
+    )
+    for left, right in equivalent_link_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id == f2.finding_id, f"unexpected link tail split for {left!r} vs {right!r}"
+        assert len(merged) == 1
+        assert merged[0].finding_id == f1.finding_id
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 0
+
+    distinct_link_categories: tuple[tuple[str, str], ...] = (
+        ("[spec](  <a  b>  )", "[spec](<a b>)"),
+        ('[spec]( /csv  "a\nb"  )', '[spec](/csv "a b")'),
+        ("[spec]( /csv   't  2'  )", "[spec](/csv 't 2')"),
+        ("[spec]( /csv   (t  2)  )", "[spec](/csv (t 2))"),
+        ('![alt]( /img.png   "a  b"  )', '![alt](/img.png "a b")'),
+        ("[spec](  /doc`x  ) `unit price`", "[spec](  /doc`x  ) `unit  price`"),
+        ("[spec](\u00a0/csv)", "[spec](/csv)"),
+    )
+    for left, right in distinct_link_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id != f2.finding_id, f"unexpected link tail collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
+
+    # 渲染侧 _single_line 同样规范化链接尾排版空白并保持单行
+    assert _single_line("[spec](  /csv  )") == "[spec](/csv)"
+    assert _single_line('[spec](\n/csv\n"a  b"\n)') == '[spec](/csv "a  b")'
+
+
+def test_r28_container_soft_wraps_hard_breaks_and_headings_matrix() -> None:
+    """R28：统一容器内段落（引用/嵌套引用/列表项）、Setext 与 ATX 标题行内折叠，并严守硬换行与结构边界。"""
+    equivalent_container_categories: tuple[tuple[str, str], ...] = (
+        ("> Race\nCondition", "> Race Condition"),
+        ("> Race\n> Condition", "> Race Condition"),
+        (">Race\n>Condition", "> Race Condition"),
+        ("> Race  \nCondition", "> Race  \n> Condition"),
+        ("> Race\\\nCondition", "> Race\\\n> Condition"),
+        ("> > Race\nCondition", "> > Race Condition"),
+        ("> > Race\n> > Condition", "> > Race Condition"),
+        (">>Race\n>>Condition", "> > Race Condition"),
+        ("> > Race  \nCondition", "> > Race  \n> > Condition"),
+        ("- Race\n  Condition", "- Race Condition"),
+        ("- Race\nCondition", "- Race Condition"),
+        ("-   Race\n    Condition", "- Race Condition"),
+        ("- Race  \nCondition", "- Race  \n  Condition"),
+        ("1. Race\n   Condition", "1. Race Condition"),
+        ("- first\n\n  second\n  wrapped", "- first\n\n  second wrapped"),
+        ("> - Race\n  Condition", "> - Race Condition"),
+        ("> - Race\n>   Condition", "> - Race Condition"),
+        ("- > Race\n  Condition", "- > Race Condition"),
+        ("Race\nCondition\n===", "Race Condition\n==="),
+        ("> Race\n> Condition\n> ===", "> Race Condition\n> ==="),
+        ("#   Race  Condition  ", "# Race Condition"),
+        ("##   Race  Condition  ", "## Race Condition"),
+        ("> #   Race  Condition", "> # Race Condition"),
+        ("> [spec](\n> /csv)", "> [spec](/csv)"),
+        ("> [spec](\n/csv)", "> [spec](/csv)"),
+        ("- [spec](\n  /csv\n  \"t\")", '- [spec](/csv "t")'),
+        ("> `a\n> b`", "> `a b`"),
+        ("> `a\nb`", "> `a b`"),
+    )
+    for left, right in equivalent_container_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id == f2.finding_id, f"unexpected container split for {left!r} vs {right!r}"
+        assert len(merged) == 1
+        assert merged[0].finding_id == f1.finding_id
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 0
+
+    distinct_container_categories: tuple[tuple[str, str], ...] = (
+        ("> Race  \nCondition", "> Race Condition"),
+        ("> Race\\\nCondition", "> Race Condition"),
+        ("> > Race", "> Race"),
+        ("- Race  \n  Condition", "- Race Condition"),
+        ("- a\n- b", "- a - b"),
+        ("- a\n  - b", "- a\n- b"),
+        ("10. a\n    - b", "10. a\n  - b"),
+        ("1. Race", "2. Race"),
+        ("- first\n\n  second", "- first\n\nsecond"),
+        ("Race  \nCondition\n===", "Race Condition\n==="),
+        ("#   `unit  price`", "# `unit price`"),
+        ("# Race", "## Race"),
+        ("> `a  \n> b`", "> `a b`"),
+        ('> <span title="a\n> b">x</span>', '> <span title="a b">x</span>'),
+        ("> a\n>\n> b", "> a\n> b"),
+    )
+    for left, right in distinct_container_categories:
+        f1, f2, merged = _r21_probe(left, right, category=True)
+        assert f1.finding_id != f2.finding_id, f"unexpected container collision for {left!r} vs {right!r}"
+        assert len(merged) == 2
+        assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+        assert len(select_postable_findings([_verified(f2, VerificationVerdict.CONFIRMED)], frozenset({f1.finding_id}))) == 1
