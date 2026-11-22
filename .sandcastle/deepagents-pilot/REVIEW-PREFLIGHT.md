@@ -17,7 +17,7 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 - `--checkout-root` 填正式 attempt 将传给 `ExternalReview(checkout_root=...)` 的同一路径；示例是其缺省值 `external_review.CHECKOUT_ROOT`，位于外卷。
 - 三个 SHA 与 attempt 的 target 相同；`--source` 是 controller 读候选对象的仓库。
-- 其余参数有默认值：`--image sandcastle:newchanlun`、`--proxy-url http://127.0.0.1:8318`、`--proxy-log-dir ~/Library/Application Support/CLIProxyLocal/auth/logs`、`--codex-home $CODEX_HOME 或 ~/.codex`、`--codex-bin codex`、`--deadline 55`。
+- 其余参数有默认值：`--image sandcastle:newchanlun`（由控制器调用时强制传已准入的不可变 `sha256:...` 镜像 ID）、`--proxy-url http://127.0.0.1:8318`、`--proxy-log-dir ~/Library/Application Support/CLIProxyLocal/auth/logs`、`--credential-mode codex-host`（控制器调用时强制传 `worker-env`，与正式 worker 同一 `CLIPROXY_LOCAL_KEY` / `launchctl` 凭据顺序）、`--codex-home $CODEX_HOME 或 ~/.codex`、`--codex-bin codex`、`--deadline 55`。
 
 退出码：`0` 可以启动；`2` 拦截（看 `checks` 里 `ok:false` 的项）；`3` 用法错误。任何退出路径（含用法错误与 `--help`）stdout 都是一行 ASCII JSON。上游错误正文与 docker/daemon 的 stderr 不进报告，只给 HTTP 状态、终态、固定词表分类（如 `tool_choice_unsupported`、`quota`、`auth`）、长度与 sha256 前 12 位，以免回显的 key 经各种转义漏出；其余来自上游或 proxy 日志的字段也只取已知枚举（响应 status、路由 provider@host，其余记 `other`）；报告其余字段输出前按全部已知 key 的各种形态脱敏。
 
@@ -92,10 +92,10 @@ Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude/Codex
 | 检查 | 拦下的真实失败 | 做法 |
 |---|---|---|
 | `checkout_root_free_space` | PR1866 A1/A2、PR1868 A3（f9）：快照需 2.60GB，HOME 只剩 1.40–1.65GB | 逐字节复刻 `prepare_review` 的快照字节公式，要求 checkout_root 所在卷剩余 ≥ 2 份（两位 reviewer） |
-| `checkout_root_container_mount` | PR1868 A1：checkout 在未共享进 colima 的路径，容器里看到的是 VM 本地空目录 | 在 checkout_root 写一次性 nonce，用审阅镜像 `--network none --read-only` 只读 bind 挂载 checkout_root 读回；读不到或不一致即拦。探针目录与容器随即删除，删不掉报 `probe_cleanup`；`docker run` 超时或 docker 自身出错（退出 125）时，daemon 可能在 `rm -f` 之后才建出容器，也报 `probe_cleanup`（回收未确认） |
+| `checkout_root_container_mount` | 正式命名卷灌入、属主设置或只读挂载不可用 | 在 checkout_root 写一次性 nonce，按正式 worker 同一命名卷路径（`volume create` → `create`/`docker cp`/`chown` → `--network none --read-only --user uid:gid -v <vol>:/review:ro`）读回；不依赖宿主目录共享。探针目录、容器与临时卷随即删除，删不掉报 `probe_cleanup`；`docker create`/`run` 超时或退出 125 时也报 `probe_cleanup`（回收未确认）。所有 Docker 子进程均剥离 `DOCKER_HOST`、`DOCKER_CONFIG` 与 `CLIPROXY_LOCAL_KEY` |
 | `route:<model>` | 旧会话被派到非预期上游或两别名撞同模型 | 两位 GPT 分别要求每次尝试有可信收据且精确匹配 `codex:gpt-6.2-sol@chatgpt.com` / `codex:gpt-6.2-astra@chatgpt.com`；不绑定模型的旧 `codex@chatgpt.com`、旧文本和缺收据都拦截 |
 | `roundtrip:<model>` | 上游 400、响应不完整、响应模型不符或线程未退出 | 每位一次最小 `/v1/responses` 往返；HTTP 200、唯一完成终态、内层完成且 `response.model` 与请求模型一致、无错误、HTTP 消息完整读完 |
-| `credential:codex-host` | #1323：宿主缺 `CLIPROXY_LOCAL_KEY`，回合在调模型前报 `Missing environment variable` | 去掉该环境变量后，按 `$CODEX_HOME/config.toml` 的 `model_providers.cliproxy-local` 取 key（`auth.command` / `env_key`）。provider 配置是否合法以宿主自己的 codex 为准：先离线跑一次 `codex features list`（约 50ms，不发请求），Codex 拒绝加载就拦（如 `auth` 与 `env_key` 并存），报告只取 Codex 报错里的字段名。两家往返都用这把 key，所以通过即证明没有该变量时 provider 也能完成往返 |
+| `credential:codex-host` / `credential:worker-env` | #1323 宿主或正式 worker 缺 `CLIPROXY_LOCAL_KEY` | 默认 `codex-host` 去掉 `CLIPROXY_LOCAL_KEY` 后按 `$CODEX_HOME/config.toml` 取 key 并离线跑 `codex features list`；控制器正式调用使用 `--credential-mode worker-env`，按正式 worker 同一顺序取进程 `CLIPROXY_LOCAL_KEY` 或 macOS `launchctl getenv CLIPROXY_LOCAL_KEY`，两家往返都用这把 key |
 
 模型探测每家只发一次、提示极短（effort=low），这是预检唯一的模型花费。
 

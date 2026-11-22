@@ -24,7 +24,7 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 需要在 Colima 验收和审阅、但全局默认是 OrbStack 时，在启动 controller 的环境中设置 `DOCKER_CONTEXT=colima`，不修改全局默认。该值沿部署准入、监督、容器/卷检查与回收、VM trim 传递；不存在或不可用的显式 context 按原失败路径处理，不重试默认 daemon。未设置时仍由 Docker 使用原默认 context。launchd 托管时，在实际加载的 `com.newchanlun.deepagents-executor.plist` 的 `EnvironmentVariables` 中设置该值；部署验收命令也须显式使用同一 context。
 
-这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定。`SANDCASTLE_MAIN_MODEL` 与 `SANDCASTLE_CONFIG_FILE` 仅传给宿主的准入与监督进程，用于按部署的起草模型（含配置文件覆盖）核对验收独审是否异家族；它们不选择审查模型，不扩大 `DOCKER_ENV` 回收环境，也不进入审阅容器。正式审阅准入不调用主控模型探针。
+这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定。`SANDCASTLE_MAIN_MODEL` 与 `SANDCASTLE_CONFIG_FILE`（相对路径在转发前统一按调用方基准规范化为绝对路径，准入与监督进程同以仓库根目录运行）仅传给宿主的准入与监督进程，用于按部署的起草模型（含配置文件覆盖）核对验收独审是否异家族；它们不选择审查模型，不扩大 `DOCKER_ENV` 回收环境，也不进入审阅容器。正式审阅准入不调用主控模型探针。
 
 同一部署的派发、恢复与回收须使用同一 context；旧 run 没有持久化 context 绑定，不能换 daemon 后接管。部署新代码后，部署 owner 必须按新 controller head 重新绑定 Docker 准入，不能沿用旧 controller head 的验收。隔离 fake 测试不代替这一步。
 
@@ -32,7 +32,7 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 新 attempt 使用合同 `external-pr-v2-gpt62`；模型与提示词一并进入 `REVIEW_CONTRACT`。旧合同的 PASS 不能沿用，旧合同的 STALE 不迁移；旧 run 的回执、已发布结论和 BLOCK 证据保留。原 base/head 上的新 attempt 使用下一个未占用的编号。自动 sweep 按同 head 最新未作废 attempt 决定恢复动作，不把旧合同中断的 run 当成 GPT 派发，也不会让已过时的旧终态遮蔽更新的 GPT 中断续跑：最新仍是旧合同待发布终态时交对账，最新仍是旧合同未完结 run 时交操作员。
 
-审查模型不依赖 `SANDCASTLE_MAIN_MODEL`。两位 GPT 走原有结构化输出 schema；Kimi 的历史 `prompt` 模式仍可用于读旧回执。Claude 或 Kimi 不再作为新正式审查的替补。手动 `review-pr` 与自动 `review_sweep` 共用的新 attempt 登记路径及沿用退回双审路径均强制执行 `review_preflight.py` 预检闸（通过 `REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER` + `REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT` + `REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR`，或宿主 `REVIEW_PREFLIGHT_PROXY_RECEIPT_DIR` 显式配置可信收据源；缺配置或任一 GPT 路由/响应模型未过预检时失败闭合，不占 attempt、不写 `target.json`、不发 `pending`）。已有 attempt 的中断恢复和有效 PASS 沿用不重跑预检。
+审查模型不依赖 `SANDCASTLE_MAIN_MODEL`。两位 GPT 走原有结构化输出 schema；Kimi 的历史 `prompt` 模式仍可用于读旧回执。Claude 或 Kimi 不再作为新正式审查的替补。手动 `review-pr` 与自动 `review_sweep` 共用的新 attempt 登记路径及沿用退回双审路径均按「空间 → 每日额度 → 部署 Docker 准入 → `review_preflight.py`」顺序强制过闸：先验证每日额度（触顶时不发付费预检请求）并经 `--admission-only` 取得已准入的不可变镜像 ID，再以与正式 worker 一致的过滤环境、`--image <sha256:...>`、`--proxy-url http://127.0.0.1:8318`（禁止通过 `REVIEW_PREFLIGHT_PROXY_URL` 指向别的代理）和 `--credential-mode worker-env`（沿用 `CLIPROXY_LOCAL_KEY` / `launchctl getenv`）运行预检（通过 `REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER` + `REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT` + `REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR`，或宿主 `REVIEW_PREFLIGHT_PROXY_RECEIPT_DIR` 显式配置可信收据源）；任一步失败均失败闭合，不启动未准入容器、不占 attempt、不写 `target.json`、不发 `pending`。已有 attempt 的中断恢复和有效 PASS 沿用不重跑预检。
 
 ## 启用前完成部署验收
 

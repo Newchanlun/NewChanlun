@@ -2430,16 +2430,28 @@ def test_new_attempt_and_reuse_fallback_enforce_preflight_fail_closed(lane, env,
             lane.review_pr(1810, 1)
         assert lane.status(1810) == [] and lane.gateway.sent == []
 
-    # 3. 预检参数透传：配置容器收据与 DOCKER_CONTEXT 后构造正确 CLI 参数
+    # 3. 预检参数与端点合同：固定对齐 codex-child.ts 代理地址，拒绝 REVIEW_PREFLIGHT_PROXY_URL 分叉，强制传已准入镜像 ID 与 worker-env
+    codex_child_ts = (Path(__file__).resolve().parents[2] / "codex-child.ts").read_text()
+    assert f'base_url: "{module.FORMAL_PROXY_URL}/v1"' in codex_child_ts
     monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER, "blackhole-cliproxy")
     monkeypatch.setenv(module.PREFLIGHT_ENV_PROXY_CONTEXT, "orbstack")
     monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER_DIR, "/tmp/cliproxy-preflight-receipts")
     monkeypatch.setenv("DOCKER_CONTEXT", "orbstack")
+    admitted_image = "sha256:" + "a" * 64
     probe_target = unconfigured._frozen(load_target(lane.gateway, 1810), 1)
-    cmd = unconfigured._preflight_args(probe_target)
+    cmd = unconfigured._preflight_args(probe_target, image=admitted_image)
+    assert "--image" in cmd and cmd[cmd.index("--image") + 1] == admitted_image
+    assert "--proxy-url" in cmd and cmd[cmd.index("--proxy-url") + 1] == module.FORMAL_PROXY_URL
+    assert "--credential-mode" in cmd and cmd[cmd.index("--credential-mode") + 1] == "worker-env"
     assert "--proxy-receipt-container" in cmd and "blackhole-cliproxy" in cmd
     assert "--proxy-docker-context" in cmd and "--review-docker-context" in cmd
     assert "--proxy-container-receipt-dir" in cmd and "/tmp/cliproxy-preflight-receipts" in cmd
+    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_URL", "http://127.0.0.1:9999")
+    with pytest.raises(EffectPending, match="REVIEW_PREFLIGHT_PROXY_URL"):
+        unconfigured._preflight_args(probe_target, image=admitted_image)
+    monkeypatch.delenv("REVIEW_PREFLIGHT_PROXY_URL", raising=False)
+    with pytest.raises(EffectPending, match="已准入镜像"):
+        unconfigured._preflight_args(probe_target, image="sandcastle:newchanlun")
 
     # 4. 正常通过后：已有 attempt 续跑与有效 PASS 沿用不重跑预检；沿用退回双审时补跑预检
     calls = []
@@ -2492,3 +2504,71 @@ def test_validate_review_rejects_mismatched_session_model_or_provider(lane):
         json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}) + "\n"
     )
     assert validate_review(target, launch, receipt, folder, lane.source).verdict == "FAILED"
+
+
+def test_run_preflight_requires_admission_before_probe_and_filters_env(lane, monkeypatch, tmp_path):
+    """正式预检先过部署准入取得不可变镜像 ID，再以过滤环境启动预检进程；准入未过时不启动任何探针容器。"""
+    monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER, "blackhole-cliproxy")
+    monkeypatch.setenv(module.PREFLIGHT_ENV_PROXY_CONTEXT, "orbstack")
+    monkeypatch.setenv(module.PREFLIGHT_ENV_CONTAINER_DIR, "/tmp/cliproxy-preflight-receipts")
+    monkeypatch.setenv("DOCKER_CONTEXT", "orbstack")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")
+    monkeypatch.setenv("DOCKER_CONFIG", "/tmp/forbidden-docker")
+    monkeypatch.setenv("SECRET_TOKEN", "must-not-leak")
+    monkeypatch.setenv("CLIPROXY_LOCAL_KEY", "fixture-worker-key")
+
+    real_lane = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
+                               checkout_root=lane.checkout_root, launcher=lane.launcher, poll_seconds=0.01)
+    seen = []
+    real_run = subprocess.run
+    def spy_run(cmd, *args, **kwargs):
+        if len(cmd) >= 3 and cmd[2] == str(module.PREFLIGHT_SCRIPT):
+            seen.append({"cmd": cmd, "env": kwargs.get("env"), "cwd": kwargs.get("cwd")})
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(_fake_preflight_pass(None)), "")
+        return real_run(cmd, *args, **kwargs)
+    monkeypatch.setattr(module.subprocess, "run", spy_run)
+
+    # 1. 部署准入失败时直接拦截，预检脚本不被调用（零容器启动）
+    (lane.source / ".git" / "fake-admission").write_text("fail")
+    with pytest.raises(EffectPending, match="部署 Docker 准入未通过"):
+        real_lane.review_pr(1810, 1)
+    assert seen == [] and lane.status(1810) == [] and lane.gateway.sent == []
+
+    # 2. 部署准入通过时只传已准入 sha256 镜像 ID，并过滤掉 DOCKER_HOST/DOCKER_CONFIG/SECRET_TOKEN
+    admitted = "sha256:" + "9" * 64
+    (lane.source / ".git" / "fake-admission").write_text(admitted)
+    target = real_lane.target(1810, 1)
+    assert target.attempt == 1 and len(seen) == 1
+    cmd = seen[0]["cmd"]
+    env = seen[0]["env"]
+    assert cmd[cmd.index("--image") + 1] == admitted
+    assert cmd[cmd.index("--proxy-url") + 1] == module.FORMAL_PROXY_URL
+    assert cmd[cmd.index("--credential-mode") + 1] == "worker-env"
+    assert env["DOCKER_CONTEXT"] == "orbstack" and env["CLIPROXY_LOCAL_KEY"] == "fixture-worker-key"
+    assert not any(k in env for k in ("DOCKER_HOST", "DOCKER_CONFIG", "SECRET_TOKEN"))
+
+
+def test_relative_sandcastle_config_file_resolves_identically_for_admission_and_supervisor(lane, monkeypatch, tmp_path):
+    """相对 SANDCASTLE_CONFIG_FILE 在准入与监督进程收到同一个绝对路径，且两者均以 SOURCE_REPO 为 cwd。"""
+    import os
+    caller_dir = tmp_path / "caller-cwd"
+    caller_dir.mkdir()
+    monkeypatch.chdir(caller_dir)
+    expected = os.path.abspath("rel/scheduler.json")
+    monkeypatch.setenv("SANDCASTLE_CONFIG_FILE", "rel/scheduler.json")
+    trace = tmp_path / "cfg-trace.jsonl"
+    worker = tmp_path / "worker.py"
+    worker.write_text(f"""import json, os, runpy, sys
+with open({str(trace)!r}, "a") as f:
+    f.write(json.dumps({{"admission": sys.argv[1:] == ["--admission-only"],
+                         "cwd": os.getcwd(), "cfg": os.environ.get("SANDCASTLE_CONFIG_FILE")}}) + "\\n")
+runpy.run_path({lane.launcher[1]!r}, run_name="__main__")
+""")
+    lane.launcher = [sys.executable, str(worker)]
+    controller = git(lane.source, "rev-parse", "HEAD")
+    assert lane._deployment_admission(controller) is not None
+    assert lane.review_pr(1810)["verdict"] == "PASS"
+    rows = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert len(rows) == 3 and sum(r["admission"] for r in rows) == 1
+    assert {r["cfg"] for r in rows} == {expected}
+    assert {Path(r["cwd"]).resolve() for r in rows} == {lane.source.resolve()}

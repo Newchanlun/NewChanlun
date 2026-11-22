@@ -227,6 +227,57 @@ def test_old_unpublished_outcome_does_not_shadow_newer_gpt_attempt_recovery(lane
     assert acts(sweep.tick()) == ["needs-operator"]
 
 
+@pytest.mark.parametrize("new_has_outcome,expected_first,expected_second", [
+    (False, "resume-review", "needs-operator"),
+    (True, "resume-publish", "needs-reconcile"),
+])
+def test_old_published_outcome_does_not_shadow_newer_gpt_attempt_recovery(
+        lane, monkeypatch, new_has_outcome, expected_first, expected_second):
+    """旧合同 A1 已发布终态，操作员启动 GPT A2 后中断（含已发 pending 未完结或有结论未发布），sweep 必须续跑 A2 而非误判 done。"""
+    sweep, host, _ = make(lane, run=False)
+    with monkeypatch.context() as legacy:
+        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
+        old_target = lane.target(1810, 1)
+    old_folder = lane.state_root / "runs" / old_target.key
+    (old_folder / "outcome.json").write_text(json.dumps({
+        "verdict": "PASS", "publication": {"id": 1, "state": "success"},
+    }))
+    new_target = lane.target(1810, 2)
+    assert new_target.registered_at_ns > old_target.registered_at_ns
+    if new_has_outcome:
+        new_folder = lane.state_root / "runs" / new_target.key
+        (new_folder / "outcome.json").write_text(json.dumps({"verdict": "PASS", "state": "success"}))
+    assert acts(sweep.tick()) == [expected_first]
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 2)]
+    host.rows.clear()
+    assert acts(sweep.tick()) == [expected_second]
+
+
+def test_spawner_normalizes_relative_sandcastle_config_file_before_chdir(tmp_path, monkeypatch):
+    """spawner 切到 deepagents-pilot 子目录前，先把相对 SANDCASTLE_CONFIG_FILE 按调用方 cwd 规范成绝对路径。"""
+    from pathlib import Path
+    caller = tmp_path / "host-cwd"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("SANDCASTLE_CONFIG_FILE", "deploy/sched.json")
+    expected = os.path.abspath("deploy/sched.json")
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        captured["cwd"] = kwargs.get("cwd")
+        return FakeProc()
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    spawn = module.spawner(tmp_path / "key.pem")
+    assert spawn(2207, 1, "a" * 40, tmp_path / "spawn.log") == 4242
+    assert captured["env"]["SANDCASTLE_CONFIG_FILE"] == expected
+    assert Path(captured["cwd"]).name == "deepagents-pilot"
+
+
 def test_explicit_reattempt_by_operator_is_left_alone(lane):
     sweep, host, _ = make(lane)
     sweep.tick()

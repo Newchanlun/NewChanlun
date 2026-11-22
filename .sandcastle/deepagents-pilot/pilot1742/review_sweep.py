@@ -428,13 +428,12 @@ class Sweep:
         if number in busy:
             return "running", None
         runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
-        final = [r for r in runs if r["outcome"] and r["outcome"].get("verdict") != "STALE"]
-        if any("publication" in r["outcome"] for r in final):
+        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
+        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
+        if latest is not None and latest["outcome"] and "publication" in latest["outcome"]:
             return "done", None
         if running >= self.max_running:
             return "queued", None
-        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
-        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
         if latest is not None and latest["outcome"]:  # 最新未作废 attempt 有结论没发布：受管对账与发布（同一 attempt，key 要求 base 未变）
             if latest["target"].get("base_sha") != base or not self._resumable(latest):
                 return "needs-reconcile", None
@@ -842,9 +841,13 @@ def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int
 def spawner(private_key: Path) -> Spawn:
     def spawn(number: int, attempt: int, head: str, log: Path) -> int:
         log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        env = dict(os.environ)
+        config = env.get("SANDCASTLE_CONFIG_FILE", "").strip()
+        if config and not Path(config).is_absolute():
+            env["SANDCASTLE_CONFIG_FILE"] = os.path.abspath(config)
         with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
             return subprocess.Popen(run_review_command(number, attempt, head, private_key), stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=out, start_new_session=True,
+                                    stdout=out, stderr=out, start_new_session=True, env=env,
                                     cwd=Path(__file__).resolve().parents[1]).pid
     return spawn
 

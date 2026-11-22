@@ -51,13 +51,13 @@ REVIEW_WORKER_ENV = (*DOCKER_ENV, "SANDCASTLE_MAIN_MODEL", "SANDCASTLE_CONFIG_FI
 # 正式 GPT 双审（EXTERNAL-REVIEW.md）；不同模型各走独立 checkout、进程与 session。
 MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 POLICY = "external-pr-v2-gpt62"
+# 与 codex-child.ts PROVIDER_DEFINITION.base_url（http://127.0.0.1:8318/v1）及 codex-route.mts 容器端点一致。
+FORMAL_PROXY_URL = "http://127.0.0.1:8318"  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy），非调试残留
 PREFLIGHT_SCRIPT = Path(__file__).resolve().parents[1] / "review_preflight.py"
 PREFLIGHT_ENV_CONTAINER = "REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER"
 PREFLIGHT_ENV_CONTAINER_DIR = "REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR"
 PREFLIGHT_ENV_PROXY_CONTEXT = "REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT"
 PREFLIGHT_ENV_HOST_DIR = "REVIEW_PREFLIGHT_PROXY_RECEIPT_DIR"
-PREFLIGHT_ENV_PROXY_URL = "REVIEW_PREFLIGHT_PROXY_URL"
-PREFLIGHT_ENV_CODEX_BIN = "REVIEW_PREFLIGHT_CODEX_BIN"
 PREFLIGHT_ENV_DEADLINE = "REVIEW_PREFLIGHT_DEADLINE"
 CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
@@ -543,7 +543,32 @@ class ExternalReview:
         self.poll_seconds = poll_seconds
         self._stop = threading.Event()
 
-    def _preflight_args(self, target: ReviewTarget) -> list[str]:
+    @staticmethod
+    def _worker_env(*, include_key: bool = False) -> dict[str, str]:
+        """准入与监督进程共用的受控环境：统一把相对 SANDCASTLE_CONFIG_FILE 解析为绝对路径，避免不同 cwd 读到不同配置。"""
+        keys = (*REVIEW_WORKER_ENV, "CLIPROXY_LOCAL_KEY") if include_key else REVIEW_WORKER_ENV
+        env = {k: os.environ[k] for k in keys if k in os.environ}
+        config = env.get("SANDCASTLE_CONFIG_FILE")
+        if config is not None:
+            stripped = config.strip()
+            if stripped:
+                env["SANDCASTLE_CONFIG_FILE"] = os.path.abspath(stripped) if not Path(stripped).is_absolute() else stripped
+            else:
+                env.pop("SANDCASTLE_CONFIG_FILE")
+        return env
+
+    @staticmethod
+    def _preflight_env() -> dict[str, str]:
+        """与正式 worker 相同的受控环境：保留 DOCKER_ENV 与 CLIPROXY_LOCAL_KEY，剔除 DOCKER_HOST/DOCKER_CONFIG 等覆写。"""
+        return {k: os.environ[k] for k in (*DOCKER_ENV, "LC_ALL", "CLIPROXY_LOCAL_KEY") if k in os.environ}
+
+    def _preflight_args(self, target: ReviewTarget, *, image: str) -> list[str]:
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", image):
+            raise EffectPending("preflight-blocked：预检必须使用已准入镜像 ID，未占 attempt")
+        override = os.environ.get("REVIEW_PREFLIGHT_PROXY_URL", "").strip()
+        if override and override.rstrip("/") != FORMAL_PROXY_URL:
+            raise EffectPending(
+                f"preflight-blocked：正式预检代理端点固定为 {FORMAL_PROXY_URL}，禁止通过 REVIEW_PREFLIGHT_PROXY_URL 分叉")
         container = os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip()
         host_dir = os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
         if container and host_dir:
@@ -554,7 +579,10 @@ class ExternalReview:
         cmd = [sys.executable, "-I", str(PREFLIGHT_SCRIPT),
                "--source", str(self.source),
                "--base", target.base_sha, "--head", target.head_sha, "--merge-base", target.merge_base_sha,
-               "--checkout-root", str(self.checkout_root)]
+               "--checkout-root", str(self.checkout_root),
+               "--image", image,
+               "--proxy-url", FORMAL_PROXY_URL,
+               "--credential-mode", "worker-env"]
         if container:
             proxy_ctx = os.environ.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
             container_dir = os.environ.get(PREFLIGHT_ENV_CONTAINER_DIR, "").strip()
@@ -569,21 +597,19 @@ class ExternalReview:
         review_ctx = os.environ.get("DOCKER_CONTEXT", "").strip()
         if review_ctx:
             cmd.extend(["--review-docker-context", review_ctx])
-        proxy_url = os.environ.get(PREFLIGHT_ENV_PROXY_URL, "").strip()
-        if proxy_url:
-            cmd.extend(["--proxy-url", proxy_url])
-        codex_bin = os.environ.get(PREFLIGHT_ENV_CODEX_BIN, "").strip()
-        if codex_bin:
-            cmd.extend(["--codex-bin", codex_bin])
         deadline = os.environ.get(PREFLIGHT_ENV_DEADLINE, "").strip()
         if deadline:
             cmd.extend(["--deadline", deadline])
         return cmd
 
     def _run_preflight(self, target: ReviewTarget) -> dict:
-        cmd = self._preflight_args(target)
+        # 先过部署 Docker 准入取得不可变镜像 ID，再启动任何探针容器（不按可变标签 sandcastle:newchanlun 预跑未准入镜像）。
+        admission = self._deployment_admission(target.controller_code_head)
+        if admission is None:
+            raise EffectPending("preflight-blocked：部署 Docker 准入未通过，未启动探针容器、未占 attempt")
+        cmd = self._preflight_args(target, image=admission["image_id"])
         try:
-            done = subprocess.run(cmd, cwd=SOURCE_REPO, stdin=subprocess.DEVNULL,
+            done = subprocess.run(cmd, env=self._preflight_env(), cwd=SOURCE_REPO, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=65)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise EffectPending(f"preflight-blocked：预检进程失败（{type(error).__name__}），未占 attempt") from None
@@ -661,6 +687,7 @@ class ExternalReview:
             planned = self.reusable(target) is not None
             if not planned:
                 self.admit_space(target)
+                self.admit_quota()
                 self.admit_preflight(target)
             target = replace(target, reuse_planned=planned)
         with _lock(folder):
@@ -899,7 +926,7 @@ class ExternalReview:
     def _deployment_admission(self, controller: str) -> dict | None:
         """与正式派发同一组部署准入（worker --admission-only，在正在执行的代码所在仓库运行）：controller 已提交、
         head 等于 controller，当前镜像和隔离合同有 accepted 记录。不通过返回 None。"""
-        env = {k: os.environ[k] for k in REVIEW_WORKER_ENV if k in os.environ}
+        env = self._worker_env(include_key=False)
         try:
             done = subprocess.run([*self.launcher, "--admission-only"], env=env, cwd=SOURCE_REPO, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=300)
@@ -1067,12 +1094,12 @@ class ExternalReview:
                       "merge_base_sha": target.merge_base_sha, "controller_code_head": target.controller_code_head,
                       "checkout": str(checkout), "prompt": frozen.prompt, "mode": "review"}
             _save(worker / "launch.json", launch)
-            env = {k: os.environ[k] for k in (*REVIEW_WORKER_ENV, "CLIPROXY_LOCAL_KEY")
-                   if k in os.environ}
+            env = self._worker_env(include_key=True)
             with open(worker / "supervisor.log", "ab", opener=lambda p, f: os.open(p, f, 0o600)) as log:
                 try:
                     process = subprocess.Popen([*self.launcher, "--output-dir", str(worker)], env=env,
-                                               stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                                               cwd=SOURCE_REPO, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                               start_new_session=True)
                 except OSError:
                     _save(worker / "receipt.json", {**launch, "prompt": None, "status": "failed",
                           "failure_reason": "SupervisorNotStarted", "container_closed": True})
@@ -1234,6 +1261,7 @@ class ExternalReview:
                             return self._publish_reuse(target, folder, publisher, source, admission)
                 if target.reuse_planned and not any((folder / model).exists() for model in MODELS):
                     self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
+                    self.admit_quota()
                     self.admit_preflight(target)
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
                     raise Stale("同 head 已有更晚登记的 attempt，本 run 不再派发")

@@ -50,7 +50,9 @@ ERROR_CLASSES = (("tool_choice", "tool_choice_unsupported"), ("预扣额度", "q
 
 
 TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed", "error")
-CREDENTIAL_SOURCES = ("auth.command", "experimental_bearer_token", "env_key")
+CREDENTIAL_SOURCES = ("auth.command", "experimental_bearer_token", "env_key",
+                      "env:CLIPROXY_LOCAL_KEY", "launchctl:CLIPROXY_LOCAL_KEY")
+CREDENTIAL_MODES = ("codex-host", "worker-env")
 # 报告协议词表：字段名与枚举值都由本脚本写死、与 key 无关，原样输出不透露 key 的任何信息。
 # 合法 key 可以是任意可见 ASCII（如 "ok"），与它们相同或是其子串时，脱敏也不能改写它们（调用方按字段与枚举读结论）。
 PROTOCOL_FIELDS = frozenset({
@@ -63,8 +65,9 @@ PROTOCOL_FIELDS = frozenset({
     "http_status", "terminal", "status", "returned_model", "length", "sha256_12", "exception", "errno", "not_sent"})
 PROTOCOL_VALUES = frozenset({
     "review-preflight", "review-preflight-help",
-    "checkout_root_free_space", "checkout_root_container_mount", "credential:codex-host", "probe_cleanup",
-    "preflight_internal", *MODELS, *(f"{kind}:{model}" for kind in ("route", "roundtrip") for model in MODELS),
+    "checkout_root_free_space", "checkout_root_container_mount", "credential:codex-host", "credential:worker-env",
+    "probe_cleanup", "preflight_internal", *MODELS,
+    *(f"{kind}:{model}" for kind in ("route", "roundtrip") for model in MODELS),
     "space", "mount", "credential", "route", "roundtrip", "cleanup", "tool",
     *TERMINAL_EVENTS, *RESPONSE_STATUSES, "other", *(label for _, label in ERROR_CLASSES), "unclassified",
     *(f"{provider}@{host}" for provider, host in KNOWN_ROUTES), *CREDENTIAL_SOURCES})
@@ -143,46 +146,110 @@ def check_space(args, deadline: Deadline) -> dict:
             "detail": {"required_bytes": need, "per_snapshot_bytes": per, "snapshots": len(MODELS), "free_bytes": free}}
 
 
+def docker_env(context: str | None) -> dict[str, str]:
+    """与正式 worker 相同的宿主 Docker 定位环境：剥离 DOCKER_HOST、DOCKER_CONFIG、TLS 覆盖与凭据。"""
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "DOCKER_CONTEXT")
+           if k in os.environ}
+    if context:
+        env.pop("DOCKER_CONTEXT", None)
+    return env
+
+
 def check_mount(args, deadline: Deadline) -> tuple[dict, list[str]]:
-    """宿主写一次性 nonce，审阅镜像经同样的只读 bind 挂载 checkout_root 读回；读不到即容器看见的不是真实文件。
-    返回 (检查结果, 回收失败列表)。"""
-    root = Path(args.checkout_root).absolute()  # docker bind 只接受绝对路径
+    """宿主写一次性 nonce，按正式 worker 同一命名卷路径（volume create -> docker cp -> chown -> 只读卷挂载）读回；
+    不依赖宿主 checkout 目录共享（Colima 未共享外卷时正式路径照常可用）。返回 (检查结果, 回收失败列表)。"""
+    root = Path(args.checkout_root).absolute()
     nonce = os.urandom(16).hex()
-    container = f"preflight-{nonce[:16]}"
+    tag = nonce[:16]
+    container = f"preflight-{tag}"
+    helper = f"preflight-copy-{tag}"
+    volume = f"preflight-vol-{tag}"
     probe = root / container
+    context = getattr(args, "review_docker_context", None)
+    dcmd = docker_command(context)
+    denv = docker_env(context)
+    owner = f"{os.getuid()}:{os.getgid()}"
     detail: dict = {"checkout_root": str(root), "image": args.image}
-    ok, cleanup, docker_called, container_done = False, [], False, False
+    ok, cleanup = False, []
+    volume_attempted, volume_done = False, False
+    helper_attempted, helper_done, helper_removed = False, False, False
+    docker_called, container_done = False, False
     try:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         probe.mkdir(mode=0o700)
         (probe / "nonce").write_text(nonce)
-        docker_called = True
-        # 与正式审阅容器相同，以宿主 uid:gid 运行（docker-isolation.mts）：探针目录是 0700，镜像用户与宿主不同时
-        # 不带 --user 会因 EACCES 误拦健康环境
-        result = run_bounded([*docker_command(getattr(args, "review_docker_context", None)), "run", "--rm", "--name", container, "--network", "none", "--read-only",
-                              "--user", f"{os.getuid()}:{os.getgid()}",
-                              "--mount", f"type=bind,src={root},dst=/checkouts,readonly",
-                              "--entrypoint", "cat", args.image, f"/checkouts/{container}/nonce"],
-                             deadline.work_left())  # 只受总工作时限约束，不另设固定上限
-        seen = result.stdout.decode("utf-8", "replace").strip()
-        # docker 约定：125 是 docker 自身出错（容器可能没跑完）；其余退出码来自容器里的命令，容器已跑完、--rm 已删
-        container_done = result.returncode >= 0 and result.returncode != 125
-        ok = result.returncode == 0 and seen == nonce
-        detail.update(docker_rc=result.returncode, nonce_match=seen == nonce,
-                      # daemon/registry 的自由文本不进报告，与上游错误正文同样只给分类、长度、摘要
-                      stderr=_error_info(result.stderr.decode("utf-8", "replace").strip()))
+        volume_attempted = True
+        step = run_bounded([*dcmd, "volume", "create", volume], deadline.work_left(), env=denv)
+        volume_done = step.returncode >= 0 and step.returncode != 125
+        if step.returncode != 0:
+            detail.update(docker_rc=step.returncode, nonce_match=False,
+                          stderr=_error_info(step.stderr.decode("utf-8", "replace").strip()))
+        else:
+            helper_attempted = True
+            step = run_bounded([*dcmd, "create", "--name", helper, "--network", "none", "--user", "0:0",
+                                "-v", f"{volume}:/review", "--entrypoint", "chown", args.image,
+                                "-R", "-h", owner, "/review"], deadline.work_left(), env=denv)
+            helper_done = step.returncode >= 0 and step.returncode != 125
+            if step.returncode != 0:
+                detail.update(docker_rc=step.returncode, nonce_match=False,
+                              stderr=_error_info(step.stderr.decode("utf-8", "replace").strip()))
+            else:
+                step = run_bounded([*dcmd, "cp", f"{probe}/.", f"{helper}:/review"], deadline.work_left(), env=denv)
+                if step.returncode != 0:
+                    detail.update(docker_rc=step.returncode, nonce_match=False,
+                                  stderr=_error_info(step.stderr.decode("utf-8", "replace").strip()))
+                else:
+                    step = run_bounded([*dcmd, "start", "-a", helper], deadline.work_left(), env=denv)
+                    if step.returncode != 0:
+                        detail.update(docker_rc=step.returncode, nonce_match=False,
+                                      stderr=_error_info(step.stderr.decode("utf-8", "replace").strip()))
+                    else:
+                        rm_helper = run_bounded([*dcmd, "rm", "-f", helper], deadline.work_left(), env=denv)
+                        helper_removed = rm_helper.returncode == 0
+                        docker_called = True
+                        # 与正式审阅容器相同，以宿主 uid:gid 只读挂载已灌入的命名卷
+                        result = run_bounded([*dcmd, "run", "--rm", "--name", container, "--network", "none",
+                                              "--read-only", "--user", owner, "-v", f"{volume}:/review:ro",
+                                              "--entrypoint", "cat", args.image, "/review/nonce"],
+                                             deadline.work_left(), env=denv)
+                        seen = result.stdout.decode("utf-8", "replace").strip()
+                        # docker 约定：125 是 docker 自身出错（容器可能没跑完）；其余退出码来自容器里的命令，容器已跑完、--rm 已删
+                        container_done = result.returncode >= 0 and result.returncode != 125
+                        ok = result.returncode == 0 and seen == nonce
+                        detail.update(docker_rc=result.returncode, nonce_match=seen == nonce,
+                                      # daemon/registry 的自由文本不进报告，与上游错误正文同样只给分类、长度、摘要
+                                      stderr=_error_info(result.stderr.decode("utf-8", "replace").strip()))
     except subprocess.TimeoutExpired:
         detail["error"] = "docker run 超时"
     except Exception as error:
         detail["error"] = type(error).__name__
     finally:
-        # docker run 被杀或非 0 退出时容器可能已建，--rm 不会清：总是 rm -f（容器不存在时也返回 0）。
-        try:
-            removed = run_bounded([*docker_command(getattr(args, "review_docker_context", None)), "rm", "-f", container], deadline.total_left() - OUTPUT_MARGIN)
-            if removed.returncode:
-                cleanup.append(f"docker rm -f {container} 退出 {removed.returncode}")
-        except (OSError, subprocess.TimeoutExpired) as error:
-            cleanup.append(f"docker rm -f {container} {type(error).__name__}")
+        if helper_attempted and not helper_removed:
+            try:
+                removed = run_bounded([*dcmd, "rm", "-f", helper], deadline.total_left() - OUTPUT_MARGIN, env=denv)
+                if removed.returncode:
+                    cleanup.append(f"docker rm -f {helper} 退出 {removed.returncode}")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                cleanup.append(f"docker rm -f {helper} {type(error).__name__}")
+        if docker_called:
+            # docker run 被杀或非 0 退出时容器可能已建，--rm 不会清：总是 rm -f（容器不存在时也返回 0）。
+            try:
+                removed = run_bounded([*dcmd, "rm", "-f", container], deadline.total_left() - OUTPUT_MARGIN, env=denv)
+                if removed.returncode:
+                    cleanup.append(f"docker rm -f {container} 退出 {removed.returncode}")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                cleanup.append(f"docker rm -f {container} {type(error).__name__}")
+        if volume_attempted:
+            try:
+                removed_v = run_bounded([*dcmd, "volume", "rm", "-f", volume], deadline.total_left() - OUTPUT_MARGIN, env=denv)
+                if removed_v.returncode:
+                    cleanup.append(f"docker volume rm -f {volume} 退出 {removed_v.returncode}")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                cleanup.append(f"docker volume rm -f {volume} {type(error).__name__}")
+        if volume_attempted and not volume_done:
+            cleanup.append(f"docker volume create 未正常结束，daemon 可能稍后仍建出卷 {volume}；请稍后 docker volume rm -f {volume} 确认")
+        if helper_attempted and not helper_done:
+            cleanup.append(f"docker create 未正常结束，daemon 可能稍后仍建出容器 {helper}；请稍后 docker rm -f {helper} 确认")
         if docker_called and not container_done:
             # 客户端超时被杀或 docker 自身出错时，daemon 可能已收下创建请求并在 rm -f 之后才建出容器：如实报未确认
             cleanup.append(f"docker run 未正常结束，daemon 可能稍后仍建出容器 {container}；请稍后 docker rm -f {container} 确认")
@@ -269,8 +336,38 @@ def provider_key(codex_home: Path, deadline: Deadline, codex_bin: str = "codex")
     raise CredentialError(f"model_providers.{PROVIDER} 未配置任何凭据来源")
 
 
+def worker_env_key(deadline: Deadline) -> tuple[str, str]:
+    """按正式 worker（codex-route.mts / codex-child.ts）同一凭据顺序取 CLIPROXY_LOCAL_KEY：
+    先读进程环境，再在 macOS 查 launchctl getenv；不读宿主 config.toml。"""
+    direct = os.environ.get(SCRUBBED_ENV)
+    if direct:
+        return _clean_key(direct, f"env:{SCRUBBED_ENV}"), f"env:{SCRUBBED_ENV}"
+    if sys.platform == "darwin":
+        try:
+            result = run_bounded(["launchctl", "getenv", SCRUBBED_ENV], deadline.work_left())
+        except subprocess.TimeoutExpired:
+            raise CredentialError("launchctl getenv 超时") from None
+        except OSError:
+            result = None
+        if result is not None and result.returncode == 0:
+            value = result.stdout.decode("utf-8", "replace").strip()
+            if value:
+                return _clean_key(value, f"launchctl:{SCRUBBED_ENV}"), f"launchctl:{SCRUBBED_ENV}"
+    raise CredentialError(f"缺少 {SCRUBBED_ENV}：进程环境与 launchctl 均未提供")
+
+
 def check_credential(args, deadline: Deadline) -> tuple[dict, str | None]:
-    detail: dict = {"scrubbed_env": SCRUBBED_ENV}
+    mode = getattr(args, "credential_mode", "codex-host")
+    if mode == "worker-env":
+        detail: dict = {}
+        try:
+            key, detail["source"] = worker_env_key(deadline)
+        except CredentialError as error:
+            key, detail["error"] = None, str(error)
+        else:
+            detail["proven_by"] = "两家 roundtrip 都用这把 key"
+        return {"name": "credential:worker-env", "class": "credential", "ok": key is not None, "detail": detail}, key
+    detail = {"scrubbed_env": SCRUBBED_ENV}
     try:
         key, detail["source"] = provider_key(Path(args.codex_home), deadline, args.codex_bin)
     except CredentialError as error:
@@ -447,7 +544,7 @@ def route_from_container(args, session: str, since: float, wait: float,
            *(["--receipt", args.proxy_container_receipt_dir] if receipt else [args.proxy_container_log_dir]),
            session, str(since), str(time.time() + budget), str(budget), json.dumps(sorted(KNOWN_ROUTES))]
     try:
-        result = run_bounded(cmd, budget)
+        result = run_bounded(cmd, budget, env=docker_env(args.proxy_docker_context))
         if result.returncode or result.stderr:
             return None
         return _decode_routes(result.stdout, session, labels)
@@ -549,8 +646,10 @@ def main(argv=None) -> int:
     ap.add_argument("--proxy-container-log-dir", help="代理容器内日志目录的绝对路径")
     ap.add_argument("--review-docker-context", help="审阅挂载探针的 Docker context；默认沿用当前环境")
     ap.add_argument("--codex-home", default=os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),
-                    help="宿主 Codex 配置目录；按其 model_providers.cliproxy-local 取 key")
+                    help="宿主 Codex 配置目录；credential-mode=codex-host 时按其 model_providers.cliproxy-local 取 key")
     ap.add_argument("--codex-bin", default="codex", help="宿主使用的 codex 可执行文件，用于离线校验 provider 配置")
+    ap.add_argument("--credential-mode", choices=CREDENTIAL_MODES, default="codex-host",
+                    help="codex-host 校验宿主 config.toml；worker-env 与正式 worker 一致取 CLIPROXY_LOCAL_KEY/launchctl")
     ap.add_argument("--deadline", type=_deadline, default=55.0, help="总墙钟上限（秒，0 < x ≤ 60），超时的检查判失败")
     args = ap.parse_args(argv)
     if args.proxy_receipt_container:

@@ -150,3 +150,14 @@ def test_failure_code_is_visible_in_review_outcome(lane):
     receipt.update(status="failed", failure_code="budget_exceeded")
     outcome = validate_review(target, launch, receipt, folder, lane.source)
     assert outcome.verdict == "FAILED" and "failure_code=budget_exceeded" in outcome.reason
+
+
+def test_quota_gate_blocks_before_paid_preflight_on_new_attempt(lane, monkeypatch):
+    """每日额度已触顶时，新 PR 在付费预检前即被拦下：零预检请求、不占 attempt、不发状态。"""
+    _receipt(lane.state_root, "r-earlier", MODELS[0], 9_000_000)
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    preflight_calls = []
+    lane.preflight = lambda t: (preflight_calls.append(t.head_sha), _fake_preflight_pass(t))[1]
+    with pytest.raises(EffectPending, match="quota-paused"):
+        lane.review_pr(1810, 1)
+    assert preflight_calls == [] and lane.status(1810) == [] and lane.gateway.sent == []

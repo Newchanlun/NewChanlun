@@ -126,19 +126,61 @@ class FakeProxy:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch, repo):
-    """宿主 checkout_root、假 docker（按 bind 源映射读文件）与宿主 provider 配置。"""
+    """宿主 checkout_root、假 docker（模拟正式命名卷 volume/create/cp/start/run/rm）与宿主 provider 配置。"""
     root, base, head = repo
-    bin_dir, logs, checkouts = tmp_path / "bin", tmp_path / "logs", tmp_path / "checkouts"
-    for d in (bin_dir, logs):
+    bin_dir, logs, checkouts, volumes = tmp_path / "bin", tmp_path / "logs", tmp_path / "checkouts", tmp_path / "volumes"
+    for d in (bin_dir, logs, volumes):
         d.mkdir()
     docker = bin_dir / "docker"
-    docker.write_text("#!/bin/sh\n"
-                      "[ \"$1\" = rm ] && exit 0\n"
-                      "src=$(printf '%s\\n' \"$@\" | sed -n 's/^type=bind,src=\\(.*\\),dst=\\/checkouts,readonly$/\\1/p')\n"
-                      "case \"$src\" in /*) ;; *) echo 'mount path must be absolute' >&2; exit 125;; esac\n"
-                      "[ -n \"$FAKE_DOCKER_EMPTY\" ] && src=/nonexistent\n"
-                      "for last; do :; done\n"
-                      "exec cat \"$src${last#/checkouts}\"\n")
+    docker.write_text(f"""#!{sys.executable}
+import os, shutil, sys
+from pathlib import Path
+vols = Path({str(volumes)!r})
+args = sys.argv[1:]
+if args[:1] == ["--context"]:
+    args = args[2:]
+cmd = args[0] if args else ""
+if cmd == "volume" and args[1:2] == ["create"]:
+    (vols / args[2]).mkdir(parents=True, exist_ok=True)
+    sys.exit(0)
+if cmd == "volume" and args[1:2] == ["rm"]:
+    shutil.rmtree(vols / args[-1], ignore_errors=True)
+    sys.exit(0)
+if cmd == "create":
+    name = args[args.index("--name") + 1]
+    mount = args[args.index("-v") + 1]
+    vol, dst = mount.split(":", 1)
+    assert dst == "/review"
+    (vols / f".helper-{{name}}").write_text(vol)
+    sys.exit(0)
+if cmd == "cp":
+    src_arg, dst_arg = args[1], args[2]
+    src = Path(src_arg[:-2] if src_arg.endswith("/.") else src_arg)
+    assert src.is_absolute()
+    helper, dst = dst_arg.split(":", 1)
+    assert dst == "/review"
+    vol = (vols / f".helper-{{helper}}").read_text()
+    if not (vols / ".empty-mode").exists():
+        for item in src.iterdir():
+            shutil.copy2(item, vols / vol / item.name)
+    sys.exit(0)
+if cmd == "start":
+    sys.exit(0)
+if cmd == "rm":
+    (vols / f".helper-{{args[-1]}}").unlink(missing_ok=True)
+    sys.exit(0)
+if cmd == "run":
+    mount = args[args.index("-v") + 1]
+    vol, dst, mode = mount.split(":", 2)
+    assert dst == "/review" and mode == "ro"
+    target = vols / vol / args[-1].removeprefix("/review/")
+    if not target.is_file():
+        print("cat: can't open file", file=sys.stderr)
+        sys.exit(1)
+    print(target.read_text(), end="")
+    sys.exit(0)
+sys.exit(125)
+""")
     docker.chmod(0o755)
     _fake_codex(bin_dir)
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
@@ -261,8 +303,8 @@ def test_space_below_two_snapshots_blocks(env, capsys, repo, monkeypatch):
 
 # ---------------- 挂载：PR1868 A1 ----------------
 
-def test_container_seeing_empty_mount_blocks(env, capsys, monkeypatch):
-    monkeypatch.setenv("FAKE_DOCKER_EMPTY", "1")
+def test_container_seeing_empty_mount_blocks(env, capsys, tmp_path):
+    (tmp_path / "volumes" / ".empty-mode").write_text("1")
     code, report, *_ = env(capsys=capsys)
     assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {"checkout_root_container_mount"}
 
@@ -270,6 +312,7 @@ def test_container_seeing_empty_mount_blocks(env, capsys, monkeypatch):
 def test_probe_leaves_no_files_in_checkout_root(env, capsys, tmp_path):
     env(capsys=capsys)
     assert list((tmp_path / "checkouts").iterdir()) == []
+    assert list((tmp_path / "volumes").iterdir()) == []
 
 
 def test_relative_checkout_root_is_mounted_as_absolute(env, capsys, tmp_path, monkeypatch):
@@ -279,18 +322,26 @@ def test_relative_checkout_root_is_mounted_as_absolute(env, capsys, tmp_path, mo
 
 
 def test_failed_docker_run_container_is_removed(env, capsys, tmp_path):
-    """docker run 非 0 退出时容器可能已建，--rm 不会清，须 rm -f。"""
+    """docker run 非 0 退出时容器可能已建，--rm 不会清，须 rm -f 并清理临时命名卷。"""
     calls = tmp_path / "docker-calls"
-    (tmp_path / "bin" / "docker").write_text(f'#!/bin/sh\necho "$@" >> {calls}\n[ "$1" = rm ] && exit 0\nexit 125\n')
+    (tmp_path / "bin" / "docker").write_text(
+        f'#!/bin/sh\necho "$@" >> {calls}\n'
+        '[ "$1" = run ] && exit 125\n'
+        'exit 0\n'
+    )
     code, report, *_ = env(capsys=capsys)
-    assert code == 2 and any(line.startswith("rm -f preflight-") for line in calls.read_text().splitlines())
+    lines = calls.read_text().splitlines()
+    assert code == 2 and any(line.startswith("rm -f preflight-") for line in lines)
+    assert any(line.startswith("volume rm -f preflight-vol-") for line in lines)
     # docker 自身出错（125）时 daemon 可能稍后才建出容器，rm -f 成功也只能报回收未确认（独审十五）
     assert any("daemon" in item for item in check(report, "probe_cleanup")["detail"])
 
 
 def test_container_command_failing_inside_a_finished_container_is_not_a_cleanup_failure(env, capsys, tmp_path):
-    """容器里的命令非 0 退出（如 PR1868 A1 空挂载时 cat 失败）：容器已跑完、--rm 已删，不报回收失败。"""
-    (tmp_path / "bin" / "docker").write_text('#!/bin/sh\n[ "$1" = rm ] && exit 0\nexit 1\n')
+    """容器里的命令非 0 退出（如命名卷缺文件时 cat 失败）：容器已跑完、--rm 已删，不报回收失败。"""
+    (tmp_path / "bin" / "docker").write_text(
+        '#!/bin/sh\n[ "$1" = run ] && exit 1\nexit 0\n'
+    )
     code, report, *_ = env(capsys=capsys)
     assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {"checkout_root_container_mount"}
 
@@ -330,14 +381,16 @@ def test_run_bounded_with_no_time_left_starts_nothing(tmp_path, monkeypatch):
 
 
 def test_hanging_docker_is_killed_removed_and_reported_within_deadline(tmp_path, repo):
-    """docker run 与 rm 都卡住：总耗时不越过 --deadline，探针目录删掉，回收失败如实报告。"""
+    """docker 卷/容器调用与清理都卡住：总耗时不越过 --deadline，探针目录删掉，回收失败如实报告。"""
     calls = tmp_path / "docker-calls"
     code, report, elapsed = _cli(tmp_path, repo, f'#!/bin/sh\necho "$@" >> {calls}\nsleep 30\n', "4")
     lines = calls.read_text().splitlines() if calls.exists() else []
     assert code == 2 and elapsed < 4.6 and report["wall_seconds"] <= 4.0 and _leftovers(tmp_path) == []
     assert "probe_cleanup" in failing(report)
+    vols = [a.split()[2] for a in lines if a.startswith("volume create ")]
+    assert all(f"volume rm -f {name}" in lines for name in vols)
     runs = [a.split()[a.split().index("--name") + 1] for a in lines if a.startswith("run ")]
-    assert all(f"rm -f {name}" in lines for name in runs)  # 机器忙到 docker run 没起来时，没有要删的容器
+    assert all(f"rm -f {name}" in lines for name in runs)
 
 
 def test_report_is_printed_within_the_deadline_when_docker_hangs(tmp_path, repo):
@@ -1108,14 +1161,23 @@ def test_every_subprocess_wait_comes_from_the_deadline_alone(tmp_path, monkeypat
 
 
 def test_mount_probe_runs_as_the_host_user_like_review_containers(env, capsys, tmp_path):
-    """正式审阅 1（Sol）：探针目录是 0700，必须像正式审阅容器一样以宿主 uid:gid 运行，否则镜像用户不同时误拦。"""
+    """正式审阅 1（Sol）：探针经命名卷灌入并以宿主 uid:gid 只读挂载运行，与正式审阅容器一致。"""
     import os
     calls = tmp_path / "docker-calls"
     docker = tmp_path / "bin" / "docker"
-    docker.write_text(docker.read_text().replace("#!/bin/sh\n", f'#!/bin/sh\necho "$@" >> {calls}\n', 1))
+    lines = docker.read_text().splitlines()
+    docker.write_text("\n".join([
+        lines[0],
+        f"import pathlib, sys; open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')",
+        *lines[1:],
+    ]) + "\n")
     code, report, *_ = env(capsys=capsys)
-    run = next(line for line in calls.read_text().splitlines() if line.startswith("run "))
-    assert code == 2 and f"--user {os.getuid()}:{os.getgid()}" in run
+    recorded = calls.read_text().splitlines()
+    run = next(line for line in recorded if line.startswith("run "))
+    assert code == 2 and f"--user {os.getuid()}:{os.getgid()}" in run and ":/review:ro" in run
+    assert any(line.startswith("volume create preflight-vol-") for line in recorded)
+    assert any(line.startswith("cp ") for line in recorded)
+    assert any(line.startswith("volume rm -f preflight-vol-") for line in recorded)
 
 
 # ---------------- 正式审查 a4 Sol P2：key 与报告字段名、枚举值重合 ----------------
@@ -1301,11 +1363,17 @@ def test_container_protocol_failures_are_closed_and_not_echoed(container_reader,
     assert not result[0]["ok"] and not result[0]["detail"]["log_found"]
 
 
-def test_proxy_and_review_contexts_are_independent(env, tmp_path, capsys):
-    # 真 CLI 参数经过假 Docker，再执行同一容器解析器；没有真实 daemon。
+def test_proxy_and_review_contexts_are_independent(env, tmp_path, capsys, monkeypatch):
+    # 真 CLI 参数经过假 Docker，再执行同一容器解析器；没有真实 daemon，且 Docker 子进程不含 DOCKER_HOST/CONFIG/KEY。
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")
+    monkeypatch.setenv("DOCKER_CONFIG", "/tmp/forbidden-docker-config")
     docker = tmp_path / "bin" / "docker"
+    volumes = tmp_path / "ctx-volumes"
+    volumes.mkdir()
     docker.write_text(f'''#!{sys.executable}
-import os, sys, json
+import os, shutil, sys, json
+from pathlib import Path
+assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "CLIPROXY_LOCAL_KEY"))
 args = sys.argv[1:]
 with open({str(tmp_path / 'commands.jsonl')!r}, 'a') as f:
     f.write(json.dumps(args[:4]) + '\\n')
@@ -1315,11 +1383,29 @@ if args[0] == 'exec':
     assert context == 'proxy-orbstack' and args[1:3] == ['fake-proxy', 'python3']
     os.execv({sys.executable!r}, [{sys.executable!r}, *args[3:]])
 assert context == 'review-colima'
-if args[0] == 'rm':
+vols = Path({str(volumes)!r})
+if args[0] == 'volume' and args[1] == 'create':
+    (vols / args[2]).mkdir(parents=True, exist_ok=True)
+    sys.exit(0)
+if args[0] == 'volume' and args[1] == 'rm':
+    shutil.rmtree(vols / args[-1], ignore_errors=True)
+    sys.exit(0)
+if args[0] == 'create':
+    name = args[args.index('--name') + 1]
+    vol = args[args.index('-v') + 1].split(':', 1)[0]
+    (vols / f'.helper-{{name}}').write_text(vol)
+    sys.exit(0)
+if args[0] == 'cp':
+    src = Path(args[1][:-2] if args[1].endswith('/.') else args[1])
+    vol = (vols / f'.helper-{{args[2].split(":", 1)[0]}}').read_text()
+    for item in src.iterdir():
+        shutil.copy2(item, vols / vol / item.name)
+    sys.exit(0)
+if args[0] in ('start', 'rm'):
     sys.exit(0)
 assert args[0] == 'run'
-src = next(x for x in args if x.startswith('type=bind,src=')).split('src=', 1)[1].split(',dst=')[0]
-print(open(src + args[-1].removeprefix('/checkouts')).read(), end='')
+vol = args[args.index('-v') + 1].split(':', 1)[0]
+print((vols / vol / args[-1].removeprefix('/review/')).read_text(), end='')
 ''')
     # env 的既有 --proxy-log-dir 与 container 开关互斥；通过其内部 main 参数适配 fake。
     original = preflight.main
@@ -1337,6 +1423,43 @@ print(open(src + args[-1].removeprefix('/checkouts')).read(), end='')
     assert sum(c[:3] == ["--context", "proxy-orbstack", "exec"] for c in calls) == 2
     assert any(c[:3] == ["--context", "review-colima", "rm"] for c in calls)
     assert any(c[:3] == ["--context", "review-colima", "run"] for c in calls)
+    assert any(c[:4] == ["--context", "review-colima", "volume", "rm"] for c in calls)
+
+
+def test_worker_env_credential_mode_uses_env_or_launchctl_without_codex_config(env, capsys, tmp_path, monkeypatch):
+    """正式模式 --credential-mode worker-env 与正式 worker 一致：读 CLIPROXY_LOCAL_KEY/launchctl，不依赖宿主 config.toml。"""
+    empty_home = tmp_path / "no-codex-home"
+    empty_home.mkdir()
+    monkeypatch.setenv("CLIPROXY_LOCAL_KEY", SHORT_VALID)
+    code, report, out, proxy = env(capsys=capsys, extra=(
+        "--credential-mode", "worker-env", "--codex-home", str(empty_home), "--codex-bin", "/nonexistent/codex"))
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    cred = check(report, "credential:worker-env")
+    assert cred["ok"] and cred["detail"]["source"] == "env:CLIPROXY_LOCAL_KEY"
+    assert SHORT_VALID not in out
+    assert all(r["auth"] == f"Bearer {SHORT_VALID}" for r in proxy.requests)
+
+    # 进程环境缺失时回退 macOS launchctl getenv；两者均缺失则阻断
+    monkeypatch.delenv("CLIPROXY_LOCAL_KEY", raising=False)
+    real_run = preflight.run_bounded
+    def fake_launchctl(cmd, timeout, **kwargs):
+        if cmd[:2] == ["launchctl", "getenv"]:
+            return subprocess.CompletedProcess(cmd, 0, (KEY + "\n").encode(), b"")
+        return real_run(cmd, timeout, **kwargs)
+    monkeypatch.setattr(preflight, "run_bounded", fake_launchctl)
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    code, report, out, proxy = env(capsys=capsys, extra=(
+        "--credential-mode", "worker-env", "--codex-home", str(empty_home)))
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    assert check(report, "credential:worker-env")["detail"]["source"] == "launchctl:CLIPROXY_LOCAL_KEY"
+    assert KEY not in out and all(r["auth"] == f"Bearer {KEY}" for r in proxy.requests)
+
+    monkeypatch.setattr(preflight, "run_bounded", lambda cmd, timeout, **kwargs: (
+        subprocess.CompletedProcess(cmd, 0, b"", b"") if cmd[:2] == ["launchctl", "getenv"]
+        else real_run(cmd, timeout, **kwargs)))
+    code, report, _, _ = env(capsys=capsys, extra=(
+        "--credential-mode", "worker-env", "--codex-home", str(empty_home)))
+    assert code == 2 and failing(report) == {"credential:worker-env", f"roundtrip:{SOL}", f"roundtrip:{ASTRA}"}
 
 
 def test_container_helper_exits_even_when_client_is_gone(tmp_path):
