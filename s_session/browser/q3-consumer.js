@@ -538,16 +538,23 @@
   function withdrawalOrder(a, b) {
     const aShape = a.kind === "CC-006.local_shape", bShape = b.kind === "CC-006.local_shape";
     if (aShape !== bShape) return aShape ? -1 : 1;
-    // 与 Rust 活动 upsert 主序相同；compareTuples 的文本比较按 UTF-8 字节，不用 JS 默认 UTF-16。
-    return aShape ? compareTuples([BigInt(a.window_start)], [BigInt(b.window_start)])
+    // Rust 同起点用对象索引插入序：每代追加出生，且同代每起点至多发布一个窗口。
+    // 由此平局按出生代重建，不依赖 JSON 数组次序或 s-record-order/2 的 ID 次序。
+    return aShape ? compareTuples([BigInt(a.window_start)], [BigInt(b.window_start)]) ||
+        compareTuples([BigInt(a.first_known_generation)], [BigInt(b.first_known_generation)])
       : compareTuples([a.kind, a.fact_key, a.object_id, BigInt(a.object_revision)],
         [b.kind, b.fact_key, b.object_id, BigInt(b.object_revision)]);
   }
   async function bindWithdrawalEvidence(evidence, deaths, check = () => {}, charge = () => {}) {
     const ordered = [...deaths].sort(withdrawalOrder), withdrawals = [], replaces = [];
+    let previous;
     for (const r of ordered) {
       check();
       const {object_id, kind, withdrawal_reason: reason, superseded_by} = r;
+      need(kind !== "CC-006.local_shape" || previous?.kind !== kind ||
+        previous.window_start !== r.window_start || previous.first_known_generation !== r.first_known_generation,
+        "CC-056 同起点形态同代出生，无法绑定活动原序");
+      previous = r;
       need(reason === withdrawalReason(kind, superseded_by), "CC-056 原件撤回原因/替代不符");
       withdrawals.push({object_id, reason, superseded_by, ...(kind === "CC-006.local_shape"
         ? {window_start: r.window_start, window_mid: r.window_mid, window_end: r.window_end}

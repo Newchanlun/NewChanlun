@@ -753,7 +753,6 @@
       } else if (kind === SEGMENT_KINDS[4]) {
         keys(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind); known(d.known_at);
         need(["formed", "updated", "terminated", "withdrawn"].includes(d.change), "段变化未声明");
-        need(Center.changeNulls(d), "B3 段变更撤回与 after/object_id 空值不符");
         for (const k of ["before", "after"]) if (d[k] !== null) validateSegmentPayload(SEGMENT_KINDS[2], {...p, slot:d[k].entity_id, object_generation:d[k].entity_id.split(":")[1], data:d[k]});
       } else {
         keys(d, ["input_frontier", "waiting_reasons", "known_at", "delivered_scope", "deferred_scope", ...(v3 ? ["scan_budget", "scan_cursors"] : [])], kind); integer(d.input_frontier, false, true); known(d.known_at); texts(d.waiting_reasons);
@@ -1104,7 +1103,7 @@
     return {knowledge, steps, groups, init, undetermined, ordered, waiting};
   }
   function validateKnowledgeRequests(records, cut, rule, structureRule, check, charge) {
-    const {knowledge, steps, init, undetermined, ordered, waiting} = cut;
+    const {knowledge, steps, groups, init, undetermined, ordered, waiting} = cut;
     const active = new Map(records.map(r => [r.object_id, r])), expected = new Map(), seen = new Set();
     const must = (ok, reason) => partNeed(ok, "B7", reason);
     const add = (key, record, axes, reasons) => expected.set(JSON.stringify(key), {
@@ -1113,7 +1112,30 @@
       axes,
       reasons,
     });
-    const equalIsEvidence = ruleContract(rule)?.[2] === KNOWLEDGE_DOMAINS[1] || resolveRule(rule).w !== null;
+    const contract = ruleContract(rule), {w} = resolveRule(rule);
+    const equalIsEvidence = contract?.[2] === KNOWLEDGE_DOMAINS[1] || w !== null;
+    const shapeKind = "CC-006.local_shape", competing = new Map();
+    if (w === null && contract?.[0] === "s-new-bi/1") {
+      const byIndex = new Map(), publishedWindows = new Set();
+      const axes = requestAxes("SUFFICIENT", "DOMAIN_PROOF_MISSING", "INCOMPLETE"), reasons = ["equal_extreme_identity"];
+      for (const r of records) {
+        if (r.kind === shapeKind) publishedWindows.add(r.slot);
+        check();
+      }
+      for (const group of groups) {
+        byIndex.set(group.payload.group_index, group);
+        check();
+      }
+      // 历史写者每个连续三组窗先检查各组的极值根；若有竞争则不发 shape。
+      // group_window_sources 取右组完整来源链（不只取三锚，也不取全 cut）。
+      for (let i = 0; i + 2 < groups.length; i++) {
+        check();
+        const window = [byIndex.get(String(i)), byIndex.get(String(i + 1)), byIndex.get(String(i + 2))];
+        if (!window.every(Boolean) || !window.some(({payload:p}) => p.high_sources.length > 1 || p.low_sources.length > 1)) continue;
+        const id = JSON.stringify([shapeKind, window.map(({payload}) => payload.group_anchor)]);
+        if (!publishedWindows.has(id)) competing.set(id, {subject:null, sources:window[2].source_coords, axes, reasons});
+      }
+    }
     for (const r of steps.values()) {
       const p = r.payload, reasons = p.waiting_reasons.filter(t => !equalIsEvidence || t !== "equal_extreme_identity");
       if (!reasons.length && p.direction_evidence === null) reasons.push("direction_not_yet_established");
@@ -1140,7 +1162,7 @@
       must(Array.isArray(key) && key.length === 2 && JSON.stringify(key) === id, "请求键不是规范二元槽位");
       must(!seen.has(id), "同 cut 知识请求键重复");
       seen.add(id);
-      const want = expected.get(id);
+      const want = expected.get(id) ?? competing.get(id);
       if (want) {
         must(request.subject_id === want.subject, "请求主体 ID、kind 或 fact_key 错绑：" + id);
         must(sameCoords(request.source_coords, want.sources), "请求来源错绑：" + id);
@@ -1152,7 +1174,7 @@
       const subject = active.get(request.subject_id);
       const group = key[0] === GROUP_KIND && (subject?.kind === GROUP_KIND && subject.fact_key === id ||
         !init && key[1] === "pending" && request.subject_id === null);
-      const shape = key[0] === "CC-006.local_shape" && (subject?.kind === key[0] && subject.slot === id || key[1] === "pending" && request.subject_id === null);
+      const shape = key[0] === shapeKind && (subject?.kind === key[0] && subject.slot === id || key[1] === "pending" && request.subject_id === null);
       const fractal = key[0]?.[0] === "CC-007.fractal_description" &&
         ["shape_description", "descriptive_labels", "subsequent_development"].includes(key[1]) &&
         subject?.kind === "CC-007.fractal_description" && JSON.stringify(key[0]) === subject.fact_key;

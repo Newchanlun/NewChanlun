@@ -1368,6 +1368,27 @@ test("#2072 撤回主序：形态在前；同 kind 槽位以 UTF-8 而非 UTF-16
   await assert.rejects(Q3.bindWithdrawalEvidence({withdrawals,replaces}, snap), /活动主序/);
 });
 
+test("#2072 R2 CC-056 同起点形态依出生原序：JSON 与 Q 行投影均收 A,B、拒 B,A", async () => {
+  const kind = "CC-006.local_shape";
+  const make = (digit, birth, mid, end) => ({
+    kind, object_id:"obj3-"+digit.repeat(64), window_start:"7", window_mid:mid, window_end:end,
+    object_revision:"1", first_known_generation:birth, published_generation:birth,
+    withdrawn_generation:"6", withdrawal_reason:"window_removed", superseded_by:null,
+  });
+  const a = make("8","2","8","9"), b = make("1","3","9","10");
+  const original = JSON.parse(JSON.stringify([a,b]));
+  const projected = API.rowsOf(Object.fromEntries(API.FAMILIES.map(f => [f, f === "withdrawn_objects" ? original : []])))
+    .map(row => row.record);
+  assert.deepEqual(projected,[b,a], "传输行序按 ID，不是活动原序");
+  const evidence = rows => ({withdrawals:rows.map(({object_id, window_start, window_mid, window_end, superseded_by}) =>
+    ({object_id, window_start, window_mid, window_end, superseded_by, reason:"window_removed"})), replaces:[]});
+  for (const rows of [original,projected]) {
+    await Q3.bindWithdrawalEvidence(evidence([a,b]),rows);
+    await assert.rejects(Q3.bindWithdrawalEvidence(evidence([b,a]),rows), /活动主序/);
+  }
+  await assert.rejects(Q3.bindWithdrawalEvidence(evidence([a,b]),[a,{...b,first_known_generation:"2"}]), /同代出生/);
+});
+
 test("#2072 Snapshot 与 Watch Delta 撤回原因分别按 shape / typed 判域", async t => {
   const st = await g5(), snap = st.snapshot;
   const window = snap.objects.find(r => r.kind === "CC-006.local_shape");
@@ -1499,12 +1520,72 @@ test("#2072 B3 三族变更单代存活、撤回缺席与非撤回精确后件",
       const subject = {kind:entityKind,object_id:"obj3-after",first_known_generation:g,withdrawn_generation:"2",
         payload:{data:{...d,sequence_id:null,sequence_object_id:null,second_sequence_id:null,second_sequence_object_id:null}}};
       assert.throws(() => run(invalid,"2",[subject]), /B3.*空值/);
+      const missingAfter = copy(event);
+      missingAfter.payload.data.change = missingAfter.payload.slot[2] = "formed";
+      assert.throws(() => run(missingAfter), /B3.*空值/);
       assert.throws(() => run(event,"2",[subject]), /B3.*缺席/);
       const badAfter = copy(invalid);
       badAfter.payload.data.change = "formed";
       badAfter.payload.slot[2] = "formed";
       assert.throws(() => run(badAfter,"2",[subject]), /B3.*后件/);
     });
+});
+
+test("#2072 R2 B3 S3 结构域从公开入口拒绝段变更的两向空值违例", async () => {
+  for (const change of ["formed","withdrawn"]) {
+    const st = await g5(), snap = st.snapshot, g = snap.generation, kind = "CC-055.segment_change";
+    const root = snap.objects.find(r => r.kind === "CC-056.segment_version");
+    const entity_id = "segment:1:999", slot = [g,entity_id,change];
+    const payload = {...root.payload, slot, data:{
+      entity_id, change, before:null, after:null, known_at:root.payload.data.known_at,
+      object_id:change === "formed" ? null : root.object_id,
+    }};
+    snap.objects.push({...root,kind,object_id:"draft-segment-change",fact_key:JSON.stringify([kind,slot]),payload});
+    await rejected(syncCatalog(st), /B3: cut-5 CC-055\.segment_change.*空值/);
+  }
+});
+
+test("#2072 R2 B7 只收历史 new-bi/1 真实竞争三锚窗及精确右组来源", () => {
+  const shape = "CC-006.local_shape", old = "s2-axis-quantifiers+new-bi/1";
+  const make = () => {
+    const groups = [
+      ["0", ["0"], ["0"]],
+      ["1", ["1"], ["0","1","2"]],
+      ["2", ["2","3"], ["0","1","2","3","4"]],
+      ["4", ["4"], ["0","1","2","3","4","5"]],
+      ["5", ["5"], ["0","1","2","3","4","5","6"]],
+    ].map(([anchor,members,source_coords], i) => ({
+      kind:"CC-005.inclusion_group", object_id:"group"+i, source_coords,
+      payload:{group_anchor:anchor,group_index:String(i),members,high_sources:members,low_sources:members.slice(0,1)},
+    }));
+    const request = {request_id:JSON.stringify([shape,["1","2","4"]]), subject_id:null,
+      source_coords:["0","1","2","3","4","5"], reasons:["equal_extreme_identity"],
+      axes:{input_quality:"SUFFICIENT",applicability:"DOMAIN_PROOF_MISSING",computation:"INCOMPLETE",validity:"CURRENT"}};
+    const knowledge = {object_id:"knowledge",kind:"CC-054.knowledge_state",payload:{requests:[request]}};
+    return {request,cut:{knowledge,steps:new Map(),groups,init:null,undetermined:new Map(),
+      ordered:["0","1","2","3","4","5","6"],waiting:false},records:[...groups,knowledge]};
+  };
+  const run = ({cut,records}, rule = old) => typed.validateKnowledgeRequests(records,cut,rule,false,()=>{},()=>{});
+  run(make());
+  run(make(), old + "+segment-second/1+bounded-layout/1");
+  for (const rule of ["s2-axis-quantifiers", "s2-axis-quantifiers+new-bi/2", typed.W_STRUCTURE_RULE,
+    old+"+segment-second/1+"+typed.INITIALIZATION_POLICY])
+    assert.throws(() => run(make(),rule), /B7.*错槽/, rule);
+  for (const [edit,reason] of [
+    [x => {x.cut.groups[2].payload.high_sources = ["2"];}, /错槽/],
+    [x => {x.request.request_id = JSON.stringify([shape,["0","2","4"]]);}, /错槽/],
+    [x => {x.request.request_id = JSON.stringify([shape,["4","2","1"]]);}, /错槽/],
+    [x => {x.request.source_coords = ["1","2","3","4"];}, /来源错绑/],
+    [x => {x.request.source_coords = x.cut.ordered;}, /来源错绑/],
+    [x => {x.request.axes.computation = "COMPLETE";}, /四轴/],
+    [x => {x.request.reasons = ["fewer_than_three_merged_bars"];}, /等待原因/],
+    [x => {x.request.subject_id = "group1";}, /主体 ID/],
+    [x => {x.records.push({kind:shape,object_id:"published-shape",slot:x.request.request_id});}, /错槽/],
+  ]) {
+    const x = make();
+    edit(x);
+    assert.throws(() => run(x),reason);
+  }
 });
 
 test("#2072 B8 W 等待与建立、步骤覆盖的独立原件锁", async t => {

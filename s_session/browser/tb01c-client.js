@@ -2600,7 +2600,7 @@ if (typeof module !== 'object' || !module.exports) {
   });
 });
 
-/* exact source q3-center.js SHA256 97194e7b5adf75b9497f7d6f2ac3fd736c285de32531248dac3d95ff3818ccaf */
+/* exact source q3-center.js SHA256 e1e4180479f198c0bc042b80006edc38c92f4511b696a67e60865a5b3112e807 */
 /* #1419/#1424：TB-02-E 中枢（s-center/1）与 TB-02-F 相邻中枢对（s-center-pair/1）的 typed 判据。
  * 判据与原因码逐字移植自旧非拆分客户端（c74a0efa28:s_session/browser/tb01c-client.js，分支 codex/1424-center-pair-20261014），
  * 与当时 s_tb02_contract.py 同序同原因码；按 #1394 拆分风格独立成模块，只在完整普通原件（q3-typed.plain）上执行，
@@ -3422,6 +3422,8 @@ if (typeof module !== 'object' || !module.exports) {
       must(r?.kind === expectedKind, "实体端点缺失或种类错绑：" + expectedKind);
       return r;
     };
+    if (CHANGE_KIND.has(kind))
+      must(changeNulls(d), "change 撤回与 after/object_id 空值不符");
     for (const id of objectReferences(d)) {
       must(typeof id === "string" && id.startsWith("obj3-") && id !== record.object_id, "结构对象边身份错误或自引用");
       const child = byObject(id);
@@ -3478,7 +3480,6 @@ if (typeof module !== 'object' || !module.exports) {
     if (CHANGE_KIND.has(kind)) {
       must(record.first_known_generation === generation && record.published_generation === generation &&
         record.payload.slot[0] === generation && d.known_at.generation === generation, "change 须只在发生代活动");
-      must(changeNulls(d), "change 撤回与 after/object_id 空值不符");
       if (d.change === "withdrawn") {
         must(d.before?.entity_id === d.entity_id && !byEntity(d.entity_id), "withdrawn 历史快照或当前缺席不符");
       } else {
@@ -3581,7 +3582,7 @@ if (typeof module !== 'object' || !module.exports) {
     STRUCTURE_ROOTS: Object.freeze(STRUCTURE_ROOTS), sameValue: equal, changeNulls, validateStructureHistory});
 });
 
-/* exact source q3-typed.js SHA256 728bd9fd1f958db51afd61e2ef8d9b49055781c09322c81e17e5145bbd3b0b06 */
+/* exact source q3-typed.js SHA256 56709a798c821975377e7141b0a05a5c3cb64b204f6ee283818f2f03194fad53 */
 /* #1394：typed 与形态来源的同一判据；只把访问迁为完整异步 Value 遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -4337,7 +4338,6 @@ if (typeof module !== 'object' || !module.exports) {
       } else if (kind === SEGMENT_KINDS[4]) {
         keys(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind); known(d.known_at);
         need(["formed", "updated", "terminated", "withdrawn"].includes(d.change), "段变化未声明");
-        need(Center.changeNulls(d), "B3 段变更撤回与 after/object_id 空值不符");
         for (const k of ["before", "after"]) if (d[k] !== null) validateSegmentPayload(SEGMENT_KINDS[2], {...p, slot:d[k].entity_id, object_generation:d[k].entity_id.split(":")[1], data:d[k]});
       } else {
         keys(d, ["input_frontier", "waiting_reasons", "known_at", "delivered_scope", "deferred_scope", ...(v3 ? ["scan_budget", "scan_cursors"] : [])], kind); integer(d.input_frontier, false, true); known(d.known_at); texts(d.waiting_reasons);
@@ -4688,7 +4688,7 @@ if (typeof module !== 'object' || !module.exports) {
     return {knowledge, steps, groups, init, undetermined, ordered, waiting};
   }
   function validateKnowledgeRequests(records, cut, rule, structureRule, check, charge) {
-    const {knowledge, steps, init, undetermined, ordered, waiting} = cut;
+    const {knowledge, steps, groups, init, undetermined, ordered, waiting} = cut;
     const active = new Map(records.map(r => [r.object_id, r])), expected = new Map(), seen = new Set();
     const must = (ok, reason) => partNeed(ok, "B7", reason);
     const add = (key, record, axes, reasons) => expected.set(JSON.stringify(key), {
@@ -4697,7 +4697,30 @@ if (typeof module !== 'object' || !module.exports) {
       axes,
       reasons,
     });
-    const equalIsEvidence = ruleContract(rule)?.[2] === KNOWLEDGE_DOMAINS[1] || resolveRule(rule).w !== null;
+    const contract = ruleContract(rule), {w} = resolveRule(rule);
+    const equalIsEvidence = contract?.[2] === KNOWLEDGE_DOMAINS[1] || w !== null;
+    const shapeKind = "CC-006.local_shape", competing = new Map();
+    if (w === null && contract?.[0] === "s-new-bi/1") {
+      const byIndex = new Map(), publishedWindows = new Set();
+      const axes = requestAxes("SUFFICIENT", "DOMAIN_PROOF_MISSING", "INCOMPLETE"), reasons = ["equal_extreme_identity"];
+      for (const r of records) {
+        if (r.kind === shapeKind) publishedWindows.add(r.slot);
+        check();
+      }
+      for (const group of groups) {
+        byIndex.set(group.payload.group_index, group);
+        check();
+      }
+      // 历史写者每个连续三组窗先检查各组的极值根；若有竞争则不发 shape。
+      // group_window_sources 取右组完整来源链（不只取三锚，也不取全 cut）。
+      for (let i = 0; i + 2 < groups.length; i++) {
+        check();
+        const window = [byIndex.get(String(i)), byIndex.get(String(i + 1)), byIndex.get(String(i + 2))];
+        if (!window.every(Boolean) || !window.some(({payload:p}) => p.high_sources.length > 1 || p.low_sources.length > 1)) continue;
+        const id = JSON.stringify([shapeKind, window.map(({payload}) => payload.group_anchor)]);
+        if (!publishedWindows.has(id)) competing.set(id, {subject:null, sources:window[2].source_coords, axes, reasons});
+      }
+    }
     for (const r of steps.values()) {
       const p = r.payload, reasons = p.waiting_reasons.filter(t => !equalIsEvidence || t !== "equal_extreme_identity");
       if (!reasons.length && p.direction_evidence === null) reasons.push("direction_not_yet_established");
@@ -4724,7 +4747,7 @@ if (typeof module !== 'object' || !module.exports) {
       must(Array.isArray(key) && key.length === 2 && JSON.stringify(key) === id, "请求键不是规范二元槽位");
       must(!seen.has(id), "同 cut 知识请求键重复");
       seen.add(id);
-      const want = expected.get(id);
+      const want = expected.get(id) ?? competing.get(id);
       if (want) {
         must(request.subject_id === want.subject, "请求主体 ID、kind 或 fact_key 错绑：" + id);
         must(sameCoords(request.source_coords, want.sources), "请求来源错绑：" + id);
@@ -4736,7 +4759,7 @@ if (typeof module !== 'object' || !module.exports) {
       const subject = active.get(request.subject_id);
       const group = key[0] === GROUP_KIND && (subject?.kind === GROUP_KIND && subject.fact_key === id ||
         !init && key[1] === "pending" && request.subject_id === null);
-      const shape = key[0] === "CC-006.local_shape" && (subject?.kind === key[0] && subject.slot === id || key[1] === "pending" && request.subject_id === null);
+      const shape = key[0] === shapeKind && (subject?.kind === key[0] && subject.slot === id || key[1] === "pending" && request.subject_id === null);
       const fractal = key[0]?.[0] === "CC-007.fractal_description" &&
         ["shape_description", "descriptive_labels", "subsequent_development"].includes(key[1]) &&
         subject?.kind === "CC-007.fractal_description" && JSON.stringify(key[0]) === subject.fact_key;
@@ -4795,7 +4818,7 @@ if (typeof module !== 'object' || !module.exports) {
     TB02_KINDS: Object.freeze(TB02_KINDS), BI_KINDS, SEGMENT_KINDS: Object.freeze(SEGMENT_KINDS)});
 });
 
-/* exact source q3-consumer.js SHA256 a554947373c6fdd0c6a2fb64a976b5316b6c70e57630e4558a65030225371760 */
+/* exact source q3-consumer.js SHA256 29ed51f46a1b0673499a706cb63a23d0bcd8eecb338fea23c5285f8bbcb3bec8 */
 /* #1394：Q3完整消费者；只供既有tb01c页面调用，没有产品路由或默认资源。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -5336,16 +5359,23 @@ if (typeof module !== 'object' || !module.exports) {
   function withdrawalOrder(a, b) {
     const aShape = a.kind === "CC-006.local_shape", bShape = b.kind === "CC-006.local_shape";
     if (aShape !== bShape) return aShape ? -1 : 1;
-    // 与 Rust 活动 upsert 主序相同；compareTuples 的文本比较按 UTF-8 字节，不用 JS 默认 UTF-16。
-    return aShape ? compareTuples([BigInt(a.window_start)], [BigInt(b.window_start)])
+    // Rust 同起点用对象索引插入序：每代追加出生，且同代每起点至多发布一个窗口。
+    // 由此平局按出生代重建，不依赖 JSON 数组次序或 s-record-order/2 的 ID 次序。
+    return aShape ? compareTuples([BigInt(a.window_start)], [BigInt(b.window_start)]) ||
+        compareTuples([BigInt(a.first_known_generation)], [BigInt(b.first_known_generation)])
       : compareTuples([a.kind, a.fact_key, a.object_id, BigInt(a.object_revision)],
         [b.kind, b.fact_key, b.object_id, BigInt(b.object_revision)]);
   }
   async function bindWithdrawalEvidence(evidence, deaths, check = () => {}, charge = () => {}) {
     const ordered = [...deaths].sort(withdrawalOrder), withdrawals = [], replaces = [];
+    let previous;
     for (const r of ordered) {
       check();
       const {object_id, kind, withdrawal_reason: reason, superseded_by} = r;
+      need(kind !== "CC-006.local_shape" || previous?.kind !== kind ||
+        previous.window_start !== r.window_start || previous.first_known_generation !== r.first_known_generation,
+        "CC-056 同起点形态同代出生，无法绑定活动原序");
+      previous = r;
       need(reason === withdrawalReason(kind, superseded_by), "CC-056 原件撤回原因/替代不符");
       withdrawals.push({object_id, reason, superseded_by, ...(kind === "CC-006.local_shape"
         ? {window_start: r.window_start, window_mid: r.window_mid, window_end: r.window_end}

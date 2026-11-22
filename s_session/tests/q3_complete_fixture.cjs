@@ -511,6 +511,25 @@ async function makeServer(prepared = null) {
   };
   return server;
 }
+// 将业务 State 夹具送入正式 Client 的分页、证明和同一语义验证入口。
+async function serverFromState({ snapshot, catalog }) {
+  const nodes = new Map();
+  async function encode(value) {
+    const pack = await C.encode(C.fromPlain(value));
+    for (const node of pack.nodes) nodes.set(node.root, node);
+    return pack.ref;
+  }
+  const fixed = { session_generation: "1", cut_generation: snapshot.generation };
+  for (const [k, v] of Object.entries(snapshot))
+    if (k !== "generation" && !API.FAMILIES.includes(k))
+      fixed[k] = k === "catalog_evidence" ? await encode(v) : v;
+  const rows = [];
+  for (const row of API.rowsOf(snapshot))
+    rows.push({ ...row, record: await encode(row.record) });
+  const counts = Object.fromEntries(API.FAMILIES.map(f => [f, String(snapshot[f].length)]));
+  counts.total = String(rows.length);
+  return makeServer({ fixed, nodes, rows, counts, catalog: await encode(catalog) });
+}
 // 每个夹具文件只解析一次，节点池跨代复用（#1419 28U：真实 S3 导出有数十万节点，逐代重解析会 OOM）。
 const FIXTURE_CACHE = new Map();
 function fixtureOf(file) {
@@ -802,6 +821,7 @@ module.exports = {
   proofNodes,
   rebuild,
   makeServer,
+  serverFromState,
   fixtureOf,
   makeS16Base,
   makeClient,

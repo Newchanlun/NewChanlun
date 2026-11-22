@@ -819,6 +819,8 @@
       must(r?.kind === expectedKind, "实体端点缺失或种类错绑：" + expectedKind);
       return r;
     };
+    if (CHANGE_KIND.has(kind))
+      must(changeNulls(d), "change 撤回与 after/object_id 空值不符");
     for (const id of objectReferences(d)) {
       must(typeof id === "string" && id.startsWith("obj3-") && id !== record.object_id, "结构对象边身份错误或自引用");
       const child = byObject(id);
@@ -875,7 +877,6 @@
     if (CHANGE_KIND.has(kind)) {
       must(record.first_known_generation === generation && record.published_generation === generation &&
         record.payload.slot[0] === generation && d.known_at.generation === generation, "change 须只在发生代活动");
-      must(changeNulls(d), "change 撤回与 after/object_id 空值不符");
       if (d.change === "withdrawn") {
         must(d.before?.entity_id === d.entity_id && !byEntity(d.entity_id), "withdrawn 历史快照或当前缺席不符");
       } else {
