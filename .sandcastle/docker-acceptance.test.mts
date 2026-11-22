@@ -9,7 +9,7 @@ import {
   ACCEPTANCE_ROWS, MAX_CHECKPOINTS, dockerImageId, parseImageInspect, MAX_RESUMES, ROW_ENV, acceptedFor, checkAdmission, contractDigest, issueReceipt, mergeBinding,
   mergeInstance, modelFamily, parseCrossFamilyReview, parseMergeBinding, recordAcceptance, retireReceipt, swarmBinding, type AcceptanceRow,
 } from "./docker-acceptance.mts";
-import { accountHome, acceptanceRoot, assertHomeNotRedirected, assertMountsExcludeAcceptance, controlledDir } from "./acceptance-dir.mts";
+import { accountHome, acceptanceRoot, assertHomeNotRedirected, assertMountsExcludeAcceptance, controlledDir, worktreeRoots } from "./acceptance-dir.mts";
 import { controlledSwarmTicket, TICKET_ENV } from "./swarm-controlled.mts";
 
 const HEAD = "a".repeat(40);
@@ -20,9 +20,10 @@ const SWARM_TICKET = 4242;
 const clean = { head: HEAD, dirty: "" };
 const dir = () => mkdtempSync(join(tmpdir(), "docker-acceptance-")); // mkdtemp：0700、属于当前用户
 const env = (row?: string): NodeJS.ProcessEnv => (row ? { [ROW_ENV]: row } : {});
-const ctx = (d: string, row?: string, binding?: string, extra: Record<string, unknown> = {}) => ({ dir: d, env: env(row), identity: clean, binding, imageIdOf, ...extra });
+const ROOTS = worktreeRoots();
+const ctx = (d: string, row?: string, binding?: string, extra: Record<string, unknown> = {}) => ({ dir: d, roots: ROOTS, env: env(row), identity: clean, binding, imageIdOf, ...extra });
 const issue = (d: string, extra: Record<string, unknown> = {}) =>
-  issueReceipt({ imageIdOf, dir: d, image: IMAGE, approval: "turn 01a17310 用户批准方案B", swarmTicket: SWARM_TICKET, identity: clean, ...extra });
+  issueReceipt({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, approval: "turn 01a17310 用户批准方案B", swarmTicket: SWARM_TICKET, identity: clean, ...extra });
 const B13 = swarmBinding(SWARM_TICKET);
 const cp = (o: Partial<{ runId: string; base: string; instance: string; head: string; incoming: string }> = {}) =>
   mergeBinding({ runId: "run-a", base: "b".repeat(40), instance: "inst-1", head: "c".repeat(40), incoming: "d".repeat(40), ...o });
@@ -41,7 +42,7 @@ function evidence(d: string) {
 function runAll(d: string) { for (const r of ACCEPTANCE_ROWS) checkAdmission(IMAGE, ctx(d, r, BINDINGS[r])).consume(); }
 function accepted(d: string, extra: Record<string, unknown> = {}) {
   issue(d, extra); runAll(d);
-  return recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
+  return recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
 }
 const read = (d: string, f: string) => JSON.parse(readFileSync(join(d, f), "utf8"));
 const write = (d: string, f: string, v: unknown) => { writeFileSync(join(d, f), JSON.stringify(v)); chmodSync(join(d, f), 0o600); };
@@ -151,14 +152,14 @@ test("伪造 accepted.json 无效：无 receipt / 无 used / nonce、批准、�
 test("登记验收：拒绝过期 receipt、批准引用被替换、缺行、缺证据；记录保存有效期，到期自动失效", () => {
   const d = dir(); const r = issue(d); runAll(d);
   const ev = evidence(d); const rv = review(d);
-  assert.throws(() => recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: ev, crossFamilyReview: rv, identity: clean, now: new Date(Date.parse(r.expiresAt) + 1000) }), /已过期/);
-  assert.throws(() => recordAcceptance({ imageIdOf, dir: d, image: IMAGE, approval: "different-approval", evidence: ev, crossFamilyReview: rv, identity: clean }), /批准引用与 receipt 不一致/);
-  assert.throws(() => recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: { ...ev, "15": join(d, "missing") }, crossFamilyReview: rv, identity: clean }), /缺少证据文件/);
-  const rec = recordAcceptance({ imageIdOf, dir: d, image: IMAGE, approval: r.approval, evidence: ev, crossFamilyReview: rv, identity: clean });
+  assert.throws(() => recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: ev, crossFamilyReview: rv, identity: clean, now: new Date(Date.parse(r.expiresAt) + 1000) }), /已过期/);
+  assert.throws(() => recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, approval: "different-approval", evidence: ev, crossFamilyReview: rv, identity: clean }), /批准引用与 receipt 不一致/);
+  assert.throws(() => recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: { ...ev, "15": join(d, "missing") }, crossFamilyReview: rv, identity: clean }), /缺少证据文件/);
+  const rec = recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, approval: r.approval, evidence: ev, crossFamilyReview: rv, identity: clean });
   assert.equal(rec.expiresAt, r.expiresAt); assert.equal(rec.approval, r.approval);
   assert.ok(checkAdmission(IMAGE, ctx(d)).accepted);
   assert.throws(() => checkAdmission(IMAGE, ctx(d, undefined, undefined, { now: new Date(Date.parse(r.expiresAt) + 1000) })), /未声明受控验收行/);
-  assert.throws(() => recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: ev, crossFamilyReview: rv, identity: clean }), /EEXIST|file already exists/);
+  assert.throws(() => recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: ev, crossFamilyReview: rv, identity: clean }), /EEXIST|file already exists/);
 });
 
 test("used 标记崩溃安全且 binding 语义受校验：半写/损坏/不一致/非法 binding 不算事实", () => {
@@ -171,7 +172,7 @@ test("used 标记崩溃安全且 binding 语义受校验：半写/损坏/不一�
   checkAdmission(IMAGE, ctx(d, "14", B14)).consume();
   checkAdmission(IMAGE, ctx(d, "15", B15)).consume();
   const good14 = read(d, f14);
-  const attempt = () => recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
+  const attempt = () => recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
   const bad13: unknown[] = ['{"sche', "{}", { ...good13, nonce: "other" }, { ...good13, head: "b".repeat(40) }, { ...good13, row: "14" }, { ...good13, binding: "" }, { ...good13, at: "nope" },
     { ...good13, binding: "wrong-nonempty" }, { ...good13, binding: swarmBinding(1237) }];
   for (const bad of bad13) {
@@ -190,7 +191,7 @@ test("used 标记崩溃安全且 binding 语义受校验：半写/损坏/不一�
 
 test("used 绑定在登记后被改为另一合法 binding：与登记快照不符，放行失败", () => {
   const d = dir(); const r = issue(d); runAll(d);
-  recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
+  recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
   assert.ok(acceptedFor(IMAGE, ctx(d)));
   const f14 = usedFile(d, r.nonce, "14");
   write(d, f14, { ...read(d, f14), binding: cp({ runId: "other-run" }) });
@@ -215,7 +216,7 @@ test("第 15 行：同一 run 实例+检查点被 SIGKILL 后重入是恢复，�
   assert.equal(again.resumed, true);
   again.consume();
   assert.equal(readdirSync(d).filter((f) => f.startsWith("resume-")).length, 1);
-  assert.ok(recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean }));
+  assert.ok(recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean }));
 
   const d2 = dir(); issue(d2); checkAdmission(IMAGE, ctx(d2, "15", B15)).consume();
   assert.throws(() => checkAdmission(IMAGE, ctx(d2, "15", cp({ runId: "run-c", incoming: "e".repeat(40) }))), /新运行不得复用/, "runId 不同");
@@ -235,7 +236,7 @@ test("同一归并 run 实例的第二个冲突检查点：单独通过门禁、
   adm2.consume();
   assert.equal(readdirSync(d).filter((f) => f.startsWith(`cp-${r.nonce}-14-`)).length, 1);
   assert.equal(checkAdmission(IMAGE, ctx(d, "14", cp({ head: "8".repeat(40), incoming: "7".repeat(40) }))).resumed, true, "同一第二检查点重入=恢复");
-  const rec = recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
+  const rec = recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
   assert.equal(rec.bindings["14"].length, 2);
   assert.ok(acceptedFor(IMAGE, ctx(d)));
   // 注入别的 run 的检查点记录 → 与行锚点不同 run，快照核对失败
@@ -272,7 +273,7 @@ test("mergeBinding 可解析、规范编码；mergeInstance 在宿主证据目�
 test("同一 checkout 不允许重复签发，须先退役保留历史；退役同时作废 accepted", async () => {
   const d = dir(); accepted(d);
   assert.throws(() => issue(d), /EEXIST|file already exists/);
-  const moved = (await retireReceipt({ dir: d }))!;
+  const moved = (await retireReceipt({ dir: d, roots: ROOTS }))!;
   assert.ok(moved && existsSync(moved) && !existsSync(join(d, "receipt.json")) && !existsSync(join(d, "accepted.json")));
   assert.equal(acceptedFor(IMAGE, ctx(d)), null);
   issue(d);
@@ -280,7 +281,7 @@ test("同一 checkout 不允许重复签发，须先退役保留历史；退役�
 
 test("外部异家族独审：首个非空行必须是 VERDICT: PASS，HEAD 绑定 receipt，重复行/正文 PASS/同家族/别名/未知名称都拒绝", () => {
   const d = dir(); issue(d); runAll(d); const ev = evidence(d);
-  const attempt = (file: string) => recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: ev, crossFamilyReview: file, identity: clean });
+  const attempt = (file: string) => recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: ev, crossFamilyReview: file, identity: clean });
   assert.throws(() => attempt(review(d, "claude-opus-5-5", "f".repeat(40))), /不是被验收的候选/, "HEAD 不等于 receipt.head");
   assert.throws(() => attempt(review(d, "claude-opus-5-5", "0".repeat(40))), /不是被验收的候选/);
   assert.throws(() => attempt(review(d, "gpt-6.1-sol")), /同属 openai/);
@@ -355,7 +356,7 @@ test("receipt 绑定镜像 Id：tag 被重指/镜像重建后 Id 漂移，受控
   assert.deepEqual(readdirSync(d).filter((f) => f.startsWith("used-")), [], "漂移不烧验收行");
   runAll(d);
   assert.throws(() => recordAcceptance({ imageIdOf: drifted, dir: d, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean }), /镜像 Id 不符/);
-  recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
+  recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
   assert.ok(acceptedFor(IMAGE, ctx(d)));
   assert.equal(acceptedFor(IMAGE, ctx(d, undefined, undefined, { imageIdOf: drifted })), null, "已登记放行同样绑定 Id");
 });
@@ -417,6 +418,6 @@ test("Admission.imageId：受控首次/恢复/新检查点与已登记放行都�
   assert.equal(checkAdmission(IMAGE, ctx(d, "14", B14)).imageId, IMG_ID, "恢复");
   assert.equal(checkAdmission(IMAGE, ctx(d, "14", cp({ head: "8".repeat(40), incoming: "7".repeat(40) }))).imageId, IMG_ID, "新检查点");
   checkAdmission(IMAGE, ctx(d, "15", B15)).consume();
-  recordAcceptance({ imageIdOf, dir: d, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
+  recordAcceptance({ imageIdOf, dir: d, roots: ROOTS, image: IMAGE, evidence: evidence(d), crossFamilyReview: review(d), identity: clean });
   const adm = checkAdmission(IMAGE, ctx(d)); assert.ok(adm.accepted); assert.equal(adm.imageId, IMG_ID);
 });
