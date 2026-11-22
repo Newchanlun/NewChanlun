@@ -3238,3 +3238,202 @@ def test_r5_subdir_gitattributes_on_non_main_branch_isolated_bare(mq_fixture: Me
         assert dec.verdict == "PASS"
         assert dec.status_state == "success"
         assert dec.reason_code == "merge_group_pass_reused"
+
+
+# ---------------------------------------------------------------------------
+# 8. Codex R6 宿主机系统级 / 用户全局 gitattributes 与 GIT_* 环境变量隔离回归
+# ---------------------------------------------------------------------------
+
+
+def test_r6_git_env_isolates_system_attrs_and_injected_git_vars(
+    mq_fixture: MergeQueueFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R6 回归：_git_env() 强制 GIT_ATTR_NOSYSTEM=1 且剔除宿主注入的 GIT_ATTR_SOURCE / GIT_CONFIG* 变量。"""
+    injected = {
+        "GIT_ATTR_SOURCE": "HEAD",
+        "GIT_CONFIG": "/tmp/host-injected-gitconfig",
+        "GIT_CONFIG_PARAMETERS": "'core.attributesFile=/tmp/host-injected-attrs'",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.attributesFile",
+        "GIT_CONFIG_VALUE_0": "/tmp/host-injected-attrs",
+        "XDG_CONFIG_HOME": str(mq_fixture.root / "injected-xdg"),
+        "HOME": str(mq_fixture.root / "injected-home"),
+    }
+    for key, value in injected.items():
+        monkeypatch.setenv(key, value)
+
+    env = mgr._git_env()
+    assert env["GIT_ATTR_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    for key in injected:
+        assert key not in env
+
+    # 即使外部 env 显式携带 GIT_CONFIG* / XDG_CONFIG_HOME，_run_git 也必须剔除注入变量并以 core.attributesFile=/dev/null 兜底
+    dirty_env = dict(env)
+    dirty_env.update(injected)
+    var_proc = mgr._run_git(mq_fixture.repo, "var", "GIT_ATTR_GLOBAL", env=dirty_env)
+    assert var_proc.returncode == 0
+    assert var_proc.stdout.decode("utf-8", errors="replace").strip() == "/dev/null"
+
+
+def test_r6_user_global_gitattributes_isolated_while_committed_attr_effective(
+    mq_fixture: MergeQueueFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """R6 回归：宿主 $XDG_CONFIG_HOME/git/attributes (*.dat -diff) 绝不干扰重放，提交树自身 .gitattributes 仍生效。"""
+    xdg_dir = tmp_path / "xdg-config"
+    xdg_git_dir = xdg_dir / "git"
+    xdg_git_dir.mkdir(parents=True, mode=0o700)
+    (xdg_git_dir / "attributes").write_text("*.dat -diff\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_dir))
+
+    # 1. 提交树不含 .gitattributes，修改 sample.dat 并使用 git show <head>:sample.dat 作为审查补丁读取证据
+    base = mq_fixture.base_sha
+    head = mq_fixture.create_branch_commit(
+        "feature-r6-nodiff-host",
+        from_ref=base,
+        files={"sample.dat": "new measurement record\n"},
+    )
+
+    # 先验证测试前提：在未隔离 core.attributesFile 且含 XDG_CONFIG_HOME 时，git diff 确实会被宿主全局 attributes 污染为二进制 diff
+    polluted_env = {
+        k: os.environ[k]
+        for k in ("PATH", "LANG", "LC_ALL", "TMPDIR", "XDG_CONFIG_HOME")
+        if k in os.environ
+    }
+    polluted_env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1")
+    polluted_diff = subprocess.run(
+        ["git", "-C", str(mq_fixture.repo), "diff", "-U0", base, head],
+        env=polluted_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Binary files /dev/null and b/sample.dat differ" in polluted_diff
+
+    run_dir, _, _ = mq_fixture.write_direct_pass_run(pr_number=11, base_sha=base, head_sha=head)
+    sample_show_output = _run_git_raw(mq_fixture.repo, "show", f"{head}:sample.dat")
+    for model in DEFAULT_EXPECTED_MODELS:
+        ev_path = run_dir / model / "events.jsonl"
+        updated_events: list[str] = []
+        for line in ev_path.read_text(encoding="utf-8").splitlines():
+            ev = json.loads(line)
+            if ev.get("type") == "item.completed" and ev.get("item", {}).get("type") == "command_execution":
+                ev["item"]["command"] = f"/bin/bash -lc 'git show {head}:sample.dat'"
+                ev["item"]["aggregated_output"] = sample_show_output
+            updated_events.append(json.dumps(ev, ensure_ascii=False))
+        ev_path.write_text("\n".join(updated_events) + "\n", encoding="utf-8")
+        os.chmod(ev_path, 0o600)
+
+    bare_repo = mq_fixture.root / "repo-r6-bare.git"
+    _run_git(mq_fixture.root, "clone", "--bare", "-q", str(mq_fixture.repo), str(bare_repo))
+
+    target = mq_fixture.make_target(base_sha=base, head_sha=head, members=[MergeGroupMember(11, head)])
+    for repo_path in (mq_fixture.repo, bare_repo):
+        dec = evaluate_merge_group(
+            target,
+            source_repo=repo_path,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert dec.verdict == "PASS"
+        assert dec.status_state == "success"
+        assert dec.reason_code == "merge_group_pass_reused"
+
+    # 即便 XDG_CONFIG_HOME 被透传进 git 子进程环境，-c core.attributesFile=/dev/null 仍彻底屏蔽宿主用户全局 attributes
+    leaked_env = mgr._git_env() | {"XDG_CONFIG_HOME": str(xdg_dir)}
+    with patch.object(mgr, "_git_env", return_value=leaked_env):
+        for repo_path in (mq_fixture.repo, bare_repo):
+            dec_leaked = evaluate_merge_group(
+                target,
+                source_repo=repo_path,
+                state_root=mq_fixture.state_root,
+                policy=mq_fixture.policy(),
+            )
+            assert dec_leaked.verdict == "PASS"
+            assert dec_leaked.status_state == "success"
+            assert dec_leaked.reason_code == "merge_group_pass_reused"
+
+    # 2. 对比：提交树自身声明 *.dat -diff 时依然生效（git show 文本读取不能冒充二进制补丁；真实二进制 diff 放行）
+    attr_base = mq_fixture.create_branch_commit(
+        "feature-r6-committed-attr-base",
+        from_ref=base,
+        files={".gitattributes": "*.dat -diff\n", "sample.dat": "before\n"},
+    )
+    attr_head = mq_fixture.create_branch_commit(
+        "feature-r6-committed-attr-head",
+        from_ref=attr_base,
+        files={"sample.dat": "after committed attr\n"},
+    )
+    bare_attr_repo = mq_fixture.root / "repo-r6-committed-attr-bare.git"
+    _run_git(mq_fixture.root, "clone", "--bare", "-q", str(mq_fixture.repo), str(bare_attr_repo))
+
+    attr_run_dir, _, _ = mq_fixture.write_direct_pass_run(pr_number=12, base_sha=attr_base, head_sha=attr_head)
+    attr_show_output = _run_git_raw(mq_fixture.repo, "show", f"{attr_head}:sample.dat")
+    for model in DEFAULT_EXPECTED_MODELS:
+        ev_path = attr_run_dir / model / "events.jsonl"
+        updated_events = []
+        for line in ev_path.read_text(encoding="utf-8").splitlines():
+            ev = json.loads(line)
+            if ev.get("type") == "item.completed" and ev.get("item", {}).get("type") == "command_execution":
+                ev["item"]["command"] = f"/bin/bash -lc 'git show {attr_head}:sample.dat'"
+                ev["item"]["aggregated_output"] = attr_show_output
+            updated_events.append(json.dumps(ev, ensure_ascii=False))
+        ev_path.write_text("\n".join(updated_events) + "\n", encoding="utf-8")
+        os.chmod(ev_path, 0o600)
+
+    attr_target = mq_fixture.make_target(
+        base_sha=attr_base,
+        head_sha=attr_head,
+        members=[MergeGroupMember(12, attr_head)],
+    )
+    for repo_path in (mq_fixture.repo, bare_attr_repo):
+        dec_show_rejected = evaluate_merge_group(
+            attr_target,
+            source_repo=repo_path,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert dec_show_rejected.verdict == "ERROR"
+        assert dec_show_rejected.status_state == "error"
+        assert dec_show_rejected.reason_code == "member_events_invalid"
+
+    # 换成提交树 .gitattributes 生效下的真实二进制 diff 证据，普通仓与 bare 仓均 PASS
+    committed_binary_diff = _run_git_raw(
+        mq_fixture.repo,
+        f"--attr-source={attr_head}",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        attr_base,
+        attr_head,
+    )
+    assert "Binary files a/sample.dat and b/sample.dat differ" in committed_binary_diff
+    for model in DEFAULT_EXPECTED_MODELS:
+        ev_path = attr_run_dir / model / "events.jsonl"
+        updated_events = []
+        for line in ev_path.read_text(encoding="utf-8").splitlines():
+            ev = json.loads(line)
+            if ev.get("type") == "item.completed" and ev.get("item", {}).get("type") == "command_execution":
+                ev["item"]["command"] = f"/bin/bash -lc 'git diff --no-ext-diff --no-textconv {attr_base} {attr_head}'"
+                ev["item"]["aggregated_output"] = committed_binary_diff
+            updated_events.append(json.dumps(ev, ensure_ascii=False))
+        ev_path.write_text("\n".join(updated_events) + "\n", encoding="utf-8")
+        os.chmod(ev_path, 0o600)
+
+    for repo_path in (mq_fixture.repo, bare_attr_repo):
+        dec_committed_pass = evaluate_merge_group(
+            attr_target,
+            source_repo=repo_path,
+            state_root=mq_fixture.state_root,
+            policy=mq_fixture.policy(),
+        )
+        assert dec_committed_pass.verdict == "PASS"
+        assert dec_committed_pass.status_state == "success"
+        assert dec_committed_pass.reason_code == "merge_group_pass_reused"

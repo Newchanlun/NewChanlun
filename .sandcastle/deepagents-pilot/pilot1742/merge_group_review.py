@@ -684,11 +684,46 @@ def parse_merge_queue_entries(
     )
 
 
+_STRIPPED_GIT_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "GIT_ATTR_SOURCE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+    }
+)
+_STRIPPED_GIT_ENV_PREFIXES: tuple[str, ...] = (
+    "GIT_CONFIG_KEY_",
+    "GIT_CONFIG_VALUE_",
+)
+_COMMON_GIT_CONFIG_ARGS: tuple[str, ...] = (
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "gc.auto=0",
+)
+
+
+def _sanitize_git_env(raw_env: Mapping[str, str]) -> dict[str, str]:
+    return {
+        k: v
+        for k, v in raw_env.items()
+        if k not in _STRIPPED_GIT_ENV_KEYS and not k.startswith(_STRIPPED_GIT_ENV_PREFIXES)
+    }
+
+
 def _git_env() -> dict[str, str]:
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "TMPDIR") if k in os.environ}
+    env = _sanitize_git_env(
+        {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "TMPDIR") if k in os.environ}
+    )
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_ATTR_NOSYSTEM="1",
         GIT_TERMINAL_PROMPT="0",
         GIT_OPTIONAL_LOCKS="0",
         GIT_NO_REPLACE_OBJECTS="1",
@@ -707,16 +742,11 @@ def _run_git(
     *args: str,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    run_env = dict(env) if env is not None else _git_env()
+    run_env = _sanitize_git_env(env) if env is not None else _git_env()
     completed = subprocess.run(
         [
             "git",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "gc.auto=0",
+            *_COMMON_GIT_CONFIG_ARGS,
             "-C",
             str(repo),
             *args,
@@ -823,12 +853,7 @@ def _frozen_patch(replay_repo: Path, target: Any) -> Any:
     base_sha = _parse_commit_sha(target.base_sha, field="target.base_sha")
     cmd = [
         "git",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "gc.auto=0",
+        *_COMMON_GIT_CONFIG_ARGS,
         f"--attr-source={head_sha}",
         "-C",
         str(replay_repo),
