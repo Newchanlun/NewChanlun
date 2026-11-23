@@ -1,17 +1,88 @@
 import base64
 import json
 import os
+import shutil
 from functools import partial
 from pathlib import Path
 
+import conftest
 import pytest
-from conftest import git
+from conftest import Env, git
 from test_boat import adapter, payload
 
 from pilot1742 import boat_execution
+from pilot1742 import run as pilot_run
 from pilot1742.boat_execution import ExecutionUnknown
 from pilot1742.domain import parse_sha
 from pilot1742.run import TaskSpec
+
+
+@pytest.fixture(scope="module")
+def _env_seed(tmp_path_factory):
+    root = tmp_path_factory.mktemp("boat_collect_seed")
+    seed = Env(root)
+    return seed.source, seed.base
+
+
+@pytest.fixture(autouse=True)
+def _fast_env(monkeypatch, _env_seed):
+    seed_source, seed_base = _env_seed
+    orig_ensure = pilot_run.PilotRun._ensure_checkout
+
+    def _fast_env_init(self, tmp: Path):
+        self.home = tmp / "home"
+        self.source = tmp / "source"
+        shutil.copytree(seed_source, self.source)
+        self.base = seed_base
+        self.home.mkdir()
+        self.control({})
+
+    def _fast_ensure(self, role, head):
+        path, branch = self.spec.checkout_for(role), self.spec.branch_for(role)
+        if not path.exists():
+            src = Path(self.source_repo)
+            git_dir = src / ".git"
+            branch_ref = git_dir / "refs" / "heads" / branch
+            head_file = git_dir / "HEAD"
+            main_ref = git_dir / "refs" / "heads" / "main"
+            index_file = git_dir / "index"
+            wt_name = f"{self.spec.run_id}-{role}"
+            wt_admin = git_dir / "worktrees" / wt_name
+            if (
+                git_dir.is_dir()
+                and not (git_dir / "packed-refs").exists()
+                and not branch_ref.exists()
+                and not wt_admin.exists()
+                and head_file.is_file()
+                and head_file.read_text().strip() == "ref: refs/heads/main"
+                and main_ref.is_file()
+                and main_ref.read_text().strip() == str(head)
+                and index_file.is_file()
+            ):
+                pilot_run.require_free_space(path.parent)
+                path.mkdir(parents=True, exist_ok=True)
+                branch_ref.parent.mkdir(parents=True, exist_ok=True)
+                branch_ref.write_text(f"{head}\n")
+                wt_admin.mkdir(parents=True)
+                (wt_admin / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+                (wt_admin / "commondir").write_text("../..\n")
+                (wt_admin / "gitdir").write_text(f"{path / '.git'}\n")
+                shutil.copy2(index_file, wt_admin / "index")
+                for item in src.iterdir():
+                    if item.name == ".git":
+                        continue
+                    dst = path / item.name
+                    if item.is_dir() and not item.is_symlink():
+                        shutil.copytree(item, dst, symlinks=True)
+                    else:
+                        shutil.copy2(item, dst, follow_symlinks=False)
+                (path / ".git").write_text(f"gitdir: {wt_admin}\n")
+                self.trail("checkout_created", role=role, path=str(path), branch=branch)
+                return
+        return orig_ensure(self, role, head)
+
+    monkeypatch.setattr(conftest.Env, "__init__", _fast_env_init)
+    monkeypatch.setattr(pilot_run.PilotRun, "_ensure_checkout", _fast_ensure)
 
 
 def directory_artifact(env):
