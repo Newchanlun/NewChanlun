@@ -1288,11 +1288,25 @@ class ExternalReview:
             os.close(fd)
             raise
 
-    def _record_preflight_usage(self, probes: int, *, reservation_id: str | None = None) -> str | None:
-        """把预检探针折算 token 追加并 fsync 到 state_root/preflight-usage.jsonl，纳入每日额度闸。
-        在发付费探针前先持久化保守预留，发送后按确定未发送的探针核减；启用每日额度闸时，
-        账本/锁文件为 FIFO/符号链接、权限不符或持久化失败按 quota-unverifiable 失败闭合，绝不发未记账请求。"""
-        if probes <= 0:
+    def _parse_daily_cap(self) -> int | None:
+        raw = os.environ.get(DAILY_INPUT_CAP_ENV, "").strip()
+        if not raw:
+            return None
+        try:
+            cap = int(raw.replace("_", ""))
+        except ValueError:
+            cap = 0
+        if cap <= 0:
+            raise ValueError(f"{DAILY_INPUT_CAP_ENV} 必须是正整数 token 数（如 400000000），当前值无效；未派模型")
+        return cap
+
+    def _record_preflight_usage(self, probes: int, *, reservation_id: str | None = None,
+                                check_quota: bool = False) -> str | None:
+        """在预检发往上游前持久化保守探针额度预留（持 preflight-usage.lock 排他锁写入并 fsync）。
+        当 check_quota=True 且启用 DAILY_INPUT_CAP_ENV 时，在同一把排他锁内先复查 24 小时用量是否触顶再写预留，
+        防止多个并发 PR 同时通过锁外额度检查后一并追加预留并发送付费探针。"""
+        cap = self._parse_daily_cap() if check_quota else None
+        if probes <= 0 and cap is None:
             return None
         strict = self._daily_cap_enabled()
         lock_fd = -1
@@ -1301,6 +1315,15 @@ class ExternalReview:
             usage_path = self.state_root / PREFLIGHT_USAGE_FILE
             lock_fd, _ = self._open_trusted_regular(self.state_root / "preflight-usage.lock", os.O_CREAT | os.O_RDWR)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if cap is not None:
+                used = self.recent_input_tokens(strict_preflight=True)
+                if used >= cap:
+                    raise EffectPending(
+                        f"quota-paused：近 24 小时独审输入 {used} tokens ≥ 上限 {cap}（{DAILY_INPUT_CAP_ENV}）；"
+                        "本 run 未派新模型，额度回落后用同一 attempt 重跑"
+                    )
+            if probes <= 0:
+                return None
             now = time.time()
             entry: dict[str, Any] = {"at": now, "probes": probes, "tokens": probes * PREFLIGHT_TOKENS_PER_PROBE}
             if reservation_id:
@@ -1410,12 +1433,15 @@ class ExternalReview:
             if lock_fd >= 0:
                 os.close(lock_fd)
 
-    def admit_preflight(self, target: ReviewTarget, *, pre_dispatch: bool = False) -> dict:
-        """新 attempt 登记与沿用退回共用的启动前预检闸：先在发送前持久化保守探针额度预留（失败即阻断、不发请求），
-        任一路由或模型证明失败即拒，不发状态；确定未发送的探针随后核减。"""
+    def admit_preflight(self, target: ReviewTarget, *, pre_dispatch: bool = False,
+                        check_quota: bool = True) -> dict:
+        """新 attempt 登记与沿用退回共用的启动前预检闸：先在同一把 preflight-usage.lock 排他锁内完成每日额度复查
+        与保守探针额度预留（失败即阻断、不发请求），任一路由或模型证明失败即拒，不发状态；确定未发送的探针随后核减。"""
         suffix = "未发状态、待退避重试" if pre_dispatch else "未占 attempt、未发状态"
         reserved_probes = len(MODELS)
-        reservation_id = self._record_preflight_usage(reserved_probes, reservation_id=str(uuid.uuid4()))
+        reservation_id = self._record_preflight_usage(
+            reserved_probes, reservation_id=str(uuid.uuid4()), check_quota=check_quota,
+        )
         try:
             raw = self.preflight(target)
         except _PreflightNotStarted:
@@ -1590,8 +1616,7 @@ class ExternalReview:
                 admitted_image = ""
                 if not planned:
                     self.admit_space(target)
-                    self.admit_quota()
-                    preflight_report = self.admit_preflight(target)
+                    preflight_report = self.admit_preflight(target, check_quota=True)
                     admitted_image = str(preflight_report.get("admitted_image_id", ""))
                 target = replace(target, reuse_planned=planned, admitted_image_id=admitted_image)
                 with self._pr_lock(target.pr_number):
@@ -1796,19 +1821,10 @@ class ExternalReview:
     def admit_quota(self) -> None:
         """每日额度闸：超出即暂停（EffectPending，显式原因），同一 attempt 之后可原样续跑。
         配置写错（非正整数）同样不派发，并报出变量名，而不是原生 ValueError 文案。"""
-        raw = os.environ.get(DAILY_INPUT_CAP_ENV, "").strip()
-        if not raw:
+        cap = self._parse_daily_cap()
+        if cap is None:
             return
-        try:
-            cap = int(raw.replace("_", ""))
-        except ValueError:
-            cap = 0
-        if cap <= 0:
-            raise ValueError(f"{DAILY_INPUT_CAP_ENV} 必须是正整数 token 数（如 400000000），当前值无效；未派模型")
-        used = self.recent_input_tokens(strict_preflight=True)
-        if used >= cap:
-            raise EffectPending(f"quota-paused：近 24 小时独审输入 {used} tokens ≥ 上限 {cap}（{DAILY_INPUT_CAP_ENV}）；"
-                                "本 run 未派新模型，额度回落后用同一 attempt 重跑")
+        self._record_preflight_usage(0, check_quota=True)
 
     def admit_space(self, target: ReviewTarget) -> None:
         """登记前总准入：所有 reviewer 并发，各要一份快照。不够就不登记 attempt、不写状态。"""
@@ -2353,8 +2369,12 @@ class ExternalReview:
                     elif (not (folder / "effects" / "status-pending.json").exists()
                             and not any((folder / model).exists() for model in MODELS)):
                         self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
-                        self.admit_quota()
-                        preflight_report = self.admit_preflight(target, pre_dispatch=True)
+                        try:
+                            preflight_report = self.admit_preflight(target, pre_dispatch=True, check_quota=True)
+                        except EffectPending as err:
+                            if str(err).startswith("quota-paused："):
+                                _save(folder / QUOTA_PAUSED_FILE, {"paused_at": time.time(), "run_id": target.run_id})
+                            raise
                         _save(admitted_marker, {"admitted_at": time.time(), "run_id": target.run_id,
                                                 "image_id": preflight_report["admitted_image_id"]})
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型

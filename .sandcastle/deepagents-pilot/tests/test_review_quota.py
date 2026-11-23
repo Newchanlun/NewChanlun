@@ -447,3 +447,54 @@ def test_preflight_usage_error_exit_3_reconciles_reservation_to_zero(lane, capsy
         with pytest.raises(EffectPending, match="preflight-blocked"):
             lane.target(1810, 1)
     assert lane.recent_input_tokens() == 0
+
+
+def test_concurrent_preflight_quota_check_and_reservation_are_atomic(lane, monkeypatch):
+    """R26（Astra P2）：额度复查与预检预留在同一把 preflight-usage.lock 排他锁内原子完成；
+    两个并发 PR 同时竞争最后一份额度时，只有先拿锁的一个放行并写入预留，另一个在锁内见触顶后报 quota-paused 且零探针发出。"""
+    import threading
+
+    single_budget = len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, str(single_budget))
+    base_pr = dict(lane.gateway.pr)
+    monkeypatch.setattr(lane.gateway, "get_pr", lambda n: {**base_pr, "number": n})
+    preflight_calls: list[int] = []
+    lane.preflight = lambda t: (preflight_calls.append(t.pr_number), _fake_preflight_pass(t))[1]
+
+    orig_recent = lane.recent_input_tokens
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    seen_calls = 0
+
+    def slow_recent(*args, **kwargs):
+        nonlocal seen_calls
+        seen_calls += 1
+        if seen_calls == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        return orig_recent(*args, **kwargs)
+
+    monkeypatch.setattr(lane, "recent_input_tokens", slow_recent)
+    results: dict[int, str] = {}
+
+    def worker(pr_num: int):
+        try:
+            lane.target(pr_num, 1)
+            results[pr_num] = "ok"
+        except EffectPending as err:
+            results[pr_num] = str(err)
+
+    t1 = threading.Thread(target=worker, args=(1810,))
+    t2 = threading.Thread(target=worker, args=(1811,))
+    t1.start()
+    assert first_entered.wait(timeout=5)
+    t2.start()
+    time.sleep(0.05)  # t2 应阻塞在 preflight-usage.lock 上，不提前通过额度检查
+    assert preflight_calls == []
+    release_first.set()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+    assert results[1810] == "ok"
+    assert results[1811].startswith("quota-paused：")
+    assert preflight_calls == [1810]
+    assert orig_recent() == single_budget

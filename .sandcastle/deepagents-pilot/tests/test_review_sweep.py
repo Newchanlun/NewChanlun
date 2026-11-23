@@ -401,18 +401,13 @@ def test_preflight_rate_limits_feed_global_sweep_backoff_without_occupying_attem
 
 
 def test_auto_merge_rechecks_latest_attempt_under_pr_lock_before_merging(lane, monkeypatch):
-    """同 head 新登记了 A2 时，即使旧 A1 已有 PASS，规划也必须报 waiting(pending_latest_attempt=True)；
-    即使在规划之后并发登记 A2，因关闭自动发起 PUT /pulls/{n}/merge，也绝不会凭旧 A1 抢跑合入。"""
+    """同 head 新登记了 A2 时，即使旧 A1 已有当前合同 PASS，规划也必须报 waiting(pending_latest_attempt=True)；
+    即使在规划之后并发登记 A2，因关闭自动发起 PUT /pulls/{n}/merge，也绝不会凭旧 A1 抢跑合入，且 read_merge_handoff 立即过滤。"""
     github = FakeGitHub(lane)
     head = lane.gateway.pr["head"]["sha"]
     green(github, head)
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
-    with monkeypatch.context() as legacy:
-        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
-        old_target = lane.target(1810, 1)
-    (lane.state_root / "runs" / old_target.key / "outcome.json").write_text(json.dumps({
-        "verdict": "PASS", "publication": {"id": 1, "state": "success"},
-    }))
     real_plan_one = sweep._plan_one
     raced = {"done": False}
     def plan_then_register(*args, **kwargs):
@@ -425,6 +420,7 @@ def test_auto_merge_rechecks_latest_attempt_under_pr_lock_before_merging(lane, m
     actions = sweep.tick()
     assert github.calls == []
     assert any(a["action"] == "needs-human-confirm" and a.get("gated") == ["base-ref-not-server-bound"] for a in actions)
+    assert module.read_merge_handoff(lane.state_root, rows=list)["ready_for_merge"] == []
     # 下一轮（已存在未完结 A2）：直接进入 waiting(pending_latest_attempt=True)
     actions2 = sweep.tick()
     assert github.calls == []
@@ -2787,3 +2783,247 @@ def test_read_merge_handoff_rechecks_latest_attempt_and_live_behind_process_and_
     with pytest.raises(SystemExit) as caught:
         module.main(["--state-root", str(lane.state_root), "--private-key", "/tmp/k.pem"])
     assert caught.value.code == 2
+
+
+def test_legacy_contract_pass_never_enters_done_or_ready_for_merge(lane, monkeypatch):
+    """R26（Sol P1）：旧合同（v1 Kimi/Opus）已发布 PASS 保留历史，但既不在 decide 中判 done（改为派发新合同 attempt 2），
+    也不得进入 ready_for_merge、通过 read_merge_handoff 或被 handoff_merge 放行。"""
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+    github.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    github.files[1810] = [{"filename": "src/a.py", "status": "modified", "changes": 1}]
+    green(github, head)
+
+    with monkeypatch.context() as legacy:
+        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
+        old_target = lane.target(1810, 1)
+    old_folder = lane.state_root / "runs" / old_target.key
+    (old_folder / "outcome.json").write_text(json.dumps({
+        "verdict": "PASS", "publication": {"id": 1, "state": "success"},
+    }))
+
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert acts(actions) == ["launch", "waiting"]
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 2)]
+    snap = module.read_merge_handoff(lane.state_root, rows=list)
+    assert snap["ready_for_merge"] == []
+
+    # 即使快照文件里人为塞入旧合同 PASS 条目，read_merge_handoff 与 handoff_merge 也必须全部拦截
+    handoff_path = lane.state_root / "sweep" / module.MERGE_HANDOFF_FILE
+    tampered = json.loads(handoff_path.read_text(encoding="utf-8"))
+    tampered["ready_for_merge"] = [{"pr": 1810, "head": head, "base": base, "base_ref": "main"}]
+    handoff_path.write_text(json.dumps(tampered), encoding="utf-8")
+    assert module.read_merge_handoff(lane.state_root, rows=list)["ready_for_merge"] == []
+
+    class MergeableGitHub(FakeGitHub):
+        def __init__(self, wrapped):
+            self.__dict__ = wrapped.__dict__
+            self.merges = []
+
+        def merge(self, number, h):
+            self.merges.append((number, h))
+            return {"merged": True}
+
+        def update_branch(self, number, h):
+            return {"message": "ok"}
+
+    mgh = MergeableGitHub(github)
+    with pytest.raises(module.HandoffBlocked) as exc:
+        module.handoff_merge(mgh, lane, 1810, expect_base=base, expect_head=head, rows=list, review_app=lambda: 5664795)
+    assert exc.value.code == "review-not-confirmed" and mgh.merges == []
+
+
+def test_plan_one_cancels_handoff_when_recheck_mergeable_state_turns_blocked(lane):
+    """R26（Astra P1）：_plan_one 第二次读取 PR（pr_files 之后）若 mergeable_state 已变为 blocked，
+    绝不能沿用第一次读取的 clean 把 PR 写入 ready_for_merge，且仍须撤回挂着的原生 auto-merge。"""
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    head = lane.gateway.pr["head"]["sha"]
+    github = FakeGitHub(lane)
+    github.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    github.files[1810] = [{"filename": "src/a.py", "status": "modified", "changes": 1}]
+    green(github, head)
+
+    calls = 0
+    orig_pr = github.pr
+
+    def drifting_pr(number):
+        nonlocal calls
+        calls += 1
+        data = dict(orig_pr(number))
+        if calls >= 2:
+            data["mergeable_state"] = "blocked"
+            data["auto_merge"] = True
+        return data
+
+    github.pr = drifting_pr  # type: ignore[method-assign]
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert any(a.get("action") == "waiting" and a.get("reason") == "mergeable-state-changed" for a in actions)
+    assert ("disable", 1810) in github.calls
+    assert module.read_merge_handoff(lane.state_root, rows=list)["ready_for_merge"] == []
+
+
+def test_concurrent_sweep_ticks_serialized_no_stale_handoff_overwrite(lane):
+    """R26（Astra P1）：同一状态根上的并发 Sweep.tick() 经 sweep.lock 串行化，
+    较早启动的慢轮绝不能在快轮使交接失效后再写回旧绿灯。"""
+    import threading
+    import time
+
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    head = lane.gateway.pr["head"]["sha"]
+    gh1 = FakeGitHub(lane)
+    gh1.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    gh1.files[1810] = [{"filename": "src/a.py", "status": "modified", "changes": 1}]
+    green(gh1, head)
+
+    entered = threading.Event()
+    release = threading.Event()
+    orig_files = gh1.pr_files
+
+    def slow_files(number):
+        entered.set()
+        assert release.wait(timeout=5)
+        return orig_files(number)
+
+    gh1.pr_files = slow_files  # type: ignore[method-assign]
+
+    gh2 = FakeGitHub(lane)
+    gh2.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    gh2.files[1810] = [{"filename": "src/a.py", "status": "modified", "changes": 1}]
+    gh2.required = {}  # 第二轮看到门禁失效，必须清空 ready_for_merge 且成为最终赢家
+
+    s1, _, _ = make(lane, run=False, github=gh1, auto_merge=True)
+    s2, _, _ = make(lane, run=False, github=gh2, auto_merge=True)
+    order: list[str] = []
+
+    def run1():
+        s1.tick()
+        order.append("t1")
+
+    def run2():
+        s2.tick()
+        order.append("t2")
+
+    t1 = threading.Thread(target=run1)
+    t2 = threading.Thread(target=run2)
+    t1.start()
+    assert entered.wait(timeout=5)
+    t2.start()
+    time.sleep(0.05)  # t2 必须阻塞在 sweep.lock，不得插队抢先结束
+    assert order == []
+    release.set()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+    assert order == ["t1", "t2"]
+    snap = module.read_merge_handoff(lane.state_root, rows=list)
+    assert snap["gate_ok"] is False and snap["ready_for_merge"] == []
+
+
+def test_handoff_merge_and_update_hold_inflight_lock_reverify_base_and_align_head_revert(lane, capsys):
+    """R26（Sol P1 #2/#3 + Sol P2 #4）：
+    1) 远端 base SHA 漂移而 head 不变时，handoff_merge 必须实时拒入（base-moved）；
+    2) 本机预检/登记在途时 handoff_merge 立即拒入，且 handoff_merge 在 github.merge 期间全程持有排他锁阻断新重审；
+    3) H1(PASS) -> H2(登记) -> 恢复 H1 时，生产端、read_merge_handoff 与 handoff_merge 共用同一判定逻辑，一致放行 H1；
+    4) handoff_update_branch 同样持锁并校验 behind 与精确 base/head。"""
+    import threading
+    import time
+
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    h1 = lane.gateway.pr["head"]["sha"]
+    b1 = lane.gateway.pr["base"]["sha"]
+
+    # 制造 H1 -> H2(登记 A1) -> 恢复 H1 的场景（Sol P2 #4）
+    (lane.source / "h2.txt").write_text("h2\n", encoding="utf-8")
+    git(lane.source, "add", "h2.txt")
+    git(lane.source, "commit", "-qm", "h2")
+    h2 = git(lane.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = h2
+    lane.target(1810, 1)  # H2 登记了更新的 attempt
+    lane.gateway.pr["head"]["sha"] = h1  # 恢复回 H1
+
+    class HandoffFakeGH(FakeGitHub):
+        def __init__(self, l):
+            super().__init__(l)
+            self.merges: list[tuple[int, str]] = []
+            self.updates: list[tuple[int, str]] = []
+            self.on_merge = None
+
+        def merge(self, number: int, head: str) -> dict:
+            if self.on_merge is not None:
+                self.on_merge()
+            self.merges.append((number, head))
+            return {"merged": True, "sha": head}
+
+        def update_branch(self, number: int, head: str) -> dict:
+            self.updates.append((number, head))
+            return {"message": "updating"}
+
+    gh = HandoffFakeGH(lane)
+    gh.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    gh.files[1810] = [{"filename": "src/a.py", "status": "modified", "changes": 1}]
+    green(gh, h1)
+
+    sweep, _, _ = make(lane, run=False, github=gh, auto_merge=True)
+    sweep.tick()
+    # 生产端与读取端对 H1->H2->H1 一致返回 H1
+    snap = module.read_merge_handoff(lane.state_root, rows=list)
+    assert [r["pr"] for r in snap["ready_for_merge"]] == [1810]
+
+    # 1. 远端 base 漂移而 head 未变（main 前进到 head 祖先）-> handoff_merge 实时拒绝 base-moved
+    gh.states[1810]["base"] = "f" * 40
+    with pytest.raises(module.HandoffBlocked) as exc_base:
+        module.handoff_merge(gh, lane, 1810, expect_base=b1, expect_head=h1, rows=list, review_app=lambda: 5664795)
+    assert exc_base.value.code == "base-moved" and gh.merges == []
+    gh.states[1810]["base"] = b1
+
+    # 2. 本机已有预检在途锁 -> handoff_merge 立即拒绝 inflight-review-active
+    with lane._inflight_review(1810):
+        with pytest.raises(module.HandoffBlocked) as exc_lock:
+            module.handoff_merge(gh, lane, 1810, expect_base=b1, expect_head=h1, rows=list, review_app=lambda: 5664795)
+        assert exc_lock.value.code == "inflight-review-active" and gh.merges == []
+
+    # 3. handoff_merge 在 github.merge 执行期间全程持有排他锁，并发手动重审必须阻塞直至 merge 返回
+    in_merge = threading.Event()
+    finish_merge = threading.Event()
+    rereview_acquired = threading.Event()
+
+    def hold_merge():
+        in_merge.set()
+        assert finish_merge.wait(timeout=5)
+
+    gh.on_merge = hold_merge
+    merge_out: dict = {}
+
+    def do_merge():
+        merge_out["res"] = module.handoff_merge(
+            gh, lane, 1810, expect_base=b1, expect_head=h1, rows=list, review_app=lambda: 5664795,
+        )
+
+    def try_rereview():
+        with lane._inflight_review(1810):
+            rereview_acquired.set()
+
+    tm = threading.Thread(target=do_merge)
+    tm.start()
+    assert in_merge.wait(timeout=5)
+    tr = threading.Thread(target=try_rereview)
+    tr.start()
+    time.sleep(0.05)
+    assert not rereview_acquired.is_set()  # merge 未完成前，新重审无法获得 _inflight_review 锁
+    finish_merge.set()
+    tm.join(timeout=10)
+    tr.join(timeout=10)
+    assert rereview_acquired.is_set()
+    assert merge_out["res"]["action"] == "handoff-merged" and gh.merges == [(1810, h1)]
+
+    # 4. handoff-update-branch 入口（behind + exact base/head）
+    gh.states[1810]["mergeable_state"] = "behind"
+    rc = module.run_handoff_command(
+        "handoff-update-branch",
+        ["--pr", "1810", "--expect-base", b1, "--expect-head", h1, "--state-root", str(lane.state_root)],
+        github=gh, rows=list, review_app=lambda: 5664795,
+    )
+    assert rc == 0 and gh.updates == [(1810, h1)]
+    assert json.loads(capsys.readouterr().out)["action"] == "handoff-updated-branch"

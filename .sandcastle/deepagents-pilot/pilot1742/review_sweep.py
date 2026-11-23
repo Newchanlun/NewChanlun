@@ -27,7 +27,11 @@ sync(number, base, head)，未注入报 needs-source-sync。
 已发布 PASS 且无在途/待完成重审意图、改动清单不触及人工确认两类）并将结果原子持久化到 `STATE_ROOT/sweep/merge-handoff.json`
 （区分普通门禁全绿的 `ready_for_merge`、队首落后需追平的 `behind_queue_head` 与敏感两类 `human_confirm`；日志仍兼容输出
 `needs-human-confirm` 与 `behind-waiting`），同时对任意挂着 GitHub 原生 auto-merge 的 PR 无条件撤掉原生 auto-merge（`disable_auto_merge`）。
-接手方为获常驻合入授权的主控巡航（`/graph-run` 与主图编排会话）或维护者，通过 `python -m pilot1742.review_sweep --handoff` 读取交接队列后按序执行追平与非敏感 PR 合入。
+接手方为获常驻合入授权的主控巡航（`/graph-run` 与主图编排会话）或维护者，先通过 `python -m pilot1742.review_sweep --handoff`
+查看交接队列，再通过显式接手入口 `python -m pilot1742.review_sweep handoff-update-branch --pr N --expect-base <base> --expect-head <head>`
+与 `python -m pilot1742.review_sweep handoff-merge --pr N --expect-base <base> --expect-head <head>` 执行追平与非敏感 PR 合入；
+显式接手入口持同一把本机排他重审锁（`p{N}.inflight.lock` + `p{N}.lock`）直至 GitHub 写操作完成，持锁期间实时复核远端 `base_ref=main`、
+精确 `(base, head)` SHA、`mergeable_state`、非敏感文件清单、分支保护与必需检查以及当前合同已发布 PASS（无待完成重审意图）。
 两类的出处：用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
 仓库设置 allow_auto_merge 已关（GET /repos/{owner}/{repo} 的 allow_auto_merge=false，2026-11-09 由主控关闭），
 GitHub 原生 auto-merge 根本挂不上；sweep 每轮读这个设置：为 true 或读不到时记 native-auto-merge-enabled，并照常对所有挂着原生 auto-merge 的 PR 执行撤回。
@@ -64,6 +68,7 @@ PR 挡住整列。队首落后、且本地没有它的在途审查（活进程�
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -73,7 +78,8 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -185,6 +191,15 @@ class SourceUnreadable(RuntimeError):
         self.actions: list[dict[str, Any]] = []  # 本轮中止前已经做过的动作，照常写日志
 
 
+class HandoffBlocked(RuntimeError):
+    """显式交接执行入口（handoff-merge / handoff-update-branch）实时复核未通过或被本机重审锁阻断。"""
+
+    def __init__(self, code: str, reason: str):
+        super().__init__(reason)
+        self.code = code
+        self.reason = reason
+
+
 def human_gated(files: list[str]) -> dict[str, list[str]]:
     """命中人工确认两类的文件，按类别列出；空表示不需要人工确认。"""
     hits: dict[str, list[str]] = {}
@@ -205,6 +220,12 @@ class GitHubPort(Protocol):
     def allow_auto_merge(self) -> bool: ...
     def pr_files(self, number: int) -> list[dict[str, Any]]: ...
     def disable_auto_merge(self, number: int) -> None: ...
+
+
+class HandoffGitHubPort(GitHubPort, Protocol):
+    """仅显式交接执行入口（handoff-merge / handoff-update-branch）使用的 GitHub 写端口；无人值守 Sweep 不可调用。"""
+    def merge(self, number: int, head: str) -> dict[str, Any]: ...
+    def update_branch(self, number: int, head: str) -> dict[str, Any]: ...
 
 
 class GhCli:
@@ -246,6 +267,8 @@ class GhCli:
             "base_ref": data["base"]["ref"],
             "base_repo_id": base_repo.get("id"),
             "head_repo_id": head_repo.get("id"),
+            "state": data.get("state", "open"),
+            "draft": bool(data.get("draft", False)),
             "changed_files": data["changed_files"],
             "mergeable_state": data["mergeable_state"],
             "auto_merge": data["auto_merge"] is not None,
@@ -304,6 +327,43 @@ class GhCli:
 
     def disable_auto_merge(self, number: int) -> None:
         self._gh("pr", "merge", str(number), "-R", self.repository, "--disable-auto")
+
+
+class HandoffGhCli(GhCli):
+    """仅显式交接执行入口（handoff-merge / handoff-update-branch）使用的 GitHub CLI；
+    与无人值守 Sweep 所用的 GhCli 物理隔离，保持 GhCli 不暴露 merge / update_branch。"""
+
+    def merge(self, number: int, head: str) -> dict[str, Any]:
+        return json.loads(self._gh("api", "-X", "PUT", f"repos/{self.repository}/pulls/{number}/merge",
+                                   "-f", f"sha={head}", "-f", "merge_method=merge"))
+
+    def update_branch(self, number: int, head: str) -> dict[str, Any]:
+        return json.loads(self._gh("api", "-X", "PUT", f"repos/{self.repository}/pulls/{number}/update-branch",
+                                   "-f", f"expected_head_sha={head}"))
+
+
+def _is_current_contract(target: dict[str, Any]) -> bool:
+    """仅认当前审查政策与合同的 run；旧合同（如 v1 Kimi/Opus）记录保留作留痕，不作当前合同的放行凭证。"""
+    return target.get("policy_version") == POLICY and target.get("review_contract") == REVIEW_CONTRACT
+
+
+def _latest_for_head(lane: ExternalReview, number: int, head: str) -> dict[str, Any] | None:
+    """生产端、只读读取端与显式接手入口共用的目标选择：在当前 (pr, head) 下按 registered_at_ns 取最新未作废 attempt。"""
+    runs = [row for row in lane.status(number) if row["target"].get("head_sha") == head]
+    non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
+    return max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
+
+
+def _confirmed_published_pass(lane: ExternalReview, number: int, head: str, base: str) -> bool:
+    """生产端、只读读取端与显式接手入口共用的放行判定：当前合同下 (pr, head) 最新未作废 attempt 绑定到当前精确 base
+    且为已发布 PASS 终态，且不存在待完成的重审意图。"""
+    if lane.has_pending_rereview_intent(number, head, base):
+        return False
+    latest = _latest_for_head(lane, number, head)
+    if latest is None or not _is_current_contract(latest["target"]) or latest["target"].get("base_sha") != base:
+        return False
+    outcome = latest["outcome"]
+    return bool(outcome and "publication" in outcome and outcome.get("verdict") == "PASS")
 
 
 def run_review_command(number: int, attempt: int, head: str, private_key: Path, base: str | None = None) -> list[str]:
@@ -536,9 +596,7 @@ class Sweep:
         )
 
     def _latest_for_head(self, number: int, head: str) -> dict[str, Any] | None:
-        runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
-        non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
-        return max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
+        return _latest_for_head(self.lane, number, head)
 
     def decide(self, pr: dict[str, Any], busy: set[int], running: int, behind: bool) -> tuple[str, dict | None]:
         number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["sha"]
@@ -546,11 +604,14 @@ class Sweep:
             return "running", None
         runs = [row for row in self.lane.status(number) if row["target"].get("head_sha") == head]
         latest = self._latest_for_head(number, head)
-        if latest is not None and latest["outcome"] and "publication" in latest["outcome"]:
+        if (latest is not None and latest["outcome"] and "publication" in latest["outcome"]
+                and (_is_current_contract(latest["target"]) or latest["outcome"].get("verdict") != "PASS")):
             # F4：正常 main 前进使 PR 落后（behind 或 base 确非 head 祖先）时不重审旧 head，等追平；
             # 若同一 (base, head) 上存在尚未承接的人工重审意图（例如 A2 预检失败退出），不得把旧 A1 判 done；
             # 若本地缺对象（_is_ancestor 返回 None）须先同步再判定，不可误判 done；
-            # 当 main 前进到 head 已包含的提交（clean，不会触发追平）时，须为新 base 派审。
+            # 当 main 前进到 head 已包含的提交（clean，不会触发追平）时，须为新 base 派审；
+            # 旧合同（如 v1 Kimi/Opus）已发布 PASS 保留历史但不算当前 GPT 双审合同的 done，落入下方派发新 attempt；
+            # 旧合同已发布 BLOCK/FAILED 仍保持 done，不自动重审已失败旧 head。
             if latest["target"].get("base_sha") == base:
                 if self.lane.has_pending_rereview_intent(number, head, base):
                     return "rereview-pending", None
@@ -630,7 +691,32 @@ class Sweep:
         # 退避一段时间，免得每轮都派一个必死的子进程。
         return self._launch_with_backoff(number, head, base, attempt)
 
+    @contextmanager
+    def _tick_lock(self) -> Iterator[None]:
+        """同一状态根的巡检排他锁：串行化常驻 serve 与手动单轮 sweep，防止慢轮用旧结论覆写快轮交接快照。"""
+        fd = -1
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock_path = self.folder / "sweep.lock"
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077):
+                raise OSError(f"sweep.lock 文件类型、属主或权限不合法：{lock_path}")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except Exception as error:
+            if fd >= 0:
+                os.close(fd)
+            raise SourceUnreadable("sweep lock", error) from error
+        try:
+            yield
+        finally:
+            os.close(fd)
+
     def tick(self) -> list[dict[str, Any]]:
+        with self._tick_lock():
+            return self._tick_locked()
+
+    def _tick_locked(self) -> list[dict[str, Any]]:
         try:
             rows = self.rows()
         except Exception as error:  # 不知道谁在审就不能派审：整轮作废并作废旧交接快照
@@ -840,15 +926,9 @@ class Sweep:
         return sorted(p for p in raw.decode().split("\0") if p)
 
     def _review_confirmed_published_pass(self, number: int, head: str, base: str) -> bool:
-        """正向确认：本 PR、当前 head 的最新未作废 attempt 绑定到当前精确 base 且为已发布 PASS 终态，
-        且当前 (pr, base, head) 上不存在待完成的重审意图（防预检失败退出后凭旧 PASS 自动合入）。"""
-        if self.lane.has_pending_rereview_intent(number, head, base):
-            return False
-        latest = self._latest_for_head(number, head)
-        if latest is None or latest["target"].get("base_sha") != base:
-            return False
-        outcome = latest["outcome"]
-        return bool(outcome and "publication" in outcome and outcome.get("verdict") == "PASS")
+        """正向确认：当前合同下本 PR、当前 head 的最新未作废 attempt 绑定到当前精确 base 且为已发布 PASS 终态，
+        且当前 (pr, base, head) 上不存在待完成的重审意图（防旧合同 PASS 或预检失败重审后凭旧状态放行）。"""
+        return _confirmed_published_pass(self.lane, number, head, base)
 
     def _plan_one(self, pr: dict[str, Any], state: dict[str, Any], gate_ok: bool, head_free: bool,
                   reviewing_now: bool = False, review_action: str | None = None,
@@ -902,6 +982,14 @@ class Sweep:
         if again["base"] != state["base"]:
             return ({"action": "base-moved", "classified_base": state["base"], "now_base": again["base"]}, False,
                     disable_if_armed)
+        if again.get("draft") is True:
+            return {"action": "draft"}, False, disable_if_armed
+        prev_mergeable = state["mergeable_state"]
+        mergeable = again["mergeable_state"]
+        state["mergeable_state"] = mergeable
+        if mergeable != prev_mergeable:
+            return ({"action": "waiting", "reason": "mergeable-state-changed", "before": prev_mergeable,
+                     "mergeable_state": mergeable, "queue_head": False}, False, disable_if_armed)
         gated = human_gated(files)
         if gated:
             return {"action": "needs-human-confirm", "gated": gated}, False, disable_if_armed
@@ -912,14 +1000,14 @@ class Sweep:
         except Exception as error:
             raise EvidenceInsufficient(f"读取 {head[:12]} 的检查失败：{type(error).__name__}: {error}") from None
         review = checks.get("deepagents/review")
-        behind = state["mergeable_state"] == "behind"
+        behind = mergeable == "behind"
         all_green = all(checks.get(name) == "success" for name in MERGE_CHECKS)
         # 本 head 已发布失败结论（BLOCK/error）时不占队首；不落后时检查失败要作者处理；
         # 不落后、三项全绿却不可合入（blocked/unknown 等）的也不占队首。
         # 无论是否处于 behind / waiting / gate_ok=False，只要 PR 挂着原生 auto-merge 一律独立撤回（disable_if_armed）。
-        candidate = (review != "failure" and state["mergeable_state"] != "dirty" and review_action not in STUCK_REVIEW
+        candidate = (review != "failure" and mergeable != "dirty" and review_action not in STUCK_REVIEW
                      and (behind or not any(checks.get(name) == "failure" for name in MERGE_CHECKS))
-                     and (behind or not all_green or state["mergeable_state"] in ("clean", "unstable")))
+                     and (behind or not all_green or mergeable in ("clean", "unstable")))
         is_head = candidate and head_free
         if behind:
             # GitHub update-branch 接口同样无服务端 expected_base_ref，不自动写入 PR 分支，报 behind-waiting 并撤原生 auto-merge。
@@ -927,14 +1015,14 @@ class Sweep:
                     "queue_head": is_head}, candidate, disable_if_armed
         confirmed_pass = self._review_confirmed_published_pass(number, head, state["base"])
         pending_latest = live_review or self.lane.has_inflight_review(number) or not confirmed_pass
-        if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green and not pending_latest:
+        if gate_ok and mergeable in ("clean", "unstable") and all_green and not pending_latest:
             # GitHub REST/GraphQL 合入接口均无服务端 expected_base_ref 前置参数，无法在读后防远端改指非 main 分支；
             # 因此全部门禁就绪的 PR 一律失败闭合转人工确认，并撤掉挂着的原生 auto-merge，不自动发起 PUT /pulls/{n}/merge。
             return ({"action": "needs-human-confirm", "gated": ["base-ref-not-server-bound"],
                      "reason": "GitHub 合入接口不支持服务端 expected_base_ref 绑定，无法原子防远端改指非 main 分支，不自动合入"},
                     False, disable_if_armed)
         return {"action": "waiting", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
-                "mergeable_state": state["mergeable_state"], "queue_head": is_head,
+                "mergeable_state": mergeable, "queue_head": is_head,
                 **({"pending_latest_attempt": True} if pending_latest else {}),
                 **({} if gate_ok else {"gate": "ci-ok 未设为必需检查"})}, candidate, disable_if_armed
 
@@ -1237,14 +1325,7 @@ def read_merge_handoff(state_root: Path = STATE_ROOT, *,
         if not isinstance(head_sha, str) or not isinstance(base_sha, str):
             continue
         if (pr_num in live_busy or lane.has_inflight_review(pr_num)
-                or lane.has_pending_rereview_intent(pr_num, head_sha, base_sha)):
-            continue
-        non_stale = [r for r in lane.status(pr_num) if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
-        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
-        if (latest is None or latest["target"].get("head_sha") != head_sha
-                or latest["target"].get("base_sha") != base_sha
-                or not latest["outcome"] or "publication" not in latest["outcome"]
-                or latest["outcome"].get("verdict") != "PASS"):
+                or not _confirmed_published_pass(lane, pr_num, head_sha, base_sha)):
             continue
         filtered_ready.append(row)
     data["ready_for_merge"] = filtered_ready
@@ -1258,6 +1339,115 @@ def read_merge_handoff(state_root: Path = STATE_ROOT, *,
         filtered_behind.append(row)
     data["behind_queue_head"] = filtered_behind
     return data
+
+
+def _no_spawn(_number: int, _attempt: int, _head: str, _log: Path, _base: str | None = None) -> int:
+    raise RuntimeError("handoff execution entrypoints must not spawn reviews")
+
+
+def _handoff_verify_remote(github: HandoffGitHubPort, lane: ExternalReview, number: int, *,
+                           expect_base: str, expect_head: str, mode: str,
+                           review_app: Callable[[], int | None] = configured_review_app) -> dict[str, Any]:
+    """持锁期间实时复核远端门禁与精确 (base_ref=main, base_sha, head_sha, mergeable_state, 非敏感文件清单, 三项检查)。"""
+    helper = Sweep(github, lane, _no_spawn, auto_merge=False, review_app=review_app)
+    required = github.required_checks()
+    if not (GATE <= set(required)):
+        raise HandoffBlocked("branch-protection-unsafe",
+                             f"main 须 strict、enforce_admins 且必需检查含绑定来源 app 的 {sorted(GATE)}")
+    unsafe = helper._review_binding_unsafe(required["deepagents/review"])
+    if unsafe:
+        raise HandoffBlocked("review-app-binding-unsafe", unsafe)
+    if github.allow_auto_merge():
+        raise HandoffBlocked("native-auto-merge-enabled", "仓库 allow_auto_merge=true，拒绝执行交接写操作")
+    state = github.pr(number)
+    if (state.get("state", "open") != "open" or state.get("draft") is True or state.get("base_ref") != "main"
+            or state.get("base_repo_id") is None
+            or state.get("base_repo_id") != state.get("head_repo_id")):
+        raise HandoffBlocked("target-branch-invalid", f"PR #{number} 目标分支、开放/草稿态或跨仓状态不合法")
+    if state.get("head") != expect_head:
+        raise HandoffBlocked("head-moved", f"PR #{number} 期望 head {expect_head}，远端现为 {state.get('head')}")
+    if state.get("base") != expect_base:
+        raise HandoffBlocked("base-moved", f"PR #{number} 期望 base {expect_base}，远端现为 {state.get('base')}")
+    allowed_states = ("clean", "unstable") if mode == "merge" else ("behind",)
+    if state.get("mergeable_state") not in allowed_states:
+        raise HandoffBlocked("mergeable-state-invalid",
+                             f"PR #{number} 当前 mergeable_state={state.get('mergeable_state')}，不满足 {mode}")
+    if state.get("auto_merge") is not False:
+        github.disable_auto_merge(number)
+        raise HandoffBlocked("native-auto-merge-armed", f"PR #{number} 挂着原生 auto-merge，已撤回，请复核后重试")
+    files = helper.complete_files(number, state)
+    again = github.pr(number)
+    if again.get("auto_merge") is not False:
+        github.disable_auto_merge(number)
+        raise HandoffBlocked("native-auto-merge-armed", f"PR #{number} 复核期间挂起原生 auto-merge，已撤回")
+    if (again.get("state", "open") != "open" or again.get("draft") is True or again.get("base_ref") != "main"
+            or again.get("base_repo_id") is None
+            or again.get("base_repo_id") != again.get("head_repo_id")
+            or again.get("head") != expect_head or again.get("base") != expect_base
+            or again.get("mergeable_state") != state.get("mergeable_state")):
+        raise HandoffBlocked("pr-drifted", f"PR #{number} 复核期间目标、状态或 base/head 发生漂移")
+    gated = human_gated(files)
+    if gated:
+        raise HandoffBlocked("needs-human-confirm", f"PR #{number} 触及人工确认两类：{sorted(gated)}")
+    bindings = {name: app for name in MERGE_CHECKS
+                if (app := required.get(name, GATED_APP_IDS.get(name))) is not None}
+    checks = github.checks(expect_head, bindings)
+    if mode == "merge":
+        if not all(checks.get(name) == "success" for name in MERGE_CHECKS):
+            raise HandoffBlocked("checks-not-green", f"PR #{number} 三项检查未全绿：{checks}")
+    elif checks.get("deepagents/review") == "failure":
+        raise HandoffBlocked("review-failed", f"PR #{number} 当前 head 已发布失败独审结论，拒绝追平")
+    return {"state": again, "checks": checks}
+
+
+def handoff_merge(github: HandoffGitHubPort, lane: ExternalReview, number: int, *,
+                  expect_base: str, expect_head: str,
+                  rows: Callable[[], Rows] = _ps_rows,
+                  review_app: Callable[[], int | None] = configured_review_app) -> dict[str, Any]:
+    """显式交接合入入口：持与 ExternalReview.target 相同的本机排他锁（外层 try_exclude_inflight_review +
+    内层 _pr_lock，同锁序无死锁）直至 GitHub merge 写完成，持锁期间实时复核本机活跃进程、重审意图、
+    当前合同已发布 PASS 与远端 exact (base_ref=main, base, head, mergeable_state, checks, 非敏感文件清单)。"""
+    with lane.try_exclude_inflight_review(number) as excluded:
+        if not excluded:
+            raise HandoffBlocked("inflight-review-active", f"PR #{number} 正有本机预检/登记在途，拒绝合入")
+        with lane._pr_lock(number):
+            try:
+                live_busy = reviewing(rows())
+            except Exception as error:
+                raise HandoffBlocked("process-table-unreadable", f"无法读取宿主活跃审查进程表：{type(error).__name__}") from None
+            if number in live_busy:
+                raise HandoffBlocked("review-running", f"PR #{number} 正有活跃审查进程，拒绝合入")
+            if not _confirmed_published_pass(lane, number, expect_head, expect_base):
+                raise HandoffBlocked(
+                    "review-not-confirmed",
+                    f"PR #{number} 缺少当前合同下精确 ({expect_base[:12]}, {expect_head[:12]}) 的已发布 PASS 或存在待完成重审意图",
+                )
+            _handoff_verify_remote(github, lane, number, expect_base=expect_base, expect_head=expect_head,
+                                   mode="merge", review_app=review_app)
+            result = github.merge(number, expect_head)
+            return {"action": "handoff-merged", "pr": number, "base": expect_base, "head": expect_head, "result": result}
+
+
+def handoff_update_branch(github: HandoffGitHubPort, lane: ExternalReview, number: int, *,
+                          expect_base: str, expect_head: str,
+                          rows: Callable[[], Rows] = _ps_rows,
+                          review_app: Callable[[], int | None] = configured_review_app) -> dict[str, Any]:
+    """显式交接追平入口：持同一本机排他重审锁直至 GitHub update-branch 写完成，持锁期间实时复核无活跃审查且
+    远端确为指向 main 的 behind PR（精确 base/head、非敏感改动、无失败独审）。"""
+    with lane.try_exclude_inflight_review(number) as excluded:
+        if not excluded:
+            raise HandoffBlocked("inflight-review-active", f"PR #{number} 正有本机预检/登记在途，拒绝追平")
+        with lane._pr_lock(number):
+            try:
+                live_busy = reviewing(rows())
+            except Exception as error:
+                raise HandoffBlocked("process-table-unreadable", f"无法读取宿主活跃审查进程表：{type(error).__name__}") from None
+            if number in live_busy:
+                raise HandoffBlocked("review-running", f"PR #{number} 正有活跃审查进程，拒绝追平")
+            _handoff_verify_remote(github, lane, number, expect_base=expect_base, expect_head=expect_head,
+                                   mode="update", review_app=review_app)
+            result = github.update_branch(number, expect_head)
+            return {"action": "handoff-updated-branch", "pr": number, "base": expect_base, "head": expect_head, "result": result}
 
 
 def report(actions: list[dict[str, Any]], prefix: str = "") -> None:
@@ -1376,10 +1566,40 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
     return external_review.main(cmd)
 
 
+def run_handoff_command(action: str, argv: list[str], *,
+                        github: HandoffGitHubPort | None = None,
+                        rows: Callable[[], Rows] = _ps_rows,
+                        review_app: Callable[[], int | None] = configured_review_app) -> int:
+    parser = argparse.ArgumentParser(prog=f"pilot1742.review_sweep {action}")
+    parser.add_argument("--pr", required=True, type=int)
+    parser.add_argument("--expect-base", required=True)
+    parser.add_argument("--expect-head", required=True)
+    parser.add_argument("--state-root", type=Path, default=None)
+    args = parser.parse_args(argv)
+    lane = ExternalReview(None, state_root=args.state_root or STATE_ROOT)
+    gh: HandoffGitHubPort = github or HandoffGhCli()
+    try:
+        fn = handoff_merge if action == "handoff-merge" else handoff_update_branch
+        out = fn(gh, lane, args.pr, expect_base=args.expect_base, expect_head=args.expect_head,
+                 rows=rows, review_app=review_app)
+        print(json.dumps(out, ensure_ascii=False), flush=True)
+        return 0
+    except HandoffBlocked as error:
+        print(json.dumps({"action": "handoff-blocked", "pr": args.pr, "code": error.code, "reason": error.reason},
+                         ensure_ascii=False), file=sys.stderr, flush=True)
+        return 2
+    except (SourceUnreadable, EvidenceInsufficient, OSError, ValueError) as error:
+        print(json.dumps({"action": "handoff-error", "pr": args.pr, "reason": f"{type(error).__name__}: {error}"},
+                         ensure_ascii=False), file=sys.stderr, flush=True)
+        return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["run-review"]:
         return run_review(argv[1:])
+    if argv[:1] in (["handoff-merge"], ["handoff-update-branch"]):
+        return run_handoff_command(argv[0], argv[1:])
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep")
     parser.add_argument("--private-key", type=Path, help="只原样交给审查子进程（--handoff 只读模式不需要）")
     parser.add_argument("--state-root", type=Path, default=None, help="审查状态根（仅用于 --handoff 只读模式，默认 STATE_ROOT）")

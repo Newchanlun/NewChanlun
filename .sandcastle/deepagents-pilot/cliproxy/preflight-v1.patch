@@ -111,10 +111,10 @@ index e69de29..2b8a7a8 100644
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..21ca169 100644
+index e69de29..8f6f5f6 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1169 @@
+@@ -0,0 +1,1178 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -1263,7 +1263,16 @@ index e69de29..21ca169 100644
 +			t.Fatalf("client never received response.completed (status=%d)", resp.StatusCode)
 +		}
 +		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Complete && !r.Tainted && r.Requests == 1 })
-+		if sealRes := seal(launch, session); sealRes.Code != http.StatusOK {
++		var sealRes *httptest.ResponseRecorder
++		deadline := time.Now().Add(2 * time.Second)
++		for {
++			sealRes = seal(launch, session)
++			if sealRes.Code != http.StatusConflict || time.Now().After(deadline) {
++				break
++			}
++			time.Sleep(10 * time.Millisecond)
++		}
++		if sealRes.Code != http.StatusOK {
 +			t.Fatalf("SealReview after immediate post-completed client close = %d %s, want 200", sealRes.Code, sealRes.Body.String())
 +		}
 +	})
@@ -3015,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..31ddaa1 100644
+index e69de29..1ee4002 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1837 @@
+@@ -0,0 +1,1840 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3321,9 +3330,9 @@ index e69de29..31ddaa1 100644
 +}
 +
 +func (c *Collector) recordCompletedResponse(respID, respModel, respStatus string, respErr json.RawMessage, output []responseOutputItem) {
-+	status := strings.TrimSpace(respStatus)
-+	id := strings.TrimSpace(respID)
-+	model := strings.TrimSpace(respModel)
++	status := respStatus
++	id := respID
++	model := respModel
 +	outText := extractAssistantOutputText(output)
 +
 +	c.mu.Lock()
@@ -3337,7 +3346,7 @@ index e69de29..31ddaa1 100644
 +		return
 +	}
 +	expected := c.expectedModel
-+	if expected == "" || model != expected || id == "" {
++	if expected == "" || model != expected || id == "" || strings.TrimSpace(id) != id {
 +		c.modelMismatch = true
 +		c.invalid = true
 +		c.lastItemOutputSHA = ""
@@ -3620,7 +3629,8 @@ index e69de29..31ddaa1 100644
 +		}
 +		switch evType {
 +		case "response.created", "response.in_progress":
-+			if rid := strings.TrimSpace(respID); rid != "" {
++			if respID != "" && strings.TrimSpace(respID) == respID {
++				rid := respID
 +				c.mu.Lock()
 +				if c.streamResponseID != "" && c.streamResponseID != rid {
 +					c.lastItemOutputSHA = ""
@@ -3656,9 +3666,11 @@ index e69de29..31ddaa1 100644
 +					}
 +					if b.Len() > 0 {
 +						h := sha256Hex(b.String())
-+						rid := strings.TrimSpace(evRespID)
-+						if rid == "" {
-+							rid = strings.TrimSpace(respID)
++						rid := ""
++						if evRespID != "" && strings.TrimSpace(evRespID) == evRespID {
++							rid = evRespID
++						} else if respID != "" && strings.TrimSpace(respID) == respID {
++							rid = respID
 +						}
 +						c.mu.Lock()
 +						if rid == "" {
@@ -4857,10 +4869,10 @@ index e69de29..31ddaa1 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..7411062 100644
+index e69de29..d5970e6 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1869 @@
+@@ -0,0 +1,1888 @@
 +package preflightreceipt
 +
 +import (
@@ -6718,6 +6730,25 @@ index e69de29..7411062 100644
 +			name: "capitalized-error-alias", id: "c",
 +			chunks: []string{
 +				`data: {"type":"response.completed","Error":{"code":"boom"},"response":{"id":"resp_mc","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++		// 7. R26 (Astra P2): whitespace-padded status/model/id MUST NOT be trimmed to match.
++		{
++			name: "whitespace-padded-status", id: "d",
++			chunks: []string{
++				`data: {"type":"response.completed","response":{"id":"resp_md","status":"completed ","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "whitespace-padded-model", id: "e",
++			chunks: []string{
++				`data: {"type":"response.completed","response":{"id":"resp_me","status":"completed","model":"gpt-6.2-sol ","output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "whitespace-padded-id", id: "f",
++			chunks: []string{
++				`data: {"type":"response.completed","response":{"id":" resp_mf ","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
 +			},
 +		},
 +	}
