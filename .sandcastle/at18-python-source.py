@@ -183,9 +183,10 @@ def class_members(cls):
 
 
 class Binding:
-    def __init__(self, key, member, chain, owner=None):
+    def __init__(self, key, member, chain, owner=None, owner_body=None):
         self.key, self.member, self.chain, self.owner = key, member, chain, owner
         self.function, self.signature = chain[0], chain[-1]
+        self.owner_body = owner_body
 
     @property
     def has_receiver(self):
@@ -215,27 +216,40 @@ class Binding:
             return self.member.__get__(instances[key], self.owner)
 
     def arguments(self, fn, named, shapes):
-        signature = self.signature
-        if type(signature) is FunctionType:
-            bound = next((target for target in reversed(self.chain) if type(target) is MethodType), fn)
-            if type(bound) is MethodType:
-                signature = MethodType(signature, bound.__self__)
-        fallback = arguments(signature, named, True)
         choices = []
-        params = inspect.signature(signature, follow_wrapped=False)
-        # 已实收的普通位置实参也能绑定到具名生产入口；不能因目标用
-        # *args 而把它丢成 None，再把入口异常误当作成功执行。
-        for args, kwargs in shapes:
-            try:
+        try:
+            params = inspect.signature(fn, follow_wrapped=False)
+        except (ValueError, TypeError):
+            params = None
+        # 实收形状只服从真正被调用的入口，先试，再推导补充形状。
+        if params is not None:
+            for args, kwargs in shapes:
+                try:
+                    params.bind(*args, **kwargs)
+                    choice = tuple(sample(v) for v in args), {k: sample(v) for k, v in kwargs.items()}
+                except (ValueError, TypeError):
+                    continue
+                if (args, kwargs) not in choices:
+                    choices.append((args, kwargs))
+                    yield choice
+
+        target = self.signature
+        if target is self.function:
+            target = fn
+        elif type(fn) is MethodType and type(target) is FunctionType and self.owner_body is not None:
+            code = target.__code__
+            # 只扣除这个类成员原有的接收者；另一层的方法不改变末端普通函数的签名。
+            if any(c is code for c in self.owner_body.co_consts) and any(
+                    name == code.co_name and member is self.member for name, member in class_members(self.owner)):
+                target = MethodType(target, fn.__self__)
+        try:
+            args, kwargs = arguments(target, named, True)
+            if params is not None:
                 params.bind(*args, **kwargs)
-            except TypeError:
-                continue
-            if (args, kwargs) not in choices:
-                choices.append((tuple(sample(v) for v in args), {k: sample(v) for k, v in kwargs.items()}))
-        args, kwargs = fallback
+        except (ValueError, TypeError):
+            return
         if (tuple(args), kwargs) not in choices:
-            choices.append((tuple(args), kwargs))
-        return choices
+            yield tuple(args), kwargs
 
 
 def has_executable_body(code):
@@ -314,7 +328,7 @@ class Exports:
     def binding(self, key, member, owner=None):
         fn = underlying(member)
         if chain := self.wrapped_chain(fn):
-            return Binding(key, member, chain, owner)
+            return Binding(key, member, chain, owner, self.class_body(owner) if owner is not None else None)
 
     def local_members(self, bindings):
         for export_name, value in bindings.items():
@@ -737,12 +751,11 @@ def public_probe(production, targets, origins, test_entered, samples, shapes):
             if identity in tried:
                 continue
             tried.add(identity)
-            choices = binding.arguments(fn, samples, shapes)
+            for args, kwargs in binding.arguments(fn, samples, shapes):
+                if probe_call(production, targets, test_entered, fn, args, kwargs):
+                    return True
         except (Exception, SystemExit):
             continue
-
-        if any(probe_call(production, targets, test_entered, fn, args, kwargs) for args, kwargs in choices):
-            return True
     return False
 
 

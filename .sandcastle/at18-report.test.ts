@@ -1665,6 +1665,83 @@ else:
   });
 });
 
+test("R26/#1319：独立探针区分公开调用形状与混合包装链签名", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const imports = "from functools import wraps\n";
+  const check = async (name: string, prod: string, signature: string, call: string, replacement?: string, expected = true) => {
+    await t.test(name, () => {
+      const repo = feedSource({
+        [entry]: replacement ?? `def route(${signature}): return sorted(rows)\n`,
+        [integration]: imports + "from .at18_fixture_feed import route\n" + prod,
+        [path]: `from trading_system.at18_fixture_feed import route\ndef test_route(): assert route(${call}) == [1, 4]\n`,
+      });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  const bridge = (outer: string, tail: string, invoke: string, body = `route(${invoke})`) => `
+def _send(${tail}): return ${body}
+class _Bridge:
+    @wraps(_send)
+    def emit(self, *, rows): return _send(${invoke})
+_a, _b = _Bridge(), _Bridge()
+@wraps(_a.emit)
+def dispatch(${outer}): return _a.emit(rows=rows)
+__all__ = ('dispatch',)
+`;
+  for (const [name, signature, invoke, call] of [
+    ["仅关键字", "*, rows", "rows=rows", "rows=[4, 1]"],
+    ["普通位置参数", "rows", "rows", "[4, 1]"],
+    ["仅位置", "rows, /", "rows", "[4, 1]"],
+  ] as const) await check(`函数 → 方法 → 函数：${name}`, bridge(signature, signature, invoke), signature, call);
+  await check("公开入口收位置参数，末端收关键字", bridge("rows, /", "*, rows", "rows=rows", "route(rows)"),
+    "rows, /", "[4, 1]");
+  await check("末端签名不可读不影响实收形状", bridge("*, rows", "*, rows", "rows=rows") +
+    "_send.__signature__ = 'invalid'\n", "*, rows", "rows=[4, 1]");
+  await check("已观察的关键字形状不适用时，从末端推导位置参数", bridge("rows, /", "rows, /", "rows", "route(rows=rows)"),
+    "*, rows", "rows=[4, 1]");
+  await check("补参时扣除同一类成员的接收者", `
+def _wrap(fn):
+    @wraps(fn)
+    def relay(*args): return fn(*args)
+    return relay
+class Adapter:
+    @_wrap
+    def dispatch(self, rows, /): return route(rows=rows)
+__all__ = ('Adapter',)
+`, "*, rows", "rows=[4, 1]");
+  for (const [name, descriptor, receiver] of [["实例", "", "self"], ["类", "    @classmethod\n", "cls"]] as const) {
+    await check(`${name}方法 → 普通函数`, `
+def _send(*, rows): return route(rows=rows)
+class Adapter:
+${descriptor}    @wraps(_send)
+    def dispatch(${receiver}, *, rows): return _send(rows=rows)
+__all__ = ('Adapter',)
+`, "*, rows", "rows=[4, 1]");
+  }
+  await check("绑定方法 → 普通函数 → 绑定方法", `
+class _Tail:
+    def send(self, *, rows): return route(rows=rows)
+_tail = _Tail()
+@wraps(_tail.send)
+def _relay(*, rows): return _tail.send(rows=rows)
+class Adapter:
+    @wraps(_relay)
+    def dispatch(self, *, rows): return _relay(rows=rows)
+__all__ = ('Adapter',)
+`, "*, rows", "rows=[4, 1]");
+  const production = bridge("*, rows", "*, rows", "rows=rows");
+  const replacement = imports + bridge("*, rows", "*, rows", "rows=rows", "sorted(rows)").replaceAll("dispatch", "route");
+  await check("承接侧混合链的各层对象均吻合", production, "*, rows", "rows=[4, 1]", replacement);
+  await check("中间层调用另一接收者不作证", production, "*, rows", "rows=[4, 1]",
+    replacement.replace("return _a.emit", "return _b.emit"), false);
+  await check("末端调用同代码的另一函数对象不作证", production, "*, rows", "rows=[4, 1]",
+    replacement.replace("def _send(*, rows): return sorted(rows)",
+      "def _make():\n    def send(*, rows): return sorted(rows)\n    return send\n_send, _other = _make(), _make()")
+      .replace("return _send(rows=rows)", "return _other(rows=rows)"), false);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
