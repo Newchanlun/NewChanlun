@@ -1161,11 +1161,18 @@ class ExternalReview:
                                     exit_m = re.search(r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text)
                                     ok_exit = exit_m is None or exit_m.group(1) == "0"
                                     if ok_exit:
-                                        if any(reads_candidate_patch(c, out_body, patch) for c in call_cmds):
+                                        patch_cmds = [c for c in call_cmds if reads_candidate_patch(c, out_body, patch)]
+                                        if patch_cmds:
                                             sess_patch_reads += 1
                                         if len(call_cmds) == 1:
                                             sess_covered_units.update(
                                                 covered_candidate_patch_units(call_cmds[0], out_body, patch)
+                                            )
+                                        elif len(patch_cmds) == 1:
+                                            sess_covered_units.update(
+                                                covered_candidate_patch_units(
+                                                    patch_cmds[0], out_body, patch, require_explicit_headers=True
+                                                )
                                             )
                                     sess_m = re.search(r"Process running with session ID (\d+)", out_text)
                                     if sess_m and len(call_cmds) == 1:
@@ -1624,8 +1631,8 @@ class ExternalReview:
         return self.state_root / "rereview-intents" / f"r{repository_id}-p{pr_number}-{base_sha}-{head_sha}.json"
 
     def _assert_not_superseded_by_higher_attempt_locked(self, target: ReviewTarget) -> None:
-        """须在 self._pr_lock(target.pr_number) 内调用：同一 (pr, base, head) 已存在更高编号的重审意图或非 STALE run 时，
-        立即抛 TargetDrifted 拒绝继续登记或推进意图时间戳，避免较慢/较旧 attempt 污染或作废更高 attempt。"""
+        """须在 self._pr_lock(target.pr_number) 内调用：同一 (pr, base, head) 存在编号高于本 attempt 的待承接重审意图
+        （或意图文件损坏）时，立即抛 TargetDrifted 拒绝继续登记或推进意图时间戳，防止并发较慢的低编号重审与高编号重审互相作废。"""
         for intent_file in self._iter_rereview_intents(
                 f"r*-p{target.pr_number}-{target.base_sha}-{target.head_sha}.json"):
             try:
@@ -1639,30 +1646,6 @@ class ExternalReview:
                 raise TargetDrifted(
                     f"superseded-by-higher-attempt-intent: attempt {target.attempt} < intent attempt {i_att}"
                 )
-        for run_dir in self._iter_pr_run_dirs(target.pr_number):
-            try:
-                other = _read(run_dir / "target.json")
-            except (OSError, ValueError, TypeError, IdentityError):
-                continue
-            if other.get("base_sha") != target.base_sha or other.get("head_sha") != target.head_sha:
-                continue
-            try:
-                other_att = _strict_pos_int(other.get("attempt"))
-            except (ValueError, TypeError):
-                raise TargetDrifted(
-                    f"invalid-peer-attempt: 同 base/head 存在非法 attempt，attempt {target.attempt} 取消登记"
-                ) from None
-            if other_att > target.attempt:
-                try:
-                    other_out = _read(run_dir / "outcome.json")
-                except FileNotFoundError:
-                    other_out = None
-                except (OSError, ValueError, TypeError, IdentityError):
-                    other_out = {}
-                if other_out is None or other_out.get("verdict") != "STALE":
-                    raise TargetDrifted(
-                        f"superseded-by-higher-attempt-run: attempt {target.attempt} < registered attempt {other_att}"
-                    )
 
     def _record_rereview_intent(self, target: ReviewTarget) -> int:
         """在旧 PASS 已存在的同一 (pr, base, head) 上启动重审但尚未过预检前，持久化待完成的重审意图。

@@ -890,20 +890,23 @@ class FrozenPatch:
         parsed = _parse_diff_git_paths(line)
         return by_paths.get(parsed) if parsed is not None else None
 
-    def covered_change_units(self, output: str, read: _Read = WHOLE_PATCH) -> frozenset[ChangeUnit]:
+    def covered_change_units(
+        self, output: str, read: _Read = WHOLE_PATCH, *, require_explicit_headers: bool = False
+    ) -> frozenset[ChangeUnit]:
         """按精确 `(file_header, sign, line_no, exact_text)` 返回本条命令在 output 中实际完整呈现的冻结改动集合。
         - diff/patch：
           1. 普通连续 diff（`diff_hunk_intact`）：解析 `diff --git`（支持解码后的中文/转义路径）、扩展头元数据变更行
-             （`old mode`/`new mode`/`new file mode`/`deleted file mode`/`rename`/`copy`/`Binary files`）与
-             `@@ -old,n +new,m @@` 坐标逐行推进；
+             （`old mode`/`new mode`/`new file mode`/`deleted file mode`/`rename`/`copy`）与 `@@ -old,n +new,m @@` 坐标逐行推进；
           2. 纯 `-U0` 补丁配 `nl -ba`/`cat -n`/`grep -n`（`plain_u0` 且 `line_pos_mode == "numbered"`）：按 1-based
              `-U0` 补丁行号精确对应每个 `ChangeUnit`，支持超过工具截断上限的超大单 hunk 分段补读；
-        - blobs：仅单文件（`len(read.paths) == 1`）且位置可信（`sequential` 或 `numbered`）按 `(header, "+", line_no, text)` 匹配。"""
+        - blobs：仅单文件（`len(read.paths) == 1`）且位置可信（`sequential` 或 `numbered`）按 `(header, "+", line_no, text)` 匹配；
+        - `require_explicit_headers=True`（多子命令并行工具调用共用未拆分输出时）：禁掉 `blobs`、`-U0` 行号映射与单文件预填头，
+          仅认带显式 `diff --git` 头与 `@@` hunk 的自描述输出，防跨文件串账。"""
         required = self.all_change_units
         covered: set[ChangeUnit] = set()
         lines = _leading_diff(output) if read.leading else _lines(output)
         if read.kind == "blobs":
-            if len(read.paths) != 1 or read.line_pos_mode == "unpositioned":
+            if require_explicit_headers or len(read.paths) != 1 or read.line_pos_mode == "unpositioned":
                 return frozenset()
             by_path = {f.path: f for f in self.files if f.path is not None}
             target_file = by_path.get(read.paths[0])
@@ -928,7 +931,7 @@ class FrozenPatch:
                         covered.add(unit)
             return frozenset(covered)
 
-        if read.kind == "patch" and read.plain_u0 and read.line_pos_mode == "numbered":
+        if not require_explicit_headers and read.kind == "patch" and read.plain_u0 and read.line_pos_mode == "numbered":
             u0_map: dict[int, ChangeUnit] = {}
             if not read.paths:
                 u0_map = dict(self.u0_global_units)
@@ -972,7 +975,7 @@ class FrozenPatch:
             if f.git_old_path is not None and f.git_new_path is not None
         }
         current_header: str | None = None
-        if read.kind == "patch":
+        if not require_explicit_headers and read.kind == "patch":
             if len(read.paths) == 1:
                 sf = self._unambiguous_file_for_path(read.paths[0])
                 current_header = sf.header if sf is not None else None
@@ -1086,10 +1089,14 @@ class FrozenPatch:
         return False
 
 
-def covered_candidate_patch_units(command: str, output: str, patch: FrozenPatch) -> frozenset[ChangeUnit]:
+def covered_candidate_patch_units(
+    command: str, output: str, patch: FrozenPatch, *, require_explicit_headers: bool = False
+) -> frozenset[ChangeUnit]:
     """返回一条命令在记录输出里按精确坐标实际覆盖到的冻结改动行集合。"""
     read = _patch_read(command, patch.head_sha, patch.merge_base_sha, patch.base_sha)
-    return patch.covered_change_units(output, read) if read is not None else frozenset()
+    if read is None:
+        return frozenset()
+    return patch.covered_change_units(output, read, require_explicit_headers=require_explicit_headers)
 
 
 def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:
