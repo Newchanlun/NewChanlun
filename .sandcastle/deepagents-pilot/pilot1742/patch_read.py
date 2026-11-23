@@ -367,9 +367,15 @@ class _Read:
     kind: str
     paths: tuple[str, ...] = ()
     leading: bool = False  # 后面还接了别的段（_trailing）：证据只在输出开头那段 diff 里找，见 _leading_diff
+    plain_u0: bool = False  # patch 且仅含 _PLAIN_U0_DIFF 选项与 -U0/--unified=0（行号与 controller 冻结 -U0 补丁严格一致）
+    line_pos_mode: str = "unpositioned"  # 原始输出 1-based 行号可信度："sequential" | "numbered" | "unpositioned"
+    diff_num_layers: int = 0  # diff/patch 管道中加在行首的行号过滤器层数（nl / cat -n / grep -n）
+    diff_hunk_intact: bool = True  # diff/patch 管道是否保持 hunk 内连续行（未被 grep / 多段 sed / cat -s / 字节截断破坏）
 
 
 WHOLE_PATCH = _Read("patch")
+_PLAIN_U0_DIFF = re.compile(r"--no-ext-diff|--no-textconv|--no-color|--color=never|-U0|--unified=0|-p|-u|--patch")
+_U0_FLAG = frozenset({"-U0", "--unified=0"})
 
 
 def _emits_patch(subcommand: str, options: list[str]) -> bool:
@@ -469,7 +475,12 @@ def _git_patch_read(command: _Expanded, revisions: _Revisions) -> _Read | None:
             if all(p not in ("", ".", "..") and not p.startswith("../") and not any(ch in p for ch in "*?[")
                    for p in normed):
                 diff_paths = tuple(normed)
-    return _Read("patch", diff_paths)
+    plain_u0 = (
+        any(o in _U0_FLAG for o in options)
+        and all(_PLAIN_U0_DIFF.fullmatch(o) for o in options)
+        and (separator == len(rest) or bool(diff_paths))
+    )
+    return _Read("patch", diff_paths, plain_u0=plain_u0)
 
 
 def _whole_range(positional: list[str], revisions: _Revisions) -> bool:
@@ -590,209 +601,301 @@ def _leading_diff(output: str) -> list[str]:
     return lines
 
 
-_SPAN_LINES = 40
-_TRUNCATED_HEADER = re.compile(r"Warning:\s*truncated output\b")
-_MID_TRUNCATED = re.compile(r"\d+\s+chars truncated")
-
-
-@dataclass(frozen=True)
-class FrozenSpan:
-    """冻结补丁中单个文件的单个 hunk（或大 hunk 按 _SPAN_LINES 切分的连续窗口）的证据单元。"""
-    id: tuple[str, int]
-    evidence: frozenset[str]
-    added: frozenset[str]
+_HUNK_POS = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_NUM_PREFIX = re.compile(r"[ \t]*(\d+)([\t:])")
+_BLOB_NUM_LINE = re.compile(r"^[ \t]*(\d+)[\t:](.*)$")
+ChangeUnit = tuple[str, str, int, str]  # (file_header, "+" | "-" | "H", 1-based line_no or 0, exact_text)
 
 
 @dataclass(frozen=True)
 class FrozenFile:
     """冻结补丁里的一个文件。header 是 controller 侧的 `diff --git a/… b/…` 行，path 是它在 head 上的路径
     （删除的文件为 None）；evidence 是这个文件的证据行，added 是其中由 `+` 加进来、head 上这个文件里有的，
-    spans 是按 hunk 与固定窗口切分的细粒度覆盖单元（用于防单大文件截断放行 PASS）。"""
+    changes 是精确到 `(file_header, sign, line_no, text)` 的全部冻结变更行集合（无 hunk 文件记 header），
+    u0_units 记录单文件 `-U0` 补丁中 1-based 行号到精确 ChangeUnit 的映射。"""
     header: str
     path: str | None
     evidence: frozenset[str]
     added: frozenset[str]
-    spans: tuple[FrozenSpan, ...] = ()
+    changes: frozenset[ChangeUnit] = frozenset()
+    u0_units: tuple[tuple[int, ChangeUnit], ...] = ()
 
 
-def _split_files(diff: str) -> list[tuple[str, str | None, list[list[tuple[str, str]]]]]:
-    """按文件与 hunk 切开 `-U<n>` 补丁：(header, head 上的路径, [[(`+`/`-`, 改动行去掉首尾空白)], ...])。
-    hunk 按 `@@ -a,b +c,d @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git` 的改动行不会被当成文件头。"""
-    files: list[tuple[str, str | None, list[list[tuple[str, str]]]]] = []
-    old = new = 0
-    for line in _lines(diff):
-        if old > 0 or new > 0:
+def _split_files(
+    diff: str,
+) -> tuple[list[tuple[str, str | None, list[tuple[str, str]], list[ChangeUnit], list[tuple[int, ChangeUnit]], int]], list[tuple[int, ChangeUnit]]]:
+    """按文件与精确 hunk 行号切开 `-U<n>` 补丁，并记录全局及单文件 1-based `-U0` 补丁行号映射：
+    (header, head 上的路径, [(`+`/`-`, 去空白改动行)], [ChangeUnit], [(file_diff_ln, ChangeUnit)], file_start_ln)。
+    hunk 按 `@@ -old,n +new,m @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git` 的改动行不会被当成文件头。"""
+    files: list[tuple[str, str | None, list[tuple[str, str]], list[ChangeUnit], list[tuple[int, ChangeUnit]], int]] = []
+    u0_global: list[tuple[int, ChangeUnit]] = []
+    old_ln = new_ln = old_rem = new_rem = 0
+    for global_ln, line in enumerate(_lines(diff), 1):
+        if old_rem > 0 or new_rem > 0:
             sign = line[:1]
-            old -= sign in ("-", " ")
-            new -= sign in ("+", " ")
-            if sign in ("+", "-") and not _BREAK.search(line) and (text := line[1:].strip()):
-                files[-1][2][-1].append((sign, text))
+            if sign == "\\":
+                continue
+            if sign == " ":
+                old_ln += 1
+                new_ln += 1
+                old_rem -= 1
+                new_rem -= 1
+            elif sign == "-":
+                if not _BREAK.search(line):
+                    raw_text = line[1:]
+                    unit: ChangeUnit = (files[-1][0], "-", old_ln, raw_text)
+                    files[-1][3].append(unit)
+                    files[-1][4].append((global_ln - files[-1][5] + 1, unit))
+                    u0_global.append((global_ln, unit))
+                    if stripped := raw_text.strip():
+                        files[-1][2].append(("-", stripped))
+                old_ln += 1
+                old_rem -= 1
+            elif sign == "+":
+                if not _BREAK.search(line):
+                    raw_text = line[1:]
+                    unit = (files[-1][0], "+", new_ln, raw_text)
+                    files[-1][3].append(unit)
+                    files[-1][4].append((global_ln - files[-1][5] + 1, unit))
+                    u0_global.append((global_ln, unit))
+                    if stripped := raw_text.strip():
+                        files[-1][2].append(("+", stripped))
+                new_ln += 1
+                new_rem -= 1
         elif line.startswith("diff --git "):
-            files.append((line, None, []))
+            files.append((line, None, [], [], [], global_ln))
         elif files and line.startswith("+++ "):
             target = _unquote(line[4:])
-            files[-1] = (files[-1][0], target[2:] if target.startswith("b/") else None, files[-1][2])
-        elif files and (hunk := re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)):
-            old, new = (int(n) if n is not None else 1 for n in hunk.groups())
-            files[-1][2].append([])
-    return files
+            files[-1] = (
+                files[-1][0],
+                target[2:] if target.startswith("b/") else None,
+                files[-1][2],
+                files[-1][3],
+                files[-1][4],
+                files[-1][5],
+            )
+        elif files and (hunk := _HUNK_POS.match(line)):
+            old_ln = int(hunk.group(1))
+            old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
+            new_ln = int(hunk.group(3))
+            new_rem = int(hunk.group(4)) if hunk.group(4) is not None else 1
+    return files, u0_global
 
 
 @dataclass(frozen=True)
 class FrozenPatch:
-    """controller 侧取得的冻结候选补丁，按文件与 hunk/窗口存证据（#1969 正式审查 bb8aa92e opus BLOCK：不分文件时，
-    `git show <head>:<本 PR 没改的文件>` 里的 `from __future__ import annotations` 就能冒充读到了改动行）。
-    证据按每个变更块/窗口独立计算：优先取至少 _DISTINCT 个字符的改动行，否则退回该块全部非空改动行，
-    纯二进制、改名、改权限文件没有改动行则取 `diff --git` 头，保证每个变更单元均有非空证据可核验覆盖范围。"""
+    """controller 侧取得的冻结候选补丁，按文件存证据并精确记录每一处增删行坐标 `(header, sign, line_no, text)`：
+    - `shown_in` 核验至少读到冻结补丁证据（防零读取/伪造读取，允许 BLOCK 提前阻断）；
+    - `covered_change_units` 按文件、增删方向、精确行号与逐字文本核验实际呈现的改动行（不靠截断关键词启发式，
+      源码正文含 `123 chars truncated` 亦不受影响；超大单 hunk 可用 `-U0 | nl -ba | sed -n` 按精确行号分段覆盖）。"""
     head_sha: str
     merge_base_sha: str
     base_sha: str
     files: tuple[FrozenFile, ...]
+    u0_global_units: tuple[tuple[int, ChangeUnit], ...] = ()
 
     @classmethod
     def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str) -> FrozenPatch:
         """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
-        split = _split_files(diff)
+        split, u0_global = _split_files(diff)
         built: list[FrozenFile] = []
-        for header, path, hunks in split:
-            all_file_lines = [item for hunk in hunks for item in hunk]
-            spans: list[FrozenSpan] = []
-            span_idx = 0
-            for hunk in hunks:
-                if not hunk:
-                    continue
-                for start in range(0, len(hunk), _SPAN_LINES):
-                    window = hunk[start:start + _SPAN_LINES]
-                    long_w = {t for _, t in window if len(t) >= _DISTINCT}
-                    all_w = {t for _, t in window}
-                    ev_w = frozenset(long_w or all_w)
-                    long_add = {t for sign, t in window if sign == "+" and len(t) >= _DISTINCT}
-                    all_add = {t for sign, t in window if sign == "+"}
-                    spans.append(FrozenSpan((header, span_idx), ev_w, frozenset(long_add or all_add)))
-                    span_idx += 1
-            if not spans:
-                spans.append(FrozenSpan((header, 0), frozenset({header}), frozenset()))
-            long_lines = {t for _, t in all_file_lines if len(t) >= _DISTINCT}
-            all_lines = {t for _, t in all_file_lines}
+        for header, path, lines, changes, u0_file, file_start_ln in split:
+            long_lines = {t for _, t in lines if len(t) >= _DISTINCT}
+            all_lines = {t for _, t in lines}
             ev = frozenset(long_lines or all_lines or {header})
-            long_added = {t for sign, t in all_file_lines if sign == "+" and len(t) >= _DISTINCT}
-            all_added = {t for sign, t in all_file_lines if sign == "+"}
+            long_added = {t for sign, t in lines if sign == "+" and len(t) >= _DISTINCT}
+            all_added = {t for sign, t in lines if sign == "+"}
             added = frozenset(long_added or all_added)
-            built.append(FrozenFile(header, path, ev, added, tuple(spans)))
-        return cls(head_sha, merge_base_sha, base_sha, tuple(built))
+            if changes:
+                unit_set = frozenset(changes)
+                u0_file_tuple = tuple(u0_file)
+            else:
+                hdr_unit: ChangeUnit = (header, "H", 0, header)
+                unit_set = frozenset({hdr_unit})
+                u0_file_tuple = ((1, hdr_unit),)
+                u0_global.append((file_start_ln, hdr_unit))
+            built.append(FrozenFile(header, path, ev, added, unit_set, u0_file_tuple))
+        return cls(head_sha, merge_base_sha, base_sha, tuple(built), tuple(u0_global))
 
     @property
     def evidence(self) -> frozenset[str]:
         return frozenset().union(*(f.evidence for f in self.files))
 
     @property
-    def all_span_ids(self) -> frozenset[tuple[str, int]]:
-        return frozenset(span.id for item in self.files for span in item.spans)
+    def all_change_units(self) -> frozenset[ChangeUnit]:
+        return frozenset().union(*(f.changes for f in self.files))
 
-    def _single_file_for_path(self, spec: str) -> FrozenFile | None:
-        header = f"diff --git a/{spec} b/{spec}"
-        for item in self.files:
-            if item.path == spec or item.header == header:
-                return item
-        return None
+    def _unambiguous_file_for_path(self, spec: str, *, require_non_renamed: bool = False) -> FrozenFile | None:
+        exact_header = f"diff --git a/{spec} b/{spec}"
+        old_prefix = f"diff --git a/{spec} "
+        new_suffix = f" b/{spec}"
+        touched = [
+            item for item in self.files
+            if (item.path == spec or item.header == exact_header
+                or item.header.startswith(old_prefix) or item.header.endswith(new_suffix))
+        ]
+        if len(touched) != 1:
+            return None
+        sf = touched[0]
+        if require_non_renamed and sf.header != exact_header:
+            return None
+        return sf
 
-    def covered_spans(self, output: str, read: _Read = WHOLE_PATCH) -> frozenset[tuple[str, int]]:
-        """返回在 output 中实际呈现的冻结变更单元（file header, span index）集合（用于 PASS 全量覆盖门）：
-        - 按 hunk 及每 40 改动行切分窗口，单个大文件只呈现首个 hunk 而后续被截断时无法满足全集；
-        - 遇到中段截断标记（`N chars truncated`）时立即撤销当前进行中文件在本条命令里的临时命中并清空上下文，
-          已完整印完的先前文件保留，截断处及无头尾部不计覆盖；
-        - 严禁把无 `diff --git` 文件头的过滤输出同时归给多个文件（仅单文件 pathspec 或单文件 PR 允许无头匹配）。"""
-        by_header = {f.header: f for f in self.files}
+    def covered_change_units(self, output: str, read: _Read = WHOLE_PATCH) -> frozenset[ChangeUnit]:
+        """按精确 `(file_header, sign, line_no, exact_text)` 返回本条命令在 output 中实际完整呈现的冻结改动行集合。
+        - diff/patch：
+          1. 普通连续 diff（`diff_hunk_intact`）：解析 `diff --git` 与 `@@ -old,n +new,m @@` 坐标逐行推进；
+          2. 纯 `-U0` 补丁配 `nl -ba`/`cat -n`/`grep -n`（`plain_u0` 且 `line_pos_mode == "numbered"`）：按 1-based
+             `-U0` 补丁行号精确对应每个 `ChangeUnit`，支持超过工具截断上限的超大单 hunk 分段补读；
+        - blobs：仅单文件（`len(read.paths) == 1`）且位置可信（`sequential` 或 `numbered`）按 `(header, "+", line_no, text)` 匹配。"""
+        required = self.all_change_units
+        covered: set[ChangeUnit] = set()
+        lines = _leading_diff(output) if read.leading else _lines(output)
         if read.kind == "blobs":
-            by_path = {f.path: f for f in self.files if f.path is not None}
-            if not all(path in by_path for path in read.paths):
+            if len(read.paths) != 1 or read.line_pos_mode == "unpositioned":
                 return frozenset()
-            targets = [by_path[path] for path in read.paths]
-            covered_blobs: set[tuple[str, int]] = set()
-            for raw in _leading_diff(output) if read.leading else _lines(output):
-                if _BREAK.search(raw) or _TRUNCATED_HEADER.search(raw):
-                    continue
-                if _MID_TRUNCATED.search(raw):
-                    return frozenset()
-                line = raw.strip()
-                if match := _LINE_NUMBER.match(line):
-                    line = line[match.end():].strip()
-                cand = line[1:].strip() if line[:1] in "+-" else None
-                for item in targets:
-                    for span in item.spans:
-                        if line in span.added or (cand is not None and cand in span.added):
-                            covered_blobs.add(span.id)
-            return frozenset(covered_blobs)
+            by_path = {f.path: f for f in self.files if f.path is not None}
+            target_file = by_path.get(read.paths[0])
+            if target_file is None:
+                return frozenset()
+            if read.line_pos_mode == "sequential":
+                for idx, raw in enumerate(lines, 1):
+                    if _BREAK.search(raw):
+                        continue
+                    unit = (target_file.header, "+", idx, raw)
+                    if unit in required:
+                        covered.add(unit)
+            elif read.line_pos_mode == "numbered":
+                for raw in lines:
+                    if _BREAK.search(raw):
+                        continue
+                    m = _BLOB_NUM_LINE.match(raw)
+                    if not m:
+                        continue
+                    unit = (target_file.header, "+", int(m.group(1)), m.group(2))
+                    if unit in required:
+                        covered.add(unit)
+            return frozenset(covered)
 
-        committed: set[tuple[str, int]] = set()
-        in_file_hits: set[tuple[str, int]] = set()
-        current: FrozenFile | None = None
-        saw_header = False
-        headerless_target: FrozenFile | None = None
+        if read.kind == "patch" and read.plain_u0 and read.line_pos_mode == "numbered":
+            u0_map: dict[int, ChangeUnit] = {}
+            if not read.paths:
+                u0_map = dict(self.u0_global_units)
+            elif len(read.paths) == 1:
+                sf = self._unambiguous_file_for_path(read.paths[0], require_non_renamed=True)
+                if sf is not None:
+                    u0_map = dict(sf.u0_units)
+            if u0_map:
+                for raw in lines:
+                    if _BREAK.search(raw):
+                        continue
+                    m = _BLOB_NUM_LINE.match(raw)
+                    if not m:
+                        continue
+                    u = u0_map.get(int(m.group(1)))
+                    if u is None:
+                        continue
+                    expected_body = u[3] if u[1] == "H" else f"{u[1]}{u[3]}"
+                    if m.group(2) == expected_body:
+                        covered.add(u)
+
+        if not read.diff_hunk_intact:
+            return frozenset(covered)
+
+        known_headers = {f.header for f in self.files}
+        current_header: str | None = None
         if read.kind == "patch":
             if len(read.paths) == 1:
-                headerless_target = self._single_file_for_path(read.paths[0])
+                sf = self._unambiguous_file_for_path(read.paths[0])
+                current_header = sf.header if sf is not None else None
             elif not read.paths and len(self.files) == 1:
-                headerless_target = self.files[0]
+                current_header = self.files[0].header
 
-        for raw in _leading_diff(output) if read.leading else _lines(output):
-            if _BREAK.search(raw) or _TRUNCATED_HEADER.search(raw):
+        old_ln = new_ln = old_rem = new_rem = 0
+        for raw in lines:
+            if _BREAK.search(raw):
+                old_rem = new_rem = 0
                 continue
-            if _MID_TRUNCATED.search(raw):
-                # 当前文件被中段截断：撤销本文件在本条命令中尚未结束的临时命中，并清空文件上下文
-                in_file_hits.clear()
-                current = None
-                headerless_target = None
+            line = raw
+            if read.diff_num_layers:
+                for _ in range(read.diff_num_layers):
+                    if line.startswith(("diff --git ", "@@ ", "+", "-", "\\")):
+                        break
+                    m = _NUM_PREFIX.match(line)
+                    if not m:
+                        break
+                    line = line[m.end():]
+            if line.startswith("diff --git "):
+                current_header = line if line in known_headers else None
+                old_rem = new_rem = 0
+                if current_header is not None:
+                    hdr_unit = (current_header, "H", 0, current_header)
+                    if hdr_unit in required:
+                        covered.add(hdr_unit)
                 continue
-            line = raw.strip()
-            unstripped = raw
-            if match := _LINE_NUMBER.match(line):
-                unstripped = line[match.end():]
-                line = unstripped.strip()
-            if unstripped.startswith("diff --git "):
-                committed.update(in_file_hits)
-                in_file_hits.clear()
-                saw_header = True
-                current = by_header.get(unstripped)
-                if current is not None and len(current.spans) == 1 and current.header in current.spans[0].evidence:
-                    in_file_hits.add(current.spans[0].id)
+            if current_header is not None and (hunk := _HUNK_POS.match(line)):
+                old_ln = int(hunk.group(1))
+                old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
+                new_ln = int(hunk.group(3))
+                new_rem = int(hunk.group(4)) if hunk.group(4) is not None else 1
                 continue
-            cand = line[1:].strip() if line[:1] in "+-" else None
-            target_file = current if saw_header else headerless_target
-            if target_file is not None:
-                for span in target_file.spans:
-                    if line in span.evidence or (cand is not None and cand in span.evidence):
-                        in_file_hits.add(span.id)
-        committed.update(in_file_hits)
-        return frozenset(committed)
+            if current_header is not None and (old_rem > 0 or new_rem > 0):
+                sign = line[:1]
+                if sign == "\\":
+                    continue
+                if sign == " ":
+                    old_ln += 1
+                    new_ln += 1
+                    old_rem -= 1
+                    new_rem -= 1
+                elif sign == "-":
+                    unit = (current_header, "-", old_ln, line[1:])
+                    if unit in required:
+                        covered.add(unit)
+                    old_ln += 1
+                    old_rem -= 1
+                elif sign == "+":
+                    unit = (current_header, "+", new_ln, line[1:])
+                    if unit in required:
+                        covered.add(unit)
+                    new_ln += 1
+                    new_rem -= 1
+                else:
+                    old_rem = new_rem = 0
+        return frozenset(covered)
 
     def shown_in(self, output: str, read: _Read = WHOLE_PATCH) -> bool:
         """输出里有一行（去掉行号前缀、diff 的 `+`/`-`/空格标记后）是冻结补丁的改动内容，按 read 限定出处：
         patch 认整个补丁的证据；diff 只认跟在冻结补丁某个文件的 `diff --git` 头之后、属于该文件的证据；
         blobs 只认所指文件（须全是本 PR 改动的文件）在 head 上加进来的行。
         含 _BREAK 字符的行不当证据：它在别的切行规则下可能是两行。"""
-        if self.covered_spans(output, read):
-            return True
-        if read.kind != "patch":
-            return False
-        # 多文件 PR 上用 `git diff <mb> <head> | grep ...` 过滤掉 diff 头时，单行命中仍算「读过补丁」（允许 BLOCK），
-        # 但不计入 covered_spans（不得据此放行 PASS）。
-        evidence = self.evidence
+        by_header = {f.header: f.evidence for f in self.files}
+        if read.kind == "blobs":
+            by_path = {f.path: f.added for f in self.files if f.path is not None}
+            if not all(path in by_path for path in read.paths):
+                return False
+            evidence: frozenset[str] = frozenset().union(*(by_path[path] for path in read.paths))
+        else:
+            evidence = self.evidence if read.kind == "patch" else frozenset()
         for raw in _leading_diff(output) if read.leading else _lines(output):
-            if _BREAK.search(raw) or _TRUNCATED_HEADER.search(raw) or _MID_TRUNCATED.search(raw):
+            if _BREAK.search(raw):
                 continue
             line = raw.strip()
+            unstripped = raw
             if match := _LINE_NUMBER.match(line):
-                line = line[match.end():].strip()
+                unstripped = line[match.end():]
+                line = unstripped.strip()
+            if read.kind == "diff" and unstripped.startswith("diff --git "):
+                evidence = by_header.get(unstripped, frozenset())
             if line in evidence or (line[:1] in "+-" and line[1:].strip() in evidence):
                 return True
         return False
 
 
-def covered_candidate_patch_spans(command: str, output: str, patch: FrozenPatch) -> frozenset[tuple[str, int]]:
-    """返回一条命令在记录输出里实际覆盖到的冻结变更单元 (file header, span index) 集合。"""
+def covered_candidate_patch_units(command: str, output: str, patch: FrozenPatch) -> frozenset[ChangeUnit]:
+    """返回一条命令在记录输出里按精确坐标实际覆盖到的冻结改动行集合。"""
     read = _patch_read(command, patch.head_sha, patch.merge_base_sha, patch.base_sha)
-    return patch.covered_spans(output, read) if read is not None else frozenset()
+    return patch.covered_change_units(output, read) if read is not None else frozenset()
 
 
 def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:
@@ -831,9 +934,12 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
     if not all(_setup(e) and c.op in ("&&", ";", "\n") for c, e in zip(commands[:k], expanded[:k], strict=True)):
         return None
     if commands[k].op in _PIPE or k + 1 == len(commands):
+        filters = expanded[k + 1:]
         ok = (all(commands[j].op in _PIPE for j in range(k, len(commands) - 1))
-              and all(_filter(e) for e in expanded[k + 1:]))
-        return read if ok else None
+              and all(_filter(e) for e in filters))
+        if not ok:
+            return None
+        return _annotate_filters(read, filters)
     # git diff 之后用 `;`/`&&`/换行接上只印提交元数据的 git 段（PR #2018 run 45a4c22b opus：
     # `git diff <mb> <head>; git show --no-patch --format=… <head>`）。前一段须是整个 PR 的 diff（不带 pathspec、
     # 只带 _PLAIN_DIFF 里的选项）：PR 非空，真实补丁就必定先于后一段印出；diff 失败时开头是报错。证据只在开头
@@ -923,6 +1029,81 @@ _FILTERS = {
     "grep": _FilterSpec(r"-[nivEFwxah]+|-[ABCm]\d+|--colou?r=never",
                         {"-e": r"(?s:.*)", "-A": r"\d+", "-B": r"\d+", "-C": r"\d+", "-m": r"\d+"}, r"(?s:.*)"),
 }
+
+
+def _annotate_filters(read: _Read, filters: list[_Expanded]) -> _Read:
+    """根据 git 之后的过滤管道标注行号层级、原始行号可信度（blobs / plain_u0）与 hunk 连续性。"""
+    diff_num_layers = 0
+    diff_hunk_intact = True
+    line_pos_mode = "sequential" if ((read.kind == "blobs" and len(read.paths) == 1) or read.plain_u0) else "unpositioned"
+    for flt in filters:
+        cmd = flt.argv[0]
+        opts = flt.argv[1:]
+        if cmd == "nl":
+            diff_num_layers += 1
+            all_lines = any(o == "-ba" for o in opts) or any(
+                opts[i] == "-b" and i + 1 < len(opts) and opts[i + 1] == "a" for i in range(len(opts))
+            )
+            left_just = any(o == "-nln" for o in opts) or any(
+                opts[i] == "-n" and i + 1 < len(opts) and opts[i + 1] == "ln" for i in range(len(opts))
+            )
+            line_pos_mode = "numbered" if (line_pos_mode == "sequential" and all_lines and not left_just) else "unpositioned"
+        elif cmd == "cat":
+            has_n = any(o.startswith("-") and not o.startswith("--") and "n" in o[1:] for o in opts)
+            has_b = any(o.startswith("-") and not o.startswith("--") and "b" in o[1:] for o in opts)
+            has_s = any(o.startswith("-") and not o.startswith("--") and "s" in o[1:] for o in opts)
+            has_mutate = any(
+                o.startswith("-") and not o.startswith("--") and any(c in o[1:] for c in "vetAET")
+                for o in opts
+            )
+            if has_n or has_b:
+                diff_num_layers += 1
+            if has_s or has_mutate:
+                diff_hunk_intact = False
+            if has_b or has_s or has_mutate:
+                line_pos_mode = "unpositioned"
+            elif has_n:
+                line_pos_mode = "numbered" if line_pos_mode == "sequential" else "unpositioned"
+        elif cmd == "grep":
+            has_n = any(o.startswith("-") and not o.startswith("--") and "n" in o[1:] for o in opts)
+            if has_n:
+                diff_num_layers += 1
+            diff_hunk_intact = False
+            if line_pos_mode == "sequential":
+                line_pos_mode = "numbered" if has_n else "unpositioned"
+            elif line_pos_mode == "numbered":
+                line_pos_mode = "unpositioned" if has_n else "numbered"
+            else:
+                line_pos_mode = "unpositioned"
+        elif cmd == "head":
+            if any(o.startswith(("-c", "--bytes=")) for o in opts):
+                line_pos_mode = "unpositioned"
+                diff_hunk_intact = False
+        elif cmd == "tail":
+            if any(o.startswith(("-c", "--bytes=")) for o in opts):
+                line_pos_mode = "unpositioned"
+                diff_hunk_intact = False
+            elif line_pos_mode != "numbered":
+                line_pos_mode = "unpositioned"
+        elif cmd == "sed":
+            if line_pos_mode != "numbered":
+                line_pos_mode = "unpositioned"
+            scripts: list[str] = []
+            idx = 0
+            while idx < len(opts):
+                if opts[idx] == "-e" and idx + 1 < len(opts):
+                    scripts.append(opts[idx + 1])
+                    idx += 2
+                    continue
+                if opts[idx] != "-n" and opts[idx] != "--":
+                    scripts.append(opts[idx])
+                idx += 1
+            if len(scripts) != 1 or ";" in scripts[0]:
+                diff_hunk_intact = False
+        else:
+            line_pos_mode = "unpositioned"
+            diff_hunk_intact = False
+    return replace(read, line_pos_mode=line_pos_mode, diff_num_layers=diff_num_layers, diff_hunk_intact=diff_hunk_intact)
 
 
 def _filter(command: _Expanded) -> bool:

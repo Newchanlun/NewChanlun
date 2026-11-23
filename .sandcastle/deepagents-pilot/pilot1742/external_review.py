@@ -49,8 +49,9 @@ from .github_app import (
     RequestNotSent,
 )
 from .patch_read import (
+    ChangeUnit,
     FrozenPatch,
-    covered_candidate_patch_spans,
+    covered_candidate_patch_units,
     reads_candidate_patch,
 )
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
@@ -113,8 +114,10 @@ PROMPT = ("只审阅，不修改、提交、fetch 或运行候选脚本。候选
           "先单独执行一条命令 git diff --no-ext-diff --no-textconv {merge_base} {head} 读取完整修改："
           "这条命令里不要接 &&、;、|，前后也不要串 cat、printf、echo、--stat、--check 等其他命令，"
           "需要别的信息就另起命令。若该输出被截断，须用独立的 git diff --no-ext-diff --no-textconv "
-          "{merge_base} {head} -- <文件...> 命令补读全部未呈现的变更文件（单文件仍截断时可接 | sed -n '起,止p' 分段读，"
-          "每条不与其他命令串联），完整覆盖全部变更块后方可给出 VERDICT: PASS。然后检查直接相关源代码。不执行来源不明的构建、测试或 hooks。"
+          "{merge_base} {head} -- <文件...> 命令补读全部未呈现的变更文件（单文件仍截断时可改用独立 "
+          "git diff --no-ext-diff --no-textconv -U0 {merge_base} {head} -- <文件> | nl -ba | sed -n '起,止p'，"
+          "纯新增大文件也可配独立 git show {head}:<文件> | nl -ba | sed -n '起,止p'，每条不与其他命令串联），"
+          "完整覆盖全部改动行后方可给出 VERDICT: PASS。然后检查直接相关源代码。不执行来源不明的构建、测试或 hooks。"
           "返回符合 schema 的 JSON，status、summary、findings、validation 均必填。"
           "完整审阅无阻断问题时 status=completed 且 summary 第一行严格为 VERDICT: PASS。"
           "有阻断问题时 status=blocked 且第一行严格为 VERDICT: BLOCK。未完成审阅时 status=failed。"
@@ -504,7 +507,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         turn_completed = False
         final_text = None
         patch_reads = 0
-        ev_covered_spans: set[tuple[str, int]] = set()
+        ev_covered_units: set[ChangeUnit] = set()
         patch = frozen_patch(source, target)
         for event in events:
             kind = event.get("type")
@@ -529,7 +532,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
                     out_s = str(item.get("aggregated_output") or "")
                     if reads_candidate_patch(cmd_s, out_s, patch):
                         patch_reads += 1
-                    ev_covered_spans.update(covered_candidate_patch_spans(cmd_s, out_s, patch))
+                    ev_covered_units.update(covered_candidate_patch_units(cmd_s, out_s, patch))
         if not turn_completed:
             return failed("stdout 缺少重连后 turn.completed")
         sessions = {e.get("thread_id") for e in events if e.get("type") == "thread.started"}
@@ -551,8 +554,8 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             return failed("结果不符合协议")
         line = output["summary"].splitlines()[0]
         if output["status"] == "completed" and line == "VERDICT: PASS":
-            if not patch.all_span_ids.issubset(ev_covered_spans):
-                return failed("审查员 stdout 未完整覆盖全部冻结变更块（完整或单文件 diff 可能被截断且未补读），PASS 不采信")
+            if not patch.all_change_units.issubset(ev_covered_units):
+                return failed("审查员 stdout 未完整覆盖全部冻结改动行（完整或单文件 diff 可能被截断且未补读），PASS 不采信")
             return ReviewOutcome(model, "PASS", session, output["summary"])
         if output["status"] in ("completed", "blocked") and line == "VERDICT: BLOCK":
             return ReviewOutcome(model, "BLOCK", session, output["summary"])
@@ -1069,7 +1072,7 @@ class ExternalReview:
         closed_cont: dict[str, list[int]] = {}
         exec_sessions: dict[int, tuple[str, str]] = {}
         sess_patch_reads = 0
-        sess_covered_spans: set[tuple[str, int]] = set()
+        sess_covered_units: set[ChangeUnit] = set()
         pending_model_output = False
         try:
             patch = frozen_patch(self.source, target)
@@ -1147,7 +1150,7 @@ class ExternalReview:
                                         if any(reads_candidate_patch(c, out_body, patch) for c in call_cmds):
                                             sess_patch_reads += 1
                                         for c in call_cmds:
-                                            sess_covered_spans.update(covered_candidate_patch_spans(c, out_body, patch))
+                                            sess_covered_units.update(covered_candidate_patch_units(c, out_body, patch))
                                     sess_m = re.search(r"Process running with session ID (\d+)", out_text)
                                     if sess_m and len(call_cmds) == 1:
                                         exec_sessions[int(sess_m.group(1))] = (call_cmds[0], out_body)
@@ -1164,8 +1167,8 @@ class ExternalReview:
                                             if ok_exit:
                                                 if reads_candidate_patch(prev_cmd, combined, patch):
                                                     sess_patch_reads += 1
-                                                sess_covered_spans.update(
-                                                    covered_candidate_patch_spans(prev_cmd, combined, patch)
+                                                sess_covered_units.update(
+                                                    covered_candidate_patch_units(prev_cmd, combined, patch)
                                                 )
                     elif rtype == "token_usage_record":
                         rid = payload.get("response_id")
@@ -1199,10 +1202,10 @@ class ExternalReview:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "session.jsonl 缺少已由 token_usage_record 闭合的冻结候选补丁读取命令与输出，PASS/BLOCK 均不采信")
         if outcome.verdict == "PASS":
-            if not patch.all_span_ids.issubset(sess_covered_spans):
+            if not patch.all_change_units.issubset(sess_covered_units):
                 return ReviewOutcome(
                     outcome.model, "FAILED", outcome.session_id,
-                    "session.jsonl 未完整呈现全部冻结变更块（完整或单文件 diff 可能被截断且未补读），PASS 不采信",
+                    "session.jsonl 未完整呈现全部冻结改动行（完整或单文件 diff 可能被截断且未补读），PASS 不采信",
                 )
         if not response_ids:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
@@ -1872,6 +1875,18 @@ class ExternalReview:
         对象不在本机库、controller 不干净或任何读失败都返回 False。"""
         try:
             return self.reuse_source(self._frozen(data, 0)) is not None  # attempt 0 从不登记，撞不上已有 run 目录
+        except (OSError, ValueError, KeyError, TypeError, IdentityError, subprocess.CalledProcessError):
+            return False
+
+    def would_reuse_target(self, raw: dict[str, Any]) -> bool:
+        """已登记的未完结 reuse_planned attempt 续跑时，按原冻结 target（保留原 run_id）判断是否仍可沿用旧 PASS，
+        避免重新生成 run_id 把自身误判为同 head 的重审记录而在额度满时误阻断。"""
+        try:
+            target = ReviewTarget(**raw)
+            if (target.policy_version != POLICY or target.review_contract != REVIEW_CONTRACT
+                    or target.controller_code_head != check_controller()):
+                return False
+            return self.reuse_source(target) is not None
         except (OSError, ValueError, KeyError, TypeError, IdentityError, subprocess.CalledProcessError):
             return False
 

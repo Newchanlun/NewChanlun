@@ -1417,9 +1417,10 @@ def test_conclusion_without_frozen_patch_read_is_failed(lane, claim):
             if o.verdict != "FAILED" or "未读取冻结候选补丁" not in (o.reason or "")} == {}
 
 
-SINGLE_FILE_PATCH_READ = frozenset({
+PARTIAL_OR_FILTERED_PATCH_READ = frozenset({
     "show-file", "var-export-quoted-show", "show-HEAD-file",
-    "show-file-dot-slash", "show-file-numbered", "dollar-at-end-of-double-quotes",
+    "show-file-dot-slash", "show-two-changed-files", "show-file-numbered",
+    "dollar-at-end-of-double-quotes", "triple-dot-base", "filter-chain",
 })
 
 
@@ -1429,17 +1430,17 @@ def test_conclusion_after_frozen_patch_read_stands(lane, claim):
     if claim == "BLOCK":
         assert {case: o.reason for case, o in outcomes.items() if o.verdict != claim} == {}
     else:
-        # R35（Sol P1）：完整补丁读取可放行 PASS；仅读取双文件 PR 中单文件的 git show 命令不得放行 PASS（但允许 BLOCK）
+        # R35/R37：完整连续补丁读取可放行 PASS；单文件/多文件无界 blob/非 -U0 grep 过滤读取不得单独放行 PASS（允许 BLOCK）
         full_bad = {
             case: o.reason for case, o in outcomes.items()
-            if case not in SINGLE_FILE_PATCH_READ and o.verdict != "PASS"
+            if case not in PARTIAL_OR_FILTERED_PATCH_READ and o.verdict != "PASS"
         }
-        single_bad = {
+        partial_bad = {
             case: (o.verdict, o.reason) for case, o in outcomes.items()
-            if case in SINGLE_FILE_PATCH_READ
-            and (o.verdict != "FAILED" or "未完整覆盖全部冻结变更块" not in (o.reason or ""))
+            if case in PARTIAL_OR_FILTERED_PATCH_READ
+            and (o.verdict != "FAILED" or "未完整覆盖全部冻结改动行" not in (o.reason or ""))
         }
-        assert full_bad == {} and single_bad == {}
+        assert full_bad == {} and partial_bad == {}
 
 
 def test_zero_tool_pass_is_never_reused(lane, env):
@@ -3976,7 +3977,9 @@ def test_truncated_multifile_diff_rejects_pass_until_all_files_covered_but_allow
         "--", "alpha_r35.py", "changed-0", "changed-1",
     )
     beta_diff = git(env.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha, "--", "beta_r35.py")
-    trunc_diff = f"Warning: truncated output (original token count: 99999)\n{before_beta_diff}\n…88888 chars truncated…\n"
+    # 截断正好落在 changed-1 的改动行之前（保留 changed-1 文件头但切掉其 `+1` 行，且缺失 beta_r35.py）
+    changed1_cut = before_beta_diff.rsplit("\n+", 1)[0]
+    trunc_diff = f"Warning: truncated output (original token count: 99999)\n{changed1_cut}\n…88888 chars truncated…\n"
 
     def write_worker(ev_cmds_out: list[tuple[str, str]], sess_cmds_out: list[tuple[str, str]], verdict: str) -> tuple[dict, dict]:
         out_obj = {
@@ -4064,12 +4067,12 @@ def test_truncated_multifile_diff_rejects_pass_until_all_files_covered_but_allow
         "--", "changed-1", "beta_r35.py",
     )
 
-    # 1. stdout 未截断但 session.jsonl 截断（仅呈现 alpha_r35.py/changed-0，changed-1 被截断撤销且缺 beta_r35.py）-> PASS 被 _verify_session_receipt 拒绝
+    # 1. stdout 未截断但 session.jsonl 截断（仅呈现 alpha_r35.py/changed-0，changed-1 缺失部分行且缺 beta_r35.py）-> PASS 被 _verify_session_receipt 拒绝
     launch, receipt = write_worker([(cmd_all, full_diff)], [(cmd_all, trunc_diff)], "PASS")
     ev_out = module.validate_review(target, launch, receipt, worker, lane.source)
     assert ev_out.verdict == "PASS"
     sess_out = lane._verify_session_receipt(target, launch, receipt, worker, ev_out)
-    assert sess_out.verdict == "FAILED" and "未完整呈现全部冻结变更块" in sess_out.reason
+    assert sess_out.verdict == "FAILED" and "未完整呈现全部冻结改动行" in sess_out.reason
 
     # 2. stdout 本身也截断 -> validate_review 直接拒绝 PASS
     launch, receipt = write_worker([(cmd_all, trunc_diff)], [(cmd_all, trunc_diff)], "PASS")
@@ -4118,56 +4121,94 @@ def test_superseded_on_head_fails_closed_on_missing_target_nonempty_dir_and_bad_
 
 
 def test_single_file_mid_truncation_and_headerless_shared_line_reject_pass(lane, env):
-    """R36（Sol P1 + Astra P1）：
-    1. 单大文件含多个 hunk（及 >40 行大 hunk）时，仅呈现首 hunk 后遇 `N chars truncated` 截断，
-       中段截断撤销本文件临时命中且缺失后续变更块，PASS 须拒认；按单文件 `| sed -n` 分段补读全部变更块后 PASS 放行；
-    2. 多文件共含相同改动行时，无 `diff --git` 头的 `git diff ... | grep` 绝不能把同一行归给多个文件放行 PASS。"""
-    from pilot1742.patch_read import covered_candidate_patch_spans
+    """R36/R37（Sol P1/P2 + Astra P1/P2）：
+    1. 按精确 `(file_header, sign, line_no, exact_text)` 追踪全部增删行：同文件两处远距 hunk 含完全相同改动行时，
+       只读首 hunk 绝不把次 hunk 算作已覆盖；大 hunk 缺失任意一行或中途截断均不能满足全集；
+    2. 超大单 hunk（含删除+新增）用 `git diff -U0 -- <file> | nl -ba | sed -n` 按精确 `-U0` 行号分段补读可完整覆盖；
+       `sed` 先于 `nl -ba`、双层行号（`nl -ba | grep -n`）、`cat -s`、多段 `sed`、非 `-U0` `grep`、多文件 `git show` 均拒认；
+    3. 源码自身合法新增含 `123 chars truncated` 的改动行不再被启发式正则误杀，精确坐标匹配可直接放行 PASS。"""
+    from pilot1742.patch_read import covered_candidate_patch_units
 
-    # 1. 构造含两个远距 hunk 的单大文件与共含同行的双文件
-    big_lines = [f"LINE_{i:03d} = 'filler_unchanged_line_{i:03d}'" for i in range(1, 120)]
+    big_lines = [f"LINE_{i:03d} = 'filler_unchanged_line_{i:03d}'" for i in range(1, 130)]
     (env.source / "big_r36.py").write_text("\n".join(big_lines) + "\n")
     git(env.source, "add", "big_r36.py")
     git(env.source, "commit", "-qm", "base big_r36")
     base_sha = git(env.source, "rev-parse", "HEAD")
     lane.gateway.pr["base"]["sha"] = base_sha
 
-    big_lines[2] = "HUNK1_FIRST_CHANGE_UNIQUE_R36 = 'hunk_one_value'"
-    big_lines[110] = "HUNK2_SECOND_CHANGE_UNIQUE_R36 = 'hunk_two_value'"
+    # 同文件两个远距 hunk 含完全相同的改动行 + 连续多行替换块 + 含 "123 chars truncated" 字面量的合法改动行
+    big_lines[2] = "IDENTICAL_LINE_TWO_HUNKS = 'exact_same_text'"
+    big_lines[3] = "HUNK1_EXTRA_LINE = 'must_not_be_dropped_by_window'"
+    big_lines[4] = "LITERAL_TRUNC_MSG = '123 chars truncated in fixture'"
+    big_lines[110] = "IDENTICAL_LINE_TWO_HUNKS = 'exact_same_text'"
     (env.source / "big_r36.py").write_text("\n".join(big_lines) + "\n")
     (env.source / "dup_a_r36.py").write_text("SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n")
     (env.source / "dup_b_r36.py").write_text("SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n")
     git(env.source, "add", "big_r36.py", "dup_a_r36.py", "dup_b_r36.py")
-    git(env.source, "commit", "-qm", "two hunks and shared line")
+    git(env.source, "commit", "-qm", "two identical hunks, literal truncated text, and shared line")
     head_sha = git(env.source, "rev-parse", "HEAD")
     lane.gateway.pr["head"]["sha"] = head_sha
 
     target = lane.target(1810, 1)
     patch = module.frozen_patch(env.source, target)
     big_header = "diff --git a/big_r36.py b/big_r36.py"
-    big_spans = [s.id for f in patch.files if f.header == big_header for s in f.spans]
-    assert len(big_spans) == 2
+    big_file = next(f for f in patch.files if f.header == big_header)
+    assert len(big_file.changes) == 8  # 4 deleted + 4 added
 
     cmd_big = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- big_r36.py"
     full_big = git(env.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha, "--", "big_r36.py")
-    # 截断发生在 big_r36.py 首 hunk 之后、次 hunk 之前：必须撤销首 hunk 临时命中，不计任何 span
-    hunk2_pos = full_big.index("HUNK2_SECOND_CHANGE_UNIQUE_R36")
-    mid_trunc = f"Warning: truncated output (original token count: 99999)\n{full_big[:hunk2_pos - 30]}\n…44444 chars truncated…\n"
-    assert covered_candidate_patch_spans(cmd_big, mid_trunc, patch) == frozenset()
 
-    # 即使没有中段截断标记、只呈现首 hunk（如 | head -12），也只覆盖 span 0，缺少 span 1 -> 不能满足全集
-    hunk1_only = full_big[:hunk2_pos - 30]
-    got_hunk1 = covered_candidate_patch_spans(f"{cmd_big} | head -12", hunk1_only, patch)
-    assert got_hunk1 == frozenset({(big_header, 0)})
-    # 用单文件 pathspec + | sed -n 补读后半段（无 diff --git 头）补齐 span 1
-    hunk2_slice = full_big[hunk2_pos - 20:]
-    got_hunk2 = covered_candidate_patch_spans(f"{cmd_big} | sed -n '20,60p'", hunk2_slice, patch)
-    assert got_hunk2 == frozenset({(big_header, 1)})
-    assert set(big_spans).issubset(got_hunk1 | got_hunk2)
+    # 1. 含字面 "123 chars truncated" 的完整单文件 diff 必须 100% 精确覆盖，不得误杀
+    assert covered_candidate_patch_units(cmd_big, full_big, patch) == big_file.changes
 
-    # 2. 多文件无头 grep 命中共享行 -> covered_spans 必须为空，不能同时覆盖 dup_a_r36.py 与 dup_b_r36.py
+    # 2. 缺失大 hunk 中任一行（即使同 hunk 前后行都在、且距离远小于 40 行）-> 不满足全集
+    dropped_one = full_big.replace("+HUNK1_EXTRA_LINE = 'must_not_be_dropped_by_window'\n", "")
+    got_drop = covered_candidate_patch_units(cmd_big, dropped_one, patch)
+    assert (big_header, "+", 4, "HUNK1_EXTRA_LINE = 'must_not_be_dropped_by_window'") not in got_drop
+    assert not big_file.changes.issubset(got_drop)
+
+    # 3. 仅读 hunk 1（即使 hunk 1 与 hunk 2 的 `+` 文本完全一致）绝不覆盖 hunk 2 的行号 111
+    hunk2_hdr_pos = full_big.index("@@ -108,")
+    hunk1_only = full_big[:hunk2_hdr_pos]
+    got_hunk1 = covered_candidate_patch_units(f"{cmd_big} | head -n 16", hunk1_only, patch)
+    assert (big_header, "+", 3, "IDENTICAL_LINE_TWO_HUNKS = 'exact_same_text'") in got_hunk1
+    assert (big_header, "+", 111, "IDENTICAL_LINE_TWO_HUNKS = 'exact_same_text'") not in got_hunk1
+    assert not big_file.changes.issubset(got_hunk1)
+
+    # 4. 单文件 -U0 + nl -ba + sed -n 在首 hunk 内部切断分段补读（第二段首部不含 @@ 头）仍按精确 -U0 行号覆盖全部删除与新增行
+    u0_big = git(env.source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0",
+                 target.merge_base_sha, target.head_sha, "--", "big_r36.py")
+    u0_lines = u0_big.splitlines()
+    numbered_u0 = [f"{idx:6d}\t{line}" for idx, line in enumerate(u0_lines, 1)]
+    mid = next(idx for idx, line in enumerate(u0_lines) if line.startswith("+HUNK1_EXTRA_LINE"))
+    part1 = "\n".join(numbered_u0[:mid]) + "\n"
+    part2 = "\n".join(numbered_u0[mid:]) + "\n"
+    hunk1_tail_only = "\n".join(numbered_u0[mid:mid + 2]) + "\n"
+    cmd_u0_1 = f"git diff --no-ext-diff --no-textconv -U0 {target.merge_base_sha} {target.head_sha} -- big_r36.py | nl -ba | sed -n '1,{mid}p'"
+    cmd_u0_2 = f"git diff --no-ext-diff --no-textconv -U0 {target.merge_base_sha} {target.head_sha} -- big_r36.py | nl -ba | sed -n '{mid + 1},999p'"
+    cov_u0 = covered_candidate_patch_units(cmd_u0_1, part1, patch) | covered_candidate_patch_units(cmd_u0_2, part2, patch)
+    assert cov_u0 == big_file.changes
+    assert len(covered_candidate_patch_units(cmd_u0_2, hunk1_tail_only, patch)) == 2
+
+    # 5. 错误管线顺序（sed 先于 nl -ba，无 @@ 头切片）、双层行号（nl -ba | grep -n）、cat -s、多段 sed、非 -U0 grep、多文件 git show 均拒认
+    cmd_bad_order = f"git diff --no-ext-diff --no-textconv -U0 {target.merge_base_sha} {target.head_sha} -- big_r36.py | sed -n '{mid + 1},{mid + 2}p' | nl -ba"
+    assert covered_candidate_patch_units(cmd_bad_order, hunk1_tail_only, patch) == frozenset()
+    cmd_double_num = f"git show {target.head_sha}:dup_a_r36.py | nl -ba | grep -n SHARED"
+    assert covered_candidate_patch_units(cmd_double_num, "1:     1\tSHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n", patch) == frozenset()
+    cmd_cat_s = f"git show {target.head_sha}:dup_a_r36.py | cat -s"
+    assert covered_candidate_patch_units(cmd_cat_s, "SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n", patch) == frozenset()
+    cmd_multi_sed = f"{cmd_big} | sed -n '1,5p;10,20p'"
+    assert covered_candidate_patch_units(cmd_multi_sed, full_big, patch) == frozenset()
     cmd_grep = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} | grep SHARED_DUPLICATE_LINE_R36"
-    assert covered_candidate_patch_spans(cmd_grep, "+SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n", patch) == frozenset()
+    assert covered_candidate_patch_units(cmd_grep, "+SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n", patch) == frozenset()
+    cmd_multi_blob = f"git show {target.head_sha}:dup_a_r36.py {target.head_sha}:dup_b_r36.py"
+    assert covered_candidate_patch_units(cmd_multi_blob, "SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n", patch) == frozenset()
+
+    # 6. 单文件 git show <head>:<file> | nl -ba | sed -n 精确覆盖该新增文件的 + 行
+    cmd_show_a = f"git show {target.head_sha}:dup_a_r36.py | nl -ba | sed -n '1,5p'"
+    assert covered_candidate_patch_units(
+        cmd_show_a, "     1\tSHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n", patch
+    ) == frozenset({("diff --git a/dup_a_r36.py b/dup_a_r36.py", "+", 1, "SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'")})
 
 
 def test_r36_inconsistent_outcome_reuse_corrupt_ts_and_runs_dir_fsync(lane, env, monkeypatch):

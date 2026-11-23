@@ -2973,7 +2973,45 @@ def test_verify_pass_holds_exclusive_pr_locks_during_check_and_rejects_incomplet
             lane=lane, rows=list,
         ) == 2
         assert json.loads(capsys.readouterr().err)["code"] == "state-unreadable"
+
+    # 8. R37（Astra P2 #3）：outcome.state 缺失或非 success（即使 verdict=PASS 且 publication 看似有效）一律报 not-published-pass
+    for bad_state_out in (
+        {k: v for k, v in orig_outcome.items() if k != "state"},
+        {**orig_outcome, "state": "error"},
+        {**orig_outcome, "state": "failure"},
+    ):
+        (folder / "outcome.json").write_text(json.dumps(bad_state_out))
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "not-published-pass"
     (folder / "outcome.json").write_text(json.dumps(orig_outcome))
+
+
+def test_r37_resume_registered_reuse_planned_attempt_bypasses_exhausted_daily_quota(lane, env, monkeypatch):
+    """R37（Astra P2 #4）：已登记的 reuse_planned=True 未完结 attempt 在日额度已满后续跑时，
+    应保留原 run_id 判定 would_reuse_target，不得因重算新 run_id 把自身误判为同 head 重审而误报 quota-paused。"""
+    from pilot1742 import external_review as ext
+    from pilot1742.delivery import EffectPending
+
+    first = lane.review_pr(1810, 1)
+    assert first["verdict"] == "PASS"
+    _external_review._advance_main(lane, env)
+
+    # 在新 head 上先登记 reuse_planned=True 的 attempt 1（尚未完结、未进入预检退回）
+    target = lane.target(1810, 1)
+    assert target.reuse_planned is True
+
+    # 把日额度设为已耗尽（上限 1；首轮预检已记账 > 1），先证实 admit_quota 会阻断
+    monkeypatch.setenv(ext.DAILY_INPUT_CAP_ENV, "1")
+    with pytest.raises(EffectPending):
+        lane.admit_quota()
+
+    sweep, host, _ = make(lane, run=False)
+    actions = sweep.tick()
+    assert acts(actions, 1810) == ["launch"]
+    assert [(s[0], s[1]) for s in host.spawned] == [(1810, 1)]
 
 
 def test_behind_pr_is_not_reviewed_when_auto_merge_is_off(lane, env):

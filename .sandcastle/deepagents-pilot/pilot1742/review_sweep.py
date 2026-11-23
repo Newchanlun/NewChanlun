@@ -377,7 +377,8 @@ def _check_confirmed_pass_locked(lane: ExternalReview, number: int, *, base: str
                 "reason": f"PR #{number} 最新记录 merge_base ({target.get('merge_base_sha')}) 非当前 base ({base})，须先追平"}
     outcome = latest["outcome"]
     pub = outcome.get("publication") if isinstance(outcome, dict) else None
-    if not isinstance(outcome, dict) or outcome.get("verdict") != "PASS" or not _valid_pass_publication(pub, head):
+    if (not isinstance(outcome, dict) or outcome.get("verdict") != "PASS"
+            or outcome.get("state") != "success" or not _valid_pass_publication(pub, head)):
         return {"ok": False, "code": "not-published-pass", "reason": f"PR #{number} 最新记录缺少完整已发布 PASS 终态"}
     out_target = outcome.get("target")
     identity_fields = (
@@ -773,7 +774,7 @@ class Sweep:
             if (self._needs_model_dispatch(latest)
                     and not (latest["target"].get("reuse_planned")
                              and not (self._run_folder(latest) / PREFLIGHT_ADMITTED_FILE).exists()
-                             and self.lane.would_reuse(pr_target_data))):
+                             and self.lane.would_reuse_target(latest["target"]))):
                 try:
                     self.lane.admit_quota()
                 except EffectPending as error:
