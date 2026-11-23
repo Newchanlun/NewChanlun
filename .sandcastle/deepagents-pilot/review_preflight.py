@@ -631,7 +631,7 @@ def review_route_from_host_receipt(directory: str, launch: str, session: str, si
 def probe_model(args, model: str, key: str, deadline: Deadline, cleanup_out: list[str] | None = None) -> list[dict]:
     seal_url = getattr(args, "review_seal_url", None)
     if seal_url:
-        launch = f"review-{uuid.uuid4()}"
+        launch = f"review-preflight-{uuid.uuid4()}"
         session = str(uuid.uuid4())
     else:
         launch = None

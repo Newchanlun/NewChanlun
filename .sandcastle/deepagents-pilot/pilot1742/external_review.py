@@ -1577,14 +1577,14 @@ class ExternalReview:
         path = self._rereview_intent_path(target.repository_id, target.pr_number, target.base_sha, target.head_sha)
         with self._pr_lock(target.pr_number):
             prev_max = 0
-            for existing in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
+            for run_dir in self._iter_pr_run_dirs(target.pr_number):
                 try:
-                    prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
+                    prev_max = max(prev_max, _strict_pos_int(_read(run_dir / "target.json").get("registered_at_ns")))
                 except (OSError, ValueError, TypeError, IdentityError):
                     continue
             if path.exists():
                 try:
-                    prev_max = max(prev_max, int(_read(path).get("recorded_at_ns", 0)))
+                    prev_max = max(prev_max, _strict_pos_int(_read(path).get("recorded_at_ns")))
                 except (OSError, ValueError, TypeError, IdentityError):
                     pass
             recorded_at_ns = max(time.time_ns(), prev_max + 1)
@@ -1690,6 +1690,21 @@ class ExternalReview:
                 return True
         return False
 
+    def _attempt_occupied(self, target: ReviewTarget, attempt: int) -> bool:
+        """显式检查同一 (repo, pr, base, head, attempt) 是否已被其他合同目录占用；目录不可读时上抛失败闭合。"""
+        prefix = f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-"
+        suffix = f"-a{attempt}"
+        for run_dir in self._iter_pr_run_dirs(target.pr_number):
+            if not (run_dir.name.startswith(prefix) and run_dir.name.endswith(suffix)):
+                continue
+            try:
+                os.lstat(run_dir / "target.json")
+                return True
+            except FileNotFoundError:
+                os.listdir(run_dir)
+                continue
+        return False
+
     def target(self, number: int, attempt: int, *,
                expect_head: str | None = None, expect_base: str | None = None,
                reject_draft: bool = False) -> ReviewTarget:
@@ -1714,25 +1729,40 @@ class ExternalReview:
                     if previous.review_contract != target.review_contract:
                         raise IdentityError("审查合同已变更，请用新 attempt 保留旧证据")
                     return previous
-                used = (self.state_root / "runs").glob(
-                    f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
-                if any(used):
+                if self._attempt_occupied(target, attempt):
                     raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
-                # 若同一 (pr, base, head) 已有非 STALE 的先前 run（如 A1 已 PASS 而人工启动 A2 重审），
-                # 在预检前持久化重审意图，防预检失败退出后下轮 sweep 仍凭旧 PASS 自动合入；
-                # 只扫同 (repo, pr, base, head) 目录，损坏的历史记录不阻断新登记。
+                # 若同一 (pr, base, head) 已有非 STALE（或不可遍历/损坏无法确认）的先前 run（如 A1 已 PASS
+                # 而人工启动 A2 重审），在预检前显式枚举并持久化重审意图，防 Path.glob 静默跳过失权 A1 目录
+                # 导致预检失败后恢复权限时 verify-pass 再次认可旧 PASS。
+                same_prefix = f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-"
                 prior_same = False
-                for p in (self.state_root / "runs").glob(
-                    f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*/target.json"
-                ):
-                    out_path = p.with_name("outcome.json")
-                    if not out_path.exists():
+                for run_dir in self._iter_pr_run_dirs(target.pr_number):
+                    if run_dir == folder or not run_dir.name.startswith(same_prefix):
+                        continue
+                    target_path = run_dir / "target.json"
+                    try:
+                        _read(target_path)
+                    except FileNotFoundError:
+                        try:
+                            entries = os.listdir(run_dir)
+                        except OSError:
+                            prior_same = True
+                            break
+                        if any(name != "owner.lock" and not name.endswith(".tmp") for name in entries):
+                            prior_same = True
+                            break
+                        continue
+                    except (OSError, ValueError, TypeError, IdentityError):
                         prior_same = True
                         break
+                    out_path = run_dir / "outcome.json"
                     try:
                         if _read(out_path).get("verdict") != "STALE":
                             prior_same = True
                             break
+                    except FileNotFoundError:
+                        prior_same = True
+                        break
                     except (OSError, ValueError, TypeError, IdentityError):
                         prior_same = True
                         break
@@ -1752,19 +1782,17 @@ class ExternalReview:
                         raise TargetDrifted(f"head-moved-not-reviewed: expected {target.head_sha}, got {live_target['head_sha']}")
                     if live_target["base_sha"] != target.base_sha:
                         raise TargetDrifted(f"base-moved-not-reviewed: expected {target.base_sha}, got {live_target['base_sha']}")
-                    used = (self.state_root / "runs").glob(
-                        f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
-                    if any(used):
+                    if self._attempt_occupied(target, attempt):
                         raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
                     prev_max = intent_recorded_ns
-                    for existing in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
+                    for run_dir in self._iter_pr_run_dirs(target.pr_number):
                         try:
-                            prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
+                            prev_max = max(prev_max, _strict_pos_int(_read(run_dir / "target.json").get("registered_at_ns")))
                         except (OSError, ValueError, TypeError, IdentityError):
                             continue
                     for intent_file in self._iter_rereview_intents(f"r*-p{target.pr_number}-*-{target.head_sha}.json"):
                         try:
-                            prev_max = max(prev_max, int(_read(intent_file).get("recorded_at_ns", 0)))
+                            prev_max = max(prev_max, _strict_pos_int(_read(intent_file).get("recorded_at_ns")))
                         except (OSError, ValueError, TypeError, IdentityError):
                             pass
                     target = replace(target, registered_at_ns=max(time.time_ns(), prev_max + 1))
@@ -2774,6 +2802,44 @@ class ExternalReview:
                 _save(folder / "outcome.json", refused)  # 已写下的迁移结论作废，磁盘回到 STALE
                 return refused
 
+    @staticmethod
+    def _validate_run_identity(dir_name: str, number: int, target: dict, outcome: dict | None) -> None:
+        """核对 run 目录键、target.json 自身 PR/仓库身份与 outcome.target 一致；放错目录或篡改身份一律抛 IdentityError。"""
+        pr_no = target.get("pr_number")
+        repo_id = target.get("repository_id")
+        base_repo = target.get("base_repository_id")
+        head_repo = target.get("head_repository_id")
+        attempt = target.get("attempt")
+        base_sha = target.get("base_sha")
+        head_sha = target.get("head_sha")
+        policy = target.get("policy_version")
+        if (type(pr_no) is not int or pr_no != number
+                or type(repo_id) is not int or repo_id <= 0
+                or type(base_repo) is not int or base_repo != repo_id
+                or type(head_repo) is not int or head_repo != repo_id
+                or type(attempt) is not int or attempt <= 0
+                or not isinstance(base_sha, str) or not base_sha
+                or not isinstance(head_sha, str) or not head_sha
+                or not isinstance(policy, str) or not policy):
+            raise IdentityError(f"run target 身份字段不合法：{dir_name}")
+        expected_key = f"r{repo_id}-p{pr_no}-{base_sha}-{head_sha}-{policy}-a{attempt}"
+        if dir_name != expected_key:
+            raise IdentityError(f"run 目录键与 target 身份不符：{dir_name} != {expected_key}")
+        if outcome is not None and "target" in outcome:
+            out_target = outcome.get("target")
+            if not isinstance(out_target, dict):
+                raise IdentityError(f"outcome.target 类型不合法：{dir_name}")
+            identity_fields = (
+                "repository_id", "pr_number", "base_repository_id", "base_ref", "base_sha",
+                "head_repository_id", "head_ref", "head_sha", "merge_base_sha", "run_id",
+                "attempt", "policy_version", "review_contract", "registered_at_ns",
+            )
+            for field in identity_fields:
+                v_t = target.get(field)
+                v_o = out_target.get(field)
+                if type(v_t) is not type(v_o) or v_t != v_o:
+                    raise IdentityError(f"outcome.target.{field} 与 target.json 不符：{dir_name}")
+
     def status(self, number: int) -> list[dict]:
         if number <= 0:
             raise ValueError("PR 号必须是正整数")
@@ -2792,6 +2858,7 @@ class ExternalReview:
                 outcome: dict | None = _read(outcome_path)
             except FileNotFoundError:
                 outcome = None
+            self._validate_run_identity(run_dir.name, number, target, outcome)
             rows.append({"target": target, "outcome": outcome})
         return rows
 

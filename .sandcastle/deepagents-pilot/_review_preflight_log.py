@@ -21,7 +21,7 @@ def route_from_log(log_dir: Path, session: str, since: float, wait: float) -> li
 SCHEMA = "cliproxy-preflight-v1"
 REVIEW_SCHEMA = "cliproxy-review-v1"
 SESSION = re.compile(r"preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-REVIEW_LAUNCH = re.compile(r"review-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+REVIEW_LAUNCH = re.compile(r"review-(?:preflight-)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 REVIEW_SESSION = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astra@chatgpt.com",
                             "kimi@api.kimi.com", "kimi-ai@api.kimi.ai", "claude@api.anthropic.com",

@@ -87,10 +87,12 @@ from .external_review import (
     PREFLIGHT_ADMITTED_FILE,
     PREFLIGHT_RATE_LIMIT_FILE,
     QUOTA_PAUSED_FILE,
+    REPOSITORY_ID,
     REVIEW_CONTRACT,
     STATE_ROOT,
     ExternalReview,
     _git,
+    _strict_pos_int,
     git_environment,
 )
 from .run import _ps_rows
@@ -310,10 +312,13 @@ def _is_current_contract(target: dict[str, Any]) -> bool:
 
 
 def _latest_for_head(lane: ExternalReview, number: int, head: str) -> dict[str, Any] | None:
-    """生产端、只读读取端与显式接手入口共用的目标选择：在当前 (pr, head) 下按 registered_at_ns 取最新未作废 attempt。"""
+    """生产端、只读读取端与显式接手入口共用的目标选择：在当前 (pr, head) 下按 registered_at_ns 取最新未作废 attempt。
+    排序前先校验全部同 head 记录的 registered_at_ns 均为严格正整数，任何一条无效即抛 ValueError 供上层失败闭合。"""
     runs = [row for row in lane.status(number) if row["target"].get("head_sha") == head]
+    for row in runs:
+        _strict_pos_int(row["target"].get("registered_at_ns"))
     non_stale = [r for r in runs if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
-    return max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
+    return max(non_stale, key=lambda r: _strict_pos_int(r["target"].get("registered_at_ns"))) if non_stale else None
 
 
 def _confirmed_published_pass(lane: ExternalReview, number: int, head: str, base: str) -> bool:
@@ -354,6 +359,13 @@ def _check_confirmed_pass_locked(lane: ExternalReview, number: int, *, base: str
     if latest is None:
         return {"ok": False, "code": "no-review", "reason": f"PR #{number} 在 {head[:12]} 上缺少有效审查记录"}
     target = latest["target"]
+    expected_repo_id = lane.gateway.client.identity.repository_id if lane.gateway is not None else REPOSITORY_ID
+    if (type(target.get("pr_number")) is not int or target.get("pr_number") != number
+            or type(target.get("repository_id")) is not int or target.get("repository_id") != expected_repo_id
+            or type(target.get("base_repository_id")) is not int or target.get("base_repository_id") != expected_repo_id
+            or type(target.get("head_repository_id")) is not int or target.get("head_repository_id") != expected_repo_id
+            or target.get("base_ref") != "main"):
+        return {"ok": False, "code": "state-unreadable", "reason": f"PR #{number} 本地 target 仓库/PR 身份不符"}
     if not _is_current_contract(target):
         return {"ok": False, "code": "legacy-contract",
                 "reason": f"PR #{number} 最新记录属旧合同 {target.get('policy_version')}，非当前合同 {POLICY}"}
@@ -367,6 +379,16 @@ def _check_confirmed_pass_locked(lane: ExternalReview, number: int, *, base: str
     pub = outcome.get("publication") if isinstance(outcome, dict) else None
     if not isinstance(outcome, dict) or outcome.get("verdict") != "PASS" or not _valid_pass_publication(pub, head):
         return {"ok": False, "code": "not-published-pass", "reason": f"PR #{number} 最新记录缺少完整已发布 PASS 终态"}
+    out_target = outcome.get("target")
+    identity_fields = (
+        "repository_id", "pr_number", "base_repository_id", "base_ref", "base_sha",
+        "head_repository_id", "head_ref", "head_sha", "merge_base_sha", "run_id",
+        "attempt", "policy_version", "review_contract", "registered_at_ns",
+    )
+    if (not isinstance(out_target, dict)
+            or any(type(out_target.get(f)) is not type(target.get(f)) or out_target.get(f) != target.get(f)
+                   for f in identity_fields)):
+        return {"ok": False, "code": "state-unreadable", "reason": f"PR #{number} outcome.target 缺失或与 target.json 不符"}
     target_run = target.get("run_id")
     outcome_run = outcome.get("run_id")
     if target_run and outcome_run and target_run != outcome_run:

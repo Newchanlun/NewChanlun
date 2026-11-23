@@ -1339,6 +1339,7 @@ def test_formal_review_seal_url_proves_same_proxy_and_blocks_mismatched_seal_hos
         assert by_name_ok[f"roundtrip:{SOL}"]["ok"] is True
         assert by_name_ok[f"seal:{SOL}"]["ok"] is True
         assert by_name_ok[f"route:{SOL}"]["ok"] is True and by_name_ok[f"route:{SOL}"]["detail"]["sealed"] is True
+        assert seen_launches and all(k.startswith("review-preflight-") for k in seen_launches)
 
         # 封存端点指向另一实例：seal 409 rejected，整项预检拦截
         args_bad = SimpleNamespace(proxy_url=same_url, review_seal_url=other_url,

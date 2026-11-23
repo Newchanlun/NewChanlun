@@ -1752,13 +1752,14 @@ def test_interleave_outcome_with_unfinished_dispatched_reviewer_never_counts_as_
 
 
 def test_prepared_but_never_dispatched_reviewer_does_not_keep_run_unsettled(lane):
-    first = lane.review_pr(1810)
+    from dataclasses import asdict
+    lane.review_pr(1810)
     second = lane.target(1810, 2)
     folder = lane.state_root / "runs" / second.key
     (folder / MODELS[0]).mkdir(parents=True)
     (folder / MODELS[0] / "prepare.json").write_text(json.dumps({"run_id": second.run_id}))
     (folder / "outcome.json").write_text(json.dumps({"run_id": second.run_id, "verdict": "FAILED", "state": "error",
-        "target": first["target"], "reviews": [{"model": MODELS[0], "verdict": "FAILED"}]}))
+        "target": asdict(second), "reviews": [{"model": MODELS[0], "verdict": "FAILED"}]}))
     row = next(r for r in lane.status(1810) if r["target"]["run_id"] == second.run_id)
     assert lane._settled(row)  # 未派发的 prepare 不让 run 永远处于未完结
     _dispatched_without_receipt(folder, MODELS[1], second.run_id)
@@ -3901,3 +3902,31 @@ def test_reuse_fallback_rechecks_draft_before_publishing_pending(lane, monkeypat
     result = lane.review_pr(1810, 2, reject_draft=True)
     assert result["verdict"] == "STALE"
     assert lane.gateway.sent == []
+
+
+def test_target_unreadable_prior_run_still_records_rereview_intent(lane):
+    """R34（Astra P1）：A1 已发布 PASS 的目录暂时不可遍历（0o000）时，启动 A2 仍须在预检前写下重审意图；
+    即使 A2 随后预检失败、A1 恢复权限，has_pending_rereview_intent 仍返回 True，绝不再次认可 A1。
+    runs 根目录本身不可遍历时直接抛 PermissionError 拒继续。"""
+    import os
+
+    t1 = lane.target(1810, 1)
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    run1 = lane.state_root / "runs" / t1.key
+    lane.preflight = lambda t: {"returncode": 2, "report": {"kind": "review-preflight", "is_review_result": False, "ready": False, "checks": []}}
+
+    os.chmod(run1, 0o000)
+    try:
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 2)
+    finally:
+        os.chmod(run1, 0o700)
+    assert lane.has_pending_rereview_intent(1810, t1.head_sha, t1.base_sha) is True
+
+    runs_root = lane.state_root / "runs"
+    os.chmod(runs_root, 0o000)
+    try:
+        with pytest.raises(PermissionError):
+            lane.target(1810, 2)
+    finally:
+        os.chmod(runs_root, 0o700)

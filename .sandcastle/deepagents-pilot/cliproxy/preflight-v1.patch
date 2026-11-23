@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..a3bcabb 100644
+index e69de29..9984bb1 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1984 @@
+@@ -0,0 +1,1997 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3072,7 +3072,7 @@ index e69de29..a3bcabb 100644
 +var ErrUnavailable = errors.New("preflight evidence unavailable")
 +var errReviewSealed = errors.New("review receipt sealed or sealing")
 +var sessionPattern = regexp.MustCompile(`^preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-+var reviewLaunchPattern = regexp.MustCompile(`^review-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
++var reviewLaunchPattern = regexp.MustCompile(`^review-(?:preflight-)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 +var reviewSessionPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 +
 +func ValidReviewLaunch(launch string) bool {
@@ -4194,7 +4194,7 @@ index e69de29..a3bcabb 100644
 +			finishSeal(true)
 +			return SealUnavailable
 +		}
-+		// Step 3: receipt.json (sealed=true) is durably synced on disk; remove seal.pending to commit the seal.
++		// Step 3: receipt.json (sealed=true) is durably synced on disk; remove seal.pending and sync dir to commit the seal.
 +		if err := os.Remove(sealPendingPath); err != nil {
 +			entry.sealed = false
 +			entry.sealedAt = 0
@@ -4203,7 +4203,20 @@ index e69de29..a3bcabb 100644
 +			finishSeal(true)
 +			return SealUnavailable
 +		}
-+		_ = syncDirFn(entry.directory)
++		if err := syncDirFn(entry.directory); err != nil {
++			entry.sealed = false
++			entry.sealedAt = 0
++			// Re-arm seal.pending (best-effort) and taint/invalidate receipt.json so neither a live reader
++			// nor post-restart recovery can accept a seal whose final commit dir-sync failed.
++			if pf, pErr := os.OpenFile(sealPendingPath, os.O_CREATE|os.O_WRONLY, 0600); pErr == nil {
++				_ = pf.Sync()
++				_ = pf.Close()
++			}
++			entry.taintAndPersistLocked()
++			entry.mu.Unlock()
++			finishSeal(true)
++			return SealUnavailable
++		}
 +		entry.mu.Unlock()
 +		finishSeal(true)
 +		return SealOK
@@ -5013,10 +5026,10 @@ index e69de29..a3bcabb 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..46dcc4d 100644
+index e69de29..58c8c19 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2150 @@
+@@ -0,0 +1,2235 @@
 +package preflightreceipt
 +
 +import (
@@ -7165,5 +7178,90 @@ index e69de29..46dcc4d 100644
 +	}
 +	if _, _, err := BeginReview(context.Background(), root2, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("post-restart BeginReview after failed seal err = %v, want ErrUnavailable", err)
++	}
++
++	// 3. R34 (Sol P1 + Astra P1): Step 1 (seal.pending create sync) and Step 2 (receipt.json sealed=true sync)
++	// BOTH succeed, and ONLY the Step 3 final dir sync after removing seal.pending fails.
++	// SealReview MUST NOT return SealOK; both live state and post-restart recovery (including if power loss
++	// resurrects seal.pending next to sealed=true) MUST reject.
++	syncDirFn = origSync
++	root3 := filepath.Join(t.TempDir(), "receipts3")
++	launch3 := "review-preflight-eeee1111-2222-4333-8444-555555555962"
++	session3 := "019d0000-0000-7000-8000-000000000962"
++	if !ValidReviewLaunch(launch3) {
++		t.Fatalf("ValidReviewLaunch(%q) = false, want true", launch3)
++	}
++	ctx3, c3, err := BeginReview(context.Background(), root3, launch3, session3, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx3, e3, err := c3.Start(ctx3, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl3 := httptransport.Decorate(ctx3, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	req3, _ := http.NewRequestWithContext(ctx3, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp3, err := cl3.Do(req3)
++	if err != nil {
++		t.Fatal(err)
++	}
++	c3.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	_, _ = io.Copy(io.Discard, resp3.Body)
++	_ = resp3.Body.Close()
++	e3.End()
++	c3.Complete(true)
++	c3.HandlerDone(true)
++
++	launchDir3 := filepath.Join(root3, launch3)
++	step3SyncCalls := 0
++	var capturedSealed3 []byte
++	syncDirFn = func(dir string) error {
++		if dir == launchDir3 {
++			step3SyncCalls++
++			if step3SyncCalls <= 2 {
++				// Step 1 (seal.pending create) & Step 2 (receipt.json sealed=true rename) both succeed.
++				if step3SyncCalls == 2 {
++					if raw, readErr := os.ReadFile(filepath.Join(launchDir3, "receipt.json")); readErr == nil {
++						capturedSealed3 = raw
++					}
++				}
++				return origSync(dir)
++			}
++			// Step 3 (post-remove seal.pending final commit sync) fails.
++			return errors.New("injected step3 commit dir sync error")
++		}
++		return origSync(dir)
++	}
++	if st := SealReview(root3, launch3, session3); st != SealUnavailable {
++		t.Fatalf("SealReview with Step 3 commit dir sync failure = %v, want SealUnavailable", st)
++	}
++	if step3SyncCalls < 3 || len(capturedSealed3) == 0 || !strings.Contains(string(capturedSealed3), `"sealed":true`) {
++		t.Fatalf("expected Steps 1&2 to succeed and fail on Step 3 (calls=%d)", step3SyncCalls)
++	}
++	if st := SealReview(root3, launch3, session3); st != SealRejected {
++		t.Fatalf("repeat in-process SealReview after Step 3 sync failure = %v, want SealRejected", st)
++	}
++	if _, _, err := BeginReview(context.Background(), root3, launch3, session3, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("in-process BeginReview after Step 3 sync failure = %v, want ErrUnavailable", err)
++	}
++	// Post-restart with actual post-rollback disk state rejects.
++	syncDirFn = origSync
++	reviewMu.Lock()
++	delete(reviewLedger, root3+"\x00"+launch3)
++	reviewMu.Unlock()
++	if st := SealReview(root3, launch3, session3); st != SealRejected {
++		t.Fatalf("post-restart SealReview after Step 3 sync failure = %v, want SealRejected", st)
++	}
++	// Post-restart simulating power loss where seal.pending reappears beside sealed=true receipt.json also rejects.
++	if err := os.WriteFile(filepath.Join(launchDir3, "receipt.json"), capturedSealed3, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(launchDir3, "seal.pending"), nil, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st := SealReview(root3, launch3, session3); st != SealRejected {
++		t.Fatalf("post-restart SealReview with resurrected seal.pending = %v, want SealRejected", st)
 +	}
 +}

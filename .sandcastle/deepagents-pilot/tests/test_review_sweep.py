@@ -336,8 +336,10 @@ def test_auto_merge_blocks_old_success_while_newer_gpt_attempt_is_pending(lane, 
     assert github.calls == []
 
     # 3. 直到 A2 完结并发布 PASS 后才不再 waiting，因服务端不支持 expected_base_ref 转人工确认且不发起自动合入
+    from dataclasses import asdict
     new_folder = lane.state_root / "runs" / new_target.key
     (new_folder / "outcome.json").write_text(json.dumps({
+        "run_id": new_target.run_id, "target": asdict(new_target),
         "verdict": "PASS", "state": "success", "publication": {"id": 2, "state": "success", "sha": head},
     }))
     actions3 = sweep.tick()
@@ -2932,6 +2934,46 @@ def test_verify_pass_holds_exclusive_pr_locks_during_check_and_rejects_incomplet
         assert json.loads(capsys.readouterr().err)["code"] == "state-unreadable"
     finally:
         os.chmod(run2, 0o700)
+
+    # 6. R34（Astra P1）：A2 的 registered_at_ns 损坏为 false 或 0 时，verify-pass 不得据此回落认可旧 A1，须报 state-unreadable
+    t2_path = run2 / "target.json"
+    orig_t2 = json.loads(t2_path.read_text())
+    for bad_ts in (False, 0, -1, "999"):
+        t2_path.write_text(json.dumps({**orig_t2, "registered_at_ns": bad_ts}))
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "state-unreadable"
+    import shutil
+    shutil.rmtree(run2)
+
+    # 7. R34（Sol P1）：目录键/target.json 的 PR/仓库身份不符或 outcome.target 缺失/篡改时，一律报 state-unreadable
+    orig_t1 = json.loads((folder / "target.json").read_text())
+    for tampered_t in (
+        {**orig_t1, "pr_number": 9999},
+        {**orig_t1, "repository_id": 999999},
+    ):
+        (folder / "target.json").write_text(json.dumps(tampered_t))
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "state-unreadable"
+    (folder / "target.json").write_text(json.dumps(orig_t1))
+
+    for bad_out in (
+        {k: v for k, v in orig_outcome.items() if k != "target"},
+        {**orig_outcome, "target": {**orig_t1, "pr_number": 9999}},
+        {**orig_outcome, "target": {**orig_t1, "repository_id": 999999}},
+    ):
+        (folder / "outcome.json").write_text(json.dumps(bad_out))
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "state-unreadable"
+    (folder / "outcome.json").write_text(json.dumps(orig_outcome))
 
 
 def test_behind_pr_is_not_reviewed_when_auto_merge_is_off(lane, env):
