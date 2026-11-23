@@ -160,11 +160,7 @@ fn tb1604_tail_window_ge3_equals_unbounded_and_tw1_is_marked() {
                         let f0 = semantic(f0);
                         for (k, (tw, pc)) in pcs.iter().enumerate() {
                             let (s, p, f) = segment::divide_segments_with_facts(ss, pc);
-                            assert_eq!(
-                                (&s, p),
-                                (&s0, p0),
-                                "#{i}: tw={tw} 段与尾部须与 ∞ 逐位相同"
-                            );
+                            assert_eq!((&s, p), (&s0, p0), "#{i}: tw={tw} 段与尾部须与 ∞ 逐位相同");
                             let f_sem = semantic(f);
                             if f_sem != f0 {
                                 let (d, trace) = json_diff(&f_sem, &f0);
