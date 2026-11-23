@@ -814,11 +814,15 @@ def _split_files(diff: str) -> tuple[list[_SplitRow], list[tuple[int, ChangeUnit
             elif norm_meta.startswith(("rename to ", "copy to ")):
                 new_p = norm_meta.split(" ", 2)[2]
             files[-1] = (cur[0], cur[1], old_p, new_p, cur[4], cur[5], cur[6], cur[7])
-            meta_unit: ChangeUnit = (cur[0], "M", 0, norm_meta)
-            cur[5].append(meta_unit)
-            if not _BREAK.search(line):
-                cur[6].append((global_ln - cur[7] + 1, meta_unit))
-                u0_global.append((global_ln, meta_unit))
+            if norm_meta.startswith("Binary files "):
+                # 未展开二进制 blob 内容无法靠默认文本 diff 证明已审阅，记为 BIN 必读项且永不自动匹配（PASS 失败闭合）
+                cur[5].append((cur[0], "BIN", 0, norm_meta))
+            else:
+                meta_unit: ChangeUnit = (cur[0], "M", 0, norm_meta)
+                cur[5].append(meta_unit)
+                if not _BREAK.search(line):
+                    cur[6].append((global_ln - cur[7] + 1, meta_unit))
+                    u0_global.append((global_ln, meta_unit))
     return files, u0_global
 
 

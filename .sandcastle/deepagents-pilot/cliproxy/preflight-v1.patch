@@ -1,12 +1,13 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..2b8a7a8 100644
+index e69de29..c674b91 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,138 @@
 +package middleware
 +
 +import (
 +	"context"
++	"errors"
 +	"net/http"
 +	"os"
 +	"strings"
@@ -56,13 +57,43 @@ index e69de29..2b8a7a8 100644
 +				c.AbortWithStatus(http.StatusBadRequest)
 +				return
 +			}
++			turnDeadline := time.Now().Add(preflightreceipt.ReviewTurnTimeout)
++			turnCtx, turnCancel := context.WithDeadline(c.Request.Context(), turnDeadline)
++			defer turnCancel()
++			c.Request = c.Request.WithContext(turnCtx)
++
++			bodyDeadline := time.Now().Add(preflightreceipt.ReviewBodyReadTimeout)
++			if bodyDeadline.After(turnDeadline) {
++				bodyDeadline = turnDeadline
++			}
++			rc := http.NewResponseController(c.Writer)
++			deadlineErr := rc.SetReadDeadline(bodyDeadline)
++			var bodyTimer *time.Timer
++			if deadlineErr != nil && c.Request.Body != nil {
++				// Non-TCP writers (e.g. httptest.ResponseRecorder) do not implement SetReadDeadline;
++				// close the body on expiry so stalled custom streams still unblock and release res.
++				body := c.Request.Body
++				bodyTimer = time.AfterFunc(time.Until(bodyDeadline), func() {
++					_ = body.Close()
++				})
++			}
 +			requestedModel, ok := preflightreceipt.ExtractInboundReviewModel(c.Request)
++			if bodyTimer != nil {
++				bodyTimer.Stop()
++			}
 +			if !ok {
 +				res.Taint()
-+				c.AbortWithStatus(http.StatusBadRequest)
++				c.Header("Connection", "close")
++				if errors.Is(turnCtx.Err(), context.DeadlineExceeded) || time.Now().After(bodyDeadline) {
++					c.AbortWithStatus(http.StatusRequestTimeout)
++				} else {
++					c.AbortWithStatus(http.StatusBadRequest)
++				}
 +				return
 +			}
-+			ctx, collector, err = preflightreceipt.BeginReviewReserved(c.Request.Context(), res, session, requestedModel)
++			_ = rc.SetReadDeadline(time.Time{})
++			_ = rc.SetWriteDeadline(turnDeadline)
++			ctx, collector, err = preflightreceipt.BeginReviewReserved(turnCtx, res, session, requestedModel)
 +			if err != nil {
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
 +				return
@@ -108,6 +139,180 @@ index e69de29..2b8a7a8 100644
 +		default:
 +			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"status": "rejected"})
 +		}
++	}
++}
+diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
+new file mode 100644
+index 0000000..023455e
+--- /dev/null
++++ b/internal/api/middleware/preflight_receipt_test.go
+@@ -0,0 +1,168 @@
++package middleware
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"errors"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++func TestPreflightReceiptReviewBodyTimeoutReleasesReservation(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	root := t.TempDir()
++	if err := os.Chmod(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++
++	origBodyTimeout := preflightreceipt.ReviewBodyReadTimeout
++	origTurnTimeout := preflightreceipt.ReviewTurnTimeout
++	preflightreceipt.ReviewBodyReadTimeout = 150 * time.Millisecond
++	preflightreceipt.ReviewTurnTimeout = 5 * time.Second
++	defer func() {
++		preflightreceipt.ReviewBodyReadTimeout = origBodyTimeout
++		preflightreceipt.ReviewTurnTimeout = origTurnTimeout
++	}()
++
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		c.Status(http.StatusOK)
++	})
++	srv := httptest.NewServer(engine)
++	defer srv.Close()
++
++	launch := "review-12345678-1234-4234-8234-123456789401"
++	session := "019d0000-0000-7000-8000-000000000401"
++
++	// Open a raw TCP connection, send headers promising a 200-byte body, then stall without sending the body.
++	conn, err := net.DialTimeout("tcp", srv.Listener.Addr().String(), 2*time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	rawReq := "POST /v1/responses HTTP/1.1\r\n" +
++		"Host: " + srv.Listener.Addr().String() + "\r\n" +
++		"Content-Type: application/json\r\n" +
++		"Content-Length: 200\r\n" +
++		"Session-Id: " + session + "\r\n" +
++		preflightreceipt.ReviewHeader + ": " + launch + "\r\n\r\n" +
++		`{"model":"gpt-6.2-sol"`
++	if _, err := conn.Write([]byte(rawReq)); err != nil {
++		t.Fatal(err)
++	}
++	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
++	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
++	if err != nil {
++		t.Fatalf("expected timeout HTTP response from server, got err: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	if resp.StatusCode != http.StatusRequestTimeout {
++		t.Fatalf("status = %d, want %d (408 Request Timeout)", resp.StatusCode, http.StatusRequestTimeout)
++	}
++
++	// Reservation MUST have been released (SealReview must NOT report SealInFlight) and launch tainted.
++	deadline := time.Now().Add(2 * time.Second)
++	for {
++		st := preflightreceipt.SealReview(root, launch, session)
++		if st == preflightreceipt.SealRejected {
++			break
++		}
++		if st != preflightreceipt.SealInFlight || time.Now().After(deadline) {
++			t.Fatalf("SealReview after body read timeout = %v, want SealRejected (reservation released)", st)
++		}
++		time.Sleep(15 * time.Millisecond)
++	}
++}
++
++func TestPreflightReceiptReviewTurnTimeoutReleasesReservation(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	root := t.TempDir()
++	if err := os.Chmod(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++
++	origBodyTimeout := preflightreceipt.ReviewBodyReadTimeout
++	origTurnTimeout := preflightreceipt.ReviewTurnTimeout
++	preflightreceipt.ReviewBodyReadTimeout = 2 * time.Second
++	preflightreceipt.ReviewTurnTimeout = 150 * time.Millisecond
++	defer func() {
++		preflightreceipt.ReviewBodyReadTimeout = origBodyTimeout
++		preflightreceipt.ReviewTurnTimeout = origTurnTimeout
++	}()
++
++	handlerCanceled := make(chan error, 1)
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		col := preflightreceipt.From(c.Request.Context())
++		if col == nil {
++			handlerCanceled <- errors.New("missing collector in review context")
++			c.Status(http.StatusInternalServerError)
++			return
++		}
++		<-c.Request.Context().Done()
++		handlerCanceled <- c.Request.Context().Err()
++		col.Complete(false)
++		c.Status(http.StatusGatewayTimeout)
++	})
++	srv := httptest.NewServer(engine)
++	defer srv.Close()
++
++	launch := "review-12345678-1234-4234-8234-123456789402"
++	session := "019d0000-0000-7000-8000-000000000402"
++	body := `{"model":"gpt-6.2-sol","stream":true}`
++	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/responses", bytes.NewBufferString(body))
++	if err != nil {
++		t.Fatal(err)
++	}
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("Session-Id", session)
++	req.Header.Set(preflightreceipt.ReviewHeader, launch)
++
++	client := &http.Client{Timeout: 3 * time.Second}
++	resp, err := client.Do(req)
++	if err != nil {
++		if !strings.Contains(err.Error(), "EOF") && !errors.Is(err, context.DeadlineExceeded) {
++			t.Fatalf("unexpected client err: %v", err)
++		}
++	} else {
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++	}
++
++	select {
++	case cerr := <-handlerCanceled:
++		if !errors.Is(cerr, context.DeadlineExceeded) {
++			t.Fatalf("handler ctx err = %v, want context.DeadlineExceeded", cerr)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("downstream review handler context was not canceled by ReviewTurnTimeout")
++	}
++
++	// Reservation MUST be released so SealReview does not remain stuck at SealInFlight.
++	deadline := time.Now().Add(2 * time.Second)
++	for {
++		st := preflightreceipt.SealReview(root, launch, session)
++		if st == preflightreceipt.SealRejected {
++			break
++		}
++		if st != preflightreceipt.SealInFlight || time.Now().After(deadline) {
++			t.Fatalf("SealReview after turn timeout = %v, want SealRejected (reservation released)", st)
++		}
++		time.Sleep(15 * time.Millisecond)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -3024,10 +3229,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..4923e52 100644
+index e69de29..2c0db13 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1985 @@
+@@ -0,0 +1,1992 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3063,6 +3268,13 @@ index e69de29..4923e52 100644
 +const MaxAttempts = 64
 +const Lifetime = 50 * time.Second
 +const ReviewTurnLifetime = 30 * time.Minute
++
++// ReviewTurnTimeout and ReviewBodyReadTimeout bound formal review turns and inbound body reads.
++// Exposed as package vars so middleware tests can exercise real timeout release without waiting 30 minutes.
++var (
++	ReviewTurnTimeout     = ReviewTurnLifetime
++	ReviewBodyReadTimeout = 30 * time.Second
++)
 +const maxOutboundModelBody = 32 << 20
 +const maxReviewResponseIDs = 512
 +const maxReviewReceiptBytes = 65536
@@ -4264,7 +4476,7 @@ index e69de29..4923e52 100644
 +
 +	c := &Collector{
 +		directory:     entry.directory,
-+		deadline:      now.Add(ReviewTurnLifetime),
++		deadline:      now.Add(ReviewTurnTimeout),
 +		strictCodex:   true,
 +		expectedModel: requestedModel,
 +		review:        entry,

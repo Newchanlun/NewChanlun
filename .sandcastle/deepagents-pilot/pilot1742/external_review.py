@@ -18,6 +18,7 @@ import fcntl
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -1162,8 +1163,10 @@ class ExternalReview:
                                     if ok_exit:
                                         if any(reads_candidate_patch(c, out_body, patch) for c in call_cmds):
                                             sess_patch_reads += 1
-                                        for c in call_cmds:
-                                            sess_covered_units.update(covered_candidate_patch_units(c, out_body, patch))
+                                        if len(call_cmds) == 1:
+                                            sess_covered_units.update(
+                                                covered_candidate_patch_units(call_cmds[0], out_body, patch)
+                                            )
                                     sess_m = re.search(r"Process running with session ID (\d+)", out_text)
                                     if sess_m and len(call_cmds) == 1:
                                         exec_sessions[int(sess_m.group(1))] = (call_cmds[0], out_body)
@@ -1453,7 +1456,9 @@ class ExternalReview:
                     for line in raw.splitlines():
                         try:
                             item = json.loads(line)
-                            if isinstance(item, dict) and isinstance(item.get("at"), (int, float)) and item["at"] >= keep_since:
+                            if (isinstance(item, dict) and isinstance(item.get("at"), (int, float))
+                                    and not isinstance(item.get("at"), bool) and math.isfinite(item["at"])
+                                    and item["at"] >= keep_since):
                                 kept.append(line)
                         except ValueError:
                             continue
@@ -1618,11 +1623,53 @@ class ExternalReview:
     def _rereview_intent_path(self, repository_id: int, pr_number: int, base_sha: str, head_sha: str) -> Path:
         return self.state_root / "rereview-intents" / f"r{repository_id}-p{pr_number}-{base_sha}-{head_sha}.json"
 
+    def _assert_not_superseded_by_higher_attempt_locked(self, target: ReviewTarget) -> None:
+        """须在 self._pr_lock(target.pr_number) 内调用：同一 (pr, base, head) 已存在更高编号的重审意图或非 STALE run 时，
+        立即抛 TargetDrifted 拒绝继续登记或推进意图时间戳，避免较慢/较旧 attempt 污染或作废更高 attempt。"""
+        for intent_file in self._iter_rereview_intents(
+                f"r*-p{target.pr_number}-{target.base_sha}-{target.head_sha}.json"):
+            try:
+                idata = _read(intent_file)
+                i_att = _strict_pos_int(idata.get("attempt"))
+            except (OSError, ValueError, TypeError, IdentityError):
+                raise TargetDrifted(
+                    f"rereview-intent-unreadable: 同 base/head 重审意图损坏，attempt {target.attempt} 取消登记"
+                ) from None
+            if i_att > target.attempt:
+                raise TargetDrifted(
+                    f"superseded-by-higher-attempt-intent: attempt {target.attempt} < intent attempt {i_att}"
+                )
+        for run_dir in self._iter_pr_run_dirs(target.pr_number):
+            try:
+                other = _read(run_dir / "target.json")
+            except (OSError, ValueError, TypeError, IdentityError):
+                continue
+            if other.get("base_sha") != target.base_sha or other.get("head_sha") != target.head_sha:
+                continue
+            try:
+                other_att = _strict_pos_int(other.get("attempt"))
+            except (ValueError, TypeError):
+                raise TargetDrifted(
+                    f"invalid-peer-attempt: 同 base/head 存在非法 attempt，attempt {target.attempt} 取消登记"
+                ) from None
+            if other_att > target.attempt:
+                try:
+                    other_out = _read(run_dir / "outcome.json")
+                except FileNotFoundError:
+                    other_out = None
+                except (OSError, ValueError, TypeError, IdentityError):
+                    other_out = {}
+                if other_out is None or other_out.get("verdict") != "STALE":
+                    raise TargetDrifted(
+                        f"superseded-by-higher-attempt-run: attempt {target.attempt} < registered attempt {other_att}"
+                    )
+
     def _record_rereview_intent(self, target: ReviewTarget) -> int:
         """在旧 PASS 已存在的同一 (pr, base, head) 上启动重审但尚未过预检前，持久化待完成的重审意图。
         不占 attempt、不写 target.json、不发 GitHub 状态，但阻止自动合入凭旧 PASS 放行。"""
         path = self._rereview_intent_path(target.repository_id, target.pr_number, target.base_sha, target.head_sha)
         with self._pr_lock(target.pr_number):
+            self._assert_not_superseded_by_higher_attempt_locked(target)
             prev_max = 0
             for run_dir in self._iter_pr_run_dirs(target.pr_number):
                 try:
@@ -1778,7 +1825,22 @@ class ExternalReview:
             # 先按精确 attempt 排他持锁再判登记/预检：防止手动与 sweep 同审并发重复发付费预检或重复计限流。
             with _lock(folder):
                 if (folder / "target.json").exists():
-                    previous = ReviewTarget(**_read(folder / "target.json"))
+                    raw_prev = _read(folder / "target.json")
+                    self._validate_run_identity(folder.name, target.pr_number, raw_prev, None)
+                    previous = ReviewTarget(**raw_prev)
+                    if (previous.key != target.key
+                            or previous.repository_id != target.repository_id
+                            or previous.pr_number != target.pr_number
+                            or previous.base_repository_id != target.base_repository_id
+                            or previous.base_ref != target.base_ref
+                            or previous.base_sha != target.base_sha
+                            or previous.head_repository_id != target.head_repository_id
+                            or previous.head_sha != target.head_sha
+                            or previous.merge_base_sha != target.merge_base_sha
+                            or previous.attempt != target.attempt
+                            or previous.policy_version != target.policy_version
+                            or previous.patch_id != target.patch_id):
+                        raise IdentityError("磁盘 target.json 与本次冻结目标身份不符，拒绝恢复")
                     if previous.controller_code_head != target.controller_code_head:
                         raise IdentityError("controller 已变更，请用新 attempt 保留旧证据")
                     if previous.review_contract != target.review_contract:
@@ -1839,6 +1901,7 @@ class ExternalReview:
                         raise TargetDrifted(f"base-moved-not-reviewed: expected {target.base_sha}, got {live_target['base_sha']}")
                     if self._attempt_occupied(target, attempt):
                         raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
+                    self._assert_not_superseded_by_higher_attempt_locked(target)
                     prev_max = intent_recorded_ns
                     for run_dir in self._iter_pr_run_dirs(target.pr_number):
                         try:
@@ -2128,6 +2191,7 @@ class ExternalReview:
                             at = item.get("at")
                             tokens = item.get("tokens")
                             if (not isinstance(at, (int, float)) or isinstance(at, bool)
+                                    or not math.isfinite(at)
                                     or type(tokens) is not int or tokens <= 0):
                                 _unverifiable("记录字段无效")
                                 continue

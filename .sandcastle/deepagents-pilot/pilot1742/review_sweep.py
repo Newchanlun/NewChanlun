@@ -556,7 +556,8 @@ class Sweep:
                 if isinstance(rows, list):
                     for row in rows:
                         if (isinstance(row, dict) and isinstance(row.get("at"), int | float)
-                                and not isinstance(row.get("at"), bool) and isinstance(row.get("rate_limited"), bool)):
+                                and not isinstance(row.get("at"), bool) and math.isfinite(row["at"])
+                                and isinstance(row.get("rate_limited"), bool)):
                             preflight_events.append(
                                 (float(row["at"]), str(row.get("id") or "preflight"), row["rate_limited"])
                             )

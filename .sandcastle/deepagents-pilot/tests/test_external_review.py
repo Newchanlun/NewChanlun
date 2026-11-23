@@ -4366,7 +4366,7 @@ def test_r38_metadata_only_break_chars_nonascii_u0_and_reuse_recovery(lane, env,
     assert covered_candidate_patch_units(cmd_full, f"{ren_f.header}\n", patch_meta) == frozenset()
 
     bin_f = next(f for f in patch_meta.files if f.git_new_path == "bin_r38.bin")
-    assert any(u[1] == "M" and u[3].startswith("Binary files ") for u in bin_f.changes)
+    assert any(u[1] == "BIN" and u[3].startswith("Binary files ") for u in bin_f.changes)
     assert covered_candidate_patch_units(cmd_full, f"{bin_f.header}\n", patch_meta) == frozenset()
 
     # 3. 中文路径（Git C-quoted）：单文件 -U0 + nl -ba + sed -n（hunk 内切断）与 -c core.quotepath=false 均须完整覆盖
@@ -4388,7 +4388,11 @@ def test_r38_metadata_only_break_chars_nonascii_u0_and_reuse_recovery(lane, env,
     unquoted_diff = git(env.source, "-c", "core.quotepath=false", "diff", "--no-ext-diff", "--no-textconv",
                         t_meta.merge_base_sha, t_meta.head_sha)
     cmd_unquoted = f"git -c core.quotepath=false diff --no-ext-diff --no-textconv {t_meta.merge_base_sha} {t_meta.head_sha}"
-    assert patch_meta.all_change_units.issubset(covered_candidate_patch_units(cmd_unquoted, unquoted_diff, patch_meta))
+    cov_unquoted = covered_candidate_patch_units(cmd_unquoted, unquoted_diff, patch_meta)
+    # R40（Sol P1 #2）：文本/权限/重命名全部覆盖，未展开二进制 blob 保留 BIN 必读项不得自动 PASS
+    non_bin_units = {u for u in patch_meta.all_change_units if u[1] != "BIN"}
+    assert non_bin_units.issubset(cov_unquoted)
+    assert not patch_meta.all_change_units.issubset(cov_unquoted)
 
     # 2. 含 _BREAK 字符（\x0c 换页符）的改动行必须保留在必读全集且永不匹配，阻断 PASS
     (env.source / "formfeed_r38.py").write_text("NORMAL_LINE_R38 = 'ok'\nHAS_FORMFEED = 'a\x0cb'\n")
@@ -4412,16 +4416,17 @@ def test_r39_rereview_attempt_binding_model_reverify_eof_newline_and_space_path(
     4. 含空格中文/ASCII 路径的 `---`/`+++` 末尾 Git 制表符须先剥离再解码，`FrozenFile.path`、`git show` 与 `-U0` 分段补读均匹配。"""
     from pilot1742.patch_read import covered_candidate_patch_units
 
-    # 1. Sol P1 #1：A1 PASS 后，A2 慢预检期间 A3 写入重审意图并失败，A2 落盘后 A3 意图仍 pending 且取代 A2，A2 不可清除之
+    # 1. Sol P1 #1（R39/R40）：A1 PASS 后，A2 先登记、随后 A3 写入意图时 A2 被取代且不可清除 A3 意图；
+    #    且一旦 A3 意图已落盘，尚未登记的 A2 必须在 PR 锁内被 TargetDrifted 拒绝登记，避免 A2/A3 互相作废。
     first = lane.review_pr(1810, 1)
     assert first["verdict"] == "PASS"
     head1 = first["target"]["head_sha"]
     base1 = first["target"]["base_sha"]
 
-    a3_preview = lane._frozen(module.load_target(lane.gateway, 1810), 3)
-    lane._record_rereview_intent(a3_preview)
     t2 = lane.target(1810, 2)
     assert t2.attempt == 2
+    a3_preview = lane._frozen(module.load_target(lane.gateway, 1810), 3)
+    lane._record_rereview_intent(a3_preview)
     assert lane.has_pending_rereview_intent(1810, head1, base1) is True
     assert lane._superseded_on_head(t2) is True
     with lane._pr_lock(1810):
@@ -4502,3 +4507,155 @@ def test_r39_rereview_attempt_binding_model_reverify_eof_newline_and_space_path(
             num_cn_sp, p39,
         )
     )
+
+
+def test_r40_concurrent_rereview_no_mutual_stale_target_swap_parallel_output_and_nan_quota(lane, env, monkeypatch):
+    """R40（Sol P1 #1/#2 + Astra P1 #1/#2 + Astra P2 #3）：
+    1. A3 先落盘后较慢的 A2 不得再登记，抛 TargetDrifted 且不建 A2/target.json，A3 不被作废；
+    2. 恢复已有 attempt 时磁盘 target.json 若被换成另一 PR 或篡改 patch_id/head_sha，必须抛 IdentityError 拒绝恢复；
+    3. `multi_tool_use.parallel` 多条子命令共用未拆分 `out_body` 时，不得把共享输出同时计入多文件 PASS 覆盖率；
+    4. 额度账本含非有限时间戳 `NaN`/`Infinity` 时，开启严格额度校验必须报 `quota-unverifiable`，不得按零用量放行。"""
+    import hashlib
+
+    from pilot1742.delivery import EffectPending
+
+    # 1. Sol P1 #1：A1 PASS -> (a) A3 先登记后 A2 尝试登记被 TargetDrifted 拒绝；
+    #    (b) A2 先进入慢预检、期间 A3 完成登记，A2 预检返回落盘时仍被 PR 锁内 TargetDrifted 拒绝，A2 不写 target.json 且 A3 不变 STALE
+    first = lane.review_pr(1810, 1)
+    assert first["verdict"] == "PASS"
+    a2_preview = lane._frozen(module.load_target(lane.gateway, 1810), 2)
+    a2_dir = lane.state_root / "runs" / a2_preview.key
+    orig_admit_preflight = lane.admit_preflight
+    t3_box: list[ReviewTarget] = []
+
+    def race_a3_during_a2_preflight(target, **kwargs):
+        res = orig_admit_preflight(target, **kwargs)
+        if target.attempt == 2 and not t3_box:
+            t3_box.append(lane.target(1810, 3))
+        return res
+
+    monkeypatch.setattr(lane, "admit_preflight", race_a3_during_a2_preflight)
+    with pytest.raises(module.TargetDrifted, match="superseded-by-higher-attempt"):
+        lane.target(1810, 2)
+    monkeypatch.setattr(lane, "admit_preflight", orig_admit_preflight)
+    assert len(t3_box) == 1
+    t3 = t3_box[0]
+    assert not (a2_dir / "target.json").exists()
+    assert lane._superseded_on_head(t3) is False
+    # A3 已落盘后再次启动 A2：预检前即在 _record_rereview_intent 被 TargetDrifted 拒绝且不污染意图时间戳
+    with pytest.raises(module.TargetDrifted, match="superseded-by-higher-attempt"):
+        lane.target(1810, 2)
+    assert not (a2_dir / "target.json").exists()
+    assert lane._superseded_on_head(t3) is False
+
+    # 2. Astra P1 #1：恢复时磁盘 target.json 被替换为另一 PR 或不同 patch_id，必须拒绝恢复
+    t3_path = lane.state_root / "runs" / t3.key / "target.json"
+    orig_t3 = json.loads(t3_path.read_text())
+    for tampered in (
+        {**orig_t3, "pr_number": 9999},
+        {**orig_t3, "patch_id": "sha256:" + "0" * 64},
+        {**orig_t3, "head_sha": "0" * 40},
+    ):
+        t3_path.write_text(json.dumps(tampered))
+        with pytest.raises(IdentityError):
+            lane.target(1810, 3)
+    t3_path.write_text(json.dumps(orig_t3))
+    assert lane.target(1810, 3).run_id == t3.run_id
+
+    # 3. Astra P1 #2：multi_tool_use.parallel 两子命令共享未拆分 out_body，不得跨文件记入 PASS 覆盖率
+    (env.source / "par_a_r40.py").write_text("SHARED_PAR_LINE_R40 = 'identical_parallel_content'\n")
+    (env.source / "par_b_r40.py").write_text("SHARED_PAR_LINE_R40 = 'identical_parallel_content'\n")
+    git(env.source, "add", "par_a_r40.py", "par_b_r40.py")
+    git(env.source, "commit", "-qm", "parallel identical lines r40")
+    h40 = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = h40
+    t40 = lane.target(1810, 1)
+    folder40 = lane.state_root / "runs" / t40.key
+    worker40 = folder40 / MODELS[0]
+    worker40.mkdir(parents=True)
+    session40 = "019d0000-0000-7000-8000-000000000409"
+    cmd_a = f"git show {t40.head_sha}:par_a_r40.py | nl -ba | sed -n '1,5p'"
+    cmd_b = f"git show {t40.head_sha}:par_b_r40.py | nl -ba | sed -n '1,5p'"
+    cmd_full_diff = f"git diff --no-ext-diff --no-textconv {t40.merge_base_sha} {t40.head_sha}"
+    full_diff_40 = git(env.source, "diff", "--no-ext-diff", "--no-textconv", t40.merge_base_sha, t40.head_sha)
+    out_obj = {"status": "completed", "summary": "VERDICT: PASS", "findings": [], "validation": ["test"]}
+    out_text = json.dumps(out_obj)
+    # stdout 放完整 diff（让 validate_review 通过），但 session.jsonl 仅用一条 multi_tool_use.parallel 共享输出
+    events = [
+        {"type": "thread.started", "thread_id": session40},
+        {"type": "item.completed", "item": {
+            "type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(cmd_a)}",
+            "aggregated_output": full_diff_40, "status": "completed", "exit_code": 0,
+        }},
+        {"type": "item.completed", "item": {
+            "type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(cmd_b)}",
+            "aggregated_output": full_diff_40, "status": "completed", "exit_code": 0,
+        }},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": out_text}},
+        {"type": "turn.completed"},
+    ]
+    (worker40 / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    rid1, rid2 = "resp_r40_par_1", "resp_r40_par_2"
+    rid_shas = [hashlib.sha256(r.encode()).hexdigest() for r in (rid1, rid2)]
+    sess_rows = [
+        {"type": "session_meta", "payload": {"id": session40, "model_provider": "cliproxy-local"}},
+        {"type": "turn_context", "payload": {"model": MODELS[0]}},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "multi_tool_use.parallel", "call_id": "call_par_1",
+            "arguments": json.dumps({"tool_uses": [
+                {"recipient_name": "functions.exec_command", "parameters": {"cmd": cmd_a}},
+                {"recipient_name": "functions.exec_command", "parameters": {"cmd": cmd_b}},
+            ]}),
+        }},
+        {"type": "token_usage_record", "payload": {"response_id": rid1}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "call_par_1",
+            "output": "Process exited with code 0\nOutput:\n     1\tSHARED_PAR_LINE_R40 = 'identical_parallel_content'\n",
+        }},
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": out_text}],
+        }},
+        {"type": "token_usage_record", "payload": {"response_id": rid2}},
+    ]
+    (worker40 / "session.jsonl").write_text("\n".join(json.dumps(r) for r in sess_rows) + "\n")
+    launch40 = {
+        "run_id": t40.run_id, "launch_id": "12345678-1234-4234-8234-123456789409",
+        "pr_number": 1810, "model": MODELS[0], "head_sha": t40.head_sha,
+        "base_sha": t40.base_sha, "merge_base_sha": t40.merge_base_sha,
+        "controller_code_head": t40.controller_code_head, "mode": "review",
+        "prompt": module.review_prompt(t40, ("par_a_r40.py", "par_b_r40.py")),
+        "image_id": "sha256:" + "1" * 64,
+    }
+    receipt40 = {
+        **launch40, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0,
+        "container_closed": True, "observed_provider": "cliproxy-local", "observed_model": MODELS[0],
+        "isolation_contract": "1" * 64, "container_id": "a" * 64,
+        "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT"},
+        "session_id": session40, "turn_completed": True, "result": out_obj,
+        "before": {"head": t40.head_sha, "branch": "HEAD", "status": ""},
+        "after": {"head": t40.head_sha, "branch": "HEAD", "status": ""},
+    }
+    module._save(worker40 / "launch.json", launch40)
+    module._save(worker40 / "receipt.json", receipt40)
+    lane.session_receipt = lambda _m, _l, _s, _since: {
+        "launch": f"review-{launch40['launch_id']}", "session": session40,
+        "complete_stable": True, "sealed": True, "routes": [f"codex:{MODELS[0]}@chatgpt.com"],
+        "requests": 2, "response_id_sha256s": rid_shas,
+        "last_response_id_sha256": rid_shas[-1],
+        "last_output_sha256": hashlib.sha256(out_text.encode()).hexdigest(),
+    }
+    pass_stub = module.ReviewOutcome(MODELS[0], "PASS", session40, "VERDICT: PASS")
+    sess_verdict = lane._verify_session_receipt(t40, launch40, receipt40, worker40, pass_stub)
+    assert sess_verdict.verdict == "FAILED" and "未完整呈现全部冻结改动行" in sess_verdict.reason
+    # 独立 diff 命令仍按单命令正常通过
+    assert cmd_full_diff  # keep lint clean
+
+    # 4. Astra P2 #3：preflight-usage.jsonl 含 NaN / Infinity 时间戳必须触发 quota-unverifiable
+    monkeypatch.setenv(module.DAILY_INPUT_CAP_ENV, "1000000")
+    usage_path = lane.state_root / module.PREFLIGHT_USAGE_FILE
+    for bad_ts in ("NaN", "Infinity", "-Infinity"):
+        usage_path.write_text(f'{{"at": {bad_ts}, "tokens": 100}}\n')
+        usage_path.chmod(0o600)
+        with pytest.raises(EffectPending, match="quota-unverifiable"):
+            lane.admit_quota()
