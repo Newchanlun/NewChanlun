@@ -1,5 +1,5 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f977dd46a1e42efbb611b17826e02c3314ed948d 100644
+index e69de29..f977dd4 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,143 @@
@@ -148,7 +148,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f977dd46a1e42efbb611b17826e02c33
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..023455e604241691bd3fd0963bc62884f89db1af
+index 0000000..023455e
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
 @@ -0,0 +1,168 @@
@@ -321,7 +321,7 @@ index 0000000000000000000000000000000000000000..023455e604241691bd3fd0963bc62884
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..5ff3f08f58e4ca010074774d8bc908e41a559f33 100644
+index e69de29..5ff3f08 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
 @@ -0,0 +1,1283 @@
@@ -1609,7 +1609,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..5ff3f08f58e4ca010074774d8bc908e4
 +	return n.r.Close()
 +}
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
-index e2b039a85631bff4fbd2c54a4dacc7b3ce3f5ab8..07de86fb038fa9260928f91b3451a4194caccc74 100644
+index e2b039a..07de86f 100644
 --- a/internal/api/server_routes.go
 +++ b/internal/api/server_routes.go
 @@ -65,6 +65,7 @@ func (s *Server) setupRoutes() {
@@ -1653,7 +1653,7 @@ index e2b039a85631bff4fbd2c54a4dacc7b3ce3f5ab8..07de86fb038fa9260928f91b3451a419
  		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
  		v1beta.POST("/interactions", geminiHandlers.Interactions)
 diff --git a/internal/pluginhost/preflight_receipt_test.go b/internal/pluginhost/preflight_receipt_test.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..6cebb3601c90b8736d1e91ced70c7ebaf5c6f567 100644
+index e69de29..6cebb36 100644
 --- a/internal/pluginhost/preflight_receipt_test.go
 +++ b/internal/pluginhost/preflight_receipt_test.go
 @@ -0,0 +1,19 @@
@@ -1677,7 +1677,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..6cebb3601c90b8736d1e91ced70c7eba
 +	}
 +}
 diff --git a/internal/pluginhost/snapshot.go b/internal/pluginhost/snapshot.go
-index 85ae6d60862f83ae7638ff66421876459a17494c..69a1d19b9d7a794dbeb243b42b88a8528533b024 100644
+index 85ae6d6..69a1d19 100644
 --- a/internal/pluginhost/snapshot.go
 +++ b/internal/pluginhost/snapshot.go
 @@ -192,3 +192,10 @@ func cloneConfigFieldValue(value any) any {
@@ -1693,10 +1693,10 @@ index 85ae6d60862f83ae7638ff66421876459a17494c..69a1d19b9d7a794dbeb243b42b88a852
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..fcd4ba1f56433e0e6f75dacf3c1d27c3ffdca17d
+index 0000000..e7e4aac
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,587 @@
+@@ -0,0 +1,695 @@
 +package executor
 +
 +import (
@@ -2114,6 +2114,13 @@ index 0000000000000000000000000000000000000000..fcd4ba1f56433e0e6f75dacf3c1d27c3
 +			sse2:     "event: response.completed\ndata: " + `{"type":"response.failed","response":{"id":"resp_fm_ev","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"event-mismatch"}}}` + "\n\n",
 +			wantSeal: preflightreceipt.SealRejected,
 +		},
++		{
++			name:     "response.failed followed by trailing wrong-model event in same stream taints prior turn",
++			launch:   "review-a3333333-2222-4333-8444-555555555507",
++			session:  "019d0000-0000-7000-8000-555555555527",
++			sse2:     "data: " + `{"type":"response.failed","response":{"id":"resp_fm_tail","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"transient"}}}` + "\n\n" + "data: " + `{"type":"response.completed","response":{"id":"resp_fm_tail2","status":"completed","model":"gpt-6.2-astra","output":[]}}` + "\n\n",
++			wantSeal: preflightreceipt.SealRejected,
++		},
 +	} {
 +		t.Run(tc.name, func(t *testing.T) {
 +			root := filepath.Join(t.TempDir(), "receipts")
@@ -2283,12 +2290,121 @@ index 0000000000000000000000000000000000000000..fcd4ba1f56433e0e6f75dacf3c1d27c3
 +			t.Fatalf("empty data line flood SealReview = %v, want SealRejected", st)
 +		}
 +	})
++
++	t.Run("trailing bare JSON line without blank delimiter after completed taints launch", func(t *testing.T) {
++		// Astra P1 #2 (PR #2280 R10): unrecognized non-SSE bare JSON after response.completed
++		// without a trailing blank line MUST still taint and prevent sealing.
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-a4444444-2222-4333-8444-555555555503"
++		session := "019d0000-0000-7000-8000-555555555543"
++		sseBareTail := "data: " + `{"type":"response.completed","response":{"id":"resp_bare","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n" +
++			`{"type":"error","error":{"message":"bare-without-blank-line"}}`
++		ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseBareTail))
++		}}
++		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++		stream, err := exec.ExecuteStream(ctx, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for chunk := range stream.Chunks {
++			if chunk.Err == nil && chunk.Payload != nil {
++				c.ObserveStreamChunk(chunk.Payload)
++			}
++		}
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++			t.Fatalf("bare JSON tail without blank delimiter SealReview = %v, want SealRejected", st)
++		}
++	})
++
++	t.Run("assembled multiline response.completed and patched output reach downstream translator", func(t *testing.T) {
++		// Sol P2 #2 (PR #2280 R10): holdTerminalUntilEOF MUST build downstream chunks from the
++		// assembled/normalized/patched event payload, not raw per-line fragments.
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-a4444444-2222-4333-8444-555555555504"
++		session := "019d0000-0000-7000-8000-555555555544"
++		ssePatched := "event: response.output_item.done\n" +
++			"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"rebuilt-answer\"}]}}\n\n" +
++			"event: response.completed\n" +
++			"data: {\"type\":\"response.completed\",\n" +
++			"data: \"response\":{\"id\":\"resp_patch\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[]}}\n\n"
++		nonNativeOpts := cliproxyexecutor.Options{
++			Stream:         true,
++			SourceFormat:   sdktranslator.FormatOpenAIResponse,
++			ResponseFormat: sdktranslator.FormatOpenAIResponse,
++		}
++		ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(ssePatched))
++		}}
++		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++		stream, err := exec.ExecuteStream(ctx, auth, req, nonNativeOpts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var downstream strings.Builder
++		for chunk := range stream.Chunks {
++			if chunk.Err != nil {
++				t.Fatalf("assembled chunk err: %v", chunk.Err)
++			}
++			if chunk.Payload != nil {
++				c.ObserveStreamChunk(chunk.Payload)
++				downstream.Write(chunk.Payload)
++				downstream.WriteByte('\n')
++			}
++		}
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		outStr := downstream.String()
++		var completedLine string
++		for _, ln := range strings.Split(outStr, "\n") {
++			if strings.Contains(ln, `"type":"response.completed"`) {
++				completedLine = ln
++			}
++		}
++		if completedLine == "" || !strings.Contains(completedLine, `"type":"response.completed","response":{"id":"resp_patch"`) {
++			t.Fatalf("downstream did not receive compacted single-line assembled response.completed: %q", outStr)
++		}
++		if !strings.Contains(completedLine, `"rebuilt-answer"`) {
++			t.Fatalf("downstream response.completed did not receive patched output: %q", completedLine)
++		}
++		if st, digest := preflightreceipt.SealReviewWithDigest(root, launch, session); st != preflightreceipt.SealOK || digest == "" {
++			t.Fatalf("assembled+patched SealReviewWithDigest = (%v, %q), want (SealOK, non-empty)", st, digest)
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c61d07567 100644
+index 6074124..7224d99 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
-@@ -15,6 +15,8 @@ import (
+@@ -3,6 +3,7 @@ package executor
+ import (
+ 	"bytes"
+ 	"context"
++	"encoding/json"
+ 	"io"
+ 	"net/http"
+ 	"strings"
+@@ -15,6 +16,8 @@ import (
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
  	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -2297,7 +2413,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
  	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
  	log "github.com/sirupsen/logrus"
  )
-@@ -154,7 +156,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -154,7 +157,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
@@ -2309,7 +2425,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +449,285 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +450,388 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -2356,8 +2472,8 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +		const maxPendingStrictTerminalLines = 4096
 +		var pendingStrictTerminal []cliproxyexecutor.StreamChunk
 +		pendingStrictBytes := 0
-+		var currentEventChunks []cliproxyexecutor.StreamChunk
-+		currentEventChunkBytes := 0
++		var currentEventMeta [][]byte
++		currentEventMetaBytes := 0
 +		var sseEventName string
 +		sseHasEvent := false
 +		var sseEventData [][]byte
@@ -2367,6 +2483,111 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +				return b[1:]
 +			}
 +			return b
++		}
++		isValidSSELine := func(l []byte) bool {
++			return len(l) == 0 || l[0] == ':' ||
++				bytes.HasPrefix(l, dataTag) ||
++				bytes.HasPrefix(l, []byte("event:")) ||
++				bytes.HasPrefix(l, []byte("id:")) ||
++				bytes.HasPrefix(l, []byte("retry:"))
++		}
++		drainAndValidateStrictFailureTail := func() {
++			if !strictReview {
++				return
++			}
++			pc := preflightreceipt.From(ctx)
++			if pc == nil {
++				return
++			}
++			tailLines := 0
++			tailBytes := 0
++			tailHasEv := false
++			for scanner.Scan() {
++				tl := scanner.Bytes()
++				tailLines++
++				tailBytes += len(tl) + 1
++				if tailLines > maxPendingStrictTerminalLines || tailBytes > maxPendingStrictTerminalBytes {
++					pc.Taint()
++					return
++				}
++				if len(tl) == 0 {
++					tailHasEv = false
++					continue
++				}
++				if tl[0] == ':' || bytes.HasPrefix(tl, []byte("id:")) || bytes.HasPrefix(tl, []byte("retry:")) {
++					continue
++				}
++				if bytes.HasPrefix(tl, []byte("event:")) {
++					tailHasEv = true
++					continue
++				}
++				if bytes.HasPrefix(tl, dataTag) {
++					td := bytes.TrimSpace(stripOneSpace(tl[5:]))
++					if len(td) == 0 {
++						continue
++					}
++					if bytes.Equal(td, []byte("[DONE]")) && !tailHasEv {
++						continue
++					}
++					pc.Taint()
++					return
++				}
++				// Unrecognized non-SSE line in failure tail violates strict SSE framing.
++				pc.Taint()
++				return
++			}
++			if scanner.Err() != nil || tailHasEv {
++				pc.Taint()
++				return
++			}
++			closeBody()
++			if !pc.UpstreamEOF() {
++				pc.Taint()
++			}
++		}
++		buildEventChunks := func(metaLines [][]byte, dataPayload []byte, isIncomplete bool) ([]cliproxyexecutor.StreamChunk, int, bool) {
++			var outChunks []cliproxyexecutor.StreamChunk
++			totalBytes := 0
++			appendLine := func(rawLine []byte) bool {
++				translated := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, rawLine, &param, claudeInputTokens)
++				for _, ch := range translated {
++					if len(outChunks) >= maxPendingStrictTerminalLines || totalBytes+len(ch)+1 > maxPendingStrictTerminalBytes {
++						return false
++					}
++					totalBytes += len(ch) + 1
++					outChunks = append(outChunks, cliproxyexecutor.StreamChunk{Payload: ch, Incomplete: isIncomplete})
++				}
++				return true
++			}
++			for _, ml := range metaLines {
++				if !appendLine(ml) {
++					return nil, 0, false
++				}
++			}
++			if dataPayload != nil {
++				if bytes.ContainsRune(dataPayload, '\n') {
++					var compacted bytes.Buffer
++					if json.Compact(&compacted, dataPayload) == nil {
++						if !appendLine(append([]byte("data: "), compacted.Bytes()...)) {
++							return nil, 0, false
++						}
++					} else {
++						for _, part := range bytes.Split(dataPayload, []byte{'\n'}) {
++							if !appendLine(append([]byte("data: "), part...)) {
++								return nil, 0, false
++							}
++						}
++					}
++				} else {
++					if !appendLine(append([]byte("data: "), dataPayload...)) {
++						return nil, 0, false
++					}
++				}
++			}
++			if !appendLine([]byte{}) {
++				return nil, 0, false
++			}
++			return outChunks, totalBytes, true
 +		}
  		for scanner.Scan() {
  			line := scanner.Bytes()
@@ -2378,16 +2599,21 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +			if holdTerminalUntilEOF {
 +				if len(line) == 0 {
 +					var joined []byte
-+					if len(sseEventData) > 0 {
++					hasData := len(sseEventData) > 0
++					if hasData {
 +						joined = bytes.TrimSpace(bytes.Join(sseEventData, []byte{'\n'}))
 +					}
 +					evName, hasEv := sseEventName, sseHasEvent
++					metaLines := currentEventMeta
 +					sseEventName = ""
 +					sseHasEvent = false
 +					sseEventData = nil
 +					sseEventDataBytes = 0
++					currentEventMeta = nil
++					currentEventMetaBytes = 0
 +
-+					if len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]")) {
++					var downstreamData []byte
++					if hasData && len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]")) {
 +						eventPayload := helps.RestoreCodexMultiAgentV2Response(joined, optimizeMultiAgentV2)
 +						observeCodexTokenEvent(reporter, eventPayload)
 +						if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(eventPayload, e.modelLevelCooling()); ok {
@@ -2398,9 +2624,8 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +										pc.Taint()
 +									}
 +								}
++								drainAndValidateStrictFailureTail()
 +							}
-+							currentEventChunks = nil
-+							currentEventChunkBytes = 0
 +							if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 +								helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 +								reporter.PublishFailure(ctx, errClearReplay)
@@ -2429,9 +2654,8 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +										pc.Taint()
 +									}
 +								}
++								drainAndValidateStrictFailureTail()
 +							}
-+							currentEventChunks = nil
-+							currentEventChunkBytes = 0
 +							streamErr := newCodexEmptyIncompleteStreamError()
 +							helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 +							reporter.PublishFailure(ctx, streamErr)
@@ -2446,6 +2670,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +								pc.ValidateStrictEvent(evName, hasEv, joined)
 +							}
 +						}
++						downstreamData = eventPayload
 +						eventType := ojson.GetBytesNoCopy(eventPayload, "type").String()
 +						switch eventType {
 +						case "response.output_item.done":
@@ -2466,41 +2691,35 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +							if eventType == "response.completed" || eventType == "response.done" {
 +								cacheCodexReasoningReplayFromCompleted(replayScope, normalized)
 +							}
++							downstreamData = normalized
 +						}
-+					} else if strictReview && hasEv && len(joined) > 0 {
-+						if pc := preflightreceipt.From(ctx); pc != nil {
-+							pc.ValidateStrictEvent(evName, hasEv, joined)
++					} else if hasData {
++						if strictReview && hasEv {
++							if pc := preflightreceipt.From(ctx); pc != nil {
++								pc.ValidateStrictEvent(evName, hasEv, joined)
++							}
 +						}
++						downstreamData = joined
 +					}
 +
-+					blankChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, []byte{}, &param, claudeInputTokens)
-+					for i := range blankChunks {
-+						if len(currentEventChunks) >= maxPendingStrictTerminalLines || currentEventChunkBytes+len(blankChunks[i])+1 > maxPendingStrictTerminalBytes {
-+							pendingStrictTerminal = nil
-+							pendingStrictBytes = 0
-+							currentEventChunks = nil
-+							currentEventChunkBytes = 0
-+							failPostTerminal()
-+							return
-+						}
-+						currentEventChunkBytes += len(blankChunks[i]) + 1
-+						currentEventChunks = append(currentEventChunks, cliproxyexecutor.StreamChunk{Payload: blankChunks[i], Incomplete: isIncompleteEvent})
++					eventChunks, _, okBuild := buildEventChunks(metaLines, downstreamData, isIncompleteEvent)
++					if !okBuild {
++						pendingStrictTerminal = nil
++						pendingStrictBytes = 0
++						failPostTerminal()
++						return
 +					}
 +					if sawStrictTerminal {
 +						if len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]")) {
 +							pendingStrictTerminal = nil
 +							pendingStrictBytes = 0
-+							currentEventChunks = nil
-+							currentEventChunkBytes = 0
 +							failPostTerminal()
 +							return
 +						}
-+						for _, ch := range currentEventChunks {
++						for _, ch := range eventChunks {
 +							if len(pendingStrictTerminal) >= maxPendingStrictTerminalLines || pendingStrictBytes+len(ch.Payload)+1 > maxPendingStrictTerminalBytes {
 +								pendingStrictTerminal = nil
 +								pendingStrictBytes = 0
-+								currentEventChunks = nil
-+								currentEventChunkBytes = 0
 +								failPostTerminal()
 +								return
 +							}
@@ -2508,26 +2727,23 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +							pendingStrictTerminal = append(pendingStrictTerminal, ch)
 +						}
 +					} else if terminalSuccess {
-+						for _, ch := range currentEventChunks {
++						for _, ch := range eventChunks {
 +							if len(pendingStrictTerminal) >= maxPendingStrictTerminalLines || pendingStrictBytes+len(ch.Payload)+1 > maxPendingStrictTerminalBytes {
 +								pendingStrictTerminal = nil
 +								pendingStrictBytes = 0
-+								currentEventChunks = nil
-+								currentEventChunkBytes = 0
 +								failPostTerminal()
 +								return
 +							}
 +							pendingStrictBytes += len(ch.Payload) + 1
-+							ch.Incomplete = isIncompleteEvent
 +							pendingStrictTerminal = append(pendingStrictTerminal, ch)
 +						}
-+						if isIncompleteEvent && len(currentEventChunks) == 0 {
++						if isIncompleteEvent && len(eventChunks) == 0 {
 +							pendingStrictTerminal = append(pendingStrictTerminal, cliproxyexecutor.StreamChunk{Incomplete: true})
 +						}
 +						sawStrictTerminal = true
 +						sawStrictTerminalBlankLine = true
 +					} else {
-+						for _, ch := range currentEventChunks {
++						for _, ch := range eventChunks {
 +							select {
 +							case out <- ch:
 +								if len(ch.Payload) > 0 {
@@ -2538,56 +2754,59 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
 +							}
 +						}
 +					}
-+					currentEventChunks = nil
-+					currentEventChunkBytes = 0
 +					continue
 +				}
 +
 +				if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
-+					translatedLine = transformed
-+				} else if bytes.HasPrefix(line, dataTag) {
++					if len(currentEventMeta) >= maxPendingStrictTerminalLines || currentEventMetaBytes+len(transformed)+1 > maxPendingStrictTerminalBytes {
++						pendingStrictTerminal = nil
++						pendingStrictBytes = 0
++						failPostTerminal()
++						return
++					}
++					currentEventMeta = append(currentEventMeta, bytes.Clone(transformed))
++					currentEventMetaBytes += len(transformed) + 1
++					continue
++				}
++				if !isValidSSELine(line) {
++					// Unrecognized non-SSE line (e.g. bare JSON without data:) violates strict SSE framing
++					// regardless of whether a blank delimiter follows before EOF.
++					pendingStrictTerminal = nil
++					pendingStrictBytes = 0
++					failPostTerminal()
++					return
++				}
++				if bytes.HasPrefix(line, dataTag) {
 +					rawData := stripOneSpace(line[5:])
 +					trimmedData := bytes.TrimSpace(rawData)
 +					if sawStrictTerminal && sawStrictTerminalBlankLine && len(trimmedData) > 0 && !bytes.Equal(trimmedData, []byte("[DONE]")) {
 +						pendingStrictTerminal = nil
 +						pendingStrictBytes = 0
-+						currentEventChunks = nil
-+						currentEventChunkBytes = 0
 +						failPostTerminal()
 +						return
 +					}
 +					if len(sseEventData) >= maxPendingStrictTerminalLines || sseEventDataBytes+len(rawData)+1 > maxPendingStrictTerminalBytes {
 +						pendingStrictTerminal = nil
 +						pendingStrictBytes = 0
-+						currentEventChunks = nil
-+						currentEventChunkBytes = 0
 +						failPostTerminal()
 +						return
 +					}
 +					sseEventData = append(sseEventData, bytes.Clone(rawData))
 +					sseEventDataBytes += len(rawData) + 1
-+					translatedLine = bytes.Clone(line)
-+				} else {
-+					if bytes.HasPrefix(line, []byte("event:")) {
-+						sseEventName = string(stripOneSpace(line[6:]))
-+						sseHasEvent = true
-+					}
-+					translatedLine = bytes.Clone(line)
++					continue
 +				}
-+
-+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
-+				for i := range chunks {
-+					if len(currentEventChunks) >= maxPendingStrictTerminalLines || currentEventChunkBytes+len(chunks[i])+1 > maxPendingStrictTerminalBytes {
-+						pendingStrictTerminal = nil
-+						pendingStrictBytes = 0
-+						currentEventChunks = nil
-+						currentEventChunkBytes = 0
-+						failPostTerminal()
-+						return
-+					}
-+					currentEventChunkBytes += len(chunks[i]) + 1
-+					currentEventChunks = append(currentEventChunks, cliproxyexecutor.StreamChunk{Payload: chunks[i]})
++				if bytes.HasPrefix(line, []byte("event:")) {
++					sseEventName = string(stripOneSpace(line[6:]))
++					sseHasEvent = true
 +				}
++				if len(currentEventMeta) >= maxPendingStrictTerminalLines || currentEventMetaBytes+len(line)+1 > maxPendingStrictTerminalBytes {
++					pendingStrictTerminal = nil
++					pendingStrictBytes = 0
++					failPostTerminal()
++					return
++				}
++				currentEventMeta = append(currentEventMeta, bytes.Clone(line))
++				currentEventMetaBytes += len(line) + 1
 +				continue
 +			}
 +
@@ -2597,14 +2816,25 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +812,77 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +916,88 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
-+		if strictReview && len(sseEventData) > 0 {
-+			joined := bytes.TrimSpace(bytes.Join(sseEventData, []byte{'\n'}))
-+			if pc := preflightreceipt.From(ctx); pc != nil {
-+				pc.ValidateStrictEvent(sseEventName, sseHasEvent, joined)
++		if strictReview {
++			if len(sseEventData) > 0 {
++				joined := bytes.TrimSpace(bytes.Join(sseEventData, []byte{'\n'}))
++				if pc := preflightreceipt.From(ctx); pc != nil {
++					pc.ValidateStrictEvent(sseEventName, sseHasEvent, joined)
++				}
++				if len(joined) > 0 && (!bytes.Equal(joined, []byte("[DONE]")) || sseHasEvent) {
++					// Unclosed trailing non-[DONE] SSE event at EOF was never dispatched cleanly.
++					failPostTerminal()
++					return
++				}
++			} else if sawStrictTerminal && sseHasEvent {
++				// Orphan event: header after terminal completion without blank-line closure.
++				failPostTerminal()
++				return
 +			}
 +		}
  		if errScan := scanner.Err(); errScan != nil {
@@ -2676,7 +2906,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c
  		if emittedCount == 0 {
  			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
-index cd725e88a6205fd0c21986ce8677e034d700199a..c02be99c03ca740fabc4aa7425f1a87a43a8e789 100644
+index cd725e8..c02be99 100644
 --- a/internal/runtime/executor/helps/proxy_helpers.go
 +++ b/internal/runtime/executor/helps/proxy_helpers.go
 @@ -15,6 +15,7 @@ import (
@@ -2715,7 +2945,7 @@ index cd725e88a6205fd0c21986ce8677e034d700199a..c02be99c03ca740fabc4aa7425f1a87a
  	if proxyURL != "" {
  		if transport := pooledProxyTransport(proxyURL, cfg, auth); transport != nil {
 diff --git a/sdk/api/handlers/handlers.go b/sdk/api/handlers/handlers.go
-index 2f1b89a507202cd233e5554b2109eb8cd1ada6cb..d20e37bdeb443b8915939b34b6b3398fbc1ee84f 100644
+index 2f1b89a..d20e37b 100644
 --- a/sdk/api/handlers/handlers.go
 +++ b/sdk/api/handlers/handlers.go
 @@ -7,6 +7,7 @@ import (
@@ -2735,7 +2965,7 @@ index 2f1b89a507202cd233e5554b2109eb8cd1ada6cb..d20e37bdeb443b8915939b34b6b3398f
  	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
  		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
 diff --git a/sdk/api/handlers/handlers_execution.go b/sdk/api/handlers/handlers_execution.go
-index dff03be5f687e16cd9b639176b5dabcfa472ab01..b6b20c218e6b34844a714e7a6329d200a7ebd6b8 100644
+index dff03be..b6b20c2 100644
 --- a/sdk/api/handlers/handlers_execution.go
 +++ b/sdk/api/handlers/handlers_execution.go
 @@ -4,6 +4,7 @@ import (
@@ -2775,7 +3005,7 @@ index dff03be5f687e16cd9b639176b5dabcfa472ab01..b6b20c218e6b34844a714e7a6329d200
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
 diff --git a/sdk/api/handlers/handlers_interceptors.go b/sdk/api/handlers/handlers_interceptors.go
-index 16203c447b7ee6f2e569fc77dee6afb22859d5b5..e1d1634c1fe0e2781bb481b06a4bfbf4404020a0 100644
+index 16203c4..e1d1634 100644
 --- a/sdk/api/handlers/handlers_interceptors.go
 +++ b/sdk/api/handlers/handlers_interceptors.go
 @@ -2,6 +2,7 @@ package handlers
@@ -2845,7 +3075,7 @@ index 16203c447b7ee6f2e569fc77dee6afb22859d5b5..e1d1634c1fe0e2781bb481b06a4bfbf4
  			completion.Error = err.Error()
  		}
 diff --git a/sdk/api/handlers/handlers_model_router_test.go b/sdk/api/handlers/handlers_model_router_test.go
-index 9c8d01a748fbd46e4de771dcf986092e14f8c3ef..b359dff86234540aa51381442183e4b806e2832c 100644
+index 9c8d01a..b359dff 100644
 --- a/sdk/api/handlers/handlers_model_router_test.go
 +++ b/sdk/api/handlers/handlers_model_router_test.go
 @@ -2,10 +2,13 @@ package handlers
@@ -2959,7 +3189,7 @@ index 9c8d01a748fbd46e4de771dcf986092e14f8c3ef..b359dff86234540aa51381442183e4b8
 +	checkTainted(t, l3)
 +}
 diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
-index e04fe3bb043d7f6e995688e9b3afdaac1c65c15d..b25b42ae47a89076cab36653146ac2d71fb9efa9 100644
+index e04fe3b..b25b42a 100644
 --- a/sdk/api/handlers/handlers_stream.go
 +++ b/sdk/api/handlers/handlers_stream.go
 @@ -5,6 +5,7 @@ import (
@@ -2998,7 +3228,7 @@ index e04fe3bb043d7f6e995688e9b3afdaac1c65c15d..b25b42ae47a89076cab36653146ac2d7
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
-index b1a8e8c626f135ad557eab8b5a2b8b4dba460123..05f948be8400752a4be281e873a1c1419ce11627 100644
+index b1a8e8c..05f948b 100644
 --- a/sdk/cliproxy/auth/conductor_execution.go
 +++ b/sdk/cliproxy/auth/conductor_execution.go
 @@ -5,6 +5,7 @@ import (
@@ -3139,7 +3369,7 @@ index b1a8e8c626f135ad557eab8b5a2b8b4dba460123..05f948be8400752a4be281e873a1c141
  			if rerrExec != nil {
  				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)
 diff --git a/sdk/cliproxy/auth/conductor_home.go b/sdk/cliproxy/auth/conductor_home.go
-index 26e85115fa5b55adeee1c2b451279da39392bf6e..ceafacb5a0458487e2898ca4a18738edcf591311 100644
+index 26e8511..ceafacb 100644
 --- a/sdk/cliproxy/auth/conductor_home.go
 +++ b/sdk/cliproxy/auth/conductor_home.go
 @@ -1513,7 +1513,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
@@ -3152,7 +3382,7 @@ index 26e85115fa5b55adeee1c2b451279da39392bf6e..ceafacb5a0458487e2898ca4a18738ed
  			if errExec != nil {
  				result.Error = resultErrorFromError(errExec)
 diff --git a/sdk/cliproxy/auth/conductor_home_execution.go b/sdk/cliproxy/auth/conductor_home_execution.go
-index 8bccc582b0d896bf084e7dce03300074c2d5e6f8..e78a6e27690796cac8fa741c9b22ba1d331e61a7 100644
+index 8bccc58..e78a6e2 100644
 --- a/sdk/cliproxy/auth/conductor_home_execution.go
 +++ b/sdk/cliproxy/auth/conductor_home_execution.go
 @@ -139,7 +139,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
@@ -3177,7 +3407,7 @@ index 8bccc582b0d896bf084e7dce03300074c2d5e6f8..e78a6e27690796cac8fa741c9b22ba1d
  			startHomeExec := time.Now()
  			response, errExecute = execute()
 diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
-index 47f87de43f9f2fb7379312637b09888cfd1a05ab..3a1a2d46b9029285fd452fe40882cc7dacd8c441 100644
+index 47f87de..3a1a2d4 100644
 --- a/sdk/cliproxy/auth/conductor_stream.go
 +++ b/sdk/cliproxy/auth/conductor_stream.go
 @@ -438,7 +438,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
@@ -3208,7 +3438,7 @@ index 47f87de43f9f2fb7379312637b09888cfd1a05ab..3a1a2d46b9029285fd452fe40882cc7d
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..a3608db9e2f53e13ed00bb9674fee8bce80292ea 100644
+index e69de29..a3608db 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
 @@ -0,0 +1,205 @@
@@ -3418,7 +3648,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..a3608db9e2f53e13ed00bb9674fee8bc
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..1322c939fdf0b310b8ea11df101ee594e58dc4df 100644
+index e69de29..1322c93 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
 @@ -0,0 +1,189 @@
@@ -3613,7 +3843,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..1322c939fdf0b310b8ea11df101ee594
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_prod.go b/sdk/cliproxy/auth/preflight_roots_prod.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..26bea8decba4fff6b3eddc64c333994befb455af
+index 0000000..26bea8d
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_roots_prod.go
 @@ -0,0 +1,8 @@
@@ -3627,7 +3857,7 @@ index 0000000000000000000000000000000000000000..26bea8decba4fff6b3eddc64c333994b
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_test_hook.go b/sdk/cliproxy/auth/preflight_roots_test_hook.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..6de513ec13a7292dd86da45e75532e34749954a3
+index 0000000..6de513e
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_roots_test_hook.go
 @@ -0,0 +1,59 @@
@@ -3692,7 +3922,7 @@ index 0000000000000000000000000000000000000000..6de513ec13a7292dd86da45e75532e34
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..e83f0e26d5da874112af60da308678013d833f29
+index 0000000..e83f0e2
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
 @@ -0,0 +1,386 @@
@@ -4084,7 +4314,7 @@ index 0000000000000000000000000000000000000000..e83f0e26d5da874112af60da30867801
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..36692d6a114486901c812c62a16a4d6465fc5493
+index 0000000..36692d6
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
 @@ -0,0 +1,154 @@
@@ -4243,7 +4473,7 @@ index 0000000000000000000000000000000000000000..36692d6a114486901c812c62a16a4d64
 +	return isAllowedTestTransport(rt)
 +}
 diff --git a/sdk/cliproxy/rtprovider.go b/sdk/cliproxy/rtprovider.go
-index ddbd342de7b44e86912b326202a94177f6cf0db9..bc1efb8d2dbe7adae57f14eaae98a844a5b3b4d6 100644
+index ddbd342..bc1efb8 100644
 --- a/sdk/cliproxy/rtprovider.go
 +++ b/sdk/cliproxy/rtprovider.go
 @@ -6,6 +6,7 @@ import (
@@ -4277,7 +4507,7 @@ index ddbd342de7b44e86912b326202a94177f6cf0db9..bc1efb8d2dbe7adae57f14eaae98a844
 +	return controlled
 +}
 diff --git a/sdk/cliproxy/rtprovider_test.go b/sdk/cliproxy/rtprovider_test.go
-index 8a29e48cbeafe96270b84a9be5a7d6523a537c11..8c01ee0e5022832ff8f8d678c45e2805772d2d2e 100644
+index 8a29e48..8c01ee0 100644
 --- a/sdk/cliproxy/rtprovider_test.go
 +++ b/sdk/cliproxy/rtprovider_test.go
 @@ -20,3 +20,28 @@ func TestRoundTripperForDirectBypassesProxy(t *testing.T) {
@@ -4310,10 +4540,10 @@ index 8a29e48cbeafe96270b84a9be5a7d6523a537c11..8c01ee0e5022832ff8f8d678c45e2805
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfffb494202f 100644
+index e69de29..24fe6a6 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2681 @@
+@@ -0,0 +1,2759 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4334,6 +4564,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +	"os"
 +	"path/filepath"
 +	"regexp"
++	"strconv"
 +	"strings"
 +	"sync"
 +	"sync/atomic"
@@ -4518,6 +4749,8 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +	lastItemResponseID                          string
 +	lastItemOutputSHA                           string
 +	sawStreamedOutputItem                       bool
++	pendingItems                                map[string]struct{}
++	pendingUnkeyed                              int
 +	sseEventName                                string
 +	sseHasEvent                                 bool
 +	sseDataLines                                [][]byte
@@ -4689,6 +4922,8 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +		c.lastItemOutputSHA = ""
 +		c.lastItemResponseID = ""
 +		c.sawStreamedOutputItem = false
++		c.pendingItems = nil
++		c.pendingUnkeyed = 0
 +		c.mu.Unlock()
 +		c.Taint()
 +		return
@@ -4700,19 +4935,24 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +		c.lastItemOutputSHA = ""
 +		c.lastItemResponseID = ""
 +		c.sawStreamedOutputItem = false
++		c.pendingItems = nil
++		c.pendingUnkeyed = 0
 +		c.mu.Unlock()
 +		c.Taint()
 +		return
 +	}
-+	if len(output) > 0 && c.sawStreamedOutputItem && completedSHA != "" && c.lastItemOutputSHA != completedSHA {
-+		// Streamed response.output_item.done sequence contradicted response.completed.output[]
-+		// (e.g. a subsequent tool call or approval request cleared the preamble, yet response.completed
-+		// omitted that item and tried to resurrect earlier text as the final answer).
++	hasPendingItems := len(c.pendingItems) > 0 || c.pendingUnkeyed > 0
++	if len(output) > 0 && c.sawStreamedOutputItem && completedSHA != "" && (c.lastItemOutputSHA != completedSHA || hasPendingItems) {
++		// Streamed output-item lifecycle contradicted response.completed.output[]
++		// (e.g. a subsequent or still-unfinished tool call/approval request invalidated earlier text,
++		// yet response.completed omitted that item and tried to resurrect earlier text as final answer).
 +		c.modelMismatch = true
 +		c.invalid = true
 +		c.lastItemOutputSHA = ""
 +		c.lastItemResponseID = ""
 +		c.sawStreamedOutputItem = false
++		c.pendingItems = nil
++		c.pendingUnkeyed = 0
 +		c.mu.Unlock()
 +		c.Taint()
 +		return
@@ -4721,7 +4961,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +	c.lastResponseIDSHA = sha256Hex(id)
 +	if len(output) > 0 {
 +		c.lastOutputSHA = completedSHA
-+	} else if c.lastItemOutputSHA != "" && c.lastItemResponseID != "" && c.lastItemResponseID == id {
++	} else if !hasPendingItems && c.lastItemOutputSHA != "" && c.lastItemResponseID != "" && c.lastItemResponseID == id {
 +		c.lastOutputSHA = c.lastItemOutputSHA
 +	} else {
 +		c.lastOutputSHA = ""
@@ -4729,6 +4969,8 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +	c.lastItemOutputSHA = ""
 +	c.lastItemResponseID = ""
 +	c.sawStreamedOutputItem = false
++	c.pendingItems = nil
++	c.pendingUnkeyed = 0
 +	c.mu.Unlock()
 +}
 +
@@ -4746,13 +4988,13 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +
 +var (
 +	sseEventSchemaKeys = map[string]struct{}{
-+		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {}, "item": {},
++		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {}, "item": {}, "output_index": {},
 +	}
 +	sseResponseSchemaKeys = map[string]struct{}{
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
 +	}
 +	sseItemSchemaKeys = map[string]struct{}{
-+		"type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
++		"id": {}, "type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
 +		"type": {}, "text": {},
@@ -4975,6 +5217,30 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +	respOutput json.RawMessage
 +	respItems  []responseOutputItem
 +	itemFields map[string]json.RawMessage
++	itemKey    string
++}
++
++func extractStrictItemKey(evFields, itemFields map[string]json.RawMessage) (string, bool) {
++	if itemFields != nil {
++		itemID, okID := exactOptionalString(itemFields, "id")
++		if !okID {
++			return "", false
++		}
++		if itemID != "" {
++			return "id:" + itemID, true
++		}
++	}
++	if rawIdx, exists := evFields["output_index"]; exists {
++		trimmed := bytes.TrimSpace(rawIdx)
++		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
++			var idx int64
++			if err := json.Unmarshal(trimmed, &idx); err != nil {
++				return "", false
++			}
++			return "idx:" + strconv.FormatInt(idx, 10), true
++		}
++	}
++	return "", true
 +}
 +
 +// validateStrictFrameIdentity performs shared strict JSON, model-binding, and response-ID
@@ -5135,6 +5401,11 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +			}
 +		}
 +	}
++	itemKey, okItemKey := extractStrictItemKey(evFields, itemFields)
++	if !okItemKey {
++		c.taintStreamAnomaly()
++		return out, false
++	}
 +	out = parsedStrictFrame{
 +		evType:     evType,
 +		respID:     respID,
@@ -5144,6 +5415,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +		respOutput: respOutput,
 +		respItems:  respItems,
 +		itemFields: itemFields,
++		itemKey:    itemKey,
 +	}
 +	return out, true
 +}
@@ -5230,7 +5502,34 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +	switch frame.evType {
 +	case "response.created", "response.in_progress":
 +		// streamResponseID is already validated and locked above for every frame carrying a response ID.
++	case "response.output_item.added":
++		// Any newly started output item (tool call, approval request, or subsequent message) supersedes
++		// earlier completed assistant preamble text and stays pending until its matching done event arrives.
++		c.mu.Lock()
++		c.sawStreamedOutputItem = true
++		c.lastItemOutputSHA = ""
++		c.lastItemResponseID = ""
++		if frame.itemKey != "" {
++			if c.pendingItems == nil {
++				c.pendingItems = make(map[string]struct{})
++			}
++			c.pendingItems[frame.itemKey] = struct{}{}
++		} else {
++			c.pendingUnkeyed++
++		}
++		c.mu.Unlock()
 +	case "response.output_item.done":
++		c.mu.Lock()
++		if frame.itemKey != "" {
++			if _, ok := c.pendingItems[frame.itemKey]; ok {
++				delete(c.pendingItems, frame.itemKey)
++			} else if c.pendingUnkeyed > 0 {
++				c.pendingUnkeyed--
++			}
++		} else if c.pendingUnkeyed > 0 {
++			c.pendingUnkeyed--
++		}
++		c.mu.Unlock()
 +		if frame.itemFields != nil {
 +			itemType, ok1 := exactOptionalString(frame.itemFields, "type")
 +			itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
@@ -5290,11 +5589,20 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +		c.invalid = true
 +		c.lastItemOutputSHA = ""
 +		c.lastItemResponseID = ""
++		c.pendingItems = nil
++		c.pendingUnkeyed = 0
 +		alreadyCompleted := c.observedCompleted
 +		c.mu.Unlock()
 +		if alreadyCompleted {
 +			c.Taint()
 +		}
++	default:
++		// Any other mid-stream progress/delta event (content_part, output_text.delta, tool/mcp call
++		// progress, etc.) invalidates any prior completed assistant text until a newer final message finishes.
++		c.mu.Lock()
++		c.lastItemOutputSHA = ""
++		c.lastItemResponseID = ""
++		c.mu.Unlock()
 +	}
 +}
 +
@@ -6996,10 +7304,10 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfff
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..5d23e1ea17f0560cdb3878b14038767b21ba7716 100644
+index e69de29..3ecc412 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3339 @@
+@@ -0,0 +1,3370 @@
 +package preflightreceipt
 +
 +import (
@@ -10337,5 +10645,36 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..5d23e1ea17f0560cdb3878b14038767b
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_res","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Preamble before tool"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555511", "019d0000-0000-7000-8000-888888888111", sseResurrect); st != SealRejected {
 +		t.Fatalf("contradictory response.completed resurrecting cleared preamble = %v, want SealRejected", st)
++	}
++
++	// 7. Unfinished response.output_item.added (without done) after unphased preamble + empty completed output
++	//    MUST clear last_output_sha256 (Sol P1 #1 + Astra P1 #3, PR #2280 R10).
++	lAdded := "review-d1111111-2222-4333-8444-555555555512"
++	sAdded := "019d0000-0000-7000-8000-888888888112"
++	sseAddedNoDone := "data: " + `{"type":"response.created","response":{"id":"resp_add","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Starting approval next"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","item":{"type":"mcp_approval_request","id":"mcpr_open"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_add","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, lAdded, sAdded, sseAddedNoDone); st != SealOK {
++		t.Fatalf("output_item.added without done seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lAdded); r.LastOutputSHA256 != "" {
++		t.Fatalf("output_item.added without done retained preamble hash %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 8. Interleaved unfinished tool item (added before an assistant message finished, never done)
++	//    MUST prevent certifying the assistant message as final answer on both empty and non-empty completed.
++	lInterleaved := "review-d1111111-2222-4333-8444-555555555513"
++	sInterleaved := "019d0000-0000-7000-8000-888888888113"
++	sseInterleaved := "data: " + `{"type":"response.created","response":{"id":"resp_int","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_open","type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Interleaved preamble"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_int","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, lInterleaved, sInterleaved, sseInterleaved); st != SealOK {
++		t.Fatalf("interleaved unfinished tool seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lInterleaved); r.LastOutputSHA256 != "" {
++		t.Fatalf("interleaved unfinished tool retained last_output_sha256 %q, want empty", r.LastOutputSHA256)
 +	}
 +}

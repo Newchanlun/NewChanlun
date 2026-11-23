@@ -377,24 +377,35 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             terminal, detail, status = None, "流在终态事件前结束", None
+            data_lines: list[str] = []
             for raw in response.read().splitlines():
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
-                line = raw.decode("utf-8", "replace").strip()
+                line = raw.decode("utf-8", "replace")
+                if line == "":
+                    if data_lines:
+                        joined = "\n".join(data_lines).strip()
+                        data_lines = []
+                        if joined.startswith("{"):
+                            event = json.loads(joined)
+                            if event.get("type") in TERMINAL_EVENTS:
+                                if terminal is not None:
+                                    detail = "终态事件后出现另一终态"
+                                    break
+                                terminal = event.get("type")
+                                inner = event.get("response") if isinstance(event.get("response"), dict) else {}
+                                # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
+                                status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
+                                    None if inner.get("status") is None else "other")
+                                detail = inner.get("error") or event.get("error") or event.get("message")
+                                # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
+                    continue
                 if line.startswith("data:"):
-                    event = json.loads(line[5:]) if line[5:].strip().startswith("{") else {}
-                    if event.get("type") in TERMINAL_EVENTS:
-                        if terminal is not None:
-                            detail = "终态事件后出现另一终态"
-                            break
-                        terminal = event.get("type")
-                        inner = event.get("response") if isinstance(event.get("response"), dict) else {}
-                        # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
-                        status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
-                            None if inner.get("status") is None else "other")
-                        detail = inner.get("error") or event.get("error") or event.get("message")
-                        # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
+                    val = line[5:]
+                    if val.startswith(" "):
+                        val = val[1:]
+                    data_lines.append(val)
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
             # 事件名成功还不够：响应体自报 failed/cancelled 或带 error 也算失败。

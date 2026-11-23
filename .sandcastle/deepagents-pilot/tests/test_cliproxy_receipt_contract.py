@@ -463,3 +463,56 @@ def test_generated_go_codex_and_review_receipts_consumed_by_python():
         expected_response_id_sha256="a" * 64,
         expected_output_sha256="b" * 64,
     ) is None
+
+
+def test_round_trip_http_accepts_multiline_sse_json_event(monkeypatch):
+    """Go 严格 SSE 支持按空行拼接多行 JSON data，Python 往返探针必须保持同构。"""
+    payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed",\n'
+        b'data: "response":{"status":"completed"}}\n'
+        b"\n"
+    )
+
+    class _FakeResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return payload
+
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    result = preflight._round_trip_http("http://127.0.0.1:8318", "k", SOL, "preflight-multiline", preflight.Deadline(5))
+    assert result["ok"] is True
+    assert result["terminal"] == "response.completed"
+    assert result["status"] == "completed"
+
+
+def test_round_trip_http_rejects_unclosed_multiline_sse_event(monkeypatch):
+    payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed",\n'
+        b'data: "response":{"status":"completed"}}\n'
+    )
+
+    class _FakeResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return payload
+
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    result = preflight._round_trip_http("http://127.0.0.1:8318", "k", SOL, "preflight-unclosed", preflight.Deadline(5))
+    assert result["ok"] is False
+    assert result["terminal"] is None
