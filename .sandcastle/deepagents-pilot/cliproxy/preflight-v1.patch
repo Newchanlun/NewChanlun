@@ -1,5 +1,5 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..c7187d0 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..c7187d0f707c638b62c8be522226bf4282049c93 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,144 @@
@@ -149,7 +149,7 @@ index e69de29..c7187d0 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..023455e
+index 0000000000000000000000000000000000000000..023455e604241691bd3fd0963bc62884f89db1af
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
 @@ -0,0 +1,168 @@
@@ -322,7 +322,7 @@ index 0000000..023455e
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..6ee3b81 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..6ee3b8132481b6de556a4034205470b12e29df62 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
 @@ -0,0 +1,1205 @@
@@ -1532,7 +1532,7 @@ index e69de29..6ee3b81 100644
 +	return n.r.Close()
 +}
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
-index e2b039a..07de86f 100644
+index e2b039a85631bff4fbd2c54a4dacc7b3ce3f5ab8..07de86fb038fa9260928f91b3451a4194caccc74 100644
 --- a/internal/api/server_routes.go
 +++ b/internal/api/server_routes.go
 @@ -65,6 +65,7 @@ func (s *Server) setupRoutes() {
@@ -1576,7 +1576,7 @@ index e2b039a..07de86f 100644
  		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
  		v1beta.POST("/interactions", geminiHandlers.Interactions)
 diff --git a/internal/pluginhost/preflight_receipt_test.go b/internal/pluginhost/preflight_receipt_test.go
-index e69de29..6cebb36 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..6cebb3601c90b8736d1e91ced70c7ebaf5c6f567 100644
 --- a/internal/pluginhost/preflight_receipt_test.go
 +++ b/internal/pluginhost/preflight_receipt_test.go
 @@ -0,0 +1,19 @@
@@ -1600,7 +1600,7 @@ index e69de29..6cebb36 100644
 +	}
 +}
 diff --git a/internal/pluginhost/snapshot.go b/internal/pluginhost/snapshot.go
-index 85ae6d6..69a1d19 100644
+index 85ae6d60862f83ae7638ff66421876459a17494c..69a1d19b9d7a794dbeb243b42b88a8528533b024 100644
 --- a/internal/pluginhost/snapshot.go
 +++ b/internal/pluginhost/snapshot.go
 @@ -192,3 +192,10 @@ func cloneConfigFieldValue(value any) any {
@@ -1616,10 +1616,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..97696ad
+index 0000000000000000000000000000000000000000..cad056f6284754eb8b588441afc97b473cdc330b
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,473 @@
 +package executor
 +
 +import (
@@ -2016,6 +2016,13 @@ index 0000000..97696ad
 +			sse2:     "data: " + `{"type":"response.created","response":{"id":"resp_fm_created","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" + "data: " + `{"type":"response.failed","response":{"id":"resp_fm_conflict","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"conflict"}}}` + "\n\n",
 +			wantSeal: preflightreceipt.SealRejected,
 +		},
++		{
++			name:     "conflicting output item response_id on response.failed with matching outer id and model taints launch",
++			launch:   "review-a3333333-2222-4333-8444-555555555504",
++			session:  "019d0000-0000-7000-8000-555555555524",
++			sse2:     "data: " + `{"type":"response.created","response":{"id":"resp_fm_outer","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" + "data: " + `{"type":"response.failed","response":{"id":"resp_fm_outer","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"conflict-item"},"output":[{"type":"message","role":"assistant","response_id":"resp_fm_evil_item","content":[{"type":"output_text","text":"spoof"}]}]}}` + "\n\n",
++			wantSeal: preflightreceipt.SealRejected,
++		},
 +	} {
 +		t.Run(tc.name, func(t *testing.T) {
 +			root := filepath.Join(t.TempDir(), "receipts")
@@ -2087,7 +2094,7 @@ index 0000000..97696ad
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..14689f5 100644
+index 6074124a5309eae2e2ebd644bd089d0175c40567..14689f569ffef4c7547190b25a18784d7e09dcfc 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -15,6 +15,8 @@ import (
@@ -2283,7 +2290,7 @@ index 6074124..14689f5 100644
  		if emittedCount == 0 {
  			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
-index cd725e8..c02be99 100644
+index cd725e88a6205fd0c21986ce8677e034d700199a..c02be99c03ca740fabc4aa7425f1a87a43a8e789 100644
 --- a/internal/runtime/executor/helps/proxy_helpers.go
 +++ b/internal/runtime/executor/helps/proxy_helpers.go
 @@ -15,6 +15,7 @@ import (
@@ -2322,7 +2329,7 @@ index cd725e8..c02be99 100644
  	if proxyURL != "" {
  		if transport := pooledProxyTransport(proxyURL, cfg, auth); transport != nil {
 diff --git a/sdk/api/handlers/handlers.go b/sdk/api/handlers/handlers.go
-index 2f1b89a..d20e37b 100644
+index 2f1b89a507202cd233e5554b2109eb8cd1ada6cb..d20e37bdeb443b8915939b34b6b3398fbc1ee84f 100644
 --- a/sdk/api/handlers/handlers.go
 +++ b/sdk/api/handlers/handlers.go
 @@ -7,6 +7,7 @@ import (
@@ -2342,7 +2349,7 @@ index 2f1b89a..d20e37b 100644
  	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
  		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
 diff --git a/sdk/api/handlers/handlers_execution.go b/sdk/api/handlers/handlers_execution.go
-index dff03be..b6b20c2 100644
+index dff03be5f687e16cd9b639176b5dabcfa472ab01..b6b20c218e6b34844a714e7a6329d200a7ebd6b8 100644
 --- a/sdk/api/handlers/handlers_execution.go
 +++ b/sdk/api/handlers/handlers_execution.go
 @@ -4,6 +4,7 @@ import (
@@ -2382,7 +2389,7 @@ index dff03be..b6b20c2 100644
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
 diff --git a/sdk/api/handlers/handlers_interceptors.go b/sdk/api/handlers/handlers_interceptors.go
-index 16203c4..e1d1634 100644
+index 16203c447b7ee6f2e569fc77dee6afb22859d5b5..e1d1634c1fe0e2781bb481b06a4bfbf4404020a0 100644
 --- a/sdk/api/handlers/handlers_interceptors.go
 +++ b/sdk/api/handlers/handlers_interceptors.go
 @@ -2,6 +2,7 @@ package handlers
@@ -2452,7 +2459,7 @@ index 16203c4..e1d1634 100644
  			completion.Error = err.Error()
  		}
 diff --git a/sdk/api/handlers/handlers_model_router_test.go b/sdk/api/handlers/handlers_model_router_test.go
-index 9c8d01a..b359dff 100644
+index 9c8d01a748fbd46e4de771dcf986092e14f8c3ef..b359dff86234540aa51381442183e4b806e2832c 100644
 --- a/sdk/api/handlers/handlers_model_router_test.go
 +++ b/sdk/api/handlers/handlers_model_router_test.go
 @@ -2,10 +2,13 @@ package handlers
@@ -2566,7 +2573,7 @@ index 9c8d01a..b359dff 100644
 +	checkTainted(t, l3)
 +}
 diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
-index e04fe3b..b25b42a 100644
+index e04fe3bb043d7f6e995688e9b3afdaac1c65c15d..b25b42ae47a89076cab36653146ac2d71fb9efa9 100644
 --- a/sdk/api/handlers/handlers_stream.go
 +++ b/sdk/api/handlers/handlers_stream.go
 @@ -5,6 +5,7 @@ import (
@@ -2605,7 +2612,7 @@ index e04fe3b..b25b42a 100644
  	}
  	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
-index b1a8e8c..05f948b 100644
+index b1a8e8c626f135ad557eab8b5a2b8b4dba460123..05f948be8400752a4be281e873a1c1419ce11627 100644
 --- a/sdk/cliproxy/auth/conductor_execution.go
 +++ b/sdk/cliproxy/auth/conductor_execution.go
 @@ -5,6 +5,7 @@ import (
@@ -2746,7 +2753,7 @@ index b1a8e8c..05f948b 100644
  			if rerrExec != nil {
  				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)
 diff --git a/sdk/cliproxy/auth/conductor_home.go b/sdk/cliproxy/auth/conductor_home.go
-index 26e8511..ceafacb 100644
+index 26e85115fa5b55adeee1c2b451279da39392bf6e..ceafacb5a0458487e2898ca4a18738edcf591311 100644
 --- a/sdk/cliproxy/auth/conductor_home.go
 +++ b/sdk/cliproxy/auth/conductor_home.go
 @@ -1513,7 +1513,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
@@ -2759,7 +2766,7 @@ index 26e8511..ceafacb 100644
  			if errExec != nil {
  				result.Error = resultErrorFromError(errExec)
 diff --git a/sdk/cliproxy/auth/conductor_home_execution.go b/sdk/cliproxy/auth/conductor_home_execution.go
-index 8bccc58..e78a6e2 100644
+index 8bccc582b0d896bf084e7dce03300074c2d5e6f8..e78a6e27690796cac8fa741c9b22ba1d331e61a7 100644
 --- a/sdk/cliproxy/auth/conductor_home_execution.go
 +++ b/sdk/cliproxy/auth/conductor_home_execution.go
 @@ -139,7 +139,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
@@ -2784,7 +2791,7 @@ index 8bccc58..e78a6e2 100644
  			startHomeExec := time.Now()
  			response, errExecute = execute()
 diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
-index 47f87de..3a1a2d4 100644
+index 47f87de43f9f2fb7379312637b09888cfd1a05ab..3a1a2d46b9029285fd452fe40882cc7dacd8c441 100644
 --- a/sdk/cliproxy/auth/conductor_stream.go
 +++ b/sdk/cliproxy/auth/conductor_stream.go
 @@ -438,7 +438,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
@@ -2815,7 +2822,7 @@ index 47f87de..3a1a2d4 100644
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-index e69de29..dc7290a 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..dc7290a169107e5e1aa988fe72953fd3cca4ce8f 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
 @@ -0,0 +1,201 @@
@@ -3021,7 +3028,7 @@ index e69de29..dc7290a 100644
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-index e69de29..1322c93 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..1322c939fdf0b310b8ea11df101ee594e58dc4df 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
 @@ -0,0 +1,189 @@
@@ -3216,7 +3223,7 @@ index e69de29..1322c93 100644
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_prod.go b/sdk/cliproxy/auth/preflight_roots_prod.go
 new file mode 100644
-index 0000000..26bea8d
+index 0000000000000000000000000000000000000000..26bea8decba4fff6b3eddc64c333994befb455af
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_roots_prod.go
 @@ -0,0 +1,8 @@
@@ -3230,7 +3237,7 @@ index 0000000..26bea8d
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_test_hook.go b/sdk/cliproxy/auth/preflight_roots_test_hook.go
 new file mode 100644
-index 0000000..6de513e
+index 0000000000000000000000000000000000000000..6de513ec13a7292dd86da45e75532e34749954a3
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_roots_test_hook.go
 @@ -0,0 +1,59 @@
@@ -3295,7 +3302,7 @@ index 0000000..6de513e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000..2b99cbe
+index 0000000000000000000000000000000000000000..2b99cbe7d004f483047a79602ad7087447f50a3b
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
 @@ -0,0 +1,385 @@
@@ -3686,7 +3693,7 @@ index 0000000..2b99cbe
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..36692d6
+index 0000000000000000000000000000000000000000..36692d6a114486901c812c62a16a4d6465fc5493
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
 @@ -0,0 +1,154 @@
@@ -3845,7 +3852,7 @@ index 0000000..36692d6
 +	return isAllowedTestTransport(rt)
 +}
 diff --git a/sdk/cliproxy/rtprovider.go b/sdk/cliproxy/rtprovider.go
-index ddbd342..bc1efb8 100644
+index ddbd342de7b44e86912b326202a94177f6cf0db9..bc1efb8d2dbe7adae57f14eaae98a844a5b3b4d6 100644
 --- a/sdk/cliproxy/rtprovider.go
 +++ b/sdk/cliproxy/rtprovider.go
 @@ -6,6 +6,7 @@ import (
@@ -3879,7 +3886,7 @@ index ddbd342..bc1efb8 100644
 +	return controlled
 +}
 diff --git a/sdk/cliproxy/rtprovider_test.go b/sdk/cliproxy/rtprovider_test.go
-index 8a29e48..8c01ee0 100644
+index 8a29e48cbeafe96270b84a9be5a7d6523a537c11..8c01ee0e5022832ff8f8d678c45e2805772d2d2e 100644
 --- a/sdk/cliproxy/rtprovider_test.go
 +++ b/sdk/cliproxy/rtprovider_test.go
 @@ -20,3 +20,28 @@ func TestRoundTripperForDirectBypassesProxy(t *testing.T) {
@@ -3912,10 +3919,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..72ac41f 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..dd23ae9a4a8c2d24a92f5d703a9b80fd40340cd3 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2223 @@
+@@ -0,0 +1,2368 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4080,7 +4087,18 @@ index e69de29..72ac41f 100644
 +	reviewLedger       = make(map[string]*reviewEntry)
 +	taintWriteOverflow bool
 +	tmpSeq             atomic.Uint64
++
++	rootLockMu sync.Mutex
++	rootLocks  = make(map[string]*heldRootLock)
 +)
++
++type heldRootLock struct {
++	file    *os.File
++	dev     uint64
++	ino     uint64
++	rootDev uint64
++	rootIno uint64
++}
 +
 +type Collector struct {
 +	mu                                          sync.Mutex
@@ -4517,6 +4535,7 @@ index e69de29..72ac41f 100644
 +	respStatus string
 +	respErr    json.RawMessage
 +	respOutput json.RawMessage
++	respItems  []responseOutputItem
 +	itemFields map[string]json.RawMessage
 +}
 +
@@ -4648,6 +4667,21 @@ index e69de29..72ac41f 100644
 +			return out, false
 +		}
 +	}
++	var respItems []responseOutputItem
++	if hasResponseError(respOutput) {
++		c.mu.Lock()
++		expectedItemRespID := explicitRespID
++		if expectedItemRespID == "" {
++			expectedItemRespID = c.streamResponseID
++		}
++		c.mu.Unlock()
++		var okItems bool
++		respItems, okItems = decodeExactResponseOutputItems(respOutput, expectedItemRespID)
++		if !okItems {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
 +	out = parsedStrictFrame{
 +		evType:     evType,
 +		respID:     respID,
@@ -4655,6 +4689,7 @@ index e69de29..72ac41f 100644
 +		respStatus: respStatus,
 +		respErr:    respErr,
 +		respOutput: respOutput,
++		respItems:  respItems,
 +		itemFields: itemFields,
 +	}
 +	return out, true
@@ -4758,18 +4793,7 @@ index e69de29..72ac41f 100644
 +				}
 +			}
 +		case "response.completed":
-+			c.mu.Lock()
-+			expectedRespID := frame.respID
-+			if expectedRespID == "" {
-+				expectedRespID = c.streamResponseID
-+			}
-+			c.mu.Unlock()
-+			output, ok := decodeExactResponseOutputItems(frame.respOutput, expectedRespID)
-+			if !ok {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+			c.recordCompletedResponse(frame.respID, frame.respModel, frame.respStatus, frame.respErr, output)
++			c.recordCompletedResponse(frame.respID, frame.respModel, frame.respStatus, frame.respErr, frame.respItems)
 +		case "response.done":
 +			c.taintStreamAnomaly()
 +		case "response.failed", "response.incomplete", "error":
@@ -4971,6 +4995,9 @@ index e69de29..72ac41f 100644
 +	if !reviewLaunchPattern.MatchString(launch) || !filepath.IsAbs(root) {
 +		return nil, ErrUnavailable
 +	}
++	if err := acquirePrivateRootLock(root); err != nil {
++		return nil, ErrUnavailable
++	}
 +	key := root + "\x00" + launch
 +	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), true, true)
 +	if err != nil {
@@ -5111,6 +5138,22 @@ index e69de29..72ac41f 100644
 +	}
 +}
 +
++func syncReviewAncestors(dir, root string) error {
++	if err := syncDirFn(dir); err != nil {
++		return err
++	}
++	if err := syncDirFn(root); err != nil {
++		return err
++	}
++	parent := filepath.Dir(root)
++	if parent != "" && parent != root {
++		if err := syncDirFn(parent); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
 +// SealReview seals a formal review launch once all in-flight requests have completed.
 +func SealReview(root, launch, session string) SealStatus {
 +	st, _ := SealReviewWithDigest(root, launch, session)
@@ -5119,14 +5162,19 @@ index e69de29..72ac41f 100644
 +
 +// SealReviewWithDigest seals a formal review launch once all in-flight requests have completed,
 +// and returns the SHA-256 hex digest of the durably sealed receipt.json ONLY when status is SealOK
-+// (after both launch and root directory fsyncs succeed). Consumers MUST require this confirmed digest
-+// so a pre-fsync rename visible on disk after SealUnavailable can never be accepted as a durable seal.
++// (after launch, root, and root-parent directory fsyncs succeed while holding the exclusive root writer lock).
 +func SealReviewWithDigest(root, launch, session string) (SealStatus, string) {
 +	if !reviewLaunchPattern.MatchString(launch) || !reviewSessionPattern.MatchString(session) || !filepath.IsAbs(root) {
 +		return SealRejected, ""
 +	}
-+	if _, err := checkPrivateDir(root, true); err != nil {
++	rootExists, err := checkPrivateDir(root, true)
++	if err != nil {
 +		return SealUnavailable, ""
++	}
++	if rootExists {
++		if err := acquirePrivateRootLock(root); err != nil {
++			return SealUnavailable, ""
++		}
 +	}
 +	key := root + "\x00" + launch
 +	now := time.Now()
@@ -5142,7 +5190,7 @@ index e69de29..72ac41f 100644
 +				return SealRejected, ""
 +			}
 +			if !entry.sealSynced {
-+				if syncDirFn(entry.directory) != nil || syncDirFn(root) != nil {
++				if syncReviewAncestors(entry.directory, root) != nil {
 +					return SealUnavailable, ""
 +				}
 +				entry.sealSynced = true
@@ -5178,7 +5226,7 @@ index e69de29..72ac41f 100644
 +				return SealRejected, ""
 +			}
 +			if !entry.sealSynced {
-+				if syncDirFn(entry.directory) != nil || syncDirFn(root) != nil {
++				if syncReviewAncestors(entry.directory, root) != nil {
 +					entry.mu.Unlock()
 +					finishSeal(true)
 +					return SealUnavailable, ""
@@ -5215,7 +5263,7 @@ index e69de29..72ac41f 100644
 +		//   taint & permanently close so repeat and post-restart SealReview return SealRejected.
 +		// - Once Rename replaces receipt.json with the verified, clean, quiescent sealed=true payload,
 +		//   the launch is permanently sealed against new turns/taints; SealOK + receipt_sha256 are returned
-+		//   ONLY after both launch and root directory fsyncs succeed.
++		//   ONLY after launch, root, and root-parent directory fsyncs succeed.
 +		entry.sealed = true
 +		entry.sealedAt = now.UnixNano()
 +		if entry.sealedAt < entry.finished {
@@ -5240,7 +5288,7 @@ index e69de29..72ac41f 100644
 +			finishSeal(true)
 +			return SealUnavailable, ""
 +		}
-+		if err != nil || syncDirFn(root) != nil {
++		if err != nil || syncReviewAncestors(entry.directory, root) != nil {
 +			entry.sealSynced = false
 +			entry.mu.Unlock()
 +			finishSeal(true)
@@ -5257,6 +5305,9 @@ index e69de29..72ac41f 100644
 +	}
 +	reviewMu.Unlock()
 +
++	if !rootExists {
++		return SealRejected, ""
++	}
 +	dir := filepath.Join(root, launch)
 +	diskEntry, onDisk, err := loadReviewEntryFromDisk(dir, launch, session, now)
 +	if err != nil {
@@ -5265,7 +5316,7 @@ index e69de29..72ac41f 100644
 +	if !onDisk || diskEntry == nil || !diskEntry.sealed || diskEntry.tainted || diskEntry.session != session {
 +		return SealRejected, ""
 +	}
-+	if syncDirFn(dir) != nil || syncDirFn(root) != nil {
++	if syncReviewAncestors(dir, root) != nil {
 +		return SealUnavailable, ""
 +	}
 +	if !isSHA256Hex(diskEntry.sealedReceiptSHA) {
@@ -5418,10 +5469,110 @@ index e69de29..72ac41f 100644
 +	return closeErr
 +}
 +
++func statDevIno(info os.FileInfo) (uint64, uint64, bool) {
++	if st, ok := info.Sys().(*syscall.Stat_t); ok {
++		return uint64(st.Dev), uint64(st.Ino), true
++	}
++	return 0, 0, false
++}
++
++// acquirePrivateRootLock enforces single-writer ownership over a receipt root across same-UID
++// proxy processes via a non-blocking exclusive flock on <root>/.writer.lock. If another process
++// holds the lock, calls fail closed with ErrUnavailable so two instances can never race on launch
++// reservation, in-flight accounting, or SealOK.
++func acquirePrivateRootLock(root string) error {
++	if err := ensurePrivateRoot(root); err != nil {
++		return ErrUnavailable
++	}
++	rootInfo, err := os.Lstat(root)
++	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(rootInfo) {
++		return ErrUnavailable
++	}
++	rDev, rIno, hasRootID := statDevIno(rootInfo)
++	lockPath := filepath.Join(root, ".writer.lock")
++
++	rootLockMu.Lock()
++	defer rootLockMu.Unlock()
++
++	if held := rootLocks[root]; held != nil {
++		if curLockInfo, err := os.Lstat(lockPath); err == nil && curLockInfo.Mode().IsRegular() &&
++			curLockInfo.Mode()&os.ModeSymlink == 0 && curLockInfo.Mode().Perm()&0077 == 0 && ownedByCurrentUser(curLockInfo) {
++			lDev, lIno, hasLockID := statDevIno(curLockInfo)
++			if (!hasRootID || (held.rootDev == rDev && held.rootIno == rIno)) &&
++				(!hasLockID || (held.dev == lDev && held.ino == lIno)) {
++				return nil
++			}
++		}
++		_ = held.file.Close()
++		delete(rootLocks, root)
++	}
++
++	// Best-effort prune of stale locks whose temp directories have already been removed.
++	if len(rootLocks) >= 32 {
++		for k, v := range rootLocks {
++			if _, statErr := os.Lstat(filepath.Join(k, ".writer.lock")); statErr != nil {
++				_ = v.file.Close()
++				delete(rootLocks, k)
++			}
++		}
++	}
++
++	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
++	if err != nil {
++		return ErrUnavailable
++	}
++	finfo, err := f.Stat()
++	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) {
++		_ = f.Close()
++		return ErrUnavailable
++	}
++	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
++		_ = f.Close()
++		return ErrUnavailable
++	}
++	lDev, lIno, hasLockID := statDevIno(finfo)
++	curRootInfo, err := os.Lstat(root)
++	if err != nil || !curRootInfo.IsDir() || curRootInfo.Mode()&os.ModeSymlink != 0 || curRootInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curRootInfo) {
++		_ = f.Close()
++		return ErrUnavailable
++	}
++	if curRDev, curRIno, ok := statDevIno(curRootInfo); ok && hasRootID && (curRDev != rDev || curRIno != rIno) {
++		_ = f.Close()
++		return ErrUnavailable
++	}
++	curLockInfo, err := os.Lstat(lockPath)
++	if err != nil || !curLockInfo.Mode().IsRegular() || curLockInfo.Mode()&os.ModeSymlink != 0 || curLockInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curLockInfo) {
++		_ = f.Close()
++		return ErrUnavailable
++	}
++	if curLDev, curLIno, ok := statDevIno(curLockInfo); ok && hasLockID && (curLDev != lDev || curLIno != lIno) {
++		_ = f.Close()
++		return ErrUnavailable
++	}
++	if err := syncDirFn(root); err != nil {
++		_ = f.Close()
++		return ErrUnavailable
++	}
++	rootLocks[root] = &heldRootLock{
++		file:    f,
++		dev:     lDev,
++		ino:     lIno,
++		rootDev: rDev,
++		rootIno: rIno,
++	}
++	return nil
++}
++
 +func ensurePrivateRoot(root string) error {
++	parentOfRoot := filepath.Dir(root)
 +	if _, err := os.Lstat(root); err == nil {
 +		if _, err := checkPrivateDir(root, false); err != nil {
 +			return ErrUnavailable
++		}
++		if parentOfRoot != "" && parentOfRoot != root {
++			if err := syncDirFn(parentOfRoot); err != nil {
++				return ErrUnavailable
++			}
 +		}
 +		return nil
 +	} else if !os.IsNotExist(err) {
@@ -5452,6 +5603,7 @@ index e69de29..72ac41f 100644
 +			return err
 +		}
 +		if err := syncDirFn(filepath.Dir(dir)); err != nil {
++			_ = os.Remove(dir)
 +			return err
 +		}
 +	}
@@ -5463,7 +5615,7 @@ index e69de29..72ac41f 100644
 +
 +func reservePrivateDir(directory string, allowExisting bool) error {
 +	root := filepath.Dir(directory)
-+	if err := ensurePrivateRoot(root); err != nil {
++	if err := acquirePrivateRootLock(root); err != nil {
 +		return err
 +	}
 +	err := os.Mkdir(directory, 0700)
@@ -5969,7 +6121,7 @@ index e69de29..72ac41f 100644
 +		}
 +		e.reserved = true
 +	} else {
-+		if _, err := checkPrivateDir(filepath.Dir(e.directory), false); err != nil {
++		if err := acquirePrivateRootLock(filepath.Dir(e.directory)); err != nil {
 +			return fail(false, ErrUnavailable)
 +		}
 +		if _, err := checkPrivateDir(e.directory, false); err != nil {
@@ -6140,10 +6292,10 @@ index e69de29..72ac41f 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..7ec734a 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..be922ffe0c4cf0bc7ddebbd89ac0e8fcb95f3622 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2808 @@
+@@ -0,0 +1,2911 @@
 +package preflightreceipt
 +
 +import (
@@ -6169,6 +6321,7 @@ index e69de29..7ec734a 100644
 +	"strings"
 +	"sync"
 +	"sync/atomic"
++	"syscall"
 +	"testing"
 +	"time"
 +
@@ -8937,7 +9090,8 @@ index e69de29..7ec734a 100644
 +		t.Fatalf("conflicting output item response_id = %v, want SealRejected", st)
 +	}
 +
-+	// 4. First-time root creation MUST sync root's parent dir; parent dir sync failure fails closed.
++	// 4. First-time root creation AND retries MUST sync root's parent dir; parent dir sync failure
++	//    fails closed on both first attempt and retries even if root already exists on disk.
 +	origSync := syncDirFn
 +	defer func() { syncDirFn = origSync }()
 +	parentBase := t.TempDir()
@@ -8949,6 +9103,107 @@ index e69de29..7ec734a 100644
 +		return origSync(dir)
 +	}
 +	if _, _, err := BeginReview(context.Background(), newRoot, "review-b8888888-2222-4333-8444-555555555505", "019d0000-0000-7000-8000-666666666805", "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
-+		t.Fatalf("BeginReview when root parent dir sync fails = %v, want ErrUnavailable", err)
++		t.Fatalf("first BeginReview when root parent dir sync fails = %v, want ErrUnavailable", err)
 +	}
++	// Retry on the exact same root path (even if an empty dir pre-existed) MUST still fail closed.
++	_ = os.Mkdir(newRoot, 0700)
++	if _, _, err := BeginReview(context.Background(), newRoot, "review-b8888888-2222-4333-8444-555555555506", "019d0000-0000-7000-8000-666666666806", "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("retry BeginReview when root parent dir sync still fails = %v, want ErrUnavailable", err)
++	}
++	// SealReviewWithDigest MUST ALSO return SealUnavailable while parentBase sync fails.
++	syncDirFn = origSync
++	lSync := "review-b8888888-2222-4333-8444-555555555507"
++	sSync := "019d0000-0000-7000-8000-666666666807"
++	ctxS, cS, err := BeginReview(context.Background(), newRoot, lSync, sSync, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxS, eS, err := cS.Start(ctxS, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clS := httptransport.Decorate(ctxS, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode: 200, Header: make(http.Header),
++			Body: io.NopCloser(strings.NewReader("data: " + `{"type":"response.completed","response":{"id":"resp_psync","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n")),
++			TLS:  verifiedTLSState("chatgpt.com"),
++		}, nil
++	})})
++	reqS, _ := http.NewRequestWithContext(ctxS, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respS, err := clS.Do(reqS)
++	if err != nil {
++		t.Fatal(err)
++	}
++	rawS, _ := io.ReadAll(respS.Body)
++	_ = respS.Body.Close()
++	cS.ObserveStreamChunk(rawS)
++	eS.End()
++	cS.Complete(true)
++	cS.HandlerDone(true)
++	syncDirFn = func(dir string) error {
++		if dir == parentBase {
++			return errors.New("injected parent of root dir sync error on seal")
++		}
++		return origSync(dir)
++	}
++	if st, digest := SealReviewWithDigest(newRoot, lSync, sSync); st != SealUnavailable || digest != "" {
++		t.Fatalf("SealReviewWithDigest while root parent dir sync fails = (%v, %q), want (SealUnavailable, \"\")", st, digest)
++	}
++	syncDirFn = origSync
++	if st, digest := SealReviewWithDigest(newRoot, lSync, sSync); st != SealOK || digest == "" {
++		t.Fatalf("SealReviewWithDigest after root parent dir sync recovers = (%v, %q), want (SealOK, non-empty)", st, digest)
++	}
++}
++
++func TestReviewReceiptSingleWriterRootLockBlocksSecondInstance(t *testing.T) {
++	// Sol P1 #3 (PR #2280 R5): an exclusive non-blocking flock on <root>/.writer.lock prevents a
++	// second same-UID proxy instance from reserving launches or confirming SealOK on a shared root.
++	root := filepath.Join(t.TempDir(), "shared-root")
++	if err := os.Mkdir(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	lockPath := filepath.Join(root, ".writer.lock")
++	peerFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(lockPath, 0600); err != nil {
++		_ = peerFile.Close()
++		t.Fatal(err)
++	}
++	// Hold exclusive BSD flock on an independent open file description (simulates another proxy process).
++	if err := syscall.Flock(int(peerFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
++		_ = peerFile.Close()
++		t.Fatal(err)
++	}
++	closed := false
++	t.Cleanup(func() {
++		if !closed {
++			_ = peerFile.Close()
++		}
++	})
++
++	launch := "review-b9999999-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-666666666901"
++	if _, err := ReserveReview(root, launch); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveReview while peer holds root flock = %v, want ErrUnavailable", err)
++	}
++	if _, _, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("BeginReview while peer holds root flock = %v, want ErrUnavailable", err)
++	}
++	if st, digest := SealReviewWithDigest(root, launch, session); st != SealUnavailable || digest != "" {
++		t.Fatalf("SealReviewWithDigest while peer holds root flock = (%v, %q), want (SealUnavailable, \"\")", st, digest)
++	}
++
++	// Once peer exits (releases flock), this instance can acquire ownership and reserve normally.
++	_ = peerFile.Close()
++	closed = true
++	res, err := ReserveReview(root, launch)
++	if err != nil {
++		t.Fatalf("ReserveReview after peer released root flock = %v, want nil", err)
++	}
++	res.Release()
 +}
