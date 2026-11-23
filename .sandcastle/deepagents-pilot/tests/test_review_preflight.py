@@ -1436,10 +1436,13 @@ def _receipt(tmp_path, routes=None, **changes):
                "started_ns": now - 1_000_000, "finished_ns": now, "complete": True,
                "routes": routes if routes is not None else ["claude@api.anthropic.com", "claude@api.anthropic.com"]}
     payload.update(changes)
+    os.chmod(tmp_path, 0o700)
     directory = tmp_path / RECEIPT_SESSION
-    directory.mkdir(exist_ok=True)
+    directory.mkdir(exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
     path = directory / "receipt.json"
     path.write_text(json.dumps(payload))
+    os.chmod(path, 0o600)
     return path
 
 
@@ -1479,6 +1482,7 @@ def test_receipt_partial_rotation_and_delayed_publish(tmp_path):
     data = path.read_bytes()
     path.unlink()
     pending.write_bytes(data)
+    os.chmod(pending, 0o600)
     timer = threading.Timer(0.03, lambda: pending.rename(path))
     timer.start()
     try:
