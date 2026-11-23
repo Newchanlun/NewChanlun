@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..c7187d0f707c638b62c8be522226bf4282049c93 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f977dd46a1e42efbb611b17826e02c3314ed948d 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,143 @@
 +package middleware
 +
 +import (
@@ -10,7 +10,6 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..c7187d0f707c638b62c8be522226bf42
 +	"errors"
 +	"net/http"
 +	"os"
-+	"strings"
 +	"time"
 +
 +	"github.com/gin-gonic/gin"
@@ -22,7 +21,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..c7187d0f707c638b62c8be522226bf42
 +	return func(c *gin.Context) {
 +		session := c.GetHeader("Session-Id")
 +		launch := c.GetHeader(preflightreceipt.ReviewHeader)
-+		isPreflight := strings.HasPrefix(session, "preflight-")
++		isPreflight := preflightreceipt.ValidPreflightSession(session)
 +		hasReviewHeader := launch != ""
 +		if !isPreflight && !hasReviewHeader {
 +			c.Next()
@@ -322,10 +321,10 @@ index 0000000000000000000000000000000000000000..023455e604241691bd3fd0963bc62884
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..9e38e66bc3f6f37156818773903d58584edf6b3e 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..5ff3f08f58e4ca010074774d8bc908e41a559f33 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1276 @@
+@@ -0,0 +1,1283 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -1360,13 +1359,20 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..9e38e66bc3f6f37156818773903d5858
 +		if resPre.Code != http.StatusServiceUnavailable || len(models) != 0 {
 +			t.Fatalf("preflight request escaped when receipt dir unset: status=%d calls=%d", resPre.Code, len(models))
 +		}
-+		// Ordinary untagged traffic continues working unchanged.
++		// Ordinary untagged traffic (including non-UUIDv4 Session-Id like "preflight-demo") continues working unchanged.
 +		resOrd := send("", "ordinary-session")
 +		if resOrd.Code != http.StatusOK {
 +			t.Fatalf("ordinary traffic broken when receipt dir unset: status=%d body=%s", resOrd.Code, resOrd.Body.String())
 +		}
 +		if got := <-models; got != "gpt-6.2-sol" {
 +			t.Fatalf("ordinary traffic upstream model = %q", got)
++		}
++		resDemo := send("", "preflight-demo")
++		if resDemo.Code != http.StatusOK {
++			t.Fatalf("non-UUIDv4 preflight-demo session wrongly blocked when receipt dir unset: status=%d body=%s", resDemo.Code, resDemo.Body.String())
++		}
++		if got := <-models; got != "gpt-6.2-sol" {
++			t.Fatalf("preflight-demo upstream model = %q", got)
 +		}
 +	})
 +
@@ -1687,10 +1693,10 @@ index 85ae6d60862f83ae7638ff66421876459a17494c..69a1d19b9d7a794dbeb243b42b88a852
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..93c3ccf64e062e54d719f7991497a5577f4d8bc9
+index 0000000000000000000000000000000000000000..fcd4ba1f56433e0e6f75dacf3c1d27c3ffdca17d
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,587 @@
 +package executor
 +
 +import (
@@ -2101,6 +2107,13 @@ index 0000000000000000000000000000000000000000..93c3ccf64e062e54d719f7991497a557
 +			sse2:     "data: " + `{"type":"response.failed","response":{"status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"conflict-items"},"output":[{"type":"message","role":"assistant","response_id":"resp_fm_a","content":[]},{"type":"message","role":"assistant","response_id":"resp_fm_b","content":[]}]}}` + "\n\n",
 +			wantSeal: preflightreceipt.SealRejected,
 +		},
++		{
++			name:     "mismatched SSE event header on response.failed with matching model and id taints launch",
++			launch:   "review-a3333333-2222-4333-8444-555555555506",
++			session:  "019d0000-0000-7000-8000-555555555526",
++			sse2:     "event: response.completed\ndata: " + `{"type":"response.failed","response":{"id":"resp_fm_ev","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"event-mismatch"}}}` + "\n\n",
++			wantSeal: preflightreceipt.SealRejected,
++		},
 +	} {
 +		t.Run(tc.name, func(t *testing.T) {
 +			root := filepath.Join(t.TempDir(), "receipts")
@@ -2171,19 +2184,111 @@ index 0000000000000000000000000000000000000000..93c3ccf64e062e54d719f7991497a557
 +		})
 +	}
 +}
++
++func TestReviewReceiptCodexExecutorMultiLineSSEAndEmptyDataCap(t *testing.T) {
++	// Sol P1 #1 + Astra P2 #3/#4 (PR #2280 R9):
++	// 1. Valid multi-line JSON SSE response.completed through native CodexExecutor seals cleanly.
++	// 2. Excess empty data: lines (>4096) in one SSE event taint and fail closed without quadratic work.
++	cfg := &config.Config{}
++	exec := NewCodexExecutor(cfg)
++	auth := &cliproxyauth.Auth{
++		ID:       "codex-multiline-test",
++		Provider: "codex",
++		Metadata: map[string]any{"access_token": "offline-fake"},
++	}
++	tlsState := preflightCodexVerifiedTLS(t, "chatgpt.com")
++	req := cliproxyexecutor.Request{
++		Model:   "gpt-6.2-sol",
++		Payload: []byte(`{"model":"gpt-6.2-sol","stream":true,"input":"multiline"}`),
++	}
++	opts := cliproxyexecutor.Options{
++		Stream:         true,
++		SourceFormat:   sdktranslator.FormatOpenAIResponse,
++		ResponseFormat: sdktranslator.FormatOpenAIResponse,
++	}
++
++	t.Run("valid multiline JSON response.completed seals through native CodexExecutor", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-a4444444-2222-4333-8444-555555555501"
++		session := "019d0000-0000-7000-8000-555555555541"
++		sseMulti := "event: response.created\n" +
++			"data: {\"type\":\"response.created\",\n" +
++			"data: \"response\":{\"id\":\"resp_ml_exec\",\"status\":\"in_progress\",\"model\":\"gpt-6.2-sol\"}}\n\n" +
++			"event: response.completed\n" +
++			"data: {\"type\":\"response.completed\",\n" +
++			"data: \"response\":{\"id\":\"resp_ml_exec\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"VERDICT: PASS\"}]}]}}\n\n"
++		ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseMulti))
++		}}
++		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++		stream, err := exec.ExecuteStream(ctx, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for chunk := range stream.Chunks {
++			if chunk.Err != nil {
++				t.Fatalf("multiline chunk err: %v", chunk.Err)
++			}
++			if chunk.Payload != nil {
++				c.ObserveStreamChunk(chunk.Payload)
++			}
++		}
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if st, digest := preflightreceipt.SealReviewWithDigest(root, launch, session); st != preflightreceipt.SealOK || digest == "" {
++			t.Fatalf("multiline native CodexExecutor SealReviewWithDigest = (%v, %q), want (SealOK, non-empty)", st, digest)
++		}
++	})
++
++	t.Run("excess empty data lines fail closed without unbounded growth", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-a4444444-2222-4333-8444-555555555502"
++		session := "019d0000-0000-7000-8000-555555555542"
++		sseFlood := strings.Repeat("data:\n", 4200) +
++			`data: {"type":"response.completed","response":{"id":"resp_flood","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++		ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseFlood))
++		}}
++		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++		stream, err := exec.ExecuteStream(ctx, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for chunk := range stream.Chunks {
++			if chunk.Err == nil && chunk.Payload != nil {
++				c.ObserveStreamChunk(chunk.Payload)
++			}
++		}
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++			t.Fatalf("empty data line flood SealReview = %v, want SealRejected", st)
++		}
++	})
++}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124a5309eae2e2ebd644bd089d0175c40567..d0d336dc9397b9e162fc7518384dbeecce868fbe 100644
+index 6074124a5309eae2e2ebd644bd089d0175c40567..fba88c259f0fd39c5ade8478cff1c84c61d07567 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
-@@ -3,6 +3,7 @@ package executor
- import (
- 	"bytes"
- 	"context"
-+	"encoding/json"
- 	"io"
- 	"net/http"
- 	"strings"
-@@ -15,6 +16,8 @@ import (
+@@ -15,6 +15,8 @@ import (
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
  	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -2192,7 +2297,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..d0d336dc9397b9e162fc7518384dbeec
  	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
  	log "github.com/sirupsen/logrus"
  )
-@@ -154,7 +157,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -154,7 +156,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
@@ -2204,7 +2309,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..d0d336dc9397b9e162fc7518384dbeec
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,27 +450,121 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +449,285 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -2248,10 +2353,21 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..d0d336dc9397b9e162fc7518384dbeec
 +			}
  		}()
 +		const maxPendingStrictTerminalBytes = 8 << 20
++		const maxPendingStrictTerminalLines = 4096
 +		var pendingStrictTerminal []cliproxyexecutor.StreamChunk
 +		pendingStrictBytes := 0
++		var currentEventChunks []cliproxyexecutor.StreamChunk
++		currentEventChunkBytes := 0
++		var sseEventName string
++		sseHasEvent := false
 +		var sseEventData [][]byte
 +		sseEventDataBytes := 0
++		stripOneSpace := func(b []byte) []byte {
++			if len(b) > 0 && b[0] == ' ' {
++				return b[1:]
++			}
++			return b
++		}
  		for scanner.Scan() {
  			line := scanner.Bytes()
  			var translatedLine []byte
@@ -2259,131 +2375,240 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..d0d336dc9397b9e162fc7518384dbeec
  			isIncompleteEvent := false
  
 -			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
-+			if len(line) == 0 {
-+				translatedLine = []byte{}
-+				if strictReview && len(sseEventData) > 0 {
-+					joined := bytes.TrimSpace(bytes.Join(sseEventData, []byte{'\n'}))
++			if holdTerminalUntilEOF {
++				if len(line) == 0 {
++					var joined []byte
++					if len(sseEventData) > 0 {
++						joined = bytes.TrimSpace(bytes.Join(sseEventData, []byte{'\n'}))
++					}
++					evName, hasEv := sseEventName, sseHasEvent
++					sseEventName = ""
++					sseHasEvent = false
++					sseEventData = nil
++					sseEventDataBytes = 0
++
 +					if len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]")) {
++						eventPayload := helps.RestoreCodexMultiAgentV2Response(joined, optimizeMultiAgentV2)
++						observeCodexTokenEvent(reporter, eventPayload)
++						if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(eventPayload, e.modelLevelCooling()); ok {
++							if strictReview {
++								if pc := preflightreceipt.From(ctx); pc != nil {
++									pc.ValidateStrictEvent(evName, hasEv, joined)
++									if sawStrictTerminal {
++										pc.Taint()
++									}
++								}
++							}
++							currentEventChunks = nil
++							currentEventChunkBytes = 0
++							if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
++								helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
++								reporter.PublishFailure(ctx, errClearReplay)
++								select {
++								case out <- cliproxyexecutor.StreamChunk{Err: errClearReplay}:
++								case <-ctx.Done():
++								}
++								return
++							}
++							helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
++							reporter.PublishFailure(ctx, streamErr)
++							select {
++							case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
++							case <-ctx.Done():
++							}
++							return
++						}
++						if helps.HasMeaningfulCodexOutputDelta(eventPayload) {
++							sawOutputDelta = true
++						}
++						if helps.IsCodexTerminalEmptyIncomplete(eventPayload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
++							if strictReview {
++								if pc := preflightreceipt.From(ctx); pc != nil {
++									pc.ValidateStrictEvent(evName, hasEv, joined)
++									if sawStrictTerminal {
++										pc.Taint()
++									}
++								}
++							}
++							currentEventChunks = nil
++							currentEventChunkBytes = 0
++							streamErr := newCodexEmptyIncompleteStreamError()
++							helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
++							reporter.PublishFailure(ctx, streamErr)
++							select {
++							case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
++							case <-ctx.Done():
++							}
++							return
++						}
++						if strictReview {
++							if pc := preflightreceipt.From(ctx); pc != nil {
++								pc.ValidateStrictEvent(evName, hasEv, joined)
++							}
++						}
++						eventType := ojson.GetBytesNoCopy(eventPayload, "type").String()
++						switch eventType {
++						case "response.output_item.done":
++							collectCodexOutputItemDone(eventPayload, outputItemsByIndex, &outputItemsFallback)
++						case "response.completed", "response.incomplete", "response.done":
++							terminalSuccess = true
++							isIncompleteEvent = eventType == "response.incomplete"
++							normalized := normalizeCodexWebsocketCompletion(eventPayload)
++							if detail, ok := helps.ParseCodexUsageWithOutputItems(normalized, outputItemsByIndex, outputItemsFallback); ok {
++								reporter.Publish(ctx, detail)
++							} else {
++								reporter.EnsurePublished(ctx)
++							}
++							publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, normalized, outputItemsByIndex, outputItemsFallback)
++							if !preserveNativeOutput {
++								normalized = patchCodexCompletedOutput(normalized, outputItemsByIndex, outputItemsFallback)
++							}
++							if eventType == "response.completed" || eventType == "response.done" {
++								cacheCodexReasoningReplayFromCompleted(replayScope, normalized)
++							}
++						}
++					} else if strictReview && hasEv && len(joined) > 0 {
 +						if pc := preflightreceipt.From(ctx); pc != nil {
-+							pc.ValidateStrictFrameModel(joined)
++							pc.ValidateStrictEvent(evName, hasEv, joined)
 +						}
 +					}
++
++					blankChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, []byte{}, &param, claudeInputTokens)
++					for i := range blankChunks {
++						if len(currentEventChunks) >= maxPendingStrictTerminalLines || currentEventChunkBytes+len(blankChunks[i])+1 > maxPendingStrictTerminalBytes {
++							pendingStrictTerminal = nil
++							pendingStrictBytes = 0
++							currentEventChunks = nil
++							currentEventChunkBytes = 0
++							failPostTerminal()
++							return
++						}
++						currentEventChunkBytes += len(blankChunks[i]) + 1
++						currentEventChunks = append(currentEventChunks, cliproxyexecutor.StreamChunk{Payload: blankChunks[i], Incomplete: isIncompleteEvent})
++					}
++					if sawStrictTerminal {
++						if len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]")) {
++							pendingStrictTerminal = nil
++							pendingStrictBytes = 0
++							currentEventChunks = nil
++							currentEventChunkBytes = 0
++							failPostTerminal()
++							return
++						}
++						for _, ch := range currentEventChunks {
++							if len(pendingStrictTerminal) >= maxPendingStrictTerminalLines || pendingStrictBytes+len(ch.Payload)+1 > maxPendingStrictTerminalBytes {
++								pendingStrictTerminal = nil
++								pendingStrictBytes = 0
++								currentEventChunks = nil
++								currentEventChunkBytes = 0
++								failPostTerminal()
++								return
++							}
++							pendingStrictBytes += len(ch.Payload) + 1
++							pendingStrictTerminal = append(pendingStrictTerminal, ch)
++						}
++					} else if terminalSuccess {
++						for _, ch := range currentEventChunks {
++							if len(pendingStrictTerminal) >= maxPendingStrictTerminalLines || pendingStrictBytes+len(ch.Payload)+1 > maxPendingStrictTerminalBytes {
++								pendingStrictTerminal = nil
++								pendingStrictBytes = 0
++								currentEventChunks = nil
++								currentEventChunkBytes = 0
++								failPostTerminal()
++								return
++							}
++							pendingStrictBytes += len(ch.Payload) + 1
++							ch.Incomplete = isIncompleteEvent
++							pendingStrictTerminal = append(pendingStrictTerminal, ch)
++						}
++						if isIncompleteEvent && len(currentEventChunks) == 0 {
++							pendingStrictTerminal = append(pendingStrictTerminal, cliproxyexecutor.StreamChunk{Incomplete: true})
++						}
++						sawStrictTerminal = true
++						sawStrictTerminalBlankLine = true
++					} else {
++						for _, ch := range currentEventChunks {
++							select {
++							case out <- ch:
++								if len(ch.Payload) > 0 {
++									emittedCount++
++								}
++							case <-ctx.Done():
++								return
++							}
++						}
++					}
++					currentEventChunks = nil
++					currentEventChunkBytes = 0
++					continue
 +				}
-+				sseEventData = nil
-+				sseEventDataBytes = 0
-+				if holdTerminalUntilEOF && sawStrictTerminal {
-+					sawStrictTerminalBlankLine = true
++
++				if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
++					translatedLine = transformed
++				} else if bytes.HasPrefix(line, dataTag) {
++					rawData := stripOneSpace(line[5:])
++					trimmedData := bytes.TrimSpace(rawData)
++					if sawStrictTerminal && sawStrictTerminalBlankLine && len(trimmedData) > 0 && !bytes.Equal(trimmedData, []byte("[DONE]")) {
++						pendingStrictTerminal = nil
++						pendingStrictBytes = 0
++						currentEventChunks = nil
++						currentEventChunkBytes = 0
++						failPostTerminal()
++						return
++					}
++					if len(sseEventData) >= maxPendingStrictTerminalLines || sseEventDataBytes+len(rawData)+1 > maxPendingStrictTerminalBytes {
++						pendingStrictTerminal = nil
++						pendingStrictBytes = 0
++						currentEventChunks = nil
++						currentEventChunkBytes = 0
++						failPostTerminal()
++						return
++					}
++					sseEventData = append(sseEventData, bytes.Clone(rawData))
++					sseEventDataBytes += len(rawData) + 1
++					translatedLine = bytes.Clone(line)
++				} else {
++					if bytes.HasPrefix(line, []byte("event:")) {
++						sseEventName = string(stripOneSpace(line[6:]))
++						sseHasEvent = true
++					}
++					translatedLine = bytes.Clone(line)
 +				}
++
++				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
++				for i := range chunks {
++					if len(currentEventChunks) >= maxPendingStrictTerminalLines || currentEventChunkBytes+len(chunks[i])+1 > maxPendingStrictTerminalBytes {
++						pendingStrictTerminal = nil
++						pendingStrictBytes = 0
++						currentEventChunks = nil
++						currentEventChunkBytes = 0
++						failPostTerminal()
++						return
++					}
++					currentEventChunkBytes += len(chunks[i]) + 1
++					currentEventChunks = append(currentEventChunks, cliproxyexecutor.StreamChunk{Payload: chunks[i]})
++				}
++				continue
++			}
++
++			if len(line) == 0 {
++				translatedLine = []byte{}
 +			} else if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-+				if holdTerminalUntilEOF && sawStrictTerminal && sawStrictTerminalBlankLine && len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
-+					// Any SSE data event after a completed terminal event contradicts terminal completion;
-+					// fail closed immediately without buffering arbitrary trailing payload bytes in memory.
-+					pendingStrictTerminal = nil
-+					pendingStrictBytes = 0
-+					failPostTerminal()
-+					return
-+				}
- 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
- 				observeCodexTokenEvent(reporter, data)
- 				translatedLine = append([]byte("data: "), data...)
- 				eventType := ojson.GetBytesNoCopy(data, "type").String()
-+				if holdTerminalUntilEOF {
-+					rawData := line[5:]
-+					if len(rawData) > 0 && rawData[0] == ' ' {
-+						rawData = rawData[1:]
-+					}
-+					if sseEventDataBytes+len(rawData) <= maxPendingStrictTerminalBytes {
-+						sseEventData = append(sseEventData, bytes.Clone(rawData))
-+						sseEventDataBytes += len(rawData)
-+					} else {
-+						pendingStrictTerminal = nil
-+						pendingStrictBytes = 0
-+						failPostTerminal()
-+						return
-+					}
-+					if eventType == "" && len(sseEventData) > 1 {
-+						joined := bytes.TrimSpace(bytes.Join(sseEventData, []byte{'\n'}))
-+						if json.Valid(joined) {
-+							joinedType := ojson.GetBytesNoCopy(joined, "type").String()
-+							switch joinedType {
-+							case "response.completed", "response.incomplete", "response.done":
-+								terminalSuccess = true
-+								isIncompleteEvent = joinedType == "response.incomplete"
-+							}
-+						}
-+					}
-+				}
- 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
-+					if strictReview {
-+						if pc := preflightreceipt.From(ctx); pc != nil {
-+							pc.ValidateStrictFrameModel(translatedLine)
-+							if sawStrictTerminal {
-+								pc.Taint()
-+							}
-+						}
-+					}
- 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
- 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
- 						reporter.PublishFailure(ctx, errClearReplay)
-@@ -486,6 +586,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
- 					sawOutputDelta = true
- 				}
- 				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
-+					if strictReview {
-+						if pc := preflightreceipt.From(ctx); pc != nil {
-+							pc.ValidateStrictFrameModel(translatedLine)
-+							if sawStrictTerminal {
-+								pc.Taint()
-+							}
-+						}
-+					}
- 					streamErr := newCodexEmptyIncompleteStreamError()
- 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
- 					reporter.PublishFailure(ctx, streamErr)
-@@ -521,6 +629,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +812,77 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 				return
  			}
- 
- 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
-+			if holdTerminalUntilEOF && (terminalSuccess || sawStrictTerminal) {
-+				// Hold terminal and trailing SSE lines until the upstream HTTP response reaches
-+				// true io.EOF and closes cleanly, bounded in both chunk count and cumulative bytes.
-+				for i := range chunks {
-+					if len(pendingStrictTerminal) >= 64 || pendingStrictBytes+len(chunks[i]) > maxPendingStrictTerminalBytes {
-+						pendingStrictTerminal = nil
-+						pendingStrictBytes = 0
-+						failPostTerminal()
-+						return
-+					}
-+					pendingStrictBytes += len(chunks[i])
-+					pendingStrictTerminal = append(pendingStrictTerminal, cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent})
-+				}
-+				if terminalSuccess && isIncompleteEvent && len(chunks) == 0 {
-+					pendingStrictTerminal = append(pendingStrictTerminal, cliproxyexecutor.StreamChunk{Incomplete: true})
-+				}
-+				sawStrictTerminal = true
-+				continue
+ 		}
++		if strictReview && len(sseEventData) > 0 {
++			joined := bytes.TrimSpace(bytes.Join(sseEventData, []byte{'\n'}))
++			if pc := preflightreceipt.From(ctx); pc != nil {
++				pc.ValidateStrictEvent(sseEventName, sseHasEvent, joined)
 +			}
- 			for i := range chunks {
- 				select {
- 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent}:
-@@ -528,6 +655,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
- 						emittedCount++
- 					}
- 				case <-ctx.Done():
-+					if strictReview {
-+						if pc := preflightreceipt.From(ctx); pc != nil {
-+							for j := i; j < len(chunks); j++ {
-+								pc.ValidateStrictFrameModel(chunks[j])
-+							}
-+						}
-+					}
- 					return
- 				}
- 			}
-@@ -546,6 +680,66 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
++		}
+ 		if errScan := scanner.Err(); errScan != nil {
+ 			if ctx.Err() != nil {
  				return
  			}
  			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
@@ -4085,10 +4310,10 @@ index 8a29e48cbeafe96270b84a9be5a7d6523a537c11..8c01ee0e5022832ff8f8d678c45e2805
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b57ed3071f 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..2c78986d9223af3d5abf94099a41dfffb494202f 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2671 @@
+@@ -0,0 +1,2681 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4137,6 +4362,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +const maxReviewResponseIDs = 512
 +const maxReviewReceiptBytes = 65536
 +const maxSSEEventBytes = 8 << 20
++const maxSSEEventLines = 4096
 +
 +var maxReviewLedgerEntries = 2048
 +
@@ -4145,6 +4371,10 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +var sessionPattern = regexp.MustCompile(`^preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 +var reviewLaunchPattern = regexp.MustCompile(`^review-(?:preflight-)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 +var reviewSessionPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
++
++func ValidPreflightSession(session string) bool {
++	return sessionPattern.MatchString(session)
++}
 +
 +func ValidReviewLaunch(launch string) bool {
 +	return reviewLaunchPattern.MatchString(launch)
@@ -4287,6 +4517,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	streamResponseID                            string
 +	lastItemResponseID                          string
 +	lastItemOutputSHA                           string
++	sawStreamedOutputItem                       bool
 +	sseEventName                                string
 +	sseHasEvent                                 bool
 +	sseDataLines                                [][]byte
@@ -4407,22 +4638,13 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	Content []responseOutputContentPart `json:"content"`
 +}
 +
-+func isToolCallOutputItemType(typ string) bool {
-+	return strings.HasSuffix(typ, "_call") || strings.HasSuffix(typ, "_call_output")
-+}
-+
 +func extractAssistantOutputText(items []responseOutputItem) string {
 +	last := ""
 +	for _, item := range items {
 +		if item.Type == "message" && item.Role == "assistant" {
-+			// Exclude intermediate narration/progress messages (e.g. phase="commentary"); only
-+			// final answers (phase="" or phase="final_answer") may supply the final output hash.
-+			if item.Phase != "" && item.Phase != "final_answer" {
-+				continue
-+			}
-+			// Reject explicitly non-completed assistant messages (e.g. status="incomplete"/"in_progress")
-+			// and clear last so earlier text never leaks through as the final answer.
-+			if item.Status != "" && item.Status != "completed" {
++			// Exclude intermediate narration/progress messages (e.g. phase="commentary") and
++			// explicitly non-completed messages; clear last so earlier text never leaks through.
++			if (item.Phase != "" && item.Phase != "final_answer") || (item.Status != "" && item.Status != "completed") {
 +				last = ""
 +				continue
 +			}
@@ -4437,11 +4659,10 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +			last = b.String()
 +			continue
 +		}
-+		// Any subsequent tool call supersedes earlier unphased assistant preamble text so only
-+		// a final assistant answer emitted after the last tool call may supply last_output_sha256.
-+		if isToolCallOutputItemType(item.Type) {
-+			last = ""
-+		}
++		// Any non-assistant-message item (tool calls, mcp_approval_request, reasoning, etc.)
++		// supersedes earlier unphased assistant preamble text so only a final assistant answer
++		// emitted as the final actionable item may supply last_output_sha256.
++		last = ""
 +	}
 +	return last
 +}
@@ -4456,6 +4677,10 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	id := respID
 +	model := respModel
 +	outText := extractAssistantOutputText(output)
++	completedSHA := ""
++	if outText != "" {
++		completedSHA = sha256Hex(outText)
++	}
 +
 +	c.mu.Lock()
 +	if status != "completed" || hasResponseError(respErr) || c.observedCompleted {
@@ -4463,6 +4688,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +		c.invalid = true
 +		c.lastItemOutputSHA = ""
 +		c.lastItemResponseID = ""
++		c.sawStreamedOutputItem = false
 +		c.mu.Unlock()
 +		c.Taint()
 +		return
@@ -4473,6 +4699,20 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +		c.invalid = true
 +		c.lastItemOutputSHA = ""
 +		c.lastItemResponseID = ""
++		c.sawStreamedOutputItem = false
++		c.mu.Unlock()
++		c.Taint()
++		return
++	}
++	if len(output) > 0 && c.sawStreamedOutputItem && completedSHA != "" && c.lastItemOutputSHA != completedSHA {
++		// Streamed response.output_item.done sequence contradicted response.completed.output[]
++		// (e.g. a subsequent tool call or approval request cleared the preamble, yet response.completed
++		// omitted that item and tried to resurrect earlier text as the final answer).
++		c.modelMismatch = true
++		c.invalid = true
++		c.lastItemOutputSHA = ""
++		c.lastItemResponseID = ""
++		c.sawStreamedOutputItem = false
 +		c.mu.Unlock()
 +		c.Taint()
 +		return
@@ -4480,13 +4720,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	c.observedCompleted = true
 +	c.lastResponseIDSHA = sha256Hex(id)
 +	if len(output) > 0 {
-+		// Authoritative output items were provided on response.completed; never fall back to
-+		// an earlier streamed item when response.completed explicitly carries no final answer text.
-+		if outText != "" {
-+			c.lastOutputSHA = sha256Hex(outText)
-+		} else {
-+			c.lastOutputSHA = ""
-+		}
++		c.lastOutputSHA = completedSHA
 +	} else if c.lastItemOutputSHA != "" && c.lastItemResponseID != "" && c.lastItemResponseID == id {
 +		c.lastOutputSHA = c.lastItemOutputSHA
 +	} else {
@@ -4494,6 +4728,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	}
 +	c.lastItemOutputSHA = ""
 +	c.lastItemResponseID = ""
++	c.sawStreamedOutputItem = false
 +	c.mu.Unlock()
 +}
 +
@@ -4913,35 +5148,28 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	return out, true
 +}
 +
-+// ValidateStrictFrameModel validates model binding, response-ID consistency, and strict protocol JSON
-+// on a raw SSE frame before an executor converts a terminal failure/empty-incomplete event into a
-+// stream error. Unlike ObserveStreamChunk, it does NOT taint on legitimate upstream error fields when
-+// declared model and response ID match, but DOES permanently taint on wrong-model frames, conflicting
-+// response IDs, or malformed/case-aliased protocol JSON.
-+func (c *Collector) ValidateStrictFrameModel(payload []byte) {
-+	if c == nil || !c.strictCodex || len(payload) == 0 {
++// ValidateStrictEvent validates model binding, response-ID consistency, explicit SSE event-name
++// consistency, and strict protocol JSON on ONE complete assembled SSE event JSON payload (including
++// multi-line JSON objects) without splitting on newlines. Unlike ObserveStreamChunk, it does NOT taint
++// on legitimate upstream error fields when declared event name, model, and response ID match, and
++// never marks observedCompleted.
++func (c *Collector) ValidateStrictEvent(evName string, hasEvName bool, rawEventJSON []byte) {
++	if c == nil || !c.strictCodex {
 +		return
 +	}
-+	for _, rawLine := range bytes.Split(payload, []byte{'\n'}) {
-+		line := bytes.TrimSpace(rawLine)
-+		if len(line) == 0 || line[0] == ':' {
-+			continue
++	trimmed := bytes.TrimSpace(rawEventJSON)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
++		if hasEvName && len(trimmed) > 0 {
++			c.taintStreamAnomaly()
 +		}
-+		if bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) {
-+			continue
-+		}
-+		isDataLine := false
-+		if bytes.HasPrefix(line, []byte("data:")) {
-+			isDataLine = true
-+			line = bytes.TrimSpace(line[5:])
-+		}
-+		if len(line) == 0 || bytes.Equal(line, []byte("[DONE]")) {
-+			continue
-+		}
-+		if !isDataLine && line[0] != '{' {
-+			continue
-+		}
-+		_, _ = c.validateStrictFrameIdentity(line, false)
++		return
++	}
++	frame, ok := c.validateStrictFrameIdentity(trimmed, false)
++	if !ok {
++		return
++	}
++	if hasEvName && evName != frame.evType {
++		c.taintStreamAnomaly()
 +	}
 +}
 +
@@ -5012,9 +5240,10 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +				c.taintStreamAnomaly()
 +				return
 +			}
-+			if itemType == "message" && itemRole == "assistant" && (itemPhase == "" || itemPhase == "final_answer") {
-+				if itemStatus != "" && itemStatus != "completed" {
++			if itemType == "message" && itemRole == "assistant" {
++				if (itemPhase != "" && itemPhase != "final_answer") || (itemStatus != "" && itemStatus != "completed") {
 +					c.mu.Lock()
++					c.sawStreamedOutputItem = true
 +					c.lastItemOutputSHA = ""
 +					c.lastItemResponseID = ""
 +					c.mu.Unlock()
@@ -5032,6 +5261,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +					}
 +				}
 +				c.mu.Lock()
++				c.sawStreamedOutputItem = true
 +				rid := c.streamResponseID
 +				if b.Len() > 0 && rid != "" {
 +					c.lastItemOutputSHA = sha256Hex(b.String())
@@ -5041,8 +5271,11 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +					c.lastItemResponseID = ""
 +				}
 +				c.mu.Unlock()
-+			} else if isToolCallOutputItemType(itemType) {
++			} else {
++				// Any non-assistant-message item (tool call, mcp_approval_request, reasoning, etc.)
++				// supersedes earlier unphased assistant preamble text.
 +				c.mu.Lock()
++				c.sawStreamedOutputItem = true
 +				c.lastItemOutputSHA = ""
 +				c.lastItemResponseID = ""
 +				c.mu.Unlock()
@@ -5101,7 +5334,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +			val := bytes.Clone(stripSSEFieldValue(rawLine[5:]))
 +			overflow := false
 +			c.mu.Lock()
-+			if c.sseDataBytes+len(val) > maxSSEEventBytes {
++			if len(c.sseDataLines) >= maxSSEEventLines || c.sseDataBytes+len(val)+1 > maxSSEEventBytes {
 +				overflow = true
 +				c.sseEventName = ""
 +				c.sseHasEvent = false
@@ -5109,7 +5342,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +				c.sseDataBytes = 0
 +			} else {
 +				c.sseDataLines = append(c.sseDataLines, val)
-+				c.sseDataBytes += len(val)
++				c.sseDataBytes += len(val) + 1
 +			}
 +			c.mu.Unlock()
 +			if overflow {
@@ -6092,6 +6325,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	c.streamResponseID = ""
 +	c.lastItemResponseID = ""
 +	c.lastItemOutputSHA = ""
++	c.sawStreamedOutputItem = false
 +	c.sseEventName = ""
 +	c.sseHasEvent = false
 +	c.sseDataLines = nil
@@ -6122,6 +6356,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	c.streamResponseID = ""
 +	c.lastItemResponseID = ""
 +	c.lastItemOutputSHA = ""
++	c.sawStreamedOutputItem = false
 +	c.sseEventName = ""
 +	c.sseHasEvent = false
 +	c.sseDataLines = nil
@@ -6761,10 +6996,10 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..f82a7a6c475f7dfca9f51d4fd5bb97b5
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..4e8640521474bbac1cbc36ee69113988680a8149 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..5d23e1ea17f0560cdb3878b14038767b21ba7716 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3305 @@
+@@ -0,0 +1,3339 @@
 +package preflightreceipt
 +
 +import (
@@ -8579,7 +8814,8 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..4e8640521474bbac1cbc36ee69113988
 +		": keep-alive\n\nevent: response.created\n" + `data: {"type":"response.created","response":{"id":"resp_m3"}}` + "\n\n",
 +		`data: {"type":"response.output_item.done","item":{"type":"reasoning","summary":[],"content":"raw-encrypted"}}` + "\n\n",
 +		`data: {"type":"response.output_item.done","item":{"type":"function_call","name":"shell","arguments":"{}"}}` + "\n\n",
-+		`data: {"type":"response.completed","response":{"id":"resp_m3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"reasoning","content":"x"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"verified"}]}]}}` + "\n\n",
++		`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"verified"}]}}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_m3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"reasoning","content":"x"},{"type":"function_call","name":"shell","arguments":"{}"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"verified"}]}]}}` + "\n\n",
 +		"data: [DONE]\n\n",
 +	})
 +	if st3 != SealOK || r3.Tainted || !r3.Complete || r3.LastOutputSHA256 != sha256Hex("verified") {
@@ -10068,5 +10304,38 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..4e8640521474bbac1cbc36ee69113988
 +	entExact.mu.Unlock()
 +	if st, digest := SealReviewWithDigest(root, lDurExact, sDurExact); st != SealOK || !isSHA256Hex(digest) {
 +		t.Fatalf("SealReviewWithDigest at exact MaxReviewDuration = (%v, %q), want (SealOK, 64-hex)", st, digest)
++	}
++
++	// 5. mcp_approval_request clears unphased preamble in BOTH response.completed and output_item.done (Astra P1 #1, R9).
++	lAppr1 := "review-d1111111-2222-4333-8444-555555555509"
++	sAppr1 := "019d0000-0000-7000-8000-888888888109"
++	sseApprCompleted := "data: " + `{"type":"response.completed","response":{"id":"resp_ap1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Requesting MCP approval..."}]},{"type":"mcp_approval_request","id":"mcpr_1"}]}}` + "\n\n"
++	if st := runSSE(t, lAppr1, sAppr1, sseApprCompleted); st != SealOK {
++		t.Fatalf("preamble+mcp_approval_request completed seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lAppr1); r.LastOutputSHA256 != "" {
++		t.Fatalf("preamble+mcp_approval_request completed retained last_output_sha256 = %q, want empty", r.LastOutputSHA256)
++	}
++
++	lAppr2 := "review-d1111111-2222-4333-8444-555555555510"
++	sAppr2 := "019d0000-0000-7000-8000-888888888110"
++	sseApprStreamed := "data: " + `{"type":"response.created","response":{"id":"resp_ap2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Waiting for approval"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"mcp_approval_request","id":"mcpr_2"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_ap2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, lAppr2, sAppr2, sseApprStreamed); st != SealOK {
++		t.Fatalf("preamble+mcp_approval_request streamed seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lAppr2); r.LastOutputSHA256 != "" {
++		t.Fatalf("preamble+mcp_approval_request streamed retained last_output_sha256 = %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 6. Contradictory response.completed omitting a streamed function_call cannot resurrect preamble text (Sol P1 #2, R9).
++	sseResurrect := "data: " + `{"type":"response.created","response":{"id":"resp_res","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Preamble before tool"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_res","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Preamble before tool"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555511", "019d0000-0000-7000-8000-888888888111", sseResurrect); st != SealRejected {
++		t.Fatalf("contradictory response.completed resurrecting cleared preamble = %v, want SealRejected", st)
 +	}
 +}
