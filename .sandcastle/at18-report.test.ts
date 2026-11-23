@@ -1394,7 +1394,7 @@ def _observe(fn):
         wire + head + signature + "return route(events)\n", direct, true);
       const wired = `from .at18_fixture_feed import Adapter\ndef dispatch(events): return ${member}(events)\n`;
       await check(label + "：多层透传的承接方法", head + signature + "return list(events)\n", wired, through, true);
-      await check(label + "：装饰器不能给 pass 桩生成证据", head + signature + "pass\n", wired,
+      if (wraps) await check(label + "：显式包装的 pass 桩仍不可作证", head + signature + "pass\n", wired,
         via(`${adapted("f")} is None and [13, 21]`, fromEntry), false);
     }
   }
@@ -1402,11 +1402,10 @@ def _observe(fn):
   const wiredClass = "from .at18_fixture_feed import Adapter\ndef dispatch(events): return Adapter.run(events)\n";
   for (const wraps of [true, false]) {
     const foreign = decorate(wraps) + "from .support import run\nclass Adapter:\n    run = staticmethod(_observe(run))\n";
-    await check("外来实现经过本地类装饰器/" + wraps, foreign, wiredClass, through, false,
+    await check("类成员只核显式包装链/" + wraps, foreign, wiredClass, through, !wraps,
       { [dependency]: external });
-    const stub = decorate(wraps) + "@_observe\ndef route(events): pass\n";
-    await check("模块装饰器也不能包裹空桩/" + wraps, stub, dispatch,
-      via("f.route([13, 21]) is None and [13, 21]", fromEntry), false);
+    if (wraps) await check("模块导出的显式包装链不得指向空桩", decorate(true) + "@_observe\ndef route(events): pass\n",
+      dispatch, via("f.route([13, 21]) is None and [13, 21]", fromEntry), false);
   }
   const spoof = decorate(true) + "from .support import run\n" +
     "def local(events): return list(events)\nclass Adapter:\n    run = staticmethod(_observe(run))\n" +
@@ -1463,7 +1462,7 @@ __all__ = ('dispatch', 'Adapter')
   await check("reload 后的旧持有引用不能冒充当前公开对象", closure, dispatch, reloaded("old"), false);
 });
 
-test("R20/#1319：透传只认本次调用实际执行的本地实现", { timeout: 120_000 }, async t => {
+test("R24/#1319：重载、构造与延迟消费必须进入精确绑定", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const production = "trading_system/__init__.py";
   const path = "trading_system/tests/test_at18_fixture_feed.py";
@@ -1481,40 +1480,6 @@ test("R20/#1319：透传只认本次调用实际执行的本地实现", { timeou
   };
   const plain = "def route(events): return list(events)\n";
   const basic = direct("assert f.route([13, 21]) == [13, 21]");
-  for (const [name, carrier] of [
-    ["partial", "relay = partial(fn)\n    return lambda *a, **kw: relay(*a, **kw)"],
-    ["自定义对象", "relay = _Carrier(fn)\n    return lambda events: relay(events)"],
-    ["字典", "relay = {'call': fn}\n    return lambda events: relay['call'](events)"],
-  ] as const) {
-    const preamble = `from functools import partial
-from .support import foreign
-class _Carrier:
-    def __init__(self, callback): self.callback = callback
-    def __call__(self, events): return self.callback(events)
-def _wrap(fn):
-    ${carrier}
-__all__ = ('route',)
-`;
-    await check(name + "：本地非空实现", preamble + plain + "route = _wrap(route)\n", dispatch, basic, true);
-    await check(name + "：本地空桩", preamble + "def route(events): pass\nroute = _wrap(route)\n",
-      dispatch, direct("assert dispatch([13, 21]) is None"), false);
-    await check(name + "：外来实现", preamble + "route = _wrap(foreign)\n", dispatch, basic, false);
-  }
-  await check("本地绑定方法可执行其接收者上的内建转换", `class _Adapter:
-    def __init__(self, convert): self.convert = convert
-    def read(self, events): return self.convert(events)
-route = _Adapter(list).read
-`, dispatch, basic, true);
-  const defaultBridge = "def _forward(events, fn=backend): return fn(events)\nroute = _forward\n";
-  await check("默认可调用参数透传到本地实现", plain + "backend = route\n" + defaultBridge, dispatch, basic, true);
-  await check("默认可调用参数透传到外来实现", "from .support import foreign as backend\n" + defaultBridge,
-    dispatch, basic, false);
-  await check("闭包执行本地计算而非透传", `from .support import clean
-def _make(transform):
-    def route(events): return [transform(v) for v in events if v > 0]
-    return route
-route = _make(clean)
-`, dispatch, direct("assert f.route([-1, 13, 21]) == [26, 42]"), true);
   const warm = "if 'route' in globals(): cache = route([13, 21])\n" + plain;
   await check("reload 只预热", warm, dispatch, direct("importlib.reload(f)\nassert f.cache == [13, 21]"), false);
   await check("reload 后显式进入新绑定", warm, dispatch,
@@ -1583,21 +1548,18 @@ route = _wrap(_leaf)
   await check("调用者显式等待包装器返回的那一个任务",
     asyncImpl.replace("async def relay", "def relay").replace("ACTION", "return task"), asyncWired,
     direct("assert asyncio.run(dispatch([13, 21])) == [13, 21]"), true);
-  await check("未等待的任务即使跑完也不能证明本地叶",
-    asyncImpl.replace("ACTION", "await asyncio.sleep(0)\n        return list(a[0])"), asyncWired,
+  // 未等待的任务本身不算覆盖；不能用调用完毕的生产入口替它作证。
+  const spawn = wire + `import asyncio
+async def dispatch(events):
+    asyncio.create_task(f.route(events))
+    await asyncio.sleep(0)
+    return events
+`;
+  await check("后台任务已运行但未等待，不计承接导出", "async def route(events): return list(events)\n", spawn,
     direct("assert asyncio.run(dispatch([13, 21])) == [13, 21]"), false);
-  await check("独立探针必须实际触达本地叶", `from .support import foreign
-def _choose():
-    def local(events): return list(events)
-    def relay(*a, **kw):
-        backend = local if len(a[0]) == 2 else foreign
-        return backend(*a, **kw)
-    return relay
-route = _choose()
-`, dispatch.replace("f.route(events)", "f.route([13])"), basic, false);
 });
 
-test("R21/#1319：精确透传调用点、结果变换与位置专用实参", { timeout: 120_000 }, async t => {
+test("R24/#1319：独立探针保留 / 与 *，不传递测试对象或回调", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
   const path = "trading_system/tests/test_at18_fixture_feed.py";
@@ -1607,48 +1569,12 @@ from trading_system import at18_fixture_feed as f
 async def take(iterator): return await anext(iterator)
 def test_route(): assert ${expr} == ${expected}
 `;
-  const support = "def order(events): return sorted(events)\nasync def order_async(events): return sorted(events)\n" +
-    "def order_stream(events): yield sorted(events)\nasync def order_async_stream(events): yield sorted(events)\n";
-  const dispatch = wire + "def dispatch(events): return f.route(events)\n";
   const check = async (name: string, impl: string, prod: string, test: string, expected: boolean) => {
     await t.test(name, () => {
-      const repo = feedSource({ [entry]: impl, [integration]: prod, [path]: test, "trading_system/support.py": support });
+      const repo = feedSource({ [entry]: impl, [integration]: prod, [path]: test });
       assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
     });
   };
-  const log = "from . import support\nlog = []\ndef _record(*values): log.append(values)\n";
-  for (const [name, relay, body, foreign, expr] of [
-    ["前置同步", "_record(); return fn(*args, **kwargs)", "def leaf(events): return sorted(events)", "order", "CALL"],
-    ["同行后置同步", "out = fn(*args, **kwargs); _record(out); return out", "def leaf(events): return sorted(events)", "order", "CALL"],
-    ["finally 协程", "try: return fn(*args, **kwargs)\n        finally: _record()", "async def leaf(events): return sorted(events)", "order_async", "asyncio.run(CALL)"],
-    ["嵌套 await", "_record(); return await fn(*args, **kwargs)", "async def leaf(events): return sorted(events)", "order_async", "asyncio.run(CALL)"],
-    ["yield 单项结果", "_record(); yield fn(*args, **kwargs)", "def leaf(events): return sorted(events)", "order", "next(CALL)"],
-    ["yield from", "_record(); yield from fn(*args, **kwargs)", "def leaf(events): yield sorted(events)", "order_stream", "next(CALL)"],
-    ["for 原样产出", "for out in fn(*args, **kwargs): _record(out); yield out", "def leaf(events): yield sorted(events)", "order_stream", "next(CALL)"],
-    ["async for 原样产出", "async for out in fn(*args, **kwargs): _record(out); yield out", "async def leaf(events): yield sorted(events)", "order_async_stream", "asyncio.run(take(CALL))"],
-  ] as const) {
-    const prefix = relay.includes("await") || relay.startsWith("async for") ? "async " : "";
-    const wrap = log + `def wrap(fn):
-    ${prefix}def relay(*args, **kwargs):
-        ${relay}
-    return relay
-__all__ = ('route',)
-`;
-    const alias = (fn: string) => "\nroute = " + (name === "嵌套 await" ? `wrap(wrap(${fn}))` : `wrap(${fn})`) + "\n";
-    const selection = expr.replace("CALL", "f.route([21, 13])");
-    await check(name + "：记录不替外来实现作证", wrap + alias(`support.${foreign}`), dispatch,
-      registered(selection, "[13, 21]"), false);
-    await check(name + "：本地实现仍计入", wrap + body + alias("leaf"), dispatch,
-      registered(selection, "[13, 21]"), true);
-  }
-  await check("记录不替空桩作证", log + `def leaf(events): pass
-def route(*args, **kwargs):
-    _record(); out = leaf(*args, **kwargs); _record(); return out
-`, dispatch, registered("f.route([21, 13])", "None"), false);
-  await check("星号调用外部排序后本地过滤", log + `def route(*args, **kwargs):
-    raw = support.order(*args, **kwargs)
-    return [value for value in raw if value > 0]
-`, dispatch, registered("f.route([-4, 21, 13])", "[13, 21]"), true);
   const wrap = "def wrap(fn):\n    def relay(*args, **kwargs): return fn(*args, **kwargs)\n    return relay\n";
   for (const layers of [1, 2]) {
     const decorated = "@wrap\n".repeat(layers);
@@ -1657,161 +1583,77 @@ def route(*args, **kwargs):
     await check(`${layers} 层：位置专用列表与关键字专用开关`, route, prod,
       registered("f.route([21, 13], reverse=False)", "[13, 21]"), true);
   }
+  for (const [name, payload] of [["对象", "object()"], ["回调", "lambda: True"]] as const) {
+    const decorated = "@wrap\n@wrap\n";
+    const route = wrap + decorated + "def route(events, /, *, context=None): return sorted(events)\n";
+    for (const required of [true, false]) {
+      const condition = required ? "context is not None" : "context is None";
+      const prod = wire + wrap + decorated +
+        `def dispatch(events, /, *, context=None):\n    if ${condition}: return f.route(events)\n`;
+      await check(name + (required ? "不可供探针满足必需值" : "剔除后仍可使用生产默认值"),
+        route, prod, registered(`f.route([21, 13], context={"nested": [${payload}]})`, "[13, 21]"), !required);
+    }
+  }
 });
 
-test("R22–R23/#1319：按实走出口判定本地承接", { timeout: 120_000 }, async t => {
+test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
   const path = "trading_system/tests/test_at18_fixture_feed.py";
-  const imports = "from .support import foreign, deferred, stream, astream\n";
   const wire = "from .at18_fixture_feed import route\ndef dispatch(events): return route(events)\n";
-  const support = "def foreign(events): return sorted(events)\nasync def deferred(events): return sorted(events)\n" +
-    "def stream(events): yield from sorted(events)\nasync def astream(events):\n    for value in sorted(events): yield value\n" +
-    "def predicate(value): return value > 0\n" +
-    "def mapping(events): return {'negative': min(events), 'positive': max(events)}\n" +
-    "class Token:\n    __slots__ = ('value',)\n    def __init__(self, value): self.value = list(value)\n" +
-    "    def __eq__(self, other): return type(other) is Token and self.value == other.value\n" +
-    "def make_token(value): return Token(value)\n";
-  const run = async (name: string, implementation: string, result: string, expected: boolean,
-    expression = "route([5, -2, 8])", production = wire) => {
+  const imports = "from .support import order, audit, stream\n";
+  const support = "def order(events): return sorted(events)\ndef audit(value): return value\n" +
+    "def stream(events): yield from sorted(events)\n";
+  const wraps = `from functools import wraps
+def wrap(fn):
+    @wraps(fn)
+    def relay(*args, **kwargs): return fn(*args, **kwargs)
+    return relay
+`;
+  const check = async (name: string, source: string, expression: string, expected: string, covered: boolean) => {
     await t.test(name, () => {
-      const repo = feedSource({ [entry]: imports + implementation, [integration]: production,
-        "trading_system/support.py": support,
-        [path]: "import asyncio\nfrom trading_system.at18_fixture_feed import route\n" +
-          "from trading_system.support import Token\nasync def drain(items): return [v async for v in items]\n" +
-          `def test_route(): assert ${expression} == ${result}\n` });
-      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+      const repo = feedSource({ [entry]: imports + source, [integration]: wire,
+        "trading_system/support.py": support, [path]: "import asyncio\n" +
+          "from trading_system.at18_fixture_feed import route\n" +
+          "async def drain(items): return [x async for x in items]\n" +
+          `def test_route(): assert ${expression} == ${expected}\n` });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), covered);
     });
   };
-  for (const [name, body] of [
-    ["IfExp 外调与常量", "return foreign(events) if events else []"],
-    ["IfExp 两臂调用", "return foreign(events) if len(events) < 4 else foreign(events[::-1])"],
-    ["分支赋值合流", "if events: out = foreign(events)\n    else: out = []\n    return out"],
-    ["match/注解赋值合流", "match events:\n        case []: out = []\n        case _: out: list[int] = foreign(events)\n    return out"],
-    ["try/except/合流/finally", "try: out = foreign(events)\n    except ValueError: out = []\n    finally: len(events)\n    return out"],
-    ["命名表达式", "return (out := foreign(events)) if events else []"],
-  ] as const) await run(name, `def route(events):\n    ${body}\n`, "[-2, 5, 8]", false);
-  await run("真实执行本地过滤，忽略未执行的快捷透传", `def route(events):
-    if min(events) >= 0: return foreign(events)
-    ordered = foreign(events)
-    return [v for v in ordered if v > 0]
-`, "[5, 8]", true);
-  const mixed = `def route(events):
-    if min(events) >= 0: out = foreign(events)
-    else: out = [v for v in foreign(events) if v > 0]
-    return out
-`;
-  await run("合流：本地过滤臂", mixed, "[5, 8]", true);
-  await run("合流：外来臂", mixed, "[5, 8, 9]", false, "route([5, 9, 8])");
-  await run("合流：实际返回字面回退", `def route(events):
-    out = [v for v in events if v > 0]
-    if len(events) > 2: out = []
-    return out
-`, "[]", false);
-  const computedNotSelected = `def route(events):
-    out = foreign(events)
-    clean = [v for v in out if v > 0]
-    if len(events) > 3: out = clean
-    return out
-`;
-  await run("合流：计算过但未采用的本地值不能作证", computedNotSelected, "[-2, 5, 8]", false);
-  await run("合流：实际采用先前计算的本地值", computedNotSelected, "[5, 8, 9]", true, "route([5, -2, 8, 9])");
-  await run("合流：后来计算但未采用的外来值不妨碍本地结果", `def route(events):
-    out = [v for v in events if v > 0]
-    raw = foreign(events)
-    if len(events) > 3: out = raw
-    return out
-`, "[5, 8]", true);
-  await run("finally 保留真正本地返回", `def route(events):
-    try: return [v for v in events if v > 0]
-    finally: len(events)
-`, "[5, 8]", true);
-  await run("await 合流：外来协程", "async def route(events): return await deferred(events) if events else []\n",
-    "[-2, 5, 8]", false, "asyncio.run(route([5, -2, 8]))");
-  for (const [name, body, value, expected] of [
-    ["常量折叠的空生成器", "if False: yield", "[]", false],
-    ["提前返回的空生成器", "return\n    yield events", "[]", false],
-    ["运行时常量为空的生成器", "flag = False\n    if flag: yield", "[]", false],
-    ["读完输入的本地过滤可产出零项", "for v in events:\n        if v > 100: yield v", "[]", true],
-    ["消费外来生成器不是本地实现", "yield from stream(events)", "[-2, 5, 8]", false],
-    ["不相关循环不能替空生成器作证", "for v in events: len(str(v))\n    flag = False\n    if flag: yield", "[]", false],
-    ["本地过滤外部迭代保留部分值", "for v in stream(events):\n        if v > 0: yield v", "[5, 8]", true],
-    ["本地过滤外部迭代可产出零项", "for v in stream(events):\n        if v > 100: yield v", "[]", true],
-    ["循环原样产出外来值", "for v in stream(events): yield v", "[-2, 5, 8]", false],
-    ["循环本地变换外来值", "for v in stream(events): yield v * 2", "[-4, 10, 16]", true],
-  ] as const) await run(name, `def route(events):\n    ${body}\n`, value, expected, "list(route([5, -2, 8]))");
-  await run("异步循环原样产出外来值", "async def route(events):\n    async for v in astream(events): yield v\n",
-    "[-2, 5, 8]", false, "asyncio.run(drain(route([5, -2, 8])))");
-  const box = "class Box:\n    def __init__(self, value): self.value = value\n";
-  for (const [name, prelude, body, result, expected] of [
-    ["元组解包选择外来值", "", "clean, out = ([v for v in events if v > 0], foreign(events))\n    return out", "[-2, 5, 8]", false],
-    ["元组解包选择本地值", "", "raw, out = (foreign(events), [v for v in events if v > 0])\n    return out", "[5, 8]", true],
-    ["带星号解包再索引", "", "head, *tail = (events, foreign(events), [5, 8])\n    return tail[0]", "[-2, 5, 8]", false],
-    ["星号尾项是从外来序列新构造的列表", "", "first, *tail = foreign(events)\n    return tail", "[5, 8]", true],
-    ["星号尾项内的原对象仍不可透传", "def _box(events): return [events, foreign(events)]\n",
-      "first, *tail = _box(events)\n    return tail[0]", "[-2, 5, 8]", false],
-    ["字典动态键选择外来值", "", "d = {'raw': foreign(events), 'clean': [5, 8]}\n    return d['raw' if events else 'clean']", "[-2, 5, 8]", false],
-    ["列表索引选择外来值", "", "return [foreign(events), [5, 8]][0]", "[-2, 5, 8]", false],
-    ["对象属性原样交还", box, "return Box(foreign(events)).value", "[-2, 5, 8]", false],
-    ["lambda 和对象属性不丢运行时身份", box, "wrapped = Box(foreign(events))\n    return (lambda x: x.value)(wrapped)", "[-2, 5, 8]", false],
-    ["match 整对象捕获", "", "match foreign(events):\n        case out: return out", "[-2, 5, 8]", false],
-    ["match Mapping 剩余项新构造字典", "from .support import mapping\n",
-      "match mapping(events):\n        case {'negative': _, **rest}: return rest", "{'positive': 8}", true],
-    ["match Or / Sequence 捕获本地值", "", "match (1, foreign(events), [v for v in events if v > 0]):\n        case (0, _, out) | (1, _, out): return out", "[5, 8]", true],
-    ["match Mapping / Class 嵌套捕获外来值", box, "match {'key': Box(foreign(events))}:\n        case {'key': Box(value=out)}: return out", "[-2, 5, 8]", false],
-    ["旧列表原地删除后交还", "", "out = foreign(events)\n    out.pop(0)\n    return out", "[5, 8]", true],
-    ["对象槽字段改变后交还", "from .support import Token\n", "out = Token(events)\n    out.value = [5, 8]\n    return out.value", "[5, 8]", true],
-    ["相等但新构造的列表", "", "out = foreign(events)\n    return list(out)", "[-2, 5, 8]", true],
-  ] as const) await run(name, prelude + `def route(events):\n    ${body}\n`, result, expected);
-  await run("协程结果经属性原样交还", box + "async def route(events): return Box(await deferred(events)).value\n",
-    "[-2, 5, 8]", false, "asyncio.run(route([5, -2, 8]))");
-  await run("外来实例经属性原样交还", box + `from .support import make_token, Token
-def route(events):
-    return Box(make_token(events)).value
-`, "Token([5, -2, 8])", false, undefined, wire);
-  await run("外来实例的嵌套槽内容原地改变", `from .support import make_token, Token
-def route(events):
-    out = make_token(events)
-    out.value.pop(0)
-    return out
-`, "Token([-2, 8])", true);
-  for (const [name, prelude, body, value, expected] of [
-    ["while 假条件不算进入循环", "ENABLED = False\n", "while ENABLED: yield from sorted(events)", "[]", false],
-    ["while 确实进入循环体", "ENABLED = True\n", "while ENABLED:\n        yield from sorted(events)\n        break", "[-2, 5, 8]", true],
-    ["for 空输入未执行循环体", "", "for v in events[:0]:\n        if v > 0: yield v", "[]", false],
-    ["for 循环体未读取输入项", "", "for v in events:\n        if len(events) > 100: yield v", "[]", false],
-    ["for 已处理项后裸 return（空）", "def _keep(v): return v > 100\n", "for v in events:\n        if _keep(v): yield v\n    return", "[]", true],
-    ["for 已处理项后裸 return（非空）", "def _keep(v): return v > 0\n", "for v in events:\n        if _keep(v): yield v\n    return None", "[5, 8]", true],
-    ["本地谓词筛选外来流（部分）", "def _keep(v): return v > 0\n", "for v in stream(events):\n        if _keep(v): yield v", "[5, 8]", true],
-    ["本地分支返回布尔常量", "def _keep(v):\n    if v > 0: return True\n    return False\n",
-      "for v in stream(events):\n        if _keep(v): yield v", "[5, 8]", true],
-    ["本地谓词筛选外来流（全空）", "def _keep(v): return v > 100\n", "for v in stream(events):\n        if _keep(v): yield v\n    return", "[]", true],
-    ["闭包、多步调用和 continue 过滤", "def _positive(v): return v > 0\n", "for v in stream(events):\n        def _keep(): return _positive(v)\n        if not _keep(): continue\n        yield v", "[5, 8]", true],
-    ["本地谓词的结果经变量控制过滤", "def _keep(v): return v > 0\n", "for v in stream(events):\n        keep = _keep(v)\n        if keep: yield v", "[5, 8]", true],
-    ["本地谓词根本不读取传入项", "def _keep(v): return bool(1)\n", "for v in stream(events):\n        if _keep(v): yield v", "[-2, 5, 8]", false],
-    ["外部谓词不能替本地实现作证", "from .support import predicate\n", "for v in stream(events):\n        if predicate(v): yield v", "[5, 8]", false],
-    ["空桩谓词不能替本地实现作证", "def _keep(v): pass\n", "for v in stream(events):\n        if _keep(v): yield v", "[]", false],
-    ["旁支调用不控制产出", "def _record(v): return v > 0\n", "for v in stream(events):\n        _record(v)\n        yield v", "[-2, 5, 8]", false],
-    ["恒真条件不控制产出", "", "for v in stream(events):\n        if True: yield v", "[-2, 5, 8]", false],
-    ["与流元素无关的开关", "ENABLED = True\n", "for v in stream(events):\n        if ENABLED: yield v", "[-2, 5, 8]", false],
-    ["两臂均原样产出，不构成过滤", "def _keep(v): return v > 0\n", "for v in stream(events):\n        if _keep(v): yield v\n        else: yield v", "[-2, 5, 8]", false],
-  ] as const) await run(name, prelude + `def route(events):\n    ${body}\n`, value, expected, "list(route([5, -2, 8]))");
-  await run("异步生成器的本地谓词与显式 return",
-    "def _keep(v): return v > 100\nasync def route(events):\n    async for v in astream(events):\n        if _keep(v): yield v\n    return\n",
-    "[]", true, "asyncio.run(drain(route([5, -2, 8])))");
-  for (const [name, predicate, expected, result] of [
-    ["生成器推导本地谓词", "def keep(v): return v > 0", true, "[5, 8]"],
-    ["生成器推导本地谓词全部滤空", "def keep(v): return v > 100", true, "[]"],
-    ["生成器推导外部谓词", "from .support import predicate as keep", false, "[5, 8]"],
+  for (const [name, declaration, expression, expected] of [
+    ["pass", "def route(events): pass", "route([1])", "None"],
+    ["纯文档字符串", "def route(events): '只登记文档'", "route([1])", "None"],
+    ["折叠掉的 return", "def route(events):\n    if False: return events", "route([1])", "None"],
+    ["折叠掉的 yield", "def route(events):\n    if False: yield events", "list(route([1]))", "[]"],
+    ["折叠掉的异步 yield", "async def route(events):\n    if False: yield events", "asyncio.run(drain(route([1])))", "[]"],
   ] as const) {
-    await run(name, predicate + "\ndef route(events): yield from (v for v in stream(events) if keep(v))\n",
-      result, expected, "list(route([5, -2, 8]))");
+    await check(name, declaration + "\n", expression, expected, false);
+    await check(name + "（显式包装）", wraps + "@wrap\n" + declaration + "\n", expression, expected, false);
   }
-  await run("异步谓词在流条件内等待本文件实现",
-    "async def keep(v): return v > 0\nasync def route(events):\n    async for v in astream(events):\n        if await keep(v): yield v\n",
-    "[5, 8]", true, "asyncio.run(drain(route([5, -2, 8])))");
-  await run("外部生成器尚未进入帧即经属性原样交还", box +
-    "def route(events): return Box(stream(events)).value\n", "[-2, 5, 8]", false, "list(route([5, -2, 8]))");
+  for (const [name, source, expression, value] of [
+    ["闭包引用外部转换不妨碍本地处理",
+      "def make(transform):\n    def apply(events): return transform(v for v in events if v > 0)\n    return apply\nroute = make(order)",
+      "route([5, -2, 8])", "[5, 8]"],
+    ["外部排序后采用本地过滤",
+      "def route(*args, **kwargs):\n    raw = order(*args, **kwargs)\n    return [v for v in raw if v > 0]",
+      "route([5, -2, 8])", "[5, 8]"],
+    ["只读 audit 不抹掉本地修改",
+      "def route(events):\n    r = order(events)\n    r.pop(0)\n    audit(r)\n    return r",
+      "route([5, -2, 8])", "[5, 8]"],
+    ["无显式包装链的转发交给 R09",
+      "def route(events): return order(events)", "route([5, -2, 8])", "[-2, 5, 8]"],
+    ["显式包装指向外来函数仍拒绝",
+      wraps + "route = wrap(order)", "route([5, -2, 8])", "[-2, 5, 8]"],
+    ["生成器返回前已实走本地谓词，结果可为空",
+      "def _keep(value): return value > 100\ndef route(events):\n    for item in stream(events):\n        if _keep(*(item,)): yield item\n    return",
+      "list(route([5, -2, 8]))", "[]"],
+    ["谓词接受展开关键字",
+      "def _keep(value): return value > 0\ndef route(events):\n    for item in stream(events):\n        if _keep(**{'value': item}): yield item",
+      "list(route([5, -2, 8]))", "[5, 8]"],
+    ["内联 abs 谓词",
+      "def route(events):\n    for item in stream(events):\n        if abs(item) >= 4: yield item",
+      "list(route([5, -7, 2]))", "[-7, 5]"],
+  ] as const) await check(name, source + "\n", expression, value, name !== "显式包装指向外来函数仍拒绝");
 });
 
 test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
