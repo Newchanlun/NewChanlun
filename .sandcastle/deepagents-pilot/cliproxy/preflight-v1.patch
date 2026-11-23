@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..1ee4002 100644
+index e69de29..2453e0b 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1840 @@
+@@ -0,0 +1,1882 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3487,6 +3487,22 @@ index e69de29..1ee4002 100644
 +	return fields, nil
 +}
 +
++func exactOptionalStringPresent(fields map[string]json.RawMessage, key string) (string, bool, bool) {
++	raw, exists := fields[key]
++	if !exists {
++		return "", false, true
++	}
++	trimmed := bytes.TrimSpace(raw)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
++		return "", true, false
++	}
++	var s string
++	if err := json.Unmarshal(trimmed, &s); err != nil {
++		return "", true, false
++	}
++	return s, true, true
++}
++
 +func exactOptionalString(fields map[string]json.RawMessage, key string) (string, bool) {
 +	raw, exists := fields[key]
 +	if !exists {
@@ -3595,8 +3611,12 @@ index e69de29..1ee4002 100644
 +			continue
 +		}
 +		evType, okType := exactOptionalString(evFields, "type")
-+		evRespID, okRespID := exactOptionalString(evFields, "response_id")
++		evRespID, hasEvRespID, okRespID := exactOptionalStringPresent(evFields, "response_id")
 +		if !okType || !okRespID || strings.TrimSpace(evType) == "" {
++			c.taintStreamAnomaly()
++			continue
++		}
++		if hasEvRespID && (evRespID == "" || strings.TrimSpace(evRespID) != evRespID) {
 +			c.taintStreamAnomaly()
 +			continue
 +		}
@@ -3605,6 +3625,7 @@ index e69de29..1ee4002 100644
 +			continue
 +		}
 +		var respID, respModel, respStatus string
++		var hasRespID bool
 +		var respErr, respOutput json.RawMessage
 +		if hasResponseError(evFields["response"]) {
 +			respFields, err := decodeExactJSONObject(evFields["response"])
@@ -3613,10 +3634,14 @@ index e69de29..1ee4002 100644
 +				continue
 +			}
 +			var ok1, ok2, ok3 bool
-+			respID, ok1 = exactOptionalString(respFields, "id")
++			respID, hasRespID, ok1 = exactOptionalStringPresent(respFields, "id")
 +			respModel, ok2 = exactOptionalString(respFields, "model")
 +			respStatus, ok3 = exactOptionalString(respFields, "status")
 +			if !ok1 || !ok2 || !ok3 {
++				c.taintStreamAnomaly()
++				continue
++			}
++			if hasRespID && (respID == "" || strings.TrimSpace(respID) != respID) {
 +				c.taintStreamAnomaly()
 +				continue
 +			}
@@ -3627,10 +3652,17 @@ index e69de29..1ee4002 100644
 +				continue
 +			}
 +		}
++		if hasEvRespID && hasRespID && evRespID != respID {
++			c.taintStreamAnomaly()
++			continue
++		}
 +		switch evType {
 +		case "response.created", "response.in_progress":
-+			if respID != "" && strings.TrimSpace(respID) == respID {
-+				rid := respID
++			rid := respID
++			if !hasRespID {
++				rid = evRespID
++			}
++			if rid != "" {
 +				c.mu.Lock()
 +				if c.streamResponseID != "" && c.streamResponseID != rid {
 +					c.lastItemOutputSHA = ""
@@ -3666,21 +3698,31 @@ index e69de29..1ee4002 100644
 +					}
 +					if b.Len() > 0 {
 +						h := sha256Hex(b.String())
++						explicitRID := hasEvRespID || hasRespID
 +						rid := ""
-+						if evRespID != "" && strings.TrimSpace(evRespID) == evRespID {
++						if hasEvRespID {
 +							rid = evRespID
-+						} else if respID != "" && strings.TrimSpace(respID) == respID {
++						} else if hasRespID {
 +							rid = respID
 +						}
++						conflict := false
 +						c.mu.Lock()
-+						if rid == "" {
++						if explicitRID {
++							if c.streamResponseID != "" && c.streamResponseID != rid {
++								conflict = true
++							}
++						} else {
 +							rid = c.streamResponseID
 +						}
-+						if rid != "" {
++						if !conflict && rid != "" {
 +							c.lastItemOutputSHA = h
 +							c.lastItemResponseID = rid
 +						}
 +						c.mu.Unlock()
++						if conflict {
++							c.taintStreamAnomaly()
++							continue
++						}
 +					}
 +				}
 +			}
@@ -4869,10 +4911,10 @@ index e69de29..1ee4002 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..d5970e6 100644
+index e69de29..9e31220 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1888 @@
+@@ -0,0 +1,1927 @@
 +package preflightreceipt
 +
 +import (
@@ -6755,6 +6797,45 @@ index e69de29..d5970e6 100644
 +	for _, tc := range badFrames {
 +		t.Run(tc.name, func(t *testing.T) {
 +			st, rec := runTurn(t, "review-eeee1111-2222-4333-8444-55555555593"+tc.id, "019d0000-0000-7000-8000-00000000093"+tc.id, tc.chunks)
++			if st != SealRejected || !rec.Tainted {
++				t.Fatalf("%s failed to taint/reject: st=%v rec=%+v", tc.name, st, rec)
++			}
++		})
++	}
++	// 8. R27 (Astra P1): malformed/empty/conflicting response_id on output_item.done MUST taint, never fall back to streamResponseID.
++	r27BadFrames := []struct {
++		name   string
++		id     string
++		chunks []string
++	}{
++		{
++			name: "output-item-padded-response-id-no-fallback", id: "0",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m0"}}` + "\n\n",
++				`data: {"type":"response.output_item.done","response_id":" resp_m0 ","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m0","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "output-item-empty-response-id-no-fallback", id: "1",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m1x"}}` + "\n\n",
++				`data: {"type":"response.output_item.done","response_id":"","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m1x","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "output-item-conflicting-response-id", id: "2",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m2a"}}` + "\n\n",
++				`data: {"type":"response.output_item.done","response_id":"resp_other","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m2a","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++	}
++	for _, tc := range r27BadFrames {
++		t.Run(tc.name, func(t *testing.T) {
++			st, rec := runTurn(t, "review-eeee1111-2222-4333-8444-55555555594"+tc.id, "019d0000-0000-7000-8000-00000000094"+tc.id, tc.chunks)
 +			if st != SealRejected || !rec.Tainted {
 +				t.Fatalf("%s failed to taint/reject: st=%v rec=%+v", tc.name, st, rec)
 +			}

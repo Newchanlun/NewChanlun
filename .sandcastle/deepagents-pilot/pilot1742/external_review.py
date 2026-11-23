@@ -1097,12 +1097,12 @@ class ExternalReview:
                                                 sess_patch_reads += 1
                     elif rtype == "token_usage_record":
                         rid = payload.get("response_id")
-                        if not isinstance(rid, str) or not rid.strip():
+                        if not isinstance(rid, str) or not rid or rid != rid.strip():
                             return ReviewOutcome(
                                 outcome.model, "FAILED", outcome.session_id,
-                                "session.jsonl 含缺失或为空的 token_usage_record.response_id，PASS/BLOCK 均不采信",
+                                "session.jsonl 含缺失、为空或带首尾空白的 token_usage_record.response_id，PASS/BLOCK 均不采信",
                             )
-                        response_ids.append(rid.strip())
+                        response_ids.append(rid)
                         closed_calls.update(pending_calls)
                         pending_calls.clear()
                         closed_cont.update(pending_cont)

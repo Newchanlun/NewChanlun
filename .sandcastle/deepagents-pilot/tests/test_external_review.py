@@ -3707,3 +3707,29 @@ def test_validate_review_rejects_missing_admitted_image_id_on_current_policy(lan
     missing_target = replace(target, admitted_image_id="")
     outcome = validate_review(missing_target, launch, receipt, worker, lane.source)
     assert outcome.verdict == "FAILED" and "缺少预检准入冻结的镜像 Id" in outcome.reason
+
+
+def test_validate_review_rejects_whitespace_padded_token_usage_response_id(lane):
+    """R27（Astra P2）：session.jsonl 中的 token_usage_record.response_id 带首尾空白时必须失败闭合，
+    不经 strip() 归一化冒充与代理精确 response_id 一致。"""
+    passed = lane.review_pr(1810, 1)
+    assert passed["verdict"] == "PASS"
+    target = ReviewTarget(**passed["target"])
+    worker = lane.state_root / "runs" / target.key / MODELS[0]
+    launch = json.loads((worker / "launch.json").read_text())
+    receipt = json.loads((worker / "receipt.json").read_text())
+    sess_path = worker / "session.jsonl"
+    lines = sess_path.read_text(encoding="utf-8").splitlines()
+    patched = []
+    mutated = False
+    for line in lines:
+        item = json.loads(line)
+        if item.get("type") == "token_usage_record" and isinstance(item.get("payload"), dict):
+            item["payload"]["response_id"] = f" {item['payload']['response_id']} "
+            mutated = True
+        patched.append(json.dumps(item))
+    assert mutated
+    sess_path.write_text("\n".join(patched) + "\n", encoding="utf-8")
+    outcome = validate_review(target, launch, receipt, worker, lane.source)
+    verified = lane._verify_session_receipt(target, launch, receipt, worker, outcome)
+    assert verified.verdict == "FAILED" and "首尾空白" in verified.reason

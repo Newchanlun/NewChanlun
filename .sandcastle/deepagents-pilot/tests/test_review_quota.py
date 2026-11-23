@@ -266,13 +266,13 @@ def test_real_preflight_missing_creds_charges_zero_and_internal_error_preserves_
 
 
 def test_container_start_failure_marks_not_sent_and_charges_zero_tokens(lane, monkeypatch):
-    """R21（Astra P2）：docker run 退出码 125/126/127 或 OSError 表示容器探针确定未启动，
-    round_trip 须报 error.not_sent，额度统计计 0，反复重试不会耗尽当日审阅额度。"""
+    """R21（Astra P2）+ R27（Sol P2）：docker run 退出码 126/127（入口 python3 未能调用/不存在）或 OSError
+    表示容器探针确定未启动，round_trip 须报 error.not_sent，额度统计计 0；退出码 125 由专门用例验证保守保留预留。"""
     import subprocess
 
     import review_preflight
 
-    for exit_code in (125, 126, 127):
+    for exit_code in (126, 127):
         monkeypatch.setattr(
             review_preflight, "run_bounded",
             lambda _cmd, _t, ec=exit_code, **kw: subprocess.CompletedProcess([], ec, b"", b"docker failed"),
@@ -498,3 +498,31 @@ def test_concurrent_preflight_quota_check_and_reservation_are_atomic(lane, monke
     assert results[1811].startswith("quota-paused：")
     assert preflight_calls == [1810]
     assert orig_recent() == single_budget
+
+
+def test_docker_run_exit_125_keeps_conservative_preflight_reservation(lane, monkeypatch):
+    """R27（Sol P2）：容器探针 docker run 返回退出码 125（或任意非零退出码）时，无法证明容器未曾启动并发送上游请求，
+    必须保留发前保守预留，绝不按 not_sent 核减为 0。"""
+    import subprocess
+
+    import review_preflight
+
+    monkeypatch.setattr(review_preflight, "run_bounded",
+                        lambda _cmd, _t, **kw: subprocess.CompletedProcess(_cmd, 125, b"", b"docker daemon error"))
+    trip = review_preflight.round_trip(
+        module.FORMAL_PROXY_URL, "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
+        review_preflight.Deadline(10), container_image="sha256:" + "1" * 64,
+    )
+    assert trip["ok"] is False and "not_sent" not in (trip.get("error") or {})
+    report = {
+        "returncode": 2,
+        "image_id": "sha256:" + "1" * 64,
+        "report": {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [{"name": f"roundtrip:{m}", "ok": False, "detail": trip} for m in MODELS],
+        },
+    }
+    lane.preflight = lambda _t: report
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 1)
+    assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE

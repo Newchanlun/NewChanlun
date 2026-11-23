@@ -462,12 +462,13 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline,
              "--entrypoint", "python3", container_image, "-I", "-c", _HTTP_WORKER.read_text()],
             work_left, data=payload, env=denv, deadline=deadline)
         container_done = result.returncode >= 0 and result.returncode != 125
-        if result.returncode in (125, 126, 127):
-            # Docker 标准退出码 125/126/127 表示容器或入口进程未能启动，HTTP 探针确定未发出。
+        if result.returncode in (126, 127):
+            # Docker 退出码 126/127 表示容器入口 python3 无法执行/不存在，HTTP 探针确定未发出；
+            # 退出码 125 为 docker 客户端/daemon 报错，可能在容器已启动并发送请求后返回，保守保留发前额度预留。
             return {"http_status": None, "terminal": None, "ok": False,
                     "error": {"not_sent": f"docker_exit_{result.returncode}"}}
         if result.returncode:
-            raise RuntimeError("Container HTTP worker failed")
+            raise RuntimeError(f"Container HTTP worker failed (exit {result.returncode})")
         return json.loads(result.stdout)
     except OSError as error:
         return {"http_status": None, "terminal": None, "ok": False,
