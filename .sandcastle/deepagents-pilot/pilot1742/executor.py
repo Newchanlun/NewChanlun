@@ -838,6 +838,19 @@ def review_sweep_key(executor_key: Path, review_key: Path | None) -> Path | None
     return executor_key
 
 
+def review_sweep_receipt_source() -> str | None:
+    """serve --review-sweep 启动前校验可信代理收据源已通过持久化环境（如 launchd plist）配置完整，
+    避免干净 LaunchAgent 启动后每个新 attempt 都在预检期失败闭合。"""
+    from . import external_review
+    reason = external_review.ExternalReview.validate_preflight_receipt_source()
+    if reason is not None:
+        print("review-sweep " + json.dumps({
+            "action": "refused-no-receipt-source",
+            "reason": reason}, ensure_ascii=False), flush=True)
+        return reason
+    return None
+
+
 def _ignore_orphan_sweep_flags(args: argparse.Namespace) -> None:
     """关审查只删 --review-sweep 时，留在 plist 里的 sweep 子参数不能让 serve 起不来（launchd 会反复重启、派票停摆）：
     记一行警告并忽略。有 --review-sweep 时只补默认值。"""
@@ -964,7 +977,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="审查 App 私钥，只原样转给 sweep 派的 review-pr；不复用 --private-key（执行器 App）。"
                             "审查身份文件（external_review.IDENTITY_CONFIG）存在时必须给")
     serve.add_argument("--review-sweep-auto-merge", action="store_true",
-                       help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；没有 --review-sweep 时记一行警告并忽略")
+                       help="可选（默认关，部署模板不启用）：review_sweep 额外执行门禁核验与无条件撤回原生 auto-merge"
+                            "（不发起 merge/update-branch）；没有 --review-sweep 时记一行警告并忽略")
     serve.add_argument("--review-sweep-max-running", type=int, default=None,
                        help="HOST 上同时在跑的审查上限（默认 1；操作员手动起的 review-pr 也算）；"
                             "没有 --review-sweep 时记一行警告并忽略")
@@ -1023,6 +1037,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.review_sweep:
                 review_key = review_sweep_key(args.private_key, args.review_private_key)
                 if review_key is None:
+                    return 2
+                if review_sweep_receipt_source() is not None:
                     return 2
             try:
                 cutover_store.load()

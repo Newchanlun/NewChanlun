@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 from conftest import git
-from test_external_review import Gateway
+from test_external_review import (
+    Gateway,
+    _fake_preflight_pass,
+    _make_fake_session_receipt,
+)
 
 from pilot1742 import external_review as module
 from pilot1742.delivery import EffectPending
@@ -94,7 +98,9 @@ def lane(env, monkeypatch):
     monkeypatch.setattr(module, "SOURCE_REPO", env.source)
     return ExternalReview(Gateway(env), source=env.source, state_root=env.home / "review",
                           checkout_root=env.home / "clones", poll_seconds=0.01,
-                          launcher=[sys.executable, str(Path(__file__).with_name("external_review_child.py"))])
+                          launcher=[sys.executable, str(Path(__file__).with_name("external_review_child.py"))],
+                          preflight=_fake_preflight_pass,
+                          session_receipt=_make_fake_session_receipt(env.home / "review"))
 
 
 def _launches(lane):
@@ -149,3 +155,434 @@ def test_failure_code_is_visible_in_review_outcome(lane):
     receipt.update(status="failed", failure_code="budget_exceeded")
     outcome = validate_review(target, launch, receipt, folder, lane.source)
     assert outcome.verdict == "FAILED" and "failure_code=budget_exceeded" in outcome.reason
+
+
+def test_quota_gate_blocks_before_paid_preflight_on_new_attempt(lane, monkeypatch):
+    """每日额度已触顶时，新 PR 在付费预检前即被拦下：零预检请求、不占 attempt、不发状态。"""
+    _receipt(lane.state_root, "r-earlier", MODELS[0], 9_000_000)
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    preflight_calls = []
+    lane.preflight = lambda t: (preflight_calls.append(t.head_sha), _fake_preflight_pass(t))[1]
+    with pytest.raises(EffectPending, match="quota-paused"):
+        lane.review_pr(1810, 1)
+    assert preflight_calls == [] and lane.status(1810) == [] and lane.gateway.sent == []
+
+
+def test_failed_preflight_probes_accumulate_into_recent_input_tokens_and_trip_quota(lane, monkeypatch):
+    """R19（Astra P2）：预检发出上游往返探针后因封存/收据等后续项失败时，仍须折算输入 token 计入 24h 额度并在触顶后触发 quota-paused；
+    未发出探针（not_sent 或前置检查失败）的预检记 0。"""
+    no_send_report = {
+        "returncode": 2,
+        "image_id": "sha256:" + "1" * 64,
+        "report": {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [
+                {"name": "models", "ok": False, "detail": {"reason": "down"}},
+                {"name": "roundtrip:gpt-6.2-sol", "ok": False, "detail": {"error": {"not_sent": "总时限已到"}}},
+                {"name": "roundtrip:gpt-6.2-astra", "ok": False, "detail": {"error": {"not_sent": "总时限已到"}}},
+            ],
+        },
+    }
+    lane.preflight = lambda _t: no_send_report
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 1)
+    assert lane.recent_input_tokens() == 0
+
+    sent_then_seal_failed = {
+        "returncode": 2,
+        "image_id": "sha256:" + "1" * 64,
+        "report": {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [
+                {"name": "roundtrip:gpt-6.2-sol", "ok": True, "detail": {"http_status": 200, "returned_model": "gpt-6.2-sol"}},
+                {"name": "roundtrip:gpt-6.2-astra", "ok": True, "detail": {"http_status": 200, "returned_model": "gpt-6.2-astra"}},
+                {"name": "seal:gpt-6.2-sol", "ok": False, "detail": {"reason": "unavailable"}},
+            ],
+        },
+    }
+    calls = []
+    lane.preflight = lambda t: (calls.append(t.head_sha), sent_then_seal_failed)[1]
+    cap = 3 * 2 * module.PREFLIGHT_TOKENS_PER_PROBE
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, str(cap))
+    for _ in range(3):
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 1)
+    assert len(calls) == 3
+    assert lane.recent_input_tokens() == cap
+    with pytest.raises(EffectPending, match="quota-paused"):
+        lane.target(1810, 1)
+    assert len(calls) == 3
+
+
+def test_real_preflight_missing_creds_charges_zero_and_internal_error_preserves_probes_sent(lane, monkeypatch, capsys):
+    """R20（Sol P2 / Astra P2）：用 review_preflight.main 真实输出报告回归两条路径：
+    1) 凭据缺失未启动探针时，预检报告带 sent=False/not_sent，额度记 0，绝不因重试耗尽本地额度；
+    2) 已启动探针后主流程抛内部异常（preflight_internal）时，报告保留 probes_sent，额度照实计入。"""
+    import review_preflight
+
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+    argv = [
+        "--source", str(lane.source),
+        "--base", base, "--head", head, "--merge-base", base,
+        "--checkout-root", str(lane.checkout_root),
+        "--credential-mode", "worker-env",
+        "--deadline", "10",
+    ]
+    monkeypatch.setattr(review_preflight, "check_credential", lambda _a, _d: (
+        {"name": "credential", "class": "credential", "ok": False, "detail": "missing"}, None
+    ))
+    monkeypatch.setattr(review_preflight, "check_space", lambda _a, _d: {
+        "name": "checkout_root_free_space", "class": "space", "ok": True, "detail": {},
+    })
+    monkeypatch.setattr(review_preflight, "check_mount", lambda _a, _d: (
+        {"name": "mount", "class": "mount", "ok": True, "detail": {}}, []
+    ))
+    rc = review_preflight.main(argv)
+    assert rc == 2
+    missing_report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    lane.preflight = lambda _t: {"returncode": rc, "report": missing_report, "image_id": "sha256:" + "1" * 64}
+    for _ in range(3):
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 1)
+    assert lane.recent_input_tokens() == 0
+
+    # 模拟凭据有效、已启动两路探针线程，随后 check_mount 抛出未预期内部异常进入 preflight_internal
+    monkeypatch.setattr(review_preflight, "check_credential", lambda _a, _d: (
+        {"name": "credential", "class": "credential", "ok": True, "detail": {}}, "fake-key"
+    ))
+    monkeypatch.setattr(review_preflight, "probe_model", lambda _a, m, _k, _d, _c=None: [
+        {"name": f"roundtrip:{m}", "class": "roundtrip", "ok": True, "detail": {"http_status": 200, "sent": True}}
+    ])
+    monkeypatch.setattr(review_preflight, "check_mount", lambda _a, _d: (_ for _ in ()).throw(RuntimeError("boom")))
+    rc2 = review_preflight.main(argv)
+    assert rc2 == 2
+    crash_report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert crash_report["checks"][0]["name"] == "preflight_internal"
+    assert crash_report["checks"][0]["detail"]["probes_sent"] == len(MODELS)
+    lane.preflight = lambda _t: {"returncode": rc2, "report": crash_report, "image_id": "sha256:" + "1" * 64}
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 1)
+    assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+
+
+def test_container_start_failure_marks_not_sent_and_charges_zero_tokens(lane, monkeypatch):
+    """R21（Astra P2）+ R27（Sol P2）：docker run 退出码 126/127（入口 python3 未能调用/不存在）或 OSError
+    表示容器探针确定未启动，round_trip 须报 error.not_sent，额度统计计 0；退出码 125 由专门用例验证保守保留预留。"""
+    import subprocess
+
+    import review_preflight
+
+    for exit_code in (126, 127):
+        monkeypatch.setattr(
+            review_preflight, "run_bounded",
+            lambda _cmd, _t, ec=exit_code, **kw: subprocess.CompletedProcess([], ec, b"", b"docker failed"),
+        )
+        trip = review_preflight.round_trip(
+            module.FORMAL_PROXY_URL, "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
+            review_preflight.Deadline(10), container_image="sha256:" + "1" * 64,
+        )
+        assert trip["ok"] is False and "not_sent" in trip["error"]
+        report = {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [
+                {"name": f"roundtrip:{MODELS[0]}", "class": "roundtrip", "ok": False,
+                 "detail": {**trip, "sent": False}},
+                {"name": f"roundtrip:{MODELS[1]}", "class": "roundtrip", "ok": False,
+                 "detail": {"error": {"not_sent": "未启动"}, "sent": False}},
+            ],
+        }
+        lane.preflight = lambda _t, rep=report: {"returncode": 2, "report": rep, "image_id": "sha256:" + "1" * 64}
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 1)
+    assert lane.recent_input_tokens() == 0
+
+    def raise_oserror(_cmd, _t, **kw):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(review_preflight, "run_bounded", raise_oserror)
+    trip_os = review_preflight.round_trip(
+        module.FORMAL_PROXY_URL, "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
+        review_preflight.Deadline(10), container_image="sha256:" + "1" * 64,
+    )
+    assert trip_os["ok"] is False and "not_sent" in trip_os["error"]
+
+
+def test_preflight_usage_ledger_fails_closed_when_daily_cap_enabled(tmp_path, monkeypatch):
+    """R22（Astra P2）：启用 DAILY_INPUT_CAP_ENV 时，预检用量账本缺失计 0；但一旦存在且权限不符、为符号链接、
+    损坏或写入失败，admit_quota / _record_preflight_usage 必须以 quota-unverifiable 失败闭合，绝不静默折算为 0。"""
+    root = tmp_path.resolve()
+    lane = ExternalReview(None, state_root=root)
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    lane.admit_quota()  # 文件不存在时正常按 0 放行
+
+    usage_path = root / module.PREFLIGHT_USAGE_FILE
+    # 1. 权限过宽（0o644）-> admit_quota 与 _record_preflight_usage 均失败闭合
+    usage_path.write_text(json.dumps({"at": time.time(), "probes": 2, "tokens": 8192}) + "\n", encoding="utf-8")
+    os.chmod(usage_path, 0o644)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.admit_quota()
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane._record_preflight_usage(2)
+
+    # 2. 损坏 JSON 行 -> 失败闭合
+    os.chmod(usage_path, 0o600)
+    usage_path.write_text("{corrupt\n", encoding="utf-8")
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.admit_quota()
+
+    # 3. 符号链接 -> 失败闭合
+    target_file = root / "real.jsonl"
+    target_file.write_text(json.dumps({"at": time.time(), "probes": 1, "tokens": 4096}) + "\n", encoding="utf-8")
+    os.chmod(target_file, 0o600)
+    usage_path.unlink()
+    usage_path.symlink_to(target_file)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.admit_quota()
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane._record_preflight_usage(1)
+
+    # 4. FIFO（无对端）绝不阻塞同步 sweep/执行器循环，读写两条路径均立即返回 quota-unverifiable
+    usage_path.unlink()
+    os.mkfifo(usage_path, 0o600)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.admit_quota()
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane._record_preflight_usage(1)
+    usage_path.unlink()
+
+    lock_path = root / "preflight-usage.lock"
+    lock_path.unlink(missing_ok=True)
+    os.mkfifo(lock_path, 0o600)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane._record_preflight_usage(1)
+    lock_path.unlink()
+
+    # 5. 未启用每日额度闸时，不因损坏账本阻断主流程
+    monkeypatch.delenv(DAILY_INPUT_CAP_ENV)
+    lane._record_preflight_usage(1)
+    lane.admit_quota()
+
+
+def test_unwritable_readable_usage_ledger_blocks_before_sending_paid_preflight(lane, monkeypatch):
+    """R23（Astra P1）：启用每日额度闸且账本可读但不可追加（0o400）时，admit_quota 可读过闸，
+    但 admit_preflight 必须在发付费探针前持久化保守预留；预留写不进去时必须立即报 quota-unverifiable 且零探针发出。"""
+    usage_path = lane.state_root / module.PREFLIGHT_USAGE_FILE
+    lane.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    usage_path.write_text("", encoding="utf-8")
+    os.chmod(usage_path, 0o400)
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    preflight_calls = []
+    lane.preflight = lambda t: (preflight_calls.append(t.head_sha), _fake_preflight_pass(t))[1]
+    try:
+        lane.admit_quota()  # 只读核验通过
+        with pytest.raises(EffectPending, match="quota-unverifiable"):
+            lane.target(1810, 1)
+        assert preflight_calls == []  # 预留失败前绝不发付费探针
+    finally:
+        os.chmod(usage_path, 0o600)
+
+
+def test_preflight_timeout_charges_once_and_prelaunch_failure_reconciles_to_zero(lane, monkeypatch):
+    """R24（Sol P2 + Astra P2）：统一使用同一笔预检预留：
+    1) _run_preflight 子进程超时时只保留发前那一笔 len(MODELS) 保守预留，绝不重复记成 2*len(MODELS)；
+    2) 部署准入未通过、缺少收据源配置或 subprocess.run 报 OSError（确认未启动探针）时，预留核减为 0。"""
+    import subprocess
+
+    real_lane = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
+                               checkout_root=lane.checkout_root, poll_seconds=0.01)
+    # 1. 部署准入未通过 -> 确定未启动探针 -> 核减回 0
+    monkeypatch.setattr(real_lane, "_deployment_admission", lambda _head: None)
+    for _ in range(3):
+        with pytest.raises(EffectPending, match="部署 Docker 准入未通过"):
+            real_lane.target(1810, 1)
+    assert real_lane.recent_input_tokens() == 0
+
+    # 2. 准入通过但未配置可信收据源 -> 确定未启动探针 -> 核减回 0
+    monkeypatch.setattr(real_lane, "_deployment_admission", lambda _head: {"image_id": "sha256:" + "1" * 64})
+    monkeypatch.delenv(module.PREFLIGHT_ENV_CONTAINER, raising=False)
+    monkeypatch.delenv(module.PREFLIGHT_ENV_HOST_DIR, raising=False)
+    with pytest.raises(EffectPending, match="未配置可信代理收据来源"):
+        real_lane.target(1810, 1)
+    assert real_lane.recent_input_tokens() == 0
+
+    # 3. 收据源已配但 subprocess.run 报 FileNotFoundError（exec 失败，未启动） -> 核减回 0
+    orig_run = module.subprocess.run
+    monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(lane.state_root / "receipts"))
+
+    def fail_preflight_exec(cmd, *a, **kw):
+        if any("review_preflight.py" in str(arg) for arg in cmd):
+            raise FileNotFoundError("py")
+        return orig_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(module.subprocess, "run", fail_preflight_exec)
+    with pytest.raises(EffectPending, match="FileNotFoundError"):
+        real_lane.target(1810, 1)
+    assert real_lane.recent_input_tokens() == 0
+
+    # 4. subprocess.run 超时（发送状态未知）-> 精确只记 1 笔 len(MODELS) 保守预留，绝不双倍记账
+    def raise_timeout(cmd, *a, **kw):
+        if any("review_preflight.py" in str(arg) for arg in cmd):
+            raise subprocess.TimeoutExpired(cmd, 65)
+        return orig_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(module.subprocess, "run", raise_timeout)
+    with pytest.raises(EffectPending, match="TimeoutExpired"):
+        real_lane.target(1810, 1)
+    assert real_lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+
+
+def test_preflight_usage_error_exit_3_reconciles_reservation_to_zero(lane, capsys):
+    """R25（Astra P2）：预检参数错误（如 REVIEW_PREFLIGHT_DEADLINE=0）在启动探针前以退出码 3 输出
+    usage_error（无 checks）；admit_preflight 必须把发前预留核减为 0，不耗尽每日额度。"""
+    import review_preflight
+
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+    with pytest.raises(SystemExit) as caught:
+        review_preflight.main([
+            "--source", str(lane.source), "--base", base, "--head", head, "--merge-base", base,
+            "--checkout-root", str(lane.checkout_root), "--deadline", "0",
+        ])
+    assert caught.value.code == 3
+    usage_report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "usage_error" in usage_report and "checks" not in usage_report
+    lane.preflight = lambda _t: {"returncode": 3, "report": usage_report, "image_id": "sha256:" + "1" * 64}
+    for _ in range(3):
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 1)
+    assert lane.recent_input_tokens() == 0
+
+
+def test_concurrent_preflight_quota_check_and_reservation_are_atomic(lane, monkeypatch):
+    """R26（Astra P2）：额度复查与预检预留在同一把 preflight-usage.lock 排他锁内原子完成；
+    两个并发 PR 同时竞争最后一份额度时，只有先拿锁的一个放行并写入预留，另一个在锁内见触顶后报 quota-paused 且零探针发出。"""
+    import threading
+
+    single_budget = len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, str(single_budget))
+    base_pr = dict(lane.gateway.pr)
+    monkeypatch.setattr(lane.gateway, "get_pr", lambda n: {**base_pr, "number": n})
+    preflight_calls: list[int] = []
+    lane.preflight = lambda t: (preflight_calls.append(t.pr_number), _fake_preflight_pass(t))[1]
+
+    orig_recent = lane.recent_input_tokens
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    seen_calls = 0
+
+    def slow_recent(*args, **kwargs):
+        nonlocal seen_calls
+        seen_calls += 1
+        if seen_calls == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        return orig_recent(*args, **kwargs)
+
+    monkeypatch.setattr(lane, "recent_input_tokens", slow_recent)
+    results: dict[int, str] = {}
+
+    def worker(pr_num: int):
+        try:
+            lane.target(pr_num, 1)
+            results[pr_num] = "ok"
+        except EffectPending as err:
+            results[pr_num] = str(err)
+
+    t1 = threading.Thread(target=worker, args=(1810,))
+    t2 = threading.Thread(target=worker, args=(1811,))
+    t1.start()
+    assert first_entered.wait(timeout=5)
+    t2.start()
+    time.sleep(0.05)  # t2 应阻塞在 preflight-usage.lock 上，不提前通过额度检查
+    assert preflight_calls == []
+    release_first.set()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+    assert results[1810] == "ok"
+    assert results[1811].startswith("quota-paused：")
+    assert preflight_calls == [1810]
+    assert orig_recent() == single_budget
+
+
+def test_docker_run_exit_125_keeps_conservative_preflight_reservation(lane, monkeypatch):
+    """R27（Sol P2）：容器探针 docker run 返回退出码 125（或任意非零退出码）时，无法证明容器未曾启动并发送上游请求，
+    必须保留发前保守预留，绝不按 not_sent 核减为 0。"""
+    import subprocess
+
+    import review_preflight
+
+    monkeypatch.setattr(review_preflight, "run_bounded",
+                        lambda _cmd, _t, **kw: subprocess.CompletedProcess(_cmd, 125, b"", b"docker daemon error"))
+    trip = review_preflight.round_trip(
+        module.FORMAL_PROXY_URL, "k", MODELS[0], "preflight-12345678-1234-4234-8234-123456789abc",
+        review_preflight.Deadline(10), container_image="sha256:" + "1" * 64,
+    )
+    assert trip["ok"] is False and "not_sent" not in (trip.get("error") or {})
+    report = {
+        "returncode": 2,
+        "image_id": "sha256:" + "1" * 64,
+        "report": {
+            "kind": "review-preflight", "is_review_result": False, "ready": False,
+            "checks": [{"name": f"roundtrip:{m}", "ok": False, "detail": trip} for m in MODELS],
+        },
+    }
+    lane.preflight = lambda _t: report
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 1)
+    assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+
+
+def test_preflight_incomplete_or_empty_checks_retains_conservative_probe_reservation(lane):
+    """R30（Astra P2）：预检返回合法 JSON 但 checks 为空或缺少某个模型的 roundtrip 项时，
+    绝不能把「发送状态未知」核减为未发送；仅对明确证明 not_sent 且无冲突的模型核减，其余保留预留。"""
+    # 1. checks 为空 -> 保留全部 MODELS 预留
+    assert module.ExternalReview._preflight_sent_probes(
+        {"kind": "review-preflight", "ready": False, "checks": []}
+    ) == len(MODELS)
+    # 2. 仅证明 sol 未发送，缺失 astra -> 保留 1 笔（astra 未知）
+    assert module.ExternalReview._preflight_sent_probes({
+        "kind": "review-preflight", "ready": False,
+        "checks": [{"name": f"roundtrip:{MODELS[0]}", "ok": False, "detail": {"sent": False}}],
+    }) == len(MODELS) - 1
+    # 3. 同一模型重复冲突项 -> 失败闭合保留该模型预留
+    assert module.ExternalReview._preflight_sent_probes({
+        "kind": "review-preflight", "ready": False,
+        "checks": [
+            {"name": f"roundtrip:{MODELS[0]}", "ok": False, "detail": {"sent": False}},
+            {"name": f"roundtrip:{MODELS[0]}", "ok": True, "detail": {"sent": True}},
+            {"name": f"roundtrip:{MODELS[1]}", "ok": False, "detail": {"sent": False}},
+        ],
+    }) == 1
+    # 4. 端到端通过 admit_preflight 验证 checks=[] 保留全部预留
+    lane.preflight = lambda _t: {
+        "returncode": 2, "image_id": "sha256:" + "1" * 64,
+        "report": {"kind": "review-preflight", "is_review_result": False, "ready": False, "checks": []},
+    }
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 1)
+    assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+
+
+def test_first_preflight_usage_ledger_creation_fsyncs_parent_dir_before_sending(lane, monkeypatch):
+    """R33/R35（Astra P2）：创建及重试写入预检用量账本时必须在发出付费探针前 fsync 父目录，
+    首次目录同步失败留下文件后，第二次重试仍须复核目录同步并以 quota-unverifiable 阻断且不发探针。"""
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    (lane.state_root / "runs").mkdir(parents=True, exist_ok=True, mode=0o700)
+    synced: list[Path] = []
+    preflight_calls: list[str] = []
+    lane.preflight = lambda t: (preflight_calls.append(t.head_sha), _fake_preflight_pass(t))[1]
+
+    def fail_sync(directory: Path) -> None:
+        synced.append(directory)
+        if directory == lane.state_root:
+            raise OSError("injected ledger parent dir fsync error")
+
+    monkeypatch.setattr(module, "_fsync_dir", fail_sync)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.target(1810, 1)
+    assert (lane.state_root / module.PREFLIGHT_USAGE_FILE).exists()
+    # 文件虽已可见，重试时仍须再次 fsync 父目录并继续阻断
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.target(1810, 1)
+    assert synced.count(lane.state_root) >= 2 and preflight_calls == []

@@ -99,6 +99,7 @@ class FakeGitHub:
     def _pr_json(self, pr: dict[str, Any]) -> dict[str, Any]:
         head = self.ref(pr["branch"]) if pr["state"] == "open" else pr["frozen_head"]
         return {"number": pr["number"], "state": pr["state"], "merged": pr["merged"], "draft": pr["draft"],
+                "auto_merge": pr.get("auto_merge"),
                 "html_url": f"https://github.com/{self.repo}/pull/{pr['number']}", "title": pr["title"],
                 "body": pr["body"], "user": pr["user"], "head": {"ref": pr["branch"], "sha": head,
                                                                  "repo": {"full_name": self.repo}},
@@ -191,7 +192,11 @@ class FakeGitHub:
                 {"id": ident.repository_id, "full_name": self.repo}]})
         prefix = f"/repos/{self.repo}"
         if path == prefix:
-            return httpx.Response(200, json={"id": ident.repository_id, "full_name": self.repo})
+            return httpx.Response(200, json={
+                "id": ident.repository_id,
+                "full_name": self.repo,
+                "allow_auto_merge": getattr(self, "allow_auto_merge", False),
+            })
         rel = path.removeprefix(prefix)
         for pattern, handler in self._routes():
             match = re.fullmatch(pattern, f"{method} {rel}")

@@ -78,3 +78,11 @@ test("显式模型与调度 effort 独立生效，显式 effort 优先且非法�
   assert.match(configured.command, /model_reasoning_effort="high"/);
   assert.match(explicit.command, /model_reasoning_effort="low"/);
 });
+
+test("正式独审 launch_id 透传为 X-NewChanlun-Review-Launch 代理头且非法格式拒绝", () => {
+  const launchId = "11111111-2222-4333-8444-555555555555";
+  const built = codexWorker({ docker: true, model: "gpt-6.2-sol", reviewLaunchId: launchId })
+    .buildPrintCommand({ prompt: "review", dangerouslySkipPermissions: true });
+  assert.match(built.command, /model_providers\.cliproxy-local\.http_headers=\{"X-NewChanlun-Review-Launch"="review-11111111-2222-4333-8444-555555555555"\}/);
+  assert.throws(() => codexWorker({ docker: true, model: "gpt-6.2-sol", reviewLaunchId: "not-uuid" }), /UUIDv4/);
+});

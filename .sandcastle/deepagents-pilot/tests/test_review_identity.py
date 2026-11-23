@@ -185,7 +185,7 @@ def test_sweep_review_uses_configured_reviewer_identity(tmp_path, monkeypatch):
     seen = capture_clients(monkeypatch)
     class GitHub:
         def pr(self, number):
-            return {"head": "a" * 40}
+            return {"head": "a" * 40, "draft": False}
     argv = ["--pr", "1810", "--attempt", "1", "--expect-head", "a" * 40, "--private-key", str(KEY)]
     assert review_sweep.run_review(argv, GitHub()) == 2
     monkeypatch.setattr(module, "IDENTITY_CONFIG", write(tmp_path, REVIEWER))

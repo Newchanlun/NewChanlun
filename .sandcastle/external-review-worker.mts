@@ -15,7 +15,7 @@ import { gitEnvironment } from "./git-environment.ts";
 export interface ReviewLaunch {
   run_id: string; launch_id: string; pr_number: number; model: ChildModel;
   base_sha: string; merge_base_sha: string; head_sha: string; controller_code_head: string;
-  checkout: string; prompt: string; mode: "review";
+  checkout: string; prompt: string; mode: "review"; image_id?: string;
 }
 export const REVIEW_IMAGE = "sandcastle:newchanlun";
 /** #1968：kimi 在 codex exec --output-schema 下把开场白当成终答、零工具调用就结束（PR #1966 实测 3/3）；
@@ -41,6 +41,9 @@ export function readLaunch(folder: string): ReviewLaunch {
     throw new Error("只接受独立无凭据 clone，不接受 linked worktree");
   }
   if (inside(launch.checkout, folder) || inside(folder, launch.checkout)) throw new Error("源码与宿主回执目录重叠");
+  if (launch.image_id !== undefined && (typeof launch.image_id !== "string" || !IMAGE_ID.test(launch.image_id))) {
+    throw new Error("launch image_id 无效");
+  }
   if (existsSync(join(launch.checkout, ".codex", "config.toml"))) throw new Error("候选项目 Codex 配置未获准入");
   return launch;
 }
@@ -203,25 +206,85 @@ export function verifyReviewAdmission(admission: Admission): void {
   if (!admission.accepted) throw new Error("外部独审必须先完成当前代码 head 的 Docker 验收，不能占用旧受控行");
 }
 
+/** 审查容器工具 shell 的固定不可写环境：关掉 login shell 与环境变量继承，HOME 指向 root 只读根目录，
+ *  避免用户可写的 /home/agent/.profile、.bashrc、.gitconfig 或可写 PATH 目录劫持补丁读取。 */
+export const REVIEW_TOOL_SHELL_ENV = {
+  PATH: "/usr/local/bin:/usr/bin:/bin",
+  HOME: "/",
+  XDG_CONFIG_HOME: "/nonexistent",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_NO_REPLACE_OBJECTS: "1",
+  GIT_OPTIONAL_LOCKS: "0",
+  GIT_TERMINAL_PROMPT: "0",
+  LC_ALL: "C.UTF-8",
+  LANG: "C.UTF-8",
+} as const;
+
+export const REVIEW_IMMUTABLE_BINS = [
+  "/usr/bin/git",
+  "/usr/bin/nl",
+  "/usr/bin/sed",
+  "/usr/bin/head",
+  "/usr/bin/tail",
+  "/usr/bin/cat",
+  "/usr/bin/grep",
+  "/bin/bash",
+  "/bin/sh",
+] as const;
+
 export async function probeReviewFilesystem(handle: BindMountSandboxHandle, folder: string): Promise<Record<string, string>> {
   const canary = join(folder, "nonsecret-canary.txt");
   writeFileSync(canary, "external-review non-secret canary", { flag: "wx", mode: 0o600 });
   try {
-    const program = `const fs=require('node:fs');const out={};
+    const program = `const fs=require('node:fs');const path=require('node:path');const out={};
       const probe=(k,f)=>{try{f();out[k]='ALLOWED'}catch(e){out[k]=e.code}};
+      const ro=(c)=>c==='EACCES'||c==='EROFS';
+      const tryWrite=(f)=>{try{f();return 'ALLOWED'}catch(e){return e.code||'ERR'}};
       probe('source_write',()=>fs.writeFileSync('/review/.external-review-write-probe','probe'));
       probe('git_write',()=>{const fd=fs.openSync('/review/.git/config','a');fs.closeSync(fd)});
       probe('host_read',()=>fs.readFileSync(${JSON.stringify(canary)}));
       probe('state_write',()=>fs.writeFileSync(${JSON.stringify(join(folder, ".state-probe"))},'probe'));
+      const homeRcs=['/.bash_profile','/.bash_login','/.profile','/.bashrc','/.gitconfig'];
+      if(homeRcs.some((p)=>fs.existsSync(p))){out.tool_home_write='RC_PRESENT'}
+      else{probe('tool_home_write',()=>fs.writeFileSync('/.external-review-home-probe','probe'));}
+      const etcFiles=['/etc/profile','/etc/bash.bashrc'];
+      try{for(const name of fs.readdirSync('/etc/profile.d')){etcFiles.push(path.join('/etc/profile.d',name));}}catch{}
+      const etcChecks=[
+        ...etcFiles.map((p)=>tryWrite(()=>{const fd=fs.openSync(p,'a');fs.closeSync(fd)})),
+        tryWrite(()=>fs.writeFileSync('/etc/profile.d/.external-review-probe','probe')),
+      ];
+      out.etc_profile_write=etcChecks.every(ro)?etcChecks[0]:(etcChecks.find((c)=>!ro(c))||'ERR');
+      const bins=${JSON.stringify(REVIEW_IMMUTABLE_BINS)};
+      let binsStatus='EACCES';
+      for(const b of bins){
+        try{
+          const real=fs.realpathSync(b);
+          if(!real.startsWith('/usr/bin/')&&!real.startsWith('/bin/')){binsStatus='BAD_PATH';break;}
+          fs.accessSync(real,fs.constants.X_OK);
+          const fc=tryWrite(()=>{const fd=fs.openSync(real,'a');fs.closeSync(fd)});
+          const dc1=tryWrite(()=>fs.writeFileSync(path.join(path.dirname(real),'.external-review-bin-probe'),'probe'));
+          const dc2=tryWrite(()=>fs.writeFileSync(path.join(path.dirname(b),'.external-review-bin-probe'),'probe'));
+          if(!ro(fc)||!ro(dc1)||!ro(dc2)){binsStatus=ro(fc)?(ro(dc1)?dc2:dc1):fc;break;}
+          binsStatus=fc;
+        }catch(e){binsStatus=e.code||'ERR';break;}
+      }
+      out.tool_bins_immutable=binsStatus;
+      try{out.git_bin=fs.realpathSync('/usr/bin/git')}catch(e){out.git_bin=e.code||'ERR'}
       console.log(JSON.stringify(out));`;
     const quote = (s: string) => "'" + s.replaceAll("'", "'\\''") + "'";
     const result = await handle.exec(`node -e ${quote(program)}`);
     if (result.exitCode) throw new Error("review 文件隔离探针无法运行");
     const observation = JSON.parse(result.stdout.trim());
+    const isReadonly = (code: unknown) => code === "EACCES" || code === "EROFS";
     if (observation.source_write !== "EROFS" || observation.git_write !== "EROFS"
       || !["ENOENT", "EACCES"].includes(observation.host_read)
-      || !["ENOENT", "EACCES", "EROFS"].includes(observation.state_write)) {
-      throw new Error("review 源码、Git、宿主 canary 或状态目录可被访问");
+      || !["ENOENT", "EACCES", "EROFS"].includes(observation.state_write)
+      || !isReadonly(observation.tool_home_write)
+      || !isReadonly(observation.etc_profile_write)
+      || !isReadonly(observation.tool_bins_immutable)
+      || observation.git_bin !== "/usr/bin/git") {
+      throw new Error("review 源码、Git、宿主 canary、状态目录或工具执行环境不可信");
     }
     return observation;
   } finally { unlinkSync(canary); }
@@ -320,6 +383,9 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     if (before.head !== launch.head_sha || before.status || before.branch !== "HEAD") throw new Error("checkout 不干净或 head 不符");
     record.phase = "admission";
     const image = deps.ready(REVIEW_IMAGE); record.image_id = image;
+    if (launch.image_id && image !== launch.image_id) {
+      throw new Error("当前审阅镜像 Id 与预检准入时冻结的镜像 Id 不一致");
+    }
     record.isolation_contract = (deps.contract ?? contractDigest)();
     const sandbox = deps.sandbox(image);
     record.phase = "volume";
@@ -358,7 +424,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     record.filesystem = await probeReviewFilesystem(handle, folder);
     save(folder, "supervisor.json", record);
     record.phase = "provider";
-    const provider = codexWorker({ docker: true, model: launch.model, effort: "xhigh" });
+    const provider = codexWorker({ docker: true, model: launch.model, effort: "xhigh", reviewLaunchId: launch.launch_id });
     const schema = join(folder, "output-schema.json");
     writeFileSync(schema, JSON.stringify(OUTPUT_SCHEMA), { mode: 0o600 });
     await handle.copyFileIn(schema, "/tmp/external-review-schema.json");
@@ -370,9 +436,13 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     if (built.stdin !== prompt || !built.command.includes("--disable multi_agent")) throw new Error("Codex 命令协议已漂移");
     // project_doc_max_bytes=0：不把候选仓 AGENTS.md 当指令自动注入每次请求（实测约 13k 字符，随每轮请求重发）；
     // 候选 AGENTS 本就是不可信审阅材料，审查员需要时可用 cat 读取。
+    const shellEnvArgs = Object.entries(REVIEW_TOOL_SHELL_ENV)
+      .map(([k, v]) => ` -c 'shell_environment_policy.set.${k}=${JSON.stringify(v)}'`)
+      .join("");
     const command = built.command + " --skip-git-repo-check"
       + (promptJson ? "" : " --output-schema /tmp/external-review-schema.json") + " -c 'features.apps=false' -c 'features.plugins=false'"
-      + " -c 'web_search=\"disabled\"' -c 'shell_environment_policy.inherit=\"core\"' -c 'project_doc_max_bytes=0' -";
+      + " -c 'web_search=\"disabled\"' -c 'allow_login_shell=false' -c 'shell_environment_policy.inherit=\"none\"'"
+      + shellEnvArgs + " -c 'project_doc_max_bytes=0' -";
     const transcript = new CodexTranscript(provider);
     const events = openSync(join(folder, "events.jsonl"), "wx", 0o600);
     const cap = deps.commandCap ?? REVIEW_COMMAND_CAP;
@@ -429,8 +499,22 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
       sessionId: transcript.sessionId!, handle });
     const log = await provider.sessionStorage.readHostSession(launch.checkout, transcript.sessionId!);
     if (!log) throw new Error("缺少真实 session 日志");
-    const first = JSON.parse(log.split("\n")[0]!);
-    if (first.type !== "session_meta" || first.payload?.id !== transcript.sessionId) throw new Error("session 日志身份不符");
+    const sessionRows = log.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as {
+      type?: unknown; payload?: { id?: unknown; model_provider?: unknown; model?: unknown };
+    });
+    const first = sessionRows[0];
+    if (!first || first.type !== "session_meta" || first.payload?.id !== transcript.sessionId) {
+      throw new Error("session 日志身份不符");
+    }
+    if (first.payload?.model_provider !== "cliproxy-local") {
+      throw new Error("session 日志 provider 不符");
+    }
+    const turnModels = sessionRows.filter((row) => row.type === "turn_context").map((row) => row.payload?.model);
+    if (!turnModels.length || turnModels.some((m) => m !== launch!.model)) {
+      throw new Error("session 日志模型与请求不符");
+    }
+    record.observed_provider = "cliproxy-local";
+    record.observed_model = launch.model;
     writeFileSync(join(folder, "session.jsonl"), log, { mode: 0o600, flag: "wx" });
     record.phase = "checkout-after";
     record.after = deps.volumes.snapshot(volume, image, launch.launch_id);

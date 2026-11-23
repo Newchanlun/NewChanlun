@@ -21,13 +21,12 @@ SHORT_VALID = "short7k"  # 正式 worker 接受的 7 字符 key
 OTHER_VALID = f"outer-{KEY}-tail"  # 含 KEY：两把 key 互为子串
 # 与报告字段名、枚举值相同或是其子串的合法 key（_clean_key 允许任意可见 ASCII）
 PROTOCOL_LIKE_KEYS = ("ok", "ready", "completed", "re", "name", "codex")
-KIMI, OPUS = "kimi-k3.1-pro", "claude-opus-5-5"
-OFFICIAL = {KIMI: ("kimi", "https://api.kimi.com/coding/v1/responses"),
-            OPUS: ("claude", "https://api.anthropic.com/v1/messages")}
+SOL, ASTRA = "gpt-6.2-sol", "gpt-6.2-astra"
+OFFICIAL = {model: ("codex", "https://chatgpt.com/backend-api/codex/responses") for model in (SOL, ASTRA)}
 ANTIGRAVITY = ("antigravity", "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent")
 MODELFLARE = ("openai-compatible-modelflare-codex", "https://modelflare.dev/v1/responses")
 LOCAL = "http://localhost:9"  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy / 测试假服务），非调试残留
-LEGACY_ROUTE_FAILURES = {f"route:{model}" for model in (KIMI, OPUS)}
+LEGACY_ROUTE_FAILURES = {f"route:{model}" for model in (SOL, ASTRA)}
 Usage = namedtuple("Usage", "total used free")
 
 
@@ -100,7 +99,12 @@ class FakeProxy:
                 elif code != 200:
                     payload = b'{"error":{"message":"tool_choice: type \\"tool\\" and \\"any\\" are not supported"}}'
                 else:
-                    payload = terminal or b'event: response.completed\ndata: {"type":"response.completed","response":{}}\n\n'
+                    payload = terminal or (
+                        'event: response.completed\ndata: '
+                        + json.dumps({"type": "response.completed",
+                                      "response": {"status": "completed", "model": body["model"]}})
+                        + "\n\n"
+                    ).encode()
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -122,19 +126,61 @@ class FakeProxy:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch, repo):
-    """宿主 checkout_root、假 docker（按 bind 源映射读文件）与宿主 provider 配置。"""
+    """宿主 checkout_root、假 docker（模拟正式命名卷 volume/create/cp/start/run/rm）与宿主 provider 配置。"""
     root, base, head = repo
-    bin_dir, logs, checkouts = tmp_path / "bin", tmp_path / "logs", tmp_path / "checkouts"
-    for d in (bin_dir, logs):
+    bin_dir, logs, checkouts, volumes = tmp_path / "bin", tmp_path / "logs", tmp_path / "checkouts", tmp_path / "volumes"
+    for d in (bin_dir, logs, volumes):
         d.mkdir()
     docker = bin_dir / "docker"
-    docker.write_text("#!/bin/sh\n"
-                      "[ \"$1\" = rm ] && exit 0\n"
-                      "src=$(printf '%s\\n' \"$@\" | sed -n 's/^type=bind,src=\\(.*\\),dst=\\/checkouts,readonly$/\\1/p')\n"
-                      "case \"$src\" in /*) ;; *) echo 'mount path must be absolute' >&2; exit 125;; esac\n"
-                      "[ -n \"$FAKE_DOCKER_EMPTY\" ] && src=/nonexistent\n"
-                      "for last; do :; done\n"
-                      "exec cat \"$src${last#/checkouts}\"\n")
+    docker.write_text(f"""#!{sys.executable}
+import os, shutil, sys
+from pathlib import Path
+vols = Path({str(volumes)!r})
+args = sys.argv[1:]
+if args[:1] == ["--context"]:
+    args = args[2:]
+cmd = args[0] if args else ""
+if cmd == "volume" and args[1:2] == ["create"]:
+    (vols / args[2]).mkdir(parents=True, exist_ok=True)
+    sys.exit(0)
+if cmd == "volume" and args[1:2] == ["rm"]:
+    shutil.rmtree(vols / args[-1], ignore_errors=True)
+    sys.exit(0)
+if cmd == "create":
+    name = args[args.index("--name") + 1]
+    mount = args[args.index("-v") + 1]
+    vol, dst = mount.split(":", 1)
+    assert dst == "/review"
+    (vols / f".helper-{{name}}").write_text(vol)
+    sys.exit(0)
+if cmd == "cp":
+    src_arg, dst_arg = args[1], args[2]
+    src = Path(src_arg[:-2] if src_arg.endswith("/.") else src_arg)
+    assert src.is_absolute()
+    helper, dst = dst_arg.split(":", 1)
+    assert dst == "/review"
+    vol = (vols / f".helper-{{helper}}").read_text()
+    if not (vols / ".empty-mode").exists():
+        for item in src.iterdir():
+            shutil.copy2(item, vols / vol / item.name)
+    sys.exit(0)
+if cmd == "start":
+    sys.exit(0)
+if cmd == "rm":
+    (vols / f".helper-{{args[-1]}}").unlink(missing_ok=True)
+    sys.exit(0)
+if cmd == "run":
+    mount = args[args.index("-v") + 1]
+    vol, dst, mode = mount.split(":", 2)
+    assert dst == "/review" and mode == "ro"
+    target = vols / vol / args[-1].removeprefix("/review/")
+    if not target.is_file():
+        print("cat: can't open file", file=sys.stderr)
+        sys.exit(1)
+    print(target.read_text(), end="")
+    sys.exit(0)
+sys.exit(125)
+""")
     docker.chmod(0o755)
     _fake_codex(bin_dir)
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
@@ -240,7 +286,7 @@ def test_healthy_environment_without_trusted_route_evidence_still_blocks(env, ca
     assert code == 2 and not report["ready"] and failing(report) == LEGACY_ROUTE_FAILURES
     assert report["is_review_result"] is False and report["kind"] == "review-preflight"
     assert KEY not in out
-    assert sorted(r["body"]["model"] for r in proxy.requests) == sorted([KIMI, OPUS])
+    assert sorted(r["body"]["model"] for r in proxy.requests) == sorted([SOL, ASTRA])
     assert all(r["body"]["tool_choice"] == "auto" and r["body"]["tools"] for r in proxy.requests)
     assert all(r["auth"] == f"Bearer {KEY}" for r in proxy.requests)
 
@@ -257,8 +303,8 @@ def test_space_below_two_snapshots_blocks(env, capsys, repo, monkeypatch):
 
 # ---------------- 挂载：PR1868 A1 ----------------
 
-def test_container_seeing_empty_mount_blocks(env, capsys, monkeypatch):
-    monkeypatch.setenv("FAKE_DOCKER_EMPTY", "1")
+def test_container_seeing_empty_mount_blocks(env, capsys, tmp_path):
+    (tmp_path / "volumes" / ".empty-mode").write_text("1")
     code, report, *_ = env(capsys=capsys)
     assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {"checkout_root_container_mount"}
 
@@ -266,6 +312,7 @@ def test_container_seeing_empty_mount_blocks(env, capsys, monkeypatch):
 def test_probe_leaves_no_files_in_checkout_root(env, capsys, tmp_path):
     env(capsys=capsys)
     assert list((tmp_path / "checkouts").iterdir()) == []
+    assert list((tmp_path / "volumes").iterdir()) == []
 
 
 def test_relative_checkout_root_is_mounted_as_absolute(env, capsys, tmp_path, monkeypatch):
@@ -275,18 +322,26 @@ def test_relative_checkout_root_is_mounted_as_absolute(env, capsys, tmp_path, mo
 
 
 def test_failed_docker_run_container_is_removed(env, capsys, tmp_path):
-    """docker run 非 0 退出时容器可能已建，--rm 不会清，须 rm -f。"""
+    """docker run 非 0 退出时容器可能已建，--rm 不会清，须 rm -f 并清理临时命名卷。"""
     calls = tmp_path / "docker-calls"
-    (tmp_path / "bin" / "docker").write_text(f'#!/bin/sh\necho "$@" >> {calls}\n[ "$1" = rm ] && exit 0\nexit 125\n')
+    (tmp_path / "bin" / "docker").write_text(
+        f'#!/bin/sh\necho "$@" >> {calls}\n'
+        '[ "$1" = run ] && exit 125\n'
+        'exit 0\n'
+    )
     code, report, *_ = env(capsys=capsys)
-    assert code == 2 and any(line.startswith("rm -f preflight-") for line in calls.read_text().splitlines())
+    lines = calls.read_text().splitlines()
+    assert code == 2 and any(line.startswith("rm -f preflight-") for line in lines)
+    assert any(line.startswith("volume rm -f preflight-vol-") for line in lines)
     # docker 自身出错（125）时 daemon 可能稍后才建出容器，rm -f 成功也只能报回收未确认（独审十五）
     assert any("daemon" in item for item in check(report, "probe_cleanup")["detail"])
 
 
 def test_container_command_failing_inside_a_finished_container_is_not_a_cleanup_failure(env, capsys, tmp_path):
-    """容器里的命令非 0 退出（如 PR1868 A1 空挂载时 cat 失败）：容器已跑完、--rm 已删，不报回收失败。"""
-    (tmp_path / "bin" / "docker").write_text('#!/bin/sh\n[ "$1" = rm ] && exit 0\nexit 1\n')
+    """容器里的命令非 0 退出（如命名卷缺文件时 cat 失败）：容器已跑完、--rm 已删，不报回收失败。"""
+    (tmp_path / "bin" / "docker").write_text(
+        '#!/bin/sh\n[ "$1" = run ] && exit 1\nexit 0\n'
+    )
     code, report, *_ = env(capsys=capsys)
     assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {"checkout_root_container_mount"}
 
@@ -326,14 +381,16 @@ def test_run_bounded_with_no_time_left_starts_nothing(tmp_path, monkeypatch):
 
 
 def test_hanging_docker_is_killed_removed_and_reported_within_deadline(tmp_path, repo):
-    """docker run 与 rm 都卡住：总耗时不越过 --deadline，探针目录删掉，回收失败如实报告。"""
+    """docker 卷/容器调用与清理都卡住：总耗时不越过 --deadline，探针目录删掉，回收失败如实报告。"""
     calls = tmp_path / "docker-calls"
     code, report, elapsed = _cli(tmp_path, repo, f'#!/bin/sh\necho "$@" >> {calls}\nsleep 30\n', "4")
     lines = calls.read_text().splitlines() if calls.exists() else []
     assert code == 2 and elapsed < 4.6 and report["wall_seconds"] <= 4.0 and _leftovers(tmp_path) == []
     assert "probe_cleanup" in failing(report)
+    vols = [a.split()[2] for a in lines if a.startswith("volume create ")]
+    assert all(f"volume rm -f {name}" in lines for name in vols)
     runs = [a.split()[a.split().index("--name") + 1] for a in lines if a.startswith("run ")]
-    assert all(f"rm -f {name}" in lines for name in runs)  # 机器忙到 docker run 没起来时，没有要删的容器
+    assert all(f"rm -f {name}" in lines for name in runs)
 
 
 def test_report_is_printed_within_the_deadline_when_docker_hangs(tmp_path, repo):
@@ -375,35 +432,29 @@ def test_no_probe_dir_is_left_when_credentials_use_up_the_deadline(tmp_path, rep
 
 # ---------------- 路由与往返：PR1883 A1 ----------------
 
-def test_opus_on_antigravity_with_upstream_400_blocks(env, capsys):
-    code, report, *_ = env(routes={**OFFICIAL, OPUS: ANTIGRAVITY}, status={OPUS: 400}, capsys=capsys)
-    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {f"roundtrip:{OPUS}"}
-    assert check(report, f"route:{OPUS}")["detail"]["actual"] == []
-    assert check(report, f"roundtrip:{OPUS}")["detail"]["error"]["class"] == "tool_choice_unsupported"
+def test_astra_on_antigravity_with_upstream_400_blocks(env, capsys):
+    code, report, *_ = env(routes={**OFFICIAL, ASTRA: ANTIGRAVITY}, status={ASTRA: 400}, capsys=capsys)
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {f"roundtrip:{ASTRA}"}
+    assert check(report, f"route:{ASTRA}")["detail"]["actual"] == []
+    assert check(report, f"roundtrip:{ASTRA}")["detail"]["error"]["class"] == "tool_choice_unsupported"
 
 
 def test_wrong_provider_blocks_even_when_round_trip_succeeds(env, capsys):
-    code, report, *_ = env(routes={**OFFICIAL, OPUS: ANTIGRAVITY}, capsys=capsys)
+    code, report, *_ = env(routes={**OFFICIAL, ASTRA: ANTIGRAVITY}, capsys=capsys)
     assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
-def test_kimi_on_third_party_route_blocks(env, capsys):
-    code, report, *_ = env(routes={**OFFICIAL, KIMI: MODELFLARE}, status={KIMI: 403}, capsys=capsys)
-    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {f"roundtrip:{KIMI}"}
+def test_sol_on_third_party_route_blocks(env, capsys):
+    code, report, *_ = env(routes={**OFFICIAL, SOL: MODELFLARE}, status={SOL: 403}, capsys=capsys)
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {f"roundtrip:{SOL}"}
 
 
-def test_kimi_international_upstream_is_an_official_route(env, capsys):
-    """CLIProxy 在国内 kimi 与国际 kimi-ai 之间按同型号候选池切换，两条都是正式路线。"""
-    code, report, *_ = env(routes={**OFFICIAL, KIMI: ("kimi-ai", "https://api.kimi.ai/coding/v1/responses")}, capsys=capsys)
+def test_old_kimi_log_is_not_route_evidence_for_gpt(env, capsys):
+    code, report, *_ = env(routes={**OFFICIAL, SOL: ("kimi-ai", "https://api.kimi.ai/coding/v1/responses")}, capsys=capsys)
     assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
-    assert check(report, f"route:{KIMI}")["detail"]["actual"] == []
-    assert check(report, f"route:{KIMI}")["detail"]["expected"] == ["kimi-ai@api.kimi.ai", "kimi@api.kimi.com"]
-
-
-def test_kimi_routed_to_codex_blocks(env, capsys):
-    code, report, *_ = env(routes={**OFFICIAL, KIMI: ("codex", "https://chatgpt.com/backend-api/codex/responses")},
-                           capsys=capsys)
-    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    assert check(report, f"route:{SOL}")["detail"]["expected"] == [f"codex:{SOL}@chatgpt.com"]
+    assert check(report, f"route:{ASTRA}")["detail"]["expected"] == [f"codex:{ASTRA}@chatgpt.com"]
+    assert check(report, f"route:{SOL}")["detail"]["expected"] != check(report, f"route:{ASTRA}")["detail"]["expected"]
 
 
 def test_preflight_probes_the_controller_reviewer_pair():
@@ -413,7 +464,7 @@ def test_preflight_probes_the_controller_reviewer_pair():
 
 def test_route_unknown_without_request_log_blocks(env, capsys):
     code, report, *_ = env(write_log=False, capsys=capsys, extra=("--deadline", "6"))
-    assert code == 2 and failing(report) == {f"route:{KIMI}", f"route:{OPUS}"}
+    assert code == 2 and failing(report) == {f"route:{SOL}", f"route:{ASTRA}"}
     assert all(not c["detail"]["log_found"] for c in report["checks"] if c["name"].startswith("route:"))
 
 
@@ -449,7 +500,7 @@ def test_vanishing_legacy_log_does_not_crash(env, capsys, tmp_path, monkeypatch)
 def test_unreadable_log_dir_does_not_crash(env, capsys, monkeypatch):
     monkeypatch.setattr(preflight.Path, "glob", lambda self, pattern: (_ for _ in ()).throw(PermissionError(13, "denied")))
     code, report, *_ = env(capsys=capsys, extra=("--deadline", "6"))
-    assert code == 2 and {f"route:{KIMI}", f"route:{OPUS}"} <= failing(report)
+    assert code == 2 and {f"route:{SOL}", f"route:{ASTRA}"} <= failing(report)
 
 
 def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
@@ -472,7 +523,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
         return process
 
     monkeypatch.setattr(preflight.subprocess, "Popen", track)
-    payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    payload = ('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": ASTRA}}) + '\n\n').encode()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -525,7 +576,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     try:
         url = f"http://127.0.0.1:{server.server_port}"  # DevSkim: ignore DS162092 本地隔离 HTTP framing 回归
         started = time.monotonic()
-        result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
+        result = preflight.round_trip(url, KEY, ASTRA, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
         elapsed = time.monotonic() - started
         assert processes and all(process.poll() is not None for process in processes)
         assert result["ok"] is (framing in ("length", "chunked")), result
@@ -540,7 +591,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
 
 @pytest.mark.parametrize("tail", ("eof", "read-error", "second-terminal", "deadline"))
 def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
-    terminal = b'data: {"type":"response.completed","response":{"status":"completed"}}\n'
+    terminal = ('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": ASTRA}}) + '\n').encode()
 
     class Response:
         status = 200
@@ -565,9 +616,9 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
 
     response = Response()
     deadline = preflight.Deadline(3)
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
-    response.read = lambda: b"".join(response)
-    result = preflight._round_trip_http(LOCAL, KEY, OPUS, "preflight-test", deadline)
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda *a, **kw: response)
+    response.read = lambda n=-1: b"".join(response)[: None if n < 0 else n]
+    result = preflight._round_trip_http(LOCAL, KEY, ASTRA, "preflight-test", deadline)
     assert result["ok"] is (tail == "eof")
     if tail == "eof":
         assert response.exhausted
@@ -577,43 +628,48 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
 def test_completed_event_with_failed_status_is_not_success(env, capsys):
     bad = b'data: {"type":"response.completed","response":{"status":"failed","error":{"message":"overloaded"}}}\n\n'
     code, report, *_ = env(terminal=bad, capsys=capsys)
-    assert code == 2 and {f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"} <= failing(report)
+    assert code == 2 and {f"roundtrip:{SOL}", f"roundtrip:{ASTRA}"} <= failing(report)
 
 
-def test_incomplete_without_error_passes_roundtrip_not_route_proof(env, capsys):
-    ok = b'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
-    code, report, *_ = env(terminal=ok, capsys=capsys)
-    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
-    assert all(check(report, f"roundtrip:{m}")["ok"] for m in preflight.MODELS)
+@pytest.mark.parametrize("event", [
+    {"type":"response.incomplete","response":{"status":"incomplete"}},
+    {"type":"response.completed"},
+    {"type":"response.completed","response":{"status":"in_progress"}},
+    {"type":"response.completed","response":{"status":"completed","error":{}}},
+    {"type":"response.completed","response":{"status":"completed"},"error":False},
+])
+def test_roundtrip_requires_completed_response_without_error(env, capsys, event):
+    data = ("data: " + json.dumps(event) + "\n\n").encode()
+    code, report, *_ = env(terminal=data, capsys=capsys)
+    assert code == 2 and {f"roundtrip:{m}" for m in preflight.MODELS} <= failing(report)
 
 
 def test_terminal_without_eof_is_cut_at_deadline(env, capsys):
     start = time.monotonic()
     code, report, *_ = env(terminal_tail_delay=3.0, extra=("--deadline", "2"), capsys=capsys)
     assert time.monotonic() - start < 4
-    assert code == 2 and {f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"} <= failing(report)
+    assert code == 2 and {f"roundtrip:{SOL}", f"roundtrip:{ASTRA}"} <= failing(report)
 
 
 def test_hanging_upstream_is_cut_at_deadline(env, capsys, monkeypatch):
     start = time.monotonic()
     code, report, *_ = env(hang=True, extra=("--deadline", "2"), capsys=capsys)
     assert time.monotonic() - start < 4
-    assert code == 2 and {f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"} <= failing(report)
+    assert code == 2 and {f"roundtrip:{SOL}", f"roundtrip:{ASTRA}"} <= failing(report)
 
 
 def test_proxy_down_blocks_without_waiting_out_the_log_window(env, capsys):
     start = time.monotonic()
     code, report, *_ = env(capsys=capsys, extra=("--proxy-url", LOCAL))  # 后给的 --proxy-url 覆盖假 proxy
-    assert code == 2 and {f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"} <= failing(report)
+    assert code == 2 and {f"roundtrip:{SOL}", f"roundtrip:{ASTRA}"} <= failing(report)
     assert time.monotonic() - start < 2
 
 
 def test_no_probe_is_sent_once_the_work_deadline_has_passed(monkeypatch):
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("不应发送"))
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda *a, **k: pytest.fail("不应发送"))
     deadline = preflight.Deadline(0.002)
     time.sleep(0.01)
-    assert preflight.round_trip(LOCAL, KEY, KIMI, "s", deadline)["error"] == {"not_sent": "总时限已到"}
+    assert preflight.round_trip(LOCAL, KEY, SOL, "s", deadline)["error"] == {"not_sent": "总时限已到"}
 
 
 # ---------------- 凭据：#1323 宿主缺 CLIPROXY_LOCAL_KEY ----------------
@@ -624,7 +680,7 @@ def test_env_key_provider_without_variable_blocks_before_any_probe(env, capsys, 
         '[model_providers.cliproxy-local]\nbase_url = "http://127.0.0.1:8318/v1"\nenv_key = "CLIPROXY_LOCAL_KEY"\n')  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy / 测试假服务），非调试残留
     monkeypatch.setenv("CLIPROXY_LOCAL_KEY", KEY)  # 预检进程里有也不算：宿主进程里没有
     code, report, out, proxy = env(capsys=capsys)
-    assert code == 2 and failing(report) == {"credential:codex-host", f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"}
+    assert code == 2 and failing(report) == {"credential:codex-host", f"roundtrip:{SOL}", f"roundtrip:{ASTRA}"}
     assert "Missing environment variable: CLIPROXY_LOCAL_KEY" in check(report, "credential:codex-host")["detail"]["error"]
     assert KEY not in out and proxy.requests == []
 
@@ -698,7 +754,7 @@ def test_late_legacy_log_within_deadline_still_lacks_trusted_evidence(env, capsy
 def test_host_key_rejected_by_proxy_blocks(env, capsys, tmp_path):
     (tmp_path / "key.txt").write_text("revoked-key\n")
     code, report, *_ = env(capsys=capsys)
-    assert code == 2 and {f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"} <= failing(report)
+    assert code == 2 and {f"roundtrip:{SOL}", f"roundtrip:{ASTRA}"} <= failing(report)
 
 
 def _auth_command(tmp_path, command: str, args: list[str], timeout_ms: int = 5000) -> None:
@@ -724,8 +780,8 @@ def test_credential_helper_timeout_does_not_leak_its_arguments(env, capsys, tmp_
 
 
 def test_key_echoed_by_upstream_error_is_redacted(env, capsys):
-    code, report, out, _ = env(status={OPUS: 400}, echo_auth=True, capsys=capsys)
-    trip = check(report, f"roundtrip:{OPUS}")["detail"]
+    code, report, out, _ = env(status={ASTRA: 400}, echo_auth=True, capsys=capsys)
+    trip = check(report, f"roundtrip:{ASTRA}")["detail"]
     # 上游正文不进报告：只有分类、长度和摘要
     assert code == 2 and KEY not in out and set(trip["error"]) == {"class", "length", "sha256_12"}
 
@@ -737,7 +793,7 @@ def test_key_crossing_the_truncation_point_leaves_no_prefix(env, capsys):
         pad = 290 - len(head) - len("Bearer ")  # 让 key 从第 290 个字符开始，跨过 300 的截断点
         return head + "x" * pad + auth + ' tail"}}'
     assert body(f"Bearer {KEY}").index(KEY) == 290
-    code, report, out, _ = env(status={OPUS: 400}, error_body=body, capsys=capsys)
+    code, report, out, _ = env(status={ASTRA: 400}, error_body=body, capsys=capsys)
     assert code == 2 and KEY[:8] not in out
 
 
@@ -752,7 +808,7 @@ def test_nested_keys_echoed_by_upstream_never_split_each_other(env, capsys, monk
     """请求用短 key（宿主），错误正文却回显包含它的长 key（环境变量）；只按短 key 先脱敏会把长 key 拆开。"""
     monkeypatch.setenv("CLIPROXY_LOCAL_KEY", OTHER_VALID)
     body = lambda auth: json.dumps({"error": {"message": f"other credential {OTHER_VALID} rejected"}})  # noqa: E731
-    code, report, out, _ = env(status={KIMI: 400}, error_body=body, capsys=capsys)
+    code, report, out, _ = env(status={SOL: 400}, error_body=body, capsys=capsys)
     assert code == 2 and KEY not in out and "outer-" not in out and "-tail" not in out
 
 
@@ -790,7 +846,6 @@ def test_broken_codex_config_never_crashes_the_report(env, capsys, tmp_path, con
 def test_structured_sse_error_never_reaches_the_report(monkeypatch):
     """SSE 错误体（含二次转义的 key）不抄进报告，只留分类与摘要。"""
     import io
-    import urllib.request
 
     key = 'secret"key"12345'
     line = "data: " + json.dumps({"type": "error", "error": {"message": json.dumps({"e": f"invalid Bearer {key}"})}}) + "\n\n"
@@ -804,8 +859,8 @@ def test_structured_sse_error_never_reaches_the_report(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResp(line.encode()))
-    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(30))
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: FakeResp(line.encode()))
+    trip = preflight._round_trip_http(LOCAL, key, SOL, "s", preflight.Deadline(30))
     out = json.dumps(preflight.sanitize(trip, [key]), ensure_ascii=True)
     assert "secret" not in out and "12345" not in out and trip["error"]["class"] == "auth"
 
@@ -913,7 +968,6 @@ def test_usage_error_and_help_print_json(capsys):
 def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkeypatch, capsys):
     """上游把 key 放进 response.status 字典的键里：status 只收字符串，报告的键也脱敏。"""
     import io
-    import urllib.request
 
     key = "isolated-fake-host-key"
     event = {"type": "response.completed", "response": {"status": {key: "diagnostic"}}}
@@ -927,9 +981,9 @@ def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkey
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen",
+    monkeypatch.setattr(preflight._http_module, "_open_http",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
-    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
+    trip = preflight._round_trip_http(LOCAL, key, SOL, "s", preflight.Deadline(5))
     preflight._emit(trip, [key])
     assert key not in capsys.readouterr().out and trip["status"] == "other"
 
@@ -968,7 +1022,6 @@ def test_container_created_by_the_daemon_after_a_failed_client_and_rm_is_reporte
 def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeypatch, status):
     """独审十六：status 只报已知枚举；双重 JSON 编码、倒序等任意形态的 key 都不进报告。"""
     import io
-    import urllib.request
 
     key = 'isolated"host"key1742'
     event = {"type": "response.completed", "response": {"status": status(key)}}
@@ -982,9 +1035,9 @@ def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeyp
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen",
+    monkeypatch.setattr(preflight._http_module, "_open_http",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
-    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
+    trip = preflight._round_trip_http(LOCAL, key, SOL, "s", preflight.Deadline(5))
     assert trip["status"] == "other" and "1742" not in json.dumps(preflight.sanitize(trip, [key]))
 
 
@@ -1003,7 +1056,7 @@ def test_route_lines_forged_inside_a_response_body_are_ignored_and_never_echoed(
     monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "demo")
     monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
     args = SimpleNamespace(proxy_url=LOCAL, proxy_log_dir=str(tmp_path))
-    checks = preflight.probe_model(args, OPUS, key, preflight.Deadline(5))
+    checks = preflight.probe_model(args, ASTRA, key, preflight.Deadline(5))
     preflight._emit({"checks": checks}, [key])
     out = capsys.readouterr().out
     assert checks[0]["detail"]["actual"] == [] and not checks[0]["ok"]
@@ -1022,7 +1075,7 @@ def test_unknown_route_is_reported_as_other(tmp_path):
     import unittest.mock as mock
     with mock.patch.object(preflight.uuid, "uuid4", lambda: "unknown"), \
          mock.patch.object(preflight, "round_trip", lambda *a: {"ok": True}):
-        route = preflight.probe_model(args, KIMI, "k", preflight.Deadline(5))[0]
+        route = preflight.probe_model(args, SOL, "k", preflight.Deadline(5))[0]
     assert route["detail"]["actual"] == [] and not route["ok"]
 
 
@@ -1059,7 +1112,6 @@ def test_auth_command_sees_the_checked_codex_home(env, capsys, tmp_path, monkeyp
 def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypatch):
     """独审二十一 B-2：往返只受总工作时限约束；比旧的固定 45 秒更慢但在时限内完成的往返不误报。"""
     import io
-    import urllib.request
 
     seen = {}
 
@@ -1074,11 +1126,311 @@ def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypa
 
     def urlopen(req, timeout=None):
         seen["timeout"] = timeout
-        return FakeResp(b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
+        return FakeResp(('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": SOL}}) + '\n\n').encode())
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    trip = preflight._round_trip_http(LOCAL, KEY, KIMI, "s", preflight.Deadline(60))
+    monkeypatch.setattr(preflight._http_module, "_open_http", urlopen)
+    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "s", preflight.Deadline(60))
     assert trip["ok"] and seen["timeout"] > 50
+
+
+def test_round_trip_rejects_http_redirect_without_forwarding_auth_header():
+    """301/302/303 重定向一律拒绝，Authorization 密钥不得随重定向发往其他主机。"""
+    trap_hits = []
+
+    class TrapHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            trap_hits.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def do_GET(self):
+            trap_hits.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+    trap = ThreadingHTTPServer(("127.0.0.1", 0), TrapHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    trap_url = f"http://127.0.0.1:{trap.server_address[1]}/steal"  # DevSkim: ignore DS162092 测试用的本地回环地址
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", trap_url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    redir = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    redir_url = f"http://127.0.0.1:{redir.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    threading.Thread(target=trap.serve_forever, daemon=True).start()
+    threading.Thread(target=redir.serve_forever, daemon=True).start()
+    try:
+        trip = preflight._round_trip_http(redir_url, KEY, SOL, "preflight-redir", preflight.Deadline(10))
+    finally:
+        redir.shutdown()
+        redir.server_close()
+        trap.shutdown()
+        trap.server_close()
+    assert trip["ok"] is False and trip["http_status"] == 302
+    assert trap_hits == []
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": "response.failed", "response": {"status": "failed", "error": {"code": "rate_limit_exceeded", "message": "Too many requests"}}},
+    {"type": "error", "code": "rate_limit_exceeded", "message": "Too many requests"},
+])
+def test_round_trip_classifies_http_200_sse_structured_rate_limit_codes(monkeypatch, payload):
+    """HTTP 200 SSE 终态带结构化错误码 rate_limit_exceeded 时归类为 rate_limit，便于接入全局限流退避。"""
+    import io
+
+    class FakeResp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    raw = ("data: " + json.dumps(payload) + "\n\n").encode()
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: FakeResp(raw))
+    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-sse-rl", preflight.Deadline(10))
+    assert trip["ok"] is False and trip["http_status"] == 200 and trip["error"]["class"] == "rate_limit"
+
+
+@pytest.mark.parametrize("events,expected_class", [
+    ([
+        {"type": "response.done", "response": {"status": "completed", "model": SOL}},
+        {"type": "response.completed", "response": {"status": "completed", "model": SOL}},
+    ], "unclassified"),
+    ([
+        {"type": "response.completed", "response": {"status": "completed", "model": SOL}},
+        {"type": "response.done", "response": {"status": "completed", "model": SOL}},
+    ], "unclassified"),
+    ([
+        {"type": "response.in_progress", "error": {"code": "rate_limit_exceeded", "message": "429"}},
+        {"type": "response.completed", "response": {"status": "completed", "model": SOL}},
+    ], "rate_limit"),
+    ([
+        {"type": "response.created", "response": {"status": "in_progress", "error": {"message": "upstream failure"}}},
+        {"type": "response.completed", "response": {"status": "completed", "model": SOL}},
+    ], "unclassified"),
+])
+def test_round_trip_rejects_mixed_response_done_and_midstream_errors(monkeypatch, events, expected_class):
+    """混合 response.done + response.completed 或中间事件携带非空 error/response.error 时，后续 response.completed 绝不可覆盖为成功。"""
+    import io
+
+    class FakeResp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    raw = "".join("data: " + json.dumps(ev) + "\n\n" for ev in events).encode()
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: FakeResp(raw))
+    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-r14-stream", preflight.Deadline(10))
+    assert trip["ok"] is False and trip["error"]["class"] == expected_class
+
+
+def test_formal_review_seal_url_proves_same_proxy_and_blocks_mismatched_seal_host(tmp_path):
+    """R15：传 --review-seal-url 时预检发送正式 X-NewChanlun-Review-Launch 请求、从宿主调用封存端点，
+    并核验已封存 cliproxy-review-v1 收据；若封存端点指向不同实例或不可达则直接拦截。"""
+    import hashlib
+    from types import SimpleNamespace
+
+    receipt_root = tmp_path / "receipts"
+    receipt_root.mkdir(mode=0o700)
+    seen_launches: dict[str, tuple[str, str]] = {}
+
+    class SameProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            launch = self.headers.get("X-NewChanlun-Review-Launch", "")
+            session = self.headers.get("Session-Id", "")
+            if self.path == "/v1/responses":
+                req_model = json.loads(raw)["model"]
+                seen_launches[launch] = (session, req_model)
+                out_text = '{"ok": true}'
+                rid = f"resp_{req_model}_1"
+                ev = {
+                    "type": "response.completed",
+                    "response": {
+                        "id": rid, "status": "completed", "model": req_model,
+                        "output": [{"type": "message", "role": "assistant",
+                                    "content": [{"type": "output_text", "text": out_text}]}],
+                    },
+                }
+                body = f"data: {json.dumps(ev)}\n\n".encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/v1/review-receipts/seal":
+                if launch not in seen_launches or seen_launches[launch][0] != session:
+                    resp = json.dumps({"status": "rejected"}).encode()
+                    self.send_response(409)
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.end_headers()
+                    self.wfile.write(resp)
+                    return
+                _, req_model = seen_launches[launch]
+                now = time.time_ns()
+                rid_sha = hashlib.sha256(f"resp_{req_model}_1".encode()).hexdigest()
+                out_sha = hashlib.sha256(b'{"ok": true}').hexdigest()
+                receipt_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                os.chmod(receipt_root, 0o700)
+                d = receipt_root / launch
+                d.mkdir(parents=True, exist_ok=True, mode=0o700)
+                os.chmod(d, 0o700)
+                rf = d / "receipt.json"
+                rf.write_text(json.dumps({
+                    "schema": "cliproxy-review-v1", "launch": launch, "session": session,
+                    "started_ns": now - 1_000_000, "finished_ns": now, "sealed_at_ns": now,
+                    "complete": True, "sealed": True, "tainted": False, "requests": 1,
+                    "routes": [f"codex:{req_model}@chatgpt.com"],
+                    "response_id_sha256s": [rid_sha],
+                    "last_response_id_sha256": rid_sha, "last_output_sha256": out_sha,
+                }))
+                os.chmod(rf, 0o600)
+                resp = json.dumps({"status": "sealed"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    class OtherProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            resp = json.dumps({"status": "rejected"}).encode()
+            self.send_response(409)
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+    same = ThreadingHTTPServer(("127.0.0.1", 0), SameProxyHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    other = ThreadingHTTPServer(("127.0.0.1", 0), OtherProxyHandler)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    same_url = f"http://127.0.0.1:{same.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    other_url = f"http://127.0.0.1:{other.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    threading.Thread(target=same.serve_forever, daemon=True).start()
+    threading.Thread(target=other.serve_forever, daemon=True).start()
+    try:
+        args_ok = SimpleNamespace(proxy_url=same_url, review_seal_url=same_url,
+                                  proxy_receipt_dir=str(receipt_root), probe_in_container=False)
+        checks_ok = preflight.probe_model(args_ok, SOL, KEY, preflight.Deadline(10))
+        by_name_ok = {c["name"]: c for c in checks_ok}
+        assert by_name_ok[f"roundtrip:{SOL}"]["ok"] is True
+        assert by_name_ok[f"seal:{SOL}"]["ok"] is True
+        assert by_name_ok[f"route:{SOL}"]["ok"] is True and by_name_ok[f"route:{SOL}"]["detail"]["sealed"] is True
+        assert seen_launches and all(k.startswith("review-preflight-") for k in seen_launches)
+
+        # 封存端点指向另一实例：seal 409 rejected，整项预检拦截
+        args_bad = SimpleNamespace(proxy_url=same_url, review_seal_url=other_url,
+                                   proxy_receipt_dir=str(receipt_root), probe_in_container=False)
+        checks_bad = preflight.probe_model(args_bad, SOL, KEY, preflight.Deadline(10))
+        by_name_bad = {c["name"]: c for c in checks_bad}
+        assert by_name_bad[f"roundtrip:{SOL}"]["ok"] is True
+        assert by_name_bad[f"seal:{SOL}"]["ok"] is False
+        assert by_name_bad[f"route:{SOL}"]["ok"] is False
+    finally:
+        same.shutdown()
+        same.server_close()
+        other.shutdown()
+        other.server_close()
+
+
+def test_probe_in_container_runs_admitted_image_over_stdin_without_leaking_key(env, capsys, tmp_path, monkeypatch):
+    """--probe-in-container 在审阅镜像容器内执行 HTTP 探针，密钥只走 stdin，不进 argv 或容器 env。"""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")
+    monkeypatch.setenv("DOCKER_CONFIG", "/tmp/forbidden-docker")
+    monkeypatch.setenv("CLIPROXY_LOCAL_KEY", KEY)
+    calls = tmp_path / "container-http-calls.jsonl"
+    docker = tmp_path / "bin" / "docker"
+    volumes = tmp_path / "volumes"
+    admitted = "sha256:" + "c" * 64
+    docker.write_text(f"""#!{sys.executable}
+import json, os, shutil, subprocess, sys
+from pathlib import Path
+assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "CLIPROXY_LOCAL_KEY"))
+assert {KEY!r} not in " ".join(sys.argv)
+args = sys.argv[1:]
+with open({str(calls)!r}, "a") as f:
+    f.write(json.dumps(args[:8]) + "\\n")
+assert args[:2] == ["--context", "review-orbstack"]
+args = args[2:]
+vols = Path({str(volumes)!r})
+if args[0] == "volume" and args[1] == "create":
+    (vols / args[2]).mkdir(parents=True, exist_ok=True)
+    sys.exit(0)
+if args[0] == "volume" and args[1] == "rm":
+    shutil.rmtree(vols / args[-1], ignore_errors=True)
+    sys.exit(0)
+if args[0] == "create":
+    name = args[args.index("--name") + 1]
+    vol = args[args.index("-v") + 1].split(":", 1)[0]
+    (vols / f".helper-{{name}}").write_text(vol)
+    sys.exit(0)
+if args[0] == "cp":
+    src = Path(args[1][:-2] if args[1].endswith("/.") else args[1])
+    vol = (vols / f".helper-{{args[2].split(':', 1)[0]}}").read_text()
+    for item in src.iterdir():
+        shutil.copy2(item, vols / vol / item.name)
+    sys.exit(0)
+if args[0] == "start":
+    sys.exit(0)
+if args[0] == "rm":
+    target = args[-1]
+    marker = vols / f".container-{{target}}"
+    helper_marker = vols / f".helper-{{target}}"
+    if marker.exists():
+        marker.unlink()
+        sys.exit(0)
+    if helper_marker.exists():
+        helper_marker.unlink()
+        sys.exit(0)
+    print(f"Error response from daemon: No such container: {{target}}", file=sys.stderr)
+    sys.exit(1)
+assert args[0] == "run"
+name = args[args.index("--name") + 1]
+if "--rm" not in args:
+    (vols / f".container-{{name}}").write_text("exited")
+if "--entrypoint" in args and args[args.index("--entrypoint") + 1] == "python3":
+    assert "-i" in args and "--read-only" in args and "--rm" not in args and {admitted!r} in args
+    code = args[args.index("-c") + 1]
+    proc = subprocess.run([{sys.executable!r}, "-I", "-c", code], stdin=sys.stdin)
+    sys.exit(proc.returncode)
+assert "--rm" not in args
+vol = args[args.index("-v") + 1].split(":", 1)[0]
+print((vols / vol / args[-1].removeprefix("/review/")).read_text(), end="")
+""")
+    docker.chmod(0o755)
+    code, report, out, proxy = env(capsys=capsys, extra=(
+        "--image", admitted, "--review-docker-context", "review-orbstack",
+        "--credential-mode", "worker-env", "--probe-in-container"))
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    assert KEY not in out
+    assert check(report, f"roundtrip:{SOL}")["ok"] and check(report, f"roundtrip:{ASTRA}")["ok"]
+    recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+    http_runs = [r for r in recorded if r[2] == "run" and "-i" in r]
+    assert len(http_runs) == 2
+    assert sum(r[2] == "rm" and r[4].startswith("preflight-http-") for r in recorded) == 2
 
 
 def test_every_subprocess_wait_comes_from_the_deadline_alone(tmp_path, monkeypatch):
@@ -1104,14 +1456,23 @@ def test_every_subprocess_wait_comes_from_the_deadline_alone(tmp_path, monkeypat
 
 
 def test_mount_probe_runs_as_the_host_user_like_review_containers(env, capsys, tmp_path):
-    """正式审阅 1（Sol）：探针目录是 0700，必须像正式审阅容器一样以宿主 uid:gid 运行，否则镜像用户不同时误拦。"""
+    """正式审阅 1（Sol）：探针经命名卷灌入并以宿主 uid:gid 只读挂载运行，与正式审阅容器一致。"""
     import os
     calls = tmp_path / "docker-calls"
     docker = tmp_path / "bin" / "docker"
-    docker.write_text(docker.read_text().replace("#!/bin/sh\n", f'#!/bin/sh\necho "$@" >> {calls}\n', 1))
+    lines = docker.read_text().splitlines()
+    docker.write_text("\n".join([
+        lines[0],
+        f"import pathlib, sys; open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')",
+        *lines[1:],
+    ]) + "\n")
     code, report, *_ = env(capsys=capsys)
-    run = next(line for line in calls.read_text().splitlines() if line.startswith("run "))
-    assert code == 2 and f"--user {os.getuid()}:{os.getgid()}" in run
+    recorded = calls.read_text().splitlines()
+    run = next(line for line in recorded if line.startswith("run "))
+    assert code == 2 and f"--user {os.getuid()}:{os.getgid()}" in run and ":/review:ro" in run
+    assert any(line.startswith("volume create preflight-vol-") for line in recorded)
+    assert any(line.startswith("cp ") for line in recorded)
+    assert any(line.startswith("volume rm -f preflight-vol-") for line in recorded)
 
 
 # ---------------- 正式审查 a4 Sol P2：key 与报告字段名、枚举值重合 ----------------
@@ -1145,7 +1506,7 @@ def test_key_equal_to_a_protocol_token_does_not_rewrite_the_report(env, capsys, 
 def test_every_report_field_and_enum_is_in_the_protocol_vocabulary(env, capsys, monkeypatch):
     """新增报告字段或枚举必须登记进协议词表，否则 key 与它重合时会被脱敏改写。"""
     reports = [env(capsys=capsys)[1],
-               env(routes={**OFFICIAL, OPUS: ANTIGRAVITY}, status={OPUS: 400}, capsys=capsys)[1]]
+               env(routes={**OFFICIAL, ASTRA: ANTIGRAVITY}, status={ASTRA: 400}, capsys=capsys)[1]]
     monkeypatch.setenv("FAKE_DOCKER_EMPTY", "1")
     reports.append(env(capsys=capsys)[1])
     fields, enums = set(), set()
@@ -1209,7 +1570,7 @@ def test_container_probe_rejects_legacy_routes_regardless_of_allowlist(tmp_path,
     (tmp_path / "v1-responses-test.log").write_text(_route_log("preflight-test", routes))
     monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
     monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
-    checks = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))
+    checks = preflight.probe_model(args, ASTRA, "dummy", preflight.Deadline(5))
     assert not checks[0]["ok"]
     assert checks[0]["detail"]["actual"] == []
 
@@ -1291,17 +1652,23 @@ def test_container_protocol_failures_are_closed_and_not_echoed(container_reader,
     monkeypatch.setattr(preflight, "run_bounded", fake)
     monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
     monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
-    result = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))
+    result = preflight.probe_model(args, ASTRA, "dummy", preflight.Deadline(5))
     preflight._emit({"checks": result})
     assert "SECRET" not in capsys.readouterr().out
     assert not result[0]["ok"] and not result[0]["detail"]["log_found"]
 
 
-def test_proxy_and_review_contexts_are_independent(env, tmp_path, capsys):
-    # 真 CLI 参数经过假 Docker，再执行同一容器解析器；没有真实 daemon。
+def test_proxy_and_review_contexts_are_independent(env, tmp_path, capsys, monkeypatch):
+    # 真 CLI 参数经过假 Docker，再执行同一容器解析器；没有真实 daemon，且 Docker 子进程不含 DOCKER_HOST/CONFIG/KEY。
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/forbidden.sock")
+    monkeypatch.setenv("DOCKER_CONFIG", "/tmp/forbidden-docker-config")
     docker = tmp_path / "bin" / "docker"
+    volumes = tmp_path / "ctx-volumes"
+    volumes.mkdir()
     docker.write_text(f'''#!{sys.executable}
-import os, sys, json
+import os, shutil, sys, json
+from pathlib import Path
+assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "CLIPROXY_LOCAL_KEY"))
 args = sys.argv[1:]
 with open({str(tmp_path / 'commands.jsonl')!r}, 'a') as f:
     f.write(json.dumps(args[:4]) + '\\n')
@@ -1311,11 +1678,29 @@ if args[0] == 'exec':
     assert context == 'proxy-orbstack' and args[1:3] == ['fake-proxy', 'python3']
     os.execv({sys.executable!r}, [{sys.executable!r}, *args[3:]])
 assert context == 'review-colima'
-if args[0] == 'rm':
+vols = Path({str(volumes)!r})
+if args[0] == 'volume' and args[1] == 'create':
+    (vols / args[2]).mkdir(parents=True, exist_ok=True)
+    sys.exit(0)
+if args[0] == 'volume' and args[1] == 'rm':
+    shutil.rmtree(vols / args[-1], ignore_errors=True)
+    sys.exit(0)
+if args[0] == 'create':
+    name = args[args.index('--name') + 1]
+    vol = args[args.index('-v') + 1].split(':', 1)[0]
+    (vols / f'.helper-{{name}}').write_text(vol)
+    sys.exit(0)
+if args[0] == 'cp':
+    src = Path(args[1][:-2] if args[1].endswith('/.') else args[1])
+    vol = (vols / f'.helper-{{args[2].split(":", 1)[0]}}').read_text()
+    for item in src.iterdir():
+        shutil.copy2(item, vols / vol / item.name)
+    sys.exit(0)
+if args[0] in ('start', 'rm'):
     sys.exit(0)
 assert args[0] == 'run'
-src = next(x for x in args if x.startswith('type=bind,src=')).split('src=', 1)[1].split(',dst=')[0]
-print(open(src + args[-1].removeprefix('/checkouts')).read(), end='')
+vol = args[args.index('-v') + 1].split(':', 1)[0]
+print((vols / vol / args[-1].removeprefix('/review/')).read_text(), end='')
 ''')
     # env 的既有 --proxy-log-dir 与 container 开关互斥；通过其内部 main 参数适配 fake。
     original = preflight.main
@@ -1333,6 +1718,43 @@ print(open(src + args[-1].removeprefix('/checkouts')).read(), end='')
     assert sum(c[:3] == ["--context", "proxy-orbstack", "exec"] for c in calls) == 2
     assert any(c[:3] == ["--context", "review-colima", "rm"] for c in calls)
     assert any(c[:3] == ["--context", "review-colima", "run"] for c in calls)
+    assert any(c[:4] == ["--context", "review-colima", "volume", "rm"] for c in calls)
+
+
+def test_worker_env_credential_mode_uses_env_or_launchctl_without_codex_config(env, capsys, tmp_path, monkeypatch):
+    """正式模式 --credential-mode worker-env 与正式 worker 一致：读 CLIPROXY_LOCAL_KEY/launchctl，不依赖宿主 config.toml。"""
+    empty_home = tmp_path / "no-codex-home"
+    empty_home.mkdir()
+    monkeypatch.setenv("CLIPROXY_LOCAL_KEY", SHORT_VALID)
+    code, report, out, proxy = env(capsys=capsys, extra=(
+        "--credential-mode", "worker-env", "--codex-home", str(empty_home), "--codex-bin", "/nonexistent/codex"))
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    cred = check(report, "credential:worker-env")
+    assert cred["ok"] and cred["detail"]["source"] == "env:CLIPROXY_LOCAL_KEY"
+    assert SHORT_VALID not in out
+    assert all(r["auth"] == f"Bearer {SHORT_VALID}" for r in proxy.requests)
+
+    # 进程环境缺失时回退 macOS launchctl getenv；两者均缺失则阻断
+    monkeypatch.delenv("CLIPROXY_LOCAL_KEY", raising=False)
+    real_run = preflight.run_bounded
+    def fake_launchctl(cmd, timeout, **kwargs):
+        if cmd[:2] == ["launchctl", "getenv"]:
+            return subprocess.CompletedProcess(cmd, 0, (KEY + "\n").encode(), b"")
+        return real_run(cmd, timeout, **kwargs)
+    monkeypatch.setattr(preflight, "run_bounded", fake_launchctl)
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    code, report, out, proxy = env(capsys=capsys, extra=(
+        "--credential-mode", "worker-env", "--codex-home", str(empty_home)))
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    assert check(report, "credential:worker-env")["detail"]["source"] == "launchctl:CLIPROXY_LOCAL_KEY"
+    assert KEY not in out and all(r["auth"] == f"Bearer {KEY}" for r in proxy.requests)
+
+    monkeypatch.setattr(preflight, "run_bounded", lambda cmd, timeout, **kwargs: (
+        subprocess.CompletedProcess(cmd, 0, b"", b"") if cmd[:2] == ["launchctl", "getenv"]
+        else real_run(cmd, timeout, **kwargs)))
+    code, report, _, _ = env(capsys=capsys, extra=(
+        "--credential-mode", "worker-env", "--codex-home", str(empty_home)))
+    assert code == 2 and failing(report) == {"credential:worker-env", f"roundtrip:{SOL}", f"roundtrip:{ASTRA}"}
 
 
 def test_container_helper_exits_even_when_client_is_gone(tmp_path):
@@ -1404,15 +1826,18 @@ def test_unframed_text_cannot_prove_attempts_or_completion(tmp_path, container_r
     args, _, outputs = container_reader
     monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
     monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
-    checks = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))
+    checks = preflight.probe_model(args, ASTRA, "dummy", preflight.Deadline(5))
     assert not checks[0]["ok"] and checks[0]["detail"]["actual"] == []
     assert json.loads(outputs[0]) == {"session": "preflight-test", "complete_stable": False, "routes": []}
 
 
 @pytest.mark.parametrize("routes,ok", [
-    (["claude@api.anthropic.com", "claude@api.anthropic.com"], True),
-    (["claude@api.anthropic.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
-    (["other", "claude@api.anthropic.com"], False),
+    ([f"codex:{ASTRA}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"], True),
+    ([f"codex:{SOL}@chatgpt.com"], False),
+    ([f"codex:{ASTRA}@chatgpt.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
+    (["other", f"codex:{ASTRA}@chatgpt.com"], False),
+    (["claude@api.anthropic.com"], False),
+    (["kimi-ai@api.kimi.ai"], False),
 ])
 def test_container_protocol_allowlist_still_checks_every_attempt(container_reader, monkeypatch, routes, ok):
     """仅测试宿主协议消费端；fake 证明不代表现有文本日志能生成可信证明。"""
@@ -1423,7 +1848,7 @@ def test_container_protocol_allowlist_still_checks_every_attempt(container_reade
     monkeypatch.setattr(preflight, "run_bounded", fake)
     monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
     monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
-    check = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))[0]
+    check = preflight.probe_model(args, ASTRA, "dummy", preflight.Deadline(5))[0]
     assert check["ok"] is ok and check["detail"]["actual"] == routes
 
 
@@ -1436,10 +1861,13 @@ def _receipt(tmp_path, routes=None, **changes):
                "started_ns": now - 1_000_000, "finished_ns": now, "complete": True,
                "routes": routes if routes is not None else ["claude@api.anthropic.com", "claude@api.anthropic.com"]}
     payload.update(changes)
+    os.chmod(tmp_path, 0o700)
     directory = tmp_path / RECEIPT_SESSION
-    directory.mkdir(exist_ok=True)
+    directory.mkdir(exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
     path = directory / "receipt.json"
     path.write_text(json.dumps(payload))
+    os.chmod(path, 0o600)
     return path
 
 
@@ -1479,6 +1907,7 @@ def test_receipt_partial_rotation_and_delayed_publish(tmp_path):
     data = path.read_bytes()
     path.unlink()
     pending.write_bytes(data)
+    os.chmod(pending, 0o600)
     timer = threading.Timer(0.03, lambda: pending.rename(path))
     timer.start()
     try:
@@ -1509,17 +1938,229 @@ def test_generated_go_receipts_consumed_by_python():
     if not root:
         pytest.skip("需要 cliproxy/build.py 导出的离线生产者收据")
     root = Path(root)
-    expected = {"success": [("claude", "api.anthropic.com")] * 2,
-                "other": [("claude", "api.anthropic.com"), ("other", "other")],
-                "native-kimi": [("kimi", "api.kimi.com")] * 2,
-                "native-claude": [("claude", "api.anthropic.com")] * 2,
-                "native-claude-eof": [("claude", "api.anthropic.com")] * 2}
-    for name, routes in expected.items():
-        payload = json.loads((root / name / RECEIPT_SESSION / "receipt.json").read_text())
+    expected = {"success": (RECEIPT_SESSION, [("claude", "api.anthropic.com")] * 2),
+                "other": (RECEIPT_SESSION, [("claude", "api.anthropic.com"), ("other", "other")]),
+                "native-kimi": (RECEIPT_SESSION, [("kimi", "api.kimi.com")] * 2),
+                "native-claude": (RECEIPT_SESSION, [("claude", "api.anthropic.com")] * 2),
+                "native-claude-eof": (RECEIPT_SESSION, [("claude", "api.anthropic.com")] * 2),
+                "native-codex-sol": ("preflight-12345678-1234-4234-8234-123456789abd", [(f"codex:{SOL}", "chatgpt.com")]),
+                "native-codex-astra": ("preflight-12345678-1234-4234-8234-123456789abe", [(f"codex:{ASTRA}", "chatgpt.com")])}
+    for name, (session, routes) in expected.items():
+        payload = json.loads((root / name / session / "receipt.json").read_text())
         since = payload["started_ns"] / 1e9
-        assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, since, 1, preflight.Deadline(3)) == routes
+        actual = preflight.route_from_host_receipt(str(root / name), session, since, 1, preflight.Deadline(3))
+        assert actual == routes
+        if name == "native-codex-sol":
+            assert all(r in preflight.ROUTES[SOL] for r in actual)
+            assert not all(r in preflight.ROUTES[ASTRA] for r in actual)
+        if name == "native-codex-astra":
+            assert all(r in preflight.ROUTES[ASTRA] for r in actual)
+            assert not all(r in preflight.ROUTES[SOL] for r in actual)
     for name in ("unfinished", "forgery-tail", "native-claude-disconnect"):
         assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, time.time(), 0.1, preflight.Deadline(3)) is None
+    review_expected = {
+        "review-codex-sol": ("review-12345678-1234-4234-8234-123456789aa1", "019d0000-0000-7000-8000-000000000aa1",
+                             [(f"codex:{SOL}", "chatgpt.com")], 2),
+        "review-codex-astra": ("review-12345678-1234-4234-8234-123456789aa2", "019d0000-0000-7000-8000-000000000aa2",
+                               [(f"codex:{ASTRA}", "chatgpt.com")], 2),
+    }
+    for name, (launch, session, routes, min_reqs) in review_expected.items():
+        payload = json.loads((root / name / launch / "receipt.json").read_text())
+        assert payload["sealed"] is True
+        since = payload["started_ns"] / 1e9
+        got = preflight._log_module.review_from_receipt(root / name, launch, session, since, 0.5)
+        assert got is not None and got["routes"] == routes and got["requests"] == min_reqs and got["sealed"] is True
+        assert len(got["response_id_sha256s"]) == min_reqs and got["response_id_sha256s"][-1] == got["last_response_id_sha256"]
+        assert len(got["last_response_id_sha256"]) == 64 and len(got["last_output_sha256"]) == 64
+        # 跨模型或换 session 消费必须失败闭合
+        assert preflight._log_module.review_from_receipt(
+            root / name, launch, "019d0000-0000-7000-8000-000000000fff", since, 0,
+        ) is None
+    tainted_launch = "review-12345678-1234-4234-8234-123456789aa3"
+    tainted_session = "019d0000-0000-7000-8000-000000000aa3"
+    tainted_payload = json.loads((root / "review-codex-tainted" / tainted_launch / "receipt.json").read_text())
+    assert tainted_payload["tainted"] is True and tainted_payload["complete"] is False and tainted_payload["sealed"] is False
+    assert preflight._log_module.review_from_receipt(
+        root / "review-codex-tainted", tainted_launch, tainted_session, tainted_payload["started_ns"] / 1e9, 0,
+    ) is None
+
+
+def test_review_receipt_reader_rejects_tainted_invalid_and_symlink(tmp_path):
+    launch = "review-12345678-1234-4234-8234-123456789ab1"
+    session = "019d0000-0000-7000-8000-000000000ab1"
+    now = time.time_ns()
+    base = {
+        "schema": "cliproxy-review-v1", "launch": launch, "session": session,
+        "started_ns": now - 1_000_000, "finished_ns": now, "sealed_at_ns": now, "complete": True, "sealed": True,
+        "tainted": False, "requests": 3, "routes": [f"codex:{SOL}@chatgpt.com"],
+        "response_id_sha256s": ["1" * 64, "2" * 64, "a" * 64],
+        "last_response_id_sha256": "a" * 64, "last_output_sha256": "b" * 64,
+    }
+    os.chmod(tmp_path, 0o700)
+    directory = tmp_path / launch
+    directory.mkdir(mode=0o700)
+    os.chmod(directory, 0o700)
+    path = directory / "receipt.json"
+    path.write_text(json.dumps(base))
+    os.chmod(path, 0o600)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) == {
+        "routes": [(f"codex:{SOL}", "chatgpt.com")],
+        "requests": 3,
+        "sealed": True,
+        "response_id_sha256s": ["1" * 64, "2" * 64, "a" * 64],
+        "last_response_id_sha256": "a" * 64,
+        "last_output_sha256": "b" * 64,
+    }
+    # 延迟恢复封存（响应在 3 小时前 5 分钟内完成，此刻才封存）不得被误判超时
+    three_hours = 3 * 3600 * 10**9
+    delayed = {**base, "started_ns": now - three_hours - 300 * 10**9, "finished_ns": now - three_hours, "sealed_at_ns": now}
+    path.write_text(json.dumps(delayed))
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, (delayed["started_ns"] / 1e9) - 1, 0) is not None
+    path.write_text(json.dumps(base))
+    for bad in (
+        {"tainted": True}, {"complete": False}, {"sealed": False, "sealed_at_ns": 0}, {"sealed": "true"},
+        {"sealed_at_ns": now - 2_000_000}, {"sealed_at_ns": now + 10**12}, {"sealed_at_ns": "bad"},
+        {"requests": 0}, {"requests": True},
+        {"schema": "cliproxy-preflight-v1"}, {"session": "019d0000-0000-7000-8000-000000000ab2"},
+        {"routes": ["codex@chatgpt.com"]}, {"routes": [f"codex:{SOL}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"]},
+        {"routes": ["other"]}, {"extra": 1}, {"finished_ns": now + 10**12},
+        {"response_id_sha256s": ["1" * 64, "a" * 64]},
+        {"response_id_sha256s": ["1" * 64, "2" * 64, "c" * 64]},
+        {"response_id_sha256s": ["1" * 64, "not-hex", "a" * 64]},
+        {"last_output_sha256": "not-sha256"}, {"last_response_id_sha256": "ZZZZ"}, {"last_response_id_sha256": ""},
+    ):
+        path.write_text(json.dumps({**base, **bad}))
+        assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+    path.unlink()
+    target = tmp_path / "secret.json"
+    target.write_text(json.dumps(base))
+    path.symlink_to(target)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+
+
+def test_receipt_reader_rejects_permissive_mode_or_untrusted_uid(tmp_path, monkeypatch):
+    """R20（Astra P1）：route_from_receipt 与 review_from_receipt 在已打开 fd 上核验属主与私有权限（无 group/other 位），
+    根目录、launch/session 目录或 receipt.json 任一层权限放宽或属主不符均拒收。"""
+    p_path = _receipt(tmp_path)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is not None
+    os.chmod(p_path, 0o644)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    os.chmod(p_path, 0o600)
+    os.chmod(p_path.parent, 0o755)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    os.chmod(p_path.parent, 0o700)
+    os.chmod(tmp_path, 0o755)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    os.chmod(tmp_path, 0o700)
+
+    launch = "review-12345678-1234-4234-8234-123456789af1"
+    session = "019d0000-0000-7000-8000-000000000af1"
+    now = time.time_ns()
+    rec_dir = tmp_path / launch
+    rec_dir.mkdir(mode=0o700)
+    os.chmod(rec_dir, 0o700)
+    r_path = rec_dir / "receipt.json"
+    r_path.write_text(json.dumps({
+        "schema": "cliproxy-review-v1", "launch": launch, "session": session,
+        "started_ns": now - 1_000_000, "finished_ns": now, "sealed_at_ns": now, "complete": True, "sealed": True,
+        "tainted": False, "requests": 1, "routes": [f"codex:{SOL}@chatgpt.com"],
+        "response_id_sha256s": ["a" * 64], "last_response_id_sha256": "a" * 64, "last_output_sha256": "b" * 64,
+    }))
+    os.chmod(r_path, 0o600)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is not None
+    os.chmod(r_path, 0o644)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+    os.chmod(r_path, 0o600)
+    os.chmod(rec_dir, 0o755)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+    os.chmod(rec_dir, 0o700)
+    os.chmod(tmp_path, 0o755)
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+    os.chmod(tmp_path, 0o700)
+
+    # 属主不符（模拟非当前有效用户拥有目录/文件）时拒收
+    other_uid = os.geteuid() + 1
+    monkeypatch.setattr(preflight._log_module.os, "geteuid", lambda: other_uid)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+
+
+def test_review_receipt_reader_waits_for_final_turn_and_rejects_taint_immediately(tmp_path):
+    """多轮审阅终轮未封存时，读取器应在 wait 时限内等待封存与期望终轮摘要；超时仍未封存或遇污染立即返回 None。"""
+    launch = "review-12345678-1234-4234-8234-123456789ab2"
+    session = "019d0000-0000-7000-8000-000000000ab2"
+    now = time.time_ns()
+    turn1 = {
+        "schema": "cliproxy-review-v1", "launch": launch, "session": session,
+        "started_ns": now - 2_000_000, "finished_ns": now - 1_000_000, "sealed_at_ns": 0, "complete": True, "sealed": False,
+        "tainted": False, "requests": 1, "routes": [f"codex:{SOL}@chatgpt.com"],
+        "response_id_sha256s": ["1" * 64],
+        "last_response_id_sha256": "1" * 64, "last_output_sha256": "",
+    }
+    turn2 = {
+        **turn1, "finished_ns": now, "sealed_at_ns": now, "requests": 2, "sealed": True,
+        "response_id_sha256s": ["1" * 64, "2" * 64],
+        "last_response_id_sha256": "2" * 64, "last_output_sha256": "3" * 64,
+    }
+    os.chmod(tmp_path, 0o700)
+    directory = tmp_path / launch
+    directory.mkdir(mode=0o700)
+    os.chmod(directory, 0o700)
+    path = directory / "receipt.json"
+    path.write_text(json.dumps(turn1))
+    os.chmod(path, 0o600)
+    # 未封存且 wait=0 时必须直接拒绝（绝不采信未封存收据）
+    assert preflight._log_module.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
+
+    def publish_turn2():
+        time.sleep(0.08)
+        tmp = directory / "pending"
+        tmp.write_text(json.dumps(turn2))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+
+    t = threading.Thread(target=publish_turn2)
+    t.start()
+    try:
+        got = preflight._log_module.review_from_receipt(
+            tmp_path, launch, session, time.time() - 5, 2.0,
+            expected_response_id_sha256="2" * 64, expected_output_sha256="3" * 64, min_requests=2,
+        )
+    finally:
+        t.join(timeout=2)
+    assert got == {
+        "routes": [(f"codex:{SOL}", "chatgpt.com")],
+        "requests": 2,
+        "sealed": True,
+        "response_id_sha256s": ["1" * 64, "2" * 64],
+        "last_response_id_sha256": "2" * 64,
+        "last_output_sha256": "3" * 64,
+    }
+
+    path.write_text(json.dumps({**turn2, "complete": False, "sealed": False, "tainted": True, "routes": ["other"],
+                                "response_id_sha256s": [], "last_response_id_sha256": "", "last_output_sha256": ""}))
+    started = time.monotonic()
+    assert preflight._log_module.review_from_receipt(
+        tmp_path, launch, session, time.time() - 5, 3.0,
+        expected_response_id_sha256="2" * 64, expected_output_sha256="3" * 64, min_requests=2,
+    ) is None
+    assert time.monotonic() - started < 0.5
+
+
+def test_unscoped_codex_receipt_and_mismatched_roundtrip_model_are_rejected(tmp_path, env, capsys):
+    _receipt(tmp_path, routes=["codex@chatgpt.com"])
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    bad = ('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": SOL}}) + '\n\n').encode()
+    code, report, *_ = env(terminal=bad, capsys=capsys)
+    assert code == 2
+    assert check(report, f"roundtrip:{SOL}")["ok"] is True
+    assert check(report, f"roundtrip:{SOL}")["detail"]["returned_model"] == SOL
+    assert check(report, f"roundtrip:{ASTRA}")["ok"] is False
+    assert check(report, f"roundtrip:{ASTRA}")["detail"]["returned_model"] == SOL
+    leaked = ('data: ' + json.dumps({"type": "response.completed", "response": {"status": "completed", "model": f"secret-{KEY}"}}) + '\n\n').encode()
+    code2, report2, *_ = env(terminal=leaked, capsys=capsys)
+    assert code2 == 2 and KEY not in json.dumps(report2)
+    assert check(report2, f"roundtrip:{SOL}")["detail"]["returned_model"] == "other"
 
 
 @pytest.mark.parametrize("failure", [None, "read", "timeout", "text"])
@@ -1552,9 +2193,12 @@ def test_receipt_container_backend_is_explicit_and_bounded(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("routes,ok", [
-    (["claude@api.anthropic.com", "claude@api.anthropic.com"], True),
-    (["claude@api.anthropic.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
-    (["other", "claude@api.anthropic.com"], False),
+    ([f"codex:{ASTRA}@chatgpt.com", f"codex:{ASTRA}@chatgpt.com"], True),
+    ([f"codex:{SOL}@chatgpt.com"], False),
+    ([f"codex:{ASTRA}@chatgpt.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
+    (["other", f"codex:{ASTRA}@chatgpt.com"], False),
+    (["claude@api.anthropic.com"], False),
+    (["kimi-ai@api.kimi.ai"], False),
 ])
 def test_receipt_probe_checks_every_attempt(tmp_path, monkeypatch, routes, ok):
     from types import SimpleNamespace
@@ -1563,7 +2207,7 @@ def test_receipt_probe_checks_every_attempt(tmp_path, monkeypatch, routes, ok):
     monkeypatch.setattr(preflight.uuid, "uuid4", lambda: RECEIPT_SESSION.removeprefix("preflight-"))
     monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
     args = SimpleNamespace(proxy_receipt_dir=str(tmp_path), proxy_url=LOCAL)
-    checks = preflight.probe_model(args, OPUS, "offline", preflight.Deadline(4))
+    checks = preflight.probe_model(args, ASTRA, "offline", preflight.Deadline(4))
     assert checks[0]["ok"] is ok
     assert checks[0]["detail"]["actual"] == routes
 
@@ -1653,3 +2297,173 @@ def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase
         server.shutdown()
         server.server_close()
         serving.join()
+
+
+@pytest.mark.parametrize("bad_chunk", [
+    "data: null\n\n",
+    "data: []\n\n",
+    "data: {}\n\n",
+    'data: {"type": ""}\n\n',
+    'data: {"type": "   "}\n\n',
+    'data: {"type": "response.completed", "error": {"code": "x"}, "error": null, "response": {"id": "r1", "status": "completed", "model": "gpt-6.2-sol", "output": []}}\n\n',
+    'data: {"type": "response.completed", "response": {"id": "r1", "status": "failed", "status": "completed", "model": "wrong", "model": "gpt-6.2-sol", "error": {"message": "bad"}, "error": null, "output": []}}\n\n',
+])
+def test_round_trip_rejects_null_empty_type_and_duplicate_key_sse_frames(monkeypatch, bad_chunk):
+    """R23（Sol P2 / Astra P1）：非控制 SSE data 帧为 null、非对象、缺非空 type 或含重复 JSON 键时，
+    无论出现在合法 response.completed 之前还是之后，round_trip 都必须拒绝（ok=False）。"""
+    import io
+
+    good_done = (
+        'data: {"type": "response.completed", "response": {"id": "r_ok", "status": "completed", '
+        f'"model": "{SOL}", "output": []}}' + "\n\n"
+    )
+
+    class FakeResp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    for payload in (bad_chunk + good_done, good_done + bad_chunk):
+        monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None, p=payload: FakeResp(p.encode()))
+        trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
+        assert trip["ok"] is False, (payload, trip)
+
+
+def test_round_trip_preserves_http_429_when_error_body_disconnects(monkeypatch):
+    """R32/R33（Astra P2）：
+    1. 收到 HTTP 429 时立即关闭并返回 http_status=429，绝不阻塞调用 error.read()（防代理迟迟不结束正文触发外层硬超时丢失 429）；
+    2. 其他非 429 的 HTTPError（如 502）若读取错误正文触发 IncompleteRead，仍保留状态码与已读片段。"""
+    import http.client
+    import urllib.error
+
+    class Hanging429(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(LOCAL, 429, "Too Many Requests", {}, None)
+            self.closed = False
+
+        def read(self, amt=None):
+            raise AssertionError("HTTP 429 不得阻塞读取可选错误正文")
+
+        def close(self):
+            self.closed = True
+
+    err429 = Hanging429()
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: (_ for _ in ()).throw(err429))
+    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
+    assert trip["ok"] is False and trip["http_status"] == 429 and err429.closed is True
+    assert (trip.get("error") or {}).get("class") == "rate_limit"
+
+    class Truncated502(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(LOCAL, 502, "Bad Gateway", {}, None)
+
+        def read(self, amt=None):
+            raise http.client.IncompleteRead(b"bad gateway", expected=100)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: (_ for _ in ()).throw(Truncated502()))
+    trip502 = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
+    assert trip502["ok"] is False and trip502["http_status"] == 502
+
+
+def test_round_trip_sse_rate_limit_frame_returns_immediately_without_waiting_eof():
+    """R35（Astra P2）：HTTP 200 的 SSE 响应收到明确限流错误帧后，即使代理迟迟不关闭连接，
+    探针也须逐帧解析并立即返回 rate_limit，不因阻塞等 EOF 超时而丢失限流退避信号。"""
+    release = threading.Event()
+
+    class HangingRateLimitSSE(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            frame = (
+                'data: {"type":"response.failed","response":{"status":"failed",'
+                '"error":{"code":"rate_limit_exceeded","message":"Rate limit reached"}}}\n\n'
+            ).encode()
+            self.wfile.write(frame)
+            self.wfile.flush()
+            release.wait(timeout=15)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), HangingRateLimitSSE)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    url = f"http://127.0.0.1:{srv.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        started = time.monotonic()
+        trip = preflight._round_trip_http(url, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(15))
+        elapsed = time.monotonic() - started
+        assert elapsed < 3.0, f"SSE 限流帧未立即返回，耗时 {elapsed:.2f}s"
+        assert trip["ok"] is False and trip["http_status"] == 200
+        assert (trip.get("error") or {}).get("class") == "rate_limit"
+    finally:
+        release.set()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_sse_enforces_line_and_total_byte_budgets(monkeypatch):
+    """R43（Astra P2）：预检 SSE 读取对单帧与总响应强制字节预算，
+    面对无换行超长流或超总预算响应立即关闭连接并报预检失败，不在超时前无限累积内存。"""
+    monkeypatch.setattr(preflight._http_module, "MAX_SSE_LINE_BYTES", 256)
+    monkeypatch.setattr(preflight._http_module, "MAX_SSE_TOTAL_BYTES", 512)
+    stop = threading.Event()
+
+    class OversizedSSE(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            try:
+                if self.path.startswith("/line"):
+                    self.wfile.write(b"data: " + b"x" * 1024)
+                    self.wfile.flush()
+                    stop.wait(timeout=10)
+                else:
+                    chunk = b'data: {"type":"response.output_text.delta","delta":"' + b"a" * 100 + b'"}\n\n'
+                    for _ in range(10):
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    stop.wait(timeout=10)
+            except OSError:
+                pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), OversizedSSE)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    base_url = f"http://127.0.0.1:{srv.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        t0 = time.monotonic()
+        res_line = preflight._round_trip_http(
+            base_url + "/line", KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(15)
+        )
+        assert time.monotonic() - t0 < 3.0 and res_line["ok"] is False and res_line["http_status"] == 200
+        assert (res_line.get("error") or {}).get("length", 0) > 0
+
+        t1 = time.monotonic()
+        res_total = preflight._round_trip_http(
+            base_url + "/total", KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(15)
+        )
+        assert time.monotonic() - t1 < 3.0 and res_total["ok"] is False and res_total["http_status"] == 200
+        assert (res_total.get("error") or {}).get("length", 0) > 0
+    finally:
+        stop.set()
+        srv.shutdown()
+        srv.server_close()

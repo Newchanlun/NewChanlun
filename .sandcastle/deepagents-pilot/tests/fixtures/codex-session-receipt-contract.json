@@ -1,0 +1,99 @@
+{
+  "contract_note": "脱敏样本源自已部署审阅镜像 sandcastle:newchanlun 中 codex-cli 0.169.0 的真实正式独审会话（session_meta/turn_context/response_item/token_usage_record/events.jsonl）与 cliproxy-review-v1 收据字段映射；自由正文已脱敏为固定回归载荷。",
+  "codex_cli_version": "0.169.0",
+  "session_id": "01a203e5-7eee-7aa1-81bb-b475181103f4",
+  "launch_id": "11111111-2222-4333-8444-555555555551",
+  "model": "gpt-6.2-sol",
+  "provider": "cliproxy-local",
+  "response_ids": [
+    "resp_08ec15470527ea96016b0302d3b28c87d08b3fecc661260c01",
+    "resp_08ec15470527ea96016b0302d3b28c87d08b3fecc661260c02"
+  ],
+  "session_records": [
+    {
+      "timestamp": "2026-11-22T15:35:00.000Z",
+      "type": "session_meta",
+      "payload": {
+        "id": "01a203e5-7eee-7aa1-81bb-b475181103f4",
+        "cli_version": "0.169.0",
+        "model_provider": "cliproxy-local",
+        "source": "exec"
+      }
+    },
+    {
+      "timestamp": "2026-11-22T15:35:00.100Z",
+      "type": "turn_context",
+      "payload": {
+        "turn_id": "01a203e5-7eee-7aa1-81bb-000000000001",
+        "model": "gpt-6.2-sol"
+      }
+    },
+    {
+      "timestamp": "2026-11-22T15:35:04.500Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "exec_command",
+        "call_id": "call_01",
+        "arguments": "{\"cmd\":\"git diff --no-ext-diff --no-textconv {{MERGE_BASE_SHA}} {{HEAD_SHA}}\"}"
+      }
+    },
+    {
+      "timestamp": "2026-11-22T15:35:05.000Z",
+      "type": "token_usage_record",
+      "payload": {
+        "response_id": "resp_08ec15470527ea96016b0302d3b28c87d08b3fecc661260c01",
+        "root_turn_id": "01a203e5-7eee-7aa1-81bb-000000000001",
+        "session_id": "01a203e5-7eee-7aa1-81bb-b475181103f4",
+        "thread_id": "01a203e5-7eee-7aa1-81bb-b475181103f4",
+        "turn_id": "01a203e5-7eee-7aa1-81bb-000000000001",
+        "usage": {"input_tokens": 1200, "output_tokens": 80},
+        "turn_token_usage": {"input_tokens": 1200, "output_tokens": 80},
+        "thread_token_usage": {"input_tokens": 1200, "output_tokens": 80}
+      }
+    },
+    {
+      "timestamp": "2026-11-22T15:35:06.000Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_01",
+        "output": "Process exited with code 0\nOutput:\n{{CANDIDATE_PATCH}}"
+      }
+    },
+    {
+      "timestamp": "2026-11-22T15:35:09.500Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "{\"status\": \"completed\", \"summary\": \"VERDICT: PASS\\n脱敏真实契约夹具通过。\", \"findings\": [], \"validation\": [\"codex-cli 0.169.0 真实脱敏日志契约样本\"]}"
+          }
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-11-22T15:35:10.000Z",
+      "type": "token_usage_record",
+      "payload": {
+        "response_id": "resp_08ec15470527ea96016b0302d3b28c87d08b3fecc661260c02",
+        "root_turn_id": "01a203e5-7eee-7aa1-81bb-000000000001",
+        "session_id": "01a203e5-7eee-7aa1-81bb-b475181103f4",
+        "thread_id": "01a203e5-7eee-7aa1-81bb-b475181103f4",
+        "turn_id": "01a203e5-7eee-7aa1-81bb-000000000001",
+        "usage": {"input_tokens": 2400, "output_tokens": 160},
+        "turn_token_usage": {"input_tokens": 3600, "output_tokens": 240},
+        "thread_token_usage": {"input_tokens": 3600, "output_tokens": 240}
+      }
+    }
+  ],
+  "final_result": {
+    "status": "completed",
+    "summary": "VERDICT: PASS\n脱敏真实契约夹具通过。",
+    "findings": [],
+    "validation": ["codex-cli 0.169.0 真实脱敏日志契约样本"]
+  }
+}

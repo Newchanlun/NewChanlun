@@ -25,7 +25,7 @@ mode_file = per_model if per_model.exists() else folder.parents[1] / "fake-mode"
 mode, _, flag = (mode_file.read_text().strip() if mode_file.exists() else "PASS").partition(":")
 session = str(uuid.uuid4())
 diff = ["diff", "--no-ext-diff", "--no-textconv", launch["merge_base_sha"], launch["head_sha"]]
-read = f"/bin/bash -lc 'git {' '.join(diff)}'"
+read = f"/bin/bash -c '/usr/bin/git {' '.join(diff)}'"
 patch = subprocess.run(["git", "-C", launch["checkout"], *diff], capture_output=True, text=True, check=True).stdout
 tool = [] if flag == "notool" else [  # 「BLOCK:notool」等：零工具调用的审查员（#1968）
     {"type": "item.completed", "item": {"type": "command_execution", "command": read, "aggregated_output": patch,
@@ -42,10 +42,37 @@ events = [{"type": "thread.started", "thread_id": session}, *tool,
           {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
           {"type": "turn.completed"}]
 (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
-(folder / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": session}}) + "\n")
+session_lines = [
+    json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}),
+    json.dumps({"type": "turn_context", "payload": {"model": launch["model"]}}),
+]
+if tool:
+    call_id = f"call_{launch['model']}_{session[:8]}"
+    session_lines.extend([
+        json.dumps({"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "call_id": call_id,
+            "arguments": json.dumps({"cmd": f"/usr/bin/git {' '.join(diff)}", "workdir": "/review"}),
+        }}),
+        json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_tool_{session}"}}),
+        json.dumps({"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": call_id,
+            "output": f"Process exited with code 0\nOutput:\n{patch}",
+        }}),
+    ])
+session_lines.extend([
+    json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": text if isinstance(text, str) else json.dumps(text)}],
+    }}),
+    json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_{session}"}}),
+])
+(folder / "session.jsonl").write_text("\n".join(session_lines) + "\n")
 record = {**launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0, "container_closed": True,
+          "observed_provider": "cliproxy-local", "observed_model": launch["model"],
           "image_id": "sha256:" + "1" * 64, "isolation_contract": isolation_contract, "container_id": "a" * 64,
-          "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT"},
+          "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT",
+                         "tool_home_write": "EACCES", "etc_profile_write": "EACCES",
+                         "tool_bins_immutable": "EACCES", "git_bin": "/usr/bin/git"},
           "session_id": session, "turn_completed": True, "result": output,
           "before": {"head": launch["head_sha"], "branch": "HEAD", "status": ""},
           "after": {"head": launch["head_sha"], "branch": "HEAD", "status": ""}}

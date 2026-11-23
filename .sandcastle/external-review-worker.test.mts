@@ -212,8 +212,8 @@ test("准入锁：持有者活着时后来者等到超时，超时不释放别�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
-  for (const model of ["gpt-6.1-sol", "claude-opus-5-5"] as const) {
+test("两位 GPT 独立建会话；历史显式模型仍可用", () => {
+  for (const model of ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "claude-opus-5-5"] as const) {
     const a = codexWorker({ docker: true, model });
     const b = codexWorker({ docker: true, model });
     const options = { prompt: "只审不修", dangerouslySkipPermissions: false };
@@ -228,12 +228,14 @@ test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
   assert.throws(() => verifyReviewAdmission({ imageId: image, consume() {} }));
 });
 
-const modes = ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "bind-mount", "volume-mismatch",
-  "volume-remove-fails", "secret-env", "bad-filesystem",
+const modes = ["PASS", "BLOCK", "failed", "missing-log", "wrong-session-model", "wrong-session-provider",
+  "missing-completed", "write", "bad-mount", "bind-mount", "volume-mismatch",
+  "volume-remove-fails", "secret-env", "bad-filesystem", "bad-tool-env",
   "over-budget", "over-budget-reject", "timeout-reject", "rate-limited-hang", "rate-limited-final", "rate-limited-exit", "rate-limited-stderr",
   "reconnect-429-recovers"] as const;
 const RECONNECT_429 = "Reconnecting... 1/5 (exceeded retry limit, last status: 429 Too Many Requests)";
 for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
+  ["PASS", "gpt-6.2-sol"], ["PASS", "gpt-6.2-astra"],
   ["PASS", "kimi-k3.1-pro"], ["BLOCK", "kimi-k3.1-pro"], ["PASS", "claude-opus-5-5"]] as const) {
   test(`宿主监督 ${model} ${mode} 不把缺证据转为通过`, async () => {
     const f = fixture(model); const session = randomUUID();
@@ -248,7 +250,11 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       worktreePath: "/review",
       async exec(command, options) {
         if (command === "cat /etc/hostname") return { stdout: container.slice(0, 12), stderr: "", exitCode: 0 };
-        if (command.startsWith("node -e ")) return { stdout: JSON.stringify({ source_write: mode === "bad-filesystem" ? "ALLOWED" : "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT" }), stderr: "", exitCode: 0 };
+        if (command.startsWith("node -e ")) return { stdout: JSON.stringify({
+          source_write: mode === "bad-filesystem" ? "ALLOWED" : "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT",
+          tool_home_write: "EACCES", etc_profile_write: "EACCES",
+          tool_bins_immutable: mode === "bad-tool-env" ? "ALLOWED" : "EACCES", git_bin: "/usr/bin/git",
+        }), stderr: "", exitCode: 0 };
         if (command.includes("find ")) {
           const sessionsDir = JSON.parse(command.match(/^find (".*?") /)![1]!);
           return { stdout: `${sessionsDir}/2026/10/29/rollout-2026-10-29-${session}.jsonl\n`, stderr: "", exitCode: 0 };
@@ -316,7 +322,11 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       async copyFileOut(_src, dest) {
         if (mode === "missing-log") throw new Error("missing session");
         mkdirSync(dirname(dest), { recursive: true });
-        writeFileSync(dest, JSON.stringify({ type: "session_meta", payload: { id: session, cwd: "/review" } }) + "\n");
+        const providerName = mode === "wrong-session-provider" ? "other-provider" : "cliproxy-local";
+        const recordedModel = mode === "wrong-session-model" ? "gpt-6.2-astra" : model;
+        writeFileSync(dest,
+          JSON.stringify({ type: "session_meta", payload: { id: session, cwd: "/review", model_provider: providerName } }) + "\n"
+          + JSON.stringify({ type: "turn_context", payload: { model: recordedModel } }) + "\n");
       },
       async close() { closed = true; },
     };
@@ -365,11 +375,18 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       if (receipt.status === "completed") {
         assert.match(modelCommand, /(?:^|\s)--skip-git-repo-check(?:\s|$)/);
         assert(modelCommand.includes("-c 'project_doc_max_bytes=0'"));
+        assert(modelCommand.includes("-c 'allow_login_shell=false'"));
+        assert(modelCommand.includes("-c 'shell_environment_policy.inherit=\"none\"'"));
+        assert(modelCommand.includes("-c 'shell_environment_policy.set.HOME=\"/\"'"));
+        assert(modelCommand.includes("-c 'shell_environment_policy.set.PATH=\"/usr/local/bin:/usr/bin:/bin\"'"));
+        assert(modelCommand.includes("-c 'shell_environment_policy.set.GIT_CONFIG_GLOBAL=\"/dev/null\"'"));
         assert.deepEqual(receipt.usage, { input_tokens: 100, cached_input_tokens: 40, output_tokens: 7,
           reasoning_output_tokens: 3, commands: 0, reported: true });
         assert.equal(receipt.result.summary, `VERDICT: ${mode}`);
         assert.equal(receipt.failure_code, undefined);
         assert.equal(receipt.session_id, session);
+        assert.equal(receipt.observed_provider, "cliproxy-local");
+        assert.equal(receipt.observed_model, model);
         assert(receipt.turn_completed);
         assert.equal(receipt.container_id, container);
         assert.equal(receipt.output_contract, schemaless ? "prompt" : "schema");
@@ -472,7 +489,10 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
       async exec(command) {
         commands.push(command);
         if (command === "cat /etc/hostname") return { stdout: container.slice(0, 12), stderr: "", exitCode: 0 };
-        if (command.startsWith("node -e ")) return { stdout: JSON.stringify({ source_write: "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT" }), stderr: "", exitCode: 0 };
+        if (command.startsWith("node -e ")) return { stdout: JSON.stringify({
+          source_write: "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT",
+          tool_home_write: "EACCES", etc_profile_write: "EACCES", tool_bins_immutable: "EACCES", git_bin: "/usr/bin/git",
+        }), stderr: "", exitCode: 0 };
         return { stdout: "", stderr: "", exitCode: 1 };
       },
       async copyFileIn() {}, async copyFileOut() {}, async close() { closed = true; },
@@ -583,4 +603,32 @@ elif sys.argv[1] == "ps":
       rmSync(trace);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("launch 冻结 image_id 时 worker 在启动前核对镜像一致并拒绝非法格式", async () => {
+  const f = fixture("gpt-6.2-sol");
+  try {
+    writeFileSync(join(f.folder, "launch.json"), JSON.stringify({ ...f.launch, image_id: "sandcastle:newchanlun" }), { mode: 0o600 });
+    assert.throws(() => readLaunch(f.folder), /image_id/);
+
+    const expectedImage = "sha256:" + "9".repeat(64);
+    writeFileSync(join(f.folder, "launch.json"), JSON.stringify({ ...f.launch, image_id: expectedImage }), { mode: 0o600 });
+    assert.equal(readLaunch(f.folder).image_id, expectedImage);
+
+    const fake = fakeVolumes();
+    const deps: WorkerDependencies = {
+      identity: () => ({ head: f.launch.controller_code_head, dirty: "" }),
+      ready: () => image, // 标签漂移到了不同的已准入镜像
+      sandbox: () => { throw new Error("镜像漂移不应启动容器"); },
+      inspect: () => { throw new Error("镜像漂移不应 inspect"); },
+      volumes: fake.volumes,
+      imageEnv: () => [],
+      timeoutMs: 10_000,
+    };
+    await runExternalReview(f.folder, deps);
+    const receipt = JSON.parse(readFileSync(join(f.folder, "receipt.json"), "utf8"));
+    assert.equal(receipt.status, "failed");
+    assert.equal(receipt.phase, "admission");
+    assert.deepEqual(fake.calls, []);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });

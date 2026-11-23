@@ -1,4 +1,6 @@
 # 强制 shell 脚本使用 LF 行尾（bash 不兼容 CRLF）
 *.sh text eol=lf
+# unified diff 补丁文件包含必需的前导空格上下文行（如 Go 制表符缩进前的 " \t"），豁免 whitespace 告警
+*.patch -whitespace
 .chanlun/block-topology/relations.jsonl filter=lfs diff=lfs merge=lfs -text
 docs/chanlun/text/tiandao/*.pdf filter=lfs diff=lfs merge=lfs -text

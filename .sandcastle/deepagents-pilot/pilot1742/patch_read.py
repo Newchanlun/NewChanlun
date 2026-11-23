@@ -367,9 +367,15 @@ class _Read:
     kind: str
     paths: tuple[str, ...] = ()
     leading: bool = False  # 后面还接了别的段（_trailing）：证据只在输出开头那段 diff 里找，见 _leading_diff
+    plain_u0: bool = False  # patch 且仅含 _PLAIN_U0_DIFF 选项与 -U0/--unified=0（行号与 controller 冻结 -U0 补丁严格一致）
+    line_pos_mode: str = "unpositioned"  # 原始输出 1-based 行号可信度："sequential" | "numbered" | "unpositioned"
+    diff_num_layers: int = 0  # diff/patch 管道中加在行首的行号过滤器层数（nl / cat -n / grep -n）
+    diff_hunk_intact: bool = True  # diff/patch 管道是否保持 hunk 内连续行（未被 grep / 多段 sed / cat -s / 字节截断破坏）
 
 
 WHOLE_PATCH = _Read("patch")
+_PLAIN_U0_DIFF = re.compile(r"--no-ext-diff|--no-textconv|--no-color|--color=never|-U0|--unified=0|-p|-u|--patch")
+_U0_FLAG = frozenset({"-U0", "--unified=0"})
 
 
 def _emits_patch(subcommand: str, options: list[str]) -> bool:
@@ -399,16 +405,49 @@ class _GitCall:
     moved: bool
 
 
+def _is_review_path(raw: str, *, allow_subpaths: bool = False, exact: str | None = None) -> bool:
+    if not raw or _OPAQUE in raw:
+        return False
+    norm = posixpath.normpath(raw)
+    if exact is not None:
+        return norm == exact
+    if allow_subpaths:
+        return norm == "/review" or norm.startswith("/review/")
+    return norm == "/review"
+
+
 def _git_call(argv: list[str]) -> _GitCall | None:
     if not argv or argv[0].rsplit("/", 1)[-1] != "git":
         return None
     i, config, moved = 1, [], False
     while i < len(argv):
-        if argv[i] in ("-C", "-c", "--git-dir", "--work-tree"):
-            config += argv[i + 1:i + 2] if argv[i] == "-c" else []
-            moved = moved or argv[i] == "-C"
+        if argv[i] == "-c":
+            if i + 1 >= len(argv):
+                return None
+            config.append(argv[i + 1])
             i += 2
-        elif argv[i] in ("--no-pager", "-P") or argv[i].startswith(("--git-dir=", "--work-tree=")):
+        elif argv[i] == "-C":
+            if i + 1 >= len(argv) or not _is_review_path(argv[i + 1], allow_subpaths=True):
+                return None
+            moved = True
+            i += 2
+        elif argv[i] == "--git-dir":
+            if i + 1 >= len(argv) or not _is_review_path(argv[i + 1], exact="/review/.git"):
+                return None
+            i += 2
+        elif argv[i] == "--work-tree":
+            if i + 1 >= len(argv) or not _is_review_path(argv[i + 1], exact="/review"):
+                return None
+            i += 2
+        elif argv[i].startswith("--git-dir="):
+            if not _is_review_path(argv[i].split("=", 1)[1], exact="/review/.git"):
+                return None
+            i += 1
+        elif argv[i].startswith("--work-tree="):
+            if not _is_review_path(argv[i].split("=", 1)[1], exact="/review"):
+                return None
+            i += 1
+        elif argv[i] in ("--no-pager", "-P"):
             i += 1
         else:
             break
@@ -436,6 +475,10 @@ def _git_patch_read(command: _Expanded, revisions: _Revisions) -> _Read | None:
     separator = rest.index("--") if "--" in rest else len(rest)
     if "--no-index" in options or (subcommand == "show" and "--output" in " ".join(options)):
         return None
+    # 拒绝任何忽略子模块的 diff 选项（仅放行显式 --ignore-submodules=none）
+    if any(o == "--ignore-submodules" or (o.startswith("--ignore-submodules=") and o != "--ignore-submodules=none")
+           for o in options):
+        return None
     # 补丁旁边能印出审查员自己写的文字的选项（`--format='+<改动行>'`、`--line-prefix`）不认（#1969 kimi BLOCK）
     if any(_PRINTS_TEXT.fullmatch(o) for o in options):
         return None
@@ -459,7 +502,22 @@ def _git_patch_read(command: _Expanded, revisions: _Revisions) -> _Read | None:
         kinds.append("head")  # 一个提交对工作区或索引；审阅 checkout 已证实停在 head 且干净
     if "head" not in kinds or not any(k in _KNOWN for k in kinds) or not _emits_patch(subcommand, options):
         return None
-    return WHOLE_PATCH if _whole_range(positional, revisions) else _Read("diff")
+    if not _whole_range(positional, revisions):
+        return _Read("diff")
+    diff_paths: tuple[str, ...] = ()
+    if not moved and separator + 1 < len(rest):
+        raw_specs = rest[separator + 1:]
+        if raw_specs and all(_OPAQUE not in p and not p.startswith((":(", ":!", "/")) for p in raw_specs):
+            normed = [posixpath.normpath(p) for p in raw_specs]
+            if all(p not in ("", ".", "..") and not p.startswith("../") and not any(ch in p for ch in "*?[")
+                   for p in normed):
+                diff_paths = tuple(normed)
+    plain_u0 = (
+        any(o in _U0_FLAG for o in options)
+        and all(_PLAIN_U0_DIFF.fullmatch(o) for o in options)
+        and (separator == len(rest) or bool(diff_paths))
+    )
+    return _Read("patch", diff_paths, plain_u0=plain_u0)
 
 
 def _whole_range(positional: list[str], revisions: _Revisions) -> bool:
@@ -510,15 +568,20 @@ def _show_read(positional: list[str], options: list[str], unresolved: bool, move
     return None
 
 
-def _script(command: str) -> str | None:
-    """取出 Codex 外层 `/bin/bash -lc '<脚本>'` 的脚本；不是这个形状时按原文当脚本。"""
+_SYSTEM_SHELLS = frozenset({"/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh"})
+
+
+def _script(command: str, *, require_system_shell: bool = False) -> str | None:
+    """取出 Codex 外层 `/bin/bash -lc '<脚本>'` / `/bin/bash -c '<脚本>'` 的脚本；
+    `require_system_shell=True` 时只接受固定不可写系统 shell（/bin/bash、/usr/bin/bash、/bin/sh、/usr/bin/sh）包装的命令。"""
     commands = _parse(_lex(command))
     if len(commands) == 1 and isinstance(commands[0], _Command):
         argv = [field for w in commands[0].words for field in _fields(w, {})]
-        if (len(argv) == 3 and argv[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh")
-                and re.fullmatch(r"-[a-z]*c[a-z]*", argv[1])):
+        if (len(argv) == 3 and re.fullmatch(r"-[a-z]*c[a-z]*", argv[1])
+                and (argv[0] in _SYSTEM_SHELLS if require_system_shell
+                     else argv[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh"))):
             return None if _OPAQUE in argv[2] else argv[2]
-    return command
+    return None if require_system_shell else command
 
 
 def _lines(text: str) -> list[str]:
@@ -580,64 +643,464 @@ def _leading_diff(output: str) -> list[str]:
     return lines
 
 
+_HUNK_POS = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_NUM_PREFIX = re.compile(r"[ \t]*(\d+)([\t:])")
+_BLOB_NUM_LINE = re.compile(r"^[ \t]*(\d+)[\t:](.*)$")
+_META_CHANGE = re.compile(
+    r"^(?:old mode |new mode |deleted file mode |new file mode |rename from |rename to |copy from |copy to |Binary files )"
+)
+ChangeUnit = tuple[str, str, int, str]  # (file_header, "+" | "-" | "M" | "H", 1-based line_no or 0, exact_text)
+
+
+def _scan_quoted_token(s: str, i: int) -> tuple[str, int] | None:
+    if i >= len(s) or s[i] != '"':
+        return None
+    j = i + 1
+    while j < len(s):
+        if s[j] == "\\" and j + 1 < len(s):
+            j += 2
+        elif s[j] == '"':
+            return _unquote(s[i:j + 1]), j + 1
+        else:
+            j += 1
+    return None
+
+
+def _parse_diff_git_paths(header: str) -> tuple[str, str] | None:
+    """解码 `diff --git <a/old> <b/new>` 行中的旧/新路径（兼容 Git C 风格引号转义、非 ASCII 路径与空格）。"""
+    if not header.startswith("diff --git "):
+        return None
+    rest = header[11:]
+    tok1: str | None = None
+    tok2: str | None = None
+    if rest.startswith('"'):
+        first = _scan_quoted_token(rest, 0)
+        if first is None:
+            return None
+        tok1, pos = first
+        if pos >= len(rest) or rest[pos] != " ":
+            return None
+        rem = rest[pos + 1:]
+        if rem.startswith('"'):
+            second = _scan_quoted_token(rem, 0)
+            if second is None or second[1] != len(rem):
+                return None
+            tok2 = second[0]
+        else:
+            tok2 = rem
+    elif rest.endswith('"'):
+        matches: list[tuple[str, str]] = []
+        idx = rest.find(' "b/')
+        while idx != -1:
+            second = _scan_quoted_token(rest, idx + 1)
+            if second is not None and second[1] == len(rest):
+                matches.append((rest[:idx], second[0]))
+            idx = rest.find(' "b/', idx + 1)
+        if len(matches) != 1:
+            return None
+        tok1, tok2 = matches[0]
+    else:
+        if len(rest) % 2 == 1 and rest[len(rest) // 2] == " ":
+            left, right = rest[:len(rest) // 2], rest[len(rest) // 2 + 1:]
+            if left.startswith("a/") and right.startswith("b/") and left[2:] == right[2:]:
+                return left[2:], right[2:]
+        positions: list[int] = []
+        idx = rest.find(" b/")
+        while idx != -1:
+            positions.append(idx)
+            idx = rest.find(" b/", idx + 1)
+        if len(positions) != 1:
+            return None
+        pos = positions[0]
+        tok1, tok2 = rest[:pos], rest[pos + 1:]
+    if tok1 is None or tok2 is None or not tok1.startswith("a/") or not tok2.startswith("b/"):
+        return None
+    return tok1[2:], tok2[2:]
+
+
+def _normalize_meta_line(line: str) -> str:
+    """规范化扩展头元数据行中的 Git C-quoted 路径，使默认 quotepath 与 `-c core.quotepath=false` 一致匹配。"""
+    for prefix in ("rename from ", "rename to ", "copy from ", "copy to "):
+        if line.startswith(prefix):
+            return prefix + _unquote(line[len(prefix):])
+    if line.startswith("Binary files ") and line.endswith(" differ"):
+        inner = line[13:-7]
+        if inner.startswith('"'):
+            first = _scan_quoted_token(inner, 0)
+            if first is not None and inner[first[1]:].startswith(" and "):
+                rem = inner[first[1] + 5:]
+                second = _scan_quoted_token(rem, 0) if rem.startswith('"') else (rem, len(rem))
+                if second is not None and second[1] == len(rem):
+                    return f"Binary files {first[0]} and {second[0]} differ"
+        elif inner.endswith('"'):
+            idx = inner.find(' and "')
+            if idx != -1:
+                second = _scan_quoted_token(inner, idx + 5)
+                if second is not None and second[1] == len(inner):
+                    return f"Binary files {inner[:idx]} and {second[0]} differ"
+    return line
+
+
 @dataclass(frozen=True)
 class FrozenFile:
     """冻结补丁里的一个文件。header 是 controller 侧的 `diff --git a/… b/…` 行，path 是它在 head 上的路径
-    （删除的文件为 None）；evidence 是这个文件的证据行，added 是其中由 `+` 加进来、head 上这个文件里有的。"""
+    （删除的文件为 None），git_old_path/git_new_path 是解码后的旧/新路径；evidence 是这个文件的证据行，
+    added 是其中由 `+` 加进来、head 上这个文件里有的，changes 是精确到 `(file_header, sign, line_no, text)`
+    的全部冻结变更行与元数据变更集合（含 `_BREAK` 行，不可删除出必读集），u0_units 记录单文件 `-U0` 补丁中
+    1-based 行号到精确 ChangeUnit 的映射。"""
     header: str
     path: str | None
     evidence: frozenset[str]
     added: frozenset[str]
+    changes: frozenset[ChangeUnit] = frozenset()
+    u0_units: tuple[tuple[int, ChangeUnit], ...] = ()
+    git_old_path: str | None = None
+    git_new_path: str | None = None
 
 
-def _split_files(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]]]]:
-    """按文件切开 `-U<n>` 补丁：(header, head 上的路径, [(`+`/`-`, 改动行去掉首尾空白)])。
-    hunk 按 `@@ -a,b +c,d @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git` 的改动行不会被当成文件头。"""
-    files: list[tuple[str, str | None, list[tuple[str, str]]]] = []
-    old = new = 0
-    for line in _lines(diff):
-        if old > 0 or new > 0:
+_SplitRow = tuple[
+    str,
+    str | None,
+    str | None,
+    str | None,
+    list[tuple[str, str]],
+    list[ChangeUnit],
+    list[tuple[int, ChangeUnit]],
+    int,
+]
+
+
+def _unquote_diff_path_header(rest: str) -> str:
+    """去掉 Git 在含空格路径的 `---`/`+++` 头末尾附加的制表符分隔符后再解码（文件名自身含 \\t 时会被 Git C-quote）。"""
+    return _unquote(rest.rstrip("\t"))
+
+
+def _split_files(diff: str) -> tuple[list[_SplitRow], list[tuple[int, ChangeUnit]]]:
+    """按文件、元数据变更行、精确 hunk 行号与 `\\ No newline at end of file` 标记切开 `-U<n>` 补丁，
+    并记录全局及单文件 1-based `-U0` 补丁行号映射。
+    hunk 按 `@@ -old,n +new,m @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git`、`old mode` 的改动行不会被当成文件头。
+    含 `_BREAK` 字符的增删行与元数据变更行同样保留在 `changes` 必读全集中（绝不从必读集剔除），但永不进入 `evidence` 或 `u0` 匹配表。"""
+    files: list[_SplitRow] = []
+    u0_global: list[tuple[int, ChangeUnit]] = []
+    old_ln = new_ln = old_rem = new_rem = 0
+    last_hunk_pos: tuple[str, int] | None = None
+    for global_ln, line in enumerate(_lines(diff), 1):
+        if files and line.startswith("\\"):
+            if last_hunk_pos is not None and last_hunk_pos[0] in ("-", "+"):
+                nl_unit: ChangeUnit = (files[-1][0], f"\\{last_hunk_pos[0]}", last_hunk_pos[1], line)
+                files[-1][5].append(nl_unit)
+                if not _BREAK.search(line):
+                    files[-1][6].append((global_ln - files[-1][7] + 1, nl_unit))
+                    u0_global.append((global_ln, nl_unit))
+            last_hunk_pos = None
+            continue
+        if old_rem > 0 or new_rem > 0:
             sign = line[:1]
-            old -= sign in ("-", " ")
-            new -= sign in ("+", " ")
-            if sign in ("+", "-") and not _BREAK.search(line) and (text := line[1:].strip()):
-                files[-1][2].append((sign, text))
+            if sign == " ":
+                last_hunk_pos = (" ", new_ln)
+                old_ln += 1
+                new_ln += 1
+                old_rem -= 1
+                new_rem -= 1
+            elif sign == "-":
+                raw_text = line[1:]
+                unit: ChangeUnit = (files[-1][0], "-", old_ln, raw_text)
+                files[-1][5].append(unit)
+                if not _BREAK.search(line):
+                    files[-1][6].append((global_ln - files[-1][7] + 1, unit))
+                    u0_global.append((global_ln, unit))
+                    if stripped := raw_text.strip():
+                        files[-1][4].append(("-", stripped))
+                last_hunk_pos = ("-", old_ln)
+                old_ln += 1
+                old_rem -= 1
+            elif sign == "+":
+                raw_text = line[1:]
+                unit = (files[-1][0], "+", new_ln, raw_text)
+                files[-1][5].append(unit)
+                if not _BREAK.search(line):
+                    files[-1][6].append((global_ln - files[-1][7] + 1, unit))
+                    u0_global.append((global_ln, unit))
+                    if stripped := raw_text.strip():
+                        files[-1][4].append(("+", stripped))
+                last_hunk_pos = ("+", new_ln)
+                new_ln += 1
+                new_rem -= 1
         elif line.startswith("diff --git "):
-            files.append((line, None, []))
+            last_hunk_pos = None
+            parsed_paths = _parse_diff_git_paths(line)
+            old_p, new_p = parsed_paths if parsed_paths is not None else (None, None)
+            files.append((line, None, old_p, new_p, [], [], [], global_ln))
         elif files and line.startswith("+++ "):
-            target = _unquote(line[4:])
-            files[-1] = (files[-1][0], target[2:] if target.startswith("b/") else None, files[-1][2])
-        elif files and (hunk := re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)):
-            old, new = (int(n) if n is not None else 1 for n in hunk.groups())
-    return files
+            target = _unquote_diff_path_header(line[4:])
+            head_p = target[2:] if target.startswith("b/") else None
+            cur = files[-1]
+            files[-1] = (cur[0], head_p, cur[2], head_p or cur[3], cur[4], cur[5], cur[6], cur[7])
+        elif files and line.startswith("--- "):
+            src = _unquote_diff_path_header(line[4:])
+            if src.startswith("a/"):
+                cur = files[-1]
+                files[-1] = (cur[0], cur[1], src[2:], cur[3], cur[4], cur[5], cur[6], cur[7])
+        elif files and (hunk := _HUNK_POS.match(line)):
+            last_hunk_pos = None
+            old_ln = int(hunk.group(1))
+            old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
+            new_ln = int(hunk.group(3))
+            new_rem = int(hunk.group(4)) if hunk.group(4) is not None else 1
+        elif files and _META_CHANGE.match(line):
+            cur = files[-1]
+            norm_meta = _normalize_meta_line(line)
+            old_p, new_p = cur[2], cur[3]
+            if norm_meta.startswith(("rename from ", "copy from ")):
+                old_p = norm_meta.split(" ", 2)[2]
+            elif norm_meta.startswith(("rename to ", "copy to ")):
+                new_p = norm_meta.split(" ", 2)[2]
+            files[-1] = (cur[0], cur[1], old_p, new_p, cur[4], cur[5], cur[6], cur[7])
+            if norm_meta.startswith("Binary files "):
+                # 未展开二进制 blob 内容无法靠默认文本 diff 证明已审阅，记为 BIN 必读项且永不自动匹配（PASS 失败闭合）
+                cur[5].append((cur[0], "BIN", 0, norm_meta))
+            else:
+                meta_unit: ChangeUnit = (cur[0], "M", 0, norm_meta)
+                cur[5].append(meta_unit)
+                if not _BREAK.search(line):
+                    cur[6].append((global_ln - cur[7] + 1, meta_unit))
+                    u0_global.append((global_ln, meta_unit))
+    return files, u0_global
 
 
 @dataclass(frozen=True)
 class FrozenPatch:
-    """controller 侧取得的冻结候选补丁，按文件存证据（#1969 正式审查 bb8aa92e opus BLOCK：不分文件时，
-    `git show <head>:<本 PR 没改的文件>` 里的 `from __future__ import annotations` 就能冒充读到了改动行）。
-    证据是审查员输出里须出现的行（去掉首尾空白）：改动行（`+`/`-` 之后的内容）里至少 _DISTINCT 个字符的；
-    整个补丁都没有这样的行就取全部非空改动行；纯二进制、改名、改权限的补丁没有改动行，取 `diff --git` 头。"""
+    """controller 侧取得的冻结候选补丁，按文件存证据并精确记录每一处增删行与元数据变更坐标 `(header, sign, line_no, text)`：
+    - `shown_in` 核验至少读到冻结补丁证据（防零读取/伪造读取，允许 BLOCK 提前阻断）；
+    - `covered_change_units` 按文件、增删/元数据方向、精确行号与逐字文本核验实际呈现的改动（不靠截断关键词启发式，
+      源码正文含 `123 chars truncated` 亦不受影响；超大单 hunk 可用 `-U0 | nl -ba | sed -n` 按精确行号分段覆盖；
+      含 `_BREAK` 字符的改动行保留在必读全集中并拒绝 PASS）。"""
     head_sha: str
     merge_base_sha: str
     base_sha: str
     files: tuple[FrozenFile, ...]
+    u0_global_units: tuple[tuple[int, ChangeUnit], ...] = ()
+    lossy_utf8: bool = False
 
     @classmethod
-    def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str) -> FrozenPatch:
+    def from_diff(
+        cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str, *, lossy_utf8: bool = False
+    ) -> FrozenPatch:
         """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
-        split = _split_files(diff)
-        changed = {text for _, _, lines in split for _, text in lines}
-        least = _DISTINCT if any(len(text) >= _DISTINCT for text in changed) else 0
-        files = tuple(FrozenFile(header, path,
-                                 frozenset({t for _, t in lines if len(t) >= least} if changed else {header}),
-                                 frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}))
-                      for header, path, lines in split)
-        return cls(head_sha, merge_base_sha, base_sha, files)
+        split, u0_global = _split_files(diff)
+        built: list[FrozenFile] = []
+        for header, path, git_old_path, git_new_path, lines, changes, u0_file, file_start_ln in split:
+            long_lines = {t for _, t in lines if len(t) >= _DISTINCT}
+            all_lines = {t for _, t in lines}
+            ev = frozenset(long_lines or all_lines or {header})
+            long_added = {t for sign, t in lines if sign == "+" and len(t) >= _DISTINCT}
+            all_added = {t for sign, t in lines if sign == "+"}
+            added = frozenset(long_added or all_added)
+            if changes:
+                unit_set = frozenset(changes)
+                u0_file_tuple = tuple(u0_file)
+            else:
+                hdr_unit: ChangeUnit = (header, "H", 0, header)
+                unit_set = frozenset({hdr_unit})
+                u0_file_tuple = ((1, hdr_unit),)
+                u0_global.append((file_start_ln, hdr_unit))
+            built.append(
+                FrozenFile(header, path, ev, added, unit_set, u0_file_tuple, git_old_path, git_new_path)
+            )
+        return cls(head_sha, merge_base_sha, base_sha, tuple(built), tuple(u0_global), lossy_utf8=lossy_utf8)
 
     @property
     def evidence(self) -> frozenset[str]:
         return frozenset().union(*(f.evidence for f in self.files))
+
+    @property
+    def all_change_units(self) -> frozenset[ChangeUnit]:
+        units = frozenset().union(*(f.changes for f in self.files))
+        if self.lossy_utf8:
+            # 冻结补丁含非 UTF-8 字节导致文本解码有损：保留已有文本证据供 BLOCK 判定，但写入不可匹配的 NON_UTF8 必读项令 PASS 失败闭合
+            return units | {("", "NON_UTF8", 0, "lossy-utf8-diff")}
+        return units
+
+    def _unambiguous_file_for_path(self, spec: str, *, require_non_renamed: bool = False) -> FrozenFile | None:
+        touched = [
+            item for item in self.files
+            if spec in (item.path, item.git_old_path, item.git_new_path)
+        ]
+        if len(touched) != 1:
+            return None
+        sf = touched[0]
+        if require_non_renamed and (sf.git_old_path != spec or sf.git_new_path != spec):
+            return None
+        return sf
+
+    def _resolve_header(self, line: str, by_line: dict[str, str], by_paths: dict[tuple[str, str], str]) -> str | None:
+        if line in by_line:
+            return by_line[line]
+        parsed = _parse_diff_git_paths(line)
+        return by_paths.get(parsed) if parsed is not None else None
+
+    def covered_change_units(
+        self, output: str, read: _Read = WHOLE_PATCH, *, require_explicit_headers: bool = False
+    ) -> frozenset[ChangeUnit]:
+        """按精确 `(file_header, sign, line_no, exact_text)` 返回本条命令在 output 中实际完整呈现的冻结改动集合。
+        - diff/patch：
+          1. 普通连续 diff（`diff_hunk_intact`）：解析 `diff --git`（支持解码后的中文/转义路径）、扩展头元数据变更行
+             （`old mode`/`new mode`/`new file mode`/`deleted file mode`/`rename`/`copy`）与 `@@ -old,n +new,m @@` 坐标逐行推进；
+          2. 纯 `-U0` 补丁配 `nl -ba`/`cat -n`/`grep -n`（`plain_u0` 且 `line_pos_mode == "numbered"`）：按 1-based
+             `-U0` 补丁行号精确对应每个 `ChangeUnit`，支持超过工具截断上限的超大单 hunk 分段补读；
+        - blobs：仅单文件（`len(read.paths) == 1`）且位置可信（`sequential` 或 `numbered`）按 `(header, "+", line_no, text)` 匹配；
+        - `require_explicit_headers=True`（多子命令并行工具调用共用未拆分输出时）：禁掉 `blobs`、`-U0` 行号映射与单文件预填头，
+          仅认带显式 `diff --git` 头与 `@@` hunk 的自描述输出，防跨文件串账。"""
+        required = self.all_change_units
+        covered: set[ChangeUnit] = set()
+        lines = _leading_diff(output) if read.leading else _lines(output)
+        if read.kind == "blobs":
+            if require_explicit_headers or len(read.paths) != 1 or read.line_pos_mode == "unpositioned":
+                return frozenset()
+            by_path = {f.path: f for f in self.files if f.path is not None}
+            target_file = by_path.get(read.paths[0])
+            if target_file is None:
+                return frozenset()
+            if read.line_pos_mode == "sequential":
+                for idx, raw in enumerate(lines, 1):
+                    if _BREAK.search(raw):
+                        continue
+                    unit = (target_file.header, "+", idx, raw)
+                    if unit in required:
+                        covered.add(unit)
+            elif read.line_pos_mode == "numbered":
+                for raw in lines:
+                    if _BREAK.search(raw):
+                        continue
+                    m = _BLOB_NUM_LINE.match(raw)
+                    if not m:
+                        continue
+                    unit = (target_file.header, "+", int(m.group(1)), m.group(2))
+                    if unit in required:
+                        covered.add(unit)
+            return frozenset(covered)
+
+        if not require_explicit_headers and read.kind == "patch" and read.plain_u0 and read.line_pos_mode == "numbered":
+            u0_map: dict[int, ChangeUnit] = {}
+            if not read.paths:
+                u0_map = dict(self.u0_global_units)
+            elif len(read.paths) == 1:
+                sf = self._unambiguous_file_for_path(read.paths[0], require_non_renamed=True)
+                if sf is not None:
+                    u0_map = dict(sf.u0_units)
+            if u0_map:
+                for raw in lines:
+                    if _BREAK.search(raw):
+                        continue
+                    m = _BLOB_NUM_LINE.match(raw)
+                    if not m:
+                        continue
+                    u = u0_map.get(int(m.group(1)))
+                    if u is None:
+                        continue
+                    body = m.group(2)
+                    if u[1] == "M":
+                        if _normalize_meta_line(body) == u[3]:
+                            covered.add(u)
+                    elif u[1].startswith("\\"):
+                        if body == u[3]:
+                            covered.add(u)
+                    elif u[1] == "H":
+                        if body == u[3] or (
+                            _parse_diff_git_paths(body) is not None
+                            and _parse_diff_git_paths(body) == _parse_diff_git_paths(u[3])
+                        ):
+                            covered.add(u)
+                    elif body == f"{u[1]}{u[3]}":
+                        covered.add(u)
+
+        if not read.diff_hunk_intact:
+            return frozenset(covered)
+
+        header_by_line = {f.header: f.header for f in self.files}
+        header_by_paths = {
+            (f.git_old_path, f.git_new_path): f.header
+            for f in self.files
+            if f.git_old_path is not None and f.git_new_path is not None
+        }
+        current_header: str | None = None
+        if not require_explicit_headers and read.kind == "patch":
+            if len(read.paths) == 1:
+                sf = self._unambiguous_file_for_path(read.paths[0])
+                current_header = sf.header if sf is not None else None
+            elif not read.paths and len(self.files) == 1:
+                current_header = self.files[0].header
+
+        old_ln = new_ln = old_rem = new_rem = 0
+        last_hunk_pos: tuple[str, int] | None = None
+        for raw in lines:
+            if _BREAK.search(raw):
+                old_rem = new_rem = 0
+                last_hunk_pos = None
+                continue
+            line = raw
+            if read.diff_num_layers:
+                for _ in range(read.diff_num_layers):
+                    if line.startswith(("diff --git ", "@@ ", "+", "-", "\\")):
+                        break
+                    m = _NUM_PREFIX.match(line)
+                    if not m:
+                        break
+                    line = line[m.end():]
+            if line.startswith("diff --git "):
+                current_header = self._resolve_header(line, header_by_line, header_by_paths)
+                old_rem = new_rem = 0
+                last_hunk_pos = None
+                if current_header is not None:
+                    hdr_unit = (current_header, "H", 0, current_header)
+                    if hdr_unit in required:
+                        covered.add(hdr_unit)
+                continue
+            if current_header is not None and line.startswith("\\"):
+                if last_hunk_pos is not None and last_hunk_pos[0] in ("-", "+"):
+                    nl_unit = (current_header, f"\\{last_hunk_pos[0]}", last_hunk_pos[1], line)
+                    if nl_unit in required:
+                        covered.add(nl_unit)
+                last_hunk_pos = None
+                continue
+            if current_header is not None and (old_rem > 0 or new_rem > 0):
+                sign = line[:1]
+                if sign == " ":
+                    last_hunk_pos = (" ", new_ln)
+                    old_ln += 1
+                    new_ln += 1
+                    old_rem -= 1
+                    new_rem -= 1
+                elif sign == "-":
+                    unit = (current_header, "-", old_ln, line[1:])
+                    if unit in required:
+                        covered.add(unit)
+                    last_hunk_pos = ("-", old_ln)
+                    old_ln += 1
+                    old_rem -= 1
+                elif sign == "+":
+                    unit = (current_header, "+", new_ln, line[1:])
+                    if unit in required:
+                        covered.add(unit)
+                    last_hunk_pos = ("+", new_ln)
+                    new_ln += 1
+                    new_rem -= 1
+                else:
+                    old_rem = new_rem = 0
+                    last_hunk_pos = None
+                continue
+            if current_header is not None and (hunk := _HUNK_POS.match(line)):
+                last_hunk_pos = None
+                old_ln = int(hunk.group(1))
+                old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
+                new_ln = int(hunk.group(3))
+                new_rem = int(hunk.group(4)) if hunk.group(4) is not None else 1
+                continue
+            if current_header is not None and _META_CHANGE.match(line):
+                meta_unit = (current_header, "M", 0, _normalize_meta_line(line))
+                if meta_unit in required:
+                    covered.add(meta_unit)
+        return frozenset(covered)
 
     def shown_in(self, output: str, read: _Read = WHOLE_PATCH) -> bool:
         """输出里有一行（去掉行号前缀、diff 的 `+`/`-`/空格标记后）是冻结补丁的改动内容，按 read 限定出处：
@@ -645,6 +1108,11 @@ class FrozenPatch:
         blobs 只认所指文件（须全是本 PR 改动的文件）在 head 上加进来的行。
         含 _BREAK 字符的行不当证据：它在别的切行规则下可能是两行。"""
         by_header = {f.header: f.evidence for f in self.files}
+        by_paths = {
+            (f.git_old_path, f.git_new_path): f.evidence
+            for f in self.files
+            if f.git_old_path is not None and f.git_new_path is not None
+        }
         if read.kind == "blobs":
             by_path = {f.path: f.added for f in self.files if f.path is not None}
             if not all(path in by_path for path in read.paths):
@@ -661,26 +1129,67 @@ class FrozenPatch:
                 unstripped = line[match.end():]
                 line = unstripped.strip()
             if read.kind == "diff" and unstripped.startswith("diff --git "):
-                # 未加行号时原样比对：diff 的上下文行带一个前导空格，不会被当成文件头
-                evidence = by_header.get(unstripped, frozenset())
+                ev = by_header.get(unstripped)
+                if ev is None and (parsed := _parse_diff_git_paths(unstripped)) is not None:
+                    ev = by_paths.get(parsed)
+                evidence = ev if ev is not None else frozenset()
             if line in evidence or (line[:1] in "+-" and line[1:].strip() in evidence):
                 return True
         return False
 
 
-def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:
+def covered_candidate_patch_units(
+    command: str,
+    output: str,
+    patch: FrozenPatch,
+    *,
+    require_explicit_headers: bool = False,
+    require_absolute_bins: bool = False,
+    require_system_shell: bool = False,
+) -> frozenset[ChangeUnit]:
+    """返回一条命令在记录输出里按精确坐标实际覆盖到的冻结改动行集合。"""
+    read = _patch_read(
+        command, patch.head_sha, patch.merge_base_sha, patch.base_sha,
+        require_absolute_bins=require_absolute_bins, require_system_shell=require_system_shell,
+    )
+    if read is None:
+        return frozenset()
+    return patch.covered_change_units(output, read, require_explicit_headers=require_explicit_headers)
+
+
+def reads_candidate_patch(
+    command: str,
+    output: str,
+    patch: FrozenPatch,
+    *,
+    require_absolute_bins: bool = False,
+    require_system_shell: bool = False,
+) -> bool:
     """命令按 bash 语义会让 git 输出冻结补丁，且记录的输出里真有冻结补丁的内容，出处与命令读的对象一致。"""
-    read = _patch_read(command, patch.head_sha, patch.merge_base_sha, patch.base_sha)
+    read = _patch_read(
+        command, patch.head_sha, patch.merge_base_sha, patch.base_sha,
+        require_absolute_bins=require_absolute_bins, require_system_shell=require_system_shell,
+    )
     return read is not None and patch.shown_in(output, read)
 
 
-def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str) -> _Read | None:
+def _patch_read(
+    command: str,
+    head_sha: str,
+    merge_base_sha: str,
+    base_sha: str,
+    *,
+    require_absolute_bins: bool = False,
+    require_system_shell: bool = False,
+) -> _Read | None:
     """diff 另一侧须是 merge-base、base 或这几个提交的祖先写法，写一个不存在的 SHA 再接管道
     （`git diff <bad> <head> | head`，无 pipefail 时退出码为 0）不算读取。
     命令替换会执行别的命令，含换行或其他行终止符（U+2028 等）的参数会被 git 或过滤器的报错原样带进输出
     （`git show <head>:'x<U+2028>+<改动行>'`；`$'x\n+<改动行>'` 在词法上就判为求不出值），
-    _SPECIAL_NAME 里的变量改的是跑哪个 git、读哪份配置和 shell 怎么分词，这三样都不算。"""
-    script = _script(command)
+    _SPECIAL_NAME 里的变量改的是跑哪个 git、读哪份配置和 shell 怎么分词，这三样都不算。
+    `require_absolute_bins=True` 时只接受容器内物理探针验证过不可写的系统绝对路径（`/usr/bin/git` 与 `_IMMUTABLE_FILTERS`），
+    防止 PATH 里的可写目录（含用户目录或运行时注入目录）劫持裸命令名。"""
+    script = _script(command, require_system_shell=require_system_shell)
     if script is None:
         return None
     items = _parse(_lex(script))
@@ -696,7 +1205,8 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
     if len(reads) != 1:
         return None
     k, read = reads[0]
-    if (expanded[k].argv[0] not in ("git", "/usr/bin/git") or _discards_stdout(expanded[k], [])
+    allowed_git = ("/usr/bin/git",) if require_absolute_bins else ("git", "/usr/bin/git")
+    if (expanded[k].argv[0] not in allowed_git or _discards_stdout(expanded[k], [])
             or (k and commands[k - 1].op not in ("&&", ";", "\n"))
             or commands[-1].op not in ("", ";", "\n")
             or any(_SPECIAL_NAME.fullmatch(name) for e in expanded for name in e.env_names)):
@@ -704,9 +1214,12 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
     if not all(_setup(e) and c.op in ("&&", ";", "\n") for c, e in zip(commands[:k], expanded[:k], strict=True)):
         return None
     if commands[k].op in _PIPE or k + 1 == len(commands):
+        filters = expanded[k + 1:]
         ok = (all(commands[j].op in _PIPE for j in range(k, len(commands) - 1))
-              and all(_filter(e) for e in expanded[k + 1:]))
-        return read if ok else None
+              and all(_filter(e, require_absolute_bins=require_absolute_bins) for e in filters))
+        if not ok:
+            return None
+        return _annotate_filters(read, filters)
     # git diff 之后用 `;`/`&&`/换行接上只印提交元数据的 git 段（PR #2018 run 45a4c22b opus：
     # `git diff <mb> <head>; git show --no-patch --format=… <head>`）。前一段须是整个 PR 的 diff（不带 pathspec、
     # 只带 _PLAIN_DIFF 里的选项）：PR 非空，真实补丁就必定先于后一段印出；diff 失败时开头是报错。证据只在开头
@@ -723,7 +1236,8 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
             or not all(_PLAIN_DIFF.fullmatch(o) for o in call.options) or commands[k].op not in ("&&", ";", "\n")):
         return None
     for j in range(k + 1, len(commands)):
-        if commands[j].op not in ("&&", ";", "\n", "") or not _trailing(expanded[j], revisions):
+        if (commands[j].op not in ("&&", ";", "\n", "")
+                or not _trailing(expanded[j], revisions, require_absolute_bins=require_absolute_bins)):
             return None
     return replace(read, leading=True)
 
@@ -734,12 +1248,13 @@ _PLAIN_DIFF = re.compile(r"--no-ext-diff|--no-textconv|--no-color|--color=never|
 _PLACEHOLDER_FORMAT = re.compile(r"(?:%(?:[HhTtPpsbBn%]|[ac](?:n|e|d|I|i))|[ \t:,|/()\[\]-])*")
 
 
-def _trailing(command: _Expanded, revisions: _Revisions) -> bool:
+def _trailing(command: _Expanded, revisions: _Revisions, *, require_absolute_bins: bool = False) -> bool:
     """冻结补丁的 git diff 之后接的段，白名单：`git show|log`，不带全局选项、重定向与管道；选项只有 `-s`/`--no-patch`
     （至少一个）和恰好一个 `--format=<占位符>`/`--pretty=[t]format:<占位符>`；位置参数只能是 head、merge-base、base
     本身。别的选项（`--binary`、`--show-linear-break`、`-p`、`--stat`、`-c` 覆盖……）一律整条不认。"""
     argv = command.argv
-    if command.redirects or len(argv) < 3 or argv[0] not in ("git", "/usr/bin/git") or argv[1] not in ("show", "log"):
+    allowed_git = ("/usr/bin/git",) if require_absolute_bins else ("git", "/usr/bin/git")
+    if command.redirects or len(argv) < 3 or argv[0] not in allowed_git or argv[1] not in ("show", "log"):
         return False
     formats, quiet, revs = 0, False, 0
     for arg in argv[2:]:
@@ -773,7 +1288,10 @@ def _setup(command: _Expanded) -> bool:
     return argv == ["cd", "/review"]
 
 
-_SPECIAL_NAME = re.compile(r"GIT_(?!PAGER$)\w*|PATH|IFS|CDPATH|HOME|XDG_CONFIG_HOME")
+_SPECIAL_NAME = re.compile(
+    r"GIT_(?!PAGER$)\w*|PATH|IFS|CDPATH|HOME|XDG_CONFIG_HOME"
+    r"|LD_\w*|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC_\w*|LOCPATH|GCONV_PATH"
+)
 _COUNT = r"\+\d+|0*[1-9]\d*"  # 0 行就是吞掉输出
 _SED_SCRIPT = re.compile(r"(?:\d+|\$)(?:,(?:\d+|\$))?p(?:;(?:\d+|\$)(?:,(?:\d+|\$))?p)*")
 
@@ -796,19 +1314,111 @@ _FILTERS = {
     "grep": _FilterSpec(r"-[nivEFwxah]+|-[ABCm]\d+|--colou?r=never",
                         {"-e": r"(?s:.*)", "-A": r"\d+", "-B": r"\d+", "-C": r"\d+", "-m": r"\d+"}, r"(?s:.*)"),
 }
+_IMMUTABLE_FILTERS = frozenset({
+    "/usr/bin/nl",
+    "/usr/bin/sed", "/bin/sed",
+    "/usr/bin/head",
+    "/usr/bin/tail",
+    "/usr/bin/cat", "/bin/cat",
+    "/usr/bin/grep", "/bin/grep",
+})
 
 
-def _filter(command: _Expanded) -> bool:
+def _annotate_filters(read: _Read, filters: list[_Expanded]) -> _Read:
+    """根据 git 之后的过滤管道标注行号层级、原始行号可信度（blobs / plain_u0）与 hunk 连续性。"""
+    diff_num_layers = 0
+    diff_hunk_intact = True
+    line_pos_mode = "sequential" if ((read.kind == "blobs" and len(read.paths) == 1) or read.plain_u0) else "unpositioned"
+    for flt in filters:
+        cmd = flt.argv[0].rsplit("/", 1)[-1]
+        opts = flt.argv[1:]
+        if cmd == "nl":
+            diff_num_layers += 1
+            all_lines = any(o == "-ba" for o in opts) or any(
+                opts[i] == "-b" and i + 1 < len(opts) and opts[i + 1] == "a" for i in range(len(opts))
+            )
+            left_just = any(o == "-nln" for o in opts) or any(
+                opts[i] == "-n" and i + 1 < len(opts) and opts[i + 1] == "ln" for i in range(len(opts))
+            )
+            line_pos_mode = "numbered" if (line_pos_mode == "sequential" and all_lines and not left_just) else "unpositioned"
+        elif cmd == "cat":
+            has_n = any(o.startswith("-") and not o.startswith("--") and "n" in o[1:] for o in opts)
+            has_b = any(o.startswith("-") and not o.startswith("--") and "b" in o[1:] for o in opts)
+            has_s = any(o.startswith("-") and not o.startswith("--") and "s" in o[1:] for o in opts)
+            has_mutate = any(
+                o.startswith("-") and not o.startswith("--") and any(c in o[1:] for c in "vetAET")
+                for o in opts
+            )
+            if has_n or has_b:
+                diff_num_layers += 1
+            if has_s or has_mutate:
+                diff_hunk_intact = False
+            if has_b or has_s or has_mutate:
+                line_pos_mode = "unpositioned"
+            elif has_n:
+                line_pos_mode = "numbered" if line_pos_mode == "sequential" else "unpositioned"
+        elif cmd == "grep":
+            has_n = any(o.startswith("-") and not o.startswith("--") and "n" in o[1:] for o in opts)
+            if has_n:
+                diff_num_layers += 1
+            diff_hunk_intact = False
+            if line_pos_mode == "sequential":
+                line_pos_mode = "numbered" if has_n else "unpositioned"
+            elif line_pos_mode == "numbered":
+                line_pos_mode = "unpositioned" if has_n else "numbered"
+            else:
+                line_pos_mode = "unpositioned"
+        elif cmd == "head":
+            if any(o.startswith(("-c", "--bytes=")) for o in opts):
+                line_pos_mode = "unpositioned"
+                diff_hunk_intact = False
+        elif cmd == "tail":
+            if any(o.startswith(("-c", "--bytes=")) for o in opts):
+                line_pos_mode = "unpositioned"
+                diff_hunk_intact = False
+            elif line_pos_mode != "numbered":
+                line_pos_mode = "unpositioned"
+        elif cmd == "sed":
+            if line_pos_mode != "numbered":
+                line_pos_mode = "unpositioned"
+            scripts: list[str] = []
+            idx = 0
+            while idx < len(opts):
+                if opts[idx] == "-e" and idx + 1 < len(opts):
+                    scripts.append(opts[idx + 1])
+                    idx += 2
+                    continue
+                if opts[idx] != "-n" and opts[idx] != "--":
+                    scripts.append(opts[idx])
+                idx += 1
+            if len(scripts) != 1 or ";" in scripts[0]:
+                diff_hunk_intact = False
+        else:
+            line_pos_mode = "unpositioned"
+            diff_hunk_intact = False
+    return replace(read, line_pos_mode=line_pos_mode, diff_num_layers=diff_num_layers, diff_hunk_intact=diff_hunk_intact)
+
+
+def _filter(command: _Expanded, *, require_absolute_bins: bool = False) -> bool:
     """git 之后的管道段只做筛选或截取，输出的每一行都来自 git 的输出（只加行号）。"""
     argv = command.argv
-    spec = _FILTERS.get(argv[0]) if argv else None
-    if spec is None or any(not op.startswith("2") for op, _ in command.redirects) or (argv[0] == "sed" and "-n" not in argv):
+    if not argv:
+        return False
+    raw_cmd = argv[0]
+    if require_absolute_bins:
+        if raw_cmd not in _IMMUTABLE_FILTERS:
+            return False
+    elif raw_cmd not in _FILTERS and raw_cmd not in _IMMUTABLE_FILTERS:
+        return False
+    base = raw_cmd.rsplit("/", 1)[-1]
+    spec = _FILTERS.get(base)
+    if spec is None or any(not op.startswith("2") for op, _ in command.redirects) or (base == "sed" and "-n" not in argv):
         return False
     positional: list[str] = []
     given_e, i, options_done = False, 1, False
     while i < len(argv):
         arg = argv[i]
-        if options_done or arg == "-" and argv[0] != "cat" or not arg.startswith("-"):
+        if options_done or arg == "-" and base != "cat" or not arg.startswith("-"):
             positional.append(arg)
         elif arg == "--":
             options_done = True

@@ -34,7 +34,7 @@ USER ${AGENT_UID}:${AGENT_GID}
 
 # uv：prime-agent 的 IPython kernel 自举依赖；沙盒无 TTY，不会交互安装，必须预装
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/home/agent/.local/bin:$PATH"
+ENV PATH="$PATH:/home/agent/.local/bin"
 
 # ---------- #1010：工具链扩容 ----------
 
@@ -44,7 +44,7 @@ ENV PATH="/home/agent/.local/bin:$PATH"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
   | sh -s -- -y --default-toolchain stable --profile default --component rust-analyzer \
   && /home/agent/.cargo/bin/rustup component add rust-src
-ENV PATH="/home/agent/.cargo/bin:$PATH"
+ENV PATH="$PATH:/home/agent/.cargo/bin"
 
 # serena server（容器内自起 streamable-http daemon 127.0.0.1:8017；宿主 daemon 容器内不可达）。
 # 宿主机为 1.6.2.dev0（dev 构建），镜像取最近正式版 1.7.0，漂移已在 #1010 报告登记。
@@ -52,9 +52,9 @@ RUN uv tool install 'serena-agent==1.7.0'
 
 # codebase-memory-mcp：npm 包装的 native runtime（postinstall 从 GitHub Releases
 # 拉 linux/arm64 二进制）。版本钉宿主机同款 0.8.1。
-# npm 全局 prefix 放 agent home（非 root 不可写 /usr/local）。
+# npm 全局 prefix 放 agent home（非 root 不可写 /usr/local）；系统目录始终在用户可写目录之前，防覆盖系统 git 等工具。
 ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
-ENV PATH="/home/agent/.npm-global/bin:$PATH"
+ENV PATH="$PATH:/home/agent/.npm-global/bin"
 RUN npm install -g codebase-memory-mcp@0.8.1 \
   && mkdir -p /home/agent/.local/bin \
   && ln -sf /home/agent/.npm-global/bin/codebase-memory-mcp /home/agent/.local/bin/codebase-memory-mcp
@@ -76,8 +76,8 @@ COPY --chown=${AGENT_UID}:${AGENT_GID} .sandcastle/image/prime-agent-settings.js
 
 # ---------- /#1010 ----------
 
-# 主控同型 Codex（Claude 仅供显式 legacy）（独立末层，保留上方重型工具链缓存；#1617）。
-RUN npm install -g @openai/codex @anthropic-ai/claude-code
+# 主控同型 Codex（锁定与正式审阅 session.jsonl 契约核验一致的版本；Claude 仅供显式 legacy；#1617/#1742）。
+RUN npm install -g @openai/codex@0.169.0 @anthropic-ai/claude-code
 
 WORKDIR /home/agent
 

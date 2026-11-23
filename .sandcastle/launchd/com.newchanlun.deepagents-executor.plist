@@ -11,7 +11,6 @@
         <string>--private-key</string><string>__PRIVATE_KEY_PATH__</string>
         <string>--workers-log</string><string>__REPO__/.sandcastle/logs/workers.jsonl</string>
         <string>--review-sweep</string>
-        <string>--review-sweep-auto-merge</string>
         <string>--review-sweep-max-running</string><string>3</string>
         <string>--review-private-key</string><string>__REVIEW_PRIVATE_KEY_PATH__</string>
     </array>
@@ -25,6 +24,11 @@
         <key>PILOT_BOAT_CONFIG</key><string>__BOAT_CONFIG__</string>
         <key>PILOT_BOAT_API_KEY_FILE</key><string>__BOAT_API_KEY_FILE__</string>
         <key>PATH</key><string>/Users/silencehan/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>DOCKER_CONTEXT</key><string>orbstack</string>
+        <key>SANDCASTLE_APPARMOR_ABSENT</key><string>accept</string>
+        <key>REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER</key><string>blackhole-cliproxy</string>
+        <key>REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT</key><string>orbstack</string>
+        <key>REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR</key><string>/tmp/cliproxy-preflight-receipts</string>
         <key>LANGSMITH_TRACING</key><string>false</string>
         <key>LANGCHAIN_TRACING_V2</key><string>false</string>
         <key>OTEL_SDK_DISABLED</key><string>true</string>
