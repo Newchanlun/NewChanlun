@@ -162,9 +162,23 @@ theorem action_spec_iff_chosen
     (P1 P2 P3 P4 P5 P6 P7 P8 P9 : Bool) (c : ActionClass) :
     ActionSpec P1 P2 P3 P4 P5 P6 P7 P8 P9 c <->
       c = chooseAction P1 P2 P3 P4 P5 P6 P7 P8 P9 := by
-  cases P1 <;> cases P2 <;> cases P3 <;> cases P4 <;> cases P5 <;>
-  cases P6 <;> cases P7 <;> cases P8 <;> cases P9 <;>
-  cases c <;> simp [ActionSpec, chooseAction]
+  cases P1 with
+  | true => cases c <;> simp [ActionSpec, chooseAction]
+  | false => cases P2 with
+    | true => cases c <;> simp [ActionSpec, chooseAction]
+    | false => cases P3 with
+      | true => cases c <;> simp [ActionSpec, chooseAction]
+      | false => cases P4 with
+        | true => cases c <;> simp [ActionSpec, chooseAction]
+        | false => cases P5 with
+          | true => cases c <;> simp [ActionSpec, chooseAction]
+          | false => cases P6 with
+            | true => cases c <;> simp [ActionSpec, chooseAction]
+            | false => cases P7 with
+              | true => cases c <;> simp [ActionSpec, chooseAction]
+              | false => cases P8 with
+                | true => cases c <;> simp [ActionSpec, chooseAction]
+                | false => cases P9 <;> cases c <;> simp [ActionSpec, chooseAction]
 
 theorem action_partition_complete_unique
     (P1 P2 P3 P4 P5 P6 P7 P8 P9 : Bool) :
@@ -230,9 +244,11 @@ theorem phase_spec_iff_chosen
     (p : CapitalPhase) :
     PhaseSpec returned pendingOrReady reserveBelow reserveBelowAccrete p <->
       p = choosePhase returned pendingOrReady reserveBelow reserveBelowAccrete := by
-  cases returned <;> cases pendingOrReady <;>
-  cases reserveBelow <;> cases reserveBelowAccrete <;>
-  cases p <;> simp [PhaseSpec, choosePhase]
+  cases returned with
+  | false => cases pendingOrReady <;> cases p <;> simp [PhaseSpec, choosePhase]
+  | true => cases reserveBelow with
+    | true => cases p <;> simp [PhaseSpec, choosePhase]
+    | false => cases reserveBelowAccrete <;> cases p <;> simp [PhaseSpec, choosePhase]
 
 theorem phase_complete_unique
     (returned pendingOrReady reserveBelow reserveBelowAccrete : Bool) :
@@ -283,8 +299,13 @@ theorem risk_mode_spec_iff_chosen
     (M0 rawM1 rawM2 rawM3 : Bool) (m : RiskMode) :
     RiskModeSpec M0 rawM1 rawM2 rawM3 m <->
       m = chooseRiskMode M0 rawM1 rawM2 rawM3 := by
-  cases M0 <;> cases rawM1 <;> cases rawM2 <;> cases rawM3 <;>
-  cases m <;> simp [RiskModeSpec, chooseRiskMode]
+  cases M0 with
+  | true => cases m <;> simp [RiskModeSpec, chooseRiskMode]
+  | false => cases rawM1 with
+    | true => cases m <;> simp [RiskModeSpec, chooseRiskMode]
+    | false => cases rawM2 with
+      | true => cases m <;> simp [RiskModeSpec, chooseRiskMode]
+      | false => cases rawM3 <;> cases m <;> simp [RiskModeSpec, chooseRiskMode]
 
 theorem risk_mode_complete_unique (M0 rawM1 rawM2 rawM3 : Bool) :
     ExistsUnique (fun m => RiskModeSpec M0 rawM1 rawM2 rawM3 m) := by
