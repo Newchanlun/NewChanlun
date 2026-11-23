@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 from newchan.topology.config_space import Configuration, polarity_index
 from newchan.topology.fiber_bundle import (
@@ -128,6 +129,60 @@ def _fiber_polarity(
     return base.sigma_p + base.sigma_c + mode_r
 
 
+
+@lru_cache(maxsize=1)
+def _default_bundle() -> FiberBundleConfigSpace:
+    """缓存 230号默认只读纤维丛配置空间，避免每次修正重复校准与构造。"""
+    return default_fiber_bundle()
+
+
+def _compute_correction_with_polarity(
+    config: Configuration,
+    fb: FiberBundleConfigSpace | None = None,
+) -> tuple[FiberCorrection, int]:
+    resolved_fb = fb if fb is not None else _default_bundle()
+
+    base = BasePoint(config.sigma_p.value, config.sigma_c.value)
+    fiber_point = resolved_fb.get(
+        config.sigma_p.value,
+        config.sigma_c.value,
+        config.sigma_r.value,
+    )
+
+    # 直积假设：R 均匀分布 1/3
+    r_prob_product: dict[int, float] = {-1: 1.0 / 3.0, 0: 1.0 / 3.0, 1: 1.0 / 3.0}
+
+    # 纤维丛联络：P(R|E,C)
+    fiber_dist = resolved_fb.connection.fiber_distribution(base)
+    r_prob_fiber: dict[int, float] = dict(fiber_dist)
+
+    # KL 散度
+    kl = _kl_divergence(r_prob_fiber, r_prob_product)
+
+    # polarity 比较
+    product_pol = _product_polarity(config)
+    fiber_pol = _fiber_polarity(base, fiber_dist, config.sigma_r.value)
+    polarity_flipped = product_pol != fiber_pol
+
+    # 修正幅度
+    correction_magnitude = max(
+        abs(r_prob_fiber[r] - r_prob_product[r]) for r in (-1, 0, 1)
+    )
+
+    return (
+        FiberCorrection(
+            original_config=config,
+            fiber_point=fiber_point,
+            r_prob_product=r_prob_product,
+            r_prob_fiber=r_prob_fiber,
+            kl_divergence=kl,
+            polarity_flipped=polarity_flipped,
+            correction_magnitude=correction_magnitude,
+        ),
+        fiber_pol,
+    )
+
+
 def compute_fiber_correction(
     config: Configuration,
     fb: FiberBundleConfigSpace | None = None,
@@ -146,45 +201,8 @@ def compute_fiber_correction(
     FiberCorrection
         修正结果。
     """
-    if fb is None:
-        fb = default_fiber_bundle()
-
-    base = BasePoint(config.sigma_p.value, config.sigma_c.value)
-    fiber_point = fb.get(
-        config.sigma_p.value,
-        config.sigma_c.value,
-        config.sigma_r.value,
-    )
-
-    # 直积假设：R 均匀分布 1/3
-    r_prob_product: dict[int, float] = {-1: 1.0 / 3.0, 0: 1.0 / 3.0, 1: 1.0 / 3.0}
-
-    # 纤维丛联络：P(R|E,C)
-    fiber_dist = fb.connection.fiber_distribution(base)
-    r_prob_fiber: dict[int, float] = dict(fiber_dist)
-
-    # KL 散度
-    kl = _kl_divergence(r_prob_fiber, r_prob_product)
-
-    # polarity 比较
-    product_pol = _product_polarity(config)
-    fiber_pol = _fiber_polarity(base, fiber_dist, config.sigma_r.value)
-    polarity_flipped = product_pol != fiber_pol
-
-    # 修正幅度
-    correction_magnitude = max(
-        abs(r_prob_fiber[r] - r_prob_product[r]) for r in (-1, 0, 1)
-    )
-
-    return FiberCorrection(
-        original_config=config,
-        fiber_point=fiber_point,
-        r_prob_product=r_prob_product,
-        r_prob_fiber=r_prob_fiber,
-        kl_divergence=kl,
-        polarity_flipped=polarity_flipped,
-        correction_magnitude=correction_magnitude,
-    )
+    correction, _ = _compute_correction_with_polarity(config, fb)
+    return correction
 
 
 class FiberPipelineAdapter:
@@ -204,7 +222,7 @@ class FiberPipelineAdapter:
     __slots__ = ("_fb",)
 
     def __init__(self, fb: FiberBundleConfigSpace | None = None) -> None:
-        self._fb = fb if fb is not None else default_fiber_bundle()
+        self._fb = fb if fb is not None else _default_bundle()
 
     @property
     def fb(self) -> FiberBundleConfigSpace:
@@ -317,11 +335,7 @@ def create_fiber_context(
         纤维丛增强的交易上下文。
     """
     config = ctx.config  # type: ignore[union-attr]
-    correction = compute_fiber_correction(config, fb)
-
-    base = BasePoint(config.sigma_p.value, config.sigma_c.value)
-    fiber_dist = (fb or default_fiber_bundle()).connection.fiber_distribution(base)
-    fiber_pol = _fiber_polarity(base, fiber_dist, config.sigma_r.value)
+    correction, fiber_pol = _compute_correction_with_polarity(config, fb)
 
     product_pol = ctx.polarity  # type: ignore[union-attr]
     divergence = product_pol != fiber_pol
