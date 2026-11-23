@@ -429,29 +429,36 @@ def unwrap_json_fence(text: str) -> str:
     return fenced[1] if fenced else text
 
 
-def _diff_tree_changed_paths(source: Path, merge_base: str, head: str) -> set[str]:
-    """配置无关的底层树差异变更路径全集（含 mode 160000 子模块指针、重命名拆成的删+增、权限/类型变更）。"""
+def _diff_tree_changed_paths(source: Path, merge_base: str, head: str) -> tuple[set[str], bool]:
+    """配置无关的底层树差异变更路径全集（含 mode 160000 子模块指针、重命名拆成的删+增、权限/类型变更），
+    并返回是否存在非 UTF-8 字节（有损解码标记）。"""
     raw = _git(source, "diff-tree", "-r", "--raw", "-z", "--no-renames", "--no-abbrev", merge_base, head)
     if not raw:
-        return set()
+        return set(), False
     parts = raw.split(b"\0")
     if parts and parts[-1] == b"":
         parts.pop()
     if len(parts) % 2 != 0:
         raise IdentityError("diff-tree 树差异输出格式异常")
     paths: set[str] = set()
+    lossy = False
     for idx in range(0, len(parts), 2):
-        meta = parts[idx].decode(errors="replace")
-        path = parts[idx + 1].decode(errors="replace")
+        meta = parts[idx].decode("utf-8", errors="replace")
+        try:
+            path = parts[idx + 1].decode("utf-8")
+        except UnicodeDecodeError:
+            lossy = True
+            path = parts[idx + 1].decode("utf-8", errors="replace")
         if not meta.startswith(":") or not path:
             raise IdentityError("diff-tree 树差异记录不完整")
         paths.add(path)
-    return paths
+    return paths, lossy
 
 
 def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
     """controller 自己从对象库取冻结补丁（不跑审查员的命令）：显式关闭外部 diff、textconv、子模块忽略与自定义前缀，
-    并与配置无关的 git diff-tree 树差异交叉校验，防止本地 diff.ignoreSubmodules 等配置漏掉变更路径。"""
+    并与配置无关的 git diff-tree 树差异交叉校验，防止本地 diff.ignoreSubmodules 等配置漏掉变更路径；
+    若补丁或路径含非 UTF-8 字节（解码有损），标记 lossy_utf8=True 使 PASS 失败闭合。"""
     diff = _git(
         source,
         "-c", "diff.ignoreSubmodules=none",
@@ -471,9 +478,17 @@ def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
         target.merge_base_sha,
         target.head_sha,
     )
-    patch = FrozenPatch.from_diff(target.head_sha, target.merge_base_sha, target.base_sha,
-                                  diff.decode(errors="replace"))
-    tree_paths = _diff_tree_changed_paths(source, target.merge_base_sha, target.head_sha)
+    diff_lossy = False
+    try:
+        diff_text = diff.decode("utf-8")
+    except UnicodeDecodeError:
+        diff_lossy = True
+        diff_text = diff.decode("utf-8", errors="replace")
+    tree_paths, tree_lossy = _diff_tree_changed_paths(source, target.merge_base_sha, target.head_sha)
+    patch = FrozenPatch.from_diff(
+        target.head_sha, target.merge_base_sha, target.base_sha, diff_text,
+        lossy_utf8=(diff_lossy or tree_lossy),
+    )
     patch_paths = {
         p for f in patch.files for p in (f.path, f.git_old_path, f.git_new_path) if p is not None
     }
@@ -633,6 +648,8 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         line = output["summary"].splitlines()[0]
         if output["status"] == "completed" and line == "VERDICT: PASS":
             if not patch.all_change_units.issubset(ev_covered_units):
+                if patch.lossy_utf8:
+                    return failed("冻结补丁含非 UTF-8 字节（文本解码有损），无法靠文本 diff 证明完整覆盖，PASS 不采信")
                 return failed("审查员 stdout 未完整覆盖全部冻结改动行（完整或单文件 diff 可能被截断且未补读），PASS 不采信")
             return ReviewOutcome(model, "PASS", session, output["summary"])
         if output["status"] in ("completed", "blocked") and line == "VERDICT: BLOCK":
@@ -1234,8 +1251,9 @@ class ExternalReview:
                             if pt in ("function_call_output", "custom_tool_call_output"):
                                 cid = payload.get("call_id")
                                 out_text = str(payload.get("output") or "")
-                                if isinstance(cid, str) and cid in closed_calls:
-                                    call_cmds = closed_calls.pop(cid)
+                                call_cmds = closed_calls.pop(cid, []) if isinstance(cid, str) else []
+                                cont_sids = closed_cont.pop(cid, []) if isinstance(cid, str) else []
+                                if call_cmds:
                                     out_body = self._extract_exec_output_body(out_text)
                                     exit_m = re.search(r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text)
                                     ok_exit = exit_m is None or exit_m.group(1) == "0"
@@ -1248,7 +1266,7 @@ class ExternalReview:
                                         ]
                                         if patch_cmds:
                                             sess_patch_reads += 1
-                                        if len(call_cmds) == 1:
+                                        if len(call_cmds) == 1 and not cont_sids:
                                             c0, trusted0 = call_cmds[0]
                                             if trusted0:
                                                 sess_covered_units.update(
@@ -1264,11 +1282,14 @@ class ExternalReview:
                                                 )
                                             )
                                     sess_m = re.search(r"Process running with session ID (\d+)", out_text)
-                                    if sess_m and len(call_cmds) == 1:
+                                    if sess_m and len(call_cmds) == 1 and not cont_sids:
                                         c0, trusted0 = call_cmds[0]
                                         exec_sessions[int(sess_m.group(1))] = (c0, trusted0, out_body)
-                                if isinstance(cid, str) and cid in closed_cont:
-                                    for sid in closed_cont.pop(cid):
+                                if cont_sids:
+                                    # 仅单个独立 write_stdin（且未与其他子调用共享同一输出正文）可绑定到原 session 累加覆盖；
+                                    # 多路并行 write_stdin 或混编调用的合并输出无法拆分归属，一律不计覆盖并使涉及 session 失效。
+                                    if len(cont_sids) == 1 and not call_cmds:
+                                        sid = cont_sids[0]
                                         if sid in exec_sessions:
                                             prev_cmd, prev_trusted, prev_body = exec_sessions[sid]
                                             combined = prev_body + self._extract_exec_output_body(out_text)
@@ -1287,6 +1308,9 @@ class ExternalReview:
                                                         prev_cmd, combined, patch, require_absolute_bins=True
                                                     )
                                                 )
+                                    else:
+                                        for sid in cont_sids:
+                                            exec_sessions.pop(sid, None)
                     elif rtype == "token_usage_record":
                         rid = payload.get("response_id")
                         if not isinstance(rid, str) or not rid or rid != rid.strip():
@@ -1320,6 +1344,11 @@ class ExternalReview:
                                  "session.jsonl 缺少已由 token_usage_record 闭合的冻结候选补丁读取命令与输出，PASS/BLOCK 均不采信")
         if outcome.verdict == "PASS":
             if not patch.all_change_units.issubset(sess_covered_units):
+                if patch.lossy_utf8:
+                    return ReviewOutcome(
+                        outcome.model, "FAILED", outcome.session_id,
+                        "冻结补丁含非 UTF-8 字节（文本解码有损），无法靠文本 diff 证明完整覆盖，PASS 不采信",
+                    )
                 return ReviewOutcome(
                     outcome.model, "FAILED", outcome.session_id,
                     "session.jsonl 未完整呈现全部冻结改动行（完整或单文件 diff 可能被截断且未补读），PASS 不采信",
@@ -1724,15 +1753,12 @@ class ExternalReview:
     def _rereview_intent_path(self, repository_id: int, pr_number: int, base_sha: str, head_sha: str) -> Path:
         return self.state_root / "rereview-intents" / f"r{repository_id}-p{pr_number}-{base_sha}-{head_sha}.json"
 
-    def _assert_not_superseded_by_higher_attempt_locked(
-        self, target: ReviewTarget, *, intent_recorded_ns: int = 0, preflight_done: bool = False
-    ) -> None:
-        """须在 self._pr_lock(target.pr_number) 内调用：
+    def _assert_not_superseded_by_higher_attempt_locked(self, target: ReviewTarget) -> None:
+        """须在 self._pr_lock(target.pr_number) 内调用（写入重审意图前与登记 target.json 前共用）：
         1. 同一 (pr, base, head) 存在编号高于本 attempt 的待承接重审意图（或意图文件损坏）时，立即抛 TargetDrifted；
-        2. 预检完成后落盘前（preflight_done=True），同时核查同 (repo, pr, base, head) 已登记 run：
-           即使更高编号 attempt 已在慢预检期间完成并清理了重审意图，只要存在非 STALE 的更高 attempt
-           （重审下其 registered_at_ns > intent_recorded_ns；首审下其已产出非 STALE outcome.json 或目录/记录损坏），
-           同样立即抛 TargetDrifted，防止较慢的旧 attempt 事后反超并覆盖较新的 BLOCK/PASS。"""
+        2. 同一 (repo, pr, base, head, policy_version) 下存在任意编号高于本 attempt 的非 STALE 已登记 run
+           （无论其是否已写出 outcome.json、也无论其是否已清理重审意图），或对应高编号目录/记录损坏时，
+           一律立即抛 TargetDrifted，防止较慢的低编号首审/重审抢占或反超覆盖高编号审阅的 BLOCK/PASS。"""
         for intent_file in self._iter_rereview_intents(
                 f"r*-p{target.pr_number}-{target.base_sha}-{target.head_sha}.json"):
             try:
@@ -1746,44 +1772,47 @@ class ExternalReview:
                 raise TargetDrifted(
                     f"superseded-by-higher-attempt-intent: attempt {target.attempt} < intent attempt {i_att}"
                 )
-        if not preflight_done:
-            return
         same_prefix = f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-"
+        same_policy_prefix = f"{same_prefix}{target.policy_version}-a"
         for run_dir in self._iter_pr_run_dirs(target.pr_number):
             if run_dir.name == target.key or not run_dir.name.startswith(same_prefix):
                 continue
+            is_same_policy_dir = run_dir.name.startswith(same_policy_prefix)
             name_att_m = re.search(r"-a(\d+)$", run_dir.name)
             name_att = int(name_att_m.group(1)) if name_att_m else None
             try:
                 tdata = _read(run_dir / "target.json")
             except FileNotFoundError:
+                if not is_same_policy_dir:
+                    continue
                 try:
                     entries = os.listdir(run_dir)
                 except OSError:
                     if name_att is None or name_att > target.attempt:
                         raise TargetDrifted(
-                            f"superseded-during-preflight: 无法读取高编号 run 目录 {run_dir.name}"
+                            f"superseded-by-higher-attempt: 无法读取同合同高编号 run 目录 {run_dir.name}"
                         ) from None
                     continue
                 if any(name != "owner.lock" and not name.endswith(".tmp") for name in entries):
                     if name_att is None or name_att > target.attempt:
                         raise TargetDrifted(
-                            f"superseded-during-preflight: 同 base/head 存在无 target.json 的高编号目录 {run_dir.name}"
+                            f"superseded-by-higher-attempt: 同合同存在无 target.json 的高编号目录 {run_dir.name}"
                         ) from None
                 continue
             except (OSError, ValueError, TypeError, IdentityError):
-                if name_att is None or name_att > target.attempt:
+                if is_same_policy_dir and (name_att is None or name_att > target.attempt):
                     raise TargetDrifted(
-                        f"superseded-during-preflight: 高编号 run 的 target.json 损坏 {run_dir.name}"
+                        f"superseded-by-higher-attempt: 同合同高编号 run 的 target.json 损坏 {run_dir.name}"
                     ) from None
+                continue
+            if tdata.get("policy_version") != target.policy_version:
                 continue
             try:
                 other_att = _strict_pos_int(tdata.get("attempt"))
-                other_ts = _strict_pos_int(tdata.get("registered_at_ns"))
             except (ValueError, TypeError):
                 if name_att is None or name_att > target.attempt:
                     raise TargetDrifted(
-                        f"superseded-during-preflight: 高编号 run 的元数据无效 {run_dir.name}"
+                        f"superseded-by-higher-attempt: 同合同高编号 run 的元数据无效 {run_dir.name}"
                     ) from None
                 continue
             if other_att <= target.attempt:
@@ -1795,18 +1824,13 @@ class ExternalReview:
                 out_data = None
             except (OSError, ValueError, TypeError, IdentityError):
                 raise TargetDrifted(
-                    f"superseded-during-preflight: 高编号 run 的 outcome.json 损坏 {run_dir.name}"
+                    f"superseded-by-higher-attempt: 同合同高编号 run 的 outcome.json 损坏 {run_dir.name}"
                 ) from None
             if out_data is not None and out_data.get("verdict") == "STALE":
                 continue
-            if intent_recorded_ns > 0 and other_ts > intent_recorded_ns:
-                raise TargetDrifted(
-                    f"superseded-during-preflight: attempt {target.attempt} < registered attempt {other_att}"
-                )
-            if intent_recorded_ns == 0 and out_data is not None:
-                raise TargetDrifted(
-                    f"superseded-by-completed-attempt: attempt {target.attempt} < completed attempt {other_att}"
-                )
+            raise TargetDrifted(
+                f"superseded-by-higher-attempt: attempt {target.attempt} < registered attempt {other_att}"
+            )
 
     def _record_rereview_intent(self, target: ReviewTarget) -> int:
         """在旧 PASS 已存在的同一 (pr, base, head) 上启动重审但尚未过预检前，持久化待完成的重审意图。
@@ -2045,9 +2069,7 @@ class ExternalReview:
                         raise TargetDrifted(f"base-moved-not-reviewed: expected {target.base_sha}, got {live_target['base_sha']}")
                     if self._attempt_occupied(target, attempt):
                         raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
-                    self._assert_not_superseded_by_higher_attempt_locked(
-                        target, intent_recorded_ns=intent_recorded_ns, preflight_done=True
-                    )
+                    self._assert_not_superseded_by_higher_attempt_locked(target)
                     prev_max = intent_recorded_ns
                     for run_dir in self._iter_pr_run_dirs(target.pr_number):
                         try:

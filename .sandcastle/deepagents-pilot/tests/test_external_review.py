@@ -2795,7 +2795,7 @@ def test_formal_session_upstream_receipt_enforced_and_fail_closed(lane, monkeypa
 
     (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
     monkeypatch.setattr(module, "validate_review", lambda t, l, r, f, s: write_proxy_receipt(t, l, r, f, s, tainted=True))
-    tainted_block = strict.review_pr(1810, 4)
+    tainted_block = strict.review_pr(1810, 9)
     assert tainted_block["verdict"] == "FAILED" and lane.gateway.sent[-1] == "error"
     (lane.state_root / "runs" / "fake-mode").unlink()
     monkeypatch.setattr(module, "validate_review", orig_validate)
@@ -2871,37 +2871,38 @@ def test_preflight_admitted_image_id_is_frozen_into_target_launch_and_validated(
 
 
 def test_registered_at_ns_is_strictly_monotonic_under_pr_lock_across_slow_preflight(lane, monkeypatch):
-    """两路并发 attempt 即使先冻结的慢预检晚于后冻结的快预检完成，锁内登记的 registered_at_ns 仍按实际登记顺序严格单调递增。"""
+    """两路并发 attempt：高编号 A2 先冻结慢预检、低编号 A1 后冻结先登记，锁内登记的 registered_at_ns 仍严格单调递增；
+    反之低编号在同合同高编号已登记（即使尚未写出 outcome.json）后完成预检，必须被 TargetDrifted 拒绝，不得抢占覆盖。"""
     import threading
 
     entered_slow = threading.Event()
     release_slow = threading.Event()
     calls = {"n": 0}
 
-    def slow_first(t):
+    def slow_higher(t):
         calls["n"] += 1
-        if t.attempt == 1:
+        if t.attempt == 2:
             entered_slow.set()
             assert release_slow.wait(5)
         return _fake_preflight_pass(t)
 
-    lane.preflight = slow_first
+    lane.preflight = slow_higher
     results = {}
 
     def register(attempt):
         results[attempt] = lane.target(1810, attempt)
 
-    t1 = threading.Thread(target=register, args=(1,))
-    t1.start()
-    assert entered_slow.wait(5)
     t2 = threading.Thread(target=register, args=(2,))
     t2.start()
-    t2.join(timeout=5)
-    assert 2 in results
-    release_slow.set()
+    assert entered_slow.wait(5)
+    t1 = threading.Thread(target=register, args=(1,))
+    t1.start()
     t1.join(timeout=5)
     assert 1 in results
-    assert results[1].registered_at_ns > results[2].registered_at_ns
+    release_slow.set()
+    t2.join(timeout=5)
+    assert 2 in results
+    assert results[2].registered_at_ns > results[1].registered_at_ns
 
 
 def test_reuse_fallback_persists_preflight_admitted_marker_and_skips_re_preflight_on_resume(lane, env, monkeypatch):
@@ -4708,11 +4709,11 @@ def test_r42_sol_p1_rereview_after_intent_cleared_cannot_overtake_newer_block(la
     assert res3["verdict"] == "BLOCK"
     assert not lane.has_pending_rereview_intent(1810, res3["target"]["head_sha"], res3["target"]["base_sha"])
 
-    # 放行 A2 慢预检：意图已清，但 A3 在 A2 意图之后登记 -> A2 必须被 TargetDrifted 拒绝且不落盘 target.json
+    # 放行 A2 慢预检：意图已清，但同合同高编号 A3 已登记 -> A2 必须被 TargetDrifted 拒绝且不落盘 target.json
     release_a2.set()
     t2.join(timeout=10)
     assert isinstance(a2_err.get("exc"), module.TargetDrifted)
-    assert "superseded-during-preflight" in str(a2_err["exc"])
+    assert "superseded-by-higher-attempt" in str(a2_err["exc"])
     a2_dirs = list((lane.state_root / "runs").glob("*-a2"))
     assert all(not (d / "target.json").exists() for d in a2_dirs)
     assert lane.gateway.sent[-1] == "failure"
@@ -4894,7 +4895,248 @@ def test_r42_sol_p1_immutable_bins_shell_workdir_and_submodule_tree_diff(lane, e
         assert lane._verify_session_receipt(t42, launch, receipt, worker, ok_ev).verdict == "FAILED"
 
     # 4. frozen_patch 与 diff-tree 交叉校验：若 diff 输出缺失树差异里的路径则失败闭合抛 IdentityError
-    monkeypatch.setattr(module, "_diff_tree_changed_paths", lambda *_a: {"normal_r42.py", "submod_r42", "missing_path"})
+    monkeypatch.setattr(module, "_diff_tree_changed_paths", lambda *_a: ({"normal_r42.py", "submod_r42", "missing_path"}, False))
     with pytest.raises(IdentityError, match="缺失路径"):
         module.frozen_patch(env.source, t42)
     assert module.validate_review(t42, launch, receipt, worker, lane.source).verdict == "FAILED"
+
+
+def test_r43_lower_attempt_preemption_lossy_utf8_and_parallel_write_stdin(lane, env):
+    """R43（Sol P1 #1/#2 + Astra P1 #1/#2）：
+    1. 首审并发：A1 慢预检期间同合同 A2 已登记（未写 outcome.json），A1 完成预检后须被 TargetDrifted 拒绝；
+    2. 重审锁竞争：A3 发布 BLOCK 并清理意图后，后到写重审意图的低编号 A2 在 _record_rereview_intent 内直接被拒且不写意图；
+    3. 非 UTF-8 文本改动：frozen_patch 标记 lossy_utf8=True，PASS 失败闭合而 BLOCK 仍可采信；合法 UTF-8 含 U+FFFD 正常放行；
+    4. multi_tool_use.parallel 含多条 write_stdin 时共享输出不计覆盖且使涉及 session 失效。"""
+    import hashlib
+    import shlex
+    import threading
+
+    # 1. 首审并发：A1 慢预检，A2 仅登记未写 outcome.json -> A1 必须被拒绝
+    a1_in = threading.Event()
+    a1_go = threading.Event()
+
+    def slow_a1(t):
+        if t.attempt == 1:
+            a1_in.set()
+            assert a1_go.wait(10)
+        return _fake_preflight_pass(t)
+
+    lane.preflight = slow_a1
+    err1: dict[str, Exception] = {}
+
+    def run_a1():
+        try:
+            lane.target(1810, 1)
+        except Exception as exc:
+            err1["exc"] = exc
+
+    th1 = threading.Thread(target=run_a1)
+    th1.start()
+    assert a1_in.wait(5)
+    t2 = lane.target(1810, 2)
+    assert not (lane.state_root / "runs" / t2.key / "outcome.json").exists()
+    a1_go.set()
+    th1.join(timeout=10)
+    assert isinstance(err1.get("exc"), module.TargetDrifted)
+    assert "superseded-by-higher-attempt" in str(err1["exc"])
+    assert not list((lane.state_root / "runs").glob("*-a1/target.json"))
+
+    # 2. A5 发布 BLOCK 并清除意图后，后到尚未登记的低编号 A4 在写重审意图前（预检前）即被拒绝且不落盘意图文件
+    lane.preflight = _fake_preflight_pass
+    _modes(lane, **{MODELS[0]: "BLOCK", MODELS[1]: "PASS"})
+    res5 = lane.review_pr(1810, 5)
+    assert res5["verdict"] == "BLOCK"
+    preflight_called = {"n": 0}
+    lane.preflight = lambda t: (preflight_called.__setitem__("n", preflight_called["n"] + 1), _fake_preflight_pass(t))[1]
+    with pytest.raises(module.TargetDrifted, match="superseded-by-higher-attempt"):
+        lane.target(1810, 4)
+    assert preflight_called["n"] == 0
+    assert not lane.has_pending_rereview_intent(1810, res5["target"]["head_sha"], res5["target"]["base_sha"])
+
+    # 3. 非 UTF-8 文本改动（Git 当文本输出但 UTF-8 解码有损）-> PASS 拒绝、BLOCK 仍放行
+    lane.preflight = _fake_preflight_pass
+    (env.source / "latin1_r43.txt").write_bytes(b"HEADER_R43 = 'line'\nBAD_BYTES = '\xff\xfe'\n")
+    git(env.source, "add", "latin1_r43.txt")
+    git(env.source, "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "-qm", "non-utf8 text")
+    h_nonutf8 = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = h_nonutf8
+    t_nu = lane.target(1810, 1)
+    p_nu = module.frozen_patch(env.source, t_nu)
+    assert p_nu.lossy_utf8 is True
+    assert ("", "NON_UTF8", 0, "lossy-utf8-diff") in p_nu.all_change_units
+
+    raw_diff_nu = module._git(
+        env.source, "-c", "diff.ignoreSubmodules=none", "diff", "--no-ext-diff", "--no-textconv",
+        t_nu.merge_base_sha, t_nu.head_sha,
+    ).decode("utf-8", errors="replace")
+    cmd_nu = f"/usr/bin/git diff --no-ext-diff --no-textconv {t_nu.merge_base_sha} {t_nu.head_sha}"
+    worker_nu = lane.state_root / "runs" / t_nu.key / MODELS[0]
+    worker_nu.mkdir(parents=True)
+    sid_nu = "019d0000-0000-7000-8000-000000000431"
+    good_fs = {
+        "source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT",
+        "tool_home_write": "EACCES", "etc_profile_write": "EACCES",
+        "tool_bins_immutable": "EACCES", "git_bin": "/usr/bin/git",
+    }
+
+    def run_verdict(verdict: str):
+        out_obj = {"status": "blocked" if verdict == "BLOCK" else "completed",
+                   "summary": f"VERDICT: {verdict}", "findings": [], "validation": ["r43"]}
+        out_text = json.dumps(out_obj)
+        launch = {
+            "run_id": t_nu.run_id, "launch_id": "12345678-1234-4234-8234-123456789431",
+            "pr_number": 1810, "model": MODELS[0], "head_sha": t_nu.head_sha,
+            "base_sha": t_nu.base_sha, "merge_base_sha": t_nu.merge_base_sha,
+            "controller_code_head": t_nu.controller_code_head, "mode": "review",
+            "prompt": module.review_prompt(t_nu, ("latin1_r43.txt",)),
+            "image_id": "sha256:" + "1" * 64,
+        }
+        receipt = {
+            **launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0,
+            "container_closed": True, "observed_provider": "cliproxy-local", "observed_model": MODELS[0],
+            "isolation_contract": "1" * 64, "container_id": "a" * 64, "filesystem": good_fs,
+            "session_id": sid_nu, "turn_completed": True, "result": out_obj,
+            "before": {"head": t_nu.head_sha, "branch": "HEAD", "status": ""},
+            "after": {"head": t_nu.head_sha, "branch": "HEAD", "status": ""},
+        }
+        ev = [
+            {"type": "thread.started", "thread_id": sid_nu},
+            {"type": "item.completed", "item": {
+                "type": "command_execution", "command": f"/bin/bash -c {shlex.quote(cmd_nu)}",
+                "aggregated_output": raw_diff_nu, "status": "completed", "exit_code": 0,
+            }},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": out_text}},
+            {"type": "turn.completed"},
+        ]
+        (worker_nu / "events.jsonl").write_text("\n".join(json.dumps(e) for e in ev) + "\n")
+        (worker_nu / "session.jsonl").write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": sid_nu, "model_provider": "cliproxy-local"}}) + "\n"
+            + json.dumps({"type": "turn_context", "payload": {"model": MODELS[0]}}) + "\n"
+        )
+        return module.validate_review(t_nu, launch, receipt, worker_nu, lane.source)
+
+    pass_nu = run_verdict("PASS")
+    assert pass_nu.verdict == "FAILED" and "非 UTF-8" in pass_nu.reason
+    assert run_verdict("BLOCK").verdict == "BLOCK"
+
+    # 合法 UTF-8 文件（即便正文包含字面量 U+FFFD）不得误判为 lossy_utf8
+    (env.source / "latin1_r43.txt").write_text("HEADER_R43 = 'utf8'\nLITERAL_FFFD = '\ufffd'\n", encoding="utf-8")
+    git(env.source, "add", "latin1_r43.txt")
+    git(env.source, "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "-qm", "valid utf8 with fffd")
+    h_utf8 = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = h_utf8
+    assert module.frozen_patch(env.source, lane.target(1810, 1)).lossy_utf8 is False
+
+    # 4. multi_tool_use.parallel 含多个 write_stdin 时，共享输出不得同时给两个 session 计覆盖
+    (env.source / "ws_a_r43.py").write_text("SHARED_WS_R43 = 'identical_line'\n")
+    (env.source / "ws_b_r43.py").write_text("SHARED_WS_R43 = 'identical_line'\n")
+    git(env.source, "add", "ws_a_r43.py", "ws_b_r43.py")
+    git(env.source, "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "-qm", "parallel write_stdin fixture")
+    h_ws = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = h_ws
+    t_ws = lane.target(1810, 1)
+    worker_ws = lane.state_root / "runs" / t_ws.key / MODELS[0]
+    worker_ws.mkdir(parents=True)
+    sid_ws = "019d0000-0000-7000-8000-000000000432"
+    cmd_a = f"/usr/bin/git show {t_ws.head_sha}:ws_a_r43.py | /usr/bin/nl -ba | /usr/bin/sed -n '1,5p'"
+    cmd_b = f"/usr/bin/git show {t_ws.head_sha}:ws_b_r43.py | /usr/bin/nl -ba | /usr/bin/sed -n '1,5p'"
+    cmd_full = f"/usr/bin/git diff --no-ext-diff --no-textconv {t_ws.merge_base_sha} {t_ws.head_sha}"
+    full_ws = git(env.source, "diff", "--no-ext-diff", "--no-textconv", t_ws.merge_base_sha, t_ws.head_sha)
+    out_obj = {"status": "completed", "summary": "VERDICT: PASS", "findings": [], "validation": ["r43"]}
+    out_text = json.dumps(out_obj)
+    ev_ws = [
+        {"type": "thread.started", "thread_id": sid_ws},
+        {"type": "item.completed", "item": {
+            "type": "command_execution", "command": f"/bin/bash -c {shlex.quote(cmd_full)}",
+            "aggregated_output": full_ws, "status": "completed", "exit_code": 0,
+        }},
+        {"type": "item.completed", "item": {
+            "type": "command_execution", "command": f"/bin/bash -c {shlex.quote(cmd_a)}",
+            "aggregated_output": "", "status": "completed", "exit_code": 0,
+        }},
+        {"type": "item.completed", "item": {
+            "type": "command_execution", "command": f"/bin/bash -c {shlex.quote(cmd_b)}",
+            "aggregated_output": "", "status": "completed", "exit_code": 0,
+        }},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": out_text}},
+        {"type": "turn.completed"},
+    ]
+    (worker_ws / "events.jsonl").write_text("\n".join(json.dumps(e) for e in ev_ws) + "\n")
+    rids = ["resp_ws_0", "resp_ws_1", "resp_ws_2", "resp_ws_3", "resp_ws_4"]
+    rid_shas = [hashlib.sha256(r.encode()).hexdigest() for r in rids]
+    sess_ws = [
+        {"type": "session_meta", "payload": {"id": sid_ws, "model_provider": "cliproxy-local"}},
+        {"type": "turn_context", "payload": {"model": MODELS[0]}},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "call_id": "c0",
+            "arguments": json.dumps({"cmd": cmd_full, "workdir": "/review"}),
+        }},
+        {"type": "token_usage_record", "payload": {"response_id": rids[0]}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "c0",
+            "output": "Process exited with code 0\nOutput:\n" + full_ws[:full_ws.find("diff --git a/ws_a_r43.py")],
+        }},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "call_id": "c1",
+            "arguments": json.dumps({"cmd": cmd_a, "workdir": "/review"}),
+        }},
+        {"type": "token_usage_record", "payload": {"response_id": rids[1]}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "c1",
+            "output": "Process running with session ID 42\nOutput:\n",
+        }},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "call_id": "c2",
+            "arguments": json.dumps({"cmd": cmd_b, "workdir": "/review"}),
+        }},
+        {"type": "token_usage_record", "payload": {"response_id": rids[2]}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "c2",
+            "output": "Process running with session ID 43\nOutput:\n",
+        }},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "multi_tool_use.parallel", "call_id": "c3",
+            "arguments": json.dumps({"tool_uses": [
+                {"recipient_name": "functions.write_stdin", "parameters": {"session_id": 42, "chars": ""}},
+                {"recipient_name": "functions.write_stdin", "parameters": {"session_id": 43, "chars": ""}},
+            ]}),
+        }},
+        {"type": "token_usage_record", "payload": {"response_id": rids[3]}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "c3",
+            "output": "Process exited with code 0\nOutput:\n     1\tSHARED_WS_R43 = 'identical_line'\n",
+        }},
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": out_text}],
+        }},
+        {"type": "token_usage_record", "payload": {"response_id": rids[4]}},
+    ]
+    (worker_ws / "session.jsonl").write_text("\n".join(json.dumps(r) for r in sess_ws) + "\n")
+    launch_ws = {
+        "run_id": t_ws.run_id, "launch_id": "12345678-1234-4234-8234-123456789432",
+        "pr_number": 1810, "model": MODELS[0], "head_sha": t_ws.head_sha,
+        "base_sha": t_ws.base_sha, "merge_base_sha": t_ws.merge_base_sha,
+        "controller_code_head": t_ws.controller_code_head, "mode": "review",
+        "prompt": module.review_prompt(t_ws, ("ws_a_r43.py", "ws_b_r43.py")),
+        "image_id": "sha256:" + "1" * 64,
+    }
+    receipt_ws = {
+        **launch_ws, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0,
+        "container_closed": True, "observed_provider": "cliproxy-local", "observed_model": MODELS[0],
+        "isolation_contract": "1" * 64, "container_id": "a" * 64, "filesystem": good_fs,
+        "session_id": sid_ws, "turn_completed": True, "result": out_obj,
+        "before": {"head": t_ws.head_sha, "branch": "HEAD", "status": ""},
+        "after": {"head": t_ws.head_sha, "branch": "HEAD", "status": ""},
+    }
+    lane.session_receipt = lambda _m, _l, _s, _since: {
+        "launch": f"review-{launch_ws['launch_id']}", "session": sid_ws,
+        "complete_stable": True, "sealed": True, "routes": [f"codex:{MODELS[0]}@chatgpt.com"],
+        "requests": len(rids), "response_id_sha256s": rid_shas,
+        "last_response_id_sha256": rid_shas[-1],
+        "last_output_sha256": hashlib.sha256(out_text.encode()).hexdigest(),
+    }
+    ev_ws_out = module.validate_review(t_ws, launch_ws, receipt_ws, worker_ws, lane.source)
+    assert ev_ws_out.verdict == "PASS"
+    sess_ws_out = lane._verify_session_receipt(t_ws, launch_ws, receipt_ws, worker_ws, ev_ws_out)
+    assert sess_ws_out.verdict == "FAILED" and "未完整呈现全部冻结改动行" in sess_ws_out.reason

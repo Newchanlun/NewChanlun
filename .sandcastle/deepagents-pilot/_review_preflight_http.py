@@ -16,6 +16,9 @@ import urllib.request
 MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 RESPONSE_STATUSES = ("completed", "incomplete", "failed", "cancelled", "in_progress", "queued")
 TERMINAL_EVENTS = ("response.completed", "response.done", "response.incomplete", "response.failed", "error")
+# 预检 SSE 字节预算：单帧与整次响应均设内存上限，防止代理持续发送无换行数据在超时前耗尽进程内存。
+MAX_SSE_LINE_BYTES = 256 * 1024
+MAX_SSE_TOTAL_BYTES = 4 * 1024 * 1024
 # 上游错误只按固定词表分类，不把原文抄进报告（原文可能回显 key，且转义形态无法穷举）
 ERROR_CLASSES = (
     ("tool_choice", "tool_choice_unsupported"),
@@ -133,21 +136,59 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
         with _open_http(request, timeout=timeout) as response:
             terminal, detail, error_code, status, returned_model = None, "流在终态事件前结束", None, None, None
             stream_error, stream_error_code = None, None
+            budget_exceeded = False
+            total_bytes = 0
             has_readline = hasattr(response, "readline")
-            fallback_lines = None if has_readline else iter(response.read().splitlines())
-            while True:
+            fallback_lines = None
+            if not has_readline:
+                raw_body = response.read(MAX_SSE_TOTAL_BYTES + 1)
+                if len(raw_body) > MAX_SSE_TOTAL_BYTES:
+                    stream_error = "SSE 响应总大小超过字节上限"
+                    detail = stream_error
+                    budget_exceeded = True
+                    fallback_lines = iter(())
+                else:
+                    fallback_lines = iter(raw_body.splitlines(keepends=True))
+            while not budget_exceeded:
                 if work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
                 if has_readline:
-                    raw = response.readline()
+                    remaining = MAX_SSE_TOTAL_BYTES - total_bytes
+                    read_cap = min(MAX_SSE_LINE_BYTES, remaining) + 1
+                    raw = response.readline(read_cap)
                     if not raw:
+                        break
+                    if len(raw) > MAX_SSE_LINE_BYTES or (len(raw) == read_cap and not raw.endswith(b"\n")):
+                        stream_error = (
+                            "SSE 单帧超过字节上限" if len(raw) > MAX_SSE_LINE_BYTES or remaining >= MAX_SSE_LINE_BYTES
+                            else "SSE 响应总大小超过字节上限"
+                        )
+                        detail = stream_error
+                        budget_exceeded = True
+                        break
+                    total_bytes += len(raw)
+                    if total_bytes > MAX_SSE_TOTAL_BYTES:
+                        stream_error = "SSE 响应总大小超过字节上限"
+                        detail = stream_error
+                        budget_exceeded = True
                         break
                 else:
                     assert fallback_lines is not None
                     try:
                         raw = next(fallback_lines)
                     except StopIteration:
+                        break
+                    if len(raw) > MAX_SSE_LINE_BYTES:
+                        stream_error = "SSE 单帧超过字节上限"
+                        detail = stream_error
+                        budget_exceeded = True
+                        break
+                    total_bytes += len(raw)
+                    if total_bytes > MAX_SSE_TOTAL_BYTES:
+                        stream_error = "SSE 响应总大小超过字节上限"
+                        detail = stream_error
+                        budget_exceeded = True
                         break
                 line = raw.decode("utf-8", "replace").strip()
                 if line.startswith("data:"):
@@ -226,7 +267,9 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
                                 "error": cand_info,
                             }
                         # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
-            if work_left() <= 0:
+            if budget_exceeded:
+                pass
+            elif work_left() <= 0:
                 detail = "总时限内流未收尾"
             elif has_readline and (
                 (getattr(response, "length", None) or 0) > 0

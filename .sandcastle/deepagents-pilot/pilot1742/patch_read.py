@@ -880,9 +880,12 @@ class FrozenPatch:
     base_sha: str
     files: tuple[FrozenFile, ...]
     u0_global_units: tuple[tuple[int, ChangeUnit], ...] = ()
+    lossy_utf8: bool = False
 
     @classmethod
-    def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str) -> FrozenPatch:
+    def from_diff(
+        cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str, *, lossy_utf8: bool = False
+    ) -> FrozenPatch:
         """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
         split, u0_global = _split_files(diff)
         built: list[FrozenFile] = []
@@ -904,7 +907,7 @@ class FrozenPatch:
             built.append(
                 FrozenFile(header, path, ev, added, unit_set, u0_file_tuple, git_old_path, git_new_path)
             )
-        return cls(head_sha, merge_base_sha, base_sha, tuple(built), tuple(u0_global))
+        return cls(head_sha, merge_base_sha, base_sha, tuple(built), tuple(u0_global), lossy_utf8=lossy_utf8)
 
     @property
     def evidence(self) -> frozenset[str]:
@@ -912,7 +915,11 @@ class FrozenPatch:
 
     @property
     def all_change_units(self) -> frozenset[ChangeUnit]:
-        return frozenset().union(*(f.changes for f in self.files))
+        units = frozenset().union(*(f.changes for f in self.files))
+        if self.lossy_utf8:
+            # 冻结补丁含非 UTF-8 字节导致文本解码有损：保留已有文本证据供 BLOCK 判定，但写入不可匹配的 NON_UTF8 必读项令 PASS 失败闭合
+            return units | {("", "NON_UTF8", 0, "lossy-utf8-diff")}
+        return units
 
     def _unambiguous_file_for_path(self, spec: str, *, require_non_renamed: bool = False) -> FrozenFile | None:
         touched = [

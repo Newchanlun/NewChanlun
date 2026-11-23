@@ -2411,3 +2411,59 @@ def test_round_trip_sse_rate_limit_frame_returns_immediately_without_waiting_eof
         release.set()
         srv.shutdown()
         srv.server_close()
+
+
+def test_round_trip_sse_enforces_line_and_total_byte_budgets(monkeypatch):
+    """R43（Astra P2）：预检 SSE 读取对单帧与总响应强制字节预算，
+    面对无换行超长流或超总预算响应立即关闭连接并报预检失败，不在超时前无限累积内存。"""
+    monkeypatch.setattr(preflight._http_module, "MAX_SSE_LINE_BYTES", 256)
+    monkeypatch.setattr(preflight._http_module, "MAX_SSE_TOTAL_BYTES", 512)
+    stop = threading.Event()
+
+    class OversizedSSE(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            try:
+                if self.path.startswith("/line"):
+                    self.wfile.write(b"data: " + b"x" * 1024)
+                    self.wfile.flush()
+                    stop.wait(timeout=10)
+                else:
+                    chunk = b'data: {"type":"response.output_text.delta","delta":"' + b"a" * 100 + b'"}\n\n'
+                    for _ in range(10):
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    stop.wait(timeout=10)
+            except OSError:
+                pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), OversizedSSE)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    base_url = f"http://127.0.0.1:{srv.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        t0 = time.monotonic()
+        res_line = preflight._round_trip_http(
+            base_url + "/line", KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(15)
+        )
+        assert time.monotonic() - t0 < 3.0 and res_line["ok"] is False and res_line["http_status"] == 200
+        assert (res_line.get("error") or {}).get("length", 0) > 0
+
+        t1 = time.monotonic()
+        res_total = preflight._round_trip_http(
+            base_url + "/total", KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(15)
+        )
+        assert time.monotonic() - t1 < 3.0 and res_total["ok"] is False and res_total["http_status"] == 200
+        assert (res_total.get("error") or {}).get("length", 0) > 0
+    finally:
+        stop.set()
+        srv.shutdown()
+        srv.server_close()
