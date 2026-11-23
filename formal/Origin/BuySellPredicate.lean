@@ -264,21 +264,156 @@ def allBSP : List SignalVector :=
   的长度恰为 `2^6 = 64`。这坐实「每级买卖点状态严格分类为 64 种」，用 `List.length` 而非
   `Fintype.card`（纯 core）。
 -/
-theorem allBSP_length_64 : allBSP.length = 64 := by decide
+private theorem append_nil_eq {α : Type} : ∀ (l : List α), l ++ [] = l
+  | [] => rfl
+  | a :: as => congrArg (a :: ·) (append_nil_eq as)
+
+private theorem nat_zero_add : ∀ (n : Nat), 0 + n = n
+  | 0 => rfl
+  | n + 1 => congrArg Nat.succ (nat_zero_add n)
+
+private theorem nat_succ_add (m : Nat) : ∀ (n : Nat), (m + 1) + n = (m + n) + 1
+  | 0 => rfl
+  | n + 1 => congrArg Nat.succ (nat_succ_add m n)
+
+private theorem length_append_eq {α : Type} :
+    ∀ (l₁ l₂ : List α), (l₁ ++ l₂).length = l₁.length + l₂.length
+  | [], l₂ => (nat_zero_add l₂.length).symm
+  | _ :: as, l₂ => (congrArg Nat.succ (length_append_eq as l₂)).trans (nat_succ_add as.length l₂.length).symm
+
+private theorem flatMap_bool_length {α : Type} (f : Bool → List α) (n : Nat)
+    (hf : ∀ b, (f b).length = n) : ([false, true].flatMap f).length = n + n :=
+  (congrArg (fun t => (f false ++ t).length) (append_nil_eq (f true))).trans
+    ((length_append_eq (f false) (f true)).trans
+      ((congrArg (· + (f true).length) (hf false)).trans
+        (congrArg (n + ·) (hf true))))
+
+theorem allBSP_length_64 : allBSP.length = 64 :=
+  flatMap_bool_length _ 32 fun _ =>
+    flatMap_bool_length _ 16 fun _ =>
+      flatMap_bool_length _ 8 fun _ =>
+        flatMap_bool_length _ 4 fun _ =>
+          flatMap_bool_length _ 2 fun _ => rfl
+
+private theorem mem_append_elim {α : Type} {x : α} :
+    ∀ {l₁ l₂ : List α}, x ∈ l₁ ++ l₂ → x ∈ l₁ ∨ x ∈ l₂
+  | [], _, h => Or.inr h
+  | _ :: _, _, List.Mem.head _ => Or.inl (List.Mem.head _)
+  | _ :: _, _, List.Mem.tail _ h =>
+      match mem_append_elim h with
+      | Or.inl h₁ => Or.inl (List.Mem.tail _ h₁)
+      | Or.inr h₂ => Or.inr h₂
+
+private theorem mem_append_inl {α : Type} {x : α} :
+    ∀ {l₁ l₂ : List α}, x ∈ l₁ → x ∈ l₁ ++ l₂
+  | _ :: _, _, List.Mem.head _ => List.Mem.head _
+  | _ :: _, _, List.Mem.tail _ h => List.Mem.tail _ (mem_append_inl h)
+
+private theorem mem_append_inr {α : Type} {x : α} :
+    ∀ (l₁ : List α) {l₂ : List α}, x ∈ l₂ → x ∈ l₁ ++ l₂
+  | [], _, h => h
+  | _ :: as, _, h => List.Mem.tail _ (mem_append_inr as h)
+
+private theorem mem_flatMap_bool_elim {α : Type} {f : Bool → List α} {x : α}
+    (h : x ∈ [false, true].flatMap f) : x ∈ f false ∨ x ∈ f true :=
+  mem_append_elim (@Eq.subst (List α) (fun t => x ∈ f false ++ t) _ _ (append_nil_eq (f true)) h)
+
+private theorem mem_flatMap_bool_intro {α : Type} {f : Bool → List α} (b : Bool) {x : α}
+    (h : x ∈ f b) : x ∈ [false, true].flatMap f :=
+  @Eq.subst (List α) (fun t => x ∈ f false ++ t) _ _ (append_nil_eq (f true)).symm
+    (match b, h with
+    | false, h => mem_append_inl h
+    | true, h => mem_append_inr (f false) h)
+
+private theorem flatMap_bool_all {α : Type} (P : α → Prop) {f : Bool → List α}
+    (hf : ∀ b x, x ∈ f b → P x) : ∀ x, x ∈ [false, true].flatMap f → P x := fun x hx =>
+  match mem_flatMap_bool_elim hx with
+  | Or.inl h => hf false x h
+  | Or.inr h => hf true x h
+
+private theorem map_bool_all {α : Type} (P : α → Prop) {f : Bool → α}
+    (hf : ∀ b, P (f b)) : ∀ x, x ∈ [false, true].map f → P x := fun x hx => by
+  change x ∈ [f false, f true] at hx
+  cases hx with
+  | head => exact hf false
+  | tail _ h =>
+      cases h with
+      | head => exact hf true
+      | tail _ h' => exact nomatch h'
+
+private theorem pairwise_append_of {α : Type} {R : α → α → Prop} :
+    ∀ {l₁ l₂ : List α}, l₁.Pairwise R → l₂.Pairwise R →
+      (∀ x, x ∈ l₁ → ∀ y, y ∈ l₂ → R x y) → (l₁ ++ l₂).Pairwise R
+  | [], _, _, h₂, _ => h₂
+  | a :: _, _, List.Pairwise.cons ha has, h₂, hcross =>
+      List.Pairwise.cons
+        (fun y hy =>
+          match mem_append_elim hy with
+          | Or.inl hy₁ => ha y hy₁
+          | Or.inr hy₂ => hcross a (List.Mem.head _) y hy₂)
+        (pairwise_append_of has h₂ (fun x hx y hy => hcross x (List.Mem.tail _ hx) y hy))
+
+private theorem flatMap_bool_nodup {α : Type} {f : Bool → List α} (proj : α → Bool)
+    (hnd : ∀ b, (f b).Nodup)
+    (hproj : ∀ b x, x ∈ f b → proj x = b) :
+    ([false, true].flatMap f).Nodup :=
+  @Eq.subst (List α) (fun t => (f false ++ t).Pairwise (· ≠ ·)) _ _ (append_nil_eq (f true)).symm
+    (pairwise_append_of (hnd false) (hnd true) fun x hx y hy hxy =>
+      Bool.noConfusion ((hproj false x hx).symm.trans ((congrArg proj hxy).trans (hproj true y hy))))
+
+private theorem map_bool_nodup {α : Type} {f : Bool → α} (proj : α → Bool)
+    (hproj : ∀ b, proj (f b) = b) : ([false, true].map f).Nodup := by
+  show ([f false, f true]).Pairwise (· ≠ ·)
+  refine List.Pairwise.cons (fun y hy => ?_)
+    (List.Pairwise.cons (fun _ h => nomatch h) List.Pairwise.nil)
+  cases hy with
+  | head =>
+      intro h
+      exact Bool.noConfusion ((hproj false).symm.trans ((congrArg proj h).trans (hproj true)))
+  | tail _ h => exact nomatch h
 
 /--
   **★P02 全枚举无重复（L0）** —— `allBSP` 64 个信号向量两两不同（`List.Nodup`）。
   配合 `allBSP_length_64` + `allBSP_complete` 坐实「恰 64 个互异状态」（穷尽且不重叠）。
 -/
-theorem allBSP_nodup : allBSP.Nodup := by decide
+theorem allBSP_nodup : allBSP.Nodup :=
+  flatMap_bool_nodup SignalVector.b1 (fun _ =>
+    flatMap_bool_nodup SignalVector.b2 (fun _ =>
+      flatMap_bool_nodup SignalVector.b3 (fun _ =>
+        flatMap_bool_nodup SignalVector.s1 (fun _ =>
+          flatMap_bool_nodup SignalVector.s2 (fun _ =>
+            map_bool_nodup SignalVector.s3 (fun _ => rfl)
+          ) (fun s2 => map_bool_all (fun u : SignalVector => u.s2 = s2) (fun _ => rfl))
+        ) (fun s1 => flatMap_bool_all (fun u : SignalVector => u.s1 = s1) (fun _ =>
+            map_bool_all (fun u : SignalVector => u.s1 = s1) (fun _ => rfl)))
+      ) (fun b3 => flatMap_bool_all (fun u : SignalVector => u.b3 = b3) (fun _ =>
+          flatMap_bool_all (fun u : SignalVector => u.b3 = b3) (fun _ =>
+            map_bool_all (fun u : SignalVector => u.b3 = b3) (fun _ => rfl))))
+    ) (fun b2 => flatMap_bool_all (fun u : SignalVector => u.b2 = b2) (fun _ =>
+        flatMap_bool_all (fun u : SignalVector => u.b2 = b2) (fun _ =>
+          flatMap_bool_all (fun u : SignalVector => u.b2 = b2) (fun _ =>
+            map_bool_all (fun u : SignalVector => u.b2 = b2) (fun _ => rfl)))))
+  ) (fun b1 => flatMap_bool_all (fun u : SignalVector => u.b1 = b1) (fun _ =>
+      flatMap_bool_all (fun u : SignalVector => u.b1 = b1) (fun _ =>
+        flatMap_bool_all (fun u : SignalVector => u.b1 = b1) (fun _ =>
+          flatMap_bool_all (fun u : SignalVector => u.b1 = b1) (fun _ =>
+            map_bool_all (fun u : SignalVector => u.b1 = b1) (fun _ => rfl))))))
 
 /--
   **★P02 全枚举穷尽（L0）** —— 每个可能的信号向量 `u` 都在 `allBSP` 中（`{0,1}^6` 无遗漏）。
-  按 6 个 Bool 字段全展开（2^6=64 分支）逐分支 `decide` 成员判定。
+  按 6 个 Bool 字段结构归约直达成员见证，避免 64 分支 `decide`。
 -/
 theorem allBSP_complete (u : SignalVector) : u ∈ allBSP := by
   obtain ⟨b1, b2, b3, s1, s2, s3⟩ := u
-  cases b1 <;> cases b2 <;> cases b3 <;> cases s1 <;> cases s2 <;> cases s3 <;> decide
+  unfold allBSP
+  refine mem_flatMap_bool_intro b1
+    (mem_flatMap_bool_intro b2
+      (mem_flatMap_bool_intro b3
+        (mem_flatMap_bool_intro s1
+          (mem_flatMap_bool_intro s2 ?_))))
+  cases s3
+  · exact List.Mem.head _
+  · exact List.Mem.tail _ (List.Mem.head _)
 
 /--
   **★P02 64 态穷尽 `Σ_u 1[b_ℓ(x)=u] = 1`（L0，单值推论）** —— 对任意级别视图 v，存在**唯一**的
@@ -299,10 +434,125 @@ theorem signalVector_unique (v : LevelView) :
   `Σ_{u} 1[b=u]=1` 的字面 List 形式（指示函数 = `decide (w = u)`，Σ = filter 后 length），
   **不用 `Finset.univ`/`Finset.card`**（纯 core）。按 w 的 6 个 Bool 字段全展开逐分支 `decide`。
 -/
+private theorem filter_nil_of_false {α : Type} {p : α → Bool} :
+    ∀ {l : List α}, (∀ x, x ∈ l → p x = false) → l.filter p = []
+  | [], _ => rfl
+  | a :: as, h =>
+      (congrArg (fun b => match b with | true => a :: as.filter p | false => as.filter p)
+        (h a (List.Mem.head _))).trans
+        (filter_nil_of_false (fun x hx => h x (List.Mem.tail _ hx)))
+
+private theorem filter_append_eq {α : Type} (p : α → Bool) :
+    ∀ (l₁ l₂ : List α), (l₁ ++ l₂).filter p = l₁.filter p ++ l₂.filter p
+  | [], _ => rfl
+  | a :: as, l₂ => by
+      show (match p a with | true => a :: (as ++ l₂).filter p | false => (as ++ l₂).filter p) =
+        (match p a with | true => a :: as.filter p | false => as.filter p) ++ l₂.filter p
+      cases p a
+      · exact filter_append_eq p as l₂
+      · exact congrArg (a :: ·) (filter_append_eq p as l₂)
+
+private theorem decide_eq_false_of_proj_ne {α : Type} [inst : DecidableEq α] (proj : α → Bool)
+    {a b : α} (h : proj b = !proj a) : decide (a = b) = false := by
+  unfold decide
+  cases inst a b with
+  | isFalse _ => rfl
+  | isTrue heq =>
+      have h' : proj a = !proj a := (congrArg proj heq).trans h
+      cases hpa : proj a with
+      | false => exact Bool.noConfusion (hpa.symm.trans (h'.trans (congrArg Bool.not hpa)))
+      | true => exact Bool.noConfusion (hpa.symm.trans (h'.trans (congrArg Bool.not hpa)))
+
+private theorem decide_eq_true_self {α : Type} [inst : DecidableEq α] (w : α) :
+    decide (w = w) = true := by
+  unfold decide
+  cases inst w w with
+  | isTrue _ => rfl
+  | isFalse h => exact absurd rfl h
+
+private theorem filter_bool_flatMap_length {α : Type} [DecidableEq α]
+    (w : α) (proj : α → Bool) (f : Bool → List α)
+    (hmatch : ((f (proj w)).filter (fun u => decide (w = u))).length = 1)
+    (hother : ∀ x, x ∈ f (!(proj w)) → proj x = !(proj w)) :
+    (([false, true].flatMap f).filter (fun u => decide (w = u))).length = 1 := by
+  have h1 : ([false, true].flatMap f).filter (fun u => decide (w = u)) =
+      (f false).filter (fun u => decide (w = u)) ++ (f true).filter (fun u => decide (w = u)) :=
+    (congrArg (fun t => (f false ++ t).filter (fun u => decide (w = u))) (append_nil_eq (f true))).trans
+      (filter_append_eq _ (f false) (f true))
+  have hlen : (([false, true].flatMap f).filter (fun u => decide (w = u))).length =
+      ((f false).filter (fun u => decide (w = u))).length + ((f true).filter (fun u => decide (w = u))).length :=
+    (congrArg List.length h1).trans (length_append_eq _ _)
+  have hzero : (f (!(proj w))).filter (fun u => decide (w = u)) = [] :=
+    filter_nil_of_false (fun x hx => decide_eq_false_of_proj_ne proj (hother x hx))
+  cases hb : proj w with
+  | false =>
+      have hm : ((f false).filter (fun u => decide (w = u))).length = 1 :=
+        @Eq.subst Bool (fun b => ((f b).filter (fun u => decide (w = u))).length = 1) _ _ hb hmatch
+      have hz : ((f true).filter (fun u => decide (w = u))).length = 0 :=
+        congrArg List.length (@Eq.subst Bool (fun b => (f (!b)).filter (fun u => decide (w = u)) = []) _ _ hb hzero)
+      exact hlen.trans ((congrArg (· + ((f true).filter (fun u => decide (w = u))).length) hm).trans
+        (congrArg (1 + ·) hz))
+  | true =>
+      have hm : ((f true).filter (fun u => decide (w = u))).length = 1 :=
+        @Eq.subst Bool (fun b => ((f b).filter (fun u => decide (w = u))).length = 1) _ _ hb hmatch
+      have hz : ((f false).filter (fun u => decide (w = u))).length = 0 :=
+        congrArg List.length (@Eq.subst Bool (fun b => (f (!b)).filter (fun u => decide (w = u)) = []) _ _ hb hzero)
+      exact hlen.trans ((congrArg (· + ((f true).filter (fun u => decide (w = u))).length) hz).trans
+        ((nat_zero_add _).trans hm))
+
+private theorem filter_bool_map_length {α : Type} [DecidableEq α]
+    (w : α) (proj : α → Bool) (f : Bool → α)
+    (hmatch : f (proj w) = w)
+    (hother : proj (f (!(proj w))) = !(proj w)) :
+    (([false, true].map f).filter (fun u => decide (w = u))).length = 1 := by
+  have ht : decide (w = f (proj w)) = true :=
+    (congrArg (fun x => decide (w = x)) hmatch).trans (decide_eq_true_self w)
+  have hf : decide (w = f (!(proj w))) = false :=
+    decide_eq_false_of_proj_ne proj hother
+  cases hb : proj w with
+  | false =>
+      have ht' : decide (w = f false) = true :=
+        @Eq.subst Bool (fun b => decide (w = f b) = true) _ _ hb ht
+      have hf' : decide (w = f true) = false :=
+        @Eq.subst Bool (fun b => decide (w = f (!b)) = false) _ _ hb hf
+      exact (congrArg (fun b₁ => (match b₁ with
+        | true => f false :: (match decide (w = f true) with | true => [f true] | false => [])
+        | false => (match decide (w = f true) with | true => [f true] | false => [])).length) ht').trans
+        (congrArg (fun b₂ => (f false :: (match b₂ with | true => [f true] | false => [])).length) hf')
+  | true =>
+      have ht' : decide (w = f true) = true :=
+        @Eq.subst Bool (fun b => decide (w = f b) = true) _ _ hb ht
+      have hf' : decide (w = f false) = false :=
+        @Eq.subst Bool (fun b => decide (w = f (!b)) = false) _ _ hb hf
+      exact (congrArg (fun b₁ => (match b₁ with
+        | true => f false :: (match decide (w = f true) with | true => [f true] | false => [])
+        | false => (match decide (w = f true) with | true => [f true] | false => [])).length) hf').trans
+        (congrArg (fun b₂ => (match b₂ with | true => [f true] | false => []).length) ht')
+
 theorem allBSP_indicator_length_one (w : SignalVector) :
     (allBSP.filter (fun u => decide (w = u))).length = 1 := by
-  obtain ⟨b1, b2, b3, s1, s2, s3⟩ := w
-  cases b1 <;> cases b2 <;> cases b3 <;> cases s1 <;> cases s2 <;> cases s3 <;> decide
+  unfold allBSP
+  refine filter_bool_flatMap_length w SignalVector.b1 _ ?_
+    (flatMap_bool_all (fun u : SignalVector => u.b1 = !w.b1) (fun _ =>
+      flatMap_bool_all (fun u : SignalVector => u.b1 = !w.b1) (fun _ =>
+        flatMap_bool_all (fun u : SignalVector => u.b1 = !w.b1) (fun _ =>
+          flatMap_bool_all (fun u : SignalVector => u.b1 = !w.b1) (fun _ =>
+            map_bool_all (fun u : SignalVector => u.b1 = !w.b1) (fun _ => rfl))))))
+  refine filter_bool_flatMap_length w SignalVector.b2 _ ?_
+    (flatMap_bool_all (fun u : SignalVector => u.b2 = !w.b2) (fun _ =>
+      flatMap_bool_all (fun u : SignalVector => u.b2 = !w.b2) (fun _ =>
+        flatMap_bool_all (fun u : SignalVector => u.b2 = !w.b2) (fun _ =>
+          map_bool_all (fun u : SignalVector => u.b2 = !w.b2) (fun _ => rfl)))))
+  refine filter_bool_flatMap_length w SignalVector.b3 _ ?_
+    (flatMap_bool_all (fun u : SignalVector => u.b3 = !w.b3) (fun _ =>
+      flatMap_bool_all (fun u : SignalVector => u.b3 = !w.b3) (fun _ =>
+        map_bool_all (fun u : SignalVector => u.b3 = !w.b3) (fun _ => rfl))))
+  refine filter_bool_flatMap_length w SignalVector.s1 _ ?_
+    (flatMap_bool_all (fun u : SignalVector => u.s1 = !w.s1) (fun _ =>
+      map_bool_all (fun u : SignalVector => u.s1 = !w.s1) (fun _ => rfl)))
+  refine filter_bool_flatMap_length w SignalVector.s2 _ ?_
+    (map_bool_all (fun u : SignalVector => u.s2 = !w.s2) (fun _ => rfl))
+  exact filter_bool_map_length w SignalVector.s3 _ (by cases w; rfl) rfl
 
 /--
   **★P02 64 态分类的指示函数和 = 1（L0，显式 Σ 形式，替代 Finset 版）** —— 对任意 v，遍历全部
