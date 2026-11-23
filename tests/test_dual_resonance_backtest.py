@@ -20,6 +20,7 @@ from newchan.topology.config_space import (
 )
 from newchan.topology.fiber_pipeline_adapter import FiberSignalFilter
 
+from functools import lru_cache
 import sys
 from pathlib import Path
 
@@ -144,34 +145,33 @@ class TestConfigEvaluation:
 # ── 干净度指标 ──
 
 
+@lru_cache(maxsize=4)
+def _eval_all_27_configs(n_bsps: int) -> tuple[tuple[BSP, ...], tuple[ConfigResult, ...]]:
+    bsps = _generate_bsp_sequence(n_bsps)
+    ff = FiberSignalFilter(kl_threshold=0.0)
+    results = tuple(
+        evaluate_config(Configuration(e, c, r), bsps, ff)
+        for e in WalkDirection
+        for c in WalkDirection
+        for r in WalkDirection
+    )
+    return tuple(bsps), results
+
+
 class TestCleanlinessMetrics:
     """干净度指标计算。"""
 
     def test_all_27_configs_processed(self):
         """全部 27 种配置应被处理。"""
-        bsps = _generate_bsp_sequence(4)
-        ff = FiberSignalFilter(kl_threshold=0.0)
-        results = []
-        for e in WalkDirection:
-            for c in WalkDirection:
-                for r in WalkDirection:
-                    config = Configuration(e, c, r)
-                    results.append(evaluate_config(config, bsps, ff))
-        m = compute_cleanliness(results, bsps)
+        bsps, results = _eval_all_27_configs(4)
+        m = compute_cleanliness(list(results), list(bsps))
         assert m.total_configs == 27
         assert m.total_bsp_events == 27 * 4
 
     def test_entry_plus_block_plus_neutral_equals_total(self):
         """入场+阻断+中立 = 总数。"""
-        bsps = _generate_bsp_sequence(10)
-        ff = FiberSignalFilter(kl_threshold=0.0)
-        results = []
-        for e in WalkDirection:
-            for c in WalkDirection:
-                for r in WalkDirection:
-                    config = Configuration(e, c, r)
-                    results.append(evaluate_config(config, bsps, ff))
-        m = compute_cleanliness(results, bsps)
+        bsps, results = _eval_all_27_configs(10)
+        m = compute_cleanliness(list(results), list(bsps))
         assert m.product_entries + m.product_blocks + m.product_neutrals == m.total_bsp_events
         assert m.fiber_entries + m.fiber_blocks + m.fiber_neutrals == m.total_bsp_events
 
@@ -184,15 +184,8 @@ class TestSignalConsistency:
 
     def test_consistency_in_range(self):
         """一致性比例在 [0, 1] 内。"""
-        bsps = _generate_bsp_sequence(10)
-        ff = FiberSignalFilter(kl_threshold=0.0)
-        results = []
-        for e in WalkDirection:
-            for c in WalkDirection:
-                for r in WalkDirection:
-                    config = Configuration(e, c, r)
-                    results.append(evaluate_config(config, bsps, ff))
-        c = signal_consistency(results)
+        _, results = _eval_all_27_configs(10)
+        c = signal_consistency(list(results))
         assert 0.0 <= c["product_consistency"] <= 1.0
         assert 0.0 <= c["fiber_consistency"] <= 1.0
 
