@@ -2370,3 +2370,44 @@ def test_round_trip_preserves_http_429_when_error_body_disconnects(monkeypatch):
     monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: (_ for _ in ()).throw(Truncated502()))
     trip502 = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
     assert trip502["ok"] is False and trip502["http_status"] == 502
+
+
+def test_round_trip_sse_rate_limit_frame_returns_immediately_without_waiting_eof():
+    """R35（Astra P2）：HTTP 200 的 SSE 响应收到明确限流错误帧后，即使代理迟迟不关闭连接，
+    探针也须逐帧解析并立即返回 rate_limit，不因阻塞等 EOF 超时而丢失限流退避信号。"""
+    release = threading.Event()
+
+    class HangingRateLimitSSE(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            frame = (
+                'data: {"type":"response.failed","response":{"status":"failed",'
+                '"error":{"code":"rate_limit_exceeded","message":"Rate limit reached"}}}\n\n'
+            ).encode()
+            self.wfile.write(frame)
+            self.wfile.flush()
+            release.wait(timeout=15)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), HangingRateLimitSSE)  # DevSkim: ignore DS162092 测试用的本地回环地址
+    url = f"http://127.0.0.1:{srv.server_address[1]}"  # DevSkim: ignore DS162092 测试用的本地回环地址
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        started = time.monotonic()
+        trip = preflight._round_trip_http(url, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(15))
+        elapsed = time.monotonic() - started
+        assert elapsed < 3.0, f"SSE 限流帧未立即返回，耗时 {elapsed:.2f}s"
+        assert trip["ok"] is False and trip["http_status"] == 200
+        assert (trip.get("error") or {}).get("class") == "rate_limit"
+    finally:
+        release.set()
+        srv.shutdown()
+        srv.server_close()

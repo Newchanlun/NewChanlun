@@ -48,7 +48,7 @@ from .github_app import (
     OutcomeUnknown,
     RequestNotSent,
 )
-from .patch_read import FrozenPatch, reads_candidate_patch
+from .patch_read import FrozenPatch, covered_candidate_patch_files
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 from .vm_trim import DOCKER_ENV, trim_vm_disk
 
@@ -108,7 +108,9 @@ PROMPT = ("只审阅，不修改、提交、fetch 或运行候选脚本。候选
           "head_sha={head}\n完整文件清单={names}\n"
           "先单独执行一条命令 git diff --no-ext-diff --no-textconv {merge_base} {head} 读取完整修改："
           "这条命令里不要接 &&、;、|，前后也不要串 cat、printf、echo、--stat、--check 等其他命令，"
-          "需要别的信息就另起命令。然后检查直接相关源代码。不执行来源不明的构建、测试或 hooks。"
+          "需要别的信息就另起命令。若该输出被截断，须用独立的 git diff --no-ext-diff --no-textconv "
+          "{merge_base} {head} -- <文件...> 命令补读全部未呈现的变更文件（每条不与其他命令串联），"
+          "覆盖全部变更文件后方可给出 VERDICT: PASS。然后检查直接相关源代码。不执行来源不明的构建、测试或 hooks。"
           "返回符合 schema 的 JSON，status、summary、findings、validation 均必填。"
           "完整审阅无阻断问题时 status=completed 且 summary 第一行严格为 VERDICT: PASS。"
           "有阻断问题时 status=blocked 且第一行严格为 VERDICT: BLOCK。未完成审阅时 status=failed。"
@@ -491,6 +493,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         turn_completed = False
         final_text = None
         patch_reads = 0
+        ev_covered_files: set[str] = set()
         patch = frozen_patch(source, target)
         for event in events:
             kind = event.get("type")
@@ -510,9 +513,15 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
                 final_text = text if isinstance(text, str) else None  # 非字符串最终消息不可比对，按不符失败
             elif kind == "item.completed" and event.get("item", {}).get("type") == "command_execution":
                 item = event["item"]
-                patch_reads += (item.get("status") == "completed" and item.get("exit_code") == 0
-                                and reads_candidate_patch(str(item.get("command", "")),
-                                                          str(item.get("aggregated_output") or ""), patch))
+                if item.get("status") == "completed" and item.get("exit_code") == 0:
+                    hits = covered_candidate_patch_files(
+                        str(item.get("command", "")),
+                        str(item.get("aggregated_output") or ""),
+                        patch,
+                    )
+                    if hits:
+                        patch_reads += 1
+                        ev_covered_files.update(hits)
         if not turn_completed:
             return failed("stdout 缺少重连后 turn.completed")
         sessions = {e.get("thread_id") for e in events if e.get("type") == "thread.started"}
@@ -534,6 +543,9 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             return failed("结果不符合协议")
         line = output["summary"].splitlines()[0]
         if output["status"] == "completed" and line == "VERDICT: PASS":
+            required_headers = {f.header for f in patch.files}
+            if not required_headers.issubset(ev_covered_files):
+                return failed("审查员 stdout 未完整覆盖全部冻结变更文件（完整 diff 可能被截断且未逐文件补读），PASS 不采信")
             return ReviewOutcome(model, "PASS", session, output["summary"])
         if output["status"] in ("completed", "blocked") and line == "VERDICT: BLOCK":
             return ReviewOutcome(model, "BLOCK", session, output["summary"])
@@ -1050,6 +1062,7 @@ class ExternalReview:
         closed_cont: dict[str, list[int]] = {}
         exec_sessions: dict[int, tuple[str, str]] = {}
         sess_patch_reads = 0
+        sess_covered_files: set[str] = set()
         pending_model_output = False
         try:
             patch = frozen_patch(self.source, target)
@@ -1123,8 +1136,13 @@ class ExternalReview:
                                     out_body = self._extract_exec_output_body(out_text)
                                     exit_m = re.search(r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text)
                                     ok_exit = exit_m is None or exit_m.group(1) == "0"
-                                    if ok_exit and any(reads_candidate_patch(c, out_body, patch) for c in call_cmds):
-                                        sess_patch_reads += 1
+                                    if ok_exit:
+                                        call_hits: set[str] = set()
+                                        for c in call_cmds:
+                                            call_hits.update(covered_candidate_patch_files(c, out_body, patch))
+                                        if call_hits:
+                                            sess_patch_reads += 1
+                                            sess_covered_files.update(call_hits)
                                     sess_m = re.search(r"Process running with session ID (\d+)", out_text)
                                     if sess_m and len(call_cmds) == 1:
                                         exec_sessions[int(sess_m.group(1))] = (call_cmds[0], out_body)
@@ -1138,8 +1156,11 @@ class ExternalReview:
                                                 r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text
                                             )
                                             ok_exit = exit_m is None or exit_m.group(1) == "0"
-                                            if ok_exit and reads_candidate_patch(prev_cmd, combined, patch):
-                                                sess_patch_reads += 1
+                                            if ok_exit:
+                                                cont_hits = covered_candidate_patch_files(prev_cmd, combined, patch)
+                                                if cont_hits:
+                                                    sess_patch_reads += 1
+                                                    sess_covered_files.update(cont_hits)
                     elif rtype == "token_usage_record":
                         rid = payload.get("response_id")
                         if not isinstance(rid, str) or not rid or rid != rid.strip():
@@ -1171,6 +1192,13 @@ class ExternalReview:
         if sess_patch_reads <= 0:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "session.jsonl 缺少已由 token_usage_record 闭合的冻结候选补丁读取命令与输出，PASS/BLOCK 均不采信")
+        if outcome.verdict == "PASS":
+            required_headers = {f.header for f in patch.files}
+            if not required_headers.issubset(sess_covered_files):
+                return ReviewOutcome(
+                    outcome.model, "FAILED", outcome.session_id,
+                    "session.jsonl 未完整呈现全部冻结变更文件（完整 diff 可能被截断且未逐文件补读），PASS 不采信",
+                )
         if not response_ids:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "session.jsonl 缺少可核验的 token_usage_record.response_id，PASS/BLOCK 均不采信")
@@ -1383,7 +1411,6 @@ class ExternalReview:
             if reservation_id:
                 entry["id"] = reservation_id
             row = json.dumps(entry) + "\n"
-            existed = usage_path.exists()
             fd, st = self._open_trusted_regular(usage_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
             try:
                 os.write(fd, row.encode("utf-8"))
@@ -1391,8 +1418,7 @@ class ExternalReview:
                 size = st.st_size + len(row)
             finally:
                 os.close(fd)
-            if not existed:
-                _fsync_dir(usage_path.parent)
+            _fsync_dir(usage_path.parent)
             if size > 131_072:
                 keep_since = now - 172_800
                 kept: list[str] = []
@@ -1657,8 +1683,10 @@ class ExternalReview:
                 t = _read(p)
             except FileNotFoundError:
                 try:
-                    os.listdir(run_dir)
+                    entries = os.listdir(run_dir)
                 except OSError:
+                    return True
+                if any(name != "owner.lock" and not name.endswith(".tmp") for name in entries):
                     return True
                 continue
             except (OSError, ValueError, TypeError, IdentityError):
@@ -2473,7 +2501,9 @@ class ExternalReview:
 
     def _superseded_on_head(self, target: ReviewTarget) -> bool:
         """同 head 上是否已有更晚登记的 attempt 或更晚记录的待完成重审意图（显式重审）：有则本 run 的结论不再发布。
-        run 目录本身不可读时失败闭合返回 True。"""
+        不读取无关旧 head 的 outcome.json（旧 head 损坏不阻断新 head 发布）；对 runs 目录不可读、无 target.json
+        的非空残缺目录、target.json 不可读/损坏，或同 head 记录的目录键/PR 身份/registered_at_ns 无效，
+        一律失败闭合返回 True。"""
         try:
             run_dirs = self._iter_pr_run_dirs(target.pr_number)
         except (OSError, IdentityError):
@@ -2483,14 +2513,24 @@ class ExternalReview:
                 other = _read(run_dir / "target.json")
             except FileNotFoundError:
                 try:
-                    os.listdir(run_dir)
+                    entries = os.listdir(run_dir)
                 except OSError:
+                    return True
+                if any(name != "owner.lock" and not name.endswith(".tmp") for name in entries):
                     return True
                 continue
             except (OSError, ValueError, TypeError, IdentityError):
                 return True
-            if (other.get("head_sha") == target.head_sha
-                    and int(other.get("registered_at_ns", 0)) > target.registered_at_ns):
+            if other.get("head_sha") != target.head_sha:
+                if f"-{target.head_sha}-" in run_dir.name:
+                    return True
+                continue
+            try:
+                self._validate_run_identity(run_dir.name, target.pr_number, other, None)
+                other_ts = _strict_pos_int(other.get("registered_at_ns"))
+            except (ValueError, TypeError, IdentityError):
+                return True
+            if other_ts > target.registered_at_ns:
                 return True
         return self._has_newer_rereview_intent(target)
 

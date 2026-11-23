@@ -612,12 +612,15 @@ def _split_files(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]]
     return files
 
 
+_TRUNCATED_LINE = re.compile(r"(?:Warning:\s*truncated output\b|\d+\s+chars truncated)")
+
+
 @dataclass(frozen=True)
 class FrozenPatch:
     """controller 侧取得的冻结候选补丁，按文件存证据（#1969 正式审查 bb8aa92e opus BLOCK：不分文件时，
     `git show <head>:<本 PR 没改的文件>` 里的 `from __future__ import annotations` 就能冒充读到了改动行）。
-    证据是审查员输出里须出现的行（去掉首尾空白）：改动行（`+`/`-` 之后的内容）里至少 _DISTINCT 个字符的；
-    整个补丁都没有这样的行就取全部非空改动行；纯二进制、改名、改权限的补丁没有改动行，取 `diff --git` 头。"""
+    证据按文件独立计算：每个文件优先取改动行里至少 _DISTINCT 个字符的行，该文件没有长改动行则退回该文件全部非空改动行，
+    纯二进制、改名、改权限文件没有改动行则取 `diff --git` 头，保证每个变更文件均有非空证据可核验覆盖范围。"""
     head_sha: str
     merge_base_sha: str
     base_sha: str
@@ -627,51 +630,89 @@ class FrozenPatch:
     def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str) -> FrozenPatch:
         """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
         split = _split_files(diff)
-        changed = {text for _, _, lines in split for _, text in lines}
-        least = _DISTINCT if any(len(text) >= _DISTINCT for text in changed) else 0
-        files = tuple(FrozenFile(header, path,
-                                 frozenset({t for _, t in lines if len(t) >= least} if changed else {header}),
-                                 frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}))
-                      for header, path, lines in split)
-        return cls(head_sha, merge_base_sha, base_sha, files)
+        built: list[FrozenFile] = []
+        for header, path, lines in split:
+            long_lines = {t for _, t in lines if len(t) >= _DISTINCT}
+            all_lines = {t for _, t in lines}
+            ev = frozenset(long_lines or all_lines or {header})
+            long_added = {t for sign, t in lines if sign == "+" and len(t) >= _DISTINCT}
+            all_added = {t for sign, t in lines if sign == "+"}
+            added = frozenset(long_added or all_added)
+            built.append(FrozenFile(header, path, ev, added))
+        return cls(head_sha, merge_base_sha, base_sha, tuple(built))
 
     @property
     def evidence(self) -> frozenset[str]:
         return frozenset().union(*(f.evidence for f in self.files))
 
-    def shown_in(self, output: str, read: _Read = WHOLE_PATCH) -> bool:
-        """输出里有一行（去掉行号前缀、diff 的 `+`/`-`/空格标记后）是冻结补丁的改动内容，按 read 限定出处：
-        patch 认整个补丁的证据；diff 只认跟在冻结补丁某个文件的 `diff --git` 头之后、属于该文件的证据；
-        blobs 只认所指文件（须全是本 PR 改动的文件）在 head 上加进来的行。
-        含 _BREAK 字符的行不当证据：它在别的切行规则下可能是两行。"""
-        by_header = {f.header: f.evidence for f in self.files}
+    def covered_files(self, output: str, read: _Read = WHOLE_PATCH) -> frozenset[str]:
+        """返回在 output 中实际呈现了冻结证据的变更文件 header 集合（用于核验完整补丁覆盖范围，防截断 diff 冒充全量审阅）。
+        遇到工具截断标记（Warning: truncated output / N chars truncated）时清空当前文件上下文，避免尾部跨文件误归属。"""
+        by_header = {f.header: f for f in self.files}
+        covered: set[str] = set()
         if read.kind == "blobs":
-            by_path = {f.path: f.added for f in self.files if f.path is not None}
+            by_path = {f.path: f for f in self.files if f.path is not None}
             if not all(path in by_path for path in read.paths):
-                return False
-            evidence: frozenset[str] = frozenset().union(*(by_path[path] for path in read.paths))
-        else:
-            evidence = self.evidence if read.kind == "patch" else frozenset()
+                return frozenset()
+            targets = [by_path[path] for path in read.paths]
+            for raw in _leading_diff(output) if read.leading else _lines(output):
+                if _BREAK.search(raw) or _TRUNCATED_LINE.search(raw):
+                    continue
+                line = raw.strip()
+                if match := _LINE_NUMBER.match(line):
+                    line = line[match.end():].strip()
+                cand = line[1:].strip() if line[:1] in "+-" else None
+                for item in targets:
+                    if line in item.added or (cand is not None and cand in item.added):
+                        covered.add(item.header)
+            return frozenset(covered)
+
+        current: FrozenFile | None = None
+        saw_header = False
         for raw in _leading_diff(output) if read.leading else _lines(output):
             if _BREAK.search(raw):
+                continue
+            if _TRUNCATED_LINE.search(raw):
+                current = None
                 continue
             line = raw.strip()
             unstripped = raw
             if match := _LINE_NUMBER.match(line):
                 unstripped = line[match.end():]
                 line = unstripped.strip()
-            if read.kind == "diff" and unstripped.startswith("diff --git "):
-                # 未加行号时原样比对：diff 的上下文行带一个前导空格，不会被当成文件头
-                evidence = by_header.get(unstripped, frozenset())
-            if line in evidence or (line[:1] in "+-" and line[1:].strip() in evidence):
-                return True
-        return False
+            if unstripped.startswith("diff --git "):
+                saw_header = True
+                current = by_header.get(unstripped)
+                if current is not None and current.header in current.evidence:
+                    covered.add(current.header)
+                continue
+            cand = line[1:].strip() if line[:1] in "+-" else None
+            if current is not None:
+                if line in current.evidence or (cand is not None and cand in current.evidence):
+                    covered.add(current.header)
+            elif read.kind == "patch" and not saw_header:
+                for item in self.files:
+                    if line in item.evidence or (cand is not None and cand in item.evidence):
+                        covered.add(item.header)
+        return frozenset(covered)
+
+    def shown_in(self, output: str, read: _Read = WHOLE_PATCH) -> bool:
+        """输出里有一行（去掉行号前缀、diff 的 `+`/`-`/空格标记后）是冻结补丁的改动内容，按 read 限定出处：
+        patch 认整个补丁的证据；diff 只认跟在冻结补丁某个文件的 `diff --git` 头之后、属于该文件的证据；
+        blobs 只认所指文件（须全是本 PR 改动的文件）在 head 上加进来的行。
+        含 _BREAK 字符的行不当证据：它在别的切行规则下可能是两行。"""
+        return bool(self.covered_files(output, read))
+
+
+def covered_candidate_patch_files(command: str, output: str, patch: FrozenPatch) -> frozenset[str]:
+    """返回一条命令在记录输出里实际覆盖到的冻结变更文件 header 集合。"""
+    read = _patch_read(command, patch.head_sha, patch.merge_base_sha, patch.base_sha)
+    return patch.covered_files(output, read) if read is not None else frozenset()
 
 
 def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:
     """命令按 bash 语义会让 git 输出冻结补丁，且记录的输出里真有冻结补丁的内容，出处与命令读的对象一致。"""
-    read = _patch_read(command, patch.head_sha, patch.merge_base_sha, patch.base_sha)
-    return read is not None and patch.shown_in(output, read)
+    return bool(covered_candidate_patch_files(command, output, patch))
 
 
 def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str) -> _Read | None:

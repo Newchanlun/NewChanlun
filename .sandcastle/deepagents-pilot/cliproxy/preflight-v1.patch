@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..9984bb1 100644
+index e69de29..fb66a80 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1997 @@
+@@ -0,0 +1,1979 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3130,6 +3130,7 @@ index e69de29..9984bb1 100644
 +	lastResponseIDSHA string
 +	lastOutputSHA     string
 +	sealed            bool
++	sealSynced        bool
 +	tainted           bool
 +	taintedPersisted  bool
 +	reserved          bool
@@ -3797,20 +3798,6 @@ index e69de29..9984bb1 100644
 +	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
 +		return nil, true, ErrUnavailable
 +	}
-+	// If seal.pending exists (or cannot be stat'd cleanly), a previous seal did not finish committing:
-+	// even if receipt.json on disk already has sealed=true (e.g. Rename succeeded before dir sync failed
-+	// and rollback also failed on a read-only filesystem), refuse to treat it as SealOK across restart.
-+	if _, pendErr := os.Lstat(filepath.Join(dir, "seal.pending")); pendErr == nil || !os.IsNotExist(pendErr) {
-+		return &reviewEntry{
-+			directory: dir,
-+			launch:    launch,
-+			session:   session,
-+			started:   now.UnixNano(),
-+			tainted:   true,
-+			reserved:  true,
-+			touched:   now,
-+		}, true, nil
-+	}
 +	path := filepath.Join(dir, "receipt.json")
 +	finfo, err := os.Lstat(path)
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Size() <= 0 || finfo.Size() > maxReviewReceiptBytes {
@@ -4111,10 +4098,16 @@ index e69de29..9984bb1 100644
 +			reviewMu.Unlock()
 +			entry.mu.Lock()
 +			defer entry.mu.Unlock()
-+			if entry.sealed && !entry.tainted && entry.session == session {
-+				return SealOK
++			if !entry.sealed || entry.tainted || entry.session != session {
++				return SealRejected
 +			}
-+			return SealRejected
++			if !entry.sealSynced {
++				if syncDirFn(entry.directory) != nil || syncDirFn(root) != nil {
++					return SealUnavailable
++				}
++				entry.sealSynced = true
++			}
++			return SealOK
 +		}
 +		if entry.sealing || entry.inFlight > 0 {
 +			reviewMu.Unlock()
@@ -4136,12 +4129,22 @@ index e69de29..9984bb1 100644
 +		entry.mu.Lock()
 +		if entry.sealed {
 +			ok := !entry.tainted && entry.session == session
++			if !ok {
++				entry.mu.Unlock()
++				finishSeal(true)
++				return SealRejected
++			}
++			if !entry.sealSynced {
++				if syncDirFn(entry.directory) != nil || syncDirFn(root) != nil {
++					entry.mu.Unlock()
++					finishSeal(true)
++					return SealUnavailable
++				}
++				entry.sealSynced = true
++			}
 +			entry.mu.Unlock()
 +			finishSeal(true)
-+			if ok {
-+				return SealOK
-+			}
-+			return SealRejected
++			return SealOK
 +		}
 +		if overflowed {
 +			entry.mu.Unlock()
@@ -4160,42 +4163,20 @@ index e69de29..9984bb1 100644
 +			finishSeal(false)
 +			return SealRejected
 +		}
-+		// Step 1: write & sync a write-ahead seal.pending marker BEFORE writing sealed=true to receipt.json.
-+		// If Step 2 (receipt rename + dir sync) fails and rollback also fails (e.g. read-only filesystem),
-+		// seal.pending remains durably on disk so post-restart recovery rejects instead of returning SealOK.
-+		sealPendingPath := filepath.Join(entry.directory, "seal.pending")
-+		pf, pendErr := os.OpenFile(sealPendingPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-+		if pendErr != nil {
-+			entry.taintAndPersistLocked()
-+			entry.mu.Unlock()
-+			finishSeal(true)
-+			return SealUnavailable
-+		}
-+		pendSync := pf.Sync()
-+		pendClose := pf.Close()
-+		if pendSync != nil || pendClose != nil || syncDirFn(entry.directory) != nil {
-+			entry.taintAndPersistLocked()
-+			entry.mu.Unlock()
-+			finishSeal(true)
-+			return SealUnavailable
-+		}
-+		// Step 2: persist receipt.json (sealed=true) and fsync launch directory while seal.pending is armed.
++		// Single-phase atomic rename + mandatory dir-sync confirmation:
++		// - If write/sync/rename fails BEFORE receipt.json is replaced, disk still holds sealed=false;
++		//   taint & permanently close so repeat and post-restart SealReview return SealRejected.
++		// - Once Rename replaces receipt.json with the verified, clean, quiescent sealed=true payload,
++		//   the launch is permanently sealed against new turns/taints; SealOK is returned ONLY after
++		//   both launch and root directory fsyncs succeed (retries & post-restart recovery re-verify
++		//   dir fsync idempotently, eliminating split-brain between RAM and read-only disk).
 +		entry.sealed = true
 +		entry.sealedAt = now.UnixNano()
 +		if entry.sealedAt < entry.finished {
 +			entry.sealedAt = entry.finished
 +		}
-+		if err := entry.persistLocked(); err != nil {
-+			entry.sealed = false
-+			entry.sealedAt = 0
-+			// Leave seal.pending armed on disk; taint & try to invalidate receipt.json, and keep launch permanently closed.
-+			entry.taintAndPersistLocked()
-+			entry.mu.Unlock()
-+			finishSeal(true)
-+			return SealUnavailable
-+		}
-+		// Step 3: receipt.json (sealed=true) is durably synced on disk; remove seal.pending and sync dir to commit the seal.
-+		if err := os.Remove(sealPendingPath); err != nil {
++		renamed, err := entry.persistWithStatusLocked()
++		if !renamed {
 +			entry.sealed = false
 +			entry.sealedAt = 0
 +			entry.taintAndPersistLocked()
@@ -4203,32 +4184,29 @@ index e69de29..9984bb1 100644
 +			finishSeal(true)
 +			return SealUnavailable
 +		}
-+		if err := syncDirFn(entry.directory); err != nil {
-+			entry.sealed = false
-+			entry.sealedAt = 0
-+			// Re-arm seal.pending (best-effort) and taint/invalidate receipt.json so neither a live reader
-+			// nor post-restart recovery can accept a seal whose final commit dir-sync failed.
-+			if pf, pErr := os.OpenFile(sealPendingPath, os.O_CREATE|os.O_WRONLY, 0600); pErr == nil {
-+				_ = pf.Sync()
-+				_ = pf.Close()
-+			}
-+			entry.taintAndPersistLocked()
++		if err != nil || syncDirFn(root) != nil {
++			entry.sealSynced = false
 +			entry.mu.Unlock()
 +			finishSeal(true)
 +			return SealUnavailable
 +		}
++		entry.sealSynced = true
 +		entry.mu.Unlock()
 +		finishSeal(true)
 +		return SealOK
 +	}
 +	reviewMu.Unlock()
 +
-+	diskEntry, onDisk, err := loadReviewEntryFromDisk(filepath.Join(root, launch), launch, session, now)
++	dir := filepath.Join(root, launch)
++	diskEntry, onDisk, err := loadReviewEntryFromDisk(dir, launch, session, now)
 +	if err != nil {
 +		return SealUnavailable
 +	}
 +	if !onDisk || diskEntry == nil || !diskEntry.sealed || diskEntry.tainted || diskEntry.session != session {
 +		return SealRejected
++	}
++	if syncDirFn(dir) != nil || syncDirFn(root) != nil {
++		return SealUnavailable
 +	}
 +	return SealOK
 +}
@@ -4395,7 +4373,6 @@ index e69de29..9984bb1 100644
 +		if statErr != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 || dirInfo.Mode().Perm()&0077 != 0 {
 +			return ErrUnavailable
 +		}
-+		return nil
 +	}
 +	if err := syncDirFn(root); err != nil {
 +		return err
@@ -4858,15 +4835,20 @@ index e69de29..9984bb1 100644
 +}
 +
 +func (e *reviewEntry) persistLocked() error {
-+	fail := func(err error) error {
++	_, err := e.persistWithStatusLocked()
++	return err
++}
++
++func (e *reviewEntry) persistWithStatusLocked() (bool, error) {
++	fail := func(renamed bool, err error) (bool, error) {
 +		if e.tainted {
 +			e.invalidateDiskReceiptLocked()
 +		}
-+		return err
++		return renamed, err
 +	}
 +	if !e.reserved {
 +		if err := reservePrivateDir(e.directory, true); err != nil {
-+			return fail(err)
++			return fail(false, err)
 +		}
 +		e.reserved = true
 +	}
@@ -4916,29 +4898,29 @@ index e69de29..9984bb1 100644
 +	}
 +	data, err := json.Marshal(payload)
 +	if err != nil {
-+		return fail(err)
++		return fail(false, err)
 +	}
 +	tmp := filepath.Join(e.directory, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Add(1)))
 +	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 +	if err != nil {
-+		return fail(err)
++		return fail(false, err)
 +	}
 +	_, errWrite := f.Write(data)
 +	errSync := f.Sync()
 +	errClose := f.Close()
 +	if errWrite != nil || errSync != nil || errClose != nil {
 +		_ = os.Remove(tmp)
-+		return fail(ErrUnavailable)
++		return fail(false, ErrUnavailable)
 +	}
 +	if err := os.Rename(tmp, filepath.Join(e.directory, "receipt.json")); err != nil {
 +		_ = os.Remove(tmp)
-+		return fail(err)
++		return fail(false, err)
 +	}
 +	if err := syncDirFn(e.directory); err != nil {
-+		return fail(err)
++		return fail(true, err)
 +	}
 +	e.markerPersisted = true
-+	return nil
++	return true, nil
 +}
 +
 +func (c *Collector) maybeReleaseReviewLocked() {
@@ -5026,10 +5008,10 @@ index e69de29..9984bb1 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..58c8c19 100644
+index e69de29..68cd077 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2235 @@
+@@ -0,0 +1,2220 @@
 +package preflightreceipt
 +
 +import (
@@ -7085,105 +7067,89 @@ index e69de29..58c8c19 100644
 +}
 +
 +func TestReviewReceiptDirSyncFailureRejectsReservationAndSeal(t *testing.T) {
-+	// R31 (Astra P2): directory fsync failure after Mkdir or Rename must fail closed before confirming reservation or seal.
++	// R31/R35 (Sol P1 + Astra P1):
++	// 1. Parent directory sync failure rejects BOTH initial BeginReview AND retry of the same launch.
++	// 2. SealReview pre-rename failure leaves sealed=false on disk -> permanently SealRejected.
++	// 3. SealReview post-rename dir-sync failure returns SealUnavailable in-process AND post-restart while
++	//    dir-sync fails, blocks new turns/wrong session, returns SealRejected if crash lost the rename,
++	//    and returns SealOK only once intact sealed=true receipt + dir-sync both succeed.
 +	origSync := syncDirFn
 +	defer func() { syncDirFn = origSync }()
 +
-+	// 1. Parent directory sync failure on initial launch dir creation rejects BeginReview.
++	// 1. Parent directory sync failure on initial AND retry BeginReview for the same launch.
 +	root1 := filepath.Join(t.TempDir(), "receipts1")
++	launch1 := "review-eeee1111-2222-4333-8444-555555555960"
++	session1 := "019d0000-0000-7000-8000-000000000960"
 +	syncDirFn = func(dir string) error {
 +		if dir == root1 {
 +			return errors.New("injected parent dir sync error")
 +		}
 +		return origSync(dir)
 +	}
-+	if _, _, err := BeginReview(context.Background(), root1, "review-eeee1111-2222-4333-8444-555555555960", "019d0000-0000-7000-8000-000000000960", "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
-+		t.Fatalf("BeginReview with parent dir sync failure err = %v, want ErrUnavailable", err)
++	if _, _, err := BeginReview(context.Background(), root1, launch1, session1, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("initial BeginReview with parent dir sync failure err = %v, want ErrUnavailable", err)
++	}
++	if _, _, err := BeginReview(context.Background(), root1, launch1, session1, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("retry BeginReview on same launch with parent dir sync still failing err = %v, want ErrUnavailable", err)
 +	}
 +
-+	// 2. Launch directory sync failure during SealReview must NOT return SealOK.
++	// 2. SealReview pre-rename write failure leaves sealed=false on disk -> repeat & post-restart SealRejected.
 +	syncDirFn = origSync
 +	root2 := filepath.Join(t.TempDir(), "receipts2")
-+	launch := "review-eeee1111-2222-4333-8444-555555555961"
-+	session := "019d0000-0000-7000-8000-000000000961"
-+	ctx, c, err := BeginReview(context.Background(), root2, launch, session, "gpt-6.2-sol")
++	launch2 := "review-eeee1111-2222-4333-8444-555555555961"
++	session2 := "019d0000-0000-7000-8000-000000000961"
++	ctx2, c2, err := BeginReview(context.Background(), root2, launch2, session2, "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	ctx2, e2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
-+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
-+	resp, err := cl.Do(req)
++	req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp2, err := cl2.Do(req2)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	c.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
-+	_, _ = io.Copy(io.Discard, resp.Body)
-+	_ = resp.Body.Close()
-+	e.End()
-+	c.Complete(true)
-+	c.HandlerDone(true)
++	c2.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	_, _ = io.Copy(io.Discard, resp2.Body)
++	_ = resp2.Body.Close()
++	e2.End()
++	c2.Complete(true)
++	c2.HandlerDone(true)
 +
-+	launchDir := filepath.Join(root2, launch)
-+	launchDirSyncCalls := 0
-+	var capturedSealedReceipt []byte
-+	syncDirFn = func(dir string) error {
-+		if dir == launchDir {
-+			launchDirSyncCalls++
-+			if launchDirSyncCalls == 1 {
-+				// Step 1 (seal.pending creation) succeeds so seal.pending is durably armed on disk.
-+				return origSync(dir)
-+			}
-+			// Step 2 (after receipt.json sealed=true Rename): capture clean sealed=true bytes before rollback,
-+			// then inject dir sync failure.
-+			if raw, readErr := os.ReadFile(filepath.Join(launchDir, "receipt.json")); readErr == nil && len(capturedSealedReceipt) == 0 {
-+				capturedSealedReceipt = raw
-+			}
-+			return errors.New("injected launch dir sync error")
-+		}
-+		return origSync(dir)
-+	}
-+	if st := SealReview(root2, launch, session); st == SealOK {
-+		t.Fatalf("SealReview succeeded despite launch dir sync error: %v", st)
-+	}
-+	if len(capturedSealedReceipt) == 0 || !strings.Contains(string(capturedSealedReceipt), `"sealed":true`) {
-+		t.Fatalf("expected Step 2 sealed=true receipt before injected dir sync failure, got: %s", string(capturedSealedReceipt))
-+	}
-+	// R33 (Sol P1): simulate rollback failure on a read-only filesystem where the clean sealed=true receipt.json
-+	// survives intact on disk alongside seal.pending; post-restart SealReview MUST still return SealRejected!
-+	if err := os.WriteFile(filepath.Join(launchDir, "receipt.json"), capturedSealedReceipt, 0600); err != nil {
++	launchDir2 := filepath.Join(root2, launch2)
++	unsealedBefore2, err := os.ReadFile(filepath.Join(launchDir2, "receipt.json"))
++	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if _, err := os.Lstat(filepath.Join(launchDir, "seal.pending")); err != nil {
-+		t.Fatalf("expected seal.pending to remain armed after failed Step 2 dir sync: %v", err)
++	blocker2 := filepath.Join(launchDir2, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
++	if err := os.Mkdir(blocker2, 0700); err != nil {
++		t.Fatal(err)
 +	}
-+	// In-process AND post-restart checks must reject both new turns and SealReview.
-+	if _, _, err := BeginReview(context.Background(), root2, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
-+		t.Fatalf("in-process BeginReview after failed seal err = %v, want ErrUnavailable", err)
++	if st := SealReview(root2, launch2, session2); st != SealUnavailable {
++		t.Fatalf("SealReview with pre-rename failure = %v, want SealUnavailable", st)
 +	}
-+	if st := SealReview(root2, launch, session); st != SealRejected {
-+		t.Fatalf("in-process repeat SealReview after failed seal = %v, want SealRejected", st)
++	_ = os.Remove(blocker2)
++	if err := os.WriteFile(filepath.Join(launchDir2, "receipt.json"), unsealedBefore2, 0600); err != nil {
++		t.Fatal(err)
 +	}
-+	syncDirFn = origSync
++	if st := SealReview(root2, launch2, session2); st != SealRejected {
++		t.Fatalf("in-process repeat SealReview after pre-rename failure = %v, want SealRejected", st)
++	}
 +	reviewMu.Lock()
-+	delete(reviewLedger, root2+"\x00"+launch)
++	delete(reviewLedger, root2+"\x00"+launch2)
 +	reviewMu.Unlock()
-+	if st := SealReview(root2, launch, session); st != SealRejected {
-+		t.Fatalf("post-restart SealReview with surviving sealed=true + seal.pending = %v, want SealRejected", st)
-+	}
-+	if _, _, err := BeginReview(context.Background(), root2, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
-+		t.Fatalf("post-restart BeginReview after failed seal err = %v, want ErrUnavailable", err)
++	if st := SealReview(root2, launch2, session2); st != SealRejected {
++		t.Fatalf("post-restart SealReview after pre-rename failure = %v, want SealRejected", st)
 +	}
 +
-+	// 3. R34 (Sol P1 + Astra P1): Step 1 (seal.pending create sync) and Step 2 (receipt.json sealed=true sync)
-+	// BOTH succeed, and ONLY the Step 3 final dir sync after removing seal.pending fails.
-+	// SealReview MUST NOT return SealOK; both live state and post-restart recovery (including if power loss
-+	// resurrects seal.pending next to sealed=true) MUST reject.
++	// 3. Post-rename dir-sync failure: launch stays sealed-but-unsynced; returns SealUnavailable both in-process
++	//    and post-restart while dir-sync fails, blocks new turns and wrong session, rejects if crash rolled back
++	//    receipt.json to sealed=false, and returns SealOK only once intact sealed=true + dir-sync both succeed.
 +	syncDirFn = origSync
 +	root3 := filepath.Join(t.TempDir(), "receipts3")
 +	launch3 := "review-preflight-eeee1111-2222-4333-8444-555555555962"
@@ -7215,53 +7181,54 @@ index e69de29..58c8c19 100644
 +	c3.HandlerDone(true)
 +
 +	launchDir3 := filepath.Join(root3, launch3)
-+	step3SyncCalls := 0
-+	var capturedSealed3 []byte
++	unsealedBefore3, err := os.ReadFile(filepath.Join(launchDir3, "receipt.json"))
++	if err != nil {
++		t.Fatal(err)
++	}
 +	syncDirFn = func(dir string) error {
 +		if dir == launchDir3 {
-+			step3SyncCalls++
-+			if step3SyncCalls <= 2 {
-+				// Step 1 (seal.pending create) & Step 2 (receipt.json sealed=true rename) both succeed.
-+				if step3SyncCalls == 2 {
-+					if raw, readErr := os.ReadFile(filepath.Join(launchDir3, "receipt.json")); readErr == nil {
-+						capturedSealed3 = raw
-+					}
-+				}
-+				return origSync(dir)
-+			}
-+			// Step 3 (post-remove seal.pending final commit sync) fails.
-+			return errors.New("injected step3 commit dir sync error")
++			return errors.New("injected launch dir sync error")
 +		}
 +		return origSync(dir)
 +	}
 +	if st := SealReview(root3, launch3, session3); st != SealUnavailable {
-+		t.Fatalf("SealReview with Step 3 commit dir sync failure = %v, want SealUnavailable", st)
++		t.Fatalf("SealReview with post-rename dir-sync failure = %v, want SealUnavailable", st)
 +	}
-+	if step3SyncCalls < 3 || len(capturedSealed3) == 0 || !strings.Contains(string(capturedSealed3), `"sealed":true`) {
-+		t.Fatalf("expected Steps 1&2 to succeed and fail on Step 3 (calls=%d)", step3SyncCalls)
++	// Repeat in-process while dir-sync still fails MUST still return SealUnavailable (not SealOK).
++	if st := SealReview(root3, launch3, session3); st != SealUnavailable {
++		t.Fatalf("repeat in-process SealReview while dir-sync fails = %v, want SealUnavailable", st)
 +	}
-+	if st := SealReview(root3, launch3, session3); st != SealRejected {
-+		t.Fatalf("repeat in-process SealReview after Step 3 sync failure = %v, want SealRejected", st)
++	// Wrong session rejects immediately; new BeginReview is blocked.
++	if st := SealReview(root3, launch3, "019d0000-0000-7000-8000-000000000999"); st != SealRejected {
++		t.Fatalf("wrong-session SealReview while unsynced = %v, want SealRejected", st)
 +	}
 +	if _, _, err := BeginReview(context.Background(), root3, launch3, session3, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
-+		t.Fatalf("in-process BeginReview after Step 3 sync failure = %v, want ErrUnavailable", err)
++		t.Fatalf("in-process BeginReview after seal rename err = %v, want ErrUnavailable", err)
 +	}
-+	// Post-restart with actual post-rollback disk state rejects.
-+	syncDirFn = origSync
++	// Post-restart while dir-sync STILL fails MUST return SealUnavailable (not SealOK!).
++	sealedBytes3, err := os.ReadFile(filepath.Join(launchDir3, "receipt.json"))
++	if err != nil || !strings.Contains(string(sealedBytes3), `"sealed":true`) {
++		t.Fatalf("expected sealed=true receipt on disk: err=%v raw=%s", err, string(sealedBytes3))
++	}
 +	reviewMu.Lock()
 +	delete(reviewLedger, root3+"\x00"+launch3)
 +	reviewMu.Unlock()
-+	if st := SealReview(root3, launch3, session3); st != SealRejected {
-+		t.Fatalf("post-restart SealReview after Step 3 sync failure = %v, want SealRejected", st)
++	if st := SealReview(root3, launch3, session3); st != SealUnavailable {
++		t.Fatalf("post-restart SealReview while dir-sync fails = %v, want SealUnavailable", st)
 +	}
-+	// Post-restart simulating power loss where seal.pending reappears beside sealed=true receipt.json also rejects.
-+	if err := os.WriteFile(filepath.Join(launchDir3, "receipt.json"), capturedSealed3, 0600); err != nil {
-+		t.Fatal(err)
-+	}
-+	if err := os.WriteFile(filepath.Join(launchDir3, "seal.pending"), nil, 0600); err != nil {
++	// If crash lost the unsynced rename (receipt.json reverts to sealed=false), post-restart returns SealRejected.
++	syncDirFn = origSync
++	if err := os.WriteFile(filepath.Join(launchDir3, "receipt.json"), unsealedBefore3, 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +	if st := SealReview(root3, launch3, session3); st != SealRejected {
-+		t.Fatalf("post-restart SealReview with resurrected seal.pending = %v, want SealRejected", st)
++		t.Fatalf("post-restart SealReview after crash lost rename = %v, want SealRejected", st)
++	}
++	// Once intact sealed=true receipt is on disk AND dir-sync succeeds, idempotent SealReview returns SealOK.
++	if err := os.WriteFile(filepath.Join(launchDir3, "receipt.json"), sealedBytes3, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st := SealReview(root3, launch3, session3); st != SealOK {
++		t.Fatalf("post-restart SealReview once intact sealed=true + dir-sync succeed = %v, want SealOK", st)
 +	}
 +}

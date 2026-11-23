@@ -1417,10 +1417,29 @@ def test_conclusion_without_frozen_patch_read_is_failed(lane, claim):
             if o.verdict != "FAILED" or "未读取冻结候选补丁" not in (o.reason or "")} == {}
 
 
+SINGLE_FILE_PATCH_READ = frozenset({
+    "show-file", "var-export-quoted-show", "show-HEAD-file",
+    "show-file-dot-slash", "show-file-numbered", "dollar-at-end-of-double-quotes",
+})
+
+
 @pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
 def test_conclusion_after_frozen_patch_read_stands(lane, claim):
     outcomes = _verdicts_with_commands(lane, claim, PATCH_READ)
-    assert {case: o.reason for case, o in outcomes.items() if o.verdict != claim} == {}
+    if claim == "BLOCK":
+        assert {case: o.reason for case, o in outcomes.items() if o.verdict != claim} == {}
+    else:
+        # R35（Sol P1）：完整补丁读取可放行 PASS；仅读取双文件 PR 中单文件的 git show 命令不得放行 PASS（但允许 BLOCK）
+        full_bad = {
+            case: o.reason for case, o in outcomes.items()
+            if case not in SINGLE_FILE_PATCH_READ and o.verdict != "PASS"
+        }
+        single_bad = {
+            case: (o.verdict, o.reason) for case, o in outcomes.items()
+            if case in SINGLE_FILE_PATCH_READ
+            and (o.verdict != "FAILED" or "未完整覆盖全部冻结变更文件" not in (o.reason or ""))
+        }
+        assert full_bad == {} and single_bad == {}
 
 
 def test_zero_tool_pass_is_never_reused(lane, env):
@@ -3930,3 +3949,160 @@ def test_target_unreadable_prior_run_still_records_rereview_intent(lane):
             lane.target(1810, 2)
     finally:
         os.chmod(runs_root, 0o700)
+
+
+def test_truncated_multifile_diff_rejects_pass_until_all_files_covered_but_allows_block(lane, env):
+    """R35（Sol P1）：完整 git diff 输出被截断（仅呈现部分变更文件）时：
+    1. 未补读其余文件即返回 PASS，validate_review 与 _verify_session_receipt 均拒认（记 FAILED）；
+    2. 独立命令补读剩余文件后覆盖全部冻结变更文件，PASS 通过；
+    3. 仅覆盖首文件但给出 BLOCK 时仍允许提前阻断（不强制空读剩余文件）。"""
+    import hashlib
+
+    (env.source / "alpha_r35.py").write_text("ALPHA_UNIQUE_R35_LINE = 'alpha_val_12345'\n")
+    (env.source / "beta_r35.py").write_text("BETA_UNIQUE_R35_LINE = 'beta_val_67890'\n")
+    git(env.source, "add", "alpha_r35.py", "beta_r35.py")
+    git(env.source, "commit", "-qm", "add two files r35")
+    new_head = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = new_head
+
+    target = lane.target(1810, 1)
+    folder = lane.state_root / "runs" / target.key
+    worker = folder / MODELS[0]
+    worker.mkdir(parents=True)
+    session = "019d0000-0000-7000-8000-00000000r351".replace("r", "a")
+    full_diff = git(env.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha)
+    before_beta_diff = git(
+        env.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha,
+        "--", "alpha_r35.py", "changed-0", "changed-1",
+    )
+    beta_diff = git(env.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha, "--", "beta_r35.py")
+    trunc_diff = f"Warning: truncated output (original token count: 99999)\n{before_beta_diff}\n…88888 chars truncated…\n"
+
+    def write_worker(ev_cmds_out: list[tuple[str, str]], sess_cmds_out: list[tuple[str, str]], verdict: str) -> tuple[dict, dict]:
+        out_obj = {
+            "status": "blocked" if verdict == "BLOCK" else "completed",
+            "summary": f"VERDICT: {verdict}",
+            "findings": ["[P1] 发现问题"] if verdict == "BLOCK" else [],
+            "validation": ["测试"],
+        }
+        out_text = json.dumps(out_obj)
+        events = [
+            {"type": "thread.started", "thread_id": session},
+            *[
+                {"type": "item.completed", "item": {
+                    "type": "command_execution", "command": f"/bin/bash -lc '{c}'",
+                    "aggregated_output": o, "status": "completed", "exit_code": 0,
+                }}
+                for c, o in ev_cmds_out
+            ],
+            {"type": "item.completed", "item": {"type": "agent_message", "text": out_text}},
+            {"type": "turn.completed"},
+        ]
+        (worker / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+        sess_rows = [
+            {"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}},
+            {"type": "turn_context", "payload": {"model": MODELS[0]}},
+        ]
+        rid_shas: list[str] = []
+        for idx, (c, o) in enumerate(sess_cmds_out, 1):
+            cid = f"call_r35_{idx}"
+            rid = f"resp_r35_tool_{idx}"
+            rid_shas.append(hashlib.sha256(rid.encode()).hexdigest())
+            sess_rows.extend([
+                {"type": "response_item", "payload": {
+                    "type": "function_call", "name": "exec_command", "call_id": cid,
+                    "arguments": json.dumps({"cmd": c}),
+                }},
+                {"type": "token_usage_record", "payload": {"response_id": rid}},
+                {"type": "response_item", "payload": {
+                    "type": "function_call_output", "call_id": cid,
+                    "output": f"Process exited with code 0\nOutput:\n{o}",
+                }},
+            ])
+        final_rid = "resp_r35_final"
+        rid_shas.append(hashlib.sha256(final_rid.encode()).hexdigest())
+        sess_rows.extend([
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": out_text}],
+            }},
+            {"type": "token_usage_record", "payload": {"response_id": final_rid}},
+        ])
+        (worker / "session.jsonl").write_text("\n".join(json.dumps(r) for r in sess_rows) + "\n")
+        launch = {
+            "run_id": target.run_id, "launch_id": "12345678-1234-4234-8234-1234567890ab",
+            "pr_number": 1810, "model": MODELS[0], "head_sha": target.head_sha,
+            "base_sha": target.base_sha, "merge_base_sha": target.merge_base_sha,
+            "controller_code_head": target.controller_code_head, "mode": "review",
+            "prompt": module.review_prompt(target, ("alpha_r35.py", "beta_r35.py")),
+            "image_id": "sha256:" + "1" * 64,
+        }
+        receipt = {
+            **launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0,
+            "container_closed": True, "observed_provider": "cliproxy-local", "observed_model": MODELS[0],
+            "isolation_contract": "1" * 64, "container_id": "a" * 64,
+            "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT"},
+            "session_id": session, "turn_completed": True, "result": out_obj,
+            "before": {"head": target.head_sha, "branch": "HEAD", "status": ""},
+            "after": {"head": target.head_sha, "branch": "HEAD", "status": ""},
+        }
+        module._save(worker / "launch.json", launch)
+        module._save(worker / "receipt.json", receipt)
+        lane.session_receipt = lambda _m, _l, _s, _since: {
+            "launch": f"review-{launch['launch_id']}", "session": session,
+            "complete_stable": True, "sealed": True, "routes": [f"codex:{MODELS[0]}@chatgpt.com"],
+            "requests": len(rid_shas), "response_id_sha256s": rid_shas,
+            "last_response_id_sha256": rid_shas[-1],
+            "last_output_sha256": hashlib.sha256(out_text.encode()).hexdigest(),
+        }
+        return launch, receipt
+
+    cmd_all = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
+    cmd_beta = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- beta_r35.py"
+
+    # 1. stdout 未截断但 session.jsonl 截断（仅呈现 alpha_r35.py，未读 beta_r35.py）-> PASS 被 _verify_session_receipt 拒绝
+    launch, receipt = write_worker([(cmd_all, full_diff)], [(cmd_all, trunc_diff)], "PASS")
+    ev_out = module.validate_review(target, launch, receipt, worker, lane.source)
+    assert ev_out.verdict == "PASS"
+    sess_out = lane._verify_session_receipt(target, launch, receipt, worker, ev_out)
+    assert sess_out.verdict == "FAILED" and "未完整呈现全部冻结变更文件" in sess_out.reason
+
+    # 2. stdout 本身也截断 -> validate_review 直接拒绝 PASS
+    launch, receipt = write_worker([(cmd_all, trunc_diff)], [(cmd_all, trunc_diff)], "PASS")
+    assert module.validate_review(target, launch, receipt, worker, lane.source).verdict == "FAILED"
+
+    # 3. 截断后用独立 git diff -- beta_r35.py 补读剩余文件 -> PASS 通过两道门
+    launch, receipt = write_worker([(cmd_all, trunc_diff), (cmd_beta, beta_diff)],
+                                   [(cmd_all, trunc_diff), (cmd_beta, beta_diff)], "PASS")
+    ev_ok = module.validate_review(target, launch, receipt, worker, lane.source)
+    assert ev_ok.verdict == "PASS"
+    assert lane._verify_session_receipt(target, launch, receipt, worker, ev_ok).verdict == "PASS"
+
+    # 4. 仅覆盖 alpha_r35.py 但给出 BLOCK -> 仍允许提前阻断
+    launch, receipt = write_worker([(cmd_all, trunc_diff)], [(cmd_all, trunc_diff)], "BLOCK")
+    ev_blk = module.validate_review(target, launch, receipt, worker, lane.source)
+    assert ev_blk.verdict == "BLOCK"
+    assert lane._verify_session_receipt(target, launch, receipt, worker, ev_blk).verdict == "BLOCK"
+
+
+def test_superseded_on_head_fails_closed_on_missing_target_nonempty_dir_and_bad_timestamp(lane):
+    """R35（Astra P1）：发布前 _superseded_on_head 遇到无 target.json 的非空残缺 run 目录（含工蜂/结果文件）
+    或同 head 另一记录的 registered_at_ns 为 false/0/缺失时，必须失败闭合返回 True，绝不放行旧 PASS 发布。"""
+    t1 = lane.target(1810, 1)
+    t2 = lane.target(1810, 2)
+    run2 = lane.state_root / "runs" / t2.key
+    orig_t2 = json.loads((run2 / "target.json").read_text())
+
+    # 1. A2 的 registered_at_ns 损坏为 false / 0 / 缺失 -> _superseded_on_head 返回 True
+    for bad_target in (
+        {**orig_t2, "registered_at_ns": False},
+        {**orig_t2, "registered_at_ns": 0},
+        {k: v for k, v in orig_t2.items() if k != "registered_at_ns"},
+    ):
+        (run2 / "target.json").write_text(json.dumps(bad_target))
+        assert lane._superseded_on_head(t1) is True
+
+    # 2. A2 缺少 target.json 但目录内已有工蜂/结果文件 -> 复用 status() 拒绝，_superseded_on_head 返回 True
+    (run2 / "target.json").unlink()
+    (run2 / "outcome.json").write_text(json.dumps({"verdict": "FAILED"}))
+    assert lane._superseded_on_head(t1) is True

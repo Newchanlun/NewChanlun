@@ -133,10 +133,22 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
         with _open_http(request, timeout=timeout) as response:
             terminal, detail, error_code, status, returned_model = None, "流在终态事件前结束", None, None, None
             stream_error, stream_error_code = None, None
-            for raw in response.read().splitlines():
+            has_readline = hasattr(response, "readline")
+            fallback_lines = None if has_readline else iter(response.read().splitlines())
+            while True:
                 if work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
+                if has_readline:
+                    raw = response.readline()
+                    if not raw:
+                        break
+                else:
+                    assert fallback_lines is not None
+                    try:
+                        raw = next(fallback_lines)
+                    except StopIteration:
+                        break
                 line = raw.decode("utf-8", "replace").strip()
                 if line.startswith("data:"):
                     payload = line[5:].strip()
@@ -191,9 +203,36 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
                              if value is not None),
                             None,
                         )
+                    # R35（Astra P2）：逐帧读取并在收到明确限流错误帧时立即关闭并返回 rate_limit，
+                    # 不等待可能迟迟不关闭的流 EOF 导致外层超时丢失退避信号；成功结论仍必须完整读到 EOF。
+                    if inner_err is not None or event_err is not None or event.get("type") in ("error", "response.failed"):
+                        cand_err = next(
+                            (value for value in (inner_err, event_err, event.get("message"), ev_code)
+                             if value is not None),
+                            None,
+                        )
+                        cand_text = (
+                            cand_err if isinstance(cand_err, str)
+                            else json.dumps(cand_err, ensure_ascii=False) if cand_err is not None else ""
+                        )
+                        cand_info = _error_info(cand_text, code=ev_code)
+                        if cand_info["class"] == "rate_limit":
+                            return {
+                                "http_status": response.status,
+                                "terminal": terminal,
+                                "status": status,
+                                "returned_model": returned_model,
+                                "ok": False,
+                                "error": cand_info,
+                            }
                         # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
             if work_left() <= 0:
                 detail = "总时限内流未收尾"
+            elif has_readline and (
+                (getattr(response, "length", None) or 0) > 0
+                or (getattr(response, "chunked", False) and getattr(response, "chunk_left", None) is not None)
+            ):
+                raise http.client.IncompleteRead(b"")
             elif stream_error is not None:
                 if detail is None:
                     detail = stream_error
