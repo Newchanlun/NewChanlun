@@ -36,9 +36,14 @@ fn rebase_txn_seam_emits_certificates_at_production_placement_points() {
 
     rebase_txn::test_capture_start();
     let mut cache = TowerCache::new();
-    for i in 5..=bars.len() {
-        let l0 = super::super::super::parser::parse_layer(&bars[..i], &cfg);
-        let _ = classify_incremental(&l0, &cfg, &mut cache, &[]);
+    let mut incr = super::super::super::parser::ParseLayerIncr::new(&cfg);
+    for (idx, &bar) in bars.iter().enumerate() {
+        let mut l0 = incr.append(bar);
+        if idx + 1 >= 5 {
+            l0.merged_confirmed_len = 0;
+            l0.segments_confirmed_len = 0;
+            let _ = classify_incremental(&l0, &cfg, &mut cache, &[]);
+        }
     }
     // len shrink：同一 cache 喂更短前缀 ⟹ cascade P=0 全清（产出点④）。
     let l0_short = super::super::super::parser::parse_layer(&bars[..300], &cfg);
@@ -129,12 +134,17 @@ fn rebase_txn_seam_does_not_change_classification_output() {
         }
         let mut cache = TowerCache::new();
         let mut out = Vec::new();
-        for i in 5..=bars.len() {
-            let l0 = super::super::super::parser::parse_layer(&bars[..i], &cfg);
-            let __co1 = classify_incremental(&l0, &cfg, &mut cache, &[]);
-            let c = __co1.classification;
-            let tower = __co1.tower;
-            out.push((c, tower));
+        let mut incr = super::super::super::parser::ParseLayerIncr::new(&cfg);
+        for (idx, &bar) in bars.iter().enumerate() {
+            let mut l0 = incr.append(bar);
+            if idx + 1 >= 5 {
+                l0.merged_confirmed_len = 0;
+                l0.segments_confirmed_len = 0;
+                let __co1 = classify_incremental(&l0, &cfg, &mut cache, &[]);
+                let c = __co1.classification;
+                let tower = __co1.tower;
+                out.push((c, tower));
+            }
         }
         let n = if capture {
             rebase_txn::test_capture_take().len()
