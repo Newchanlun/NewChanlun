@@ -288,7 +288,7 @@ def test_reconnect_protocol_matches_child_supervision(lane, scenario):
     receipt = json.loads((folder / "receipt.json").read_text())
     session = RECONNECT_CASES["session_id"]
     events = [{"type": "thread.started", "thread_id": session},
-              _command(f"git diff {target.merge_base_sha} {target.head_sha}"), *scenario["events"]]
+              _command(f"/usr/bin/git diff {target.merge_base_sha} {target.head_sha}"), *scenario["events"]]
     (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
     (folder / "session.jsonl").write_text(
         json.dumps({"type": "session_meta", "payload": {"id": session, "model_provider": "cliproxy-local"}}) + "\n"
@@ -956,18 +956,21 @@ def _command(script: str, exit_code: int = 0, output: str | None = LANE_PATCH) -
 
 
 def _verdicts_with_commands(lane, claim: str, cases: dict) -> dict[str, module.ReviewOutcome]:
-    """跑一次 PASS/BLOCK 审查，再把 events.jsonl 依次换成每个用例的命令序列重新判定。"""
+    """跑一次 PASS/BLOCK 审查，再把 events.jsonl 依次换成每个用例的命令序列重新判定（以历史 v1 合同覆盖裸 git 语法矩阵）。"""
+    from dataclasses import replace as _replace
+
     _modes(lane, **{model: claim for model in MODELS})
     target = ReviewTarget(**lane.review_pr(1810)["target"])
     folder = lane.state_root / "runs" / target.key / MODELS[0]
+    v1_target = _replace(target, policy_version="external-pr-v1")
     events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
     events = [e for e in events if e.get("item", {}).get("type") != "command_execution"]
     launch, receipt = json.loads((folder / "launch.json").read_text()), json.loads((folder / "receipt.json").read_text())
     outcomes = {}
     for case, commands in cases.items():
         (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
-            events[0], *(c(target) for c in commands), *events[1:]]) + "\n")
-        outcomes[case] = validate_review(target, launch, receipt, folder, lane.source)
+            events[0], *(c(v1_target) for c in commands), *events[1:]]) + "\n")
+        outcomes[case] = validate_review(v1_target, launch, receipt, folder, lane.source)
     return outcomes
 
 
@@ -2311,19 +2314,23 @@ def test_nb_residual_retry_early_return_leaves_disk_pass(lane, monkeypatch):
 
 
 def test_prompt_asks_for_standalone_diff_that_patch_read_accepts():
-    """#1968：kimi 常把 diff 串在 cat/printf/--stat/--check 后面，守卫不认；提示词要求单独执行那条 diff，守卫不改。"""
-    required = "git diff --no-ext-diff --no-textconv {merge_base} {head}"
+    """#1968：kimi 常把 diff 串在 cat/printf/--stat/--check 后面，守卫不认；提示词要求单独执行那条不可写系统路径 diff，守卫不改。"""
+    required = "/usr/bin/git diff --no-ext-diff --no-textconv {merge_base} {head}"
     assert "先单独执行一条命令 " + required in module.PROMPT
     assert "不要接 &&、;、|" in module.PROMPT
-    # 按提示词原样写出的那条命令（只替换两个 SHA，不加任何别的段）被现有 patch_read 判为读取
+    # 按提示词原样写出的那条命令（只替换两个 SHA，不加任何别的段）被现有 patch_read 严格模式判为读取
     command = required.format(merge_base=PR2018_MB, head=PR2018_HEAD)
     assert command in module.PROMPT.format(pr=1, base=PR2018_MB, merge_base=PR2018_MB, head=PR2018_HEAD, names="[]")
     patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
-    assert reads_candidate_patch(f"/bin/bash -lc '{command}'", PR2018_DIFF, patch)
+    assert reads_candidate_patch(
+        f"/bin/bash -c '{command}'", PR2018_DIFF, patch, require_absolute_bins=True, require_system_shell=True
+    )
     # 提示词劝阻的串接写法仍判未读（守卫行为不变）
-    for chained in (f"cat SKILL.md && printf '--- DIFF ---' && {command}", f"{command} && git diff --check",
-                    f"git diff --stat && {command}"):
-        assert not reads_candidate_patch(f"/bin/bash -lc \"{chained}\"", PR2018_DIFF, patch)
+    for chained in (f"cat SKILL.md && printf '--- DIFF ---' && {command}", f"{command} && /usr/bin/git diff --check",
+                    f"/usr/bin/git diff --stat && {command}"):
+        assert not reads_candidate_patch(
+            f"/bin/bash -c \"{chained}\"", PR2018_DIFF, patch, require_absolute_bins=True, require_system_shell=True
+        )
 
 
 # ---------------- Codex 额度耗尽时的临时组合（Kimi + Opus） ----------------
@@ -2976,11 +2983,11 @@ def test_real_codex_0169_redacted_session_contract_and_empty_rid_rejection(lane,
     receipt = module._read(worker / "receipt.json")
     session_id = fixture["session_id"]
     final_text = json.dumps(fixture["final_result"], ensure_ascii=False)
-    diff_cmd = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
+    diff_cmd = f"/usr/bin/git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
     patch = git(lane.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha)
     events = [
         {"type": "thread.started", "thread_id": session_id},
-        {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc '{diff_cmd}'",
+        {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -c '{diff_cmd}'",
                                             "aggregated_output": patch, "status": "completed", "exit_code": 0}},
         {"type": "item.completed", "item": {"type": "agent_message", "text": final_text}},
         {"type": "turn.completed"},
@@ -3342,7 +3349,7 @@ def test_session_receipt_accepts_write_stdin_continuation_and_parallel_tool_call
     launch = module._read(worker / "launch.json")
     receipt = module._read(worker / "receipt.json")
     session_id = "01a204f8-2a11-7720-baca-0bff89db9901"
-    diff_cmd = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
+    diff_cmd = f"/usr/bin/git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
     patch = git(lane.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha)
     final_obj = {"status": "completed", "summary": "VERDICT: PASS\n含续读与并行工具调用回归通过。",
                  "findings": [], "validation": ["write_stdin + parallel"]}
@@ -4044,7 +4051,9 @@ def test_truncated_multifile_diff_rejects_pass_until_all_files_covered_but_allow
             **launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0,
             "container_closed": True, "observed_provider": "cliproxy-local", "observed_model": MODELS[0],
             "isolation_contract": "1" * 64, "container_id": "a" * 64,
-            "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT"},
+            "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT",
+                           "tool_home_write": "EACCES", "etc_profile_write": "EACCES",
+                           "tool_bins_immutable": "EACCES", "git_bin": "/usr/bin/git"},
             "session_id": session, "turn_completed": True, "result": out_obj,
             "before": {"head": target.head_sha, "branch": "HEAD", "status": ""},
             "after": {"head": target.head_sha, "branch": "HEAD", "status": ""},
@@ -4060,8 +4069,8 @@ def test_truncated_multifile_diff_rejects_pass_until_all_files_covered_but_allow
         }
         return launch, receipt
 
-    cmd_all = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
-    cmd_rest = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- changed-1 beta_r35.py"
+    cmd_all = f"/usr/bin/git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
+    cmd_rest = f"/usr/bin/git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- changed-1 beta_r35.py"
     rest_diff = git(
         env.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha,
         "--", "changed-1", "beta_r35.py",
@@ -4079,7 +4088,7 @@ def test_truncated_multifile_diff_rejects_pass_until_all_files_covered_but_allow
     assert module.validate_review(target, launch, receipt, worker, lane.source).verdict == "FAILED"
 
     # 3. 截断后仅补读 beta_r35.py（未补读被截断撤销的 changed-1）仍拒 PASS；补读 changed-1 与 beta_r35.py 后 PASS 通过两道门
-    cmd_beta = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- beta_r35.py"
+    cmd_beta = f"/usr/bin/git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- beta_r35.py"
     launch, receipt = write_worker([(cmd_all, trunc_diff), (cmd_beta, beta_diff)],
                                    [(cmd_all, trunc_diff), (cmd_beta, beta_diff)], "PASS")
     assert module.validate_review(target, launch, receipt, worker, lane.source).verdict == "FAILED"
@@ -4574,9 +4583,9 @@ def test_r40_concurrent_rereview_no_mutual_stale_target_swap_parallel_output_and
     worker40 = folder40 / MODELS[0]
     worker40.mkdir(parents=True)
     session40 = "019d0000-0000-7000-8000-000000000409"
-    cmd_a = f"git show {t40.head_sha}:par_a_r40.py | nl -ba | sed -n '1,5p'"
-    cmd_b = f"git show {t40.head_sha}:par_b_r40.py | nl -ba | sed -n '1,5p'"
-    cmd_full_diff = f"git diff --no-ext-diff --no-textconv {t40.merge_base_sha} {t40.head_sha}"
+    cmd_a = f"/usr/bin/git show {t40.head_sha}:par_a_r40.py | /usr/bin/nl -ba | /usr/bin/sed -n '1,5p'"
+    cmd_b = f"/usr/bin/git show {t40.head_sha}:par_b_r40.py | /usr/bin/nl -ba | /usr/bin/sed -n '1,5p'"
+    cmd_full_diff = f"/usr/bin/git diff --no-ext-diff --no-textconv {t40.merge_base_sha} {t40.head_sha}"
     full_diff_40 = git(env.source, "diff", "--no-ext-diff", "--no-textconv", t40.merge_base_sha, t40.head_sha)
     out_obj = {"status": "completed", "summary": "VERDICT: PASS", "findings": [], "validation": ["test"]}
     out_text = json.dumps(out_obj)
@@ -4631,7 +4640,9 @@ def test_r40_concurrent_rereview_no_mutual_stale_target_swap_parallel_output_and
         **launch40, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0,
         "container_closed": True, "observed_provider": "cliproxy-local", "observed_model": MODELS[0],
         "isolation_contract": "1" * 64, "container_id": "a" * 64,
-        "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT"},
+        "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT",
+                       "tool_home_write": "EACCES", "etc_profile_write": "EACCES",
+                       "tool_bins_immutable": "EACCES", "git_bin": "/usr/bin/git"},
         "session_id": session40, "turn_completed": True, "result": out_obj,
         "before": {"head": t40.head_sha, "branch": "HEAD", "status": ""},
         "after": {"head": t40.head_sha, "branch": "HEAD", "status": ""},
@@ -4659,3 +4670,231 @@ def test_r40_concurrent_rereview_no_mutual_stale_target_swap_parallel_output_and
         usage_path.chmod(0o600)
         with pytest.raises(EffectPending, match="quota-unverifiable"):
             lane.admit_quota()
+
+
+def test_r42_sol_p1_rereview_after_intent_cleared_cannot_overtake_newer_block(lane):
+    """R42（Sol P1 #1）：A1 已 PASS，A2 写下重审意图后进入慢预检；期间 A3 启动、登记、完成 BLOCK 并清理重审意图。
+    A2 随后完成预检进锁时，即使意图文件已被 A3 清理，仍须识别出预检期间已有更高编号 attempt 登记并抛 TargetDrifted，
+    绝不能拿到更大的 registered_at_ns 覆盖 A3 的 BLOCK。"""
+    import threading
+
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+
+    a2_in_preflight = threading.Event()
+    release_a2 = threading.Event()
+
+    def slow_a2(t):
+        if t.attempt == 2:
+            a2_in_preflight.set()
+            assert release_a2.wait(10)
+        return _fake_preflight_pass(t)
+
+    lane.preflight = slow_a2
+    a2_err: dict[str, Exception] = {}
+
+    def run_a2():
+        try:
+            lane.target(1810, 2)
+        except Exception as exc:
+            a2_err["exc"] = exc
+
+    t2 = threading.Thread(target=run_a2)
+    t2.start()
+    assert a2_in_preflight.wait(5)
+
+    # A3 在 A2 慢预检期间完成 BLOCK 并清理重审意图文件
+    _modes(lane, **{MODELS[0]: "BLOCK", MODELS[1]: "PASS"})
+    res3 = lane.review_pr(1810, 3)
+    assert res3["verdict"] == "BLOCK"
+    assert not lane.has_pending_rereview_intent(1810, res3["target"]["head_sha"], res3["target"]["base_sha"])
+
+    # 放行 A2 慢预检：意图已清，但 A3 在 A2 意图之后登记 -> A2 必须被 TargetDrifted 拒绝且不落盘 target.json
+    release_a2.set()
+    t2.join(timeout=10)
+    assert isinstance(a2_err.get("exc"), module.TargetDrifted)
+    assert "superseded-during-preflight" in str(a2_err["exc"])
+    a2_dirs = list((lane.state_root / "runs").glob("*-a2"))
+    assert all(not (d / "target.json").exists() for d in a2_dirs)
+    assert lane.gateway.sent[-1] == "failure"
+
+
+def test_r42_sol_p1_immutable_bins_shell_workdir_and_submodule_tree_diff(lane, env, tmp_path, monkeypatch):
+    """R42（Sol P1 #2 + #3）：
+    1. POLICY 下裸 git、裸 nl/sed、非系统 shell 包装、session workdir!=/review、git -C /tmp 及缺工具不可写探针均拒收；
+    2. 源仓配置 diff.ignoreSubmodules=all 与 diff.submodule=log 时，frozen_patch 与 prepare_review 仍完整捕获 mode 160000
+       子模块指针变更，只读普通文件不能 PASS；若解析补丁缺失 diff-tree 路径则失败闭合抛 IdentityError。"""
+    import hashlib
+    import shlex
+
+    from pilot1742.patch_read import covered_candidate_patch_units
+
+    # 1. 构造同时修改普通文件与 mode 160000 子模块指针的提交，并在源仓设置 diff.ignoreSubmodules=all + diff.submodule=log
+    sub_sha = git(env.source, "rev-parse", "HEAD~1")
+    (env.source / "normal_r42.py").write_text("NORMAL_R42 = 'changed_line_r42'\n")
+    git(env.source, "add", "normal_r42.py")
+    git(env.source, "update-index", "--add", "--cacheinfo", f"160000,{sub_sha},submod_r42")
+    git(env.source, "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid",
+        "commit", "-qm", "change normal file and submodule pointer")
+    head_r42 = git(env.source, "rev-parse", "HEAD")
+    git(env.source, "config", "diff.ignoreSubmodules", "all")
+    git(env.source, "config", "diff.submodule", "log")
+    lane.gateway.pr["head"]["sha"] = head_r42
+
+    t42 = lane.target(1810, 1)
+    patch42 = module.frozen_patch(env.source, t42)
+    paths42 = {f.git_new_path for f in patch42.files}
+    assert "normal_r42.py" in paths42 and "submod_r42" in paths42
+    assert any(u[1] == "+" and f"Subproject commit {sub_sha}" in u[3] for u in patch42.all_change_units)
+
+    # prepare_review 的完整文件清单也必须包含 submod_r42
+    frozen_in = module.prepare_review(t42, env.source, tmp_path / "r42-checkout-check")
+    assert "submod_r42" in frozen_in.changed_files and "normal_r42.py" in frozen_in.changed_files
+
+    full_diff_42 = git(
+        env.source, "-c", "diff.ignoreSubmodules=none", "-c", "diff.submodule=short",
+        "diff", "--ignore-submodules=none", "--submodule=short", "--no-ext-diff", "--no-textconv",
+        t42.merge_base_sha, t42.head_sha,
+    )
+    only_normal_diff = git(
+        env.source, "-c", "diff.ignoreSubmodules=none", "-c", "diff.submodule=short",
+        "diff", "--ignore-submodules=none", "--submodule=short", "--no-ext-diff", "--no-textconv",
+        t42.merge_base_sha, t42.head_sha, "--", "normal_r42.py",
+    )
+
+    # 2. 覆盖与执行环境边界（Sol P1 #2 + #3）
+    cmd_abs = f"/usr/bin/git diff --no-ext-diff --no-textconv {t42.merge_base_sha} {t42.head_sha}"
+    cmd_bare = f"git diff --no-ext-diff --no-textconv {t42.merge_base_sha} {t42.head_sha}"
+    cmd_bare_flt = f"/usr/bin/git diff --no-ext-diff --no-textconv {t42.merge_base_sha} {t42.head_sha} | cat"
+    cmd_abs_flt = f"/usr/bin/git diff --no-ext-diff --no-textconv {t42.merge_base_sha} {t42.head_sha} | /usr/bin/cat"
+    cmd_bad_c = f"/usr/bin/git -C /tmp diff --no-ext-diff --no-textconv {t42.merge_base_sha} {t42.head_sha}"
+    cmd_bad_sub = f"/usr/bin/git diff --ignore-submodules=all --no-ext-diff --no-textconv {t42.merge_base_sha} {t42.head_sha}"
+    cmd_normal_only = f"/usr/bin/git diff --no-ext-diff --no-textconv {t42.merge_base_sha} {t42.head_sha} -- normal_r42.py"
+
+    # 绝对路径 + /usr/bin/cat 通过；裸 git、裸 cat、非系统 shell、-C /tmp、--ignore-submodules=all 均拒绝
+    assert covered_candidate_patch_units(
+        f"/bin/bash -c {shlex.quote(cmd_abs)}", full_diff_42, patch42,
+        require_absolute_bins=True, require_system_shell=True,
+    ) == patch42.all_change_units
+    assert covered_candidate_patch_units(
+        f"/bin/bash -c {shlex.quote(cmd_abs_flt)}", full_diff_42, patch42,
+        require_absolute_bins=True, require_system_shell=True,
+    ) == patch42.all_change_units
+    for rejected_ev_cmd in (
+        f"/bin/bash -c {shlex.quote(cmd_bare)}",
+        f"/bin/bash -c {shlex.quote(cmd_bare_flt)}",
+        f"/tmp/fake-bash -c {shlex.quote(cmd_abs)}",
+        f"/bin/bash -c {shlex.quote(cmd_bad_c)}",
+        f"/bin/bash -c {shlex.quote(cmd_bad_sub)}",
+    ):
+        assert not reads_candidate_patch(
+            rejected_ev_cmd, full_diff_42, patch42, require_absolute_bins=True, require_system_shell=True
+        )
+        assert covered_candidate_patch_units(
+            rejected_ev_cmd, full_diff_42, patch42, require_absolute_bins=True, require_system_shell=True
+        ) == frozenset()
+    # 只读 normal_r42.py 漏掉 submod_r42 -> 覆盖不完整，不能 PASS
+    assert not patch42.all_change_units.issubset(
+        covered_candidate_patch_units(
+            f"/bin/bash -c {shlex.quote(cmd_normal_only)}", only_normal_diff, patch42,
+            require_absolute_bins=True, require_system_shell=True,
+        )
+    )
+
+    # 3. validate_review 拒绝缺失/可写工具环境探针；_verify_session_receipt 拒绝 workdir!=/review 或自定义 shell
+    worker = lane.state_root / "runs" / t42.key / MODELS[0]
+    worker.mkdir(parents=True)
+    sid = "019d0000-0000-7000-8000-000000000420"
+    out_obj = {"status": "completed", "summary": "VERDICT: PASS", "findings": [], "validation": ["r42"]}
+    out_text = json.dumps(out_obj)
+    launch = {
+        "run_id": t42.run_id, "launch_id": "12345678-1234-4234-8234-123456789420",
+        "pr_number": 1810, "model": MODELS[0], "head_sha": t42.head_sha,
+        "base_sha": t42.base_sha, "merge_base_sha": t42.merge_base_sha,
+        "controller_code_head": t42.controller_code_head, "mode": "review",
+        "prompt": module.review_prompt(t42, frozen_in.changed_files),
+        "image_id": "sha256:" + "1" * 64,
+    }
+    good_fs = {
+        "source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT",
+        "tool_home_write": "EACCES", "etc_profile_write": "EACCES",
+        "tool_bins_immutable": "EACCES", "git_bin": "/usr/bin/git",
+    }
+    receipt = {
+        **launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0,
+        "container_closed": True, "observed_provider": "cliproxy-local", "observed_model": MODELS[0],
+        "isolation_contract": "1" * 64, "container_id": "a" * 64, "filesystem": good_fs,
+        "session_id": sid, "turn_completed": True, "result": out_obj,
+        "before": {"head": t42.head_sha, "branch": "HEAD", "status": ""},
+        "after": {"head": t42.head_sha, "branch": "HEAD", "status": ""},
+    }
+    module._save(worker / "launch.json", launch)
+    module._save(worker / "receipt.json", receipt)
+    ev_rows = [
+        {"type": "thread.started", "thread_id": sid},
+        {"type": "item.completed", "item": {
+            "type": "command_execution", "command": f"/bin/bash -c {shlex.quote(cmd_abs)}",
+            "aggregated_output": full_diff_42, "status": "completed", "exit_code": 0,
+        }},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": out_text}},
+        {"type": "turn.completed"},
+    ]
+    (worker / "events.jsonl").write_text("\n".join(json.dumps(e) for e in ev_rows) + "\n")
+    rid1, rid2 = "resp_r42_1", "resp_r42_2"
+    rid_shas = [hashlib.sha256(r.encode()).hexdigest() for r in (rid1, rid2)]
+    lane.session_receipt = lambda _m, _l, _s, _since: {
+        "launch": f"review-{launch['launch_id']}", "session": sid,
+        "complete_stable": True, "sealed": True, "routes": [f"codex:{MODELS[0]}@chatgpt.com"],
+        "requests": 2, "response_id_sha256s": rid_shas,
+        "last_response_id_sha256": rid_shas[-1],
+        "last_output_sha256": hashlib.sha256(out_text.encode()).hexdigest(),
+    }
+
+    def write_sess(params: dict):
+        rows = [
+            {"type": "session_meta", "payload": {"id": sid, "model_provider": "cliproxy-local"}},
+            {"type": "turn_context", "payload": {"model": MODELS[0]}},
+            {"type": "response_item", "payload": {
+                "type": "function_call", "name": "exec_command", "call_id": "c42",
+                "arguments": json.dumps(params),
+            }},
+            {"type": "token_usage_record", "payload": {"response_id": rid1}},
+            {"type": "response_item", "payload": {
+                "type": "function_call_output", "call_id": "c42",
+                "output": f"Process exited with code 0\nOutput:\n{full_diff_42}",
+            }},
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": out_text}],
+            }},
+            {"type": "token_usage_record", "payload": {"response_id": rid2}},
+        ]
+        (worker / "session.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    write_sess({"cmd": cmd_abs, "workdir": "/review"})
+    ok_ev = module.validate_review(t42, launch, receipt, worker, lane.source)
+    assert ok_ev.verdict == "PASS"
+    assert lane._verify_session_receipt(t42, launch, receipt, worker, ok_ev).verdict == "PASS"
+
+    # 破坏工具环境物理探针任一项 -> validate_review 拒绝
+    for bad_key, bad_val in (
+        ("tool_home_write", "ALLOWED"),
+        ("etc_profile_write", "ALLOWED"),
+        ("tool_bins_immutable", "ALLOWED"),
+        ("git_bin", "/home/agent/.npm-global/bin/git"),
+    ):
+        bad_rc = {**receipt, "filesystem": {**good_fs, bad_key: bad_val}}
+        assert module.validate_review(t42, launch, bad_rc, worker, lane.source).verdict == "FAILED"
+
+    # session.jsonl workdir 切离 /review 或指定可写自定义 shell -> _verify_session_receipt 拒绝
+    for bad_params in (
+        {"cmd": cmd_abs, "workdir": "/tmp/fake-repo"},
+        {"cmd": cmd_abs, "workdir": "/review", "shell": "/tmp/fake-bash"},
+    ):
+        write_sess(bad_params)
+        assert lane._verify_session_receipt(t42, launch, receipt, worker, ok_ev).verdict == "FAILED"
+
+    # 4. frozen_patch 与 diff-tree 交叉校验：若 diff 输出缺失树差异里的路径则失败闭合抛 IdentityError
+    monkeypatch.setattr(module, "_diff_tree_changed_paths", lambda *_a: {"normal_r42.py", "submod_r42", "missing_path"})
+    with pytest.raises(IdentityError, match="缺失路径"):
+        module.frozen_patch(env.source, t42)
+    assert module.validate_review(t42, launch, receipt, worker, lane.source).verdict == "FAILED"

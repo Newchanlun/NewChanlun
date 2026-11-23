@@ -405,16 +405,49 @@ class _GitCall:
     moved: bool
 
 
+def _is_review_path(raw: str, *, allow_subpaths: bool = False, exact: str | None = None) -> bool:
+    if not raw or _OPAQUE in raw:
+        return False
+    norm = posixpath.normpath(raw)
+    if exact is not None:
+        return norm == exact
+    if allow_subpaths:
+        return norm == "/review" or norm.startswith("/review/")
+    return norm == "/review"
+
+
 def _git_call(argv: list[str]) -> _GitCall | None:
     if not argv or argv[0].rsplit("/", 1)[-1] != "git":
         return None
     i, config, moved = 1, [], False
     while i < len(argv):
-        if argv[i] in ("-C", "-c", "--git-dir", "--work-tree"):
-            config += argv[i + 1:i + 2] if argv[i] == "-c" else []
-            moved = moved or argv[i] == "-C"
+        if argv[i] == "-c":
+            if i + 1 >= len(argv):
+                return None
+            config.append(argv[i + 1])
             i += 2
-        elif argv[i] in ("--no-pager", "-P") or argv[i].startswith(("--git-dir=", "--work-tree=")):
+        elif argv[i] == "-C":
+            if i + 1 >= len(argv) or not _is_review_path(argv[i + 1], allow_subpaths=True):
+                return None
+            moved = True
+            i += 2
+        elif argv[i] == "--git-dir":
+            if i + 1 >= len(argv) or not _is_review_path(argv[i + 1], exact="/review/.git"):
+                return None
+            i += 2
+        elif argv[i] == "--work-tree":
+            if i + 1 >= len(argv) or not _is_review_path(argv[i + 1], exact="/review"):
+                return None
+            i += 2
+        elif argv[i].startswith("--git-dir="):
+            if not _is_review_path(argv[i].split("=", 1)[1], exact="/review/.git"):
+                return None
+            i += 1
+        elif argv[i].startswith("--work-tree="):
+            if not _is_review_path(argv[i].split("=", 1)[1], exact="/review"):
+                return None
+            i += 1
+        elif argv[i] in ("--no-pager", "-P"):
             i += 1
         else:
             break
@@ -441,6 +474,10 @@ def _git_patch_read(command: _Expanded, revisions: _Revisions) -> _Read | None:
     subcommand, rest, options, positional, moved = call.subcommand, call.rest, call.options, call.positional, call.moved
     separator = rest.index("--") if "--" in rest else len(rest)
     if "--no-index" in options or (subcommand == "show" and "--output" in " ".join(options)):
+        return None
+    # 拒绝任何忽略子模块的 diff 选项（仅放行显式 --ignore-submodules=none）
+    if any(o == "--ignore-submodules" or (o.startswith("--ignore-submodules=") and o != "--ignore-submodules=none")
+           for o in options):
         return None
     # 补丁旁边能印出审查员自己写的文字的选项（`--format='+<改动行>'`、`--line-prefix`）不认（#1969 kimi BLOCK）
     if any(_PRINTS_TEXT.fullmatch(o) for o in options):
@@ -531,15 +568,20 @@ def _show_read(positional: list[str], options: list[str], unresolved: bool, move
     return None
 
 
-def _script(command: str) -> str | None:
-    """取出 Codex 外层 `/bin/bash -lc '<脚本>'` 的脚本；不是这个形状时按原文当脚本。"""
+_SYSTEM_SHELLS = frozenset({"/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh"})
+
+
+def _script(command: str, *, require_system_shell: bool = False) -> str | None:
+    """取出 Codex 外层 `/bin/bash -lc '<脚本>'` / `/bin/bash -c '<脚本>'` 的脚本；
+    `require_system_shell=True` 时只接受固定不可写系统 shell（/bin/bash、/usr/bin/bash、/bin/sh、/usr/bin/sh）包装的命令。"""
     commands = _parse(_lex(command))
     if len(commands) == 1 and isinstance(commands[0], _Command):
         argv = [field for w in commands[0].words for field in _fields(w, {})]
-        if (len(argv) == 3 and argv[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh")
-                and re.fullmatch(r"-[a-z]*c[a-z]*", argv[1])):
+        if (len(argv) == 3 and re.fullmatch(r"-[a-z]*c[a-z]*", argv[1])
+                and (argv[0] in _SYSTEM_SHELLS if require_system_shell
+                     else argv[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh"))):
             return None if _OPAQUE in argv[2] else argv[2]
-    return command
+    return None if require_system_shell else command
 
 
 def _lines(text: str) -> list[str]:
@@ -1090,28 +1132,57 @@ class FrozenPatch:
 
 
 def covered_candidate_patch_units(
-    command: str, output: str, patch: FrozenPatch, *, require_explicit_headers: bool = False
+    command: str,
+    output: str,
+    patch: FrozenPatch,
+    *,
+    require_explicit_headers: bool = False,
+    require_absolute_bins: bool = False,
+    require_system_shell: bool = False,
 ) -> frozenset[ChangeUnit]:
     """返回一条命令在记录输出里按精确坐标实际覆盖到的冻结改动行集合。"""
-    read = _patch_read(command, patch.head_sha, patch.merge_base_sha, patch.base_sha)
+    read = _patch_read(
+        command, patch.head_sha, patch.merge_base_sha, patch.base_sha,
+        require_absolute_bins=require_absolute_bins, require_system_shell=require_system_shell,
+    )
     if read is None:
         return frozenset()
     return patch.covered_change_units(output, read, require_explicit_headers=require_explicit_headers)
 
 
-def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:
+def reads_candidate_patch(
+    command: str,
+    output: str,
+    patch: FrozenPatch,
+    *,
+    require_absolute_bins: bool = False,
+    require_system_shell: bool = False,
+) -> bool:
     """命令按 bash 语义会让 git 输出冻结补丁，且记录的输出里真有冻结补丁的内容，出处与命令读的对象一致。"""
-    read = _patch_read(command, patch.head_sha, patch.merge_base_sha, patch.base_sha)
+    read = _patch_read(
+        command, patch.head_sha, patch.merge_base_sha, patch.base_sha,
+        require_absolute_bins=require_absolute_bins, require_system_shell=require_system_shell,
+    )
     return read is not None and patch.shown_in(output, read)
 
 
-def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str) -> _Read | None:
+def _patch_read(
+    command: str,
+    head_sha: str,
+    merge_base_sha: str,
+    base_sha: str,
+    *,
+    require_absolute_bins: bool = False,
+    require_system_shell: bool = False,
+) -> _Read | None:
     """diff 另一侧须是 merge-base、base 或这几个提交的祖先写法，写一个不存在的 SHA 再接管道
     （`git diff <bad> <head> | head`，无 pipefail 时退出码为 0）不算读取。
     命令替换会执行别的命令，含换行或其他行终止符（U+2028 等）的参数会被 git 或过滤器的报错原样带进输出
     （`git show <head>:'x<U+2028>+<改动行>'`；`$'x\n+<改动行>'` 在词法上就判为求不出值），
-    _SPECIAL_NAME 里的变量改的是跑哪个 git、读哪份配置和 shell 怎么分词，这三样都不算。"""
-    script = _script(command)
+    _SPECIAL_NAME 里的变量改的是跑哪个 git、读哪份配置和 shell 怎么分词，这三样都不算。
+    `require_absolute_bins=True` 时只接受容器内物理探针验证过不可写的系统绝对路径（`/usr/bin/git` 与 `_IMMUTABLE_FILTERS`），
+    防止 PATH 里的可写目录（含用户目录或运行时注入目录）劫持裸命令名。"""
+    script = _script(command, require_system_shell=require_system_shell)
     if script is None:
         return None
     items = _parse(_lex(script))
@@ -1127,7 +1198,8 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
     if len(reads) != 1:
         return None
     k, read = reads[0]
-    if (expanded[k].argv[0] not in ("git", "/usr/bin/git") or _discards_stdout(expanded[k], [])
+    allowed_git = ("/usr/bin/git",) if require_absolute_bins else ("git", "/usr/bin/git")
+    if (expanded[k].argv[0] not in allowed_git or _discards_stdout(expanded[k], [])
             or (k and commands[k - 1].op not in ("&&", ";", "\n"))
             or commands[-1].op not in ("", ";", "\n")
             or any(_SPECIAL_NAME.fullmatch(name) for e in expanded for name in e.env_names)):
@@ -1137,7 +1209,7 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
     if commands[k].op in _PIPE or k + 1 == len(commands):
         filters = expanded[k + 1:]
         ok = (all(commands[j].op in _PIPE for j in range(k, len(commands) - 1))
-              and all(_filter(e) for e in filters))
+              and all(_filter(e, require_absolute_bins=require_absolute_bins) for e in filters))
         if not ok:
             return None
         return _annotate_filters(read, filters)
@@ -1157,7 +1229,8 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
             or not all(_PLAIN_DIFF.fullmatch(o) for o in call.options) or commands[k].op not in ("&&", ";", "\n")):
         return None
     for j in range(k + 1, len(commands)):
-        if commands[j].op not in ("&&", ";", "\n", "") or not _trailing(expanded[j], revisions):
+        if (commands[j].op not in ("&&", ";", "\n", "")
+                or not _trailing(expanded[j], revisions, require_absolute_bins=require_absolute_bins)):
             return None
     return replace(read, leading=True)
 
@@ -1168,12 +1241,13 @@ _PLAIN_DIFF = re.compile(r"--no-ext-diff|--no-textconv|--no-color|--color=never|
 _PLACEHOLDER_FORMAT = re.compile(r"(?:%(?:[HhTtPpsbBn%]|[ac](?:n|e|d|I|i))|[ \t:,|/()\[\]-])*")
 
 
-def _trailing(command: _Expanded, revisions: _Revisions) -> bool:
+def _trailing(command: _Expanded, revisions: _Revisions, *, require_absolute_bins: bool = False) -> bool:
     """冻结补丁的 git diff 之后接的段，白名单：`git show|log`，不带全局选项、重定向与管道；选项只有 `-s`/`--no-patch`
     （至少一个）和恰好一个 `--format=<占位符>`/`--pretty=[t]format:<占位符>`；位置参数只能是 head、merge-base、base
     本身。别的选项（`--binary`、`--show-linear-break`、`-p`、`--stat`、`-c` 覆盖……）一律整条不认。"""
     argv = command.argv
-    if command.redirects or len(argv) < 3 or argv[0] not in ("git", "/usr/bin/git") or argv[1] not in ("show", "log"):
+    allowed_git = ("/usr/bin/git",) if require_absolute_bins else ("git", "/usr/bin/git")
+    if command.redirects or len(argv) < 3 or argv[0] not in allowed_git or argv[1] not in ("show", "log"):
         return False
     formats, quiet, revs = 0, False, 0
     for arg in argv[2:]:
@@ -1207,7 +1281,10 @@ def _setup(command: _Expanded) -> bool:
     return argv == ["cd", "/review"]
 
 
-_SPECIAL_NAME = re.compile(r"GIT_(?!PAGER$)\w*|PATH|IFS|CDPATH|HOME|XDG_CONFIG_HOME")
+_SPECIAL_NAME = re.compile(
+    r"GIT_(?!PAGER$)\w*|PATH|IFS|CDPATH|HOME|XDG_CONFIG_HOME"
+    r"|LD_\w*|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC_\w*|LOCPATH|GCONV_PATH"
+)
 _COUNT = r"\+\d+|0*[1-9]\d*"  # 0 行就是吞掉输出
 _SED_SCRIPT = re.compile(r"(?:\d+|\$)(?:,(?:\d+|\$))?p(?:;(?:\d+|\$)(?:,(?:\d+|\$))?p)*")
 
@@ -1230,6 +1307,14 @@ _FILTERS = {
     "grep": _FilterSpec(r"-[nivEFwxah]+|-[ABCm]\d+|--colou?r=never",
                         {"-e": r"(?s:.*)", "-A": r"\d+", "-B": r"\d+", "-C": r"\d+", "-m": r"\d+"}, r"(?s:.*)"),
 }
+_IMMUTABLE_FILTERS = frozenset({
+    "/usr/bin/nl",
+    "/usr/bin/sed", "/bin/sed",
+    "/usr/bin/head",
+    "/usr/bin/tail",
+    "/usr/bin/cat", "/bin/cat",
+    "/usr/bin/grep", "/bin/grep",
+})
 
 
 def _annotate_filters(read: _Read, filters: list[_Expanded]) -> _Read:
@@ -1238,7 +1323,7 @@ def _annotate_filters(read: _Read, filters: list[_Expanded]) -> _Read:
     diff_hunk_intact = True
     line_pos_mode = "sequential" if ((read.kind == "blobs" and len(read.paths) == 1) or read.plain_u0) else "unpositioned"
     for flt in filters:
-        cmd = flt.argv[0]
+        cmd = flt.argv[0].rsplit("/", 1)[-1]
         opts = flt.argv[1:]
         if cmd == "nl":
             diff_num_layers += 1
@@ -1307,17 +1392,26 @@ def _annotate_filters(read: _Read, filters: list[_Expanded]) -> _Read:
     return replace(read, line_pos_mode=line_pos_mode, diff_num_layers=diff_num_layers, diff_hunk_intact=diff_hunk_intact)
 
 
-def _filter(command: _Expanded) -> bool:
+def _filter(command: _Expanded, *, require_absolute_bins: bool = False) -> bool:
     """git 之后的管道段只做筛选或截取，输出的每一行都来自 git 的输出（只加行号）。"""
     argv = command.argv
-    spec = _FILTERS.get(argv[0]) if argv else None
-    if spec is None or any(not op.startswith("2") for op, _ in command.redirects) or (argv[0] == "sed" and "-n" not in argv):
+    if not argv:
+        return False
+    raw_cmd = argv[0]
+    if require_absolute_bins:
+        if raw_cmd not in _IMMUTABLE_FILTERS:
+            return False
+    elif raw_cmd not in _FILTERS and raw_cmd not in _IMMUTABLE_FILTERS:
+        return False
+    base = raw_cmd.rsplit("/", 1)[-1]
+    spec = _FILTERS.get(base)
+    if spec is None or any(not op.startswith("2") for op, _ in command.redirects) or (base == "sed" and "-n" not in argv):
         return False
     positional: list[str] = []
     given_e, i, options_done = False, 1, False
     while i < len(argv):
         arg = argv[i]
-        if options_done or arg == "-" and argv[0] != "cat" or not arg.startswith("-"):
+        if options_done or arg == "-" and base != "cat" or not arg.startswith("-"):
             positional.append(arg)
         elif arg == "--":
             options_done = True

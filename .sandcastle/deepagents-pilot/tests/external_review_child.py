@@ -25,7 +25,7 @@ mode_file = per_model if per_model.exists() else folder.parents[1] / "fake-mode"
 mode, _, flag = (mode_file.read_text().strip() if mode_file.exists() else "PASS").partition(":")
 session = str(uuid.uuid4())
 diff = ["diff", "--no-ext-diff", "--no-textconv", launch["merge_base_sha"], launch["head_sha"]]
-read = f"/bin/bash -lc 'git {' '.join(diff)}'"
+read = f"/bin/bash -c '/usr/bin/git {' '.join(diff)}'"
 patch = subprocess.run(["git", "-C", launch["checkout"], *diff], capture_output=True, text=True, check=True).stdout
 tool = [] if flag == "notool" else [  # 「BLOCK:notool」等：零工具调用的审查员（#1968）
     {"type": "item.completed", "item": {"type": "command_execution", "command": read, "aggregated_output": patch,
@@ -51,7 +51,7 @@ if tool:
     session_lines.extend([
         json.dumps({"type": "response_item", "payload": {
             "type": "function_call", "name": "exec_command", "call_id": call_id,
-            "arguments": json.dumps({"cmd": f"git {' '.join(diff)}"}),
+            "arguments": json.dumps({"cmd": f"/usr/bin/git {' '.join(diff)}", "workdir": "/review"}),
         }}),
         json.dumps({"type": "token_usage_record", "payload": {"response_id": f"resp_{launch['model']}_tool_{session}"}}),
         json.dumps({"type": "response_item", "payload": {
@@ -70,7 +70,9 @@ session_lines.extend([
 record = {**launch, "status": "completed", "sandbox": "docker-read-only", "exit_code": 0, "container_closed": True,
           "observed_provider": "cliproxy-local", "observed_model": launch["model"],
           "image_id": "sha256:" + "1" * 64, "isolation_contract": isolation_contract, "container_id": "a" * 64,
-          "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT"},
+          "filesystem": {"source_write": "EROFS", "git_write": "EROFS", "host_read": "ENOENT", "state_write": "ENOENT",
+                         "tool_home_write": "EACCES", "etc_profile_write": "EACCES",
+                         "tool_bins_immutable": "EACCES", "git_bin": "/usr/bin/git"},
           "session_id": session, "turn_completed": True, "result": output,
           "before": {"head": launch["head_sha"], "branch": "HEAD", "status": ""},
           "after": {"head": launch["head_sha"], "branch": "HEAD", "status": ""}}

@@ -230,7 +230,7 @@ test("两位 GPT 独立建会话；历史显式模型仍可用", () => {
 
 const modes = ["PASS", "BLOCK", "failed", "missing-log", "wrong-session-model", "wrong-session-provider",
   "missing-completed", "write", "bad-mount", "bind-mount", "volume-mismatch",
-  "volume-remove-fails", "secret-env", "bad-filesystem",
+  "volume-remove-fails", "secret-env", "bad-filesystem", "bad-tool-env",
   "over-budget", "over-budget-reject", "timeout-reject", "rate-limited-hang", "rate-limited-final", "rate-limited-exit", "rate-limited-stderr",
   "reconnect-429-recovers"] as const;
 const RECONNECT_429 = "Reconnecting... 1/5 (exceeded retry limit, last status: 429 Too Many Requests)";
@@ -250,7 +250,11 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       worktreePath: "/review",
       async exec(command, options) {
         if (command === "cat /etc/hostname") return { stdout: container.slice(0, 12), stderr: "", exitCode: 0 };
-        if (command.startsWith("node -e ")) return { stdout: JSON.stringify({ source_write: mode === "bad-filesystem" ? "ALLOWED" : "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT" }), stderr: "", exitCode: 0 };
+        if (command.startsWith("node -e ")) return { stdout: JSON.stringify({
+          source_write: mode === "bad-filesystem" ? "ALLOWED" : "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT",
+          tool_home_write: "EACCES", etc_profile_write: "EACCES",
+          tool_bins_immutable: mode === "bad-tool-env" ? "ALLOWED" : "EACCES", git_bin: "/usr/bin/git",
+        }), stderr: "", exitCode: 0 };
         if (command.includes("find ")) {
           const sessionsDir = JSON.parse(command.match(/^find (".*?") /)![1]!);
           return { stdout: `${sessionsDir}/2026/10/29/rollout-2026-10-29-${session}.jsonl\n`, stderr: "", exitCode: 0 };
@@ -371,6 +375,11 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       if (receipt.status === "completed") {
         assert.match(modelCommand, /(?:^|\s)--skip-git-repo-check(?:\s|$)/);
         assert(modelCommand.includes("-c 'project_doc_max_bytes=0'"));
+        assert(modelCommand.includes("-c 'allow_login_shell=false'"));
+        assert(modelCommand.includes("-c 'shell_environment_policy.inherit=\"none\"'"));
+        assert(modelCommand.includes("-c 'shell_environment_policy.set.HOME=\"/\"'"));
+        assert(modelCommand.includes("-c 'shell_environment_policy.set.PATH=\"/usr/local/bin:/usr/bin:/bin\"'"));
+        assert(modelCommand.includes("-c 'shell_environment_policy.set.GIT_CONFIG_GLOBAL=\"/dev/null\"'"));
         assert.deepEqual(receipt.usage, { input_tokens: 100, cached_input_tokens: 40, output_tokens: 7,
           reasoning_output_tokens: 3, commands: 0, reported: true });
         assert.equal(receipt.result.summary, `VERDICT: ${mode}`);
@@ -480,7 +489,10 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
       async exec(command) {
         commands.push(command);
         if (command === "cat /etc/hostname") return { stdout: container.slice(0, 12), stderr: "", exitCode: 0 };
-        if (command.startsWith("node -e ")) return { stdout: JSON.stringify({ source_write: "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT" }), stderr: "", exitCode: 0 };
+        if (command.startsWith("node -e ")) return { stdout: JSON.stringify({
+          source_write: "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT",
+          tool_home_write: "EACCES", etc_profile_write: "EACCES", tool_bins_immutable: "EACCES", git_bin: "/usr/bin/git",
+        }), stderr: "", exitCode: 0 };
         return { stdout: "", stderr: "", exitCode: 1 };
       },
       async copyFileIn() {}, async copyFileOut() {}, async close() { closed = true; },
