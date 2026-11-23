@@ -4863,6 +4863,12 @@ where
     // ★工位 4f：上一 bar merge 用的 tree Rc——`Rc::ptr_eq` 命中（同一 Rc::clone）⟹ tree 逐字节不变
     // ⟹ merge tree 段跳过 step 1'/2'（confirmed prefix 增量维护，消 O(tree)/bar）。
     let mut prev_merge_tree: Option<std::rc::Rc<Vec<coverage::CoverageElement>>> = None;
+    let mut prev_step_tree: Option<std::rc::Rc<Vec<coverage::CoverageElement>>> = None;
+    let mut prev_step_forest_epoch: Option<u64> = None;
+    let mut prev_merge_forest_epoch: Option<u64> = None;
+    let mut prev_merge_bsp_fp: Vec<Vec<(usize, u8)>> = Vec::new();
+    let mut prev_merge_cand_len: usize = 0;
+    let mut prev_merge_done = false;
     // #82 DC-E：默认关闭时整段惰性（不算 MACD、不评生产门、不上触发轨），订单轨 frozen。
     // 开启时首见证书只经 econ_positive 的 Nest/XZD 单一门产触发事件（#282：账面形态已删，
     // 门内不产订单、不写子腿簿——触发链保留为 #274 原料）。
@@ -5287,16 +5293,30 @@ where
             // 工位 K 性能：tree-prefix 缓存（§16，命中省 extract_elements 重建）。pi_theta_step 用
             // newly-confirmed step 候选；merge 用全 classification 候选——两者共享同一 tower tree-prefix 缓存。
             // ★热点② O(n²) 消除：tree=Rc::clone O(1)，candidate 段单独 Vec，ElementView 双段零拷贝。
-            let (step_tree, step_candidates, step_gamma) = {
-                let _g = classifier::stage_profile::stage("cand_build_step");
-                interp::coverage_elements_and_gamma_with_tower_cached_gen(
-                    &classification_step,
-                    &tower_i,
-                    &mut Some(&mut tree_cache),
-                    Some(tower_gen),
-                    Some(forest_epoch),
-                )
-            };
+            let step_has_bsp = classification_step
+                .levels
+                .iter()
+                .any(|lvl| !lvl.bsp.is_empty());
+            let (step_tree, step_candidates, step_gamma) =
+                if !step_has_bsp && prev_step_forest_epoch == Some(forest_epoch) {
+                    let _g = classifier::stage_profile::stage("cand_build_step");
+                    let cached = prev_step_tree
+                        .as_ref()
+                        .expect("prev_step_forest_epoch Some ⟹ prev_step_tree Some");
+                    (std::rc::Rc::clone(cached), Vec::new(), Vec::new())
+                } else {
+                    let _g = classifier::stage_profile::stage("cand_build_step");
+                    let out = interp::coverage_elements_and_gamma_with_tower_cached_gen(
+                        &classification_step,
+                        &tower_i,
+                        &mut Some(&mut tree_cache),
+                        Some(tower_gen),
+                        Some(forest_epoch),
+                    );
+                    prev_step_tree = Some(std::rc::Rc::clone(&out.0));
+                    prev_step_forest_epoch = Some(forest_epoch);
+                    out
+                };
             // ★工位 4d 热点①②：注入缓存的 base（tree 前缀）兄弟/ID 索引（命中 Rc::clone O(1)），消除
             // coverage_step_from_buckets 内每 bar build_prev_sibling_index/build_tree_id_index O(tree)/bar。
             let mut step_work = coverage::ElementView::from_parts(&step_tree, step_candidates);
@@ -6332,38 +6352,94 @@ where
             // 用本 bar snapshot（elements）+ held legs（next_active）刷新 registry。
             // 关闭的腿（buckets.close）在 registry 中标记 invalidated（§9 rule 5）。
             {
-                // ★工位 4h：caller B gamma-free + candidate 前缀缓存路径（源(b) O(n²) 真修）。merge 只
-                // 消费 candidates（不读 gamma/role，codex Q1）⟹ 跳遍历2 + candidate 前缀复用（codex Q2/Q3）。
-                let (tree_ref, candidates_ref) = {
-                    let _g = classifier::stage_profile::stage("cand_build_merge");
-                    interp::coverage_elements_with_tower_cached_gen(
-                        &classification_i,
-                        &tower_i,
-                        &mut tree_cache,
-                        &mut cand_cache,
-                        Some(tower_gen),
-                        Some(forest_epoch),
-                    )
+                let bsp_fp = |p: &classifier::bsp::BspPoint| -> (usize, u8) {
+                    let b = &p.bits;
+                    let disc = (b.buy1 as u8)
+                        | ((b.buy2 as u8) << 1)
+                        | ((b.buy3 as u8) << 2)
+                        | ((b.sell1 as u8) << 3)
+                        | ((b.sell2 as u8) << 4)
+                        | ((b.sell3 as u8) << 5);
+                    (p.source_index, disc)
                 };
-                classifier::stage_profile::record_span("cand_count", candidates_ref.len() as u64);
-                let cand_dirty = cand_cache.dirty; // ★on2w3：candidates 逐字节变？否 ⟹ merge cand 段跳过。
-                                                   // ★工位 4f：双段 merge（消 as_contiguous materialize O(tree) + step 1'/2' tree 全量 O(tree)）。
-                                                   // tree_dirty=false（Rc::ptr_eq 命中，tree 同上 bar）⟹ 跳过 tree 段（断言1-3 bit-exact）。
-                let tree_dirty = prev_merge_tree
-                    .as_ref()
-                    .map(|p| !std::rc::Rc::ptr_eq(p, &tree_ref))
-                    .unwrap_or(true);
-                {
-                    let _g = classifier::stage_profile::stage("cand_merge_consume");
-                    registry.merge_in_place_split(
-                        &tree_ref,
-                        tree_dirty,
-                        &candidates_ref,
-                        cand_dirty,
-                        &next_active,
+                let merge_inputs_unchanged = prev_merge_done
+                    && prev_merge_forest_epoch == Some(forest_epoch)
+                    && prev_merge_tree
+                        .as_ref()
+                        .map(|p| std::rc::Rc::ptr_eq(p, &step_tree))
+                        .unwrap_or(false)
+                    && classification_i.levels.len() == prev_merge_bsp_fp.len()
+                    && classification_i
+                        .levels
+                        .iter()
+                        .zip(prev_merge_bsp_fp.iter())
+                        .all(|(lvl, prev_fp)| {
+                            lvl.bsp.len() == prev_fp.len()
+                                && lvl
+                                    .bsp
+                                    .iter()
+                                    .zip(prev_fp.iter())
+                                    .all(|(p, &fp)| bsp_fp(p) == fp)
+                        });
+                let held_already_in_registry = next_active.iter().all(|a| {
+                    prev_active
+                        .iter()
+                        .any(|b| b.id == a.id && b.op_parent == a.op_parent)
+                });
+                if merge_inputs_unchanged && held_already_in_registry {
+                    classifier::stage_profile::record_span(
+                        "cand_count",
+                        prev_merge_cand_len as u64,
                     );
+                } else {
+                    // ★工位 4h：caller B gamma-free + candidate 前缀缓存路径（源(b) O(n²) 真修）。merge 只
+                    // 消费 candidates（不读 gamma/role，codex Q1）⟹ 跳遍历2 + candidate 前缀复用（codex Q2/Q3）。
+                    let (tree_ref, candidates_ref) = {
+                        let _g = classifier::stage_profile::stage("cand_build_merge");
+                        interp::coverage_elements_with_tower_cached_gen(
+                            &classification_i,
+                            &tower_i,
+                            &mut tree_cache,
+                            &mut cand_cache,
+                            Some(tower_gen),
+                            Some(forest_epoch),
+                        )
+                    };
+                    classifier::stage_profile::record_span(
+                        "cand_count",
+                        candidates_ref.len() as u64,
+                    );
+                    let cand_dirty = cand_cache.dirty; // ★on2w3：candidates 逐字节变？否 ⟹ merge cand 段跳过。
+                                                       // ★工位 4f：双段 merge（消 as_contiguous materialize O(tree) + step 1'/2' tree 全量 O(tree)）。
+                                                       // tree_dirty=false（Rc::ptr_eq 命中，tree 同上 bar）⟹ 跳过 tree 段（断言1-3 bit-exact）。
+                    let tree_dirty = prev_merge_tree
+                        .as_ref()
+                        .map(|p| !std::rc::Rc::ptr_eq(p, &tree_ref))
+                        .unwrap_or(true);
+                    {
+                        let _g = classifier::stage_profile::stage("cand_merge_consume");
+                        registry.merge_in_place_split(
+                            &tree_ref,
+                            tree_dirty,
+                            &candidates_ref,
+                            cand_dirty,
+                            &next_active,
+                        );
+                    }
+                    prev_merge_tree = Some(tree_ref);
+                    prev_merge_forest_epoch = Some(forest_epoch);
+                    prev_merge_cand_len = candidates_ref.len();
+                    prev_merge_bsp_fp.resize_with(classification_i.levels.len(), Vec::new);
+                    prev_merge_bsp_fp.truncate(classification_i.levels.len());
+                    for (dst, lvl) in prev_merge_bsp_fp
+                        .iter_mut()
+                        .zip(classification_i.levels.iter())
+                    {
+                        dst.clear();
+                        dst.extend(lvl.bsp.iter().map(bsp_fp));
+                    }
+                    prev_merge_done = true;
                 }
-                prev_merge_tree = Some(tree_ref);
             }
             // ── #1306 对拍观测：⑤ 段末持久注册表长度（状态面右端读数）。──
             #[cfg(any(test, feature = "backtest_bin"))]
