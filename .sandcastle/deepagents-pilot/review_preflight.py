@@ -34,6 +34,8 @@ CLIPROXY_LOG_DIR = Path.home() / "Library/Application Support/CLIProxyLocal/auth
 # 每个模型可接受的上游路线。Sol 走 Codex OAuth（chatgpt.com）；Kimi 走国内 kimi（api.kimi.com）或国际 kimi-ai
 # （api.kimi.ai），CLIProxy 在两者间按同型号候选池切换（CLIProxyLocal ROUTING-KIMI-1696.md）；Opus 走 Claude OAuth。
 ROUTES = {"gpt-6.1-sol": {("codex", "chatgpt.com")},
+          "gpt-6.2-sol": {("codex:gpt-6.2-sol", "chatgpt.com")},
+          "gpt-6.2-astra": {("codex:gpt-6.2-astra", "chatgpt.com")},
           "kimi-k3.1-pro": {("kimi", "api.kimi.com"), ("kimi-ai", "api.kimi.ai")},
           "claude-opus-5-5": {("claude", "api.anthropic.com")}}
 # 报告里只回显这些已知路由，其余记作 "other"：日志字段来自上游，不能原样进报告

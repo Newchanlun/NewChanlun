@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..c674b91 100644
+index e69de29..c7187d0 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,144 @@
 +package middleware
 +
 +import (
@@ -129,9 +129,15 @@ index e69de29..c674b91 100644
 +		}
 +		launch := c.GetHeader(preflightreceipt.ReviewHeader)
 +		session := c.GetHeader("Session-Id")
-+		switch preflightreceipt.SealReview(root, launch, session) {
++		status, receiptSHA := preflightreceipt.SealReviewWithDigest(root, launch, session)
++		switch status {
 +		case preflightreceipt.SealOK:
-+			c.JSON(http.StatusOK, gin.H{"status": "sealed"})
++			c.JSON(http.StatusOK, gin.H{
++				"status":         "sealed",
++				"launch":         launch,
++				"session":        session,
++				"receipt_sha256": receiptSHA,
++			})
 +		case preflightreceipt.SealInFlight:
 +			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"status": "in_flight"})
 +		case preflightreceipt.SealUnavailable:
@@ -316,10 +322,10 @@ index 0000000..023455e
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..8f6f5f6 100644
+index e69de29..6ee3b81 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1178 @@
+@@ -0,0 +1,1205 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -969,10 +975,12 @@ index e69de29..8f6f5f6 100644
 +				return r.Requests == 2 && r.Complete && !r.Sealed && !r.Tainted
 +			})
 +			// Seal the launch once all in-flight turns have finished.
++			var sealBody []byte
 +			deadline := time.Now().Add(2 * time.Second)
 +			for {
 +				sres := seal(tc.launch, tc.session)
 +				if sres.Code == http.StatusOK {
++					sealBody = append([]byte(nil), sres.Body.Bytes()...)
 +					break
 +				}
 +				if sres.Code == http.StatusConflict && strings.Contains(sres.Body.String(), "in_flight") && time.Now().Before(deadline) {
@@ -984,6 +992,17 @@ index e69de29..8f6f5f6 100644
 +			raw, r := waitReceipt(t, tc.launch, func(r preflightreceipt.ReviewReceipt) bool {
 +				return r.Requests == 2 && r.Complete && r.Sealed && !r.Tainted
 +			})
++			var sealResp struct {
++				Status        string `json:"status"`
++				Launch        string `json:"launch"`
++				Session       string `json:"session"`
++				ReceiptSHA256 string `json:"receipt_sha256"`
++			}
++			if err := json.Unmarshal(sealBody, &sealResp); err != nil ||
++				sealResp.Status != "sealed" || sealResp.Launch != tc.launch || sealResp.Session != tc.session ||
++				sealResp.ReceiptSHA256 != shaHex(string(raw)) {
++				t.Fatalf("seal response mismatch: body=%s want sha=%s", string(sealBody), shaHex(string(raw)))
++			}
 +			wantRoute := "codex:" + tc.model + "@chatgpt.com"
 +			if r.Schema != preflightreceipt.ReviewSchema || r.Launch != tc.launch || r.Session != tc.session ||
 +				len(r.Routes) != 1 || r.Routes[0] != wantRoute || r.SealedAt < r.Finished ||
@@ -997,6 +1016,11 @@ index e69de29..8f6f5f6 100644
 +				t.Fatalf("post-seal request escaped guard: status=%d extraCalls=%d", resAfter.Code, len(models))
 +			}
 +			exportFixture(t, tc.fixture, tc.launch, raw)
++			if export := os.Getenv("PREFLIGHT_FIXTURES"); export != "" {
++				if err := os.WriteFile(filepath.Join(export, tc.fixture, tc.launch, "seal-response.json"), sealBody, 0600); err != nil {
++					t.Fatal(err)
++				}
++			}
 +		})
 +	}
 +
@@ -1403,8 +1427,17 @@ index e69de29..8f6f5f6 100644
 +			t.Fatalf("turn 2 did not reach upstream handler: hits=%d", upstreamHits.Load())
 +		}
 +		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
-+		if sealRes := seal(launch, session); sealRes.Code != http.StatusConflict || !strings.Contains(sealRes.Body.String(), "rejected") {
-+			t.Fatalf("SealReview accepted trailing-error stream after clean Turn 1: %d %s", sealRes.Code, sealRes.Body.String())
++		deadline := time.Now().Add(2 * time.Second)
++		for {
++			sealRes := seal(launch, session)
++			if sealRes.Code == http.StatusConflict && strings.Contains(sealRes.Body.String(), "in_flight") && time.Now().Before(deadline) {
++				time.Sleep(2 * time.Millisecond)
++				continue
++			}
++			if sealRes.Code != http.StatusConflict || !strings.Contains(sealRes.Body.String(), "rejected") {
++				t.Fatalf("SealReview accepted trailing-error stream after clean Turn 1: %d %s", sealRes.Code, sealRes.Body.String())
++			}
++			break
 +		}
 +	})
 +
@@ -1583,10 +1616,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..b96fea2
+index 0000000..00d60a4
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,344 @@
 +package executor
 +
 +import (
@@ -1788,8 +1821,151 @@ index 0000000..b96fea2
 +		})
 +	}
 +}
++
++func TestReviewReceiptCodexExecutorCancelBeforeTerminalObservationTaintsPriorTurn(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R2): if Turn 1 succeeded cleanly and Turn 2 receives a terminal or
++	// non-terminal frame carrying a spoofed/wrong model while ctx cancels before downstream reads
++	// stream2.Chunks, CodexExecutor MUST taint the launch so Turn 1 cannot be sealed.
++	tlsState := preflightCodexVerifiedTLS(t, "chatgpt.com")
++	exec := NewCodexExecutor(&config.Config{})
++	auth := &cliproxyauth.Auth{
++		ID:       "codex-review-cancel-test",
++		Provider: "codex",
++		Metadata: map[string]any{"access_token": "test-token", "account_id": "acct-test"},
++	}
++	req := cliproxyexecutor.Request{
++		Model:   "gpt-6.2-sol",
++		Payload: []byte(`{"model":"gpt-6.2-sol","stream":true,"input":[]}`),
++	}
++	opts := cliproxyexecutor.Options{
++		Stream:         true,
++		SourceFormat:   sdktranslator.FormatOpenAIResponse,
++		ResponseFormat: sdktranslator.FormatOpenAIResponse,
++	}
++	sse1 := "data: " + `{"type":"response.completed","response":{"id":"resp_cancel_t1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1"}]}]}}` + "\n\n"
++
++	for _, tc := range []struct {
++		name    string
++		launch  string
++		session string
++		sse2    string
++	}{
++		{
++			name:    "cancel drops buffered wrong-model response.completed",
++			launch:  "review-a2222222-2222-4333-8444-555555555501",
++			session: "019d0000-0000-7000-8000-555555555511",
++			sse2:    "data: " + `{"type":"response.completed","response":{"id":"resp_cancel_t2","status":"completed","model":"gpt-6.2-astra","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"spoof"}]}]}}` + "\n\n",
++		},
++		{
++			name:    "cancel drops undelivered wrong-model response.created",
++			launch:  "review-a2222222-2222-4333-8444-555555555502",
++			session: "019d0000-0000-7000-8000-555555555512",
++			sse2:    "data: " + `{"type":"response.created","response":{"id":"resp_cancel_t3","status":"in_progress","model":"gpt-6.2-astra"}}` + "\n\n",
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			root := filepath.Join(t.TempDir(), "receipts")
++
++			// Turn 1: clean completion.
++			ctx1, c1, err := preflightreceipt.BeginReview(context.Background(), root, tc.launch, tc.session, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatalf("turn 1 BeginReview: %v", err)
++			}
++			ctx1, lease1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatalf("turn 1 Start: %v", err)
++			}
++			rt1 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++				return io.NopCloser(strings.NewReader(sse1))
++			}}
++			ctx1 = context.WithValue(ctx1, "cliproxy.roundtripper", http.RoundTripper(rt1))
++			stream1, err := exec.ExecuteStream(ctx1, auth, req, opts)
++			if err != nil {
++				t.Fatalf("turn 1 ExecuteStream: %v", err)
++			}
++			for chunk := range stream1.Chunks {
++				if chunk.Err != nil {
++					t.Fatalf("turn 1 chunk err: %v", chunk.Err)
++				}
++				c1.ObserveStreamChunk(chunk.Payload)
++			}
++			lease1.End()
++			c1.Complete(true)
++			c1.HandlerDone(true)
++
++			// Turn 2: upstream sends wrong-model frame; cancel ctx WITHOUT reading stream2.Chunks
++			// so the executor goroutine must exit via <-ctx.Done() without delivering to wrapPreflightStream.
++			turn2Ctx, cancelTurn2 := context.WithCancel(context.Background())
++			defer cancelTurn2()
++			ctx2, c2, err := preflightreceipt.BeginReview(turn2Ctx, root, tc.launch, tc.session, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatalf("turn 2 BeginReview: %v", err)
++			}
++			ctx2, lease2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatalf("turn 2 Start: %v", err)
++			}
++			readDone := make(chan struct{})
++			rt2 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++				return &notifyEOFReader{data: tc.sse2, onEOF: func() { close(readDone) }}
++			}}
++			ctx2 = context.WithValue(ctx2, "cliproxy.roundtripper", http.RoundTripper(rt2))
++			stream2, err := exec.ExecuteStream(ctx2, auth, req, opts)
++			if err != nil {
++				t.Fatalf("turn 2 ExecuteStream: %v", err)
++			}
++			// Wait until the executor goroutine has read the frame from upstream, then cancel without receiving on out.
++			select {
++			case <-readDone:
++			case <-time.After(2 * time.Second):
++				t.Fatal("timed out waiting for executor to read turn 2 SSE body")
++			}
++			time.Sleep(15 * time.Millisecond)
++			cancelTurn2()
++			for range stream2.Chunks {
++			}
++			lease2.End()
++			c2.Complete(false)
++			c2.HandlerDone(false)
++
++			if st := preflightreceipt.SealReview(root, tc.launch, tc.session); st != preflightreceipt.SealRejected {
++				t.Fatalf("SealReview after canceled wrong-model turn 2 = %v, want SealRejected", st)
++			}
++		})
++	}
++}
++
++type notifyEOFReader struct {
++	data   string
++	offset int
++	onEOF  func()
++	fired  bool
++}
++
++func (r *notifyEOFReader) Read(p []byte) (int, error) {
++	if r.offset < len(r.data) {
++		n := copy(p, r.data[r.offset:])
++		r.offset += n
++		if r.offset >= len(r.data) && !r.fired {
++			r.fired = true
++			if r.onEOF != nil {
++				r.onEOF()
++			}
++		}
++		return n, nil
++	}
++	if !r.fired {
++		r.fired = true
++		if r.onEOF != nil {
++			r.onEOF()
++		}
++	}
++	return 0, io.EOF
++}
++
++func (r *notifyEOFReader) Close() error { return nil }
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..5e67fdd 100644
+index 6074124..8cf72a5 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -15,6 +15,8 @@ import (
@@ -1814,7 +1990,7 @@ index 6074124..5e67fdd 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,12 +450,27 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,12 +450,38 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -1836,15 +2012,25 @@ index 6074124..5e67fdd 100644
  			if errClose := httpResp.Body.Close(); errClose != nil {
  				log.Errorf("codex executor: close response body error: %v", errClose)
  			}
--		}()
 +		}
 +		defer closeBody()
 +		sawStrictTerminal := false
++		strictTerminalDelivered := false
++		defer func() {
++			// If upstream already emitted a terminal frame on a formal review stream, never allow
++			// downstream cancellation or an unexpected exit to drop it before ObserveStreamChunk
++			// validates the response model/ID/error fields (a mere Reject would leave prior turns sealable).
++			if strictReview && sawStrictTerminal && !strictTerminalDelivered {
++				if pc := preflightreceipt.From(ctx); pc != nil {
++					pc.Taint()
++				}
++			}
+ 		}()
 +		var pendingStrictTerminal []cliproxyexecutor.StreamChunk
  		for scanner.Scan() {
  			line := scanner.Bytes()
  			var translatedLine []byte
-@@ -465,6 +486,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -465,6 +497,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				translatedLine = append([]byte("data: "), data...)
  				eventType := ojson.GetBytesNoCopy(data, "type").String()
  				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
@@ -1856,7 +2042,7 @@ index 6074124..5e67fdd 100644
  					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
  						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
  						reporter.PublishFailure(ctx, errClearReplay)
-@@ -486,6 +512,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -486,6 +523,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  					sawOutputDelta = true
  				}
  				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
@@ -1868,7 +2054,7 @@ index 6074124..5e67fdd 100644
  					streamErr := newCodexEmptyIncompleteStreamError()
  					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
  					reporter.PublishFailure(ctx, streamErr)
-@@ -521,6 +552,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -521,6 +563,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  			}
  
  			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
@@ -1894,7 +2080,21 @@ index 6074124..5e67fdd 100644
  			for i := range chunks {
  				select {
  				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent}:
-@@ -546,6 +596,56 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -528,6 +589,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 						emittedCount++
+ 					}
+ 				case <-ctx.Done():
++					if strictReview {
++						if pc := preflightreceipt.From(ctx); pc != nil {
++							for j := i; j < len(chunks); j++ {
++								pc.ObserveStreamChunk(chunks[j])
++							}
++						}
++					}
+ 					return
+ 				}
+ 			}
+@@ -546,6 +614,59 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
@@ -1939,6 +2139,9 @@ index 6074124..5e67fdd 100644
 +					merged := cliproxyexecutor.StreamChunk{Payload: combined.Bytes(), Incomplete: incomplete}
 +					select {
 +					case out <- merged:
++						// strictReview disables bootstrap buffering so out is unbuffered; handoff here
++						// guarantees wrapPreflightStream received merged and will invoke ObserveStreamChunk.
++						strictTerminalDelivered = true
 +						if len(merged.Payload) > 0 {
 +							emittedCount++
 +						}
@@ -3465,10 +3668,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..eedd7b4 100644
+index e69de29..8632f27 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2067 @@
+@@ -0,0 +1,2094 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3580,6 +3783,7 @@ index e69de29..eedd7b4 100644
 +	lastOutputSHA     string
 +	sealed            bool
 +	sealSynced        bool
++	sealedReceiptSHA  string
 +	tainted           bool
 +	taintedPersisted  bool
 +	reserved          bool
@@ -4354,6 +4558,7 @@ index e69de29..eedd7b4 100644
 +		lastOutputSHA:     disk.LastOutputSHA256,
 +		sealed:            true,
 +		sealedFlag:        true,
++		sealedReceiptSHA:  sha256Hex(string(raw)),
 +		tainted:           false,
 +		reserved:          true,
 +		markerPersisted:   true,
@@ -4574,14 +4779,21 @@ index e69de29..eedd7b4 100644
 +}
 +
 +// SealReview seals a formal review launch once all in-flight requests have completed.
-+// Checking inFlight == 0 and entering the sealing barrier happen atomically under reviewMu
-+// so no concurrent request can be admitted after SealReview checks quiescence.
 +func SealReview(root, launch, session string) SealStatus {
++	st, _ := SealReviewWithDigest(root, launch, session)
++	return st
++}
++
++// SealReviewWithDigest seals a formal review launch once all in-flight requests have completed,
++// and returns the SHA-256 hex digest of the durably sealed receipt.json ONLY when status is SealOK
++// (after both launch and root directory fsyncs succeed). Consumers MUST require this confirmed digest
++// so a pre-fsync rename visible on disk after SealUnavailable can never be accepted as a durable seal.
++func SealReviewWithDigest(root, launch, session string) (SealStatus, string) {
 +	if !reviewLaunchPattern.MatchString(launch) || !reviewSessionPattern.MatchString(session) || !filepath.IsAbs(root) {
-+		return SealRejected
++		return SealRejected, ""
 +	}
 +	if _, err := checkPrivateDir(root, true); err != nil {
-+		return SealUnavailable
++		return SealUnavailable, ""
 +	}
 +	key := root + "\x00" + launch
 +	now := time.Now()
@@ -4594,19 +4806,22 @@ index e69de29..eedd7b4 100644
 +			entry.mu.Lock()
 +			defer entry.mu.Unlock()
 +			if !entry.sealed || entry.tainted || entry.session != session {
-+				return SealRejected
++				return SealRejected, ""
 +			}
 +			if !entry.sealSynced {
 +				if syncDirFn(entry.directory) != nil || syncDirFn(root) != nil {
-+					return SealUnavailable
++					return SealUnavailable, ""
 +				}
 +				entry.sealSynced = true
 +			}
-+			return SealOK
++			if !isSHA256Hex(entry.sealedReceiptSHA) {
++				return SealUnavailable, ""
++			}
++			return SealOK, entry.sealedReceiptSHA
 +		}
 +		if entry.sealing || entry.inFlight > 0 {
 +			reviewMu.Unlock()
-+			return SealInFlight
++			return SealInFlight, ""
 +		}
 +		entry.sealing = true
 +		entry.touched = now
@@ -4627,44 +4842,47 @@ index e69de29..eedd7b4 100644
 +			if !ok {
 +				entry.mu.Unlock()
 +				finishSeal(true)
-+				return SealRejected
++				return SealRejected, ""
 +			}
 +			if !entry.sealSynced {
 +				if syncDirFn(entry.directory) != nil || syncDirFn(root) != nil {
 +					entry.mu.Unlock()
 +					finishSeal(true)
-+					return SealUnavailable
++					return SealUnavailable, ""
 +				}
 +				entry.sealSynced = true
 +			}
++			digest := entry.sealedReceiptSHA
 +			entry.mu.Unlock()
 +			finishSeal(true)
-+			return SealOK
++			if !isSHA256Hex(digest) {
++				return SealUnavailable, ""
++			}
++			return SealOK, digest
 +		}
 +		if overflowed {
 +			entry.mu.Unlock()
 +			finishSeal(false)
-+			return SealUnavailable
++			return SealUnavailable, ""
 +		}
 +		if entry.tainted || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) ||
 +			len(entry.responseIDSHAs) != entry.requests || entry.responseIDSHAs[len(entry.responseIDSHAs)-1] != entry.lastResponseIDSHA {
 +			entry.mu.Unlock()
 +			finishSeal(false)
-+			return SealRejected
++			return SealRejected, ""
 +		}
 +		if entry.session != session {
 +			entry.taintAndPersistLocked()
 +			entry.mu.Unlock()
 +			finishSeal(false)
-+			return SealRejected
++			return SealRejected, ""
 +		}
 +		// Single-phase atomic rename + mandatory dir-sync confirmation:
 +		// - If write/sync/rename fails BEFORE receipt.json is replaced, disk still holds sealed=false;
 +		//   taint & permanently close so repeat and post-restart SealReview return SealRejected.
 +		// - Once Rename replaces receipt.json with the verified, clean, quiescent sealed=true payload,
-+		//   the launch is permanently sealed against new turns/taints; SealOK is returned ONLY after
-+		//   both launch and root directory fsyncs succeed (retries & post-restart recovery re-verify
-+		//   dir fsync idempotently, eliminating split-brain between RAM and read-only disk).
++		//   the launch is permanently sealed against new turns/taints; SealOK + receipt_sha256 are returned
++		//   ONLY after both launch and root directory fsyncs succeed.
 +		entry.sealed = true
 +		entry.sealedAt = now.UnixNano()
 +		if entry.sealedAt < entry.finished {
@@ -4674,44 +4892,53 @@ index e69de29..eedd7b4 100644
 +		if entry.tainted || !entry.sealed {
 +			entry.sealed = false
 +			entry.sealedAt = 0
++			entry.sealedReceiptSHA = ""
 +			entry.taintedPersisted = renamed && err == nil
 +			entry.mu.Unlock()
 +			finishSeal(true)
-+			return SealRejected
++			return SealRejected, ""
 +		}
 +		if !renamed {
 +			entry.sealed = false
 +			entry.sealedAt = 0
++			entry.sealedReceiptSHA = ""
 +			entry.taintAndPersistLocked()
 +			entry.mu.Unlock()
 +			finishSeal(true)
-+			return SealUnavailable
++			return SealUnavailable, ""
 +		}
 +		if err != nil || syncDirFn(root) != nil {
 +			entry.sealSynced = false
 +			entry.mu.Unlock()
 +			finishSeal(true)
-+			return SealUnavailable
++			return SealUnavailable, ""
 +		}
 +		entry.sealSynced = true
++		digest := entry.sealedReceiptSHA
 +		entry.mu.Unlock()
 +		finishSeal(true)
-+		return SealOK
++		if !isSHA256Hex(digest) {
++			return SealUnavailable, ""
++		}
++		return SealOK, digest
 +	}
 +	reviewMu.Unlock()
 +
 +	dir := filepath.Join(root, launch)
 +	diskEntry, onDisk, err := loadReviewEntryFromDisk(dir, launch, session, now)
 +	if err != nil {
-+		return SealUnavailable
++		return SealUnavailable, ""
 +	}
 +	if !onDisk || diskEntry == nil || !diskEntry.sealed || diskEntry.tainted || diskEntry.session != session {
-+		return SealRejected
++		return SealRejected, ""
 +	}
 +	if syncDirFn(dir) != nil || syncDirFn(root) != nil {
-+		return SealUnavailable
++		return SealUnavailable, ""
 +	}
-+	return SealOK
++	if !isSHA256Hex(diskEntry.sealedReceiptSHA) {
++		return SealUnavailable, ""
++	}
++	return SealOK, diskEntry.sealedReceiptSHA
 +}
 +
 +// BeginReviewReserved transfers an already-reserved in-flight review launch into a Collector
@@ -5445,6 +5672,9 @@ index e69de29..eedd7b4 100644
 +		_ = os.Remove(tmp)
 +		return fail(false, err)
 +	}
++	if sealed {
++		e.sealedReceiptSHA = sha256Hex(string(data))
++	}
 +	if err := syncDirFn(e.directory); err != nil {
 +		return fail(true, err)
 +	}
@@ -5537,7 +5767,7 @@ index e69de29..eedd7b4 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..0b6ef1d 100644
+index e69de29..0592658 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
 @@ -0,0 +1,2642 @@
@@ -7724,21 +7954,21 @@ index e69de29..0b6ef1d 100644
 +		}
 +		return origSync(dir)
 +	}
-+	if st := SealReview(root3, launch3, session3); st != SealUnavailable {
-+		t.Fatalf("SealReview with post-rename dir-sync failure = %v, want SealUnavailable", st)
++	if st, digest := SealReviewWithDigest(root3, launch3, session3); st != SealUnavailable || digest != "" {
++		t.Fatalf("SealReviewWithDigest with post-rename dir-sync failure = (%v, %q), want (SealUnavailable, \"\")", st, digest)
 +	}
-+	// Repeat in-process while dir-sync still fails MUST still return SealUnavailable (not SealOK).
-+	if st := SealReview(root3, launch3, session3); st != SealUnavailable {
-+		t.Fatalf("repeat in-process SealReview while dir-sync fails = %v, want SealUnavailable", st)
++	// Repeat in-process while dir-sync still fails MUST still return SealUnavailable with empty digest.
++	if st, digest := SealReviewWithDigest(root3, launch3, session3); st != SealUnavailable || digest != "" {
++		t.Fatalf("repeat in-process SealReviewWithDigest while dir-sync fails = (%v, %q), want (SealUnavailable, \"\")", st, digest)
 +	}
 +	// Wrong session rejects immediately; new BeginReview is blocked.
-+	if st := SealReview(root3, launch3, "019d0000-0000-7000-8000-000000000999"); st != SealRejected {
-+		t.Fatalf("wrong-session SealReview while unsynced = %v, want SealRejected", st)
++	if st, digest := SealReviewWithDigest(root3, launch3, "019d0000-0000-7000-8000-000000000999"); st != SealRejected || digest != "" {
++		t.Fatalf("wrong-session SealReviewWithDigest while unsynced = (%v, %q), want (SealRejected, \"\")", st, digest)
 +	}
 +	if _, _, err := BeginReview(context.Background(), root3, launch3, session3, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("in-process BeginReview after seal rename err = %v, want ErrUnavailable", err)
 +	}
-+	// Post-restart while dir-sync STILL fails MUST return SealUnavailable (not SealOK!).
++	// Post-restart while dir-sync STILL fails MUST return SealUnavailable with empty digest (never confirm un-fsynced seal!).
 +	sealedBytes3, err := os.ReadFile(filepath.Join(launchDir3, "receipt.json"))
 +	if err != nil || !strings.Contains(string(sealedBytes3), `"sealed":true`) {
 +		t.Fatalf("expected sealed=true receipt on disk: err=%v raw=%s", err, string(sealedBytes3))
@@ -7746,23 +7976,23 @@ index e69de29..0b6ef1d 100644
 +	reviewMu.Lock()
 +	delete(reviewLedger, root3+"\x00"+launch3)
 +	reviewMu.Unlock()
-+	if st := SealReview(root3, launch3, session3); st != SealUnavailable {
-+		t.Fatalf("post-restart SealReview while dir-sync fails = %v, want SealUnavailable", st)
++	if st, digest := SealReviewWithDigest(root3, launch3, session3); st != SealUnavailable || digest != "" {
++		t.Fatalf("post-restart SealReviewWithDigest while dir-sync fails = (%v, %q), want (SealUnavailable, \"\")", st, digest)
 +	}
 +	// If crash lost the unsynced rename (receipt.json reverts to sealed=false), post-restart returns SealRejected.
 +	syncDirFn = origSync
 +	if err := os.WriteFile(filepath.Join(launchDir3, "receipt.json"), unsealedBefore3, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	if st := SealReview(root3, launch3, session3); st != SealRejected {
-+		t.Fatalf("post-restart SealReview after crash lost rename = %v, want SealRejected", st)
++	if st, digest := SealReviewWithDigest(root3, launch3, session3); st != SealRejected || digest != "" {
++		t.Fatalf("post-restart SealReviewWithDigest after crash lost rename = (%v, %q), want (SealRejected, \"\")", st, digest)
 +	}
-+	// Once intact sealed=true receipt is on disk AND dir-sync succeeds, idempotent SealReview returns SealOK.
++	// Once intact sealed=true receipt is on disk AND dir-sync succeeds, idempotent SealReviewWithDigest returns SealOK + exact SHA-256.
 +	if err := os.WriteFile(filepath.Join(launchDir3, "receipt.json"), sealedBytes3, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	if st := SealReview(root3, launch3, session3); st != SealOK {
-+		t.Fatalf("post-restart SealReview once intact sealed=true + dir-sync succeed = %v, want SealOK", st)
++	if st, digest := SealReviewWithDigest(root3, launch3, session3); st != SealOK || digest != sha256Hex(string(sealedBytes3)) {
++		t.Fatalf("post-restart SealReviewWithDigest once intact sealed=true + dir-sync succeed = (%v, %q), want (SealOK, %q)", st, digest, sha256Hex(string(sealedBytes3)))
 +	}
 +}
 +

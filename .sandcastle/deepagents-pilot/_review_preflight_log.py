@@ -1,4 +1,5 @@
 """#1742 私有日志读取器；宿主与容器使用同一解析实现。"""
+import hashlib
 import json
 import os
 import re
@@ -101,16 +102,25 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
 
 def review_from_receipt(
     root: Path, launch: str, session: str, since: float, wait: float, *,
-    expected_response_id_sha256: str = "", expected_output_sha256: str = "", min_requests: int = 1,
+    expected_receipt_sha256: str = "", expected_response_id_sha256: str = "",
+    expected_output_sha256: str = "", min_requests: int = 1,
 ) -> dict | None:
-    """消费代理为正式独审 launch 封存的不可变 cliproxy-review-v1 收据；缺项、污染或模型不符立即返回 None；
-    未封存（sealed!=True）绝不放行，仅在 wait 截止时间内轮询等待封存落盘，超时仍未封存返回 None。"""
+    """消费代理为正式独审 launch 封存的不可变 cliproxy-review-v1 收据；必须提供代理封存接口确认返回的
+    expected_receipt_sha256，防止仅凭尚未完成目录 fsync 的磁盘文件可见性放行。缺项、污染、哈希或请求数不符
+    立即返回 None；合法占位或未封存中间态在 wait 截止时间内轮询等待封存落盘，超时仍未封存返回 None。"""
     if not REVIEW_LAUNCH.fullmatch(launch) or not REVIEW_SESSION.fullmatch(session):
+        return None
+    if not expected_receipt_sha256 or not SHA256_HEX.fullmatch(expected_receipt_sha256):
         return None
     if expected_response_id_sha256 and not SHA256_HEX.fullmatch(expected_response_id_sha256):
         return None
     if expected_output_sha256 and not SHA256_HEX.fullmatch(expected_output_sha256):
         return None
+    expected_keys = {
+        "schema", "launch", "session", "started_ns", "finished_ns", "sealed_at_ns",
+        "complete", "sealed", "tainted", "requests", "routes",
+        "response_id_sha256s", "last_response_id_sha256", "last_output_sha256",
+    }
     end = time.monotonic() + max(0, wait)
     while True:
         try:
@@ -137,18 +147,51 @@ def review_from_receipt(
             payload = json.loads(raw, object_pairs_hook=_unique_object)
             now_ns = time.time_ns()
             if (not isinstance(payload, dict)
-                    or set(payload) != {"schema", "launch", "session", "started_ns", "finished_ns", "sealed_at_ns",
-                                        "complete", "sealed", "tainted", "requests", "routes",
-                                        "response_id_sha256s", "last_response_id_sha256", "last_output_sha256"}
-                    or payload["schema"] != REVIEW_SCHEMA or payload["launch"] != launch
-                    or payload["session"] != session
-                    or payload["complete"] is not True or payload["tainted"] is not False
+                    or set(payload) != expected_keys
+                    or payload["schema"] != REVIEW_SCHEMA
+                    or payload["launch"] != launch
+                    or payload["tainted"] is not False
                     or type(payload["sealed"]) is not bool
-                    or type(payload["requests"]) is not int or not 1 <= payload["requests"] <= MAX_REVIEW_RESPONSE_IDS
-                    or type(payload["started_ns"]) is not int or type(payload["finished_ns"]) is not int
-                    or type(payload["sealed_at_ns"]) is not int
+                    or type(payload["complete"]) is not bool
+                    or type(payload["requests"]) is not int
+                    or not 0 <= payload["requests"] <= MAX_REVIEW_RESPONSE_IDS
+                    or type(payload["started_ns"]) is not int
+                    or type(payload["finished_ns"]) is not int
+                    or type(payload["sealed_at_ns"]) is not int):
+                return None
+            if payload["sealed"] is not True:
+                if payload["sealed_at_ns"] != 0:
+                    return None
+                # 合法初始预留占位（ReserveReview 在首轮读请求体前写入）或未封存的进行中收据：继续等待。
+                is_reservation_placeholder = (
+                    payload["session"] in ("", session)
+                    and payload["complete"] is False
+                    and payload["requests"] == 0
+                    and payload["routes"] == ["other"]
+                    and payload["response_id_sha256s"] == []
+                    and payload["last_response_id_sha256"] == ""
+                    and payload["last_output_sha256"] == ""
+                )
+                is_unsealed_progress = (
+                    payload["session"] == session
+                    and payload["complete"] is True
+                    and payload["requests"] >= 1
+                    and isinstance(payload["routes"], list) and len(payload["routes"]) == 1
+                    and isinstance(payload["routes"][0], str)
+                    and payload["routes"][0] in REVIEW_RECEIPT_ROUTES
+                )
+                if not (is_reservation_placeholder or is_unsealed_progress):
+                    return None
+                if time.monotonic() >= end:
+                    return None
+                time.sleep(min(0.02, max(0, end - time.monotonic())))
+                continue
+            if (payload["session"] != session
+                    or payload["complete"] is not True
+                    or payload["requests"] < 1
                     or not int((since - 1) * 1e9) <= payload["started_ns"] <= payload["finished_ns"] <= now_ns
                     or payload["finished_ns"] - payload["started_ns"] > MAX_REVIEW_DURATION_NS
+                    or not payload["finished_ns"] <= payload["sealed_at_ns"] <= now_ns
                     or not isinstance(payload["routes"], list) or len(payload["routes"]) != 1
                     or not isinstance(payload["routes"][0], str)
                     or payload["routes"][0] not in REVIEW_RECEIPT_ROUTES
@@ -162,16 +205,17 @@ def review_from_receipt(
                     or not isinstance(payload["last_output_sha256"], str)
                     or (payload["last_output_sha256"] != "" and not SHA256_HEX.fullmatch(payload["last_output_sha256"]))):
                 return None
-            if payload["sealed"] is not True:
-                if payload["sealed_at_ns"] != 0:
-                    return None
-                if time.monotonic() >= end:
-                    return None
-                time.sleep(min(0.02, max(0, end - time.monotonic())))
-                continue
-            if not payload["finished_ns"] <= payload["sealed_at_ns"] <= now_ns:
+            if hashlib.sha256(raw).hexdigest() != expected_receipt_sha256:
                 return None
-            result = {
+            matched = (
+                payload["requests"] >= max(1, min_requests)
+                and (not expected_response_id_sha256 or payload["last_response_id_sha256"] == expected_response_id_sha256)
+                and (not expected_output_sha256 or payload["last_output_sha256"] == expected_output_sha256)
+            )
+            # 已封存收据不可变：与预期请求数、响应 ID 或输出摘要不符时立即失败闭合，不得继续等待或放行。
+            if not matched:
+                return None
+            return {
                 "routes": [tuple(payload["routes"][0].split("@"))],
                 "requests": payload["requests"],
                 "sealed": True,
@@ -179,14 +223,6 @@ def review_from_receipt(
                 "last_response_id_sha256": payload["last_response_id_sha256"],
                 "last_output_sha256": payload["last_output_sha256"],
             }
-            matched = (
-                payload["requests"] >= max(1, min_requests)
-                and (not expected_response_id_sha256 or payload["last_response_id_sha256"] == expected_response_id_sha256)
-                and (not expected_output_sha256 or payload["last_output_sha256"] == expected_output_sha256)
-            )
-            if matched or time.monotonic() >= end:
-                return result
-            time.sleep(min(0.02, max(0, end - time.monotonic())))
         except FileNotFoundError:
             if time.monotonic() >= end:
                 return None
@@ -200,11 +236,12 @@ def main():
     arguments = sys.argv[1:]
     if arguments[:1] == ["--review-receipt"]:
         rest = arguments[1:]
-        if len(rest) == 7:
-            log_dir, launch, session, since, expires, budget, known_json = rest
+        if len(rest) == 8:
+            log_dir, launch, session, since, expires, budget, known_json, expected_receipt_sha = rest
             expected_rid, expected_out, min_reqs = "", "", 1
-        elif len(rest) == 10:
-            log_dir, launch, session, since, expires, budget, known_json, expected_rid, expected_out, raw_min = rest
+        elif len(rest) == 11:
+            (log_dir, launch, session, since, expires, budget, known_json,
+             expected_receipt_sha, expected_rid, expected_out, raw_min) = rest
             min_reqs = int(raw_min)
         else:
             return 2
@@ -216,7 +253,10 @@ def main():
         known = {tuple(route): "@".join(route) for route in json.loads(known_json)}
         info = review_from_receipt(
             Path(log_dir), launch, session, float(since), remaining,
-            expected_response_id_sha256=expected_rid, expected_output_sha256=expected_out, min_requests=min_reqs,
+            expected_receipt_sha256=expected_receipt_sha,
+            expected_response_id_sha256=expected_rid,
+            expected_output_sha256=expected_out,
+            min_requests=min_reqs,
         )
         print(json.dumps({
             "launch": launch,
