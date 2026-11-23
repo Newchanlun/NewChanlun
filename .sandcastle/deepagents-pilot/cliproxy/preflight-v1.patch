@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..fb66a80 100644
+index e69de29..4923e52 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1979 @@
+@@ -0,0 +1,1985 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3964,14 +3964,18 @@ index e69de29..fb66a80 100644
 +	}
 +	if !entry.markerPersisted {
 +		if persistErr := entry.persistLocked(); persistErr != nil {
-+			canEvict := !entry.markerPersisted && !entry.tainted && entry.requests == 0
 +			entry.mu.Unlock()
 +			reviewMu.Lock()
 +			if entry.inFlight > 0 {
 +				entry.inFlight--
 +			}
-+			if canEvict && entry.inFlight == 0 && reviewLedger[key] == entry {
-+				delete(reviewLedger, key)
++			if entry.inFlight == 0 && !entry.sealing && !entry.sealedFlag && reviewLedger[key] == entry {
++				entry.mu.Lock()
++				canEvict := !entry.markerPersisted && !entry.tainted && !entry.sealed && entry.requests == 0
++				entry.mu.Unlock()
++				if canEvict {
++					delete(reviewLedger, key)
++				}
 +			}
 +			reviewMu.Unlock()
 +			return nil, ErrUnavailable
@@ -4720,13 +4724,12 @@ index e69de29..fb66a80 100644
 +	c.attempts++
 +	e.attempts++
 +	c.bodies++
++	slot := len(c.receipt.Routes)
++	c.receipt.Routes = append(c.receipt.Routes, "other")
 +	c.mu.Unlock()
 +	resp, err := t.next.RoundTrip(req)
 +	finish := func() { c.mu.Lock(); defer c.mu.Unlock(); c.bodies--; c.publishLocked() }
 +	if err != nil {
-+		c.mu.Lock()
-+		c.receipt.Routes = append(c.receipt.Routes, "other")
-+		c.mu.Unlock()
 +		if strict {
 +			if observed != "other" && isTLSVerificationError(err) {
 +				c.Taint()
@@ -4739,7 +4742,12 @@ index e69de29..fb66a80 100644
 +		finish()
 +		return nil, err
 +	}
-+	if resp != nil && observed != "other" {
++	if resp == nil {
++		c.Reject()
++		finish()
++		return nil, nil
++	}
++	if observed != "other" {
 +		expectedHost := strings.ToLower(req.URL.Hostname())
 +		tlsOK := resp.TLS != nil &&
 +			resp.TLS.HandshakeComplete &&
@@ -4760,12 +4768,10 @@ index e69de29..fb66a80 100644
 +			return nil, ErrUnavailable
 +		}
 +	}
-+	if resp != nil {
-+		c.mu.Lock()
-+		c.receipt.Routes = append(c.receipt.Routes, observed)
-+		c.mu.Unlock()
-+	}
-+	if resp == nil || resp.Body == nil {
++	c.mu.Lock()
++	c.receipt.Routes[slot] = observed
++	c.mu.Unlock()
++	if resp.Body == nil {
 +		finish()
 +	} else {
 +		resp.Body = &body{
@@ -5008,10 +5014,10 @@ index e69de29..fb66a80 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..68cd077 100644
+index e69de29..f133cc6 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2220 @@
+@@ -0,0 +1,2386 @@
 +package preflightreceipt
 +
 +import (
@@ -5036,6 +5042,7 @@ index e69de29..68cd077 100644
 +	"path/filepath"
 +	"strings"
 +	"sync"
++	"sync/atomic"
 +	"testing"
 +	"time"
 +
@@ -7230,5 +7237,170 @@ index e69de29..68cd077 100644
 +	}
 +	if st := SealReview(root3, launch3, session3); st != SealOK {
 +		t.Fatalf("post-restart SealReview once intact sealed=true + dir-sync succeed = %v, want SealOK", st)
++	}
++}
++
++func TestReserveReview_PersistFailureDoesNotEvictConcurrentPersistedEntry(t *testing.T) {
++	root := t.TempDir()
++	if err := os.Chmod(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	launch := "review-12345678-1234-4234-8234-1234567890ef"
++	session := "019d0000-0000-7000-8000-000000000391"
++	key := root + "\x00" + launch
++
++	origSync := syncDirFn
++	defer func() { syncDirFn = origSync }()
++
++	inSync := make(chan struct{})
++	proceedSync := make(chan struct{})
++	var failOnce atomic.Bool
++	failOnce.Store(true)
++	syncDirFn = func(dir string) error {
++		if failOnce.CompareAndSwap(true, false) {
++			close(inSync)
++			<-proceedSync
++			return errors.New("injected first persist dir-sync error")
++		}
++		return origSync(dir)
++	}
++
++	req1Err := make(chan error, 1)
++	go func() {
++		_, err := ReserveReview(root, launch)
++		req1Err <- err
++	}()
++	<-inSync
++
++	// Grab the same ledger entry while req1 is inside persistLocked (holding entry.mu, not reviewMu).
++	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), true, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	// Hold reviewMu while letting req1 finish persistLocked and unlock entry.mu, so req1 blocks right at reviewMu.Lock().
++	reviewMu.Lock()
++	close(proceedSync)
++	// Acquiring entry.mu under reviewMu (global lock order) blocks until req1 has released entry.mu after computing error.
++	entry.mu.Lock()
++	// Simulate concurrent request persisting the entry and recording a completed request on disk.
++	entry.session = session
++	entry.route = "codex:gpt-6.2-sol@chatgpt.com"
++	entry.requests = 1
++	entry.responseIDSHAs = []string{strings.Repeat("a", 64)}
++	entry.lastResponseIDSHA = strings.Repeat("a", 64)
++	entry.lastOutputSHA = strings.Repeat("b", 64)
++	entry.finished = time.Now().UnixNano()
++	if persistErr := entry.persistLocked(); persistErr != nil {
++		entry.mu.Unlock()
++		reviewMu.Unlock()
++		t.Fatalf("concurrent persistLocked err = %v", persistErr)
++	}
++	entry.mu.Unlock()
++	// Release concurrent request's inFlight so req1 will observe entry.inFlight dropping to 0.
++	entry.inFlight--
++	reviewMu.Unlock()
++
++	if err := <-req1Err; !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("req1 ReserveReview err = %v, want ErrUnavailable", err)
++	}
++
++	// Entry MUST NOT have been evicted from reviewLedger when req1 observed inFlight==0.
++	reviewMu.Lock()
++	got := reviewLedger[key]
++	reviewMu.Unlock()
++	if got != entry {
++		t.Fatalf("reviewLedger[%q] was evicted despite concurrent persisted request", key)
++	}
++	if st := SealReview(root, launch, session); st != SealOK {
++		t.Fatalf("SealReview after concurrent persist = %v, want SealOK", st)
++	}
++}
++
++func TestRoundTrip_ConcurrentPreflightPreservesRequestInitiationOrder(t *testing.T) {
++	root := t.TempDir()
++	if err := os.Chmod(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	token := "preflight-12345678-1234-4234-8234-123456789390"
++	ctx, c, err := Begin(context.Background(), root, token)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c.Start(ctx, "kimi", "kimi-k3.1-pro")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx2, e2, err := c.Start(ctx, "claude", "claude-opus-4-6")
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	req1Entered := make(chan struct{})
++	req2Finished := make(chan struct{})
++	var wg sync.WaitGroup
++	wg.Add(2)
++
++	go func() {
++		defer wg.Done()
++		cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			close(req1Entered)
++			<-req2Finished // Force request 1 to respond AFTER request 2.
++			return &http.Response{
++				StatusCode: 200,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(strings.NewReader("ok1")),
++				TLS:        verifiedTLSState("api.kimi.com"),
++			}, nil
++		})})
++		req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://api.kimi.com/v1/messages", strings.NewReader("{}"))
++		resp1, err := cl1.Do(req1)
++		if err != nil {
++			t.Errorf("req1 err: %v", err)
++			return
++		}
++		_, _ = io.Copy(io.Discard, resp1.Body)
++		_ = resp1.Body.Close()
++		e1.End()
++	}()
++
++	go func() {
++		defer wg.Done()
++		<-req1Entered // Guarantee request 2 is initiated AFTER request 1.
++		cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: 200,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(strings.NewReader("ok2")),
++				TLS:        verifiedTLSState("api.anthropic.com"),
++			}, nil
++		})})
++		req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader("{}"))
++		resp2, err := cl2.Do(req2)
++		if err != nil {
++			t.Errorf("req2 err: %v", err)
++			return
++		}
++		_, _ = io.Copy(io.Discard, resp2.Body)
++		_ = resp2.Body.Close()
++		e2.End()
++		close(req2Finished)
++	}()
++
++	wg.Wait()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	raw, err := os.ReadFile(filepath.Join(root, token, "receipt.json"))
++	if err != nil {
++		t.Fatalf("read receipt.json: %v", err)
++	}
++	var got Receipt
++	if err := json.Unmarshal(raw, &got); err != nil {
++		t.Fatalf("unmarshal receipt.json: %v", err)
++	}
++	want := []string{"kimi@api.kimi.com", "claude@api.anthropic.com"}
++	if len(got.Routes) != len(want) || got.Routes[0] != want[0] || got.Routes[1] != want[1] {
++		t.Fatalf("receipt.Routes = %v, want request-initiation order %v", got.Routes, want)
 +	}
 +}

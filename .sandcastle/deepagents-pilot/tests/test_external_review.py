@@ -4402,3 +4402,103 @@ def test_r38_metadata_only_break_chars_nonascii_u0_and_reuse_recovery(lane, env,
     cmd_ff = f"git diff --no-ext-diff --no-textconv {t_ff.merge_base_sha} {t_ff.head_sha}"
     assert any("\x0c" in u[3] for u in patch_ff.all_change_units)
     assert not patch_ff.all_change_units.issubset(covered_candidate_patch_units(cmd_ff, ff_diff, patch_ff))
+
+
+def test_r39_rereview_attempt_binding_model_reverify_eof_newline_and_space_path(lane, env):
+    """R39（Sol P1 #1 + Sol P2 #3 + Astra P1 #1 + Astra P2 #2/#3）：
+    1. A2 预检期间 A3 写入重审意图并预检失败后，A2 登记与发布绝不能把 A3 意图判为已承接或误删，且 `_superseded_on_head(A2)` 为 True；
+    2. `_reverify_sealed_receipts` 在两目录均放同一模型（Sol+Sol 不同 session）时必须按目录核对模型身份并判 FAILED，绝不发布 success；
+    3. 仅删/加末尾换行（`\\ No newline at end of file`）时，截断在无换行标记前的输出不得通过 PASS，完整 diff 与 `-U0 | nl -ba` 须通过；
+    4. 含空格中文/ASCII 路径的 `---`/`+++` 末尾 Git 制表符须先剥离再解码，`FrozenFile.path`、`git show` 与 `-U0` 分段补读均匹配。"""
+    from pilot1742.patch_read import covered_candidate_patch_units
+
+    # 1. Sol P1 #1：A1 PASS 后，A2 慢预检期间 A3 写入重审意图并失败，A2 落盘后 A3 意图仍 pending 且取代 A2，A2 不可清除之
+    first = lane.review_pr(1810, 1)
+    assert first["verdict"] == "PASS"
+    head1 = first["target"]["head_sha"]
+    base1 = first["target"]["base_sha"]
+
+    a3_preview = lane._frozen(module.load_target(lane.gateway, 1810), 3)
+    lane._record_rereview_intent(a3_preview)
+    t2 = lane.target(1810, 2)
+    assert t2.attempt == 2
+    assert lane.has_pending_rereview_intent(1810, head1, base1) is True
+    assert lane._superseded_on_head(t2) is True
+    with lane._pr_lock(1810):
+        lane._clear_rereview_intent_locked(t2)
+    assert lane.has_pending_rereview_intent(1810, head1, base1) is True
+    # 直到 A3 真正登记并清理后，意图才解除
+    t3 = lane.target(1810, 3)
+    assert lane.has_pending_rereview_intent(1810, head1, base1) is False
+    assert lane._superseded_on_head(t3) is False
+    with lane._pr_lock(1810):
+        lane._clear_rereview_intent_locked(t3)
+    assert not lane._rereview_intent_path(t3.repository_id, 1810, base1, head1).exists()
+
+    # 2. Astra P1 #1：_reverify_sealed_receipts 遇 MODELS[1] 目录被替换为 MODELS[0] 另一 session 时必须判 FAILED
+    f1 = lane.state_root / "runs" / ReviewTarget(**first["target"]).key
+    w1 = f1 / MODELS[1]
+    l1_path = w1 / "launch.json"
+    orig_l1 = json.loads(l1_path.read_text())
+    l1_path.write_text(json.dumps({**orig_l1, "model": MODELS[0]}))
+    t1_obj = ReviewTarget(**first["target"])
+    reverified = lane._reverify_sealed_receipts(t1_obj, f1, dict(first))
+    assert reverified["verdict"] == "FAILED" and reverified["state"] == "error"
+    assert any("不符" in (r.get("reason") or "") for r in reverified["reviews"])
+    l1_path.write_text(json.dumps(orig_l1))
+
+    # 3 & 4. Astra P2 #2/#3 + Sol P2 #3：仅删末尾换行 + 含空格中文/ASCII 路径（---/+++ 带末尾 \t）
+    (env.source / "eof_r39.txt").write_text("same_eof_line\n")
+    (env.source / "第一章 形态学_r39.md").write_text("line1_cn_space\nline2_cn_space\n")
+    (env.source / "my space_r39.py").write_text("SPACE_A = 1\n")
+    git(env.source, "add", "eof_r39.txt", "第一章 形态学_r39.md", "my space_r39.py")
+    git(env.source, "commit", "-qm", "base r39")
+    b39 = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["base"]["sha"] = b39
+
+    (env.source / "eof_r39.txt").write_text("same_eof_line")  # 唯一改动：删掉末尾换行
+    (env.source / "第一章 形态学_r39.md").write_text("line1_cn_space\nline2_cn_space_new\n")
+    (env.source / "my space_r39.py").write_text("SPACE_A = 2\n")
+    git(env.source, "add", "eof_r39.txt", "第一章 形态学_r39.md", "my space_r39.py")
+    git(env.source, "commit", "-qm", "r39 eof newline and space paths")
+    h39 = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = h39
+
+    t39 = lane.target(1810, 1)
+    p39 = module.frozen_patch(env.source, t39)
+    full39 = git(env.source, "diff", "--no-ext-diff", "--no-textconv", t39.merge_base_sha, t39.head_sha)
+    cmd39 = f"git diff --no-ext-diff --no-textconv {t39.merge_base_sha} {t39.head_sha}"
+
+    # 3. 删去末尾换行产生 `\+` 必读单元；截断掉 `\ No newline at end of file` 后不得满足全集，完整 diff 与 `-U0 | nl -ba` 均通过
+    eof_f = next(f for f in p39.files if f.path == "eof_r39.txt")
+    assert any(u[1] == "\\+" and "No newline" in u[3] for u in eof_f.changes)
+    eof_diff = git(env.source, "diff", "--no-ext-diff", "--no-textconv", t39.merge_base_sha, t39.head_sha, "--", "eof_r39.txt")
+    eof_without_marker = "\n".join(line for line in eof_diff.splitlines() if not line.startswith("\\")) + "\n"
+    assert not eof_f.changes.issubset(covered_candidate_patch_units(f"{cmd39} -- eof_r39.txt", eof_without_marker, p39))
+    assert eof_f.changes.issubset(covered_candidate_patch_units(f"{cmd39} -- eof_r39.txt", eof_diff, p39))
+    u0_eof = git(env.source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0",
+                 t39.merge_base_sha, t39.head_sha, "--", "eof_r39.txt")
+    num_eof = "\n".join(f"{i:6d}\t{line}" for i, line in enumerate(u0_eof.splitlines(), 1)) + "\n"
+    assert eof_f.changes.issubset(
+        covered_candidate_patch_units(f"{cmd39} -U0 -- eof_r39.txt | nl -ba | sed -n '1,99p'", num_eof, p39)
+    )
+
+    # 4. 含空格中文/ASCII 路径：Git 在 ---/+++ 后附带 \t，仍正确解码 path 且 git show 与 -U0 单文件分段补读均通过
+    cn_sp = next(f for f in p39.files if f.path == "第一章 形态学_r39.md")
+    en_sp = next(f for f in p39.files if f.path == "my space_r39.py")
+    assert cn_sp.git_old_path == "第一章 形态学_r39.md" and cn_sp.git_new_path == "第一章 形态学_r39.md"
+    assert en_sp.git_old_path == "my space_r39.py" and en_sp.git_new_path == "my space_r39.py"
+    assert p39.all_change_units.issubset(covered_candidate_patch_units(cmd39, full39, p39))
+    cmd_show_cn = f"git show {t39.head_sha}:'第一章 形态学_r39.md' | nl -ba | sed -n '2,2p'"
+    assert covered_candidate_patch_units(cmd_show_cn, "     2\tline2_cn_space_new\n", p39) == frozenset({
+        (cn_sp.header, "+", 2, "line2_cn_space_new"),
+    })
+    u0_cn_sp = git(env.source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0",
+                   t39.merge_base_sha, t39.head_sha, "--", "第一章 形态学_r39.md")
+    num_cn_sp = "\n".join(f"{i:6d}\t{line}" for i, line in enumerate(u0_cn_sp.splitlines(), 1)) + "\n"
+    assert cn_sp.changes.issubset(
+        covered_candidate_patch_units(
+            f"git diff --no-ext-diff --no-textconv -U0 {t39.merge_base_sha} {t39.head_sha} -- '第一章 形态学_r39.md' | nl -ba | sed -n '1,99p'",
+            num_cn_sp, p39,
+        )
+    )

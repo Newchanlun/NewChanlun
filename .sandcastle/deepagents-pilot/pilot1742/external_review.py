@@ -1629,9 +1629,12 @@ class ExternalReview:
                     prev_max = max(prev_max, _strict_pos_int(_read(run_dir / "target.json").get("registered_at_ns")))
                 except (OSError, ValueError, TypeError, IdentityError):
                     continue
+            existing_attempt = 0
             if path.exists():
                 try:
-                    prev_max = max(prev_max, _strict_pos_int(_read(path).get("recorded_at_ns")))
+                    prev_data = _read(path)
+                    prev_max = max(prev_max, _strict_pos_int(prev_data.get("recorded_at_ns")))
+                    existing_attempt = _strict_pos_int(prev_data.get("attempt"))
                 except (OSError, ValueError, TypeError, IdentityError):
                     pass
             recorded_at_ns = max(time.time_ns(), prev_max + 1)
@@ -1641,7 +1644,7 @@ class ExternalReview:
                 "base_sha": target.base_sha,
                 "head_sha": target.head_sha,
                 "patch_id": target.patch_id,
-                "attempt": target.attempt,
+                "attempt": max(existing_attempt, target.attempt),
                 "recorded_at_ns": recorded_at_ns,
             })
             return recorded_at_ns
@@ -1683,7 +1686,7 @@ class ExternalReview:
         return dirs
 
     def has_pending_rereview_intent(self, number: int, head: str, base: str) -> bool:
-        """是否存在针对该 (pr, base, head) 且尚未被更晚登记的新 attempt 承接的重审意图。
+        """是否存在针对该 (pr, base, head) 且尚未被对应或更高 attempt 更晚登记承接的重审意图。
         目录或意图文件不可读/损坏一律失败闭合返回 True。"""
         try:
             matches = self._iter_rereview_intents(f"r*-p{number}-{base}-{head}.json")
@@ -1691,7 +1694,7 @@ class ExternalReview:
             return True
         if not matches:
             return False
-        latest_reg = 0
+        registered_runs: list[tuple[int, int]] = []
         try:
             run_dirs = self._iter_pr_run_dirs(number)
         except (OSError, IdentityError):
@@ -1724,18 +1727,21 @@ class ExternalReview:
             if out is not None and out.get("verdict") == "STALE":
                 continue
             try:
-                latest_reg = max(latest_reg, _strict_pos_int(t.get("registered_at_ns")))
+                run_attempt = _strict_pos_int(t.get("attempt"))
+                run_reg = _strict_pos_int(t.get("registered_at_ns"))
+                registered_runs.append((run_attempt, run_reg))
             except (ValueError, TypeError):
                 return True
         for path in matches:
             try:
                 data = _read(path)
                 recorded = _strict_pos_int(data["recorded_at_ns"])
+                intent_attempt = _strict_pos_int(data["attempt"])
                 if data.get("pr_number") != number or data.get("base_sha") != base or data.get("head_sha") != head:
                     return True
             except (OSError, ValueError, TypeError, KeyError, IdentityError):
                 return True
-            if latest_reg <= recorded:
+            if not any(run_attempt >= intent_attempt and run_reg > recorded for run_attempt, run_reg in registered_runs):
                 return True
         return False
 
@@ -1841,7 +1847,11 @@ class ExternalReview:
                             continue
                     for intent_file in self._iter_rereview_intents(f"r*-p{target.pr_number}-*-{target.head_sha}.json"):
                         try:
-                            prev_max = max(prev_max, _strict_pos_int(_read(intent_file).get("recorded_at_ns")))
+                            idata = _read(intent_file)
+                            i_att = _strict_pos_int(idata.get("attempt"))
+                            i_ts = _strict_pos_int(idata.get("recorded_at_ns"))
+                            if idata.get("base_sha") != target.base_sha or i_att <= target.attempt:
+                                prev_max = max(prev_max, i_ts)
                         except (OSError, ValueError, TypeError, IdentityError):
                             pass
                     target = replace(target, registered_at_ns=max(time.time_ns(), prev_max + 1))
@@ -1853,15 +1863,17 @@ class ExternalReview:
 
     def _clear_rereview_intent_locked(self, target: ReviewTarget) -> None:
         """须在 self._pr_lock(target.pr_number) 内调用：非 STALE 的重审已产生并发布有效终态后，
-        清理早于本 attempt 登记时刻的重审意图文件。"""
+        仅当本 attempt 编号不低于且登记晚于意图文件所记录的重审意图时才清理，防止并发较旧 attempt 误删新 attempt 意图。"""
         intent_file = self._rereview_intent_path(
             target.repository_id, target.pr_number, target.base_sha, target.head_sha
         )
         if not intent_file.exists():
             return
         try:
-            recorded = _strict_pos_int(_read(intent_file).get("recorded_at_ns"))
-            if recorded < target.registered_at_ns:
+            data = _read(intent_file)
+            recorded = _strict_pos_int(data.get("recorded_at_ns"))
+            intent_attempt = _strict_pos_int(data.get("attempt"))
+            if target.attempt >= intent_attempt and recorded < target.registered_at_ns:
                 intent_file.unlink(missing_ok=True)
                 _fsync_dir(intent_file.parent)
         except (OSError, ValueError, TypeError, IdentityError):
@@ -2512,13 +2524,19 @@ class ExternalReview:
         if process is not None:
             process.wait()
         receipt = _read(worker / "receipt.json")
-        outcome = validate_review(target, launch, receipt, worker, self.source)
-        outcome = self._verify_session_receipt(target, launch, receipt, worker, outcome)
+        if launch.get("model") != model:
+            outcome = ReviewOutcome(model, "FAILED", None, f"工蜂目录 {model} 与 launch 模型 {launch.get('model')!r} 不符")
+        else:
+            outcome = validate_review(target, launch, receipt, worker, self.source)
+            if outcome.model != model:
+                outcome = ReviewOutcome(model, "FAILED", None, f"回执模型 {outcome.model!r} 与工蜂目录 {model} 不符")
+            else:
+                outcome = self._verify_session_receipt(target, launch, receipt, worker, outcome)
         self.cleanup_checkout(target, model, folder)
         return outcome
 
     def _has_newer_rereview_intent(self, target: ReviewTarget) -> bool:
-        """是否存在晚于本 attempt 登记时刻、针对同 PR 同 head 的待完成重审意图（即使新 attempt 预检失败尚未写 target.json）。
+        """是否存在晚于本 attempt 登记时刻、或同 base 上目标 attempt 编号大于本 attempt 的待完成重审意图。
         目录或意图文件不可读/损坏时失败闭合返回 True，阻止旧 attempt 覆盖发布 success。"""
         try:
             paths = self._iter_rereview_intents(f"r*-p{target.pr_number}-*-{target.head_sha}.json")
@@ -2528,11 +2546,14 @@ class ExternalReview:
             try:
                 data = _read(path)
                 recorded = _strict_pos_int(data["recorded_at_ns"])
+                intent_attempt = _strict_pos_int(data["attempt"])
                 if data.get("pr_number") != target.pr_number or data.get("head_sha") != target.head_sha:
                     return True
             except (OSError, ValueError, TypeError, KeyError, IdentityError):
                 return True
             if recorded > target.registered_at_ns:
+                return True
+            if data.get("base_sha") == target.base_sha and intent_attempt > target.attempt:
                 return True
         return False
 
@@ -2594,15 +2615,29 @@ class ExternalReview:
             worker = folder / model
             try:
                 launch = _read(worker / "launch.json")
-                receipt = _read(worker / "receipt.json")
-                outcome = validate_review(target, launch, receipt, worker, self.source)
-                outcome = self._verify_session_receipt(target, launch, receipt, worker, outcome)
+                if launch.get("model") != model:
+                    outcome = ReviewOutcome(
+                        model, "FAILED", None,
+                        f"发布前复核工蜂目录 {model} 与 launch 模型 {launch.get('model')!r} 不符",
+                    )
+                else:
+                    receipt = _read(worker / "receipt.json")
+                    outcome = validate_review(target, launch, receipt, worker, self.source)
+                    if outcome.model != model:
+                        outcome = ReviewOutcome(
+                            model, "FAILED", None,
+                            f"发布前复核回执模型 {outcome.model!r} 与工蜂目录 {model} 不符",
+                        )
+                    else:
+                        outcome = self._verify_session_receipt(target, launch, receipt, worker, outcome)
             except (OSError, ValueError, TypeError, KeyError, IdentityError) as error:
                 outcome = ReviewOutcome(model, "FAILED", None, f"发布前复核代理终态收据失败：{error}")
             rechecked.append(outcome)
         sessions = [o.session_id for o in rechecked if o.session_id]
         if len(sessions) != len(set(sessions)):
             rechecked = [ReviewOutcome(o.model, "FAILED", o.session_id, "两独审复用了 session") for o in rechecked]
+        if {o.model for o in rechecked} != set(MODELS) or len({o.model for o in rechecked}) != len(MODELS):
+            rechecked = [ReviewOutcome(o.model, "FAILED", o.session_id, "两独审模型未区分") for o in rechecked]
         verdict = ("FAILED" if any(o.verdict == "FAILED" for o in rechecked) else
                    "BLOCK" if any(o.verdict == "BLOCK" for o in rechecked) else "PASS")
         state = self._VERDICT_STATES[verdict]

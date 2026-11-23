@@ -728,19 +728,34 @@ _SplitRow = tuple[
 ]
 
 
+def _unquote_diff_path_header(rest: str) -> str:
+    """去掉 Git 在含空格路径的 `---`/`+++` 头末尾附加的制表符分隔符后再解码（文件名自身含 \\t 时会被 Git C-quote）。"""
+    return _unquote(rest.rstrip("\t"))
+
+
 def _split_files(diff: str) -> tuple[list[_SplitRow], list[tuple[int, ChangeUnit]]]:
-    """按文件、元数据变更行与精确 hunk 行号切开 `-U<n>` 补丁，并记录全局及单文件 1-based `-U0` 补丁行号映射。
+    """按文件、元数据变更行、精确 hunk 行号与 `\\ No newline at end of file` 标记切开 `-U<n>` 补丁，
+    并记录全局及单文件 1-based `-U0` 补丁行号映射。
     hunk 按 `@@ -old,n +new,m @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git`、`old mode` 的改动行不会被当成文件头。
     含 `_BREAK` 字符的增删行与元数据变更行同样保留在 `changes` 必读全集中（绝不从必读集剔除），但永不进入 `evidence` 或 `u0` 匹配表。"""
     files: list[_SplitRow] = []
     u0_global: list[tuple[int, ChangeUnit]] = []
     old_ln = new_ln = old_rem = new_rem = 0
+    last_hunk_pos: tuple[str, int] | None = None
     for global_ln, line in enumerate(_lines(diff), 1):
+        if files and line.startswith("\\"):
+            if last_hunk_pos is not None and last_hunk_pos[0] in ("-", "+"):
+                nl_unit: ChangeUnit = (files[-1][0], f"\\{last_hunk_pos[0]}", last_hunk_pos[1], line)
+                files[-1][5].append(nl_unit)
+                if not _BREAK.search(line):
+                    files[-1][6].append((global_ln - files[-1][7] + 1, nl_unit))
+                    u0_global.append((global_ln, nl_unit))
+            last_hunk_pos = None
+            continue
         if old_rem > 0 or new_rem > 0:
             sign = line[:1]
-            if sign == "\\":
-                continue
             if sign == " ":
+                last_hunk_pos = (" ", new_ln)
                 old_ln += 1
                 new_ln += 1
                 old_rem -= 1
@@ -754,6 +769,7 @@ def _split_files(diff: str) -> tuple[list[_SplitRow], list[tuple[int, ChangeUnit
                     u0_global.append((global_ln, unit))
                     if stripped := raw_text.strip():
                         files[-1][4].append(("-", stripped))
+                last_hunk_pos = ("-", old_ln)
                 old_ln += 1
                 old_rem -= 1
             elif sign == "+":
@@ -765,23 +781,26 @@ def _split_files(diff: str) -> tuple[list[_SplitRow], list[tuple[int, ChangeUnit
                     u0_global.append((global_ln, unit))
                     if stripped := raw_text.strip():
                         files[-1][4].append(("+", stripped))
+                last_hunk_pos = ("+", new_ln)
                 new_ln += 1
                 new_rem -= 1
         elif line.startswith("diff --git "):
+            last_hunk_pos = None
             parsed_paths = _parse_diff_git_paths(line)
             old_p, new_p = parsed_paths if parsed_paths is not None else (None, None)
             files.append((line, None, old_p, new_p, [], [], [], global_ln))
         elif files and line.startswith("+++ "):
-            target = _unquote(line[4:])
+            target = _unquote_diff_path_header(line[4:])
             head_p = target[2:] if target.startswith("b/") else None
             cur = files[-1]
             files[-1] = (cur[0], head_p, cur[2], head_p or cur[3], cur[4], cur[5], cur[6], cur[7])
         elif files and line.startswith("--- "):
-            src = _unquote(line[4:])
+            src = _unquote_diff_path_header(line[4:])
             if src.startswith("a/"):
                 cur = files[-1]
                 files[-1] = (cur[0], cur[1], src[2:], cur[3], cur[4], cur[5], cur[6], cur[7])
         elif files and (hunk := _HUNK_POS.match(line)):
+            last_hunk_pos = None
             old_ln = int(hunk.group(1))
             old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
             new_ln = int(hunk.group(3))
@@ -927,6 +946,9 @@ class FrozenPatch:
                     if u[1] == "M":
                         if _normalize_meta_line(body) == u[3]:
                             covered.add(u)
+                    elif u[1].startswith("\\"):
+                        if body == u[3]:
+                            covered.add(u)
                     elif u[1] == "H":
                         if body == u[3] or (
                             _parse_diff_git_paths(body) is not None
@@ -954,9 +976,11 @@ class FrozenPatch:
                 current_header = self.files[0].header
 
         old_ln = new_ln = old_rem = new_rem = 0
+        last_hunk_pos: tuple[str, int] | None = None
         for raw in lines:
             if _BREAK.search(raw):
                 old_rem = new_rem = 0
+                last_hunk_pos = None
                 continue
             line = raw
             if read.diff_num_layers:
@@ -970,16 +994,23 @@ class FrozenPatch:
             if line.startswith("diff --git "):
                 current_header = self._resolve_header(line, header_by_line, header_by_paths)
                 old_rem = new_rem = 0
+                last_hunk_pos = None
                 if current_header is not None:
                     hdr_unit = (current_header, "H", 0, current_header)
                     if hdr_unit in required:
                         covered.add(hdr_unit)
                 continue
+            if current_header is not None and line.startswith("\\"):
+                if last_hunk_pos is not None and last_hunk_pos[0] in ("-", "+"):
+                    nl_unit = (current_header, f"\\{last_hunk_pos[0]}", last_hunk_pos[1], line)
+                    if nl_unit in required:
+                        covered.add(nl_unit)
+                last_hunk_pos = None
+                continue
             if current_header is not None and (old_rem > 0 or new_rem > 0):
                 sign = line[:1]
-                if sign == "\\":
-                    continue
                 if sign == " ":
+                    last_hunk_pos = (" ", new_ln)
                     old_ln += 1
                     new_ln += 1
                     old_rem -= 1
@@ -988,18 +1019,22 @@ class FrozenPatch:
                     unit = (current_header, "-", old_ln, line[1:])
                     if unit in required:
                         covered.add(unit)
+                    last_hunk_pos = ("-", old_ln)
                     old_ln += 1
                     old_rem -= 1
                 elif sign == "+":
                     unit = (current_header, "+", new_ln, line[1:])
                     if unit in required:
                         covered.add(unit)
+                    last_hunk_pos = ("+", new_ln)
                     new_ln += 1
                     new_rem -= 1
                 else:
                     old_rem = new_rem = 0
+                    last_hunk_pos = None
                 continue
             if current_header is not None and (hunk := _HUNK_POS.match(line)):
+                last_hunk_pos = None
                 old_ln = int(hunk.group(1))
                 old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
                 new_ln = int(hunk.group(3))
