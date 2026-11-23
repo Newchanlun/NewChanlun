@@ -22,8 +22,9 @@ TERMINALS = {  # 名 → (scan.semantic_state, second_sequence_status, coverage)
     "OPEN": ("OPEN_AT_PREFIX_END", "PENDING", "COMPLETE"),
     "BUDGET": (None, "PENDING", "INCOMPLETE_RESOURCE_BOUND"),
 }
-NODE = ("const a=require(process.argv[1]);let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{"
-        "try{a.validateSegmentPayload(process.argv[2],JSON.parse(s))}catch(e){process.stdout.write(e.message);process.exit(3)}})")
+NODE = ("const a=require(process.argv[1]),rl=require('node:readline').createInterface({input:process.stdin,terminal:false});"
+        "rl.on('line',line=>{if(!line)return;try{const [k,p]=JSON.parse(line);a.validateSegmentPayload(k,p);"
+        "console.log(JSON.stringify({ok:true}))}catch(e){console.log(JSON.stringify({ok:false,err:e.message}))}})")
 
 
 def v3(p):
@@ -126,6 +127,35 @@ def mutated(p, change):
 
 
 class TB02WContractTest(unittest.TestCase):
+    _node_proc = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls._node_proc = subprocess.Popen(
+            ["node", "-e", NODE, str(CLIENT)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        proc = cls._node_proc
+        cls._node_proc = None
+        if proc is not None:
+            if proc.stdin is not None:
+                proc.stdin.close()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+
     def judge(self, kind, p):
         """同一载荷交 Python 与浏览器 JS 各判一次；返回 (py拒因, js拒因)，接受为 None。"""
         try:
@@ -133,9 +163,15 @@ class TB02WContractTest(unittest.TestCase):
             py = None
         except ValueError as error:
             py = str(error)
-        result = subprocess.run(["node", "-e", NODE, str(CLIENT), kind], input=json.dumps(p), text=True, capture_output=True)
-        self.assertIn(result.returncode, (0, 3), result.stderr)
-        return py, (result.stdout if result.returncode == 3 else None)
+        proc = self._node_proc
+        assert proc is not None and proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(json.dumps([kind, p]) + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        if not line:
+            self.fail(proc.stderr.read() if proc.stderr is not None else "node worker exited unexpectedly")
+        res = json.loads(line)
+        return py, (None if res["ok"] else res["err"])
 
     def accept(self, kind, p):
         self.assertEqual(self.judge(kind, p), (None, None))
