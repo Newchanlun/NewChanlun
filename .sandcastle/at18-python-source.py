@@ -8,6 +8,7 @@ import importlib
 import inspect
 import json
 import os
+import struct
 import sys
 from collections import Counter
 from contextvars import ContextVar
@@ -63,12 +64,11 @@ def sample_key(value):
     # 仅接收 sample() 验过的值；类型标签避免 True、1、1.0 等合并。
     kind = type(value)
     if kind is float:
-        return kind, value.hex()  # NaN 有稳定键，且不混同正负零。
+        return kind, struct.pack("!d", value)
     if kind is complex:
-        return kind, (value.real.hex(), value.imag.hex())
+        return kind, (struct.pack("!d", value.real), struct.pack("!d", value.imag))
     if kind is dict:
-        items = ((sample_key(k), sample_key(v)) for k, v in value.items())
-        return kind, frozenset(Counter(items).items())
+        return kind, tuple((sample_key(k), sample_key(v)) for k, v in value.items())
     if kind is list or kind is tuple:
         return kind, tuple(map(sample_key, value))
     if kind is set or kind is frozenset:
@@ -77,7 +77,12 @@ def sample_key(value):
     return kind, value
 
 
+def keyword_sample_key(kwargs):
+    return tuple((k, sample_key(v)) for k, v in kwargs.items())
+
+
 POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+VARIADIC = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
 
 
 def arguments(signature, samples, variadic=False):
@@ -86,7 +91,8 @@ def arguments(signature, samples, variadic=False):
     extra_args, extra_kwargs = (), {}
     if variadic:
         # 无显式签名的生产包装器只能使用已经观察到的普通参数。
-        remaining = {k: sample(v) for k, v in samples.items() if k not in params}
+        fixed = {name for name, param in params.items() if param.kind not in VARIADIC}
+        remaining = {k: sample(v) for k, v in samples.items() if k not in fixed}
         kinds = {param.kind for param in params.values()}
         if inspect.Parameter.VAR_KEYWORD in kinds:
             extra_kwargs = remaining
@@ -122,9 +128,7 @@ def arguments(signature, samples, variadic=False):
 
 
 def variadic_only(signature):
-    return bool(signature.parameters) and all(
-        p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-        for p in signature.parameters.values())
+    return bool(signature.parameters) and all(p.kind in VARIADIC for p in signature.parameters.values())
 
 
 DEFERRED_FRAMES = {GeneratorType: "gi_frame", AsyncGeneratorType: "ag_frame", CoroutineType: "cr_frame"}
@@ -284,7 +288,7 @@ class Binding:
         if generic:
             yield public
 
-    def arguments(self, fn, named, shapes):
+    def arguments(self, fn, named, shapes, overrides=()):
         try:
             public = inspect.signature(fn, follow_wrapped=False)
         except (ValueError, TypeError):
@@ -293,11 +297,12 @@ class Binding:
         def candidates():
             for args, kwargs in shapes:
                 yield args, kwargs, {}
-            for signature in self.signatures(fn, public, named):
-                try:
-                    yield arguments(signature, named, True)
-                except (ValueError, TypeError):
-                    continue
+            for view in (named, *overrides):
+                for signature in self.signatures(fn, public, view):
+                    try:
+                        yield arguments(signature, view, True)
+                    except (ValueError, TypeError):
+                        continue
 
         choices, default_refs = set(), {}
 
@@ -317,7 +322,7 @@ class Binding:
             try:
                 public.bind(*args, **kwargs)
                 positional = tuple(positional_key(i, v, defaults) for i, v in enumerate(args))
-                keywords = frozenset((k, sample_key(sample(v))) for k, v in kwargs.items())
+                keywords = keyword_sample_key(kwargs)
             except (ValueError, TypeError):
                 continue
             choice = positional, keywords
@@ -812,7 +817,7 @@ class Trace:
         return any(via_public and not keys.isdisjoint(expected) for keys, _, via_public in self.accepted())
 
 
-def public_probe(production, targets, origins, test_entered, samples, shapes):
+def public_probe(production, targets, origins, test_entered, samples, shapes, overrides):
     # pytest 可能已加载或修改受验模块；用同一冻结副本重新导入，且导入不记覆盖。
     root = Path.cwd().resolve()
     for name, loaded in list(sys.modules.items()):
@@ -832,7 +837,7 @@ def public_probe(production, targets, origins, test_entered, samples, shapes):
             if identity in tried:
                 continue
             tried.add(identity)
-            for args, kwargs in binding.arguments(fn, samples, shapes):
+            for args, kwargs in binding.arguments(fn, samples, shapes, overrides):
                 if probe_call(production, targets, test_entered, fn, args, kwargs):
                     return True
         except (Exception, SystemExit):
@@ -899,7 +904,18 @@ def proves(doc, scratch):
         def __init__(self):
             self.entered = set()
             self.samples = {}
-            self.shapes = []
+            self.shapes = {}
+            self.named_observations = {}
+
+        def overrides(self):
+            # 先保留可跨调用拼合的首值表，再让各观察覆盖其实际提供的名字与顺序。
+            seen = {keyword_sample_key(self.samples)}
+            for observed in self.named_observations.values():
+                view = observed | {k: v for k, v in self.samples.items() if k not in observed}
+                key = keyword_sample_key(view)
+                if key not in seen:
+                    seen.add(key)
+                    yield view
 
         @pytest.hookimpl(wrapper=True, trylast=True)
         def pytest_runtest_call(self, item):
@@ -915,9 +931,10 @@ def proves(doc, scratch):
                 for keys, path, via_public in trace.accepted():
                     self.entered.update(keys)
                     self.covered |= via_public
-                    for samples, shape in path:
-                        if shape not in self.shapes:
-                            self.shapes.append(shape)
+                    for samples, (args, kwargs) in path:
+                        key = tuple(map(sample_key, args)), keyword_sample_key(kwargs)
+                        self.shapes.setdefault(key, (args, kwargs))
+                        self.named_observations.setdefault(keyword_sample_key(samples), samples)
                         for key, value in samples.items():
                             self.samples.setdefault(key, value)
 
@@ -936,7 +953,8 @@ def proves(doc, scratch):
                               path + "::" + selector], plugins=[registration])
         return (result == pytest.ExitCode.OK and not registration.nonpass and registration.passed == doc["count"] and
                 (registration.covered or bool(registration.entered) and
-                 public_probe(production, targets, origins, registration.entered, registration.samples, registration.shapes)))
+                 public_probe(production, targets, origins, registration.entered, registration.samples,
+                              registration.shapes.values(), tuple(registration.overrides()))))
 
 
 if __name__ == "__main__":

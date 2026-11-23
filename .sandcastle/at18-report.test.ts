@@ -2003,6 +2003,9 @@ class _Token:
     def __eq__(self, other):
         comparisons.append(True)
         raise AssertionError('sentinel compared by value')
+    def __hash__(self):
+        comparisons.append(True)
+        raise AssertionError('sentinel hashed by value')
 _FIRST, _SECOND = _Token(), _Token()
 def _second(rows, mode=_SECOND, limit=0, /):
     if attempts == [True] and not comparisons and mode is _SECOND and rows == [4, 1]:
@@ -2055,6 +2058,69 @@ class _Right(_Base): pass
 @wraps(_Left.handle)
 def route(*, rows, limit): return _Right.handle(rows, limit)
 `, samples, false);
+});
+
+test("R30/#1319：登记与探针保留实参的类型、顺序和位表示", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = async (name: string, source: string, implementation: string, calls: string[], setup = "") => {
+    await t.test(name, () => {
+      const repo = feedSource({ [entry]: implementation,
+        [integration]: "from functools import wraps\nfrom .at18_fixture_feed import route\n" + setup + source,
+        [path]: "from trading_system.at18_fixture_feed import route\n" + setup +
+          "def test_route():\n" + calls.map(call => `    assert route(${call}) == [1, 4]\n`).join("") });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), true);
+    });
+  };
+  const route = "def route(*, mode): return [1, 4]\n";
+  const twoModes = async (name: string, first: string, second: string, fingerprint: string, setup = "") => {
+    for (const positional of [false, true]) {
+      await check(`${name}：${positional ? "位置专用重绑定" : "直接绑定"}`, `
+def _fingerprint(mode): return ${fingerprint}
+attempts = []
+def dispatch(mode${positional ? ", /" : ""}):
+    attempts.append(_fingerprint(mode))
+    if attempts == [_fingerprint(${first}), _fingerprint(${second})]: return route(mode=mode)
+`, route, [first, first, second].map(value => `mode=${value}`), setup);
+    }
+  };
+  await twoModes("True 与 1", "True", "1", "type(mode)");
+  await twoModes("1 与 1.0", "1", "1.0", "type(mode)");
+  await twoModes("嵌套集合中的 True 与 1", "({'values': {True}},)", "({'values': {1}},)",
+    "type(next(iter(mode[0]['values'])))");
+  await twoModes("字典插入顺序", "{'bid': 1, 'ask': 2}", "{'ask': 2, 'bid': 1}", "tuple(mode)");
+  const bits = "from struct import pack, unpack\ndef real(hex): return unpack('!d', bytes.fromhex(hex))[0]\n";
+  const positive = "real('7ff8000000000001')";
+  const negative = "real('fff8000000000001')";
+  await twoModes("NaN 符号及相同位去重", positive, negative, "pack('!d', mode)", bits);
+  await twoModes("复数 NaN 载荷及相同位去重", `complex(-0.0, ${positive})`,
+    "complex(-0.0, real('7ff8000000000002'))", "(pack('!d', mode.real), pack('!d', mode.imag))", bits);
+  await check("登记与独立探针都保留关键字实参顺序", `
+attempts = []
+def dispatch(**event):
+    attempts.append(tuple(event))
+    if attempts == [('rows', 'limit'), ('limit', 'rows')]: return route(**event)
+`, "def route(**event): return sorted(event['rows'])[:event['limit']]\n",
+  ["rows=[4, 1], limit=2", "rows=[4, 1], limit=2", "limit=2, rows=[4, 1]"]);
+  await check("合并具名样本优先，再按观察次序覆写同名值", `
+attempts = []
+def dispatch(rows, mode, limit, /):
+    attempts.append((rows, type(mode), limit))
+    if attempts == [([4, 1], bool, 2), ([4, 1], int, 2)]:
+        return route(rows=rows, mode=mode, limit=limit)
+`, "def route(**event): return [1, 4]\n", ["rows=[4, 1], mode=True", "mode=1", "limit=2"]);
+  await check("*limit 收集名不消耗具名样本 limit", `
+_MISSING = object()
+def dispatch(rows, mode=_MISSING, *limit, audit=False):
+    if mode is _MISSING and limit == (2,) and audit is False:
+        return route(rows=rows, limit=limit[0])
+`, "def route(*, rows, limit): return sorted(rows)[:limit]\n", ["rows=[4, 1], limit=2"]);
+  await check("**labels 收集名仍可接收关键字 labels", `
+def dispatch(rows, /, **labels):
+    if labels == {'labels': 'quote'}:
+        return route(rows=rows, **labels)
+`, "def route(*, rows, labels): return sorted(rows)\n", ["rows=[4, 1], labels='quote'"]);
 });
 
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
