@@ -308,6 +308,19 @@ mod tests {
     /// 线段层因样本短而「塌缩到 4 段」（prototype #972 退化点2 的实情），见报告 §2 的订正。
     const BTC_FIXTURE: &str = include_str!("../../../tests/fixtures/btc_agg_trades_20000.json");
 
+    fn btc_fixture_feed() -> &'static TickFeed {
+        static FEED: std::sync::OnceLock<TickFeed> = std::sync::OnceLock::new();
+        FEED.get_or_init(|| {
+            parse_binance_agg_trades(
+                BTC_FIXTURE,
+                "btc_agg_trades_20000.json",
+                "BTCUSDT",
+                &ThetaConfig::default(),
+            )
+            .expect("20000 笔样本加载失败")
+        })
+    }
+
     /// 重标定后的 `new_stroke_min_gap`（稳定点判据：笔中位尺寸逃出 $0.01 噪声底 + 线段层非平凡）。
     ///
     /// #973 定标时取 10（当时报告 §2：gap=10 起逃出）。#1392 起笔层按 SPEC #1340 严格新笔、#1405 起
@@ -414,9 +427,7 @@ mod tests {
     #[test]
     fn seam_btc_tick_bars_yield_non_trivial_structure() {
         let cfg = cfg_with_gap(RECALIBRATED_GAP);
-        let feed =
-            parse_binance_agg_trades(BTC_FIXTURE, "btc_agg_trades_20000.json", "BTCUSDT", &cfg)
-                .expect("20000 笔样本加载失败");
+        let feed = btc_fixture_feed();
         assert_eq!(feed.n_trades(), 20000);
 
         let layer = parse_layer(&feed.bars, &cfg);
@@ -455,32 +466,34 @@ mod tests {
     /// 用 `--nocapture` 跑本测试可重放完整扫参表。
     #[test]
     fn calibration_sweep_finds_non_collapsed_segments() {
-        let feed = parse_binance_agg_trades(
-            BTC_FIXTURE,
-            "btc_agg_trades_20000.json",
-            "BTCUSDT",
-            &ThetaConfig::default(),
-        )
-        .expect("20000 笔样本加载失败");
+        let feed = btc_fixture_feed();
         let gaps = [3u32, 5, 10, 20, 50, 100];
         // (gap, strokes, segments, 笔中位尺寸$) —— tick_size=1e-8，Tick 差 ×1e-8 = 美元。
-        let mut table: Vec<(u32, usize, usize, f64)> = Vec::new();
-        for g in gaps {
-            let cfg = cfg_with_gap(g);
-            let layer = parse_layer(&feed.bars, &cfg);
-            let mut sizes: Vec<f64> = layer
-                .strokes
+        let table: Vec<(u32, usize, usize, f64)> = std::thread::scope(|scope| {
+            let bars = &feed.bars;
+            let handles: Vec<_> = gaps
                 .iter()
-                .map(|st| (st.start_price - st.end_price).abs() as f64 * 1e-8)
+                .map(|&g| {
+                    scope.spawn(move || {
+                        let cfg = cfg_with_gap(g);
+                        let layer = parse_layer(bars, &cfg);
+                        let mut sizes: Vec<f64> = layer
+                            .strokes
+                            .iter()
+                            .map(|st| (st.start_price - st.end_price).abs() as f64 * 1e-8)
+                            .collect();
+                        sizes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let med = if sizes.is_empty() {
+                            0.0
+                        } else {
+                            sizes[sizes.len() / 2]
+                        };
+                        (g, layer.strokes.len(), layer.segments.len(), med)
+                    })
+                })
                 .collect();
-            sizes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let med = if sizes.is_empty() {
-                0.0
-            } else {
-                sizes[sizes.len() / 2]
-            };
-            table.push((g, layer.strokes.len(), layer.segments.len(), med));
-        }
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
         for (g, ns, nseg, med) in &table {
             println!("gap={g:>3}  strokes={ns:>5}  segments={nseg:>4}  median_stroke=${med:.4}");
         }
