@@ -2,8 +2,6 @@
 
 import copy
 import hashlib
-import json
-import os
 import sqlite3
 import time
 import threading
@@ -23,6 +21,28 @@ TOKEN_SCHEMA = "s-snapshot-token/1"
 TOKEN_FIELDS = {"token_schema", "session_id", "session_generation", "cut_generation", "scope", "history_mode",
                 "structure_cut", "catalog_revision", "index_frontier", "profile_hash", "rule_revision",
                 "order_version", "page_size", "offset", "cut_projection_digest", "issued_capture_digest", "token_checksum"}
+_TOKEN_FIELDS = frozenset(TOKEN_FIELDS)
+_RESOURCE_KEYS_SET = frozenset(RESOURCE_KEYS)
+_ENVELOPE_FIELDS = frozenset(("schema_revision", "session_id", "session_generation", "source_namespace", "source_epoch",
+                              "message_id", "producer_id", "producer_epoch", "payload_hash", "causal_refs", "payload"))
+_ENVELOPE_TEXT_FIELDS = _ENVELOPE_FIELDS - frozenset(("payload", "causal_refs", "schema_revision"))
+_SNAPSHOT_TOKEN_REQ_FIELDS = frozenset(("op", "snapshot_token"))
+_SNAPSHOT_INIT_REQ_FIELDS = frozenset(("op", "session_id", "session_generation", "scope", "history_mode", "as_of_generation", "page_size", "order_version"))
+_WATCH_REQ_FIELDS = frozenset(("op", "cursor", "max_batches", "client_id"))
+_CURSOR_FIELDS = frozenset(("session_id", "session_generation", "catalog_revision", "scope", "after_generation", "base_cut", "index_frontier", "last_seq", "order_version"))
+_HEX_LOWER = frozenset("0123456789abcdef")
+_I64_MAX = 1 << 63
+
+
+def _clone_json(value, _dict=dict, _list=list, _type=type):
+    tv = _type(value)
+    if tv is _dict:
+        return {k: _clone_json(v) for k, v in value.items()}
+    if tv is _list:
+        return [_clone_json(v) for v in value]
+    if tv is str or tv is int or tv is bool or value is None or tv is float:
+        return value
+    return copy.deepcopy(value)
 
 
 def load_resources(path, audit):
@@ -31,7 +51,7 @@ def load_resources(path, audit):
     if len(raw) > 65536:
         raise ValueError("Q 资源配置超过 64 KiB")
     data = audit.parse_json(raw)
-    if set(data) != set(RESOURCE_KEYS):
+    if data.keys() != _RESOURCE_KEYS_SET:
         raise ValueError("Q 资源配置字段缺失或未声明")
     for key in RESOURCE_KEYS:
         if type(data.get(key)) is not int or data[key] <= 0:
@@ -194,7 +214,7 @@ def _integer(raw, name, invalid, positive=False):
     if type(raw) is not str or not raw.isascii() or not raw.isdigit() or len(raw)>19 or (len(raw)>1 and raw[0]=='0'):
         raise invalid(name + " 必须是规范整数文本")
     value = int(raw)
-    if value < int(positive) or value >= 2**63:
+    if value < int(positive) or value >= _I64_MAX:
         raise invalid(name + " 超出声明整数域")
     return value
 
@@ -202,19 +222,18 @@ def _integer(raw, name, invalid, positive=False):
 def _text(value, name, invalid):
     if type(value) is not str or not value:
         raise invalid(name + " 必须是非空文本")
-    try:
-        value.encode("utf-8")
-    except UnicodeError as exc:
-        raise invalid(name + " 不是 UTF-8 文本") from exc
+    if not value.isascii():
+        try:
+            value.encode("utf-8")
+        except UnicodeError as exc:
+            raise invalid(name + " 不是 UTF-8 文本") from exc
     return value
 
 
 def validate_envelope(envelope, audit, invalid):
-    fields = {"schema_revision", "session_id", "session_generation", "source_namespace", "source_epoch",
-              "message_id", "producer_id", "producer_epoch", "payload_hash", "causal_refs", "payload"}
-    if type(envelope) is not dict or set(envelope) != fields or envelope["schema_revision"] != "s-session/2":
+    if type(envelope) is not dict or envelope.keys() != _ENVELOPE_FIELDS or envelope["schema_revision"] != "s-session/2":
         raise invalid("公共头 schema/完整字段不符")
-    for key in fields - {"payload", "causal_refs", "schema_revision"}:
+    for key in _ENVELOPE_TEXT_FIELDS:
         _text(envelope[key], key, invalid)
     _integer(envelope["session_generation"], "session_generation", invalid, True)
     _integer(envelope["producer_epoch"], "producer_epoch", invalid, True)
@@ -234,29 +253,89 @@ def _order_version(proof):
     return "s-record-order/2" if proof["meta"].get("profile_id") == "ohlc_integer_tb02a_v1" else ORDER_VERSION
 
 
+def _order_objects(record):
+    if "fact_key" in record:
+        return 1, record["kind"].encode("utf-8"), record["fact_key"].encode("utf-8"), record["object_id"].encode("utf-8"), int(record["object_revision"])
+    return 0, int(record["window_start"]), int(record["window_mid"]), int(record["window_end"]), record["object_id"].encode("utf-8"), int(record["object_revision"])
+
+
+def _order_objects_str(record):
+    if "fact_key" in record:
+        return 1, record["kind"], record["fact_key"], record["object_id"], int(record["object_revision"])
+    return 0, int(record["window_start"]), int(record["window_mid"]), int(record["window_end"]), record["object_id"], int(record["object_revision"])
+
+
+def _order_withdrawn(record):
+    return int(record["withdrawn_generation"]), record["object_id"].encode("utf-8"), int(record["object_revision"])
+
+
+def _order_withdrawn_str(record):
+    return int(record["withdrawn_generation"]), record["object_id"], int(record["object_revision"])
+
+
+def _order_witnesses(record):
+    return record["object_id"].encode("utf-8"), int(record["slot"]), record["witness_id"].encode("utf-8")
+
+
+def _order_witnesses_str(record):
+    return record["object_id"], int(record["slot"]), record["witness_id"]
+
+
+def _order_relations(record):
+    return record["subject"].encode("utf-8"), record["relation_type"].encode("utf-8"), record["object"].encode("utf-8")
+
+
+def _order_relations_str(record):
+    return record["subject"], record["relation_type"], record["object"]
+
+
+def _order_observations(record):
+    ws = record["window_start"]
+    return record["kind"].encode("utf-8"), (-1 if ws is None else int(ws)), record["observation_id"].encode("utf-8")
+
+
+def _order_observations_str(record):
+    ws = record["window_start"]
+    return record["kind"], (-1 if ws is None else int(ws)), record["observation_id"]
+
+
+def _order_raw_history(record):
+    return int(record["seq"]), record["identity_key"].encode("utf-8"), int(record["revision"])
+
+
+def _order_raw_history_str(record):
+    return int(record["seq"]), record["identity_key"], int(record["revision"])
+
+
+_ORDER_FN = {
+    "objects": _order_objects,
+    "withdrawn_objects": _order_withdrawn,
+    "witnesses": _order_witnesses,
+    "relations": _order_relations,
+    "observations": _order_observations,
+}
+_ORDER_STR_FN = {
+    "objects": _order_objects_str,
+    "withdrawn_objects": _order_withdrawn_str,
+    "witnesses": _order_witnesses_str,
+    "relations": _order_relations_str,
+    "observations": _order_observations_str,
+    "raw_history": _order_raw_history_str,
+}
+
+
 def _order(family, record):
-    numeric = lambda key: int(record[key])
-    text = lambda key: record[key].encode("utf-8")
-    if family == "objects":
-        if "fact_key" in record:
-            return 1, text("kind"), text("fact_key"), text("object_id"), numeric("object_revision")
-        return 0, numeric("window_start"), numeric("window_mid"), numeric("window_end"), text("object_id"), numeric("object_revision")
-    if family == "withdrawn_objects":
-        return numeric("withdrawn_generation"), text("object_id"), numeric("object_revision")
-    if family == "witnesses":
-        return text("object_id"), numeric("slot"), text("witness_id")
-    if family == "relations":
-        return text("subject"), text("relation_type"), text("object")
-    if family == "observations":
-        return text("kind"), (-1 if record["window_start"] is None else numeric("window_start")), text("observation_id")
-    return numeric("seq"), text("identity_key"), numeric("revision")
+    fn = _ORDER_FN.get(family)
+    if fn is not None:
+        return fn(record)
+    return _order_raw_history(record)
 
 
 def _key(family, record):
     if family in ("objects", "withdrawn_objects"):
         return [record["object_id"]]
     if family == "relations":
-        return [record[k] for k in ("subject", "relation_type", "object")]
+        return [record["subject"], record["relation_type"], record["object"]]
     if family == "raw_history":
         return [record["identity_key"], record["revision"]]
     return [record["witness_id" if family == "witnesses" else "observation_id"]]
@@ -269,20 +348,45 @@ def project_fixed_cut(proof, generation, mode, h):
     snapshot["history_mode"] = mode
     snapshot["as_of_generation"] = str(generation) if mode == "AsKnown" else None
     rows, counts = [], {}
+    rows_append = rows.append
     object_ids = set()
     for family in FAMILIES:
-        records = sorted(snapshot[family], key=lambda value: _order(family, value))
+        records = sorted(snapshot[family], key=_ORDER_STR_FN[family])
         identities = set()
-        for record in records:
-            key = tuple(_key(family, record))
-            if key in identities:
-                raise ValueError(family + " 含重复公开身份")
-            identities.add(key)
-            if family in ("objects", "withdrawn_objects"):
-                if key in object_ids:
+        if family == "objects" or family == "withdrawn_objects":
+            for record in records:
+                oid = record["object_id"]
+                if oid in identities:
+                    raise ValueError(family + " 含重复公开身份")
+                identities.add(oid)
+                if oid in object_ids:
                     raise ValueError("active/withdrawn 对象身份冲突")
-                object_ids.add(key)
-            rows.append({"family": family, "key": list(key), "record": record})
+                object_ids.add(oid)
+                rows_append({"family": family, "key": [oid], "record": record})
+        elif family == "relations":
+            for record in records:
+                s, rt, o = record["subject"], record["relation_type"], record["object"]
+                key = (s, rt, o)
+                if key in identities:
+                    raise ValueError(family + " 含重复公开身份")
+                identities.add(key)
+                rows_append({"family": family, "key": [s, rt, o], "record": record})
+        elif family == "raw_history":
+            for record in records:
+                ik, rev = record["identity_key"], record["revision"]
+                key = (ik, rev)
+                if key in identities:
+                    raise ValueError(family + " 含重复公开身份")
+                identities.add(key)
+                rows_append({"family": family, "key": [ik, rev], "record": record})
+        else:
+            id_field = "witness_id" if family == "witnesses" else "observation_id"
+            for record in records:
+                rid = record[id_field]
+                if rid in identities:
+                    raise ValueError(family + " 含重复公开身份")
+                identities.add(rid)
+                rows_append({"family": family, "key": [rid], "record": record})
         snapshot[family] = records
         counts[family] = str(len(records))
     counts["total"] = str(len(rows))
@@ -314,13 +418,13 @@ def _token(projection, digest, capture_digest, page_size, offset, audit):
 def snapshot_page(proof, request, resources, h, *, projection_provider=None):
     audit, invalid = h["_query_integrity"](), h["InvalidQuery"]
     if "snapshot_token" in request:
-        if set(request) != {"op", "snapshot_token"}:
+        if request.keys() != _SNAPSHOT_TOKEN_REQ_FIELDS:
             raise invalid("续页只能提供原 snapshot_token")
         token = request["snapshot_token"]
-        if type(token) is not dict or set(token) != TOKEN_FIELDS:
+        if type(token) is not dict or token.keys() != _TOKEN_FIELDS:
             raise invalid("snapshot_token 必须含完整且唯一的声明字段")
         issued = token["issued_capture_digest"]
-        if type(issued) is not str or len(issued) != 64 or any(c not in "0123456789abcdef" for c in issued):
+        if type(issued) is not str or len(issued) != 64 or not _HEX_LOWER.issuperset(issued):
             raise invalid("snapshot_token 签发来源摘要不规范")
         unsigned = {k: v for k, v in token.items() if k != "token_checksum"}
         if token.get("token_checksum") != hashlib.sha256(audit.canonical(unsigned)).hexdigest():
@@ -330,8 +434,7 @@ def snapshot_page(proof, request, resources, h, *, projection_provider=None):
         offset = _integer(token.get("offset"), "offset", invalid)
         mode = token.get("history_mode")
     else:
-        required = {"op", "session_id", "session_generation", "scope", "history_mode", "as_of_generation", "page_size", "order_version"}
-        if set(request) != required:
+        if request.keys() != _SNAPSHOT_INIT_REQ_FIELDS:
             raise invalid("首个 snapshot 请求完整字段不符")
         generation = proof["generation"] if request["as_of_generation"] is None else _integer(request["as_of_generation"], "as_of_generation", invalid)
         page_size = _integer(request["page_size"], "page_size", invalid, True)
@@ -357,7 +460,7 @@ def snapshot_page(proof, request, resources, h, *, projection_provider=None):
     done = end == len(projection["rows"])
     next_token = None if done else _token(projection, digest, issued, page_size, end, audit)
     # 只复制这一页与公开metadata，私有完整projection不能从可变响应泄漏。
-    return copy.deepcopy(dict(projection, rows=projection["rows"][offset:end], offset=str(offset), done=done,
+    return _clone_json(dict(projection, rows=projection["rows"][offset:end], offset=str(offset), done=done,
                 next_token=next_token, cut_projection_digest=digest,
                 validated_capture_digest=proof["capture_digest"]))
 
@@ -416,7 +519,7 @@ class ClientLeases:
 
 def watch_page(proof, request, resources, h, leases, *, projection_provider=None):
     audit, invalid = h["_query_integrity"](), h["InvalidQuery"]
-    if set(request) != {"op", "cursor", "max_batches", "client_id"}:
+    if request.keys() != _WATCH_REQ_FIELDS:
         raise invalid("Watch 请求完整字段不符")
     cursor = request["cursor"]
     client = _text(request["client_id"], "client_id", invalid)
@@ -425,8 +528,7 @@ def watch_page(proof, request, resources, h, leases, *, projection_provider=None
         raise audit.QueryBudgetExceeded("Watch 批数超出事前上限")
     if proof.get("protocol") is None:
         raise ValueError("v2 Watch 需要完整协议存储")
-    shape = set(cursor_at(proof, 0, h))
-    if type(cursor) is not dict or set(cursor) != shape:
+    if type(cursor) is not dict or cursor.keys() != _CURSOR_FIELDS:
         raise invalid("Watch cursor 完整字段不符")
     after = _integer(cursor["after_generation"], "after_generation", invalid)
     _text(cursor["session_id"], "cursor.session_id", invalid)
@@ -435,7 +537,7 @@ def watch_page(proof, request, resources, h, leases, *, projection_provider=None
     policy = proof["protocol"]["delivery_policy"]
     current, digest = (projection_provider(proof, head, "RecomputedWithRevision") if projection_provider is not None
                        else project_fixed_cut(proof, head, "RecomputedWithRevision", h))
-    output = {"deltas": [], "next_cursor": cursor, "observed_head": copy.deepcopy(current["fixed_cut"]),
+    output = {"deltas": [], "next_cursor": cursor, "observed_head": _clone_json(current["fixed_cut"]),
               "delivery_frontier": {key: str(policy[key]) if type(policy[key]) is int else policy[key]
                                     for key in ("policy_revision", "retain_generations", "first_available_generation", "head_generation")},
               "has_more": False, "gap": None, "validated_capture_digest": proof["capture_digest"]}
@@ -456,23 +558,35 @@ def watch_page(proof, request, resources, h, leases, *, projection_provider=None
         missing_range = {"from_generation": str(after+1), "to_generation": str(head)}
     if reason is not None:
         output["gap"] = {"requested_identity": cursor, "reason": reason, "missing_range": missing_range,
-                         "rebuild": copy.deepcopy(current["fixed_cut"]),
-                         "snapshot_token": copy.deepcopy(_token(current, digest, proof["capture_digest"], resources["max_page_size"], 0, audit))}
+                         "rebuild": _clone_json(current["fixed_cut"]),
+                         "snapshot_token": _token(current, digest, proof["capture_digest"], resources["max_page_size"], 0, audit)}
         return output
-    for index in range(after, min(head, after+maximum)):
-        delta = h["_project_wire_integers"](audit.project_delta(proof, index))
-        if len(audit.canonical(delta)) > resources["max_atomic_batch_bytes"]:
-            raise audit.QueryBudgetExceeded("单个完整 Delta 超出原子批字节上限")
-        output["deltas"].append(delta)
-        output["next_cursor"] = cursor_at(proof, index+1, h)
-        output["has_more"] = index+1 < head
-        if len(audit.canonical(output)) > resources["max_reply_bytes"]:
-            output["deltas"].pop()
-            if not output["deltas"]:
-                raise audit.QueryBudgetExceeded("单个完整 Watch 响应超出回复上限")
-            output["next_cursor"] = cursor_at(proof, index, h)
-            output["has_more"] = True
-            break
+    limit = min(head, after + maximum)
+    if after < limit:
+        # 增量计算 canonical(output) 字节长度，避免 O(K^2) 全量重序列化；与 len(audit.canonical(output)) 逐字节一致。
+        base_len = len(audit.canonical({**output, "next_cursor": None, "has_more": False})) - 9
+        deltas_bytes = 0
+        max_atomic = resources["max_atomic_batch_bytes"]
+        max_reply = resources["max_reply_bytes"]
+        for index in range(after, limit):
+            delta = h["_project_wire_integers"](audit.project_delta(proof, index))
+            delta_len = len(audit.canonical(delta))
+            if delta_len > max_atomic:
+                raise audit.QueryBudgetExceeded("单个完整 Delta 超出原子批字节上限")
+            next_cursor = cursor_at(proof, index + 1, h)
+            has_more = index + 1 < head
+            next_deltas_bytes = deltas_bytes + delta_len + (1 if output["deltas"] else 0)
+            reply_len = base_len + next_deltas_bytes + len(audit.canonical(next_cursor)) + (4 if has_more else 5)
+            if reply_len > max_reply:
+                if not output["deltas"]:
+                    raise audit.QueryBudgetExceeded("单个完整 Watch 响应超出回复上限")
+                output["next_cursor"] = cursor_at(proof, index, h)
+                output["has_more"] = True
+                break
+            output["deltas"].append(delta)
+            deltas_bytes = next_deltas_bytes
+            output["next_cursor"] = next_cursor
+            output["has_more"] = has_more
     return output
 
 
