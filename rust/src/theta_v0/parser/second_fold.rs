@@ -71,7 +71,7 @@ pub struct SecondFoldState {
 }
 
 /// 单步撤销记录：步进只在尾部追加或改写末元素，故只备份尾部（同 `stroke.rs` checkpoint）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FoldUndo {
     consumed_len: usize,
     consumed_digest: u64,
@@ -82,8 +82,8 @@ struct FoldUndo {
     steps_len: usize,
     checks_len: usize,
     elements_len: usize,
-    elements_last: Option<(Tick, Tick)>,
-    standard_last: Option<FeatureElement>,
+    /// 仅当该步合并改写了末尾标准元素时记录旧 `(high, low, stroke_idx)`，零堆分配撤销。
+    merged_prev: Option<(Tick, Tick, usize)>,
 }
 
 fn digest_stroke(mut h: u64, s: &Stroke) -> u64 {
@@ -144,22 +144,6 @@ impl SecondFoldState {
         self.facts.from_stroke + self.consumed_len
     }
 
-    fn capture(&self) -> FoldUndo {
-        FoldUndo {
-            consumed_len: self.consumed_len,
-            consumed_digest: self.consumed_digest,
-            through_stroke: self.facts.through_stroke,
-            dir_state: self.dir_state,
-            breach_watermark: self.facts.breach_watermark,
-            raw_len: self.facts.raw_elements.len(),
-            steps_len: self.facts.steps.len(),
-            checks_len: self.facts.checks.len(),
-            elements_len: self.elements.len(),
-            elements_last: self.elements.last().copied(),
-            standard_last: self.facts.standard.last().cloned(),
-        }
-    }
-
     /// 撤销一步。只对未决态步进，故终点三字段一律回到空。
     fn restore(&mut self, u: FoldUndo) {
         self.consumed_len = u.consumed_len;
@@ -172,19 +156,36 @@ impl SecondFoldState {
         self.facts.checks.truncate(u.checks_len);
         self.elements.truncate(u.elements_len);
         self.facts.standard.truncate(u.elements_len);
-        if let (Some(e), Some(last)) = (u.elements_last, self.elements.last_mut()) {
-            *last = e;
-        }
-        if let (Some(e), Some(last)) = (u.standard_last, self.facts.standard.last_mut()) {
-            *last = e;
+        if let Some((old_h, old_l, old_stroke_idx)) = u.merged_prev {
+            if let Some(last) = self.elements.last_mut() {
+                *last = (old_h, old_l);
+            }
+            if let Some(last) = self.facts.standard.last_mut() {
+                last.high = old_h;
+                last.low = old_l;
+                last.stroke_idx = old_stroke_idx;
+                last.stroke_indices.pop();
+            }
         }
         self.facts.matched = None;
         self.facts.semantic_state = None;
         self.facts.killed_by = None;
     }
 
-    /// 消费下一根笔：先包含处理与分型检查，后严格越界检查（到达终点见 `decided`）。
-    fn step(&mut self, strokes: &[Stroke], c: &SecondCandidateId) {
+    /// 消费下一根笔并返回零堆分配撤销记录：先包含处理与分型检查，后严格越界检查。
+    fn step_with_undo(&mut self, strokes: &[Stroke], c: &SecondCandidateId) -> FoldUndo {
+        let mut undo = FoldUndo {
+            consumed_len: self.consumed_len,
+            consumed_digest: self.consumed_digest,
+            through_stroke: self.facts.through_stroke,
+            dir_state: self.dir_state,
+            breach_watermark: self.facts.breach_watermark,
+            raw_len: self.facts.raw_elements.len(),
+            steps_len: self.facts.steps.len(),
+            checks_len: self.facts.checks.len(),
+            elements_len: self.elements.len(),
+            merged_prev: None,
+        };
         let i = self.next_index();
         let sk = &strokes[i];
         self.consumed_len += 1;
@@ -192,7 +193,7 @@ impl SecondFoldState {
         let facts = &mut self.facts;
         facts.through_stroke = i;
         if sk.direction != c.seg_dir {
-            return;
+            return undo;
         }
         let (high, low) = stroke_high_low(sk);
         // #1344：越界看该笔原始极值（不是包含合并后的元素），水位只作记账。
@@ -213,6 +214,7 @@ impl SecondFoldState {
             window_members: vec![],
         };
         let before = facts.standard.last().cloned();
+        let prev_elem = self.elements.last().copied();
         facts.raw_elements.push(incoming.clone());
         let previous_len = self.elements.len();
         let merge_direction = if self.dir_state == Some(Direction::Down) {
@@ -227,7 +229,10 @@ impl SecondFoldState {
         }
         let merge = previous_len == self.elements.len();
         let mut stroke_indices = if merge {
-            facts.standard.pop().unwrap().stroke_indices
+            let old = facts.standard.pop().unwrap();
+            let (old_h, old_l) = prev_elem.unwrap();
+            undo.merged_prev = Some((old_h, old_l, old.stroke_idx));
+            old.stroke_indices
         } else {
             vec![]
         };
@@ -263,12 +268,13 @@ impl SecondFoldState {
                 elements: es,
                 through_stroke: i,
             };
-            facts.checks.push(check.clone());
             if check.top_fractal || check.bottom_fractal {
+                facts.checks.push(check.clone());
                 facts.matched = Some(check);
                 facts.semantic_state = Some(SecondTerminal::Confirmed);
-                return;
+                return undo;
             }
+            facts.checks.push(check);
         }
         // #1344 第二问：分型检查之后才看越界；被包含并入前一元素的笔不是独立第三元素，
         // 但它的新高/新低照样触发失效（078:52「直接新高或新低」）。
@@ -288,6 +294,12 @@ impl SecondFoldState {
             });
             facts.semantic_state = Some(SecondTerminal::KilledByNewExtreme);
         }
+        undo
+    }
+
+    /// 消费下一根笔：先包含处理与分型检查，后严格越界检查（到达终点见 `decided`）。
+    fn step(&mut self, strokes: &[Stroke], c: &SecondCandidateId) {
+        let _ = self.step_with_undo(strokes, c);
     }
 }
 
@@ -427,13 +439,11 @@ impl SecondFoldCursor {
         // 封存到输入末笔之前（预算先尽则止于预算）。
         let seal_end = end.min(n.saturating_sub(1));
         while !self.state.decided() && self.state.next_index() < seal_end {
-            self.undo = Some(self.state.capture());
-            self.state.step(strokes, &self.candidate);
+            self.undo = Some(self.state.step_with_undo(strokes, &self.candidate));
         }
         // 末笔暂算：步进、出具、撤销，不入封存态。
         let facts = if !self.state.decided() && self.state.next_index() < end {
-            let u = self.state.capture();
-            self.state.step(strokes, &self.candidate);
+            let u = self.state.step_with_undo(strokes, &self.candidate);
             let out = self.state.facts.clone();
             self.state.restore(u);
             out
@@ -475,43 +485,410 @@ fn wire_int(v: &serde_json::Value) -> Option<i64> {
     }
 }
 
-/// 数字一律转十进制文本（与 S 对象线形一致），便于逐字段比对。
-fn normalized(v: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    match v {
-        Value::Number(n) => Value::String(n.to_string()),
-        Value::Array(a) => Value::Array(a.into_iter().map(normalized).collect()),
-        Value::Object(m) => Value::Object(m.into_iter().map(|(k, x)| (k, normalized(x))).collect()),
-        x => x,
+#[inline]
+fn fmt_u64_dec(mut x: u64, buf: &mut [u8; 20]) -> &str {
+    let mut pos = buf.len();
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (x % 10) as u8;
+        x /= 10;
+        if x == 0 {
+            break;
+        }
     }
+    // SAFETY: buf[pos..] contains only ASCII digits '0'..='9'.
+    unsafe { std::str::from_utf8_unchecked(&buf[pos..]) }
+}
+
+#[inline]
+fn fmt_i64_dec(x: i64, buf: &mut [u8; 21]) -> &str {
+    let neg = x < 0;
+    let mag = x.unsigned_abs();
+    let mut pos = buf.len();
+    let mut v = mag;
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    if neg {
+        pos -= 1;
+        buf[pos] = b'-';
+    }
+    // SAFETY: buf[pos..] contains only ASCII '-' and '0'..='9'.
+    unsafe { std::str::from_utf8_unchecked(&buf[pos..]) }
+}
+
+#[inline]
+fn fmt_u64_hex16(x: u64) -> [u8; 16] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0u8; 16];
+    for (idx, slot) in out.iter_mut().enumerate() {
+        let shift = (15 - idx) * 4;
+        *slot = HEX[((x >> shift) & 0xf) as usize];
+    }
+    out
+}
+
+#[inline]
+fn usize_slice_to_value(xs: &[usize]) -> serde_json::Value {
+    serde_json::Value::Array(
+        xs.iter()
+            .map(|&x| serde_json::Value::Number((x as u64).into()))
+            .collect(),
+    )
+}
+
+fn feature_element_to_value(e: &FeatureElement) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert("high".to_owned(), serde_json::Value::Number(e.high.into()));
+    m.insert("low".to_owned(), serde_json::Value::Number(e.low.into()));
+    m.insert(
+        "stroke_idx".to_owned(),
+        serde_json::Value::Number((e.stroke_idx as u64).into()),
+    );
+    m.insert(
+        "stroke_indices".to_owned(),
+        usize_slice_to_value(&e.stroke_indices),
+    );
+    m.insert(
+        "window_members".to_owned(),
+        usize_slice_to_value(&e.window_members),
+    );
+    serde_json::Value::Object(m)
+}
+
+fn second_check_to_value(c: &SecondCheck) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "elements".to_owned(),
+        serde_json::Value::Array(vec![
+            feature_element_to_value(&c.elements[0]),
+            feature_element_to_value(&c.elements[1]),
+            feature_element_to_value(&c.elements[2]),
+        ]),
+    );
+    m.insert(
+        "top_fractal".to_owned(),
+        serde_json::Value::Bool(c.top_fractal),
+    );
+    m.insert(
+        "bottom_fractal".to_owned(),
+        serde_json::Value::Bool(c.bottom_fractal),
+    );
+    m.insert(
+        "through_stroke".to_owned(),
+        serde_json::Value::Number((c.through_stroke as u64).into()),
+    );
+    serde_json::Value::Object(m)
+}
+
+fn second_kill_to_value(k: &SecondKill) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "stroke_idx".to_owned(),
+        serde_json::Value::Number((k.stroke_idx as u64).into()),
+    );
+    m.insert(
+        "price".to_owned(),
+        serde_json::Value::Number(k.price.into()),
+    );
+    m.insert(
+        "candidate_extreme".to_owned(),
+        serde_json::Value::Number(k.candidate_extreme.into()),
+    );
+    m.insert(
+        "comparison".to_owned(),
+        serde_json::Value::String(k.comparison.to_owned()),
+    );
+    serde_json::Value::Object(m)
+}
+
+#[inline]
+fn terminal_name(t: SecondTerminal) -> &'static str {
+    match t {
+        SecondTerminal::Confirmed => "CONFIRMED",
+        SecondTerminal::KilledByNewExtreme => "KILLED_BY_NEW_EXTREME",
+        SecondTerminal::OpenAtPrefixEnd => "OPEN_AT_PREFIX_END",
+    }
+}
+
+/// 等价于 `normalized(v) == Value::String(expected.to_string())`，零堆分配。
+#[inline]
+fn wire_eq_usize(v: &serde_json::Value, expected: usize) -> bool {
+    let exp = expected as u64;
+    match v {
+        serde_json::Value::Number(n) => n.as_u64() == Some(exp),
+        serde_json::Value::String(s) => {
+            let mut buf = [0u8; 20];
+            s.as_str() == fmt_u64_dec(exp, &mut buf)
+        }
+        _ => false,
+    }
+}
+
+/// 等价于 `normalized(v) == Value::String(expected.to_string())`，零堆分配。
+#[inline]
+fn wire_eq_i64(v: &serde_json::Value, expected: i64) -> bool {
+    match v {
+        serde_json::Value::Number(n) => n.as_i64() == Some(expected),
+        serde_json::Value::String(s) => {
+            let mut buf = [0u8; 21];
+            s.as_str() == fmt_i64_dec(expected, &mut buf)
+        }
+        _ => false,
+    }
+}
+
+/// 等价于 `normalized(v) == Value::String(format!("{expected:016x}"))`，零堆分配。
+#[inline]
+fn wire_eq_hex16(v: &serde_json::Value, expected: u64) -> bool {
+    let hex = fmt_u64_hex16(expected);
+    match v {
+        serde_json::Value::String(s) => s.as_bytes() == hex.as_slice(),
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                let mut buf = [0u8; 20];
+                fmt_u64_dec(u, &mut buf).as_bytes() == hex.as_slice()
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+#[inline]
+fn wire_eq_usize_slice(v: &serde_json::Value, expected: &[usize]) -> bool {
+    let serde_json::Value::Array(arr) = v else {
+        return false;
+    };
+    arr.len() == expected.len()
+        && arr
+            .iter()
+            .zip(expected.iter())
+            .all(|(x, &e)| wire_eq_usize(x, e))
+}
+
+fn wire_eq_feature_element(v: &serde_json::Value, e: &FeatureElement) -> bool {
+    let serde_json::Value::Object(m) = v else {
+        return false;
+    };
+    if m.len() != 5 {
+        return false;
+    }
+    m.get("high").is_some_and(|x| wire_eq_i64(x, e.high))
+        && m.get("low").is_some_and(|x| wire_eq_i64(x, e.low))
+        && m.get("stroke_idx")
+            .is_some_and(|x| wire_eq_usize(x, e.stroke_idx))
+        && m.get("stroke_indices")
+            .is_some_and(|x| wire_eq_usize_slice(x, &e.stroke_indices))
+        && m.get("window_members")
+            .is_some_and(|x| wire_eq_usize_slice(x, &e.window_members))
+}
+
+fn wire_eq_second_check(v: &serde_json::Value, c: &SecondCheck) -> bool {
+    let serde_json::Value::Object(m) = v else {
+        return false;
+    };
+    if m.len() != 4 {
+        return false;
+    }
+    let Some(serde_json::Value::Array(elems)) = m.get("elements") else {
+        return false;
+    };
+    elems.len() == 3
+        && wire_eq_feature_element(&elems[0], &c.elements[0])
+        && wire_eq_feature_element(&elems[1], &c.elements[1])
+        && wire_eq_feature_element(&elems[2], &c.elements[2])
+        && m.get("top_fractal") == Some(&serde_json::Value::Bool(c.top_fractal))
+        && m.get("bottom_fractal") == Some(&serde_json::Value::Bool(c.bottom_fractal))
+        && m.get("through_stroke")
+            .is_some_and(|x| wire_eq_usize(x, c.through_stroke))
+}
+
+fn wire_eq_second_kill(v: &serde_json::Value, k: &SecondKill) -> bool {
+    let serde_json::Value::Object(m) = v else {
+        return false;
+    };
+    if m.len() != 4 {
+        return false;
+    }
+    m.get("stroke_idx")
+        .is_some_and(|x| wire_eq_usize(x, k.stroke_idx))
+        && m.get("price").is_some_and(|x| wire_eq_i64(x, k.price))
+        && m.get("candidate_extreme")
+            .is_some_and(|x| wire_eq_i64(x, k.candidate_extreme))
+        && m.get("comparison").and_then(|x| x.as_str()) == Some(k.comparison)
+}
+
+/// 等价于 `normalized(probe.to_wire()) == normalized(wire.clone())`，零 JSON 树分配。
+fn wire_matches_cursor(
+    m: &serde_json::Map<String, serde_json::Value>,
+    probe: &SecondFoldCursor,
+) -> bool {
+    let f = &probe.state.facts;
+    if !m
+        .get("through_stroke")
+        .is_some_and(|x| wire_eq_usize(x, f.through_stroke))
+    {
+        return false;
+    }
+    if !m
+        .get("consumed_digest")
+        .is_some_and(|x| wire_eq_hex16(x, probe.state.consumed_digest))
+    {
+        return false;
+    }
+    let dir_ok = match (m.get("dir_state"), probe.state.dir_state) {
+        (Some(serde_json::Value::Null), None) => true,
+        (Some(serde_json::Value::String(s)), Some(d)) => s.as_str() == dir_name(d),
+        _ => false,
+    };
+    if !dir_ok {
+        return false;
+    }
+    let wm_ok = match (m.get("breach_watermark"), f.breach_watermark) {
+        (Some(serde_json::Value::Null), None) => true,
+        (Some(v), Some(w)) => wire_eq_i64(v, w),
+        _ => false,
+    };
+    if !wm_ok {
+        return false;
+    }
+    let sem_ok = match (m.get("semantic_state"), f.semantic_state) {
+        (Some(serde_json::Value::Null), None) => true,
+        (Some(serde_json::Value::String(s)), Some(t)) => s.as_str() == terminal_name(t),
+        _ => false,
+    };
+    if !sem_ok {
+        return false;
+    }
+    let kill_ok = match (m.get("killed_by"), &f.killed_by) {
+        (Some(serde_json::Value::Null), None) => true,
+        (Some(v), Some(k)) => wire_eq_second_kill(v, k),
+        _ => false,
+    };
+    if !kill_ok {
+        return false;
+    }
+    let matched_ok = match (m.get("matched"), &f.matched) {
+        (Some(serde_json::Value::Null), None) => true,
+        (Some(v), Some(c)) => wire_eq_second_check(v, c),
+        _ => false,
+    };
+    if !matched_ok {
+        return false;
+    }
+    let Some(serde_json::Value::Array(std_arr)) = m.get("standard") else {
+        return false;
+    };
+    std_arr.len() == f.standard.len()
+        && std_arr
+            .iter()
+            .zip(f.standard.iter())
+            .all(|(v, e)| wire_eq_feature_element(v, e))
 }
 
 impl SecondFoldCursor {
     /// K1 线形（字段见模块头）。
     pub fn to_wire(&self) -> serde_json::Value {
+        use serde_json::Value;
         let f = &self.state.facts;
-        serde_json::json!({
-            "schema": self.schema,
-            "rule_revision": self.rule_revision,
-            "budget_policy": self.budget_policy.label(),
-            "budget_granted": self.budget_granted,
-            "candidate": {
-                "seg_dir": dir_name(self.candidate.seg_dir),
-                "b_stroke": self.candidate.b_stroke,
-                "candidate_extreme": self.candidate.candidate_extreme,
+        let hex = fmt_u64_hex16(self.state.consumed_digest);
+        // SAFETY: fmt_u64_hex16 emits only ASCII lowercase hex bytes.
+        let digest_str = unsafe { std::str::from_utf8_unchecked(&hex) }.to_owned();
+        let mut cand = serde_json::Map::new();
+        cand.insert(
+            "seg_dir".to_owned(),
+            Value::String(dir_name(self.candidate.seg_dir).to_owned()),
+        );
+        cand.insert(
+            "b_stroke".to_owned(),
+            Value::Number((self.candidate.b_stroke as u64).into()),
+        );
+        cand.insert(
+            "candidate_extreme".to_owned(),
+            Value::Number(self.candidate.candidate_extreme.into()),
+        );
+        let mut m = serde_json::Map::new();
+        m.insert("schema".to_owned(), Value::String(self.schema.to_owned()));
+        m.insert(
+            "rule_revision".to_owned(),
+            Value::String(self.rule_revision.to_owned()),
+        );
+        m.insert(
+            "budget_policy".to_owned(),
+            Value::String(self.budget_policy.label()),
+        );
+        m.insert(
+            "budget_granted".to_owned(),
+            match self.budget_granted {
+                Some(g) => Value::Number((g as u64).into()),
+                None => Value::Null,
             },
-            "input_stroke_count": self.input_stroke_count,
-            "from_stroke": f.from_stroke,
-            "through_stroke": f.through_stroke,
-            "consumed_len": self.state.consumed_len,
-            "consumed_digest": format!("{:016x}", self.state.consumed_digest),
-            "dir_state": self.state.dir_state.map(dir_name),
-            "standard": f.standard,
-            "breach_watermark": f.breach_watermark,
-            "semantic_state": f.semantic_state,
-            "killed_by": f.killed_by,
-            "matched": f.matched,
-        })
+        );
+        m.insert("candidate".to_owned(), Value::Object(cand));
+        m.insert(
+            "input_stroke_count".to_owned(),
+            Value::Number((self.input_stroke_count as u64).into()),
+        );
+        m.insert(
+            "from_stroke".to_owned(),
+            Value::Number((f.from_stroke as u64).into()),
+        );
+        m.insert(
+            "through_stroke".to_owned(),
+            Value::Number((f.through_stroke as u64).into()),
+        );
+        m.insert(
+            "consumed_len".to_owned(),
+            Value::Number((self.state.consumed_len as u64).into()),
+        );
+        m.insert("consumed_digest".to_owned(), Value::String(digest_str));
+        m.insert(
+            "dir_state".to_owned(),
+            match self.state.dir_state {
+                Some(d) => Value::String(dir_name(d).to_owned()),
+                None => Value::Null,
+            },
+        );
+        m.insert(
+            "standard".to_owned(),
+            Value::Array(f.standard.iter().map(feature_element_to_value).collect()),
+        );
+        m.insert(
+            "breach_watermark".to_owned(),
+            match f.breach_watermark {
+                Some(w) => Value::Number(w.into()),
+                None => Value::Null,
+            },
+        );
+        m.insert(
+            "semantic_state".to_owned(),
+            match f.semantic_state {
+                Some(t) => Value::String(terminal_name(t).to_owned()),
+                None => Value::Null,
+            },
+        );
+        m.insert(
+            "killed_by".to_owned(),
+            match &f.killed_by {
+                Some(k) => second_kill_to_value(k),
+                None => Value::Null,
+            },
+        );
+        m.insert(
+            "matched".to_owned(),
+            match &f.matched {
+                Some(c) => second_check_to_value(c),
+                None => Value::Null,
+            },
+        );
+        Value::Object(m)
     }
 
     /// 本轮预算已耗尽：未决且封存步数恰等于累计获批预算。
@@ -563,17 +940,72 @@ impl SecondFoldCursor {
         if from + consumed > strokes.len() {
             return Some((cursor, false, exhausted));
         }
+        let Some(m) = wire.as_object() else {
+            return Some((cursor, false, exhausted));
+        };
+        let expected_through = candidate.b_stroke.saturating_add(consumed);
+        let header_ok = m.len() == 16
+            && m.get("schema").and_then(|x| x.as_str()) == Some(SECOND_FOLD_CURSOR_SCHEMA)
+            && m.get("rule_revision").and_then(|x| x.as_str())
+                == Some(SECOND_CANDIDATE_RULE_REVISION)
+            && m.get("budget_policy").and_then(|x| x.as_str())
+                == Some(budget_policy.label().as_str())
+            && match (m.get("budget_granted"), budget_granted) {
+                (Some(serde_json::Value::Null), None) => true,
+                (Some(v), Some(g)) => wire_eq_usize(v, g),
+                _ => false,
+            }
+            && m.get("candidate")
+                .and_then(|x| x.as_object())
+                .is_some_and(|cm| {
+                    cm.len() == 3
+                        && cm.get("seg_dir").and_then(|x| x.as_str())
+                            == Some(dir_name(candidate.seg_dir))
+                        && cm
+                            .get("b_stroke")
+                            .is_some_and(|x| wire_eq_usize(x, candidate.b_stroke))
+                        && cm
+                            .get("candidate_extreme")
+                            .is_some_and(|x| wire_eq_i64(x, candidate.candidate_extreme))
+                })
+            && m.get("input_stroke_count")
+                .is_some_and(|x| wire_eq_usize(x, cursor.input_stroke_count))
+            && m.get("from_stroke").is_some_and(|x| wire_eq_usize(x, from))
+            && m.get("consumed_len")
+                .is_some_and(|x| wire_eq_usize(x, consumed))
+            && m.get("through_stroke")
+                .is_some_and(|x| wire_eq_usize(x, expected_through));
+        if !header_ok {
+            return Some((cursor, false, exhausted));
+        }
+        let expected_digest = strokes[from..from + consumed]
+            .iter()
+            .fold(FNV_OFFSET, digest_stroke);
+        if !m
+            .get("consumed_digest")
+            .is_some_and(|x| wire_eq_hex16(x, expected_digest))
+        {
+            return Some((cursor, false, exhausted));
+        }
         let mut probe = cursor.clone();
+        if consumed > 0 {
+            let cap = (consumed + 1) / 2;
+            probe.state.facts.raw_elements.reserve(cap);
+            probe.state.facts.steps.reserve(cap);
+            probe.state.facts.standard.reserve(cap);
+            probe.state.elements.reserve(cap);
+        }
         for k in 0..consumed {
             if probe.state.decided() {
                 return Some((cursor, false, exhausted));
             }
             if k + 1 == consumed {
-                probe.undo = Some(probe.state.capture());
+                probe.undo = Some(probe.state.step_with_undo(strokes, &candidate));
+            } else {
+                probe.state.step(strokes, &candidate);
             }
-            probe.state.step(strokes, &candidate);
         }
-        let verified = normalized(probe.to_wire()) == normalized(wire.clone());
+        let verified = wire_matches_cursor(m, &probe);
         Some((if verified { probe } else { cursor }, verified, exhausted))
     }
 }
