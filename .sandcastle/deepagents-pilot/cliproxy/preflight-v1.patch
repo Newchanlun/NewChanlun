@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..28dd848 100644
+index e69de29..30edad3 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1885 @@
+@@ -0,0 +1,1913 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3612,11 +3612,16 @@ index e69de29..28dd848 100644
 +		}
 +		evType, okType := exactOptionalString(evFields, "type")
 +		evRespID, hasEvRespID, okRespID := exactOptionalStringPresent(evFields, "response_id")
-+		if !okType || !okRespID || strings.TrimSpace(evType) == "" {
++		evModel, hasEvModel, okEvModel := exactOptionalStringPresent(evFields, "model")
++		if !okType || !okRespID || !okEvModel || strings.TrimSpace(evType) == "" {
 +			c.taintStreamAnomaly()
 +			continue
 +		}
 +		if hasEvRespID && (evRespID == "" || strings.TrimSpace(evRespID) != evRespID) {
++			c.taintStreamAnomaly()
++			continue
++		}
++		if hasEvModel && evModel == "" {
 +			c.taintStreamAnomaly()
 +			continue
 +		}
@@ -3625,7 +3630,7 @@ index e69de29..28dd848 100644
 +			continue
 +		}
 +		var respID, respModel, respStatus string
-+		var hasRespID bool
++		var hasRespID, hasRespModel bool
 +		var respErr, respOutput json.RawMessage
 +		if hasResponseError(evFields["response"]) {
 +			respFields, err := decodeExactJSONObject(evFields["response"])
@@ -3635,7 +3640,7 @@ index e69de29..28dd848 100644
 +			}
 +			var ok1, ok2, ok3 bool
 +			respID, hasRespID, ok1 = exactOptionalStringPresent(respFields, "id")
-+			respModel, ok2 = exactOptionalString(respFields, "model")
++			respModel, hasRespModel, ok2 = exactOptionalStringPresent(respFields, "model")
 +			respStatus, ok3 = exactOptionalString(respFields, "status")
 +			if !ok1 || !ok2 || !ok3 {
 +				c.taintStreamAnomaly()
@@ -3645,9 +3650,32 @@ index e69de29..28dd848 100644
 +				c.taintStreamAnomaly()
 +				continue
 +			}
++			if hasRespModel && respModel == "" {
++				c.taintStreamAnomaly()
++				continue
++			}
 +			respErr = respFields["error"]
 +			respOutput = respFields["output"]
 +			if hasResponseError(respErr) {
++				c.taintStreamAnomaly()
++				continue
++			}
++		}
++		if hasEvModel && hasRespModel && evModel != respModel {
++			c.taintStreamAnomaly()
++			continue
++		}
++		explicitModel := ""
++		if hasRespModel {
++			explicitModel = respModel
++		} else if hasEvModel {
++			explicitModel = evModel
++		}
++		if explicitModel != "" {
++			c.mu.Lock()
++			mismatch := c.expectedModel == "" || explicitModel != c.expectedModel
++			c.mu.Unlock()
++			if mismatch {
 +				c.taintStreamAnomaly()
 +				continue
 +			}
@@ -4914,10 +4942,10 @@ index e69de29..28dd848 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..22b4411 100644
+index e69de29..8d66986 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2037 @@
+@@ -0,0 +1,2053 @@
 +package preflightreceipt
 +
 +import (
@@ -6891,6 +6919,22 @@ index e69de29..22b4411 100644
 +				`data: {"type":"response.created","response":{"id":"resp_m8a"}}` + "\n\n",
 +				`data: {"type":"response.output_item.added","item":{"type":"function_call","response_id":"resp_m8b","name":"shell"}}` + "\n\n",
 +				`data: {"type":"response.completed","response":{"id":"resp_m8a","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			},
++		},
++		// 11. R30 (Astra P1): ANY SSE frame (created, in_progress, etc.) reporting a conflicting explicit model MUST taint immediately.
++		{
++			name: "created-frame-wrong-model-completed-right-model", id: "a",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m9a","model":"gpt-6.2-astra"}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m9a","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			},
++		},
++		{
++			name: "in-progress-frame-wrong-model-completed-right-model", id: "b",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m10a","model":"gpt-6.2-sol"}}` + "\n\n",
++				`data: {"type":"response.in_progress","response":{"id":"resp_m10a","model":"gpt-6.2-astra"}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m10a","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
 +			},
 +		},
 +	}

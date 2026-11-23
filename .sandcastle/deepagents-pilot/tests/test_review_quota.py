@@ -179,6 +179,7 @@ def test_failed_preflight_probes_accumulate_into_recent_input_tokens_and_trip_qu
             "checks": [
                 {"name": "models", "ok": False, "detail": {"reason": "down"}},
                 {"name": "roundtrip:gpt-6.2-sol", "ok": False, "detail": {"error": {"not_sent": "总时限已到"}}},
+                {"name": "roundtrip:gpt-6.2-astra", "ok": False, "detail": {"error": {"not_sent": "总时限已到"}}},
             ],
         },
     }
@@ -284,8 +285,12 @@ def test_container_start_failure_marks_not_sent_and_charges_zero_tokens(lane, mo
         assert trip["ok"] is False and "not_sent" in trip["error"]
         report = {
             "kind": "review-preflight", "is_review_result": False, "ready": False,
-            "checks": [{"name": f"roundtrip:{MODELS[0]}", "class": "roundtrip", "ok": False,
-                        "detail": {**trip, "sent": False}}],
+            "checks": [
+                {"name": f"roundtrip:{MODELS[0]}", "class": "roundtrip", "ok": False,
+                 "detail": {**trip, "sent": False}},
+                {"name": f"roundtrip:{MODELS[1]}", "class": "roundtrip", "ok": False,
+                 "detail": {"error": {"not_sent": "未启动"}, "sent": False}},
+            ],
         }
         lane.preflight = lambda _t, rep=report: {"returncode": 2, "report": rep, "image_id": "sha256:" + "1" * 64}
         with pytest.raises(EffectPending, match="preflight-blocked"):
@@ -523,6 +528,37 @@ def test_docker_run_exit_125_keeps_conservative_preflight_reservation(lane, monk
         },
     }
     lane.preflight = lambda _t: report
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 1)
+    assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+
+
+def test_preflight_incomplete_or_empty_checks_retains_conservative_probe_reservation(lane):
+    """R30（Astra P2）：预检返回合法 JSON 但 checks 为空或缺少某个模型的 roundtrip 项时，
+    绝不能把「发送状态未知」核减为未发送；仅对明确证明 not_sent 且无冲突的模型核减，其余保留预留。"""
+    # 1. checks 为空 -> 保留全部 MODELS 预留
+    assert module.ExternalReview._preflight_sent_probes(
+        {"kind": "review-preflight", "ready": False, "checks": []}
+    ) == len(MODELS)
+    # 2. 仅证明 sol 未发送，缺失 astra -> 保留 1 笔（astra 未知）
+    assert module.ExternalReview._preflight_sent_probes({
+        "kind": "review-preflight", "ready": False,
+        "checks": [{"name": f"roundtrip:{MODELS[0]}", "ok": False, "detail": {"sent": False}}],
+    }) == len(MODELS) - 1
+    # 3. 同一模型重复冲突项 -> 失败闭合保留该模型预留
+    assert module.ExternalReview._preflight_sent_probes({
+        "kind": "review-preflight", "ready": False,
+        "checks": [
+            {"name": f"roundtrip:{MODELS[0]}", "ok": False, "detail": {"sent": False}},
+            {"name": f"roundtrip:{MODELS[0]}", "ok": True, "detail": {"sent": True}},
+            {"name": f"roundtrip:{MODELS[1]}", "ok": False, "detail": {"sent": False}},
+        ],
+    }) == 1
+    # 4. 端到端通过 admit_preflight 验证 checks=[] 保留全部预留
+    lane.preflight = lambda _t: {
+        "returncode": 2, "image_id": "sha256:" + "1" * 64,
+        "report": {"kind": "review-preflight", "is_review_result": False, "ready": False, "checks": []},
+    }
     with pytest.raises(EffectPending, match="preflight-blocked"):
         lane.target(1810, 1)
     assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE

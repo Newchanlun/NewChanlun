@@ -2826,11 +2826,16 @@ def test_verify_pass_binds_pr_contract_base_head_run_id_and_rejects_rereview_or_
 
 
 def test_verify_pass_holds_exclusive_pr_locks_across_command_and_rejects_incomplete_publication(lane, capsys):
-    """R29（Sol P1 + Astra P1 + Astra P2）：
-    1. verify-pass 在持有排他在途锁与 PR 锁期间原子完成核验，带 `-- <cmd>` 时持续持锁至命令结束；
+    """R29/R30（Sol P1 + Astra P1 + Astra P2）：
+    1. verify-pass 在持有排他在途锁与 PR 锁期间原子完成核验，带 `-- <cmd>` 时清除 FD_CLOEXEC 并经 os.execvp
+       原地替换为写入进程（由写入进程自身持锁直至退出或被 SIGKILL，无独立父进程）；
     2. 核验失败时不执行命令；
     3. 缺少 id/state/sha 或字段不合法的残缺 publication 一律以 not-published-pass 拒绝。"""
+    import signal
     import subprocess
+    import sys
+    import time
+    from pathlib import Path
 
     passed = lane.review_pr(1810, 1)
     assert passed["verdict"] == "PASS"
@@ -2839,39 +2844,81 @@ def test_verify_pass_holds_exclusive_pr_locks_across_command_and_rejects_incompl
     run_id = passed["run_id"]
     folder = lane.state_root / "runs" / ReviewTarget(**passed["target"]).key
 
-    # 1. 带 `-- <cmd>` 时，命令执行期间 inflight.lock 与 p1810.lock 必须处于排他持有状态，命令结束后才释放
+    # 1. 单元桩测试：带 `-- <cmd>` 时，execer 被调用瞬间两把锁处于排他持有状态，失败返回后立即释放
     seen: dict[str, object] = {}
 
-    def fake_runner(cmd, *, check=False):
-        seen["cmd"] = list(cmd)
+    def fake_execer(prog, argv_list):
+        seen["prog"] = prog
+        seen["argv"] = list(argv_list)
         with lane.try_exclude_inflight_review(1810) as excl:
-            seen["inflight_free_during_cmd"] = excl
+            seen["inflight_free_during_exec"] = excl
         with lane.try_pr_lock(1810) as pr_free:
-            seen["pr_lock_free_during_cmd"] = pr_free
-        return subprocess.CompletedProcess(cmd, 0)
+            seen["pr_lock_free_during_exec"] = pr_free
+        return 0
 
     rc = module.run_verify_pass(
         ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id,
-         "--", "gh", "pr", "merge", "1810", "--merge", "--match-head-commit", head],
-        lane=lane, rows=list, runner=fake_runner,
+         "--", "git", "push", f"--force-with-lease=refs/heads/main:{base}", "origin", f"{head}:refs/heads/main"],
+        lane=lane, rows=list, execer=fake_execer,
     )
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["locked_command"] is True and out["lock_scope"] == "local-pr-exclusive-across-command"
+    assert out["locked_command"] is True and out["lock_scope"] == "exec-inherited-local-pr-locks"
     assert seen == {
-        "cmd": ["gh", "pr", "merge", "1810", "--merge", "--match-head-commit", head],
-        "inflight_free_during_cmd": False,
-        "pr_lock_free_during_cmd": False,
+        "prog": "git",
+        "argv": ["git", "push", f"--force-with-lease=refs/heads/main:{base}", "origin", f"{head}:refs/heads/main"],
+        "inflight_free_during_exec": False,
+        "pr_lock_free_during_exec": False,
     }
     with lane.try_exclude_inflight_review(1810) as excl, lane.try_pr_lock(1810) as pr_free:
         assert excl is True and pr_free is True
+
+    # 1b. 真实多进程 os.execvp 回归：verify-pass 原地 exec 为写入进程（同 PID、无单独父进程），
+    # 写入进程存活期间两把排他锁持续占用，对写入进程 SIGKILL 后内核原子释锁。
+    ready_file = lane.state_root / "exec-ready.txt"
+    wrapper_code = (
+        "import sys; from pathlib import Path; "
+        "import pilot1742.review_sweep as rs; "
+        "from pilot1742.external_review import ExternalReview; "
+        f"lane = ExternalReview(None, state_root=Path({str(lane.state_root)!r})); "
+        "raise SystemExit(rs.run_verify_pass(sys.argv[1:], lane=lane, rows=list))"
+    )
+    child_code = (
+        "import os, time; from pathlib import Path; "
+        f"Path({str(ready_file)!r}).write_text(str(os.getpid())); "
+        "time.sleep(30)"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(module.__file__).resolve().parents[1])}
+    proc = subprocess.Popen(
+        [sys.executable, "-c", wrapper_code,
+         "--pr", "1810", "--base", base, "--head", head, "--run-id", run_id,
+         "--", sys.executable, "-c", child_code],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready_file.exists() and time.monotonic() < deadline:
+            assert proc.poll() is None, f"verify-pass exited early: {proc.communicate()}"
+            time.sleep(0.05)
+        assert ready_file.exists(), "exec'd writer did not start"
+        assert int(ready_file.read_text().strip()) == proc.pid  # 原地 os.execvp：写入进程就是原 PID，无单独父进程
+        with lane.try_exclude_inflight_review(1810) as excl, lane.try_pr_lock(1810) as pr_free:
+            assert excl is False and pr_free is False  # 写入进程自身持续持有两把排他锁
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+    with lane.try_exclude_inflight_review(1810) as excl, lane.try_pr_lock(1810) as pr_free:
+        assert excl is True and pr_free is True  # 写入进程异常终止后内核立刻释放两把锁
 
     # 2. p<N>.lock 被占用时立即拒绝且不执行命令
     called = []
     with lane._pr_lock(1810):
         assert module.run_verify_pass(
             ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id, "--", "true"],
-            lane=lane, rows=list, runner=lambda cmd, **kw: called.append(cmd) or subprocess.CompletedProcess(cmd, 0),
+            lane=lane, rows=list, execer=lambda p, a: called.append(a) or 0,
         ) == 2
         assert json.loads(capsys.readouterr().err)["code"] == "pr-lock-busy"
     assert called == []
@@ -2897,10 +2944,22 @@ def test_verify_pass_holds_exclusive_pr_locks_across_command_and_rejects_incompl
         (folder / "outcome.json").write_text(json.dumps({**orig_outcome, "publication": bad_pub}))
         assert module.run_verify_pass(
             ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id, "--", "true"],
-            lane=lane, rows=list, runner=lambda cmd, **kw: called.append(cmd) or subprocess.CompletedProcess(cmd, 0),
+            lane=lane, rows=list, execer=lambda p, a: called.append(a) or 0,
         ) == 2
         assert json.loads(capsys.readouterr().err)["code"] == "not-published-pass"
     assert called == []
+
+
+def test_behind_pr_is_not_reviewed_when_auto_merge_is_off(lane, env):
+    """R30（Astra P2）：默认部署关闭 --auto-merge（不拉 mergeable_state）时，首次出现且 base 非 head 祖先的
+    落后 PR 仍须判 behind-awaiting-update，不直接派发注定因追平作废的付费双审。"""
+    first_head = lane.gateway.pr["head"]["sha"]
+    _external_review._advance_main(lane, env)  # main 前进到新 base
+    lane.gateway.pr["head"]["sha"] = first_head  # PR 仍停在旧 head，落后于新 base
+    sweep, host, _ = make(lane, run=False, auto_merge=False)
+    actions = sweep.tick()
+    assert acts(actions) == ["behind-awaiting-update"]
+    assert host.spawned == []
 
 
 def test_serve_refuses_without_valid_proxy_receipt_source(monkeypatch, tmp_path, capsys):

@@ -1241,8 +1241,9 @@ class ExternalReview:
 
     @staticmethod
     def _preflight_sent_probes(report: Any) -> int:
-        """统计本次预检实际发往上游代理的 roundtrip 探针次数。报告缺失或格式损坏时保守按 len(MODELS) 计；
-        参数解析失败（usage_error，退出码 3，尚未启动任何探针）确定未发送，返回 0。"""
+        """统计本次预检实际发往上游代理的 roundtrip 探针次数（失败闭合：默认按每个模型保留 1 笔预留，
+        仅对报告中明确证明未发送且无重复冲突的 roundtrip:<model> 项逐个核减；报告缺失、checks 为空或
+        缺少任一模型项时均保留对应预留，不把「发送状态未知」记成「未发送」）。"""
         if not isinstance(report, dict):
             return len(MODELS)
         if (report.get("kind") == "review-preflight" and report.get("ready") is False
@@ -1259,27 +1260,35 @@ class ExternalReview:
                 if type(report.get("probes_sent")) is int and report["probes_sent"] >= 0:
                     return report["probes_sent"]
                 return len(MODELS)
-        sent = 0
+        if report.get("kind") != "review-preflight":
+            return len(MODELS)
+        per_model: dict[str, int] = {model: 1 for model in MODELS}
+        seen: set[str] = set()
+        extra_sent = 0
         for item in checks:
             if not isinstance(item, dict) or not isinstance(item.get("name"), str):
                 continue
-            if not item["name"].startswith("roundtrip:"):
+            name = item["name"]
+            if not name.startswith("roundtrip:"):
                 continue
+            model = name.removeprefix("roundtrip:")
             detail = item.get("detail")
+            proved_not_sent = False
             if isinstance(detail, dict):
-                if detail.get("sent") is False:
-                    continue
                 err = detail.get("error")
-                if isinstance(err, dict) and "not_sent" in err:
-                    continue
-                sent += 1
-            elif isinstance(detail, str):
-                if "未发探测" in detail:
-                    continue
-                sent += 1
-            else:
-                sent += 1
-        return sent
+                if detail.get("sent") is False or (isinstance(err, dict) and "not_sent" in err):
+                    proved_not_sent = True
+            elif isinstance(detail, str) and "未发探测" in detail:
+                proved_not_sent = True
+            if model in per_model:
+                if model in seen:
+                    per_model[model] = 1
+                else:
+                    seen.add(model)
+                    per_model[model] = 0 if proved_not_sent else 1
+            elif not proved_not_sent:
+                extra_sent += 1
+        return sum(per_model.values()) + extra_sent
 
     @staticmethod
     def _daily_cap_enabled() -> bool:
@@ -1759,6 +1768,41 @@ class ExternalReview:
             if acquired:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+    @contextmanager
+    def exclusive_pr_lock_fds(self, number: int) -> Iterator[tuple[int, int] | tuple[None, str]]:
+        """非阻塞同时独占 p<N>.inflight.lock 与 p<N>.lock 并暴露原始文件描述符，供 verify-pass 在
+        os.execvp 前清除 FD_CLOEXEC（os.set_inheritable(..., True)），让执行写操作的进程自身持锁直至退出
+        （无单独父进程可被误杀导致提前释锁）。未 exec 返回或异常时自动释放并关闭两把锁。"""
+        folder = self.state_root / "pr-locks"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inflight_fd = os.open(folder / f"p{number}.inflight.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        pr_fd = -1
+        inflight_locked = False
+        pr_locked = False
+        try:
+            try:
+                fcntl.flock(inflight_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                inflight_locked = True
+            except BlockingIOError:
+                yield (None, "inflight-review-active")
+                return
+            pr_fd = os.open(folder / f"p{number}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(pr_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                pr_locked = True
+            except BlockingIOError:
+                yield (None, "pr-lock-busy")
+                return
+            yield (inflight_fd, pr_fd)
+        finally:
+            if pr_locked and pr_fd >= 0:
+                fcntl.flock(pr_fd, fcntl.LOCK_UN)
+            if pr_fd >= 0:
+                os.close(pr_fd)
+            if inflight_locked:
+                fcntl.flock(inflight_fd, fcntl.LOCK_UN)
+            os.close(inflight_fd)
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:
