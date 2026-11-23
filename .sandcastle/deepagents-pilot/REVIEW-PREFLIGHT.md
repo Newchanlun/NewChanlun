@@ -71,7 +71,7 @@ Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude execu
 - 插件 executor、`/v1/responses/compact`、`count-tokens`、非流式正式审阅、裸 `HttpRequest`、非标准自定义 RoundTripper、WebSocket 及其他入口均不在支持范围内，直接拒绝并按规则污染 launch。
 - 默认空插件宿主可用；活跃插件或请求期间插件快照变化使证据失效。原生受控 HTTP transport 保留严格 TLS 与代理边界；OAuth 刷新不是模型尝试。
 - collector 从入站头绑定 nonce/launch 与服务端起点，并跨 handler bootstrap 重试共享。全部 Manager 执行调用经过同一 guard；没有任何被观察 HTTP 传输的执行也拒绝证明。传输开始前分配全局序号，失败请求、重定向及重复路线不去重。只存固定枚举与 SHA-256 摘要，不存正文、URL 路径、auth_id、token 或错误字符串。
-- 成功发布要求：HTTP handler 成功结束、请求 lifecycle 成功、所有执行租约结束（含取消路径等待生产者关闭上游流后再释放租约）、全部响应体关闭且达到上游 EOF、至少一个尝试、没有覆盖缺口。预检最多 64 次传输、50 秒生命周期；正式独审每 launch 最多 512 轮响应 ID，超限失败闭合。
+- 成功发布要求：HTTP handler 成功结束、请求 lifecycle 成功、所有执行租约结束（含取消路径等待生产者关闭上游流后再释放租约）、全部响应体关闭且达到上游 EOF、至少一个尝试、没有覆盖缺口。预检最多 64 次传输、50 秒生命周期；正式独审每 launch 最多 512 轮响应 ID 且首轮开始到末轮完成不超过 2 小时，超限失败闭合。
 - 每个 nonce/launch 在认证后的受支持执行开始时用 `0700` 独占目录预留，未认证请求不写磁盘；根目录与收据文件均须属当前用户且无 group/other 权限、禁止 symlink。完成后先写同目录临时文件、`fsync`/`close`，再 `rename` 为 `receipt.json` 并同步目录。读取者不依赖旧文本日志，目录不自动删除，部署方可在无活动任务时清理整个专用临时目录，禁止将其配置成原状态卷目录。
 
 ## 可信证据缺口
