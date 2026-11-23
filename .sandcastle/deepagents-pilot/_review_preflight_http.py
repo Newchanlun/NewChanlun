@@ -215,6 +215,17 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
             }
     except urllib.error.HTTPError as error:
         status_code = error.code
+        if status_code == 429:
+            try:
+                error.close()
+            except Exception:
+                pass
+            return {
+                "http_status": 429,
+                "terminal": None,
+                "ok": False,
+                "error": _error_info("", code="rate_limit_exceeded"),
+            }
         try:
             body_bytes = error.read(65536)
         except http.client.IncompleteRead as inc:

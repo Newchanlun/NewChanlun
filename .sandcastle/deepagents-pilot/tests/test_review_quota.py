@@ -562,3 +562,21 @@ def test_preflight_incomplete_or_empty_checks_retains_conservative_probe_reserva
     with pytest.raises(EffectPending, match="preflight-blocked"):
         lane.target(1810, 1)
     assert lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+
+
+def test_first_preflight_usage_ledger_creation_fsyncs_parent_dir_before_sending(lane, monkeypatch):
+    """R33（Astra P2）：首次创建预检用量账本时必须在发出付费探针前 fsync 父目录，失败时以 quota-unverifiable 阻断且不发探针。"""
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    synced: list[Path] = []
+    preflight_calls: list[str] = []
+    lane.preflight = lambda t: (preflight_calls.append(t.head_sha), _fake_preflight_pass(t))[1]
+
+    def fail_sync(directory: Path) -> None:
+        synced.append(directory)
+        if directory == lane.state_root:
+            raise OSError("injected ledger parent dir fsync error")
+
+    monkeypatch.setattr(module, "_fsync_dir", fail_sync)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.target(1810, 1)
+    assert lane.state_root in synced and preflight_calls == []

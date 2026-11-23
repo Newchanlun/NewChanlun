@@ -2911,6 +2911,28 @@ def test_verify_pass_holds_exclusive_pr_locks_during_check_and_rejects_incomplet
     finally:
         os.chmod(intent_dir, 0o700)
 
+    # 5. R33（Astra P1）：A2 目录失去遍历权限时，verify-pass 不得静默跳过 A2 重新认可 A1：
+    #    - 存在重审意图时失败闭合返回 rereview-pending；
+    #    - 重审意图已清理（如 A2 曾完结）时仍须经 status() 抛 PermissionError 返回 state-unreadable。
+    t2 = lane.target(1810, 2)
+    run2 = lane.state_root / "runs" / t2.key
+    os.chmod(run2, 0o000)
+    try:
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "rereview-pending"
+        for intent_file in (lane.state_root / "rereview-intents").glob("*.json"):
+            intent_file.unlink()
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "state-unreadable"
+    finally:
+        os.chmod(run2, 0o700)
+
 
 def test_behind_pr_is_not_reviewed_when_auto_merge_is_off(lane, env):
     """R30（Astra P2）：默认部署关闭 --auto-merge（不拉 mergeable_state）时，首次出现且 base 非 head 祖先的

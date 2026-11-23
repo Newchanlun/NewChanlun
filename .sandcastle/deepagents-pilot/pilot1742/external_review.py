@@ -186,6 +186,13 @@ def _read(path: Path) -> dict:
     return value
 
 
+def _strict_pos_int(value: Any) -> int:
+    """严格正整数校验（拒绝 bool/float/str/0/负数），防止损坏意图记录中的 false 或 0 被当成早期时间戳。"""
+    if type(value) is not int or value <= 0:
+        raise ValueError("时间戳必须是正整数")
+    return value
+
+
 def _fsync_dir(directory: Path) -> None:
     """持久化目录项变更（新建目录、原子 replace 或 unlink 后调用）；失败直接上抛，不静默忽略。"""
     fd = os.open(directory, os.O_RDONLY)
@@ -540,11 +547,12 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
 
 class StatusPublisher:
     def __init__(self, gateway: RepoGateway, target: ReviewTarget, folder: Path, locks: Path,
-                 controller: str | None = None):
+                 controller: str | None = None, *, reject_draft: bool = False):
         """controller：发布者（正在执行的代码）应有的身份，默认就是本 run 登记时的 controller；
         受管迁移由新部署补发旧 run 时，传入已准入的当前 controller。"""
         self.gateway, self.target, self.folder, self.locks = gateway, target, folder, locks
         self.controller = controller or target.controller_code_head
+        self.reject_draft = reject_draft
 
     def check_current(self, *, state: str | None = None) -> None:
         try:
@@ -557,7 +565,7 @@ class StatusPublisher:
             # 按出处分类：向 GitHub/App 读取 PR 时的任何失败（认证、token 刷新、安装、传输）都不是漂移。
             raise EffectPending(f"{error}；读取 PR 失败，未判定漂移，恢复后用同一 attempt 重跑以重验并补发") from error
         try:
-            current = parse_target(self.gateway, pr, self.target.pr_number)
+            current = parse_target(self.gateway, pr, self.target.pr_number, reject_draft=self.reject_draft)
         except IdentityError as error:
             raise Stale(str(error)) from error
         if any(getattr(self.target, key) != value for key, value in current.items()):
@@ -1375,6 +1383,7 @@ class ExternalReview:
             if reservation_id:
                 entry["id"] = reservation_id
             row = json.dumps(entry) + "\n"
+            existed = usage_path.exists()
             fd, st = self._open_trusted_regular(usage_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
             try:
                 os.write(fd, row.encode("utf-8"))
@@ -1382,6 +1391,8 @@ class ExternalReview:
                 size = st.st_size + len(row)
             finally:
                 os.close(fd)
+            if not existed:
+                _fsync_dir(usage_path.parent)
             if size > 131_072:
                 keep_since = now - 172_800
                 kept: list[str] = []
@@ -1410,6 +1421,7 @@ class ExternalReview:
                         tmp.unlink(missing_ok=True)
                         raise
                     os.replace(tmp, usage_path)
+                    _fsync_dir(usage_path.parent)
                 except OSError:
                     pass
             return reservation_id
@@ -1473,6 +1485,7 @@ class ExternalReview:
                 tmp.unlink(missing_ok=True)
                 raise
             os.replace(tmp, usage_path)
+            _fsync_dir(usage_path.parent)
         except OSError:
             pass
         finally:
@@ -1599,6 +1612,29 @@ class ExternalReview:
             raise IdentityError("rereview-intents 目录类型不合法或为符号链接")
         return [intent_dir / name for name in sorted(os.listdir(intent_dir)) if fnmatch.fnmatch(name, pattern)]
 
+    def _iter_pr_run_dirs(self, number: int) -> list[Path]:
+        """显式枚举指定 PR 的全部 run 目录：仅当 runs 根目录本身不存在时返回空列表；
+        runs 根目录或任一匹配 r*-p<N>-* 的 run 子目录不可读、非目录或为符号链接时一律抛 OSError/IdentityError，
+        避免 Path.glob() 静默跳过失权的新 attempt 目录而把旧 PASS 当作最新结果。"""
+        runs_dir = self.state_root / "runs"
+        try:
+            st = os.lstat(runs_dir)
+        except FileNotFoundError:
+            return []
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise IdentityError("runs 状态目录类型不合法或为符号链接")
+        marker = f"-p{number}-"
+        dirs: list[Path] = []
+        for name in sorted(os.listdir(runs_dir)):
+            if not (name.startswith("r") and marker in name):
+                continue
+            run_dir = runs_dir / name
+            child_st = os.lstat(run_dir)
+            if stat.S_ISLNK(child_st.st_mode) or not stat.S_ISDIR(child_st.st_mode):
+                raise IdentityError(f"run 目录类型不合法或为符号链接：{name}")
+            dirs.append(run_dir)
+        return dirs
+
     def has_pending_rereview_intent(self, number: int, head: str, base: str) -> bool:
         """是否存在针对该 (pr, base, head) 且尚未被更晚登记的新 attempt 承接的重审意图。
         目录或意图文件不可读/损坏一律失败闭合返回 True。"""
@@ -1609,23 +1645,43 @@ class ExternalReview:
         if not matches:
             return False
         latest_reg = 0
-        for p in (self.state_root / "runs").glob(f"r*-p{number}-{base}-{head}-*/target.json"):
+        try:
+            run_dirs = self._iter_pr_run_dirs(number)
+        except (OSError, IdentityError):
+            return True
+        for run_dir in run_dirs:
+            if f"-{base}-{head}-" not in run_dir.name:
+                continue
+            p = run_dir / "target.json"
             try:
                 t = _read(p)
-                if t.get("head_sha") != head or t.get("base_sha") != base:
-                    continue
-                out_path = p.with_name("outcome.json")
-                if out_path.exists():
-                    out = _read(out_path)
-                    if out.get("verdict") == "STALE":
-                        continue
-                latest_reg = max(latest_reg, int(t.get("registered_at_ns", 0)))
-            except (OSError, ValueError, TypeError, IdentityError):
+            except FileNotFoundError:
+                try:
+                    os.listdir(run_dir)
+                except OSError:
+                    return True
                 continue
+            except (OSError, ValueError, TypeError, IdentityError):
+                return True
+            if t.get("head_sha") != head or t.get("base_sha") != base:
+                continue
+            out_path = run_dir / "outcome.json"
+            try:
+                out = _read(out_path)
+            except FileNotFoundError:
+                out = None
+            except (OSError, ValueError, TypeError, IdentityError):
+                return True
+            if out is not None and out.get("verdict") == "STALE":
+                continue
+            try:
+                latest_reg = max(latest_reg, _strict_pos_int(t.get("registered_at_ns")))
+            except (ValueError, TypeError):
+                return True
         for path in matches:
             try:
                 data = _read(path)
-                recorded = int(data["recorded_at_ns"])
+                recorded = _strict_pos_int(data["recorded_at_ns"])
                 if data.get("pr_number") != number or data.get("base_sha") != base or data.get("head_sha") != head:
                     return True
             except (OSError, ValueError, TypeError, KeyError, IdentityError):
@@ -1726,7 +1782,7 @@ class ExternalReview:
         if not intent_file.exists():
             return
         try:
-            recorded = int(_read(intent_file).get("recorded_at_ns", 0))
+            recorded = _strict_pos_int(_read(intent_file).get("recorded_at_ns"))
             if recorded < target.registered_at_ns:
                 intent_file.unlink(missing_ok=True)
                 _fsync_dir(intent_file.parent)
@@ -2132,7 +2188,7 @@ class ExternalReview:
                 try:
                     intent_data = _read(intent_path)
                     intent_patch = intent_data.get("patch_id")
-                    intent_ts = int(intent_data["recorded_at_ns"])
+                    intent_ts = _strict_pos_int(intent_data["recorded_at_ns"])
                     intent_head = str(intent_data.get("head_sha") or "")
                     intent_base = str(intent_data.get("base_sha") or "")
                 except (OSError, ValueError, TypeError, KeyError, IdentityError):
@@ -2378,7 +2434,7 @@ class ExternalReview:
         for path in paths:
             try:
                 data = _read(path)
-                recorded = int(data["recorded_at_ns"])
+                recorded = _strict_pos_int(data["recorded_at_ns"])
                 if data.get("pr_number") != target.pr_number or data.get("head_sha") != target.head_sha:
                     return True
             except (OSError, ValueError, TypeError, KeyError, IdentityError):
@@ -2388,15 +2444,26 @@ class ExternalReview:
         return False
 
     def _superseded_on_head(self, target: ReviewTarget) -> bool:
-        """同 head 上是否已有更晚登记的 attempt 或更晚记录的待完成重审意图（显式重审）：有则本 run 的结论不再发布。"""
-        for path in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
-            try:  # 只读 target.json；别的 run 的 outcome 损坏与此无关。读不了的无法证明同 head，跳过。
-                other = _read(path)
-                if (other.get("head_sha") == target.head_sha
-                        and int(other.get("registered_at_ns", 0)) > target.registered_at_ns):
+        """同 head 上是否已有更晚登记的 attempt 或更晚记录的待完成重审意图（显式重审）：有则本 run 的结论不再发布。
+        run 目录本身不可读时失败闭合返回 True。"""
+        try:
+            run_dirs = self._iter_pr_run_dirs(target.pr_number)
+        except (OSError, IdentityError):
+            return True
+        for run_dir in run_dirs:
+            try:
+                other = _read(run_dir / "target.json")
+            except FileNotFoundError:
+                try:
+                    os.listdir(run_dir)
+                except OSError:
                     return True
-            except (OSError, ValueError, TypeError, IdentityError):
                 continue
+            except (OSError, ValueError, TypeError, IdentityError):
+                return True
+            if (other.get("head_sha") == target.head_sha
+                    and int(other.get("registered_at_ns", 0)) > target.registered_at_ns):
+                return True
         return self._has_newer_rereview_intent(target)
 
     def _reverify_sealed_receipts(self, target: ReviewTarget, folder: Path, result: dict) -> dict:
@@ -2535,7 +2602,8 @@ class ExternalReview:
         assert self.gateway is not None
         folder = self.state_root / "runs" / target.key
         with _lock(folder):
-            publisher = StatusPublisher(self.gateway, target, folder, self.state_root / "status-locks")
+            publisher = StatusPublisher(self.gateway, target, folder, self.state_root / "status-locks",
+                                        reject_draft=reject_draft)
             try:
                 publisher.check_current()
                 if (folder / "outcome.json").exists():
@@ -2567,6 +2635,7 @@ class ExternalReview:
                             if str(err).startswith("quota-paused："):
                                 _save(folder / QUOTA_PAUSED_FILE, {"paused_at": time.time(), "run_id": target.run_id})
                             raise
+                        publisher.check_current()  # 补做预检期间若 PR 漂移或转回 draft（reject_draft=True），先停再发 pending
                         _save(admitted_marker, {"admitted_at": time.time(), "run_id": target.run_id,
                                                 "image_id": preflight_report["admitted_image_id"]})
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
@@ -2708,9 +2777,23 @@ class ExternalReview:
     def status(self, number: int) -> list[dict]:
         if number <= 0:
             raise ValueError("PR 号必须是正整数")
-        return [{"target": _read(p), "outcome": _read(p.with_name("outcome.json"))
-                 if p.with_name("outcome.json").exists() else None}
-                for p in sorted((self.state_root / "runs").glob(f"r*-p{number}-*/target.json"))]
+        rows: list[dict] = []
+        for run_dir in self._iter_pr_run_dirs(number):
+            target_path = run_dir / "target.json"
+            try:
+                target = _read(target_path)
+            except FileNotFoundError:
+                entries = os.listdir(run_dir)
+                if any(name != "owner.lock" and not name.endswith(".tmp") for name in entries):
+                    raise IdentityError(f"run 目录缺少 target.json 但存在其他文件：{run_dir.name}") from None
+                continue
+            outcome_path = run_dir / "outcome.json"
+            try:
+                outcome: dict | None = _read(outcome_path)
+            except FileNotFoundError:
+                outcome = None
+            rows.append({"target": target, "outcome": outcome})
+        return rows
 
     def reconcile(self, run_id: str, note: str) -> dict:
         if not note.strip() or not re.fullmatch(r"[a-f0-9-]{36}", run_id):

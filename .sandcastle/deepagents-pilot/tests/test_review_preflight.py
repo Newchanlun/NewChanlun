@@ -2333,25 +2333,39 @@ def test_round_trip_rejects_null_empty_type_and_duplicate_key_sse_frames(monkeyp
 
 
 def test_round_trip_preserves_http_429_when_error_body_disconnects(monkeypatch):
-    """R32（Astra P2）：收到 HTTP 429 后若读取错误正文触发 IncompleteRead，仍须保留 http_status=429 与已读片段，
-    确保控制器触发限流退避而非误判为一般异常。"""
+    """R32/R33（Astra P2）：
+    1. 收到 HTTP 429 时立即关闭并返回 http_status=429，绝不阻塞调用 error.read()（防代理迟迟不结束正文触发外层硬超时丢失 429）；
+    2. 其他非 429 的 HTTPError（如 502）若读取错误正文触发 IncompleteRead，仍保留状态码与已读片段。"""
     import http.client
     import urllib.error
 
-    class Truncated429(urllib.error.HTTPError):
+    class Hanging429(urllib.error.HTTPError):
         def __init__(self):
             super().__init__(LOCAL, 429, "Too Many Requests", {}, None)
+            self.closed = False
 
         def read(self, amt=None):
-            raise http.client.IncompleteRead(b'{"error":{"code":"rate_limit_exceeded"}}', expected=100)
+            raise AssertionError("HTTP 429 不得阻塞读取可选错误正文")
+
+        def close(self):
+            self.closed = True
+
+    err429 = Hanging429()
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: (_ for _ in ()).throw(err429))
+    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
+    assert trip["ok"] is False and trip["http_status"] == 429 and err429.closed is True
+    assert (trip.get("error") or {}).get("class") == "rate_limit"
+
+    class Truncated502(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(LOCAL, 502, "Bad Gateway", {}, None)
+
+        def read(self, amt=None):
+            raise http.client.IncompleteRead(b"bad gateway", expected=100)
 
         def close(self):
             pass
 
-    def raise_429(req, timeout=None):
-        raise Truncated429()
-
-    monkeypatch.setattr(preflight._http_module, "_open_http", raise_429)
-    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
-    assert trip["ok"] is False and trip["http_status"] == 429
-    assert (trip.get("error") or {}).get("class") == "rate_limit"
+    monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None: (_ for _ in ()).throw(Truncated502()))
+    trip502 = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
+    assert trip502["ok"] is False and trip502["http_status"] == 502

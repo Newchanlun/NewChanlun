@@ -3833,3 +3833,71 @@ def test_reject_draft_blocks_auto_dispatch_but_manual_review_allows_draft(lane):
     # 手动模式允许 draft
     manual_target = lane.target(1810, 1, reject_draft=False)
     assert manual_target.pr_number == 1810
+
+
+def test_corrupt_rereview_intent_timestamp_and_unreadable_newer_run_dir_fail_closed(lane):
+    """R33（Sol P2 + Astra P1）：
+    1. 重审意图 JSON 中 recorded_at_ns 为 false 或 0 时，绝不能因 int() 强转当作更早时间而忽略，必须失败闭合；
+    2. A1 已 PASS、A2 随后登记/结束，若 A2 的 run 目录失去遍历权限，status() 抛 PermissionError、
+       reuse_source 返回 None、_superseded_on_head 返回 True，绝不静默跳过 A2 重新认可旧 PASS。"""
+    import os
+    from dataclasses import replace
+
+    t1 = lane.target(1810, 1)
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+
+    # 1. 损坏的 recorded_at_ns（false / 0）必须失败闭合
+    intent_path = lane._rereview_intent_path(t1.repository_id, t1.pr_number, t1.base_sha, t1.head_sha)
+    for bad_ts in (False, 0, -5, "123"):
+        module._save(intent_path, {
+            "repository_id": t1.repository_id, "pr_number": t1.pr_number,
+            "base_sha": t1.base_sha, "head_sha": t1.head_sha,
+            "patch_id": t1.patch_id, "attempt": 2, "recorded_at_ns": bad_ts,
+        })
+        assert lane.has_pending_rereview_intent(1810, t1.head_sha, t1.base_sha) is True
+        assert lane._has_newer_rereview_intent(t1) is True
+        t_other = replace(t1, run_id="00000000-0000-4000-8000-000000000088", attempt=8)
+        assert lane.reuse_source(t_other) is None
+    intent_path.unlink(missing_ok=True)
+
+    # 2. A2 目录失去遍历权限（0o000，且清空重审意图防止被意图路径遮罩）：
+    #    status() 抛 PermissionError，reuse_source 拒沿用，_superseded_on_head 失败闭合
+    t2 = lane.target(1810, 2)
+    intent_path.unlink(missing_ok=True)
+    run2 = lane.state_root / "runs" / t2.key
+    os.chmod(run2, 0o000)
+    try:
+        with pytest.raises(PermissionError):
+            lane.status(1810)
+        assert lane._superseded_on_head(t1) is True
+        t_other = replace(t1, run_id="00000000-0000-4000-8000-000000000077", attempt=7)
+        assert lane.reuse_source(t_other) is None
+    finally:
+        os.chmod(run2, 0o700)
+
+
+def test_reuse_fallback_rechecks_draft_before_publishing_pending(lane, monkeypatch):
+    """R33（Sol P2）：自动派审（reject_draft=True）从沿用退回新审时，若 PR 在补做预检期间转回 draft，
+    绝不发布 pending 也不派发模型。"""
+    t1 = lane.target(1810, 1)
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    lane.gateway.sent.clear()
+    # 登记 A2 时模拟规划沿用（reuse_planned=True），随后来源失效触发退回补做预检
+    calls = {"reusable": 0}
+
+    def flaky_reusable(target):
+        calls["reusable"] += 1
+        if calls["reusable"] == 1:
+            return ({"run_id": t1.run_id}, {"image_id": "sha256:" + "1" * 64})
+        return None
+
+    monkeypatch.setattr(lane, "reusable", flaky_reusable)
+
+    def preflight_turns_draft(t):
+        lane.gateway.pr["draft"] = True
+        return _fake_preflight_pass(t)
+
+    lane.preflight = preflight_turns_draft
+    result = lane.review_pr(1810, 2, reject_draft=True)
+    assert result["verdict"] == "STALE"
+    assert lane.gateway.sent == []

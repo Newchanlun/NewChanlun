@@ -69,6 +69,13 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
             try:
                 if _trusted_fd(directory, is_dir=True) is None:
                     return None
+                try:
+                    os.stat("seal.pending", dir_fd=directory, follow_symlinks=False)
+                    return None
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    return None
                 fd = os.open("receipt.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             finally:
                 os.close(directory)
@@ -123,6 +130,13 @@ def review_from_receipt(
                 os.close(parent)
             try:
                 if _trusted_fd(directory, is_dir=True) is None:
+                    return None
+                try:
+                    os.stat("seal.pending", dir_fd=directory, follow_symlinks=False)
+                    return None
+                except FileNotFoundError:
+                    pass
+                except OSError:
                     return None
                 fd = os.open("receipt.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             finally:
