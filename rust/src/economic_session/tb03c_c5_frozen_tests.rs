@@ -246,7 +246,7 @@ fn c5_frozen_nonzero_cost_is_not_zero_cost_principal_or_realized_profit() {
 
 #[test]
 fn c5_frozen_capture_rejects_missing_sources_and_invalid_opening_metadata() {
-    let mut s = session("c5-frozen-negative", 16);
+    let mut s = legacy_session("c5-frozen-negative");
     let mut opening = parsed_raw("chong-G1").doc.clone();
     opening["events"][0]["known_cost_components"][0]
         .as_object_mut()
@@ -664,11 +664,6 @@ impl FrozenSession {
         )
     }
 
-    fn capture_raw(&mut self, raw: &str, index: usize) -> Value {
-        let doc: Value = serde_json::from_str(raw).unwrap();
-        self.capture_raw_parsed(raw, &doc, index)
-    }
-
     fn apply_payload(receipt: &Value) -> Value {
         json!({
             "op": "ApplyAllocation",
@@ -684,20 +679,6 @@ impl FrozenSession {
 
     fn image(&self, owner: usize) -> Value {
         store::latest(&self.connections[owner]).unwrap().3
-    }
-
-    fn audit(&mut self) {
-        std::thread::scope(|sc| {
-            let handles: Vec<_> = self
-                .connections
-                .iter_mut()
-                .zip(&self.configs)
-                .map(|(c, config)| sc.spawn(move || store::audit(c, config).unwrap()))
-                .collect();
-            for h in handles {
-                h.join().unwrap();
-            }
-        });
     }
 
     fn has_receipt(&self, owner: usize, allocation_id: &str) -> bool {
@@ -742,4 +723,17 @@ impl FrozenSession {
         })
         .collect()
     }
+}
+
+fn legacy_session(tag: &str) -> super::tb03c_c5_tests::Session {
+    super::tb03c_c5_tests::Session::with_routes(
+        tag,
+        "testonly-tb1406-c5",
+        "fixture-epoch-1",
+        &[
+            ("chong-G1", "TEST-G", "1", "10"),
+            ("chong-G2", "TEST-G", "2", "5"),
+            ("chong-G3", "TEST-G", "3", "3"),
+        ],
+    )
 }
