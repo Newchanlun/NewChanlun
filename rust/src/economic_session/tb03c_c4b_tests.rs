@@ -8,18 +8,59 @@ const PER_LEG_RAW: &str =
 const PER_LEG_HAND: &str =
     include_str!("../../../s_session/tests/fixtures/tb03c_allocation/PER-LEG-HAND-ORACLE.json");
 
+fn c4b_trim_clock(m: &mut Value) {
+    let plan = &mut m["clock"]["plan"];
+    plan["recover_ns"].as_array_mut().unwrap().truncate(8);
+    let messages = plan["messages"].as_object_mut().unwrap();
+    messages.retain(|key, _| key.strip_prefix("m-").unwrap().parse::<usize>().unwrap() < 112);
+    for phases in messages.values_mut() {
+        for phase in ["received_ns", "first_known_ns", "commit_ns"] {
+            phases[phase].as_array_mut().unwrap().truncate(8);
+        }
+    }
+}
+fn c4b_session(tag: &str, policy: bool) -> Session {
+    Session::custom(tag, policy, c4b_trim_clock)
+}
 fn c4b_apply_all(s: &mut Session, r: &Value) -> Vec<Value> {
-    s.allocations(r)
+    let allocs = s.allocations(r);
+    let envelopes = allocs
         .iter()
         .enumerate()
         .map(|(i, a)| {
-            let request = apply_request(r, &a["allocation_id"]);
-            let receipt = s.send(i + 1, request.clone());
-            assert_eq!(receipt["kind"], "Applied", "{receipt}");
-            assert_eq!(s.send(i + 1, request), receipt);
-            receipt
+            let req = apply_request(r, &a["allocation_id"]);
+            let env1 = s.new_envelope(i + 1, req.clone());
+            let env2 = s.new_envelope(i + 1, req);
+            (env1, env2)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let e_epoch = s.epochs[0];
+    let (_, b_dbs) = s.dbs.split_at_mut(1);
+    std::thread::scope(|scope| {
+        let workers = b_dbs
+            .iter_mut()
+            .zip(&s.configs[1..4])
+            .zip(&s.epochs[1..4])
+            .zip(envelopes)
+            .map(|(((db, cfg), &epoch), (env1, env2))| {
+                scope.spawn(move || {
+                    let receipt = service::handle(db, cfg, epoch, e_epoch, &json!({}), &env1)
+                        ["payload"]
+                        .clone();
+                    assert_eq!(receipt["kind"], "Applied", "{receipt}");
+                    assert_eq!(
+                        service::handle(db, cfg, epoch, e_epoch, &json!({}), &env2)["payload"],
+                        receipt
+                    );
+                    receipt
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    })
 }
 fn c4b_fills(s: &mut Session) {
     s.opening();
@@ -58,7 +99,7 @@ fn c4b_book_matches(s: &Session, expected: &Value) {
 
 #[test]
 fn c4b_late_fee_bust_and_explicit_commission_reverse_match_hand_reopen_and_replay() {
-    let mut s = Session::new("c4b-main", true);
+    let mut s = c4b_session("c4b-main", true);
     c4b_fills(&mut s);
     let hand: Value = serde_json::from_str(C4B_HAND).unwrap();
     let original = s.image(0)["recorded"].clone();
@@ -78,21 +119,59 @@ fn c4b_late_fee_bust_and_explicit_commission_reverse_match_hand_reopen_and_repla
         assert_eq!(s.resolve(&r, index + 1), resolved);
         let receipts = c4b_apply_all(&mut s, &r);
         c4b_book_matches(&s, &hand[name]);
-        for i in 1..4 {
-            c4b_reopen(&mut s, i);
-            assert_eq!(
-                s.send(
-                    i,
-                    apply_request(&r, &s.allocations(&r)[i - 1]["allocation_id"])
-                ),
-                receipts[i - 1]
-            );
-            let query = s.send(i, json!({"op":"QueryFact","fact_key":r["fact_key"]}));
-            assert_eq!(query["receipt"], receipts[i - 1]);
-            assert_eq!(
-                &s.image(i)["applied"].as_array().unwrap()[..4],
-                original_applied[i - 1].as_array().unwrap().as_slice()
-            );
+        let allocs = s.allocations(&r);
+        let envelopes = (1..4)
+            .map(|i| {
+                let apply = s.new_envelope(i, apply_request(&r, &allocs[i - 1]["allocation_id"]));
+                let query = s.new_envelope(i, json!({"op":"QueryFact","fact_key":r["fact_key"]}));
+                (apply, query)
+            })
+            .collect::<Vec<_>>();
+        let before = (1..4).map(|i| s.image(i)).collect::<Vec<_>>();
+        s.dbs.truncate(1);
+        let e_epoch = s.epochs[0];
+        let recovered = std::thread::scope(|scope| {
+            let workers = (1..4)
+                .zip(envelopes)
+                .map(|(i, (apply, query))| {
+                    let cfg = &s.configs[i];
+                    let old_epoch = s.epochs[i];
+                    let image = &before[i - 1];
+                    let receipt = &receipts[i - 1];
+                    let original = &original_applied[i - 1];
+                    scope.spawn(move || {
+                        let recovered = store::recover(cfg).unwrap();
+                        assert_eq!(recovered["kind"], "Recovered");
+                        let epoch = book::integer(&recovered, "writer_epoch").unwrap();
+                        assert!(epoch > old_epoch);
+                        let mut db = store::open(&cfg.db, false).unwrap().0;
+                        assert_eq!(&store::latest(&db).unwrap().3, image);
+                        assert_eq!(
+                            &service::handle(&mut db, cfg, epoch, e_epoch, &json!({}), &apply)
+                                ["payload"],
+                            receipt
+                        );
+                        let query =
+                            service::handle(&mut db, cfg, epoch, e_epoch, &json!({}), &query)
+                                ["payload"]
+                                .clone();
+                        assert_eq!(&query["receipt"], receipt);
+                        assert_eq!(
+                            &store::latest(&db).unwrap().3["applied"].as_array().unwrap()[..4],
+                            original.as_array().unwrap().as_slice()
+                        );
+                        (epoch, db)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for (i, (epoch, db)) in recovered.into_iter().enumerate() {
+            s.epochs[i + 1] = epoch;
+            s.dbs.push(db);
         }
         assert_eq!(
             &s.image(0)["recorded"].as_array().unwrap()[..6],
@@ -111,18 +190,27 @@ fn c4b_late_fee_bust_and_explicit_commission_reverse_match_hand_reopen_and_repla
     // 关闭、移走 E 后，每个 B 只用自己持久的 Capture/Resolve 证明恢复。
     drop(s.dbs.remove(0));
     std::fs::rename(&s.configs[0].db, s._space.0.join("offline-c4b-e.db")).unwrap();
-    for i in 0..3 {
-        store::audit(&s.dbs[i], &s.configs[i + 1]).unwrap();
-        assert_eq!(
-            store::recover(&s.configs[i + 1]).unwrap()["kind"],
-            "Recovered"
-        );
-    }
+    std::thread::scope(|scope| {
+        let workers = s
+            .dbs
+            .iter_mut()
+            .zip(&s.configs[1..4])
+            .map(|(db, cfg)| {
+                scope.spawn(move || {
+                    store::audit(db, cfg).unwrap();
+                    assert_eq!(store::recover(cfg).unwrap()["kind"], "Recovered");
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
 }
 
 #[test]
 fn c4b_fee_before_fill_waits_for_named_record_resolution_and_each_b_application() {
-    let mut s = Session::new("c4b-fee-before", true);
+    let mut s = c4b_session("c4b-fee-before", true);
     s.opening();
     let fee = s.capture(C4B_RAW, 6);
     assert_eq!(fee["kind"], "Recorded", "{fee}");
@@ -177,56 +265,64 @@ fn c4b_fee_before_fill_waits_for_named_record_resolution_and_each_b_application(
 
 #[test]
 fn c4b_wrong_predecessor_or_policy_fail_without_applied() {
-    for (tag, mutation, expected) in [
-        ("opening", 0, "IdentityConflict"),
-        ("allocation", 1, "IdentityConflict"),
-        ("policy", 2, "IdentityConflict"),
-    ] {
-        let mut s = Session::new(&format!("c4b-{tag}"), true);
-        c4b_fills(&mut s);
-        let mut raw: Value = serde_json::from_str(C4B_RAW).unwrap();
-        let index = 6;
-        match mutation {
-            0 => {
-                let original = raw["events"][0].clone();
-                for k in ["source_namespace", "source_epoch", "external_fact_id"] {
-                    raw["events"][index]["netted_fill"]["fill_ref"][k] =
-                        original["source"][k].clone();
-                    raw["events"][index]["depends_on"][k] = original["source"][k].clone();
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for (tag, mutation, expected) in [
+            ("opening", 0, "IdentityConflict"),
+            ("allocation", 1, "IdentityConflict"),
+            ("policy", 2, "IdentityConflict"),
+        ] {
+            workers.push(scope.spawn(move || {
+                let mut s = c4b_session(&format!("c4b-{tag}"), true);
+                c4b_fills(&mut s);
+                let mut raw: Value = serde_json::from_str(C4B_RAW).unwrap();
+                let index = 6;
+                match mutation {
+                    0 => {
+                        let original = raw["events"][0].clone();
+                        for k in ["source_namespace", "source_epoch", "external_fact_id"] {
+                            raw["events"][index]["netted_fill"]["fill_ref"][k] =
+                                original["source"][k].clone();
+                            raw["events"][index]["depends_on"][k] = original["source"][k].clone();
+                        }
+                        raw["events"][index]["netted_fill"]["fill_ref"]["allocation_id"] =
+                            original["allocation_id"].clone();
+                    }
+                    1 => {
+                        raw["events"][index]["netted_fill"]["fill_ref"]["allocation_id"] =
+                            json!("not-original")
+                    }
+                    _ => {
+                        raw["events"][index]["netted_fill"]["fill_ref"]["policy_revision"] =
+                            json!("wrong-policy-revision")
+                    }
                 }
-                raw["events"][index]["netted_fill"]["fill_ref"]["allocation_id"] =
-                    original["allocation_id"].clone();
-            }
-            1 => {
-                raw["events"][index]["netted_fill"]["fill_ref"]["allocation_id"] =
-                    json!("not-original")
-            }
-            _ => {
-                raw["events"][index]["netted_fill"]["fill_ref"]["policy_revision"] =
-                    json!("wrong-policy-revision")
-            }
+                let r = s.capture(&canonical_json(&raw), index);
+                assert_eq!(r["kind"], "Recorded", "{r}");
+                let before = s.image(0);
+                assert_error(&s.resolve(&r, 9), expected);
+                assert_eq!(s.image(0), before);
+                let query = s.send(0, json!({"op":"QueryFact","fact_key":r["fact_key"]}));
+                assert_eq!(query["kind"], "EconomicFact");
+                for i in 1..4 {
+                    let before = s.image(i);
+                    assert_error(
+                        &s.send(i, apply_request(&r, &json!("fake"))),
+                        "AwaitingDependency",
+                    );
+                    assert_eq!(s.image(i), before);
+                }
+            }));
         }
-        let r = s.capture(&canonical_json(&raw), index);
-        assert_eq!(r["kind"], "Recorded", "{r}");
-        let before = s.image(0);
-        assert_error(&s.resolve(&r, 9), expected);
-        assert_eq!(s.image(0), before);
-        let query = s.send(0, json!({"op":"QueryFact","fact_key":r["fact_key"]}));
-        assert_eq!(query["kind"], "EconomicFact");
-        for i in 1..4 {
-            let before = s.image(i);
-            assert_error(
-                &s.send(i, apply_request(&r, &json!("fake"))),
-                "AwaitingDependency",
-            );
-            assert_eq!(s.image(i), before);
+        for worker in workers {
+            worker.join().unwrap();
         }
-    }
+    });
 }
 
 #[test]
 fn c4b_correction_request_amount_and_resolved_proof_tampering_are_rejected() {
-    let mut s = Session::new("c4b-proof", true);
+    let mut s = c4b_session("c4b-proof", true);
     c4b_fills(&mut s);
     let r = s.capture(C4B_RAW, 7);
     let mut request = resolve_request(&r, 8);
@@ -253,6 +349,7 @@ fn c4b_correction_request_amount_and_resolved_proof_tampering_are_rejected() {
 }
 
 fn c4b_per_leg_manifest(m: &mut Value) {
+    c4b_trim_clock(m);
     m["fill_manifests"][0]["projection_kind"] = json!("per_leg");
     let mut body = m["fill_manifests"][0].clone();
     body.as_object_mut().unwrap().remove("manifest_hash");
@@ -374,32 +471,41 @@ fn c4b_per_leg_attribution_negative_controls_preserve_e_and_b_images() {
     commission["chong-N1"]["commission"] = json!("3");
     let mut zero_with_fee = c4b_per_leg_attribution();
     zero_with_fee["chong-N3"]["commission"] = json!("1");
-    for (name, attribution) in [
-        ("missing", missing),
-        ("unknown", unknown),
-        ("quantity", quantity),
-        ("cash", cash),
-        ("commission", commission),
-        ("zero-with-fee", zero_with_fee),
-    ] {
-        let mut s = Session::custom(&format!("c4b-per-leg-{name}"), true, c4b_per_leg_manifest);
-        s.opening();
-        let before_b = (1..4).map(|i| s.image(i)).collect::<Vec<_>>();
-        let raw = c4b_per_leg_raw(&s, attribution);
-        let r = s.capture(&raw, 3);
-        assert_eq!(r["kind"], "Recorded", "{name}: {r}");
-        let before_e = s.image(0);
-        assert_error(&s.resolve(&r, 4), "IdentityConflict");
-        assert_eq!(s.image(0), before_e, "{name}");
-        for (i, before) in before_b.into_iter().enumerate() {
-            assert_eq!(s.image(i + 1), before, "{name}");
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for (name, attribution) in [
+            ("missing", missing),
+            ("unknown", unknown),
+            ("quantity", quantity),
+            ("cash", cash),
+            ("commission", commission),
+            ("zero-with-fee", zero_with_fee),
+        ] {
+            workers.push(scope.spawn(move || {
+                let mut s =
+                    Session::custom(&format!("c4b-per-leg-{name}"), true, c4b_per_leg_manifest);
+                s.opening();
+                let before_b = (1..4).map(|i| s.image(i)).collect::<Vec<_>>();
+                let raw = c4b_per_leg_raw(&s, attribution);
+                let r = s.capture(&raw, 3);
+                assert_eq!(r["kind"], "Recorded", "{name}: {r}");
+                let before_e = s.image(0);
+                assert_error(&s.resolve(&r, 4), "IdentityConflict");
+                assert_eq!(s.image(0), before_e, "{name}");
+                for (i, before) in before_b.into_iter().enumerate() {
+                    assert_eq!(s.image(i + 1), before, "{name}");
+                }
+            }));
         }
-    }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
 }
 
 #[test]
 fn c4b_bust_after_refill_cannot_reuse_old_price_or_rewind_twice() {
-    let mut s = Session::new("c4b-refill", true);
+    let mut s = c4b_session("c4b-refill", true);
     c4b_fills(&mut s);
     let bust = s.capture(C4B_RAW, 7);
     assert_eq!(s.resolve(&bust, 8)["kind"], "Resolved");
@@ -432,14 +538,37 @@ fn c4b_bust_after_refill_cannot_reuse_old_price_or_rewind_twice() {
 }
 
 fn c4b_reopen_all(s: &mut Session) {
-    for owner in 0..4 {
-        c4b_reopen(s, owner);
-    }
+    let before = (0..4).map(|o| s.image(o)).collect::<Vec<_>>();
+    s.dbs.clear();
+    let recovered = std::thread::scope(|scope| {
+        let workers = s
+            .configs
+            .iter()
+            .zip(&s.epochs)
+            .zip(&before)
+            .map(|((cfg, &old_epoch), image)| {
+                scope.spawn(move || {
+                    let recovered = store::recover(cfg).unwrap();
+                    assert_eq!(recovered["kind"], "Recovered");
+                    let epoch = book::integer(&recovered, "writer_epoch").unwrap();
+                    assert!(epoch > old_epoch);
+                    let conn = store::open(&cfg.db, false).unwrap().0;
+                    assert_eq!(&store::latest(&conn).unwrap().3, image);
+                    (epoch, conn)
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    (s.epochs, s.dbs) = recovered.into_iter().unzip();
 }
 
 #[test]
 fn c4b_surviving_original_fill_after_refill_reversal_reopens_and_keeps_original_price() {
-    let mut s = Session::new("c4b-surviving-origin", true);
+    let mut s = c4b_session("c4b-surviving-origin", true);
     c4b_fills(&mut s);
     c4b_reopen_all(&mut s);
     let original_rows = s.image(0)["fill_allocations"].as_array().unwrap().clone();
@@ -553,13 +682,22 @@ fn c4b_surviving_original_fill_after_refill_reversal_reopens_and_keeps_original_
     );
     drop(s.dbs.remove(0));
     std::fs::rename(&s.configs[0].db, s._space.0.join("offline-surviving-e.db")).unwrap();
-    for i in 0..3 {
-        store::audit(&s.dbs[i], &s.configs[i + 1]).unwrap();
-        assert_eq!(
-            store::recover(&s.configs[i + 1]).unwrap()["kind"],
-            "Recovered"
-        );
-    }
+    std::thread::scope(|scope| {
+        let workers = s
+            .dbs
+            .iter_mut()
+            .zip(&s.configs[1..4])
+            .map(|(db, cfg)| {
+                scope.spawn(move || {
+                    store::audit(db, cfg).unwrap();
+                    assert_eq!(store::recover(cfg).unwrap()["kind"], "Recovered");
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
 }
 
 /// #1683：以 C4B 原件中的 bust 为底，改为具名 `fill`、逆区间 `from→to` 的新事实。
@@ -587,7 +725,7 @@ fn c4b_column(allocations: &[Value], key: &str) -> Vec<i64> {
 
 #[test]
 fn c4b_total_bust_across_three_fills_reverses_per_unit_from_range_stack_and_recovers() {
-    let mut s = Session::new("c4b-cross-fill", true);
+    let mut s = c4b_session("c4b-cross-fill", true);
     c4b_fills(&mut s);
     c4b_book_matches(&s, &json!({"q":[2,5,5],"K":[204,506,506]}));
     let original_rows = s.image(0)["fill_allocations"].as_array().unwrap().clone();
@@ -612,7 +750,13 @@ fn c4b_total_bust_across_three_fills_reverses_per_unit_from_range_stack_and_reco
     // 单位3/5 由 tie_break_order 在 N2、N3 并列中给 N2。
     assert_eq!(
         per_unit,
-        vec![(3, 1, 100), (4, 2, 101), (5, 1, 102), (6, 2, 102), (7, 0, 102)]
+        vec![
+            (3, 1, 100),
+            (4, 2, 101),
+            (5, 1, 102),
+            (6, 2, 102),
+            (7, 0, 102)
+        ]
     );
     assert_eq!(tie_broken, 2);
     let mut want_units = vec![0i64; 3];
@@ -716,24 +860,35 @@ fn c4b_total_bust_across_three_fills_reverses_per_unit_from_range_stack_and_reco
     let books = (1..4).map(|i| s.image(i)).collect::<Vec<_>>();
     drop(s.dbs.remove(0));
     std::fs::rename(&s.configs[0].db, s._space.0.join("offline-cross-e.db")).unwrap();
-    for i in 0..3 {
-        store::audit(&s.dbs[i], &s.configs[i + 1]).unwrap();
-        assert_eq!(
-            store::recover(&s.configs[i + 1]).unwrap()["kind"],
-            "Recovered"
-        );
-        assert_eq!(
-            store::latest(&store::open(&s.configs[i + 1].db, false).unwrap().0)
-                .unwrap()
-                .3["book"],
-            books[i]["book"]
-        );
-    }
+    std::thread::scope(|scope| {
+        let workers = s
+            .dbs
+            .iter_mut()
+            .zip(&s.configs[1..4])
+            .enumerate()
+            .map(|(i, (db, cfg))| {
+                let image = &books[i];
+                scope.spawn(move || {
+                    store::audit(db, cfg).unwrap();
+                    assert_eq!(store::recover(cfg).unwrap()["kind"], "Recovered");
+                    assert_eq!(
+                        store::latest(&store::open(&cfg.db, false).unwrap().0)
+                            .unwrap()
+                            .3["book"],
+                        image["book"]
+                    );
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
 }
 
 #[test]
 fn c4b_cross_fill_bust_must_name_a_reversed_source_and_stay_within_stack() {
-    let mut s = Session::new("c4b-cross-named", true);
+    let mut s = c4b_session("c4b-cross-named", true);
     c4b_fills(&mut s);
     // 具名原 fill 必须是被撤回段之一：撤 7→4 只覆盖 N3，具名 N1 冲突。
     let bad = s.capture(
