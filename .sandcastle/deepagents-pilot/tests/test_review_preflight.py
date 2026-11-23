@@ -617,7 +617,7 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
     response = Response()
     deadline = preflight.Deadline(3)
     monkeypatch.setattr(preflight._http_module, "_open_http", lambda *a, **kw: response)
-    response.read = lambda: b"".join(response)
+    response.read = lambda n=-1: b"".join(response)[: None if n < 0 else n]
     result = preflight._round_trip_http(LOCAL, KEY, ASTRA, "preflight-test", deadline)
     assert result["ok"] is (tail == "eof")
     if tail == "eof":
