@@ -3733,3 +3733,28 @@ def test_validate_review_rejects_whitespace_padded_token_usage_response_id(lane)
     outcome = validate_review(target, launch, receipt, worker, lane.source)
     verified = lane._verify_session_receipt(target, launch, receipt, worker, outcome)
     assert verified.verdict == "FAILED" and "首尾空白" in verified.reason
+
+
+def test_publish_final_blocks_old_pass_when_newer_rereview_intent_exists_without_target(lane):
+    """R28（Astra P1）：A1 尚未发布终态时，若 A2 写下重审意图后预检失败退出（无 A2 的 target.json），
+    A1 在 _publish_final 的 PR 锁内必须发现更晚的重审意图并转 STALE，绝不能发布旧 success 或清掉该意图。"""
+    t1 = lane.target(1810, 1)
+    folder1 = lane.state_root / "runs" / t1.key
+    # A2 尝试重审：记录重审意图后预检失败，不写 target.json
+    lane.preflight = lambda _t: {
+        "returncode": 2,
+        "image_id": "sha256:" + "1" * 64,
+        "report": {"kind": "review-preflight", "is_review_result": False, "ready": False,
+                   "checks": [{"name": f"route:{MODELS[0]}", "ok": False}]},
+    }
+    with pytest.raises(EffectPending, match="preflight-blocked"):
+        lane.target(1810, 2)
+    assert lane.has_pending_rereview_intent(1810, t1.head_sha, t1.base_sha) is True
+    assert len(lane.status(1810)) == 1  # 仅 A1 有 target.json
+
+    # A1 随后推进到发布阶段：必须判 STALE，不得发布 success，也不得清掉 A2 的重审意图
+    result = lane.review_pr(1810, 1)
+    assert result["verdict"] == "STALE"
+    assert not any(s.get("state") == "success" for s in lane.gateway.sent)
+    assert lane.has_pending_rereview_intent(1810, t1.head_sha, t1.base_sha) is True
+    assert (folder1 / "outcome.json").exists()

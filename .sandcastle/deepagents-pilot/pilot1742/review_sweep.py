@@ -317,15 +317,70 @@ def _latest_for_head(lane: ExternalReview, number: int, head: str) -> dict[str, 
 
 
 def _confirmed_published_pass(lane: ExternalReview, number: int, head: str, base: str) -> bool:
-    """生产端、只读读取端与显式接手入口共用的放行判定：当前合同下 (pr, head) 最新未作废 attempt 绑定到当前精确 base
+    """生产端、审计端与合入前只读核验共用的放行判定：当前合同下 (pr, head) 最新未作废 attempt 绑定到当前精确 base
     且为已发布 PASS 终态，且不存在待完成的重审意图。"""
+    return verify_confirmed_pass(lane, number, base=base, head=head, check_processes=False)["ok"]
+
+
+def verify_confirmed_pass(lane: ExternalReview, number: int, *, base: str, head: str,
+                          run_id: str | None = None,
+                          rows: Callable[[], Rows] = _ps_rows,
+                          check_processes: bool = True) -> dict[str, Any]:
+    """只读核验本机正式审查状态：确认指定 PR 在当前合同（POLICY + REVIEW_CONTRACT）下对精确 (base, head)
+    拥有最新未作废且已发布的 PASS，无活跃审查进程、无本机预检在途锁、无待完成重审意图；
+    传入远端 deepagents/review 状态中的 run_id 时一并校对精确一致，防止跨 PR 同 head 或旧合同绿灯冒充通过。"""
+    if check_processes:
+        try:
+            live_busy = reviewing(rows())
+        except Exception as error:
+            return {"ok": False, "code": "process-table-unreadable", "reason": f"无法读取宿主进程表：{type(error).__name__}"}
+        if number in live_busy:
+            return {"ok": False, "code": "review-running", "reason": f"PR #{number} 正有活跃审查进程"}
+        if lane.has_inflight_review(number):
+            return {"ok": False, "code": "inflight-review-active", "reason": f"PR #{number} 正有本机预检/登记在途"}
     if lane.has_pending_rereview_intent(number, head, base):
-        return False
-    latest = _latest_for_head(lane, number, head)
-    if latest is None or not _is_current_contract(latest["target"]) or latest["target"].get("base_sha") != base:
-        return False
+        return {"ok": False, "code": "rereview-pending", "reason": f"PR #{number} 存在待完成重审意图"}
+    try:
+        latest = _latest_for_head(lane, number, head)
+    except Exception as error:
+        return {"ok": False, "code": "state-unreadable", "reason": f"无法读取 PR #{number} 本地审查记录：{type(error).__name__}"}
+    if latest is None:
+        return {"ok": False, "code": "no-review", "reason": f"PR #{number} 在 {head[:12]} 上缺少有效审查记录"}
+    target = latest["target"]
+    if not _is_current_contract(target):
+        return {"ok": False, "code": "legacy-contract",
+                "reason": f"PR #{number} 最新记录属旧合同 {target.get('policy_version')}，非当前合同 {POLICY}"}
+    if target.get("base_sha") != base:
+        return {"ok": False, "code": "base-mismatch",
+                "reason": f"PR #{number} 最新记录绑定 base {target.get('base_sha')}，与期望 {base} 不符"}
     outcome = latest["outcome"]
-    return bool(outcome and "publication" in outcome and outcome.get("verdict") == "PASS")
+    pub = outcome.get("publication") if isinstance(outcome, dict) else None
+    if (not isinstance(outcome, dict) or not isinstance(pub, dict)
+            or outcome.get("verdict") != "PASS"
+            or (pub.get("state") is not None and pub.get("state") != "success")
+            or (pub.get("sha") is not None and pub.get("sha") != head)):
+        return {"ok": False, "code": "not-published-pass", "reason": f"PR #{number} 最新记录尚未发布 PASS 终态"}
+    target_run = target.get("run_id")
+    outcome_run = outcome.get("run_id")
+    if target_run and outcome_run and target_run != outcome_run:
+        return {"ok": False, "code": "run-id-corrupt", "reason": f"PR #{number} 本地 target 与 outcome 的 run_id 不一致"}
+    actual_run = outcome_run or target_run
+    if not isinstance(actual_run, str) or not actual_run:
+        return {"ok": False, "code": "run-id-missing", "reason": f"PR #{number} 本地记录缺少 run_id"}
+    if run_id is not None and actual_run != run_id:
+        return {"ok": False, "code": "run-id-mismatch",
+                "reason": f"远端状态 run_id={run_id} 与本 PR 最新已发布 PASS ({actual_run}) 不符"}
+    return {
+        "ok": True,
+        "pr": number,
+        "base": base,
+        "head": head,
+        "run_id": actual_run,
+        "attempt": target.get("attempt"),
+        "policy_version": target.get("policy_version"),
+        "review_contract": target.get("review_contract"),
+        "publication_id": (outcome.get("publication") or {}).get("id"),
+    }
 
 
 def run_review_command(number: int, attempt: int, head: str, private_key: Path, base: str | None = None) -> list[str]:
@@ -1262,10 +1317,31 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
     return external_review.main(cmd)
 
 
+def run_verify_pass(argv: list[str], *, lane: ExternalReview | None = None,
+                    rows: Callable[[], Rows] = _ps_rows) -> int:
+    """合入前只读核验子命令（不访问 GitHub、不写任何状态）：核对固定正式状态根 STATE_ROOT 中本 PR、
+    当前合同与精确 (base, head) 的最新已发布 PASS，并与远端 deepagents/review 状态的 run_id 精确比对。"""
+    parser = argparse.ArgumentParser(prog="pilot1742.review_sweep verify-pass")
+    parser.add_argument("--pr", required=True, type=int)
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--head", required=True)
+    parser.add_argument("--run-id", required=True, help="远端 deepagents/review 状态描述中的 run=<UUID>")
+    args = parser.parse_args(argv)
+    res = verify_confirmed_pass(lane or ExternalReview(None, state_root=STATE_ROOT), args.pr,
+                                base=args.base, head=args.head, run_id=args.run_id, rows=rows)
+    if res["ok"]:
+        print(json.dumps(res, ensure_ascii=False), flush=True)
+        return 0
+    print(json.dumps(res, ensure_ascii=False), file=sys.stderr, flush=True)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["run-review"]:
         return run_review(argv[1:])
+    if argv[:1] == ["verify-pass"]:
+        return run_verify_pass(argv[1:])
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep")
     parser.add_argument("--private-key", required=True, type=Path, help="只原样交给审查子进程")
     parser.add_argument("--max-running", type=int, default=2)

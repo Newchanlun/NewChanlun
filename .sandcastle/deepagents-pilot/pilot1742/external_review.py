@@ -1636,10 +1636,9 @@ class ExternalReview:
                             prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
                         except (OSError, ValueError, TypeError, IdentityError):
                             continue
-                    intent_file = self._rereview_intent_path(
-                        target.repository_id, target.pr_number, target.base_sha, target.head_sha
-                    )
-                    if intent_file.exists():
+                    for intent_file in (self.state_root / "rereview-intents").glob(
+                        f"r*-p{target.pr_number}-*-{target.head_sha}.json"
+                    ):
                         try:
                             prev_max = max(prev_max, int(_read(intent_file).get("recorded_at_ns", 0)))
                         except (OSError, ValueError, TypeError, IdentityError):
@@ -2200,8 +2199,23 @@ class ExternalReview:
         self.cleanup_checkout(target, model, folder)
         return outcome
 
+    def _has_newer_rereview_intent(self, target: ReviewTarget) -> bool:
+        """是否存在晚于本 attempt 登记时刻、针对同 PR 同 head 的待完成重审意图（即使新 attempt 预检失败尚未写 target.json）。
+        意图文件损坏时失败闭合返回 True，阻止旧 attempt 覆盖发布 success。"""
+        for path in (self.state_root / "rereview-intents").glob(f"r*-p{target.pr_number}-*-{target.head_sha}.json"):
+            try:
+                data = _read(path)
+                recorded = int(data["recorded_at_ns"])
+                if data.get("pr_number") != target.pr_number or data.get("head_sha") != target.head_sha:
+                    return True
+            except (OSError, ValueError, TypeError, KeyError, IdentityError):
+                return True
+            if recorded > target.registered_at_ns:
+                return True
+        return False
+
     def _superseded_on_head(self, target: ReviewTarget) -> bool:
-        """同 head 上是否已有更晚登记的 attempt（显式重审）：有则本 run 的结论不再发布。"""
+        """同 head 上是否已有更晚登记的 attempt 或更晚记录的待完成重审意图（显式重审）：有则本 run 的结论不再发布。"""
         for path in (self.state_root / "runs").glob(f"r*-p{target.pr_number}-*/target.json"):
             try:  # 只读 target.json；别的 run 的 outcome 损坏与此无关。读不了的无法证明同 head，跳过。
                 other = _read(path)
@@ -2210,7 +2224,7 @@ class ExternalReview:
                     return True
             except (OSError, ValueError, TypeError, IdentityError):
                 continue
-        return False
+        return self._has_newer_rereview_intent(target)
 
     def _reverify_sealed_receipts(self, target: ReviewTarget, folder: Path, result: dict) -> dict:
         """发布前终态复核（首次发布与未发布结果续发共用）：对真实双审的 PASS/BLOCK 再次校验两位 reviewer
@@ -2276,12 +2290,13 @@ class ExternalReview:
         valid = source is not None and admission is not None and source["run_id"] == reused.get("run_id")
         if valid:
             with self._pr_lock(target.pr_number):
-                current = self.reuse_source(target)
-                if current is not None and current["run_id"] == reused.get("run_id"):
-                    saved["publication"] = publisher.publish("success", reused["run_id"])
-                    _save(folder / "outcome.json", saved)
-                    self._clear_rereview_intent_locked(target)
-                    return saved
+                if not self._superseded_on_head(target):
+                    current = self.reuse_source(target)
+                    if current is not None and current["run_id"] == reused.get("run_id"):
+                        saved["publication"] = publisher.publish("success", reused["run_id"])
+                        _save(folder / "outcome.json", saved)
+                        self._clear_rereview_intent_locked(target)
+                        return saved
         history = f"outcome.reuse-invalidated-{time.time_ns()}.json"
         _save(folder / history, saved)
         result = {**saved, "verdict": "STALE", "reason": "沿用在恢复时已失效（准入、历史或来源改变），未发布 success",
@@ -2358,6 +2373,8 @@ class ExternalReview:
                 if reuse is not None:
                     source, admission = reuse
                     with self._pr_lock(target.pr_number):
+                        if self._superseded_on_head(target):
+                            raise Stale("同 head 已有更晚登记的 attempt 或待完成重审意图，本 run 不再发布沿用")
                         # 部署准入在锁外，可能耗时；锁内重读历史，来源仍是同一个才发布。
                         current = self.reuse_source(target)
                         if current is not None and current["run_id"] == source["run_id"]:

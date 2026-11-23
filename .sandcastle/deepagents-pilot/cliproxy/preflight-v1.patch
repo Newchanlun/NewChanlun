@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..2453e0b 100644
+index e69de29..2e51d44 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1882 @@
+@@ -0,0 +1,1883 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3346,7 +3346,7 @@ index e69de29..2453e0b 100644
 +		return
 +	}
 +	expected := c.expectedModel
-+	if expected == "" || model != expected || id == "" || strings.TrimSpace(id) != id {
++	if expected == "" || model != expected || id == "" || strings.TrimSpace(id) != id || (c.streamResponseID != "" && c.streamResponseID != id) {
 +		c.modelMismatch = true
 +		c.invalid = true
 +		c.lastItemOutputSHA = ""
@@ -3663,13 +3663,18 @@ index e69de29..2453e0b 100644
 +				rid = evRespID
 +			}
 +			if rid != "" {
++				conflict := false
 +				c.mu.Lock()
 +				if c.streamResponseID != "" && c.streamResponseID != rid {
-+					c.lastItemOutputSHA = ""
-+					c.lastItemResponseID = ""
++					conflict = true
++				} else {
++					c.streamResponseID = rid
 +				}
-+				c.streamResponseID = rid
 +				c.mu.Unlock()
++				if conflict {
++					c.taintStreamAnomaly()
++					continue
++				}
 +			}
 +		case "response.output_item.done":
 +			if hasResponseError(evFields["item"]) {
@@ -3710,6 +3715,8 @@ index e69de29..2453e0b 100644
 +						if explicitRID {
 +							if c.streamResponseID != "" && c.streamResponseID != rid {
 +								conflict = true
++							} else {
++								c.streamResponseID = rid
 +							}
 +						} else {
 +							rid = c.streamResponseID
@@ -4682,7 +4689,6 @@ index e69de29..2453e0b 100644
 +			reject:     c.Reject,
 +			markEOF:    c.MarkUpstreamEOF,
 +			requireEOF: strict && resp.StatusCode >= 200 && resp.StatusCode < 300,
-+			ctx:        req.Context(),
 +		}
 +	}
 +	return resp, nil
@@ -4695,7 +4701,6 @@ index e69de29..2453e0b 100644
 +	reject     func()
 +	markEOF    func()
 +	requireEOF bool
-+	ctx        context.Context
 +	sawEOF     atomic.Bool
 +	readErr    atomic.Bool
 +}
@@ -4711,12 +4716,8 @@ index e69de29..2453e0b 100644
 +}
 +
 +func (b *body) Close() error {
-+	if b.requireEOF && !b.sawEOF.Load() && !b.readErr.Load() && (b.ctx == nil || b.ctx.Err() == nil) {
-+		var probe [1]byte
-+		if n, rerr := b.ReadCloser.Read(probe[:]); n == 0 && errors.Is(rerr, io.EOF) {
-+			b.sawEOF.Store(true)
-+		}
-+	}
++	// Never block Close() on a synchronous Read against a potentially stalled upstream connection:
++	// strict callers must have already drained Read() to real io.EOF; otherwise fail closed immediately.
 +	err := b.ReadCloser.Close()
 +	if err != nil || (b.requireEOF && (b.readErr.Load() || !b.sawEOF.Load())) {
 +		b.reject()
@@ -4911,10 +4912,10 @@ index e69de29..2453e0b 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..9e31220 100644
+index e69de29..2a62b50 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1927 @@
+@@ -0,0 +1,2012 @@
 +package preflightreceipt
 +
 +import (
@@ -5455,6 +5456,7 @@ index e69de29..9e31220 100644
 +			})
 +			c.ObserveStreamChunk(append([]byte("data: "), append(ev, '\n', '\n')...))
 +		}
++		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e.End()
 +		c.Complete(true)
@@ -5851,6 +5853,7 @@ index e69de29..9e31220 100644
 +		t.Fatal(err)
 +	}
 +	c0.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_sealed","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass"}]}]}}` + "\n\n"))
++	_, _ = io.Copy(io.Discard, resp0.Body)
 +	_ = resp0.Body.Close()
 +	e0.End()
 +	c0.Complete(true)
@@ -5915,6 +5918,7 @@ index e69de29..9e31220 100644
 +		t.Fatal(err)
 +	}
 +	c.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_clean","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +	e.End()
 +	c.Complete(true)
@@ -6126,6 +6130,7 @@ index e69de29..9e31220 100644
 +		for _, ch := range chunks {
 +			c.ObserveStreamChunk([]byte(ch))
 +		}
++		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e.End()
 +		c.Complete(true)
@@ -6220,6 +6225,7 @@ index e69de29..9e31220 100644
 +	}
 +	c.ObserveStreamChunk([]byte(`data: {"type":"response.created","response":{"id":"resp_aborted"}}` + "\n\n"))
 +	c.ObserveStreamChunk([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"leaked-from-exec1"}]}}` + "\n\n"))
++	_, _ = io.Copy(io.Discard, rp1.Body)
 +	_ = rp1.Body.Close()
 +	e1.End()
 +
@@ -6237,6 +6243,7 @@ index e69de29..9e31220 100644
 +	}
 +	c.ObserveStreamChunk([]byte(`data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"))
 +	c.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++	_, _ = io.Copy(io.Discard, rp2.Body)
 +	_ = rp2.Body.Close()
 +	e2.End()
 +	c.Complete(true)
@@ -6268,6 +6275,7 @@ index e69de29..9e31220 100644
 +			t.Fatal(err)
 +		}
 +		c0.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_race","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e0.End()
 +		c0.Complete(true)
@@ -6598,6 +6606,7 @@ index e69de29..9e31220 100644
 +				t.Fatal(err)
 +			}
 +			c1.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_t1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++			_, _ = io.Copy(io.Discard, resp1.Body)
 +			_ = resp1.Body.Close()
 +			e1.End()
 +			c1.Complete(true)
@@ -6625,6 +6634,7 @@ index e69de29..9e31220 100644
 +				t.Fatal(err)
 +			}
 +			c2.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_t2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n" + tc.trail))
++			_, _ = io.Copy(io.Discard, resp2.Body)
 +			_ = resp2.Body.Close()
 +			e2.End()
 +			c2.Complete(true)
@@ -6669,6 +6679,7 @@ index e69de29..9e31220 100644
 +		for _, ch := range chunks {
 +			c.ObserveStreamChunk([]byte(ch))
 +		}
++		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e.End()
 +		c.Complete(true)
@@ -6832,6 +6843,29 @@ index e69de29..9e31220 100644
 +				`data: {"type":"response.completed","response":{"id":"resp_m2a","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
 +			},
 +		},
++		// 9. R28 (Sol P1 + Astra P1): conflicting response IDs across created / in_progress / output_item.done / completed MUST taint.
++		{
++			name: "created-vs-in-progress-id-conflict", id: "3",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m3a"}}` + "\n\n",
++				`data: {"type":"response.in_progress","response":{"id":"resp_m3b"}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m3b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			},
++		},
++		{
++			name: "created-vs-completed-id-conflict", id: "4",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m4a"}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m4b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			},
++		},
++		{
++			name: "output-item-vs-completed-id-conflict", id: "5",
++			chunks: []string{
++				`data: {"type":"response.output_item.done","response_id":"resp_m5a","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m5b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			},
++		},
 +	}
 +	for _, tc := range r27BadFrames {
 +		t.Run(tc.name, func(t *testing.T) {
@@ -6840,5 +6874,57 @@ index e69de29..9e31220 100644
 +				t.Fatalf("%s failed to taint/reject: st=%v rec=%+v", tc.name, st, rec)
 +			}
 +		})
++	}
++}
++
++func TestReviewReceiptStrictBodyCloseNeverBlocksOnHangingUpstream(t *testing.T) {
++	// R28 (Astra P2): if an executor stops reading early while upstream holds the stream open without data or EOF,
++	// body.Close() must NOT block on a synchronous probe Read; it must close immediately, run finish(), and reject seal.
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-eeee1111-2222-4333-8444-555555555949"
++	session := "019d0000-0000-7000-8000-000000000949"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	pr, pw := io.Pipe()
++	defer pw.Close()
++	sse := `data: {"type":"response.completed","response":{"id":"resp_hang","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"
++	go func() {
++		_, _ = pw.Write([]byte(sse))
++		// Keep pipe open without closing (stalled upstream after terminal event).
++	}()
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: pr}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	buf := make([]byte, len(sse))
++	if _, err := io.ReadFull(resp.Body, buf); err != nil {
++		t.Fatal(err)
++	}
++	c.ObserveStreamChunk(buf)
++	closed := make(chan error, 1)
++	go func() { closed <- resp.Body.Close() }()
++	select {
++	case err := <-closed:
++		if err != nil {
++			t.Fatalf("unexpected Close error: %v", err)
++		}
++	case <-time.After(1 * time.Second):
++		t.Fatal("resp.Body.Close() blocked waiting on stalled upstream instead of failing closed immediately")
++	}
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("SealReview accepted early-closed stalled stream without EOF: %v", st)
 +	}
 +}

@@ -2748,3 +2748,63 @@ def test_reviewing_detects_any_flag_order_and_equals_syntax():
     ]
     assert module.reviewing(rows) == {2207, 2208, 2209}
     assert module.reviewer_processes(rows) == 3
+
+
+def test_verify_pass_binds_pr_contract_base_head_run_id_and_rejects_rereview_or_legacy(lane, monkeypatch, capsys):
+    """R28（Sol P1 + Astra P1）：合入前只读核验 verify-pass 必须把远端状态的 run_id 精确对回本 PR、
+    当前合同、精确 (base, head) 的最新已发布 PASS，并拦截旧合同、跨 PR run_id、活跃审查、在途锁与待完成重审意图。"""
+    passed = lane.review_pr(1810, 1)
+    assert passed["verdict"] == "PASS"
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+    run_id = passed["run_id"]
+
+    # 1. 精确匹配 -> 退出码 0
+    assert module.run_verify_pass(
+        ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id], lane=lane, rows=list,
+    ) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True and out["run_id"] == run_id and out["policy_version"] == module.POLICY
+
+    # 2. 跨 PR 同 head 的不同 run_id -> 退出码 2 (run-id-mismatch)
+    assert module.run_verify_pass(
+        ["--pr", "1810", "--base", base, "--head", head, "--run-id", "other-pr-run-id"], lane=lane, rows=list,
+    ) == 2
+    assert json.loads(capsys.readouterr().err)["code"] == "run-id-mismatch"
+
+    # 3. 活跃审查进程（含 --attempt 在前与 --pr=N）-> 退出码 2 (review-running)
+    live_rows = [(777, 1, "S", "python -m pilot1742.external_review review-pr --attempt 2 --pr=1810")]
+    assert module.run_verify_pass(
+        ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id], lane=lane, rows=lambda: live_rows,
+    ) == 2
+    assert json.loads(capsys.readouterr().err)["code"] == "review-running"
+
+    # 4. 本机预检在途锁 -> 退出码 2 (inflight-review-active)
+    with lane._inflight_review(1810):
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id], lane=lane, rows=list,
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "inflight-review-active"
+
+    # 5. 待完成重审意图 -> 退出码 2 (rereview-pending)
+    lane._record_rereview_intent(ReviewTarget(**passed["target"]))
+    assert module.run_verify_pass(
+        ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id], lane=lane, rows=list,
+    ) == 2
+    assert json.loads(capsys.readouterr().err)["code"] == "rereview-pending"
+
+    # 6. 旧合同已发布 PASS -> 退出码 2 (legacy-contract)
+    lane2 = _external_review.ExternalReview(
+        lane.gateway, source=lane.source, state_root=lane.state_root / "legacy-only",
+        checkout_root=lane.checkout_root, poll_seconds=0.01, preflight=lane.preflight,
+    )
+    with monkeypatch.context() as legacy:
+        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
+        old_target = lane2.target(1810, 1)
+    (lane2.state_root / "runs" / old_target.key / "outcome.json").write_text(json.dumps({
+        "run_id": old_target.run_id, "verdict": "PASS", "publication": {"id": 9, "state": "success"},
+    }))
+    assert module.run_verify_pass(
+        ["--pr", "1810", "--base", base, "--head", head, "--run-id", old_target.run_id], lane=lane2, rows=list,
+    ) == 2
+    assert json.loads(capsys.readouterr().err)["code"] == "legacy-contract"

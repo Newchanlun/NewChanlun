@@ -6,18 +6,48 @@
 
 ## 用法
 
-在要启动正式 attempt 的 controller checkout 根目录，用启动 attempt 的同一宿主账户运行（Python ≥ 3.11，只用标准库）：
+在要启动正式 attempt 的 controller checkout 根目录，用启动 attempt 的同一宿主账户运行（Python ≥ 3.11，只用标准库）。须严格区分**正式启动准入验收**与**普通连通性自检**：
+
+### 1. 正式启动准入验收命令（生产交付与正式开审前必跑）
+
+与 `ExternalReview._run_preflight` 完全对齐：强制在审阅容器内经 `http://host.docker.internal:8318` 发出带正式 `X-NewChanlun-Review-Launch: review-<UUIDv4>` 头的往返探针，再由宿主调用 `--review-seal-url` 封存并从可信收据源读回 `sealed=true` 的 `cliproxy-review-v1` 收据，证明容器网络、宿主封存端点与收据存储命中同一代理实例：
 
 ```sh
 python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
   --source . \
   --base <base_sha> --head <head_sha> --merge-base <merge_base_sha> \
-  --checkout-root /Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/checkouts/external-review
+  --checkout-root /Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/checkouts/external-review \
+  --image <已准入不可变 sha256:...> \
+  --probe-in-container \
+  --proxy-url http://host.docker.internal:8318 \
+  --review-seal-url http://127.0.0.1:8318/v1/review-receipts/seal \
+  --credential-mode worker-env \
+  --proxy-receipt-container blackhole-cliproxy \
+  --proxy-docker-context orbstack \
+  --proxy-container-receipt-dir /tmp/cliproxy-preflight-receipts \
+  --review-docker-context orbstack
+```
+
+仅当该命令退出码为 `0` 且报告中两路 `route:*` 均含 `sealed: true`、`seal:*` 均为 `ok: true` 时，才算完成正式启动准入验收（宿主本地部署补丁代理时可将 `--proxy-receipt-container`/`--proxy-docker-context`/`--proxy-container-receipt-dir` 替换为绝对路径 `--proxy-receipt-dir <私有收据目录>`）。
+
+### 2. 普通连通性自检（不替代正式启动准入）
+
+不带 `--probe-in-container` 与 `--review-seal-url` 时，仅走宿主直连 `http://127.0.0.1:8318` 的普通 `preflight-*` 路径，**不验证**正式 launch 封存端点或审阅容器网络与代理实例的一致性；即便退出 `0` 也不得当作正式启动准入验收结果：
+
+```sh
+python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
+  --source . \
+  --base <base_sha> --head <head_sha> --merge-base <merge_base_sha> \
+  --checkout-root /Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/checkouts/external-review \
+  --proxy-receipt-container blackhole-cliproxy \
+  --proxy-docker-context orbstack \
+  --proxy-container-receipt-dir /tmp/cliproxy-preflight-receipts \
+  --review-docker-context orbstack
 ```
 
 - `--checkout-root` 填正式 attempt 将传给 `ExternalReview(checkout_root=...)` 的同一路径；示例是其缺省值 `external_review.CHECKOUT_ROOT`，位于外卷。
 - 三个 SHA 与 attempt 的 target 相同；`--source` 是 controller 读候选对象的仓库。
-- 其余参数有默认值：`--image sandcastle:newchanlun`（由控制器调用时强制传已准入的不可变 `sha256:...` 镜像 ID）、`--proxy-url http://127.0.0.1:8318`（控制器正式调用时强制配 `--probe-in-container --proxy-url http://host.docker.internal:8318`，沿审阅容器实际网络路径探测）、`--proxy-log-dir ~/Library/Application Support/CLIProxyLocal/auth/logs`、`--credential-mode codex-host`（控制器调用时强制传 `worker-env`，与正式 worker 同一 `CLIPROXY_LOCAL_KEY` / `launchctl` 凭据顺序）、`--codex-home $CODEX_HOME 或 ~/.codex`、`--codex-bin codex`、`--deadline 55`。
+- 其余参数默认值：`--image sandcastle:newchanlun`（正式验收与控制器调用必须改为已准入的不可变 `sha256:...` 镜像 ID）、`--proxy-url http://127.0.0.1:8318`（正式验收与控制器调用必须配 `--probe-in-container --proxy-url http://host.docker.internal:8318`）、`--proxy-log-dir ~/Library/Application Support/CLIProxyLocal/auth/logs`、`--credential-mode codex-host`（正式验收与控制器调用必须传 `worker-env`，与正式 worker 同一 `CLIPROXY_LOCAL_KEY` / `launchctl` 凭据顺序）、`--codex-home $CODEX_HOME 或 ~/.codex`、`--codex-bin codex`、`--deadline 55`。
 
 退出码：`0` 可以启动；`2` 拦截（看 `checks` 里 `ok:false` 的项）；`3` 用法错误。任何退出路径（含用法错误与 `--help`）stdout 都是一行 ASCII JSON。上游错误正文与 docker/daemon 的 stderr 不进报告，只给 HTTP 状态、终态、固定词表分类（如 `tool_choice_unsupported`、`quota`、`auth`）、长度与 sha256 前 12 位，以免回显的 key 经各种转义漏出；其余来自上游或 proxy 日志的字段也只取已知枚举（响应 status、路由 provider@host，其余记 `other`）；报告其余字段输出前按全部已知 key 的各种形态脱敏。
 
