@@ -568,6 +568,7 @@ def test_first_preflight_usage_ledger_creation_fsyncs_parent_dir_before_sending(
     """R33/R35（Astra P2）：创建及重试写入预检用量账本时必须在发出付费探针前 fsync 父目录，
     首次目录同步失败留下文件后，第二次重试仍须复核目录同步并以 quota-unverifiable 阻断且不发探针。"""
     monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    (lane.state_root / "runs").mkdir(parents=True, exist_ok=True, mode=0o700)
     synced: list[Path] = []
     preflight_calls: list[str] = []
     lane.preflight = lambda t: (preflight_calls.append(t.head_sha), _fake_preflight_pass(t))[1]

@@ -48,7 +48,11 @@ from .github_app import (
     OutcomeUnknown,
     RequestNotSent,
 )
-from .patch_read import FrozenPatch, covered_candidate_patch_files
+from .patch_read import (
+    FrozenPatch,
+    covered_candidate_patch_spans,
+    reads_candidate_patch,
+)
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 from .vm_trim import DOCKER_ENV, trim_vm_disk
 
@@ -109,8 +113,8 @@ PROMPT = ("只审阅，不修改、提交、fetch 或运行候选脚本。候选
           "先单独执行一条命令 git diff --no-ext-diff --no-textconv {merge_base} {head} 读取完整修改："
           "这条命令里不要接 &&、;、|，前后也不要串 cat、printf、echo、--stat、--check 等其他命令，"
           "需要别的信息就另起命令。若该输出被截断，须用独立的 git diff --no-ext-diff --no-textconv "
-          "{merge_base} {head} -- <文件...> 命令补读全部未呈现的变更文件（每条不与其他命令串联），"
-          "覆盖全部变更文件后方可给出 VERDICT: PASS。然后检查直接相关源代码。不执行来源不明的构建、测试或 hooks。"
+          "{merge_base} {head} -- <文件...> 命令补读全部未呈现的变更文件（单文件仍截断时可接 | sed -n '起,止p' 分段读，"
+          "每条不与其他命令串联），完整覆盖全部变更块后方可给出 VERDICT: PASS。然后检查直接相关源代码。不执行来源不明的构建、测试或 hooks。"
           "返回符合 schema 的 JSON，status、summary、findings、validation 均必填。"
           "完整审阅无阻断问题时 status=completed 且 summary 第一行严格为 VERDICT: PASS。"
           "有阻断问题时 status=blocked 且第一行严格为 VERDICT: BLOCK。未完成审阅时 status=failed。"
@@ -225,7 +229,14 @@ def _save(path: Path, value: dict) -> None:
 
 @contextmanager
 def _lock(folder: Path):
+    created: list[Path] = []
+    cur = folder
+    while not cur.exists() and cur != cur.parent:
+        created.append(cur)
+        cur = cur.parent
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for directory in reversed(created):
+        _fsync_dir(directory.parent)
     if folder.is_symlink() or folder.resolve() != folder.absolute():
         raise IdentityError("宿主状态目录不能经过符号链接")
     info = folder.stat()
@@ -493,7 +504,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         turn_completed = False
         final_text = None
         patch_reads = 0
-        ev_covered_files: set[str] = set()
+        ev_covered_spans: set[tuple[str, int]] = set()
         patch = frozen_patch(source, target)
         for event in events:
             kind = event.get("type")
@@ -514,14 +525,11 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             elif kind == "item.completed" and event.get("item", {}).get("type") == "command_execution":
                 item = event["item"]
                 if item.get("status") == "completed" and item.get("exit_code") == 0:
-                    hits = covered_candidate_patch_files(
-                        str(item.get("command", "")),
-                        str(item.get("aggregated_output") or ""),
-                        patch,
-                    )
-                    if hits:
+                    cmd_s = str(item.get("command", ""))
+                    out_s = str(item.get("aggregated_output") or "")
+                    if reads_candidate_patch(cmd_s, out_s, patch):
                         patch_reads += 1
-                        ev_covered_files.update(hits)
+                    ev_covered_spans.update(covered_candidate_patch_spans(cmd_s, out_s, patch))
         if not turn_completed:
             return failed("stdout 缺少重连后 turn.completed")
         sessions = {e.get("thread_id") for e in events if e.get("type") == "thread.started"}
@@ -543,9 +551,8 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             return failed("结果不符合协议")
         line = output["summary"].splitlines()[0]
         if output["status"] == "completed" and line == "VERDICT: PASS":
-            required_headers = {f.header for f in patch.files}
-            if not required_headers.issubset(ev_covered_files):
-                return failed("审查员 stdout 未完整覆盖全部冻结变更文件（完整 diff 可能被截断且未逐文件补读），PASS 不采信")
+            if not patch.all_span_ids.issubset(ev_covered_spans):
+                return failed("审查员 stdout 未完整覆盖全部冻结变更块（完整或单文件 diff 可能被截断且未补读），PASS 不采信")
             return ReviewOutcome(model, "PASS", session, output["summary"])
         if output["status"] in ("completed", "blocked") and line == "VERDICT: BLOCK":
             return ReviewOutcome(model, "BLOCK", session, output["summary"])
@@ -1062,7 +1069,7 @@ class ExternalReview:
         closed_cont: dict[str, list[int]] = {}
         exec_sessions: dict[int, tuple[str, str]] = {}
         sess_patch_reads = 0
-        sess_covered_files: set[str] = set()
+        sess_covered_spans: set[tuple[str, int]] = set()
         pending_model_output = False
         try:
             patch = frozen_patch(self.source, target)
@@ -1137,12 +1144,10 @@ class ExternalReview:
                                     exit_m = re.search(r"(?:^|\n)Process exited with code (\d+)(?:\r?\n|$)", out_text)
                                     ok_exit = exit_m is None or exit_m.group(1) == "0"
                                     if ok_exit:
-                                        call_hits: set[str] = set()
-                                        for c in call_cmds:
-                                            call_hits.update(covered_candidate_patch_files(c, out_body, patch))
-                                        if call_hits:
+                                        if any(reads_candidate_patch(c, out_body, patch) for c in call_cmds):
                                             sess_patch_reads += 1
-                                            sess_covered_files.update(call_hits)
+                                        for c in call_cmds:
+                                            sess_covered_spans.update(covered_candidate_patch_spans(c, out_body, patch))
                                     sess_m = re.search(r"Process running with session ID (\d+)", out_text)
                                     if sess_m and len(call_cmds) == 1:
                                         exec_sessions[int(sess_m.group(1))] = (call_cmds[0], out_body)
@@ -1157,10 +1162,11 @@ class ExternalReview:
                                             )
                                             ok_exit = exit_m is None or exit_m.group(1) == "0"
                                             if ok_exit:
-                                                cont_hits = covered_candidate_patch_files(prev_cmd, combined, patch)
-                                                if cont_hits:
+                                                if reads_candidate_patch(prev_cmd, combined, patch):
                                                     sess_patch_reads += 1
-                                                    sess_covered_files.update(cont_hits)
+                                                sess_covered_spans.update(
+                                                    covered_candidate_patch_spans(prev_cmd, combined, patch)
+                                                )
                     elif rtype == "token_usage_record":
                         rid = payload.get("response_id")
                         if not isinstance(rid, str) or not rid or rid != rid.strip():
@@ -1193,11 +1199,10 @@ class ExternalReview:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
                                  "session.jsonl 缺少已由 token_usage_record 闭合的冻结候选补丁读取命令与输出，PASS/BLOCK 均不采信")
         if outcome.verdict == "PASS":
-            required_headers = {f.header for f in patch.files}
-            if not required_headers.issubset(sess_covered_files):
+            if not patch.all_span_ids.issubset(sess_covered_spans):
                 return ReviewOutcome(
                     outcome.model, "FAILED", outcome.session_id,
-                    "session.jsonl 未完整呈现全部冻结变更文件（完整 diff 可能被截断且未逐文件补读），PASS 不采信",
+                    "session.jsonl 未完整呈现全部冻结变更块（完整或单文件 diff 可能被截断且未补读），PASS 不采信",
                 )
         if not response_ids:
             return ReviewOutcome(outcome.model, "FAILED", outcome.session_id,
@@ -1825,6 +1830,7 @@ class ExternalReview:
                             pass
                     target = replace(target, registered_at_ns=max(time.time_ns(), prev_max + 1))
                     _save(folder / "target.json", asdict(target))
+                    _fsync_dir(folder.parent)
                     # 保留重审意图文件直至非 STALE 的重审产生并发布终态：若本 attempt 在发出 pending 前因控制器切换等
                     # 变 STALE，has_pending_rereview_intent 会自动跳过 STALE run 并恢复阻断旧 PASS。
         return target
@@ -2209,7 +2215,9 @@ class ExternalReview:
         # 最新有效裁定：来源只能是同补丁最晚登记的那次真实双 PASS；在它之后登记的同补丁 run
         # （例如以 FAILED、STALE 收场的显式重审）只要不是 PASS，旧 PASS 就已被取代，不得复活。
         def registered(row: dict) -> int:
-            return int(row["target"].get("registered_at_ns", 0))
+            return _strict_pos_int(row["target"].get("registered_at_ns"))
+        for row in rows:
+            registered(row)
         for row in sorted(rows, key=registered, reverse=True):
             saved, old = row["outcome"], row["target"]
             if (not saved or not self._settled(row) or old["run_id"] == target.run_id
@@ -2534,9 +2542,22 @@ class ExternalReview:
                 return True
         return self._has_newer_rereview_intent(target)
 
+    _VERDICT_STATES = {"PASS": "success", "BLOCK": "failure", "FAILED": "error"}
+
+    @classmethod
+    def _checked_publish_state(cls, result: dict) -> str:
+        """严格校对 outcome 的 verdict 与 state 对应关系，并始终由合法 verdict 推导待发布状态。"""
+        verdict = result.get("verdict")
+        expected = cls._VERDICT_STATES.get(verdict) if isinstance(verdict, str) else None
+        if expected is None or result.get("state") != expected:
+            raise IdentityError(f"outcome 终态字段不一致：verdict={verdict!r}, state={result.get('state')!r}")
+        return expected
+
     def _reverify_sealed_receipts(self, target: ReviewTarget, folder: Path, result: dict) -> dict:
-        """发布前终态复核（首次发布与未发布结果续发共用）：对真实双审的 PASS/BLOCK 再次校验两位 reviewer
-        均具备已封存且未污染的代理收据，防止第一位在等待第二位或中断续发期间被污染或未封存却发布 success。"""
+        """发布前终态复核（首次发布与未发布结果续发共用）：先校对 verdict 与 state 一致，
+        再对真实双审的 PASS/BLOCK 再次校验两位 reviewer 均具备已封存且未污染的代理收据，
+        防止第一位在等待第二位、中断续发或磁盘 outcome 字段被篡改时绕过核验发布 success。"""
+        self._checked_publish_state(result)
         if target.policy_version != POLICY or result.get("reused_from") or result.get("verdict") not in ("PASS", "BLOCK"):
             return result
         rechecked: list[ReviewOutcome] = []
@@ -2555,36 +2576,40 @@ class ExternalReview:
             rechecked = [ReviewOutcome(o.model, "FAILED", o.session_id, "两独审复用了 session") for o in rechecked]
         verdict = ("FAILED" if any(o.verdict == "FAILED" for o in rechecked) else
                    "BLOCK" if any(o.verdict == "BLOCK" for o in rechecked) else "PASS")
-        state = {"PASS": "success", "BLOCK": "failure", "FAILED": "error"}[verdict]
+        state = self._VERDICT_STATES[verdict]
         if verdict != result.get("verdict") or state != result.get("state"):
             result = {**result, "verdict": verdict, "state": state, "reviews": [asdict(o) for o in rechecked]}
             _save(folder / "outcome.json", result)
         return result
 
     def _publish_final(self, target: ReviewTarget, folder: Path, publisher: StatusPublisher, result: dict) -> dict:
-        """最终发布门（新审汇总、中断续发、STALE 恢复共用）：发布前先复核全部代理终态收据已封存且未污染，
-        并在 PR 锁内确认同 head 没有更晚登记的 attempt 再发布终态；有就记 STALE（原审查明细保留），由新 attempt 接手。"""
+        """最终发布门（新审汇总、中断续发、STALE 恢复共用）：发布前先复核 verdict/state 一致及全部代理终态收据已封存且未污染，
+        仅按核验后的 verdict 推导发布状态，并在 PR 锁内确认同 head 没有更晚登记的 attempt 再发布终态；有就记 STALE。"""
         result = self._reverify_sealed_receipts(target, folder, result)
+        publish_state = self._checked_publish_state(result)
         with self._pr_lock(target.pr_number):
             if self._superseded_on_head(target):
                 raise Stale("同 head 已有更晚登记的 attempt，本 run 结论不再发布")
-            result["publication"] = publisher.publish(result["state"])
+            result["publication"] = publisher.publish(publish_state)
             _save(folder / "outcome.json", result)
             if result.get("verdict") in ("PASS", "BLOCK", "FAILED"):
                 self._clear_rereview_intent_locked(target)
         return result
 
     def _resume_publication(self, target: ReviewTarget, folder: Path, publisher: StatusPublisher, saved: dict) -> dict:
-        """outcome 已存在时：终态已发布的只对账（不重新判定、不改写）；尚未发布的按来源分别过门——
+        """outcome 已存在时：先校验 verdict 与 state 一致；终态已发布的只对账（不重新判定、不改写）；尚未发布的按来源分别过门——
         真实双审走 _publish_final；沿用结果重新做部署准入，并在 PR 锁内重读历史、确认来源未变，任何一项
         失效都不发布 success，记 STALE（原 outcome 另存为历史），由新 attempt 接手。"""
+        publish_state = self._checked_publish_state(saved)
         reused = saved.get("reused_from") or {}
-        record = Journal(folder / "effects").load(f"status-{saved['state']}")
+        if reused and (saved.get("verdict") != "PASS" or publish_state != "success"):
+            raise IdentityError("沿用结果 outcome 的 verdict/state 必须为 PASS/success")
+        record = Journal(folder / "effects").load(f"status-{publish_state}")
         if record is not None and record["state"] in ("pending", "done"):
             # 终态已发出或已发布（journal 为 pending 或 done）：只对账。主控对账为 reconciled_not_applied 的
             # 等同未发布，下面照常过门（取代检查、沿用重做准入），不直接重发。publish 先读回远端，读到即认领；pending 读不到
             # 上抛待对账、不重发；done 被覆盖也上抛待对账。不重新过门，免得把远端已有的 success 记成「未发布」。
-            saved["publication"] = publisher.publish(saved["state"], reused.get("run_id"))
+            saved["publication"] = publisher.publish(publish_state, reused.get("run_id"))
             # 认回后落盘，与正常发布同构；否则 outcome 缺 publication，沿用判定（_reuse_source）永远选不到本 run。
             _save(folder / "outcome.json", saved)
             if saved.get("verdict") in ("PASS", "BLOCK", "FAILED"):

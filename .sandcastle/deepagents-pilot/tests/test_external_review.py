@@ -1437,7 +1437,7 @@ def test_conclusion_after_frozen_patch_read_stands(lane, claim):
         single_bad = {
             case: (o.verdict, o.reason) for case, o in outcomes.items()
             if case in SINGLE_FILE_PATCH_READ
-            and (o.verdict != "FAILED" or "未完整覆盖全部冻结变更文件" not in (o.reason or ""))
+            and (o.verdict != "FAILED" or "未完整覆盖全部冻结变更块" not in (o.reason or ""))
         }
         assert full_bad == {} and single_bad == {}
 
@@ -4058,22 +4058,31 @@ def test_truncated_multifile_diff_rejects_pass_until_all_files_covered_but_allow
         return launch, receipt
 
     cmd_all = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha}"
-    cmd_beta = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- beta_r35.py"
+    cmd_rest = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- changed-1 beta_r35.py"
+    rest_diff = git(
+        env.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha,
+        "--", "changed-1", "beta_r35.py",
+    )
 
-    # 1. stdout 未截断但 session.jsonl 截断（仅呈现 alpha_r35.py，未读 beta_r35.py）-> PASS 被 _verify_session_receipt 拒绝
+    # 1. stdout 未截断但 session.jsonl 截断（仅呈现 alpha_r35.py/changed-0，changed-1 被截断撤销且缺 beta_r35.py）-> PASS 被 _verify_session_receipt 拒绝
     launch, receipt = write_worker([(cmd_all, full_diff)], [(cmd_all, trunc_diff)], "PASS")
     ev_out = module.validate_review(target, launch, receipt, worker, lane.source)
     assert ev_out.verdict == "PASS"
     sess_out = lane._verify_session_receipt(target, launch, receipt, worker, ev_out)
-    assert sess_out.verdict == "FAILED" and "未完整呈现全部冻结变更文件" in sess_out.reason
+    assert sess_out.verdict == "FAILED" and "未完整呈现全部冻结变更块" in sess_out.reason
 
     # 2. stdout 本身也截断 -> validate_review 直接拒绝 PASS
     launch, receipt = write_worker([(cmd_all, trunc_diff)], [(cmd_all, trunc_diff)], "PASS")
     assert module.validate_review(target, launch, receipt, worker, lane.source).verdict == "FAILED"
 
-    # 3. 截断后用独立 git diff -- beta_r35.py 补读剩余文件 -> PASS 通过两道门
+    # 3. 截断后仅补读 beta_r35.py（未补读被截断撤销的 changed-1）仍拒 PASS；补读 changed-1 与 beta_r35.py 后 PASS 通过两道门
+    cmd_beta = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- beta_r35.py"
     launch, receipt = write_worker([(cmd_all, trunc_diff), (cmd_beta, beta_diff)],
                                    [(cmd_all, trunc_diff), (cmd_beta, beta_diff)], "PASS")
+    assert module.validate_review(target, launch, receipt, worker, lane.source).verdict == "FAILED"
+
+    launch, receipt = write_worker([(cmd_all, trunc_diff), (cmd_rest, rest_diff)],
+                                   [(cmd_all, trunc_diff), (cmd_rest, rest_diff)], "PASS")
     ev_ok = module.validate_review(target, launch, receipt, worker, lane.source)
     assert ev_ok.verdict == "PASS"
     assert lane._verify_session_receipt(target, launch, receipt, worker, ev_ok).verdict == "PASS"
@@ -4106,3 +4115,108 @@ def test_superseded_on_head_fails_closed_on_missing_target_nonempty_dir_and_bad_
     (run2 / "target.json").unlink()
     (run2 / "outcome.json").write_text(json.dumps({"verdict": "FAILED"}))
     assert lane._superseded_on_head(t1) is True
+
+
+def test_single_file_mid_truncation_and_headerless_shared_line_reject_pass(lane, env):
+    """R36（Sol P1 + Astra P1）：
+    1. 单大文件含多个 hunk（及 >40 行大 hunk）时，仅呈现首 hunk 后遇 `N chars truncated` 截断，
+       中段截断撤销本文件临时命中且缺失后续变更块，PASS 须拒认；按单文件 `| sed -n` 分段补读全部变更块后 PASS 放行；
+    2. 多文件共含相同改动行时，无 `diff --git` 头的 `git diff ... | grep` 绝不能把同一行归给多个文件放行 PASS。"""
+    from pilot1742.patch_read import covered_candidate_patch_spans
+
+    # 1. 构造含两个远距 hunk 的单大文件与共含同行的双文件
+    big_lines = [f"LINE_{i:03d} = 'filler_unchanged_line_{i:03d}'" for i in range(1, 120)]
+    (env.source / "big_r36.py").write_text("\n".join(big_lines) + "\n")
+    git(env.source, "add", "big_r36.py")
+    git(env.source, "commit", "-qm", "base big_r36")
+    base_sha = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["base"]["sha"] = base_sha
+
+    big_lines[2] = "HUNK1_FIRST_CHANGE_UNIQUE_R36 = 'hunk_one_value'"
+    big_lines[110] = "HUNK2_SECOND_CHANGE_UNIQUE_R36 = 'hunk_two_value'"
+    (env.source / "big_r36.py").write_text("\n".join(big_lines) + "\n")
+    (env.source / "dup_a_r36.py").write_text("SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n")
+    (env.source / "dup_b_r36.py").write_text("SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n")
+    git(env.source, "add", "big_r36.py", "dup_a_r36.py", "dup_b_r36.py")
+    git(env.source, "commit", "-qm", "two hunks and shared line")
+    head_sha = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = head_sha
+
+    target = lane.target(1810, 1)
+    patch = module.frozen_patch(env.source, target)
+    big_header = "diff --git a/big_r36.py b/big_r36.py"
+    big_spans = [s.id for f in patch.files if f.header == big_header for s in f.spans]
+    assert len(big_spans) == 2
+
+    cmd_big = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} -- big_r36.py"
+    full_big = git(env.source, "diff", "--no-ext-diff", "--no-textconv", target.merge_base_sha, target.head_sha, "--", "big_r36.py")
+    # 截断发生在 big_r36.py 首 hunk 之后、次 hunk 之前：必须撤销首 hunk 临时命中，不计任何 span
+    hunk2_pos = full_big.index("HUNK2_SECOND_CHANGE_UNIQUE_R36")
+    mid_trunc = f"Warning: truncated output (original token count: 99999)\n{full_big[:hunk2_pos - 30]}\n…44444 chars truncated…\n"
+    assert covered_candidate_patch_spans(cmd_big, mid_trunc, patch) == frozenset()
+
+    # 即使没有中段截断标记、只呈现首 hunk（如 | head -12），也只覆盖 span 0，缺少 span 1 -> 不能满足全集
+    hunk1_only = full_big[:hunk2_pos - 30]
+    got_hunk1 = covered_candidate_patch_spans(f"{cmd_big} | head -12", hunk1_only, patch)
+    assert got_hunk1 == frozenset({(big_header, 0)})
+    # 用单文件 pathspec + | sed -n 补读后半段（无 diff --git 头）补齐 span 1
+    hunk2_slice = full_big[hunk2_pos - 20:]
+    got_hunk2 = covered_candidate_patch_spans(f"{cmd_big} | sed -n '20,60p'", hunk2_slice, patch)
+    assert got_hunk2 == frozenset({(big_header, 1)})
+    assert set(big_spans).issubset(got_hunk1 | got_hunk2)
+
+    # 2. 多文件无头 grep 命中共享行 -> covered_spans 必须为空，不能同时覆盖 dup_a_r36.py 与 dup_b_r36.py
+    cmd_grep = f"git diff --no-ext-diff --no-textconv {target.merge_base_sha} {target.head_sha} | grep SHARED_DUPLICATE_LINE_R36"
+    assert covered_candidate_patch_spans(cmd_grep, "+SHARED_DUPLICATE_LINE_R36 = 'identical_change_content'\n", patch) == frozenset()
+
+
+def test_r36_inconsistent_outcome_reuse_corrupt_ts_and_runs_dir_fsync(lane, env, monkeypatch):
+    """R36（Astra P1 #1 + Astra P1 #3 + Astra P2 #4）：
+    1. 未发布 outcome.json 若 verdict=FAILED 与 state=success 矛盾且无 journal，续发必须抛 IdentityError，绝不向 GitHub 发布 success；
+    2. 跨 head 沿用时若同补丁较晚的 FAILED 历史记录 registered_at_ns 为 false/0/缺失，reuse_source 拒绝沿用改走新双审；
+    3. 登记 target.json 前后必须 fsync runs 父目录以确保新 attempt 目录项持久化。"""
+    # 3. 登记 target 时 fsync runs 父目录
+    synced: list[Path] = []
+    orig_fsync = module._fsync_dir
+    monkeypatch.setattr(module, "_fsync_dir", lambda d: (synced.append(d), orig_fsync(d))[1])
+    t1 = lane.target(1810, 1)
+    assert (lane.state_root / "runs") in synced
+
+    # 1. outcome.json 字段矛盾（verdict=FAILED, state=success）绝不能跳过复核发布 success
+    folder1 = lane.state_root / "runs" / t1.key
+    tampered = {
+        "run_id": t1.run_id, "verdict": "FAILED", "state": "success",
+        "target": json.loads((folder1 / "target.json").read_text()), "reviews": [],
+    }
+    module._save(folder1 / "outcome.json", tampered)
+    lane.gateway.sent.clear()
+    with pytest.raises(IdentityError, match="终态字段不一致"):
+        lane.review_pr(1810, 1)
+    assert "success" not in lane.gateway.sent
+
+    # 2. 跨 head 沿用：A1 PASS、A2 FAILED 但 A2 的 registered_at_ns 损坏为 false/0/缺失 -> 拒沿用，改走新双审
+    reuse_root = lane.state_root / "reuse-ts"
+    lane2 = module.ExternalReview(
+        lane.gateway, source=lane.source, state_root=reuse_root,
+        checkout_root=lane.checkout_root / "reuse-ts", poll_seconds=0.01,
+        launcher=lane.launcher, preflight=lane.preflight,
+        session_receipt=_make_fake_session_receipt(reuse_root),
+    )
+    first = lane2.review_pr(1810, 1)
+    assert first["verdict"] == "PASS"
+    t2 = lane2.target(1810, 2)
+    f2 = lane2.state_root / "runs" / t2.key
+    orig_t2 = json.loads((f2 / "target.json").read_text())
+    module._save(f2 / "outcome.json", {
+        "run_id": t2.run_id, "verdict": "FAILED", "state": "error", "target": orig_t2, "reviews": [],
+    })
+    _advance_main(lane2, env)
+    for bad_ts in (False, 0, None):
+        bad_t2 = {**orig_t2, "registered_at_ns": bad_ts} if bad_ts is not None else {
+            k: v for k, v in orig_t2.items() if k != "registered_at_ns"
+        }
+        module._save(f2 / "target.json", bad_t2)
+        module._save(f2 / "outcome.json", {
+            "run_id": t2.run_id, "verdict": "FAILED", "state": "error", "target": bad_t2, "reviews": [],
+        })
+        assert lane2.would_reuse(module.load_target(lane2.gateway, 1810)) is False
