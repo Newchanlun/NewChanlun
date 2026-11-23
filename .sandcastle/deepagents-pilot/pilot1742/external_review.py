@@ -1230,9 +1230,13 @@ class ExternalReview:
 
     @staticmethod
     def _preflight_sent_probes(report: Any) -> int:
-        """统计本次预检实际发往上游代理的 roundtrip 探针次数。报告缺失或格式损坏时保守按 len(MODELS) 计。"""
+        """统计本次预检实际发往上游代理的 roundtrip 探针次数。报告缺失或格式损坏时保守按 len(MODELS) 计；
+        参数解析失败（usage_error，退出码 3，尚未启动任何探针）确定未发送，返回 0。"""
         if not isinstance(report, dict):
             return len(MODELS)
+        if (report.get("kind") == "review-preflight" and report.get("ready") is False
+                and isinstance(report.get("usage_error"), str) and "checks" not in report):
+            return 0
         checks = report.get("checks")
         if not isinstance(checks, list):
             return len(MODELS)

@@ -2749,3 +2749,41 @@ def test_merge_handoff_invalidates_on_failed_tick_rejects_stale_and_unconfirmed_
     handoff_path.write_text(json.dumps(stale_payload), encoding="utf-8")
     assert module.main(["--state-root", str(lane.state_root), "--handoff"]) == 2
     assert "handoff-unreadable" in capsys.readouterr().err
+
+
+def test_read_merge_handoff_rechecks_latest_attempt_and_live_behind_process_and_cli_state_root(lane):
+    """R25（Astra P1/P2）：
+    1) A1 已 PASS 并入 ready_for_merge 后，A2 写入 target.json（释放登记锁并承接重审意图、尚未发 pending）：
+       read_merge_handoff 必须复核最新非 STALE attempt 仍为已发布 PASS，不得继续返回该 PR；
+    2) behind_queue_head 快照写入后若启动了活跃审查进程，read_merge_handoff 必须实时过滤掉该追平条目；
+    3) 非 --handoff 模式传 --state-root 必须被 CLI 拒绝，避免父子进程状态根分叉。"""
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    head = lane.gateway.pr["head"]["sha"]
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1811])
+    github.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    github.states[1811] = {"mergeable_state": "behind", "auto_merge": False}
+    github.files[1810] = [{"filename": "src/a.py", "status": "modified", "changes": 1}]
+    github.files[1811] = [{"filename": "src/b.py", "status": "modified", "changes": 1}]
+    green(github, head)
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    sweep.tick()
+
+    snap0 = module.read_merge_handoff(lane.state_root, rows=list)
+    assert [r["pr"] for r in snap0["ready_for_merge"]] == [1810]
+    assert [r["pr"] for r in snap0["behind_queue_head"]] == [1811]
+
+    # 1. A2 登记 target.json（未发 pending、无活进程、重审意图已被 A2 承接）-> 立刻从 ready_for_merge 剔除
+    lane.target(1810, 2)
+    snap1 = module.read_merge_handoff(lane.state_root, rows=list)
+    assert snap1["ready_for_merge"] == []
+
+    # 2. 1811 快照写入后新起活跃审查进程 -> 立刻从 behind_queue_head 剔除
+    live_rows = [(9002, 1, "S", "python -m pilot1742.external_review review-pr --pr 1811 --attempt 1")]
+    snap2 = module.read_merge_handoff(lane.state_root, rows=lambda: live_rows)
+    assert snap2["behind_queue_head"] == []
+
+    # 3. 常规 sweep 禁止传 --state-root
+    with pytest.raises(SystemExit) as caught:
+        module.main(["--state-root", str(lane.state_root), "--private-key", "/tmp/k.pem"])
+    assert caught.value.code == 2

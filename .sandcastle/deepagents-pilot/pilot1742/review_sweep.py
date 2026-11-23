@@ -1180,9 +1180,11 @@ class Sweep:
 
 def read_merge_handoff(state_root: Path = STATE_ROOT, *,
                        max_age_seconds: float = MERGE_HANDOFF_MAX_AGE_SECONDS,
-                       now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, Any]:
-    """只读读取 sweep/merge-handoff.json（非阻塞、拒绝符号链接/FIFO/越权/过期快照），并现场过滤本机已新起
-    重审意图或在途审阅的条目，供主控巡航或维护者消费。"""
+                       now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                       rows: Callable[[], Rows] = _ps_rows) -> dict[str, Any]:
+    """只读读取 sweep/merge-handoff.json（非阻塞、拒绝符号链接/FIFO/越权/过期快照），并现场复核
+    本机活跃审查进程、在途锁、待承接重审意图及最新非 STALE attempt 是否仍为精确 (base, head) 的已发布 PASS，
+    供主控巡航或维护者消费。"""
     path = state_root / "sweep" / MERGE_HANDOFF_FILE
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -1220,19 +1222,41 @@ def read_merge_handoff(state_root: Path = STATE_ROOT, *,
     age = (now() - updated_dt).total_seconds()
     if age > max_age_seconds or age < -60:
         raise ValueError(f"merge-handoff 快照已过期或时钟异常（age={age:.1f}s，上限 {max_age_seconds:.0f}s）：{path}")
+    try:
+        live_busy = reviewing(rows())
+    except Exception as error:
+        raise ValueError(f"无法读取宿主活跃审查进程表：{type(error).__name__}") from None
     lane = ExternalReview(None, state_root=state_root)
-    if isinstance(data.get("ready_for_merge"), list):
-        filtered_ready = []
-        for row in data["ready_for_merge"]:
-            if not isinstance(row, dict) or not isinstance(row.get("pr"), int):
-                continue
-            pr_num, head_sha, base_sha = row["pr"], row.get("head"), row.get("base")
-            if not isinstance(head_sha, str) or not isinstance(base_sha, str):
-                continue
-            if lane.has_inflight_review(pr_num) or lane.has_pending_rereview_intent(pr_num, head_sha, base_sha):
-                continue
-            filtered_ready.append(row)
-        data["ready_for_merge"] = filtered_ready
+    if not isinstance(data.get("ready_for_merge"), list) or not isinstance(data.get("behind_queue_head"), list):
+        raise ValueError(f"merge-handoff 队列字段格式无效：{path}")
+    filtered_ready = []
+    for row in data["ready_for_merge"]:
+        if not isinstance(row, dict) or type(row.get("pr")) is not int:
+            continue
+        pr_num, head_sha, base_sha = row["pr"], row.get("head"), row.get("base")
+        if not isinstance(head_sha, str) or not isinstance(base_sha, str):
+            continue
+        if (pr_num in live_busy or lane.has_inflight_review(pr_num)
+                or lane.has_pending_rereview_intent(pr_num, head_sha, base_sha)):
+            continue
+        non_stale = [r for r in lane.status(pr_num) if not r["outcome"] or r["outcome"].get("verdict") != "STALE"]
+        latest = max(non_stale, key=lambda r: r["target"]["registered_at_ns"]) if non_stale else None
+        if (latest is None or latest["target"].get("head_sha") != head_sha
+                or latest["target"].get("base_sha") != base_sha
+                or not latest["outcome"] or "publication" not in latest["outcome"]
+                or latest["outcome"].get("verdict") != "PASS"):
+            continue
+        filtered_ready.append(row)
+    data["ready_for_merge"] = filtered_ready
+    filtered_behind = []
+    for row in data["behind_queue_head"]:
+        if not isinstance(row, dict) or type(row.get("pr")) is not int:
+            continue
+        pr_num = row["pr"]
+        if pr_num in live_busy or lane.has_inflight_review(pr_num):
+            continue
+        filtered_behind.append(row)
+    data["behind_queue_head"] = filtered_behind
     return data
 
 
@@ -1358,7 +1382,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_review(argv[1:])
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep")
     parser.add_argument("--private-key", type=Path, help="只原样交给审查子进程（--handoff 只读模式不需要）")
-    parser.add_argument("--state-root", type=Path, default=STATE_ROOT, help="审查状态根（默认 STATE_ROOT）")
+    parser.add_argument("--state-root", type=Path, default=None, help="审查状态根（仅用于 --handoff 只读模式，默认 STATE_ROOT）")
     parser.add_argument("--handoff", action="store_true",
                         help="只读输出 sweep/merge-handoff.json 交接队列（供主控巡航或维护者消费追平与合入）")
     parser.add_argument("--max-running", type=int, default=2)
@@ -1369,17 +1393,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.handoff:
         try:
-            print(json.dumps(read_merge_handoff(args.state_root), ensure_ascii=False, indent=2), flush=True)
+            print(json.dumps(read_merge_handoff(args.state_root or STATE_ROOT), ensure_ascii=False, indent=2), flush=True)
             return 0
         except (OSError, ValueError) as error:
             print(json.dumps({"action": "handoff-unreadable", "reason": str(error)}, ensure_ascii=False), file=sys.stderr, flush=True)
             return 2
+    if args.state_root is not None:
+        parser.error("--state-root 仅用于 --handoff 只读模式")
     if args.private_key is None:
         parser.error("--private-key is required unless --handoff is set")
     if not math.isfinite(args.loop) or not (args.loop == 0 or args.loop >= MIN_LOOP_SECONDS):  # 挡住负数、nan、inf
         parser.error(f"--loop 须为 0 或至少 {MIN_LOOP_SECONDS:g} 秒")
-    sweep = Sweep(GhCli(), ExternalReview(None, state_root=args.state_root), spawner(args.private_key),
-                  state_root=args.state_root, max_running=args.max_running, auto_merge=args.auto_merge)
+    sweep = Sweep(GhCli(), ExternalReview(None), spawner(args.private_key), max_running=args.max_running,
+                  auto_merge=args.auto_merge)
     while True:
         try:
             report(sweep.tick())

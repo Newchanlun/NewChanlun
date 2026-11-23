@@ -425,3 +425,25 @@ def test_preflight_timeout_charges_once_and_prelaunch_failure_reconciles_to_zero
     with pytest.raises(EffectPending, match="TimeoutExpired"):
         real_lane.target(1810, 1)
     assert real_lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE
+
+
+def test_preflight_usage_error_exit_3_reconciles_reservation_to_zero(lane, capsys):
+    """R25（Astra P2）：预检参数错误（如 REVIEW_PREFLIGHT_DEADLINE=0）在启动探针前以退出码 3 输出
+    usage_error（无 checks）；admit_preflight 必须把发前预留核减为 0，不耗尽每日额度。"""
+    import review_preflight
+
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+    with pytest.raises(SystemExit) as caught:
+        review_preflight.main([
+            "--source", str(lane.source), "--base", base, "--head", head, "--merge-base", base,
+            "--checkout-root", str(lane.checkout_root), "--deadline", "0",
+        ])
+    assert caught.value.code == 3
+    usage_report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "usage_error" in usage_report and "checks" not in usage_report
+    lane.preflight = lambda _t: {"returncode": 3, "report": usage_report, "image_id": "sha256:" + "1" * 64}
+    for _ in range(3):
+        with pytest.raises(EffectPending, match="preflight-blocked"):
+            lane.target(1810, 1)
+    assert lane.recent_input_tokens() == 0
