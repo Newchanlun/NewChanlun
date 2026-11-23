@@ -58,9 +58,9 @@ def sample(value, depth=5):
     raise ValueError("not a plain parameter sample")
 
 
-def arguments(fn, samples, variadic=False):
+def arguments(signature, samples, variadic=False):
     args, kwargs = [], {}
-    params = inspect.signature(fn, follow_wrapped=False).parameters
+    params = signature.parameters
     for param in params.values():
         if param.kind is inspect.Parameter.POSITIONAL_ONLY:
             args.append(sample(samples[param.name]) if param.name in samples else
@@ -80,6 +80,15 @@ def arguments(fn, samples, variadic=False):
                 p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL) for p in params.values()):
             args.extend(remaining.values())
     return args, kwargs
+
+
+POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+
+
+def variadic_only(signature):
+    return bool(signature.parameters) and all(
+        p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for p in signature.parameters.values())
 
 
 DEFERRED_FRAMES = {GeneratorType: "gi_frame", AsyncGeneratorType: "ag_frame", CoroutineType: "cr_frame"}
@@ -183,10 +192,9 @@ def class_members(cls):
 
 
 class Binding:
-    def __init__(self, key, member, chain, owner=None, owner_body=None):
+    def __init__(self, key, member, chain, exports, owner=None):
         self.key, self.member, self.chain, self.owner = key, member, chain, owner
-        self.function, self.signature = chain[0], chain[-1]
-        self.owner_body = owner_body
+        self.function, self.exports = chain[0], exports
 
     @property
     def has_receiver(self):
@@ -210,46 +218,65 @@ class Binding:
         key = id(self.owner)
         if key not in instances:
             instances[key] = None  # 构造器异常也只试一次。
-            args, kwargs = arguments(self.owner, samples)
+            args, kwargs = arguments(inspect.signature(self.owner, follow_wrapped=False), samples)
             instances[key] = self.owner(*args, **kwargs)
         if instances[key] is not None:
             return self.member.__get__(instances[key], self.owner)
 
-    def arguments(self, fn, named, shapes):
-        choices = []
-        try:
-            params = inspect.signature(fn, follow_wrapped=False)
-        except (ValueError, TypeError):
-            params = None
-        # 实收形状只服从真正被调用的入口，先试，再推导补充形状。
-        if params is not None:
-            for args, kwargs in shapes:
-                try:
-                    params.bind(*args, **kwargs)
-                    choice = tuple(sample(v) for v in args), {k: sample(v) for k, v in kwargs.items()}
-                except (ValueError, TypeError):
+    def signatures(self, fn, public, named):
+        generic = variadic_only(public)
+        if not generic:
+            yield public
+        receiver = fn.__self__ if type(fn) is MethodType else MISSING
+        for target in self.chain[1:]:
+            # 实际绑定的层自带签名和接收者；只考察它之后的未绑定层。
+            if type(target) is MethodType:
+                receiver = target.__self__
+            try:
+                params = inspect.signature(target, follow_wrapped=False)
+            except (ValueError, TypeError):
+                continue
+            if variadic_only(params):
+                continue
+            slots = tuple(params.parameters.values())
+            if type(target) is FunctionType and receiver is not MISSING and slots and slots[0].kind in POSITIONAL:
+                role = self.exports.receiver_slot(receiver, target)
+                first = slots[0]
+                if role is True or (role is None and first.name not in named and
+                                    first.default is inspect.Parameter.empty):
+                    # 只推导实参槽，不绑定函数对象，也不把接收者值放进探针。
+                    yield params.replace(parameters=slots[1:])
+                if role is True:
                     continue
-                if (args, kwargs) not in choices:
-                    choices.append((args, kwargs))
-                    yield choice
+            yield params
+        if generic:
+            yield public
 
-        target = self.signature
-        if target is self.function:
-            target = fn
-        elif type(fn) is MethodType and type(target) is FunctionType and self.owner_body is not None:
-            code = target.__code__
-            # 只扣除这个类成员原有的接收者；另一层的方法不改变末端普通函数的签名。
-            if any(c is code for c in self.owner_body.co_consts) and any(
-                    name == code.co_name and member is self.member for name, member in class_members(self.owner)):
-                target = MethodType(target, fn.__self__)
+    def arguments(self, fn, named, shapes):
         try:
-            args, kwargs = arguments(target, named, True)
-            if params is not None:
-                params.bind(*args, **kwargs)
+            public = inspect.signature(fn, follow_wrapped=False)
         except (ValueError, TypeError):
             return
-        if (tuple(args), kwargs) not in choices:
-            yield tuple(args), kwargs
+
+        def candidates():
+            yield from shapes
+            for signature in self.signatures(fn, public, named):
+                try:
+                    yield arguments(signature, named, True)
+                except (ValueError, TypeError):
+                    continue
+
+        choices = []
+        for args, kwargs in candidates():
+            try:
+                public.bind(*args, **kwargs)
+                choice = tuple(sample(v) for v in args), {k: sample(v) for k, v in kwargs.items()}
+            except (ValueError, TypeError):
+                continue
+            if choice not in choices:
+                choices.append(choice)
+                # 生产调用可以原地修改参数；保留独立快照给后续候选去重。
+                yield tuple(sample(v) for v in choice[0]), {k: sample(v) for k, v in choice[1].items()}
 
 
 def has_executable_body(code):
@@ -294,6 +321,28 @@ class Exports:
         cls = receiver if is_class(receiver) else type(receiver)
         return self.class_body(cls) is not None
 
+    def receiver_slot(self, receiver, target):
+        """区分有类体依据的方法、静态层与仅能尝试两种形状的层。"""
+        cls = receiver if is_class(receiver) else type(receiver)
+        method, declared, static = False, False, False
+        for owner in type.__getattribute__(cls, "__mro__"):
+            if (body := self.class_body(owner)) is None:
+                continue
+            declared |= any(code is target.__code__ for code in body.co_consts)
+            for _, member in class_members(owner):
+                if type(member) is staticmethod:
+                    for layer in self.wrapped_chain(member.__func__) or ():
+                        if type(layer) is MethodType:
+                            break
+                        if layer is target:
+                            static = True
+                            break
+                elif type(member) in (FunctionType, classmethod):
+                    method |= underlying(member) is target
+        if static:
+            return None if method else False
+        return True if method or declared else None
+
     def wrapped_chain(self, target):
         chain, seen = [], set()
         while True:
@@ -328,7 +377,7 @@ class Exports:
     def binding(self, key, member, owner=None):
         fn = underlying(member)
         if chain := self.wrapped_chain(fn):
-            return Binding(key, member, chain, owner, self.class_body(owner) if owner is not None else None)
+            return Binding(key, member, chain, self, owner)
 
     def local_members(self, bindings):
         for export_name, value in bindings.items():
@@ -336,10 +385,16 @@ class Exports:
                 if (binding := self.binding(("module", export_name), value)) is not None:
                     yield binding
             elif is_class(value) and self.class_body(value) is not None:
-                for name, member in class_members(value):
-                    if not name.startswith("_") and type(member) in (FunctionType, staticmethod, classmethod):
-                        if (binding := self.binding(("class", export_name, name), member, value)) is not None:
-                            yield binding
+                seen = set()
+                for owner in type.__getattribute__(value, "__mro__"):
+                    local = self.class_body(owner) is not None
+                    for name, member in class_members(owner):
+                        if name in seen:
+                            continue
+                        seen.add(name)
+                        if local and not name.startswith("_") and type(member) in (FunctionType, staticmethod, classmethod):
+                            if (binding := self.binding(("class", export_name, name), member, value)) is not None:
+                                yield binding
 
     def candidates(self, frame):
         if frame.f_globals is self.globals:

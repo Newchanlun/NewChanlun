@@ -1742,6 +1742,128 @@ __all__ = ('Adapter',)
       .replace("return _send(rows=rows)", "return _other(rows=rows)"), false);
 });
 
+test("R27/#1319：公开签名补参、接收者来源与探针形状隔离", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const wraps = "from functools import wraps\n";
+  const relay = wraps + "def _relay(fn):\n    @wraps(fn)\n    def invoke(*args): return fn(*args)\n    return invoke\n";
+  const check = async (name: string, source: string, declared = "*, rows", call = "rows=[4, 1]",
+    implementation = `def route(${declared}): return sorted(rows)\n`, expected = true) => {
+    await t.test(name, () => {
+      const repo = feedSource({
+        [entry]: implementation,
+        [integration]: "from .at18_fixture_feed import route\n" + source,
+        [path]: `from trading_system.at18_fixture_feed import route\ndef test_route(): assert route(${call}) == [1, 4]\n`,
+      });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  for (const [kind, descriptor, receiver, bound] of [
+    ["实例", "", "this", "Adapter().dispatch"],
+    ["类", "    @classmethod\n", "cls", "Adapter.dispatch"],
+  ] as const) {
+    const method = `${relay}class Adapter:\n${descriptor}    @_relay\n    def dispatch(${receiver}, rows, /): return route(rows=rows)\n`;
+    await check(`类公开：装饰${kind}方法`, method + "__all__ = ('Adapter',)\n");
+    await check(`模块公开：已绑定的装饰${kind}方法`, method + `dispatch = ${bound}\n__all__ = ('dispatch',)\n`);
+  }
+  await check("私有原方法与公开包装成员不必同名", relay + `
+class Adapter:
+    def _deliver(this, rows, /): return route(rows=rows)
+    dispatch = _relay(_deliver)
+__all__ = ('Adapter',)
+`);
+  const inherited = relay + `
+class _Base:
+    @_relay
+    def dispatch(this, rows, /): return route(rows=rows)
+class Adapter(_Base): pass
+`;
+  await check("类公开：继承本地基类的装饰方法", inherited + "__all__ = ('Adapter',)\n");
+  await check("模块公开：继承本地基类的绑定方法",
+    inherited + "dispatch = Adapter().dispatch\n__all__ = ('dispatch',)\n");
+  await check("同名属性遮蔽继承方法，不枚举被遮蔽的入口",
+    inherited.replace("class Adapter(_Base): pass", "class Adapter(_Base): dispatch = None") + "__all__ = ('Adapter',)\n",
+    undefined, undefined, undefined, false);
+  await check("定义在模块内、后来装入类的原方法可消费接收者", relay + `
+def _deliver(this, rows, /): return route(rows=rows)
+class Adapter:
+    dispatch = _relay(_deliver)
+__all__ = ('Adapter',)
+`);
+  await check("绑定方法不扣除同类静态方法的数据槽", wraps + `
+class Adapter:
+    @staticmethod
+    def _send(rows, /): return route(rows=rows)
+    @wraps(_send.__func__)
+    def dispatch(*args): return Adapter._send(*args[1:])
+__all__ = ('Adapter',)
+`);
+  for (const [outer, tail, forward, observed, call] of [
+    ["rows, /", "*, rows", "rows=rows", "*, rows", "rows=[4, 1]"],
+    ["*, rows", "rows, /", "rows", "rows, /", "[4, 1]"],
+  ] as const) {
+    await check(`公开 (${outer}) 优先于末端 (${tail})`, wraps + `
+def _end(${tail}): return route(${forward})
+@wraps(_end)
+def dispatch(${outer}): return _end(${forward})
+__all__ = ('dispatch',)
+`, observed, call);
+  }
+  const outer = "actor = _Adapter()\n@wraps(actor.emit)\ndef dispatch(*a, **kw): return actor.emit(*a, **kw)\n__all__ = ('dispatch',)\n";
+  await check("通用入口经已绑定装饰方法，以原方法的位置签名补参", relay + `
+class _Adapter:
+    @_relay
+    def emit(this, rows, /): return route(rows=rows)
+` + outer);
+  await check("通用入口优先使用已绑定中间方法的具体签名", wraps + `
+def _send(*, rows): return route(rows=rows)
+class _Adapter:
+    @wraps(_send)
+    def emit(this, rows, /): return _send(rows=rows)
+` + outer);
+  const independent = wraps + `
+def _send(*, rows): return route(rows)
+class _Adapter:
+    @wraps(_send)
+    def emit(*a, **kw): return _send(*a[1:], **kw)
+`;
+  await check("通用入口经已绑定方法到独立的仅关键字函数", independent + outer, "rows, /", "[4, 1]");
+  await check("公开绑定方法不向独立函数注入接收者",
+    independent + "dispatch = _Adapter().emit\n__all__ = ('dispatch',)\n", "rows, /", "[4, 1]");
+  await check("重复形状只调用一次，原地突变不污染后续形状", wraps + `
+mutations = []
+def _end(rows, /):
+    if mutations == [True] and rows == [4, 1]: return route(rows=rows)
+@wraps(_end)
+def _relay(*, rows): return _end(rows)
+@wraps(_relay)
+def dispatch(*args, **kwargs):
+    if kwargs:
+        mutations.append(True)
+        kwargs['rows'].clear()
+        return
+    return _relay(rows=args[0])
+__all__ = ('dispatch',)
+`);
+  for (const [name, pair] of [
+    ["同函数异实例", "_left, _right = _Base(), _Base()"],
+    ["同函数异子类", "class _Left(_Base): pass\nclass _Right(_Base): pass\n_left, _right = _Left, _Right"],
+  ] as const) {
+    const method = name === "同函数异子类" ? "    @classmethod\n" : "";
+    const impl = wraps + `
+class _Base:
+${method}    def process(receiver, rows): return sorted(rows)
+${pair}
+@wraps(_left.process)
+def route(rows): return _right.process(rows)
+__all__ = ('route',)
+`;
+    await check(`承接侧${name}仍拒绝`, "def dispatch(rows): return route(rows)\n",
+      "rows", "[4, 1]", impl, false);
+  }
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
