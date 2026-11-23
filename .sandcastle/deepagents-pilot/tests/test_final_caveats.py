@@ -9,6 +9,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from test_agent import receipt_for, scripted
 
 from pilot1742 import agent as pilot_agent
+from pilot1742 import run as pilot_run
 from pilot1742.agent import build_agent
 from pilot1742.domain import (
     DEEPAGENTS_OUTPUT_PROTOCOL,
@@ -17,6 +18,12 @@ from pilot1742.domain import (
     WorkerKey,
     WorkerSelfReport,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fast_poll(monkeypatch):
+    real_sleep = pilot_run.time.sleep
+    monkeypatch.setattr(pilot_run.time, "sleep", lambda s: real_sleep(min(s, 0.01)))
 
 
 def graph(run, model):
