@@ -49,11 +49,11 @@ def selected_test(path, selector):
 def sample(value, depth=5):
     """只复用登记测试的普通数据，不把测试对象、回调或其状态交给生产入口。"""
     kind = type(value)
-    if kind in (type(None), bool, int, float, complex, str, bytes):
+    if any(kind is native for native in (type(None), bool, int, float, complex, str, bytes)):
         return value
     if depth and kind is dict:
         return {sample(k, depth - 1): sample(v, depth - 1) for k, v in value.items()}
-    if depth and kind in (tuple, list, set, frozenset):
+    if depth and any(kind is native for native in (tuple, list, set, frozenset)):
         return kind(sample(v, depth - 1) for v in value)
     raise ValueError("not a plain parameter sample")
 
@@ -216,8 +216,10 @@ class Binding:
 
     def arguments(self, fn, named, shapes):
         signature = self.signature
-        if type(fn) is MethodType:
-            signature = MethodType(signature, fn.__self__)
+        if type(signature) is FunctionType:
+            bound = next((target for target in reversed(self.chain) if type(target) is MethodType), fn)
+            if type(bound) is MethodType:
+                signature = MethodType(signature, bound.__self__)
         fallback = arguments(signature, named, True)
         choices = []
         params = inspect.signature(signature, follow_wrapped=False)
@@ -278,15 +280,26 @@ class Exports:
         cls = receiver if is_class(receiver) else type(receiver)
         return self.class_body(cls) is not None
 
-    def wrapped_chain(self, fn):
-        chain = []
-        while self.owns_fn(fn) and fn not in chain:
-            chain.append(fn)
+    def wrapped_chain(self, target):
+        chain, seen = [], set()
+        while True:
+            if type(target) is MethodType:
+                if not self.owns_receiver(target.__self__):
+                    return None
+                fn = target.__func__
+                identity = (id(fn), id(target.__self__))
+            elif type(target) is FunctionType:
+                fn, identity = target, (id(target),)
+            else:
+                return None
+            if identity in seen or not self.owns_fn(fn):
+                return None
+            seen.add(identity)
+            chain.append(target)
             explicit = vars(fn).get("__wrapped__", MISSING)
             if explicit is MISSING:
                 return tuple(chain)
-            fn = explicit
-        return None
+            target = explicit
 
     def load(self, origins):
         self.origins = origins
@@ -296,7 +309,7 @@ class Exports:
         self.wrapped_codes = set()
         for binding in self.members:
             self.by_code.setdefault(id(binding.function.__code__), []).append(binding)
-            self.wrapped_codes.update(id(fn.__code__) for fn in binding.chain[1:])
+            self.wrapped_codes.update(id(underlying(target).__code__) for target in binding.chain[1:])
 
     def binding(self, key, member, owner=None):
         fn = underlying(member)
@@ -510,6 +523,11 @@ class Call:
     def matches(self):
         return tuple(b for b in self.bindings if b.function is self.actual())
 
+    def matches_member(self, target):
+        if type(target) is MethodType:
+            return self.actual() is target.__func__ and self.receiver is target.__self__
+        return self.actual() is target
+
 
 def deferred_result(value):
     if attr := DEFERRED_FRAMES.get(type(value)):
@@ -622,13 +640,17 @@ class Trace:
         offset = int(bound and code.co_argcount > 0)
         items = [(name, locals_[name]) for name in code.co_varnames[offset:count] if name in locals_]
         extra = locals_.get(code.co_varnames[count + varargs], {}) if code.co_flags & inspect.CO_VARKEYWORDS else {}
-        named = {}
-        for name, value in (*items, *extra.items()):
-            if type(name) is str:
-                try:
-                    named.setdefault(name, sample(value))
-                except ValueError:
-                    pass
+        def plain(items):
+            values = {}
+            for name, value in items:
+                if type(name) is str:
+                    try:
+                        values[name] = sample(value)
+                    except ValueError:
+                        pass
+            return values
+
+        named, extras = plain(items), plain(extra.items())
         # *args/**kwargs 保留外层实收形状；普通帧已完成绑定，只能确认
         # / 和 * 的方向，其余具名槽在没有实际 *args 时可按名称复用。
         rest = locals_.get(code.co_varnames[count], ()) if varargs else ()
@@ -642,8 +664,11 @@ class Trace:
                 positional.append(sample(value))
             except ValueError:
                 break  # 不能让后面的参数滑进被滤掉的位置。
+        # 同名 / 槽不会占用 **kwargs 的键。
         keywords = {k: v for k, v in named.items() if k not in positional_names}
-        return named, (tuple(positional), keywords)
+        for key, value in extras.items():
+            named.setdefault(key, value)
+        return named, (tuple(positional), keywords | extras)
 
     def accepted(self):
         reach = {}
@@ -682,8 +707,9 @@ class Trace:
                 continue
             entries = [(call, data) for s, t, call, data in self.observations.get(target, {}).values()
                        if reachable(s, t) and test_reaches(t)]
-            observed = {call.actual() for call, _ in entries if call is not None}
-            keys = frozenset(b.key for b in matched if all(fn in observed for fn in b.chain[1:]))
+            observed = [call for call, _ in entries if call is not None]
+            keys = frozenset(b.key for b in matched if
+                             all(any(call.matches_member(target) for call in observed) for target in b.chain[1:]))
             if keys:
                 yield keys, tuple(data for _, data in entries if data is not None), via_public
 

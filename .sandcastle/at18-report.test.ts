@@ -1596,6 +1596,75 @@ def test_route(): assert ${expr} == ${expected}
   }
 });
 
+test("R25/#1319：绑定包装身份与纯数据实参", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = (impl: string, prod: string, test: string, expected: boolean) => {
+    const repo = feedSource({ [entry]: impl, [integration]: prod, [path]: test,
+      "trading_system/support.py": "class Foreign:\n    def process(self, events): return sorted(events)\n" });
+    assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+  };
+  for (const [name, declared, called, expected, accepts, nested] of [
+    ["同一接收者重新取出方法", "_a.process", "_a.process", "[13, 21]", true, false],
+    ["绑定方法内还有一层显式包装", "_a.process", "_a.process", "[13, 21]", true, true],
+    ["同一函数但不同本地接收者", "_a.process", "_b.process", "[13, 21]", false, false],
+    ["外来绑定方法", "_foreign.process", "_foreign.process", "[13, 21]", false, false],
+    ["本地函数绑定外来实例", "MethodType(_Batch.process, _foreign)", "route.__wrapped__", "[13, 21]", false, false],
+    ["本地函数绑定外来类", "MethodType(_Batch.process, Foreign)", "route.__wrapped__", "[13, 21]", false, false],
+    ["本地绑定方法的编译空体", "_a.empty", "_a.empty", "None", false, false],
+  ] as const) await t.test(name, () => {
+    check(`from functools import wraps
+from types import MethodType
+from .support import Foreign
+def _wrap(fn):
+    @wraps(fn)
+    def relay(*args, **kwargs): return fn(*args, **kwargs)
+    return relay
+class _Batch:
+${nested ? "    @_wrap\n" : ""}    def process(self, events): return sorted(events)
+    def empty(self, events): pass
+_a, _b, _foreign = _Batch(), _Batch(), Foreign()
+@wraps(${declared})
+def route(events): return ${called}(events)
+__all__ = ("route",)
+`, "from .at18_fixture_feed import route\ndef dispatch(events): return route(events)\n",
+    `from trading_system import dispatch\ndef test_route(): assert dispatch([21, 13]) == ${expected}\n`, accepts);
+  });
+  for (const layers of [0, 1, 2]) await t.test(`${layers} 层：位置专用槽与同名额外关键字分别保留`, () => {
+    const wrap = `from functools import wraps
+def _wrap(fn):
+    @wraps(fn)
+    def relay(*args, **kwargs): return fn(*args, **kwargs)
+    return relay
+` + "@_wrap\n".repeat(layers);
+    check(wrap + "def route(column, /, **labels): return column, labels['column']\n",
+      "from .at18_fixture_feed import route\n" + wrap +
+      "def dispatch(column, /, **labels): return route(column, column=labels['column'])\n",
+      "from trading_system.at18_fixture_feed import route\ndef test_route(): assert route(3, column=5) == (3, 5)\n", true);
+  });
+  await t.test("拒绝嵌套对象不触发其元类相等比较", () => {
+    const observations = execFileSync("python3", ["-I", "-B", "-c", `
+import json, runpy, sys
+sample = runpy.run_path(sys.argv[1])["sample"]
+calls = 0
+class Compared(type):
+    def __eq__(self, other):
+        global calls
+        calls += 1
+        return False
+class Payload(metaclass=Compared): pass
+try:
+    sample({"nested": [Payload()]})
+except ValueError:
+    print(json.dumps({"rejected": True, "calls": calls}))
+else:
+    print(json.dumps({"rejected": False, "calls": calls}))
+`, join(sandbox, "at18-python-source.py")], { encoding: "utf8" });
+    assert.deepEqual(JSON.parse(observations), { rejected: true, calls: 0 });
+  });
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
