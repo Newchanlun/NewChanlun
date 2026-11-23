@@ -428,6 +428,21 @@ def read_block(block_id: str, base: Path = DEFAULT_BASE) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _normalize_relation_inplace(rec: dict) -> dict:
+    """In-place equivalent of _normalize_relation for freshly parsed JSON dicts."""
+    if "source" in rec and "from" not in rec:
+        rec["from"] = rec.pop("source")
+    if "target" in rec and "to" not in rec:
+        rec["to"] = rec.pop("target")
+    if "type" in rec and "relation" not in rec:
+        rec["relation"] = rec.pop("type")
+    if rec.get("relation") in VALIDITY_CAPABLE_RELATIONS and "validity" not in rec:
+        rec["validity"] = "active"
+        rec["invalidated_by"] = None
+        rec["invalidated_at"] = None
+    return rec
+
+
 def read_all_relations(base: Path = DEFAULT_BASE) -> list[dict]:
     """Read all relations from JSONL.
 
@@ -437,12 +452,36 @@ def read_all_relations(base: Path = DEFAULT_BASE) -> list[dict]:
     jsonl_path = base / "relations.jsonl"
     if not jsonl_path.exists():
         return []
-    relations = []
-    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            relations.append(_normalize_relation(json.loads(line)))
+    raw = jsonl_path.read_text(encoding="utf-8")
+    lines = [ln for ln in raw.splitlines() if ln and not ln.isspace()]
+    if not lines:
+        return []
+    try:
+        relations: list[dict] = json.loads("[" + ",".join(lines) + "]")
+    except json.JSONDecodeError:
+        loads = json.loads
+        relations = [loads(ln) for ln in lines]
+    validity_rels = VALIDITY_CAPABLE_RELATIONS
+    for rec in relations:
+        if "source" in rec and "from" not in rec:
+            rec["from"] = rec.pop("source")
+        if "target" in rec and "to" not in rec:
+            rec["to"] = rec.pop("target")
+        if "type" in rec and "relation" not in rec:
+            rec["relation"] = rec.pop("type")
+        if rec.get("relation") in validity_rels and "validity" not in rec:
+            rec["validity"] = "active"
+            rec["invalidated_by"] = None
+            rec["invalidated_at"] = None
     return relations
+
+
+def _ascii_token_bytes(value: str | None) -> bytes | None:
+    if not value or not value.isascii():
+        return None
+    if any(ord(c) < 0x20 or c in '"\\' for c in value):
+        return None
+    return value.encode("ascii")
 
 
 def query_relations(
@@ -457,15 +496,35 @@ def query_relations(
     - relation: match relation type
     - order: match order (1 or 2)
     """
-    results = []
-    for rec in read_all_relations(base):
-        if block_id and rec["from"] != block_id and rec["to"] != block_id:
-            continue
-        if relation and rec["relation"] != relation:
-            continue
-        if order is not None and rec.get("order") != order:
-            continue
-        results.append(rec)
+    if block_id is None and relation is None and order is None:
+        return read_all_relations(base)
+    jsonl_path = base / "relations.jsonl"
+    if not jsonl_path.exists():
+        return []
+    bid_bytes = _ascii_token_bytes(block_id)
+    rel_bytes = _ascii_token_bytes(relation)
+    loads = json.loads
+    normalize = _normalize_relation_inplace
+    results: list[dict] = []
+    append = results.append
+    with open(jsonl_path, "rb") as f:
+        for raw in f:
+            if b"\\u" not in raw:
+                if bid_bytes is not None and bid_bytes not in raw:
+                    continue
+                if rel_bytes is not None and rel_bytes not in raw:
+                    continue
+            line = raw.strip()
+            if not line:
+                continue
+            rec = normalize(loads(line))
+            if block_id and rec["from"] != block_id and rec["to"] != block_id:
+                continue
+            if relation and rec["relation"] != relation:
+                continue
+            if order is not None and rec.get("order") != order:
+                continue
+            append(rec)
     return results
 
 
