@@ -376,3 +376,52 @@ def test_unwritable_readable_usage_ledger_blocks_before_sending_paid_preflight(l
         assert preflight_calls == []  # 预留失败前绝不发付费探针
     finally:
         os.chmod(usage_path, 0o600)
+
+
+def test_preflight_timeout_charges_once_and_prelaunch_failure_reconciles_to_zero(lane, monkeypatch):
+    """R24（Sol P2 + Astra P2）：统一使用同一笔预检预留：
+    1) _run_preflight 子进程超时时只保留发前那一笔 len(MODELS) 保守预留，绝不重复记成 2*len(MODELS)；
+    2) 部署准入未通过、缺少收据源配置或 subprocess.run 报 OSError（确认未启动探针）时，预留核减为 0。"""
+    import subprocess
+
+    real_lane = ExternalReview(lane.gateway, source=lane.source, state_root=lane.state_root,
+                               checkout_root=lane.checkout_root, poll_seconds=0.01)
+    # 1. 部署准入未通过 -> 确定未启动探针 -> 核减回 0
+    monkeypatch.setattr(real_lane, "_deployment_admission", lambda _head: None)
+    for _ in range(3):
+        with pytest.raises(EffectPending, match="部署 Docker 准入未通过"):
+            real_lane.target(1810, 1)
+    assert real_lane.recent_input_tokens() == 0
+
+    # 2. 准入通过但未配置可信收据源 -> 确定未启动探针 -> 核减回 0
+    monkeypatch.setattr(real_lane, "_deployment_admission", lambda _head: {"image_id": "sha256:" + "1" * 64})
+    monkeypatch.delenv(module.PREFLIGHT_ENV_CONTAINER, raising=False)
+    monkeypatch.delenv(module.PREFLIGHT_ENV_HOST_DIR, raising=False)
+    with pytest.raises(EffectPending, match="未配置可信代理收据来源"):
+        real_lane.target(1810, 1)
+    assert real_lane.recent_input_tokens() == 0
+
+    # 3. 收据源已配但 subprocess.run 报 FileNotFoundError（exec 失败，未启动） -> 核减回 0
+    orig_run = module.subprocess.run
+    monkeypatch.setenv(module.PREFLIGHT_ENV_HOST_DIR, str(lane.state_root / "receipts"))
+
+    def fail_preflight_exec(cmd, *a, **kw):
+        if any("review_preflight.py" in str(arg) for arg in cmd):
+            raise FileNotFoundError("py")
+        return orig_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(module.subprocess, "run", fail_preflight_exec)
+    with pytest.raises(EffectPending, match="FileNotFoundError"):
+        real_lane.target(1810, 1)
+    assert real_lane.recent_input_tokens() == 0
+
+    # 4. subprocess.run 超时（发送状态未知）-> 精确只记 1 笔 len(MODELS) 保守预留，绝不双倍记账
+    def raise_timeout(cmd, *a, **kw):
+        if any("review_preflight.py" in str(arg) for arg in cmd):
+            raise subprocess.TimeoutExpired(cmd, 65)
+        return orig_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(module.subprocess, "run", raise_timeout)
+    with pytest.raises(EffectPending, match="TimeoutExpired"):
+        real_lane.target(1810, 1)
+    assert real_lane.recent_input_tokens() == len(MODELS) * module.PREFLIGHT_TOKENS_PER_PROBE

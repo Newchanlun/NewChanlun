@@ -599,6 +599,10 @@ class StatusPublisher:
             return result
 
 
+class _PreflightNotStarted(EffectPending):
+    """预检子进程尚未启动（部署准入未通过、配置无效或 exec 失败）：确定零探针发出，允许核减为 0。"""
+
+
 class TargetDrifted(IdentityError):
     """PR 实时 head 或 base 已偏离派发时冻结的目标，不登记、不预检、不消费额度。"""
 
@@ -663,20 +667,20 @@ class ExternalReview:
 
     def _preflight_args(self, target: ReviewTarget, *, image: str) -> list[str]:
         if not re.fullmatch(r"sha256:[a-f0-9]{64}", image):
-            raise EffectPending("preflight-blocked：预检必须使用已准入镜像 ID，未占 attempt")
+            raise _PreflightNotStarted("preflight-blocked：预检必须使用已准入镜像 ID，未占 attempt")
         override = os.environ.get("REVIEW_PREFLIGHT_PROXY_URL", "").strip()
         if override and override.rstrip("/") != FORMAL_PROXY_URL:
-            raise EffectPending(
+            raise _PreflightNotStarted(
                 f"preflight-blocked：正式预检代理端点固定为 {FORMAL_PROXY_URL}，禁止通过 REVIEW_PREFLIGHT_PROXY_URL 分叉")
         container = os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip()
         host_dir = os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
         if container and host_dir:
-            raise EffectPending("preflight-blocked：代理收据容器与宿主目录配置冲突，未占 attempt")
+            raise _PreflightNotStarted("preflight-blocked：代理收据容器与宿主目录配置冲突，未占 attempt")
         if not container and not host_dir:
-            raise EffectPending(
+            raise _PreflightNotStarted(
                 f"preflight-blocked：未配置可信代理收据来源（{PREFLIGHT_ENV_CONTAINER} 或 {PREFLIGHT_ENV_HOST_DIR}），未占 attempt")
         if host_dir and not Path(host_dir).is_absolute():
-            raise EffectPending(
+            raise _PreflightNotStarted(
                 f"preflight-blocked：{PREFLIGHT_ENV_HOST_DIR} 必须是绝对路径，未占 attempt")
         cmd = [sys.executable, "-I", str(PREFLIGHT_SCRIPT),
                "--source", str(self.source),
@@ -691,7 +695,7 @@ class ExternalReview:
             proxy_ctx = os.environ.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
             container_dir = os.environ.get(PREFLIGHT_ENV_CONTAINER_DIR, "").strip()
             if not proxy_ctx or not container_dir:
-                raise EffectPending(
+                raise _PreflightNotStarted(
                     f"preflight-blocked：缺少 {PREFLIGHT_ENV_PROXY_CONTEXT} 或 {PREFLIGHT_ENV_CONTAINER_DIR}，未占 attempt")
             cmd.extend(["--proxy-receipt-container", container,
                         "--proxy-docker-context", proxy_ctx,
@@ -710,17 +714,16 @@ class ExternalReview:
         # 先过部署 Docker 准入取得不可变镜像 ID，再启动任何探针容器（不按可变标签 sandcastle:newchanlun 预跑未准入镜像）。
         admission = self._deployment_admission(target.controller_code_head)
         if admission is None:
-            raise EffectPending("preflight-blocked：部署 Docker 准入未通过，未启动探针容器、未占 attempt")
+            raise _PreflightNotStarted("preflight-blocked：部署 Docker 准入未通过，未启动探针容器、未占 attempt")
         cmd = self._preflight_args(target, image=admission["image_id"])
         try:
             done = subprocess.run(cmd, env=self._preflight_env(), cwd=SOURCE_REPO, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=65)
         except subprocess.TimeoutExpired as error:
-            # 预检子进程超时可能已发出上游付费往返探针，按模型数保守计入 24h 额度。
-            self._record_preflight_usage(len(MODELS))
+            # admit_preflight 在启动前已持久化唯一一笔保守预留；超时属发送状态未知，直接上抛保留原预留，绝不重复记账。
             raise EffectPending(f"preflight-blocked：预检进程失败（{type(error).__name__}），未占 attempt") from None
         except OSError as error:
-            raise EffectPending(f"preflight-blocked：预检进程失败（{type(error).__name__}），未占 attempt") from None
+            raise _PreflightNotStarted(f"preflight-blocked：预检进程失败（{type(error).__name__}），未占 attempt") from None
         lines = [line for line in done.stdout.splitlines() if line.strip()]
         try:
             report = json.loads(lines[-1]) if lines else None
@@ -1411,6 +1414,9 @@ class ExternalReview:
         reservation_id = self._record_preflight_usage(reserved_probes, reservation_id=str(uuid.uuid4()))
         try:
             raw = self.preflight(target)
+        except _PreflightNotStarted:
+            self._reconcile_preflight_usage(reservation_id, 0, reserved_probes)
+            raise
         except EffectPending:
             raise
         except Exception as error:

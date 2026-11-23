@@ -119,6 +119,8 @@ APP_SLUGS = {5486877: "newchanlun-deepagents-1742", 5664795: "newchanlun-review-
 GH_TIMEOUT_SECONDS = 60
 MERGE_HANDOFF_FILE = "merge-handoff.json"
 MERGE_HANDOFF_SCHEMA = "review-sweep-merge-handoff-v1"
+# 交接快照有效期：至多容忍 3 轮 serve 间隔，超过即视为过期并在读取端拒绝。
+MERGE_HANDOFF_MAX_AGE_SECONDS = MIN_LOOP_SECONDS * 3
 # 执行器 App：交付时在冻结 head 上自写 deepagents/review=success（作者侧独审，不是正式非作者双审）。
 EXECUTOR_APP_ID = DEFAULT_IDENTITY["app_id"]
 
@@ -631,7 +633,9 @@ class Sweep:
     def tick(self) -> list[dict[str, Any]]:
         try:
             rows = self.rows()
-        except Exception as error:  # 不知道谁在审就不能派审：整轮作废
+        except Exception as error:  # 不知道谁在审就不能派审：整轮作废并作废旧交接快照
+            if self.auto_merge:
+                self._invalidate_merge_handoff("host process table unreadable")
             raise SourceUnreadable("host process table", error) from error
         busy = reviewing(rows)  # 单 PR 去重：已在审的 PR 不再派
         running = reviewer_processes(rows)  # 并发上限：按进程数，不按 PR 数
@@ -642,6 +646,8 @@ class Sweep:
         try:
             pulls = sorted(self.open_pulls(), key=lambda pr: pr["number"])
         except Exception as error:
+            if self.auto_merge:
+                self._invalidate_merge_handoff("github open pulls unreadable")
             raise SourceUnreadable("github open pulls", error) from error
         self._sync_failed = False
         self._backoff = self.rate_limit_backoff()
@@ -780,9 +786,10 @@ class Sweep:
                 actions.append({**self._backoff,
                                 "held": [n for n, a in review_actions.items() if a == "review-backoff"]})
         except SourceUnreadable as error:
-            # 超时（或整轮输入源读不到）：本轮不再合入、不再追平；先补记已即时撤回但尚未由 merge_actions 落日志的条目，
-            # 再对尚未确认撤回且挂着（或不知道挂没挂）原生 auto-merge 的 PR（含跳过派审的 PR）兜底撤回。
+            # 超时（或整轮输入源读不到）：本轮不再合入、不再追平，立即作废旧交接快照；先补记已即时撤回但尚未由
+            # merge_actions 落日志的条目，再对尚未确认撤回且挂着（或不知道挂没挂）原生 auto-merge 的 PR 兜底撤回。
             if self.auto_merge:
+                self._invalidate_merge_handoff(f"source unreadable: {error.source}")
                 for pr in pulls:
                     number = pr["number"]
                     if number in early_withdraw and number not in early_logged:
@@ -791,6 +798,10 @@ class Sweep:
                         early_logged.add(number)
                 actions += self.fail_closed(pulls, states, withdrawn, unreadable)
             error.actions = actions
+            raise
+        except Exception as error:
+            if self.auto_merge:
+                self._invalidate_merge_handoff(f"tick error: {type(error).__name__}")
             raise
         return actions
 
@@ -1058,6 +1069,7 @@ class Sweep:
                     drifted.add(number)
             head_free = head_free and not claimed
             plan.append((entry, result, write, armed))
+        executed: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
         for entry, result, write, armed in plan:
             number = entry["pr"]
             try:
@@ -1079,28 +1091,72 @@ class Sweep:
                         actions.append({**entry, **result, "auto_merge_withdrawn": False,
                                         "withdraw_error": str(timeout)})
                         raise
+            withdraw_confirmed = (
+                (not armed or number in withdrawn)
+                and result.get("auto_merge_withdrawn") is not False
+                and result.get("action") != "error"
+            )
+            executed.append((entry, result, withdraw_confirmed))
             actions.append({**entry, **result})
             early_logged.add(number)
-        self._write_merge_handoff(plan, states, gate_ok)
+        self._write_merge_handoff(executed, states, gate_ok)
         return actions
 
-    def _write_merge_handoff(self, plan: list[tuple[dict[str, Any], dict[str, Any], str | None, bool]],
+    def _save_merge_handoff_payload(self, payload: dict[str, Any]) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = self.folder / MERGE_HANDOFF_FILE
+        tmp = self.folder / f".{MERGE_HANDOFF_FILE}.{os.getpid()}.{time.time_ns()}.tmp"
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, target)
+
+    def _invalidate_merge_handoff(self, reason: str) -> None:
+        """失败/超时轮次立即作废旧交接快照（置 gate_ok=False 并清空可操作队列；写失败时删除旧文件），防止读到陈旧结果。"""
+        payload = {
+            "schema": MERGE_HANDOFF_SCHEMA,
+            "updated_at": self.now().isoformat(),
+            "base_ref": "main",
+            "gate_ok": False,
+            "invalidated_reason": reason,
+            "behind_queue_head": [],
+            "ready_for_merge": [],
+            "human_confirm": [],
+        }
+        try:
+            self._save_merge_handoff_payload(payload)
+        except OSError:
+            try:
+                (self.folder / MERGE_HANDOFF_FILE).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _write_merge_handoff(self, executed: list[tuple[dict[str, Any], dict[str, Any], bool]],
                              states: dict[int, dict[str, Any]], gate_ok: bool) -> None:
-        """每轮 --auto-merge 完成门禁核验与撤回后，原子刷新 sweep/merge-handoff.json（0o600），
-        供获常驻授权的主控巡航（/graph-run、主图会话）或维护者通过 --handoff 读取并接手追平与合入。"""
+        """每轮 --auto-merge 完成撤回后，按实际确认结果原子刷新 sweep/merge-handoff.json（0o600）：
+        仅在撤回已确认（未挂或已成功撤回原生 auto-merge）时入队；队首落后 PR 若仍有在途审查（reviewing=True），
+        保留队首位置但不交接追平，免得改 head 作废正在运行的审阅。"""
         behind_queue_head: list[dict[str, Any]] = []
         ready_for_merge: list[dict[str, Any]] = []
         human_confirm: list[dict[str, Any]] = []
-        for entry, result, _write, _armed in plan:
+        for entry, result, withdraw_confirmed in executed:
             number = entry["pr"]
             state = states.get(number) or {}
             base = state.get("base")
             action = result.get("action")
-            if gate_ok and action == "behind-waiting" and result.get("queue_head") is True:
+            if (gate_ok and withdraw_confirmed and action == "behind-waiting"
+                    and result.get("queue_head") is True and not result.get("reviewing")):
                 behind_queue_head.append({"pr": number, "head": entry["head"], "base": base, "base_ref": "main"})
             elif action == "needs-human-confirm":
                 gated = result.get("gated")
-                if gate_ok and gated == ["base-ref-not-server-bound"]:
+                if gate_ok and withdraw_confirmed and gated == ["base-ref-not-server-bound"]:
                     ready_for_merge.append({
                         "pr": number, "head": entry["head"], "base": base,
                         "base_ref": "main", "gated": gated,
@@ -1119,24 +1175,14 @@ class Sweep:
             "ready_for_merge": ready_for_merge,
             "human_confirm": human_confirm,
         }
-        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = self.folder / MERGE_HANDOFF_FILE
-        tmp = self.folder / f".{MERGE_HANDOFF_FILE}.{os.getpid()}.{time.time_ns()}.tmp"
-        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
-        os.replace(tmp, target)
+        self._save_merge_handoff_payload(payload)
 
 
-def read_merge_handoff(state_root: Path = STATE_ROOT) -> dict[str, Any]:
-    """只读读取 sweep/merge-handoff.json（非阻塞、拒绝符号链接/FIFO/越权文件），供主控巡航或操作员消费。"""
+def read_merge_handoff(state_root: Path = STATE_ROOT, *,
+                       max_age_seconds: float = MERGE_HANDOFF_MAX_AGE_SECONDS,
+                       now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, Any]:
+    """只读读取 sweep/merge-handoff.json（非阻塞、拒绝符号链接/FIFO/越权/过期快照），并现场过滤本机已新起
+    重审意图或在途审阅的条目，供主控巡航或维护者消费。"""
     path = state_root / "sweep" / MERGE_HANDOFF_FILE
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -1162,6 +1208,31 @@ def read_merge_handoff(state_root: Path = STATE_ROOT) -> dict[str, Any]:
             os.close(fd)
     if not isinstance(data, dict) or data.get("schema") != MERGE_HANDOFF_SCHEMA:
         raise ValueError(f"merge-handoff 格式无效：{path}")
+    updated_raw = data.get("updated_at")
+    if not isinstance(updated_raw, str) or not updated_raw.strip():
+        raise ValueError(f"merge-handoff 缺少有效 updated_at：{path}")
+    try:
+        updated_dt = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+        if updated_dt.tzinfo is None:
+            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise ValueError(f"merge-handoff 时间戳格式无效：{path}") from None
+    age = (now() - updated_dt).total_seconds()
+    if age > max_age_seconds or age < -60:
+        raise ValueError(f"merge-handoff 快照已过期或时钟异常（age={age:.1f}s，上限 {max_age_seconds:.0f}s）：{path}")
+    lane = ExternalReview(None, state_root=state_root)
+    if isinstance(data.get("ready_for_merge"), list):
+        filtered_ready = []
+        for row in data["ready_for_merge"]:
+            if not isinstance(row, dict) or not isinstance(row.get("pr"), int):
+                continue
+            pr_num, head_sha, base_sha = row["pr"], row.get("head"), row.get("base")
+            if not isinstance(head_sha, str) or not isinstance(base_sha, str):
+                continue
+            if lane.has_inflight_review(pr_num) or lane.has_pending_rereview_intent(pr_num, head_sha, base_sha):
+                continue
+            filtered_ready.append(row)
+        data["ready_for_merge"] = filtered_ready
     return data
 
 

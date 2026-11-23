@@ -3015,10 +3015,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..fb611b1 100644
+index e69de29..31ddaa1 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1774 @@
+@@ -0,0 +1,1837 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3290,52 +3290,10 @@ index e69de29..fb611b1 100644
 +	Text string `json:"text"`
 +}
 +
-+type rawResponseOutputItem struct {
-+	Type    string          `json:"type"`
-+	Role    string          `json:"role"`
-+	Content json.RawMessage `json:"content"`
-+}
-+
 +type responseOutputItem struct {
 +	Type    string                      `json:"type"`
 +	Role    string                      `json:"role"`
 +	Content []responseOutputContentPart `json:"content"`
-+}
-+
-+func decodeAssistantContentParts(raw json.RawMessage) ([]responseOutputContentPart, bool) {
-+	trimmed := bytes.TrimSpace(raw)
-+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-+		return nil, true
-+	}
-+	var parts []responseOutputContentPart
-+	if err := json.Unmarshal(trimmed, &parts); err != nil {
-+		return nil, false
-+	}
-+	return parts, true
-+}
-+
-+func decodeResponseOutputItems(raw json.RawMessage) ([]responseOutputItem, bool) {
-+	trimmed := bytes.TrimSpace(raw)
-+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-+		return nil, true
-+	}
-+	var rawItems []rawResponseOutputItem
-+	if err := json.Unmarshal(trimmed, &rawItems); err != nil {
-+		return nil, false
-+	}
-+	items := make([]responseOutputItem, 0, len(rawItems))
-+	for _, ri := range rawItems {
-+		item := responseOutputItem{Type: ri.Type, Role: ri.Role}
-+		if ri.Type == "message" && ri.Role == "assistant" {
-+			parts, ok := decodeAssistantContentParts(ri.Content)
-+			if !ok {
-+				return nil, false
-+			}
-+			item.Content = parts
-+		}
-+		items = append(items, item)
-+	}
-+	return items, true
 +}
 +
 +func extractAssistantOutputText(items []responseOutputItem) string {
@@ -3414,6 +3372,15 @@ index e69de29..fb611b1 100644
 +
 +var errStrictJSONFormat = errors.New("invalid strict JSON SSE frame")
 +
++func isSchemaFieldKey(lower string) bool {
++	switch lower {
++	case "type", "response_id", "error", "item", "response", "id", "model", "status", "output", "role", "content", "text":
++		return true
++	default:
++		return false
++	}
++}
++
 +func validateStrictJSONValue(dec *json.Decoder, depth int) error {
 +	if depth > 128 {
 +		return errStrictJSONFormat
@@ -3442,10 +3409,14 @@ index e69de29..fb611b1 100644
 +			if !ok {
 +				return errStrictJSONFormat
 +			}
-+			if _, dup := seen[key]; dup {
++			lower := strings.ToLower(key)
++			if _, dup := seen[lower]; dup {
 +				return errStrictJSONFormat
 +			}
-+			seen[key] = struct{}{}
++			if key != lower && isSchemaFieldKey(lower) {
++				return errStrictJSONFormat
++			}
++			seen[lower] = struct{}{}
 +			if err := validateStrictJSONValue(dec, depth+1); err != nil {
 +				return err
 +			}
@@ -3496,6 +3467,91 @@ index e69de29..fb611b1 100644
 +	return nil
 +}
 +
++func decodeExactJSONObject(raw []byte) (map[string]json.RawMessage, error) {
++	if err := validateStrictJSONObject(raw); err != nil {
++		return nil, err
++	}
++	var fields map[string]json.RawMessage
++	if err := json.Unmarshal(raw, &fields); err != nil {
++		return nil, err
++	}
++	return fields, nil
++}
++
++func exactOptionalString(fields map[string]json.RawMessage, key string) (string, bool) {
++	raw, exists := fields[key]
++	if !exists {
++		return "", true
++	}
++	trimmed := bytes.TrimSpace(raw)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
++		return "", true
++	}
++	var s string
++	if err := json.Unmarshal(trimmed, &s); err != nil {
++		return "", false
++	}
++	return s, true
++}
++
++func decodeExactAssistantContentParts(raw json.RawMessage) ([]responseOutputContentPart, bool) {
++	trimmed := bytes.TrimSpace(raw)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
++		return nil, true
++	}
++	var rawParts []json.RawMessage
++	if err := json.Unmarshal(trimmed, &rawParts); err != nil {
++		return nil, false
++	}
++	parts := make([]responseOutputContentPart, 0, len(rawParts))
++	for _, rp := range rawParts {
++		fields, err := decodeExactJSONObject(rp)
++		if err != nil {
++			return nil, false
++		}
++		typ, ok1 := exactOptionalString(fields, "type")
++		txt, ok2 := exactOptionalString(fields, "text")
++		if !ok1 || !ok2 {
++			return nil, false
++		}
++		parts = append(parts, responseOutputContentPart{Type: typ, Text: txt})
++	}
++	return parts, true
++}
++
++func decodeExactResponseOutputItems(raw json.RawMessage) ([]responseOutputItem, bool) {
++	trimmed := bytes.TrimSpace(raw)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
++		return nil, true
++	}
++	var rawItems []json.RawMessage
++	if err := json.Unmarshal(trimmed, &rawItems); err != nil {
++		return nil, false
++	}
++	items := make([]responseOutputItem, 0, len(rawItems))
++	for _, ri := range rawItems {
++		fields, err := decodeExactJSONObject(ri)
++		if err != nil {
++			return nil, false
++		}
++		typ, ok1 := exactOptionalString(fields, "type")
++		role, ok2 := exactOptionalString(fields, "role")
++		if !ok1 || !ok2 {
++			return nil, false
++		}
++		item := responseOutputItem{Type: typ, Role: role}
++		if typ == "message" && role == "assistant" {
++			parts, ok := decodeExactAssistantContentParts(fields["content"])
++			if !ok {
++				return nil, false
++			}
++			item.Content = parts
++		}
++		items = append(items, item)
++	}
++	return items, true
++}
++
 +// ObserveStreamChunk records SHA-256 hashes of the upstream response ID and final assistant output text
 +// and verifies the upstream response.model matches the bound review model without persisting any free text.
 +func (c *Collector) ObserveStreamChunk(payload []byte) {
@@ -3521,49 +3577,50 @@ index e69de29..fb611b1 100644
 +		if !isDataLine && line[0] != '{' {
 +			continue
 +		}
-+		// Reject non-object JSON (e.g. data: null / []), trailing tokens, and duplicate keys at any depth
-+		// before decoding so conflicting fields (e.g. error followed by null) can never overwrite earlier values.
-+		if err := validateStrictJSONObject(line); err != nil {
++		// Reject non-object JSON (e.g. data: null / []), trailing tokens, case-insensitive duplicate keys,
++		// and mixed-case schema field aliases at any depth, and decode solely by exact lowercase map keys
++		// so Go encoding/json's case-insensitive struct matching can never overwrite error/status/model.
++		evFields, err := decodeExactJSONObject(line)
++		if err != nil {
 +			c.taintStreamAnomaly()
 +			continue
 +		}
-+		// Two-stage json.RawMessage decode: error detection runs before optional item/output
-+		// decoding, non-assistant items never break unmarshaling, and malformed data frames fail closed.
-+		var ev struct {
-+			Type       string          `json:"type"`
-+			ResponseID string          `json:"response_id"`
-+			Error      json.RawMessage `json:"error"`
-+			Item       json.RawMessage `json:"item"`
-+			Response   json.RawMessage `json:"response"`
-+		}
-+		if err := json.Unmarshal(line, &ev); err != nil || strings.TrimSpace(ev.Type) == "" {
++		evType, okType := exactOptionalString(evFields, "type")
++		evRespID, okRespID := exactOptionalString(evFields, "response_id")
++		if !okType || !okRespID || strings.TrimSpace(evType) == "" {
 +			c.taintStreamAnomaly()
 +			continue
 +		}
-+		if hasResponseError(ev.Error) {
++		if hasResponseError(evFields["error"]) {
 +			c.taintStreamAnomaly()
 +			continue
 +		}
-+		var resp struct {
-+			ID     string          `json:"id"`
-+			Model  string          `json:"model"`
-+			Status string          `json:"status"`
-+			Error  json.RawMessage `json:"error"`
-+			Output json.RawMessage `json:"output"`
-+		}
-+		if hasResponseError(ev.Response) {
-+			if err := json.Unmarshal(ev.Response, &resp); err != nil {
++		var respID, respModel, respStatus string
++		var respErr, respOutput json.RawMessage
++		if hasResponseError(evFields["response"]) {
++			respFields, err := decodeExactJSONObject(evFields["response"])
++			if err != nil {
 +				c.taintStreamAnomaly()
 +				continue
 +			}
-+			if hasResponseError(resp.Error) {
++			var ok1, ok2, ok3 bool
++			respID, ok1 = exactOptionalString(respFields, "id")
++			respModel, ok2 = exactOptionalString(respFields, "model")
++			respStatus, ok3 = exactOptionalString(respFields, "status")
++			if !ok1 || !ok2 || !ok3 {
++				c.taintStreamAnomaly()
++				continue
++			}
++			respErr = respFields["error"]
++			respOutput = respFields["output"]
++			if hasResponseError(respErr) {
 +				c.taintStreamAnomaly()
 +				continue
 +			}
 +		}
-+		switch ev.Type {
++		switch evType {
 +		case "response.created", "response.in_progress":
-+			if rid := strings.TrimSpace(resp.ID); rid != "" {
++			if rid := strings.TrimSpace(respID); rid != "" {
 +				c.mu.Lock()
 +				if c.streamResponseID != "" && c.streamResponseID != rid {
 +					c.lastItemOutputSHA = ""
@@ -3573,14 +3630,20 @@ index e69de29..fb611b1 100644
 +				c.mu.Unlock()
 +			}
 +		case "response.output_item.done":
-+			if hasResponseError(ev.Item) {
-+				var rawItem rawResponseOutputItem
-+				if err := json.Unmarshal(ev.Item, &rawItem); err != nil {
++			if hasResponseError(evFields["item"]) {
++				itemFields, err := decodeExactJSONObject(evFields["item"])
++				if err != nil {
 +					c.taintStreamAnomaly()
 +					continue
 +				}
-+				if rawItem.Type == "message" && rawItem.Role == "assistant" {
-+					parts, ok := decodeAssistantContentParts(rawItem.Content)
++				itemType, ok1 := exactOptionalString(itemFields, "type")
++				itemRole, ok2 := exactOptionalString(itemFields, "role")
++				if !ok1 || !ok2 {
++					c.taintStreamAnomaly()
++					continue
++				}
++				if itemType == "message" && itemRole == "assistant" {
++					parts, ok := decodeExactAssistantContentParts(itemFields["content"])
 +					if !ok {
 +						c.taintStreamAnomaly()
 +						continue
@@ -3593,9 +3656,9 @@ index e69de29..fb611b1 100644
 +					}
 +					if b.Len() > 0 {
 +						h := sha256Hex(b.String())
-+						rid := strings.TrimSpace(ev.ResponseID)
++						rid := strings.TrimSpace(evRespID)
 +						if rid == "" {
-+							rid = strings.TrimSpace(resp.ID)
++							rid = strings.TrimSpace(respID)
 +						}
 +						c.mu.Lock()
 +						if rid == "" {
@@ -3610,12 +3673,12 @@ index e69de29..fb611b1 100644
 +				}
 +			}
 +		case "response.completed":
-+			output, ok := decodeResponseOutputItems(resp.Output)
++			output, ok := decodeExactResponseOutputItems(respOutput)
 +			if !ok {
 +				c.taintStreamAnomaly()
 +				continue
 +			}
-+			c.recordCompletedResponse(resp.ID, resp.Model, resp.Status, resp.Error, output)
++			c.recordCompletedResponse(respID, respModel, respStatus, respErr, output)
 +		case "response.done":
 +			c.taintStreamAnomaly()
 +		case "response.failed", "response.incomplete", "error":
@@ -4794,10 +4857,10 @@ index e69de29..fb611b1 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..7f2d3fe 100644
+index e69de29..7411062 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1850 @@
+@@ -0,0 +1,1869 @@
 +package preflightreceipt
 +
 +import (
@@ -6636,6 +6699,25 @@ index e69de29..7f2d3fe 100644
 +			name: "duplicate-inner-response-error-and-model", id: "9",
 +			chunks: []string{
 +				`data: {"type":"response.completed","response":{"id":"resp_m9","status":"failed","status":"completed","model":"wrong-model","model":"gpt-6.2-sol","error":{"message":"bad"},"error":null,"output":[]}}` + "\n\n",
++			},
++		},
++		// 6. R24 (Sol P1 + Astra P1): case-insensitive field collision (error vs Error, Status vs status, Model vs model).
++		{
++			name: "case-collision-top-level-error", id: "a",
++			chunks: []string{
++				`data: {"type":"response.completed","error":{"code":"boom"},"Error":null,"response":{"id":"resp_ma","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "case-collision-inner-response-fields", id: "b",
++			chunks: []string{
++				`data: {"type":"response.completed","response":{"id":"resp_mb","status":"failed","Status":"completed","model":"wrong","Model":"gpt-6.2-sol","error":{"message":"bad"},"Error":null,"output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "capitalized-error-alias", id: "c",
++			chunks: []string{
++				`data: {"type":"response.completed","Error":{"code":"boom"},"response":{"id":"resp_mc","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
 +			},
 +		},
 +	}

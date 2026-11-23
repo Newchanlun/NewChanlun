@@ -2669,3 +2669,83 @@ def test_merge_handoff_persisted_atomically_and_readable_via_cli(lane, capsys):
     unsafe = json.loads(capsys.readouterr().out)
     assert unsafe["gate_ok"] is False and unsafe["ready_for_merge"] == [] and unsafe["behind_queue_head"] == []
     assert [row["pr"] for row in unsafe["human_confirm"]] == [1812]
+
+
+def test_merge_handoff_invalidates_on_failed_tick_rejects_stale_and_unconfirmed_withdraw_or_reviewing(lane, capsys):
+    """R24（Sol P1/P2 + Astra P1/P2）：
+    1) 原生 auto-merge 撤回失败（auto_merge_withdrawn=False）不得进入 ready_for_merge 或 behind_queue_head；
+    2) 队首落后 PR 仍有在途审查（reviewing=True）时保留队首占位、但不进入 behind_queue_head；
+    3) 后续轮次读超时必须作废旧 gate_ok=True 交接快照，--handoff 亦须拒绝过期快照（退出码 2），并过滤新起的重审意图。"""
+    from pilot1742 import external_review as ext
+
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+
+    # 1. 复核发现重挂且撤回失败 -> 即使三项全绿也不得进入 ready_for_merge
+    github = FakeGitHub(lane)
+    github.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    github.files[1810] = [{"filename": "src/normal.py", "status": "modified", "changes": 1}]
+    green(github, head)
+    orig_pr = github.pr
+    reads = []
+
+    def pr_rearm(number):
+        reads.append(number)
+        st = orig_pr(number)
+        if len(reads) >= 2:
+            st["auto_merge"] = True
+        return st
+
+    github.pr = pr_rearm
+    github.disable_auto_merge = _raise
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    sweep.tick()
+    assert module.main(["--state-root", str(lane.state_root), "--handoff"]) == 0
+    unwithdrawn = json.loads(capsys.readouterr().out)
+    assert unwithdrawn["ready_for_merge"] == []
+
+    # 2. 队首落后 PR 正在审查（reviewing=True）-> 占位但不入 behind_queue_head；审查结束后才入队
+    github2 = FakeGitHub(lane)
+    _more_pulls(lane, github2, [1811])
+    github2.states[1810] = {"mergeable_state": "behind", "auto_merge": False}
+    github2.states[1811] = {"mergeable_state": "behind", "auto_merge": False}
+    github2.files[1810] = [{"filename": "src/a.py", "status": "modified", "changes": 1}]
+    github2.files[1811] = [{"filename": "src/b.py", "status": "modified", "changes": 1}]
+    live_rows = [(9001, 1, "S", "python -m pilot1742.review_sweep run-review --pr 1810 --attempt 1")]
+    sweep2 = Sweep(github2, lane, lambda *a: 0, state_root=lane.state_root, rows=lambda: live_rows, auto_merge=True)
+    sweep2.tick()
+    assert module.main(["--state-root", str(lane.state_root), "--handoff"]) == 0
+    mid = json.loads(capsys.readouterr().out)
+    assert mid["behind_queue_head"] == []  # 1810 占位且在审，1811 亦未越队
+
+    # 3. 写入合法 ready_for_merge 后，本机新增重审意图立即被 read_merge_handoff 过滤
+    github3 = FakeGitHub(lane)
+    github3.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    github3.files[1810] = [{"filename": "src/normal.py", "status": "modified", "changes": 1}]
+    green(github3, head)
+    sweep3, _, _ = make(lane, run=False, github=github3, auto_merge=True)
+    sweep3.tick()
+    assert [r["pr"] for r in module.read_merge_handoff(lane.state_root)["ready_for_merge"]] == [1810]
+    t1 = ext.ReviewTarget(**lane.status(1810)[0]["target"])
+    lane._record_rereview_intent(t1)
+    assert module.read_merge_handoff(lane.state_root)["ready_for_merge"] == []
+    lane._rereview_intent_path(t1.repository_id, 1810, base, head).unlink(missing_ok=True)
+
+    # 4. 下一轮读开放 PR 失败/超时 -> 立即作废旧 gate_ok=True 快照
+    github3.open_pulls = _hang
+    with pytest.raises(SourceUnreadable):
+        sweep3.tick()
+    assert module.main(["--state-root", str(lane.state_root), "--handoff"]) == 0
+    invalidated = json.loads(capsys.readouterr().out)
+    assert invalidated["gate_ok"] is False and invalidated["ready_for_merge"] == [] and invalidated.get("invalidated_reason")
+
+    # 5. 过期快照 -> --handoff 以退出码 2 拒绝
+    from datetime import timedelta
+
+    handoff_path = lane.state_root / "sweep" / module.MERGE_HANDOFF_FILE
+    stale_payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+    stale_payload["updated_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    handoff_path.write_text(json.dumps(stale_payload), encoding="utf-8")
+    assert module.main(["--state-root", str(lane.state_root), "--handoff"]) == 2
+    assert "handoff-unreadable" in capsys.readouterr().err
