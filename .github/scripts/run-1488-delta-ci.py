@@ -1233,7 +1233,9 @@ def select_binary(log: str, rust: Path, target_dir: Path, target: str, mode: str
     binary = Path(artifact["executable"]).resolve()
     if not binary.is_relative_to(target_dir.resolve()) or not binary.is_file() or not os.access(binary, os.X_OK):
         raise ValueError("测试 executable 不存在、不可执行或不属本 job target")
-    return {"path": str(binary), "sha256": sha256(binary),
+    digest = sha256(binary)
+    _VERIFIED_BINARY_STATS[(str(binary), digest)] = _stat_signature(binary)
+    return {"path": str(binary), "sha256": digest,
             "features": artifact["features"], "fresh": artifact.get("fresh"),
             "target": meta, "manifest_path": artifact["manifest_path"]}
 
@@ -1256,9 +1258,24 @@ def require_passed(log: str, name: str) -> None:
         raise ValueError(f"exact运行必须恰1 passed且无failed/ignored/measured：{summaries}")
 
 
+_VERIFIED_BINARY_STATS: dict[tuple[str, str], tuple[int, int, int, int, int]] = {}
+
+
+def _stat_signature(path: Path) -> tuple[int, int, int, int, int]:
+    st = path.stat()
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
 def same_binary(binary: dict) -> None:
-    if sha256(Path(binary["path"])) != binary["sha256"]:
+    path = Path(binary["path"])
+    expected = binary["sha256"]
+    key = (str(path), expected)
+    sig = _stat_signature(path)
+    if _VERIFIED_BINARY_STATS.get(key) == sig:
+        return
+    if sha256(path) != expected:
         raise ValueError("列举/执行之间测试二进制已改变")
+    _VERIFIED_BINARY_STATS[key] = sig
 
 
 def run_logged(argv: list[str], cwd: Path, log_path: Path, receipts: list[dict]) -> int:
@@ -1367,8 +1384,10 @@ def run_target(rust: Path, target_dir: Path, output: Path, target: str, mode: st
                 for future in [pool.submit(run_one, *item) for item in submission_order(planned)]:
                     future.result()
         failures.sort(key=[lock["name"] for lock in locks].index)
-        same_binary(binary)
-        result["binary_hash_after_run"] = sha256(Path(binary["path"]))
+        after_hash = sha256(Path(binary["path"]))
+        if "sha256" in binary and after_hash != binary["sha256"]:
+            raise ValueError("列举/执行之间测试二进制已改变")
+        result["binary_hash_after_run"] = after_hash
         if failures:
             raise ValueError(f"具名锁失败：{failures}")
         result["success"] = True
