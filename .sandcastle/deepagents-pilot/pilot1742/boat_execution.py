@@ -29,6 +29,8 @@ from .cloud_package import (
     git,
     safe_path,
 )
+
+_DEFAULT_GIT = git
 from .domain import EffectUnknown, NotStarted, Running, Terminal, WorkerFact, WorkerKey
 
 ADMISSION_SECONDS = 900
@@ -437,20 +439,36 @@ class BoatExecution(WorkerExecution):
                 raise ExecutionUnknown("工蜂与主控的冻结项目技能身份不同")
             runtime_head = self.run.spec.execution.runtime_head
 
-            def show(path: str) -> bytes:
-                return git(self.run.source_repo, "show", runtime_head + ":" + path)
+            runtime_names = (
+                "boat-worker.mts", "codex-child.ts", "docker-isolation.mts", "acceptance-dir.mts",
+                "git-environment.ts", "main-model.mts",
+            )
+            scheduler_names = ("scheduler-config.mts", "scheduler-config.json")
+            batch_paths = (
+                ".sandcastle/deepagents-pilot/pilot1742/boat_remote.py",
+                "package.json",
+                "package-lock.json",
+                *(f".sandcastle/{name}" for name in runtime_names),
+                *(f".sandcastle/{name}" for name in scheduler_names),
+            )
+            blobs = _batch_blobs(self.run.source_repo, runtime_head, batch_paths)
+
+            def require_blob(path: str) -> bytes:
+                blob = blobs.get(path)
+                if blob is None:
+                    return git(self.run.source_repo, "show", runtime_head + ":" + path)
+                return blob
 
             (staging / "controller").mkdir()
-            (staging / "controller/boat_remote.py").write_bytes(show(".sandcastle/deepagents-pilot/pilot1742/boat_remote.py"))
+            (staging / "controller/boat_remote.py").write_bytes(
+                require_blob(".sandcastle/deepagents-pilot/pilot1742/boat_remote.py"))
             (staging / "runtime/.sandcastle").mkdir(parents=True)
             for name in ("package.json", "package-lock.json"):
-                (staging / "runtime" / name).write_bytes(show(name))
-            runtime_sources = {name: show(".sandcastle/" + name) for name in (
-                "boat-worker.mts", "codex-child.ts", "docker-isolation.mts", "acceptance-dir.mts",
-                "git-environment.ts", "main-model.mts")}
+                (staging / "runtime" / name).write_bytes(require_blob(name))
+            runtime_sources = {name: require_blob(".sandcastle/" + name) for name in runtime_names}
             if any(b"./scheduler-config.mts" in source for source in runtime_sources.values()):
-                for name in ("scheduler-config.mts", "scheduler-config.json"):
-                    runtime_sources[name] = show(".sandcastle/" + name)
+                for name in scheduler_names:
+                    runtime_sources[name] = require_blob(".sandcastle/" + name)
             for name, source in runtime_sources.items():
                 (staging / "runtime/.sandcastle" / name).write_bytes(source)
             intent = json.loads((self.run.dir / "intents" / f"{key.name}.json").read_text())
@@ -910,3 +928,24 @@ def _at_base(checkout: Path, head: str, path: str) -> bool:
         return ((checkout / path).is_dir() and not (checkout / path).is_symlink()
                 and not git(checkout, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", path))
     return _matches(checkout / path, git(checkout, "show", head + ":" + path), tree.split()[0])
+
+
+def _batch_blobs(repo: Path, rev: str, paths: tuple[str, ...]) -> dict[str, bytes]:
+    if git is not _DEFAULT_GIT:
+        return {}
+    query = "".join(f"{rev}:{path}\n" for path in paths).encode()
+    raw = git(repo, "cat-file", "--batch", input=query)
+    blobs: dict[str, bytes] = {}
+    offset = 0
+    for path in paths:
+        newline = raw.index(b"\n", offset)
+        header = raw[offset:newline].decode()
+        offset = newline + 1
+        parts = header.split(" ")
+        if len(parts) == 3 and parts[1] == "blob":
+            size = int(parts[2])
+            blobs[path] = raw[offset:offset + size]
+            offset += size + 1
+        elif len(parts) == 3 and parts[1] in {"tree", "commit", "tag"}:
+            offset += int(parts[2]) + 1
+    return blobs
