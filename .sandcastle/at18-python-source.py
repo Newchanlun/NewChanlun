@@ -12,7 +12,7 @@ import sys
 from collections import namedtuple
 from contextvars import ContextVar
 from pathlib import Path
-from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType, MethodType
+from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType, GetSetDescriptorType, MemberDescriptorType, MethodType
 from weakref import WeakKeyDictionary
 
 import pytest
@@ -374,7 +374,47 @@ def captures(fn, name):
 # 出口的值来源和调用点各有独立的源码位置。桥接位置供运行时追踪
 # await/yield from/迭代，不把该行其它调用（包括收尾日志）挂进来。
 Site = namedtuple("Site", "call consumes schedules iterates", defaults=(frozenset(), frozenset(), False))
-Source = namedtuple("Source", "kind position site", defaults=(None,))
+Source = namedtuple("Source", "kind position site slots", defaults=(None, None))
+SequenceSlots = namedtuple("SequenceSlots", "items unknown", defaults=(frozenset(),))
+MappingSlots = namedtuple("MappingSlots", "items")
+Filter = namedtuple("Filter", "test calls item_names reads_item")
+
+
+def within(position, outer):
+    start, end, col, end_col = position
+    return (start is not None and end is not None and col is not None and end_col is not None and
+            (outer[0], outer[2]) <= (start, col) <= (end, end_col) <= (outer[1], outer[3]))
+
+
+def slot_key(node):
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant):
+        if type(node.operand.value) in (int, float, complex):
+            return -node.operand.value
+    return MISSING
+
+
+def aggregate(position, slots):
+    # 循环中同一构造点可能包住上一轮的容器。截在重复构造点，
+    # 保留该值的来源，但不把无限嵌套的形状带进固定点。
+    def prune(source, seen):
+        if source.slots is None:
+            return source
+        if source.position in seen:
+            return source._replace(slots=None)
+        return source._replace(slots=prune_slots(source.slots, seen | {source.position}))
+
+    def prune_slots(shape, seen):
+        def items(sources):
+            return frozenset(prune(source, seen) for source in sources)
+        if isinstance(shape, SequenceSlots):
+            return SequenceSlots(tuple(items(part) for part in shape.items), items(shape.unknown))
+        return MappingSlots(tuple((key, items(part)) for key, part in shape.items))
+
+    return frozenset({Source("local" if slots.items or isinstance(slots, SequenceSlots) and slots.unknown else "constant", position,
+                             slots=prune_slots(slots, {position}))})
+
 Exit = namedtuple("Exit", "kind position operands sources")
 
 
@@ -386,21 +426,81 @@ def merge_states(*states):
     return result
 
 
+def guarded_stream(node):
+    return isinstance(node, ast.GeneratorExp) and any(c.ifs for c in node.generators)
+
+
 class ExitFlow:
     def __init__(self, node, code):
-        self.exits, self.loop_yields, self.scheduled = {}, {}, set()
+        self.exits, self.scheduled = {}, set()
         self.yield_filters, self.iterators = {}, set()
+        self.call_nodes = {}
+        self.predicate_sites = set()
+        self.loop_reads = {}
+        self.local_iterators = {}
+        self.while_bodies = {}
+        self.iteration_targets = set()
         self.names, self.writes = {}, {}
-        args = node.args
-        extra = tuple(p for p in (args.vararg, args.kwarg) if p is not None)
-        self.spread = {p.arg for p in extra}
-        parameters = {p.arg: frozenset({Source("read", None)})
-                      for p in (*args.posonlyargs, *args.args, *args.kwonlyargs, *extra)}
-        if isinstance(node, ast.Lambda):
-            self.exit("return", node.body, node.body, self.value(node.body, parameters))
+        parameters = {}
+        self.spread = set()
+        if guarded_stream(node):
+            # 隐式的 <genexpr> 帧从外层接到迭代器；仅进入该帧或
+            # 沿用元素不是本地证据，真正的变换/过滤走与 for 相同的规则。
+            body = [ast.copy_location(ast.Expr(
+                value=ast.copy_location(ast.Yield(value=node.elt), node.elt)), node.elt)]
+            for index, comp in reversed(list(enumerate(node.generators))):
+                for test in reversed(comp.ifs):
+                    body = [ast.copy_location(ast.If(test=test, body=body, orelse=[]), test)]
+                iterator = comp.iter
+                if index == 0:
+                    iterator = ast.copy_location(ast.Name(id=".0", ctx=ast.Load()), iterator)
+                    parameters[".0"] = frozenset({Source("borrowed", span(iterator))})
+                loop = ast.AsyncFor if comp.is_async else ast.For
+                body = [ast.copy_location(loop(target=comp.target, iter=iterator, body=body, orelse=[]),
+                                          comp.iter)]
+            self.block(body, parameters)
         else:
-            self.block(node.body, parameters)
+            args = node.args
+            extra = tuple(p for p in (args.vararg, args.kwarg) if p is not None)
+            self.spread = {p.arg for p in extra}
+            parameters = {p.arg: frozenset({Source("read", None)})
+                          for p in (*args.posonlyargs, *args.args, *args.kwonlyargs, *extra)}
+            if isinstance(node, ast.Lambda):
+                self.exit("return", node.body, node.body, self.value(node.body, parameters))
+            else:
+                self.block(node.body, parameters)
+        # 谓词入参必须参与返回值或选择返回值的分支；旁支读取不算。
+        predicate_nodes, control_nodes = set(), set()
+        definition = (node.body,) if isinstance(node, ast.Lambda) else tuple(scope_nodes(node))
+        assignments = {}
+        for part in definition:
+            if isinstance(node, ast.Lambda) and part is node.body:
+                predicate_nodes.add(part)
+            elif isinstance(part, ast.Return) and part.value is not None:
+                predicate_nodes.add(part.value)
+                if isinstance(part.value, ast.IfExp):
+                    control_nodes.add(part.value.test)
+            elif isinstance(part, ast.If) and any(isinstance(n, ast.Return) for n in scope_nodes(part)):
+                control_nodes.add(part.test)
+            elif isinstance(part, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and part.value is not None:
+                targets = part.targets if isinstance(part, ast.Assign) else (part.target,)
+                for target in targets:
+                    for name in ast.walk(target):
+                        if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
+                            assignments.setdefault(name.id, set()).add(part.value)
+        pending = list(predicate_nodes | control_nodes)
+        read = set()
+        while pending:
+            for part in ast.walk(pending.pop()):
+                if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load) and part.id not in read:
+                    read.add(part.id)
+                    pending.extend(assignments.get(part.id, ()))
+        self.predicate_inputs = read.intersection(parameters.keys() | set(code.co_freevars))
+
+        self.filters = {f for group in self.yield_filters.values() for f in group}
         self.sites = {o.site for e in self.exits.values() for o in e.sources if o.site is not None}
+        self.sites.update(self.predicate_sites)
+        self.sites.update(Site(key) for f in self.filters for key in f.calls)
         self.calls = {site.call for site in self.sites}
         self.invoking, self.scheduling = {}, {}
         for site in self.sites:
@@ -419,10 +519,36 @@ class ExitFlow:
         self.code_positions = tuple(code.co_positions())
         yields = {position for op, position, _ in self.instructions.values() if op == "YIELD_VALUE"
                   and position in self.exits}
-        self.loops = {position for position, outputs in self.loop_yields.items() if not outputs.isdisjoint(yields)}
-        self.loops.update(e.position for e in self.exits.values() if e.kind == "delegate" and e.position in yields and
-                          any(o.kind in ("local", "read") for o in e.sources))
-        self.filters = {p for y in yields for p in self.yield_filters.get(y, ())}
+        self.iteration_offsets = {
+            offset for offset, (op, position, _) in self.instructions.items()
+            if any(not self.local_iterators[loop].isdisjoint(yields) for loop in self.loop_reads.get(position, ())) or (
+                op not in ("NOP", "NOT_TAKEN", "JUMP_BACKWARD") and
+                any(not outputs.isdisjoint(yields) and within(position, body)
+                    for body, outputs in self.while_bodies.items()))
+        }
+        self.advance_offsets = {
+            offset for offset, (op, position, _) in self.instructions.items()
+            if position in self.iteration_targets and op.startswith("STORE_")
+        }
+        self.filter_offsets, self.predicate_controls = {}, {}
+        direct_controls = []
+        for test in control_nodes:
+            scope = list(ast.walk(test))
+            if not any(isinstance(n, ast.Call) for n in scope):
+                names = self.predicate_inputs.intersection(n.id for n in scope if isinstance(n, ast.Name))
+                if names:
+                    direct_controls.append((span(test), names))
+        previous = None
+        for offset, (op, position, _) in self.instructions.items():
+            if op.startswith("POP_JUMP_IF"):
+                if names := set().union(*(names for test, names in direct_controls if within(position, test))):
+                    self.predicate_controls[offset] = names
+                choices = tuple(f for f in self.filters if within(position, f.test) or (
+                    guarded_stream(node) and previous is not None and within(previous, f.test)))
+                if choices:
+                    self.filter_offsets[offset] = choices
+            previous = position
+
 
     @staticmethod
     def yield_positions(statements):
@@ -450,8 +576,87 @@ class ExitFlow:
     def bridge(sources, position, *, schedule=False, iterates=False):
         return frozenset(Source(o.kind, position, o.site._replace(
             schedules=o.site.schedules | {position}) if schedule else o.site._replace(
-            consumes=o.site.consumes | {position}, iterates=iterates or o.site.iterates)) if o.site is not None else
-            Source(o.kind, position) for o in sources)
+            consumes=o.site.consumes | {position}, iterates=iterates or o.site.iterates), o.slots) if o.site is not None else
+            o._replace(position=position) for o in sources)
+
+    @classmethod
+    def project(cls, sources, key, position):
+        result = set()
+        for source in sources:
+            if isinstance(source.slots, SequenceSlots):
+                items = source.slots.items
+                result.update(source.slots.unknown)
+                if key is MISSING:
+                    result.update(*items)
+                elif type(key) is int and -len(items) <= key < len(items):
+                    result.update(items[key])
+            elif isinstance(source.slots, MappingSlots):
+                items = source.slots.items
+                if key is MISSING:
+                    result.update(*(values for _, values in items))
+                else:
+                    result.update(dict(items).get(key, ()), dict(items).get(MISSING, ()))
+            else:
+                result.update(cls.bridge((source,), position, iterates=True) if source.site is not None else (source,))
+        return frozenset(result)
+
+    @classmethod
+    def unpack(cls, targets, sources, position):
+        star = next((i for i, target in enumerate(targets)
+                     if isinstance(target, (ast.Starred, ast.MatchStar))), None)
+        for index, target in enumerate(targets):
+            if star is not None and index == star:
+                rest = set()
+                after = len(targets) - star - 1
+                for source in sources:
+                    if isinstance(source.slots, SequenceSlots):
+                        items = source.slots.items
+                        rest.update(aggregate(position, SequenceSlots(items[star:len(items) - after],
+                                                                     source.slots.unknown)))
+                    else:
+                        # 星号绑定本身新建列表；未知的是列表内各项，而不是列表身份。
+                        rest.update(aggregate(position, SequenceSlots((), cls.project((source,), MISSING, position))))
+                yield target, frozenset(rest)
+            else:
+                key = index if star is None or index < star else index - len(targets)
+                yield target, cls.project(sources, key, position)
+
+    def pattern(self, pattern, sources, env, subject):
+        if isinstance(pattern, ast.MatchAs):
+            if pattern.pattern is not None:
+                self.pattern(pattern.pattern, sources, env, subject)
+            if pattern.name is not None:
+                self.write(pattern.name, span(pattern), sources, env, subject)
+        elif isinstance(pattern, ast.MatchOr):
+            arms = []
+            for option in pattern.patterns:
+                arm = env.copy()
+                self.pattern(option, sources, arm, subject)
+                arms.append(arm)
+            env.update(merge_states(*arms))
+        elif isinstance(pattern, ast.MatchSequence):
+            for child, part in self.unpack(pattern.patterns, sources, span(subject if subject is not None else pattern)):
+                self.pattern(child, part, env, None)
+        elif isinstance(pattern, ast.MatchStar):
+            if pattern.name is not None:
+                self.write(pattern.name, span(pattern), sources, env)
+        elif isinstance(pattern, ast.MatchMapping):
+            for key, child in zip(pattern.keys, pattern.patterns):
+                self.pattern(child, self.project(sources, slot_key(key), span(key)), env, None)
+            if pattern.rest is not None:
+                keys = {slot_key(key) for key in pattern.keys}
+                rest = set()
+                for source in sources:
+                    if isinstance(source.slots, MappingSlots):
+                        rest.update(aggregate(span(pattern), MappingSlots(tuple(
+                            (key, values) for key, values in source.slots.items if key not in keys))))
+                    else:
+                        rest.update(aggregate(span(pattern), MappingSlots((
+                            (MISSING, self.project((source,), MISSING, span(pattern))),))))
+                self.write(pattern.rest, span(pattern), frozenset(rest), env)
+        elif isinstance(pattern, ast.MatchClass):
+            for child in (*pattern.patterns, *pattern.kwd_patterns):
+                self.pattern(child, self.project(sources, MISSING, span(child)), env, None)
 
     def value(self, value, env):
         if value is None:
@@ -459,6 +664,9 @@ class ExitFlow:
         key = span(value)
         if isinstance(value, ast.Name):
             self.names[key] = value.id
+            for origin in env.get(value.id, ()):
+                if origin.position in self.local_iterators and origin.kind in ("local", "read"):
+                    self.loop_reads.setdefault(key, set()).add(origin.position)
             return env.get(value.id, frozenset({Source("read", key)}))
         if isinstance(value, ast.NamedExpr):
             sources = self.value(value.value, env)
@@ -487,8 +695,46 @@ class ExitFlow:
             return sources
         if isinstance(value, ast.Yield):
             self.exit("yield", value, value.value, self.value(value.value, env))
+            if isinstance(value.value, ast.IfExp):
+                self.guard(value.value.test, env, {key})
             return frozenset({Source("read", key)})   # yield 表达式的结果由 send 给入。
+        if isinstance(value, (ast.Tuple, ast.List)):
+            items, unknown = [], frozenset()
+            for part in value.elts:
+                if isinstance(part, ast.Starred):
+                    variants = self.value(part.value, env)
+                    if len(variants) == 1 and isinstance((o := next(iter(variants))).slots, SequenceSlots):
+                        items.extend(o.slots.items)
+                        unknown |= o.slots.unknown
+                    else:
+                        unknown |= self.project(variants, MISSING, key)
+                else:
+                    items.append(self.value(part, env))
+            if unknown:
+                unknown = unknown.union(*items)
+                items = []
+            return aggregate(key, SequenceSlots(tuple(items), unknown))
+        if isinstance(value, ast.Dict):
+            items = {}
+            for k, v in zip(value.keys, value.values):
+                if k is not None:
+                    self.value(k, env)
+                part = self.value(v, env)
+                if k is None and len(part) == 1 and isinstance(next(iter(part)).slots, MappingSlots):
+                    items.update(next(iter(part)).slots.items)
+                else:
+                    label = slot_key(k)
+                    items[label] = part if label is not MISSING else items.get(label, frozenset()) | part
+            return aggregate(key, MappingSlots(tuple(items.items())))
+        if isinstance(value, ast.Subscript):
+            container = self.value(value.value, env)
+            self.value(value.slice, env)
+            if not isinstance(value.slice, ast.Slice):
+                sources = self.project(container, slot_key(value.slice), key)
+                if sources:
+                    return sources
         if isinstance(value, ast.Call):
+            self.call_nodes[key] = value
             self.value(value.func, env)
             args = [self.value(a, env) for a in value.args]
             for keyword in value.keywords:
@@ -501,6 +747,9 @@ class ExitFlow:
                        for a in ast.walk(value.args[0])):
                     self.scheduled.add(key)
                 return self.bridge(args[0], key, schedule=True)
+            return frozenset({Source("call", key, Site(key))})
+        if guarded_stream(value):
+            self.value(value.generators[0].iter, env)
             return frozenset({Source("call", key, Site(key))})
         if not isinstance(value, (ast.Lambda, ast.GeneratorExp)):
             for child in ast.iter_child_nodes(value):
@@ -518,18 +767,65 @@ class ExitFlow:
             for child in ast.iter_child_nodes(node):
                 self.nested(child, env)
 
+    def write(self, name, position, sources, env, operand=None):
+        env[name] = sources
+        old = self.writes.get(position)
+        alias = operand.id if isinstance(operand, ast.Name) else None
+        self.writes[position] = (name, alias, sources if old is None else sources | old[2])
+
     def bind(self, target, sources, env, operand=None):
         if isinstance(target, ast.Name):
-            env[target.id] = sources
-            position = span(target)
-            old = self.writes.get(position)
-            alias = operand.id if isinstance(operand, ast.Name) else None
-            self.writes[position] = (target.id, alias, sources if old is None else sources | old[2])
+            self.write(target.id, span(target), sources, env, operand)
         elif isinstance(target, (ast.Tuple, ast.List)):
-            for value in target.elts:
-                self.bind(value, sources, env)
+            for value, part in self.unpack(target.elts, sources, span(target)):
+                self.bind(value, part, env)
         elif isinstance(target, ast.Starred):
             self.bind(target.value, sources, env)
+        elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+            name = target.value.id
+            key = slot_key(target.slice)
+            old = env.get(name)
+            if old and key is not MISSING:
+                updated = set()
+                for source in old:
+                    shape = source.slots
+                    if isinstance(shape, MappingSlots):
+                        items = dict(shape.items)
+                        items[key] = sources
+                        updated.update(aggregate(source.position, MappingSlots(tuple(items.items()))))
+                    elif isinstance(shape, SequenceSlots) and type(key) is int and -len(shape.items) <= key < len(shape.items):
+                        parts = list(shape.items)
+                        parts[key] = sources
+                        updated.update(aggregate(source.position, SequenceSlots(tuple(parts), shape.unknown)))
+                    else:
+                        updated.add(source)
+                for alias, current in list(env.items()):
+                    if current is old:
+                        env[alias] = frozenset(updated)
+
+    def guard(self, test, env, outputs):
+        if not outputs:
+            return
+        def current(sources):
+            return any(o.position in self.iterators for o in sources)
+        item_names = frozenset(name for name, sources in env.items() if current(sources))
+        if not item_names:
+            return
+        nodes = list(ast.walk(test))
+        reads_item = any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in item_names for n in nodes)
+        calls = {span(n) for n in nodes if isinstance(n, ast.Call)}
+        for n in nodes:
+            if isinstance(n, ast.Await):
+                for source in self.value(n, env.copy()):
+                    if source.site is not None:
+                        self.predicate_sites.add(source.site)
+                        calls.add(source.site.call)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                calls.update(o.site.call for o in env.get(n.id, ()) if o.site is not None and not o.site.iterates)
+        if reads_item or calls:
+            rule = Filter(span(test), frozenset(calls), item_names, reads_item)
+            for output in outputs:
+                self.yield_filters.setdefault(output, set()).add(rule)
 
     def block(self, statements, original):
         env, transfers = original.copy(), {}
@@ -563,27 +859,23 @@ class ExitFlow:
                         self.bind(target, sources, env, None if isinstance(stmt, ast.AugAssign) else stmt.value)
             elif isinstance(stmt, ast.If):
                 self.value(stmt.test, env)
-                predicate = span(stmt.test)
-                if isinstance(stmt.test, (ast.Compare, ast.BinOp, ast.UnaryOp, ast.Name, ast.Subscript, ast.Attribute)) and any(
-                        isinstance(n, ast.Name) and any(o.position in self.iterators for o in env.get(n.id, ()))
-                        for n in ast.walk(stmt.test)):
-                    affected = self.yield_positions([*stmt.body, *stmt.orelse])
-                    if any(isinstance(arm[-1], ast.Continue) for arm in (stmt.body, stmt.orelse) if arm):
-                        affected.update(self.yield_positions(statements[i + 1:]))
-                    for output in affected:
-                        self.yield_filters.setdefault(output, set()).add(predicate)
+                yes, no = self.yield_positions(stmt.body), self.yield_positions(stmt.orelse)
+                affected = yes | no if not (yes and no) else set()
+                if any(isinstance(arm[-1], (ast.Continue, ast.Break, ast.Return))
+                       for arm in (stmt.body, stmt.orelse) if arm):
+                    affected.update(self.yield_positions(statements[i + 1:]))
+                self.guard(stmt.test, env, affected)
                 paths = [follow(part, env) for part in (stmt.body, stmt.orelse)]
                 env = merge_states(*(p for p in paths if p is not None)) if any(p is not None for p in paths) else None
             elif isinstance(stmt, ast.Match):
-                self.value(stmt.subject, env)
+                subject = self.value(stmt.subject, env)
                 paths = []
                 for case in stmt.cases:
                     arm = env.copy()
-                    for pattern in ast.walk(case.pattern):
-                        name = getattr(pattern, "name", None) or getattr(pattern, "rest", None)
-                        if name is not None:
-                            arm[name] = frozenset({Source("read", span(stmt.subject))})
-                    self.value(case.guard, arm)
+                    self.pattern(case.pattern, subject, arm, stmt.subject)
+                    if case.guard is not None:
+                        self.value(case.guard, arm)
+                        self.guard(case.guard, arm, self.yield_positions(case.body))
                     paths.append(follow(case.body, arm))
                 # 只有无守卫的不可反驳末臂才确定吃掉不匹配路径。
                 last = stmt.cases[-1]
@@ -631,13 +923,17 @@ class ExitFlow:
                     if isinstance(stmt, ast.While):
                         condition = self.value(stmt.test, test)
                         if any(o.kind in ("local", "read") for o in condition):
-                            self.loop_yields[span(stmt.test)] = self.yield_positions(stmt.body)
+                            if self.yield_positions(stmt.body):
+                                self.while_bodies.update((span(part), self.yield_positions(stmt.body))
+                                                         for part in stmt.body)
                     else:
                         iterator = self.value(stmt.iter, test)
                         position = span(stmt if isinstance(stmt, ast.AsyncFor) else stmt.iter)
                         self.iterators.add(position)
-                        if any(o.kind in ("local", "read") for o in iterator):
-                            self.loop_yields[position] = self.yield_positions(stmt.body)
+                        self.iteration_targets.update(span(target) for target in ast.walk(stmt.target)
+                                                      if isinstance(target, ast.Name))
+                        if self.yield_positions(stmt.body):
+                            self.local_iterators[position] = self.yield_positions(stmt.body)
                         self.bind(stmt.target, self.bridge(iterator, position, iterates=True), test)
                     body = self.block(stmt.body, test)
                     new = merge_states(env, *(body[k] for k in ("next", "continue") if k in body))
@@ -688,6 +984,8 @@ class Exports:
         for node in declarations:
             if isinstance(node, ast.Lambda):
                 functions.setdefault((node.lineno, "<lambda>"), []).append(node)
+            elif require_body and guarded_stream(node):
+                functions.setdefault((node.lineno, "<genexpr>"), []).append(node)
             elif isinstance(node, FUNCTIONS) and (not require_body or substantive(node)):
                 functions.setdefault((line(node), node.name), []).append(node)
         classes = {(line(node), node.name) for node in declarations if isinstance(node, ast.ClassDef)}
@@ -697,11 +995,10 @@ class Exports:
         self.shapes, self.flows = {}, {}
         for code in self.definitions:
             candidates = functions[code.co_firstlineno, code.co_name]
-            if len(candidates) != 1 and code.co_name == "<lambda>":
-                # 同行的多个 lambda 用实际表达式位置区分。
+            if len(candidates) != 1 and code.co_name in ("<lambda>", "<genexpr>"):
+                # 同行的多个表达式用实际结果操作数位置区分。
                 positions = set(code.co_positions())
-                candidates = [n for n in candidates if
-                              (n.body.lineno, n.body.end_lineno, n.body.col_offset, n.body.end_col_offset) in positions]
+                candidates = [n for n in candidates if span(n.body if isinstance(n, ast.Lambda) else n.elt) in positions]
             if len(candidates) == 1:
                 if require_body:
                     self.flows[code] = ExitFlow(candidates[0], code)
@@ -997,6 +1294,61 @@ def public(scope):
 task_creators = {asyncio.create_task.__code__: "coro", asyncio.ensure_future.__code__: "coro_or_future"}
 
 
+# 不调用被验对象的 __eq__、__repr__、__iter__ 或属性钩子。内建容器
+# 通过自身的描述符读出结构；普通实例的字典及槽同样读实际存储。
+ATOMIC_TYPES = (type(None), bool, int, float, complex, str, bytes, type(Ellipsis), type(NotImplemented))
+
+
+def snapshot(root):
+    seen = {}
+
+    def take(value):
+        cls = type(value)
+        if cls in ATOMIC_TYPES:
+            if cls is float:
+                return (cls, float.hex(value))
+            if cls is complex:
+                return (cls, float.hex(value.real), float.hex(value.imag))
+            return (cls, value)
+        identity = id(value)
+        if identity in seen:
+            return (identity,)
+        seen[identity] = value
+        mro = type.__getattribute__(cls, "__mro__")
+        if any(kind is base for kind in (type, FunctionType, MethodType, CodeType, GeneratorType,
+                                        AsyncGeneratorType, CoroutineType) for base in mro):
+            return (identity, id(cls))
+        payload = ()
+        for kind, reader in ((list, list.__iter__), (tuple, tuple.__iter__), (set, set.__iter__),
+                             (frozenset, frozenset.__iter__)):
+            if any(kind is base for base in mro):
+                parts = map(take, reader(value))
+                payload = frozenset(parts) if kind in (set, frozenset) else tuple(parts)
+                break
+        if any(dict is base for base in mro):
+            payload = tuple((take(k), take(v)) for k, v in dict.items(value))
+        elif any(bytearray is base for base in mro):
+            payload = bytes(bytearray.__iter__(value))
+        fields = []
+        for owner in mro:
+            for name, descriptor in type.__getattribute__(owner, "__dict__").items():
+                if type(descriptor) is MemberDescriptorType or (
+                        name == "__dict__" and type(descriptor) is GetSetDescriptorType):
+                    try:
+                        field = descriptor.__get__(value, cls)
+                    except AttributeError:
+                        continue
+                    fields.append((id(descriptor), take(field)))
+        return (identity, id(cls), payload, tuple(fields))
+
+    # 只比较结构；同时保留被观察的身份，避免调用间复用对象地址。
+    state = take(root)
+    return state, seen
+
+
+Output = namedtuple("Output", "value attempt gate unchanged", defaults=(None, False))
+
+
 class Delegation:
     def __init__(self, owner):
         self.owner = owner
@@ -1004,10 +1356,12 @@ class Delegation:
         self.values = {}
         self.delayed = False
         self.projected = False
+        self.predicate_inputs = {}
+        self.clock = owner.clock
 
 
 class ForwardCall:
-    def __init__(self, call, task, scopes, samples, bound, flow):
+    def __init__(self, call, task, scopes, samples, bound, flow, parent):
         self.call, self.task, self.scopes = call, task, scopes
         self.samples, self.bound, self.flow = samples, bound, flow
         self.clock, self.executed, self.attempts = 0, {}, {}
@@ -1016,7 +1370,41 @@ class ForwardCall:
         self.pending_write = None
         self.bound_sources, self.exit_reads = {}, {}
         self.iterated = False
-        self.filtered = set()
+        self.filtered, self.completed_filters = {}, set()
+        self.iteration_clock = 0
+        self.predicate_control_inputs = set()
+        self.child_returns = {}
+        # 委托帧也能接到上层已经取得的对象，例如 lambda(Box(raw))。
+        # 拷贝回执而非共享累加表，避免随后同帧或并发调用污染本次判断。
+        self.inherited_returns = dict(parent.inherited_returns) if parent is not None else {}
+        if parent is not None:
+            for key, entries in parent.child_returns.items():
+                self.inherited_returns[key] = (*self.inherited_returns.get(key, ()), *entries)
+
+    def remember(self, value, visit):
+        if type(value) in ATOMIC_TYPES:
+            return
+        proved_here = visit is not None and any(
+            output.value is value and not output.unchanged and output.gate is None and
+            (output.attempt is None or not output.attempt.calls and not output.attempt.delayed)
+            for output in visit.outputs
+        )
+        if not proved_here:
+            self.child_returns.setdefault(id(value), []).append(snapshot(value))
+        if visit is not None:
+            # 外来对象也可能嵌在本地叶返回的容器内。容器的本地
+            # 实现不能替其中原样转交的外来元素作证。
+            for key, entries in visit.child_returns.items():
+                self.child_returns.setdefault(key, []).extend(entries)
+
+    def identity(self, value):
+        identity = id(value)
+        before = (*self.inherited_returns.get(identity, ()), *self.child_returns.get(identity, ()))
+        if not before:
+            return False, False
+        after, _ = snapshot(value)
+        unchanged = any(state == after for state, _ in before)
+        return unchanged, not unchanged
 
     def commit_write(self, frame):
         # INSTRUCTION 发生在 STORE 之前。下一条指令读到的是实际选中
@@ -1028,7 +1416,7 @@ class ForwardCall:
             if alias in self.bound_sources:
                 self.bound_sources[name] = self.bound_sources[alias]
             else:
-                self.bound_sources[name] = self.source(sources, value)
+                self.bound_sources[name] = self.source(sources, value, storing=True)
 
     def opcode(self, frame, offset):
         self.commit_write(frame)
@@ -1046,10 +1434,48 @@ class ForwardCall:
             self.pending_write = self.flow.writes[position]
         if op in ("CALL", "CALL_KW", "CALL_FUNCTION_EX") and position in self.flow.calls:
             self.attempts[position] = Delegation(self)
-        if op in ("FOR_ITER", "GET_ANEXT", "SEND") or op is not None and op.startswith("POP_JUMP_IF"):
-            self.iterated |= position in self.flow.loops
-            if position in self.flow.filters:
-                self.filtered.add(position)
+        self.iterated |= offset in self.flow.iteration_offsets
+        self.predicate_control_inputs.update(self.flow.predicate_controls.get(offset, ()))
+        if offset in self.flow.advance_offsets:
+            self.iteration_clock = self.clock
+            self.filtered.clear()
+        for predicate in self.flow.filter_offsets.get(offset, ()):
+            matching = tuple(self.attempts[key] for key in sorted(predicate.calls) if key in self.attempts
+                             and self.attempts[key].clock > self.iteration_clock)
+            if matching or predicate.reads_item and not predicate.calls:
+                self.filtered[predicate] = matching
+                self.completed_filters.add(matching)
+
+    def predicate_inputs(self, frame, flow, position):
+        bindings = {}
+        locals_ = frame.f_locals
+        caller = self.call.frame.f_locals
+        call = self.flow.call_nodes.get(position)
+        for predicate in self.flow.filters:
+            if position not in predicate.calls:
+                continue
+            items = [(name, caller[name]) for name in predicate.item_names if name in caller]
+            names = frozenset(name for name, value in items)
+            dependency = set()
+            captured = flow.predicate_inputs.intersection(frame.f_code.co_freevars)
+            for name, value in items:
+                if name in captured and locals_.get(name, MISSING) is value:
+                    dependency.add(name)
+            if call is not None and not any(isinstance(arg, ast.Starred) for arg in call.args):
+                def depends(expr):
+                    return any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(expr))
+                code = frame.f_code
+                names_ = code.co_varnames[:code.co_argcount]
+                if isinstance(call.func, ast.Attribute) and names_ and names_[0] in ("self", "cls"):
+                    names_ = names_[1:]
+                for target, arg in zip(names_, call.args):
+                    if target in flow.predicate_inputs and depends(arg):
+                        dependency.add(target)
+                for keyword in call.keywords:
+                    if keyword.arg in flow.predicate_inputs and depends(keyword.value):
+                        dependency.add(keyword.arg)
+            bindings[predicate] = dependency
+        return bindings
 
     def attempts_at(self, position, *, schedules=False):
         # 同一个消费点可接到多个分支的延迟体；取本次实际创建的最近来源。
@@ -1057,11 +1483,11 @@ class ForwardCall:
         return sorted((key for key in sites if key in self.attempts),
                       key=lambda key: self.executed.get(key, 0), reverse=True)
 
-    def source(self, origins, value):
+    def source(self, origins, value, *, storing=False):
         candidates = []
         for source in origins:
             clock = self.executed.get(source.position, 0)
-            if source.position is not None and not clock:
+            if source.position is not None and not clock and not (storing and source.slots is not None):
                 continue
             same = False
             if source.site is not None:
@@ -1086,27 +1512,39 @@ class ForwardCall:
             if exit_ is None or exit_.kind not in ("yield", "delegate"):
                 return  # await/async for 的挂起不是对外产出。
         elif normal:
+            if stream:
+                # 裸 return / return None 和自然耗尽都只结算已经执行的工作。
+                if self.iterated:
+                    self.outputs.append(Output(MISSING, None))
+                for gates in self.completed_filters:
+                    self.outputs.append(Output(MISSING, None, gates))
+                for key in self.flow.iterated_calls:
+                    attempt = self.attempts.get(key)
+                    if attempt is not None and attempt.calls:
+                        self.outputs.append(Output(MISSING, attempt))
+                return
             if exit_ is None or exit_.kind != "return":
-                if stream:
-                    if self.iterated or self.filtered:
-                        self.outputs.append((MISSING, None))
-                    # 委托合法的本地过滤生成器，它可能读完输入但没有产出。
-                    for key in self.flow.iterated_calls:
-                        attempt = self.attempts.get(key)
-                        if attempt is not None and attempt.calls:
-                            self.outputs.append((MISSING, attempt))
-                    return
                 # try:return 的实际 RETURN_VALUE 可落在 finally 收尾指令上。
                 exit_ = self.flow.exits.get(self.pending_exit)
         else:
+            return
+        unchanged, modified = self.identity(arg) if normal else (False, False)
+        # 调生成器/协程函数创建对象时还没有 Python 帧返回。若出口
+        # 原样交回未驱动的外部延迟体，直接核对该对象所带的真实帧。
+        deferred_attr = DEFERRED_FRAMES.get(type(arg)) if normal else None
+        if deferred_attr and (child := getattr(arg, deferred_attr)) is not None:
+            unchanged |= child.f_globals is not frame.f_globals or child.f_code.co_filename != frame.f_code.co_filename
+        if modified and not unchanged and not self.flow.scheduled.intersection(self.executed):
+            self.outputs.append(Output(arg, None))
             return
         if exit_ is None or op == "RETURN_CONST":
             return
         if op == "YIELD_VALUE" and frame.f_code.co_flags & inspect.CO_ASYNC_GENERATOR and exit_.kind == "yield":
             arg, = gc.get_referents(arg)  # CPython 的 async_generator_wrapped_value。
-        if self.filtered.intersection(self.flow.yield_filters.get(exit_.position, ())):
-            self.outputs.append((arg, None))
-            return None
+        for predicate in self.flow.yield_filters.get(exit_.position, ()):
+            gates = self.filtered.get(predicate)
+            if gates is not None:
+                self.outputs.append(Output(arg, None, gates))
         chosen = self.exit_reads.get(exit_.position)
         if chosen is None and len(exit_.operands) == 1:
             chosen = self.bound_sources.get(self.flow.names.get(next(iter(exit_.operands))))
@@ -1126,10 +1564,10 @@ class ForwardCall:
             if self.flow.scheduled.intersection(self.executed) - site.schedules and not attempt.calls:
                 return None   # 没有消费的星号任务不能由另一个内建调用替代。
             attempt.projected |= site.iterates and any(not f.f_code.co_flags & DEFERRED_FLAGS for f in attempt.calls)
-            self.outputs.append((arg, attempt))
+            self.outputs.append(Output(arg, attempt, unchanged=unchanged))
             return attempt
-        if chosen.kind in ("read", "local") and not self.flow.scheduled.intersection(self.executed):
-            self.outputs.append((arg, None))
+        if chosen.kind in ("read", "local") and not unchanged and not self.flow.scheduled.intersection(self.executed):
+            self.outputs.append(Output(arg, None))
         return None
 
 
@@ -1231,17 +1669,22 @@ class Trace:
         code = frame.f_code
         if event == "c_call" and code in wait_result_codes and arg.__name__ == "result":
             joined(active.get(), current_task(), (arg.__self__,))
-        if event == "return" and (frame in self.activations or frame in self.forward_calls
-                                  or frame in self.delegations or code is RELOAD_CODE):
-            normal_return = code.co_code[frame.f_lasti] in returns if frame.f_lasti >= 0 else False
+        if event == "return":
             visit = self.forward_calls.get(frame)
             attempt = self.delegations.get(frame)
+            parent = self.forward_calls.get(frame.f_back)
+            if not (visit is not None or attempt is not None or parent is not None or
+                    frame in self.activations or code is RELOAD_CODE):
+                return
+            normal_return = frame.f_lasti >= 0 and code.co_code[frame.f_lasti] in returns
             if visit is not None:
                 selected = visit.produced(frame, arg, normal_return)
                 if normal_return:
                     self.handoff(arg, selected)
             elif attempt is not None and normal_return:
                 self.handoff(arg, None)
+            if parent is not None and normal_return:
+                parent.remember(arg, visit)
             if attempt is not None:
                 attempt.values[frame] = arg
                 if normal_return:
@@ -1301,7 +1744,7 @@ class Trace:
                     call = self.call(frame, bindings)
                     samples, bound = self.samples(frame, call, parent) if self.test else (({}, ((), {})), False)
                     visit = self.forward_calls[frame] = ForwardCall(
-                        call, current_task(), scopes, samples, bound, self.targets.flows[code])
+                        call, current_task(), scopes, samples, bound, self.targets.flows[code], parent)
                     if id(code) not in self.monitored_codes:
                         self.monitored_codes[id(code)] = code
                         sys.monitoring.set_local_events(self.monitor_id, code, sys.monitoring.events.INSTRUCTION)
@@ -1314,6 +1757,9 @@ class Trace:
                     self.hits.append((visit, current_task(), scopes, wrapper, direct))
         if attempt is not None:
             attempt.calls[frame] = visit
+            if visit is not None and parent.flow.filters:
+                position = next((key for key, value in parent.attempts.items() if value is attempt), None)
+                attempt.predicate_inputs[frame] = parent.predicate_inputs(frame, visit.flow, position)
             self.delegations[frame] = attempt
         if local:
             self.activations[frame] = active.set((*inherited, *local)), local
@@ -1360,21 +1806,42 @@ class Trace:
                 reach[scope] = scope.reachable()
             return task in reach[scope]
 
+        def local_gate(attempt, wrapper, seen):
+            for frame, child in attempt.calls.items():
+                if child is None:
+                    return False
+                inputs = set().union(*attempt.predicate_inputs.get(frame, {}).values())
+                if not inputs:
+                    return False
+                value = attempt.values.get(frame, MISSING)
+                if not (any(witnesses(child, wrapper, seen, value)) or (
+                        type(value) is bool and child.predicate_control_inputs.intersection(inputs)
+                        and reachable(wrapper, child.task))):
+                    return False
+            return True
+
         def witnesses(visit, wrapper, seen=frozenset(), value=MISSING):
             if visit in seen or self.test_scope and not reachable(self.test_scope, visit.task):
                 return
             if not any(s.origin is wrapper and reachable(s, visit.task) for s in (wrapper, *visit.scopes)) and not (
                     visit.task in wrapper.returned and any(reachable(s, visit.task) for s in visit.scopes)):
                 return
-            for produced, attempt in visit.outputs:
+            for produced, attempt, gates, unchanged in visit.outputs:
                 if value is not MISSING and produced is not value:
                     continue
-                if attempt is None or not attempt.calls and not attempt.delayed:
-                    yield (visit.samples,)
+                if gates is not None:
+                    # 每个实际执行的 Python 条件调用都必须是本文件的实质
+                    # 谓词，且至少一条路径从当前项取值。裸内联判断没有调用。
+                    if not gates or (any(a.calls for a in gates) and all(
+                            local_gate(a, wrapper, seen | {visit}) for a in gates)):
+                        yield (visit.samples,)
+                elif attempt is None or not attempt.calls and not attempt.delayed:
+                    if not unchanged:
+                        yield (visit.samples,)
                 elif all(child is not None for child in attempt.calls.values()):
                     for child in attempt.calls.values():
                         if child.call.actual() is not None:
-                            expected = MISSING if attempt.delayed or attempt.projected else produced
+                            expected = MISSING if attempt.delayed or attempt.projected and not unchanged else produced
                             for path in witnesses(child, wrapper, seen | {visit}, expected):
                                 yield (visit.samples, *path)
 

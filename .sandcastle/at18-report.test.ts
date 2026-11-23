@@ -1659,21 +1659,26 @@ def route(*args, **kwargs):
   }
 });
 
-test("R22/#1319：按实走出口判定本地承接", { timeout: 120_000 }, async t => {
+test("R22–R23/#1319：按实走出口判定本地承接", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
   const path = "trading_system/tests/test_at18_fixture_feed.py";
   const imports = "from .support import foreign, deferred, stream, astream\n";
   const wire = "from .at18_fixture_feed import route\ndef dispatch(events): return route(events)\n";
   const support = "def foreign(events): return sorted(events)\nasync def deferred(events): return sorted(events)\n" +
-    "def stream(events): yield from sorted(events)\nasync def astream(events):\n    for value in sorted(events): yield value\n";
+    "def stream(events): yield from sorted(events)\nasync def astream(events):\n    for value in sorted(events): yield value\n" +
+    "def predicate(value): return value > 0\n" +
+    "def mapping(events): return {'negative': min(events), 'positive': max(events)}\n" +
+    "class Token:\n    __slots__ = ('value',)\n    def __init__(self, value): self.value = list(value)\n" +
+    "    def __eq__(self, other): return type(other) is Token and self.value == other.value\n" +
+    "def make_token(value): return Token(value)\n";
   const run = async (name: string, implementation: string, result: string, expected: boolean,
     expression = "route([5, -2, 8])", production = wire) => {
     await t.test(name, () => {
       const repo = feedSource({ [entry]: imports + implementation, [integration]: production,
         "trading_system/support.py": support,
         [path]: "import asyncio\nfrom trading_system.at18_fixture_feed import route\n" +
-          "async def drain(items): return [v async for v in items]\n" +
+          "from trading_system.support import Token\nasync def drain(items): return [v async for v in items]\n" +
           `def test_route(): assert ${expression} == ${result}\n` });
       assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
     });
@@ -1737,6 +1742,76 @@ test("R22/#1319：按实走出口判定本地承接", { timeout: 120_000 }, asyn
   ] as const) await run(name, `def route(events):\n    ${body}\n`, value, expected, "list(route([5, -2, 8]))");
   await run("异步循环原样产出外来值", "async def route(events):\n    async for v in astream(events): yield v\n",
     "[-2, 5, 8]", false, "asyncio.run(drain(route([5, -2, 8])))");
+  const box = "class Box:\n    def __init__(self, value): self.value = value\n";
+  for (const [name, prelude, body, result, expected] of [
+    ["元组解包选择外来值", "", "clean, out = ([v for v in events if v > 0], foreign(events))\n    return out", "[-2, 5, 8]", false],
+    ["元组解包选择本地值", "", "raw, out = (foreign(events), [v for v in events if v > 0])\n    return out", "[5, 8]", true],
+    ["带星号解包再索引", "", "head, *tail = (events, foreign(events), [5, 8])\n    return tail[0]", "[-2, 5, 8]", false],
+    ["星号尾项是从外来序列新构造的列表", "", "first, *tail = foreign(events)\n    return tail", "[5, 8]", true],
+    ["星号尾项内的原对象仍不可透传", "def _box(events): return [events, foreign(events)]\n",
+      "first, *tail = _box(events)\n    return tail[0]", "[-2, 5, 8]", false],
+    ["字典动态键选择外来值", "", "d = {'raw': foreign(events), 'clean': [5, 8]}\n    return d['raw' if events else 'clean']", "[-2, 5, 8]", false],
+    ["列表索引选择外来值", "", "return [foreign(events), [5, 8]][0]", "[-2, 5, 8]", false],
+    ["对象属性原样交还", box, "return Box(foreign(events)).value", "[-2, 5, 8]", false],
+    ["lambda 和对象属性不丢运行时身份", box, "wrapped = Box(foreign(events))\n    return (lambda x: x.value)(wrapped)", "[-2, 5, 8]", false],
+    ["match 整对象捕获", "", "match foreign(events):\n        case out: return out", "[-2, 5, 8]", false],
+    ["match Mapping 剩余项新构造字典", "from .support import mapping\n",
+      "match mapping(events):\n        case {'negative': _, **rest}: return rest", "{'positive': 8}", true],
+    ["match Or / Sequence 捕获本地值", "", "match (1, foreign(events), [v for v in events if v > 0]):\n        case (0, _, out) | (1, _, out): return out", "[5, 8]", true],
+    ["match Mapping / Class 嵌套捕获外来值", box, "match {'key': Box(foreign(events))}:\n        case {'key': Box(value=out)}: return out", "[-2, 5, 8]", false],
+    ["旧列表原地删除后交还", "", "out = foreign(events)\n    out.pop(0)\n    return out", "[5, 8]", true],
+    ["对象槽字段改变后交还", "from .support import Token\n", "out = Token(events)\n    out.value = [5, 8]\n    return out.value", "[5, 8]", true],
+    ["相等但新构造的列表", "", "out = foreign(events)\n    return list(out)", "[-2, 5, 8]", true],
+  ] as const) await run(name, prelude + `def route(events):\n    ${body}\n`, result, expected);
+  await run("协程结果经属性原样交还", box + "async def route(events): return Box(await deferred(events)).value\n",
+    "[-2, 5, 8]", false, "asyncio.run(route([5, -2, 8]))");
+  await run("外来实例经属性原样交还", box + `from .support import make_token, Token
+def route(events):
+    return Box(make_token(events)).value
+`, "Token([5, -2, 8])", false, undefined, wire);
+  await run("外来实例的嵌套槽内容原地改变", `from .support import make_token, Token
+def route(events):
+    out = make_token(events)
+    out.value.pop(0)
+    return out
+`, "Token([-2, 8])", true);
+  for (const [name, prelude, body, value, expected] of [
+    ["while 假条件不算进入循环", "ENABLED = False\n", "while ENABLED: yield from sorted(events)", "[]", false],
+    ["while 确实进入循环体", "ENABLED = True\n", "while ENABLED:\n        yield from sorted(events)\n        break", "[-2, 5, 8]", true],
+    ["for 空输入未执行循环体", "", "for v in events[:0]:\n        if v > 0: yield v", "[]", false],
+    ["for 循环体未读取输入项", "", "for v in events:\n        if len(events) > 100: yield v", "[]", false],
+    ["for 已处理项后裸 return（空）", "def _keep(v): return v > 100\n", "for v in events:\n        if _keep(v): yield v\n    return", "[]", true],
+    ["for 已处理项后裸 return（非空）", "def _keep(v): return v > 0\n", "for v in events:\n        if _keep(v): yield v\n    return None", "[5, 8]", true],
+    ["本地谓词筛选外来流（部分）", "def _keep(v): return v > 0\n", "for v in stream(events):\n        if _keep(v): yield v", "[5, 8]", true],
+    ["本地分支返回布尔常量", "def _keep(v):\n    if v > 0: return True\n    return False\n",
+      "for v in stream(events):\n        if _keep(v): yield v", "[5, 8]", true],
+    ["本地谓词筛选外来流（全空）", "def _keep(v): return v > 100\n", "for v in stream(events):\n        if _keep(v): yield v\n    return", "[]", true],
+    ["闭包、多步调用和 continue 过滤", "def _positive(v): return v > 0\n", "for v in stream(events):\n        def _keep(): return _positive(v)\n        if not _keep(): continue\n        yield v", "[5, 8]", true],
+    ["本地谓词的结果经变量控制过滤", "def _keep(v): return v > 0\n", "for v in stream(events):\n        keep = _keep(v)\n        if keep: yield v", "[5, 8]", true],
+    ["本地谓词根本不读取传入项", "def _keep(v): return bool(1)\n", "for v in stream(events):\n        if _keep(v): yield v", "[-2, 5, 8]", false],
+    ["外部谓词不能替本地实现作证", "from .support import predicate\n", "for v in stream(events):\n        if predicate(v): yield v", "[5, 8]", false],
+    ["空桩谓词不能替本地实现作证", "def _keep(v): pass\n", "for v in stream(events):\n        if _keep(v): yield v", "[]", false],
+    ["旁支调用不控制产出", "def _record(v): return v > 0\n", "for v in stream(events):\n        _record(v)\n        yield v", "[-2, 5, 8]", false],
+    ["恒真条件不控制产出", "", "for v in stream(events):\n        if True: yield v", "[-2, 5, 8]", false],
+    ["与流元素无关的开关", "ENABLED = True\n", "for v in stream(events):\n        if ENABLED: yield v", "[-2, 5, 8]", false],
+    ["两臂均原样产出，不构成过滤", "def _keep(v): return v > 0\n", "for v in stream(events):\n        if _keep(v): yield v\n        else: yield v", "[-2, 5, 8]", false],
+  ] as const) await run(name, prelude + `def route(events):\n    ${body}\n`, value, expected, "list(route([5, -2, 8]))");
+  await run("异步生成器的本地谓词与显式 return",
+    "def _keep(v): return v > 100\nasync def route(events):\n    async for v in astream(events):\n        if _keep(v): yield v\n    return\n",
+    "[]", true, "asyncio.run(drain(route([5, -2, 8])))");
+  for (const [name, predicate, expected, result] of [
+    ["生成器推导本地谓词", "def keep(v): return v > 0", true, "[5, 8]"],
+    ["生成器推导本地谓词全部滤空", "def keep(v): return v > 100", true, "[]"],
+    ["生成器推导外部谓词", "from .support import predicate as keep", false, "[5, 8]"],
+  ] as const) {
+    await run(name, predicate + "\ndef route(events): yield from (v for v in stream(events) if keep(v))\n",
+      result, expected, "list(route([5, -2, 8]))");
+  }
+  await run("异步谓词在流条件内等待本文件实现",
+    "async def keep(v): return v > 0\nasync def route(events):\n    async for v in astream(events):\n        if await keep(v): yield v\n",
+    "[5, 8]", true, "asyncio.run(drain(route([5, -2, 8])))");
+  await run("外部生成器尚未进入帧即经属性原样交还", box +
+    "def route(events): return Box(stream(events)).value\n", "[-2, 5, 8]", false, "list(route([5, -2, 8]))");
 });
 
 test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
