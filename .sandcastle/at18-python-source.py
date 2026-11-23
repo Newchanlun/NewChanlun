@@ -231,6 +231,31 @@ def class_members(cls):
     return type.__dict__["__dict__"].__get__(cls).items()
 
 
+def argument_choice(signature, args, kwargs, defaults, default_refs):
+    signature.bind(*args, **kwargs)
+    positional = []
+    for i, value in enumerate(args):
+        if i not in defaults:
+            positional.append(sample_key(sample(value)))
+            continue
+        try:
+            plain = sample(value)
+        except ValueError:
+            # 非纯数据的生产默认值只按身份比较；保活以免 id 被复用。
+            identity = id(value)
+            default_refs[identity] = value
+            positional.append((MISSING, identity))
+        else:
+            positional.append(sample_key(plain))
+    keywords = tuple((k, sample_key(sample(v))) for k, v in kwargs.items())
+    return tuple(positional), keywords
+
+
+def copy_arguments(args, kwargs, defaults):
+    return (tuple(v if i in defaults else sample(v) for i, v in enumerate(args)),
+            {k: sample(v) for k, v in kwargs.items()})
+
+
 class Binding:
     def __init__(self, key, member, chain, owner=None):
         self.key, self.member, self.chain, self.owner = key, member, chain, owner
@@ -250,18 +275,37 @@ class Binding:
             return is_class(receiver) and inherits(receiver, self.owner)
         return receiver is not MISSING and inherits(type(receiver), self.owner)
 
-    def callable(self, instances, samples):
+    def callables(self, instances, views):
         if self.owner is None:
-            return self.member
+            yield self.member
+            return
         if type(self.member) in (staticmethod, classmethod):
-            return self.member.__get__(None, self.owner)
-        key = id(self.owner)
-        if key not in instances:
-            instances[key] = None  # 构造器异常也只试一次。
-            args, kwargs, _ = arguments(inspect.signature(self.owner, follow_wrapped=False), samples)
-            instances[key] = self.owner(*args, **kwargs)
-        if instances[key] is not None:
-            return self.member.__get__(instances[key], self.owner)
+            yield self.member.__get__(None, self.owner)
+            return
+        try:
+            ctor_sig = inspect.signature(self.owner, follow_wrapped=False)
+        except (ValueError, TypeError):
+            return
+        seen, default_refs = set(), {}
+        for view in views:
+            try:
+                args, kwargs, defaults = arguments(ctor_sig, view)
+                ctor_key = argument_choice(ctor_sig, args, kwargs, defaults, default_refs)
+            except (ValueError, TypeError):
+                continue
+            if ctor_key in seen:
+                continue
+            seen.add(ctor_key)
+            key = (id(self.owner), ctor_key)
+            if key not in instances:
+                instances[key] = None  # 构造器异常也只试一次。
+                ctor_args, ctor_kwargs = copy_arguments(args, kwargs, defaults)
+                try:
+                    instances[key] = self.owner(*ctor_args, **ctor_kwargs)
+                except (Exception, SystemExit):
+                    continue
+            if instances[key] is not None:
+                yield self.member.__get__(instances[key], self.owner)
 
     def signatures(self, fn, public, named):
         generic = variadic_only(public)
@@ -305,31 +349,14 @@ class Binding:
                         continue
 
         choices, default_refs = set(), {}
-
-        def positional_key(i, value, defaults):
-            if i not in defaults:
-                return sample_key(sample(value))
-            try:
-                plain = sample(value)
-            except ValueError:
-                # 非纯数据的生产默认值只按身份比较；保活以免 id 被复用。
-                identity = id(value)
-                default_refs[identity] = value
-                return MISSING, identity
-            return sample_key(plain)
-
         for args, kwargs, defaults in candidates():
             try:
-                public.bind(*args, **kwargs)
-                positional = tuple(positional_key(i, v, defaults) for i, v in enumerate(args))
-                keywords = keyword_sample_key(kwargs)
+                choice = argument_choice(public, args, kwargs, defaults, default_refs)
             except (ValueError, TypeError):
                 continue
-            choice = positional, keywords
             if choice not in choices:
                 choices.add(choice)
-                yield (tuple(v if i in defaults else sample(v) for i, v in enumerate(args)),
-                       {k: sample(v) for k, v in kwargs.items()})
+                yield copy_arguments(args, kwargs, defaults)
 
 
 def has_executable_body(code):
@@ -827,19 +854,21 @@ def public_probe(production, targets, origins, test_entered, samples, shapes, ov
     production.load(origins)
     targets.load(origins)
 
+    views = (samples, *overrides)
     instances, tried = {}, set()
     for binding in production.members:
         try:
-            fn = binding.callable(instances, samples)
-            if fn is None:
-                continue
-            identity = (id(fn.__func__), id(fn.__self__)) if type(fn) is MethodType else (id(fn),)
-            if identity in tried:
-                continue
-            tried.add(identity)
-            for args, kwargs in binding.arguments(fn, samples, shapes, overrides):
-                if probe_call(production, targets, test_entered, fn, args, kwargs):
-                    return True
+            for fn in binding.callables(instances, views):
+                try:
+                    identity = (id(fn.__func__), id(fn.__self__)) if type(fn) is MethodType else (id(fn),)
+                    if identity in tried:
+                        continue
+                    tried.add(identity)
+                    for args, kwargs in binding.arguments(fn, samples, shapes, overrides):
+                        if probe_call(production, targets, test_entered, fn, args, kwargs):
+                            return True
+                except (Exception, SystemExit):
+                    continue
         except (Exception, SystemExit):
             continue
     return False
@@ -908,10 +937,11 @@ def proves(doc, scratch):
             self.named_observations = {}
 
         def overrides(self):
-            # 先保留可跨调用拼合的首值表，再让各观察覆盖其实际提供的名字与顺序。
+            # 先保留可跨调用拼合的首值表与合并覆写视图，再保留未补齐的原始观察以触发生产默认。
             seen = {keyword_sample_key(self.samples)}
-            for observed in self.named_observations.values():
-                view = observed | {k: v for k, v in self.samples.items() if k not in observed}
+            merged = [observed | {k: v for k, v in self.samples.items() if k not in observed}
+                      for observed in self.named_observations.values()]
+            for view in (*merged, *self.named_observations.values()):
                 key = keyword_sample_key(view)
                 if key not in seen:
                     seen.add(key)

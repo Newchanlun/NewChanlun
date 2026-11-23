@@ -2123,6 +2123,143 @@ def dispatch(rows, /, **labels):
 `, "def route(*, rows, labels): return sorted(rows)\n", ["rows=[4, 1], labels='quote'"]);
 });
 
+test("R31/#1319：保留省略的可选参数原貌与构造器多观察去重实例化", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = async (name: string, source: string, implementation: string, calls: string[], expected = true) => {
+    await t.test(name, () => {
+      const repo = feedSource({ [entry]: implementation,
+        [integration]: "from .at18_fixture_feed import route\n" + source,
+        [path]: "from trading_system.at18_fixture_feed import route\n" +
+          "def test_route():\n" + calls.map(call => `    assert route(${call}) == [1, 4]\n`).join("") });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  const eventRoute = "def route(**event): return sorted(event['rows'])\n__all__ = ('route',)\n";
+  const modeRoute = "def route(*, rows, mode): return sorted(rows)\n__all__ = ('route',)\n";
+  const missingKwSource = `
+_MISSING = object()
+def dispatch(rows, /, *, mode=_MISSING):
+    if mode is _MISSING: return route(rows=rows)
+__all__ = ('dispatch',)
+`;
+  await check("missing-kw-first-full：先带 mode 后省略保留生产默认哨兵", missingKwSource, eventRoute,
+    ["rows=[4, 1], mode='audit'", "rows=[4, 1]"]);
+  await check("missing-kw-first-bare：先省略后带 mode 保留生产默认哨兵", missingKwSource, eventRoute,
+    ["rows=[4, 1]", "rows=[4, 1], mode='audit'"]);
+  await check("constructor-multivalue：构造器按多观察值区分类型并分别实例化", `
+class Adapter:
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+  await check("构造器首值抛错后缓存失败并继续尝试后续观察值", `
+attempts = []
+class Adapter:
+    def __init__(self, mode, /):
+        attempts.append(type(mode))
+        if type(mode) is not int: raise TypeError('int required')
+        self.mode = mode
+    def dispatch(self, rows, /):
+        if attempts == [bool, int]: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+  await check("构造器依赖省略的可选非纯哨兵默认值", `
+class _Sentinel:
+    def __eq__(self, other): raise AssertionError('ctor sentinel compared')
+    def __hash__(self): raise AssertionError('ctor sentinel hashed')
+_MISSING = _Sentinel()
+class Adapter:
+    def __init__(self, mode=_MISSING, /):
+        self.ready = mode is _MISSING
+    def dispatch(self, rows, /):
+        if self.ready: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode='bad'", "rows=[4, 1]"]);
+  await check("构造器中间非纯哨兵不触发比较且可变样本传独立副本", `
+class _Token:
+    def __eq__(self, other): raise AssertionError('ctor token compared')
+    def __hash__(self): raise AssertionError('ctor token hashed')
+_MISSING = _Token()
+class Adapter:
+    def __init__(self, rows, mode=_MISSING, limit=0, /):
+        if limit == 2:
+            rows.clear()
+            raise ValueError('bad limit')
+        self.ready = mode is _MISSING and rows == [4, 1] and limit == 3
+    def dispatch(self, rows, /):
+        if self.ready: return route(rows=rows, limit=3)
+__all__ = ('Adapter',)
+`, "def route(*, rows, limit): return sorted(rows)[:limit]\n", ["rows=[4, 1], limit=2", "rows=[4, 1], limit=3"]);
+  await check("无参构造器在多观察视图下仅构造一次", `
+created = []
+class Adapter:
+    def __init__(self): created.append(True)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1", "rows=[4, 1]"]);
+  await check("仅在 __init__ 构造期间调用承接函数仍拒绝", `
+class Adapter:
+    def __init__(self, mode, /):
+        self.mode = mode
+        if type(mode) is int: route(rows=[4, 1], mode=mode)
+    def dispatch(self, rows, /): return sorted(rows)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+  await t.test("仅在 __init__ 构造期间调用承接函数经正式 CLI 返回 FAIL/1", async () => {
+    const { report } = await control({
+      feedReplacement: modeRoute,
+      feedIntegration: `from . import at18_fixture_feed as f
+class Adapter:
+    def __init__(self, mode, /):
+        self.mode = mode
+        if type(mode) is int: f.route(rows=[4, 1], mode=mode)
+    def dispatch(self, rows, /): return sorted(rows)
+__all__ = ('Adapter',)
+`,
+      feedTest: `from trading_system import at18_fixture_feed as f
+def test_route():
+    assert f.route(rows=[4, 1], mode=True) == [1, 4]
+    assert f.route(rows=[4, 1], mode=1) == [1, 4]
+`,
+    });
+    assert.equal(report.overall_result, "FAIL");
+    assert.equal(report.failed_checks.length, 1);
+    assert.equal(report.failed_checks[0]?.check_id, "LEGACY_DISPOSITION");
+    assert.equal(report.failed_checks[0]?.scope, "ticket:1319@ISSUE_1319_FEED_WIRE");
+  });
+  await check("多值构造仍拒绝承接侧异子类接收者", `
+class Adapter:
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, `
+from functools import wraps
+class _Base:
+    @classmethod
+    def handle(cls, rows, mode): return sorted(rows)
+class _Left(_Base): pass
+class _Right(_Base): pass
+@wraps(_Left.handle)
+def route(*, rows, mode): return _Right.handle(rows, mode)
+__all__ = ('route',)
+`, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+  for (const [label, value] of [["对象", "object()"], ["回调", "lambda: None"]] as const) {
+    await check(`多值构造仍拒绝测试${label}`, `
+class Adapter:
+    def __init__(self, guard, /): self.guard = guard
+    def dispatch(self, rows, /):
+        if self.guard is not None: return route(rows=rows, guard=self.guard)
+__all__ = ('Adapter',)
+`, "def route(*, rows, guard): return sorted(rows)\n__all__ = ('route',)\n",
+    ["rows=[4, 1], guard=None", `rows=[4, 1], guard=${value}`], false);
+  }
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
