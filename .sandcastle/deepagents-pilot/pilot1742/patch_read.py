@@ -604,30 +604,135 @@ def _leading_diff(output: str) -> list[str]:
 _HUNK_POS = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _NUM_PREFIX = re.compile(r"[ \t]*(\d+)([\t:])")
 _BLOB_NUM_LINE = re.compile(r"^[ \t]*(\d+)[\t:](.*)$")
-ChangeUnit = tuple[str, str, int, str]  # (file_header, "+" | "-" | "H", 1-based line_no or 0, exact_text)
+_META_CHANGE = re.compile(
+    r"^(?:old mode |new mode |deleted file mode |new file mode |rename from |rename to |copy from |copy to |Binary files )"
+)
+ChangeUnit = tuple[str, str, int, str]  # (file_header, "+" | "-" | "M" | "H", 1-based line_no or 0, exact_text)
+
+
+def _scan_quoted_token(s: str, i: int) -> tuple[str, int] | None:
+    if i >= len(s) or s[i] != '"':
+        return None
+    j = i + 1
+    while j < len(s):
+        if s[j] == "\\" and j + 1 < len(s):
+            j += 2
+        elif s[j] == '"':
+            return _unquote(s[i:j + 1]), j + 1
+        else:
+            j += 1
+    return None
+
+
+def _parse_diff_git_paths(header: str) -> tuple[str, str] | None:
+    """解码 `diff --git <a/old> <b/new>` 行中的旧/新路径（兼容 Git C 风格引号转义、非 ASCII 路径与空格）。"""
+    if not header.startswith("diff --git "):
+        return None
+    rest = header[11:]
+    tok1: str | None = None
+    tok2: str | None = None
+    if rest.startswith('"'):
+        first = _scan_quoted_token(rest, 0)
+        if first is None:
+            return None
+        tok1, pos = first
+        if pos >= len(rest) or rest[pos] != " ":
+            return None
+        rem = rest[pos + 1:]
+        if rem.startswith('"'):
+            second = _scan_quoted_token(rem, 0)
+            if second is None or second[1] != len(rem):
+                return None
+            tok2 = second[0]
+        else:
+            tok2 = rem
+    elif rest.endswith('"'):
+        matches: list[tuple[str, str]] = []
+        idx = rest.find(' "b/')
+        while idx != -1:
+            second = _scan_quoted_token(rest, idx + 1)
+            if second is not None and second[1] == len(rest):
+                matches.append((rest[:idx], second[0]))
+            idx = rest.find(' "b/', idx + 1)
+        if len(matches) != 1:
+            return None
+        tok1, tok2 = matches[0]
+    else:
+        if len(rest) % 2 == 1 and rest[len(rest) // 2] == " ":
+            left, right = rest[:len(rest) // 2], rest[len(rest) // 2 + 1:]
+            if left.startswith("a/") and right.startswith("b/") and left[2:] == right[2:]:
+                return left[2:], right[2:]
+        positions: list[int] = []
+        idx = rest.find(" b/")
+        while idx != -1:
+            positions.append(idx)
+            idx = rest.find(" b/", idx + 1)
+        if len(positions) != 1:
+            return None
+        pos = positions[0]
+        tok1, tok2 = rest[:pos], rest[pos + 1:]
+    if tok1 is None or tok2 is None or not tok1.startswith("a/") or not tok2.startswith("b/"):
+        return None
+    return tok1[2:], tok2[2:]
+
+
+def _normalize_meta_line(line: str) -> str:
+    """规范化扩展头元数据行中的 Git C-quoted 路径，使默认 quotepath 与 `-c core.quotepath=false` 一致匹配。"""
+    for prefix in ("rename from ", "rename to ", "copy from ", "copy to "):
+        if line.startswith(prefix):
+            return prefix + _unquote(line[len(prefix):])
+    if line.startswith("Binary files ") and line.endswith(" differ"):
+        inner = line[13:-7]
+        if inner.startswith('"'):
+            first = _scan_quoted_token(inner, 0)
+            if first is not None and inner[first[1]:].startswith(" and "):
+                rem = inner[first[1] + 5:]
+                second = _scan_quoted_token(rem, 0) if rem.startswith('"') else (rem, len(rem))
+                if second is not None and second[1] == len(rem):
+                    return f"Binary files {first[0]} and {second[0]} differ"
+        elif inner.endswith('"'):
+            idx = inner.find(' and "')
+            if idx != -1:
+                second = _scan_quoted_token(inner, idx + 5)
+                if second is not None and second[1] == len(inner):
+                    return f"Binary files {inner[:idx]} and {second[0]} differ"
+    return line
 
 
 @dataclass(frozen=True)
 class FrozenFile:
     """冻结补丁里的一个文件。header 是 controller 侧的 `diff --git a/… b/…` 行，path 是它在 head 上的路径
-    （删除的文件为 None）；evidence 是这个文件的证据行，added 是其中由 `+` 加进来、head 上这个文件里有的，
-    changes 是精确到 `(file_header, sign, line_no, text)` 的全部冻结变更行集合（无 hunk 文件记 header），
-    u0_units 记录单文件 `-U0` 补丁中 1-based 行号到精确 ChangeUnit 的映射。"""
+    （删除的文件为 None），git_old_path/git_new_path 是解码后的旧/新路径；evidence 是这个文件的证据行，
+    added 是其中由 `+` 加进来、head 上这个文件里有的，changes 是精确到 `(file_header, sign, line_no, text)`
+    的全部冻结变更行与元数据变更集合（含 `_BREAK` 行，不可删除出必读集），u0_units 记录单文件 `-U0` 补丁中
+    1-based 行号到精确 ChangeUnit 的映射。"""
     header: str
     path: str | None
     evidence: frozenset[str]
     added: frozenset[str]
     changes: frozenset[ChangeUnit] = frozenset()
     u0_units: tuple[tuple[int, ChangeUnit], ...] = ()
+    git_old_path: str | None = None
+    git_new_path: str | None = None
 
 
-def _split_files(
-    diff: str,
-) -> tuple[list[tuple[str, str | None, list[tuple[str, str]], list[ChangeUnit], list[tuple[int, ChangeUnit]], int]], list[tuple[int, ChangeUnit]]]:
-    """按文件与精确 hunk 行号切开 `-U<n>` 补丁，并记录全局及单文件 1-based `-U0` 补丁行号映射：
-    (header, head 上的路径, [(`+`/`-`, 去空白改动行)], [ChangeUnit], [(file_diff_ln, ChangeUnit)], file_start_ln)。
-    hunk 按 `@@ -old,n +new,m @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git` 的改动行不会被当成文件头。"""
-    files: list[tuple[str, str | None, list[tuple[str, str]], list[ChangeUnit], list[tuple[int, ChangeUnit]], int]] = []
+_SplitRow = tuple[
+    str,
+    str | None,
+    str | None,
+    str | None,
+    list[tuple[str, str]],
+    list[ChangeUnit],
+    list[tuple[int, ChangeUnit]],
+    int,
+]
+
+
+def _split_files(diff: str) -> tuple[list[_SplitRow], list[tuple[int, ChangeUnit]]]:
+    """按文件、元数据变更行与精确 hunk 行号切开 `-U<n>` 补丁，并记录全局及单文件 1-based `-U0` 补丁行号映射。
+    hunk 按 `@@ -old,n +new,m @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git`、`old mode` 的改动行不会被当成文件头。
+    含 `_BREAK` 字符的增删行与元数据变更行同样保留在 `changes` 必读全集中（绝不从必读集剔除），但永不进入 `evidence` 或 `u0` 匹配表。"""
+    files: list[_SplitRow] = []
     u0_global: list[tuple[int, ChangeUnit]] = []
     old_ln = new_ln = old_rem = new_rem = 0
     for global_ln, line in enumerate(_lines(diff), 1):
@@ -641,53 +746,70 @@ def _split_files(
                 old_rem -= 1
                 new_rem -= 1
             elif sign == "-":
+                raw_text = line[1:]
+                unit: ChangeUnit = (files[-1][0], "-", old_ln, raw_text)
+                files[-1][5].append(unit)
                 if not _BREAK.search(line):
-                    raw_text = line[1:]
-                    unit: ChangeUnit = (files[-1][0], "-", old_ln, raw_text)
-                    files[-1][3].append(unit)
-                    files[-1][4].append((global_ln - files[-1][5] + 1, unit))
+                    files[-1][6].append((global_ln - files[-1][7] + 1, unit))
                     u0_global.append((global_ln, unit))
                     if stripped := raw_text.strip():
-                        files[-1][2].append(("-", stripped))
+                        files[-1][4].append(("-", stripped))
                 old_ln += 1
                 old_rem -= 1
             elif sign == "+":
+                raw_text = line[1:]
+                unit = (files[-1][0], "+", new_ln, raw_text)
+                files[-1][5].append(unit)
                 if not _BREAK.search(line):
-                    raw_text = line[1:]
-                    unit = (files[-1][0], "+", new_ln, raw_text)
-                    files[-1][3].append(unit)
-                    files[-1][4].append((global_ln - files[-1][5] + 1, unit))
+                    files[-1][6].append((global_ln - files[-1][7] + 1, unit))
                     u0_global.append((global_ln, unit))
                     if stripped := raw_text.strip():
-                        files[-1][2].append(("+", stripped))
+                        files[-1][4].append(("+", stripped))
                 new_ln += 1
                 new_rem -= 1
         elif line.startswith("diff --git "):
-            files.append((line, None, [], [], [], global_ln))
+            parsed_paths = _parse_diff_git_paths(line)
+            old_p, new_p = parsed_paths if parsed_paths is not None else (None, None)
+            files.append((line, None, old_p, new_p, [], [], [], global_ln))
         elif files and line.startswith("+++ "):
             target = _unquote(line[4:])
-            files[-1] = (
-                files[-1][0],
-                target[2:] if target.startswith("b/") else None,
-                files[-1][2],
-                files[-1][3],
-                files[-1][4],
-                files[-1][5],
-            )
+            head_p = target[2:] if target.startswith("b/") else None
+            cur = files[-1]
+            files[-1] = (cur[0], head_p, cur[2], head_p or cur[3], cur[4], cur[5], cur[6], cur[7])
+        elif files and line.startswith("--- "):
+            src = _unquote(line[4:])
+            if src.startswith("a/"):
+                cur = files[-1]
+                files[-1] = (cur[0], cur[1], src[2:], cur[3], cur[4], cur[5], cur[6], cur[7])
         elif files and (hunk := _HUNK_POS.match(line)):
             old_ln = int(hunk.group(1))
             old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
             new_ln = int(hunk.group(3))
             new_rem = int(hunk.group(4)) if hunk.group(4) is not None else 1
+        elif files and _META_CHANGE.match(line):
+            cur = files[-1]
+            norm_meta = _normalize_meta_line(line)
+            old_p, new_p = cur[2], cur[3]
+            if norm_meta.startswith(("rename from ", "copy from ")):
+                old_p = norm_meta.split(" ", 2)[2]
+            elif norm_meta.startswith(("rename to ", "copy to ")):
+                new_p = norm_meta.split(" ", 2)[2]
+            files[-1] = (cur[0], cur[1], old_p, new_p, cur[4], cur[5], cur[6], cur[7])
+            meta_unit: ChangeUnit = (cur[0], "M", 0, norm_meta)
+            cur[5].append(meta_unit)
+            if not _BREAK.search(line):
+                cur[6].append((global_ln - cur[7] + 1, meta_unit))
+                u0_global.append((global_ln, meta_unit))
     return files, u0_global
 
 
 @dataclass(frozen=True)
 class FrozenPatch:
-    """controller 侧取得的冻结候选补丁，按文件存证据并精确记录每一处增删行坐标 `(header, sign, line_no, text)`：
+    """controller 侧取得的冻结候选补丁，按文件存证据并精确记录每一处增删行与元数据变更坐标 `(header, sign, line_no, text)`：
     - `shown_in` 核验至少读到冻结补丁证据（防零读取/伪造读取，允许 BLOCK 提前阻断）；
-    - `covered_change_units` 按文件、增删方向、精确行号与逐字文本核验实际呈现的改动行（不靠截断关键词启发式，
-      源码正文含 `123 chars truncated` 亦不受影响；超大单 hunk 可用 `-U0 | nl -ba | sed -n` 按精确行号分段覆盖）。"""
+    - `covered_change_units` 按文件、增删/元数据方向、精确行号与逐字文本核验实际呈现的改动（不靠截断关键词启发式，
+      源码正文含 `123 chars truncated` 亦不受影响；超大单 hunk 可用 `-U0 | nl -ba | sed -n` 按精确行号分段覆盖；
+      含 `_BREAK` 字符的改动行保留在必读全集中并拒绝 PASS）。"""
     head_sha: str
     merge_base_sha: str
     base_sha: str
@@ -699,7 +821,7 @@ class FrozenPatch:
         """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
         split, u0_global = _split_files(diff)
         built: list[FrozenFile] = []
-        for header, path, lines, changes, u0_file, file_start_ln in split:
+        for header, path, git_old_path, git_new_path, lines, changes, u0_file, file_start_ln in split:
             long_lines = {t for _, t in lines if len(t) >= _DISTINCT}
             all_lines = {t for _, t in lines}
             ev = frozenset(long_lines or all_lines or {header})
@@ -714,7 +836,9 @@ class FrozenPatch:
                 unit_set = frozenset({hdr_unit})
                 u0_file_tuple = ((1, hdr_unit),)
                 u0_global.append((file_start_ln, hdr_unit))
-            built.append(FrozenFile(header, path, ev, added, unit_set, u0_file_tuple))
+            built.append(
+                FrozenFile(header, path, ev, added, unit_set, u0_file_tuple, git_old_path, git_new_path)
+            )
         return cls(head_sha, merge_base_sha, base_sha, tuple(built), tuple(u0_global))
 
     @property
@@ -726,25 +850,29 @@ class FrozenPatch:
         return frozenset().union(*(f.changes for f in self.files))
 
     def _unambiguous_file_for_path(self, spec: str, *, require_non_renamed: bool = False) -> FrozenFile | None:
-        exact_header = f"diff --git a/{spec} b/{spec}"
-        old_prefix = f"diff --git a/{spec} "
-        new_suffix = f" b/{spec}"
         touched = [
             item for item in self.files
-            if (item.path == spec or item.header == exact_header
-                or item.header.startswith(old_prefix) or item.header.endswith(new_suffix))
+            if spec in (item.path, item.git_old_path, item.git_new_path)
         ]
         if len(touched) != 1:
             return None
         sf = touched[0]
-        if require_non_renamed and sf.header != exact_header:
+        if require_non_renamed and (sf.git_old_path != spec or sf.git_new_path != spec):
             return None
         return sf
 
+    def _resolve_header(self, line: str, by_line: dict[str, str], by_paths: dict[tuple[str, str], str]) -> str | None:
+        if line in by_line:
+            return by_line[line]
+        parsed = _parse_diff_git_paths(line)
+        return by_paths.get(parsed) if parsed is not None else None
+
     def covered_change_units(self, output: str, read: _Read = WHOLE_PATCH) -> frozenset[ChangeUnit]:
-        """按精确 `(file_header, sign, line_no, exact_text)` 返回本条命令在 output 中实际完整呈现的冻结改动行集合。
+        """按精确 `(file_header, sign, line_no, exact_text)` 返回本条命令在 output 中实际完整呈现的冻结改动集合。
         - diff/patch：
-          1. 普通连续 diff（`diff_hunk_intact`）：解析 `diff --git` 与 `@@ -old,n +new,m @@` 坐标逐行推进；
+          1. 普通连续 diff（`diff_hunk_intact`）：解析 `diff --git`（支持解码后的中文/转义路径）、扩展头元数据变更行
+             （`old mode`/`new mode`/`new file mode`/`deleted file mode`/`rename`/`copy`/`Binary files`）与
+             `@@ -old,n +new,m @@` 坐标逐行推进；
           2. 纯 `-U0` 补丁配 `nl -ba`/`cat -n`/`grep -n`（`plain_u0` 且 `line_pos_mode == "numbered"`）：按 1-based
              `-U0` 补丁行号精确对应每个 `ChangeUnit`，支持超过工具截断上限的超大单 hunk 分段补读；
         - blobs：仅单文件（`len(read.paths) == 1`）且位置可信（`sequential` 或 `numbered`）按 `(header, "+", line_no, text)` 匹配。"""
@@ -795,14 +923,28 @@ class FrozenPatch:
                     u = u0_map.get(int(m.group(1)))
                     if u is None:
                         continue
-                    expected_body = u[3] if u[1] == "H" else f"{u[1]}{u[3]}"
-                    if m.group(2) == expected_body:
+                    body = m.group(2)
+                    if u[1] == "M":
+                        if _normalize_meta_line(body) == u[3]:
+                            covered.add(u)
+                    elif u[1] == "H":
+                        if body == u[3] or (
+                            _parse_diff_git_paths(body) is not None
+                            and _parse_diff_git_paths(body) == _parse_diff_git_paths(u[3])
+                        ):
+                            covered.add(u)
+                    elif body == f"{u[1]}{u[3]}":
                         covered.add(u)
 
         if not read.diff_hunk_intact:
             return frozenset(covered)
 
-        known_headers = {f.header for f in self.files}
+        header_by_line = {f.header: f.header for f in self.files}
+        header_by_paths = {
+            (f.git_old_path, f.git_new_path): f.header
+            for f in self.files
+            if f.git_old_path is not None and f.git_new_path is not None
+        }
         current_header: str | None = None
         if read.kind == "patch":
             if len(read.paths) == 1:
@@ -826,18 +968,12 @@ class FrozenPatch:
                         break
                     line = line[m.end():]
             if line.startswith("diff --git "):
-                current_header = line if line in known_headers else None
+                current_header = self._resolve_header(line, header_by_line, header_by_paths)
                 old_rem = new_rem = 0
                 if current_header is not None:
                     hdr_unit = (current_header, "H", 0, current_header)
                     if hdr_unit in required:
                         covered.add(hdr_unit)
-                continue
-            if current_header is not None and (hunk := _HUNK_POS.match(line)):
-                old_ln = int(hunk.group(1))
-                old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
-                new_ln = int(hunk.group(3))
-                new_rem = int(hunk.group(4)) if hunk.group(4) is not None else 1
                 continue
             if current_header is not None and (old_rem > 0 or new_rem > 0):
                 sign = line[:1]
@@ -862,6 +998,17 @@ class FrozenPatch:
                     new_rem -= 1
                 else:
                     old_rem = new_rem = 0
+                continue
+            if current_header is not None and (hunk := _HUNK_POS.match(line)):
+                old_ln = int(hunk.group(1))
+                old_rem = int(hunk.group(2)) if hunk.group(2) is not None else 1
+                new_ln = int(hunk.group(3))
+                new_rem = int(hunk.group(4)) if hunk.group(4) is not None else 1
+                continue
+            if current_header is not None and _META_CHANGE.match(line):
+                meta_unit = (current_header, "M", 0, _normalize_meta_line(line))
+                if meta_unit in required:
+                    covered.add(meta_unit)
         return frozenset(covered)
 
     def shown_in(self, output: str, read: _Read = WHOLE_PATCH) -> bool:
@@ -870,6 +1017,11 @@ class FrozenPatch:
         blobs 只认所指文件（须全是本 PR 改动的文件）在 head 上加进来的行。
         含 _BREAK 字符的行不当证据：它在别的切行规则下可能是两行。"""
         by_header = {f.header: f.evidence for f in self.files}
+        by_paths = {
+            (f.git_old_path, f.git_new_path): f.evidence
+            for f in self.files
+            if f.git_old_path is not None and f.git_new_path is not None
+        }
         if read.kind == "blobs":
             by_path = {f.path: f.added for f in self.files if f.path is not None}
             if not all(path in by_path for path in read.paths):
@@ -886,7 +1038,10 @@ class FrozenPatch:
                 unstripped = line[match.end():]
                 line = unstripped.strip()
             if read.kind == "diff" and unstripped.startswith("diff --git "):
-                evidence = by_header.get(unstripped, frozenset())
+                ev = by_header.get(unstripped)
+                if ev is None and (parsed := _parse_diff_git_paths(unstripped)) is not None:
+                    ev = by_paths.get(parsed)
+                evidence = ev if ev is not None else frozenset()
             if line in evidence or (line[:1] in "+-" and line[1:].strip() in evidence):
                 return True
         return False

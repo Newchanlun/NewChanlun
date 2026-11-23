@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from .delivery import EffectPending, Journal, RepoGateway, Stale
 from .domain import parse_sha
@@ -116,8 +116,8 @@ PROMPT = ("只审阅，不修改、提交、fetch 或运行候选脚本。候选
           "需要别的信息就另起命令。若该输出被截断，须用独立的 git diff --no-ext-diff --no-textconv "
           "{merge_base} {head} -- <文件...> 命令补读全部未呈现的变更文件（单文件仍截断时可改用独立 "
           "git diff --no-ext-diff --no-textconv -U0 {merge_base} {head} -- <文件> | nl -ba | sed -n '起,止p'，"
-          "纯新增大文件也可配独立 git show {head}:<文件> | nl -ba | sed -n '起,止p'，每条不与其他命令串联），"
-          "完整覆盖全部改动行后方可给出 VERDICT: PASS。然后检查直接相关源代码。不执行来源不明的构建、测试或 hooks。"
+          "纯新增大文件也可在先读取文件头与权限元数据后配独立 git show {head}:<文件> | nl -ba | sed -n '起,止p'，每条不与其他命令串联），"
+          "完整覆盖全部改动行与元数据变更后方可给出 VERDICT: PASS。然后检查直接相关源代码。不执行来源不明的构建、测试或 hooks。"
           "返回符合 schema 的 JSON，status、summary、findings、validation 均必填。"
           "完整审阅无阻断问题时 status=completed 且 summary 第一行严格为 VERDICT: PASS。"
           "有阻断问题时 status=blocked 且第一行严格为 VERDICT: BLOCK。未完成审阅时 status=failed。"
@@ -193,6 +193,19 @@ def _read(path: Path) -> dict:
     if not isinstance(value, dict):
         raise IdentityError("宿主回执不是对象")
     return value
+
+
+def valid_pass_publication(pub: Any, head: str) -> TypeGuard[dict[str, Any]]:
+    """发布凭证共用校验（沿用来源选取与合入前核验同源）：必须包含正整数 id、state=success 且 sha 等于该次 run 的 head。"""
+    return (
+        isinstance(pub, dict)
+        and isinstance(head, str)
+        and bool(head)
+        and type(pub.get("id")) is int
+        and pub["id"] > 0
+        and pub.get("state") == "success"
+        and pub.get("sha") == head
+    )
 
 
 def _strict_pos_int(value: Any) -> int:
@@ -2239,7 +2252,8 @@ class ExternalReview:
                     or old["repository_id"] != target.repository_id
                     or saved.get("verdict") != "PASS" or saved.get("state") != "success" or "reused_from" in saved
                     or "migrated" in saved
-                    or (saved.get("publication") or {}).get("state") != "success"
+                    or not isinstance(old.get("head_sha"), str)
+                    or not valid_pass_publication(saved.get("publication"), old["head_sha"])
                     or [(r["model"], r["verdict"]) for r in saved.get("reviews", [])]
                     != [(m, "PASS") for m in MODELS]
                     or old.get("controller_code_head") != target.controller_code_head
@@ -2734,9 +2748,8 @@ class ExternalReview:
                 if target.reuse_planned:
                     if admitted_marker.exists():
                         _read_preflight_admitted(folder, target)
-                    elif (not (folder / "effects" / "status-pending.json").exists()
-                            and not any((folder / model).exists() for model in MODELS)):
-                        self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
+                    elif not any((folder / model).exists() for model in MODELS):
+                        self.admit_space(target)  # 登记时因可沿用跳过了总准入（含沿用已发 pending 后中断再失效情形），未派工蜂前补做
                         try:
                             preflight_report = self.admit_preflight(target, pre_dispatch=True, check_quota=True)
                         except EffectPending as err:

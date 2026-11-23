@@ -4261,3 +4261,144 @@ def test_r36_inconsistent_outcome_reuse_corrupt_ts_and_runs_dir_fsync(lane, env,
             "run_id": t2.run_id, "verdict": "FAILED", "state": "error", "target": bad_t2, "reviews": [],
         })
         assert lane2.would_reuse(module.load_target(lane2.gateway, 1810)) is False
+
+
+def test_r38_metadata_only_break_chars_nonascii_u0_and_reuse_recovery(lane, env, monkeypatch):
+    """R38（Sol P1 #1/#2 + Astra P1 #1/#2/#3 + Astra P2 #4/#5）：
+    1. 仅改权限（100644->100755）、纯重命名、二进制等无文本 hunk 变更，只读 `diff --git` 头绝不放行 PASS，
+       必须覆盖 `old mode`/`new mode`/`rename from`/`rename to`/`Binary files` 等实际变更元数据；
+    2. 含 `_BREAK` 控制字符（如 `\\x0c` / `\\u2028`）的改动行必须保留在必读全集中且无法被匹配，PASS 失败闭合；
+    3. 非 ASCII 中文路径被 Git C-quote 转义时，解码旧/新路径后单文件 `-U0 | nl -ba | sed -n` 与 `-c core.quotepath=false`
+       均可完整覆盖全部删除与新增行；
+    4. 沿用来源必须满足完整 `valid_pass_publication`（正整数 id + state=success + sha=old_head），缺 id 或错 sha 一律拒沿用；
+    5. `reuse_planned=True` 在已写 `status-pending.json` 后、写 `outcome.json` 前中断，恢复时若沿用失效，
+       只要尚未建工蜂目录必须补做空间/预检并写入 `preflight-admitted.json`，随后正常完成双审 PASS。"""
+    import os
+
+    from pilot1742.patch_read import covered_candidate_patch_units
+
+    # 4 & 5. 沿用来源发布凭证校验 + 沿用已发 pending 后中断再失效自动补做预检完成双审（先在原始分支基线上完成）
+    reuse_root = lane.state_root / "r38-reuse"
+    lane2 = module.ExternalReview(
+        lane.gateway, source=lane.source, state_root=reuse_root,
+        checkout_root=lane.checkout_root / "r38-reuse", poll_seconds=0.01,
+        launcher=lane.launcher, preflight=lane.preflight,
+        session_receipt=_make_fake_session_receipt(reuse_root),
+    )
+    first = lane2.review_pr(1810, 1)
+    assert first["verdict"] == "PASS"
+    first_head = first["target"]["head_sha"]
+    first_folder = reuse_root / "runs" / ReviewTarget(**first["target"]).key
+    orig_first_outcome = json.loads((first_folder / "outcome.json").read_text())
+
+    _advance_main(lane2, env)
+    # 4. 残缺/伪造 publication（缺 id / id=0 / id=True / sha 不符）一律拒沿用
+    for bad_pub in (
+        {"state": "success"},
+        {"id": 0, "state": "success", "sha": first_head},
+        {"id": True, "state": "success", "sha": first_head},
+        {"id": 1, "state": "success", "sha": "0" * 40},
+    ):
+        module._save(first_folder / "outcome.json", {**orig_first_outcome, "publication": bad_pub})
+        assert lane2.would_reuse(module.load_target(lane2.gateway, 1810)) is False
+    module._save(first_folder / "outcome.json", orig_first_outcome)
+    assert lane2.would_reuse(module.load_target(lane2.gateway, 1810)) is True
+
+    # 5. reuse_planned=True 在 _publish_reuse 发出 pending 后、写 outcome 前中断，恢复时旧镜像准入失效 -> 补做预检并完成双审 PASS
+    t_next = lane2.target(1810, 1)
+    assert t_next.reuse_planned is True and t_next.admitted_image_id == ""
+    next_folder = reuse_root / "runs" / t_next.key
+    pub = module.StatusPublisher(lane2.gateway, t_next, next_folder, reuse_root / "status-locks")
+    pub.publish("pending")
+    assert (next_folder / "effects" / "status-pending.json").exists()
+    assert not (next_folder / "outcome.json").exists()
+    assert not (next_folder / module.PREFLIGHT_ADMITTED_FILE).exists()
+    # 使旧镜像准入失效（改为新镜像 id，导致 reuse_admission 返回 None，但新双审预检仍通过）
+    (lane2.source / ".git" / "fake-admission").write_text("sha256:" + "2" * 64)
+    resumed = lane2.review_pr(1810, 1)
+    assert resumed["verdict"] == "PASS" and "reused_from" not in resumed
+    assert (next_folder / module.PREFLIGHT_ADMITTED_FILE).exists()
+    assert [r["model"] for r in resumed["reviews"]] == list(MODELS)
+    (lane2.source / ".git" / "fake-admission").unlink()
+
+    # 1. 元数据变更（纯 chmod + 纯 rename + binary）仅读 diff --git 头不得覆盖必读全集
+    (env.source / "chmod_r38.sh").write_text("#!/bin/sh\necho hi\n")
+    (env.source / "rename_old_r38.py").write_text("KEEP_CONTENT_R38 = 'unchanged_body_for_pure_rename'\n")
+    (env.source / "中文_r38.py").write_text(
+        "\n".join(f"CN_LINE_{i:02d} = 'orig_{i:02d}'" for i in range(1, 20)) + "\n"
+    )
+    git(env.source, "add", "chmod_r38.sh", "rename_old_r38.py", "中文_r38.py")
+    git(env.source, "commit", "-qm", "base r38")
+    base_sha = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["base"]["sha"] = base_sha
+
+    os.chmod(env.source / "chmod_r38.sh", 0o755)
+    git(env.source, "mv", "rename_old_r38.py", "rename_new_r38.py")
+    (env.source / "bin_r38.bin").write_bytes(b"\x00\x01\x02\x03binary_r38\x00")
+    cn_lines = [f"CN_LINE_{i:02d} = 'orig_{i:02d}'" for i in range(1, 20)]
+    cn_lines[2] = "CN_LINE_03 = 'changed_alpha'"
+    cn_lines[3] = "CN_LINE_04 = 'changed_beta'"
+    cn_lines[4] = "CN_LINE_05 = 'changed_gamma'"
+    (env.source / "中文_r38.py").write_text("\n".join(cn_lines) + "\n")
+    git(env.source, "add", "chmod_r38.sh", "rename_new_r38.py", "bin_r38.bin", "中文_r38.py")
+    git(env.source, "commit", "-qm", "r38 chmod rename binary nonascii")
+    head_sha = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = head_sha
+
+    t_meta = lane.target(1810, 1)
+    patch_meta = module.frozen_patch(env.source, t_meta)
+    cmd_full = f"git diff --no-ext-diff --no-textconv {t_meta.merge_base_sha} {t_meta.head_sha}"
+
+    chmod_f = next(f for f in patch_meta.files if f.git_new_path == "chmod_r38.sh")
+    assert (chmod_f.header, "M", 0, "old mode 100644") in chmod_f.changes
+    assert (chmod_f.header, "M", 0, "new mode 100755") in chmod_f.changes
+    assert covered_candidate_patch_units(cmd_full, f"{chmod_f.header}\n", patch_meta) == frozenset()
+    assert not chmod_f.changes.issubset(
+        covered_candidate_patch_units(cmd_full, f"{chmod_f.header}\nold mode 100644\n", patch_meta)
+    )
+    assert chmod_f.changes.issubset(
+        covered_candidate_patch_units(cmd_full, f"{chmod_f.header}\nold mode 100644\nnew mode 100755\n", patch_meta)
+    )
+
+    ren_f = next(f for f in patch_meta.files if f.git_new_path == "rename_new_r38.py")
+    assert (ren_f.header, "M", 0, "rename from rename_old_r38.py") in ren_f.changes
+    assert (ren_f.header, "M", 0, "rename to rename_new_r38.py") in ren_f.changes
+    assert covered_candidate_patch_units(cmd_full, f"{ren_f.header}\n", patch_meta) == frozenset()
+
+    bin_f = next(f for f in patch_meta.files if f.git_new_path == "bin_r38.bin")
+    assert any(u[1] == "M" and u[3].startswith("Binary files ") for u in bin_f.changes)
+    assert covered_candidate_patch_units(cmd_full, f"{bin_f.header}\n", patch_meta) == frozenset()
+
+    # 3. 中文路径（Git C-quoted）：单文件 -U0 + nl -ba + sed -n（hunk 内切断）与 -c core.quotepath=false 均须完整覆盖
+    cn_f = next(f for f in patch_meta.files if f.git_new_path == "中文_r38.py")
+    assert cn_f.header.startswith('diff --git "a/') and cn_f.git_old_path == "中文_r38.py"
+    u0_cn = git(env.source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0",
+                t_meta.merge_base_sha, t_meta.head_sha, "--", "中文_r38.py")
+    u0_cn_lines = u0_cn.splitlines()
+    num_cn = [f"{idx:6d}\t{line}" for idx, line in enumerate(u0_cn_lines, 1)]
+    cut = next(idx for idx, line in enumerate(u0_cn_lines) if line.startswith("+CN_LINE_04"))
+    cmd_cn_1 = f"git diff --no-ext-diff --no-textconv -U0 {t_meta.merge_base_sha} {t_meta.head_sha} -- 中文_r38.py | nl -ba | sed -n '1,{cut}p'"
+    cmd_cn_2 = f"git diff --no-ext-diff --no-textconv -U0 {t_meta.merge_base_sha} {t_meta.head_sha} -- 中文_r38.py | nl -ba | sed -n '{cut + 1},999p'"
+    cov_cn_u0 = (
+        covered_candidate_patch_units(cmd_cn_1, "\n".join(num_cn[:cut]) + "\n", patch_meta)
+        | covered_candidate_patch_units(cmd_cn_2, "\n".join(num_cn[cut:]) + "\n", patch_meta)
+    )
+    assert cov_cn_u0 == cn_f.changes
+
+    unquoted_diff = git(env.source, "-c", "core.quotepath=false", "diff", "--no-ext-diff", "--no-textconv",
+                        t_meta.merge_base_sha, t_meta.head_sha)
+    cmd_unquoted = f"git -c core.quotepath=false diff --no-ext-diff --no-textconv {t_meta.merge_base_sha} {t_meta.head_sha}"
+    assert patch_meta.all_change_units.issubset(covered_candidate_patch_units(cmd_unquoted, unquoted_diff, patch_meta))
+
+    # 2. 含 _BREAK 字符（\x0c 换页符）的改动行必须保留在必读全集且永不匹配，阻断 PASS
+    (env.source / "formfeed_r38.py").write_text("NORMAL_LINE_R38 = 'ok'\nHAS_FORMFEED = 'a\x0cb'\n")
+    git(env.source, "add", "formfeed_r38.py")
+    git(env.source, "commit", "-qm", "add formfeed")
+    ff_head = git(env.source, "rev-parse", "HEAD")
+    lane.gateway.pr["head"]["sha"] = ff_head
+    t_ff = lane.target(1810, 1)
+    patch_ff = module.frozen_patch(env.source, t_ff)
+    ff_diff = git(env.source, "diff", "--no-ext-diff", "--no-textconv", t_ff.merge_base_sha, t_ff.head_sha)
+    cmd_ff = f"git diff --no-ext-diff --no-textconv {t_ff.merge_base_sha} {t_ff.head_sha}"
+    assert any("\x0c" in u[3] for u in patch_ff.all_change_units)
+    assert not patch_ff.all_change_units.issubset(covered_candidate_patch_units(cmd_ff, ff_diff, patch_ff))

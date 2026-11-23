@@ -76,7 +76,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol, TypeGuard
+from typing import Any, Protocol
 
 from .delivery import EffectPending
 from .external_review import (
@@ -95,6 +95,7 @@ from .external_review import (
     _strict_pos_int,
     git_environment,
 )
+from .external_review import valid_pass_publication as _valid_pass_publication
 from .run import _ps_rows
 from .workunit import REPO
 
@@ -327,16 +328,6 @@ def _confirmed_published_pass(lane: ExternalReview, number: int, head: str, base
     return _check_confirmed_pass_locked(
         lane, number, base=base, head=head, run_id=None, rows=_ps_rows, check_processes=False
     )["ok"]
-
-
-def _valid_pass_publication(pub: Any, head: str) -> TypeGuard[dict[str, Any]]:
-    return (
-        isinstance(pub, dict)
-        and type(pub.get("id")) is int
-        and pub["id"] > 0
-        and pub.get("state") == "success"
-        and pub.get("sha") == head
-    )
 
 
 def _check_confirmed_pass_locked(lane: ExternalReview, number: int, *, base: str, head: str,
@@ -649,16 +640,18 @@ class Sweep:
         return any(not (folder / model / "launch.json").exists() for model in MODELS)
 
     def _pre_dispatch_reuse_fallback(self, row: dict) -> bool:
-        """在发 pending 与建工蜂目录前即被拦下（沿用退回尚未过预检，或预检记账后触发 quota-paused）：
-        尚未开始审查，按 launch-backoff 重试而不消耗唯一续跑机会。"""
+        """在建工蜂目录前即被拦下（沿用退回尚未过预检——含沿用已发 pending 后中断再失效情形——或预检记账后触发 quota-paused）：
+        尚未派发任何工蜂，按 launch-backoff 重试而不消耗唯一续跑机会。"""
         if row.get("outcome"):
             return False
         folder = self._run_folder(row)
-        if (folder / "effects" / "status-pending.json").exists() or any((folder / model).exists() for model in MODELS):
+        if any((folder / model).exists() for model in MODELS):
             return False
-        if (folder / QUOTA_PAUSED_FILE).exists():
+        if bool(row["target"].get("reuse_planned")) and not (folder / PREFLIGHT_ADMITTED_FILE).exists():
             return True
-        return bool(row["target"].get("reuse_planned")) and not (folder / PREFLIGHT_ADMITTED_FILE).exists()
+        if (folder / "effects" / "status-pending.json").exists():
+            return False
+        return (folder / QUOTA_PAUSED_FILE).exists()
 
     def _launch_with_backoff(self, number: int, head: str, base: str, attempt: int) -> tuple[str, dict | None]:
         marker = self.folder / f"p{number}-{head}-{base}-a{attempt}.launched"
