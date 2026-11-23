@@ -1864,6 +1864,100 @@ __all__ = ('route',)
   }
 });
 
+test("R28/#1319：生产位置默认值与绑定后调用形状", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const imports = "from functools import wraps\nfrom .at18_fixture_feed import route\n";
+  const check = async (name: string, source: string, expected = true,
+    implementation = "def route(*, rows): return sorted(rows)\n", call = "rows=[4, 1]", setup = "") => {
+    await t.test(name, () => {
+      const repo = feedSource({ [entry]: implementation, [integration]: imports + source,
+        [path]: `from trading_system.at18_fixture_feed import route\n${setup}def test_route(): assert route(${call}) == [1, 4]\n` });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  await check("可省略的尾部生产默认哨兵不显式传给入口", `
+from inspect import signature
+_MISSING = object()
+def _deliver(rows, mode=_MISSING, /):
+    if mode is _MISSING: return route(rows=rows)
+@wraps(_deliver)
+def dispatch(*args):
+    if len(args) == 1: return _deliver(*args)
+dispatch.__signature__ = signature(_deliver)
+`);
+  await check("本地类构造器应用自己的位置专用默认哨兵", `
+_MISSING = object()
+class Adapter:
+    def __init__(self, mode=_MISSING, /): self.ready = mode is _MISSING
+    def dispatch(self, rows, /):
+        if self.ready: return route(rows=rows)
+`);
+  const twoSamples = "def route(*, rows, limit): return sorted(rows)[:limit]\n";
+  await check("额外位置实参之前透传生产哨兵", `
+_MISSING = object()
+def dispatch(rows, mode=_MISSING, /, *limits):
+    if mode is _MISSING and limits == (2,): return route(rows=rows, limit=limits[0])
+`, true, twoSamples, "rows=[4, 1], limit=2");
+  await check("中间生产哨兵按身份去重，列表突变不污染回退", `
+class _Sentinel:
+    def __eq__(self, other): raise AssertionError('default compared by value')
+_FIRST, _SECOND = _Sentinel(), _Sentinel()
+attempts = []
+def _end(rows, mode=_SECOND, limit=10, /):
+    if attempts == [True] and rows == [4, 1] and mode is _SECOND and limit == 2:
+        return route(rows=rows, limit=limit)
+@wraps(_end)
+def _same(rows, mode=_FIRST, limit=10, /): return _end(rows, mode, limit)
+@wraps(_same)
+def _first(rows, mode=_FIRST, limit=10, /): return _same(rows, mode, limit)
+@wraps(_first)
+def dispatch(*args):
+    if args[1] is _FIRST:
+        attempts.append(True)
+        args[0].clear()
+        return
+    return _first(*args)
+`, true, twoSamples, "rows=[4, 1], limit=2");
+  await check("未调用的私有静态别名不改变实例方法的接收者槽", `
+def _relay(fn):
+    @wraps(fn)
+    def invoke(*args, **kwargs): return fn(*args, **kwargs)
+    return invoke
+class Adapter:
+    @_relay
+    def dispatch(self, rows, /): return route(rows=rows)
+    _raw = staticmethod(dispatch.__wrapped__)
+`);
+  for (const [name, declared, call, fill] of [
+    ["首槽已具名", "rows", "rows=[4, 1]", "rows"],
+    ["首槽未具名", "values", "values=[4, 1]", "[4, 1] if rows is None else rows"],
+  ] as const) await check(`绑定包装器经类调用普通函数：${name}`, `
+class Adapter:
+    def _sort(rows, /): return route(${declared}=${fill})
+    @wraps(_sort)
+    def dispatch(*args, **kwargs): return Adapter._sort(*args[1:], **kwargs)
+`, true, `def route(*, ${declared}): return sorted(${declared})\n`, call);
+  for (const [name, value, setup] of [
+    ["对象", "[object()]", ""],
+    ["回调", "lambda: None", ""],
+    ["内置子类", "Rows([4, 1])", "class Rows(list): pass\n"],
+  ] as const) await check(`测试侧${name}不得进入探针`, `
+def dispatch(rows, guard, /):
+    if guard is not None: return route(rows=rows, guard=guard)
+`, false, "def route(*, rows, guard): return sorted(rows)\n", `rows=[4, 1], guard=${value}`, setup);
+  await check("保留两种实参形状仍拒绝同一函数的异接收者",
+    "def dispatch(rows, /): return route(rows=rows)\n", false, `
+from functools import wraps
+class _Adapter:
+    def process(self, rows): return sorted(rows)
+_left, _right = _Adapter(), _Adapter()
+@wraps(_left.process)
+def route(*, rows): return _right.process(rows)
+`);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";

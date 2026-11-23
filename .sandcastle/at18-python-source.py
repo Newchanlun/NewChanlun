@@ -59,27 +59,42 @@ def sample(value, depth=5):
 
 
 def arguments(signature, samples, variadic=False):
-    args, kwargs = [], {}
+    args, kwargs, defaults = [], {}, {}
     params = signature.parameters
-    for param in params.values():
-        if param.kind is inspect.Parameter.POSITIONAL_ONLY:
-            args.append(sample(samples[param.name]) if param.name in samples else
-                        None if param.default is inspect.Parameter.empty else param.default)
-        elif param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
-            if param.name in samples:
-                kwargs[param.name] = sample(samples[param.name])
-            elif param.default is inspect.Parameter.empty:
-                kwargs[param.name] = None
+    extra_args, extra_kwargs = (), {}
     if variadic:
         # 无显式签名的生产包装器只能使用已经观察到的普通参数。
         remaining = {k: sample(v) for k, v in samples.items() if k not in params}
         kinds = {param.kind for param in params.values()}
         if inspect.Parameter.VAR_KEYWORD in kinds:
-            kwargs.update(remaining)
+            extra_kwargs = remaining
         elif inspect.Parameter.VAR_POSITIONAL in kinds and all(
                 p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL) for p in params.values()):
-            args.extend(remaining.values())
-    return args, kwargs
+            extra_args = tuple(remaining.values())
+
+    positional = [p for p in params.values() if p.kind is inspect.Parameter.POSITIONAL_ONLY]
+    if not extra_args:
+        # 只在后面还有位置实参时填默认值；其余由 Python 自己应用。
+        while positional and positional[-1].name not in samples and positional[-1].default is not inspect.Parameter.empty:
+            positional.pop()
+    for param in positional:
+        if param.name in samples:
+            args.append(sample(samples[param.name]))
+        elif param.default is inspect.Parameter.empty:
+            args.append(None)
+        else:
+            defaults[len(args)] = param.default
+            args.append(param.default)
+    args.extend(extra_args)
+
+    for param in params.values():
+        if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            if param.name in samples:
+                kwargs[param.name] = sample(samples[param.name])
+            elif param.default is inspect.Parameter.empty:
+                kwargs[param.name] = None
+    kwargs.update(extra_kwargs)
+    return args, kwargs, defaults
 
 
 POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
@@ -192,9 +207,9 @@ def class_members(cls):
 
 
 class Binding:
-    def __init__(self, key, member, chain, exports, owner=None):
+    def __init__(self, key, member, chain, owner=None):
         self.key, self.member, self.chain, self.owner = key, member, chain, owner
-        self.function, self.exports = chain[0], exports
+        self.function = chain[0]
 
     @property
     def has_receiver(self):
@@ -218,7 +233,7 @@ class Binding:
         key = id(self.owner)
         if key not in instances:
             instances[key] = None  # 构造器异常也只试一次。
-            args, kwargs = arguments(inspect.signature(self.owner, follow_wrapped=False), samples)
+            args, kwargs, _ = arguments(inspect.signature(self.owner, follow_wrapped=False), samples)
             instances[key] = self.owner(*args, **kwargs)
         if instances[key] is not None:
             return self.member.__get__(instances[key], self.owner)
@@ -240,15 +255,11 @@ class Binding:
                 continue
             slots = tuple(params.parameters.values())
             if type(target) is FunctionType and receiver is not MISSING and slots and slots[0].kind in POSITIONAL:
-                role = self.exports.receiver_slot(receiver, target)
-                first = slots[0]
-                if role is True or (role is None and first.name not in named and
-                                    first.default is inspect.Parameter.empty):
-                    # 只推导实参槽，不绑定函数对象，也不把接收者值放进探针。
-                    yield params.replace(parameters=slots[1:])
-                if role is True:
-                    continue
-            yield params
+                # 按观察值排序两种形状，不绑定内层函数，也不把接收者放进实参。
+                clipped = params.replace(parameters=slots[1:])
+                yield from (params, clipped) if slots[0].name in named else (clipped, params)
+            else:
+                yield params
         if generic:
             yield public
 
@@ -259,7 +270,8 @@ class Binding:
             return
 
         def candidates():
-            yield from shapes
+            for args, kwargs in shapes:
+                yield args, kwargs, {}
             for signature in self.signatures(fn, public, named):
                 try:
                     yield arguments(signature, named, True)
@@ -267,16 +279,19 @@ class Binding:
                     continue
 
         choices = []
-        for args, kwargs in candidates():
+        for args, kwargs, defaults in candidates():
             try:
                 public.bind(*args, **kwargs)
-                choice = tuple(sample(v) for v in args), {k: sample(v) for k, v in kwargs.items()}
+                positional = tuple((id(v), None) if i in defaults else (None, sample(v)) for i, v in enumerate(args))
+                keywords = {k: sample(v) for k, v in kwargs.items()}
             except (ValueError, TypeError):
                 continue
-            if choice not in choices:
-                choices.append(choice)
-                # 生产调用可以原地修改参数；保留独立快照给后续候选去重。
-                yield tuple(sample(v) for v in choice[0]), {k: sample(v) for k, v in choice[1].items()}
+            choice = positional, keywords
+            if not any(choice == key for key, _ in choices):
+                # 默认值仅按身份去重并保留引用；测试数据的快照不交给生产调用。
+                choices.append((choice, defaults))
+                yield (tuple(defaults[i] if i in defaults else sample(v) for i, (_, v) in enumerate(positional)),
+                       {k: sample(v) for k, v in keywords.items()})
 
 
 def has_executable_body(code):
@@ -321,28 +336,6 @@ class Exports:
         cls = receiver if is_class(receiver) else type(receiver)
         return self.class_body(cls) is not None
 
-    def receiver_slot(self, receiver, target):
-        """区分有类体依据的方法、静态层与仅能尝试两种形状的层。"""
-        cls = receiver if is_class(receiver) else type(receiver)
-        method, declared, static = False, False, False
-        for owner in type.__getattribute__(cls, "__mro__"):
-            if (body := self.class_body(owner)) is None:
-                continue
-            declared |= any(code is target.__code__ for code in body.co_consts)
-            for _, member in class_members(owner):
-                if type(member) is staticmethod:
-                    for layer in self.wrapped_chain(member.__func__) or ():
-                        if type(layer) is MethodType:
-                            break
-                        if layer is target:
-                            static = True
-                            break
-                elif type(member) in (FunctionType, classmethod):
-                    method |= underlying(member) is target
-        if static:
-            return None if method else False
-        return True if method or declared else None
-
     def wrapped_chain(self, target):
         chain, seen = [], set()
         while True:
@@ -377,7 +370,7 @@ class Exports:
     def binding(self, key, member, owner=None):
         fn = underlying(member)
         if chain := self.wrapped_chain(fn):
-            return Binding(key, member, chain, self, owner)
+            return Binding(key, member, chain, owner)
 
     def local_members(self, bindings):
         for export_name, value in bindings.items():
