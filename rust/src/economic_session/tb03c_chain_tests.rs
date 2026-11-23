@@ -180,10 +180,10 @@ impl Chain {
             "CommitDecision"
         ]);
         let mut plan_clock = serde_json::Map::new();
-        for i in 0..128 {
+        for i in 0..48 {
             let t = 1000 + 10 * i;
             let times = |offset: i64| {
-                (0..16)
+                (0..4)
                     .map(|r| (r * 1_000_000 + t + offset).to_string())
                     .collect::<Vec<_>>()
             };
@@ -199,7 +199,7 @@ impl Chain {
             "fill_allocation_policy":{"fill_allocation_policy_id":super::allocation::FILL_ALLOCATION_POLICY_ID,"policy_revision":"s1-fin-1"},
             "authorized_sources":[auth],
             "resources":{"max_frame_bytes":"16777216","read_timeout_ms":"1000","write_timeout_ms":"1000","response_timeout_ms":"3000","queue_capacity":"4","max_connections":"4"},
-            "clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":((1..=16).map(|r| (r * 1_000_000).to_string()).collect::<Vec<_>>()),"messages":plan_clock}},
+            "clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":((1..=4).map(|r| (r * 1_000_000).to_string()).collect::<Vec<_>>()),"messages":plan_clock}},
             "voice_binding":{"schema_revision":"voice-binding/1","authorities":[{"authority_id":"alpha","bundle_path":bp,"bundle_sha256":bh,"verification_path":rp,"verification_sha256":rh,"max_bytes":"1048576"}]},
             "finance":{"schema_revision":FIN1,"input_path":ip,"input_sha256":ih,"coordinator_source":src,
                 "structure":{"binary":stub,"binary_sha256":sha256_hex(script.as_bytes()),"db":dir.join("s.db"),"session_id":SESSION,"session_generation":"1","writer_epoch":"1"}}});
