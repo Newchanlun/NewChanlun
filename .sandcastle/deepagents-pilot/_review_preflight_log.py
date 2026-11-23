@@ -22,8 +22,9 @@ def route_from_log(log_dir: Path, session: str, since: float, wait: float) -> li
 SCHEMA = "cliproxy-preflight-v1"
 REVIEW_SCHEMA = "cliproxy-review-v1"
 SESSION = re.compile(r"preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-REVIEW_LAUNCH = re.compile(r"review-(?:preflight-)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+REVIEW_FORMAL_LAUNCH = re.compile(r"review-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 REVIEW_PREFLIGHT_LAUNCH = re.compile(r"review-preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+REVIEW_LAUNCH = re.compile(r"review-(?:preflight-)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 REVIEW_SESSION = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astra@chatgpt.com",
                             "kimi@api.kimi.com", "kimi-ai@api.kimi.ai", "claude@api.anthropic.com",
@@ -108,10 +109,10 @@ def review_from_receipt(
 ) -> dict | None:
     """消费代理为正式独审 launch 封存的不可变 cliproxy-review-v1 收据；必须提供代理封存接口确认返回的
     expected_receipt_sha256，防止仅凭尚未完成目录 fsync 的磁盘文件可见性放行。
-    正式验收（require_content_match=True，默认）还必须提供独立的 expected_response_id_sha256、
-    expected_output_sha256 与 min_requests >= 1，仅工具调用无最终文本的轮次不得通过正式验收；
-    预检探针（require_content_match=False）仅允许 review-preflight-<uuid4> 命名空间。"""
-    launch_pattern = REVIEW_LAUNCH if require_content_match else REVIEW_PREFLIGHT_LAUNCH
+    正式验收（require_content_match=True，默认）仅允许 review-<uuid4> 命名空间，并必须提供独立的
+    expected_response_id_sha256、expected_output_sha256 与 min_requests >= 1，仅工具调用或仅过程消息
+    无最终答复的轮次不得通过正式验收；预检探针（require_content_match=False）仅允许 review-preflight-<uuid4>。"""
+    launch_pattern = REVIEW_FORMAL_LAUNCH if require_content_match else REVIEW_PREFLIGHT_LAUNCH
     if not launch_pattern.fullmatch(launch) or not REVIEW_SESSION.fullmatch(session):
         return None
     if not expected_receipt_sha256 or not SHA256_HEX.fullmatch(expected_receipt_sha256):

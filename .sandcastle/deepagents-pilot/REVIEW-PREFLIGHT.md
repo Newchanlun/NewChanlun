@@ -62,12 +62,17 @@ Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude execu
 
 ### 生产者支持范围与完成合同
 
-- 仅显式开启收据目录、且请求头为严格 `preflight-<UUIDv4>` 的 `POST /v1/responses` 启用。普通 session 的路由、传输和返回行为保持原样。收据功能未开启时不产生证据。
-- 本次固定源码仅允许具体的原生 `KimiExecutor`、`ClaudeExecutor`、`AntigravityExecutor`，不靠可冒名的 `Identifier()` 判覆盖。Antigravity 的真实尝试可被记录，但 Opus 的原 allowlist 仍拒绝它。Codex、插件 executor、count-tokens、裸 `HttpRequest`、非标准自定义 RoundTripper、WebSocket/其他入口不在本补丁支持范围，不能得到成功证明。
-- 默认空插件宿主可用；活跃插件或请求期间插件快照变化使证据失效。原生标准 HTTP transport 保留原 TLS、代理和连接池策略。收据记录 HTTP `RoundTrip` 边界的 provider 与请求 authority，不声称证明代理后的物理出口 IP；底层 TCP 重传不作为另一个模型请求。OAuth 刷新不是模型尝试。
-- collector 从入站头绑定 nonce 与服务端起点，并跨 handler bootstrap 重试共享。全部 Manager 执行调用经过同一 guard；没有任何被观察 HTTP 传输的执行也拒绝证明。传输开始前分配全局序号，失败请求、重定向及重复路线不去重。只存固定枚举，不存正文、URL 路径、auth_id、token 或错误字符串。
-- 成功发布要求：HTTP handler 成功结束、请求 lifecycle 成功、所有执行租约结束、全部响应体关闭、至少一个尝试、没有覆盖缺口。最多 64 次传输、50 秒生命周期，超限失败闭合。流式执行在上游 channel 关闭前持有租约；正文里的 `=== RESPONSE ===` 或 `API REQUEST 99` 不参与判定。
-- 每个 nonce 在认证后的受支持执行开始时才用独占目录预留，未认证请求不写磁盘，重复请求不覆盖；请求间 collector 独立，同请求并发尝试用锁编号。完成后先写同目录 `pending`、sync/close，再 rename 为 `receipt.json`。读取者只认最终文件；半写、崩溃、错误状态、读取超时、过期时间或缺字段都没有证明。收据不做持久恢复，重启丢失可以拒绝；不会补造成功。旧收据也不能匹配新 UUID。目录不自动删除，部署方可在无活动预检时清理整个专用临时目录；禁止把它配置成原状态卷目录。
+- 补丁同时支持两类显式开启的私有收据，普通请求完全不受影响、未配置收据目录时不产生证据：
+  1. **旧预检路由收据（`cliproxy-preflight-v1`）**：由 `POST /v1/responses` 且请求头 `Session-Id: preflight-<UUIDv4>` 触发，覆盖原生 `KimiExecutor`、`ClaudeExecutor`、`AntigravityExecutor` 以及原生 `CodexExecutor`（仅 `gpt-6.2-sol` / `gpt-6.2-astra`，按 `codex:<model>@chatgpt.com` 核验出站请求体模型与受控 TLS transport）。Antigravity 仍会被记录但被 allowlist 拒绝。
+  2. **正式独审封存收据（`cliproxy-review-v1`）**：由 `POST /v1/responses`（流式 `stream: true`）携带 `X-NewChanlun-Review-Launch: review-<UUIDv4>`（正式独审）或 `review-preflight-<UUIDv4>`（预检封存探针）及 `Session-Id: <UUID>` 触发，仅允许原生 `CodexExecutor` 的 `gpt-6.2-sol` / `gpt-6.2-astra` 路由；逐帧校验响应模型、响应 ID 一致性与显式 `output_text` 最终答复（排除 `commentary` 过程消息与非最终拒答）。
+- **封存确认与消费端分离**：
+  - 代理端点 `POST /v1/review-receipts/seal` 在确认同 launch 全部在途请求结束后原子写入 `sealed=true` 并完成 launch 与 root 双目录 `fsync`（首次新建目录同时同步其父目录），**仅在 `SealOK` 时**返回 `{"status":"sealed","launch":...,"session":...,"receipt_sha256":...}`；目录同步失败返回 `503 unavailable` 且不返回确认摘要。
+  - `_review_preflight_log.py` 严格区分两类读取入口：正式验收 `--review-receipt` 仅接受 `review-<UUIDv4>`，必须提供代理封存接口返回的 `expected_receipt_sha256` 以及独立的 `expected_response_id_sha256`、`expected_output_sha256` 与 `min_requests >= 1`（仅工具调用或过程消息无最终答复均拒绝）；预检探针 `--review-preflight-receipt` 仅接受 `review-preflight-<UUIDv4>`，须提供 `expected_receipt_sha256` 并输出 `preflight_sealed`（不输出 `complete_stable`）。
+- 插件 executor、`/v1/responses/compact`、`count-tokens`、非流式正式审阅、裸 `HttpRequest`、非标准自定义 RoundTripper、WebSocket 及其他入口均不在支持范围内，直接拒绝并按规则污染 launch。
+- 默认空插件宿主可用；活跃插件或请求期间插件快照变化使证据失效。原生受控 HTTP transport 保留严格 TLS 与代理边界；OAuth 刷新不是模型尝试。
+- collector 从入站头绑定 nonce/launch 与服务端起点，并跨 handler bootstrap 重试共享。全部 Manager 执行调用经过同一 guard；没有任何被观察 HTTP 传输的执行也拒绝证明。传输开始前分配全局序号，失败请求、重定向及重复路线不去重。只存固定枚举与 SHA-256 摘要，不存正文、URL 路径、auth_id、token 或错误字符串。
+- 成功发布要求：HTTP handler 成功结束、请求 lifecycle 成功、所有执行租约结束（含取消路径等待生产者关闭上游流后再释放租约）、全部响应体关闭且达到上游 EOF、至少一个尝试、没有覆盖缺口。预检最多 64 次传输、50 秒生命周期；正式独审每 launch 最多 512 轮响应 ID，超限失败闭合。
+- 每个 nonce/launch 在认证后的受支持执行开始时用 `0700` 独占目录预留，未认证请求不写磁盘；根目录与收据文件均须属当前用户且无 group/other 权限、禁止 symlink。完成后先写同目录临时文件、`fsync`/`close`，再 `rename` 为 `receipt.json` 并同步目录。读取者不依赖旧文本日志，目录不自动删除，部署方可在无活动任务时清理整个专用临时目录，禁止将其配置成原状态卷目录。
 
 ## 可信证据缺口
 

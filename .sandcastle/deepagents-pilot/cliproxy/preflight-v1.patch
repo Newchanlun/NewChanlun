@@ -1616,10 +1616,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..32515e6
+index 0000000..97696ad
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,456 @@
+@@ -0,0 +1,466 @@
 +package executor
 +
 +import (
@@ -2006,8 +2006,15 @@ index 0000000..32515e6
 +			name:     "matching model on response.failed rejects turn only",
 +			launch:   "review-a3333333-2222-4333-8444-555555555502",
 +			session:  "019d0000-0000-7000-8000-555555555522",
-+			sse2:     "data: " + `{"type":"response.failed","response":{"id":"resp_fm_t3","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"transient"}}}` + "\n\n",
++			sse2:     "data: " + `{"type":"response.created","response":{"id":"resp_fm_t3","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" + "data: " + `{"type":"response.failed","response":{"id":"resp_fm_t3","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"transient"}}}` + "\n\n",
 +			wantSeal: preflightreceipt.SealOK,
++		},
++		{
++			name:     "conflicting response_id on response.failed with matching model taints launch",
++			launch:   "review-a3333333-2222-4333-8444-555555555503",
++			session:  "019d0000-0000-7000-8000-555555555523",
++			sse2:     "data: " + `{"type":"response.created","response":{"id":"resp_fm_created","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" + "data: " + `{"type":"response.failed","response":{"id":"resp_fm_conflict","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"conflict"}}}` + "\n\n",
++			wantSeal: preflightreceipt.SealRejected,
 +		},
 +	} {
 +		t.Run(tc.name, func(t *testing.T) {
@@ -2059,6 +2066,9 @@ index 0000000..32515e6
 +			}
 +			sawErr := false
 +			for chunk := range stream2.Chunks {
++				if len(chunk.Payload) > 0 {
++					c2.ObserveStreamChunk(chunk.Payload)
++				}
 +				if chunk.Err != nil {
 +					sawErr = true
 +				}
@@ -3902,10 +3912,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..ceedb46 100644
+index e69de29..72ac41f 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2169 @@
+@@ -0,0 +1,2223 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4190,6 +4200,7 @@ index e69de29..ceedb46 100644
 +type responseOutputItem struct {
 +	Type    string                      `json:"type"`
 +	Role    string                      `json:"role"`
++	Phase   string                      `json:"phase"`
 +	Content []responseOutputContentPart `json:"content"`
 +}
 +
@@ -4199,15 +4210,20 @@ index e69de29..ceedb46 100644
 +		if item.Type != "message" || item.Role != "assistant" {
 +			continue
 +		}
++		// Exclude intermediate narration/progress messages (e.g. phase="commentary"); only
++		// final answers (phase="" or phase="final_answer") may supply the final output hash.
++		if item.Phase != "" && item.Phase != "final_answer" {
++			continue
++		}
 +		var b strings.Builder
 +		for _, part := range item.Content {
 +			if part.Type == "output_text" {
 +				b.WriteString(part.Text)
 +			}
 +		}
-+		if b.Len() > 0 {
-+			last = b.String()
-+		}
++		// Always overwrite last (including clearing to "" when the latest final assistant
++		// message has only a refusal or non-output_text content) so earlier text never leaks through.
++		last = b.String()
 +	}
 +	return last
 +}
@@ -4245,8 +4261,14 @@ index e69de29..ceedb46 100644
 +	}
 +	c.observedCompleted = true
 +	c.lastResponseIDSHA = sha256Hex(id)
-+	if outText != "" {
-+		c.lastOutputSHA = sha256Hex(outText)
++	if len(output) > 0 {
++		// Authoritative output items were provided on response.completed; never fall back to
++		// an earlier streamed item when response.completed explicitly carries no final answer text.
++		if outText != "" {
++			c.lastOutputSHA = sha256Hex(outText)
++		} else {
++			c.lastOutputSHA = ""
++		}
 +	} else if c.lastItemOutputSHA != "" && c.lastItemResponseID != "" && c.lastItemResponseID == id {
 +		c.lastOutputSHA = c.lastItemOutputSHA
 +	} else {
@@ -4277,7 +4299,7 @@ index e69de29..ceedb46 100644
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
 +	}
 +	sseItemSchemaKeys = map[string]struct{}{
-+		"type": {}, "role": {}, "content": {}, "response_id": {},
++		"type": {}, "role": {}, "phase": {}, "content": {}, "response_id": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
 +		"type": {}, "text": {},
@@ -4445,7 +4467,7 @@ index e69de29..ceedb46 100644
 +	return parts, true
 +}
 +
-+func decodeExactResponseOutputItems(raw json.RawMessage) ([]responseOutputItem, bool) {
++func decodeExactResponseOutputItems(raw json.RawMessage, expectedRespID string) ([]responseOutputItem, bool) {
 +	trimmed := bytes.TrimSpace(raw)
 +	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 +		return nil, true
@@ -4462,10 +4484,20 @@ index e69de29..ceedb46 100644
 +		}
 +		typ, ok1 := exactOptionalString(fields, "type")
 +		role, ok2 := exactOptionalString(fields, "role")
-+		if !ok1 || !ok2 {
++		phase, ok3 := exactOptionalString(fields, "phase")
++		itemRespID, hasItemRespID, okRespID := exactOptionalStringPresent(fields, "response_id")
++		if !ok1 || !ok2 || !ok3 || !okRespID {
 +			return nil, false
 +		}
-+		item := responseOutputItem{Type: typ, Role: role}
++		if hasItemRespID {
++			if itemRespID == "" || strings.TrimSpace(itemRespID) != itemRespID {
++				return nil, false
++			}
++			if expectedRespID != "" && itemRespID != expectedRespID {
++				return nil, false
++			}
++		}
++		item := responseOutputItem{Type: typ, Role: role, Phase: phase}
 +		if typ == "message" && role == "assistant" {
 +			parts, ok := decodeExactAssistantContentParts(fields["content"])
 +			if !ok {
@@ -4478,11 +4510,161 @@ index e69de29..ceedb46 100644
 +	return items, true
 +}
 +
-+// ValidateStrictFrameModel validates model binding and strict protocol JSON structure on a raw
-+// SSE frame before an executor converts a terminal failure/empty-incomplete event into a stream
-+// error. Unlike ObserveStreamChunk, it does NOT taint on legitimate upstream error fields when any
-+// declared model matches c.expectedModel (or no model is present), but DOES permanently taint the
-+// review launch on wrong-model frames, conflicting models, or malformed/case-aliased protocol JSON.
++type parsedStrictFrame struct {
++	evType     string
++	respID     string
++	respModel  string
++	respStatus string
++	respErr    json.RawMessage
++	respOutput json.RawMessage
++	itemFields map[string]json.RawMessage
++}
++
++// validateStrictFrameIdentity performs shared strict JSON, model-binding, and response-ID
++// consistency verification used by both ObserveStreamChunk and ValidateStrictFrameModel.
++// When rejectErrors is true, non-null event/response error fields also taint immediately.
++func (c *Collector) validateStrictFrameIdentity(line []byte, rejectErrors bool) (parsedStrictFrame, bool) {
++	var out parsedStrictFrame
++	evFields, err := decodeExactJSONObject(line, sseEventSchemaKeys)
++	if err != nil {
++		c.taintStreamAnomaly()
++		return out, false
++	}
++	evType, okType := exactOptionalString(evFields, "type")
++	evRespID, hasEvRespID, okRespID := exactOptionalStringPresent(evFields, "response_id")
++	evModel, hasEvModel, okEvModel := exactOptionalStringPresent(evFields, "model")
++	if !okType || !okRespID || !okEvModel || (rejectErrors && strings.TrimSpace(evType) == "") {
++		c.taintStreamAnomaly()
++		return out, false
++	}
++	if hasEvRespID && (evRespID == "" || strings.TrimSpace(evRespID) != evRespID) {
++		c.taintStreamAnomaly()
++		return out, false
++	}
++	if hasEvModel && evModel == "" {
++		c.taintStreamAnomaly()
++		return out, false
++	}
++	if rejectErrors && hasResponseError(evFields["error"]) {
++		c.taintStreamAnomaly()
++		return out, false
++	}
++	var respID, respModel, respStatus string
++	var hasRespID, hasRespModel bool
++	var respErr, respOutput json.RawMessage
++	if hasResponseError(evFields["response"]) {
++		respFields, err := decodeExactJSONObject(evFields["response"], sseResponseSchemaKeys)
++		if err != nil {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		var ok1, ok2, ok3 bool
++		respID, hasRespID, ok1 = exactOptionalStringPresent(respFields, "id")
++		respModel, hasRespModel, ok2 = exactOptionalStringPresent(respFields, "model")
++		respStatus, ok3 = exactOptionalString(respFields, "status")
++		if !ok1 || !ok2 || !ok3 {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		if hasRespID && (respID == "" || strings.TrimSpace(respID) != respID) {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		if hasRespModel && respModel == "" {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		respErr = respFields["error"]
++		respOutput = respFields["output"]
++		if rejectErrors && hasResponseError(respErr) {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	if hasEvModel && hasRespModel && evModel != respModel {
++		c.taintStreamAnomaly()
++		return out, false
++	}
++	explicitModel := ""
++	if hasRespModel {
++		explicitModel = respModel
++	} else if hasEvModel {
++		explicitModel = evModel
++	}
++	if explicitModel != "" {
++		c.mu.Lock()
++		mismatch := c.expectedModel == "" || explicitModel != c.expectedModel
++		c.mu.Unlock()
++		if mismatch {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	if hasEvRespID && hasRespID && evRespID != respID {
++		c.taintStreamAnomaly()
++		return out, false
++	}
++	var itemFields map[string]json.RawMessage
++	var itemRespID string
++	var hasItemRespID bool
++	if hasResponseError(evFields["item"]) {
++		var itemErr error
++		itemFields, itemErr = decodeExactJSONObject(evFields["item"], sseItemSchemaKeys)
++		if itemErr != nil {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		var okItemRespID bool
++		itemRespID, hasItemRespID, okItemRespID = exactOptionalStringPresent(itemFields, "response_id")
++		if !okItemRespID || (hasItemRespID && (itemRespID == "" || strings.TrimSpace(itemRespID) != itemRespID)) {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	explicitRespID := ""
++	if hasEvRespID {
++		explicitRespID = evRespID
++	} else if hasRespID {
++		explicitRespID = respID
++	}
++	if hasItemRespID {
++		if explicitRespID != "" && explicitRespID != itemRespID {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		explicitRespID = itemRespID
++	}
++	if explicitRespID != "" {
++		conflict := false
++		c.mu.Lock()
++		if c.streamResponseID != "" && c.streamResponseID != explicitRespID {
++			conflict = true
++		} else {
++			c.streamResponseID = explicitRespID
++		}
++		c.mu.Unlock()
++		if conflict {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	out = parsedStrictFrame{
++		evType:     evType,
++		respID:     respID,
++		respModel:  respModel,
++		respStatus: respStatus,
++		respErr:    respErr,
++		respOutput: respOutput,
++		itemFields: itemFields,
++	}
++	return out, true
++}
++
++// ValidateStrictFrameModel validates model binding, response-ID consistency, and strict protocol JSON
++// on a raw SSE frame before an executor converts a terminal failure/empty-incomplete event into a
++// stream error. Unlike ObserveStreamChunk, it does NOT taint on legitimate upstream error fields when
++// declared model and response ID match, but DOES permanently taint on wrong-model frames, conflicting
++// response IDs, or malformed/case-aliased protocol JSON.
 +func (c *Collector) ValidateStrictFrameModel(payload []byte) {
 +	if c == nil || !c.strictCodex || len(payload) == 0 {
 +		return
@@ -4506,50 +4688,7 @@ index e69de29..ceedb46 100644
 +		if !isDataLine && line[0] != '{' {
 +			continue
 +		}
-+		evFields, err := decodeExactJSONObject(line, sseEventSchemaKeys)
-+		if err != nil {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		evModel, hasEvModel, okEvModel := exactOptionalStringPresent(evFields, "model")
-+		if !okEvModel || (hasEvModel && evModel == "") {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		var respModel string
-+		var hasRespModel bool
-+		if hasResponseError(evFields["response"]) {
-+			respFields, err := decodeExactJSONObject(evFields["response"], sseResponseSchemaKeys)
-+			if err != nil {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+			var okRespModel bool
-+			respModel, hasRespModel, okRespModel = exactOptionalStringPresent(respFields, "model")
-+			if !okRespModel || (hasRespModel && respModel == "") {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+		}
-+		if hasEvModel && hasRespModel && evModel != respModel {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		explicitModel := ""
-+		if hasRespModel {
-+			explicitModel = respModel
-+		} else if hasEvModel {
-+			explicitModel = evModel
-+		}
-+		if explicitModel != "" {
-+			c.mu.Lock()
-+			mismatch := c.expectedModel == "" || explicitModel != c.expectedModel
-+			c.mu.Unlock()
-+			if mismatch {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+		}
++		_, _ = c.validateStrictFrameIdentity(line, false)
 +	}
 +}
 +
@@ -4578,145 +4717,24 @@ index e69de29..ceedb46 100644
 +		if !isDataLine && line[0] != '{' {
 +			continue
 +		}
-+		// Reject non-object JSON (e.g. data: null / []), trailing tokens, case-insensitive duplicate keys,
-+		// and mixed-case schema field aliases on protocol evidence objects (while allowing arbitrary user keys
-+		// inside nested metadata / tool arguments), and decode solely by exact lowercase map keys.
-+		evFields, err := decodeExactJSONObject(line, sseEventSchemaKeys)
-+		if err != nil {
-+			c.taintStreamAnomaly()
++		frame, ok := c.validateStrictFrameIdentity(line, true)
++		if !ok {
 +			continue
 +		}
-+		evType, okType := exactOptionalString(evFields, "type")
-+		evRespID, hasEvRespID, okRespID := exactOptionalStringPresent(evFields, "response_id")
-+		evModel, hasEvModel, okEvModel := exactOptionalStringPresent(evFields, "model")
-+		if !okType || !okRespID || !okEvModel || strings.TrimSpace(evType) == "" {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		if hasEvRespID && (evRespID == "" || strings.TrimSpace(evRespID) != evRespID) {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		if hasEvModel && evModel == "" {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		if hasResponseError(evFields["error"]) {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		var respID, respModel, respStatus string
-+		var hasRespID, hasRespModel bool
-+		var respErr, respOutput json.RawMessage
-+		if hasResponseError(evFields["response"]) {
-+			respFields, err := decodeExactJSONObject(evFields["response"], sseResponseSchemaKeys)
-+			if err != nil {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+			var ok1, ok2, ok3 bool
-+			respID, hasRespID, ok1 = exactOptionalStringPresent(respFields, "id")
-+			respModel, hasRespModel, ok2 = exactOptionalStringPresent(respFields, "model")
-+			respStatus, ok3 = exactOptionalString(respFields, "status")
-+			if !ok1 || !ok2 || !ok3 {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+			if hasRespID && (respID == "" || strings.TrimSpace(respID) != respID) {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+			if hasRespModel && respModel == "" {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+			respErr = respFields["error"]
-+			respOutput = respFields["output"]
-+			if hasResponseError(respErr) {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+		}
-+		if hasEvModel && hasRespModel && evModel != respModel {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		explicitModel := ""
-+		if hasRespModel {
-+			explicitModel = respModel
-+		} else if hasEvModel {
-+			explicitModel = evModel
-+		}
-+		if explicitModel != "" {
-+			c.mu.Lock()
-+			mismatch := c.expectedModel == "" || explicitModel != c.expectedModel
-+			c.mu.Unlock()
-+			if mismatch {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+		}
-+		if hasEvRespID && hasRespID && evRespID != respID {
-+			c.taintStreamAnomaly()
-+			continue
-+		}
-+		var itemFields map[string]json.RawMessage
-+		var itemRespID string
-+		var hasItemRespID bool
-+		if hasResponseError(evFields["item"]) {
-+			var itemErr error
-+			itemFields, itemErr = decodeExactJSONObject(evFields["item"], sseItemSchemaKeys)
-+			if itemErr != nil {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+			var okItemRespID bool
-+			itemRespID, hasItemRespID, okItemRespID = exactOptionalStringPresent(itemFields, "response_id")
-+			if !okItemRespID || (hasItemRespID && (itemRespID == "" || strings.TrimSpace(itemRespID) != itemRespID)) {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+		}
-+		explicitRespID := ""
-+		if hasEvRespID {
-+			explicitRespID = evRespID
-+		} else if hasRespID {
-+			explicitRespID = respID
-+		}
-+		if hasItemRespID {
-+			if explicitRespID != "" && explicitRespID != itemRespID {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+			explicitRespID = itemRespID
-+		}
-+		if explicitRespID != "" {
-+			conflict := false
-+			c.mu.Lock()
-+			if c.streamResponseID != "" && c.streamResponseID != explicitRespID {
-+				conflict = true
-+			} else {
-+				c.streamResponseID = explicitRespID
-+			}
-+			c.mu.Unlock()
-+			if conflict {
-+				c.taintStreamAnomaly()
-+				continue
-+			}
-+		}
-+		switch evType {
++		switch frame.evType {
 +		case "response.created", "response.in_progress":
 +			// streamResponseID is already validated and locked above for every frame carrying a response ID.
 +		case "response.output_item.done":
-+			if itemFields != nil {
-+				itemType, ok1 := exactOptionalString(itemFields, "type")
-+				itemRole, ok2 := exactOptionalString(itemFields, "role")
-+				if !ok1 || !ok2 {
++			if frame.itemFields != nil {
++				itemType, ok1 := exactOptionalString(frame.itemFields, "type")
++				itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
++				itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
++				if !ok1 || !ok2 || !ok3 {
 +					c.taintStreamAnomaly()
 +					continue
 +				}
-+				if itemType == "message" && itemRole == "assistant" {
-+					parts, ok := decodeExactAssistantContentParts(itemFields["content"])
++				if itemType == "message" && itemRole == "assistant" && (itemPhase == "" || itemPhase == "final_answer") {
++					parts, ok := decodeExactAssistantContentParts(frame.itemFields["content"])
 +					if !ok {
 +						c.taintStreamAnomaly()
 +						continue
@@ -4727,25 +4745,31 @@ index e69de29..ceedb46 100644
 +							b.WriteString(part.Text)
 +						}
 +					}
-+					if b.Len() > 0 {
-+						h := sha256Hex(b.String())
-+						c.mu.Lock()
-+						rid := c.streamResponseID
-+						if rid != "" {
-+							c.lastItemOutputSHA = h
-+							c.lastItemResponseID = rid
-+						}
-+						c.mu.Unlock()
++					c.mu.Lock()
++					rid := c.streamResponseID
++					if b.Len() > 0 && rid != "" {
++						c.lastItemOutputSHA = sha256Hex(b.String())
++						c.lastItemResponseID = rid
++					} else {
++						c.lastItemOutputSHA = ""
++						c.lastItemResponseID = ""
 +					}
++					c.mu.Unlock()
 +				}
 +			}
 +		case "response.completed":
-+			output, ok := decodeExactResponseOutputItems(respOutput)
++			c.mu.Lock()
++			expectedRespID := frame.respID
++			if expectedRespID == "" {
++				expectedRespID = c.streamResponseID
++			}
++			c.mu.Unlock()
++			output, ok := decodeExactResponseOutputItems(frame.respOutput, expectedRespID)
 +			if !ok {
 +				c.taintStreamAnomaly()
 +				continue
 +			}
-+			c.recordCompletedResponse(respID, respModel, respStatus, respErr, output)
++			c.recordCompletedResponse(frame.respID, frame.respModel, frame.respStatus, frame.respErr, output)
 +		case "response.done":
 +			c.taintStreamAnomaly()
 +		case "response.failed", "response.incomplete", "error":
@@ -5394,13 +5418,53 @@ index e69de29..ceedb46 100644
 +	return closeErr
 +}
 +
-+func reservePrivateDir(directory string, allowExisting bool) error {
-+	root := filepath.Dir(directory)
-+	if err := os.MkdirAll(root, 0700); err != nil {
-+		return err
++func ensurePrivateRoot(root string) error {
++	if _, err := os.Lstat(root); err == nil {
++		if _, err := checkPrivateDir(root, false); err != nil {
++			return ErrUnavailable
++		}
++		return nil
++	} else if !os.IsNotExist(err) {
++		return ErrUnavailable
++	}
++	// Collect missing ancestors up to the deepest existing parent so every newly created
++	// directory entry (including root inside its parent) is durably synced on disk.
++	var toCreate []string
++	cur := root
++	for {
++		_, err := os.Lstat(cur)
++		if err == nil {
++			break
++		}
++		if !os.IsNotExist(err) {
++			return ErrUnavailable
++		}
++		parent := filepath.Dir(cur)
++		if parent == cur {
++			return ErrUnavailable
++		}
++		toCreate = append(toCreate, cur)
++		cur = parent
++	}
++	for i := len(toCreate) - 1; i >= 0; i-- {
++		dir := toCreate[i]
++		if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
++			return err
++		}
++		if err := syncDirFn(filepath.Dir(dir)); err != nil {
++			return err
++		}
 +	}
 +	if _, err := checkPrivateDir(root, false); err != nil {
 +		return ErrUnavailable
++	}
++	return nil
++}
++
++func reservePrivateDir(directory string, allowExisting bool) error {
++	root := filepath.Dir(directory)
++	if err := ensurePrivateRoot(root); err != nil {
++		return err
 +	}
 +	err := os.Mkdir(directory, 0700)
 +	if err != nil {
@@ -6076,10 +6140,10 @@ index e69de29..ceedb46 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..3a1a952 100644
+index e69de29..7ec734a 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2705 @@
+@@ -0,0 +1,2808 @@
 +package preflightreceipt
 +
 +import (
@@ -8783,5 +8847,108 @@ index e69de29..3a1a952 100644
 +	r3 := runSSE(t, "review-b7777777-2222-4333-8444-555555555503", "019d0000-0000-7000-8000-666666666703", sseMixed)
 +	if r3.LastOutputSHA256 != sha256Hex("real-verdict") {
 +		t.Fatalf("mixed parts hashed as %q, want sha256(\"real-verdict\")=%q", r3.LastOutputSHA256, sha256Hex("real-verdict"))
++	}
++}
++
++func TestReviewReceiptCommentaryRefusalItemRespIDAndRootParentSync(t *testing.T) {
++	// Sol P1 #1 & Astra P1 #2/#3 + P2 #2 (PR #2280 R4):
++	// 1. commentary + function_call (no final_answer) MUST yield empty last_output_sha256 (both completed & output_item.done).
++	// 2. Earlier text followed by a final assistant refusal/no-text message MUST clear last_output_sha256 (never retain earlier text).
++	// 3. response.completed output item carrying a conflicting response_id MUST taint and return SealRejected.
++	// 4. First-time root creation MUST sync root's parent dir; parent dir sync failure fails closed with ErrUnavailable.
++	root := filepath.Join(t.TempDir(), "receipts")
++
++	runSSEStatus := func(t *testing.T, launch, session, sse string) SealStatus {
++		t.Helper()
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: 200,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(strings.NewReader(sse)),
++				TLS:        verifiedTLSState("chatgpt.com"),
++			}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		raw, _ := io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk(raw)
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReview(root, launch, session)
++	}
++
++	// 1a. Commentary + function_call on response.completed -> last_output_sha256 MUST be empty.
++	l1 := "review-b8888888-2222-4333-8444-555555555501"
++	s1 := "019d0000-0000-7000-8000-666666666801"
++	sseCommentaryCompleted := "data: " + `{"type":"response.completed","response":{"id":"resp_c1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"inspecting diff..."}]},{"type":"function_call","name":"exec_command"}]}}` + "\n\n"
++	if st := runSSEStatus(t, l1, s1, sseCommentaryCompleted); st != SealOK {
++		t.Fatalf("commentary+tool SealReview = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, l1); r.LastOutputSHA256 != "" {
++		t.Fatalf("commentary+tool response.completed hashed %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 1b. Commentary + function_call via output_item.done + empty response.completed output -> MUST be empty.
++	l2 := "review-b8888888-2222-4333-8444-555555555502"
++	s2 := "019d0000-0000-7000-8000-666666666802"
++	sseCommentaryStreamed := "data: " + `{"type":"response.created","response":{"id":"resp_c2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"still checking"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_c2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSEStatus(t, l2, s2, sseCommentaryStreamed); st != SealOK {
++		t.Fatalf("commentary streamed SealReview = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, l2); r.LastOutputSHA256 != "" {
++		t.Fatalf("commentary streamed hashed %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 2. Earlier text followed by final assistant refusal (no output_text) MUST clear last_output_sha256
++	//    and MUST NOT fall back to earlier streamed output_item.done text.
++	l3 := "review-b8888888-2222-4333-8444-555555555503"
++	s3 := "019d0000-0000-7000-8000-666666666803"
++	sseRefusalFinal := "data: " + `{"type":"response.created","response":{"id":"resp_c3","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"earlier text"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_c3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"earlier text"}]},{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"refusal","refusal":"cannot comply"}]}]}}` + "\n\n"
++	if st := runSSEStatus(t, l3, s3, sseRefusalFinal); st != SealOK {
++		t.Fatalf("refusal-final SealReview = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, l3); r.LastOutputSHA256 != "" {
++		t.Fatalf("refusal-final retained earlier text hash %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 3. Conflicting item.response_id inside response.completed.response.output[] MUST taint & reject.
++	l4 := "review-b8888888-2222-4333-8444-555555555504"
++	s4 := "019d0000-0000-7000-8000-666666666804"
++	sseConflictItemID := "data: " + `{"type":"response.completed","response":{"id":"resp_outer","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","response_id":"resp_other","phase":"final_answer","content":[{"type":"output_text","text":"spoof"}]}]}}` + "\n\n"
++	if st := runSSEStatus(t, l4, s4, sseConflictItemID); st != SealRejected {
++		t.Fatalf("conflicting output item response_id = %v, want SealRejected", st)
++	}
++
++	// 4. First-time root creation MUST sync root's parent dir; parent dir sync failure fails closed.
++	origSync := syncDirFn
++	defer func() { syncDirFn = origSync }()
++	parentBase := t.TempDir()
++	newRoot := filepath.Join(parentBase, "fresh-receipts")
++	syncDirFn = func(dir string) error {
++		if dir == parentBase {
++			return errors.New("injected parent of root dir sync error")
++		}
++		return origSync(dir)
++	}
++	if _, _, err := BeginReview(context.Background(), newRoot, "review-b8888888-2222-4333-8444-555555555505", "019d0000-0000-7000-8000-666666666805", "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("BeginReview when root parent dir sync fails = %v, want ErrUnavailable", err)
 +	}
 +}

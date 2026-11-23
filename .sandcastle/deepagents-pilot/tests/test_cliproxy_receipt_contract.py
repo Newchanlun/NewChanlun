@@ -135,8 +135,33 @@ def test_formal_review_receipt_and_preflight_receipt_cli_separation(tmp_path: Pa
         expected_response_id_sha256=rid2, expected_output_sha256="", min_requests=1,
     ) is None
 
-    # 3. --review-preflight-receipt accepts review-preflight-<uuid4> (returns preflight_sealed, NOT complete_stable)
-    #    and refuses formal review-<uuid4> launches.
+    # 3. Formal --review-receipt MUST reject review-preflight-<uuid4> even when text & all hashes match.
+    _, preflight_with_text_sha = _write_private_receipt(
+        tmp_path, preflight_launch, {**base, "launch": preflight_launch}
+    )
+    assert log_mod.review_from_receipt(
+        tmp_path, preflight_launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=preflight_with_text_sha,
+        expected_response_id_sha256=rid2, expected_output_sha256=out_sha, min_requests=2,
+        require_content_match=True,
+    ) is None
+    formal_on_pf_proc = subprocess.run(
+        [
+            sys.executable, "-I", script,
+            "--review-receipt", str(tmp_path), preflight_launch, session,
+            str(time.time() - 5), str(time.time() + 5), "10", known, preflight_with_text_sha, rid2, out_sha, "2",
+        ],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert formal_on_pf_proc.returncode == 0
+    formal_on_pf_out = json.loads(formal_on_pf_proc.stdout)
+    assert formal_on_pf_out["complete_stable"] is False and formal_on_pf_out["sealed"] is False
+
+    # Restore tool-only preflight receipt and verify --review-preflight-receipt accepts review-preflight-<uuid4>
+    # (returns preflight_sealed, NOT complete_stable) and refuses formal review-<uuid4> launches.
+    _, preflight_sha = _write_private_receipt(
+        tmp_path, preflight_launch, {**base, "launch": preflight_launch, "last_output_sha256": ""}
+    )
     pf_proc = subprocess.run(
         [
             sys.executable, "-I", script,
