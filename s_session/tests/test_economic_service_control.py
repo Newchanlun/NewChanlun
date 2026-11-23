@@ -1,9 +1,11 @@
 """#1394：launcher 按冻结经济版本探测、输送并核验 Ready；不运行财务核。"""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 from pathlib import Path
+import select
 import socket
 import sys
 import tempfile
@@ -30,7 +32,8 @@ class OwnerSocket:
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(str(path))
         self.listener.listen()
-        self.listener.settimeout(0.05)
+        self.listener.setblocking(False)
+        self._wake_r, self._wake_w = socket.socketpair()
         self.thread = threading.Thread(target=self.serve)
 
     def __enter__(self):
@@ -39,17 +42,26 @@ class OwnerSocket:
 
     def __exit__(self, *args):
         self.stopped.set()
+        try:
+            self._wake_w.send(b"x")
+        except OSError:
+            pass
         self.thread.join(timeout=2)
         self.listener.close()
+        self._wake_r.close()
+        self._wake_w.close()
         self.path.unlink()
         if self.thread.is_alive() or self.errors:
             raise AssertionError("socket 测试服务未正常结束：" + str(self.errors))
 
     def serve(self):
         while not self.stopped.is_set():
+            ready, _, _ = select.select([self.listener, self._wake_r], [], [])
+            if self.stopped.is_set() or self.listener not in ready:
+                continue
             try:
                 connection, _ = self.listener.accept()
-            except socket.timeout:
+            except BlockingIOError:
                 continue
             try:
                 with connection:
@@ -199,10 +211,40 @@ class EconomicLauncherTests(unittest.TestCase):
                    altered_payload("writer_epoch", "10"), altered_payload("domain_id", "B:other"),
                    lambda r: r.update(schema_revision="economic-session/1"),
                    lambda r: r.update(producer_epoch="10"), lambda r: r.update(causal_refs=[])]
-        for change in changes:
-            with self.subTest(change=change), self.assertRaises(TimeoutError):
-                self.ready(self.v2_manifest(), "E", change)
-            self.assertFalse((self.root / "state" / digest("E") / "owner.process.json").exists())
+        def check_rejected(change):
+            with tempfile.TemporaryDirectory(prefix="ec-", dir="/tmp") as tmp:
+                root = Path(tmp)
+                manifest = {
+                    **self.v2_manifest(),
+                    "e": {"db": str(root / "e.db"), "socket": str(root / "e.sock")},
+                    "chongs": [{"chong_id": "opaque", "db": str(root / "b.db"), "socket": str(root / "b.sock")}],
+                }
+                (root / "manifest.json").write_bytes(canonical(manifest))
+                cfg = {**self.config, "manifest_hash": digest(manifest), "state_root": str(root / "state")}
+                cfg_path = root / "launcher.json"
+                cfg_path.write_bytes(canonical(cfg))
+                config, frozen, node = control.read_config(cfg_path, "E")
+                controller = control.EconomicController(config, frozen, node, "E")
+                Path(controller.config["db"]).touch()
+                expected = {"state": "running", "service": "owner", "pid": 12345,
+                            "process_identity": "fixture-process", "control_instance_id": "nonce-fixture"}
+                try:
+                    with OwnerSocket(Path(controller.config["socket"]), "economic-session/2", "E", change),                          patch.object(controller, "runtime_environment", return_value={}),                          patch.object(controller, "prepare_socket", return_value=None),                          patch.object(controller, "start_process"),                          patch.object(controller, "status", return_value=expected):
+                        try:
+                            controller.start_owner("11", "11")
+                            timed_out = False
+                        except TimeoutError:
+                            timed_out = True
+                finally:
+                    controller.close()
+                return timed_out, (root / "state" / digest("E") / "owner.process.json").exists()
+
+        with ThreadPoolExecutor(max_workers=len(changes)) as pool:
+            outcomes = list(pool.map(check_rejected, changes))
+        for change, (timed_out, record_exists) in zip(changes, outcomes):
+            with self.subTest(change=change):
+                self.assertTrue(timed_out)
+                self.assertFalse(record_exists)
 
     def test_send_preserves_matching_original_request_and_rejects_version_mismatch_before_io(self):
         for manifest, expected in ((self.manifest, "economic-session/1"),
