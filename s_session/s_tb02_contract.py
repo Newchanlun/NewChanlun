@@ -78,27 +78,84 @@ CREATE TABLE structure_facts (
 """
 
 
+_KINDS_SET = frozenset(KINDS)
+_BI_KINDS_SET = frozenset(BI_KINDS)
+_SEGMENT_KINDS_SET = frozenset(SEGMENT_KINDS)
+_BI_OR_SEGMENT_KINDS = _BI_KINDS_SET | _SEGMENT_KINDS_SET
+_FACT_BASE_COLUMNS = tuple(k for k in FACT_COLUMNS if k not in ("payload_json", "input_refs_json", "source_coords_json"))
+_FACT_FIELDS_SET = frozenset(FACT_FIELDS)
+_REF_FIELDS_SET = frozenset(REF_FIELDS)
+_BAR_FIELDS_SET = frozenset(("source_coord", "open", "high", "low", "close"))
+_SOURCE_LIST_KEYS = frozenset(("members", "high_sources", "low_sources", "source_coords", "window"))
+_SOURCE_SCALAR_KEYS = frozenset(("source_coord", "group_anchor", "established_at"))
+_ENDPOINT_ORDER_LABELS = frozenset(("acc.low", "acc.high", "incoming.low", "incoming.high"))
+_CC007_REF_NAMES = tuple(f"{slot}.{axis}" for slot in ("left", "mid", "right") for axis in ("high", "low"))
+_CC007_REF_AXES = tuple(axis for _ in ("left", "mid", "right") for axis in ("high", "low"))
+_I64_MIN = -(1 << 63)
+_I64_MAX = 1 << 63
+_HEX64_FULLMATCH = re.compile(r"[a-f0-9]{64}").fullmatch
+_HEX16_FULLMATCH = re.compile(r"[0-9a-f]{16}").fullmatch
+_CANONICAL_ENCODE = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode
+_EXPECTED_KEY_SETS = {}
+
+
+def _canonical_str(value):
+    encoded = _CANONICAL_ENCODE(value)
+    if not encoded.isascii():
+        encoded.encode("utf-8")
+    return encoded
+
+
 def canonical(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _CANONICAL_ENCODE(value).encode("utf-8")
 
 
 def keys(value, expected, name):
-    if type(value) is not dict or set(value) != set(expected):
+    if type(value) is not dict:
+        raise ValueError(name + " 字段缺失/多余")
+    te = type(expected)
+    if te is frozenset or te is set:
+        expected_set = expected
+    elif te is tuple:
+        expected_set = _EXPECTED_KEY_SETS.get(expected)
+        if expected_set is None:
+            expected_set = frozenset(expected)
+            if len(_EXPECTED_KEY_SETS) < 512:
+                _EXPECTED_KEY_SETS[expected] = expected_set
+    else:
+        expected_set = frozenset(expected)
+    if value.keys() != expected_set:
         raise ValueError(name + " 字段缺失/多余")
 
 
 def text(value, name):
     if type(value) is not str or not value:
         raise ValueError(name + " 必须是非空文本")
-    value.encode("utf-8")
+    if not value.isascii():
+        value.encode("utf-8")
     return value
 
 
 def integer(value, name, minimum=None):
-    if type(value) is not str or not re.fullmatch(r"(?:0|[1-9][0-9]*|-[1-9][0-9]*)", value) or len(value) > 20:
+    if type(value) is not str:
         raise ValueError(name + " 必须是规范 i64 文本")
-    number = int(value)
-    if not -(2**63) <= number < 2**63 or (minimum is not None and number < minimum):
+    n = len(value)
+    if n == 0 or n > 20:
+        raise ValueError(name + " 必须是规范 i64 文本")
+    c0 = value[0]
+    if c0 == "0":
+        if n != 1:
+            raise ValueError(name + " 必须是规范 i64 文本")
+        number = 0
+    elif c0 == "-":
+        if n == 1 or value[1] == "0" or not (value.isascii() and value[1:].isdigit()):
+            raise ValueError(name + " 必须是规范 i64 文本")
+        number = int(value)
+    else:
+        if not (value.isascii() and value.isdigit()):
+            raise ValueError(name + " 必须是规范 i64 文本")
+        number = int(value)
+    if number < _I64_MIN or number >= _I64_MAX or (minimum is not None and number < minimum):
         raise ValueError(name + " 超出整数域")
     return number
 
@@ -110,38 +167,73 @@ def array(value, name):
 
 
 def strings(value, name):
-    for item in array(value, name):
-        text(item, name)
+    if type(value) is not list:
+        raise ValueError(name + " 必须是数组")
+    for item in value:
+        if type(item) is not str or not item:
+            raise ValueError(name + " 必须是非空文本")
+        if not item.isascii():
+            item.encode("utf-8")
     return value
 
 
 def coords(value, name):
-    values = [integer(item, name, 0) for item in array(value, name)]
-    if values != sorted(set(values)):
+    if type(value) is not list:
+        raise ValueError(name + " 必须是数组")
+    prev = -1
+    strict = True
+    for item in value:
+        num = integer(item, name, 0)
+        if num <= prev:
+            strict = False
+        prev = num
+    if not strict:
         raise ValueError(name + " 必须按真实源坐标严格递增")
     return value
 
 
-def wire_tree(value):
-    if type(value) is dict:
+def wire_tree(value, _dict=dict, _list=list, _str=str, _bool=bool, _type=type):
+    tv = _type(value)
+    if tv is _dict:
         for key, item in value.items():
-            text(key, "payload.key")
-            wire_tree(item)
-    elif type(value) is list:
+            if _type(key) is not _str or not key:
+                raise ValueError("payload.key 必须是非空文本")
+            if not key.isascii():
+                key.encode("utf-8")
+            ti = _type(item)
+            if ti is _str:
+                if not item.isascii():
+                    item.encode("utf-8")
+            elif ti is _dict or ti is _list:
+                wire_tree(item)
+            elif item is not None and ti is not _bool:
+                raise ValueError("TB02 wire 不允许 JSON number 或未知类型")
+    elif tv is _list:
         for item in value:
-            wire_tree(item)
-    elif type(value) is str:
-        value.encode("utf-8")
-    elif value is not None and type(value) is not bool:
+            ti = _type(item)
+            if ti is _str:
+                if not item.isascii():
+                    item.encode("utf-8")
+            elif ti is _dict or ti is _list:
+                wire_tree(item)
+            elif item is not None and ti is not _bool:
+                raise ValueError("TB02 wire 不允许 JSON number 或未知类型")
+    elif tv is _str:
+        if not value.isascii():
+            value.encode("utf-8")
+    elif value is not None and tv is not _bool:
         raise ValueError("TB02 wire 不允许 JSON number 或未知类型")
 
 
 def bar(value, name):
-    keys(value, ("source_coord", "open", "high", "low", "close"), name)
+    if type(value) is not dict or value.keys() != _BAR_FIELDS_SET:
+        raise ValueError(name + " 字段缺失/多余")
     integer(value["source_coord"], name + ".source_coord", 0)
     # acc/group 是同核合并段，open/close 沿原锚语义；不能对其重套 raw 几何门。
-    for key in ("open", "high", "low", "close"):
-        integer(value[key], name + "." + key)
+    integer(value["open"], name + ".open")
+    integer(value["high"], name + ".high")
+    integer(value["low"], name + ".low")
+    integer(value["close"], name + ".close")
 
 
 def direction(value):
@@ -170,9 +262,9 @@ def validate_payload(kind, p):
 
 def _validate_payload_fields(kind, p):
     """内部字段门；调用方须在同次调用先完成此原树的 wire_tree。"""
-    if kind in SEGMENT_KINDS:
+    if kind in _SEGMENT_KINDS_SET:
         validate_segment_payload(kind, p)
-    elif kind in BI_KINDS:
+    elif kind in _BI_KINDS_SET:
         validate_bi_payload(kind, p)
     elif kind == KINDS[0]:
         keys(p, ("action", "incoming", "acc_before", "acc_after", "direction", "direction_evidence", "comparisons", "endpoint_order", "contains", "high_sources", "low_sources", "waiting_reasons"), kind)
@@ -198,7 +290,7 @@ def _validate_payload_fields(kind, p):
             if not strings(group, "endpoint class"):
                 raise ValueError("端点等价类为空")
             flattened.extend(group)
-        if flattened and (len(flattened) != 4 or set(flattened) != {"acc.low", "acc.high", "incoming.low", "incoming.high"}):
+        if flattened and (len(flattened) != 4 or set(flattened) != _ENDPOINT_ORDER_LABELS):
             raise ValueError("端点标签缺失或重复")
         if p["contains"] is not None and type(p["contains"]) is not bool:
             raise ValueError("contains 必须是 bool/null")
@@ -211,12 +303,17 @@ def _validate_payload_fields(kind, p):
         keys(p, ("group_index", "group_anchor", "members", "open", "high", "low", "close", "high_sources", "low_sources", "confirmed", "direction", "direction_evidence", "confirmation_evidence", "waiting_reasons"), kind)
         integer(p["group_index"], "group_index", 0)
         integer(p["group_anchor"], "group_anchor", 0)
-        bar({"source_coord": p["group_anchor"], **{k: p[k] for k in ("open", "high", "low", "close")}}, "group")
+        integer(p["group_anchor"], "group.source_coord", 0)
+        integer(p["open"], "group.open")
+        integer(p["high"], "group.high")
+        integer(p["low"], "group.low")
+        integer(p["close"], "group.close")
         members = coords(p["members"], "members")
         if not members or p["group_anchor"] != members[0]:
             raise ValueError("组首必须绑定该组首个真实成员")
+        members_set = set(members)
         for key in ("high_sources", "low_sources"):
-            if not coords(p[key], key) or not set(p[key]) <= set(members):
+            if not coords(p[key], key) or not members_set.issuperset(p[key]):
                 raise ValueError("组极值来源不属于完整成员")
         if type(p["confirmed"]) is not bool:
             raise ValueError("confirmed 必须 bool")
@@ -233,12 +330,12 @@ def _validate_payload_fields(kind, p):
             raise ValueError("CC007 只描述已经成立的顶/底三组")
         text(p["description"], "description")
         refs = array(p["reference_prices"], "reference_prices")
-        names = [f"{slot}.{axis}" for slot in ("left", "mid", "right") for axis in ("high", "low")]
         if len(refs) != 6:
             raise ValueError("CC007 六参考价不完整")
+        window = p["window"]
         for index, ref in enumerate(refs):
             keys(ref, ("name", "source_coord", "axis", "value"), "reference_price")
-            if ref["name"] != names[index] or ref["axis"] != names[index].split(".")[1] or ref["source_coord"] != p["window"][index // 2]:
+            if ref["name"] != _CC007_REF_NAMES[index] or ref["axis"] != _CC007_REF_AXES[index] or ref["source_coord"] != window[index // 2]:
                 raise ValueError("CC007 参考价身份/组锚不一致")
             integer(ref["value"], "reference.value")
         labels = p["descriptive_labels"]
@@ -252,16 +349,18 @@ def _validate_payload_fields(kind, p):
         bars = array(subsequent["bars"], "subsequent.bars")
         if (subsequent["status"], subsequent["reason"]) != (("observed", None) if bars else ("insufficient_knowledge", "no_subsequent_bar")):
             raise ValueError("后续事实状态与是否有事实不一致")
+        expected_rels = [(axis, ref["name"], ref["value"]) for axis in ("open", "high", "low", "close") for ref in refs]
+        expected_rel_len = len(expected_rels)
         for item in bars:
             keys(item, ("bar", "relations"), "subsequent.bar")
-            bar(item["bar"], "subsequent.bar")
+            item_bar = item["bar"]
+            bar(item_bar, "subsequent.bar")
             relations = array(item["relations"], "subsequent.relations")
-            expected = [(axis, ref) for axis in ("open", "high", "low", "close") for ref in refs]
-            if len(relations) != len(expected):
+            if len(relations) != expected_rel_len:
                 raise ValueError("后续四价×六参考价关系不完整")
-            for rel, (axis, ref) in zip(relations, expected):
+            for rel, (axis, ref_name, ref_value) in zip(relations, expected_rels):
                 keys(rel, ("axis", "value", "reference", "reference_value", "order"), "subsequent.relation")
-                if (rel["axis"], rel["value"], rel["reference"], rel["reference_value"]) != (axis, item["bar"][axis], ref["name"], ref["value"]) or rel["order"] not in ("LT", "EQ", "GT"):
+                if (rel["axis"] != axis or rel["value"] != item_bar[axis] or rel["reference"] != ref_name or rel["reference_value"] != ref_value or rel["order"] not in ("LT", "EQ", "GT")):
                     raise ValueError("后续关系来源字段不一致")
     elif kind == KINDS[3]:
         keys(p, ("scope", "input_frontier", "known_facts", "waiting_reasons", "domain", "requests"), kind)
@@ -297,12 +396,14 @@ def project_fact(row, parse, *, meta=None, raw=None, parse_canonical=None):
 def _project_fact(row, parse, *, meta=None, raw=None, parse_canonical=None, _identity_hash=None):
     if type(row) is not dict:
         row = dict(zip(FACT_COLUMNS, row))
-    result = {k: row[k] for k in FACT_COLUMNS if k not in ("payload_json", "input_refs_json", "source_coords_json")}
+    result = {k: row[k] for k in _FACT_BASE_COLUMNS}
     for name in ("payload", "input_refs", "source_coords"):
         expected = dict if name == "payload" else list
+        raw_json = row[name + "_json"]
         if parse_canonical is None:
-            result[name] = parse(row[name + "_json"], expected)
-            if row[name + "_json"] != canonical(result[name]).decode():
+            parsed = parse(raw_json, expected)
+            result[name] = parsed
+            if raw_json != _canonical_str(parsed):
                 raise ValueError("事实 JSON 列不是封存规范字节")
         else:
             # 明确注入的严格列解析器同时核原串；失败直接传播，不换解析路径。
@@ -325,11 +426,11 @@ def validate_fact(value, meta=None, raw=None):
 
 
 def _validate_fact(value, meta=None, raw=None, *, _identity_hash=None):
-    keys(value, FACT_FIELDS, "typed object")
+    keys(value, _FACT_FIELDS_SET, "typed object")
     wire_tree(value)
     for key in ("object_id", "batch_id", "fact_key", "first_known_cut"):
         text(value[key], key)
-    if value["kind"] not in KINDS or value["object_revision"] != "1":
+    if value["kind"] not in _KINDS_SET or value["object_revision"] != "1":
         raise ValueError("typed kind/revision 未声明")
     first = integer(value["first_known_generation"], "first_known_generation", 1)
     published = integer(value["published_generation"], "published_generation", 1)
@@ -347,32 +448,37 @@ def _validate_fact(value, meta=None, raw=None, *, _identity_hash=None):
     # #1414：本次 wire_tree(value) 已完整覆盖同一未修改的 payload 原树。
     _validate_payload_fields(value["kind"], value["payload"])
     references = array(value["input_refs"], "input_refs")
+    raw_len = len(raw) if raw is not None else 0
     for ref in references:
-        keys(ref, REF_FIELDS, "input_ref")
+        keys(ref, _REF_FIELDS_SET, "input_ref")
         for name in REF_FIELDS:
             text(ref[name], name)
-        for name in ("input_revision", "revision", "seq", "source_coord"):
-            integer(ref[name], name, 1 if name in ("input_revision", "revision") else 0)
-        if ref["input_revision"] != ref["revision"] or not re.fullmatch(r"[a-f0-9]{64}", ref["payload_hash"]):
+        integer(ref["input_revision"], "input_revision", 1)
+        integer(ref["revision"], "revision", 1)
+        seq = integer(ref["seq"], "seq", 0)
+        integer(ref["source_coord"], "source_coord", 0)
+        if ref["input_revision"] != ref["revision"] or _HEX64_FULLMATCH(ref["payload_hash"]) is None:
             raise ValueError("input_ref 修订/hash 不规范")
         if raw is not None:
-            seq = int(ref["seq"])
-            if seq >= len(raw) or any(ref[key] != raw[seq][key] for key in REF_FIELDS):
+            if seq >= raw_len:
+                raise ValueError("typed input_ref 与完整已接纳账不一致")
+            raw_row = raw[seq]
+            if any(ref[key] != raw_row[key] for key in REF_FIELDS):
                 raise ValueError("typed input_ref 与完整已接纳账不一致")
     source_coords = coords(value["source_coords"], "source_coords")
-    if source_coords != [ref["source_coord"] for ref in references]:
+    if len(source_coords) != len(references) or any(sc != ref["source_coord"] for sc, ref in zip(source_coords, references)):
         raise ValueError("事实源坐标与扁平输入引用不一一对应")
     p, kind = value["payload"], value["kind"]
-    slot = p["slot"] if kind in BI_KINDS + SEGMENT_KINDS else p["incoming"]["source_coord"] if kind == KINDS[0] else p["group_anchor"] if kind == KINDS[1] else p["window"] if kind == KINDS[2] else "TB-02-A"
-    if value["fact_key"] != canonical([kind, slot]).decode():
+    slot = p["slot"] if kind in _BI_OR_SEGMENT_KINDS else p["incoming"]["source_coord"] if kind == KINDS[0] else p["group_anchor"] if kind == KINDS[1] else p["window"] if kind == KINDS[2] else "TB-02-A"
+    if value["fact_key"] != _canonical_str([kind, slot]):
         raise ValueError("fact_key 与真实语义槽不符")
     if meta is not None:
         if meta["rule_revision"] not in RULE_CONTRACTS:
             raise ValueError("cut规则修订未声明")
         bi_schema, segment_schema, domain = RULE_CONTRACTS[meta["rule_revision"]]
-        if kind in SEGMENT_KINDS and p["schema_revision"] != segment_schema:
+        if kind in _SEGMENT_KINDS_SET and p["schema_revision"] != segment_schema:
             raise ValueError("段合同与cut规则版本不符")
-        if kind in BI_KINDS and p["schema_revision"] != bi_schema:
+        if kind in _BI_KINDS_SET and p["schema_revision"] != bi_schema:
             raise ValueError("新笔合同与cut规则版本不符")
         if kind == KINDS[3] and domain is not None and p["domain"] != domain:
             raise ValueError("TB-02-A 知识域与cut规则版本不符")
@@ -387,19 +493,34 @@ def _validate_fact(value, meta=None, raw=None, *, _identity_hash=None):
 def validate_sources(value, effective):
     """只核已有字段的原始来源与已封存对象引用，不计算包含、方向或分型。"""
     sources = set(value["source_coords"])
-    def walk(item, key=None):
-        if type(item) is dict:
+    issuperset = sources.issuperset
+    _dict = dict
+    _list = list
+    _type = type
+    list_keys = _SOURCE_LIST_KEYS
+    scalar_keys = _SOURCE_SCALAR_KEYS
+
+    def walk(item):
+        ti = _type(item)
+        if ti is _dict:
             for name, child in item.items():
-                walk(child, name)
-        elif type(item) is list:
-            if key in ("members", "high_sources", "low_sources", "source_coords", "window"):
-                if not set(item) <= sources:
-                    raise ValueError("typed payload 使用未绑定的原始坐标")
-            else:
-                for child in item:
+                tc = _type(child)
+                if tc is _dict:
                     walk(child)
-        elif key in ("source_coord", "group_anchor", "established_at") and item not in sources:
-            raise ValueError("typed payload 使用未绑定的原始坐标")
+                elif tc is _list:
+                    if name in list_keys:
+                        if not issuperset(child):
+                            raise ValueError("typed payload 使用未绑定的原始坐标")
+                    else:
+                        walk(child)
+                elif name in scalar_keys and child not in sources:
+                    raise ValueError("typed payload 使用未绑定的原始坐标")
+        elif ti is _list:
+            for child in item:
+                tc = _type(child)
+                if tc is _dict or tc is _list:
+                    walk(child)
+
     walk(value["payload"])
     for ref in value["input_refs"]:
         if effective.get(ref["source_coord"]) != ref:
@@ -449,7 +570,7 @@ def validate_axes(axes, object_ids=None):
         if evidence["scope"] != ("TB-02-D" if "CC-014" in axes and cid in ("CC-011", "CC-012", "CC-013", "CC-014") else "TB-02-C" if cid in ("CC-011", "CC-012", "CC-013") else "TB-02-A"):
             raise ValueError("逐轴证据范围不符")
         ids = strings(evidence["object_ids"], "axis.object_ids")
-        if len(ids) != len(set(ids)) or (object_ids is not None and not set(ids) <= object_ids):
+        if len(ids) != len(set(ids)) or (object_ids is not None and not object_ids.issuperset(ids)):
             raise ValueError("逐轴对象证据缺失/重复")
         strings(evidence["waiting_reasons"], "axis.waiting_reasons")
 
@@ -490,7 +611,7 @@ def validate_segment_links(records, axes=None):
             q = seq["payload"]["data"]
             if q["entity_id"] != d[prefix + "_id"] or q["segment_id"] != d["entity_id"] or q["role"] != role:
                 raise ValueError("段序列引用身份/角色不符")
-            if not set(seq["source_coords"]) <= set(r["source_coords"]):
+            if not set(r["source_coords"]).issuperset(seq["source_coords"]):
                 raise ValueError("段缺序列实际来源")
             if role == "FIRST_SEQUENCE" and d["strict"] is not None and not any(c["elements"] == d["strict"]["elements"] for c in q["facts"]["checks"]):
                 raise ValueError("strict未绑定FIRST检查")
@@ -543,7 +664,7 @@ def validate_shape_refs(shape, effective=None, groups=None):
                     text(ref[key], key)
                 for key in ("revision", "input_revision", "seq", "source_coord"):
                     integer(ref[key], key, 1 if key in ("revision", "input_revision") else 0)
-                if ref["revision"] != ref["input_revision"] or not re.fullmatch(r"[a-f0-9]{64}", ref["payload_hash"]):
+                if ref["revision"] != ref["input_revision"] or _HEX64_FULLMATCH(ref["payload_hash"]) is None:
                     raise ValueError("CC006 来源修订/hash 不规范")
                 if effective is not None and effective.get(ref["source_coord"]) != ref:
                     raise ValueError("CC006 来源不是该 cut 的有效原始修订")
@@ -596,7 +717,7 @@ def _fold_cursor(c, element, kill, check, v5=False):
         integer(c[name], "cursor." + name, 0)
     if c["budget_granted"] is not None:
         integer(c["budget_granted"], "cursor.budget_granted", 1)
-    if type(c["consumed_digest"]) is not str or not re.fullmatch(r"[0-9a-f]{16}", c["consumed_digest"]):
+    if type(c["consumed_digest"]) is not str or _HEX16_FULLMATCH(c["consumed_digest"]) is None:
         raise ValueError("K1游标指纹不规范")
     direction(c["dir_state"])
     for e in array(c["standard"], "cursor.standard"):
@@ -800,7 +921,7 @@ def validate_segment_payload(kind, p):
 
     def indices(xs):
         coords(xs, "stroke_indices")
-        if not set(xs) <= refs.keys():
+        if not all(x in refs for x in xs):
             raise ValueError("段事实引用了未绑定的笔")
 
     def construction(v):
@@ -848,9 +969,14 @@ def validate_segment_payload(kind, p):
                 indices(members)
             if second and members:
                 raise ValueError("SECOND元素不得带窗成员")
-            numbers = [int(m) for m in members]
-            if numbers != sorted(set(numbers)) or any(m <= int(e["stroke_idx"]) for m in numbers) or set(members) & set(e["stroke_indices"]):
-                raise ValueError("窗成员不在b之后或混入合并来源")
+            if members:
+                prev_m = int(e["stroke_idx"])
+                idx_set = set(e["stroke_indices"])
+                for m in members:
+                    mi = int(m)
+                    if mi <= prev_m or m in idx_set:
+                        raise ValueError("窗成员不在b之后或混入合并来源")
+                    prev_m = mi
 
     if kind in (SEGMENT_KINDS[0], SEGMENT_KINDS[6]):
         keys(d, ("entity_id", "construction", "stroke_refs"), kind)
@@ -1182,7 +1308,7 @@ def validate_bi_payload(kind, p):
         integer(e["price"], "price")
         coords(e["extreme_roots"], "extreme_roots")
         coords(e["source_coords"], "source_coords")
-        if not set(e["extreme_roots"]) <= set(e["source_coords"]):
+        if not set(e["source_coords"]).issuperset(e["extreme_roots"]):
             raise ValueError("实际根无原始来源")
         if v2:
             # 极值区：根集非空，首末序位覆盖全部根（单根时首末相同）。
