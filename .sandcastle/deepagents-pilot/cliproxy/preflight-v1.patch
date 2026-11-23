@@ -1616,10 +1616,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..00d60a4
+index 0000000..32515e6
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,456 @@
 +package executor
 +
 +import (
@@ -1964,8 +1964,120 @@ index 0000000..00d60a4
 +}
 +
 +func (r *notifyEOFReader) Close() error { return nil }
++
++func TestReviewReceiptCodexExecutorTerminalFailureWrongModelTaintsPriorTurn(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R3): if Turn 1 succeeded cleanly and Turn 2's first terminal event is
++	// a failure frame carrying a wrong model, CodexExecutor MUST validate its model before converting
++	// to StreamChunk{Err} and permanently taint the launch so Turn 1 cannot be sealed. Conversely,
++	// a transient failure frame carrying the expected model must fail Turn 2 without tainting Turn 1.
++	tlsState := preflightCodexVerifiedTLS(t, "chatgpt.com")
++	exec := NewCodexExecutor(&config.Config{})
++	auth := &cliproxyauth.Auth{
++		ID:       "codex-review-failmodel-test",
++		Provider: "codex",
++		Metadata: map[string]any{"access_token": "test-token", "account_id": "acct-test"},
++	}
++	req := cliproxyexecutor.Request{
++		Model:   "gpt-6.2-sol",
++		Payload: []byte(`{"model":"gpt-6.2-sol","stream":true,"input":[]}`),
++	}
++	opts := cliproxyexecutor.Options{
++		Stream:         true,
++		SourceFormat:   sdktranslator.FormatOpenAIResponse,
++		ResponseFormat: sdktranslator.FormatOpenAIResponse,
++	}
++	sse1 := "data: " + `{"type":"response.completed","response":{"id":"resp_fm_t1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1"}]}]}}` + "\n\n"
++
++	for _, tc := range []struct {
++		name     string
++		launch   string
++		session  string
++		sse2     string
++		wantSeal preflightreceipt.SealStatus
++	}{
++		{
++			name:     "wrong model on response.failed taints launch",
++			launch:   "review-a3333333-2222-4333-8444-555555555501",
++			session:  "019d0000-0000-7000-8000-555555555521",
++			sse2:     "data: " + `{"type":"response.failed","response":{"id":"resp_fm_t2","status":"failed","model":"gpt-6.2-astra","error":{"code":"server_error","message":"boom"}}}` + "\n\n",
++			wantSeal: preflightreceipt.SealRejected,
++		},
++		{
++			name:     "matching model on response.failed rejects turn only",
++			launch:   "review-a3333333-2222-4333-8444-555555555502",
++			session:  "019d0000-0000-7000-8000-555555555522",
++			sse2:     "data: " + `{"type":"response.failed","response":{"id":"resp_fm_t3","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"transient"}}}` + "\n\n",
++			wantSeal: preflightreceipt.SealOK,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			root := filepath.Join(t.TempDir(), "receipts")
++
++			// Turn 1: clean completion.
++			ctx1, c1, err := preflightreceipt.BeginReview(context.Background(), root, tc.launch, tc.session, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx1, lease1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			rt1 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++				return io.NopCloser(strings.NewReader(sse1))
++			}}
++			ctx1 = context.WithValue(ctx1, "cliproxy.roundtripper", http.RoundTripper(rt1))
++			stream1, err := exec.ExecuteStream(ctx1, auth, req, opts)
++			if err != nil {
++				t.Fatal(err)
++			}
++			for chunk := range stream1.Chunks {
++				if chunk.Err != nil {
++					t.Fatalf("turn 1 chunk err: %v", chunk.Err)
++				}
++				c1.ObserveStreamChunk(chunk.Payload)
++			}
++			lease1.End()
++			c1.Complete(true)
++			c1.HandlerDone(true)
++
++			// Turn 2: terminal failure frame.
++			ctx2, c2, err := preflightreceipt.BeginReview(context.Background(), root, tc.launch, tc.session, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx2, lease2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			rt2 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++				return io.NopCloser(strings.NewReader(tc.sse2))
++			}}
++			ctx2 = context.WithValue(ctx2, "cliproxy.roundtripper", http.RoundTripper(rt2))
++			stream2, err := exec.ExecuteStream(ctx2, auth, req, opts)
++			if err != nil {
++				t.Fatal(err)
++			}
++			sawErr := false
++			for chunk := range stream2.Chunks {
++				if chunk.Err != nil {
++					sawErr = true
++				}
++			}
++			if !sawErr {
++				t.Fatalf("expected stream error chunk on response.failed")
++			}
++			lease2.End()
++			c2.Complete(false)
++			c2.HandlerDone(false)
++
++			if st := preflightreceipt.SealReview(root, tc.launch, tc.session); st != tc.wantSeal {
++				t.Fatalf("SealReview = %v, want %v", st, tc.wantSeal)
++			}
++		})
++	}
++}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..8cf72a5 100644
+index 6074124..14689f5 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -15,6 +15,8 @@ import (
@@ -2030,31 +2142,37 @@ index 6074124..8cf72a5 100644
  		for scanner.Scan() {
  			line := scanner.Bytes()
  			var translatedLine []byte
-@@ -465,6 +497,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -465,6 +497,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				translatedLine = append([]byte("data: "), data...)
  				eventType := ojson.GetBytesNoCopy(data, "type").String()
  				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
-+					if strictReview && sawStrictTerminal {
++					if strictReview {
 +						if pc := preflightreceipt.From(ctx); pc != nil {
-+							pc.Taint()
++							pc.ValidateStrictFrameModel(translatedLine)
++							if sawStrictTerminal {
++								pc.Taint()
++							}
 +						}
 +					}
  					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
  						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
  						reporter.PublishFailure(ctx, errClearReplay)
-@@ -486,6 +523,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -486,6 +526,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  					sawOutputDelta = true
  				}
  				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
-+					if strictReview && sawStrictTerminal {
++					if strictReview {
 +						if pc := preflightreceipt.From(ctx); pc != nil {
-+							pc.Taint()
++							pc.ValidateStrictFrameModel(translatedLine)
++							if sawStrictTerminal {
++								pc.Taint()
++							}
 +						}
 +					}
  					streamErr := newCodexEmptyIncompleteStreamError()
  					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
  					reporter.PublishFailure(ctx, streamErr)
-@@ -521,6 +563,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -521,6 +569,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  			}
  
  			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
@@ -2080,7 +2198,7 @@ index 6074124..8cf72a5 100644
  			for i := range chunks {
  				select {
  				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent}:
-@@ -528,6 +589,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -528,6 +595,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  						emittedCount++
  					}
  				case <-ctx.Done():
@@ -2094,7 +2212,7 @@ index 6074124..8cf72a5 100644
  					return
  				}
  			}
-@@ -546,6 +614,59 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -546,6 +620,59 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
@@ -2687,10 +2805,10 @@ index 47f87de..3a1a2d4 100644
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-index e69de29..4d07cdf 100644
+index e69de29..dc7290a 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,201 @@
 +package auth
 +
 +import (
@@ -2826,6 +2944,12 @@ index e69de29..4d07cdf 100644
 +				// Formal review launches must observe upstream EOF; stopping early on client
 +				// cancellation could hide trailing duplicate terminal events or errors.
 +				c.Reject()
++				// Hold the execution lease until the producer goroutine finishes closing original
++				// (and completes any pending ObserveStreamChunk / defer Taint()) so SealReview can
++				// never observe inFlight == 0 and seal a prior turn ahead of producer taint.
++				for chunk := range original {
++					c.ObserveStreamChunk(chunk.Payload)
++				}
 +			} else {
 +				deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
 +				if !tracked || !deliverySupported || deliveryErr != nil {
@@ -3161,10 +3285,10 @@ index 0000000..6de513e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000..0d280f9
+index 0000000..2b99cbe
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,385 @@
 +package auth
 +
 +import (
@@ -3328,6 +3452,7 @@ index 0000000..0d280f9
 +	// Acknowledge clean downstream delivery and cancel ctx BEFORE upstream closes orig.
 +	finishDelivery(nil)
 +	cancel()
++	close(orig)
 +	for range out {
 +	}
 +	_ = resp.Body.Close()
@@ -3338,6 +3463,115 @@ index 0000000..0d280f9
 +	// and never recorded a sealable request.
 +	if st := waitSealReview(t, root, launch, session); st != preflightreceipt.SealRejected {
 +		t.Fatalf("SealReview after early stream cancel = %v, want SealRejected", st)
++	}
++}
++
++func TestPreflightReceiptStrictCodexCancelHoldsLeaseUntilProducerTaints(t *testing.T) {
++	// Sol P1 #1 & Astra P1 #1 (PR #2280 R3): when ctx cancels on Turn 2 after upstream resp.Body
++	// already closed but before the producer delivers its buffered terminal chunk, wrapPreflightStream
++	// MUST hold lease.End() until the producer finishes Taint() and closes original, so concurrent
++	// SealReview can NEVER observe inFlight == 0 and seal Turn 1 ahead of producer taint.
++	root := filepath.Join(t.TempDir(), "receipts")
++	tlsState := testVerifiedTLS(t, "chatgpt.com")
++	launch := "review-88881111-2222-4333-8444-999999999921"
++	session := "019d0000-0000-7000-8000-999999999921"
++	sse1 := `data: {"type":"response.completed","response":{"id":"resp_t1_race","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"step1"}]}]}}` + "\n\n"
++
++	// Turn 1: clean completion.
++	ctx1, c1, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	execCtx1, lease1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(execCtx1, &http.Client{Transport: status200StreamTestRT{tlsState: tlsState, body: sse1}})
++	req1, _ := http.NewRequestWithContext(execCtx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses",
++		strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp1, err := cl1.Do(req1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	raw1, err := io.ReadAll(resp1.Body)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := resp1.Body.Close(); err != nil {
++		t.Fatal(err)
++	}
++	c1.ObserveStreamChunk(raw1)
++	lease1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++
++	// Turn 2: upstream body reaches EOF and closes (c2.bodies == 0), then producer goroutine blocks
++	// trying to send buffered terminal while ctx cancels, and takes 40ms to finish Taint() + close(orig).
++	reqCtx2, cancel2 := context.WithCancel(context.Background())
++	defer cancel2()
++	ctx2, c2, err := preflightreceipt.BeginReview(reqCtx2, root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	execCtx2, lease2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl2 := httptransport.Decorate(execCtx2, &http.Client{Transport: status200StreamTestRT{tlsState: tlsState, body: sse1}})
++	req2, _ := http.NewRequestWithContext(execCtx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses",
++		strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp2, err := cl2.Do(req2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := io.ReadAll(resp2.Body); err != nil {
++		t.Fatal(err)
++	}
++	if err := resp2.Body.Close(); err != nil {
++		t.Fatal(err)
++	}
++
++	orig := make(chan executor.StreamChunk)
++	producerDone := make(chan struct{})
++	go func() {
++		defer close(producerDone)
++		defer close(orig)
++		<-execCtx2.Done()
++		time.Sleep(40 * time.Millisecond)
++		c2.Taint()
++	}()
++
++	out := wrapPreflightStream(execCtx2, lease2, orig)
++	cancel2()
++	for range out {
++	}
++	c2.Complete(false)
++	c2.HandlerDone(false)
++
++	// Immediately race SealReview while producer goroutine has NOT yet run c2.Taint()!
++	sawInFlight := false
++	deadline := time.Now().Add(2 * time.Second)
++	for {
++		st := preflightreceipt.SealReview(root, launch, session)
++		if st == preflightreceipt.SealOK {
++			t.Fatalf("SealReview raced ahead of producer Taint() and sealed Turn 1!")
++		}
++		if st == preflightreceipt.SealInFlight {
++			sawInFlight = true
++			if time.Now().After(deadline) {
++				t.Fatalf("SealReview stuck in SealInFlight after producer exit")
++			}
++			time.Sleep(2 * time.Millisecond)
++			continue
++		}
++		if st != preflightreceipt.SealRejected {
++			t.Fatalf("SealReview = %v, want SealRejected", st)
++		}
++		break
++	}
++	<-producerDone
++	if !sawInFlight {
++		t.Fatalf("expected concurrent SealReview to observe SealInFlight while producer Taint() was pending")
 +	}
 +}
 +
@@ -3668,10 +3902,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..8632f27 100644
+index e69de29..ceedb46 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2094 @@
+@@ -0,0 +1,2169 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3967,7 +4201,7 @@ index e69de29..8632f27 100644
 +		}
 +		var b strings.Builder
 +		for _, part := range item.Content {
-+			if part.Type == "" || part.Type == "output_text" {
++			if part.Type == "output_text" {
 +				b.WriteString(part.Text)
 +			}
 +		}
@@ -4244,6 +4478,81 @@ index e69de29..8632f27 100644
 +	return items, true
 +}
 +
++// ValidateStrictFrameModel validates model binding and strict protocol JSON structure on a raw
++// SSE frame before an executor converts a terminal failure/empty-incomplete event into a stream
++// error. Unlike ObserveStreamChunk, it does NOT taint on legitimate upstream error fields when any
++// declared model matches c.expectedModel (or no model is present), but DOES permanently taint the
++// review launch on wrong-model frames, conflicting models, or malformed/case-aliased protocol JSON.
++func (c *Collector) ValidateStrictFrameModel(payload []byte) {
++	if c == nil || !c.strictCodex || len(payload) == 0 {
++		return
++	}
++	for _, rawLine := range bytes.Split(payload, []byte{'\n'}) {
++		line := bytes.TrimSpace(rawLine)
++		if len(line) == 0 || line[0] == ':' {
++			continue
++		}
++		if bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) {
++			continue
++		}
++		isDataLine := false
++		if bytes.HasPrefix(line, []byte("data:")) {
++			isDataLine = true
++			line = bytes.TrimSpace(line[5:])
++		}
++		if len(line) == 0 || bytes.Equal(line, []byte("[DONE]")) {
++			continue
++		}
++		if !isDataLine && line[0] != '{' {
++			continue
++		}
++		evFields, err := decodeExactJSONObject(line, sseEventSchemaKeys)
++		if err != nil {
++			c.taintStreamAnomaly()
++			continue
++		}
++		evModel, hasEvModel, okEvModel := exactOptionalStringPresent(evFields, "model")
++		if !okEvModel || (hasEvModel && evModel == "") {
++			c.taintStreamAnomaly()
++			continue
++		}
++		var respModel string
++		var hasRespModel bool
++		if hasResponseError(evFields["response"]) {
++			respFields, err := decodeExactJSONObject(evFields["response"], sseResponseSchemaKeys)
++			if err != nil {
++				c.taintStreamAnomaly()
++				continue
++			}
++			var okRespModel bool
++			respModel, hasRespModel, okRespModel = exactOptionalStringPresent(respFields, "model")
++			if !okRespModel || (hasRespModel && respModel == "") {
++				c.taintStreamAnomaly()
++				continue
++			}
++		}
++		if hasEvModel && hasRespModel && evModel != respModel {
++			c.taintStreamAnomaly()
++			continue
++		}
++		explicitModel := ""
++		if hasRespModel {
++			explicitModel = respModel
++		} else if hasEvModel {
++			explicitModel = evModel
++		}
++		if explicitModel != "" {
++			c.mu.Lock()
++			mismatch := c.expectedModel == "" || explicitModel != c.expectedModel
++			c.mu.Unlock()
++			if mismatch {
++				c.taintStreamAnomaly()
++				continue
++			}
++		}
++	}
++}
++
 +// ObserveStreamChunk records SHA-256 hashes of the upstream response ID and final assistant output text
 +// and verifies the upstream response.model matches the bound review model without persisting any free text.
 +func (c *Collector) ObserveStreamChunk(payload []byte) {
@@ -4414,7 +4723,7 @@ index e69de29..8632f27 100644
 +					}
 +					var b strings.Builder
 +					for _, part := range parts {
-+						if part.Type == "" || part.Type == "output_text" {
++						if part.Type == "output_text" {
 +							b.WriteString(part.Text)
 +						}
 +					}
@@ -5767,10 +6076,10 @@ index e69de29..8632f27 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..0592658 100644
+index e69de29..3a1a952 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2642 @@
+@@ -0,0 +1,2705 @@
 +package preflightreceipt
 +
 +import (
@@ -8411,5 +8720,68 @@ index e69de29..0592658 100644
 +		if st := runSSE(t, launch, session, badSSE); st != SealRejected {
 +			t.Fatalf("case %d: protocol case-alias SSE = %v, want SealRejected", i, st)
 +		}
++	}
++}
++
++func TestReviewReceiptOutputHashRequiresExplicitOutputTextType(t *testing.T) {
++	// Astra P1 #3 (PR #2280 R3): content parts with missing, null, or empty type must NOT be
++	// included in last_output_sha256 on either response.completed or response.output_item.done.
++	root := filepath.Join(t.TempDir(), "receipts")
++	runSSE := func(t *testing.T, launch, session, sse string) ReviewReceipt {
++		t.Helper()
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: 200,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(strings.NewReader(sse)),
++				TLS:        verifiedTLSState("chatgpt.com"),
++			}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		raw, _ := io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk(raw)
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if st := SealReview(root, launch, session); st != SealOK {
++			t.Fatalf("SealReview = %v, want SealOK", st)
++		}
++		return readReviewReceiptFile(t, root, launch)
++	}
++
++	// 1. response.completed with missing/null/empty type parts ONLY -> last_output_sha256 MUST be empty.
++	sseNoType := "data: " + `{"type":"response.completed","response":{"id":"resp_notype1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"text":"missing"},{"type":null,"text":"nulltype"},{"type":"","text":"emptytype"}]}]}}` + "\n\n"
++	r1 := runSSE(t, "review-b7777777-2222-4333-8444-555555555501", "019d0000-0000-7000-8000-666666666701", sseNoType)
++	if r1.LastOutputSHA256 != "" {
++		t.Fatalf("response.completed untyped parts hashed as %q, want empty", r1.LastOutputSHA256)
++	}
++
++	// 2. response.output_item.done fallback with missing/empty type parts -> last_output_sha256 MUST be empty.
++	sseItemNoType := "data: " + `{"type":"response.created","response":{"id":"resp_notype2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"text":"missing"},{"type":"","text":"emptytype"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_notype2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	r2 := runSSE(t, "review-b7777777-2222-4333-8444-555555555502", "019d0000-0000-7000-8000-666666666702", sseItemNoType)
++	if r2.LastOutputSHA256 != "" {
++		t.Fatalf("response.output_item.done untyped parts hashed as %q, want empty", r2.LastOutputSHA256)
++	}
++
++	// 3. Mixed parts: ONLY explicit "output_text" part contributes to last_output_sha256.
++	sseMixed := "data: " + `{"type":"response.completed","response":{"id":"resp_mixed3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"text":"ignored"},{"type":"output_text","text":"real-verdict"},{"type":"","text":"also-ignored"}]}]}}` + "\n\n"
++	r3 := runSSE(t, "review-b7777777-2222-4333-8444-555555555503", "019d0000-0000-7000-8000-666666666703", sseMixed)
++	if r3.LastOutputSHA256 != sha256Hex("real-verdict") {
++		t.Fatalf("mixed parts hashed as %q, want sha256(\"real-verdict\")=%q", r3.LastOutputSHA256, sha256Hex("real-verdict"))
 +	}
 +}

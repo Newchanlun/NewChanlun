@@ -52,7 +52,7 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 python3 cliproxy/build.py --docker-context colima --output /tmp/cliproxy-preflight-build-01
 CLIPROXY_OFFLINE_RECEIPTS=/tmp/cliproxy-preflight-build-01/receipts \
   PYTHONPATH=../approval-signing LANGSMITH_TRACING=false LANGCHAIN_TRACING_V2=false OTEL_SDK_DISABLED=true \
-  python -m pytest tests/test_review_preflight.py -q --disable-warnings
+  python -m pytest tests/test_review_preflight.py tests/test_cliproxy_receipt_contract.py -q --disable-warnings
 python -m ruff check --select F,E9,B,I .
 ```
 

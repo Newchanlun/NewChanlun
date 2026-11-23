@@ -23,6 +23,7 @@ SCHEMA = "cliproxy-preflight-v1"
 REVIEW_SCHEMA = "cliproxy-review-v1"
 SESSION = re.compile(r"preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 REVIEW_LAUNCH = re.compile(r"review-(?:preflight-)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+REVIEW_PREFLIGHT_LAUNCH = re.compile(r"review-preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 REVIEW_SESSION = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 RECEIPT_ROUTES = frozenset({"codex:gpt-6.2-sol@chatgpt.com", "codex:gpt-6.2-astra@chatgpt.com",
                             "kimi@api.kimi.com", "kimi-ai@api.kimi.ai", "claude@api.anthropic.com",
@@ -103,19 +104,30 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
 def review_from_receipt(
     root: Path, launch: str, session: str, since: float, wait: float, *,
     expected_receipt_sha256: str = "", expected_response_id_sha256: str = "",
-    expected_output_sha256: str = "", min_requests: int = 1,
+    expected_output_sha256: str = "", min_requests: int = 1, require_content_match: bool = True,
 ) -> dict | None:
     """消费代理为正式独审 launch 封存的不可变 cliproxy-review-v1 收据；必须提供代理封存接口确认返回的
-    expected_receipt_sha256，防止仅凭尚未完成目录 fsync 的磁盘文件可见性放行。缺项、污染、哈希或请求数不符
-    立即返回 None；合法占位或未封存中间态在 wait 截止时间内轮询等待封存落盘，超时仍未封存返回 None。"""
-    if not REVIEW_LAUNCH.fullmatch(launch) or not REVIEW_SESSION.fullmatch(session):
+    expected_receipt_sha256，防止仅凭尚未完成目录 fsync 的磁盘文件可见性放行。
+    正式验收（require_content_match=True，默认）还必须提供独立的 expected_response_id_sha256、
+    expected_output_sha256 与 min_requests >= 1，仅工具调用无最终文本的轮次不得通过正式验收；
+    预检探针（require_content_match=False）仅允许 review-preflight-<uuid4> 命名空间。"""
+    launch_pattern = REVIEW_LAUNCH if require_content_match else REVIEW_PREFLIGHT_LAUNCH
+    if not launch_pattern.fullmatch(launch) or not REVIEW_SESSION.fullmatch(session):
         return None
     if not expected_receipt_sha256 or not SHA256_HEX.fullmatch(expected_receipt_sha256):
         return None
-    if expected_response_id_sha256 and not SHA256_HEX.fullmatch(expected_response_id_sha256):
+    if type(min_requests) is not int or min_requests < 1:
         return None
-    if expected_output_sha256 and not SHA256_HEX.fullmatch(expected_output_sha256):
-        return None
+    if require_content_match:
+        if not expected_response_id_sha256 or not SHA256_HEX.fullmatch(expected_response_id_sha256):
+            return None
+        if not expected_output_sha256 or not SHA256_HEX.fullmatch(expected_output_sha256):
+            return None
+    else:
+        if expected_response_id_sha256 and not SHA256_HEX.fullmatch(expected_response_id_sha256):
+            return None
+        if expected_output_sha256 and not SHA256_HEX.fullmatch(expected_output_sha256):
+            return None
     expected_keys = {
         "schema", "launch", "session", "started_ns", "finished_ns", "sealed_at_ns",
         "complete", "sealed", "tainted", "requests", "routes",
@@ -236,15 +248,11 @@ def main():
     arguments = sys.argv[1:]
     if arguments[:1] == ["--review-receipt"]:
         rest = arguments[1:]
-        if len(rest) == 8:
-            log_dir, launch, session, since, expires, budget, known_json, expected_receipt_sha = rest
-            expected_rid, expected_out, min_reqs = "", "", 1
-        elif len(rest) == 11:
-            (log_dir, launch, session, since, expires, budget, known_json,
-             expected_receipt_sha, expected_rid, expected_out, raw_min) = rest
-            min_reqs = int(raw_min)
-        else:
+        if len(rest) != 11:
             return 2
+        (log_dir, launch, session, since, expires, budget, known_json,
+         expected_receipt_sha, expected_rid, expected_out, raw_min) = rest
+        min_reqs = int(raw_min)
         remaining = float(expires) - time.time()
         if not 0 < remaining <= float(budget):
             return 2
@@ -257,11 +265,40 @@ def main():
             expected_response_id_sha256=expected_rid,
             expected_output_sha256=expected_out,
             min_requests=min_reqs,
+            require_content_match=True,
         )
         print(json.dumps({
             "launch": launch,
             "session": session,
             "complete_stable": bool(info is not None and info.get("sealed") is True),
+            "sealed": bool(info is not None and info.get("sealed") is True),
+            "routes": [known.get(route, "other") for route in (info["routes"] if info else [])],
+            "requests": info["requests"] if info else 0,
+            "response_id_sha256s": info["response_id_sha256s"] if info else [],
+            "last_response_id_sha256": info["last_response_id_sha256"] if info else "",
+            "last_output_sha256": info["last_output_sha256"] if info else "",
+        }), flush=True)
+        return 0
+    if arguments[:1] == ["--review-preflight-receipt"]:
+        rest = arguments[1:]
+        if len(rest) != 8:
+            return 2
+        log_dir, launch, session, since, expires, budget, known_json, expected_receipt_sha = rest
+        remaining = float(expires) - time.time()
+        if not 0 < remaining <= float(budget):
+            return 2
+        signal.signal(signal.SIGALRM, lambda *_: os._exit(2))
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+        known = {tuple(route): "@".join(route) for route in json.loads(known_json)}
+        info = review_from_receipt(
+            Path(log_dir), launch, session, float(since), remaining,
+            expected_receipt_sha256=expected_receipt_sha,
+            require_content_match=False,
+        )
+        print(json.dumps({
+            "launch": launch,
+            "session": session,
+            "preflight_sealed": bool(info is not None and info.get("sealed") is True),
             "sealed": bool(info is not None and info.get("sealed") is True),
             "routes": [known.get(route, "other") for route in (info["routes"] if info else [])],
             "requests": info["requests"] if info else 0,

@@ -50,20 +50,16 @@ def test_preflight_receipt_accepts_codex_model_scoped_routes_via_preflight_entry
     ) == expected
 
 
-@pytest.mark.parametrize("model,launch_prefix", [
-    (SOL, "review-"),
-    (ASTRA, "review-"),
-    (SOL, "review-preflight-"),
-    (ASTRA, "review-preflight-"),
-])
-def test_review_receipt_reader_and_cli_accept_sealed_codex_receipt(tmp_path: Path, model: str, launch_prefix: str):
-    launch = f"{launch_prefix}12345678-1234-4234-8234-123456789ab1"
+@pytest.mark.parametrize("model", [SOL, ASTRA])
+def test_formal_review_receipt_and_preflight_receipt_cli_separation(tmp_path: Path, model: str):
+    """Sol P2: 正式验收 --review-receipt 必须核验独立响应 ID、输出摘要与请求数；预检探针走 --review-preflight-receipt 且限定命名空间。"""
+    formal_launch = "review-12345678-1234-4234-8234-123456789ab1"
+    preflight_launch = "review-preflight-12345678-1234-4234-8234-123456789ab1"
     session = "019d0000-0000-7000-8000-000000000ab1"
     now = time.time_ns()
     rid1, rid2, out_sha = "1" * 64, "a" * 64, "b" * 64
-    payload = {
+    base = {
         "schema": "cliproxy-review-v1",
-        "launch": launch,
         "session": session,
         "started_ns": now - 2_000_000,
         "finished_ns": now - 1_000_000,
@@ -77,10 +73,17 @@ def test_review_receipt_reader_and_cli_accept_sealed_codex_receipt(tmp_path: Pat
         "last_response_id_sha256": rid2,
         "last_output_sha256": out_sha,
     }
-    _, receipt_sha = _write_private_receipt(tmp_path, launch, payload)
+    _, formal_sha = _write_private_receipt(tmp_path, formal_launch, {**base, "launch": formal_launch})
+    _, preflight_sha = _write_private_receipt(
+        tmp_path, preflight_launch, {**base, "launch": preflight_launch, "last_output_sha256": ""}
+    )
+    known = json.dumps([[f"codex:{model}", "chatgpt.com"]])
+    script = str(Path(log_mod.__file__).resolve())
+
+    # 1. Formal --review-receipt succeeds with full 11 args (receipt_sha + rid + out_sha + min_requests).
     got = log_mod.review_from_receipt(
-        tmp_path, launch, session, time.time() - 5, 0,
-        expected_receipt_sha256=receipt_sha,
+        tmp_path, formal_launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=formal_sha,
         expected_response_id_sha256=rid2, expected_output_sha256=out_sha, min_requests=2,
     )
     assert got == {
@@ -91,21 +94,17 @@ def test_review_receipt_reader_and_cli_accept_sealed_codex_receipt(tmp_path: Pat
         "last_response_id_sha256": rid2,
         "last_output_sha256": out_sha,
     }
-
-    # Verify CLI --review-receipt subprocess contract requires confirmed receipt_sha256 and matches Go JSON schema.
-    known = json.dumps([[f"codex:{model}", "chatgpt.com"]])
     proc = subprocess.run(
         [
-            sys.executable, "-I", str(Path(log_mod.__file__).resolve()),
-            "--review-receipt", str(tmp_path), launch, session,
-            str(time.time() - 5), str(time.time() + 5), "10", known, receipt_sha, rid2, out_sha, "2",
+            sys.executable, "-I", script,
+            "--review-receipt", str(tmp_path), formal_launch, session,
+            str(time.time() - 5), str(time.time() + 5), "10", known, formal_sha, rid2, out_sha, "2",
         ],
         capture_output=True, text=True, timeout=10, check=False,
     )
     assert proc.returncode == 0 and proc.stderr == ""
-    out = json.loads(proc.stdout)
-    assert out == {
-        "launch": launch,
+    assert json.loads(proc.stdout) == {
+        "launch": formal_launch,
         "session": session,
         "complete_stable": True,
         "sealed": True,
@@ -115,6 +114,50 @@ def test_review_receipt_reader_and_cli_accept_sealed_codex_receipt(tmp_path: Pat
         "last_response_id_sha256": rid2,
         "last_output_sha256": out_sha,
     }
+
+    # 2. Short 8-arg --review-receipt is rejected (rc=2); empty rid/out_sha or tool-only receipt fails closed.
+    short_proc = subprocess.run(
+        [
+            sys.executable, "-I", script,
+            "--review-receipt", str(tmp_path), formal_launch, session,
+            str(time.time() - 5), str(time.time() + 5), "10", known, formal_sha,
+        ],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert short_proc.returncode == 2
+    assert log_mod.review_from_receipt(
+        tmp_path, formal_launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=formal_sha,
+    ) is None
+    assert log_mod.review_from_receipt(
+        tmp_path, preflight_launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=preflight_sha,
+        expected_response_id_sha256=rid2, expected_output_sha256="", min_requests=1,
+    ) is None
+
+    # 3. --review-preflight-receipt accepts review-preflight-<uuid4> (returns preflight_sealed, NOT complete_stable)
+    #    and refuses formal review-<uuid4> launches.
+    pf_proc = subprocess.run(
+        [
+            sys.executable, "-I", script,
+            "--review-preflight-receipt", str(tmp_path), preflight_launch, session,
+            str(time.time() - 5), str(time.time() + 5), "10", known, preflight_sha,
+        ],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert pf_proc.returncode == 0 and pf_proc.stderr == ""
+    pf_out = json.loads(pf_proc.stdout)
+    assert "complete_stable" not in pf_out and pf_out["preflight_sealed"] is True and pf_out["routes"] == [f"codex:{model}@chatgpt.com"]
+
+    pf_formal_proc = subprocess.run(
+        [
+            sys.executable, "-I", script,
+            "--review-preflight-receipt", str(tmp_path), formal_launch, session,
+            str(time.time() - 5), str(time.time() + 5), "10", known, formal_sha,
+        ],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert pf_formal_proc.returncode == 0 and json.loads(pf_formal_proc.stdout)["preflight_sealed"] is False
 
 
 def test_review_receipt_rejects_mismatched_hashes_min_requests_and_unconfirmed_seal(tmp_path: Path):
@@ -143,9 +186,14 @@ def test_review_receipt_rejects_mismatched_hashes_min_requests_and_unconfirmed_s
     known = json.dumps([[f"codex:{SOL}", "chatgpt.com"]])
 
     # 1. Missing or mismatched expected_receipt_sha256 (e.g. disk visible after SealUnavailable) MUST fail closed.
-    assert log_mod.review_from_receipt(tmp_path, launch, session, time.time() - 5, 0) is None
     assert log_mod.review_from_receipt(
-        tmp_path, launch, session, time.time() - 5, 0, expected_receipt_sha256="0" * 64
+        tmp_path, launch, session, time.time() - 5, 0,
+        expected_response_id_sha256=rid2, expected_output_sha256=out_sha, min_requests=2,
+    ) is None
+    assert log_mod.review_from_receipt(
+        tmp_path, launch, session, time.time() - 5, 0,
+        expected_receipt_sha256="0" * 64,
+        expected_response_id_sha256=rid2, expected_output_sha256=out_sha, min_requests=2,
     ) is None
 
     # 2. Mismatched response_id, mismatched output_sha256, or insufficient requests MUST fail closed (even at wait=0).
@@ -153,6 +201,8 @@ def test_review_receipt_rejects_mismatched_hashes_min_requests_and_unconfirmed_s
         ("c" * 64, out_sha, 2),
         (rid2, "d" * 64, 2),
         (rid2, out_sha, 3),
+        ("", out_sha, 2),
+        (rid2, "", 2),
     ):
         assert log_mod.review_from_receipt(
             tmp_path, launch, session, time.time() - 5, 0,
@@ -189,6 +239,7 @@ def test_review_receipt_reader_waits_on_initial_reservation_placeholder_and_reje
     launch = "review-12345678-1234-4234-8234-123456789ab2"
     session = "019d0000-0000-7000-8000-000000000ab2"
     now = time.time_ns()
+    rid, out_sha = "a" * 64, "b" * 64
     base = {
         "schema": "cliproxy-review-v1",
         "launch": launch,
@@ -201,9 +252,9 @@ def test_review_receipt_reader_waits_on_initial_reservation_placeholder_and_reje
         "tainted": False,
         "requests": 1,
         "routes": [f"codex:{SOL}@chatgpt.com"],
-        "response_id_sha256s": ["a" * 64],
-        "last_response_id_sha256": "a" * 64,
-        "last_output_sha256": "b" * 64,
+        "response_id_sha256s": [rid],
+        "last_response_id_sha256": rid,
+        "last_output_sha256": out_sha,
     }
     sealed_bytes = json.dumps(base).encode("utf-8")
     sealed_sha = hashlib.sha256(sealed_bytes).hexdigest()
@@ -227,7 +278,9 @@ def test_review_receipt_reader_waits_on_initial_reservation_placeholder_and_reje
     }
     path, _ = _write_private_receipt(tmp_path, launch, placeholder)
     assert log_mod.review_from_receipt(
-        tmp_path, launch, session, time.time() - 5, 0, expected_receipt_sha256=sealed_sha
+        tmp_path, launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=sealed_sha,
+        expected_response_id_sha256=rid, expected_output_sha256=out_sha,
     ) is None
 
     def seal_later() -> None:
@@ -240,7 +293,9 @@ def test_review_receipt_reader_waits_on_initial_reservation_placeholder_and_reje
     timer.start()
     try:
         got = log_mod.review_from_receipt(
-            tmp_path, launch, session, time.time() - 5, 0.5, expected_receipt_sha256=sealed_sha
+            tmp_path, launch, session, time.time() - 5, 0.5,
+            expected_receipt_sha256=sealed_sha,
+            expected_response_id_sha256=rid, expected_output_sha256=out_sha,
         )
         assert got is not None and got["sealed"] is True
     finally:
@@ -250,14 +305,18 @@ def test_review_receipt_reader_waits_on_initial_reservation_placeholder_and_reje
     unsealed = {**base, "sealed": False, "sealed_at_ns": 0}
     _write_private_receipt(tmp_path, launch, unsealed)
     assert log_mod.review_from_receipt(
-        tmp_path, launch, session, time.time() - 5, 0, expected_receipt_sha256=sealed_sha
+        tmp_path, launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=sealed_sha,
+        expected_response_id_sha256=rid, expected_output_sha256=out_sha,
     ) is None
 
     timer2 = threading.Timer(0.03, seal_later)
     timer2.start()
     try:
         assert log_mod.review_from_receipt(
-            tmp_path, launch, session, time.time() - 5, 0.5, expected_receipt_sha256=sealed_sha
+            tmp_path, launch, session, time.time() - 5, 0.5,
+            expected_receipt_sha256=sealed_sha,
+            expected_response_id_sha256=rid, expected_output_sha256=out_sha,
         ) is not None
     finally:
         timer2.join()
@@ -274,24 +333,29 @@ def test_review_receipt_reader_waits_on_initial_reservation_placeholder_and_reje
     ):
         _, bad_sha = _write_private_receipt(tmp_path, launch, {**base, **bad})
         assert log_mod.review_from_receipt(
-            tmp_path, launch, session, time.time() - 5, 0, expected_receipt_sha256=bad_sha
+            tmp_path, launch, session, time.time() - 5, 0,
+            expected_receipt_sha256=bad_sha,
+            expected_response_id_sha256=rid, expected_output_sha256=out_sha,
         ) is None
 
     # Permissive root/dir/file modes and symlinks MUST fail closed.
     path, receipt_sha = _write_private_receipt(tmp_path, launch, base)
     os.chmod(path, 0o644)
     assert log_mod.review_from_receipt(
-        tmp_path, launch, session, time.time() - 5, 0, expected_receipt_sha256=receipt_sha
+        tmp_path, launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=receipt_sha, expected_response_id_sha256=rid, expected_output_sha256=out_sha,
     ) is None
     os.chmod(path, 0o600)
     os.chmod(path.parent, 0o755)
     assert log_mod.review_from_receipt(
-        tmp_path, launch, session, time.time() - 5, 0, expected_receipt_sha256=receipt_sha
+        tmp_path, launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=receipt_sha, expected_response_id_sha256=rid, expected_output_sha256=out_sha,
     ) is None
     os.chmod(path.parent, 0o700)
     os.chmod(tmp_path, 0o755)
     assert log_mod.review_from_receipt(
-        tmp_path, launch, session, time.time() - 5, 0, expected_receipt_sha256=receipt_sha
+        tmp_path, launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=receipt_sha, expected_response_id_sha256=rid, expected_output_sha256=out_sha,
     ) is None
     os.chmod(tmp_path, 0o700)
 
@@ -301,7 +365,8 @@ def test_review_receipt_reader_waits_on_initial_reservation_placeholder_and_reje
     path.unlink()
     path.symlink_to(target)
     assert log_mod.review_from_receipt(
-        tmp_path, launch, session, time.time() - 5, 0, expected_receipt_sha256=receipt_sha
+        tmp_path, launch, session, time.time() - 5, 0,
+        expected_receipt_sha256=receipt_sha, expected_response_id_sha256=rid, expected_output_sha256=out_sha,
     ) is None
 
 
@@ -351,9 +416,15 @@ def test_generated_go_codex_and_review_receipts_consumed_by_python():
         assert log_mod.review_from_receipt(
             root / name, launch, "019d0000-0000-7000-8000-000000000fff", since, 0,
             expected_receipt_sha256=seal_resp["receipt_sha256"],
+            expected_response_id_sha256=payload["last_response_id_sha256"],
+            expected_output_sha256=payload["last_output_sha256"],
+            min_requests=2,
         ) is None
         assert log_mod.review_from_receipt(
             root / name, launch, session, since, 0,
+            expected_response_id_sha256=payload["last_response_id_sha256"],
+            expected_output_sha256=payload["last_output_sha256"],
+            min_requests=2,
         ) is None
 
     tainted_launch = "review-12345678-1234-4234-8234-123456789aa3"
@@ -364,4 +435,6 @@ def test_generated_go_codex_and_review_receipts_consumed_by_python():
     assert log_mod.review_from_receipt(
         root / "review-codex-tainted", tainted_launch, tainted_session, tainted_payload["started_ns"] / 1e9, 0,
         expected_receipt_sha256=hashlib.sha256(tainted_raw).hexdigest(),
+        expected_response_id_sha256="a" * 64,
+        expected_output_sha256="b" * 64,
     ) is None
