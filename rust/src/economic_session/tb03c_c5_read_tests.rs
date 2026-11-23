@@ -1,7 +1,7 @@
 //! #1406 C5 H2：真实 /1 handle 的源捕获借入受控 Job，隔离验证 SQL 累计与失败。
 //! 注入仅 cfg(test) 存在；不替代 /2 固定卷/内容节点容量验收，不修改原件/金额期望。
 use super::tb03c_book_tests::Space;
-use super::tb03c_c5_tests::transfer_documents;
+use super::tb03c_c5_tests::{apply_sources, transfer_documents, Session};
 use super::{book, service, store};
 use crate::s_content::job::{Existing, Job, JobLimits, JobSnapshot, DEADLINE, LIMIT_EXCEEDED};
 use crate::session_protocol::canonical_json;
@@ -562,11 +562,35 @@ fn c5_h2_low_wire_limit_keeps_failed_bytes_and_does_not_charge_sql_rows_as_recor
 
 #[test]
 fn c5_h2_external_deadline_after_return_does_not_erase_read_accounting() {
-    let (mut s, _, incoming) = prepare("c5-h2-ingress", Source::Applied);
+    let (source, target, _) = transfer_documents();
+    let mut s = Session::new("c5-h2-ingress");
+    apply_sources(&mut s, &source, 3);
+    let outgoing = s.capture(&source, 3);
+    assert_eq!(outgoing["kind"], "Recorded", "{outgoing}");
+    assert_eq!(s.apply(1, &outgoing)["kind"], "Applied");
+    let incoming = s.capture(&target, 0);
+    assert_eq!(incoming["kind"], "Recorded", "{incoming}");
     let before = s.image(2);
     let rows = s.row_counts(2);
-    arm(&s, limits(), None, false);
-    HOOKS.with(|state| state.borrow_mut().expire_external_after = Some(1));
+    let clock = Rc::new(Cell::new(Instant::now()));
+    let clock_for_job = clock.clone();
+    let job = Job::new(
+        limits(),
+        Existing {
+            store_bytes: s.allocated(2),
+            staged_bytes: 0,
+        },
+        Box::new(move || clock_for_job.get()),
+    )
+    .unwrap();
+    HOOKS.with(|state| {
+        *state.borrow_mut() = Hooks {
+            ready: Some(job),
+            clock: Some(clock),
+            expire_external_after: Some(1),
+            ..Hooks::default()
+        }
+    });
     let rejected = s.apply(2, &incoming);
     assert!(
         rejected["error"]
@@ -580,7 +604,9 @@ fn c5_h2_external_deadline_after_return_does_not_erase_read_accounting() {
     assert!(snapshot.wire_bytes > 0);
     // Job 自身期限尚未到，先到的是外部 ingress；不能拿另一个钟覆盖它。
     assert_eq!(snapshot.stopped, None);
-    assert_zero_target(&mut s, &before, &rows);
+    assert_eq!(&s.image(2), &before);
+    assert_eq!(s.row_counts(2), rows);
+    s.recover_all();
 }
 
 #[test]
