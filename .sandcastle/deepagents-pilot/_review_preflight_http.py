@@ -59,6 +59,19 @@ def _error_info(body: str, *, code: str | None = None) -> dict:
     }
 
 
+def _strict_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    obj: dict[str, object] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate JSON key: {key}")
+        obj[key] = value
+    return obj
+
+
+def _strict_loads(text: str) -> object:
+    return json.loads(text, object_pairs_hook=_strict_object_pairs)
+
+
 def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
                      *, review_launch: str | None = None) -> dict:
     """最小连通探针采用 JSON schema，不验证真实审阅或工具调用。"""
@@ -125,8 +138,25 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
                     break
                 line = raw.decode("utf-8", "replace").strip()
                 if line.startswith("data:"):
-                    event = json.loads(line[5:]) if line[5:].strip().startswith("{") else {}
-                    inner = event.get("response") if isinstance(event.get("response"), dict) else {}
+                    payload = line[5:].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        event = _strict_loads(payload)
+                    except ValueError:
+                        if stream_error is None:
+                            stream_error = "非法 SSE 数据帧（JSON 损坏或存在重复键）"
+                        continue
+                    if not isinstance(event, dict) or not isinstance(event.get("type"), str) or not event["type"].strip():
+                        if stream_error is None:
+                            stream_error = "非法 SSE 数据帧（须为带非空 type 的 JSON 对象）"
+                        continue
+                    raw_inner = event.get("response")
+                    if raw_inner is not None and not isinstance(raw_inner, dict):
+                        if stream_error is None:
+                            stream_error = "非法 SSE 响应字段（response 须为 JSON 对象）"
+                        continue
+                    inner = raw_inner if isinstance(raw_inner, dict) else {}
                     inner_err = inner.get("error")
                     event_err = event.get("error")
                     ev_code = next(
@@ -219,7 +249,7 @@ def _seal_review_http(url: str, key: str, launch: str, session: str, timeout_sec
         try:
             with _open_http(request, timeout=remaining) as response:
                 raw = response.read(4096).decode("utf-8", "replace")
-                parsed = json.loads(raw)
+                parsed = _strict_loads(raw)
                 status = parsed.get("status") if isinstance(parsed, dict) and isinstance(parsed.get("status"), str) else None
                 ok = response.status == 200 and status == "sealed"
                 return {
@@ -232,7 +262,7 @@ def _seal_review_http(url: str, key: str, launch: str, session: str, timeout_sec
             raw = error.read(4096).decode("utf-8", "replace")
             status_word = ""
             try:
-                parsed = json.loads(raw)
+                parsed = _strict_loads(raw)
                 if isinstance(parsed, dict) and isinstance(parsed.get("status"), str):
                     status_word = parsed["status"]
             except ValueError:

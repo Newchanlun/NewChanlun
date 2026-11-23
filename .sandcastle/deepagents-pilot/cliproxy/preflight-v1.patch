@@ -3015,10 +3015,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..281ffef 100644
+index e69de29..fb611b1 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1684 @@
+@@ -0,0 +1,1774 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3412,6 +3412,90 @@ index e69de29..281ffef 100644
 +	c.Taint()
 +}
 +
++var errStrictJSONFormat = errors.New("invalid strict JSON SSE frame")
++
++func validateStrictJSONValue(dec *json.Decoder, depth int) error {
++	if depth > 128 {
++		return errStrictJSONFormat
++	}
++	tok, err := dec.Token()
++	if err != nil {
++		return err
++	}
++	return validateStrictJSONToken(dec, tok, depth)
++}
++
++func validateStrictJSONToken(dec *json.Decoder, tok json.Token, depth int) error {
++	delim, ok := tok.(json.Delim)
++	if !ok {
++		return nil
++	}
++	switch delim {
++	case '{':
++		seen := make(map[string]struct{})
++		for dec.More() {
++			keyTok, err := dec.Token()
++			if err != nil {
++				return err
++			}
++			key, ok := keyTok.(string)
++			if !ok {
++				return errStrictJSONFormat
++			}
++			if _, dup := seen[key]; dup {
++				return errStrictJSONFormat
++			}
++			seen[key] = struct{}{}
++			if err := validateStrictJSONValue(dec, depth+1); err != nil {
++				return err
++			}
++		}
++		endTok, err := dec.Token()
++		if err != nil {
++			return err
++		}
++		if endDelim, ok := endTok.(json.Delim); !ok || endDelim != '}' {
++			return errStrictJSONFormat
++		}
++		return nil
++	case '[':
++		for dec.More() {
++			if err := validateStrictJSONValue(dec, depth+1); err != nil {
++				return err
++			}
++		}
++		endTok, err := dec.Token()
++		if err != nil {
++			return err
++		}
++		if endDelim, ok := endTok.(json.Delim); !ok || endDelim != ']' {
++			return errStrictJSONFormat
++		}
++		return nil
++	default:
++		return errStrictJSONFormat
++	}
++}
++
++func validateStrictJSONObject(raw []byte) error {
++	dec := json.NewDecoder(bytes.NewReader(raw))
++	tok, err := dec.Token()
++	if err != nil {
++		return err
++	}
++	delim, ok := tok.(json.Delim)
++	if !ok || delim != '{' {
++		return errStrictJSONFormat
++	}
++	if err := validateStrictJSONToken(dec, tok, 0); err != nil {
++		return err
++	}
++	if _, err := dec.Token(); err != io.EOF {
++		return errStrictJSONFormat
++	}
++	return nil
++}
++
 +// ObserveStreamChunk records SHA-256 hashes of the upstream response ID and final assistant output text
 +// and verifies the upstream response.model matches the bound review model without persisting any free text.
 +func (c *Collector) ObserveStreamChunk(payload []byte) {
@@ -3437,6 +3521,12 @@ index e69de29..281ffef 100644
 +		if !isDataLine && line[0] != '{' {
 +			continue
 +		}
++		// Reject non-object JSON (e.g. data: null / []), trailing tokens, and duplicate keys at any depth
++		// before decoding so conflicting fields (e.g. error followed by null) can never overwrite earlier values.
++		if err := validateStrictJSONObject(line); err != nil {
++			c.taintStreamAnomaly()
++			continue
++		}
 +		// Two-stage json.RawMessage decode: error detection runs before optional item/output
 +		// decoding, non-assistant items never break unmarshaling, and malformed data frames fail closed.
 +		var ev struct {
@@ -3446,7 +3536,7 @@ index e69de29..281ffef 100644
 +			Item       json.RawMessage `json:"item"`
 +			Response   json.RawMessage `json:"response"`
 +		}
-+		if err := json.Unmarshal(line, &ev); err != nil {
++		if err := json.Unmarshal(line, &ev); err != nil || strings.TrimSpace(ev.Type) == "" {
 +			c.taintStreamAnomaly()
 +			continue
 +		}
@@ -4704,10 +4794,10 @@ index e69de29..281ffef 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..50baebb 100644
+index e69de29..7f2d3fe 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,1793 @@
+@@ -0,0 +1,1850 @@
 +package preflightreceipt
 +
 +import (
@@ -6499,5 +6589,62 @@ index e69de29..50baebb 100644
 +	})
 +	if st3 != SealOK || r3.Tainted || !r3.Complete || r3.LastOutputSHA256 != sha256Hex("verified") {
 +		t.Fatalf("legitimate non-message items / SSE framing rejected: st=%v r=%+v", st3, r3)
++	}
++
++	// 4. Sol P2 (R22): data: null or empty/missing type (both before and after valid response.completed) MUST taint.
++	badFrames := []struct {
++		name   string
++		id     string
++		chunks []string
++	}{
++		{
++			name: "null-before-completed", id: "4",
++			chunks: []string{
++				"data: null\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m4","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "null-after-completed", id: "5",
++			chunks: []string{
++				`data: {"type":"response.completed","response":{"id":"resp_m5","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++				"data: null\n\n",
++			},
++		},
++		{
++			name: "empty-object-before-completed", id: "6",
++			chunks: []string{
++				"data: {}\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m6","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "blank-type-after-completed", id: "7",
++			chunks: []string{
++				`data: {"type":"response.completed","response":{"id":"resp_m7","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++				`data: {"type":"   "}` + "\n\n",
++			},
++		},
++		// 5. Astra P1 (R22): duplicate keys overwriting error/status/model MUST taint.
++		{
++			name: "duplicate-top-level-error", id: "8",
++			chunks: []string{
++				`data: {"type":"response.completed","error":{"code":"boom"},"error":null,"response":{"id":"resp_m8","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++			},
++		},
++		{
++			name: "duplicate-inner-response-error-and-model", id: "9",
++			chunks: []string{
++				`data: {"type":"response.completed","response":{"id":"resp_m9","status":"failed","status":"completed","model":"wrong-model","model":"gpt-6.2-sol","error":{"message":"bad"},"error":null,"output":[]}}` + "\n\n",
++			},
++		},
++	}
++	for _, tc := range badFrames {
++		t.Run(tc.name, func(t *testing.T) {
++			st, rec := runTurn(t, "review-eeee1111-2222-4333-8444-55555555593"+tc.id, "019d0000-0000-7000-8000-00000000093"+tc.id, tc.chunks)
++			if st != SealRejected || !rec.Tainted {
++				t.Fatalf("%s failed to taint/reject: st=%v rec=%+v", tc.name, st, rec)
++			}
++		})
 +	}
 +}

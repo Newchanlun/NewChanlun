@@ -337,7 +337,42 @@ def test_preflight_usage_ledger_fails_closed_when_daily_cap_enabled(tmp_path, mo
     with pytest.raises(EffectPending, match="quota-unverifiable"):
         lane._record_preflight_usage(1)
 
-    # 4. 未启用每日额度闸时，不因损坏账本阻断主流程
+    # 4. FIFO（无对端）绝不阻塞同步 sweep/执行器循环，读写两条路径均立即返回 quota-unverifiable
+    usage_path.unlink()
+    os.mkfifo(usage_path, 0o600)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane.admit_quota()
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane._record_preflight_usage(1)
+    usage_path.unlink()
+
+    lock_path = root / "preflight-usage.lock"
+    lock_path.unlink(missing_ok=True)
+    os.mkfifo(lock_path, 0o600)
+    with pytest.raises(EffectPending, match="quota-unverifiable"):
+        lane._record_preflight_usage(1)
+    lock_path.unlink()
+
+    # 5. 未启用每日额度闸时，不因损坏账本阻断主流程
     monkeypatch.delenv(DAILY_INPUT_CAP_ENV)
     lane._record_preflight_usage(1)
     lane.admit_quota()
+
+
+def test_unwritable_readable_usage_ledger_blocks_before_sending_paid_preflight(lane, monkeypatch):
+    """R23（Astra P1）：启用每日额度闸且账本可读但不可追加（0o400）时，admit_quota 可读过闸，
+    但 admit_preflight 必须在发付费探针前持久化保守预留；预留写不进去时必须立即报 quota-unverifiable 且零探针发出。"""
+    usage_path = lane.state_root / module.PREFLIGHT_USAGE_FILE
+    lane.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    usage_path.write_text("", encoding="utf-8")
+    os.chmod(usage_path, 0o400)
+    monkeypatch.setenv(DAILY_INPUT_CAP_ENV, "1000000")
+    preflight_calls = []
+    lane.preflight = lambda t: (preflight_calls.append(t.head_sha), _fake_preflight_pass(t))[1]
+    try:
+        lane.admit_quota()  # 只读核验通过
+        with pytest.raises(EffectPending, match="quota-unverifiable"):
+            lane.target(1810, 1)
+        assert preflight_calls == []  # 预留失败前绝不发付费探针
+    finally:
+        os.chmod(usage_path, 0o600)

@@ -19,12 +19,15 @@ head 提交早于 48 小时的垫底；只改先后，不改派不派。合入�
 发起前 base、head 提交须已在宿主对象库（EXTERNAL-REVIEW.md：入口和 reviewer 都不 fetch）；缺失时调用 owner 注入的
 sync(number, base, head)，未注入报 needs-source-sync。
 
-合入（--auto-merge，用宿主 gh 凭据；本模块不构造 App 身份，审查身份归 external_review）：不预先挂 auto-merge，
-且因 GitHub REST/GraphQL 合入与追平接口均不支持服务端 `expected_base_ref` 绑定（读后写前若 PR 改指同仓非 main 分支，本机锁无法阻止远端改指），
-本模块关闭自动发起 `PUT /pulls/{n}/merge` 与 `PUT /pulls/{n}/update-branch`；满足全部准入条件（分支保护 strict/enforce_admins/禁止强推删分支、
-必需检查绑定审查专用 App、仓库 allow_auto_merge=false、精确 head 三项检查全绿、已发布 PASS 且无在途/待完成重审意图、改动清单不触及人工确认两类）的 PR
-一律输出 `needs-human-confirm`（`gated: ["base-ref-not-server-bound"]`），落后 PR 输出 `behind-waiting`；
-只要任何 PR 上挂着 GitHub 原生 auto-merge（无论该轮门禁是否通过、是否处于 waiting 或 allow_auto_merge=true），本模块都无条件撤掉原生 auto-merge（`disable_auto_merge`）。
+合入（--auto-merge，用宿主 gh 凭据；本模块不构造 App 身份，审查身份归 external_review）：不预先挂 auto-merge；
+依据 #1742 用户常驻授权（https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）与 #1909 裁定，
+因 GitHub REST/GraphQL 合入与追平接口均不支持服务端 `expected_base_ref` 绑定（读后写前若 PR 改指同仓非 main 分支，本机锁无法阻止远端改指），
+#2207 正式关闭无人值守循环内自动发起 `PUT /pulls/{n}/merge` 与 `PUT /pulls/{n}/update-branch`，改为每轮核验全部准入条件
+（分支保护 strict/enforce_admins/禁止强推删分支、必需检查绑定审查专用 App、仓库 allow_auto_merge=false、精确 head 三项检查全绿、
+已发布 PASS 且无在途/待完成重审意图、改动清单不触及人工确认两类）并将结果原子持久化到 `STATE_ROOT/sweep/merge-handoff.json`
+（区分普通门禁全绿的 `ready_for_merge`、队首落后需追平的 `behind_queue_head` 与敏感两类 `human_confirm`；日志仍兼容输出
+`needs-human-confirm` 与 `behind-waiting`），同时对任意挂着 GitHub 原生 auto-merge 的 PR 无条件撤掉原生 auto-merge（`disable_auto_merge`）。
+接手方为获常驻合入授权的主控巡航（`/graph-run` 与主图编排会话）或维护者，通过 `python -m pilot1742.review_sweep --handoff` 读取交接队列后按序执行追平与非敏感 PR 合入。
 两类的出处：用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
 仓库设置 allow_auto_merge 已关（GET /repos/{owner}/{repo} 的 allow_auto_merge=false，2026-11-09 由主控关闭），
 GitHub 原生 auto-merge 根本挂不上；sweep 每轮读这个设置：为 true 或读不到时记 native-auto-merge-enabled，并照常对所有挂着原生 auto-merge 的 PR 执行撤回。
@@ -65,6 +68,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -113,6 +117,8 @@ GATED_APP_IDS = {"DevSkim": 15368}
 # 现场核对 id；不在表里的 App 发的 status 一律不算（失败关闭）。
 APP_SLUGS = {5486877: "newchanlun-deepagents-1742", 5664795: "newchanlun-review-gate", 15368: "github-actions"}
 GH_TIMEOUT_SECONDS = 60
+MERGE_HANDOFF_FILE = "merge-handoff.json"
+MERGE_HANDOFF_SCHEMA = "review-sweep-merge-handoff-v1"
 # 执行器 App：交付时在冻结 head 上自写 deepagents/review=success（作者侧独审，不是正式非作者双审）。
 EXECUTOR_APP_ID = DEFAULT_IDENTITY["app_id"]
 
@@ -1075,7 +1081,88 @@ class Sweep:
                         raise
             actions.append({**entry, **result})
             early_logged.add(number)
+        self._write_merge_handoff(plan, states, gate_ok)
         return actions
+
+    def _write_merge_handoff(self, plan: list[tuple[dict[str, Any], dict[str, Any], str | None, bool]],
+                             states: dict[int, dict[str, Any]], gate_ok: bool) -> None:
+        """每轮 --auto-merge 完成门禁核验与撤回后，原子刷新 sweep/merge-handoff.json（0o600），
+        供获常驻授权的主控巡航（/graph-run、主图会话）或维护者通过 --handoff 读取并接手追平与合入。"""
+        behind_queue_head: list[dict[str, Any]] = []
+        ready_for_merge: list[dict[str, Any]] = []
+        human_confirm: list[dict[str, Any]] = []
+        for entry, result, _write, _armed in plan:
+            number = entry["pr"]
+            state = states.get(number) or {}
+            base = state.get("base")
+            action = result.get("action")
+            if gate_ok and action == "behind-waiting" and result.get("queue_head") is True:
+                behind_queue_head.append({"pr": number, "head": entry["head"], "base": base, "base_ref": "main"})
+            elif action == "needs-human-confirm":
+                gated = result.get("gated")
+                if gate_ok and gated == ["base-ref-not-server-bound"]:
+                    ready_for_merge.append({
+                        "pr": number, "head": entry["head"], "base": base,
+                        "base_ref": "main", "gated": gated,
+                    })
+                elif isinstance(gated, dict):
+                    human_confirm.append({
+                        "pr": number, "head": entry["head"], "base": base,
+                        "base_ref": "main", "gated": gated,
+                    })
+        payload = {
+            "schema": MERGE_HANDOFF_SCHEMA,
+            "updated_at": self.now().isoformat(),
+            "base_ref": "main",
+            "gate_ok": bool(gate_ok),
+            "behind_queue_head": behind_queue_head,
+            "ready_for_merge": ready_for_merge,
+            "human_confirm": human_confirm,
+        }
+        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = self.folder / MERGE_HANDOFF_FILE
+        tmp = self.folder / f".{MERGE_HANDOFF_FILE}.{os.getpid()}.{time.time_ns()}.tmp"
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, target)
+
+
+def read_merge_handoff(state_root: Path = STATE_ROOT) -> dict[str, Any]:
+    """只读读取 sweep/merge-handoff.json（非阻塞、拒绝符号链接/FIFO/越权文件），供主控巡航或操作员消费。"""
+    path = state_root / "sweep" / MERGE_HANDOFF_FILE
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {
+            "schema": MERGE_HANDOFF_SCHEMA,
+            "updated_at": None,
+            "base_ref": "main",
+            "gate_ok": False,
+            "behind_queue_head": [],
+            "ready_for_merge": [],
+            "human_confirm": [],
+        }
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077) or st.st_size > 1_048_576:
+            raise ValueError(f"merge-handoff 文件类型、属主、权限或大小不合法：{path}")
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            data = json.load(handle)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not isinstance(data, dict) or data.get("schema") != MERGE_HANDOFF_SCHEMA:
+        raise ValueError(f"merge-handoff 格式无效：{path}")
+    return data
 
 
 def report(actions: list[dict[str, Any]], prefix: str = "") -> None:
@@ -1199,17 +1286,29 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] == ["run-review"]:
         return run_review(argv[1:])
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep")
-    parser.add_argument("--private-key", required=True, type=Path, help="只原样交给审查子进程")
+    parser.add_argument("--private-key", type=Path, help="只原样交给审查子进程（--handoff 只读模式不需要）")
+    parser.add_argument("--state-root", type=Path, default=STATE_ROOT, help="审查状态根（默认 STATE_ROOT）")
+    parser.add_argument("--handoff", action="store_true",
+                        help="只读输出 sweep/merge-handoff.json 交接队列（供主控巡航或维护者消费追平与合入）")
     parser.add_argument("--max-running", type=int, default=2)
     parser.add_argument("--loop", type=float, default=0,
                         help=f"0 只跑一轮；循环时间隔至少 {MIN_LOOP_SECONDS:g} 秒（每轮每个 PR 约 4 次读接口，受 GitHub 核心限额约束）")
     parser.add_argument("--auto-merge", action="store_true",
-                        help="默认关。用宿主 gh 凭据核验门禁、分类人工确认并撤原生 auto-merge（不自动发起 merge/update-branch 写分支）")
+                        help="默认关。用宿主 gh 凭据核验门禁、撤原生 auto-merge 并刷新 sweep/merge-handoff.json（不自动发起 merge/update-branch）")
     args = parser.parse_args(argv)
+    if args.handoff:
+        try:
+            print(json.dumps(read_merge_handoff(args.state_root), ensure_ascii=False, indent=2), flush=True)
+            return 0
+        except (OSError, ValueError) as error:
+            print(json.dumps({"action": "handoff-unreadable", "reason": str(error)}, ensure_ascii=False), file=sys.stderr, flush=True)
+            return 2
+    if args.private_key is None:
+        parser.error("--private-key is required unless --handoff is set")
     if not math.isfinite(args.loop) or not (args.loop == 0 or args.loop >= MIN_LOOP_SECONDS):  # 挡住负数、nan、inf
         parser.error(f"--loop 须为 0 或至少 {MIN_LOOP_SECONDS:g} 秒")
-    sweep = Sweep(GhCli(), ExternalReview(None), spawner(args.private_key), max_running=args.max_running,
-                  auto_merge=args.auto_merge)
+    sweep = Sweep(GhCli(), ExternalReview(None, state_root=args.state_root), spawner(args.private_key),
+                  state_root=args.state_root, max_running=args.max_running, auto_merge=args.auto_merge)
     while True:
         try:
             report(sweep.tick())

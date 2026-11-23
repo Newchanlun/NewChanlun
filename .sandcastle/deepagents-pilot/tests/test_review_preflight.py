@@ -2296,3 +2296,37 @@ def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase
         server.shutdown()
         server.server_close()
         serving.join()
+
+
+@pytest.mark.parametrize("bad_chunk", [
+    "data: null\n\n",
+    "data: []\n\n",
+    "data: {}\n\n",
+    'data: {"type": ""}\n\n',
+    'data: {"type": "   "}\n\n',
+    'data: {"type": "response.completed", "error": {"code": "x"}, "error": null, "response": {"id": "r1", "status": "completed", "model": "gpt-6.2-sol", "output": []}}\n\n',
+    'data: {"type": "response.completed", "response": {"id": "r1", "status": "failed", "status": "completed", "model": "wrong", "model": "gpt-6.2-sol", "error": {"message": "bad"}, "error": null, "output": []}}\n\n',
+])
+def test_round_trip_rejects_null_empty_type_and_duplicate_key_sse_frames(monkeypatch, bad_chunk):
+    """R23（Sol P2 / Astra P1）：非控制 SSE data 帧为 null、非对象、缺非空 type 或含重复 JSON 键时，
+    无论出现在合法 response.completed 之前还是之后，round_trip 都必须拒绝（ok=False）。"""
+    import io
+
+    good_done = (
+        'data: {"type": "response.completed", "response": {"id": "r_ok", "status": "completed", '
+        f'"model": "{SOL}", "output": []}}' + "\n\n"
+    )
+
+    class FakeResp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    for payload in (bad_chunk + good_done, good_done + bad_chunk):
+        monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None, p=payload: FakeResp(p.encode()))
+        trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
+        assert trip["ok"] is False, (payload, trip)

@@ -964,8 +964,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="审查 App 私钥，只原样转给 sweep 派的 review-pr；不复用 --private-key（执行器 App）。"
                             "审查身份文件（external_review.IDENTITY_CONFIG）存在时必须给")
     serve.add_argument("--review-sweep-auto-merge", action="store_true",
-                       help="review_sweep 执行门禁核验、人工确认分类与无条件撤回原生 auto-merge（不自动发起 merge/update-branch）；"
-                            "没有 --review-sweep 时记一行警告并忽略")
+                       help="review_sweep 执行门禁核验、无条件撤回原生 auto-merge 并刷新 sweep/merge-handoff.json 交接队列"
+                            "（不自动发起 merge/update-branch）；没有 --review-sweep 时记一行警告并忽略")
     serve.add_argument("--review-sweep-max-running", type=int, default=None,
                        help="HOST 上同时在跑的审查上限（默认 1；操作员手动起的 review-pr 也算）；"
                             "没有 --review-sweep 时记一行警告并忽略")

@@ -1267,28 +1267,42 @@ class ExternalReview:
     def _daily_cap_enabled() -> bool:
         return bool(os.environ.get(DAILY_INPUT_CAP_ENV, "").strip())
 
-    def _record_preflight_usage(self, probes: int) -> None:
-        """把预检发出的上游探针折算 token 追加写入 state_root/preflight-usage.jsonl，纳入每日额度闸。
-        启用每日额度闸时，账本类型/权限不符或持久化失败按 quota-unverifiable 失败闭合，绝不静默丢弃。"""
+    @staticmethod
+    def _open_trusted_regular(path: Path, flags: int, mode: int = 0o600) -> tuple[int, os.stat_result]:
+        """以 O_NOFOLLOW | O_NONBLOCK 打开并用同一 fd 的 fstat 核验普通文件、同属主且无 group/other 权限，
+        防止 FIFO 挂死同步 sweep 循环或符号链接篡改。"""
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077):
+                raise PermissionError(f"非普通文件、属主或权限不符：{path.name}")
+            return fd, st
+        except Exception:
+            os.close(fd)
+            raise
+
+    def _record_preflight_usage(self, probes: int, *, reservation_id: str | None = None) -> str | None:
+        """把预检探针折算 token 追加并 fsync 到 state_root/preflight-usage.jsonl，纳入每日额度闸。
+        在发付费探针前先持久化保守预留，发送后按确定未发送的探针核减；启用每日额度闸时，
+        账本/锁文件为 FIFO/符号链接、权限不符或持久化失败按 quota-unverifiable 失败闭合，绝不发未记账请求。"""
         if probes <= 0:
-            return
+            return None
         strict = self._daily_cap_enabled()
         lock_fd = -1
         try:
             self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
             usage_path = self.state_root / PREFLIGHT_USAGE_FILE
-            lock_fd = os.open(self.state_root / "preflight-usage.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            lock_fd, _ = self._open_trusted_regular(self.state_root / "preflight-usage.lock", os.O_CREAT | os.O_RDWR)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             now = time.time()
-            row = json.dumps({"at": now, "probes": probes, "tokens": probes * PREFLIGHT_TOKENS_PER_PROBE}) + "\n"
-            fd = os.open(usage_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            entry: dict[str, Any] = {"at": now, "probes": probes, "tokens": probes * PREFLIGHT_TOKENS_PER_PROBE}
+            if reservation_id:
+                entry["id"] = reservation_id
+            row = json.dumps(entry) + "\n"
+            fd, st = self._open_trusted_regular(usage_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
             try:
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077):
-                    if strict:
-                        raise EffectPending("quota-unverifiable：预检用量账本类型、属主或权限不符，暂停派发以防绕过每日额度闸")
-                    return
                 os.write(fd, row.encode("utf-8"))
+                os.fsync(fd)
                 size = st.st_size + len(row)
             finally:
                 os.close(fd)
@@ -1296,7 +1310,7 @@ class ExternalReview:
                 keep_since = now - 172_800
                 kept: list[str] = []
                 try:
-                    rfd = os.open(usage_path, os.O_RDONLY | os.O_NOFOLLOW)
+                    rfd, _ = self._open_trusted_regular(usage_path, os.O_RDONLY)
                     try:
                         raw = os.fdopen(rfd, "r", encoding="utf-8", errors="replace").read()
                     except Exception:
@@ -1310,28 +1324,91 @@ class ExternalReview:
                         except ValueError:
                             continue
                     tmp = self.state_root / f".{PREFLIGHT_USAGE_FILE}.{os.getpid()}.{time.time_ns()}.tmp"
-                    wfd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                    wfd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
                     try:
                         with os.fdopen(wfd, "w", encoding="utf-8") as handle:
                             handle.write("".join(f"{line}\n" for line in kept))
+                            handle.flush()
+                            os.fsync(handle.fileno())
                     except Exception:
                         tmp.unlink(missing_ok=True)
                         raise
                     os.replace(tmp, usage_path)
                 except OSError:
                     pass
+            return reservation_id
         except OSError as error:
             if strict:
                 raise EffectPending(
                     f"quota-unverifiable：无法持久化预检用量账本（{type(error).__name__}），暂停派发以防绕过每日额度闸"
                 ) from None
+            return None
+        finally:
+            if lock_fd >= 0:
+                os.close(lock_fd)
+
+    def _reconcile_preflight_usage(self, reservation_id: str | None, actual_probes: int, reserved_probes: int) -> None:
+        """预检返回后核对实际发送探针数：等于预留无需重写；少于预留（确定未发送）在锁内原子核减；
+        若核减写失败则保留保守预留（只多不少，失败闭合）。"""
+        if actual_probes > reserved_probes:
+            self._record_preflight_usage(actual_probes - reserved_probes)
+            return
+        if not reservation_id or actual_probes >= reserved_probes or actual_probes < 0:
+            return
+        lock_fd = -1
+        try:
+            usage_path = self.state_root / PREFLIGHT_USAGE_FILE
+            lock_fd, _ = self._open_trusted_regular(self.state_root / "preflight-usage.lock", os.O_CREAT | os.O_RDWR)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            rfd, _ = self._open_trusted_regular(usage_path, os.O_RDONLY)
+            try:
+                raw = os.fdopen(rfd, "r", encoding="utf-8", errors="replace").read()
+            except Exception:
+                os.close(rfd)
+                raise
+            updated: list[str] = []
+            changed = False
+            for line in raw.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    updated.append(line)
+                    continue
+                if isinstance(item, dict) and item.get("id") == reservation_id:
+                    changed = True
+                    if actual_probes > 0:
+                        item["probes"] = actual_probes
+                        item["tokens"] = actual_probes * PREFLIGHT_TOKENS_PER_PROBE
+                        updated.append(json.dumps(item))
+                    continue
+                updated.append(line)
+            if not changed:
+                return
+            tmp = self.state_root / f".{PREFLIGHT_USAGE_FILE}.{os.getpid()}.{time.time_ns()}.tmp"
+            wfd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            try:
+                with os.fdopen(wfd, "w", encoding="utf-8") as handle:
+                    handle.write("".join(f"{line}\n" for line in updated))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+            os.replace(tmp, usage_path)
+        except OSError:
+            pass
         finally:
             if lock_fd >= 0:
                 os.close(lock_fd)
 
     def admit_preflight(self, target: ReviewTarget, *, pre_dispatch: bool = False) -> dict:
-        """新 attempt 登记与沿用退回共用的启动前预检闸：任一路由或模型证明失败即拒，不发状态。"""
+        """新 attempt 登记与沿用退回共用的启动前预检闸：先在发送前持久化保守探针额度预留（失败即阻断、不发请求），
+        任一路由或模型证明失败即拒，不发状态；确定未发送的探针随后核减。"""
         suffix = "未发状态、待退避重试" if pre_dispatch else "未占 attempt、未发状态"
+        reserved_probes = len(MODELS)
+        reservation_id = self._record_preflight_usage(reserved_probes, reservation_id=str(uuid.uuid4()))
         try:
             raw = self.preflight(target)
         except EffectPending:
@@ -1346,7 +1423,7 @@ class ExternalReview:
         else:
             rc = 0
             report = raw
-        self._record_preflight_usage(self._preflight_sent_probes(report))
+        self._reconcile_preflight_usage(reservation_id, self._preflight_sent_probes(report), reserved_probes)
         limited = self._preflight_rate_limited_models(report)
         if limited:
             self._record_preflight_rate_limit(target, rate_limited=True, models=limited)
@@ -1663,7 +1740,7 @@ class ExternalReview:
 
         rfd = -1
         try:
-            rfd = os.open(usage_path, os.O_RDONLY | os.O_NOFOLLOW)
+            rfd = os.open(usage_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             rfd = -1
         except OSError as error:

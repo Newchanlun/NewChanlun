@@ -1407,8 +1407,9 @@ def test_sweep_flags_without_review_sweep_are_ignored_with_one_warning(monkeypat
 
 
 def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
-    """#1915 合入后 main 的合入不设人工批准，部署模板同时开审查与自动合入；
-    代码默认仍关，见 test_auto_merge_is_off_unless_explicitly_enabled。"""
+    """#1915 裁定 main 普通 PR 不设人工批准；#2207 依据 #1742/#1909 裁定保留部署模板中的
+    --review-sweep 与 --review-sweep-auto-merge 用于维持每轮门禁核验、无条件撤原生 auto-merge
+    并刷新 sweep/merge-handoff.json 交接给主控巡航/维护者；代码默认仍关，见 test_auto_merge_is_off_unless_explicitly_enabled。"""
     import plistlib
     from pathlib import Path
     plist = Path(module.__file__).resolve().parents[2] / "launchd" / "com.newchanlun.deepagents-executor.plist"
@@ -2631,3 +2632,40 @@ def test_preflight_induced_quota_pause_before_pending_does_not_burn_resume_and_r
     assert lane.status(1810)[0]["outcome"]["verdict"] == "PASS"
     assert not (folder / ext.QUOTA_PAUSED_FILE).exists()
     assert not list((lane.state_root / "sweep").glob("*.resumes"))
+
+
+def test_merge_handoff_persisted_atomically_and_readable_via_cli(lane, capsys):
+    """R23（Sol P1）：--auto-merge 每轮将门禁就绪普通 PR、队首落后 PR 与敏感两类 PR 原子落盘至
+    sweep/merge-handoff.json（0o600），并可经 review_sweep --handoff 只读消费；门禁不安全时清空就绪/追平队列。"""
+    import stat
+
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+    head = lane.gateway.pr["head"]["sha"]
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1811, 1812])
+    github.states[1810] = {"mergeable_state": "clean", "auto_merge": False}
+    github.states[1811] = {"mergeable_state": "behind", "auto_merge": False}
+    github.states[1812] = {"mergeable_state": "clean", "auto_merge": False}
+    github.files[1810] = [{"filename": "src/normal.py", "status": "modified", "changes": 1}]
+    github.files[1811] = [{"filename": "src/behind.py", "status": "modified", "changes": 1}]
+    github.files[1812] = [{"filename": "rust/src/trading/order.rs", "status": "modified", "changes": 1}]
+    green(github, head)
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    sweep.tick()
+
+    handoff_path = lane.state_root / "sweep" / module.MERGE_HANDOFF_FILE
+    assert handoff_path.is_file() and (stat.S_IMODE(handoff_path.stat().st_mode) & 0o077) == 0
+    assert module.main(["--state-root", str(lane.state_root), "--handoff"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["schema"] == module.MERGE_HANDOFF_SCHEMA and data["gate_ok"] is True
+    assert [row["pr"] for row in data["ready_for_merge"]] == [1810]
+    assert [row["pr"] for row in data["behind_queue_head"]] == [1811]
+    assert [row["pr"] for row in data["human_confirm"]] == [1812]
+
+    # 门禁失效（allow_auto_merge=True）时，清空 ready_for_merge 与 behind_queue_head
+    github.allow_auto_merge = lambda: True
+    sweep.tick()
+    assert module.main(["--state-root", str(lane.state_root), "--handoff"]) == 0
+    unsafe = json.loads(capsys.readouterr().out)
+    assert unsafe["gate_ok"] is False and unsafe["ready_for_merge"] == [] and unsafe["behind_queue_head"] == []
+    assert [row["pr"] for row in unsafe["human_confirm"]] == [1812]
