@@ -8,23 +8,72 @@ const crypto = require("node:crypto");
 const root = path.resolve(__dirname, "../..");
 const clientPath = path.join(root, "s_session/browser/tb01c-client.js");
 const htmlPath = path.join(root, "s_session/browser/index.html");
+const htmlScriptSource = fs.readFileSync(htmlPath, "utf8").match(/<script>([\s\S]*?)<\/script>/)[1].replace(/load\("current"\);\s*$/, "");
 const API = require(clientPath);
 const hashBytes = (bytes) =>
   crypto.createHash("sha256").update(bytes).digest("hex");
+function utf8Compare(a, b) {
+  const len = a.length < b.length ? a.length : b.length;
+  for (let i = 0; i < len; i++) {
+    const ca = a.charCodeAt(i);
+    const cb = b.charCodeAt(i);
+    if (ca >= 0x80 || cb >= 0x80) return Buffer.compare(Buffer.from(a), Buffer.from(b));
+    if (ca !== cb) return ca < cb ? -1 : 1;
+  }
+  return a.length < b.length ? -1 : a.length > b.length ? 1 : 0;
+}
 function canonical(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
-  return (
-    "{" +
-    Object.keys(value)
-      .sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))
-      .map((k) => JSON.stringify(k) + ":" + canonical(value[k]))
-      .join(",") +
-    "}"
-  );
+  if (Array.isArray(value)) {
+    let out = "[";
+    for (let i = 0; i < value.length; i++) {
+      if (i > 0) out += ",";
+      out += canonical(value[i]);
+    }
+    return out + "]";
+  }
+  const keys = Object.keys(value);
+  if (keys.length > 1) keys.sort(utf8Compare);
+  let out = "{";
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (i > 0) out += ",";
+    out += JSON.stringify(k) + ":" + canonical(value[k]);
+  }
+  return out + "}";
 }
 const hash = (value) => hashBytes(canonical(value));
-const copy = (value) => JSON.parse(JSON.stringify(value));
+function copy(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    const out = new Array(value.length);
+    for (let i = 0; i < value.length; i++) out[i] = copy(value[i]);
+    return out;
+  }
+  const out = {};
+  const keys = Object.keys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = value[k];
+    if (v !== undefined) out[k] = copy(v);
+  }
+  return out;
+}
+const projectionCache = new WeakMap();
+function cachedProjection(state, mode) {
+  let byMode = projectionCache.get(state);
+  if (!byMode) {
+    byMode = new Map();
+    projectionCache.set(state, byMode);
+  }
+  let entry = byMode.get(mode);
+  if (!entry) {
+    const p = projection(state, mode);
+    entry = { p, digest: hash(p) };
+    byMode.set(mode, entry);
+  }
+  return entry;
+}
 function htmlContext(extra = {}) {
   const elements = new Map();
   function element() {
@@ -71,11 +120,7 @@ function htmlContext(extra = {}) {
     performance,
     ...extra,
   });
-  const source = fs
-    .readFileSync(htmlPath, "utf8")
-    .match(/<script>([\s\S]*?)<\/script>/)[1]
-    .replace(/load\("current"\);\s*$/, "");
-  vm.runInContext(source, context);
+  vm.runInContext(htmlScriptSource, context);
   return { context, elements };
 }
 // root 真实 HTTP driver 可复用这三份实际 HTML 函数；不存在测试放行实现。
@@ -174,7 +219,7 @@ function projection(state, mode) {
       for (let i = 0; i < aa.length; i++) {
         const c =
           typeof aa[i] === "string"
-            ? Buffer.compare(Buffer.from(aa[i]), Buffer.from(bb[i]))
+            ? utf8Compare(aa[i], bb[i])
             : aa[i] < bb[i]
               ? -1
               : aa[i] > bb[i]
@@ -202,7 +247,7 @@ function projection(state, mode) {
         : "s-record-order/1",
   };
 }
-function token(p, offset, pageSize = TEST_PAGE_SIZE) {
+function token(p, offset, pageSize = TEST_PAGE_SIZE, cutDigest = hash(p)) {
   const t = Object.fromEntries(
     [
       "session_id",
@@ -222,24 +267,26 @@ function token(p, offset, pageSize = TEST_PAGE_SIZE) {
     order_version: p.order_version,
     page_size: String(pageSize),
     offset: String(offset),
-    cut_projection_digest: hash(p),
+    cut_projection_digest: cutDigest,
     issued_capture_digest: "a".repeat(64),
   });
   t.token_checksum = hash(t);
   return t;
 }
-function page(p, offset, pageSize = TEST_PAGE_SIZE) {
+function page(p, offset, pageSize = TEST_PAGE_SIZE, cutDigest = hash(p)) {
   const end = Math.min(p.rows.length, offset + pageSize);
-  return {
-    ...copy(p),
-    rows: copy(p.rows.slice(offset, end)),
-    offset: String(offset),
-    done: end === p.rows.length,
-    next_token: end === p.rows.length ? null : token(p, end, pageSize),
-    cut_projection_digest: hash(p),
-    validated_capture_digest: "a".repeat(64),
-    ok: true,
-  };
+  const out = {};
+  for (const k of Object.keys(p)) {
+    if (k !== "rows") out[k] = copy(p[k]);
+  }
+  out.rows = copy(p.rows.slice(offset, end));
+  out.offset = String(offset);
+  out.done = end === p.rows.length;
+  out.next_token = end === p.rows.length ? null : token(p, end, pageSize, cutDigest);
+  out.cut_projection_digest = cutDigest;
+  out.validated_capture_digest = "a".repeat(64);
+  out.ok = true;
+  return out;
 }
 function cursor(f) {
   return {
@@ -282,6 +329,38 @@ function seal(request, payload, fixed) {
     ],
     payload,
   };
+}
+function sealCanonical(request, payload, fixed) {
+  const payloadCanon = canonical(payload);
+  const digest = hashBytes(payloadCanon);
+  const messageId =
+    "reply-" +
+    hash([
+      request.source_namespace,
+      request.source_epoch,
+      request.message_id,
+      digest,
+    ]);
+  const causalRefs = [
+    Object.fromEntries(
+      ["source_namespace", "source_epoch", "message_id", "payload_hash"].map(
+        (k) => [k, request[k]],
+      ),
+    ),
+  ];
+  return (
+    '{"causal_refs":' + canonical(causalRefs) +
+    ',"message_id":' + JSON.stringify(messageId) +
+    ',"payload":' + payloadCanon +
+    ',"payload_hash":' + JSON.stringify(digest) +
+    ',"producer_epoch":"2"' +
+    ',"producer_id":' + JSON.stringify("Q:" + fixed.session_id) +
+    ',"schema_revision":"s-session/2"' +
+    ',"session_generation":' + JSON.stringify(fixed.session_generation) +
+    ',"session_id":' + JSON.stringify(fixed.session_id) +
+    ',"source_epoch":"2"' +
+    ',"source_namespace":"s-observe/replies"}'
+  );
 }
 function fixtures() {
   const bytes = fs.readFileSync(
@@ -362,6 +441,17 @@ function sparseCursor(fixed) {
 }
 function sparseServer(sp) {
   const server = { mutate: null, requests: [] };
+  const sparseProj = new Map();
+  const getSparseProj = (gen, mode) => {
+    const key = gen + ":" + mode;
+    let entry = sparseProj.get(key);
+    if (!entry) {
+      const p = projection(sparseState(sp, gen), mode);
+      entry = { p, digest: hash(p) };
+      sparseProj.set(key, entry);
+    }
+    return entry;
+  };
   server.fetch = async (url, options) => {
     const request = JSON.parse(options.body),
       payload = request.payload;
@@ -372,21 +462,18 @@ function sparseServer(sp) {
     if (payload.op === "snapshot") {
       const t = payload.snapshot_token,
         gen = t ? t.cut_generation : payload.as_of_generation || "3";
-      const p = projection(
-          sparseState(sp, gen),
+      const { p, digest } = getSparseProj(
+          gen,
           t ? t.history_mode : payload.history_mode,
         ),
         offset = t ? Number(t.offset) : 0;
       const pageSize = Number(t ? t.page_size : payload.page_size);
-      if (t) assert.deepEqual(t, token(p, offset, pageSize));
-      response = page(p, offset, pageSize);
+      if (t) assert.deepEqual(t, token(p, offset, pageSize, digest));
+      response = page(p, offset, pageSize, digest);
       fixed = p.fixed_cut;
     } else {
       assert.equal(payload.op, "watch");
-      const head = projection(
-        sparseState(sp, "5"),
-        "RecomputedWithRevision",
-      ).fixed_cut;
+      const head = getSparseProj("5", "RecomputedWithRevision").p.fixed_cut;
       response = {
         deltas: [copy(sparseDelta(sp, "4")), copy(sparseDelta(sp, "5"))],
         next_cursor: sparseCursor(head),
@@ -405,7 +492,7 @@ function sparseServer(sp) {
       fixed = head;
     }
     if (server.mutate) server.mutate(response, request);
-    return new Response(canonical(seal(request, response, fixed)), {
+    return new Response(sealCanonical(request, response, fixed), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -481,16 +568,16 @@ function fakeServer(f) {
       const sid = t ? t.session_id : payload.session_id;
       const state =
         sid === f.b1.snapshot.session_id ? f.b1 : gen === "4" ? f.a4 : f.a3;
-      const p = projection(state, t ? t.history_mode : payload.history_mode),
+      const { p, digest } = cachedProjection(state, t ? t.history_mode : payload.history_mode),
         offset = t ? Number(t.offset) : 0;
       assert.equal(request.session_id, sid);
       assert.equal(request.session_generation, "1");
       const pageSize = Number(t ? t.page_size : payload.page_size);
-      if (t) assert.deepEqual(t, token(p, offset, pageSize));
-      response = page(p, offset, pageSize);
+      if (t) assert.deepEqual(t, token(p, offset, pageSize, digest));
+      response = page(p, offset, pageSize, digest);
       fixed = p.fixed_cut;
     } else {
-      const p = projection(server.gap ? f.b1 : f.a4, "RecomputedWithRevision");
+      const { p, digest } = cachedProjection(server.gap ? f.b1 : f.a4, "RecomputedWithRevision");
       fixed = p.fixed_cut;
       response = {
         deltas: [copy(f.delta)],
@@ -516,12 +603,12 @@ function fakeServer(f) {
             reason: "session_identity_changed",
             missing_range: null,
             rebuild: fixed,
-            snapshot_token: token(p, 0),
+            snapshot_token: token(p, 0, TEST_PAGE_SIZE, digest),
           },
         });
     }
     if (server.mutate) server.mutate(response, request);
-    let raw = canonical(seal(request, response, fixed));
+    let raw = sealCanonical(request, response, fixed);
     if (server.wire) raw = server.wire(raw, request);
     return new Response(raw, {
       status: 200,
@@ -537,13 +624,14 @@ function actualTB02Server(state) {
       payload = request.payload,
       t = payload.snapshot_token;
     assert.equal(url, "/api/v2/snapshot");
-    const p = projection(state, t ? t.history_mode : payload.history_mode);
+    const { p, digest } = cachedProjection(state, t ? t.history_mode : payload.history_mode);
     const response = page(
       p,
       t ? Number(t.offset) : 0,
       Number(t ? t.page_size : payload.page_size),
+      digest,
     );
-    return new Response(canonical(seal(request, response, p.fixed_cut)), {
+    return new Response(sealCanonical(request, response, p.fixed_cut), {
       status: 200,
     });
   };
