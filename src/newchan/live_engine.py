@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from newchan.orchestrator.recursive import (
     RecursiveOrchestrator,
@@ -213,6 +213,7 @@ class ReconnectingLiveEngine:
         self._reconnect_count = 0
         self._last_disconnect: datetime | None = None
         self._gaps: list[GapInfo] = []
+        self._active_wait_task: asyncio.Task[Any] | None = None
 
     @property
     def engine(self) -> LiveEngine:
@@ -301,7 +302,7 @@ class ReconnectingLiveEngine:
                     break
                 wait = self._advance_backoff()
                 logger.warning("将在 %.1fs 后重试连接", wait)
-                await asyncio.sleep(wait)
+                await self._cancellable_sleep(wait)
                 continue
 
             # 连接成功：重置退避
@@ -320,10 +321,31 @@ class ReconnectingLiveEngine:
             # --- 消费阶段 ---
             try:
                 bar_stream = self._subscribe_fn(self._symbols)
-                async for symbol, bar in bar_stream:
-                    if not self._running:
-                        break
-                    self._engine.process_bar(symbol, bar)
+                aiter = bar_stream.__aiter__()
+                try:
+                    while self._running:
+                        next_task: asyncio.Task[Any] = asyncio.create_task(
+                            aiter.__anext__()
+                        )
+                        self._active_wait_task = next_task
+                        try:
+                            symbol, bar = await next_task
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.CancelledError:
+                            if not self._running:
+                                break
+                            raise
+                        finally:
+                            if self._active_wait_task is next_task:
+                                self._active_wait_task = None
+                        if not self._running:
+                            break
+                        self._engine.process_bar(symbol, bar)
+                finally:
+                    aclose = getattr(aiter, "aclose", None)
+                    if aclose is not None:
+                        await aclose()
             except Exception:
                 logger.exception("数据流中断")
 
@@ -338,8 +360,26 @@ class ReconnectingLiveEngine:
                 "连接断开，%.1fs 后重试（已重连 %d 次）",
                 wait, self._reconnect_count,
             )
-            await asyncio.sleep(wait)
+            await self._cancellable_sleep(wait)
+
+    async def _cancellable_sleep(self, seconds: float) -> None:
+        """可被 stop() 立即唤醒的退避等待。"""
+        if not self._running:
+            return
+        sleep_task: asyncio.Task[Any] = asyncio.create_task(asyncio.sleep(seconds))
+        self._active_wait_task = sleep_task
+        try:
+            await sleep_task
+        except asyncio.CancelledError:
+            if self._running:
+                raise
+        finally:
+            if self._active_wait_task is sleep_task:
+                self._active_wait_task = None
 
     def stop(self) -> None:
-        """停止主循环。"""
+        """停止主循环并唤醒正在等待中的流订阅或退避休眠。"""
         self._running = False
+        task = self._active_wait_task
+        if task is not None and not task.done():
+            task.cancel()
