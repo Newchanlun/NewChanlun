@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from concurrent.futures import ThreadPoolExecutor
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -90,21 +92,52 @@ class PartitionTests(unittest.TestCase):
 
 
 class RunAndVerifyTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
+    _shared_tmp: tempfile.TemporaryDirectory[str]
+    _shared_root: Path
+    _shared_weights: Path
+    _shared_env: dict[str, str]
+    _shared_dirs: list[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._shared_tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._shared_tmp.name)
         bin_dir = root / "bin"
         bin_dir.mkdir()
         cargo = bin_dir / "cargo"
         cargo.write_text(STUB_CARGO, encoding="utf-8")
         cargo.chmod(0o755)
-        self.weights = root / "weights.tsv"
-        self.weights.write_text("# seconds\tname\n4000\ttests::slow_a\n3000\ttests::slow_b\n", encoding="utf-8")
-        self.root = root
-        self.env = os.environ | {
+        cls._shared_weights = root / "weights.tsv"
+        cls._shared_weights.write_text("# seconds\tname\n4000\ttests::slow_a\n3000\ttests::slow_b\n", encoding="utf-8")
+        cls._shared_root = root
+        cls._shared_env = os.environ | {
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "STUB_NAMES": ",".join(NAMES + ["v3::financial_session::tests::skipped"]),
         }
+
+        def _run_one(i: int) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), "run", "--index", str(i), "--count", "3",
+                 "--weights", str(cls._shared_weights), "--out", str(root / f"shared-shard-{i}"),
+                 "--skip", "v3::financial_session", "--", "--features", "x", "--bin", "y"],
+                env=cls._shared_env, capture_output=True, text=True,
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(_run_one, range(3)))
+        for res in results:
+            assert res.returncode == 0, res.stderr
+        cls._shared_dirs = [str(root / f"shared-shard-{i}") for i in range(3)]
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._shared_tmp.cleanup()
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.weights = self._shared_weights
+        self.env = self._shared_env
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -124,10 +157,8 @@ class RunAndVerifyTests(unittest.TestCase):
         )
 
     def test_all_shards_together_execute_the_full_set_once(self) -> None:
-        for i in range(3):
-            done = self.run_shard(i, 3)
-            self.assertEqual(done.returncode, 0, done.stderr)
-        done = self.verify(3, [str(self.root / f"shard-{i}") for i in range(3)])
+        dirs = self.run_all(3)
+        done = self.verify(3, dirs)
         self.assertEqual(done.returncode, 0, done.stderr)
         ignored = sum(n.endswith("_00") for n in NAMES)
         self.assertIn(
@@ -149,54 +180,54 @@ class RunAndVerifyTests(unittest.TestCase):
         self.assertEqual(done.returncode, 101)
 
     def test_verify_rejects_missing_shard(self) -> None:
-        for i in range(3):
-            self.assertEqual(self.run_shard(i, 3).returncode, 0)
-        done = self.verify(3, [str(self.root / f"shard-{i}") for i in range(2)])
+        done = self.verify(3, self._shared_dirs[:2])
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("Shard artifacts missing", done.stderr)
 
     def test_verify_rejects_shard_without_execution_record(self) -> None:
-        for i in range(3):
-            self.assertEqual(self.run_shard(i, 3).returncode, 0)
+        dirs = []
+        for i, src in enumerate(self._shared_dirs):
+            dst = self.root / f"shard-{i}"
+            shutil.copytree(src, dst)
+            dirs.append(str(dst))
         (self.root / "shard-1" / "executed.tsv").unlink()
-        done = self.verify(3, [str(self.root / f"shard-{i}") for i in range(3)])
+        done = self.verify(3, dirs)
         self.assertEqual(done.returncode, 1)
         self.assertIn("::error title=Shard executed.tsv missing::", done.stderr)
         self.assertNotIn("Traceback", done.stderr)
 
     def run_all(self, count: int) -> list[str]:
-        for i in range(count):
-            self.assertEqual(self.run_shard(i, count).returncode, 0)
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            results = list(pool.map(lambda i: self.run_shard(i, count), range(count)))
+        for res in results:
+            self.assertEqual(res.returncode, 0, res.stderr)
         return [str(self.root / f"shard-{i}") for i in range(count)]
 
     def test_verify_accepts_named_groups_meeting_minimum(self) -> None:
-        dirs = self.run_all(3)
-        done = self.verify(3, dirs, "--require", "6:mod1::tests::", "--require", "1:tests::slow_a")
+        done = self.verify(3, self._shared_dirs, "--require", "6:mod1::tests::", "--require", "1:tests::slow_a")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("require filter=mod1::tests:: min=6 matched=7 ok=7 not_ok=0", done.stdout)
 
     def test_verify_rejects_group_below_minimum(self) -> None:
-        dirs = self.run_all(3)
-        done = self.verify(3, dirs, "--require", "8:mod1::tests::")
+        done = self.verify(3, self._shared_dirs, "--require", "8:mod1::tests::")
         self.assertEqual(done.returncode, 1)
         self.assertIn("::error title=Required tests missing::filter=mod1::tests:: min=8", done.stderr)
 
     def test_verify_rejects_missing_group(self) -> None:
-        dirs = self.run_all(3)
-        done = self.verify(3, dirs, "--require", "1:native_n1_")
+        done = self.verify(3, self._shared_dirs, "--require", "1:native_n1_")
         self.assertEqual(done.returncode, 1)
         self.assertIn("filter=native_n1_ min=1 matched=0 ok=0", done.stderr)
 
     def test_verify_rejects_ignored_member_of_required_group(self) -> None:
-        dirs = self.run_all(3)
-        done = self.verify(3, dirs, "--require", "1:mod0::tests::")
+        done = self.verify(3, self._shared_dirs, "--require", "1:mod0::tests::")
         self.assertEqual(done.returncode, 1)
         self.assertIn("not_ok=['mod0::tests::case_00']", done.stderr)
 
     def test_verify_rejects_malformed_requirement(self) -> None:
-        dirs = self.run_all(3)
-        for raw in ("native_n1_", "0:native_n1_", "x:native_n1_", "3:"):
-            done = self.verify(3, dirs, "--require", raw)
+        raws = ("native_n1_", "0:native_n1_", "x:native_n1_", "3:")
+        with ThreadPoolExecutor(max_workers=len(raws)) as pool:
+            results = list(pool.map(lambda raw: self.verify(3, self._shared_dirs, "--require", raw), raws))
+        for raw, done in zip(raws, results):
             self.assertEqual(done.returncode, 1, raw)
             self.assertIn("Invalid requirement", done.stderr)
 
