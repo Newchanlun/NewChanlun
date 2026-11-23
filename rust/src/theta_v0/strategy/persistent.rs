@@ -140,7 +140,7 @@ pub struct PersistentElement {
 ///
 /// `Pi+1 = merge(Pi, Ei+1, held legs)`（§4/§9）。held 腿引用 `pid∈Pi`，而非直接引用 `Ei`。
 /// 跨 bar 存活：腿未显式关闭 ⟹ pid∈Pi 所有后续 bar（I1）。
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct PersistentRegistry {
     /// pid → PersistentElement。
     elements: std::collections::HashMap<ElementId, PersistentElement>,
@@ -152,6 +152,20 @@ pub struct PersistentRegistry {
     present_last_tree: std::collections::HashSet<ElementId>,
     /// 上一 bar present 的 candidate 段 pid（每 bar 变，O(candidate) 有界，恒重建）。
     present_last_cand: std::collections::HashSet<ElementId>,
+    #[cfg(debug_assertions)]
+    oracle_last_tree: Vec<CoverageElement>,
+    #[cfg(debug_assertions)]
+    oracle_last_cand: Vec<CoverageElement>,
+    #[cfg(debug_assertions)]
+    oracle_valid: bool,
+}
+
+impl PartialEq for PersistentRegistry {
+    fn eq(&self, other: &Self) -> bool {
+        self.elements == other.elements
+            && self.present_last_tree == other.present_last_tree
+            && self.present_last_cand == other.present_last_cand
+    }
 }
 
 impl PersistentRegistry {
@@ -196,12 +210,20 @@ impl PersistentRegistry {
         if let Some(e) = self.elements.get_mut(pid) {
             e.invalidated = true;
         }
+        #[cfg(debug_assertions)]
+        {
+            self.oracle_valid = false;
+        }
     }
 
     /// 标记元素为显式关闭（§10：显式平仓结束）→ 从 live set 退出。
     pub fn close(&mut self, pid: &ElementId) {
         if let Some(e) = self.elements.get_mut(pid) {
             e.invalidated = true;
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.oracle_valid = false;
         }
     }
 
@@ -264,7 +286,13 @@ impl PersistentRegistry {
         // ★on2w3 神谕（debug）：跳过路径（tree_dirty=false ∨ cand_dirty=false）与「强制全量」逐字段等价。
         // 全量 = 恒 tree_dirty=true ∧ cand_dirty=true。skip 后与全量末态（elements + present_last）比对。
         #[cfg(debug_assertions)]
-        let oracle_full = if !tree_dirty || !cand_dirty {
+        let fast_verified = !tree_dirty
+            && !cand_dirty
+            && self.oracle_valid
+            && self.oracle_last_tree.as_slice() == tree
+            && self.oracle_last_cand.as_slice() == candidates;
+        #[cfg(debug_assertions)]
+        let oracle_full = if (!tree_dirty || !cand_dirty) && !fast_verified {
             let mut shadow = self.clone();
             shadow.merge_full_oracle(tree, candidates, held_legs);
             Some(shadow)
@@ -281,6 +309,17 @@ impl PersistentRegistry {
                 "on2w3 merge 跳过路径 != 全量（tree_dirty={tree_dirty} cand_dirty={cand_dirty}）——\
                  candidates 逐字节稳定/id集恒等前提被违反"
             );
+            self.oracle_last_tree.clear();
+            self.oracle_last_tree.extend_from_slice(tree);
+            self.oracle_last_cand.clear();
+            self.oracle_last_cand.extend_from_slice(candidates);
+            self.oracle_valid = true;
+        } else if tree_dirty && cand_dirty {
+            self.oracle_last_tree.clear();
+            self.oracle_last_tree.extend_from_slice(tree);
+            self.oracle_last_cand.clear();
+            self.oracle_last_cand.extend_from_slice(candidates);
+            self.oracle_valid = true;
         }
     }
 
@@ -303,12 +342,10 @@ impl PersistentRegistry {
         cand_dirty: bool,
         held_legs: &[ActiveLeg],
     ) {
-        let tree_ids: std::collections::HashSet<ElementId> = if tree_dirty {
-            tree.iter().map(|e| e.id).collect()
-        } else {
-            // tree_dirty=false ⟹ tree ids 同上 bar present_last_tree（不重建，消 O(tree)）。
-            self.present_last_tree.clone()
-        };
+        let new_tree_ids: Option<std::collections::HashSet<ElementId>> =
+            tree_dirty.then(|| tree.iter().map(|e| e.id).collect());
+        let tree_ids: &std::collections::HashSet<ElementId> =
+            new_tree_ids.as_ref().unwrap_or(&self.present_last_tree);
         // ★on2w3：cand_dirty=false ⟹ candidates 逐字节同上 bar（CandidateCache whole-cache 命中 + 零新尾）
         // ⟹ cand_ids == present_last_cand（集合不变）。此时整段 candidate 工作（cand_ids 建 + reset + upsert
         // + present_last_cand 重建，全 O(cand)/bar，cand∝n ⟹ O(n²)）是 no-op：同 id 全 present、同值上 bar 已
@@ -448,7 +485,7 @@ impl PersistentRegistry {
         // present_last 更新为本 bar snapshot ids（下 bar 增量重置基准）。tree 段：tree_dirty=true 用新
         // tree_ids，false 复用旧（同上 bar，不变）。cand 段：cand_dirty=true 用新 cand_ids；false 复用旧
         // （集合恒等，cand_ids 为空占位不可写入——on2w3）。
-        if tree_dirty {
+        if let Some(tree_ids) = new_tree_ids {
             self.present_last_tree = tree_ids;
         }
         if cand_dirty {
