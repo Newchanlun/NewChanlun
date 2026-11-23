@@ -231,14 +231,15 @@ class Binding:
         fallback = arguments(signature, named, self.variadic)
         choices = []
         params = inspect.signature(signature, follow_wrapped=False)
-        if self.variadic:
-            for args, kwargs in shapes:
-                try:
-                    params.bind(*args, **kwargs)
-                except TypeError:
-                    continue
-                if (args, kwargs) not in choices:
-                    choices.append((tuple(sample(v) for v in args), {k: sample(v) for k, v in kwargs.items()}))
+        # 已实收的普通位置实参也能绑定到具名生产入口；不能因目标用
+        # *args 而把它丢成 None，再把入口异常误当作成功执行。
+        for args, kwargs in shapes:
+            try:
+                params.bind(*args, **kwargs)
+            except TypeError:
+                continue
+            if (args, kwargs) not in choices:
+                choices.append((tuple(sample(v) for v in args), {k: sample(v) for k, v in kwargs.items()}))
         args, kwargs = fallback
         if (tuple(args), kwargs) not in choices:
             choices.append((tuple(args), kwargs))
@@ -259,13 +260,13 @@ def span(node):
     return node.lineno, node.end_lineno, node.col_offset, node.end_col_offset
 
 
-ForwardSite = namedtuple("ForwardSite", "call consumes schedules spreads capture")
-ForwardPlan = namedtuple("ForwardPlan", "sites exits all_exits discarded")
-NO_FORWARDING = ForwardPlan((), (), False, False)
+ProductionSite = namedtuple("ProductionSite", "spreads capture")
+ProductionShape = namedtuple("ProductionShape", "sites discarded")
+ORDINARY_PRODUCTION = ProductionShape((), False)
 
 
-def forwarding(node):
-    """先从实际返回/产出值反查调用，不把同一函数体中的其它调用算入透传。"""
+def production_shape(node):
+    """保持生产探针的包装器签名及显式消费约束；不用于判断承接函数体。"""
     params = node.args
     names = {p.arg for p in (*params.posonlyargs, *params.args, *params.kwonlyargs)}
     vararg = params.vararg and params.vararg.arg
@@ -288,19 +289,19 @@ def forwarding(node):
                 any(k.arg is None and isinstance(k.value, ast.Name) and k.value.id == kwarg
                     for k in call.keywords))
 
-    def origin(value, bridges=(), scheduled=()):
+    def origin(value):
         if isinstance(value, ast.Name) and stores.get(value.id) == 1 and value.id in assigned:
             earlier = assigned[value.id]
             if (earlier.lineno, earlier.col_offset) < (value.lineno, value.col_offset):
-                return origin(earlier, bridges, scheduled)
+                return origin(earlier)
         if isinstance(value, (ast.Await, ast.YieldFrom)):
-            return origin(value.value, (*bridges, span(value)), scheduled)
+            return origin(value.value)
         if not isinstance(value, ast.Call):
             return None
         callee = value.func
         label = callee.attr if isinstance(callee, ast.Attribute) else callee.id if isinstance(callee, ast.Name) else None
         if label in ("create_task", "ensure_future") and value.args:
-            return origin(value.args[0], bridges, (*scheduled, span(value)))
+            return origin(value.args[0])
         star = spreads(value)
         args = [*value.args, *(k.value for k in value.keywords)]
         if not star and not all(isinstance(a, ast.Name) and a.id in names for a in args):
@@ -308,23 +309,20 @@ def forwarding(node):
         while isinstance(callee, (ast.Attribute, ast.Subscript)):
             callee = callee.value
         capture = (callee.id, callee is not value.func) if isinstance(callee, ast.Name) else None
-        return ForwardSite(span(value), bridges, scheduled, star, capture)
+        return ProductionSite(star, capture)
 
-    sites, exits, returns_ = set(), set(), 0
+    sites = set()
     if isinstance(node, ast.Lambda):
         if site := origin(node.body):
             sites.add(site)
-            exits.add(span(node.body))
         values = [node.body]
     else:
         values = []
         for stmt in scope:
             if isinstance(stmt, ast.Return):
-                returns_ += 1
                 values.append(stmt.value)
                 if site := origin(stmt.value):
                     sites.add(site)
-                    exits.add(span(stmt))
             elif isinstance(stmt, ast.YieldFrom):
                 values.append(stmt)
                 if site := origin(stmt):
@@ -336,8 +334,7 @@ def forwarding(node):
                 elif isinstance(stmt.value, ast.Name) and stores.get(stmt.value.id) == 1:
                     loop = iterations.get(stmt.value.id)
                     if loop and any(stmt is n for s in loop.body for n in (s, *scope_nodes(s))):
-                        consumption = span(loop if isinstance(loop, ast.AsyncFor) else loop.iter)
-                        if site := origin(loop.iter, (consumption,)):
+                        if site := origin(loop.iter):
                             sites.add(site)
 
     def transformed(value, seen=()):
@@ -357,9 +354,7 @@ def forwarding(node):
     # 确实由调用结果变换而来，则计算发生在本地，不是透传。
     discarded = (not any(site.spreads for site in sites) and any(isinstance(n, ast.Call) and spreads(n) for n in scope)
                  and not any(transformed(v) for v in values))
-    # CPython 可把 try:return 的 RETURN_VALUE 标在收尾语句上。只有所有
-    # 显式返回都已关联透传时，才允许从该种实际返回转交延迟结果。
-    return ForwardPlan(sites, exits, bool(returns_ and returns_ == len(exits)), discarded)
+    return ProductionShape(sites, discarded)
 
 
 def captures(fn, name):
@@ -376,8 +371,316 @@ def captures(fn, name):
     return (fn.__kwdefaults__ or {}).get(name, MISSING)
 
 
+# 出口的值来源和调用点各有独立的源码位置。桥接位置供运行时追踪
+# await/yield from/迭代，不把该行其它调用（包括收尾日志）挂进来。
+Site = namedtuple("Site", "call consumes schedules iterates", defaults=(frozenset(), frozenset(), False))
+Source = namedtuple("Source", "kind position site", defaults=(None,))
+Exit = namedtuple("Exit", "kind position operands sources")
+
+
+def merge_states(*states):
+    result = {}
+    for state in states:
+        for name, sources in state.items():
+            result[name] = result.get(name, frozenset()) | sources
+    return result
+
+
+class ExitFlow:
+    def __init__(self, node, code):
+        self.exits, self.loop_yields, self.scheduled = {}, {}, set()
+        self.yield_filters, self.iterators = {}, set()
+        self.names, self.writes = {}, {}
+        args = node.args
+        extra = tuple(p for p in (args.vararg, args.kwarg) if p is not None)
+        self.spread = {p.arg for p in extra}
+        parameters = {p.arg: frozenset({Source("read", None)})
+                      for p in (*args.posonlyargs, *args.args, *args.kwonlyargs, *extra)}
+        if isinstance(node, ast.Lambda):
+            self.exit("return", node.body, node.body, self.value(node.body, parameters))
+        else:
+            self.block(node.body, parameters)
+        self.sites = {o.site for e in self.exits.values() for o in e.sources if o.site is not None}
+        self.calls = {site.call for site in self.sites}
+        self.invoking, self.scheduling = {}, {}
+        for site in self.sites:
+            for position in {site.call} | site.consumes:
+                self.invoking.setdefault(position, set()).add(site.call)
+            for position in site.schedules:
+                self.scheduling.setdefault(position, set()).add(site.call)
+        self.iterated_calls = {o.site.call for e in self.exits.values() if e.kind in ("delegate", "yield")
+                               for o in e.sources if o.site is not None and o.site.iterates}
+        self.positions = self.calls | {o.position for e in self.exits.values() for o in e.sources}
+        self.operands = {}
+        for e in self.exits.values():
+            for position in e.operands:
+                self.operands.setdefault(position, set()).add(e.position)
+        self.instructions = {i.offset: (i.opname, tuple(i.positions), i.argval) for i in dis.get_instructions(code)}
+        self.code_positions = tuple(code.co_positions())
+        yields = {position for op, position, _ in self.instructions.values() if op == "YIELD_VALUE"
+                  and position in self.exits}
+        self.loops = {position for position, outputs in self.loop_yields.items() if not outputs.isdisjoint(yields)}
+        self.loops.update(e.position for e in self.exits.values() if e.kind == "delegate" and e.position in yields and
+                          any(o.kind in ("local", "read") for o in e.sources))
+        self.filters = {p for y in yields for p in self.yield_filters.get(y, ())}
+
+    @staticmethod
+    def yield_positions(statements):
+        return {span(n) for stmt in statements for n in (stmt, *scope_nodes(stmt))
+                if isinstance(n, (ast.Yield, ast.YieldFrom))}
+
+    def exit(self, kind, node, operand, sources):
+        key = span(node)
+        if operand is None:
+            leaves = {key}
+        else:
+            def arms(expr):
+                if isinstance(expr, ast.IfExp):
+                    return arms(expr.body) | arms(expr.orelse)
+                if isinstance(expr, ast.NamedExpr):
+                    return arms(expr.value)
+                if isinstance(expr, ast.BoolOp):
+                    return set().union(*(arms(v) for v in expr.values))
+                return {span(expr)}
+            leaves = arms(operand)
+        old = self.exits.get(key)
+        self.exits[key] = Exit(kind, key, frozenset(leaves), sources if old is None else sources | old.sources)
+
+    @staticmethod
+    def bridge(sources, position, *, schedule=False, iterates=False):
+        return frozenset(Source(o.kind, position, o.site._replace(
+            schedules=o.site.schedules | {position}) if schedule else o.site._replace(
+            consumes=o.site.consumes | {position}, iterates=iterates or o.site.iterates)) if o.site is not None else
+            Source(o.kind, position) for o in sources)
+
+    def value(self, value, env):
+        if value is None:
+            return frozenset({Source("constant", None)})
+        key = span(value)
+        if isinstance(value, ast.Name):
+            self.names[key] = value.id
+            return env.get(value.id, frozenset({Source("read", key)}))
+        if isinstance(value, ast.NamedExpr):
+            sources = self.value(value.value, env)
+            self.bind(value.target, sources, env, value.value)
+            return sources
+        if isinstance(value, ast.IfExp):
+            self.value(value.test, env)
+            left, right = env.copy(), env.copy()
+            sources = self.value(value.body, left) | self.value(value.orelse, right)
+            env.update(merge_states(left, right))
+            return sources
+        if isinstance(value, ast.BoolOp):
+            # 短路表达式可返回任一操作数；其后的赋值不保证发生。
+            states, sources = [env.copy()], frozenset()
+            inside = env.copy()
+            for operand in value.values:
+                sources |= self.value(operand, inside)
+                states.append(inside.copy())
+            env.update(merge_states(*states))
+            return sources
+        if isinstance(value, ast.Await):
+            return self.bridge(self.value(value.value, env), key)
+        if isinstance(value, ast.YieldFrom):
+            sources = self.bridge(self.value(value.value, env), key, iterates=True)
+            self.exit("delegate", value, value.value, sources)
+            return sources
+        if isinstance(value, ast.Yield):
+            self.exit("yield", value, value.value, self.value(value.value, env))
+            return frozenset({Source("read", key)})   # yield 表达式的结果由 send 给入。
+        if isinstance(value, ast.Call):
+            self.value(value.func, env)
+            args = [self.value(a, env) for a in value.args]
+            for keyword in value.keywords:
+                self.value(keyword.value, env)
+            callee = value.func
+            label = callee.attr if isinstance(callee, ast.Attribute) else callee.id if isinstance(callee, ast.Name) else None
+            if label in ("create_task", "ensure_future") and args and any(o.site for o in args[0]):
+                if any(isinstance(a, ast.Starred) and isinstance(a.value, ast.Name) and a.value.id in self.spread or
+                       isinstance(a, ast.keyword) and a.arg is None and isinstance(a.value, ast.Name) and a.value.id in self.spread
+                       for a in ast.walk(value.args[0])):
+                    self.scheduled.add(key)
+                return self.bridge(args[0], key, schedule=True)
+            return frozenset({Source("call", key, Site(key))})
+        if not isinstance(value, (ast.Lambda, ast.GeneratorExp)):
+            for child in ast.iter_child_nodes(value):
+                self.nested(child, env)
+        literal = (isinstance(value, ast.Constant) or
+                   isinstance(value, (ast.List, ast.Tuple, ast.Set)) and not value.elts or
+                   isinstance(value, ast.Dict) and not value.keys or
+                   isinstance(value, ast.UnaryOp) and isinstance(value.operand, ast.Constant))
+        return frozenset({Source("constant" if literal else "local", key)})
+
+    def nested(self, node, env):
+        if isinstance(node, ast.expr):
+            self.value(node, env)
+        else:
+            for child in ast.iter_child_nodes(node):
+                self.nested(child, env)
+
+    def bind(self, target, sources, env, operand=None):
+        if isinstance(target, ast.Name):
+            env[target.id] = sources
+            position = span(target)
+            old = self.writes.get(position)
+            alias = operand.id if isinstance(operand, ast.Name) else None
+            self.writes[position] = (target.id, alias, sources if old is None else sources | old[2])
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for value in target.elts:
+                self.bind(value, sources, env)
+        elif isinstance(target, ast.Starred):
+            self.bind(target.value, sources, env)
+
+    def block(self, statements, original):
+        env, transfers = original.copy(), {}
+
+        def stop(kind, state):
+            transfers[kind] = merge_states(transfers.get(kind, {}), state)
+
+        def follow(part, state):
+            paths = self.block(part, state)
+            next_state = paths.pop("next", None)
+            for kind, effect in paths.items():
+                stop(kind, effect)
+            return next_state
+
+        for i, stmt in enumerate(statements):
+            if env is None:
+                break
+            if isinstance(stmt, ast.Return):
+                self.exit("return", stmt, stmt.value, self.value(stmt.value, env))
+                stop("return", env)
+                env = None
+            elif isinstance(stmt, (ast.Break, ast.Continue, ast.Raise)):
+                stop(type(stmt).__name__.lower(), env)
+                env = None
+            elif isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                if stmt.value is not None:
+                    sources = self.value(stmt.value, env)
+                    if isinstance(stmt, ast.AugAssign):
+                        sources = frozenset({Source("local", span(stmt))})
+                    for target in stmt.targets if isinstance(stmt, ast.Assign) else (stmt.target,):
+                        self.bind(target, sources, env, None if isinstance(stmt, ast.AugAssign) else stmt.value)
+            elif isinstance(stmt, ast.If):
+                self.value(stmt.test, env)
+                predicate = span(stmt.test)
+                if isinstance(stmt.test, (ast.Compare, ast.BinOp, ast.UnaryOp, ast.Name, ast.Subscript, ast.Attribute)) and any(
+                        isinstance(n, ast.Name) and any(o.position in self.iterators for o in env.get(n.id, ()))
+                        for n in ast.walk(stmt.test)):
+                    affected = self.yield_positions([*stmt.body, *stmt.orelse])
+                    if any(isinstance(arm[-1], ast.Continue) for arm in (stmt.body, stmt.orelse) if arm):
+                        affected.update(self.yield_positions(statements[i + 1:]))
+                    for output in affected:
+                        self.yield_filters.setdefault(output, set()).add(predicate)
+                paths = [follow(part, env) for part in (stmt.body, stmt.orelse)]
+                env = merge_states(*(p for p in paths if p is not None)) if any(p is not None for p in paths) else None
+            elif isinstance(stmt, ast.Match):
+                self.value(stmt.subject, env)
+                paths = []
+                for case in stmt.cases:
+                    arm = env.copy()
+                    for pattern in ast.walk(case.pattern):
+                        name = getattr(pattern, "name", None) or getattr(pattern, "rest", None)
+                        if name is not None:
+                            arm[name] = frozenset({Source("read", span(stmt.subject))})
+                    self.value(case.guard, arm)
+                    paths.append(follow(case.body, arm))
+                # 只有无守卫的不可反驳末臂才确定吃掉不匹配路径。
+                last = stmt.cases[-1]
+                if not (last.guard is None and isinstance(last.pattern, ast.MatchAs) and last.pattern.pattern is None):
+                    paths.append(env)
+                env = merge_states(*(p for p in paths if p is not None)) if any(p is not None for p in paths) else None
+            elif isinstance(stmt, (ast.Try, ast.TryStar)):
+                # except 可从 try 的任意语句收到异常，包含赋值尚未完成的边。
+                prefixes = [env]
+                for statement in stmt.body:
+                    normal = self.block([statement], prefixes[-1]).get("next")
+                    if normal is None:
+                        break
+                    prefixes.append(normal)
+                paths = self.block(stmt.body, env)
+                normal = paths.pop("next", None)
+                caught = merge_states(*prefixes, *paths.values())
+                results = [paths]
+                if normal is not None:
+                    results.append(self.block(stmt.orelse, normal))
+                for handler in stmt.handlers:
+                    arm = caught.copy()
+                    if handler.name is not None:
+                        arm.pop(handler.name, None)
+                    result = self.block(handler.body, arm)
+                    for state in result.values():
+                        state.pop(handler.name, None)
+                    results.append(result)
+                joined = {}
+                for result in results:
+                    for kind, state in result.items():
+                        joined[kind] = merge_states(joined.get(kind, {}), state)
+                env = None
+                for kind, state in joined.items():
+                    final = follow(stmt.finalbody, state)
+                    if final is not None:
+                        if kind == "next":
+                            env = final
+                        else:
+                            stop(kind, final)
+            elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+                head = env.copy()
+                while True:
+                    test = head.copy()
+                    if isinstance(stmt, ast.While):
+                        condition = self.value(stmt.test, test)
+                        if any(o.kind in ("local", "read") for o in condition):
+                            self.loop_yields[span(stmt.test)] = self.yield_positions(stmt.body)
+                    else:
+                        iterator = self.value(stmt.iter, test)
+                        position = span(stmt if isinstance(stmt, ast.AsyncFor) else stmt.iter)
+                        self.iterators.add(position)
+                        if any(o.kind in ("local", "read") for o in iterator):
+                            self.loop_yields[position] = self.yield_positions(stmt.body)
+                        self.bind(stmt.target, self.bridge(iterator, position, iterates=True), test)
+                    body = self.block(stmt.body, test)
+                    new = merge_states(env, *(body[k] for k in ("next", "continue") if k in body))
+                    if new == head:
+                        break
+                    head = new
+                for kind in ("return", "raise"):
+                    if kind in body:
+                        stop(kind, body[kind])
+                paths = [follow(stmt.orelse, head), body.get("break")]
+                env = merge_states(*(p for p in paths if p is not None)) if any(p is not None for p in paths) else None
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                for item in stmt.items:
+                    self.value(item.context_expr, env)
+                    if item.optional_vars is not None:
+                        self.bind(item.optional_vars, frozenset({Source("read", span(item.context_expr))}), env)
+                env = follow(stmt.body, env)
+            elif isinstance(stmt, ast.Delete):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        env.pop(target.id, None)
+            elif isinstance(stmt, (*FUNCTIONS, ast.ClassDef)):
+                env[stmt.name] = frozenset({Source("local", span(stmt))})
+            elif isinstance(stmt, ast.Expr):
+                self.value(stmt.value, env)
+        if env is not None:
+            stop("next", env)
+        return transfers
+
+
+# 只剔除编译后没有可执行工作的桩；Python 3.12/3.14 对 None
+# 返回和生成器入口的指令组合不同。
+def live_body(code):
+    scaffold = {"RESUME", "RETURN_GENERATOR", "POP_TOP", "COPY_FREE_VARS", "MAKE_CELL", "NOP",
+                "CACHE", "RETURN_VALUE", "RETURN_CONST", "NOT_TAKEN", "RERAISE"}
+    return any(i.opname not in scaffold and not (i.opname == "LOAD_CONST" and i.argval is None or
+               i.opname == "CALL_INTRINSIC_1" and i.argrepr == "INTRINSIC_STOPITERATION_ERROR")
+               for i in dis.get_instructions(code))
+
+
 class Exports:
     def __init__(self, path, require_body=False):
+        self.require_body = require_body
         self.path, self.module = str(Path(path).resolve()), module(path)
         raw = Path(path).read_bytes()
         declarations = list(ast.walk(ast.parse(raw, path)))
@@ -389,9 +692,9 @@ class Exports:
                 functions.setdefault((line(node), node.name), []).append(node)
         classes = {(line(node), node.name) for node in declarations if isinstance(node, ast.ClassDef)}
         codes = list(code_objects(compile(raw, self.path, "exec")))
-        self.definitions = {c for c in codes if (c.co_firstlineno, c.co_name) in functions}
+        self.definitions = {c for c in codes if (c.co_firstlineno, c.co_name) in functions and (not require_body or live_body(c))}
         self.classes = {c for c in codes if (c.co_firstlineno, c.co_name) in classes}
-        self.forwarding = {}
+        self.shapes, self.flows = {}, {}
         for code in self.definitions:
             candidates = functions[code.co_firstlineno, code.co_name]
             if len(candidates) != 1 and code.co_name == "<lambda>":
@@ -400,7 +703,10 @@ class Exports:
                 candidates = [n for n in candidates if
                               (n.body.lineno, n.body.end_lineno, n.body.col_offset, n.body.end_col_offset) in positions]
             if len(candidates) == 1:
-                self.forwarding[code] = forwarding(candidates[0])
+                if require_body:
+                    self.flows[code] = ExitFlow(candidates[0], code)
+                else:
+                    self.shapes[code] = production_shape(candidates[0])
 
     def owns_frame(self, frame):
         return (frame.f_globals is self.globals and frame.f_code.co_filename == self.path and
@@ -409,7 +715,7 @@ class Exports:
     def wrapper(self, fn):
         if "__wrapped__" in vars(fn):
             return True
-        plan = self.forwarding.get(fn.__code__, NO_FORWARDING)
+        plan = self.shapes.get(fn.__code__, ORDINARY_PRODUCTION)
         if plan.discarded:
             return True
         for site in plan.sites:
@@ -465,7 +771,7 @@ class Exports:
         fn = underlying(member)
         signature = self.signature(fn)
         if signature is not None:
-            return Binding(key, member, signature, owner, wrapper=self.wrapper(fn),
+            return Binding(key, member, signature, owner, wrapper=not self.require_body and self.wrapper(fn),
                            variadic=bool(signature.__code__.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS)))
 
     def local_members(self, bindings):
@@ -533,6 +839,7 @@ def current_task():
 native_task = asyncio.Task
 native_future = asyncio.Future
 children_of = WeakKeyDictionary()
+wait_infrastructure = {asyncio.BaseEventLoop._asyncgen_firstiter_hook.__code__}
 
 
 def joined(scopes, waiter, futures):
@@ -576,6 +883,8 @@ def observe_waits():
                 joined(scopes, waiter, (self,))
 
         __iter__ = __await__
+
+    wait_infrastructure.add(ObservedAwait.__await__.__code__)
 
     class TracedTask(ObservedAwait, native_task):
         pass
@@ -688,11 +997,141 @@ def public(scope):
 task_creators = {asyncio.create_task.__code__: "coro", asyncio.ensure_future.__code__: "coro_or_future"}
 
 
+class Delegation:
+    def __init__(self, owner):
+        self.owner = owner
+        self.calls = {}  # 实际进入的 Python 帧；None 表示外来实现或空桩。
+        self.values = {}
+        self.delayed = False
+        self.projected = False
+
+
 class ForwardCall:
-    def __init__(self, call, task, scopes, samples, bound):
+    def __init__(self, call, task, scopes, samples, bound, flow):
         self.call, self.task, self.scopes = call, task, scopes
-        self.samples, self.bound = samples, bound
-        self.children = []
+        self.samples, self.bound, self.flow = samples, bound, flow
+        self.clock, self.executed, self.attempts = 0, {}, {}
+        self.outputs = []
+        self.pending_exit = None
+        self.pending_write = None
+        self.bound_sources, self.exit_reads = {}, {}
+        self.iterated = False
+        self.filtered = set()
+
+    def commit_write(self, frame):
+        # INSTRUCTION 发生在 STORE 之前。下一条指令读到的是实际选中
+        # 的赋值，而非其它分支也已计算、却没有赋给这个变量的值。
+        if self.pending_write is not None:
+            name, alias, sources = self.pending_write
+            self.pending_write = None
+            value = frame.f_locals.get(name, frame.f_globals.get(name, MISSING))
+            if alias in self.bound_sources:
+                self.bound_sources[name] = self.bound_sources[alias]
+            else:
+                self.bound_sources[name] = self.source(sources, value)
+
+    def opcode(self, frame, offset):
+        self.commit_write(frame)
+        op, position, _ = self.flow.instructions.get(offset, (None, None, None))
+        self.clock += 1
+        if position in self.flow.positions or position in self.flow.scheduled:
+            self.executed[position] = self.clock
+        if op not in ("RETURN_VALUE", "RETURN_CONST", "YIELD_VALUE"):
+            for key in self.flow.operands.get(position, ()):
+                if self.flow.exits[key].kind == "return":
+                    self.pending_exit = key
+                name = self.flow.names.get(position)
+                self.exit_reads[key] = self.bound_sources.get(name)
+        if op is not None and op.startswith("STORE_") and position in self.flow.writes:
+            self.pending_write = self.flow.writes[position]
+        if op in ("CALL", "CALL_KW", "CALL_FUNCTION_EX") and position in self.flow.calls:
+            self.attempts[position] = Delegation(self)
+        if op in ("FOR_ITER", "GET_ANEXT", "SEND") or op is not None and op.startswith("POP_JUMP_IF"):
+            self.iterated |= position in self.flow.loops
+            if position in self.flow.filters:
+                self.filtered.add(position)
+
+    def attempts_at(self, position, *, schedules=False):
+        # 同一个消费点可接到多个分支的延迟体；取本次实际创建的最近来源。
+        sites = self.flow.scheduling.get(position, ()) if schedules else self.flow.invoking.get(position, ())
+        return sorted((key for key in sites if key in self.attempts),
+                      key=lambda key: self.executed.get(key, 0), reverse=True)
+
+    def source(self, origins, value):
+        candidates = []
+        for source in origins:
+            clock = self.executed.get(source.position, 0)
+            if source.position is not None and not clock:
+                continue
+            same = False
+            if source.site is not None:
+                site = source.site
+                attempt = self.attempts.get(site.call)
+                if attempt is None:
+                    continue
+                same = any(v is value for v in attempt.values.values())
+                if not same and attempt.values and not site.consumes and not attempt.delayed:
+                    continue
+                if not clock:
+                    clock = self.executed.get(site.call, 0)
+            candidates.append((same, clock, source))
+        return max(candidates, key=lambda row: row[:2])[2] if candidates else None
+
+    def produced(self, frame, arg, normal):
+        self.commit_write(frame)
+        op, position, _ = self.flow.instructions.get(frame.f_lasti, (None, None, None))
+        exit_ = self.flow.exits.get(position)
+        stream = frame.f_code.co_flags & (inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR)
+        if op == "YIELD_VALUE":
+            if exit_ is None or exit_.kind not in ("yield", "delegate"):
+                return  # await/async for 的挂起不是对外产出。
+        elif normal:
+            if exit_ is None or exit_.kind != "return":
+                if stream:
+                    if self.iterated or self.filtered:
+                        self.outputs.append((MISSING, None))
+                    # 委托合法的本地过滤生成器，它可能读完输入但没有产出。
+                    for key in self.flow.iterated_calls:
+                        attempt = self.attempts.get(key)
+                        if attempt is not None and attempt.calls:
+                            self.outputs.append((MISSING, attempt))
+                    return
+                # try:return 的实际 RETURN_VALUE 可落在 finally 收尾指令上。
+                exit_ = self.flow.exits.get(self.pending_exit)
+        else:
+            return
+        if exit_ is None or op == "RETURN_CONST":
+            return
+        if op == "YIELD_VALUE" and frame.f_code.co_flags & inspect.CO_ASYNC_GENERATOR and exit_.kind == "yield":
+            arg, = gc.get_referents(arg)  # CPython 的 async_generator_wrapped_value。
+        if self.filtered.intersection(self.flow.yield_filters.get(exit_.position, ())):
+            self.outputs.append((arg, None))
+            return None
+        chosen = self.exit_reads.get(exit_.position)
+        if chosen is None and len(exit_.operands) == 1:
+            chosen = self.bound_sources.get(self.flow.names.get(next(iter(exit_.operands))))
+        if chosen is not None and chosen not in exit_.sources:
+            # 同一调用在 await / 迭代处换成消费位置，仍是同一来源。
+            chosen = next((o for o in exit_.sources if o.site is not None and chosen.site is not None and
+                           o.site.call == chosen.site.call), None)
+        if chosen is None:
+            chosen = self.source(exit_.sources, arg)
+        if chosen is None:
+            return None
+        if chosen.site is not None:
+            site = chosen.site
+            attempt = self.attempts.get(site.call)
+            if attempt is None:
+                return None
+            if self.flow.scheduled.intersection(self.executed) - site.schedules and not attempt.calls:
+                return None   # 没有消费的星号任务不能由另一个内建调用替代。
+            attempt.projected |= site.iterates and any(not f.f_code.co_flags & DEFERRED_FLAGS for f in attempt.calls)
+            self.outputs.append((arg, attempt))
+            return attempt
+        if chosen.kind in ("read", "local") and not self.flow.scheduled.intersection(self.executed):
+            self.outputs.append((arg, None))
+        return None
+
 
 
 class Trace:
@@ -706,11 +1145,12 @@ class Trace:
         self.wrappers = {}
         self.forward_calls = {}
         self.forward_results = {}
-        self.foreign_calls = set()
-        self.positions = {}
+        self.delegations = {}
         self.resumed = {}
         self.activations = {}
         self.hits = []
+        self.monitor_id = None
+        self.monitored_codes = {}
 
     def call(self, frame, bindings):
         code = frame.f_code
@@ -726,53 +1166,86 @@ class Trace:
         receiver, fn = self.suspended_calls[frame]
         return Call(frame, bindings, receiver, fn)
 
-    def position(self, frame):
-        code = frame.f_code
-        if code not in self.positions:
-            self.positions[code] = tuple(code.co_positions())
-        return self.positions[code][frame.f_lasti // 2] if frame.f_lasti >= 0 else None
+    def start(self):
+        # 只监听已进入的承接帧，用真实 code 限定指令事件；不跟踪 pytest
+        # 和生产调用树的每条指令。两个受支持版本均提供这一接口。
+        monitor = sys.monitoring
+        self.monitor_id = next(tool for tool in (3, 4) if monitor.get_tool(tool) is None)
+        monitor.use_tool_id(self.monitor_id, "at18-source")
+        monitor.register_callback(self.monitor_id, monitor.events.INSTRUCTION, self.instruction)
+        sys.setprofile(self.profile)
 
-    def forwarding_parent(self, frame):
-        if not (parent := self.forward_calls.get(frame.f_back)):
+    def stop(self):
+        sys.setprofile(None)
+        if self.monitor_id is not None:
+            monitor = sys.monitoring
+            for code in self.monitored_codes.values():
+                monitor.set_local_events(self.monitor_id, code, 0)
+            monitor.register_callback(self.monitor_id, monitor.events.INSTRUCTION, None)
+            monitor.free_tool_id(self.monitor_id)
+            self.monitor_id = None
+
+    def instruction(self, code, offset):
+        frame = sys._getframe(1)
+        visit = self.forward_calls.get(frame)
+        if visit is not None:
+            visit.opcode(frame, offset)
+
+    def delegation(self, frame):
+        if frame.f_code in wait_infrastructure or frame.f_code is Trace.instruction.__code__:
             return None
+        if frame in self.forward_results:
+            return self.forward_results[frame]
         caller = frame.f_back
-        sites = self.targets.forwarding.get(caller.f_code, NO_FORWARDING).sites
-        if sites:
-            # 匹配字节码位置而非行号或范围相交：同一行、甚至实参中
-            # 的日志调用各有自己的位置。延迟体则从消费令牌进入。
-            position = self.position(caller)
-            if any(position == site.call or frame.f_code.co_flags & DEFERRED_FLAGS and position in site.consumes
-                   for site in sites):
-                return parent
-            if parameter := task_creators.get(frame.f_code):
-                if any(position in site.schedules for site in sites):
-                    coroutine = frame.f_locals.get(parameter)
-                    if type(coroutine) is CoroutineType and coroutine.cr_frame is not None:
-                        self.forward_results.setdefault(coroutine.cr_frame, parent)
-        return None
+        if (parent := self.forward_calls.get(caller)) is None:
+            return None
+        _, position, _ = parent.flow.instructions.get(caller.f_lasti, (None, None, None))
+        # CPython 的 profile 回调可能将 f_lasti 留在 CALL 的内联 CACHE。
+        if position is None and caller.f_lasti >= 0:
+            position = parent.flow.code_positions[caller.f_lasti // 2]
+        if frame.f_code in task_creators:
+            keys = parent.attempts_at(position, schedules=True)
+            if keys:
+                value = frame.f_locals.get(task_creators[frame.f_code])
+                if type(value) is CoroutineType and value.cr_frame is not None:
+                    attempt = parent.attempts[keys[0]]
+                    attempt.delayed = True
+                    self.forward_results.setdefault(value.cr_frame, attempt)
+                return None
+        keys = parent.attempts_at(position)
+        if not keys:
+            return None
+        return parent.attempts[keys[0]]
 
-    def forward_return(self, frame, arg):
-        # 内层已交接的同一对象保留内层归属，不能从外层直接跳过内层包装器。
+    def handoff(self, arg, attempt):
         if inherits(type(arg), native_task):
             arg = native_task.get_coro(arg)
         attr = DEFERRED_FRAMES.get(type(arg))
-        if not attr or (child := getattr(arg, attr)) is None or child in self.forward_results:
-            return
-        visit = self.forward_calls.get(frame)
-        plan = self.targets.forwarding.get(frame.f_code, NO_FORWARDING)
-        self.forward_results[child] = visit if visit and (plan.all_exits or self.position(frame) in plan.exits) else None
+        if attr and (child := getattr(arg, attr)) is not None:
+            if attempt is not None:
+                attempt.delayed = True
+            # 外层不能越过内层把同一个延迟体改认成自己的直接实现。
+            self.forward_results.setdefault(child, attempt)
 
     def profile(self, frame, event, arg):
         code = frame.f_code
         if event == "c_call" and code in wait_result_codes and arg.__name__ == "result":
             joined(active.get(), current_task(), (arg.__self__,))
         if event == "return" and (frame in self.activations or frame in self.forward_calls
-                                  or frame in self.foreign_calls or code is RELOAD_CODE):
+                                  or frame in self.delegations or code is RELOAD_CODE):
             normal_return = code.co_code[frame.f_lasti] in returns if frame.f_lasti >= 0 else False
-            if frame in self.forward_calls or frame in self.foreign_calls:
+            visit = self.forward_calls.get(frame)
+            attempt = self.delegations.get(frame)
+            if visit is not None:
+                selected = visit.produced(frame, arg, normal_return)
                 if normal_return:
-                    self.forward_return(frame, arg)
-                self.foreign_calls.discard(frame)
+                    self.handoff(arg, selected)
+            elif attempt is not None and normal_return:
+                self.handoff(arg, None)
+            if attempt is not None:
+                attempt.values[frame] = arg
+                if normal_return:
+                    self.delegations.pop(frame, None)
             if frame in self.activations:
                 token, local = self.activations.pop(frame)
                 active.reset(token)
@@ -816,12 +1289,10 @@ class Trace:
         scopes = (*inherited, *local)
         # 生产公开入口可主动调用生产构造器；导入、重载、类体以及承接侧
         # 构造器仍是初始化。裸生产构造器也不能替登记测试形成直接证据。
-        parent = (self.forward_results[frame] if frame in self.forward_results
-                  else self.forwarding_parent(frame))
-        if parent and not self.targets.owns_frame(frame):
-            # 外来 Python 中间层若返回延迟对象，不让本地外层越过它认领该对象。
-            self.foreign_calls.add(frame)
-        if ((scopes or parent) and self.targets.owns_frame(frame)
+        attempt = self.delegation(frame)
+        parent = attempt.owner if attempt is not None else None
+        visit = None
+        if ((scopes or parent) and self.targets.owns_frame(frame) and code in self.targets.flows
                 and self.production.initialized(frame, constructors=False) and self.targets.initialized(frame)):
             bindings = self.targets.candidates(frame)
             if bindings or parent:
@@ -829,18 +1300,21 @@ class Trace:
                 if visit is None:
                     call = self.call(frame, bindings)
                     samples, bound = self.samples(frame, call, parent) if self.test else (({}, ((), {})), False)
-                    visit = self.forward_calls[frame] = ForwardCall(call, current_task(), scopes, samples, bound)
-                    if parent:
-                        parent.children.append(visit)
+                    visit = self.forward_calls[frame] = ForwardCall(
+                        call, current_task(), scopes, samples, bound, self.targets.flows[code])
+                    if id(code) not in self.monitored_codes:
+                        self.monitored_codes[id(code)] = code
+                        sys.monitoring.set_local_events(self.monitor_id, code, sys.monitoring.events.INSTRUCTION)
                 if bindings:
-                    wrapper = None
-                    if any(b.wrapper for b in bindings):
-                        if frame not in self.wrappers:
-                            self.wrappers[frame] = Invocation(wrapper=True)
-                        wrapper = self.wrappers[frame]
-                        local.append(wrapper)
+                    if frame not in self.wrappers:
+                        self.wrappers[frame] = Invocation(wrapper=True)
+                    wrapper = self.wrappers[frame]
+                    local.append(wrapper)
                     direct = in_test and self.production.initialized(frame)
                     self.hits.append((visit, current_task(), scopes, wrapper, direct))
+        if attempt is not None:
+            attempt.calls[frame] = visit
+            self.delegations[frame] = attempt
         if local:
             self.activations[frame] = active.set((*inherited, *local)), local
 
@@ -886,6 +1360,24 @@ class Trace:
                 reach[scope] = scope.reachable()
             return task in reach[scope]
 
+        def witnesses(visit, wrapper, seen=frozenset(), value=MISSING):
+            if visit in seen or self.test_scope and not reachable(self.test_scope, visit.task):
+                return
+            if not any(s.origin is wrapper and reachable(s, visit.task) for s in (wrapper, *visit.scopes)) and not (
+                    visit.task in wrapper.returned and any(reachable(s, visit.task) for s in visit.scopes)):
+                return
+            for produced, attempt in visit.outputs:
+                if value is not MISSING and produced is not value:
+                    continue
+                if attempt is None or not attempt.calls and not attempt.delayed:
+                    yield (visit.samples,)
+                elif all(child is not None for child in attempt.calls.values()):
+                    for child in attempt.calls.values():
+                        if child.call.actual() is not None:
+                            expected = MISSING if attempt.delayed or attempt.projected else produced
+                            for path in witnesses(child, wrapper, seen | {visit}, expected):
+                                yield (visit.samples, *path)
+
         for root, task, scopes, wrapper, direct in self.hits:
             matched = root.call.matches()
             if not matched or self.test_scope and not reachable(self.test_scope, task):
@@ -894,27 +1386,9 @@ class Trace:
                              and reachable(scope, task) and public(scope) for scope in scopes)
             if not via_public and not direct:
                 continue
-            ordinary = [b.key for b in matched if not b.wrapper]
-            if ordinary:
-                yield frozenset(ordinary), (root.samples,), via_public
-            if wrapper is None or not any(b.wrapper for b in matched):
-                continue
-            stack = [(child, (root.samples,)) for child in reversed(root.children)]
-            while stack:
-                child, previous = stack.pop()
-                if self.test_scope and not reachable(self.test_scope, child.task):
-                    continue
-                if not any(s.origin is wrapper and reachable(s, child.task) for s in (wrapper, *child.scopes)) and not (
-                        child.task in wrapper.returned and any(reachable(s, child.task) for s in scopes)):
-                    continue
-                fn = child.call.actual()
-                if fn is None:
-                    continue
-                path = (*previous, child.samples)
-                if self.targets.wrapper(fn):
-                    stack.extend((visit, path) for visit in reversed(child.children))
-                else:
-                    yield frozenset(b.key for b in matched if b.wrapper), path, via_public
+            keys = frozenset(b.key for b in matched)
+            for path in witnesses(root, wrapper):
+                yield keys, path, via_public
 
     def covers(self, expected):
         return any(via_public and not keys.isdisjoint(expected) for keys, _, via_public in self.accepted())
@@ -964,10 +1438,10 @@ def probe_call(production, targets, test_entered, fn, args, kwargs):
                     break
         finally:
             # asyncio.run 关闭事件循环时的隐式 aclose 不属于公开消费。
-            sys.setprofile(None)
+            trace.stop()
 
     try:
-        sys.setprofile(trace.profile)
+        trace.start()
         result = fn(*args, **kwargs)
         attr = DEFERRED_FRAMES.get(type(result))
         if attr and not trace.covers(test_entered):
@@ -988,7 +1462,7 @@ def probe_call(production, targets, test_entered, fn, args, kwargs):
         # 只承认异常前实际进入的导出；不因一次探针异常停止其他公开入口。
         pass
     finally:
-        sys.setprofile(None)
+        trace.stop()
         result = None
     return trace.covers(test_entered)
 
@@ -1015,11 +1489,11 @@ def proves(doc, scratch):
             production.load(origins)
             targets.load(origins)
             trace = Trace(production, targets, test=position)
-            sys.setprofile(trace.profile)
+            trace.start()
             try:
                 return (yield)
             finally:
-                sys.setprofile(None)
+                trace.stop()
                 for keys, path, via_public in trace.accepted():
                     self.entered.update(keys)
                     self.covered |= via_public

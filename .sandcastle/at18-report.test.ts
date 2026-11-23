@@ -1659,6 +1659,86 @@ def route(*args, **kwargs):
   }
 });
 
+test("R22/#1319：按实走出口判定本地承接", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const imports = "from .support import foreign, deferred, stream, astream\n";
+  const wire = "from .at18_fixture_feed import route\ndef dispatch(events): return route(events)\n";
+  const support = "def foreign(events): return sorted(events)\nasync def deferred(events): return sorted(events)\n" +
+    "def stream(events): yield from sorted(events)\nasync def astream(events):\n    for value in sorted(events): yield value\n";
+  const run = async (name: string, implementation: string, result: string, expected: boolean,
+    expression = "route([5, -2, 8])", production = wire) => {
+    await t.test(name, () => {
+      const repo = feedSource({ [entry]: imports + implementation, [integration]: production,
+        "trading_system/support.py": support,
+        [path]: "import asyncio\nfrom trading_system.at18_fixture_feed import route\n" +
+          "async def drain(items): return [v async for v in items]\n" +
+          `def test_route(): assert ${expression} == ${result}\n` });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  for (const [name, body] of [
+    ["IfExp 外调与常量", "return foreign(events) if events else []"],
+    ["IfExp 两臂调用", "return foreign(events) if len(events) < 4 else foreign(events[::-1])"],
+    ["分支赋值合流", "if events: out = foreign(events)\n    else: out = []\n    return out"],
+    ["match/注解赋值合流", "match events:\n        case []: out = []\n        case _: out: list[int] = foreign(events)\n    return out"],
+    ["try/except/合流/finally", "try: out = foreign(events)\n    except ValueError: out = []\n    finally: len(events)\n    return out"],
+    ["命名表达式", "return (out := foreign(events)) if events else []"],
+  ] as const) await run(name, `def route(events):\n    ${body}\n`, "[-2, 5, 8]", false);
+  await run("真实执行本地过滤，忽略未执行的快捷透传", `def route(events):
+    if min(events) >= 0: return foreign(events)
+    ordered = foreign(events)
+    return [v for v in ordered if v > 0]
+`, "[5, 8]", true);
+  const mixed = `def route(events):
+    if min(events) >= 0: out = foreign(events)
+    else: out = [v for v in foreign(events) if v > 0]
+    return out
+`;
+  await run("合流：本地过滤臂", mixed, "[5, 8]", true);
+  await run("合流：外来臂", mixed, "[5, 8, 9]", false, "route([5, 9, 8])");
+  await run("合流：实际返回字面回退", `def route(events):
+    out = [v for v in events if v > 0]
+    if len(events) > 2: out = []
+    return out
+`, "[]", false);
+  const computedNotSelected = `def route(events):
+    out = foreign(events)
+    clean = [v for v in out if v > 0]
+    if len(events) > 3: out = clean
+    return out
+`;
+  await run("合流：计算过但未采用的本地值不能作证", computedNotSelected, "[-2, 5, 8]", false);
+  await run("合流：实际采用先前计算的本地值", computedNotSelected, "[5, 8, 9]", true, "route([5, -2, 8, 9])");
+  await run("合流：后来计算但未采用的外来值不妨碍本地结果", `def route(events):
+    out = [v for v in events if v > 0]
+    raw = foreign(events)
+    if len(events) > 3: out = raw
+    return out
+`, "[5, 8]", true);
+  await run("finally 保留真正本地返回", `def route(events):
+    try: return [v for v in events if v > 0]
+    finally: len(events)
+`, "[5, 8]", true);
+  await run("await 合流：外来协程", "async def route(events): return await deferred(events) if events else []\n",
+    "[-2, 5, 8]", false, "asyncio.run(route([5, -2, 8]))");
+  for (const [name, body, value, expected] of [
+    ["常量折叠的空生成器", "if False: yield", "[]", false],
+    ["提前返回的空生成器", "return\n    yield events", "[]", false],
+    ["运行时常量为空的生成器", "flag = False\n    if flag: yield", "[]", false],
+    ["读完输入的本地过滤可产出零项", "for v in events:\n        if v > 100: yield v", "[]", true],
+    ["消费外来生成器不是本地实现", "yield from stream(events)", "[-2, 5, 8]", false],
+    ["不相关循环不能替空生成器作证", "for v in events: len(str(v))\n    flag = False\n    if flag: yield", "[]", false],
+    ["本地过滤外部迭代保留部分值", "for v in stream(events):\n        if v > 0: yield v", "[5, 8]", true],
+    ["本地过滤外部迭代可产出零项", "for v in stream(events):\n        if v > 100: yield v", "[]", true],
+    ["循环原样产出外来值", "for v in stream(events): yield v", "[-2, 5, 8]", false],
+    ["循环本地变换外来值", "for v in stream(events): yield v * 2", "[-4, 10, 16]", true],
+  ] as const) await run(name, `def route(events):\n    ${body}\n`, value, expected, "list(route([5, -2, 8]))");
+  await run("异步循环原样产出外来值", "async def route(events):\n    async for v in astream(events): yield v\n",
+    "[-2, 5, 8]", false, "asyncio.run(drain(route([5, -2, 8])))");
+});
+
 test("R15/#1319：三路并发的慢解释器发现不误拒列表迭代器", { timeout: 120_000 }, async () => {
   const f = makeFixture({ feedIntegration: `from .at18_fixture_feed import route
 def select_feed(sources, events):
