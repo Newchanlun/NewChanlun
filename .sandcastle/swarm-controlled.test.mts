@@ -1,7 +1,7 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ROW_ENV, issueReceipt, swarmBinding } from "./docker-acceptance.mts";
@@ -11,13 +11,24 @@ import { assertControlledBase } from "./swarm-controlled.mts";
 
 const TICKET = 4242;
 const tmp = (p: string) => mkdtempSync(join(tmpdir(), p));
+let templateRepo: { dir: string; candidate: string } | undefined;
+function getTemplateRepo() {
+  if (!templateRepo) {
+    const dir = tmp("controlled-base-tpl-");
+    const git = (...a: string[]) => execFileSync("git", ["-C", dir, ...a], { encoding: "utf8", stdio: "pipe" }).trim();
+    git("init", "-q", "-b", "main"); git("config", "user.name", "t"); git("config", "user.email", "t@x");
+    writeFileSync(join(dir, "a"), "1"); git("add", "."); git("commit", "-qm", "c1");
+    templateRepo = { dir, candidate: git("rev-parse", "HEAD") };
+  }
+  return templateRepo;
+}
+after(() => { if (templateRepo) rmSync(templateRepo.dir, { recursive: true, force: true }); });
 function repo() {
+  const tpl = getTemplateRepo();
   const dir = tmp("controlled-base-");
+  cpSync(tpl.dir, dir, { recursive: true });
   const git = (...a: string[]) => execFileSync("git", ["-C", dir, ...a], { encoding: "utf8", stdio: "pipe" }).trim();
-  git("init", "-q", "-b", "main"); git("config", "user.name", "t"); git("config", "user.email", "t@x");
-  writeFileSync(join(dir, "a"), "1"); git("add", "."); git("commit", "-qm", "c1");
-  const candidate = git("rev-parse", "HEAD");
-  return { dir, git, candidate };
+  return { dir, git, candidate: tpl.candidate };
 }
 const admissionFor = (head: string) => ({ imageId: IMG_ID, row: "13" as const, receipt: { head } as never, consume: () => undefined });
 const good = {
