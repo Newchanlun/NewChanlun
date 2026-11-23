@@ -50,8 +50,6 @@ W1 无定义，本模块直接报错，不静默丢点。
 from __future__ import annotations
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
-from scipy.spatial.distance import cdist
 
 __all__ = ["wasserstein_1"]
 
@@ -137,6 +135,9 @@ def wasserstein_1(dgm_a: np.ndarray, dgm_b: np.ndarray) -> float:
         s = np.zeros((1, 2), dtype=float)
     if t.shape[0] == 0:
         t = np.zeros((1, 2), dtype=float)
+
+    from scipy.optimize import linear_sum_assignment
+    from scipy.spatial.distance import cdist
 
     m = s.shape[0]
     n = t.shape[0]
