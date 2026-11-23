@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { describe, test } from "node:test";
 
 const repoRoot = join(__dirname, "..");
 const entrypoint = join(
@@ -22,7 +22,7 @@ const tsx = join(repoRoot, "node_modules", ".bin", "tsx");
 
 type GitShape = "up-to-date" | "clean" | "conflict";
 
-function runEntrypoint(shape: GitShape, legacy = false) {
+async function runEntrypoint(shape: GitShape, legacy = false) {
   const dir = mkdtempSync(join(tmpdir(), `update-branch-${shape}-`));
   try {
     const bin = join(dir, "bin");
@@ -54,21 +54,39 @@ esac
     writeFileSync(git, fakeGit);
     chmodSync(git, 0o755);
 
-    const result = spawnSync(tsx, [entrypoint], {
-      cwd: dir,
-      encoding: "utf8",
-      timeout: 30_000,
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH ?? ""}`,
-        GIT_CALL_LOG: gitCalls,
-        EVENT_PAYLOAD: legacy ? '["agent:model:deepseek-v4-pro"]' : "[]",
-        ...(legacy ? { DEEPSEEK_API_KEY: "fixture-secret" } : {}),
-        PR_NUMBER: "1701",
-        BRANCH: "codex/issue-1617-kimi-main-model",
-        BASE_REF: "main",
-        OUTPUT_DIR: output,
-      },
+    const result = await new Promise<{ status: number | null; stdout: string; stderr: string; error?: Error }>((resolve) => {
+      execFile(
+        tsx,
+        [entrypoint],
+        {
+          cwd: dir,
+          encoding: "utf8",
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            GIT_CALL_LOG: gitCalls,
+            EVENT_PAYLOAD: legacy ? '["agent:model:deepseek-v4-pro"]' : "[]",
+            ...(legacy ? { DEEPSEEK_API_KEY: "fixture-secret" } : {}),
+            PR_NUMBER: "1701",
+            BRANCH: "codex/issue-1617-kimi-main-model",
+            BASE_REF: "main",
+            OUTPUT_DIR: output,
+          },
+        },
+        (err, stdout, stderr) => {
+          if (!err) {
+            resolve({ status: 0, stdout, stderr });
+            return;
+          }
+          const code = (err as NodeJS.ErrnoException & { code?: unknown }).code;
+          if (typeof code === "number") {
+            resolve({ status: code, stdout, stderr });
+            return;
+          }
+          resolve({ status: null, stdout, stderr, error: err });
+        },
+      );
     });
 
     assert.equal(result.error, undefined, `${shape}: process must finish`);
@@ -96,6 +114,8 @@ for (const shape of ["up-to-date", "clean", "conflict"] as const) {
   });
 }
 
-test("update-branch 显式 DeepSeek legacy 路线不被退役默认吞掉", () => {
-  runEntrypoint("up-to-date", true);
+describe("update-branch-entry", { concurrency: 4 }, () => {
+test("update-branch 显式 DeepSeek legacy 路线不被退役默认吞掉", async () => {
+  await runEntrypoint("up-to-date", true);
+});
 });
