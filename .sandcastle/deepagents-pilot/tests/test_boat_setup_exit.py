@@ -1,10 +1,12 @@
 import json
+import shutil
 import subprocess
 import time
 from dataclasses import replace
 
 import pytest
-from conftest import FAKE, MODELS
+from conftest import FAKE, MODELS, git
+from fake_github import FakeGitHub
 from test_boat import launches, supervise, supervisor_env
 from test_boat_drain import assert_no_collection, stopped_worker
 from test_queue import SPEC, authorize, executor
@@ -12,10 +14,13 @@ from test_queue import queued as queued
 from v2env import TICKET, V2Env
 
 from pilot1742 import boat_remote
+from pilot1742.approval import SignedApprovals
 from pilot1742.boat_execution import ExecutionUnknown
 from pilot1742.claims import ClaimRefused, ClaimStore
 from pilot1742.domain import EffectUnknown
 from pilot1742.executor import load_unit, open_v2_run, release_claim
+from pilot1742.run import Halted, PilotRun
+from pilot1742.workunit import DEDICATED_MARKER
 
 
 def setup_receipt(tmp_path, monkeypatch, case, binding=None):
@@ -162,3 +167,69 @@ def test_setup_receipt_controls_manual_generation(tmp_path, monkeypatch, case):
         assert v2.claim_record()['generation'] == 1
         assert v2.writes() == before
     assert_no_collection(run, key, cli)
+
+
+@pytest.fixture(scope="module")
+def _v2_seed(tmp_path_factory):
+    return V2Env(tmp_path_factory.mktemp("v2-seed"))
+
+
+@pytest.fixture(autouse=True)
+def _fast_env(_v2_seed, monkeypatch):
+    seed = _v2_seed
+
+    def initialize(self, tmp):
+        self.tmp = tmp
+        self.home = tmp / "home"
+        self.home.mkdir()
+        self.source = tmp / "source"
+        self.bare = tmp / "origin.git"
+        shutil.copytree(seed.source, self.source)
+        shutil.copytree(seed.bare, self.bare)
+        pem = tmp / "app.pem"
+        shutil.copy2(seed.identity.private_key_path, pem)
+        pem.chmod(0o600)
+        self.base = seed.base
+        self.identity = replace(seed.identity, private_key_path=pem)
+        self.github = FakeGitHub(self.identity, self.bare)
+        self.github.add_issue(TICKET, body=f"#1742 首证专用票\n\n{DEDICATED_MARKER}\n")
+        self.claims_root = tmp / "claims"
+        self.workers_log = tmp / "workers.jsonl"
+        self.workers_log.write_text(json.dumps({"ticket": 1715, "branch": "sandcastle/issue-1715"}) + "\n")
+        self.approvals = SignedApprovals(trust_path=tmp / "unconfigured-trust.json",
+                                         authority_root=tmp / "unconfigured-authority")
+        self.control({})
+
+    def ensure_checkout(self, role, head):
+        path, branch = self.spec.checkout_for(role), self.spec.branch_for(role)
+        if not path.exists():
+            path.mkdir(parents=True)
+            for item in self.source_repo.iterdir():
+                if item.name == ".git":
+                    continue
+                target = path / item.name
+                if item.is_dir() and not item.is_symlink():
+                    shutil.copytree(item, target, symlinks=True)
+                elif item.is_symlink():
+                    target.symlink_to(item.readlink())
+                else:
+                    shutil.copy2(item, target)
+            common = self.source_repo / ".git"
+            wt_name = f"{self.spec.run_id}-{role}"
+            admin = common / "worktrees" / wt_name
+            admin.mkdir(parents=True)
+            (admin / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+            (admin / "commondir").write_text("../..\n")
+            (admin / "gitdir").write_text(str(path / ".git") + "\n")
+            (path / ".git").write_text(f"gitdir: {admin}\n")
+            ref = common / "refs/heads" / branch
+            if not ref.exists():
+                ref.parent.mkdir(parents=True, exist_ok=True)
+                ref.write_text(str(head) + "\n")
+            git(path, "read-tree", str(head))
+            self.trail("checkout_created", role=role, path=str(path), branch=branch)
+        if git(path, "symbolic-ref", "--short", "HEAD") != branch:
+            raise Halted(f"{path} 不在预期分支 {branch}")
+
+    monkeypatch.setattr(V2Env, "__init__", initialize)
+    monkeypatch.setattr(PilotRun, "_ensure_checkout", ensure_checkout)
