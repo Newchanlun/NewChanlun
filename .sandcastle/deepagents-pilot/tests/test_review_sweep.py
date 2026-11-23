@@ -66,6 +66,7 @@ class FakeGitHub:
             "base_ref": p["base"]["ref"],
             "base_repo_id": (p["base"].get("repo") or {}).get("id"),
             "head_repo_id": (p["head"].get("repo") or {}).get("id"),
+            "draft": bool(p.get("draft", False)),
             "changed_files": 1,
             "mergeable_state": "clean",
             "auto_merge": False,
@@ -624,21 +625,26 @@ def test_reviewer_identity_rejects_other_prs_zombies_and_unrelated_commands():
 
 
 def test_run_review_refuses_when_head_moved(monkeypatch):
-    """F5：子进程绑定决策时的 head 与 base；任一已变就不审（不登记、不派模型），匹配时原样透传给 external_review。"""
+    """F5 + R32（Astra P2）：子进程绑定决策时的 head、base 与非 draft；任一已变就不审（不登记、不派模型），
+    匹配时带 --reject-draft 透传给 external_review 供登记前再次复核。"""
     called = []
     monkeypatch.setattr("pilot1742.external_review.main", lambda argv: called.append(argv) or 0)
     class GitHub:
+        def __init__(self, *, draft=False):
+            self.draft = draft
         def pr(self, number):
-            return {"head": "b" * 40, "base": "c" * 40}
+            return {"head": "b" * 40, "base": "c" * 40, "draft": self.draft}
     assert module.run_review(["--pr", "5", "--attempt", "1", "--expect-head", "a" * 40, "--private-key", "/k"],
                              GitHub()) == 3
     assert module.run_review(["--pr", "5", "--attempt", "1", "--expect-head", "b" * 40,
                               "--expect-base", "d" * 40, "--private-key", "/k"], GitHub()) == 3
+    assert module.run_review(["--pr", "5", "--attempt", "1", "--expect-head", "b" * 40,
+                              "--expect-base", "c" * 40, "--private-key", "/k"], GitHub(draft=True)) == 3
     assert called == []
     assert module.run_review(["--pr", "5", "--attempt", "1", "--expect-head", "b" * 40,
                               "--expect-base", "c" * 40, "--private-key", "/k"], GitHub()) == 0
     assert called == [["review-pr", "--pr", "5", "--attempt", "1", "--private-key", "/k",
-                       "--expect-head", "b" * 40, "--expect-base", "c" * 40]]
+                       "--expect-head", "b" * 40, "--reject-draft", "--expect-base", "c" * 40]]
 
 
 def test_behind_head_is_caught_up_before_review(lane):
@@ -2881,6 +2887,29 @@ def test_verify_pass_holds_exclusive_pr_locks_during_check_and_rejects_incomplet
             lane=lane, rows=list,
         ) == 2
         assert json.loads(capsys.readouterr().err)["code"] == "not-published-pass"
+    (folder / "outcome.json").write_text(json.dumps(orig_outcome))
+
+    # 4. R32（Sol P2）：纯只读约束——核验不存在的 PR 不创建任何目录或锁文件，直接返回结构化 no-pr-locks；
+    #    rereview-intents 不可读时失败闭合返回 rereview-pending。
+    empty_lane = _external_review.ExternalReview(None, state_root=lane.state_root / "brand-new-empty")
+    assert module.run_verify_pass(
+        ["--pr", "9999", "--base", base, "--head", head, "--run-id", run_id],
+        lane=empty_lane, rows=list,
+    ) == 2
+    assert json.loads(capsys.readouterr().err)["code"] == "no-pr-locks"
+    assert not (empty_lane.state_root / "pr-locks").exists()
+
+    intent_dir = lane.state_root / "rereview-intents"
+    intent_dir.mkdir(exist_ok=True, mode=0o700)
+    os.chmod(intent_dir, 0o000)
+    try:
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "rereview-pending"
+    finally:
+        os.chmod(intent_dir, 0o700)
 
 
 def test_behind_pr_is_not_reviewed_when_auto_merge_is_off(lane, env):

@@ -394,19 +394,21 @@ def _check_confirmed_pass_locked(lane: ExternalReview, number: int, *, base: str
 def locked_verified_pass(lane: ExternalReview, number: int, *, base: str, head: str,
                          run_id: str | None = None,
                          rows: Callable[[], Rows] = _ps_rows) -> Iterator[dict[str, Any]]:
-    """在持有同 PR 排他在途锁（inflight.lock）与排他 PR 锁（p<N>.lock）期间原子完成本机核验，
-    消除核验内部「探测释锁后、新重审抢入预检」的本机竞态；退出上下文即释锁，不锁定后续远端操作。"""
-    with lane.try_exclude_inflight_review(number) as excluded:
-        if not excluded:
-            yield {"ok": False, "code": "inflight-review-active", "reason": f"PR #{number} 正有本机预检/登记在途"}
+    """纯只读核验端：以 O_RDONLY | O_NOFOLLOW 打开已存在的 p<N>.inflight.lock 与 p<N>.lock 并短暂排他持锁，
+    消除核验内部「探测释锁后、新重审抢入预检」的本机竞态；不创建目录或锁文件，退出即释锁，不锁定后续远端操作。"""
+    with lane.try_readonly_pr_locks(number) as (acquired, err_code):
+        if not acquired:
+            reasons = {
+                "no-pr-locks": f"PR #{number} 缺少本机审查锁文件（尚无本机审查记录）",
+                "lock-unreadable": f"PR #{number} 本机审查锁目录或文件不可读/不合法",
+                "inflight-review-active": f"PR #{number} 正有本机预检/登记在途",
+                "pr-lock-busy": f"PR #{number} 正有登记/发布持有 PR 锁",
+            }
+            yield {"ok": False, "code": err_code, "reason": reasons.get(err_code, f"PR #{number} 无法获取本机只读锁")}
             return
-        with lane.try_pr_lock(number) as pr_locked:
-            if not pr_locked:
-                yield {"ok": False, "code": "pr-lock-busy", "reason": f"PR #{number} 正有登记/发布持有 PR 锁"}
-                return
-            yield _check_confirmed_pass_locked(
-                lane, number, base=base, head=head, run_id=run_id, rows=rows, check_processes=True
-            )
+        yield _check_confirmed_pass_locked(
+            lane, number, base=base, head=head, run_id=run_id, rows=rows, check_processes=True
+        )
 
 
 def verify_confirmed_pass(lane: ExternalReview, number: int, *, base: str, head: str,
@@ -1361,6 +1363,9 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
     parser.add_argument("--private-key", required=True, type=Path)
     args = parser.parse_args(argv)
     live = (github or GhCli()).pr(args.pr)
+    if live.get("draft") is not False:
+        print(json.dumps({"pr": args.pr, "action": "draft-not-reviewed", "draft": live.get("draft")}))
+        return 3
     if live["head"] != args.expect_head:
         print(json.dumps({"pr": args.pr, "action": "head-moved-not-reviewed", "expected": args.expect_head}))
         return 3
@@ -1370,7 +1375,7 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
         return 3
     from . import external_review
     cmd = ["review-pr", "--pr", str(args.pr), "--attempt", str(args.attempt),
-           "--private-key", str(args.private_key), "--expect-head", args.expect_head]
+           "--private-key", str(args.private_key), "--expect-head", args.expect_head, "--reject-draft"]
     if args.expect_base is not None:
         cmd.extend(["--expect-base", args.expect_base])
     return external_review.main(cmd)

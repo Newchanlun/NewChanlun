@@ -6,6 +6,7 @@
 - 独立运行时从 stdin 读取 JSON 数组 `[url, key, model, session, work_seconds]`，stdout 仅输出固定枚举 JSON。
 """
 import hashlib
+import http.client
 import json
 import sys
 import time
@@ -213,11 +214,23 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline,
                 "error": None if ok else _error_info(text, code=error_code),
             }
     except urllib.error.HTTPError as error:
+        status_code = error.code
+        try:
+            body_bytes = error.read(65536)
+        except http.client.IncompleteRead as inc:
+            body_bytes = inc.partial[:65536]
+        except Exception:
+            body_bytes = b""
+        finally:
+            try:
+                error.close()
+            except Exception:
+                pass
         return {
-            "http_status": error.code,
+            "http_status": status_code,
             "terminal": None,
             "ok": False,
-            "error": _error_info(error.read()[:65536].decode("utf-8", "replace")),
+            "error": _error_info(body_bytes.decode("utf-8", "replace")),
         }
     except Exception as error:  # 连接、协议等任何异常都只记类型与 errno，不带异常原文
         reason = getattr(error, "reason", None)

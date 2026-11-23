@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..341b214 100644
+index e69de29..f7ce42e 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1937 @@
+@@ -0,0 +1,1942 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4154,8 +4154,12 @@ index e69de29..341b214 100644
 +		if err := entry.persistLocked(); err != nil {
 +			entry.sealed = false
 +			entry.sealedAt = 0
++			// Seal persistence outcome is indeterminate (Rename may already have landed on disk):
++			// taint and invalidate any unconfirmed receipt on disk, and keep the launch permanently
++			// closed against new turns and future SealOK (both in-process and after restart).
++			entry.taintAndPersistLocked()
 +			entry.mu.Unlock()
-+			finishSeal(false)
++			finishSeal(true)
 +			return SealUnavailable
 +		}
 +		entry.mu.Unlock()
@@ -4795,6 +4799,7 @@ index e69de29..341b214 100644
 +	finalPath := filepath.Join(e.directory, "receipt.json")
 +	_ = os.Truncate(finalPath, 0)
 +	_ = os.Remove(finalPath)
++	_ = syncDirFn(e.directory)
 +}
 +
 +func (e *reviewEntry) persistLocked() error {
@@ -4966,10 +4971,10 @@ index e69de29..341b214 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..9d39e2e 100644
+index e69de29..1f8846c 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2110 @@
+@@ -0,0 +1,2128 @@
 +package preflightreceipt
 +
 +import (
@@ -7078,5 +7083,23 @@ index e69de29..9d39e2e 100644
 +	}
 +	if st := SealReview(root2, launch, session); st == SealOK {
 +		t.Fatalf("SealReview succeeded despite launch dir sync error: %v", st)
++	}
++	// R32 (Astra P1): launch must stay permanently closed against new turns and future SealOK,
++	// both in-process AND after a simulated proxy restart once normal fsync recovers.
++	if _, _, err := BeginReview(context.Background(), root2, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("in-process BeginReview after failed seal err = %v, want ErrUnavailable", err)
++	}
++	if st := SealReview(root2, launch, session); st != SealRejected {
++		t.Fatalf("in-process repeat SealReview after failed seal = %v, want SealRejected", st)
++	}
++	syncDirFn = origSync
++	reviewMu.Lock()
++	delete(reviewLedger, root2+"\x00"+launch)
++	reviewMu.Unlock()
++	if st := SealReview(root2, launch, session); st != SealRejected {
++		t.Fatalf("post-restart SealReview after failed seal = %v, want SealRejected", st)
++	}
++	if _, _, err := BeginReview(context.Background(), root2, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("post-restart BeginReview after failed seal err = %v, want ErrUnavailable", err)
 +	}
 +}

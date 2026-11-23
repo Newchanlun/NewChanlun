@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import collections
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -185,8 +186,24 @@ def _read(path: Path) -> dict:
     return value
 
 
+def _fsync_dir(directory: Path) -> None:
+    """持久化目录项变更（新建目录、原子 replace 或 unlink 后调用）；失败直接上抛，不静默忽略。"""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _save(path: Path, value: dict) -> None:
+    created: list[Path] = []
+    cur = path.parent
+    while not cur.exists() and cur != cur.parent:
+        created.append(cur)
+        cur = cur.parent
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for directory in reversed(created):
+        _fsync_dir(directory.parent)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     with open(tmp, "w", opener=lambda p, f: os.open(p, f, 0o600)) as stream:
         json.dump(value, stream, ensure_ascii=False, indent=2)
@@ -194,6 +211,7 @@ def _save(path: Path, value: dict) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(tmp, path)
+    _fsync_dir(path.parent)
 
 
 @contextmanager
@@ -261,13 +279,14 @@ def check_controller(expected: str | None = None) -> str:
     return head
 
 
-def load_target(gateway: RepoGateway, pr_number: int) -> dict[str, Any]:
+def load_target(gateway: RepoGateway, pr_number: int, *, reject_draft: bool = False) -> dict[str, Any]:
     if type(pr_number) is not int or pr_number <= 0:
         raise ValueError("PR 号必须是正整数")
-    return parse_target(gateway, gateway.get_pr(pr_number), pr_number)
+    return parse_target(gateway, gateway.get_pr(pr_number), pr_number, reject_draft=reject_draft)
 
 
-def parse_target(gateway: RepoGateway, pr: dict[str, Any], pr_number: int) -> dict[str, Any]:
+def parse_target(gateway: RepoGateway, pr: dict[str, Any], pr_number: int,
+                 *, reject_draft: bool = False) -> dict[str, Any]:
     """从已读到的 PR 内容得出冻结目标；这里的不符是内容漂移，与读取时的认证或传输故障分开。"""
     try:
         base, head = pr["base"], pr["head"]
@@ -280,6 +299,8 @@ def parse_target(gateway: RepoGateway, pr: dict[str, Any], pr_number: int) -> di
             raise IdentityError("unsupported_head_repository")
         if type(pr["draft"]) is not bool or not all(isinstance(x, str) and x for x in (base["ref"], head["ref"])):
             raise IdentityError("PR 字段不完整")
+        if reject_draft and pr["draft"]:
+            raise TargetDrifted("draft-not-reviewed: PR 已转回 draft，自动派审中止")
         return dict(repository_id=repository_id, pr_number=pr_number,
                     base_repository_id=repository_id, base_ref=base["ref"], base_sha=str(parse_sha(base["sha"])),
                     head_repository_id=repository_id, head_ref=head["ref"], head_sha=str(parse_sha(head["sha"])))
@@ -1502,10 +1523,15 @@ class ExternalReview:
         for model in MODELS:
             route = checks.get(f"route:{model}")
             rt = checks.get(f"roundtrip:{model}")
-            if not route or route.get("ok") is not True or not rt or rt.get("ok") is not True:
-                raise EffectPending(f"preflight-blocked：缺少通过的 {model} 预检项，{suffix}")
+            seal = checks.get(f"seal:{model}")
+            if (not route or route.get("ok") is not True
+                    or not rt or rt.get("ok") is not True
+                    or not seal or seal.get("ok") is not True):
+                raise EffectPending(f"preflight-blocked：缺少通过的 {model} 正式预检或封存项，{suffix}")
             raw_route_detail = route.get("detail")
             route_detail: dict[str, Any] = raw_route_detail if isinstance(raw_route_detail, dict) else {}
+            if route_detail.get("sealed") is not True:
+                raise EffectPending(f"preflight-blocked：{model} 路由收据未封存（sealed!=true），{suffix}")
             expected_routes = route_detail.get("expected")
             actual_routes = route_detail.get("actual")
             if (not isinstance(expected_routes, list) or not expected_routes
@@ -1560,9 +1586,26 @@ class ExternalReview:
             })
             return recorded_at_ns
 
+    def _iter_rereview_intents(self, pattern: str) -> list[Path]:
+        """枚举 rereview-intents 下匹配文件：仅当目录本身不存在时返回空列表；
+        目录不可读、非目录、符号链接或枚举失败一律抛 OSError/IdentityError 供调用方失败闭合，
+        避免 Path.glob() 静默吞掉 PermissionError 误判为无重审意图。"""
+        intent_dir = self.state_root / "rereview-intents"
+        try:
+            st = os.lstat(intent_dir)
+        except FileNotFoundError:
+            return []
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise IdentityError("rereview-intents 目录类型不合法或为符号链接")
+        return [intent_dir / name for name in sorted(os.listdir(intent_dir)) if fnmatch.fnmatch(name, pattern)]
+
     def has_pending_rereview_intent(self, number: int, head: str, base: str) -> bool:
-        """是否存在针对该 (pr, base, head) 且尚未被更晚登记的新 attempt 承接的重审意图。损坏即失败闭合返回 True。"""
-        matches = list((self.state_root / "rereview-intents").glob(f"r*-p{number}-{base}-{head}.json"))
+        """是否存在针对该 (pr, base, head) 且尚未被更晚登记的新 attempt 承接的重审意图。
+        目录或意图文件不可读/损坏一律失败闭合返回 True。"""
+        try:
+            matches = self._iter_rereview_intents(f"r*-p{number}-{base}-{head}.json")
+        except (OSError, IdentityError):
+            return True
         if not matches:
             return False
         latest_reg = 0
@@ -1592,13 +1635,14 @@ class ExternalReview:
         return False
 
     def target(self, number: int, attempt: int, *,
-               expect_head: str | None = None, expect_base: str | None = None) -> ReviewTarget:
+               expect_head: str | None = None, expect_base: str | None = None,
+               reject_draft: bool = False) -> ReviewTarget:
         if type(attempt) is not int or attempt <= 0:
             raise ValueError("attempt 必须为正整数")
         if self.gateway is None:
             raise IdentityError("在线独审需要宿主 App 客户端")
         with self._inflight_review(number):
-            raw_target = load_target(self.gateway, number)
+            raw_target = load_target(self.gateway, number, reject_draft=reject_draft)
             if expect_head is not None and raw_target["head_sha"] != expect_head:
                 raise TargetDrifted(f"head-moved-not-reviewed: expected {expect_head}, got {raw_target['head_sha']}")
             if expect_base is not None and raw_target["base_sha"] != expect_base:
@@ -1645,8 +1689,9 @@ class ExternalReview:
                     admitted_image = str(preflight_report.get("admitted_image_id", ""))
                 target = replace(target, reuse_planned=planned, admitted_image_id=admitted_image)
                 with self._pr_lock(target.pr_number):
-                    # 慢预检后落盘前再次核对实时 PR 目标，防旧 base 晚于新 base 写入 target.json 误把新审标成 STALE。
-                    live_target = load_target(self.gateway, number)
+                    # 慢预检后落盘前再次核对实时 PR 目标，防旧 base 晚于新 base 写入 target.json 误把新审标成 STALE，
+                    # 自动派审（reject_draft=True）同时复核 PR 未在预检期间转回 draft。
+                    live_target = load_target(self.gateway, number, reject_draft=reject_draft)
                     if live_target["head_sha"] != target.head_sha:
                         raise TargetDrifted(f"head-moved-not-reviewed: expected {target.head_sha}, got {live_target['head_sha']}")
                     if live_target["base_sha"] != target.base_sha:
@@ -1661,9 +1706,7 @@ class ExternalReview:
                             prev_max = max(prev_max, int(_read(existing).get("registered_at_ns", 0)))
                         except (OSError, ValueError, TypeError, IdentityError):
                             continue
-                    for intent_file in (self.state_root / "rereview-intents").glob(
-                        f"r*-p{target.pr_number}-*-{target.head_sha}.json"
-                    ):
+                    for intent_file in self._iter_rereview_intents(f"r*-p{target.pr_number}-*-{target.head_sha}.json"):
                         try:
                             prev_max = max(prev_max, int(_read(intent_file).get("recorded_at_ns", 0)))
                         except (OSError, ValueError, TypeError, IdentityError):
@@ -1686,6 +1729,7 @@ class ExternalReview:
             recorded = int(_read(intent_file).get("recorded_at_ns", 0))
             if recorded < target.registered_at_ns:
                 intent_file.unlink(missing_ok=True)
+                _fsync_dir(intent_file.parent)
         except (OSError, ValueError, TypeError, IdentityError):
             pass
 
@@ -1746,13 +1790,89 @@ class ExternalReview:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    @contextmanager
+    def try_readonly_pr_locks(self, number: int) -> Iterator[tuple[bool, str]]:
+        """纯只读核验端（verify-pass）专用的非阻塞排他锁获取：不创建目录、不使用 O_CREAT/O_RDWR，
+        仅以 O_RDONLY | O_NOFOLLOW | O_NONBLOCK 打开已存在的 p<N>.inflight.lock 与 p<N>.lock 并 flock。
+        文件/目录缺失、符号链接、权限不符或任一锁被占用均返回结构化拒绝码，绝不留痕也不抛未捕获异常。"""
+        folder = self.state_root / "pr-locks"
+        inflight_fd = -1
+        pr_fd = -1
+        inflight_locked = False
+        pr_locked = False
+        try:
+            try:
+                dir_st = os.lstat(folder)
+            except FileNotFoundError:
+                yield False, "no-pr-locks"
+                return
+            except OSError:
+                yield False, "lock-unreadable"
+                return
+            if stat.S_ISLNK(dir_st.st_mode) or not stat.S_ISDIR(dir_st.st_mode):
+                yield False, "lock-unreadable"
+                return
+            for slot, name, busy_code in (
+                ("inflight", f"p{number}.inflight.lock", "inflight-review-active"),
+                ("pr", f"p{number}.lock", "pr-lock-busy"),
+            ):
+                try:
+                    fd = os.open(folder / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                except FileNotFoundError:
+                    yield False, "no-pr-locks"
+                    return
+                except OSError:
+                    yield False, "lock-unreadable"
+                    return
+                if slot == "inflight":
+                    inflight_fd = fd
+                else:
+                    pr_fd = fd
+                try:
+                    st = os.fstat(fd)
+                    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077):
+                        yield False, "lock-unreadable"
+                        return
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    yield False, busy_code
+                    return
+                except OSError:
+                    yield False, "lock-unreadable"
+                    return
+                if slot == "inflight":
+                    inflight_locked = True
+                else:
+                    pr_locked = True
+            yield True, ""
+        finally:
+            if pr_locked and pr_fd >= 0:
+                fcntl.flock(pr_fd, fcntl.LOCK_UN)
+            if pr_fd >= 0:
+                os.close(pr_fd)
+            if inflight_locked and inflight_fd >= 0:
+                fcntl.flock(inflight_fd, fcntl.LOCK_UN)
+            if inflight_fd >= 0:
+                os.close(inflight_fd)
+
     def has_inflight_review(self, number: int) -> bool:
-        """只读规划期探测：当前是否有手动或自动审查进程正在该 PR 的预检/登记阶段（不占 attempt）。"""
+        """只读规划期探测：当前是否有手动或自动审查进程正在该 PR 的预检/登记阶段（不创建锁文件）。"""
         path = self.state_root / "pr-locks" / f"p{number}.inflight.lock"
-        if not path.exists():
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
             return False
-        with self.try_exclude_inflight_review(number) as excluded:
-            return not excluded
+        except OSError:
+            return True
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return False
+            except BlockingIOError:
+                return True
+        finally:
+            os.close(fd)
 
     @contextmanager
     def try_pr_lock(self, number: int) -> Iterator[bool]:
@@ -2004,7 +2124,11 @@ class ExternalReview:
             # 旧 PASS 已被待重审取代，不得沿用。
             if self.has_pending_rereview_intent(target.pr_number, old["head_sha"], old["base_sha"]):
                 return None
-            for intent_path in (self.state_root / "rereview-intents").glob(f"r*-p{target.pr_number}-*.json"):
+            try:
+                intent_paths = self._iter_rereview_intents(f"r*-p{target.pr_number}-*.json")
+            except (OSError, IdentityError):
+                return None
+            for intent_path in intent_paths:
                 try:
                     intent_data = _read(intent_path)
                     intent_patch = intent_data.get("patch_id")
@@ -2246,8 +2370,12 @@ class ExternalReview:
 
     def _has_newer_rereview_intent(self, target: ReviewTarget) -> bool:
         """是否存在晚于本 attempt 登记时刻、针对同 PR 同 head 的待完成重审意图（即使新 attempt 预检失败尚未写 target.json）。
-        意图文件损坏时失败闭合返回 True，阻止旧 attempt 覆盖发布 success。"""
-        for path in (self.state_root / "rereview-intents").glob(f"r*-p{target.pr_number}-*-{target.head_sha}.json"):
+        目录或意图文件不可读/损坏时失败闭合返回 True，阻止旧 attempt 覆盖发布 success。"""
+        try:
+            paths = self._iter_rereview_intents(f"r*-p{target.pr_number}-*-{target.head_sha}.json")
+        except (OSError, IdentityError):
+            return True
+        for path in paths:
             try:
                 data = _read(path)
                 recorded = int(data["recorded_at_ns"])
@@ -2400,8 +2528,10 @@ class ExternalReview:
         return outcomes
 
     def review_pr(self, number: int, attempt: int = 1, *,
-                  expect_head: str | None = None, expect_base: str | None = None) -> dict:
-        target = self.target(number, attempt, expect_head=expect_head, expect_base=expect_base)
+                  expect_head: str | None = None, expect_base: str | None = None,
+                  reject_draft: bool = False) -> dict:
+        target = self.target(number, attempt, expect_head=expect_head, expect_base=expect_base,
+                             reject_draft=reject_draft)
         assert self.gateway is not None
         folder = self.state_root / "runs" / target.key
         with _lock(folder):
@@ -2635,6 +2765,8 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("--private-key", required=True, type=Path)
     review.add_argument("--expect-head", default=None)
     review.add_argument("--expect-base", default=None)
+    review.add_argument("--reject-draft", action="store_true",
+                        help="自动派审专用：实时 PR 已转回 draft 时以退出码 3 拒绝登记与派发（手动 review-pr 仍可审 draft）")
     migrate = sub.add_parser("migrate-stale", help="新部署补发旧 controller 下双审完整却未发布终态的 STALE run")
     migrate.add_argument("--pr", required=True, type=_positive)
     migrate.add_argument("--attempt", type=_positive, default=1)
@@ -2652,7 +2784,8 @@ def main(argv: list[str] | None = None) -> int:
             with GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS) as client:
                 client.verify()
                 lane = ExternalReview(RepoGateway(client))
-                result = (lane.review_pr(args.pr, args.attempt, expect_head=args.expect_head, expect_base=args.expect_base)
+                result = (lane.review_pr(args.pr, args.attempt, expect_head=args.expect_head,
+                                         expect_base=args.expect_base, reject_draft=args.reject_draft)
                           if args.command == "review-pr"
                           else lane.migrate_stale(args.pr, args.attempt))
         else:

@@ -2330,3 +2330,28 @@ def test_round_trip_rejects_null_empty_type_and_duplicate_key_sse_frames(monkeyp
         monkeypatch.setattr(preflight._http_module, "_open_http", lambda req, timeout=None, p=payload: FakeResp(p.encode()))
         trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
         assert trip["ok"] is False, (payload, trip)
+
+
+def test_round_trip_preserves_http_429_when_error_body_disconnects(monkeypatch):
+    """R32（Astra P2）：收到 HTTP 429 后若读取错误正文触发 IncompleteRead，仍须保留 http_status=429 与已读片段，
+    确保控制器触发限流退避而非误判为一般异常。"""
+    import http.client
+    import urllib.error
+
+    class Truncated429(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(LOCAL, 429, "Too Many Requests", {}, None)
+
+        def read(self, amt=None):
+            raise http.client.IncompleteRead(b'{"error":{"code":"rate_limit_exceeded"}}', expected=100)
+
+        def close(self):
+            pass
+
+    def raise_429(req, timeout=None):
+        raise Truncated429()
+
+    monkeypatch.setattr(preflight._http_module, "_open_http", raise_429)
+    trip = preflight._round_trip_http(LOCAL, KEY, SOL, "preflight-12345678-1234-4234-8234-123456789abc", preflight.Deadline(30))
+    assert trip["ok"] is False and trip["http_status"] == 429
+    assert (trip.get("error") or {}).get("class") == "rate_limit"

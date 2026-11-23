@@ -82,7 +82,9 @@ def _fake_preflight_pass(_target: ReviewTarget) -> dict:
         route = f"codex:{model}@chatgpt.com" if model.startswith("gpt-6.2-") else (
             "kimi@api.kimi.com" if "kimi" in model else "claude@api.anthropic.com" if "claude" in model else f"{model}@example.test")
         checks.append({"name": f"route:{model}", "class": "route", "ok": True,
-                       "detail": {"expected": [route], "actual": [route], "log_found": True}})
+                       "detail": {"expected": [route], "actual": [route], "log_found": True, "sealed": True}})
+        checks.append({"name": f"seal:{model}", "class": "seal", "ok": True,
+                       "detail": {"http_status": 200, "status": "sealed", "ok": True}})
         checks.append({"name": f"roundtrip:{model}", "class": "roundtrip", "ok": True,
                        "detail": {"http_status": 200, "terminal": "response.completed", "status": "completed",
                                   "returned_model": model, "ok": True, "error": None}})
@@ -2474,10 +2476,27 @@ def test_new_attempt_and_reuse_fallback_enforce_preflight_fail_closed(lane, env,
             {"name": f"roundtrip:{m}", "ok": True, "detail": {"returned_model": m}} for m in MODELS
         ]},
         {"kind": "review-preflight", "is_review_result": False, "ready": True, "checks": [
-            {"name": f"route:{m}", "ok": True, "detail": {"expected": [f"codex:{m}@chatgpt.com"], "actual": [f"codex:{m}@chatgpt.com"]}}
+            {"name": f"route:{m}", "ok": True, "detail": {"expected": [f"codex:{m}@chatgpt.com"], "actual": [f"codex:{m}@chatgpt.com"], "sealed": True}}
             for m in MODELS
         ] + [
+            {"name": f"seal:{m}", "ok": True, "detail": {"status": "sealed", "ok": True}} for m in MODELS
+        ] + [
             {"name": f"roundtrip:{m}", "ok": True, "detail": {"returned_model": MODELS[0]}} for m in MODELS
+        ]},
+        # R32 (Astra P2): 普通连通性自检报告（缺少 seal:<model> 或 route.detail.sealed=true）不得充当正式预检
+        {"kind": "review-preflight", "is_review_result": False, "ready": True, "image_id": "sha256:" + "1" * 64, "checks": [
+            {"name": f"route:{m}", "ok": True, "detail": {"expected": [f"codex:{m}@chatgpt.com"], "actual": [f"codex:{m}@chatgpt.com"], "log_found": True}}
+            for m in MODELS
+        ] + [
+            {"name": f"roundtrip:{m}", "ok": True, "detail": {"returned_model": m}} for m in MODELS
+        ]},
+        {"kind": "review-preflight", "is_review_result": False, "ready": True, "image_id": "sha256:" + "1" * 64, "checks": [
+            {"name": f"route:{m}", "ok": True, "detail": {"expected": [f"codex:{m}@chatgpt.com"], "actual": [f"codex:{m}@chatgpt.com"], "sealed": False}}
+            for m in MODELS
+        ] + [
+            {"name": f"seal:{m}", "ok": True, "detail": {"status": "sealed", "ok": True}} for m in MODELS
+        ] + [
+            {"name": f"roundtrip:{m}", "ok": True, "detail": {"returned_model": m}} for m in MODELS
         ]},
     ]
     for bad in bad_reports:
@@ -3758,3 +3777,59 @@ def test_publish_final_blocks_old_pass_when_newer_rereview_intent_exists_without
     assert not any(s.get("state") == "success" for s in lane.gateway.sent)
     assert lane.has_pending_rereview_intent(1810, t1.head_sha, t1.base_sha) is True
     assert (folder1 / "outcome.json").exists()
+
+
+def test_rereview_intent_dir_unreadable_fails_closed_and_fsync_failure_blocks_preflight(lane, monkeypatch):
+    """R32（Sol P1 + Astra P1）：
+    1. rereview-intents 目录不可读（PermissionError）时，has_pending_rereview_intent、_has_newer_rereview_intent
+       与 reuse_source 均必须失败闭合，绝不因 Path.glob() 静默返回空而放行旧 PASS；
+    2. _save() 必须在新建目录与 os.replace() 后 fsync 父目录；fsync 失败时重审在进入预检前中止。"""
+    import os
+    from dataclasses import replace
+
+    t1 = lane.target(1810, 1)
+    assert lane.review_pr(1810, 1)["verdict"] == "PASS"
+
+    # 1. fsync 目录调用记录 + 注入失败阻断预检
+    synced: list[Path] = []
+    orig_fsync = module._fsync_dir
+
+    def fail_on_intent(directory: Path) -> None:
+        synced.append(directory)
+        if directory.name == "rereview-intents":
+            raise OSError("injected dir fsync error")
+        orig_fsync(directory)
+
+    preflight_called = []
+    lane.preflight = lambda t: (preflight_called.append(t), _fake_preflight_pass(t))[1]
+    monkeypatch.setattr(module, "_fsync_dir", fail_on_intent)
+    with pytest.raises(OSError, match="injected dir fsync error"):
+        lane.target(1810, 2)
+    assert preflight_called == []
+    assert any(p.name == "rereview-intents" for p in synced)
+    assert lane.state_root in synced
+
+    # 2. rereview-intents 目录不可读（0o000）-> 全部查询失败闭合
+    monkeypatch.setattr(module, "_fsync_dir", orig_fsync)
+    intent_dir = lane.state_root / "rereview-intents"
+    intent_dir.mkdir(exist_ok=True, mode=0o700)
+    os.chmod(intent_dir, 0o000)
+    try:
+        assert lane.has_pending_rereview_intent(1810, t1.head_sha, t1.base_sha) is True
+        assert lane._has_newer_rereview_intent(t1) is True
+        t_new = replace(t1, run_id="00000000-0000-4000-8000-000000000099", attempt=9)
+        assert lane.reuse_source(t_new) is None
+    finally:
+        os.chmod(intent_dir, 0o700)
+
+
+def test_reject_draft_blocks_auto_dispatch_but_manual_review_allows_draft(lane):
+    """R32（Astra P2）：自动派审传 reject_draft=True 时，PR 转回 draft 立即以 TargetDrifted 拒绝且不登记；
+    手动 review_pr（默认 reject_draft=False）仍可照常审 draft。"""
+    lane.gateway.pr["draft"] = True
+    with pytest.raises(module.TargetDrifted, match="draft-not-reviewed"):
+        lane.target(1810, 1, reject_draft=True)
+    assert lane.status(1810) == [] and lane.gateway.sent == []
+    # 手动模式允许 draft
+    manual_target = lane.target(1810, 1, reject_draft=False)
+    assert manual_target.pr_number == 1810
