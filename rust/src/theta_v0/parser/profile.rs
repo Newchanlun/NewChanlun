@@ -270,15 +270,34 @@ fn bit_exact_parse_layer_incr_per_bar_synthetic() {
         .collect();
 
     let cfg = ThetaConfig::default();
-    let mut incr = ParseLayerIncr::new(&cfg);
-    for (i, b) in bars.iter().enumerate() {
-        let incr_layer = incr.append(*b);
-        let full_layer = parse_layer(&bars[..=i], &cfg);
-        assert_eq!(
-            incr_layer, full_layer,
-            "bar {i}: 增量 parse_layer != 全量（bit-exact 破裂）"
-        );
-    }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 4);
+    std::thread::scope(|scope| {
+        let bars = &bars;
+        let cfg = &cfg;
+        let handles: Vec<_> = (0..workers)
+            .map(|tid| {
+                scope.spawn(move || {
+                    let mut incr = ParseLayerIncr::new(cfg);
+                    for (i, b) in bars.iter().enumerate() {
+                        let incr_layer = incr.append(*b);
+                        if i % workers == tid {
+                            let full_layer = parse_layer(&bars[..=i], cfg);
+                            assert_eq!(
+                                incr_layer, full_layer,
+                                "bar {i}: 增量 parse_layer != 全量（bit-exact 破裂）"
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+    });
 }
 
 /// 真实数据逐 bar bit-exact（ES + CL，ignored 需数据）。
