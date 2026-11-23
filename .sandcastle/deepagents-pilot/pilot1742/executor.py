@@ -838,6 +838,19 @@ def review_sweep_key(executor_key: Path, review_key: Path | None) -> Path | None
     return executor_key
 
 
+def review_sweep_receipt_source() -> str | None:
+    """serve --review-sweep 启动前校验可信代理收据源已通过持久化环境（如 launchd plist）配置完整，
+    避免干净 LaunchAgent 启动后每个新 attempt 都在预检期失败闭合。"""
+    from . import external_review
+    reason = external_review.ExternalReview.validate_preflight_receipt_source()
+    if reason is not None:
+        print("review-sweep " + json.dumps({
+            "action": "refused-no-receipt-source",
+            "reason": reason}, ensure_ascii=False), flush=True)
+        return reason
+    return None
+
+
 def _ignore_orphan_sweep_flags(args: argparse.Namespace) -> None:
     """关审查只删 --review-sweep 时，留在 plist 里的 sweep 子参数不能让 serve 起不来（launchd 会反复重启、派票停摆）：
     记一行警告并忽略。有 --review-sweep 时只补默认值。"""
@@ -1024,6 +1037,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.review_sweep:
                 review_key = review_sweep_key(args.private_key, args.review_private_key)
                 if review_key is None:
+                    return 2
+                if review_sweep_receipt_source() is not None:
                     return 2
             try:
                 cutover_store.load()

@@ -76,7 +76,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeGuard
 
 from .delivery import EffectPending
 from .external_review import (
@@ -317,18 +317,27 @@ def _latest_for_head(lane: ExternalReview, number: int, head: str) -> dict[str, 
 
 
 def _confirmed_published_pass(lane: ExternalReview, number: int, head: str, base: str) -> bool:
-    """生产端、审计端与合入前只读核验共用的放行判定：当前合同下 (pr, head) 最新未作废 attempt 绑定到当前精确 base
-    且为已发布 PASS 终态，且不存在待完成的重审意图。"""
-    return verify_confirmed_pass(lane, number, base=base, head=head, check_processes=False)["ok"]
+    """生产端、审计端与合入前核验共用的放行判定：当前合同下 (pr, head) 最新未作废 attempt 绑定到当前精确 base
+    且具备完整已发布 PASS 终态（含 id、state=success、sha=head），且不存在待完成的重审意图。"""
+    return _check_confirmed_pass_locked(
+        lane, number, base=base, head=head, run_id=None, rows=_ps_rows, check_processes=False
+    )["ok"]
 
 
-def verify_confirmed_pass(lane: ExternalReview, number: int, *, base: str, head: str,
-                          run_id: str | None = None,
-                          rows: Callable[[], Rows] = _ps_rows,
-                          check_processes: bool = True) -> dict[str, Any]:
-    """只读核验本机正式审查状态：确认指定 PR 在当前合同（POLICY + REVIEW_CONTRACT）下对精确 (base, head)
-    拥有最新未作废且已发布的 PASS，无活跃审查进程、无本机预检在途锁、无待完成重审意图；
-    传入远端 deepagents/review 状态中的 run_id 时一并校对精确一致，防止跨 PR 同 head 或旧合同绿灯冒充通过。"""
+def _valid_pass_publication(pub: Any, head: str) -> TypeGuard[dict[str, Any]]:
+    return (
+        isinstance(pub, dict)
+        and type(pub.get("id")) is int
+        and pub["id"] > 0
+        and pub.get("state") == "success"
+        and pub.get("sha") == head
+    )
+
+
+def _check_confirmed_pass_locked(lane: ExternalReview, number: int, *, base: str, head: str,
+                                 run_id: str | None,
+                                 rows: Callable[[], Rows],
+                                 check_processes: bool) -> dict[str, Any]:
     if check_processes:
         try:
             live_busy = reviewing(rows())
@@ -336,8 +345,6 @@ def verify_confirmed_pass(lane: ExternalReview, number: int, *, base: str, head:
             return {"ok": False, "code": "process-table-unreadable", "reason": f"无法读取宿主进程表：{type(error).__name__}"}
         if number in live_busy:
             return {"ok": False, "code": "review-running", "reason": f"PR #{number} 正有活跃审查进程"}
-        if lane.has_inflight_review(number):
-            return {"ok": False, "code": "inflight-review-active", "reason": f"PR #{number} 正有本机预检/登记在途"}
     if lane.has_pending_rereview_intent(number, head, base):
         return {"ok": False, "code": "rereview-pending", "reason": f"PR #{number} 存在待完成重审意图"}
     try:
@@ -355,11 +362,8 @@ def verify_confirmed_pass(lane: ExternalReview, number: int, *, base: str, head:
                 "reason": f"PR #{number} 最新记录绑定 base {target.get('base_sha')}，与期望 {base} 不符"}
     outcome = latest["outcome"]
     pub = outcome.get("publication") if isinstance(outcome, dict) else None
-    if (not isinstance(outcome, dict) or not isinstance(pub, dict)
-            or outcome.get("verdict") != "PASS"
-            or (pub.get("state") is not None and pub.get("state") != "success")
-            or (pub.get("sha") is not None and pub.get("sha") != head)):
-        return {"ok": False, "code": "not-published-pass", "reason": f"PR #{number} 最新记录尚未发布 PASS 终态"}
+    if not isinstance(outcome, dict) or outcome.get("verdict") != "PASS" or not _valid_pass_publication(pub, head):
+        return {"ok": False, "code": "not-published-pass", "reason": f"PR #{number} 最新记录缺少完整已发布 PASS 终态"}
     target_run = target.get("run_id")
     outcome_run = outcome.get("run_id")
     if target_run and outcome_run and target_run != outcome_run:
@@ -379,8 +383,43 @@ def verify_confirmed_pass(lane: ExternalReview, number: int, *, base: str, head:
         "attempt": target.get("attempt"),
         "policy_version": target.get("policy_version"),
         "review_contract": target.get("review_contract"),
-        "publication_id": (outcome.get("publication") or {}).get("id"),
+        "publication_id": pub["id"],
     }
+
+
+@contextmanager
+def locked_verified_pass(lane: ExternalReview, number: int, *, base: str, head: str,
+                         run_id: str | None = None,
+                         rows: Callable[[], Rows] = _ps_rows) -> Iterator[dict[str, Any]]:
+    """在持续持有同 PR 排他在途锁（inflight.lock）与排他 PR 锁（p<N>.lock）期间完成最终核验，
+    并将两把排他锁保持至调用方退出上下文（如完成合入命令），杜绝「探测释放后、新重审抢入预检」的本机竞态。"""
+    with lane.try_exclude_inflight_review(number) as excluded:
+        if not excluded:
+            yield {"ok": False, "code": "inflight-review-active", "reason": f"PR #{number} 正有本机预检/登记在途"}
+            return
+        with lane.try_pr_lock(number) as pr_locked:
+            if not pr_locked:
+                yield {"ok": False, "code": "pr-lock-busy", "reason": f"PR #{number} 正有登记/发布持有 PR 锁"}
+                return
+            yield _check_confirmed_pass_locked(
+                lane, number, base=base, head=head, run_id=run_id, rows=rows, check_processes=True
+            )
+
+
+def verify_confirmed_pass(lane: ExternalReview, number: int, *, base: str, head: str,
+                          run_id: str | None = None,
+                          rows: Callable[[], Rows] = _ps_rows,
+                          check_processes: bool = True) -> dict[str, Any]:
+    """核验本机正式审查状态：确认指定 PR 在当前合同（POLICY + REVIEW_CONTRACT）下对精确 (base, head)
+    拥有最新未作废且完整已发布的 PASS（含 id、state=success、sha=head），无活跃审查进程、无本机预检在途锁、
+    无待完成重审意图；check_processes=True 时在持续持有排他在途锁与排他 PR 锁期间原子完成核验。
+    注意：本函数返回后即释放排他锁，不锁定后续远端写操作；执行合入应使用 locked_verified_pass 或 verify-pass -- <cmd>。"""
+    if not check_processes:
+        return _check_confirmed_pass_locked(
+            lane, number, base=base, head=head, run_id=run_id, rows=rows, check_processes=False
+        )
+    with locked_verified_pass(lane, number, base=base, head=head, run_id=run_id, rows=rows) as res:
+        return res
 
 
 def run_review_command(number: int, attempt: int, head: str, private_key: Path, base: str | None = None) -> list[str]:
@@ -1318,22 +1357,52 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
 
 
 def run_verify_pass(argv: list[str], *, lane: ExternalReview | None = None,
-                    rows: Callable[[], Rows] = _ps_rows) -> int:
-    """合入前只读核验子命令（不访问 GitHub、不写任何状态）：核对固定正式状态根 STATE_ROOT 中本 PR、
-    当前合同与精确 (base, head) 的最新已发布 PASS，并与远端 deepagents/review 状态的 run_id 精确比对。"""
+                    rows: Callable[[], Rows] = _ps_rows,
+                    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run) -> int:
+    """合入前本机锁保护核验子命令（本身不访问 GitHub、不写任何审查状态）：
+    在持续持有同 PR 排他在途锁（inflight.lock）与排他 PR 锁（p<N>.lock）期间核对固定正式状态根 STATE_ROOT 中
+    本 PR、当前合同与精确 (base, head) 的最新完整已发布 PASS 并比对远端 run_id；
+    提供 `-- <cmd> [args...]` 时在两把排他锁持续持有下直接执行该命令（例如 `gh pr merge <N> --merge --match-head-commit <head>`），
+    待命令结束后才释放锁，消除核验与合入之间的本机重审竞态；不提供 `-- <cmd>` 时仅返回瞬时快照，不锁定后续远端操作。"""
+    exec_cmd: list[str] | None = None
+    if "--" in argv:
+        sep = argv.index("--")
+        flag_argv, exec_cmd = argv[:sep], argv[sep + 1:]
+        if not exec_cmd:
+            print(json.dumps({"ok": False, "code": "empty-command",
+                              "reason": "-- 之后缺少要在持锁期间执行的命令"}, ensure_ascii=False),
+                  file=sys.stderr, flush=True)
+            return 2
+    else:
+        flag_argv = argv
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep verify-pass")
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", required=True)
     parser.add_argument("--run-id", required=True, help="远端 deepagents/review 状态描述中的 run=<UUID>")
-    args = parser.parse_args(argv)
-    res = verify_confirmed_pass(lane or ExternalReview(None, state_root=STATE_ROOT), args.pr,
-                                base=args.base, head=args.head, run_id=args.run_id, rows=rows)
-    if res["ok"]:
-        print(json.dumps(res, ensure_ascii=False), flush=True)
-        return 0
-    print(json.dumps(res, ensure_ascii=False), file=sys.stderr, flush=True)
-    return 2
+    args = parser.parse_args(flag_argv)
+    target_lane = lane or ExternalReview(None, state_root=STATE_ROOT)
+    with locked_verified_pass(target_lane, args.pr, base=args.base, head=args.head,
+                              run_id=args.run_id, rows=rows) as res:
+        if not res["ok"]:
+            print(json.dumps(res, ensure_ascii=False), file=sys.stderr, flush=True)
+            return 2
+        payload = {
+            **res,
+            "locked_command": bool(exec_cmd),
+            "lock_scope": "local-pr-exclusive-across-command" if exec_cmd else "snapshot-only-unlocked-after-exit",
+        }
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+        if exec_cmd is not None:
+            try:
+                done = runner(exec_cmd, check=False)
+            except OSError as error:
+                print(json.dumps({"ok": False, "code": "command-exec-failed",
+                                  "reason": f"执行持锁命令失败：{type(error).__name__}: {error}"},
+                                 ensure_ascii=False), file=sys.stderr, flush=True)
+                return 127
+            return int(done.returncode)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

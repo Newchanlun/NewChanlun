@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..2e51d44 100644
+index e69de29..28dd848 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1883 @@
+@@ -0,0 +1,1885 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -3656,33 +3656,55 @@ index e69de29..2e51d44 100644
 +			c.taintStreamAnomaly()
 +			continue
 +		}
++		var itemFields map[string]json.RawMessage
++		var itemRespID string
++		var hasItemRespID bool
++		if hasResponseError(evFields["item"]) {
++			var itemErr error
++			itemFields, itemErr = decodeExactJSONObject(evFields["item"])
++			if itemErr != nil {
++				c.taintStreamAnomaly()
++				continue
++			}
++			var okItemRespID bool
++			itemRespID, hasItemRespID, okItemRespID = exactOptionalStringPresent(itemFields, "response_id")
++			if !okItemRespID || (hasItemRespID && (itemRespID == "" || strings.TrimSpace(itemRespID) != itemRespID)) {
++				c.taintStreamAnomaly()
++				continue
++			}
++		}
++		explicitRespID := ""
++		if hasEvRespID {
++			explicitRespID = evRespID
++		} else if hasRespID {
++			explicitRespID = respID
++		}
++		if hasItemRespID {
++			if explicitRespID != "" && explicitRespID != itemRespID {
++				c.taintStreamAnomaly()
++				continue
++			}
++			explicitRespID = itemRespID
++		}
++		if explicitRespID != "" {
++			conflict := false
++			c.mu.Lock()
++			if c.streamResponseID != "" && c.streamResponseID != explicitRespID {
++				conflict = true
++			} else {
++				c.streamResponseID = explicitRespID
++			}
++			c.mu.Unlock()
++			if conflict {
++				c.taintStreamAnomaly()
++				continue
++			}
++		}
 +		switch evType {
 +		case "response.created", "response.in_progress":
-+			rid := respID
-+			if !hasRespID {
-+				rid = evRespID
-+			}
-+			if rid != "" {
-+				conflict := false
-+				c.mu.Lock()
-+				if c.streamResponseID != "" && c.streamResponseID != rid {
-+					conflict = true
-+				} else {
-+					c.streamResponseID = rid
-+				}
-+				c.mu.Unlock()
-+				if conflict {
-+					c.taintStreamAnomaly()
-+					continue
-+				}
-+			}
++			// streamResponseID is already validated and locked above for every frame carrying a response ID.
 +		case "response.output_item.done":
-+			if hasResponseError(evFields["item"]) {
-+				itemFields, err := decodeExactJSONObject(evFields["item"])
-+				if err != nil {
-+					c.taintStreamAnomaly()
-+					continue
-+				}
++			if itemFields != nil {
 +				itemType, ok1 := exactOptionalString(itemFields, "type")
 +				itemRole, ok2 := exactOptionalString(itemFields, "role")
 +				if !ok1 || !ok2 {
@@ -3703,33 +3725,13 @@ index e69de29..2e51d44 100644
 +					}
 +					if b.Len() > 0 {
 +						h := sha256Hex(b.String())
-+						explicitRID := hasEvRespID || hasRespID
-+						rid := ""
-+						if hasEvRespID {
-+							rid = evRespID
-+						} else if hasRespID {
-+							rid = respID
-+						}
-+						conflict := false
 +						c.mu.Lock()
-+						if explicitRID {
-+							if c.streamResponseID != "" && c.streamResponseID != rid {
-+								conflict = true
-+							} else {
-+								c.streamResponseID = rid
-+							}
-+						} else {
-+							rid = c.streamResponseID
-+						}
-+						if !conflict && rid != "" {
++						rid := c.streamResponseID
++						if rid != "" {
 +							c.lastItemOutputSHA = h
 +							c.lastItemResponseID = rid
 +						}
 +						c.mu.Unlock()
-+						if conflict {
-+							c.taintStreamAnomaly()
-+							continue
-+						}
 +					}
 +				}
 +			}
@@ -4912,10 +4914,10 @@ index e69de29..2e51d44 100644
 +	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..2a62b50 100644
+index e69de29..22b4411 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2012 @@
+@@ -0,0 +1,2037 @@
 +package preflightreceipt
 +
 +import (
@@ -6864,6 +6866,31 @@ index e69de29..2a62b50 100644
 +			chunks: []string{
 +				`data: {"type":"response.output_item.done","response_id":"resp_m5a","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n",
 +				`data: {"type":"response.completed","response":{"id":"resp_m5b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			},
++		},
++		// 10. R29 (Sol P1 + Astra P1): non-assistant events (tool calls, deltas, item.added) with conflicting response IDs MUST taint.
++		{
++			name: "tool-call-output-item-conflicting-response-id", id: "6",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m6a"}}` + "\n\n",
++				`data: {"type":"response.output_item.done","response_id":"resp_m6b","item":{"type":"function_call","name":"shell","call_id":"call_1","arguments":"{}"}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m6a","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			},
++		},
++		{
++			name: "delta-event-conflicting-response-id", id: "7",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m7a"}}` + "\n\n",
++				`data: {"type":"response.output_text.delta","response_id":"resp_m7b","delta":"hello"}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m7a","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			},
++		},
++		{
++			name: "item-added-nested-item-conflicting-response-id", id: "8",
++			chunks: []string{
++				`data: {"type":"response.created","response":{"id":"resp_m8a"}}` + "\n\n",
++				`data: {"type":"response.output_item.added","item":{"type":"function_call","response_id":"resp_m8b","name":"shell"}}` + "\n\n",
++				`data: {"type":"response.completed","response":{"id":"resp_m8a","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
 +			},
 +		},
 +	}

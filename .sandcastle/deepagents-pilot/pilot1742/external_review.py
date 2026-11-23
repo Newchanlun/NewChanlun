@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -665,23 +665,37 @@ class ExternalReview:
         """与正式 worker 相同的受控环境：保留 DOCKER_ENV 与 CLIPROXY_LOCAL_KEY，剔除 DOCKER_HOST/DOCKER_CONFIG 等覆写。"""
         return {k: os.environ[k] for k in (*DOCKER_ENV, "LC_ALL", "CLIPROXY_LOCAL_KEY") if k in os.environ}
 
+    @staticmethod
+    def validate_preflight_receipt_source(env: Mapping[str, str] | None = None) -> str | None:
+        """校验正式预检与审查收据源配置（供 executor serve --review-sweep 启动前与 _preflight_args 共用）。
+        返回 None 表示配置完整有效；否则返回可读失败原因。"""
+        source = os.environ if env is None else env
+        override = source.get("REVIEW_PREFLIGHT_PROXY_URL", "").strip()
+        if override and override.rstrip("/") != FORMAL_PROXY_URL:
+            return f"正式预检代理端点固定为 {FORMAL_PROXY_URL}，禁止通过 REVIEW_PREFLIGHT_PROXY_URL 分叉"
+        container = source.get(PREFLIGHT_ENV_CONTAINER, "").strip()
+        host_dir = source.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
+        if container and host_dir:
+            return "代理收据容器与宿主目录配置冲突，未占 attempt"
+        if not container and not host_dir:
+            return f"未配置可信代理收据来源（{PREFLIGHT_ENV_CONTAINER} 或 {PREFLIGHT_ENV_HOST_DIR}），未占 attempt"
+        if host_dir and not Path(host_dir).is_absolute():
+            return f"{PREFLIGHT_ENV_HOST_DIR} 必须是绝对路径，未占 attempt"
+        if container:
+            proxy_ctx = source.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
+            container_dir = source.get(PREFLIGHT_ENV_CONTAINER_DIR, "").strip()
+            if not proxy_ctx or not container_dir:
+                return f"缺少 {PREFLIGHT_ENV_PROXY_CONTEXT} 或 {PREFLIGHT_ENV_CONTAINER_DIR}，未占 attempt"
+        return None
+
     def _preflight_args(self, target: ReviewTarget, *, image: str) -> list[str]:
         if not re.fullmatch(r"sha256:[a-f0-9]{64}", image):
             raise _PreflightNotStarted("preflight-blocked：预检必须使用已准入镜像 ID，未占 attempt")
-        override = os.environ.get("REVIEW_PREFLIGHT_PROXY_URL", "").strip()
-        if override and override.rstrip("/") != FORMAL_PROXY_URL:
-            raise _PreflightNotStarted(
-                f"preflight-blocked：正式预检代理端点固定为 {FORMAL_PROXY_URL}，禁止通过 REVIEW_PREFLIGHT_PROXY_URL 分叉")
+        err = self.validate_preflight_receipt_source(os.environ)
+        if err is not None:
+            raise _PreflightNotStarted(f"preflight-blocked：{err}")
         container = os.environ.get(PREFLIGHT_ENV_CONTAINER, "").strip()
         host_dir = os.environ.get(PREFLIGHT_ENV_HOST_DIR, "").strip()
-        if container and host_dir:
-            raise _PreflightNotStarted("preflight-blocked：代理收据容器与宿主目录配置冲突，未占 attempt")
-        if not container and not host_dir:
-            raise _PreflightNotStarted(
-                f"preflight-blocked：未配置可信代理收据来源（{PREFLIGHT_ENV_CONTAINER} 或 {PREFLIGHT_ENV_HOST_DIR}），未占 attempt")
-        if host_dir and not Path(host_dir).is_absolute():
-            raise _PreflightNotStarted(
-                f"preflight-blocked：{PREFLIGHT_ENV_HOST_DIR} 必须是绝对路径，未占 attempt")
         cmd = [sys.executable, "-I", str(PREFLIGHT_SCRIPT),
                "--source", str(self.source),
                "--base", target.base_sha, "--head", target.head_sha, "--merge-base", target.merge_base_sha,
@@ -694,9 +708,6 @@ class ExternalReview:
         if container:
             proxy_ctx = os.environ.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
             container_dir = os.environ.get(PREFLIGHT_ENV_CONTAINER_DIR, "").strip()
-            if not proxy_ctx or not container_dir:
-                raise _PreflightNotStarted(
-                    f"preflight-blocked：缺少 {PREFLIGHT_ENV_PROXY_CONTEXT} 或 {PREFLIGHT_ENV_CONTAINER_DIR}，未占 attempt")
             cmd.extend(["--proxy-receipt-container", container,
                         "--proxy-docker-context", proxy_ctx,
                         "--proxy-container-receipt-dir", container_dir])
@@ -1728,6 +1739,26 @@ class ExternalReview:
             return False
         with self.try_exclude_inflight_review(number) as excluded:
             return not excluded
+
+    @contextmanager
+    def try_pr_lock(self, number: int) -> Iterator[bool]:
+        """非阻塞尝试独占 PR 锁（p<N>.lock）并持续持有至上下文退出：用于 verify-pass 在已持
+        try_exclude_inflight_review 排他锁后继续锁定 PR 登记/重审意图/发布临界区，避免与 _pr_lock 死锁或阻塞。"""
+        folder = self.state_root / "pr-locks"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(folder / f"p{number}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        acquired = False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                acquired = False
+            yield acquired
+        finally:
+            if acquired:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:

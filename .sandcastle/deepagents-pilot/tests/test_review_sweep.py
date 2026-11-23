@@ -337,7 +337,7 @@ def test_auto_merge_blocks_old_success_while_newer_gpt_attempt_is_pending(lane, 
     # 3. 直到 A2 完结并发布 PASS 后才不再 waiting，因服务端不支持 expected_base_ref 转人工确认且不发起自动合入
     new_folder = lane.state_root / "runs" / new_target.key
     (new_folder / "outcome.json").write_text(json.dumps({
-        "verdict": "PASS", "state": "success", "publication": {"id": 2, "state": "success"},
+        "verdict": "PASS", "state": "success", "publication": {"id": 2, "state": "success", "sha": head},
     }))
     actions3 = sweep.tick()
     assert acts(actions3) == ["done", "needs-human-confirm"]
@@ -1357,6 +1357,14 @@ def _fake_serve(monkeypatch, tmp_path, *, rounds):
         if rounds.count("intake") >= 3:
             raise _StopServe
     monkeypatch.setattr(cli.time, "sleep", sleep)
+    for var in (
+        "REVIEW_PREFLIGHT_PROXY_URL",
+        "REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER",
+        "REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT",
+        "REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_RECEIPT_DIR", str(tmp_path / "receipts"))
     return cli, ["--state-root", str(tmp_path / "state"), "serve", "--loop", "--private-key", str(tmp_path / "k.pem")]
 
 
@@ -1404,14 +1412,21 @@ def test_sweep_flags_without_review_sweep_are_ignored_with_one_warning(monkeypat
 def test_deployed_executor_plist_turns_sweep_on_without_unattended_auto_merge():
     """#2207 依据 #1742/#1909 裁定：因 GitHub 合入/追平接口无服务端 expected_base_ref/expected_base_sha，
     部署模板仅开启 --review-sweep 负责正式双审派发，不再启用 --review-sweep-auto-merge；
-    代码里 auto_merge 亦默认关，见 test_auto_merge_is_off_unless_explicitly_enabled。"""
+    代码里 auto_merge 亦默认关，见 test_auto_merge_is_off_unless_explicitly_enabled；
+    模板同时持久化可信代理收据源配置，确保干净 LaunchAgent 启动无需依赖交互 shell。"""
     import plistlib
     from pathlib import Path
     plist = Path(module.__file__).resolve().parents[2] / "launchd" / "com.newchanlun.deepagents-executor.plist"
-    args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+    data = plistlib.loads(plist.read_bytes())
+    args = data["ProgramArguments"]
     assert args[args.index("serve"):args.index("serve") + 2] == ["serve", "--loop"]
     assert "--review-sweep" in args and "--review-sweep-auto-merge" not in args
     assert args[args.index("--review-sweep-max-running") + 1] == "3"
+    env = data["EnvironmentVariables"]
+    assert _external_review.ExternalReview.validate_preflight_receipt_source(env) is None
+    assert env["REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER"] == "blackhole-cliproxy"
+    assert env["REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT"] == "orbstack"
+    assert env["REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR"] == "/tmp/cliproxy-preflight-receipts"
 
 
 def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
@@ -2808,3 +2823,94 @@ def test_verify_pass_binds_pr_contract_base_head_run_id_and_rejects_rereview_or_
         ["--pr", "1810", "--base", base, "--head", head, "--run-id", old_target.run_id], lane=lane2, rows=list,
     ) == 2
     assert json.loads(capsys.readouterr().err)["code"] == "legacy-contract"
+
+
+def test_verify_pass_holds_exclusive_pr_locks_across_command_and_rejects_incomplete_publication(lane, capsys):
+    """R29（Sol P1 + Astra P1 + Astra P2）：
+    1. verify-pass 在持有排他在途锁与 PR 锁期间原子完成核验，带 `-- <cmd>` 时持续持锁至命令结束；
+    2. 核验失败时不执行命令；
+    3. 缺少 id/state/sha 或字段不合法的残缺 publication 一律以 not-published-pass 拒绝。"""
+    import subprocess
+
+    passed = lane.review_pr(1810, 1)
+    assert passed["verdict"] == "PASS"
+    head = lane.gateway.pr["head"]["sha"]
+    base = lane.gateway.pr["base"]["sha"]
+    run_id = passed["run_id"]
+    folder = lane.state_root / "runs" / ReviewTarget(**passed["target"]).key
+
+    # 1. 带 `-- <cmd>` 时，命令执行期间 inflight.lock 与 p1810.lock 必须处于排他持有状态，命令结束后才释放
+    seen: dict[str, object] = {}
+
+    def fake_runner(cmd, *, check=False):
+        seen["cmd"] = list(cmd)
+        with lane.try_exclude_inflight_review(1810) as excl:
+            seen["inflight_free_during_cmd"] = excl
+        with lane.try_pr_lock(1810) as pr_free:
+            seen["pr_lock_free_during_cmd"] = pr_free
+        return subprocess.CompletedProcess(cmd, 0)
+
+    rc = module.run_verify_pass(
+        ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id,
+         "--", "gh", "pr", "merge", "1810", "--merge", "--match-head-commit", head],
+        lane=lane, rows=list, runner=fake_runner,
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["locked_command"] is True and out["lock_scope"] == "local-pr-exclusive-across-command"
+    assert seen == {
+        "cmd": ["gh", "pr", "merge", "1810", "--merge", "--match-head-commit", head],
+        "inflight_free_during_cmd": False,
+        "pr_lock_free_during_cmd": False,
+    }
+    with lane.try_exclude_inflight_review(1810) as excl, lane.try_pr_lock(1810) as pr_free:
+        assert excl is True and pr_free is True
+
+    # 2. p<N>.lock 被占用时立即拒绝且不执行命令
+    called = []
+    with lane._pr_lock(1810):
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id, "--", "true"],
+            lane=lane, rows=list, runner=lambda cmd, **kw: called.append(cmd) or subprocess.CompletedProcess(cmd, 0),
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "pr-lock-busy"
+    assert called == []
+
+    # 3. 空 `--` 命令被拒
+    assert module.run_verify_pass(
+        ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id, "--"],
+        lane=lane, rows=list,
+    ) == 2
+    assert json.loads(capsys.readouterr().err)["code"] == "empty-command"
+
+    # 4. 残缺 publication（空字典 / 缺 sha / 缺 state / id 非正整数 / sha 不符）全部拒放
+    orig_outcome = json.loads((folder / "outcome.json").read_text())
+    for bad_pub in (
+        {},
+        {"id": 1},
+        {"id": 1, "state": "success"},
+        {"id": 1, "sha": head},
+        {"id": True, "state": "success", "sha": head},
+        {"id": 1, "state": "failure", "sha": head},
+        {"id": 1, "state": "success", "sha": "0" * 40},
+    ):
+        (folder / "outcome.json").write_text(json.dumps({**orig_outcome, "publication": bad_pub}))
+        assert module.run_verify_pass(
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id, "--", "true"],
+            lane=lane, rows=list, runner=lambda cmd, **kw: called.append(cmd) or subprocess.CompletedProcess(cmd, 0),
+        ) == 2
+        assert json.loads(capsys.readouterr().err)["code"] == "not-published-pass"
+    assert called == []
+
+
+def test_serve_refuses_without_valid_proxy_receipt_source(monkeypatch, tmp_path, capsys):
+    """R29（Astra P2）：executor serve --review-sweep 启动前校验可信代理收据源，缺失或冲突时退出码 2 拒绝启动。"""
+    rounds = []
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.delenv("REVIEW_PREFLIGHT_PROXY_RECEIPT_DIR", raising=False)
+    monkeypatch.setattr(module, "serve_round", lambda *a, **k: pytest.fail("sweep started without receipt source"))
+    monkeypatch.setattr(cli, "_client", lambda args: pytest.fail("App opened"))
+    assert cli.main(argv + ["--review-sweep"]) == 2
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("review-sweep ")]
+    assert any(json.loads(line.removeprefix("review-sweep "))["action"] == "refused-no-receipt-source" for line in lines)
+    assert rounds == []
