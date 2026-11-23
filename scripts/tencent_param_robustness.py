@@ -42,7 +42,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np  # noqa: E402
-from persim import bottleneck  # noqa: E402
 
 from newchan.a_geometric_momentum import momentum_barcode, momentum_divergence  # noqa: E402
 
@@ -144,6 +143,8 @@ def pairwise_mean(vals: list[float]) -> float:
 
 
 def pairwise_bottleneck(diagrams: list[np.ndarray]) -> list[float]:
+    from persim import bottleneck
+
     out = []
     for i in range(len(diagrams)):
         for j in range(i + 1, len(diagrams)):
