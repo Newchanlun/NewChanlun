@@ -141,26 +141,104 @@ def selOrderWithKeys (keys : SelectorKeys) (a b : Interval) : Prop :=
         ∨ (a.endTime = b.endTime ∧ a.startTime < b.startTime)
         ∨ (a.endTime = b.endTime ∧ a.startTime = b.startTime ∧ a.idx > b.idx)
 
+private theorem nat_gt_asymm (x y : Nat) (h : x > y) : ¬ y > x := Nat.lt_asymm h
+private theorem nat_lt_asymm (x y : Nat) (h : x < y) : ¬ y < x := Nat.lt_asymm h
+
+private theorem nat_gt_trichotomy (x y : Nat) : x > y ∨ x = y ∨ y > x :=
+  match Nat.lt_trichotomy y x with
+  | Or.inl h => Or.inl h
+  | Or.inr (Or.inl h) => Or.inr (Or.inl h.symm)
+  | Or.inr (Or.inr h) => Or.inr (Or.inr h)
+
+private theorem lex3_asymm {r₂ r₃ : Nat → Nat → Prop}
+    (hr₂ : ∀ x y, r₂ x y → ¬ r₂ y x)
+    (hr₃ : ∀ x y, r₃ x y → ¬ r₃ y x)
+    {e₁ s₁ i₁ e₂ s₂ i₂ : Nat}
+    (h₁ : e₁ > e₂ ∨ (e₁ = e₂ ∧ r₂ s₁ s₂) ∨ (e₁ = e₂ ∧ s₁ = s₂ ∧ r₃ i₁ i₂))
+    (h₂ : e₂ > e₁ ∨ (e₂ = e₁ ∧ r₂ s₂ s₁) ∨ (e₂ = e₁ ∧ s₂ = s₁ ∧ r₃ i₂ i₁)) : False := by
+  rcases h₁ with he | ⟨he, hs⟩ | ⟨he, hs, hi⟩
+  · rcases h₂ with he' | ⟨he', _⟩ | ⟨he', _, _⟩
+    · exact Nat.lt_asymm he he'
+    · exact Nat.ne_of_gt he he'.symm
+    · exact Nat.ne_of_gt he he'.symm
+  · rcases h₂ with he' | ⟨_, hs'⟩ | ⟨_, hs', _⟩
+    · exact Nat.ne_of_gt he' he.symm
+    · exact hr₂ _ _ hs hs'
+    · rw [hs'] at hs; exact hr₂ _ _ hs hs
+  · rcases h₂ with he' | ⟨_, hs'⟩ | ⟨_, _, hi'⟩
+    · exact Nat.ne_of_gt he' he.symm
+    · rw [hs] at hs'; exact hr₂ _ _ hs' hs'
+    · exact hr₃ _ _ hi hi'
+
+private theorem lex3_trichotomy {r₂ r₃ : Nat → Nat → Prop}
+    (tr₂ : ∀ x y, r₂ x y ∨ x = y ∨ r₂ y x)
+    (tr₃ : ∀ x y, r₃ x y ∨ x = y ∨ r₃ y x)
+    (e₁ s₁ i₁ e₂ s₂ i₂ : Nat) :
+    (e₁ > e₂ ∨ (e₁ = e₂ ∧ r₂ s₁ s₂) ∨ (e₁ = e₂ ∧ s₁ = s₂ ∧ r₃ i₁ i₂)) ∨
+    (e₁ = e₂ ∧ s₁ = s₂ ∧ i₁ = i₂) ∨
+    (e₂ > e₁ ∨ (e₂ = e₁ ∧ r₂ s₂ s₁) ∨ (e₂ = e₁ ∧ s₂ = s₁ ∧ r₃ i₂ i₁)) := by
+  rcases nat_gt_trichotomy e₁ e₂ with he | he | he
+  · exact Or.inl (Or.inl he)
+  · rcases tr₂ s₁ s₂ with hs | hs | hs
+    · exact Or.inl (Or.inr (Or.inl ⟨he, hs⟩))
+    · rcases tr₃ i₁ i₂ with hi | hi | hi
+      · exact Or.inl (Or.inr (Or.inr ⟨he, hs, hi⟩))
+      · exact Or.inr (Or.inl ⟨he, hs, hi⟩)
+      · exact Or.inr (Or.inr (Or.inr (Or.inr ⟨he.symm, hs.symm, hi⟩)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inl ⟨he.symm, hs⟩)))
+  · exact Or.inr (Or.inr (Or.inl he))
+
+private theorem lex3_trans (r₂ r₃ : Nat → Nat → Prop)
+    (tr₂ : ∀ {x y z}, r₂ x y → r₂ y z → r₂ x z)
+    (tr₃ : ∀ {x y z}, r₃ x y → r₃ y z → r₃ x z)
+    {e₁ s₁ i₁ e₂ s₂ i₂ e₃ s₃ i₃ : Nat}
+    (h₁ : e₁ > e₂ ∨ (e₁ = e₂ ∧ r₂ s₁ s₂) ∨ (e₁ = e₂ ∧ s₁ = s₂ ∧ r₃ i₁ i₂))
+    (h₂ : e₂ > e₃ ∨ (e₂ = e₃ ∧ r₂ s₂ s₃) ∨ (e₂ = e₃ ∧ s₂ = s₃ ∧ r₃ i₂ i₃)) :
+    e₁ > e₃ ∨ (e₁ = e₃ ∧ r₂ s₁ s₃) ∨ (e₁ = e₃ ∧ s₁ = s₃ ∧ r₃ i₁ i₃) := by
+  rcases h₁ with he₁ | ⟨he₁, hs₁⟩ | ⟨he₁, hs₁, hi₁⟩
+  · rcases h₂ with he₂ | ⟨he₂, _⟩ | ⟨he₂, _, _⟩
+    · exact Or.inl (Nat.lt_trans he₂ he₁)
+    · rw [← he₂]; exact Or.inl he₁
+    · rw [← he₂]; exact Or.inl he₁
+  · rcases h₂ with he₂ | ⟨he₂, hs₂⟩ | ⟨he₂, hs₂, _⟩
+    · rw [he₁]; exact Or.inl he₂
+    · exact Or.inr (Or.inl ⟨he₁.trans he₂, tr₂ hs₁ hs₂⟩)
+    · rw [← hs₂]; exact Or.inr (Or.inl ⟨he₁.trans he₂, hs₁⟩)
+  · rcases h₂ with he₂ | ⟨he₂, hs₂⟩ | ⟨he₂, hs₂, hi₂⟩
+    · rw [he₁]; exact Or.inl he₂
+    · rw [hs₁]; exact Or.inr (Or.inl ⟨he₁.trans he₂, hs₂⟩)
+    · exact Or.inr (Or.inr ⟨he₁.trans he₂, hs₁.trans hs₂, tr₃ hi₁ hi₂⟩)
+
 /-- 通用键表的反对称性。 -/
 theorem selOrderWithKeys_asymm {keys : SelectorKeys} {a b : Interval}
     (h : selOrderWithKeys keys a b) : ¬ selOrderWithKeys keys b a := by
   intro h'
-  cases keys <;> simp [selOrderWithKeys] at h h'
-  <;> rcases h with he | ⟨_, hs⟩ | ⟨_, _, hi⟩ <;>
-    rcases h' with he' | ⟨_, hs'⟩ | ⟨_, _, hi'⟩ <;> omega
+  cases keys
+  · exact lex3_asymm nat_gt_asymm nat_lt_asymm h h'
+  · exact lex3_asymm nat_gt_asymm nat_gt_asymm h h'
+  · exact lex3_asymm nat_lt_asymm nat_lt_asymm h h'
+  · exact lex3_asymm nat_lt_asymm nat_gt_asymm h h'
 
 /-- 通用键表的三歧性。 -/
 theorem selOrderWithKeys_trichotomy (keys : SelectorKeys) (a b : Interval) :
     selOrderWithKeys keys a b ∨
       (a.endTime = b.endTime ∧ a.startTime = b.startTime ∧ a.idx = b.idx) ∨
       selOrderWithKeys keys b a := by
-  cases keys <;> simp [selOrderWithKeys] at * <;> omega
+  cases keys
+  · exact lex3_trichotomy nat_gt_trichotomy Nat.lt_trichotomy a.endTime a.startTime a.idx b.endTime b.startTime b.idx
+  · exact lex3_trichotomy nat_gt_trichotomy nat_gt_trichotomy a.endTime a.startTime a.idx b.endTime b.startTime b.idx
+  · exact lex3_trichotomy Nat.lt_trichotomy Nat.lt_trichotomy a.endTime a.startTime a.idx b.endTime b.startTime b.idx
+  · exact lex3_trichotomy Nat.lt_trichotomy nat_gt_trichotomy a.endTime a.startTime a.idx b.endTime b.startTime b.idx
 
 /-- 通用键表的传递性。 -/
 theorem selOrderWithKeys_trans {keys : SelectorKeys} {a b c : Interval}
     (h₁ : selOrderWithKeys keys a b) (h₂ : selOrderWithKeys keys b c) :
     selOrderWithKeys keys a c := by
-  cases keys <;> simp [selOrderWithKeys] at * <;> omega
+  cases keys
+  · exact lex3_trans (· > ·) (· < ·) (fun h₁ h₂ => Nat.lt_trans h₂ h₁) Nat.lt_trans h₁ h₂
+  · exact lex3_trans (· > ·) (· > ·) (fun h₁ h₂ => Nat.lt_trans h₂ h₁) (fun h₁ h₂ => Nat.lt_trans h₂ h₁) h₁ h₂
+  · exact lex3_trans (· < ·) (· < ·) Nat.lt_trans Nat.lt_trans h₁ h₂
+  · exact lex3_trans (· < ·) (· > ·) Nat.lt_trans (fun h₁ h₂ => Nat.lt_trans h₂ h₁) h₁ h₂
 
 /--
   **Sel_Θ 字典序键** —— 把一个区间映射到其三键 `(endTime, startTime, idx)`。
@@ -207,10 +285,8 @@ def IsSelected (cands : List Interval) (J : Interval) : Prop :=
 
   这是字典序严格序的基本性质，唯一性证明的核心引理：两个互相严格优的候选不可能共存。
 -/
-theorem selOrder_asymm {a b : Interval} (h : selOrder a b) : ¬ selOrder b a := by
-  intro h'
-  rcases h with he | ⟨hee, hs⟩ | ⟨hee, hse, hi⟩ <;>
-    rcases h' with he' | ⟨hee', hs'⟩ | ⟨hee', hse', hi'⟩ <;> omega
+theorem selOrder_asymm {a b : Interval} (h : selOrder a b) : ¬ selOrder b a :=
+  fun h' => lex3_asymm nat_gt_asymm nat_lt_asymm h h'
 
 /--
   **selOrder 蕴含键不等** —— 若 `selOrder a b` 则 `selKey a ≠ selKey b`。
@@ -262,7 +338,7 @@ theorem selOrderWithKeys_left_congr {keys : SelectorKeys} {a a' b : Interval}
     selOrderWithKeys keys a' b := by
   simp only [selKey, Prod.mk.injEq] at hk
   obtain ⟨h1, h2, h3⟩ := hk
-  cases keys <;> simp [selOrderWithKeys] at * <;> omega
+  cases keys <;> simp only [selOrderWithKeys] at h ⊢ <;> rw [← h1, ← h2, ← h3] <;> exact h
 
 /-- 键相等可在 `selOrderWithKeys` 右位替换。 -/
 theorem selOrderWithKeys_right_congr {keys : SelectorKeys} {a b b' : Interval}
@@ -270,7 +346,7 @@ theorem selOrderWithKeys_right_congr {keys : SelectorKeys} {a b b' : Interval}
     selOrderWithKeys keys a b' := by
   simp only [selKey, Prod.mk.injEq] at hk
   obtain ⟨h1, h2, h3⟩ := hk
-  cases keys <;> simp [selOrderWithKeys] at * <;> omega
+  cases keys <;> simp only [selOrderWithKeys] at h ⊢ <;> rw [← h1, ← h2, ← h3] <;> exact h
 
 /--
   **区间套关系 `Sub`** —— `Sub J' J` 表示候选区间 `J'`（低级别）套在 `J`（高级别）之内，
