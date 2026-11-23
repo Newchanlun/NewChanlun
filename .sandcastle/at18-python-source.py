@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import sys
+from collections import Counter
 from contextvars import ContextVar
 from pathlib import Path
 from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType, MethodType
@@ -58,6 +59,27 @@ def sample(value, depth=5):
     raise ValueError("not a plain parameter sample")
 
 
+def sample_key(value):
+    # 仅接收 sample() 验过的值；类型标签避免 True、1、1.0 等合并。
+    kind = type(value)
+    if kind is float:
+        return kind, value.hex()  # NaN 有稳定键，且不混同正负零。
+    if kind is complex:
+        return kind, (value.real.hex(), value.imag.hex())
+    if kind is dict:
+        items = ((sample_key(k), sample_key(v)) for k, v in value.items())
+        return kind, frozenset(Counter(items).items())
+    if kind is list or kind is tuple:
+        return kind, tuple(map(sample_key, value))
+    if kind is set or kind is frozenset:
+        # 不同 NaN 可以同时在同一容器中；归一后仍保留其出现次数。
+        return kind, frozenset(Counter(map(sample_key, value)).items())
+    return kind, value
+
+
+POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+
+
 def arguments(signature, samples, variadic=False):
     args, kwargs, defaults = [], {}, {}
     params = signature.parameters
@@ -68,11 +90,13 @@ def arguments(signature, samples, variadic=False):
         kinds = {param.kind for param in params.values()}
         if inspect.Parameter.VAR_KEYWORD in kinds:
             extra_kwargs = remaining
-        elif inspect.Parameter.VAR_POSITIONAL in kinds and all(
-                p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL) for p in params.values()):
+        elif inspect.Parameter.VAR_POSITIONAL in kinds:
             extra_args = tuple(remaining.values())
 
-    positional = [p for p in params.values() if p.kind is inspect.Parameter.POSITIONAL_ONLY]
+    pos_kinds = POSITIONAL if extra_args else (inspect.Parameter.POSITIONAL_ONLY,)
+    kw_kinds = (inspect.Parameter.KEYWORD_ONLY,) if extra_args else (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    positional = [p for p in params.values() if p.kind in pos_kinds]
     if not extra_args:
         # 只在后面还有位置实参时填默认值；其余由 Python 自己应用。
         while positional and positional[-1].name not in samples and positional[-1].default is not inspect.Parameter.empty:
@@ -88,16 +112,13 @@ def arguments(signature, samples, variadic=False):
     args.extend(extra_args)
 
     for param in params.values():
-        if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+        if param.kind in kw_kinds:
             if param.name in samples:
                 kwargs[param.name] = sample(samples[param.name])
             elif param.default is inspect.Parameter.empty:
                 kwargs[param.name] = None
     kwargs.update(extra_kwargs)
     return args, kwargs, defaults
-
-
-POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 
 
 def variadic_only(signature):
@@ -278,20 +299,32 @@ class Binding:
                 except (ValueError, TypeError):
                     continue
 
-        choices = []
+        choices, default_refs = set(), {}
+
+        def positional_key(i, value, defaults):
+            if i not in defaults:
+                return sample_key(sample(value))
+            try:
+                plain = sample(value)
+            except ValueError:
+                # 非纯数据的生产默认值只按身份比较；保活以免 id 被复用。
+                identity = id(value)
+                default_refs[identity] = value
+                return MISSING, identity
+            return sample_key(plain)
+
         for args, kwargs, defaults in candidates():
             try:
                 public.bind(*args, **kwargs)
-                positional = tuple((id(v), None) if i in defaults else (None, sample(v)) for i, v in enumerate(args))
-                keywords = {k: sample(v) for k, v in kwargs.items()}
+                positional = tuple(positional_key(i, v, defaults) for i, v in enumerate(args))
+                keywords = frozenset((k, sample_key(sample(v))) for k, v in kwargs.items())
             except (ValueError, TypeError):
                 continue
             choice = positional, keywords
-            if not any(choice == key for key, _ in choices):
-                # 默认值仅按身份去重并保留引用；测试数据的快照不交给生产调用。
-                choices.append((choice, defaults))
-                yield (tuple(defaults[i] if i in defaults else sample(v) for i, (_, v) in enumerate(positional)),
-                       {k: sample(v) for k, v in keywords.items()})
+            if choice not in choices:
+                choices.add(choice)
+                yield (tuple(v if i in defaults else sample(v) for i, v in enumerate(args)),
+                       {k: sample(v) for k, v in kwargs.items()})
 
 
 def has_executable_body(code):

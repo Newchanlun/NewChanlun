@@ -1958,6 +1958,105 @@ def route(*, rows): return _right.process(rows)
 `);
 });
 
+test("R29/#1319：同值实参去重与完整的可变位置参数", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = async (name: string, source: string, implementation: string, call: string, expected = true) => {
+    await t.test(name, () => {
+      const repo = feedSource({ [entry]: implementation,
+        [integration]: "from functools import wraps\nfrom .at18_fixture_feed import route\n" + source,
+        [path]: `from trading_system.at18_fixture_feed import route\ndef test_route(): assert route(${call}) == [1, 4]\n` });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  for (const [name, value] of [
+    ["None", "None"],
+    ["嵌套纯数据与 NaN", "{'rows': ([float('nan'), True], {b'x'}), 1: frozenset({2j})}"],
+  ] as const) await check(`同一位置调用只尝试一次：${name}`, `
+attempts = []
+def _keyword(*, rows, pad, limit): return route(rows, pad, limit)
+@wraps(_keyword)
+def _positional(rows, mode=${value}, limit=0, /): return _keyword(rows=rows, pad=mode, limit=limit)
+@wraps(_positional)
+def dispatch(*args, **kwargs):
+    if args:
+        attempts.append(tuple(args[0]))
+        args[0].clear()
+    elif attempts == [(4, 1)] and kwargs['rows'] == [4, 1]:
+        return _keyword(**kwargs)
+`, "def route(rows, pad, limit, /): return sorted(rows)[:limit]\n", `[4, 1], ${value}, 2`);
+  await check("同值的 True 与 1 是不同实参", `
+attempts = []
+def dispatch(rows, mode=1, limit=0, /):
+    if mode is True:
+        attempts.append(True)
+        rows.clear()
+    elif type(mode) is int and attempts == [True] and rows == [4, 1]:
+        return route(rows, mode, limit)
+`, "def route(rows, pad, limit, /): return sorted(rows)[:limit]\n", "[4, 1], True, 2");
+  const named = "def route(*, rows, limit): return sorted(rows)[:limit]\n";
+  const samples = "rows=[4, 1], limit=2";
+  await check("不同生产哨兵各试一次且从不比较其值", `
+attempts, comparisons = [], []
+class _Token:
+    def __eq__(self, other):
+        comparisons.append(True)
+        raise AssertionError('sentinel compared by value')
+_FIRST, _SECOND = _Token(), _Token()
+def _second(rows, mode=_SECOND, limit=0, /):
+    if attempts == [True] and not comparisons and mode is _SECOND and rows == [4, 1]:
+        return route(rows=rows, limit=limit)
+@wraps(_second)
+def _same(rows, mode=_FIRST, limit=0, /): return _second(rows, mode, limit)
+@wraps(_same)
+def _first(rows, mode=_FIRST, limit=0, /): return _same(rows, mode, limit)
+@wraps(_first)
+def dispatch(*args):
+    if args[1] is _FIRST:
+        attempts.append(True)
+        args[0].clear()
+    else:
+        return _first(*args)
+`, named, samples);
+  for (const fixed of ["rows, mode=_MISSING, /", "rows, mode=_MISSING"]) {
+    await check(`关键字专用槽不挤掉额外位置实参：(${fixed})`, `
+_MISSING = object()
+def dispatch(${fixed}, *limits, audit=False):
+    if mode is _MISSING and limits == (2,) and audit is False:
+        return route(rows=rows, limit=limits[0])
+`, named, samples);
+  }
+  await check("没有固定位置槽时，登记样本直接进入 *limits", `
+def dispatch(*limits, audit=False):
+    if limits == ([4, 1], 2) and audit is False:
+        return route(rows=limits[0], limit=limits[1])
+`, named, samples);
+  await check("必填未观察槽补 None，已观察关键字专用槽仍按名称绑定", `
+def dispatch(prefix, rows, *limits, audit, mandatory):
+    if prefix is None and limits == (2,) and audit is True and mandatory is None:
+        return route(rows=rows, limit=limits[0], audit=audit)
+`, "def route(*, rows, limit, audit): return sorted(rows)[:limit]\n", samples + ", audit=True");
+  for (const value of ["object()", "lambda: None"]) await check(`不复用容器中的测试对象：${value}`, `
+def dispatch(rows, /, *limits, audit=False):
+    if len(limits) and limits[0] is not None:
+        return route(rows=rows, guard=limits[0])
+`, "def route(*, rows, guard): return sorted(rows)\n", `rows=[4, 1], guard=[${value}]`, false);
+  await check("补齐 *limits 仍不得把异子类的绑定认作同一承接", `
+def dispatch(rows, *limits, audit=False):
+    if limits == (2,): return route(rows=rows, limit=limits[0])
+`, `
+from functools import wraps
+class _Base:
+    @classmethod
+    def handle(cls, rows, limit): return sorted(rows)[:limit]
+class _Left(_Base): pass
+class _Right(_Base): pass
+@wraps(_Left.handle)
+def route(*, rows, limit): return _Right.handle(rows, limit)
+`, samples, false);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
