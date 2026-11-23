@@ -487,7 +487,7 @@ def test_round_trip_http_accepts_multiline_sse_json_event(monkeypatch):
             return payload
 
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
-    result = preflight._round_trip_http("http://127.0.0.1:8318", "k", SOL, "preflight-multiline", preflight.Deadline(5))
+    result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-multiline", preflight.Deadline(5))
     assert result["ok"] is True
     assert result["terminal"] == "response.completed"
     assert result["status"] == "completed"
@@ -513,6 +513,6 @@ def test_round_trip_http_rejects_unclosed_multiline_sse_event(monkeypatch):
             return payload
 
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
-    result = preflight._round_trip_http("http://127.0.0.1:8318", "k", SOL, "preflight-unclosed", preflight.Deadline(5))
+    result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-unclosed", preflight.Deadline(5))
     assert result["ok"] is False
     assert result["terminal"] is None
