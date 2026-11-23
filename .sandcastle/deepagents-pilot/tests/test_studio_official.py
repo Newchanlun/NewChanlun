@@ -1,8 +1,14 @@
 import asyncio
+import json
+import shutil
 import sqlite3
 import uuid
+from pathlib import Path
 
+import conftest
 import pytest
+import v2env
+from fake_github import FakeGitHub
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
@@ -12,10 +18,13 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from test_agent import call, scripted
-from v2env import V2Env
+from v2env import TICKET, V2Env
 
+from pilot1742 import run as pilot_run
 from pilot1742 import studio
 from pilot1742.agent import build_agent
+from pilot1742.approval import SignedApprovals
+from pilot1742.github_app import AppIdentity
 from pilot1742.run import Busy
 from pilot1742.studio_binding import (
     _LEASE,
@@ -24,6 +33,99 @@ from pilot1742.studio_binding import (
     grant,
     thread_for,
 )
+from pilot1742.workunit import DEDICATED_MARKER
+
+
+@pytest.fixture(scope="module")
+def _v2_seed(tmp_path_factory):
+    root = tmp_path_factory.mktemp("studio_official_seed")
+    seed = V2Env(root)
+    return seed.source, seed.base, seed.bare, seed.identity.private_key_path
+
+
+@pytest.fixture(autouse=True)
+def _fast_env(monkeypatch, _v2_seed):
+    seed_source, seed_base, seed_bare, seed_pem = _v2_seed
+    orig_ensure = pilot_run.PilotRun._ensure_checkout
+    real_sleep = pilot_run.time.sleep
+
+    def _fast_env_init(self, tmp: Path):
+        self.home = tmp / "home"
+        self.source = tmp / "source"
+        shutil.copytree(seed_source, self.source)
+        self.base = seed_base
+        self.home.mkdir()
+        self.control({})
+
+    def _fast_v2_init(self, tmp: Path):
+        _fast_env_init(self, tmp)
+        self.tmp = tmp
+        self.bare = tmp / "origin.git"
+        shutil.copytree(seed_bare, self.bare)
+        pem = tmp / "app.pem"
+        shutil.copy2(seed_pem, pem)
+        pem.chmod(0o600)
+        self.identity = AppIdentity(
+            5486877, 179444545, 1150335160, "Newchanlun/NewChanlun", "newchanlun-deepagents-1742", pem
+        )
+        self.github = FakeGitHub(self.identity, self.bare)
+        self.github.add_issue(TICKET, body=f"#1742 首证专用票\n\n{DEDICATED_MARKER}\n")
+        self.claims_root = tmp / "claims"
+        self.workers_log = tmp / "workers.jsonl"
+        self.workers_log.write_text(json.dumps({"ticket": 1715, "branch": "sandcastle/issue-1715"}) + "\n")
+        self.approvals = SignedApprovals(
+            trust_path=tmp / "unconfigured-trust.json",
+            authority_root=tmp / "unconfigured-authority",
+        )
+
+    def _fast_ensure(self, role, head):
+        path, branch = self.spec.checkout_for(role), self.spec.branch_for(role)
+        if not path.exists():
+            src = Path(self.source_repo)
+            git_dir = src / ".git"
+            branch_ref = git_dir / "refs" / "heads" / branch
+            head_file = git_dir / "HEAD"
+            main_ref = git_dir / "refs" / "heads" / "main"
+            index_file = git_dir / "index"
+            wt_name = f"{self.spec.run_id}-{role}"
+            wt_admin = git_dir / "worktrees" / wt_name
+            if (
+                git_dir.is_dir()
+                and not (git_dir / "packed-refs").exists()
+                and not branch_ref.exists()
+                and not wt_admin.exists()
+                and head_file.is_file()
+                and head_file.read_text().strip() == "ref: refs/heads/main"
+                and main_ref.is_file()
+                and main_ref.read_text().strip() == str(head)
+                and index_file.is_file()
+            ):
+                pilot_run.require_free_space(path.parent)
+                path.mkdir(parents=True, exist_ok=True)
+                branch_ref.parent.mkdir(parents=True, exist_ok=True)
+                branch_ref.write_text(f"{head}\n")
+                wt_admin.mkdir(parents=True)
+                (wt_admin / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+                (wt_admin / "commondir").write_text("../..\n")
+                (wt_admin / "gitdir").write_text(f"{path / '.git'}\n")
+                shutil.copy2(index_file, wt_admin / "index")
+                for item in src.iterdir():
+                    if item.name == ".git":
+                        continue
+                    dst = path / item.name
+                    if item.is_dir() and not item.is_symlink():
+                        shutil.copytree(item, dst, symlinks=True)
+                    else:
+                        shutil.copy2(item, dst, follow_symlinks=False)
+                (path / ".git").write_text(f"gitdir: {wt_admin}\n")
+                self.trail("checkout_created", role=role, path=str(path), branch=branch)
+                return
+        return orig_ensure(self, role, head)
+
+    monkeypatch.setattr(conftest.Env, "__init__", _fast_env_init)
+    monkeypatch.setattr(v2env.V2Env, "__init__", _fast_v2_init)
+    monkeypatch.setattr(pilot_run.PilotRun, "_ensure_checkout", _fast_ensure)
+    monkeypatch.setattr(pilot_run.time, "sleep", lambda sec: real_sleep(min(sec, 0.01)))
 
 ALL = ["GET", "POST", "PUT", "PATCH", "DELETE"]
 
