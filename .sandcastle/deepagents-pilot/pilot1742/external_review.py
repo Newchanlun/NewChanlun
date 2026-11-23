@@ -667,7 +667,8 @@ class ExternalReview:
 
     @staticmethod
     def validate_preflight_receipt_source(env: Mapping[str, str] | None = None) -> str | None:
-        """校验正式预检与审查收据源配置（供 executor serve --review-sweep 启动前与 _preflight_args 共用）。
+        """校验正式预检与审查收据源配置（与 review_preflight.py 参数校验保持同源一致，
+        供 executor serve --review-sweep 启动前与 _preflight_args 共用）。
         返回 None 表示配置完整有效；否则返回可读失败原因。"""
         source = os.environ if env is None else env
         override = source.get("REVIEW_PREFLIGHT_PROXY_URL", "").strip()
@@ -682,10 +683,14 @@ class ExternalReview:
         if host_dir and not Path(host_dir).is_absolute():
             return f"{PREFLIGHT_ENV_HOST_DIR} 必须是绝对路径，未占 attempt"
         if container:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container):
+                return f"{PREFLIGHT_ENV_CONTAINER} 必须是合法容器名称或 ID，未占 attempt"
             proxy_ctx = source.get(PREFLIGHT_ENV_PROXY_CONTEXT, "").strip()
             container_dir = source.get(PREFLIGHT_ENV_CONTAINER_DIR, "").strip()
             if not proxy_ctx or not container_dir:
                 return f"缺少 {PREFLIGHT_ENV_PROXY_CONTEXT} 或 {PREFLIGHT_ENV_CONTAINER_DIR}，未占 attempt"
+            if not container_dir.startswith("/"):
+                return f"{PREFLIGHT_ENV_CONTAINER_DIR} 必须是容器内绝对路径，未占 attempt"
         return None
 
     def _preflight_args(self, target: ReviewTarget, *, image: str) -> list[str]:
@@ -1768,41 +1773,6 @@ class ExternalReview:
             if acquired:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
-
-    @contextmanager
-    def exclusive_pr_lock_fds(self, number: int) -> Iterator[tuple[int, int] | tuple[None, str]]:
-        """非阻塞同时独占 p<N>.inflight.lock 与 p<N>.lock 并暴露原始文件描述符，供 verify-pass 在
-        os.execvp 前清除 FD_CLOEXEC（os.set_inheritable(..., True)），让执行写操作的进程自身持锁直至退出
-        （无单独父进程可被误杀导致提前释锁）。未 exec 返回或异常时自动释放并关闭两把锁。"""
-        folder = self.state_root / "pr-locks"
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        inflight_fd = os.open(folder / f"p{number}.inflight.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        pr_fd = -1
-        inflight_locked = False
-        pr_locked = False
-        try:
-            try:
-                fcntl.flock(inflight_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                inflight_locked = True
-            except BlockingIOError:
-                yield (None, "inflight-review-active")
-                return
-            pr_fd = os.open(folder / f"p{number}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-            try:
-                fcntl.flock(pr_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                pr_locked = True
-            except BlockingIOError:
-                yield (None, "pr-lock-busy")
-                return
-            yield (inflight_fd, pr_fd)
-        finally:
-            if pr_locked and pr_fd >= 0:
-                fcntl.flock(pr_fd, fcntl.LOCK_UN)
-            if pr_fd >= 0:
-                os.close(pr_fd)
-            if inflight_locked:
-                fcntl.flock(inflight_fd, fcntl.LOCK_UN)
-            os.close(inflight_fd)
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:

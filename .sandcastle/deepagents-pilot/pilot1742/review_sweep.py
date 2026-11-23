@@ -394,18 +394,19 @@ def _check_confirmed_pass_locked(lane: ExternalReview, number: int, *, base: str
 def locked_verified_pass(lane: ExternalReview, number: int, *, base: str, head: str,
                          run_id: str | None = None,
                          rows: Callable[[], Rows] = _ps_rows) -> Iterator[dict[str, Any]]:
-    """在持续持有同 PR 排他在途锁（inflight.lock）与排他 PR 锁（p<N>.lock）期间完成最终核验，
-    并将两把排他锁保持至调用方退出上下文，杜绝「探测释放后、新重审抢入预检」的本机竞态。"""
-    with lane.exclusive_pr_lock_fds(number) as lock_pair:
-        if lock_pair[0] is None:
-            code = lock_pair[1]
-            reason = (f"PR #{number} 正有本机预检/登记在途" if code == "inflight-review-active"
-                      else f"PR #{number} 正有登记/发布持有 PR 锁")
-            yield {"ok": False, "code": code, "reason": reason}
+    """在持有同 PR 排他在途锁（inflight.lock）与排他 PR 锁（p<N>.lock）期间原子完成本机核验，
+    消除核验内部「探测释锁后、新重审抢入预检」的本机竞态；退出上下文即释锁，不锁定后续远端操作。"""
+    with lane.try_exclude_inflight_review(number) as excluded:
+        if not excluded:
+            yield {"ok": False, "code": "inflight-review-active", "reason": f"PR #{number} 正有本机预检/登记在途"}
             return
-        yield _check_confirmed_pass_locked(
-            lane, number, base=base, head=head, run_id=run_id, rows=rows, check_processes=True
-        )
+        with lane.try_pr_lock(number) as pr_locked:
+            if not pr_locked:
+                yield {"ok": False, "code": "pr-lock-busy", "reason": f"PR #{number} 正有登记/发布持有 PR 锁"}
+                return
+            yield _check_confirmed_pass_locked(
+                lane, number, base=base, head=head, run_id=run_id, rows=rows, check_processes=True
+            )
 
 
 def verify_confirmed_pass(lane: ExternalReview, number: int, *, base: str, head: str,
@@ -767,9 +768,11 @@ class Sweep:
         return self._launch_with_backoff(number, head, base, attempt)
 
     @contextmanager
-    def _tick_lock(self) -> Iterator[None]:
-        """同一状态根的巡检排他锁：串行化常驻 serve 与手动单轮 sweep，防止慢轮用旧结论覆写快轮交接快照。"""
+    def _tick_lock(self) -> Iterator[bool]:
+        """同一状态根的非阻塞巡检排他锁：防止常驻 serve 与手动单轮 sweep 并发交错，
+        且已有巡检持锁时立即跳过本轮（不阻塞 executor serve 主循环及无关派票）。"""
         fd = -1
+        acquired = False
         try:
             self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
             lock_path = self.folder / "sweep.lock"
@@ -777,18 +780,26 @@ class Sweep:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or (st.st_mode & 0o077):
                 raise OSError(f"sweep.lock 文件类型、属主或权限不合法：{lock_path}")
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                acquired = False
         except Exception as error:
             if fd >= 0:
                 os.close(fd)
             raise SourceUnreadable("sweep lock", error) from error
         try:
-            yield
+            yield acquired
         finally:
+            if acquired:
+                fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
     def tick(self) -> list[dict[str, Any]]:
-        with self._tick_lock():
+        with self._tick_lock() as acquired:
+            if not acquired:
+                return [{"action": "sweep-busy", "reason": "另一巡检进程正持有 sweep.lock，跳过本轮以免阻塞执行器主循环"}]
             return self._tick_locked()
 
     def _tick_locked(self) -> list[dict[str, Any]]:
@@ -1366,69 +1377,28 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
 
 
 def run_verify_pass(argv: list[str], *, lane: ExternalReview | None = None,
-                    rows: Callable[[], Rows] = _ps_rows,
-                    execer: Callable[[str, list[str]], Any] | None = None) -> int:
-    """合入前本机锁保护核验子命令（本身不访问 GitHub、不写任何审查状态）：
-    在持续持有同 PR 排他在途锁（inflight.lock）与排他 PR 锁（p<N>.lock）期间核对固定正式状态根 STATE_ROOT 中
-    本 PR、当前合同与精确 (base, head)（且 merge_base == base）的最新完整已发布 PASS 并比对远端 run_id；
-    提供 `-- <cmd> [args...]` 时先清除两把锁 fd 的 FD_CLOEXEC（os.set_inheritable(..., True)），再通过
-    os.execvp 原地替换为写入命令（如绑定目标 ref 与期望 base 的 `git push --force-with-lease=refs/heads/main:<base> ... <head>:refs/heads/main`），
-    由写入进程自身持锁直至退出（无单独父进程，异常退出或 SIGKILL 时内核原子释锁）；
-    不提供 `-- <cmd>` 时仅返回瞬时快照，不锁定后续远端操作。"""
-    exec_cmd: list[str] | None = None
-    if "--" in argv:
-        sep = argv.index("--")
-        flag_argv, exec_cmd = argv[:sep], argv[sep + 1:]
-        if not exec_cmd:
-            print(json.dumps({"ok": False, "code": "empty-command",
-                              "reason": "-- 之后缺少要在持锁期间执行的命令"}, ensure_ascii=False),
-                  file=sys.stderr, flush=True)
-            return 2
-    else:
-        flag_argv = argv
+                    rows: Callable[[], Rows] = _ps_rows) -> int:
+    """合入前纯只读本机核验子命令（不访问 GitHub、不执行任何写入命令、不写审查状态）：
+    在持有同 PR 排他在途锁（inflight.lock）与排他 PR 锁（p<N>.lock）期间原子核对固定正式状态根 STATE_ROOT 中
+    本 PR、当前合同（POLICY + REVIEW_CONTRACT）、merge_base == base 与精确 (base, head) 的最新完整已发布 PASS
+    并比对远端 run_id；退出即释放两把本机锁，不锁定后续任何远端操作，亦不代替全量改动清单、敏感变更确认或远端分支保护核查。"""
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep verify-pass")
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", required=True)
     parser.add_argument("--run-id", required=True, help="远端 deepagents/review 状态描述中的 run=<UUID>")
-    args = parser.parse_args(flag_argv)
+    args = parser.parse_args(argv)
     target_lane = lane or ExternalReview(None, state_root=STATE_ROOT)
-    with target_lane.exclusive_pr_lock_fds(args.pr) as lock_pair:
-        if lock_pair[0] is None:
-            code = lock_pair[1]
-            reason = (f"PR #{args.pr} 正有本机预检/登记在途" if code == "inflight-review-active"
-                      else f"PR #{args.pr} 正有登记/发布持有 PR 锁")
-            print(json.dumps({"ok": False, "code": code, "reason": reason}, ensure_ascii=False),
-                  file=sys.stderr, flush=True)
-            return 2
-        inflight_fd, pr_fd = lock_pair
-        res = _check_confirmed_pass_locked(
-            target_lane, args.pr, base=args.base, head=args.head,
-            run_id=args.run_id, rows=rows, check_processes=True,
-        )
-        if not res["ok"]:
-            print(json.dumps(res, ensure_ascii=False), file=sys.stderr, flush=True)
-            return 2
-        payload = {
-            **res,
-            "locked_command": bool(exec_cmd),
-            "lock_scope": "exec-inherited-local-pr-locks" if exec_cmd else "snapshot-only-unlocked-after-exit",
-        }
-        print(json.dumps(payload, ensure_ascii=False), flush=True)
-        if exec_cmd is not None:
-            os.set_inheritable(inflight_fd, True)
-            os.set_inheritable(pr_fd, True)
-            sys.stdout.flush()
-            sys.stderr.flush()
-            do_exec = os.execvp if execer is None else execer
-            try:
-                ret = do_exec(exec_cmd[0], exec_cmd)
-            except OSError as error:
-                print(json.dumps({"ok": False, "code": "command-exec-failed",
-                                  "reason": f"原地 exec 持锁命令失败：{type(error).__name__}: {error}"},
-                                 ensure_ascii=False), file=sys.stderr, flush=True)
-                return 127
-            return int(ret) if isinstance(ret, int) else 0
+    res = verify_confirmed_pass(target_lane, args.pr, base=args.base, head=args.head,
+                                run_id=args.run_id, rows=rows, check_processes=True)
+    if not res["ok"]:
+        print(json.dumps(res, ensure_ascii=False), file=sys.stderr, flush=True)
+        return 2
+    payload = {
+        **res,
+        "lock_scope": "snapshot-only-unlocked-after-exit",
+    }
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
     return 0
 
 

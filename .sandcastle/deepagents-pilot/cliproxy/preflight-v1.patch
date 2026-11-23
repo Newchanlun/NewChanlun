@@ -3024,10 +3024,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..30edad3 100644
+index e69de29..341b214 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,1913 @@
+@@ -0,0 +1,1937 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4303,6 +4303,21 @@ index e69de29..30edad3 100644
 +	c.publishLocked()
 +}
 +
++var syncDirFn = defaultSyncDir
++
++func defaultSyncDir(dir string) error {
++	f, err := os.Open(dir)
++	if err != nil {
++		return err
++	}
++	syncErr := f.Sync()
++	closeErr := f.Close()
++	if syncErr != nil {
++		return syncErr
++	}
++	return closeErr
++}
++
 +func reservePrivateDir(directory string, allowExisting bool) error {
 +	root := filepath.Dir(directory)
 +	if err := os.MkdirAll(root, 0700); err != nil {
@@ -4321,6 +4336,10 @@ index e69de29..30edad3 100644
 +		if statErr != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 || dirInfo.Mode().Perm()&0077 != 0 {
 +			return ErrUnavailable
 +		}
++		return nil
++	}
++	if err := syncDirFn(root); err != nil {
++		return err
 +	}
 +	return nil
 +}
@@ -4855,6 +4874,9 @@ index e69de29..30edad3 100644
 +		_ = os.Remove(tmp)
 +		return fail(err)
 +	}
++	if err := syncDirFn(e.directory); err != nil {
++		return fail(err)
++	}
 +	e.markerPersisted = true
 +	return nil
 +}
@@ -4939,13 +4961,15 @@ index e69de29..30edad3 100644
 +	if errWrite != nil || errSync != nil || errClose != nil {
 +		return
 +	}
-+	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
++	if err := os.Rename(tmp, filepath.Join(c.directory, "receipt.json")); err == nil {
++		_ = syncDirFn(c.directory)
++	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..8d66986 100644
+index e69de29..9d39e2e 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,2053 @@
+@@ -0,0 +1,2110 @@
 +package preflightreceipt
 +
 +import (
@@ -6997,5 +7021,62 @@ index e69de29..8d66986 100644
 +	c.HandlerDone(true)
 +	if st := SealReview(root, launch, session); st != SealRejected {
 +		t.Fatalf("SealReview accepted early-closed stalled stream without EOF: %v", st)
++	}
++}
++
++func TestReviewReceiptDirSyncFailureRejectsReservationAndSeal(t *testing.T) {
++	// R31 (Astra P2): directory fsync failure after Mkdir or Rename must fail closed before confirming reservation or seal.
++	origSync := syncDirFn
++	defer func() { syncDirFn = origSync }()
++
++	// 1. Parent directory sync failure on initial launch dir creation rejects BeginReview.
++	root1 := filepath.Join(t.TempDir(), "receipts1")
++	syncDirFn = func(dir string) error {
++		if dir == root1 {
++			return errors.New("injected parent dir sync error")
++		}
++		return origSync(dir)
++	}
++	if _, _, err := BeginReview(context.Background(), root1, "review-eeee1111-2222-4333-8444-555555555960", "019d0000-0000-7000-8000-000000000960", "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("BeginReview with parent dir sync failure err = %v, want ErrUnavailable", err)
++	}
++
++	// 2. Launch directory sync failure during SealReview must NOT return SealOK.
++	syncDirFn = origSync
++	root2 := filepath.Join(t.TempDir(), "receipts2")
++	launch := "review-eeee1111-2222-4333-8444-555555555961"
++	session := "019d0000-0000-7000-8000-000000000961"
++	ctx, c, err := BeginReview(context.Background(), root2, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	c.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	launchDir := filepath.Join(root2, launch)
++	syncDirFn = func(dir string) error {
++		if dir == launchDir {
++			return errors.New("injected launch dir sync error")
++		}
++		return origSync(dir)
++	}
++	if st := SealReview(root2, launch, session); st == SealOK {
++		t.Fatalf("SealReview succeeded despite launch dir sync error: %v", st)
 +	}
 +}

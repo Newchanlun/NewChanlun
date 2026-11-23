@@ -2701,9 +2701,9 @@ def test_plan_one_uses_rechecked_mergeable_state_and_withdraws_auto_merge(lane):
 
 
 def test_concurrent_sweep_ticks_are_serialized_by_sweep_lock(lane):
-    """R26/R27（Astra P1）：同一状态根上的并发 Sweep.tick() 经 sweep.lock 串行化，防止常驻 serve 与手动单跑并发交错。"""
+    """R26/R31（Astra P1/P2）：同一状态根上的并发 Sweep.tick() 经非阻塞 sweep.lock 互斥：
+    已有巡检持锁时另一轮立刻跳过并返回 sweep-busy（绝不阻塞 executor serve 主循环），持锁方退出后恢复正常。"""
     import threading
-    import time
 
     assert lane.review_pr(1810, 1)["verdict"] == "PASS"
     head = lane.gateway.pr["head"]["sha"]
@@ -2729,27 +2729,25 @@ def test_concurrent_sweep_ticks_are_serialized_by_sweep_lock(lane):
 
     s1, _, _ = make(lane, run=False, github=gh1, auto_merge=True)
     s2, _, _ = make(lane, run=False, github=gh2, auto_merge=True)
-    order: list[str] = []
+    t1_done: list[str] = []
 
     def run1():
         s1.tick()
-        order.append("t1")
-
-    def run2():
-        s2.tick()
-        order.append("t2")
+        t1_done.append("t1")
 
     t1 = threading.Thread(target=run1)
-    t2 = threading.Thread(target=run2)
     t1.start()
     assert entered.wait(timeout=5)
-    t2.start()
-    time.sleep(0.05)
-    assert order == []
+    # t1 持锁期间，s2.tick() 必须非阻塞立即返回 sweep-busy，不等待 t1 也不并发写
+    busy_actions = s2.tick()
+    assert [a["action"] for a in busy_actions] == ["sweep-busy"]
+    assert t1_done == []
     release.set()
     t1.join(timeout=10)
-    t2.join(timeout=10)
-    assert order == ["t1", "t2"]
+    assert t1_done == ["t1"]
+    # 锁释放后，下一轮 s2.tick() 恢复正常执行
+    after_actions = s2.tick()
+    assert "sweep-busy" not in [a["action"] for a in after_actions] and "done" in acts(after_actions)
 
 
 def test_reviewing_detects_any_flag_order_and_equals_syntax():
@@ -2825,18 +2823,11 @@ def test_verify_pass_binds_pr_contract_base_head_run_id_and_rejects_rereview_or_
     assert json.loads(capsys.readouterr().err)["code"] == "legacy-contract"
 
 
-def test_verify_pass_holds_exclusive_pr_locks_across_command_and_rejects_incomplete_publication(lane, capsys):
-    """R29/R30（Sol P1 + Astra P1 + Astra P2）：
-    1. verify-pass 在持有排他在途锁与 PR 锁期间原子完成核验，带 `-- <cmd>` 时清除 FD_CLOEXEC 并经 os.execvp
-       原地替换为写入进程（由写入进程自身持锁直至退出或被 SIGKILL，无独立父进程）；
-    2. 核验失败时不执行命令；
+def test_verify_pass_holds_exclusive_pr_locks_during_check_and_rejects_incomplete_publication(lane, capsys):
+    """R29/R31（Sol P1 + Astra P1 + Astra P2）：
+    1. verify-pass 为纯只读本机核验，在核验瞬间同时排他持有 inflight.lock 与 p<N>.lock，退出即释锁并明示 snapshot-only；
+    2. p<N>.lock 被占用或 merge_base != base 时立即拒绝；
     3. 缺少 id/state/sha 或字段不合法的残缺 publication 一律以 not-published-pass 拒绝。"""
-    import signal
-    import subprocess
-    import sys
-    import time
-    from pathlib import Path
-
     passed = lane.review_pr(1810, 1)
     assert passed["verdict"] == "PASS"
     head = lane.gateway.pr["head"]["sha"]
@@ -2844,93 +2835,36 @@ def test_verify_pass_holds_exclusive_pr_locks_across_command_and_rejects_incompl
     run_id = passed["run_id"]
     folder = lane.state_root / "runs" / ReviewTarget(**passed["target"]).key
 
-    # 1. 单元桩测试：带 `-- <cmd>` 时，execer 被调用瞬间两把锁处于排他持有状态，失败返回后立即释放
+    # 1. 核验执行期间（rows() 回调触发时）两把排他锁均已持有，返回后立即释放
     seen: dict[str, object] = {}
 
-    def fake_execer(prog, argv_list):
-        seen["prog"] = prog
-        seen["argv"] = list(argv_list)
+    def probe_rows():
         with lane.try_exclude_inflight_review(1810) as excl:
-            seen["inflight_free_during_exec"] = excl
+            seen["inflight_free_during_check"] = excl
         with lane.try_pr_lock(1810) as pr_free:
-            seen["pr_lock_free_during_exec"] = pr_free
-        return 0
+            seen["pr_lock_free_during_check"] = pr_free
+        return []
 
     rc = module.run_verify_pass(
-        ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id,
-         "--", "git", "push", f"--force-with-lease=refs/heads/main:{base}", "origin", f"{head}:refs/heads/main"],
-        lane=lane, rows=list, execer=fake_execer,
+        ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+        lane=lane, rows=probe_rows,
     )
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["locked_command"] is True and out["lock_scope"] == "exec-inherited-local-pr-locks"
-    assert seen == {
-        "prog": "git",
-        "argv": ["git", "push", f"--force-with-lease=refs/heads/main:{base}", "origin", f"{head}:refs/heads/main"],
-        "inflight_free_during_exec": False,
-        "pr_lock_free_during_exec": False,
-    }
+    assert out["ok"] is True and out["lock_scope"] == "snapshot-only-unlocked-after-exit"
+    assert seen == {"inflight_free_during_check": False, "pr_lock_free_during_check": False}
     with lane.try_exclude_inflight_review(1810) as excl, lane.try_pr_lock(1810) as pr_free:
         assert excl is True and pr_free is True
 
-    # 1b. 真实多进程 os.execvp 回归：verify-pass 原地 exec 为写入进程（同 PID、无单独父进程），
-    # 写入进程存活期间两把排他锁持续占用，对写入进程 SIGKILL 后内核原子释锁。
-    ready_file = lane.state_root / "exec-ready.txt"
-    wrapper_code = (
-        "import sys; from pathlib import Path; "
-        "import pilot1742.review_sweep as rs; "
-        "from pilot1742.external_review import ExternalReview; "
-        f"lane = ExternalReview(None, state_root=Path({str(lane.state_root)!r})); "
-        "raise SystemExit(rs.run_verify_pass(sys.argv[1:], lane=lane, rows=list))"
-    )
-    child_code = (
-        "import os, time; from pathlib import Path; "
-        f"Path({str(ready_file)!r}).write_text(str(os.getpid())); "
-        "time.sleep(30)"
-    )
-    env = {**os.environ, "PYTHONPATH": str(Path(module.__file__).resolve().parents[1])}
-    proc = subprocess.Popen(
-        [sys.executable, "-c", wrapper_code,
-         "--pr", "1810", "--base", base, "--head", head, "--run-id", run_id,
-         "--", sys.executable, "-c", child_code],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    try:
-        deadline = time.monotonic() + 10
-        while not ready_file.exists() and time.monotonic() < deadline:
-            assert proc.poll() is None, f"verify-pass exited early: {proc.communicate()}"
-            time.sleep(0.05)
-        assert ready_file.exists(), "exec'd writer did not start"
-        assert int(ready_file.read_text().strip()) == proc.pid  # 原地 os.execvp：写入进程就是原 PID，无单独父进程
-        with lane.try_exclude_inflight_review(1810) as excl, lane.try_pr_lock(1810) as pr_free:
-            assert excl is False and pr_free is False  # 写入进程自身持续持有两把排他锁
-        os.kill(proc.pid, signal.SIGKILL)
-        proc.wait(timeout=5)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
-    with lane.try_exclude_inflight_review(1810) as excl, lane.try_pr_lock(1810) as pr_free:
-        assert excl is True and pr_free is True  # 写入进程异常终止后内核立刻释放两把锁
-
-    # 2. p<N>.lock 被占用时立即拒绝且不执行命令
-    called = []
+    # 2. p<N>.lock 被占用时立即拒绝
     with lane._pr_lock(1810):
         assert module.run_verify_pass(
-            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id, "--", "true"],
-            lane=lane, rows=list, execer=lambda p, a: called.append(a) or 0,
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
         ) == 2
         assert json.loads(capsys.readouterr().err)["code"] == "pr-lock-busy"
-    assert called == []
 
-    # 3. 空 `--` 命令被拒
-    assert module.run_verify_pass(
-        ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id, "--"],
-        lane=lane, rows=list,
-    ) == 2
-    assert json.loads(capsys.readouterr().err)["code"] == "empty-command"
-
-    # 4. 残缺 publication（空字典 / 缺 sha / 缺 state / id 非正整数 / sha 不符）全部拒放
+    # 3. 残缺 publication（空字典 / 缺 sha / 缺 state / id 非正整数 / sha 不符）全部拒放
     orig_outcome = json.loads((folder / "outcome.json").read_text())
     for bad_pub in (
         {},
@@ -2943,11 +2877,10 @@ def test_verify_pass_holds_exclusive_pr_locks_across_command_and_rejects_incompl
     ):
         (folder / "outcome.json").write_text(json.dumps({**orig_outcome, "publication": bad_pub}))
         assert module.run_verify_pass(
-            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id, "--", "true"],
-            lane=lane, rows=list, execer=lambda p, a: called.append(a) or 0,
+            ["--pr", "1810", "--base", base, "--head", head, "--run-id", run_id],
+            lane=lane, rows=list,
         ) == 2
         assert json.loads(capsys.readouterr().err)["code"] == "not-published-pass"
-    assert called == []
 
 
 def test_behind_pr_is_not_reviewed_when_auto_merge_is_off(lane, env):
@@ -2963,13 +2896,28 @@ def test_behind_pr_is_not_reviewed_when_auto_merge_is_off(lane, env):
 
 
 def test_serve_refuses_without_valid_proxy_receipt_source(monkeypatch, tmp_path, capsys):
-    """R29（Astra P2）：executor serve --review-sweep 启动前校验可信代理收据源，缺失或冲突时退出码 2 拒绝启动。"""
+    """R29/R31（Astra P2）：executor serve --review-sweep 启动前与 review_preflight.py 同源校验可信代理收据源：
+    缺失、相对容器路径或非法容器名均在启动期退出码 2 拒绝启动。"""
     rounds = []
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
     monkeypatch.delenv("REVIEW_PREFLIGHT_PROXY_RECEIPT_DIR", raising=False)
     monkeypatch.setattr(module, "serve_round", lambda *a, **k: pytest.fail("sweep started without receipt source"))
     monkeypatch.setattr(cli, "_client", lambda args: pytest.fail("App opened"))
+    # 1. 缺失任何收据源
     assert cli.main(argv + ["--review-sweep"]) == 2
     lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("review-sweep ")]
     assert any(json.loads(line.removeprefix("review-sweep "))["action"] == "refused-no-receipt-source" for line in lines)
+    # 2. 容器收据目录非绝对路径（与 review_preflight.py:765 同口径拒绝）
+    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER", "blackhole-cliproxy")
+    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_DOCKER_CONTEXT", "orbstack")
+    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR", "receipts")
+    assert cli.main(argv + ["--review-sweep"]) == 2
+    lines2 = [line for line in capsys.readouterr().out.splitlines() if line.startswith("review-sweep ")]
+    assert any(json.loads(line.removeprefix("review-sweep "))["action"] == "refused-no-receipt-source" for line in lines2)
+    # 3. 非法容器名（与 review_preflight.py:767 同口径拒绝）
+    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_RECEIPT_CONTAINER", "-bad-name")
+    monkeypatch.setenv("REVIEW_PREFLIGHT_PROXY_CONTAINER_RECEIPT_DIR", "/tmp/cliproxy-preflight-receipts")
+    assert cli.main(argv + ["--review-sweep"]) == 2
+    lines3 = [line for line in capsys.readouterr().out.splitlines() if line.startswith("review-sweep ")]
+    assert any(json.loads(line.removeprefix("review-sweep "))["action"] == "refused-no-receipt-source" for line in lines3)
     assert rounds == []
