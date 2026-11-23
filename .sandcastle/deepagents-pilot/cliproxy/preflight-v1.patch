@@ -2101,7 +2101,7 @@ index 0000000000000000000000000000000000000000..53026eaa31910815edb473a06eaf35da
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124a5309eae2e2ebd644bd089d0175c40567..14689f569ffef4c7547190b25a18784d7e09dcfc 100644
+index 6074124a5309eae2e2ebd644bd089d0175c40567..453f724b6f3f4506f2f897016e39e42e39fdc2d8 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -15,6 +15,8 @@ import (
@@ -2126,7 +2126,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..14689f569ffef4c7547190b25a18784d
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,12 +450,38 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,12 +450,40 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -2162,11 +2162,28 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..14689f569ffef4c7547190b25a18784d
 +				}
 +			}
  		}()
++		const maxPendingStrictTerminalBytes = 8 << 20
 +		var pendingStrictTerminal []cliproxyexecutor.StreamChunk
++		pendingStrictBytes := 0
  		for scanner.Scan() {
  			line := scanner.Bytes()
  			var translatedLine []byte
-@@ -465,6 +497,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -460,11 +494,29 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 				translatedLine = transformed
+ 			} else if bytes.HasPrefix(line, dataTag) {
+ 				data := bytes.TrimSpace(line[5:])
++				if strictReview && sawStrictTerminal && len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
++					// Any SSE data frame after a terminal response frame contradicts terminal completion;
++					// taint immediately without buffering arbitrary trailing payload bytes in memory.
++					pendingStrictTerminal = nil
++					pendingStrictBytes = 0
++					if pc := preflightreceipt.From(ctx); pc != nil {
++						pc.Taint()
++					}
++					return
++				}
+ 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
+ 				observeCodexTokenEvent(reporter, data)
  				translatedLine = append([]byte("data: "), data...)
  				eventType := ojson.GetBytesNoCopy(data, "type").String()
  				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
@@ -2181,7 +2198,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..14689f569ffef4c7547190b25a18784d
  					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
  						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
  						reporter.PublishFailure(ctx, errClearReplay)
-@@ -486,6 +526,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -486,6 +538,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  					sawOutputDelta = true
  				}
  				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
@@ -2196,33 +2213,35 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..14689f569ffef4c7547190b25a18784d
  					streamErr := newCodexEmptyIncompleteStreamError()
  					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
  					reporter.PublishFailure(ctx, streamErr)
-@@ -521,6 +569,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -521,6 +581,27 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  			}
  
  			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
 +			if strictReview && (terminalSuccess || sawStrictTerminal) {
-+				// Hold terminal and any trailing chunks until the upstream HTTP response reaches
-+				// true io.EOF and closes cleanly, so a client disconnecting immediately after
-+				// receiving response.completed cannot race with upstream EOF or mask trailing errors.
++				// Hold terminal and any trailing non-data lines until the upstream HTTP response reaches
++				// true io.EOF and closes cleanly, bounded in both chunk count and cumulative bytes.
 +				for i := range chunks {
++					if len(pendingStrictTerminal) >= 64 || pendingStrictBytes+len(chunks[i]) > maxPendingStrictTerminalBytes {
++						pendingStrictTerminal = nil
++						pendingStrictBytes = 0
++						if pc := preflightreceipt.From(ctx); pc != nil {
++							pc.Taint()
++						}
++						return
++					}
++					pendingStrictBytes += len(chunks[i])
 +					pendingStrictTerminal = append(pendingStrictTerminal, cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent})
 +				}
 +				if terminalSuccess && isIncompleteEvent && len(chunks) == 0 {
 +					pendingStrictTerminal = append(pendingStrictTerminal, cliproxyexecutor.StreamChunk{Incomplete: true})
 +				}
 +				sawStrictTerminal = true
-+				if len(pendingStrictTerminal) > 64 {
-+					if pc := preflightreceipt.From(ctx); pc != nil {
-+						pc.Taint()
-+					}
-+					return
-+				}
 +				continue
 +			}
  			for i := range chunks {
  				select {
  				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i], Incomplete: isIncompleteEvent}:
-@@ -528,6 +595,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -528,6 +609,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  						emittedCount++
  					}
  				case <-ctx.Done():
@@ -2236,7 +2255,7 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..14689f569ffef4c7547190b25a18784d
  					return
  				}
  			}
-@@ -546,6 +620,59 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -546,6 +634,67 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
@@ -2261,24 +2280,32 @@ index 6074124a5309eae2e2ebd644bd089d0175c40567..14689f569ffef4c7547190b25a18784d
 +				return
 +			}
 +			if len(pendingStrictTerminal) > 0 {
-+				var combined bytes.Buffer
-+				incomplete := false
-+				for _, pending := range pendingStrictTerminal {
-+					if pending.Incomplete {
-+						incomplete = true
-+					}
-+					if len(pending.Payload) > 0 {
-+						if combined.Len() > 0 && !bytes.HasSuffix(combined.Bytes(), []byte{'\n'}) {
-+							combined.WriteByte('\n')
++				var merged cliproxyexecutor.StreamChunk
++				if len(pendingStrictTerminal) == 1 {
++					merged = pendingStrictTerminal[0]
++				} else {
++					var combined bytes.Buffer
++					combined.Grow(pendingStrictBytes + len(pendingStrictTerminal))
++					incomplete := false
++					for _, pending := range pendingStrictTerminal {
++						if pending.Incomplete {
++							incomplete = true
 +						}
-+						combined.Write(pending.Payload)
++						if len(pending.Payload) > 0 {
++							if combined.Len() > 0 && !bytes.HasSuffix(combined.Bytes(), []byte{'\n'}) {
++								combined.WriteByte('\n')
++							}
++							combined.Write(pending.Payload)
++						}
 +					}
++					merged = cliproxyexecutor.StreamChunk{Payload: combined.Bytes(), Incomplete: incomplete}
 +				}
-+				if combined.Len() > 0 || incomplete {
-+					if !incomplete {
++				pendingStrictTerminal = nil
++				pendingStrictBytes = 0
++				if len(merged.Payload) > 0 || merged.Incomplete {
++					if !merged.Incomplete {
 +						stopDeliverySupport = coreusage.SupportStreamDelivery(ctx)
 +					}
-+					merged := cliproxyexecutor.StreamChunk{Payload: combined.Bytes(), Incomplete: incomplete}
 +					select {
 +					case out <- merged:
 +						// strictReview disables bootstrap buffering so out is unbuffered; handoff here
@@ -3926,10 +3953,10 @@ index 8a29e48cbeafe96270b84a9be5a7d6523a537c11..8c01ee0e5022832ff8f8d678c45e2805
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f55448cbda3c 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..04ef66215f68b548df5bc76c135bc81d3ca83f70 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2456 @@
+@@ -0,0 +1,2525 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4238,6 +4265,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +	Type    string                      `json:"type"`
 +	Role    string                      `json:"role"`
 +	Phase   string                      `json:"phase"`
++	Status  string                      `json:"status"`
 +	Content []responseOutputContentPart `json:"content"`
 +}
 +
@@ -4250,6 +4278,12 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +		// Exclude intermediate narration/progress messages (e.g. phase="commentary"); only
 +		// final answers (phase="" or phase="final_answer") may supply the final output hash.
 +		if item.Phase != "" && item.Phase != "final_answer" {
++			continue
++		}
++		// Reject explicitly non-completed assistant messages (e.g. status="incomplete"/"in_progress")
++		// and clear last so earlier text never leaks through as the final answer.
++		if item.Status != "" && item.Status != "completed" {
++			last = ""
 +			continue
 +		}
 +		var b strings.Builder
@@ -4336,7 +4370,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
 +	}
 +	sseItemSchemaKeys = map[string]struct{}{
-+		"type": {}, "role": {}, "phase": {}, "content": {}, "response_id": {},
++		"type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
 +		"type": {}, "text": {},
@@ -4523,8 +4557,9 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +		typ, ok1 := exactOptionalString(fields, "type")
 +		role, ok2 := exactOptionalString(fields, "role")
 +		phase, ok3 := exactOptionalString(fields, "phase")
++		status, ok4 := exactOptionalString(fields, "status")
 +		itemRespID, hasItemRespID, okRespID := exactOptionalStringPresent(fields, "response_id")
-+		if !ok1 || !ok2 || !ok3 || !okRespID {
++		if !ok1 || !ok2 || !ok3 || !ok4 || !okRespID {
 +			return nil, "", false
 +		}
 +		if hasItemRespID {
@@ -4536,7 +4571,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +			}
 +			boundID = itemRespID
 +		}
-+		item := responseOutputItem{Type: typ, Role: role, Phase: phase}
++		item := responseOutputItem{Type: typ, Role: role, Phase: phase, Status: status}
 +		if typ == "message" && role == "assistant" {
 +			parts, ok := decodeExactAssistantContentParts(fields["content"])
 +			if !ok {
@@ -4806,11 +4841,19 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +				itemType, ok1 := exactOptionalString(frame.itemFields, "type")
 +				itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
 +				itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
-+				if !ok1 || !ok2 || !ok3 {
++				itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
++				if !ok1 || !ok2 || !ok3 || !ok4 {
 +					c.taintStreamAnomaly()
 +					continue
 +				}
 +				if itemType == "message" && itemRole == "assistant" && (itemPhase == "" || itemPhase == "final_answer") {
++					if itemStatus != "" && itemStatus != "completed" {
++						c.mu.Lock()
++						c.lastItemOutputSHA = ""
++						c.lastItemResponseID = ""
++						c.mu.Unlock()
++						continue
++					}
 +					parts, ok := decodeExactAssistantContentParts(frame.itemFields["content"])
 +					if !ok {
 +						c.taintStreamAnomaly()
@@ -5205,6 +5248,23 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +	return nil
 +}
 +
++func readVerifiedSealDigest(dir string) (string, bool) {
++	path := filepath.Join(dir, "seal.sha256")
++	finfo, err := os.Lstat(path)
++	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) || finfo.Size() != 64 {
++		return "", false
++	}
++	raw, err := os.ReadFile(path)
++	if err != nil || len(raw) != 64 {
++		return "", false
++	}
++	digest := string(raw)
++	if !isSHA256Hex(digest) {
++		return "", false
++	}
++	return digest, true
++}
++
 +func verifySealedDiskReceipt(dir, launch, session, expectedSHA string, now time.Time) (SealStatus, string) {
 +	diskEntry, onDisk, err := loadReviewEntryFromDisk(dir, launch, session, now)
 +	if err != nil {
@@ -5216,10 +5276,14 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +	if !isSHA256Hex(diskEntry.sealedReceiptSHA) {
 +		return SealUnavailable, ""
 +	}
-+	if expectedSHA != "" && diskEntry.sealedReceiptSHA != expectedSHA {
++	savedDigest, ok := readVerifiedSealDigest(dir)
++	if !ok || diskEntry.sealedReceiptSHA != savedDigest {
 +		return SealRejected, ""
 +	}
-+	return SealOK, diskEntry.sealedReceiptSHA
++	if expectedSHA != "" && savedDigest != expectedSHA {
++		return SealRejected, ""
++	}
++	return SealOK, savedDigest
 +}
 +
 +// SealReview seals a formal review launch once all in-flight requests have completed.
@@ -6119,7 +6183,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +			taint:             c.Taint,
 +			observedCompleted: c.ObservedCompleted,
 +			markEOF:           c.MarkUpstreamEOF,
-+			requireEOF:        strict && resp.StatusCode >= 200 && resp.StatusCode < 300,
++			requireEOF:        resp.StatusCode >= 200 && resp.StatusCode < 300,
 +		}
 +	}
 +	return resp, nil
@@ -6186,9 +6250,11 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +		return
 +	}
 +	finalPath := filepath.Join(e.directory, "receipt.json")
++	sealDigestPath := filepath.Join(e.directory, "seal.sha256")
 +	// Never call os.Truncate on receipt.json: Truncate follows symlinks, whereas os.Remove
 +	// unlinks only the directory entry inside the verified private launch directory.
 +	_ = os.Remove(finalPath)
++	_ = os.Remove(sealDigestPath)
 +	_ = syncDirFn(e.directory)
 +}
 +
@@ -6276,9 +6342,33 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +	if err != nil {
 +		return fail(false, err)
 +	}
-+	tmp := filepath.Join(e.directory, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Add(1)))
++	seq := tmpSeq.Add(1)
++	sealedDigest := ""
++	if sealed {
++		sealedDigest = sha256Hex(string(data))
++		shaTmp := filepath.Join(e.directory, fmt.Sprintf("pending-sha-%d-%d", os.Getpid(), seq))
++		sf, err := os.OpenFile(shaTmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++		if err != nil {
++			return fail(false, err)
++		}
++		_, errWriteSHA := sf.WriteString(sealedDigest)
++		errSyncSHA := sf.Sync()
++		errCloseSHA := sf.Close()
++		if errWriteSHA != nil || errSyncSHA != nil || errCloseSHA != nil {
++			_ = os.Remove(shaTmp)
++			return fail(false, ErrUnavailable)
++		}
++		if err := os.Rename(shaTmp, filepath.Join(e.directory, "seal.sha256")); err != nil {
++			_ = os.Remove(shaTmp)
++			return fail(false, err)
++		}
++	}
++	tmp := filepath.Join(e.directory, fmt.Sprintf("pending-%d-%d", os.Getpid(), seq))
 +	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 +	if err != nil {
++		if sealed {
++			_ = os.Remove(filepath.Join(e.directory, "seal.sha256"))
++		}
 +		return fail(false, err)
 +	}
 +	_, errWrite := f.Write(data)
@@ -6286,14 +6376,20 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +	errClose := f.Close()
 +	if errWrite != nil || errSync != nil || errClose != nil {
 +		_ = os.Remove(tmp)
++		if sealed {
++			_ = os.Remove(filepath.Join(e.directory, "seal.sha256"))
++		}
 +		return fail(false, ErrUnavailable)
 +	}
 +	if err := os.Rename(tmp, filepath.Join(e.directory, "receipt.json")); err != nil {
 +		_ = os.Remove(tmp)
++		if sealed {
++			_ = os.Remove(filepath.Join(e.directory, "seal.sha256"))
++		}
 +		return fail(false, err)
 +	}
 +	if sealed {
-+		e.sealedReceiptSHA = sha256Hex(string(data))
++		e.sealedReceiptSHA = sealedDigest
 +	}
 +	if err := syncDirFn(e.directory); err != nil {
 +		return fail(true, err)
@@ -6387,10 +6483,10 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..bae7e5e77adbf06ce61d564abf44f554
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92eacb031f1 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..ba5d090e258d00ff04c24c4239b9eec3002c3817 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3049 @@
+@@ -0,0 +1,3106 @@
 +package preflightreceipt
 +
 +import (
@@ -6581,10 +6677,13 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +	absent(t, c2)
 +}
 +func TestPreflightReceiptCannotSealUnfinishedOrUncovered(t *testing.T) {
-+	for _, kind := range []string{"body", "execution", "lifecycle", "handler", "expired", "unknown-executor", "zero-transport", "canceled", "duplicate-lifecycle"} {
++	for _, kind := range []string{"body", "body-no-eof", "execution", "lifecycle", "handler", "expired", "unknown-executor", "zero-transport", "canceled", "duplicate-lifecycle"} {
 +		t.Run(kind, func(t *testing.T) {
 +			ctx, c := beginTest(t)
 +			e, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "=== RESPONSE ===", false)
++			if kind != "body" && kind != "body-no-eof" {
++				_, _ = io.Copy(io.Discard, resp.Body)
++			}
 +			if kind != "body" {
 +				_ = resp.Body.Close()
 +			}
@@ -6620,12 +6719,14 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +func TestPreflightReceiptLateAttemptAndUnknown(t *testing.T) {
 +	ctx, c := beginTest(t)
 +	first, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "=== RESPONSE ===", false)
++	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +	first.End()
 +	late, resp := attempt(t, ctx, c, "antigravity", "daily-cloudcode-pa.googleapis.com", "", false)
 +	c.Complete(true)
 +	c.HandlerDone(true)
 +	absent(t, c)
++	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +	late.End()
 +	if got := readReceipt(t, c).Routes; len(got) != 2 || got[1] != "antigravity@daily-cloudcode-pa.googleapis.com" {
@@ -6636,6 +6737,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +	}
 +	ctx, c = beginTest(t)
 +	e, resp := attempt(t, ctx, c, "secret provider", "secret.invalid", "secret", false)
++	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +	e.End()
 +	c.Complete(true)
@@ -6653,6 +6755,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +		go func() {
 +			defer wg.Done()
 +			e, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "", false)
++			_, _ = io.Copy(io.Discard, resp.Body)
 +			_ = resp.Body.Close()
 +			e.End()
 +		}()
@@ -6683,6 +6786,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +			t.Fatal(err)
 +		}
 +		e, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "=== RESPONSE ===\n=== API REQUEST 99 ===", false)
++		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e.End()
 +		provider, host := "claude", "api.anthropic.com"
@@ -6694,6 +6798,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +		}
 +		e, resp = attempt(t, ctx, c, provider, host, "", false)
 +		if kind != "unfinished" && kind != "forgery-tail" {
++			_, _ = io.Copy(io.Discard, resp.Body)
 +			_ = resp.Body.Close()
 +			e.End()
 +		}
@@ -6705,6 +6810,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +func TestPreflightReceiptAtomicPublicationFailure(t *testing.T) {
 +	ctx, c := beginTest(t)
 +	e, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "", false)
++	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +	e.End()
 +	// A crash-left temporary file is never trusted or overwritten.
@@ -6732,6 +6838,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +	if err != nil {
 +		t.Fatal(err)
 +	}
++	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +	e.End()
 +	c.Complete(true)
@@ -6779,6 +6886,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +			if err != nil {
 +				t.Fatal(err)
 +			}
++			_, _ = io.Copy(io.Discard, resp.Body)
 +			_ = resp.Body.Close()
 +			e.End()
 +			c.Complete(true)
@@ -6849,6 +6957,7 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +			if err != nil {
 +				t.Fatal(err)
 +			}
++			_, _ = io.Copy(io.Discard, resp.Body)
 +			_ = resp.Body.Close()
 +			e.End()
 +			c.Complete(true)
@@ -9422,12 +9531,32 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +	if st3, digest3 := SealReviewWithDigest(slashRoot, lOK, sOK); st3 != SealRejected || digest3 != "" {
 +		t.Fatalf("repeat SealReviewWithDigest after receipt.json deleted = (%v, %q), want (SealRejected, \"\")", st3, digest3)
 +	}
-+	// Mutating receipt.json bytes (different digest) causes repeat seal to fail closed.
++	// Mutating receipt.json bytes (different digest) causes repeat seal to fail closed BOTH in-process AND after proxy restart (evicted ledger).
 +	if err := os.WriteFile(receiptPath, append(savedBytes, '\n'), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +	if st4, digest4 := SealReviewWithDigest(slashRoot, lOK, sOK); st4 != SealRejected || digest4 != "" {
 +		t.Fatalf("repeat SealReviewWithDigest after receipt.json modified = (%v, %q), want (SealRejected, \"\")", st4, digest4)
++	}
++	reviewMu.Lock()
++	delete(reviewLedger, filepath.Clean(slashRoot)+"\x00"+lOK)
++	reviewMu.Unlock()
++	if st4b, digest4b := SealReviewWithDigest(slashRoot, lOK, sOK); st4b != SealRejected || digest4b != "" {
++		t.Fatalf("post-restart SealReviewWithDigest after receipt.json modified = (%v, %q), want (SealRejected, \"\")", st4b, digest4b)
++	}
++	// Restoring exact original bytes passes post-restart ONLY while seal.sha256 is intact; deleting seal.sha256 fails closed.
++	if err := os.WriteFile(receiptPath, savedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st4c, digest4c := SealReviewWithDigest(slashRoot, lOK, sOK); st4c != SealOK || digest4c != digest {
++		t.Fatalf("post-restart SealReviewWithDigest with intact receipt + seal.sha256 = (%v, %q), want (SealOK, %q)", st4c, digest4c, digest)
++	}
++	sealDigestPath := filepath.Join(filepath.Clean(slashRoot), lOK, "seal.sha256")
++	if err := os.Remove(sealDigestPath); err != nil {
++		t.Fatal(err)
++	}
++	if st4d, digest4d := SealReviewWithDigest(slashRoot, lOK, sOK); st4d != SealRejected || digest4d != "" {
++		t.Fatalf("post-restart SealReviewWithDigest without seal.sha256 = (%v, %q), want (SealRejected, \"\")", st4d, digest4d)
 +	}
 +	// Removing the entire root directory causes repeat seal to fail closed without recreating root.
 +	if err := os.RemoveAll(filepath.Clean(slashRoot)); err != nil {
@@ -9438,5 +9567,29 @@ index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..3770afe1903f14fd572944a571d9e92e
 +	}
 +	if _, statErr := os.Stat(filepath.Clean(slashRoot)); !os.IsNotExist(statErr) {
 +		t.Fatalf("SealReviewWithDigest recreated deleted root directory: %v", statErr)
++	}
++
++	// 5. Explicitly incomplete/in_progress assistant message status MUST NOT populate last_output_sha256
++	//    on either response.completed or response.output_item.done (Astra P1 #2, PR #2280 R7).
++	lInc1 := "review-c1111111-2222-4333-8444-555555555505"
++	sInc1 := "019d0000-0000-7000-8000-777777777105"
++	sseIncompleteCompleted := "data: " + `{"type":"response.completed","response":{"id":"resp_inc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"earlier"}]},{"type":"message","role":"assistant","phase":"final_answer","status":"incomplete","content":[{"type":"output_text","text":"partial"}]}]}}` + "\n\n"
++	if stInc1, _ := runSSE(t, root, lInc1, sInc1, sseIncompleteCompleted); stInc1 != SealOK {
++		t.Fatalf("incomplete assistant message on response.completed seal = %v, want SealOK", stInc1)
++	}
++	if r := readReviewReceiptFile(t, root, lInc1); r.LastOutputSHA256 != "" {
++		t.Fatalf("incomplete assistant message populated last_output_sha256 = %q, want empty", r.LastOutputSHA256)
++	}
++
++	lInc2 := "review-c1111111-2222-4333-8444-555555555506"
++	sInc2 := "019d0000-0000-7000-8000-777777777106"
++	sseIncompleteStreamed := "data: " + `{"type":"response.created","response":{"id":"resp_inc2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","status":"in_progress","content":[{"type":"output_text","text":"partial streamed"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_inc2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if stInc2, _ := runSSE(t, root, lInc2, sInc2, sseIncompleteStreamed); stInc2 != SealOK {
++		t.Fatalf("in_progress output_item.done seal = %v, want SealOK", stInc2)
++	}
++	if r := readReviewReceiptFile(t, root, lInc2); r.LastOutputSHA256 != "" {
++		t.Fatalf("in_progress output_item.done populated last_output_sha256 = %q, want empty", r.LastOutputSHA256)
 +	}
 +}
