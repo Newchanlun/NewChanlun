@@ -1,4 +1,4 @@
-import Lean
+import Lean.Data.Json
 import Origin.Tangency
 
 namespace NewChanlun.Origin
