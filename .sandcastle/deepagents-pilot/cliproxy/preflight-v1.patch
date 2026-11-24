@@ -2696,7 +2696,7 @@ index 0000000..04b7de6
 +	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..1272779 100644
+index 6074124..3dcaed4 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,6 +3,7 @@ package executor
@@ -2728,7 +2728,7 @@ index 6074124..1272779 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +450,416 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +450,417 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -3012,13 +3012,14 @@ index 6074124..1272779 100644
 +							downstreamData = normalized
 +						}
 +					} else if hasData {
-+						if strictReview && hasEv {
++						isDoneMarker := bytes.Equal(joined, []byte("[DONE]"))
++						if strictReview && (hasEv || isDoneMarker) {
 +							if pc := preflightreceipt.From(ctx); pc != nil {
 +								pc.ValidateStrictEvent(evName, hasEv, joined)
 +							}
 +						}
-+						if hasEv {
-+							// Named SSE event with empty data: or [DONE] violates strict SSE framing across all paths.
++						if hasEv || (isDoneMarker && !sawStrictTerminal) {
++							// Named SSE event with empty data:/[DONE], or premature [DONE] before terminal completion.
 +							pendingStrictTerminal = nil
 +							pendingStrictBytes = 0
 +							failPostTerminal()
@@ -3147,7 +3148,7 @@ index 6074124..1272779 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +944,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +945,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
@@ -3159,8 +3160,8 @@ index 6074124..1272779 100644
 +						pc.ValidateStrictEvent(sseEventName, sseHasEvent, joined)
 +					}
 +				}
-+				if (len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]"))) || sseHasEvent {
-+					// Unclosed trailing non-[DONE] SSE event or named event (even with empty data:) at EOF.
++				if (len(joined) > 0 && (!bytes.Equal(joined, []byte("[DONE]")) || !sawStrictTerminal)) || sseHasEvent {
++					// Unclosed trailing non-[DONE] SSE event, premature [DONE], or named event at EOF.
 +					failPostTerminal()
 +					return
 +				}
@@ -4903,10 +4904,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..dd65cea 100644
+index e69de29..b6b3fb2 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,3641 @@
+@@ -0,0 +1,3787 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4922,6 +4923,7 @@ index e69de29..dd65cea 100644
 +	"encoding/json"
 +	"errors"
 +	"fmt"
++	"hash"
 +	"io"
 +	"net/http"
 +	"os"
@@ -5108,6 +5110,7 @@ index e69de29..dd65cea 100644
 +type strictStreamTracker struct {
 +	responseID                string
 +	sawCompleted              bool
++	sawFailure                bool
 +	lastItemResponseID        string
 +	lastItemOutputSHA         string
 +	lastItemSeq               int
@@ -5121,6 +5124,7 @@ index e69de29..dd65cea 100644
 +	itemIDByIndex             map[int64]string
 +	itemKindByKey             map[string]strictItemKind
 +	contentPartByItem         map[string]map[int64]string
++	textDeltaHashByItem       map[string]map[int64]hash.Hash
 +	pendingUnkeyed            int
 +	itemSeqByKey              map[string]int
 +	nextItemSeq               int
@@ -5149,6 +5153,7 @@ index e69de29..dd65cea 100644
 +	t.itemIDByIndex = nil
 +	t.itemKindByKey = nil
 +	t.contentPartByItem = nil
++	t.textDeltaHashByItem = nil
 +	t.pendingUnkeyed = 0
 +	t.itemSeqByKey = nil
 +	t.nextItemSeq = 0
@@ -5407,7 +5412,7 @@ index e69de29..dd65cea 100644
 +	if partType == "output_text" {
 +		return "text:" + sha256Hex(text)
 +	}
-+	return "other:" + partType
++	return "other:" + sha256Hex(partType)
 +}
 +
 +func extractAssistantOutputText(items []responseOutputItem) string {
@@ -5488,6 +5493,20 @@ index e69de29..dd65cea 100644
 +				}
 +			}
 +		}
++		if deltaHashes, hasDeltas := t.textDeltaHashByItem[canonKey]; hasDeltas {
++			if item.Type != "message" || item.Role != "assistant" {
++				return false
++			}
++			for cIdx, h := range deltaHashes {
++				if cIdx < 0 || int(cIdx) >= len(item.Content) {
++					return false
++				}
++				part := item.Content[cIdx]
++				if part.Type != "output_text" || sha256Hex(part.Text) != hex.EncodeToString(h.Sum(nil)) {
++					return false
++				}
++			}
++		}
 +		if doneRec, exists := t.doneItems[canonKey]; exists {
 +			matchedDoneKeys[canonKey] = struct{}{}
 +			if doneRec.isFinal != isFinalAssistantOutputItem(item) {
@@ -5545,7 +5564,7 @@ index e69de29..dd65cea 100644
 +var (
 +	sseEventSchemaKeys = map[string]struct{}{
 +		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {},
-+		"item": {}, "item_id": {}, "output_index": {}, "content_index": {}, "text": {}, "part": {},
++		"item": {}, "item_id": {}, "output_index": {}, "content_index": {}, "text": {}, "delta": {}, "part": {},
 +	}
 +	sseResponseSchemaKeys = map[string]struct{}{
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
@@ -5741,7 +5760,7 @@ index e69de29..dd65cea 100644
 +		}
 +		typ, ok1 := exactOptionalString(fields, "type")
 +		txt, ok2 := exactOptionalString(fields, "text")
-+		if !ok1 || !ok2 {
++		if !ok1 || !ok2 || len(typ) > maxStrictIdentityBytes {
 +			return false
 +		}
 +		parts = append(parts, responseOutputContentPart{Type: typ, Text: txt})
@@ -5826,6 +5845,8 @@ index e69de29..dd65cea 100644
 +	hasContentIndex bool
 +	evText          string
 +	hasEvText       bool
++	evDelta         string
++	hasEvDelta      bool
 +	partFields      map[string]json.RawMessage
 +}
 +
@@ -5901,12 +5922,20 @@ index e69de29..dd65cea 100644
 +	}
 +}
 +
++func isExplicitFailureEventType(evType string) bool {
++	switch evType {
++	case "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
++		return true
++	default:
++		return false
++	}
++}
++
 +// validateStrictFrameIdentity performs shared strict JSON, model-binding, and response-ID
 +// consistency verification used by both ObserveStreamChunk and ValidateStrictEvent.
-+// When rejectErrors is true, non-null event/response error fields also taint immediately.
-+// When producerOnly is true, response-ID tracking stays isolated in producerResponseID so
-+// producer lookahead never attributes an earlier consumer output_item.done to a later frame's ID.
-+func (c *Collector) validateStrictFrameIdentity(line []byte, rejectErrors, producerOnly bool) (parsedStrictFrame, bool) {
++// Required fields (such as non-blank type) are ALWAYS enforced; error fields are tolerated
++// only when allowFailureEvents is true AND the event type is an explicit upstream failure event.
++func (c *Collector) validateStrictFrameIdentity(line []byte, allowFailureEvents, producerOnly bool) (parsedStrictFrame, bool) {
 +	var out parsedStrictFrame
 +	evFields, err := decodeExactJSONObject(line, sseEventSchemaKeys)
 +	if err != nil {
@@ -5916,7 +5945,7 @@ index e69de29..dd65cea 100644
 +	evType, okType := exactOptionalString(evFields, "type")
 +	evRespID, hasEvRespID, okRespID := exactOptionalStringPresent(evFields, "response_id")
 +	evModel, hasEvModel, okEvModel := exactOptionalStringPresent(evFields, "model")
-+	if !okType || !okRespID || !okEvModel || (rejectErrors && strings.TrimSpace(evType) == "") ||
++	if !okType || !okRespID || !okEvModel || strings.TrimSpace(evType) == "" ||
 +		len(evType) > maxStrictIdentityBytes || len(evRespID) > maxStrictIdentityBytes || len(evModel) > maxStrictIdentityBytes {
 +		c.taintStreamAnomaly()
 +		return out, false
@@ -5929,6 +5958,7 @@ index e69de29..dd65cea 100644
 +		c.taintStreamAnomaly()
 +		return out, false
 +	}
++	rejectErrors := !allowFailureEvents || !isExplicitFailureEventType(evType)
 +	if rejectErrors && hasResponseError(evFields["error"]) {
 +		c.taintStreamAnomaly()
 +		return out, false
@@ -5961,6 +5991,10 @@ index e69de29..dd65cea 100644
 +		respErr = respFields["error"]
 +		respOutput = respFields["output"]
 +		if rejectErrors && hasResponseError(respErr) {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		if rejectErrors && (respStatus == "failed" || respStatus == "cancelled" || respStatus == "canceled") {
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
@@ -6103,21 +6137,39 @@ index e69de29..dd65cea 100644
 +			return out, false
 +		}
 +	}
++	var evDelta string
++	var hasEvDelta bool
++	if evType == "response.output_text.delta" {
++		var okDelta bool
++		evDelta, hasEvDelta, okDelta = exactOptionalStringPresent(evFields, "delta")
++		if !okDelta || !hasEvDelta {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
 +	var partFields map[string]json.RawMessage
-+	if evType == "response.content_part.done" && hasResponseError(evFields["part"]) {
++	if evType == "response.content_part.done" {
++		if !hasResponseError(evFields["part"]) {
++			c.taintStreamAnomaly()
++			return out, false
++		}
 +		var partErr error
 +		partFields, partErr = decodeExactJSONObject(evFields["part"], sseContentPartSchemaKeys)
 +		if partErr != nil {
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
-+		if _, ok1 := exactOptionalString(partFields, "type"); !ok1 {
++		pType, hasPType, ok1 := exactOptionalStringPresent(partFields, "type")
++		_, ok2 := exactOptionalString(partFields, "text")
++		if !ok1 || !ok2 || !hasPType || strings.TrimSpace(pType) == "" || len(pType) > maxStrictIdentityBytes {
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
-+		if _, ok2 := exactOptionalString(partFields, "text"); !ok2 {
-+			c.taintStreamAnomaly()
-+			return out, false
++		if pType == "output_text" {
++			if _, hasPText, okPText := exactOptionalStringPresent(partFields, "text"); !okPText || !hasPText {
++				c.taintStreamAnomaly()
++				return out, false
++			}
 +		}
 +	}
 +	out = parsedStrictFrame{
@@ -6138,6 +6190,8 @@ index e69de29..dd65cea 100644
 +		hasContentIndex: hasContentIndex,
 +		evText:          evText,
 +		hasEvText:       hasEvText,
++		evDelta:         evDelta,
++		hasEvDelta:      hasEvDelta,
 +		partFields:      partFields,
 +	}
 +	return out, true
@@ -6146,8 +6200,9 @@ index e69de29..dd65cea 100644
 +// ValidateStrictEvent validates model binding, response-ID consistency, explicit SSE event-name
 +// consistency, strict protocol JSON, and cross-frame item/content/completion consistency on ONE
 +// complete assembled SSE event JSON payload (including multi-line JSON objects) without touching
-+// consumer-order state. Unlike ObserveStreamChunk, it does NOT taint on legitimate pre-completion
-+// upstream error frames when declared event name, model, and response ID match.
++// consumer-order state. Unlike ObserveStreamChunk, it tolerates legitimate pre-completion upstream
++// failure event types (response.failed, response.incomplete, response.cancelled, error) when
++// declared event name, model, and response ID match.
 +func (c *Collector) ValidateStrictEvent(evName string, hasEvName bool, rawEventJSON []byte) {
 +	if c == nil || !c.strictCodex {
 +		return
@@ -6163,13 +6218,22 @@ index e69de29..dd65cea 100644
 +		return
 +	}
 +	trimmed := bytes.TrimSpace(rawEventJSON)
-+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
++	if len(trimmed) == 0 {
 +		if hasEvName {
 +			c.taintStreamAnomaly()
 +		}
 +		return
 +	}
-+	frame, ok := c.validateStrictFrameIdentity(trimmed, false, true)
++	if bytes.Equal(trimmed, []byte("[DONE]")) {
++		c.mu.Lock()
++		doneAllowed := c.producer.sawCompleted || c.producer.sawFailure
++		c.mu.Unlock()
++		if hasEvName || !doneAllowed {
++			c.taintStreamAnomaly()
++		}
++		return
++	}
++	frame, ok := c.validateStrictFrameIdentity(trimmed, true, true)
 +	if !ok {
 +		return
 +	}
@@ -6273,6 +6337,23 @@ index e69de29..dd65cea 100644
 +						}
 +					}
 +				}
++				if prevDeltas, hasDeltas := t.textDeltaHashByItem[idxKey]; hasDeltas {
++					delete(t.textDeltaHashByItem, idxKey)
++					curDeltas := t.textDeltaHashByItem[canonKey]
++					if curDeltas == nil {
++						t.textDeltaHashByItem[canonKey] = prevDeltas
++					} else {
++						for cIdx, h := range prevDeltas {
++							if _, dup := curDeltas[cIdx]; dup {
++								return "", "", 0, false, false
++							}
++							if len(curDeltas) >= maxTrackedContentParts {
++								return "", "", 0, false, false
++							}
++							curDeltas[cIdx] = h
++						}
++					}
++				}
 +				if seq, hasSeq := t.itemSeqByKey[idxKey]; hasSeq {
 +					if _, hasIDSeq := t.itemSeqByKey[canonKey]; !hasIDSeq {
 +						t.itemSeqByKey[canonKey] = seq
@@ -6346,12 +6427,54 @@ index e69de29..dd65cea 100644
 +	return true
 +}
 +
++func (t *strictStreamTracker) recordTextDelta(canonKey string, contentIdx int64, delta string) bool {
++	if canonKey == "" {
++		return true
++	}
++	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
++		return false
++	}
++	if parts := t.contentPartByItem[canonKey]; parts != nil {
++		if _, finalized := parts[contentIdx]; finalized {
++			return false
++		}
++	}
++	hashes := t.textDeltaHashByItem[canonKey]
++	if hashes == nil {
++		if len(t.textDeltaHashByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.textDeltaHashByItem == nil {
++			t.textDeltaHashByItem = make(map[string]map[int64]hash.Hash)
++		}
++		hashes = make(map[int64]hash.Hash)
++		t.textDeltaHashByItem[canonKey] = hashes
++	}
++	h := hashes[contentIdx]
++	if h == nil {
++		if len(hashes) >= maxTrackedContentParts {
++			return false
++		}
++		h = sha256.New()
++		hashes[contentIdx] = h
++	}
++	_, _ = h.Write([]byte(delta))
++	return true
++}
++
 +func (t *strictStreamTracker) recordContentPart(canonKey string, contentIdx int64, partType, text string) bool {
 +	if canonKey == "" {
 +		return true
 +	}
 +	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
 +		return false
++	}
++	if hashes := t.textDeltaHashByItem[canonKey]; hashes != nil {
++		if h := hashes[contentIdx]; h != nil {
++			if partType != "output_text" || hex.EncodeToString(h.Sum(nil)) != sha256Hex(text) {
++				return false
++			}
++		}
 +	}
 +	tag := contentPartTag(partType, text)
 +	parts := t.contentPartByItem[canonKey]
@@ -6570,6 +6693,15 @@ index e69de29..dd65cea 100644
 +						}
 +					}
 +				}
++				if deltaHashes, hasDeltas := t.textDeltaHashByItem[canonKey]; hasDeltas {
++					for cIdx := range deltaHashes {
++						if cIdx < 0 || int(cIdx) >= len(parts) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
 +				for i, part := range parts {
 +					if !t.recordContentPart(canonKey, int64(i), part.Type, part.Text) {
 +						c.mu.Unlock()
@@ -6578,6 +6710,10 @@ index e69de29..dd65cea 100644
 +					}
 +				}
 +			} else if _, hasParts := t.contentPartByItem[canonKey]; hasParts {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			} else if _, hasDeltas := t.textDeltaHashByItem[canonKey]; hasDeltas {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -6712,6 +6848,7 @@ index e69de29..dd65cea 100644
 +		c.taintStreamAnomaly()
 +		return
 +	case "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
++		t.sawFailure = true
 +		t.resetTracking()
 +		if isConsumer {
 +			c.invalid = true
@@ -6732,7 +6869,17 @@ index e69de29..dd65cea 100644
 +			c.taintStreamAnomaly()
 +			return
 +		}
-+		if frame.evType == "response.output_text.done" {
++		if frame.evType == "response.output_text.delta" {
++			cIdx := int64(0)
++			if frame.hasContentIndex {
++				cIdx = frame.contentIndex
++			}
++			if !frame.hasEvDelta || !t.recordTextDelta(canonKey, cIdx, frame.evDelta) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		} else if frame.evType == "response.output_text.done" {
 +			cIdx := int64(0)
 +			if frame.hasContentIndex {
 +				cIdx = frame.contentIndex
@@ -6742,14 +6889,14 @@ index e69de29..dd65cea 100644
 +				c.taintStreamAnomaly()
 +				return
 +			}
-+		} else if frame.evType == "response.content_part.done" && frame.partFields != nil {
++		} else if frame.evType == "response.content_part.done" {
 +			pType, _ := exactOptionalString(frame.partFields, "type")
 +			pText, _ := exactOptionalString(frame.partFields, "text")
 +			cIdx := int64(0)
 +			if frame.hasContentIndex {
 +				cIdx = frame.contentIndex
 +			}
-+			if pType != "" && !t.recordContentPart(canonKey, cIdx, pType, pText) {
++			if frame.partFields == nil || pType == "" || !t.recordContentPart(canonKey, cIdx, pType, pText) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -6839,12 +6986,12 @@ index e69de29..dd65cea 100644
 +		return
 +	}
 +	if bytes.Equal(joined, []byte("[DONE]")) {
-+		if hasEvName {
++		if hasEvName || !c.ObservedCompleted() {
 +			c.taintStreamAnomaly()
 +		}
 +		return
 +	}
-+	frame, ok := c.validateStrictFrameIdentity(joined, true, false)
++	frame, ok := c.validateStrictFrameIdentity(joined, false, false)
 +	if !ok {
 +		return
 +	}
@@ -8549,10 +8696,10 @@ index e69de29..dd65cea 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..bfc0c30 100644
+index e69de29..9900c06 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3833 @@
+@@ -0,0 +1,3943 @@
 +package preflightreceipt
 +
 +import (
@@ -12384,5 +12531,115 @@ index e69de29..bfc0c30 100644
 +	sseTooManyParts := "data: " + `{"type":"response.completed","response":{"id":"resp_parts","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_p","type":"message","role":"assistant","content":[{"type":"output_text","text":"1"},{"type":"output_text","text":"2"},{"type":"output_text","text":"3"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555540", "019d0000-0000-7000-8000-888888888140", sseTooManyParts); st != SealRejected {
 +		t.Fatalf("exceeding maxTrackedContentParts seal = %v, want SealRejected", st)
++	}
++	maxTrackedContentParts = origMaxParts
++
++	// 31. Sol P1 #1 + Astra P1 #1 (PR #2280 R17): streamed output_text.delta chunks MUST match finalized
++	//     output_text.done / output_item.done / response.completed text via incremental SHA-256.
++	sseDeltaConflict := "data: " + `{"type":"response.created","response":{"id":"resp_dc1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_d","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.delta","output_index":0,"item_id":"msg_d","content_index":0,"delta":"VERDICT: "}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.delta","output_index":0,"item_id":"msg_d","content_index":0,"delta":"BLOCK"}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.done","output_index":0,"item_id":"msg_d","content_index":0,"text":"VERDICT: PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_d","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_dc1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_d","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555541", "019d0000-0000-7000-8000-888888888141", sseDeltaConflict); st != SealRejected {
++		t.Fatalf("conflicting output_text.delta vs done seal = %v, want SealRejected", st)
++	}
++	lDeltaMatch := "review-d1111111-2222-4333-8444-555555555542"
++	sDeltaMatch := "019d0000-0000-7000-8000-888888888142"
++	sseDeltaMatch := "data: " + `{"type":"response.created","response":{"id":"resp_dm1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_dm","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.delta","output_index":0,"item_id":"msg_dm","content_index":0,"delta":"VERDICT: "}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.delta","output_index":0,"item_id":"msg_dm","content_index":0,"delta":"PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.done","output_index":0,"item_id":"msg_dm","content_index":0,"text":"VERDICT: PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_dm","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_dm1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_dm","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" +
++		"data: [DONE]\n\n"
++	if st := runSSE(t, lDeltaMatch, sDeltaMatch, sseDeltaMatch); st != SealOK {
++		t.Fatalf("matching output_text.delta + trailing [DONE] seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lDeltaMatch); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("matching output_text.delta hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 32. Sol P1 #2 + Astra P1 #2 (PR #2280 R17): producer ValidateStrictEvent MUST taint on non-failure
++	//     frame carrying error OR missing/blank type even when client cancels before consumer observes.
++	for idx, badFrame := range []string{
++		`{"type":"response.in_progress","error":{"message":"injected"}}`,
++		`{"type":"   ","response":{"id":"resp_blank"}}`,
++	} {
++		lBad := fmt.Sprintf("review-d1111111-2222-4333-8444-55555555554%d", idx+3)
++		sBad := fmt.Sprintf("019d0000-0000-7000-8000-88888888814%d", idx+3)
++		ctxB1, cB1, err := BeginReview(context.Background(), root, lBad, sBad, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctxB1, eB1, err := cB1.Start(ctxB1, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		clB1 := httptransport.Decorate(ctxB1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		reqB1, _ := http.NewRequestWithContext(ctxB1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		respB1, err := clB1.Do(reqB1)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, respB1.Body)
++		_ = respB1.Body.Close()
++		cB1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_ok1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"t1"}]}]}}` + "\n\n"))
++		eB1.End()
++		cB1.Complete(true)
++		cB1.HandlerDone(true)
++
++		ctxB2, cB2, err := BeginReview(context.Background(), root, lBad, sBad, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, eB2, err := cB2.Start(ctxB2, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cB2.ValidateStrictEvent("", false, []byte(badFrame))
++		cB2.Reject()
++		eB2.End()
++		cB2.Complete(false)
++		cB2.HandlerDone(false)
++		if st := SealReview(root, lBad, sBad); st != SealRejected {
++			t.Fatalf("producer bad frame case %d (%s) seal = %v, want SealRejected", idx, badFrame, st)
++		}
++	}
++
++	// 33. Astra P2 #1 (PR #2280 R17): content_part.done missing part, null part, or missing part.type MUST taint.
++	for idx, badPartEv := range []string{
++		`{"type":"response.content_part.done","output_index":0,"item_id":"msg_p","content_index":0}`,
++		`{"type":"response.content_part.done","output_index":0,"item_id":"msg_p","content_index":0,"part":null}`,
++		`{"type":"response.content_part.done","output_index":0,"item_id":"msg_p","content_index":0,"part":{"text":"no-type"}}`,
++	} {
++		sseBadPart := "data: " + `{"type":"response.created","response":{"id":"resp_bp","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++			"data: " + badPartEv + "\n\n" +
++			"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_p","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}` + "\n\n" +
++			"data: " + `{"type":"response.completed","response":{"id":"resp_bp","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_p","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"
++		lBP := fmt.Sprintf("review-d1111111-2222-4333-8444-55555555554%d", idx+5)
++		sBP := fmt.Sprintf("019d0000-0000-7000-8000-88888888814%d", idx+5)
++		if st := runSSE(t, lBP, sBP, sseBadPart); st != SealRejected {
++			t.Fatalf("malformed content_part.done case %d seal = %v, want SealRejected", idx, st)
++		}
++	}
++
++	// 34. Sol P2 #1 + Astra P2 #2 (PR #2280 R17): premature [DONE] BEFORE response.completed MUST taint.
++	ssePrematureDone := "data: [DONE]\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_pd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555548", "019d0000-0000-7000-8000-888888888148", ssePrematureDone); st != SealRejected {
++		t.Fatalf("premature [DONE] before response.completed seal = %v, want SealRejected", st)
++	}
++
++	// 35. Astra P2 #4 (PR #2280 R17): oversized non-output_text part.type MUST taint.
++	longPartType := strings.Repeat("p", maxStrictIdentityBytes+1)
++	sseLongPartType := "data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_lpt","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":%q,"text":"x"}]}]}}`, longPartType) + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555549", "019d0000-0000-7000-8000-888888888149", sseLongPartType); st != SealRejected {
++		t.Fatalf("oversized content part.type seal = %v, want SealRejected", st)
 +	}
 +}

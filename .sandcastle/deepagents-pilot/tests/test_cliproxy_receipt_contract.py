@@ -593,6 +593,17 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
             b"event: response.completed\n"
             b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
         ),
+        (
+            b"data: [DONE]\n\n"
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        ),
+        (
+            b'data: {"type":"response.failed","type":"response.completed","response":{"status":"completed"}}\n\n'
+        ),
+        (
+            b'data: {"type":"response.completed","response":{"status":"failed","status":"completed"}}\n\n'
+        ),
     ):
         class _FakeResp:
             status = 200

@@ -355,6 +355,15 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
                 "error": {"exception": type(error).__name__, "errno": None}}
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate JSON key")
+        out[key] = value
+    return out
+
+
 def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
     """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
     不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
@@ -391,8 +400,8 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                         joined = "\n".join(data_lines).strip()
                         data_lines = []
                         if joined == "[DONE]":
-                            if ev_name is not None:
-                                detail = "SSE 事件名与 [DONE] 冲突"
+                            if ev_name is not None or terminal is None:
+                                detail = "SSE 存在提前或带事件名的 [DONE]"
                                 break
                             continue
                         if not joined:
@@ -407,7 +416,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                             detail = "SSE 存在非 JSON 对象数据事件"
                             break
                         try:
-                            event = json.loads(joined)
+                            event = json.loads(joined, object_pairs_hook=_no_duplicate_keys)
                         except ValueError:
                             detail = "SSE 数据帧 JSON 解析失败"
                             break
@@ -446,7 +455,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                     break
             if data_lines:
                 trailing = "\n".join(data_lines).strip()
-                if (trailing and trailing != "[DONE]") or event_name is not None:
+                if (trailing and (trailing != "[DONE]" or terminal is None)) or event_name is not None:
                     detail = "流尾存在未闭合 SSE 事件"
             elif event_name is not None:
                 detail = "流尾存在未闭合 SSE 事件头"
