@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..8276cdd 100644
+index e69de29..6d56967 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,176 @@
 +package middleware
 +
 +import (
@@ -28,7 +28,11 @@ index e69de29..8276cdd 100644
 +			return
 +		}
 +		if root == "" {
-+			c.AbortWithStatus(http.StatusServiceUnavailable)
++			if hasReviewHeader {
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
++			c.Next()
 +			return
 +		}
 +		if hasReviewHeader && c.Request.Method == http.MethodPost && c.Request.URL.Path == "/v1/review-receipts/seal" && c.GetHeader("Upgrade") == "" {
@@ -59,6 +63,13 @@ index e69de29..8276cdd 100644
 +			if bodyDeadline.After(turnDeadline) {
 +				bodyDeadline = turnDeadline
 +			}
++			pending, pendErr := preflightreceipt.BeginPendingReview(root, launch)
++			if pendErr != nil {
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
++			defer pending.Release()
++
 +			res, existed, resErr := preflightreceipt.ReserveExistingReview(root, launch)
 +			if resErr != nil {
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
@@ -66,6 +77,7 @@ index e69de29..8276cdd 100644
 +			}
 +			if existed {
 +				defer res.Release()
++				pending.Release()
 +			}
 +			taintFailure := func() {
 +				if existed {
@@ -111,6 +123,7 @@ index e69de29..8276cdd 100644
 +					return
 +				}
 +				defer res.Release()
++				pending.Release()
 +			}
 +			ctx, collector, err = preflightreceipt.BeginReviewReserved(turnCtx, res, session, requestedModel)
 +			if err != nil {
@@ -436,10 +449,10 @@ index 0000000..f8a6d33
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..87dc0d5 100644
+index e69de29..830c067 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1357 @@
+@@ -0,0 +1,1414 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -1497,6 +1510,59 @@ index e69de29..87dc0d5 100644
 +		}
 +	})
 +
++	t.Run("concurrent-first-requests-on-new-launch-block-seal-during-slow-body-read", func(t *testing.T) {
++		// Astra P1 #1 (PR #2280 R27): two overlapping first requests for a brand-new launch MUST NOT
++		// allow the faster request to finish and seal while the slower request is still reading its body.
++		const launch = "review-12345678-1234-4234-8234-123456789af2"
++		const session = "019d0000-0000-7000-8000-000000000af2"
++
++		pr, pw := io.Pipe()
++		readingStarted := make(chan struct{})
++		var notifyOnce sync.Once
++		bodyReader := &notifyOnReadReader{r: pr, onRead: func() { notifyOnce.Do(func() { close(readingStarted) }) }}
++		reqDone := make(chan *httptest.ResponseRecorder, 1)
++		go func() {
++			req := httptest.NewRequest(http.MethodPost, "/v1/responses", bodyReader)
++			req.Header.Set("Authorization", "Bearer test-key")
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set(preflightreceipt.ReviewHeader, launch)
++			req.Header.Set("Session-Id", session)
++			res := newDeadlineRecorder()
++			server.engine.ServeHTTP(res, req)
++			reqDone <- res.ResponseRecorder
++		}()
++		select {
++		case <-readingStarted:
++		case <-time.After(2 * time.Second):
++			t.Fatal("slow first request never started reading body")
++		}
++		// While slow request is mid-body (and before any disk dir exists), fast request arrives and completes.
++		resFast := post("/v1/responses", "gpt-6.2-sol", launch, session)
++		if resFast.Code != http.StatusOK {
++			t.Fatalf("fast first request HTTP %d: %s", resFast.Code, resFast.Body.String())
++		}
++		<-models
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Requests == 1 && r.Complete && !r.Sealed })
++
++		// Seal MUST return 409 in_flight while the slower first request is still reading its body.
++		sealMid := seal(launch, session)
++		if sealMid.Code != http.StatusConflict || !strings.Contains(sealMid.Body.String(), "in_flight") {
++			t.Fatalf("SealReview during concurrent slow first-request body read = %d %s, want 409 in_flight", sealMid.Code, sealMid.Body.String())
++		}
++
++		// Finish slow request with a disallowed model -> MUST taint the launch before releasing pending guard.
++		_, _ = pw.Write([]byte(`{"model":"gpt-6.1-sol","stream":true,"input":"slow-bad"}`))
++		_ = pw.Close()
++		resSlow := <-reqDone
++		if resSlow.Code != http.StatusBadRequest || len(models) != 0 {
++			t.Fatalf("slow disallowed first request status=%d calls=%d, want 400 and 0 calls", resSlow.Code, len(models))
++		}
++		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++		if sealAfter := seal(launch, session); sealAfter.Code != http.StatusConflict || !strings.Contains(sealAfter.Body.String(), "rejected") {
++			t.Fatalf("SealReview after slow bad first request = %d %s, want 409 rejected", sealAfter.Code, sealAfter.Body.String())
++		}
++	})
++
 +	t.Run("missing-receipt-dir-blocks-tagged-requests-and-passes-ordinary", func(t *testing.T) {
 +		t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", "")
 +		noDirServer := newTestServer(t)
@@ -1528,14 +1594,18 @@ index e69de29..87dc0d5 100644
 +			noDirServer.engine.ServeHTTP(res, req)
 +			return res
 +		}
-+		// Formal review and preflight requests MUST fail closed (503) before reaching upstream.
++		// Formal review requests MUST fail closed (503) before reaching upstream when receipt dir is unset,
++		// while legacy preflight-<uuid4> connectivity probes continue forwarding normally without writing receipts.
 +		resRev := send("review-12345678-1234-4234-8234-123456789ad1", "019d0000-0000-7000-8000-000000000ad1")
 +		if resRev.Code != http.StatusServiceUnavailable || len(models) != 0 {
 +			t.Fatalf("review request escaped when receipt dir unset: status=%d calls=%d", resRev.Code, len(models))
 +		}
 +		resPre := send("", "preflight-12345678-1234-4234-8234-123456789ad2")
-+		if resPre.Code != http.StatusServiceUnavailable || len(models) != 0 {
-+			t.Fatalf("preflight request escaped when receipt dir unset: status=%d calls=%d", resPre.Code, len(models))
++		if resPre.Code != http.StatusOK {
++			t.Fatalf("legacy preflight probe broken when receipt dir unset: status=%d body=%s", resPre.Code, resPre.Body.String())
++		}
++		if got := <-models; got != "gpt-6.2-sol" {
++			t.Fatalf("legacy preflight probe upstream model = %q", got)
 +		}
 +		// Ordinary untagged traffic (including non-UUIDv4 Session-Id like "preflight-demo") continues working unchanged.
 +		resOrd := send("", "ordinary-session")
@@ -5221,10 +5291,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..f12cb85 100644
+index e69de29..f0da8ec 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,5644 @@
+@@ -0,0 +1,5841 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5280,6 +5350,7 @@ index e69de29..f12cb85 100644
 +
 +var maxReviewLedgerEntries = 2048
 +var maxReviewDiskEntries = 2048
++var maxPendingReviewLaunches = 2048
 +var maxTrackedOutputItems = 2048
 +var maxTrackedContentParts = 512
 +
@@ -5407,15 +5478,57 @@ index e69de29..f12cb85 100644
 +}
 +
 +var (
-+	reviewMu           sync.Mutex
-+	reviewLedger       = make(map[string]*reviewEntry)
-+	taintWriteOverflow bool
-+	tmpSeq             atomic.Uint64
++	reviewMu              sync.Mutex
++	reviewLedger          = make(map[string]*reviewEntry)
++	pendingReviewLaunches = make(map[string]int)
++	taintWriteOverflow    bool
++	tmpSeq                atomic.Uint64
 +
 +	rootLockMu  sync.Mutex
 +	rootLocks   = make(map[string]*heldRootLock)
 +	rootQuotaMu sync.Mutex
 +)
++
++type PendingReviewGuard struct {
++	key  string
++	once sync.Once
++}
++
++func (g *PendingReviewGuard) Release() {
++	if g == nil {
++		return
++	}
++	g.once.Do(func() {
++		reviewMu.Lock()
++		if n := pendingReviewLaunches[g.key]; n <= 1 {
++			delete(pendingReviewLaunches, g.key)
++		} else {
++			pendingReviewLaunches[g.key] = n - 1
++		}
++		reviewMu.Unlock()
++	})
++}
++
++// BeginPendingReview registers a bounded in-memory pre-admission guard BEFORE reading the
++// HTTP body so concurrent first requests on a brand-new launch cannot race ahead of SealReview
++// while avoiding any disk directory allocation before request validation succeeds.
++func BeginPendingReview(root, launch string) (*PendingReviewGuard, error) {
++	cleanRoot, ok := cleanPrivateRoot(root)
++	if !ok || !reviewLaunchPattern.MatchString(launch) {
++		return nil, ErrUnavailable
++	}
++	key := cleanRoot + "\x00" + launch
++	reviewMu.Lock()
++	defer reviewMu.Unlock()
++	if entry := reviewLedger[key]; entry != nil && (entry.sealedFlag || entry.sealing) {
++		return nil, errReviewSealed
++	}
++	if pendingReviewLaunches[key] == 0 && len(pendingReviewLaunches) >= maxPendingReviewLaunches {
++		return nil, ErrUnavailable
++	}
++	pendingReviewLaunches[key]++
++	return &PendingReviewGuard{key: key}, nil
++}
 +
 +type heldRootLock struct {
 +	file    *os.File
@@ -5486,6 +5599,9 @@ index e69de29..f12cb85 100644
 +	pendingItems              map[string]struct{}
 +	doneItemKeys              map[string]struct{}
 +	doneItems                 map[string]doneItemSummary
++	unkeyedDoneItems          []doneItemSummary
++	failedItemKeys            map[string]struct{}
++	completedSubItemKeys      map[string]struct{}
 +	itemIndexByID             map[string]int64
 +	itemIDByIndex             map[int64]string
 +	itemKindByKey             map[string]strictItemKind
@@ -5521,6 +5637,9 @@ index e69de29..f12cb85 100644
 +	t.pendingItems = nil
 +	t.doneItemKeys = nil
 +	t.doneItems = nil
++	t.unkeyedDoneItems = nil
++	t.failedItemKeys = nil
++	t.completedSubItemKeys = nil
 +	t.itemIndexByID = nil
 +	t.itemIDByIndex = nil
 +	t.itemKindByKey = nil
@@ -5732,11 +5851,40 @@ index e69de29..f12cb85 100644
 +	return status == "" || status == "completed"
 +}
 +
++func isTerminalAssistantItemStatus(status string) bool {
++	return status == "" || status == "completed" || status == "incomplete"
++}
++
 +func doneItemStatusCompatible(doneStatus, nextStatus string) bool {
 +	if doneStatus == nextStatus {
 +		return true
 +	}
 +	return (doneStatus == "" && nextStatus == "completed") || (doneStatus == "completed" && nextStatus == "")
++}
++
++func doneItemMatchesOutputItem(doneRec doneItemSummary, item responseOutputItem) bool {
++	if doneRec.itemType != item.Type || doneRec.itemRole != item.Role || doneRec.itemPhase != item.Phase ||
++		!doneItemStatusCompatible(doneRec.itemStatus, item.Status) ||
++		doneRec.callID != item.CallID || doneRec.name != item.Name || doneRec.serverLabel != item.ServerLabel ||
++		doneRec.argsSHA != item.ArgsSHA || doneRec.inputSHA != item.InputSHA || doneRec.codeSHA != item.CodeSHA ||
++		(doneRec.canonicalItemSHA != "" && item.CanonicalItemSHA != "" && doneRec.canonicalItemSHA != item.CanonicalItemSHA) ||
++		doneRec.isFinal != isFinalAssistantOutputItem(item) {
++		return false
++	}
++	if doneRec.isAssistantMsg {
++		if item.Type != "message" || item.Role != "assistant" {
++			return false
++		}
++		itemText := extractSingleAssistantText(item)
++		itemSHA := ""
++		if itemText != "" {
++			itemSHA = sha256Hex(itemText)
++		}
++		if itemSHA != doneRec.outputTextSHA {
++			return false
++		}
++	}
++	return true
 +}
 +
 +type strictItemKind uint8
@@ -5935,11 +6083,15 @@ index e69de29..f12cb85 100644
 +}
 +
 +func (t *strictStreamTracker) verifyCompletedOutput(output []responseOutputItem, completedSHA string) bool {
-+	if len(t.pendingItems) > 0 || t.pendingUnkeyed > 0 {
++	if len(t.pendingItems) > 0 || t.pendingUnkeyed > 0 || len(t.failedItemKeys) > 0 {
 +		return false
 +	}
 +	for _, item := range output {
-+		if !(item.Type == "message" && item.Role == "assistant") && !isCompletedNonMessageItemStatus(item.Status) {
++		if item.Type == "message" && item.Role == "assistant" {
++			if !isTerminalAssistantItemStatus(item.Status) {
++				return false
++			}
++		} else if !isCompletedNonMessageItemStatus(item.Status) {
 +			return false
 +		}
 +	}
@@ -5953,6 +6105,7 @@ index e69de29..f12cb85 100644
 +	completedNonFinalCount := 0
 +	completedNonFinalIDs := make(map[string]struct{}, len(output))
 +	matchedDoneKeys := make(map[string]struct{}, len(t.doneItems))
++	matchedOutputIdx := make([]bool, len(output))
 +	for idx, item := range output {
 +		pos := int64(idx)
 +		if item.ID != "" {
@@ -6050,26 +6203,9 @@ index e69de29..f12cb85 100644
 +		}
 +		if doneRec, exists := t.doneItems[canonKey]; exists {
 +			matchedDoneKeys[canonKey] = struct{}{}
-+			if doneRec.itemType != item.Type || doneRec.itemRole != item.Role || doneRec.itemPhase != item.Phase ||
-+				!doneItemStatusCompatible(doneRec.itemStatus, item.Status) ||
-+				doneRec.callID != item.CallID || doneRec.name != item.Name || doneRec.serverLabel != item.ServerLabel ||
-+				doneRec.argsSHA != item.ArgsSHA || doneRec.inputSHA != item.InputSHA || doneRec.codeSHA != item.CodeSHA ||
-+				(doneRec.canonicalItemSHA != "" && item.CanonicalItemSHA != "" && doneRec.canonicalItemSHA != item.CanonicalItemSHA) ||
-+				doneRec.isFinal != isFinalAssistantOutputItem(item) {
++			matchedOutputIdx[idx] = true
++			if !doneItemMatchesOutputItem(doneRec, item) {
 +				return false
-+			}
-+			if doneRec.isAssistantMsg {
-+				if item.Type != "message" || item.Role != "assistant" {
-+					return false
-+				}
-+				itemText := extractSingleAssistantText(item)
-+				itemSHA := ""
-+				if itemText != "" {
-+					itemSHA = sha256Hex(itemText)
-+				}
-+				if itemSHA != doneRec.outputTextSHA {
-+					return false
-+				}
 +			}
 +		}
 +		if !isFinalAssistantOutputItem(item) {
@@ -6081,6 +6217,28 @@ index e69de29..f12cb85 100644
 +	}
 +	if len(matchedDoneKeys) < len(t.doneItems) {
 +		return false
++	}
++	if len(t.unkeyedDoneItems) > 0 {
++		scan := 0
++		for _, unkeyedRec := range t.unkeyedDoneItems {
++			found := false
++			for scan < len(output) {
++				if matchedOutputIdx[scan] {
++					scan++
++					continue
++				}
++				if doneItemMatchesOutputItem(unkeyedRec, output[scan]) {
++					matchedOutputIdx[scan] = true
++					scan++
++					found = true
++					break
++				}
++				scan++
++			}
++			if !found {
++				return false
++			}
++		}
 +	}
 +	if completedNonFinalCount < len(t.streamedNonFinalKeys)+t.streamedNonFinalUnkeyed {
 +		return false
@@ -6413,7 +6571,7 @@ index e69de29..f12cb85 100644
 +func decodeExactResponseOutputItems(raw json.RawMessage, expectedRespID string) ([]responseOutputItem, string, bool) {
 +	trimmed := bytes.TrimSpace(raw)
 +	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-+		return nil, expectedRespID, true
++		return nil, "", false
 +	}
 +	boundID := expectedRespID
 +	var items []responseOutputItem
@@ -6656,7 +6814,7 @@ index e69de29..f12cb85 100644
 +		return out, false
 +	}
 +	var respID, respModel, respStatus string
-+	var hasRespID, hasRespModel bool
++	var hasRespID, hasRespModel, hasRespOutput bool
 +	var respErr, respOutput json.RawMessage
 +	if hasResponseError(evFields["response"]) {
 +		respFields, err := decodeExactJSONObject(evFields["response"], sseResponseSchemaKeys)
@@ -6681,7 +6839,11 @@ index e69de29..f12cb85 100644
 +			return out, false
 +		}
 +		respErr = respFields["error"]
-+		respOutput = respFields["output"]
++		respOutput, hasRespOutput = respFields["output"]
++		if hasRespOutput && !hasResponseError(respOutput) {
++			c.taintStreamAnomaly()
++			return out, false
++		}
 +		if rejectErrors && hasResponseError(respErr) {
 +			c.taintStreamAnomaly()
 +			return out, false
@@ -6934,7 +7096,7 @@ index e69de29..f12cb85 100644
 +		respStatus:      respStatus,
 +		respErr:         respErr,
 +		respOutput:      respOutput,
-+		hasRespOutput:   hasResponseError(respOutput),
++		hasRespOutput:   hasRespOutput,
 +		respItems:       respItems,
 +		itemRaw:         evFields["item"],
 +		itemFields:      itemFields,
@@ -7092,6 +7254,26 @@ index e69de29..f12cb85 100644
 +						t.pendingItems = make(map[string]struct{})
 +					}
 +					t.pendingItems[canonKey] = struct{}{}
++				}
++				if _, wasFailed := t.failedItemKeys[idxKey]; wasFailed {
++					delete(t.failedItemKeys, idxKey)
++					if _, alreadyCompletedSub := t.completedSubItemKeys[canonKey]; alreadyCompletedSub {
++						return "", "", 0, false, false
++					}
++					if t.failedItemKeys == nil {
++						t.failedItemKeys = make(map[string]struct{})
++					}
++					t.failedItemKeys[canonKey] = struct{}{}
++				}
++				if _, wasCompSub := t.completedSubItemKeys[idxKey]; wasCompSub {
++					delete(t.completedSubItemKeys, idxKey)
++					if _, alreadyFailed := t.failedItemKeys[canonKey]; alreadyFailed {
++						return "", "", 0, false, false
++					}
++					if t.completedSubItemKeys == nil {
++						t.completedSubItemKeys = make(map[string]struct{})
++					}
++					t.completedSubItemKeys[canonKey] = struct{}{}
 +				}
 +				if _, wasNonFinal := t.streamedNonFinalKeys[idxKey]; wasNonFinal {
 +					delete(t.streamedNonFinalKeys, idxKey)
@@ -8012,7 +8194,15 @@ index e69de29..f12cb85 100644
 +			if seenSnapKeys != nil && canonKey != "" {
 +				seenSnapKeys[canonKey] = struct{}{}
 +			}
-+			isDone := item.Status == "completed"
++			_, alreadyDoneSnap := t.doneItems[canonKey]
++			isDone := item.Status == "completed" || (alreadyDoneSnap && item.Status == "")
++			if isDone && canonKey != "" {
++				if _, failed := t.failedItemKeys[canonKey]; failed {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++			}
 +			snapKind := classifyOutputItemKind(item.Type, item.Role, item.Phase, isDone)
 +			if !t.recordItemKind(canonKey, snapKind) || !t.recordItemType(canonKey, item.Type) {
 +				c.mu.Unlock()
@@ -8454,7 +8644,12 @@ index e69de29..f12cb85 100644
 +		}
 +		doneKind := classifyOutputItemKind(itemType, itemRole, itemPhase, true)
 +		isAssistantMsg := itemType == "message" && itemRole == "assistant"
-+		if !isAssistantMsg && !isCompletedNonMessageItemStatus(itemStatus) {
++		if isAssistantMsg {
++			if !isTerminalAssistantItemStatus(itemStatus) {
++				c.taintStreamAnomaly()
++				return
++			}
++		} else if !isCompletedNonMessageItemStatus(itemStatus) {
 +			c.taintStreamAnomaly()
 +			return
 +		}
@@ -8493,6 +8688,11 @@ index e69de29..f12cb85 100644
 +			return
 +		}
 +		if canonKey != "" {
++			if _, failed := t.failedItemKeys[canonKey]; failed {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
 +			if isAssistantMsg {
 +				if t.hasTrackedToolPayload(canonKey) {
 +					c.mu.Unlock()
@@ -8622,6 +8822,32 @@ index e69de29..f12cb85 100644
 +				outputTextSHA:    outTextSHA,
 +				doneDigest:       doneDigest,
 +			}
++		} else {
++			if len(t.unkeyedDoneItems) >= maxTrackedOutputItems {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			t.unkeyedDoneItems = append(t.unkeyedDoneItems, doneItemSummary{
++				itemID:           effItemID,
++				itemType:         itemType,
++				itemRole:         itemRole,
++				itemPhase:        itemPhase,
++				itemStatus:       itemStatus,
++				callID:           doneMeta.callID,
++				name:             doneMeta.name,
++				serverLabel:      doneMeta.serverLabel,
++				argsSHA:          doneArgs.sha,
++				inputSHA:         doneInput.sha,
++				codeSHA:          doneCode.sha,
++				canonicalItemSHA: canonItemSHA,
++				outputIndex:      effIdx,
++				hasOutputIndex:   effHasIdx,
++				isFinal:          isFinalCandidate,
++				isAssistantMsg:   isAssistantMsg,
++				outputTextSHA:    outTextSHA,
++				doneDigest:       doneDigest,
++			})
 +		}
 +		seq, okSeq := t.assignSeq(canonKey)
 +		if !okSeq {
@@ -8877,6 +9103,43 @@ index e69de29..f12cb85 100644
 +					c.taintStreamAnomaly()
 +					return
 +				}
++			}
++		default:
++			if strings.HasSuffix(frame.evType, ".failed") {
++				if canonKey == "" {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, alreadyCompletedSub := t.completedSubItemKeys[canonKey]; alreadyCompletedSub {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, exists := t.failedItemKeys[canonKey]; !exists && len(t.failedItemKeys) >= maxTrackedOutputItems {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if t.failedItemKeys == nil {
++					t.failedItemKeys = make(map[string]struct{})
++				}
++				t.failedItemKeys[canonKey] = struct{}{}
++			} else if strings.HasSuffix(frame.evType, ".completed") && canonKey != "" {
++				if _, failed := t.failedItemKeys[canonKey]; failed {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, exists := t.completedSubItemKeys[canonKey]; !exists && len(t.completedSubItemKeys) >= maxTrackedOutputItems {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if t.completedSubItemKeys == nil {
++					t.completedSubItemKeys = make(map[string]struct{})
++				}
++				t.completedSubItemKeys[canonKey] = struct{}{}
 +			}
 +		}
 +		t.sawStreamedOutputItem = true
@@ -9568,6 +9831,10 @@ index e69de29..f12cb85 100644
 +	key := root + "\x00" + launch
 +	now := time.Now()
 +	reviewMu.Lock()
++	if pendingReviewLaunches[key] > 0 {
++		reviewMu.Unlock()
++		return SealInFlight, ""
++	}
 +	overflowed := taintWriteOverflow
 +	entry := reviewLedger[key]
 +	if entry != nil {
@@ -10870,10 +11137,10 @@ index e69de29..f12cb85 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..d927a37 100644
+index e69de29..6d7c584 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,4927 @@
+@@ -0,0 +1,4999 @@
 +package preflightreceipt
 +
 +import (
@@ -12723,7 +12990,7 @@ index e69de29..d927a37 100644
 +		`data: {"type":"response.output_item.done","item":{"type":"reasoning","summary":[],"content":"raw-encrypted"}}` + "\n\n",
 +		`data: {"type":"response.output_item.done","item":{"type":"function_call","name":"shell","arguments":"{}"}}` + "\n\n",
 +		`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"verified"}]}}` + "\n\n",
-+		`data: {"type":"response.completed","response":{"id":"resp_m3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"reasoning","content":"x"},{"type":"function_call","name":"shell","arguments":"{}"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"verified"}]}]}}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_m3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"reasoning","content":"raw-encrypted"},{"type":"function_call","name":"shell","arguments":"{}"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"verified"}]}]}}` + "\n\n",
 +		"data: [DONE]\n\n",
 +	})
 +	if st3 != SealOK || r3.Tainted || !r3.Complete || r3.LastOutputSHA256 != sha256Hex("verified") {
@@ -14006,13 +14273,13 @@ index e69de29..d927a37 100644
 +	lInc2 := "review-c1111111-2222-4333-8444-555555555506"
 +	sInc2 := "019d0000-0000-7000-8000-777777777106"
 +	sseIncompleteStreamed := "data: " + `{"type":"response.created","response":{"id":"resp_inc2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
-+		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","status":"in_progress","content":[{"type":"output_text","text":"partial streamed"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","status":"incomplete","content":[{"type":"output_text","text":"partial streamed"}]}}` + "\n\n" +
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_inc2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
 +	if stInc2, _ := runSSE(t, root, lInc2, sInc2, sseIncompleteStreamed); stInc2 != SealOK {
-+		t.Fatalf("in_progress output_item.done seal = %v, want SealOK", stInc2)
++		t.Fatalf("incomplete output_item.done seal = %v, want SealOK", stInc2)
 +	}
 +	if r := readReviewReceiptFile(t, root, lInc2); r.LastOutputSHA256 != "" {
-+		t.Fatalf("in_progress output_item.done populated last_output_sha256 = %q, want empty", r.LastOutputSHA256)
++		t.Fatalf("incomplete output_item.done populated last_output_sha256 = %q, want empty", r.LastOutputSHA256)
 +	}
 +}
 +
@@ -15601,6 +15868,78 @@ index e69de29..d927a37 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_soo","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_soo","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, lSnapOmitOutputOK, sSnapOmitOutputOK, sseSnapOmitOutputOK); st != SealOK {
 +		t.Fatalf("in_progress omitting output field after added seal = %v, want SealOK", st)
++	}
++
++	// 67. Sol P1 #1 (PR #2280 R27): explicit "output": null in response.in_progress MUST taint
++	//     rather than being treated as an omitted field.
++	sseNullOutput := "data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_no","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_no","status":"in_progress","model":"gpt-6.2-sol","output":null}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_no","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_no","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_no","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555a3", "019d0000-0000-7000-8000-8888888881a3", sseNullOutput); st != SealRejected {
++		t.Fatalf("explicit output:null in response.in_progress seal = %v, want SealRejected", st)
++	}
++
++	// 68. Sol P1 #2 (PR #2280 R27): assistant message still declaring status="in_progress" in
++	//     output_item.done or response.completed.output[] MUST taint even if followed by a completed final answer.
++	sseInProgMsgDone := "data: " + `{"type":"response.created","response":{"id":"resp_ipmd","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant","phase":"commentary"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant","phase":"commentary","status":"in_progress","content":[{"type":"output_text","text":"still going"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_ipmd","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_0","type":"message","role":"assistant","phase":"commentary","status":"in_progress","content":[{"type":"output_text","text":"still going"}]},{"id":"msg_1","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555a4", "019d0000-0000-7000-8000-8888888881a4", sseInProgMsgDone); st != SealRejected {
++		t.Fatalf("assistant message status=in_progress in output_item.done + completed seal = %v, want SealRejected", st)
++	}
++	sseSingleFrameInProgMsg := "data: " + `{"type":"response.completed","response":{"id":"resp_sfipm","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_0","type":"message","role":"assistant","phase":"commentary","status":"in_progress","content":[{"type":"output_text","text":"still going"}]},{"id":"msg_1","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555a5", "019d0000-0000-7000-8000-8888888881a5", sseSingleFrameInProgMsg); st != SealRejected {
++		t.Fatalf("single-frame response.completed with in_progress assistant message seal = %v, want SealRejected", st)
++	}
++
++	// 69. Astra P1 #2 (PR #2280 R27): unkeyed output_item.done (no id and no output_index) MUST still
++	//     match response.completed.output[] in order by full item digest; mutated args taint, matching seals.
++	sseUnkeyedToolMismatch := "data: " + `{"type":"response.created","response":{"id":"resp_utm","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"git status\"}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_utm","status":"completed","model":"gpt-6.2-sol","output":[{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"evil\"}"},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555a6", "019d0000-0000-7000-8000-8888888881a6", sseUnkeyedToolMismatch); st != SealRejected {
++		t.Fatalf("unkeyed output_item.done tool args mismatch seal = %v, want SealRejected", st)
++	}
++	lUnkeyedToolOK := "review-d1111111-2222-4333-8444-5555555555a7"
++	sUnkeyedToolOK := "019d0000-0000-7000-8000-8888888881a7"
++	sseUnkeyedToolOK := "data: " + `{"type":"response.created","response":{"id":"resp_utok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"git status\"}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_utok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"git status\"}"},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lUnkeyedToolOK, sUnkeyedToolOK, sseUnkeyedToolOK); st != SealOK {
++		t.Fatalf("matching unkeyed output_item.done + completed seal = %v, want SealOK", st)
++	}
++
++	// 70. Astra P1 #3 (PR #2280 R27): response.mcp_call.failed (or any *.failed sub-event) followed by
++	//     output_item.done claiming completed for the same item MUST taint.
++	sseMcpFailedThenDone := "data: " + `{"type":"response.created","response":{"id":"resp_mfd","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"mcp_1","type":"mcp_call","server_label":"s","name":"tool"}}` + "\n\n" +
++		"data: " + `{"type":"response.mcp_call.failed","output_index":0,"item_id":"mcp_1"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"mcp_1","type":"mcp_call","status":"completed","server_label":"s","name":"tool","arguments":"{}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_mfd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_mfd","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_1","type":"mcp_call","status":"completed","server_label":"s","name":"tool","arguments":"{}"},{"id":"msg_mfd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555a8", "019d0000-0000-7000-8000-8888888881a8", sseMcpFailedThenDone); st != SealRejected {
++		t.Fatalf("mcp_call.failed contradicted by completed output_item.done seal = %v, want SealRejected", st)
++	}
++
++	// 71. Astra P2 #1 (PR #2280 R27): a reasoning item already closed by output_item.done with omitted
++	//     status appearing verbatim in a later response.in_progress snapshot MUST NOT falsely taint.
++	lReasonSnapOK := "review-d1111111-2222-4333-8444-5555555555a9"
++	sReasonSnapOK := "019d0000-0000-7000-8000-8888888881a9"
++	sseReasonSnapOK := "data: " + `{"type":"response.created","response":{"id":"resp_rsok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_0","type":"reasoning"}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_rsok","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"rs_0","type":"reasoning"},{"id":"msg_rs","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: "}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_rs","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_rsok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"rs_0","type":"reasoning"},{"id":"msg_rs","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lReasonSnapOK, sReasonSnapOK, sseReasonSnapOK); st != SealOK {
++		t.Fatalf("already-done status-omitted reasoning in later in_progress snapshot seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lReasonSnapOK); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("already-done reasoning snapshot hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
 +	}
 +}
 +

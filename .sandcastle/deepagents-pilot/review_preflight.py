@@ -412,6 +412,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             terminal, detail, status = None, "流在终态事件前结束", None
+            has_response_dict = False
             data_lines: list[str] = []
             event_name: str | None = None
             for raw in _split_sse_lines(response.read()):
@@ -458,7 +459,8 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                             break
                         if event.get("type") in TERMINAL_EVENTS:
                             terminal = event.get("type")
-                            inner = event.get("response") if isinstance(event.get("response"), dict) else {}
+                            has_response_dict = isinstance(event.get("response"), dict)
+                            inner = event["response"] if has_response_dict else {}
                             # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
                             status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
                                 None if inner.get("status") is None else "other")
@@ -491,9 +493,11 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                 detail = "流尾存在未闭合 SSE 事件头"
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
-            # 事件名成功还不够：响应体自报 failed/cancelled 或带 error 也算失败。
-            ok = (terminal in ("response.completed", "response.incomplete") and not detail
-                  and status not in ("failed", "cancelled", "canceled"))
+            # 事件名成功还不够：须存在合法 response 对象且 status 与终态事件一致，无错误才算成功。
+            ok = (not detail and has_response_dict and (
+                (terminal == "response.completed" and status == "completed")
+                or (terminal == "response.incomplete" and status == "incomplete")
+            ))
             text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail else ""
             return {"http_status": response.status, "terminal": terminal, "status": status, "ok": ok,
                     "error": None if ok else _error_info(text)}

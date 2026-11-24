@@ -100,7 +100,7 @@ class FakeProxy:
                 elif code != 200:
                     payload = b'{"error":{"message":"tool_choice: type \\"tool\\" and \\"any\\" are not supported"}}'
                 else:
-                    payload = terminal or b'event: response.completed\ndata: {"type":"response.completed","response":{}}\n\n'
+                    payload = terminal or b'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
