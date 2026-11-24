@@ -36,10 +36,28 @@ def hits_in(text):
     return [text.count('\n', 0, m.start()) + 1 for m in UTF8_STDIN_READ.finditer(text)]
 
 
+def _candidate_sources():
+    this_file = Path(__file__).resolve()
+    globs = [f'*{ext}' for ext in sorted(SOURCE_SUFFIXES)]
+    proc = subprocess.run(
+        ['git', '-C', str(REPO), 'grep', '-a', '--no-textconv', '-l', '-i', '-F', '-z',
+         '--', 'readFileSync', '--', *globs],
+        capture_output=True, check=False,
+    )
+    if proc.returncode not in (0, 1):
+        proc.check_returncode()
+    for rel in proc.stdout.decode().split('\0'):
+        if not rel:
+            continue
+        p = REPO / rel
+        if p.suffix in SOURCE_SUFFIXES and p.is_file() and p != this_file:
+            yield p
+
+
 class NodeStdinReadTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('git') and (REPO / '.git').exists(), 'needs a git checkout')
     def test_no_utf8_read_of_stdin_in_tracked_sources(self):
-        hits = [f"{p.relative_to(REPO)}:{n}" for p in tracked_sources()
+        hits = [f"{p.relative_to(REPO)}:{n}" for p in _candidate_sources()
                 for n in hits_in(p.read_text(errors='replace'))]
         self.assertEqual(hits, [])
 
