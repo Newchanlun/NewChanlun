@@ -3830,6 +3830,150 @@ __all__ = ('Adapter',)
 `, guardRoute, ["rows=[4, 1], guard={}", "rows=[4, 1], guard={'cb': (lambda: None)}"], false);
 });
 
+test("R36/#1319：接收者解释配对与构造关键字子集", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = async (name: string, source: string, calls: string[], expected = true,
+    extra: Record<string, string> = {}) => {
+    await t.test(name, () => {
+      const repo = feedSource({
+        ...extra,
+        [entry]: "def route(**event): return sorted(event['rows'])\n__all__ = ('route',)\n",
+        [integration]: "from functools import wraps\nfrom .at18_fixture_feed import route\n" +
+          source + "\n__all__ = ('Adapter',)\n",
+        [path]: "from trading_system.at18_fixture_feed import route\ndef test_route():\n" +
+          calls.map(call => `    assert route(rows=[4, 1], ${call}) == [1, 4]\n`).join(""),
+      });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+
+  for (const [name, receiver] of [["after-hook-default", "ctx=None"], ["after-hook-required", "ctx"]] as const) {
+    await check(name, `
+def init_helper(${receiver}, mode=None, extra=None, /): ctx.mode = mode
+class Adapter:
+    @wraps(init_helper)
+    def __init__(self, *args, **kw): init_helper(self, *args, **kw)
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+`, ["mode=1"]);
+  }
+
+  for (const [name, newInClass, initInClass, wrapInit] of [
+    ["variant-dual", false, false, true],
+    ["variant-single", false, false, false],
+    ["variant-mixed-new-in-class", true, false, true],
+    ["variant-mixed-init-in-class", false, true, true],
+  ] as const) {
+    const make = `@wraps(spec)
+def __new__(cls, *args, **kw):
+    if not args or args[0] != 'x': raise TypeError('ctx')
+    return object.__new__(cls)`;
+    const init = `${wrapInit ? "@wraps(spec)\n" : ""}def __init__(self, *args, **kw):
+    if not args or args[0] != 'x': raise TypeError('ctx')
+    made.append(args[0])`;
+    const member = (body: string, name: string, local: boolean) =>
+      local ? body.split("\n").map(line => "    " + line).join("\n") : `    ${name} = ${name}`;
+    await check(name, `
+def spec(ctx, mode=None, /): return ctx, mode
+made = []
+${newInClass ? "" : make}
+${initInClass ? "" : init}
+class Adapter:
+${member(make, "__new__", newInClass)}
+${member(init, "__init__", initInClass)}
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(made) == 1: return route(rows=rows, ctx='x')
+`, ["ctx='x', mode=None", "ctx='x'"]);
+  }
+
+  const subset = (inject: string, switches: string, keep: string) => `
+def outer(fn):
+    @wraps(fn)
+    def go(self, *args, **kw): return fn(self, *args, ${inject}, **kw)
+    return go
+def middle(fn):
+    @wraps(fn)
+    def go(self, *args, ${switches}, **kw):
+        self.keep = ${keep}
+        return fn(self, *args, **kw)
+    return go
+class Adapter:
+    @outer
+    @middle
+    def __init__(self, mode=None, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if self.keep and type(self.mode) is int: return route(rows=rows, mode=self.mode)
+`;
+  for (const [name, call] of [
+    ["kw-subset-with-debug", "mode=1, keep=True, debug=True"],
+    ["kw-subset-without-debug", "mode=1, keep=True"],
+  ] as const) {
+    await check(name, subset("debug=False", "keep=False, debug=False", "keep"), [call]);
+  }
+  await check("四个 extra：去掉两个注入参数，保留两个观测开关",
+    subset("debug=False, audit=False", "left=False, debug=False, right=False, audit=False", "left and right"),
+    ["mode=1, left=True, debug=True, right=True, audit=True"]);
+  await check("五个 extra：保留 singleton",
+    subset("debug=False, audit=False, trace=False, verify=False",
+      "debug=False, keep=False, audit=False, trace=False, verify=False", "keep"),
+    ["mode=1, debug=True, keep=True, audit=True, trace=True, verify=True"]);
+  await check("五个 extra：保留 drop-one",
+    subset("debug=False", "audit=False, trace=False, debug=False, keep=False, verify=False",
+      "audit and trace and keep and verify"),
+    ["mode=1, audit=True, trace=True, debug=True, keep=True, verify=True"]);
+
+  await check("中间层左右开关的显式与省略默认只构造一次；哨兵不执行运算", `
+made, touched = [], []
+class Hostile:
+    def __eq__(self, other): touched.append('eq'); raise AssertionError('eq')
+    def __hash__(self): touched.append('hash'); raise AssertionError('hash')
+    def __bool__(self): touched.append('bool'); raise AssertionError('bool')
+absent = Hostile()
+def outer(fn):
+    @wraps(fn)
+    def go(self, *args, **kw): return fn(self, *args, **kw)
+    return go
+def middle(fn):
+    @wraps(fn)
+    def go(self, *args, left=False, right=False, marker=absent, **kw):
+        if args == (1,) and marker is absent and not left and not right: made.append(1)
+        return fn(self, *args, **kw)
+    return go
+class Adapter:
+    @outer
+    @middle
+    def __init__(self, mode=None, /): self.mode = mode
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if self.mode == 1 and len(made) == 1 and not touched: return route(rows=rows, mode=self.mode)
+`, ["mode=1, left=False, right=False", "mode=1, left=False", "mode=1, right=False", "mode=1"]);
+
+  await check("门 2：类体构造钩子后的外来目标仍拒绝", `
+from .foreign import init_helper
+class Adapter:
+    @wraps(init_helper)
+    def __init__(self, *args, **kw): init_helper(self, *args, **kw)
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+`, ["mode=1"], false, {
+    "trading_system/foreign.py": "def init_helper(ctx=None, mode=None, extra=None, /): ctx.mode = mode\n",
+  });
+  await check("门 4：构造器内触碰承接导出不计", `
+def init_helper(ctx=None, mode=None, extra=None, /):
+    if mode == 1: route(rows=[4, 1], mode=mode)
+class Adapter:
+    @wraps(init_helper)
+    def __init__(self, *args, **kw): init_helper(self, *args, **kw)
+    def dispatch(self, rows, /): return sorted(rows)
+`, ["mode=1"], false);
+  await check("门 5：补齐关键字子集也不传入测试侧容器回调",
+    subset("debug=False", "keep=None, debug=False", "isinstance(keep, dict) and 'cb' in keep"),
+    ["mode=1, keep={'cb': lambda: None}, debug=True"], false);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";

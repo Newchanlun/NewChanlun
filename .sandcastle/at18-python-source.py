@@ -12,6 +12,7 @@ import struct
 import sys
 from collections import Counter
 from contextvars import ContextVar
+from itertools import combinations, product
 from pathlib import Path
 from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType, MethodType
 from weakref import WeakKeyDictionary
@@ -422,26 +423,22 @@ class Binding:
         if variadic_only(params):
             return ()
         if strip == 0:
-            return ((params, None),)
+            return ((params, None, False),)
         clipped = strip_receivers(params, strip)
         if guaranteed:
-            return () if (clipped is None or variadic_only(clipped)) else ((clipped, None),)
+            return () if (clipped is None or variadic_only(clipped)) else ((clipped, None, True),)
         slots = tuple(params.parameters.values())
         if not slots or slots[0].kind not in POSITIONAL:
-            return ((params, None),)
-        if slots[0].default is not inspect.Parameter.empty:
-            if after_class_hook or clipped is None or not clipped.parameters or variadic_only(clipped):
-                fb = None if (clipped is None or variadic_only(clipped)) else clipped
-                return ((params, fb),)
-            return (clipped, None), (params, None)
-        if slots[0].name in observed_names:
+            return ((params, None, False),)
+        if slots[0].default is not inspect.Parameter.empty or slots[0].name in observed_names:
             if clipped is None or not clipped.parameters or variadic_only(clipped):
                 fb = None if (clipped is None or variadic_only(clipped)) else clipped
-                return ((params, fb),)
-            return ((params, None), (clipped, None)) if after_class_hook else ((clipped, None), (params, None))
+                return ((params, fb, False),)
+            full, stripped = (params, None, False), (clipped, None, True)
+            return (full, stripped) if after_class_hook else (stripped, full)
         if clipped is None or variadic_only(clipped):
             return ()
-        return ((clipped, params),)
+        return ((clipped, params, True),)
 
     def ctor_plan(self, public, observed_names):
         primary_targets, secondary_targets = self.ctor_chains
@@ -455,36 +452,61 @@ class Binding:
         ]
         nonempty_primary = [sigs for sigs in primary_entries if sigs]
         nonempty_secondary = [sigs for sigs in secondary_entries if sigs]
-        default_primary = (public, *(sigs[0][0] for sigs in nonempty_primary))
-        default_secondary = tuple(sigs[0][0] for sigs in nonempty_secondary)
+        def side_variants(prefix, entries):
+            layers = (*prefix, *(sigs[0][0] for sigs in entries))
+            polarities = tuple(sigs[0][2] for sigs in entries if len(sigs) > 1)
+            variants, alternatives = [(layers, polarities)], {}
+            # 同一侧只替换一层，避免包装深度使候选数量指数增长。
+            polarity_offset = 0
+            for offset, sigs in enumerate(entries):
+                if len(sigs) == 1:
+                    continue
+                sig, _, is_clipped = sigs[1]
+                pos = len(prefix) + offset
+                alt_layers = (*layers[:pos], sig, *layers[pos + 1:])
+                alt_polarities = (*polarities[:polarity_offset], is_clipped, *polarities[polarity_offset + 1:])
+                alternatives[offset] = len(variants)
+                variants.append((alt_layers, alt_polarities))
+                polarity_offset += 1
+            return variants, alternatives
 
-        layer_variants = [(default_primary, default_secondary)]
-        primary_tagged = []
-        for layer_offset, sigs in enumerate(nonempty_primary):
-            tagged_sigs = []
-            for sig_idx, (sig, fallback) in enumerate(sigs):
-                if sig_idx == 0:
-                    variant = 0
-                else:
-                    variant = len(layer_variants)
-                    alt_primary = default_primary[:1 + layer_offset] + (sig,) + default_primary[2 + layer_offset:]
-                    layer_variants.append((alt_primary, default_secondary))
-                tagged_sigs.append((sig, fallback, variant))
-            primary_tagged.append(tagged_sigs)
+        primary_variants, primary_alts = side_variants((public,), nonempty_primary)
+        secondary_variants, secondary_alts = side_variants((), nonempty_secondary)
+        default_primary, default_secondary = primary_variants[0][0], secondary_variants[0][0]
 
-        primary_ambiguous = len(layer_variants) > 1
-        secondary_tagged = []
-        for layer_offset, sigs in enumerate(nonempty_secondary):
-            tagged_sigs = []
-            for sig_idx, (sig, fallback) in enumerate(sigs):
-                if sig_idx == 0:
-                    variant = None if (primary_ambiguous and len(sigs) == 1) else 0
-                else:
-                    variant = len(layer_variants)
-                    alt_secondary = default_secondary[:layer_offset] + (sig,) + default_secondary[layer_offset + 1:]
-                    layer_variants.append((default_primary, alt_secondary))
-                tagged_sigs.append((sig, fallback, variant))
-            secondary_tagged.append(tagged_sigs)
+        def polarity_rank(pair):
+            p, s = pair
+            left, right = set(primary_variants[p][1]), set(secondary_variants[s][1])
+            if not left or not right or left == right and len(left) == 1:
+                return 0
+            return 1 if left & right else 2
+
+        joint = sorted(product(range(len(primary_variants)), range(len(secondary_variants))), key=polarity_rank)
+        joint_index = {pair: i for i, pair in enumerate(joint)}
+        layer_variants = [(primary_variants[p][0], secondary_variants[s][0]) for p, s in joint]
+
+        def aligned(variants, is_clipped):
+            return min(range(len(variants)), key=lambda i: variants[i][1].count(not is_clipped))
+
+        def tagged(entries, alts, other, primary):
+            for offset, sigs in enumerate(entries):
+                candidates = []
+                default_pair = None
+                if len(sigs) == 2 and not sigs[0][2] and next(iter(sigs[0][0].parameters)) not in observed_names:
+                    # 类体钩子后的未观察默认首槽可能是规范参数，不一定是真接收者。
+                    default_pair = (primary, offset)
+                for sig_idx, (sig, fallback, is_clipped) in enumerate(sigs):
+                    if len(sigs) == 1:
+                        variant = None if not primary and primary_alts else joint_index[0, 0]
+                    else:
+                        own = alts[offset] if sig_idx else 0
+                        peer = aligned(other, is_clipped)
+                        variant = joint_index[own, peer] if primary else joint_index[peer, own]
+                    candidates.append((sig, fallback, variant, default_pair, is_clipped))
+                yield candidates
+
+        primary_tagged = list(tagged(nonempty_primary, primary_alts, secondary_variants, True))
+        secondary_tagged = list(tagged(nonempty_secondary, secondary_alts, primary_variants, False))
 
         public_has_varkw = any(
             p.kind is inspect.Parameter.VAR_KEYWORD for p in public.parameters.values()
@@ -511,8 +533,15 @@ class Binding:
         kwonly_sets = []
         if public_kwonly:
             kwonly_sets.append(public_kwonly)
-        if all_kwonly and tuple(all_kwonly) != tuple(public_kwonly):
+        extra = tuple(name for name in all_kwonly if name not in public_kwonly)
+        if extra:
             kwonly_sets.append(all_kwonly)
+        if len(extra) >= 2:
+            sizes = range(len(extra) - 1, 0, -1) if len(extra) <= 4 else (len(extra) - 1, 1)
+            # extra 与 public 不相交；combinations 按参数名产出不同子集，不比较默认值。
+            for size in sizes:
+                for subset in combinations(extra, size):
+                    kwonly_sets.append({**public_kwonly, **{name: all_kwonly[name] for name in subset}})
 
         def project_kwonly(sig):
             if sig is None or public_has_varkw:
@@ -531,10 +560,14 @@ class Binding:
         pairs = []
         generic = has_variadic(public)
 
-        def add(sig, fallback=None, variant=None):
+        def add(sig, fallback=None, variant=None, default_pair=None, is_clipped=False):
+            def append(sig, fallback, names=()):
+                default_group = (default_pair, names) if default_pair is not None else None
+                pairs.append((sig, fallback, variant, default_group, is_clipped))
+
             sig = project_kwonly(sig)
             fallback = project_kwonly(fallback)
-            pairs.append((sig, fallback, variant))
+            append(sig, fallback)
             if kwonly_sets and not variadic_only(sig):
                 for kw_set in kwonly_sets:
                     merged = merge_kwonly(sig, kw_set)
@@ -544,18 +577,18 @@ class Binding:
                         else None
                     )
                     if merged is not None:
-                        pairs.append((merged, merged_fb or fallback, variant))
+                        append(merged, merged_fb or fallback, tuple(kw_set))
                     elif merged_fb is not None:
-                        pairs.append((sig, merged_fb, variant))
+                        append(sig, merged_fb, tuple(kw_set))
 
         if not generic:
             add(public)
         for tagged_sigs in reversed(primary_tagged):
-            for sig, fallback, variant in tagged_sigs:
-                add(sig, fallback, variant)
+            for candidate in tagged_sigs:
+                add(*candidate)
         for tagged_sigs in reversed(secondary_tagged):
-            for sig, fallback, variant in tagged_sigs:
-                add(sig, fallback, variant)
+            for candidate in tagged_sigs:
+                add(*candidate)
         if generic:
             add(public)
         return tuple(layer_variants), tuple(pairs)
@@ -602,12 +635,19 @@ class Binding:
                             break
             return best_idx, best_choice
 
-        def resolve(sig, view, use_variadic, variant):
+        def resolve(sig, view, use_variadic, variant, skip_defaults=False):
             if use_variadic and not has_variadic(sig):
                 return False
             try:
                 args, kwargs, defaults = arguments(sig, view, use_variadic)
                 public.bind(*args, **kwargs)
+                if skip_defaults and all(
+                    param.default is not inspect.Parameter.empty and
+                    choice_value_key(value, default_refs) == choice_value_key(param.default, default_refs)
+                    for name, value in sig.bind(*args, **kwargs).arguments.items()
+                    for param in (sig.parameters[name],)
+                ):
+                    return False
                 ctor_key = pick_ctor_key(variant, args, kwargs, defaults)
             except (ValueError, TypeError):
                 return False
@@ -650,10 +690,15 @@ class Binding:
         phases = (False, True) if variadic is None else (variadic,)
         for use_variadic in phases:
             for view in views:
-                for sig, fallback, variant in pairs:
-                    succeeded = yield from resolve(sig, view, use_variadic, variant)
+                full_successes = set()
+                for sig, fallback, variant, default_group, is_clipped in pairs:
+                    # 纯默认观察不能在完整解释已成功后再制造一个错位实例；非默认形状仍独立尝试。
+                    skip_defaults = is_clipped and default_group in full_successes
+                    succeeded = yield from resolve(sig, view, use_variadic, variant, skip_defaults)
                     if not succeeded and fallback is not None:
-                        yield from resolve(fallback, view, use_variadic, variant)
+                        succeeded = yield from resolve(fallback, view, use_variadic, variant, skip_defaults)
+                    if succeeded and default_group is not None and not is_clipped:
+                        full_successes.add(default_group)
 
     def signatures(self, fn, public, named):
         generic = variadic_only(public)
