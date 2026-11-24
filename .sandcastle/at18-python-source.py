@@ -320,7 +320,9 @@ def merge_kwonly(signature, extra_kwonly):
 
 def peel_chain(layers, args, kwargs, default_refs):
     parts, cur_args, cur_kwargs = [], tuple(args), dict(kwargs)
-    bound_pos, bound_kw = 0, set()
+    pos_offset = 0
+    pos_default_matches, kw_default_matches = set(), set()
+    concrete = False
     for sig in layers:
         try:
             bound = sig.bind(*cur_args, **cur_kwargs)
@@ -328,6 +330,7 @@ def peel_chain(layers, args, kwargs, default_refs):
             break
         bound.apply_defaults()
         params = sig.parameters
+        pos_params = [p for p in params.values() if p.kind in POSITIONAL]
         next_args, next_kwargs, var_pos, var_kw = (), {}, False, False
         layer_items = []
         for name, value in bound.arguments.items():
@@ -338,17 +341,36 @@ def peel_chain(layers, args, kwargs, default_refs):
                 next_kwargs, var_kw = value, True
             else:
                 layer_items.append((name, choice_value_key(value, default_refs)))
-                if kind in POSITIONAL:
-                    bound_pos += 1
-                if kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
-                    bound_kw.add(name)
+        consumed_pos = len(cur_args) - len(next_args) if var_pos else len(cur_args)
+        for j in range(consumed_pos):
+            param = pos_params[j]
+            if (param.default is not inspect.Parameter.empty and
+                    choice_value_key(cur_args[j], default_refs) == choice_value_key(param.default, default_refs)):
+                pos_default_matches.add(pos_offset + j)
+        for k, v in cur_kwargs.items():
+            param = params.get(k)
+            if (param is not None and
+                    param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) and
+                    param.default is not inspect.Parameter.empty and
+                    choice_value_key(v, default_refs) == choice_value_key(param.default, default_refs)):
+                kw_default_matches.add(k)
+        pos_offset += consumed_pos
         parts.append(tuple(layer_items))
         if not (var_pos or var_kw):
-            return True, tuple(parts), (), (), bound_pos, frozenset(bound_kw)
+            concrete = True
+            cur_args, cur_kwargs = (), {}
+            break
         cur_args, cur_kwargs = next_args, next_kwargs
+    trailing_default_pos = 0
+    i = len(args) - 1
+    while i >= 0 and i in pos_default_matches:
+        trailing_default_pos += 1
+        i -= 1
+    if concrete:
+        return True, tuple(parts), (), (), pos_offset, trailing_default_pos, frozenset(kw_default_matches)
     res_args = tuple(choice_value_key(item, default_refs) for item in cur_args)
     res_kwargs = tuple((k, choice_value_key(v, default_refs)) for k, v in cur_kwargs.items())
-    return False, tuple(parts), res_args, res_kwargs, bound_pos, frozenset(bound_kw)
+    return False, tuple(parts), res_args, res_kwargs, pos_offset, trailing_default_pos, frozenset(kw_default_matches)
 
 
 def ctor_choice(primary_layers, secondary_layers, args, kwargs, defaults, default_refs):
@@ -358,19 +380,17 @@ def ctor_choice(primary_layers, secondary_layers, args, kwargs, defaults, defaul
             sample(value)
     for value in kwargs.values():
         sample(value)
-    k1 = peel_chain(primary_layers, args, kwargs, default_refs)
+    c1, p1, ra1, rk1, rp1, td1, dkw1 = peel_chain(primary_layers, args, kwargs, default_refs)
     if not secondary_layers:
-        return k1[:4]
-    k2 = peel_chain(secondary_layers, args, kwargs, default_refs)
-    c1, p1, ra1, rk1, bp1, bkw1 = k1
-    c2, p2, ra2, rk2, bp2, bkw2 = k2
-    if c1 or c2:
-        return (c1, p1, (), ()), (c2, p2, (), ())
-    ra1 = ra1[max(0, bp2 - bp1):]
-    rk1 = tuple((k, v) for k, v in rk1 if k not in bkw2)
-    ra2 = ra2[max(0, bp1 - bp2):]
-    rk2 = tuple((k, v) for k, v in rk2 if k not in bkw1)
-    return (False, p1, ra1, rk1), (False, p2, ra2, rk2)
+        return c1, p1, ra1, rk1
+    c2, p2, ra2, rk2, rp2, td2, dkw2 = peel_chain(secondary_layers, args, kwargs, default_refs)
+    limit1 = len(args) - td2
+    ra1 = tuple(v for m, v in enumerate(ra1) if rp1 + m < limit1)
+    rk1 = tuple((k, v) for k, v in rk1 if k not in dkw2)
+    limit2 = len(args) - td1
+    ra2 = tuple(v for m, v in enumerate(ra2) if rp2 + m < limit2)
+    rk2 = tuple((k, v) for k, v in rk2 if k not in dkw1)
+    return (c1, p1, ra1, rk1), (c2, p2, ra2, rk2)
 
 
 class Binding:
@@ -394,7 +414,7 @@ class Binding:
         return receiver is not MISSING and inherits(type(receiver), self.owner)
 
     @staticmethod
-    def ctor_target_signatures(target, strip, guaranteed, observed_names):
+    def ctor_target_signatures(target, strip, guaranteed, observed_names, after_class_hook=False):
         try:
             params = inspect.signature(target, follow_wrapped=False)
         except (ValueError, TypeError):
@@ -410,13 +430,15 @@ class Binding:
         if not slots or slots[0].kind not in POSITIONAL:
             return ((params, None),)
         if slots[0].default is not inspect.Parameter.empty:
-            fb = None if (clipped is None or variadic_only(clipped)) else clipped
-            return ((params, fb),)
+            if after_class_hook or clipped is None or not clipped.parameters or variadic_only(clipped):
+                fb = None if (clipped is None or variadic_only(clipped)) else clipped
+                return ((params, fb),)
+            return (clipped, None), (params, None)
         if slots[0].name in observed_names:
             if clipped is None or not clipped.parameters or variadic_only(clipped):
                 fb = None if (clipped is None or variadic_only(clipped)) else clipped
                 return ((params, fb),)
-            return (clipped, None), (params, None)
+            return ((params, None), (clipped, None)) if after_class_hook else ((clipped, None), (params, None))
         if clipped is None or variadic_only(clipped):
             return ()
         return ((clipped, params),)
@@ -424,43 +446,119 @@ class Binding:
     def ctor_plan(self, public, observed_names):
         primary_targets, secondary_targets = self.ctor_chains
         primary_entries = [
-            self.ctor_target_signatures(target, strip, guaranteed, observed_names)
-            for target, strip, guaranteed in primary_targets
+            self.ctor_target_signatures(target, strip, guaranteed, observed_names, after_class_hook)
+            for target, strip, guaranteed, after_class_hook in primary_targets
         ]
         secondary_entries = [
-            self.ctor_target_signatures(target, strip, guaranteed, observed_names)
-            for target, strip, guaranteed in secondary_targets
+            self.ctor_target_signatures(target, strip, guaranteed, observed_names, after_class_hook)
+            for target, strip, guaranteed, after_class_hook in secondary_targets
         ]
-        primary_layers = (public, *(sigs[0][0] for sigs in primary_entries if sigs))
-        secondary_layers = tuple(sigs[0][0] for sigs in secondary_entries if sigs)
+        nonempty_primary = [sigs for sigs in primary_entries if sigs]
+        nonempty_secondary = [sigs for sigs in secondary_entries if sigs]
+        default_primary = (public, *(sigs[0][0] for sigs in nonempty_primary))
+        default_secondary = tuple(sigs[0][0] for sigs in nonempty_secondary)
 
-        extra_kwonly = {}
-        for sig in (*primary_layers, *secondary_layers):
+        layer_variants = [(default_primary, default_secondary)]
+        primary_tagged = []
+        for layer_offset, sigs in enumerate(nonempty_primary):
+            tagged_sigs = []
+            for sig_idx, (sig, fallback) in enumerate(sigs):
+                if sig_idx == 0:
+                    variant = 0
+                else:
+                    variant = len(layer_variants)
+                    alt_primary = default_primary[:1 + layer_offset] + (sig,) + default_primary[2 + layer_offset:]
+                    layer_variants.append((alt_primary, default_secondary))
+                tagged_sigs.append((sig, fallback, variant))
+            primary_tagged.append(tagged_sigs)
+
+        primary_ambiguous = len(layer_variants) > 1
+        secondary_tagged = []
+        for layer_offset, sigs in enumerate(nonempty_secondary):
+            tagged_sigs = []
+            for sig_idx, (sig, fallback) in enumerate(sigs):
+                if sig_idx == 0:
+                    variant = None if (primary_ambiguous and len(sigs) == 1) else 0
+                else:
+                    variant = len(layer_variants)
+                    alt_secondary = default_secondary[:layer_offset] + (sig,) + default_secondary[layer_offset + 1:]
+                    layer_variants.append((default_primary, alt_secondary))
+                tagged_sigs.append((sig, fallback, variant))
+            secondary_tagged.append(tagged_sigs)
+
+        public_has_varkw = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in public.parameters.values()
+        )
+        public_kw_names = {
+            name for name, p in public.parameters.items()
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        public_required_kw = {
+            name for name, p in public.parameters.items()
+            if p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is inspect.Parameter.empty
+        }
+        public_kwonly = {
+            name: param for name, param in public.parameters.items()
+            if param.kind is inspect.Parameter.KEYWORD_ONLY and (name in observed_names or name in public_required_kw)
+        }
+        all_kwonly = {}
+        for sig in (*default_primary, *default_secondary):
             for name, param in sig.parameters.items():
-                if param.kind is inspect.Parameter.KEYWORD_ONLY and name not in extra_kwonly:
-                    extra_kwonly[name] = param
+                if (param.kind is inspect.Parameter.KEYWORD_ONLY and name not in all_kwonly and
+                        (public_has_varkw or name in public_kw_names) and
+                        (name in observed_names or name in public_required_kw)):
+                    all_kwonly[name] = param
+        kwonly_sets = []
+        if public_kwonly:
+            kwonly_sets.append(public_kwonly)
+        if all_kwonly and tuple(all_kwonly) != tuple(public_kwonly):
+            kwonly_sets.append(all_kwonly)
+
+        def project_kwonly(sig):
+            if sig is None or public_has_varkw:
+                return sig
+            kept = [
+                p for name, p in sig.parameters.items()
+                if not (p.kind is inspect.Parameter.KEYWORD_ONLY and name not in public_kw_names)
+            ]
+            if len(kept) == len(sig.parameters):
+                return sig
+            try:
+                return sig.replace(parameters=kept)
+            except ValueError:
+                return sig
 
         pairs = []
         generic = has_variadic(public)
 
-        def add(sig, fallback=None):
-            pairs.append((sig, fallback))
-            if extra_kwonly and not variadic_only(sig):
-                merged = merge_kwonly(sig, extra_kwonly)
-                if merged is not None:
-                    pairs.append((merged, None))
+        def add(sig, fallback=None, variant=None):
+            sig = project_kwonly(sig)
+            fallback = project_kwonly(fallback)
+            pairs.append((sig, fallback, variant))
+            if kwonly_sets and not variadic_only(sig):
+                for kw_set in kwonly_sets:
+                    merged = merge_kwonly(sig, kw_set)
+                    merged_fb = (
+                        merge_kwonly(fallback, kw_set)
+                        if fallback is not None and not variadic_only(fallback)
+                        else None
+                    )
+                    if merged is not None:
+                        pairs.append((merged, merged_fb or fallback, variant))
+                    elif merged_fb is not None:
+                        pairs.append((sig, merged_fb, variant))
 
         if not generic:
             add(public)
-        for sigs in reversed(primary_entries):
-            for sig, fallback in sigs:
-                add(sig, fallback)
-        for sigs in reversed(secondary_entries):
-            for sig, fallback in sigs:
-                add(sig, fallback)
+        for tagged_sigs in reversed(primary_tagged):
+            for sig, fallback, variant in tagged_sigs:
+                add(sig, fallback, variant)
+        for tagged_sigs in reversed(secondary_tagged):
+            for sig, fallback, variant in tagged_sigs:
+                add(sig, fallback, variant)
         if generic:
             add(public)
-        return primary_layers, secondary_layers, tuple(pairs)
+        return tuple(layer_variants), tuple(pairs)
 
     def callables(self, instances, views, variadic=None):
         if self.owner is None:
@@ -476,29 +574,74 @@ class Binding:
         except (ValueError, TypeError):
             return
         observed_names = {name for view in views for name in view}
-        primary_layers, secondary_layers, pairs = self.ctor_plan(public, observed_names)
+        layer_variants, pairs = self.ctor_plan(public, observed_names)
         seen, default_refs = set(), {}
 
-        def resolve(sig, view, use_variadic):
+        def convergence_score(choice, has_secondary):
+            if not has_secondary:
+                return int(choice[0])
+            return int(choice[0][0]) + int(choice[1][0])
+
+        def pick_ctor_key(variant, args, kwargs, defaults):
+            if variant is not None:
+                p_layers, s_layers = layer_variants[variant]
+                return variant, ctor_choice(p_layers, s_layers, args, kwargs, defaults, default_refs)
+            p0, s0 = layer_variants[0]
+            best_idx = 0
+            best_choice = ctor_choice(p0, s0, args, kwargs, defaults, default_refs)
+            best_score = convergence_score(best_choice, bool(s0))
+            max_score = 2 if s0 else 1
+            if best_score < max_score and len(layer_variants) > 1:
+                for alt_idx in range(1, len(layer_variants)):
+                    pa, sa = layer_variants[alt_idx]
+                    alt_choice = ctor_choice(pa, sa, args, kwargs, defaults, default_refs)
+                    alt_score = convergence_score(alt_choice, bool(sa))
+                    if alt_score > best_score:
+                        best_idx, best_choice, best_score = alt_idx, alt_choice, alt_score
+                        if best_score == max_score:
+                            break
+            return best_idx, best_choice
+
+        def resolve(sig, view, use_variadic, variant):
             if use_variadic and not has_variadic(sig):
                 return False
             try:
                 args, kwargs, defaults = arguments(sig, view, use_variadic)
                 public.bind(*args, **kwargs)
-                ctor_key = ctor_choice(primary_layers, secondary_layers, args, kwargs, defaults, default_refs)
+                ctor_key = pick_ctor_key(variant, args, kwargs, defaults)
             except (ValueError, TypeError):
                 return False
             key = (id(self.owner), ctor_key)
+            raw_key = None
+            if len(layer_variants) > 1:
+                raw_key = (
+                    id(self.owner),
+                    MISSING,
+                    tuple(choice_value_key(v, default_refs) for v in args),
+                    tuple((k, choice_value_key(v, default_refs)) for k, v in kwargs.items()),
+                )
             if ctor_key in seen:
-                return instances.get(key) is not None
+                inst = instances.get(key)
+                if inst is not None and raw_key is not None:
+                    instances.setdefault(raw_key, inst)
+                return inst is not None
             seen.add(ctor_key)
             if key not in instances:
-                instances[key] = None  # 构造器异常也只试一次。
-                ctor_args, ctor_kwargs = copy_arguments(args, kwargs, defaults)
-                try:
-                    instances[key] = self.owner(*ctor_args, **ctor_kwargs)
-                except (Exception, SystemExit):
-                    return False
+                if raw_key is not None and raw_key in instances:
+                    instances[key] = instances[raw_key]
+                else:
+                    instances[key] = None  # 构造器异常也只试一次。
+                    ctor_args, ctor_kwargs = copy_arguments(args, kwargs, defaults)
+                    try:
+                        instances[key] = self.owner(*ctor_args, **ctor_kwargs)
+                    except (Exception, SystemExit):
+                        if raw_key is not None:
+                            instances[raw_key] = None
+                        return False
+                    if raw_key is not None:
+                        instances[raw_key] = instances[key]
+            elif instances[key] is not None and raw_key is not None:
+                instances.setdefault(raw_key, instances[key])
             if instances[key] is not None:
                 yield self.member.__get__(instances[key], self.owner)
                 return True
@@ -507,10 +650,10 @@ class Binding:
         phases = (False, True) if variadic is None else (variadic,)
         for use_variadic in phases:
             for view in views:
-                for sig, fallback in pairs:
-                    succeeded = yield from resolve(sig, view, use_variadic)
+                for sig, fallback, variant in pairs:
+                    succeeded = yield from resolve(sig, view, use_variadic, variant)
                     if not succeeded and fallback is not None:
-                        yield from resolve(fallback, view, use_variadic)
+                        yield from resolve(fallback, view, use_variadic, variant)
 
     def signatures(self, fn, public, named):
         generic = variadic_only(public)
@@ -656,21 +799,19 @@ class Exports:
         return False
 
     def tag_ctor_chain(self, owner, hook_name, member, chain, *, include_first=False):
-        base_strip = ctor_receiver_count(hook_name, member)
+        strip = ctor_receiver_count(hook_name, member)
         start = 0 if include_first else 1
         items = []
-        for idx in range(start, len(chain)):
-            target = chain[idx]
-            if idx == 0:
-                strip = base_strip
-            elif type(target) is MethodType:
-                strip = 1 if hook_name == "__new__" else 0
-            else:
-                strip = base_strip
-            guaranteed = strip > 0 and (
-                idx == 0 or (type(target) is FunctionType and self.class_defines_code(owner, target.__code__, hook_name))
-            )
-            items.append((target, strip, guaranteed))
+        after_class_hook = False
+        for idx, target in enumerate(chain):
+            is_class_hook = type(target) is FunctionType and self.class_defines_code(owner, target.__code__, hook_name)
+            if idx >= start:
+                guaranteed = strip > 0 and (idx == 0 or is_class_hook)
+                items.append((target, strip, guaranteed, after_class_hook))
+            if is_class_hook:
+                after_class_hook = True
+            if type(target) is MethodType:
+                strip += 1
         return tuple(items)
 
     def ctor_chains(self, owner):
