@@ -218,6 +218,91 @@ def path_point_cloud(
 # ====================================================================
 
 
+def _exact_vr_h0_h1(
+    cloud: Sequence[tuple[float, float]],
+    maxdim: int,
+) -> list[list[tuple[float, float]]]:
+    """2D 欧氏点云上的精确 Vietoris-Rips 持续同调（Z/2Z，H0 与可选 H1）。
+
+    H0 严格等于最小生成树（Prim）边权；H1 为标准 Z/2Z 边界矩阵 ∂₂ 列约简。
+    对于小规模点云（n <= 48）或纯 H0，避免冷导入 ripser（~1.5s）。
+    """
+    n = len(cloud)
+    dist = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        xi, yi = cloud[i]
+        row_i = dist[i]
+        for j in range(i + 1, n):
+            xj, yj = cloud[j]
+            d = math.hypot(xi - xj, yi - yj)
+            row_i[j] = d
+            dist[j][i] = d
+
+    # H0: Prim 最小生成树（所有顶点在 0 诞生，n-1 条 MST 边依次合并连通分量）
+    in_tree = [False] * n
+    in_tree[0] = True
+    min_d = dist[0][:]
+    h0: list[tuple[float, float]] = []
+    for _ in range(n - 1):
+        best_v = -1
+        best_w = math.inf
+        for v in range(1, n):
+            if not in_tree[v] and min_d[v] < best_w:
+                best_w = min_d[v]
+                best_v = v
+        in_tree[best_v] = True
+        if best_w > 0.0:
+            h0.append((0.0, best_w))
+        rv = dist[best_v]
+        for v in range(1, n):
+            if not in_tree[v] and rv[v] < min_d[v]:
+                min_d[v] = rv[v]
+
+    if maxdim == 0:
+        return [h0]
+
+    # H1: 按边权排序并做 Z/2Z 整数位向量列约简（与 ripser 在 Z/2Z 下严格同构）
+    edges: list[tuple[float, int, int]] = []
+    for i in range(n):
+        row_i = dist[i]
+        for j in range(i + 1, n):
+            edges.append((row_i[j], i, j))
+    edges.sort()
+    edge_id: list[list[int]] = [[0] * n for _ in range(n)]
+    for idx, (_, i, j) in enumerate(edges):
+        edge_id[i][j] = idx
+
+    tris: list[tuple[int, int]] = []
+    for i in range(n):
+        eid_i = edge_id[i]
+        for j in range(i + 1, n):
+            e_ij = eid_i[j]
+            eid_j = edge_id[j]
+            bit_ij = 1 << e_ij
+            for k in range(j + 1, n):
+                e_ik = eid_i[k]
+                e_jk = eid_j[k]
+                e_max = e_ij if e_ij >= e_ik and e_ij >= e_jk else (e_ik if e_ik >= e_jk else e_jk)
+                tris.append((e_max, bit_ij | (1 << e_ik) | (1 << e_jk)))
+    tris.sort(key=lambda item: item[0])
+
+    pivots: dict[int, int] = {}
+    h1: list[tuple[float, float]] = []
+    for e_max, col in tris:
+        while col:
+            low = col.bit_length() - 1
+            prev = pivots.get(low)
+            if prev is None:
+                pivots[low] = col
+                birth = edges[low][0]
+                death = edges[e_max][0]
+                if death > birth:
+                    h1.append((birth, death))
+                break
+            col ^= prev
+    return [h0, h1]
+
+
 def path_persistence(
     prices: Sequence[float],
     times: Sequence[float] | None = None,
@@ -251,17 +336,23 @@ def path_persistence(
     if n < 3:
         return PathPersistenceResult((), n, sigma_t, sigma_p, normalization)
 
-    import numpy as np
-    from ripser import ripser
+    if maxdim == 0 or (maxdim == 1 and n <= 48):
+        diagrams_exact = _exact_vr_h0_h1(cloud, maxdim)
+        bars: list[PathBar] = []
+        for dim, dgm in enumerate(diagrams_exact):
+            for birth, death in dgm:
+                bars.append(PathBar(birth, death, death - birth, dim))
+    else:
+        import numpy as np
+        from ripser import ripser
 
-    diagrams = ripser(np.asarray(cloud, dtype=float), maxdim=maxdim)["dgms"]
-
-    bars: list[PathBar] = []
-    for dim, dgm in enumerate(diagrams):
-        for birth, death in dgm:
-            if math.isinf(death):
-                continue  # essential class（H0 全局分量）：不计入有限 persistence
-            bars.append(PathBar(float(birth), float(death), float(death - birth), dim))
+        diagrams = ripser(np.asarray(cloud, dtype=float), maxdim=maxdim)["dgms"]
+        bars = []
+        for dim, dgm in enumerate(diagrams):
+            for birth, death in dgm:
+                if math.isinf(death):
+                    continue  # essential class（H0 全局分量）：不计入有限 persistence
+                bars.append(PathBar(float(birth), float(death), float(death - birth), dim))
 
     bars.sort(key=lambda b: b.persistence, reverse=True)
     return PathPersistenceResult(
