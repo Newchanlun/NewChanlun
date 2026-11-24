@@ -364,6 +364,32 @@ def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return out
 
 
+def _reject_json_constant(token: str) -> object:
+    raise ValueError(f"non-JSON constant: {token}")
+
+
+def _split_sse_lines(raw: bytes) -> list[bytes]:
+    lines: list[bytes] = []
+    start = 0
+    i = 0
+    n = len(raw)
+    while i < n:
+        b = raw[i]
+        if b == 13:  # CR
+            lines.append(raw[start:i])
+            i += 2 if i + 1 < n and raw[i + 1] == 10 else 1
+            start = i
+        elif b == 10:  # LF
+            lines.append(raw[start:i])
+            i += 1
+            start = i
+        else:
+            i += 1
+    if start < n:
+        lines.append(raw[start:n])
+    return lines
+
+
 def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
     """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
     不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
@@ -388,7 +414,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
             terminal, detail, status = None, "流在终态事件前结束", None
             data_lines: list[str] = []
             event_name: str | None = None
-            for raw in response.read().splitlines():
+            for raw in _split_sse_lines(response.read()):
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
@@ -416,7 +442,11 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                             detail = "SSE 存在非 JSON 对象数据事件"
                             break
                         try:
-                            event = json.loads(joined, object_pairs_hook=_no_duplicate_keys)
+                            event = json.loads(
+                                joined,
+                                object_pairs_hook=_no_duplicate_keys,
+                                parse_constant=_reject_json_constant,
+                            )
                         except ValueError:
                             detail = "SSE 数据帧 JSON 解析失败"
                             break
