@@ -449,10 +449,10 @@ index 0000000..f8a6d33
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..830c067 100644
+index e69de29..e94489b 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1414 @@
+@@ -0,0 +1,1460 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -1560,6 +1560,52 @@ index e69de29..830c067 100644
 +		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
 +		if sealAfter := seal(launch, session); sealAfter.Code != http.StatusConflict || !strings.Contains(sealAfter.Body.String(), "rejected") {
 +			t.Fatalf("SealReview after slow bad first request = %d %s, want 409 rejected", sealAfter.Code, sealAfter.Body.String())
++		}
++	})
++
++	t.Run("concurrent-first-requests-on-new-launch-invalid-finishes-first-blocks-valid-sibling", func(t *testing.T) {
++		// Sol P1 #1 + Astra P1 #1 (PR #2280 R28): opposite ordering on a brand-new launch —
++		// valid Req A is still mid-body read when invalid Req B fails first; pending guard MUST
++		// preserve the rejection so Req A cannot later reserve a clean ledger entry and seal.
++		const launch = "review-12345678-1234-4234-8234-123456789af3"
++		const session = "019d0000-0000-7000-8000-000000000af3"
++
++		pr, pw := io.Pipe()
++		readingStarted := make(chan struct{})
++		var notifyOnce sync.Once
++		bodyReader := &notifyOnReadReader{r: pr, onRead: func() { notifyOnce.Do(func() { close(readingStarted) }) }}
++		validDone := make(chan *httptest.ResponseRecorder, 1)
++		go func() {
++			req := httptest.NewRequest(http.MethodPost, "/v1/responses", bodyReader)
++			req.Header.Set("Authorization", "Bearer test-key")
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set(preflightreceipt.ReviewHeader, launch)
++			req.Header.Set("Session-Id", session)
++			res := newDeadlineRecorder()
++			server.engine.ServeHTTP(res, req)
++			validDone <- res.ResponseRecorder
++		}()
++		select {
++		case <-readingStarted:
++		case <-time.After(2 * time.Second):
++			t.Fatal("slow valid first request never started reading body")
++		}
++
++		// Invalid sibling finishes FIRST before any ledger/disk entry exists.
++		resBad := post("/v1/responses", "gpt-6.1-sol", launch, session)
++		if resBad.Code != http.StatusBadRequest || len(models) != 0 {
++			t.Fatalf("invalid sibling status=%d calls=%d, want 400 and 0 calls", resBad.Code, len(models))
++		}
++
++		// Now finish valid Req A's body -> MUST fail closed (503) without reaching upstream or sealing.
++		_, _ = pw.Write([]byte(`{"model":"gpt-6.2-sol","stream":true,"input":"slow-valid"}`))
++		_ = pw.Close()
++		resValid := <-validDone
++		if resValid.Code != http.StatusServiceUnavailable || len(models) != 0 {
++			t.Fatalf("valid sibling after invalid sibling rejected status=%d calls=%d, want 503 and 0 calls", resValid.Code, len(models))
++		}
++		if sealAfter := seal(launch, session); sealAfter.Code != http.StatusConflict || !strings.Contains(sealAfter.Body.String(), "rejected") {
++			t.Fatalf("SealReview after concurrent invalid-first wave = %d %s, want 409 rejected", sealAfter.Code, sealAfter.Body.String())
 +		}
 +	})
 +
@@ -5291,10 +5337,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..f0da8ec 100644
+index e69de29..f2f90e7 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,5841 @@
+@@ -0,0 +1,5930 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5477,10 +5523,15 @@ index e69de29..f0da8ec 100644
 +	return r.entry, true
 +}
 +
++type pendingReviewState struct {
++	count   int
++	tainted bool
++}
++
 +var (
 +	reviewMu              sync.Mutex
 +	reviewLedger          = make(map[string]*reviewEntry)
-+	pendingReviewLaunches = make(map[string]int)
++	pendingReviewLaunches = make(map[string]*pendingReviewState)
 +	taintWriteOverflow    bool
 +	tmpSeq                atomic.Uint64
 +
@@ -5500,10 +5551,11 @@ index e69de29..f0da8ec 100644
 +	}
 +	g.once.Do(func() {
 +		reviewMu.Lock()
-+		if n := pendingReviewLaunches[g.key]; n <= 1 {
-+			delete(pendingReviewLaunches, g.key)
-+		} else {
-+			pendingReviewLaunches[g.key] = n - 1
++		if st := pendingReviewLaunches[g.key]; st != nil {
++			st.count--
++			if st.count <= 0 {
++				delete(pendingReviewLaunches, g.key)
++			}
 +		}
 +		reviewMu.Unlock()
 +	})
@@ -5511,7 +5563,7 @@ index e69de29..f0da8ec 100644
 +
 +// BeginPendingReview registers a bounded in-memory pre-admission guard BEFORE reading the
 +// HTTP body so concurrent first requests on a brand-new launch cannot race ahead of SealReview
-+// while avoiding any disk directory allocation before request validation succeeds.
++// or drop a sibling request's rejection, while avoiding any disk allocation before validation.
 +func BeginPendingReview(root, launch string) (*PendingReviewGuard, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
@@ -5523,10 +5575,17 @@ index e69de29..f0da8ec 100644
 +	if entry := reviewLedger[key]; entry != nil && (entry.sealedFlag || entry.sealing) {
 +		return nil, errReviewSealed
 +	}
-+	if pendingReviewLaunches[key] == 0 && len(pendingReviewLaunches) >= maxPendingReviewLaunches {
++	if st := pendingReviewLaunches[key]; st != nil {
++		if st.tainted {
++			return nil, ErrUnavailable
++		}
++		st.count++
++		return &PendingReviewGuard{key: key}, nil
++	}
++	if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
 +		return nil, ErrUnavailable
 +	}
-+	pendingReviewLaunches[key]++
++	pendingReviewLaunches[key] = &pendingReviewState{count: 1}
 +	return &PendingReviewGuard{key: key}, nil
 +}
 +
@@ -5853,6 +5912,10 @@ index e69de29..f0da8ec 100644
 +
 +func isTerminalAssistantItemStatus(status string) bool {
 +	return status == "" || status == "completed" || status == "incomplete"
++}
++
++func isIrreversibleFailureItemStatus(status string) bool {
++	return status == "failed" || status == "cancelled" || status == "canceled"
 +}
 +
 +func doneItemStatusCompatible(doneStatus, nextStatus string) bool {
@@ -8194,8 +8257,35 @@ index e69de29..f0da8ec 100644
 +			if seenSnapKeys != nil && canonKey != "" {
 +				seenSnapKeys[canonKey] = struct{}{}
 +			}
++			isAssistantMsg := item.Type == "message" && item.Role == "assistant"
++			if isIrreversibleFailureItemStatus(item.Status) || (!isAssistantMsg && item.Status == "incomplete") {
++				if canonKey == "" {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, alreadyDone := t.doneItemKeys[canonKey]; alreadyDone {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, alreadyCompSub := t.completedSubItemKeys[canonKey]; alreadyCompSub {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, exists := t.failedItemKeys[canonKey]; !exists && len(t.failedItemKeys) >= maxTrackedOutputItems {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if t.failedItemKeys == nil {
++					t.failedItemKeys = make(map[string]struct{})
++				}
++				t.failedItemKeys[canonKey] = struct{}{}
++			}
 +			_, alreadyDoneSnap := t.doneItems[canonKey]
-+			isDone := item.Status == "completed" || (alreadyDoneSnap && item.Status == "")
++			isDone := item.Status == "completed" || (isAssistantMsg && item.Status == "incomplete") || (alreadyDoneSnap && item.Status == "")
 +			if isDone && canonKey != "" {
 +				if _, failed := t.failedItemKeys[canonKey]; failed {
 +					c.mu.Unlock()
@@ -8209,7 +8299,6 @@ index e69de29..f0da8ec 100644
 +				c.taintStreamAnomaly()
 +				return
 +			}
-+			isAssistantMsg := item.Type == "message" && item.Role == "assistant"
 +			if isAssistantMsg {
 +				if t.hasTrackedToolPayload(canonKey) {
 +					c.mu.Unlock()
@@ -8502,6 +8591,7 @@ index e69de29..f0da8ec 100644
 +		itemType, _ := exactOptionalString(frame.itemFields, "type")
 +		itemRole, _ := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
++		itemStatus, _ := exactOptionalString(frame.itemFields, "status")
 +		addedMeta, addedArgs, addedInput, addedCode, okTool := extractItemToolFields(frame.itemFields)
 +		if !okTool {
 +			c.taintStreamAnomaly()
@@ -8526,6 +8616,27 @@ index e69de29..f0da8ec 100644
 +			c.mu.Unlock()
 +			c.taintStreamAnomaly()
 +			return
++		}
++		if isIrreversibleFailureItemStatus(itemStatus) || (!(itemType == "message" && itemRole == "assistant") && itemStatus == "incomplete") {
++			if canonKey == "" {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if _, alreadyCompSub := t.completedSubItemKeys[canonKey]; alreadyCompSub {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if _, exists := t.failedItemKeys[canonKey]; !exists && len(t.failedItemKeys) >= maxTrackedOutputItems {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if t.failedItemKeys == nil {
++				t.failedItemKeys = make(map[string]struct{})
++			}
++			t.failedItemKeys[canonKey] = struct{}{}
 +		}
 +		if canonKey != "" {
 +			if _, alreadyDone := t.doneItemKeys[canonKey]; alreadyDone {
@@ -9105,7 +9216,10 @@ index e69de29..f0da8ec 100644
 +				}
 +			}
 +		default:
-+			if strings.HasSuffix(frame.evType, ".failed") {
++			if strings.HasSuffix(frame.evType, ".failed") ||
++				strings.HasSuffix(frame.evType, ".cancelled") ||
++				strings.HasSuffix(frame.evType, ".canceled") ||
++				strings.HasSuffix(frame.evType, ".incomplete") {
 +				if canonKey == "" {
 +					c.mu.Unlock()
 +					c.taintStreamAnomaly()
@@ -9509,6 +9623,42 @@ index e69de29..f0da8ec 100644
 +	return entry, nil
 +}
 +
++func finishReserveReviewEntry(root, key string, entry *reviewEntry) (*ReviewReservation, error) {
++	entry.mu.Lock()
++	if entry.sealed {
++		entry.mu.Unlock()
++		releaseReview(entry)
++		return nil, ErrUnavailable
++	}
++	if entry.tainted {
++		entry.taintAndPersistLocked()
++		entry.mu.Unlock()
++		releaseReview(entry)
++		return nil, ErrUnavailable
++	}
++	if !entry.markerPersisted {
++		if lockErr := acquirePrivateRootLock(root); lockErr != nil || entry.persistLocked() != nil {
++			entry.mu.Unlock()
++			reviewMu.Lock()
++			if entry.inFlight > 0 {
++				entry.inFlight--
++			}
++			if entry.inFlight == 0 && !entry.sealing && !entry.sealedFlag && reviewLedger[key] == entry {
++				entry.mu.Lock()
++				canEvict := !entry.markerPersisted && !entry.tainted && !entry.sealed && entry.requests == 0
++				entry.mu.Unlock()
++				if canEvict {
++					delete(reviewLedger, key)
++				}
++			}
++			reviewMu.Unlock()
++			return nil, ErrUnavailable
++		}
++	}
++	entry.mu.Unlock()
++	return &ReviewReservation{entry: entry}, nil
++}
++
 +// ReserveExistingReview reserves an in-flight turn ONLY if launch already exists in the
 +// in-memory ledger or on disk under root. For brand-new launches it returns (nil, false, nil)
 +// without creating root or any launch directory on disk, so rejected pre-admission requests
@@ -9522,6 +9672,7 @@ index e69de29..f0da8ec 100644
 +	key := root + "\x00" + launch
 +	now := time.Now()
 +	reviewMu.Lock()
++	pendingTainted := pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
 +	if entry := reviewLedger[key]; entry != nil {
 +		if entry.sealedFlag || entry.sealing {
 +			reviewMu.Unlock()
@@ -9530,24 +9681,19 @@ index e69de29..f0da8ec 100644
 +		entry.touched = now
 +		entry.inFlight++
 +		reviewMu.Unlock()
-+		entry.mu.Lock()
-+		if entry.sealed {
-+			entry.mu.Unlock()
-+			releaseReview(entry)
-+			return nil, true, ErrUnavailable
-+		}
-+		if entry.tainted {
++		if pendingTainted {
++			entry.mu.Lock()
 +			entry.taintAndPersistLocked()
 +			entry.mu.Unlock()
 +			releaseReview(entry)
 +			return nil, true, ErrUnavailable
 +		}
-+		entry.mu.Unlock()
-+		return &ReviewReservation{entry: entry}, true, nil
++		res, err := finishReserveReviewEntry(root, key, entry)
++		return res, true, err
 +	}
 +	overflowed := taintWriteOverflow
 +	reviewMu.Unlock()
-+	if overflowed {
++	if overflowed || pendingTainted {
 +		return nil, false, ErrUnavailable
 +	}
 +	rootExists, err := checkPrivateDir(root, true)
@@ -9568,8 +9714,9 @@ index e69de29..f0da8ec 100644
 +	return res, true, resErr
 +}
 +
-+// TaintExistingReview taints launch ONLY if it already exists in memory or on disk under root.
-+// Brand-new launches rejected before admission never allocate directories or files on disk.
++// TaintExistingReview taints launch if it already exists in the pending pre-admission wave,
++// in-memory ledger, or on disk under root. Brand-new launches with no active siblings rejected
++// before admission never allocate directories or files on disk.
 +func TaintExistingReview(root, launch string) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
@@ -9578,6 +9725,9 @@ index e69de29..f0da8ec 100644
 +	root = cleanRoot
 +	key := root + "\x00" + launch
 +	reviewMu.Lock()
++	if st := pendingReviewLaunches[key]; st != nil {
++		st.tainted = true
++	}
 +	existsInLedger := reviewLedger[key] != nil
 +	reviewMu.Unlock()
 +	if existsInLedger {
@@ -9594,56 +9744,41 @@ index e69de29..f0da8ec 100644
 +	TaintReview(root, launch)
 +}
 +
-+// ReserveReview atomically checks that the launch is neither sealed nor sealing, persists the
-+// initial unsealed reservation marker on disk before admitting the first request, and registers
-+// an in-flight request before reading or parsing the HTTP request body.
++// ReserveReview atomically checks that the launch is neither sealed nor sealing nor rejected by
++// an overlapping pending request, persists the initial unsealed reservation marker on disk before
++// admitting the first request, and registers an in-flight request.
 +func ReserveReview(root, launch string) (*ReviewReservation, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
 +		return nil, ErrUnavailable
 +	}
 +	root = cleanRoot
++	key := root + "\x00" + launch
++	reviewMu.Lock()
++	pendingTainted := pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
++	reviewMu.Unlock()
++	if pendingTainted {
++		TaintExistingReview(root, launch)
++		return nil, ErrUnavailable
++	}
 +	if err := acquirePrivateRootLock(root); err != nil {
 +		return nil, ErrUnavailable
 +	}
-+	key := root + "\x00" + launch
 +	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), true, true)
 +	if err != nil {
 +		return nil, ErrUnavailable
 +	}
-+	entry.mu.Lock()
-+	if entry.sealed {
-+		entry.mu.Unlock()
-+		releaseReview(entry)
-+		return nil, ErrUnavailable
-+	}
-+	if entry.tainted {
++	reviewMu.Lock()
++	pendingTainted = pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
++	reviewMu.Unlock()
++	if pendingTainted {
++		entry.mu.Lock()
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
 +		releaseReview(entry)
 +		return nil, ErrUnavailable
 +	}
-+	if !entry.markerPersisted {
-+		if persistErr := entry.persistLocked(); persistErr != nil {
-+			entry.mu.Unlock()
-+			reviewMu.Lock()
-+			if entry.inFlight > 0 {
-+				entry.inFlight--
-+			}
-+			if entry.inFlight == 0 && !entry.sealing && !entry.sealedFlag && reviewLedger[key] == entry {
-+				entry.mu.Lock()
-+				canEvict := !entry.markerPersisted && !entry.tainted && !entry.sealed && entry.requests == 0
-+				entry.mu.Unlock()
-+				if canEvict {
-+					delete(reviewLedger, key)
-+				}
-+			}
-+			reviewMu.Unlock()
-+			return nil, ErrUnavailable
-+		}
-+	}
-+	entry.mu.Unlock()
-+	return &ReviewReservation{entry: entry}, nil
++	return finishReserveReviewEntry(root, key, entry)
 +}
 +
 +func acquireReview(entry *reviewEntry) {
@@ -9831,7 +9966,7 @@ index e69de29..f0da8ec 100644
 +	key := root + "\x00" + launch
 +	now := time.Now()
 +	reviewMu.Lock()
-+	if pendingReviewLaunches[key] > 0 {
++	if st := pendingReviewLaunches[key]; st != nil && st.count > 0 {
 +		reviewMu.Unlock()
 +		return SealInFlight, ""
 +	}
@@ -11137,10 +11272,10 @@ index e69de29..f0da8ec 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..6d7c584 100644
+index e69de29..cb0d7ea 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,4999 @@
+@@ -0,0 +1,5052 @@
 +package preflightreceipt
 +
 +import (
@@ -15940,6 +16075,59 @@ index e69de29..6d7c584 100644
 +	}
 +	if r := readReviewReceiptFile(t, root, lReasonSnapOK); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
 +		t.Fatalf("already-done reasoning snapshot hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 72. Sol P1 #2 + Astra P1 #2 (PR #2280 R28): response.in_progress carrying a tool item with
++	//     status="failed" MUST taint if the same item later claims completed in output_item.done / response.completed.
++	sseSnapFailedThenDone := "data: " + `{"type":"response.in_progress","response":{"id":"resp_sftd","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"mcp_f","type":"mcp_call","status":"failed","server_label":"s","name":"tool","arguments":"{}"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"mcp_f","type":"mcp_call","status":"completed","server_label":"s","name":"tool","arguments":"{}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_sftd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sftd","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_f","type":"mcp_call","status":"completed","server_label":"s","name":"tool","arguments":"{}"},{"id":"msg_sftd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555aa", "019d0000-0000-7000-8000-8888888881aa", sseSnapFailedThenDone); st != SealRejected {
++		t.Fatalf("in_progress tool status=failed later claiming completed seal = %v, want SealRejected", st)
++	}
++}
++
++func TestReserveExistingReviewRequiresMarkerPersisted(t *testing.T) {
++	// Astra P1 #3 (PR #2280 R28): ReserveExistingReview MUST verify markerPersisted (and fail closed
++	// when marker persistence fails) rather than admitting a second concurrent request on an unpersisted entry.
++	root := filepath.Join(t.TempDir(), "existing-marker-receipts")
++	launch := "review-e2222222-2222-4333-8444-555555555501"
++	key := filepath.Clean(root) + "\x00" + launch
++
++	// Simulate an in-memory entry whose initial marker write failed/is still unpersisted while sync fails.
++	origSync := syncDirFn
++	syncDirFn = func(string) error { return errors.New("injected sync failure") }
++	defer func() { syncDirFn = origSync }()
++
++	unpersisted := &reviewEntry{
++		directory: filepath.Join(filepath.Clean(root), launch),
++		launch:    launch,
++		started:   time.Now().UnixNano(),
++		touched:   time.Now(),
++		inFlight:  1,
++	}
++	reviewMu.Lock()
++	reviewLedger[key] = unpersisted
++	reviewMu.Unlock()
++	t.Cleanup(func() {
++		reviewMu.Lock()
++		delete(reviewLedger, key)
++		reviewMu.Unlock()
++	})
++
++	if res, existed, err := ReserveExistingReview(root, launch); !existed || res != nil || !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveExistingReview on unpersisted entry with failing sync = (%v, %v, %v), want (nil, true, ErrUnavailable)", res, existed, err)
++	}
++	// Restore syncDirFn: once persistence can succeed, ReserveExistingReview persists the marker and admits.
++	syncDirFn = origSync
++	res, existed, err := ReserveExistingReview(root, launch)
++	if !existed || err != nil || res == nil {
++		t.Fatalf("ReserveExistingReview after sync restored = (%v, %v, %v), want (non-nil, true, nil)", res, existed, err)
++	}
++	res.Release()
++	if _, statErr := os.Stat(filepath.Join(root, launch, "receipt.json")); statErr != nil {
++		t.Fatalf("ReserveExistingReview admitted without persisting receipt marker: %v", statErr)
 +	}
 +}
 +

@@ -464,7 +464,11 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                             # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
                             status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
                                 None if inner.get("status") is None else "other")
-                            detail = inner.get("error") or event.get("error") or event.get("message")
+                            detail = next(
+                                (val for val in (inner.get("error"), event.get("error"), event.get("message"))
+                                 if val is not None),
+                                None,
+                            )
                             # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
                     elif ev_name is not None:
                         detail = "SSE 存在无数据事件头"
@@ -493,12 +497,12 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                 detail = "流尾存在未闭合 SSE 事件头"
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
-            # 事件名成功还不够：须存在合法 response 对象且 status 与终态事件一致，无错误才算成功。
-            ok = (not detail and has_response_dict and (
+            # 事件名成功还不够：须存在合法 response 对象且 status 与终态事件一致，且 error/message 均须为 null/缺省。
+            ok = (detail is None and has_response_dict and (
                 (terminal == "response.completed" and status == "completed")
                 or (terminal == "response.incomplete" and status == "incomplete")
             ))
-            text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail else ""
+            text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail is not None else ""
             return {"http_status": response.status, "terminal": terminal, "status": status, "ok": ok,
                     "error": None if ok else _error_info(text)}
     except urllib.error.HTTPError as error:
