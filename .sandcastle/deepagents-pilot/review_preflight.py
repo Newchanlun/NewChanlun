@@ -44,7 +44,7 @@ KNOWN_ROUTES = {*(route for routes in ROUTES.values() for route in routes),
 PROVIDER = "cliproxy-local"
 SCRUBBED_ENV = "CLIPROXY_LOCAL_KEY"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-RESPONSE_STATUSES = ("completed", "incomplete", "failed", "cancelled", "in_progress", "queued")
+RESPONSE_STATUSES = ("completed", "incomplete", "failed", "cancelled", "canceled", "in_progress", "queued")
 CLEANUP_RESERVE = 3.0  # 总时限里留给回收与输出报告的秒数
 OUTPUT_MARGIN = 0.5  # 回收之后杀进程组、删目录、输出报告所留的秒数（机器忙时也够）
 # 上游错误只按固定词表分类，不把原文抄进报告（原文可能回显 key，且转义形态无法穷举）
@@ -54,7 +54,7 @@ ERROR_CLASSES = (("tool_choice", "tool_choice_unsupported"), ("预扣额度", "q
                  ("model_not_found", "model_not_found"), ("not supported", "unsupported"))
 
 
-TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed", "error")
+TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed", "response.cancelled", "response.canceled", "error")
 CREDENTIAL_SOURCES = ("auth.command", "experimental_bearer_token", "env_key")
 # 报告协议词表：字段名与枚举值都由本脚本写死、与 key 无关，原样输出不透露 key 的任何信息。
 # 合法 key 可以是任意可见 ASCII（如 "ok"），与它们相同或是其子串时，脱敏也不能改写它们（调用方按字段与枚举读结论）。
@@ -493,7 +493,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                 detail = "总时限内流未收尾"
             # 事件名成功还不够：响应体自报 failed/cancelled 或带 error 也算失败。
             ok = (terminal in ("response.completed", "response.incomplete") and not detail
-                  and status not in ("failed", "cancelled"))
+                  and status not in ("failed", "cancelled", "canceled"))
             text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail else ""
             return {"http_status": response.status, "terminal": terminal, "status": status, "ok": ok,
                     "error": None if ok else _error_info(text)}

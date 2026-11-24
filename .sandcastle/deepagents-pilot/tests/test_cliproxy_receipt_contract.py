@@ -615,6 +615,14 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
             b'data: {"type":"response.completed","response":{"status":"completed"}}\r\n\r\n'
             b': keepalive\rdata: {"type":"error","error":{"message":"cr-smuggled"}}\r\r'
         ),
+        (
+            b'data: {"type":"response.cancelled","response":{"status":"cancelled"}}\n\n'
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        ),
+        (
+            b'data: {"type":"response.canceled","response":{"status":"canceled"}}\n\n'
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        ),
     ):
         class _FakeResp:
             status = 200

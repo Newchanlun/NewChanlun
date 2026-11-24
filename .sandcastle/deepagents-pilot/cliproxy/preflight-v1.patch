@@ -5141,10 +5141,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..efd88c4 100644
+index e69de29..bf58fdf 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,4141 @@
+@@ -0,0 +1,4150 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5269,6 +5269,7 @@ index e69de29..efd88c4 100644
 +	sealed            bool
 +	sealSynced        bool
 +	sealedReceiptSHA  string
++	lastPersistedSHA  string
 +	tainted           bool
 +	taintedPersisted  bool
 +	reserved          bool
@@ -6224,13 +6225,11 @@ index e69de29..efd88c4 100644
 +			len(itemPhase) > maxStrictIdentityBytes || len(itemStatus) > maxStrictIdentityBytes {
 +			return false
 +		}
-+		if rawContent, hasContent := frame.itemFields["content"]; hasContent && hasResponseError(rawContent) {
-+			parts, okParts := decodeExactAssistantContentParts(rawContent)
-+			if !okParts {
-+				return false
-+			}
-+			if len(parts) > 0 && (itemType != "message" || (itemRole != "" && itemRole != "assistant")) {
-+				return false
++		if (itemType == "" || itemType == "message") && (itemRole == "" || itemRole == "assistant") {
++			if rawContent, hasContent := frame.itemFields["content"]; hasContent && hasResponseError(rawContent) {
++				if _, okParts := decodeExactAssistantContentParts(rawContent); !okParts {
++					return false
++				}
 +			}
 +		}
 +		return true
@@ -7033,16 +7032,14 @@ index e69de29..efd88c4 100644
 +		addedKind := classifyOutputItemKind(itemType, itemRole, itemPhase, false)
 +		isExplicitNonFinal := addedKind == itemKindCommentary || addedKind == itemKindNonMessage
 +		var addedParts []responseOutputContentPart
-+		if rawContent, hasContent := frame.itemFields["content"]; hasContent && hasResponseError(rawContent) {
-+			var okParts bool
-+			addedParts, okParts = decodeExactAssistantContentParts(rawContent)
-+			if !okParts {
-+				c.taintStreamAnomaly()
-+				return
-+			}
-+			if len(addedParts) > 0 && (itemType != "message" || (itemRole != "" && itemRole != "assistant")) {
-+				c.taintStreamAnomaly()
-+				return
++		if (itemType == "" || itemType == "message") && (itemRole == "" || itemRole == "assistant") {
++			if rawContent, hasContent := frame.itemFields["content"]; hasContent && hasResponseError(rawContent) {
++				var okParts bool
++				addedParts, okParts = decodeExactAssistantContentParts(rawContent)
++				if !okParts {
++					c.taintStreamAnomaly()
++					return
++				}
 +			}
 +		}
 +		c.mu.Lock()
@@ -7422,6 +7419,7 @@ index e69de29..efd88c4 100644
 +		case "response.content_part.added":
 +			if frame.partFields != nil {
 +				pType, _ := exactOptionalString(frame.partFields, "type")
++				pText, _ := exactOptionalString(frame.partFields, "text")
 +				if pType != "" && pType != "output_text" {
 +					if !t.recordContentPart(canonKey, cIdx, pType, "") {
 +						c.mu.Unlock()
@@ -7429,7 +7427,13 @@ index e69de29..efd88c4 100644
 +						return
 +					}
 +				} else if pType == "output_text" {
-+					if !t.recordPendingTextPart(canonKey, cIdx) {
++					var okPart bool
++					if pText == "" {
++						okPart = t.recordPendingTextPart(canonKey, cIdx)
++					} else {
++						okPart = t.recordContentPart(canonKey, cIdx, "output_text", pText)
++					}
++					if !okPart {
 +						c.mu.Unlock()
 +						c.taintStreamAnomaly()
 +						return
@@ -7734,6 +7738,7 @@ index e69de29..efd88c4 100644
 +		sealed:            true,
 +		sealedFlag:        true,
 +		sealedReceiptSHA:  sha256Hex(string(raw)),
++		lastPersistedSHA:  sha256Hex(string(raw)),
 +		tainted:           false,
 +		reserved:          true,
 +		markerPersisted:   true,
@@ -9004,8 +9009,8 @@ index e69de29..efd88c4 100644
 +func (e *reviewEntry) diskReceiptUnsafeLocked() bool {
 +	path := filepath.Join(e.directory, "receipt.json")
 +	finfo, err := os.Lstat(path)
-+	if !e.markerPersisted && errors.Is(err, os.ErrNotExist) {
-+		// Before initial marker persistence, absence of receipt.json is expected.
++	if !e.markerPersisted && e.lastPersistedSHA == "" && errors.Is(err, os.ErrNotExist) {
++		// Before initial persistence, absence of receipt.json is expected.
 +		return false
 +	}
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 ||
@@ -9020,6 +9025,9 @@ index e69de29..efd88c4 100644
 +	raw, err := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
 +	_ = f.Close()
 +	if err != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
++		return true
++	}
++	if e.lastPersistedSHA != "" && sha256Hex(string(raw)) != e.lastPersistedSHA {
 +		return true
 +	}
 +	var disk ReviewReceipt
@@ -9184,6 +9192,7 @@ index e69de29..efd88c4 100644
 +		}
 +		return fail(false, err)
 +	}
++	e.lastPersistedSHA = sha256Hex(string(data))
 +	if sealed {
 +		e.sealedReceiptSHA = sealedDigest
 +	}
@@ -9287,10 +9296,10 @@ index e69de29..efd88c4 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..9d5518b 100644
+index e69de29..348fc40 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,4172 @@
+@@ -0,0 +1,4237 @@
 +package preflightreceipt
 +
 +import (
@@ -13370,6 +13379,44 @@ index e69de29..9d5518b 100644
 +	if st := runProducerConsumer(t, "review-d1111111-2222-4333-8444-555555555561", "019d0000-0000-7000-8000-888888888161", prodPass, consMatch, true); st != SealOK {
 +		t.Fatalf("matching producer+consumer completion seal = %v, want SealOK", st)
 +	}
++
++	// 41. Sol P1 #1 + Astra P1 #1 (PR #2280 R20): response.content_part.added carrying non-empty
++	//     output_text MUST bind that initial text so done/completed cannot silently replace it.
++	ssePartAddedTextConflict := "data: " + `{"type":"response.created","response":{"id":"resp_patc","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_patc","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"msg_patc","content_index":0,"part":{"type":"output_text","text":"VERDICT: BLOCK"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_patc","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_patc","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_patc","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555562", "019d0000-0000-7000-8000-888888888162", ssePartAddedTextConflict); st != SealRejected {
++		t.Fatalf("content_part.added non-empty output_text conflict seal = %v, want SealRejected", st)
++	}
++	lPartAddedTextMatch := "review-d1111111-2222-4333-8444-555555555563"
++	sPartAddedTextMatch := "019d0000-0000-7000-8000-888888888163"
++	ssePartAddedTextMatch := "data: " + `{"type":"response.created","response":{"id":"resp_patm","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_patm","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"msg_patm","content_index":0,"part":{"type":"output_text","text":"VERDICT: PASS"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_patm","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_patm","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_patm","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lPartAddedTextMatch, sPartAddedTextMatch, ssePartAddedTextMatch); st != SealOK {
++		t.Fatalf("content_part.added matching non-empty output_text seal = %v, want SealOK", st)
++	}
++
++	// 42. Astra P2 #2 (PR #2280 R20): valid reasoning output_item.added carrying reasoning_text
++	//     content MUST NOT taint the launch when followed by a consistent final assistant answer.
++	lReasoningContent := "review-d1111111-2222-4333-8444-555555555564"
++	sReasoningContent := "019d0000-0000-7000-8000-888888888164"
++	sseReasoningContent := "data: " + `{"type":"response.created","response":{"id":"resp_rc","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"rs_0","type":"reasoning","content":[{"type":"reasoning_text","text":"checking diff"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_0","type":"reasoning","content":[{"type":"reasoning_text","text":"checking diff"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":1,"item":{"id":"msg_rc","type":"message","role":"assistant","content":[]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_rc","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_rc","status":"completed","model":"gpt-6.2-sol","output":[{"id":"rs_0","type":"reasoning","content":[{"type":"reasoning_text","text":"checking diff"}]},{"id":"msg_rc","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lReasoningContent, sReasoningContent, sseReasoningContent); st != SealOK {
++		t.Fatalf("reasoning output_item.added with reasoning_text content seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lReasoningContent); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("reasoning output_item.added final hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
 +}
 +
 +func TestReviewReceiptPreSealDiskCorruptionFailsClosed(t *testing.T) {
@@ -13419,6 +13466,33 @@ index e69de29..9d5518b 100644
 +			name: "permissive-mode",
 +			corrupt: func(t *testing.T, receiptPath string) {
 +				if err := os.Chmod(receiptPath, 0644); err != nil {
++					t.Fatal(err)
++				}
++			},
++		},
++		{
++			name: "rollback-to-valid-earlier-receipt",
++			corrupt: func(t *testing.T, receiptPath string) {
++				// Sol P1 #2 + Astra P1 #2 (PR #2280 R20): rolling disk back to a valid earlier
++				// receipt (requests=0 or altered response_id_sha256s) MUST still fail closed.
++				raw, err := os.ReadFile(receiptPath)
++				if err != nil {
++					t.Fatal(err)
++				}
++				var rec ReviewReceipt
++				if err := json.Unmarshal(raw, &rec); err != nil {
++					t.Fatal(err)
++				}
++				rec.Requests = 0
++				rec.Complete = false
++				rec.ResponseIDSHAs = []string{}
++				rec.LastResponseID = ""
++				rec.LastOutputSHA256 = ""
++				rolled, err := json.Marshal(rec)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if err := os.WriteFile(receiptPath, rolled, 0600); err != nil {
 +					t.Fatal(err)
 +				}
 +			},
