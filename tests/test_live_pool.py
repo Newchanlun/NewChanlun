@@ -115,6 +115,7 @@ async def test_get_status_with_symbols() -> None:
 @pytest.mark.asyncio
 async def test_feed_bar_triggers_callback() -> None:
     received: list[tuple[str, int]] = []
+    done = asyncio.Event()
 
     async def on_update(
         symbol: str,
@@ -123,6 +124,8 @@ async def test_feed_bar_triggers_callback() -> None:
         snap: RecursiveOrchestratorSnapshot,
     ) -> None:
         received.append((symbol, bar_idx))
+        if len(received) == 2:
+            done.set()
 
     pool = LivePool(max_symbols=5, on_update=on_update)
     await pool.add_symbol("AAPL")
@@ -130,8 +133,8 @@ async def test_feed_bar_triggers_callback() -> None:
     pool.feed_bar("AAPL", _make_bar(0))
     pool.feed_bar("AAPL", _make_bar(1))
 
-    # 让事件循环处理 queue
-    await asyncio.sleep(0.1)
+    # 等待两条 bar 被消费并触发回调
+    await asyncio.wait_for(done.wait(), timeout=2.0)
 
     assert len(received) == 2
     assert received[0] == ("AAPL", 0)
@@ -154,7 +157,10 @@ async def test_bar_count_in_status() -> None:
     pool.feed_bar("AAPL", _make_bar(0))
     pool.feed_bar("AAPL", _make_bar(1))
     pool.feed_bar("AAPL", _make_bar(2))
-    await asyncio.sleep(0.1)
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while pool.get_status()["symbols"]["AAPL"]["bar_count"] < 3:
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0)
 
     status = pool.get_status()
     assert status["symbols"]["AAPL"]["bar_count"] == 3
