@@ -7,3 +7,7 @@ linter.unusedVariables = true
 
 [[lean_lib]]
 name = "Chan"
+
+[[lean_lib]]
+name = "ChanTest"
+roots = ["ChanTest.Probe"]

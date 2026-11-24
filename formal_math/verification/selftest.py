@@ -69,6 +69,13 @@ def exercise(tmp, fixture, gate, color):
         env.pop("GITHUB_HEAD_REF", None)
         expected_exit = {"green": 0, "red": 1, "unknown": 2}[color]
         base_package(repo, fixture)
+        if (fixture / "lean-version.txt").is_file():
+            fake = repo / "fixture-bin"
+            fake.mkdir()
+            lean = fake / "lean"
+            lean.write_text("#!/bin/sh\nprintf '%s\\n' 'Lean (version 4.35.0, fixture)'\n")
+            lean.chmod(0o755)
+            env["PATH"] = str(fake) + os.pathsep + env["PATH"]
         if gate == "6b":
             git(repo, "init", "-q", "-b", "main")
             git(repo, "add", "formal_math")
@@ -102,6 +109,10 @@ def exercise(tmp, fixture, gate, color):
     ]
     actual = {row[3] for row in rows if row}
     ok = result.returncode == expected_exit and actual == expected and all(rows)
+    if (fixture / "expect_decls.txt").is_file():
+        ok = ok and {row[2] for row in rows if row} == set(
+            (fixture / "expect_decls.txt").read_text().split()
+        )
     if gate == "3" and fixture.name == "private-proof":
         ok = ok and bool(rows) and all(row and row[2].startswith("_private.") for row in rows)
     show = lambda codes: ",".join(sorted(codes)) or "—"

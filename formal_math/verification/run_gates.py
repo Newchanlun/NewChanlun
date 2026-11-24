@@ -46,7 +46,7 @@ def sources(root):
 
 # 消费完整标识符、注释、字面量；不把说明文字算作命令。
 LEX = re.compile(
-    r'/\-|--[^\n]*|r(?P<hash>#+)?"[\s\S]*?"(?P=hash)|'
+    r'/\-|--[^\n]*|r#*"|'
     r'"(?:\\.|[^"\\])*"|' r"'(?:\\.|[^'\\\n])'|"
     r'«[^»]*»|[#@]?[^\W\d][\w′\']*|[^\s]',
     re.UNICODE,
@@ -68,6 +68,13 @@ def tokens(text):
                     raise Undetermined(f"第 {line} 行的块注释未闭合")
                 depth += 1 if marker.group() == "/-" else -1
                 end += marker.end()
+        elif token.startswith('r') and token.endswith('"'):
+            delimiter = '"' + token[1:-1]
+            close = text.find(delimiter, end)
+            if close < 0:
+                raise Undetermined(f"第 {line} 行的原始字符串未闭合")
+            end = close + len(delimiter)
+            yield "", line
         elif token.startswith("--"):
             pass
         elif token.startswith(('"', 'r"', "r#", "'")) and len(token) > 1:
@@ -85,13 +92,23 @@ def load_sources(root):
 
 def gate1(root):
     fm = root / "formal_math"
-    pins = json.loads((fm / "verification/pins.json").read_text())
-    manifest = json.loads((fm / "lake-manifest.json").read_text())
+    pins = load_data(fm / "verification/pins.json")
+    manifest = load_data(fm / "lake-manifest.json")
     toolchain = (fm / "lean-toolchain").read_text().strip()
     failed = False
     if toolchain != pins["toolchain"]:
         red("1", "formal_math/lean-toolchain", 1, "TOOLCHAIN_PIN", f"期望 {pins['toolchain']}")
         failed = True
+    # 钉选文件自身不匹配时不触发 elan 下载错误工具链。
+    else:
+        runtime = checked(fm, "lean", "--version")
+        match = re.match(r"Lean \(version ([^,\s)]+)", runtime)
+        if not match:
+            raise Undetermined("无法识别运行期 Lean 版本")
+        if match[1] != toolchain.rsplit(":v", 1)[-1]:
+            red("1", "formal_math/lean-toolchain", 1, "RUNTIME_TOOLCHAIN_PIN",
+                f"实际版本 {match[1]}，期望 {toolchain}")
+            failed = True
     packages = manifest["packages"]
     actual = {package["name"]: package["rev"] for package in packages}
     if len(packages) != 9 or actual.keys() != pins["packages"].keys():
@@ -109,14 +126,28 @@ def option_issues(items, include_linter=True):
     for i, (value, line) in enumerate(items):
         if value == "set_option" and i + 1 < len(items):
             key = values[i + 1]
-            if key == "autoImplicit" or (include_linter and key == "linter"):
+            if key in {"autoImplicit", "relaxedAutoImplicit"} or (include_linter and key == "linter"):
                 yield line, key
 
 
 def gate2(root):
     config = root / "formal_math/lakefile.toml"
-    options = tomllib.loads(config.read_text()).get("leanOptions", {})
+    package = tomllib.loads(config.read_text())
+    options = package.get("leanOptions", {})
     failed = False
+    controlled = {"autoImplicit", "relaxedAutoImplicit", "linter.unusedVariables"}
+    for target in [package, *package.get("lean_lib", []), *package.get("lean_exe", [])]:
+        overrides = set(target.get("leanOptions", {}))
+        if target is package:
+            overrides = set()
+        args = target.get("moreLeanArgs", []) + target.get("weakLeanArgs", [])
+        if overrides & (controlled | {"linter"}) or any(
+            re.search(r"(?:^|\s)(?:-D\s*)?(autoImplicit|relaxedAutoImplicit|linter\.unusedVariables)=", arg)
+            for arg in args
+        ):
+            red("2", config.relative_to(root), 1, "LEAN_OPTION_OVERRIDE",
+                f"{target.get('name', 'package')} 覆盖受控选项")
+            failed = True
     for option, expected in (
         ("autoImplicit", False), ("relaxedAutoImplicit", False), ("linter.unusedVariables", True)
     ):
@@ -127,11 +158,15 @@ def gate2(root):
         if table.get(pieces[-1]) is not expected:
             red("2", config.relative_to(root), 1, "LEAN_OPTION", f"{option} 必须为 {str(expected).lower()}")
             failed = True
-    for path, items in load_sources(root).items():
+    source = load_sources(root)
+    for path, items in source.items():
         for line, key in option_issues(items):
             red("2", path, line, "LOCAL_OPTION", f"禁止在源码设置 {key}")
             failed = True
+    targets = [f"+{module_name(p)}:olean" for p in source if p.parts[1] != "verification"]
     result = command(config.parent, "lake", "build", "--wfail")
+    if not result.returncode and targets:
+        result = command(config.parent, "lake", "build", "--wfail", *targets)
     if result.returncode:
         if result.returncode < 0 or re.search(
             r"(?:no default toolchain|toolchain .*not installed|could not (?:download|resolve host))",
@@ -149,6 +184,7 @@ BANNED = {
     "implemented_by", "partial", "syntax", "macro", "macro_rules", "elab",
     "elab_rules", "notation", "infix", "infixl", "infixr", "prefix", "postfix",
     "declare_syntax_cat",
+    "run_cmd", "run_meta", "initialize", "builtin_initialize",
 }
 
 
@@ -195,6 +231,10 @@ def gate3(root):
     source = load_sources(root)
     findings = []
     for path, items in source.items():
+        if items and items[0][0] == "module" and module_name(path) not in AUDIT_TOOLS:
+            for _, line, import_all in read_imports(items):
+                if import_all:
+                    findings.append((path, line, "禁止普通源码使用 import all"))
         for value, line in items:
             if value in BANNED or (value == "#eval" and lane(module_name(path)) != "ChanExplore"):
                 findings.append((path, line, f"禁用记号 {value}"))
@@ -244,6 +284,12 @@ def formalization(fm):
                 raise ValueError(f"{name}: {field} 不允许重复")
             row[field] = values
         row["mode"] = conf.get("mode", "")
+        exemptions = conf.get("doc_only", {})
+        row["doc_only"] = []
+        for key, reason in exemptions.items():
+            if not re.fullmatch(r"[1-9][0-9]*", key) or not isinstance(reason, str) or not reason.strip():
+                raise ValueError(f"{name}: doc_only 需要从 1 起算的前提序号及理由")
+            row["doc_only"].append((int(key), reason))
         for field in ("declarative_unique", "needs_necessity"):
             row[field] = conf.get(field, False)
         normalized.append((name, row))
@@ -321,12 +367,16 @@ def environment_gate(root, gate):
 PATHS = {
     "decl": ("formal_math/Chan/Defs/", "formal_math/Chan/Hypotheses/", "formal_math/Chan/Audit/Literal/",
              "formal_math/ChanChallenge/", "formal_math/statement-lock.json",
+             "formal_math/Chan/Proxy/", "formal_math/sources/",
+             "formal_math/verification/garbage-signoffs.yaml",
              "formal_math/formalization.yaml", "formal_math/HISTORY.md", "formal_math/blueprint/"),
     "proof": ("formal_math/Chan/Thm/", "formal_math/Chan/Proofs/", "formal_math/ChanTest/",
-              "formal_math/ChanDyn/"),
+              "formal_math/ChanDyn/", "formal_math/Chan/Exec/", "formal_math/Chan/Final.lean",
+              "formal_math/Chan/Final/", "formal_math/Chan.lean"),
     "audit": ("formal_math/Chan/Audit/Math/", "formal_math/Chan/Audit/Separation/",
               "formal_math/Chan/Audit/Cases/", "formal_math/ChanTest/"),
-    "infra": ("formal_math/verification/", "scripts/", ".github/workflows/", "formal_math/lakefile.toml"),
+    "infra": ("formal_math/verification/", "scripts/", ".github/workflows/", "formal_math/lakefile.toml",
+              "formal_math/README.md", "formal_math/ChanExplore/", "formal_math/ChanExplore.lean"),
 }
 # 前置片尚未进 main 时，只从已验收且确为本 HEAD 祖先的原件接续。
 # 不豁免任何路径；main 纳入前置片后，正常的 merge-base 自然优先。
@@ -335,6 +385,23 @@ ACCEPTED_LAYOUT = "c97fe37cdf1ce90a4b0c1cd7871a271154f032e1"
 
 def within(path, rules):
     return any(path.startswith(rule) if rule.endswith("/") else path == rule for rule in rules)
+
+
+SIGNOFF_PATH = "formal_math/verification/garbage-signoffs.yaml"
+
+
+def initializes_empty_signoffs(root, base, head):
+    if command(root, "git", "cat-file", "-e", f"{base}:{SIGNOFF_PATH}").returncode == 0:
+        return False
+    current = root / SIGNOFF_PATH
+    if not current.is_file() or load_data(current) != {}:
+        return False
+    committed = command(root, "git", "show", f"{head}:{SIGNOFF_PATH}")
+    staged = command(root, "git", "show", f":{SIGNOFF_PATH}")
+    if committed.returncode == 0 and staged.returncode != 0:
+        return False
+    return all(json.loads(v.stdout, object_pairs_hook=unique_object) == {}
+               for v in (committed, staged) if v.returncode == 0)
 
 
 def gate6b(root):
@@ -363,7 +430,10 @@ def gate6b(root):
         return 1
     failed = False
     for path in sorted(changes):
-        if within(path, PATHS[prefix]):
+        if within(path, PATHS[prefix]) and (
+            path != SIGNOFF_PATH or prefix == "decl" or
+            prefix == "infra" and initializes_empty_signoffs(root, base, head)
+        ):
             continue
         red("6b", path, 1, "PATH_SCOPE", f"分支 {branch} 不允许修改此路径")
         failed = True
@@ -381,7 +451,8 @@ def read_imports(items):
             break
         line = items[index][1]
         index += 1
-        if index < len(items) and items[index][0] == "all":
+        import_all = index < len(items) and items[index][0] == "all"
+        if import_all:
             index += 1
         if index == len(items):
             raise Undetermined(f"第 {line} 行的 import 缺少模块")
@@ -391,26 +462,36 @@ def read_imports(items):
         while index + 1 < len(items) and items[index][0] == ".":
             parts.append(items[index + 1][0])
             index += 2
-        yield ".".join(parts), line
+        yield ".".join(parts), line, import_all
 
 
 PROOF_LANES = {"Chan.Thm", "Chan.Proofs", "Chan.Exec"}
 FOUNDATION = {"Chan.Defs", "Chan.Proxy", "Chan.Hypotheses"}
 AUDIT_LANES = {"Chan.Audit", "Chan.Audit.Literal"}
+AUDIT_TOOLS = {"verification.Audit", "verification.EnvGates"}
+EXTERNAL = {"Lean", "Init", "Std", "Mathlib", "Batteries", "Aesop", "Qq", "Plausible",
+            "ProofWidgets", "LeanSearchClient", "ImportGraph", "Cli", "Lake"}
 
 
-def allowed_edge(src, dst):
+def allowed_edge(src, dst, local, transitive=False):
     a, b = lane(src), lane(dst)
+    if dst not in local:
+        external = dst.partition(".")[0]
+        if a in {"ChanChallenge", "Chan.Audit.Literal"}:
+            return external in {"Mathlib", "Init"}
+        return external in EXTERNAL
+    if src in AUDIT_TOOLS:
+        return dst in AUDIT_TOOLS
+    if not a or not b:
+        return False
     if a == "ChanExplore":
         return True
     if b == "ChanExplore":
         return False
-    if a == "ChanChallenge":
-        return dst.startswith(("Mathlib.", "Init.")) or dst == "Init" or b in {
+    if a in {"ChanChallenge", "Chan.Audit.Literal"}:
+        return b in {
             "Chan.Defs", "Chan.Hypotheses", "Chan.Audit.Literal",
         }
-    if b == "" and dst != "Chan":
-        return True  # 外部工具链依赖不属于 Chan 分层。
     if a == "Chan.Defs":
         return b == "Chan.Defs"
     if a in {"Chan.Proxy", "Chan.Hypotheses"}:
@@ -420,14 +501,17 @@ def allowed_edge(src, dst):
     if a in AUDIT_LANES:
         return b in FOUNDATION | PROOF_LANES | AUDIT_LANES
     if a == "Chan.Final":
-        return b == "Chan.Thm"
+        return b == "Chan.Thm" or transitive and b in FOUNDATION | PROOF_LANES
     if a == "ChanDyn":
         return b in FOUNDATION | PROOF_LANES | AUDIT_LANES | {"Chan", "Chan.Final", "ChanDyn"}
-    return b != "ChanChallenge"
+    if a == "ChanTest":
+        return b not in {"ChanChallenge", "ChanExplore"}
+    return b not in {"ChanChallenge", "ChanDyn", "ChanTest"}
 
 
 def gate15(root):
     source = load_sources(root)
+    local = {module_name(path) for path in source}
     graph = defaultdict(list)
     failed = False
     for path, items in source.items():
@@ -444,12 +528,15 @@ def gate15(root):
         ):
             red("15", path, 1, "EXPOSE_SECTION", "定义文件须用 @[expose] public section")
             failed = True
-        for dst, line in read_imports(items):
+        for dst, line, import_all in read_imports(items):
             graph[module].append((dst, line))
             if dst == "Mathlib":
                 red("15", path, line, "WHOLE_MATHLIB", "请只导入所需的 Mathlib 子模块")
                 failed = True
-            elif not allowed_edge(module, dst):
+            elif import_all and module not in AUDIT_TOOLS:
+                red("15", path, line, "IMPORT_ALL", "仅审计工具能使用 import all")
+                failed = True
+            elif not allowed_edge(module, dst, local):
                 red("15", path, line, "IMPORT_EDGE", f"禁止导入 {dst}")
                 failed = True
     if failed:
@@ -473,15 +560,17 @@ def gate15(root):
                 if target in seen:
                     continue
                 seen.add(target)
-                target_lane = lane(target)
-                if (lane(module) != "ChanExplore" and target_lane == "ChanExplore") or (
-                    lane(module) == "Chan.Final" and target_lane in AUDIT_LANES | {"ChanDyn"}
-                ):
+                if not allowed_edge(module, target, local, transitive=True):
                     red("15", path, line, "IMPORT_CLOSURE", f"经 {dst} 间接导入 {target}")
                     failed = True
                     break
                 pending.extend(imported for imported, _ in graph.get(target, ()))
-    return int(failed)
+    if failed:
+        return 1
+    definitions = [m for m in graph if lane(m) == "Chan.Defs"]
+    if definitions:
+        return emit_findings("15", lean_audit(root / "formal_math", "15", definitions))
+    return 0
 
 
 GATES = {"1": gate1, "2": gate2, "3": gate3, "6a": None, "6b": gate6b, "7a": None,

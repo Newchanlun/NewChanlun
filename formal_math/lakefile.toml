@@ -14,6 +14,7 @@ rev = "v4.36.0"
 
 [[lean_lib]]
 name = "Chan"
+globs = ["Chan.*"]
 
 [[lean_lib]]
 name = "ChanTest"

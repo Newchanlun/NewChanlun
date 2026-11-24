@@ -67,13 +67,18 @@ public def main (args : List String) : IO UInt32 := do
     let mod ← env.header.moduleNames[idx.toNat]?
     if mods.contains mod then some { mod, name, info } else none).toArray
   if gate == "3" then return ← gate3 env entries
-  let config ← (← IO.getStdin).readToEnd
-  let .ok (cfg : FM.Config) := Json.parse config >>= fromJson?
-    | IO.eprintln "节点台账无法解码"; return 2
+  let cfg : FM.Config ← if ["6a", "10", "15"].contains gate then pure {} else do
+    let config ← (← IO.getStdin).readToEnd
+    let .ok decoded := Json.parse config >>= fromJson?
+      | throw (IO.userError "节点台账无法解码")
+    pure decoded
   let options := maxRecDepth.set (maxHeartbeats.set {} 6000000) 1024
   let ctx : Core.Context := { fileName := "FM 门禁", fileMap := default, options }
   try
-    let (code, _) ← (FM.run gate entries cfg).run'.toIO ctx { env }
+    let publicView ← if gate == "15" then
+      some <$> Lean.importModules (mods.map fun m => { module := m }) {} (level := .exported)
+      else pure none
+    let (code, _) ← (FM.run gate entries cfg publicView).run'.toIO ctx { env }
     return code
   catch err =>
     IO.eprintln err.toString
