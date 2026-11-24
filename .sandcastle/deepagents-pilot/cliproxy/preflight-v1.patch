@@ -5141,10 +5141,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..09b0cad 100644
+index e69de29..8f6a694 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,4658 @@
+@@ -0,0 +1,4753 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5340,6 +5340,11 @@ index e69de29..09b0cad 100644
 +	itemType       string
 +	itemRole       string
 +	itemPhase      string
++	callID         string
++	name           string
++	serverLabel    string
++	argsSHA        string
++	inputSHA       string
 +	outputIndex    int64
 +	hasOutputIndex bool
 +	isFinal        bool
@@ -5589,12 +5594,17 @@ index e69de29..09b0cad 100644
 +}
 +
 +type responseOutputItem struct {
-+	ID      string                      `json:"id"`
-+	Type    string                      `json:"type"`
-+	Role    string                      `json:"role"`
-+	Phase   string                      `json:"phase"`
-+	Status  string                      `json:"status"`
-+	Content []responseOutputContentPart `json:"content"`
++	ID          string                      `json:"id"`
++	Type        string                      `json:"type"`
++	Role        string                      `json:"role"`
++	Phase       string                      `json:"phase"`
++	Status      string                      `json:"status"`
++	CallID      string                      `json:"call_id"`
++	Name        string                      `json:"name"`
++	ServerLabel string                      `json:"server_label"`
++	ArgsSHA     string                      `json:"-"`
++	InputSHA    string                      `json:"-"`
++	Content     []responseOutputContentPart `json:"content"`
 +}
 +
 +type strictItemKind uint8
@@ -5888,6 +5898,8 @@ index e69de29..09b0cad 100644
 +		if doneRec, exists := t.doneItems[canonKey]; exists {
 +			matchedDoneKeys[canonKey] = struct{}{}
 +			if doneRec.itemType != item.Type || doneRec.itemRole != item.Role || doneRec.itemPhase != item.Phase ||
++				doneRec.callID != item.CallID || doneRec.name != item.Name || doneRec.serverLabel != item.ServerLabel ||
++				doneRec.argsSHA != item.ArgsSHA || doneRec.inputSHA != item.InputSHA ||
 +				doneRec.isFinal != isFinalAssistantOutputItem(item) {
 +				return false
 +			}
@@ -5950,6 +5962,7 @@ index e69de29..09b0cad 100644
 +	}
 +	sseItemSchemaKeys = map[string]struct{}{
 +		"id": {}, "type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
++		"call_id": {}, "name": {}, "server_label": {}, "arguments": {}, "input": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
 +		"type": {}, "text": {}, "refusal": {},
@@ -6151,6 +6164,31 @@ index e69de29..09b0cad 100644
 +	return parts, true
 +}
 +
++func extractItemToolFields(fields map[string]json.RawMessage) (callID, name, serverLabel, argsSHA, inputSHA string, ok bool) {
++	callID, ok1 := exactOptionalString(fields, "call_id")
++	name, ok2 := exactOptionalString(fields, "name")
++	serverLabel, ok3 := exactOptionalString(fields, "server_label")
++	if !ok1 || !ok2 || !ok3 ||
++		len(callID) > maxStrictIdentityBytes || len(name) > maxStrictIdentityBytes || len(serverLabel) > maxStrictIdentityBytes {
++		return "", "", "", "", "", false
++	}
++	if rawArgs, hasArgs := fields["arguments"]; hasArgs && hasResponseError(rawArgs) {
++		var okCanon bool
++		argsSHA, okCanon = canonicalJSONDigest(rawArgs)
++		if !okCanon {
++			return "", "", "", "", "", false
++		}
++	}
++	if rawInput, hasInput := fields["input"]; hasInput && hasResponseError(rawInput) {
++		var okCanon bool
++		inputSHA, okCanon = canonicalJSONDigest(rawInput)
++		if !okCanon {
++			return "", "", "", "", "", false
++		}
++	}
++	return callID, name, serverLabel, argsSHA, inputSHA, true
++}
++
 +func decodeExactResponseOutputItems(raw json.RawMessage, expectedRespID string) ([]responseOutputItem, string, bool) {
 +	trimmed := bytes.TrimSpace(raw)
 +	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -6191,7 +6229,22 @@ index e69de29..09b0cad 100644
 +			}
 +			boundID = itemRespID
 +		}
-+		item := responseOutputItem{ID: itemID, Type: typ, Role: role, Phase: phase, Status: status}
++		callID, name, serverLabel, argsSHA, inputSHA, okTool := extractItemToolFields(fields)
++		if !okTool {
++			return false
++		}
++		item := responseOutputItem{
++			ID:          itemID,
++			Type:        typ,
++			Role:        role,
++			Phase:       phase,
++			Status:      status,
++			CallID:      callID,
++			Name:        name,
++			ServerLabel: serverLabel,
++			ArgsSHA:     argsSHA,
++			InputSHA:    inputSHA,
++		}
 +		if typ == "message" && role == "assistant" {
 +			parts, okParts := decodeExactAssistantContentParts(fields["content"])
 +			if !okParts {
@@ -6842,10 +6895,17 @@ index e69de29..09b0cad 100644
 +					}
 +				}
 +				if seq, hasSeq := t.itemSeqByKey[idxKey]; hasSeq {
-+					if _, hasIDSeq := t.itemSeqByKey[canonKey]; !hasIDSeq {
++					if idSeq, hasIDSeq := t.itemSeqByKey[canonKey]; !hasIDSeq || seq < idSeq {
 +						t.itemSeqByKey[canonKey] = seq
 +					}
 +					delete(t.itemSeqByKey, idxKey)
++					recomputedMax := t.maxNonFinalSeq
++					for _, s := range t.itemSeqByKey {
++						if s > recomputedMax {
++							recomputedMax = s
++						}
++					}
++					t.maxItemSeq = recomputedMax
 +				}
 +			}
 +			if t.itemIndexByID == nil {
@@ -6993,7 +7053,20 @@ index e69de29..09b0cad 100644
 +	if !t.recordPendingTextPart(canonKey, contentIdx) {
 +		return false
 +	}
-+	if canonKey == "" || snapText == "" {
++	if canonKey == "" {
++		return true
++	}
++	if snapText == "" {
++		if prefixes := t.textPrefixByItem[canonKey]; prefixes != nil {
++			if pref, exists := prefixes[contentIdx]; exists && pref.byteLen > 0 {
++				return false
++			}
++		}
++		if hashes := t.textDeltaHashByItem[canonKey]; hashes != nil {
++			if st := hashes[contentIdx]; st != nil && hex.EncodeToString(st.h.Sum(nil)) != sha256Hex("") {
++				return false
++			}
++		}
 +		return true
 +	}
 +	if !t.recordTextPrefix(canonKey, contentIdx, snapText) {
@@ -7330,17 +7403,20 @@ index e69de29..09b0cad 100644
 +					t.lastItemOutputIndex = 0
 +				}
 +				if canonKey != "" {
-+					if _, alreadyDone := t.doneItemKeys[canonKey]; !alreadyDone {
-+						if _, exists := t.pendingItems[canonKey]; !exists && len(t.pendingItems) >= maxTrackedOutputItems {
-+							c.mu.Unlock()
-+							c.taintStreamAnomaly()
-+							return
-+						}
-+						if t.pendingItems == nil {
-+							t.pendingItems = make(map[string]struct{})
-+						}
-+						t.pendingItems[canonKey] = struct{}{}
++					if _, alreadyDone := t.doneItemKeys[canonKey]; alreadyDone {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
 +					}
++					if _, exists := t.pendingItems[canonKey]; !exists && len(t.pendingItems) >= maxTrackedOutputItems {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
++					}
++					if t.pendingItems == nil {
++						t.pendingItems = make(map[string]struct{})
++					}
++					t.pendingItems[canonKey] = struct{}{}
 +				} else {
 +					if t.pendingUnkeyed >= maxTrackedOutputItems {
 +						c.mu.Unlock()
@@ -7367,6 +7443,8 @@ index e69de29..09b0cad 100644
 +			if canonKey != "" {
 +				if prevRec, alreadyDone := t.doneItems[canonKey]; alreadyDone {
 +					if prevRec.itemType != item.Type || prevRec.itemRole != item.Role || prevRec.itemPhase != item.Phase ||
++						prevRec.callID != item.CallID || prevRec.name != item.Name || prevRec.serverLabel != item.ServerLabel ||
++						prevRec.argsSHA != item.ArgsSHA || prevRec.inputSHA != item.InputSHA ||
 +						prevRec.isFinal != isFinalCandidate || prevRec.isAssistantMsg != isAssistantMsg ||
 +						prevRec.outputTextSHA != outTextSHA {
 +						c.mu.Unlock()
@@ -7393,6 +7471,11 @@ index e69de29..09b0cad 100644
 +					itemType:       item.Type,
 +					itemRole:       item.Role,
 +					itemPhase:      item.Phase,
++					callID:         item.CallID,
++					name:           item.Name,
++					serverLabel:    item.ServerLabel,
++					argsSHA:        item.ArgsSHA,
++					inputSHA:       item.InputSHA,
 +					outputIndex:    effIdx,
 +					hasOutputIndex: effHasIdx,
 +					isFinal:        isFinalCandidate,
@@ -7581,6 +7664,11 @@ index e69de29..09b0cad 100644
 +		itemRole, _ := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
 +		itemStatus, _ := exactOptionalString(frame.itemFields, "status")
++		callID, itemName, serverLabel, argsSHA, inputSHA, okTool := extractItemToolFields(frame.itemFields)
++		if !okTool {
++			c.taintStreamAnomaly()
++			return
++		}
 +		doneKind := classifyOutputItemKind(itemType, itemRole, itemPhase, true)
 +		isAssistantMsg := itemType == "message" && itemRole == "assistant"
 +		isFinalCandidate := isAssistantMsg &&
@@ -7685,6 +7773,8 @@ index e69de29..09b0cad 100644
 +					return
 +				}
 +				if prevRec.itemType != itemType || prevRec.itemRole != itemRole || prevRec.itemPhase != itemPhase ||
++					prevRec.callID != callID || prevRec.name != itemName || prevRec.serverLabel != serverLabel ||
++					prevRec.argsSHA != argsSHA || prevRec.inputSHA != inputSHA ||
 +					prevRec.isFinal != isFinalCandidate || prevRec.isAssistantMsg != isAssistantMsg ||
 +					prevRec.outputTextSHA != outTextSHA {
 +					c.mu.Unlock()
@@ -7714,6 +7804,11 @@ index e69de29..09b0cad 100644
 +				itemType:       itemType,
 +				itemRole:       itemRole,
 +				itemPhase:      itemPhase,
++				callID:         callID,
++				name:           itemName,
++				serverLabel:    serverLabel,
++				argsSHA:        argsSHA,
++				inputSHA:       inputSHA,
 +				outputIndex:    effIdx,
 +				hasOutputIndex: effHasIdx,
 +				isFinal:        isFinalCandidate,
@@ -9120,7 +9215,7 @@ index e69de29..09b0cad 100644
 +		}
 +	}
 +	truncatedStream := false
-+	if c.strictCodex && c.had2xxBody && (c.producer.sawAnyFrame || c.consumer.sawAnyFrame) &&
++	if c.strictCodex && c.had2xxBody &&
 +		!c.observedCompleted && !c.producer.sawFailure && !c.consumer.sawFailure {
 +		c.modelMismatch = true
 +		c.invalid = true
@@ -9804,10 +9899,10 @@ index e69de29..09b0cad 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..db7ff10 100644
+index e69de29..e97bd9c 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,4606 @@
+@@ -0,0 +1,4707 @@
 +package preflightreceipt
 +
 +import (
@@ -14293,6 +14388,107 @@ index e69de29..db7ff10 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_cdok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_cd","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, lCanonDupOK, sCanonDupOK, sseCanonDupOK); st != SealOK {
 +		t.Fatalf("duplicate output_item.done with reordered keys/escapes seal = %v, want SealOK", st)
++	}
++
++	// 56. Sol P1 #1 + Astra P1 #1 (PR #2280 R24): Turn 2 HTTP 200 stream emitting ONLY keepalive
++	//     comments (or empty body) with NO protocol terminal MUST taint so Turn 1 cannot be sealed.
++	lEmpty200 := "review-d1111111-2222-4333-8444-555555555583"
++	sEmpty200 := "019d0000-0000-7000-8000-888888888183"
++	ctxE1, cE1, err := BeginReview(context.Background(), root, lEmpty200, sEmpty200, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxE1, eE1, err := cE1.Start(ctxE1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clE1 := httptransport.Decorate(ctxE1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqE1, _ := http.NewRequestWithContext(ctxE1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respE1, err := clE1.Do(reqE1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respE1.Body)
++	_ = respE1.Body.Close()
++	cE1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_e200_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	eE1.End()
++	cE1.Complete(true)
++	cE1.HandlerDone(true)
++
++	// Turn 2: HTTP 200 with keepalive comment only -> clean EOF, NO terminal.
++	ctxE2, cE2, err := BeginReview(context.Background(), root, lEmpty200, sEmpty200, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxE2, eE2, err := cE2.Start(ctxE2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clE2 := httptransport.Decorate(ctxE2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(": keepalive\n\n")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqE2, _ := http.NewRequestWithContext(ctxE2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respE2, err := clE2.Do(reqE2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respE2.Body)
++	_ = respE2.Body.Close()
++	cE2.ObserveStreamChunk([]byte(": keepalive\n\n"))
++	eE2.End()
++	cE2.Complete(false)
++	cE2.HandlerDone(false)
++	if st := SealReview(root, lEmpty200, sEmpty200); st != SealRejected {
++		t.Fatalf("Turn 2 keepalive-only HTTP 200 EOF allowed sealing Turn 1: seal = %v, want SealRejected", st)
++	}
++
++	// 57. Sol P2 #1 (PR #2280 R24): item appearing first with item_id-only, then output_index-only,
++	//     then output_item.done with both MUST preserve latest ordering and certify last_output_sha256.
++	lMergeSeqOK := "review-d1111111-2222-4333-8444-555555555584"
++	sMergeSeqOK := "019d0000-0000-7000-8000-888888888184"
++	sseMergeSeqOK := "data: " + `{"type":"response.created","response":{"id":"resp_mseq","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","item":{"id":"msg_mseq","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"VERDICT: PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_mseq","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_mseq","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_mseq","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lMergeSeqOK, sMergeSeqOK, sseMergeSeqOK); st != SealOK {
++		t.Fatalf("id-only + idx-only + combined done seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lMergeSeqOK); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("id-only + idx-only + combined done hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 58. Astra P1 #2 (PR #2280 R24): response.in_progress reverting an already-done tool item
++	//     back to status="in_progress" MUST taint immediately.
++	sseRevertDone := "data: " + `{"type":"response.created","response":{"id":"resp_rev","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_rev","type":"function_call","call_id":"c1","name":"read_file","arguments":"{}"}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_rev","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"fc_rev","type":"function_call","status":"in_progress","call_id":"c1","name":"read_file","arguments":"{}"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_rev","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_rev","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_rev","type":"function_call","call_id":"c1","name":"read_file","arguments":"{}"},{"id":"msg_rev","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555585", "019d0000-0000-7000-8000-888888888185", sseRevertDone); st != SealRejected {
++		t.Fatalf("in_progress reverting completed tool item to in_progress seal = %v, want SealRejected", st)
++	}
++
++	// 59. Astra P1 #3 (PR #2280 R24): tool call name/call_id/arguments differing between
++	//     output_item.done and response.completed.output[] MUST taint even when final assistant text matches.
++	sseToolArgsMismatch := "data: " + `{"type":"response.created","response":{"id":"resp_tam","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_tam","type":"function_call","call_id":"c1","name":"read_file","arguments":"{\"path\":\"a\"}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_tam","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_tam","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_tam","type":"function_call","call_id":"c1","name":"exec_command","arguments":"{\"cmd\":\"evil\"}"},{"id":"msg_tam","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555586", "019d0000-0000-7000-8000-888888888186", sseToolArgsMismatch); st != SealRejected {
++		t.Fatalf("tool call name/arguments mismatch between done and completed seal = %v, want SealRejected", st)
++	}
++
++	// 60. Astra P2 #1 (PR #2280 R24): response.in_progress clearing previously observed non-empty
++	//     output_text to empty string MUST taint even if later frames restore the text.
++	sseSnapClearText := "data: " + `{"type":"response.in_progress","response":{"id":"resp_sct","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_sct","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: "}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_sct","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_sct","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":""}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_sct","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sct","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_sct","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555587", "019d0000-0000-7000-8000-888888888187", sseSnapClearText); st != SealRejected {
++		t.Fatalf("in_progress clearing non-empty text to empty string seal = %v, want SealRejected", st)
 +	}
 +}
 +
