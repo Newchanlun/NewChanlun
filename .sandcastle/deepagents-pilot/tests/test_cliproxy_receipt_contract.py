@@ -578,6 +578,11 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
             b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
             b"data: extra\n\n"
         ),
+        (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+            b'{"type":"error","error":{"message":"bare json tail"}}\n'
+        ),
     ):
         class _FakeResp:
             status = 200
@@ -594,3 +599,27 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
         monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
         result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-ev-mismatch", preflight.Deadline(5))
         assert result["ok"] is False, payload
+
+    # 允许合法 SSE 注释、id:、retry: 行
+    valid_meta = (
+        b": keepalive\n"
+        b"id: 1\n"
+        b"retry: 1000\n"
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    )
+
+    class _ValidMetaResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return valid_meta
+
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _ValidMetaResp())
+    assert preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-valid-meta", preflight.Deadline(5))["ok"] is True

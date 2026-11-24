@@ -433,6 +433,11 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                     if val.startswith(" "):
                         val = val[1:]
                     data_lines.append(val)
+                elif line.startswith((":", "id:", "retry:")):
+                    continue
+                else:
+                    detail = "SSE 存在非法非协议行"
+                    break
             if data_lines:
                 trailing = "\n".join(data_lines).strip()
                 if (trailing and trailing != "[DONE]") or event_name is not None:
