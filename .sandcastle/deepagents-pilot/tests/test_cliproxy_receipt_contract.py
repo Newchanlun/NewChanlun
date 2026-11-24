@@ -583,6 +583,16 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
             b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
             b'{"type":"error","error":{"message":"bare json tail"}}\n'
         ),
+        (
+            b"data: garbage-before-completed\n\n"
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        ),
+        (
+            b"data: [1]\n\n"
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        ),
     ):
         class _FakeResp:
             status = 200

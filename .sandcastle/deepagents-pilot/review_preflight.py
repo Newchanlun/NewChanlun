@@ -403,22 +403,28 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                         if terminal is not None:
                             detail = "终态事件后出现多余数据事件"
                             break
-                        if joined.startswith("{"):
-                            event = json.loads(joined)
-                            if ev_name is not None and event.get("type") != ev_name:
-                                detail = "SSE 事件名与数据 type 不一致"
-                                break
-                            if event.get("type") in TERMINAL_EVENTS:
-                                terminal = event.get("type")
-                                inner = event.get("response") if isinstance(event.get("response"), dict) else {}
-                                # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
-                                status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
-                                    None if inner.get("status") is None else "other")
-                                detail = inner.get("error") or event.get("error") or event.get("message")
-                                # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
-                        elif ev_name is not None:
-                            detail = "SSE 事件名与非 JSON 数据冲突"
+                        if not joined.startswith("{"):
+                            detail = "SSE 存在非 JSON 对象数据事件"
                             break
+                        try:
+                            event = json.loads(joined)
+                        except ValueError:
+                            detail = "SSE 数据帧 JSON 解析失败"
+                            break
+                        if not isinstance(event, dict) or not isinstance(event.get("type"), str) or not event["type"].strip():
+                            detail = "SSE 数据事件缺少合法 type"
+                            break
+                        if ev_name is not None and event.get("type") != ev_name:
+                            detail = "SSE 事件名与数据 type 不一致"
+                            break
+                        if event.get("type") in TERMINAL_EVENTS:
+                            terminal = event.get("type")
+                            inner = event.get("response") if isinstance(event.get("response"), dict) else {}
+                            # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
+                            status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
+                                None if inner.get("status") is None else "other")
+                            detail = inner.get("error") or event.get("error") or event.get("message")
+                            # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
                     elif ev_name is not None:
                         detail = "SSE 存在无数据事件头"
                         break

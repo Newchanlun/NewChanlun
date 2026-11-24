@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..078b2c3 100644
+index e69de29..0861fb7 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,146 @@
 +package middleware
 +
 +import (
@@ -74,6 +74,15 @@ index e69de29..078b2c3 100644
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
 +				return
 +			}
++			if err := rc.SetWriteDeadline(turnDeadline); err != nil {
++				// Without ResponseWriter write-deadline enforcement, a stalled client could block
++				// downstream streaming Write/Flush past ReviewTurnTimeout and keep res in-flight.
++				_ = rc.SetReadDeadline(time.Time{})
++				res.Taint()
++				c.Header("Connection", "close")
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
 +			requestedModel, ok := preflightreceipt.ExtractInboundReviewModel(c.Request)
 +			if !ok {
 +				res.Taint()
@@ -86,7 +95,6 @@ index e69de29..078b2c3 100644
 +				return
 +			}
 +			_ = rc.SetReadDeadline(time.Time{})
-+			_ = rc.SetWriteDeadline(turnDeadline)
 +			ctx, collector, err = preflightreceipt.BeginReviewReserved(turnCtx, res, session, requestedModel)
 +			if err != nil {
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
@@ -143,10 +151,10 @@ index e69de29..078b2c3 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..5c560ca
+index 0000000..f8a6d33
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,263 @@
 +package middleware
 +
 +import (
@@ -362,6 +370,52 @@ index 0000000..5c560ca
 +	}
 +	if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
 +		t.Fatalf("SealReview after unsupported SetReadDeadline = %v, want SealRejected (reservation released)", st)
++	}
++}
++
++type readOnlyDeadlineRecorder struct {
++	*httptest.ResponseRecorder
++}
++
++func (r *readOnlyDeadlineRecorder) SetReadDeadline(time.Time) error { return nil }
++
++func TestPreflightReceiptMiddlewareRejectsUnsupportedSetWriteDeadlineBeforeReadingBody(t *testing.T) {
++	// Sol P2 #1 + Astra P2 #3 (PR #2280 R16): when ResponseWriter supports SetReadDeadline but NOT
++	// SetWriteDeadline, fail closed (503 + taint + release reservation) BEFORE reading body or streaming.
++	gin.SetMode(gin.TestMode)
++	root := t.TempDir() + "/receipts"
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++
++	handlerCalled := atomic.Bool{}
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		handlerCalled.Store(true)
++		c.Status(http.StatusOK)
++	})
++
++	body := &mustNotReadBody{}
++	launch := "review-12345678-1234-4234-8234-123456789404"
++	session := "019d0000-0000-7000-8000-000000000404"
++	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("Session-Id", session)
++	req.Header.Set(preflightreceipt.ReviewHeader, launch)
++
++	rec := &readOnlyDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(rec, req)
++	if rec.Code != http.StatusServiceUnavailable {
++		t.Fatalf("status = %d, want %d (503 Service Unavailable)", rec.Code, http.StatusServiceUnavailable)
++	}
++	if rec.Header().Get("Connection") != "close" {
++		t.Fatalf("Connection header = %q, want close", rec.Header().Get("Connection"))
++	}
++	if body.readCalled.Load() || handlerCalled.Load() {
++		t.Fatalf("middleware read body (%v) or ran handler (%v) despite unsupported SetWriteDeadline",
++			body.readCalled.Load(), handlerCalled.Load())
++	}
++	if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++		t.Fatalf("SealReview after unsupported SetWriteDeadline = %v, want SealRejected", st)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -4849,10 +4903,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..836cdcc 100644
+index e69de29..dd65cea 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,3355 @@
+@@ -0,0 +1,3641 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4907,6 +4961,7 @@ index e69de29..836cdcc 100644
 +
 +var maxReviewLedgerEntries = 2048
 +var maxTrackedOutputItems = 2048
++var maxTrackedContentParts = 512
 +
 +var ErrUnavailable = errors.New("preflight evidence unavailable")
 +var errReviewSealed = errors.New("review receipt sealed or sealing")
@@ -5040,6 +5095,74 @@ index e69de29..836cdcc 100644
 +	rootIno uint64
 +}
 +
++type doneItemSummary struct {
++	itemID         string
++	outputIndex    int64
++	hasOutputIndex bool
++	isFinal        bool
++	isAssistantMsg bool
++	outputTextSHA  string
++	doneDigest     string
++}
++
++type strictStreamTracker struct {
++	responseID                string
++	sawCompleted              bool
++	lastItemResponseID        string
++	lastItemOutputSHA         string
++	lastItemSeq               int
++	hasLastItemOutputIndex    bool
++	lastItemOutputIndex       int64
++	sawStreamedOutputItem     bool
++	pendingItems              map[string]struct{}
++	doneItemKeys              map[string]struct{}
++	doneItems                 map[string]doneItemSummary
++	itemIndexByID             map[string]int64
++	itemIDByIndex             map[int64]string
++	itemKindByKey             map[string]strictItemKind
++	contentPartByItem         map[string]map[int64]string
++	pendingUnkeyed            int
++	itemSeqByKey              map[string]int
++	nextItemSeq               int
++	maxItemSeq                int
++	maxNonFinalSeq            int
++	hasMaxOutputIndex         bool
++	maxOutputIndex            int64
++	hasMaxNonFinalOutputIndex bool
++	maxNonFinalOutputIndex    int64
++	streamedNonFinalIDs       map[string]struct{}
++	streamedNonFinalKeys      map[string]struct{}
++	streamedNonFinalUnkeyed   int
++}
++
++func (t *strictStreamTracker) resetTracking() {
++	t.lastItemResponseID = ""
++	t.lastItemOutputSHA = ""
++	t.lastItemSeq = 0
++	t.hasLastItemOutputIndex = false
++	t.lastItemOutputIndex = 0
++	t.sawStreamedOutputItem = false
++	t.pendingItems = nil
++	t.doneItemKeys = nil
++	t.doneItems = nil
++	t.itemIndexByID = nil
++	t.itemIDByIndex = nil
++	t.itemKindByKey = nil
++	t.contentPartByItem = nil
++	t.pendingUnkeyed = 0
++	t.itemSeqByKey = nil
++	t.nextItemSeq = 0
++	t.maxItemSeq = 0
++	t.maxNonFinalSeq = 0
++	t.hasMaxOutputIndex = false
++	t.maxOutputIndex = 0
++	t.hasMaxNonFinalOutputIndex = false
++	t.maxNonFinalOutputIndex = 0
++	t.streamedNonFinalIDs = nil
++	t.streamedNonFinalKeys = nil
++	t.streamedNonFinalUnkeyed = 0
++}
++
 +type Collector struct {
 +	mu                                          sync.Mutex
 +	receipt                                     Receipt
@@ -5056,32 +5179,8 @@ index e69de29..836cdcc 100644
 +	modelMismatch                               bool
 +	lastResponseIDSHA                           string
 +	lastOutputSHA                               string
-+	streamResponseID                            string
-+	producerResponseID                          string
-+	lastItemResponseID                          string
-+	lastItemOutputSHA                           string
-+	lastItemSeq                                 int
-+	hasLastItemOutputIndex                      bool
-+	lastItemOutputIndex                         int64
-+	sawStreamedOutputItem                       bool
-+	pendingItems                                map[string]struct{}
-+	doneItemKeys                                map[string]struct{}
-+	doneItemDigestByKey                         map[string]string
-+	itemIndexByID                               map[string]int64
-+	itemIDByIndex                               map[int64]string
-+	itemKindByKey                               map[string]strictItemKind
-+	pendingUnkeyed                              int
-+	itemSeqByKey                                map[string]int
-+	nextItemSeq                                 int
-+	maxItemSeq                                  int
-+	maxNonFinalSeq                              int
-+	hasMaxOutputIndex                           bool
-+	maxOutputIndex                              int64
-+	hasMaxNonFinalOutputIndex                   bool
-+	maxNonFinalOutputIndex                      int64
-+	streamedNonFinalIDs                         map[string]struct{}
-+	streamedNonFinalKeys                        map[string]struct{}
-+	streamedNonFinalUnkeyed                     int
++	consumer                                    strictStreamTracker
++	producer                                    strictStreamTracker
 +	sseEventName                                string
 +	sseHasEvent                                 bool
 +	sseDataLines                                [][]byte
@@ -5281,40 +5380,34 @@ index e69de29..836cdcc 100644
 +}
 +
 +func (c *Collector) resetOutputTrackingLocked() {
-+	c.lastItemResponseID = ""
-+	c.lastItemOutputSHA = ""
-+	c.lastItemSeq = 0
-+	c.hasLastItemOutputIndex = false
-+	c.lastItemOutputIndex = 0
-+	c.sawStreamedOutputItem = false
-+	c.pendingItems = nil
-+	c.doneItemKeys = nil
-+	c.doneItemDigestByKey = nil
-+	c.itemIndexByID = nil
-+	c.itemIDByIndex = nil
-+	c.itemKindByKey = nil
-+	c.pendingUnkeyed = 0
-+	c.itemSeqByKey = nil
-+	c.nextItemSeq = 0
-+	c.maxItemSeq = 0
-+	c.maxNonFinalSeq = 0
-+	c.hasMaxOutputIndex = false
-+	c.maxOutputIndex = 0
-+	c.hasMaxNonFinalOutputIndex = false
-+	c.maxNonFinalOutputIndex = 0
-+	c.streamedNonFinalIDs = nil
-+	c.streamedNonFinalKeys = nil
-+	c.streamedNonFinalUnkeyed = 0
++	c.consumer.resetTracking()
++	c.producer.resetTracking()
 +}
 +
 +func (c *Collector) resetAttemptStreamStateLocked() {
-+	c.streamResponseID = ""
-+	c.producerResponseID = ""
-+	c.resetOutputTrackingLocked()
++	c.consumer = strictStreamTracker{}
++	c.producer = strictStreamTracker{}
 +	c.sseEventName = ""
 +	c.sseHasEvent = false
 +	c.sseDataLines = nil
 +	c.sseDataBytes = 0
++}
++
++func extractSingleAssistantText(item responseOutputItem) string {
++	var b strings.Builder
++	for _, part := range item.Content {
++		if part.Type == "output_text" {
++			b.WriteString(part.Text)
++		}
++	}
++	return b.String()
++}
++
++func contentPartTag(partType, text string) string {
++	if partType == "output_text" {
++		return "text:" + sha256Hex(text)
++	}
++	return "other:" + partType
 +}
 +
 +func extractAssistantOutputText(items []responseOutputItem) string {
@@ -5327,15 +5420,9 @@ index e69de29..836cdcc 100644
 +				last = ""
 +				continue
 +			}
-+			var b strings.Builder
-+			for _, part := range item.Content {
-+				if part.Type == "output_text" {
-+					b.WriteString(part.Text)
-+				}
-+			}
 +			// Always overwrite last (including clearing to "" when the latest final assistant
 +			// message has only a refusal or non-output_text content) so earlier text never leaks through.
-+			last = b.String()
++			last = extractSingleAssistantText(item)
 +			continue
 +		}
 +		// Any non-assistant-message item (tool calls, mcp_approval_request, reasoning, etc.)
@@ -5351,95 +5438,97 @@ index e69de29..836cdcc 100644
 +	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 +}
 +
-+func (c *Collector) recordCompletedResponse(respID, respModel, respStatus string, respErr json.RawMessage, output []responseOutputItem) {
-+	status := respStatus
-+	id := respID
-+	model := respModel
-+	outText := extractAssistantOutputText(output)
-+	completedSHA := ""
-+	if outText != "" {
-+		completedSHA = sha256Hex(outText)
++func (t *strictStreamTracker) verifyCompletedOutput(output []responseOutputItem, completedSHA string) bool {
++	if len(output) == 0 || !t.sawStreamedOutputItem {
++		return true
 +	}
-+
-+	c.mu.Lock()
-+	if status != "completed" || hasResponseError(respErr) || c.observedCompleted {
-+		c.modelMismatch = true
-+		c.invalid = true
-+		c.resetOutputTrackingLocked()
-+		c.mu.Unlock()
-+		c.Taint()
-+		return
++	if t.hasMaxOutputIndex && int64(len(output)) <= t.maxOutputIndex {
++		return false
 +	}
-+	expected := c.expectedModel
-+	if expected == "" || model != expected || id == "" || strings.TrimSpace(id) != id ||
-+		(c.streamResponseID != "" && c.streamResponseID != id) ||
-+		(c.producerResponseID != "" && c.producerResponseID != id) {
-+		c.modelMismatch = true
-+		c.invalid = true
-+		c.resetOutputTrackingLocked()
-+		c.mu.Unlock()
-+		c.Taint()
-+		return
-+	}
-+	hasPendingItems := len(c.pendingItems) > 0 || c.pendingUnkeyed > 0
-+	if len(output) > 0 && c.sawStreamedOutputItem {
-+		// Cross-check response.completed.output[] against streamed non-final items (e.g. tool calls or
-+		// approval requests) so response.completed cannot omit an observed non-final item and resurrect
-+		// an earlier unphased assistant message as final output.
-+		completedNonFinalCount := 0
-+		completedNonFinalIDs := make(map[string]struct{}, len(output))
-+		kindConflict := false
-+		for idx, item := range output {
-+			itemKind := classifyOutputItemKind(item.Type, item.Role, item.Phase, true)
++	hasPendingItems := len(t.pendingItems) > 0 || t.pendingUnkeyed > 0
++	completedNonFinalCount := 0
++	completedNonFinalIDs := make(map[string]struct{}, len(output))
++	matchedDoneKeys := make(map[string]struct{}, len(t.doneItems))
++	for idx, item := range output {
++		pos := int64(idx)
++		if item.ID != "" {
++			if boundIdx, seen := t.itemIndexByID[item.ID]; seen && boundIdx != pos {
++				return false
++			}
++		}
++		boundID, hasBoundID := t.itemIDByIndex[pos]
++		if hasBoundID && item.ID != "" && boundID != item.ID {
++			return false
++		}
++		canonKey := ""
++		if item.ID != "" {
++			canonKey = "id:" + item.ID
++		} else if hasBoundID {
++			canonKey = "id:" + boundID
++		} else {
++			canonKey = "idx:" + strconv.FormatInt(pos, 10)
++		}
++		itemKind := classifyOutputItemKind(item.Type, item.Role, item.Phase, true)
++		if prevKind, exists := t.itemKindByKey[canonKey]; exists {
++			if _, okMerge := mergeStrictItemKind(prevKind, itemKind); !okMerge {
++				return false
++			}
++		}
++		if recordedParts, hasParts := t.contentPartByItem[canonKey]; hasParts {
++			if item.Type != "message" || item.Role != "assistant" {
++				return false
++			}
++			for cIdx, wantTag := range recordedParts {
++				if cIdx < 0 || int(cIdx) >= len(item.Content) {
++					return false
++				}
++				part := item.Content[cIdx]
++				if contentPartTag(part.Type, part.Text) != wantTag {
++					return false
++				}
++			}
++		}
++		if doneRec, exists := t.doneItems[canonKey]; exists {
++			matchedDoneKeys[canonKey] = struct{}{}
++			if doneRec.isFinal != isFinalAssistantOutputItem(item) {
++				return false
++			}
++			if doneRec.isAssistantMsg {
++				if item.Type != "message" || item.Role != "assistant" {
++					return false
++				}
++				itemText := extractSingleAssistantText(item)
++				itemSHA := ""
++				if itemText != "" {
++					itemSHA = sha256Hex(itemText)
++				}
++				if itemSHA != doneRec.outputTextSHA {
++					return false
++				}
++			}
++		}
++		if !isFinalAssistantOutputItem(item) {
++			completedNonFinalCount++
 +			if item.ID != "" {
-+				if prevKind, exists := c.itemKindByKey["id:"+item.ID]; exists {
-+					if _, okMerge := mergeStrictItemKind(prevKind, itemKind); !okMerge {
-+						kindConflict = true
-+						break
-+					}
-+				}
-+			} else if prevKind, exists := c.itemKindByKey["idx:"+strconv.FormatInt(int64(idx), 10)]; exists {
-+				if _, okMerge := mergeStrictItemKind(prevKind, itemKind); !okMerge {
-+					kindConflict = true
-+					break
-+				}
++				completedNonFinalIDs[item.ID] = struct{}{}
 +			}
-+			if !isFinalAssistantOutputItem(item) {
-+				completedNonFinalCount++
-+				if item.ID != "" {
-+					completedNonFinalIDs[item.ID] = struct{}{}
-+				}
-+			}
-+		}
-+		missingStreamedNonFinal := completedNonFinalCount < len(c.streamedNonFinalKeys)+c.streamedNonFinalUnkeyed
-+		if !missingStreamedNonFinal {
-+			for nonFinalID := range c.streamedNonFinalIDs {
-+				if _, ok := completedNonFinalIDs[nonFinalID]; !ok {
-+					missingStreamedNonFinal = true
-+					break
-+				}
-+			}
-+		}
-+		if kindConflict || missingStreamedNonFinal || (completedSHA != "" && (c.lastItemOutputSHA != completedSHA || hasPendingItems)) {
-+			c.modelMismatch = true
-+			c.invalid = true
-+			c.resetOutputTrackingLocked()
-+			c.mu.Unlock()
-+			c.Taint()
-+			return
 +		}
 +	}
-+	c.observedCompleted = true
-+	c.lastResponseIDSHA = sha256Hex(id)
-+	if len(output) > 0 {
-+		c.lastOutputSHA = completedSHA
-+	} else if !hasPendingItems && c.lastItemOutputSHA != "" && c.lastItemResponseID != "" && c.lastItemResponseID == id {
-+		c.lastOutputSHA = c.lastItemOutputSHA
-+	} else {
-+		c.lastOutputSHA = ""
++	if len(matchedDoneKeys) < len(t.doneItems) {
++		return false
 +	}
-+	c.resetOutputTrackingLocked()
-+	c.mu.Unlock()
++	if completedNonFinalCount < len(t.streamedNonFinalKeys)+t.streamedNonFinalUnkeyed {
++		return false
++	}
++	for nonFinalID := range t.streamedNonFinalIDs {
++		if _, ok := completedNonFinalIDs[nonFinalID]; !ok {
++			return false
++		}
++	}
++	if completedSHA != "" && (t.lastItemOutputSHA != completedSHA || hasPendingItems) {
++		return false
++	}
++	return true
 +}
 +
 +func (c *Collector) taintStreamAnomaly() {
@@ -5455,7 +5544,8 @@ index e69de29..836cdcc 100644
 +
 +var (
 +	sseEventSchemaKeys = map[string]struct{}{
-+		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {}, "item": {}, "item_id": {}, "output_index": {},
++		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {},
++		"item": {}, "item_id": {}, "output_index": {}, "content_index": {}, "text": {}, "part": {},
 +	}
 +	sseResponseSchemaKeys = map[string]struct{}{
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
@@ -5604,27 +5694,61 @@ index e69de29..836cdcc 100644
 +	return s, true
 +}
 +
++func forEachJSONArrayElement(raw []byte, limit int, fn func(elem json.RawMessage) bool) bool {
++	dec := json.NewDecoder(bytes.NewReader(raw))
++	tok, err := dec.Token()
++	if err != nil {
++		return false
++	}
++	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
++		return false
++	}
++	count := 0
++	for dec.More() {
++		count++
++		if count > limit {
++			return false
++		}
++		var elem json.RawMessage
++		if err := dec.Decode(&elem); err != nil {
++			return false
++		}
++		if !fn(elem) {
++			return false
++		}
++	}
++	endTok, err := dec.Token()
++	if err != nil {
++		return false
++	}
++	if delim, ok := endTok.(json.Delim); !ok || delim != ']' {
++		return false
++	}
++	_, err = dec.Token()
++	return err == io.EOF
++}
++
 +func decodeExactAssistantContentParts(raw json.RawMessage) ([]responseOutputContentPart, bool) {
 +	trimmed := bytes.TrimSpace(raw)
 +	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 +		return nil, true
 +	}
-+	var rawParts []json.RawMessage
-+	if err := json.Unmarshal(trimmed, &rawParts); err != nil {
-+		return nil, false
-+	}
-+	parts := make([]responseOutputContentPart, 0, len(rawParts))
-+	for _, rp := range rawParts {
++	var parts []responseOutputContentPart
++	ok := forEachJSONArrayElement(trimmed, maxTrackedContentParts, func(rp json.RawMessage) bool {
 +		fields, err := decodeExactJSONObject(rp, sseContentPartSchemaKeys)
 +		if err != nil {
-+			return nil, false
++			return false
 +		}
 +		typ, ok1 := exactOptionalString(fields, "type")
 +		txt, ok2 := exactOptionalString(fields, "text")
 +		if !ok1 || !ok2 {
-+			return nil, false
++			return false
 +		}
 +		parts = append(parts, responseOutputContentPart{Type: typ, Text: txt})
++		return true
++	})
++	if !ok {
++		return nil, false
 +	}
 +	return parts, true
 +}
@@ -5634,19 +5758,13 @@ index e69de29..836cdcc 100644
 +	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 +		return nil, expectedRespID, true
 +	}
-+	var rawItems []json.RawMessage
-+	if err := json.Unmarshal(trimmed, &rawItems); err != nil {
-+		return nil, "", false
-+	}
-+	if len(rawItems) > maxTrackedOutputItems {
-+		return nil, "", false
-+	}
 +	boundID := expectedRespID
-+	items := make([]responseOutputItem, 0, len(rawItems))
-+	for _, ri := range rawItems {
++	var items []responseOutputItem
++	seenIDs := make(map[string]struct{})
++	ok := forEachJSONArrayElement(trimmed, maxTrackedOutputItems, func(ri json.RawMessage) bool {
 +		fields, err := decodeExactJSONObject(ri, sseItemSchemaKeys)
 +		if err != nil {
-+			return nil, "", false
++			return false
 +		}
 +		itemID, okID := exactOptionalString(fields, "id")
 +		typ, ok1 := exactOptionalString(fields, "type")
@@ -5656,44 +5774,59 @@ index e69de29..836cdcc 100644
 +		itemRespID, hasItemRespID, okRespID := exactOptionalStringPresent(fields, "response_id")
 +		if !okID || !ok1 || !ok2 || !ok3 || !ok4 || !okRespID ||
 +			len(itemID) > maxStrictIdentityBytes || len(itemRespID) > maxStrictIdentityBytes {
-+			return nil, "", false
++			return false
++		}
++		if itemID != "" {
++			if _, dup := seenIDs[itemID]; dup {
++				return false
++			}
++			seenIDs[itemID] = struct{}{}
 +		}
 +		if hasItemRespID {
 +			if itemRespID == "" || strings.TrimSpace(itemRespID) != itemRespID {
-+				return nil, "", false
++				return false
 +			}
 +			if boundID != "" && itemRespID != boundID {
-+				return nil, "", false
++				return false
 +			}
 +			boundID = itemRespID
 +		}
 +		item := responseOutputItem{ID: itemID, Type: typ, Role: role, Phase: phase, Status: status}
 +		if typ == "message" && role == "assistant" {
-+			parts, ok := decodeExactAssistantContentParts(fields["content"])
-+			if !ok {
-+				return nil, "", false
++			parts, okParts := decodeExactAssistantContentParts(fields["content"])
++			if !okParts {
++				return false
 +			}
 +			item.Content = parts
 +		}
 +		items = append(items, item)
++		return true
++	})
++	if !ok {
++		return nil, "", false
 +	}
 +	return items, boundID, true
 +}
 +
 +type parsedStrictFrame struct {
-+	evType         string
-+	respID         string
-+	respModel      string
-+	respStatus     string
-+	respErr        json.RawMessage
-+	respOutput     json.RawMessage
-+	respItems      []responseOutputItem
-+	itemRaw        json.RawMessage
-+	itemFields     map[string]json.RawMessage
-+	itemKey        string
-+	itemID         string
-+	outputIndex    int64
-+	hasOutputIndex bool
++	evType          string
++	respID          string
++	respModel       string
++	respStatus      string
++	respErr         json.RawMessage
++	respOutput      json.RawMessage
++	respItems       []responseOutputItem
++	itemRaw         json.RawMessage
++	itemFields      map[string]json.RawMessage
++	itemKey         string
++	itemID          string
++	outputIndex     int64
++	hasOutputIndex  bool
++	contentIndex    int64
++	hasContentIndex bool
++	evText          string
++	hasEvText       bool
++	partFields      map[string]json.RawMessage
 +}
 +
 +func extractStrictItemIdentity(evFields, itemFields map[string]json.RawMessage) (itemKey, itemID string, outputIndex int64, hasOutputIndex bool, ok bool) {
@@ -5752,14 +5885,12 @@ index e69de29..836cdcc 100644
 +		}
 +		itemType, ok1 := exactOptionalString(frame.itemFields, "type")
 +		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
-+		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
-+		itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
++		_, ok3 := exactOptionalString(frame.itemFields, "phase")
++		_, ok4 := exactOptionalString(frame.itemFields, "status")
 +		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" {
 +			return false
 +		}
-+		if itemType == "message" && itemRole == "assistant" &&
-+			(itemPhase == "" || itemPhase == "final_answer") &&
-+			(itemStatus == "" || itemStatus == "completed") {
++		if itemType == "message" && itemRole == "assistant" {
 +			if _, okParts := decodeExactAssistantContentParts(frame.itemFields["content"]); !okParts {
 +				return false
 +			}
@@ -5890,18 +6021,14 @@ index e69de29..836cdcc 100644
 +	if explicitRespID != "" {
 +		conflict := false
 +		c.mu.Lock()
++		tr := &c.consumer
 +		if producerOnly {
-+			if c.producerResponseID != "" && c.producerResponseID != explicitRespID {
-+				conflict = true
-+			} else {
-+				c.producerResponseID = explicitRespID
-+			}
++			tr = &c.producer
++		}
++		if tr.responseID != "" && tr.responseID != explicitRespID {
++			conflict = true
 +		} else {
-+			if c.streamResponseID != "" && c.streamResponseID != explicitRespID {
-+				conflict = true
-+			} else {
-+				c.streamResponseID = explicitRespID
-+			}
++			tr.responseID = explicitRespID
 +		}
 +		c.mu.Unlock()
 +		if conflict {
@@ -5915,9 +6042,9 @@ index e69de29..836cdcc 100644
 +		expectedItemRespID := explicitRespID
 +		if expectedItemRespID == "" {
 +			if producerOnly {
-+				expectedItemRespID = c.producerResponseID
++				expectedItemRespID = c.producer.responseID
 +			} else {
-+				expectedItemRespID = c.streamResponseID
++				expectedItemRespID = c.consumer.responseID
 +			}
 +		}
 +		c.mu.Unlock()
@@ -5931,18 +6058,14 @@ index e69de29..836cdcc 100644
 +		if boundItemRespID != "" {
 +			conflict := false
 +			c.mu.Lock()
++			tr := &c.consumer
 +			if producerOnly {
-+				if c.producerResponseID != "" && c.producerResponseID != boundItemRespID {
-+					conflict = true
-+				} else {
-+					c.producerResponseID = boundItemRespID
-+				}
++				tr = &c.producer
++			}
++			if tr.responseID != "" && tr.responseID != boundItemRespID {
++				conflict = true
 +			} else {
-+				if c.streamResponseID != "" && c.streamResponseID != boundItemRespID {
-+					conflict = true
-+				} else {
-+					c.streamResponseID = boundItemRespID
-+				}
++				tr.responseID = boundItemRespID
 +			}
 +			c.mu.Unlock()
 +			if conflict {
@@ -5956,31 +6079,83 @@ index e69de29..836cdcc 100644
 +		c.taintStreamAnomaly()
 +		return out, false
 +	}
++	var contentIndex int64
++	hasContentIndex := false
++	if rawCIdx, exists := evFields["content_index"]; exists {
++		trimmedCIdx := bytes.TrimSpace(rawCIdx)
++		if len(trimmedCIdx) > 0 && !bytes.Equal(trimmedCIdx, []byte("null")) {
++			var cIdx int64
++			if err := json.Unmarshal(trimmedCIdx, &cIdx); err != nil || cIdx < 0 || cIdx >= int64(maxTrackedContentParts) {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++			contentIndex = cIdx
++			hasContentIndex = true
++		}
++	}
++	var evText string
++	var hasEvText bool
++	if evType == "response.output_text.done" {
++		var okText bool
++		evText, hasEvText, okText = exactOptionalStringPresent(evFields, "text")
++		if !okText || !hasEvText {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	var partFields map[string]json.RawMessage
++	if evType == "response.content_part.done" && hasResponseError(evFields["part"]) {
++		var partErr error
++		partFields, partErr = decodeExactJSONObject(evFields["part"], sseContentPartSchemaKeys)
++		if partErr != nil {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		if _, ok1 := exactOptionalString(partFields, "type"); !ok1 {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++		if _, ok2 := exactOptionalString(partFields, "text"); !ok2 {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
 +	out = parsedStrictFrame{
-+		evType:         evType,
-+		respID:         respID,
-+		respModel:      respModel,
-+		respStatus:     respStatus,
-+		respErr:        respErr,
-+		respOutput:     respOutput,
-+		respItems:      respItems,
-+		itemRaw:        evFields["item"],
-+		itemFields:     itemFields,
-+		itemKey:        itemKey,
-+		itemID:         itemID,
-+		outputIndex:    outputIndex,
-+		hasOutputIndex: hasOutputIndex,
++		evType:          evType,
++		respID:          respID,
++		respModel:       respModel,
++		respStatus:      respStatus,
++		respErr:         respErr,
++		respOutput:      respOutput,
++		respItems:       respItems,
++		itemRaw:         evFields["item"],
++		itemFields:      itemFields,
++		itemKey:         itemKey,
++		itemID:          itemID,
++		outputIndex:     outputIndex,
++		hasOutputIndex:  hasOutputIndex,
++		contentIndex:    contentIndex,
++		hasContentIndex: hasContentIndex,
++		evText:          evText,
++		hasEvText:       hasEvText,
++		partFields:      partFields,
 +	}
 +	return out, true
 +}
 +
 +// ValidateStrictEvent validates model binding, response-ID consistency, explicit SSE event-name
-+// consistency, and strict protocol JSON on ONE complete assembled SSE event JSON payload (including
-+// multi-line JSON objects) without splitting on newlines. Unlike ObserveStreamChunk, it does NOT taint
-+// on legitimate upstream error fields when declared event name, model, and response ID match, and
-+// never marks observedCompleted or writes consumer-order streamResponseID.
++// consistency, strict protocol JSON, and cross-frame item/content/completion consistency on ONE
++// complete assembled SSE event JSON payload (including multi-line JSON objects) without touching
++// consumer-order state. Unlike ObserveStreamChunk, it does NOT taint on legitimate pre-completion
++// upstream error frames when declared event name, model, and response ID match.
 +func (c *Collector) ValidateStrictEvent(evName string, hasEvName bool, rawEventJSON []byte) {
 +	if c == nil || !c.strictCodex {
++		return
++	}
++	c.mu.Lock()
++	alreadyTainted := c.modelMismatch && c.invalid
++	c.mu.Unlock()
++	if alreadyTainted {
 +		return
 +	}
 +	if hasEvName && len(evName) > maxStrictIdentityBytes {
@@ -6004,7 +6179,9 @@ index e69de29..836cdcc 100644
 +	}
 +	if hasEvName && evName != frame.evType {
 +		c.taintStreamAnomaly()
++		return
 +	}
++	c.applyStrictFrame(frame, false)
 +}
 +
 +func splitSSEChunkLines(payload []byte) [][]byte {
@@ -6030,84 +6207,611 @@ index e69de29..836cdcc 100644
 +	return raw
 +}
 +
-+func (c *Collector) bindStrictItemIdentityLocked(itemID string, outputIndex int64, hasOutputIndex bool) (canonKey, effItemID string, effIdx int64, effHasIdx bool, ok bool) {
++func (t *strictStreamTracker) bindIdentity(itemID string, outputIndex int64, hasOutputIndex bool) (canonKey, effItemID string, effIdx int64, effHasIdx bool, ok bool) {
 +	if itemID != "" {
 +		canonKey = "id:" + itemID
 +		if hasOutputIndex {
-+			if prevIdx, exists := c.itemIndexByID[itemID]; exists && prevIdx != outputIndex {
++			if prevIdx, exists := t.itemIndexByID[itemID]; exists && prevIdx != outputIndex {
 +				return "", "", 0, false, false
 +			}
-+			if prevID, exists := c.itemIDByIndex[outputIndex]; exists && prevID != itemID {
++			if prevID, exists := t.itemIDByIndex[outputIndex]; exists && prevID != itemID {
 +				return "", "", 0, false, false
 +			}
-+			if _, exists := c.itemIndexByID[itemID]; !exists && len(c.itemIndexByID) >= maxTrackedOutputItems {
++			if _, exists := t.itemIndexByID[itemID]; !exists && len(t.itemIndexByID) >= maxTrackedOutputItems {
 +				return "", "", 0, false, false
 +			}
-+			if _, exists := c.itemIDByIndex[outputIndex]; !exists {
-+				if len(c.itemIDByIndex) >= maxTrackedOutputItems {
++			if _, exists := t.itemIDByIndex[outputIndex]; !exists {
++				if len(t.itemIDByIndex) >= maxTrackedOutputItems {
 +					return "", "", 0, false, false
 +				}
 +				idxKey := "idx:" + strconv.FormatInt(outputIndex, 10)
-+				if _, idxDone := c.doneItemKeys[idxKey]; idxDone {
++				if _, idxDone := t.doneItemKeys[idxKey]; idxDone {
 +					return "", "", 0, false, false
 +				}
 +				// Migrate any open index-only tracking state onto the unified canonical ID key.
-+				if _, wasPending := c.pendingItems[idxKey]; wasPending {
-+					delete(c.pendingItems, idxKey)
-+					if c.pendingItems == nil {
-+						c.pendingItems = make(map[string]struct{})
++				if _, wasPending := t.pendingItems[idxKey]; wasPending {
++					delete(t.pendingItems, idxKey)
++					if t.pendingItems == nil {
++						t.pendingItems = make(map[string]struct{})
 +					}
-+					c.pendingItems[canonKey] = struct{}{}
++					t.pendingItems[canonKey] = struct{}{}
 +				}
-+				if _, wasNonFinal := c.streamedNonFinalKeys[idxKey]; wasNonFinal {
-+					delete(c.streamedNonFinalKeys, idxKey)
-+					c.streamedNonFinalKeys[canonKey] = struct{}{}
-+					if c.streamedNonFinalIDs == nil {
-+						c.streamedNonFinalIDs = make(map[string]struct{})
++				if _, wasNonFinal := t.streamedNonFinalKeys[idxKey]; wasNonFinal {
++					delete(t.streamedNonFinalKeys, idxKey)
++					t.streamedNonFinalKeys[canonKey] = struct{}{}
++					if t.streamedNonFinalIDs == nil {
++						t.streamedNonFinalIDs = make(map[string]struct{})
 +					}
-+					c.streamedNonFinalIDs[itemID] = struct{}{}
++					t.streamedNonFinalIDs[itemID] = struct{}{}
 +				}
-+				if prevKind, hasKind := c.itemKindByKey[idxKey]; hasKind {
-+					delete(c.itemKindByKey, idxKey)
-+					if curKind, hasCur := c.itemKindByKey[canonKey]; hasCur {
++				if prevKind, hasKind := t.itemKindByKey[idxKey]; hasKind {
++					delete(t.itemKindByKey, idxKey)
++					if curKind, hasCur := t.itemKindByKey[canonKey]; hasCur {
 +						merged, okMerge := mergeStrictItemKind(curKind, prevKind)
 +						if !okMerge {
 +							return "", "", 0, false, false
 +						}
-+						c.itemKindByKey[canonKey] = merged
++						t.itemKindByKey[canonKey] = merged
 +					} else {
-+						c.itemKindByKey[canonKey] = prevKind
++						t.itemKindByKey[canonKey] = prevKind
 +					}
 +				}
-+				if seq, hasSeq := c.itemSeqByKey[idxKey]; hasSeq {
-+					if _, hasIDSeq := c.itemSeqByKey[canonKey]; !hasIDSeq {
-+						c.itemSeqByKey[canonKey] = seq
++				if prevParts, hasParts := t.contentPartByItem[idxKey]; hasParts {
++					delete(t.contentPartByItem, idxKey)
++					curParts := t.contentPartByItem[canonKey]
++					if curParts == nil {
++						t.contentPartByItem[canonKey] = prevParts
++					} else {
++						for cIdx, tag := range prevParts {
++							if existingTag, dup := curParts[cIdx]; dup && existingTag != tag {
++								return "", "", 0, false, false
++							}
++							if len(curParts) >= maxTrackedContentParts {
++								return "", "", 0, false, false
++							}
++							curParts[cIdx] = tag
++						}
 +					}
-+					delete(c.itemSeqByKey, idxKey)
++				}
++				if seq, hasSeq := t.itemSeqByKey[idxKey]; hasSeq {
++					if _, hasIDSeq := t.itemSeqByKey[canonKey]; !hasIDSeq {
++						t.itemSeqByKey[canonKey] = seq
++					}
++					delete(t.itemSeqByKey, idxKey)
 +				}
 +			}
-+			if c.itemIndexByID == nil {
-+				c.itemIndexByID = make(map[string]int64)
++			if t.itemIndexByID == nil {
++				t.itemIndexByID = make(map[string]int64)
 +			}
-+			if c.itemIDByIndex == nil {
-+				c.itemIDByIndex = make(map[int64]string)
++			if t.itemIDByIndex == nil {
++				t.itemIDByIndex = make(map[int64]string)
 +			}
-+			c.itemIndexByID[itemID] = outputIndex
-+			c.itemIDByIndex[outputIndex] = itemID
++			t.itemIndexByID[itemID] = outputIndex
++			t.itemIDByIndex[outputIndex] = itemID
 +			return canonKey, itemID, outputIndex, true, true
 +		}
-+		if prevIdx, exists := c.itemIndexByID[itemID]; exists {
++		if prevIdx, exists := t.itemIndexByID[itemID]; exists {
 +			return canonKey, itemID, prevIdx, true, true
 +		}
 +		return canonKey, itemID, 0, false, true
 +	}
 +	if hasOutputIndex {
-+		if prevID, exists := c.itemIDByIndex[outputIndex]; exists {
++		if prevID, exists := t.itemIDByIndex[outputIndex]; exists {
 +			return "id:" + prevID, prevID, outputIndex, true, true
 +		}
 +		return "idx:" + strconv.FormatInt(outputIndex, 10), "", outputIndex, true, true
 +	}
 +	return "", "", 0, false, true
++}
++
++func (t *strictStreamTracker) assignSeq(canonKey string) (int, bool) {
++	if canonKey != "" {
++		if existing, exists := t.itemSeqByKey[canonKey]; exists {
++			return existing, true
++		}
++	}
++	if t.nextItemSeq >= maxTrackedOutputItems {
++		return 0, false
++	}
++	t.nextItemSeq++
++	seq := t.nextItemSeq
++	if canonKey != "" {
++		if len(t.itemSeqByKey) >= maxTrackedOutputItems {
++			return 0, false
++		}
++		if t.itemSeqByKey == nil {
++			t.itemSeqByKey = make(map[string]int)
++		}
++		t.itemSeqByKey[canonKey] = seq
++	}
++	return seq, true
++}
++
++func (t *strictStreamTracker) recordItemKind(canonKey string, kind strictItemKind) bool {
++	if canonKey == "" || kind == itemKindUnknown {
++		return true
++	}
++	prev := t.itemKindByKey[canonKey]
++	merged, okMerge := mergeStrictItemKind(prev, kind)
++	if !okMerge {
++		return false
++	}
++	if _, exists := t.itemKindByKey[canonKey]; !exists && len(t.itemKindByKey) >= maxTrackedOutputItems {
++		return false
++	}
++	if t.itemKindByKey == nil {
++		t.itemKindByKey = make(map[string]strictItemKind)
++	}
++	t.itemKindByKey[canonKey] = merged
++	return true
++}
++
++func (t *strictStreamTracker) recordContentPart(canonKey string, contentIdx int64, partType, text string) bool {
++	if canonKey == "" {
++		return true
++	}
++	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
++		return false
++	}
++	tag := contentPartTag(partType, text)
++	parts := t.contentPartByItem[canonKey]
++	if parts != nil {
++		if prevTag, exists := parts[contentIdx]; exists {
++			return prevTag == tag
++		}
++		if len(parts) >= maxTrackedContentParts {
++			return false
++		}
++	} else {
++		if len(t.contentPartByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.contentPartByItem == nil {
++			t.contentPartByItem = make(map[string]map[int64]string)
++		}
++		parts = make(map[int64]string)
++		t.contentPartByItem[canonKey] = parts
++	}
++	parts[contentIdx] = tag
++	return true
++}
++
++func (t *strictStreamTracker) recordNonFinal(seq int, canonKey, itemID string, outputIndex int64, hasOutputIndex, countUnkeyed bool) bool {
++	if seq > t.maxNonFinalSeq {
++		t.maxNonFinalSeq = seq
++	}
++	if hasOutputIndex && (!t.hasMaxNonFinalOutputIndex || outputIndex > t.maxNonFinalOutputIndex) {
++		t.maxNonFinalOutputIndex = outputIndex
++		t.hasMaxNonFinalOutputIndex = true
++	}
++	if itemID != "" {
++		if _, exists := t.streamedNonFinalIDs[itemID]; !exists && len(t.streamedNonFinalIDs) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.streamedNonFinalIDs == nil {
++			t.streamedNonFinalIDs = make(map[string]struct{})
++		}
++		t.streamedNonFinalIDs[itemID] = struct{}{}
++	}
++	if canonKey != "" {
++		if _, exists := t.streamedNonFinalKeys[canonKey]; !exists && len(t.streamedNonFinalKeys) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.streamedNonFinalKeys == nil {
++			t.streamedNonFinalKeys = make(map[string]struct{})
++		}
++		t.streamedNonFinalKeys[canonKey] = struct{}{}
++	} else if countUnkeyed {
++		if t.streamedNonFinalUnkeyed >= maxTrackedOutputItems {
++			return false
++		}
++		t.streamedNonFinalUnkeyed++
++	}
++	return true
++}
++
++func (c *Collector) applyStrictFrame(frame parsedStrictFrame, isConsumer bool) {
++	c.mu.Lock()
++	if c.modelMismatch && c.invalid {
++		c.mu.Unlock()
++		return
++	}
++	t := &c.producer
++	if isConsumer {
++		t = &c.consumer
++	}
++	if t.sawCompleted || (isConsumer && c.observedCompleted) {
++		c.mu.Unlock()
++		c.taintStreamAnomaly()
++		return
++	}
++	switch frame.evType {
++	case "response.created", "response.queued", "response.in_progress":
++		c.mu.Unlock()
++		return
++	case "response.output_item.added":
++		c.mu.Unlock()
++		if !validateStrictOutputItemEvent(frame) {
++			c.taintStreamAnomaly()
++			return
++		}
++		itemType, _ := exactOptionalString(frame.itemFields, "type")
++		itemRole, _ := exactOptionalString(frame.itemFields, "role")
++		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
++		addedKind := classifyOutputItemKind(itemType, itemRole, itemPhase, false)
++		isExplicitNonFinal := addedKind == itemKindCommentary || addedKind == itemKindNonMessage
++		c.mu.Lock()
++		canonKey, effItemID, effIdx, effHasIdx, okBind := t.bindIdentity(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++		if !okBind {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		if canonKey != "" {
++			if _, alreadyDone := t.doneItemKeys[canonKey]; alreadyDone {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		}
++		if !t.recordItemKind(canonKey, addedKind) {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		t.sawStreamedOutputItem = true
++		seq, okSeq := t.assignSeq(canonKey)
++		if !okSeq {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		if seq > t.maxItemSeq {
++			t.maxItemSeq = seq
++		}
++		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
++			t.maxOutputIndex = effIdx
++			t.hasMaxOutputIndex = true
++		}
++		isStrictlyEarlier := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
++			(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++		if !isStrictlyEarlier {
++			t.lastItemOutputSHA = ""
++			t.lastItemResponseID = ""
++			t.lastItemSeq = 0
++			t.hasLastItemOutputIndex = false
++			t.lastItemOutputIndex = 0
++		}
++		if canonKey != "" {
++			if _, exists := t.pendingItems[canonKey]; !exists && len(t.pendingItems) >= maxTrackedOutputItems {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if t.pendingItems == nil {
++				t.pendingItems = make(map[string]struct{})
++			}
++			t.pendingItems[canonKey] = struct{}{}
++		} else {
++			if t.pendingUnkeyed >= maxTrackedOutputItems {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			t.pendingUnkeyed++
++		}
++		if isExplicitNonFinal && !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		c.mu.Unlock()
++		return
++	case "response.output_item.done":
++		c.mu.Unlock()
++		if !validateStrictOutputItemEvent(frame) {
++			c.taintStreamAnomaly()
++			return
++		}
++		var compactItem bytes.Buffer
++		if err := json.Compact(&compactItem, frame.itemRaw); err != nil {
++			c.taintStreamAnomaly()
++			return
++		}
++		doneDigest := sha256Hex(compactItem.String())
++		itemType, _ := exactOptionalString(frame.itemFields, "type")
++		itemRole, _ := exactOptionalString(frame.itemFields, "role")
++		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
++		itemStatus, _ := exactOptionalString(frame.itemFields, "status")
++		doneKind := classifyOutputItemKind(itemType, itemRole, itemPhase, true)
++		isAssistantMsg := itemType == "message" && itemRole == "assistant"
++		isFinalCandidate := isAssistantMsg &&
++			(itemPhase == "" || itemPhase == "final_answer") &&
++			(itemStatus == "" || itemStatus == "completed")
++		var parts []responseOutputContentPart
++		var outTextSHA string
++		if isAssistantMsg {
++			var okParts bool
++			parts, okParts = decodeExactAssistantContentParts(frame.itemFields["content"])
++			if !okParts {
++				c.taintStreamAnomaly()
++				return
++			}
++			var b strings.Builder
++			for _, part := range parts {
++				if part.Type == "output_text" {
++					b.WriteString(part.Text)
++				}
++			}
++			if b.Len() > 0 {
++				outTextSHA = sha256Hex(b.String())
++			}
++		}
++		c.mu.Lock()
++		canonKey, effItemID, effIdx, effHasIdx, okBind := t.bindIdentity(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++		if !okBind {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		if !t.recordItemKind(canonKey, doneKind) {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		if canonKey != "" {
++			if isAssistantMsg {
++				if existingParts, hasExisting := t.contentPartByItem[canonKey]; hasExisting {
++					for cIdx := range existingParts {
++						if cIdx < 0 || int(cIdx) >= len(parts) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
++				for i, part := range parts {
++					if !t.recordContentPart(canonKey, int64(i), part.Type, part.Text) {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
++					}
++				}
++			} else if _, hasParts := t.contentPartByItem[canonKey]; hasParts {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if prevRec, alreadyDone := t.doneItems[canonKey]; alreadyDone {
++				if prevRec.doneDigest != doneDigest {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				c.mu.Unlock()
++				return
++			}
++			if len(t.doneItemKeys) >= maxTrackedOutputItems {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			delete(t.pendingItems, canonKey)
++			if t.doneItemKeys == nil {
++				t.doneItemKeys = make(map[string]struct{})
++			}
++			if t.doneItems == nil {
++				t.doneItems = make(map[string]doneItemSummary)
++			}
++			t.doneItemKeys[canonKey] = struct{}{}
++			t.doneItems[canonKey] = doneItemSummary{
++				itemID:         effItemID,
++				outputIndex:    effIdx,
++				hasOutputIndex: effHasIdx,
++				isFinal:        isFinalCandidate,
++				isAssistantMsg: isAssistantMsg,
++				outputTextSHA:  outTextSHA,
++				doneDigest:     doneDigest,
++			}
++		}
++		seq, okSeq := t.assignSeq(canonKey)
++		if !okSeq {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		if seq > t.maxItemSeq {
++			t.maxItemSeq = seq
++		}
++		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
++			t.maxOutputIndex = effIdx
++			t.hasMaxOutputIndex = true
++		}
++		t.sawStreamedOutputItem = true
++		if isFinalCandidate {
++			rid := t.responseID
++			isLatest := seq >= t.maxItemSeq && seq > t.maxNonFinalSeq
++			if effHasIdx {
++				if (t.hasMaxOutputIndex && effIdx < t.maxOutputIndex) ||
++					(t.hasMaxNonFinalOutputIndex && effIdx <= t.maxNonFinalOutputIndex) {
++					isLatest = false
++				}
++			}
++			if isLatest {
++				if outTextSHA != "" && rid != "" {
++					t.lastItemOutputSHA = outTextSHA
++					t.lastItemResponseID = rid
++					t.lastItemSeq = seq
++					t.hasLastItemOutputIndex = effHasIdx
++					t.lastItemOutputIndex = effIdx
++				} else {
++					t.lastItemOutputSHA = ""
++					t.lastItemResponseID = ""
++					t.lastItemSeq = 0
++					t.hasLastItemOutputIndex = false
++					t.lastItemOutputIndex = 0
++				}
++			}
++		} else {
++			if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			isStrictlyEarlier := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
++				(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++			if !isStrictlyEarlier {
++				t.lastItemOutputSHA = ""
++				t.lastItemResponseID = ""
++				t.lastItemSeq = 0
++				t.hasLastItemOutputIndex = false
++				t.lastItemOutputIndex = 0
++			}
++		}
++		c.mu.Unlock()
++		return
++	case "response.completed":
++		outText := extractAssistantOutputText(frame.respItems)
++		completedSHA := ""
++		if outText != "" {
++			completedSHA = sha256Hex(outText)
++		}
++		expected := c.expectedModel
++		otherRespID := c.producer.responseID
++		if !isConsumer {
++			otherRespID = ""
++		}
++		if frame.respStatus != "completed" || hasResponseError(frame.respErr) ||
++			expected == "" || frame.respModel != expected ||
++			frame.respID == "" || strings.TrimSpace(frame.respID) != frame.respID ||
++			(t.responseID != "" && t.responseID != frame.respID) ||
++			(otherRespID != "" && otherRespID != frame.respID) ||
++			!t.verifyCompletedOutput(frame.respItems, completedSHA) {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		hasPendingItems := len(t.pendingItems) > 0 || t.pendingUnkeyed > 0
++		t.sawCompleted = true
++		if isConsumer {
++			c.observedCompleted = true
++			c.lastResponseIDSHA = sha256Hex(frame.respID)
++			if len(frame.respItems) > 0 {
++				c.lastOutputSHA = completedSHA
++			} else if !hasPendingItems && t.lastItemOutputSHA != "" && t.lastItemResponseID != "" && t.lastItemResponseID == frame.respID {
++				c.lastOutputSHA = t.lastItemOutputSHA
++			} else {
++				c.lastOutputSHA = ""
++			}
++		}
++		t.resetTracking()
++		c.mu.Unlock()
++		return
++	case "response.done":
++		c.mu.Unlock()
++		c.taintStreamAnomaly()
++		return
++	case "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
++		t.resetTracking()
++		if isConsumer {
++			c.invalid = true
++			alreadyCompleted := c.observedCompleted
++			c.mu.Unlock()
++			if alreadyCompleted {
++				c.Taint()
++			}
++			return
++		}
++		c.mu.Unlock()
++		return
++	default:
++		deltaKind := classifyDeltaEventKind(frame.evType)
++		canonKey, effItemID, effIdx, effHasIdx, okBind := t.bindIdentity(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++		if !okBind || !t.recordItemKind(canonKey, deltaKind) {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		if frame.evType == "response.output_text.done" {
++			cIdx := int64(0)
++			if frame.hasContentIndex {
++				cIdx = frame.contentIndex
++			}
++			if !frame.hasEvText || !t.recordContentPart(canonKey, cIdx, "output_text", frame.evText) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		} else if frame.evType == "response.content_part.done" && frame.partFields != nil {
++			pType, _ := exactOptionalString(frame.partFields, "type")
++			pText, _ := exactOptionalString(frame.partFields, "text")
++			cIdx := int64(0)
++			if frame.hasContentIndex {
++				cIdx = frame.contentIndex
++			}
++			if pType != "" && !t.recordContentPart(canonKey, cIdx, pType, pText) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		}
++		t.sawStreamedOutputItem = true
++		seq, okSeq := t.assignSeq(canonKey)
++		if !okSeq {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		if seq > t.maxItemSeq {
++			t.maxItemSeq = seq
++		}
++		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
++			t.maxOutputIndex = effIdx
++			t.hasMaxOutputIndex = true
++		}
++		if deltaKind == itemKindNonMessage {
++			if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, false) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		}
++		alreadyDone := false
++		if canonKey != "" {
++			_, alreadyDone = t.doneItemKeys[canonKey]
++		}
++		if !alreadyDone {
++			if canonKey != "" {
++				if _, exists := t.pendingItems[canonKey]; !exists && len(t.pendingItems) >= maxTrackedOutputItems {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if t.pendingItems == nil {
++					t.pendingItems = make(map[string]struct{})
++				}
++				t.pendingItems[canonKey] = struct{}{}
++			} else {
++				if t.pendingUnkeyed >= maxTrackedOutputItems {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				t.pendingUnkeyed++
++			}
++		}
++		isEarlierDelta := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
++			(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++		if !isEarlierDelta {
++			t.lastItemOutputSHA = ""
++			t.lastItemResponseID = ""
++			t.lastItemSeq = 0
++			t.hasLastItemOutputIndex = false
++			t.lastItemOutputIndex = 0
++		}
++		c.mu.Unlock()
++		return
++	}
 +}
 +
 +func (c *Collector) dispatchSSEEvent(evName string, hasEvName bool, dataLines [][]byte) {
@@ -6148,371 +6852,7 @@ index e69de29..836cdcc 100644
 +		c.taintStreamAnomaly()
 +		return
 +	}
-+	if c.ObservedCompleted() {
-+		// Any SSE JSON data event arriving after response.completed contradicts terminal completion
-+		// (e.g. duplicate completion, trailing output_item.done refusal/overwrite, or trailing error).
-+		c.taintStreamAnomaly()
-+		return
-+	}
-+	assignSeqLocked := func(canonKey string) (int, bool) {
-+		if canonKey != "" {
-+			if existing, exists := c.itemSeqByKey[canonKey]; exists {
-+				return existing, true
-+			}
-+		}
-+		if c.nextItemSeq >= maxTrackedOutputItems {
-+			return 0, false
-+		}
-+		c.nextItemSeq++
-+		seq := c.nextItemSeq
-+		if canonKey != "" {
-+			if len(c.itemSeqByKey) >= maxTrackedOutputItems {
-+				return 0, false
-+			}
-+			if c.itemSeqByKey == nil {
-+				c.itemSeqByKey = make(map[string]int)
-+			}
-+			c.itemSeqByKey[canonKey] = seq
-+		}
-+		return seq, true
-+	}
-+	recordItemKindLocked := func(canonKey string, kind strictItemKind) bool {
-+		if canonKey == "" || kind == itemKindUnknown {
-+			return true
-+		}
-+		prev := c.itemKindByKey[canonKey]
-+		merged, okMerge := mergeStrictItemKind(prev, kind)
-+		if !okMerge {
-+			return false
-+		}
-+		if _, exists := c.itemKindByKey[canonKey]; !exists && len(c.itemKindByKey) >= maxTrackedOutputItems {
-+			return false
-+		}
-+		if c.itemKindByKey == nil {
-+			c.itemKindByKey = make(map[string]strictItemKind)
-+		}
-+		c.itemKindByKey[canonKey] = merged
-+		return true
-+	}
-+	recordNonFinalLocked := func(seq int, canonKey, itemID string, outputIndex int64, hasOutputIndex, countUnkeyed bool) bool {
-+		if seq > c.maxNonFinalSeq {
-+			c.maxNonFinalSeq = seq
-+		}
-+		if hasOutputIndex && (!c.hasMaxNonFinalOutputIndex || outputIndex > c.maxNonFinalOutputIndex) {
-+			c.maxNonFinalOutputIndex = outputIndex
-+			c.hasMaxNonFinalOutputIndex = true
-+		}
-+		if itemID != "" {
-+			if _, exists := c.streamedNonFinalIDs[itemID]; !exists && len(c.streamedNonFinalIDs) >= maxTrackedOutputItems {
-+				return false
-+			}
-+			if c.streamedNonFinalIDs == nil {
-+				c.streamedNonFinalIDs = make(map[string]struct{})
-+			}
-+			c.streamedNonFinalIDs[itemID] = struct{}{}
-+		}
-+		if canonKey != "" {
-+			if _, exists := c.streamedNonFinalKeys[canonKey]; !exists && len(c.streamedNonFinalKeys) >= maxTrackedOutputItems {
-+				return false
-+			}
-+			if c.streamedNonFinalKeys == nil {
-+				c.streamedNonFinalKeys = make(map[string]struct{})
-+			}
-+			c.streamedNonFinalKeys[canonKey] = struct{}{}
-+		} else if countUnkeyed {
-+			if c.streamedNonFinalUnkeyed >= maxTrackedOutputItems {
-+				return false
-+			}
-+			c.streamedNonFinalUnkeyed++
-+		}
-+		return true
-+	}
-+	switch frame.evType {
-+	case "response.created", "response.queued", "response.in_progress":
-+		// Response-level lifecycle events carry no output item; streamResponseID and model are already validated above.
-+	case "response.output_item.added":
-+		if !validateStrictOutputItemEvent(frame) {
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		itemType, _ := exactOptionalString(frame.itemFields, "type")
-+		itemRole, _ := exactOptionalString(frame.itemFields, "role")
-+		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
-+		addedKind := classifyOutputItemKind(itemType, itemRole, itemPhase, false)
-+		isExplicitNonFinal := addedKind == itemKindCommentary || addedKind == itemKindNonMessage
-+		// Any newly started output item (tool call, approval request, or subsequent message) supersedes
-+		// earlier completed assistant preamble text and stays pending until its matching done event arrives.
-+		c.mu.Lock()
-+		canonKey, effItemID, effIdx, effHasIdx, okBind := c.bindStrictItemIdentityLocked(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
-+		if !okBind {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		if canonKey != "" {
-+			if _, alreadyDone := c.doneItemKeys[canonKey]; alreadyDone {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
-+			}
-+		}
-+		if !recordItemKindLocked(canonKey, addedKind) {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		c.sawStreamedOutputItem = true
-+		seq, okSeq := assignSeqLocked(canonKey)
-+		if !okSeq {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		if seq > c.maxItemSeq {
-+			c.maxItemSeq = seq
-+		}
-+		if effHasIdx && (!c.hasMaxOutputIndex || effIdx > c.maxOutputIndex) {
-+			c.maxOutputIndex = effIdx
-+			c.hasMaxOutputIndex = true
-+		}
-+		isStrictlyEarlier := c.lastItemOutputSHA != "" && seq < c.lastItemSeq &&
-+			(!c.hasLastItemOutputIndex || (effHasIdx && effIdx < c.lastItemOutputIndex))
-+		if !isStrictlyEarlier {
-+			c.lastItemOutputSHA = ""
-+			c.lastItemResponseID = ""
-+			c.lastItemSeq = 0
-+			c.hasLastItemOutputIndex = false
-+			c.lastItemOutputIndex = 0
-+		}
-+		if canonKey != "" {
-+			if _, exists := c.pendingItems[canonKey]; !exists && len(c.pendingItems) >= maxTrackedOutputItems {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
-+			}
-+			if c.pendingItems == nil {
-+				c.pendingItems = make(map[string]struct{})
-+			}
-+			c.pendingItems[canonKey] = struct{}{}
-+		} else {
-+			if c.pendingUnkeyed >= maxTrackedOutputItems {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
-+			}
-+			c.pendingUnkeyed++
-+		}
-+		if isExplicitNonFinal && !recordNonFinalLocked(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		c.mu.Unlock()
-+	case "response.output_item.done":
-+		if !validateStrictOutputItemEvent(frame) {
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		var compactItem bytes.Buffer
-+		if err := json.Compact(&compactItem, frame.itemRaw); err != nil {
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		doneDigest := sha256Hex(compactItem.String())
-+		itemType, _ := exactOptionalString(frame.itemFields, "type")
-+		itemRole, _ := exactOptionalString(frame.itemFields, "role")
-+		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
-+		itemStatus, _ := exactOptionalString(frame.itemFields, "status")
-+		doneKind := classifyOutputItemKind(itemType, itemRole, itemPhase, true)
-+		var parts []responseOutputContentPart
-+		isFinalCandidate := itemType == "message" && itemRole == "assistant" &&
-+			(itemPhase == "" || itemPhase == "final_answer") &&
-+			(itemStatus == "" || itemStatus == "completed")
-+		if isFinalCandidate {
-+			parts, _ = decodeExactAssistantContentParts(frame.itemFields["content"])
-+		}
-+		c.mu.Lock()
-+		canonKey, effItemID, effIdx, effHasIdx, okBind := c.bindStrictItemIdentityLocked(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
-+		if !okBind {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		if !recordItemKindLocked(canonKey, doneKind) {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		if canonKey != "" {
-+			if prevDigest, alreadyDone := c.doneItemDigestByKey[canonKey]; alreadyDone {
-+				if prevDigest != doneDigest {
-+					c.mu.Unlock()
-+					c.taintStreamAnomaly()
-+					return
-+				}
-+				c.mu.Unlock()
-+				return
-+			}
-+			if len(c.doneItemKeys) >= maxTrackedOutputItems {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
-+			}
-+			delete(c.pendingItems, canonKey)
-+			if c.doneItemKeys == nil {
-+				c.doneItemKeys = make(map[string]struct{})
-+			}
-+			if c.doneItemDigestByKey == nil {
-+				c.doneItemDigestByKey = make(map[string]string)
-+			}
-+			c.doneItemKeys[canonKey] = struct{}{}
-+			c.doneItemDigestByKey[canonKey] = doneDigest
-+		}
-+		seq, okSeq := assignSeqLocked(canonKey)
-+		if !okSeq {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		if seq > c.maxItemSeq {
-+			c.maxItemSeq = seq
-+		}
-+		if effHasIdx && (!c.hasMaxOutputIndex || effIdx > c.maxOutputIndex) {
-+			c.maxOutputIndex = effIdx
-+			c.hasMaxOutputIndex = true
-+		}
-+		c.sawStreamedOutputItem = true
-+		if isFinalCandidate {
-+			var b strings.Builder
-+			for _, part := range parts {
-+				if part.Type == "output_text" {
-+					b.WriteString(part.Text)
-+				}
-+			}
-+			rid := c.streamResponseID
-+			isLatest := seq >= c.maxItemSeq && seq > c.maxNonFinalSeq
-+			if effHasIdx {
-+				if (c.hasMaxOutputIndex && effIdx < c.maxOutputIndex) ||
-+					(c.hasMaxNonFinalOutputIndex && effIdx <= c.maxNonFinalOutputIndex) {
-+					isLatest = false
-+				}
-+			}
-+			if isLatest {
-+				if b.Len() > 0 && rid != "" {
-+					c.lastItemOutputSHA = sha256Hex(b.String())
-+					c.lastItemResponseID = rid
-+					c.lastItemSeq = seq
-+					c.hasLastItemOutputIndex = effHasIdx
-+					c.lastItemOutputIndex = effIdx
-+				} else {
-+					c.lastItemOutputSHA = ""
-+					c.lastItemResponseID = ""
-+					c.lastItemSeq = 0
-+					c.hasLastItemOutputIndex = false
-+					c.lastItemOutputIndex = 0
-+				}
-+			}
-+		} else {
-+			// Any non-assistant-message, commentary, or non-completed item supersedes earlier
-+			// unphased assistant text, while an earlier-indexed item finishing out-of-order MUST NOT
-+			// erase a verified later final assistant answer.
-+			if !recordNonFinalLocked(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
-+			}
-+			isStrictlyEarlier := c.lastItemOutputSHA != "" && seq < c.lastItemSeq &&
-+				(!c.hasLastItemOutputIndex || (effHasIdx && effIdx < c.lastItemOutputIndex))
-+			if !isStrictlyEarlier {
-+				c.lastItemOutputSHA = ""
-+				c.lastItemResponseID = ""
-+				c.lastItemSeq = 0
-+				c.hasLastItemOutputIndex = false
-+				c.lastItemOutputIndex = 0
-+			}
-+		}
-+		c.mu.Unlock()
-+	case "response.completed":
-+		c.recordCompletedResponse(frame.respID, frame.respModel, frame.respStatus, frame.respErr, frame.respItems)
-+	case "response.done":
-+		c.taintStreamAnomaly()
-+	case "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
-+		c.mu.Lock()
-+		c.invalid = true
-+		c.resetOutputTrackingLocked()
-+		alreadyCompleted := c.observedCompleted
-+		c.mu.Unlock()
-+		if alreadyCompleted {
-+			c.Taint()
-+		}
-+	default:
-+		// Any mid-stream progress/delta event (content_part, output_text.delta, function/mcp call
-+		// progress, etc.) validates item kind consistency, advances output-item ordering, and marks
-+		// its item pending until a matching output_item.done completes.
-+		deltaKind := classifyDeltaEventKind(frame.evType)
-+		c.mu.Lock()
-+		canonKey, effItemID, effIdx, effHasIdx, okBind := c.bindStrictItemIdentityLocked(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
-+		if !okBind || !recordItemKindLocked(canonKey, deltaKind) {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		c.sawStreamedOutputItem = true
-+		seq, okSeq := assignSeqLocked(canonKey)
-+		if !okSeq {
-+			c.mu.Unlock()
-+			c.taintStreamAnomaly()
-+			return
-+		}
-+		if seq > c.maxItemSeq {
-+			c.maxItemSeq = seq
-+		}
-+		if effHasIdx && (!c.hasMaxOutputIndex || effIdx > c.maxOutputIndex) {
-+			c.maxOutputIndex = effIdx
-+			c.hasMaxOutputIndex = true
-+		}
-+		if deltaKind == itemKindNonMessage {
-+			if !recordNonFinalLocked(seq, canonKey, effItemID, effIdx, effHasIdx, false) {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
-+			}
-+		}
-+		alreadyDone := false
-+		if canonKey != "" {
-+			_, alreadyDone = c.doneItemKeys[canonKey]
-+		}
-+		if !alreadyDone {
-+			if canonKey != "" {
-+				if _, exists := c.pendingItems[canonKey]; !exists && len(c.pendingItems) >= maxTrackedOutputItems {
-+					c.mu.Unlock()
-+					c.taintStreamAnomaly()
-+					return
-+				}
-+				if c.pendingItems == nil {
-+					c.pendingItems = make(map[string]struct{})
-+				}
-+				c.pendingItems[canonKey] = struct{}{}
-+			} else {
-+				if c.pendingUnkeyed >= maxTrackedOutputItems {
-+					c.mu.Unlock()
-+					c.taintStreamAnomaly()
-+					return
-+				}
-+				c.pendingUnkeyed++
-+			}
-+		}
-+		isEarlierDelta := c.lastItemOutputSHA != "" && seq < c.lastItemSeq &&
-+			(!c.hasLastItemOutputIndex || (effHasIdx && effIdx < c.lastItemOutputIndex))
-+		if !isEarlierDelta {
-+			c.lastItemOutputSHA = ""
-+			c.lastItemResponseID = ""
-+			c.lastItemSeq = 0
-+			c.hasLastItemOutputIndex = false
-+			c.lastItemOutputIndex = 0
-+		}
-+		c.mu.Unlock()
-+	}
++	c.applyStrictFrame(frame, true)
 +}
 +
 +// ObserveStreamChunk frames SSE events on blank-line boundaries, validates explicit event names,
@@ -8209,10 +8549,10 @@ index e69de29..836cdcc 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..b4a5f46 100644
+index e69de29..bfc0c30 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3735 @@
+@@ -0,0 +1,3833 @@
 +package preflightreceipt
 +
 +import (
@@ -11946,5 +12286,103 @@ index e69de29..b4a5f46 100644
 +	sb.WriteString("data: " + `{"type":"response.completed","response":{"id":"resp_cap","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n")
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555534", "019d0000-0000-7000-8000-888888888134", sb.String()); st != SealRejected {
 +		t.Fatalf("exceeding maxTrackedOutputItems seal = %v, want SealRejected", st)
++	}
++	maxTrackedOutputItems = origMaxTracked
++
++	// 26. Sol P1 #1 + Astra P1 #1 (PR #2280 R16): response.output_text.done conflicting with output_item.done
++	//     and response.completed MUST taint; matching output_text.done + content_part.done MUST seal cleanly.
++	sseTextDoneConflict := "data: " + `{"type":"response.created","response":{"id":"resp_tdc1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_td","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.done","output_index":0,"item_id":"msg_td","content_index":0,"text":"VERDICT: BLOCK"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_td","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_tdc1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_td","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555535", "019d0000-0000-7000-8000-888888888135", sseTextDoneConflict); st != SealRejected {
++		t.Fatalf("output_text.done text mismatch seal = %v, want SealRejected", st)
++	}
++	lTextDoneMatch := "review-d1111111-2222-4333-8444-555555555536"
++	sTextDoneMatch := "019d0000-0000-7000-8000-888888888136"
++	sseTextDoneMatch := "data: " + `{"type":"response.created","response":{"id":"resp_tdm1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_ok","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.done","output_index":0,"item_id":"msg_ok","content_index":0,"text":"VERDICT: PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.done","output_index":0,"item_id":"msg_ok","content_index":0,"part":{"type":"output_text","text":"VERDICT: PASS"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_tdm1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lTextDoneMatch, sTextDoneMatch, sseTextDoneMatch); st != SealOK {
++		t.Fatalf("matching output_text.done + content_part.done seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lTextDoneMatch); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("matching output_text.done hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 27. Astra P1 #2 (PR #2280 R16): duplicate item IDs inside response.completed.output[] MUST taint
++	//     even when no prior output_item events were streamed.
++	sseDupIDCompleted := "data: " + `{"type":"response.completed","response":{"id":"resp_dupid","status":"completed","model":"gpt-6.2-sol","output":[{"id":"dup_1","type":"function_call","name":"shell"},{"id":"dup_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555537", "019d0000-0000-7000-8000-888888888137", sseDupIDCompleted); st != SealRejected {
++		t.Fatalf("duplicate item ID in response.completed.output seal = %v, want SealRejected", st)
++	}
++
++	// 28. Sol P1 #2 (PR #2280 R16): two completed assistant items where response.completed.output[] omits
++	//     item 1 and moves its text into item 0 MUST taint (per-item position + text binding).
++	sseSwapCompleted := "data: " + `{"type":"response.created","response":{"id":"resp_swap","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"first-answer"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"second-answer"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_swap","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"second-answer"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555538", "019d0000-0000-7000-8000-888888888138", sseSwapCompleted); st != SealRejected {
++		t.Fatalf("response.completed omitting msg_1 and rewriting msg_0 seal = %v, want SealRejected", st)
++	}
++
++	// 29. Astra P1 #3 (PR #2280 R16): producer ValidateStrictEvent MUST catch cross-frame duplicate/kind
++	//     conflicts even when downstream cancels before ObserveStreamChunk runs (tainting prior Turn 1).
++	lProdCross := "review-d1111111-2222-4333-8444-555555555539"
++	sProdCross := "019d0000-0000-7000-8000-888888888139"
++	ctxPC1, cPC1, err := BeginReview(context.Background(), root, lProdCross, sProdCross, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxPC1, ePC1, err := cPC1.Start(ctxPC1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clPC1 := httptransport.Decorate(ctxPC1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqPC1, _ := http.NewRequestWithContext(ctxPC1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respPC1, err := clPC1.Do(reqPC1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respPC1.Body)
++	_ = respPC1.Body.Close()
++	cPC1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_pc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1-clean"}]}]}}` + "\n\n"))
++	ePC1.End()
++	cPC1.Complete(true)
++	cPC1.HandlerDone(true)
++	// Turn 2: producer sees conflicting output_item.done, then client cancels before consumer observes anything.
++	ctxPC2, cPC2, err := BeginReview(context.Background(), root, lProdCross, sProdCross, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, ePC2, err := cPC2.Start(ctxPC2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cPC2.ValidateStrictEvent("", false, []byte(`{"type":"response.created","response":{"id":"resp_pc2","status":"in_progress","model":"gpt-6.2-sol"}}`))
++	cPC2.ValidateStrictEvent("", false, []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_c","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: BLOCK"}]}}`))
++	cPC2.ValidateStrictEvent("", false, []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_c","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`))
++	cPC2.Reject()
++	ePC2.End()
++	cPC2.Complete(false)
++	cPC2.HandlerDone(false)
++	if st := SealReview(root, lProdCross, sProdCross); st != SealRejected {
++		t.Fatalf("producer cross-frame conflict + early cancel seal = %v, want SealRejected", st)
++	}
++
++	// 30. Astra P2 #2 (PR #2280 R16): exceeding maxTrackedContentParts during streaming decode MUST taint.
++	origMaxParts := maxTrackedContentParts
++	maxTrackedContentParts = 2
++	defer func() { maxTrackedContentParts = origMaxParts }()
++	sseTooManyParts := "data: " + `{"type":"response.completed","response":{"id":"resp_parts","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_p","type":"message","role":"assistant","content":[{"type":"output_text","text":"1"},{"type":"output_text","text":"2"},{"type":"output_text","text":"3"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555540", "019d0000-0000-7000-8000-888888888140", sseTooManyParts); st != SealRejected {
++		t.Fatalf("exceeding maxTrackedContentParts seal = %v, want SealRejected", st)
 +	}
 +}
