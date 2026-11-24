@@ -5141,10 +5141,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..69999b9 100644
+index e69de29..09b0cad 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,4579 @@
+@@ -0,0 +1,4658 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5349,10 +5349,11 @@ index e69de29..69999b9 100644
 +}
 +
 +type textDeltaState struct {
-+	h        hash.Hash
-+	hasSeed  bool
-+	hasDelta bool
-+	seedSHA  string
++	h            hash.Hash
++	hasSeed      bool
++	fromSnapshot bool
++	hasDelta     bool
++	seedSHA      string
 +}
 +
 +type textPrefixCheck struct {
@@ -5362,6 +5363,7 @@ index e69de29..69999b9 100644
 +
 +type strictStreamTracker struct {
 +	responseID                string
++	sawAnyFrame               bool
 +	sawCompleted              bool
 +	sawFailure                bool
 +	completedOutputSHA        string
@@ -5440,6 +5442,7 @@ index e69de29..69999b9 100644
 +	reviewReleased                              bool
 +	observedCompleted                           bool
 +	upstreamEOF                                 bool
++	had2xxBody                                  bool
 +	modelMismatch                               bool
 +	lastResponseIDSHA                           string
 +	lastOutputSHA                               string
@@ -5863,7 +5866,7 @@ index e69de29..69999b9 100644
 +					return false
 +				}
 +				part := item.Content[cIdx]
-+				if part.Type != "output_text" || sha256Hex(part.Text) != hex.EncodeToString(st.h.Sum(nil)) {
++				if part.Type != "output_text" || ((!st.fromSnapshot || st.hasDelta) && sha256Hex(part.Text) != hex.EncodeToString(st.h.Sum(nil))) {
 +					return false
 +				}
 +			}
@@ -6968,6 +6971,67 @@ index e69de29..69999b9 100644
 +	return true
 +}
 +
++func canonicalJSONDigest(raw []byte) (string, bool) {
++	dec := json.NewDecoder(bytes.NewReader(raw))
++	dec.UseNumber()
++	var v any
++	if err := dec.Decode(&v); err != nil {
++		return "", false
++	}
++	var extra any
++	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
++		return "", false
++	}
++	canon, err := json.Marshal(v)
++	if err != nil {
++		return "", false
++	}
++	return sha256Hex(string(canon)), true
++}
++
++func (t *strictStreamTracker) recordSnapshotText(canonKey string, contentIdx int64, snapText string) bool {
++	if !t.recordPendingTextPart(canonKey, contentIdx) {
++		return false
++	}
++	if canonKey == "" || snapText == "" {
++		return true
++	}
++	if !t.recordTextPrefix(canonKey, contentIdx, snapText) {
++		return false
++	}
++	hashes := t.textDeltaHashByItem[canonKey]
++	if hashes == nil {
++		if len(t.textDeltaHashByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.textDeltaHashByItem == nil {
++			t.textDeltaHashByItem = make(map[string]map[int64]*textDeltaState)
++		}
++		hashes = make(map[int64]*textDeltaState)
++		t.textDeltaHashByItem[canonKey] = hashes
++	}
++	snapSHA := sha256Hex(snapText)
++	if st := hashes[contentIdx]; st != nil {
++		if st.hasDelta {
++			return hex.EncodeToString(st.h.Sum(nil)) == snapSHA
++		}
++		// Advance pre-delta snapshot seed (monotonic prefix already proven by recordTextPrefix).
++		h := sha256.New()
++		_, _ = h.Write([]byte(snapText))
++		st.h = h
++		st.hasSeed = true
++		st.seedSHA = snapSHA
++		return true
++	}
++	if len(hashes) >= maxTrackedContentParts {
++		return false
++	}
++	h := sha256.New()
++	_, _ = h.Write([]byte(snapText))
++	hashes[contentIdx] = &textDeltaState{h: h, hasSeed: true, fromSnapshot: true, seedSHA: snapSHA}
++	return true
++}
++
 +func (t *strictStreamTracker) recordInitialText(canonKey string, contentIdx int64, initText string) bool {
 +	if !t.recordPendingTextPart(canonKey, contentIdx) {
 +		return false
@@ -7079,7 +7143,7 @@ index e69de29..69999b9 100644
 +	}
 +	if hashes := t.textDeltaHashByItem[canonKey]; hashes != nil {
 +		if st := hashes[contentIdx]; st != nil {
-+			if partType != "output_text" || hex.EncodeToString(st.h.Sum(nil)) != sha256Hex(text) {
++			if partType != "output_text" || ((!st.fromSnapshot || st.hasDelta) && hex.EncodeToString(st.h.Sum(nil)) != sha256Hex(text)) {
 +				return false
 +			}
 +		}
@@ -7170,6 +7234,7 @@ index e69de29..69999b9 100644
 +		c.taintStreamAnomaly()
 +		return
 +	}
++	t.sawAnyFrame = true
 +	switch frame.evType {
 +	case "response.created", "response.queued", "response.in_progress":
 +		for idx, item := range frame.respItems {
@@ -7228,10 +7293,7 @@ index e69de29..69999b9 100644
 +					for cIdx, part := range item.Content {
 +						var okPart bool
 +						if part.Type == "output_text" {
-+							okPart = t.recordPendingTextPart(canonKey, int64(cIdx))
-+							if okPart && part.Text != "" {
-+								okPart = t.recordTextPrefix(canonKey, int64(cIdx), part.Text)
-+							}
++							okPart = t.recordSnapshotText(canonKey, int64(cIdx), part.Text)
 +						} else {
 +							okPart = t.recordContentPart(canonKey, int64(cIdx), part.Type, "")
 +						}
@@ -7510,12 +7572,11 @@ index e69de29..69999b9 100644
 +			c.taintStreamAnomaly()
 +			return
 +		}
-+		var compactItem bytes.Buffer
-+		if err := json.Compact(&compactItem, frame.itemRaw); err != nil {
++		doneDigest, okCanon := canonicalJSONDigest(frame.itemRaw)
++		if !okCanon {
 +			c.taintStreamAnomaly()
 +			return
 +		}
-+		doneDigest := sha256Hex(compactItem.String())
 +		itemType, _ := exactOptionalString(frame.itemFields, "type")
 +		itemRole, _ := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
@@ -7794,6 +7855,13 @@ index e69de29..69999b9 100644
 +			c.mu.Unlock()
 +			c.taintStreamAnomaly()
 +			return
++		}
++		if canonKey != "" {
++			if _, alreadyDone := t.doneItemKeys[canonKey]; alreadyDone {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
 +		}
 +		cIdx := int64(0)
 +		if frame.hasContentIndex {
@@ -9009,6 +9077,7 @@ index e69de29..69999b9 100644
 +	c.executions++
 +	c.attemptFailed = false
 +	c.upstreamEOF = false
++	c.had2xxBody = false
 +	c.lastAttemptRequiredProducer = false
 +	c.lastAttemptProducerVerified = false
 +	c.resetAttemptStreamStateLocked()
@@ -9050,11 +9119,18 @@ index e69de29..69999b9 100644
 +			}
 +		}
 +	}
++	truncatedStream := false
++	if c.strictCodex && c.had2xxBody && (c.producer.sawAnyFrame || c.consumer.sawAnyFrame) &&
++		!c.observedCompleted && !c.producer.sawFailure && !c.consumer.sawFailure {
++		c.modelMismatch = true
++		c.invalid = true
++		truncatedStream = true
++	}
 +	c.resetAttemptStreamStateLocked()
 +	if e.attempts == 0 {
 +		c.invalid = true
 +	}
-+	if unterminatedPostComplete || producerMismatch {
++	if unterminatedPostComplete || producerMismatch || truncatedStream {
 +		// Hold c.active (keeping entry.inFlight > 0) until c.Taint() finishes persisting taint
 +		// so concurrent HandlerDone() + SealReview can never race ahead and seal a prior clean turn.
 +		c.mu.Unlock()
@@ -9373,6 +9449,9 @@ index e69de29..69999b9 100644
 +	}
 +	c.mu.Lock()
 +	c.receipt.Routes[slot] = observed
++	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
++		c.had2xxBody = true
++	}
 +	c.mu.Unlock()
 +	if resp.Body == nil {
 +		finish()
@@ -9725,10 +9804,10 @@ index e69de29..69999b9 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..b758b8d 100644
+index e69de29..db7ff10 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,4478 @@
+@@ -0,0 +1,4606 @@
 +package preflightreceipt
 +
 +import (
@@ -11035,7 +11114,9 @@ index e69de29..b758b8d 100644
 +	}); r == nil || !r.Complete || r.LastOutputSHA256 != sha256Hex("bound-text") {
 +		t.Fatalf("bound output_item.done not adopted: %+v", r)
 +	}
-+	// 7. Execution 1 aborted after output_item.done MUST NOT leak into retry Execution 2's response.completed.
++	// 7. Execution 1 retryable pre-stream failure (non-2xx) with stale output_item.done MUST NOT leak
++	//    into retry Execution 2's response.completed; whereas an HTTP 200 stream that emits progress
++	//    frames and hits EOF without any protocol terminal MUST taint and block retry (Sol/Astra P1 R23).
 +	launchIso := "review-eeee1111-2222-4333-8444-555555555507"
 +	sessionIso := "019d0000-0000-7000-8000-000000000507"
 +	ctx, c, err := BeginReview(context.Background(), root, launchIso, sessionIso, "gpt-6.2-sol")
@@ -11047,7 +11128,7 @@ index e69de29..b758b8d 100644
 +		t.Fatal(err)
 +	}
 +	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 503, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	rq1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	rp1, err := cl1.Do(rq1)
@@ -11081,6 +11162,38 @@ index e69de29..b758b8d 100644
 +	c.HandlerDone(true)
 +	if r := readReviewReceiptFile(t, root, launchIso); !r.Complete || r.Tainted || r.LastOutputSHA256 != "" || r.LastResponseID != sha256Hex("resp_retry") {
 +		t.Fatalf("cross-execution output hash leaked: %+v", r)
++	}
++
++	// 7b. HTTP 200 stream emitting progress frames and hitting EOF without terminal MUST taint and reject retry.
++	launchTrunc := "review-eeee1111-2222-4333-8444-555555555599"
++	sessionTrunc := "019d0000-0000-7000-8000-000000000599"
++	ctxT, cT, err := BeginReview(context.Background(), root, launchTrunc, sessionTrunc, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxT1, eT1, err := cT.Start(ctxT, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clT1 := httptransport.Decorate(ctxT1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	rqT1, _ := http.NewRequestWithContext(ctxT1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
++	rpT1, err := clT1.Do(rqT1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cT.ObserveStreamChunk([]byte(`data: {"type":"response.created","response":{"id":"resp_trunc"}}` + "\n\n"))
++	_, _ = io.Copy(io.Discard, rpT1.Body)
++	_ = rpT1.Body.Close()
++	eT1.End()
++	if _, _, retryErr := cT.Start(ctxT, "codex", "gpt-6.2-sol"); !errors.Is(retryErr, ErrUnavailable) {
++		t.Fatalf("retry after truncated HTTP 200 stream err = %v, want ErrUnavailable", retryErr)
++	}
++	cT.Complete(false)
++	cT.HandlerDone(false)
++	if st := SealReview(root, launchTrunc, sessionTrunc); st != SealRejected {
++		t.Fatalf("truncated HTTP 200 stream SealReview = %v, want SealRejected", st)
 +	}
 +}
 +
@@ -14086,6 +14199,100 @@ index e69de29..b758b8d 100644
 +	syncDirFn = origSyncER
 +	if stFinal := SealReview(root, lEndRace, sEndRace); stFinal != SealRejected {
 +		t.Fatalf("SealReview after Execution.End() taint = %v, want SealRejected", stFinal)
++	}
++
++	// 52. Sol P1 #1 + Astra P1 #1 (PR #2280 R23): Turn 2 HTTP 200 stream emitting progress frames
++	//     and reaching clean io.EOF with NO terminal event MUST taint the launch before releasing
++	//     the lease so Turn 1 cannot be sealed.
++	lTruncEOF := "review-d1111111-2222-4333-8444-555555555579"
++	sTruncEOF := "019d0000-0000-7000-8000-888888888179"
++	ctxTE1, cTE1, err := BeginReview(context.Background(), root, lTruncEOF, sTruncEOF, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxTE1, eTE1, err := cTE1.Start(ctxTE1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clTE1 := httptransport.Decorate(ctxTE1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqTE1, _ := http.NewRequestWithContext(ctxTE1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respTE1, err := clTE1.Do(reqTE1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respTE1.Body)
++	_ = respTE1.Body.Close()
++	cTE1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_te1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	eTE1.End()
++	cTE1.Complete(true)
++	cTE1.HandlerDone(true)
++
++	// Turn 2: HTTP 200 reaches clean EOF after progress event with NO terminal event.
++	ctxTE2, cTE2, err := BeginReview(context.Background(), root, lTruncEOF, sTruncEOF, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxTE2, eTE2, err := cTE2.Start(ctxTE2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clTE2 := httptransport.Decorate(ctxTE2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqTE2, _ := http.NewRequestWithContext(ctxTE2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respTE2, err := clTE2.Do(reqTE2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respTE2.Body)
++	_ = respTE2.Body.Close()
++	cTE2.ObserveStreamChunk([]byte("data: " + `{"type":"response.created","response":{"id":"resp_te2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n"))
++	eTE2.End()
++	cTE2.Complete(false)
++	cTE2.HandlerDone(false)
++	if st := SealReview(root, lTruncEOF, sTruncEOF); st != SealRejected {
++		t.Fatalf("Turn 2 truncated 200 EOF without terminal allowed sealing Turn 1: seal = %v, want SealRejected", st)
++	}
++
++	// 53. Sol P1 #2 (PR #2280 R23): delta event arriving AFTER output_item.done for the same item
++	//     (e.g. function_call_arguments.delta after function_call done) MUST taint immediately.
++	ssePostDoneDelta := "data: " + `{"type":"response.created","response":{"id":"resp_pdd","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_0","type":"function_call","name":"exec_command","arguments":"{}"}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_0","delta":"{\"evil\":1}"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_pdd","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_0","type":"function_call","name":"exec_command","arguments":"{}"},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555580", "019d0000-0000-7000-8000-888888888180", ssePostDoneDelta); st != SealRejected {
++		t.Fatalf("post-done function_call_arguments.delta seal = %v, want SealRejected", st)
++	}
++
++	// 54. Sol P2 #1 + Astra P2 #1 (PR #2280 R23): response.in_progress carrying non-empty output_text
++	//     followed by output_text.delta appending the remainder MUST seal cleanly when done matches
++	//     snapshot+delta, and MUST reject if done contradicts snapshot+delta.
++	lSnapDeltaOK := "review-d1111111-2222-4333-8444-555555555581"
++	sSnapDeltaOK := "019d0000-0000-7000-8000-888888888181"
++	sseSnapDeltaOK := "data: " + `{"type":"response.in_progress","response":{"id":"resp_sdok","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_sd","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: "}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.delta","output_index":0,"item_id":"msg_sd","content_index":0,"delta":"PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_sd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sdok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_sd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lSnapDeltaOK, sSnapDeltaOK, sseSnapDeltaOK); st != SealOK {
++		t.Fatalf("in_progress snapshot + delta matching done seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lSnapDeltaOK); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("in_progress snapshot + delta hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 55. Astra P2 #2 (PR #2280 R23): duplicate output_item.done with equivalent JSON content but
++	//     different key ordering or Unicode escape MUST be accepted as identical (not false conflict).
++	lCanonDupOK := "review-d1111111-2222-4333-8444-555555555582"
++	sCanonDupOK := "019d0000-0000-7000-8000-888888888182"
++	sseCanonDupOK := "data: " + `{"type":"response.created","response":{"id":"resp_cdok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_cd","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"role":"assistant","content":[{"text":"VERDICT: \u0050ASS","type":"output_text"}],"type":"message","id":"msg_cd"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_cdok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_cd","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lCanonDupOK, sCanonDupOK, sseCanonDupOK); st != SealOK {
++		t.Fatalf("duplicate output_item.done with reordered keys/escapes seal = %v, want SealOK", st)
 +	}
 +}
 +
