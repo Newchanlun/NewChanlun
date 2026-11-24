@@ -1,0 +1,10 @@
+{
+  "nodes": {
+    "claim": {
+      "about": [
+        "NotThere"
+      ],
+      "mode": "对任意实现成立"
+    }
+  }
+}

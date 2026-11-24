@@ -1,0 +1,13 @@
+{
+  "nodes": {
+    "claim": {
+      "about": [
+        "D"
+      ],
+      "mode": "依赖具体定义",
+      "helpers": [
+        "_private.Chan.Thm.Fixture.0.helper"
+      ]
+    }
+  }
+}

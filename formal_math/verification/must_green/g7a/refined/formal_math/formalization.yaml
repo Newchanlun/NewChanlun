@@ -1,0 +1,13 @@
+{
+  "nodes": {
+    "registered": {
+      "about": [
+        "Reviewed"
+      ],
+      "mode": "对任意实现成立"
+    }
+  },
+  "refinements": {
+    "Reviewed": "raw_to_criterion"
+  }
+}

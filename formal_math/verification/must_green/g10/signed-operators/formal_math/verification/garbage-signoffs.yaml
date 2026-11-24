@@ -1,0 +1,50 @@
+{
+  "first": {
+    "head!": {
+      "count": 1,
+      "review": "夹具：独立核对签注键"
+    }
+  },
+  "atIndex": {
+    "get!": {
+      "count": 1,
+      "review": "夹具：独立核对签注键"
+    }
+  },
+  "withFallback": {
+    "getD": {
+      "count": 1,
+      "review": "夹具：独立核对签注键"
+    }
+  },
+  "fallback": {
+    "Inhabited.default": {
+      "count": 1,
+      "review": "夹具：独立核对签注键"
+    }
+  },
+  "finSup": {
+    "Finset.sup": {
+      "count": 1,
+      "review": "夹具：独立核对签注键"
+    }
+  },
+  "finInf": {
+    "Finset.inf": {
+      "count": 1,
+      "review": "夹具：独立核对签注键"
+    }
+  },
+  "setSup": {
+    "sSup": {
+      "count": 1,
+      "review": "夹具：独立核对签注键"
+    }
+  },
+  "setInf": {
+    "sInf": {
+      "count": 1,
+      "review": "夹具：独立核对签注键"
+    }
+  }
+}

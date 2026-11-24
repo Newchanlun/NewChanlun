@@ -23,3 +23,7 @@ globs = ["ChanTest.+"]
 [[lean_exe]]
 name = "fm_audit"
 root = "verification.Audit"
+
+[[lean_lib]]
+name = "FMEnvGates"
+roots = ["verification.EnvGates"]

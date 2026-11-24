@@ -1,6 +1,7 @@
 """FM-04 门禁。退出码：0 绿，1 红，2 无法判定。"""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,15 +9,16 @@ import re
 import subprocess
 import sys
 import tomllib
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 
 class Undetermined(Exception):
     """没有足够的原件或工具作出判断。"""
 
 
-def command(cwd, *args):
-    return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=False)
+def command(cwd, *args, stdin=None):
+    return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=False,
+                          input=stdin, timeout=600)
 
 
 def checked(cwd, *args):
@@ -36,7 +38,7 @@ def sources(root):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         here = Path(directory).relative_to(root)
         if here == Path("formal_math/verification"):
-            dirs[:] = [d for d in dirs if d not in {"must_red", "must_green"}]
+            dirs[:] = [d for d in dirs if d not in {"must_red", "must_green", "must_unknown"}]
         for name in sorted(files):
             if name.endswith(".lean"):
                 yield here / name
@@ -165,12 +167,18 @@ def lane(module):
     return "Chan" if module == "Chan" or module.startswith("Chan.") else ""
 
 
-def audit(fm, mods):
+def lean_audit(fm, gate, mods, config="{}"):
     checked(fm, "lake", "build", *(f"+{module}:olean" for module in mods))
-    result = command(fm, "lake", "exe", "fm_audit", *mods)
+    result = command(fm, "lake", "exe", "fm_audit", gate, *mods, stdin=config)
+    if result.returncode not in (0, 1):
+        raise Undetermined(result.stderr.strip() or f"Lean 审计退出 {result.returncode}")
+    return result
+
+
+def emit_findings(gate, result):
     findings = []
     for line in result.stdout.splitlines():
-        if re.fullmatch(r"GATE3 RED formal_math/\S+:\S+ [A-Z_]+ .+", line):
+        if re.fullmatch(rf"GATE{gate} RED formal_math/\S+:\S+ [A-Z_]+ .+", line):
             findings.append(line)
         elif line.strip():
             raise Undetermined(f"审计输出无法识别：{line}")
@@ -178,6 +186,8 @@ def audit(fm, mods):
         raise Undetermined(result.stderr.strip() or f"Lean 审计退出 {result.returncode}")
     for line in findings:
         print(line)
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
     return result.returncode
 
 
@@ -194,10 +204,118 @@ def gate3(root):
     fm = root / "formal_math"
     # 文本已有硬反例时，只编译与读取独立探针，不编译有禁用记号的模块。
     mods = ["ChanTest.Probe"] if findings else [module_name(path) for path in source]
-    environment = audit(fm, mods)
+    environment = emit_findings("3", lean_audit(fm, "3", mods))
     for path, line, detail in findings:
         red("3", path, line, "TOKEN", detail)
     return max(environment, int(bool(findings)))
+
+
+def unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"重复键：{key}")
+        obj[key] = value
+    return obj
+
+
+def load_data(path):
+    # 台账采用 YAML 1.2 的 JSON 子集；拒绝重复键，不猜测缩进或隐式类型。
+    return json.loads(path.read_text(), object_pairs_hook=unique_object)
+
+
+def formalization(fm):
+    raw = load_data(fm / "formalization.yaml")
+    if raw == []:
+        raw = {}  # 第一片的空台账。
+    if not isinstance(raw, dict):
+        raise ValueError("formalization.yaml 需要对象")
+    nodes, refinements = raw.get("nodes", {}), raw.get("refinements", {})
+    normalized = []
+    for name, conf in nodes.items():
+        if not isinstance(conf, dict):
+            raise ValueError(f"{name}: 节点登记需要对象")
+        row = {"registration": "about" in conf and "mode" in conf}
+        for field in ("about", "helpers", "necessary"):
+            values = conf.get(field, [])
+            if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
+                raise ValueError(f"{name}: {field} 需要非空字符串组成的数组")
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name}: {field} 不允许重复")
+            row[field] = values
+        row["mode"] = conf.get("mode", "")
+        for field in ("declarative_unique", "needs_necessity"):
+            row[field] = conf.get(field, False)
+        normalized.append((name, row))
+    return json.dumps({"nodes": normalized, "refinements": list(refinements.items())})
+
+
+def compare_lock(fm, result):
+    expect = load_data(fm / "statement-lock.json")
+    path = "formal_math/statement-lock.json"
+    if not isinstance(expect, dict):
+        raise ValueError(f"{path} 需要对象")
+    actual = {}
+    for line in result.stdout.splitlines():
+        name, mod, statement = json.loads(line)
+        payload = json.dumps(statement, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if name in actual:
+            raise ValueError(f"声明名重复：{name}")
+        actual[name] = (mod, hashlib.sha256(payload).hexdigest())
+    failed = False
+    for name in sorted(actual.keys() | expect.keys()):
+        if name not in actual:
+            red("6a", path, name, "LOCK_REMOVED", "锁定声明不在环境中")
+        else:
+            mod, digest = actual[name]
+            if name in expect and digest == expect[name]:
+                continue
+            code = "LOCK_CHANGED" if name in expect else "LOCK_UNLISTED"
+            red("6a", "formal_math/" + mod.replace(".", "/") + ".lean", name, code, f"现算 {digest}")
+        failed = True
+    return int(failed)
+
+
+def compare_signoffs(fm, result):
+    path = "formal_math/verification/garbage-signoffs.yaml"
+    signoffs = load_data(fm / "verification/garbage-signoffs.yaml")
+    expected = {}
+    for name, entries in signoffs.items():
+        for op, signoff in entries.items():
+            count, review = signoff["count"], signoff["review"]
+            if type(count) is not int or count < 1 or not isinstance(review, str) or not review.strip():
+                raise ValueError(f"{name}: {op} 的签注需要正整数 count 与非空 review")
+            expected[name, op] = count
+    counts = Counter()
+    modules = {}
+    for line in result.stdout.splitlines():
+        mod, name, op = json.loads(line)
+        counts[name, op] += 1
+        modules[name] = mod
+    failed = False
+    for name, op in sorted(counts.keys() | expected.keys()):
+        actual, signed = counts[name, op], expected.get((name, op), 0)
+        if actual == signed:
+            continue
+        if actual > signed:
+            red("10", "formal_math/" + modules[name].replace(".", "/") + ".lean", name,
+                "SIGNOFF_MISSING", f"{op} 实有 {actual} 处，签注 {signed} 处")
+        else:
+            red("10", path, name, "SIGNOFF_STALE", f"{op} 实有 {actual} 处，签注 {signed} 处")
+        failed = True
+    return int(failed)
+
+
+def environment_gate(root, gate):
+    fm = root / "formal_math"
+    mods = [module_name(path) for path in sources(root)]
+    config = formalization(fm) if gate in {"7a", "7b", "8a", "8b", "9"} else '{"nodes":[],"refinements":[]}'
+    result = lean_audit(fm, gate, mods, config)
+    if gate in {"6a", "10"}:
+        if result.returncode:
+            raise Undetermined("审计枚举没有完成")
+        return (compare_lock if gate == "6a" else compare_signoffs)(fm, result)
+    return emit_findings(gate, result)
 
 
 PATHS = {
@@ -210,12 +328,9 @@ PATHS = {
               "formal_math/Chan/Audit/Cases/", "formal_math/ChanTest/"),
     "infra": ("formal_math/verification/", "scripts/", ".github/workflows/", "formal_math/lakefile.toml"),
 }
-BOOTSTRAP_HEAD = "38f65e920a851a29a3ec55142113a90d8921d1db"
-BOOTSTRAP_BRANCH = "infra/2312-a-layout-gates"
-BOOTSTRAP_PATHS = (
-    "formal_math/ChanTest/", "formal_math/README.md", "formal_math/HISTORY.md",
-    "formal_math/formalization.yaml", "formal_math/Chan/Smoke.lean",
-)
+# 前置片尚未进 main 时，只从已验收且确为本 HEAD 祖先的原件接续。
+# 不豁免任何路径；main 纳入前置片后，正常的 merge-base 自然优先。
+ACCEPTED_LAYOUT = "c97fe37cdf1ce90a4b0c1cd7871a271154f032e1"
 
 
 def within(path, rules):
@@ -223,15 +338,19 @@ def within(path, rules):
 
 
 def gate6b(root):
-    branch = checked(root, "git", "symbolic-ref", "--short", "HEAD").strip()
+    ref = command(root, "git", "symbolic-ref", "--quiet", "--short", "HEAD")
+    if ref.returncode not in (0, 1):
+        raise Undetermined(ref.stderr.strip())
+    branch = ref.stdout.strip() if ref.returncode == 0 else os.environ.get("GITHUB_HEAD_REF", "").strip()
+    if not branch:
+        raise Undetermined("分离 HEAD 且缺少 GITHUB_HEAD_REF")
     prefix, marker, _ = branch.partition("/")
     head = checked(root, "git", "rev-parse", "HEAD").strip()
     base = checked(root, "git", "merge-base", "refs/remotes/origin/main", head).strip()
-    special = branch == BOOTSTRAP_BRANCH and command(
-        root, "git", "merge-base", "--is-ancestor", BOOTSTRAP_HEAD, head
-    ).returncode == 0
-    if special and command(root, "git", "merge-base", "--is-ancestor", BOOTSTRAP_HEAD, base).returncode == 1:
-        base = BOOTSTRAP_HEAD
+    if command(root, "git", "cat-file", "-e", f"{ACCEPTED_LAYOUT}^{{commit}}").returncode == 0:
+        if all(command(root, "git", "merge-base", "--is-ancestor", a, b).returncode == 0
+               for a, b in ((base, ACCEPTED_LAYOUT), (ACCEPTED_LAYOUT, head))):
+            base = ACCEPTED_LAYOUT
     changes = set()
     # 分开查提交、暂存区、工作树，避免两个相反的改动互相抵消。
     for revisions in ((base, head), ("--cached", head), ()):
@@ -244,18 +363,8 @@ def gate6b(root):
         return 1
     failed = False
     for path in sorted(changes):
-        if within(path, PATHS[prefix]) or special and within(path, BOOTSTRAP_PATHS):
+        if within(path, PATHS[prefix]):
             continue
-        if special and path == "formal_math/statement-lock.json":
-            existed = command(root, "git", "cat-file", "-e", f"{base}:{path}").returncode == 0
-            current = root / path
-            committed = command(root, "git", "show", f"{head}:{path}")
-            staged = command(root, "git", "show", f":{path}")
-            versions = [r.stdout for r in (committed, staged) if r.returncode == 0]
-            if not existed and current.is_file() and all(
-                json.loads(data) == {} for data in [current.read_text(), *versions]
-            ):
-                continue
         red("6b", path, 1, "PATH_SCOPE", f"分支 {branch} 不允许修改此路径")
         failed = True
     return int(failed)
@@ -375,7 +484,10 @@ def gate15(root):
     return int(failed)
 
 
-GATES = {"1": gate1, "2": gate2, "3": gate3, "6b": gate6b, "15": gate15}
+GATES = {"1": gate1, "2": gate2, "3": gate3, "6a": None, "6b": gate6b, "7a": None,
+         "7b": None, "8a": None, "8b": None, "9": None, "10": None, "15": gate15}
+DECL_ONLY = {"7a", "8a", "10"}
+PROOF_ONLY = {"7b", "8b"}
 
 
 def main():
@@ -389,11 +501,15 @@ def main():
         print(f"FM: {root} 下找不到 formal_math", file=sys.stderr)
         return 2
     result = 0
-    # 本片各门在声明期和证明期均适用。
     for number in (args.gate,) if args.gate else GATES:
+        if args.gate is None and (args.stage == "decl" and number in PROOF_ONLY or
+                                  args.stage == "proof" and number in DECL_ONLY):
+            continue
         try:
-            result = max(result, GATES[number](root))
-        except (Undetermined, OSError, ValueError, KeyError, TypeError) as exc:
+            gate = GATES[number]
+            result = max(result, gate(root) if gate else environment_gate(root, number))
+        except (Undetermined, OSError, ValueError, KeyError, TypeError, AttributeError,
+                subprocess.TimeoutExpired) as exc:
             print(f"GATE{number}: 无法判定：{exc}", file=sys.stderr)
             result = 2
     return result
