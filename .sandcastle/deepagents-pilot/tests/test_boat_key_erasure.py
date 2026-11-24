@@ -1,16 +1,34 @@
 import json
 import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import Env
 from test_boat import adapter, launches, supervise, supervisor_env, wait_for
 from test_boat_drain import failure_receipt
 
 from pilot1742.boat_execution import BoatExecution
 from pilot1742.domain import EffectUnknown
+
+
+@pytest.fixture(scope='module')
+def _env_template(tmp_path_factory):
+    return Env(tmp_path_factory.mktemp('boat-key-erasure-env-template'))
+
+
+@pytest.fixture
+def env(tmp_path, _env_template):
+    obj = object.__new__(Env)
+    obj.source = tmp_path / 'source'
+    obj.home = tmp_path / 'home'
+    shutil.copytree(_env_template.source, obj.source)
+    shutil.copytree(_env_template.home, obj.home)
+    obj.base = _env_template.base
+    return obj
 
 
 def test_cancel_before_claim_erases_key_and_late_submit_is_idempotent(tmp_path, monkeypatch):
