@@ -1,10 +1,11 @@
 import json
+import shutil
 import sqlite3
 from dataclasses import asdict
 from pathlib import Path
 
 import pytest
-from conftest import FAKE, MODELS, TASK, git
+from conftest import FAKE, MODELS, TASK, Env, git
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from test_agent import call, scripted
@@ -21,6 +22,22 @@ from pilot1742.boat_execution import (
 from pilot1742.cloud_package import build_package
 from pilot1742.domain import WorkerKey, parse_run_id
 from pilot1742.run import PilotRun, RunSpec
+
+
+@pytest.fixture(scope='module')
+def _env_template(tmp_path_factory):
+    return Env(tmp_path_factory.mktemp('boat-freeze-env-template'))
+
+
+@pytest.fixture
+def env(tmp_path, _env_template):
+    obj = object.__new__(Env)
+    obj.source = tmp_path / 'source'
+    obj.home = tmp_path / 'home'
+    shutil.copytree(_env_template.source, obj.source)
+    shutil.copytree(_env_template.home, obj.home)
+    obj.base = _env_template.base
+    return obj
 
 
 def configure(tmp_path, monkeypatch, **changes):
