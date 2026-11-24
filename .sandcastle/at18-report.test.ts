@@ -2516,6 +2516,357 @@ __all__ = ('Adapter',)
   }
 });
 
+test("R33/#1319：构造器 MRO 顺序、双钩子与归一去重边界", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = async (
+    name: string,
+    source: string,
+    implementation: string,
+    calls: string[],
+    expected = true,
+    extra: Record<string, string> = {},
+  ) => {
+    await t.test(name, () => {
+      const repo = feedSource({
+        ...extra,
+        [entry]: implementation,
+        [integration]: "from .at18_fixture_feed import route\n" + source,
+        [path]: "from trading_system.at18_fixture_feed import route\n" +
+          "def test_route():\n" + calls.map(call => `    assert route(${call}) == [1, 4]\n`).join(""),
+      });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  const eventRoute = "def route(**event): return sorted(event['rows'])\n__all__ = ('route',)\n";
+  const modeRoute = "def route(*, rows, mode): return sorted(rows)\n__all__ = ('route',)\n";
+  const localWrap = `from functools import wraps
+def _wrap(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs): return fn(*args, **kwargs)
+    return inner
+`;
+  const localWrapKw = `from functools import wraps
+def _wrap_kw(fn):
+    @wraps(fn)
+    def inner(self, *args, trace=False, **kwargs): return fn(self, *args, **kwargs)
+    return inner
+`;
+
+  await check("ctor-wraps-new-with-init：同层 @wraps __new__ 优先于泛变参 __init__", localWrap + `
+class Adapter:
+    @_wrap
+    def __new__(cls, mode, /):
+        obj = super().__new__(cls)
+        obj.mode = mode
+        return obj
+    def __init__(self, *args, **kwargs): pass
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("ctor-wraps-new-subclass-exception：继承 Exception 时恢复子类 @wraps __new__", localWrap + `
+class Adapter(Exception):
+    @_wrap
+    def __new__(cls, mode, /):
+        obj = super().__new__(cls, mode)
+        obj.mode = mode
+        return obj
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("ctor-wraps-new-subclass-local-base-init：继承本地基类 __init__ 时子类 @wraps __new__ 优先", localWrap + `
+class _Base:
+    def __init__(self, *args, **kwargs): pass
+class Adapter(_Base):
+    @_wrap
+    def __new__(cls, mode, /):
+        obj = super().__new__(cls)
+        obj.mode = mode
+        return obj
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("ctor-new-variadic-with-posonly-init：泛变参 __new__ 与裸位置专用 __init__ 双钩子协作", `
+class Adapter:
+    def __new__(cls, *args, **kwargs): return super().__new__(cls)
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("裸双钩子默认 None 双视图仅构造一次", `
+created = []
+class Adapter:
+    def __new__(cls, *args, **kwargs): return super().__new__(cls)
+    def __init__(self, mode=None, /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("对称双钩子：子类泛变参 __init__ 与本地基类位置专用 __new__", `
+class _Base:
+    def __new__(cls, mode, /):
+        obj = super().__new__(cls)
+        obj.mode = mode
+        return obj
+class Adapter(_Base):
+    def __init__(self, *args, **kwargs): pass
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("本地元类 @wraps __call__ 恢复构造器签名", localWrap + `
+class _Meta(type):
+    @_wrap
+    def __call__(cls, mode, /): return super().__call__(mode)
+class Adapter(metaclass=_Meta):
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("ctor-wraps-extra-kw-default-dup：含可选关键字开关的外层 @wraps 仅构造一次", localWrapKw + `
+created = []
+class Adapter:
+    @_wrap_kw
+    def __init__(self, mode=None, /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("ctor-wraps-two-layer-self-variadic-dup：两层 @wraps 中间层带 self 时仅构造一次", localWrap + `
+def _wrap2(fn):
+    @wraps(fn)
+    def inner2(self, *args, **kwargs): return fn(self, *args, **kwargs)
+    return inner2
+created = []
+class Adapter:
+    @_wrap
+    @_wrap2
+    def __init__(self, mode=None, /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("两层 @wraps 中间层带 self 且内层非 None 默认时不伪造 None 入参", localWrap + `
+def _wrap2(fn):
+    @wraps(fn)
+    def inner2(self, *args, **kwargs): return fn(self, *args, **kwargs)
+    return inner2
+created = []
+class Adapter:
+    @_wrap
+    @_wrap2
+    def __init__(self, mode='live', /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if created == ['live']: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode='live'", "rows=[4, 1]"]);
+
+  await check("ctor-wraps-two-layer-middle-kw-dup：两层 @wraps 中间层含可选开关时最内层签名优先", localWrap + `
+def _wrap_kw(fn):
+    @wraps(fn)
+    def inner(self, *args, trace=False, **kwargs): return fn(self, *args, **kwargs)
+    return inner
+created = []
+class Adapter:
+    @_wrap
+    @_wrap_kw
+    def __init__(self, mode=None, /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("ctor-wraps-standalone-spec-default-dup：@wraps 独立无 self 签名规范仅构造一次", `
+from functools import wraps
+def _spec(mode=None, /): return mode
+created = []
+class Adapter:
+    @wraps(_spec)
+    def __init__(self, *args, **kwargs): created.append(args[0] if args else None)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("@wraps 独立无 self 签名首参带默认且未观察时仍按完整签名归一", `
+from functools import wraps
+def _spec(a=1, b=None, /): return a, b
+created = []
+class Adapter:
+    @wraps(_spec)
+    def __init__(self, *args, **kwargs):
+        created.append((args[0] if len(args) > 0 else 1, args[1] if len(args) > 1 else None))
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if created == [(1, None)]: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], b=None", "rows=[4, 1]"]);
+
+  await check("外层 @wraps 声明开关被观察时仍可探测且不误塞多余关键字", `
+from functools import wraps
+def _wrap_kw(fn):
+    @wraps(fn)
+    def inner(self, *args, trace=False, **kwargs):
+        self.trace = trace
+        return fn(self, *args, **kwargs)
+    return inner
+class Adapter:
+    @_wrap_kw
+    def __init__(self, mode=None, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if self.trace: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], trace=True"]);
+
+  await check("@wraps 独立签名与 hostile 默认哨兵零触发比较哈希或布尔转换", `
+from functools import wraps
+class _Hostile:
+    def __eq__(self, other): raise AssertionError('hostile __eq__')
+    def __hash__(self): raise AssertionError('hostile __hash__')
+    def __bool__(self): raise AssertionError('hostile __bool__')
+_MISSING = _Hostile()
+def _spec(mode=_MISSING, /): return mode
+seen = []
+class Adapter:
+    @wraps(_spec)
+    def __init__(self, *args, **kwargs):
+        val = args[0] if args else _MISSING
+        seen.append(val is _MISSING)
+        self.ready = val is _MISSING
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if self.ready and seen == [False, True]: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("门 2：本地泛变参 __new__ 不得借伴随钩子追踪外来基类 __init__", `
+from .ext_bases import ForeignInitBase
+class Adapter(ForeignInitBase):
+    def __new__(cls, *args, **kwargs): return super().__new__(cls)
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false, {
+    "trading_system/ext_bases.py": "class ForeignInitBase:\n    def __init__(self, mode, /): self.mode = mode\n",
+  });
+
+  await check("门 2：本地泛变参 __init__ 不得借伴随钩子追踪外来基类 __new__", `
+from .ext_bases import ForeignNewBase
+class Adapter(ForeignNewBase):
+    def __init__(self, *args, **kwargs): pass
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false, {
+    "trading_system/ext_bases.py": `class ForeignNewBase:
+    def __new__(cls, mode, /):
+        obj = super().__new__(cls)
+        obj.mode = mode
+        return obj
+`,
+  });
+
+  await check("门 2：主钩子 @wraps 包外来 __new__ 时严禁借本地 __init__ 绕过拒绝", localWrap + `
+from .ext_hooks import ext_new
+class Adapter:
+    __new__ = _wrap(ext_new)
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false, {
+    "trading_system/ext_hooks.py": "def ext_new(cls, *args, **kwargs): return object.__new__(cls)\n",
+  });
+
+  await check("门 2：本地 __new__ 伴随 @wraps 包外来 __init__ 时严格拒绝", localWrap + `
+from .ext_hooks import ext_init
+class Adapter:
+    def __new__(cls, *args, **kwargs): return super().__new__(cls)
+    __init__ = _wrap(ext_init)
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false, {
+    "trading_system/ext_hooks.py": "def ext_init(self, mode, /): self.mode = mode\n",
+  });
+
+  await check("门 2：主钩子循环 __wrapped__ 时严禁借本地伴随 __init__ 绕过拒绝", localWrap + `
+class Adapter:
+    @_wrap
+    def __new__(cls, *args, **kwargs): return super().__new__(cls)
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+Adapter.__new__.__wrapped__.__wrapped__ = Adapter.__new__
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+
+  await check("门 2：本地 __new__ 伴随循环 __wrapped__ 的 __init__ 时严格拒绝", localWrap + `
+class Adapter:
+    def __new__(cls, *args, **kwargs): return super().__new__(cls)
+    @_wrap
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+Adapter.__init__.__wrapped__.__wrapped__ = Adapter.__init__
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+
+  await check("门 2：外来元类 __call__ 不得回退追踪 __init__", localWrap + `
+from .ext_meta import ForeignMeta
+class Adapter(metaclass=ForeignMeta):
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false, {
+    "trading_system/ext_meta.py": "class ForeignMeta(type):\n    def __call__(cls, *args, **kwargs): return super().__call__(*args, **kwargs)\n",
+  });
+
+  await check("门 2：本地元类 @wraps 包外来 __call__ 时不得回退追踪 __init__", localWrap + `
+from .ext_meta import ext_call
+class _Meta(type):
+    __call__ = _wrap(ext_call)
+class Adapter(metaclass=_Meta):
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false, {
+    "trading_system/ext_meta.py": "def ext_call(cls, *args, **kwargs): return type.__call__(cls, *args, **kwargs)\n",
+  });
+
+  await check("门 4：双钩子仅在 __init__ 内调承接而公开方法不调仍拒绝", `
+class Adapter:
+    def __new__(cls, *args, **kwargs): return super().__new__(cls)
+    def __init__(self, mode, /):
+        if type(mode) is int: route(rows=[4, 1], mode=mode)
+    def dispatch(self, rows, /): return sorted(rows)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";

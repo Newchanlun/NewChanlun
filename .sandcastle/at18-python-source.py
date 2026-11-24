@@ -131,6 +131,10 @@ def variadic_only(signature):
     return bool(signature.parameters) and all(p.kind in VARIADIC for p in signature.parameters.values())
 
 
+def has_variadic(signature):
+    return any(p.kind in VARIADIC for p in signature.parameters.values())
+
+
 DEFERRED_FRAMES = {GeneratorType: "gi_frame", AsyncGeneratorType: "ag_frame", CoroutineType: "cr_frame"}
 PROBE_STEPS = 1000
 RELOAD_CODE = importlib.reload.__code__
@@ -279,8 +283,8 @@ def copy_arguments(args, kwargs, defaults):
 
 
 class Binding:
-    def __init__(self, key, member, chain, owner=None, ctor_chain=()):
-        self.key, self.member, self.chain, self.owner, self.ctor_chain = key, member, chain, owner, ctor_chain
+    def __init__(self, key, member, chain, owner=None, ctor_targets=()):
+        self.key, self.member, self.chain, self.owner, self.ctor_targets = key, member, chain, owner, ctor_targets
         self.function = chain[0]
 
     @property
@@ -297,50 +301,47 @@ class Binding:
             return is_class(receiver) and inherits(receiver, self.owner)
         return receiver is not MISSING and inherits(type(receiver), self.owner)
 
-    def ctor_signature_pairs(self, public, view):
-        generic = variadic_only(public)
-        if not generic:
-            yield public, None
-        for target in self.ctor_chain[1:]:
-            try:
-                params = inspect.signature(target, follow_wrapped=False)
-            except (ValueError, TypeError):
-                continue
-            if variadic_only(params):
-                continue
-            slots = tuple(params.parameters.values())
-            if type(target) is FunctionType and slots and slots[0].kind in POSITIONAL:
-                clipped = params.replace(parameters=slots[1:])
-                if slots[0].name in view:
-                    yield params, None
-                    yield clipped, None
-                else:
-                    yield clipped, params
-            else:
-                yield params, None
-        if generic:
-            yield public, None
+    @staticmethod
+    def ctor_target_signatures(target, takes_receiver, observed_names):
+        try:
+            params = inspect.signature(target, follow_wrapped=False)
+        except (ValueError, TypeError):
+            return None, None
+        if variadic_only(params):
+            return None, None
+        slots = tuple(params.parameters.values())
+        if type(target) is FunctionType and slots and slots[0].kind in POSITIONAL:
+            clipped = params.replace(parameters=slots[1:])
+            if takes_receiver:
+                return (None, None) if variadic_only(clipped) else (clipped, None)
+            if slots[0].name in observed_names or slots[0].default is not inspect.Parameter.empty:
+                return params, (None if variadic_only(clipped) else clipped)
+            if variadic_only(clipped):
+                return None, None
+            return clipped, params
+        return params, None
 
-    def ctor_normalizers(self, public):
-        if not variadic_only(public):
+    def ctor_signature_pairs(self, public, observed_names):
+        generic = has_variadic(public)
+        if not generic:
+            yield public, None, False
+        for target, takes_receiver in self.ctor_targets:
+            sig, fallback = self.ctor_target_signatures(target, takes_receiver, observed_names)
+            if sig is not None:
+                yield sig, fallback, True
+        if generic:
+            yield public, None, False
+
+    def ctor_normalizers(self, public, observed_names):
+        if not has_variadic(public):
             return ()
-        normalizers = []
-        for target in self.ctor_chain[1:]:
-            try:
-                params = inspect.signature(target, follow_wrapped=False)
-            except (ValueError, TypeError):
+        concrete, variadic_mixed = [], []
+        for target, takes_receiver in self.ctor_targets:
+            sig, _ = self.ctor_target_signatures(target, takes_receiver, observed_names)
+            if sig is None:
                 continue
-            if variadic_only(params):
-                continue
-            slots = tuple(params.parameters.values())
-            if type(target) is FunctionType and slots and slots[0].kind in POSITIONAL:
-                clipped = params.replace(parameters=slots[1:])
-                if not variadic_only(clipped):
-                    normalizers.append(clipped)
-                normalizers.append(params)
-            else:
-                normalizers.append(params)
-        return tuple(normalizers)
+            (variadic_mixed if has_variadic(sig) else concrete).append(sig)
+        return tuple(concrete + variadic_mixed)
 
     def callables(self, instances, views):
         if self.owner is None:
@@ -353,11 +354,13 @@ class Binding:
             public = inspect.signature(self.owner, follow_wrapped=False)
         except (ValueError, TypeError):
             return
-        normalizers = self.ctor_normalizers(public)
+        observed_names = {name for view in views for name in view}
+        normalizers = self.ctor_normalizers(public, observed_names)
+        pairs = tuple(self.ctor_signature_pairs(public, observed_names))
         seen, default_refs = set(), {}
 
-        def resolve(sig, view):
-            variadics = (False, True) if any(p.kind in VARIADIC for p in sig.parameters.values()) else (False,)
+        def resolve(sig, view, allow_variadic=True):
+            variadics = (False, True) if allow_variadic and has_variadic(sig) else (False,)
             succeeded = False
             for variadic in variadics:
                 try:
@@ -392,10 +395,17 @@ class Binding:
             return succeeded
 
         for view in views:
-            for sig, fallback in self.ctor_signature_pairs(public, view):
-                succeeded = yield from resolve(sig, view)
+            inner_succeeded = False
+            for sig, fallback, is_inner in pairs:
+                if not is_inner and inner_succeeded and variadic_only(sig):
+                    continue
+                allow_variadic = not (inner_succeeded and has_variadic(sig))
+                succeeded = yield from resolve(sig, view, allow_variadic=allow_variadic)
                 if not succeeded and fallback is not None:
-                    yield from resolve(fallback, view)
+                    fb_variadic = not (inner_succeeded and has_variadic(fallback))
+                    succeeded = yield from resolve(fallback, view, allow_variadic=fb_variadic)
+                if is_inner and succeeded:
+                    inner_succeeded = True
 
     def signatures(self, fn, public, named):
         generic = variadic_only(public)
@@ -522,24 +532,87 @@ class Exports:
             self.by_code.setdefault(id(binding.function.__code__), []).append(binding)
             self.wrapped_codes.update(id(underlying(target).__code__) for target in binding.chain[1:])
 
-    def ctor_chain(self, owner):
-        cls, member = mro_member(owner, "__init__")
-        if member is object.__init__:
-            cls, member = mro_member(owner, "__new__")
-        if cls is None or cls is object or self.class_body(cls) is None:
-            return ()
+    @staticmethod
+    def ctor_callable(cls, member):
+        if cls is None or cls is object:
+            return None
         if type(member) in (staticmethod, classmethod):
             target = member.__func__
-        elif type(member) in (FunctionType, MethodType):
-            target = member
-        else:
-            return ()
-        return self.wrapped_chain(target) or ()
+            return target if type(target) in (FunctionType, MethodType) else None
+        return member if type(member) in (FunctionType, MethodType) else None
 
-    def binding(self, key, member, owner=None, ctor_chain=()):
+    def class_defines_code(self, owner, code, hook_name):
+        if code.co_name != hook_name:
+            return False
+        for base in type.__getattribute__(owner, "__mro__"):
+            body = self.class_body(base)
+            if body is not None and code in body.co_consts:
+                return True
+        return False
+
+    def tag_ctor_chain(self, owner, hook_name, member, chain, *, include_first=False):
+        receiver_hook = hook_name != "__init__" or type(member) is not staticmethod
+        start = 0 if include_first else 1
+        items = []
+        for idx in range(start, len(chain)):
+            target = chain[idx]
+            takes_receiver = (
+                type(target) is FunctionType and receiver_hook and
+                (idx == 0 or self.class_defines_code(owner, target.__code__, hook_name))
+            )
+            items.append((target, takes_receiver))
+        return tuple(items)
+
+    def ctor_targets(self, owner):
+        meta_cls, meta_member = mro_member(type(owner), "__call__")
+        if meta_cls is not None and meta_cls is not type:
+            if self.class_body(meta_cls) is None:
+                return ()
+            target = self.ctor_callable(meta_cls, meta_member)
+            if target is None:
+                return ()
+            chain = self.wrapped_chain(target)
+            if not chain:
+                return ()
+            return tuple(reversed(self.tag_ctor_chain(type(owner), "__call__", meta_member, chain)))
+
+        new_cls, new_member = mro_member(owner, "__new__")
+        init_cls, init_member = mro_member(owner, "__init__")
+        new_target = self.ctor_callable(new_cls, new_member)
+        init_target = self.ctor_callable(init_cls, init_member)
+        if new_target is None and init_target is None:
+            return ()
+
+        mro = type.__getattribute__(owner, "__mro__")
+        new_rank = mro.index(new_cls) if new_target is not None else len(mro)
+        init_rank = mro.index(init_cls) if init_target is not None else len(mro)
+        if new_rank <= init_rank:
+            primary = ("__new__", new_cls, new_member, new_target)
+            secondary = ("__init__", init_cls, init_member, init_target) if init_target is not None else None
+        else:
+            primary = ("__init__", init_cls, init_member, init_target)
+            secondary = ("__new__", new_cls, new_member, new_target) if new_target is not None else None
+
+        p_name, p_cls, p_member, p_target = primary
+        if self.class_body(p_cls) is None:
+            return ()
+        p_chain = self.wrapped_chain(p_target)
+        if not p_chain:
+            return ()
+
+        items = list(reversed(self.tag_ctor_chain(owner, p_name, p_member, p_chain)))
+        if secondary is not None:
+            s_name, s_cls, s_member, s_target = secondary
+            if self.class_body(s_cls) is not None:
+                s_chain = self.wrapped_chain(s_target)
+                if s_chain:
+                    items.extend(reversed(self.tag_ctor_chain(owner, s_name, s_member, s_chain, include_first=True)))
+        return tuple(items)
+
+    def binding(self, key, member, owner=None, ctor_targets=()):
         fn = underlying(member)
         if chain := self.wrapped_chain(fn):
-            return Binding(key, member, chain, owner, ctor_chain)
+            return Binding(key, member, chain, owner, ctor_targets)
 
     def local_members(self, bindings):
         for export_name, value in bindings.items():
@@ -547,7 +620,7 @@ class Exports:
                 if (binding := self.binding(("module", export_name), value)) is not None:
                     yield binding
             elif is_class(value) and self.class_body(value) is not None:
-                ctor_chain = self.ctor_chain(value)
+                ctor_targets = self.ctor_targets(value)
                 seen = set()
                 for owner in type.__getattribute__(value, "__mro__"):
                     local = self.class_body(owner) is not None
@@ -556,7 +629,7 @@ class Exports:
                             continue
                         seen.add(name)
                         if local and not name.startswith("_") and type(member) in (FunctionType, staticmethod, classmethod):
-                            if (binding := self.binding(("class", export_name, name), member, value, ctor_chain)) is not None:
+                            if (binding := self.binding(("class", export_name, name), member, value, ctor_targets)) is not None:
                                 yield binding
 
     def candidates(self, frame):
