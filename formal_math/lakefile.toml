@@ -1,6 +1,6 @@
 name = "chan"
 version = "0.1.0"
-defaultTargets = ["Chan"]
+defaultTargets = ["Chan", "ChanTest"]
 
 [leanOptions]
 autoImplicit = false
@@ -14,3 +14,12 @@ rev = "v4.36.0"
 
 [[lean_lib]]
 name = "Chan"
+
+[[lean_lib]]
+name = "ChanTest"
+roots = ["ChanTest.Probe"]
+globs = ["ChanTest.+"]
+
+[[lean_exe]]
+name = "fm_audit"
+root = "verification.Audit"

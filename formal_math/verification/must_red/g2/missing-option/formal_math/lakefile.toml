@@ -1,0 +1,9 @@
+name = "fixture"
+defaultTargets = ["Chan"]
+
+[leanOptions]
+autoImplicit = false
+linter.unusedVariables = true
+
+[[lean_lib]]
+name = "Chan"
