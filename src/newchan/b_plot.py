@@ -4,17 +4,37 @@ from __future__ import annotations
 
 import platform
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
-import pandas as pd
+if TYPE_CHECKING:
+    import pandas as pd
 
-# 中文字体支持
-if platform.system() == "Windows":
-    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "sans-serif"]
-else:
-    plt.rcParams["font.sans-serif"] = ["PingFang SC", "Noto Sans CJK SC", "sans-serif"]
-plt.rcParams["axes.unicode_minus"] = False
+mdates: Any = None
+plt: Any = None
+
+
+def _ensure_plt() -> Any:
+    global plt
+    if plt is None:
+        import matplotlib.pyplot as _plt
+
+        # 中文字体支持
+        if platform.system() == "Windows":
+            _plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "sans-serif"]
+        else:
+            _plt.rcParams["font.sans-serif"] = ["PingFang SC", "Noto Sans CJK SC", "sans-serif"]
+        _plt.rcParams["axes.unicode_minus"] = False
+        plt = _plt
+    return plt
+
+
+def _ensure_mdates() -> Any:
+    global mdates
+    if mdates is None:
+        import matplotlib.dates as _mdates
+
+        mdates = _mdates
+    return mdates
 
 
 def plot_close(df: pd.DataFrame, title: str = "") -> None:
@@ -32,21 +52,23 @@ def plot_close(df: pd.DataFrame, title: str = "") -> None:
     title : str
         图表标题。
     """
-    fig, ax = plt.subplots(figsize=(14, 5))
+    _plt = _ensure_plt()
+    _mdates = _ensure_mdates()
+    fig, ax = _plt.subplots(figsize=(14, 5))
 
     ax.plot(df.index, df["close"], linewidth=1.0)
 
     # x 轴日期格式 — 根据数据跨度自动选择
     span = df.index[-1] - df.index[0]
     if span.days > 365:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        ax.xaxis.set_major_formatter(_mdates.DateFormatter("%Y-%m"))
+        ax.xaxis.set_major_locator(_mdates.MonthLocator(interval=3))
     elif span.days > 30:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-        ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+        ax.xaxis.set_major_formatter(_mdates.DateFormatter("%Y-%m-%d"))
+        ax.xaxis.set_major_locator(_mdates.WeekdayLocator(interval=1))
     else:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(_mdates.DateFormatter("%m-%d %H:%M"))
+        ax.xaxis.set_major_locator(_mdates.AutoDateLocator())
 
     fig.autofmt_xdate()
 
@@ -56,8 +78,8 @@ def plot_close(df: pd.DataFrame, title: str = "") -> None:
         ax.set_title(title)
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plt.show()
+    _plt.tight_layout()
+    _plt.show()
 
 
 # ── BSP 标签映射 ──
@@ -121,7 +143,9 @@ def plot_overlay(
     title : str
         图表标题。
     """
-    fig, ax = plt.subplots(figsize=(14, 5))
+    _plt = _ensure_plt()
+    _mdates = _ensure_mdates()
+    fig, ax = _plt.subplots(figsize=(14, 5))
 
     ax.plot(df.index, df["close"], linewidth=1.0, color="#4488CC", label="收盘价")
 
@@ -130,14 +154,14 @@ def plot_overlay(
     # x 轴日期格式
     span = df.index[-1] - df.index[0]
     if span.days > 365:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        ax.xaxis.set_major_formatter(_mdates.DateFormatter("%Y-%m"))
+        ax.xaxis.set_major_locator(_mdates.MonthLocator(interval=3))
     elif span.days > 30:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-        ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+        ax.xaxis.set_major_formatter(_mdates.DateFormatter("%Y-%m-%d"))
+        ax.xaxis.set_major_locator(_mdates.WeekdayLocator(interval=1))
     else:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(_mdates.DateFormatter("%m-%d %H:%M"))
+        ax.xaxis.set_major_locator(_mdates.AutoDateLocator())
 
     fig.autofmt_xdate()
 
@@ -147,5 +171,5 @@ def plot_overlay(
         ax.set_title(title)
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plt.show()
+    _plt.tight_layout()
+    _plt.show()
