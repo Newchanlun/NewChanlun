@@ -541,3 +541,40 @@ def test_round_trip_http_rejects_unclosed_trailing_event_after_completed(monkeyp
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
     result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-unclosed-tail", preflight.Deadline(5))
     assert result["ok"] is False
+
+
+def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof(monkeypatch):
+    """Sol P2 #3 + Astra P2 #4 (PR #2280 R12): 显式 event: 与 JSON type 冲突、或终态后残留未闭合 event: 头均拒绝。"""
+    for payload in (
+        (
+            b"event: response.failed\n"
+            b'data: {"type":"response.completed",\n'
+            b'data: "response":{"status":"completed"}}\n\n'
+        ),
+        (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+            b"event: response.failed\n"
+        ),
+        (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+            b"event: response.failed\n"
+            b"data: [DONE]\n\n"
+        ),
+    ):
+        class _FakeResp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, _p=payload):
+                return _p
+
+        monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+        result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-ev-mismatch", preflight.Deadline(5))
+        assert result["ok"] is False, payload

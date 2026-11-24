@@ -378,17 +378,33 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
         with urllib.request.urlopen(request, timeout=timeout) as response:
             terminal, detail, status = None, "流在终态事件前结束", None
             data_lines: list[str] = []
+            event_name: str | None = None
             for raw in response.read().splitlines():
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
                 line = raw.decode("utf-8", "replace")
                 if line == "":
+                    ev_name = event_name
+                    event_name = None
                     if data_lines:
                         joined = "\n".join(data_lines).strip()
                         data_lines = []
+                        if joined == "[DONE]":
+                            if ev_name is not None:
+                                detail = "SSE 事件名与 [DONE] 冲突"
+                                break
+                            continue
+                        if not joined:
+                            if ev_name is not None:
+                                detail = "SSE 存在空数据事件"
+                                break
+                            continue
                         if joined.startswith("{"):
                             event = json.loads(joined)
+                            if ev_name is not None and event.get("type") != ev_name:
+                                detail = "SSE 事件名与数据 type 不一致"
+                                break
                             if event.get("type") in TERMINAL_EVENTS:
                                 if terminal is not None:
                                     detail = "终态事件后出现另一终态"
@@ -400,16 +416,29 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                                     None if inner.get("status") is None else "other")
                                 detail = inner.get("error") or event.get("error") or event.get("message")
                                 # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
+                        elif ev_name is not None:
+                            detail = "SSE 事件名与非 JSON 数据冲突"
+                            break
+                    elif ev_name is not None:
+                        detail = "SSE 存在无数据事件头"
+                        break
                     continue
-                if line.startswith("data:"):
+                if line.startswith("event:"):
+                    val = line[6:]
+                    if val.startswith(" "):
+                        val = val[1:]
+                    event_name = val
+                elif line.startswith("data:"):
                     val = line[5:]
                     if val.startswith(" "):
                         val = val[1:]
                     data_lines.append(val)
             if data_lines:
                 trailing = "\n".join(data_lines).strip()
-                if trailing and trailing != "[DONE]":
+                if (trailing and trailing != "[DONE]") or event_name is not None:
                     detail = "流尾存在未闭合 SSE 事件"
+            elif event_name is not None:
+                detail = "流尾存在未闭合 SSE 事件头"
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
             # 事件名成功还不够：响应体自报 failed/cancelled 或带 error 也算失败。
