@@ -3772,10 +3772,10 @@ index 47f87de..3a1a2d4 100644
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-index e69de29..cb801ff 100644
+index e69de29..e172af8 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,269 @@
 +package auth
 +
 +import (
@@ -3879,7 +3879,13 @@ index e69de29..cb801ff 100644
 +	go func() {
 +		canceled := false
 +		postEOFCancel := false
++		sawPayload := false
++		leaseEnded := false
 +		defer func() {
++			if leaseEnded {
++				close(out)
++				return
++			}
 +			if !canceled && !postEOFCancel {
 +				// Release the execution lease BEFORE exposing EOF on out so an immediate
 +				// serial retry on the same Collector never observes stale active > 0.
@@ -3968,10 +3974,45 @@ index e69de29..cb801ff 100644
 +					if chunk.Err != nil {
 +						if c.StrictCodex() && c.ObservedCompleted() {
 +							c.Taint()
-+						} else {
++						} else if sawPayload {
 +							c.Reject()
++						} else {
++							c.MarkAttemptFailed()
++							// Drain original to EOF and release the execution lease BEFORE delivering a
++							// pre-payload bootstrap error so Manager.ExecuteStream's immediate serial
++							// retry never races with async discardStreamChunks and hits active > 0.
++							for {
++								select {
++								case <-ctx.Done():
++									canceled = true
++									return
++								case extra, more := <-original:
++									if !more {
++										goto bootstrapDrained
++									}
++									if extra.Err != nil {
++										if c.StrictCodex() && c.ObservedCompleted() {
++											c.Taint()
++										}
++									} else if len(extra.Payload) > 0 {
++										c.Reject()
++										c.ObserveStreamChunk(extra.Payload)
++									}
++								}
++							}
++						bootstrapDrained:
++							lease.End()
++							leaseEnded = true
++							select {
++							case out <- chunk:
++							case <-ctx.Done():
++							}
++							return
 +						}
 +					} else if chunk.Payload != nil {
++						if len(chunk.Payload) > 0 {
++							sawPayload = true
++						}
 +						c.ObserveStreamChunk(chunk.Payload)
 +					}
 +				}
@@ -4279,10 +4320,10 @@ index 0000000..6de513e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000..e87d24e
+index 0000000..f6b92f0
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,501 @@
 +package auth
 +
 +import (
@@ -4676,6 +4717,114 @@ index 0000000..e87d24e
 +		t.Fatalf("post-EOF trailing StreamChunk.Err = %v, want SealRejected", st)
 +	}
 +}
++
++func TestPreflightReceiptBootstrapStreamErrAllowsSerialRetry(t *testing.T) {
++	// Sol P2 #1 (PR #2280 R18): a pre-payload StreamChunk{Err} (bootstrap failure before any
++	// payload bytes are emitted) MUST block sealing if unretried, yet MUST release the lease
++	// cleanly and leave the Collector reusable for an immediate serial retry (without waiting for
++	// async discardStreamChunks).
++	root := filepath.Join(t.TempDir(), "receipts")
++	tlsState := testVerifiedTLS(t, "chatgpt.com")
++	sseOK := `data: {"type":"response.completed","response":{"id":"resp_retry_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++
++	// 1. Unretried pre-payload bootstrap StreamChunk.Err MUST NOT seal.
++	lFail := "review-88881111-2222-4333-8444-999999999931"
++	sFail := "019d0000-0000-7000-8000-999999999931"
++	ctxF, cF, err := preflightreceipt.BeginReview(context.Background(), root, lFail, sFail, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	execCtxF, leaseF, err := cF.Start(ctxF, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clF := httptransport.Decorate(execCtxF, &http.Client{Transport: streamTestRT{tlsState: tlsState}})
++	reqF, _ := http.NewRequestWithContext(execCtxF, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respF, err := clF.Do(reqF)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respF.Body)
++	_ = respF.Body.Close()
++
++	origF := make(chan executor.StreamChunk, 1)
++	origF <- executor.StreamChunk{Err: errors.New("retryable 502")}
++	close(origF)
++	outF := wrapPreflightStream(execCtxF, leaseF, origF)
++	chunkF, ok := <-outF
++	if !ok || chunkF.Err == nil {
++		t.Fatalf("expected bootstrap error chunk, got ok=%v chunk=%+v", ok, chunkF)
++	}
++	for range outF {
++	}
++	cF.Complete(true)
++	cF.HandlerDone(true)
++	if st := waitSealReview(t, root, lFail, sFail); st != preflightreceipt.SealRejected {
++		t.Fatalf("unretried bootstrap StreamChunk.Err seal = %v, want SealRejected", st)
++	}
++
++	// 2. Immediate serial retry right after reading bootstrap error chunk (simulating readStreamBootstrap)
++	//    MUST succeed on Attempt 2 and seal cleanly.
++	lRetry := "review-88881111-2222-4333-8444-999999999932"
++	sRetry := "019d0000-0000-7000-8000-999999999932"
++	ctxR, cR, err := preflightreceipt.BeginReview(context.Background(), root, lRetry, sRetry, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	execCtx1, lease1, err := cR.Start(ctxR, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(execCtx1, &http.Client{Transport: streamTestRT{tlsState: tlsState}})
++	req1, _ := http.NewRequestWithContext(execCtx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp1, err := cl1.Do(req1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp1.Body)
++	_ = resp1.Body.Close()
++
++	orig1 := make(chan executor.StreamChunk, 1)
++	orig1 <- executor.StreamChunk{Err: errors.New("retryable 502")}
++	close(orig1)
++	out1 := wrapPreflightStream(execCtx1, lease1, orig1)
++	// Read ONLY the first error chunk (exactly like readStreamBootstrap) without waiting for out1 EOF.
++	chunk1, ok := <-out1
++	if !ok || chunk1.Err == nil {
++		t.Fatalf("expected bootstrap error chunk on attempt 1, got ok=%v chunk=%+v", ok, chunk1)
++	}
++	discardStreamChunks(out1)
++
++	// Immediately start Attempt 2 on the same Collector.
++	execCtx2, lease2, err := cR.Start(ctxR, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("serial retry immediately after bootstrap StreamChunk.Err failed: %v", err)
++	}
++	cl2 := httptransport.Decorate(execCtx2, &http.Client{Transport: status200StreamTestRT{tlsState: tlsState, body: sseOK}})
++	req2, _ := http.NewRequestWithContext(execCtx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp2, err := cl2.Do(req2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	raw2, err := io.ReadAll(resp2.Body)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := resp2.Body.Close(); err != nil {
++		t.Fatal(err)
++	}
++	orig2 := make(chan executor.StreamChunk, 1)
++	orig2 <- executor.StreamChunk{Payload: raw2}
++	close(orig2)
++	out2 := wrapPreflightStream(execCtx2, lease2, orig2)
++	for range out2 {
++	}
++	cR.Complete(true)
++	cR.HandlerDone(true)
++	if st := waitSealReview(t, root, lRetry, sRetry); st != preflightreceipt.SealOK {
++		t.Fatalf("serial retry after bootstrap StreamChunk.Err seal = %v, want SealOK", st)
++	}
++}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
 index 0000000..36692d6
@@ -4904,10 +5053,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..b6b3fb2 100644
+index e69de29..bdcb1fb 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,3787 @@
+@@ -0,0 +1,3983 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5099,6 +5248,9 @@ index e69de29..b6b3fb2 100644
 +
 +type doneItemSummary struct {
 +	itemID         string
++	itemType       string
++	itemRole       string
++	itemPhase      string
 +	outputIndex    int64
 +	hasOutputIndex bool
 +	isFinal        bool
@@ -5123,6 +5275,7 @@ index e69de29..b6b3fb2 100644
 +	itemIndexByID             map[string]int64
 +	itemIDByIndex             map[int64]string
 +	itemKindByKey             map[string]strictItemKind
++	itemTypeByKey             map[string]string
 +	contentPartByItem         map[string]map[int64]string
 +	textDeltaHashByItem       map[string]map[int64]hash.Hash
 +	pendingUnkeyed            int
@@ -5152,6 +5305,7 @@ index e69de29..b6b3fb2 100644
 +	t.itemIndexByID = nil
 +	t.itemIDByIndex = nil
 +	t.itemKindByKey = nil
++	t.itemTypeByKey = nil
 +	t.contentPartByItem = nil
 +	t.textDeltaHashByItem = nil
 +	t.pendingUnkeyed = 0
@@ -5174,6 +5328,7 @@ index e69de29..b6b3fb2 100644
 +	directory                                   string
 +	deadline                                    time.Time
 +	invalid, sealed, handlerDone, lifecycleDone bool
++	attemptFailed                               bool
 +	reserved                                    bool
 +	strictCodex                                 bool
 +	expectedModel                               string
@@ -5226,6 +5381,17 @@ index e69de29..b6b3fb2 100644
 +	}
 +	c.mu.Lock()
 +	c.upstreamEOF = true
++	c.mu.Unlock()
++}
++
++// MarkAttemptFailed marks the current execution attempt failed without poisoning the Collector,
++// allowing Manager bootstrap retries on the next Start() while blocking publication if no retry succeeds.
++func (c *Collector) MarkAttemptFailed() {
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	c.attemptFailed = true
 +	c.mu.Unlock()
 +}
 +
@@ -5334,6 +5500,41 @@ index e69de29..b6b3fb2 100644
 +		return itemKindMessageAny
 +	}
 +	return itemKindNonMessage
++}
++
++func inferredDeltaItemType(evType string) string {
++	switch {
++	case evType == "response.content_part.added" ||
++		evType == "response.content_part.done" ||
++		evType == "response.output_text.delta" ||
++		evType == "response.output_text.done" ||
++		evType == "response.output_text.annotation.added" ||
++		evType == "response.refusal.delta" ||
++		evType == "response.refusal.done" ||
++		evType == "response.audio.delta" ||
++		evType == "response.audio.done" ||
++		evType == "response.audio.transcript.delta" ||
++		evType == "response.audio.transcript.done":
++		return "message"
++	case strings.HasPrefix(evType, "response.function_call_arguments."):
++		return "function_call"
++	case strings.HasPrefix(evType, "response.custom_tool_call_input."):
++		return "custom_tool_call"
++	case strings.HasPrefix(evType, "response.mcp_call_arguments.") || strings.HasPrefix(evType, "response.mcp_call."):
++		return "mcp_call"
++	case strings.HasPrefix(evType, "response.reasoning"):
++		return "reasoning"
++	case strings.HasPrefix(evType, "response.code_interpreter_call"):
++		return "code_interpreter_call"
++	case strings.HasPrefix(evType, "response.file_search_call"):
++		return "file_search_call"
++	case strings.HasPrefix(evType, "response.web_search_call"):
++		return "web_search_call"
++	case strings.HasPrefix(evType, "response.image_generation_call"):
++		return "image_generation_call"
++	default:
++		return ""
++	}
 +}
 +
 +func classifyDeltaEventKind(evType string) strictItemKind {
@@ -5479,6 +5680,9 @@ index e69de29..b6b3fb2 100644
 +				return false
 +			}
 +		}
++		if prevType, exists := t.itemTypeByKey[canonKey]; exists && item.Type != prevType {
++			return false
++		}
 +		if recordedParts, hasParts := t.contentPartByItem[canonKey]; hasParts {
 +			if item.Type != "message" || item.Role != "assistant" {
 +				return false
@@ -5488,7 +5692,11 @@ index e69de29..b6b3fb2 100644
 +					return false
 +				}
 +				part := item.Content[cIdx]
-+				if contentPartTag(part.Type, part.Text) != wantTag {
++				if wantTag == "text-pending" {
++					if part.Type != "output_text" {
++						return false
++					}
++				} else if contentPartTag(part.Type, part.Text) != wantTag {
 +					return false
 +				}
 +			}
@@ -5509,7 +5717,8 @@ index e69de29..b6b3fb2 100644
 +		}
 +		if doneRec, exists := t.doneItems[canonKey]; exists {
 +			matchedDoneKeys[canonKey] = struct{}{}
-+			if doneRec.isFinal != isFinalAssistantOutputItem(item) {
++			if doneRec.itemType != item.Type || doneRec.itemRole != item.Role || doneRec.itemPhase != item.Phase ||
++				doneRec.isFinal != isFinalAssistantOutputItem(item) {
 +				return false
 +			}
 +			if doneRec.isAssistantMsg {
@@ -5564,7 +5773,7 @@ index e69de29..b6b3fb2 100644
 +var (
 +	sseEventSchemaKeys = map[string]struct{}{
 +		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {},
-+		"item": {}, "item_id": {}, "output_index": {}, "content_index": {}, "text": {}, "delta": {}, "part": {},
++		"item": {}, "item_id": {}, "output_index": {}, "content_index": {}, "text": {}, "delta": {}, "refusal": {}, "part": {},
 +	}
 +	sseResponseSchemaKeys = map[string]struct{}{
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
@@ -5573,7 +5782,7 @@ index e69de29..b6b3fb2 100644
 +		"id": {}, "type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
-+		"type": {}, "text": {},
++		"type": {}, "text": {}, "refusal": {},
 +	}
 +)
 +
@@ -5792,7 +6001,9 @@ index e69de29..b6b3fb2 100644
 +		status, ok4 := exactOptionalString(fields, "status")
 +		itemRespID, hasItemRespID, okRespID := exactOptionalStringPresent(fields, "response_id")
 +		if !okID || !ok1 || !ok2 || !ok3 || !ok4 || !okRespID ||
-+			len(itemID) > maxStrictIdentityBytes || len(itemRespID) > maxStrictIdentityBytes {
++			len(itemID) > maxStrictIdentityBytes || len(itemRespID) > maxStrictIdentityBytes ||
++			len(typ) > maxStrictIdentityBytes || len(role) > maxStrictIdentityBytes ||
++			len(phase) > maxStrictIdentityBytes || len(status) > maxStrictIdentityBytes {
 +			return false
 +		}
 +		if itemID != "" {
@@ -5895,20 +6106,24 @@ index e69de29..b6b3fb2 100644
 +		if frame.itemFields == nil {
 +			return false
 +		}
-+		_, ok1 := exactOptionalString(frame.itemFields, "type")
-+		_, ok2 := exactOptionalString(frame.itemFields, "role")
-+		_, ok3 := exactOptionalString(frame.itemFields, "phase")
-+		_, ok4 := exactOptionalString(frame.itemFields, "status")
-+		return ok1 && ok2 && ok3 && ok4
++		itemType, ok1 := exactOptionalString(frame.itemFields, "type")
++		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
++		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
++		itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
++		return ok1 && ok2 && ok3 && ok4 &&
++			len(itemType) <= maxStrictIdentityBytes && len(itemRole) <= maxStrictIdentityBytes &&
++			len(itemPhase) <= maxStrictIdentityBytes && len(itemStatus) <= maxStrictIdentityBytes
 +	case "response.output_item.done":
 +		if frame.itemFields == nil {
 +			return false
 +		}
 +		itemType, ok1 := exactOptionalString(frame.itemFields, "type")
 +		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
-+		_, ok3 := exactOptionalString(frame.itemFields, "phase")
-+		_, ok4 := exactOptionalString(frame.itemFields, "status")
-+		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" {
++		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
++		itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
++		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" ||
++			len(itemType) > maxStrictIdentityBytes || len(itemRole) > maxStrictIdentityBytes ||
++			len(itemPhase) > maxStrictIdentityBytes || len(itemStatus) > maxStrictIdentityBytes {
 +			return false
 +		}
 +		if itemType == "message" && itemRole == "assistant" {
@@ -6139,10 +6354,16 @@ index e69de29..b6b3fb2 100644
 +	}
 +	var evDelta string
 +	var hasEvDelta bool
-+	if evType == "response.output_text.delta" {
++	if evType == "response.output_text.delta" || evType == "response.refusal.delta" {
 +		var okDelta bool
 +		evDelta, hasEvDelta, okDelta = exactOptionalStringPresent(evFields, "delta")
 +		if !okDelta || !hasEvDelta {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	if evType == "response.refusal.done" {
++		if _, hasRef, okRef := exactOptionalStringPresent(evFields, "refusal"); !okRef || !hasRef {
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
@@ -6161,12 +6382,33 @@ index e69de29..b6b3fb2 100644
 +		}
 +		pType, hasPType, ok1 := exactOptionalStringPresent(partFields, "type")
 +		_, ok2 := exactOptionalString(partFields, "text")
-+		if !ok1 || !ok2 || !hasPType || strings.TrimSpace(pType) == "" || len(pType) > maxStrictIdentityBytes {
++		_, ok3 := exactOptionalString(partFields, "refusal")
++		if !ok1 || !ok2 || !ok3 || !hasPType || strings.TrimSpace(pType) == "" || len(pType) > maxStrictIdentityBytes {
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
 +		if pType == "output_text" {
 +			if _, hasPText, okPText := exactOptionalStringPresent(partFields, "text"); !okPText || !hasPText {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		}
++	} else if evType == "response.content_part.added" {
++		if rawPart, hasPartKey := evFields["part"]; hasPartKey {
++			if !hasResponseError(rawPart) {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++			var partErr error
++			partFields, partErr = decodeExactJSONObject(rawPart, sseContentPartSchemaKeys)
++			if partErr != nil {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++			pType, ok1 := exactOptionalString(partFields, "type")
++			_, ok2 := exactOptionalString(partFields, "text")
++			_, ok3 := exactOptionalString(partFields, "refusal")
++			if !ok1 || !ok2 || !ok3 || len(pType) > maxStrictIdentityBytes {
 +				c.taintStreamAnomaly()
 +				return out, false
 +			}
@@ -6320,6 +6562,16 @@ index e69de29..b6b3fb2 100644
 +						t.itemKindByKey[canonKey] = prevKind
 +					}
 +				}
++				if prevType, hasType := t.itemTypeByKey[idxKey]; hasType {
++					delete(t.itemTypeByKey, idxKey)
++					if curType, hasCur := t.itemTypeByKey[canonKey]; hasCur {
++						if curType != prevType {
++							return "", "", 0, false, false
++						}
++					} else {
++						t.itemTypeByKey[canonKey] = prevType
++					}
++				}
 +				if prevParts, hasParts := t.contentPartByItem[idxKey]; hasParts {
 +					delete(t.contentPartByItem, idxKey)
 +					curParts := t.contentPartByItem[canonKey]
@@ -6327,8 +6579,18 @@ index e69de29..b6b3fb2 100644
 +						t.contentPartByItem[canonKey] = prevParts
 +					} else {
 +						for cIdx, tag := range prevParts {
-+							if existingTag, dup := curParts[cIdx]; dup && existingTag != tag {
-+								return "", "", 0, false, false
++							if existingTag, dup := curParts[cIdx]; dup {
++								if existingTag == "text-pending" && strings.HasPrefix(tag, "text:") {
++									curParts[cIdx] = tag
++									continue
++								}
++								if tag == "text-pending" && strings.HasPrefix(existingTag, "text:") {
++									continue
++								}
++								if existingTag != tag {
++									return "", "", 0, false, false
++								}
++								continue
 +							}
 +							if len(curParts) >= maxTrackedContentParts {
 +								return "", "", 0, false, false
@@ -6408,6 +6670,26 @@ index e69de29..b6b3fb2 100644
 +	return seq, true
 +}
 +
++func (t *strictStreamTracker) recordItemType(canonKey, rawType string) bool {
++	if canonKey == "" || rawType == "" {
++		return true
++	}
++	if len(rawType) > maxStrictIdentityBytes {
++		return false
++	}
++	if prev, exists := t.itemTypeByKey[canonKey]; exists {
++		return prev == rawType
++	}
++	if len(t.itemTypeByKey) >= maxTrackedOutputItems {
++		return false
++	}
++	if t.itemTypeByKey == nil {
++		t.itemTypeByKey = make(map[string]string)
++	}
++	t.itemTypeByKey[canonKey] = rawType
++	return true
++}
++
 +func (t *strictStreamTracker) recordItemKind(canonKey string, kind strictItemKind) bool {
 +	if canonKey == "" || kind == itemKindUnknown {
 +		return true
@@ -6435,7 +6717,7 @@ index e69de29..b6b3fb2 100644
 +		return false
 +	}
 +	if parts := t.contentPartByItem[canonKey]; parts != nil {
-+		if _, finalized := parts[contentIdx]; finalized {
++		if prevTag, finalized := parts[contentIdx]; finalized && prevTag != "text-pending" {
 +			return false
 +		}
 +	}
@@ -6462,6 +6744,35 @@ index e69de29..b6b3fb2 100644
 +	return true
 +}
 +
++func (t *strictStreamTracker) recordPendingTextPart(canonKey string, contentIdx int64) bool {
++	if canonKey == "" {
++		return true
++	}
++	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
++		return false
++	}
++	parts := t.contentPartByItem[canonKey]
++	if parts != nil {
++		if prevTag, exists := parts[contentIdx]; exists {
++			return prevTag == "text-pending" || strings.HasPrefix(prevTag, "text:")
++		}
++		if len(parts) >= maxTrackedContentParts {
++			return false
++		}
++	} else {
++		if len(t.contentPartByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.contentPartByItem == nil {
++			t.contentPartByItem = make(map[string]map[int64]string)
++		}
++		parts = make(map[int64]string)
++		t.contentPartByItem[canonKey] = parts
++	}
++	parts[contentIdx] = "text-pending"
++	return true
++}
++
 +func (t *strictStreamTracker) recordContentPart(canonKey string, contentIdx int64, partType, text string) bool {
 +	if canonKey == "" {
 +		return true
@@ -6480,6 +6791,13 @@ index e69de29..b6b3fb2 100644
 +	parts := t.contentPartByItem[canonKey]
 +	if parts != nil {
 +		if prevTag, exists := parts[contentIdx]; exists {
++			if prevTag == "text-pending" {
++				if partType != "output_text" {
++					return false
++				}
++				parts[contentIdx] = tag
++				return true
++			}
 +			return prevTag == tag
 +		}
 +		if len(parts) >= maxTrackedContentParts {
@@ -6577,7 +6895,7 @@ index e69de29..b6b3fb2 100644
 +				return
 +			}
 +		}
-+		if !t.recordItemKind(canonKey, addedKind) {
++		if !t.recordItemKind(canonKey, addedKind) || !t.recordItemType(canonKey, itemType) {
 +			c.mu.Unlock()
 +			c.taintStreamAnomaly()
 +			return
@@ -6677,7 +6995,7 @@ index e69de29..b6b3fb2 100644
 +			c.taintStreamAnomaly()
 +			return
 +		}
-+		if !t.recordItemKind(canonKey, doneKind) {
++		if !t.recordItemKind(canonKey, doneKind) || !t.recordItemType(canonKey, itemType) {
 +			c.mu.Unlock()
 +			c.taintStreamAnomaly()
 +			return
@@ -6742,6 +7060,9 @@ index e69de29..b6b3fb2 100644
 +			t.doneItemKeys[canonKey] = struct{}{}
 +			t.doneItems[canonKey] = doneItemSummary{
 +				itemID:         effItemID,
++				itemType:       itemType,
++				itemRole:       itemRole,
++				itemPhase:      itemPhase,
 +				outputIndex:    effIdx,
 +				hasOutputIndex: effHasIdx,
 +				isFinal:        isFinalCandidate,
@@ -6863,39 +7184,62 @@ index e69de29..b6b3fb2 100644
 +		return
 +	default:
 +		deltaKind := classifyDeltaEventKind(frame.evType)
++		deltaItemType := inferredDeltaItemType(frame.evType)
 +		canonKey, effItemID, effIdx, effHasIdx, okBind := t.bindIdentity(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
-+		if !okBind || !t.recordItemKind(canonKey, deltaKind) {
++		if !okBind || !t.recordItemKind(canonKey, deltaKind) || !t.recordItemType(canonKey, deltaItemType) {
 +			c.mu.Unlock()
 +			c.taintStreamAnomaly()
 +			return
 +		}
-+		if frame.evType == "response.output_text.delta" {
-+			cIdx := int64(0)
-+			if frame.hasContentIndex {
-+				cIdx = frame.contentIndex
-+			}
++		cIdx := int64(0)
++		if frame.hasContentIndex {
++			cIdx = frame.contentIndex
++		}
++		switch frame.evType {
++		case "response.output_text.delta":
 +			if !frame.hasEvDelta || !t.recordTextDelta(canonKey, cIdx, frame.evDelta) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
 +			}
-+		} else if frame.evType == "response.output_text.done" {
-+			cIdx := int64(0)
-+			if frame.hasContentIndex {
-+				cIdx = frame.contentIndex
-+			}
++		case "response.output_text.done":
 +			if !frame.hasEvText || !t.recordContentPart(canonKey, cIdx, "output_text", frame.evText) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
 +			}
-+		} else if frame.evType == "response.content_part.done" {
++		case "response.refusal.delta", "response.refusal.done":
++			if !t.recordContentPart(canonKey, cIdx, "refusal", "") {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		case "response.audio.delta", "response.audio.done", "response.audio.transcript.delta", "response.audio.transcript.done":
++			if !t.recordContentPart(canonKey, cIdx, "output_audio", "") {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		case "response.content_part.added":
++			if frame.partFields != nil {
++				pType, _ := exactOptionalString(frame.partFields, "type")
++				if pType != "" && pType != "output_text" {
++					if !t.recordContentPart(canonKey, cIdx, pType, "") {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
++					}
++				} else if pType == "output_text" {
++					if !t.recordPendingTextPart(canonKey, cIdx) {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
++					}
++				}
++			}
++		case "response.content_part.done":
 +			pType, _ := exactOptionalString(frame.partFields, "type")
 +			pText, _ := exactOptionalString(frame.partFields, "text")
-+			cIdx := int64(0)
-+			if frame.hasContentIndex {
-+				cIdx = frame.contentIndex
-+			}
 +			if frame.partFields == nil || pType == "" || !t.recordContentPart(canonKey, cIdx, pType, pText) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
@@ -8035,6 +8379,7 @@ index e69de29..b6b3fb2 100644
 +	}
 +	c.active++
 +	c.executions++
++	c.attemptFailed = false
 +	c.upstreamEOF = false
 +	c.resetAttemptStreamStateLocked()
 +	e := &Execution{c: c, provider: provider, model: model}
@@ -8607,7 +8952,7 @@ index e69de29..b6b3fb2 100644
 +}
 +
 +func (c *Collector) maybeReleaseReviewLocked() {
-+	if c.review != nil && !c.reviewReleased && c.handlerDone && c.active == 0 && c.bodies == 0 && (c.sealed || c.lifecycleDone || c.invalid) {
++	if c.review != nil && !c.reviewReleased && c.handlerDone && c.active == 0 && c.bodies == 0 && (c.sealed || c.lifecycleDone || c.invalid || c.attemptFailed) {
 +		c.reviewReleased = true
 +		releaseReview(c.review)
 +	}
@@ -8615,7 +8960,7 @@ index e69de29..b6b3fb2 100644
 +
 +func (c *Collector) publishLocked() {
 +	defer c.maybeReleaseReviewLocked()
-+	if c.invalid || c.sealed || !c.handlerDone || !c.lifecycleDone || c.active != 0 || c.bodies != 0 || c.executions == 0 || len(c.receipt.Routes) == 0 {
++	if c.invalid || c.attemptFailed || c.sealed || !c.handlerDone || !c.lifecycleDone || c.active != 0 || c.bodies != 0 || c.executions == 0 || len(c.receipt.Routes) == 0 {
 +		return
 +	}
 +	if time.Now().After(c.deadline) {
@@ -8696,10 +9041,10 @@ index e69de29..b6b3fb2 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..9900c06 100644
+index e69de29..b261e1b 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3943 @@
+@@ -0,0 +1,3995 @@
 +package preflightreceipt
 +
 +import (
@@ -12641,5 +12986,57 @@ index e69de29..9900c06 100644
 +	sseLongPartType := "data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_lpt","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":%q,"text":"x"}]}]}}`, longPartType) + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555549", "019d0000-0000-7000-8000-888888888149", sseLongPartType); st != SealRejected {
 +		t.Fatalf("oversized content part.type seal = %v, want SealRejected", st)
++	}
++
++	// 36. Sol P1 #1 (PR #2280 R18): refusal/audio/content_part.added type binding MUST prevent
++	//     refusal parts from morphing into output_text (or output_text morphing into refusal), while
++	//     consistent refusal streams seal cleanly with empty last_output_sha256.
++	sseRefusalMorph := "data: " + `{"type":"response.created","response":{"id":"resp_rm1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_ref","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.refusal.done","output_index":0,"item_id":"msg_ref","content_index":0,"refusal":"cannot comply"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ref","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_rm1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_ref","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555550", "019d0000-0000-7000-8000-888888888150", sseRefusalMorph); st != SealRejected {
++		t.Fatalf("refusal.done morphing into output_text seal = %v, want SealRejected", st)
++	}
++	ssePartAddedMorph := "data: " + `{"type":"response.created","response":{"id":"resp_pam1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_pa","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"msg_pa","content_index":0,"part":{"type":"output_text","text":""}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_pa","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"no"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_pam1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_pa","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"no"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555551", "019d0000-0000-7000-8000-888888888151", ssePartAddedMorph); st != SealRejected {
++		t.Fatalf("content_part.added(output_text) morphing into refusal seal = %v, want SealRejected", st)
++	}
++	lRefusalOK := "review-d1111111-2222-4333-8444-555555555552"
++	sRefusalOK := "019d0000-0000-7000-8000-888888888152"
++	sseRefusalOK := "data: " + `{"type":"response.created","response":{"id":"resp_rok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_rok","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"msg_rok","content_index":0,"part":{"type":"refusal","refusal":""}}` + "\n\n" +
++		"data: " + `{"type":"response.refusal.delta","output_index":0,"item_id":"msg_rok","content_index":0,"delta":"cannot "}` + "\n\n" +
++		"data: " + `{"type":"response.refusal.done","output_index":0,"item_id":"msg_rok","content_index":0,"refusal":"cannot comply"}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.done","output_index":0,"item_id":"msg_rok","content_index":0,"part":{"type":"refusal","refusal":"cannot comply"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_rok","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"cannot comply"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_rok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_rok","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"cannot comply"}]}]}}` + "\n\n"
++	if st := runSSE(t, lRefusalOK, sRefusalOK, sseRefusalOK); st != SealOK {
++		t.Fatalf("consistent refusal stream seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lRefusalOK); r.LastOutputSHA256 != "" {
++		t.Fatalf("consistent refusal stream certified last_output_sha256 = %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 37. Sol P1 #2 (PR #2280 R18): exact raw item.Type MUST match across delta/added/done/response.completed
++	//     (e.g. function_call MUST NOT morph into reasoning).
++	sseFuncToReasoning := "data: " + `{"type":"response.created","response":{"id":"resp_ftr","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"nf_0","type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_ftr","status":"completed","model":"gpt-6.2-sol","output":[{"id":"nf_0","type":"reasoning"}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555553", "019d0000-0000-7000-8000-888888888153", sseFuncToReasoning); st != SealRejected {
++		t.Fatalf("function_call morphing into reasoning in completed output seal = %v, want SealRejected", st)
++	}
++	sseDeltaFuncToReasoning := "data: " + `{"type":"response.created","response":{"id":"resp_dftr","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"nf_1","delta":"{}"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"nf_1","type":"reasoning"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_dftr","status":"completed","model":"gpt-6.2-sol","output":[{"id":"nf_1","type":"reasoning"}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555554", "019d0000-0000-7000-8000-888888888154", sseDeltaFuncToReasoning); st != SealRejected {
++		t.Fatalf("function_call_arguments.delta morphing into reasoning done seal = %v, want SealRejected", st)
 +	}
 +}
