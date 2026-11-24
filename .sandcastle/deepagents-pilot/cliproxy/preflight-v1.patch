@@ -5141,10 +5141,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..8f6a694 100644
+index e69de29..9b72372 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,4753 @@
+@@ -0,0 +1,5348 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5340,6 +5340,7 @@ index e69de29..8f6a694 100644
 +	itemType       string
 +	itemRole       string
 +	itemPhase      string
++	itemStatus     string
 +	callID         string
 +	name           string
 +	serverLabel    string
@@ -5351,6 +5352,18 @@ index e69de29..8f6a694 100644
 +	isAssistantMsg bool
 +	outputTextSHA  string
 +	doneDigest     string
++}
++
++type toolItemMeta struct {
++	callID      string
++	name        string
++	serverLabel string
++}
++
++type toolPayloadField struct {
++	sha   string
++	str   string
++	isStr bool
 +}
 +
 +type textDeltaState struct {
@@ -5385,6 +5398,10 @@ index e69de29..8f6a694 100644
 +	itemIDByIndex             map[int64]string
 +	itemKindByKey             map[string]strictItemKind
 +	itemTypeByKey             map[string]string
++	toolMetaByKey             map[string]toolItemMeta
++	toolPayloadFinalByItem    map[string]map[string]string
++	toolPayloadDeltaByItem    map[string]map[string]*textDeltaState
++	toolPayloadPrefixByItem   map[string]map[string]textPrefixCheck
 +	contentPartByItem         map[string]map[int64]string
 +	textDeltaHashByItem       map[string]map[int64]*textDeltaState
 +	textPrefixByItem          map[string]map[int64]textPrefixCheck
@@ -5416,6 +5433,10 @@ index e69de29..8f6a694 100644
 +	t.itemIDByIndex = nil
 +	t.itemKindByKey = nil
 +	t.itemTypeByKey = nil
++	t.toolMetaByKey = nil
++	t.toolPayloadFinalByItem = nil
++	t.toolPayloadDeltaByItem = nil
++	t.toolPayloadPrefixByItem = nil
 +	t.contentPartByItem = nil
 +	t.textDeltaHashByItem = nil
 +	t.textPrefixByItem = nil
@@ -5603,8 +5624,19 @@ index e69de29..8f6a694 100644
 +	Name        string                      `json:"name"`
 +	ServerLabel string                      `json:"server_label"`
 +	ArgsSHA     string                      `json:"-"`
++	ArgsStr     string                      `json:"-"`
++	ArgsIsStr   bool                        `json:"-"`
 +	InputSHA    string                      `json:"-"`
++	InputStr    string                      `json:"-"`
++	InputIsStr  bool                        `json:"-"`
 +	Content     []responseOutputContentPart `json:"content"`
++}
++
++func doneItemStatusCompatible(doneStatus, nextStatus string) bool {
++	if doneStatus == nextStatus {
++		return true
++	}
++	return (doneStatus == "" && nextStatus == "completed") || (doneStatus == "completed" && nextStatus == "")
 +}
 +
 +type strictItemKind uint8
@@ -5895,9 +5927,24 @@ index e69de29..8f6a694 100644
 +				}
 +			}
 +		}
++		itemMeta := toolItemMeta{callID: item.CallID, name: item.Name, serverLabel: item.ServerLabel}
++		itemArgs := toolPayloadField{sha: item.ArgsSHA, str: item.ArgsStr, isStr: item.ArgsIsStr}
++		itemInput := toolPayloadField{sha: item.InputSHA, str: item.InputStr, isStr: item.InputIsStr}
++		if item.Type == "message" && item.Role == "assistant" {
++			if t.hasTrackedToolPayload(canonKey) {
++				return false
++			}
++		} else {
++			if !t.checkToolMetaComplete(canonKey, itemMeta) ||
++				!t.checkToolPayloadFinal(canonKey, "arguments", itemArgs) ||
++				!t.checkToolPayloadFinal(canonKey, "input", itemInput) {
++				return false
++			}
++		}
 +		if doneRec, exists := t.doneItems[canonKey]; exists {
 +			matchedDoneKeys[canonKey] = struct{}{}
 +			if doneRec.itemType != item.Type || doneRec.itemRole != item.Role || doneRec.itemPhase != item.Phase ||
++				!doneItemStatusCompatible(doneRec.itemStatus, item.Status) ||
 +				doneRec.callID != item.CallID || doneRec.name != item.Name || doneRec.serverLabel != item.ServerLabel ||
 +				doneRec.argsSHA != item.ArgsSHA || doneRec.inputSHA != item.InputSHA ||
 +				doneRec.isFinal != isFinalAssistantOutputItem(item) {
@@ -5956,6 +6003,7 @@ index e69de29..8f6a694 100644
 +	sseEventSchemaKeys = map[string]struct{}{
 +		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {},
 +		"item": {}, "item_id": {}, "output_index": {}, "content_index": {}, "text": {}, "delta": {}, "refusal": {}, "part": {},
++		"arguments": {}, "input": {}, "name": {}, "call_id": {},
 +	}
 +	sseResponseSchemaKeys = map[string]struct{}{
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
@@ -6164,29 +6212,43 @@ index e69de29..8f6a694 100644
 +	return parts, true
 +}
 +
-+func extractItemToolFields(fields map[string]json.RawMessage) (callID, name, serverLabel, argsSHA, inputSHA string, ok bool) {
++func extractToolPayloadField(fields map[string]json.RawMessage, key string) (toolPayloadField, bool) {
++	raw, exists := fields[key]
++	if !exists || !hasResponseError(raw) {
++		return toolPayloadField{}, true
++	}
++	trimmed := bytes.TrimSpace(raw)
++	if len(trimmed) > 0 && trimmed[0] == '"' {
++		var s string
++		if err := json.Unmarshal(trimmed, &s); err != nil {
++			return toolPayloadField{}, false
++		}
++		return toolPayloadField{sha: "str:" + sha256Hex(s), str: s, isStr: true}, true
++	}
++	canon, okCanon := canonicalJSONDigest(trimmed)
++	if !okCanon {
++		return toolPayloadField{}, false
++	}
++	return toolPayloadField{sha: "json:" + canon}, true
++}
++
++func extractItemToolFields(fields map[string]json.RawMessage) (meta toolItemMeta, args, input toolPayloadField, ok bool) {
 +	callID, ok1 := exactOptionalString(fields, "call_id")
 +	name, ok2 := exactOptionalString(fields, "name")
 +	serverLabel, ok3 := exactOptionalString(fields, "server_label")
 +	if !ok1 || !ok2 || !ok3 ||
 +		len(callID) > maxStrictIdentityBytes || len(name) > maxStrictIdentityBytes || len(serverLabel) > maxStrictIdentityBytes {
-+		return "", "", "", "", "", false
++		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
-+	if rawArgs, hasArgs := fields["arguments"]; hasArgs && hasResponseError(rawArgs) {
-+		var okCanon bool
-+		argsSHA, okCanon = canonicalJSONDigest(rawArgs)
-+		if !okCanon {
-+			return "", "", "", "", "", false
-+		}
++	args, okArgs := extractToolPayloadField(fields, "arguments")
++	if !okArgs {
++		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
-+	if rawInput, hasInput := fields["input"]; hasInput && hasResponseError(rawInput) {
-+		var okCanon bool
-+		inputSHA, okCanon = canonicalJSONDigest(rawInput)
-+		if !okCanon {
-+			return "", "", "", "", "", false
-+		}
++	input, okInput := extractToolPayloadField(fields, "input")
++	if !okInput {
++		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
-+	return callID, name, serverLabel, argsSHA, inputSHA, true
++	return toolItemMeta{callID: callID, name: name, serverLabel: serverLabel}, args, input, true
 +}
 +
 +func decodeExactResponseOutputItems(raw json.RawMessage, expectedRespID string) ([]responseOutputItem, string, bool) {
@@ -6229,7 +6291,7 @@ index e69de29..8f6a694 100644
 +			}
 +			boundID = itemRespID
 +		}
-+		callID, name, serverLabel, argsSHA, inputSHA, okTool := extractItemToolFields(fields)
++		meta, argsField, inputField, okTool := extractItemToolFields(fields)
 +		if !okTool {
 +			return false
 +		}
@@ -6239,11 +6301,15 @@ index e69de29..8f6a694 100644
 +			Role:        role,
 +			Phase:       phase,
 +			Status:      status,
-+			CallID:      callID,
-+			Name:        name,
-+			ServerLabel: serverLabel,
-+			ArgsSHA:     argsSHA,
-+			InputSHA:    inputSHA,
++			CallID:      meta.callID,
++			Name:        meta.name,
++			ServerLabel: meta.serverLabel,
++			ArgsSHA:     argsField.sha,
++			ArgsStr:     argsField.str,
++			ArgsIsStr:   argsField.isStr,
++			InputSHA:    inputField.sha,
++			InputStr:    inputField.str,
++			InputIsStr:  inputField.isStr,
 +		}
 +		if typ == "message" && role == "assistant" {
 +			parts, okParts := decodeExactAssistantContentParts(fields["content"])
@@ -6281,6 +6347,11 @@ index e69de29..8f6a694 100644
 +	hasEvText       bool
 +	evDelta         string
 +	hasEvDelta      bool
++	evArgs          string
++	hasEvArgs       bool
++	evInput         string
++	hasEvInput      bool
++	evName          string
 +	partFields      map[string]json.RawMessage
 +}
 +
@@ -6344,6 +6415,9 @@ index e69de29..8f6a694 100644
 +					return false
 +				}
 +			}
++		}
++		if _, _, _, okTool := extractItemToolFields(frame.itemFields); !okTool {
++			return false
 +		}
 +		return true
 +	case "response.output_item.done":
@@ -6587,10 +6661,37 @@ index e69de29..8f6a694 100644
 +	}
 +	var evDelta string
 +	var hasEvDelta bool
-+	if evType == "response.output_text.delta" || evType == "response.refusal.delta" {
++	if evType == "response.output_text.delta" ||
++		evType == "response.refusal.delta" ||
++		evType == "response.function_call_arguments.delta" ||
++		evType == "response.mcp_call_arguments.delta" ||
++		evType == "response.custom_tool_call_input.delta" {
 +		var okDelta bool
 +		evDelta, hasEvDelta, okDelta = exactOptionalStringPresent(evFields, "delta")
 +		if !okDelta || !hasEvDelta {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	var evArgs string
++	var hasEvArgs bool
++	var evName string
++	if evType == "response.function_call_arguments.done" || evType == "response.mcp_call_arguments.done" {
++		var okArgs bool
++		evArgs, hasEvArgs, okArgs = exactOptionalStringPresent(evFields, "arguments")
++		var okName bool
++		evName, okName = exactOptionalString(evFields, "name")
++		if !okArgs || !hasEvArgs || !okName || len(evName) > maxStrictIdentityBytes {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	var evInput string
++	var hasEvInput bool
++	if evType == "response.custom_tool_call_input.done" {
++		var okInput bool
++		evInput, hasEvInput, okInput = exactOptionalStringPresent(evFields, "input")
++		if !okInput || !hasEvInput {
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
@@ -6665,6 +6766,11 @@ index e69de29..8f6a694 100644
 +		hasEvText:       hasEvText,
 +		evDelta:         evDelta,
 +		hasEvDelta:      hasEvDelta,
++		evArgs:          evArgs,
++		hasEvArgs:       hasEvArgs,
++		evInput:         evInput,
++		hasEvInput:      hasEvInput,
++		evName:          evName,
 +		partFields:      partFields,
 +	}
 +	return out, true
@@ -6833,6 +6939,54 @@ index e69de29..8f6a694 100644
 +						t.itemTypeByKey[canonKey] = prevType
 +					}
 +				}
++				if prevMeta, hasMeta := t.toolMetaByKey[idxKey]; hasMeta {
++					delete(t.toolMetaByKey, idxKey)
++					if !t.recordToolMeta(canonKey, prevMeta) {
++						return "", "", 0, false, false
++					}
++				}
++				if prevFinals, hasFinals := t.toolPayloadFinalByItem[idxKey]; hasFinals {
++					delete(t.toolPayloadFinalByItem, idxKey)
++					curFinals := t.toolPayloadFinalByItem[canonKey]
++					if curFinals == nil {
++						t.toolPayloadFinalByItem[canonKey] = prevFinals
++					} else {
++						for field, sha := range prevFinals {
++							if existing, dup := curFinals[field]; dup && existing != sha {
++								return "", "", 0, false, false
++							}
++							curFinals[field] = sha
++						}
++					}
++				}
++				if prevToolDeltas, hasToolDeltas := t.toolPayloadDeltaByItem[idxKey]; hasToolDeltas {
++					delete(t.toolPayloadDeltaByItem, idxKey)
++					curToolDeltas := t.toolPayloadDeltaByItem[canonKey]
++					if curToolDeltas == nil {
++						t.toolPayloadDeltaByItem[canonKey] = prevToolDeltas
++					} else {
++						for field, st := range prevToolDeltas {
++							if _, dup := curToolDeltas[field]; dup {
++								return "", "", 0, false, false
++							}
++							curToolDeltas[field] = st
++						}
++					}
++				}
++				if prevToolPrefixes, hasToolPrefixes := t.toolPayloadPrefixByItem[idxKey]; hasToolPrefixes {
++					delete(t.toolPayloadPrefixByItem, idxKey)
++					curToolPrefixes := t.toolPayloadPrefixByItem[canonKey]
++					if curToolPrefixes == nil {
++						t.toolPayloadPrefixByItem[canonKey] = prevToolPrefixes
++					} else {
++						for field, pref := range prevToolPrefixes {
++							if existing, dup := curToolPrefixes[field]; dup && existing != pref {
++								return "", "", 0, false, false
++							}
++							curToolPrefixes[field] = pref
++						}
++					}
++				}
 +				if prevParts, hasParts := t.contentPartByItem[idxKey]; hasParts {
 +					delete(t.contentPartByItem, idxKey)
 +					curParts := t.contentPartByItem[canonKey]
@@ -6991,6 +7145,345 @@ index e69de29..8f6a694 100644
 +		t.itemKindByKey = make(map[string]strictItemKind)
 +	}
 +	t.itemKindByKey[canonKey] = merged
++	return true
++}
++
++func (t *strictStreamTracker) hasTrackedToolPayload(canonKey string) bool {
++	if canonKey == "" {
++		return false
++	}
++	return len(t.toolPayloadFinalByItem[canonKey]) > 0 ||
++		len(t.toolPayloadDeltaByItem[canonKey]) > 0 ||
++		len(t.toolPayloadPrefixByItem[canonKey]) > 0
++}
++
++func (t *strictStreamTracker) recordToolMeta(canonKey string, meta toolItemMeta) bool {
++	if canonKey == "" || (meta.callID == "" && meta.name == "" && meta.serverLabel == "") {
++		return true
++	}
++	prev, exists := t.toolMetaByKey[canonKey]
++	if !exists && len(t.toolMetaByKey) >= maxTrackedOutputItems {
++		return false
++	}
++	if prev.callID != "" && meta.callID != "" && prev.callID != meta.callID {
++		return false
++	}
++	if prev.name != "" && meta.name != "" && prev.name != meta.name {
++		return false
++	}
++	if prev.serverLabel != "" && meta.serverLabel != "" && prev.serverLabel != meta.serverLabel {
++		return false
++	}
++	if meta.callID != "" {
++		prev.callID = meta.callID
++	}
++	if meta.name != "" {
++		prev.name = meta.name
++	}
++	if meta.serverLabel != "" {
++		prev.serverLabel = meta.serverLabel
++	}
++	if t.toolMetaByKey == nil {
++		t.toolMetaByKey = make(map[string]toolItemMeta)
++	}
++	t.toolMetaByKey[canonKey] = prev
++	return true
++}
++
++func (t *strictStreamTracker) checkToolMetaComplete(canonKey string, meta toolItemMeta) bool {
++	if canonKey == "" {
++		return true
++	}
++	prev, exists := t.toolMetaByKey[canonKey]
++	if !exists {
++		return true
++	}
++	if prev.callID != "" && meta.callID != prev.callID {
++		return false
++	}
++	if prev.name != "" && meta.name != prev.name {
++		return false
++	}
++	if prev.serverLabel != "" && meta.serverLabel != prev.serverLabel {
++		return false
++	}
++	return true
++}
++
++func (t *strictStreamTracker) verifyToolMetaComplete(canonKey string, meta toolItemMeta) bool {
++	return t.checkToolMetaComplete(canonKey, meta) && t.recordToolMeta(canonKey, meta)
++}
++
++func (t *strictStreamTracker) recordToolPayloadPrefix(canonKey, field, text string) bool {
++	if canonKey == "" || text == "" {
++		return true
++	}
++	prefixes := t.toolPayloadPrefixByItem[canonKey]
++	if prefixes == nil {
++		if len(t.toolPayloadPrefixByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.toolPayloadPrefixByItem == nil {
++			t.toolPayloadPrefixByItem = make(map[string]map[string]textPrefixCheck)
++		}
++		prefixes = make(map[string]textPrefixCheck)
++		t.toolPayloadPrefixByItem[canonKey] = prefixes
++	}
++	if prev, exists := prefixes[field]; exists {
++		if len(text) < prev.byteLen || sha256Hex(text[:prev.byteLen]) != prev.sha256 {
++			return false
++		}
++		if len(text) == prev.byteLen {
++			return true
++		}
++	}
++	prefixes[field] = textPrefixCheck{byteLen: len(text), sha256: sha256Hex(text)}
++	return true
++}
++
++func (t *strictStreamTracker) recordToolPayloadInitial(canonKey, field string, val toolPayloadField) bool {
++	if canonKey == "" || val.sha == "" {
++		return true
++	}
++	if !val.isStr {
++		if deltas := t.toolPayloadDeltaByItem[canonKey]; deltas != nil && deltas[field] != nil {
++			return false
++		}
++		if prefixes := t.toolPayloadPrefixByItem[canonKey]; prefixes != nil {
++			if _, hasPref := prefixes[field]; hasPref {
++				return false
++			}
++		}
++		return t.recordToolPayloadFinal(canonKey, field, val)
++	}
++	if finals := t.toolPayloadFinalByItem[canonKey]; finals != nil {
++		if prevFinal, exists := finals[field]; exists && prevFinal != val.sha {
++			return false
++		}
++	}
++	if val.str == "" {
++		if prefixes := t.toolPayloadPrefixByItem[canonKey]; prefixes != nil {
++			if pref, exists := prefixes[field]; exists && pref.byteLen > 0 {
++				return false
++			}
++		}
++		if deltas := t.toolPayloadDeltaByItem[canonKey]; deltas != nil {
++			if st := deltas[field]; st != nil && hex.EncodeToString(st.h.Sum(nil)) != sha256Hex("") {
++				return false
++			}
++		}
++		return true
++	}
++	if !t.recordToolPayloadPrefix(canonKey, field, val.str) {
++		return false
++	}
++	deltas := t.toolPayloadDeltaByItem[canonKey]
++	if deltas == nil {
++		if len(t.toolPayloadDeltaByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.toolPayloadDeltaByItem == nil {
++			t.toolPayloadDeltaByItem = make(map[string]map[string]*textDeltaState)
++		}
++		deltas = make(map[string]*textDeltaState)
++		t.toolPayloadDeltaByItem[canonKey] = deltas
++	}
++	initSHA := sha256Hex(val.str)
++	if st := deltas[field]; st != nil {
++		if !st.hasDelta && st.hasSeed {
++			return st.seedSHA == initSHA
++		}
++		return hex.EncodeToString(st.h.Sum(nil)) == initSHA
++	}
++	h := sha256.New()
++	_, _ = h.Write([]byte(val.str))
++	deltas[field] = &textDeltaState{h: h, hasSeed: true, seedSHA: initSHA}
++	return true
++}
++
++func (t *strictStreamTracker) recordToolPayloadDelta(canonKey, field, delta string) bool {
++	if canonKey == "" {
++		return true
++	}
++	if finals := t.toolPayloadFinalByItem[canonKey]; finals != nil {
++		if _, finalized := finals[field]; finalized {
++			return false
++		}
++	}
++	deltas := t.toolPayloadDeltaByItem[canonKey]
++	if deltas == nil {
++		if len(t.toolPayloadDeltaByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.toolPayloadDeltaByItem == nil {
++			t.toolPayloadDeltaByItem = make(map[string]map[string]*textDeltaState)
++		}
++		deltas = make(map[string]*textDeltaState)
++		t.toolPayloadDeltaByItem[canonKey] = deltas
++	}
++	st := deltas[field]
++	if st == nil {
++		st = &textDeltaState{h: sha256.New()}
++		deltas[field] = st
++	}
++	_, _ = st.h.Write([]byte(delta))
++	st.hasDelta = true
++	return true
++}
++
++func (t *strictStreamTracker) recordToolPayloadSnapshot(canonKey, field string, val toolPayloadField) bool {
++	if canonKey == "" {
++		return true
++	}
++	if val.sha == "" {
++		if finals := t.toolPayloadFinalByItem[canonKey]; finals != nil {
++			if _, exists := finals[field]; exists {
++				return false
++			}
++		}
++		if deltas := t.toolPayloadDeltaByItem[canonKey]; deltas != nil && deltas[field] != nil {
++			return false
++		}
++		if prefixes := t.toolPayloadPrefixByItem[canonKey]; prefixes != nil {
++			if _, exists := prefixes[field]; exists {
++				return false
++			}
++		}
++		return true
++	}
++	if !val.isStr {
++		if deltas := t.toolPayloadDeltaByItem[canonKey]; deltas != nil && deltas[field] != nil {
++			return false
++		}
++		if prefixes := t.toolPayloadPrefixByItem[canonKey]; prefixes != nil {
++			if _, exists := prefixes[field]; exists {
++				return false
++			}
++		}
++		return t.recordToolPayloadFinal(canonKey, field, val)
++	}
++	if finals := t.toolPayloadFinalByItem[canonKey]; finals != nil {
++		if prevFinal, exists := finals[field]; exists && prevFinal != val.sha {
++			return false
++		}
++	}
++	if val.str == "" {
++		if prefixes := t.toolPayloadPrefixByItem[canonKey]; prefixes != nil {
++			if pref, exists := prefixes[field]; exists && pref.byteLen > 0 {
++				return false
++			}
++		}
++		if deltas := t.toolPayloadDeltaByItem[canonKey]; deltas != nil {
++			if st := deltas[field]; st != nil && hex.EncodeToString(st.h.Sum(nil)) != sha256Hex("") {
++				return false
++			}
++		}
++		return true
++	}
++	if !t.recordToolPayloadPrefix(canonKey, field, val.str) {
++		return false
++	}
++	deltas := t.toolPayloadDeltaByItem[canonKey]
++	if deltas == nil {
++		if len(t.toolPayloadDeltaByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.toolPayloadDeltaByItem == nil {
++			t.toolPayloadDeltaByItem = make(map[string]map[string]*textDeltaState)
++		}
++		deltas = make(map[string]*textDeltaState)
++		t.toolPayloadDeltaByItem[canonKey] = deltas
++	}
++	snapSHA := sha256Hex(val.str)
++	if st := deltas[field]; st != nil {
++		if st.hasDelta {
++			return hex.EncodeToString(st.h.Sum(nil)) == snapSHA
++		}
++		h := sha256.New()
++		_, _ = h.Write([]byte(val.str))
++		st.h = h
++		st.hasSeed = true
++		st.seedSHA = snapSHA
++		return true
++	}
++	h := sha256.New()
++	_, _ = h.Write([]byte(val.str))
++	deltas[field] = &textDeltaState{h: h, hasSeed: true, fromSnapshot: true, seedSHA: snapSHA}
++	return true
++}
++
++func (t *strictStreamTracker) checkToolPayloadFinal(canonKey, field string, val toolPayloadField) bool {
++	if canonKey == "" {
++		return true
++	}
++	if val.sha == "" {
++		if finals := t.toolPayloadFinalByItem[canonKey]; finals != nil {
++			if _, exists := finals[field]; exists {
++				return false
++			}
++		}
++		if deltas := t.toolPayloadDeltaByItem[canonKey]; deltas != nil && deltas[field] != nil {
++			return false
++		}
++		if prefixes := t.toolPayloadPrefixByItem[canonKey]; prefixes != nil {
++			if _, exists := prefixes[field]; exists {
++				return false
++			}
++		}
++		return true
++	}
++	if val.isStr {
++		if deltas := t.toolPayloadDeltaByItem[canonKey]; deltas != nil {
++			if st := deltas[field]; st != nil && (!st.fromSnapshot || st.hasDelta) {
++				if hex.EncodeToString(st.h.Sum(nil)) != sha256Hex(val.str) {
++					return false
++				}
++			}
++		}
++		if prefixes := t.toolPayloadPrefixByItem[canonKey]; prefixes != nil {
++			if pref, exists := prefixes[field]; exists {
++				if len(val.str) < pref.byteLen || sha256Hex(val.str[:pref.byteLen]) != pref.sha256 {
++					return false
++				}
++			}
++		}
++	} else {
++		if deltas := t.toolPayloadDeltaByItem[canonKey]; deltas != nil && deltas[field] != nil {
++			return false
++		}
++		if prefixes := t.toolPayloadPrefixByItem[canonKey]; prefixes != nil {
++			if _, exists := prefixes[field]; exists {
++				return false
++			}
++		}
++	}
++	if finals := t.toolPayloadFinalByItem[canonKey]; finals != nil {
++		if prevFinal, exists := finals[field]; exists && prevFinal != val.sha {
++			return false
++		}
++	}
++	return true
++}
++
++func (t *strictStreamTracker) recordToolPayloadFinal(canonKey, field string, val toolPayloadField) bool {
++	if !t.checkToolPayloadFinal(canonKey, field, val) {
++		return false
++	}
++	if canonKey == "" || val.sha == "" {
++		return true
++	}
++	finals := t.toolPayloadFinalByItem[canonKey]
++	if finals == nil {
++		if len(t.toolPayloadFinalByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.toolPayloadFinalByItem == nil {
++			t.toolPayloadFinalByItem = make(map[string]map[string]string)
++		}
++		finals = make(map[string]string)
++		t.toolPayloadFinalByItem[canonKey] = finals
++	}
++	finals[field] = val.sha
 +	return true
 +}
 +
@@ -7327,34 +7820,39 @@ index e69de29..8f6a694 100644
 +			}
 +			isAssistantMsg := item.Type == "message" && item.Role == "assistant"
 +			if isAssistantMsg {
++				if t.hasTrackedToolPayload(canonKey) {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if existingParts, hasExisting := t.contentPartByItem[canonKey]; hasExisting {
++					for cIdx := range existingParts {
++						if cIdx < 0 || int(cIdx) >= len(item.Content) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
++				if deltaHashes, hasDeltas := t.textDeltaHashByItem[canonKey]; hasDeltas {
++					for cIdx := range deltaHashes {
++						if cIdx < 0 || int(cIdx) >= len(item.Content) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
++				if prefixes, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
++					for cIdx := range prefixes {
++						if cIdx < 0 || int(cIdx) >= len(item.Content) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
 +				if isDone {
-+					if existingParts, hasExisting := t.contentPartByItem[canonKey]; hasExisting {
-+						for cIdx := range existingParts {
-+							if cIdx < 0 || int(cIdx) >= len(item.Content) {
-+								c.mu.Unlock()
-+								c.taintStreamAnomaly()
-+								return
-+							}
-+						}
-+					}
-+					if deltaHashes, hasDeltas := t.textDeltaHashByItem[canonKey]; hasDeltas {
-+						for cIdx := range deltaHashes {
-+							if cIdx < 0 || int(cIdx) >= len(item.Content) {
-+								c.mu.Unlock()
-+								c.taintStreamAnomaly()
-+								return
-+							}
-+						}
-+					}
-+					if prefixes, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
-+						for cIdx := range prefixes {
-+							if cIdx < 0 || int(cIdx) >= len(item.Content) {
-+								c.mu.Unlock()
-+								c.taintStreamAnomaly()
-+								return
-+							}
-+						}
-+					}
 +					for cIdx, part := range item.Content {
 +						if !t.recordContentPart(canonKey, int64(cIdx), part.Type, part.Text) {
 +							c.mu.Unlock()
@@ -7375,6 +7873,46 @@ index e69de29..8f6a694 100644
 +							c.taintStreamAnomaly()
 +							return
 +						}
++					}
++				}
++			} else {
++				if existingParts, hasParts := t.contentPartByItem[canonKey]; hasParts {
++					for _, tag := range existingParts {
++						if isAssistantOnlyPartTag(tag) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
++				if _, hasDeltas := t.textDeltaHashByItem[canonKey]; hasDeltas {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				itemMeta := toolItemMeta{callID: item.CallID, name: item.Name, serverLabel: item.ServerLabel}
++				itemArgs := toolPayloadField{sha: item.ArgsSHA, str: item.ArgsStr, isStr: item.ArgsIsStr}
++				itemInput := toolPayloadField{sha: item.InputSHA, str: item.InputStr, isStr: item.InputIsStr}
++				if isDone {
++					if !t.verifyToolMetaComplete(canonKey, itemMeta) ||
++						!t.recordToolPayloadFinal(canonKey, "arguments", itemArgs) ||
++						!t.recordToolPayloadFinal(canonKey, "input", itemInput) {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
++					}
++				} else {
++					if !t.recordToolMeta(canonKey, itemMeta) ||
++						!t.recordToolPayloadSnapshot(canonKey, "arguments", itemArgs) ||
++						!t.recordToolPayloadSnapshot(canonKey, "input", itemInput) {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
 +					}
 +				}
 +			}
@@ -7443,6 +7981,7 @@ index e69de29..8f6a694 100644
 +			if canonKey != "" {
 +				if prevRec, alreadyDone := t.doneItems[canonKey]; alreadyDone {
 +					if prevRec.itemType != item.Type || prevRec.itemRole != item.Role || prevRec.itemPhase != item.Phase ||
++						!doneItemStatusCompatible(prevRec.itemStatus, item.Status) ||
 +						prevRec.callID != item.CallID || prevRec.name != item.Name || prevRec.serverLabel != item.ServerLabel ||
 +						prevRec.argsSHA != item.ArgsSHA || prevRec.inputSHA != item.InputSHA ||
 +						prevRec.isFinal != isFinalCandidate || prevRec.isAssistantMsg != isAssistantMsg ||
@@ -7471,6 +8010,7 @@ index e69de29..8f6a694 100644
 +					itemType:       item.Type,
 +					itemRole:       item.Role,
 +					itemPhase:      item.Phase,
++					itemStatus:     item.Status,
 +					callID:         item.CallID,
 +					name:           item.Name,
 +					serverLabel:    item.ServerLabel,
@@ -7549,6 +8089,11 @@ index e69de29..8f6a694 100644
 +		itemType, _ := exactOptionalString(frame.itemFields, "type")
 +		itemRole, _ := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
++		addedMeta, addedArgs, addedInput, okTool := extractItemToolFields(frame.itemFields)
++		if !okTool {
++			c.taintStreamAnomaly()
++			return
++		}
 +		addedKind := classifyOutputItemKind(itemType, itemRole, itemPhase, false)
 +		isExplicitNonFinal := addedKind == itemKindCommentary || addedKind == itemKindNonMessage
 +		var addedParts []responseOutputContentPart
@@ -7580,6 +8125,15 @@ index e69de29..8f6a694 100644
 +			c.mu.Unlock()
 +			c.taintStreamAnomaly()
 +			return
++		}
++		if addedKind == itemKindNonMessage || addedKind == itemKindUnknown {
++			if !t.recordToolMeta(canonKey, addedMeta) ||
++				!t.recordToolPayloadInitial(canonKey, "arguments", addedArgs) ||
++				!t.recordToolPayloadInitial(canonKey, "input", addedInput) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
 +		}
 +		if len(addedParts) > 0 {
 +			if !t.recordItemKind(canonKey, itemKindMessageAny) {
@@ -7664,7 +8218,7 @@ index e69de29..8f6a694 100644
 +		itemRole, _ := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
 +		itemStatus, _ := exactOptionalString(frame.itemFields, "status")
-+		callID, itemName, serverLabel, argsSHA, inputSHA, okTool := extractItemToolFields(frame.itemFields)
++		doneMeta, doneArgs, doneInput, okTool := extractItemToolFields(frame.itemFields)
 +		if !okTool {
 +			c.taintStreamAnomaly()
 +			return
@@ -7707,6 +8261,11 @@ index e69de29..8f6a694 100644
 +		}
 +		if canonKey != "" {
 +			if isAssistantMsg {
++				if t.hasTrackedToolPayload(canonKey) {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
 +				if existingParts, hasExisting := t.contentPartByItem[canonKey]; hasExisting {
 +					for cIdx := range existingParts {
 +						if cIdx < 0 || int(cIdx) >= len(parts) {
@@ -7761,6 +8320,13 @@ index e69de29..8f6a694 100644
 +					c.taintStreamAnomaly()
 +					return
 +				}
++				if !t.verifyToolMetaComplete(canonKey, doneMeta) ||
++					!t.recordToolPayloadFinal(canonKey, "arguments", doneArgs) ||
++					!t.recordToolPayloadFinal(canonKey, "input", doneInput) {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
 +			}
 +			if prevRec, alreadyDone := t.doneItems[canonKey]; alreadyDone {
 +				if prevRec.doneDigest != "" {
@@ -7773,8 +8339,9 @@ index e69de29..8f6a694 100644
 +					return
 +				}
 +				if prevRec.itemType != itemType || prevRec.itemRole != itemRole || prevRec.itemPhase != itemPhase ||
-+					prevRec.callID != callID || prevRec.name != itemName || prevRec.serverLabel != serverLabel ||
-+					prevRec.argsSHA != argsSHA || prevRec.inputSHA != inputSHA ||
++					!doneItemStatusCompatible(prevRec.itemStatus, itemStatus) ||
++					prevRec.callID != doneMeta.callID || prevRec.name != doneMeta.name || prevRec.serverLabel != doneMeta.serverLabel ||
++					prevRec.argsSHA != doneArgs.sha || prevRec.inputSHA != doneInput.sha ||
 +					prevRec.isFinal != isFinalCandidate || prevRec.isAssistantMsg != isAssistantMsg ||
 +					prevRec.outputTextSHA != outTextSHA {
 +					c.mu.Unlock()
@@ -7804,11 +8371,12 @@ index e69de29..8f6a694 100644
 +				itemType:       itemType,
 +				itemRole:       itemRole,
 +				itemPhase:      itemPhase,
-+				callID:         callID,
-+				name:           itemName,
-+				serverLabel:    serverLabel,
-+				argsSHA:        argsSHA,
-+				inputSHA:       inputSHA,
++				itemStatus:     itemStatus,
++				callID:         doneMeta.callID,
++				name:           doneMeta.name,
++				serverLabel:    doneMeta.serverLabel,
++				argsSHA:        doneArgs.sha,
++				inputSHA:       doneInput.sha,
 +				outputIndex:    effIdx,
 +				hasOutputIndex: effHasIdx,
 +				isFinal:        isFinalCandidate,
@@ -7965,6 +8533,33 @@ index e69de29..8f6a694 100644
 +		switch frame.evType {
 +		case "response.output_text.delta":
 +			if !frame.hasEvDelta || !t.recordTextDelta(canonKey, cIdx, frame.evDelta) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		case "response.function_call_arguments.delta", "response.mcp_call_arguments.delta":
++			if !frame.hasEvDelta || !t.recordToolPayloadDelta(canonKey, "arguments", frame.evDelta) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		case "response.function_call_arguments.done", "response.mcp_call_arguments.done":
++			if !frame.hasEvArgs ||
++				(frame.evName != "" && !t.recordToolMeta(canonKey, toolItemMeta{name: frame.evName})) ||
++				!t.recordToolPayloadFinal(canonKey, "arguments", toolPayloadField{sha: "str:" + sha256Hex(frame.evArgs), str: frame.evArgs, isStr: true}) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		case "response.custom_tool_call_input.delta":
++			if !frame.hasEvDelta || !t.recordToolPayloadDelta(canonKey, "input", frame.evDelta) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		case "response.custom_tool_call_input.done":
++			if !frame.hasEvInput ||
++				!t.recordToolPayloadFinal(canonKey, "input", toolPayloadField{sha: "str:" + sha256Hex(frame.evInput), str: frame.evInput, isStr: true}) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -9899,10 +10494,10 @@ index e69de29..8f6a694 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..e97bd9c 100644
+index e69de29..1653810 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,4707 @@
+@@ -0,0 +1,4778 @@
 +package preflightreceipt
 +
 +import (
@@ -14489,6 +15084,77 @@ index e69de29..e97bd9c 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_sct","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_sct","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555587", "019d0000-0000-7000-8000-888888888187", sseSnapClearText); st != SealRejected {
 +		t.Fatalf("in_progress clearing non-empty text to empty string seal = %v, want SealRejected", st)
++	}
++
++	// 61. Sol P1 #1 + Astra P1 #1 (PR #2280 R25): streamed tool arguments/input deltas and .done events
++	//     MUST bind to output_item.done and response.completed.output[]; consistent deltas+done seal cleanly.
++	sseFuncDeltaRewrite := "data: " + `{"type":"response.created","response":{"id":"resp_fdr","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_fdr","type":"function_call","status":"in_progress","call_id":"c1","name":"shell","arguments":""}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_fdr","delta":"{\"cmd\":\"git status\"}"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_fdr","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"echo spoofed\"}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_fdr","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_fdr","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_fdr","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"echo spoofed\"}"},{"id":"msg_fdr","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555588", "019d0000-0000-7000-8000-888888888188", sseFuncDeltaRewrite); st != SealRejected {
++		t.Fatalf("function_call_arguments.delta rewritten in done+completed seal = %v, want SealRejected", st)
++	}
++	sseFuncArgsDoneRewrite := "data: " + `{"type":"response.created","response":{"id":"resp_fadr","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_fadr","arguments":"{\"cmd\":\"git diff\"}"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_fadr","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"true\"}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_fadr","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_fadr","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_fadr","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"true\"}"},{"id":"msg_fadr","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555589", "019d0000-0000-7000-8000-888888888189", sseFuncArgsDoneRewrite); st != SealRejected {
++		t.Fatalf("function_call_arguments.done rewritten in done+completed seal = %v, want SealRejected", st)
++	}
++	sseCustomInputRewrite := "data: " + `{"type":"response.created","response":{"id":"resp_cir","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.custom_tool_call_input.delta","output_index":0,"item_id":"ct_0","delta":"diff-a"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ct_0","type":"custom_tool_call","status":"completed","call_id":"c1","name":"apply_patch","input":"diff-b"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_cir","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_cir","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ct_0","type":"custom_tool_call","status":"completed","call_id":"c1","name":"apply_patch","input":"diff-b"},{"id":"msg_cir","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555590", "019d0000-0000-7000-8000-888888888190", sseCustomInputRewrite); st != SealRejected {
++		t.Fatalf("custom_tool_call_input.delta rewritten in done+completed seal = %v, want SealRejected", st)
++	}
++	lToolDeltaMatch := "review-d1111111-2222-4333-8444-555555555591"
++	sToolDeltaMatch := "019d0000-0000-7000-8000-888888888191"
++	sseToolDeltaMatch := "data: " + `{"type":"response.created","response":{"id":"resp_tdmok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_ok","type":"function_call","status":"in_progress","call_id":"c1","name":"shell","arguments":""}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_ok","delta":"{\"cmd\":"}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_ok","delta":"\"git status\"}"}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_ok","name":"shell","arguments":"{\"cmd\":\"git status\"}"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_ok","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"git status\"}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_tdmok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_ok","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"git status\"}"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lToolDeltaMatch, sToolDeltaMatch, sseToolDeltaMatch); st != SealOK {
++		t.Fatalf("consistent function_call_arguments delta+done+completed seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lToolDeltaMatch); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("consistent tool delta+done hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 62. Sol P1 #2 + Astra P1 #2 (PR #2280 R25): completed non-message tool item reverting to
++	//     status="in_progress" inside response.completed.output[] MUST taint.
++	sseToolStatusRegress := "data: " + `{"type":"response.created","response":{"id":"resp_tsr","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_tsr","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_tsr","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_tsr","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_tsr","type":"function_call","status":"in_progress","call_id":"c1","name":"shell","arguments":"{}"},{"id":"msg_tsr","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555592", "019d0000-0000-7000-8000-888888888192", sseToolStatusRegress); st != SealRejected {
++		t.Fatalf("completed tool reverting to in_progress in response.completed seal = %v, want SealRejected", st)
++	}
++
++	// 63. Sol P2 #1 + Astra P2 #1 (PR #2280 R25): in_progress snapshot emptying content to []
++	//     OR truncating a previously observed content index MUST taint even if later frames restore it.
++	sseSnapEmptyContent := "data: " + `{"type":"response.in_progress","response":{"id":"resp_sec","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_sec","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: "}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_sec","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_sec","type":"message","role":"assistant","status":"in_progress","content":[]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_sec","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sec","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_sec","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555593", "019d0000-0000-7000-8000-888888888193", sseSnapEmptyContent); st != SealRejected {
++		t.Fatalf("in_progress emptying content array to [] seal = %v, want SealRejected", st)
++	}
++	sseSnapTruncContent := "data: " + `{"type":"response.in_progress","response":{"id":"resp_stc","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_stc","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: "},{"type":"output_text","text":"PASS"}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_stc","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_stc","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: "}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_stc","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: "},{"type":"output_text","text":"PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_stc","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_stc","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: "},{"type":"output_text","text":"PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555594", "019d0000-0000-7000-8000-888888888194", sseSnapTruncContent); st != SealRejected {
++		t.Fatalf("in_progress truncating content array from 2 parts to 1 seal = %v, want SealRejected", st)
 +	}
 +}
 +
