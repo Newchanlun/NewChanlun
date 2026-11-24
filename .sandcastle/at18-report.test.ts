@@ -2260,6 +2260,262 @@ __all__ = ('Adapter',)
   }
 });
 
+test("R32/#1319：变参构造器、绑定默认归一与 @wraps 构造器签名恢复", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = async (
+    name: string,
+    source: string,
+    implementation: string,
+    calls: string[],
+    expected = true,
+    extra: Record<string, string> = {},
+  ) => {
+    await t.test(name, () => {
+      const repo = feedSource({
+        ...extra,
+        [entry]: implementation,
+        [integration]: "from .at18_fixture_feed import route\n" + source,
+        [path]: "from trading_system.at18_fixture_feed import route\n" +
+          "def test_route():\n" + calls.map(call => `    assert route(${call}) == [1, 4]\n`).join(""),
+      });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+  const eventRoute = "def route(**event): return sorted(event['rows'])\n__all__ = ('route',)\n";
+  const modeRoute = "def route(*, rows, mode): return sorted(rows)\n__all__ = ('route',)\n";
+  const localWrap = `from functools import wraps
+def _wrap(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs): return fn(*args, **kwargs)
+    return inner
+`;
+
+  await check("ctor-varkw-multivalue：**config 变参构造器按多观察值区分类型", `
+class Adapter:
+    def __init__(self, **config): self.mode = config.get('mode')
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("ctor-varkw-single：**event 变参构造器获取单次观察值", `
+class Adapter:
+    def __init__(self, **event): self.event = event
+    def dispatch(self): return route(**self.event)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1]"]);
+
+  await check("ctor-varargs：*modes 变参构造器按多观察值区分类型", `
+class Adapter:
+    def __init__(self, rows, /, *modes):
+        self.rows = rows
+        self.mode = modes[0] if modes else None
+    def dispatch(self):
+        if type(self.mode) is int: return route(rows=self.rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("ctor-super-object-control：super().__init__(*args, **kwargs) 零参首试不回归", `
+class Adapter:
+    def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
+    def dispatch(self, rows, /, *, mode): return route(rows=rows, mode=mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=1"]);
+
+  await check("ctor-default-posonly-none-dup：位置专用默认 None 双视图仅构造一次", `
+created = []
+class Adapter:
+    def __init__(self, mode=None, /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("ctor-default-kwonly-none-dup：关键字专用默认 None 双视图仅构造一次", `
+created = []
+class Adapter:
+    def __init__(self, *, mode=None): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("绑定默认归一严格区分 None 与 hostile 默认哨兵且不触发比较或哈希", `
+class _Hostile:
+    def __eq__(self, other): raise AssertionError('hostile __eq__')
+    def __hash__(self): raise AssertionError('hostile __hash__')
+_MISSING = _Hostile()
+seen = []
+class Adapter:
+    def __init__(self, *, mode=_MISSING):
+        seen.append(mode is _MISSING)
+        self.ready = mode is _MISSING
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if self.ready and seen == [False, True]: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("绑定默认归一严格区分 True 默认与 int 1 以及关键字插入序和正负 NaN", `
+import struct
+class Adapter:
+    def __init__(self, *, mode=True, **extra):
+        self.mode = mode
+        self.order = tuple(extra)
+        self.nan = extra.get('x')
+    def dispatch(self, rows, /):
+        if (type(self.mode) is int and self.order == ('rows', 'b', 'a', 'x') and
+                isinstance(self.nan, float) and struct.pack('!d', self.nan)[0] & 0x80):
+            return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, [
+    "rows=[4, 1], a=1, b=2, x=float('nan')",
+    "rows=[4, 1], mode=1, b=2, a=1, x=-float('nan')",
+  ]);
+
+  await check("ctor-wraps-init：本地 @wraps 装饰的位置专用 __init__ 恢复签名", localWrap + `
+class Adapter:
+    @_wrap
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("@wraps 装饰的默认 None 构造器双视图同参仅构造一次", localWrap + `
+created = []
+class Adapter:
+    @_wrap
+    def __init__(self, mode=None, /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if len(created) == 1: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode=None", "rows=[4, 1]"]);
+
+  await check("@wraps 装饰的非 None 默认构造器双视图同参仅构造一次", localWrap + `
+created = []
+class Adapter:
+    @_wrap
+    def __init__(self, mode='live', /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if created == ['live']: return route(rows=rows)
+__all__ = ('Adapter',)
+`, eventRoute, ["rows=[4, 1], mode='live'", "rows=[4, 1]"]);
+
+  await check("继承本地基类 @wraps __init__ 恢复签名", localWrap + `
+class _Base:
+    @_wrap
+    def __init__(self, mode, /): self.mode = mode
+class Adapter(_Base):
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("本地 @wraps 装饰的 __new__ 恢复签名", localWrap + `
+class Adapter:
+    @_wrap
+    def __new__(cls, mode, /):
+        obj = super().__new__(cls)
+        obj.mode = mode
+        return obj
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"]);
+
+  await check("循环 __wrapped__ 构造器不误追踪", localWrap + `
+class Adapter:
+    @_wrap
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+Adapter.__init__.__wrapped__.__wrapped__ = Adapter.__init__
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+
+  await check("外来装饰器 __wrapped__ 构造器不误追踪", `
+from .helper_wrap import ext_wrap
+class Adapter:
+    @ext_wrap
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false, {
+    "trading_system/helper_wrap.py": `from functools import wraps
+def ext_wrap(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs): return fn(*args, **kwargs)
+    return inner
+`,
+  });
+
+  await check("变参构造器仅在 __init__ 调承接仍拒绝", `
+class Adapter:
+    def __init__(self, **config):
+        mode = config.get('mode')
+        if type(mode) is int: route(rows=[4, 1], mode=mode)
+    def dispatch(self, rows, /): return sorted(rows)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+
+  await check("@wraps 构造器仅在 __init__ 调承接仍拒绝", localWrap + `
+class Adapter:
+    @_wrap
+    def __init__(self, mode, /):
+        if type(mode) is int: route(rows=[4, 1], mode=mode)
+    def dispatch(self, rows, /): return sorted(rows)
+__all__ = ('Adapter',)
+`, modeRoute, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+
+  await check("变参与 @wraps 构造器仍拒绝承接侧异子类接收者", localWrap + `
+class Adapter:
+    @_wrap
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if type(self.mode) is int: return route(rows=rows, mode=self.mode)
+__all__ = ('Adapter',)
+`, `
+from functools import wraps
+class _Base:
+    @classmethod
+    def handle(cls, rows, mode): return sorted(rows)
+class _Left(_Base): pass
+class _Right(_Base): pass
+@wraps(_Left.handle)
+def route(*, rows, mode): return _Right.handle(rows, mode)
+__all__ = ('route',)
+`, ["rows=[4, 1], mode=True", "rows=[4, 1], mode=1"], false);
+
+  for (const [label, value] of [["对象", "object()"], ["回调", "lambda: None"]] as const) {
+    await check(`变参构造器仍拒绝测试${label}`, `
+class Adapter:
+    def __init__(self, **config): self.guard = config.get('guard')
+    def dispatch(self, rows, /):
+        if self.guard is not None: return route(rows=rows, guard=self.guard)
+__all__ = ('Adapter',)
+`, "def route(*, rows, guard): return sorted(rows)\n__all__ = ('route',)\n",
+    ["rows=[4, 1], guard=None", `rows=[4, 1], guard=${value}`], false);
+
+    await check(`@wraps 构造器仍拒绝测试${label}`, localWrap + `
+class Adapter:
+    @_wrap
+    def __init__(self, guard, /): self.guard = guard
+    def dispatch(self, rows, /):
+        if self.guard is not None: return route(rows=rows, guard=self.guard)
+__all__ = ('Adapter',)
+`, "def route(*, rows, guard): return sorted(rows)\n__all__ = ('route',)\n",
+    ["rows=[4, 1], guard=None", `rows=[4, 1], guard=${value}`], false);
+  }
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";

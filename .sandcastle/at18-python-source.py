@@ -231,24 +231,46 @@ def class_members(cls):
     return type.__dict__["__dict__"].__get__(cls).items()
 
 
+def mro_member(cls, name):
+    for base in type.__getattribute__(cls, "__mro__"):
+        members = type.__dict__["__dict__"].__get__(base)
+        if name in members:
+            return base, members[name]
+    return None, None
+
+
+def choice_value_key(value, default_refs):
+    try:
+        plain = sample(value)
+    except ValueError:
+        # 非纯数据的生产默认值只按身份比较；保活以免 id 被复用。
+        identity = id(value)
+        default_refs[identity] = value
+        return MISSING, identity
+    return sample_key(plain)
+
+
 def argument_choice(signature, args, kwargs, defaults, default_refs):
-    signature.bind(*args, **kwargs)
-    positional = []
+    # 先校验全部来自测试侧的实参，避免非纯测试对象进入 bind 后落入默认值身份分支。
     for i, value in enumerate(args):
         if i not in defaults:
-            positional.append(sample_key(sample(value)))
-            continue
-        try:
-            plain = sample(value)
-        except ValueError:
-            # 非纯数据的生产默认值只按身份比较；保活以免 id 被复用。
-            identity = id(value)
-            default_refs[identity] = value
-            positional.append((MISSING, identity))
+            sample(value)
+    for value in kwargs.values():
+        sample(value)
+    bound = signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    params = signature.parameters
+    items = []
+    for name, value in bound.arguments.items():
+        kind = params[name].kind
+        if kind is inspect.Parameter.VAR_POSITIONAL:
+            key = tuple(choice_value_key(item, default_refs) for item in value)
+        elif kind is inspect.Parameter.VAR_KEYWORD:
+            key = tuple((k, sample_key(sample(v))) for k, v in value.items())
         else:
-            positional.append(sample_key(plain))
-    keywords = tuple((k, sample_key(sample(v))) for k, v in kwargs.items())
-    return tuple(positional), keywords
+            key = choice_value_key(value, default_refs)
+        items.append((name, key))
+    return tuple(items)
 
 
 def copy_arguments(args, kwargs, defaults):
@@ -257,8 +279,8 @@ def copy_arguments(args, kwargs, defaults):
 
 
 class Binding:
-    def __init__(self, key, member, chain, owner=None):
-        self.key, self.member, self.chain, self.owner = key, member, chain, owner
+    def __init__(self, key, member, chain, owner=None, ctor_chain=()):
+        self.key, self.member, self.chain, self.owner, self.ctor_chain = key, member, chain, owner, ctor_chain
         self.function = chain[0]
 
     @property
@@ -275,6 +297,51 @@ class Binding:
             return is_class(receiver) and inherits(receiver, self.owner)
         return receiver is not MISSING and inherits(type(receiver), self.owner)
 
+    def ctor_signature_pairs(self, public, view):
+        generic = variadic_only(public)
+        if not generic:
+            yield public, None
+        for target in self.ctor_chain[1:]:
+            try:
+                params = inspect.signature(target, follow_wrapped=False)
+            except (ValueError, TypeError):
+                continue
+            if variadic_only(params):
+                continue
+            slots = tuple(params.parameters.values())
+            if type(target) is FunctionType and slots and slots[0].kind in POSITIONAL:
+                clipped = params.replace(parameters=slots[1:])
+                if slots[0].name in view:
+                    yield params, None
+                    yield clipped, None
+                else:
+                    yield clipped, params
+            else:
+                yield params, None
+        if generic:
+            yield public, None
+
+    def ctor_normalizers(self, public):
+        if not variadic_only(public):
+            return ()
+        normalizers = []
+        for target in self.ctor_chain[1:]:
+            try:
+                params = inspect.signature(target, follow_wrapped=False)
+            except (ValueError, TypeError):
+                continue
+            if variadic_only(params):
+                continue
+            slots = tuple(params.parameters.values())
+            if type(target) is FunctionType and slots and slots[0].kind in POSITIONAL:
+                clipped = params.replace(parameters=slots[1:])
+                if not variadic_only(clipped):
+                    normalizers.append(clipped)
+                normalizers.append(params)
+            else:
+                normalizers.append(params)
+        return tuple(normalizers)
+
     def callables(self, instances, views):
         if self.owner is None:
             yield self.member
@@ -283,29 +350,52 @@ class Binding:
             yield self.member.__get__(None, self.owner)
             return
         try:
-            ctor_sig = inspect.signature(self.owner, follow_wrapped=False)
+            public = inspect.signature(self.owner, follow_wrapped=False)
         except (ValueError, TypeError):
             return
+        normalizers = self.ctor_normalizers(public)
         seen, default_refs = set(), {}
-        for view in views:
-            try:
-                args, kwargs, defaults = arguments(ctor_sig, view)
-                ctor_key = argument_choice(ctor_sig, args, kwargs, defaults, default_refs)
-            except (ValueError, TypeError):
-                continue
-            if ctor_key in seen:
-                continue
-            seen.add(ctor_key)
-            key = (id(self.owner), ctor_key)
-            if key not in instances:
-                instances[key] = None  # 构造器异常也只试一次。
-                ctor_args, ctor_kwargs = copy_arguments(args, kwargs, defaults)
+
+        def resolve(sig, view):
+            variadics = (False, True) if any(p.kind in VARIADIC for p in sig.parameters.values()) else (False,)
+            succeeded = False
+            for variadic in variadics:
                 try:
-                    instances[key] = self.owner(*ctor_args, **ctor_kwargs)
-                except (Exception, SystemExit):
+                    args, kwargs, defaults = arguments(sig, view, variadic)
+                    public.bind(*args, **kwargs)
+                    ctor_key = None
+                    for idx, norm_sig in enumerate(normalizers):
+                        try:
+                            ctor_key = (idx, argument_choice(norm_sig, args, kwargs, defaults, default_refs))
+                            break
+                        except TypeError:
+                            continue
+                    if ctor_key is None:
+                        ctor_key = (-1, argument_choice(public, args, kwargs, defaults, default_refs))
+                except (ValueError, TypeError):
                     continue
-            if instances[key] is not None:
-                yield self.member.__get__(instances[key], self.owner)
+                key = (id(self.owner), ctor_key)
+                if ctor_key in seen:
+                    succeeded |= instances.get(key) is not None
+                    continue
+                seen.add(ctor_key)
+                if key not in instances:
+                    instances[key] = None  # 构造器异常也只试一次。
+                    ctor_args, ctor_kwargs = copy_arguments(args, kwargs, defaults)
+                    try:
+                        instances[key] = self.owner(*ctor_args, **ctor_kwargs)
+                    except (Exception, SystemExit):
+                        continue
+                if instances[key] is not None:
+                    succeeded = True
+                    yield self.member.__get__(instances[key], self.owner)
+            return succeeded
+
+        for view in views:
+            for sig, fallback in self.ctor_signature_pairs(public, view):
+                succeeded = yield from resolve(sig, view)
+                if not succeeded and fallback is not None:
+                    yield from resolve(fallback, view)
 
     def signatures(self, fn, public, named):
         generic = variadic_only(public)
@@ -432,10 +522,24 @@ class Exports:
             self.by_code.setdefault(id(binding.function.__code__), []).append(binding)
             self.wrapped_codes.update(id(underlying(target).__code__) for target in binding.chain[1:])
 
-    def binding(self, key, member, owner=None):
+    def ctor_chain(self, owner):
+        cls, member = mro_member(owner, "__init__")
+        if member is object.__init__:
+            cls, member = mro_member(owner, "__new__")
+        if cls is None or cls is object or self.class_body(cls) is None:
+            return ()
+        if type(member) in (staticmethod, classmethod):
+            target = member.__func__
+        elif type(member) in (FunctionType, MethodType):
+            target = member
+        else:
+            return ()
+        return self.wrapped_chain(target) or ()
+
+    def binding(self, key, member, owner=None, ctor_chain=()):
         fn = underlying(member)
         if chain := self.wrapped_chain(fn):
-            return Binding(key, member, chain, owner)
+            return Binding(key, member, chain, owner, ctor_chain)
 
     def local_members(self, bindings):
         for export_name, value in bindings.items():
@@ -443,6 +547,7 @@ class Exports:
                 if (binding := self.binding(("module", export_name), value)) is not None:
                     yield binding
             elif is_class(value) and self.class_body(value) is not None:
+                ctor_chain = self.ctor_chain(value)
                 seen = set()
                 for owner in type.__getattribute__(value, "__mro__"):
                     local = self.class_body(owner) is not None
@@ -451,7 +556,7 @@ class Exports:
                             continue
                         seen.add(name)
                         if local and not name.startswith("_") and type(member) in (FunctionType, staticmethod, classmethod):
-                            if (binding := self.binding(("class", export_name, name), member, value)) is not None:
+                            if (binding := self.binding(("class", export_name, name), member, value, ctor_chain)) is not None:
                                 yield binding
 
     def candidates(self, frame):
