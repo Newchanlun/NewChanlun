@@ -1,0 +1,18 @@
+{
+ "items": [
+  [
+   "台账 ledger_final.jsonl（verify_final.py）",
+   "entries 1604 bad 0 {'main_body': 790, 'main_machine_author': 782, 'note_cites': 2054, 'note_author_verbatim': 1685, 'note_nonauthor_verbatim': 58, 'main_manual_confirmed': 32}"
+  ],
+  [
+   "本册（verify_report.py）",
+   "files 1 quotes checked 965 bare cites 135 bad 0"
+  ],
+  [
+   "附录 1、附录 2（verify_report.py --allow-free）",
+   "files 2 quotes checked 3801 bare cites 1314 bad 0"
+  ]
+ ],
+ "when": "2026-11-24",
+ "fingerprint": "b6a35574ed6db3625da6d18f4e11c8976874ba66b0e888362e1769483f0c0a0d"
+}

@@ -1,0 +1,226 @@
+[
+{
+"id": 214,
+"cite": "019:200",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 434,
+"cite": "026:187",
+"who": "答疑",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 485,
+"cite": "028:754",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 518,
+"cite": "029:392",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 551,
+"cite": "031:418",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 633,
+"cite": "035:192",
+"who": "答疑",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 669,
+"cite": "038:192",
+"who": "答疑",
+"machine": "REVIEW:netizen-ts-above",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 683,
+"cite": "040:36",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 684,
+"cite": "040:36",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 685,
+"cite": "040:36",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 687,
+"cite": "040:52",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 690,
+"cite": "041:104",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 745,
+"cite": "046:48",
+"who": "解盘",
+"machine": "REVIEW:netizen-ts-above",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 771,
+"cite": "048:40",
+"who": "解盘",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 776,
+"cite": "048:80",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 827,
+"cite": "051:314",
+"who": "答疑",
+"machine": "REVIEW:followed-by-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 848,
+"cite": "052:458",
+"who": "答疑",
+"machine": "REVIEW:netizen-ts-above",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 865,
+"cite": "053:151",
+"who": "答疑",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 882,
+"cite": "054:86",
+"who": "解盘",
+"machine": "REVIEW:netizen-ts-above",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 883,
+"cite": "054:96",
+"who": "解盘",
+"machine": "REVIEW:netizen-ts-above",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 909,
+"cite": "056:102",
+"who": "课间",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 910,
+"cite": "056:104",
+"who": "课间",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 925,
+"cite": "057:78",
+"who": "课间",
+"machine": "REVIEW:netizen-ts-above",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 932,
+"cite": "058:50",
+"who": "解盘",
+"machine": "REVIEW:netizen-ts-above",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 947,
+"cite": "059:56",
+"who": "解盘",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 948,
+"cite": "059:62",
+"who": "解盘",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 949,
+"cite": "059:66",
+"who": "解盘",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 960,
+"cite": "060:114",
+"who": "课间",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 1051,
+"cite": "066:68",
+"who": "答疑",
+"machine": "REVIEW:netizen-ts-above",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 1127,
+"cite": "070:148",
+"who": "答疑",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 1254,
+"cite": "080:477",
+"who": "答疑",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+},
+{
+"id": 1272,
+"cite": "081:294",
+"who": "答疑",
+"machine": "REVIEW:author-hdr-no-eq",
+"manual": "人工复核上下文：缠师文字"
+}
+]
