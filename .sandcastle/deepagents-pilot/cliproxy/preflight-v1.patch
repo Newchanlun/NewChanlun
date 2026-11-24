@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..f977dd4 100644
+index e69de29..123db31 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,180 @@
 +package middleware
 +
 +import (
@@ -67,23 +67,60 @@ index e69de29..f977dd4 100644
 +			}
 +			rc := http.NewResponseController(c.Writer)
 +			deadlineErr := rc.SetReadDeadline(bodyDeadline)
-+			var bodyTimer *time.Timer
++			var requestedModel string
++			var ok bool
++			var bodyTimedOut bool
 +			if deadlineErr != nil && c.Request.Body != nil {
-+				// Non-TCP writers (e.g. httptest.ResponseRecorder) do not implement SetReadDeadline;
-+				// close the body on expiry so stalled custom streams still unblock and release res.
-+				body := c.Request.Body
-+				bodyTimer = time.AfterFunc(time.Until(bodyDeadline), func() {
-+					_ = body.Close()
-+				})
-+			}
-+			requestedModel, ok := preflightreceipt.ExtractInboundReviewModel(c.Request)
-+			if bodyTimer != nil {
-+				bodyTimer.Stop()
++				// Non-TCP or wrapped ResponseWriters may not implement SetReadDeadline; read the
++				// bounded request body in a helper goroutine and select against the deadline so a
++				// stalled custom io.Reader that ignores Close() still unblocks and releases res.
++				origBody := c.Request.Body
++				reqCopy := c.Request.Clone(turnCtx)
++				reqCopy.Body = origBody
++				type extractResult struct {
++					model string
++					ok    bool
++					body  http.Request
++				}
++				done := make(chan extractResult, 1)
++				go func() {
++					m, valid := preflightreceipt.ExtractInboundReviewModel(reqCopy)
++					done <- extractResult{model: m, ok: valid, body: *reqCopy}
++				}()
++				bodyTimer := time.NewTimer(time.Until(bodyDeadline))
++				select {
++				case got := <-done:
++					if !bodyTimer.Stop() {
++						select {
++						case <-bodyTimer.C:
++						default:
++						}
++					}
++					requestedModel = got.model
++					ok = got.ok
++					if ok {
++						c.Request.Body = got.body.Body
++					}
++				case <-bodyTimer.C:
++					_ = origBody.Close()
++					bodyTimedOut = true
++				case <-turnCtx.Done():
++					if !bodyTimer.Stop() {
++						select {
++						case <-bodyTimer.C:
++						default:
++						}
++					}
++					_ = origBody.Close()
++					bodyTimedOut = true
++				}
++			} else {
++				requestedModel, ok = preflightreceipt.ExtractInboundReviewModel(c.Request)
 +			}
 +			if !ok {
 +				res.Taint()
 +				c.Header("Connection", "close")
-+				if errors.Is(turnCtx.Err(), context.DeadlineExceeded) || time.Now().After(bodyDeadline) {
++				if bodyTimedOut || errors.Is(turnCtx.Err(), context.DeadlineExceeded) || time.Now().After(bodyDeadline) {
 +					c.AbortWithStatus(http.StatusRequestTimeout)
 +				} else {
 +					c.AbortWithStatus(http.StatusBadRequest)
@@ -148,10 +185,10 @@ index e69de29..f977dd4 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..023455e
+index 0000000..c983aed
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,225 @@
 +package middleware
 +
 +import (
@@ -318,6 +355,63 @@ index 0000000..023455e
 +			t.Fatalf("SealReview after turn timeout = %v, want SealRejected (reservation released)", st)
 +		}
 +		time.Sleep(15 * time.Millisecond)
++	}
++}
++
++type closeIgnoringBlockingBody struct {
++	unblock chan struct{}
++}
++
++func (b *closeIgnoringBlockingBody) Read(_ []byte) (int, error) {
++	<-b.unblock
++	return 0, io.EOF
++}
++
++func (b *closeIgnoringBlockingBody) Close() error { return nil }
++
++func TestPreflightReceiptMiddlewareReleasesReservationWhenSetReadDeadlineUnsupportedAndCloseBlocks(t *testing.T) {
++	// Sol P2 #3 (PR #2280 R13): when ResponseWriter does not support SetReadDeadline AND Request.Body.Close()
++	// does not interrupt a blocked Read, the middleware MUST still time out, taint, and release res.
++	gin.SetMode(gin.TestMode)
++	root := t.TempDir() + "/receipts"
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++
++	origBodyTimeout := preflightreceipt.ReviewBodyReadTimeout
++	origTurnTimeout := preflightreceipt.ReviewTurnTimeout
++	preflightreceipt.ReviewBodyReadTimeout = 120 * time.Millisecond
++	preflightreceipt.ReviewTurnTimeout = 2 * time.Second
++	t.Cleanup(func() {
++		preflightreceipt.ReviewBodyReadTimeout = origBodyTimeout
++		preflightreceipt.ReviewTurnTimeout = origTurnTimeout
++	})
++
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		c.Status(http.StatusOK)
++	})
++
++	body := &closeIgnoringBlockingBody{unblock: make(chan struct{})}
++	t.Cleanup(func() { close(body.unblock) })
++
++	launch := "review-12345678-1234-4234-8234-123456789403"
++	session := "019d0000-0000-7000-8000-000000000403"
++	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("Session-Id", session)
++	req.Header.Set(preflightreceipt.ReviewHeader, launch)
++
++	rec := httptest.NewRecorder()
++	start := time.Now()
++	engine.ServeHTTP(rec, req)
++	if time.Since(start) > time.Second {
++		t.Fatalf("ServeHTTP did not time out promptly on close-ignoring body: %v", time.Since(start))
++	}
++	if rec.Code != http.StatusRequestTimeout {
++		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestTimeout)
++	}
++	if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++		t.Fatalf("SealReview after close-ignoring body timeout = %v, want SealRejected (not SealInFlight)", st)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -1693,10 +1787,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..383ea10
+index 0000000..2e213da
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,803 @@
+@@ -0,0 +1,846 @@
 +package executor
 +
 +import (
@@ -2499,9 +2593,52 @@ index 0000000..383ea10
 +			t.Fatalf("native executor response.done without event header SealReview = %v, want SealRejected", st)
 +		}
 +	})
++
++	t.Run("trailing named event with empty data at EOF after completed taints launch", func(t *testing.T) {
++		// Astra P2 #3 + Sol P2 #2 (PR #2280 R13): named event with empty data: at EOF (no blank line)
++		// or data-less named event with blank line after response.completed MUST taint launch.
++		for idx, tc := range []struct {
++			launch, session, tail string
++		}{
++			{"review-a4444444-2222-4333-8444-555555555507", "019d0000-0000-7000-8000-555555555547", "event: response.failed\ndata:\n"},
++			{"review-a4444444-2222-4333-8444-555555555508", "019d0000-0000-7000-8000-555555555548", "event: response.failed\n\n"},
++		} {
++			root := filepath.Join(t.TempDir(), "receipts")
++			launch := tc.launch
++			session := tc.session
++			sseTail := "data: " + `{"type":"response.completed","response":{"id":"resp_ev_tail","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n" + tc.tail
++			ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++				return io.NopCloser(strings.NewReader(sseTail))
++			}}
++			ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++			stream, err := exec.ExecuteStream(ctx, auth, req, opts)
++			if err != nil {
++				t.Fatal(err)
++			}
++			for ch := range stream.Chunks {
++				if ch.Err == nil && ch.Payload != nil {
++					c.ObserveStreamChunk(ch.Payload)
++				}
++			}
++			lease.End()
++			c.Complete(true)
++			c.HandlerDone(true)
++			if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++				t.Fatalf("case %d (%q) SealReview = %v, want SealRejected", idx, tc.tail, st)
++			}
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..2f99b0c 100644
+index 6074124..7f323c5 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,6 +3,7 @@ package executor
@@ -2533,7 +2670,7 @@ index 6074124..2f99b0c 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +450,403 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +450,409 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -2823,6 +2960,12 @@ index 6074124..2f99b0c 100644
 +							}
 +						}
 +						downstreamData = joined
++					} else if strictReview && hasEv {
++						// Named SSE event with no data: lines violates strict SSE framing across all paths.
++						pendingStrictTerminal = nil
++						pendingStrictBytes = 0
++						failPostTerminal()
++						return
 +					}
 +
 +					eventChunks, _, okBuild := buildEventChunks(metaLines, downstreamData, isIncompleteEvent)
@@ -2939,7 +3082,7 @@ index 6074124..2f99b0c 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +931,88 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +937,88 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
@@ -2949,13 +3092,13 @@ index 6074124..2f99b0c 100644
 +				if pc := preflightreceipt.From(ctx); pc != nil {
 +					pc.ValidateStrictEvent(sseEventName, sseHasEvent, joined)
 +				}
-+				if len(joined) > 0 && (!bytes.Equal(joined, []byte("[DONE]")) || sseHasEvent) {
-+					// Unclosed trailing non-[DONE] SSE event at EOF was never dispatched cleanly.
++				if (len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]"))) || sseHasEvent {
++					// Unclosed trailing non-[DONE] SSE event or named event (even with empty data:) at EOF.
 +					failPostTerminal()
 +					return
 +				}
-+			} else if sawStrictTerminal && sseHasEvent {
-+				// Orphan event: header after terminal completion without blank-line closure.
++			} else if sseHasEvent {
++				// Orphan event: header without blank-line closure.
 +				failPostTerminal()
 +				return
 +			}
@@ -4668,10 +4811,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..9cd3da2 100644
+index e69de29..0d6ec94 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2948 @@
+@@ -0,0 +1,3039 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4882,6 +5025,7 @@ index e69de29..9cd3da2 100644
 +	lastItemOutputIndex                         int64
 +	sawStreamedOutputItem                       bool
 +	pendingItems                                map[string]struct{}
++	doneItemKeys                                map[string]struct{}
 +	pendingUnkeyed                              int
 +	itemSeqByKey                                map[string]int
 +	nextItemSeq                                 int
@@ -5036,6 +5180,7 @@ index e69de29..9cd3da2 100644
 +	c.lastItemOutputIndex = 0
 +	c.sawStreamedOutputItem = false
 +	c.pendingItems = nil
++	c.doneItemKeys = nil
 +	c.pendingUnkeyed = 0
 +	c.itemSeqByKey = nil
 +	c.nextItemSeq = 0
@@ -5183,7 +5328,7 @@ index e69de29..9cd3da2 100644
 +
 +var (
 +	sseEventSchemaKeys = map[string]struct{}{
-+		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {}, "item": {}, "output_index": {},
++		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {}, "item": {}, "item_id": {}, "output_index": {},
 +	}
 +	sseResponseSchemaKeys = map[string]struct{}{
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
@@ -5427,6 +5572,15 @@ index e69de29..9cd3da2 100644
 +		}
 +		itemID = idVal
 +	}
++	evItemID, okEvItemID := exactOptionalString(evFields, "item_id")
++	if !okEvItemID {
++		return "", "", 0, false, false
++	}
++	if itemID == "" {
++		itemID = evItemID
++	} else if evItemID != "" && evItemID != itemID {
++		return "", "", 0, false, false
++	}
 +	if rawIdx, exists := evFields["output_index"]; exists {
 +		trimmed := bytes.TrimSpace(rawIdx)
 +		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
@@ -5444,6 +5598,41 @@ index e69de29..9cd3da2 100644
 +		itemKey = "idx:" + strconv.FormatInt(outputIndex, 10)
 +	}
 +	return itemKey, itemID, outputIndex, hasOutputIndex, true
++}
++
++func validateStrictOutputItemEvent(frame parsedStrictFrame) bool {
++	switch frame.evType {
++	case "response.output_item.added":
++		if frame.itemFields == nil {
++			return false
++		}
++		_, ok1 := exactOptionalString(frame.itemFields, "type")
++		_, ok2 := exactOptionalString(frame.itemFields, "role")
++		_, ok3 := exactOptionalString(frame.itemFields, "phase")
++		_, ok4 := exactOptionalString(frame.itemFields, "status")
++		return ok1 && ok2 && ok3 && ok4
++	case "response.output_item.done":
++		if frame.itemFields == nil {
++			return false
++		}
++		itemType, ok1 := exactOptionalString(frame.itemFields, "type")
++		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
++		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
++		itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
++		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" {
++			return false
++		}
++		if itemType == "message" && itemRole == "assistant" &&
++			(itemPhase == "" || itemPhase == "final_answer") &&
++			(itemStatus == "" || itemStatus == "completed") {
++			if _, okParts := decodeExactAssistantContentParts(frame.itemFields["content"]); !okParts {
++				return false
++			}
++		}
++		return true
++	default:
++		return true
++	}
 +}
 +
 +// validateStrictFrameIdentity performs shared strict JSON, model-binding, and response-ID
@@ -5659,7 +5848,7 @@ index e69de29..9cd3da2 100644
 +	}
 +	trimmed := bytes.TrimSpace(rawEventJSON)
 +	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
-+		if hasEvName && len(trimmed) > 0 {
++		if hasEvName {
 +			c.taintStreamAnomaly()
 +		}
 +		return
@@ -5668,7 +5857,7 @@ index e69de29..9cd3da2 100644
 +	if !ok {
 +		return
 +	}
-+	if frame.evType == "response.done" {
++	if frame.evType == "response.done" || !validateStrictOutputItemEvent(frame) {
 +		c.taintStreamAnomaly()
 +		return
 +	}
@@ -5702,6 +5891,9 @@ index e69de29..9cd3da2 100644
 +
 +func (c *Collector) dispatchSSEEvent(evName string, hasEvName bool, dataLines [][]byte) {
 +	if len(dataLines) == 0 {
++		if hasEvName {
++			c.taintStreamAnomaly()
++		}
 +		return
 +	}
 +	joined := bytes.TrimSpace(bytes.Join(dataLines, []byte{'\n'}))
@@ -5731,19 +5923,36 @@ index e69de29..9cd3da2 100644
 +		c.taintStreamAnomaly()
 +		return
 +	}
-+	assignSeqLocked := func(itemKey string) int {
++	assignSeqLocked := func(itemKey string, outputIndex int64, hasOutputIndex bool) int {
++		idxKey := ""
++		if hasOutputIndex {
++			idxKey = "idx:" + strconv.FormatInt(outputIndex, 10)
++		}
++		var seq int
 +		if itemKey != "" {
-+			if seq, exists := c.itemSeqByKey[itemKey]; exists {
-+				return seq
++			if existing, exists := c.itemSeqByKey[itemKey]; exists {
++				seq = existing
 +			}
 +		}
-+		c.nextItemSeq++
-+		seq := c.nextItemSeq
-+		if itemKey != "" {
++		if seq == 0 && idxKey != "" {
++			if existing, exists := c.itemSeqByKey[idxKey]; exists {
++				seq = existing
++			}
++		}
++		if seq == 0 {
++			c.nextItemSeq++
++			seq = c.nextItemSeq
++		}
++		if itemKey != "" || idxKey != "" {
 +			if c.itemSeqByKey == nil {
 +				c.itemSeqByKey = make(map[string]int)
 +			}
-+			c.itemSeqByKey[itemKey] = seq
++			if itemKey != "" {
++				c.itemSeqByKey[itemKey] = seq
++			}
++			if idxKey != "" {
++				c.itemSeqByKey[idxKey] = seq
++			}
 +		}
 +		return seq
 +	}
@@ -5774,24 +5983,19 @@ index e69de29..9cd3da2 100644
 +	case "response.created", "response.in_progress":
 +		// streamResponseID is already validated and locked above for every frame carrying a response ID.
 +	case "response.output_item.added":
-+		if frame.itemFields == nil {
++		if !validateStrictOutputItemEvent(frame) {
 +			c.taintStreamAnomaly()
 +			return
 +		}
-+		itemType, ok1 := exactOptionalString(frame.itemFields, "type")
-+		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
-+		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
-+		_, ok4 := exactOptionalString(frame.itemFields, "status")
-+		if !ok1 || !ok2 || !ok3 || !ok4 {
-+			c.taintStreamAnomaly()
-+			return
-+		}
++		itemType, _ := exactOptionalString(frame.itemFields, "type")
++		itemRole, _ := exactOptionalString(frame.itemFields, "role")
++		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
 +		isExplicitNonFinal := itemType != "" && !(itemType == "message" && itemRole == "assistant" && (itemPhase == "" || itemPhase == "final_answer"))
 +		// Any newly started output item (tool call, approval request, or subsequent message) supersedes
 +		// earlier completed assistant preamble text and stays pending until its matching done event arrives.
 +		c.mu.Lock()
 +		c.sawStreamedOutputItem = true
-+		seq := assignSeqLocked(frame.itemKey)
++		seq := assignSeqLocked(frame.itemKey, frame.outputIndex, frame.hasOutputIndex)
 +		if seq > c.maxItemSeq {
 +			c.maxItemSeq = seq
 +		}
@@ -5821,37 +6025,40 @@ index e69de29..9cd3da2 100644
 +		}
 +		c.mu.Unlock()
 +	case "response.output_item.done":
-+		if frame.itemFields == nil {
++		if !validateStrictOutputItemEvent(frame) {
 +			c.taintStreamAnomaly()
 +			return
 +		}
-+		itemType, ok1 := exactOptionalString(frame.itemFields, "type")
-+		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
-+		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
-+		itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
-+		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" {
-+			c.taintStreamAnomaly()
-+			return
-+		}
++		itemType, _ := exactOptionalString(frame.itemFields, "type")
++		itemRole, _ := exactOptionalString(frame.itemFields, "role")
++		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
++		itemStatus, _ := exactOptionalString(frame.itemFields, "status")
 +		var parts []responseOutputContentPart
 +		isFinalCandidate := itemType == "message" && itemRole == "assistant" &&
 +			(itemPhase == "" || itemPhase == "final_answer") &&
 +			(itemStatus == "" || itemStatus == "completed")
 +		if isFinalCandidate {
-+			var okParts bool
-+			parts, okParts = decodeExactAssistantContentParts(frame.itemFields["content"])
-+			if !okParts {
-+				c.taintStreamAnomaly()
-+				return
-+			}
++			parts, _ = decodeExactAssistantContentParts(frame.itemFields["content"])
 +		}
 +		c.mu.Lock()
 +		// Only a matching keyed done event can clear a keyed pending item; unkeyed pending items
 +		// have no verifiable identity and therefore remain pending for the turn (fail-closed).
 +		if frame.itemKey != "" {
 +			delete(c.pendingItems, frame.itemKey)
++			if c.doneItemKeys == nil {
++				c.doneItemKeys = make(map[string]struct{})
++			}
++			c.doneItemKeys[frame.itemKey] = struct{}{}
 +		}
-+		seq := assignSeqLocked(frame.itemKey)
++		if frame.hasOutputIndex {
++			idxKey := "idx:" + strconv.FormatInt(frame.outputIndex, 10)
++			delete(c.pendingItems, idxKey)
++			if c.doneItemKeys == nil {
++				c.doneItemKeys = make(map[string]struct{})
++			}
++			c.doneItemKeys[idxKey] = struct{}{}
++		}
++		seq := assignSeqLocked(frame.itemKey, frame.outputIndex, frame.hasOutputIndex)
 +		if seq > c.maxItemSeq {
 +			c.maxItemSeq = seq
 +		}
@@ -5920,12 +6127,39 @@ index e69de29..9cd3da2 100644
 +			c.Taint()
 +		}
 +	default:
-+		// Any other mid-stream progress/delta event (content_part, output_text.delta, tool/mcp call
-+		// progress, etc.) invalidates any prior completed assistant text unless it explicitly belongs
-+		// to an earlier output_index than the already completed final answer.
++		// Any mid-stream progress/delta event (content_part, output_text.delta, function/mcp call
++		// progress, etc.) advances output-item ordering and marks its item pending until a matching
++		// output_item.done completes, so an earlier-indexed assistant message finishing later can never
++		// masquerade as the latest final answer.
 +		c.mu.Lock()
-+		isEarlierDelta := c.lastItemOutputSHA != "" && c.hasLastItemOutputIndex &&
-+			frame.hasOutputIndex && frame.outputIndex < c.lastItemOutputIndex
++		c.sawStreamedOutputItem = true
++		seq := assignSeqLocked(frame.itemKey, frame.outputIndex, frame.hasOutputIndex)
++		if seq > c.maxItemSeq {
++			c.maxItemSeq = seq
++		}
++		if frame.hasOutputIndex && (!c.hasMaxOutputIndex || frame.outputIndex > c.maxOutputIndex) {
++			c.maxOutputIndex = frame.outputIndex
++			c.hasMaxOutputIndex = true
++		}
++		alreadyDone := false
++		if frame.itemKey != "" {
++			_, alreadyDone = c.doneItemKeys[frame.itemKey]
++		}
++		if !alreadyDone && frame.hasOutputIndex {
++			_, alreadyDone = c.doneItemKeys["idx:"+strconv.FormatInt(frame.outputIndex, 10)]
++		}
++		if !alreadyDone {
++			if frame.itemKey != "" {
++				if c.pendingItems == nil {
++					c.pendingItems = make(map[string]struct{})
++				}
++				c.pendingItems[frame.itemKey] = struct{}{}
++			} else {
++				c.pendingUnkeyed++
++			}
++		}
++		isEarlierDelta := c.lastItemOutputSHA != "" && seq < c.lastItemSeq &&
++			(!c.hasLastItemOutputIndex || (frame.hasOutputIndex && frame.outputIndex < c.lastItemOutputIndex))
 +		if !isEarlierDelta {
 +			c.lastItemOutputSHA = ""
 +			c.lastItemResponseID = ""
@@ -7621,10 +7855,10 @@ index e69de29..9cd3da2 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..2492cf1 100644
+index e69de29..3954dc0 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3552 @@
+@@ -0,0 +1,3620 @@
 +package preflightreceipt
 +
 +import (
@@ -11175,5 +11409,73 @@ index e69de29..2492cf1 100644
 +	}
 +	if r := readReviewReceiptFile(t, root, lEarlyLateDone); r.LastOutputSHA256 != sha256Hex("verified-final-after-early-reasoning") {
 +		t.Fatalf("earlier reasoning late done erased final hash: got %q, want %q", r.LastOutputSHA256, sha256Hex("verified-final-after-early-reasoning"))
++	}
++
++	// 16. Sol P1 #1 + Astra P1 #1 (PR #2280 R13): ValidateStrictEvent MUST taint on malformed
++	//     output_item.added/done (missing or null item) even if downstream cancels before observing chunks.
++	lProdTaint := "review-d1111111-2222-4333-8444-555555555522"
++	sProdTaint := "019d0000-0000-7000-8000-888888888122"
++	sseTurn1OK := "data: " + `{"type":"response.completed","response":{"id":"resp_pt1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prior-turn-ok"}]}]}}` + "\n\n"
++	ctxP1, cP1, err := BeginReview(context.Background(), root, lProdTaint, sProdTaint, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxP1, eP1, err := cP1.Start(ctxP1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clP1 := httptransport.Decorate(ctxP1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqP1, _ := http.NewRequestWithContext(ctxP1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respP1, err := clP1.Do(reqP1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respP1.Body)
++	_ = respP1.Body.Close()
++	cP1.ObserveStreamChunk([]byte(sseTurn1OK))
++	eP1.End()
++	cP1.Complete(true)
++	cP1.HandlerDone(true)
++	// Turn 2: producer sees malformed output_item.done with null item, then client cancels before downstream delivery.
++	ctxP2, cP2, err := BeginReview(context.Background(), root, lProdTaint, sProdTaint, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, eP2, err := cP2.Start(ctxP2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cP2.ValidateStrictEvent("response.output_item.done", true, []byte(`{"type":"response.output_item.done","output_index":0,"item":null}`))
++	cP2.Reject()
++	eP2.End()
++	cP2.Complete(false)
++	cP2.HandlerDone(false)
++	if st := SealReview(root, lProdTaint, sProdTaint); st != SealRejected {
++		t.Fatalf("producer ValidateStrictEvent null item + cancel seal = %v, want SealRejected", st)
++	}
++
++	// 17. Astra P1 #2 (PR #2280 R13): higher-index tool progress delta (without output_item.added)
++	//     MUST advance maxOutputIndex and mark item pending so a late lower-index assistant message
++	//     cannot become last_output_sha256.
++	lDeltaPend := "review-d1111111-2222-4333-8444-555555555523"
++	sDeltaPend := "019d0000-0000-7000-8000-888888888123"
++	sseDeltaPend := "data: " + `{"type":"response.created","response":{"id":"resp_dp1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc_1","delta":"{}"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"earlier-preamble"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_dp1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, lDeltaPend, sDeltaPend, sseDeltaPend); st != SealOK {
++		t.Fatalf("tool progress delta + late earlier assistant seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lDeltaPend); r.LastOutputSHA256 != "" {
++		t.Fatalf("tool progress delta failed to block late earlier assistant text: got %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 18. Sol P2 #2 (PR #2280 R13): post-completed data-less named SSE event (event: foo\n\n) MUST taint.
++	sseDataLessEv := "data: " + `{"type":"response.completed","response":{"id":"resp_dle","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n" +
++		"event: response.failed\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555524", "019d0000-0000-7000-8000-888888888124", sseDataLessEv); st != SealRejected {
++		t.Fatalf("post-completed data-less event header seal = %v, want SealRejected", st)
 +	}
 +}
