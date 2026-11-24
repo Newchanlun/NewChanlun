@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..123db31 100644
+index e69de29..078b2c3 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,138 @@
 +package middleware
 +
 +import (
@@ -66,61 +66,19 @@ index e69de29..123db31 100644
 +				bodyDeadline = turnDeadline
 +			}
 +			rc := http.NewResponseController(c.Writer)
-+			deadlineErr := rc.SetReadDeadline(bodyDeadline)
-+			var requestedModel string
-+			var ok bool
-+			var bodyTimedOut bool
-+			if deadlineErr != nil && c.Request.Body != nil {
-+				// Non-TCP or wrapped ResponseWriters may not implement SetReadDeadline; read the
-+				// bounded request body in a helper goroutine and select against the deadline so a
-+				// stalled custom io.Reader that ignores Close() still unblocks and releases res.
-+				origBody := c.Request.Body
-+				reqCopy := c.Request.Clone(turnCtx)
-+				reqCopy.Body = origBody
-+				type extractResult struct {
-+					model string
-+					ok    bool
-+					body  http.Request
-+				}
-+				done := make(chan extractResult, 1)
-+				go func() {
-+					m, valid := preflightreceipt.ExtractInboundReviewModel(reqCopy)
-+					done <- extractResult{model: m, ok: valid, body: *reqCopy}
-+				}()
-+				bodyTimer := time.NewTimer(time.Until(bodyDeadline))
-+				select {
-+				case got := <-done:
-+					if !bodyTimer.Stop() {
-+						select {
-+						case <-bodyTimer.C:
-+						default:
-+						}
-+					}
-+					requestedModel = got.model
-+					ok = got.ok
-+					if ok {
-+						c.Request.Body = got.body.Body
-+					}
-+				case <-bodyTimer.C:
-+					_ = origBody.Close()
-+					bodyTimedOut = true
-+				case <-turnCtx.Done():
-+					if !bodyTimer.Stop() {
-+						select {
-+						case <-bodyTimer.C:
-+						default:
-+						}
-+					}
-+					_ = origBody.Close()
-+					bodyTimedOut = true
-+				}
-+			} else {
-+				requestedModel, ok = preflightreceipt.ExtractInboundReviewModel(c.Request)
++			if err := rc.SetReadDeadline(bodyDeadline); err != nil {
++				// Without ResponseWriter deadline enforcement, reading an untrusted review body
++				// cannot be bounded without leaking a blocked reader goroutine or blocking Close().
++				res.Taint()
++				c.Header("Connection", "close")
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
 +			}
++			requestedModel, ok := preflightreceipt.ExtractInboundReviewModel(c.Request)
 +			if !ok {
 +				res.Taint()
 +				c.Header("Connection", "close")
-+				if bodyTimedOut || errors.Is(turnCtx.Err(), context.DeadlineExceeded) || time.Now().After(bodyDeadline) {
++				if errors.Is(turnCtx.Err(), context.DeadlineExceeded) || time.Now().After(bodyDeadline) {
 +					c.AbortWithStatus(http.StatusRequestTimeout)
 +				} else {
 +					c.AbortWithStatus(http.StatusBadRequest)
@@ -185,10 +143,10 @@ index e69de29..123db31 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..c983aed
+index 0000000..5c560ca
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,217 @@
 +package middleware
 +
 +import (
@@ -202,6 +160,7 @@ index 0000000..c983aed
 +	"net/http/httptest"
 +	"os"
 +	"strings"
++	"sync/atomic"
 +	"testing"
 +	"time"
 +
@@ -358,32 +317,23 @@ index 0000000..c983aed
 +	}
 +}
 +
-+type closeIgnoringBlockingBody struct {
-+	unblock chan struct{}
++type mustNotReadBody struct {
++	readCalled atomic.Bool
 +}
 +
-+func (b *closeIgnoringBlockingBody) Read(_ []byte) (int, error) {
-+	<-b.unblock
++func (b *mustNotReadBody) Read(_ []byte) (int, error) {
++	b.readCalled.Store(true)
 +	return 0, io.EOF
 +}
 +
-+func (b *closeIgnoringBlockingBody) Close() error { return nil }
++func (b *mustNotReadBody) Close() error { return nil }
 +
-+func TestPreflightReceiptMiddlewareReleasesReservationWhenSetReadDeadlineUnsupportedAndCloseBlocks(t *testing.T) {
-+	// Sol P2 #3 (PR #2280 R13): when ResponseWriter does not support SetReadDeadline AND Request.Body.Close()
-+	// does not interrupt a blocked Read, the middleware MUST still time out, taint, and release res.
++func TestPreflightReceiptMiddlewareRejectsUnsupportedSetReadDeadlineBeforeReadingBody(t *testing.T) {
++	// Sol P2 #4 + Astra P2 #4 (PR #2280 R14): when ResponseWriter does not support SetReadDeadline,
++	// fail closed (503 + taint + release reservation) BEFORE reading Request.Body so no reader goroutine leaks.
 +	gin.SetMode(gin.TestMode)
 +	root := t.TempDir() + "/receipts"
 +	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
-+
-+	origBodyTimeout := preflightreceipt.ReviewBodyReadTimeout
-+	origTurnTimeout := preflightreceipt.ReviewTurnTimeout
-+	preflightreceipt.ReviewBodyReadTimeout = 120 * time.Millisecond
-+	preflightreceipt.ReviewTurnTimeout = 2 * time.Second
-+	t.Cleanup(func() {
-+		preflightreceipt.ReviewBodyReadTimeout = origBodyTimeout
-+		preflightreceipt.ReviewTurnTimeout = origTurnTimeout
-+	})
 +
 +	engine := gin.New()
 +	engine.Use(PreflightReceipt())
@@ -391,9 +341,7 @@ index 0000000..c983aed
 +		c.Status(http.StatusOK)
 +	})
 +
-+	body := &closeIgnoringBlockingBody{unblock: make(chan struct{})}
-+	t.Cleanup(func() { close(body.unblock) })
-+
++	body := &mustNotReadBody{}
 +	launch := "review-12345678-1234-4234-8234-123456789403"
 +	session := "019d0000-0000-7000-8000-000000000403"
 +	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
@@ -402,23 +350,25 @@ index 0000000..c983aed
 +	req.Header.Set(preflightreceipt.ReviewHeader, launch)
 +
 +	rec := httptest.NewRecorder()
-+	start := time.Now()
 +	engine.ServeHTTP(rec, req)
-+	if time.Since(start) > time.Second {
-+		t.Fatalf("ServeHTTP did not time out promptly on close-ignoring body: %v", time.Since(start))
++	if rec.Code != http.StatusServiceUnavailable {
++		t.Fatalf("status = %d, want %d (503 Service Unavailable)", rec.Code, http.StatusServiceUnavailable)
 +	}
-+	if rec.Code != http.StatusRequestTimeout {
-+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestTimeout)
++	if rec.Header().Get("Connection") != "close" {
++		t.Fatalf("Connection header = %q, want close", rec.Header().Get("Connection"))
++	}
++	if body.readCalled.Load() {
++		t.Fatalf("middleware read request body despite SetReadDeadline being unsupported")
 +	}
 +	if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
-+		t.Fatalf("SealReview after close-ignoring body timeout = %v, want SealRejected (not SealInFlight)", st)
++		t.Fatalf("SealReview after unsupported SetReadDeadline = %v, want SealRejected (reservation released)", st)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..5ff3f08 100644
+index e69de29..4ed3be2 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1283 @@
+@@ -0,0 +1,1294 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -818,9 +768,9 @@ index e69de29..5ff3f08 100644
 +		req.Header.Set("Authorization", "Bearer test-key")
 +		req.Header.Set("Content-Type", "application/json")
 +		req.Header.Set("Session-Id", session)
-+		res := httptest.NewRecorder()
++		res := newDeadlineRecorder()
 +		server.engine.ServeHTTP(res, req)
-+		return res
++		return res.ResponseRecorder
 +	}
 +	requireUpstreamModel := func(t *testing.T, expected string) {
 +		t.Helper()
@@ -991,9 +941,9 @@ index e69de29..5ff3f08 100644
 +		if session != "" {
 +			req.Header.Set("Session-Id", session)
 +		}
-+		res := httptest.NewRecorder()
++		res := newDeadlineRecorder()
 +		server.engine.ServeHTTP(res, req)
-+		return res
++		return res.ResponseRecorder
 +	}
 +	seal := func(launch, session string) *httptest.ResponseRecorder {
 +		req := httptest.NewRequest(http.MethodPost, "/v1/review-receipts/seal", nil)
@@ -1004,9 +954,9 @@ index e69de29..5ff3f08 100644
 +		if session != "" {
 +			req.Header.Set("Session-Id", session)
 +		}
-+		res := httptest.NewRecorder()
++		res := newDeadlineRecorder()
 +		server.engine.ServeHTTP(res, req)
-+		return res
++		return res.ResponseRecorder
 +	}
 +	waitReceipt := func(t *testing.T, launch string, check func(preflightreceipt.ReviewReceipt) bool) ([]byte, preflightreceipt.ReviewReceipt) {
 +		t.Helper()
@@ -1143,7 +1093,7 @@ index e69de29..5ff3f08 100644
 +				req.Header.Set("Content-Type", "application/json")
 +				req.Header.Set(preflightreceipt.ReviewHeader, tc.launch)
 +				req.Header.Set("Session-Id", session)
-+				res := httptest.NewRecorder()
++				res := newDeadlineRecorder()
 +				server.engine.ServeHTTP(res, req)
 +				if res.Code != http.StatusBadRequest || len(models) != 0 {
 +					t.Fatalf("non-streaming formal review %s escaped guard: status=%d calls=%d", tc.name, res.Code, len(models))
@@ -1238,7 +1188,7 @@ index e69de29..5ff3f08 100644
 +				req.Header.Set("Content-Type", "application/json")
 +				req.Header.Set(preflightreceipt.ReviewHeader, tc.launch)
 +				req.Header.Set("Session-Id", "019d0000-0000-7000-8000-000000000ae1")
-+				res := httptest.NewRecorder()
++				res := newDeadlineRecorder()
 +				isoServer.engine.ServeHTTP(res, req)
 +				if res.Code < 400 || len(models) != 0 {
 +					t.Fatalf("bad TLS transport escaped guard: status=%d calls=%d", res.Code, len(models))
@@ -1382,9 +1332,9 @@ index e69de29..5ff3f08 100644
 +			req.Header.Set("Content-Type", "application/json")
 +			req.Header.Set(preflightreceipt.ReviewHeader, launch)
 +			req.Header.Set("Session-Id", session)
-+			rec := httptest.NewRecorder()
++			rec := newDeadlineRecorder()
 +			server.engine.ServeHTTP(rec, req)
-+			reqDone <- rec
++			reqDone <- rec.ResponseRecorder
 +		}()
 +
 +		// Deterministically wait until ExtractInboundReviewModel has begun reading req.Body
@@ -1512,9 +1462,9 @@ index e69de29..5ff3f08 100644
 +			req.Header.Set("Content-Type", "application/json")
 +			req.Header.Set(preflightreceipt.ReviewHeader, launch)
 +			req.Header.Set("Session-Id", session)
-+			res := httptest.NewRecorder()
++			res := newDeadlineRecorder()
 +			srv.engine.ServeHTTP(res, req)
-+			return res
++			return res.ResponseRecorder
 +		}
 +		res1 := sendTurn("turn1")
 +		if res1.Code != http.StatusOK || upstreamHits.Load() != 1 {
@@ -1702,6 +1652,17 @@ index e69de29..5ff3f08 100644
 +func (n *notifyOnReadReader) Close() error {
 +	return n.r.Close()
 +}
++
++type deadlineRecorder struct {
++	*httptest.ResponseRecorder
++}
++
++func newDeadlineRecorder() *deadlineRecorder {
++	return &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++}
++
++func (d *deadlineRecorder) SetReadDeadline(time.Time) error  { return nil }
++func (d *deadlineRecorder) SetWriteDeadline(time.Time) error { return nil }
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
 index e2b039a..07de86f 100644
 --- a/internal/api/server_routes.go
@@ -1787,10 +1748,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..2e213da
+index 0000000..04b7de6
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,846 @@
+@@ -0,0 +1,889 @@
 +package executor
 +
 +import (
@@ -1805,6 +1766,7 @@ index 0000000..2e213da
 +	"io"
 +	"math/big"
 +	"net/http"
++	"os"
 +	"path/filepath"
 +	"strings"
 +	"testing"
@@ -2636,9 +2598,51 @@ index 0000000..2e213da
 +			}
 +		}
 +	})
++
++	t.Run("legacy codex preflight rejects trailing named event or unclosed event at EOF", func(t *testing.T) {
++		// Sol P2 #2 (PR #2280 R14): legacy Codex preflight (holdTerminalUntilEOF && !strictReview)
++		// MUST enforce the same EOF unclosed-event and data-less named-event framing checks as strictReview.
++		for idx, tc := range []struct {
++			session, tail string
++		}{
++			{"preflight-a4444444-2222-4333-8444-555555555501", "event: response.failed\n"},
++			{"preflight-a4444444-2222-4333-8444-555555555502", "event: response.failed\ndata:\n"},
++			{"preflight-a4444444-2222-4333-8444-555555555503", "event: response.failed\n\n"},
++		} {
++			root := filepath.Join(t.TempDir(), "receipts")
++			sseTail := "data: " + `{"type":"response.completed","response":{"id":"resp_leg_tail","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n" + tc.tail
++			ctx, c, err := preflightreceipt.Begin(context.Background(), root, tc.session)
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++				return io.NopCloser(strings.NewReader(sseTail))
++			}}
++			ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++			stream, err := exec.ExecuteStream(ctx, auth, req, opts)
++			if err != nil {
++				t.Fatal(err)
++			}
++			for ch := range stream.Chunks {
++				if ch.Err != nil {
++					break
++				}
++			}
++			lease.End()
++			c.Complete(true)
++			c.HandlerDone(true)
++			if _, statErr := os.Stat(filepath.Join(root, tc.session, "receipt.json")); !os.IsNotExist(statErr) {
++				t.Fatalf("case %d (%q) published legacy preflight receipt despite malformed tail: %v", idx, tc.tail, statErr)
++			}
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..7f323c5 100644
+index 6074124..1272779 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,6 +3,7 @@ package executor
@@ -2670,7 +2674,7 @@ index 6074124..7f323c5 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +450,409 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +450,416 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -2959,8 +2963,15 @@ index 6074124..7f323c5 100644
 +								pc.ValidateStrictEvent(evName, hasEv, joined)
 +							}
 +						}
++						if hasEv {
++							// Named SSE event with empty data: or [DONE] violates strict SSE framing across all paths.
++							pendingStrictTerminal = nil
++							pendingStrictBytes = 0
++							failPostTerminal()
++							return
++						}
 +						downstreamData = joined
-+					} else if strictReview && hasEv {
++					} else if hasEv {
 +						// Named SSE event with no data: lines violates strict SSE framing across all paths.
 +						pendingStrictTerminal = nil
 +						pendingStrictBytes = 0
@@ -3082,15 +3093,17 @@ index 6074124..7f323c5 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +937,88 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +944,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
-+		if strictReview {
++		if holdTerminalUntilEOF {
 +			if len(sseEventData) > 0 {
 +				joined := bytes.TrimSpace(bytes.Join(sseEventData, []byte{'\n'}))
-+				if pc := preflightreceipt.From(ctx); pc != nil {
-+					pc.ValidateStrictEvent(sseEventName, sseHasEvent, joined)
++				if strictReview {
++					if pc := preflightreceipt.From(ctx); pc != nil {
++						pc.ValidateStrictEvent(sseEventName, sseHasEvent, joined)
++					}
 +				}
 +				if (len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]"))) || sseHasEvent {
 +					// Unclosed trailing non-[DONE] SSE event or named event (even with empty data:) at EOF.
@@ -4811,10 +4824,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..0d6ec94 100644
+index e69de29..f67a5aa 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,3039 @@
+@@ -0,0 +1,3094 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5026,6 +5039,8 @@ index e69de29..0d6ec94 100644
 +	sawStreamedOutputItem                       bool
 +	pendingItems                                map[string]struct{}
 +	doneItemKeys                                map[string]struct{}
++	itemIndexByID                               map[string]int64
++	itemIDByIndex                               map[int64]string
 +	pendingUnkeyed                              int
 +	itemSeqByKey                                map[string]int
 +	nextItemSeq                                 int
@@ -5181,6 +5196,8 @@ index e69de29..0d6ec94 100644
 +	c.sawStreamedOutputItem = false
 +	c.pendingItems = nil
 +	c.doneItemKeys = nil
++	c.itemIndexByID = nil
++	c.itemIDByIndex = nil
 +	c.pendingUnkeyed = 0
 +	c.itemSeqByKey = nil
 +	c.nextItemSeq = 0
@@ -5889,6 +5906,39 @@ index e69de29..0d6ec94 100644
 +	return raw
 +}
 +
++func (c *Collector) bindStrictItemIdentityLocked(itemID string, outputIndex int64, hasOutputIndex bool) (int64, bool, bool) {
++	if itemID != "" {
++		if hasOutputIndex {
++			if prevIdx, exists := c.itemIndexByID[itemID]; exists && prevIdx != outputIndex {
++				return 0, false, false
++			}
++			if prevID, exists := c.itemIDByIndex[outputIndex]; exists && prevID != itemID {
++				return 0, false, false
++			}
++			if _, exists := c.itemIDByIndex[outputIndex]; !exists {
++				idxKey := "idx:" + strconv.FormatInt(outputIndex, 10)
++				if _, idxDone := c.doneItemKeys[idxKey]; idxDone {
++					return 0, false, false
++				}
++			}
++			if c.itemIndexByID == nil {
++				c.itemIndexByID = make(map[string]int64)
++			}
++			if c.itemIDByIndex == nil {
++				c.itemIDByIndex = make(map[int64]string)
++			}
++			c.itemIndexByID[itemID] = outputIndex
++			c.itemIDByIndex[outputIndex] = itemID
++			return outputIndex, true, true
++		}
++		if prevIdx, exists := c.itemIndexByID[itemID]; exists {
++			return prevIdx, true, true
++		}
++		return 0, false, true
++	}
++	return outputIndex, hasOutputIndex, true
++}
++
 +func (c *Collector) dispatchSSEEvent(evName string, hasEvName bool, dataLines [][]byte) {
 +	if len(dataLines) == 0 {
 +		if hasEvName {
@@ -5980,8 +6030,8 @@ index e69de29..0d6ec94 100644
 +		}
 +	}
 +	switch frame.evType {
-+	case "response.created", "response.in_progress":
-+		// streamResponseID is already validated and locked above for every frame carrying a response ID.
++	case "response.created", "response.queued", "response.in_progress":
++		// Response-level lifecycle events carry no output item; streamResponseID and model are already validated above.
 +	case "response.output_item.added":
 +		if !validateStrictOutputItemEvent(frame) {
 +			c.taintStreamAnomaly()
@@ -5994,17 +6044,23 @@ index e69de29..0d6ec94 100644
 +		// Any newly started output item (tool call, approval request, or subsequent message) supersedes
 +		// earlier completed assistant preamble text and stays pending until its matching done event arrives.
 +		c.mu.Lock()
++		effIdx, effHasIdx, okBind := c.bindStrictItemIdentityLocked(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++		if !okBind {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
 +		c.sawStreamedOutputItem = true
-+		seq := assignSeqLocked(frame.itemKey, frame.outputIndex, frame.hasOutputIndex)
++		seq := assignSeqLocked(frame.itemKey, effIdx, effHasIdx)
 +		if seq > c.maxItemSeq {
 +			c.maxItemSeq = seq
 +		}
-+		if frame.hasOutputIndex && (!c.hasMaxOutputIndex || frame.outputIndex > c.maxOutputIndex) {
-+			c.maxOutputIndex = frame.outputIndex
++		if effHasIdx && (!c.hasMaxOutputIndex || effIdx > c.maxOutputIndex) {
++			c.maxOutputIndex = effIdx
 +			c.hasMaxOutputIndex = true
 +		}
 +		isStrictlyEarlier := c.lastItemOutputSHA != "" && seq < c.lastItemSeq &&
-+			(!c.hasLastItemOutputIndex || (frame.hasOutputIndex && frame.outputIndex < c.lastItemOutputIndex))
++			(!c.hasLastItemOutputIndex || (effHasIdx && effIdx < c.lastItemOutputIndex))
 +		if !isStrictlyEarlier {
 +			c.lastItemOutputSHA = ""
 +			c.lastItemResponseID = ""
@@ -6021,7 +6077,7 @@ index e69de29..0d6ec94 100644
 +			c.pendingUnkeyed++
 +		}
 +		if isExplicitNonFinal {
-+			recordNonFinalLocked(seq, frame.itemKey, frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++			recordNonFinalLocked(seq, frame.itemKey, frame.itemID, effIdx, effHasIdx)
 +		}
 +		c.mu.Unlock()
 +	case "response.output_item.done":
@@ -6041,6 +6097,12 @@ index e69de29..0d6ec94 100644
 +			parts, _ = decodeExactAssistantContentParts(frame.itemFields["content"])
 +		}
 +		c.mu.Lock()
++		effIdx, effHasIdx, okBind := c.bindStrictItemIdentityLocked(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++		if !okBind {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
 +		// Only a matching keyed done event can clear a keyed pending item; unkeyed pending items
 +		// have no verifiable identity and therefore remain pending for the turn (fail-closed).
 +		if frame.itemKey != "" {
@@ -6050,20 +6112,20 @@ index e69de29..0d6ec94 100644
 +			}
 +			c.doneItemKeys[frame.itemKey] = struct{}{}
 +		}
-+		if frame.hasOutputIndex {
-+			idxKey := "idx:" + strconv.FormatInt(frame.outputIndex, 10)
++		if effHasIdx {
++			idxKey := "idx:" + strconv.FormatInt(effIdx, 10)
 +			delete(c.pendingItems, idxKey)
 +			if c.doneItemKeys == nil {
 +				c.doneItemKeys = make(map[string]struct{})
 +			}
 +			c.doneItemKeys[idxKey] = struct{}{}
 +		}
-+		seq := assignSeqLocked(frame.itemKey, frame.outputIndex, frame.hasOutputIndex)
++		seq := assignSeqLocked(frame.itemKey, effIdx, effHasIdx)
 +		if seq > c.maxItemSeq {
 +			c.maxItemSeq = seq
 +		}
-+		if frame.hasOutputIndex && (!c.hasMaxOutputIndex || frame.outputIndex > c.maxOutputIndex) {
-+			c.maxOutputIndex = frame.outputIndex
++		if effHasIdx && (!c.hasMaxOutputIndex || effIdx > c.maxOutputIndex) {
++			c.maxOutputIndex = effIdx
 +			c.hasMaxOutputIndex = true
 +		}
 +		c.sawStreamedOutputItem = true
@@ -6076,9 +6138,9 @@ index e69de29..0d6ec94 100644
 +			}
 +			rid := c.streamResponseID
 +			isLatest := seq >= c.maxItemSeq && seq > c.maxNonFinalSeq
-+			if frame.hasOutputIndex {
-+				if (c.hasMaxOutputIndex && frame.outputIndex < c.maxOutputIndex) ||
-+					(c.hasMaxNonFinalOutputIndex && frame.outputIndex <= c.maxNonFinalOutputIndex) {
++			if effHasIdx {
++				if (c.hasMaxOutputIndex && effIdx < c.maxOutputIndex) ||
++					(c.hasMaxNonFinalOutputIndex && effIdx <= c.maxNonFinalOutputIndex) {
 +					isLatest = false
 +				}
 +			}
@@ -6087,8 +6149,8 @@ index e69de29..0d6ec94 100644
 +					c.lastItemOutputSHA = sha256Hex(b.String())
 +					c.lastItemResponseID = rid
 +					c.lastItemSeq = seq
-+					c.hasLastItemOutputIndex = frame.hasOutputIndex
-+					c.lastItemOutputIndex = frame.outputIndex
++					c.hasLastItemOutputIndex = effHasIdx
++					c.lastItemOutputIndex = effIdx
 +				} else {
 +					c.lastItemOutputSHA = ""
 +					c.lastItemResponseID = ""
@@ -6101,9 +6163,9 @@ index e69de29..0d6ec94 100644
 +			// Any non-assistant-message, commentary, or non-completed item supersedes earlier
 +			// unphased assistant text, while an earlier-indexed item finishing out-of-order MUST NOT
 +			// erase a verified later final assistant answer.
-+			recordNonFinalLocked(seq, frame.itemKey, frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++			recordNonFinalLocked(seq, frame.itemKey, frame.itemID, effIdx, effHasIdx)
 +			isStrictlyEarlier := c.lastItemOutputSHA != "" && seq < c.lastItemSeq &&
-+				(!c.hasLastItemOutputIndex || (frame.hasOutputIndex && frame.outputIndex < c.lastItemOutputIndex))
++				(!c.hasLastItemOutputIndex || (effHasIdx && effIdx < c.lastItemOutputIndex))
 +			if !isStrictlyEarlier {
 +				c.lastItemOutputSHA = ""
 +				c.lastItemResponseID = ""
@@ -6117,7 +6179,7 @@ index e69de29..0d6ec94 100644
 +		c.recordCompletedResponse(frame.respID, frame.respModel, frame.respStatus, frame.respErr, frame.respItems)
 +	case "response.done":
 +		c.taintStreamAnomaly()
-+	case "response.failed", "response.incomplete", "error":
++	case "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
 +		c.mu.Lock()
 +		c.invalid = true
 +		c.resetOutputTrackingLocked()
@@ -6132,21 +6194,27 @@ index e69de29..0d6ec94 100644
 +		// output_item.done completes, so an earlier-indexed assistant message finishing later can never
 +		// masquerade as the latest final answer.
 +		c.mu.Lock()
++		effIdx, effHasIdx, okBind := c.bindStrictItemIdentityLocked(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++		if !okBind {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
 +		c.sawStreamedOutputItem = true
-+		seq := assignSeqLocked(frame.itemKey, frame.outputIndex, frame.hasOutputIndex)
++		seq := assignSeqLocked(frame.itemKey, effIdx, effHasIdx)
 +		if seq > c.maxItemSeq {
 +			c.maxItemSeq = seq
 +		}
-+		if frame.hasOutputIndex && (!c.hasMaxOutputIndex || frame.outputIndex > c.maxOutputIndex) {
-+			c.maxOutputIndex = frame.outputIndex
++		if effHasIdx && (!c.hasMaxOutputIndex || effIdx > c.maxOutputIndex) {
++			c.maxOutputIndex = effIdx
 +			c.hasMaxOutputIndex = true
 +		}
 +		alreadyDone := false
 +		if frame.itemKey != "" {
 +			_, alreadyDone = c.doneItemKeys[frame.itemKey]
 +		}
-+		if !alreadyDone && frame.hasOutputIndex {
-+			_, alreadyDone = c.doneItemKeys["idx:"+strconv.FormatInt(frame.outputIndex, 10)]
++		if !alreadyDone && frame.itemID == "" && effHasIdx {
++			_, alreadyDone = c.doneItemKeys["idx:"+strconv.FormatInt(effIdx, 10)]
 +		}
 +		if !alreadyDone {
 +			if frame.itemKey != "" {
@@ -6159,7 +6227,7 @@ index e69de29..0d6ec94 100644
 +			}
 +		}
 +		isEarlierDelta := c.lastItemOutputSHA != "" && seq < c.lastItemSeq &&
-+			(!c.hasLastItemOutputIndex || (frame.hasOutputIndex && frame.outputIndex < c.lastItemOutputIndex))
++			(!c.hasLastItemOutputIndex || (effHasIdx && effIdx < c.lastItemOutputIndex))
 +		if !isEarlierDelta {
 +			c.lastItemOutputSHA = ""
 +			c.lastItemResponseID = ""
@@ -7855,10 +7923,10 @@ index e69de29..0d6ec94 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..3954dc0 100644
+index e69de29..7a02bc4 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3620 @@
+@@ -0,0 +1,3677 @@
 +package preflightreceipt
 +
 +import (
@@ -11477,5 +11545,62 @@ index e69de29..3954dc0 100644
 +		"event: response.failed\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555524", "019d0000-0000-7000-8000-888888888124", sseDataLessEv); st != SealRejected {
 +		t.Fatalf("post-completed data-less event header seal = %v, want SealRejected", st)
++	}
++
++	// 19. Sol P1 + Astra P1 (PR #2280 R14): a different item_id reusing an already-bound or already-done
++	//     output_index MUST taint immediately, and an item_id changing output_index MUST taint.
++	sseReusedIdxDelta := "data: " + `{"type":"response.created","response":{"id":"resp_bi1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"preamble"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_evil","delta":"{}"}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_bi1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555525", "019d0000-0000-7000-8000-888888888125", sseReusedIdxDelta); st != SealRejected {
++		t.Fatalf("reused output_index with different item_id delta seal = %v, want SealRejected", st)
++	}
++	sseReusedUnkeyedDoneIdx := "data: " + `{"type":"response.created","response":{"id":"resp_bi2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"preamble"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_evil","delta":"{}"}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_bi2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555526", "019d0000-0000-7000-8000-888888888126", sseReusedUnkeyedDoneIdx); st != SealRejected {
++		t.Fatalf("new item_id reusing unkeyed completed output_index seal = %v, want SealRejected", st)
++	}
++	sseMovedIdx := "data: " + `{"type":"response.created","response":{"id":"resp_bi3","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":2,"item":{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"moved"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_bi3","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555527", "019d0000-0000-7000-8000-888888888127", sseMovedIdx); st != SealRejected {
++		t.Fatalf("item_id changing output_index seal = %v, want SealRejected", st)
++	}
++
++	// 20. Sol P1 + Astra P1 (PR #2280 R14): earlier assistant item omitting output_index on late done
++	//     MUST retain its bound output_index=0 and NOT certify as last_output_sha256 after a higher tool index.
++	lOmitLateIdx := "review-d1111111-2222-4333-8444-555555555528"
++	sOmitLateIdx := "019d0000-0000-7000-8000-888888888128"
++	sseOmitLateIdx := "data: " + `{"type":"response.created","response":{"id":"resp_bi4","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"earlier-preamble-without-index"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_bi4","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, lOmitLateIdx, sOmitLateIdx, sseOmitLateIdx); st != SealOK {
++		t.Fatalf("earlier assistant omitting output_index on late done seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lOmitLateIdx); r.LastOutputSHA256 != "" {
++		t.Fatalf("earlier assistant omitting output_index on late done certified hash %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 21. Astra P2 #3 (PR #2280 R14): response.queued is a response-level lifecycle event and MUST NOT
++	//     increment pendingUnkeyed or wipe a valid final answer hash.
++	lQueued := "review-d1111111-2222-4333-8444-555555555529"
++	sQueued := "019d0000-0000-7000-8000-888888888129"
++	sseQueued := "data: " + `{"type":"response.created","response":{"id":"resp_q1","status":"queued","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.queued","response":{"id":"resp_q1","status":"queued","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_q1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_q","type":"message","role":"assistant","content":[{"type":"output_text","text":"queued-verdict-pass"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_q1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_q","type":"message","role":"assistant","content":[{"type":"output_text","text":"queued-verdict-pass"}]}]}}` + "\n\n"
++	if st := runSSE(t, lQueued, sQueued, sseQueued); st != SealOK {
++		t.Fatalf("response.queued lifecycle stream seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lQueued); r.LastOutputSHA256 != sha256Hex("queued-verdict-pass") {
++		t.Fatalf("response.queued wiped last_output_sha256: got %q, want %q", r.LastOutputSHA256, sha256Hex("queued-verdict-pass"))
 +	}
 +}

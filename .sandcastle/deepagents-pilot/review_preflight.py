@@ -400,13 +400,13 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                                 detail = "SSE 存在空数据事件"
                                 break
                             continue
+                        if terminal is not None:
+                            detail = "终态事件后出现多余数据事件"
+                            break
                         if joined.startswith("{"):
                             event = json.loads(joined)
                             if ev_name is not None and event.get("type") != ev_name:
                                 detail = "SSE 事件名与数据 type 不一致"
-                                break
-                            if terminal is not None:
-                                detail = "终态事件后出现多余数据事件"
                                 break
                             if event.get("type") in TERMINAL_EVENTS:
                                 terminal = event.get("type")
