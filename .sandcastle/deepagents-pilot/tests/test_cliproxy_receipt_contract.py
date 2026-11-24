@@ -516,3 +516,28 @@ def test_round_trip_http_rejects_unclosed_multiline_sse_event(monkeypatch):
     result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-unclosed", preflight.Deadline(5))
     assert result["ok"] is False
     assert result["terminal"] is None
+
+
+def test_round_trip_http_rejects_unclosed_trailing_event_after_completed(monkeypatch):
+    payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"status":"completed"}}\n'
+        b"\n"
+        b'data: {"type":"response.failed","response":{"status":"failed"}}\n'
+    )
+
+    class _FakeResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return payload
+
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-unclosed-tail", preflight.Deadline(5))
+    assert result["ok"] is False

@@ -1693,10 +1693,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..e7e4aac
+index 0000000..7ba4117
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,695 @@
+@@ -0,0 +1,767 @@
 +package executor
 +
 +import (
@@ -2334,7 +2334,9 @@ index 0000000..e7e4aac
 +		root := filepath.Join(t.TempDir(), "receipts")
 +		launch := "review-a4444444-2222-4333-8444-555555555504"
 +		session := "019d0000-0000-7000-8000-555555555544"
-+		ssePatched := "event: response.output_item.done\n" +
++		ssePatched := "event: response.created\n" +
++			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_patch\",\"status\":\"in_progress\",\"model\":\"gpt-6.2-sol\"}}\n\n" +
++			"event: response.output_item.done\n" +
 +			"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"rebuilt-answer\"}]}}\n\n" +
 +			"event: response.completed\n" +
 +			"data: {\"type\":\"response.completed\",\n" +
@@ -2391,9 +2393,79 @@ index 0000000..e7e4aac
 +			t.Fatalf("assembled+patched SealReviewWithDigest = (%v, %q), want (SealOK, non-empty)", st, digest)
 +		}
 +	})
++
++	t.Run("failure tail with data [DONE] before event header still taints prior turn", func(t *testing.T) {
++		// Astra P2 #4 (PR #2280 R11): failure-tail validation MUST evaluate each SSE event at blank-line
++		// boundary so data:[DONE] followed by event: in the same event cannot evade taint.
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-a4444444-2222-4333-8444-555555555505"
++		session := "019d0000-0000-7000-8000-555555555545"
++		// Turn 1: clean completion
++		sseTurn1 := "data: " + `{"type":"response.completed","response":{"id":"resp_t1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1-ok"}]}]}}` + "\n\n"
++		ctx1, c1, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx1, lease1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt1 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseTurn1))
++		}}
++		ctx1 = context.WithValue(ctx1, "cliproxy.roundtripper", http.RoundTripper(rt1))
++		stream1, err := exec.ExecuteStream(ctx1, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for ch := range stream1.Chunks {
++			if ch.Err != nil {
++				t.Fatalf("turn1 err: %v", ch.Err)
++			}
++			if ch.Payload != nil {
++				c1.ObserveStreamChunk(ch.Payload)
++			}
++		}
++		lease1.End()
++		c1.Complete(true)
++		c1.HandlerDone(true)
++
++		// Turn 2: response.failed with matching model followed by malformed SSE event (data:[DONE] then event:)
++		sseTurn2 := "event: response.failed\n" +
++			"data: " + `{"type":"response.failed","response":{"id":"resp_t2","status":"failed","model":"gpt-6.2-sol","error":{"message":"transient"}}}` + "\n\n" +
++			"data: [DONE]\nevent: response.completed\n\n"
++		ctx2, c2, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx2, lease2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt2 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseTurn2))
++		}}
++		ctx2 = context.WithValue(ctx2, "cliproxy.roundtripper", http.RoundTripper(rt2))
++		stream2, err := exec.ExecuteStream(ctx2, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for ch := range stream2.Chunks {
++			if ch.Err == nil && ch.Payload != nil {
++				c2.ObserveStreamChunk(ch.Payload)
++			}
++		}
++		lease2.End()
++		c2.Complete(false)
++		c2.HandlerDone(false)
++
++		if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++			t.Fatalf("failure tail with data:[DONE] before event: SealReview = %v, want SealRejected", st)
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..7224d99 100644
+index 6074124..8664a84 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,6 +3,7 @@ package executor
@@ -2425,7 +2497,7 @@ index 6074124..7224d99 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +450,388 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +450,397 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -2501,7 +2573,18 @@ index 6074124..7224d99 100644
 +			}
 +			tailLines := 0
 +			tailBytes := 0
++			var tailData [][]byte
 +			tailHasEv := false
++			validateTailEvent := func() bool {
++				if len(tailData) == 0 {
++					return !tailHasEv
++				}
++				joined := bytes.TrimSpace(bytes.Join(tailData, []byte{'\n'}))
++				if len(joined) == 0 {
++					return !tailHasEv
++				}
++				return bytes.Equal(joined, []byte("[DONE]")) && !tailHasEv
++			}
 +			for scanner.Scan() {
 +				tl := scanner.Bytes()
 +				tailLines++
@@ -2511,6 +2594,11 @@ index 6074124..7224d99 100644
 +					return
 +				}
 +				if len(tl) == 0 {
++					if !validateTailEvent() {
++						pc.Taint()
++						return
++					}
++					tailData = nil
 +					tailHasEv = false
 +					continue
 +				}
@@ -2522,21 +2610,14 @@ index 6074124..7224d99 100644
 +					continue
 +				}
 +				if bytes.HasPrefix(tl, dataTag) {
-+					td := bytes.TrimSpace(stripOneSpace(tl[5:]))
-+					if len(td) == 0 {
-+						continue
-+					}
-+					if bytes.Equal(td, []byte("[DONE]")) && !tailHasEv {
-+						continue
-+					}
-+					pc.Taint()
-+					return
++					tailData = append(tailData, bytes.Clone(stripOneSpace(tl[5:])))
++					continue
 +				}
 +				// Unrecognized non-SSE line in failure tail violates strict SSE framing.
 +				pc.Taint()
 +				return
 +			}
-+			if scanner.Err() != nil || tailHasEv {
++			if scanner.Err() != nil || !validateTailEvent() {
 +				pc.Taint()
 +				return
 +			}
@@ -2816,7 +2897,7 @@ index 6074124..7224d99 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +916,88 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +925,88 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
@@ -4540,10 +4621,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..24fe6a6 100644
+index e69de29..1f1d6e7 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,2759 @@
+@@ -0,0 +1,2916 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -4746,11 +4827,23 @@ index e69de29..24fe6a6 100644
 +	lastResponseIDSHA                           string
 +	lastOutputSHA                               string
 +	streamResponseID                            string
++	producerResponseID                          string
 +	lastItemResponseID                          string
 +	lastItemOutputSHA                           string
 +	sawStreamedOutputItem                       bool
 +	pendingItems                                map[string]struct{}
 +	pendingUnkeyed                              int
++	itemSeqByKey                                map[string]int
++	nextItemSeq                                 int
++	maxItemSeq                                  int
++	maxNonFinalSeq                              int
++	hasMaxOutputIndex                           bool
++	maxOutputIndex                              int64
++	hasMaxNonFinalOutputIndex                   bool
++	maxNonFinalOutputIndex                      int64
++	streamedNonFinalIDs                         map[string]struct{}
++	streamedNonFinalKeys                        map[string]struct{}
++	streamedNonFinalUnkeyed                     int
 +	sseEventName                                string
 +	sseHasEvent                                 bool
 +	sseDataLines                                [][]byte
@@ -4864,11 +4957,54 @@ index e69de29..24fe6a6 100644
 +}
 +
 +type responseOutputItem struct {
++	ID      string                      `json:"id"`
 +	Type    string                      `json:"type"`
 +	Role    string                      `json:"role"`
 +	Phase   string                      `json:"phase"`
 +	Status  string                      `json:"status"`
 +	Content []responseOutputContentPart `json:"content"`
++}
++
++func isFinalAssistantOutputItem(item responseOutputItem) bool {
++	if item.Type != "message" || item.Role != "assistant" {
++		return false
++	}
++	if item.Phase != "" && item.Phase != "final_answer" {
++		return false
++	}
++	if item.Status != "" && item.Status != "completed" {
++		return false
++	}
++	return true
++}
++
++func (c *Collector) resetOutputTrackingLocked() {
++	c.lastItemResponseID = ""
++	c.lastItemOutputSHA = ""
++	c.sawStreamedOutputItem = false
++	c.pendingItems = nil
++	c.pendingUnkeyed = 0
++	c.itemSeqByKey = nil
++	c.nextItemSeq = 0
++	c.maxItemSeq = 0
++	c.maxNonFinalSeq = 0
++	c.hasMaxOutputIndex = false
++	c.maxOutputIndex = 0
++	c.hasMaxNonFinalOutputIndex = false
++	c.maxNonFinalOutputIndex = 0
++	c.streamedNonFinalIDs = nil
++	c.streamedNonFinalKeys = nil
++	c.streamedNonFinalUnkeyed = 0
++}
++
++func (c *Collector) resetAttemptStreamStateLocked() {
++	c.streamResponseID = ""
++	c.producerResponseID = ""
++	c.resetOutputTrackingLocked()
++	c.sseEventName = ""
++	c.sseHasEvent = false
++	c.sseDataLines = nil
++	c.sseDataBytes = 0
 +}
 +
 +func extractAssistantOutputText(items []responseOutputItem) string {
@@ -4919,43 +5055,54 @@ index e69de29..24fe6a6 100644
 +	if status != "completed" || hasResponseError(respErr) || c.observedCompleted {
 +		c.modelMismatch = true
 +		c.invalid = true
-+		c.lastItemOutputSHA = ""
-+		c.lastItemResponseID = ""
-+		c.sawStreamedOutputItem = false
-+		c.pendingItems = nil
-+		c.pendingUnkeyed = 0
++		c.resetOutputTrackingLocked()
 +		c.mu.Unlock()
 +		c.Taint()
 +		return
 +	}
 +	expected := c.expectedModel
-+	if expected == "" || model != expected || id == "" || strings.TrimSpace(id) != id || (c.streamResponseID != "" && c.streamResponseID != id) {
++	if expected == "" || model != expected || id == "" || strings.TrimSpace(id) != id ||
++		(c.streamResponseID != "" && c.streamResponseID != id) ||
++		(c.producerResponseID != "" && c.producerResponseID != id) {
 +		c.modelMismatch = true
 +		c.invalid = true
-+		c.lastItemOutputSHA = ""
-+		c.lastItemResponseID = ""
-+		c.sawStreamedOutputItem = false
-+		c.pendingItems = nil
-+		c.pendingUnkeyed = 0
++		c.resetOutputTrackingLocked()
 +		c.mu.Unlock()
 +		c.Taint()
 +		return
 +	}
 +	hasPendingItems := len(c.pendingItems) > 0 || c.pendingUnkeyed > 0
-+	if len(output) > 0 && c.sawStreamedOutputItem && completedSHA != "" && (c.lastItemOutputSHA != completedSHA || hasPendingItems) {
-+		// Streamed output-item lifecycle contradicted response.completed.output[]
-+		// (e.g. a subsequent or still-unfinished tool call/approval request invalidated earlier text,
-+		// yet response.completed omitted that item and tried to resurrect earlier text as final answer).
-+		c.modelMismatch = true
-+		c.invalid = true
-+		c.lastItemOutputSHA = ""
-+		c.lastItemResponseID = ""
-+		c.sawStreamedOutputItem = false
-+		c.pendingItems = nil
-+		c.pendingUnkeyed = 0
-+		c.mu.Unlock()
-+		c.Taint()
-+		return
++	if len(output) > 0 && c.sawStreamedOutputItem {
++		// Cross-check response.completed.output[] against streamed non-final items (e.g. tool calls or
++		// approval requests) so response.completed cannot omit an observed non-final item and resurrect
++		// an earlier unphased assistant message as final output.
++		completedNonFinalCount := 0
++		completedNonFinalIDs := make(map[string]struct{}, len(output))
++		for _, item := range output {
++			if !isFinalAssistantOutputItem(item) {
++				completedNonFinalCount++
++				if item.ID != "" {
++					completedNonFinalIDs[item.ID] = struct{}{}
++				}
++			}
++		}
++		missingStreamedNonFinal := completedNonFinalCount < len(c.streamedNonFinalKeys)+c.streamedNonFinalUnkeyed
++		if !missingStreamedNonFinal {
++			for nonFinalID := range c.streamedNonFinalIDs {
++				if _, ok := completedNonFinalIDs[nonFinalID]; !ok {
++					missingStreamedNonFinal = true
++					break
++				}
++			}
++		}
++		if missingStreamedNonFinal || (completedSHA != "" && (c.lastItemOutputSHA != completedSHA || hasPendingItems)) {
++			c.modelMismatch = true
++			c.invalid = true
++			c.resetOutputTrackingLocked()
++			c.mu.Unlock()
++			c.Taint()
++			return
++		}
 +	}
 +	c.observedCompleted = true
 +	c.lastResponseIDSHA = sha256Hex(id)
@@ -4966,11 +5113,7 @@ index e69de29..24fe6a6 100644
 +	} else {
 +		c.lastOutputSHA = ""
 +	}
-+	c.lastItemOutputSHA = ""
-+	c.lastItemResponseID = ""
-+	c.sawStreamedOutputItem = false
-+	c.pendingItems = nil
-+	c.pendingUnkeyed = 0
++	c.resetOutputTrackingLocked()
 +	c.mu.Unlock()
 +}
 +
@@ -4978,8 +5121,7 @@ index e69de29..24fe6a6 100644
 +	c.mu.Lock()
 +	c.modelMismatch = true
 +	c.invalid = true
-+	c.lastItemOutputSHA = ""
-+	c.lastItemResponseID = ""
++	c.resetOutputTrackingLocked()
 +	c.mu.Unlock()
 +	c.Taint()
 +}
@@ -5178,12 +5320,13 @@ index e69de29..24fe6a6 100644
 +		if err != nil {
 +			return nil, "", false
 +		}
++		itemID, okID := exactOptionalString(fields, "id")
 +		typ, ok1 := exactOptionalString(fields, "type")
 +		role, ok2 := exactOptionalString(fields, "role")
 +		phase, ok3 := exactOptionalString(fields, "phase")
 +		status, ok4 := exactOptionalString(fields, "status")
 +		itemRespID, hasItemRespID, okRespID := exactOptionalStringPresent(fields, "response_id")
-+		if !ok1 || !ok2 || !ok3 || !ok4 || !okRespID {
++		if !okID || !ok1 || !ok2 || !ok3 || !ok4 || !okRespID {
 +			return nil, "", false
 +		}
 +		if hasItemRespID {
@@ -5195,7 +5338,7 @@ index e69de29..24fe6a6 100644
 +			}
 +			boundID = itemRespID
 +		}
-+		item := responseOutputItem{Type: typ, Role: role, Phase: phase, Status: status}
++		item := responseOutputItem{ID: itemID, Type: typ, Role: role, Phase: phase, Status: status}
 +		if typ == "message" && role == "assistant" {
 +			parts, ok := decodeExactAssistantContentParts(fields["content"])
 +			if !ok {
@@ -5209,44 +5352,53 @@ index e69de29..24fe6a6 100644
 +}
 +
 +type parsedStrictFrame struct {
-+	evType     string
-+	respID     string
-+	respModel  string
-+	respStatus string
-+	respErr    json.RawMessage
-+	respOutput json.RawMessage
-+	respItems  []responseOutputItem
-+	itemFields map[string]json.RawMessage
-+	itemKey    string
++	evType         string
++	respID         string
++	respModel      string
++	respStatus     string
++	respErr        json.RawMessage
++	respOutput     json.RawMessage
++	respItems      []responseOutputItem
++	itemFields     map[string]json.RawMessage
++	itemKey        string
++	itemID         string
++	outputIndex    int64
++	hasOutputIndex bool
 +}
 +
-+func extractStrictItemKey(evFields, itemFields map[string]json.RawMessage) (string, bool) {
++func extractStrictItemIdentity(evFields, itemFields map[string]json.RawMessage) (itemKey, itemID string, outputIndex int64, hasOutputIndex bool, ok bool) {
 +	if itemFields != nil {
-+		itemID, okID := exactOptionalString(itemFields, "id")
++		idVal, okID := exactOptionalString(itemFields, "id")
 +		if !okID {
-+			return "", false
++			return "", "", 0, false, false
 +		}
-+		if itemID != "" {
-+			return "id:" + itemID, true
-+		}
++		itemID = idVal
 +	}
 +	if rawIdx, exists := evFields["output_index"]; exists {
 +		trimmed := bytes.TrimSpace(rawIdx)
 +		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
 +			var idx int64
-+			if err := json.Unmarshal(trimmed, &idx); err != nil {
-+				return "", false
++			if err := json.Unmarshal(trimmed, &idx); err != nil || idx < 0 {
++				return "", "", 0, false, false
 +			}
-+			return "idx:" + strconv.FormatInt(idx, 10), true
++			outputIndex = idx
++			hasOutputIndex = true
 +		}
 +	}
-+	return "", true
++	if itemID != "" {
++		itemKey = "id:" + itemID
++	} else if hasOutputIndex {
++		itemKey = "idx:" + strconv.FormatInt(outputIndex, 10)
++	}
++	return itemKey, itemID, outputIndex, hasOutputIndex, true
 +}
 +
 +// validateStrictFrameIdentity performs shared strict JSON, model-binding, and response-ID
-+// consistency verification used by both ObserveStreamChunk and ValidateStrictFrameModel.
++// consistency verification used by both ObserveStreamChunk and ValidateStrictEvent.
 +// When rejectErrors is true, non-null event/response error fields also taint immediately.
-+func (c *Collector) validateStrictFrameIdentity(line []byte, rejectErrors bool) (parsedStrictFrame, bool) {
++// When producerOnly is true, response-ID tracking stays isolated in producerResponseID so
++// producer lookahead never attributes an earlier consumer output_item.done to a later frame's ID.
++func (c *Collector) validateStrictFrameIdentity(line []byte, rejectErrors, producerOnly bool) (parsedStrictFrame, bool) {
 +	var out parsedStrictFrame
 +	evFields, err := decodeExactJSONObject(line, sseEventSchemaKeys)
 +	if err != nil {
@@ -5360,10 +5512,18 @@ index e69de29..24fe6a6 100644
 +	if explicitRespID != "" {
 +		conflict := false
 +		c.mu.Lock()
-+		if c.streamResponseID != "" && c.streamResponseID != explicitRespID {
-+			conflict = true
++		if producerOnly {
++			if c.producerResponseID != "" && c.producerResponseID != explicitRespID {
++				conflict = true
++			} else {
++				c.producerResponseID = explicitRespID
++			}
 +		} else {
-+			c.streamResponseID = explicitRespID
++			if c.streamResponseID != "" && c.streamResponseID != explicitRespID {
++				conflict = true
++			} else {
++				c.streamResponseID = explicitRespID
++			}
 +		}
 +		c.mu.Unlock()
 +		if conflict {
@@ -5376,7 +5536,11 @@ index e69de29..24fe6a6 100644
 +		c.mu.Lock()
 +		expectedItemRespID := explicitRespID
 +		if expectedItemRespID == "" {
-+			expectedItemRespID = c.streamResponseID
++			if producerOnly {
++				expectedItemRespID = c.producerResponseID
++			} else {
++				expectedItemRespID = c.streamResponseID
++			}
 +		}
 +		c.mu.Unlock()
 +		var boundItemRespID string
@@ -5389,10 +5553,18 @@ index e69de29..24fe6a6 100644
 +		if boundItemRespID != "" {
 +			conflict := false
 +			c.mu.Lock()
-+			if c.streamResponseID != "" && c.streamResponseID != boundItemRespID {
-+				conflict = true
++			if producerOnly {
++				if c.producerResponseID != "" && c.producerResponseID != boundItemRespID {
++					conflict = true
++				} else {
++					c.producerResponseID = boundItemRespID
++				}
 +			} else {
-+				c.streamResponseID = boundItemRespID
++				if c.streamResponseID != "" && c.streamResponseID != boundItemRespID {
++					conflict = true
++				} else {
++					c.streamResponseID = boundItemRespID
++				}
 +			}
 +			c.mu.Unlock()
 +			if conflict {
@@ -5401,21 +5573,24 @@ index e69de29..24fe6a6 100644
 +			}
 +		}
 +	}
-+	itemKey, okItemKey := extractStrictItemKey(evFields, itemFields)
++	itemKey, itemID, outputIndex, hasOutputIndex, okItemKey := extractStrictItemIdentity(evFields, itemFields)
 +	if !okItemKey {
 +		c.taintStreamAnomaly()
 +		return out, false
 +	}
 +	out = parsedStrictFrame{
-+		evType:     evType,
-+		respID:     respID,
-+		respModel:  respModel,
-+		respStatus: respStatus,
-+		respErr:    respErr,
-+		respOutput: respOutput,
-+		respItems:  respItems,
-+		itemFields: itemFields,
-+		itemKey:    itemKey,
++		evType:         evType,
++		respID:         respID,
++		respModel:      respModel,
++		respStatus:     respStatus,
++		respErr:        respErr,
++		respOutput:     respOutput,
++		respItems:      respItems,
++		itemFields:     itemFields,
++		itemKey:        itemKey,
++		itemID:         itemID,
++		outputIndex:    outputIndex,
++		hasOutputIndex: hasOutputIndex,
 +	}
 +	return out, true
 +}
@@ -5424,7 +5599,7 @@ index e69de29..24fe6a6 100644
 +// consistency, and strict protocol JSON on ONE complete assembled SSE event JSON payload (including
 +// multi-line JSON objects) without splitting on newlines. Unlike ObserveStreamChunk, it does NOT taint
 +// on legitimate upstream error fields when declared event name, model, and response ID match, and
-+// never marks observedCompleted.
++// never marks observedCompleted or writes consumer-order streamResponseID.
 +func (c *Collector) ValidateStrictEvent(evName string, hasEvName bool, rawEventJSON []byte) {
 +	if c == nil || !c.strictCodex {
 +		return
@@ -5436,7 +5611,7 @@ index e69de29..24fe6a6 100644
 +		}
 +		return
 +	}
-+	frame, ok := c.validateStrictFrameIdentity(trimmed, false)
++	frame, ok := c.validateStrictFrameIdentity(trimmed, false, true)
 +	if !ok {
 +		return
 +	}
@@ -5485,7 +5660,7 @@ index e69de29..24fe6a6 100644
 +		}
 +		return
 +	}
-+	frame, ok := c.validateStrictFrameIdentity(joined, true)
++	frame, ok := c.validateStrictFrameIdentity(joined, true, false)
 +	if !ok {
 +		return
 +	}
@@ -5499,16 +5674,77 @@ index e69de29..24fe6a6 100644
 +		c.taintStreamAnomaly()
 +		return
 +	}
++	assignSeqLocked := func(itemKey string) int {
++		if itemKey != "" {
++			if seq, exists := c.itemSeqByKey[itemKey]; exists {
++				return seq
++			}
++		}
++		c.nextItemSeq++
++		seq := c.nextItemSeq
++		if itemKey != "" {
++			if c.itemSeqByKey == nil {
++				c.itemSeqByKey = make(map[string]int)
++			}
++			c.itemSeqByKey[itemKey] = seq
++		}
++		return seq
++	}
++	recordNonFinalLocked := func(seq int, itemKey, itemID string, outputIndex int64, hasOutputIndex bool) {
++		if seq > c.maxNonFinalSeq {
++			c.maxNonFinalSeq = seq
++		}
++		if hasOutputIndex && (!c.hasMaxNonFinalOutputIndex || outputIndex > c.maxNonFinalOutputIndex) {
++			c.maxNonFinalOutputIndex = outputIndex
++			c.hasMaxNonFinalOutputIndex = true
++		}
++		if itemID != "" {
++			if c.streamedNonFinalIDs == nil {
++				c.streamedNonFinalIDs = make(map[string]struct{})
++			}
++			c.streamedNonFinalIDs[itemID] = struct{}{}
++		}
++		if itemKey != "" {
++			if c.streamedNonFinalKeys == nil {
++				c.streamedNonFinalKeys = make(map[string]struct{})
++			}
++			c.streamedNonFinalKeys[itemKey] = struct{}{}
++		} else {
++			c.streamedNonFinalUnkeyed++
++		}
++	}
 +	switch frame.evType {
 +	case "response.created", "response.in_progress":
 +		// streamResponseID is already validated and locked above for every frame carrying a response ID.
 +	case "response.output_item.added":
++		var isExplicitNonFinal bool
++		if frame.itemFields != nil {
++			itemType, ok1 := exactOptionalString(frame.itemFields, "type")
++			itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
++			itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
++			_, ok4 := exactOptionalString(frame.itemFields, "status")
++			if !ok1 || !ok2 || !ok3 || !ok4 {
++				c.taintStreamAnomaly()
++				return
++			}
++			if itemType != "" && !(itemType == "message" && itemRole == "assistant" && (itemPhase == "" || itemPhase == "final_answer")) {
++				isExplicitNonFinal = true
++			}
++		}
 +		// Any newly started output item (tool call, approval request, or subsequent message) supersedes
 +		// earlier completed assistant preamble text and stays pending until its matching done event arrives.
 +		c.mu.Lock()
 +		c.sawStreamedOutputItem = true
 +		c.lastItemOutputSHA = ""
 +		c.lastItemResponseID = ""
++		seq := assignSeqLocked(frame.itemKey)
++		if seq > c.maxItemSeq {
++			c.maxItemSeq = seq
++		}
++		if frame.hasOutputIndex && (!c.hasMaxOutputIndex || frame.outputIndex > c.maxOutputIndex) {
++			c.maxOutputIndex = frame.outputIndex
++			c.hasMaxOutputIndex = true
++		}
 +		if frame.itemKey != "" {
 +			if c.pendingItems == nil {
 +				c.pendingItems = make(map[string]struct{})
@@ -5517,17 +5753,25 @@ index e69de29..24fe6a6 100644
 +		} else {
 +			c.pendingUnkeyed++
 +		}
++		if isExplicitNonFinal {
++			recordNonFinalLocked(seq, frame.itemKey, frame.itemID, frame.outputIndex, frame.hasOutputIndex)
++		}
 +		c.mu.Unlock()
 +	case "response.output_item.done":
 +		c.mu.Lock()
++		// Never let a keyed output_item.done cancel an unrelated unkeyed pending item.
 +		if frame.itemKey != "" {
-+			if _, ok := c.pendingItems[frame.itemKey]; ok {
-+				delete(c.pendingItems, frame.itemKey)
-+			} else if c.pendingUnkeyed > 0 {
-+				c.pendingUnkeyed--
-+			}
++			delete(c.pendingItems, frame.itemKey)
 +		} else if c.pendingUnkeyed > 0 {
 +			c.pendingUnkeyed--
++		}
++		seq := assignSeqLocked(frame.itemKey)
++		if seq > c.maxItemSeq {
++			c.maxItemSeq = seq
++		}
++		if frame.hasOutputIndex && (!c.hasMaxOutputIndex || frame.outputIndex > c.maxOutputIndex) {
++			c.maxOutputIndex = frame.outputIndex
++			c.hasMaxOutputIndex = true
 +		}
 +		c.mu.Unlock()
 +		if frame.itemFields != nil {
@@ -5543,6 +5787,7 @@ index e69de29..24fe6a6 100644
 +				if (itemPhase != "" && itemPhase != "final_answer") || (itemStatus != "" && itemStatus != "completed") {
 +					c.mu.Lock()
 +					c.sawStreamedOutputItem = true
++					recordNonFinalLocked(seq, frame.itemKey, frame.itemID, frame.outputIndex, frame.hasOutputIndex)
 +					c.lastItemOutputSHA = ""
 +					c.lastItemResponseID = ""
 +					c.mu.Unlock()
@@ -5562,12 +5807,21 @@ index e69de29..24fe6a6 100644
 +				c.mu.Lock()
 +				c.sawStreamedOutputItem = true
 +				rid := c.streamResponseID
-+				if b.Len() > 0 && rid != "" {
-+					c.lastItemOutputSHA = sha256Hex(b.String())
-+					c.lastItemResponseID = rid
-+				} else {
-+					c.lastItemOutputSHA = ""
-+					c.lastItemResponseID = ""
++				isLatest := seq >= c.maxItemSeq && seq > c.maxNonFinalSeq
++				if frame.hasOutputIndex {
++					if (c.hasMaxOutputIndex && frame.outputIndex < c.maxOutputIndex) ||
++						(c.hasMaxNonFinalOutputIndex && frame.outputIndex <= c.maxNonFinalOutputIndex) {
++						isLatest = false
++					}
++				}
++				if isLatest {
++					if b.Len() > 0 && rid != "" {
++						c.lastItemOutputSHA = sha256Hex(b.String())
++						c.lastItemResponseID = rid
++					} else {
++						c.lastItemOutputSHA = ""
++						c.lastItemResponseID = ""
++					}
 +				}
 +				c.mu.Unlock()
 +			} else {
@@ -5575,6 +5829,7 @@ index e69de29..24fe6a6 100644
 +				// supersedes earlier unphased assistant preamble text.
 +				c.mu.Lock()
 +				c.sawStreamedOutputItem = true
++				recordNonFinalLocked(seq, frame.itemKey, frame.itemID, frame.outputIndex, frame.hasOutputIndex)
 +				c.lastItemOutputSHA = ""
 +				c.lastItemResponseID = ""
 +				c.mu.Unlock()
@@ -5587,10 +5842,7 @@ index e69de29..24fe6a6 100644
 +	case "response.failed", "response.incomplete", "error":
 +		c.mu.Lock()
 +		c.invalid = true
-+		c.lastItemOutputSHA = ""
-+		c.lastItemResponseID = ""
-+		c.pendingItems = nil
-+		c.pendingUnkeyed = 0
++		c.resetOutputTrackingLocked()
 +		alreadyCompleted := c.observedCompleted
 +		c.mu.Unlock()
 +		if alreadyCompleted {
@@ -6630,14 +6882,7 @@ index e69de29..24fe6a6 100644
 +	c.active++
 +	c.executions++
 +	c.upstreamEOF = false
-+	c.streamResponseID = ""
-+	c.lastItemResponseID = ""
-+	c.lastItemOutputSHA = ""
-+	c.sawStreamedOutputItem = false
-+	c.sseEventName = ""
-+	c.sseHasEvent = false
-+	c.sseDataLines = nil
-+	c.sseDataBytes = 0
++	c.resetAttemptStreamStateLocked()
 +	e := &Execution{c: c, provider: provider, model: model}
 +	ctx = httptransport.WithDecorator(ctx, func(next http.RoundTripper) http.RoundTripper { return &transport{next: next, execution: e} })
 +	return ctx, e, nil
@@ -6661,14 +6906,7 @@ index e69de29..24fe6a6 100644
 +			unterminatedPostComplete = true
 +		}
 +	}
-+	c.streamResponseID = ""
-+	c.lastItemResponseID = ""
-+	c.lastItemOutputSHA = ""
-+	c.sawStreamedOutputItem = false
-+	c.sseEventName = ""
-+	c.sseHasEvent = false
-+	c.sseDataLines = nil
-+	c.sseDataBytes = 0
++	c.resetAttemptStreamStateLocked()
 +	if e.attempts == 0 {
 +		c.invalid = true
 +	}
@@ -7304,10 +7542,10 @@ index e69de29..24fe6a6 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..3ecc412 100644
+index e69de29..0bcab70 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,3370 @@
+@@ -0,0 +1,3508 @@
 +package preflightreceipt
 +
 +import (
@@ -10676,5 +10914,143 @@ index e69de29..3ecc412 100644
 +	}
 +	if r := readReviewReceiptFile(t, root, lInterleaved); r.LastOutputSHA256 != "" {
 +		t.Fatalf("interleaved unfinished tool retained last_output_sha256 %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 9. Sol P1 (PR #2280 R11): earlier unphased assistant message (output_index=0) completing LATE
++	//    after a later tool call (output_index=1) MUST NOT become last_output_sha256 on empty completed
++	//    AND MUST taint if response.completed.output omits the tool call to resurrect the preamble.
++	lLateEmpty := "review-d1111111-2222-4333-8444-555555555514"
++	sLateEmpty := "019d0000-0000-7000-8000-888888888114"
++	sseLateEmpty := "data: " + `{"type":"response.created","response":{"id":"resp_late1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"Earlier preamble finishing late"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_late1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, lLateEmpty, sLateEmpty, sseLateEmpty); st != SealOK {
++		t.Fatalf("late preamble after tool (empty completed) seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lLateEmpty); r.LastOutputSHA256 != "" {
++		t.Fatalf("late preamble after tool retained last_output_sha256 = %q, want empty", r.LastOutputSHA256)
++	}
++
++	lLateOmit := "review-d1111111-2222-4333-8444-555555555515"
++	sLateOmit := "019d0000-0000-7000-8000-888888888115"
++	sseLateOmit := "data: " + `{"type":"response.created","response":{"id":"resp_late2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"Earlier preamble finishing late"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_late2","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_0","type":"message","role":"assistant","content":[{"type":"output_text","text":"Earlier preamble finishing late"}]}]}}` + "\n\n"
++	if st := runSSE(t, lLateOmit, sLateOmit, sseLateOmit); st != SealRejected {
++		t.Fatalf("response.completed omitting streamed tool after late preamble = %v, want SealRejected", st)
++	}
++
++	// 10. Astra P1 #2 (PR #2280 R11): a keyed assistant output_item.done MUST NOT decrement pendingUnkeyed
++	//     from an unrelated unkeyed pending tool call.
++	lUnkeyed := "review-d1111111-2222-4333-8444-555555555516"
++	sUnkeyed := "019d0000-0000-7000-8000-888888888116"
++	sseUnkeyed := "data: " + `{"type":"response.created","response":{"id":"resp_uk","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","item":{"type":"function_call","name":"exec_command"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_keyed","type":"message","role":"assistant","content":[{"type":"output_text","text":"Keyed assistant done"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_uk","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
++	if st := runSSE(t, lUnkeyed, sUnkeyed, sseUnkeyed); st != SealOK {
++		t.Fatalf("unkeyed pending tool + keyed assistant done seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lUnkeyed); r.LastOutputSHA256 != "" {
++		t.Fatalf("keyed assistant done cancelled unkeyed pending tool: last_output_sha256 = %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 11. Astra P1 #1 (PR #2280 R11): producer ValidateStrictEvent lookahead writing response.completed's
++	//     response ID BEFORE consumer ObserveStreamChunk processes an earlier unattributed output_item.done
++	//     MUST NOT attribute that earlier text to the later frame's response ID.
++	lRace := "review-d1111111-2222-4333-8444-555555555517"
++	sRace := "019d0000-0000-7000-8000-888888888117"
++	ctxR, cR, err := BeginReview(context.Background(), root, lRace, sRace, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxR, eR, err := cR.Start(ctxR, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clR := httptransport.Decorate(ctxR, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqR, _ := http.NewRequestWithContext(ctxR, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respR, err := clR.Do(reqR)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respR.Body)
++	_ = respR.Body.Close()
++	frame1 := `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"unattributed-early"}]}}`
++	frame2 := `{"type":"response.completed","response":{"id":"resp_later","status":"completed","model":"gpt-6.2-sol","output":[]}}`
++	// Producer runs ahead and validates BOTH frames before consumer observes frame 1.
++	cR.ValidateStrictEvent("", false, []byte(frame1))
++	cR.ValidateStrictEvent("", false, []byte(frame2))
++	cR.ObserveStreamChunk([]byte("data: " + frame1 + "\n\n"))
++	cR.ObserveStreamChunk([]byte("data: " + frame2 + "\n\n"))
++	eR.End()
++	cR.Complete(true)
++	cR.HandlerDone(true)
++	if st := SealReview(root, lRace, sRace); st != SealOK {
++		t.Fatalf("producer-lookahead unattributed test seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lRace); r.LastOutputSHA256 != "" {
++		t.Fatalf("producer lookahead leaked response ID to earlier unattributed output_item.done: got %q, want empty", r.LastOutputSHA256)
++	}
++
++	// 12. Astra P2 #5 (PR #2280 R11): pendingItems/pendingUnkeyed left by an earlier retryable attempt
++	//     MUST be reset when a subsequent retry attempt starts cleanly.
++	lRetry := "review-d1111111-2222-4333-8444-555555555518"
++	sRetry := "019d0000-0000-7000-8000-888888888118"
++	ctxT, cT, err := BeginReview(context.Background(), root, lRetry, sRetry, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Attempt 1 leaves an unfinished output_item.added and fails retryably (503).
++	ctxT1, eT1, err := cT.Start(ctxT, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clT1 := httptransport.Decorate(ctxT1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 503, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqT1, _ := http.NewRequestWithContext(ctxT1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respT1, err := clT1.Do(reqT1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respT1.Body)
++	_ = respT1.Body.Close()
++	cT.ObserveStreamChunk([]byte("data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"stale_open","type":"function_call","name":"exec_command"}}` + "\n\n"))
++	eT1.End()
++	// Attempt 2 starts cleanly and emits a complete final answer.
++	ctxT2, eT2, err := cT.Start(ctxT, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clT2 := httptransport.Decorate(ctxT2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqT2, _ := http.NewRequestWithContext(ctxT2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respT2, err := clT2.Do(reqT2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respT2.Body)
++	_ = respT2.Body.Close()
++	cT.ObserveStreamChunk([]byte("data: " + `{"type":"response.created","response":{"id":"resp_retry_ok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"clean-retry-answer"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_retry_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"clean-retry-answer"}]}]}}` + "\n\n"))
++	eT2.End()
++	cT.Complete(true)
++	cT.HandlerDone(true)
++	if st := SealReview(root, lRetry, sRetry); st != SealOK {
++		t.Fatalf("clean retry after stale pending item seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lRetry); r.LastOutputSHA256 != sha256Hex("clean-retry-answer") {
++		t.Fatalf("clean retry lost last_output_sha256: got %q, want %q", r.LastOutputSHA256, sha256Hex("clean-retry-answer"))
 +	}
 +}

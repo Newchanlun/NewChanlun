@@ -406,6 +406,10 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                     if val.startswith(" "):
                         val = val[1:]
                     data_lines.append(val)
+            if data_lines:
+                trailing = "\n".join(data_lines).strip()
+                if trailing and trailing != "[DONE]":
+                    detail = "流尾存在未闭合 SSE 事件"
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
             # 事件名成功还不够：响应体自报 failed/cancelled 或带 error 也算失败。
