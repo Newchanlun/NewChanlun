@@ -5141,10 +5141,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..66b907a 100644
+index e69de29..69999b9 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,4335 @@
+@@ -0,0 +1,4579 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5348,6 +5348,18 @@ index e69de29..66b907a 100644
 +	doneDigest     string
 +}
 +
++type textDeltaState struct {
++	h        hash.Hash
++	hasSeed  bool
++	hasDelta bool
++	seedSHA  string
++}
++
++type textPrefixCheck struct {
++	byteLen int
++	sha256  string
++}
++
 +type strictStreamTracker struct {
 +	responseID                string
 +	sawCompleted              bool
@@ -5367,7 +5379,8 @@ index e69de29..66b907a 100644
 +	itemKindByKey             map[string]strictItemKind
 +	itemTypeByKey             map[string]string
 +	contentPartByItem         map[string]map[int64]string
-+	textDeltaHashByItem       map[string]map[int64]hash.Hash
++	textDeltaHashByItem       map[string]map[int64]*textDeltaState
++	textPrefixByItem          map[string]map[int64]textPrefixCheck
 +	pendingUnkeyed            int
 +	itemSeqByKey              map[string]int
 +	nextItemSeq               int
@@ -5398,6 +5411,7 @@ index e69de29..66b907a 100644
 +	t.itemTypeByKey = nil
 +	t.contentPartByItem = nil
 +	t.textDeltaHashByItem = nil
++	t.textPrefixByItem = nil
 +	t.pendingUnkeyed = 0
 +	t.itemSeqByKey = nil
 +	t.nextItemSeq = 0
@@ -5611,9 +5625,7 @@ index e69de29..66b907a 100644
 +
 +func inferredDeltaItemType(evType string) string {
 +	switch {
-+	case evType == "response.content_part.added" ||
-+		evType == "response.content_part.done" ||
-+		evType == "response.output_text.delta" ||
++	case evType == "response.output_text.delta" ||
 +		evType == "response.output_text.done" ||
 +		evType == "response.output_text.annotation.added" ||
 +		evType == "response.refusal.delta" ||
@@ -5646,9 +5658,7 @@ index e69de29..66b907a 100644
 +
 +func classifyDeltaEventKind(evType string) strictItemKind {
 +	switch evType {
-+	case "response.content_part.added",
-+		"response.content_part.done",
-+		"response.output_text.delta",
++	case "response.output_text.delta",
 +		"response.output_text.done",
 +		"response.output_text.annotation.added",
 +		"response.refusal.delta",
@@ -5661,6 +5671,31 @@ index e69de29..66b907a 100644
 +	default:
 +		return itemKindNonMessage
 +	}
++}
++
++func classifyDeltaFrame(frame parsedStrictFrame) (strictItemKind, string) {
++	if frame.evType == "response.content_part.added" || frame.evType == "response.content_part.done" {
++		if frame.partFields != nil {
++			pType, _ := exactOptionalString(frame.partFields, "type")
++			switch pType {
++			case "output_text", "refusal", "output_audio":
++				return itemKindMessageAny, "message"
++			case "reasoning_text", "summary_text":
++				return itemKindNonMessage, "reasoning"
++			default:
++				return itemKindUnknown, ""
++			}
++		}
++		return itemKindUnknown, ""
++	}
++	return classifyDeltaEventKind(frame.evType), inferredDeltaItemType(frame.evType)
++}
++
++func isAssistantOnlyPartTag(tag string) bool {
++	return tag == "text-pending" ||
++		strings.HasPrefix(tag, "text:") ||
++		tag == contentPartTag("refusal", "") ||
++		tag == contentPartTag("output_audio", "")
 +}
 +
 +func mergeStrictItemKind(prev, next strictItemKind) (strictItemKind, bool) {
@@ -5798,19 +5833,24 @@ index e69de29..66b907a 100644
 +		}
 +		if recordedParts, hasParts := t.contentPartByItem[canonKey]; hasParts {
 +			if item.Type != "message" || item.Role != "assistant" {
-+				return false
-+			}
-+			for cIdx, wantTag := range recordedParts {
-+				if cIdx < 0 || int(cIdx) >= len(item.Content) {
-+					return false
-+				}
-+				part := item.Content[cIdx]
-+				if wantTag == "text-pending" {
-+					if part.Type != "output_text" {
++				for _, wantTag := range recordedParts {
++					if isAssistantOnlyPartTag(wantTag) {
 +						return false
 +					}
-+				} else if contentPartTag(part.Type, part.Text) != wantTag {
-+					return false
++				}
++			} else {
++				for cIdx, wantTag := range recordedParts {
++					if cIdx < 0 || int(cIdx) >= len(item.Content) {
++						return false
++					}
++					part := item.Content[cIdx]
++					if wantTag == "text-pending" {
++						if part.Type != "output_text" {
++							return false
++						}
++					} else if contentPartTag(part.Type, part.Text) != wantTag {
++						return false
++					}
 +				}
 +			}
 +		}
@@ -5818,12 +5858,26 @@ index e69de29..66b907a 100644
 +			if item.Type != "message" || item.Role != "assistant" {
 +				return false
 +			}
-+			for cIdx, h := range deltaHashes {
++			for cIdx, st := range deltaHashes {
 +				if cIdx < 0 || int(cIdx) >= len(item.Content) {
 +					return false
 +				}
 +				part := item.Content[cIdx]
-+				if part.Type != "output_text" || sha256Hex(part.Text) != hex.EncodeToString(h.Sum(nil)) {
++				if part.Type != "output_text" || sha256Hex(part.Text) != hex.EncodeToString(st.h.Sum(nil)) {
++					return false
++				}
++			}
++		}
++		if prefixes, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
++			if item.Type != "message" || item.Role != "assistant" {
++				return false
++			}
++			for cIdx, pref := range prefixes {
++				if cIdx < 0 || int(cIdx) >= len(item.Content) {
++					return false
++				}
++				part := item.Content[cIdx]
++				if part.Type != "output_text" || len(part.Text) < pref.byteLen || sha256Hex(part.Text[:pref.byteLen]) != pref.sha256 {
 +					return false
 +				}
 +			}
@@ -6756,14 +6810,31 @@ index e69de29..66b907a 100644
 +					if curDeltas == nil {
 +						t.textDeltaHashByItem[canonKey] = prevDeltas
 +					} else {
-+						for cIdx, h := range prevDeltas {
++						for cIdx, st := range prevDeltas {
 +							if _, dup := curDeltas[cIdx]; dup {
 +								return "", "", 0, false, false
 +							}
 +							if len(curDeltas) >= maxTrackedContentParts {
 +								return "", "", 0, false, false
 +							}
-+							curDeltas[cIdx] = h
++							curDeltas[cIdx] = st
++						}
++					}
++				}
++				if prevPrefixes, hasPrefixes := t.textPrefixByItem[idxKey]; hasPrefixes {
++					delete(t.textPrefixByItem, idxKey)
++					curPrefixes := t.textPrefixByItem[canonKey]
++					if curPrefixes == nil {
++						t.textPrefixByItem[canonKey] = prevPrefixes
++					} else {
++						for cIdx, pref := range prevPrefixes {
++							if existing, dup := curPrefixes[cIdx]; dup && existing != pref {
++								return "", "", 0, false, false
++							}
++							if len(curPrefixes) >= maxTrackedContentParts {
++								return "", "", 0, false, false
++							}
++							curPrefixes[cIdx] = pref
 +						}
 +					}
 +				}
@@ -6860,6 +6931,80 @@ index e69de29..66b907a 100644
 +	return true
 +}
 +
++func (t *strictStreamTracker) recordTextPrefix(canonKey string, contentIdx int64, text string) bool {
++	if canonKey == "" || text == "" {
++		return true
++	}
++	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
++		return false
++	}
++	if parts := t.contentPartByItem[canonKey]; parts != nil {
++		if prevTag, exists := parts[contentIdx]; exists && prevTag != "text-pending" && !strings.HasPrefix(prevTag, "text:") {
++			return false
++		}
++	}
++	prefixes := t.textPrefixByItem[canonKey]
++	if prefixes == nil {
++		if len(t.textPrefixByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.textPrefixByItem == nil {
++			t.textPrefixByItem = make(map[string]map[int64]textPrefixCheck)
++		}
++		prefixes = make(map[int64]textPrefixCheck)
++		t.textPrefixByItem[canonKey] = prefixes
++	}
++	if prev, exists := prefixes[contentIdx]; exists {
++		if len(text) < prev.byteLen || sha256Hex(text[:prev.byteLen]) != prev.sha256 {
++			return false
++		}
++		if len(text) == prev.byteLen {
++			return true
++		}
++	} else if len(prefixes) >= maxTrackedContentParts {
++		return false
++	}
++	prefixes[contentIdx] = textPrefixCheck{byteLen: len(text), sha256: sha256Hex(text)}
++	return true
++}
++
++func (t *strictStreamTracker) recordInitialText(canonKey string, contentIdx int64, initText string) bool {
++	if !t.recordPendingTextPart(canonKey, contentIdx) {
++		return false
++	}
++	if canonKey == "" || initText == "" {
++		return true
++	}
++	if !t.recordTextPrefix(canonKey, contentIdx, initText) {
++		return false
++	}
++	hashes := t.textDeltaHashByItem[canonKey]
++	if hashes == nil {
++		if len(t.textDeltaHashByItem) >= maxTrackedOutputItems {
++			return false
++		}
++		if t.textDeltaHashByItem == nil {
++			t.textDeltaHashByItem = make(map[string]map[int64]*textDeltaState)
++		}
++		hashes = make(map[int64]*textDeltaState)
++		t.textDeltaHashByItem[canonKey] = hashes
++	}
++	initSHA := sha256Hex(initText)
++	if st := hashes[contentIdx]; st != nil {
++		if !st.hasDelta && st.hasSeed {
++			return st.seedSHA == initSHA
++		}
++		return hex.EncodeToString(st.h.Sum(nil)) == initSHA
++	}
++	if len(hashes) >= maxTrackedContentParts {
++		return false
++	}
++	h := sha256.New()
++	_, _ = h.Write([]byte(initText))
++	hashes[contentIdx] = &textDeltaState{h: h, hasSeed: true, seedSHA: initSHA}
++	return true
++}
++
 +func (t *strictStreamTracker) recordTextDelta(canonKey string, contentIdx int64, delta string) bool {
 +	if canonKey == "" {
 +		return true
@@ -6878,20 +7023,21 @@ index e69de29..66b907a 100644
 +			return false
 +		}
 +		if t.textDeltaHashByItem == nil {
-+			t.textDeltaHashByItem = make(map[string]map[int64]hash.Hash)
++			t.textDeltaHashByItem = make(map[string]map[int64]*textDeltaState)
 +		}
-+		hashes = make(map[int64]hash.Hash)
++		hashes = make(map[int64]*textDeltaState)
 +		t.textDeltaHashByItem[canonKey] = hashes
 +	}
-+	h := hashes[contentIdx]
-+	if h == nil {
++	st := hashes[contentIdx]
++	if st == nil {
 +		if len(hashes) >= maxTrackedContentParts {
 +			return false
 +		}
-+		h = sha256.New()
-+		hashes[contentIdx] = h
++		st = &textDeltaState{h: sha256.New()}
++		hashes[contentIdx] = st
 +	}
-+	_, _ = h.Write([]byte(delta))
++	_, _ = st.h.Write([]byte(delta))
++	st.hasDelta = true
 +	return true
 +}
 +
@@ -6932,8 +7078,15 @@ index e69de29..66b907a 100644
 +		return false
 +	}
 +	if hashes := t.textDeltaHashByItem[canonKey]; hashes != nil {
-+		if h := hashes[contentIdx]; h != nil {
-+			if partType != "output_text" || hex.EncodeToString(h.Sum(nil)) != sha256Hex(text) {
++		if st := hashes[contentIdx]; st != nil {
++			if partType != "output_text" || hex.EncodeToString(st.h.Sum(nil)) != sha256Hex(text) {
++				return false
++			}
++		}
++	}
++	if prefixes := t.textPrefixByItem[canonKey]; prefixes != nil {
++		if pref, hasPref := prefixes[contentIdx]; hasPref {
++			if partType != "output_text" || len(text) < pref.byteLen || sha256Hex(text[:pref.byteLen]) != pref.sha256 {
 +				return false
 +			}
 +		}
@@ -7055,6 +7208,15 @@ index e69de29..66b907a 100644
 +							}
 +						}
 +					}
++					if prefixes, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
++						for cIdx := range prefixes {
++							if cIdx < 0 || int(cIdx) >= len(item.Content) {
++								c.mu.Unlock()
++								c.taintStreamAnomaly()
++								return
++							}
++						}
++					}
 +					for cIdx, part := range item.Content {
 +						if !t.recordContentPart(canonKey, int64(cIdx), part.Type, part.Text) {
 +							c.mu.Unlock()
@@ -7067,6 +7229,9 @@ index e69de29..66b907a 100644
 +						var okPart bool
 +						if part.Type == "output_text" {
 +							okPart = t.recordPendingTextPart(canonKey, int64(cIdx))
++							if okPart && part.Text != "" {
++								okPart = t.recordTextPrefix(canonKey, int64(cIdx), part.Text)
++							}
 +						} else {
 +							okPart = t.recordContentPart(canonKey, int64(cIdx), part.Type, "")
 +						}
@@ -7079,6 +7244,55 @@ index e69de29..66b907a 100644
 +				}
 +			}
 +			if !isDone {
++				t.sawStreamedOutputItem = true
++				seq, okSeq := t.assignSeq(canonKey)
++				if !okSeq {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if seq > t.maxItemSeq {
++					t.maxItemSeq = seq
++				}
++				if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
++					t.maxOutputIndex = effIdx
++					t.hasMaxOutputIndex = true
++				}
++				isStrictlyEarlier := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
++					(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++				if !isStrictlyEarlier {
++					t.lastItemOutputSHA = ""
++					t.lastItemResponseID = ""
++					t.lastItemSeq = 0
++					t.hasLastItemOutputIndex = false
++					t.lastItemOutputIndex = 0
++				}
++				if canonKey != "" {
++					if _, alreadyDone := t.doneItemKeys[canonKey]; !alreadyDone {
++						if _, exists := t.pendingItems[canonKey]; !exists && len(t.pendingItems) >= maxTrackedOutputItems {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++						if t.pendingItems == nil {
++							t.pendingItems = make(map[string]struct{})
++						}
++						t.pendingItems[canonKey] = struct{}{}
++					}
++				} else {
++					if t.pendingUnkeyed >= maxTrackedOutputItems {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
++					}
++					t.pendingUnkeyed++
++				}
++				if (snapKind == itemKindCommentary || snapKind == itemKindNonMessage) &&
++					!t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
 +				continue
 +			}
 +			isFinalCandidate := isFinalAssistantOutputItem(item)
@@ -7231,10 +7445,7 @@ index e69de29..66b907a 100644
 +			for i, part := range addedParts {
 +				var okPart bool
 +				if part.Type == "output_text" {
-+					okPart = t.recordPendingTextPart(canonKey, int64(i))
-+					if okPart && part.Text != "" {
-+						okPart = t.recordTextDelta(canonKey, int64(i), part.Text)
-+					}
++					okPart = t.recordInitialText(canonKey, int64(i), part.Text)
 +				} else {
 +					okPart = t.recordContentPart(canonKey, int64(i), part.Type, part.Text)
 +				}
@@ -7365,6 +7576,15 @@ index e69de29..66b907a 100644
 +						}
 +					}
 +				}
++				if prefixes, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
++					for cIdx := range prefixes {
++						if cIdx < 0 || int(cIdx) >= len(parts) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
 +				for i, part := range parts {
 +					if !t.recordContentPart(canonKey, int64(i), part.Type, part.Text) {
 +						c.mu.Unlock()
@@ -7372,14 +7592,26 @@ index e69de29..66b907a 100644
 +						return
 +					}
 +				}
-+			} else if _, hasParts := t.contentPartByItem[canonKey]; hasParts {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
-+			} else if _, hasDeltas := t.textDeltaHashByItem[canonKey]; hasDeltas {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
++			} else {
++				if existingParts, hasParts := t.contentPartByItem[canonKey]; hasParts {
++					for _, tag := range existingParts {
++						if isAssistantOnlyPartTag(tag) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
++				if _, hasDeltas := t.textDeltaHashByItem[canonKey]; hasDeltas {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
 +			}
 +			if prevRec, alreadyDone := t.doneItems[canonKey]; alreadyDone {
 +				if prevRec.doneDigest != "" {
@@ -7556,8 +7788,7 @@ index e69de29..66b907a 100644
 +		c.mu.Unlock()
 +		return
 +	default:
-+		deltaKind := classifyDeltaEventKind(frame.evType)
-+		deltaItemType := inferredDeltaItemType(frame.evType)
++		deltaKind, deltaItemType := classifyDeltaFrame(frame)
 +		canonKey, effItemID, effIdx, effHasIdx, okBind := t.bindIdentity(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
 +		if !okBind || !t.recordItemKind(canonKey, deltaKind) || !t.recordItemType(canonKey, deltaItemType) {
 +			c.mu.Unlock()
@@ -7606,18 +7837,16 @@ index e69de29..66b907a 100644
 +				c.taintStreamAnomaly()
 +				return
 +			}
-+			if pType != "output_text" {
-+				if !t.recordContentPart(canonKey, cIdx, pType, "") {
++			if pType == "reasoning_text" || pType == "summary_text" {
++				// Non-assistant reasoning content part already bound to itemKindNonMessage/"reasoning".
++			} else if pType == "output_text" {
++				if !t.recordInitialText(canonKey, cIdx, pText) {
 +					c.mu.Unlock()
 +					c.taintStreamAnomaly()
 +					return
 +				}
-+			} else {
-+				okPart := t.recordPendingTextPart(canonKey, cIdx)
-+				if okPart && pText != "" {
-+					okPart = t.recordTextDelta(canonKey, cIdx, pText)
-+				}
-+				if !okPart {
++			} else if pType == "refusal" || pType == "output_audio" || t.itemKindByKey[canonKey] != itemKindNonMessage {
++				if !t.recordContentPart(canonKey, cIdx, pType, "") {
 +					c.mu.Unlock()
 +					c.taintStreamAnomaly()
 +					return
@@ -7626,10 +7855,19 @@ index e69de29..66b907a 100644
 +		case "response.content_part.done":
 +			pType, _ := exactOptionalString(frame.partFields, "type")
 +			pText, _ := exactOptionalString(frame.partFields, "text")
-+			if frame.partFields == nil || pType == "" || !t.recordContentPart(canonKey, cIdx, pType, pText) {
++			if frame.partFields == nil || pType == "" {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
++			}
++			if pType == "reasoning_text" || pType == "summary_text" {
++				// Non-assistant reasoning content part already bound to itemKindNonMessage/"reasoning".
++			} else if pType == "output_text" || pType == "refusal" || pType == "output_audio" || t.itemKindByKey[canonKey] != itemKindNonMessage {
++				if !t.recordContentPart(canonKey, cIdx, pType, pText) {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
 +			}
 +		}
 +		t.sawStreamedOutputItem = true
@@ -8788,7 +9026,6 @@ index e69de29..66b907a 100644
 +		return
 +	}
 +	e.ended = true
-+	c.active--
 +	unterminatedPostComplete := false
 +	if c.strictCodex && (len(c.sseDataLines) > 0 || c.sseHasEvent) {
 +		// Trailing SSE data or event header without a terminating blank-line delimiter is an incomplete event.
@@ -8817,13 +9054,20 @@ index e69de29..66b907a 100644
 +	if e.attempts == 0 {
 +		c.invalid = true
 +	}
-+	if !unterminatedPostComplete && !producerMismatch {
-+		c.publishLocked()
-+	}
-+	c.mu.Unlock()
 +	if unterminatedPostComplete || producerMismatch {
++		// Hold c.active (keeping entry.inFlight > 0) until c.Taint() finishes persisting taint
++		// so concurrent HandlerDone() + SealReview can never race ahead and seal a prior clean turn.
++		c.mu.Unlock()
 +		c.Taint()
++		c.mu.Lock()
++		c.active--
++		c.maybeReleaseReviewLocked()
++		c.mu.Unlock()
++		return
 +	}
++	c.active--
++	c.publishLocked()
++	c.mu.Unlock()
 +}
 +
 +type restoredBody struct {
@@ -9481,10 +9725,10 @@ index e69de29..66b907a 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..7b2b9b2 100644
+index e69de29..b758b8d 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,4326 @@
+@@ -0,0 +1,4478 @@
 +package preflightreceipt
 +
 +import (
@@ -13690,6 +13934,158 @@ index e69de29..7b2b9b2 100644
 +	cMC2.HandlerDone(false)
 +	if st := SealReview(root, lMidCancel, sMidCancel); st != SealRejected {
 +		t.Fatalf("Turn 2 mid-stream non-EOF close allowed sealing Turn 1: seal = %v, want SealRejected", st)
++	}
++
++	// 47. Sol P1 #1 + Astra P1 #1 (PR #2280 R22): response.in_progress snapshot containing an
++	//     in-progress tool item after a completed assistant item MUST track it as pending so
++	//     response.completed omitting the tool item taints/rejects instead of certifying the prior text.
++	sseSnapOmitTool := "data: " + `{"type":"response.in_progress","response":{"id":"resp_sot","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_0","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]},{"id":"fc_1","type":"function_call","status":"in_progress","name":"exec_command"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sot","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_0","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555572", "019d0000-0000-7000-8000-888888888172", sseSnapOmitTool); st != SealRejected {
++		t.Fatalf("in_progress snapshot with omitted in-progress tool seal = %v, want SealRejected", st)
++	}
++
++	// 48. Astra P1 #2 (PR #2280 R22): non-empty output_text in an in_progress snapshot MUST be a
++	//     prefix of the finalized text in done/completed (contradicting prefix taints; valid continuation seals).
++	sseSnapPrefixConflict := "data: " + `{"type":"response.in_progress","response":{"id":"resp_spc","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_p","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: BLOCK"}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_p","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_spc","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_p","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555573", "019d0000-0000-7000-8000-888888888173", sseSnapPrefixConflict); st != SealRejected {
++		t.Fatalf("in_progress prefix BLOCK contradicted by PASS seal = %v, want SealRejected", st)
++	}
++	lSnapPrefixOK := "review-d1111111-2222-4333-8444-555555555574"
++	sSnapPrefixOK := "019d0000-0000-7000-8000-888888888174"
++	sseSnapPrefixOK := "data: " + `{"type":"response.in_progress","response":{"id":"resp_spok","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_p","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: "}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_p","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_spok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_p","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lSnapPrefixOK, sSnapPrefixOK, sseSnapPrefixOK); st != SealOK {
++		t.Fatalf("in_progress valid prefix continuation seal = %v, want SealOK", st)
++	}
++
++	// 49. Astra P2 #1 (PR #2280 R22): identical non-empty initial text repeated across output_item.added
++	//     and content_part.added MUST be seeded once (not double-hashed), while conflicting initial text taints.
++	lDupSeedOK := "review-d1111111-2222-4333-8444-555555555575"
++	sDupSeedOK := "019d0000-0000-7000-8000-888888888175"
++	sseDupSeedOK := "data: " + `{"type":"response.created","response":{"id":"resp_dso","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_ds","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: "}]}}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"msg_ds","content_index":0,"part":{"type":"output_text","text":"VERDICT: "}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.delta","output_index":0,"item_id":"msg_ds","content_index":0,"delta":"PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ds","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_dso","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_ds","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lDupSeedOK, sDupSeedOK, sseDupSeedOK); st != SealOK {
++		t.Fatalf("repeated identical initial text in added + content_part.added seal = %v, want SealOK", st)
++	}
++	sseDupSeedConflict := "data: " + `{"type":"response.created","response":{"id":"resp_dsc","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_ds","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: BLOCK"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"msg_ds","content_index":0,"part":{"type":"output_text","text":"VERDICT: PASS"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ds","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_dsc","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_ds","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555576", "019d0000-0000-7000-8000-888888888176", sseDupSeedConflict); st != SealRejected {
++		t.Fatalf("conflicting initial text between added and content_part.added seal = %v, want SealRejected", st)
++	}
++
++	// 50. Astra P2 #2 (PR #2280 R22): reasoning item emitting content_part.added/done with
++	//     part.type="reasoning_text" MUST NOT conflict with itemType="reasoning" and MUST seal cleanly.
++	lReasonPartsOK := "review-d1111111-2222-4333-8444-555555555577"
++	sReasonPartsOK := "019d0000-0000-7000-8000-888888888177"
++	sseReasonPartsOK := "data: " + `{"type":"response.created","response":{"id":"resp_rp","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning"}}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"rs_1","content_index":0,"part":{"type":"reasoning_text","text":""}}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.done","output_index":0,"item_id":"rs_1","content_index":0,"part":{"type":"reasoning_text","text":"step-by-step"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","content":[{"type":"reasoning_text","text":"step-by-step"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_rp","status":"completed","model":"gpt-6.2-sol","output":[{"id":"rs_1","type":"reasoning","content":[{"type":"reasoning_text","text":"step-by-step"}]},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lReasonPartsOK, sReasonPartsOK, sseReasonPartsOK); st != SealOK {
++		t.Fatalf("reasoning content_part.added/done(reasoning_text) seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lReasonPartsOK); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("reasoning content_part.added/done final hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 51. Sol P1 #2 (PR #2280 R22): Execution.End() MUST keep inFlight > 0 while persisting taint
++	//     on post-complete unterminated SSE tail so concurrent HandlerDone + SealReview cannot race
++	//     ahead and seal Turn 1.
++	lEndRace := "review-d1111111-2222-4333-8444-555555555578"
++	sEndRace := "019d0000-0000-7000-8000-888888888178"
++	ctxER1, cER1, err := BeginReview(context.Background(), root, lEndRace, sEndRace, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxER1, eER1, err := cER1.Start(ctxER1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clER1 := httptransport.Decorate(ctxER1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqER1, _ := http.NewRequestWithContext(ctxER1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respER1, err := clER1.Do(reqER1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respER1.Body)
++	_ = respER1.Body.Close()
++	cER1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_er1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	eER1.End()
++	cER1.Complete(true)
++	cER1.HandlerDone(true)
++
++	// Turn 2: complete + trailing unterminated SSE line -> Execution.End() triggers Taint().
++	ctxER2, cER2, err := BeginReview(context.Background(), root, lEndRace, sEndRace, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxER2, eER2, err := cER2.Start(ctxER2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clER2 := httptransport.Decorate(ctxER2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqER2, _ := http.NewRequestWithContext(ctxER2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respER2, err := clER2.Do(reqER2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respER2.Body)
++	_ = respER2.Body.Close()
++	cER2.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_er2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" + "data: {\"type\":\"error\"}\n"))
++
++	inTaintSync := make(chan struct{})
++	releaseTaintSync := make(chan struct{})
++	origSyncER := syncDirFn
++	var syncOnce sync.Once
++	syncDirFn = func(dir string) error {
++		if dir == filepath.Join(root, lEndRace) {
++			syncOnce.Do(func() {
++				close(inTaintSync)
++				<-releaseTaintSync
++			})
++		}
++		return origSyncER(dir)
++	}
++	defer func() { syncDirFn = origSyncER }()
++
++	endDone := make(chan struct{})
++	go func() {
++		defer close(endDone)
++		eER2.End()
++	}()
++	<-inTaintSync
++	// While eER2.End() is still inside c.Taint(), fire HandlerDone + SealReview concurrently.
++	cER2.Complete(false)
++	cER2.HandlerDone(false)
++	if stMid := SealReview(root, lEndRace, sEndRace); stMid != SealInFlight {
++		close(releaseTaintSync)
++		<-endDone
++		t.Fatalf("SealReview raced ahead of Execution.End() taint: got %v, want SealInFlight", stMid)
++	}
++	close(releaseTaintSync)
++	<-endDone
++	syncDirFn = origSyncER
++	if stFinal := SealReview(root, lEndRace, sEndRace); stFinal != SealRejected {
++		t.Fatalf("SealReview after Execution.End() taint = %v, want SealRejected", stFinal)
 +	}
 +}
 +
