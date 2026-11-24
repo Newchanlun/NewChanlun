@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..0861fb7 100644
+index e69de29..8276cdd 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,163 @@
 +package middleware
 +
 +import (
@@ -45,14 +45,8 @@ index e69de29..0861fb7 100644
 +				c.AbortWithStatus(http.StatusBadRequest)
 +				return
 +			}
-+			res, resErr := preflightreceipt.ReserveReview(root, launch)
-+			if resErr != nil {
-+				c.AbortWithStatus(http.StatusServiceUnavailable)
-+				return
-+			}
-+			defer res.Release()
-+			if isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" {
-+				res.Taint()
++			if isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" || !preflightreceipt.ValidReviewSession(session) {
++				preflightreceipt.TaintExistingReview(root, launch)
 +				c.AbortWithStatus(http.StatusBadRequest)
 +				return
 +			}
@@ -65,11 +59,26 @@ index e69de29..0861fb7 100644
 +			if bodyDeadline.After(turnDeadline) {
 +				bodyDeadline = turnDeadline
 +			}
++			res, existed, resErr := preflightreceipt.ReserveExistingReview(root, launch)
++			if resErr != nil {
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
++			if existed {
++				defer res.Release()
++			}
++			taintFailure := func() {
++				if existed {
++					res.Taint()
++				} else {
++					preflightreceipt.TaintExistingReview(root, launch)
++				}
++			}
 +			rc := http.NewResponseController(c.Writer)
 +			if err := rc.SetReadDeadline(bodyDeadline); err != nil {
 +				// Without ResponseWriter deadline enforcement, reading an untrusted review body
 +				// cannot be bounded without leaking a blocked reader goroutine or blocking Close().
-+				res.Taint()
++				taintFailure()
 +				c.Header("Connection", "close")
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
 +				return
@@ -78,16 +87,16 @@ index e69de29..0861fb7 100644
 +				// Without ResponseWriter write-deadline enforcement, a stalled client could block
 +				// downstream streaming Write/Flush past ReviewTurnTimeout and keep res in-flight.
 +				_ = rc.SetReadDeadline(time.Time{})
-+				res.Taint()
++				taintFailure()
 +				c.Header("Connection", "close")
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
 +				return
 +			}
 +			requestedModel, ok := preflightreceipt.ExtractInboundReviewModel(c.Request)
-+			if !ok {
-+				res.Taint()
++			if !ok || !preflightreceipt.AllowedReviewModel(requestedModel) {
++				taintFailure()
 +				c.Header("Connection", "close")
-+				if errors.Is(turnCtx.Err(), context.DeadlineExceeded) || time.Now().After(bodyDeadline) {
++				if !ok && (errors.Is(turnCtx.Err(), context.DeadlineExceeded) || time.Now().After(bodyDeadline)) {
 +					c.AbortWithStatus(http.StatusRequestTimeout)
 +				} else {
 +					c.AbortWithStatus(http.StatusBadRequest)
@@ -95,6 +104,14 @@ index e69de29..0861fb7 100644
 +				return
 +			}
 +			_ = rc.SetReadDeadline(time.Time{})
++			if !existed {
++				res, resErr = preflightreceipt.ReserveReview(root, launch)
++				if resErr != nil {
++					c.AbortWithStatus(http.StatusServiceUnavailable)
++					return
++				}
++				defer res.Release()
++			}
 +			ctx, collector, err = preflightreceipt.BeginReviewReserved(turnCtx, res, session, requestedModel)
 +			if err != nil {
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
@@ -419,10 +436,10 @@ index 0000000..f8a6d33
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..4ed3be2 100644
+index e69de29..87dc0d5 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1294 @@
+@@ -0,0 +1,1357 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -1121,38 +1138,73 @@ index e69de29..4ed3be2 100644
 +		})
 +	}
 +
-+	t.Run("compact-rejected-and-tainted-before-upstream", func(t *testing.T) {
-+		const launch = "review-12345678-1234-4234-8234-123456789aa9"
++	t.Run("compact-rejected-without-allocating-new-dir-and-taints-existing", func(t *testing.T) {
++		const freshLaunch = "review-12345678-1234-4234-8234-123456789aa9"
 +		const session = "019d0000-0000-7000-8000-000000000aa9"
-+		res := post("/v1/responses/compact", "gpt-6.2-sol", launch, session)
++		res := post("/v1/responses/compact", "gpt-6.2-sol", freshLaunch, session)
 +		if res.Code != http.StatusBadRequest || len(models) != 0 {
 +			t.Fatalf("compact escaped formal review guard: status=%d calls=%d", res.Code, len(models))
 +		}
-+		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++		if _, err := os.Stat(filepath.Join(root, freshLaunch)); !os.IsNotExist(err) {
++			t.Fatalf("rejected compact for nonexistent launch created disk dir: %v", err)
++		}
++		// Existing launch after a clean turn MUST be tainted on /v1/responses/compact.
++		const existingLaunch = "review-12345678-1234-4234-8234-123456789ab9"
++		res1 := post("/v1/responses", "gpt-6.2-sol", existingLaunch, session)
++		if res1.Code != http.StatusOK {
++			t.Fatalf("turn 1 HTTP %d", res1.Code)
++		}
++		<-models
++		waitReceipt(t, existingLaunch, func(r preflightreceipt.ReviewReceipt) bool { return r.Requests == 1 && r.Complete && !r.Tainted })
++		res2 := post("/v1/responses/compact", "gpt-6.2-sol", existingLaunch, session)
++		if res2.Code != http.StatusBadRequest || len(models) != 0 {
++			t.Fatalf("compact on existing launch escaped guard: status=%d calls=%d", res2.Code, len(models))
++		}
++		waitReceipt(t, existingLaunch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
 +	})
 +
-+	t.Run("non-streaming-formal-review-rejected-and-tainted-before-upstream", func(t *testing.T) {
++	t.Run("non-streaming-formal-review-rejected-without-allocating-new-dir-and-taints-existing", func(t *testing.T) {
 +		for _, tc := range []struct {
-+			name   string
-+			launch string
-+			body   string
++			name           string
++			freshLaunch    string
++			existingLaunch string
++			body           string
 +		}{
-+			{"stream-false", "review-12345678-1234-4234-8234-123456789ab1", `{"model":"gpt-6.2-sol","stream":false,"input":"offline"}`},
-+			{"stream-omitted", "review-12345678-1234-4234-8234-123456789ab2", `{"model":"gpt-6.2-sol","input":"offline"}`},
++			{"stream-false", "review-12345678-1234-4234-8234-123456789ab1", "review-12345678-1234-4234-8234-123456789ab3", `{"model":"gpt-6.2-sol","stream":false,"input":"offline"}`},
++			{"stream-omitted", "review-12345678-1234-4234-8234-123456789ab2", "review-12345678-1234-4234-8234-123456789ab4", `{"model":"gpt-6.2-sol","input":"offline"}`},
 +		} {
 +			t.Run(tc.name, func(t *testing.T) {
 +				const session = "019d0000-0000-7000-8000-000000000ab1"
 +				req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(tc.body))
 +				req.Header.Set("Authorization", "Bearer test-key")
 +				req.Header.Set("Content-Type", "application/json")
-+				req.Header.Set(preflightreceipt.ReviewHeader, tc.launch)
++				req.Header.Set(preflightreceipt.ReviewHeader, tc.freshLaunch)
 +				req.Header.Set("Session-Id", session)
 +				res := newDeadlineRecorder()
 +				server.engine.ServeHTTP(res, req)
 +				if res.Code != http.StatusBadRequest || len(models) != 0 {
 +					t.Fatalf("non-streaming formal review %s escaped guard: status=%d calls=%d", tc.name, res.Code, len(models))
 +				}
-+				waitReceipt(t, tc.launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
++				if _, err := os.Stat(filepath.Join(root, tc.freshLaunch)); !os.IsNotExist(err) {
++					t.Fatalf("non-streaming %s for nonexistent launch created disk dir: %v", tc.name, err)
++				}
++				res1 := post("/v1/responses", "gpt-6.2-sol", tc.existingLaunch, session)
++				if res1.Code != http.StatusOK {
++					t.Fatalf("turn 1 HTTP %d", res1.Code)
++				}
++				<-models
++				waitReceipt(t, tc.existingLaunch, func(r preflightreceipt.ReviewReceipt) bool { return r.Requests == 1 && r.Complete && !r.Tainted })
++				req2 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(tc.body))
++				req2.Header.Set("Authorization", "Bearer test-key")
++				req2.Header.Set("Content-Type", "application/json")
++				req2.Header.Set(preflightreceipt.ReviewHeader, tc.existingLaunch)
++				req2.Header.Set("Session-Id", session)
++				res2 := newDeadlineRecorder()
++				server.engine.ServeHTTP(res2, req2)
++				if res2.Code != http.StatusBadRequest || len(models) != 0 {
++					t.Fatalf("non-streaming %s on existing launch escaped guard: status=%d calls=%d", tc.name, res2.Code, len(models))
++				}
++				waitReceipt(t, tc.existingLaunch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete && !r.Sealed })
 +			})
 +		}
 +	})
@@ -1316,14 +1368,42 @@ index e69de29..4ed3be2 100644
 +		exportFixture(t, "review-codex-tainted", launch, raw)
 +	})
 +
-+	t.Run("unlisted-model-rejected-before-upstream", func(t *testing.T) {
-+		const launch = "review-12345678-1234-4234-8234-123456789aa4"
++	t.Run("unlisted-model-and-wrong-method-never-allocate-disk-for-new-launch-but-taint-existing", func(t *testing.T) {
++		const freshLaunch = "review-12345678-1234-4234-8234-123456789aa4"
++		const getLaunch = "review-12345678-1234-4234-8234-123456789ab5"
 +		const session = "019d0000-0000-7000-8000-000000000aa4"
-+		res := post("/v1/responses", "gpt-6.1-sol", launch, session)
-+		if res.Code < 400 || len(models) != 0 {
++		res := post("/v1/responses", "gpt-6.1-sol", freshLaunch, session)
++		if res.Code != http.StatusBadRequest || len(models) != 0 {
 +			t.Fatalf("unlisted review model escaped guard: status=%d calls=%d", res.Code, len(models))
 +		}
-+		waitReceipt(t, launch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete })
++		if _, err := os.Stat(filepath.Join(root, freshLaunch)); !os.IsNotExist(err) {
++			t.Fatalf("unlisted review model for nonexistent launch created disk dir: %v", err)
++		}
++		getReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
++		getReq.Header.Set("Authorization", "Bearer test-key")
++		getReq.Header.Set(preflightreceipt.ReviewHeader, getLaunch)
++		getReq.Header.Set("Session-Id", session)
++		getRes := newDeadlineRecorder()
++		server.engine.ServeHTTP(getRes, getReq)
++		if getRes.Code != http.StatusBadRequest || len(models) != 0 {
++			t.Fatalf("GET /v1/models with review header escaped guard: status=%d calls=%d", getRes.Code, len(models))
++		}
++		if _, err := os.Stat(filepath.Join(root, getLaunch)); !os.IsNotExist(err) {
++			t.Fatalf("rejected GET /v1/models with nonexistent launch created disk dir: %v", err)
++		}
++		// Existing launch MUST still be tainted when followed by unlisted model.
++		const existingLaunch = "review-12345678-1234-4234-8234-123456789ab6"
++		res1 := post("/v1/responses", "gpt-6.2-sol", existingLaunch, session)
++		if res1.Code != http.StatusOK {
++			t.Fatalf("turn 1 HTTP %d", res1.Code)
++		}
++		<-models
++		waitReceipt(t, existingLaunch, func(r preflightreceipt.ReviewReceipt) bool { return r.Requests == 1 && r.Complete && !r.Tainted })
++		res2 := post("/v1/responses", "gpt-6.1-sol", existingLaunch, session)
++		if res2.Code != http.StatusBadRequest || len(models) != 0 {
++			t.Fatalf("unlisted model on existing launch escaped guard: status=%d calls=%d", res2.Code, len(models))
++		}
++		waitReceipt(t, existingLaunch, func(r preflightreceipt.ReviewReceipt) bool { return r.Tainted && !r.Complete })
 +	})
 +
 +	t.Run("malformed-header-and-websocket-rejected", func(t *testing.T) {
@@ -5141,10 +5221,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..9b72372 100644
+index e69de29..f12cb85 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,5348 @@
+@@ -0,0 +1,5644 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5199,6 +5279,7 @@ index e69de29..9b72372 100644
 +const maxStrictIdentityBytes = 512
 +
 +var maxReviewLedgerEntries = 2048
++var maxReviewDiskEntries = 2048
 +var maxTrackedOutputItems = 2048
 +var maxTrackedContentParts = 512
 +
@@ -5214,6 +5295,14 @@ index e69de29..9b72372 100644
 +
 +func ValidReviewLaunch(launch string) bool {
 +	return reviewLaunchPattern.MatchString(launch)
++}
++
++func ValidReviewSession(session string) bool {
++	return reviewSessionPattern.MatchString(session)
++}
++
++func AllowedReviewModel(model string) bool {
++	return model == "gpt-6.2-sol" || model == "gpt-6.2-astra"
 +}
 +
 +type contextKey struct{}
@@ -5323,8 +5412,9 @@ index e69de29..9b72372 100644
 +	taintWriteOverflow bool
 +	tmpSeq             atomic.Uint64
 +
-+	rootLockMu sync.Mutex
-+	rootLocks  = make(map[string]*heldRootLock)
++	rootLockMu  sync.Mutex
++	rootLocks   = make(map[string]*heldRootLock)
++	rootQuotaMu sync.Mutex
 +)
 +
 +type heldRootLock struct {
@@ -5336,22 +5426,24 @@ index e69de29..9b72372 100644
 +}
 +
 +type doneItemSummary struct {
-+	itemID         string
-+	itemType       string
-+	itemRole       string
-+	itemPhase      string
-+	itemStatus     string
-+	callID         string
-+	name           string
-+	serverLabel    string
-+	argsSHA        string
-+	inputSHA       string
-+	outputIndex    int64
-+	hasOutputIndex bool
-+	isFinal        bool
-+	isAssistantMsg bool
-+	outputTextSHA  string
-+	doneDigest     string
++	itemID           string
++	itemType         string
++	itemRole         string
++	itemPhase        string
++	itemStatus       string
++	callID           string
++	name             string
++	serverLabel      string
++	argsSHA          string
++	inputSHA         string
++	codeSHA          string
++	canonicalItemSHA string
++	outputIndex      int64
++	hasOutputIndex   bool
++	isFinal          bool
++	isAssistantMsg   bool
++	outputTextSHA    string
++	doneDigest       string
 +}
 +
 +type toolItemMeta struct {
@@ -5615,21 +5707,29 @@ index e69de29..9b72372 100644
 +}
 +
 +type responseOutputItem struct {
-+	ID          string                      `json:"id"`
-+	Type        string                      `json:"type"`
-+	Role        string                      `json:"role"`
-+	Phase       string                      `json:"phase"`
-+	Status      string                      `json:"status"`
-+	CallID      string                      `json:"call_id"`
-+	Name        string                      `json:"name"`
-+	ServerLabel string                      `json:"server_label"`
-+	ArgsSHA     string                      `json:"-"`
-+	ArgsStr     string                      `json:"-"`
-+	ArgsIsStr   bool                        `json:"-"`
-+	InputSHA    string                      `json:"-"`
-+	InputStr    string                      `json:"-"`
-+	InputIsStr  bool                        `json:"-"`
-+	Content     []responseOutputContentPart `json:"content"`
++	ID               string                      `json:"id"`
++	Type             string                      `json:"type"`
++	Role             string                      `json:"role"`
++	Phase            string                      `json:"phase"`
++	Status           string                      `json:"status"`
++	CallID           string                      `json:"call_id"`
++	Name             string                      `json:"name"`
++	ServerLabel      string                      `json:"server_label"`
++	ArgsSHA          string                      `json:"-"`
++	ArgsStr          string                      `json:"-"`
++	ArgsIsStr        bool                        `json:"-"`
++	InputSHA         string                      `json:"-"`
++	InputStr         string                      `json:"-"`
++	InputIsStr       bool                        `json:"-"`
++	CodeSHA          string                      `json:"-"`
++	CodeStr          string                      `json:"-"`
++	CodeIsStr        bool                        `json:"-"`
++	CanonicalItemSHA string                      `json:"-"`
++	Content          []responseOutputContentPart `json:"content"`
++}
++
++func isCompletedNonMessageItemStatus(status string) bool {
++	return status == "" || status == "completed"
 +}
 +
 +func doneItemStatusCompatible(doneStatus, nextStatus string) bool {
@@ -5838,6 +5938,11 @@ index e69de29..9b72372 100644
 +	if len(t.pendingItems) > 0 || t.pendingUnkeyed > 0 {
 +		return false
 +	}
++	for _, item := range output {
++		if !(item.Type == "message" && item.Role == "assistant") && !isCompletedNonMessageItemStatus(item.Status) {
++			return false
++		}
++	}
 +	if len(output) == 0 || !t.sawStreamedOutputItem {
 +		return true
 +	}
@@ -5930,6 +6035,7 @@ index e69de29..9b72372 100644
 +		itemMeta := toolItemMeta{callID: item.CallID, name: item.Name, serverLabel: item.ServerLabel}
 +		itemArgs := toolPayloadField{sha: item.ArgsSHA, str: item.ArgsStr, isStr: item.ArgsIsStr}
 +		itemInput := toolPayloadField{sha: item.InputSHA, str: item.InputStr, isStr: item.InputIsStr}
++		itemCode := toolPayloadField{sha: item.CodeSHA, str: item.CodeStr, isStr: item.CodeIsStr}
 +		if item.Type == "message" && item.Role == "assistant" {
 +			if t.hasTrackedToolPayload(canonKey) {
 +				return false
@@ -5937,7 +6043,8 @@ index e69de29..9b72372 100644
 +		} else {
 +			if !t.checkToolMetaComplete(canonKey, itemMeta) ||
 +				!t.checkToolPayloadFinal(canonKey, "arguments", itemArgs) ||
-+				!t.checkToolPayloadFinal(canonKey, "input", itemInput) {
++				!t.checkToolPayloadFinal(canonKey, "input", itemInput) ||
++				!t.checkToolPayloadFinal(canonKey, "code", itemCode) {
 +				return false
 +			}
 +		}
@@ -5946,7 +6053,8 @@ index e69de29..9b72372 100644
 +			if doneRec.itemType != item.Type || doneRec.itemRole != item.Role || doneRec.itemPhase != item.Phase ||
 +				!doneItemStatusCompatible(doneRec.itemStatus, item.Status) ||
 +				doneRec.callID != item.CallID || doneRec.name != item.Name || doneRec.serverLabel != item.ServerLabel ||
-+				doneRec.argsSHA != item.ArgsSHA || doneRec.inputSHA != item.InputSHA ||
++				doneRec.argsSHA != item.ArgsSHA || doneRec.inputSHA != item.InputSHA || doneRec.codeSHA != item.CodeSHA ||
++				(doneRec.canonicalItemSHA != "" && item.CanonicalItemSHA != "" && doneRec.canonicalItemSHA != item.CanonicalItemSHA) ||
 +				doneRec.isFinal != isFinalAssistantOutputItem(item) {
 +				return false
 +			}
@@ -6003,14 +6111,14 @@ index e69de29..9b72372 100644
 +	sseEventSchemaKeys = map[string]struct{}{
 +		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {},
 +		"item": {}, "item_id": {}, "output_index": {}, "content_index": {}, "text": {}, "delta": {}, "refusal": {}, "part": {},
-+		"arguments": {}, "input": {}, "name": {}, "call_id": {},
++		"arguments": {}, "input": {}, "code": {}, "name": {}, "call_id": {},
 +	}
 +	sseResponseSchemaKeys = map[string]struct{}{
 +		"id": {}, "model": {}, "status": {}, "error": {}, "output": {},
 +	}
 +	sseItemSchemaKeys = map[string]struct{}{
 +		"id": {}, "type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
-+		"call_id": {}, "name": {}, "server_label": {}, "arguments": {}, "input": {},
++		"call_id": {}, "name": {}, "server_label": {}, "arguments": {}, "input": {}, "code": {}, "action": {}, "queries": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
 +		"type": {}, "text": {}, "refusal": {},
@@ -6036,8 +6144,11 @@ index e69de29..9b72372 100644
 +	switch delim {
 +	case '{':
 +		var seenLower map[string]struct{}
++		var seenExact map[string]struct{}
 +		if depth == 0 && schemaKeys != nil {
 +			seenLower = make(map[string]struct{})
++		} else {
++			seenExact = make(map[string]struct{})
 +		}
 +		for dec.More() {
 +			keyTok, err := dec.Token()
@@ -6059,6 +6170,11 @@ index e69de29..9b72372 100644
 +					}
 +				}
 +				seenLower[lower] = struct{}{}
++			} else {
++				if _, dup := seenExact[key]; dup {
++					return errStrictJSONFormat
++				}
++				seenExact[key] = struct{}{}
 +			}
 +			if err := validateStrictJSONValue(dec, depth+1); err != nil {
 +				return err
@@ -6232,23 +6348,66 @@ index e69de29..9b72372 100644
 +	return toolPayloadField{sha: "json:" + canon}, true
 +}
 +
-+func extractItemToolFields(fields map[string]json.RawMessage) (meta toolItemMeta, args, input toolPayloadField, ok bool) {
++func extractItemToolFields(fields map[string]json.RawMessage) (meta toolItemMeta, args, input, code toolPayloadField, ok bool) {
 +	callID, ok1 := exactOptionalString(fields, "call_id")
 +	name, ok2 := exactOptionalString(fields, "name")
 +	serverLabel, ok3 := exactOptionalString(fields, "server_label")
 +	if !ok1 || !ok2 || !ok3 ||
 +		len(callID) > maxStrictIdentityBytes || len(name) > maxStrictIdentityBytes || len(serverLabel) > maxStrictIdentityBytes {
-+		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, false
++		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
 +	args, okArgs := extractToolPayloadField(fields, "arguments")
 +	if !okArgs {
-+		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, false
++		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
 +	input, okInput := extractToolPayloadField(fields, "input")
 +	if !okInput {
-+		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, false
++		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
-+	return toolItemMeta{callID: callID, name: name, serverLabel: serverLabel}, args, input, true
++	code, okCode := extractToolPayloadField(fields, "code")
++	if !okCode {
++		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, toolPayloadField{}, false
++	}
++	return toolItemMeta{callID: callID, name: name, serverLabel: serverLabel}, args, input, code, true
++}
++
++func canonicalCompletedItemDigest(fields map[string]json.RawMessage) (string, bool) {
++	if fields == nil {
++		return "", false
++	}
++	itemType, _ := exactOptionalString(fields, "type")
++	norm := make(map[string]any, len(fields))
++	for k, raw := range fields {
++		// id, status, and response_id are verified separately (identity binding,
++		// status compatibility/terminal checks, and response_id consistency).
++		if k == "id" || k == "status" || k == "response_id" {
++			continue
++		}
++		dec := json.NewDecoder(bytes.NewReader(raw))
++		dec.UseNumber()
++		var v any
++		if err := dec.Decode(&v); err != nil {
++			return "", false
++		}
++		var extra any
++		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
++			return "", false
++		}
++		if itemType == "reasoning" && k == "summary" {
++			if v == nil {
++				continue
++			}
++			if arr, ok := v.([]any); ok && len(arr) == 0 {
++				continue
++			}
++		}
++		norm[k] = v
++	}
++	canon, err := json.Marshal(norm)
++	if err != nil {
++		return "", false
++	}
++	return sha256Hex(string(canon)), true
 +}
 +
 +func decodeExactResponseOutputItems(raw json.RawMessage, expectedRespID string) ([]responseOutputItem, string, bool) {
@@ -6291,25 +6450,33 @@ index e69de29..9b72372 100644
 +			}
 +			boundID = itemRespID
 +		}
-+		meta, argsField, inputField, okTool := extractItemToolFields(fields)
++		meta, argsField, inputField, codeField, okTool := extractItemToolFields(fields)
 +		if !okTool {
 +			return false
 +		}
++		canonItemSHA, okCanonItem := canonicalCompletedItemDigest(fields)
++		if !okCanonItem {
++			return false
++		}
 +		item := responseOutputItem{
-+			ID:          itemID,
-+			Type:        typ,
-+			Role:        role,
-+			Phase:       phase,
-+			Status:      status,
-+			CallID:      meta.callID,
-+			Name:        meta.name,
-+			ServerLabel: meta.serverLabel,
-+			ArgsSHA:     argsField.sha,
-+			ArgsStr:     argsField.str,
-+			ArgsIsStr:   argsField.isStr,
-+			InputSHA:    inputField.sha,
-+			InputStr:    inputField.str,
-+			InputIsStr:  inputField.isStr,
++			ID:               itemID,
++			Type:             typ,
++			Role:             role,
++			Phase:            phase,
++			Status:           status,
++			CallID:           meta.callID,
++			Name:             meta.name,
++			ServerLabel:      meta.serverLabel,
++			ArgsSHA:          argsField.sha,
++			ArgsStr:          argsField.str,
++			ArgsIsStr:        argsField.isStr,
++			InputSHA:         inputField.sha,
++			InputStr:         inputField.str,
++			InputIsStr:       inputField.isStr,
++			CodeSHA:          codeField.sha,
++			CodeStr:          codeField.str,
++			CodeIsStr:        codeField.isStr,
++			CanonicalItemSHA: canonItemSHA,
 +		}
 +		if typ == "message" && role == "assistant" {
 +			parts, okParts := decodeExactAssistantContentParts(fields["content"])
@@ -6334,6 +6501,7 @@ index e69de29..9b72372 100644
 +	respStatus      string
 +	respErr         json.RawMessage
 +	respOutput      json.RawMessage
++	hasRespOutput   bool
 +	respItems       []responseOutputItem
 +	itemRaw         json.RawMessage
 +	itemFields      map[string]json.RawMessage
@@ -6351,6 +6519,8 @@ index e69de29..9b72372 100644
 +	hasEvArgs       bool
 +	evInput         string
 +	hasEvInput      bool
++	evCode          string
++	hasEvCode       bool
 +	evName          string
 +	partFields      map[string]json.RawMessage
 +}
@@ -6416,7 +6586,7 @@ index e69de29..9b72372 100644
 +				}
 +			}
 +		}
-+		if _, _, _, okTool := extractItemToolFields(frame.itemFields); !okTool {
++		if _, _, _, _, okTool := extractItemToolFields(frame.itemFields); !okTool {
 +			return false
 +		}
 +		return true
@@ -6665,7 +6835,8 @@ index e69de29..9b72372 100644
 +		evType == "response.refusal.delta" ||
 +		evType == "response.function_call_arguments.delta" ||
 +		evType == "response.mcp_call_arguments.delta" ||
-+		evType == "response.custom_tool_call_input.delta" {
++		evType == "response.custom_tool_call_input.delta" ||
++		evType == "response.code_interpreter_call_code.delta" {
 +		var okDelta bool
 +		evDelta, hasEvDelta, okDelta = exactOptionalStringPresent(evFields, "delta")
 +		if !okDelta || !hasEvDelta {
@@ -6692,6 +6863,16 @@ index e69de29..9b72372 100644
 +		var okInput bool
 +		evInput, hasEvInput, okInput = exactOptionalStringPresent(evFields, "input")
 +		if !okInput || !hasEvInput {
++			c.taintStreamAnomaly()
++			return out, false
++		}
++	}
++	var evCode string
++	var hasEvCode bool
++	if evType == "response.code_interpreter_call_code.done" {
++		var okCode bool
++		evCode, hasEvCode, okCode = exactOptionalStringPresent(evFields, "code")
++		if !okCode || !hasEvCode {
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
@@ -6753,6 +6934,7 @@ index e69de29..9b72372 100644
 +		respStatus:      respStatus,
 +		respErr:         respErr,
 +		respOutput:      respOutput,
++		hasRespOutput:   hasResponseError(respOutput),
 +		respItems:       respItems,
 +		itemRaw:         evFields["item"],
 +		itemFields:      itemFields,
@@ -6770,6 +6952,8 @@ index e69de29..9b72372 100644
 +		hasEvArgs:       hasEvArgs,
 +		evInput:         evInput,
 +		hasEvInput:      hasEvInput,
++		evCode:          evCode,
++		hasEvCode:       hasEvCode,
 +		evName:          evName,
 +		partFields:      partFields,
 +	}
@@ -7803,6 +7987,20 @@ index e69de29..9b72372 100644
 +	t.sawAnyFrame = true
 +	switch frame.evType {
 +	case "response.created", "response.queued", "response.in_progress":
++		var seenSnapKeys map[string]struct{}
++		if frame.hasRespOutput {
++			if t.hasMaxOutputIndex && int64(len(frame.respItems)) <= t.maxOutputIndex {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if t.pendingUnkeyed > 0 && len(frame.respItems) < t.pendingUnkeyed {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			seenSnapKeys = make(map[string]struct{}, len(frame.respItems))
++		}
 +		for idx, item := range frame.respItems {
 +			pos := int64(idx)
 +			canonKey, effItemID, effIdx, effHasIdx, okBind := t.bindIdentity(item.ID, pos, true)
@@ -7810,6 +8008,9 @@ index e69de29..9b72372 100644
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
++			}
++			if seenSnapKeys != nil && canonKey != "" {
++				seenSnapKeys[canonKey] = struct{}{}
 +			}
 +			isDone := item.Status == "completed"
 +			snapKind := classifyOutputItemKind(item.Type, item.Role, item.Phase, isDone)
@@ -7898,10 +8099,12 @@ index e69de29..9b72372 100644
 +				itemMeta := toolItemMeta{callID: item.CallID, name: item.Name, serverLabel: item.ServerLabel}
 +				itemArgs := toolPayloadField{sha: item.ArgsSHA, str: item.ArgsStr, isStr: item.ArgsIsStr}
 +				itemInput := toolPayloadField{sha: item.InputSHA, str: item.InputStr, isStr: item.InputIsStr}
++				itemCode := toolPayloadField{sha: item.CodeSHA, str: item.CodeStr, isStr: item.CodeIsStr}
 +				if isDone {
 +					if !t.verifyToolMetaComplete(canonKey, itemMeta) ||
 +						!t.recordToolPayloadFinal(canonKey, "arguments", itemArgs) ||
-+						!t.recordToolPayloadFinal(canonKey, "input", itemInput) {
++						!t.recordToolPayloadFinal(canonKey, "input", itemInput) ||
++						!t.recordToolPayloadFinal(canonKey, "code", itemCode) {
 +						c.mu.Unlock()
 +						c.taintStreamAnomaly()
 +						return
@@ -7909,7 +8112,8 @@ index e69de29..9b72372 100644
 +				} else {
 +					if !t.recordToolMeta(canonKey, itemMeta) ||
 +						!t.recordToolPayloadSnapshot(canonKey, "arguments", itemArgs) ||
-+						!t.recordToolPayloadSnapshot(canonKey, "input", itemInput) {
++						!t.recordToolPayloadSnapshot(canonKey, "input", itemInput) ||
++						!t.recordToolPayloadSnapshot(canonKey, "code", itemCode) {
 +						c.mu.Unlock()
 +						c.taintStreamAnomaly()
 +						return
@@ -7983,7 +8187,8 @@ index e69de29..9b72372 100644
 +					if prevRec.itemType != item.Type || prevRec.itemRole != item.Role || prevRec.itemPhase != item.Phase ||
 +						!doneItemStatusCompatible(prevRec.itemStatus, item.Status) ||
 +						prevRec.callID != item.CallID || prevRec.name != item.Name || prevRec.serverLabel != item.ServerLabel ||
-+						prevRec.argsSHA != item.ArgsSHA || prevRec.inputSHA != item.InputSHA ||
++						prevRec.argsSHA != item.ArgsSHA || prevRec.inputSHA != item.InputSHA || prevRec.codeSHA != item.CodeSHA ||
++						(prevRec.canonicalItemSHA != "" && item.CanonicalItemSHA != "" && prevRec.canonicalItemSHA != item.CanonicalItemSHA) ||
 +						prevRec.isFinal != isFinalCandidate || prevRec.isAssistantMsg != isAssistantMsg ||
 +						prevRec.outputTextSHA != outTextSHA {
 +						c.mu.Unlock()
@@ -8006,21 +8211,23 @@ index e69de29..9b72372 100644
 +				}
 +				t.doneItemKeys[canonKey] = struct{}{}
 +				t.doneItems[canonKey] = doneItemSummary{
-+					itemID:         effItemID,
-+					itemType:       item.Type,
-+					itemRole:       item.Role,
-+					itemPhase:      item.Phase,
-+					itemStatus:     item.Status,
-+					callID:         item.CallID,
-+					name:           item.Name,
-+					serverLabel:    item.ServerLabel,
-+					argsSHA:        item.ArgsSHA,
-+					inputSHA:       item.InputSHA,
-+					outputIndex:    effIdx,
-+					hasOutputIndex: effHasIdx,
-+					isFinal:        isFinalCandidate,
-+					isAssistantMsg: isAssistantMsg,
-+					outputTextSHA:  outTextSHA,
++					itemID:           effItemID,
++					itemType:         item.Type,
++					itemRole:         item.Role,
++					itemPhase:        item.Phase,
++					itemStatus:       item.Status,
++					callID:           item.CallID,
++					name:             item.Name,
++					serverLabel:      item.ServerLabel,
++					argsSHA:          item.ArgsSHA,
++					inputSHA:         item.InputSHA,
++					codeSHA:          item.CodeSHA,
++					canonicalItemSHA: item.CanonicalItemSHA,
++					outputIndex:      effIdx,
++					hasOutputIndex:   effHasIdx,
++					isFinal:          isFinalCandidate,
++					isAssistantMsg:   isAssistantMsg,
++					outputTextSHA:    outTextSHA,
 +				}
 +			}
 +			seq, okSeq := t.assignSeq(canonKey)
@@ -8078,6 +8285,22 @@ index e69de29..9b72372 100644
 +				}
 +			}
 +		}
++		if seenSnapKeys != nil {
++			for k := range t.doneItems {
++				if _, ok := seenSnapKeys[k]; !ok {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++			}
++			for k := range t.pendingItems {
++				if _, ok := seenSnapKeys[k]; !ok {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++			}
++		}
 +		c.mu.Unlock()
 +		return
 +	case "response.output_item.added":
@@ -8089,7 +8312,7 @@ index e69de29..9b72372 100644
 +		itemType, _ := exactOptionalString(frame.itemFields, "type")
 +		itemRole, _ := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
-+		addedMeta, addedArgs, addedInput, okTool := extractItemToolFields(frame.itemFields)
++		addedMeta, addedArgs, addedInput, addedCode, okTool := extractItemToolFields(frame.itemFields)
 +		if !okTool {
 +			c.taintStreamAnomaly()
 +			return
@@ -8129,7 +8352,8 @@ index e69de29..9b72372 100644
 +		if addedKind == itemKindNonMessage || addedKind == itemKindUnknown {
 +			if !t.recordToolMeta(canonKey, addedMeta) ||
 +				!t.recordToolPayloadInitial(canonKey, "arguments", addedArgs) ||
-+				!t.recordToolPayloadInitial(canonKey, "input", addedInput) {
++				!t.recordToolPayloadInitial(canonKey, "input", addedInput) ||
++				!t.recordToolPayloadInitial(canonKey, "code", addedCode) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -8214,17 +8438,26 @@ index e69de29..9b72372 100644
 +			c.taintStreamAnomaly()
 +			return
 +		}
++		canonItemSHA, okCanonItem := canonicalCompletedItemDigest(frame.itemFields)
++		if !okCanonItem {
++			c.taintStreamAnomaly()
++			return
++		}
 +		itemType, _ := exactOptionalString(frame.itemFields, "type")
 +		itemRole, _ := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, _ := exactOptionalString(frame.itemFields, "phase")
 +		itemStatus, _ := exactOptionalString(frame.itemFields, "status")
-+		doneMeta, doneArgs, doneInput, okTool := extractItemToolFields(frame.itemFields)
++		doneMeta, doneArgs, doneInput, doneCode, okTool := extractItemToolFields(frame.itemFields)
 +		if !okTool {
 +			c.taintStreamAnomaly()
 +			return
 +		}
 +		doneKind := classifyOutputItemKind(itemType, itemRole, itemPhase, true)
 +		isAssistantMsg := itemType == "message" && itemRole == "assistant"
++		if !isAssistantMsg && !isCompletedNonMessageItemStatus(itemStatus) {
++			c.taintStreamAnomaly()
++			return
++		}
 +		isFinalCandidate := isAssistantMsg &&
 +			(itemPhase == "" || itemPhase == "final_answer") &&
 +			(itemStatus == "" || itemStatus == "completed")
@@ -8322,7 +8555,8 @@ index e69de29..9b72372 100644
 +				}
 +				if !t.verifyToolMetaComplete(canonKey, doneMeta) ||
 +					!t.recordToolPayloadFinal(canonKey, "arguments", doneArgs) ||
-+					!t.recordToolPayloadFinal(canonKey, "input", doneInput) {
++					!t.recordToolPayloadFinal(canonKey, "input", doneInput) ||
++					!t.recordToolPayloadFinal(canonKey, "code", doneCode) {
 +					c.mu.Unlock()
 +					c.taintStreamAnomaly()
 +					return
@@ -8341,7 +8575,8 @@ index e69de29..9b72372 100644
 +				if prevRec.itemType != itemType || prevRec.itemRole != itemRole || prevRec.itemPhase != itemPhase ||
 +					!doneItemStatusCompatible(prevRec.itemStatus, itemStatus) ||
 +					prevRec.callID != doneMeta.callID || prevRec.name != doneMeta.name || prevRec.serverLabel != doneMeta.serverLabel ||
-+					prevRec.argsSHA != doneArgs.sha || prevRec.inputSHA != doneInput.sha ||
++					prevRec.argsSHA != doneArgs.sha || prevRec.inputSHA != doneInput.sha || prevRec.codeSHA != doneCode.sha ||
++					(prevRec.canonicalItemSHA != "" && prevRec.canonicalItemSHA != canonItemSHA) ||
 +					prevRec.isFinal != isFinalCandidate || prevRec.isAssistantMsg != isAssistantMsg ||
 +					prevRec.outputTextSHA != outTextSHA {
 +					c.mu.Unlock()
@@ -8349,6 +8584,7 @@ index e69de29..9b72372 100644
 +					return
 +				}
 +				prevRec.doneDigest = doneDigest
++				prevRec.canonicalItemSHA = canonItemSHA
 +				t.doneItems[canonKey] = prevRec
 +				c.mu.Unlock()
 +				return
@@ -8367,22 +8603,24 @@ index e69de29..9b72372 100644
 +			}
 +			t.doneItemKeys[canonKey] = struct{}{}
 +			t.doneItems[canonKey] = doneItemSummary{
-+				itemID:         effItemID,
-+				itemType:       itemType,
-+				itemRole:       itemRole,
-+				itemPhase:      itemPhase,
-+				itemStatus:     itemStatus,
-+				callID:         doneMeta.callID,
-+				name:           doneMeta.name,
-+				serverLabel:    doneMeta.serverLabel,
-+				argsSHA:        doneArgs.sha,
-+				inputSHA:       doneInput.sha,
-+				outputIndex:    effIdx,
-+				hasOutputIndex: effHasIdx,
-+				isFinal:        isFinalCandidate,
-+				isAssistantMsg: isAssistantMsg,
-+				outputTextSHA:  outTextSHA,
-+				doneDigest:     doneDigest,
++				itemID:           effItemID,
++				itemType:         itemType,
++				itemRole:         itemRole,
++				itemPhase:        itemPhase,
++				itemStatus:       itemStatus,
++				callID:           doneMeta.callID,
++				name:             doneMeta.name,
++				serverLabel:      doneMeta.serverLabel,
++				argsSHA:          doneArgs.sha,
++				inputSHA:         doneInput.sha,
++				codeSHA:          doneCode.sha,
++				canonicalItemSHA: canonItemSHA,
++				outputIndex:      effIdx,
++				hasOutputIndex:   effHasIdx,
++				isFinal:          isFinalCandidate,
++				isAssistantMsg:   isAssistantMsg,
++				outputTextSHA:    outTextSHA,
++				doneDigest:       doneDigest,
 +			}
 +		}
 +		seq, okSeq := t.assignSeq(canonKey)
@@ -8560,6 +8798,19 @@ index e69de29..9b72372 100644
 +		case "response.custom_tool_call_input.done":
 +			if !frame.hasEvInput ||
 +				!t.recordToolPayloadFinal(canonKey, "input", toolPayloadField{sha: "str:" + sha256Hex(frame.evInput), str: frame.evInput, isStr: true}) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		case "response.code_interpreter_call_code.delta":
++			if !frame.hasEvDelta || !t.recordToolPayloadDelta(canonKey, "code", frame.evDelta) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++		case "response.code_interpreter_call_code.done":
++			if !frame.hasEvCode ||
++				!t.recordToolPayloadFinal(canonKey, "code", toolPayloadField{sha: "str:" + sha256Hex(frame.evCode), str: frame.evCode, isStr: true}) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -8993,6 +9244,91 @@ index e69de29..9b72372 100644
 +	}
 +	reviewLedger[key] = entry
 +	return entry, nil
++}
++
++// ReserveExistingReview reserves an in-flight turn ONLY if launch already exists in the
++// in-memory ledger or on disk under root. For brand-new launches it returns (nil, false, nil)
++// without creating root or any launch directory on disk, so rejected pre-admission requests
++// cannot consume disk space or inodes.
++func ReserveExistingReview(root, launch string) (*ReviewReservation, bool, error) {
++	cleanRoot, ok := cleanPrivateRoot(root)
++	if !ok || !reviewLaunchPattern.MatchString(launch) {
++		return nil, false, ErrUnavailable
++	}
++	root = cleanRoot
++	key := root + "\x00" + launch
++	now := time.Now()
++	reviewMu.Lock()
++	if entry := reviewLedger[key]; entry != nil {
++		if entry.sealedFlag || entry.sealing {
++			reviewMu.Unlock()
++			return nil, true, ErrUnavailable
++		}
++		entry.touched = now
++		entry.inFlight++
++		reviewMu.Unlock()
++		entry.mu.Lock()
++		if entry.sealed {
++			entry.mu.Unlock()
++			releaseReview(entry)
++			return nil, true, ErrUnavailable
++		}
++		if entry.tainted {
++			entry.taintAndPersistLocked()
++			entry.mu.Unlock()
++			releaseReview(entry)
++			return nil, true, ErrUnavailable
++		}
++		entry.mu.Unlock()
++		return &ReviewReservation{entry: entry}, true, nil
++	}
++	overflowed := taintWriteOverflow
++	reviewMu.Unlock()
++	if overflowed {
++		return nil, false, ErrUnavailable
++	}
++	rootExists, err := checkPrivateDir(root, true)
++	if err != nil {
++		return nil, false, ErrUnavailable
++	}
++	if !rootExists {
++		return nil, false, nil
++	}
++	dir := filepath.Join(root, launch)
++	if _, statErr := os.Lstat(dir); statErr != nil {
++		if os.IsNotExist(statErr) {
++			return nil, false, nil
++		}
++		return nil, false, ErrUnavailable
++	}
++	res, resErr := ReserveReview(root, launch)
++	return res, true, resErr
++}
++
++// TaintExistingReview taints launch ONLY if it already exists in memory or on disk under root.
++// Brand-new launches rejected before admission never allocate directories or files on disk.
++func TaintExistingReview(root, launch string) {
++	cleanRoot, ok := cleanPrivateRoot(root)
++	if !ok || !reviewLaunchPattern.MatchString(launch) {
++		return
++	}
++	root = cleanRoot
++	key := root + "\x00" + launch
++	reviewMu.Lock()
++	existsInLedger := reviewLedger[key] != nil
++	reviewMu.Unlock()
++	if existsInLedger {
++		TaintReview(root, launch)
++		return
++	}
++	rootExists, err := checkPrivateDir(root, true)
++	if err != nil || !rootExists {
++		return
++	}
++	if _, statErr := os.Lstat(filepath.Join(root, launch)); statErr != nil {
++		return
++	}
++	TaintReview(root, launch)
 +}
 +
 +// ReserveReview atomically checks that the launch is neither sealed nor sealing, persists the
@@ -9685,6 +10021,21 @@ index e69de29..9b72372 100644
 +	return nil
 +}
 +
++func countRootEntries(root string) (int, error) {
++	entries, err := os.ReadDir(root)
++	if err != nil {
++		return 0, err
++	}
++	count := 0
++	for _, ent := range entries {
++		if ent.Name() == ".writer.lock" {
++			continue
++		}
++		count++
++	}
++	return count, nil
++}
++
 +func reservePrivateDir(directory string, allowExisting bool) error {
 +	directory = filepath.Clean(directory)
 +	root, ok := cleanPrivateRoot(filepath.Dir(directory))
@@ -9694,12 +10045,37 @@ index e69de29..9b72372 100644
 +	if err := acquirePrivateRootLock(root); err != nil {
 +		return err
 +	}
++	rootQuotaMu.Lock()
++	_, statErr := os.Lstat(directory)
++	if statErr == nil {
++		rootQuotaMu.Unlock()
++		if !allowExisting {
++			return os.ErrExist
++		}
++		if _, checkErr := checkPrivateDir(directory, false); checkErr != nil {
++			return ErrUnavailable
++		}
++		if err := syncDirFn(root); err != nil {
++			return err
++		}
++		return nil
++	}
++	if !os.IsNotExist(statErr) {
++		rootQuotaMu.Unlock()
++		return ErrUnavailable
++	}
++	existingCount, countErr := countRootEntries(root)
++	if countErr != nil || existingCount >= maxReviewDiskEntries {
++		rootQuotaMu.Unlock()
++		return ErrUnavailable
++	}
 +	err := os.Mkdir(directory, 0700)
++	rootQuotaMu.Unlock()
 +	if err != nil {
 +		if !allowExisting || !os.IsExist(err) {
 +			return err
 +		}
-+		if _, statErr := checkPrivateDir(directory, false); statErr != nil {
++		if _, checkErr := checkPrivateDir(directory, false); checkErr != nil {
 +			return ErrUnavailable
 +		}
 +	}
@@ -10494,10 +10870,10 @@ index e69de29..9b72372 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..1653810 100644
+index e69de29..d927a37 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,4778 @@
+@@ -0,0 +1,4927 @@
 +package preflightreceipt
 +
 +import (
@@ -15155,6 +15531,155 @@ index e69de29..1653810 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_stc","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_stc","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: "},{"type":"output_text","text":"PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555594", "019d0000-0000-7000-8000-888888888194", sseSnapTruncContent); st != SealRejected {
 +		t.Fatalf("in_progress truncating content array from 2 parts to 1 seal = %v, want SealRejected", st)
++	}
++
++	// 64. Sol P1 #1 + Astra P1 #1 (PR #2280 R26): non-terminal tool item status (e.g. in_progress)
++	//     in output_item.done + response.completed.output[] (or single-frame response.completed) MUST taint.
++	sseInProgToolDone := "data: " + `{"type":"response.created","response":{"id":"resp_iptd","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_ip","type":"function_call","status":"in_progress","call_id":"c1","name":"shell","arguments":""}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_ip","type":"function_call","status":"in_progress","call_id":"c1","name":"shell","arguments":"{}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_ip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_iptd","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_ip","type":"function_call","status":"in_progress","call_id":"c1","name":"shell","arguments":"{}"},{"id":"msg_ip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555595", "019d0000-0000-7000-8000-888888888195", sseInProgToolDone); st != SealRejected {
++		t.Fatalf("non-terminal tool status in done+completed seal = %v, want SealRejected", st)
++	}
++	sseSingleFrameInProgTool := "data: " + `{"type":"response.completed","response":{"id":"resp_sfip","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_sf","type":"function_call","status":"in_progress","call_id":"c1","name":"shell","arguments":"{}"},{"id":"msg_sf","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555596", "019d0000-0000-7000-8000-888888888196", sseSingleFrameInProgTool); st != SealRejected {
++		t.Fatalf("single-frame response.completed with in_progress tool seal = %v, want SealRejected", st)
++	}
++
++	// 65. Astra P1 #2 (PR #2280 R26): full canonical item digest binds ALL non-envelope tool fields
++	//     (such as web_search_call.action), code_interpreter_call_code.delta binds code, and nested
++	//     duplicate JSON keys taint; matching web_search_call with reordered keys seals cleanly.
++	sseWebSearchMismatch := "data: " + `{"type":"response.created","response":{"id":"resp_wsm","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"safe query"}}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_ws","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_wsm","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"tampered query"}},{"id":"msg_ws","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555597", "019d0000-0000-7000-8000-888888888197", sseWebSearchMismatch); st != SealRejected {
++		t.Fatalf("web_search_call.action mismatch between done and completed seal = %v, want SealRejected", st)
++	}
++	lWebSearchOK := "review-d1111111-2222-4333-8444-555555555598"
++	sWebSearchOK := "019d0000-0000-7000-8000-888888888198"
++	sseWebSearchOK := "data: " + `{"type":"response.created","response":{"id":"resp_wsok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_ok","type":"web_search_call","status":"completed","action":{"type":"search","query":"exact query"}}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_wsok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_wsok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_ok","type":"web_search_call","status":"completed","action":{"query":"exact query","type":"search"}},{"id":"msg_wsok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lWebSearchOK, sWebSearchOK, sseWebSearchOK); st != SealOK {
++		t.Fatalf("matching web_search_call with reordered action keys seal = %v, want SealOK", st)
++	}
++	sseCodeInterpMismatch := "data: " + `{"type":"response.created","response":{"id":"resp_cim","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.code_interpreter_call_code.delta","output_index":0,"item_id":"ci_1","delta":"print(1)"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ci_1","type":"code_interpreter_call","status":"completed","code":"print(2)"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_ci","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_cim","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_1","type":"code_interpreter_call","status":"completed","code":"print(2)"},{"id":"msg_ci","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555599", "019d0000-0000-7000-8000-888888888199", sseCodeInterpMismatch); st != SealRejected {
++		t.Fatalf("code_interpreter_call_code.delta mismatch seal = %v, want SealRejected", st)
++	}
++
++	// 66. Sol P2 #1 + Astra P2 #1 (PR #2280 R26): response.in_progress explicitly truncating output[]
++	//     to drop a previously observed item MUST taint even if later frames restore that item;
++	//     omitting output on response.in_progress continues to seal cleanly.
++	sseSnapTruncOutput := "data: " + `{"type":"response.in_progress","response":{"id":"resp_sto","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"fc_sto","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{}"},{"id":"msg_sto","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"VERDICT: "}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_sto","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"fc_sto","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{}"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_sto","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sto","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_sto","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{}"},{"id":"msg_sto","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555a0", "019d0000-0000-7000-8000-8888888881a0", sseSnapTruncOutput); st != SealRejected {
++		t.Fatalf("in_progress explicitly truncating output array seal = %v, want SealRejected", st)
++	}
++	sseSnapEmptyOutput := "data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_seo","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_seo","status":"in_progress","model":"gpt-6.2-sol","output":[]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_seo","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_seo","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_seo","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555a1", "019d0000-0000-7000-8000-8888888881a1", sseSnapEmptyOutput); st != SealRejected {
++		t.Fatalf("in_progress explicitly emptying output array after added seal = %v, want SealRejected", st)
++	}
++	lSnapOmitOutputOK := "review-d1111111-2222-4333-8444-5555555555a2"
++	sSnapOmitOutputOK := "019d0000-0000-7000-8000-8888888881a2"
++	sseSnapOmitOutputOK := "data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_soo","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_soo","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_soo","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_soo","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_soo","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lSnapOmitOutputOK, sSnapOmitOutputOK, sseSnapOmitOutputOK); st != SealOK {
++		t.Fatalf("in_progress omitting output field after added seal = %v, want SealOK", st)
++	}
++}
++
++func TestReviewReceiptDiskQuotaBoundsRootDirectories(t *testing.T) {
++	// Sol P1 #2 (PR #2280 R26): on-disk launch directories under root MUST be strictly bounded
++	// by maxReviewDiskEntries even after in-memory ledger eviction; existing launches remain
++	// taintable and sealable at quota, and TaintExistingReview never allocates new directories.
++	oldDiskCap := maxReviewDiskEntries
++	oldLedgerCap := maxReviewLedgerEntries
++	maxReviewDiskEntries = 2
++	maxReviewLedgerEntries = 10
++	defer func() {
++		maxReviewDiskEntries = oldDiskCap
++		maxReviewLedgerEntries = oldLedgerCap
++	}()
++
++	root := filepath.Join(t.TempDir(), "quota-receipts")
++	// TaintExistingReview on a nonexistent launch MUST NOT even create root.
++	TaintExistingReview(root, "review-e1111111-2222-4333-8444-555555555500")
++	if _, err := os.Stat(root); !os.IsNotExist(err) {
++		t.Fatalf("TaintExistingReview created root for nonexistent launch: %v", err)
++	}
++
++	l1 := "review-e1111111-2222-4333-8444-555555555501"
++	s1 := "019d0000-0000-7000-8000-888888888501"
++	l2 := "review-e1111111-2222-4333-8444-555555555502"
++	s2 := "019d0000-0000-7000-8000-888888888502"
++	l3 := "review-e1111111-2222-4333-8444-555555555503"
++
++	// Complete and seal l1 (dir 1/2), evictable from memory ledger.
++	ctx1, c1, err := BeginReview(context.Background(), root, l1, s1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp1, err := cl1.Do(req1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp1.Body)
++	_ = resp1.Body.Close()
++	c1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_q1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++	if st := SealReview(root, l1, s1); st != SealOK {
++		t.Fatalf("seal l1 = %v, want SealOK", st)
++	}
++
++	// Reserve l2 (evicts sealed l1 from memory ledger; creates dir 2/2).
++	res2, err := ReserveReview(root, l2)
++	if err != nil {
++		t.Fatalf("ReserveReview l2 = %v, want nil", err)
++	}
++	res2.Release()
++
++	// Brand-new l3 MUST fail closed at maxReviewDiskEntries=2 without creating a 3rd directory.
++	if _, err := ReserveReview(root, l3); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveReview l3 at disk quota = %v, want ErrUnavailable", err)
++	}
++	if _, err := os.Stat(filepath.Join(root, l3)); !os.IsNotExist(err) {
++		t.Fatalf("ReserveReview at disk quota created directory for l3: %v", err)
++	}
++
++	// Existing l2 MUST still be taintable even while root is at quota.
++	TaintExistingReview(root, l2)
++	if st := SealReview(root, l2, s2); st != SealRejected {
++		t.Fatalf("SealReview tainted l2 at quota = %v, want SealRejected", st)
++	}
++	// Sealed l1 MUST remain SealOK at quota.
++	if st := SealReview(root, l1, s1); st != SealOK {
++		t.Fatalf("SealReview sealed l1 at quota = %v, want SealOK", st)
 +	}
 +}
 +
