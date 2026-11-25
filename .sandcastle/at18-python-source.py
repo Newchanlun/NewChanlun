@@ -84,26 +84,55 @@ def keyword_sample_key(kwargs):
 
 
 POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+KEYWORD = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
 VARIADIC = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+
+
+def variadic_modes(signature, shapes=()):
+    kinds = {param.kind for param in signature.parameters.values()}
+    has_kwargs = inspect.Parameter.VAR_KEYWORD in kinds
+    has_args = inspect.Parameter.VAR_POSITIONAL in kinds
+    if has_kwargs:
+        yield "kwargs"
+        if inspect.Parameter.POSITIONAL_ONLY in kinds:
+            yield "kwargs_shadow"
+    # 透明双变参层没有固定槽给具名值定位；只用原见证的位置形状，
+    # 不从外来规范或任意具名值的顺序发明位置尾参。
+    if has_args and (not has_kwargs or not variadic_only(signature)):
+        yield "args"
+    if has_args and has_kwargs:
+        for args, kwargs in shapes:
+            if args and kwargs:
+                yield "both", args, kwargs
 
 
 def arguments(signature, samples, variadic=False):
     args, kwargs, defaults = [], {}, {}
     params = signature.parameters
     extra_args, extra_kwargs = (), {}
-    if variadic:
-        # 无显式签名的生产包装器只能使用已经观察到的普通参数。
-        fixed = {name for name, param in params.items() if param.kind not in VARIADIC}
-        remaining = {k: sample(v) for k, v in samples.items() if k not in fixed}
+    if variadic is True:
+        # 诊断调用仍使用原来的单通道解释。
         kinds = {param.kind for param in params.values()}
-        if inspect.Parameter.VAR_KEYWORD in kinds:
-            extra_kwargs = remaining
-        elif inspect.Parameter.VAR_POSITIONAL in kinds:
-            extra_args = tuple(remaining.values())
+        variadic = ("kwargs" if inspect.Parameter.VAR_KEYWORD in kinds else
+                    "args" if inspect.Parameter.VAR_POSITIONAL in kinds else False)
+    if variadic:
+        # 仅位置槽占用位置，不会占用同名的 **kwargs 键。
+        shadow = variadic == "kwargs_shadow" or type(variadic) is tuple
+        fixed = {name for name, param in params.items()
+                 if (param.kind in KEYWORD if shadow else param.kind not in VARIADIC)}
+        if type(variadic) is tuple:
+            _, tail, options = variadic
+            extra_args = tuple(map(sample, tail))
+            extra_kwargs = {k: sample(v) for k, v in options.items() if k not in fixed}
+        else:
+            remaining = {k: sample(v) for k, v in samples.items() if k not in fixed}
+            if variadic == "args":
+                extra_args = tuple(remaining.values())
+            else:
+                extra_kwargs = remaining
 
     pos_kinds = POSITIONAL if extra_args else (inspect.Parameter.POSITIONAL_ONLY,)
-    kw_kinds = (inspect.Parameter.KEYWORD_ONLY,) if extra_args else (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    kw_kinds = (inspect.Parameter.KEYWORD_ONLY,) if extra_args else KEYWORD
     positional = [p for p in params.values() if p.kind in pos_kinds]
     if not extra_args:
         # 只在后面还有位置实参时填默认值；其余由 Python 自己应用。
@@ -446,9 +475,10 @@ CTOR_PROBE_TIERS = ((False, False), (False, True), (True, None))
 
 
 class Binding:
-    def __init__(self, key, member, chain, owner=None, ctor_chains=((), ())):
+    def __init__(self, key, member, chain, owner=None, ctor_chains=((), ()), ctor_shapes=True):
         self.key, self.member, self.chain, self.owner = key, member, chain, owner
         self.ctor_chains = ctor_chains if len(ctor_chains) == 2 else ((), ())
+        self.ctor_shapes = ctor_shapes
         self.function = chain[0]
 
     @property
@@ -579,10 +609,7 @@ class Binding:
         public_has_varkw = any(
             p.kind is inspect.Parameter.VAR_KEYWORD for p in public.parameters.values()
         )
-        public_kw_names = {
-            name for name, p in public.parameters.items()
-            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-        }
+        public_kw_names = {name for name, p in public.parameters.items() if p.kind in KEYWORD}
         public_required_kw = {
             name for name, p in public.parameters.items()
             if p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is inspect.Parameter.empty
@@ -601,15 +628,18 @@ class Binding:
         extra_kwonly = {name: param for name, param in all_kwonly.items() if name not in public_kwonly}
         full_kwonly = {**public_kwonly, **extra_kwonly}
         extra_recover = dict(extra_kwonly)
+        # 新同名键只参与备用阶段，不能改变主阶段成功与失败的缓存键。
+        ordinary_recover = set(extra_recover)
         if public_has_varkw:
-            public_fixed_names = {name for name, p in public.parameters.items() if p.kind not in VARIADIC}
             for sig in (*default_primary, *default_secondary):
                 for name, param in sig.parameters.items():
-                    if (name not in extra_recover and name not in public_fixed_names and
-                            param.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) and
+                    if (name not in extra_recover and name not in public_kw_names and param.kind in KEYWORD and
                             (name in observed_names or param.default is inspect.Parameter.empty)):
                         extra_recover[name] = (param if param.kind is inspect.Parameter.KEYWORD_ONLY else
                                                param.replace(kind=inspect.Parameter.KEYWORD_ONLY))
+                        public_param = public.parameters.get(name)
+                        if public_param is None or public_param.kind is not inspect.Parameter.POSITIONAL_ONLY:
+                            ordinary_recover.add(name)
         pairs, recovery, recovery_keys = [], [], set()
         generic = has_variadic(public)
 
@@ -645,9 +675,9 @@ class Binding:
             add(public)
         if public_has_varkw and extra_recover:
             add_recovery(strip_variadics(public), None)
-        return layer_variants, pairs, (recovery, public_kwonly, extra_recover), ordinary_count
+        return layer_variants, pairs, (recovery, public_kwonly, extra_recover, ordinary_recover), ordinary_count
 
-    def callables(self, instances, views, variadic=None, alternate=None, ctor_errors=None):
+    def callables(self, instances, views, variadic=None, alternate=None, ctor_errors=None, shapes=()):
         if self.owner is None:
             if not variadic and alternate is not True:
                 yield self.member
@@ -660,8 +690,10 @@ class Binding:
             public = inspect.signature(self.owner, follow_wrapped=False)
         except (ValueError, TypeError):
             return
+        shapes = shapes if self.ctor_shapes else ()
         observed_names = {name for view in views for name in view}
-        layer_variants, pairs, (recovery, public_kwonly, extra_recover), ordinary_count = self.ctor_plan(public, observed_names)
+        layer_variants, pairs, recover_plan, ordinary_count = self.ctor_plan(public, observed_names)
+        recovery, public_kwonly, extra_recover, ordinary_recover = recover_plan
         seen, default_refs = set(), {}
         extra_set = set(extra_recover)
         if ctor_errors is None:
@@ -692,18 +724,15 @@ class Binding:
                             break
             return best_idx, best_choice
 
-        def resolve(sig, view, use_variadic, variant):
-            if use_variadic and not has_variadic(sig):
-                return False, None
+        def resolve_args(args, kwargs, defaults, variant, error_keys):
             try:
-                args, kwargs, defaults = arguments(sig, view, use_variadic)
                 public.bind(*args, **kwargs)
                 ctor_key = pick_ctor_key(variant, args, kwargs, defaults)
             except (ValueError, TypeError):
                 return False, None
             key = id(self.owner), ctor_key
             raw_key = None
-            if len(layer_variants) > 1 or extra_set:
+            if len(layer_variants) > 1 or error_keys:
                 raw_key = (
                     id(self.owner),
                     MISSING,
@@ -712,7 +741,7 @@ class Binding:
                 )
             # 成功仍按绑定后默认值归一；失败若含可恢复键，按原实参记录。
             # 显式传默认值可能与外层注入冲突，而同一键省略时可以成功。
-            failed_key = raw_key if extra_set else key
+            failed_key = raw_key if error_keys else key
             if failed_key in instances and instances[failed_key] is None:
                 return False, ctor_errors.get(failed_key)
             if key not in instances:
@@ -725,7 +754,7 @@ class Binding:
                     try:
                         inst = self.owner(*ctor_args, **ctor_kwargs)
                     except (Exception, SystemExit) as exc:
-                        tag = parse_kw_type_error(exc, extra_set) if extra_set else None
+                        tag = parse_kw_type_error(exc, error_keys) if error_keys else None
                         instances[failed_key] = None
                         if raw_key is not None:
                             instances[raw_key] = None
@@ -743,6 +772,19 @@ class Binding:
                 yield self.member.__get__(inst, self.owner)
             return True, None
 
+        def resolve(sig, view, mode, variant, shadow_kw=None, error_keys=ordinary_recover):
+            try:
+                args, kwargs, defaults = arguments(sig, view, mode)
+                if shadow_kw:
+                    for name, param in shadow_kw.items():
+                        if name in view:
+                            kwargs[name] = sample(view[name])
+                        elif param.default is inspect.Parameter.empty:
+                            kwargs[name] = None
+            except (ValueError, TypeError):
+                return False, None
+            return (yield from resolve_args(args, kwargs, defaults, variant, error_keys))
+
         def recover_kwonly(pair, view):
             base_sig, variant = pair
             extra = tuple(extra_recover)
@@ -752,7 +794,12 @@ class Binding:
                 if names not in tested:
                     kw_set = {**public_kwonly, **{name: extra_recover[name] for name in names}}
                     sig = merge_kwonly(base_sig, kw_set)
-                    tested[names] = yield from resolve(sig if sig is not None else base_sig, view, False, variant)
+                    shadow = {name: param for name, param in kw_set.items()
+                              if (slot := base_sig.parameters.get(name)) is not None and
+                              slot.kind is inspect.Parameter.POSITIONAL_ONLY}
+                    # Signature 不能同时声明两个同名槽，关键字独立传给公开绑定。
+                    tested[names] = yield from resolve(sig if sig is not None else base_sig, view, False, variant,
+                                                       shadow, extra_set)
                 return tested[names]
 
             # 从全集按真实绑定冲突剥离；每一轮至少少一个键。
@@ -806,10 +853,17 @@ class Binding:
             if alternate is not None and use_alternate is not None and alternate is not use_alternate:
                 continue
             only_alternate = alternate if use_variadic else use_alternate
+            if use_variadic:
+                for args, kwargs in shapes:
+                    yield from resolve_args(args, kwargs, {}, None, extra_set)
             for view in views:
                 for sig, variant, is_alternate in pairs:
                     if only_alternate is None or is_alternate is only_alternate:
-                        yield from resolve(sig, view, use_variadic, variant)
+                        if use_variadic:
+                            for mode in variadic_modes(sig, shapes):
+                                yield from resolve(sig, view, mode, variant, error_keys=extra_set)
+                        else:
+                            yield from resolve(sig, view, False, variant)
             if use_alternate is True:
                 for view in views:
                     for pair in recovery:
@@ -851,10 +905,12 @@ class Binding:
                 yield args, kwargs, {}
             for view in (named, *overrides):
                 for signature in self.signatures(fn, public, view):
-                    try:
-                        yield arguments(signature, view, True)
-                    except (ValueError, TypeError):
-                        continue
+                    modes = variadic_modes(signature, shapes) if has_variadic(signature) else (False,)
+                    for mode in modes:
+                        try:
+                            yield arguments(signature, view, mode)
+                        except (ValueError, TypeError):
+                            continue
 
         choices, default_refs = set(), {}
         for args, kwargs, defaults in candidates():
@@ -975,24 +1031,32 @@ class Exports:
         return tuple(items)
 
     def ctor_chains(self, owner):
-        meta_cls, meta_member = mro_member(type(owner), "__call__")
-        if meta_cls is not None and meta_cls is not type:
-            if self.class_body(meta_cls) is None:
-                return (), ()
-            target = self.ctor_callable(meta_cls, meta_member)
-            if target is None:
-                return (), ()
-            chain = self.wrapped_chain(target)
-            if not chain:
-                return (), ()
-            return self.tag_ctor_chain(type(owner), "__call__", meta_member, chain), ()
-
         new_cls, new_member = mro_member(owner, "__new__")
         init_cls, init_member = mro_member(owner, "__init__")
         new_target = self.ctor_callable(new_cls, new_member)
         init_target = self.ctor_callable(init_cls, init_member)
+        hooks = ((new_cls, new_target), (init_cls, init_target))
+
+        def local_chain(cls, target):
+            if target is not None and self.class_body(cls) is not None:
+                return self.wrapped_chain(target)
+
+        meta_cls, meta_member = mro_member(type(owner), "__call__")
+        if meta_cls is not None and meta_cls is not type:
+            chain = local_chain(meta_cls, self.ctor_callable(meta_cls, meta_member))
+            if not chain:
+                return (), (), False
+            # 元类可以转发给实例构造链，不替其外来钩子提供身份依据。
+            shapes_local = all(cls is None or cls is object or local_chain(cls, target) is not None
+                               for cls, target in hooks)
+            return self.tag_ctor_chain(type(owner), "__call__", meta_member, chain), (), shapes_local
+
+        # 只给已经核验的本地构造链复用原始形状。透明签名能绑定，
+        # 不代表可以替未核验的包装对象或另一侧构造钩子猜测输入。
+        shapes_local = all(cls is None or cls is object or target is not None
+                           for cls, target in hooks)
         if new_target is None and init_target is None:
-            return (), ()
+            return (), (), shapes_local
 
         mro = type.__getattribute__(owner, "__mro__")
         new_rank = mro.index(new_cls) if new_target is not None else len(mro)
@@ -1005,26 +1069,25 @@ class Exports:
             secondary = ("__new__", new_cls, new_member, new_target) if new_target is not None else None
 
         p_name, p_cls, p_member, p_target = primary
-        if self.class_body(p_cls) is None:
-            return (), ()
-        p_chain = self.wrapped_chain(p_target)
+        p_chain = local_chain(p_cls, p_target)
         if not p_chain:
-            return (), ()
+            return (), (), False
 
         p_items = self.tag_ctor_chain(owner, p_name, p_member, p_chain)
         s_items = ()
         if secondary is not None:
             s_name, s_cls, s_member, s_target = secondary
-            if self.class_body(s_cls) is not None:
-                s_chain = self.wrapped_chain(s_target)
-                if s_chain:
-                    s_items = self.tag_ctor_chain(owner, s_name, s_member, s_chain, include_first=True)
-        return p_items, s_items
+            s_chain = local_chain(s_cls, s_target)
+            if s_chain:
+                s_items = self.tag_ctor_chain(owner, s_name, s_member, s_chain, include_first=True)
+            else:
+                shapes_local = False
+        return p_items, s_items, shapes_local
 
-    def binding(self, key, member, owner=None, ctor_chains=((), ())):
+    def binding(self, key, member, owner=None, ctor_chains=((), ()), ctor_shapes=True):
         fn = underlying(member)
         if chain := self.wrapped_chain(fn):
-            return Binding(key, member, chain, owner, ctor_chains)
+            return Binding(key, member, chain, owner, ctor_chains, ctor_shapes)
 
     def local_members(self, bindings):
         for export_name, value in bindings.items():
@@ -1032,7 +1095,7 @@ class Exports:
                 if (binding := self.binding(("module", export_name), value)) is not None:
                     yield binding
             elif is_class(value) and self.class_body(value) is not None:
-                ctor_chains = self.ctor_chains(value)
+                primary, secondary, ctor_shapes = self.ctor_chains(value)
                 seen = set()
                 for owner in type.__getattribute__(value, "__mro__"):
                     local = self.class_body(owner) is not None
@@ -1041,7 +1104,8 @@ class Exports:
                             continue
                         seen.add(name)
                         if local and not name.startswith("_") and type(member) in (FunctionType, staticmethod, classmethod):
-                            if (binding := self.binding(("class", export_name, name), member, value, ctor_chains)) is not None:
+                            if (binding := self.binding(("class", export_name, name), member, value,
+                                                       (primary, secondary), ctor_shapes)) is not None:
                                 yield binding
 
     def candidates(self, frame):
@@ -1444,13 +1508,13 @@ def public_probe(production, targets, origins, test_entered, samples, shapes, ov
     production.load(origins)
     targets.load(origins)
 
-    views = (samples, *overrides)
+    views, shapes = (samples, *overrides), tuple(shapes)
     instances, ctor_errors, tried = {}, {}, set()
     for variadic, alternate in CTOR_PROBE_TIERS:
         for binding in production.members:
             try:
                 for fn in binding.callables(instances, views, variadic=variadic, alternate=alternate,
-                                            ctor_errors=ctor_errors):
+                                            ctor_errors=ctor_errors, shapes=shapes):
                     try:
                         identity = (id(fn.__func__), id(fn.__self__)) if type(fn) is MethodType else (id(fn),)
                         if identity in tried:

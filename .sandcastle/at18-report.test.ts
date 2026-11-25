@@ -4461,6 +4461,160 @@ class Adapter:
     standalone(specRest, "return sorted(rows)", "route(rows=[4, 1])"), "marker=None", false);
 });
 
+test("R40/#1319：仅位置槽与同名关键字独立，双变参两条通道均可达", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = (name: string, prod: string, target: string, observed: string, result: string,
+    expected = true, extra: Record<string, string> = {}) => t.test(name, () => {
+    const repo = feedSource({
+      ...extra,
+      [entry]: target + "\n__all__ = ('route',)\n",
+      [integration]: "from functools import wraps\nfrom . import at18_fixture_feed as f\n" +
+        prod + "\n__all__ = ('Adapter',)\n",
+      [path]: "from trading_system import at18_fixture_feed as f\ndef test_route():\n" +
+        `    assert f.route(${observed}) == ${result}\n`,
+    });
+    assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+  });
+  const shadow = (outer: string, inner: string, dispatch: string, layer = "return fn(self, **kw)") => `
+def bind(fn):
+    @wraps(fn)
+    def outer(self, ${outer}, /, **kw): ${layer}
+    return outer
+class Adapter:
+    @bind
+    def __init__(self, ${inner}): self.item = prefix
+    def dispatch(self): ${dispatch}
+`;
+  const shadowTarget = `def route(prefix, /, **kw): return prefix + kw['prefix']`;
+  const shadowCall = "return f.route(self.item,prefix=self.item)";
+  for (const [name, slot] of [["4e0213b5", "prefix"], ["7b097e6b", "tag"]] as const) {
+    await check(name, shadow(slot, "prefix", shadowCall), shadowTarget, "17, prefix=17", "34");
+  }
+  await check("同名异值：原始位置 99，关键字 17",
+    shadow("prefix", "prefix", "return f.route(self.tag,prefix=self.item)",
+      "assert prefix == 99 and kw['prefix'] == 17; self.tag = prefix; return fn(self, **kw)"),
+    shadowTarget, "99, prefix=17", "116");
+
+  const callWithRows = "return f.route(rows=[4,1], prefix=self.item)";
+  const rowsTarget = "def route(rows, *, prefix): return sorted(rows)";
+  for (const [name, inner] of [
+    ["登记与构造不同形：内层普通 prefix", "prefix"],
+    ["登记与构造不同形：内层仅关键字 prefix", "*, prefix"],
+  ] as const) {
+    await check(name, shadow("prefix", inner, callWithRows,
+      "assert prefix == 17 and kw['prefix'] == 17; return fn(self, **kw)"),
+    rowsTarget, "rows=[4,1], prefix=17", "[1,4]");
+  }
+
+  await check("三参位置注入与同名 / 关键字并存", `
+def inject(fn):
+    @wraps(fn)
+    def outer(self, prefix, /, **kw):
+        assert prefix == 17
+        return fn(self, 1, 2, 3, **kw)
+    return outer
+class Adapter:
+    @inject
+    def __init__(self, a, b, c, prefix):
+        assert (a,b,c,prefix) == (1,2,3,17)
+        self.item = prefix
+    def dispatch(self): ${callWithRows}
+`, "def route(rows, *, prefix, a=11, b=12, c=13): return sorted(rows)", "rows=[4,1], prefix=17", "[1,4]");
+
+  const tail = (sig: string, dispatch: string) => `
+def one(item, /): return item
+${sig}
+class Adapter:
+    @wraps(spec)
+    def __init__(self, *args, **kw): self.item = spec(*args,**kw)
+    def dispatch(self): ${dispatch}
+`;
+  const tailSpec = "def spec(prefix, /, *rest, **options): return one(*rest)";
+  const tailTarget = "def inc(item, /): return item+1\ndef route(*args): return inc(args[1])";
+  for (const [name, spec] of [
+    ["4888e1fe", tailSpec],
+    ["0fc1bb2f", "def spec(prefix, /, *rest): return one(*rest)"],
+  ] as const) {
+    await check(name, tail(spec, "return f.route(None,self.item)"), tailTarget, "None,17", "18");
+  }
+  const kwTarget = "def route(*, item): return item+1";
+  await check("只观察关键字 item，构造依然走 *rest",
+    tail(tailSpec, "return f.route(item=self.item)"), kwTarget, "item=17", "18");
+  const mixedSpec = "def spec(prefix, /, *rest, **options):\n    assert prefix is None and options['flag'] is True\n    return one(*rest)";
+  const mixedTarget = "def route(*items, **flags): return items[0] + flags['flag']";
+  await check("从混合观察构造 (None, 17, flag=True)",
+    tail(mixedSpec, "return f.route(self.item,flag=True)"), mixedTarget, "17,flag=True", "18");
+  await check("方法保留固定前缀后同时填 *rest 和 **options", `
+class Adapter:
+    def dispatch(self, prefix, /, *rest, **options):
+        assert prefix is None and len(rest) == 1 and options['flag'] is True
+        return f.route(rest[0],flag=True)
+`, mixedTarget, "17,flag=True", "18");
+  await check("方法只观察关键字也可走 *rest", `
+class Adapter:
+    def dispatch(self, prefix, /, *rest, **options):
+        assert prefix is None and len(rest) == 1 and not options
+        return f.route(item=rest[0])
+`, kwTarget, "item=17", "18");
+  await check("方法可恢复和仅位置槽同名的 **kw", `
+class Adapter:
+    def dispatch(self, prefix, /, **kw):
+        assert prefix == kw['prefix'] == 17
+        return f.route(prefix=prefix)
+`, "def route(*, prefix): return prefix", "prefix=17", "17");
+  await check("旧关键字通道优先且不转发同名 prefix", `
+created = []
+class Adapter:
+    def __init__(self, prefix, /, **kw):
+        created.append((prefix,tuple(kw)))
+        assert prefix == 17 and kw == {'item': 23}
+    def dispatch(self):
+        if all('prefix' not in keys for _, keys in created): return f.route(prefix=17,item=23)
+`, "def route(*, prefix,item): return prefix+item", "prefix=17,item=23", "40");
+
+  await check("仅构造阶段进入承接，公开 dispatch 不进入",
+    shadow("prefix", "*, prefix", "return [1,4]",
+      "f.route(rows=[4,1], prefix=kw['prefix']); return fn(self, **kw)"),
+    rowsTarget, "rows=[4,1],prefix=17", "[1,4]", false);
+  await check("外来规范不能合成未观察的混合构造",
+    tail("from .foreign import spec", "return f.route(self.item,flag=True)"),
+    mixedTarget, "17,flag=True", "18", false, {
+      "trading_system/foreign.py": mixedSpec.replace("return one(*rest)", "return rest[0]") + "\n",
+    });
+  const localSpec = "def spec(prefix, /, *rest): return prefix";
+  const positionTarget = "def route(item, /): return item+1";
+  await check("原始位置观察也不能替代外来构造规范的身份核验",
+    tail("spec = f.spec", "return f.route(self.item)"),
+    localSpec + "\n" + positionTarget, "17", "18", false);
+  await check("本地主构造钩子不替外来次钩子背书",
+    tail("spec = f.spec", "return f.route(self.item)").replace("class Adapter:",
+      "class Adapter:\n    def __new__(cls, *args, **kw): return super().__new__(cls)"),
+    localSpec + "\n" + positionTarget, "17", "18", false);
+  const throughMeta = (source: string) => `
+class Factory(type):
+    def __call__(cls, *args, **kw): return super().__call__(*args, **kw)
+` + source.replace("class Adapter:", "class Adapter(metaclass=Factory):");
+  await check("本地元类转发不替外来实例构造链背书",
+    throughMeta(tail("spec = f.spec", "return f.route(self.item)")),
+    localSpec + "\n" + positionTarget, "17", "18", false);
+  await check("本地元类和本地实例构造链均可复用实收形状",
+    throughMeta(tail(localSpec, "return f.route(self.item)")), positionTarget, "17", "18");
+  await check("相同位置观察可进入本地构造规范",
+    tail(localSpec, "return f.route(self.item)"), positionTarget, "17", "18");
+  await check("没有包装规范时，直接复用本地透明构造器的实收形状",
+    `class Adapter:
+    def __init__(self, *args, **kw):
+        assert args == (17,) and kw == {'flag': True}
+        self.item = args[0]
+    def dispatch(self): return f.route(self.item,flag=True)
+`, mixedTarget, "17,flag=True", "18");
+  await check("混合参数构造成功，但丢弃未消费的生成器",
+    tail(mixedSpec + "\ndef deferred(item): yield f.route(item,flag=True)",
+      "deferred(self.item); return 18"), mixedTarget, "17,flag=True", "18", false);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
