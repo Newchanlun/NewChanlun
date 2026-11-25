@@ -1,5 +1,5 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..6d56967 100644
+index e69de29..cec28df 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,176 @@
@@ -77,7 +77,6 @@ index e69de29..6d56967 100644
 +			}
 +			if existed {
 +				defer res.Release()
-+				pending.Release()
 +			}
 +			taintFailure := func() {
 +				if existed {
@@ -119,12 +118,13 @@ index e69de29..6d56967 100644
 +			if !existed {
 +				res, resErr = preflightreceipt.ReserveReview(root, launch)
 +				if resErr != nil {
++					preflightreceipt.TaintExistingReview(root, launch)
 +					c.AbortWithStatus(http.StatusServiceUnavailable)
 +					return
 +				}
 +				defer res.Release()
-+				pending.Release()
 +			}
++			pending.Release()
 +			ctx, collector, err = preflightreceipt.BeginReviewReserved(turnCtx, res, session, requestedModel)
 +			if err != nil {
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
@@ -181,28 +181,38 @@ index e69de29..6d56967 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..f8a6d33
+index 0000000..8b56bd2
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,481 @@
 +package middleware
 +
 +import (
 +	"bufio"
 +	"bytes"
 +	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
 +	"errors"
++	"fmt"
 +	"io"
++	"math/big"
 +	"net"
 +	"net/http"
 +	"net/http/httptest"
 +	"os"
 +	"strings"
++	"sync"
 +	"sync/atomic"
 +	"testing"
 +	"time"
 +
 +	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
 +
@@ -446,6 +456,214 @@ index 0000000..f8a6d33
 +	}
 +	if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
 +		t.Fatalf("SealReview after unsupported SetWriteDeadline = %v, want SealRejected", st)
++	}
++}
++
++type fullDeadlineRecorder struct {
++	*httptest.ResponseRecorder
++}
++
++func (r *fullDeadlineRecorder) SetReadDeadline(time.Time) error  { return nil }
++func (r *fullDeadlineRecorder) SetWriteDeadline(time.Time) error { return nil }
++
++type middlewareFakeRT func(*http.Request) (*http.Response, error)
++
++func (f middlewareFakeRT) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++func middlewareVerifiedTLS(t *testing.T, host string) *tls.ConnectionState {
++	t.Helper()
++	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		Subject:      pkix.Name{CommonName: host},
++		DNSNames:     []string{host},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(time.Hour),
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return &tls.ConnectionState{
++		HandshakeComplete: true,
++		ServerName:        host,
++		VerifiedChains:    [][]*x509.Certificate{{cert}},
++	}
++}
++
++type blockingReviewBody struct {
++	entered chan struct{}
++	release chan struct{}
++	once    sync.Once
++	reader  *strings.Reader
++}
++
++func (b *blockingReviewBody) Read(p []byte) (int, error) {
++	b.once.Do(func() {
++		close(b.entered)
++		<-b.release
++	})
++	return b.reader.Read(p)
++}
++
++func (b *blockingReviewBody) Close() error { return nil }
++
++func TestPreflightReceiptMiddlewareExistingLaunchEnforcesBodyReadCapAndRecordsFailedTurn(t *testing.T) {
++	// Sol P1 #1 + P2 #1 & Astra P1 #1 + P2 #1 (PR #2280 R30):
++	// 1. An existing untainted launch rejected at the global BeginPendingReview cap MUST record a failed
++	//    follow-up turn atomically so SealReview cannot seal stale Turn 1 until a clean retry succeeds.
++	// 2. An existing launch MUST hold its BeginPendingReview slot until ExtractInboundReviewModel finishes
++	//    so concurrent body reads on the same existing launch cannot bypass the 32-reader global cap.
++	gin.SetMode(gin.TestMode)
++	root := t.TempDir() + "/receipts"
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	tlsState := middlewareVerifiedTLS(t, "chatgpt.com")
++
++	var turnCounter atomic.Int32
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		col := preflightreceipt.From(c.Request.Context())
++		if col == nil {
++			c.AbortWithStatus(http.StatusInternalServerError)
++			return
++		}
++		ctx, execLease, err := col.Start(c.Request.Context(), "codex", "gpt-6.2-sol")
++		if err != nil {
++			c.AbortWithStatus(http.StatusInternalServerError)
++			return
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: middlewareFakeRT(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: http.StatusOK,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(strings.NewReader("")),
++				TLS:        tlsState,
++			}, nil
++		})})
++		upReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(upReq)
++		if err != nil {
++			execLease.End()
++			col.Complete(false)
++			c.AbortWithStatus(http.StatusInternalServerError)
++			return
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		n := turnCounter.Add(1)
++		col.ObserveStreamChunk([]byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_mw_cap_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS %d"}]}]}}`, n, n) + "\n\n"))
++		execLease.End()
++		col.Complete(true)
++		c.Status(http.StatusOK)
++	})
++
++	runCleanTurn := func(launch, session string) int {
++		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("Session-Id", session)
++		req.Header.Set(preflightreceipt.ReviewHeader, launch)
++		rec := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++		engine.ServeHTTP(rec, req)
++		return rec.Code
++	}
++
++	// Part 1: existing launch rejected with 503 at global BeginPendingReview cap cannot seal stale Turn 1.
++	launch1 := "review-12345678-1234-4234-8234-123456789501"
++	session1 := "019d0000-0000-7000-8000-000000000501"
++	if code := runCleanTurn(launch1, session1); code != http.StatusOK {
++		t.Fatalf("launch1 turn 1 HTTP %d, want 200", code)
++	}
++	guards := make([]*preflightreceipt.PendingReviewGuard, 0, 32)
++	for i := 0; i < 32; i++ {
++		other := fmt.Sprintf("review-22345678-1234-4234-8234-1234567895%02d", i)
++		g, err := preflightreceipt.BeginPendingReview(root, other)
++		if err != nil {
++			for _, held := range guards {
++				held.Release()
++			}
++			t.Fatalf("fill pending slot %d: %v", i, err)
++		}
++		guards = append(guards, g)
++	}
++	bodyRejected := &mustNotReadBody{}
++	reqCap := httptest.NewRequest(http.MethodPost, "/v1/responses", bodyRejected)
++	reqCap.Header.Set("Content-Type", "application/json")
++	reqCap.Header.Set("Session-Id", session1)
++	reqCap.Header.Set(preflightreceipt.ReviewHeader, launch1)
++	recCap := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(recCap, reqCap)
++	for _, held := range guards {
++		held.Release()
++	}
++	if recCap.Code != http.StatusServiceUnavailable || bodyRejected.readCalled.Load() {
++		t.Fatalf("cap-rejected turn = (status=%d, readBody=%v), want (503, false)", recCap.Code, bodyRejected.readCalled.Load())
++	}
++	if st, digest := preflightreceipt.SealReviewWithDigest(root, launch1, session1); st != preflightreceipt.SealRejected || digest != "" {
++		t.Fatalf("SealReviewWithDigest after cap-rejected follow-up = (%v, %q), want (SealRejected, \"\")", st, digest)
++	}
++	if code := runCleanTurn(launch1, session1); code != http.StatusOK {
++		t.Fatalf("launch1 clean retry turn HTTP %d, want 200", code)
++	}
++	if st, digest := preflightreceipt.SealReviewWithDigest(root, launch1, session1); st != preflightreceipt.SealOK || digest == "" {
++		t.Fatalf("SealReviewWithDigest after clean retry = (%v, %q), want (SealOK, non-empty)", st, digest)
++	}
++
++	// Part 2: 32 concurrent body reads on the SAME existing launch saturate the global cap so #33 gets 503 before Read().
++	launch2 := "review-12345678-1234-4234-8234-123456789502"
++	session2 := "019d0000-0000-7000-8000-000000000502"
++	if code := runCleanTurn(launch2, session2); code != http.StatusOK {
++		t.Fatalf("launch2 turn 1 HTTP %d, want 200", code)
++	}
++	release := make(chan struct{})
++	entered := make([]chan struct{}, 32)
++	var wg sync.WaitGroup
++	for i := 0; i < 32; i++ {
++		ch := make(chan struct{})
++		entered[i] = ch
++		wg.Add(1)
++		go func(ent chan struct{}) {
++			defer wg.Done()
++			b := &blockingReviewBody{
++				entered: ent,
++				release: release,
++				reader:  strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`),
++			}
++			req := httptest.NewRequest(http.MethodPost, "/v1/responses", b)
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set("Session-Id", session2)
++			req.Header.Set(preflightreceipt.ReviewHeader, launch2)
++			rec := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++			engine.ServeHTTP(rec, req)
++		}(ch)
++	}
++	for i, ch := range entered {
++		select {
++		case <-ch:
++		case <-time.After(5 * time.Second):
++			close(release)
++			wg.Wait()
++			t.Fatalf("concurrent body reader %d on existing launch did not enter Read()", i)
++		}
++	}
++	body33 := &mustNotReadBody{}
++	req33 := httptest.NewRequest(http.MethodPost, "/v1/responses", body33)
++	req33.Header.Set("Content-Type", "application/json")
++	req33.Header.Set("Session-Id", session2)
++	req33.Header.Set(preflightreceipt.ReviewHeader, launch2)
++	rec33 := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(rec33, req33)
++	close(release)
++	wg.Wait()
++	if rec33.Code != http.StatusServiceUnavailable || body33.readCalled.Load() {
++		t.Fatalf("33rd concurrent request on existing launch = (status=%d, readBody=%v), want (503, false)", rec33.Code, body33.readCalled.Load())
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -5371,10 +5589,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..04e8b28 100644
+index e69de29..c4a2b2f 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,6082 @@
+@@ -0,0 +1,6148 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5610,9 +5828,30 @@ index e69de29..04e8b28 100644
 +	})
 +}
 +
++func recordExistingReviewTurnFailure(entry *reviewEntry, taint bool) {
++	defer releaseReview(entry)
++	entry.mu.Lock()
++	if !entry.sealed && !entry.tainted {
++		if taint {
++			entry.taintAndPersistLocked()
++		} else {
++			entry.nextTurnSeq++
++			entry.failedTurnSeq = entry.nextTurnSeq
++			entry.lastTurnFailed = true
++			if err := entry.persistLocked(); err != nil {
++				entry.taintAndPersistLocked()
++			}
++		}
++	}
++	entry.mu.Unlock()
++}
++
 +// BeginPendingReview registers a bounded in-memory pre-admission guard BEFORE reading the
 +// HTTP body so concurrent first requests on a brand-new launch cannot race ahead of SealReview,
 +// drop a sibling request's rejection, or exhaust memory via unbounded concurrent body reads.
++// If an existing unsealed launch is rejected due to the global pre-admission cap, the rejected
++// follow-up turn is atomically recorded under inFlight before releasing reviewMu so SealReview
++// cannot seal a stale prior turn in the unlock window.
 +func BeginPendingReview(root, launch string) (*PendingReviewGuard, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
@@ -5620,26 +5859,50 @@ index e69de29..04e8b28 100644
 +	}
 +	key := cleanRoot + "\x00" + launch
 +	reviewMu.Lock()
-+	defer reviewMu.Unlock()
-+	if entry := reviewLedger[key]; entry != nil && (entry.sealedFlag || entry.sealing) {
++	entry := reviewLedger[key]
++	if entry != nil && (entry.sealedFlag || entry.sealing) {
++		reviewMu.Unlock()
 +		return nil, errReviewSealed
 +	}
 +	if pendingReviewTotal >= maxPendingReviewInFlight {
++		if entry != nil {
++			entry.inFlight++
++			reviewMu.Unlock()
++			recordExistingReviewTurnFailure(entry, false)
++			return nil, ErrUnavailable
++		}
++		reviewMu.Unlock()
 +		return nil, ErrUnavailable
 +	}
 +	if st := pendingReviewLaunches[key]; st != nil {
 +		if st.tainted {
++			if entry != nil {
++				entry.inFlight++
++				reviewMu.Unlock()
++				recordExistingReviewTurnFailure(entry, true)
++				return nil, ErrUnavailable
++			}
++			reviewMu.Unlock()
 +			return nil, ErrUnavailable
 +		}
 +		st.count++
 +		pendingReviewTotal++
++		reviewMu.Unlock()
 +		return &PendingReviewGuard{key: key}, nil
 +	}
 +	if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
++		if entry != nil {
++			entry.inFlight++
++			reviewMu.Unlock()
++			recordExistingReviewTurnFailure(entry, false)
++			return nil, ErrUnavailable
++		}
++		reviewMu.Unlock()
 +		return nil, ErrUnavailable
 +	}
 +	pendingReviewLaunches[key] = &pendingReviewState{count: 1}
 +	pendingReviewTotal++
++	reviewMu.Unlock()
 +	return &PendingReviewGuard{key: key}, nil
 +}
 +
@@ -6712,6 +6975,7 @@ index e69de29..04e8b28 100644
 +		status, ok4 := exactOptionalString(fields, "status")
 +		itemRespID, hasItemRespID, okRespID := exactOptionalStringPresent(fields, "response_id")
 +		if !okID || !ok1 || !ok2 || !ok3 || !ok4 || !okRespID ||
++			strings.TrimSpace(typ) == "" ||
 +			len(itemID) > maxStrictIdentityBytes || len(itemRespID) > maxStrictIdentityBytes ||
 +			len(typ) > maxStrictIdentityBytes || len(role) > maxStrictIdentityBytes ||
 +			len(phase) > maxStrictIdentityBytes || len(status) > maxStrictIdentityBytes {
@@ -8120,10 +8384,30 @@ index e69de29..04e8b28 100644
 +}
 +
 +func (t *strictStreamTracker) recordInitialText(canonKey string, contentIdx int64, initText string) bool {
++	if canonKey != "" {
++		if parts := t.contentPartByItem[canonKey]; parts != nil {
++			if prevTag, exists := parts[contentIdx]; exists && strings.HasPrefix(prevTag, "text:") {
++				return false
++			}
++		}
++	}
 +	if !t.recordPendingTextPart(canonKey, contentIdx) {
 +		return false
 +	}
-+	if canonKey == "" || initText == "" {
++	if canonKey == "" {
++		return true
++	}
++	if initText == "" {
++		if prefixes := t.textPrefixByItem[canonKey]; prefixes != nil {
++			if pref, exists := prefixes[contentIdx]; exists && pref.byteLen > 0 {
++				return false
++			}
++		}
++		if hashes := t.textDeltaHashByItem[canonKey]; hashes != nil {
++			if st := hashes[contentIdx]; st != nil && hex.EncodeToString(st.h.Sum(nil)) != sha256Hex("") {
++				return false
++			}
++		}
 +		return true
 +	}
 +	if !t.recordTextPrefix(canonKey, contentIdx, initText) {
@@ -11458,10 +11742,10 @@ index e69de29..04e8b28 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..24f65c6 100644
+index e69de29..5ea6c60 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,5237 @@
+@@ -0,0 +1,5255 @@
 +package preflightreceipt
 +
 +import (
@@ -16307,6 +16591,24 @@ index e69de29..24f65c6 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_sif","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_sif","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555b6", "019d0000-0000-7000-8000-8888888881b6", sseSnapIncompleteFlip); st != SealRejected {
 +		t.Fatalf("response.in_progress status=incomplete flipping to completed seal = %v, want SealRejected", st)
++	}
++
++	// 76. Astra P2 #3 (PR #2280 R30): response.completed.output[] item missing non-empty "type"
++	//     (e.g. empty object {}) MUST taint just like output_item.done requires non-empty type.
++	sseMissingItemType := "data: " + `{"type":"response.completed","response":{"id":"resp_mit","status":"completed","model":"gpt-6.2-sol","output":[{},{"id":"msg_mit","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555b7", "019d0000-0000-7000-8000-8888888881b7", sseMissingItemType); st != SealRejected {
++		t.Fatalf("response.completed output item missing type seal = %v, want SealRejected", st)
++	}
++
++	// 77. Astra P2 #4 (PR #2280 R30): content_part.added arriving AFTER output_text.done for the
++	//     same content_index with empty text (re-opening a finalized part) MUST taint.
++	sseReopenFinalizedPart := "data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_rfp","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.done","output_index":0,"item_id":"msg_rfp","content_index":0,"text":"VERDICT: PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"msg_rfp","content_index":0,"part":{"type":"output_text","text":""}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_rfp","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_rfp","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_rfp","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555b8", "019d0000-0000-7000-8000-8888888881b8", sseReopenFinalizedPart); st != SealRejected {
++		t.Fatalf("content_part.added reopening finalized output_text.done part seal = %v, want SealRejected", st)
 +	}
 +}
 +
