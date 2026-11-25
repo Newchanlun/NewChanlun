@@ -392,6 +392,11 @@ def special(script, repo, base, heads):
     expect("基线解析不出", run(script, [r, "nope", green, "proof/x"]), 2, {"BAD_REV"})
     expect("基线是树对象", run(script, [r, base + "^{tree}", green, "proof/x"]), 2, {"BAD_REV"})
     expect("被审带范围语法", run(script, [r, base, base + ".." + green, "proof/x"]), 2, {"BAD_REV"})
+    corrupt = os.path.join(os.fsencode(os.path.dirname(os.fsdecode(r))), b"corrupt")
+    shutil.copytree(r, corrupt)  # 测试仓库的对象都是松散对象，删一个文件即可造出缺失
+    tree = git(corrupt, "rev-parse", green + "^{tree}").strip().decode()
+    os.remove(os.path.join(corrupt, b".git/objects", tree[:2].encode(), tree[2:].encode()))
+    expect("被审提交的根树对象缺失", run(script, [corrupt, base, green, "proof/x"]), 2, {"GIT"})
     expect("仓库不存在", run(script, [r + b"/nope", base, green, "proof/x"]), 2, {"GIT"})
     rd, wr = os.pipe()
     os.close(rd)

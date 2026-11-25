@@ -64,10 +64,10 @@ def git(repo, *args, ok=(0,), data=b""):
     return p.returncode, p.stdout
 
 
-def resolve(repo, rev, kind):
+def resolve(repo, rev, kind, fault=("BAD_REV", "解析不出提交")):
     rc, out = git(repo, b"rev-parse", b"--verify", b"--quiet", b"--end-of-options", rev + kind, ok=(0, 1))
     if rc or not OID.fullmatch(out.strip()):
-        raise Fault("BAD_REV", rev, "解析不出提交")
+        raise Fault(fault[0], rev, fault[1])
     return out.strip()
 
 
@@ -101,7 +101,7 @@ def inventory(repo, commit, red):
     """第 2 条：从提交的根树起逐层读原始树对象，得受管范围的清单 {路径: (原始模式, 对象)}，目录节点在内。
     读到的每一层都核对：能解析、条目名非空且不含 /、名字唯一、按 git 顺序严格递增、目录条目指向树对象。"""
     hash_len, found = len(commit) // 2, {}
-    level = [(b"", resolve(repo, commit, b"^{tree}"))]
+    level = [(b"", resolve(repo, commit, b"^{tree}", ("GIT", "读不到提交的根树（对象缺失）")))]
     while level:
         objs, nxt = objects(repo, [oid for _, oid in level]), []
         for path, oid in level:
