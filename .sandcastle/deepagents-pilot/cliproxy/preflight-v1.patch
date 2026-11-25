@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..3c0d562 100644
+index e69de29..905dd18 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,264 @@
 +package middleware
 +
 +import (
@@ -30,6 +30,25 @@ index e69de29..3c0d562 100644
 +
 +func hasAnyHeaderValue(h http.Header, key string) bool {
 +	return len(h.Values(key)) > 0
++}
++
++func uniqueValidReviewLaunch(h http.Header) (string, bool) {
++	vals := h.Values(preflightreceipt.ReviewHeader)
++	unique := ""
++	for _, v := range vals {
++		if v == "" {
++			continue
++		}
++		if !preflightreceipt.ValidReviewLaunch(v) {
++			return "", false
++		}
++		if unique == "" {
++			unique = v
++		} else if unique != v {
++			return "", false
++		}
++	}
++	return unique, unique != ""
 +}
 +
 +func PreflightReceipt() gin.HandlerFunc {
@@ -76,6 +95,11 @@ index e69de29..3c0d562 100644
 +				c.AbortWithStatus(status)
 +			}
 +			if launchAmbiguous || !preflightreceipt.ValidReviewLaunch(launch) {
++				if launchAmbiguous {
++					if attrLaunch, ok := uniqueValidReviewLaunch(c.Request.Header); ok {
++						preflightreceipt.TaintExistingReview(root, attrLaunch)
++					}
++				}
 +				abortClose(http.StatusBadRequest)
 +				return
 +			}
@@ -245,10 +269,10 @@ index e69de29..3c0d562 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..d38fcf5
+index 0000000..588b640
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,839 @@
+@@ -0,0 +1,875 @@
 +package middleware
 +
 +import (
@@ -1086,6 +1110,42 @@ index 0000000..d38fcf5
 +	}
 +	if st := preflightreceipt.SealReview(root, launch3, session3); st != preflightreceipt.SealRejected {
 +		t.Fatalf("SealReview(launch3) after duplicate Session-Id = %v, want SealRejected", st)
++	}
++
++	// 6. Astra P1 #1 (PR #2280 R54): after a clean Turn 1 on an unsealed launch, a follow-up /v1/responses
++	// with uniquely attributable duplicate ReviewHeader ([launch, launch] or ["", launch]) MUST return 400
++	// AND taint that existing launch so subsequent SealReview cannot seal stale Turn 1.
++	for idx, tc := range []struct {
++		name     string
++		launch   string
++		session  string
++		dupHdrs  []string
++	}{
++		{"identical_dup_launch", "review-62345678-1234-4234-8234-123456789604", "019d0000-0000-7000-8000-000000000604", []string{"review-62345678-1234-4234-8234-123456789604", "review-62345678-1234-4234-8234-123456789604"}},
++		{"empty_plus_valid_launch", "review-62345678-1234-4234-8234-123456789605", "019d0000-0000-7000-8000-000000000605", []string{"", "review-62345678-1234-4234-8234-123456789605"}},
++	} {
++		req1 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		req1.Header.Set(preflightreceipt.ReviewHeader, tc.launch)
++		req1.Header.Set("Session-Id", tc.session)
++		rec1 := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++		engine.ServeHTTP(rec1, req1)
++		if rec1.Code != http.StatusOK {
++			t.Fatalf("case %d (%s) turn 1 -> HTTP %d, want 200", idx, tc.name, rec1.Code)
++		}
++
++		req2 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		for _, v := range tc.dupHdrs {
++			req2.Header.Add(preflightreceipt.ReviewHeader, v)
++		}
++		req2.Header.Set("Session-Id", tc.session)
++		rec2 := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++		engine.ServeHTTP(rec2, req2)
++		if rec2.Code != http.StatusBadRequest {
++			t.Fatalf("case %d (%s) turn 2 dup headers -> HTTP %d, want 400", idx, tc.name, rec2.Code)
++		}
++		if st := preflightreceipt.SealReview(root, tc.launch, tc.session); st != preflightreceipt.SealRejected {
++			t.Fatalf("case %d (%s) SealReview after uniquely attributable dup ReviewHeader = %v, want SealRejected", idx, tc.name, st)
++		}
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -6705,10 +6765,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..1355eac 100644
+index e69de29..59a14af 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,9977 @@
+@@ -0,0 +1,10021 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -6871,10 +6931,12 @@ index e69de29..1355eac 100644
 +	boundDirIno       uint64
 +	hasBoundDirID     bool
 +	boundDirFD        *os.File
-+	lastPersistedSHA  string
-+	tainted           bool
-+	taintedPersisted  bool
-+	foreignDisk       bool
++	lastPersistedSHA      string
++	markerOnlyInvalidated bool
++	markerOnlySynced      bool
++	tainted               bool
++	taintedPersisted      bool
++	foreignDisk           bool
 +	lastTurnFailed    bool
 +	nextTurnSeq       uint64
 +	failedTurnSeq     uint64
@@ -12603,7 +12665,7 @@ index e69de29..1355eac 100644
 +		e.boundDirFD = nil
 +		return
 +	}
-+	if err := e.persistLocked(); err == nil || e.foreignDisk {
++	if err := e.persistLocked(); err == nil || e.foreignDisk || e.markerOnlySynced {
 +		e.taintedPersisted = true
 +		closeBudgetedPinnedDirFD(e.boundDirFD)
 +		e.boundDirFD = nil
@@ -13297,7 +13359,7 @@ index e69de29..1355eac 100644
 +			entry.sealed = false
 +			entry.sealedAt = 0
 +			entry.sealedReceiptSHA = ""
-+			entry.taintedPersisted = (renamed && err == nil) || entry.foreignDisk
++			entry.taintedPersisted = (renamed && err == nil) || entry.foreignDisk || entry.markerOnlySynced
 +			// Entry is permanently closed via finishSeal(true) and can never seal SealOK;
 +			// release any pinned dirFD now so rejected/foreignDisk launches never leak FD budget.
 +			closeBudgetedPinnedDirFD(entry.boundDirFD)
@@ -15177,11 +15239,17 @@ index e69de29..1355eac 100644
 +						idMismatch = true
 +					}
 +				}
-+				if !idMismatch && ent.lastPersistedSHA != "" {
-+					if cand.receiptSHA != ent.lastPersistedSHA {
-+						idMismatch = true
-+					} else if expectedReceiptSHA == "" {
-+						expectedReceiptSHA = ent.lastPersistedSHA
++				if !idMismatch {
++					if ent.markerOnlyInvalidated {
++						if cand.receiptSHA != "" {
++							idMismatch = true
++						}
++					} else if ent.lastPersistedSHA != "" {
++						if cand.receiptSHA != ent.lastPersistedSHA {
++							idMismatch = true
++						} else if expectedReceiptSHA == "" {
++							expectedReceiptSHA = ent.lastPersistedSHA
++						}
 +					}
 +				}
 +				ent.mu.Unlock()
@@ -16047,6 +16115,12 @@ index e69de29..1355eac 100644
 +		return diskReceiptPreserveUntouched
 +	}
 +	finfo, err := launchRoot.Lstat("receipt.json")
++	if e.markerOnlyInvalidated && e.tainted {
++		if errors.Is(err, os.ErrNotExist) && verifyProducerMarkerInSubdir(launchRoot, e.launch) {
++			return diskReceiptSafeToWrite
++		}
++		return diskReceiptPreserveUntouched
++	}
 +	if !e.markerPersisted && e.lastPersistedSHA == "" {
 +		if errors.Is(err, os.ErrNotExist) {
 +			return diskReceiptSafeToWrite
@@ -16096,6 +16170,21 @@ index e69de29..1355eac 100644
 +	return diskReceiptSafeToWrite
 +}
 +
++func verifyProducerMarkerInSubdir(subRoot *os.Root, launch string) bool {
++	if subRoot == nil || !ValidReviewLaunch(launch) {
++		return false
++	}
++	raw, _, _, _, ok := readPrivateRegularFileInSubdir(subRoot, "producer.json", 4096)
++	if !ok {
++		return false
++	}
++	var marker reviewReservationMarker
++	return decodeExactReceiptJSON(raw, reviewMarkerJSONKeys, &marker) == nil &&
++		marker.Schema == ReviewSchema &&
++		marker.Launch == launch &&
++		marker.Started > 0
++}
++
 +func (e *reviewEntry) invalidateDiskReceiptInRootLocked(launchRoot *os.Root) {
 +	if e.foreignDisk || launchRoot == nil {
 +		return
@@ -16107,7 +16196,20 @@ index e69de29..1355eac 100644
 +	_ = launchRoot.Remove("receipt.json")
 +	_ = launchRoot.Remove("seal.sha256")
 +	_ = launchRoot.Remove("seal.pending.json")
-+	_ = syncPinnedDir(launchRoot, e.directory)
++	_, recErr := launchRoot.Lstat("receipt.json")
++	_, sealErr := launchRoot.Lstat("seal.sha256")
++	_, pendErr := launchRoot.Lstat("seal.pending.json")
++	syncErr := syncPinnedDir(launchRoot, e.directory)
++	if errors.Is(recErr, os.ErrNotExist) && errors.Is(sealErr, os.ErrNotExist) && errors.Is(pendErr, os.ErrNotExist) && verifyProducerMarkerInSubdir(launchRoot, e.launch) {
++		e.lastPersistedSHA = ""
++		e.markerOnlyInvalidated = true
++		if syncErr == nil {
++			e.markerOnlySynced = true
++			e.taintedPersisted = true
++			closeBudgetedPinnedDirFD(e.boundDirFD)
++			e.boundDirFD = nil
++		}
++	}
 +}
 +
 +func (e *reviewEntry) invalidateDiskReceiptLocked() {
@@ -16460,6 +16562,8 @@ index e69de29..1355eac 100644
 +		}
 +	}
 +	e.lastPersistedSHA = sha256Hex(string(data))
++	e.markerOnlyInvalidated = false
++	e.markerOnlySynced = false
 +	if sealed {
 +		e.sealedReceiptSHA = sealedDigest
 +		if rootLease.lock != nil {
@@ -16687,10 +16791,10 @@ index e69de29..1355eac 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..2d098b6 100644
+index e69de29..b1c0f81 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,9969 @@
+@@ -0,0 +1,10175 @@
 +package preflightreceipt
 +
 +import (
@@ -26657,6 +26761,212 @@ index e69de29..2d098b6 100644
 +		c.HandlerDone(true)
 +		if st, dig := SealReviewWithDigest(root, launch, session); st != SealOK || !isSHA256Hex(dig) {
 +			t.Fatalf("SealReviewWithDigest with nested metadata Run/run = (%v, %q), want SealOK", st, dig)
++		}
++	})
++}
++
++func TestReviewReceiptFailedTaintPersistReclaimsInSameProcessWithoutClearingLedger(t *testing.T) {
++	// Sol P2 #1 + Astra P2 #2 (PR #2280 R54): when taint persistence fails after receipt.json was
++	// written and invalidateDiskReceiptInRootLocked leaves a verified producer-only marker dir:
++	// (1) if launch dir fsync succeeds, boundDirFD is immediately released and expired dir is
++	//     reclaimed in the SAME process WITHOUT deleting reviewLedger[key];
++	// (2) even if launch dir fsync ALSO fails during the outage (leaving boundDirFD held until
++	//     retention expires), once storage recovers and retention expires, same-process reclaim
++	//     reclaims BOTH the directory and the pinned FD without clearing reviewLedger;
++	// (3) if a foreign receipt.json appears inside the marker-only dir, reclaim MUST reject it.
++	runOneTurn := func(root, launch, session, respID string) {
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++	}
++
++	t.Run("staging fail with synced marker-only releases FD and reclaims in same process", func(t *testing.T) {
++		oldReviewCap := maxReviewDiskEntries
++		maxReviewDiskEntries = 1
++		defer func() { maxReviewDiskEntries = oldReviewCap }()
++
++		beforeFDs := pinnedDirFDs.Load()
++		root := filepath.Join(t.TempDir(), "taint-fail-same-proc-synced")
++		launch1 := "review-ffffffff-2222-4333-8444-555555555501"
++		session1 := "019d0000-0000-7000-8000-fffffffff901"
++		runOneTurn(root, launch1, session1, "resp_sameproc_1")
++
++		stagingDir := filepath.Join(root, ".staging")
++		_ = os.RemoveAll(stagingDir)
++		if err := os.WriteFile(stagingDir, []byte("blocked"), 0600); err != nil {
++			t.Fatal(err)
++		}
++		TaintReview(root, launch1)
++		_ = os.Remove(stagingDir)
++
++		if afterTaintFDs := pinnedDirFDs.Load(); afterTaintFDs != beforeFDs {
++			t.Fatalf("pinnedDirFDs not released after synced marker-only invalidation: before=%d after=%d", beforeFDs, afterTaintFDs)
++		}
++
++		// Age producer.json, dir, and ent.touched WITHOUT deleting reviewLedger[key1].
++		dir1 := filepath.Join(root, launch1)
++		ancient := time.Now().Add(-48 * time.Hour)
++		agedMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch1, Started: ancient.UnixNano()})
++		_ = os.WriteFile(filepath.Join(dir1, "producer.json"), agedMarker, 0600)
++		_ = os.Chtimes(filepath.Join(dir1, "producer.json"), ancient, ancient)
++		_ = os.Chtimes(dir1, ancient, ancient)
++		key1 := filepath.Clean(root) + "\x00" + launch1
++		reviewMu.Lock()
++		if ent := reviewLedger[key1]; ent != nil {
++			ent.touched = ancient
++		}
++		reviewMu.Unlock()
++
++		launch2 := "review-ffffffff-2222-4333-8444-555555555502"
++		res2, err := ReserveReview(root, launch2)
++		if err != nil {
++			t.Fatalf("ReserveReview(launch2) failed to reclaim expired marker-only dir in same process: %v", err)
++		}
++		res2.Release()
++		if _, statErr := os.Lstat(dir1); !os.IsNotExist(statErr) {
++			t.Fatalf("expired marker-only dir1 still on disk: %v", statErr)
++		}
++		reviewMu.Lock()
++		_, stillInLedger := reviewLedger[key1]
++		reviewMu.Unlock()
++		if stillInLedger {
++			t.Fatalf("reclaimed marker-only entry still present in reviewLedger")
++		}
++	})
++
++	t.Run("staging fail plus launch fsync fail still recovers FD and disk quota in same process", func(t *testing.T) {
++		beforeFDs := pinnedDirFDs.Load()
++		oldOverride := pinnedDirFDBudgetOverride
++		pinnedDirFDBudgetOverride = int(beforeFDs) + 1
++		defer func() { pinnedDirFDBudgetOverride = oldOverride }()
++
++		root := filepath.Join(t.TempDir(), "taint-fail-same-proc-unsynced")
++		launch1 := "review-ffffffff-2222-4333-8444-555555555503"
++		session1 := "019d0000-0000-7000-8000-fffffffff903"
++		runOneTurn(root, launch1, session1, "resp_sameproc_2")
++
++		dir1 := filepath.Join(root, launch1)
++		stagingDir := filepath.Join(root, ".staging")
++		_ = os.RemoveAll(stagingDir)
++		if err := os.WriteFile(stagingDir, []byte("blocked"), 0600); err != nil {
++			t.Fatal(err)
++		}
++		origSync := syncDirFn
++		syncDirFn = func(dir string) error {
++			if filepath.Clean(dir) == filepath.Clean(dir1) {
++				return errors.New("injected launch dir fsync failure during storage outage")
++			}
++			if origSync != nil {
++				return origSync(dir)
++			}
++			return nil
++		}
++		TaintReview(root, launch1)
++		syncDirFn = origSync
++		_ = os.Remove(stagingDir)
++
++		// Because fsync also failed, boundDirFD is still held (saturating FD budget = beforeFDs + 1).
++		if curFDs := pinnedDirFDs.Load(); curFDs != beforeFDs+1 {
++			t.Fatalf("expected boundDirFD still held when launch fsync also failed: got %d want %d", curFDs, beforeFDs+1)
++		}
++
++		// Storage recovers and 24h retention passes -> WITHOUT clearing reviewLedger, a new ReserveReview
++		// MUST reclaim expired dir1 AND release its boundDirFD so quota recovers!
++		ancient := time.Now().Add(-48 * time.Hour)
++		agedMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch1, Started: ancient.UnixNano()})
++		_ = os.WriteFile(filepath.Join(dir1, "producer.json"), agedMarker, 0600)
++		_ = os.Chtimes(filepath.Join(dir1, "producer.json"), ancient, ancient)
++		_ = os.Chtimes(dir1, ancient, ancient)
++		key1 := filepath.Clean(root) + "\x00" + launch1
++		reviewMu.Lock()
++		if ent := reviewLedger[key1]; ent != nil {
++			ent.touched = ancient
++		}
++		reviewMu.Unlock()
++
++		launch2 := "review-ffffffff-2222-4333-8444-555555555504"
++		res2, err := ReserveReview(root, launch2)
++		if err != nil {
++			t.Fatalf("ReserveReview(launch2) failed to recover FD budget from expired unsynced marker-only dir: %v", err)
++		}
++		res2.Release()
++		if _, statErr := os.Lstat(dir1); !os.IsNotExist(statErr) {
++			t.Fatalf("expired unsynced marker-only dir1 still on disk: %v", statErr)
++		}
++		if curFDs := pinnedDirFDs.Load(); curFDs != beforeFDs+1 {
++			t.Fatalf("pinnedDirFDs after reclaiming dir1 + reserving launch2 = %d, want %d", curFDs, beforeFDs+1)
++		}
++	})
++
++	t.Run("foreign receipt dropped into marker-only invalidated dir blocks reclaim", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "taint-fail-foreign-rec-dropped")
++		launch1 := "review-ffffffff-2222-4333-8444-555555555505"
++		session1 := "019d0000-0000-7000-8000-fffffffff905"
++		runOneTurn(root, launch1, session1, "resp_sameproc_3")
++
++		stagingDir := filepath.Join(root, ".staging")
++		_ = os.RemoveAll(stagingDir)
++		if err := os.WriteFile(stagingDir, []byte("blocked"), 0600); err != nil {
++			t.Fatal(err)
++		}
++		TaintReview(root, launch1)
++		_ = os.Remove(stagingDir)
++
++		dir1 := filepath.Join(root, launch1)
++		ancient := time.Now().Add(-48 * time.Hour)
++		agedMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch1, Started: ancient.UnixNano()})
++		forgedRec, _ := json.Marshal(ReviewReceipt{
++			Schema:         ReviewSchema,
++			Launch:         launch1,
++			Session:        session1,
++			Started:        ancient.UnixNano(),
++			Finished:       ancient.UnixNano(),
++			Complete:       false,
++			Sealed:         false,
++			Tainted:        true,
++			Requests:       0,
++			Routes:         []string{"other"},
++			ResponseIDSHAs: []string{},
++		})
++		_ = os.WriteFile(filepath.Join(dir1, "producer.json"), agedMarker, 0600)
++		_ = os.WriteFile(filepath.Join(dir1, "receipt.json"), forgedRec, 0600)
++		for _, p := range []string{filepath.Join(dir1, "producer.json"), filepath.Join(dir1, "receipt.json"), dir1} {
++			_ = os.Chtimes(p, ancient, ancient)
++		}
++		key1 := filepath.Clean(root) + "\x00" + launch1
++		reviewMu.Lock()
++		if ent := reviewLedger[key1]; ent != nil {
++			ent.touched = ancient
++		}
++		reviewMu.Unlock()
++
++		lease, err := acquirePrivateRootLease(root)
++		if err != nil {
++			t.Fatal(err)
++		}
++		dirs, fds := reclaimExpiredBucketEntries(lease.dir, root, []string{launch1}, true, 1, 1, &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)})
++		lease.Close()
++		if dirs != 0 || fds != 0 {
++			t.Fatalf("reclaim deleted marker-only dir with unexpected receipt.json: (%d, %d), want (0, 0)", dirs, fds)
 +		}
 +	})
 +}
