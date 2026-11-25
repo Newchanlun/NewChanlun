@@ -5962,10 +5962,10 @@ index 0000000..c34cfd7
 +	return unix.Renameat(oldfd, oldname, newfd, newname)
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..53a5372 100644
+index e69de29..7e0444a 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,8861 @@
+@@ -0,0 +1,8878 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -6115,6 +6115,11 @@ index e69de29..53a5372 100644
 +	sealed            bool
 +	sealSynced        bool
 +	sealedReceiptSHA  string
++	sealedRootDev     uint64
++	sealedRootIno     uint64
++	sealedDirDev      uint64
++	sealedDirIno      uint64
++	hasSealedDirID    bool
 +	lastPersistedSHA  string
 +	tainted           bool
 +	taintedPersisted  bool
@@ -11762,7 +11767,7 @@ index e69de29..53a5372 100644
 +	return readVerifiedSealDigestFromRoot(subRoot)
 +}
 +
-+func verifySealedDiskReceiptInRoot(rootLease *lockedRootLease, dir, root, launch, session, expectedSHA string, now time.Time, requireSync bool) (SealStatus, string) {
++func verifySealedDiskReceiptInRoot(rootLease *lockedRootLease, dir, root, launch, session, expectedSHA string, expectDirDev, expectDirIno uint64, checkDirID bool, now time.Time) (SealStatus, string) {
 +	if rootLease == nil || rootLease.dir == nil || rootLease.lock == nil {
 +		return SealUnavailable, ""
 +	}
@@ -11776,6 +11781,9 @@ index e69de29..53a5372 100644
 +	}
 +	defer subRoot.Close()
 +	subDev, subIno, hasSubID := statDevIno(subFI)
++	if checkDirID && (!hasSubID || subDev != expectDirDev || subIno != expectDirIno) {
++		return SealUnavailable, ""
++	}
 +	diskEntry, onDisk, err := loadReviewEntryFromSubRoot(subRoot, dir, launch, session, now)
 +	if err != nil {
 +		return SealUnavailable, ""
@@ -11793,21 +11801,10 @@ index e69de29..53a5372 100644
 +	if expectedSHA != "" && savedDigest != expectedSHA {
 +		return SealRejected, ""
 +	}
-+	if requireSync {
-+		if syncSealAncestorsForSubRoot(rootLease, subRoot, launch, dir, root, subDev, subIno, hasSubID) != nil {
-+			return SealUnavailable, ""
-+		}
-+	} else {
-+		if verifyRootStillBound(rootLease.lock, root) != nil {
-+			return SealUnavailable, ""
-+		}
-+		curFI, lerr := rootHandle.Lstat(launch)
-+		if lerr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
-+			return SealUnavailable, ""
-+		}
-+		if curDev, curIno, okCur := statDevIno(curFI); okCur && hasSubID && (curDev != subDev || curIno != subIno) {
-+			return SealUnavailable, ""
-+		}
++	// Always confirm launch, root, and pinned root-parent fsyncs plus active root/launch inode binding
++	// before returning SealOK (never skip fsync via in-memory flags on repeat SealReview calls).
++	if syncSealAncestorsForSubRoot(rootLease, subRoot, launch, dir, root, subDev, subIno, hasSubID) != nil {
++		return SealUnavailable, ""
 +	}
 +	return SealOK, savedDigest
 +}
@@ -11860,7 +11857,10 @@ index e69de29..53a5372 100644
 +			if !isSHA256Hex(entry.sealedReceiptSHA) {
 +				return SealUnavailable, ""
 +			}
-+			st, digest := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, entry.sealedReceiptSHA, now, !entry.sealSynced)
++			if entry.hasSealedDirID && (rootLease.lock.rootDev != entry.sealedRootDev || rootLease.lock.rootIno != entry.sealedRootIno) {
++				return SealUnavailable, ""
++			}
++			st, digest := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, entry.sealedReceiptSHA, entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID, now)
 +			if st != SealOK {
 +				return st, ""
 +			}
@@ -11898,7 +11898,12 @@ index e69de29..53a5372 100644
 +				finishSeal(true)
 +				return SealUnavailable, ""
 +			}
-+			st, digest := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, expectedSHA, now, !entry.sealSynced)
++			if entry.hasSealedDirID && (rootLease.lock.rootDev != entry.sealedRootDev || rootLease.lock.rootIno != entry.sealedRootIno) {
++				entry.mu.Unlock()
++				finishSeal(true)
++				return SealUnavailable, ""
++			}
++			st, digest := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, expectedSHA, entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID, now)
 +			if st != SealOK {
 +				entry.mu.Unlock()
 +				finishSeal(true)
@@ -11980,7 +11985,7 @@ index e69de29..53a5372 100644
 +	reviewMu.Unlock()
 +
 +	dir := filepath.Join(root, launch)
-+	return verifySealedDiskReceiptInRoot(rootLease, dir, root, launch, session, "", now, true)
++	return verifySealedDiskReceiptInRoot(rootLease, dir, root, launch, session, "", 0, 0, false, now)
 +}
 +
 +// BeginReviewReserved transfers an already-reserved in-flight review launch into a Collector
@@ -12169,11 +12174,12 @@ index e69de29..53a5372 100644
 +	return 0, 0, false
 +}
 +
-+// acquirePrivateRootLease enforces single-writer ownership over a receipt root across same-UID
-+// proxy processes via a non-blocking exclusive flock on <root>/.writer.lock and returns a
-+// ref-counted lease holding BOTH the flock file and the descriptor-pinned *os.Root for that exact
-+// locked directory inode. Even if root is rotated or pruned from the cache while operations are
-+// in flight, neither the flock nor the *os.Root is closed until the last active lease calls Close().
++// acquirePrivateRootLease enforces single-writer ownership over a dedicated private receipt root
++// across same-UID proxy processes via a non-blocking exclusive flock DIRECTLY on the verified root
++// directory inode (cannot be bypassed by lock-file rotation), returning a ref-counted lease holding
++// the locked root directory fd, the descriptor-pinned *os.Root, and the verified parent directory fd.
++// Even if root is rotated or pruned from the cache while operations are in flight, neither the flock
++// nor the directory descriptors are closed until the last active lease calls Close().
 +func acquirePrivateRootLease(root string) (*lockedRootLease, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || pathHasDisallowedSymlink(cleanRoot) {
@@ -12209,18 +12215,12 @@ index e69de29..53a5372 100644
 +
 +	rootLockMu.Lock()
 +	if held := rootLocks[root]; held != nil {
-+		if held.dir != nil && held.parentFD != nil && held.rootDev == rDev && held.rootIno == rIno && verifyRootStillBound(held, root) == nil {
-+			if curLockInfo, lerr := held.dir.Lstat(".writer.lock"); lerr == nil && curLockInfo.Mode().IsRegular() &&
-+				curLockInfo.Mode()&os.ModeSymlink == 0 && curLockInfo.Mode().Perm()&0077 == 0 && ownedByCurrentUser(curLockInfo) {
-+				lDev, lIno, hasLockID := statDevIno(curLockInfo)
-+				if !hasLockID || (held.dev == lDev && held.ino == lIno) {
-+					held.refs++
-+					lease := &lockedRootLease{lock: held, dir: held.dir}
-+					rootLockMu.Unlock()
-+					_ = candRoot.Close()
-+					return lease, nil
-+				}
-+			}
++		if held.file != nil && held.dir != nil && held.parentFD != nil && held.rootDev == rDev && held.rootIno == rIno && verifyRootStillBound(held, root) == nil {
++			held.refs++
++			lease := &lockedRootLease{lock: held, dir: held.dir}
++			rootLockMu.Unlock()
++			_ = candRoot.Close()
++			return lease, nil
 +		}
 +		delete(rootLocks, root)
 +		releaseRetired(held)
@@ -12229,7 +12229,7 @@ index e69de29..53a5372 100644
 +	// Best-effort prune of stale locks whose temp directories have already been removed.
 +	if len(rootLocks) >= 32 {
 +		for k, v := range rootLocks {
-+			if _, statErr := os.Lstat(filepath.Join(k, ".writer.lock")); statErr != nil {
++			if _, statErr := os.Lstat(k); statErr != nil {
 +				delete(rootLocks, k)
 +				releaseRetired(v)
 +			}
@@ -12243,70 +12243,21 @@ index e69de29..53a5372 100644
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
-+	f, err := candRoot.OpenFile(".writer.lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
-+	if err != nil {
++	rootFD, rfDev, rfIno, hasRFID, err := openPinnedDirFD(candRoot)
++	if err != nil || (hasRFID && (rfDev != rDev || rfIno != rIno)) {
 +		rootLockMu.Unlock()
 +		closeRetired()
++		if rootFD != nil {
++			_ = rootFD.Close()
++		}
 +		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
-+	finfo, err := f.Stat()
-+	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) {
++	if err := syscall.Flock(int(rootFD.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 +		rootLockMu.Unlock()
 +		closeRetired()
-+		_ = f.Close()
-+		_ = parentFD.Close()
-+		_ = candRoot.Close()
-+		return nil, ErrUnavailable
-+	}
-+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-+		rootLockMu.Unlock()
-+		closeRetired()
-+		_ = f.Close()
-+		_ = parentFD.Close()
-+		_ = candRoot.Close()
-+		return nil, ErrUnavailable
-+	}
-+	lDev, lIno, hasLockID := statDevIno(finfo)
-+	if pathHasDisallowedSymlink(root) {
-+		rootLockMu.Unlock()
-+		closeRetired()
-+		_ = f.Close()
-+		_ = parentFD.Close()
-+		_ = candRoot.Close()
-+		return nil, ErrUnavailable
-+	}
-+	curRootInfo, err := os.Lstat(root)
-+	if err != nil || !curRootInfo.IsDir() || curRootInfo.Mode()&os.ModeSymlink != 0 || curRootInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curRootInfo) {
-+		rootLockMu.Unlock()
-+		closeRetired()
-+		_ = f.Close()
-+		_ = parentFD.Close()
-+		_ = candRoot.Close()
-+		return nil, ErrUnavailable
-+	}
-+	if curRDev, curRIno, ok := statDevIno(curRootInfo); ok && (curRDev != rDev || curRIno != rIno) {
-+		rootLockMu.Unlock()
-+		closeRetired()
-+		_ = f.Close()
-+		_ = parentFD.Close()
-+		_ = candRoot.Close()
-+		return nil, ErrUnavailable
-+	}
-+	curLockInfo, err := candRoot.Lstat(".writer.lock")
-+	if err != nil || !curLockInfo.Mode().IsRegular() || curLockInfo.Mode()&os.ModeSymlink != 0 || curLockInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curLockInfo) {
-+		rootLockMu.Unlock()
-+		closeRetired()
-+		_ = f.Close()
-+		_ = parentFD.Close()
-+		_ = candRoot.Close()
-+		return nil, ErrUnavailable
-+	}
-+	if curLDev, curLIno, ok := statDevIno(curLockInfo); ok && hasLockID && (curLDev != lDev || curLIno != lIno) {
-+		rootLockMu.Unlock()
-+		closeRetired()
-+		_ = f.Close()
++		_ = rootFD.Close()
 +		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
@@ -12314,17 +12265,17 @@ index e69de29..53a5372 100644
 +	if err := syncPinnedDir(candRoot, root); err != nil {
 +		rootLockMu.Unlock()
 +		closeRetired()
-+		_ = f.Close()
++		_ = rootFD.Close()
 +		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
 +	held := &heldRootLock{
-+		file:      f,
++		file:      rootFD,
 +		dir:       candRoot,
 +		parentFD:  parentFD,
-+		dev:       lDev,
-+		ino:       lIno,
++		dev:       rDev,
++		ino:       rIno,
 +		rootDev:   rDev,
 +		rootIno:   rIno,
 +		parentDev: pDev,
@@ -12334,7 +12285,7 @@ index e69de29..53a5372 100644
 +	if err := verifyRootStillBound(held, root); err != nil {
 +		rootLockMu.Unlock()
 +		closeRetired()
-+		_ = f.Close()
++		_ = rootFD.Close()
 +		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
@@ -12343,7 +12294,7 @@ index e69de29..53a5372 100644
 +	lease := &lockedRootLease{lock: held, dir: candRoot}
 +	rootLockMu.Unlock()
 +	closeRetired()
-+	// Newly acquired exclusive .writer.lock guarantees no other proxy process owns root;
++	// Newly acquired exclusive root-directory flock guarantees no other proxy process owns root;
 +	// safely sweep content-verified crash-orphaned producer staging artifacts not active in this process.
 +	sweepOrphanStagingInRoot(candRoot, root, true)
 +	return lease, nil
@@ -12451,7 +12402,7 @@ index e69de29..53a5372 100644
 +	stagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker)-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
 +	stagingDirPattern   = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
 +	stageSealDirPattern = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
-+	reclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
++	reclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}$`)
 +	stagingOrphanAge    = 5 * time.Minute
 +
 +	activeStagingMu sync.Mutex
@@ -12488,6 +12439,14 @@ index e69de29..53a5372 100644
 +
 +func randomStagingToken() (string, error) {
 +	var buf [8]byte
++	if _, err := rand.Read(buf[:]); err != nil {
++		return "", err
++	}
++	return hex.EncodeToString(buf[:]), nil
++}
++
++func randomQuarantineToken() (string, error) {
++	var buf [16]byte
 +	if _, err := rand.Read(buf[:]); err != nil {
 +		return "", err
 +	}
@@ -12602,15 +12561,48 @@ index e69de29..53a5372 100644
 +	return raw, dev, ino, hasID, true
 +}
 +
++// removeVerifiedFileInSubdir holds the target file descriptor open across stat/content SHA-256
++// verification, re-checks Lstat identity, and unlinks via descriptor-pinned unix.Unlinkat before
++// closing the fd. Under the dedicated single-writer 0700 receipt-root contract (root-inode flock),
++// this prevents inode-number reuse during verification and refuses to unlink pre-existing or
++// previously swapped files (POSIX unlinkat is inherently name-based, so concurrent adversarial
++// same-UID mutations inside the dedicated private root remain outside POSIX process isolation).
 +func removeVerifiedFileInSubdir(subRoot *os.Root, childName string, dev, ino uint64, hasID bool, expectSHA string, maxBytes int64) bool {
 +	if subRoot == nil || !isSingleBaseName(childName) || !hasID || expectSHA == "" || maxBytes <= 0 {
 +		return false
 +	}
-+	raw, curDev, curIno, curHasID, ok := readPrivateRegularFileInSubdir(subRoot, childName, maxBytes)
-+	if !ok || !curHasID || curDev != dev || curIno != ino || sha256Hex(string(raw)) != expectSHA {
++	subDirFD, _, _, _, err := openPinnedDirFD(subRoot)
++	if err != nil {
 +		return false
 +	}
-+	return subRoot.Remove(childName) == nil
++	defer subDirFD.Close()
++	f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
++	if oerr != nil {
++		return false
++	}
++	defer f.Close()
++	fStat, serr := f.Stat()
++	if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > maxBytes {
++		return false
++	}
++	curDev, curIno, curHasID := statDevIno(fStat)
++	if !curHasID || curDev != dev || curIno != ino {
++		return false
++	}
++	raw, rerr := io.ReadAll(io.LimitReader(f, maxBytes+1))
++	if rerr != nil || len(raw) == 0 || int64(len(raw)) > maxBytes || sha256Hex(string(raw)) != expectSHA {
++		return false
++	}
++	lfi, lerr := subRoot.Lstat(childName)
++	if lerr != nil || !lfi.Mode().IsRegular() || lfi.Mode()&os.ModeSymlink != 0 {
++		return false
++	}
++	if lDev, lIno, okL := statDevIno(lfi); !okL || lDev != dev || lIno != ino {
++		return false
++	}
++	unlinkErr := unix.Unlinkat(int(subDirFD.Fd()), childName, 0)
++	runtime.KeepAlive(subDirFD)
++	return unlinkErr == nil
 +}
 +
 +func verifyStagingRegularFile(stagingRoot *os.Root, name string) (verifiedLeafChild, bool) {
@@ -12743,8 +12735,12 @@ index e69de29..53a5372 100644
 +		return false
 +	}
 +	if hasSeal {
-+		matched := pendingSHA != "" && sealDigest == pendingSHA
-+		if !matched && rootHandle != nil {
++		var matched bool
++		if pendingSHA != "" {
++			// When seal.pending.json is still present in stage-seal-*, seal.sha256 MUST match it directly;
++			// contradicting staged files are preserved untouched rather than explained away via <launch>.
++			matched = (sealDigest == pendingSHA)
++		} else if rootHandle != nil {
 +			if lSub, _, lerr := openVerifiedSubdir(rootHandle, launch); lerr == nil {
 +				for _, target := range []string{"seal.pending.json", "receipt.json"} {
 +					if raw, _, _, _, ok := readPrivateRegularFileInSubdir(lSub, target, maxReviewReceiptBytes); ok && sha256Hex(string(raw)) == sealDigest {
@@ -13284,10 +13280,10 @@ index e69de29..53a5372 100644
 +}
 +
 +// removeVerifiedLeafSubdir atomically quarantines a verified, expired bucket directory out of
-+// <root> into <root>/.staging/reclaim-... via descriptor-pinned renameatNoReplace BEFORE deleting
-+// any child file, then deletes ONLY the exact verified children by (dev, ino, sha256) in safe order.
-+// A crash after quarantine frees the quota slot immediately and is safely resumed on restart;
-+// any file swapped or added after verification is never deleted.
++// <root> into <root>/.staging/reclaim-<random> via descriptor-pinned renameatNoReplace BEFORE
++// deleting any child file, immediately confirms the quarantined directory matches the exact
++// inspected (subDev, subIno) before syncing or claiming quota, and then removes the verified
++// children in safe order via removeVerifiedFileInSubdir.
 +func removeVerifiedLeafSubdir(rootHandle *os.Root, root, name string, reviewBucket bool, expectDev, expectIno uint64, checkExpectedID bool, retention time.Duration, checkRetention bool) bool {
 +	subRoot, subDev, subIno, lastMod, verified, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
 +	if !ok {
@@ -13335,7 +13331,7 @@ index e69de29..53a5372 100644
 +	var releaseReclaim func()
 +	moved := false
 +	for i := 0; i < maxStagingCreateRetries; i++ {
-+		tok, terr := randomStagingToken()
++		tok, terr := randomQuarantineToken()
 +		if terr != nil {
 +			break
 +		}
@@ -13359,15 +13355,29 @@ index e69de29..53a5372 100644
 +		return false
 +	}
 +	defer releaseReclaim()
++
++	// Immediately confirm the directory that landed at .staging/<reclaimName> IS the exact inspected
++	// (subDev, subIno) BEFORE syncing, deleting any child, or counting the slot as reclaimed.
++	qFI, qErr := stagingRoot.Lstat(reclaimName)
++	if qErr != nil || !qFI.IsDir() || qFI.Mode()&os.ModeSymlink != 0 || qFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(qFI) {
++		_ = renameatNoReplacePinned(stagingDirFD, reclaimName, rootDirFD, name)
++		_ = subRoot.Close()
++		return false
++	}
++	if qDev, qIno, okQ := statDevIno(qFI); !okQ || qDev != subDev || qIno != subIno {
++		_ = renameatNoReplacePinned(stagingDirFD, reclaimName, rootDirFD, name)
++		_ = subRoot.Close()
++		return false
++	}
 +	_ = syncPinnedDir(rootHandle, root)
 +
-+	// Delete ONLY the exact files verified during inspection (checked again by dev, ino, sha256).
++	// Delete ONLY the exact files verified during inspection (checked again while held open before unlinkat).
 +	allClean := removeVerifiedChildrenInSafeOrder(subRoot, verified)
 +	_ = subRoot.Close()
 +	if allClean {
-+		qFI, qErr := stagingRoot.Lstat(reclaimName)
-+		if qErr == nil && qFI.IsDir() && qFI.Mode()&os.ModeSymlink == 0 && qFI.Mode().Perm()&0077 == 0 && ownedByCurrentUser(qFI) {
-+			if qDev, qIno, okQ := statDevIno(qFI); !okQ || (qDev == subDev && qIno == subIno) {
++		qFI2, qErr2 := stagingRoot.Lstat(reclaimName)
++		if qErr2 == nil && qFI2.IsDir() && qFI2.Mode()&os.ModeSymlink == 0 && qFI2.Mode().Perm()&0077 == 0 && ownedByCurrentUser(qFI2) {
++			if qDev, qIno, okQ := statDevIno(qFI2); !okQ || (qDev == subDev && qIno == subIno) {
 +				if stagingRoot.Remove(reclaimName) == nil {
 +					_ = syncPinnedDir(stagingRoot, filepath.Join(root, ".staging"))
 +				}
@@ -14342,8 +14352,8 @@ index e69de29..53a5372 100644
 +	if !ok {
 +		return false, ErrUnavailable
 +	}
-+	// Acquire single-writer root lock FIRST and pin all disk mutations to the locked root lease.
-+	// Never unlink or modify any file under root unless this process owns <root>/.writer.lock.
++	// Acquire single-writer root-directory flock FIRST and pin all disk mutations to the locked root lease.
++	// Never unlink or modify any file under root unless this process holds exclusive flock on root's inode.
 +	rootLease, err := acquirePrivateRootLease(root)
 +	if err != nil {
 +		return false, ErrUnavailable
@@ -14610,6 +14620,13 @@ index e69de29..53a5372 100644
 +	e.lastPersistedSHA = sha256Hex(string(data))
 +	if sealed {
 +		e.sealedReceiptSHA = sealedDigest
++		if rootLease.lock != nil {
++			e.sealedRootDev = rootLease.lock.rootDev
++			e.sealedRootIno = rootLease.lock.rootIno
++		}
++		e.sealedDirDev = launchDev
++		e.sealedDirIno = launchIno
++		e.hasSealedDirID = hasLaunchID
 +	}
 +	if syncSealAncestors {
 +		if err := syncSealAncestorsForSubRoot(rootLease, launchRoot, e.launch, e.directory, root, launchDev, launchIno, hasLaunchID); err != nil {
@@ -14828,10 +14845,10 @@ index e69de29..53a5372 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..0b81c8c 100644
+index e69de29..9e2acf2 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,7508 @@
+@@ -0,0 +1,7598 @@
 +package preflightreceipt
 +
 +import (
@@ -17767,8 +17784,9 @@ index e69de29..0b81c8c 100644
 +}
 +
 +func TestReviewReceiptSingleWriterRootLockBlocksSecondInstance(t *testing.T) {
-+	// Sol P1 #3 (PR #2280 R5): an exclusive non-blocking flock on <root>/.writer.lock prevents a
-+	// second same-UID proxy instance from reserving launches or confirming SealOK on a shared root.
++	// Sol P1 #3 (R5) + Sol P1 #2 / Astra P1 #1 (R43): an exclusive non-blocking flock directly on the
++	// receipt root directory inode prevents a second same-UID proxy instance from reserving launches
++	// or confirming SealOK on a shared root, and cannot be bypassed by deleting/rotating a lock file.
 +	root := filepath.Join(t.TempDir(), "shared-root")
 +	if err := os.Mkdir(root, 0700); err != nil {
 +		t.Fatal(err)
@@ -17776,16 +17794,11 @@ index e69de29..0b81c8c 100644
 +	if err := os.Chmod(root, 0700); err != nil {
 +		t.Fatal(err)
 +	}
-+	lockPath := filepath.Join(root, ".writer.lock")
-+	peerFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
++	peerFile, err := os.OpenFile(root, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := os.Chmod(lockPath, 0600); err != nil {
-+		_ = peerFile.Close()
-+		t.Fatal(err)
-+	}
-+	// Hold exclusive BSD flock on an independent open file description (simulates another proxy process).
++	// Hold exclusive BSD flock directly on root directory inode (simulates another proxy process).
 +	if err := syscall.Flock(int(peerFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 +		_ = peerFile.Close()
 +		t.Fatal(err)
@@ -21504,7 +21517,7 @@ index e69de29..0b81c8c 100644
 +		t.Fatal(err)
 +	}
 +	// Acquire a second lease on the fresh root at the original path -> cache evicts old entry,
-+	// yet lease1 is still active so moved/.writer.lock MUST remain exclusively locked.
++	// yet lease1 is still active so moved root directory inode MUST remain exclusively locked.
 +	lease2, err := acquirePrivateRootLease(root)
 +	if err != nil {
 +		lease1.Close()
@@ -21512,7 +21525,7 @@ index e69de29..0b81c8c 100644
 +	}
 +	defer lease2.Close()
 +
-+	probe, err := os.OpenFile(filepath.Join(moved, ".writer.lock"), os.O_RDWR, 0600)
++	probe, err := os.OpenFile(moved, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 +	if err != nil {
 +		lease1.Close()
 +		t.Fatal(err)
@@ -21520,14 +21533,14 @@ index e69de29..0b81c8c 100644
 +	if flockErr := syscall.Flock(int(probe.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); flockErr == nil {
 +		_ = probe.Close()
 +		lease1.Close()
-+		t.Fatalf("old root .writer.lock was released before active lease1 closed")
++		t.Fatalf("old root directory flock was released before active lease1 closed")
 +	}
 +
 +	// Closing lease1 releases the last reference -> another process/fd can now acquire the old lock.
 +	lease1.Close()
 +	if flockErr := syscall.Flock(int(probe.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); flockErr != nil {
 +		_ = probe.Close()
-+		t.Fatalf("old root .writer.lock remained locked after lease1 closed: %v", flockErr)
++		t.Fatalf("old root directory flock remained locked after lease1 closed: %v", flockErr)
 +	}
 +	_ = probe.Close()
 +}
@@ -22083,7 +22096,7 @@ index e69de29..0b81c8c 100644
 +		t.Fatal(err)
 +	}
 +
-+	// 2. Same-UID non-producer files (including EXACT matching pending-* name & suffix-less legacy name) -> MUST be preserved!
++	// 2. Same-UID non-producer files AND contradicting stage-seal-* (Astra P2 #4 R43) -> MUST be preserved!
 +	nonProducerMatchingName := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-9-abcdef0123456789", os.Getpid()))
 +	nonProducerLegacyName := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-1", os.Getpid()))
 +	foreignStagingFile := filepath.Join(stagingDir, "keep-foreign.txt")
@@ -22094,6 +22107,34 @@ index e69de29..0b81c8c 100644
 +		t.Fatal(err)
 +	}
 +	if err := os.WriteFile(foreignStagingFile, []byte("foreign"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	// Contradicting stage-seal-*: seal.pending.json disagrees with seal.sha256 even though seal.sha256
++	// matches <root>/<orphanLaunch>/receipt.json -> MUST NOT be deleted.
++	liveLaunchDir := filepath.Join(root, orphanLaunch)
++	if err := os.Mkdir(liveLaunchDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(liveLaunchDir, "receipt.json"), sealedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	contradictSealDir := filepath.Join(stagingDir, fmt.Sprintf("stage-seal-%d-8-abcdef0123456788", os.Getpid()))
++	if err := os.Mkdir(contradictSealDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	otherSealedBytes, _ := json.Marshal(ReviewReceipt{
++		Schema: ReviewSchema, Launch: orphanLaunch, Session: orphanSession,
++		Started: nowNS, Finished: nowNS, SealedAt: nowNS + 1, Complete: true, Sealed: true, Tainted: false,
++		Requests: 1, Routes: []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs: []string{rid}, LastResponseID: rid, LastOutputSHA256: outSHA,
++	})
++	if err := os.WriteFile(filepath.Join(contradictSealDir, "producer.json"), mBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(contradictSealDir, "seal.pending.json"), otherSealedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(contradictSealDir, "seal.sha256"), []byte(sha256Hex(string(sealedBytes))), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +
@@ -22117,6 +22158,9 @@ index e69de29..0b81c8c 100644
 +		if got, err := os.ReadFile(p); err != nil || string(got) != want {
 +			t.Fatalf("non-producer file %s inside .staging was removed/modified: err=%v raw=%q", p, err, string(got))
 +		}
++	}
++	if _, statErr := os.Lstat(filepath.Join(contradictSealDir, "seal.pending.json")); statErr != nil {
++		t.Fatalf("contradicting stage-seal dir was deleted instead of preserved: %v", statErr)
 +	}
 +
 +	// End-to-end review publish + seal succeeds cleanly on the recovered root.
@@ -22290,6 +22334,69 @@ index e69de29..0b81c8c 100644
 +	}
 +	if len(state.cache) != 1 {
 +		t.Fatalf("expected 1 negative cache entry for un-reclaimable old dir, got %d", len(state.cache))
++	}
++}
++
++func TestReviewReceiptRepeatSealRejectsReplacedLaunchDirWithIdenticalContent(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R43): repeat SealReviewWithDigest MUST bind to the original sealed
++	// launch directory inode and MUST NOT confirm SealOK if the launch directory is replaced
++	// with a new directory inode containing copied identical receipt.json and seal.sha256.
++	root := filepath.Join(t.TempDir(), "repeat-seal-replaced-dir")
++	launch := "review-c3333333-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-ccccccccccc3"
++
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	st1, d1 := SealReviewWithDigest(root, launch, session)
++	if st1 != SealOK || !isSHA256Hex(d1) {
++		t.Fatalf("initial SealReviewWithDigest = (%v, %q), want SealOK", st1, d1)
++	}
++	// Replace <root>/<launch> with a brand-new directory inode holding copied identical files.
++	origDir := filepath.Join(root, launch)
++	recRaw, err := os.ReadFile(filepath.Join(origDir, "receipt.json"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	shaRaw, err := os.ReadFile(filepath.Join(origDir, "seal.sha256"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	movedDir := filepath.Join(t.TempDir(), "old-launch")
++	if err := os.Rename(origDir, movedDir); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(origDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(origDir, "receipt.json"), recRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(origDir, "seal.sha256"), shaRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st2, d2 := SealReviewWithDigest(root, launch, session); st2 != SealUnavailable || d2 != "" {
++		t.Fatalf("repeat SealReviewWithDigest after launch dir replacement = (%v, %q), want (SealUnavailable, \"\")", st2, d2)
 +	}
 +}
 +
