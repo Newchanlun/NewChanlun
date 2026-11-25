@@ -295,7 +295,7 @@ index e69de29..2d18367 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..f47381a
+index 0000000..9796d17
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
 @@ -0,0 +1,1096 @@
@@ -1283,7 +1283,7 @@ index 0000000..f47381a
 +
 +func (f sealTestRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 +
-+func TestSealReviewReceiptHandlerRejectsBodyWithoutDraining(t *testing.T) {
++func TestPreflightReceiptSealHandlerRejectsBodyWithoutDraining(t *testing.T) {
 +	// Astra P2 #3 (PR #2280 R69): POST /v1/review-receipts/seal MUST reject any request carrying
 +	// a non-empty Content-Length or Transfer-Encoding: chunked body BEFORE entering seal logic,
 +	// send 400 + Connection: close immediately, and never hang waiting to drain unread body bytes.
@@ -7209,10 +7209,10 @@ index 0000000..1c8abfa
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..7d877c9
+index 0000000..ca8935f
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,203 @@
 +package auth
 +
 +import (
@@ -7281,6 +7281,7 @@ index 0000000..7d877c9
 +		Proxy:                 strictEnvProxyFunc,
 +		DialContext:           dialer.DialContext,
 +		ForceAttemptHTTP2:     true,
++		DisableCompression:    true,
 +		MaxIdleConns:          100,
 +		IdleConnTimeout:       90 * time.Second,
 +		TLSHandshakeTimeout:   10 * time.Second,
@@ -7528,10 +7529,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..baeb307 100644
+index e69de29..5e8d849 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11130 @@
+@@ -0,0 +1,11141 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -13743,10 +13744,12 @@ index e69de29..baeb307 100644
 +			if entry.inFlight > 0 {
 +				entry.inFlight--
 +			}
-+			if entry.inFlight == 0 && !entry.sealing && !entry.sealedFlag && reviewLedger[key] == entry {
-+				entry.mu.Lock()
++			var evictFD *os.File
++			if entry.inFlight == 0 && !entry.sealing && !entry.sealedFlag &&
++				!entry.failurePersistQueued && !entry.failurePersistRunning &&
++				!entry.pendingTaint.Load() && entry.pendingFailedTurnSeq.Load() == 0 &&
++				reviewLedger[key] == entry && entry.mu.TryLock() {
 +				canEvict := !entry.markerPersisted && !entry.tainted && !entry.sealed && entry.requests == 0
-+				var evictFD *os.File
 +				if canEvict {
 +					evictFD = entry.boundDirFD
 +					entry.boundDirFD = nil
@@ -13754,10 +13757,10 @@ index e69de29..baeb307 100644
 +				entry.mu.Unlock()
 +				if canEvict {
 +					delete(reviewLedger, key)
-+					closeBudgetedPinnedDirFD(evictFD)
 +				}
 +			}
 +			reviewMu.Unlock()
++			closeBudgetedPinnedDirFD(evictFD)
 +			return nil, ErrUnavailable
 +		}
 +	}
@@ -14351,14 +14354,15 @@ index e69de29..baeb307 100644
 +	return true, nil
 +}
 +
-+// verifyReviewDirAllowedEntries enforces the exact directory-entry allowlist and producer.json
-+// marker validation shared by pre-write inspection, first seal, cold-restart loading, repeat seal
-+// verification, and expired-directory reclamation (inspectProducerReceiptSubdir).
++// verifyReviewDirAllowedEntries enforces the exact directory-entry allowlist and mandatory
++// producer.json marker validation shared by pre-write inspection, first seal, cold-restart
++// loading, repeat seal verification, and expired-directory reclamation.
 +func verifyReviewDirAllowedEntries(subRoot *os.Root, launch string, allowSealedFiles bool) bool {
 +	entries, trunc, err := readDirCapped(subRoot, maxProducerLeafFiles)
 +	if err != nil || trunc {
 +		return false
 +	}
++	hasProducer := false
 +	for _, de := range entries {
 +		switch de.Name() {
 +		case "receipt.json":
@@ -14366,6 +14370,7 @@ index e69de29..baeb307 100644
 +			if !verifyProducerMarkerInSubdir(subRoot, launch) {
 +				return false
 +			}
++			hasProducer = true
 +		case "seal.sha256":
 +			if !allowSealedFiles {
 +				return false
@@ -14374,7 +14379,7 @@ index e69de29..baeb307 100644
 +			return false
 +		}
 +	}
-+	return true
++	return hasProducer
 +}
 +
 +func verifySealedDiskReceiptInRoot(rootLease *lockedRootLease, dir, root, launch, session, expectedSHA string, expectDirDev, expectDirIno uint64, checkDirID bool, wantPinFD bool, now time.Time) (SealStatus, string, uint64, uint64, bool, *os.File) {
@@ -17037,9 +17042,8 @@ index e69de29..baeb307 100644
 +			rDev, rIno := rootDev, rootIno
 +			finishReclaim := func() (fd1, fd2 *os.File) {
 +				if removed && pendingReviewLaunches[k] == nil {
-+					if ent := reviewLedger[k]; ent != nil && ent == expEnt && ent.inFlight == 0 && !ent.sealing {
++					if ent := reviewLedger[k]; ent != nil && ent == expEnt && ent.inFlight == 0 && !ent.sealing && !ent.failurePersistQueued && !ent.failurePersistRunning && ent.mu.TryLock() {
 +						delete(reviewLedger, k)
-+						ent.mu.Lock()
 +						fd1 = ent.boundDirFD
 +						ent.boundDirFD = nil
 +						ent.mu.Unlock()
@@ -17801,7 +17805,15 @@ index e69de29..baeb307 100644
 +	slot := len(c.receipt.Routes)
 +	c.receipt.Routes = append(c.receipt.Routes, "other")
 +	c.mu.Unlock()
-+	resp, err := t.next.RoundTrip(req)
++	outReq := req
++	if req.Header.Get("Accept-Encoding") == "" {
++		// Prevent Go's net/http.Transport from transparently negotiating gzip and stripping the
++		// wire Content-Length to -1 before our framing check runs. Callers that explicitly manage
++		// compression (e.g. codex_executor) already set Accept-Encoding and preserve wire Content-Length.
++		outReq = req.Clone(req.Context())
++		outReq.Header.Set("Accept-Encoding", "identity")
++	}
++	resp, err := t.next.RoundTrip(outReq)
 +	finish := func() { c.mu.Lock(); defer c.mu.Unlock(); c.bodies--; c.publishLocked() }
 +	if err != nil {
 +		if strict {
@@ -18663,10 +18675,10 @@ index e69de29..baeb307 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..eb06d38 100644
+index e69de29..9756828 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,12600 @@
+@@ -0,0 +1,12687 @@
 +package preflightreceipt
 +
 +import (
@@ -30998,6 +31010,31 @@ index e69de29..eb06d38 100644
 +				case "chunked-complete":
 +					_, _ = io.WriteString(tlsConn, fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n%s\r\n0\r\n\r\n", len(ssePayload), ssePayload))
 +					_ = tlsConn.CloseWrite()
++				case "gzip-fixed-length":
++					var gzBuf bytes.Buffer
++					gw := gzip.NewWriter(&gzBuf)
++					_, _ = gw.Write([]byte(ssePayload))
++					_ = gw.Close()
++					gzBytes := gzBuf.Bytes()
++					_, _ = io.WriteString(tlsConn, fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(gzBytes)))
++					_, _ = tlsConn.Write(gzBytes)
++					_ = tlsConn.CloseWrite()
++				case "identity-fixed-length":
++					// If caller failed to disable Go transparent gzip, Accept-Encoding would contain "gzip".
++					// Respond with fixed-length gzip whenever gzip is offered, or fixed-length identity otherwise.
++					reqText := string(buf[:n])
++					if strings.Contains(strings.ToLower(reqText), "accept-encoding: gzip") {
++						var gzBuf bytes.Buffer
++						gw := gzip.NewWriter(&gzBuf)
++						_, _ = gw.Write([]byte(ssePayload))
++						_ = gw.Close()
++						gzBytes := gzBuf.Bytes()
++						_, _ = io.WriteString(tlsConn, fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(gzBytes)))
++						_, _ = tlsConn.Write(gzBytes)
++					} else {
++						_, _ = io.WriteString(tlsConn, fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(ssePayload), ssePayload))
++					}
++					_ = tlsConn.CloseWrite()
 +				}
 +			}(rawConn)
 +		}
@@ -31030,13 +31067,31 @@ index e69de29..eb06d38 100644
 +			t.Fatalf("%s Start: %v", caseMode, err)
 +		}
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		if caseMode == "gzip-fixed-length" {
++			req.Header.Set("Accept-Encoding", "gzip")
++		}
 +		resp, rtErr := makeClient(ctx).Do(req)
 +		var readErr error
 +		if rtErr == nil && resp != nil {
-+			data, rerr := io.ReadAll(resp.Body)
-+			readErr = rerr
-+			if len(data) > 0 {
-+				col.ObserveStreamChunk(data)
++			var bodyReader io.Reader = resp.Body
++			var gzReader *gzip.Reader
++			if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
++				gzReader, readErr = gzip.NewReader(resp.Body)
++				if readErr == nil {
++					bodyReader = gzReader
++				}
++			}
++			if readErr == nil {
++				data, rerr := io.ReadAll(bodyReader)
++				readErr = rerr
++				if gzReader != nil {
++					_ = gzReader.Close()
++					// Drain any trailing bytes to reach underlying wire EOF.
++					_, _ = io.Copy(io.Discard, resp.Body)
++				}
++				if len(data) > 0 {
++					col.ObserveStreamChunk(data)
++				}
 +			}
 +			_ = resp.Body.Close()
 +		}
@@ -31058,6 +31113,14 @@ index e69de29..eb06d38 100644
 +	// 3. Complete chunked HTTP/1.1 TLS response (with 0\r\n\r\n) -> seals cleanly.
 +	if rtErr, readErr, st := runCase("chunked-complete", "review-ff9a9a9a-2222-4333-8444-555555555503", "019d0000-0000-7000-8000-00000000f903"); rtErr != nil || readErr != nil || st != SealOK {
 +		t.Fatalf("chunked-complete TLS = (rtErr=%v, readErr=%v, seal=%v), want (nil, nil, SealOK)", rtErr, readErr, st)
++	}
++	// 4. Fixed-length HTTP/1.1 gzip response with explicit Accept-Encoding -> preserves wire Content-Length and seals cleanly.
++	if rtErr, readErr, st := runCase("gzip-fixed-length", "review-ff9a9a9a-2222-4333-8444-555555555504", "019d0000-0000-7000-8000-00000000f904"); rtErr != nil || readErr != nil || st != SealOK {
++		t.Fatalf("gzip-fixed-length TLS = (rtErr=%v, readErr=%v, seal=%v), want (nil, nil, SealOK)", rtErr, readErr, st)
++	}
++	// 5. Default request without Accept-Encoding on default Transport -> transport injects Accept-Encoding: identity (no transparent gzip stripping Content-Length) and seals cleanly.
++	if rtErr, readErr, st := runCase("identity-fixed-length", "review-ff9a9a9a-2222-4333-8444-555555555505", "019d0000-0000-7000-8000-00000000f905"); rtErr != nil || readErr != nil || st != SealOK {
++		t.Fatalf("identity-fixed-length TLS = (rtErr=%v, readErr=%v, seal=%v), want (nil, nil, SealOK)", rtErr, readErr, st)
 +	}
 +}
 +
@@ -31128,6 +31191,42 @@ index e69de29..eb06d38 100644
 +	reviewMu.Unlock()
 +	if st, dig := SealReviewWithDigest(root, l2, s2); st != SealRejected || dig != "" {
 +		t.Fatalf("cold-restart seal with corrupted producer.json = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++
++	// 3. Missing producer.json BEFORE first seal -> SealRejected.
++	l3 := "review-ff9b9b9b-2222-4333-8444-555555555503"
++	s3 := "019d0000-0000-7000-8000-00000000f913"
++	runClean(l3, s3)
++	if err := os.Remove(filepath.Join(root, l3, "producer.json")); err != nil {
++		t.Fatal(err)
++	}
++	if st, dig := SealReviewWithDigest(root, l3, s3); st != SealRejected || dig != "" {
++		t.Fatalf("first seal with missing producer.json = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++
++	// 4. Clean first seal, then delete producer.json -> repeat & cold-restart seal BOTH SealRejected.
++	l4 := "review-ff9b9b9b-2222-4333-8444-555555555504"
++	s4 := "019d0000-0000-7000-8000-00000000f914"
++	runClean(l4, s4)
++	if st, dig := SealReviewWithDigest(root, l4, s4); st != SealOK || dig == "" {
++		t.Fatalf("clean first seal l4 = (%v, %q), want SealOK", st, dig)
++	}
++	if err := os.Remove(filepath.Join(root, l4, "producer.json")); err != nil {
++		t.Fatal(err)
++	}
++	if st, dig := SealReviewWithDigest(root, l4, s4); st != SealRejected || dig != "" {
++		t.Fatalf("repeat seal with missing producer.json = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	key4 := filepath.Clean(root) + "\x00" + l4
++	reviewMu.Lock()
++	delete(reviewLedger, key4)
++	if b, ok := sealedBindings[key4]; ok {
++		closeBudgetedPinnedDirFD(b.dirFD)
++		delete(sealedBindings, key4)
++	}
++	reviewMu.Unlock()
++	if st, dig := SealReviewWithDigest(root, l4, s4); st != SealRejected || dig != "" {
++		t.Fatalf("cold-restart seal with missing producer.json = (%v, %q), want (SealRejected, \"\")", st, dig)
 +	}
 +}
 +
