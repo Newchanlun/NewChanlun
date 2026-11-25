@@ -5962,10 +5962,10 @@ index 0000000..c34cfd7
 +	return unix.Renameat(oldfd, oldname, newfd, newname)
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..7e0444a 100644
+index e69de29..e4bf850 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,8878 @@
+@@ -0,0 +1,9067 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -6212,9 +6212,22 @@ index e69de29..7e0444a 100644
 +	started       int64
 +}
 +
++type sealedDirBinding struct {
++	rootDev    uint64
++	rootIno    uint64
++	dirDev     uint64
++	dirIno     uint64
++	hasDirID   bool
++	receiptSHA string
++	recordedAt time.Time
++}
++
++const maxSealedBindings = 16384
++
 +var (
 +	reviewMu              sync.Mutex
 +	reviewLedger          = make(map[string]*reviewEntry)
++	sealedBindings        = make(map[string]sealedDirBinding)
 +	pendingReviewLaunches = make(map[string]*pendingReviewState)
 +	pendingReviewTotal    int
 +	reviewTurnSeqGen      uint64
@@ -11767,46 +11780,61 @@ index e69de29..7e0444a 100644
 +	return readVerifiedSealDigestFromRoot(subRoot)
 +}
 +
-+func verifySealedDiskReceiptInRoot(rootLease *lockedRootLease, dir, root, launch, session, expectedSHA string, expectDirDev, expectDirIno uint64, checkDirID bool, now time.Time) (SealStatus, string) {
++func recordSealedBindingLocked(key string, b sealedDirBinding, now time.Time) bool {
++	if _, exists := sealedBindings[key]; !exists && len(sealedBindings) >= maxSealedBindings {
++		for k, v := range sealedBindings {
++			if now.Sub(v.recordedAt) >= reviewDiskRetention {
++				delete(sealedBindings, k)
++			}
++		}
++		if len(sealedBindings) >= maxSealedBindings {
++			return false
++		}
++	}
++	sealedBindings[key] = b
++	return true
++}
++
++func verifySealedDiskReceiptInRoot(rootLease *lockedRootLease, dir, root, launch, session, expectedSHA string, expectDirDev, expectDirIno uint64, checkDirID bool, now time.Time) (SealStatus, string, uint64, uint64, bool) {
 +	if rootLease == nil || rootLease.dir == nil || rootLease.lock == nil {
-+		return SealUnavailable, ""
++		return SealUnavailable, "", 0, 0, false
 +	}
 +	rootHandle := rootLease.dir
 +	subRoot, subFI, err := openVerifiedSubdir(rootHandle, launch)
 +	if err != nil {
 +		if errors.Is(err, os.ErrNotExist) {
-+			return SealRejected, ""
++			return SealRejected, "", 0, 0, false
 +		}
-+		return SealUnavailable, ""
++		return SealUnavailable, "", 0, 0, false
 +	}
 +	defer subRoot.Close()
 +	subDev, subIno, hasSubID := statDevIno(subFI)
 +	if checkDirID && (!hasSubID || subDev != expectDirDev || subIno != expectDirIno) {
-+		return SealUnavailable, ""
++		return SealUnavailable, "", 0, 0, false
 +	}
 +	diskEntry, onDisk, err := loadReviewEntryFromSubRoot(subRoot, dir, launch, session, now)
 +	if err != nil {
-+		return SealUnavailable, ""
++		return SealUnavailable, "", 0, 0, false
 +	}
 +	if !onDisk || diskEntry == nil || !diskEntry.sealed || diskEntry.tainted || diskEntry.session != session {
-+		return SealRejected, ""
++		return SealRejected, "", 0, 0, false
 +	}
 +	if !isSHA256Hex(diskEntry.sealedReceiptSHA) {
-+		return SealUnavailable, ""
++		return SealUnavailable, "", 0, 0, false
 +	}
 +	savedDigest, ok := readVerifiedSealDigestFromRoot(subRoot)
 +	if !ok || diskEntry.sealedReceiptSHA != savedDigest {
-+		return SealRejected, ""
++		return SealRejected, "", 0, 0, false
 +	}
 +	if expectedSHA != "" && savedDigest != expectedSHA {
-+		return SealRejected, ""
++		return SealRejected, "", 0, 0, false
 +	}
 +	// Always confirm launch, root, and pinned root-parent fsyncs plus active root/launch inode binding
 +	// before returning SealOK (never skip fsync via in-memory flags on repeat SealReview calls).
 +	if syncSealAncestorsForSubRoot(rootLease, subRoot, launch, dir, root, subDev, subIno, hasSubID) != nil {
-+		return SealUnavailable, ""
++		return SealUnavailable, "", 0, 0, false
 +	}
-+	return SealOK, savedDigest
++	return SealOK, savedDigest, subDev, subIno, hasSubID
 +}
 +
 +// SealReview seals a formal review launch once all in-flight requests have completed.
@@ -11860,11 +11888,32 @@ index e69de29..7e0444a 100644
 +			if entry.hasSealedDirID && (rootLease.lock.rootDev != entry.sealedRootDev || rootLease.lock.rootIno != entry.sealedRootIno) {
 +				return SealUnavailable, ""
 +			}
-+			st, digest := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, entry.sealedReceiptSHA, entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID, now)
++			st, digest, subDev, subIno, hasSubID := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, entry.sealedReceiptSHA, entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID, now)
 +			if st != SealOK {
 +				return st, ""
 +			}
 +			entry.sealSynced = true
++			if !entry.hasSealedDirID && hasSubID {
++				entry.sealedRootDev = rootLease.lock.rootDev
++				entry.sealedRootIno = rootLease.lock.rootIno
++				entry.sealedDirDev = subDev
++				entry.sealedDirIno = subIno
++				entry.hasSealedDirID = true
++			}
++			reviewMu.Lock()
++			recorded := recordSealedBindingLocked(key, sealedDirBinding{
++				rootDev:    rootLease.lock.rootDev,
++				rootIno:    rootLease.lock.rootIno,
++				dirDev:     subDev,
++				dirIno:     subIno,
++				hasDirID:   hasSubID,
++				receiptSHA: digest,
++				recordedAt: now,
++			}, now)
++			reviewMu.Unlock()
++			if !recorded {
++				return SealUnavailable, ""
++			}
 +			return SealOK, digest
 +		}
 +		if entry.sealing || entry.inFlight > 0 {
@@ -11903,15 +11952,36 @@ index e69de29..7e0444a 100644
 +				finishSeal(true)
 +				return SealUnavailable, ""
 +			}
-+			st, digest := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, expectedSHA, entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID, now)
++			st, digest, subDev, subIno, hasSubID := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, expectedSHA, entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID, now)
 +			if st != SealOK {
 +				entry.mu.Unlock()
 +				finishSeal(true)
 +				return st, ""
 +			}
 +			entry.sealSynced = true
++			if !entry.hasSealedDirID && hasSubID {
++				entry.sealedRootDev = rootLease.lock.rootDev
++				entry.sealedRootIno = rootLease.lock.rootIno
++				entry.sealedDirDev = subDev
++				entry.sealedDirIno = subIno
++				entry.hasSealedDirID = true
++			}
 +			entry.mu.Unlock()
++			reviewMu.Lock()
++			recorded := recordSealedBindingLocked(key, sealedDirBinding{
++				rootDev:    rootLease.lock.rootDev,
++				rootIno:    rootLease.lock.rootIno,
++				dirDev:     subDev,
++				dirIno:     subIno,
++				hasDirID:   hasSubID,
++				receiptSHA: digest,
++				recordedAt: now,
++			}, now)
++			reviewMu.Unlock()
 +			finishSeal(true)
++			if !recorded {
++				return SealUnavailable, ""
++			}
 +			return SealOK, digest
 +		}
 +		if overflowed {
@@ -11975,17 +12045,66 @@ index e69de29..7e0444a 100644
 +		}
 +		entry.sealSynced = true
 +		digest := entry.sealedReceiptSHA
++		sRootDev, sRootIno := entry.sealedRootDev, entry.sealedRootIno
++		sDirDev, sDirIno, sHasID := entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID
 +		entry.mu.Unlock()
++		reviewMu.Lock()
++		recorded := recordSealedBindingLocked(key, sealedDirBinding{
++			rootDev:    sRootDev,
++			rootIno:    sRootIno,
++			dirDev:     sDirDev,
++			dirIno:     sDirIno,
++			hasDirID:   sHasID,
++			receiptSHA: digest,
++			recordedAt: now,
++		}, now)
++		reviewMu.Unlock()
 +		finishSeal(true)
-+		if !isSHA256Hex(digest) {
++		if !isSHA256Hex(digest) || !recorded {
 +			return SealUnavailable, ""
 +		}
 +		return SealOK, digest
 +	}
++	binding, hasBinding := sealedBindings[key]
 +	reviewMu.Unlock()
 +
 +	dir := filepath.Join(root, launch)
-+	return verifySealedDiskReceiptInRoot(rootLease, dir, root, launch, session, "", 0, 0, false, now)
++	if hasBinding {
++		if rootLease.lock.rootDev != binding.rootDev || rootLease.lock.rootIno != binding.rootIno {
++			return SealUnavailable, ""
++		}
++		st, digest, _, _, _ := verifySealedDiskReceiptInRoot(rootLease, dir, root, launch, session, binding.receiptSHA, binding.dirDev, binding.dirIno, binding.hasDirID, now)
++		return st, digest
++	}
++	st, digest, subDev, subIno, hasSubID := verifySealedDiskReceiptInRoot(rootLease, dir, root, launch, session, "", 0, 0, false, now)
++	if st == SealOK {
++		reviewMu.Lock()
++		if existing, exists := sealedBindings[key]; exists {
++			same := existing.rootDev == rootLease.lock.rootDev &&
++				existing.rootIno == rootLease.lock.rootIno &&
++				existing.receiptSHA == digest &&
++				(!existing.hasDirID || (hasSubID && existing.dirDev == subDev && existing.dirIno == subIno))
++			reviewMu.Unlock()
++			if !same {
++				return SealUnavailable, ""
++			}
++			return SealOK, digest
++		}
++		recorded := recordSealedBindingLocked(key, sealedDirBinding{
++			rootDev:    rootLease.lock.rootDev,
++			rootIno:    rootLease.lock.rootIno,
++			dirDev:     subDev,
++			dirIno:     subIno,
++			hasDirID:   hasSubID,
++			receiptSHA: digest,
++			recordedAt: now,
++		}, now)
++		reviewMu.Unlock()
++		if !recorded {
++			return SealUnavailable, ""
++		}
++	}
++	return st, digest
 +}
 +
 +// BeginReviewReserved transfers an already-reserved in-flight review launch into a Collector
@@ -12679,6 +12798,26 @@ index e69de29..7e0444a 100644
 +	return err == nil && len(rem) == 0
 +}
 +
++func reviewSealPendingMatchesReceipt(reviewDisk, sealPendingDisk ReviewReceipt) bool {
++	return !reviewDisk.Sealed &&
++		reviewDisk.Complete &&
++		!reviewDisk.Tainted &&
++		sealPendingDisk.Schema == reviewDisk.Schema &&
++		sealPendingDisk.Launch == reviewDisk.Launch &&
++		sealPendingDisk.Session == reviewDisk.Session &&
++		sealPendingDisk.Started == reviewDisk.Started &&
++		sealPendingDisk.Finished == reviewDisk.Finished &&
++		sealPendingDisk.Complete == reviewDisk.Complete &&
++		sealPendingDisk.Tainted == reviewDisk.Tainted &&
++		sealPendingDisk.Requests == reviewDisk.Requests &&
++		slices.Equal(sealPendingDisk.Routes, reviewDisk.Routes) &&
++		slices.Equal(sealPendingDisk.ResponseIDSHAs, reviewDisk.ResponseIDSHAs) &&
++		sealPendingDisk.LastResponseID == reviewDisk.LastResponseID &&
++		sealPendingDisk.LastOutputSHA256 == reviewDisk.LastOutputSHA256 &&
++		sealPendingDisk.Sealed &&
++		sealPendingDisk.SealedAt >= reviewDisk.Finished
++}
++
 +func cleanOrphanStageSealDir(rootHandle, stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool) bool {
 +	children, err := readDirFromRoot(subRoot)
 +	if err != nil {
@@ -12688,7 +12827,8 @@ index e69de29..7e0444a 100644
 +		return false
 +	}
 +	verified := make(map[string]verifiedLeafChild, len(children))
-+	var launch string
++	var markerLaunch string
++	var pendingLaunch string
 +	var pendingSHA string
 +	var sealDigest string
 +	hasMarker := false
@@ -12701,7 +12841,7 @@ index e69de29..7e0444a 100644
 +			if !ok || !ValidReviewLaunch(owner) {
 +				return false
 +			}
-+			launch = owner
++			markerLaunch = owner
 +			hasMarker = true
 +			verified[cname] = ch
 +		case "seal.pending.json":
@@ -12713,10 +12853,7 @@ index e69de29..7e0444a 100644
 +			if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &rr) != nil || !ValidReviewLaunch(rr.Launch) || !isValidProducerReviewReceipt(rr, rr.Launch) || !rr.Sealed {
 +				return false
 +			}
-+			if launch != "" && rr.Launch != launch {
-+				return false
-+			}
-+			launch = rr.Launch
++			pendingLaunch = rr.Launch
 +			pendingSHA = sha256Hex(string(raw))
 +			verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: pendingSHA}
 +		case "seal.sha256":
@@ -12731,9 +12868,14 @@ index e69de29..7e0444a 100644
 +			return false
 +		}
 +	}
-+	if !hasMarker || launch == "" {
++	// Cross-check launch ownership independently of ReadDir(-1) enumeration order.
++	if !hasMarker || markerLaunch == "" {
 +		return false
 +	}
++	if pendingLaunch != "" && pendingLaunch != markerLaunch {
++		return false
++	}
++	launch := markerLaunch
 +	if hasSeal {
 +		var matched bool
 +		if pendingSHA != "" {
@@ -12776,16 +12918,24 @@ index e69de29..7e0444a 100644
 +	}
 +	if len(children) > 0 {
 +		verified := make(map[string]verifiedLeafChild, len(children))
-+		var receiptSHA, pendingSHA, sealDigest string
-+		hasSeal := false
++		var (
++			hasMarker, hasReceipt, hasPending, hasSeal bool
++			markerOwner, receiptOwner, pendingOwner    string
++			markerIsReview, receiptIsReview            bool
++			reviewDisk, pendingDisk                    ReviewReceipt
++			receiptSHA, pendingSHA, sealDigest         string
++		)
 +		for _, child := range children {
 +			cname := child.Name()
 +			switch cname {
 +			case "producer.json":
-+				ch, _, ok := readVerifiedStagingMarkerFile(subRoot)
-+				if !ok {
++				ch, owner, ok := readVerifiedStagingMarkerFile(subRoot)
++				if !ok || owner == "" {
 +					return false
 +				}
++				hasMarker = true
++				markerOwner = owner
++				markerIsReview = ValidReviewLaunch(owner)
 +				verified[cname] = ch
 +			case "receipt.json":
 +				raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(subRoot, cname, maxReviewReceiptBytes)
@@ -12799,6 +12949,15 @@ index e69de29..7e0444a 100644
 +				if !okRR && !okPR {
 +					return false
 +				}
++				hasReceipt = true
++				if okRR {
++					receiptIsReview = true
++					receiptOwner = rr.Launch
++					reviewDisk = rr
++				} else {
++					receiptIsReview = false
++					receiptOwner = pr.Session
++				}
 +				receiptSHA = sha256Hex(string(raw))
 +				verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: receiptSHA}
 +			case "seal.pending.json":
@@ -12810,6 +12969,9 @@ index e69de29..7e0444a 100644
 +				if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &rr) != nil || !ValidReviewLaunch(rr.Launch) || !isValidProducerReviewReceipt(rr, rr.Launch) || !rr.Sealed {
 +					return false
 +				}
++				hasPending = true
++				pendingOwner = rr.Launch
++				pendingDisk = rr
 +				pendingSHA = sha256Hex(string(raw))
 +				verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: pendingSHA}
 +			case "seal.sha256":
@@ -12824,8 +12986,55 @@ index e69de29..7e0444a 100644
 +				return false
 +			}
 +		}
-+		if hasSeal && sealDigest != receiptSHA && sealDigest != pendingSHA {
++		// Enforce order-independent owner/bucket agreement and full cross-file seal consistency
++		// matching inspectProducerReceiptSubdir + safe deletion order (seal.sha256 -> seal.pending.json -> receipt.json -> producer.json).
++		var commonOwner string
++		var isReview bool
++		haveOwner := false
++		bindOwner := func(owner string, rev bool) bool {
++			if owner == "" {
++				return false
++			}
++			if !haveOwner {
++				commonOwner = owner
++				isReview = rev
++				haveOwner = true
++				return true
++			}
++			return commonOwner == owner && isReview == rev
++		}
++		if hasMarker && !bindOwner(markerOwner, markerIsReview) {
 +			return false
++		}
++		if hasReceipt && !bindOwner(receiptOwner, receiptIsReview) {
++			return false
++		}
++		if hasPending && !bindOwner(pendingOwner, true) {
++			return false
++		}
++		if !haveOwner {
++			return false
++		}
++		if !isReview && (hasPending || hasSeal) {
++			return false
++		}
++		if hasPending && hasReceipt && !reviewSealPendingMatchesReceipt(reviewDisk, pendingDisk) {
++			return false
++		}
++		if hasSeal {
++			if hasPending {
++				if sealDigest != pendingSHA {
++					return false
++				}
++			} else if hasReceipt {
++				if !reviewDisk.Sealed || sealDigest != receiptSHA {
++					return false
++				}
++			} else {
++				// seal.sha256 is always removed FIRST in removeVerifiedChildrenInSafeOrder;
++				// a standalone seal.sha256 without its receipt/pending file is never valid.
++				return false
++			}
 +		}
 +		if !removeVerifiedChildrenInSafeOrder(subRoot, verified) {
 +			return false
@@ -13076,8 +13285,6 @@ index e69de29..7e0444a 100644
 +	var reviewDisk ReviewReceipt
 +	var sealPendingDisk ReviewReceipt
 +	var reviewSealed bool
-+	var reviewComplete bool
-+	var reviewTainted bool
 +	for _, child := range children {
 +		childName := child.Name()
 +		if !isProducerOwnedReceiptFile(childName, reviewBucket) {
@@ -13106,8 +13313,6 @@ index e69de29..7e0444a 100644
 +				}
 +				reviewDisk = disk
 +				reviewSealed = disk.Sealed
-+				reviewComplete = disk.Complete
-+				reviewTainted = disk.Tainted
 +				for _, ns := range []int64{disk.Started, disk.Finished, disk.SealedAt} {
 +					if ns > 0 {
 +						if t := time.Unix(0, ns); t.After(lastMod) {
@@ -13209,24 +13414,7 @@ index e69de29..7e0444a 100644
 +			// An interrupted seal is recognized ONLY when producer.json, a matching unsealed complete
 +			// receipt.json, AND the exact staged seal.pending.json are present; when seal.sha256 is
 +			// also present, its 64-byte digest MUST cryptographically match sha256(seal.pending.json).
-+			if !hasProducerMarker || !hasReceipt || !reviewComplete || reviewTainted || !hasSealPending {
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, nil, false
-+			}
-+			if sealPendingDisk.Schema != reviewDisk.Schema ||
-+				sealPendingDisk.Launch != reviewDisk.Launch ||
-+				sealPendingDisk.Session != reviewDisk.Session ||
-+				sealPendingDisk.Started != reviewDisk.Started ||
-+				sealPendingDisk.Finished != reviewDisk.Finished ||
-+				sealPendingDisk.Complete != reviewDisk.Complete ||
-+				sealPendingDisk.Tainted != reviewDisk.Tainted ||
-+				sealPendingDisk.Requests != reviewDisk.Requests ||
-+				!slices.Equal(sealPendingDisk.Routes, reviewDisk.Routes) ||
-+				!slices.Equal(sealPendingDisk.ResponseIDSHAs, reviewDisk.ResponseIDSHAs) ||
-+				sealPendingDisk.LastResponseID != reviewDisk.LastResponseID ||
-+				sealPendingDisk.LastOutputSHA256 != reviewDisk.LastOutputSHA256 ||
-+				!sealPendingDisk.Sealed ||
-+				sealPendingDisk.SealedAt < reviewDisk.Finished {
++			if !hasProducerMarker || !hasReceipt || !hasSealPending || !reviewSealPendingMatchesReceipt(reviewDisk, sealPendingDisk) {
 +				_ = subRoot.Close()
 +				return nil, 0, 0, time.Time{}, nil, false
 +			}
@@ -13507,6 +13695,7 @@ index e69de29..7e0444a 100644
 +				}
 +				delete(reviewLedger, key)
 +			}
++			delete(sealedBindings, key)
 +			reviewMu.Unlock()
 +		}
 +		if removeVerifiedLeafSubdir(rootHandle, root, cand.name, reviewBucket, cand.dev, cand.ino, cand.hasID, retention, true) {
@@ -14845,10 +15034,10 @@ index e69de29..7e0444a 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..9e2acf2 100644
+index e69de29..e940b91 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,7598 @@
+@@ -0,0 +1,7707 @@
 +package preflightreceipt
 +
 +import (
@@ -22137,6 +22326,51 @@ index e69de29..9e2acf2 100644
 +	if err := os.WriteFile(filepath.Join(contradictSealDir, "seal.sha256"), []byte(sha256Hex(string(sealedBytes))), 0600); err != nil {
 +		t.Fatal(err)
 +	}
++	// Sol P1 #1 + Astra P2 #2 (R44): stage-seal-* with mismatched launch between producer.json and seal.pending.json
++	// MUST be preserved regardless of ReadDir(-1) enumeration order.
++	otherLaunch := "review-c0000000-2222-4333-8444-555555555599"
++	mismatchStageSealDir := filepath.Join(stagingDir, fmt.Sprintf("stage-seal-%d-7-abcdef0123456787", os.Getpid()))
++	if err := os.Mkdir(mismatchStageSealDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	otherLaunchMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: otherLaunch, Started: nowNS})
++	if err := os.WriteFile(filepath.Join(mismatchStageSealDir, "producer.json"), otherLaunchMarker, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(mismatchStageSealDir, "seal.pending.json"), sealedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(mismatchStageSealDir, "seal.sha256"), []byte(sha256Hex(string(sealedBytes))), 0600); err != nil {
++		t.Fatal(err)
++	}
++	// Sol P1 #1 + Astra P2 #3 (R44): reclaim-* with mismatched owner between producer.json and receipt.json,
++	// OR contradicting seal.pending.json + receipt.json, MUST be preserved untouched.
++	mismatchReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-6-abcdef0123456786", os.Getpid()))
++	if err := os.Mkdir(mismatchReclaimDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(mismatchReclaimDir, "producer.json"), otherLaunchMarker, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(mismatchReclaimDir, "receipt.json"), sealedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	contradictReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-5-abcdef0123456795", os.Getpid()))
++	if err := os.Mkdir(contradictReclaimDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(contradictReclaimDir, "producer.json"), mBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(contradictReclaimDir, "receipt.json"), sealedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(contradictReclaimDir, "seal.pending.json"), otherSealedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(contradictReclaimDir, "seal.sha256"), []byte(sha256Hex(string(sealedBytes))), 0600); err != nil {
++		t.Fatal(err)
++	}
 +
 +	// Fresh lock acquire simulates process restart with PID reuse.
 +	lease, err := acquirePrivateRootLease(root)
@@ -22161,6 +22395,15 @@ index e69de29..9e2acf2 100644
 +	}
 +	if _, statErr := os.Lstat(filepath.Join(contradictSealDir, "seal.pending.json")); statErr != nil {
 +		t.Fatalf("contradicting stage-seal dir was deleted instead of preserved: %v", statErr)
++	}
++	if _, statErr := os.Lstat(filepath.Join(mismatchStageSealDir, "seal.pending.json")); statErr != nil {
++		t.Fatalf("mismatched-launch stage-seal dir was deleted instead of preserved: %v", statErr)
++	}
++	if _, statErr := os.Lstat(filepath.Join(mismatchReclaimDir, "receipt.json")); statErr != nil {
++		t.Fatalf("mismatched-owner reclaim dir was deleted instead of preserved: %v", statErr)
++	}
++	if _, statErr := os.Lstat(filepath.Join(contradictReclaimDir, "seal.pending.json")); statErr != nil {
++		t.Fatalf("contradicting reclaim dir was deleted instead of preserved: %v", statErr)
 +	}
 +
 +	// End-to-end review publish + seal succeeds cleanly on the recovered root.
@@ -22225,14 +22468,26 @@ index e69de29..9e2acf2 100644
 +	c.Complete(true)
 +	c.HandlerDone(true)
 +
-+	// Rotate root away during parent sync inside syncSealAncestorsForSubRoot.
++	// Rotate root away ONLY during the POST-COMMIT parent sync inside syncSealAncestorsForSubRoot
++	// (after sealed receipt.json has already been committed and launchDir + root have been synced),
++	// proving the final verifyRootStillBound check blocks SealOK (Astra P2 #4 R44).
 +	origSync := syncDirFn
 +	defer func() { syncDirFn = origSync }()
++	launchDir := filepath.Join(root, launch)
 +	movedAway := filepath.Join(base, "receipts-old")
-+	rotated := false
++	sawPostCommitLaunchSync := false
++	sawPostCommitRootSync := false
++	rotatedAtSealParentSync := false
 +	syncDirFn = func(dir string) error {
-+		if !rotated && filepath.Clean(dir) == filepath.Clean(base) {
-+			rotated = true
++		clean := filepath.Clean(dir)
++		if clean == filepath.Clean(launchDir) {
++			if raw, rerr := os.ReadFile(filepath.Join(launchDir, "receipt.json")); rerr == nil && strings.Contains(string(raw), `"sealed":true`) {
++				sawPostCommitLaunchSync = true
++			}
++		} else if sawPostCommitLaunchSync && clean == filepath.Clean(root) {
++			sawPostCommitRootSync = true
++		} else if sawPostCommitRootSync && !rotatedAtSealParentSync && clean == filepath.Clean(base) {
++			rotatedAtSealParentSync = true
 +			if rerr := os.Rename(root, movedAway); rerr != nil {
 +				return rerr
 +			}
@@ -22246,7 +22501,13 @@ index e69de29..9e2acf2 100644
 +		return nil
 +	}
 +	if st, digest := SealReviewWithDigest(root, launch, session); st != SealUnavailable || digest != "" {
-+		t.Fatalf("SealReviewWithDigest after root rotation = (%v, %q), want (SealUnavailable, \"\")", st, digest)
++		t.Fatalf("SealReviewWithDigest after post-commit root rotation = (%v, %q), want (SealUnavailable, \"\")", st, digest)
++	}
++	if !rotatedAtSealParentSync {
++		t.Fatalf("test fault never reached post-commit parent sync inside syncSealAncestorsForSubRoot (launchSync=%v rootSync=%v)", sawPostCommitLaunchSync, sawPostCommitRootSync)
++	}
++	if raw, err := os.ReadFile(filepath.Join(movedAway, launch, "receipt.json")); err != nil || !strings.Contains(string(raw), `"sealed":true`) {
++		t.Fatalf("expected sealed receipt committed in movedAway before final verification rejected SealOK: err=%v raw=%s", err, string(raw))
 +	}
 +}
 +
@@ -22397,6 +22658,43 @@ index e69de29..9e2acf2 100644
 +	}
 +	if st2, d2 := SealReviewWithDigest(root, launch, session); st2 != SealUnavailable || d2 != "" {
 +		t.Fatalf("repeat SealReviewWithDigest after launch dir replacement = (%v, %q), want (SealUnavailable, \"\")", st2, d2)
++	}
++
++	// Astra P1 #1 (R44): even AFTER reviewLedger evicts the sealed entry (without process restart),
++	// sealedBindings MUST still preserve the original dir inode + digest binding and reject the replaced dir.
++	key := filepath.Clean(root) + "\x00" + launch
++	reviewMu.Lock()
++	delete(reviewLedger, key)
++	reviewMu.Unlock()
++	if st3, d3 := SealReviewWithDigest(root, launch, session); st3 != SealUnavailable || d3 != "" {
++		t.Fatalf("post-eviction SealReviewWithDigest after launch dir replacement = (%v, %q), want (SealUnavailable, \"\")", st3, d3)
++	}
++
++	// Sol P2 #2 (R44): after a cold restart (both reviewLedger and sealedBindings empty), the first
++	// disk-fallback SealOK MUST record the confirmed dir inode in sealedBindings so a subsequent
++	// directory replacement returns SealUnavailable rather than SealOK.
++	reviewMu.Lock()
++	delete(reviewLedger, key)
++	delete(sealedBindings, key)
++	reviewMu.Unlock()
++	if st4, d4 := SealReviewWithDigest(root, launch, session); st4 != SealOK || d4 != d1 {
++		t.Fatalf("cold post-restart SealReviewWithDigest = (%v, %q), want (SealOK, %q)", st4, d4, d1)
++	}
++	movedDir2 := filepath.Join(t.TempDir(), "old-launch-2")
++	if err := os.Rename(origDir, movedDir2); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(origDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(origDir, "receipt.json"), recRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(origDir, "seal.sha256"), shaRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st5, d5 := SealReviewWithDigest(root, launch, session); st5 != SealUnavailable || d5 != "" {
++		t.Fatalf("post-restart repeat SealReviewWithDigest after dir replacement = (%v, %q), want (SealUnavailable, \"\")", st5, d5)
 +	}
 +}
 +
