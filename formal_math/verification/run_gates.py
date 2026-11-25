@@ -1,4 +1,9 @@
-"""FM-04 门禁。退出码：0 绿，1 红，2 无法判定。"""
+"""FM-04 门禁（已停用）。#2312 第二片起审计程序不再是被审包的构建目标，本脚本无法再运行，入口改为 runner/run.py。"""
+
+import sys
+
+sys.stderr.write("run_gates.py 已停用：fm_audit 不再由被审包构建，请用 formal_math/verification/runner/run.py\n")
+sys.exit(2)
 
 import argparse
 import hashlib

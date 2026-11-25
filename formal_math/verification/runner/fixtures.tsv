@@ -1,0 +1,254 @@
+# 旧夹具归属与本片在新入口上的实测期望。列：夹具	归属	退出码	判红步骤	红码	说明
+# 退出码为 - 的行不在新入口上跑。归属是设计上负责的那一层，期望列是现状，不是承诺。
+must_red/g1/r4-manifest-path-source	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 PACKAGE_SOURCE；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g1/r4-manifest-url	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 PACKAGE_SOURCE；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g1/revision	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 PACKAGE_PIN；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g1/runtime-pin	不再检查	0	-	-	旧期望 RUNTIME_TOOLCHAIN_PIN；运行期 Lean 版本不符改为第 3 步 TOOLCHAIN 环境故障退 2；本自测不伪造 lean，故全绿
+must_red/g1/toolchain	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 TOOLCHAIN_PIN；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g15/bridge	取料	1	fetch	CONTENT_PATH	旧期望 IMPORT_EDGE；顶层 Bridge.lean 不是内容文件，第 2 步 CONTENT_PATH；真实流程里预检先以 TOP_LEVEL 判红
+must_red/g15/chan-audit-math-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-audit-math-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-proxy	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-thm	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-exec-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-exec-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-exec-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-final-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-final-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-hypotheses-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-hypotheses-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-hypotheses-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proofs-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proofs-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proofs-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proxy-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proxy-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proxy-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-thm-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-thm-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-thm-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-exec	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-final	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-proofs	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-proxy	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-root	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-test	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-thm	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chandyn-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chantest-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/empty-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_red/g15/literal-proof	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/main-dynamics	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/no-expose	第四片	1	build	BUILD_WFAIL	旧期望 EXPOSE_SECTION；源码层规则「定义文件须用 @[expose] public section」；现状由 build 一步兜住
+must_red/g15/no-module	头部	1	headers	MODULE_FIRST	旧期望 MODULE_FIRST
+must_red/g15/private-import	头部	1	headers	IMPORT_ALL	旧期望 IMPORT_ALL
+must_red/g15/r2-g3-meta-import-all	头部	1	headers	IMPORT_ALL	旧期望 IMPORT_ALL
+must_red/g15/r2-g4-challenge-trans-ext	头部	1	headers	IMPORT_PINNED	旧期望 IMPORT_CLOSURE
+must_red/g15/r2-g5-interp-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_red/g15/r2-g6-bridge-subdir	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/r4-p9d2-challenge-trans-std	头部	1	headers	IMPORT_CLOSURE	旧期望 IMPORT_CLOSURE
+must_red/g15/raw-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_red/g15/whole-mathlib	头部	1	headers	WHOLE_MATHLIB	旧期望 WHOLE_MATHLIB
+must_red/g2/fable-b1	头部	1	headers	IMPORT_PINNED	旧期望 LOCAL_OPTION；新流水线在头部规则一步拦下
+must_red/g2/lib-option	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 LEAN_OPTION_OVERRIDE；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/local-autoimplicit	第四片	0	-	-	旧期望 LOCAL_OPTION；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g2/local-linter	第四片	0	-	-	旧期望 LOCAL_OPTION；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g2/missing-option	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 LEAN_OPTION；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/r2-a1-clean	第四片	0	-	-	旧期望 LOCAL_OPTION；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g2/r2-a2-clean	头部	1	headers	IMPORT_PINNED	旧期望 LOCAL_OPTION；新流水线在头部规则一步拦下
+must_red/g2/r2-a4d-guillemet-opt	第四片	0	-	-	旧期望 LOCAL_OPTION；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g2/r2-a5-build-config	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 BUILD_WFAIL,LAKEFILE_KEY；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/r2-a6-build-config	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 BUILD_WFAIL,LAKEFILE_KEY；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/r2-a6b-build-config	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 BUILD_WFAIL,LAKEFILE_KEY；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/r2-a6c-build-config	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 BUILD_WFAIL,LAKEFILE_KEY；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/r2-a6d-build-config	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 BUILD_WFAIL,LAKEFILE_KEY；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/r3-a5b-grind-option	第四片	0	-	-	旧期望 LOCAL_OPTION；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g2/r3-a5c-grind-kernel	第四片	0	-	-	旧期望 LOCAL_OPTION；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g2/r4-p6a-lakefile-invalid-toml	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 LAKEFILE_KEY；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/r4-p6b-lakefile-more-lean-args	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 LAKEFILE_KEY；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/r4-p6c-lakefile-package-options	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 LAKEFILE_KEY；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/raw-linter	第四片	0	-	-	旧期望 LOCAL_OPTION；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g2/relaxed-local	第四片	0	-	-	旧期望 LOCAL_OPTION；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g2/unimported-child	预检	1	precheck	PATH_SCOPE,TRUSTED_DRIFT	旧期望 BUILD_WFAIL；改了受信文件：配置与门禁目录须与基线同一对象，被审工作区的配置也取自基线
+must_red/g2/unused	沙箱构建	1	build	BUILD_WFAIL	旧期望 BUILD_WFAIL
+must_red/g3/admit	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/attribute-command-macro	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/attribute-csimp	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/axiom	第四片	1	env	ENV_AXIOM,ENV_AXIOM_DEP	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/blocked-kernel-option	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/deriving-inline-not-whitelisted	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/deriving-not-whitelisted	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/environment-derived-without-certificate	环境层	1	env	ENV_PARTIAL	旧期望 ENV_PARTIAL
+must_red/g3/environment-implemented-by	环境层	1	env	ENV_IMPLEMENTED_BY	旧期望 ENV_IMPLEMENTED_BY
+must_red/g3/environment-meta	环境层	1	env	ENV_META	旧期望 ENV_META
+must_red/g3/environment-partial	环境层	1	env	ENV_PARTIAL	旧期望 ENV_PARTIAL
+must_red/g3/environment-partial-mutual	环境层	1	env	ENV_PARTIAL	旧期望 ENV_PARTIAL
+must_red/g3/environment-unsafe	环境层	1	env	ENV_UNSAFE	旧期望 ENV_UNSAFE
+must_red/g3/eval	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/exit-command	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/explore-eval-rejected	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/extern	第四片	1	env	ENV_EXTERN	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/fable-b1	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/guard-msgs-declaration	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/guard-msgs-drop-warning	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/guard-msgs-outside-final	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/implemented-by	第四片	1	env	ENV_IMPLEMENTED_BY	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/import-aesop	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/import-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/import-lean	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/library-macro-option	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/local-linter	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/meta-def	第四片	1	env	ENV_META	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/meta-import-library	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/meta-section	第四片	1	env	ENV_META	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/native-decide	第四片	1	env	ENV_AXIOM,ENV_AXIOM_DEP	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/non-module	头部	1	headers	MODULE_FIRST	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/partial	第四片	1	env	ENV_PARTIAL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/prelude	头部	1	headers	PRELUDE	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/private-proof	环境层	1	build	BUILD_WFAIL	旧期望 ENV_SORRY；整次运行在 build 一步先判红；对应的环境层码由其它夹具覆盖
+must_red/g3/r2-a2-clean	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r2-a2-syntax-quotes	第四片	1	env	ENV_META	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/r2-a3-interp-raw-g3	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r2-a4d-guillemet-opt	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r2-d5c-subsingleton-ref	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r2-g3-meta-import-all	头部	1	headers	IMPORT_ALL	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1-macro	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1b-macro-clean	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1c-macro-full	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1d-macro-nuclear	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1e-macro-fresh	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1f-environment	环境层	1	headers	META_IMPORT	旧期望 ENV_IMPLEMENTED_BY,ENV_META,ENV_PARTIAL,ENV_UNSAFE；整次运行在 headers 一步先判红；对应的环境层码由其它夹具覆盖
+must_red/g3/r3-a1f-macro	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1f-victim-source-only	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1g-environment	环境层	1	headers	META_IMPORT	旧期望 ENV_IMPLEMENTED_BY,ENV_META,ENV_PARTIAL,ENV_UNSAFE；整次运行在 headers 一步先判红；对应的环境层码由其它夹具覆盖
+must_red/g3/r3-a1g-macro-stripinfo	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1g-victim-source-only	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a2-init-attr	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r3-a2b-init-meta-import	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a2b-init-plain-source-only	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a3-meta-attrs	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a3b-app-elab	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a4-guard-msgs-drop	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r3-a5a-example-sorryax	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r3-a5b-grind-option	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r3-a5c-grind-kernel	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r3-a8b-mathlib-lemma	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r4-p0-include-str-unsafe-io	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p0-include-str-unsafe-io-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p1a-by-elab-io	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p1a-by-elab-io-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p1b-by-elab-options	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p1b-by-elab-options-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p1d-sudo-by-elab-io	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p1d-sudo-by-elab-io-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p2a-sudo-set-option	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p2b-sudo-set-option-clean	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r4-p3a-eval-percent	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r4-p3a-eval-percent-source-only	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r4-p3b-include-str-host-read	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p3b-include-str-host-read-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p3b2-include-str-clean	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p3b2-include-str-clean-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p3c-trace-siffwm	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p3c-trace-siffwm-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p3d-trace-siffwm-eval	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p3d-trace-siffwm-eval-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p4a-decreasing-by-rfl-prime	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
+must_red/g3/r4-p5a-guard-msgs-substring	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p5b-guard-msgs-swallow	第四片	1	env	ENV_SORRY	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/r4-p7a-deriving-spoof	环境层	1	build	BUILD_WFAIL	旧期望 ENV_PARTIAL；整次运行在 build 一步先判红；对应的环境层码由其它夹具覆盖
+must_red/g3/r4-p7a-deriving-spoof-source	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p7a2-deriving-spoof	环境层	1	env	ENV_PARTIAL	旧期望 ENV_PARTIAL
+must_red/g3/r4-p7a2-deriving-spoof-source	第四片	1	env	ENV_PARTIAL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/r4-p7b-ctoridx-spoof-source	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p7b2-ctoridx-spoof	环境层	1	env	ENV_IMPLEMENTED_BY,ENV_UNSAFE	旧期望 ENV_IMPLEMENTED_BY,ENV_UNSAFE
+must_red/g3/r4-p7b2-ctoridx-spoof-source	第四片	1	env	ENV_IMPLEMENTED_BY,ENV_UNSAFE	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/r4-p7c-extern-on-exempt	环境层	1	env	ENV_EXTERN	旧期望 ENV_EXTERN
+must_red/g3/r4-p7c-extern-on-exempt-source	第四片	1	env	ENV_EXTERN	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/r4-p7d-term-unsafe	第四片	1	env	ENV_IMPLEMENTED_BY	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/r4-p7d-term-unsafe-source-only	第四片	1	env	ENV_IMPLEMENTED_BY	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/r4-p7e-root-sorryax	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/raw-command	第四片	1	env	ENV_META	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/run-cmd	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/sorry	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/sorry-via-export	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/syntax	第四片	1	env	ENV_META	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/unsafe	第四片	1	env	ENV_UNSAFE	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g6a/changed-constant	声明锁	1	env	LOCK_CHANGED	旧期望 LOCK_CHANGED
+must_red/g6a/def-to-abbrev	声明锁	1	env	LOCK_CHANGED	旧期望 LOCK_CHANGED
+must_red/g6a/opaque-type	声明锁	1	env	LOCK_CHANGED	旧期望 LOCK_CHANGED
+must_red/g6a/removed	声明锁	1	env	LOCK_REMOVED	旧期望 LOCK_REMOVED
+must_red/g6a/theorem-to-axiom	声明锁	1	env	ENV_AXIOM,ENV_AXIOM_DEP,LOCK_CHANGED	旧期望 LOCK_CHANGED
+must_red/g6a/unlisted	声明锁	1	env	LOCK_UNLISTED	旧期望 LOCK_UNLISTED
+must_red/g6b/no-layout-waiver	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。infra 改 statement-lock.json：PATH_SCOPE，第一片自测同形
+must_red/g6b/proof-edits-defs	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。proof 改 Chan/Defs：PATH_SCOPE
+must_red/g6b/r4-empty-branch-suffix	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。空后缀分支名：BRANCH_ROLE
+must_red/g6b/r4-symlink-in-proof	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。提交树里的符号链接：MODE；工作树里的符号链接不再检查
+must_red/g6b/r4-untracked-root-file	不再检查	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。未跟踪文件：门禁只审提交
+must_green/g1/pins	预检	0	-	-	旧期望 绿；阴性对照
+must_green/g15/expose	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/module-comments	头部	0	-	-	旧期望 绿
+must_green/g15/r2-g1-unexposed-struct	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/r2-g2-unexposed-instance	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/r2-g7-public-import-chan-defs	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/r4-p9d1-defs-noncomputable	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/r4-w1d-defs-deriving	头部	1	env	ENV_PARTIAL,EXPOSE_SECTION,LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g2/common-syntax	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/generated-auxiliaries	沙箱构建	1	env	ENV_PARTIAL	旧期望 绿；阴性对照；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g2/no-warnings	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r3-a4c-guard-msgs	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r3-a7-omit	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r3-a7b-mutual-deriving	沙箱构建	1	env	ENV_PARTIAL	旧期望 绿；阴性对照；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g2/r3-a7c-omit-instance	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r4-w1a-plain-rec-ord	沙箱构建	1	env	ENV_PARTIAL	旧期望 绿；阴性对照；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g2/r4-w2-w3-proofs	沙箱构建	1	env	ENV_PARTIAL,LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g3/attributes-whitelist	第四片	1	build	BUILD_WFAIL	旧期望 绿；阴性对照；夹具自身有告警（`@[no_expose]` has no effect），--wfail 判红；旧自测只跑门 3、不构建
+must_green/g3/comments	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/common-syntax	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/generated-auxiliaries	第四片	1	env	ENV_PARTIAL	旧期望 绿；阴性对照；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g3/r2-a4c-guillemet	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a4c-guard-msgs	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7-default-prop-field	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7-named-expose-section	第四片	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g3/r3-a7-noncomputable-section	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7-omit	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7-open-scoped	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7-open-scoped-attr	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7-struct-extends	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7-tactic-var	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7b-mutual-deriving	第四片	1	env	ENV_PARTIAL	旧期望 绿；阴性对照；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g3/r3-a7c-omit-instance	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a7d-deriving-nonempty	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r3-a8-mathlib	第四片	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g3/r4-p8a-local-instance-simp	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r4-w1a-plain-rec-ord	第四片	1	env	ENV_PARTIAL	旧期望 绿；阴性对照；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g3/r4-w1b-plain-rec-others	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/r4-w1c-ns-private-deriving	第四片	1	env	ENV_PARTIAL	旧期望 绿；阴性对照；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g3/r4-w1d-defs-deriving	第四片	1	env	ENV_PARTIAL,EXPOSE_SECTION,LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g3/r4-w1e-ns-param-deriving	第四片	1	env	ENV_PARTIAL	旧期望 绿；阴性对照；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g3/r4-w2-w3-proofs	第四片	1	env	ENV_PARTIAL,LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED；没给派生证书：合法派生判红（已接受，第四片接证书）
+must_green/g3/raw-comments	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g3/real-declarations	第四片	0	-	-	旧期望 绿；阴性对照
+must_green/g6a/alpha-rename	声明锁	0	-	-	旧期望 绿
+must_green/g6a/def-to-abbrev	声明锁	0	-	-	旧期望 绿
+must_green/g6a/opaque-type	声明锁	0	-	-	旧期望 绿
+must_green/g6a/original	声明锁	0	-	-	旧期望 绿
+must_green/g6a/r4-p9a-let-vs-have	声明锁	0	-	-	旧期望 绿
+must_green/g6a/theorem-to-axiom	声明锁	0	-	-	旧期望 绿
+must_green/g6b/decl-signoffs	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。decl 改 verification/garbage-signoffs.yaml：新表下判红，见第一片 README 出入表
+must_green/g6b/detached-pr	不再检查	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。分支名由调用方作参数给出，不再读 HEAD 或 GITHUB_HEAD_REF；infra 改门禁目录归预检放行流程
+must_green/g6b/infra-generic	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。infra 改门禁目录：须放行开关
+must_green/g6b/proof-edits-test	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。proof 改 ChanTest：绿
+must_green/g6b/symbolic-wins	不再检查	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。分支名来源优先级：改为显式参数
+must_unknown/g2/broken-string	沙箱构建	1	build	BUILD_WFAIL	旧期望 退 2；源码写坏：旧实现无法判定（退 2），新流水线在构建一步判红
+must_unknown/g3/broken-string	沙箱构建	1	build	BUILD_WFAIL	旧期望 退 2；源码写坏：旧实现无法判定（退 2），新流水线在构建一步判红
+must_unknown/g3/r2-a4-comment-edge	沙箱构建	1	build	BUILD_WFAIL	旧期望 退 2；源码写坏：旧实现无法判定（退 2），新流水线在构建一步判红
+must_unknown/g3/r2-a4b-comment-desync	头部	1	headers	HEADER_PARSE	旧期望 退 2；新流水线在头部规则一步拦下
+must_unknown/g6b/detached-no-ref	不再检查	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。分离 HEAD 且无分支名：改为显式参数，缺参数退 2

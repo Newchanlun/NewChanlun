@@ -20,12 +20,3 @@ globs = ["Chan.*"]
 name = "ChanTest"
 roots = ["ChanTest.Probe"]
 globs = ["ChanTest.+"]
-
-[[lean_exe]]
-name = "fm_audit"
-root = "verification.Audit"
-supportInterpreter = true
-
-[[lean_lib]]
-name = "FMEnvGates"
-roots = ["verification.EnvGates", "verification.SourceGates", "verification.Perimeter", "verification.Inventory"]

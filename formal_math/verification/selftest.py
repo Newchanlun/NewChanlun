@@ -7,6 +7,12 @@
   断言 `run_gates.py --report` 里出现或不出现某条读数，报告退出码恒为 0。
 """
 
+import sys
+
+sys.stderr.write("selftest.py 已停用：它经 run_gates.py 跑旧门禁；新入口的自测是 formal_math/verification/runner/selftest.py\n")
+sys.exit(2)
+
+
 import argparse
 import json
 import os
