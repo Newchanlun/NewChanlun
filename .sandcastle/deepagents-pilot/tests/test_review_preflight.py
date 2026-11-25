@@ -1894,3 +1894,61 @@ def test_round_trip_rejects_unpaired_utf16_surrogate_and_accepts_valid_pair():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_round_trip_rejects_case_alias_protocol_keys_matching_go_producer():
+    """Astra P2 #2 (R52): Python 须与 Go 正式生产者一致拒绝协议字段的大小写重复键与非规范大小写别名。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    # 与 Go 单测 TestReviewReceiptStrictRejectsCaseAliasDuplicateStatusKey 使用同一终态帧。
+    case_dup_payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_case_dup","status":"completed","Status":"failed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}\n\n'
+    )
+    non_canonical_alias = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_case_alias","Status":"completed","model":"gpt-6.2-sol"}}\n\n'
+    )
+    current = {"body": case_dup_payload}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res_dup = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000092",
+            preflight.Deadline(5),
+        )
+        assert res_dup["ok"] is False
+
+        current["body"] = non_canonical_alias
+        res_alias = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000091",
+            preflight.Deadline(5),
+        )
+        assert res_alias["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

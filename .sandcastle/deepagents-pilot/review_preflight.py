@@ -355,13 +355,66 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
                 "error": {"exception": type(error).__name__, "errno": None}}
 
 
+_SSE_EVENT_SCHEMA_KEYS = frozenset({
+    "type", "response_id", "model", "error", "response", "message",
+    "item", "item_id", "output_index", "content_index", "text", "delta", "refusal", "part",
+    "arguments", "input", "code", "name", "call_id",
+})
+_SSE_RESPONSE_SCHEMA_KEYS = frozenset({"id", "model", "status", "error", "output"})
+_SSE_ITEM_SCHEMA_KEYS = frozenset({
+    "id", "type", "role", "phase", "status", "content", "response_id",
+    "call_id", "name", "server_label", "arguments", "input", "code", "action", "queries",
+})
+_SSE_CONTENT_PART_SCHEMA_KEYS = frozenset({"type", "text", "refusal"})
+
+
 def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     out: dict[str, object] = {}
+    seen_lower: set[str] = set()
     for key, value in pairs:
-        if key in out:
+        lower = key.lower()
+        if key in out or lower in seen_lower:
             raise ValueError("duplicate JSON key")
+        seen_lower.add(lower)
         out[key] = value
     return out
+
+
+def _check_canonical_schema_keys(obj: object, schema_keys: frozenset[str]) -> None:
+    if not isinstance(obj, dict):
+        return
+    for key in obj:
+        lower = key.lower()
+        if key != lower and lower in schema_keys:
+            raise ValueError(f"non-canonical protocol key case: {key}")
+
+
+def _validate_sse_protocol_key_casing(event: object) -> None:
+    if not isinstance(event, dict):
+        return
+    _check_canonical_schema_keys(event, _SSE_EVENT_SCHEMA_KEYS)
+    resp = event.get("response")
+    if isinstance(resp, dict):
+        _check_canonical_schema_keys(resp, _SSE_RESPONSE_SCHEMA_KEYS)
+        output = resp.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if isinstance(item, dict):
+                    _check_canonical_schema_keys(item, _SSE_ITEM_SCHEMA_KEYS)
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        for part in content:
+                            _check_canonical_schema_keys(part, _SSE_CONTENT_PART_SCHEMA_KEYS)
+    item = event.get("item")
+    if isinstance(item, dict):
+        _check_canonical_schema_keys(item, _SSE_ITEM_SCHEMA_KEYS)
+        content = item.get("content")
+        if isinstance(content, list):
+            for part in content:
+                _check_canonical_schema_keys(part, _SSE_CONTENT_PART_SCHEMA_KEYS)
+    part = event.get("part")
+    if isinstance(part, dict):
+        _check_canonical_schema_keys(part, _SSE_CONTENT_PART_SCHEMA_KEYS)
 
 
 def _reject_json_constant(token: str) -> object:
@@ -467,6 +520,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                             )
                             if _contains_surrogate(event):
                                 raise ValueError("unpaired UTF-16 surrogate")
+                            _validate_sse_protocol_key_casing(event)
                         except ValueError:
                             detail = "SSE 数据帧 JSON 解析失败"
                             break

@@ -6516,10 +6516,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..0c2777c 100644
+index e69de29..ccc8eb6 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,9917 @@
+@@ -0,0 +1,9949 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -6539,6 +6539,7 @@ index e69de29..0c2777c 100644
 +	"hash"
 +	"io"
 +	"net/http"
++	"net/url"
 +	"os"
 +	"path/filepath"
 +	"regexp"
@@ -6788,6 +6789,11 @@ index e69de29..0c2777c 100644
 +	maxSealedBindings         = 2048
 +	pinnedDirFDBudgetOverride = -1
 +	pinnedDirFDs              atomic.Int64
++	getNofileRlimitFn         = func() (uint64, error) {
++		var rl syscall.Rlimit
++		err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl)
++		return rl.Cur, err
++	}
 +)
 +
 +func computePinnedDirFDBudget(nofile uint64, maxCap int) int {
@@ -6811,11 +6817,11 @@ index e69de29..0c2777c 100644
 +	if pinnedDirFDBudgetOverride >= 0 {
 +		return pinnedDirFDBudgetOverride
 +	}
-+	var rl syscall.Rlimit
-+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl); err == nil {
-+		return computePinnedDirFDBudget(rl.Cur, maxSealedBindings)
++	if cur, err := getNofileRlimitFn(); err == nil {
++		return computePinnedDirFDBudget(cur, maxSealedBindings)
 +	}
-+	return maxSealedBindings
++	// Fail closed if RLIMIT_NOFILE cannot be queried so pinned launch FDs can never exhaust a low-limit process.
++	return 0
 +}
 +
 +func tryReservePinnedDirFD() bool {
@@ -14810,12 +14816,19 @@ index e69de29..0c2777c 100644
 +		prefix := root + "\x00"
 +		pinnedSet = make(map[string]struct{})
 +		for k, b := range sealedBindings {
-+			if b.dirFD != nil && strings.HasPrefix(k, prefix) {
-+				pinnedSet[strings.TrimPrefix(k, prefix)] = struct{}{}
++			if b.dirFD != nil && strings.HasPrefix(k, prefix) && now.Sub(b.recordedAt) >= retention &&
++				pendingReviewLaunches[k] == nil && activeSealingKeys[k] == 0 && !reclaimingKeys[k] {
++				if ent := reviewLedger[k]; ent == nil || (ent.inFlight == 0 && !ent.sealing && now.Sub(ent.touched) >= retention) {
++					pinnedSet[strings.TrimPrefix(k, prefix)] = struct{}{}
++				}
 +			}
 +		}
 +		for k, ent := range reviewLedger {
-+			if ent != nil && ent.inFlight == 0 && !ent.sealing && strings.HasPrefix(k, prefix) {
++			if ent != nil && ent.inFlight == 0 && !ent.sealing && strings.HasPrefix(k, prefix) && now.Sub(ent.touched) >= retention &&
++				pendingReviewLaunches[k] == nil && activeSealingKeys[k] == 0 && !reclaimingKeys[k] {
++				if b, ok := sealedBindings[k]; ok && now.Sub(b.recordedAt) < retention {
++					continue
++				}
 +				pinnedSet[strings.TrimPrefix(k, prefix)] = struct{}{}
 +			}
 +		}
@@ -14879,21 +14892,25 @@ index e69de29..0c2777c 100644
 +		})
 +		return true
 +	}
++	pinnedVisited := 0
 +	if pinnedSet != nil {
 +		// Prioritize entries that hold in-process pinned FDs so expired non-FD disk directories
-+		// never crowd out FD reclamation within maxReclaimInspectPerCall.
++		// never crowd out FD reclamation within maxReclaimInspectPerCall, and track visited
++		// progress so state.cursor always advances past skipped batches on FD-only scans.
 +		for i := 0; i < len(names); i++ {
 +			idx := (startIdx + i) % len(names)
 +			name := names[idx]
++			pinnedVisited++
 +			if _, ok := pinnedSet[name]; !ok {
 +				continue
 +			}
 +			if !inspectName(name) {
++				pinnedVisited--
 +				break
 +			}
 +		}
 +	}
-+	if needDirs > 0 || pinnedSet == nil {
++	if (needDirs > 0 || pinnedSet == nil) && inspected < maxReclaimInspectPerCall {
 +		for i := 0; i < len(names); i++ {
 +			idx := (startIdx + i) % len(names)
 +			name := names[idx]
@@ -14911,6 +14928,8 @@ index e69de29..0c2777c 100644
 +		if state != nil && len(names) > 0 {
 +			state.cursor = (startIdx + visited) % len(names)
 +		}
++	} else if state != nil && len(names) > 0 && pinnedVisited > 0 {
++		state.cursor = (startIdx + pinnedVisited) % len(names)
 +	}
 +	if len(candidates) == 0 {
 +		return 0, 0
@@ -15564,11 +15583,24 @@ index e69de29..0c2777c 100644
 +	}
 +}
 +
++func isExactCodexResponsesURL(u *url.URL) bool {
++	return u != nil &&
++		u.Opaque == "" &&
++		u.RawPath == "" &&
++		u.Path == "/backend-api/codex/responses" &&
++		u.EscapedPath() == "/backend-api/codex/responses" &&
++		!u.ForceQuery &&
++		u.RawQuery == "" &&
++		u.Fragment == "" &&
++		u.RawFragment == "" &&
++		u.RequestURI() == "/backend-api/codex/responses"
++}
++
 +func codexOutboundModel(req *http.Request) string {
 +	if req.Method != http.MethodPost || req.Body == nil {
 +		return ""
 +	}
-+	if req.URL == nil || req.URL.Path != "/backend-api/codex/responses" {
++	if !isExactCodexResponsesURL(req.URL) {
 +		return ""
 +	}
 +	orig := req.Body
@@ -15600,7 +15632,7 @@ index e69de29..0c2777c 100644
 +		return "other"
 +	}
 +	if provider == "codex" {
-+		if host != "chatgpt.com" || req.Method != http.MethodPost || req.URL.Path != "/backend-api/codex/responses" || req.URL.RawQuery != "" || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
++		if host != "chatgpt.com" || req.Method != http.MethodPost || !isExactCodexResponsesURL(req.URL) || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
 +			return "other"
 +		}
 +		if codexOutboundModel(req) != model {
@@ -16438,10 +16470,10 @@ index e69de29..0c2777c 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..b1b8ead 100644
+index e69de29..cd2ff88 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,9472 @@
+@@ -0,0 +1,9744 @@
 +package preflightreceipt
 +
 +import (
@@ -25912,5 +25944,277 @@ index e69de29..b1b8ead 100644
 +	if st := runCase("truncated-bom", "review-faaaaaaa-2222-4333-8444-555555555503", "019d0000-0000-7000-8000-fffffffff603",
 +		[][]byte{{0xEF}}); st != SealRejected {
 +		t.Fatalf("truncated 0xEF SealReview = %v, want SealRejected", st)
++	}
++}
++
++func TestRouteRejectsPercentEncodedAndNonCanonicalCodexPaths(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R52): route() and codexOutboundModel() MUST check the wire request
++	// target (EscapedPath / RawPath / Opaque / ForceQuery / RawQuery / RequestURI), not decoded
++	// URL.Path alone, so percent-encoded slashes like /backend-api%2Fcodex/responses or trailing
++	// "?" are NEVER recorded as a trusted codex route.
++	validReq, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := route("codex", "gpt-6.2-sol", validReq); got != "codex:gpt-6.2-sol@chatgpt.com" {
++		t.Fatalf("canonical Codex route = %q, want codex:gpt-6.2-sol@chatgpt.com", got)
++	}
++
++	badURLs := []string{
++		"https://chatgpt.com/backend-api%2Fcodex/responses",
++		"https://chatgpt.com/backend-api/codex%2Fresponses",
++		"https://chatgpt.com/backend-api/codex/responses?",
++		"https://chatgpt.com/backend-api/codex/responses?x=1",
++		"https://chatgpt.com/backend-api/codex/responses#frag",
++	}
++	for _, rawURL := range badURLs {
++		req, rerr := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		if rerr != nil {
++			t.Fatalf("NewRequest(%q): %v", rawURL, rerr)
++		}
++		if got := route("codex", "gpt-6.2-sol", req); got != "other" {
++			t.Fatalf("route(%q) = %q, want other (Path=%q RawPath=%q RequestURI=%q)", rawURL, got, req.URL.Path, req.URL.RawPath, req.URL.RequestURI())
++		}
++	}
++	// Also test opaque URL form.
++	opaqueReq, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	opaqueReq.URL.Opaque = "//chatgpt.com/backend-api/codex/responses"
++	if got := route("codex", "gpt-6.2-sol", opaqueReq); got != "other" {
++		t.Fatalf("route(opaque URL) = %q, want other", got)
++	}
++}
++
++func TestEffectivePinnedDirFDBudgetFailsClosedOnGetrlimitError(t *testing.T) {
++	// Astra P2 #4 (PR #2280 R52): when querying RLIMIT_NOFILE fails, effectivePinnedDirFDBudget
++	// MUST fail closed (0) instead of falling back to maxSealedBindings (2048).
++	oldOverride := pinnedDirFDBudgetOverride
++	oldFn := getNofileRlimitFn
++	pinnedDirFDBudgetOverride = -1
++	getNofileRlimitFn = func() (uint64, error) {
++		return 0, errors.New("injected getrlimit EPERM")
++	}
++	defer func() {
++		pinnedDirFDBudgetOverride = oldOverride
++		getNofileRlimitFn = oldFn
++	}()
++
++	if got := effectivePinnedDirFDBudget(); got != 0 {
++		t.Fatalf("effectivePinnedDirFDBudget on Getrlimit error = %d, want 0", got)
++	}
++	root := filepath.Join(t.TempDir(), "rlimit-err-fail-closed")
++	launch := "review-fbbbbbbb-2222-4333-8444-555555555501"
++	if res, err := ReserveReview(root, launch); !errors.Is(err, ErrUnavailable) || res != nil {
++		if res != nil {
++			res.Release()
++		}
++		t.Fatalf("ReserveReview on Getrlimit error = (%v, %v), want (nil, ErrUnavailable)", res, err)
++	}
++	if _, statErr := os.Lstat(filepath.Join(root, launch)); !os.IsNotExist(statErr) {
++		t.Fatalf("rejected Getrlimit-error ReserveReview left dir on disk: %v", statErr)
++	}
++}
++
++func TestReviewReceiptFDOnlyReclaimAdvancesCursorPast64SkippedPinnedEntries(t *testing.T) {
++	// Sol P1 #1 + Astra P2 #3 (PR #2280 R52): when disk quota has room and only pinned FD budget
++	// is exhausted, FD-only reclamation MUST:
++	// (1) skip recently-reconfirmed sealedBindings (recordedAt within retention) immediately; AND
++	// (2) advance state.cursor past a 64-entry batch of disk-expired pinned entries that skip at
++	//     reclaim time (e.g. digest mismatch), so a later reclaimable entry at index 64 is reached!
++	root := filepath.Join(t.TempDir(), "fd-cursor-advance")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	ancient := time.Now().Add(-48 * time.Hour)
++	cleanRoot := filepath.Clean(root)
++	names := make([]string, 0, 66)
++	var cleanupFDs []*os.File
++	var cleanupKeys []string
++	defer func() {
++		reviewMu.Lock()
++		for _, k := range cleanupKeys {
++			delete(sealedBindings, k)
++		}
++		reviewMu.Unlock()
++		for _, fd := range cleanupFDs {
++			_ = fd.Close()
++		}
++	}()
++
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lease.Close()
++	var rootDev, rootIno uint64
++	if rf, rerr := lease.dir.Open("."); rerr == nil {
++		if rfi, serr := rf.Stat(); serr == nil {
++			rootDev, rootIno, _ = statDevIno(rfi)
++		}
++		_ = rf.Close()
++	}
++
++	makeBoundAgedDir := func(idx int, recordedAt time.Time, mismatchDigest bool, countBudget bool) (string, string) {
++		launch := fmt.Sprintf("review-fccccccc-2222-4333-8444-%012d", idx)
++		session := fmt.Sprintf("019d0000-0000-7000-8000-%012d", idx)
++		dir := filepath.Join(root, launch)
++		if mkErr := os.Mkdir(dir, 0700); mkErr != nil {
++			t.Fatal(mkErr)
++		}
++		rr := ReviewReceipt{
++			Schema:           ReviewSchema,
++			Launch:           launch,
++			Session:          session,
++			Started:          ancient.UnixNano(),
++			Finished:         ancient.UnixNano(),
++			SealedAt:         ancient.UnixNano(),
++			Complete:         true,
++			Sealed:           true,
++			Requests:         1,
++			Routes:           []string{"codex:gpt-6.2-sol@chatgpt.com"},
++			ResponseIDSHAs:   []string{sha256Hex(fmt.Sprintf("resp_%d", idx))},
++			LastResponseID:   sha256Hex(fmt.Sprintf("resp_%d", idx)),
++			LastOutputSHA256: sha256Hex("VERDICT: PASS"),
++		}
++		rawRec, _ := json.Marshal(rr)
++		shaRec := sha256Hex(string(rawRec))
++		rawMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch, Started: ancient.UnixNano()})
++		if werr := os.WriteFile(filepath.Join(dir, "receipt.json"), rawRec, 0600); werr != nil {
++			t.Fatal(werr)
++		}
++		if werr := os.WriteFile(filepath.Join(dir, "seal.sha256"), []byte(shaRec), 0600); werr != nil {
++			t.Fatal(werr)
++		}
++		if werr := os.WriteFile(filepath.Join(dir, "producer.json"), rawMarker, 0600); werr != nil {
++			t.Fatal(werr)
++		}
++		for _, p := range []string{filepath.Join(dir, "receipt.json"), filepath.Join(dir, "seal.sha256"), filepath.Join(dir, "producer.json"), dir} {
++			_ = os.Chtimes(p, ancient, ancient)
++		}
++		sub, _, oerr := openVerifiedSubdir(lease.dir, launch)
++		if oerr != nil {
++			t.Fatal(oerr)
++		}
++		var fd *os.File
++		var dev, ino uint64
++		var hasID bool
++		var ferr error
++		if countBudget {
++			fd, dev, ino, hasID, ferr = openBudgetedPinnedDirFD(sub)
++		} else {
++			fd, dev, ino, hasID, ferr = openPinnedDirFD(sub)
++		}
++		_ = sub.Close()
++		if ferr != nil {
++			t.Fatal(ferr)
++		}
++		if !countBudget {
++			cleanupFDs = append(cleanupFDs, fd)
++		}
++		boundSHA := shaRec
++		if mismatchDigest {
++			boundSHA = sha256Hex("different-bound-digest")
++		}
++		key := cleanRoot + "\x00" + launch
++		cleanupKeys = append(cleanupKeys, key)
++		reviewMu.Lock()
++		sealedBindings[key] = sealedDirBinding{
++			rootDev:    rootDev,
++			rootIno:    rootIno,
++			dirDev:     dev,
++			dirIno:     ino,
++			hasDirID:   hasID,
++			dirFD:      fd,
++			receiptSHA: boundSHA,
++			recordedAt: recordedAt,
++		}
++		reviewMu.Unlock()
++		return launch, key
++	}
++
++	// Sub-scenario A: 64 disk-expired dirs whose sealedBindings.recordedAt is FRESH + 1 genuinely expired dir at #65.
++	// Pre-filtering fresh recordedAt MUST reach #65 on the VERY FIRST call!
++	freshNames := make([]string, 0, 65)
++	for i := 0; i < 64; i++ {
++		l, _ := makeBoundAgedDir(i+1, time.Now(), false, false)
++		freshNames = append(freshNames, l)
++	}
++	targetA, _ := makeBoundAgedDir(65, ancient, false, true)
++	freshNames = append(freshNames, targetA)
++
++	stateA := &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}
++	dirsA, fdsA := reclaimExpiredBucketEntries(lease.dir, root, freshNames, true, 0, 1, stateA)
++	if dirsA != 1 || fdsA != 1 {
++		t.Fatalf("FD-only reclaim with 64 fresh-recordedAt bindings + 1 expired = (%d, %d), want (1, 1)", dirsA, fdsA)
++	}
++	if _, statErr := os.Lstat(filepath.Join(root, targetA)); !os.IsNotExist(statErr) {
++		t.Fatalf("targetA %s was not reclaimed on call 1: %v", targetA, statErr)
++	}
++
++	// Sub-scenario B: 64 disk-expired dirs whose recordedAt IS aged (so they enter pinnedSet and
++	// consume all 64 inspection slots) yet skip at reclaim due to digest mismatch, followed by
++	// entry #65 which IS genuinely reclaimable! Call 1 MUST advance state.cursor to 64 so Call 2
++	// reaches and reclaims #65 instead of looping on indices 0..63 forever.
++	for i := 0; i < 64; i++ {
++		l, _ := makeBoundAgedDir(100+i, ancient, true, false)
++		names = append(names, l)
++	}
++	targetB, _ := makeBoundAgedDir(200, ancient, false, true)
++	names = append(names, targetB)
++
++	stateB := &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}
++	dirsB1, fdsB1 := reclaimExpiredBucketEntries(lease.dir, root, names, true, 0, 1, stateB)
++	if dirsB1 != 0 || fdsB1 != 0 {
++		t.Fatalf("FD-only reclaim call 1 over 64 mismatched entries = (%d, %d), want (0, 0)", dirsB1, fdsB1)
++	}
++	if stateB.cursor != 64 {
++		t.Fatalf("FD-only reclaim did not advance cursor past first 64 pinned entries: cursor=%d, want 64", stateB.cursor)
++	}
++	dirsB2, fdsB2 := reclaimExpiredBucketEntries(lease.dir, root, names, true, 0, 1, stateB)
++	if dirsB2 != 1 || fdsB2 != 1 {
++		t.Fatalf("FD-only reclaim call 2 starting at cursor 64 = (%d, %d), want (1, 1)", dirsB2, fdsB2)
++	}
++	if _, statErr := os.Lstat(filepath.Join(root, targetB)); !os.IsNotExist(statErr) {
++		t.Fatalf("targetB %s was not reclaimed on call 2: %v", targetB, statErr)
++	}
++}
++
++func TestReviewReceiptStrictRejectsCaseAliasDuplicateStatusKey(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R52): exact same terminal frame tested on Python preflight side
++	// containing both "status":"completed" and "Status":"failed" MUST be rejected identically.
++	root := filepath.Join(t.TempDir(), "case-alias-status")
++	launch := "review-fddddddd-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-fffffffff701"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++
++	frame := `{"type":"response.completed","response":{"id":"resp_case_dup","status":"completed","Status":"failed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`
++	if c.ValidateStrictEvent("response.completed", true, []byte(frame)) {
++		t.Fatalf("ValidateStrictEvent accepted case-duplicate status/Status frame")
++	}
++	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + frame + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("SealReview after case-duplicate status/Status frame = %v, want SealRejected", st)
 +	}
 +}
