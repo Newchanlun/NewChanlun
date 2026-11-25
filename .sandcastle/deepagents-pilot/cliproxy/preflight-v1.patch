@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..f0af4b3 100644
+index e69de29..6323ea0 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,211 @@
 +package middleware
 +
 +import (
@@ -84,6 +84,21 @@ index e69de29..f0af4b3 100644
 +			}
 +			if existed {
 +				defer res.Release()
++				if launchDeadline := res.Deadline(); !launchDeadline.IsZero() {
++					if !launchDeadline.After(time.Now()) {
++						abortClose(http.StatusServiceUnavailable)
++						return
++					}
++					if launchDeadline.Before(turnDeadline) {
++						turnDeadline = launchDeadline
++						turnCancel()
++						turnCtx, turnCancel = context.WithDeadline(c.Request.Context(), turnDeadline)
++						c.Request = c.Request.WithContext(turnCtx)
++						if bodyDeadline.After(turnDeadline) {
++							bodyDeadline = turnDeadline
++						}
++					}
++				}
 +			}
 +			taintFailure := func() {
 +				if existed {
@@ -137,6 +152,18 @@ index e69de29..f0af4b3 100644
 +			if err != nil {
 +				abortClose(http.StatusServiceUnavailable)
 +				return
++			}
++			if colDeadline := collector.Deadline(); !colDeadline.IsZero() && colDeadline.Before(turnDeadline) {
++				turnDeadline = colDeadline
++				var subCancel context.CancelFunc
++				ctx, subCancel = context.WithDeadline(ctx, turnDeadline)
++				defer subCancel()
++				if err := rc.SetWriteDeadline(turnDeadline); err != nil {
++					collector.Taint()
++					collector.HandlerDone(false)
++					abortClose(http.StatusServiceUnavailable)
++					return
++				}
 +			}
 +		} else {
 +			if c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" {
@@ -5861,10 +5888,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..40dd727 100644
+index e69de29..8083b86 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,6518 @@
+@@ -0,0 +1,6667 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -6013,6 +6040,7 @@ index e69de29..40dd727 100644
 +	lastPersistedSHA  string
 +	tainted           bool
 +	taintedPersisted  bool
++	foreignDisk       bool
 +	lastTurnFailed    bool
 +	nextTurnSeq       uint64
 +	failedTurnSeq     uint64
@@ -6035,6 +6063,31 @@ index e69de29..40dd727 100644
 +		return
 +	}
 +	r.turnSeq = seq
++}
++
++// Deadline returns the launch's absolute MaxReviewDuration expiration time (or zero if unbounded).
++func (r *ReviewReservation) Deadline() time.Time {
++	if r == nil || r.entry == nil {
++		return time.Time{}
++	}
++	r.entry.mu.Lock()
++	started := r.entry.started
++	r.entry.mu.Unlock()
++	if started <= 0 {
++		return time.Time{}
++	}
++	return time.Unix(0, started).Add(MaxReviewDuration)
++}
++
++// Deadline returns the collector's effective turn deadline (already capped by launch MaxReviewDuration).
++func (c *Collector) Deadline() time.Time {
++	if c == nil {
++		return time.Time{}
++	}
++	c.mu.Lock()
++	d := c.deadline
++	c.mu.Unlock()
++	return d
 +}
 +
 +func (r *ReviewReservation) Release() {
@@ -6235,6 +6288,7 @@ index e69de29..40dd727 100644
 +	canonicalItemSHA string
 +	outputIndex      int64
 +	hasOutputIndex   bool
++	seq              int
 +	isFinal          bool
 +	isAssistantMsg   bool
 +	outputTextSHA    string
@@ -8182,6 +8236,11 @@ index e69de29..40dd727 100644
 +			}
 +			t.itemIndexByID[itemID] = outputIndex
 +			t.itemIDByIndex[outputIndex] = itemID
++			if doneRec, hasDone := t.doneItems[canonKey]; hasDone && !doneRec.hasOutputIndex {
++				doneRec.outputIndex = outputIndex
++				doneRec.hasOutputIndex = true
++				t.doneItems[canonKey] = doneRec
++			}
 +			return canonKey, itemID, outputIndex, true, true
 +		}
 +		if prevIdx, exists := t.itemIndexByID[itemID]; exists {
@@ -8890,30 +8949,150 @@ index e69de29..40dd727 100644
 +	return true
 +}
 +
-+func (t *strictStreamTracker) isLatestOutputPosition(seq int, effIdx int64, effHasIdx bool) bool {
-+	if effHasIdx && !t.sawUnindexedItem {
-+		return (!t.hasMaxOutputIndex || effIdx >= t.maxOutputIndex) &&
-+			(!t.hasMaxNonFinalOutputIndex || effIdx > t.maxNonFinalOutputIndex)
++func (t *strictStreamTracker) resolvedKeyIndex(key string) (int64, bool) {
++	if strings.HasPrefix(key, "idx:") {
++		idx, err := strconv.ParseInt(strings.TrimPrefix(key, "idx:"), 10, 64)
++		return idx, err == nil
 +	}
-+	isLatest := seq >= t.maxItemSeq && seq > t.maxNonFinalSeq
-+	if effHasIdx {
-+		if (t.hasMaxOutputIndex && effIdx < t.maxOutputIndex) ||
-+			(t.hasMaxNonFinalOutputIndex && effIdx <= t.maxNonFinalOutputIndex) {
-+			return false
-+		}
++	if strings.HasPrefix(key, "id:") {
++		idx, ok := t.itemIndexByID[strings.TrimPrefix(key, "id:")]
++		return idx, ok
 +	}
-+	return isLatest
++	return 0, false
 +}
 +
-+func (t *strictStreamTracker) isStrictlyEarlierThanLastItem(seq int, effIdx int64, effHasIdx bool) bool {
-+	if t.lastItemOutputSHA == "" {
-+		return false
++func (t *strictStreamTracker) recomputeLastItemOutput() {
++	if t.responseID == "" {
++		t.lastItemOutputSHA = ""
++		t.lastItemResponseID = ""
++		return
 +	}
-+	if effHasIdx && t.hasLastItemOutputIndex {
-+		return effIdx < t.lastItemOutputIndex
++	allIndexed := t.pendingUnkeyed == 0 && t.streamedNonFinalUnkeyed == 0 && len(t.unkeyedDoneItems) == 0
++	if allIndexed {
++		for k := range t.doneItems {
++			if _, ok := t.resolvedKeyIndex(k); !ok {
++				allIndexed = false
++				break
++			}
++		}
 +	}
-+	return seq < t.lastItemSeq &&
-+		(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++	if allIndexed {
++		for k := range t.pendingItems {
++			if _, ok := t.resolvedKeyIndex(k); !ok {
++				allIndexed = false
++				break
++			}
++		}
++	}
++	if allIndexed {
++		for k := range t.streamedNonFinalKeys {
++			if _, ok := t.resolvedKeyIndex(k); !ok {
++				allIndexed = false
++				break
++			}
++		}
++	}
++	if allIndexed {
++		hasMax := false
++		var maxIdx int64
++		var maxKey string
++		visit := func(k string) {
++			if idx, ok := t.resolvedKeyIndex(k); ok {
++				if !hasMax || idx > maxIdx {
++					hasMax = true
++					maxIdx = idx
++					maxKey = k
++				}
++			}
++		}
++		for k := range t.doneItems {
++			visit(k)
++		}
++		for k := range t.pendingItems {
++			visit(k)
++		}
++		for k := range t.streamedNonFinalKeys {
++			visit(k)
++		}
++		if hasMax {
++			if _, isPending := t.pendingItems[maxKey]; !isPending {
++				if _, isNonFinal := t.streamedNonFinalKeys[maxKey]; !isNonFinal {
++					if rec, isDone := t.doneItems[maxKey]; isDone && rec.isFinal && rec.outputTextSHA != "" {
++						t.lastItemOutputSHA = rec.outputTextSHA
++						t.lastItemResponseID = t.responseID
++						return
++					}
++				}
++			}
++		}
++		t.lastItemOutputSHA = ""
++		t.lastItemResponseID = ""
++		return
++	}
++	if len(t.pendingItems) > 0 || t.pendingUnkeyed > 0 {
++		t.lastItemOutputSHA = ""
++		t.lastItemResponseID = ""
++		return
++	}
++	hasMaxIdx := false
++	var maxIdx int64
++	hasMaxNonFinalIdx := false
++	var maxNonFinalIdx int64
++	for k := range t.doneItems {
++		if idx, ok := t.resolvedKeyIndex(k); ok {
++			if !hasMaxIdx || idx > maxIdx {
++				hasMaxIdx = true
++				maxIdx = idx
++			}
++		}
++	}
++	for k := range t.streamedNonFinalKeys {
++		if idx, ok := t.resolvedKeyIndex(k); ok {
++			if !hasMaxIdx || idx > maxIdx {
++				hasMaxIdx = true
++				maxIdx = idx
++			}
++			if !hasMaxNonFinalIdx || idx > maxNonFinalIdx {
++				hasMaxNonFinalIdx = true
++				maxNonFinalIdx = idx
++			}
++		}
++	}
++	bestSeq := 0
++	var bestRec doneItemSummary
++	foundBest := false
++	for k, rec := range t.doneItems {
++		s := rec.seq
++		if s == 0 {
++			s = t.itemSeqByKey[k]
++		}
++		if s > bestSeq {
++			bestSeq = s
++			bestRec = rec
++			foundBest = true
++		}
++	}
++	for _, rec := range t.unkeyedDoneItems {
++		if rec.seq > bestSeq {
++			bestSeq = rec.seq
++			bestRec = rec
++			foundBest = true
++		}
++	}
++	if !foundBest || bestSeq < t.maxItemSeq || bestSeq <= t.maxNonFinalSeq || !bestRec.isFinal || bestRec.outputTextSHA == "" {
++		t.lastItemOutputSHA = ""
++		t.lastItemResponseID = ""
++		return
++	}
++	if bestRec.hasOutputIndex {
++		if (hasMaxIdx && bestRec.outputIndex < maxIdx) || (hasMaxNonFinalIdx && bestRec.outputIndex <= maxNonFinalIdx) {
++			t.lastItemOutputSHA = ""
++			t.lastItemResponseID = ""
++			return
++		}
++	}
++	t.lastItemOutputSHA = bestRec.outputTextSHA
++	t.lastItemResponseID = t.responseID
 +}
 +
 +func (t *strictStreamTracker) recordNonFinal(seq int, canonKey, itemID string, outputIndex int64, hasOutputIndex, countUnkeyed bool) bool {
@@ -9175,15 +9354,6 @@ index e69de29..40dd727 100644
 +				if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +					t.maxOutputIndex = effIdx
 +					t.hasMaxOutputIndex = true
-+				} else if !effHasIdx {
-+					t.sawUnindexedItem = true
-+				}
-+				if !t.isStrictlyEarlierThanLastItem(seq, effIdx, effHasIdx) {
-+					t.lastItemOutputSHA = ""
-+					t.lastItemResponseID = ""
-+					t.lastItemSeq = 0
-+					t.hasLastItemOutputIndex = false
-+					t.lastItemOutputIndex = 0
 +				}
 +				if canonKey != "" {
 +					if _, alreadyDone := t.doneItemKeys[canonKey]; alreadyDone {
@@ -9251,6 +9421,12 @@ index e69de29..40dd727 100644
 +					t.doneItems = make(map[string]doneItemSummary)
 +				}
 +				t.doneItemKeys[canonKey] = struct{}{}
++				seq, okSeq := t.assignSeq(canonKey)
++				if !okSeq {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
 +				t.doneItems[canonKey] = doneItemSummary{
 +					itemID:           effItemID,
 +					itemType:         item.Type,
@@ -9266,10 +9442,27 @@ index e69de29..40dd727 100644
 +					canonicalItemSHA: item.CanonicalItemSHA,
 +					outputIndex:      effIdx,
 +					hasOutputIndex:   effHasIdx,
++					seq:              seq,
 +					isFinal:          isFinalCandidate,
 +					isAssistantMsg:   isAssistantMsg,
 +					outputTextSHA:    outTextSHA,
 +				}
++				if seq > t.maxItemSeq {
++					t.maxItemSeq = seq
++				}
++				if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
++					t.maxOutputIndex = effIdx
++					t.hasMaxOutputIndex = true
++				}
++				t.sawStreamedOutputItem = true
++				if !isFinalCandidate {
++					if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
++					}
++				}
++				continue
 +			}
 +			seq, okSeq := t.assignSeq(canonKey)
 +			if !okSeq {
@@ -9283,39 +9476,13 @@ index e69de29..40dd727 100644
 +			if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +				t.maxOutputIndex = effIdx
 +				t.hasMaxOutputIndex = true
-+			} else if !effHasIdx {
-+				t.sawUnindexedItem = true
 +			}
 +			t.sawStreamedOutputItem = true
-+			if isFinalCandidate {
-+				rid := t.responseID
-+				if t.isLatestOutputPosition(seq, effIdx, effHasIdx) {
-+					if outTextSHA != "" && rid != "" {
-+						t.lastItemOutputSHA = outTextSHA
-+						t.lastItemResponseID = rid
-+						t.lastItemSeq = seq
-+						t.hasLastItemOutputIndex = effHasIdx
-+						t.lastItemOutputIndex = effIdx
-+					} else {
-+						t.lastItemOutputSHA = ""
-+						t.lastItemResponseID = ""
-+						t.lastItemSeq = 0
-+						t.hasLastItemOutputIndex = false
-+						t.lastItemOutputIndex = 0
-+					}
-+				}
-+			} else {
++			if !isFinalCandidate {
 +				if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
 +					c.mu.Unlock()
 +					c.taintStreamAnomaly()
 +					return
-+				}
-+				if !t.isStrictlyEarlierThanLastItem(seq, effIdx, effHasIdx) {
-+					t.lastItemOutputSHA = ""
-+					t.lastItemResponseID = ""
-+					t.lastItemSeq = 0
-+					t.hasLastItemOutputIndex = false
-+					t.lastItemOutputIndex = 0
 +				}
 +			}
 +		}
@@ -9335,6 +9502,7 @@ index e69de29..40dd727 100644
 +				}
 +			}
 +		}
++		t.recomputeLastItemOutput()
 +		c.mu.Unlock()
 +		return
 +	case "response.output_item.added":
@@ -9368,6 +9536,11 @@ index e69de29..40dd727 100644
 +		c.mu.Lock()
 +		canonKey, effItemID, effIdx, effHasIdx, okBind := t.bindIdentity(frame.itemID, frame.outputIndex, frame.hasOutputIndex)
 +		if !okBind {
++			c.mu.Unlock()
++			c.taintStreamAnomaly()
++			return
++		}
++		if itemStatus == "completed" {
 +			c.mu.Unlock()
 +			c.taintStreamAnomaly()
 +			return
@@ -9468,24 +9641,6 @@ index e69de29..40dd727 100644
 +		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +			t.maxOutputIndex = effIdx
 +			t.hasMaxOutputIndex = true
-+		} else if !effHasIdx {
-+			t.sawUnindexedItem = true
-+		}
-+		var isStrictlyEarlier bool
-+		if t.lastItemOutputSHA != "" {
-+			if effHasIdx && t.hasLastItemOutputIndex {
-+				isStrictlyEarlier = effIdx < t.lastItemOutputIndex
-+			} else {
-+				isStrictlyEarlier = seq < t.lastItemSeq &&
-+					(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
-+			}
-+		}
-+		if !isStrictlyEarlier {
-+			t.lastItemOutputSHA = ""
-+			t.lastItemResponseID = ""
-+			t.lastItemSeq = 0
-+			t.hasLastItemOutputIndex = false
-+			t.lastItemOutputIndex = 0
 +		}
 +		if canonKey != "" {
 +			if _, exists := t.pendingItems[canonKey]; !exists && len(t.pendingItems) >= maxTrackedOutputItems {
@@ -9510,6 +9665,7 @@ index e69de29..40dd727 100644
 +			c.taintStreamAnomaly()
 +			return
 +		}
++		t.recomputeLastItemOutput()
 +		c.mu.Unlock()
 +		return
 +	case "response.output_item.done":
@@ -9686,10 +9842,17 @@ index e69de29..40dd727 100644
 +				prevRec.doneDigest = doneDigest
 +				prevRec.canonicalItemSHA = canonItemSHA
 +				t.doneItems[canonKey] = prevRec
++				t.recomputeLastItemOutput()
 +				c.mu.Unlock()
 +				return
 +			}
 +			if len(t.doneItemKeys) >= maxTrackedOutputItems {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			seq, okSeq := t.assignSeq(canonKey)
++			if !okSeq {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -9717,13 +9880,38 @@ index e69de29..40dd727 100644
 +				canonicalItemSHA: canonItemSHA,
 +				outputIndex:      effIdx,
 +				hasOutputIndex:   effHasIdx,
++				seq:              seq,
 +				isFinal:          isFinalCandidate,
 +				isAssistantMsg:   isAssistantMsg,
 +				outputTextSHA:    outTextSHA,
 +				doneDigest:       doneDigest,
 +			}
++			if seq > t.maxItemSeq {
++				t.maxItemSeq = seq
++			}
++			if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
++				t.maxOutputIndex = effIdx
++				t.hasMaxOutputIndex = true
++			}
++			t.sawStreamedOutputItem = true
++			if !isFinalCandidate {
++				if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++			}
++			t.recomputeLastItemOutput()
++			c.mu.Unlock()
++			return
 +		} else {
 +			if len(t.unkeyedDoneItems) >= maxTrackedOutputItems {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			seq, okSeq := t.assignSeq(canonKey)
++			if !okSeq {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -9743,83 +9931,31 @@ index e69de29..40dd727 100644
 +				canonicalItemSHA: canonItemSHA,
 +				outputIndex:      effIdx,
 +				hasOutputIndex:   effHasIdx,
++				seq:              seq,
 +				isFinal:          isFinalCandidate,
 +				isAssistantMsg:   isAssistantMsg,
 +				outputTextSHA:    outTextSHA,
 +				doneDigest:       doneDigest,
 +			})
-+		}
-+		seq, okSeq := t.assignSeq(canonKey)
-+		if !okSeq {
++			if seq > t.maxItemSeq {
++				t.maxItemSeq = seq
++			}
++			if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
++				t.maxOutputIndex = effIdx
++				t.hasMaxOutputIndex = true
++			}
++			t.sawStreamedOutputItem = true
++			if !isFinalCandidate {
++				if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++			}
++			t.recomputeLastItemOutput()
 +			c.mu.Unlock()
-+			c.taintStreamAnomaly()
 +			return
 +		}
-+		if seq > t.maxItemSeq {
-+			t.maxItemSeq = seq
-+		}
-+		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
-+			t.maxOutputIndex = effIdx
-+			t.hasMaxOutputIndex = true
-+		} else if !effHasIdx {
-+			t.sawUnindexedItem = true
-+		}
-+		t.sawStreamedOutputItem = true
-+		if isFinalCandidate {
-+			rid := t.responseID
-+			var isLatest bool
-+			if effHasIdx && !t.sawUnindexedItem {
-+				isLatest = (!t.hasMaxOutputIndex || effIdx >= t.maxOutputIndex) &&
-+					(!t.hasMaxNonFinalOutputIndex || effIdx > t.maxNonFinalOutputIndex)
-+			} else {
-+				isLatest = seq >= t.maxItemSeq && seq > t.maxNonFinalSeq
-+				if effHasIdx {
-+					if (t.hasMaxOutputIndex && effIdx < t.maxOutputIndex) ||
-+						(t.hasMaxNonFinalOutputIndex && effIdx <= t.maxNonFinalOutputIndex) {
-+						isLatest = false
-+					}
-+				}
-+			}
-+			if isLatest {
-+				if outTextSHA != "" && rid != "" {
-+					t.lastItemOutputSHA = outTextSHA
-+					t.lastItemResponseID = rid
-+					t.lastItemSeq = seq
-+					t.hasLastItemOutputIndex = effHasIdx
-+					t.lastItemOutputIndex = effIdx
-+				} else {
-+					t.lastItemOutputSHA = ""
-+					t.lastItemResponseID = ""
-+					t.lastItemSeq = 0
-+					t.hasLastItemOutputIndex = false
-+					t.lastItemOutputIndex = 0
-+				}
-+			}
-+		} else {
-+			if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, true) {
-+				c.mu.Unlock()
-+				c.taintStreamAnomaly()
-+				return
-+			}
-+			var isStrictlyEarlier bool
-+			if t.lastItemOutputSHA != "" {
-+				if effHasIdx && t.hasLastItemOutputIndex {
-+					isStrictlyEarlier = effIdx < t.lastItemOutputIndex
-+				} else {
-+					isStrictlyEarlier = seq < t.lastItemSeq &&
-+						(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
-+				}
-+			}
-+			if !isStrictlyEarlier {
-+				t.lastItemOutputSHA = ""
-+				t.lastItemResponseID = ""
-+				t.lastItemSeq = 0
-+				t.hasLastItemOutputIndex = false
-+				t.lastItemOutputIndex = 0
-+			}
-+		}
-+		c.mu.Unlock()
-+		return
 +	case "response.completed":
 +		outText := extractAssistantOutputText(frame.respItems)
 +		completedSHA := ""
@@ -10083,8 +10219,6 @@ index e69de29..40dd727 100644
 +		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +			t.maxOutputIndex = effIdx
 +			t.hasMaxOutputIndex = true
-+		} else if !effHasIdx {
-+			t.sawUnindexedItem = true
 +		}
 +		if deltaKind == itemKindNonMessage {
 +			if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, false) {
@@ -10117,22 +10251,7 @@ index e69de29..40dd727 100644
 +				t.pendingUnkeyed++
 +			}
 +		}
-+		var isEarlierDelta bool
-+		if t.lastItemOutputSHA != "" {
-+			if effHasIdx && t.hasLastItemOutputIndex {
-+				isEarlierDelta = effIdx < t.lastItemOutputIndex
-+			} else {
-+				isEarlierDelta = seq < t.lastItemSeq &&
-+					(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
-+			}
-+		}
-+		if !isEarlierDelta {
-+			t.lastItemOutputSHA = ""
-+			t.lastItemResponseID = ""
-+			t.lastItemSeq = 0
-+			t.hasLastItemOutputIndex = false
-+			t.lastItemOutputIndex = 0
-+		}
++		t.recomputeLastItemOutput()
 +		c.mu.Unlock()
 +		return
 +	}
@@ -10299,13 +10418,15 @@ index e69de29..40dd727 100644
 +	finfo, err := os.Lstat(path)
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) || finfo.Size() <= 0 || finfo.Size() > maxReviewReceiptBytes {
 +		return &reviewEntry{
-+			directory: dir,
-+			launch:    launch,
-+			session:   session,
-+			started:   now.UnixNano(),
-+			tainted:   true,
-+			reserved:  true,
-+			touched:   now,
++			directory:        dir,
++			launch:           launch,
++			session:          session,
++			started:          now.UnixNano(),
++			tainted:          true,
++			taintedPersisted: true,
++			foreignDisk:      true,
++			reserved:         true,
++			touched:          now,
 +		}, true, nil
 +	}
 +	raw, err := os.ReadFile(path)
@@ -10324,9 +10445,9 @@ index e69de29..40dd727 100644
 +		}
 +		return true
 +	}
-+	if err := json.Unmarshal(raw, &disk); err != nil ||
-+		disk.Schema != ReviewSchema ||
-+		disk.Launch != launch ||
++	unmarshalErr := json.Unmarshal(raw, &disk)
++	foreignReceipt := unmarshalErr != nil || disk.Schema != ReviewSchema || disk.Launch != launch
++	if foreignReceipt ||
 +		disk.Tainted ||
 +		!disk.Complete ||
 +		!disk.Sealed ||
@@ -10347,7 +10468,8 @@ index e69de29..40dd727 100644
 +			session:          disk.Session,
 +			started:          now.UnixNano(),
 +			tainted:          true,
-+			taintedPersisted: disk.Tainted,
++			taintedPersisted: disk.Tainted || foreignReceipt,
++			foreignDisk:      foreignReceipt,
 +			reserved:         true,
 +			markerPersisted:  true,
 +			touched:          now,
@@ -10462,6 +10584,12 @@ index e69de29..40dd727 100644
 +		return nil, ErrUnavailable
 +	}
 +	if entry.tainted {
++		entry.taintAndPersistLocked()
++		entry.mu.Unlock()
++		releaseReview(entry)
++		return nil, ErrUnavailable
++	}
++	if entry.started > 0 && time.Now().UnixNano()-entry.started > int64(MaxReviewDuration) {
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
 +		releaseReview(entry)
@@ -10668,6 +10796,10 @@ index e69de29..40dd727 100644
 +		return
 +	}
 +	e.tainted = true
++	if e.foreignDisk {
++		e.taintedPersisted = true
++		return
++	}
 +	if err := e.persistLocked(); err == nil {
 +		e.taintedPersisted = true
 +	} else {
@@ -11039,11 +11171,24 @@ index e69de29..40dd727 100644
 +		releaseReview(entry)
 +		return ctx, nil, ErrUnavailable
 +	}
++	turnDeadline := now.Add(ReviewTurnTimeout)
++	if entry.started > 0 {
++		launchDeadline := time.Unix(0, entry.started).Add(MaxReviewDuration)
++		if !launchDeadline.After(now) {
++			entry.taintAndPersistLocked()
++			entry.mu.Unlock()
++			releaseReview(entry)
++			return ctx, nil, ErrUnavailable
++		}
++		if launchDeadline.Before(turnDeadline) {
++			turnDeadline = launchDeadline
++		}
++	}
 +	entry.mu.Unlock()
 +
 +	c := &Collector{
 +		directory:     entry.directory,
-+		deadline:      now.Add(ReviewTurnTimeout),
++		deadline:      turnDeadline,
 +		strictCodex:   true,
 +		expectedModel: requestedModel,
 +		review:        entry,
@@ -11299,8 +11444,6 @@ index e69de29..40dd727 100644
 +	ts   int64
 +}
 +
-+var reviewPendingTempPattern = regexp.MustCompile(`^pending-(?:sha-)?[0-9]+-[0-9]+$`)
-+
 +func isReviewBucketName(name string) bool {
 +	return ValidReviewLaunch(name)
 +}
@@ -11314,9 +11457,9 @@ index e69de29..40dd727 100644
 +
 +func isProducerOwnedReceiptFile(childName string, reviewBucket bool) bool {
 +	if reviewBucket {
-+		return childName == "receipt.json" || childName == "seal.sha256" || reviewPendingTempPattern.MatchString(childName)
++		return childName == "receipt.json" || childName == "seal.sha256"
 +	}
-+	return childName == "receipt.json" || childName == "pending"
++	return childName == "receipt.json"
 +}
 +
 +func inspectProducerReceiptDir(dir, name string, reviewBucket bool) (time.Time, bool) {
@@ -11332,6 +11475,10 @@ index e69de29..40dd727 100644
 +	if err != nil {
 +		return time.Time{}, false
 +	}
++	hasReceipt := false
++	hasSealFile := false
++	var receiptRaw []byte
++	var reviewSealed bool
 +	for _, child := range children {
 +		childName := child.Name()
 +		if !isProducerOwnedReceiptFile(childName, reviewBucket) {
@@ -11363,6 +11510,7 @@ index e69de29..40dd727 100644
 +				if json.Unmarshal(raw, &disk) != nil || disk.Schema != ReviewSchema || disk.Launch != name {
 +					return time.Time{}, false
 +				}
++				reviewSealed = disk.Sealed
 +				for _, ns := range []int64{disk.Started, disk.Finished, disk.SealedAt} {
 +					if ns > 0 {
 +						if t := time.Unix(0, ns); t.After(lastMod) {
@@ -11383,6 +11531,28 @@ index e69de29..40dd727 100644
 +					}
 +				}
 +			}
++			hasReceipt = true
++			receiptRaw = raw
++		} else if childName == "seal.sha256" {
++			hasSealFile = true
++		}
++	}
++	if !hasReceipt {
++		return time.Time{}, false
++	}
++	if hasSealFile {
++		if !reviewBucket || !reviewSealed {
++			return time.Time{}, false
++		}
++		sp := filepath.Join(dir, "seal.sha256")
++		sf, serr := os.OpenFile(sp, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++		if serr != nil {
++			return time.Time{}, false
++		}
++		sraw, rerr := io.ReadAll(io.LimitReader(sf, 129))
++		_ = sf.Close()
++		if rerr != nil || strings.TrimSpace(string(sraw)) != sha256Hex(string(receiptRaw)) {
++			return time.Time{}, false
 +		}
 +	}
 +	return lastMod, true
@@ -12094,6 +12264,9 @@ index e69de29..40dd727 100644
 +}
 +
 +func (e *reviewEntry) invalidateDiskReceiptLocked() {
++	if e.foreignDisk {
++		return
++	}
 +	if _, err := checkPrivateDir(filepath.Dir(e.directory), false); err != nil {
 +		return
 +	}
@@ -12115,6 +12288,9 @@ index e69de29..40dd727 100644
 +}
 +
 +func (e *reviewEntry) persistWithStatusLocked() (bool, error) {
++	if e.foreignDisk {
++		return false, ErrUnavailable
++	}
 +	root, ok := cleanPrivateRoot(filepath.Dir(e.directory))
 +	if !ok {
 +		return false, ErrUnavailable
@@ -12384,10 +12560,10 @@ index e69de29..40dd727 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..e46fb98 100644
+index e69de29..d49910e 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,5581 @@
+@@ -0,0 +1,5737 @@
 +package preflightreceipt
 +
 +import (
@@ -17349,6 +17525,50 @@ index e69de29..e46fb98 100644
 +	if r := readReviewReceiptFile(t, root, lOutOfOrderSnap); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
 +		t.Fatalf("out-of-order snapshot hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
 +	}
++
++	// 84. Astra P1 #1 (PR #2280 R34): output_item.added declaring status="completed" followed by
++	//     text delta mutation MUST taint immediately rather than allowing post-completed rewrites.
++	sseAddedCompletedDelta := "data: " + `{"type":"response.created","response":{"id":"resp_acd","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_acd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: BLOCK"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.delta","output_index":0,"item_id":"msg_acd","content_index":0,"delta":" -> PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_acd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: BLOCK -> PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_acd","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_acd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: BLOCK -> PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555c3", "019d0000-0000-7000-8000-8888888881c3", sseAddedCompletedDelta); st != SealRejected {
++		t.Fatalf("output_item.added status=completed followed by delta seal = %v, want SealRejected", st)
++	}
++
++	// 85. Sol P2 #2 (PR #2280 R34): output_index=1 final answer completes, then id-only reasoning item
++	//     arrives without output_index, then response.in_progress binds reasoning to output_index=0 ->
++	//     recomputed final output hash MUST recover and seal cleanly.
++	lLateBindSnap := "review-d1111111-2222-4333-8444-5555555555c4"
++	sLateBindSnap := "019d0000-0000-7000-8000-8888888881c4"
++	sseLateBindSnap := "data: " + `{"type":"response.created","response":{"id":"resp_lbs","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_lbs","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"id":"rs_lbs","type":"reasoning"}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_lbs","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"rs_lbs","type":"reasoning"},{"id":"msg_lbs","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_lbs","status":"completed","model":"gpt-6.2-sol","output":[{"id":"rs_lbs","type":"reasoning"},{"id":"msg_lbs","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lLateBindSnap, sLateBindSnap, sseLateBindSnap); st != SealOK {
++		t.Fatalf("late index binding via response.in_progress seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lLateBindSnap); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("late index binding hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 86. Astra P2 #3 (PR #2280 R34): final message first appears id-only, tool item at output_index=0
++	//     completes, then final message completes binding output_index=1 -> MUST seal cleanly.
++	lLateBindFinal := "review-d1111111-2222-4333-8444-5555555555c5"
++	sLateBindFinal := "019d0000-0000-7000-8000-8888888881c5"
++	sseLateBindFinal := "data: " + `{"type":"response.created","response":{"id":"resp_lbf","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","item":{"id":"msg_lbf","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_lbf","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_lbf","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_lbf","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_lbf","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{}"},{"id":"msg_lbf","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lLateBindFinal, sLateBindFinal, sseLateBindFinal); st != SealOK {
++		t.Fatalf("id-only final message later bound to output_index=1 seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lLateBindFinal); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("id-only final message bound to output_index=1 hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
 +}
 +
 +func TestReviewReceiptDiskQuotaIsolatesPreflightAndReclaimsExpired(t *testing.T) {
@@ -17397,8 +17617,26 @@ index e69de29..e46fb98 100644
 +	if err := reservePrivateDir(p3, false); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("reserve p3 with recent preflights = %v, want ErrUnavailable", err)
 +	}
-+	// Age p1 past preflightDiskRetention -> p3 MUST reclaim p1 and succeed.
++	// Age p1 (with verified producer receipt.json) past preflightDiskRetention -> p3 MUST reclaim p1 and succeed.
 +	oldTime := time.Now().Add(-2 * time.Hour)
++	p1RecPath := filepath.Join(p1, "receipt.json")
++	p1Data, err := json.Marshal(Receipt{
++		Schema:   Schema,
++		Session:  "preflight-11111111-2222-4333-8444-555555555501",
++		Started:  oldTime.UnixNano(),
++		Finished: oldTime.UnixNano(),
++		Complete: true,
++		Routes:   []string{"codex:gpt-6.2-sol@chatgpt.com"},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(p1RecPath, p1Data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chtimes(p1RecPath, oldTime, oldTime); err != nil {
++		t.Fatal(err)
++	}
 +	if err := os.Chtimes(p1, oldTime, oldTime); err != nil {
 +		t.Fatal(err)
 +	}
@@ -17479,6 +17717,100 @@ index e69de29..e46fb98 100644
 +	}
 +	if _, err := os.Stat(dirtyExtra); err != nil {
 +		t.Fatalf("reclaimer deleted receipt-named directory containing unknown file: %v", err)
++	}
++
++	// Sol P1 #1 + Astra P1 #2 (PR #2280 R34):
++	// 1. A review-UUID dir containing ONLY an invalid seal.sha256 (no verified receipt.json) MUST NOT be deleted.
++	// 2. A review-UUID dir with a foreign receipt.json MUST fail closed WITHOUT overwriting or deleting the foreign file.
++	r2Dir := filepath.Join(root, r2Launch)
++	_ = os.Remove(filepath.Join(r2Dir, "receipt.json"))
++	_ = os.Remove(r2Dir)
++	reviewMu.Lock()
++	delete(reviewLedger, filepath.Clean(root)+"\x00"+r2Launch)
++	reviewMu.Unlock()
++
++	sealOnlyLaunch := "review-e7777777-2222-4333-8444-555555555598"
++	sealOnlyDir := filepath.Join(root, sealOnlyLaunch)
++	if err := os.Mkdir(sealOnlyDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	sealOnlyFile := filepath.Join(sealOnlyDir, "seal.sha256")
++	if err := os.WriteFile(sealOnlyFile, []byte("not-a-producer-seal"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(sealOnlyFile, ancient, ancient)
++	_ = os.Chtimes(sealOnlyDir, ancient, ancient)
++	maxReviewDiskEntries = 1
++	if _, err := ReserveReview(root, "review-e7777777-2222-4333-8444-555555555599"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveReview over seal-only foreign dir = %v, want ErrUnavailable", err)
++	}
++	if raw, err := os.ReadFile(sealOnlyFile); err != nil || string(raw) != "not-a-producer-seal" {
++		t.Fatalf("reclaimer modified/deleted seal-only dir without receipt.json: raw=%q err=%v", string(raw), err)
++	}
++
++	foreignLaunch := "review-e7777777-2222-4333-8444-555555555597"
++	foreignReviewDir := filepath.Join(root, foreignLaunch)
++	if err := os.Mkdir(foreignReviewDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	foreignRecPath := filepath.Join(foreignReviewDir, "receipt.json")
++	foreignBytes := `{"schema":"other-app-v1","important":"keep-untouched"}`
++	if err := os.WriteFile(foreignRecPath, []byte(foreignBytes), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := ReserveReview(root, foreignLaunch); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveReview on foreign receipt.json = %v, want ErrUnavailable", err)
++	}
++	if raw, err := os.ReadFile(foreignRecPath); err != nil || string(raw) != foreignBytes {
++		t.Fatalf("foreign receipt.json was overwritten/deleted: raw=%q err=%v", string(raw), err)
++	}
++}
++
++func TestReviewReceiptExpiredLaunchRejectedAtAdmissionAndCapsTurnDeadline(t *testing.T) {
++	// Astra P2 #4 (PR #2280 R34):
++	// 1. A launch with <30m remaining in its 2h MaxReviewDuration MUST cap collector.Deadline() to the launch limit.
++	// 2. An already-expired (>2h) launch MUST be rejected at admission BEFORE starting upstream inference.
++	root := filepath.Join(t.TempDir(), "deadline-cap-receipts")
++	launchCap := "review-e9999999-2222-4333-8444-555555555501"
++	sessionCap := "019d0000-0000-7000-8000-888888888901"
++
++	res, err := ReserveReview(root, launchCap)
++	if err != nil {
++		t.Fatal(err)
++	}
++	res.Release()
++
++	// Backdate started to 1h55m ago -> only ~5m left in 2h window (< 30m ReviewTurnTimeout).
++	keyCap := filepath.Clean(root) + "\x00" + launchCap
++	nearExpStart := time.Now().Add(-MaxReviewDuration + 5*time.Minute)
++	reviewMu.Lock()
++	entCap := reviewLedger[keyCap]
++	reviewMu.Unlock()
++	entCap.mu.Lock()
++	entCap.started = nearExpStart.UnixNano()
++	entCap.mu.Unlock()
++
++	res2, existed, err := ReserveExistingReview(root, launchCap)
++	if err != nil || !existed || res2 == nil {
++		t.Fatalf("ReserveExistingReview near-expiry = (%v, %v, %v), want active reservation", res2, existed, err)
++	}
++	_, c2, err := BeginReviewReserved(context.Background(), res2, sessionCap, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("BeginReviewReserved near-expiry: %v", err)
++	}
++	wantMaxDeadline := nearExpStart.Add(MaxReviewDuration)
++	if c2.Deadline().After(wantMaxDeadline.Add(time.Second)) {
++		t.Fatalf("collector.Deadline() = %v exceeded launch 2h limit %v", c2.Deadline(), wantMaxDeadline)
++	}
++	c2.Complete(false)
++	c2.HandlerDone(false)
++
++	// Backdate started past 2h -> admission MUST reject immediately with ErrUnavailable.
++	entCap.mu.Lock()
++	entCap.started = time.Now().Add(-MaxReviewDuration - time.Minute).UnixNano()
++	entCap.mu.Unlock()
++	if resExp, _, expErr := ReserveExistingReview(root, launchCap); !errors.Is(expErr, ErrUnavailable) || resExp != nil {
++		t.Fatalf("ReserveExistingReview expired launch = (%v, %v), want (nil, ErrUnavailable)", resExp, expErr)
 +	}
 +}
 +
