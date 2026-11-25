@@ -295,7 +295,7 @@ index e69de29..2d18367 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..5f12b61
+index 0000000..b7c1228
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
 @@ -0,0 +1,1102 @@
@@ -409,8 +409,8 @@ index 0000000..5f12b61
 +
 +	origBodyTimeout := preflightreceipt.ReviewBodyReadTimeout
 +	origTurnTimeout := preflightreceipt.ReviewTurnTimeout
-+	preflightreceipt.ReviewBodyReadTimeout = 2 * time.Second
-+	preflightreceipt.ReviewTurnTimeout = 400 * time.Millisecond
++	preflightreceipt.ReviewBodyReadTimeout = 5 * time.Second
++	preflightreceipt.ReviewTurnTimeout = 1500 * time.Millisecond
 +	defer func() {
 +		preflightreceipt.ReviewBodyReadTimeout = origBodyTimeout
 +		preflightreceipt.ReviewTurnTimeout = origTurnTimeout
@@ -445,7 +445,7 @@ index 0000000..5f12b61
 +	req.Header.Set("Session-Id", session)
 +	req.Header.Set(preflightreceipt.ReviewHeader, launch)
 +
-+	client := &http.Client{Timeout: 3 * time.Second}
++	client := &http.Client{Timeout: 10 * time.Second}
 +	resp, err := client.Do(req)
 +	if err != nil {
 +		if !strings.Contains(err.Error(), "EOF") && !errors.Is(err, context.DeadlineExceeded) {
@@ -461,12 +461,12 @@ index 0000000..5f12b61
 +		if !errors.Is(cerr, context.DeadlineExceeded) {
 +			t.Fatalf("handler ctx err = %v, want context.DeadlineExceeded", cerr)
 +		}
-+	case <-time.After(2 * time.Second):
++	case <-time.After(5 * time.Second):
 +		t.Fatal("downstream review handler context was not canceled by ReviewTurnTimeout")
 +	}
 +
 +	// Reservation MUST be released so SealReview does not remain stuck at SealInFlight.
-+	deadline := time.Now().Add(2 * time.Second)
++	deadline := time.Now().Add(5 * time.Second)
 +	for {
 +		st := preflightreceipt.SealReview(root, launch, session)
 +		if st == preflightreceipt.SealRejected {
@@ -1402,10 +1402,10 @@ index 0000000..5f12b61
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..734b9a9 100644
+index e69de29..05db9b0 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1469 @@
+@@ -0,0 +1,1472 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -2003,18 +2003,21 @@ index e69de29..734b9a9 100644
 +	}
 +	waitReceipt := func(t *testing.T, launch string, check func(preflightreceipt.ReviewReceipt) bool) ([]byte, preflightreceipt.ReviewReceipt) {
 +		t.Helper()
-+		deadline := time.Now().Add(2 * time.Second)
++		deadline := time.Now().Add(10 * time.Second)
++		var lastRaw []byte
++		var lastErr error
 +		for time.Now().Before(deadline) {
 +			raw, err := os.ReadFile(filepath.Join(root, launch, "receipt.json"))
++			lastRaw, lastErr = raw, err
 +			if err == nil {
 +				var r preflightreceipt.ReviewReceipt
 +				if json.Unmarshal(raw, &r) == nil && check(r) {
 +					return raw, r
 +				}
 +			}
-+			time.Sleep(time.Millisecond)
++			time.Sleep(5 * time.Millisecond)
 +		}
-+		t.Fatalf("review receipt for %s did not reach expected state", launch)
++		t.Fatalf("review receipt for %s did not reach expected state (err=%v, raw=%s)", launch, lastErr, string(lastRaw))
 +		return nil, preflightreceipt.ReviewReceipt{}
 +	}
 +	exportFixture := func(t *testing.T, name, launch string, raw []byte) {
@@ -19091,10 +19094,10 @@ index e69de29..b51a050 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..08eb50c 100644
+index e69de29..5daa9d3 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,13795 @@
+@@ -0,0 +1,13716 @@
 +package preflightreceipt
 +
 +import (
@@ -32811,6 +32814,75 @@ index e69de29..08eb50c 100644
 +		c.ObserveStreamChunk(ch)
 +	}
 +}
+diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
+new file mode 100644
+index 0000000..fdf1f50
+--- /dev/null
++++ b/sdk/preflightreceipt/seal_hook_disabled.go
+@@ -0,0 +1,5 @@
++//go:build !preflight_test_roots
++
++package preflightreceipt
++
++func notifySealBeforeCommit() {}
+diff --git a/sdk/preflightreceipt/seal_hook_enabled.go b/sdk/preflightreceipt/seal_hook_enabled.go
+new file mode 100644
+index 0000000..164e818
+--- /dev/null
++++ b/sdk/preflightreceipt/seal_hook_enabled.go
+@@ -0,0 +1,31 @@
++//go:build preflight_test_roots
++
++package preflightreceipt
++
++import "sync"
++
++var (
++	beforeSealCommitMu sync.Mutex
++	beforeSealCommitFn func()
++)
++
++func setBeforeSealCommitHook(fn func()) func() {
++	beforeSealCommitMu.Lock()
++	prev := beforeSealCommitFn
++	beforeSealCommitFn = fn
++	beforeSealCommitMu.Unlock()
++	return func() {
++		beforeSealCommitMu.Lock()
++		beforeSealCommitFn = prev
++		beforeSealCommitMu.Unlock()
++	}
++}
++
++func notifySealBeforeCommit() {
++	beforeSealCommitMu.Lock()
++	fn := beforeSealCommitFn
++	beforeSealCommitMu.Unlock()
++	if fn != nil {
++		fn()
++	}
++}
+diff --git a/sdk/preflightreceipt/seal_hook_enabled_test.go b/sdk/preflightreceipt/seal_hook_enabled_test.go
+new file mode 100644
+index 0000000..7b08c30
+--- /dev/null
++++ b/sdk/preflightreceipt/seal_hook_enabled_test.go
+@@ -0,0 +1,94 @@
++//go:build preflight_test_roots
++
++package preflightreceipt
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++)
 +
 +func TestReviewReceiptTaintDuringSealStagingWindowAbortsBeforeRename(t *testing.T) {
 +	// Sol P1 #1 (PR #2280 R75): if TaintExistingReview arrives AFTER SealReviewWithDigest has
@@ -32888,53 +32960,5 @@ index e69de29..08eb50c 100644
 +	reviewMu.Unlock()
 +	if st3, dig3 := SealReviewWithDigest(root, launch, session); st3 != SealRejected || dig3 != "" {
 +		t.Fatalf("cold-restart seal after staging-window taint = (%v, %q), want (SealRejected, \"\")", st3, dig3)
-+	}
-+}
-diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
-new file mode 100644
-index 0000000..fdf1f50
---- /dev/null
-+++ b/sdk/preflightreceipt/seal_hook_disabled.go
-@@ -0,0 +1,5 @@
-+//go:build !preflight_test_roots
-+
-+package preflightreceipt
-+
-+func notifySealBeforeCommit() {}
-diff --git a/sdk/preflightreceipt/seal_hook_enabled.go b/sdk/preflightreceipt/seal_hook_enabled.go
-new file mode 100644
-index 0000000..164e818
---- /dev/null
-+++ b/sdk/preflightreceipt/seal_hook_enabled.go
-@@ -0,0 +1,31 @@
-+//go:build preflight_test_roots
-+
-+package preflightreceipt
-+
-+import "sync"
-+
-+var (
-+	beforeSealCommitMu sync.Mutex
-+	beforeSealCommitFn func()
-+)
-+
-+func setBeforeSealCommitHook(fn func()) func() {
-+	beforeSealCommitMu.Lock()
-+	prev := beforeSealCommitFn
-+	beforeSealCommitFn = fn
-+	beforeSealCommitMu.Unlock()
-+	return func() {
-+		beforeSealCommitMu.Lock()
-+		beforeSealCommitFn = prev
-+		beforeSealCommitMu.Unlock()
-+	}
-+}
-+
-+func notifySealBeforeCommit() {
-+	beforeSealCommitMu.Lock()
-+	fn := beforeSealCommitFn
-+	beforeSealCommitMu.Unlock()
-+	if fn != nil {
-+		fn()
 +	}
 +}

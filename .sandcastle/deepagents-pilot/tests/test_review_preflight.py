@@ -2704,23 +2704,42 @@ def test_round_trip_enforces_consistent_response_id_when_present():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 response.id 一致性回归
-        # 1. 同流不同 response.id 须拒绝。
-        current["body"] = (
-            'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_a","status":"in_progress"}}\n\n'
-            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_b","status":"completed"}}\n\n'
-        ).encode()
-        res_conflict = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-conflict", preflight.Deadline(3))
-        assert res_conflict["ok"] is False, res_conflict
+        # 1. 同流不同 response.id / item.response_id / output[*].response_id 须拒绝。
+        for bad_stream in (
+            (
+                'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_a","status":"in_progress"}}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_b","status":"completed"}}\n\n'
+            ),
+            (
+                'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"id":"msg_1","response_id":"resp_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
+            (
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":[{"id":"msg_1","response_id":"resp_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+            ),
+            # 显式 null 响应 ID 不得视作缺省放行。
+            'event: response.completed\ndata: {"type":"response.completed","response_id":null,"response":{"status":"completed"}}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":null,"status":"completed"}}\n\n',
+            (
+                'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"id":"msg_1","response_id":null,"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":[{"id":"msg_1","response_id":null,"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}\n\n',
+        ):
+            current["body"] = bad_stream.encode()
+            res_bad = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-bad", preflight.Deadline(3))
+            assert res_bad["ok"] is False, (bad_stream, res_bad)
 
-        # 2. 同流一致 response.id 须通过。
+        # 2. 同流一致 response_id / response.id / item.response_id / output[*].response_id 须通过。
         current["body"] = (
-            'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_a","status":"in_progress"}}\n\n'
-            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            'event: response.created\ndata: {"type":"response.created","response_id":"resp_a","response":{"id":"resp_a","status":"in_progress"}}\n\n'
+            'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"id":"msg_1","response_id":"resp_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}\n\n'
+            'event: response.completed\ndata: {"type":"response.completed","response_id":"resp_a","response":{"id":"resp_a","status":"completed","output":[{"id":"msg_1","response_id":"resp_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
         ).encode()
         res_same = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-same", preflight.Deadline(3))
         assert res_same["ok"] is True, res_same
 
-        # 3. 省略 response.id 的既有载荷保持兼容。
+        # 3. 真正省略 response.id 的既有载荷保持兼容。
         current["body"] = (
             'event: response.created\ndata: {"type":"response.created","response":{"status":"in_progress"}}\n\n'
             'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
