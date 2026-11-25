@@ -5962,10 +5962,10 @@ index 0000000..c34cfd7
 +	return unix.Renameat(oldfd, oldname, newfd, newname)
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..4b05bcb 100644
+index e69de29..53a5372 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,8240 @@
+@@ -0,0 +1,8861 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -6216,10 +6216,46 @@ index e69de29..4b05bcb 100644
 +	taintWriteOverflow    bool
 +	tmpSeq                atomic.Uint64
 +
-+	rootLockMu  sync.Mutex
-+	rootLocks   = make(map[string]*heldRootLock)
-+	rootQuotaMu sync.Mutex
++	rootLockMu sync.Mutex
++	rootLocks  = make(map[string]*heldRootLock)
 +)
++
++const (
++	maxReclaimInspectPerCall = 64
++	maxReclaimCacheEntries   = 4096
++	reclaimNegativeCooldown  = 30 * time.Second
++)
++
++type reclaimCacheKey struct {
++	rootDev uint64
++	rootIno uint64
++	name    string
++}
++
++type reclaimCacheEntry struct {
++	dev       uint64
++	ino       uint64
++	mtimeNS   int64
++	skipUntil time.Time
++}
++
++type bucketReclaimState struct {
++	mu     sync.Mutex
++	cursor int
++	cache  map[reclaimCacheKey]reclaimCacheEntry
++}
++
++var (
++	reviewBucketState    = &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}
++	preflightBucketState = &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}
++)
++
++func bucketStateFor(reviewBucket bool) *bucketReclaimState {
++	if reviewBucket {
++		return reviewBucketState
++	}
++	return preflightBucketState
++}
 +
 +type PendingReviewGuard struct {
 +	key     string
@@ -6344,13 +6380,16 @@ index e69de29..4b05bcb 100644
 +}
 +
 +type heldRootLock struct {
-+	file    *os.File
-+	dir     *os.Root
-+	dev     uint64
-+	ino     uint64
-+	rootDev uint64
-+	rootIno uint64
-+	refs    int
++	file      *os.File
++	dir       *os.Root
++	parentFD  *os.File
++	dev       uint64
++	ino       uint64
++	rootDev   uint64
++	rootIno   uint64
++	parentDev uint64
++	parentIno uint64
++	refs      int
 +}
 +
 +type lockedRootLease struct {
@@ -6373,6 +6412,9 @@ index e69de29..4b05bcb 100644
 +		_ = lock.file.Close()
 +		if lock.dir != nil {
 +			_ = lock.dir.Close()
++		}
++		if lock.parentFD != nil {
++			_ = lock.parentFD.Close()
 +		}
 +	}
 +}
@@ -11520,7 +11562,7 @@ index e69de29..4b05bcb 100644
 +		if (diskEntry.sealed && !diskEntry.tainted) || diskEntry.foreignDisk || diskEntry.taintedPersisted {
 +			return
 +		}
-+		if _, persistErr := diskEntry.persistWithStatusInRootLocked(rootLease.dir, root, false); persistErr != nil && !diskEntry.foreignDisk {
++		if _, persistErr := diskEntry.persistWithStatusInRootLocked(rootLease, root, false); persistErr != nil && !diskEntry.foreignDisk {
 +			reviewMu.Lock()
 +			taintWriteOverflow = true
 +			reviewMu.Unlock()
@@ -11533,31 +11575,135 @@ index e69de29..4b05bcb 100644
 +		started:   now.UnixNano(),
 +		tainted:   true,
 +	}
-+	if _, persistErr := temp.persistWithStatusInRootLocked(rootLease.dir, root, false); persistErr != nil && !temp.foreignDisk {
++	if _, persistErr := temp.persistWithStatusInRootLocked(rootLease, root, false); persistErr != nil && !temp.foreignDisk {
 +		reviewMu.Lock()
 +		taintWriteOverflow = true
 +		reviewMu.Unlock()
 +	}
 +}
 +
-+func syncSealAncestorsForSubRoot(rootHandle, subRoot *os.Root, launch, dir, root string, expectDev, expectIno uint64, hasSubID bool) error {
-+	if rootHandle == nil || subRoot == nil {
++func openVerifiedRootParent(root string, rDev, rIno uint64) (*os.File, uint64, uint64, error) {
++	parent := filepath.Dir(root)
++	base := filepath.Base(root)
++	if parent == "" || parent == root || !isSingleBaseName(base) || pathHasDisallowedSymlink(root) {
++		return nil, 0, 0, ErrUnavailable
++	}
++	pf, err := os.OpenFile(parent, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK, 0)
++	if err != nil {
++		return nil, 0, 0, ErrUnavailable
++	}
++	pfi, statErr := pf.Stat()
++	if statErr != nil || !pfi.IsDir() {
++		_ = pf.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	pDev, pIno, _ := statDevIno(pfi)
++	var childSt unix.Stat_t
++	fstatErr := unix.Fstatat(int(pf.Fd()), base, &childSt, unix.AT_SYMLINK_NOFOLLOW)
++	runtime.KeepAlive(pf)
++	if fstatErr != nil || childSt.Mode&unix.S_IFMT != unix.S_IFDIR || childSt.Mode&0077 != 0 || childSt.Uid != uint32(os.Geteuid()) {
++		_ = pf.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	if uint64(childSt.Dev) != rDev || uint64(childSt.Ino) != rIno {
++		_ = pf.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	if pathHasDisallowedSymlink(root) {
++		_ = pf.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	lfi, lerr := os.Lstat(root)
++	if lerr != nil || !lfi.IsDir() || lfi.Mode()&os.ModeSymlink != 0 || lfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(lfi) {
++		_ = pf.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	if lDev, lIno, okL := statDevIno(lfi); okL && (lDev != rDev || lIno != rIno) {
++		_ = pf.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	return pf, pDev, pIno, nil
++}
++
++func syncPinnedParentFD(parentFD *os.File, parentPath string) error {
++	if parentFD == nil {
++		return ErrUnavailable
++	}
++	fi, statErr := parentFD.Stat()
++	if statErr != nil || !fi.IsDir() {
++		return ErrUnavailable
++	}
++	if err := parentFD.Sync(); err != nil {
++		return err
++	}
++	if syncDirFn != nil {
++		return syncDirFn(parentPath)
++	}
++	return nil
++}
++
++func verifyRootStillBound(lock *heldRootLock, root string) error {
++	if lock == nil || lock.dir == nil || lock.parentFD == nil {
++		return ErrUnavailable
++	}
++	base := filepath.Base(root)
++	parent := filepath.Dir(root)
++	if !isSingleBaseName(base) || parent == "" || parent == root {
++		return ErrUnavailable
++	}
++	// Verify base(root) inside the exact pinned parent directory descriptor is still the locked root inode.
++	var childSt unix.Stat_t
++	fstatErr := unix.Fstatat(int(lock.parentFD.Fd()), base, &childSt, unix.AT_SYMLINK_NOFOLLOW)
++	runtime.KeepAlive(lock.parentFD)
++	if fstatErr != nil || childSt.Mode&unix.S_IFMT != unix.S_IFDIR || childSt.Mode&0077 != 0 || childSt.Uid != uint32(os.Geteuid()) {
++		return ErrUnavailable
++	}
++	if uint64(childSt.Dev) != lock.rootDev || uint64(childSt.Ino) != lock.rootIno {
++		return ErrUnavailable
++	}
++	// Also verify the configured path from / still reaches this exact parent & root (no ancestor rotation).
++	if pathHasDisallowedSymlink(root) {
++		return ErrUnavailable
++	}
++	pfi, perr := os.Stat(parent)
++	if perr != nil || !pfi.IsDir() {
++		return ErrUnavailable
++	}
++	if curPDev, curPIno, okP := statDevIno(pfi); okP && (curPDev != lock.parentDev || curPIno != lock.parentIno) {
++		return ErrUnavailable
++	}
++	rfi, rerr := os.Lstat(root)
++	if rerr != nil || !rfi.IsDir() || rfi.Mode()&os.ModeSymlink != 0 || rfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(rfi) {
++		return ErrUnavailable
++	}
++	if curRDev, curRIno, okR := statDevIno(rfi); okR && (curRDev != lock.rootDev || curRIno != lock.rootIno) {
++		return ErrUnavailable
++	}
++	return nil
++}
++
++func syncSealAncestorsForSubRoot(rootLease *lockedRootLease, subRoot *os.Root, launch, dir, root string, expectDev, expectIno uint64, hasSubID bool) error {
++	if rootLease == nil || rootLease.dir == nil || rootLease.lock == nil || subRoot == nil {
 +		return ErrUnavailable
 +	}
 +	if err := syncPinnedDir(subRoot, dir); err != nil {
 +		return err
 +	}
-+	if err := syncPinnedDir(rootHandle, root); err != nil {
++	if err := syncPinnedDir(rootLease.dir, root); err != nil {
 +		return err
 +	}
 +	parent := filepath.Dir(root)
 +	if parent != "" && parent != root {
-+		if err := syncPathDir(parent); err != nil {
++		if err := syncPinnedParentFD(rootLease.lock.parentFD, parent); err != nil {
 +			return err
 +		}
 +	}
-+	// Confirm the verified & synced subRoot is still the active directory for launch inside rootHandle.
-+	curFI, err := rootHandle.Lstat(launch)
++	// Confirm configured root and pinned parent STILL resolve to the exact locked root inode,
++	// AND launch inside rootLease.dir STILL resolves to the exact verified & synced subRoot inode.
++	if err := verifyRootStillBound(rootLease.lock, root); err != nil {
++		return err
++	}
++	curFI, err := rootLease.dir.Lstat(launch)
 +	if err != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
 +		return ErrUnavailable
 +	}
@@ -11567,33 +11713,39 @@ index e69de29..4b05bcb 100644
 +	return nil
 +}
 +
-+func readVerifiedSealDigestFromRoot(subRoot *os.Root) (string, bool) {
++func readVerifiedSealDigestWithIdentityFromRoot(subRoot *os.Root) (string, uint64, uint64, bool, bool) {
 +	if subRoot == nil {
-+		return "", false
++		return "", 0, 0, false, false
 +	}
 +	finfo, err := subRoot.Lstat("seal.sha256")
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) || finfo.Size() != 64 {
-+		return "", false
++		return "", 0, 0, false, false
 +	}
 +	f, err := subRoot.OpenFile("seal.sha256", os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 +	if err != nil {
-+		return "", false
++		return "", 0, 0, false, false
 +	}
 +	fStat, statErr := f.Stat()
 +	if statErr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() != 64 {
 +		_ = f.Close()
-+		return "", false
++		return "", 0, 0, false, false
 +	}
 +	raw, readErr := io.ReadAll(io.LimitReader(f, 65))
 +	_ = f.Close()
 +	if readErr != nil || len(raw) != 64 {
-+		return "", false
++		return "", 0, 0, false, false
 +	}
 +	digest := string(raw)
 +	if !isSHA256Hex(digest) {
-+		return "", false
++		return "", 0, 0, false, false
 +	}
-+	return digest, true
++	dev, ino, hasID := statDevIno(fStat)
++	return digest, dev, ino, hasID, true
++}
++
++func readVerifiedSealDigestFromRoot(subRoot *os.Root) (string, bool) {
++	digest, _, _, _, ok := readVerifiedSealDigestWithIdentityFromRoot(subRoot)
++	return digest, ok
 +}
 +
 +func readVerifiedSealDigest(dir string) (string, bool) {
@@ -11610,10 +11762,11 @@ index e69de29..4b05bcb 100644
 +	return readVerifiedSealDigestFromRoot(subRoot)
 +}
 +
-+func verifySealedDiskReceiptInRoot(rootHandle *os.Root, dir, root, launch, session, expectedSHA string, now time.Time, requireSync bool) (SealStatus, string) {
-+	if rootHandle == nil {
++func verifySealedDiskReceiptInRoot(rootLease *lockedRootLease, dir, root, launch, session, expectedSHA string, now time.Time, requireSync bool) (SealStatus, string) {
++	if rootLease == nil || rootLease.dir == nil || rootLease.lock == nil {
 +		return SealUnavailable, ""
 +	}
++	rootHandle := rootLease.dir
 +	subRoot, subFI, err := openVerifiedSubdir(rootHandle, launch)
 +	if err != nil {
 +		if errors.Is(err, os.ErrNotExist) {
@@ -11641,10 +11794,13 @@ index e69de29..4b05bcb 100644
 +		return SealRejected, ""
 +	}
 +	if requireSync {
-+		if syncSealAncestorsForSubRoot(rootHandle, subRoot, launch, dir, root, subDev, subIno, hasSubID) != nil {
++		if syncSealAncestorsForSubRoot(rootLease, subRoot, launch, dir, root, subDev, subIno, hasSubID) != nil {
 +			return SealUnavailable, ""
 +		}
 +	} else {
++		if verifyRootStillBound(rootLease.lock, root) != nil {
++			return SealUnavailable, ""
++		}
 +		curFI, lerr := rootHandle.Lstat(launch)
 +		if lerr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
 +			return SealUnavailable, ""
@@ -11704,7 +11860,7 @@ index e69de29..4b05bcb 100644
 +			if !isSHA256Hex(entry.sealedReceiptSHA) {
 +				return SealUnavailable, ""
 +			}
-+			st, digest := verifySealedDiskReceiptInRoot(rootLease.dir, entry.directory, root, launch, session, entry.sealedReceiptSHA, now, !entry.sealSynced)
++			st, digest := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, entry.sealedReceiptSHA, now, !entry.sealSynced)
 +			if st != SealOK {
 +				return st, ""
 +			}
@@ -11742,7 +11898,7 @@ index e69de29..4b05bcb 100644
 +				finishSeal(true)
 +				return SealUnavailable, ""
 +			}
-+			st, digest := verifySealedDiskReceiptInRoot(rootLease.dir, entry.directory, root, launch, session, expectedSHA, now, !entry.sealSynced)
++			st, digest := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, expectedSHA, now, !entry.sealSynced)
 +			if st != SealOK {
 +				entry.mu.Unlock()
 +				finishSeal(true)
@@ -11787,7 +11943,7 @@ index e69de29..4b05bcb 100644
 +		if entry.sealedAt < entry.finished {
 +			entry.sealedAt = entry.finished
 +		}
-+		renamed, err := entry.persistWithStatusInRootLocked(rootLease.dir, root, true)
++		renamed, err := entry.persistWithStatusInRootLocked(rootLease, root, true)
 +		if entry.tainted || !entry.sealed {
 +			entry.sealed = false
 +			entry.sealedAt = 0
@@ -11824,7 +11980,7 @@ index e69de29..4b05bcb 100644
 +	reviewMu.Unlock()
 +
 +	dir := filepath.Join(root, launch)
-+	return verifySealedDiskReceiptInRoot(rootLease.dir, dir, root, launch, session, "", now, true)
++	return verifySealedDiskReceiptInRoot(rootLease, dir, root, launch, session, "", now, true)
 +}
 +
 +// BeginReviewReserved transfers an already-reserved in-flight review launch into a Collector
@@ -12045,12 +12201,15 @@ index e69de29..4b05bcb 100644
 +			if h.dir != nil {
 +				_ = h.dir.Close()
 +			}
++			if h.parentFD != nil {
++				_ = h.parentFD.Close()
++			}
 +		}
 +	}
 +
 +	rootLockMu.Lock()
 +	if held := rootLocks[root]; held != nil {
-+		if held.dir != nil && held.rootDev == rDev && held.rootIno == rIno {
++		if held.dir != nil && held.parentFD != nil && held.rootDev == rDev && held.rootIno == rIno && verifyRootStillBound(held, root) == nil {
 +			if curLockInfo, lerr := held.dir.Lstat(".writer.lock"); lerr == nil && curLockInfo.Mode().IsRegular() &&
 +				curLockInfo.Mode()&os.ModeSymlink == 0 && curLockInfo.Mode().Perm()&0077 == 0 && ownedByCurrentUser(curLockInfo) {
 +				lDev, lIno, hasLockID := statDevIno(curLockInfo)
@@ -12077,10 +12236,18 @@ index e69de29..4b05bcb 100644
 +		}
 +	}
 +
++	parentFD, pDev, pIno, err := openVerifiedRootParent(root, rDev, rIno)
++	if err != nil {
++		rootLockMu.Unlock()
++		closeRetired()
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
++	}
 +	f, err := candRoot.OpenFile(".writer.lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 +	if err != nil {
 +		rootLockMu.Unlock()
 +		closeRetired()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
@@ -12089,6 +12256,7 @@ index e69de29..4b05bcb 100644
 +		rootLockMu.Unlock()
 +		closeRetired()
 +		_ = f.Close()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
@@ -12096,6 +12264,7 @@ index e69de29..4b05bcb 100644
 +		rootLockMu.Unlock()
 +		closeRetired()
 +		_ = f.Close()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
@@ -12104,6 +12273,7 @@ index e69de29..4b05bcb 100644
 +		rootLockMu.Unlock()
 +		closeRetired()
 +		_ = f.Close()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
@@ -12112,6 +12282,7 @@ index e69de29..4b05bcb 100644
 +		rootLockMu.Unlock()
 +		closeRetired()
 +		_ = f.Close()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
@@ -12119,6 +12290,7 @@ index e69de29..4b05bcb 100644
 +		rootLockMu.Unlock()
 +		closeRetired()
 +		_ = f.Close()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
@@ -12127,6 +12299,7 @@ index e69de29..4b05bcb 100644
 +		rootLockMu.Unlock()
 +		closeRetired()
 +		_ = f.Close()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
@@ -12134,6 +12307,7 @@ index e69de29..4b05bcb 100644
 +		rootLockMu.Unlock()
 +		closeRetired()
 +		_ = f.Close()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
@@ -12141,24 +12315,36 @@ index e69de29..4b05bcb 100644
 +		rootLockMu.Unlock()
 +		closeRetired()
 +		_ = f.Close()
++		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
 +	held := &heldRootLock{
-+		file:    f,
-+		dir:     candRoot,
-+		dev:     lDev,
-+		ino:     lIno,
-+		rootDev: rDev,
-+		rootIno: rIno,
-+		refs:    2, // 1 for rootLocks cache + 1 for returned lease
++		file:      f,
++		dir:       candRoot,
++		parentFD:  parentFD,
++		dev:       lDev,
++		ino:       lIno,
++		rootDev:   rDev,
++		rootIno:   rIno,
++		parentDev: pDev,
++		parentIno: pIno,
++		refs:      2, // 1 for rootLocks cache + 1 for returned lease
++	}
++	if err := verifyRootStillBound(held, root); err != nil {
++		rootLockMu.Unlock()
++		closeRetired()
++		_ = f.Close()
++		_ = parentFD.Close()
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
 +	rootLocks[root] = held
 +	lease := &lockedRootLease{lock: held, dir: candRoot}
 +	rootLockMu.Unlock()
 +	closeRetired()
 +	// Newly acquired exclusive .writer.lock guarantees no other proxy process owns root;
-+	// safely sweep crash-orphaned producer staging files/dirs not active in this process.
++	// safely sweep content-verified crash-orphaned producer staging artifacts not active in this process.
 +	sweepOrphanStagingInRoot(candRoot, root, true)
 +	return lease, nil
 +}
@@ -12262,9 +12448,11 @@ index e69de29..4b05bcb 100644
 +const maxStagingCreateRetries = 8
 +
 +var (
-+	stagingFilePattern = regexp.MustCompile(`^(?:pending|pending-sha|pending-marker)-[0-9]+-[0-9]+(?:-[0-9a-f]{16})?$`)
-+	stagingDirPattern  = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
-+	stagingOrphanAge   = 5 * time.Minute
++	stagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker)-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
++	stagingDirPattern   = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
++	stageSealDirPattern = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
++	reclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
++	stagingOrphanAge    = 5 * time.Minute
 +
 +	activeStagingMu sync.Mutex
 +	activeStaging   = make(map[string]int)
@@ -12343,8 +12531,8 @@ index e69de29..4b05bcb 100644
 +	})
 +}
 +
-+func createStagingDir(stagingRoot *os.Root, root string) (string, *os.Root, func(), error) {
-+	if stagingRoot == nil {
++func createNamedStagingDir(stagingRoot *os.Root, root, prefix string) (string, *os.Root, func(), error) {
++	if stagingRoot == nil || !isSingleBaseName(prefix) {
 +		return "", nil, nil, ErrUnavailable
 +	}
 +	for i := 0; i < maxStagingCreateRetries; i++ {
@@ -12352,7 +12540,7 @@ index e69de29..4b05bcb 100644
 +		if err != nil {
 +			return "", nil, nil, ErrUnavailable
 +		}
-+		name := fmt.Sprintf("stage-dir-%d-%d-%s", os.Getpid(), tmpSeq.Add(1), tok)
++		name := fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok)
 +		trackStagingEntry(root, name)
 +		if mkErr := stagingRoot.Mkdir(name, 0700); mkErr != nil {
 +			untrackStagingEntry(root, name)
@@ -12376,37 +12564,289 @@ index e69de29..4b05bcb 100644
 +	return "", nil, nil, ErrUnavailable
 +}
 +
-+func isValidStagingMarkerFile(subRoot *os.Root, childName string) bool {
-+	if subRoot == nil || childName != "producer.json" {
-+		return false
++func createStagingDir(stagingRoot *os.Root, root string) (string, *os.Root, func(), error) {
++	return createNamedStagingDir(stagingRoot, root, "stage-dir")
++}
++
++type verifiedLeafChild struct {
++	name   string
++	dev    uint64
++	ino    uint64
++	hasID  bool
++	sha256 string
++}
++
++func readPrivateRegularFileInSubdir(subRoot *os.Root, childName string, maxBytes int64) ([]byte, uint64, uint64, bool, bool) {
++	if subRoot == nil || !isSingleBaseName(childName) || maxBytes <= 0 {
++		return nil, 0, 0, false, false
 +	}
 +	cfi, cerr := subRoot.Lstat(childName)
-+	if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || cfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(cfi) || cfi.Size() <= 0 || cfi.Size() > 4096 {
-+		return false
++	if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || cfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(cfi) || cfi.Size() <= 0 || cfi.Size() > maxBytes {
++		return nil, 0, 0, false, false
 +	}
 +	f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 +	if oerr != nil {
-+		return false
++		return nil, 0, 0, false, false
 +	}
 +	fStat, serr := f.Stat()
-+	if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > 4096 {
++	if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > maxBytes {
 +		_ = f.Close()
++		return nil, 0, 0, false, false
++	}
++	raw, rerr := io.ReadAll(io.LimitReader(f, maxBytes+1))
++	_ = f.Close()
++	if rerr != nil || len(raw) == 0 || int64(len(raw)) > maxBytes {
++		return nil, 0, 0, false, false
++	}
++	dev, ino, hasID := statDevIno(fStat)
++	return raw, dev, ino, hasID, true
++}
++
++func removeVerifiedFileInSubdir(subRoot *os.Root, childName string, dev, ino uint64, hasID bool, expectSHA string, maxBytes int64) bool {
++	if subRoot == nil || !isSingleBaseName(childName) || !hasID || expectSHA == "" || maxBytes <= 0 {
 +		return false
 +	}
-+	raw, rerr := io.ReadAll(io.LimitReader(f, 4097))
-+	_ = f.Close()
-+	if rerr != nil || len(raw) == 0 || len(raw) > 4096 {
++	raw, curDev, curIno, curHasID, ok := readPrivateRegularFileInSubdir(subRoot, childName, maxBytes)
++	if !ok || !curHasID || curDev != dev || curIno != ino || sha256Hex(string(raw)) != expectSHA {
 +		return false
++	}
++	return subRoot.Remove(childName) == nil
++}
++
++func verifyStagingRegularFile(stagingRoot *os.Root, name string) (verifiedLeafChild, bool) {
++	if strings.HasPrefix(name, "pending-marker-") {
++		raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(stagingRoot, name, 4096)
++		if !ok {
++			return verifiedLeafChild{}, false
++		}
++		var rm reviewReservationMarker
++		if decodeExactReceiptJSON(raw, reviewMarkerJSONKeys, &rm) == nil && rm.Schema == ReviewSchema && ValidReviewLaunch(rm.Launch) && rm.Started > 0 {
++			return verifiedLeafChild{name: name, dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, true
++		}
++		var pm preflightReservationMarker
++		if decodeExactReceiptJSON(raw, preflightMarkerJSONKeys, &pm) == nil && pm.Schema == Schema && ValidPreflightSession(pm.Session) && pm.Started > 0 {
++			return verifiedLeafChild{name: name, dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, true
++		}
++		return verifiedLeafChild{}, false
++	}
++	if strings.HasPrefix(name, "pending-") {
++		raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(stagingRoot, name, maxReviewReceiptBytes)
++		if !ok {
++			return verifiedLeafChild{}, false
++		}
++		var rr ReviewReceipt
++		if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &rr) == nil && ValidReviewLaunch(rr.Launch) && isValidProducerReviewReceipt(rr, rr.Launch) {
++			return verifiedLeafChild{name: name, dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, true
++		}
++		var pr Receipt
++		if decodeExactReceiptJSON(raw, preflightReceiptJSONKeys, &pr) == nil && ValidPreflightSession(pr.Session) && isValidProducerPreflightReceipt(pr, pr.Session) {
++			return verifiedLeafChild{name: name, dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, true
++		}
++		return verifiedLeafChild{}, false
++	}
++	return verifiedLeafChild{}, false
++}
++
++func readVerifiedStagingMarkerFile(subRoot *os.Root) (verifiedLeafChild, string, bool) {
++	raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(subRoot, "producer.json", 4096)
++	if !ok {
++		return verifiedLeafChild{}, "", false
 +	}
 +	var rm reviewReservationMarker
 +	if decodeExactReceiptJSON(raw, reviewMarkerJSONKeys, &rm) == nil && rm.Schema == ReviewSchema && ValidReviewLaunch(rm.Launch) && rm.Started > 0 {
-+		return true
++		return verifiedLeafChild{name: "producer.json", dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, rm.Launch, true
 +	}
 +	var pm preflightReservationMarker
-+	return decodeExactReceiptJSON(raw, preflightMarkerJSONKeys, &pm) == nil && pm.Schema == Schema && ValidPreflightSession(pm.Session) && pm.Started > 0
++	if decodeExactReceiptJSON(raw, preflightMarkerJSONKeys, &pm) == nil && pm.Schema == Schema && ValidPreflightSession(pm.Session) && pm.Started > 0 {
++		return verifiedLeafChild{name: "producer.json", dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, pm.Session, true
++	}
++	return verifiedLeafChild{}, "", false
 +}
 +
-+func sweepOrphanStagingDir(stagingRoot *os.Root, root string, forceAllInactive bool) int {
++func removeVerifiedChildrenInSafeOrder(subRoot *os.Root, verified map[string]verifiedLeafChild) bool {
++	if subRoot == nil {
++		return false
++	}
++	order := []string{"seal.sha256", "seal.pending.json", "receipt.json", "producer.json"}
++	for _, cname := range order {
++		ch, ok := verified[cname]
++		if !ok {
++			continue
++		}
++		maxB := int64(maxReviewReceiptBytes)
++		if cname == "producer.json" {
++			maxB = 4096
++		} else if cname == "seal.sha256" {
++			maxB = 64
++		}
++		if !removeVerifiedFileInSubdir(subRoot, ch.name, ch.dev, ch.ino, ch.hasID, ch.sha256, maxB) {
++			return false
++		}
++	}
++	rem, err := readDirFromRoot(subRoot)
++	return err == nil && len(rem) == 0
++}
++
++func cleanOrphanStageSealDir(rootHandle, stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool) bool {
++	children, err := readDirFromRoot(subRoot)
++	if err != nil {
++		return false
++	}
++	if len(children) == 0 {
++		return false
++	}
++	verified := make(map[string]verifiedLeafChild, len(children))
++	var launch string
++	var pendingSHA string
++	var sealDigest string
++	hasMarker := false
++	hasSeal := false
++	for _, child := range children {
++		cname := child.Name()
++		switch cname {
++		case "producer.json":
++			ch, owner, ok := readVerifiedStagingMarkerFile(subRoot)
++			if !ok || !ValidReviewLaunch(owner) {
++				return false
++			}
++			launch = owner
++			hasMarker = true
++			verified[cname] = ch
++		case "seal.pending.json":
++			raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(subRoot, cname, maxReviewReceiptBytes)
++			if !ok {
++				return false
++			}
++			var rr ReviewReceipt
++			if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &rr) != nil || !ValidReviewLaunch(rr.Launch) || !isValidProducerReviewReceipt(rr, rr.Launch) || !rr.Sealed {
++				return false
++			}
++			if launch != "" && rr.Launch != launch {
++				return false
++			}
++			launch = rr.Launch
++			pendingSHA = sha256Hex(string(raw))
++			verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: pendingSHA}
++		case "seal.sha256":
++			d, dev, ino, hasID, ok := readVerifiedSealDigestWithIdentityFromRoot(subRoot)
++			if !ok {
++				return false
++			}
++			sealDigest = d
++			hasSeal = true
++			verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(d)}
++		default:
++			return false
++		}
++	}
++	if !hasMarker || launch == "" {
++		return false
++	}
++	if hasSeal {
++		matched := pendingSHA != "" && sealDigest == pendingSHA
++		if !matched && rootHandle != nil {
++			if lSub, _, lerr := openVerifiedSubdir(rootHandle, launch); lerr == nil {
++				for _, target := range []string{"seal.pending.json", "receipt.json"} {
++					if raw, _, _, _, ok := readPrivateRegularFileInSubdir(lSub, target, maxReviewReceiptBytes); ok && sha256Hex(string(raw)) == sealDigest {
++						matched = true
++						break
++					}
++				}
++				_ = lSub.Close()
++			}
++		}
++		if !matched {
++			return false
++		}
++	}
++	if !removeVerifiedChildrenInSafeOrder(subRoot, verified) {
++		return false
++	}
++	_ = subRoot.Close()
++	curFI, curErr := stagingRoot.Lstat(name)
++	if curErr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
++		return false
++	}
++	if curDev, curIno, okCur := statDevIno(curFI); okCur && hasSubID && (curDev != subDev || curIno != subIno) {
++		return false
++	}
++	return stagingRoot.Remove(name) == nil
++}
++
++func cleanOrphanReclaimDir(stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool) bool {
++	children, err := readDirFromRoot(subRoot)
++	if err != nil {
++		return false
++	}
++	if len(children) > 0 {
++		verified := make(map[string]verifiedLeafChild, len(children))
++		var receiptSHA, pendingSHA, sealDigest string
++		hasSeal := false
++		for _, child := range children {
++			cname := child.Name()
++			switch cname {
++			case "producer.json":
++				ch, _, ok := readVerifiedStagingMarkerFile(subRoot)
++				if !ok {
++					return false
++				}
++				verified[cname] = ch
++			case "receipt.json":
++				raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(subRoot, cname, maxReviewReceiptBytes)
++				if !ok {
++					return false
++				}
++				var rr ReviewReceipt
++				var pr Receipt
++				okRR := decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &rr) == nil && ValidReviewLaunch(rr.Launch) && isValidProducerReviewReceipt(rr, rr.Launch)
++				okPR := !okRR && decodeExactReceiptJSON(raw, preflightReceiptJSONKeys, &pr) == nil && ValidPreflightSession(pr.Session) && isValidProducerPreflightReceipt(pr, pr.Session)
++				if !okRR && !okPR {
++					return false
++				}
++				receiptSHA = sha256Hex(string(raw))
++				verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: receiptSHA}
++			case "seal.pending.json":
++				raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(subRoot, cname, maxReviewReceiptBytes)
++				if !ok {
++					return false
++				}
++				var rr ReviewReceipt
++				if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &rr) != nil || !ValidReviewLaunch(rr.Launch) || !isValidProducerReviewReceipt(rr, rr.Launch) || !rr.Sealed {
++					return false
++				}
++				pendingSHA = sha256Hex(string(raw))
++				verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: pendingSHA}
++			case "seal.sha256":
++				d, dev, ino, hasID, ok := readVerifiedSealDigestWithIdentityFromRoot(subRoot)
++				if !ok {
++					return false
++				}
++				sealDigest = d
++				hasSeal = true
++				verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(d)}
++			default:
++				return false
++			}
++		}
++		if hasSeal && sealDigest != receiptSHA && sealDigest != pendingSHA {
++			return false
++		}
++		if !removeVerifiedChildrenInSafeOrder(subRoot, verified) {
++			return false
++		}
++	}
++	_ = subRoot.Close()
++	curFI, curErr := stagingRoot.Lstat(name)
++	if curErr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
++		return false
++	}
++	if curDev, curIno, okCur := statDevIno(curFI); okCur && hasSubID && (curDev != subDev || curIno != subIno) {
++		return false
++	}
++	return stagingRoot.Remove(name) == nil
++}
++
++func sweepOrphanStagingDir(rootHandle, stagingRoot *os.Root, root string, forceAllInactive bool) int {
 +	if stagingRoot == nil {
 +		return 0
 +	}
@@ -12429,7 +12869,15 @@ index e69de29..4b05bcb 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
-+			if stagingRoot.Remove(name) == nil {
++			ch, ok := verifyStagingRegularFile(stagingRoot, name)
++			if !ok {
++				continue
++			}
++			maxB := int64(maxReviewReceiptBytes)
++			if strings.HasPrefix(name, "pending-marker-") {
++				maxB = 4096
++			}
++			if removeVerifiedFileInSubdir(stagingRoot, ch.name, ch.dev, ch.ino, ch.hasID, ch.sha256, maxB) {
 +				removed++
 +			}
 +			continue
@@ -12448,22 +12896,22 @@ index e69de29..4b05bcb 100644
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
 +			children, cerr := readDirFromRoot(subRoot)
-+			canRemove := cerr == nil && len(children) <= 1
-+			hasMarker := false
-+			if canRemove && len(children) == 1 {
-+				if isValidStagingMarkerFile(subRoot, children[0].Name()) {
-+					hasMarker = true
-+				} else {
-+					canRemove = false
-+				}
++			if cerr != nil || len(children) != 1 || children[0].Name() != "producer.json" {
++				_ = subRoot.Close()
++				continue
 +			}
-+			if canRemove && hasMarker {
-+				if rerr := subRoot.Remove("producer.json"); rerr != nil && !os.IsNotExist(rerr) {
-+					canRemove = false
-+				}
++			ch, _, ok := readVerifiedStagingMarkerFile(subRoot)
++			if !ok {
++				_ = subRoot.Close()
++				continue
 +			}
++			if !removeVerifiedFileInSubdir(subRoot, ch.name, ch.dev, ch.ino, ch.hasID, ch.sha256, 4096) {
++				_ = subRoot.Close()
++				continue
++			}
++			rem, rerr := readDirFromRoot(subRoot)
 +			_ = subRoot.Close()
-+			if canRemove {
++			if rerr == nil && len(rem) == 0 {
 +				curFI, curErr := stagingRoot.Lstat(name)
 +				if curErr == nil && curFI.IsDir() && curFI.Mode()&os.ModeSymlink == 0 && curFI.Mode().Perm()&0077 == 0 && ownedByCurrentUser(curFI) {
 +					if curDev, curIno, okCur := statDevIno(curFI); !okCur || !hasSubID || (curDev == subDev && curIno == subIno) {
@@ -12472,6 +12920,46 @@ index e69de29..4b05bcb 100644
 +						}
 +					}
 +				}
++			}
++			continue
++		}
++		if stageSealDirPattern.MatchString(name) {
++			fi, lerr := stagingRoot.Lstat(name)
++			if lerr != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++				continue
++			}
++			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
++				continue
++			}
++			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
++			if oerr != nil {
++				continue
++			}
++			subDev, subIno, hasSubID := statDevIno(subFI)
++			if cleanOrphanStageSealDir(rootHandle, stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
++				removed++
++			} else {
++				_ = subRoot.Close()
++			}
++			continue
++		}
++		if reclaimDirPattern.MatchString(name) {
++			fi, lerr := stagingRoot.Lstat(name)
++			if lerr != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++				continue
++			}
++			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
++				continue
++			}
++			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
++			if oerr != nil {
++				continue
++			}
++			subDev, subIno, hasSubID := statDevIno(subFI)
++			if cleanOrphanReclaimDir(stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
++				removed++
++			} else {
++				_ = subRoot.Close()
 +			}
 +		}
 +	}
@@ -12490,7 +12978,7 @@ index e69de29..4b05bcb 100644
 +		return 0
 +	}
 +	defer stagingRoot.Close()
-+	return sweepOrphanStagingDir(stagingRoot, root, forceAllInactive)
++	return sweepOrphanStagingDir(rootHandle, stagingRoot, root, forceAllInactive)
 +}
 +
 +func ensureStagingDir(rootHandle *os.Root, root string) (*os.Root, error) {
@@ -12567,21 +13055,22 @@ index e69de29..4b05bcb 100644
 +	return f.ReadDir(-1)
 +}
 +
-+func inspectProducerReceiptSubdir(rootHandle *os.Root, name string, reviewBucket bool) (*os.Root, uint64, uint64, time.Time, bool) {
++func inspectProducerReceiptSubdir(rootHandle *os.Root, name string, reviewBucket bool) (*os.Root, uint64, uint64, time.Time, map[string]verifiedLeafChild, bool) {
 +	if rootHandle == nil || !isProducerBucketDirName(name, reviewBucket) {
-+		return nil, 0, 0, time.Time{}, false
++		return nil, 0, 0, time.Time{}, nil, false
 +	}
 +	subRoot, fi, err := openVerifiedSubdir(rootHandle, name)
 +	if err != nil {
-+		return nil, 0, 0, time.Time{}, false
++		return nil, 0, 0, time.Time{}, nil, false
 +	}
 +	subDev, subIno, _ := statDevIno(fi)
 +	lastMod := fi.ModTime()
 +	children, err := readDirFromRoot(subRoot)
 +	if err != nil {
 +		_ = subRoot.Close()
-+		return nil, 0, 0, time.Time{}, false
++		return nil, 0, 0, time.Time{}, nil, false
 +	}
++	verified := make(map[string]verifiedLeafChild, len(children))
 +	hasReceipt := false
 +	hasProducerMarker := false
 +	hasSealFile := false
@@ -12597,43 +13086,27 @@ index e69de29..4b05bcb 100644
 +		childName := child.Name()
 +		if !isProducerOwnedReceiptFile(childName, reviewBucket) {
 +			_ = subRoot.Close()
-+			return nil, 0, 0, time.Time{}, false
++			return nil, 0, 0, time.Time{}, nil, false
 +		}
 +		cfi, cerr := subRoot.Lstat(childName)
 +		if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || cfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(cfi) {
 +			_ = subRoot.Close()
-+			return nil, 0, 0, time.Time{}, false
++			return nil, 0, 0, time.Time{}, nil, false
 +		}
 +		if cfi.ModTime().After(lastMod) {
 +			lastMod = cfi.ModTime()
 +		}
 +		if childName == "receipt.json" {
-+			if cfi.Size() <= 0 || cfi.Size() > maxReviewReceiptBytes {
++			raw, fDev, fIno, fHasID, ok := readPrivateRegularFileInSubdir(subRoot, childName, maxReviewReceiptBytes)
++			if !ok {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
-+			}
-+			f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-+			if oerr != nil {
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
-+			}
-+			fStat, serr := f.Stat()
-+			if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > maxReviewReceiptBytes {
-+				_ = f.Close()
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
-+			}
-+			raw, rerr := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
-+			_ = f.Close()
-+			if rerr != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
 +			if reviewBucket {
 +				var disk ReviewReceipt
 +				if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &disk) != nil || !isValidProducerReviewReceipt(disk, name) {
 +					_ = subRoot.Close()
-+					return nil, 0, 0, time.Time{}, false
++					return nil, 0, 0, time.Time{}, nil, false
 +				}
 +				reviewDisk = disk
 +				reviewSealed = disk.Sealed
@@ -12650,7 +13123,7 @@ index e69de29..4b05bcb 100644
 +				var disk Receipt
 +				if decodeExactReceiptJSON(raw, preflightReceiptJSONKeys, &disk) != nil || !isValidProducerPreflightReceipt(disk, name) {
 +					_ = subRoot.Close()
-+					return nil, 0, 0, time.Time{}, false
++					return nil, 0, 0, time.Time{}, nil, false
 +				}
 +				for _, ns := range []int64{disk.Started, disk.Finished} {
 +					if ns > 0 {
@@ -12662,32 +13135,21 @@ index e69de29..4b05bcb 100644
 +			}
 +			hasReceipt = true
 +			receiptRaw = raw
++			verified[childName] = verifiedLeafChild{name: childName, dev: fDev, ino: fIno, hasID: fHasID, sha256: sha256Hex(string(raw))}
 +		} else if childName == "seal.pending.json" {
-+			if !reviewBucket || cfi.Size() <= 0 || cfi.Size() > maxReviewReceiptBytes {
++			if !reviewBucket {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
-+			f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-+			if oerr != nil {
++			raw, fDev, fIno, fHasID, ok := readPrivateRegularFileInSubdir(subRoot, childName, maxReviewReceiptBytes)
++			if !ok {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
-+			}
-+			fStat, serr := f.Stat()
-+			if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > maxReviewReceiptBytes {
-+				_ = f.Close()
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
-+			}
-+			raw, rerr := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
-+			_ = f.Close()
-+			if rerr != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
 +			var pendingDisk ReviewReceipt
 +			if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &pendingDisk) != nil || !isValidProducerReviewReceipt(pendingDisk, name) || !pendingDisk.Sealed {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
 +			for _, ns := range []int64{pendingDisk.Started, pendingDisk.Finished, pendingDisk.SealedAt} {
 +				if ns > 0 {
@@ -12699,33 +13161,18 @@ index e69de29..4b05bcb 100644
 +			sealPendingDisk = pendingDisk
 +			sealPendingRaw = raw
 +			hasSealPending = true
++			verified[childName] = verifiedLeafChild{name: childName, dev: fDev, ino: fIno, hasID: fHasID, sha256: sha256Hex(string(raw))}
 +		} else if childName == "producer.json" {
-+			if cfi.Size() <= 0 || cfi.Size() > 4096 {
++			raw, fDev, fIno, fHasID, ok := readPrivateRegularFileInSubdir(subRoot, childName, 4096)
++			if !ok {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
-+			}
-+			f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-+			if oerr != nil {
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
-+			}
-+			fStat, serr := f.Stat()
-+			if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > 4096 {
-+				_ = f.Close()
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
-+			}
-+			raw, rerr := io.ReadAll(io.LimitReader(f, 4097))
-+			_ = f.Close()
-+			if rerr != nil || len(raw) == 0 || len(raw) > 4096 {
-+				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
 +			if reviewBucket {
 +				var marker reviewReservationMarker
 +				if decodeExactReceiptJSON(raw, reviewMarkerJSONKeys, &marker) != nil || marker.Schema != ReviewSchema || marker.Launch != name || marker.Started <= 0 {
 +					_ = subRoot.Close()
-+					return nil, 0, 0, time.Time{}, false
++					return nil, 0, 0, time.Time{}, nil, false
 +				}
 +				if t := time.Unix(0, marker.Started); t.After(lastMod) {
 +					lastMod = t
@@ -12734,39 +13181,41 @@ index e69de29..4b05bcb 100644
 +				var marker preflightReservationMarker
 +				if decodeExactReceiptJSON(raw, preflightMarkerJSONKeys, &marker) != nil || marker.Schema != Schema || marker.Session != name || marker.Started <= 0 {
 +					_ = subRoot.Close()
-+					return nil, 0, 0, time.Time{}, false
++					return nil, 0, 0, time.Time{}, nil, false
 +				}
 +				if t := time.Unix(0, marker.Started); t.After(lastMod) {
 +					lastMod = t
 +				}
 +			}
 +			hasProducerMarker = true
++			verified[childName] = verifiedLeafChild{name: childName, dev: fDev, ino: fIno, hasID: fHasID, sha256: sha256Hex(string(raw))}
 +		} else if childName == "seal.sha256" {
 +			hasSealFile = true
 +		}
 +	}
 +	if !hasReceipt && !hasProducerMarker {
 +		_ = subRoot.Close()
-+		return nil, 0, 0, time.Time{}, false
++		return nil, 0, 0, time.Time{}, nil, false
 +	}
 +	if reviewBucket {
 +		if reviewSealed {
 +			if !hasSealFile || hasSealPending {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
-+			savedDigest, okSeal := readVerifiedSealDigestFromRoot(subRoot)
++			savedDigest, sDev, sIno, sHasID, okSeal := readVerifiedSealDigestWithIdentityFromRoot(subRoot)
 +			if !okSeal || savedDigest != sha256Hex(string(receiptRaw)) {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
++			verified["seal.sha256"] = verifiedLeafChild{name: "seal.sha256", dev: sDev, ino: sIno, hasID: sHasID, sha256: sha256Hex(savedDigest)}
 +		} else if hasSealPending || hasSealFile {
 +			// An interrupted seal is recognized ONLY when producer.json, a matching unsealed complete
 +			// receipt.json, AND the exact staged seal.pending.json are present; when seal.sha256 is
 +			// also present, its 64-byte digest MUST cryptographically match sha256(seal.pending.json).
 +			if !hasProducerMarker || !hasReceipt || !reviewComplete || reviewTainted || !hasSealPending {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
 +			if sealPendingDisk.Schema != reviewDisk.Schema ||
 +				sealPendingDisk.Launch != reviewDisk.Launch ||
@@ -12783,21 +13232,22 @@ index e69de29..4b05bcb 100644
 +				!sealPendingDisk.Sealed ||
 +				sealPendingDisk.SealedAt < reviewDisk.Finished {
 +				_ = subRoot.Close()
-+				return nil, 0, 0, time.Time{}, false
++				return nil, 0, 0, time.Time{}, nil, false
 +			}
 +			if hasSealFile {
-+				savedDigest, okSeal := readVerifiedSealDigestFromRoot(subRoot)
++				savedDigest, sDev, sIno, sHasID, okSeal := readVerifiedSealDigestWithIdentityFromRoot(subRoot)
 +				if !okSeal || savedDigest != sha256Hex(string(sealPendingRaw)) {
 +					_ = subRoot.Close()
-+					return nil, 0, 0, time.Time{}, false
++					return nil, 0, 0, time.Time{}, nil, false
 +				}
++				verified["seal.sha256"] = verifiedLeafChild{name: "seal.sha256", dev: sDev, ino: sIno, hasID: sHasID, sha256: sha256Hex(savedDigest)}
 +			}
 +		}
 +	} else if hasSealFile || hasSealPending {
 +		_ = subRoot.Close()
-+		return nil, 0, 0, time.Time{}, false
++		return nil, 0, 0, time.Time{}, nil, false
 +	}
-+	return subRoot, subDev, subIno, lastMod, true
++	return subRoot, subDev, subIno, lastMod, verified, true
 +}
 +
 +func inspectProducerReceiptDir(dir, name string, reviewBucket bool) (time.Time, bool) {
@@ -12806,7 +13256,7 @@ index e69de29..4b05bcb 100644
 +		return time.Time{}, false
 +	}
 +	defer rootHandle.Close()
-+	subRoot, _, _, lastMod, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
++	subRoot, _, _, lastMod, _, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
 +	if !ok {
 +		return time.Time{}, false
 +	}
@@ -12833,42 +13283,102 @@ index e69de29..4b05bcb 100644
 +	return len(names), names, nil
 +}
 +
-+func removeVerifiedLeafSubdir(rootHandle *os.Root, name string, reviewBucket bool, expectDev, expectIno uint64, checkExpectedID bool, retention time.Duration, checkRetention bool) bool {
-+	subRoot, subDev, subIno, lastMod, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
++// removeVerifiedLeafSubdir atomically quarantines a verified, expired bucket directory out of
++// <root> into <root>/.staging/reclaim-... via descriptor-pinned renameatNoReplace BEFORE deleting
++// any child file, then deletes ONLY the exact verified children by (dev, ino, sha256) in safe order.
++// A crash after quarantine frees the quota slot immediately and is safely resumed on restart;
++// any file swapped or added after verification is never deleted.
++func removeVerifiedLeafSubdir(rootHandle *os.Root, root, name string, reviewBucket bool, expectDev, expectIno uint64, checkExpectedID bool, retention time.Duration, checkRetention bool) bool {
++	subRoot, subDev, subIno, lastMod, verified, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
 +	if !ok {
 +		return false
 +	}
-+	defer subRoot.Close()
 +	if checkExpectedID && (subDev != expectDev || subIno != expectIno) {
++		_ = subRoot.Close()
 +		return false
 +	}
 +	if checkRetention && time.Now().Sub(lastMod) < retention {
++		_ = subRoot.Close()
 +		return false
 +	}
-+	children, err := readDirFromRoot(subRoot)
++	stagingRoot, err := ensureStagingDir(rootHandle, root)
 +	if err != nil {
++		_ = subRoot.Close()
 +		return false
 +	}
-+	for _, child := range children {
-+		if !isProducerOwnedReceiptFile(child.Name(), reviewBucket) {
-+			return false
-+		}
-+		if err := subRoot.Remove(child.Name()); err != nil && !os.IsNotExist(err) {
-+			return false
-+		}
++	defer stagingRoot.Close()
++	rootDirFD, _, _, _, err := openPinnedDirFD(rootHandle)
++	if err != nil {
++		_ = subRoot.Close()
++		return false
 +	}
++	defer rootDirFD.Close()
++	stagingDirFD, _, _, _, err := openPinnedDirFD(stagingRoot)
++	if err != nil {
++		_ = subRoot.Close()
++		return false
++	}
++	defer stagingDirFD.Close()
++
++	// Re-confirm <root>/<name> still refers to the exact verified directory inode right before quarantine.
 +	curFI, err := rootHandle.Lstat(name)
 +	if err != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
++		_ = subRoot.Close()
 +		return false
 +	}
 +	if curDev, curIno, hasID := statDevIno(curFI); hasID && (curDev != subDev || curIno != subIno) {
++		_ = subRoot.Close()
 +		return false
 +	}
-+	return rootHandle.Remove(name) == nil
++
++	var reclaimName string
++	var releaseReclaim func()
++	moved := false
++	for i := 0; i < maxStagingCreateRetries; i++ {
++		tok, terr := randomStagingToken()
++		if terr != nil {
++			break
++		}
++		cand := fmt.Sprintf("reclaim-%d-%d-%s", os.Getpid(), tmpSeq.Add(1), tok)
++		trackStagingEntry(root, cand)
++		renErr := renameatNoReplacePinned(rootDirFD, name, stagingDirFD, cand)
++		if renErr == nil {
++			reclaimName = cand
++			releaseReclaim = func() { untrackStagingEntry(root, cand) }
++			moved = true
++			break
++		}
++		untrackStagingEntry(root, cand)
++		if os.IsExist(renErr) || errors.Is(renErr, syscall.ENOTEMPTY) {
++			continue
++		}
++		break
++	}
++	if !moved {
++		_ = subRoot.Close()
++		return false
++	}
++	defer releaseReclaim()
++	_ = syncPinnedDir(rootHandle, root)
++
++	// Delete ONLY the exact files verified during inspection (checked again by dev, ino, sha256).
++	allClean := removeVerifiedChildrenInSafeOrder(subRoot, verified)
++	_ = subRoot.Close()
++	if allClean {
++		qFI, qErr := stagingRoot.Lstat(reclaimName)
++		if qErr == nil && qFI.IsDir() && qFI.Mode()&os.ModeSymlink == 0 && qFI.Mode().Perm()&0077 == 0 && ownedByCurrentUser(qFI) {
++			if qDev, qIno, okQ := statDevIno(qFI); !okQ || (qDev == subDev && qIno == subIno) {
++				if stagingRoot.Remove(reclaimName) == nil {
++					_ = syncPinnedDir(stagingRoot, filepath.Join(root, ".staging"))
++				}
++			}
++		}
++	}
++	return true
 +}
 +
-+func reclaimExpiredBucketEntries(rootHandle *os.Root, root string, names []string, reviewBucket bool, need int) int {
-+	if need <= 0 || rootHandle == nil {
++func reclaimExpiredBucketEntries(rootHandle *os.Root, root string, names []string, reviewBucket bool, need int, state *bucketReclaimState) int {
++	if need <= 0 || rootHandle == nil || len(names) == 0 {
 +		return 0
 +	}
 +	sweepOrphanStagingInRoot(rootHandle, root, false)
@@ -12877,15 +13387,66 @@ index e69de29..4b05bcb 100644
 +	if reviewBucket {
 +		retention = reviewDiskRetention
 +	}
++	var rootDev, rootIno uint64
++	if rf, rerr := rootHandle.Open("."); rerr == nil {
++		if rfi, serr := rf.Stat(); serr == nil {
++			rootDev, rootIno, _ = statDevIno(rfi)
++		}
++		_ = rf.Close()
++	}
++	if state != nil && len(state.cache) > maxReclaimCacheEntries {
++		state.cache = make(map[reclaimCacheKey]reclaimCacheEntry)
++	}
++	startIdx := 0
++	if state != nil && len(names) > 0 {
++		startIdx = state.cursor % len(names)
++	}
 +	candidates := make([]expiredDiskCandidate, 0)
-+	for _, name := range names {
-+		subRoot, subDev, subIno, lastMod, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
++	inspected := 0
++	visited := 0
++	for i := 0; i < len(names); i++ {
++		idx := (startIdx + i) % len(names)
++		name := names[idx]
++		visited++
++		// Fast Lstat pre-filter before any directory open or JSON parse:
++		// inspectProducerReceiptSubdir sets lastMod >= dir.ModTime(), so a directory whose
++		// ModTime is still within retention can never be eligible yet.
++		lfi, lerr := rootHandle.Lstat(name)
++		if lerr != nil || !lfi.IsDir() || lfi.Mode()&os.ModeSymlink != 0 || lfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(lfi) {
++			continue
++		}
++		if now.Sub(lfi.ModTime()) < retention {
++			continue
++		}
++		lDev, lIno, _ := statDevIno(lfi)
++		mtimeNS := lfi.ModTime().UnixNano()
++		ck := reclaimCacheKey{rootDev: rootDev, rootIno: rootIno, name: name}
++		if state != nil {
++			if ce, hit := state.cache[ck]; hit && ce.dev == lDev && ce.ino == lIno && ce.mtimeNS == mtimeNS && now.Before(ce.skipUntil) {
++				continue
++			}
++		}
++		if inspected >= maxReclaimInspectPerCall {
++			visited--
++			break
++		}
++		inspected++
++		subRoot, subDev, subIno, lastMod, _, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
 +		if !ok {
++			if state != nil {
++				state.cache[ck] = reclaimCacheEntry{dev: lDev, ino: lIno, mtimeNS: mtimeNS, skipUntil: now.Add(reclaimNegativeCooldown)}
++			}
 +			continue
 +		}
 +		_ = subRoot.Close()
 +		if now.Sub(lastMod) < retention {
++			if state != nil {
++				state.cache[ck] = reclaimCacheEntry{dev: lDev, ino: lIno, mtimeNS: mtimeNS, skipUntil: lastMod.Add(retention)}
++			}
 +			continue
++		}
++		if state != nil {
++			delete(state.cache, ck)
 +		}
 +		candidates = append(candidates, expiredDiskCandidate{
 +			name:  name,
@@ -12896,10 +13457,13 @@ index e69de29..4b05bcb 100644
 +			hasID: subDev != 0 || subIno != 0,
 +		})
 +	}
++	if state != nil && len(names) > 0 {
++		state.cursor = (startIdx + visited) % len(names)
++	}
 +	if len(candidates) == 0 {
 +		return 0
 +	}
-+	// Selection-sort oldest-first (bounded by bucket cap).
++	// Selection-sort oldest-first (bounded by maxReclaimInspectPerCall).
 +	for i := 0; i < len(candidates); i++ {
 +		minIdx := i
 +		for j := i + 1; j < len(candidates); j++ {
@@ -12935,12 +13499,9 @@ index e69de29..4b05bcb 100644
 +			}
 +			reviewMu.Unlock()
 +		}
-+		if removeVerifiedLeafSubdir(rootHandle, cand.name, reviewBucket, cand.dev, cand.ino, cand.hasID, retention, true) {
++		if removeVerifiedLeafSubdir(rootHandle, root, cand.name, reviewBucket, cand.dev, cand.ino, cand.hasID, retention, true) {
 +			reclaimed++
 +		}
-+	}
-+	if reclaimed > 0 {
-+		_ = syncPinnedDir(rootHandle, root)
 +	}
 +	return reclaimed
 +}
@@ -13002,10 +13563,11 @@ index e69de29..4b05bcb 100644
 +	if reviewBucket {
 +		capLimit = maxReviewDiskEntries
 +	}
-+	rootQuotaMu.Lock()
++	bState := bucketStateFor(reviewBucket)
++	bState.mu.Lock()
 +	_, statErr := rootHandle.Lstat(name)
 +	if statErr == nil {
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		if !allowExisting {
 +			return nil, nil, false, 0, 0, false, "", os.ErrExist
 +		}
@@ -13020,44 +13582,44 @@ index e69de29..4b05bcb 100644
 +		return subRoot, subFI, false, 0, 0, false, "", nil
 +	}
 +	if !os.IsNotExist(statErr) {
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	existingCount, names, countErr := countRootBucketEntries(rootHandle, reviewBucket)
 +	if countErr != nil {
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	if existingCount >= capLimit {
-+		reclaimed := reclaimExpiredBucketEntries(rootHandle, root, names, reviewBucket, existingCount-capLimit+1)
++		reclaimed := reclaimExpiredBucketEntries(rootHandle, root, names, reviewBucket, existingCount-capLimit+1, bState)
 +		existingCount -= reclaimed
 +		if existingCount >= capLimit {
-+			rootQuotaMu.Unlock()
++			bState.mu.Unlock()
 +			return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +		}
 +	}
 +	stagingRoot, err := ensureStagingDir(rootHandle, root)
 +	if err != nil {
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", err
 +	}
 +	defer stagingRoot.Close()
 +	rootDirFD, _, _, _, err := openPinnedDirFD(rootHandle)
 +	if err != nil {
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	defer rootDirFD.Close()
 +	stagingDirFD, _, _, _, err := openPinnedDirFD(stagingRoot)
 +	if err != nil {
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	defer stagingDirFD.Close()
 +
 +	stageDirName, stageSubRoot, releaseStageDir, err := createStagingDir(stagingRoot, root)
 +	if err != nil {
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	defer releaseStageDir()
@@ -13065,7 +13627,7 @@ index e69de29..4b05bcb 100644
 +	if err != nil {
 +		_ = stageSubRoot.Close()
 +		_ = stagingRoot.Remove(stageDirName)
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	subFI, statSubErr := stageSubFD.Stat()
@@ -13073,7 +13635,7 @@ index e69de29..4b05bcb 100644
 +		_ = stageSubFD.Close()
 +		_ = stageSubRoot.Close()
 +		_ = stagingRoot.Remove(stageDirName)
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +
@@ -13082,7 +13644,7 @@ index e69de29..4b05bcb 100644
 +		_ = stageSubFD.Close()
 +		_ = stageSubRoot.Close()
 +		_ = stagingRoot.Remove(stageDirName)
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	mfi, mStatErr := mf.Stat()
@@ -13095,7 +13657,7 @@ index e69de29..4b05bcb 100644
 +		_ = stageSubFD.Close()
 +		_ = stageSubRoot.Close()
 +		_ = stagingRoot.Remove(stageDirName)
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	mDev, mIno, hasMID := statDevIno(mfi)
@@ -13106,7 +13668,7 @@ index e69de29..4b05bcb 100644
 +		_ = stageSubFD.Close()
 +		_ = stageSubRoot.Close()
 +		_ = stagingRoot.Remove(stageDirName)
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	releaseMarkerTmp()
@@ -13115,11 +13677,11 @@ index e69de29..4b05bcb 100644
 +		removeVerifiedMarkerInSubdir(stageSubRoot, mDev, mIno, hasMID, mSHA)
 +		_ = stageSubRoot.Close()
 +		_ = stagingRoot.Remove(stageDirName)
-+		rootQuotaMu.Unlock()
++		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", err
 +	}
 +	pubErr := renameatNoReplacePinned(stagingDirFD, stageDirName, rootDirFD, name)
-+	rootQuotaMu.Unlock()
++	bState.mu.Unlock()
 +	if pubErr != nil {
 +		removeVerifiedMarkerInSubdir(stageSubRoot, mDev, mIno, hasMID, mSHA)
 +		_ = stageSubRoot.Close()
@@ -13787,13 +14349,14 @@ index e69de29..4b05bcb 100644
 +		return false, ErrUnavailable
 +	}
 +	defer rootLease.Close()
-+	return e.persistWithStatusInRootLocked(rootLease.dir, root, false)
++	return e.persistWithStatusInRootLocked(rootLease, root, false)
 +}
 +
-+func (e *reviewEntry) persistWithStatusInRootLocked(rootHandle *os.Root, root string, syncSealAncestors bool) (bool, error) {
-+	if e.foreignDisk || rootHandle == nil {
++func (e *reviewEntry) persistWithStatusInRootLocked(rootLease *lockedRootLease, root string, syncSealAncestors bool) (bool, error) {
++	if e.foreignDisk || rootLease == nil || rootLease.dir == nil {
 +		return false, ErrUnavailable
 +	}
++	rootHandle := rootLease.dir
 +
 +	var launchRoot *os.Root
 +	var launchDev, launchIno uint64
@@ -13932,55 +14495,113 @@ index e69de29..4b05bcb 100644
 +	} else if curDev, curIno, okCur := statDevIno(curFI); okCur && hasLaunchID && (curDev != launchDev || curIno != launchIno) {
 +		return fail(false, ErrUnavailable)
 +	}
-+	tmp, f, releaseTmp, err := createStagingFile(stagingRoot, root, "pending")
-+	if err != nil {
-+		return fail(false, err)
-+	}
-+	defer releaseTmp()
-+	_, errWrite := f.Write(data)
-+	errSync := f.Sync()
-+	errClose := f.Close()
-+	if errWrite != nil || errSync != nil || errClose != nil {
-+		_ = stagingRoot.Remove(tmp)
-+		return fail(false, ErrUnavailable)
-+	}
 +	sealedDigest := ""
 +	if sealed {
 +		sealedDigest = sha256Hex(string(data))
-+		shaTmp, sf, releaseSHATmp, err := createStagingFile(stagingRoot, root, "pending-sha")
++		// Stage producer.json + seal.pending.json + seal.sha256 together inside a dedicated
++		// <root>/.staging/stage-seal-<pid>-<seq>-<16hex>/ directory so every staged artifact is
++		// cryptographically provably producer-owned even on an abrupt crash.
++		sealDirName, sealStageRoot, releaseSealDir, err := createNamedStagingDir(stagingRoot, root, "stage-seal")
 +		if err != nil {
-+			_ = stagingRoot.Remove(tmp)
 +			return fail(false, err)
 +		}
-+		defer releaseSHATmp()
-+		_, errWriteSHA := sf.WriteString(sealedDigest)
-+		errSyncSHA := sf.Sync()
-+		errCloseSHA := sf.Close()
-+		if errWriteSHA != nil || errSyncSHA != nil || errCloseSHA != nil {
-+			_ = stagingRoot.Remove(shaTmp)
-+			_ = stagingRoot.Remove(tmp)
++		defer releaseSealDir()
++		sealStageFD, ssDev, ssIno, hasSSID, err := openPinnedDirFD(sealStageRoot)
++		if err != nil {
++			_ = sealStageRoot.Close()
++			_ = stagingRoot.Remove(sealDirName)
 +			return fail(false, ErrUnavailable)
 +		}
-+		// Descriptor-pinned 3-step atomic commit using verified stagingDirFD and launchDirFD (zero path re-resolution):
-+		// 1) stagingDirFD/pending -> launchDirFD/seal.pending.json (complete sealed JSON)
-+		// 2) stagingDirFD/pending-sha -> launchDirFD/seal.sha256 (exact sha256 of seal.pending.json)
++		cleanupSealStage := func(removePending, removeSHA bool) {
++			if removeSHA {
++				_ = sealStageRoot.Remove("seal.sha256")
++			}
++			if removePending {
++				_ = sealStageRoot.Remove("seal.pending.json")
++			}
++			_ = sealStageRoot.Remove("producer.json")
++			_ = sealStageFD.Close()
++			_ = sealStageRoot.Close()
++			if curSFI, lerr := stagingRoot.Lstat(sealDirName); lerr == nil && curSFI.IsDir() {
++				if cDev, cIno, okC := statDevIno(curSFI); !okC || !hasSSID || (cDev == ssDev && cIno == ssIno) {
++					_ = stagingRoot.Remove(sealDirName)
++				}
++			}
++		}
++		markerBytes, merr := marshalReservationMarker(e.launch, e.started)
++		if merr != nil {
++			cleanupSealStage(false, false)
++			return fail(false, ErrUnavailable)
++		}
++		mf, merr := sealStageRoot.OpenFile("producer.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++		if merr != nil {
++			cleanupSealStage(false, false)
++			return fail(false, merr)
++		}
++		_, errMW := mf.Write(markerBytes)
++		errMS := mf.Sync()
++		errMC := mf.Close()
++		if errMW != nil || errMS != nil || errMC != nil {
++			cleanupSealStage(false, false)
++			return fail(false, ErrUnavailable)
++		}
++		pf, perr := sealStageRoot.OpenFile("seal.pending.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++		if perr != nil {
++			cleanupSealStage(false, false)
++			return fail(false, perr)
++		}
++		_, errPW := pf.Write(data)
++		errPS := pf.Sync()
++		errPC := pf.Close()
++		if errPW != nil || errPS != nil || errPC != nil {
++			cleanupSealStage(true, false)
++			return fail(false, ErrUnavailable)
++		}
++		sf, serr := sealStageRoot.OpenFile("seal.sha256", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++		if serr != nil {
++			cleanupSealStage(true, false)
++			return fail(false, serr)
++		}
++		_, errSW := sf.WriteString(sealedDigest)
++		errSS := sf.Sync()
++		errSC := sf.Close()
++		if errSW != nil || errSS != nil || errSC != nil {
++			cleanupSealStage(true, true)
++			return fail(false, ErrUnavailable)
++		}
++		// Descriptor-pinned 3-step atomic commit using verified sealStageFD and launchDirFD:
++		// 1) sealStageFD/seal.pending.json -> launchDirFD/seal.pending.json
++		// 2) sealStageFD/seal.sha256 -> launchDirFD/seal.sha256
 +		// 3) launchDirFD/seal.pending.json -> launchDirFD/receipt.json
-+		if err := renameatPinned(stagingDirFD, tmp, launchDirFD, "seal.pending.json"); err != nil {
-+			_ = stagingRoot.Remove(shaTmp)
-+			_ = stagingRoot.Remove(tmp)
++		if err := renameatPinned(sealStageFD, "seal.pending.json", launchDirFD, "seal.pending.json"); err != nil {
++			cleanupSealStage(true, true)
 +			return fail(false, err)
 +		}
-+		if err := renameatPinned(stagingDirFD, shaTmp, launchDirFD, "seal.sha256"); err != nil {
-+			_ = stagingRoot.Remove(shaTmp)
++		if err := renameatPinned(sealStageFD, "seal.sha256", launchDirFD, "seal.sha256"); err != nil {
++			cleanupSealStage(false, true)
 +			_ = launchRoot.Remove("seal.pending.json")
 +			return fail(false, err)
 +		}
 +		if err := renameatPinned(launchDirFD, "seal.pending.json", launchDirFD, "receipt.json"); err != nil {
++			cleanupSealStage(false, false)
 +			_ = launchRoot.Remove("seal.sha256")
 +			_ = launchRoot.Remove("seal.pending.json")
 +			return fail(false, err)
 +		}
++		cleanupSealStage(false, false)
 +	} else {
++		tmp, f, releaseTmp, err := createStagingFile(stagingRoot, root, "pending")
++		if err != nil {
++			return fail(false, err)
++		}
++		defer releaseTmp()
++		_, errWrite := f.Write(data)
++		errSync := f.Sync()
++		errClose := f.Close()
++		if errWrite != nil || errSync != nil || errClose != nil {
++			_ = stagingRoot.Remove(tmp)
++			return fail(false, ErrUnavailable)
++		}
 +		if err := renameatPinned(stagingDirFD, tmp, launchDirFD, "receipt.json"); err != nil {
 +			_ = stagingRoot.Remove(tmp)
 +			return fail(false, err)
@@ -13991,7 +14612,7 @@ index e69de29..4b05bcb 100644
 +		e.sealedReceiptSHA = sealedDigest
 +	}
 +	if syncSealAncestors {
-+		if err := syncSealAncestorsForSubRoot(rootHandle, launchRoot, e.launch, e.directory, root, launchDev, launchIno, hasLaunchID); err != nil {
++		if err := syncSealAncestorsForSubRoot(rootLease, launchRoot, e.launch, e.directory, root, launchDev, launchIno, hasLaunchID); err != nil {
 +			return fail(true, err)
 +		}
 +	} else {
@@ -14207,10 +14828,10 @@ index e69de29..4b05bcb 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..e1e0794 100644
+index e69de29..0b81c8c 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,7312 @@
+@@ -0,0 +1,7508 @@
 +package preflightreceipt
 +
 +import (
@@ -20659,7 +21280,7 @@ index e69de29..e1e0794 100644
 +	}
 +
 +	// Removing via pinnedLease.dir MUST remove the moved original launch dir and NEVER touch decoyLaunchDir.
-+	if !removeVerifiedLeafSubdir(pinnedLease.dir, launch, true, 0, 0, false, 0, false) {
++	if !removeVerifiedLeafSubdir(pinnedLease.dir, origRoot, launch, true, 0, 0, false, 0, false) {
 +		t.Fatalf("removeVerifiedLeafSubdir on pinned root failed after ancestor rename")
 +	}
 +	if _, err := os.Lstat(filepath.Join(movedParent, "receipts", launch)); !os.IsNotExist(err) {
@@ -21116,11 +21737,11 @@ index e69de29..e1e0794 100644
 +		t.Fatal(err)
 +	}
 +	dev, ino, _ := statDevIno(fi)
-+	if removeVerifiedLeafSubdir(lease.dir, launch, true, dev, ino, true, 24*time.Hour, true) {
++	if removeVerifiedLeafSubdir(lease.dir, root, launch, true, dev, ino, true, 24*time.Hour, true) {
 +		t.Fatalf("removeVerifiedLeafSubdir deleted directory still within retention")
 +	}
 +	// Wrong inode (directory replaced since scan) -> MUST NOT be deleted even when expired.
-+	if removeVerifiedLeafSubdir(lease.dir, launch, true, dev, ino+1, true, 0, true) {
++	if removeVerifiedLeafSubdir(lease.dir, root, launch, true, dev, ino+1, true, 0, true) {
 +		t.Fatalf("removeVerifiedLeafSubdir deleted directory whose inode changed since scan")
 +	}
 +	if _, err := os.Lstat(filepath.Join(root, launch)); err != nil {
@@ -21390,9 +22011,10 @@ index e69de29..e1e0794 100644
 +}
 +
 +func TestReviewReceiptOrphanStagingSweptOnLockAcquireRestart(t *testing.T) {
-+	// Sol P2 #3 + Astra P2 #4 (PR #2280 R41): after a proxy crash/restart (even with PID reuse),
-+	// freshly acquiring .writer.lock sweeps orphaned producer files & stage-dirs inside .staging,
-+	// preserves foreign files untouched, and allows subsequent publish + seal to succeed.
++	// Sol P2 #3 + Astra P2 #4 (R41) + Astra P1 #2 (R42): after a proxy crash/restart (even with PID reuse),
++	// freshly acquiring .writer.lock sweeps ONLY content-verified producer artifacts inside .staging
++	// (pending-*, pending-marker-*, stage-dir-*, stage-seal-*, reclaim-*), while preserving any
++	// foreign or non-producer file UNTOUCHED even if it shares a matching pending-* filename.
 +	root := filepath.Join(t.TempDir(), "staging-restart-sweep")
 +	if err := ensurePrivateRoot(root); err != nil {
 +		t.Fatal(err)
@@ -21401,29 +22023,74 @@ index e69de29..e1e0794 100644
 +	if err := os.Mkdir(stagingDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
-+	orphanLegacy := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-1", os.Getpid()))
-+	orphanRand := filepath.Join(stagingDir, fmt.Sprintf("pending-sha-%d-2-abcdef0123456789", os.Getpid()))
-+	orphanDirEmpty := filepath.Join(stagingDir, fmt.Sprintf("stage-dir-%d-3-abcdef0123456789", os.Getpid()))
-+	orphanDirMarked := filepath.Join(stagingDir, fmt.Sprintf("stage-dir-%d-4-abcdef0123456780", os.Getpid()))
-+	foreignStagingFile := filepath.Join(stagingDir, "keep-foreign.txt")
-+	if err := os.WriteFile(orphanLegacy, []byte("partial"), 0600); err != nil {
++	nowNS := time.Now().UnixNano()
++	orphanLaunch := "review-c0000000-2222-4333-8444-555555555501"
++	orphanSession := "019d0000-0000-7000-8000-cccccccccc01"
++	rid := sha256Hex("resp_orphan_stage")
++	outSHA := sha256Hex("VERDICT: PASS")
++
++	// 1. Valid producer staging artifacts -> MUST be reclaimed on fresh lock acquire.
++	orphanPendingRec := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-1-abcdef0123456781", os.Getpid()))
++	recBytes, _ := json.Marshal(ReviewReceipt{
++		Schema: ReviewSchema, Launch: orphanLaunch, Session: orphanSession,
++		Started: nowNS, Finished: nowNS, SealedAt: 0, Complete: true, Sealed: false, Tainted: false,
++		Requests: 1, Routes: []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs: []string{rid}, LastResponseID: rid, LastOutputSHA256: outSHA,
++	})
++	if err := os.WriteFile(orphanPendingRec, recBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := os.WriteFile(orphanRand, []byte("partial-sha"), 0600); err != nil {
++	orphanMarkerFile := filepath.Join(stagingDir, fmt.Sprintf("pending-marker-%d-2-abcdef0123456782", os.Getpid()))
++	mBytes, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: orphanLaunch, Started: nowNS})
++	if err := os.WriteFile(orphanMarkerFile, mBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := os.Mkdir(orphanDirEmpty, 0700); err != nil {
-+		t.Fatal(err)
-+	}
++	orphanDirMarked := filepath.Join(stagingDir, fmt.Sprintf("stage-dir-%d-3-abcdef0123456783", os.Getpid()))
 +	if err := os.Mkdir(orphanDirMarked, 0700); err != nil {
 +		t.Fatal(err)
 +	}
-+	mBytes, _ := json.Marshal(reviewReservationMarker{
-+		Schema:  ReviewSchema,
-+		Launch:  "review-c0000000-2222-4333-8444-555555555501",
-+		Started: time.Now().UnixNano(),
-+	})
 +	if err := os.WriteFile(filepath.Join(orphanDirMarked, "producer.json"), mBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	orphanSealDir := filepath.Join(stagingDir, fmt.Sprintf("stage-seal-%d-4-abcdef0123456784", os.Getpid()))
++	if err := os.Mkdir(orphanSealDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	sealedBytes, _ := json.Marshal(ReviewReceipt{
++		Schema: ReviewSchema, Launch: orphanLaunch, Session: orphanSession,
++		Started: nowNS, Finished: nowNS, SealedAt: nowNS, Complete: true, Sealed: true, Tainted: false,
++		Requests: 1, Routes: []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs: []string{rid}, LastResponseID: rid, LastOutputSHA256: outSHA,
++	})
++	if err := os.WriteFile(filepath.Join(orphanSealDir, "producer.json"), mBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(orphanSealDir, "seal.pending.json"), sealedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(orphanSealDir, "seal.sha256"), []byte(sha256Hex(string(sealedBytes))), 0600); err != nil {
++		t.Fatal(err)
++	}
++	// Mid-reclaim interrupted quarantine dir (seal.sha256 already removed, sealed receipt + marker left).
++	orphanReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-5-abcdef0123456785", os.Getpid()))
++	if err := os.Mkdir(orphanReclaimDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(orphanReclaimDir, "receipt.json"), sealedBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(orphanReclaimDir, "producer.json"), mBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// 2. Same-UID non-producer files (including EXACT matching pending-* name & suffix-less legacy name) -> MUST be preserved!
++	nonProducerMatchingName := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-9-abcdef0123456789", os.Getpid()))
++	nonProducerLegacyName := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-1", os.Getpid()))
++	foreignStagingFile := filepath.Join(stagingDir, "keep-foreign.txt")
++	if err := os.WriteFile(nonProducerMatchingName, []byte("same-uid-user-data"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(nonProducerLegacyName, []byte("legacy-user-data"), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +	if err := os.WriteFile(foreignStagingFile, []byte("foreign"), 0600); err != nil {
@@ -21437,13 +22104,19 @@ index e69de29..e1e0794 100644
 +	}
 +	lease.Close()
 +
-+	for _, p := range []string{orphanLegacy, orphanRand, orphanDirEmpty, orphanDirMarked} {
++	for _, p := range []string{orphanPendingRec, orphanMarkerFile, orphanDirMarked, orphanSealDir, orphanReclaimDir} {
 +		if _, statErr := os.Lstat(p); !os.IsNotExist(statErr) {
-+			t.Fatalf("orphan staging artifact %s survived restart sweep: %v", p, statErr)
++			t.Fatalf("verified producer orphan %s survived restart sweep: %v", p, statErr)
 +		}
 +	}
-+	if got, err := os.ReadFile(foreignStagingFile); err != nil || string(got) != "foreign" {
-+		t.Fatalf("foreign file inside .staging was removed/modified: err=%v raw=%q", err, string(got))
++	for p, want := range map[string]string{
++		nonProducerMatchingName: "same-uid-user-data",
++		nonProducerLegacyName:   "legacy-user-data",
++		foreignStagingFile:      "foreign",
++	} {
++		if got, err := os.ReadFile(p); err != nil || string(got) != want {
++			t.Fatalf("non-producer file %s inside .staging was removed/modified: err=%v raw=%q", p, err, string(got))
++		}
 +	}
 +
 +	// End-to-end review publish + seal succeeds cleanly on the recovered root.
@@ -21473,6 +22146,150 @@ index e69de29..e1e0794 100644
 +	c.HandlerDone(true)
 +	if st, digest := SealReviewWithDigest(root, launch, session); st != SealOK || !isSHA256Hex(digest) {
 +		t.Fatalf("SealReviewWithDigest after restart staging sweep = (%v, %q), want SealOK", st, digest)
++	}
++}
++
++func TestReviewReceiptSealRejectsRotatedRootDuringSeal(t *testing.T) {
++	// Sol #1 + Astra P1 #1 (PR #2280 R42): if the configured receipt root is moved/rotated away
++	// during SealReviewWithDigest before confirmation completes, SealReviewWithDigest MUST NOT
++	// return SealOK for the orphaned old root inode.
++	base := t.TempDir()
++	root := filepath.Join(base, "receipts")
++	launch := "review-c1111111-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-ccccccccccc1"
++
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_rot_root","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	// Rotate root away during parent sync inside syncSealAncestorsForSubRoot.
++	origSync := syncDirFn
++	defer func() { syncDirFn = origSync }()
++	movedAway := filepath.Join(base, "receipts-old")
++	rotated := false
++	syncDirFn = func(dir string) error {
++		if !rotated && filepath.Clean(dir) == filepath.Clean(base) {
++			rotated = true
++			if rerr := os.Rename(root, movedAway); rerr != nil {
++				return rerr
++			}
++			if merr := os.Mkdir(root, 0700); merr != nil {
++				return merr
++			}
++		}
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
++	}
++	if st, digest := SealReviewWithDigest(root, launch, session); st != SealUnavailable || digest != "" {
++		t.Fatalf("SealReviewWithDigest after root rotation = (%v, %q), want (SealUnavailable, \"\")", st, digest)
++	}
++}
++
++func TestReviewReceiptReclaimPreservesSwappedChildAndSkipsFreshDirs(t *testing.T) {
++	// Sol #3 (R42): verified child removal MUST refuse to delete a file whose inode or SHA-256
++	// changed after inspection, even under the same allowlisted filename (receipt.json).
++	root := filepath.Join(t.TempDir(), "reclaim-swap-and-fastskip")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	launch := "review-c2222222-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-ccccccccccc2"
++	ancient := time.Now().Add(-48 * time.Hour)
++	dir := filepath.Join(root, launch)
++	if err := os.Mkdir(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	recBytes, _ := json.Marshal(ReviewReceipt{
++		Schema: ReviewSchema, Launch: launch, Session: session,
++		Started: ancient.UnixNano(), Finished: ancient.UnixNano(), SealedAt: 0,
++		Complete: true, Sealed: false, Tainted: false, Requests: 1,
++		Routes: []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs: []string{sha256Hex("resp_swap")}, LastResponseID: sha256Hex("resp_swap"),
++		LastOutputSHA256: sha256Hex("ok"),
++	})
++	recPath := filepath.Join(dir, "receipt.json")
++	if err := os.WriteFile(recPath, recBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(recPath, ancient, ancient)
++	_ = os.Chtimes(dir, ancient, ancient)
++
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lease.Close()
++	subRoot, _, _, _, verified, ok := inspectProducerReceiptSubdir(lease.dir, launch, true)
++	if !ok {
++		t.Fatalf("inspectProducerReceiptSubdir failed on valid dir")
++	}
++	defer subRoot.Close()
++
++	// Swap receipt.json with a different same-named file after inspection.
++	if err := os.Remove(recPath); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(recPath, []byte("unverified-swapped-content"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if removeVerifiedChildrenInSafeOrder(subRoot, verified) {
++		t.Fatalf("removeVerifiedChildrenInSafeOrder deleted swapped unverified receipt.json")
++	}
++	if got, rerr := os.ReadFile(recPath); rerr != nil || string(got) != "unverified-swapped-content" {
++		t.Fatalf("swapped receipt.json was removed/altered: err=%v raw=%q", rerr, string(got))
++	}
++
++	// Astra P2 #4 (R42): fresh directory with recent ModTime is skipped before opening/parsing,
++	// and bounded inspection caps full parses when many old-mtime foreign dirs exist.
++	freshRoot := filepath.Join(t.TempDir(), "reclaim-fastskip")
++	if err := ensurePrivateRoot(freshRoot); err != nil {
++		t.Fatal(err)
++	}
++	fLease, err := acquirePrivateRootLease(freshRoot)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer fLease.Close()
++	freshName := "preflight-c2222222-2222-4333-8444-555555555509"
++	freshDir := filepath.Join(freshRoot, freshName)
++	if err := os.Mkdir(freshDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	state := &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}
++	if got := reclaimExpiredBucketEntries(fLease.dir, freshRoot, []string{freshName}, false, 1, state); got != 0 {
++		t.Fatalf("reclaimExpiredBucketEntries reclaimed fresh dir: got %d", got)
++	}
++	if len(state.cache) != 0 {
++		t.Fatalf("fresh dir should skip at Lstat before inspection/caching, cache len=%d", len(state.cache))
++	}
++	// Age foreign dir -> 1st call caches negative result; 2nd call hits cache cleanly.
++	_ = os.Chtimes(freshDir, ancient, ancient)
++	if got := reclaimExpiredBucketEntries(fLease.dir, freshRoot, []string{freshName}, false, 1, state); got != 0 {
++		t.Fatalf("reclaimExpiredBucketEntries reclaimed empty foreign dir: got %d", got)
++	}
++	if len(state.cache) != 1 {
++		t.Fatalf("expected 1 negative cache entry for un-reclaimable old dir, got %d", len(state.cache))
 +	}
 +}
 +
