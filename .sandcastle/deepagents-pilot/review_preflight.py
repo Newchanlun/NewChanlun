@@ -436,55 +436,104 @@ def _contains_surrogate(value: object) -> bool:
 MAX_SSE_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SSE_EVENT_BYTES = 256 * 1024
 SSE_READ_CHUNK_BYTES = 8192
+MAX_HTTP_ERROR_BYTES = 65536
+_CHUNK_SIZE_HEX_RE = re.compile(rb"[0-9A-Fa-f]{1,16}")
 
 
 class _SSEReadLimitError(Exception):
     pass
 
 
-def _install_strict_chunked_trailer_check(response) -> None:
-    """CPython HTTPResponse._read_and_discard_trailer 在 0\\r\\n 后若遇 EOF 会静默 break；
-    此处强制要求看到完整终结空行 \\r\\n 并限制 trailer 总字节数，避免截断分块被误判成功。"""
-    if not isinstance(response, http.client.HTTPResponse) or not getattr(response, "chunked", False):
-        return
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """拒绝所有 3xx 重定向，避免跟随重定向时无界读体或向跨源地址转发 Authorization。"""
 
-    def _strict_trailer() -> None:
-        total_trailer_bytes = 0
-        while True:
-            line = response.fp.readline(http.client._MAXLINE + 1)
-            if len(line) > http.client._MAXLINE:
-                raise http.client.LineTooLong("trailer line")
-            if not line:
-                raise http.client.IncompleteRead(b"")
-            total_trailer_bytes += len(line)
-            if total_trailer_bytes > 65536:
-                raise http.client.LineTooLong("trailer section")
-            if line == b"\r\n":
-                break
-            if not line.endswith(b"\r\n"):
-                raise http.client.IncompleteRead(b"")
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
 
-    response._read_and_discard_trailer = _strict_trailer
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
-def _iter_bounded_sse_lines(
+def _open_http(request: urllib.request.Request, timeout: float):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    return opener.open(request, timeout=timeout)
+
+
+def _read_exact_fp(fp, n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        part = fp.read(n - len(buf))
+        if not part:
+            raise http.client.IncompleteRead(bytes(buf))
+        buf.extend(part)
+    return bytes(buf)
+
+
+def _iter_strict_http_body(
     response,
-    deadline: Deadline,
+    deadline: Deadline | None,
     *,
-    max_total_bytes: int = MAX_SSE_RESPONSE_BYTES,
-    max_line_bytes: int = MAX_SSE_EVENT_BYTES,
+    max_total_bytes: int,
     chunk_bytes: int = SSE_READ_CHUNK_BYTES,
 ):
-    """增量按块读取 SSE 流并执行总字节数与单行上限，未超限时必须读至 EOF 以保留截断传输检测。"""
-    _install_strict_chunked_trailer_check(response)
+    """严格有界读取 HTTP 响应体：对真实 chunked 响应绕过 CPython 宽松分块解码，
+    在读块体前强制校验无符号 16 进制块长、块尾 \\r\\n 与 trailer 终结空行，避免负块长无界分配或坏分帧放行。"""
     total_bytes = 0
-    bom_checked = False
-    bom_buf = bytearray()
-    pending_cr = False
-    line_buf = bytearray()
+    if isinstance(response, http.client.HTTPResponse) and getattr(response, "chunked", False):
+        fp = getattr(response, "fp", None)
+        if fp is None:
+            raise http.client.IncompleteRead(b"")
+        while True:
+            if deadline is not None and deadline.work_left() <= 0:
+                return
+            size_line = fp.readline(http.client._MAXLINE + 1)
+            if len(size_line) > http.client._MAXLINE:
+                raise http.client.LineTooLong("chunk size")
+            if not size_line or not size_line.endswith(b"\r\n"):
+                raise http.client.IncompleteRead(b"")
+            size_head, sep, _ext = size_line[:-2].partition(b";")
+            size_token = size_head.rstrip(b" \t") if sep else size_head
+            if not _CHUNK_SIZE_HEX_RE.fullmatch(size_token):
+                raise http.client.HTTPException("invalid chunk size")
+            chunk_size = int(size_token, 16)
+            if chunk_size == 0:
+                total_trailer_bytes = 0
+                while True:
+                    if deadline is not None and deadline.work_left() <= 0:
+                        return
+                    tline = fp.readline(http.client._MAXLINE + 1)
+                    if len(tline) > http.client._MAXLINE:
+                        raise http.client.LineTooLong("trailer line")
+                    if not tline:
+                        raise http.client.IncompleteRead(b"")
+                    total_trailer_bytes += len(tline)
+                    if total_trailer_bytes > 65536:
+                        raise http.client.LineTooLong("trailer section")
+                    if tline == b"\r\n":
+                        break
+                    if not tline.endswith(b"\r\n"):
+                        raise http.client.IncompleteRead(b"")
+                response.close()
+                return
+            chunk_rem = chunk_size
+            while chunk_rem > 0:
+                if deadline is not None and deadline.work_left() <= 0:
+                    return
+                remaining = max_total_bytes - total_bytes
+                read_size = min(chunk_bytes, chunk_rem, remaining + 1)
+                data = fp.read(read_size)
+                if not data:
+                    raise http.client.IncompleteRead(b"")
+                chunk_rem -= len(data)
+                total_bytes += len(data)
+                if total_bytes > max_total_bytes:
+                    raise _SSEReadLimitError("SSE 响应超过大小上限")
+                yield data
+            if _read_exact_fp(fp, 2) != b"\r\n":
+                raise http.client.HTTPException("invalid chunk terminator")
+        return
 
     while True:
-        if deadline.work_left() <= 0:
+        if deadline is not None and deadline.work_left() <= 0:
             return
         remaining = max_total_bytes - total_bytes
         read_size = min(chunk_bytes, remaining + 1)
@@ -501,7 +550,45 @@ def _iter_bounded_sse_lines(
         total_bytes += len(chunk)
         if total_bytes > max_total_bytes:
             raise _SSEReadLimitError("SSE 响应超过大小上限")
+        yield chunk
 
+
+def _read_bounded_error_body(error: urllib.error.HTTPError, *, max_bytes: int = MAX_HTTP_ERROR_BYTES) -> bytes:
+    """严格有界读取 HTTPError 正文，对 chunked 错误响应同样校验块长与上限。"""
+    raw_resp = getattr(error, "fp", None)
+    if isinstance(raw_resp, http.client.HTTPResponse):
+        buf = bytearray()
+        try:
+            for chunk in _iter_strict_http_body(raw_resp, None, max_total_bytes=max_bytes, chunk_bytes=min(SSE_READ_CHUNK_BYTES, max_bytes)):
+                buf.extend(chunk)
+                if len(buf) >= max_bytes:
+                    break
+        except (_SSEReadLimitError, http.client.HTTPException, OSError):
+            pass
+        return bytes(buf[:max_bytes])
+    try:
+        return error.read(max_bytes)[:max_bytes]
+    except http.client.IncompleteRead as inc:
+        return inc.partial[:max_bytes]
+    except Exception:
+        return b""
+
+
+def _iter_bounded_sse_lines(
+    response,
+    deadline: Deadline,
+    *,
+    max_total_bytes: int = MAX_SSE_RESPONSE_BYTES,
+    max_line_bytes: int = MAX_SSE_EVENT_BYTES,
+    chunk_bytes: int = SSE_READ_CHUNK_BYTES,
+):
+    """增量按块读取 SSE 流并执行总字节数与单行上限，未超限时必须读至 EOF 以保留截断传输检测。"""
+    bom_checked = False
+    bom_buf = bytearray()
+    pending_cr = False
+    line_buf = bytearray()
+
+    for chunk in _iter_strict_http_body(response, deadline, max_total_bytes=max_total_bytes, chunk_bytes=chunk_bytes):
         if not bom_checked:
             need = 3 - len(bom_buf)
             bom_buf.extend(chunk[:need])
@@ -580,7 +667,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
     if timeout <= 0:
         return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_http(request, timeout=timeout) as response:
             terminal, detail, status = None, "流在终态事件前结束", None
             has_response_dict = False
             data_lines: list[str] = []
@@ -718,11 +805,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                     "error": None if ok else _error_info(text)}
     except urllib.error.HTTPError as error:
         try:
-            err_body = error.read(65536)
-        except http.client.IncompleteRead as inc:
-            err_body = inc.partial[:65536]
-        except Exception:
-            err_body = b""
+            err_body = _read_bounded_error_body(error, max_bytes=MAX_HTTP_ERROR_BYTES)
         finally:
             try:
                 error.close()

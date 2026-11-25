@@ -554,7 +554,7 @@ def test_round_trip_http_accepts_multiline_sse_json_event(monkeypatch):
         def read(self, n=-1):
             return self._buf.read(n)
 
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _FakeResp())
     result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-multiline", preflight.Deadline(5))
     assert result["ok"] is True
     assert result["terminal"] == "response.completed"
@@ -583,7 +583,7 @@ def test_round_trip_http_rejects_unclosed_multiline_sse_event(monkeypatch):
         def read(self, n=-1):
             return self._buf.read(n)
 
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _FakeResp())
     result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-unclosed", preflight.Deadline(5))
     assert result["ok"] is False
     assert result["terminal"] is None
@@ -612,7 +612,7 @@ def test_round_trip_http_rejects_unclosed_trailing_event_after_completed(monkeyp
         def read(self, n=-1):
             return self._buf.read(n)
 
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _FakeResp())
     result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-unclosed-tail", preflight.Deadline(5))
     assert result["ok"] is False
 
@@ -745,7 +745,7 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
             def read(self, n=-1):
                 return self._buf.read(n)
 
-        monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+        monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _FakeResp())
         result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-ev-mismatch", preflight.Deadline(5))
         assert result["ok"] is False, payload
 
@@ -773,7 +773,7 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
         def read(self, n=-1):
             return self._buf.read(n)
 
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _ValidMetaResp())
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _ValidMetaResp())
     assert preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-valid-meta", preflight.Deadline(5))["ok"] is True
 
 

@@ -7252,10 +7252,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..6ea52aa 100644
+index e69de29..4fca3da 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,10793 @@
+@@ -0,0 +1,10876 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -13169,21 +13169,66 @@ index e69de29..6ea52aa 100644
 +		return nil, errReviewSealed
 +	}
 +	if len(reviewLedger) >= maxReviewLedgerEntries {
++		evictOldestEvictableLocked := func(curNow time.Time) bool {
++			var oldestKey string
++			var oldestTime time.Time
++			for k, v := range reviewLedger {
++				if v.inFlight > 0 || v.sealing {
++					continue
++				}
++				v.mu.Lock()
++				evictable := !(v.tainted && !v.taintedPersisted) && (v.sealed || v.tainted || (v.started > 0 && curNow.UnixNano()-v.started > int64(MaxReviewDuration)))
++				v.mu.Unlock()
++				if !evictable {
++					continue
++				}
++				if oldestKey == "" || v.touched.Before(oldestTime) {
++					oldestKey, oldestTime = k, v.touched
++				}
++			}
++			if oldestKey == "" {
++				return false
++			}
++			evicted := reviewLedger[oldestKey]
++			delete(reviewLedger, oldestKey)
++			if evicted != nil {
++				evicted.mu.Lock()
++				evictedFD := evicted.boundDirFD
++				evicted.boundDirFD = nil
++				evicted.mu.Unlock()
++				closeBudgetedPinnedDirFD(evictedFD)
++			}
++			return true
++		}
++		type unpersistedTaintCand struct {
++			key     string
++			entry   *reviewEntry
++			touched time.Time
++		}
 +		var oldestKey string
 +		var oldestTime time.Time
 +		expiredByRoot := make(map[string][]string)
++		var unpersistedTaint []unpersistedTaintCand
 +		for k, v := range reviewLedger {
 +			if v.inFlight > 0 || v.sealing {
 +				continue
 +			}
 +			v.mu.Lock()
-+			evictable := !(v.tainted && !v.taintedPersisted) && (v.sealed || v.tainted || (v.started > 0 && now.UnixNano()-v.started > int64(MaxReviewDuration)))
++			isUnpersistedTaint := !v.sealed && v.tainted && !v.taintedPersisted
++			evictable := !isUnpersistedTaint && (v.sealed || v.tainted || (v.started > 0 && now.UnixNano()-v.started > int64(MaxReviewDuration)))
 +			v.mu.Unlock()
 +			if !evictable {
 +				if !reclaimingKeys[k] && now.Sub(v.touched) >= reviewDiskRetention {
 +					if sep := strings.IndexByte(k, '\x00'); sep > 0 && sep+1 < len(k) {
 +						candRoot, candLaunch := k[:sep], k[sep+1:]
 +						expiredByRoot[candRoot] = append(expiredByRoot[candRoot], candLaunch)
++					}
++					if isUnpersistedTaint {
++						unpersistedTaint = append(unpersistedTaint, unpersistedTaintCand{
++							key:     k,
++							entry:   v,
++							touched: v.touched,
++						})
 +					}
 +				}
 +				continue
@@ -13202,10 +13247,12 @@ index e69de29..6ea52aa 100644
 +				evicted.mu.Unlock()
 +				closeBudgetedPinnedDirFD(evictedFD)
 +			}
-+		} else if len(expiredByRoot) > 0 {
++		} else if len(expiredByRoot) > 0 || len(unpersistedTaint) > 0 {
 +			// When the ledger is full solely with unpersisted-taint entries, never blindly drop
-+			// unpersisted taint records; instead release reviewMu and attempt verified disk
-+			// reclamation of entries past reviewDiskRetention so quota recovers once storage heals.
++			// unpersisted taint records; instead release reviewMu and first attempt verified disk
++			// reclamation of expired on-disk dirs, then retry durable taint persistence on oldest
++			// unpersisted entries (including those whose initial persist failed before creating a
++			// launch dir) so recovered storage can safely persist taint and free ledger slots.
 +			reviewMu.Unlock()
 +			locked = false
 +			reclaimed := 0
@@ -13224,6 +13271,37 @@ index e69de29..6ea52aa 100644
 +					break
 +				}
 +			}
++			if reclaimed == 0 && len(unpersistedTaint) > 0 {
++				slices.SortFunc(unpersistedTaint, func(a, b unpersistedTaintCand) int {
++					return a.touched.Compare(b.touched)
++				})
++				const maxUnpersistedFlushBatch = 8
++				limit := len(unpersistedTaint)
++				if limit > maxUnpersistedFlushBatch {
++					limit = maxUnpersistedFlushBatch
++				}
++				for i := 0; i < limit; i++ {
++					cand := unpersistedTaint[i]
++					reviewMu.Lock()
++					cur := reviewLedger[cand.key]
++					if cur == nil || cur != cand.entry || cur.inFlight > 0 || cur.sealing || reclaimingKeys[cand.key] {
++						reviewMu.Unlock()
++						continue
++					}
++					cur.inFlight++
++					reviewMu.Unlock()
++					cur.mu.Lock()
++					if cur.tainted && !cur.taintedPersisted && !cur.sealed {
++						cur.taintAndPersistLocked()
++					}
++					persisted := cur.taintedPersisted || cur.sealed
++					cur.mu.Unlock()
++					releaseReview(cur)
++					if persisted {
++						break
++					}
++				}
++			}
 +			reviewMu.Lock()
 +			locked = true
 +			if ent, err, done := checkExisting(); done {
@@ -13235,6 +13313,9 @@ index e69de29..6ea52aa 100644
 +			}
 +			if rejectSealed && onDisk && diskEntry != nil && diskEntry.sealedFlag {
 +				return nil, errReviewSealed
++			}
++			if len(reviewLedger) >= maxReviewLedgerEntries {
++				_ = evictOldestEvictableLocked(now)
 +			}
 +			if len(reviewLedger) >= maxReviewLedgerEntries {
 +				return nil, ErrUnavailable
@@ -15026,7 +15107,7 @@ index e69de29..6ea52aa 100644
 +
 +var stagingQuotaMu sync.Mutex
 +
-+func ensureStagingQuotaLocked(stagingRoot *os.Root, root string) error {
++func ensureStagingQuotaLocked(rootHandle, stagingRoot *os.Root, root string) error {
 +	if stagingRoot == nil || maxStagingEntries <= 0 {
 +		return nil
 +	}
@@ -15050,10 +15131,12 @@ index e69de29..6ea52aa 100644
 +	if n < maxStagingEntries {
 +		return nil
 +	}
-+	// Hard ceiling hit (e.g. crash-left half-written staging files or foreign clutter):
-+	// attempt one bounded sweep batch, then fail closed if .staging is still at/above quota.
++	// Hard ceiling hit (e.g. crash-left half-written staging files or interrupted stage-seal dirs):
++	// attempt one bounded sweep batch using the pinned rootHandle so interrupted stage-seal dirs
++	// whose seal.pending.json already moved into <root>/<launch> can still be digest-verified and
++	// safely reclaimed, then fail closed if .staging is still at/above quota.
 +	sDev, sIno, hasSID := statDevIno(fi)
-+	sweepOrphanStagingDir(nil, stagingRoot, root, sDev, sIno, hasSID, false)
++	sweepOrphanStagingDir(rootHandle, stagingRoot, root, sDev, sIno, hasSID, false)
 +	n2, _, err2 := countCapped()
 +	if err2 != nil || n2 >= maxStagingEntries {
 +		return ErrUnavailable
@@ -15061,13 +15144,13 @@ index e69de29..6ea52aa 100644
 +	return nil
 +}
 +
-+func createStagingFileWithGen(stagingRoot *os.Root, root string, gen func() (string, error)) (string, *os.File, func(), error) {
++func createStagingFileWithGen(rootHandle, stagingRoot *os.Root, root string, gen func() (string, error)) (string, *os.File, func(), error) {
 +	if stagingRoot == nil || gen == nil {
 +		return "", nil, nil, ErrUnavailable
 +	}
 +	stagingQuotaMu.Lock()
 +	defer stagingQuotaMu.Unlock()
-+	if err := ensureStagingQuotaLocked(stagingRoot, root); err != nil {
++	if err := ensureStagingQuotaLocked(rootHandle, stagingRoot, root); err != nil {
 +		return "", nil, nil, err
 +	}
 +	for i := 0; i < maxStagingCreateRetries; i++ {
@@ -15093,8 +15176,8 @@ index e69de29..6ea52aa 100644
 +	return "", nil, nil, ErrUnavailable
 +}
 +
-+func createStagingFile(stagingRoot *os.Root, root, prefix string) (string, *os.File, func(), error) {
-+	return createStagingFileWithGen(stagingRoot, root, func() (string, error) {
++func createStagingFile(rootHandle, stagingRoot *os.Root, root, prefix string) (string, *os.File, func(), error) {
++	return createStagingFileWithGen(rootHandle, stagingRoot, root, func() (string, error) {
 +		tok, err := randomStagingToken()
 +		if err != nil {
 +			return "", err
@@ -15103,12 +15186,12 @@ index e69de29..6ea52aa 100644
 +	})
 +}
 +
-+func createNamedStagingDir(stagingRoot *os.Root, root, prefix string) (string, *os.Root, func(), error) {
++func createNamedStagingDir(rootHandle, stagingRoot *os.Root, root, prefix string) (string, *os.Root, func(), error) {
 +	if stagingRoot == nil || !isSingleBaseName(prefix) {
 +		return "", nil, nil, ErrUnavailable
 +	}
 +	stagingQuotaMu.Lock()
-+	if err := ensureStagingQuotaLocked(stagingRoot, root); err != nil {
++	if err := ensureStagingQuotaLocked(rootHandle, stagingRoot, root); err != nil {
 +		stagingQuotaMu.Unlock()
 +		return "", nil, nil, err
 +	}
@@ -15149,8 +15232,8 @@ index e69de29..6ea52aa 100644
 +	return createdName, subRoot, release, nil
 +}
 +
-+func createStagingDir(stagingRoot *os.Root, root string) (string, *os.Root, func(), error) {
-+	return createNamedStagingDir(stagingRoot, root, "stage-dir")
++func createStagingDir(rootHandle, stagingRoot *os.Root, root string) (string, *os.Root, func(), error) {
++	return createNamedStagingDir(rootHandle, stagingRoot, root, "stage-dir")
 +}
 +
 +type verifiedLeafChild struct {
@@ -16160,7 +16243,7 @@ index e69de29..6ea52aa 100644
 +	var releaseReclaim func()
 +	moved := false
 +	stagingQuotaMu.Lock()
-+	if qErr := ensureStagingQuotaLocked(stagingRoot, root); qErr == nil {
++	if qErr := ensureStagingQuotaLocked(rootHandle, stagingRoot, root); qErr == nil {
 +		for i := 0; i < maxStagingCreateRetries; i++ {
 +			tok, terr := randomQuarantineToken()
 +			if terr != nil {
@@ -16647,7 +16730,7 @@ index e69de29..6ea52aa 100644
 +	}
 +	defer stagingDirFD.Close()
 +
-+	stageDirName, stageSubRoot, releaseStageDir, err := createStagingDir(stagingRoot, root)
++	stageDirName, stageSubRoot, releaseStageDir, err := createStagingDir(rootHandle, stagingRoot, root)
 +	if err != nil {
 +		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
@@ -16669,7 +16752,7 @@ index e69de29..6ea52aa 100644
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +
-+	markerTmp, mf, releaseMarkerTmp, err := createStagingFile(stagingRoot, root, "pending-marker")
++	markerTmp, mf, releaseMarkerTmp, err := createStagingFile(rootHandle, stagingRoot, root, "pending-marker")
 +	if err != nil {
 +		_ = stageSubFD.Close()
 +		_ = stageSubRoot.Close()
@@ -17707,7 +17790,7 @@ index e69de29..6ea52aa 100644
 +		// Stage producer.json + seal.pending.json + seal.sha256 together inside a dedicated
 +		// <root>/.staging/stage-seal-<pid>-<seq>-<16hex>/ directory so every staged artifact is
 +		// cryptographically provably producer-owned even on an abrupt crash.
-+		sealDirName, sealStageRoot, releaseSealDir, err := createNamedStagingDir(stagingRoot, root, "stage-seal")
++		sealDirName, sealStageRoot, releaseSealDir, err := createNamedStagingDir(rootHandle, stagingRoot, root, "stage-seal")
 +		if err != nil {
 +			return fail(false, err)
 +		}
@@ -17796,7 +17879,7 @@ index e69de29..6ea52aa 100644
 +		}
 +		cleanupSealStage(false, false)
 +	} else {
-+		tmp, f, releaseTmp, err := createStagingFile(stagingRoot, root, "pending")
++		tmp, f, releaseTmp, err := createStagingFile(rootHandle, stagingRoot, root, "pending")
 +		if err != nil {
 +			return fail(false, err)
 +		}
@@ -18016,7 +18099,7 @@ index e69de29..6ea52aa 100644
 +	// Stage temporary file inside <root>/.staging and publish via descriptor-pinned non-overwriting linkat:
 +	// neither .staging nor <session> is re-resolved by path, readers see all or nothing, and an existing
 +	// receipt.json is never clobbered.
-+	tmp, f, releaseTmp, err := createStagingFile(stagingRoot, rootDir, "pending")
++	tmp, f, releaseTmp, err := createStagingFile(rootLease.dir, stagingRoot, rootDir, "pending")
 +	if err != nil {
 +		return
 +	}
@@ -18050,10 +18133,10 @@ index e69de29..6ea52aa 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..edfeefe 100644
+index e69de29..f2087fc 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,11577 @@
+@@ -0,0 +1,11781 @@
 +package preflightreceipt
 +
 +import (
@@ -25218,7 +25301,7 @@ index e69de29..edfeefe 100644
 +		"pending-1-3-0000000000000003",
 +	}
 +	idx := 0
-+	name, f, release, err := createStagingFileWithGen(stagingRoot, root, func() (string, error) {
++	name, f, release, err := createStagingFileWithGen(lease.dir, stagingRoot, root, func() (string, error) {
 +		n := candidates[idx]
 +		idx++
 +		return n, nil
@@ -29531,7 +29614,7 @@ index e69de29..edfeefe 100644
 +			defer wg.Done()
 +			<-start
 +			if idx%2 == 0 {
-+				_, f, rel, cerr := createStagingFile(stagingRoot, root, "pending")
++				_, f, rel, cerr := createStagingFile(lease.dir, stagingRoot, root, "pending")
 +				if cerr == nil {
 +					succeeded.Add(1)
 +					_ = f.Close()
@@ -29540,7 +29623,7 @@ index e69de29..edfeefe 100644
 +					releaseMu.Unlock()
 +				}
 +			} else {
-+				_, sub, rel, cerr := createStagingDir(stagingRoot, root)
++				_, sub, rel, cerr := createStagingDir(lease.dir, stagingRoot, root)
 +				if cerr == nil {
 +					succeeded.Add(1)
 +					_ = sub.Close()
@@ -29629,5 +29712,209 @@ index e69de29..edfeefe 100644
 +	}
 +	if _, _, cerr := countRootBucketEntries(lease.dir, true); !errors.Is(cerr, ErrUnavailable) {
 +		t.Fatalf("countRootBucketEntries on oversized root dir = %v, want ErrUnavailable", cerr)
++	}
++}
++
++func TestStagingQuotaSweepReclaimsInterruptedSealDirWithRootHandle(t *testing.T) {
++	// Sol #2 + Astra P2 #4 (PR #2280 R62): when .staging hits maxStagingEntries and holds an
++	// interrupted stage-seal-* dir whose seal.pending.json already moved into <root>/<launch>,
++	// quota sweep MUST pass the verified rootHandle so digest verification succeeds and reclaims
++	// the orphan slot; mismatched pending digest must still fail closed.
++	oldMaxStaging := maxStagingEntries
++	oldOrphanAge := stagingOrphanAge
++	maxStagingEntries = 2
++	stagingOrphanAge = time.Second
++	defer func() {
++		maxStagingEntries = oldMaxStaging
++		stagingOrphanAge = oldOrphanAge
++	}()
++
++	root := filepath.Join(t.TempDir(), "staging-quota-interrupted-seal")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lease.Close()
++	stagingRoot, err := ensureStagingDir(lease.dir, root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer stagingRoot.Close()
++
++	launch := "review-ff3f3f3f-2222-4333-8444-555555555501"
++	launchDir := filepath.Join(root, launch)
++	if err := os.Mkdir(launchDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	oldTime := time.Now().Add(-time.Hour)
++	markerRaw, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch, Started: oldTime.UnixNano()})
++	if err := os.WriteFile(filepath.Join(launchDir, "producer.json"), markerRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// Build a valid sealed payload and leave seal.sha256 in .staging/stage-seal-* while
++	// seal.pending.json already moved to <root>/<launch>/seal.pending.json.
++	pendingPayload := []byte(`{"schema":"cliproxy-review-v1","launch":"` + launch + `","sealed":true}`)
++	expectedSHA := sha256Hex(string(pendingPayload))
++
++	stageSealName := "stage-seal-99999-1-0000000000000001"
++	stageSealPath := filepath.Join(root, ".staging", stageSealName)
++	if err := os.Mkdir(stageSealPath, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(stageSealPath, "producer.json"), markerRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(stageSealPath, "seal.sha256"), []byte(expectedSHA), 0600); err != nil {
++		t.Fatal(err)
++	}
++	// Occupy the second slot with an unverified foreign clutter file so .staging is at 2/2.
++	if err := os.WriteFile(filepath.Join(root, ".staging", "foreign-keep"), []byte("keep"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chtimes(stageSealPath, oldTime, oldTime); err != nil {
++		t.Fatal(err)
++	}
++
++	// 1. With a mismatched seal.pending.json in launchDir, quota sweep MUST NOT delete stage-seal-*.
++	if err := os.WriteFile(filepath.Join(launchDir, "seal.pending.json"), []byte(`{"tampered":true}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, f, rel, cerr := createStagingFile(lease.dir, stagingRoot, root, "pending"); !errors.Is(cerr, ErrUnavailable) {
++		if f != nil {
++			_ = f.Close()
++		}
++		if rel != nil {
++			rel()
++		}
++		t.Fatalf("createStagingFile with mismatched pending digest = %v, want ErrUnavailable", cerr)
++	}
++	if _, statErr := os.Stat(stageSealPath); statErr != nil {
++		t.Fatalf("mismatched stage-seal dir should not have been deleted: %v", statErr)
++	}
++
++	// 2. With the matching seal.pending.json in launchDir, quota sweep uses rootHandle to verify
++	// the digest, reclaims stage-seal-*, and allows creating a new staging file.
++	if err := os.WriteFile(filepath.Join(launchDir, "seal.pending.json"), pendingPayload, 0600); err != nil {
++		t.Fatal(err)
++	}
++	name, f, rel, cerr := createStagingFile(lease.dir, stagingRoot, root, "pending")
++	if cerr != nil {
++		t.Fatalf("createStagingFile after matching seal.pending.json = %v, want nil", cerr)
++	}
++	_ = f.Close()
++	_ = stagingRoot.Remove(name)
++	rel()
++	if _, statErr := os.Stat(stageSealPath); !os.IsNotExist(statErr) {
++		t.Fatalf("verified interrupted stage-seal dir was not reclaimed: %v", statErr)
++	}
++}
++
++func TestFullLedgerUnpersistedTaintWithoutDiskDirRecoversAfterStorageHeals(t *testing.T) {
++	// Astra P2 #3 (PR #2280 R62): when reviewLedger is full of unpersisted tainted entries that
++	// never created a launch dir on disk (because initial storage write failed), once storage heals
++	// getOrCreateReviewEntry MUST durably persist taint to disk before freeing a ledger slot so new
++	// launches recover and the old tainted launch remains rejected on disk.
++	oldMaxLedger := maxReviewLedgerEntries
++	maxReviewLedgerEntries = 2
++	defer func() { maxReviewLedgerEntries = oldMaxLedger }()
++
++	reviewMu.Lock()
++	savedLedger := reviewLedger
++	savedSealed := sealedBindings
++	savedOverflow := taintWriteOverflow
++	reviewLedger = make(map[string]*reviewEntry)
++	sealedBindings = make(map[string]sealedDirBinding)
++	taintWriteOverflow = false
++	reviewMu.Unlock()
++	t.Cleanup(func() {
++		reviewMu.Lock()
++		reviewLedger = savedLedger
++		sealedBindings = savedSealed
++		taintWriteOverflow = savedOverflow
++		reviewMu.Unlock()
++	})
++
++	root := filepath.Join(t.TempDir(), "unpersisted-taint-recover")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++
++	// Simulate two launches whose initial taint persistence failed before creating any launch dir
++	// (e.g. .staging blocked by a regular file so staging fails even under uid=0 in Linux CI).
++	l1 := "review-ff4f4f4f-2222-4333-8444-555555555501"
++	l2 := "review-ff4f4f4f-2222-4333-8444-555555555502"
++	l3 := "review-ff4f4f4f-2222-4333-8444-555555555503"
++	ancient := time.Now().Add(-reviewDiskRetention - time.Hour)
++
++	stagingPath := filepath.Join(root, ".staging")
++	_ = os.RemoveAll(stagingPath)
++	if err := os.WriteFile(stagingPath, []byte("blocked"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = os.Remove(stagingPath) }()
++
++	reviewMu.Lock()
++	reviewLedger[root+"\x00"+l1] = &reviewEntry{
++		directory:        filepath.Join(root, l1),
++		launch:           l1,
++		started:          ancient.UnixNano(),
++		touched:          ancient,
++		tainted:          true,
++		taintedPersisted: false,
++	}
++	reviewLedger[root+"\x00"+l2] = &reviewEntry{
++		directory:        filepath.Join(root, l2),
++		launch:           l2,
++		started:          ancient.Add(time.Minute).UnixNano(),
++		touched:          ancient.Add(time.Minute),
++		tainted:          true,
++		taintedPersisted: false,
++	}
++	reviewMu.Unlock()
++
++	// Neither l1 nor l2 has a directory on disk.
++	if _, err := os.Stat(filepath.Join(root, l1)); !os.IsNotExist(err) {
++		t.Fatalf("expected no disk dir for l1, got err=%v", err)
++	}
++
++	// 1. While storage is still broken (.staging blocked), l3 MUST fail closed and neither taint may be dropped.
++	if res, err := ReserveReview(root, l3); !errors.Is(err, ErrUnavailable) {
++		if res != nil {
++			res.Release()
++		}
++		t.Fatalf("ReserveReview while storage broken = %v, want ErrUnavailable", err)
++	}
++	reviewMu.Lock()
++	stillTwo := len(reviewLedger) == 2 && reviewLedger[root+"\x00"+l1] != nil && reviewLedger[root+"\x00"+l2] != nil
++	reviewMu.Unlock()
++	if !stillTwo {
++		t.Fatalf("unpersisted tainted entries were dropped while storage was still broken")
++	}
++
++	// 2. Heal storage (remove blocker file): reserving l3 MUST persist oldest unpersisted taint (l1)
++	// to disk, free its ledger slot, admit l3, and keep l1 durably tainted on disk.
++	if err := os.Remove(stagingPath); err != nil {
++		t.Fatal(err)
++	}
++	res3, err := ReserveReview(root, l3)
++	if err != nil {
++		t.Fatalf("ReserveReview after storage healed = %v, want nil", err)
++	}
++	res3.Release()
++
++	rawL1, err := os.ReadFile(filepath.Join(root, l1, "receipt.json"))
++	if err != nil {
++		t.Fatalf("expected l1 taint receipt persisted to disk before eviction: %v", err)
++	}
++	var diskL1 ReviewReceipt
++	if err := json.Unmarshal(rawL1, &diskL1); err != nil || !diskL1.Tainted || diskL1.Sealed {
++		t.Fatalf("persisted l1 receipt = (%+v, err=%v), want tainted=true sealed=false", diskL1, err)
++	}
++	if status, _ := SealReviewWithDigest(root, l1, "sess-1"); status != SealRejected {
++		t.Fatalf("SealReviewWithDigest on evicted tainted l1 = %v, want SealRejected", status)
 +	}
 +}

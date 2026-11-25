@@ -461,7 +461,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "short-chunked", "short-trailer", "short-trailer-header", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "chunked-trailer", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -506,6 +506,11 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             try:
                 if framing in ("length", "short-length"):
                     self.wfile.write(payload)
+                elif framing == "neg-chunk":
+                    # CPython 3.11 HTTPResponse._read_next_chunk_size 接受 -1，须在读块体前直接拒绝。
+                    self.wfile.write(b"-1\r\n" + payload + b"\r\n0\r\n\r\n")
+                elif framing == "bad-chunk-sep":
+                    self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"XX0\r\n\r\n")
                 else:
                     self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
                     self.wfile.flush()
@@ -519,6 +524,8 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                         self.wfile.write(b"0\r\n")
                     elif framing == "short-trailer-header":
                         self.wfile.write(b"0\r\nX-Trailer: 1\r\n")
+                    elif framing == "chunked-trailer":
+                        self.wfile.write(b"0\r\nX-Trailer: 1\r\n\r\n")
                     elif framing != "short-chunked":
                         self.wfile.write(b"0\r\n\r\n")
             except (BrokenPipeError, ConnectionResetError):
@@ -532,9 +539,11 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
         result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
         elapsed = time.monotonic() - started
         assert processes and all(process.poll() is not None for process in processes)
-        assert result["ok"] is (framing in ("length", "chunked")), result
+        assert result["ok"] is (framing in ("length", "chunked", "chunked-trailer")), result
         if framing.startswith("short-"):
             assert result["error"]["exception"] == "IncompleteRead"
+        if framing in ("neg-chunk", "bad-chunk-sep"):
+            assert result["error"]["exception"] == "HTTPException"
         if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed
     finally:
@@ -569,7 +578,7 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
 
     response = Response()
     deadline = preflight.Deadline(3)
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: response)
     chunks = iter(response)
     response.read = lambda n=-1: next(chunks, b"")
     result = preflight._round_trip_http(LOCAL, KEY, OPUS, "preflight-test", deadline)
@@ -614,8 +623,7 @@ def test_proxy_down_blocks_without_waiting_out_the_log_window(env, capsys):
 
 
 def test_no_probe_is_sent_once_the_work_deadline_has_passed(monkeypatch):
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("不应发送"))
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **k: pytest.fail("不应发送"))
     deadline = preflight.Deadline(0.002)
     time.sleep(0.01)
     assert preflight.round_trip(LOCAL, KEY, KIMI, "s", deadline)["error"] == {"not_sent": "总时限已到"}
@@ -795,7 +803,6 @@ def test_broken_codex_config_never_crashes_the_report(env, capsys, tmp_path, con
 def test_structured_sse_error_never_reaches_the_report(monkeypatch):
     """SSE 错误体（含二次转义的 key）不抄进报告，只留分类与摘要。"""
     import io
-    import urllib.request
 
     key = 'secret"key"12345'
     line = "data: " + json.dumps({"type": "error", "error": {"message": json.dumps({"e": f"invalid Bearer {key}"})}}) + "\n\n"
@@ -809,7 +816,7 @@ def test_structured_sse_error_never_reaches_the_report(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResp(line.encode()))
+    monkeypatch.setattr(preflight, "_open_http", lambda req, timeout=None: FakeResp(line.encode()))
     trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(30))
     out = json.dumps(preflight.sanitize(trip, [key]), ensure_ascii=True)
     assert "secret" not in out and "12345" not in out and trip["error"]["class"] == "auth"
@@ -918,7 +925,6 @@ def test_usage_error_and_help_print_json(capsys):
 def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkeypatch, capsys):
     """上游把 key 放进 response.status 字典的键里：status 只收字符串，报告的键也脱敏。"""
     import io
-    import urllib.request
 
     key = "isolated-fake-host-key"
     event = {"type": "response.completed", "response": {"status": {key: "diagnostic"}}}
@@ -932,7 +938,7 @@ def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkey
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen",
+    monkeypatch.setattr(preflight, "_open_http",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
     trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
     preflight._emit(trip, [key])
@@ -973,7 +979,6 @@ def test_container_created_by_the_daemon_after_a_failed_client_and_rm_is_reporte
 def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeypatch, status):
     """独审十六：status 只报已知枚举；双重 JSON 编码、倒序等任意形态的 key 都不进报告。"""
     import io
-    import urllib.request
 
     key = 'isolated"host"key1742'
     event = {"type": "response.completed", "response": {"status": status(key)}}
@@ -987,7 +992,7 @@ def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeyp
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen",
+    monkeypatch.setattr(preflight, "_open_http",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
     trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
     assert trip["status"] == "other" and "1742" not in json.dumps(preflight.sanitize(trip, [key]))
@@ -1064,7 +1069,6 @@ def test_auth_command_sees_the_checked_codex_home(env, capsys, tmp_path, monkeyp
 def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypatch):
     """独审二十一 B-2：往返只受总工作时限约束；比旧的固定 45 秒更慢但在时限内完成的往返不误报。"""
     import io
-    import urllib.request
 
     seen = {}
 
@@ -1081,7 +1085,7 @@ def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypa
         seen["timeout"] = timeout
         return FakeResp(b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(preflight, "_open_http", urlopen)
     trip = preflight._round_trip_http(LOCAL, KEY, KIMI, "s", preflight.Deadline(60))
     assert trip["ok"] and seen["timeout"] > 50
 
@@ -2044,7 +2048,7 @@ def test_round_trip_http_enforces_bounded_sse_response_and_event_limits(monkeypa
             return b": " + b"x" * max(0, size - 3) + b"\n"
 
     huge = _HugeStreamResp()
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: huge)
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: huge)
     res_huge = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000086", preflight.Deadline(5))
     assert res_huge["ok"] is False
     assert huge.bytes_read <= preflight.MAX_SSE_RESPONSE_BYTES + preflight.SSE_READ_CHUNK_BYTES
@@ -2074,7 +2078,7 @@ def test_round_trip_http_enforces_bounded_sse_response_and_event_limits(monkeypa
                 self.eof_reached = True
             return out
 
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _BytesStreamResp(oversized_event))
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _BytesStreamResp(oversized_event))
     res_event = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000085", preflight.Deadline(5))
     assert res_event["ok"] is False
 
@@ -2085,7 +2089,7 @@ def test_round_trip_http_enforces_bounded_sse_response_and_event_limits(monkeypa
         b'data: {"type":"response.completed","response":{"id":"resp_chunked","status":"completed"}}\r\n\r\n'
     )
     chunked = _BytesStreamResp(valid_payload, max_chunk=2)
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: chunked)
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: chunked)
     res_ok = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000084", preflight.Deadline(5))
     assert res_ok["ok"] is True
     assert chunked.eof_reached is True
@@ -2117,7 +2121,7 @@ def test_round_trip_rejects_response_done_and_bounds_http_error_read(monkeypatch
         b"event: response.completed\n"
         b'data: {"type":"response.completed","response":{"id":"resp_done_second","status":"completed"}}\n\n'
     )
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _StreamResp(conflict_done))
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _StreamResp(conflict_done))
     res_conflict = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000083", preflight.Deadline(5))
     assert res_conflict["ok"] is False
 
@@ -2126,7 +2130,7 @@ def test_round_trip_rejects_response_done_and_bounds_http_error_read(monkeypatch
         b"event: response.done\n"
         b'data: {"type":"response.done","response":{"id":"resp_done_only","status":"completed"}}\n\n'
     )
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _StreamResp(only_done))
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _StreamResp(only_done))
     res_only = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000082", preflight.Deadline(5))
     assert res_only["ok"] is False
 
@@ -2144,8 +2148,96 @@ def test_round_trip_rejects_response_done_and_bounds_http_error_read(monkeypatch
     def _raise_http_err(*a, **kw):
         raise preflight.urllib.error.HTTPError("https://proxy.invalid/v1/responses", 429, "Too Many Requests", {}, _BoundedErrBody())
 
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", _raise_http_err)
+    monkeypatch.setattr(preflight, "_open_http", _raise_http_err)
     res_err = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000081", preflight.Deadline(5))
     assert res_err["ok"] is False
     assert res_err["http_status"] == 429
     assert seen_args == [65536]
+
+
+def test_roundtrip_rejects_redirects_without_forwarding_auth_and_bounds_chunked_error():
+    """Astra P1 #1 & #2 (R62): 禁用 301/302/303 重定向与凭据转发，chunked 错误体同样拦截负块长与超大载荷。"""
+    target_hits = []
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            target_hits.append((self.command, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_POST(self):
+            target_hits.append((self.command, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    target_srv = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)  # DevSkim: ignore DS162092 本地重定向目标回归
+    threading.Thread(target=target_srv.serve_forever, daemon=True).start()
+    target_url = f"http://127.0.0.1:{target_srv.server_port}/stolen"  # DevSkim: ignore DS162092 本地重定向目标回归
+
+    mode = {"kind": "302"}
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.close_connection = True
+            if mode["kind"] in ("301", "302", "303"):
+                self.send_response(int(mode["kind"]))
+                self.send_header("Location", target_url)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    # 畸形负块长 + 大载荷：不得跟随重定向，也不得无界读体。
+                    self.wfile.write(b"-1\r\n" + b"X" * 131072 + b"\r\n0\r\n\r\n")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
+            self.send_response(500)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                if mode["kind"] == "err-neg-chunk":
+                    self.wfile.write(b"-1\r\n" + b"E" * 131072 + b"\r\n0\r\n\r\n")
+                else:
+                    big_chunk = b"rate_limit " + b"E" * 131072
+                    self.wfile.write(f"{len(big_chunk):x}\r\n".encode() + big_chunk + b"\r\n0\r\n\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    proxy_srv = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)  # DevSkim: ignore DS162092 本地错误体与重定向回归
+    threading.Thread(target=proxy_srv.serve_forever, daemon=True).start()
+    try:
+        proxy_url = f"http://127.0.0.1:{proxy_srv.server_port}"  # DevSkim: ignore DS162092 本地错误体与重定向回归
+        for code_str in ("301", "302", "303"):
+            mode["kind"] = code_str
+            res = preflight._round_trip_http(proxy_url, KEY, OPUS, f"preflight-redir-{code_str}", preflight.Deadline(3))
+            assert res["ok"] is False and res["http_status"] == int(code_str), res
+        assert target_hits == [], f"不应跟随重定向或转发 Authorization: {target_hits}"
+
+        mode["kind"] = "err-neg-chunk"
+        res_neg = preflight._round_trip_http(proxy_url, KEY, OPUS, "preflight-err-neg", preflight.Deadline(3))
+        assert res_neg["ok"] is False and res_neg["http_status"] == 500, res_neg
+        assert res_neg["error"]["length"] == 0, res_neg
+
+        mode["kind"] = "err-huge-chunk"
+        res_big = preflight._round_trip_http(proxy_url, KEY, OPUS, "preflight-err-big", preflight.Deadline(3))
+        assert res_big["ok"] is False and res_big["http_status"] == 500, res_big
+        assert res_big["error"]["length"] <= preflight.MAX_HTTP_ERROR_BYTES, res_big
+    finally:
+        proxy_srv.shutdown()
+        proxy_srv.server_close()
+        target_srv.shutdown()
+        target_srv.server_close()
