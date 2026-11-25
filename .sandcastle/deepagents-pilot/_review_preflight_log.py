@@ -69,9 +69,26 @@ def _is_allowed_darwin_os_symlink(path_str: str) -> bool:
 
 
 def _open_trusted_root_dir(root: Path) -> int | None:
-    """从根目录逐段以 O_NOFOLLOW 打开 root，拒绝任意祖先符号链接（仅允许 macOS 固定 OS 链接），并校验属主与 0700 权限。"""
-    if not root.is_absolute():
+    """从根目录逐段以 O_NOFOLLOW 打开 root，拒绝任意祖先符号链接（仅允许 macOS 固定 OS 链接），并校验属主与 0700 权限。
+    若传入相对路径（如 --proxy-receipt-dir ./receipts），在当前受总时限约束的子进程内将其按 cwd 展开且拒绝跨符号链接回退的 ..。"""
+    raw_str = str(root)
+    if not raw_str:
         return None
+    if not root.is_absolute():
+        cur = Path(os.getcwd())
+        for part in raw_str.split(os.sep):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                try:
+                    if cur.is_symlink():
+                        return None
+                except OSError:
+                    return None
+                cur = cur.parent
+            else:
+                cur = cur / part
+        root = cur
     parts = [p for p in root.parts[1:] if p not in ("", ".")]
     if not parts or any(p == ".." for p in parts):
         return None
