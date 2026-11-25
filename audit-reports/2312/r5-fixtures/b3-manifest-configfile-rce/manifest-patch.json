@@ -1,0 +1,7 @@
+{
+  "note": "在 formal_math/lake-manifest.json 中保持 name/rev/type/url 与 pins.json 完全一致，仅修改 Cli 包的 configFile 字段为下列相对路径（或修改顶层 packagesDir），即可使门 1 退 0，并在门 2/3/6a/15 每次调用 lake 时执行仓库内 formal_math/.cfg/cli_lakefile.lean 中的 run_cmd IO 代码且门 1/2/3/6a/15 全部退 0。",
+  "target_package": "Cli",
+  "patch": {
+    "configFile": "../../../.cfg/cli_lakefile.lean"
+  }
+}
