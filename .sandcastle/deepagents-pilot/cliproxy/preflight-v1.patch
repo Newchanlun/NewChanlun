@@ -5861,10 +5861,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..fe5f765 100644
+index e69de29..40dd727 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,6434 @@
+@@ -0,0 +1,6518 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7814,6 +7814,12 @@ index e69de29..fe5f765 100644
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
++		if pType == "output_text" {
++			if _, hasPText, okPText := exactOptionalStringPresent(partFields, "text"); !okPText || !hasPText {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		}
 +	}
 +	out = parsedStrictFrame{
 +		evType:          evType,
@@ -8884,6 +8890,32 @@ index e69de29..fe5f765 100644
 +	return true
 +}
 +
++func (t *strictStreamTracker) isLatestOutputPosition(seq int, effIdx int64, effHasIdx bool) bool {
++	if effHasIdx && !t.sawUnindexedItem {
++		return (!t.hasMaxOutputIndex || effIdx >= t.maxOutputIndex) &&
++			(!t.hasMaxNonFinalOutputIndex || effIdx > t.maxNonFinalOutputIndex)
++	}
++	isLatest := seq >= t.maxItemSeq && seq > t.maxNonFinalSeq
++	if effHasIdx {
++		if (t.hasMaxOutputIndex && effIdx < t.maxOutputIndex) ||
++			(t.hasMaxNonFinalOutputIndex && effIdx <= t.maxNonFinalOutputIndex) {
++			return false
++		}
++	}
++	return isLatest
++}
++
++func (t *strictStreamTracker) isStrictlyEarlierThanLastItem(seq int, effIdx int64, effHasIdx bool) bool {
++	if t.lastItemOutputSHA == "" {
++		return false
++	}
++	if effHasIdx && t.hasLastItemOutputIndex {
++		return effIdx < t.lastItemOutputIndex
++	}
++	return seq < t.lastItemSeq &&
++		(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++}
++
 +func (t *strictStreamTracker) recordNonFinal(seq int, canonKey, itemID string, outputIndex int64, hasOutputIndex, countUnkeyed bool) bool {
 +	if seq > t.maxNonFinalSeq {
 +		t.maxNonFinalSeq = seq
@@ -9143,10 +9175,10 @@ index e69de29..fe5f765 100644
 +				if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +					t.maxOutputIndex = effIdx
 +					t.hasMaxOutputIndex = true
++				} else if !effHasIdx {
++					t.sawUnindexedItem = true
 +				}
-+				isStrictlyEarlier := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
-+					(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
-+				if !isStrictlyEarlier {
++				if !t.isStrictlyEarlierThanLastItem(seq, effIdx, effHasIdx) {
 +					t.lastItemOutputSHA = ""
 +					t.lastItemResponseID = ""
 +					t.lastItemSeq = 0
@@ -9251,18 +9283,13 @@ index e69de29..fe5f765 100644
 +			if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +				t.maxOutputIndex = effIdx
 +				t.hasMaxOutputIndex = true
++			} else if !effHasIdx {
++				t.sawUnindexedItem = true
 +			}
 +			t.sawStreamedOutputItem = true
 +			if isFinalCandidate {
 +				rid := t.responseID
-+				isLatest := seq >= t.maxItemSeq && seq > t.maxNonFinalSeq
-+				if effHasIdx {
-+					if (t.hasMaxOutputIndex && effIdx < t.maxOutputIndex) ||
-+						(t.hasMaxNonFinalOutputIndex && effIdx <= t.maxNonFinalOutputIndex) {
-+						isLatest = false
-+					}
-+				}
-+				if isLatest {
++				if t.isLatestOutputPosition(seq, effIdx, effHasIdx) {
 +					if outTextSHA != "" && rid != "" {
 +						t.lastItemOutputSHA = outTextSHA
 +						t.lastItemResponseID = rid
@@ -9283,9 +9310,7 @@ index e69de29..fe5f765 100644
 +					c.taintStreamAnomaly()
 +					return
 +				}
-+				isStrictlyEarlier := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
-+					(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
-+				if !isStrictlyEarlier {
++				if !t.isStrictlyEarlierThanLastItem(seq, effIdx, effHasIdx) {
 +					t.lastItemOutputSHA = ""
 +					t.lastItemResponseID = ""
 +					t.lastItemSeq = 0
@@ -11274,8 +11299,93 @@ index e69de29..fe5f765 100644
 +	ts   int64
 +}
 +
++var reviewPendingTempPattern = regexp.MustCompile(`^pending-(?:sha-)?[0-9]+-[0-9]+$`)
++
 +func isReviewBucketName(name string) bool {
-+	return strings.HasPrefix(name, "review-")
++	return ValidReviewLaunch(name)
++}
++
++func isProducerBucketDirName(name string, reviewBucket bool) bool {
++	if reviewBucket {
++		return ValidReviewLaunch(name)
++	}
++	return ValidPreflightSession(name)
++}
++
++func isProducerOwnedReceiptFile(childName string, reviewBucket bool) bool {
++	if reviewBucket {
++		return childName == "receipt.json" || childName == "seal.sha256" || reviewPendingTempPattern.MatchString(childName)
++	}
++	return childName == "receipt.json" || childName == "pending"
++}
++
++func inspectProducerReceiptDir(dir, name string, reviewBucket bool) (time.Time, bool) {
++	if !isProducerBucketDirName(name, reviewBucket) {
++		return time.Time{}, false
++	}
++	fi, err := os.Lstat(dir)
++	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++		return time.Time{}, false
++	}
++	lastMod := fi.ModTime()
++	children, err := os.ReadDir(dir)
++	if err != nil {
++		return time.Time{}, false
++	}
++	for _, child := range children {
++		childName := child.Name()
++		if !isProducerOwnedReceiptFile(childName, reviewBucket) {
++			return time.Time{}, false
++		}
++		p := filepath.Join(dir, childName)
++		cfi, cerr := os.Lstat(p)
++		if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || !ownedByCurrentUser(cfi) {
++			return time.Time{}, false
++		}
++		if cfi.ModTime().After(lastMod) {
++			lastMod = cfi.ModTime()
++		}
++		if childName == "receipt.json" {
++			if cfi.Size() <= 0 || cfi.Size() > maxReviewReceiptBytes {
++				return time.Time{}, false
++			}
++			f, oerr := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++			if oerr != nil {
++				return time.Time{}, false
++			}
++			raw, rerr := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
++			_ = f.Close()
++			if rerr != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
++				return time.Time{}, false
++			}
++			if reviewBucket {
++				var disk ReviewReceipt
++				if json.Unmarshal(raw, &disk) != nil || disk.Schema != ReviewSchema || disk.Launch != name {
++					return time.Time{}, false
++				}
++				for _, ns := range []int64{disk.Started, disk.Finished, disk.SealedAt} {
++					if ns > 0 {
++						if t := time.Unix(0, ns); t.After(lastMod) {
++							lastMod = t
++						}
++					}
++				}
++			} else {
++				var disk Receipt
++				if json.Unmarshal(raw, &disk) != nil || disk.Schema != Schema || disk.Session != name {
++					return time.Time{}, false
++				}
++				for _, ns := range []int64{disk.Started, disk.Finished} {
++					if ns > 0 {
++						if t := time.Unix(0, ns); t.After(lastMod) {
++							lastMod = t
++						}
++					}
++				}
++			}
++		}
++	}
++	return lastMod, true
 +}
 +
 +func countRootBucketEntries(root string, reviewBucket bool) (int, []string, error) {
@@ -11297,8 +11407,8 @@ index e69de29..fe5f765 100644
 +	return len(names), names, nil
 +}
 +
-+func removePrivateLeafDir(dir string) bool {
-+	if _, err := checkPrivateDir(dir, false); err != nil {
++func removePrivateLeafDir(dir, name string, reviewBucket bool) bool {
++	if _, ok := inspectProducerReceiptDir(dir, name, reviewBucket); !ok {
 +		return false
 +	}
 +	children, err := os.ReadDir(dir)
@@ -11306,13 +11416,9 @@ index e69de29..fe5f765 100644
 +		return false
 +	}
 +	for _, child := range children {
-+		p := filepath.Join(dir, child.Name())
-+		fi, lerr := os.Lstat(p)
-+		if lerr != nil || !fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0 || !ownedByCurrentUser(fi) {
++		if !isProducerOwnedReceiptFile(child.Name(), reviewBucket) {
 +			return false
 +		}
-+	}
-+	for _, child := range children {
 +		if err := os.Remove(filepath.Join(dir, child.Name())); err != nil && !os.IsNotExist(err) {
 +			return false
 +		}
@@ -11332,31 +11438,9 @@ index e69de29..fe5f765 100644
 +	candidates := make([]expiredDiskCandidate, 0)
 +	for _, name := range names {
 +		subDir := filepath.Join(root, name)
-+		fi, err := os.Lstat(subDir)
-+		if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++		lastMod, ok := inspectProducerReceiptDir(subDir, name, reviewBucket)
++		if !ok {
 +			continue
-+		}
-+		lastMod := fi.ModTime()
-+		recPath := filepath.Join(subDir, "receipt.json")
-+		if rfi, rerr := os.Lstat(recPath); rerr == nil && rfi.Mode().IsRegular() && rfi.Mode()&os.ModeSymlink == 0 && ownedByCurrentUser(rfi) {
-+			if rfi.ModTime().After(lastMod) {
-+				lastMod = rfi.ModTime()
-+			}
-+			if reviewBucket && rfi.Size() > 0 && rfi.Size() <= maxReviewReceiptBytes {
-+				if raw, readErr := os.ReadFile(recPath); readErr == nil {
-+					var disk ReviewReceipt
-+					if json.Unmarshal(raw, &disk) == nil {
-+						for _, ns := range []int64{disk.Started, disk.Finished, disk.SealedAt} {
-+							if ns > 0 {
-+								t := time.Unix(0, ns)
-+								if t.After(lastMod) {
-+									lastMod = t
-+								}
-+							}
-+						}
-+					}
-+				}
-+			}
 +		}
 +		if now.Sub(lastMod) < retention {
 +			continue
@@ -11402,7 +11486,7 @@ index e69de29..fe5f765 100644
 +			}
 +			reviewMu.Unlock()
 +		}
-+		if removePrivateLeafDir(cand.dir) {
++		if removePrivateLeafDir(cand.dir, cand.name, reviewBucket) {
 +			reclaimed++
 +		}
 +	}
@@ -12300,10 +12384,10 @@ index e69de29..fe5f765 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..84482ce 100644
+index e69de29..e46fb98 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,5511 @@
+@@ -0,0 +1,5581 @@
 +package preflightreceipt
 +
 +import (
@@ -17234,6 +17318,37 @@ index e69de29..84482ce 100644
 +	if r := readReviewReceiptFile(t, root, lOutOfOrderDelta); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
 +		t.Fatalf("out-of-order delta hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
 +	}
++
++	// 82. Sol P2 #2 + Astra P2 #3 (PR #2280 R33): response.content_part.added with type="output_text"
++	//     and missing or null "text" MUST taint (allowing explicit empty string "").
++	for i, badAdded := range []string{
++		`{"type":"response.content_part.added","output_index":0,"item_id":"msg_cpa","content_index":0,"part":{"type":"output_text"}}`,
++		`{"type":"response.content_part.added","output_index":0,"item_id":"msg_cpa","content_index":0,"part":{"type":"output_text","text":null}}`,
++	} {
++		sseBadAdded := "data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_cpa","type":"message","role":"assistant"}}` + "\n\n" +
++			"data: " + badAdded + "\n\n" +
++			"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_cpa","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++			"data: " + `{"type":"response.completed","response":{"id":"resp_cpa","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_cpa","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++		if st := runSSE(t, fmt.Sprintf("review-d1111111-2222-4333-8444-5555555555c%d", i), fmt.Sprintf("019d0000-0000-7000-8000-8888888881c%d", i), sseBadAdded); st != SealRejected {
++			t.Fatalf("content_part.added missing/null output_text.text case %d seal = %v, want SealRejected", i, st)
++		}
++	}
++
++	// 83. Astra P2 #2 (PR #2280 R33): output_index=1 final answer completing BEFORE a response.in_progress
++	//     snapshot introduces an earlier completed output_index=0 reasoning item MUST preserve the final answer
++	//     by explicit output_index and seal cleanly.
++	lOutOfOrderSnap := "review-d1111111-2222-4333-8444-5555555555c2"
++	sOutOfOrderSnap := "019d0000-0000-7000-8000-8888888881c2"
++	sseOutOfOrderSnap := "data: " + `{"type":"response.created","response":{"id":"resp_ooos","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_ooos","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_ooos","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"rs_ooos","type":"reasoning","status":"completed"},{"id":"msg_ooos","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_ooos","status":"completed","model":"gpt-6.2-sol","output":[{"id":"rs_ooos","type":"reasoning","status":"completed"},{"id":"msg_ooos","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lOutOfOrderSnap, sOutOfOrderSnap, sseOutOfOrderSnap); st != SealOK {
++		t.Fatalf("out-of-order response.in_progress introducing lower-index completed reasoning seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lOutOfOrderSnap); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("out-of-order snapshot hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
 +}
 +
 +func TestReviewReceiptDiskQuotaIsolatesPreflightAndReclaimsExpired(t *testing.T) {
@@ -17325,6 +17440,45 @@ index e69de29..84482ce 100644
 +	res2.Release()
 +	if _, statErr := os.Stat(r1Dir); !os.IsNotExist(statErr) {
 +		t.Fatalf("expired r1 was not reclaimed: %v", statErr)
++	}
++
++	// Sol P1 #1 + Astra P1 #1 (PR #2280 R33): reclamation MUST NEVER delete unrelated directories or
++	// receipt-named directories containing unknown files or foreign receipt.json schemas.
++	maxPreflightDiskEntries = 2
++	foreignDir := filepath.Join(root, "unrelated-private-dir")
++	if err := os.Mkdir(foreignDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	foreignFile := filepath.Join(foreignDir, "user-note.txt")
++	if err := os.WriteFile(foreignFile, []byte("keep"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(foreignFile, ancient, ancient)
++	_ = os.Chtimes(foreignDir, ancient, ancient)
++
++	dirtyPreflight := filepath.Join(root, "preflight-11111111-2222-4333-8444-555555555509")
++	if err := os.Mkdir(dirtyPreflight, 0700); err != nil {
++		t.Fatal(err)
++	}
++	dirtyExtra := filepath.Join(dirtyPreflight, "extra.txt")
++	if err := os.WriteFile(dirtyExtra, []byte("keep-extra"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(dirtyExtra, ancient, ancient)
++	_ = os.Chtimes(dirtyPreflight, ancient, ancient)
++
++	// Remove p2 and p3 so only foreignDir and dirtyPreflight occupy the 2-entry preflight cap.
++	_ = os.Remove(p2)
++	_ = os.Remove(p3)
++	p4 := filepath.Join(root, "preflight-11111111-2222-4333-8444-555555555504")
++	if err := reservePrivateDir(p4, false); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("reserve p4 when bucket holds only unrelated/dirty dirs = %v, want ErrUnavailable", err)
++	}
++	if _, err := os.Stat(foreignFile); err != nil {
++		t.Fatalf("reclaimer deleted unrelated directory/file: %v", err)
++	}
++	if _, err := os.Stat(dirtyExtra); err != nil {
++		t.Fatalf("reclaimer deleted receipt-named directory containing unknown file: %v", err)
 +	}
 +}
 +
