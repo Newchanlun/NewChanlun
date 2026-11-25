@@ -1,0 +1,40 @@
+TAP version 13
+# Q3-WIRE load 2 32826058 17270 1742782464
+# Q3-WIRE watch 6 179587419 100039 2015084544
+# Q3-WIRE watch 10 247509972 157730 4072226816
+# Q3-WIRE watch 14 359318276 256877 3341877248
+# Q3-WIRE watch 18 499536775 420966 5024202752
+# Q3-WIRE watch 22 687759591 604197 6742753280
+# Subtest: 真实S3 W 跨真实写者恢复（纪元1→2）逐代 Watch 与同代 AsKnown 一致
+ok 1 - 真实S3 W 跨真实写者恢复（纪元1→2）逐代 Watch 与同代 AsKnown 一致
+  ---
+  duration_ms: 1607206.925625
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1608937.192375
+     1609.01 real      1748.00 user        37.19 sys
+         12443353088  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             5572746  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  21  messages sent
+                  17  messages received
+                   0  signals received
+                  26  voluntary context switches
+             3954399  involuntary context switches
+           543780488  instructions retired
+           235381036  cycles elapsed
+            16467984  peak memory footprint

@@ -1,0 +1,80 @@
+# #1419/#1855：四条 W2 冷锁（W2 写者 H1 冷往返对拍）在第八门签署值 V = 1,342,177,280 B 下跑满。
+#   长作业通道，不截短锁（#1855 追平裁定 2，issuecomment-6725667142）；挡合入的接法见下。
+#   托管机实测（run 42515237738，各一次，单线程 CPU 定时长）：CD 2013 s / VmHWM 4.10 GB、EF 至首拒 2208 s / 8.13 GB
+#   （9V45），bounded2 439 s（9V74），W 20 s，release 构建约 200 s；顺序合计约 81 分钟。慢机（7763）约 2.2 倍即约 180 分钟，
+#   超过 ci.yml native 组 90 分钟上限，故上限取 270 分钟（1.5 倍余量）。
+#   PR 上由 ci.yml 的 w2-cold-locks 作业调用（S 写者路径判定与 ci-ok 汇总都在 ci.yml，#1855 裁定 2）；main 上每晚再跑。
+#   一个作业、release 档、逐条 --exact 单线程；任一步失败不影响后续步执行。
+name: W2 cold locks (#1419)
+
+on:
+  workflow_call:
+  schedule:
+    - cron: "23 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  w2-cold-locks:
+    name: w2-cold-locks
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    env:
+      CARGO_INCREMENTAL: "0"
+      LOCK_PREFIX: "v3::audit_owner::construction_tests::"
+      CARGO_ARGS: "--release --locked --features s_session,s_incremental --bin s_structure_session"
+    defaults:
+      run:
+        working-directory: rust
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-job-setup
+
+      - name: build release test binary
+        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test $CARGO_ARGS --no-run --jobs "${CI_CARGO_JOBS_RELEASE:-4}"
+
+      - name: W2 cold locks that must pass (W undetermined, bounded2, CD)
+        if: ${{ !cancelled() }}
+        run: |
+          set +e
+          fail=0
+          for lock in w_undetermined_prior_revision bounded2_shape_development_window cd_second_cursor_continuation; do
+            name="${LOCK_PREFIX}w2_h1_cold_${lock}_matches_online"
+            start=$(date +%s)
+            cargo test $CARGO_ARGS -- --exact "$name" --test-threads 1 --nocapture > "$RUNNER_TEMP/$lock.log" 2>&1
+            rc=$?
+            grep -E 'M8D_P3_RECEIPT|panicked|^test |test result' "$RUNNER_TEMP/$lock.log" | tail -20
+            echo "lock=$lock rc=$rc secs=$(( $(date +%s) - start ))"
+            # --nocapture 下测试输出夹在「test 名 ...」与「ok」之间，按退出码与汇总行判定。
+            [ "$rc" -eq 0 ] && grep -q "test result: ok. 1 passed" "$RUNNER_TEMP/$lock.log" \
+              || { echo "::error title=W2 cold lock failed::$lock rc=$rc"; fail=1; }
+          done
+          exit $fail
+
+      # 签署记录第 3、4 条：EF 在 V 下于第 76 代资源首拒，归轨道二 #1642，锁登记 first_refusal = Some(76)。
+      #   本步要求 EF 恰在登记代、以原资源首拒文本失败；前 75 代任一断言失败、首拒代变化或首拒原因变化都让本步变红。
+      #   轨道二交付、EF 改登记 None 后，本步并回上一步。
+      - name: EF registered budget refusal at g76 (#1642)
+        if: ${{ !cancelled() }}
+        run: |
+          set +e
+          name="${LOCK_PREFIX}w2_h1_cold_ef_seed_pair_qualification_and_canonical_matches_online"
+          log="$RUNNER_TEMP/ef.log"
+          start=$(date +%s)
+          cargo test $CARGO_ARGS -- --exact "$name" --test-threads 1 --nocapture > "$log" 2>&1
+          rc=$?
+          grep -E 'M8D_P3_RECEIPT|panicked|^test |test result' "$log" | tail -20
+          echo "lock=ef rc=$rc secs=$(( $(date +%s) - start ))"
+          refused=$(grep -c 'M8D_P3_RECEIPT lock=ef .*outcome=refused' "$log")
+          panics=$(grep -c "panicked at" "$log")
+          if [ "$rc" -ne 0 ] && [ "$refused" -eq 1 ] && [ "$panics" -eq 1 ] \
+            && grep -q 'M8D_P3_RECEIPT lock=ef g=76 outcome=refused' "$log" \
+            && grep -q 'called `Result::unwrap()` on an `Err` value: "HistoricalAuditStale：认证发布资源不足；禁止无候选重试或完整审计兜底"' "$log"; then
+            echo "::warning title=EF known budget refusal (#1642)::EF refused at g76 under V exactly as registered"
+          else
+            echo "::error title=EF differs from its registration::rc=$rc refused=$refused panics=$panics"
+            exit 1
+          fi
