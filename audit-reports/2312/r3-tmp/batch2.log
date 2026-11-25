@@ -1,0 +1,164 @@
+
+=== CASE A1c_macro_full_bypass (mathlib=False) ===
+[DISK] before A1c_macro_full_bypass: / free = 7.904 GiB
+  build --wfail rc=1
+    build out: ✔ [2/6] Built Chan (252ms)
+✔ [3/6] Built ChanTest.Probe (252ms)
+✔ [4/6] Built Chan.Thm.Helper (817ms)
+✖ [6/6] Building Chan.Thm.Victim (459ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/li
+  gate 2: rc=1 stdout='GATE2 RED formal_math/Chan/Thm/Victim.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令' stderr='Chan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4'
+  gate 3: rc=2 stdout='' stderr='GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; ex'
+  gate S: rc=2 stdout='' stderr='GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (494ms)\ntrace:'
+  gate 7a: rc=2 stdout='' stderr='GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (519ms)\ntrace'
+  gate 8a: rc=2 stdout='' stderr='GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (477ms)\ntrace'
+  gate 8b: rc=2 stdout='' stderr='GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (498ms)\ntrace'
+  gate 9: rc=2 stdout='' stderr='GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (490ms)\ntrace:'
+  gate 15: rc=2 stdout='' stderr='GATE15: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; e'
+[DISK] after A1c_macro_full_bypass: / free = 7.901 GiB
+
+=== CASE A4b_guard_msgs_legal_broken (mathlib=False) ===
+[DISK] before A4b_guard_msgs_legal_broken: / free = 7.901 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",4,"命令不在白名单：in"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Final/LegalGuard.lean:4 TOKEN 命令不在白名单：in' stderr=''
+[DISK] after A4b_guard_msgs_legal_broken: / free = 7.901 GiB
+
+=== CASE A5a_example_sorryAx (mathlib=False) ===
+[DISK] before A5a_example_sorryAx: / free = 7.901 GiB
+  build --wfail rc=1
+    build out: ⚠ [2/4] Building Chan.Thm.ExSorry (206ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/Chan/Thm/ExSorry.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean/Chan/Thm/ExSorry.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean/Chan/Thm/ExSorry.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryA
+  gate 2: rc=1 stdout='GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1' stderr='⚠ [4/6] Replaying Chan.Thm.ExSorry\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Vol'
+  gate 3: rc=0 stdout='' stderr=''
+[DISK] after A5a_example_sorryAx: / free = 7.896 GiB
+
+=== CASE A5b_grind_set_option (mathlib=False) ===
+[DISK] before A5b_grind_set_option: / free = 7.896 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+[DISK] after A5b_grind_set_option: / free = 7.899 GiB
+
+=== CASE A3_other_meta_attrs (mathlib=False) ===
+[DISK] before A3_other_meta_attrs: / free = 7.899 GiB
+  gate 2: rc=1 stdout='GATE2 RED formal_math/Chan/Thm/MetaAttrs.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令' stderr='Chan/Thm/MetaAttrs.lean:5:2: error: Unknown attribute `[app_elaborator]`\n\nChan/Thm/MetaAttrs.lean:6:28: error(lean.unknownIdentifier): Unknown identifier `AppUnexpander`\n\nNote: It is not possible to treat `AppUnexpander` as an implicitly bo'
+  gate 3: rc=2 stdout='' stderr='GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/MetaAttrs.lean:5:2: error: Unknown attribute `[app_elaborator]`\n\nChan/Thm/MetaAttrs.lean:6:28: error(lean.unknownIdentifier): Unknown identifier `AppUnexpander`\n\nNote: It is no'
+[DISK] after A3_other_meta_attrs: / free = 7.899 GiB
+
+=== CASE A3b_app_elab_compiling (mathlib=False) ===
+[DISK] before A3b_app_elab_compiling: / free = 7.899 GiB
+  build --wfail rc=1
+    build out: ✔ [2/4] Built Chan (220ms)
+✔ [3/4] Built ChanTest.Probe (221ms)
+✖ [4/4] Building Chan.Thm.AppElab (559ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/Chan/Thm/AppElab.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/.lake/build/lib/lean/Chan/Thm/AppElab.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/.lake/build/lib/lean/Chan/Thm/AppElab.ilean -
+  gate 2: rc=1 stdout='GATE2 RED formal_math/Chan/Thm/AppElab.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令' stderr='Chan/Thm/AppElab.lean:5:2: error: Unknown attribute `[app_elaborator]`'
+  gate 3: rc=2 stdout='' stderr='GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/AppElab.lean:5:2: error: Unknown attribute `[app_elaborator]`'
+  gate 15: rc=2 stdout='' stderr='GATE15: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/AppElab.lean:5:2: error: Unknown attribute `[app_elaborator]`'
+[DISK] after A3b_app_elab_compiling: / free = 7.895 GiB
+
+=== CASE A7b_mutual_deriving (mathlib=False) ===
+[DISK] before A7b_mutual_deriving: / free = 7.895 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",11,"命令不在白名单：Lean.Parser.Command.deriving"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Exec/MutualDerive.lean:11 TOKEN 命令不在白名单：Lean.Parser.Command.deriving' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after A7b_mutual_deriving: / free = 7.894 GiB
+
+=== CASE A7c_omit_instance_needed (mathlib=False) ===
+[DISK] before A7c_omit_instance_needed: / free = 7.894 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",6,"命令不在白名单：Lean.Parser.Command.omit"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Thm/OmitInst.lean:6 TOKEN 命令不在白名单：Lean.Parser.Command.omit' stderr=''
+[DISK] after A7c_omit_instance_needed: / free = 7.894 GiB
+
+=== CASE A7d_deriving_nonempty (mathlib=False) ===
+[DISK] before A7d_deriving_nonempty: / free = 7.894 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=1 stdout='GATE7a RED formal_math/Chan/Exec/DeriveProp.lean:instNonemptyPt NODE_MISSING 定理未登记' stderr=''
+  gate 9: rc=1 stdout='GATE9 RED formal_math/Chan/Exec/DeriveProp.lean:instNonemptyPt WITNESS ChanTest 缺少见证定理 instNonemptyPt.witness' stderr=''
+[DISK] after A7d_deriving_nonempty: / free = 8.303 GiB
+
+=== CASE B3b_gateS_audit_and_class_fp (mathlib=False) ===
+[DISK] before B3b_gateS_audit_and_class_fp: / free = 8.303 GiB
+  build --wfail rc=1
+    build out: ✔ [2/7] Built Chan.Defs.Spec (222ms)
+✔ [4/7] Built Chan (214ms)
+✔ [5/7] Built ChanTest.Probe (214ms)
+✖ [6/7] Building Chan.Audit.Math.Counter (170ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/Chan/Audit/Math/Counter.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/lib/lean/Chan/Audit/Math/Counter.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_
+  gate 2: rc=1 stdout='GATE2 RED formal_math/Chan/Audit/Math/Counter.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令' stderr='Chan/Audit/Math/Counter.lean:4:59: error: failed to synthesize\n  Decidable ¬Concl 0\n\nHint: Additional diagnostic information may be available using the `set_option diagnostics true` command.'
+  gate 3: rc=2 stdout='' stderr='GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Audit/Math/Counter.lean:4:59: error: failed to synthesize\n  Decidable ¬Concl 0\n\nHint: Additional diagnostic information may be available using the `set_option diagnostics true` com'
+  gate S: rc=2 stdout='' stderr='GATES: 无法判定：lake build +Chan:olean +Chan.Audit.Math.Counter:olean +Chan.Defs.Spec:olean +Chan.Thm.UseClass:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [12/12] Buildin'
+[DISK] after B3b_gateS_audit_and_class_fp: / free = 8.302 GiB
+
+=== CASE B4_locked_alias_bypass (mathlib=False) ===
+[DISK] before B4_locked_alias_bypass: / free = 8.302 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 8a: rc=0 stdout='' stderr=''
+  gate 8b: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after B4_locked_alias_bypass: / free = 8.299 GiB
+
+=== CASE C2_g7a_func_pred_ref (mathlib=False) ===
+[DISK] before C2_g7a_func_pred_ref: / free = 8.299 GiB
+  build --wfail rc=0
+  gate 7a: rc=1 stdout='GATE7a RED formal_math/Chan/Defs/FuncPred.lean:BarSeq FREE_PREDICATE 自由判据字段 #[isPivot] 缺少原始数据到判据的精化定理' stderr=''
+[DISK] after C2_g7a_func_pred_ref: / free = 8.299 GiB
+
+=== CASE E3_g8b_real_and_limits (mathlib=False) ===
+[DISK] before E3_g8b_real_and_limits: / free = 8.299 GiB
+  build --wfail rc=1
+    build out: ✖ [2/4] Building Chan.Thm.G8bProbe (265ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/Chan/Thm/G8bProbe.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean/Chan/Thm/G8bProbe.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean/Chan/Thm/G8bProbe.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3
+  gate 8b: rc=2 stdout='' stderr='GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.G8bProbe:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/9] Building Chan.Thm.G8bProbe (151ms)\ntrace: .> LEAN_PATH=/Volum'
+[DISK] after E3_g8b_real_and_limits: / free = 8.298 GiB
+
+=== CASE E4_g9_dep_premise_nec (mathlib=False) ===
+[DISK] before E4_g9_dep_premise_nec: / free = 8.298 GiB
+  build --wfail rc=0
+  gate 9: rc=2 stdout='' stderr='GATE9: 无法判定：无法生成闭见证命题 dep_get.without_1'
+[DISK] after E4_g9_dep_premise_nec: / free = 8.298 GiB
+
+=== CASE A2b_init_exec_on_import (mathlib=False) ===
+[DISK] before A2b_init_exec_on_import: / free = 8.298 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 15: rc=0 stdout='' stderr=''
+[DISK] after A2b_init_exec_on_import: / free = 8.294 GiB
+
+=== CASE D1b_g10_isolated_bypasses (mathlib=False) ===
+[DISK] before D1b_g10_isolated_bypasses: / free = 8.294 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 10: rc=0 stdout='' stderr=''
+[DISK] after D1b_g10_isolated_bypasses: / free = 8.289 GiB
+
+=== CASE A8_mathlib_w3_checks (mathlib=True) ===
+[DISK] before A8_mathlib_w3_checks: / free = 8.289 GiB
+[DISK] before template build mathlib=True: / free = 8.289 GiB
+[DISK] after template build mathlib=True: / free = 8.285 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 10: rc=2 stdout='' stderr='GATE10: 无法判定：AppBuilder for `mkAppM`, too many explicit arguments provided to\n  @Field.toCommRing\narguments\n  #[inst✝¹]'
+[DISK] after A8_mathlib_w3_checks: / free = 8.272 GiB
+
+=== CASE A8b_mathlib_lemma (mathlib=True) ===
+[DISK] before A8b_mathlib_lemma: / free = 8.272 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",4,"命令不在白名单：lemma"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Thm/LemmaTest.lean:4 TOKEN 命令不在白名单：lemma' stderr=''
+[DISK] after A8b_mathlib_lemma: / free = 8.271 GiB

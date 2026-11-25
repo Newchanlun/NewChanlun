@@ -1,0 +1,73 @@
+
+=== CASE A1e_macro_nuclear_fresh (mathlib=False, fresh=True) ===
+[DISK] before A1e_macro_nuclear_fresh: / free = 8.118 GiB
+  build --wfail rc=1
+    build out: ✔ [2/6] Built Chan (265ms)
+✔ [3/6] Built ChanTest.Probe (266ms)
+✔ [4/6] Built Chan.Thm.Helper (815ms)
+✖ [6/6] Building Chan.Thm.Victim (519ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/
+  gate 2: rc=1 stdout='GATE2 RED formal_math/Chan/Thm/Victim.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令' stderr='Chan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown constant `f'
+  gate 3: rc=2 stdout='' stderr='GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:'
+  gate S: rc=2 stdout='' stderr='GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (544ms)\ntrace:'
+  gate 7a: rc=2 stdout='' stderr='GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (545ms)\ntrace'
+  gate 8a: rc=2 stdout='' stderr='GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (549ms)\ntrace'
+  gate 8b: rc=2 stdout='' stderr='GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (508ms)\ntrace'
+  gate 9: rc=2 stdout='' stderr='GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (578ms)\ntrace:'
+  gate 15: rc=2 stdout='' stderr='GATE15: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean'
+[DISK] after A1e_macro_nuclear_fresh: / free = 8.257 GiB
+
+=== CASE D5_g10_mathlib_headI (mathlib=True, fresh=False) ===
+[DISK] before D5_g10_mathlib_headI: / free = 8.257 GiB
+  build --wfail rc=1
+    build out: ✔ [1000/1002] Built Chan (249ms)
+✔ [1001/1002] Built ChanTest.Probe (248ms)
+✖ [1002/1002] Building Chan.Defs.HeadI (1.0s)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:/Volumes/AgentStorage/
+  gate 2: rc=1 stdout='GATE2 RED formal_math/Chan/Defs/HeadI.lean:6 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令' stderr='Chan/Defs/HeadI.lean:6:40: error(lean.invalidField): Invalid field `iget`: The environment does not contain `Option.iget`, so it is not possible to project the field `iget` from an expression\n  o\nof type `Option ℕ`'
+  gate 3: rc=2 stdout='' stderr='GATE3: 无法判定：[true,[["build",6,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Defs/HeadI.lean:6:40: error(lean.invalidField): Invalid field `iget`: The environment does not contain `Option.iget`, so it is not possible to project the field `iget` from an expre'
+  gate 10: rc=2 stdout='' stderr='GATE10: 无法判定：lake build +Chan:olean +Chan.Defs.HeadI:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [1007/1007] Building Chan.Defs.HeadI (755ms)\ntrace: .> LEAN_PATH=/Vol'
+[DISK] after D5_g10_mathlib_headI: / free = 8.026 GiB
+
+=== CASE F_B1_B2_gateS_fresh (mathlib=False, fresh=True) ===
+[DISK] before F_B1_B2_gateS_fresh: / free = 8.026 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 8a: rc=0 stdout='' stderr=''
+  gate 8b: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after F_B1_B2_gateS_fresh: / free = 8.296 GiB
+
+=== CASE F_C1_g7a_vac_fresh (mathlib=False, fresh=True) ===
+[DISK] before F_C1_g7a_vac_fresh: / free = 8.296 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after F_C1_g7a_vac_fresh: / free = 8.293 GiB
+
+=== CASE F_D1_g10_bypass_fresh (mathlib=False, fresh=True) ===
+[DISK] before F_D1_g10_bypass_fresh: / free = 8.293 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 10: rc=0 stdout='' stderr=''
+[DISK] after F_D1_g10_bypass_fresh: / free = 8.292 GiB
+
+=== CASE F_D3_g10_class_crash_fresh (mathlib=False, fresh=True) ===
+[DISK] before F_D3_g10_class_crash_fresh: / free = 8.292 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 10: rc=2 stdout='' stderr='GATE10: 无法判定：AppBuilder for `mkAppM`, too many explicit arguments provided to\n  @Inhabited.default\narguments\n  #[inst✝]'
+[DISK] after F_D3_g10_class_crash_fresh: / free = 8.290 GiB
+
+=== CASE M1_g1_manifest_path ===
+[DISK] before M1: / free = 8.290 GiB
+  gate 1: rc=0 stdout='' stderr=''
+[DISK] after M1: / free = 8.290 GiB

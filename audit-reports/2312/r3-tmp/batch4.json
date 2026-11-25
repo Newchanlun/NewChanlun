@@ -1,0 +1,213 @@
+[
+  {
+    "name": "A1e_macro_nuclear_fresh",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/Chan/Thm/Victim.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令",
+        "stderr": "Chan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown constant `fakeImpl`"
+      },
+      "3": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE3: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown constant `fakeImpl`"
+      },
+      "S": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (544ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "7a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (545ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "8a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (549ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "8b": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (508ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "9": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (578ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "15": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE15: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown constant `fakeImpl`"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✔ [2/6] Built Chan (265ms)\n✔ [3/6] Built ChanTest.Probe (266ms)\n✔ [4/6] Built Chan.Thm.Helper (815ms)\n✖ [6/6] Building Chan.Thm.Victim (519ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1e_macro_nuclear_fresh/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "D5_g10_mathlib_headI",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/Chan/Defs/HeadI.lean:6 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令",
+        "stderr": "Chan/Defs/HeadI.lean:6:40: error(lean.invalidField): Invalid field `iget`: The environment does not contain `Option.iget`, so it is not possible to project the field `iget` from an expression\n  o\nof type `Option ℕ`"
+      },
+      "3": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE3: 无法判定：[true,[[\"build\",6,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Defs/HeadI.lean:6:40: error(lean.invalidField): Invalid field `iget`: The environment does not contain `Option.iget`, so it is not possible to project the field `iget` from an expression\n  o\nof type `Option ℕ`"
+      },
+      "10": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE10: 无法判定：lake build +Chan:olean +Chan.Defs.HeadI:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [1007/1007] Building Chan.Defs.HeadI (755ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/importGraph/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/LeanSearchClient/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/plausible/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/mathlib/.lake/build/lib/lean:/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/Chan/Defs/HeadI.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/lib/lean/Chan/Defs/HeadI.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/lib/lean/Chan/Defs/HeadI.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/ir/Chan/Defs/HeadI.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/ir/Chan/Defs/HeadI.setup.json --json\nerror: Chan/Defs/HeadI.lean:6:40: Invalid field `iget`: The environment does not contain `Option.iget`, so it is not possible to project the field `iget` from an expression\n  o\nof type `Option ℕ`\nSome required targets logged failures:\n- Chan.Defs.HeadI\nerror: build failed"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✔ [1000/1002] Built Chan (249ms)\n✔ [1001/1002] Built ChanTest.Probe (248ms)\n✖ [1002/1002] Building Chan.Defs.HeadI (1.0s)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/importGraph/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/LeanSearchClient/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/plausible/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/mathlib/.lake/build/lib/lean:/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/Chan/Defs/HeadI.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/lib/lean/Chan/Defs/HeadI.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/lib/lean/Chan/Defs/HeadI.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/ir/Chan/Defs/HeadI.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_D5_g10_mathlib_headI/formal_math/.lake/build/ir/Chan/Defs/HeadI.setup.json --json\nerror: Chan/Defs/HeadI.lean:6:40: Invalid field `iget`: The environment does not contain `Option.iget`, so it is not possible to project the field `iget` from an expression\n  o\nof type `Option ℕ`\nSome required targets logged failures:\n- Chan.Defs.HeadI",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "F_B1_B2_gateS_fresh",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "8a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "8b": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/6] Built Chan.Thm.WrapFresh (281ms)\n✔ [3/6] Built Chan (275ms)\n✔ [5/6] Built ChanTest.Probe (274ms)\n✔ [6/6] Built ChanTest.Evidence (188ms)\nBuild completed successfully (6 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "F_C1_g7a_vac_fresh",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Defs.VacFresh (255ms)\n✔ [3/4] Built Chan (248ms)\n✔ [4/4] Built ChanTest.Probe (248ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "F_D1_g10_bypass_fresh",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "10": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Defs.BadDivFresh (283ms)\n✔ [3/4] Built Chan (276ms)\n✔ [4/4] Built ChanTest.Probe (277ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "F_D3_g10_class_crash_fresh",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "10": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE10: 无法判定：AppBuilder for `mkAppM`, too many explicit arguments provided to\n  @Inhabited.default\narguments\n  #[inst✝]"
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan (210ms)\n✔ [3/4] Built ChanTest.Probe (210ms)\n✔ [4/4] Built Chan.Defs.ClassDivFresh (213ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "M1_g1_manifest_path",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  }
+]

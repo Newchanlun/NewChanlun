@@ -1,0 +1,33 @@
+
+=== CASE A1f_macro_nuclear_success (fresh=True) ===
+[DISK] before A1f_macro_nuclear_success: / free = 7.461 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Thm/Victim.lean:hiddenUnsafe ENV_UNSAFE 声明不受内核安全性保证\nGATE3 RED formal_math/Chan/Thm/Victim.lean:hiddenImplBy ENV_IMPLEMENTED_BY 声明具有 implemented_by 属性' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=1 stdout='GATE7a RED formal_math/Chan/Thm/Victim.lean:hiddenVacuous NODE_MISSING 定理未登记' stderr=''
+  gate 8a: rc=0 stdout='' stderr=''
+  gate 8b: rc=0 stdout='' stderr=''
+  gate 9: rc=1 stdout='GATE9 RED formal_math/Chan/Thm/Victim.lean:hiddenVacuous WITNESS ChanTest 缺少见证定理 hiddenVacuous.witness' stderr=''
+  gate 15: rc=0 stdout='' stderr=''
+[DISK] after A1f_macro_nuclear_success: / free = 7.259 GiB
+
+=== CASE D5b_g10_headI_fresh (fresh=True) ===
+[DISK] before D5b_g10_headI_fresh: / free = 7.259 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 10: rc=0 stdout='' stderr=''
+[DISK] after D5b_g10_headI_fresh: / free = 5.815 GiB
+Traceback (most recent call last):
+  File "/Volumes/AgentStorage/fm/tmp/2312-v3-review/run_probes_batch5.py", line 179, in <module>
+    main()
+    ~~~~^^
+  File "/Volumes/AgentStorage/fm/tmp/2312-v3-review/run_probes_batch5.py", line 174, in main
+    res2 = run_fresh("D5b_g10_headI_fresh", headi_files, ["2", "3", "10"])
+  File "/Volumes/AgentStorage/fm/tmp/2312-v3-review/run_probes_batch5.py", line 106, in run_fresh
+    check_disk(f"after {name}")
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/Volumes/AgentStorage/fm/tmp/2312-v3-review/run_probes_batch5.py", line 26, in check_disk
+    raise RuntimeError(f"Root disk free {gib:.3f} GiB < 6 GiB at {tag}; stopping Lean runs!")
+RuntimeError: Root disk free 5.815 GiB < 6 GiB at after D5b_g10_headI_fresh; stopping Lean runs!

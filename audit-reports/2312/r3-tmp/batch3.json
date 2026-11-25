@@ -1,0 +1,207 @@
+[
+  {
+    "name": "A1d_macro_nuclear_bypass",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/Chan/Thm/Victim.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令",
+        "stderr": "Chan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown constant `fakeImpl`"
+      },
+      "3": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE3: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown constant `fakeImpl`"
+      },
+      "S": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (582ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "7a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (469ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "8a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (485ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "8b": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (534ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "9": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (460ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "15": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE15: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown constant `fakeImpl`"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✔ [2/6] Built ChanTest.Probe (216ms)\n✔ [3/6] Built Chan.Thm.Helper (670ms)\n✔ [5/6] Built Chan (670ms)\n✖ [6/6] Building Chan.Thm.Victim (511ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown constant `fakeImpl`\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "B3c_gateS_audit_class_proj_fp",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 1,
+        "stdout": "GATES RED formal_math/Chan/Thm/UseClass.lean:with_pos STATEMENT_FORM 闭命题不能作前提或合取项\nGATES RED formal_math/Chan/Audit/Math/Counter.lean:counterexample STATEMENT_FORM 闭命题不能作前提或合取项",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/7] Built Chan (217ms)\n✔ [3/7] Built ChanTest.Probe (216ms)\n✔ [4/7] Built Chan.Defs.Spec (224ms)\n✔ [6/7] Built Chan.Audit.Math.Counter (173ms)\n✔ [7/7] Built Chan.Thm.UseClass (174ms)\nBuild completed successfully (7 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "B3d_smoke_in_thm_gateS",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 1,
+        "stdout": "GATES RED formal_math/Chan/Thm/SmokeLike.lean:sample_bounds STATEMENT_FORM 闭命题不能作前提或合取项",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.SmokeLike (215ms)\n✔ [3/4] Built Chan (211ms)\n✔ [4/4] Built ChanTest.Probe (210ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A5c_grind_skip_kernel_opt",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.GrindKernel (215ms)\n✔ [3/4] Built Chan (214ms)\n✔ [4/4] Built ChanTest.Probe (214ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "E3b_g8b_real_and_limits",
+    "gates": {
+      "8b": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.G8bProbe (232ms)\n✔ [3/4] Built Chan (226ms)\n✔ [4/4] Built ChanTest.Probe (226ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A4c_guard_msgs_legal_fresh",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",4,\"命令不在白名单：in\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Final/LegalGuard.lean:4 TOKEN 命令不在白名单：in",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Final.LegalGuard (228ms)\n✔ [3/4] Built Chan (228ms)\n✔ [4/4] Built ChanTest.Probe (229ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "D3_g10_typeclass_mkAppM_crash",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "10": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE10: 无法判定：type class instance expected\n  Div (Div α)"
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Defs.ClassDiv (425ms)\n✔ [3/4] Built Chan (421ms)\n✔ [4/4] Built ChanTest.Probe (421ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "D4_g10_any_class_in_scope_crash",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "10": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE10: 无法判定：AppBuilder for `mkAppM`, too many explicit arguments provided to\n  @Inhabited.default\narguments\n  #[inst✝]"
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Defs.ClassScope (284ms)\n✔ [3/4] Built Chan (281ms)\n✔ [4/4] Built ChanTest.Probe (285ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  }
+]

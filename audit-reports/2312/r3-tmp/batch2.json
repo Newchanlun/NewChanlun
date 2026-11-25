@@ -1,0 +1,452 @@
+[
+  {
+    "name": "A1c_macro_full_bypass",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/Chan/Thm/Victim.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令",
+        "stderr": "Chan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier"
+      },
+      "3": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE3: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier"
+      },
+      "S": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (494ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "7a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (519ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "8a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (477ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "8b": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (498ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "9": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (490ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim\nerror: build failed"
+      },
+      "15": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE15: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error(lean.unknownIdentifier): Unknown identifier `α✝`\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier\n\nChan/Thm/Victim.lean:4:0: error: unexpected visibility modifier"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✔ [2/6] Built Chan (252ms)\n✔ [3/6] Built ChanTest.Probe (252ms)\n✔ [4/6] Built Chan.Thm.Helper (817ms)\n✖ [6/6] Building Chan.Thm.Victim (459ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1c_macro_full_bypass/formal_math/.lake/build/ir/Chan/Thm/Victim.setup.json --json\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: Unknown identifier `α✝`\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:4:0: unexpected visibility modifier\nerror: Chan/Thm/Victim.lean:5:20: Unknown identifier `hiddenUnused`\nerror: Chan/Thm/Victim.lean:5:37: Unknown identifier `hiddenAutoImp`\nerror: Chan/Thm/Victim.lean:5:55: Unknown identifier `hiddenPartial`\nerror: Chan/Thm/Victim.lean:5:73: Unknown identifier `hiddenImplBy`\nSome required targets logged failures:\n- Chan.Thm.Victim",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "A4b_guard_msgs_legal_broken",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",4,\"命令不在白名单：in\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Final/LegalGuard.lean:4 TOKEN 命令不在白名单：in",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Final.LegalGuard (237ms)\n✔ [3/4] Built Chan (235ms)\n✔ [4/4] Built ChanTest.Probe (238ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A5a_example_sorryAx",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1",
+        "stderr": "⚠ [4/6] Replaying Chan.Thm.ExSorry\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/Chan/Thm/ExSorry.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean/Chan/Thm/ExSorry.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean/Chan/Thm/ExSorry.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/ir/Chan/Thm/ExSorry.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/ir/Chan/Thm/ExSorry.setup.json --json\nwarning: Chan/Thm/ExSorry.lean:3:0: declaration uses `sorry`\nSome required targets logged failures:\n- Chan.Thm.ExSorry\nerror: build failed"
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "⚠ [2/4] Building Chan.Thm.ExSorry (206ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/Chan/Thm/ExSorry.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean/Chan/Thm/ExSorry.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/lib/lean/Chan/Thm/ExSorry.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/ir/Chan/Thm/ExSorry.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A5a_example_sorryAx/formal_math/.lake/build/ir/Chan/Thm/ExSorry.setup.json --json\nwarning: Chan/Thm/ExSorry.lean:3:0: declaration uses `sorry`\n✔ [3/4] Built Chan (204ms)\n✔ [4/4] Built ChanTest.Probe (204ms)\nSome required targets logged failures:\n- Chan.Thm.ExSorry",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "A5b_grind_set_option",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.GrindOpt (288ms)\n✔ [3/4] Built Chan (278ms)\n✔ [4/4] Built ChanTest.Probe (278ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A3_other_meta_attrs",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/Chan/Thm/MetaAttrs.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令",
+        "stderr": "Chan/Thm/MetaAttrs.lean:5:2: error: Unknown attribute `[app_elaborator]`\n\nChan/Thm/MetaAttrs.lean:6:28: error(lean.unknownIdentifier): Unknown identifier `AppUnexpander`\n\nNote: It is not possible to treat `AppUnexpander` as an implicitly bound variable here because the `autoImplicit` option is set to `false`."
+      },
+      "3": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE3: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/MetaAttrs.lean:5:2: error: Unknown attribute `[app_elaborator]`\n\nChan/Thm/MetaAttrs.lean:6:28: error(lean.unknownIdentifier): Unknown identifier `AppUnexpander`\n\nNote: It is not possible to treat `AppUnexpander` as an implicitly bound variable here because the `autoImplicit` option is set to `false`."
+      }
+    }
+  },
+  {
+    "name": "A3b_app_elab_compiling",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/Chan/Thm/AppElab.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令",
+        "stderr": "Chan/Thm/AppElab.lean:5:2: error: Unknown attribute `[app_elaborator]`"
+      },
+      "3": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE3: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/AppElab.lean:5:2: error: Unknown attribute `[app_elaborator]`"
+      },
+      "15": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE15: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/AppElab.lean:5:2: error: Unknown attribute `[app_elaborator]`"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✔ [2/4] Built Chan (220ms)\n✔ [3/4] Built ChanTest.Probe (221ms)\n✖ [4/4] Building Chan.Thm.AppElab (559ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/Chan/Thm/AppElab.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/.lake/build/lib/lean/Chan/Thm/AppElab.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/.lake/build/lib/lean/Chan/Thm/AppElab.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/.lake/build/ir/Chan/Thm/AppElab.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A3b_app_elab_compiling/formal_math/.lake/build/ir/Chan/Thm/AppElab.setup.json --json\nerror: Chan/Thm/AppElab.lean:5:2: Unknown attribute `[app_elaborator]`\nSome required targets logged failures:\n- Chan.Thm.AppElab",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "A7b_mutual_deriving",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",11,\"命令不在白名单：Lean.Parser.Command.deriving\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Exec/MutualDerive.lean:11 TOKEN 命令不在白名单：Lean.Parser.Command.deriving",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan (205ms)\n✔ [3/4] Built ChanTest.Probe (206ms)\n✔ [4/4] Built Chan.Exec.MutualDerive (235ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7c_omit_instance_needed",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",6,\"命令不在白名单：Lean.Parser.Command.omit\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Thm/OmitInst.lean:6 TOKEN 命令不在白名单：Lean.Parser.Command.omit",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.OmitInst (232ms)\n✔ [3/4] Built Chan (229ms)\n✔ [4/4] Built ChanTest.Probe (230ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7d_deriving_nonempty",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 1,
+        "stdout": "GATE7a RED formal_math/Chan/Exec/DeriveProp.lean:instNonemptyPt NODE_MISSING 定理未登记",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 1,
+        "stdout": "GATE9 RED formal_math/Chan/Exec/DeriveProp.lean:instNonemptyPt WITNESS ChanTest 缺少见证定理 instNonemptyPt.witness",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan (214ms)\n✔ [3/4] Built ChanTest.Probe (214ms)\n✔ [4/4] Built Chan.Exec.DeriveProp (228ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "B3b_gateS_audit_and_class_fp",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/Chan/Audit/Math/Counter.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令",
+        "stderr": "Chan/Audit/Math/Counter.lean:4:59: error: failed to synthesize\n  Decidable ¬Concl 0\n\nHint: Additional diagnostic information may be available using the `set_option diagnostics true` command."
+      },
+      "3": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE3: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Audit/Math/Counter.lean:4:59: error: failed to synthesize\n  Decidable ¬Concl 0\n\nHint: Additional diagnostic information may be available using the `set_option diagnostics true` command."
+      },
+      "S": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATES: 无法判定：lake build +Chan:olean +Chan.Audit.Math.Counter:olean +Chan.Defs.Spec:olean +Chan.Thm.UseClass:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [12/12] Building Chan.Audit.Math.Counter (181ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/Chan/Audit/Math/Counter.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/lib/lean/Chan/Audit/Math/Counter.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/lib/lean/Chan/Audit/Math/Counter.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/ir/Chan/Audit/Math/Counter.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/ir/Chan/Audit/Math/Counter.setup.json --json\nerror: Chan/Audit/Math/Counter.lean:4:59: failed to synthesize\n  Decidable ¬Concl 0\n\nHint: Additional diagnostic information may be available using the `set_option diagnostics true` command.\nSome required targets logged failures:\n- Chan.Audit.Math.Counter\nerror: build failed"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✔ [2/7] Built Chan.Defs.Spec (222ms)\n✔ [4/7] Built Chan (214ms)\n✔ [5/7] Built ChanTest.Probe (214ms)\n✖ [6/7] Building Chan.Audit.Math.Counter (170ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/Chan/Audit/Math/Counter.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/lib/lean/Chan/Audit/Math/Counter.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/lib/lean/Chan/Audit/Math/Counter.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/ir/Chan/Audit/Math/Counter.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_B3b_gateS_audit_and_class_fp/formal_math/.lake/build/ir/Chan/Audit/Math/Counter.setup.json --json\nerror: Chan/Audit/Math/Counter.lean:4:59: failed to synthesize\n  Decidable ¬Concl 0\n\nHint: Additional diagnostic information may be available using the `set_option diagnostics true` command.\n✔ [7/7] Built Chan.Thm.UseClass (174ms)\nSome required targets logged failures:\n- Chan.Audit.Math.Counter",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "B4_locked_alias_bypass",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "8a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "8b": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/8] Built Chan.Defs.Alias (216ms)\n✔ [4/8] Built Chan (214ms)\n✔ [5/8] Built ChanTest.Probe (214ms)\n✔ [6/8] Built Chan.Thm.UseAlias (172ms)\n✔ [8/8] Built ChanTest.Evidence (155ms)\nBuild completed successfully (8 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "C2_g7a_func_pred_ref",
+    "gates": {
+      "7a": {
+        "rc": 1,
+        "stdout": "GATE7a RED formal_math/Chan/Defs/FuncPred.lean:BarSeq FREE_PREDICATE 自由判据字段 #[isPivot] 缺少原始数据到判据的精化定理",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/6] Built Chan.Defs.FuncPred (213ms)\n✔ [3/6] Built Chan (206ms)\n✔ [5/6] Built ChanTest.Probe (207ms)\n✔ [6/6] Built ChanTest.Evidence (156ms)\nBuild completed successfully (6 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "E3_g8b_real_and_limits",
+    "gates": {
+      "8b": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.G8bProbe:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/9] Building Chan.Thm.G8bProbe (151ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/Chan/Thm/G8bProbe.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean/Chan/Thm/G8bProbe.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean/Chan/Thm/G8bProbe.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/ir/Chan/Thm/G8bProbe.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/ir/Chan/Thm/G8bProbe.setup.json --json\nerror: Chan/Thm/G8bProbe.lean:4:59: Type mismatch\n  (?m.17, ?m.18).fst\nhas type\n  ?m.13\nof sort `Type ?u.16` but is expected to have type\n  x + 0 = x\nof sort `Prop`\nerror: Chan/Thm/G8bProbe.lean:5:55: Type mismatch\n  (?m.15, ?m.16).fst\nhas type\n  ?m.17\nof sort `Type ?u.17` but is expected to have type\n  x + 0 = x\nof sort `Prop`\nSome required targets logged failures:\n- Chan.Thm.G8bProbe\nerror: build failed"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✖ [2/4] Building Chan.Thm.G8bProbe (265ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/Chan/Thm/G8bProbe.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean/Chan/Thm/G8bProbe.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/lib/lean/Chan/Thm/G8bProbe.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/ir/Chan/Thm/G8bProbe.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_E3_g8b_real_and_limits/formal_math/.lake/build/ir/Chan/Thm/G8bProbe.setup.json --json\nerror: Chan/Thm/G8bProbe.lean:4:59: Type mismatch\n  (?m.17, ?m.18).fst\nhas type\n  ?m.13\nof sort `Type ?u.16` but is expected to have type\n  x + 0 = x\nof sort `Prop`\nerror: Chan/Thm/G8bProbe.lean:5:55: Type mismatch\n  (?m.15, ?m.16).fst\nhas type\n  ?m.17\nof sort `Type ?u.17` but is expected to have type\n  x + 0 = x\nof sort `Prop`\n✔ [3/4] Built Chan (260ms)\n✔ [4/4] Built ChanTest.Probe (260ms)\nSome required targets logged failures:\n- Chan.Thm.G8bProbe",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "E4_g9_dep_premise_nec",
+    "gates": {
+      "9": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE9: 无法判定：无法生成闭见证命题 dep_get.without_1"
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/6] Built Chan.Thm.DepPrem (284ms)\n✔ [3/6] Built Chan (280ms)\n✔ [5/6] Built ChanTest.Probe (280ms)\n✔ [6/6] Built ChanTest.Evidence (170ms)\nBuild completed successfully (6 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A2b_init_exec_on_import",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "15": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/6] Built Chan (205ms)\n✔ [3/6] Built ChanTest.Probe (205ms)\n✔ [4/6] Built Chan.Thm.InitMod (550ms)\n✔ [6/6] Built Chan.Thm.Importer (487ms)\nBuild completed successfully (6 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "D1b_g10_isolated_bypasses",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "10": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Defs.BadDivClean (212ms)\n✔ [3/4] Built Chan (205ms)\n✔ [4/4] Built ChanTest.Probe (206ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A8_mathlib_w3_checks",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "10": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE10: 无法判定：AppBuilder for `mkAppM`, too many explicit arguments provided to\n  @Field.toCommRing\narguments\n  #[inst✝¹]"
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [1584/1587] Built Chan (255ms)\n✔ [1585/1587] Built ChanTest.Probe (255ms)\n✔ [1586/1587] Built Chan.Thm.MathlibThm (1.8s)\n✔ [1587/1587] Built Chan.Defs.MathlibDefs (1.9s)\nBuild completed successfully (1587 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A8b_mathlib_lemma",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",4,\"命令不在白名单：lemma\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Thm/LemmaTest.lean:4 TOKEN 命令不在白名单：lemma",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [14/16] Built Chan (187ms)\n✔ [15/16] Built ChanTest.Probe (186ms)\n✔ [16/16] Built Chan.Thm.LemmaTest (260ms)\nBuild completed successfully (16 jobs).",
+      "stderr": ""
+    }
+  }
+]

@@ -1,0 +1,70 @@
+
+=== CASE A1d_macro_nuclear_bypass (fresh=True) ===
+[DISK] before A1d_macro_nuclear_bypass: / free = 8.269 GiB
+  build --wfail rc=1
+    build out: ✔ [2/6] Built ChanTest.Probe (216ms)
+✔ [3/6] Built Chan.Thm.Helper (670ms)
+✔ [5/6] Built Chan (670ms)
+✖ [6/6] Building Chan.Thm.Victim (511ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/Chan/Thm/Victim.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Victim.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1d_macro_nuclear_bypass/formal_math/.l
+  gate 2: rc=1 stdout='GATE2 RED formal_math/Chan/Thm/Victim.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令' stderr='Chan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4'
+  gate 3: rc=2 stdout='' stderr='GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; ex'
+  gate S: rc=2 stdout='' stderr='GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (582ms)\ntrace:'
+  gate 7a: rc=2 stdout='' stderr='GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (469ms)\ntrace'
+  gate 8a: rc=2 stdout='' stderr='GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (485ms)\ntrace'
+  gate 8b: rc=2 stdout='' stderr='GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (534ms)\ntrace'
+  gate 9: rc=2 stdout='' stderr='GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [11/11] Building Chan.Thm.Victim (460ms)\ntrace:'
+  gate 15: rc=2 stdout='' stderr='GATE15: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; expected a literal of type `Bool`\n\nChan/Thm/Victim.lean:4:0: error: Unexpected set_option value `<missing>`; e'
+[DISK] after A1d_macro_nuclear_bypass: / free = 8.268 GiB
+
+=== CASE B3c_gateS_audit_class_proj_fp (fresh=False) ===
+[DISK] before B3c_gateS_audit_class_proj_fp: / free = 8.268 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=1 stdout='GATES RED formal_math/Chan/Thm/UseClass.lean:with_pos STATEMENT_FORM 闭命题不能作前提或合取项\nGATES RED formal_math/Chan/Audit/Math/Counter.lean:counterexample STATEMENT_FORM 闭命题不能作前提或合取项' stderr=''
+[DISK] after B3c_gateS_audit_class_proj_fp: / free = 8.267 GiB
+
+=== CASE B3d_smoke_in_thm_gateS (fresh=False) ===
+[DISK] before B3d_smoke_in_thm_gateS: / free = 8.267 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=1 stdout='GATES RED formal_math/Chan/Thm/SmokeLike.lean:sample_bounds STATEMENT_FORM 闭命题不能作前提或合取项' stderr=''
+[DISK] after B3d_smoke_in_thm_gateS: / free = 8.266 GiB
+
+=== CASE A5c_grind_skip_kernel_opt (fresh=False) ===
+[DISK] before A5c_grind_skip_kernel_opt: / free = 8.266 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+[DISK] after A5c_grind_skip_kernel_opt: / free = 8.266 GiB
+
+=== CASE E3b_g8b_real_and_limits (fresh=False) ===
+[DISK] before E3b_g8b_real_and_limits: / free = 8.266 GiB
+  build --wfail rc=0
+  gate 8b: rc=0 stdout='' stderr=''
+[DISK] after E3b_g8b_real_and_limits: / free = 8.266 GiB
+
+=== CASE A4c_guard_msgs_legal_fresh (fresh=True) ===
+[DISK] before A4c_guard_msgs_legal_fresh: / free = 8.266 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",4,"命令不在白名单：in"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Final/LegalGuard.lean:4 TOKEN 命令不在白名单：in' stderr=''
+[DISK] after A4c_guard_msgs_legal_fresh: / free = 8.250 GiB
+
+=== CASE D3_g10_typeclass_mkAppM_crash (fresh=False) ===
+[DISK] before D3_g10_typeclass_mkAppM_crash: / free = 8.250 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 10: rc=2 stdout='' stderr='GATE10: 无法判定：type class instance expected\n  Div (Div α)'
+[DISK] after D3_g10_typeclass_mkAppM_crash: / free = 8.273 GiB
+
+=== CASE D4_g10_any_class_in_scope_crash (fresh=False) ===
+[DISK] before D4_g10_any_class_in_scope_crash: / free = 8.273 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 10: rc=2 stdout='' stderr='GATE10: 无法判定：AppBuilder for `mkAppM`, too many explicit arguments provided to\n  @Inhabited.default\narguments\n  #[inst✝]'
+[DISK] after D4_g10_any_class_in_scope_crash: / free = 8.271 GiB

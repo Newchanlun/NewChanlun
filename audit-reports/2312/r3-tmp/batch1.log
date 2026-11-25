@@ -1,0 +1,187 @@
+
+=== CASE E1_g8a_syllogism_fp (mathlib=False) ===
+[DISK] before E1_g8a_syllogism_fp: / free = 7.503 GiB
+[DISK] before template build mathlib=False: / free = 7.503 GiB
+[DISK] after template build mathlib=False: / free = 7.501 GiB
+  build --wfail rc=0
+  gate 8a: rc=0 stdout='' stderr=''
+[DISK] after E1_g8a_syllogism_fp: / free = 7.500 GiB
+
+=== CASE A1_macro_bypass (mathlib=False) ===
+[DISK] before A1_macro_bypass: / free = 7.500 GiB
+  build --wfail rc=1
+    build out: ✔ [2/6] Built Chan (209ms)
+✔ [3/6] Built ChanTest.Probe (209ms)
+✖ [4/6] Building Chan.Thm.Helper (676ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_m
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",16,"选项不在白名单：[anonymous]"],["3",17,"选项不在白名单：[anonymous]"],["3",18,"源码含禁用语法：Lean.Parser.Command.partial"],["3",19,"源码含禁用语法：Lean.Parser.Command.unsafe"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Thm/Helper.lean:16 TOKEN 选项不在白名单：[anonymous]\nGATE3 RED formal_math/Chan/Thm/Helper.lean:17 TOKEN 选项不在白名单：[anonymous]\nGATE3 RED formal_math/Chan/Thm/Helper.lean:18 TOKEN 源码含禁用语法：Lean.Parser.Command.partial\nGATE3 RE' stderr=''
+  gate S: rc=2 stdout='' stderr='GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] '
+  gate 7a: rc=2 stdout='' stderr='GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11]'
+  gate 8a: rc=2 stdout='' stderr='GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11]'
+  gate 8b: rc=2 stdout='' stderr='GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11]'
+  gate 9: rc=2 stdout='' stderr='GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] '
+  gate 15: rc=2 stdout='' stderr='GATE15: 无法判定：[false,[["3",16,"选项不在白名单：[anonymous]"],["3",17,"选项不在白名单：[anonymous]"],["3",18,"源码含禁用语法：Lean.Parser.Command.partial"],["3",19,"源码含禁用语法：Lean.Parser.Command.unsafe"]]]'
+[DISK] after A1_macro_bypass: / free = 7.487 GiB
+
+=== CASE A1b_macro_clean_syntax (mathlib=False) ===
+[DISK] before A1b_macro_clean_syntax: / free = 7.487 GiB
+  build --wfail rc=1
+    build out: ✔ [2/6] Built Chan (259ms)
+✔ [3/6] Built ChanTest.Probe (259ms)
+✖ [4/6] Building Chan.Thm.Helper (708ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-re
+  gate 2: rc=1 stdout='GATE2 RED formal_math/Chan/Thm/Helper.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令' stderr='Chan/Thm/Helper.lean:23:81: error(lean.synthInstanceFailed): failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures c'
+  gate 3: rc=2 stdout='' stderr='GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/Helper.lean:23:81: error(lean.synthInstanceFailed): failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 '
+  gate S: rc=2 stdout='' stderr='GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] '
+  gate 7a: rc=2 stdout='' stderr='GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11]'
+  gate 8a: rc=2 stdout='' stderr='GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11]'
+  gate 8b: rc=2 stdout='' stderr='GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11]'
+  gate 9: rc=2 stdout='' stderr='GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] '
+  gate 15: rc=2 stdout='' stderr='GATE15: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]\nChan/Thm/Helper.lean:23:81: error(lean.synthInstanceFailed): failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220'
+[DISK] after A1b_macro_clean_syntax: / free = 7.503 GiB
+
+=== CASE A2_init_attr (mathlib=False) ===
+[DISK] before A2_init_attr: / free = 7.503 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 15: rc=0 stdout='' stderr=''
+[DISK] after A2_init_attr: / free = 7.494 GiB
+
+=== CASE A4_guard_msgs_index (mathlib=False) ===
+[DISK] before A4_guard_msgs_index: / free = 7.494 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",3,"命令不在白名单：in"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Final/GuardProbe.lean:3 TOKEN 命令不在白名单：in' stderr=''
+[DISK] after A4_guard_msgs_index: / free = 7.480 GiB
+
+=== CASE A7_legal_w3_omit (mathlib=False) ===
+[DISK] before A7_legal_w3_omit: / free = 7.480 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",7,"命令不在白名单：Lean.Parser.Command.omit"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Thm/OmitTest.lean:7 TOKEN 命令不在白名单：Lean.Parser.Command.omit' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+[DISK] after A7_legal_w3_omit: / free = 7.491 GiB
+
+=== CASE A7_legal_w3_noncomputable_section (mathlib=False) ===
+[DISK] before A7_legal_w3_noncomputable_section: / free = 7.491 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+[DISK] after A7_legal_w3_noncomputable_section: / free = 7.482 GiB
+
+=== CASE A7_legal_w3_open_scoped_and_attr (mathlib=False) ===
+[DISK] before A7_legal_w3_open_scoped_and_attr: / free = 7.482 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",9,"命令不在白名单：Lean.Parser.Command.attribute"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Thm/ScopedTest.lean:9 TOKEN 命令不在白名单：Lean.Parser.Command.attribute' stderr=''
+[DISK] after A7_legal_w3_open_scoped_and_attr: / free = 7.482 GiB
+
+=== CASE A7_legal_w3_open_scoped_only (mathlib=False) ===
+[DISK] before A7_legal_w3_open_scoped_only: / free = 7.482 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+[DISK] after A7_legal_w3_open_scoped_only: / free = 7.482 GiB
+
+=== CASE A7_legal_w3_named_expose_section (mathlib=False) ===
+[DISK] before A7_legal_w3_named_expose_section: / free = 7.482 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 15: rc=0 stdout='' stderr=''
+[DISK] after A7_legal_w3_named_expose_section: / free = 7.485 GiB
+
+=== CASE A7_legal_w3_struct_extends (mathlib=False) ===
+[DISK] before A7_legal_w3_struct_extends: / free = 7.485 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after A7_legal_w3_struct_extends: / free = 7.487 GiB
+
+=== CASE A7_legal_w3_default_prop_field (mathlib=False) ===
+[DISK] before A7_legal_w3_default_prop_field: / free = 7.487 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after A7_legal_w3_default_prop_field: / free = 7.488 GiB
+
+=== CASE A7_legal_w3_tactic_var (mathlib=False) ===
+[DISK] before A7_legal_w3_tactic_var: / free = 7.488 GiB
+  build --wfail rc=0
+  gate 2: rc=2 stdout='' stderr='GATE2: 无法判定：[false,[["3",3,"源码含禁用语法：ident"],["3",3,"源码含禁用语法：ident"]]]'
+  gate 3: rc=1 stdout='GATE3 RED formal_math/Chan/Thm/TacVar.lean:3 TOKEN 源码含禁用语法：ident\nGATE3 RED formal_math/Chan/Thm/TacVar.lean:3 TOKEN 源码含禁用语法：ident' stderr=''
+[DISK] after A7_legal_w3_tactic_var: / free = 7.486 GiB
+
+=== CASE B1_gateS_connective_bypasses (mathlib=False) ===
+[DISK] before B1_gateS_connective_bypasses: / free = 7.486 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 8a: rc=0 stdout='' stderr=''
+  gate 8b: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after B1_gateS_connective_bypasses: / free = 7.489 GiB
+
+=== CASE B2_gateS_atom_wrappers (mathlib=False) ===
+[DISK] before B2_gateS_atom_wrappers: / free = 7.489 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 8a: rc=0 stdout='' stderr=''
+  gate 8b: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after B2_gateS_atom_wrappers: / free = 7.488 GiB
+
+=== CASE B3_gateS_false_positives (mathlib=False) ===
+[DISK] before B3_gateS_false_positives: / free = 7.488 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=1 stdout='GATES RED formal_math/Chan/Thm/Normal.lean:use_named_hyp STATEMENT_FORM 闭命题不能作前提或合取项\nGATES RED formal_math/Chan/Thm/Normal.lean:use_inline_hyp STATEMENT_FORM 闭命题不能作前提或合取项\nGATES RED formal_math/Chan/Hypotheses/Market.lean:GlobalMarket.pos ST' stderr=''
+[DISK] after B3_gateS_false_positives: / free = 7.487 GiB
+
+=== CASE C1_g7a_vacuous_subtype_bypass (mathlib=False) ===
+[DISK] before C1_g7a_vacuous_subtype_bypass: / free = 7.487 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate S: rc=0 stdout='' stderr=''
+  gate 7a: rc=0 stdout='' stderr=''
+  gate 9: rc=0 stdout='' stderr=''
+[DISK] after C1_g7a_vacuous_subtype_bypass: / free = 7.475 GiB
+
+=== CASE D1_g10_bypasses (mathlib=False) ===
+[DISK] before D1_g10_bypasses: / free = 7.475 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 10: rc=1 stdout='GATE10 RED formal_math/Chan/Defs/BadDiv.lean:fakeOneInt SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/BadDiv.lean:fakeOneRat SIGNOFF_MISSING Rat.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/BadDiv.lean:fakeZer' stderr=''
+[DISK] after D1_g10_bypasses: / free = 7.492 GiB
+
+=== CASE D2_g10_legal_guards (mathlib=False) ===
+[DISK] before D2_g10_legal_guards: / free = 7.492 GiB
+  build --wfail rc=0
+  gate 2: rc=0 stdout='' stderr=''
+  gate 3: rc=0 stdout='' stderr=''
+  gate 10: rc=1 stdout='GATE10 RED formal_math/Chan/Defs/GoodDiv.lean:invGuarded SIGNOFF_MISSING Inv.inv 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/GoodDiv.lean:negInt SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处' stderr=''
+[DISK] after D2_g10_legal_guards: / free = 7.518 GiB
+
+=== CASE E2_g7b_hyp_helper (mathlib=False) ===
+[DISK] before E2_g7b_hyp_helper: / free = 7.518 GiB
+  build --wfail rc=0
+  gate 7b: rc=2 stdout='' stderr='GATE7b: 无法判定：未获准展开的依赖 PullbackInd 隐藏了具体定义'
+[DISK] after E2_g7b_hyp_helper: / free = 7.517 GiB
+
+init_pwned.txt exists = False

@@ -1,0 +1,577 @@
+[
+  {
+    "name": "E1_g8a_syllogism_fp",
+    "gates": {
+      "8a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.Legit (233ms)\n✔ [3/4] Built Chan (228ms)\n✔ [4/4] Built ChanTest.Probe (231ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A1_macro_bypass",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",16,\"选项不在白名单：[anonymous]\"],[\"3\",17,\"选项不在白名单：[anonymous]\"],[\"3\",18,\"源码含禁用语法：Lean.Parser.Command.partial\"],[\"3\",19,\"源码含禁用语法：Lean.Parser.Command.unsafe\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Thm/Helper.lean:16 TOKEN 选项不在白名单：[anonymous]\nGATE3 RED formal_math/Chan/Thm/Helper.lean:17 TOKEN 选项不在白名单：[anonymous]\nGATE3 RED formal_math/Chan/Thm/Helper.lean:18 TOKEN 源码含禁用语法：Lean.Parser.Command.partial\nGATE3 RED formal_math/Chan/Thm/Helper.lean:19 TOKEN 源码含禁用语法：Lean.Parser.Command.unsafe",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (559ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:16:33: Application type mismatch: The argument\n  f\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  f.raw\nerror: Chan/Thm/Helper.lean:17:33: Application type mismatch: The argument\n  t\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  t.raw\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "7a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (568ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:16:33: Application type mismatch: The argument\n  f\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  f.raw\nerror: Chan/Thm/Helper.lean:17:33: Application type mismatch: The argument\n  t\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  t.raw\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "8a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (564ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:16:33: Application type mismatch: The argument\n  f\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  f.raw\nerror: Chan/Thm/Helper.lean:17:33: Application type mismatch: The argument\n  t\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  t.raw\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "8b": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (577ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:16:33: Application type mismatch: The argument\n  f\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  f.raw\nerror: Chan/Thm/Helper.lean:17:33: Application type mismatch: The argument\n  t\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  t.raw\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "9": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (544ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:16:33: Application type mismatch: The argument\n  f\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  f.raw\nerror: Chan/Thm/Helper.lean:17:33: Application type mismatch: The argument\n  t\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  t.raw\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "15": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE15: 无法判定：[false,[[\"3\",16,\"选项不在白名单：[anonymous]\"],[\"3\",17,\"选项不在白名单：[anonymous]\"],[\"3\",18,\"源码含禁用语法：Lean.Parser.Command.partial\"],[\"3\",19,\"源码含禁用语法：Lean.Parser.Command.unsafe\"]]]"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✔ [2/6] Built Chan (209ms)\n✔ [3/6] Built ChanTest.Probe (209ms)\n✖ [4/6] Building Chan.Thm.Helper (676ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1_macro_bypass/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:16:33: Application type mismatch: The argument\n  f\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  f.raw\nerror: Chan/Thm/Helper.lean:17:33: Application type mismatch: The argument\n  t\nhas type\n  Ident\nbut is expected to have type\n  TSyntax [`str, `num]\nin the application\n  t.raw\nSome required targets logged failures:\n- Chan.Thm.Helper",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "A1b_macro_clean_syntax",
+    "gates": {
+      "2": {
+        "rc": 1,
+        "stdout": "GATE2 RED formal_math/Chan/Thm/Helper.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令",
+        "stderr": "Chan/Thm/Helper.lean:23:81: error(lean.synthInstanceFailed): failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\n\nChan/Thm/Helper.lean:23:81: error: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1"
+      },
+      "3": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE3: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/Helper.lean:23:81: error(lean.synthInstanceFailed): failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\n\nChan/Thm/Helper.lean:23:81: error: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1"
+      },
+      "S": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATES: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (516ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:23:81: failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\nerror: Chan/Thm/Helper.lean:23:81: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "7a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE7a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (600ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:23:81: failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\nerror: Chan/Thm/Helper.lean:23:81: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "8a": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (553ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:23:81: failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\nerror: Chan/Thm/Helper.lean:23:81: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "8b": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE8b: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (511ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:23:81: failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\nerror: Chan/Thm/Helper.lean:23:81: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "9": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Helper:olean +Chan.Thm.Victim:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean +verification.SourceGates:olean: ✖ [9/11] Building Chan.Thm.Helper (577ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:23:81: failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\nerror: Chan/Thm/Helper.lean:23:81: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1\nSome required targets logged failures:\n- Chan.Thm.Helper\nerror: build failed"
+      },
+      "15": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE15: 无法判定：[false,[[\"build\",4,\"语法已解析，Lean 拒绝精化该命令\"]]]\nChan/Thm/Helper.lean:23:81: error(lean.synthInstanceFailed): failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\n\nChan/Thm/Helper.lean:23:81: error: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1"
+      }
+    },
+    "build_wfail": {
+      "rc": 1,
+      "stdout": "✔ [2/6] Built Chan (259ms)\n✔ [3/6] Built ChanTest.Probe (259ms)\n✖ [4/6] Building Chan.Thm.Helper (708ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/Chan/Thm/Helper.lean -o /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.olean -i /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/lib/lean/Chan/Thm/Helper.ilean -c /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.c --setup /Volumes/AgentStorage/fm/tmp/2312-v3-review/scratch/run_A1b_macro_clean_syntax/formal_math/.lake/build/ir/Chan/Thm/Helper.setup.json --json\nerror: Chan/Thm/Helper.lean:23:81: failed to synthesize instance of type class\n  GetElem (TSyntax `command) Nat ?m.220 ?m.221\n\nHint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.\nerror: Chan/Thm/Helper.lean:23:81: failed to prove index is valid, possible solutions:\n  - Use `have`-expressions to prove the index is valid\n  - Use `a[i]!` notation instead, runtime check is performed, and 'Panic' error message is produced if index is not valid\n  - Use `a[i]?` notation instead, result is an `Option` type\n  - Use `a[i]'h` notation instead, where `h` is a proof that index is valid\nx✝ : Syntax\nmkA : String → Syntax := fun s => Syntax.atom SourceInfo.none s\nopt : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.set_option\n    #[mkA (\"set_\" ++ \"option\"), (mkIdent `linter.unusedVariables).raw, (mkIdent `false).raw]\ndefCmd : TSyntax `command\ninCmd : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.in #[opt, mkA \"in\", defCmd.raw]\nvacCmd : TSyntax `command\npartMod : Syntax := Syntax.node SourceInfo.none `Lean.Parser.Command.partial #[mkA (\"par\" ++ \"tial\")]\ndeclMods : Syntax :=\n  Syntax.node SourceInfo.none `Lean.Parser.Command.declModifiers\n    #[mkNullNode, mkNullNode, mkNullNode #[Syntax.node SourceInfo.none `Lean.Parser.Command.visibility #[mkA \"public\"]],\n      mkNullNode, mkNullNode, mkNullNode #[partMod], mkNullNode]\npartDef : TSyntax `command\n⊢ ?m.285 x✝ __r✝⁷ __r✝⁶ defCmd __r✝⁵ __r✝⁴ vacCmd __r✝³ __r✝² __r✝¹ partDef __r✝ partDef 1\nSome required targets logged failures:\n- Chan.Thm.Helper",
+      "stderr": "error: build failed"
+    }
+  },
+  {
+    "name": "A2_init_attr",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "15": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.InitProbe (245ms)\n✔ [3/4] Built Chan (239ms)\n✔ [4/4] Built ChanTest.Probe (239ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A4_guard_msgs_index",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",3,\"命令不在白名单：in\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Final/GuardProbe.lean:3 TOKEN 命令不在白名单：in",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Final.GuardProbe (229ms)\n✔ [3/4] Built Chan (225ms)\n✔ [4/4] Built ChanTest.Probe (225ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7_legal_w3_omit",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",7,\"命令不在白名单：Lean.Parser.Command.omit\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Thm/OmitTest.lean:7 TOKEN 命令不在白名单：Lean.Parser.Command.omit",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.OmitTest (230ms)\n✔ [3/4] Built Chan (229ms)\n✔ [4/4] Built ChanTest.Probe (231ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7_legal_w3_noncomputable_section",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.NoncompSec (205ms)\n✔ [3/4] Built Chan (205ms)\n✔ [4/4] Built ChanTest.Probe (206ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7_legal_w3_open_scoped_and_attr",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",9,\"命令不在白名单：Lean.Parser.Command.attribute\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Thm/ScopedTest.lean:9 TOKEN 命令不在白名单：Lean.Parser.Command.attribute",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.ScopedTest (223ms)\n✔ [3/4] Built Chan (218ms)\n✔ [4/4] Built ChanTest.Probe (219ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7_legal_w3_open_scoped_only",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.ScopedOnly (203ms)\n✔ [3/4] Built Chan (201ms)\n✔ [4/4] Built ChanTest.Probe (201ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7_legal_w3_named_expose_section",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "15": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Defs.NamedExpose (232ms)\n✔ [3/4] Built Chan (231ms)\n✔ [4/4] Built ChanTest.Probe (231ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7_legal_w3_struct_extends",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Exec.Extends (244ms)\n✔ [3/4] Built Chan (232ms)\n✔ [4/4] Built ChanTest.Probe (234ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7_legal_w3_default_prop_field",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Exec.DefProp (241ms)\n✔ [3/4] Built Chan (236ms)\n✔ [4/4] Built ChanTest.Probe (237ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "A7_legal_w3_tactic_var",
+    "gates": {
+      "2": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE2: 无法判定：[false,[[\"3\",3,\"源码含禁用语法：ident\"],[\"3\",3,\"源码含禁用语法：ident\"]]]"
+      },
+      "3": {
+        "rc": 1,
+        "stdout": "GATE3 RED formal_math/Chan/Thm/TacVar.lean:3 TOKEN 源码含禁用语法：ident\nGATE3 RED formal_math/Chan/Thm/TacVar.lean:3 TOKEN 源码含禁用语法：ident",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Thm.TacVar (238ms)\n✔ [3/4] Built Chan (236ms)\n✔ [4/4] Built ChanTest.Probe (237ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "B1_gateS_connective_bypasses",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "8a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "8b": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/6] Built Chan.Thm.Wrap (242ms)\n✔ [3/6] Built Chan (235ms)\n✔ [5/6] Built ChanTest.Probe (235ms)\n✔ [6/6] Built ChanTest.Evidence (164ms)\nBuild completed successfully (6 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "B2_gateS_atom_wrappers",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "8a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "8b": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/6] Built Chan.Thm.AtomWrap (258ms)\n✔ [3/6] Built Chan (243ms)\n✔ [5/6] Built ChanTest.Probe (244ms)\n✔ [6/6] Built ChanTest.Evidence (163ms)\nBuild completed successfully (6 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "B3_gateS_false_positives",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 1,
+        "stdout": "GATES RED formal_math/Chan/Thm/Normal.lean:use_named_hyp STATEMENT_FORM 闭命题不能作前提或合取项\nGATES RED formal_math/Chan/Thm/Normal.lean:use_inline_hyp STATEMENT_FORM 闭命题不能作前提或合取项\nGATES RED formal_math/Chan/Hypotheses/Market.lean:GlobalMarket.pos STATEMENT_FORM 闭命题不能作前提或合取项\nGATES RED formal_math/Chan/Thm/Normal.lean:concrete_conj STATEMENT_FORM 闭命题不能作前提或合取项",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/8] Built Chan.Defs.Model (231ms)\n✔ [4/8] Built Chan (228ms)\n✔ [5/8] Built ChanTest.Probe (229ms)\n✔ [6/8] Built Chan.Hypotheses.Market (175ms)\n✔ [8/8] Built Chan.Thm.Normal (162ms)\nBuild completed successfully (8 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "C1_g7a_vacuous_subtype_bypass",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "S": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "7a": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "9": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan (212ms)\n✔ [3/4] Built ChanTest.Probe (213ms)\n✔ [4/4] Built Chan.Defs.VacStruct (226ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "D1_g10_bypasses",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "10": {
+        "rc": 1,
+        "stdout": "GATE10 RED formal_math/Chan/Defs/BadDiv.lean:fakeOneInt SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/BadDiv.lean:fakeOneRat SIGNOFF_MISSING Rat.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/BadDiv.lean:fakeZeroGuard SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Defs.BadDiv (246ms)\n✔ [3/4] Built Chan (237ms)\n✔ [4/4] Built ChanTest.Probe (236ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "D2_g10_legal_guards",
+    "gates": {
+      "2": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "3": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "10": {
+        "rc": 1,
+        "stdout": "GATE10 RED formal_math/Chan/Defs/GoodDiv.lean:invGuarded SIGNOFF_MISSING Inv.inv 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/GoodDiv.lean:negInt SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处",
+        "stderr": ""
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/4] Built Chan.Defs.GoodDiv (234ms)\n✔ [3/4] Built Chan (229ms)\n✔ [4/4] Built ChanTest.Probe (229ms)\nBuild completed successfully (4 jobs).",
+      "stderr": ""
+    }
+  },
+  {
+    "name": "E2_g7b_hyp_helper",
+    "gates": {
+      "7b": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "GATE7b: 无法判定：未获准展开的依赖 PullbackInd 隐藏了具体定义"
+      }
+    },
+    "build_wfail": {
+      "rc": 0,
+      "stdout": "✔ [2/8] Built Chan.Defs.Fixture (217ms)\n✔ [4/8] Built Chan (216ms)\n✔ [5/8] Built ChanTest.Probe (219ms)\n✔ [6/8] Built Chan.Hypotheses.Fixture (181ms)\n✔ [8/8] Built Chan.Thm.Fixture (168ms)\nBuild completed successfully (8 jobs).",
+      "stderr": ""
+    }
+  }
+]
