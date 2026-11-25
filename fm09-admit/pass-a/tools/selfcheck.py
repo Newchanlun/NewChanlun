@@ -8,7 +8,16 @@ KEYS = ['id', 'lesson', 'line', 'quote_spans', 'author_spans', 'verdict',
         'nonauthor_kind', 'reason', 'author_text_sha256']
 KINDS = {'none', 'editor_note', 'quoted_other', 'reader', 'non_body', 'not_found'}
 err = []
-rows = [json.loads(l) for l in open(OUT, encoding='utf-8')]
+from common import BLOG, LEDGER
+# 语料指纹：按文件名排序逐个 `sha256sum` 行（"<hex>  <name>\n"）拼接后再取 sha256
+fp = hashlib.sha256(''.join(
+    hashlib.sha256(open(os.path.join(BLOG, f), 'rb').read()).hexdigest() + '  ' + f + '\n'
+    for f in sorted(os.listdir(BLOG))).encode()).hexdigest()
+if fp != 'b6a35574ed6db3625da6d18f4e11c8976874ba66b0e888362e1769483f0c0a0d':
+    err.append(f'语料指纹不符 {fp}')
+if sum(1 for l in open(LEDGER, encoding='utf-8') if l.strip()) != 1604:
+    err.append('台账行数不是 1604')
+rows =[json.loads(l) for l in open(OUT, encoding='utf-8')]
 E = entries()
 if len(rows) != 790:
     err.append(f'行数 {len(rows)} != 790')
