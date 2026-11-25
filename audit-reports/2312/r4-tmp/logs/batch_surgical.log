@@ -1,0 +1,127 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    15Gi   6.6Gi    71%    459k   69M    1%   /
+[DISK] before P0_zero_import_io_rce_in_audit: / free = 6.599 GiB
+=== P0_zero_import_io_rce_in_audit ===
+  [fm_audit_source_only_before_build] rc=0
+    STDOUT: [false,[]]
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Thm.ZeroImportRCE (189ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+  SENTINELS: {'/Volumes/AgentStorage/fm/tmp/2312-d-review/sentinel_zero_import_rce.txt': 'ZERO_IMPORT_IO_EXECUTED_IN_AUDIT'}
+[DISK] after P0_zero_import_io_rce_in_audit: / free = 6.424 GiB
+[DISK] before P7b2_env_ctoridx_spoof_fixed: / free = 6.424 GiB
+=== P7b2_env_ctoridx_spoof_fixed ===
+  [env_build] rc=0
+    STDOUT: ✔ [3/3] Built Chan.Thm.SpoofCtorIdx (184ms)
+Build completed successfully (3 jobs).
+  [fm_audit_3_env] rc=0
+[DISK] after P7b2_env_ctoridx_spoof_fixed: / free = 6.422 GiB
+[DISK] before P7a2_env_deriving_spoof_clean: / free = 6.422 GiB
+=== P7a2_env_deriving_spoof_clean ===
+  [env_build] rc=0
+    STDOUT: ✔ [3/3] Built Chan.Thm.SpoofDeriveClean (212ms)
+Build completed successfully (3 jobs).
+  [fm_audit_3_env] rc=0
+[DISK] after P7a2_env_deriving_spoof_clean: / free = 6.420 GiB
+[DISK] before P5b_guard_msgs_clean_swallow: / free = 6.420 GiB
+=== P5b_guard_msgs_clean_swallow ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/4] Built Chan.Thm.Dep (188ms)
+✔ [4/4] Built Chan.Final.GuardSwallow (175ms)
+Build completed successfully (4 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=1
+    STDOUT: GATE3 RED formal_math/Chan/Final/GuardSwallow.lean:instReprPairTag.repr ENV_SORRY 闭包包含禁用公理 sorryAx
+GATE3 RED formal_math/Chan/Final/GuardSwallow.lean:instReprPairTag ENV_SORRY 闭包包含禁用公理 sorryAx
+  [gate_15] rc=0
+[DISK] after P5b_guard_msgs_clean_swallow: / free = 6.376 GiB
+[DISK] before P6c_lakefile_pkg_leanOptions_bypass: / free = 6.376 GiB
+=== P6c_lakefile_pkg_leanOptions_bypass ===
+  [gate_2] rc=0
+  [gate_3] rc=0
+[DISK] after P6c_lakefile_pkg_leanOptions_bypass: / free = 6.379 GiB
+[DISK] before P2b_sudo_set_option_clean: / free = 6.379 GiB
+=== P2b_sudo_set_option_clean ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [193/193] Built Chan.Thm.SudoClean (626ms)
+Build completed successfully (193 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after P2b_sudo_set_option_clean: / free = 6.361 GiB
+[DISK] before P1d_sudo_by_elab_io_audit: / free = 6.361 GiB
+=== P1d_sudo_by_elab_io_audit ===
+  [fm_audit_source_only_before_build] rc=0
+    STDOUT: [false,[]]
+  [build_wfail] rc=0
+    STDOUT: ✔ [195/195] Built Chan.Thm.SudoByElab (374ms)
+Build completed successfully (195 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+  SENTINELS: {'/Volumes/AgentStorage/fm/tmp/2312-d-review/sentinel_sudo_by_elab_pwned.txt': 'SUDO_BY_ELAB_EXECUTED_IN_AUDIT'}
+[DISK] after P1d_sudo_by_elab_io_audit: / free = 6.592 GiB
+[DISK] before P3d_mathlib_trace_and_siffwm_eval: / free = 6.592 GiB
+=== P3d_mathlib_trace_and_siffwm_eval ===
+  [build_wfail] rc=1
+    STDOUT: ⚠ [195/195] Building Chan.Thm.TraceEval (381ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/importGraph/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/LeanS
+    STDERR: error: build failed
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    STDERR: ⚠ [195/199] Replaying Chan.Thm.TraceEval
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/importGraph/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/LeanSearchCl
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after P3d_mathlib_trace_and_siffwm_eval: / free = 6.179 GiB
+[DISK] before W1e_ns_param_deriving_visitNamespace: / free = 6.179 GiB
+=== W1e_ns_param_deriving_visitNamespace ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Exec.NsParamDerive (205ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after W1e_ns_param_deriving_visitNamespace: / free = 6.172 GiB
+[DISK] before W2_comprehensive_w3_proof: / free = 6.171 GiB
+=== W2_comprehensive_w3_proof ===
+  [build_wfail] rc=1
+    STDOUT: ✔ [1978/1980] Built Chan.Defs.Model (2.3s)
+✖ [1980/1980] Building Chan.Thm.W3Proofs (1.0s)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/importGraph/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-
+    STDERR: error: build failed
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/Chan/Thm/W3Proofs.lean:72 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令
+    STDERR: Chan/Thm/W3Proofs.lean:75:15: error: omega could not prove the goal:
+a possible counterexample may satisfy the constraints
+  b ≥ 0
+  a ≥ 0
+  0 ≤ a + b ≤ 2
+where
+ a := ↑x
+ b := ↑y
+  [gate_3] rc=2
+    STDERR: GATE3: 无法判定：[false,[["build",72,"语法已解析，Lean 拒绝精化该命令"]]]
+Chan/Thm/W3Proofs.lean:75:15: error: omega could not prove the goal:
+a possible counterexample may satisfy the constraints
+  b ≥ 0
+  a ≥ 0
+  0 ≤ a + b ≤ 2
+where
+ a := ↑x
+ b := ↑y
+  [gate_15] rc=2
+    STDERR: GATE15: 无法判定：[false,[["build",72,"语法已解析，Lean 拒绝精化该命令"]]]
+Chan/Thm/W3Proofs.lean:75:15: error: omega could not prove the goal:
+a possible counterexample may satisfy the constraints
+  b ≥ 0
+  a ≥ 0
+  0 ≤ a + b ≤ 2
+where
+ a := ↑x
+ b := ↑y
+[DISK] after W2_comprehensive_w3_proof: / free = 5.901 GiB
+STOP_DISK_LOW: / free = 5.901 GiB < 6.000 GiB at after W2_comprehensive_w3_proof

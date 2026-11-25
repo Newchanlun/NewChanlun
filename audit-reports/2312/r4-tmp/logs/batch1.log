@@ -1,0 +1,175 @@
+[DISK] before warm_build: / free = 6.381 GiB
+[DISK] after warm_build: / free = 6.375 GiB
+[DISK] before P1a_by_elab_io_audit: / free = 6.375 GiB
+[DISK] after P1a_by_elab_io_audit: / free = 6.364 GiB
+=== P1a_by_elab_io_audit ===
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/Chan/Thm/ByElabPwn.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令
+    STDERR: Chan/Thm/ByElabPwn.lean:4:17: error: Invalid `meta` definition `_tmp✝`, `Lean.Elab.Term.instMonadTermElabM` is not accessible here; consider adding `public meta import Lean.Elab.Term.TermElabM`
+  [gate_3] rc=2
+    STDERR: GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]
+Chan/Thm/ByElabPwn.lean:4:17: error: Invalid `meta` definition `_tmp✝`, `Lean.Elab.Term.instMonadTermElabM` is not accessible here; consider adding `public meta import Lean.Elab.Term.TermElabM`
+  [gate_15] rc=2
+    STDERR: GATE15: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]
+Chan/Thm/ByElabPwn.lean:4:17: error: Invalid `meta` definition `_tmp✝`, `Lean.Elab.Term.instMonadTermElabM` is not accessible here; consider adding `public meta import Lean.Elab.Term.TermElabM`
+  [build_wfail_after] rc=1
+    STDOUT: ✖ [5/5] Building Chan.Thm.ByElabPwn (213ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:
+    STDERR: error: build failed
+  SENTINELS: {'/Volumes/AgentStorage/fm/tmp/2312-d-review/sentinel_by_elab_pwned.txt': None}
+[DISK] before P1b_by_elab_options_and_unused: / free = 6.364 GiB
+[DISK] after P1b_by_elab_options_and_unused: / free = 6.372 GiB
+=== P1b_by_elab_options_and_unused ===
+  [build_wfail] rc=1
+    STDOUT: ✖ [5/5] Building Chan.Thm.ByElabOpt (209ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:
+    STDERR: error: build failed
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/Chan/Thm/ByElabOpt.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令
+    STDERR: Chan/Thm/ByElabOpt.lean:6:60: error: Application type mismatch: The argument
+  Lean.mkArrow (Lean.mkConst `Nat) (Lean.mkConst `Nat)
+has type
+  Lean.CoreM Lean.Expr
+but is expected to have type
+  Lean.Expr
+in the application
+  some (Lean.mkArrow (Lean.mkConst `Nat) (Lean.mkConst `Nat))
+
+Chan/Thm/ByElabOpt.lean:4:33: error: Invalid `meta` definition `_tmp✝`, `Lean.Elab.Term.instMonadMacroAdapterTermElabM` is not accessible here; consider adding `public meta import Lean.Elab.Term.TermElabM`
+  [gate_3] rc=2
+    STDERR: GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]
+Chan/Thm/ByElabOpt.lean:6:60: error: Application type mismatch: The argument
+  Lean.mkArrow (Lean.mkConst `Nat) (Lean.mkConst `Nat)
+has type
+  Lean.CoreM Lean.Expr
+but is expected to have type
+  Lean.Expr
+in the application
+  some (Lean.mkArrow (Lean.mkConst `Nat) (Lean.mkConst `Nat))
+
+Chan/Thm/ByElabOpt.lean:4:33: error: Invalid `meta` definition `_tmp✝`, `Lean.Elab.Term.instMonadMacroAdapterTermElabM` is not accessible here; consider adding `public meta import Lean.Elab.Term.TermElabM`
+  [gate_15] rc=2
+    STDERR: GATE15: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]
+Chan/Thm/ByElabOpt.lean:6:60: error: Application type mismatch: The argument
+  Lean.mkArrow (Lean.mkConst `Nat) (Lean.mkConst `Nat)
+has type
+  Lean.CoreM Lean.Expr
+but is expected to have type
+  Lean.Expr
+in the application
+  some (Lean.mkArrow (Lean.mkConst `Nat) (Lean.mkConst `Nat))
+
+Chan/Thm/ByElabOpt.lean:4:33: error: Invalid `meta` definition `_tmp✝`, `Lean.Elab.Term.instMonadMacroAdapterTermElabM` is not accessible here; consider adding `public meta import Lean.Elab.Term.TermElabM`
+[DISK] before P2a_sudo_set_option_unused: / free = 6.372 GiB
+[DISK] after P2a_sudo_set_option_unused: / free = 6.367 GiB
+=== P2a_sudo_set_option_unused ===
+  [build_wfail] rc=1
+    STDOUT: ⚠ [193/193] Building Chan.Thm.SudoOpt (747ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lea
+    STDERR: error: build failed
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    STDERR: ⚠ [193/197] Replaying Chan.Thm.SudoOpt
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/lean:/Volu
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] before P3a_eval_percent: / free = 6.367 GiB
+[DISK] after P3a_eval_percent: / free = 6.344 GiB
+=== P3a_eval_percent ===
+  [build_wfail] rc=0
+    STDOUT: ℹ [202/202] Built Chan.Thm.EvalPct (353ms)
+info: Chan/Thm/EvalPct.lean:5:0: EVAL_PCT_USER_CODE_RAN
+Build completed successfully (202 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] before P3b_include_str_host_read: / free = 6.344 GiB
+[DISK] after P3b_include_str_host_read: / free = 6.344 GiB
+=== P3b_include_str_host_read ===
+  [build_wfail] rc=1
+    STDOUT: ✖ [2/2] Building Chan.Thm.IncStr (207ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-d-review/work/P3b_include_str_host_read-aglvo5ez/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P3b_include_str_host_read-aglvo5ez/formal_math/Chan/Thm/IncStr.lean -o /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P3b_include_str_host_read-aglvo5ez/formal_math/.lake/build/lib/lean/Chan/Thm/IncStr.olean -i /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P3b_include_str_host_read-aglvo5ez/formal_m
+    STDERR: error: build failed
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/Chan/Thm/IncStr.lean:4 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令
+    STDERR: INCLUDE_STR_EVAL_RAN
+Chan/Thm/IncStr.lean:4:8: error: Not a definitional equality: the left-hand side
+  leaked
+is not definitionally equal to the right-hand side
+  "TOP_SECRET_HOST_CONTENT_42\n"
+
+Note: This theorem is exported from the current module. This requires that all definitions that need to be unfolded to prove this theorem must be exposed.
+  [gate_3] rc=2
+    STDERR: GATE3: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]
+INCLUDE_STR_EVAL_RAN
+Chan/Thm/IncStr.lean:4:8: error: Not a definitional equality: the left-hand side
+  leaked
+is not definitionally equal to the right-hand side
+  "TOP_SECRET_HOST_CONTENT_42\n"
+
+Note: This theorem is exported from the current module. This requires that all definitions that need to be unfolded to prove this theorem must be exposed.
+  [gate_15] rc=2
+    STDERR: GATE15: 无法判定：[false,[["build",4,"语法已解析，Lean 拒绝精化该命令"]]]
+INCLUDE_STR_EVAL_RAN
+Chan/Thm/IncStr.lean:4:8: error: Not a definitional equality: the left-hand side
+  leaked
+is not definitionally equal to the right-hand side
+  "TOP_SECRET_HOST_CONTENT_42\n"
+
+Note: This theorem is exported from the current module. This requires that all definitions that need to be unfolded to prove this theorem must be exposed.
+[DISK] before P3c_trace_and_siffwm: / free = 6.344 GiB
+[DISK] after P3c_trace_and_siffwm: / free = 6.080 GiB
+=== P3c_trace_and_siffwm ===
+  [build_wfail] rc=1
+    STDOUT: ✖ [193/193] Building Chan.Thm.EvalTacs (375ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Cli/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/batteries/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/Qq/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/aesop/.lake/build/lib/lean:/Volumes/AgentStorage/fm/lake/infra-2312-b-env-gates-2428b08ce810d112/packages/proofwidgets/.lake/build/lib/le
+    STDERR: error: build failed
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/Chan/Thm/EvalTacs.lean:5 BUILD_WFAIL 语法已解析，Lean 拒绝精化该命令
+    STDERR: SIFFWM_EVAL_RAN
+Chan/Thm/EvalTacs.lean:6:33: error: tactic '(have : 0 = 1 := by rfl)' failed, but got different error message:
+
+Tactic `rfl` failed: The left-hand side
+  0
+is not definitionally equal to the right-hand side
+  1
+
+⊢ 0 = 1
+  [gate_3] rc=2
+    STDERR: GATE3: 无法判定：[false,[["build",5,"语法已解析，Lean 拒绝精化该命令"]]]
+SIFFWM_EVAL_RAN
+Chan/Thm/EvalTacs.lean:6:33: error: tactic '(have : 0 = 1 := by rfl)' failed, but got different error message:
+
+Tactic `rfl` failed: The left-hand side
+  0
+is not definitionally equal to the right-hand side
+  1
+
+⊢ 0 = 1
+  [gate_15] rc=2
+    STDERR: GATE15: 无法判定：[false,[["build",5,"语法已解析，Lean 拒绝精化该命令"]]]
+SIFFWM_EVAL_RAN
+Chan/Thm/EvalTacs.lean:6:33: error: tactic '(have : 0 = 1 := by rfl)' failed, but got different error message:
+
+Tactic `rfl` failed: The left-hand side
+  0
+is not definitionally equal to the right-hand side
+  1
+
+⊢ 0 = 1
+[DISK] before P4a_decreasing_by_rfl_prime: / free = 6.080 GiB
+[DISK] after P4a_decreasing_by_rfl_prime: / free = 6.330 GiB
+=== P4a_decreasing_by_rfl_prime ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Thm.DecHole (198ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=2
+    STDERR: GATE2: 无法判定：[false,[["3",7,"选项不在白名单：smartUnfolding"],["3",8,"选项不在白名单：tactic.hygienic"]]]
+  [gate_3] rc=1
+    STDOUT: GATE3 RED formal_math/Chan/Thm/DecHole.lean:7 TOKEN 选项不在白名单：smartUnfolding
+GATE3 RED formal_math/Chan/Thm/DecHole.lean:8 TOKEN 选项不在白名单：tactic.hygienic
+  [gate_15] rc=2
+    STDERR: GATE15: 无法判定：[false,[["3",7,"选项不在白名单：smartUnfolding"],["3",8,"选项不在白名单：tactic.hygienic"]]]
+[DISK] before P5a_guard_msgs_substring_swallow: / free = 6.330 GiB
+[DISK] after P5a_guard_msgs_substring_swallow: / free = 5.959 GiB
+STOP_DISK_LOW: / free = 5.959 GiB < 6.000 GiB at after P5a_guard_msgs_substring_swallow

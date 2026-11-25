@@ -1,0 +1,235 @@
+[DISK] before P3b2_include_str_clean: / free = 7.095 GiB
+=== P3b2_include_str_clean ===
+  [build_wfail] rc=0
+    STDOUT: ℹ [2/2] Built Chan.Thm.IncStr (216ms)
+info: Chan/Thm/IncStr.lean:3:0: INCLUDE_STR_EVAL_RAN
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after P3b2_include_str_clean: / free = 7.085 GiB
+[DISK] before P5a_guard_msgs_substring_swallow: / free = 7.085 GiB
+=== P5a_guard_msgs_substring_swallow ===
+  [build_wfail] rc=1
+    STDOUT: ⚠ [2/4] Building Chan.Thm.Dep (175ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/Chan/Thm/Dep.lean -o /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/.lake/build/lib/lean/Chan/Thm/Dep.olean -i /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/.lake/build/lib/lean/Chan/Thm/Dep.ilean -c /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/.lake/build/ir/Chan/Thm/Dep.c --
+    STDERR: error: build failed
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    STDERR: ⚠ [2/8] Replaying Chan.Thm.Dep
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/Chan/Thm/Dep.lean -o /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/.lake/build/lib/lean/Chan/Thm/Dep.olean -i /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/.lake/build/lib/lean/Chan/Thm/Dep.ilean -c /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P5a_guard_msgs_substring_swallow-dz3p5_ii/formal_math/.lake/build/ir/Chan/Thm/Dep.c --setup /
+  [gate_3] rc=1
+    STDOUT: GATE3 RED formal_math/Chan/Final/GuardSwallow.lean:instReprPairTag.repr ENV_SORRY 闭包包含禁用公理 sorryAx
+GATE3 RED formal_math/Chan/Final/GuardSwallow.lean:instReprPairTag ENV_SORRY 闭包包含禁用公理 sorryAx
+  [gate_15] rc=0
+[DISK] after P5a_guard_msgs_substring_swallow: / free = 7.066 GiB
+[DISK] before P6a_lakefile_leanOptions_bypass: / free = 7.066 GiB
+=== P6a_lakefile_leanOptions_bypass ===
+  [gate_2] rc=2
+    STDERR: GATE2: 无法判定：Cannot overwrite a value (at line 8, column 39)
+  [gate_3] rc=2
+    STDERR: GATE3: 无法判定：lake exe fm_audit headers Chan.lean Chan/Thm/UnusedArg.lean ChanTest/Probe.lean verification/Audit.lean verification/EnvGates.lean verification/SourceGates.lean: error: lakefile.toml:8:7: error: cannot redefine value key `leanOptions.linter.unusedVariables`
+[DISK] after P6a_lakefile_leanOptions_bypass: / free = 7.066 GiB
+[DISK] before P6b_lakefile_moreLeanArgs_bypass: / free = 7.066 GiB
+=== P6b_lakefile_moreLeanArgs_bypass ===
+  [gate_2] rc=0
+  [gate_3] rc=0
+[DISK] after P6b_lakefile_moreLeanArgs_bypass: / free = 7.060 GiB
+[DISK] before P7a_env_deriving_spoof: / free = 7.060 GiB
+=== P7a_env_deriving_spoof ===
+  [env_build] rc=0
+    STDOUT: ⚠ [3/3] Built Chan.Thm.SpoofDerive (189ms)
+warning: Chan/Thm/SpoofDerive.lean:11:0: Definition `instReprTree` of class type is semireducible. Most type class instances should be instance-reducible, so consider marking this
+definition with `@[instance_reducible]`. If it is intentionally semireducible, this warning can be disabled with `set_option warn.classDefReducibility false`.
+Build completed successfully (3 jobs).
+  [fm_audit_3_env] rc=0
+[DISK] after P7a_env_deriving_spoof: / free = 7.059 GiB
+[DISK] before P7b_env_ctoridx_spoof: / free = 7.059 GiB
+=== P7b_env_ctoridx_spoof ===
+  [env_build] rc=1
+    STDOUT: ✖ [3/3] Building Chan.Thm.SpoofCtorIdx (163ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7b_env_ctoridx_spoof-gu3727bc/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7b_env_ctoridx_spoof-gu3727bc/formal_math/Chan/Thm/SpoofCtorIdx.lean -o /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7b_env_ctoridx_spoof-gu3727bc/formal_math/.lake/build/lib/lean/Chan/Thm/SpoofCtorIdx.olean -i /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7b_env_ctoridx_spoof-gu3727bc/formal_math/.lake/build/lib/lean/Chan/Thm/SpoofCtorIdx.ilean -c /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7b_env_ctoridx_spoof-gu3727bc/formal_math/.lake/build/ir/Chan/Thm/SpoofCtorIdx.c --setup /Vol
+    STDERR: error: build failed
+[DISK] after P7b_env_ctoridx_spoof: / free = 7.059 GiB
+[DISK] before P7c_env_extern_on_exempt: / free = 7.059 GiB
+=== P7c_env_extern_on_exempt ===
+  [env_build] rc=0
+    STDOUT: ✔ [3/3] Built Chan.Thm.ExternExempt (188ms)
+Build completed successfully (3 jobs).
+  [fm_audit_3_env] rc=0
+[DISK] after P7c_env_extern_on_exempt: / free = 7.059 GiB
+[DISK] before P7d_term_unsafe_expr: / free = 7.059 GiB
+=== P7d_term_unsafe_expr ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Thm.TermUnsafe (165ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=1
+    STDOUT: GATE3 RED formal_math/Chan/Thm/TermUnsafe.lean:_private.Chan.Thm.TermUnsafe.0.u.unsafe_impl_2 ENV_IMPLEMENTED_BY 声明具有 implemented_by 属性
+  [gate_15] rc=0
+  [fm_audit_source_3] rc=0
+    STDOUT: [false,[]]
+[DISK] after P7d_term_unsafe_expr: / free = 7.052 GiB
+[DISK] before P7e_root_sorryAx_example: / free = 7.052 GiB
+=== P7e_root_sorryAx_example ===
+  [build_wfail] rc=1
+    STDOUT: ⚠ [2/2] Building Chan.Thm.RootSorry (174ms)
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/Chan/Thm/RootSorry.lean -o /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/.lake/build/lib/lean/Chan/Thm/RootSorry.olean -i /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/.lake/build/lib/lean/Chan/Thm/RootSorry.ilean -c /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/.lake/build/ir/Chan/Thm/RootSorry.c --setup /Vol
+    STDERR: error: build failed
+  [gate_2] rc=1
+    STDOUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    STDERR: ⚠ [2/6] Replaying Chan.Thm.RootSorry
+trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/Chan/Thm/RootSorry.lean -o /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/.lake/build/lib/lean/Chan/Thm/RootSorry.olean -i /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/.lake/build/lib/lean/Chan/Thm/RootSorry.ilean -c /Volumes/AgentStorage/fm/tmp/2312-d-review/work/P7e_root_sorryAx_example-nalri_mw/formal_math/.lake/build/ir/Chan/Thm/RootSorry.c --setup /Volumes/Ag
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after P7e_root_sorryAx_example: / free = 6.265 GiB
+[DISK] before W1a_plain_rec_deriving_ord: / free = 6.265 GiB
+=== W1a_plain_rec_deriving_ord ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Exec.BinTreeOrd (185ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=1
+    STDOUT: GATE3 RED formal_math/Chan/Exec/BinTreeOrd.lean:instOrdBinTree.ord._unsafe_rec ENV_PARTIAL 部分定义（源定义 instOrdBinTree.ord 不是结构／良基递归或白名单派生）
+  [gate_15] rc=0
+[DISK] after W1a_plain_rec_deriving_ord: / free = 6.263 GiB
+[DISK] before W1b_plain_rec_deriving_others: / free = 6.263 GiB
+=== W1b_plain_rec_deriving_others ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Exec.BinTreeOthers (235ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after W1b_plain_rec_deriving_others: / free = 6.256 GiB
+[DISK] before W1c_ns_and_private_deriving: / free = 6.256 GiB
+=== W1c_ns_and_private_deriving ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Exec.NsDerive (225ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after W1c_ns_and_private_deriving: / free = 6.260 GiB
+[DISK] before W1d_defs_deriving_expose: / free = 6.260 GiB
+=== W1d_defs_deriving_expose ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Defs.Types (267ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=1
+    STDOUT: GATE15 RED formal_math/Chan/Defs/Types.lean:instHashableDir.hash EXPOSE_SECTION 公开定义未暴露定义体
+GATE15 RED formal_math/Chan/Defs/Types.lean:instHashableBar.hash EXPOSE_SECTION 公开定义未暴露定义体
+GATE15 RED formal_math/Chan/Defs/Types.lean:instReprDir.repr EXPOSE_SECTION 公开定义未暴露定义体
+GATE15 RED formal_math/Chan/Defs/Types.lean:instReprBar.repr EXPOSE_SECTION 公开定义未暴露定义体
+[DISK] after W1d_defs_deriving_expose: / free = 6.257 GiB
+[DISK] before P8a_instance_priority_and_simp: / free = 6.257 GiB
+=== P8a_instance_priority_and_simp ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Thm.ShadowInst (188ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after P8a_instance_priority_and_simp: / free = 6.248 GiB
+[DISK] before P9a_gate6a_let_vs_have: / free = 6.248 GiB
+=== P9a_gate6a_let_vs_have ===
+  [build_v1] rc=0 stdout=✔ [3/4] Built Chan.Defs.V (202ms)
+✔ [4/4] Built Chan (201ms)
+Build completed successfully (4 jobs). stderr=
+  [audit_6a_v1] rc=0 stdout=["calcVal","Chan.Defs.V",["FM-lock-v2",["str",null,"calcVal"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Nat"],[]]],["definition","regular","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["let",["const",["str",null,"Nat"],[]],["app",["app",["app",["app",["ap stderr=
+  [build_v2] rc=0 stdout=✔ [2/2] Built Chan.Defs.V (154ms)
+Build completed successfully (2 jobs). stderr=
+  [gate_6a_v2_against_v1_lock] rc=0 stdout= stderr=
+[DISK] after P9a_gate6a_let_vs_have: / free = 6.249 GiB
+[DISK] before P9b_gate6a_hyp_no_expose: / free = 6.249 GiB
+=== P9b_gate6a_hyp_no_expose ===
+  [gate_6a_after_drop_expose] rc=0 stdout= stderr=
+  [gate_15_after_drop_expose] rc=0 stdout= stderr=
+[DISK] after P9b_gate6a_hyp_no_expose: / free = 6.246 GiB
+[DISK] before P9c_gate6b_probes: / free = 6.246 GiB
+=== P9c_gate6b_probes ===
+  [proof_untracked_root] rc=0 stdout= stderr=
+  [proof_untracked_defs] rc=1 stdout=GATE6b RED formal_math/Chan/Defs/Sneak.lean:1 PATH_SCOPE 分支 proof/untracked-root 不允许修改此路径 stderr=
+  [infra_nonempty_signoff] rc=1 stdout=GATE6b RED formal_math/verification/garbage-signoffs.yaml:1 PATH_SCOPE 分支 infra/sneak-signoff 不允许修改此路径 stderr=
+  [detached_decl_empty_suffix] rc=0 stdout= stderr=
+[DISK] after P9c_gate6b_probes: / free = 6.247 GiB
+[DISK] before P9d1_gate15_defs_noncomputable_expose: / free = 6.247 GiB
+=== P9d1_gate15_defs_noncomputable_expose ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/2] Built Chan.Defs.Noncomp (166ms)
+Build completed successfully (2 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+[DISK] after P9d1_gate15_defs_noncomputable_expose: / free = 6.245 GiB
+[DISK] before P9d2_gate15_challenge_trans_std: / free = 6.245 GiB
+=== P9d2_gate15_challenge_trans_std ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/4] Built Chan.Defs.UsesStd (169ms)
+✔ [4/4] Built ChanChallenge.C (159ms)
+Build completed successfully (4 jobs).
+  [gate_15] rc=1
+    STDOUT: GATE15 RED formal_math/ChanChallenge/C.lean:2 IMPORT_CLOSURE 经 Chan.Defs.UsesStd 间接导入 Std.Data.HashMap
+[DISK] after P9d2_gate15_challenge_trans_std: / free = 6.245 GiB
+[DISK] before R1_report_certified_and_robustness: / free = 6.245 GiB
+=== R1_report_certified_and_robustness ===
+  [build_wfail] rc=0
+    STDOUT: ✔ [2/6] Built Chan.Defs.RepDefs (191ms)
+✔ [4/6] Built Chan.Hypotheses.RepHyp (185ms)
+✔ [6/6] Built Chan.Thm.RepThm (197ms)
+Build completed successfully (6 jobs).
+  [gate_2] rc=0
+  [gate_3] rc=0
+  [gate_15] rc=0
+  [report] rc=0
+    STDOUT: {
+  "schema": "fm-review-v1",
+  "declarations": [
+    {
+      "module": "Chan.Defs.RepDefs",
+      "declaration": "CarryD",
+      "readings": {
+        "S": [
+          {
+            "status": "no_finding",
+            "evidence": "hint",
+            "code": "NO_FINDING",
+            "detail": "无读数命中或不适用"
+          }
+        ],
+        "7a": [
+          {
+            "status": "finding",
+            "evidence": "hint",
+            "code": "RESIDENCE",
+            "detail": "ChanTest 缺少具体参数下的闭项居留见证"
+          }
+        ],
+        "7b": [
+          {
+            "status": "no_finding",
+            "evidence": "hint",
+            "code": "NO_FINDING",
+            "detail": "无读数命中或不适用"
+          }
+        ],
+        "8a": [
+          {
+            "status": "no_finding",
+            "evidence"
+    STDERR: | 模块 | 声明 | S | 7a | 7b | 8a | 8b | 9 | 10 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Chan.Defs.RepDefs | CarryD | — | hint/finding RESIDENCE: ChanTest 缺少具体参数下的闭项居留见证 | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD._sizeOf_1 | — | — | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD._sizeOf_inst | — | — | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD.casesOn | — | — | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD.ctorIdx | — | — | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD.h | — | — | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD.mk | — | — | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD.mk._flat_ctor | — | — | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD.mk.inj | — | — | — | — | — | — | — |
+| Chan.Defs.RepDefs | CarryD.mk.injEq | — | — | — | — | —
+[DISK] after R1_report_certified_and_robustness: / free = 6.238 GiB
+BATCH FAST COMPLETE
