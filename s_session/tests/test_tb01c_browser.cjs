@@ -807,6 +807,13 @@ async function run() {
       }
     }
   });
+  await test("Q3值层Reader区间验完释放图与布尔/坏证明锁", () => {
+    require("node:child_process").execFileSync(
+      process.execPath,
+      ["--test", path.join(__dirname, "test_q3_values_release_graph.cjs")],
+      { stdio: "pipe" },
+    );
+  });
   async function setup() {
     const server = fakeServer(f),
       commits = [];

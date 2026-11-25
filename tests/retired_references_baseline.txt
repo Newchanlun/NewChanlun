@@ -31,7 +31,6 @@
 .chanlun/agent-roster-20260723.md|.chanlun/review-results/splitlegledger-wiring-cost-memo-20260723.md
 .chanlun/agent-roster-20260727.md|.chanlun/review-results/prereg-binding-scope-20260727.md
 .chanlun/agent-roster-20260727.md|rust/src/theta_v0/strategy/coverage.rs
-.chanlun/definitions/baohan.md|formal/Origin/RawInclusionInitialization.lean
 .chanlun/definitions/beichi.md|formal/Origin/DivergenceNesting.lean
 .chanlun/definitions/bi.md|rust/src/theta_v0/bi_engine.rs
 .chanlun/definitions/chanlun-trading-system.md|src/newchan/risk/
