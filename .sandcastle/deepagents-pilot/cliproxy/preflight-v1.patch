@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..2d18367 100644
+index e69de29..7b6f579 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,298 @@
 +package middleware
 +
 +import (
@@ -262,9 +262,12 @@ index e69de29..2d18367 100644
 +			rejectClose(http.StatusBadRequest, "rejected")
 +			return
 +		}
++		sealDeadline := time.Now().Add(preflightreceipt.ReviewBodyReadTimeout)
 +		rc := http.NewResponseController(c.Writer)
-+		_ = rc.SetReadDeadline(time.Now().Add(preflightreceipt.ReviewBodyReadTimeout))
-+		_ = rc.SetWriteDeadline(time.Now().Add(preflightreceipt.ReviewBodyReadTimeout))
++		// Leave a short grace window past sealDeadline so sealCtx expires with DeadlineExceeded
++		// and the handler can flush 503 + Connection: close before socket deadlines trip.
++		_ = rc.SetReadDeadline(sealDeadline.Add(5 * time.Second))
++		_ = rc.SetWriteDeadline(sealDeadline.Add(5 * time.Second))
 +		defer func() {
 +			_ = rc.SetReadDeadline(time.Time{})
 +			_ = rc.SetWriteDeadline(time.Time{})
@@ -275,7 +278,12 @@ index e69de29..2d18367 100644
 +			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"status": "rejected"})
 +			return
 +		}
-+		status, receiptSHA := preflightreceipt.SealReviewWithDigestContext(c.Request.Context(), root, launch, session)
++		sealCtx, sealCancel := context.WithDeadline(c.Request.Context(), sealDeadline)
++		defer sealCancel()
++		status, receiptSHA := callSealReviewWithDigestContext(sealCtx, root, launch, session)
++		if sealCtx.Err() != nil {
++			c.Header("Connection", "close")
++		}
 +		switch status {
 +		case preflightreceipt.SealOK:
 +			c.JSON(http.StatusOK, gin.H{
@@ -1399,6 +1407,158 @@ index 0000000..b7c1228
 +	defer func() { _ = respOK.Body.Close() }()
 +	if respOK.StatusCode != http.StatusOK {
 +		t.Fatalf("clean empty-body seal HTTP %d, want 200", respOK.StatusCode)
++	}
++}
+diff --git a/internal/api/middleware/seal_hook_disabled.go b/internal/api/middleware/seal_hook_disabled.go
+new file mode 100644
+index 0000000..d910f83
+--- /dev/null
++++ b/internal/api/middleware/seal_hook_disabled.go
+@@ -0,0 +1,13 @@
++//go:build !preflight_test_roots
++
++package middleware
++
++import (
++	"context"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++func callSealReviewWithDigestContext(ctx context.Context, root, launch, session string) (preflightreceipt.SealStatus, string) {
++	return preflightreceipt.SealReviewWithDigestContext(ctx, root, launch, session)
++}
+diff --git a/internal/api/middleware/seal_hook_enabled.go b/internal/api/middleware/seal_hook_enabled.go
+new file mode 100644
+index 0000000..6a3f821
+--- /dev/null
++++ b/internal/api/middleware/seal_hook_enabled.go
+@@ -0,0 +1,37 @@
++//go:build preflight_test_roots
++
++package middleware
++
++import (
++	"context"
++	"sync"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++var (
++	sealInvokeMu sync.Mutex
++	sealInvokeFn func(ctx context.Context, root, launch, session string) (preflightreceipt.SealStatus, string)
++)
++
++func setSealInvokeHook(fn func(ctx context.Context, root, launch, session string) (preflightreceipt.SealStatus, string)) func() {
++	sealInvokeMu.Lock()
++	prev := sealInvokeFn
++	sealInvokeFn = fn
++	sealInvokeMu.Unlock()
++	return func() {
++		sealInvokeMu.Lock()
++		sealInvokeFn = prev
++		sealInvokeMu.Unlock()
++	}
++}
++
++func callSealReviewWithDigestContext(ctx context.Context, root, launch, session string) (preflightreceipt.SealStatus, string) {
++	sealInvokeMu.Lock()
++	fn := sealInvokeFn
++	sealInvokeMu.Unlock()
++	if fn != nil {
++		return fn(ctx, root, launch, session)
++	}
++	return preflightreceipt.SealReviewWithDigestContext(ctx, root, launch, session)
++}
+diff --git a/internal/api/middleware/seal_hook_enabled_test.go b/internal/api/middleware/seal_hook_enabled_test.go
+new file mode 100644
+index 0000000..da52892
+--- /dev/null
++++ b/internal/api/middleware/seal_hook_enabled_test.go
+@@ -0,0 +1,84 @@
++//go:build preflight_test_roots
++
++package middleware
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++func TestSealReviewReceiptHandlerCancelsContextAtDeadlineWhileClientKeepsConnectionOpen(t *testing.T) {
++	// Astra P2 (PR #2280 R77): SealReviewReceiptHandler must pass a deadline-bound context
++	// matching ReviewBodyReadTimeout into SealReviewWithDigestContext so waiting duplicate seal
++	// callers wake up, return 503 unavailable, and release their global seal slot even when the
++	// client keeps the TCP connection open.
++	gin.SetMode(gin.TestMode)
++	root := filepath.Join(t.TempDir(), "seal-handler-ctx-deadline")
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++
++	origTimeout := preflightreceipt.ReviewBodyReadTimeout
++	preflightreceipt.ReviewBodyReadTimeout = 150 * time.Millisecond
++	defer func() { preflightreceipt.ReviewBodyReadTimeout = origTimeout }()
++
++	sawDeadline := make(chan bool, 1)
++	wokeOnCancel := make(chan error, 1)
++	restoreHook := setSealInvokeHook(func(ctx context.Context, _, _, _ string) (preflightreceipt.SealStatus, string) {
++		dl, ok := ctx.Deadline()
++		sawDeadline <- ok && time.Until(dl) <= time.Second
++		<-ctx.Done()
++		wokeOnCancel <- ctx.Err()
++		return preflightreceipt.SealUnavailable, ""
++	})
++	defer restoreHook()
++
++	engine := gin.New()
++	engine.POST("/v1/review-receipts/seal", SealReviewReceiptHandler())
++	srv := httptest.NewServer(engine)
++	defer srv.Close()
++
++	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/review-receipts/seal", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	req.Header.Set(preflightreceipt.ReviewHeader, "review-12345678-1234-4234-8234-123456789778")
++	req.Header.Set("Session-Id", "019d0000-0000-7000-8000-000000000778")
++
++	// Keep-alive client with a long timeout (5s >> 150ms) so cancellation must come from handler deadline.
++	client := &http.Client{Timeout: 5 * time.Second}
++	start := time.Now()
++	resp, err := client.Do(req)
++	if err != nil {
++		t.Fatalf("client.Do: %v", err)
++	}
++	defer resp.Body.Close()
++	body, _ := io.ReadAll(resp.Body)
++	elapsed := time.Since(start)
++
++	if okDL := <-sawDeadline; !okDL {
++		t.Fatal("SealReviewReceiptHandler did not pass a ReviewBodyReadTimeout-bounded context")
++	}
++	if cerr := <-wokeOnCancel; cerr != context.DeadlineExceeded {
++		t.Fatalf("blocked seal waiter ctx err = %v, want context.DeadlineExceeded", cerr)
++	}
++	if resp.StatusCode != http.StatusServiceUnavailable {
++		t.Fatalf("status = %d (%s), want 503 unavailable", resp.StatusCode, string(body))
++	}
++	if !strings.Contains(string(body), `"unavailable"`) {
++		t.Fatalf("body = %q, want unavailable status", string(body))
++	}
++	if !resp.Close {
++		t.Fatalf("resp.Close = false, want true (Connection: close)")
++	}
++	if elapsed > 2*time.Second {
++		t.Fatalf("handler took %v, expected prompt cancellation near ReviewBodyReadTimeout", elapsed)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -7593,10 +7753,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..b51a050 100644
+index e69de29..befdfa0 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11496 @@
+@@ -0,0 +1,11516 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -8940,11 +9100,31 @@ index e69de29..b51a050 100644
 +			return false
 +		}
 +	}
-+	if len(output) == 0 || !t.sawStreamedOutputItem {
++	if len(output) == 0 {
++		if t.hasMaxOutputIndex {
++			if t.maxOutputIndex < 0 {
++				return false
++			}
++			seenDoneIdx := make(map[int64]struct{}, len(t.doneItems))
++			for k := range t.doneItems {
++				if idx, ok := t.resolvedKeyIndex(k); ok {
++					if idx < 0 || idx > t.maxOutputIndex {
++						return false
++					}
++					seenDoneIdx[idx] = struct{}{}
++				}
++			}
++			if int64(len(seenDoneIdx)) != t.maxOutputIndex+1 {
++				return false
++			}
++		}
 +		return true
 +	}
 +	if t.hasMaxOutputIndex && int64(len(output)) <= t.maxOutputIndex {
 +		return false
++	}
++	if !t.sawStreamedOutputItem {
++		return true
 +	}
 +	hasPendingItems := len(t.pendingItems) > 0 || t.pendingUnkeyed > 0
 +	completedNonFinalCount := 0
@@ -19094,10 +19274,10 @@ index e69de29..b51a050 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..5daa9d3 100644
+index e69de29..169ff7c 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,13716 @@
+@@ -0,0 +1,13829 @@
 +package preflightreceipt
 +
 +import (
@@ -32813,6 +32993,119 @@ index e69de29..5daa9d3 100644
 +	for _, ch := range chunks {
 +		c.ObserveStreamChunk(ch)
 +	}
++}
++
++func TestReviewReceiptEmptyCompletedOutputRejectsOutputIndexGapAndAllowsOutOfOrderCompletion(t *testing.T) {
++	// Sol P1 (PR #2280 R77): when response.completed omits or empties output, streaming fallback
++	// must reject provable output_index gaps (e.g. only index 1 observed without index 0, or 0 and 2
++	// without 1), while still allowing out-of-order completion that fills 0..maxIdx before terminal.
++	runTurn := func(t *testing.T, root, launch, session, stream string) (SealStatus, string) {
++		t.Helper()
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview: %v", err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte(stream))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReviewWithDigest(root, launch, session)
++	}
++
++	t.Run("missing-index-0-taints-and-rejects-seal", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "gap-idx0")
++		launch := "review-e77e7701-1111-4111-8111-111111111101"
++		session := "019d0000-0000-7000-8000-00000000e701"
++		stream := strings.Join([]string{
++			`event: response.created`,
++			`data: {"type":"response.created","response":{"id":"resp_gap_0","status":"in_progress","model":"gpt-6.2-sol"}}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++			``,
++			`event: response.completed`,
++			`data: {"type":"response.completed","response":{"id":"resp_gap_0","status":"completed","model":"gpt-6.2-sol","output":[]}}`,
++			``,
++			``,
++		}, "\n")
++		if st, dig := runTurn(t, root, launch, session, stream); st != SealRejected || dig != "" {
++			t.Fatalf("SealReviewWithDigest with missing index 0 = (%v, %q), want (SealRejected, \"\")", st, dig)
++		}
++	})
++
++	t.Run("missing-middle-index-1-taints-and-rejects-seal", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "gap-idx1")
++		launch := "review-e77e7702-1111-4111-8111-111111111102"
++		session := "019d0000-0000-7000-8000-00000000e702"
++		stream := strings.Join([]string{
++			`event: response.created`,
++			`data: {"type":"response.created","response":{"id":"resp_gap_mid","status":"in_progress","model":"gpt-6.2-sol"}}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rsn_0","type":"reasoning","status":"completed"}}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":2,"item":{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++			``,
++			`event: response.completed`,
++			`data: {"type":"response.completed","response":{"id":"resp_gap_mid","status":"completed","model":"gpt-6.2-sol"}}`,
++			``,
++			``,
++		}, "\n")
++		if st, dig := runTurn(t, root, launch, session, stream); st != SealRejected || dig != "" {
++			t.Fatalf("SealReviewWithDigest with missing middle index 1 = (%v, %q), want (SealRejected, \"\")", st, dig)
++		}
++	})
++
++	t.Run("out-of-order-completion-fills-0-and-1-seals-ok", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "ooo-ok")
++		launch := "review-e77e7703-1111-4111-8111-111111111103"
++		session := "019d0000-0000-7000-8000-00000000e703"
++		stream := strings.Join([]string{
++			`event: response.created`,
++			`data: {"type":"response.created","response":{"id":"resp_ooo_ok","status":"in_progress","model":"gpt-6.2-sol"}}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rsn_0","type":"reasoning","status":"completed"}}`,
++			``,
++			`event: response.completed`,
++			`data: {"type":"response.completed","response":{"id":"resp_ooo_ok","status":"completed","model":"gpt-6.2-sol","output":[]}}`,
++			``,
++			``,
++		}, "\n")
++		st, dig := runTurn(t, root, launch, session, stream)
++		if st != SealOK || dig == "" {
++			t.Fatalf("SealReviewWithDigest with out-of-order complete indices 1 then 0 = (%v, %q), want SealOK", st, dig)
++		}
++		raw, err := os.ReadFile(filepath.Join(root, launch, "receipt.json"))
++		if err != nil {
++			t.Fatalf("read sealed receipt: %v", err)
++		}
++		var rr ReviewReceipt
++		if err := json.Unmarshal(raw, &rr); err != nil {
++			t.Fatalf("unmarshal sealed receipt: %v", err)
++		}
++		if rr.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++			t.Fatalf("LastOutputSHA256 = %q, want %q", rr.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++		}
++	})
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
 new file mode 100644

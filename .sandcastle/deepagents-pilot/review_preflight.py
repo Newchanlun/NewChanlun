@@ -411,18 +411,24 @@ def _is_valid_sse_extension_field(line: str) -> bool:
 
 def _extract_explicit_response_ids(event: dict, raw_inner: object) -> tuple[list[str], bool]:
     """提取事件中所有显式声明的响应 ID（顶层 response_id、response.id、item.response_id、
-    response.output[*].response_id）；显式 null、非字符串、空串或首尾空白均判非法。"""
+    response.output[*].response_id）；显式声明的 output/item 类型错误，或 ID 为 null、
+    非字符串、空串或首尾空白均判非法。"""
     found: list[str] = []
     containers: list[tuple[dict, str]] = [(event, "response_id")]
     if isinstance(raw_inner, dict):
         containers.append((raw_inner, "id"))
-        raw_output = raw_inner.get("output")
-        if isinstance(raw_output, list):
+        if "output" in raw_inner:
+            raw_output = raw_inner["output"]
+            if not isinstance(raw_output, list):
+                return [], False
             for out_item in raw_output:
-                if isinstance(out_item, dict):
-                    containers.append((out_item, "response_id"))
-    raw_item = event.get("item")
-    if isinstance(raw_item, dict):
+                if not isinstance(out_item, dict):
+                    return [], False
+                containers.append((out_item, "response_id"))
+    if "item" in event:
+        raw_item = event["item"]
+        if not isinstance(raw_item, dict):
+            return [], False
         containers.append((raw_item, "response_id"))
     for obj, key in containers:
         if key not in obj:

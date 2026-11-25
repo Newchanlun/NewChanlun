@@ -2725,6 +2725,14 @@ def test_round_trip_enforces_consistent_response_id_when_present():
                 'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
             ),
             'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":[{"id":"msg_1","response_id":null,"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}\n\n',
+            # Astra P1 (R77): 显式声明的 output/item 类型错误（null、非数组、非对象元素）不得跳过放行。
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":null}}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":[null]}}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":"bad"}}\n\n',
+            (
+                'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":null}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
         ):
             current["body"] = bad_stream.encode()
             res_bad = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-bad", preflight.Deadline(3))
