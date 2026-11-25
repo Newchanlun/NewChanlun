@@ -1,0 +1,4012 @@
+{
+ "must_green/g1/pins": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g15/expose": {
+  "files": 2,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g15/module-comments": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g15/r2-g1-unexposed-struct": {
+  "files": 3,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g15/r2-g2-unexposed-instance": {
+  "files": 3,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g15/r2-g7-public-import-chan-defs": {
+  "files": 3,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g15/r4-p9d1-defs-noncomputable": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g15/r4-w1d-defs-deriving": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/common-syntax": {
+  "files": 1,
+  "commands": 37,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/generated-auxiliaries": {
+  "files": 1,
+  "commands": 14,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/no-warnings": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/r3-a4c-guard-msgs": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/r3-a7-omit": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/r3-a7b-mutual-deriving": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/r3-a7c-omit-instance": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/r4-w1a-plain-rec-ord": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g2/r4-w2-w3-proofs": {
+  "files": 2,
+  "commands": 29,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/attributes-whitelist": {
+  "files": 1,
+  "commands": 23,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/comments": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/common-syntax": {
+  "files": 1,
+  "commands": 37,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/generated-auxiliaries": {
+  "files": 1,
+  "commands": 14,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r2-a4c-guillemet": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a4c-guard-msgs": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7-default-prop-field": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7-named-expose-section": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7-noncomputable-section": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7-omit": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7-open-scoped": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7-open-scoped-attr": {
+  "files": 1,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7-struct-extends": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7-tactic-var": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7b-mutual-deriving": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7c-omit-instance": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a7d-deriving-nonempty": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r3-a8-mathlib": {
+  "files": 2,
+  "commands": 9,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r4-p8a-local-instance-simp": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r4-w1a-plain-rec-ord": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r4-w1b-plain-rec-others": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r4-w1c-ns-private-deriving": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r4-w1d-defs-deriving": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r4-w1e-ns-param-deriving": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/r4-w2-w3-proofs": {
+  "files": 2,
+  "commands": 29,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/raw-comments": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g3/real-declarations": {
+  "files": 2,
+  "commands": 31,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6a/alpha-rename": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6a/def-to-abbrev": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6a/opaque-type": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6a/original": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6a/r4-p9a-let-vs-have": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6a/theorem-to-axiom": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6b/decl-signoffs": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6b/detached-pr": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6b/infra-generic": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6b/proof-edits-test": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_green/g6b/symbolic-wins": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g1/r4-manifest-path-source": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g1/r4-manifest-url": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g1/revision": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g1/runtime-pin": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g1/toolchain": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/bridge": {
+  "files": 3,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Fixture.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Bridge"
+   ]
+  ]
+ },
+ "must_red/g15/chan-audit-math-case-to-dyn": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-audit-math-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-defs-case-to-audit": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-defs-case-to-dyn": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-defs-case-to-explore": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-defs-case-to-proxy": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-defs-case-to-thm": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-exec-case-to-audit": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-exec-case-to-dyn": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-exec-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-final-to-audit": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-final-to-dyn": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-hypotheses-case-to-audit": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-hypotheses-case-to-dyn": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-hypotheses-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-proofs-case-to-audit": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-proofs-case-to-dyn": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-proofs-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-proxy-case-to-audit": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-proxy-case-to-dyn": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-proxy-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-thm-case-to-audit": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-thm-case-to-dyn": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-thm-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chan-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-audit": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-dyn": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-exec": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-final": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-proofs": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-proxy": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-root": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-test": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chanchallenge-case-to-thm": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chandyn-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/chantest-case-to-explore": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/empty-expose": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/literal-proof": {
+  "files": 3,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/main-dynamics": {
+  "files": 2,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/no-expose": {
+  "files": 2,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/no-module": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    1,
+    "HEADER",
+    "源码第一条命令必须是 module"
+   ]
+  ]
+ },
+ "must_red/g15/private-import": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Fixture.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Chan.Defs.Fixture"
+   ]
+  ]
+ },
+ "must_red/g15/r2-g3-meta-import-all": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Sneaky.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Chan.Defs.Flag"
+   ]
+  ]
+ },
+ "must_red/g15/r2-g4-challenge-trans-ext": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "UseLean.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Lean"
+   ]
+  ]
+ },
+ "must_red/g15/r2-g5-interp-expose": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/r2-g6-bridge-subdir": {
+  "files": 4,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Leak.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Helper.Bridge"
+   ]
+  ]
+ },
+ "must_red/g15/r4-p9d2-challenge-trans-std": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/raw-expose": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g15/whole-mathlib": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/fable-b1": {
+  "files": 1,
+  "commands": 11,
+  "parse_errors": [
+   [
+    "Fixture.lean",
+    "/home/workspace/fm/wt/gates-d/formal_math/verification/must_red/g2/fable-b1/formal_math/Chan/Thm/Fixture.lean:20:28: error: unexpected token '+'; expected term\n"
+   ]
+  ],
+  "issues": [
+   [
+    "Fixture.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Lean.Elab.Command"
+   ],
+   [
+    "Fixture.lean",
+    8,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ],
+   [
+    "Fixture.lean",
+    10,
+    "OPTION",
+    "禁止设置受控选项 autoImplicit"
+   ],
+   [
+    "Fixture.lean",
+    12,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ],
+   [
+    "Fixture.lean",
+    13,
+    "COMMAND",
+    "命令不在白名单：Lean.runCmd"
+   ],
+   [
+    "Fixture.lean",
+    14,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntaxCat"
+   ],
+   [
+    "Fixture.lean",
+    15,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntax"
+   ],
+   [
+    "Fixture.lean",
+    16,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.mixfix"
+   ],
+   [
+    "Fixture.lean",
+    17,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.macro"
+   ]
+  ]
+ },
+ "must_red/g2/lib-option": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/local-autoimplicit": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "OPTION",
+    "禁止设置受控选项 autoImplicit"
+   ]
+  ]
+ },
+ "must_red/g2/local-linter": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g2/missing-option": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/r2-a1-clean": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ],
+   [
+    "Chan.lean",
+    4,
+    "OPTION",
+    "禁止设置受控选项 autoImplicit"
+   ],
+   [
+    "Chan.lean",
+    5,
+    "OPTION",
+    "禁止设置受控选项 relaxedAutoImplicit"
+   ]
+  ]
+ },
+ "must_red/g2/r2-a2-clean": {
+  "files": 1,
+  "commands": 8,
+  "parse_errors": [
+   [
+    "Chan.lean",
+    "/home/workspace/fm/wt/gates-d/formal_math/verification/must_red/g2/r2-a2-clean/formal_math/Chan.lean:11:37: error: unexpected token '+'; expected term\n"
+   ]
+  ],
+  "issues": [
+   [
+    "Chan.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Lean"
+   ],
+   [
+    "Chan.lean",
+    4,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ],
+   [
+    "Chan.lean",
+    5,
+    "OPTION",
+    "禁止设置受控选项 autoImplicit"
+   ],
+   [
+    "Chan.lean",
+    6,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ],
+   [
+    "Chan.lean",
+    7,
+    "COMMAND",
+    "命令不在白名单：Lean.runCmd"
+   ],
+   [
+    "Chan.lean",
+    8,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntaxCat"
+   ],
+   [
+    "Chan.lean",
+    9,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.mixfix"
+   ]
+  ]
+ },
+ "must_red/g2/r2-a4d-guillemet-opt": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    2,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g2/r2-a5-build-config": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/r2-a6-build-config": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/r2-a6b-build-config": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/r2-a6c-build-config": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/r2-a6d-build-config": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/r3-a5b-grind-option": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "GrindOpt.lean",
+    5,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g2/r3-a5c-grind-kernel": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "GrindKernel.lean",
+    5,
+    "OPTION",
+    "选项不在白名单：debug.skipKernelTC"
+   ],
+   [
+    "GrindKernel.lean",
+    6,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g2/r4-p6a-lakefile-invalid-toml": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/r4-p6b-lakefile-more-lean-args": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/r4-p6c-lakefile-package-options": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/raw-linter": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    6,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g2/relaxed-local": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    2,
+    "OPTION",
+    "禁止设置受控选项 relaxedAutoImplicit"
+   ]
+  ]
+ },
+ "must_red/g2/unimported-child": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g2/unused": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g3/admit": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Tactic.tacticAdmit"
+   ]
+  ]
+ },
+ "must_red/g3/attribute-command-macro": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    4,
+    "ATTRIBUTE",
+    "属性不在白名单：init"
+   ]
+  ]
+ },
+ "must_red/g3/attribute-csimp": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：csimp"
+   ]
+  ]
+ },
+ "must_red/g3/axiom": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "DECL",
+    "声明不在白名单：Lean.Parser.Command.axiom"
+   ]
+  ]
+ },
+ "must_red/g3/blocked-kernel-option": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "OPTION",
+    "选项不在白名单：debug.skipKernelTC"
+   ]
+  ]
+ },
+ "must_red/g3/deriving-inline-not-whitelisted": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    5,
+    "DERIVING",
+    "派生目标类不在白名单：`SizeOf"
+   ]
+  ]
+ },
+ "must_red/g3/deriving-not-whitelisted": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    6,
+    "DERIVING",
+    "派生目标类不在白名单：`SizeOf"
+   ]
+  ]
+ },
+ "must_red/g3/environment-derived-without-certificate": {
+  "files": 1,
+  "commands": 14,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g3/environment-implemented-by": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    4,
+    "ATTRIBUTE",
+    "属性不在白名单：implemented_by"
+   ]
+  ]
+ },
+ "must_red/g3/environment-meta": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/environment-partial": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ]
+  ]
+ },
+ "must_red/g3/environment-partial-mutual": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ],
+   [
+    "Chan.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ]
+  ]
+ },
+ "must_red/g3/environment-unsafe": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.unsafe"
+   ]
+  ]
+ },
+ "must_red/g3/eval": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ]
+  ]
+ },
+ "must_red/g3/exit-command": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g3/explore-eval-rejected": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Case.lean",
+    3,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ]
+  ]
+ },
+ "must_red/g3/extern": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "ATTRIBUTE",
+    "属性不在白名单：extern"
+   ],
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Attr.extern"
+   ]
+  ]
+ },
+ "must_red/g3/fable-b1": {
+  "files": 1,
+  "commands": 11,
+  "parse_errors": [
+   [
+    "Fixture.lean",
+    "/home/workspace/fm/wt/gates-d/formal_math/verification/must_red/g3/fable-b1/formal_math/Chan/Thm/Fixture.lean:20:28: error: unexpected token '+'; expected term\n"
+   ]
+  ],
+  "issues": [
+   [
+    "Fixture.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Lean.Elab.Command"
+   ],
+   [
+    "Fixture.lean",
+    8,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ],
+   [
+    "Fixture.lean",
+    10,
+    "OPTION",
+    "禁止设置受控选项 autoImplicit"
+   ],
+   [
+    "Fixture.lean",
+    12,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ],
+   [
+    "Fixture.lean",
+    13,
+    "COMMAND",
+    "命令不在白名单：Lean.runCmd"
+   ],
+   [
+    "Fixture.lean",
+    14,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntaxCat"
+   ],
+   [
+    "Fixture.lean",
+    15,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntax"
+   ],
+   [
+    "Fixture.lean",
+    16,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.mixfix"
+   ],
+   [
+    "Fixture.lean",
+    17,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.macro"
+   ]
+  ]
+ },
+ "must_red/g3/guard-msgs-declaration": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    9,
+    "GUARD",
+    "#guard_msgs 内只许 #check 与 #print axioms：Lean.Parser.Command.declaration"
+   ]
+  ]
+ },
+ "must_red/g3/guard-msgs-drop-warning": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    3,
+    "GUARD",
+    "#guard_msgs 只许不带规格的精确匹配写法"
+   ]
+  ]
+ },
+ "must_red/g3/guard-msgs-outside-final": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    3,
+    "COMMAND",
+    "命令不在白名单：Lean.guardMsgsCmd"
+   ]
+  ]
+ },
+ "must_red/g3/implemented-by": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    4,
+    "ATTRIBUTE",
+    "属性不在白名单：implemented_by"
+   ]
+  ]
+ },
+ "must_red/g3/import-aesop": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Aesop"
+   ]
+  ]
+ },
+ "must_red/g3/import-explore": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g3/import-lean": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Lean"
+   ]
+  ]
+ },
+ "must_red/g3/library-macro-option": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g3/local-linter": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g3/meta-def": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/meta-import-library": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Init.Data.Nat"
+   ]
+  ]
+ },
+ "must_red/g3/meta-section": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    2,
+    "MODIFIER",
+    "禁止 meta section"
+   ]
+  ]
+ },
+ "must_red/g3/native-decide": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Tactic.nativeDecide"
+   ],
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用记号：native_decide"
+   ]
+  ]
+ },
+ "must_red/g3/non-module": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    1,
+    "HEADER",
+    "源码第一条命令必须是 module"
+   ]
+  ]
+ },
+ "must_red/g3/partial": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ]
+  ]
+ },
+ "must_red/g3/prelude": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    1,
+    "HEADER",
+    "禁止 prelude"
+   ]
+  ]
+ },
+ "must_red/g3/private-proof": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Hidden.lean",
+    4,
+    "FORBIDDEN",
+    "sorryAx 标识符"
+   ]
+  ]
+ },
+ "must_red/g3/r2-a2-clean": {
+  "files": 1,
+  "commands": 8,
+  "parse_errors": [
+   [
+    "Chan.lean",
+    "/home/workspace/fm/wt/gates-d/formal_math/verification/must_red/g3/r2-a2-clean/formal_math/Chan.lean:11:37: error: unexpected token '+'; expected term\n"
+   ]
+  ],
+  "issues": [
+   [
+    "Chan.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Lean"
+   ],
+   [
+    "Chan.lean",
+    4,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ],
+   [
+    "Chan.lean",
+    5,
+    "OPTION",
+    "禁止设置受控选项 autoImplicit"
+   ],
+   [
+    "Chan.lean",
+    6,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ],
+   [
+    "Chan.lean",
+    7,
+    "COMMAND",
+    "命令不在白名单：Lean.runCmd"
+   ],
+   [
+    "Chan.lean",
+    8,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntaxCat"
+   ],
+   [
+    "Chan.lean",
+    9,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.mixfix"
+   ]
+  ]
+ },
+ "must_red/g3/r2-a2-syntax-quotes": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntax"
+   ],
+   [
+    "Chan.lean",
+    4,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.macro_rules"
+   ]
+  ]
+ },
+ "must_red/g3/r2-a3-interp-raw-g3": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ]
+  ]
+ },
+ "must_red/g3/r2-a4d-guillemet-opt": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    2,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g3/r2-d5c-subsingleton-ref": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Fixture.lean",
+    9,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Term.sorry"
+   ]
+  ]
+ },
+ "must_red/g3/r2-g3-meta-import-all": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Sneaky.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Chan.Defs.Flag"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1-macro": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ],
+   [
+    "Helper.lean",
+    16,
+    "OPTION",
+    "选项不在白名单：opt1"
+   ],
+   [
+    "Helper.lean",
+    17,
+    "OPTION",
+    "选项不在白名单：opt2"
+   ],
+   [
+    "Helper.lean",
+    18,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ],
+   [
+    "Helper.lean",
+    19,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.unsafe"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1b-macro-clean": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1c-macro-full": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1d-macro-nuclear": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1e-macro-fresh": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1f-environment": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1f-macro": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1f-victim-source-only": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1g-environment": {
+  "files": 2,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ],
+   [
+    "Helper.lean",
+    13,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    14,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1g-macro-stripinfo": {
+  "files": 2,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ],
+   [
+    "Helper.lean",
+    13,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    14,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a1g-victim-source-only": {
+  "files": 2,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Helper.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "Helper.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ],
+   [
+    "Helper.lean",
+    13,
+    "ATTRIBUTE",
+    "属性不在白名单：macro"
+   ],
+   [
+    "Helper.lean",
+    14,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a2-init-attr": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "InitProbe.lean",
+    6,
+    "ATTRIBUTE",
+    "属性不在白名单：init"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a2b-init-meta-import": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Importer.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Chan.Thm.InitMod"
+   ],
+   [
+    "InitMod.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "InitMod.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ],
+   [
+    "InitMod.lean",
+    7,
+    "ATTRIBUTE",
+    "属性不在白名单：init"
+   ],
+   [
+    "InitMod.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a2b-init-plain-source-only": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "InitMod.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "InitMod.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ],
+   [
+    "InitMod.lean",
+    7,
+    "ATTRIBUTE",
+    "属性不在白名单：init"
+   ],
+   [
+    "InitMod.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a3-meta-attrs": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "MetaAttrs.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "MetaAttrs.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：app_elaborator"
+   ],
+   [
+    "MetaAttrs.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a3b-app-elab": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "AppElab.lean",
+    1,
+    "IMPORT",
+    "禁止 meta import 或 import all：Lean"
+   ],
+   [
+    "AppElab.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：app_elaborator"
+   ],
+   [
+    "AppElab.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.meta"
+   ],
+   [
+    "AppElab.lean",
+    8,
+    "ATTRIBUTE",
+    "属性不在白名单：export"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a4-guard-msgs-drop": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "GuardProbe.lean",
+    3,
+    "GUARD",
+    "#guard_msgs 只许不带规格的精确匹配写法"
+   ],
+   [
+    "GuardProbe.lean",
+    4,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ],
+   [
+    "GuardProbe.lean",
+    4,
+    "GUARD",
+    "#guard_msgs 内只许 #check 与 #print axioms：Lean.Parser.Command.eval"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a5a-example-sorryax": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ExSorry.lean",
+    3,
+    "FORBIDDEN",
+    "sorryAx 标识符"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a5b-grind-option": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "GrindOpt.lean",
+    5,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a5c-grind-kernel": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "GrindKernel.lean",
+    5,
+    "OPTION",
+    "选项不在白名单：debug.skipKernelTC"
+   ],
+   [
+    "GrindKernel.lean",
+    6,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ]
+  ]
+ },
+ "must_red/g3/r3-a8b-mathlib-lemma": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "LemmaTest.lean",
+    4,
+    "COMMAND",
+    "命令不在白名单：lemma"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p0-include-str-unsafe-io": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ZeroImportRCE.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.includeStr"
+   ],
+   [
+    "ZeroImportRCE.lean",
+    4,
+    "FORBIDDEN",
+    "禁用记号：include_str"
+   ],
+   [
+    "ZeroImportRCE.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Term.unsafe"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p0-include-str-unsafe-io-source-only": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ZeroImportRCE.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.includeStr"
+   ],
+   [
+    "ZeroImportRCE.lean",
+    4,
+    "FORBIDDEN",
+    "禁用记号：include_str"
+   ],
+   [
+    "ZeroImportRCE.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Term.unsafe"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p1a-by-elab-io": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ByElabPwn.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.byElab"
+   ],
+   [
+    "ByElabPwn.lean",
+    4,
+    "FORBIDDEN",
+    "禁用记号：by_elab"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p1a-by-elab-io-source-only": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ByElabPwn.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.byElab"
+   ],
+   [
+    "ByElabPwn.lean",
+    4,
+    "FORBIDDEN",
+    "禁用记号：by_elab"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p1b-by-elab-options": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ByElabOpt.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.byElab"
+   ],
+   [
+    "ByElabOpt.lean",
+    4,
+    "FORBIDDEN",
+    "禁用记号：by_elab"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p1b-by-elab-options-source-only": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ByElabOpt.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.byElab"
+   ],
+   [
+    "ByElabOpt.lean",
+    4,
+    "FORBIDDEN",
+    "禁用记号：by_elab"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p1d-sudo-by-elab-io": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SudoByElab.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoByElab.lean",
+    6,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoByElab.lean",
+    7,
+    "FORBIDDEN",
+    "禁用语法：Lean.byElab"
+   ],
+   [
+    "SudoByElab.lean",
+    7,
+    "FORBIDDEN",
+    "禁用记号：by_elab"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p1d-sudo-by-elab-io-source-only": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SudoByElab.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoByElab.lean",
+    6,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoByElab.lean",
+    7,
+    "FORBIDDEN",
+    "禁用语法：Lean.byElab"
+   ],
+   [
+    "SudoByElab.lean",
+    7,
+    "FORBIDDEN",
+    "禁用记号：by_elab"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p2a-sudo-set-option": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SudoOpt.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoOpt.lean",
+    5,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoOpt.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoOpt.lean",
+    6,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoOpt.lean",
+    7,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoOpt.lean",
+    7,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoOpt.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoOpt.lean",
+    8,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p2b-sudo-set-option-clean": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SudoClean.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoClean.lean",
+    5,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoClean.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoClean.lean",
+    6,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoClean.lean",
+    7,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoClean.lean",
+    7,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoClean.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoClean.lean",
+    8,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoClean.lean",
+    9,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoClean.lean",
+    9,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ],
+   [
+    "SudoClean.lean",
+    13,
+    "FORBIDDEN",
+    "禁用语法：termSudoSet_option___In_"
+   ],
+   [
+    "SudoClean.lean",
+    13,
+    "FORBIDDEN",
+    "禁用记号：sudo"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3a-eval-percent": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "EvalPct.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：Mathlib.Meta.eval_expr"
+   ],
+   [
+    "EvalPct.lean",
+    5,
+    "FORBIDDEN",
+    "禁用记号：eval%"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3a-eval-percent-source-only": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "EvalPct.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：Mathlib.Meta.eval_expr"
+   ],
+   [
+    "EvalPct.lean",
+    5,
+    "FORBIDDEN",
+    "禁用记号：eval%"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3b-include-str-host-read": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "IncStr.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.includeStr"
+   ],
+   [
+    "IncStr.lean",
+    3,
+    "FORBIDDEN",
+    "禁用记号：include_str"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3b-include-str-host-read-source-only": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "IncStr.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.includeStr"
+   ],
+   [
+    "IncStr.lean",
+    3,
+    "FORBIDDEN",
+    "禁用记号：include_str"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3b2-include-str-clean": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "IncStr.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.includeStr"
+   ],
+   [
+    "IncStr.lean",
+    3,
+    "FORBIDDEN",
+    "禁用记号：include_str"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3b2-include-str-clean-source-only": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "IncStr.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.includeStr"
+   ],
+   [
+    "IncStr.lean",
+    3,
+    "FORBIDDEN",
+    "禁用记号：include_str"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3c-trace-siffwm": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "EvalTacs.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Mathlib.Tactic.successIfFailWithMsg"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3c-trace-siffwm-source-only": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": [
+   [
+    "EvalTacs.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Mathlib.Tactic.successIfFailWithMsg"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3d-trace-siffwm-eval": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "TraceEval.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Tactic.trace"
+   ],
+   [
+    "TraceEval.lean",
+    9,
+    "FORBIDDEN",
+    "禁用语法：Mathlib.Tactic.successIfFailWithMsg"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p3d-trace-siffwm-eval-source-only": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "TraceEval.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Tactic.trace"
+   ],
+   [
+    "TraceEval.lean",
+    9,
+    "FORBIDDEN",
+    "禁用语法：Mathlib.Tactic.successIfFailWithMsg"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p4a-decreasing-by-rfl-prime": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g3/r4-p5a-guard-msgs-substring": {
+  "files": 2,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": [
+   [
+    "GuardSwallow.lean",
+    4,
+    "GUARD",
+    "#guard_msgs 只许不带规格的精确匹配写法"
+   ],
+   [
+    "GuardSwallow.lean",
+    6,
+    "GUARD",
+    "#guard_msgs 只许不带规格的精确匹配写法"
+   ],
+   [
+    "GuardSwallow.lean",
+    8,
+    "GUARD",
+    "#guard_msgs 只许不带规格的精确匹配写法"
+   ],
+   [
+    "GuardSwallow.lean",
+    9,
+    "GUARD",
+    "#guard_msgs 内只许 #check 与 #print axioms：Lean.Parser.Command.deriving"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p5b-guard-msgs-swallow": {
+  "files": 2,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": [
+   [
+    "GuardSwallow.lean",
+    4,
+    "GUARD",
+    "#guard_msgs 只许不带规格的精确匹配写法"
+   ],
+   [
+    "GuardSwallow.lean",
+    6,
+    "GUARD",
+    "#guard_msgs 只许不带规格的精确匹配写法"
+   ],
+   [
+    "GuardSwallow.lean",
+    8,
+    "GUARD",
+    "#guard_msgs 只许不带规格的精确匹配写法"
+   ],
+   [
+    "GuardSwallow.lean",
+    9,
+    "GUARD",
+    "#guard_msgs 内只许 #check 与 #print axioms：Lean.Parser.Command.deriving"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7a-deriving-spoof": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SpoofDerive.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7a-deriving-spoof-source": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SpoofDerive.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7a2-deriving-spoof": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SpoofDeriveClean.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7a2-deriving-spoof-source": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SpoofDeriveClean.lean",
+    8,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.partial"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7b-ctoridx-spoof-source": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SpoofCtorIdx.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.unsafe"
+   ],
+   [
+    "SpoofCtorIdx.lean",
+    8,
+    "ATTRIBUTE",
+    "属性不在白名单：implemented_by"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7b2-ctoridx-spoof": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SpoofCtorIdx.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.unsafe"
+   ],
+   [
+    "SpoofCtorIdx.lean",
+    8,
+    "ATTRIBUTE",
+    "属性不在白名单：implemented_by"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7b2-ctoridx-spoof-source": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": [
+   [
+    "SpoofCtorIdx.lean",
+    6,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.unsafe"
+   ],
+   [
+    "SpoofCtorIdx.lean",
+    8,
+    "ATTRIBUTE",
+    "属性不在白名单：implemented_by"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7c-extern-on-exempt": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ExternExempt.lean",
+    4,
+    "ATTRIBUTE",
+    "属性不在白名单：extern"
+   ],
+   [
+    "ExternExempt.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Attr.extern"
+   ],
+   [
+    "ExternExempt.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：extern"
+   ],
+   [
+    "ExternExempt.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Attr.extern"
+   ],
+   [
+    "ExternExempt.lean",
+    9,
+    "ATTRIBUTE",
+    "属性不在白名单：extern"
+   ],
+   [
+    "ExternExempt.lean",
+    9,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Attr.extern"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7c-extern-on-exempt-source": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": [
+   [
+    "ExternExempt.lean",
+    4,
+    "ATTRIBUTE",
+    "属性不在白名单：extern"
+   ],
+   [
+    "ExternExempt.lean",
+    4,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Attr.extern"
+   ],
+   [
+    "ExternExempt.lean",
+    5,
+    "ATTRIBUTE",
+    "属性不在白名单：extern"
+   ],
+   [
+    "ExternExempt.lean",
+    5,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Attr.extern"
+   ],
+   [
+    "ExternExempt.lean",
+    9,
+    "ATTRIBUTE",
+    "属性不在白名单：extern"
+   ],
+   [
+    "ExternExempt.lean",
+    9,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Attr.extern"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7d-term-unsafe": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "TermUnsafe.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Term.unsafe"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7d-term-unsafe-source-only": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "TermUnsafe.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Term.unsafe"
+   ]
+  ]
+ },
+ "must_red/g3/r4-p7e-root-sorryax": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "RootSorry.lean",
+    3,
+    "FORBIDDEN",
+    "sorryAx 标识符"
+   ]
+  ]
+ },
+ "must_red/g3/raw-command": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    6,
+    "OPTION",
+    "禁止设置受控选项 linter.unusedVariables"
+   ],
+   [
+    "Chan.lean",
+    7,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.eval"
+   ],
+   [
+    "Chan.lean",
+    8,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntax"
+   ],
+   [
+    "Chan.lean",
+    9,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.macro_rules"
+   ]
+  ]
+ },
+ "must_red/g3/run-cmd": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    1,
+    "IMPORT",
+    "导入来源不在白名单：Lean"
+   ],
+   [
+    "Chan.lean",
+    3,
+    "COMMAND",
+    "命令不在白名单：Lean.runCmd"
+   ]
+  ]
+ },
+ "must_red/g3/sorry": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Tactic.tacticSorry"
+   ]
+  ]
+ },
+ "must_red/g3/sorry-via-export": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "X.lean",
+    4,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.export"
+   ],
+   [
+    "X.lean",
+    4,
+    "FORBIDDEN",
+    "sorryAx 标识符"
+   ]
+  ]
+ },
+ "must_red/g3/syntax": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "COMMAND",
+    "命令不在白名单：Lean.Parser.Command.syntax"
+   ]
+  ]
+ },
+ "must_red/g3/unsafe": {
+  "files": 1,
+  "commands": 1,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    3,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Command.unsafe"
+   ]
+  ]
+ },
+ "must_red/g6a/changed-constant": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6a/def-to-abbrev": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6a/opaque-type": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6a/removed": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6a/theorem-to-axiom": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Fixture.lean",
+    5,
+    "DECL",
+    "声明不在白名单：Lean.Parser.Command.axiom"
+   ]
+  ]
+ },
+ "must_red/g6a/unlisted": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6b/no-layout-waiver": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6b/proof-edits-defs": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6b/r4-empty-branch-suffix": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6b/r4-symlink-in-proof": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_red/g6b/r4-untracked-root-file": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "must_unknown/g2/broken-string": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [
+   [
+    "Chan.lean",
+    "/home/workspace/fm/wt/gates-d/formal_math/verification/must_unknown/g2/broken-string/formal_math/Chan.lean:3:11: error: unterminated string literal\n"
+   ]
+  ],
+  "issues": []
+ },
+ "must_unknown/g3/broken-string": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [
+   [
+    "Chan.lean",
+    "/home/workspace/fm/wt/gates-d/formal_math/verification/must_unknown/g3/broken-string/formal_math/Chan.lean:3:11: error: unterminated string literal\n"
+   ]
+  ],
+  "issues": []
+ },
+ "must_unknown/g3/r2-a4-comment-edge": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [
+   [
+    "Chan.lean",
+    "/home/workspace/fm/wt/gates-d/formal_math/verification/must_unknown/g3/r2-a4-comment-edge/formal_math/Chan.lean:2:5: error: unexpected token '-'; expected command\n"
+   ]
+  ],
+  "issues": []
+ },
+ "must_unknown/g3/r2-a4b-comment-desync": {
+  "files": 1,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Chan.lean",
+    1,
+    "PARSE",
+    "头部解析失败"
+   ]
+  ]
+ },
+ "must_unknown/g6b/detached-no-ref": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g10/nonzero-divisors": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g10/positive-and-option": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g10/r2-f3-g10-safe-fp": {
+  "files": 2,
+  "commands": 16,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g10/real-guarded-int-rat": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g10/signed": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g10/signed-operators": {
+  "files": 1,
+  "commands": 10,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/compiler-auxiliaries": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/fable-b4": {
+  "files": 3,
+  "commands": 9,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/fable-b5kill-with-residence": {
+  "files": 2,
+  "commands": 10,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/r2-d2-exec-realistic": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/r2-d4-poly-struct-fp": {
+  "files": 3,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/r2-d4b-val-param-fp": {
+  "files": 3,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/r2-structural-recursion": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/real-declarations": {
+  "files": 2,
+  "commands": 31,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7a/refined": {
+  "files": 3,
+  "commands": 10,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7b/concrete": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7b/fable-b7b": {
+  "files": 3,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7b/nominal-hypothesis": {
+  "files": 3,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7b/r2-d6-2field-cases": {
+  "files": 4,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7b/r2-d6-hyp-cases-crash": {
+  "files": 4,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7b/r2-d6b-hyp-inductive-crash": {
+  "files": 4,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7b/r2-d6c-hyp-alias-crash": {
+  "files": 4,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g7b/real-multi-constructor": {
+  "files": 3,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g8a/congruence": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g8a/r3-e1-g8a-syllogism-fp": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g8a/uninhabited-quantifier": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g8a/unmarked-graph": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g8b/documented-premise": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g8b/uses-premise": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g9/fable-b4": {
+  "files": 3,
+  "commands": 9,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g9/joint-evidence": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g9/main-necessary": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g9/r2-d2-exec-realistic": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g9/r2-structural-recursion": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/g9/real-declarations": {
+  "files": 2,
+  "commands": 31,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/gS/fable-b2ctl": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/gS/r3-b3-gate-s-false-positives": {
+  "files": 3,
+  "commands": 9,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/gS/r3-b3c-gate-s-audit-class-proj-fp": {
+  "files": 3,
+  "commands": 11,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/gS/r3-b3d-smoke-in-thm-gate-s": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/clean/gS/real-declarations": {
+  "files": 2,
+  "commands": 31,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/alias-domain": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/fable-b6": {
+  "files": 1,
+  "commands": 11,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/option-fallback": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/r2-f1-clean": {
+  "files": 2,
+  "commands": 14,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/r2-f1-rat-inv-only": {
+  "files": 2,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/r2-f2-g10-aliases": {
+  "files": 2,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/r3-d1-g10-bypasses": {
+  "files": 1,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/r3-d2-g10-legal-guards": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/stale": {
+  "files": 0,
+  "commands": 0,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/totalized-operations": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/unsafe-div": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g10/unsigned-sub": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/bsp-endpoint": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/empty-refinement": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/fable-b5kill-no-residence": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/fable-b5vac": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/invalid-about": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/literal-refinement": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/proof-def": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/r2-d1-node-kinds": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/r2-d3-flag-def-bypass": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/r2-d4-poly-struct-fp-no-residence": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/r2-d4b-val-param-fp-no-residence": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/r2-d5-forge-refines": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/r2-d5b-nonprop-ref": {
+  "files": 2,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/r2-d5c-subsingleton-ref": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": [
+   [
+    "Fixture.lean",
+    9,
+    "FORBIDDEN",
+    "禁用语法：Lean.Parser.Term.sorry"
+   ]
+  ]
+ },
+ "report_cases/finding/g7a/r3-c2-g7a-func-pred-ref": {
+  "files": 2,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/reflexive-refinement": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7a/unregistered-private": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7b/expanded-helper": {
+  "files": 3,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g7b/reflexive": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/fable-b2ctl": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/fable-b7a": {
+  "files": 1,
+  "commands": 15,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/function-graph-backward": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/function-graph-forward": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/guarded-premise": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/mirror-instance": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/normalized-unique": {
+  "files": 1,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/r2-unique-and-alias": {
+  "files": 2,
+  "commands": 11,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8a/statement-alias": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/default-premises": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/divergence-creates-bsp": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/eta-and-let": {
+  "files": 1,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/fable-b2ctl": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/fable-b3": {
+  "files": 1,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/r2-e4-and-left": {
+  "files": 2,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/r2-e4-const": {
+  "files": 2,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/r2-e4-g8b-bypasses": {
+  "files": 2,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/r2-e4-sub-beta": {
+  "files": 2,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g8b/r2-e4-sub-helper": {
+  "files": 2,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g9/contradictory-unlisted": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g9/fable-b2ctl": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g9/main-convenience": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g9/main-double": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g9/main-incomplete": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g9/split-counterexample": {
+  "files": 2,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g9/statement-alias": {
+  "files": 2,
+  "commands": 7,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/g9/weakened-witness": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/fable-b2": {
+  "files": 2,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/r2-e1-struct-proj-bypass": {
+  "files": 3,
+  "commands": 18,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/r2-e2-and-8a8b": {
+  "files": 2,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/r2-e2-and-wrap": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/r2-e2-fun-wrap": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/r2-e2-have-wrap": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/r2-e2-let-wrap": {
+  "files": 3,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/r2-option-getd": {
+  "files": 3,
+  "commands": 10,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/finding/gS/r2-unique-and-alias": {
+  "files": 2,
+  "commands": 11,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g10/r3-d1b-g10-isolated-bypasses": {
+  "files": 1,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g10/r3-d5b-g10-headi-fresh": {
+  "files": 1,
+  "commands": 3,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g10/r3-f-d1-g10-bypass-fresh": {
+  "files": 1,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g7a/r3-c1-g7a-vacuous-subtype-bypass": {
+  "files": 1,
+  "commands": 9,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g7a/r3-f-c1-g7a-vac-fresh": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g8a/fable-b7a-tuple-projection": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g8a/r2-eu-dup": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g8a/r2-eu-pair": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g8b/locked-helper": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g8b/r2-e5-g8b-rec": {
+  "files": 2,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/g8b/r3-e3b-g8b-real-and-limits": {
+  "files": 1,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/gS/fable-b7a": {
+  "files": 1,
+  "commands": 15,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/gS/r3-b1-gate-s-connective-bypasses": {
+  "files": 2,
+  "commands": 16,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/gS/r3-b2-gate-s-atom-wrappers": {
+  "files": 2,
+  "commands": 26,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/gS/r3-b4-locked-alias-bypass": {
+  "files": 3,
+  "commands": 6,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/known_limits/gS/r3-f-b1-b2-gate-s-fresh": {
+  "files": 2,
+  "commands": 17,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/unknown/g10/r3-a8-mathlib-w3-checks": {
+  "files": 2,
+  "commands": 9,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/unknown/g10/r3-d3-g10-typeclass-mkappm-crash": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/unknown/g10/r3-d4-g10-any-class-in-scope-crash": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/unknown/g10/r3-f-d3-g10-class-crash-fresh": {
+  "files": 1,
+  "commands": 2,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/unknown/g7b/r3-e2-g7b-hyp-helper": {
+  "files": 3,
+  "commands": 8,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/unknown/g7b/unapproved-helper": {
+  "files": 2,
+  "commands": 5,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/unknown/g9/r3-e4-g9-dep-premise-nec": {
+  "files": 2,
+  "commands": 4,
+  "parse_errors": [],
+  "issues": []
+ },
+ "report_cases/unknown/gS/r2-e2-let-have-fun-and": {
+  "files": 3,
+  "commands": 10,
+  "parse_errors": [],
+  "issues": []
+ }
+}
