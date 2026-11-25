@@ -82,7 +82,8 @@ def base_package(repo, fixture, warm=None):
         libs.add(path.relative_to(fixture / "formal_math").parts[0].removesuffix(".lean"))
     for lib in libs:
         (fm / lib).mkdir(exist_ok=True)
-    uses_mathlib = any("import Mathlib." in p.read_text() for p in lean_files)
+    uses_mathlib = any(re.search(r"import (Mathlib|Batteries|Aesop|Qq|Plausible|ProofWidgets)\b", p.read_text())
+                       for p in lean_files)
     if uses_mathlib:
         (fm / ".lake").mkdir()
         (fm / ".lake/packages").symlink_to((HERE.parent / ".lake/packages").resolve())

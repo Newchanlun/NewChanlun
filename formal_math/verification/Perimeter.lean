@@ -102,10 +102,20 @@ partial def kindIssues (lists : Lists) (env : Environment) (fallback stx : Synta
     return issues
   | _ => #[]
 
+/--
+用户源码能写出的语法类别。`prio`、`prec`、`attr` 等类别的宏由库内部在求属性参数时展开（如
+`@[simp]` 的默认优先级 `eval_prio default`），不留信息树，也不承载用户项；它们的处理器不擦除，
+其语法种类出现在用户源码里时照样过第 1 道。
+-/
+private def userCategories : List Name := [`command, `term, `tactic, `doElem]
+
 private def eraseOutside {γ} (lists : Lists) (attr : KeyedDeclsAttribute γ) (env : Environment) :
     Environment :=
+  let cats := (Parser.parserExtension.getState env).categories
+  let user (k : Name) := userCategories.any fun c => (cats.find? c).any (·.kinds.contains k)
   attr.ext.modifyState env fun s =>
-    { s with erased := s.table.fold (init := s.erased) fun acc _ entries =>
+    { s with erased := s.table.fold (init := s.erased) fun acc key entries =>
+        if !user key then acc else
         entries.foldl (init := acc) fun acc e =>
           if lists.elaborators.contains e.declName then acc else acc.insert e.declName }
 

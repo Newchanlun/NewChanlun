@@ -84,7 +84,12 @@ def gate1(root):
 
 def gate2(root):
     config = root / "formal_math/lakefile.toml"
-    package = tomllib.loads(config.read_text())
+    try:
+        package = tomllib.loads(config.read_text())
+    except tomllib.TOMLDecodeError as exc:
+        # 解析不了的配置不在白名单里（例如同一键既是值又是表，借此夹带子选项）。
+        red("2", "formal_math/lakefile.toml", 1, "LAKEFILE_KEY", f"lakefile.toml 无法解析：{exc}")
+        return 1
     options = package.get("leanOptions", {})
     failed = False
     controlled = {"autoImplicit", "relaxedAutoImplicit", "linter.unusedVariables"}

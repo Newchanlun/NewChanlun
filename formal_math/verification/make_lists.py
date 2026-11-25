@@ -44,24 +44,24 @@ PATH_RULES = [
 ]
 
 REJECT = {
-    "Lean.Elab.Command.elabEval": ("lean4", "Lean/Elab/BuiltinEvalCommand.lean",
-                                   "`#eval` 在精化期编译并运行用户项（含 IO）"),
-    "Lean.Elab.Term.elabIncludeStr": ("lean4", "Lean/Elab/BuiltinTerm.lean:431",
-                                      "`include_str` 经 evalTerm 求值用户项并读宿主机文件"),
-    "Lean.Elab.Term.elabUnsafe": ("lean4", "Lean/Elab/BuiltinNotation.lean:555",
-                                  "项级 `unsafe` 生成 unsafe 辅助声明与 implemented_by"),
-    "Lean.Elab.Term.elabRunElab": ("lean4", "Lean/Elab/BuiltinNotation.lean", "`run_elab` 运行用户元程序"),
-    "Lean.Elab.Tactic.evalRunTac": ("lean4", "Lean/Elab/Tactic/BuiltinTactic.lean", "`run_tac` 运行用户元程序"),
-    "Lean.Elab.Tactic.evalNativeDecide": ("lean4", "Lean/Elab/Tactic/Decide.lean",
+    # 语料里出现过的候选
+    "Lean.Elab.Command.elabEval": ("lean4", "src/lean/Lean/Elab/BuiltinEvalCommand.lean:179",
+                                   "`#eval` 经 elabEvalCoreUnsafe 在精化期编译并运行用户项（含 IO）"),
+    # 语料外、第四轮审阅指出的精化期求值入口；名单本是封闭的，列出只为留下判断依据
+    "Lean.Elab.Tactic.evalNativeDecide": ("lean4", "src/lean/Lean/Elab/Tactic/Decide.lean:202",
                                           "编译运行判定程序并引入 Lean.ofReduceBool"),
-    "Mathlib.Meta.elabEvalExpr": ("mathlib", "Mathlib/Tactic/Eval.lean:41", "`eval%` 经 evalExpr 运行用户项"),
-    "Mathlib.Tactic.elabSudoSetOption": ("mathlib", "Mathlib/Tactic/SudoSetOption.lean:50",
-                                         "`sudo set_option` 直改 Core.Context.options，不经 elabSetOption、不留 OptionInfo"),
-    "Mathlib.Tactic.elabTrace": ("mathlib", "Mathlib/Tactic/Trace.lean:24", "`trace` 经 evalExpr 运行用户项"),
-    "Mathlib.Tactic.successIfFailWithMsg": ("mathlib", "Mathlib/Tactic/SuccessIfFailWithMsg.lean",
-                                            "`success_if_fail_with_msg` 经 evalTerm 运行用户项"),
-    "Mathlib.Tactic.ByElab.elabByElab": ("mathlib", "Mathlib/Tactic/ByElab.lean",
-                                         "`by_elab` 运行用户写的 TermElabM 元程序"),
+    "Lean.Elab.Tactic.evalRunTac": ("lean4", "src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:682",
+                                    "`run_tac` 运行用户元程序"),
+    "Lean.Elab.Term.elabIncludeStr": ("lean4", "src/lean/Lean/Elab/BuiltinTerm.lean:437",
+                                      "`include_str` 经 evalTerm 求值用户项并读宿主机文件"),
+    "Lean.Elab.Term.elabRunElab": ("lean4", "src/lean/Lean/Elab/BuiltinNotation.lean:583",
+                                   "`by_elab` 运行用户写的 TermElabM 元程序"),
+    "Lean.Elab.Command.elabRunElab": ("lean4", "src/lean/Lean/Elab/BuiltinEvalCommand.lean:283",
+                                      "`run_elab` 运行用户元程序"),
+    "Lean.Elab.Term.elabUnsafe": ("lean4", "src/lean/Lean/Elab/BuiltinNotation.lean:556",
+                                  "项级 `unsafe` 生成 unsafe 辅助声明与 implemented_by"),
+    "Mathlib.Meta.elabEvalExpr": ("mathlib", ".lake/packages/mathlib/Mathlib/Tactic/Eval.lean:41",
+                                  "`eval%` 经 evalExpr 运行用户项"),
 }
 
 EXTRA = {

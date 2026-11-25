@@ -5,7 +5,7 @@
 语料：`must_green/` 全部夹具、`report_cases/clean/` 全部夹具、`formal_math/Chan/` 现有源码。
 
 用法（从仓库根，已 source scripts/fm_env.sh）：
-    python3 formal_math/verification/inventory.py <输出.json>
+    python3 formal_math/verification/inventory.py <输出.json> [增补夹具目录…]
 """
 
 import json
@@ -97,8 +97,14 @@ def main():
     rows = []
     cache = out.with_suffix(".rows.json")
     try:
+        extra = [Path(a).resolve() for a in sys.argv[2:]]
         if cache.is_file():
             rows = [tuple(r) for r in json.loads(cache.read_text())]
+            # 增补语料：只收新给的夹具，并入缓存。
+            for fixture in extra:
+                collect(tmp, warm, fixture, rows)
+            if extra:
+                cache.write_text(json.dumps(rows, ensure_ascii=False))
         else:
             for fixture in corpus():
                 collect(tmp, warm, fixture, rows)

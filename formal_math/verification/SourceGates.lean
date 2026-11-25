@@ -280,6 +280,8 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
   let mut issues := #[]
   let mut exposes := false
   let mut derived := #[]
+  -- 一条命令被拒后，余下命令只做精化前的检查、不再精化，让其他门（如门 2 的局部选项）仍有读数。
+  let mut stopped := false
   repeat
     Frontend.updateCmdPos
     let state ← Frontend.getCommandState
@@ -289,6 +291,7 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
       { env := state.env, options := scope.opts, currNamespace := scope.currNamespace,
         openDecls := scope.openDecls } ps {}
     if msgs.hasErrors then
+      if stopped then break  -- 前面的命令没有精化，后文解析不出来不另作判断。
       for m in msgs.toList do IO.eprintln (← m.toString)
       throw (IO.userError s!"{ctx.fileName}: 命令解析失败")
     if cmd.getKind == `Lean.Parser.Command.eoi then break
@@ -302,14 +305,19 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
       else pure #[]
     issues := issues ++ found
     -- 不执行已经被拒绝的命令或项。已拒绝的文件不会进入构建或环境门。
-    if gate3Blocked found then break
+    if stopped || gate3Blocked found then
+      stopped := true
+      if Parser.isTerminalCommand cmd then break
+      Frontend.setParserState next
+      continue
     if Parser.isTerminalCommand cmd then
       throw (IO.userError s!"{ctx.fileName}: 文件头之后的终止命令")
     Frontend.setParserState next
     let before := localNames state.env
     let optionsBefore := controlled scope.opts
-    unless auditTool do
-      -- 精化之中：各处理表里名单外的处理器擦除；宏展开出的名单外语法找不到处理器。
+    -- 精化之中：各处理表里名单外的处理器擦除；宏展开出的名单外语法找不到处理器。
+    -- selfcheck 要先精化样例里的宏定义本身，不封表。
+    if !auditTool && preCheck then
       Frontend.runCommandElabM <| modifyEnv (Perimeter.sealTables lists)
     Frontend.elabCommandAtFrontend cmd
     let state ← Frontend.getCommandState
@@ -332,7 +340,7 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
       let extra := extra.filter fun (s, g, d) =>
         !found.any fun (s', g', d') => g == g' && d == d' && s.getPos? == s'.getPos?
       issues := issues ++ extra
-      if preCheck && gate3Blocked extra then break
+      if preCheck && gate3Blocked extra then stopped := true
       -- 异步登记的子树（如 decreasing_by 的证明）先等齐再展开空洞。
       let infos := (state.infoState.substituteLazy).get
       let after ← Frontend.runCommandElabM do
@@ -342,7 +350,7 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
       let fresh := after.filter fun (s, g, d) =>
         !found.any fun (s', g', d') => g == g' && d == d' && s.getPos? == s'.getPos?
       issues := issues ++ fresh
-      if preCheck && gate3Blocked fresh then break
+      if preCheck && gate3Blocked fresh then stopped := true
     if state.messages.hasErrors then
       for m in state.messages.toList do
         if m.severity == .error then IO.eprintln (← m.toString)

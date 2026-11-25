@@ -123,6 +123,28 @@ private def location (env : Environment) (n : Name) : IO (String × Nat) := do
     catch _ => pure 0
   return (mod.toString, line)
 
+/-- 处理器实际被调用的记录：信息树看不到库内部的精化（如派生处理器里 `by injection` 的证明）。 -/
+builtin_initialize invoked : IO.Ref NameSet ← IO.mkRef {}
+
+/-- 宏在 `MacroM` 里跑，没有 IO；借 `unsafeBaseIO` 记一笔，结果参与返回值以免被优化掉。 -/
+@[noinline] private unsafe def note (n : Name) (stx : Syntax) : Syntax :=
+  match unsafeBaseIO (do invoked.modify (·.insert n); return stx) with
+  | s => s
+
+private def rewrap {γ} (attr : KeyedDeclsAttribute γ) (wrap : Name → γ → γ) (env : Environment) :
+    Environment :=
+  attr.ext.modifyState env fun s =>
+    { s with table := s.table.fold (init := {}) fun t k es =>
+        t.insert k (es.map fun e => { e with value := wrap e.declName e.value }) }
+
+/-- 给项、战术、命令、宏四张处理表的每个处理器套一层记录。 -/
+private unsafe def instrument (env : Environment) : Environment :=
+  env
+    |> rewrap Term.termElabAttribute (fun n f stx ty => do invoked.modify (·.insert n); f stx ty)
+    |> rewrap Tactic.tacticElabAttribute (fun n f stx => do invoked.modify (·.insert n); f stx)
+    |> rewrap commandElabAttribute (fun n f stx => do invoked.modify (·.insert n); f stx)
+    |> rewrap macroAttribute (fun n f stx => f (note n stx))
+
 unsafe def run (mod : Name) (path : String) : IO UInt32 := do
   let ctx := Parser.mkInputContext (← IO.FS.readFile path) path
   let (header, ps, msgs) ← Parser.parseHeader ctx
@@ -141,6 +163,7 @@ unsafe def run (mod : Name) (path : String) : IO UInt32 := do
       if cmd.getKind == `Lean.Parser.Command.eoi then break
       ref.modify fun s => { s with kinds := kindsOf cmd s.kinds }
       Frontend.setParserState next
+      Frontend.runCommandElabM <| modifyEnv instrument
       Frontend.elabCommandAtFrontend cmd
       let st ← Frontend.getCommandState
       let infos := (st.infoState.substituteLazy).get
@@ -157,6 +180,8 @@ unsafe def run (mod : Name) (path : String) : IO UInt32 := do
       toJson (hs.map fun (t, n) => #[t, n.toString])]).compress
   for (cat, n, k) in seen.elaborators do
     IO.println <| (Json.arr #[toJson "elab", toJson cat, toJson n.toString, toJson k.toString]).compress
+  for n in ← invoked.get do
+    IO.println <| (Json.arr #[toJson "elab", toJson "invoked", toJson n.toString, toJson ""]).compress
   return 0
 
 /-- 读入一个只含导入的文件的环境，对标准输入里的每个名字给出所在模块、声明行与危险常量。 -/

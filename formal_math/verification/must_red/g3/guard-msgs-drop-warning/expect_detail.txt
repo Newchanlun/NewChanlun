@@ -1,1 +1,1 @@
-#guard_msgs 不得丢弃消息
+#guard_msgs 只许不带规格的精确匹配写法
