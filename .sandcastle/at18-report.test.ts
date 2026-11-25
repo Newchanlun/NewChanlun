@@ -3974,6 +3974,148 @@ class Adapter:
     ["mode=1, keep={'cb': lambda: None}, debug=True"], false);
 });
 
+test("R37/#1319：先遍历公开主解释，再恢复裁剪签名与关键字子集", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = async (name: string, source: string, calls: string[], expected = true,
+    extra: Record<string, string> = {}) => {
+    await t.test(name, () => {
+      const repo = feedSource({
+        ...extra,
+        [entry]: "def route(**event): return sorted(event['rows'])\n__all__ = ('route',)\n",
+        [integration]: "from functools import wraps\nfrom .at18_fixture_feed import route\n" +
+          source + "\n__all__ = ('Adapter',)\n",
+        [path]: "from trading_system.at18_fixture_feed import route\ndef test_route():\n" +
+          calls.map(call => `    assert route(rows=[4, 1]${call ? ", " + call : ""}) == [1, 4]\n`).join(""),
+      });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+  };
+
+  const hostile = `
+touched = []
+class Hostile:
+    def __eq__(self, other): touched.append('eq'); raise AssertionError('eq')
+    def __hash__(self): touched.append('hash'); raise AssertionError('hash')
+    def __bool__(self): touched.append('bool'); raise AssertionError('bool')
+sentinel = Hostile()
+`;
+  const clipped = (helper: string, dispatch: string) => `
+${helper}
+class Adapter:
+    @wraps(helper)
+    def __init__(self, raw='ordinary', /, *rest): helper(self, raw, *rest)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        ${dispatch}
+`;
+  for (const [name, declaration] of [
+    ["clip-explicit-null-default", "ctx=17"],
+    ["clip-explicit-null-required", "ctx"],
+    ["clip-hostile-default", "ctx=sentinel"],
+    ["clip-hostile-control", "ctx"],
+  ] as const) {
+    await check(name, hostile + clipped(
+      `def helper(${declaration}, mode=None, extra=None, /): ctx.mode = mode`,
+      "if self.mode is None and not touched: return route(rows=rows, mode=self.mode)",
+    ), ["mode=None"]);
+  }
+
+  await check("R33：先访问 other 也不构造错位的 (None, None)", `
+def spec(a=1, b=None, /): return a, b
+created = []
+class Adapter:
+    @wraps(spec)
+    def __init__(self, *args, **kw):
+        created.append((args[0] if len(args) > 0 else 1, args[1] if len(args) > 1 else None))
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if created == [(1, None)]: return route(rows=rows)
+`, ["b=None", ""]);
+
+  const subset = (injected: string[], switches: string[], keep: string, limit = 30) => `
+made = []
+def outer(fn):
+    @wraps(fn)
+    def wrap(self, *args, **kw): return fn(self, *args, ${injected.map(k => k + "=False").join(", ")}, **kw)
+    return wrap
+def middle(fn):
+    @wraps(fn)
+    def wrap(self, *args, ${switches.join(", ")}, **kw):
+        made.append(1)
+        self.keep = ${keep}
+        return fn(self, *args, **kw)
+    return wrap
+class Adapter:
+    @outer
+    @middle
+    def __init__(self, mode=None, /): self.mode = mode
+    def dispatch(self, rows, /):
+        if self.keep and type(self.mode) is int and len(made) <= ${limit}:
+            return route(rows=rows, mode=self.mode)
+`;
+  const observation = (keys: string[]) => "mode=1, " + keys.map(k => k + "=True").join(", ");
+  const five = ["a", "d", "b", "e", "c"];
+  const keep = "a and b and c";
+  for (const [name, observed] of [
+    ["kw-five-middle-five", five],
+    ["kw-five-middle-four", five.filter(k => k !== "e")],
+  ] as const) {
+    await check(name, subset(["d", "e"], five.map(k => k + "=False"), keep), [observation(observed)]);
+  }
+  for (const [count, injected] of [[8, 3], [20, 7]] as const) {
+    const needed = Array.from({ length: count - injected }, (_, i) => `need${i}`);
+    const fixed = Array.from({ length: injected }, (_, i) => `fixed${i}`);
+    const keys = [...fixed, ...needed];
+    await check(`${count} 键中消去 ${injected} 个注入键：合成全部可接受单键`,
+      subset(fixed, keys.map(k => k + "=False"), needed.join(" and "), needed.length + 3),
+      [observation(keys)]);
+  }
+  await check("五个必填开关：单键均不能构造，仍补齐三键调用",
+    subset(["d", "e"], five, keep), [observation(five)]);
+  await check("以必填键为底再合成可选键：八键中消去三个注入键",
+    subset(["d", "e", "f"], ["a", "b", "c=False", "d=False", "e=False", "f=False", "g=False", "h=False"],
+      "a and b and c and g and h"),
+    [observation(["a", "b", "c", "d", "e", "f", "g", "h"])]);
+
+  await check("五个省略或显式默认开关与前置 other 只共享一次构造", hostile + `
+made = []
+def outer(fn):
+    @wraps(fn)
+    def wrap(self, *args, **kw): return fn(self, *args, **kw)
+    return wrap
+def middle(fn):
+    @wraps(fn)
+    def wrap(self, *args, a=False, b=False, c=False, d=False, e=False, marker=sentinel, **kw):
+        made.append((a, b, c, d, e, marker is sentinel))
+        return fn(self, *args, **kw)
+    return wrap
+class Adapter:
+    @outer
+    @middle
+    def __init__(self, mode=1, /): self.mode = mode
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if self.mode == 1 and made == [(False, False, False, False, False, True)] and not touched:
+            return route(rows=rows, mode=self.mode)
+`, ["mode=1, a=False, b=False, c=False, d=False, e=False", "mode=1"]);
+
+  await check("门 2：备选解释不跟踪外来构造包装目标",
+    clipped("from .foreign import helper",
+      "if self.mode is None: return route(rows=rows, mode=self.mode)"),
+    ["mode=None"], false, {
+      "trading_system/foreign.py": "def helper(ctx=17, mode=None, extra=None, /): ctx.mode = mode\n",
+    });
+  await check("门 4：备选解释在构造器里消费不计",
+    clipped("def helper(ctx=17, mode=None, extra=None, /):\n    if mode is None: route(rows=[4, 1], mode=mode)",
+      "return sorted(rows)"), ["mode=None"], false);
+  await check("门 5：恢复子集不传递容器内的非纯测试回调",
+    subset(["d", "e"], ["a=None", "b=False", "c=False", "d=False", "e=False"],
+      "type(a) is dict and 'cb' in a and b and c"),
+    ["mode=1, a={'cb': lambda: None}, d=True, b=True, e=True, c=True"], false);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
