@@ -1,6 +1,7 @@
-a92583f68c53dee1abb29e614431159032dd0ac9dc46bc91b20fe370d791d5a2  ./candidate/merge.py
-4e24ec2ea59997f71123ed9b8f2682c1ed183dee7317de89d4e48c33eea5191c  ./candidate/README.md
-2d8ff56a595543d5f00e9e639030a2762efcc3dfb8442a95eb4aaf41330cef86  ./candidate/tier1_candidate.jsonl
+038370fd7a8dd0740538aaecc2f1a2b74278bb20455cdc89da3e075295510f71  ./candidate/adjudications.json
+cbf1d140e1ba4b6908db647da28ee6a114e1cb6e6c3e4ac782b3051e5c0ba16b  ./candidate/merge.py
+2d10710bdbbc88a218d263c728d6741ecb850dfa8600d267c66d8d4fa4e34ed4  ./candidate/README.md
+d7bfaea0cc72d47323a5e0c604f5ed5b34e58bac38e6e1eb29191a62702c45bd  ./candidate/tier1_candidate.jsonl
 97afbc474b99a2d074c70b43fd3b38b4726daefec542e7c6e18f92f5c34e72b1  ./errata/errata.jsonl
 1edc083a64ee8bf5b077f3c965b4a5bab65c78f7f8796a2519cbc15e924f9268  ./errata/README.md
 ffcff1ead062aa0cc03062e6e285b225cd455910579aa7411054fcb74e19f262  ./errata/reports/r1-FM-09a-audit.md

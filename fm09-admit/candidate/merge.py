@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""合并甲、乙两遍：作者区间取交集（任一遍剔除的字符都不准入）。只读原件，结论现算。
+"""合并甲、乙两遍：作者区间取交集（任一遍剔除的字符都不准入），再减去 adjudications.json
+里主控按实物审逐条剔除的区间。只读原件，结论现算。处置文件只能剔除，不能恢复。
 用法（仓库根目录）：python3 -I fm09-admit/candidate/merge.py
 """
 import hashlib, json, os, sys
@@ -19,17 +20,26 @@ def spans(cs):
         if out and out[-1][1] == i: out[-1][1] = i + 1
         else: out.append([i, i + 1])
     return out
+adj = json.load(open(os.path.join(root, "fm09-admit/candidate/adjudications.json"), encoding="utf-8"))
+cut = {}
+for x in adj["exclude"]:
+    row_line = lib.load(x["lesson"])[0][x["line"] - 1]
+    assert row_line[x["span"][0]:x["span"][1]] == x["text"], ("处置区间与原文不符", x["id"])
+    cut.setdefault(x["id"], set()).update(range(*x["span"]))
+assert set(cut) <= set(want), "处置了不在表内的 id"
 rows, disputes = [], []
 for a, b in zip(A, B):
     assert (a["lesson"], a["line"]) == (b["lesson"], b["line"]), a["id"]
     assert a["quote_spans"] == b["quote_spans"], ("摘句定位不一致", a["id"])
     line = lib.load(a["lesson"])[0][a["line"] - 1]
-    au = spans(chars(a["author_spans"]) & chars(b["author_spans"]))
+    both = chars(a["author_spans"]) & chars(b["author_spans"])
+    assert cut.get(a["id"], set()) <= chars(a["quote_spans"]), ("处置区间不在摘句内", a["id"])
+    au = spans(both - cut.get(a["id"], set()))
     agree = a["author_spans"] == b["author_spans"]
     text = "".join(line[x:y] for x, y in au)
     verdict = "reject" if not au else ("clean" if au == a["quote_spans"] else "trimmed")
     row = {"id": a["id"], "lesson": a["lesson"], "line": a["line"], "quote_spans": a["quote_spans"],
-           "author_spans": au, "verdict": verdict, "passes_agree": agree,
+           "author_spans": au, "verdict": verdict, "passes_agree": agree, "adjudicated": a["id"] in cut,
            "pass_a": {"verdict": a["verdict"], "kind": a["nonauthor_kind"]},
            "pass_b": {"verdict": b["verdict"], "kind": b["nonauthor_kind"]},
            "author_text_sha256": hashlib.sha256(text.encode()).hexdigest() if au else ""}
