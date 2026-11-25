@@ -6936,10 +6936,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..e74904b 100644
+index e69de29..eef19a3 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,10359 @@
+@@ -0,0 +1,10417 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -12379,6 +12379,26 @@ index e69de29..e74904b 100644
 +		}
 +		_ = rf.Close()
 +	}
++	lfi, lerr := rootHandle.Lstat(launch)
++	if lerr != nil {
++		if errors.Is(lerr, os.ErrNotExist) {
++			return nil, false, nil
++		}
++		return nil, true, ErrUnavailable
++	}
++	if !lfi.IsDir() || lfi.Mode()&os.ModeSymlink != 0 || lfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(lfi) {
++		return &reviewEntry{
++			directory:        dir,
++			launch:           launch,
++			session:          session,
++			started:          now.UnixNano(),
++			tainted:          true,
++			taintedPersisted: true,
++			foreignDisk:      true,
++			reserved:         true,
++			touched:          now,
++		}, true, nil
++	}
 +	subRoot, subFI, err := openVerifiedSubdir(rootHandle, launch)
 +	if err != nil {
 +		if errors.Is(err, os.ErrNotExist) {
@@ -12558,12 +12578,39 @@ index e69de29..e74904b 100644
 +	}
 +	f, err := subRoot.OpenFile("receipt.json", os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 +	if err != nil {
++		if errors.Is(err, syscall.ELOOP) {
++			return &reviewEntry{
++				directory:        dir,
++				launch:           launch,
++				session:          session,
++				started:          now.UnixNano(),
++				tainted:          true,
++				taintedPersisted: true,
++				foreignDisk:      true,
++				reserved:         true,
++				touched:          now,
++			}, true, nil
++		}
 +		return nil, true, ErrUnavailable
 +	}
 +	fStat, statErr := f.Stat()
-+	if statErr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > maxReviewReceiptBytes {
++	if statErr != nil {
 +		_ = f.Close()
 +		return nil, true, ErrUnavailable
++	}
++	if !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > maxReviewReceiptBytes {
++		_ = f.Close()
++		return &reviewEntry{
++			directory:        dir,
++			launch:           launch,
++			session:          session,
++			started:          now.UnixNano(),
++			tainted:          true,
++			taintedPersisted: true,
++			foreignDisk:      true,
++			reserved:         true,
++			touched:          now,
++		}, true, nil
 +	}
 +	raw, readErr := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
 +	_ = f.Close()
@@ -12967,7 +13014,7 @@ index e69de29..e74904b 100644
 +	if err != nil || !rootExists {
 +		return
 +	}
-+	if _, statErr := os.Lstat(filepath.Join(root, launch)); statErr != nil {
++	if fi, statErr := os.Lstat(filepath.Join(root, launch)); statErr != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
 +		return
 +	}
 +	TaintReview(root, launch)
@@ -15165,26 +15212,32 @@ index e69de29..e74904b 100644
 +	return staging, nil
 +}
 +
-+func removeVerifiedMarkerInSubdir(subRoot *os.Root, dev, ino uint64, hasID bool, sha string) {
++func verifyMarkerInSubdir(subRoot *os.Root, dev, ino uint64, hasID bool, sha string) bool {
 +	if subRoot == nil || !hasID || sha == "" {
-+		return
++		return false
 +	}
 +	mf, merr := subRoot.OpenFile("producer.json", os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 +	if merr != nil {
++		return false
++	}
++	defer mf.Close()
++	mfi, serr := mf.Stat()
++	if serr != nil || !mfi.Mode().IsRegular() || mfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(mfi) || mfi.Size() <= 0 || mfi.Size() > 4096 {
++		return false
++	}
++	mDev, mIno, okM := statDevIno(mfi)
++	if !okM || mDev != dev || mIno != ino {
++		return false
++	}
++	mRaw, rerr := io.ReadAll(io.LimitReader(mf, 4097))
++	return rerr == nil && sha256Hex(string(mRaw)) == sha
++}
++
++func removeVerifiedMarkerInSubdir(subRoot *os.Root, dev, ino uint64, hasID bool, sha string) {
++	if !verifyMarkerInSubdir(subRoot, dev, ino, hasID, sha) {
 +		return
 +	}
-+	mfi, serr := mf.Stat()
-+	if serr == nil && mfi.Mode().IsRegular() && mfi.Mode().Perm()&0077 == 0 && ownedByCurrentUser(mfi) && mfi.Size() > 0 && mfi.Size() <= 4096 {
-+		if mDev, mIno, okM := statDevIno(mfi); okM && mDev == dev && mIno == ino {
-+			mRaw, rerr := io.ReadAll(io.LimitReader(mf, 4097))
-+			if rerr == nil && sha256Hex(string(mRaw)) == sha {
-+				_ = mf.Close()
-+				_ = subRoot.Remove("producer.json")
-+				return
-+			}
-+		}
-+	}
-+	_ = mf.Close()
++	_ = subRoot.Remove("producer.json")
 +}
 +
 +func removeVerifiedEmptySubdir(rootHandle *os.Root, name string, expectDev, expectIno uint64, hasID bool) {
@@ -16238,8 +16291,8 @@ index e69de29..e74904b 100644
 +		if !ok {
 +			return ""
 +		}
-+		if key == "model" {
-+			if seenModel {
++		if strings.EqualFold(key, "model") {
++			if key != "model" || seenModel {
 +				return ""
 +			}
 +			seenModel = true
@@ -16291,9 +16344,9 @@ index e69de29..e74904b 100644
 +		if !ok {
 +			return "", false
 +		}
-+		switch key {
-+		case "model":
-+			if seenModel {
++		switch {
++		case strings.EqualFold(key, "model"):
++			if key != "model" || seenModel {
 +				return "", false
 +			}
 +			seenModel = true
@@ -16302,8 +16355,8 @@ index e69de29..e74904b 100644
 +				return "", false
 +			}
 +			foundModel = value
-+		case "stream":
-+			if seenStream {
++		case strings.EqualFold(key, "stream"):
++			if key != "stream" || seenStream {
 +				return "", false
 +			}
 +			seenStream = true
@@ -17233,8 +17286,8 @@ index e69de29..e74904b 100644
 +			return
 +		}
 +	}
-+	// Refuse to publish into a polluted session directory containing unexpected files (such as
-+	// crash-left temp files or a pre-existing receipt.json); only our reservation marker may exist.
++	// Refuse to publish into a polluted or tampered session directory: ONLY our exact verified
++	// reservation marker (producer.json matching dev/ino/sha256) may exist prior to publication.
 +	subDirFile, err := subRoot.Open(".")
 +	if err != nil {
 +		return
@@ -17244,10 +17297,11 @@ index e69de29..e74904b 100644
 +	if readDirErr != nil && !errors.Is(readDirErr, io.EOF) {
 +		return
 +	}
-+	for _, ent := range subEntries {
-+		if ent.Name() != "producer.json" {
-+			return
-+		}
++	if len(subEntries) != 1 || subEntries[0].Name() != "producer.json" {
++		return
++	}
++	if !verifyMarkerInSubdir(subRoot, c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256) {
++		return
 +	}
 +	stagingRoot, err := ensureStagingDir(rootLease.dir, rootDir)
 +	if err != nil {
@@ -17291,6 +17345,10 @@ index e69de29..e74904b 100644
 +			return
 +		}
 +	}
++	if !verifyMarkerInSubdir(subRoot, c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256) {
++		_ = stagingRoot.Remove(tmp)
++		return
++	}
 +	linkErr := linkatPinned(stagingDirFD, tmp, subDirFD, "receipt.json")
 +	_ = stagingRoot.Remove(tmp)
 +	if linkErr != nil {
@@ -17300,10 +17358,10 @@ index e69de29..e74904b 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..2e5842c 100644
+index e69de29..b3c35b8 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,10688 @@
+@@ -0,0 +1,10849 @@
 +package preflightreceipt
 +
 +import (
@@ -24271,6 +24329,9 @@ index e69de29..2e5842c 100644
 +	if err != nil || fi.Mode()&os.ModeNamedPipe == 0 {
 +		t.Fatalf("FIFO producer.json was removed or altered: fi=%v err=%v", fi, err)
 +	}
++	if _, statErr := os.Lstat(filepath.Join(root, sess, "receipt.json")); !os.IsNotExist(statErr) {
++		t.Fatalf("publishLocked must NOT publish receipt.json when producer.json was replaced by FIFO: %v", statErr)
++	}
 +}
 +
 +func TestReviewReceiptCodexRateLimitsNotificationDoesNotBlockSeal(t *testing.T) {
@@ -27990,5 +28051,163 @@ index e69de29..2e5842c 100644
 +	c.HandlerDone(true)
 +	if st, dig := SealReviewWithDigest(root, launch, session); st != SealOK || !isSHA256Hex(dig) {
 +		t.Fatalf("SealReviewWithDigest with bare SSE fields = (%v, %q), want SealOK", st, dig)
++	}
++}
++
++func TestReviewReceiptForeignFileAtLaunchPathDoesNotTriggerTaintWriteOverflow(t *testing.T) {
++	// Sol P2 #2 (PR #2280 R57): a regular file (or non-dir) at a valid launch path must be
++	// isolated as foreignDisk for that launch and MUST NOT set process-wide taintWriteOverflow.
++	reviewMu.Lock()
++	savedOverflow := taintWriteOverflow
++	taintWriteOverflow = false
++	reviewMu.Unlock()
++	t.Cleanup(func() {
++		reviewMu.Lock()
++		taintWriteOverflow = savedOverflow
++		reviewMu.Unlock()
++	})
++
++	root := filepath.Join(t.TempDir(), "foreign-file-taint")
++	if err := os.MkdirAll(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	launch1 := "review-f7070707-2222-4333-8444-555555555501"
++	foreignPath := filepath.Join(root, launch1)
++	if err := os.WriteFile(foreignPath, []byte("not-a-directory"), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// Both TaintExistingReview and direct TaintReview must keep taintWriteOverflow=false and preserve the file.
++	TaintExistingReview(root, launch1)
++	TaintReview(root, launch1)
++	reviewMu.Lock()
++	overflowed := taintWriteOverflow
++	reviewMu.Unlock()
++	if overflowed {
++		t.Fatalf("foreign regular file at launch path escalated to process-wide taintWriteOverflow=true")
++	}
++	raw, err := os.ReadFile(foreignPath)
++	if err != nil || string(raw) != "not-a-directory" {
++		t.Fatalf("foreign file was modified or removed: raw=%q err=%v", string(raw), err)
++	}
++	if res, err := ReserveReview(root, launch1); !errors.Is(err, ErrUnavailable) || res != nil {
++		if res != nil {
++			res.Release()
++		}
++		t.Fatalf("ReserveReview(foreign launch1) = (%v, %v), want (nil, ErrUnavailable)", res, err)
++	}
++	if st := SealReview(root, launch1, "019d0000-0000-7000-8000-fffffffffd01"); st != SealRejected {
++		t.Fatalf("SealReview(foreign launch1) = %v, want SealRejected", st)
++	}
++
++	// An unrelated launch in the same root MUST still reserve, complete, and seal SealOK.
++	launch2 := "review-f7070707-2222-4333-8444-555555555502"
++	session2 := "019d0000-0000-7000-8000-fffffffffd02"
++	ctx, c, err := BeginReview(context.Background(), root, launch2, session2, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("unrelated BeginReview(launch2) failed: %v", err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_unrelated_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if st, dig := SealReviewWithDigest(root, launch2, session2); st != SealOK || !isSHA256Hex(dig) {
++		t.Fatalf("unrelated launch2 SealReviewWithDigest = (%v, %q), want SealOK", st, dig)
++	}
++}
++
++func TestPreflightReceiptRejectsCaseAliasModelAndStreamInRequests(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R57): outbound and inbound request JSON parsers must reject
++	// case-insensitive aliases ("Model", "MODEL", "Stream", "\u017ftream") so Go encoding/json
++	// struct decoding cannot pick an ambiguous model or stream value.
++	badOutbound := []string{
++		`{"model":"gpt-6.2-sol","Model":"other-model"}`,
++		`{"Model":"gpt-6.2-sol"}`,
++		`{"model":"gpt-6.2-sol","MODEL":"gpt-6.2-sol"}`,
++		`{"model":"gpt-6.2-sol","model":"gpt-6.2-sol"}`,
++	}
++	for _, body := range badOutbound {
++		if got := parseTopLevelJSONModel([]byte(body)); got != "" {
++			t.Fatalf("parseTopLevelJSONModel(%s) = %q, want empty", body, got)
++		}
++	}
++	if got := parseTopLevelJSONModel([]byte(`{"model":"gpt-6.2-sol","stream":true}`)); got != "gpt-6.2-sol" {
++		t.Fatalf("parseTopLevelJSONModel(canonical) = %q, want gpt-6.2-sol", got)
++	}
++
++	badInbound := []string{
++		`{"model":"gpt-6.2-sol","Model":"other-model","stream":true}`,
++		`{"Model":"gpt-6.2-sol","stream":true}`,
++		`{"model":"gpt-6.2-sol","stream":true,"Stream":false}`,
++		`{"model":"gpt-6.2-sol","Stream":true}`,
++		"{\"model\":\"gpt-6.2-sol\",\"\u017ftream\":true}",
++		"{\"model\":\"gpt-6.2-sol\",\"stream\":true,\"\u017ftream\":false}",
++	}
++	for _, body := range badInbound {
++		if m, ok := parseTopLevelJSONReviewRequest([]byte(body)); ok || m != "" {
++			t.Fatalf("parseTopLevelJSONReviewRequest(%s) = (%q, %v), want (\"\", false)", body, m, ok)
++		}
++	}
++	if m, ok := parseTopLevelJSONReviewRequest([]byte(`{"model":"gpt-6.2-sol","stream":true}`)); !ok || m != "gpt-6.2-sol" {
++		t.Fatalf("parseTopLevelJSONReviewRequest(canonical) = (%q, %v), want (gpt-6.2-sol, true)", m, ok)
++	}
++}
++
++func TestPreflightReceiptDoesNotPublishWhenMarkerMissingOrReplaced(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R57): legacy preflight publishLocked must verify producer.json
++	// exists and still matches the reservation's (dev, ino, sha256) BEFORE publishing receipt.json.
++	for _, mode := range []string{"deleted", "replaced"} {
++		t.Run(mode, func(t *testing.T) {
++			root := filepath.Join(t.TempDir(), "preflight-marker-"+mode)
++			sess := "preflight-f8080808-2222-4333-8444-555555555501"
++			ctx, c, err := Begin(context.Background(), root, sess)
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			})})
++			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++			resp, err := cl.Do(req)
++			if err != nil {
++				t.Fatal(err)
++			}
++			_, _ = io.Copy(io.Discard, resp.Body)
++			_ = resp.Body.Close()
++
++			markerPath := filepath.Join(root, sess, "producer.json")
++			if err := os.Remove(markerPath); err != nil {
++				t.Fatal(err)
++			}
++			if mode == "replaced" {
++				if err := os.WriteFile(markerPath, []byte(`{"schema":"cliproxy-preflight-v1","session":"`+sess+`","started_ns":1}`), 0600); err != nil {
++					t.Fatal(err)
++				}
++			}
++			e.End()
++			c.Complete(true)
++			c.HandlerDone(true)
++			if _, statErr := os.Lstat(filepath.Join(root, sess, "receipt.json")); !os.IsNotExist(statErr) {
++				t.Fatalf("publishLocked(%s) unexpectedly published receipt.json: %v", mode, statErr)
++			}
++		})
 +	}
 +}

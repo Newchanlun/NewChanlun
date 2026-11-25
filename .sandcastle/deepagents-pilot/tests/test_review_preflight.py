@@ -566,7 +566,8 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
     response = Response()
     deadline = preflight.Deadline(3)
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
-    response.read = lambda: b"".join(response)
+    chunks = iter(response)
+    response.read = lambda n=-1: next(chunks, b"")
     result = preflight._round_trip_http(LOCAL, KEY, OPUS, "preflight-test", deadline)
     assert result["ok"] is (tail == "eof")
     if tail == "eof":
@@ -1682,7 +1683,7 @@ def test_round_trip_rejects_unicode_nbsp_before_terminal_json():
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1723,7 +1724,7 @@ def test_round_trip_rejects_invalid_utf8_in_sse():
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1768,7 +1769,7 @@ def test_round_trip_accepts_single_leading_utf8_bom_and_rejects_second_bom():
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1821,7 +1822,7 @@ def test_round_trip_rejects_empty_status_on_non_terminal_event():
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1868,7 +1869,7 @@ def test_round_trip_rejects_unpaired_utf16_surrogate_and_accepts_valid_pair():
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1926,7 +1927,7 @@ def test_round_trip_rejects_case_alias_protocol_keys_matching_go_producer():
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -2012,3 +2013,75 @@ def test_round_trip_rejects_case_alias_protocol_keys_matching_go_producer():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_round_trip_http_enforces_bounded_sse_response_and_event_limits(monkeypatch):
+    """Astra P2 #3 (R57): _round_trip_http 须增量有界读取 SSE，拒绝超总字节/单事件上限响应，同时保留分块 BOM/CRLF 边界与 EOF 读完。"""
+    import io
+
+    # 1. 超总响应字节上限：须在触顶后立刻停止读取，不得无界耗尽内存。
+    class _HugeStreamResp:
+        status = 200
+
+        def __init__(self):
+            self.bytes_read = 0
+            self.reads = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            self.reads += 1
+            size = 8192 if n is None or n < 0 else min(n, 8192)
+            self.bytes_read += size
+            return b": " + b"x" * max(0, size - 3) + b"\n"
+
+    huge = _HugeStreamResp()
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: huge)
+    res_huge = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000086", preflight.Deadline(5))
+    assert res_huge["ok"] is False
+    assert huge.bytes_read <= preflight.MAX_SSE_RESPONSE_BYTES + preflight.SSE_READ_CHUNK_BYTES
+
+    # 2. 单多行 SSE 事件超过 MAX_SSE_EVENT_BYTES：即使总字节未超上限，也须拒绝。
+    chunk_line = b"data: " + b"a" * 1024 + b"\n"
+    oversized_event = chunk_line * ((preflight.MAX_SSE_EVENT_BYTES // 1024) + 2) + b"\n"
+
+    class _BytesStreamResp:
+        status = 200
+
+        def __init__(self, data: bytes, max_chunk: int = 8192):
+            self._buf = io.BytesIO(data)
+            self._max_chunk = max_chunk
+            self.eof_reached = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            take = self._max_chunk if n is None or n < 0 else min(n, self._max_chunk)
+            out = self._buf.read(take)
+            if not out:
+                self.eof_reached = True
+            return out
+
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _BytesStreamResp(oversized_event))
+    res_event = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000085", preflight.Deadline(5))
+    assert res_event["ok"] is False
+
+    # 3. 跨块拆分 UTF-8 BOM 与 CRLF：未超限响应须完整读到 EOF 并成功通过。
+    valid_payload = (
+        b"\xef\xbb\xbf"
+        b"event: response.completed\r\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_chunked","status":"completed"}}\r\n\r\n'
+    )
+    chunked = _BytesStreamResp(valid_payload, max_chunk=2)
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: chunked)
+    res_ok = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000084", preflight.Deadline(5))
+    assert res_ok["ok"] is True
+    assert chunked.eof_reached is True

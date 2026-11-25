@@ -9,6 +9,7 @@
 """
 import argparse
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
@@ -432,26 +433,102 @@ def _contains_surrogate(value: object) -> bool:
     return False
 
 
-def _split_sse_lines(raw: bytes) -> list[bytes]:
-    lines: list[bytes] = []
-    start = 0
-    i = 0
-    n = len(raw)
-    while i < n:
-        b = raw[i]
-        if b == 13:  # CR
-            lines.append(raw[start:i])
-            i += 2 if i + 1 < n and raw[i + 1] == 10 else 1
-            start = i
-        elif b == 10:  # LF
-            lines.append(raw[start:i])
-            i += 1
-            start = i
-        else:
-            i += 1
-    if start < n:
-        lines.append(raw[start:n])
-    return lines
+MAX_SSE_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_SSE_EVENT_BYTES = 256 * 1024
+SSE_READ_CHUNK_BYTES = 8192
+
+
+class _SSEReadLimitError(Exception):
+    pass
+
+
+def _iter_bounded_sse_lines(
+    response,
+    deadline: Deadline,
+    *,
+    max_total_bytes: int = MAX_SSE_RESPONSE_BYTES,
+    max_line_bytes: int = MAX_SSE_EVENT_BYTES,
+    chunk_bytes: int = SSE_READ_CHUNK_BYTES,
+):
+    """增量按块读取 SSE 流并执行总字节数与单行上限，未超限时必须读至 EOF 以保留截断传输检测。"""
+    total_bytes = 0
+    bom_checked = False
+    bom_buf = bytearray()
+    pending_cr = False
+    line_buf = bytearray()
+
+    while True:
+        if deadline.work_left() <= 0:
+            return
+        remaining = max_total_bytes - total_bytes
+        read_size = min(chunk_bytes, remaining + 1)
+        chunk = response.read(read_size)
+        if not chunk:
+            if (getattr(response, "length", None) or 0) > 0 or (
+                getattr(response, "chunked", False) and getattr(response, "chunk_left", None) is not None
+            ):
+                raise http.client.IncompleteRead(b"")
+            break
+        total_bytes += len(chunk)
+        if total_bytes > max_total_bytes:
+            raise _SSEReadLimitError("SSE 响应超过大小上限")
+
+        if not bom_checked:
+            need = 3 - len(bom_buf)
+            bom_buf.extend(chunk[:need])
+            rest = chunk[need:]
+            if len(bom_buf) < 3 and b"\xef\xbb\xbf".startswith(bom_buf):
+                continue
+            bom_checked = True
+            if bom_buf == b"\xef\xbb\xbf":
+                chunk = rest
+            else:
+                chunk = bytes(bom_buf) + rest
+            bom_buf.clear()
+            if not chunk:
+                continue
+
+        idx = 0
+        if pending_cr:
+            pending_cr = False
+            if chunk[0] == 10:
+                idx = 1
+
+        n = len(chunk)
+        start = idx
+        while idx < n:
+            b = chunk[idx]
+            if b == 13 or b == 10:
+                if idx > start:
+                    if len(line_buf) + (idx - start) > max_line_bytes:
+                        raise _SSEReadLimitError("SSE 单行超过大小上限")
+                    line_buf.extend(chunk[start:idx])
+                yield bytes(line_buf)
+                line_buf.clear()
+                if b == 13:
+                    if idx + 1 < n and chunk[idx + 1] == 10:
+                        idx += 2
+                    else:
+                        if idx + 1 == n:
+                            pending_cr = True
+                        idx += 1
+                else:
+                    idx += 1
+                start = idx
+            else:
+                idx += 1
+
+        if start < n:
+            if len(line_buf) + (n - start) > max_line_bytes:
+                raise _SSEReadLimitError("SSE 单行超过大小上限")
+            line_buf.extend(chunk[start:n])
+
+    if not bom_checked and bom_buf:
+        if len(line_buf) + len(bom_buf) > max_line_bytes:
+            raise _SSEReadLimitError("SSE 单行超过大小上限")
+        line_buf.extend(bom_buf)
+    if line_buf:
+        yield bytes(line_buf)
 
 
 def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
@@ -478,112 +555,122 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
             terminal, detail, status = None, "流在终态事件前结束", None
             has_response_dict = False
             data_lines: list[str] = []
+            event_data_bytes = 0
             event_name: str | None = None
-            raw_body = response.read()
-            if raw_body.startswith(b"\xef\xbb\xbf"):
-                raw_body = raw_body[3:]
-            for raw in _split_sse_lines(raw_body):
-                if deadline.work_left() <= 0:
-                    detail = "总时限内无终态事件"
-                    break
-                try:
-                    line = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    detail = "SSE 包含非法 UTF-8 字节"
-                    break
-                if line == "":
-                    ev_name = event_name
-                    event_name = None
-                    if data_lines:
-                        joined = "\n".join(data_lines).strip(" \t\r\n")
-                        data_lines = []
-                        if joined == "[DONE]":
-                            if ev_name is not None or terminal is None:
-                                detail = "SSE 存在提前或带事件名的 [DONE]"
-                                break
-                            continue
-                        if not joined:
-                            if ev_name is not None:
-                                detail = "SSE 存在空数据事件"
-                                break
-                            continue
-                        if terminal is not None:
-                            detail = "终态事件后出现多余数据事件"
-                            break
-                        if not joined.startswith("{"):
-                            detail = "SSE 存在非 JSON 对象数据事件"
-                            break
-                        try:
-                            event = json.loads(
-                                joined,
-                                object_pairs_hook=_no_duplicate_keys,
-                                parse_constant=_reject_json_constant,
-                            )
-                            if _contains_surrogate(event):
-                                raise ValueError("unpaired UTF-16 surrogate")
-                            _validate_sse_protocol_key_casing(event)
-                        except ValueError:
-                            detail = "SSE 数据帧 JSON 解析失败"
-                            break
-                        if not isinstance(event, dict) or not isinstance(event.get("type"), str) or not event["type"].strip():
-                            detail = "SSE 数据事件缺少合法 type"
-                            break
-                        if ev_name is not None and event.get("type") != ev_name:
-                            detail = "SSE 事件名与数据 type 不一致"
-                            break
-                        raw_inner = event.get("response")
-                        if raw_inner is not None and not isinstance(raw_inner, dict):
-                            detail = "SSE 响应字段须为 JSON 对象"
-                            break
-                        inner = raw_inner if isinstance(raw_inner, dict) else {}
-                        if event.get("type") in TERMINAL_EVENTS:
-                            terminal = event.get("type")
-                            has_response_dict = isinstance(raw_inner, dict)
-                            # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
-                            status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
-                                None if inner.get("status") is None else "other")
-                            detail = next(
-                                (val for val in (inner.get("error"), event.get("error"), event.get("message"))
-                                 if val is not None),
-                                None,
-                            )
-                            # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
-                        else:
-                            ev_err = next(
-                                (val for val in (inner.get("error"), event.get("error")) if val is not None),
-                                None,
-                            )
-                            if ev_err is not None:
-                                detail = ev_err
-                                break
-                            ev_status = inner.get("status")
-                            ev_type = event.get("type")
-                            if ev_status is not None and (
-                                ev_status not in ("in_progress", "queued")
-                                or (ev_type == "response.queued" and ev_status != "queued")
-                                or (ev_type == "response.in_progress" and ev_status != "in_progress")
-                            ):
-                                detail = "非终态事件携带非法状态"
-                                break
-                    elif ev_name is not None:
-                        detail = "SSE 存在无数据事件头"
+            try:
+                for raw in _iter_bounded_sse_lines(response, deadline):
+                    if deadline.work_left() <= 0:
+                        detail = "总时限内无终态事件"
                         break
-                    continue
-                if line == "event" or line.startswith("event:"):
-                    val = "" if line == "event" else line[6:]
-                    if val.startswith(" "):
-                        val = val[1:]
-                    event_name = val
-                elif line == "data" or line.startswith("data:"):
-                    val = "" if line == "data" else line[5:]
-                    if val.startswith(" "):
-                        val = val[1:]
-                    data_lines.append(val)
-                elif line in ("id", "retry") or line.startswith((":", "id:", "retry:")):
-                    continue
-                else:
-                    detail = "SSE 存在非法非协议行"
-                    break
+                    try:
+                        line = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        detail = "SSE 包含非法 UTF-8 字节"
+                        break
+                    if line == "":
+                        ev_name = event_name
+                        event_name = None
+                        if data_lines:
+                            joined = "\n".join(data_lines).strip(" \t\r\n")
+                            data_lines = []
+                            event_data_bytes = 0
+                            if joined == "[DONE]":
+                                if ev_name is not None or terminal is None:
+                                    detail = "SSE 存在提前或带事件名的 [DONE]"
+                                    break
+                                continue
+                            if not joined:
+                                if ev_name is not None:
+                                    detail = "SSE 存在空数据事件"
+                                    break
+                                continue
+                            if terminal is not None:
+                                detail = "终态事件后出现多余数据事件"
+                                break
+                            if not joined.startswith("{"):
+                                detail = "SSE 存在非 JSON 对象数据事件"
+                                break
+                            try:
+                                event = json.loads(
+                                    joined,
+                                    object_pairs_hook=_no_duplicate_keys,
+                                    parse_constant=_reject_json_constant,
+                                )
+                                if _contains_surrogate(event):
+                                    raise ValueError("unpaired UTF-16 surrogate")
+                                _validate_sse_protocol_key_casing(event)
+                            except ValueError:
+                                detail = "SSE 数据帧 JSON 解析失败"
+                                break
+                            if not isinstance(event, dict) or not isinstance(event.get("type"), str) or not event["type"].strip():
+                                detail = "SSE 数据事件缺少合法 type"
+                                break
+                            if ev_name is not None and event.get("type") != ev_name:
+                                detail = "SSE 事件名与数据 type 不一致"
+                                break
+                            raw_inner = event.get("response")
+                            if raw_inner is not None and not isinstance(raw_inner, dict):
+                                detail = "SSE 响应字段须为 JSON 对象"
+                                break
+                            inner = raw_inner if isinstance(raw_inner, dict) else {}
+                            if event.get("type") in TERMINAL_EVENTS:
+                                terminal = event.get("type")
+                                has_response_dict = isinstance(raw_inner, dict)
+                                # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
+                                status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
+                                    None if inner.get("status") is None else "other")
+                                detail = next(
+                                    (val for val in (inner.get("error"), event.get("error"), event.get("message"))
+                                     if val is not None),
+                                    None,
+                                )
+                                # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
+                            else:
+                                ev_err = next(
+                                    (val for val in (inner.get("error"), event.get("error")) if val is not None),
+                                    None,
+                                )
+                                if ev_err is not None:
+                                    detail = ev_err
+                                    break
+                                ev_status = inner.get("status")
+                                ev_type = event.get("type")
+                                if ev_status is not None and (
+                                    ev_status not in ("in_progress", "queued")
+                                    or (ev_type == "response.queued" and ev_status != "queued")
+                                    or (ev_type == "response.in_progress" and ev_status != "in_progress")
+                                ):
+                                    detail = "非终态事件携带非法状态"
+                                    break
+                        elif ev_name is not None:
+                            detail = "SSE 存在无数据事件头"
+                            break
+                        continue
+                    if line == "event" or line.startswith("event:"):
+                        val = "" if line == "event" else line[6:]
+                        if val.startswith(" "):
+                            val = val[1:]
+                        event_name = val
+                    elif line == "data" or line.startswith("data:"):
+                        val = "" if line == "data" else line[5:]
+                        if val.startswith(" "):
+                            val = val[1:]
+                        event_data_bytes += len(val.encode("utf-8")) + (1 if data_lines else 0)
+                        if event_data_bytes > MAX_SSE_EVENT_BYTES:
+                            detail = "SSE 单事件超过大小上限"
+                            data_lines = []
+                            event_data_bytes = 0
+                            break
+                        data_lines.append(val)
+                    elif line in ("id", "retry") or line.startswith((":", "id:", "retry:")):
+                        continue
+                    else:
+                        detail = "SSE 存在非法非协议行"
+                        break
+            except _SSEReadLimitError as limit_err:
+                detail = str(limit_err)
+                data_lines = []
+                event_name = None
             if data_lines:
                 trailing = "\n".join(data_lines).strip(" \t\r\n")
                 if (trailing and (trailing != "[DONE]" or terminal is None)) or event_name is not None:

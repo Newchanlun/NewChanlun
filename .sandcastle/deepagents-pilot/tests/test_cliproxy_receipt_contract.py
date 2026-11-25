@@ -1,5 +1,6 @@
 """#1742 CLIProxy Go 生产者收据与 Python `_review_preflight_log` / `review_preflight` 跨语言契约回归。"""
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -500,8 +501,17 @@ def test_generated_go_codex_and_review_receipts_consumed_by_python():
             expected_output_sha256=client_out_sha,
             min_requests=2,
         ) is None
+        # 缺省封存摘要或封存摘要不匹配均须失败闭合。
         assert log_mod.review_from_receipt(
             root / name, launch, session, since, 0,
+            expected_receipt_sha256="",
+            expected_response_id_sha256=client_resp_id_sha,
+            expected_output_sha256=client_out_sha,
+            min_requests=2,
+        ) is None
+        assert log_mod.review_from_receipt(
+            root / name, launch, session, since, 0,
+            expected_receipt_sha256=hashlib.sha256(b"wrong-receipt-digest").hexdigest(),
             expected_response_id_sha256=client_resp_id_sha,
             expected_output_sha256=client_out_sha,
             min_requests=2,
@@ -532,14 +542,17 @@ def test_round_trip_http_accepts_multiline_sse_json_event(monkeypatch):
     class _FakeResp:
         status = 200
 
+        def __init__(self):
+            self._buf = io.BytesIO(payload)
+
         def __enter__(self):
             return self
 
         def __exit__(self, *args):
             return False
 
-        def read(self):
-            return payload
+        def read(self, n=-1):
+            return self._buf.read(n)
 
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
     result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-multiline", preflight.Deadline(5))
@@ -558,14 +571,17 @@ def test_round_trip_http_rejects_unclosed_multiline_sse_event(monkeypatch):
     class _FakeResp:
         status = 200
 
+        def __init__(self):
+            self._buf = io.BytesIO(payload)
+
         def __enter__(self):
             return self
 
         def __exit__(self, *args):
             return False
 
-        def read(self):
-            return payload
+        def read(self, n=-1):
+            return self._buf.read(n)
 
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
     result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-unclosed", preflight.Deadline(5))
@@ -584,14 +600,17 @@ def test_round_trip_http_rejects_unclosed_trailing_event_after_completed(monkeyp
     class _FakeResp:
         status = 200
 
+        def __init__(self):
+            self._buf = io.BytesIO(payload)
+
         def __enter__(self):
             return self
 
         def __exit__(self, *args):
             return False
 
-        def read(self):
-            return payload
+        def read(self, n=-1):
+            return self._buf.read(n)
 
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
     result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-unclosed-tail", preflight.Deadline(5))
@@ -714,14 +733,17 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
         class _FakeResp:
             status = 200
 
+            def __init__(self, _p=payload):
+                self._buf = io.BytesIO(_p)
+
             def __enter__(self):
                 return self
 
             def __exit__(self, *args):
                 return False
 
-            def read(self, _p=payload):
-                return _p
+            def read(self, n=-1):
+                return self._buf.read(n)
 
         monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
         result = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-ev-mismatch", preflight.Deadline(5))
@@ -739,14 +761,17 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
     class _ValidMetaResp:
         status = 200
 
+        def __init__(self):
+            self._buf = io.BytesIO(valid_meta)
+
         def __enter__(self):
             return self
 
         def __exit__(self, *args):
             return False
 
-        def read(self):
-            return valid_meta
+        def read(self, n=-1):
+            return self._buf.read(n)
 
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _ValidMetaResp())
     assert preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-valid-meta", preflight.Deadline(5))["ok"] is True
