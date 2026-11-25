@@ -20,7 +20,7 @@ python3 formal_math/verification/selftest.py
 |---|---|
 | 1 钉选 | 文件中的工具链、运行中的 Lean 与九个依赖的修订须符合钉选。 |
 | 2 零告警 | 受控选项不得在源码或 Lake 目标中覆盖；`lake build --wfail` 构建默认目标和源码发现的模块（包括未被聚合文件导入的子模块）。 |
-| 3 可信源码与环境 | 源码须符合下节命令白名单，整树不能有禁用项、战术及属性。环境仍逐常量检查，包括私有项和无范围的生成项；公理闭包只接受 `propext`、`Classical.choice`、`Quot.sound`。 |
+| 3 可信源码与环境 | 源码须符合下节命令白名单，整树不能有禁用项、战术及属性。环境对有源码范围的常量检查 `unsafe`、`partial`、`implemented_by`、`extern`；公理及公理闭包检查覆盖全部常量，包括私有项和无范围的生成项。包内不能声明公理，闭包只接受 `propext`、`Classical.choice`、`Quot.sound`。 |
 | 6a 声明锁 | Defs、Hypotheses、Audit/Literal、ChanChallenge 按环境中的模块归属枚举，含私有声明。 `FM-lock-v2` 以序号表达绑定变量和宇宙参数，编码声明类别、可约性、类型与非定理的定义体。锁集多、少、变均红。 |
 | 6b 路径权限 | 分别核对提交、暂存区与工作树的变更；不让差异相消。声明锁及非空签注由 `decl/` 维护；`infra/` 只能初始化空签注。分离 HEAD 用 `GITHUB_HEAD_REF`，缺失退 2。 |
 | S 陈述范式 | 可信目录手写命题陈述的骨架只接受全称／蕴含、`And`、`Or`、`Not`、`Iff`、`Exists`、`ExistsUnique` 或原子。未锁定的项目命题别名先展开；原子以局部变量或声明末端字面为 `Prop` 的常量为头。不在骨架上用 `if`、`match`、`id`、投影或取默认值包装命题；`True` 及不含外层绑定变量的闭命题不能作前提或合取项。数据项不受骨架限制。 |
@@ -44,18 +44,20 @@ python3 formal_math/verification/selftest.py
 
 ### 节点来自声明范围，不按名字猜
 
-门 7a、9 在 Thm、Proofs、Exec、ChanChallenge 枚举**有 Lean 源码声明范围且类型为命题**的常量。用 Lean 4.36.0（`611c117b`）按审计实际路径以 `.private` 加载夹具对象，逐个读取 `findDeclarationRangesCore?`：
+门 7a、9 在 Thm、Proofs、Exec、ChanChallenge 枚举**有 Lean 源码声明范围、类型为命题、且种类为定理、定义或 opaque** 的常量。结构字段投影、构造器、递归子和归纳类型不算节点。用 Lean 4.36.0（`611c117b`）按审计实际路径以 `.private` 加载夹具对象，逐个读取 `findDeclarationRangesCore?`：
 
 | 写法 | 有范围 | 无范围的代表项 |
 |---|---|---|
-| `deriving DecidableEq, Repr, Ord` | `Dir`、手写构造器、派生实例及 `instReprDir.repr`、`instOrdDir.ord`；这些类型都不是命题 | `instDecidableEqDir._proof_1/_proof_2`、`Dir.ofNat_ctorIdx` |
+| `deriving DecidableEq, Repr, Ord` | `Dir`、手写构造器、派生实例及 `instReprDir.repr`、`instOrdDir.ord`；这些类型都不是命题 | `instDecidableEqDir._proof_1/_proof_2`、`Dir.ofNat_ctorIdx`、`Dir.ctorIdx`、`Dir.ctorIdx._impl` |
 | `termination_by`／`decreasing_by` | `countdown` | `countdown._proof_1`、`countdown.eq_def`、`countdown._unsafe_rec` |
 | 模式匹配的结构递归定理 | `recThm` | `recThm._f`、私有 `recThm.match_1_1` |
 | `where`、`let rec` | 外层声明和手写的局部助手；私有名称也查到 | 局部递归助手的 `_f` |
 | `mutual` | 两个手写定理 `mutualA`、`mutualB` | 两个 `_f` 及私有匹配辅助项 |
 | 命题类与 `instance` | `Pos.mk`、`Pos.pos`、命名及匿名实例 `posOne`、`instPosOfNatNat` 都是命题常量 | `Pos.mk._flat_ctor` |
 
-按该规则，主控原样 b4 缺 `Pos.mk`、`Pos.pos` 的登记和见证；b5kill 的精化定理可通过，但原件没有新的居留见证。自测各自保留原件，并另测只补证据的同形绿样。另一个问题来自不变的门 3 环境层：普通归纳类型生成 `Dir.ctorIdx` 的 `implemented_by` 和 `Dir.ctorIdx._impl` 的 `unsafe`，会导致真实写法组的全门验收仍红。
+原样 b4 无须为 `Pos.mk` 或 `Pos.pos` 登记或写见证；b5kill 原件没有居留见证，故为红，自测另保留补闭项的绿样。
+
+门 3 不会把无范围的 `Dir.ctorIdx`（带 `implemented_by`）与 `Dir.ctorIdx._impl`（带 `unsafe`）当成手写禁用构造。这个区别依赖门 2、3 的源码命令白名单：用户代码不能绕开源码声明直接造常量；安全定理不能引用 `unsafe` 常量，全部常量仍检查公理闭包，包括 `sorryAx`、`Lean.ofReduceBool` 和 `Lean.trustCompiler`。手写 `unsafe def` 和 `@[implemented_by]` 在源码层与环境层均有必红夹具。
 
 ### 登记主定理的前提
 
@@ -91,7 +93,7 @@ python3 formal_math/verification/selftest.py
 
 ## 自测与构建
 
-自测把每个夹具装入 `TMPDIR` 中的独立最小包，通过同一 Python 入口重算退出码、代码和指定声明名。报告分开计数 `must_red`、`must_green`、`must_unknown`、`known_limits`。紧凑复跑可传门编号；有共享预编译缓存时可用 `--jobs 4`。
+自测把每个夹具装入独立最小包，重算退出码、代码和指定声明名。macOS 上夹具与子进程临时文件都放在 `/Volumes/AgentStorage/fm/tmp/`；Linux 上用 `TMPDIR`。夹具结束时删除独立的 `.lake/build` 和临时文件，不清理共享预编译包。报告分开计数 `must_red`、`must_green`、`must_unknown`、`known_limits`。紧凑复跑可传门编号；macOS 内置盘低于 6 GiB 时停止派发，默认串行。
 
 门 3、7b、8b 装载 `.olean` 私有分片，并先读 ChanTest 的私有探针证明体；可见性不足返回 2。原先用 `import all` 也读到了探针正文，但只读基础 `.olean` 拿不到这个私有名称。
 

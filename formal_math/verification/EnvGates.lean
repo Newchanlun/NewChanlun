@@ -28,6 +28,9 @@ private def owner (env : Environment) (name : Name) : Option Name := do
 private def node (entry : Entry) : MetaM Bool := do
   unless [`Chan.Thm, `Chan.Proofs, `Chan.Exec, `ChanChallenge].any (within entry.mod) do
     return false
+  unless entry.info matches .thmInfo _ | .defnInfo _ | .opaqueInfo _ do return false
+  let env ← getEnv
+  if (env.getProjectionStructureName? entry.name).isSome then return false
   if (← findDeclarationRangesCore? entry.name).isNone then return false
   isProp entry.info.type
 

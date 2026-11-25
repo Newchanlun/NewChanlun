@@ -130,11 +130,25 @@ def exercise(tmp, fixture, gate, color):
                     env["GITHUB_HEAD_REF"] = "proof/ci"
                 elif mode != "absent":
                     env["GITHUB_HEAD_REF"] = mode
-        result = subprocess.run(
-            [sys.executable, str(repo / "formal_math/verification/run_gates.py"),
-             "--repo-root", str(repo), "--gate", gate],
-            cwd=repo, env=env, capture_output=True, text=True, check=False,
-        )
+        if gate == "3" and (fixture / "environment-only.txt").is_file():
+            # 源码必红样本另测前端；这里直接核对手写声明在环境层也不能通过。
+            fm = repo / "formal_math"
+            build = subprocess.run(
+                ["lake", "build", "+Chan:olean", "+ChanTest.Probe:olean"],
+                cwd=fm, env=env, capture_output=True, text=True,
+            )
+            if build.returncode:
+                raise ValueError(build.stdout + build.stderr)
+            result = subprocess.run(
+                ["lake", "exe", "fm_audit", "3", "Chan", "ChanTest.Probe"],
+                cwd=fm, env=env, capture_output=True, text=True,
+            )
+        else:
+            result = subprocess.run(
+                [sys.executable, str(repo / "formal_math/verification/run_gates.py"),
+                 "--repo-root", str(repo), "--gate", gate],
+                cwd=repo, env=env, capture_output=True, text=True, check=False,
+            )
     rows = [
         re.fullmatch(rf"GATE{gate} RED (\S+):(\S+) ([A-Z_]+) .+", line)
         for line in result.stdout.splitlines()
