@@ -445,7 +445,7 @@ MAX_HTTP_HEADER_BYTES = 65536
 _CHUNK_SIZE_HEX_RE = re.compile(rb"[0-9A-Fa-f]{1,16}")
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,20}")
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
-_HTTP_STATUS_LINE_RE = re.compile(rb"HTTP/1\.([01]) ([0-9]{3})(?: ([\t\x20-\x7e]*))?")
+_HTTP_STATUS_LINE_RE = re.compile(rb"HTTP/1\.([01]) ([0-9]{3}) ([\t\x20-\x7e\x80-\xff]*)")
 _TRAILER_FIELD_RE = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+:[\t\x20-\x7e\x80-\xff]*")
 _TCHAR_BYTES = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
@@ -691,7 +691,11 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
         raise urllib.error.URLError("unsupported URL")
     host = parsed.hostname
     default_port = 443 if scheme == "https" else 80
-    port = parsed.port or default_port
+    try:
+        parsed_port = parsed.port
+    except ValueError as err:
+        raise urllib.error.URLError("invalid port") from err
+    port = default_port if parsed_port is None else parsed_port
     if not (1 <= port <= 65535):
         raise urllib.error.URLError("invalid port")
     method = request.get_method()
@@ -725,7 +729,11 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
     try:
         if scheme == "https":
             ctx = ssl.create_default_context()
-            # 禁用 suppress_ragged_eofs：对端若未发送 TLS close_notify 即断流，必须抛出 SSLEOFError 而非当成正常 EOF。
+            # 清除 OpenSSL 3.x 默认可能开启的 OP_IGNORE_UNEXPECTED_EOF，并禁用 suppress_ragged_eofs：
+            # 对端若未发送 TLS close_notify 即断流，TLS 层必须抛出 SSLEOFError 而非当成正常 EOF。
+            op_ignore_eof = getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+            if op_ignore_eof:
+                ctx.options &= ~op_ignore_eof
             sock = ctx.wrap_socket(raw_sock, server_hostname=host, suppress_ragged_eofs=False)
         sock.settimeout(timeout)
         sock.sendall(wire_head)
@@ -749,7 +757,7 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
                 raise http.client.BadStatusLine("invalid status line")
             http_minor = m.group(1)
             status_code = int(m.group(2))
-            reason = (m.group(3) or b"").decode("ascii")
+            reason = m.group(3).decode("latin-1")
             if status_code == 101:
                 raise http.client.HTTPException("unsupported 101 Switching Protocols")
 

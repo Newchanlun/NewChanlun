@@ -7390,10 +7390,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..3ca92dc 100644
+index e69de29..eb3d391 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11061 @@
+@@ -0,0 +1,11080 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -13242,18 +13242,7 @@ index e69de29..3ca92dc 100644
 +	if validProducer && disk.Sealed {
 +		// A clean sealed directory cannot simultaneously contain an unfinished seal.pending.json
 +		// or any unexpected extra files; treat contradictory disk states as tainted/foreign.
-+		entries, trunc, rerr := readDirCapped(subRoot, maxProducerLeafFiles)
-+		contradictory := rerr != nil || trunc
-+		if !contradictory {
-+			for _, de := range entries {
-+				switch de.Name() {
-+				case "receipt.json", "seal.sha256", "producer.json":
-+				default:
-+					contradictory = true
-+				}
-+			}
-+		}
-+		if contradictory {
++		if !verifyReviewDirAllowedEntries(subRoot, true) {
 +			return &reviewEntry{
 +				directory:        dir,
 +				launch:           launch,
@@ -14213,6 +14202,27 @@ index e69de29..3ca92dc 100644
 +	return true, nil
 +}
 +
++// verifyReviewDirAllowedEntries enforces the exact directory-entry allowlist shared by
++// pre-write inspection, first seal, cold-restart loading, and repeat seal verification.
++func verifyReviewDirAllowedEntries(subRoot *os.Root, allowSealedFiles bool) bool {
++	entries, trunc, err := readDirCapped(subRoot, maxProducerLeafFiles)
++	if err != nil || trunc {
++		return false
++	}
++	for _, de := range entries {
++		switch de.Name() {
++		case "receipt.json", "producer.json":
++		case "seal.sha256":
++			if !allowSealedFiles {
++				return false
++			}
++		default:
++			return false
++		}
++	}
++	return true
++}
++
 +func verifySealedDiskReceiptInRoot(rootLease *lockedRootLease, dir, root, launch, session, expectedSHA string, expectDirDev, expectDirIno uint64, checkDirID bool, wantPinFD bool, now time.Time) (SealStatus, string, uint64, uint64, bool, *os.File) {
 +	if rootLease == nil || rootLease.dir == nil || rootLease.lock == nil {
 +		return SealUnavailable, "", 0, 0, false, nil
@@ -14247,18 +14257,10 @@ index e69de29..3ca92dc 100644
 +	if expectedSHA != "" && savedDigest != expectedSHA {
 +		return SealRejected, "", 0, 0, false, nil
 +	}
-+	// Enforce exact sealed directory shape matching inspectProducerReceiptSubdir:
++	// Enforce exact sealed directory shape shared with first seal and inspectProducerReceiptSubdir:
 +	// reject contradictory seal.pending.json or unexpected extra files before confirming SealOK.
-+	sealEntries, sealTrunc, sealReadErr := readDirCapped(subRoot, maxProducerLeafFiles)
-+	if sealReadErr != nil || sealTrunc {
++	if !verifyReviewDirAllowedEntries(subRoot, true) {
 +		return SealRejected, "", 0, 0, false, nil
-+	}
-+	for _, de := range sealEntries {
-+		switch de.Name() {
-+		case "receipt.json", "seal.sha256", "producer.json":
-+		default:
-+			return SealRejected, "", 0, 0, false, nil
-+		}
 +	}
 +	// Always confirm launch, root, and pinned root-parent fsyncs plus active root/launch inode binding
 +	// before returning SealOK (never skip fsync via in-memory flags on repeat SealReview calls).
@@ -17772,6 +17774,12 @@ index e69de29..3ca92dc 100644
 +		}
 +		return diskReceiptPreserveUntouched
 +	}
++	// Enforce the same directory entry allowlist as repeat/cold-restart seal verification before
++	// writing or first-sealing so pre-existing unexpected files never get confirmed SealOK once
++	// and then rejected on repeat verification.
++	if !verifyReviewDirAllowedEntries(launchRoot, false) {
++		return diskReceiptPreserveUntouched
++	}
 +	finfo, err := launchRoot.Lstat("receipt.json")
 +	if e.markerOnlyInvalidated && e.tainted {
 +		if errors.Is(err, os.ErrNotExist) && verifyProducerMarkerInSubdir(launchRoot, e.launch) {
@@ -18236,6 +18244,17 @@ index e69de29..3ca92dc 100644
 +		if err := syncSealAncestorsForSubRoot(rootLease, launchRoot, e.launch, e.directory, root, launchDev, launchIno, hasLaunchID); err != nil {
 +			return fail(true, err)
 +		}
++		if sealed && !verifyReviewDirAllowedEntries(launchRoot, true) {
++			e.tainted = true
++			e.sealed = false
++			e.sealedAt = 0
++			e.sealedReceiptSHA = ""
++			e.foreignDisk = true
++			e.taintedPersisted = true
++			closeBudgetedPinnedDirFD(e.boundDirFD)
++			e.boundDirFD = nil
++			return false, ErrUnavailable
++		}
 +	} else {
 +		if err := syncPinnedDir(launchRoot, e.directory); err != nil {
 +			return fail(true, err)
@@ -18456,10 +18475,10 @@ index e69de29..3ca92dc 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..889dacf 100644
+index e69de29..18db7c4 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,12188 @@
+@@ -0,0 +1,12254 @@
 +package preflightreceipt
 +
 +import (
@@ -30646,5 +30665,71 @@ index e69de29..889dacf 100644
 +	clearMem()
 +	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealOK || dig != origDig {
 +		t.Fatalf("cold-restart seal on clean dir = (%v, %q), want (SealOK, %q)", st, dig, origDig)
++	}
++}
++
++func TestFirstSealRejectsPreExistingExtraFileConsistentlyWithRepeatSeal(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R68): an unexpected file already present in the review directory
++	// before first SealReviewWithDigest MUST cause first seal AND subsequent repeat/cold-restart
++	// seals to reject consistently (SealRejected, "") while preserving the extra file untouched.
++	root := filepath.Join(t.TempDir(), "first-seal-extra")
++	l1 := "review-ff8f8f8f-2222-4333-8444-555555555501"
++	s1 := "019d0000-0000-7000-8000-00000000f801"
++	ctx, c, err := BeginReview(context.Background(), root, l1, s1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_first_extra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	// Drop an unexpected extra file into the review directory BEFORE the very first seal.
++	extraPath := filepath.Join(root, l1, "unexpected.tmp")
++	if err := os.WriteFile(extraPath, []byte("keep-untouched"), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// First seal must reject (and must not create seal.sha256 or delete extraPath).
++	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealRejected || dig != "" {
++		t.Fatalf("first seal with pre-existing extra file = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	if _, err := os.Lstat(filepath.Join(root, l1, "seal.sha256")); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("seal.sha256 should not exist after rejected first seal, err=%v", err)
++	}
++	if raw, err := os.ReadFile(extraPath); err != nil || string(raw) != "keep-untouched" {
++		t.Fatalf("extra file not preserved untouched: raw=%q err=%v", string(raw), err)
++	}
++
++	// Repeat in-memory seal must return the exact same SealRejected result.
++	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealRejected || dig != "" {
++		t.Fatalf("repeat in-memory seal with pre-existing extra file = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++
++	// Cold-restart repeat seal must also return SealRejected.
++	key1 := filepath.Clean(root) + "\x00" + l1
++	reviewMu.Lock()
++	delete(reviewLedger, key1)
++	if b, ok := sealedBindings[key1]; ok {
++		closeBudgetedPinnedDirFD(b.dirFD)
++		delete(sealedBindings, key1)
++	}
++	reviewMu.Unlock()
++	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealRejected || dig != "" {
++		t.Fatalf("cold-restart seal after rejected first seal = (%v, %q), want (SealRejected, \"\")", st, dig)
 +	}
 +}

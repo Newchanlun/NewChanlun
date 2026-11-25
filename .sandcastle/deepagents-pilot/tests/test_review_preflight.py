@@ -461,7 +461,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "obs-text-reason", "empty-reason", "missing-status-sp", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -485,9 +485,30 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             self.rfile.read(int(self.headers["Content-Length"]))
             if framing == "spent-budget":
                 time.sleep(0.3)
-            if framing in ("early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header"):
+            if framing in ("obs-text-reason", "empty-reason", "missing-status-sp", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header"):
                 try:
-                    if framing == "early-hints-103":
+                    if framing == "obs-text-reason":
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK-\xe9\xff\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "empty-reason":
+                        raw_resp = (
+                            b"HTTP/1.1 200 \r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "missing-status-sp":
+                        raw_resp = (
+                            b"HTTP/1.1 200\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "early-hints-103":
                         raw_resp = (
                             b"HTTP/1.1 103 Early Hints\r\n"
                             b"Link: </hint>; rel=preload\r\n\r\n"
@@ -653,7 +674,9 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
         result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
         elapsed = time.monotonic() - started
         assert processes and all(process.poll() is not None for process in processes)
-        assert result["ok"] is (framing in ("length", "same-dup-cl", "early-hints-103", "chunked", "chunked-trailer", "valid-chunk-ext")), result
+        assert result["ok"] is (framing in ("length", "same-dup-cl", "obs-text-reason", "empty-reason", "early-hints-103", "chunked", "chunked-trailer", "valid-chunk-ext")), result
+        if framing == "missing-status-sp":
+            assert result["error"]["exception"] == "BadStatusLine"
         if framing.startswith("short-"):
             assert result["error"]["exception"] == "IncompleteRead"
         if framing in ("status-204", "status-201"):
@@ -2359,67 +2382,139 @@ def test_roundtrip_rejects_redirects_without_forwarding_auth_and_bounds_chunked_
         target_srv.server_close()
 
 
-def test_open_http_disables_tls_suppress_ragged_eofs(monkeypatch):
-    """Sol P1 #1 + Astra P1 #2 (R67): HTTPS 必须以 suppress_ragged_eofs=False 包装 TLS 套接字，
-    且无 close_notify 的异常 TLS 断流（SSLEOFError）不得把关闭定界 SSE 判为成功。"""
+def test_open_http_rejects_explicit_zero_or_invalid_port_before_connecting(monkeypatch):
+    """Sol P1 #1 + Astra P2 #3 (R68): 显式 `:0` 或越界端口绝不得静默回退到 80/443，须在发起任何 TCP 连接前拒绝。"""
+    connect_calls = []
+
+    def fail_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        raise AssertionError(f"must not connect for invalid port: {args}")
+
+    monkeypatch.setattr(preflight.socket, "create_connection", fail_connect)
+    for bad_url in (
+        "http://127.0.0.1:0",  # DevSkim: ignore DS162092 显式零端口拒绝回归
+        "https://127.0.0.1:0",  # DevSkim: ignore DS162092 显式零端口拒绝回归
+        "http://[::1]:0",
+        "http://127.0.0.1:65536",  # DevSkim: ignore DS162092 越界端口拒绝回归
+    ):
+        res = preflight._round_trip_http(bad_url, KEY, OPUS, "preflight-bad-port", preflight.Deadline(3))
+        assert res["ok"] is False, (bad_url, res)
+        assert res["error"]["exception"] == "URLError", (bad_url, res)
+    assert connect_calls == []
+
+
+def test_open_http_disables_tls_suppress_ragged_eofs(tmp_path, monkeypatch):
+    """Sol P1 #1 + Astra P1 #1 (R67/R68): HTTPS 必须显式清除 OpenSSL OP_IGNORE_UNEXPECTED_EOF 且传入
+    suppress_ragged_eofs=False；真实 TLS 回环上无 close_notify 的断流须报 SSLEOFError，正常 close_notify 通过。"""
+    import shutil
+    import socket
     import ssl
 
-    seen_wrap_kwargs = {}
+    openssl = shutil.which("openssl")
+    assert openssl, "openssl CLI required for real TLS close_notify regression test"
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    subprocess.run(
+        [
+            openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+            "-keyout", str(key_path), "-out", str(cert_path), "-days", "1", "-nodes",
+            "-subj", "/CN=127.0.0.1",  # DevSkim: ignore DS162092 本地自签 TLS 测试证书
+            "-addext", "subjectAltName=IP:127.0.0.1",  # DevSkim: ignore DS162092 本地自签 TLS 测试证书
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
     payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
     raw_http = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + payload
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
 
-    class _FakeRaggedTLSSock:
-        def __init__(self):
-            self._buf = bytearray(raw_http)
-            self._closed = False
+    mode = {"ragged": True}
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))  # DevSkim: ignore DS162092 本地 TLS 断流回归
+    listener.listen(4)
+    port = listener.getsockname()[1]
+    stop_evt = threading.Event()
 
-        def settimeout(self, timeout):
-            pass
-
-        def sendall(self, data):
-            pass
-
-        def makefile(self, mode):
-            sock = self
-
-            class _RaggedFP:
-                def readline(self, limit=-1):
-                    nl = sock._buf.find(b"\n")
-                    if nl == -1:
-                        raise ssl.SSLEOFError("EOF occurred in violation of protocol")
-                    take = nl + 1 if limit < 0 else min(nl + 1, limit)
-                    out = bytes(sock._buf[:take])
-                    del sock._buf[:take]
-                    return out
-
-                def read(self, n=-1):
-                    if not sock._buf:
-                        raise ssl.SSLEOFError("EOF occurred in violation of protocol")
-                    take = len(sock._buf) if n < 0 else min(n, len(sock._buf))
-                    out = bytes(sock._buf[:take])
-                    del sock._buf[:take]
-                    return out
-
-                def close(self):
+    def serve():
+        listener.settimeout(0.2)
+        while not stop_evt.is_set():
+            try:
+                raw_conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            tls_conn = None
+            try:
+                raw_conn.settimeout(3.0)
+                tls_conn = server_ctx.wrap_socket(raw_conn, server_side=True)
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    chunk = tls_conn.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                head, _, rest = buf.partition(b"\r\n\r\n")
+                cl = 0
+                for line in head.split(b"\r\n")[1:]:
+                    if line.lower().startswith(b"content-length:"):
+                        cl = int(line.split(b":", 1)[1].strip())
+                while len(rest) < cl:
+                    chunk = tls_conn.recv(cl - len(rest))
+                    if not chunk:
+                        break
+                    rest += chunk
+                tls_conn.sendall(raw_http)
+                if mode["ragged"]:
+                    # 直接断开底层 TCP，不发送 TLS close_notify。
+                    tls_conn.close()
+                else:
+                    # 正常发送 TLS close_notify 后再关闭。
+                    try:
+                        tls_conn.unwrap()
+                    except Exception:
+                        pass
+                    tls_conn.close()
+            except Exception:
+                try:
+                    (tls_conn or raw_conn).close()
+                except Exception:
                     pass
 
-            return _RaggedFP()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
 
-        def close(self):
-            self._closed = True
+    created_ctxs = []
+    real_create_default_context = ssl.create_default_context
 
-    class _FakeCtx:
-        def wrap_socket(self, sock, **kwargs):
-            seen_wrap_kwargs.update(kwargs)
-            return _FakeRaggedTLSSock()
+    def fake_default_context():
+        ctx = real_create_default_context(cafile=str(cert_path))
+        # 显式打开 OP_IGNORE_UNEXPECTED_EOF（模拟 OpenSSL 3.0 默认行为），
+        # 验证 _open_http 会真正清除该标志而不是依赖宿主默认值。
+        op_ignore = getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+        if op_ignore:
+            ctx.options |= op_ignore
+        created_ctxs.append(ctx)
+        return ctx
 
-    class _FakeRawSock:
-        def close(self):
-            pass
+    monkeypatch.setattr(preflight.ssl, "create_default_context", fake_default_context)
+    url = f"https://127.0.0.1:{port}"  # DevSkim: ignore DS162092 本地 TLS 断流回归
+    try:
+        mode["ragged"] = True
+        res_ragged = preflight._round_trip_http(url, KEY, OPUS, "preflight-tls-ragged", preflight.Deadline(5))
+        assert res_ragged["ok"] is False, res_ragged
+        assert res_ragged["error"]["exception"] == "SSLEOFError", res_ragged
+        op_ignore = getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+        assert created_ctxs and (not op_ignore or (created_ctxs[-1].options & op_ignore) == 0)
 
-    monkeypatch.setattr(preflight.socket, "create_connection", lambda *a, **kw: _FakeRawSock())
-    monkeypatch.setattr(preflight.ssl, "create_default_context", lambda: _FakeCtx())
-    res = preflight._round_trip_http("https://proxy.invalid", KEY, OPUS, "preflight-tls-eof", preflight.Deadline(3))
-    assert seen_wrap_kwargs.get("suppress_ragged_eofs") is False, seen_wrap_kwargs
-    assert res["ok"] is False, res
-    assert res["error"]["exception"] == "SSLEOFError", res
+        mode["ragged"] = False
+        res_clean = preflight._round_trip_http(url, KEY, OPUS, "preflight-tls-clean", preflight.Deadline(5))
+        assert res_clean["ok"] is True, res_clean
+    finally:
+        stop_evt.set()
+        listener.close()
+        thread.join(timeout=3)
