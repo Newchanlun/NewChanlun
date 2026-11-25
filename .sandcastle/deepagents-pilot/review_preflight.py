@@ -424,7 +424,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                     ev_name = event_name
                     event_name = None
                     if data_lines:
-                        joined = "\n".join(data_lines).strip()
+                        joined = "\n".join(data_lines).strip(" \t\r\n")
                         data_lines = []
                         if joined == "[DONE]":
                             if ev_name is not None or terminal is None:
@@ -511,7 +511,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                     detail = "SSE 存在非法非协议行"
                     break
             if data_lines:
-                trailing = "\n".join(data_lines).strip()
+                trailing = "\n".join(data_lines).strip(" \t\r\n")
                 if (trailing and (trailing != "[DONE]" or terminal is None)) or event_name is not None:
                     detail = "流尾存在未闭合 SSE 事件"
             elif event_name is not None:

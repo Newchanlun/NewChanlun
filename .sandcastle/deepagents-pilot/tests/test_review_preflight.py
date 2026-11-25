@@ -1657,3 +1657,44 @@ def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase
         server.shutdown()
         server.server_close()
         serving.join()
+
+
+def test_round_trip_rejects_unicode_nbsp_before_terminal_json():
+    """Astra P2 #5 (R46): RFC 8259 允许的 JSON 空白仅限 ASCII 空格/Tab/CR/LF，不换行空格须拒绝。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = (
+        "event: response.completed\n"
+        'data: \u00a0{"type":"response.completed","response":{"status":"completed"}}\n\n'
+    ).encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000099",
+            preflight.Deadline(5),
+        )
+        assert res["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
