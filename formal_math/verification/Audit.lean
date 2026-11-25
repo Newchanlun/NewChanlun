@@ -47,9 +47,9 @@ Lean 自动生成的辅助项才豁免，返回类别名。
 1. 归纳类型的 `ctorIdx` 运行期实现（`isCtorIdxCore?` 认定，且形状与生成器一致）。
 2. 结构递归或良基递归定义的编译影子：`Compiler.isUnsafeRecName?` 指向的源定义是同模块、
    内核检查过的安全 `def`，且 `isRecursiveDefinition` 登记为结构／良基递归，类型逐字相同。
-3. 派生处理器的辅助函数：源定义是同模块的 `opaque`，其前缀是同模块已注册的实例，实例类型为
+3. 派生处理器的辅助函数：源定义是同模块的 `opaque`，其前缀是同模块的实例常量，实例类型为
    `C (T …)`，用 Lean 自己的 `Deriving.mkContext C 前缀 T` 重算得出 `usePartial` 为真，
-   且辅助函数名与实例名恰与重算结果一致。
+   辅助函数名与实例名恰与重算结果一致，且实例体引用重算出的辅助函数。
 手写 `partial def` 的源定义是 `opaque` 且不满足第 3 类，不豁免。
 -/
 private def generatedBy (name : Name) (info : ConstantInfo) (implTargets : NameMap Name) :
@@ -71,7 +71,7 @@ private def generatedBy (name : Name) (info : ConstantInfo) (implTargets : NameM
   | some (.opaqueInfo s) =>
     if s.isUnsafe || s.type != d.type then return none
     let inst := source.getPrefix
-    unless sameModule env inst source && isInstanceCore env inst do return none
+    unless sameModule env inst source do return none
     let some instInfo := env.find? inst | return none
     forallTelescopeReducing instInfo.type fun _ target => do
       let .const cls _ := target.getAppFn | return none
@@ -79,9 +79,15 @@ private def generatedBy (name : Name) (info : ConstantInfo) (implTargets : NameM
       let some arg := target.getAppArgs.back? | return none
       let .const ty _ := arg.getAppFn | return none
       unless sameModule env ty source && (← isInductive ty) do return none
-      let ctx ← (Elab.Deriving.mkContext cls pre ty).run'
-      if ctx.usePartial && inst == inst.getPrefix ++ ctx.instName &&
-          ctx.auxFunNames.any (inst.getPrefix ++ · == source) then
+      -- 生成器为实例取「当前命名空间里未用的」名字；在空的探针命名空间里重算，
+      -- 避开已存在的实例本身。原处若因撞名加过后缀，重算对不上，按不豁免处理。
+      let ctx ← withTheReader Core.Context ({ · with currNamespace := `_fm_regen, openDecls := [] })
+        (Elab.Deriving.mkContext cls pre ty).run'
+      let aux := ctx.auxFunNames.map (inst.getPrefix ++ ·)
+      -- 实例体须引用重算出的辅助函数，证明二者出自同一次派生。
+      let used := (instInfo.value? (allowOpaque := true)).map (·.getUsedConstants) |>.getD #[]
+      if ctx.usePartial && inst == inst.getPrefix ++ ctx.instName && aux.contains source &&
+          aux.any used.contains then
         return some "派生处理器辅助函数"
       return none
   | _ => return none

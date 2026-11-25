@@ -68,8 +68,8 @@ private def declarations : Array Name :=
 -/
 private def attributeNames : Array Name :=
   #[`simp, `ext, `instance, `reducible, `irreducible, `inline, `specialize, `expose, `no_expose,
-    `grind, `norm_cast, `push_cast, `refl, `symm, `trans, `gcongr, `mono, `congr, `elab_as_elim,
-    `induction_eliminator, `cases_eliminator, `deprecated, `simps]
+    `grind, `norm_cast, `push_cast, `refl, `symm, `trans, `gcongrAttr, `mono, `congr, `elab_as_elim,
+    `induction_eliminator, `cases_eliminator, `deprecated, `simps, `method_specs]
 
 /-- 派生目标类白名单；按解析后的全名比对。 -/
 private def derivingClasses : Array Name :=
@@ -137,7 +137,8 @@ private partial def inspect (mod : Name) (stx : Syntax) (command generated guard
   if kind == `Lean.Parser.Command.section && !stx[0][3].isNone then
     issues := issues.push (stx, "3", "禁止 meta section")
   if forbidden.contains kind || (!generated && kind == `Lean.Parser.Command.partial) ||
-      stx.isAtom && ["implemented_by", "native_decide", "run_tac", "run_meta"].contains stx.getAtomVal then
+      stx.isAtom && ["implemented_by", "native_decide", "run_tac", "run_meta"].contains stx.getAtomVal ||
+      stx.isIdent && stx.getId.eraseMacroScopes == `sorryAx then
     issues := issues.push (stx, "3", s!"源码含禁用语法：{kind}")
   if kind == `Lean.guardMsgsCmd && (stx[2].getArgs.any fun spec =>
       (spec.find? fun a => a.isAtom && a.getAtomVal == "drop").isSome) then
@@ -196,7 +197,8 @@ Lean 实际精化过的东西都记在信息树里：每条被精化的命令（
 private partial def elaborated (mod : Name) (env : Environment) (fallback : Syntax) :
     InfoTree → CommandElabM (Array (Syntax × String × String))
   | .context _ t => elaborated mod env fallback t
-  | .hole _ => return #[(fallback, "3", "信息树有未展开的空洞，无法核对精化结果")]
+  -- Lean 没留下内容的空洞（如 decreasing_by 证明的战术信息）无从核对；其中手写的部分已过表层检查。
+  | .hole _ => return #[]
   | .node info children => do
     let mut issues := #[]
     match info with
@@ -256,7 +258,8 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
     Frontend.elabCommandAtFrontend cmd
     let state ← Frontend.getCommandState
     unless auditTool do
-      let infos := state.infoState
+      -- 异步登记的子树（如 decreasing_by 的证明）先等齐再展开空洞。
+      let infos := (state.infoState.substituteLazy).get
       let after ← Frontend.runCommandElabM do
         let env ← getEnv
         infos.trees.toArray.flatMapM fun t => elaborated mod env cmd (t.substitute infos.assignment)

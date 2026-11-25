@@ -352,15 +352,15 @@ def report_signoffs(fm, declarations, counts):
         if actual > signed:
             code = "SIGNOFF_MISSING"
         elif actual == signed:
-            code = "SIGNOFF_MATCH"
+            code = "SIGNOFF_MATCH"  # 已签注，只作记录，不算发现。
         else:
             code = "SIGNOFF_STALE"
         if entry is None:
             entry = declarations.setdefault(name, {
                 "module": None, "declaration": name, "readings": {gate: [] for gate in REPORT_GATES}
             })
-        entry["readings"]["10"].append(reading("finding", "hint", code,
-                                               f"{op} 实有 {actual} 处，签注 {signed} 处"))
+        entry["readings"]["10"].append(reading("signed" if code == "SIGNOFF_MATCH" else "finding",
+                                               "hint", code, f"{op} 实有 {actual} 处，签注 {signed} 处"))
 
 
 REPORT_GATES = ("S", "7a", "7b", "8a", "8b", "9", "10")
@@ -371,7 +371,7 @@ def reading(status, evidence, code, detail):
     return dict(status=status, evidence=evidence, code=code, detail=detail)
 
 
-def review_report(root):
+def review_report(root, report_dir=None):
     fm = root / "formal_math"
     mods = [m for path in sources(root) if (m := module_name(path)).partition(".")[0] in TRUSTED_ROOTS]
     result = lean_audit(fm, "report", mods, formalization(fm))
@@ -398,17 +398,26 @@ def review_report(root):
             raise Undetermined(f"无法识别报告事件：{status}")
     report_signoffs(fm, declarations, counts)
     rows = sorted(declarations.values(), key=lambda row: (row["module"] or "", row["declaration"]))
-    print("模块\t声明\t" + "\t".join(REPORT_GATES), file=sys.stderr)
+    table = ["| 模块 | 声明 | " + " | ".join(REPORT_GATES) + " |",
+             "|" + " --- |" * (2 + len(REPORT_GATES))]
     for row in rows:
         cells = []
         for gate in REPORT_GATES:
             items = row["readings"][gate]
             if not items:
                 items.append(reading("no_finding", "hint", "NO_FINDING", "无读数命中或不适用"))
-            cells.append("；".join(f"{r['evidence']}/{r['status']} {r['code']}: "
-                                  f"{' '.join(r['detail'].split())}" for r in items))
-        print("\t".join([row["module"] or "（仅签注）", row["declaration"], *cells]), file=sys.stderr)
-    print(json.dumps({"schema": "fm-review-v1", "declarations": rows}, ensure_ascii=False, indent=2))
+            shown = [r for r in items if r["status"] != "no_finding"]
+            cells.append("<br>".join(f"{r['evidence']}/{r['status']} {r['code']}: "
+                                     f"{' '.join(r['detail'].split())}".replace("|", "\\|")
+                                     for r in shown) or "—")
+        table.append("| " + " | ".join([row["module"] or "（仅签注）", row["declaration"], *cells]) + " |")
+    document = json.dumps({"schema": "fm-review-v1", "declarations": rows}, ensure_ascii=False, indent=2)
+    if report_dir is not None:
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "report.json").write_text(document + "\n")
+        (report_dir / "report.md").write_text("# FM 审阅报告\n\n" + "\n".join(table) + "\n")
+    print("\n".join(table), file=sys.stderr)
+    print(document)
     return 0
 
 
@@ -610,14 +619,16 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--gate", choices=GATES)
     mode.add_argument("--stage", choices=("decl", "proof", "all"), default="all")
-    mode.add_argument("--report", action="store_true")
+    mode.add_argument("--report", action="store_true",
+                      help="生成不阻断的审阅报告：标准输出为 JSON，标准错误为人读表")
+    parser.add_argument("--report-dir", type=Path, help="另把 report.json 与 report.md 写入此目录")
     args = parser.parse_args()
     root = args.repo_root.resolve()
     if not (root / "formal_math").is_dir():
         print(f"FM: {root} 下找不到 formal_math", file=sys.stderr)
         return 2
     result = 0
-    selected = {"报告": review_report} if args.report else (
+    selected = {"报告": lambda root: review_report(root, args.report_dir)} if args.report else (
         {args.gate: GATES[args.gate]} if args.gate else GATES)
     for number, action in selected.items():
         try:
