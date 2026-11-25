@@ -569,17 +569,17 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                         detail = "SSE 存在无数据事件头"
                         break
                     continue
-                if line.startswith("event:"):
-                    val = line[6:]
+                if line == "event" or line.startswith("event:"):
+                    val = "" if line == "event" else line[6:]
                     if val.startswith(" "):
                         val = val[1:]
                     event_name = val
-                elif line.startswith("data:"):
-                    val = line[5:]
+                elif line == "data" or line.startswith("data:"):
+                    val = "" if line == "data" else line[5:]
                     if val.startswith(" "):
                         val = val[1:]
                     data_lines.append(val)
-                elif line.startswith((":", "id:", "retry:")):
+                elif line in ("id", "retry") or line.startswith((":", "id:", "retry:")):
                     continue
                 else:
                     detail = "SSE 存在非法非协议行"

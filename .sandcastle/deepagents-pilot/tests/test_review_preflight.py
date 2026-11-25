@@ -1976,6 +1976,38 @@ def test_round_trip_rejects_case_alias_protocol_keys_matching_go_producer():
             preflight.Deadline(5),
         )
         assert res_msg["ok"] is False
+
+        # Astra P2 #3 (R56): WHATWG SSE 合法无冒号空字段（id / retry / data）须与 Go 一致接受，
+        # 同时未知裸行（如 foo）仍须拒绝。
+        current["body"] = (
+            b"id\n"
+            b"retry\n"
+            b"data\n\n"
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_bare_field","status":"completed","model":"gpt-6.2-sol"}}\n\n'
+        )
+        res_bare = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000088",
+            preflight.Deadline(5),
+        )
+        assert res_bare["ok"] is True
+
+        current["body"] = (
+            b"unknown_bare_line\n"
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_bad_bare","status":"completed","model":"gpt-6.2-sol"}}\n\n'
+        )
+        res_unknown = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000087",
+            preflight.Deadline(5),
+        )
+        assert res_unknown["ok"] is False
     finally:
         server.shutdown()
         server.server_close()
