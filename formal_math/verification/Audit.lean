@@ -67,7 +67,7 @@ public unsafe def main (args : List String) : IO UInt32 := do
   -- 加载同一轮构建的私有分片，保留私有声明与证明体。
   let env := (← Lean.importModules (mods.map fun m => { module := m }) {}
     (level := .private)).setExporting false
-  if ["3", "7b", "8b"].contains gate &&
+  if ["3", "report"].contains gate &&
       !((env.checked.get.find? probeName >>= (·.value? true)).any
         (fun body => !body.getUsedConstants.isEmpty)) then
     IO.eprintln s!"GATE{gate}: 无法读取 {probeName} 的证明体"
@@ -81,16 +81,17 @@ public unsafe def main (args : List String) : IO UInt32 := do
   if gate == "3" then
     let (code, _) ← (gate3 entries).toIO ctx { env }
     return code
-  let cfg : FM.Config ← if ["6a", "10", "15"].contains gate then pure {} else do
-    let config ← (← IO.getStdin).readToEnd
-    let .ok decoded := Json.parse config >>= fromJson?
-      | throw (IO.userError "节点台账无法解码")
-    pure decoded
   try
+    if gate == "report" then
+      let config ← (← IO.getStdin).readToEnd
+      let .ok cfg := Json.parse config >>= fromJson?
+        | throw (IO.userError "节点台账无法解码")
+      let (code, _) ← (FM.report entries cfg).run'.toIO ctx { env }
+      return code
     let publicView ← if gate == "15" then
       some <$> Lean.importModules (mods.map fun m => { module := m }) {} (level := .exported)
       else pure none
-    let (code, _) ← (FM.run gate entries cfg publicView).run'.toIO ctx { env }
+    let (code, _) ← (FM.run gate entries publicView).run'.toIO ctx { env }
     return code
   catch err =>
     IO.eprintln err.toString

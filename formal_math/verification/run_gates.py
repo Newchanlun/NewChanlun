@@ -38,7 +38,7 @@ def sources(root):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         here = Path(directory).relative_to(root)
         if here == Path("formal_math/verification"):
-            dirs[:] = [d for d in dirs if d not in {"must_red", "must_green", "must_unknown", "known_limits"}]
+            dirs[:] = [d for d in dirs if d not in {"must_red", "must_green", "must_unknown", "report_cases"}]
         for name in sorted(files):
             if name.endswith(".lean"):
                 yield here / name
@@ -333,8 +333,7 @@ def compare_lock(fm, result):
     return int(failed)
 
 
-def compare_signoffs(fm, result):
-    path = "formal_math/verification/garbage-signoffs.yaml"
+def report_signoffs(fm, declarations, counts):
     signoffs = load_data(fm / "verification/garbage-signoffs.yaml")
     expected = {}
     for name, entries in signoffs.items():
@@ -343,36 +342,83 @@ def compare_signoffs(fm, result):
             if type(count) is not int or count < 1 or not isinstance(review, str) or not review.strip():
                 raise ValueError(f"{name}: {op} 的签注需要正整数 count 与非空 review")
             expected[name, op] = count
-    counts = Counter()
-    modules = {}
-    for line in result.stdout.splitlines():
-        mod, name, op = json.loads(line)
-        counts[name, op] += 1
-        modules[name] = mod
-    failed = False
     for name, op in sorted(counts.keys() | expected.keys()):
         actual, signed = counts[name, op], expected.get((name, op), 0)
-        if actual == signed:
+        entry = declarations.get(name)
+        if entry is not None and any(reading["status"] == "unknown" for reading in entry["readings"]["10"]):
+            continue  # 缺少读数时，不能据此判签注过时。
+        if actual == signed == 0:
             continue
         if actual > signed:
-            red("10", "formal_math/" + modules[name].replace(".", "/") + ".lean", name,
-                "SIGNOFF_MISSING", f"{op} 实有 {actual} 处，签注 {signed} 处")
+            code = "SIGNOFF_MISSING"
+        elif actual == signed:
+            code = "SIGNOFF_MATCH"
         else:
-            red("10", path, name, "SIGNOFF_STALE", f"{op} 实有 {actual} 处，签注 {signed} 处")
-        failed = True
-    return int(failed)
+            code = "SIGNOFF_STALE"
+        if entry is None:
+            entry = declarations.setdefault(name, {
+                "module": None, "declaration": name, "readings": {gate: [] for gate in REPORT_GATES}
+            })
+        entry["readings"]["10"].append(reading("finding", "hint", code,
+                                               f"{op} 实有 {actual} 处，签注 {signed} 处"))
 
 
-def environment_gate(root, gate):
+REPORT_GATES = ("S", "7a", "7b", "8a", "8b", "9", "10")
+TRUSTED_ROOTS = {"Chan", "ChanChallenge", "ChanDyn", "ChanTest"}
+
+
+def reading(status, evidence, code, detail):
+    return dict(status=status, evidence=evidence, code=code, detail=detail)
+
+
+def review_report(root):
+    fm = root / "formal_math"
+    mods = [m for path in sources(root) if (m := module_name(path)).partition(".")[0] in TRUSTED_ROOTS]
+    result = lean_audit(fm, "report", mods, formalization(fm))
+    if result.returncode:
+        raise Undetermined("审阅报告未生成")
+    declarations = {}
+    counts = Counter()
+    for line in result.stdout.splitlines():
+        mod, name, *fields = json.loads(line)
+        if fields == ["declaration"]:
+            if name in declarations or mod not in mods:
+                raise Undetermined(f"报告返回重复或未请求的声明：{mod}:{name}")
+            declarations[name] = {
+                "module": mod, "declaration": name, "readings": {gate: [] for gate in REPORT_GATES}
+            }
+            continue
+        gate, status, *payload = fields
+        if [gate, status] == ["10", "operation"]:
+            op, = payload
+            counts[name, op] += 1
+        elif status in {"finding", "unknown"}:
+            declarations[name]["readings"][gate].append(reading(status, *payload))
+        else:
+            raise Undetermined(f"无法识别报告事件：{status}")
+    report_signoffs(fm, declarations, counts)
+    rows = sorted(declarations.values(), key=lambda row: (row["module"] or "", row["declaration"]))
+    print("模块\t声明\t" + "\t".join(REPORT_GATES), file=sys.stderr)
+    for row in rows:
+        cells = []
+        for gate in REPORT_GATES:
+            items = row["readings"][gate]
+            if not items:
+                items.append(reading("no_finding", "hint", "NO_FINDING", "无读数命中或不适用"))
+            cells.append("；".join(f"{r['evidence']}/{r['status']} {r['code']}: "
+                                  f"{' '.join(r['detail'].split())}" for r in items))
+        print("\t".join([row["module"] or "（仅签注）", row["declaration"], *cells]), file=sys.stderr)
+    print(json.dumps({"schema": "fm-review-v1", "declarations": rows}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def gate6a(root):
     fm = root / "formal_math"
     mods = [module_name(path) for path in sources(root)]
-    config = formalization(fm) if gate in {"7a", "7b", "8a", "8b", "9", "S"} else '{"nodes":[],"refinements":[]}'
-    result = lean_audit(fm, gate, mods, config)
-    if gate in {"6a", "10"}:
-        if result.returncode:
-            raise Undetermined("审计枚举没有完成")
-        return (compare_lock if gate == "6a" else compare_signoffs)(fm, result)
-    return emit_findings(gate, result)
+    result = lean_audit(fm, "6a", mods)
+    if result.returncode:
+        raise Undetermined("审计枚举没有完成")
+    return compare_lock(fm, result)
 
 
 PATHS = {
@@ -555,30 +601,27 @@ def gate15(root):
     return 0
 
 
-GATES = {"1": gate1, "2": gate2, "3": gate3, "6a": None, "6b": gate6b, "7a": None,
-         "7b": None, "S": None, "8a": None, "8b": None, "9": None, "10": None, "15": gate15}
-DECL_ONLY = {"7a", "S", "8a", "10"}
-PROOF_ONLY = {"7b", "8b"}
+GATES = {"1": gate1, "2": gate2, "3": gate3, "6a": gate6a, "6b": gate6b, "15": gate15}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
-    parser.add_argument("--gate", choices=GATES)
-    parser.add_argument("--stage", choices=("decl", "proof", "all"), default="all")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--gate", choices=GATES)
+    mode.add_argument("--stage", choices=("decl", "proof", "all"), default="all")
+    mode.add_argument("--report", action="store_true")
     args = parser.parse_args()
     root = args.repo_root.resolve()
     if not (root / "formal_math").is_dir():
         print(f"FM: {root} 下找不到 formal_math", file=sys.stderr)
         return 2
     result = 0
-    for number in (args.gate,) if args.gate else GATES:
-        if args.gate is None and (args.stage == "decl" and number in PROOF_ONLY or
-                                  args.stage == "proof" and number in DECL_ONLY):
-            continue
+    selected = {"报告": review_report} if args.report else (
+        {args.gate: GATES[args.gate]} if args.gate else GATES)
+    for number, action in selected.items():
         try:
-            gate = GATES[number]
-            result = max(result, gate(root) if gate else environment_gate(root, number))
+            result = max(result, action(root))
         except (Undetermined, OSError, ValueError, KeyError, TypeError, AttributeError,
                 subprocess.TimeoutExpired) as exc:
             print(f"GATE{number}: 无法判定：{exc}", file=sys.stderr)

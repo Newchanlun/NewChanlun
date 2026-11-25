@@ -31,7 +31,6 @@ private def node (entry : Entry) : MetaM Bool := do
   unless entry.info matches .thmInfo _ | .defnInfo _ | .opaqueInfo _ do return false
   let env ← getEnv
   if (env.getProjectionStructureName? entry.name).isSome then return false
-  if (← findDeclarationRangesCore? entry.name).isNone then return false
   isProp entry.info.type
 
 private def row (tag : String) (items : List Json) : Json :=
@@ -122,8 +121,14 @@ structure Config where
   deriving FromJson
 
 private def finding (gate : String) (e : Entry) (code detail : String) : MetaM Bool := do
-  let path := e.mod.toString.replace "." "/"
-  IO.println s!"GATE{gate} RED formal_math/{path}.lean:{e.name} {code} {detail}"
+  if gate == "15" then
+    let path := e.mod.toString.replace "." "/"
+    IO.println s!"GATE{gate} RED formal_math/{path}.lean:{e.name} {code} {detail}"
+  else
+    let evidence := if ["GENERALIZES", "DROPPABLE_PREMISE"].contains code then
+      "certified" else "hint"
+    IO.println <| (toJson #[e.mod.toString, e.name.toString, gate, "finding",
+      evidence, code, detail]).compress
   return true
 
 private def resolve (env : Environment) (s : String) : Option ConstantInfo :=
@@ -194,7 +199,7 @@ private def refines (struct : Name) (nparams : Nat) (fields bad : Array (Nat × 
 
 private def resident (name : Name) (nparams : Nat) (entries : Array Entry) : MetaM Bool :=
   entries.anyM fun w => do
-    unless within w.mod `ChanTest && (← findDeclarationRangesCore? w.name).isSome do
+    unless within w.mod `ChanTest do
       return false
     -- 见证可直接给出结构项，或内核已验的 Nonempty 实例。
     let ty ← withTransparency .reducible <| whnf w.info.type
@@ -273,7 +278,6 @@ private def skeleton (e : Expr) (parallel : Bool := false) (fuel : Nat := 1024) 
     MetaM (Option String) := do
   let e ← unfoldStatement e
   if parallel && e.isConstOf `True then return some "True 不能作前提或合取项"
-  if parallel && !e.hasFVar then return some "闭命题不能作前提或合取项"
   match fuel with
   | 0 => throwError "命题骨架超过上限"
   | k + 1 =>
@@ -298,7 +302,7 @@ private def gateS (e : Entry) : MetaM Bool := do
   unless [`Chan.Defs, `Chan.Hypotheses, `Chan.Proxy, `Chan.Thm, `Chan.Proofs,
       `Chan.Exec, `ChanChallenge, `Chan.Final, `Chan.Audit].any (within e.mod) do return false
   unless e.info matches .thmInfo _ | .defnInfo _ | .opaqueInfo _ do return false
-  unless (← findDeclarationRangesCore? e.name).isSome && (← isProp e.info.type) do return false
+  unless ← isProp e.info.type do return false
   if let some issue ← skeleton e.info.type then
     finding "S" e "STATEMENT_FORM" (issue.replace "\n" " ")
   else pure false
@@ -628,7 +632,7 @@ private def gate9 (e : Entry) (cfg : NodeConfig) (entries : Array Entry) : MetaM
       if cfg.main_theorem && necessary == convenience then
         red ← finding "9" e "PREMISE_REGISTRATION" s!"前提 #{i + 1} 必须二选一登记必要性或便利性"
       if convenience then
-        IO.eprintln s!"GATE9 REVIEW {e.name}: 便利前提 #{i + 1}，{(cfg.convenience.lookup (i + 1)).getD ""}"
+        let _ ← finding "9" e "CONVENIENCE" s!"便利前提 #{i + 1}，{(cfg.convenience.lookup (i + 1)).getD ""}"
       if necessary || cfg.needs_necessity then
         let h := premises[i]!
         let negated := mkApp (mkConst `Not) result
@@ -774,13 +778,38 @@ private def gate10 (e : Entry) : MetaM Unit := do
   unless e.info matches .thmInfo _ do
     if e.info.hasValue true then ops := ops ++ (← scan 1024 (← bodyOf e))
   for op in ops do
-    IO.println <| (toJson #[e.mod.toString, e.name.toString, op]).compress
+    IO.println <| (toJson #[e.mod.toString, e.name.toString, "10", "operation", op]).compress
 
-def run (gate : String) (entries : Array Entry) (cfg : Config)
+def reportGates : List String := ["S", "7a", "7b", "8a", "8b", "9", "10"]
+
+def report (entries : Array Entry) (cfg : Config) : MetaM UInt32 := do
+  for e in entries do
+    unless [`Chan, `ChanChallenge, `ChanDyn, `ChanTest].any (within e.mod) do continue
+    let config := (cfg.nodes.lookup e.name.toString).getD {}
+    let identity := #[e.mod.toString, e.name.toString]
+    IO.println <| (toJson (identity.push "declaration")).compress
+    for gate in reportGates do
+      try
+        -- 每条读数独立预算；失败条目不会消耗后续条目的预算或保留元变量。
+        withoutModifyingState <| withCurrHeartbeats do
+          match gate with
+          | "S" => discard <| gateS e
+          | "7a" => discard <| gate7a e cfg entries
+          | "7b" => if ← node e then discard <| gate7b e config
+          | "8a" => if ← node e then discard <| gate8a e config
+          | "8b" => if e.info.hasValue true && (← node e) then discard <| gate8b e config
+          | "9" => if ← node e then discard <| gate9 e config entries
+          | "10" => gate10 e
+          | _ => unreachable!
+      catch err =>
+        let detail ← err.toMessageData.toString
+        IO.println <| (toJson (identity ++ #[gate, "unknown", "hint", "UNKNOWN", detail])).compress
+  return 0
+
+def run (gate : String) (entries : Array Entry)
     (publicView : Option Environment := none) : MetaM UInt32 := do
   let mut red := false
   for e in entries do
-    let config := (cfg.nodes.lookup e.name.toString).getD {}
     let failed ← match gate with
       | "6a" =>
         if locked e then
@@ -788,13 +817,6 @@ def run (gate : String) (entries : Array Entry) (cfg : Config)
           | .error detail => throwError "{e.name}: {detail}"
           | .ok j => IO.println <| (row e.name.toString [toJson e.mod.toString, j]).compress
         pure false
-      | "7a" => gate7a e cfg entries
-      | "S" => gateS e
-      | "7b" => if ← node e then gate7b e config else pure false
-      | "8a" => if ← node e then gate8a e config else pure false
-      | "8b" => if e.info.hasValue true && (← node e) then gate8b e config else pure false
-      | "9" => if ← node e then gate9 e config entries else pure false
-      | "10" => gate10 e *> pure false
       | "15" =>
         let some env := publicView | throwError "缺少对外可见环境"
         if !isPrivateName e.name && (e.info matches .defnInfo _) &&
