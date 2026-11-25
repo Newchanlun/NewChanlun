@@ -7390,10 +7390,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..d66b19f 100644
+index e69de29..3ca92dc 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11016 @@
+@@ -0,0 +1,11061 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -13239,6 +13239,37 @@ index e69de29..d66b19f 100644
 +			touched:          touched,
 +		}, true, nil
 +	}
++	if validProducer && disk.Sealed {
++		// A clean sealed directory cannot simultaneously contain an unfinished seal.pending.json
++		// or any unexpected extra files; treat contradictory disk states as tainted/foreign.
++		entries, trunc, rerr := readDirCapped(subRoot, maxProducerLeafFiles)
++		contradictory := rerr != nil || trunc
++		if !contradictory {
++			for _, de := range entries {
++				switch de.Name() {
++				case "receipt.json", "seal.sha256", "producer.json":
++				default:
++					contradictory = true
++				}
++			}
++		}
++		if contradictory {
++			return &reviewEntry{
++				directory:        dir,
++				launch:           launch,
++				session:          disk.Session,
++				started:          disk.Started,
++				requests:         disk.Requests,
++				tainted:          true,
++				taintedPersisted: true,
++				foreignDisk:      true,
++				reserved:         true,
++				markerPersisted:  true,
++				lastPersistedSHA: rawSHA,
++				touched:          now,
++			}, true, nil
++		}
++	}
 +	return &reviewEntry{
 +		directory:         dir,
 +		launch:            launch,
@@ -14215,6 +14246,19 @@ index e69de29..d66b19f 100644
 +	}
 +	if expectedSHA != "" && savedDigest != expectedSHA {
 +		return SealRejected, "", 0, 0, false, nil
++	}
++	// Enforce exact sealed directory shape matching inspectProducerReceiptSubdir:
++	// reject contradictory seal.pending.json or unexpected extra files before confirming SealOK.
++	sealEntries, sealTrunc, sealReadErr := readDirCapped(subRoot, maxProducerLeafFiles)
++	if sealReadErr != nil || sealTrunc {
++		return SealRejected, "", 0, 0, false, nil
++	}
++	for _, de := range sealEntries {
++		switch de.Name() {
++		case "receipt.json", "seal.sha256", "producer.json":
++		default:
++			return SealRejected, "", 0, 0, false, nil
++		}
 +	}
 +	// Always confirm launch, root, and pinned root-parent fsyncs plus active root/launch inode binding
 +	// before returning SealOK (never skip fsync via in-memory flags on repeat SealReview calls).
@@ -15410,11 +15454,12 @@ index e69de29..d66b19f 100644
 +		return nil
 +	}
 +	// Hard ceiling hit (e.g. crash-left half-written staging files or interrupted stage-seal dirs):
-+	// attempt one bounded sweep batch using the pinned rootHandle so interrupted stage-seal dirs
-+	// whose seal.pending.json already moved into <root>/<launch> can still be digest-verified and
-+	// safely reclaimed, then fail closed if .staging is still at/above quota.
++	// release stagingQuotaMu while performing the bounded disk sweep/fsync so unrelated staging
++	// operations are not blocked on slow I/O, then reacquire stagingQuotaMu and recount atomically.
 +	sDev, sIno, hasSID := statDevIno(fi)
++	stagingQuotaMu.Unlock()
 +	sweepOrphanStagingDir(rootHandle, stagingRoot, root, sDev, sIno, hasSID, false)
++	stagingQuotaMu.Lock()
 +	n2, _, err2 := countCapped()
 +	if err2 != nil || n2 >= maxStagingEntries {
 +		return ErrUnavailable
@@ -18411,10 +18456,10 @@ index e69de29..d66b19f 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..1934163 100644
+index e69de29..889dacf 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,12108 @@
+@@ -0,0 +1,12188 @@
 +package preflightreceipt
 +
 +import (
@@ -30521,5 +30566,85 @@ index e69de29..1934163 100644
 +	}
 +	if got := parentSyncs.Load(); got != 0 {
 +		t.Fatalf("parent-dir fsync count on existing root reuse = %d, want 0", got)
++	}
++}
++
++func TestColdRestartSealRejectsContradictoryDirWithPendingOrExtraFile(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R67): after a cold restart (empty in-memory ledger & bindings),
++	// SealReviewWithDigest MUST NOT confirm SealOK on a sealed directory that also contains
++	// a contradictory seal.pending.json or any unexpected extra file.
++	root := filepath.Join(t.TempDir(), "cold-seal-contradictory")
++	l1 := "review-ff7f7f7f-2222-4333-8444-555555555501"
++	s1 := "019d0000-0000-7000-8000-00000000f701"
++	ctx, c, err := BeginReview(context.Background(), root, l1, s1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_cold_contra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	origSt, origDig := SealReviewWithDigest(root, l1, s1)
++	if origSt != SealOK || !isSHA256Hex(origDig) {
++		t.Fatalf("initial seal = (%v, %q), want SealOK", origSt, origDig)
++	}
++
++	// Simulate cold restart by clearing in-memory ledger and sealed bindings for l1.
++	key1 := filepath.Clean(root) + "\x00" + l1
++	clearMem := func() {
++		reviewMu.Lock()
++		delete(reviewLedger, key1)
++		if b, ok := sealedBindings[key1]; ok {
++			closeBudgetedPinnedDirFD(b.dirFD)
++			delete(sealedBindings, key1)
++		}
++		reviewMu.Unlock()
++	}
++
++	// 1. Contradictory seal.pending.json alongside sealed receipt.json + seal.sha256 -> SealRejected.
++	clearMem()
++	pendingPath := filepath.Join(root, l1, "seal.pending.json")
++	if err := os.WriteFile(pendingPath, []byte(`{"stale":true}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealRejected || dig != "" {
++		t.Fatalf("cold-restart seal with seal.pending.json = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	if err := os.Remove(pendingPath); err != nil {
++		t.Fatal(err)
++	}
++
++	// 2. Unexpected foreign file in sealed dir -> SealRejected.
++	clearMem()
++	extraPath := filepath.Join(root, l1, "unexpected.tmp")
++	if err := os.WriteFile(extraPath, []byte("x"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealRejected || dig != "" {
++		t.Fatalf("cold-restart seal with extra file = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	if err := os.Remove(extraPath); err != nil {
++		t.Fatal(err)
++	}
++
++	// 3. Clean sealed dir confirms SealOK with matching digest after cold restart.
++	clearMem()
++	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealOK || dig != origDig {
++		t.Fatalf("cold-restart seal on clean dir = (%v, %q), want (SealOK, %q)", st, dig, origDig)
 +	}
 +}

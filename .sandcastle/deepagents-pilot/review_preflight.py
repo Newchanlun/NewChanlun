@@ -445,7 +445,7 @@ MAX_HTTP_HEADER_BYTES = 65536
 _CHUNK_SIZE_HEX_RE = re.compile(rb"[0-9A-Fa-f]{1,16}")
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,20}")
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
-_HTTP_STATUS_LINE_RE = re.compile(rb"HTTP/1\.[01] ([0-9]{3})(?: ([\t\x20-\x7e]*))?")
+_HTTP_STATUS_LINE_RE = re.compile(rb"HTTP/1\.([01]) ([0-9]{3})(?: ([\t\x20-\x7e]*))?")
 _TRAILER_FIELD_RE = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+:[\t\x20-\x7e\x80-\xff]*")
 _TCHAR_BYTES = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
@@ -725,7 +725,8 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
     try:
         if scheme == "https":
             ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+            # 禁用 suppress_ragged_eofs：对端若未发送 TLS close_notify 即断流，必须抛出 SSLEOFError 而非当成正常 EOF。
+            sock = ctx.wrap_socket(raw_sock, server_hostname=host, suppress_ragged_eofs=False)
         sock.settimeout(timeout)
         sock.sendall(wire_head)
         if body:
@@ -746,8 +747,9 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
             m = _HTTP_STATUS_LINE_RE.fullmatch(status_line[:-2])
             if not m:
                 raise http.client.BadStatusLine("invalid status line")
-            status_code = int(m.group(1))
-            reason = (m.group(2) or b"").decode("ascii")
+            http_minor = m.group(1)
+            status_code = int(m.group(2))
+            reason = (m.group(3) or b"").decode("ascii")
             if status_code == 101:
                 raise http.client.HTTPException("unsupported 101 Switching Protocols")
 
@@ -787,11 +789,18 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
                     ce_headers.append(hval)
 
             if 100 <= status_code < 200:
+                if http_minor == b"0":
+                    raise http.client.HTTPException("HTTP/1.0 forbids 1xx response")
+                if te_headers or cl_headers:
+                    raise http.client.HTTPException("forbidden framing header in 1xx response")
                 info_responses += 1
                 if info_responses > 4:
                     raise http.client.HTTPException("too many 1xx responses")
                 continue
             break
+
+        if http_minor == b"0" and te_headers:
+            raise http.client.HTTPException("HTTP/1.0 forbids Transfer-Encoding")
 
         if ce_headers:
             ce_codings = [tok.strip(" \t").lower() for hdr in ce_headers for tok in hdr.split(",")]

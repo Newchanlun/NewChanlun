@@ -461,7 +461,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "early-hints-103", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -485,7 +485,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             self.rfile.read(int(self.headers["Content-Length"]))
             if framing == "spent-budget":
                 time.sleep(0.3)
-            if framing in ("early-hints-103", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header"):
+            if framing in ("early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header"):
                 try:
                     if framing == "early-hints-103":
                         raw_resp = (
@@ -493,6 +493,39 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                             b"Link: </hint>; rel=preload\r\n\r\n"
                             b"HTTP/1.1 200 OK\r\n"
                             b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "early-hints-103-cl":
+                        raw_resp = (
+                            b"HTTP/1.1 103 Early Hints\r\n"
+                            b"Content-Length: 0\r\n\r\n"
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "early-hints-103-te":
+                        raw_resp = (
+                            b"HTTP/1.1 103 Early Hints\r\n"
+                            b"Transfer-Encoding: chunked\r\n\r\n"
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "http10-chunked":
+                        raw_resp = (
+                            b"HTTP/1.0 200 OK\r\n"
+                            b"Transfer-Encoding: chunked\r\n\r\n"
+                            + f"{len(payload):x}\r\n".encode()
+                            + payload
+                            + b"\r\n0\r\n\r\n"
+                        )
+                    elif framing == "http10-1xx":
+                        raw_resp = (
+                            b"HTTP/1.0 103 Early Hints\r\n\r\n"
+                            b"HTTP/1.0 200 OK\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
                         )
@@ -625,7 +658,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             assert result["error"]["exception"] == "IncompleteRead"
         if framing in ("status-204", "status-201"):
             assert result["http_status"] == int(framing.split("-")[1])
-        if framing in ("status-101", "gzip-encoding", "neg-chunk", "bad-chunk-sep", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-trailer", "bad-trailer-space"):
+        if framing in ("early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "gzip-encoding", "neg-chunk", "bad-chunk-sep", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-trailer", "bad-trailer-space"):
             assert result["error"]["exception"] == "HTTPException"
         if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed
@@ -2324,3 +2357,69 @@ def test_roundtrip_rejects_redirects_without_forwarding_auth_and_bounds_chunked_
         proxy_srv.server_close()
         target_srv.shutdown()
         target_srv.server_close()
+
+
+def test_open_http_disables_tls_suppress_ragged_eofs(monkeypatch):
+    """Sol P1 #1 + Astra P1 #2 (R67): HTTPS 必须以 suppress_ragged_eofs=False 包装 TLS 套接字，
+    且无 close_notify 的异常 TLS 断流（SSLEOFError）不得把关闭定界 SSE 判为成功。"""
+    import ssl
+
+    seen_wrap_kwargs = {}
+    payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    raw_http = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + payload
+
+    class _FakeRaggedTLSSock:
+        def __init__(self):
+            self._buf = bytearray(raw_http)
+            self._closed = False
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendall(self, data):
+            pass
+
+        def makefile(self, mode):
+            sock = self
+
+            class _RaggedFP:
+                def readline(self, limit=-1):
+                    nl = sock._buf.find(b"\n")
+                    if nl == -1:
+                        raise ssl.SSLEOFError("EOF occurred in violation of protocol")
+                    take = nl + 1 if limit < 0 else min(nl + 1, limit)
+                    out = bytes(sock._buf[:take])
+                    del sock._buf[:take]
+                    return out
+
+                def read(self, n=-1):
+                    if not sock._buf:
+                        raise ssl.SSLEOFError("EOF occurred in violation of protocol")
+                    take = len(sock._buf) if n < 0 else min(n, len(sock._buf))
+                    out = bytes(sock._buf[:take])
+                    del sock._buf[:take]
+                    return out
+
+                def close(self):
+                    pass
+
+            return _RaggedFP()
+
+        def close(self):
+            self._closed = True
+
+    class _FakeCtx:
+        def wrap_socket(self, sock, **kwargs):
+            seen_wrap_kwargs.update(kwargs)
+            return _FakeRaggedTLSSock()
+
+    class _FakeRawSock:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(preflight.socket, "create_connection", lambda *a, **kw: _FakeRawSock())
+    monkeypatch.setattr(preflight.ssl, "create_default_context", lambda: _FakeCtx())
+    res = preflight._round_trip_http("https://proxy.invalid", KEY, OPUS, "preflight-tls-eof", preflight.Deadline(3))
+    assert seen_wrap_kwargs.get("suppress_ragged_eofs") is False, seen_wrap_kwargs
+    assert res["ok"] is False, res
+    assert res["error"]["exception"] == "SSLEOFError", res
