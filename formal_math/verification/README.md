@@ -1,65 +1,147 @@
 # FM-04 数学包门禁
 
-从仓库根目录加载钉选工具链后，可单查一门，或在声明封存时运行声明期组合：
+门禁分两部分：**阻断门**只管可判定的可信边界，红即不得合入；**审阅报告**汇总陈述质量的语义读数，
+不阻断，交给声明评审 PR 的非作者独审逐条处置。划分依据是 #2312 的用户裁定（评论 `7164343103`）。
 
 ```sh
 source scripts/fm_env.sh
-python3 formal_math/verification/run_gates.py --repo-root . --gate S
-python3 formal_math/verification/run_gates.py --repo-root . --stage decl
-python3 formal_math/verification/selftest.py
+python3 formal_math/verification/run_gates.py --repo-root .              # 全部阻断门
+python3 formal_math/verification/run_gates.py --repo-root . --gate 3     # 单查一道阻断门
+python3 formal_math/verification/run_gates.py --repo-root . --report --report-dir <目录>
+python3 formal_math/verification/selftest.py --jobs 3                    # 阻断门自测 + 报告回归
 ```
 
-退出码为 **0 绿、1 红、2 无法判定**；CI 不接受 2。红行格式是
-`GATE<编号> RED <文件>:<行或声明名> <代码> <说明>`。诊断写到标准错误。
-`--stage decl` 加跑 7a、S、8a、10；`--stage proof` 加跑 7b、8b；
-默认 `all` 跑两期。显式 `--gate` 只查所选门。门禁重算源码、Git 差异及本轮构建的 Lean 环境，不读回报告。
+阻断门退出码为 **0 绿、1 红、2 无法判定**；CI 不接受 2。红行格式是
+`GATE<编号> RED <文件>:<行或声明名> <代码> <说明>`，诊断写到标准错误。默认运行（含 `--stage`
+的任何取值）只跑阻断门 1、2、3、6a、6b、15。报告的退出码恒为 0，只有工具自身出错
+（构建失败、环境加载失败、台账无法解码）才退 2。
 
-## 硬门
+## 一、阻断门
 
 | 门 | 机械承诺 |
 |---|---|
 | 1 钉选 | 文件中的工具链、运行中的 Lean 与九个依赖的修订须符合钉选。 |
-| 2 零告警 | 受控选项不得在源码或 Lake 目标中覆盖；`lake build --wfail` 构建默认目标和源码发现的模块（包括未被聚合文件导入的子模块）。 |
-| 3 可信源码与环境 | 源码须符合下节命令白名单，整树不能有禁用项、战术及属性。环境对有源码范围的常量检查 `unsafe`、`partial`、`implemented_by`、`extern`；公理及公理闭包检查覆盖全部常量，包括私有项和无范围的生成项。包内不能声明公理，闭包只接受 `propext`、`Classical.choice`、`Quot.sound`。 |
-| 6a 声明锁 | Defs、Hypotheses、Audit/Literal、ChanChallenge 按环境中的模块归属枚举，含私有声明。 `FM-lock-v2` 以序号表达绑定变量和宇宙参数，编码声明类别、可约性、类型与非定理的定义体。锁集多、少、变均红。 |
+| 2 受控选项与零告警 | `autoImplicit`、`relaxedAutoImplicit`、`linter.*` 不得在 Lake 目标或源码的**任何语法位置**设置（见下文「选项设置的判定」）；`lake build --wfail` 构建默认目标和源码发现的全部模块。 |
+| 3 源码层 | 可信目录 `Chan`、`ChanChallenge`、`ChanDyn`、`ChanTest`（及 `ChanExplore`，另多放行 `#eval`）里的命令、声明、修饰符、属性、派生目标类、选项与导入全部走白名单，名单外即红；Lean 实际精化的命令（宏展开与精化器生成的命令）同样过白名单。审计程序不执行被审代码。 |
+| 3 环境层 | 公理与公理闭包查全部常量，闭包只接受 `propext`、`Classical.choice`、`Quot.sound`。`unsafe`、`partial`、`implemented_by`、`extern`、`meta` 查**全部**常量；只有能机械复核为 Lean 自动生成的三类辅助项才豁免（见下文）。不按有无声明范围豁免，不按名字后缀匹配。 |
+| 6a 声明锁 | Defs、Hypotheses、Audit/Literal、ChanChallenge 按环境中的模块归属枚举，含私有声明。`FM-lock-v2` 以序号表达绑定变量和宇宙参数，编码声明类别、可约性、类型与非定理的定义体。锁集多、少、变均红。 |
 | 6b 路径权限 | 分别核对提交、暂存区与工作树的变更；不让差异相消。声明锁及非空签注由 `decl/` 维护；`infra/` 只能初始化空签注。分离 HEAD 用 `GITHUB_HEAD_REF`，缺失退 2。 |
-| S 陈述范式 | 可信目录手写命题陈述的骨架只接受全称／蕴含、`And`、`Or`、`Not`、`Iff`、`Exists`、`ExistsUnique` 或原子。未锁定的项目命题别名先展开；原子以局部变量或声明末端字面为 `Prop` 的常量为头。不在骨架上用 `if`、`match`、`id`、投影或取默认值包装命题；`True` 及不含外层绑定变量的闭命题不能作前提或合取项。数据项不受骨架限制。 |
-| 7a 定义依赖与居留 | 节点缺 `about`／`mode`、模式非法或所列常量不存在均红。Defs 的自由 `Bool`／`Prop` 判据要求精化定理：前缀逐个符合结构参数域，绑定种类不限，随后只绑定一个结构项；等式、等价或其合取把完整判据接到该项的原始数据。含命题字段的结构另需 ChanTest 中闭的具体实例（直接给出值，或给出 `Nonempty` 证明）。 |
-| 9 联合证据 | 从范式望远镜逐个绑定数据，把前提联合为一个命题；ChanTest 须给出同类型的 `<全名>.witness`。主定理逐个登记必要或便利前提，必要前提还需 `<全名>.without_i`：在同一存在链满足其余各前提并否定结论。 |
-| 10 垃圾值 | 从 Defs、ChanChallenge 的类型和非定理定义体计数，按签注逐项对账：除、模、逆，Nat 减法／前驱，带回退值或以 `!` 结尾的取值，`Inhabited.default`，不带撇的确界，以及 `panic!`。除法守卫只接受同一除数上的作用域内证据、同一结构字段或带证明的子类型；识别有序类型的 `0 < b` 和 `b ≠ 0`。安全查询如 `head?` 不计，`head!` 的元素是 `Option` 也照计。 |
 | 15 模块边界 | 首条命令为 `module`；导入不能越过目录的直接或传递边界，不能整库导入 Mathlib。只有审计工具可 `import all`。Defs 须写 `@[expose] public section`，公开可计算定义也须真的有公开定义体。 |
 
-### Lean 4.36.0 源码白名单
+### 门 3 源码层的白名单（Lean 4.36.0 本机枚举）
 
-`fm_audit headers` 用 `Parser.parseHeader` 读取模块头和导入；`fm_audit source` 用加载本轮依赖后的 Lean 前端逐条解析、检查、再精化命令。解析或导入加载失败退 2；语法有效而声明精化被编译器拒绝时，门 2 报构建红、其余门不能加载该环境。已经发现硬反例时不执行禁用命令。Python 只编排这些步骤并核对 Lake 导入图。
+`fm_audit source` 用加载本轮依赖后的 Lean 前端逐条解析、检查、再精化命令。每条命令分两步查：
 
-单查一个文件的源码阶段：`lake exe fm_audit source Chan.Defs.Example Chan/Defs/Example.lean 3`（从 `formal_math/` 运行）。最后一项可选，可填 `2`、`3` 或 `15`；明确门编号时，源码阶段与 Python 调用方用同一退出码。模块依赖顺序、导入方向与环境检查仍由整门入口编排。
+1. **表层预检**（精化之前）：命令语法树整树过下列白名单；有门 3 红即不精化该命令，文件到此为止。
+2. **精化结果复核**（精化之后）：读这条命令留下的信息树。Lean 每精化一条命令（含宏展开产物、
+   派生处理器等精化器生成的命令）都留一个 `CommandInfo`，每次设置选项都经
+   `Lean.Elab.elabSetOption` 留一个 `OptionInfo`。逐个 `CommandInfo` 的语法树按同一白名单查，
+   逐个 `OptionInfo` 按选项规则查。唯一差别：生成命令里的 `partial` 不在此处判，交给环境层按
+   生成来源判（Lean 的 `Repr`、`BEq`、`Hashable`、`Ord` 派生处理器对递归类型会生成 `partial def`）。
 
-本机枚举后钉选的顶层命令 kind（以下省去共同前缀 `Lean.Parser.Command.`）：
+名单如下（省去前缀 `Lean.Parser.Command.`）：
 
-- `moduleDoc`、`namespace`、`section`、`end`、`open`、`variable`、`universe`、`include`；
-- `declaration`，其子类只接受 `definition`、`theorem`、`abbrev`、`opaque`、`example`、`inductive`、`structure`、`instance`；
-- `mutual`、`in`（内部命令仍按同表验），`set_option`（只允许 `maxRecDepth`、`maxHeartbeats`、`pp.*`），`check`；
-- `eval` 仅 `ChanExplore`；`Lean.guardMsgsCmd` 仅 `Chan/Final`。
+- **命令**：`moduleDoc`、`namespace`、`section`、`end`、`open`、`variable`、`universe`、`include`、
+  `omit`、`in`、`declaration`、`mutual`、`set_option`、`check`、`attribute`、`deriving`（独立的
+  `deriving instance`）；`Lean.guardMsgsCmd` 仅 `Chan/Final`；`eval` 仅 `ChanExplore`。生成命令另允许
+  `cmd in` 展开出的内部命令 `InternalSyntax.end_local_scope`。`in`、`mutual`、`#guard_msgs`
+  内的命令照样按命令验（`#guard_msgs` 的内嵌命令是第 4 号子节点）。
+- **`#guard_msgs`**：内嵌命令不得是声明（否则可用期望消息吞掉告警），规格不得含 `drop`。
+- **声明**：`definition`、`theorem`、`abbrev`、`opaque`、`example`、`inductive`、`classInductive`、
+  `structure`、`instance`。
+- **修饰符**：`meta`、`unsafe`、`partial` 必红；`meta section` 必红；其余（可见性、`protected`、
+  `noncomputable`、`nonrec`）放行。
+- **属性**：按 Lean `elabAttr` 的取名规则比对（先展开属性宏；`Attr.simple` 取标识符，其余取语法
+  种类末段）。白名单为 `simp`、`ext`、`instance`、`reducible`、`irreducible`、`inline`、`specialize`、
+  `expose`、`no_expose`、`grind`、`norm_cast`、`push_cast`、`refl`、`symm`、`trans`、`gcongrAttr`、
+  `mono`、`congr`、`elab_as_elim`、`induction_eliminator`、`cases_eliminator`、`deprecated`、`simps`、
+  `method_specs`（派生处理器为结构生成）。注册宏、精化器、解析器、初始化器、派生处理器以及改写
+  编译产物的属性（`macro`、`*_elab`、`*_parser`、`init`、`builtin_*`、`implemented_by`、`extern`、
+  `export`、`csimp` 等）都不在名单里。`attribute [-x]` 的擦除同样按此名单。
+- **派生目标类**（行内 `deriving` 与独立 `deriving instance`，按解析后的全名）：`DecidableEq`、`BEq`、
+  `ReflBEq`、`LawfulBEq`、`Hashable`、`Ord`、`Repr`、`Inhabited`、`Nonempty`。
+- **选项**：受控选项归门 2；其余只许 `maxRecDepth`、`maxHeartbeats`、`synthInstance.maxHeartbeats`、
+  `synthInstance.maxSize`、`match.ignoreUnusedAlts`（派生处理器生成）与 `pp.*`。库宏在展开时设置的
+  选项同样受此名单约束，例如 `rfl'` 展开出 `smartUnfolding`，判红。
+- **导入**：只许可信目录模块与 `Init`、`Std`、`Mathlib`、`Batteries`；`Lean`、`Lake`、`Qq`、`Aesop`
+  等钉选库判红（只加载库代码，红后仍继续精化以便门 2 继续读数）；`meta import`、`import all`、
+  `prelude`、非 `module` 文件、`ChanExplore`／`verification` 等其他来源判红并立即停止，不加载导入。
+- **其余禁用项**（整树）：`sorry`、`admit`、`native_decide`、`run_tac`、`run_meta`、`sorryAx` 标识符。
 
-禁用的构造在项、战术、修饰符及属性语法树里同样检查，包括 `sorry`、`admit`、`native_decide`、`unsafe`、`partial`、`extern`、`implemented_by` 及局部受控选项。审计工具允许元编程，不允许占位证明。
+#### 选项设置的判定
 
-### 节点来自声明范围，不按名字猜
+不列节点名单，按类收：
 
-门 7a、9 在 Thm、Proofs、Exec、ChanChallenge 枚举**有 Lean 源码声明范围、类型为命题、且种类为定理、定义或 opaque** 的常量。结构字段投影、构造器、递归子和归纳类型不算节点。用 Lean 4.36.0（`611c117b`）按审计实际路径以 `.private` 加载夹具对象，逐个读取 `findDeclarationRangesCore?`：
+- 表层：凡**首个子节点是 `set_option` 关键字**的语法节点都按选项设置处理，选项名取第二个子节点里的
+  全部标识符。命令、项、战术、`grind =>` 内的 `set_option`，以及今后任何沿用这个关键字的新语法位置
+  都在此列。
+- 精化后：Lean 4.36.0 的四个 `set_option` 精化器（命令、项、战术、`grind`）都调用
+  `Lean.Elab.elabSetOption`，它为每次设置推一个 `OptionInfo`。读信息树里的全部 `OptionInfo`，
+  宏展开出的选项（表层看不到）也在其中。新语法若复用 `elabSetOption`，自动覆盖。
 
-| 写法 | 有范围 | 无范围的代表项 |
+#### 审计期不执行被审代码
+
+- 精化前先不运行任何初始化器读入导入闭包（`importModules (loadExts := false)`），按 `.olean` 的
+  真实路径分出被审代码：不在工具链 `lib/lean` 或 `.lake/packages`（门 1 钉选）之下的模块都算。
+  这些模块登记进 Lean 的 `interpretedModInits`，随后的 `processHeader` 不运行它们的 `[init]`。
+- 若被审代码的任一导入模块含 `meta` 声明，拒绝精化（门 3 红）。在模块制下，只有 `meta` 声明能在
+  精化期被解释执行，宏、精化器、初始化器都必须是 `meta`；`module` 又不能导入非 `module` 文件。
+  因此精化期运行的代码只剩钉选库。
+- `fm_audit selfcheck` 用一段固定样例（不走表层预检，样例在审计程序源码里，命令行不可改）核对
+  精化结果复核确实看到宏生成的受控选项、`implemented_by` 属性、非白名单命令与库宏展开出的选项。
+
+### 门 3 环境层的生成来源判据
+
+常量带 `unsafe`、`partial`、`implemented_by` 时，只有能机械复核为下列三类之一才豁免；`extern` 与
+`meta` 没有豁免。判据都在 `Audit.lean` 的 `generatedBy`：
+
+1. **归纳类型的 `ctorIdx` 运行期实现**：`T.ctorIdx` 由 Lean 的 `isCtorIdxCore?` 认定（同模块的安全
+   归纳类型），其 `implemented_by` 目标是同模块的 `unsafe` 定义，类型、宇宙参数与 `T.ctorIdx` 逐字
+   相同，值是逐参数抽象后的 `getObjTagNat _ x`（即 `mkCtorIdxImpl` 生成的形状）。
+2. **结构递归或良基递归的编译影子**：`partial` 定义经 `Compiler.isUnsafeRecName?` 指向源定义，源定义
+   是同模块、内核检查过的安全 `def`，`isRecursiveDefinition` 登记它为结构或良基递归（Lean 的
+   `recExt`），类型与宇宙参数逐字相同。
+3. **派生处理器的辅助函数**：源定义是同模块的 `opaque`，其名字前缀是同模块的实例常量，实例类型为
+   `C (T …)`（`C` 为 `Repr`、`BEq`、`Hashable`、`Ord`、`DecidableEq` 之一，`T` 为同模块归纳类型）；
+   用 Lean 自己的 `Deriving.mkContext C 前缀 T` 在空的探针命名空间里重算，得到 `usePartial` 为真，
+   实例名与辅助函数名恰与重算结果一致，且实例体引用重算出的辅助函数。
+
+手写 `partial def` 被编译成 `opaque` 加 `_unsafe_rec`：源定义不是 `def`，也不满足第 3 类，判
+`ENV_PARTIAL`。原处若因撞名给实例加过后缀，第 3 类重算对不上，按不豁免处理（误红方向）。
+
+### 阻断门的已知不覆盖
+
+- 信息树里 Lean 未保留内容的空洞（例如 `decreasing_by` 证明的战术信息）无从复核；其中手写的部分已
+  过表层预检，库宏在其中生成的选项看不到。
+- 库代码用 `withOptions` 等方式直接改选项而不经 `elabSetOption`，看不到；这类代码只来自钉选库。
+- 门 1 不核包来源 `type`／`url`（第三轮 R3-S7），本轮未改。
+
+## 二、审阅报告（不阻断）
+
+`--report` 对可信目录逐常量输出 S、7a、7b、8a、8b、9、10 的读数：标准输出是 JSON
+（`schema: fm-review-v1`），标准错误是 Markdown 表；给 `--report-dir` 时另写 `report.json`、
+`report.md`。每条读数有：
+
+- `status`：`finding`（命中）、`unknown`（拿不到读数，`detail` 写原因，如门 10 遇到类型类参数时
+  `mkAppM` 失败）、`signed`（门 10 已签注且次数相符）、`no_finding`（未命中或不适用）。
+- `evidence`：`certified` 只用于有内核可复核证书的发现——门 7b `GENERALIZES`（内核接受了泛化命题）、
+  门 8b `DROPPABLE_PREMISE`（删前提后内核重放原证明成功）；其余一律 `hint`。
+
+各项读数的含义：
+
+| 读数 | 含义 | 已知不覆盖（第三轮夹具在 `report_cases/`） |
 |---|---|---|
-| `deriving DecidableEq, Repr, Ord` | `Dir`、手写构造器、派生实例及 `instReprDir.repr`、`instOrdDir.ord`；这些类型都不是命题 | `instDecidableEqDir._proof_1/_proof_2`、`Dir.ofNat_ctorIdx`、`Dir.ctorIdx`、`Dir.ctorIdx._impl` |
-| `termination_by`／`decreasing_by` | `countdown` | `countdown._proof_1`、`countdown.eq_def`、`countdown._unsafe_rec` |
-| 模式匹配的结构递归定理 | `recThm` | `recThm._f`、私有 `recThm.match_1_1` |
-| `where`、`let rec` | 外层声明和手写的局部助手；私有名称也查到 | 局部递归助手的 `_f` |
-| `mutual` | 两个手写定理 `mutualA`、`mutualB` | 两个 `_f` 及私有匹配辅助项 |
-| 命题类与 `instance` | `Pos.mk`、`Pos.pos`、命名及匿名实例 `posOne`、`instPosOfNatNat` 都是命题常量 | `Pos.mk._flat_ctor` |
+| S 陈述范式 | 骨架只接受全称／蕴含、`And`、`Or`、`Not`、`Iff`、`Exists`、`ExistsUnique` 或原子；不在骨架上用 `if`、`match`、`id`、投影或取默认值包装命题；`True` 不能作前提或合取项。已删除「闭命题不能作前提或合取项」。 | 连接词外包（`(x = x) ∧ …`、`True ↔ …`、`¬¬…`、`∃ _, …`），`Prop` 末端原子与局部变量头包装（`Eq … True`、`Nonempty …`、本地 `Prop` 归纳或结构、锁定别名）：`known_limits/gS`。 |
+| 7a 定义依赖与居留 | 节点登记、自由判据的精化定理、含命题字段结构的 ChanTest 居留见证。 | 用 `Type` 级空字段（`{_n // False}`、`Empty`、`Fin 0`）跳过居留检查：`known_limits/g7a`。函数型判据的逐点精化不被接受：`finding/g7a/r3-c2-*`。 |
+| 7b 抽象诊断 | 一致替换后内核接受泛化命题即 `GENERALIZES`（certified）。 | 经 Hypotheses 别名间接用归纳接口时读不出：`unknown/g7b/r3-e2-*`。 |
+| 8a 形状诊断 | 前提实例化出结论（`PREMISE_INSTANCE`），函数图（`FUNCTION_GRAPH`）。 | 见 `known_limits/g8a`。 |
+| 8b 未用前提 | 删前提后内核重放原证明成功即 `DROPPABLE_PREMISE`（certified）。 | `PProd.fst`、`id` 包装等：`known_limits/g8b`。 |
+| 9 联合证据 | 见证定理、必要性反例与前提登记；便利前提列为 `CONVENIENCE` 提示。 | 依赖型前提生成不了闭见证命题时读不出：`unknown/g9/r3-e4-*`。 |
+| 10 垃圾值 | Defs、ChanChallenge 中除、模、逆、Nat 减法等计数与签注对账（`SIGNOFF_MISSING`／`SIGNOFF_STALE`）。 | 伪造 `LT`／`OfNat` 实例的守卫、`Rat.divInt`、`mkRat`、`List.headI`／`getLastI`：`known_limits/g10`；带类型类参数的声明读不出：`unknown/g10`；`b⁻¹` 等偏严读数：`finding/g10/r3-d2-*`。 |
 
-原样 b4 无须为 `Pos.mk` 或 `Pos.pos` 登记或写见证；b5kill 原件没有居留见证，故为红，自测另保留补闭项的绿样。
-
-门 3 不会把无范围的 `Dir.ctorIdx`（带 `implemented_by`）与 `Dir.ctorIdx._impl`（带 `unsafe`）当成手写禁用构造。这个区别依赖门 2、3 的源码命令白名单：用户代码不能绕开源码声明直接造常量；安全定理不能引用 `unsafe` 常量，全部常量仍检查公理闭包，包括 `sorryAx`、`Lean.ofReduceBool` 和 `Lean.trustCompiler`。手写 `unsafe def` 和 `@[implemented_by]` 在源码层与环境层均有必红夹具。
+**独审者必须读这份报告并逐条处置**：每条 `finding` 与 `unknown` 都要在声明评审 PR 的审阅记录里写明
+接受、改写陈述或驳回的理由；`certified` 发现驳回须给出内核证书为何不构成问题的说明。报告里的
+`no_finding` 不代表安全：上表的不覆盖项靠独审、声明锁（门 6a）与 `lake comparator` 收口。
 
 ### 登记主定理的前提
 
@@ -81,22 +163,30 @@ python3 formal_math/verification/selftest.py
 }
 ```
 
-此处需提供 `Chan.step.witness` 和 `Chan.step.without_1`；第 2 前提进入门 9 的独审清单。辅助引理不用给逐前提登记；旧台账中的 `needs_necessity` 仍要求所有反例。私有定理见证保留 `_private`、模块名和数字组件，Lean 源码中将数字写作 `«0»`。签注样例：`{"Chan.gap":{"Nat.sub":{"count":1,"review":"#票号／独审记录"}}}`。
+此处需提供 `Chan.step.witness` 和 `Chan.step.without_1`；第 2 前提在报告中列为 `CONVENIENCE`。
+私有定理见证保留 `_private`、模块名和数字组件，Lean 源码中将数字写作 `«0»`。签注样例：
+`{"Chan.gap":{"Nat.sub":{"count":1,"review":"#票号／独审记录"}}}`。
 
-## 启发式门：红必带证书，绿不代表安全
+## 三、自测
 
-| 门 | 能签发的红证书 | 绿仍待检查 |
-|---|---|---|
-| 7b 抽象诊断 | 一致替换陈述、辅助接口、原证明中的具体定义后，内核接受泛化命题。 | 保留与具体定义绑定的 Hypotheses 归纳名义接口（含多构造器）时不签发正证书；内核拒绝也不证明依赖必要。不获准展开的普通依赖、无法读取或超时退 2。 |
-| 8a 形状诊断 | 拆开前提合取，用默认透明度以元变量实例化全称前提；得到与结论定义相等的实例即 `PREMISE_INSTANCE`。展开 `ExistsUnique` 后，按任一合取顺序识别裸等式函数图，记 `FUNCTION_GRAPH`。 | 不为投影反向构造积类型见证，不用逻辑等价证明去化简重写过或重复的函数图，亦不做任意命题搜索。声明式唯一性用 `declarative_unique: true` 登记。 |
-| 8b 未用前提 | 全树做 beta、eta、zeta、投影归约并内联未锁定的项目证明体。删前提后重建类型并由内核接受原证明，才报 `DROPPABLE_PREMISE`。 | 不替换锁定证明，不为依赖删除项的后续类型或剩余证明另找证明。旧台账中附理由的 `doc_only` 保留豁免。 |
+`selftest.py` 把每个夹具装入独立最小包（先预编译一次 `fm_audit` 供各夹具复用），从入口重算。
+两类分开计数：
 
-`known_limits/` 的案例期望对应启发式门为绿，并写明限制的封口：范式 S、门 9 的必要性反例或非作者审阅。
+- **阻断门**：`must_red/g<门>/`、`must_green/g<门>/`、`must_unknown/g<门>/` 断言退出码 1／0／2 与红码集合，
+  另跑一例 `fm_audit selfcheck`。夹具约定：`expect.txt` 红码；`expect_decls.txt` 声明名；
+  `expect_detail.txt` 每行须出现在输出里（用来钉住是哪条规则判的）；`environment-only.txt`（配
+  `modules.txt`）直调门 3 环境层；`source-only.txt`（模块名、路径、需先构建的依赖）跳过依赖顺序直审
+  一个文件；`forbid-file.txt` 列出跑完后不得存在的文件（核对审计期没有执行被审代码）；
+  `lean-version.txt`、`branch.txt`、`head.txt` 同前。
+- **报告回归**：`report_cases/{finding,clean,unknown,known_limits}/g<门>/` 跑 `--report`，断言该门读数：
+  `finding` 的命中代码集合等于 `expect.txt`（可配 `expect_decls.txt`、`expect_certified.txt`）；`clean`
+  与 `known_limits` 无命中也无 `unknown`（后者须附 `README.md` 写明为何漏、由谁收口）；`unknown`
+  至少一条 `unknown`。报告退出码须为 0。
 
-## 自测与构建
+macOS 上夹具与子进程临时文件放在 `/Volumes/AgentStorage/fm/tmp/`；Linux 上用 `TMPDIR`。根分区可用
+低于 6 GiB 时停止派发。门 3 与报告装载 `.olean` 私有分片，并先读 ChanTest 的私有探针证明体；
+可见性不足返回 2。
 
-自测把每个夹具装入独立最小包，重算退出码、代码和指定声明名。macOS 上夹具与子进程临时文件都放在 `/Volumes/AgentStorage/fm/tmp/`；Linux 上用 `TMPDIR`。夹具结束时删除独立的 `.lake/build` 和临时文件，不清理共享预编译包。报告分开计数 `must_red`、`must_green`、`must_unknown`、`known_limits`。紧凑复跑可传门编号；macOS 内置盘低于 6 GiB 时停止派发，默认串行。
-
-门 3、7b、8b 装载 `.olean` 私有分片，并先读 ChanTest 的私有探针证明体；可见性不足返回 2。原先用 `import all` 也读到了探针正文，但只读基础 `.olean` 拿不到这个私有名称。
-
-M-4 的本机实测：定义只写 `public section` 时，跨模块 `decide` 卡在不可展开的 `probeFlag`；改成 `@[expose] public section` 后，同一计算通过。对应夹具是 [no-expose](must_red/g15/no-expose) 和 [expose](must_green/g15/expose)。
+M-4 的本机实测：定义只写 `public section` 时，跨模块 `decide` 卡在不可展开的 `probeFlag`；改成
+`@[expose] public section` 后，同一计算通过。对应夹具是 [no-expose](must_red/g15/no-expose) 和
+[expose](must_green/g15/expose)。
