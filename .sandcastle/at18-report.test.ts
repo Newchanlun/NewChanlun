@@ -4615,6 +4615,163 @@ class Factory(type):
       "deferred(self.item); return 18"), mixedTarget, "17,flag=True", "18", false);
 });
 
+test("R41/#1319：按实收通道恢复同名键、位置尾参与本地元类转发", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = (name: string, prod: string, target: string, observed: string, result: string,
+    expected = true, extra: Record<string, string> = {}) => t.test(name, () => {
+    const repo = feedSource({
+      ...extra,
+      [entry]: target + "\n__all__ = ('route',)\n",
+      [integration]: "from functools import wraps\nfrom . import at18_fixture_feed as f\n" +
+        prod + "\n__all__ = ('Adapter',)\n",
+      [path]: "from trading_system import at18_fixture_feed as f\ndef test_route():\n" +
+        `    assert f.route(${observed}) == ${result}\n`,
+    });
+    assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+  });
+
+  const shadowRoute = "def route(prefix,/,**kw): return prefix + kw['prefix']";
+  const route99 = "99,prefix=17,rows=[4,1]";
+  const shadow = (inner = "*,prefix", guard = "", forward = "**kw",
+    dispatch = "return f.route(self.tag,prefix=self.item,rows=[4,1])", consume = "") => `
+def forward(fn):
+    @wraps(fn)
+    def outer(self,prefix,/,**kw):
+        assert prefix == 99
+        self.tag = prefix
+        ${guard || "pass"}
+        ${consume || "pass"}
+        return fn(self,${forward})
+    return outer
+class Adapter:
+    @forward
+    def __init__(self,${inner}):
+        assert prefix == 17
+        self.item = prefix
+    def dispatch(self): ${dispatch}
+`;
+  await check("b00e5785", shadow(), shadowRoute, route99, "116");
+  await check("78c9b424", shadow("*,prefix,**unused"), shadowRoute, route99, "116");
+  const renamedRoute = "def route(a,/,**kw): return a + kw['prefix']";
+  await check("不同位置槽名：逐轮剥离多个原生拒绝键",
+    shadow("*,prefix"), renamedRoute, route99 + ",debug=True", "116");
+  await check("不同位置槽名：外层先抛 ValueError，按已知键投影",
+    shadow("*,prefix", "if 'rows' in kw: raise ValueError('rows')"), renamedRoute, route99, "116");
+  await check("目标遮蔽、构造外层无遮蔽：具名恢复保留关键字 17", `
+class Adapter:
+    def __init__(self, *, prefix):
+        assert prefix == 17
+        self.item = prefix
+    def dispatch(self): return f.route(99,prefix=self.item,rows=[4,1])
+`, shadowRoute, route99, "116");
+  await check("位置注入与同名关键字、冗余字段同时存在",
+    shadow("a,b,*,prefix", "assert kw['prefix'] == 17", "1,2,**kw"), shadowRoute, route99, "116");
+  await check("方法侧也可按本地包装链筛去多余键",
+    shadow().replace("    @forward\n    def __init__(self,*,prefix):", "    @forward\n    def dispatch(self,*,prefix):")
+      .replace("        self.item = prefix\n    def dispatch(self): return f.route(self.tag,prefix=self.item,rows=[4,1])",
+        "        return f.route(self.tag,prefix=prefix,rows=[4,1])"), shadowRoute, route99, "116");
+  await check("构造时承接不能替代公开方法承接",
+    shadow("*,prefix", "", "**kw", "return 116", "f.route(prefix, prefix=kw['prefix'])"), shadowRoute, route99, "116", false);
+  await check("公开方法只创建生成器、未消费", shadow("*,prefix", "", "**kw",
+    "later(self.tag, self.item); return 116") + "\ndef later(tag, item): yield f.route(tag, prefix=item)\n",
+    shadowRoute, route99, "116", false);
+
+  const tailRoute = "def route(*items,**flags): return items[0]+1";
+  const tail = (params = "prefix=None,/,*items,**flags", guard = "assert prefix is None", wrapped = "") => `
+class Adapter:
+    ${wrapped ? wrapped + "\n    " : ""}def __init__(self,${params}):
+        ${guard}
+        self.item, = items
+        assert self.item == 17
+    def dispatch(self): return f.route(self.item)
+`;
+  await check("85f38152", tail(), tailRoute, "17", "18");
+  await check("32c61fee", tail(), tailRoute, "17,flag=True", "18");
+  for (const observe of ["17", "17,flag=True"]) {
+    await check("只有 *items：" + observe, tail("prefix=None,/,*items"), tailRoute, observe, "18");
+  }
+  await check("可收 **flags 但拒绝冗余 flag", tail(undefined, "assert prefix is None and not flags"),
+    tailRoute, "17,flag=True", "18");
+  await check("方法侧只观察位置尾参", `
+class Adapter:
+    def dispatch(self,prefix=None,/,*items,**flags):
+        assert prefix is None and items == (17,)
+        return f.route(*items)
+`, tailRoute, "17", "18");
+  await check("真实默认哨兵只按身份传入固定前缀", `
+class Sentinel:
+    def hostile(self, *args): raise AssertionError('sentinel hook')
+    __bool__ = __eq__ = __hash__ = __repr__ = hostile
+sentinel = Sentinel()
+` + tail("prefix=sentinel,/,*items", "assert prefix is sentinel"), tailRoute, "17", "18");
+  await check("外来规范不获得位置尾参",
+    "from .foreign import spec\n" + tail("prefix=None,/,*items", undefined, "@wraps(spec)"), tailRoute, "17", "18", false,
+    { "trading_system/foreign.py": "def spec(prefix=None,/,*items): return items[0]\n" });
+
+  const meta = `
+class Factory(type):
+    def __call__(cls,*args,**kw): return super().__call__(*args,**kw)
+`;
+  const spec = `
+def spec(prefix, /, *rest, **options):
+    (item,) = rest
+    assert item == 17
+    return item
+`;
+  const adapter = (base = "", hook = "    @wraps(spec)\n    def __init__(self,*args,**kw): self.item = spec(*args,**kw)") => `
+class Adapter${base}:
+${hook || "    pass"}
+    def dispatch(self): return f.route(item=self.item)
+`;
+  const itemRoute = "def route(*,item): return item+1";
+  await check("b1cca127", meta + spec + adapter("(metaclass=Factory)"), itemRoute, "item=17", "18");
+  await check("2477350a", meta + spec + adapter(), itemRoute, "item=17", "18");
+  const fixedInit = `    def __init__(self,prefix,/,*rest,**options):
+        assert prefix is None
+        self.item, = rest
+        assert self.item == 17`;
+  await check("透明本地元类保留无包装实例签名", meta + adapter("(metaclass=Factory)", fixedInit), itemRoute, "item=17", "18");
+  await check("透明本地元类保留本地继承的实例签名",
+    meta + "class Base:\n" + fixedInit + "\n" + adapter("(Base, metaclass=Factory)", ""), itemRoute, "item=17", "18");
+  await check("透明本地元类下双钩子仍只构造一次", meta + `
+created = []
+class Adapter(metaclass=Factory):
+    def __new__(cls, *, item):
+        created.append('new')
+        return object.__new__(cls)
+    def __init__(self, *, item):
+        created.append('init')
+        self.item = item
+    def before_dispatch(self): return None
+    def dispatch(self):
+        assert created == ['new', 'init']
+        return f.route(item=self.item)
+`, itemRoute, "item=17", "18");
+  const taggedMeta = `
+class Factory(type):
+    def __call__(cls,tag,/,*args,**kw):
+        assert tag is None and set(kw) == {'prefix'}
+        return super().__call__(*args,**kw)
+`;
+  await check("有固定槽的本地元类在备用阶段转发实例关键字",
+    (taggedMeta + adapter("(metaclass=Factory)", "    def __init__(self,*,prefix): self.item = prefix"))
+      .replace("f.route(item=self.item)", "f.route(prefix=self.item)"),
+    "def route(*,prefix,**kw): return prefix+1", "prefix=17,debug=True", "18");
+  await check("元类消费固定前缀，再转发实例前缀和位置尾参",
+    taggedMeta.replace("set(kw) == {'prefix'}", "not kw") + adapter("(metaclass=Factory)", fixedInit),
+    itemRoute, "item=17", "18");
+  const foreignInit = { "trading_system/foreign.py":
+    "def init(self,prefix,/,*rest):\n    self.item, = rest\nclass Base:\n    __init__ = init\n" + spec };
+  await check("本地元类转发外来实例钩子", meta + "from .foreign import init\n" +
+    adapter("(metaclass=Factory)", "    __init__ = init"), itemRoute, "item=17", "18", false, foreignInit);
+  await check("本地元类转发外来包装规范", meta + "from .foreign import spec\n" +
+    adapter("(metaclass=Factory)"), itemRoute, "item=17", "18", false, foreignInit);
+  await check("本地元类转发外来继承钩子", meta + "from .foreign import Base\n" +
+    adapter("(Base, metaclass=Factory)", ""), itemRoute, "item=17", "18", false, foreignInit);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
