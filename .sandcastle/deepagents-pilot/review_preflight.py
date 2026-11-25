@@ -856,6 +856,8 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
                 if len(parsed_lengths) != 1:
                     raise http.client.HTTPException("conflicting Content-Length")
                 content_length = next(iter(parsed_lengths))
+            if status_code == 200 and scheme == "http" and not chunked and content_length is None:
+                raise http.client.HTTPException("plaintext HTTP 200 requires Content-Length or chunked framing")
     except Exception:
         if fp is not None:
             try:
@@ -940,11 +942,15 @@ def _iter_bounded_sse_lines(
     response,
     deadline: Deadline,
     *,
-    max_total_bytes: int = MAX_SSE_RESPONSE_BYTES,
-    max_line_bytes: int = MAX_SSE_EVENT_BYTES,
+    max_total_bytes: int | None = None,
+    max_line_bytes: int | None = None,
     chunk_bytes: int = SSE_READ_CHUNK_BYTES,
 ):
     """增量按块读取 SSE 流并执行总字节数与单行上限，未超限时必须读至 EOF 以保留截断传输检测。"""
+    if max_total_bytes is None:
+        max_total_bytes = MAX_SSE_RESPONSE_BYTES
+    if max_line_bytes is None:
+        max_line_bytes = MAX_SSE_EVENT_BYTES
     bom_checked = False
     bom_buf = bytearray()
     pending_cr = False

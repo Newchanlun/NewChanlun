@@ -89,6 +89,7 @@ class FakeProxy:
                 if hang:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Content-Length", "1000")
                     self.end_headers()
                     self.wfile.flush()
                     time.sleep(4)
@@ -461,7 +462,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "obs-text-reason", "empty-reason", "missing-status-sp", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-chunk-ext-trailing-ws-name", "bad-chunk-ext-trailing-ws-val", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "obs-text-reason", "empty-reason", "missing-status-sp", "close-delimited-200", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-chunk-ext-trailing-ws-name", "bad-chunk-ext-trailing-ws-val", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -485,7 +486,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             self.rfile.read(int(self.headers["Content-Length"]))
             if framing == "spent-budget":
                 time.sleep(0.3)
-            if framing in ("obs-text-reason", "empty-reason", "missing-status-sp", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header"):
+            if framing in ("obs-text-reason", "empty-reason", "missing-status-sp", "close-delimited-200", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header"):
                 try:
                     if framing == "obs-text-reason":
                         raw_resp = (
@@ -508,6 +509,9 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
                         )
+                    elif framing == "close-delimited-200":
+                        # 明文 HTTP 200 无 Content-Length 且无 Transfer-Encoding 时，TCP 断流不可区分于正常 EOF，须拒绝。
+                        raw_resp = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + payload
                     elif framing == "early-hints-103":
                         raw_resp = (
                             b"HTTP/1.1 103 Early Hints\r\n"
@@ -685,7 +689,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             assert result["error"]["exception"] == "IncompleteRead"
         if framing in ("status-204", "status-201"):
             assert result["http_status"] == int(framing.split("-")[1])
-        if framing in ("early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "gzip-encoding", "neg-chunk", "bad-chunk-sep", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-chunk-ext-trailing-ws-name", "bad-chunk-ext-trailing-ws-val", "bad-trailer", "bad-trailer-space"):
+        if framing in ("close-delimited-200", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "gzip-encoding", "neg-chunk", "bad-chunk-sep", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-chunk-ext-trailing-ws-name", "bad-chunk-ext-trailing-ws-val", "bad-trailer", "bad-trailer-space"):
             assert result["error"]["exception"] == "HTTPException"
         if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed
@@ -2525,12 +2529,18 @@ def test_open_http_disables_tls_suppress_ragged_eofs(tmp_path, monkeypatch):
 
 
 def test_chunked_framing_overhead_budget_caps_200_and_error_responses(monkeypatch):
-    """Astra P2 #4 (R71): chunked 读取器必须对 chunk-size/chunk-ext/trailer 累计分帧开销设上限，
-    防止大量带长扩展的小块在正文未超限时持续耗尽预算（200 成功体与 500 错误体均受限）。"""
+    """Astra P2 #4 (R71) & Sol P2 #2 / Astra P2 #5 (R72): chunked 读取器必须对 chunk-size/chunk-ext/trailer
+    累计分帧开销设上限，且 _iter_bounded_sse_lines 动态读取 MAX_SSE_RESPONSE_BYTES；使用本可成功的完整 SSE 正文
+    分别验证正常 chunked 通过、超分帧预算时在读到终态前报分帧超限，以及 500 错误体同样有界截断。"""
+    import hashlib
+
     monkeypatch.setattr(preflight, "MAX_SSE_RESPONSE_BYTES", 2048)
-    ext = b"a=1;" * 128  # ~512B per chunk header
-    chunk_flood = (b"1;" + ext[:-1] + b"\r\n \r\n") * 200 + b"0\r\n\r\n"
-    mode = {"status": 200}
+    valid_sse = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    ext = b"a=1;" * 128  # ~512B per chunk header -> >4096B within ~10 bytes of valid_sse
+    normal_chunked = b"".join(b"1\r\n" + bytes([b]) + b"\r\n" for b in valid_sse) + b"0\r\n\r\n"
+    bloated_chunked = b"".join(b"1;" + ext[:-1] + b"\r\n" + bytes([b]) + b"\r\n" for b in valid_sse) + b"0\r\n\r\n"
+    err_flood = (b"1;" + ext[:-1] + b"\r\n \r\n") * 200 + b"0\r\n\r\n"
+    mode = {"status": 200, "body": normal_chunked}
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -2546,7 +2556,7 @@ def test_chunked_framing_overhead_budget_caps_200_and_error_responses(monkeypatc
             self.send_header("Connection", "close")
             self.end_headers()
             try:
-                self.wfile.write(chunk_flood)
+                self.wfile.write(mode["body"])
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
@@ -2554,11 +2564,20 @@ def test_chunked_framing_overhead_budget_caps_200_and_error_responses(monkeypatc
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 chunked 分帧预算回归
-        mode["status"] = 200
-        res200 = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-flood-200", preflight.Deadline(3))
-        assert res200["ok"] is False, res200
+        # 1. 基线对照组：相同 1 字节分块有效 SSE 正文使用正常块头必须通过。
+        mode.update(status=200, body=normal_chunked)
+        res_ok = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-ok-200", preflight.Deadline(3))
+        assert res_ok["ok"] is True, res_ok
 
-        mode["status"] = 500
+        # 2. 相同有效 SSE 正文加上超限 chunk-ext 分帧开销：必须在到达终态前触发分帧上限错误。
+        mode.update(status=200, body=bloated_chunked)
+        res200 = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-flood-200", preflight.Deadline(3))
+        want_sha = hashlib.sha256("chunked 分帧开销超过字节上限".encode()).hexdigest()[:12]
+        assert res200["ok"] is False and res200["terminal"] is None, res200
+        assert res200["error"]["sha256_12"] == want_sha, res200
+
+        # 3. 500 错误体同样受分帧预算（64 KiB）约束。
+        mode.update(status=500, body=err_flood)
         res500 = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-flood-500", preflight.Deadline(3))
         assert res500["ok"] is False and res500["http_status"] == 500, res500
         assert res500["error"]["length"] < 200, res500
