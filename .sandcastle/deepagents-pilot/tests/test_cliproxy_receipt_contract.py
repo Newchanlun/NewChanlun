@@ -695,3 +695,82 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
 
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _ValidMetaResp())
     assert preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-valid-meta", preflight.Deadline(5))["ok"] is True
+
+
+def test_receipt_readers_reject_symlinked_ancestor_directory(tmp_path):
+    """Astra P2 #4 (PR #2280 R37): Python 收据读取端须与 Go 生产端一致，逐段 O_NOFOLLOW 拒绝祖先符号链接。"""
+    import time
+
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir(mode=0o700)
+    real_root = real_parent / "receipts"
+    real_root.mkdir(mode=0o700)
+    os.chmod(real_root, 0o700)
+
+    sym_parent = tmp_path / "sym-parent"
+    sym_parent.symlink_to(real_parent)
+    sym_root = sym_parent / "receipts"
+
+    now_ns = time.time_ns()
+    since = now_ns / 1e9 - 5.0
+
+    # 1. Legacy preflight receipt: succeeds via real_root, rejected via sym_root.
+    pf_session = "preflight-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee1"
+    pf_dir = real_root / pf_session
+    pf_dir.mkdir(mode=0o700)
+    os.chmod(pf_dir, 0o700)
+    pf_path = pf_dir / "receipt.json"
+    pf_path.write_bytes(json.dumps({
+        "schema": log_mod.SCHEMA,
+        "session": pf_session,
+        "started_ns": now_ns,
+        "finished_ns": now_ns,
+        "complete": True,
+        "routes": ["codex:gpt-6.2-sol@chatgpt.com"],
+    }).encode("utf-8"))
+    os.chmod(pf_path, 0o600)
+
+    assert log_mod.route_from_receipt(real_root, pf_session, since, 0) == [("codex:gpt-6.2-sol", "chatgpt.com")]
+    assert log_mod.route_from_receipt(sym_root, pf_session, since, 0) is None
+
+    # 2. Sealed review receipt: succeeds via real_root, rejected via sym_root.
+    rev_launch = "review-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee2"
+    rev_session = "019d0000-0000-7000-8000-aaaaaaaaaaa2"
+    resp_sha = hashlib.sha256(b"resp-sym-test").hexdigest()
+    out_sha = hashlib.sha256(b"VERDICT: PASS").hexdigest()
+    rev_dir = real_root / rev_launch
+    rev_dir.mkdir(mode=0o700)
+    os.chmod(rev_dir, 0o700)
+    rev_raw = json.dumps({
+        "schema": log_mod.REVIEW_SCHEMA,
+        "launch": rev_launch,
+        "session": rev_session,
+        "started_ns": now_ns,
+        "finished_ns": now_ns,
+        "sealed_at_ns": now_ns,
+        "complete": True,
+        "sealed": True,
+        "tainted": False,
+        "requests": 1,
+        "routes": ["codex:gpt-6.2-sol@chatgpt.com"],
+        "response_id_sha256s": [resp_sha],
+        "last_response_id_sha256": resp_sha,
+        "last_output_sha256": out_sha,
+    }).encode("utf-8")
+    rev_path = rev_dir / "receipt.json"
+    rev_path.write_bytes(rev_raw)
+    os.chmod(rev_path, 0o600)
+    rev_sha = hashlib.sha256(rev_raw).hexdigest()
+
+    assert log_mod.review_from_receipt(
+        real_root, rev_launch, rev_session, since, 0,
+        expected_receipt_sha256=rev_sha,
+        expected_response_id_sha256=resp_sha,
+        expected_output_sha256=out_sha,
+    ) is not None
+    assert log_mod.review_from_receipt(
+        sym_root, rev_launch, rev_session, since, 0,
+        expected_receipt_sha256=rev_sha,
+        expected_response_id_sha256=resp_sha,
+        expected_output_sha256=out_sha,
+    ) is None

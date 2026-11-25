@@ -1,4 +1,5 @@
 """#1742 私有日志读取器；宿主与容器使用同一解析实现。"""
+import errno
 import hashlib
 import json
 import os
@@ -54,6 +55,56 @@ def _trusted_fd(fd: int, *, is_dir: bool) -> os.stat_result | None:
     return info
 
 
+def _is_allowed_darwin_os_symlink(path_str: str) -> bool:
+    if sys.platform != "darwin":
+        return False
+    want = {"/var": "private/var", "/tmp": "private/tmp", "/etc": "private/etc"}.get(path_str)
+    if want is None:
+        return False
+    try:
+        target = os.readlink(path_str)
+    except OSError:
+        return False
+    return target in (want, "/" + want)
+
+
+def _open_trusted_root_dir(root: Path) -> int | None:
+    """从根目录逐段以 O_NOFOLLOW 打开 root，拒绝任意祖先符号链接（仅允许 macOS 固定 OS 链接），并校验属主与 0700 权限。"""
+    if not root.is_absolute():
+        return None
+    parts = [p for p in root.parts[1:] if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    cur_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    cur_path = ""
+    try:
+        for part in parts:
+            cur_path = f"{cur_path}/{part}"
+            try:
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur_fd)
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR) and _is_allowed_darwin_os_symlink(cur_path):
+                    priv_fd = os.open("private", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur_fd)
+                    try:
+                        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=priv_fd)
+                    finally:
+                        os.close(priv_fd)
+                else:
+                    return None
+            os.close(cur_fd)
+            cur_fd = next_fd
+        if _trusted_fd(cur_fd, is_dir=True) is None:
+            return None
+        fd = cur_fd
+        cur_fd = -1
+        return fd
+    finally:
+        if cur_fd >= 0:
+            os.close(cur_fd)
+
+
 def route_from_receipt(root: Path, session: str, since: float, wait: float) -> list[tuple[str, str]] | None:
     """仅消费生产者原子发布的私有收据；正式调用在有截止时间的子进程中执行。"""
     if not SESSION.fullmatch(session):
@@ -61,11 +112,11 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
     end = time.monotonic() + max(0, wait)
     while True:
         try:
-            # 逐层禁止 symlink 并核验已打开 fd 的受信属主与私有权限；不跟随轮转目录或读取 FIFO/设备。
-            parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            # 逐层禁止祖先与末段 symlink 并核验已打开 fd 的受信属主与私有权限；不跟随轮转目录或读取 FIFO/设备。
+            parent = _open_trusted_root_dir(root)
+            if parent is None:
+                return None
             try:
-                if _trusted_fd(parent, is_dir=True) is None:
-                    return None
                 directory = os.open(session, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             finally:
                 os.close(parent)
@@ -137,10 +188,10 @@ def review_from_receipt(
     end = time.monotonic() + max(0, wait)
     while True:
         try:
-            parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            parent = _open_trusted_root_dir(root)
+            if parent is None:
+                return None
             try:
-                if _trusted_fd(parent, is_dir=True) is None:
-                    return None
                 directory = os.open(launch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             finally:
                 os.close(parent)

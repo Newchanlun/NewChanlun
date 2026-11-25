@@ -5917,10 +5917,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..b617cac 100644
+index e69de29..ba9229a 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,7030 @@
+@@ -0,0 +1,7126 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7589,12 +7589,12 @@ index e69de29..b617cac 100644
 +		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
 +		itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
-+		if !ok1 || !ok2 || !ok3 || !ok4 ||
++		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" ||
 +			len(itemType) > maxStrictIdentityBytes || len(itemRole) > maxStrictIdentityBytes ||
 +			len(itemPhase) > maxStrictIdentityBytes || len(itemStatus) > maxStrictIdentityBytes {
 +			return false
 +		}
-+		if (itemType == "" || itemType == "message") && (itemRole == "" || itemRole == "assistant") {
++		if itemType == "message" && (itemRole == "" || itemRole == "assistant") {
 +			if rawContent, hasContent := frame.itemFields["content"]; hasContent && hasResponseError(rawContent) {
 +				if _, okParts := decodeExactAssistantContentParts(rawContent); !okParts {
 +					return false
@@ -10498,39 +10498,97 @@ index e69de29..b617cac 100644
 +	return true
 +}
 +
++type receiptJSONKind uint8
++
++const (
++	receiptJSONString receiptJSONKind = iota + 1
++	receiptJSONInt64
++	receiptJSONBool
++	receiptJSONStringSlice
++)
++
 +var (
-+	reviewReceiptJSONKeys = map[string]struct{}{
-+		"schema":                  {},
-+		"launch":                  {},
-+		"session":                 {},
-+		"started_ns":              {},
-+		"finished_ns":             {},
-+		"sealed_at_ns":            {},
-+		"complete":                {},
-+		"sealed":                  {},
-+		"tainted":                 {},
-+		"requests":                {},
-+		"routes":                  {},
-+		"response_id_sha256s":     {},
-+		"last_response_id_sha256": {},
-+		"last_output_sha256":      {},
++	reviewReceiptJSONKeys = map[string]receiptJSONKind{
++		"schema":                  receiptJSONString,
++		"launch":                  receiptJSONString,
++		"session":                 receiptJSONString,
++		"started_ns":              receiptJSONInt64,
++		"finished_ns":             receiptJSONInt64,
++		"sealed_at_ns":            receiptJSONInt64,
++		"complete":                receiptJSONBool,
++		"sealed":                  receiptJSONBool,
++		"tainted":                 receiptJSONBool,
++		"requests":                receiptJSONInt64,
++		"routes":                  receiptJSONStringSlice,
++		"response_id_sha256s":     receiptJSONStringSlice,
++		"last_response_id_sha256": receiptJSONString,
++		"last_output_sha256":      receiptJSONString,
 +	}
-+	preflightReceiptJSONKeys = map[string]struct{}{
-+		"schema":      {},
-+		"session":     {},
-+		"started_ns":  {},
-+		"finished_ns": {},
-+		"complete":    {},
-+		"routes":      {},
++	preflightReceiptJSONKeys = map[string]receiptJSONKind{
++		"schema":      receiptJSONString,
++		"session":     receiptJSONString,
++		"started_ns":  receiptJSONInt64,
++		"finished_ns": receiptJSONInt64,
++		"complete":    receiptJSONBool,
++		"routes":      receiptJSONStringSlice,
 +	}
-+	preflightMarkerJSONKeys = map[string]struct{}{
-+		"schema":     {},
-+		"session":    {},
-+		"started_ns": {},
++	preflightMarkerJSONKeys = map[string]receiptJSONKind{
++		"schema":     receiptJSONString,
++		"session":    receiptJSONString,
++		"started_ns": receiptJSONInt64,
 +	}
 +)
 +
-+func decodeExactReceiptJSON(raw []byte, requiredKeys map[string]struct{}, dst any) error {
++func validExactReceiptJSONKind(raw []byte, kind receiptJSONKind) bool {
++	trimmed := bytes.TrimSpace(raw)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
++		return false
++	}
++	switch kind {
++	case receiptJSONString:
++		if trimmed[0] != '"' {
++			return false
++		}
++		var s string
++		return json.Unmarshal(trimmed, &s) == nil
++	case receiptJSONBool:
++		return bytes.Equal(trimmed, []byte("true")) || bytes.Equal(trimmed, []byte("false"))
++	case receiptJSONInt64:
++		s := string(trimmed)
++		start := 0
++		if s[0] == '-' {
++			start = 1
++		}
++		if start >= len(s) {
++			return false
++		}
++		for i := start; i < len(s); i++ {
++			if s[i] < '0' || s[i] > '9' {
++				return false
++			}
++		}
++		_, err := strconv.ParseInt(s, 10, 64)
++		return err == nil
++	case receiptJSONStringSlice:
++		if trimmed[0] != '[' {
++			return false
++		}
++		var elems []json.RawMessage
++		if err := json.Unmarshal(trimmed, &elems); err != nil {
++			return false
++		}
++		for _, elem := range elems {
++			if !validExactReceiptJSONKind(elem, receiptJSONString) {
++				return false
++			}
++		}
++		return true
++	default:
++		return false
++	}
++}
++
++func decodeExactReceiptJSON(raw []byte, requiredKeys map[string]receiptJSONKind, dst any) error {
 +	dec := json.NewDecoder(bytes.NewReader(raw))
 +	tok, err := dec.Token()
 +	if err != nil {
@@ -10549,7 +10607,8 @@ index e69de29..b617cac 100644
 +		if !ok {
 +			return errors.New("expected string key")
 +		}
-+		if _, allowed := requiredKeys[key]; !allowed {
++		wantKind, allowed := requiredKeys[key]
++		if !allowed {
 +			return errors.New("unexpected field")
 +		}
 +		if _, dup := seen[key]; dup {
@@ -10559,6 +10618,9 @@ index e69de29..b617cac 100644
 +		var val json.RawMessage
 +		if verr := dec.Decode(&val); verr != nil {
 +			return verr
++		}
++		if !validExactReceiptJSONKind(val, wantKind) {
++			return errors.New("invalid field JSON type")
 +		}
 +	}
 +	endTok, err := dec.Token()
@@ -10584,6 +10646,21 @@ index e69de29..b617cac 100644
 +		return errors.New("trailing JSON value")
 +	}
 +	return nil
++}
++
++func isValidProducerPreflightRoute(r string) bool {
++	switch r {
++	case "codex:gpt-6.2-sol@chatgpt.com",
++		"codex:gpt-6.2-astra@chatgpt.com",
++		"kimi@api.kimi.com",
++		"kimi-ai@api.kimi.ai",
++		"claude@api.anthropic.com",
++		"antigravity@daily-cloudcode-pa.googleapis.com",
++		"other":
++		return true
++	default:
++		return false
++	}
 +}
 +
 +func isValidReviewResponseIDs(ids []string, count int, last string) bool {
@@ -10655,7 +10732,7 @@ index e69de29..b617cac 100644
 +		return false
 +	}
 +	for _, r := range disk.Routes {
-+		if strings.TrimSpace(r) == "" || len(r) > maxStrictIdentityBytes {
++		if !isValidProducerPreflightRoute(r) {
 +			return false
 +		}
 +	}
@@ -12014,13 +12091,18 @@ index e69de29..b617cac 100644
 +}
 +
 +func reservePrivateDir(directory string, allowExisting bool) error {
++	_, err := reservePrivateDirTracked(directory, allowExisting)
++	return err
++}
++
++func reservePrivateDirTracked(directory string, allowExisting bool) (bool, error) {
 +	directory = filepath.Clean(directory)
 +	root, ok := cleanPrivateRoot(filepath.Dir(directory))
 +	if !ok {
-+		return ErrUnavailable
++		return false, ErrUnavailable
 +	}
 +	if err := acquirePrivateRootLock(root); err != nil {
-+		return err
++		return false, err
 +	}
 +	reviewBucket := isReviewBucketName(filepath.Base(directory))
 +	capLimit := maxPreflightDiskEntries
@@ -12032,47 +12114,54 @@ index e69de29..b617cac 100644
 +	if statErr == nil {
 +		rootQuotaMu.Unlock()
 +		if !allowExisting {
-+			return os.ErrExist
++			return false, os.ErrExist
 +		}
 +		if _, checkErr := checkPrivateDir(directory, false); checkErr != nil {
-+			return ErrUnavailable
++			return false, ErrUnavailable
 +		}
 +		if err := syncDirFn(root); err != nil {
-+			return err
++			return false, err
 +		}
-+		return nil
++		return false, nil
 +	}
 +	if !os.IsNotExist(statErr) {
 +		rootQuotaMu.Unlock()
-+		return ErrUnavailable
++		return false, ErrUnavailable
 +	}
 +	existingCount, names, countErr := countRootBucketEntries(root, reviewBucket)
 +	if countErr != nil {
 +		rootQuotaMu.Unlock()
-+		return ErrUnavailable
++		return false, ErrUnavailable
 +	}
 +	if existingCount >= capLimit {
 +		reclaimed := reclaimExpiredBucketEntries(root, names, reviewBucket, existingCount-capLimit+1)
 +		existingCount -= reclaimed
 +		if existingCount >= capLimit {
 +			rootQuotaMu.Unlock()
-+			return ErrUnavailable
++			return false, ErrUnavailable
 +		}
 +	}
++	created := false
 +	err := os.Mkdir(directory, 0700)
++	if err == nil {
++		created = true
++	}
 +	rootQuotaMu.Unlock()
 +	if err != nil {
 +		if !allowExisting || !os.IsExist(err) {
-+			return err
++			return false, err
 +		}
 +		if _, checkErr := checkPrivateDir(directory, false); checkErr != nil {
-+			return ErrUnavailable
++			return false, ErrUnavailable
 +		}
 +	}
 +	if err := syncDirFn(root); err != nil {
-+		return err
++		if created {
++			_ = os.Remove(directory)
++		}
++		return false, err
 +	}
-+	return nil
++	return created, nil
 +}
 +
 +// Start is called by the auth execution guard, not by an asynchronous usage sink.
@@ -12673,16 +12762,23 @@ index e69de29..b617cac 100644
 +		return false, ErrUnavailable
 +	}
 +	invalidateOnFail := false
++	createdDir := false
 +	fail := func(renamed bool, err error) (bool, error) {
 +		if invalidateOnFail && e.tainted && !e.foreignDisk {
 +			e.invalidateDiskReceiptLocked()
 +		}
++		if createdDir && !renamed && !e.markerPersisted && e.lastPersistedSHA == "" {
++			_ = os.Remove(e.directory)
++			e.reserved = false
++		}
 +		return renamed, err
 +	}
 +	if !e.reserved {
-+		if err := reservePrivateDir(e.directory, true); err != nil {
++		created, err := reservePrivateDirTracked(e.directory, true)
++		if err != nil {
 +			return fail(false, err)
 +		}
++		createdDir = created
 +		e.reserved = true
 +	} else {
 +		if _, err := checkPrivateDir(e.directory, false); err != nil {
@@ -12952,10 +13048,10 @@ index e69de29..b617cac 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..3bcebca 100644
+index e69de29..30d7c36 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,6160 @@
+@@ -0,0 +1,6356 @@
 +package preflightreceipt
 +
 +import (
@@ -19114,5 +19210,201 @@ index e69de29..3bcebca 100644
 +	}
 +	if _, err := os.Lstat(filepath.Join(realParent, "receipts")); !os.IsNotExist(err) {
 +		t.Fatalf("symlink ancestor created directory inside target: %v", err)
++	}
++}
++
++func TestReviewReceiptExactJSONTypesAndPreflightRouteAllowlist(t *testing.T) {
++	// Sol P1 #1 + Astra P1 #2 + Astra P1 #3 (PR #2280 R37):
++	// 1. JSON null for required scalars/arrays (e.g. requests:null, tainted:null, routes:null) MUST be
++	//    rejected by decodeExactReceiptJSON so foreign files are neither overwritten nor reclaimed.
++	// 2. Preflight receipt reclamation MUST enforce the exact producer route allowlist.
++	root := filepath.Join(t.TempDir(), "receipts")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	ancient := time.Now().Add(-48 * time.Hour)
++	for idx, tc := range []struct {
++		name string
++		body string
++	}{
++		{
++			name: "requests-null",
++			body: fmt.Sprintf(`{"schema":%q,"launch":"review-f7777777-2222-4333-8444-555555555500","session":"","started_ns":%d,"finished_ns":%d,"sealed_at_ns":0,"complete":false,"sealed":false,"tainted":false,"requests":null,"routes":["other"],"response_id_sha256s":[],"last_response_id_sha256":"","last_output_sha256":""}`, ReviewSchema, ancient.UnixNano(), ancient.UnixNano()),
++		},
++		{
++			name: "tainted-null",
++			body: fmt.Sprintf(`{"schema":%q,"launch":"review-f7777777-2222-4333-8444-555555555501","session":"","started_ns":%d,"finished_ns":%d,"sealed_at_ns":0,"complete":false,"sealed":false,"tainted":null,"requests":0,"routes":["other"],"response_id_sha256s":[],"last_response_id_sha256":"","last_output_sha256":""}`, ReviewSchema, ancient.UnixNano(), ancient.UnixNano()),
++		},
++		{
++			name: "routes-null",
++			body: fmt.Sprintf(`{"schema":%q,"launch":"review-f7777777-2222-4333-8444-555555555502","session":"","started_ns":%d,"finished_ns":%d,"sealed_at_ns":0,"complete":false,"sealed":false,"tainted":false,"requests":0,"routes":null,"response_id_sha256s":[],"last_response_id_sha256":"","last_output_sha256":""}`, ReviewSchema, ancient.UnixNano(), ancient.UnixNano()),
++		},
++		{
++			name: "response-ids-null",
++			body: fmt.Sprintf(`{"schema":%q,"launch":"review-f7777777-2222-4333-8444-555555555503","session":"","started_ns":%d,"finished_ns":%d,"sealed_at_ns":0,"complete":false,"sealed":false,"tainted":false,"requests":0,"routes":["other"],"response_id_sha256s":null,"last_response_id_sha256":"","last_output_sha256":""}`, ReviewSchema, ancient.UnixNano(), ancient.UnixNano()),
++		},
++	} {
++		launch := fmt.Sprintf("review-f7777777-2222-4333-8444-55555555550%d", idx)
++		dir := filepath.Join(root, launch)
++		if err := os.Mkdir(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++		recPath := filepath.Join(dir, "receipt.json")
++		if err := os.WriteFile(recPath, []byte(tc.body), 0600); err != nil {
++			t.Fatal(err)
++		}
++		if _, ok := inspectProducerReceiptDir(dir, launch, true); ok {
++			t.Fatalf("%s: inspectProducerReceiptDir accepted null field", tc.name)
++		}
++		if _, err := ReserveReview(root, launch); !errors.Is(err, ErrUnavailable) {
++			t.Fatalf("%s: ReserveReview = %v, want ErrUnavailable", tc.name, err)
++		}
++		if got, err := os.ReadFile(recPath); err != nil || string(got) != tc.body {
++			t.Fatalf("%s: ReserveReview modified foreign null-field receipt: err=%v raw=%q", tc.name, err, string(got))
++		}
++	}
++
++	// Preflight route allowlist check.
++	pfBad := "preflight-f7777777-2222-4333-8444-555555555510"
++	pfBadDir := filepath.Join(root, pfBad)
++	if err := os.Mkdir(pfBadDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	pfBadData, _ := json.Marshal(Receipt{
++		Schema:   Schema,
++		Session:  pfBad,
++		Started:  ancient.UnixNano(),
++		Finished: ancient.UnixNano(),
++		Complete: true,
++		Routes:   []string{"evil@attacker.example"},
++	})
++	if err := os.WriteFile(filepath.Join(pfBadDir, "receipt.json"), pfBadData, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(pfBadDir, pfBad, false); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted unknown preflight route")
++	}
++
++	pfGood := "preflight-f7777777-2222-4333-8444-555555555511"
++	pfGoodDir := filepath.Join(root, pfGood)
++	if err := os.Mkdir(pfGoodDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	pfGoodData, _ := json.Marshal(Receipt{
++		Schema:   Schema,
++		Session:  pfGood,
++		Started:  ancient.UnixNano(),
++		Finished: ancient.UnixNano(),
++		Complete: true,
++		Routes:   []string{"codex:gpt-6.2-sol@chatgpt.com"},
++	})
++	if err := os.WriteFile(filepath.Join(pfGoodDir, "receipt.json"), pfGoodData, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(pfGoodDir, pfGood, false); !ok {
++		t.Fatalf("inspectProducerReceiptDir rejected valid producer preflight route")
++	}
++}
++
++func TestReviewReceiptReserveDirSyncFailureRollsBackAndRecoversQuota(t *testing.T) {
++	// Sol P2 #2 (PR #2280 R37): when root dir sync fails right after os.Mkdir in reservePrivateDir,
++	// the newly created empty directory MUST be rolled back so quota recovers after the transient fault.
++	oldReviewCap := maxReviewDiskEntries
++	oldPreflightCap := maxPreflightDiskEntries
++	oldSync := syncDirFn
++	maxReviewDiskEntries = 1
++	maxPreflightDiskEntries = 1
++	defer func() {
++		maxReviewDiskEntries = oldReviewCap
++		maxPreflightDiskEntries = oldPreflightCap
++		syncDirFn = oldSync
++	}()
++
++	root := filepath.Join(t.TempDir(), "rollback-quota-receipts")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	if err := acquirePrivateRootLock(root); err != nil {
++		t.Fatal(err)
++	}
++
++	failRootSync := true
++	syncDirFn = func(dir string) error {
++		if failRootSync && filepath.Clean(dir) == filepath.Clean(root) {
++			return errors.New("simulated transient root fsync failure")
++		}
++		return oldSync(dir)
++	}
++
++	lFail := "review-f8888888-2222-4333-8444-555555555501"
++	if _, err := ReserveReview(root, lFail); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveReview during root sync failure = %v, want ErrUnavailable", err)
++	}
++	if _, statErr := os.Lstat(filepath.Join(root, lFail)); !os.IsNotExist(statErr) {
++		t.Fatalf("newly created empty review dir leaked after root sync failure: %v", statErr)
++	}
++
++	pFail := "preflight-f8888888-2222-4333-8444-555555555501"
++	if err := reservePrivateDir(filepath.Join(root, pFail), false); err == nil {
++		t.Fatalf("reservePrivateDir during root sync failure unexpectedly succeeded")
++	}
++	if _, statErr := os.Lstat(filepath.Join(root, pFail)); !os.IsNotExist(statErr) {
++		t.Fatalf("newly created empty preflight dir leaked after root sync failure: %v", statErr)
++	}
++
++	// Recover transient fault -> quota slot MUST be available for both review and preflight buckets.
++	failRootSync = false
++	lOK := "review-f8888888-2222-4333-8444-555555555502"
++	res, err := ReserveReview(root, lOK)
++	if err != nil {
++		t.Fatalf("ReserveReview after transient root sync recovery failed (quota leaked): %v", err)
++	}
++	res.Release()
++
++	pOK := "preflight-f8888888-2222-4333-8444-555555555502"
++	if err := reservePrivateDir(filepath.Join(root, pOK), false); err != nil {
++		t.Fatalf("reservePrivateDir after transient root sync recovery failed (quota leaked): %v", err)
++	}
++}
++
++func TestReviewReceiptOutputItemAddedRequiresNonEmptyType(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R37): response.output_item.added without item.type (even when carrying
++	// phase="commentary") MUST be rejected so commentary items can never later finalize as final_answer.
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-f9999999-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-999999999909"
++
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++
++	badAdded := `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_notype","role":"assistant","phase":"commentary"}}`
++	if c.ValidateStrictEvent("response.output_item.added", true, []byte(badAdded)) {
++		t.Fatalf("ValidateStrictEvent accepted output_item.added with missing item.type")
++	}
++	c.ObserveStreamChunk([]byte("event: response.output_item.added\ndata: " + badAdded + "\n\n"))
++	c.ObserveStreamChunk([]byte(`event: response.output_item.done` + "\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n"))
++	c.ObserveStreamChunk([]byte(`event: response.completed` + "\n" + `data: {"type":"response.completed","response":{"id":"resp_notype","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("SealReview after output_item.added with missing item.type = %v, want SealRejected", st)
 +	}
 +}
