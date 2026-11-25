@@ -4339,7 +4339,7 @@ index 0000000..c98c7e3
 +	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..c492739 100644
+index 6074124..62c147c 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,10 +3,12 @@ package executor
@@ -4379,36 +4379,15 @@ index 6074124..c492739 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -224,6 +234,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -224,6 +234,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  	var param any
  	outputItemsByIndex := make(map[int64][]byte)
  	var outputItemsFallback [][]byte
 +	outputItemsBytes := 0
-+	outputItemsOverflow := false
  
  	var bufferedChunks [][]byte
  	var initialChunks [][]byte
-@@ -310,7 +322,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
- 				}
- 				switch eventType {
- 				case "response.output_item.done":
--					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
-+					if !outputItemsOverflow && !collectCodexOutputItemDoneBounded(data, outputItemsByIndex, &outputItemsFallback, &outputItemsBytes, maxCodexCollectedOutputItemBytes) {
-+						outputItemsOverflow = true
-+					}
- 				case "response.completed", "response.incomplete", "response.done":
- 					terminalSuccess = true
- 					immediateIncomplete = eventType == "response.incomplete"
-@@ -321,7 +335,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
- 						reporter.EnsurePublished(ctx)
- 					}
- 					publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, data, outputItemsByIndex, outputItemsFallback)
--					if !preserveNativeOutput {
-+					if !preserveNativeOutput && !outputItemsOverflow {
- 						data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
- 					}
- 					if eventType == "response.completed" || eventType == "response.done" {
-@@ -444,19 +458,501 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +455,501 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -4912,27 +4891,7 @@ index 6074124..c492739 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -497,7 +993,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
- 				}
- 				switch eventType {
- 				case "response.output_item.done":
--					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
-+					if !outputItemsOverflow && !collectCodexOutputItemDoneBounded(data, outputItemsByIndex, &outputItemsFallback, &outputItemsBytes, maxCodexCollectedOutputItemBytes) {
-+						outputItemsOverflow = true
-+					}
- 				case "response.completed", "response.incomplete", "response.done":
- 					terminalSuccess = true
- 					isIncompleteEvent = eventType == "response.incomplete"
-@@ -508,7 +1006,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
- 						reporter.EnsurePublished(ctx)
- 					}
- 					publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, data, outputItemsByIndex, outputItemsFallback)
--					if !preserveNativeOutput {
-+					if !preserveNativeOutput && !outputItemsOverflow {
- 						data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
- 					}
- 					if eventType == "response.completed" || eventType == "response.done" {
-@@ -541,11 +1039,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +1034,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}

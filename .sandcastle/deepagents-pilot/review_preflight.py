@@ -708,10 +708,11 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
         f"{method} {target} HTTP/1.1",
         f"Host: {host_hdr}",
         "Connection: close",
+        "Accept-Encoding: identity",
         f"Content-Length: {len(body)}",
     ]
     for name, val in request.header_items():
-        if name.lower() in ("host", "connection", "content-length"):
+        if name.lower() in ("host", "connection", "content-length", "accept-encoding"):
             continue
         if not _HEADER_NAME_RE.fullmatch(name) or any(ch in val for ch in ("\r", "\n", "\x00")):
             raise urllib.error.URLError("invalid HTTP request header")
@@ -730,71 +731,96 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
         if body:
             sock.sendall(body)
         fp = sock.makefile("rb")
-        status_line = fp.readline(http.client._MAXLINE + 1)
-        if len(status_line) > http.client._MAXLINE:
-            raise http.client.LineTooLong("status line")
-        if not status_line or not status_line.endswith(b"\r\n"):
-            raise http.client.BadStatusLine("malformed status line")
-        m = _HTTP_STATUS_LINE_RE.fullmatch(status_line[:-2])
-        if not m:
-            raise http.client.BadStatusLine("invalid status line")
-        status_code = int(m.group(1))
-        reason = (m.group(2) or b"").decode("ascii")
-        if 100 <= status_code < 200:
-            raise http.client.HTTPException("unexpected 1xx response")
-
-        raw_headers: list[tuple[str, str]] = []
-        te_headers: list[str] = []
-        cl_headers: list[str] = []
         total_hdr_bytes = 0
+        total_hdr_count = 0
+        info_responses = 0
         while True:
-            hline = fp.readline(http.client._MAXLINE + 1)
-            if len(hline) > http.client._MAXLINE:
-                raise http.client.LineTooLong("header line")
-            if not hline:
-                raise http.client.IncompleteRead(b"")
-            total_hdr_bytes += len(hline)
+            status_line = fp.readline(http.client._MAXLINE + 1)
+            if len(status_line) > http.client._MAXLINE:
+                raise http.client.LineTooLong("status line")
+            if not status_line or not status_line.endswith(b"\r\n"):
+                raise http.client.BadStatusLine("malformed status line")
+            total_hdr_bytes += len(status_line)
             if total_hdr_bytes > MAX_HTTP_HEADER_BYTES:
                 raise http.client.LineTooLong("header section")
-            if hline == b"\r\n":
-                break
-            if not hline.endswith(b"\r\n"):
-                raise http.client.HTTPException("malformed HTTP response header line ending")
-            line = hline[:-2]
-            if not _TRAILER_FIELD_RE.fullmatch(line):
-                raise http.client.HTTPException("malformed HTTP response header")
-            if len(raw_headers) >= MAX_HTTP_HEADERS:
-                raise http.client.HTTPException("too many HTTP response headers")
-            raw_name, raw_val = line.split(b":", 1)
-            hname = raw_name.decode("ascii")
-            hval = raw_val.decode("latin-1").strip(" \t")
-            raw_headers.append((hname, hval))
-            lower_name = hname.lower()
-            if lower_name == "transfer-encoding":
-                te_headers.append(hval)
-            elif lower_name == "content-length":
-                cl_headers.append(hval)
+            m = _HTTP_STATUS_LINE_RE.fullmatch(status_line[:-2])
+            if not m:
+                raise http.client.BadStatusLine("invalid status line")
+            status_code = int(m.group(1))
+            reason = (m.group(2) or b"").decode("ascii")
+            if status_code == 101:
+                raise http.client.HTTPException("unsupported 101 Switching Protocols")
 
-        if te_headers and cl_headers:
-            raise http.client.HTTPException("conflicting Transfer-Encoding and Content-Length")
-        chunked = False
-        content_length: int | None = None
-        if te_headers:
-            codings = [tok.strip(" \t").lower() for hdr in te_headers for tok in hdr.split(",")]
-            if codings != ["chunked"]:
-                raise http.client.HTTPException("unsupported Transfer-Encoding")
-            chunked = True
-        elif cl_headers:
-            parsed_lengths: set[int] = set()
-            for hdr in cl_headers:
-                for part in hdr.split(","):
-                    tok = part.strip(" \t")
-                    if not _CONTENT_LENGTH_RE.fullmatch(tok):
-                        raise http.client.HTTPException("invalid Content-Length")
-                    parsed_lengths.add(int(tok))
-            if len(parsed_lengths) != 1:
-                raise http.client.HTTPException("conflicting Content-Length")
-            content_length = next(iter(parsed_lengths))
+            raw_headers: list[tuple[str, str]] = []
+            te_headers: list[str] = []
+            cl_headers: list[str] = []
+            ce_headers: list[str] = []
+            while True:
+                hline = fp.readline(http.client._MAXLINE + 1)
+                if len(hline) > http.client._MAXLINE:
+                    raise http.client.LineTooLong("header line")
+                if not hline:
+                    raise http.client.IncompleteRead(b"")
+                total_hdr_bytes += len(hline)
+                if total_hdr_bytes > MAX_HTTP_HEADER_BYTES:
+                    raise http.client.LineTooLong("header section")
+                if hline == b"\r\n":
+                    break
+                if not hline.endswith(b"\r\n"):
+                    raise http.client.HTTPException("malformed HTTP response header line ending")
+                line = hline[:-2]
+                if not _TRAILER_FIELD_RE.fullmatch(line):
+                    raise http.client.HTTPException("malformed HTTP response header")
+                total_hdr_count += 1
+                if total_hdr_count > MAX_HTTP_HEADERS:
+                    raise http.client.HTTPException("too many HTTP response headers")
+                raw_name, raw_val = line.split(b":", 1)
+                hname = raw_name.decode("ascii")
+                hval = raw_val.decode("latin-1").strip(" \t")
+                raw_headers.append((hname, hval))
+                lower_name = hname.lower()
+                if lower_name == "transfer-encoding":
+                    te_headers.append(hval)
+                elif lower_name == "content-length":
+                    cl_headers.append(hval)
+                elif lower_name == "content-encoding":
+                    ce_headers.append(hval)
+
+            if 100 <= status_code < 200:
+                info_responses += 1
+                if info_responses > 4:
+                    raise http.client.HTTPException("too many 1xx responses")
+                continue
+            break
+
+        if ce_headers:
+            ce_codings = [tok.strip(" \t").lower() for hdr in ce_headers for tok in hdr.split(",")]
+            if not ce_codings or any(c != "identity" for c in ce_codings):
+                raise http.client.HTTPException("unsupported Content-Encoding")
+        if status_code in (204, 205, 304):
+            chunked = False
+            content_length: int | None = 0
+        else:
+            if te_headers and cl_headers:
+                raise http.client.HTTPException("conflicting Transfer-Encoding and Content-Length")
+            chunked = False
+            content_length = None
+            if te_headers:
+                codings = [tok.strip(" \t").lower() for hdr in te_headers for tok in hdr.split(",")]
+                if codings != ["chunked"]:
+                    raise http.client.HTTPException("unsupported Transfer-Encoding")
+                chunked = True
+            elif cl_headers:
+                parsed_lengths: set[int] = set()
+                for hdr in cl_headers:
+                    for part in hdr.split(","):
+                        tok = part.strip(" \t")
+                        if not _CONTENT_LENGTH_RE.fullmatch(tok):
+                            raise http.client.HTTPException("invalid Content-Length")
+                        parsed_lengths.add(int(tok))
+                if len(parsed_lengths) != 1:
+                    raise http.client.HTTPException("conflicting Content-Length")
+                content_length = next(iter(parsed_lengths))
     except Exception:
         if fp is not None:
             try:
@@ -816,7 +842,7 @@ def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPRe
         chunked=chunked,
         content_length=content_length,
     )
-    if status_code < 200 or status_code >= 300:
+    if status_code != 200:
         hdr_msg = http.client.HTTPMessage()
         for hname, hval in raw_headers:
             hdr_msg.add_header(hname, hval)
@@ -1096,8 +1122,8 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                 detail = "流尾存在未闭合 SSE 事件头"
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
-            # 事件名成功还不够：须存在合法 response 对象且 status 与终态事件一致，且 error/message 均须为 null/缺省。
-            ok = (detail is None and has_response_dict and (
+            # 事件名成功还不够：须 HTTP 200、存在合法 response 对象且 status 与终态事件一致，且 error/message 均须为 null/缺省。
+            ok = (response.status == 200 and detail is None and has_response_dict and (
                 (terminal == "response.completed" and status == "completed")
                 or (terminal == "response.incomplete" and status == "incomplete")
             ))

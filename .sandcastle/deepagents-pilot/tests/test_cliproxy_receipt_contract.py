@@ -973,9 +973,9 @@ def test_receipt_readers_allow_execute_only_ancestor_and_handle_deep_json(tmp_pa
     assert log_mod.route_from_receipt(real_root, deep_pf, since, 0) is None
 
 
-def test_legacy_preflight_producer_consumer_status_contract_parity(monkeypatch):
-    """Sol P2 #3 (PR #2280 R65): 配对验证新版 review_preflight 消费端与生产端 Responses API 终态契约：
-    携带完整 response.status=completed/incomplete 的终态通过，缺省 response.status 的旧桩载荷被明确拒绝。"""
+def test_review_preflight_requires_matching_response_status_on_terminal_events(monkeypatch):
+    """Sol P2 #3 (R65) + Astra P2 #5 (R66): 验证 Python review_preflight 消费端对终态事件内层
+    response.status 的显式加固校验（与 Go 旧预检路由收集器职责分离，Go 仅验路由与 SSE/JSON 结构）。"""
     import io
 
     class _Resp:
