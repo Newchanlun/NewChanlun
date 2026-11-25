@@ -2085,3 +2085,63 @@ def test_round_trip_http_enforces_bounded_sse_response_and_event_limits(monkeypa
     res_ok = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000084", preflight.Deadline(5))
     assert res_ok["ok"] is True
     assert chunked.eof_reached is True
+
+
+def test_round_trip_rejects_response_done_and_bounds_http_error_read(monkeypatch):
+    """Astra P2 #2 & #3 (R58): response.done 须视作冲突/非完成终态拒绝；HTTPError 读取须带 65536 字节上限。"""
+    import io
+
+    class _StreamResp:
+        status = 200
+
+        def __init__(self, data: bytes):
+            self._buf = io.BytesIO(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            return self._buf.read(n)
+
+    # 1. response.done 后再跟 response.completed 须判为冲突终态失败，不能被忽略。
+    conflict_done = (
+        b"event: response.done\n"
+        b'data: {"type":"response.done","response":{"id":"resp_done_first"}}\n\n'
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_done_second","status":"completed"}}\n\n'
+    )
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _StreamResp(conflict_done))
+    res_conflict = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000083", preflight.Deadline(5))
+    assert res_conflict["ok"] is False
+
+    # 2. 单独 response.done 也须失败。
+    only_done = (
+        b"event: response.done\n"
+        b'data: {"type":"response.done","response":{"id":"resp_done_only","status":"completed"}}\n\n'
+    )
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: _StreamResp(only_done))
+    res_only = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000082", preflight.Deadline(5))
+    assert res_only["ok"] is False
+
+    # 3. HTTPError 必须使用带长度上限的 error.read(65536)，不得无界 error.read()。
+    seen_args = []
+
+    class _BoundedErrBody:
+        def read(self, n=-1):
+            seen_args.append(n)
+            return b'{"error":{"message":"rate limit"}}'[: (n if n is not None and n >= 0 else None)]
+
+        def close(self):
+            pass
+
+    def _raise_http_err(*a, **kw):
+        raise preflight.urllib.error.HTTPError("https://proxy.invalid/v1/responses", 429, "Too Many Requests", {}, _BoundedErrBody())
+
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", _raise_http_err)
+    res_err = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000081", preflight.Deadline(5))
+    assert res_err["ok"] is False
+    assert res_err["http_status"] == 429
+    assert seen_args == [65536]

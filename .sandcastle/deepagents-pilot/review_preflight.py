@@ -55,7 +55,7 @@ ERROR_CLASSES = (("tool_choice", "tool_choice_unsupported"), ("预扣额度", "q
                  ("model_not_found", "model_not_found"), ("not supported", "unsupported"))
 
 
-TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed", "response.cancelled", "response.canceled", "error")
+TERMINAL_EVENTS = ("response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled", "error")
 CREDENTIAL_SOURCES = ("auth.command", "experimental_bearer_token", "env_key")
 # 报告协议词表：字段名与枚举值都由本脚本写死、与 key 无关，原样输出不透露 key 的任何信息。
 # 合法 key 可以是任意可见 ASCII（如 "ok"），与它们相同或是其子串时，脱敏也不能改写它们（调用方按字段与枚举读结论）。
@@ -688,8 +688,19 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
             return {"http_status": response.status, "terminal": terminal, "status": status, "ok": ok,
                     "error": None if ok else _error_info(text)}
     except urllib.error.HTTPError as error:
+        try:
+            err_body = error.read(65536)
+        except http.client.IncompleteRead as inc:
+            err_body = inc.partial[:65536]
+        except Exception:
+            err_body = b""
+        finally:
+            try:
+                error.close()
+            except Exception:
+                pass
         return {"http_status": error.code, "terminal": None, "ok": False,
-                "error": _error_info(error.read()[:65536].decode("utf-8", "replace"))}
+                "error": _error_info(err_body.decode("utf-8", "replace"))}
     except Exception as error:  # 连接、协议等任何异常都只记类型与 errno，不带异常原文
         reason = getattr(error, "reason", None)
         return {"http_status": None, "terminal": None, "ok": False,

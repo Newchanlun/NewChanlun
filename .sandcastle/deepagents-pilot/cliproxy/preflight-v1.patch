@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..6c13c05 100644
+index e69de29..2ac9365 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,269 @@
 +package middleware
 +
 +import (
@@ -200,6 +200,7 @@ index e69de29..6c13c05 100644
 +				defer res.Release()
 +			}
 +			res.SetTurnSeq(pending.TurnSeq())
++			res.AttachPendingSlot(pending)
 +			pending.Release()
 +			ctx, collector, err = preflightreceipt.BeginReviewReserved(turnCtx, res, session, requestedModel)
 +			if err != nil {
@@ -273,10 +274,10 @@ index e69de29..6c13c05 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..c3cedd2
+index 0000000..520fb91
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,959 @@
 +package middleware
 +
 +import (
@@ -1154,6 +1155,86 @@ index 0000000..c3cedd2
 +		if st := preflightreceipt.SealReview(root, tc.launch, tc.session); st != preflightreceipt.SealRejected {
 +			t.Fatalf("case %d (%s) SealReview after uniquely attributable dup ReviewHeader = %v, want SealRejected", idx, tc.name, st)
 +		}
++	}
++}
++
++func TestPreflightReceiptMiddlewareConcurrencyCapCoversActiveStreams(t *testing.T) {
++	// Sol P1 #1a (PR #2280 R58): the 32-stream review concurrency cap must remain held after
++	// middleware finishes reading the request body, for the entire active stream lifecycle,
++	// rejecting the 33rd concurrent formal review with HTTP 503 until an active stream ends.
++	gin.SetMode(gin.TestMode)
++	root := t.TempDir() + "/concurrency-middleware"
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++
++	entered := make(chan struct{}, 32)
++	releaseOne := make(chan struct{}, 1)
++	releaseAll := make(chan struct{})
++
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		if col := preflightreceipt.From(c.Request.Context()); col != nil {
++			defer col.Complete(false)
++		}
++		select {
++		case entered <- struct{}{}:
++		default:
++		}
++		select {
++		case <-releaseOne:
++		case <-releaseAll:
++		}
++		c.Status(http.StatusOK)
++	})
++
++	var wg sync.WaitGroup
++	for i := 0; i < 32; i++ {
++		wg.Add(1)
++		go func(idx int) {
++			defer wg.Done()
++			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++			req.Header.Set(preflightreceipt.ReviewHeader, fmt.Sprintf("review-72345678-1234-4234-8234-%012d", idx))
++			req.Header.Set("Session-Id", fmt.Sprintf("019d0000-0000-7000-8000-%012d", idx))
++			rec := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++			engine.ServeHTTP(rec, req)
++		}(i)
++	}
++
++	// Wait for all 32 requests to pass body reading & pending.Release() and enter the handler.
++	for i := 0; i < 32; i++ {
++		select {
++		case <-entered:
++		case <-time.After(10 * time.Second):
++			close(releaseAll)
++			wg.Wait()
++			t.Fatalf("timed out waiting for active review stream %d to enter handler", i)
++		}
++	}
++
++	// 33rd concurrent formal review MUST fail with 503 even though all 32 already released PendingReviewGuard.
++	req33 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	req33.Header.Set(preflightreceipt.ReviewHeader, "review-72345678-1234-4234-8234-000000000033")
++	req33.Header.Set("Session-Id", "019d0000-0000-7000-8000-000000000033")
++	rec33 := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(rec33, req33)
++	if rec33.Code != http.StatusServiceUnavailable {
++		close(releaseAll)
++		wg.Wait()
++		t.Fatalf("33rd concurrent active review stream -> HTTP %d, want 503", rec33.Code)
++	}
++
++	// Release ONE active stream and wait briefly for HandlerDone to release its slot -> 34th MUST succeed (200).
++	releaseOne <- struct{}{}
++	close(releaseAll)
++	wg.Wait()
++
++	req34 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	req34.Header.Set(preflightreceipt.ReviewHeader, "review-72345678-1234-4234-8234-000000000034")
++	req34.Header.Set("Session-Id", "019d0000-0000-7000-8000-000000000034")
++	rec34 := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(rec34, req34)
++	if rec34.Code != http.StatusOK {
++		t.Fatalf("review stream after active streams finished -> HTTP %d, want 200", rec34.Code)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -5451,10 +5532,10 @@ index 47f87de..3a1a2d4 100644
  					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
  					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 diff --git a/sdk/cliproxy/auth/preflight_execution.go b/sdk/cliproxy/auth/preflight_execution.go
-index e69de29..e172af8 100644
+index e69de29..7d0d345 100644
 --- a/sdk/cliproxy/auth/preflight_execution.go
 +++ b/sdk/cliproxy/auth/preflight_execution.go
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,277 @@
 +package auth
 +
 +import (
@@ -5622,6 +5703,14 @@ index e69de29..e172af8 100644
 +				deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
 +				if !tracked || !deliverySupported || deliveryErr != nil {
 +					c.Reject()
++				}
++				// Hold the execution lease until the producer goroutine finishes closing original
++				// so legacy preflight receipts cannot publish while the producer is still active
++				// or about to report a stream error.
++				for chunk := range original {
++					if chunk.Err != nil {
++						c.Reject()
++					}
 +				}
 +			}
 +			lease.End()
@@ -6110,10 +6199,10 @@ index 0000000..6de513e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000..f6b92f0
+index 0000000..1c8abfa
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,592 @@
 +package auth
 +
 +import (
@@ -6129,6 +6218,7 @@ index 0000000..f6b92f0
 +	"io"
 +	"math/big"
 +	"net/http"
++	"os"
 +	"path/filepath"
 +	"strings"
 +	"testing"
@@ -6615,6 +6705,96 @@ index 0000000..f6b92f0
 +		t.Fatalf("serial retry after bootstrap StreamChunk.Err seal = %v, want SealOK", st)
 +	}
 +}
++
++func TestPreflightReceiptLegacyCancelHoldsLeaseUntilOriginalCloses(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R58): on legacy preflight cancellation where WaitStreamDelivery
++	// reports deliveryErr == nil, wrapPreflightStream MUST still hold lease.End() until the
++	// producer goroutine closes original, preventing premature receipt publication while the
++	// producer is still active or about to emit a stream error.
++	tlsState := testVerifiedTLS(t, "chatgpt.com")
++	for _, trailingErr := range []bool{false, true} {
++		name := "clean_close"
++		if trailingErr {
++			name = "trailing_error"
++		}
++		t.Run(name, func(t *testing.T) {
++			root := filepath.Join(t.TempDir(), "legacy-cancel-"+name)
++			sess := "preflight-88881111-2222-4333-8444-999999999941"
++			if trailingErr {
++				sess = "preflight-88881111-2222-4333-8444-999999999942"
++			}
++			deliveryCtx, finishDelivery := coreusage.WithStreamDelivery(context.Background())
++			releaseSupport := coreusage.SupportStreamDelivery(deliveryCtx)
++			defer releaseSupport()
++			reqCtx, cancel := context.WithCancel(deliveryCtx)
++			defer cancel()
++
++			ctx, c, err := preflightreceipt.Begin(reqCtx, root, sess)
++			if err != nil {
++				t.Fatal(err)
++			}
++			execCtx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			cl := httptransport.Decorate(execCtx, &http.Client{Transport: status200StreamTestRT{tlsState: tlsState, body: "data: {}\n\n"}})
++			req, _ := http.NewRequestWithContext(execCtx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses",
++				strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++			resp, err := cl.Do(req)
++			if err != nil {
++				t.Fatal(err)
++			}
++			_, _ = io.Copy(io.Discard, resp.Body)
++			_ = resp.Body.Close()
++
++			orig := make(chan executor.StreamChunk, 2)
++			orig <- executor.StreamChunk{Payload: []byte("data: {}\n\n")}
++			out := wrapPreflightStream(execCtx, lease, orig)
++			if _, ok := <-out; !ok {
++				t.Fatalf("expected initial chunk")
++			}
++
++			// Downstream finishes delivery and cancels ctx; handler and lifecycle finish,
++			// while producer STILL holds orig open.
++			finishDelivery(nil)
++			cancel()
++			for range out {
++			}
++			c.Complete(true)
++			c.HandlerDone(true)
++
++			// Sleep briefly and verify NO receipt.json exists while orig remains open.
++			time.Sleep(40 * time.Millisecond)
++			receiptPath := filepath.Join(root, sess, "receipt.json")
++			if _, statErr := os.Lstat(receiptPath); !os.IsNotExist(statErr) {
++				t.Fatalf("legacy preflight published receipt.json while producer channel was still open: %v", statErr)
++			}
++
++			if trailingErr {
++				orig <- executor.StreamChunk{Err: errors.New("late producer error")}
++			}
++			close(orig)
++
++			deadline := time.Now().Add(2 * time.Second)
++			if trailingErr {
++				time.Sleep(50 * time.Millisecond)
++				if _, statErr := os.Lstat(receiptPath); !os.IsNotExist(statErr) {
++					t.Fatalf("legacy preflight published receipt.json despite trailing producer error: %v", statErr)
++				}
++			} else {
++				for {
++					if _, statErr := os.Lstat(receiptPath); statErr == nil {
++						break
++					}
++					if time.Now().After(deadline) {
++						t.Fatalf("legacy preflight did not publish receipt.json after clean producer channel close")
++					}
++					time.Sleep(5 * time.Millisecond)
++				}
++			}
++		})
++	}
++}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
 index 0000000..7d877c9
@@ -6936,10 +7116,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..eef19a3 100644
+index e69de29..ec3d1aa 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,10417 @@
+@@ -0,0 +1,10570 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7008,6 +7188,10 @@ index e69de29..eef19a3 100644
 +var maxPendingReviewInFlight = 32
 +var maxTrackedOutputItems = 2048
 +var maxTrackedContentParts = 512
++var maxTrackedTotalHashStates = 2048
++var maxTrackedTotalPartEntries = 4096
++var maxStagingSweepInspectPerCall = 64
++var maxStagingSweepStartupPerCall = 256
 +
 +var ErrUnavailable = errors.New("preflight evidence unavailable")
 +var errReviewSealed = errors.New("review receipt sealed or sealing")
@@ -7120,9 +7304,10 @@ index e69de29..eef19a3 100644
 +}
 +
 +type ReviewReservation struct {
-+	entry   *reviewEntry
-+	turnSeq uint64
-+	once    sync.Once
++	entry     *reviewEntry
++	turnSeq   uint64
++	holdsSlot bool
++	once      sync.Once
 +}
 +
 +func (r *ReviewReservation) SetTurnSeq(seq uint64) {
@@ -7130,6 +7315,21 @@ index e69de29..eef19a3 100644
 +		return
 +	}
 +	r.turnSeq = seq
++}
++
++// AttachPendingSlot transfers the global concurrency slot acquired by BeginPendingReview
++// onto this reservation (and subsequently onto Collector) so the 32-stream cap spans the
++// entire request/stream lifecycle rather than ending after the HTTP request body is read.
++func (r *ReviewReservation) AttachPendingSlot(g *PendingReviewGuard) {
++	if r == nil || g == nil {
++		return
++	}
++	reviewMu.Lock()
++	if g.holdsSlot && !r.holdsSlot {
++		g.holdsSlot = false
++		r.holdsSlot = true
++	}
++	reviewMu.Unlock()
 +}
 +
 +// Deadline returns the launch's absolute MaxReviewDuration expiration time (or zero if unbounded).
@@ -7162,7 +7362,8 @@ index e69de29..eef19a3 100644
 +		return
 +	}
 +	r.once.Do(func() {
-+		releaseReview(r.entry)
++		releaseReviewWithSlot(r.entry, r.holdsSlot)
++		r.holdsSlot = false
 +	})
 +}
 +
@@ -7175,18 +7376,21 @@ index e69de29..eef19a3 100644
 +	r.entry.mu.Unlock()
 +}
 +
-+func (r *ReviewReservation) transfer() (*reviewEntry, bool) {
++func (r *ReviewReservation) transfer() (*reviewEntry, bool, bool) {
 +	if r == nil || r.entry == nil {
-+		return nil, false
++		return nil, false, false
 +	}
 +	transferred := false
++	holdsSlot := false
 +	r.once.Do(func() {
 +		transferred = true
++		holdsSlot = r.holdsSlot
++		r.holdsSlot = false
 +	})
 +	if !transferred {
-+		return nil, false
++		return nil, false, false
 +	}
-+	return r.entry, true
++	return r.entry, holdsSlot, true
 +}
 +
 +type pendingReviewState struct {
@@ -7339,9 +7543,10 @@ index e69de29..eef19a3 100644
 +}
 +
 +type PendingReviewGuard struct {
-+	key     string
-+	turnSeq uint64
-+	once    sync.Once
++	key       string
++	turnSeq   uint64
++	holdsSlot bool
++	once      sync.Once
 +}
 +
 +func (g *PendingReviewGuard) TurnSeq() uint64 {
@@ -7357,8 +7562,11 @@ index e69de29..eef19a3 100644
 +	}
 +	g.once.Do(func() {
 +		reviewMu.Lock()
-+		if pendingReviewTotal > 0 {
-+			pendingReviewTotal--
++		if g.holdsSlot {
++			g.holdsSlot = false
++			if pendingReviewTotal > 0 {
++				pendingReviewTotal--
++			}
 +		}
 +		if st := pendingReviewLaunches[g.key]; st != nil {
 +			st.count--
@@ -7450,7 +7658,7 @@ index e69de29..eef19a3 100644
 +		st.count++
 +		pendingReviewTotal++
 +		reviewMu.Unlock()
-+		return &PendingReviewGuard{key: key, turnSeq: turnSeq}, nil
++		return &PendingReviewGuard{key: key, turnSeq: turnSeq, holdsSlot: true}, nil
 +	}
 +	if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
 +		if entry != nil {
@@ -7465,7 +7673,7 @@ index e69de29..eef19a3 100644
 +	pendingReviewLaunches[key] = &pendingReviewState{count: 1, started: time.Now().UnixNano()}
 +	pendingReviewTotal++
 +	reviewMu.Unlock()
-+	return &PendingReviewGuard{key: key, turnSeq: turnSeq}, nil
++	return &PendingReviewGuard{key: key, turnSeq: turnSeq, holdsSlot: true}, nil
 +}
 +
 +type heldRootLock struct {
@@ -7585,6 +7793,8 @@ index e69de29..eef19a3 100644
 +	contentPartByItem         map[string]map[int64]string
 +	textDeltaHashByItem       map[string]map[int64]*textDeltaState
 +	textPrefixByItem          map[string]map[int64]textPrefixCheck
++	totalHashStates           int
++	totalPartEntries          int
 +	pendingUnkeyed            int
 +	itemSeqByKey              map[string]int
 +	nextItemSeq               int
@@ -7625,6 +7835,8 @@ index e69de29..eef19a3 100644
 +	t.contentPartByItem = nil
 +	t.textDeltaHashByItem = nil
 +	t.textPrefixByItem = nil
++	t.totalHashStates = 0
++	t.totalPartEntries = 0
 +	t.pendingUnkeyed = 0
 +	t.itemSeqByKey = nil
 +	t.nextItemSeq = 0
@@ -7659,6 +7871,7 @@ index e69de29..eef19a3 100644
 +	expectedModel                               string
 +	review                                      *reviewEntry
 +	reviewTurnSeq                               uint64
++	holdsConcurrencySlot                        bool
 +	reviewPublished                             bool
 +	reviewReleased                              bool
 +	observedCompleted                           bool
@@ -9937,6 +10150,11 @@ index e69de29..eef19a3 100644
 +		if len(text) == prev.byteLen {
 +			return true
 +		}
++	} else {
++		if t.totalPartEntries >= maxTrackedTotalPartEntries {
++			return false
++		}
++		t.totalPartEntries++
 +	}
 +	prefixes[field] = textPrefixCheck{byteLen: len(text), sha256: sha256Hex(text)}
 +	return true
@@ -9996,9 +10214,13 @@ index e69de29..eef19a3 100644
 +		}
 +		return hex.EncodeToString(st.h.Sum(nil)) == initSHA
 +	}
++	if t.totalHashStates >= maxTrackedTotalHashStates {
++		return false
++	}
 +	h := sha256.New()
 +	_, _ = h.Write([]byte(val.str))
 +	deltas[field] = &textDeltaState{h: h, hasSeed: true, seedSHA: initSHA}
++	t.totalHashStates++
 +	return true
 +}
 +
@@ -10024,8 +10246,12 @@ index e69de29..eef19a3 100644
 +	}
 +	st := deltas[field]
 +	if st == nil {
++		if t.totalHashStates >= maxTrackedTotalHashStates {
++			return false
++		}
 +		st = &textDeltaState{h: sha256.New()}
 +		deltas[field] = st
++		t.totalHashStates++
 +	}
 +	_, _ = st.h.Write([]byte(delta))
 +	st.hasDelta = true
@@ -10107,9 +10333,13 @@ index e69de29..eef19a3 100644
 +		st.seedSHA = snapSHA
 +		return true
 +	}
++	if t.totalHashStates >= maxTrackedTotalHashStates {
++		return false
++	}
 +	h := sha256.New()
 +	_, _ = h.Write([]byte(val.str))
 +	deltas[field] = &textDeltaState{h: h, hasSeed: true, fromSnapshot: true, seedSHA: snapSHA}
++	t.totalHashStates++
 +	return true
 +}
 +
@@ -10184,6 +10414,12 @@ index e69de29..eef19a3 100644
 +		finals = make(map[string]string)
 +		t.toolPayloadFinalByItem[canonKey] = finals
 +	}
++	if _, exists := finals[field]; !exists {
++		if t.totalPartEntries >= maxTrackedTotalPartEntries {
++			return false
++		}
++		t.totalPartEntries++
++	}
 +	finals[field] = val.sha
 +	return true
 +}
@@ -10218,8 +10454,11 @@ index e69de29..eef19a3 100644
 +		if len(text) == prev.byteLen {
 +			return true
 +		}
-+	} else if len(prefixes) >= maxTrackedContentParts {
-+		return false
++	} else {
++		if len(prefixes) >= maxTrackedContentParts || t.totalPartEntries >= maxTrackedTotalPartEntries {
++			return false
++		}
++		t.totalPartEntries++
 +	}
 +	prefixes[contentIdx] = textPrefixCheck{byteLen: len(text), sha256: sha256Hex(text)}
 +	return true
@@ -10300,12 +10539,13 @@ index e69de29..eef19a3 100644
 +		st.seedSHA = snapSHA
 +		return true
 +	}
-+	if len(hashes) >= maxTrackedContentParts {
++	if len(hashes) >= maxTrackedContentParts || t.totalHashStates >= maxTrackedTotalHashStates {
 +		return false
 +	}
 +	h := sha256.New()
 +	_, _ = h.Write([]byte(snapText))
 +	hashes[contentIdx] = &textDeltaState{h: h, hasSeed: true, fromSnapshot: true, seedSHA: snapSHA}
++	t.totalHashStates++
 +	return true
 +}
 +
@@ -10357,12 +10597,13 @@ index e69de29..eef19a3 100644
 +		}
 +		return hex.EncodeToString(st.h.Sum(nil)) == initSHA
 +	}
-+	if len(hashes) >= maxTrackedContentParts {
++	if len(hashes) >= maxTrackedContentParts || t.totalHashStates >= maxTrackedTotalHashStates {
 +		return false
 +	}
 +	h := sha256.New()
 +	_, _ = h.Write([]byte(initText))
 +	hashes[contentIdx] = &textDeltaState{h: h, hasSeed: true, seedSHA: initSHA}
++	t.totalHashStates++
 +	return true
 +}
 +
@@ -10391,11 +10632,12 @@ index e69de29..eef19a3 100644
 +	}
 +	st := hashes[contentIdx]
 +	if st == nil {
-+		if len(hashes) >= maxTrackedContentParts {
++		if len(hashes) >= maxTrackedContentParts || t.totalHashStates >= maxTrackedTotalHashStates {
 +			return false
 +		}
 +		st = &textDeltaState{h: sha256.New()}
 +		hashes[contentIdx] = st
++		t.totalHashStates++
 +	}
 +	_, _ = st.h.Write([]byte(delta))
 +	st.hasDelta = true
@@ -10427,7 +10669,11 @@ index e69de29..eef19a3 100644
 +		parts = make(map[int64]string)
 +		t.contentPartByItem[canonKey] = parts
 +	}
++	if t.totalPartEntries >= maxTrackedTotalPartEntries {
++		return false
++	}
 +	parts[contentIdx] = "text-pending"
++	t.totalPartEntries++
 +	return true
 +}
 +
@@ -10478,7 +10724,11 @@ index e69de29..eef19a3 100644
 +		parts = make(map[int64]string)
 +		t.contentPartByItem[canonKey] = parts
 +	}
++	if t.totalPartEntries >= maxTrackedTotalPartEntries {
++		return false
++	}
 +	parts[contentIdx] = tag
++	t.totalPartEntries++
 +	return true
 +}
 +
@@ -13075,12 +13325,19 @@ index e69de29..eef19a3 100644
 +}
 +
 +func releaseReview(entry *reviewEntry) {
-+	if entry == nil {
++	releaseReviewWithSlot(entry, false)
++}
++
++func releaseReviewWithSlot(entry *reviewEntry, holdsSlot bool) {
++	if entry == nil && !holdsSlot {
 +		return
 +	}
 +	reviewMu.Lock()
-+	if entry.inFlight > 0 {
++	if entry != nil && entry.inFlight > 0 {
 +		entry.inFlight--
++	}
++	if holdsSlot && pendingReviewTotal > 0 {
++		pendingReviewTotal--
 +	}
 +	reviewMu.Unlock()
 +}
@@ -13590,11 +13847,35 @@ index e69de29..eef19a3 100644
 +		return SealRejected, ""
 +	}
 +	root = cleanRoot
++	key := root + "\x00" + launch
++	// Check in-memory pending/in-flight state BEFORE checking root existence on disk:
++	// on a fresh deployment, BeginPendingReview registers the launch before reading the body
++	// and before root is created, so a concurrent seal must see SealInFlight, never SealRejected.
++	checkEarlyInFlight := func() (SealStatus, bool) {
++		reviewMu.Lock()
++		defer reviewMu.Unlock()
++		if reclaimingKeys[key] {
++			return SealUnavailable, true
++		}
++		if st := pendingReviewLaunches[key]; st != nil && st.count > 0 {
++			return SealInFlight, true
++		}
++		if ent := reviewLedger[key]; ent != nil && !ent.sealedFlag && (ent.sealing || ent.inFlight > 0) {
++			return SealInFlight, true
++		}
++		return SealRejected, false
++	}
++	if earlySt, hit := checkEarlyInFlight(); hit {
++		return earlySt, ""
++	}
 +	rootExists, err := checkPrivateDir(root, true)
 +	if err != nil {
 +		return SealUnavailable, ""
 +	}
 +	if !rootExists {
++		if earlySt, hit := checkEarlyInFlight(); hit {
++			return earlySt, ""
++		}
 +		return SealRejected, ""
 +	}
 +	rootLease, err := acquirePrivateRootLease(root)
@@ -13602,7 +13883,6 @@ index e69de29..eef19a3 100644
 +		return SealUnavailable, ""
 +	}
 +	defer rootLease.Close()
-+	key := root + "\x00" + launch
 +	now := time.Now()
 +	reviewMu.Lock()
 +	if reclaimingKeys[key] {
@@ -14090,7 +14370,7 @@ index e69de29..eef19a3 100644
 +		return ctx, nil, ErrUnavailable
 +	}
 +	turnSeq := res.turnSeq
-+	entry, ok := res.transfer()
++	entry, holdsSlot, ok := res.transfer()
 +	if !ok {
 +		return ctx, nil, ErrUnavailable
 +	}
@@ -14105,13 +14385,13 @@ index e69de29..eef19a3 100644
 +	entry.mu.Lock()
 +	if entry.sealed {
 +		entry.mu.Unlock()
-+		releaseReview(entry)
++		releaseReviewWithSlot(entry, holdsSlot)
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if entry.tainted {
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
-+		releaseReview(entry)
++		releaseReviewWithSlot(entry, holdsSlot)
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if entry.session == "" {
@@ -14119,7 +14399,7 @@ index e69de29..eef19a3 100644
 +	} else if entry.session != session {
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
-+		releaseReview(entry)
++		releaseReviewWithSlot(entry, holdsSlot)
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if entry.route == "" {
@@ -14127,7 +14407,7 @@ index e69de29..eef19a3 100644
 +	} else if entry.route != expectedRoute {
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
-+		releaseReview(entry)
++		releaseReviewWithSlot(entry, holdsSlot)
 +		return ctx, nil, ErrUnavailable
 +	}
 +	turnDeadline := now.Add(ReviewTurnTimeout)
@@ -14136,7 +14416,7 @@ index e69de29..eef19a3 100644
 +		if !launchDeadline.After(now) {
 +			entry.taintAndPersistLocked()
 +			entry.mu.Unlock()
-+			releaseReview(entry)
++			releaseReviewWithSlot(entry, holdsSlot)
 +			return ctx, nil, ErrUnavailable
 +		}
 +		if launchDeadline.Before(turnDeadline) {
@@ -14146,13 +14426,14 @@ index e69de29..eef19a3 100644
 +	entry.mu.Unlock()
 +
 +	c := &Collector{
-+		directory:     entry.directory,
-+		deadline:      turnDeadline,
-+		strictCodex:   true,
-+		expectedModel: requestedModel,
-+		review:        entry,
-+		reviewTurnSeq: turnSeq,
-+		receipt:       Receipt{Schema: ReviewSchema, Session: session, Started: now.UnixNano()},
++		directory:            entry.directory,
++		deadline:             turnDeadline,
++		strictCodex:          true,
++		expectedModel:        requestedModel,
++		review:               entry,
++		reviewTurnSeq:        turnSeq,
++		holdsConcurrencySlot: holdsSlot,
++		receipt:              Receipt{Schema: ReviewSchema, Session: session, Started: now.UnixNano()},
 +	}
 +	return context.WithValue(ctx, contextKey{}, c), c, nil
 +}
@@ -15039,18 +15320,58 @@ index e69de29..eef19a3 100644
 +	return stagingRoot.Remove(name) == nil
 +}
 +
++var (
++	stagingSweepMu      sync.Mutex
++	stagingSweepCursors = make(map[string]string)
++)
++
 +func sweepOrphanStagingDir(rootHandle, stagingRoot *os.Root, root string, forceAllInactive bool) int {
 +	if stagingRoot == nil {
 +		return 0
 +	}
-+	entries, err := readDirFromRoot(stagingRoot)
++	df, err := stagingRoot.Open(".")
 +	if err != nil {
 +		return 0
 +	}
++	names, err := df.Readdirnames(-1)
++	_ = df.Close()
++	if err != nil || len(names) == 0 {
++		stagingSweepMu.Lock()
++		delete(stagingSweepCursors, root)
++		stagingSweepMu.Unlock()
++		return 0
++	}
++	slices.Sort(names)
++	budget := maxStagingSweepInspectPerCall
++	if forceAllInactive {
++		budget = maxStagingSweepStartupPerCall
++	}
++	if budget <= 0 {
++		budget = len(names)
++	}
++	stagingSweepMu.Lock()
++	cursorName := stagingSweepCursors[root]
++	stagingSweepMu.Unlock()
++	startIdx := 0
++	if cursorName != "" {
++		idx, found := slices.BinarySearch(names, cursorName)
++		if found {
++			idx++
++		}
++		if idx < len(names) {
++			startIdx = idx
++		}
++	}
++	endIdx := startIdx + budget
++	if endIdx > len(names) {
++		endIdx = len(names)
++	}
 +	now := time.Now()
 +	removed := 0
-+	for _, ent := range entries {
-+		name := ent.Name()
++	lastProcessed := ""
++	for i := startIdx; i < endIdx; i++ {
++		name := names[i]
++		lastProcessed = name
 +		if isStagingEntryActive(root, name) {
 +			continue
 +		}
@@ -15156,6 +15477,16 @@ index e69de29..eef19a3 100644
 +			}
 +		}
 +	}
++	stagingSweepMu.Lock()
++	if len(stagingSweepCursors) > 64 {
++		stagingSweepCursors = make(map[string]string)
++	}
++	if endIdx >= len(names) || lastProcessed == "" {
++		delete(stagingSweepCursors, root)
++	} else {
++		stagingSweepCursors[root] = lastProcessed
++	}
++	stagingSweepMu.Unlock()
 +	if removed > 0 {
 +		_ = syncPinnedDir(stagingRoot, filepath.Join(root, ".staging"))
 +	}
@@ -17172,7 +17503,9 @@ index e69de29..eef19a3 100644
 +			entry.mu.Unlock()
 +		}
 +		c.reviewReleased = true
-+		releaseReview(c.review)
++		holdsSlot := c.holdsConcurrencySlot
++		c.holdsConcurrencySlot = false
++		releaseReviewWithSlot(c.review, holdsSlot)
 +	}
 +}
 +
@@ -17358,10 +17691,10 @@ index e69de29..eef19a3 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..b3c35b8 100644
+index e69de29..4e34626 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,10849 @@
+@@ -0,0 +1,11042 @@
 +package preflightreceipt
 +
 +import (
@@ -28209,5 +28542,198 @@ index e69de29..b3c35b8 100644
 +				t.Fatalf("publishLocked(%s) unexpectedly published receipt.json: %v", mode, statErr)
 +			}
 +		})
++	}
++}
++
++func TestReviewReceiptConcurrencySlotHeldAcrossFullStreamLifecycle(t *testing.T) {
++	// Sol P1 #1a (PR #2280 R58): maxPendingReviewInFlight must cover the full turn/stream
++	// lifecycle after PendingReviewGuard hands off its slot to ReviewReservation/Collector,
++	// releasing the slot only once HandlerDone + Complete + active==0 finish.
++	oldCap := maxPendingReviewInFlight
++	maxPendingReviewInFlight = 2
++	defer func() { maxPendingReviewInFlight = oldCap }()
++
++	root := filepath.Join(t.TempDir(), "concurrency-lifecycle")
++	l1 := "review-f9090909-2222-4333-8444-555555555501"
++	l2 := "review-f9090909-2222-4333-8444-555555555502"
++	l3 := "review-f9090909-2222-4333-8444-555555555503"
++	s1 := "019d0000-0000-7000-8000-fffffffffc01"
++	s2 := "019d0000-0000-7000-8000-fffffffffc02"
++
++	admit := func(launch, session string) *Collector {
++		t.Helper()
++		p, err := BeginPendingReview(root, launch)
++		if err != nil {
++			t.Fatalf("BeginPendingReview(%s): %v", launch, err)
++		}
++		res, err := ReserveReview(root, launch)
++		if err != nil {
++			p.Release()
++			t.Fatalf("ReserveReview(%s): %v", launch, err)
++		}
++		res.SetTurnSeq(p.TurnSeq())
++		res.AttachPendingSlot(p)
++		p.Release()
++		_, c, err := BeginReviewReserved(context.Background(), res, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReviewReserved(%s): %v", launch, err)
++		}
++		return c
++	}
++
++	c1 := admit(l1, s1)
++	c2 := admit(l2, s2)
++	defer func() {
++		c1.Complete(false)
++		c1.HandlerDone(false)
++		c2.Complete(false)
++		c2.HandlerDone(false)
++	}()
++
++	// Both pending guards have already been released, yet both streams are active -> 3rd MUST be rejected.
++	if p3, err := BeginPendingReview(root, l3); err == nil || p3 != nil {
++		if p3 != nil {
++			p3.Release()
++		}
++		t.Fatalf("3rd BeginPendingReview unexpectedly succeeded while 2 review streams remained active")
++	}
++
++	// Completing c1 frees its concurrency slot -> 3rd BeginPendingReview now succeeds.
++	c1.Complete(false)
++	c1.HandlerDone(false)
++	p3, err := BeginPendingReview(root, l3)
++	if err != nil {
++		t.Fatalf("BeginPendingReview(l3) failed after active stream c1 finished: %v", err)
++	}
++	p3.Release()
++}
++
++func TestReviewReceiptStrictTrackerEnforcesCumulativeStateBudget(t *testing.T) {
++	// Sol P1 #1b (PR #2280 R58): strictStreamTracker must enforce cumulative hash-state and
++	// part-entry budgets across all items in a turn (preventing item*part multiplicative blowup).
++	oldHashCap := maxTrackedTotalHashStates
++	oldPartCap := maxTrackedTotalPartEntries
++	maxTrackedTotalHashStates = 3
++	maxTrackedTotalPartEntries = 6
++	defer func() {
++		maxTrackedTotalHashStates = oldHashCap
++		maxTrackedTotalPartEntries = oldPartCap
++	}()
++
++	root := filepath.Join(t.TempDir(), "tracker-budget")
++	launch := "review-fa0a0a0a-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-fffffffffb01"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++
++	// Emit 4 distinct (item_id, content_index) text deltas (exceeding maxTrackedTotalHashStates=3).
++	var sb strings.Builder
++	for i := 0; i < 4; i++ {
++		sb.WriteString(fmt.Sprintf("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_%d\",\"output_index\":%d,\"content_index\":0,\"delta\":\"x\"}\n\n", i, i))
++	}
++	sb.WriteString(`event: response.completed` + "\n" + `data: {"type":"response.completed","response":{"id":"resp_budget","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","id":"msg_0","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"x"}]}]}}` + "\n\n")
++	c.ObserveStreamChunk([]byte(sb.String()))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("SealReview after exceeding cumulative tracker budget = %v, want SealRejected", st)
++	}
++}
++
++func TestReviewReceiptSealBeforeRootCreatedReturnsInFlight(t *testing.T) {
++	// Sol P2 #2 (PR #2280 R58): when the receipt root directory has not yet been created on disk
++	// while BeginPendingReview is active (first request reading body), SealReviewWithDigest MUST
++	// return SealInFlight rather than SealRejected.
++	root := filepath.Join(t.TempDir(), "not-yet-created-root")
++	launch := "review-fb0b0b0b-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-fffffffffa01"
++
++	p, err := BeginPendingReview(root, launch)
++	if err != nil {
++		t.Fatalf("BeginPendingReview: %v", err)
++	}
++	if _, statErr := os.Lstat(root); !os.IsNotExist(statErr) {
++		p.Release()
++		t.Fatalf("expected root not to exist yet before ReserveReview: %v", statErr)
++	}
++	if st, dig := SealReviewWithDigest(root, launch, session); st != SealInFlight || dig != "" {
++		p.Release()
++		t.Fatalf("SealReviewWithDigest while pending before root exists = (%v, %q), want (SealInFlight, \"\")", st, dig)
++	}
++	p.Release()
++	if st, dig := SealReviewWithDigest(root, launch, session); st != SealRejected || dig != "" {
++		t.Fatalf("SealReviewWithDigest after pending released and root still absent = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++}
++
++func TestStagingSweepBoundedBatchAndResumesCursor(t *testing.T) {
++	// Astra P2 #4 (PR #2280 R58): orphan .staging sweep must process bounded batches and resume
++	// via cursor across consecutive calls instead of scanning the entire directory on each quota hit.
++	oldBatch := maxStagingSweepInspectPerCall
++	maxStagingSweepInspectPerCall = 3
++	defer func() { maxStagingSweepInspectPerCall = oldBatch }()
++
++	root := filepath.Join(t.TempDir(), "staging-batched-sweep")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lease.Close()
++	stagingRoot, err := ensureStagingDir(lease.dir, root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_ = stagingRoot.Close()
++
++	ancient := time.Now().Add(-2 * time.Hour)
++	stagingPath := filepath.Join(root, ".staging")
++	for i := 0; i < 7; i++ {
++		name := fmt.Sprintf("pending-1-%d-%016x", i+1, i+1)
++		p := filepath.Join(stagingPath, name)
++		raw := fmt.Sprintf(`{"schema":"cliproxy-preflight-v1","session":"preflight-00000000-0000-4000-8000-%012d","started_ns":%d,"finished_ns":%d,"complete":true,"routes":["codex:gpt-6.2-sol@chatgpt.com"]}`, i+1, ancient.UnixNano(), ancient.UnixNano())
++		if err := os.WriteFile(p, []byte(raw), 0600); err != nil {
++			t.Fatal(err)
++		}
++		_ = os.Chtimes(p, ancient, ancient)
++	}
++
++	r1 := sweepOrphanStagingInRoot(lease.dir, root, false)
++	if r1 != 3 {
++		t.Fatalf("batch 1 removed %d staging files, want 3", r1)
++	}
++	r2 := sweepOrphanStagingInRoot(lease.dir, root, false)
++	if r2 != 3 {
++		t.Fatalf("batch 2 removed %d staging files, want 3", r2)
++	}
++	r3 := sweepOrphanStagingInRoot(lease.dir, root, false)
++	if r3 != 1 {
++		t.Fatalf("batch 3 removed %d staging files, want 1", r3)
++	}
++	rem, err := os.ReadDir(stagingPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(rem) != 0 {
++		t.Fatalf("expected .staging empty after 3 bounded batches, still has %d entries", len(rem))
 +	}
 +}
