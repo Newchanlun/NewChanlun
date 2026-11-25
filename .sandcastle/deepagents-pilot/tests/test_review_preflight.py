@@ -1948,6 +1948,34 @@ def test_round_trip_rejects_case_alias_protocol_keys_matching_go_producer():
             preflight.Deadline(5),
         )
         assert res_alias["ok"] is False
+
+        # 非协议自由格式嵌套对象（如 response.metadata 中的 Run / run）须与 Go 一致放行，
+        # 而顶层非 null message 字段在 response.completed 上须与 Go 一致拒绝。
+        current["body"] = (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_meta_case","status":"completed","model":"gpt-6.2-sol","metadata":{"Run":1,"run":2},"output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}\n\n'
+        )
+        res_meta = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000090",
+            preflight.Deadline(5),
+        )
+        assert res_meta["ok"] is True
+
+        current["body"] = (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","message":"unexpected notice","response":{"id":"resp_top_msg","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}\n\n'
+        )
+        res_msg = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000089",
+            preflight.Deadline(5),
+        )
+        assert res_msg["ok"] is False
     finally:
         server.shutdown()
         server.server_close()

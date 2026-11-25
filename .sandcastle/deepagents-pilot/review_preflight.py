@@ -370,12 +370,9 @@ _SSE_CONTENT_PART_SCHEMA_KEYS = frozenset({"type", "text", "refusal"})
 
 def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     out: dict[str, object] = {}
-    seen_lower: set[str] = set()
     for key, value in pairs:
-        lower = key.lower()
-        if key in out or lower in seen_lower:
+        if key in out:
             raise ValueError("duplicate JSON key")
-        seen_lower.add(lower)
         out[key] = value
     return out
 
@@ -383,10 +380,14 @@ def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
 def _check_canonical_schema_keys(obj: object, schema_keys: frozenset[str]) -> None:
     if not isinstance(obj, dict):
         return
+    seen_lower: set[str] = set()
     for key in obj:
         lower = key.lower()
+        if lower in seen_lower:
+            raise ValueError(f"case-duplicate protocol JSON key: {key}")
         if key != lower and lower in schema_keys:
             raise ValueError(f"non-canonical protocol key case: {key}")
+        seen_lower.add(lower)
 
 
 def _validate_sse_protocol_key_casing(event: object) -> None:

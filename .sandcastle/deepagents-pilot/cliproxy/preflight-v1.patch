@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..9f4ab60 100644
+index e69de29..3c0d562 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,240 @@
 +package middleware
 +
 +import (
@@ -16,14 +16,37 @@ index e69de29..9f4ab60 100644
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
 +
++func singleHeaderValue(h http.Header, key string) (val string, present bool, ambiguous bool) {
++	vals := h.Values(key)
++	switch len(vals) {
++	case 0:
++		return "", false, false
++	case 1:
++		return vals[0], true, false
++	default:
++		return "", true, true
++	}
++}
++
++func hasAnyHeaderValue(h http.Header, key string) bool {
++	return len(h.Values(key)) > 0
++}
++
 +func PreflightReceipt() gin.HandlerFunc {
 +	root := os.Getenv("CLIPROXY_PREFLIGHT_RECEIPTS")
 +	return func(c *gin.Context) {
-+		session := c.GetHeader("Session-Id")
-+		launch := c.GetHeader(preflightreceipt.ReviewHeader)
-+		isPreflight := preflightreceipt.ValidPreflightSession(session)
-+		hasReviewHeader := launch != ""
-+		if !isPreflight && !hasReviewHeader {
++		session, sessionPresent, sessionAmbiguous := singleHeaderValue(c.Request.Header, "Session-Id")
++		launch, launchPresent, launchAmbiguous := singleHeaderValue(c.Request.Header, preflightreceipt.ReviewHeader)
++		anyPreflightSession := false
++		for _, sv := range c.Request.Header.Values("Session-Id") {
++			if preflightreceipt.ValidPreflightSession(sv) {
++				anyPreflightSession = true
++				break
++			}
++		}
++		isPreflight := !sessionAmbiguous && sessionPresent && preflightreceipt.ValidPreflightSession(session)
++		hasReviewHeader := launchPresent
++		if !anyPreflightSession && !hasReviewHeader {
 +			c.Next()
 +			return
 +		}
@@ -35,7 +58,7 @@ index e69de29..9f4ab60 100644
 +			c.Next()
 +			return
 +		}
-+		if hasReviewHeader && c.Request.Method == http.MethodPost && c.Request.URL.Path == "/v1/review-receipts/seal" && c.GetHeader("Upgrade") == "" {
++		if hasReviewHeader && c.Request.Method == http.MethodPost && c.Request.URL.Path == "/v1/review-receipts/seal" && !hasAnyHeaderValue(c.Request.Header, "Upgrade") {
 +			c.Next()
 +			return
 +		}
@@ -52,11 +75,11 @@ index e69de29..9f4ab60 100644
 +				c.Header("Connection", "close")
 +				c.AbortWithStatus(status)
 +			}
-+			if !preflightreceipt.ValidReviewLaunch(launch) {
++			if launchAmbiguous || !preflightreceipt.ValidReviewLaunch(launch) {
 +				abortClose(http.StatusBadRequest)
 +				return
 +			}
-+			if isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" || !preflightreceipt.ValidReviewSession(session) {
++			if sessionAmbiguous || !sessionPresent || anyPreflightSession || isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || hasAnyHeaderValue(c.Request.Header, "Upgrade") || !preflightreceipt.ValidReviewSession(session) {
 +				preflightreceipt.TaintExistingReview(root, launch)
 +				abortClose(http.StatusBadRequest)
 +				return
@@ -168,7 +191,7 @@ index e69de29..9f4ab60 100644
 +				}
 +			}
 +		} else {
-+			if c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" {
++			if sessionAmbiguous || !isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || hasAnyHeaderValue(c.Request.Header, "Upgrade") {
 +				c.AbortWithStatus(http.StatusBadRequest)
 +				return
 +			}
@@ -196,8 +219,12 @@ index e69de29..9f4ab60 100644
 +			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
 +			return
 +		}
-+		launch := c.GetHeader(preflightreceipt.ReviewHeader)
-+		session := c.GetHeader("Session-Id")
++		launch, launchPresent, launchAmbiguous := singleHeaderValue(c.Request.Header, preflightreceipt.ReviewHeader)
++		session, sessionPresent, sessionAmbiguous := singleHeaderValue(c.Request.Header, "Session-Id")
++		if !launchPresent || launchAmbiguous || launch == "" || !sessionPresent || sessionAmbiguous || session == "" {
++			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"status": "rejected"})
++			return
++		}
 +		status, receiptSHA := preflightreceipt.SealReviewWithDigest(root, launch, session)
 +		switch status {
 +		case preflightreceipt.SealOK:
@@ -218,10 +245,10 @@ index e69de29..9f4ab60 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..5e13ff0
+index 0000000..d38fcf5
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,677 @@
+@@ -0,0 +1,839 @@
 +package middleware
 +
 +import (
@@ -897,6 +924,168 @@ index 0000000..5e13ff0
 +	}
 +	if st, digest := preflightreceipt.SealReviewWithDigest(root, launch6, session6); st != preflightreceipt.SealOK || digest == "" {
 +		t.Fatalf("SealReviewWithDigest launch6 after tightened turn 2 = (%v, %q), want (SealOK, non-empty)", st, digest)
++	}
++}
++
++func TestPreflightReceiptMiddlewareAndSealRejectAmbiguousOrEmptyIdentityHeaders(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R53): both request and seal entrypoints must share single-value
++	// header validation, distinguish absent vs explicit empty ReviewHeader, and reject any
++	// ambiguous duplicate ReviewHeader or Session-Id headers.
++	gin.SetMode(gin.TestMode)
++	root := t.TempDir() + "/receipts"
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	tlsState := middlewareVerifiedTLS(t, "chatgpt.com")
++
++	handlerCalls := atomic.Int32{}
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		handlerCalls.Add(1)
++		col := preflightreceipt.From(c.Request.Context())
++		if col == nil {
++			c.Status(http.StatusOK)
++			return
++		}
++		ctx, execLease, err := col.Start(c.Request.Context(), "codex", "gpt-6.2-sol")
++		if err != nil {
++			c.AbortWithStatus(http.StatusInternalServerError)
++			return
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: middlewareFakeRT(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: http.StatusOK,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(strings.NewReader("")),
++				TLS:        tlsState,
++			}, nil
++		})})
++		upReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(upReq)
++		if err != nil {
++			execLease.End()
++			col.Complete(false)
++			c.AbortWithStatus(http.StatusInternalServerError)
++			return
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		col.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_hdr_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		execLease.End()
++		col.Complete(true)
++		c.Status(http.StatusOK)
++	})
++	engine.POST("/v1/review-receipts/seal", SealReviewReceiptHandler())
++
++	launch1 := "review-62345678-1234-4234-8234-123456789601"
++	launch2 := "review-62345678-1234-4234-8234-123456789602"
++	session1 := "019d0000-0000-7000-8000-000000000601"
++	session2 := "019d0000-0000-7000-8000-000000000602"
++	pfSess := "preflight-62345678-1234-4234-8234-123456789601"
++
++	// 1. Explicit empty ReviewHeader on /v1/responses MUST be rejected (400), NEVER treated as ordinary traffic.
++	reqEmpty := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	reqEmpty.Header.Add(preflightreceipt.ReviewHeader, "")
++	reqEmpty.Header.Set("Session-Id", session1)
++	recEmpty := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(recEmpty, reqEmpty)
++	if recEmpty.Code != http.StatusBadRequest || handlerCalls.Load() != 0 {
++		t.Fatalf("empty ReviewHeader -> code=%d handlerCalls=%d, want (400, 0)", recEmpty.Code, handlerCalls.Load())
++	}
++
++	// 2. Duplicate ReviewHeader (["", launch1] and [launch1, launch2]) MUST be rejected (400), never run handler.
++	for _, vals := range [][]string{{"", launch1}, {launch1, launch2}} {
++		reqDup := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		for _, v := range vals {
++			reqDup.Header.Add(preflightreceipt.ReviewHeader, v)
++		}
++		reqDup.Header.Set("Session-Id", session1)
++		recDup := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++		engine.ServeHTTP(recDup, reqDup)
++		if recDup.Code != http.StatusBadRequest || handlerCalls.Load() != 0 {
++			t.Fatalf("duplicate ReviewHeader %v -> code=%d handlerCalls=%d, want (400, 0)", vals, recDup.Code, handlerCalls.Load())
++		}
++	}
++
++	// 3. Duplicate Session-Id on preflight request (["", pfSess] or [pfSess, "other"]) MUST be rejected (400).
++	for _, vals := range [][]string{{"", pfSess}, {pfSess, "other"}} {
++		reqPF := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		for _, v := range vals {
++			reqPF.Header.Add("Session-Id", v)
++		}
++		recPF := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++		engine.ServeHTTP(recPF, reqPF)
++		if recPF.Code != http.StatusBadRequest || handlerCalls.Load() != 0 {
++			t.Fatalf("duplicate preflight Session-Id %v -> code=%d handlerCalls=%d, want (400, 0)", vals, recPF.Code, handlerCalls.Load())
++		}
++	}
++
++	// 4. Run one clean review turn, then verify duplicate headers on /v1/review-receipts/seal are rejected (400)
++	// while clean single-value seal still succeeds (200).
++	reqOK := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	reqOK.Header.Set(preflightreceipt.ReviewHeader, launch1)
++	reqOK.Header.Set("Session-Id", session1)
++	recOK := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(recOK, reqOK)
++	if recOK.Code != http.StatusOK || handlerCalls.Load() != 1 {
++		t.Fatalf("clean review turn -> code=%d handlerCalls=%d, want (200, 1)", recOK.Code, handlerCalls.Load())
++	}
++
++	for _, tc := range []struct {
++		name     string
++		launches []string
++		sessions []string
++	}{
++		{"dup_launch", []string{launch1, launch2}, []string{session1}},
++		{"empty_plus_launch", []string{"", launch1}, []string{session1}},
++		{"dup_session", []string{launch1}, []string{session1, session2}},
++		{"empty_session", []string{launch1}, []string{""}},
++	} {
++		reqSeal := httptest.NewRequest(http.MethodPost, "/v1/review-receipts/seal", nil)
++		for _, v := range tc.launches {
++			reqSeal.Header.Add(preflightreceipt.ReviewHeader, v)
++		}
++		for _, v := range tc.sessions {
++			reqSeal.Header.Add("Session-Id", v)
++		}
++		recSeal := httptest.NewRecorder()
++		engine.ServeHTTP(recSeal, reqSeal)
++		if recSeal.Code != http.StatusBadRequest {
++			t.Fatalf("seal %s -> HTTP %d, want 400", tc.name, recSeal.Code)
++		}
++	}
++
++	// Clean single-value seal succeeds (200).
++	reqSealOK := httptest.NewRequest(http.MethodPost, "/v1/review-receipts/seal", nil)
++	reqSealOK.Header.Set(preflightreceipt.ReviewHeader, launch1)
++	reqSealOK.Header.Set("Session-Id", session1)
++	recSealOK := httptest.NewRecorder()
++	engine.ServeHTTP(recSealOK, reqSealOK)
++	if recSealOK.Code != http.StatusOK {
++		t.Fatalf("clean single-value seal -> HTTP %d, want 200 (body=%s)", recSealOK.Code, recSealOK.Body.String())
++	}
++
++	// 5. Duplicate Session-Id on a valid existing review launch on /v1/responses MUST reject (400) AND taint.
++	launch3 := "review-62345678-1234-4234-8234-123456789603"
++	session3 := "019d0000-0000-7000-8000-000000000603"
++	reqClean3 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	reqClean3.Header.Set(preflightreceipt.ReviewHeader, launch3)
++	reqClean3.Header.Set("Session-Id", session3)
++	recClean3 := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(recClean3, reqClean3)
++	if recClean3.Code != http.StatusOK {
++		t.Fatalf("launch3 clean turn -> HTTP %d, want 200", recClean3.Code)
++	}
++	reqDupSess := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	reqDupSess.Header.Set(preflightreceipt.ReviewHeader, launch3)
++	reqDupSess.Header.Add("Session-Id", session3)
++	reqDupSess.Header.Add("Session-Id", session2)
++	recDupSess := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(recDupSess, reqDupSess)
++	if recDupSess.Code != http.StatusBadRequest {
++		t.Fatalf("duplicate Session-Id on review launch -> HTTP %d, want 400", recDupSess.Code)
++	}
++	if st := preflightreceipt.SealReview(root, launch3, session3); st != preflightreceipt.SealRejected {
++		t.Fatalf("SealReview(launch3) after duplicate Session-Id = %v, want SealRejected", st)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -6516,10 +6705,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..ccc8eb6 100644
+index e69de29..1355eac 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,9949 @@
+@@ -0,0 +1,9977 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7917,7 +8106,7 @@ index e69de29..ccc8eb6 100644
 +
 +var (
 +	sseEventSchemaKeys = map[string]struct{}{
-+		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {},
++		"type": {}, "response_id": {}, "model": {}, "error": {}, "response": {}, "message": {},
 +		"item": {}, "item_id": {}, "output_index": {}, "content_index": {}, "text": {}, "delta": {}, "refusal": {}, "part": {},
 +		"arguments": {}, "input": {}, "code": {}, "name": {}, "call_id": {},
 +	}
@@ -8586,6 +8775,10 @@ index e69de29..ccc8eb6 100644
 +	}
 +	rejectErrors := !allowFailureEvents || !isExplicitFailureEventType(evType)
 +	if rejectErrors && hasResponseError(evFields["error"]) {
++		c.taintStreamAnomaly()
++		return out, false
++	}
++	if (evType == "response.completed" || evType == "response.incomplete") && hasResponseError(evFields["message"]) {
 +		c.taintStreamAnomaly()
 +		return out, false
 +	}
@@ -12921,9 +13114,7 @@ index e69de29..ccc8eb6 100644
 +			}
 +			st, digest, subDev, subIno, hasSubID, pinFD := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, entry.sealedReceiptSHA, entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID, wantPinFD, now)
 +			if st != SealOK {
-+				if pinFD != nil {
-+					_ = pinFD.Close()
-+				}
++				closeBudgetedPinnedDirFD(pinFD)
 +				entry.mu.Unlock()
 +				return st, ""
 +			}
@@ -12948,9 +13139,7 @@ index e69de29..ccc8eb6 100644
 +					slotReleased = true
 +				}
 +				reviewMu.Unlock()
-+				if pinFD != nil {
-+					_ = pinFD.Close()
-+				}
++				closeBudgetedPinnedDirFD(pinFD)
 +				return SealUnavailable, ""
 +			}
 +			recorded, extraFD := recordSealedBindingLocked(key, sealedDirBinding{
@@ -13003,6 +13192,10 @@ index e69de29..ccc8eb6 100644
 +		if entry.sealed {
 +			ok := !entry.tainted && entry.session == session
 +			if !ok {
++				if entry.tainted {
++					closeBudgetedPinnedDirFD(entry.boundDirFD)
++					entry.boundDirFD = nil
++				}
 +				entry.mu.Unlock()
 +				finishSeal(true)
 +				return SealRejected, ""
@@ -13020,9 +13213,7 @@ index e69de29..ccc8eb6 100644
 +			}
 +			st, digest, subDev, subIno, hasSubID, pinFD := verifySealedDiskReceiptInRoot(rootLease, entry.directory, root, launch, session, expectedSHA, entry.sealedDirDev, entry.sealedDirIno, entry.hasSealedDirID, entry.boundDirFD == nil, now)
 +			if st != SealOK {
-+				if pinFD != nil {
-+					_ = pinFD.Close()
-+				}
++				closeBudgetedPinnedDirFD(pinFD)
 +				entry.mu.Unlock()
 +				finishSeal(true)
 +				return st, ""
@@ -13070,6 +13261,10 @@ index e69de29..ccc8eb6 100644
 +		}
 +		if entry.tainted || entry.lastTurnFailed || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) ||
 +			len(entry.responseIDSHAs) != entry.requests || entry.responseIDSHAs[len(entry.responseIDSHAs)-1] != entry.lastResponseIDSHA {
++			if entry.tainted && entry.taintedPersisted {
++				closeBudgetedPinnedDirFD(entry.boundDirFD)
++				entry.boundDirFD = nil
++			}
 +			entry.mu.Unlock()
 +			finishSeal(false)
 +			return SealRejected, ""
@@ -13103,6 +13298,10 @@ index e69de29..ccc8eb6 100644
 +			entry.sealedAt = 0
 +			entry.sealedReceiptSHA = ""
 +			entry.taintedPersisted = (renamed && err == nil) || entry.foreignDisk
++			// Entry is permanently closed via finishSeal(true) and can never seal SealOK;
++			// release any pinned dirFD now so rejected/foreignDisk launches never leak FD budget.
++			closeBudgetedPinnedDirFD(entry.boundDirFD)
++			entry.boundDirFD = nil
 +			entry.mu.Unlock()
 +			finishSeal(true)
 +			return SealRejected, ""
@@ -13175,9 +13374,7 @@ index e69de29..ccc8eb6 100644
 +		entry.sealing = false
 +		entry.sealedFlag = true
 +		reviewMu.Unlock()
-+		if extraFD != nil {
-+			_ = extraFD.Close()
-+		}
++		closeBudgetedPinnedDirFD(extraFD)
 +		if !isSHA256Hex(digest) || !recorded {
 +			return SealUnavailable, ""
 +		}
@@ -13196,18 +13393,14 @@ index e69de29..ccc8eb6 100644
 +		}
 +		st, digest, subDev, subIno, hasSubID, pinFD := verifySealedDiskReceiptInRoot(rootLease, dir, root, launch, session, binding.receiptSHA, binding.dirDev, binding.dirIno, binding.hasDirID, binding.dirFD == nil, now)
 +		if st != SealOK {
-+			if pinFD != nil {
-+				closeBudgetedPinnedDirFD(pinFD)
-+			}
++			closeBudgetedPinnedDirFD(pinFD)
 +			return st, ""
 +		}
 +		reviewMu.Lock()
 +		curBind, stillExists := sealedBindings[key]
 +		if !stillExists || (curBind.dirFD != nil && !verifyPinnedDirFDAlive(curBind.dirFD, curBind.dirDev, curBind.dirIno)) {
 +			reviewMu.Unlock()
-+			if pinFD != nil {
-+				closeBudgetedPinnedDirFD(pinFD)
-+			}
++			closeBudgetedPinnedDirFD(pinFD)
 +			return SealUnavailable, ""
 +		}
 +		recorded, extraFD := recordSealedBindingLocked(key, sealedDirBinding{
@@ -13221,9 +13414,7 @@ index e69de29..ccc8eb6 100644
 +			recordedAt: now,
 +		}, now, false)
 +		reviewMu.Unlock()
-+		if extraFD != nil {
-+			_ = extraFD.Close()
-+		}
++		closeBudgetedPinnedDirFD(extraFD)
 +		if !recorded {
 +			return SealUnavailable, ""
 +		}
@@ -13254,9 +13445,7 @@ index e69de29..ccc8eb6 100644
 +				slotReleased = true
 +			}
 +			reviewMu.Unlock()
-+			if pinFD != nil {
-+				closeBudgetedPinnedDirFD(pinFD)
-+			}
++			closeBudgetedPinnedDirFD(pinFD)
 +			return SealUnavailable, ""
 +		}
 +		recorded, extraFD := recordSealedBindingLocked(key, sealedDirBinding{
@@ -13271,9 +13460,7 @@ index e69de29..ccc8eb6 100644
 +		}, now, reservedSlot)
 +		slotReleased = true
 +		reviewMu.Unlock()
-+		if extraFD != nil {
-+			_ = extraFD.Close()
-+		}
++		closeBudgetedPinnedDirFD(extraFD)
 +		if !recorded {
 +			return SealUnavailable, ""
 +		}
@@ -14976,6 +15163,32 @@ index e69de29..ccc8eb6 100644
 +					reviewMu.Unlock()
 +					continue
 +				}
++				if !ent.mu.TryLock() {
++					reviewMu.Unlock()
++					continue
++				}
++				idMismatch := ent.foreignDisk
++				if !idMismatch && ent.hasBoundDirID {
++					if ent.boundRootDev != rootDev || ent.boundRootIno != rootIno ||
++						!cand.hasID || ent.boundDirDev != cand.dev || ent.boundDirIno != cand.ino {
++						idMismatch = true
++					}
++					if !idMismatch && ent.boundDirFD != nil && !verifyPinnedDirFDAlive(ent.boundDirFD, ent.boundDirDev, ent.boundDirIno) {
++						idMismatch = true
++					}
++				}
++				if !idMismatch && ent.lastPersistedSHA != "" {
++					if cand.receiptSHA != ent.lastPersistedSHA {
++						idMismatch = true
++					} else if expectedReceiptSHA == "" {
++						expectedReceiptSHA = ent.lastPersistedSHA
++					}
++				}
++				ent.mu.Unlock()
++				if idMismatch {
++					reviewMu.Unlock()
++					continue
++				}
 +				expectedEntry = ent
 +			}
 +			if b, ok := sealedBindings[key]; ok {
@@ -16045,6 +16258,8 @@ index e69de29..ccc8eb6 100644
 +		e.sealedAt = 0
 +		e.foreignDisk = true
 +		e.taintedPersisted = true
++		closeBudgetedPinnedDirFD(e.boundDirFD)
++		e.boundDirFD = nil
 +		return false, ErrUnavailable
 +	case diskReceiptAlreadyTainted:
 +		wasTainted := e.tainted
@@ -16052,6 +16267,8 @@ index e69de29..ccc8eb6 100644
 +		e.sealed = false
 +		e.sealedAt = 0
 +		e.taintedPersisted = true
++		closeBudgetedPinnedDirFD(e.boundDirFD)
++		e.boundDirFD = nil
 +		if wasTainted {
 +			return true, nil
 +		}
@@ -16470,10 +16687,10 @@ index e69de29..ccc8eb6 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..cd2ff88 100644
+index e69de29..2d098b6 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,9744 @@
+@@ -0,0 +1,9969 @@
 +package preflightreceipt
 +
 +import (
@@ -21592,12 +21809,14 @@ index e69de29..cd2ff88 100644
 +	r1Dir := filepath.Join(root, r1Launch)
 +	r1RecPath := filepath.Join(r1Dir, "receipt.json")
 +	ancient := time.Now().Add(-48 * time.Hour)
++	var agedR1SHA string
 +	if raw, err := os.ReadFile(r1RecPath); err == nil {
 +		var rec ReviewReceipt
 +		if json.Unmarshal(raw, &rec) == nil {
 +			rec.Started = ancient.UnixNano()
 +			rec.Finished = ancient.UnixNano()
 +			if data, merr := json.Marshal(rec); merr == nil {
++				agedR1SHA = sha256Hex(string(data))
 +				_ = os.WriteFile(r1RecPath, data, 0600)
 +			}
 +		}
@@ -21619,6 +21838,9 @@ index e69de29..cd2ff88 100644
 +	reviewMu.Lock()
 +	if ent := reviewLedger[key1]; ent != nil {
 +		ent.touched = ancient
++		ent.mu.Lock()
++		ent.lastPersistedSHA = agedR1SHA
++		ent.mu.Unlock()
 +	}
 +	reviewMu.Unlock()
 +
@@ -25372,6 +25594,9 @@ index e69de29..cd2ff88 100644
 +	reviewMu.Lock()
 +	if ent := reviewLedger[key1]; ent != nil {
 +		ent.touched = ancient
++		ent.mu.Lock()
++		ent.lastPersistedSHA = agedSHA1
++		ent.mu.Unlock()
 +	}
 +	if b, ok := sealedBindings[key1]; ok {
 +		b.receiptSHA = agedSHA1
@@ -25761,6 +25986,9 @@ index e69de29..cd2ff88 100644
 +	reviewMu.Lock()
 +	if ent := reviewLedger[key2]; ent != nil {
 +		ent.touched = aged48
++		ent.mu.Lock()
++		ent.lastPersistedSHA = agedSHA2
++		ent.mu.Unlock()
 +	}
 +	if b, ok := sealedBindings[key2]; ok {
 +		b.receiptSHA = agedSHA2
@@ -25817,6 +26045,9 @@ index e69de29..cd2ff88 100644
 +	reviewMu.Lock()
 +	if ent := reviewLedger[key4]; ent != nil {
 +		ent.touched = aged48
++		ent.mu.Lock()
++		ent.lastPersistedSHA = agedSHA4
++		ent.mu.Unlock()
 +	}
 +	if b, ok := sealedBindings[key4]; ok {
 +		b.receiptSHA = agedSHA4
@@ -26217,4 +26448,215 @@ index e69de29..cd2ff88 100644
 +	if st := SealReview(root, launch, session); st != SealRejected {
 +		t.Fatalf("SealReview after case-duplicate status/Status frame = %v, want SealRejected", st)
 +	}
++}
++
++func TestReviewReceiptSealRejectedOnCorruptForeignDiskReleasesPinnedFDBudget(t *testing.T) {
++	// Sol P1 #1 (PR #2280 R53): when SealReviewWithDigest encounters a corrupted/mismatched
++	// receipt.json on disk (marking foreignDisk and returning SealRejected), it MUST preserve the
++	// foreign file untouched AND release boundDirFD back to pinnedDirFDs so rejected launches can
++	// never accumulate to exhaust the FD budget.
++	root := filepath.Join(t.TempDir(), "foreign-disk-fd-release")
++	launch := "review-feeeeeee-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-fffffffff801"
++	beforeFDs := pinnedDirFDs.Load()
++
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_corrupt_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	if duringFDs := pinnedDirFDs.Load(); duringFDs != beforeFDs+1 {
++		t.Fatalf("pinnedDirFDs before corrupt seal = %d, want %d", duringFDs, beforeFDs+1)
++	}
++	recPath := filepath.Join(root, launch, "receipt.json")
++	foreignBody := []byte("{corrupted-foreign-content")
++	if err := os.WriteFile(recPath, foreignBody, 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	if st, dig := SealReviewWithDigest(root, launch, session); st != SealRejected || dig != "" {
++		t.Fatalf("SealReviewWithDigest on corrupted receipt.json = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	if gotRaw, rerr := os.ReadFile(recPath); rerr != nil || !bytes.Equal(gotRaw, foreignBody) {
++		t.Fatalf("foreign receipt.json altered: err=%v got=%q", rerr, string(gotRaw))
++	}
++	if afterFDs := pinnedDirFDs.Load(); afterFDs != beforeFDs {
++		t.Fatalf("pinnedDirFDs leaked on foreignDisk SealRejected: before=%d after=%d", beforeFDs, afterFDs)
++	}
++}
++
++func TestReviewReceiptReclaimUnsealedRejectsReplacedSameNameExpiredDir(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R53): when reclaiming an unsealed reviewLedger entry, reclaim MUST
++	// compare the scanned directory inode against the entry's bound (boundRootDev/Ino, boundDirDev/Ino)
++	// and lastPersistedSHA; if the directory was replaced by a same-name valid expired directory,
++	// reclaim MUST skip it and keep BOTH the replaced directory and the original ledger entry intact.
++	root := filepath.Join(t.TempDir(), "unsealed-replaced-reclaim")
++	launch := "review-feeeeeee-2222-4333-8444-555555555502"
++	session := "019d0000-0000-7000-8000-fffffffff802"
++	res, err := ReserveReview(root, launch)
++	if err != nil {
++		t.Fatal(err)
++	}
++	res.Release()
++
++	dir := filepath.Join(root, launch)
++	origMoved := filepath.Join(t.TempDir(), "orig-unsealed-dir")
++	if err := os.Rename(dir, origMoved); err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = os.RemoveAll(origMoved) }()
++
++	// Create a replacement directory at <root>/<launch> with a DIFFERENT inode and valid aged producer files.
++	ancient := time.Now().Add(-48 * time.Hour)
++	if err := os.Mkdir(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	rr := ReviewReceipt{
++		Schema:         ReviewSchema,
++		Launch:         launch,
++		Session:        session,
++		Started:        ancient.UnixNano(),
++		Finished:       ancient.UnixNano(),
++		Complete:       false,
++		Sealed:         false,
++		Tainted:        false,
++		Requests:       0,
++		Routes:         []string{"other"},
++		ResponseIDSHAs: []string{},
++	}
++	rawRec, _ := json.Marshal(rr)
++	rawMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch, Started: ancient.UnixNano()})
++	if err := os.WriteFile(filepath.Join(dir, "receipt.json"), rawRec, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, "producer.json"), rawMarker, 0600); err != nil {
++		t.Fatal(err)
++	}
++	for _, p := range []string{filepath.Join(dir, "receipt.json"), filepath.Join(dir, "producer.json"), dir} {
++		_ = os.Chtimes(p, ancient, ancient)
++	}
++
++	key := filepath.Clean(root) + "\x00" + launch
++	reviewMu.Lock()
++	if ent := reviewLedger[key]; ent != nil {
++		ent.touched = ancient
++	}
++	reviewMu.Unlock()
++
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	dirsRemoved, fdsReleased := reclaimExpiredBucketEntries(
++		lease.dir, root, []string{launch}, true, 1, 1,
++		&bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)},
++	)
++	lease.Close()
++	if dirsRemoved != 0 || fdsReleased != 0 {
++		t.Fatalf("reclaimExpiredBucketEntries deleted replaced unsealed dir: (%d, %d), want (0, 0)", dirsRemoved, fdsReleased)
++	}
++	if _, statErr := os.Lstat(dir); statErr != nil {
++		t.Fatalf("replacement dir was unexpectedly removed: %v", statErr)
++	}
++	reviewMu.Lock()
++	entStillPresent := reviewLedger[key] != nil
++	reviewMu.Unlock()
++	if !entStillPresent {
++		t.Fatalf("original reviewLedger entry was unexpectedly evicted on replaced-dir mismatch")
++	}
++}
++
++func TestReviewReceiptStrictRejectsTopLevelMessageOnCompletedAndAcceptsNestedCaseMetadata(t *testing.T) {
++	// Astra P2 #3 + Sol P2 #2 + Astra P2 #4 (PR #2280 R53):
++	// 1. Go formal producer rejects non-null top-level "message" on response.completed identically to Python.
++	// 2. Both Go and Python accept free-form nested metadata containing distinct-case keys ("Run" & "run").
++	t.Run("rejects top-level message on response.completed", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "top-level-message")
++		launch := "review-feeeeeee-2222-4333-8444-555555555503"
++		session := "019d0000-0000-7000-8000-fffffffff803"
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++
++		frame := `{"type":"response.completed","message":"unexpected notice","response":{"id":"resp_top_msg","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`
++		if c.ValidateStrictEvent("response.completed", true, []byte(frame)) {
++			t.Fatalf("ValidateStrictEvent accepted response.completed with top-level message")
++		}
++		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + frame + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if st := SealReview(root, launch, session); st != SealRejected {
++			t.Fatalf("SealReview after top-level message on response.completed = %v, want SealRejected", st)
++		}
++	})
++
++	t.Run("accepts free-form nested metadata with distinct-case keys", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "nested-case-metadata")
++		launch := "review-feeeeeee-2222-4333-8444-555555555504"
++		session := "019d0000-0000-7000-8000-fffffffff804"
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++
++		frame := `{"type":"response.completed","response":{"id":"resp_meta_case","status":"completed","model":"gpt-6.2-sol","metadata":{"Run":1,"run":2},"output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`
++		if !c.ValidateStrictEvent("response.completed", true, []byte(frame)) {
++			t.Fatalf("ValidateStrictEvent rejected free-form nested metadata with Run/run")
++		}
++		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + frame + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if st, dig := SealReviewWithDigest(root, launch, session); st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("SealReviewWithDigest with nested metadata Run/run = (%v, %q), want SealOK", st, dig)
++		}
++	})
 +}
