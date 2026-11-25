@@ -844,7 +844,7 @@ index 0000000..1bc2a55
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..e94489b 100644
+index e69de29..e4057da 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
 @@ -0,0 +1,1460 @@
@@ -1718,8 +1718,8 @@ index e69de29..e94489b 100644
 +		responseModelOverride.Store("gpt-6.2-sol")
 +		defer responseModelOverride.Store("")
 +		res := post("/v1/responses", "gpt-6.2-astra", launch, session)
-+		if res.Code != http.StatusOK {
-+			t.Fatalf("unexpected HTTP %d: %s", res.Code, res.Body.String())
++		if res.Code == http.StatusOK && strings.Contains(res.Body.String(), "VERDICT: PASS") {
++			t.Fatalf("mismatched upstream frame was forwarded downstream: HTTP %d: %s", res.Code, res.Body.String())
 +		}
 +		if got := <-models; got != "gpt-6.2-astra" {
 +			t.Fatalf("outbound model = %q, want gpt-6.2-astra", got)
@@ -2393,10 +2393,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..711ba55
+index 0000000..ad24976
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,964 @@
+@@ -0,0 +1,1009 @@
 +package executor
 +
 +import (
@@ -3360,9 +3360,54 @@ index 0000000..711ba55
 +			t.Fatalf("CR-separated post-terminal error SealReview = %v, want SealRejected", st)
 +		}
 +	})
++
++	t.Run("strict review aborts with stream error BEFORE forwarding mismatched tool frame", func(t *testing.T) {
++		// Astra P1 #1 (PR #2280 R32): when ValidateStrictEvent rejects a frame (wrong model or
++		// conflicting response_id), ExecuteStream MUST stop and return an error chunk BEFORE
++		// translating or forwarding that untrusted tool call frame downstream.
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-a5555555-2222-4333-8444-555555555502"
++		session := "019d0000-0000-7000-8000-555555555502"
++		sseSpoofTool := "data: " + `{"type":"response.created","response":{"id":"resp_valid_1","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++			"data: " + `{"type":"response.output_item.done","output_index":0,"response_id":"resp_spoof_2","item":{"id":"fc_evil","type":"function_call","status":"completed","call_id":"call_evil","name":"shell","arguments":"{\"cmd\":\"rm -rf /\"}"}}` + "\n\n"
++		ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseSpoofTool))
++		}}
++		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++		stream, err := exec.ExecuteStream(ctx, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		sawErr := false
++		for ch := range stream.Chunks {
++			if ch.Err != nil {
++				sawErr = true
++			}
++			if ch.Payload != nil && strings.Contains(string(ch.Payload), "fc_evil") {
++				t.Fatalf("spoofed tool frame was forwarded downstream: %s", string(ch.Payload))
++			}
++		}
++		if !sawErr {
++			t.Fatalf("expected stream error chunk when ValidateStrictEvent rejects mismatched frame")
++		}
++		lease.End()
++		c.Complete(false)
++		c.HandlerDone(false)
++		if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++			t.Fatalf("SealReview after aborted spoofed frame = %v, want SealRejected", st)
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..d3677d2 100644
+index 6074124..f8320f6 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,6 +3,7 @@ package executor
@@ -3397,7 +3442,7 @@ index 6074124..d3677d2 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +453,417 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +453,441 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -3648,7 +3693,19 @@ index 6074124..d3677d2 100644
 +						}
 +						if strictReview {
 +							if pc := preflightreceipt.From(ctx); pc != nil {
-+								pc.ValidateStrictEvent(evName, hasEv, joined)
++								if !pc.ValidateStrictEvent(evName, hasEv, joined) {
++									pendingStrictTerminal = nil
++									pendingStrictBytes = 0
++									failPostTerminal()
++									streamErr := newStrictReviewValidationError()
++									helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
++									reporter.PublishFailure(ctx, streamErr)
++									select {
++									case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
++									case <-ctx.Done():
++									}
++									return
++								}
 +							}
 +						}
 +						downstreamData = eventPayload
@@ -3684,7 +3741,19 @@ index 6074124..d3677d2 100644
 +						isDoneMarker := bytes.Equal(joined, []byte("[DONE]"))
 +						if strictReview && (hasEv || isDoneMarker) {
 +							if pc := preflightreceipt.From(ctx); pc != nil {
-+								pc.ValidateStrictEvent(evName, hasEv, joined)
++								if !pc.ValidateStrictEvent(evName, hasEv, joined) {
++									pendingStrictTerminal = nil
++									pendingStrictBytes = 0
++									failPostTerminal()
++									streamErr := newStrictReviewValidationError()
++									helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
++									reporter.PublishFailure(ctx, streamErr)
++									select {
++									case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
++									case <-ctx.Done():
++									}
++									return
++								}
 +							}
 +						}
 +						if hasEv || (isDoneMarker && !sawStrictTerminal) {
@@ -3817,7 +3886,7 @@ index 6074124..d3677d2 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +948,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +972,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
@@ -3908,6 +3977,32 @@ index 6074124..d3677d2 100644
  		}
  		if emittedCount == 0 {
  			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
+diff --git a/internal/runtime/executor/codex_executor_terminal.go b/internal/runtime/executor/codex_executor_terminal.go
+index 6e513dd..159bc55 100644
+--- a/internal/runtime/executor/codex_executor_terminal.go
++++ b/internal/runtime/executor/codex_executor_terminal.go
+@@ -46,6 +46,21 @@ func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
+ 	return true
+ }
+ 
++type strictReviewValidationError struct {
++	statusErr
++}
++
++func newStrictReviewValidationError() strictReviewValidationError {
++	return strictReviewValidationError{statusErr: statusErr{
++		code: http.StatusBadGateway,
++		msg:  "strict review upstream stream validation failed",
++	}}
++}
++
++func (strictReviewValidationError) IsRequestScoped() bool {
++	return true
++}
++
+ // Streamed Codex responses may emit response.output_item.done events while leaving
+ // response.completed.response.output empty. Keep the stream path aligned with the
+ // already-patched non-stream path by reconstructing response.output from those items.
 diff --git a/internal/runtime/executor/helps/codex_sse_scanner.go b/internal/runtime/executor/helps/codex_sse_scanner.go
 index 35f5532..12dfd1c 100644
 --- a/internal/runtime/executor/helps/codex_sse_scanner.go
@@ -5766,10 +5861,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..eddd0c3 100644
+index e69de29..fe5f765 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,6255 @@
+@@ -0,0 +1,6434 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5825,6 +5920,9 @@ index e69de29..eddd0c3 100644
 +
 +var maxReviewLedgerEntries = 2048
 +var maxReviewDiskEntries = 2048
++var maxPreflightDiskEntries = 2048
++var preflightDiskRetention = 30 * time.Minute
++var reviewDiskRetention = 24 * time.Hour
 +var maxPendingReviewLaunches = 2048
 +var maxPendingReviewInFlight = 32
 +var maxTrackedOutputItems = 2048
@@ -5975,6 +6073,7 @@ index e69de29..eddd0c3 100644
 +	count         int
 +	tainted       bool
 +	failedTurnSeq uint64
++	started       int64
 +}
 +
 +var (
@@ -6107,7 +6206,7 @@ index e69de29..eddd0c3 100644
 +		reviewMu.Unlock()
 +		return nil, ErrUnavailable
 +	}
-+	pendingReviewLaunches[key] = &pendingReviewState{count: 1}
++	pendingReviewLaunches[key] = &pendingReviewState{count: 1, started: time.Now().UnixNano()}
 +	pendingReviewTotal++
 +	reviewMu.Unlock()
 +	return &PendingReviewGuard{key: key, turnSeq: turnSeq}, nil
@@ -7069,9 +7168,22 @@ index e69de29..eddd0c3 100644
 +			return false
 +		}
 +		typ, ok1 := exactOptionalString(fields, "type")
-+		txt, ok2 := exactOptionalString(fields, "text")
-+		if !ok1 || !ok2 || len(typ) > maxStrictIdentityBytes {
++		if !ok1 || len(typ) > maxStrictIdentityBytes {
 +			return false
++		}
++		var txt string
++		if typ == "output_text" {
++			var hasTxt, ok2 bool
++			txt, hasTxt, ok2 = exactOptionalStringPresent(fields, "text")
++			if !hasTxt || !ok2 {
++				return false
++			}
++		} else {
++			var ok2 bool
++			txt, ok2 = exactOptionalString(fields, "text")
++			if !ok2 {
++				return false
++			}
 +		}
 +		parts = append(parts, responseOutputContentPart{Type: typ, Text: txt})
 +		return true
@@ -7741,10 +7853,11 @@ index e69de29..eddd0c3 100644
 +// complete assembled SSE event JSON payload (including multi-line JSON objects) without touching
 +// consumer-order state. Unlike ObserveStreamChunk, it tolerates legitimate pre-completion upstream
 +// failure event types (response.failed, response.incomplete, response.cancelled, error) when
-+// declared event name, model, and response ID match.
-+func (c *Collector) ValidateStrictEvent(evName string, hasEvName bool, rawEventJSON []byte) {
++// declared event name, model, and response ID match. Returns false whenever validation fails
++// and taints the collector so callers can abort before forwarding an untrusted frame downstream.
++func (c *Collector) ValidateStrictEvent(evName string, hasEvName bool, rawEventJSON []byte) bool {
 +	if c == nil || !c.strictCodex {
-+		return
++		return true
 +	}
 +	c.mu.Lock()
 +	c.producerObserved = true
@@ -7752,18 +7865,19 @@ index e69de29..eddd0c3 100644
 +	alreadyTainted := c.modelMismatch && c.invalid
 +	c.mu.Unlock()
 +	if alreadyTainted {
-+		return
++		return false
 +	}
 +	if hasEvName && len(evName) > maxStrictIdentityBytes {
 +		c.taintStreamAnomaly()
-+		return
++		return false
 +	}
 +	trimmed := bytes.TrimSpace(rawEventJSON)
 +	if len(trimmed) == 0 {
 +		if hasEvName {
 +			c.taintStreamAnomaly()
++			return false
 +		}
-+		return
++		return true
 +	}
 +	if bytes.Equal(trimmed, []byte("[DONE]")) {
 +		c.mu.Lock()
@@ -7771,22 +7885,27 @@ index e69de29..eddd0c3 100644
 +		c.mu.Unlock()
 +		if hasEvName || !doneAllowed {
 +			c.taintStreamAnomaly()
++			return false
 +		}
-+		return
++		return true
 +	}
 +	frame, ok := c.validateStrictFrameIdentity(trimmed, true, true)
 +	if !ok {
-+		return
++		return false
 +	}
 +	if frame.evType == "response.done" || !validateStrictOutputItemEvent(frame) {
 +		c.taintStreamAnomaly()
-+		return
++		return false
 +	}
 +	if hasEvName && evName != frame.evType {
 +		c.taintStreamAnomaly()
-+		return
++		return false
 +	}
 +	c.applyStrictFrame(frame, false)
++	c.mu.Lock()
++	valid := !(c.modelMismatch && c.invalid)
++	c.mu.Unlock()
++	return valid
 +}
 +
 +func (c *Collector) splitSSEChunkLinesLocked(payload []byte) [][]byte {
@@ -9939,6 +10058,8 @@ index e69de29..eddd0c3 100644
 +		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +			t.maxOutputIndex = effIdx
 +			t.hasMaxOutputIndex = true
++		} else if !effHasIdx {
++			t.sawUnindexedItem = true
 +		}
 +		if deltaKind == itemKindNonMessage {
 +			if !t.recordNonFinal(seq, canonKey, effItemID, effIdx, effHasIdx, false) {
@@ -9971,8 +10092,15 @@ index e69de29..eddd0c3 100644
 +				t.pendingUnkeyed++
 +			}
 +		}
-+		isEarlierDelta := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
-+			(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++		var isEarlierDelta bool
++		if t.lastItemOutputSHA != "" {
++			if effHasIdx && t.hasLastItemOutputIndex {
++				isEarlierDelta = effIdx < t.lastItemOutputIndex
++			} else {
++				isEarlierDelta = seq < t.lastItemSeq &&
++					(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++			}
++		}
 +		if !isEarlierDelta {
 +			t.lastItemOutputSHA = ""
 +			t.lastItemResponseID = ""
@@ -10278,11 +10406,15 @@ index e69de29..eddd0c3 100644
 +	}
 +	entry := diskEntry
 +	if !onDisk {
++		startedNS := now.UnixNano()
++		if st := pendingReviewLaunches[key]; st != nil && st.started > 0 && st.started < startedNS {
++			startedNS = st.started
++		}
 +		entry = &reviewEntry{
 +			directory: dir,
 +			launch:    launch,
 +			session:   session,
-+			started:   now.UnixNano(),
++			started:   startedNS,
 +			touched:   now,
 +		}
 +		if st := pendingReviewLaunches[key]; st != nil && st.failedTurnSeq > 0 {
@@ -11136,19 +11268,148 @@ index e69de29..eddd0c3 100644
 +	return nil
 +}
 +
-+func countRootEntries(root string) (int, error) {
++type expiredDiskCandidate struct {
++	name string
++	dir  string
++	ts   int64
++}
++
++func isReviewBucketName(name string) bool {
++	return strings.HasPrefix(name, "review-")
++}
++
++func countRootBucketEntries(root string, reviewBucket bool) (int, []string, error) {
 +	entries, err := os.ReadDir(root)
 +	if err != nil {
-+		return 0, err
++		return 0, nil, err
 +	}
-+	count := 0
++	names := make([]string, 0, len(entries))
 +	for _, ent := range entries {
-+		if ent.Name() == ".writer.lock" {
++		name := ent.Name()
++		if name == ".writer.lock" {
 +			continue
 +		}
-+		count++
++		if isReviewBucketName(name) != reviewBucket {
++			continue
++		}
++		names = append(names, name)
 +	}
-+	return count, nil
++	return len(names), names, nil
++}
++
++func removePrivateLeafDir(dir string) bool {
++	if _, err := checkPrivateDir(dir, false); err != nil {
++		return false
++	}
++	children, err := os.ReadDir(dir)
++	if err != nil {
++		return false
++	}
++	for _, child := range children {
++		p := filepath.Join(dir, child.Name())
++		fi, lerr := os.Lstat(p)
++		if lerr != nil || !fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0 || !ownedByCurrentUser(fi) {
++			return false
++		}
++	}
++	for _, child := range children {
++		if err := os.Remove(filepath.Join(dir, child.Name())); err != nil && !os.IsNotExist(err) {
++			return false
++		}
++	}
++	return os.Remove(dir) == nil
++}
++
++func reclaimExpiredBucketEntries(root string, names []string, reviewBucket bool, need int) int {
++	if need <= 0 {
++		return 0
++	}
++	now := time.Now()
++	retention := preflightDiskRetention
++	if reviewBucket {
++		retention = reviewDiskRetention
++	}
++	candidates := make([]expiredDiskCandidate, 0)
++	for _, name := range names {
++		subDir := filepath.Join(root, name)
++		fi, err := os.Lstat(subDir)
++		if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++			continue
++		}
++		lastMod := fi.ModTime()
++		recPath := filepath.Join(subDir, "receipt.json")
++		if rfi, rerr := os.Lstat(recPath); rerr == nil && rfi.Mode().IsRegular() && rfi.Mode()&os.ModeSymlink == 0 && ownedByCurrentUser(rfi) {
++			if rfi.ModTime().After(lastMod) {
++				lastMod = rfi.ModTime()
++			}
++			if reviewBucket && rfi.Size() > 0 && rfi.Size() <= maxReviewReceiptBytes {
++				if raw, readErr := os.ReadFile(recPath); readErr == nil {
++					var disk ReviewReceipt
++					if json.Unmarshal(raw, &disk) == nil {
++						for _, ns := range []int64{disk.Started, disk.Finished, disk.SealedAt} {
++							if ns > 0 {
++								t := time.Unix(0, ns)
++								if t.After(lastMod) {
++									lastMod = t
++								}
++							}
++						}
++					}
++				}
++			}
++		}
++		if now.Sub(lastMod) < retention {
++			continue
++		}
++		candidates = append(candidates, expiredDiskCandidate{name: name, dir: subDir, ts: lastMod.UnixNano()})
++	}
++	if len(candidates) == 0 {
++		return 0
++	}
++	// Selection-sort oldest-first (bounded by bucket cap).
++	for i := 0; i < len(candidates); i++ {
++		minIdx := i
++		for j := i + 1; j < len(candidates); j++ {
++			if candidates[j].ts < candidates[minIdx].ts {
++				minIdx = j
++			}
++		}
++		if minIdx != i {
++			candidates[i], candidates[minIdx] = candidates[minIdx], candidates[i]
++		}
++	}
++	reclaimed := 0
++	for _, cand := range candidates {
++		if reclaimed >= need {
++			break
++		}
++		if reviewBucket {
++			key := root + "\x00" + cand.name
++			// Use TryLock to prevent any lock-order cycle when called from persistWithStatusLocked (holding entry.mu).
++			if !reviewMu.TryLock() {
++				continue
++			}
++			if pendingReviewLaunches[key] != nil {
++				reviewMu.Unlock()
++				continue
++			}
++			if ent := reviewLedger[key]; ent != nil {
++				if ent.inFlight > 0 || ent.sealing || now.Sub(ent.touched) < retention {
++					reviewMu.Unlock()
++					continue
++				}
++				delete(reviewLedger, key)
++			}
++			reviewMu.Unlock()
++		}
++		if removePrivateLeafDir(cand.dir) {
++			reclaimed++
++		}
++	}
++	if reclaimed > 0 {
++		_ = syncDirFn(root)
++	}
++	return reclaimed
 +}
 +
 +func reservePrivateDir(directory string, allowExisting bool) error {
@@ -11159,6 +11420,11 @@ index e69de29..eddd0c3 100644
 +	}
 +	if err := acquirePrivateRootLock(root); err != nil {
 +		return err
++	}
++	reviewBucket := isReviewBucketName(filepath.Base(directory))
++	capLimit := maxPreflightDiskEntries
++	if reviewBucket {
++		capLimit = maxReviewDiskEntries
 +	}
 +	rootQuotaMu.Lock()
 +	_, statErr := os.Lstat(directory)
@@ -11179,10 +11445,18 @@ index e69de29..eddd0c3 100644
 +		rootQuotaMu.Unlock()
 +		return ErrUnavailable
 +	}
-+	existingCount, countErr := countRootEntries(root)
-+	if countErr != nil || existingCount >= maxReviewDiskEntries {
++	existingCount, names, countErr := countRootBucketEntries(root, reviewBucket)
++	if countErr != nil {
 +		rootQuotaMu.Unlock()
 +		return ErrUnavailable
++	}
++	if existingCount >= capLimit {
++		reclaimed := reclaimExpiredBucketEntries(root, names, reviewBucket, existingCount-capLimit+1)
++		existingCount -= reclaimed
++		if existingCount >= capLimit {
++			rootQuotaMu.Unlock()
++			return ErrUnavailable
++		}
 +	}
 +	err := os.Mkdir(directory, 0700)
 +	rootQuotaMu.Unlock()
@@ -12026,10 +12300,10 @@ index e69de29..eddd0c3 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..1d8235a 100644
+index e69de29..84482ce 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,5354 @@
+@@ -0,0 +1,5511 @@
 +package preflightreceipt
 +
 +import (
@@ -16931,6 +17205,163 @@ index e69de29..1d8235a 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_scsip","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_2","type":"web_search_call","status":"completed"},{"id":"msg_scsip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555bb", "019d0000-0000-7000-8000-8888888881bb", sseSubCompletedThenSnapInProg); st != SealRejected {
 +		t.Fatalf("web_search_call.completed followed by response.in_progress regression seal = %v, want SealRejected", st)
++	}
++
++	// 80. Astra P1 #2 (PR #2280 R32): output_text content part missing "text" or with "text": null
++	//     MUST taint even when another valid output_text part exists in the same final message.
++	sseMissingPartText := "data: " + `{"type":"response.completed","response":{"id":"resp_mpt","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_mpt","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text"},{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555bc", "019d0000-0000-7000-8000-8888888881bc", sseMissingPartText); st != SealRejected {
++		t.Fatalf("output_text missing text field seal = %v, want SealRejected", st)
++	}
++	sseNullPartText := "data: " + `{"type":"response.completed","response":{"id":"resp_npt","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_npt","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":null},{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555bd", "019d0000-0000-7000-8000-8888888881bd", sseNullPartText); st != SealRejected {
++		t.Fatalf("output_text with null text field seal = %v, want SealRejected", st)
++	}
++
++	// 81. Sol P2 #1 + Astra P2 #3 (PR #2280 R32): output_index=1 final answer completing BEFORE a
++	//     previously-unseen output_index=0 tool item emits deltas and completes MUST preserve the final
++	//     answer hash by output_index and seal cleanly.
++	lOutOfOrderDelta := "review-d1111111-2222-4333-8444-5555555555be"
++	sOutOfOrderDelta := "019d0000-0000-7000-8000-8888888881be"
++	sseOutOfOrderDelta := "data: " + `{"type":"response.created","response":{"id":"resp_oood","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_oood","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_oood","delta":"{\"cmd\":\"ls\"}"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_oood","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"ls\"}"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_oood","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fc_oood","type":"function_call","status":"completed","call_id":"c1","name":"shell","arguments":"{\"cmd\":\"ls\"}"},{"id":"msg_oood","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lOutOfOrderDelta, sOutOfOrderDelta, sseOutOfOrderDelta); st != SealOK {
++		t.Fatalf("out-of-order lower-index delta after final answer done seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lOutOfOrderDelta); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("out-of-order delta hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++}
++
++func TestReviewReceiptDiskQuotaIsolatesPreflightAndReclaimsExpired(t *testing.T) {
++	// Sol P2 #2 (PR #2280 R32):
++	// 1. Legacy preflight-* directories MUST NOT consume the formal review-* disk quota.
++	// 2. Expired preflight-* and expired review-* directories MUST be reclaimed boundedly when a bucket is full.
++	oldReviewCap := maxReviewDiskEntries
++	oldPreflightCap := maxPreflightDiskEntries
++	oldPreflightRet := preflightDiskRetention
++	oldReviewRet := reviewDiskRetention
++	maxReviewDiskEntries = 1
++	maxPreflightDiskEntries = 2
++	preflightDiskRetention = 30 * time.Minute
++	reviewDiskRetention = 24 * time.Hour
++	defer func() {
++		maxReviewDiskEntries = oldReviewCap
++		maxPreflightDiskEntries = oldPreflightCap
++		preflightDiskRetention = oldPreflightRet
++		reviewDiskRetention = oldReviewRet
++	}()
++
++	root := filepath.Join(t.TempDir(), "isolated-quota-receipts")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++
++	// Fill preflight bucket (2/2).
++	p1 := filepath.Join(root, "preflight-11111111-2222-4333-8444-555555555501")
++	p2 := filepath.Join(root, "preflight-11111111-2222-4333-8444-555555555502")
++	if err := reservePrivateDir(p1, false); err != nil {
++		t.Fatalf("reserve p1: %v", err)
++	}
++	if err := reservePrivateDir(p2, false); err != nil {
++		t.Fatalf("reserve p2: %v", err)
++	}
++	// Formal review launch MUST still succeed despite preflight bucket being full.
++	r1Launch := "review-e7777777-2222-4333-8444-555555555501"
++	res1, err := ReserveReview(root, r1Launch)
++	if err != nil {
++		t.Fatalf("ReserveReview blocked by full preflight bucket: %v", err)
++	}
++	res1.Release()
++
++	// Fresh 3rd preflight fails while p1 & p2 are recent.
++	p3 := filepath.Join(root, "preflight-11111111-2222-4333-8444-555555555503")
++	if err := reservePrivateDir(p3, false); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("reserve p3 with recent preflights = %v, want ErrUnavailable", err)
++	}
++	// Age p1 past preflightDiskRetention -> p3 MUST reclaim p1 and succeed.
++	oldTime := time.Now().Add(-2 * time.Hour)
++	if err := os.Chtimes(p1, oldTime, oldTime); err != nil {
++		t.Fatal(err)
++	}
++	if err := reservePrivateDir(p3, false); err != nil {
++		t.Fatalf("reserve p3 after p1 expired: %v", err)
++	}
++	if _, statErr := os.Stat(p1); !os.IsNotExist(statErr) {
++		t.Fatalf("expired p1 was not reclaimed: %v", statErr)
++	}
++
++	// Age r1 past reviewDiskRetention (both dir, receipt.json, and ledger touched) -> r2 MUST reclaim r1 and succeed.
++	r1Dir := filepath.Join(root, r1Launch)
++	r1RecPath := filepath.Join(r1Dir, "receipt.json")
++	ancient := time.Now().Add(-48 * time.Hour)
++	if raw, err := os.ReadFile(r1RecPath); err == nil {
++		var rec ReviewReceipt
++		if json.Unmarshal(raw, &rec) == nil {
++			rec.Started = ancient.UnixNano()
++			rec.Finished = ancient.UnixNano()
++			if data, merr := json.Marshal(rec); merr == nil {
++				_ = os.WriteFile(r1RecPath, data, 0600)
++			}
++		}
++	}
++	_ = os.Chtimes(r1RecPath, ancient, ancient)
++	_ = os.Chtimes(r1Dir, ancient, ancient)
++	key1 := filepath.Clean(root) + "\x00" + r1Launch
++	reviewMu.Lock()
++	if ent := reviewLedger[key1]; ent != nil {
++		ent.touched = ancient
++	}
++	reviewMu.Unlock()
++
++	r2Launch := "review-e7777777-2222-4333-8444-555555555502"
++	res2, err := ReserveReview(root, r2Launch)
++	if err != nil {
++		t.Fatalf("ReserveReview r2 after r1 expired past 24h: %v", err)
++	}
++	res2.Release()
++	if _, statErr := os.Stat(r1Dir); !os.IsNotExist(statErr) {
++		t.Fatalf("expired r1 was not reclaimed: %v", statErr)
++	}
++}
++
++func TestBeginPendingReviewAnchorsStartedTimestamp(t *testing.T) {
++	// Astra P2 #4 (PR #2280 R32): a brand-new launch's started timestamp MUST be anchored at the
++	// first BeginPendingReview arrival rather than after slow body reads finish.
++	root := filepath.Join(t.TempDir(), "pending-started-receipts")
++	launch := "review-e8888888-2222-4333-8444-555555555501"
++	key := filepath.Clean(root) + "\x00" + launch
++
++	g1, err := BeginPendingReview(root, launch)
++	if err != nil {
++		t.Fatalf("BeginPendingReview 1: %v", err)
++	}
++	defer g1.Release()
++
++	anchored := time.Now().Add(-15 * time.Minute).UnixNano()
++	reviewMu.Lock()
++	pendingReviewLaunches[key].started = anchored
++	reviewMu.Unlock()
++
++	// Second concurrent pending request MUST NOT move started forward.
++	g2, err := BeginPendingReview(root, launch)
++	if err != nil {
++		t.Fatalf("BeginPendingReview 2: %v", err)
++	}
++	defer g2.Release()
++
++	res, err := ReserveReview(root, launch)
++	if err != nil {
++		t.Fatalf("ReserveReview: %v", err)
++	}
++	defer res.Release()
++
++	rec := readReviewReceiptFile(t, root, launch)
++	if rec.Started != anchored {
++		t.Fatalf("receipt Started = %d, want anchored %d", rec.Started, anchored)
 +	}
 +}
 +
