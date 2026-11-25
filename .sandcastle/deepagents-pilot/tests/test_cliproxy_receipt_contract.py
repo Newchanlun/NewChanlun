@@ -907,3 +907,67 @@ def test_route_from_host_receipt_accepts_relative_path_and_rejects_symlink_ances
     assert preflight.route_from_host_receipt(
         "./sym-parent/../real-parent/receipts", pf_session, since, 1.0, preflight.Deadline(5)
     ) is None
+
+
+def test_receipt_readers_allow_execute_only_ancestor_and_handle_deep_json(tmp_path):
+    """Astra P2 #3 & #4 (PR #2280 R61): 仅具遍历权限(0111)的祖先目录仍可打开私有收据根；
+    低于 64 KiB 上限的深层嵌套畸形 JSON 须返回 None 而非抛出 RecursionError。"""
+    import time
+
+    exec_only_parent = tmp_path / "exec-only-ancestor"
+    exec_only_parent.mkdir(mode=0o700)
+    real_root = exec_only_parent / "receipts"
+    real_root.mkdir(mode=0o700)
+    os.chmod(real_root, 0o700)
+
+    now_ns = time.time_ns()
+    since = now_ns / 1e9 - 5.0
+    pf_session = "preflight-cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeee1"
+    pf_dir = real_root / pf_session
+    pf_dir.mkdir(mode=0o700)
+    os.chmod(pf_dir, 0o700)
+    pf_path = pf_dir / "receipt.json"
+    pf_path.write_bytes(json.dumps({
+        "schema": log_mod.SCHEMA,
+        "session": pf_session,
+        "started_ns": now_ns,
+        "finished_ns": now_ns,
+        "complete": True,
+        "routes": ["codex:gpt-6.2-sol@chatgpt.com"],
+    }).encode("utf-8"))
+    os.chmod(pf_path, 0o600)
+
+    # 1. Remove read bit on ancestor (0111 execute-only): reader must still traverse and verify private root.
+    os.chmod(exec_only_parent, 0o111)
+    try:
+        got = log_mod.route_from_receipt(real_root, pf_session, since, 0)
+        assert got == [("codex:gpt-6.2-sol", "chatgpt.com")]
+    finally:
+        os.chmod(exec_only_parent, 0o700)
+
+    # 2. Deeply nested JSON (< 64 KiB) must return None cleanly without leaking RecursionError.
+    deep_raw = (b"[" * 10000) + (b"]" * 10000)
+    deep_sha = hashlib.sha256(deep_raw).hexdigest()
+    deep_launch = "review-cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeee2"
+    deep_session = "019d0000-0000-7000-8000-eeeeeeeeeee2"
+    deep_dir = real_root / deep_launch
+    deep_dir.mkdir(mode=0o700)
+    os.chmod(deep_dir, 0o700)
+    deep_path = deep_dir / "receipt.json"
+    deep_path.write_bytes(deep_raw)
+    os.chmod(deep_path, 0o600)
+    assert log_mod.review_from_receipt(
+        real_root, deep_launch, deep_session, since, 0,
+        expected_receipt_sha256=deep_sha,
+        expected_response_id_sha256="a" * 64,
+        expected_output_sha256="b" * 64,
+    ) is None
+
+    deep_pf = "preflight-cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeee3"
+    deep_pf_dir = real_root / deep_pf
+    deep_pf_dir.mkdir(mode=0o700)
+    os.chmod(deep_pf_dir, 0o700)
+    deep_pf_path = deep_pf_dir / "receipt.json"
+    deep_pf_path.write_bytes((b"[" * 4000) + (b"]" * 4000))
+    os.chmod(deep_pf_path, 0o600)
+    assert log_mod.route_from_receipt(real_root, deep_pf, since, 0) is None

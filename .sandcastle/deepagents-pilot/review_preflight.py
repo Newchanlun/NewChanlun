@@ -442,6 +442,31 @@ class _SSEReadLimitError(Exception):
     pass
 
 
+def _install_strict_chunked_trailer_check(response) -> None:
+    """CPython HTTPResponse._read_and_discard_trailer 在 0\\r\\n 后若遇 EOF 会静默 break；
+    此处强制要求看到完整终结空行 \\r\\n 并限制 trailer 总字节数，避免截断分块被误判成功。"""
+    if not isinstance(response, http.client.HTTPResponse) or not getattr(response, "chunked", False):
+        return
+
+    def _strict_trailer() -> None:
+        total_trailer_bytes = 0
+        while True:
+            line = response.fp.readline(http.client._MAXLINE + 1)
+            if len(line) > http.client._MAXLINE:
+                raise http.client.LineTooLong("trailer line")
+            if not line:
+                raise http.client.IncompleteRead(b"")
+            total_trailer_bytes += len(line)
+            if total_trailer_bytes > 65536:
+                raise http.client.LineTooLong("trailer section")
+            if line == b"\r\n":
+                break
+            if not line.endswith(b"\r\n"):
+                raise http.client.IncompleteRead(b"")
+
+    response._read_and_discard_trailer = _strict_trailer
+
+
 def _iter_bounded_sse_lines(
     response,
     deadline: Deadline,
@@ -451,6 +476,7 @@ def _iter_bounded_sse_lines(
     chunk_bytes: int = SSE_READ_CHUNK_BYTES,
 ):
     """增量按块读取 SSE 流并执行总字节数与单行上限，未超限时必须读至 EOF 以保留截断传输检测。"""
+    _install_strict_chunked_trailer_check(response)
     total_bytes = 0
     bom_checked = False
     bom_buf = bytearray()
@@ -465,7 +491,10 @@ def _iter_bounded_sse_lines(
         chunk = response.read(read_size)
         if not chunk:
             if (getattr(response, "length", None) or 0) > 0 or (
-                getattr(response, "chunked", False) and getattr(response, "chunk_left", None) is not None
+                getattr(response, "chunked", False) and (
+                    getattr(response, "chunk_left", None) is not None
+                    or (isinstance(response, http.client.HTTPResponse) and not response.isclosed())
+                )
             ):
                 raise http.client.IncompleteRead(b"")
             break
@@ -599,7 +628,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                                 if _contains_surrogate(event):
                                     raise ValueError("unpaired UTF-16 surrogate")
                                 _validate_sse_protocol_key_casing(event)
-                            except ValueError:
+                            except (ValueError, RecursionError):
                                 detail = "SSE 数据帧 JSON 解析失败"
                                 break
                             if not isinstance(event, dict) or not isinstance(event.get("type"), str) or not event["type"].strip():

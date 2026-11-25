@@ -68,6 +68,41 @@ def _is_allowed_darwin_os_symlink(path_str: str) -> bool:
     return target in (want, "/" + want)
 
 
+def _ancestor_open_flags() -> int:
+    """祖先目录仅需遍历权限（execute-only 0711），不得要求读权限（Linux 用 O_PATH，macOS 用 O_SEARCH）。"""
+    traversal = getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0)
+    if traversal:
+        return traversal | os.O_DIRECTORY | os.O_NOFOLLOW
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _check_json_depth(raw: bytes, max_depth: int = 16) -> bool:
+    """拒绝深层嵌套的畸形收据 JSON（合法收据嵌套深度不超过 2），防止 json.loads 触发 RecursionError。"""
+    depth = 0
+    in_str = False
+    escaped = False
+    for b in raw:
+        if in_str:
+            if escaped:
+                escaped = False
+            elif b == 92:  # backslash
+                escaped = True
+            elif b == 34:  # quote
+                in_str = False
+            continue
+        if b == 34:
+            in_str = True
+        elif b in (91, 123):  # [ or {
+            depth += 1
+            if depth > max_depth:
+                return False
+        elif b in (93, 125):  # ] or }
+            depth -= 1
+            if depth < 0:
+                return False
+    return True
+
+
 def _open_trusted_root_dir(root: Path) -> int | None:
     """从根目录逐段以 O_NOFOLLOW 打开 root，拒绝任意祖先符号链接（仅允许 macOS 固定 OS 链接），并校验属主与 0700 权限。
     无论绝对路径还是相对路径（如 --proxy-receipt-dir ./receipts），均在展开前统一拒绝 .. 分量，避免先消去不存在或符号链接段。"""
@@ -87,20 +122,24 @@ def _open_trusted_root_dir(root: Path) -> int | None:
     parts = [p for p in root.parts[1:] if p not in ("", ".")]
     if not parts or any(p == ".." for p in parts):
         return None
-    cur_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    anc_flags = _ancestor_open_flags()
+    leaf_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    cur_fd = os.open("/", anc_flags)
     cur_path = ""
     try:
-        for part in parts:
+        for idx, part in enumerate(parts):
             cur_path = f"{cur_path}/{part}"
+            is_leaf = idx == len(parts) - 1
+            open_flags = leaf_flags if is_leaf else anc_flags
             try:
-                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur_fd)
+                next_fd = os.open(part, open_flags, dir_fd=cur_fd)
             except FileNotFoundError:
                 raise
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR) and _is_allowed_darwin_os_symlink(cur_path):
-                    priv_fd = os.open("private", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur_fd)
+                    priv_fd = os.open("private", anc_flags, dir_fd=cur_fd)
                     try:
-                        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=priv_fd)
+                        next_fd = os.open(part, open_flags, dir_fd=priv_fd)
                     finally:
                         os.close(priv_fd)
                 else:
@@ -145,6 +184,8 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
                 raw = os.read(fd, 16385)
             finally:
                 os.close(fd)
+            if not _check_json_depth(raw):
+                return None
             payload = json.loads(raw, object_pairs_hook=_unique_object)
             if (not isinstance(payload, dict)
                     or set(payload) != {"schema", "session", "started_ns", "finished_ns", "complete", "routes"}
@@ -161,7 +202,7 @@ def route_from_receipt(root: Path, session: str, since: float, wait: float) -> l
             if time.monotonic() >= end:
                 return None
             time.sleep(min(0.02, max(0, end - time.monotonic())))
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, RecursionError):
             return None
 
 
@@ -220,6 +261,8 @@ def review_from_receipt(
                 raw = os.read(fd, MAX_REVIEW_RECEIPT_BYTES + 1)
             finally:
                 os.close(fd)
+            if not _check_json_depth(raw):
+                return None
             payload = json.loads(raw, object_pairs_hook=_unique_object)
             now_ns = time.time_ns()
             if (not isinstance(payload, dict)
@@ -303,7 +346,7 @@ def review_from_receipt(
             if time.monotonic() >= end:
                 return None
             time.sleep(min(0.02, max(0, end - time.monotonic())))
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, RecursionError):
             return None
 
 

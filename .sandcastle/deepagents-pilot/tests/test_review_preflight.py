@@ -461,7 +461,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "short-chunked", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "short-chunked", "short-trailer", "short-trailer-header", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -515,7 +515,11 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                             time.sleep(0.05)
                             self.wfile.write(b"1\r\n \r\n")
                             self.wfile.flush()
-                    if framing != "short-chunked":
+                    if framing == "short-trailer":
+                        self.wfile.write(b"0\r\n")
+                    elif framing == "short-trailer-header":
+                        self.wfile.write(b"0\r\nX-Trailer: 1\r\n")
+                    elif framing != "short-chunked":
                         self.wfile.write(b"0\r\n\r\n")
             except (BrokenPipeError, ConnectionResetError):
                 pass
