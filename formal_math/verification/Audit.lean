@@ -2,10 +2,11 @@ module
 
 public import Lean
 import all Lean.Util.CollectAxioms
+import Lean.Meta.Constructions.CtorIdx
 import verification.EnvGates
 import verification.SourceGates
 
-open Lean
+open Lean Meta
 
 private def allowedAxioms : Array Name :=
   #[`propext, `Classical.choice, `Quot.sound]
@@ -13,9 +14,85 @@ private def allowedAxioms : Array Name :=
 private def probeName : Name :=
   (Name.mkSimple "_private" ++ `ChanTest.Probe).num 0 |>.str "gateProofProbe"
 
-private def gate3 (entries : Array FM.Entry) : CoreM UInt32 := do
+/-- 派生处理器的类与辅助函数前缀，照录 `Lean.Elab.Deriving` 各处理器调用 `mkContext` 的实参。 -/
+private def derivingPrefixes : Array (Name × String) :=
+  #[(``Repr, "repr"), (``BEq, "beq"), (``Hashable, "hash"), (``Ord, "ord"),
+    (``DecidableEq, "decEq")]
+
+private def sameModule (env : Environment) (a b : Name) : Bool :=
+  (env.getModuleIdxFor? a).isSome && env.getModuleIdxFor? a == env.getModuleIdxFor? b
+
+/--
+`T.ctorIdx` 的运行期实现：类型与 `T.ctorIdx` 相同，值是逐参数抽象后的
+`getObjTagNat _ x`（`Lean.Meta.Constructions.CtorIdx.mkCtorIdxImpl` 的形状）。
+-/
+private def ctorIdxImpl (env : Environment) (decl impl : Name) : Bool := Id.run do
+  let some ind := isCtorIdxCore? env decl | false
+  let some (.defnInfo d) := env.find? decl | false
+  let some (.defnInfo i) := env.find? impl | false
+  if ind.isUnsafe || !sameModule env ind.name decl || !sameModule env decl impl then return false
+  if d.safety != .safe || i.safety != .unsafe || i.type != d.type ||
+      i.levelParams != d.levelParams then return false
+  let mut body := i.value
+  let mut arity := 0
+  while body.isLambda do
+    body := body.bindingBody!
+    arity := arity + 1
+  return arity == d.type.getForallArity && body.isAppOfArity ``getObjTagNat 2 &&
+    body.appArg! == .bvar 0
+
+/--
+生成来源判据：常量带 `unsafe`、`partial`、`implemented_by` 时，只有能机械复核为下列三类
+Lean 自动生成的辅助项才豁免，返回类别名。
+1. 归纳类型的 `ctorIdx` 运行期实现（`isCtorIdxCore?` 认定，且形状与生成器一致）。
+2. 结构递归或良基递归定义的编译影子：`Compiler.isUnsafeRecName?` 指向的源定义是同模块、
+   内核检查过的安全 `def`，且 `isRecursiveDefinition` 登记为结构／良基递归，类型逐字相同。
+3. 派生处理器的辅助函数：源定义是同模块的 `opaque`，其前缀是同模块已注册的实例，实例类型为
+   `C (T …)`，用 Lean 自己的 `Deriving.mkContext C 前缀 T` 重算得出 `usePartial` 为真，
+   且辅助函数名与实例名恰与重算结果一致。
+手写 `partial def` 的源定义是 `opaque` 且不满足第 3 类，不豁免。
+-/
+private def generatedBy (name : Name) (info : ConstantInfo) (implTargets : NameMap Name) :
+    MetaM (Option String) := do
+  let env ← getEnv
+  if let some decl := implTargets.find? name then
+    if ctorIdxImpl env decl name then return some "ctorIdx 运行期实现"
+  if let some impl := Compiler.getImplementedBy? env name then
+    if ctorIdxImpl env name impl then return some "ctorIdx"
+  let .defnInfo d := info | return none
+  let some source := Compiler.isUnsafeRecName? name | return none
+  unless d.safety == .partial && sameModule env name source do return none
+  match env.find? source with
+  | some (.defnInfo s) =>
+    if s.safety == .safe && s.type == d.type && s.levelParams == d.levelParams &&
+        (← isRecursiveDefinition source) then
+      return some "递归定义的编译影子"
+    return none
+  | some (.opaqueInfo s) =>
+    if s.isUnsafe || s.type != d.type then return none
+    let inst := source.getPrefix
+    unless sameModule env inst source && isInstanceCore env inst do return none
+    let some instInfo := env.find? inst | return none
+    forallTelescopeReducing instInfo.type fun _ target => do
+      let .const cls _ := target.getAppFn | return none
+      let some (_, pre) := derivingPrefixes.find? (·.1 == cls) | return none
+      let some arg := target.getAppArgs.back? | return none
+      let .const ty _ := arg.getAppFn | return none
+      unless sameModule env ty source && (← isInductive ty) do return none
+      let ctx ← (Elab.Deriving.mkContext cls pre ty).run'
+      if ctx.usePartial && inst == inst.getPrefix ++ ctx.instName &&
+          ctx.auxFunNames.any (inst.getPrefix ++ · == source) then
+        return some "派生处理器辅助函数"
+      return none
+  | _ => return none
+
+private def gate3 (entries : Array FM.Entry) : MetaM UInt32 := do
   let env ← getEnv
   let names := entries.map fun e => (e.mod, e.name, e.info)
+  let implTargets := entries.foldl (init := {}) fun m e =>
+    match Compiler.getImplementedBy? env e.name with
+    | some impl => m.insert impl e.name
+    | none => m
   let mut red := false
   let deps := CollectAxioms.runM env <| names.mapM fun (_, name, _) =>
     CollectAxioms.collectAndGet (fun _ _ => none) name
@@ -28,15 +105,20 @@ private def gate3 (entries : Array FM.Entry) : CoreM UInt32 := do
     let mut issues : Array (String × String) := #[]
     if info matches .axiomInfo _ then
       issues := issues.push ("ENV_AXIOM", "包内声明是公理")
-    -- 编译器生成的实现标记不等于源码使用禁用构造；下面的公理闭包仍检查全部常量。
-    if (← findDeclarationRangesCore? name).isSome then
+    if isMarkedMeta env name then
+      issues := issues.push ("ENV_META", "声明是 meta 元程序")
+    -- 全部常量都查；只有能复核生成来源的辅助项豁免，不看有无声明范围、不按名字后缀匹配。
+    let flagged := info.isUnsafe || info.isPartial ||
+      (Compiler.getImplementedBy? env name).isSome || isExtern env name
+    if flagged && (← generatedBy name info implTargets).isNone then
       if info.isUnsafe then
         issues := issues.push ("ENV_UNSAFE", "声明不受内核安全性保证")
       if info.isPartial then
-        issues := issues.push ("ENV_PARTIAL", "声明是部分定义")
-      if (Lean.Compiler.getImplementedBy? env name).isSome then
+        let source := (Compiler.isUnsafeRecName? name).getD name
+        issues := issues.push ("ENV_PARTIAL", s!"部分定义（源定义 {source} 不是结构／良基递归或白名单派生）")
+      if (Compiler.getImplementedBy? env name).isSome then
         issues := issues.push ("ENV_IMPLEMENTED_BY", "声明具有 implemented_by 属性")
-      if Lean.isExtern env name then
+      if isExtern env name then
         issues := issues.push ("ENV_EXTERN", "声明具有 extern 属性")
     for ax in axioms do
       unless allowedAxioms.contains ax do
@@ -47,9 +129,20 @@ private def gate3 (entries : Array FM.Entry) : CoreM UInt32 := do
       red := true
   return if red then 1 else 0
 
+/-- 报告逐声明列读数：只列有源码声明范围的常量（报告用，不作任何豁免依据）。 -/
+private def declarations (entries : Array FM.Entry) : MetaM Unit := do
+  for e in entries do
+    if (← findDeclarationRangesCore? e.name).isSome then
+      IO.println <| (toJson #[e.mod.toString, e.name.toString]).compress
+
 public unsafe def main (args : List String) : IO UInt32 := do
   let gate :: modules := args | return 2
   Lean.initSearchPath (← Lean.findSysroot)
+  if gate == "selfcheck" then
+    try return ← FM.selfcheck
+    catch err =>
+      IO.eprintln err.toString
+      return 2
   if gate == "headers" || gate == "source" then
     try
       if gate == "headers" then return ← FM.headers modules
@@ -78,9 +171,14 @@ public unsafe def main (args : List String) : IO UInt32 := do
     if mods.contains mod then some { mod, name, info } else none).toArray
   let options := maxRecDepth.set (maxHeartbeats.set {} 6000000) 1024
   let ctx : Core.Context := { fileName := "FM 门禁", fileMap := default, options }
-  if gate == "3" then
-    let (code, _) ← (gate3 entries).toIO ctx { env }
-    return code
+  if gate == "3" || gate == "decls" then
+    try
+      let run := if gate == "3" then gate3 entries else declarations entries *> pure 0
+      let (code, _) ← (run.run'.toIO ctx { env })
+      return code
+    catch err =>
+      IO.eprintln err.toString
+      return 2
   try
     if gate == "report" then
       let config ← (← IO.getStdin).readToEnd
