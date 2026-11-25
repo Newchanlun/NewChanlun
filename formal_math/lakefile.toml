@@ -28,4 +28,4 @@ supportInterpreter = true
 
 [[lean_lib]]
 name = "FMEnvGates"
-roots = ["verification.EnvGates", "verification.SourceGates"]
+roots = ["verification.EnvGates", "verification.SourceGates", "verification.Perimeter", "verification.Inventory"]

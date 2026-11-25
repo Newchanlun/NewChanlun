@@ -69,7 +69,8 @@ private def exprCode (params : List Name) : Expr → Except String Json
   | .app f a => return row "app" [← exprCode params f, ← exprCode params a]
   | .lam _ t b i => return row "lam" [binderCode i, ← exprCode params t, ← exprCode params b]
   | .forallE _ t b i => return row "forall" [binderCode i, ← exprCode params t, ← exprCode params b]
-  | .letE _ t v b _ => return row "let" [← exprCode params t, ← exprCode params v, ← exprCode params b]
+  | .letE _ t v b nondep =>
+    return row "let" [toJson nondep, ← exprCode params t, ← exprCode params v, ← exprCode params b]
   | .lit (.natVal n) => pure (row "nat" [toJson n])
   | .lit (.strVal s) => pure (row "string" [toJson s])
   | .mdata _ b => exprCode params b
@@ -102,7 +103,8 @@ def statement (env : Environment) (entry : Entry) : Except String Json := do
         toJson d.numParams, toJson d.numFields])
     | .recInfo _ => pure (row "recursor" [])
     | .quotInfo _ => pure (row "quotient" []))
-  return row "FM-lock-v2" [canonicalName entry.name, toJson params.length,
+  -- v3：`let` 记 nondep 位（`have` 与 `let` 不再同码）。
+  return row "FM-lock-v3" [canonicalName entry.name, toJson params.length,
     ← exprCode params info.type, value]
 
 structure NodeConfig where
@@ -810,7 +812,7 @@ def report (entries : Array Entry) (cfg : Config) : MetaM UInt32 := do
   return 0
 
 def run (gate : String) (entries : Array Entry)
-    (publicView : Option Environment := none) : MetaM UInt32 := do
+    (publicView : Option Environment := none) (derived : NameSet := {}) : MetaM UInt32 := do
   let mut red := false
   for e in entries do
     let failed ← match gate with
@@ -822,7 +824,8 @@ def run (gate : String) (entries : Array Entry)
         pure false
       | "15" =>
         let some env := publicView | throwError "缺少对外可见环境"
-        if !isPrivateName e.name && (e.info matches .defnInfo _) &&
+        -- 派生处理器给 Repr、Hashable 的辅助函数贴 @[no_expose]；源码层派生证书里的不算手写定义。
+        if !isPrivateName e.name && (e.info matches .defnInfo _) && !derived.contains e.name &&
           (← findDeclarationRangesCore? e.name).isSome &&
           !(env.find? e.name matches some (.defnInfo _)) then
           finding "15" e "EXPOSE_SECTION" "公开定义未暴露定义体"

@@ -1,6 +1,7 @@
 module
 
 public import Lean
+public import verification.Perimeter
 
 open Lean Elab Command
 
@@ -30,7 +31,8 @@ def headers (paths : List String) : IO UInt32 := do
 
 /-- 审计程序自身；只有它们可以导入 `Lean`、使用 `import all` 与元编程。 -/
 def auditTools : Array Name :=
-  #[`verification.Audit, `verification.EnvGates, `verification.SourceGates]
+  #[`verification.Audit, `verification.EnvGates, `verification.SourceGates, `verification.Perimeter,
+    `verification.Inventory]
 
 /-- 包内可信目录。`ChanExplore` 按同一白名单审，另外只多放行 `#eval`。 -/
 private def trustedRoots : Array Name := #[`Chan, `ChanChallenge, `ChanDyn, `ChanTest]
@@ -114,8 +116,9 @@ private def optionIssues (ref : Syntax) (key : Name) : Array (Syntax × String �
 
 private def allowedCommand (mod : Name) (generated : Bool) (stx : Syntax) : Bool :=
   commandKinds.contains stx.getKind ||
+    -- 只读命令，只许出现在 Chan/Final 的 #guard_msgs 里（inspect 另查嵌套位置）。
+    (stx.getKind == `Lean.Parser.Command.printAxioms && (`Chan.Final).isPrefixOf mod) ||
     (generated && generatedCommandKinds.contains stx.getKind) ||
-    (stx.getKind == `Lean.Parser.Command.eval && (`ChanExplore).isPrefixOf mod) ||
     (stx.getKind == `Lean.guardMsgsCmd && (`Chan.Final).isPrefixOf mod)
 
 /--
@@ -129,9 +132,11 @@ private partial def inspect (mod : Name) (stx : Syntax) (command generated guard
   let mut issues := #[]
   if command && !allowedCommand mod generated stx then
     issues := issues.push (stx, "3", s!"命令不在白名单：{kind}")
+  if command && !guarded && kind == `Lean.Parser.Command.printAxioms then
+    issues := issues.push (stx, "3", "#print axioms 只许出现在 #guard_msgs 内")
   if command && guarded &&
-      [`Lean.Parser.Command.declaration, `Lean.Parser.Command.mutual].contains kind then
-    issues := issues.push (stx, "3", "#guard_msgs 内不得出现声明")
+      ![`Lean.Parser.Command.check, `Lean.Parser.Command.printAxioms].contains kind then
+    issues := issues.push (stx, "3", s!"#guard_msgs 内只许 #check 与 #print axioms：{kind}")
   if kind == `Lean.Parser.Command.declaration && !declarations.contains stx[1].getKind then
     issues := issues.push (stx[1], "3", s!"声明不在白名单：{stx[1].getKind}")
   if kind == `Lean.Parser.Command.section && !stx[0][3].isNone then
@@ -140,9 +145,9 @@ private partial def inspect (mod : Name) (stx : Syntax) (command generated guard
       stx.isAtom && ["implemented_by", "native_decide", "run_tac", "run_meta"].contains stx.getAtomVal ||
       stx.isIdent && stx.getId.eraseMacroScopes == `sorryAx then
     issues := issues.push (stx, "3", s!"源码含禁用语法：{kind}")
-  if kind == `Lean.guardMsgsCmd && (stx[2].getArgs.any fun spec =>
-      (spec.find? fun a => a.isAtom && a.getAtomVal == "drop").isSome) then
-    issues := issues.push (stx, "3", "#guard_msgs 不得丢弃消息")
+  -- 规格元素一律不许：substring、drop、whitespace、ordering、按严重度过滤都会放宽精确匹配。
+  if kind == `Lean.guardMsgsCmd && !stx[2].isNone then
+    issues := issues.push (stx, "3", "#guard_msgs 只许不带规格的精确匹配写法")
   if let some key := setting stx then
     issues := issues ++ optionIssues stx key
   -- 复合命令内仍按命令验白名单，不能用 in、mutual 或 #guard_msgs 藏命令。
@@ -227,10 +232,54 @@ private def gate3Blocked (issues : Array (Syntax × String × String)) : Bool :=
 /--
 `preCheck` 为假只供 `selfcheck` 用固定样例核对展开后检查本身；命令行入口恒为真。
 -/
-private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : Bool) :
-    Frontend.FrontendM (Bool × Array (Syntax × String × String)) := do
+private def controlled (opts : Options) : List (Name × String) := Id.run do
+  let mut out := []
+  for (k, v) in opts do
+    if k == `autoImplicit || k == `relaxedAutoImplicit || (`linter).isPrefixOf k then
+      out := (k, s!"{v}") :: out
+  return out
+
+/-- 本命令新增的常量（第二阶段的本地常量表）。 -/
+private def localNames (env : Environment) : NameSet :=
+  env.constants.foldStage2 (fun s n _ => s.insert n) {}
+
+/--
+派生证书：本命令新增、声明范围落在某个派生目标类语法节点（`derivingClass`）之内的常量。
+派生处理器在 `withRef` 该节点下精化生成的命令，手写声明的范围在它自己的语法上。
+-/
+private def derivedBy (ctx : Parser.InputContext) (cmd : Syntax) (fresh : Array Name) :
+    CommandElabM (Array Name) := do
+  let spans := (collect (·.getKind == `Lean.Parser.Command.derivingClass) cmd).filterMap fun c => do
+    return (ctx.fileMap.toPosition (← c.getPos?), ctx.fileMap.toPosition (← c.getTailPos?))
+  if spans.isEmpty then return #[]
+  let le (x y : Position) := x.line < y.line || (x.line == y.line && x.column ≤ y.column)
+  let inside (p a b : Position) := le a p && le p b
+  fresh.filterM fun n => do
+    let some r ← findDeclarationRanges? n | return false
+    return spans.any fun (a, b) => inside r.range.pos a b
+
+/-- 源码层的 partial 来源：只许派生证书里的辅助函数与结构／良基递归定义的编译影子。 -/
+private def partialIssues (cmd : Syntax) (fresh : Array Name) (derived : Array Name) :
+    CommandElabM (Array (Syntax × String × String)) := do
+  let env ← getEnv
+  let mut issues := #[]
+  for n in fresh do
+    let some info := env.find? n | continue
+    unless info.isPartial do continue
+    let source := (Compiler.isUnsafeRecName? n).getD n
+    let recursive ← match env.find? source with
+      | some (.defnInfo d) => pure (d.safety == .safe) <&&> liftCoreM (Meta.isRecursiveDefinition source)
+      | _ => pure false
+    unless recursive || derived.contains source do
+      issues := issues.push (cmd, "3", s!"partial 定义 {n}：源定义 {source} 不是派生产物或结构／良基递归")
+  return issues
+
+private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : Bool)
+    (lists : Perimeter.Lists) :
+    Frontend.FrontendM (Bool × Array (Syntax × String × String) × Array Name) := do
   let mut issues := #[]
   let mut exposes := false
+  let mut derived := #[]
   repeat
     Frontend.updateCmdPos
     let state ← Frontend.getCommandState
@@ -247,7 +296,9 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
     let found ← if auditTool then
         pure ((placeholder cmd).map fun s => (s, "3", "审计工具不能使用占位证明")).toArray
       else if preCheck then
-        pure <| inspect mod cmd true false false ++ (← Frontend.runCommandElabM (scopedIssues cmd))
+        -- 精化之前：命令白名单 + 语法种类与处理器白名单；名单外的节点不进入精化。
+        pure <| inspect mod cmd true false false ++ Perimeter.kindIssues lists state.env cmd cmd ++
+          (← Frontend.runCommandElabM (scopedIssues cmd))
       else pure #[]
     issues := issues ++ found
     -- 不执行已经被拒绝的命令或项。已拒绝的文件不会进入构建或环境门。
@@ -255,9 +306,33 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
     if Parser.isTerminalCommand cmd then
       throw (IO.userError s!"{ctx.fileName}: 文件头之后的终止命令")
     Frontend.setParserState next
+    let before := localNames state.env
+    let optionsBefore := controlled scope.opts
+    unless auditTool do
+      -- 精化之中：各处理表里名单外的处理器擦除；宏展开出的名单外语法找不到处理器。
+      Frontend.runCommandElabM <| modifyEnv (Perimeter.sealTables lists)
     Frontend.elabCommandAtFrontend cmd
     let state ← Frontend.getCommandState
     unless auditTool do
+      let fresh := (localNames state.env).toArray.filter (!before.contains ·)
+      let mine ← Frontend.runCommandElabM (derivedBy ctx cmd fresh)
+      derived := derived ++ mine
+      let partials ← Frontend.runCommandElabM (partialIssues cmd fresh mine)
+      -- 占位证明按 Lean 自己打的 `hasSorry` 标签认，不看名字怎么写。
+      let sorries := state.messages.toList.filter (·.data.hasTag (· == `hasSorry)) |>.map fun _ =>
+        (cmd, "3", "声明使用了占位证明（sorry）")
+      -- 命令级的受控选项前后须一致；项内局部改了又恢复的看不见，见 README。
+      let optionsAfter := controlled (state.scopes.headD default).opts
+      let drift := if optionsAfter != optionsBefore then
+          #[(cmd, "2", s!"命令前后受控选项不一致：{optionsBefore} → {optionsAfter}")] else #[]
+      let infosFinal := (state.infoState.substituteLazy).get
+      let perimeter := infosFinal.trees.toArray.flatMap fun t =>
+        Perimeter.infoIssues lists state.env cmd (t.substitute infosFinal.assignment)
+      let extra := partials ++ sorries.toArray ++ drift ++ perimeter
+      let extra := extra.filter fun (s, g, d) =>
+        !found.any fun (s', g', d') => g == g' && d == d' && s.getPos? == s'.getPos?
+      issues := issues ++ extra
+      if preCheck && gate3Blocked extra then break
       -- 异步登记的子树（如 decreasing_by 的证明）先等齐再展开空洞。
       let infos := (state.infoState.substituteLazy).get
       let after ← Frontend.runCommandElabM do
@@ -273,7 +348,7 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool preCheck : 
         if m.severity == .error then IO.eprintln (← m.toString)
       issues := issues.push (cmd, "build", "语法已解析，Lean 拒绝精化该命令")
       break
-  return (exposes, issues)
+  return (exposes, issues, derived)
 
 /-- 头部白名单。第二个返回值为真时不得继续加载导入或精化。 -/
 private def headerIssues (mod : Name) (header : HeaderSyntax) :
@@ -331,11 +406,14 @@ unsafe def source (mod : Name) (path gate : String) : IO UInt32 := do
   let opts := (Elab.async.set {} false).setBool `linter.unusedVariables true
     |>.setBool `autoImplicit false |>.setBool `relaxedAutoImplicit false
   let auditTool := auditTools.contains mod
+  let lists ← Perimeter.load
   let (early, fatal) := if auditTool then (#[], false) else headerIssues mod header
-  let report (exposes : Bool) (issues : Array (Syntax × String × String)) : IO UInt32 := do
+  let report (exposes : Bool) (issues : Array (Syntax × String × String))
+      (derived : Array Name := #[]) : IO UInt32 := do
     let lines := issues.map fun (stx, gate, detail) =>
       Json.arr #[toJson gate, toJson (ctx.fileMap.toPosition (stx.getPos?.getD 0)).line, toJson detail]
-    IO.println <| (toJson (exposes, lines)).compress
+    IO.println <| (Json.arr #[toJson exposes, toJson lines,
+      toJson (derived.map (·.toString))]).compress
     let has (g : String) := issues.any fun (_, number, _) => number == g
     let blocked := has "3" || has "build"
     return match gate with
@@ -352,9 +430,9 @@ unsafe def source (mod : Name) (path gate : String) : IO UInt32 := do
   if msgs.hasErrors then
     for m in msgs.toList do IO.eprintln (← m.toString)
     throw (IO.userError s!"{path}: 导入加载失败")
-  let ((exposes, issues), _) ← ((walk ctx mod auditTool true).run { inputCtx := ctx }).run {
+  let ((exposes, issues, derived), _) ← ((walk ctx mod auditTool true lists).run { inputCtx := ctx }).run {
     commandState := Command.mkState env msgs opts, parserState := ps, cmdPos := ps.pos }
-  report exposes (early ++ issues)
+  report exposes (early ++ issues) derived
 
 /-- 不经表层预检，直接精化一段固定样例，核对展开后检查能看到宏生成的命令与选项。 -/
 private def selfcheckSource : String := "import Lean
@@ -377,7 +455,8 @@ unsafe def selfcheck : IO UInt32 := do
   if msgs.hasErrors then
     for m in msgs.toList do IO.eprintln (← m.toString)
     return 2
-  let ((_, issues), _) ← ((walk ctx `Chan.Thm.SelfCheck false false).run { inputCtx := ctx }).run {
+  let lists ← Perimeter.load
+  let ((_, issues, _), _) ← ((walk ctx `Chan.Thm.SelfCheck false false lists).run { inputCtx := ctx }).run {
     commandState := Command.mkState env msgs opts, parserState := ps, cmdPos := ps.pos }
   -- 宏定义本身（第 3 行）不在白名单；这里只看宏展开所在的第 9 行。
   let expanded := issues.filter fun (stx, _, _) =>

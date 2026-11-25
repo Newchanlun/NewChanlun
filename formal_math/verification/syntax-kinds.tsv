@@ -1,0 +1,261 @@
+# 语法种类白名单。由 make_lists.py 生成；列：种类、所属包、判断、依据（登记的处理器）。
+Aesop.Frontend.Parser.aesopTactic	aesop	允许	处理器 Aesop.evalAesop（tactic），均允许
+Batteries.ExtendedBinder.extBinder	batteries	允许	无处理器：结构节点，由父节点的精化器解释
+Batteries.ExtendedBinder.extBinderCollection	batteries	允许	无处理器：结构节点，由父节点的精化器解释
+Batteries.ExtendedBinder.extBinderParenthesized	batteries	允许	无处理器：结构节点，由父节点的精化器解释
+Batteries.ExtendedBinder.extBinders	batteries	允许	无处理器：结构节点，由父节点的精化器解释
+BigOperators.bigOpBinder	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+BigOperators.bigOpBinders	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+BigOperators.bigsum	lean4	允许	处理器 BigOperators._aux_Mathlib_Algebra_BigOperators_Group_Finset_Defs___macroRules_BigOperators_bigsum_1（macro），均允许
+Filter.«term∀ᶠ_In_,_»	lean4	允许	处理器 Filter.«_aux_Mathlib_Order_Filter_Defs___macroRules_Filter_term∀ᶠ_In_,__1»（macro），均允许
+Lean.Parser.Attr.ext	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Attr.instance	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Attr.simp	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Attr.simple	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Attr.specialize	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.InternalSyntax.end_local_scope	lean4	允许	处理器 Lean.Elab.Command.elabEndLocalScope（command），均允许
+Lean.Parser.Command.abbrev	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.attribute	lean4	允许	处理器 Lean.Elab.Command.elabAttr（command），均允许
+Lean.Parser.Command.check	lean4	允许	处理器 Lean.Elab.Command.elabCheck（command），均允许
+Lean.Parser.Command.classTk	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.commentBody	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.ctor	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.declId	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.declModifiers	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.declSig	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.declValEqns	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.declValSimple	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.declaration	lean4	允许	处理器 Lean.Elab.Command.elabDeclaration（command）、Lean.Elab.Command.expandNamespacedDeclaration（macro）、Lean.Elab.Tactic.Do.expandDefContract（macro），均允许
+Lean.Parser.Command.definition	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.deriving	lean4	允许	处理器 Lean.Elab.elabDeriving（command），均允许
+Lean.Parser.Command.derivingClass	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.docComment	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.end	lean4	允许	处理器 Lean.Elab.Command.elabEnd（command），均允许
+Lean.Parser.Command.eraseAttr	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.eval	lean4	拒收	处理器 Lean.Elab.Command.elabEval（command）；其中拒收 Lean.Elab.Command.elabEval
+Lean.Parser.Command.example	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.extends	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.in	lean4	允许	处理器 Lean.Elab.Command.expandInCmd（macro），均允许
+Lean.Parser.Command.include	lean4	允许	处理器 Lean.Elab.Command.elabInclude（command），均允许
+Lean.Parser.Command.inductive	lean4	允许	处理器 Lean.Elab.Command.elabInductiveCommand（inductive），均允许
+Lean.Parser.Command.instance	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.moduleDoc	lean4	允许	处理器 Lean.Elab.Command.elabModuleDoc（command），均允许
+Lean.Parser.Command.mutual	lean4	允许	处理器 Lean.Elab.Command.elabMutual（command）、Lean.Elab.Command.expandMutualElement（macro）、Lean.Elab.Command.expandMutualNamespace（macro）、Lean.Elab.Command.expandMutualPreamble（macro），均允许
+Lean.Parser.Command.namedPrio	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.namespace	lean4	允许	处理器 Lean.Elab.Command.elabNamespace（command），均允许
+Lean.Parser.Command.omit	lean4	允许	处理器 Lean.Elab.Command.elabOmit（command），均允许
+Lean.Parser.Command.opaque	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.open	lean4	允许	处理器 Lean.Elab.Command.elabOpen（command），均允许
+Lean.Parser.Command.openScoped	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.optDeclSig	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.optDeriving	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.partial	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.printAxioms	lean4	允许	处理器 Lean.Elab.Command.elabPrintAxioms（允许）
+Lean.Parser.Command.private	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.section	lean4	允许	处理器 Lean.Elab.Command.elabSection（command），均允许
+Lean.Parser.Command.sectionHeader	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.set_option	lean4	允许	处理器 Lean.Elab.Command.elabSetOption（command），均允许
+Lean.Parser.Command.structFields	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.structParent	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.structSimpleBinder	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.structure	lean4	允许	处理器 Lean.Elab.Command.Structure.elabStructureCommand（inductive），均允许
+Lean.Parser.Command.structureTk	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.theorem	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Command.universe	lean4	允许	处理器 Lean.Elab.Command.elabUniverse（command），均允许
+Lean.Parser.Command.variable	lean4	允许	处理器 Lean.Elab.Command.elabVariable（command），均允许
+Lean.Parser.Level.hole	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.allGoals	lean4	允许	处理器 Lean.Elab.Tactic.evalAllGoals（tactic），均允许
+Lean.Parser.Tactic.apply	lean4	允许	处理器 Lean.Elab.Tactic.evalApply（tactic），均允许
+Lean.Parser.Tactic.applyRfl	lean4	允许	处理器 Lean.Elab.Tactic.Rfl.evalApplyRfl（tactic），均允许
+Lean.Parser.Tactic.assumption	lean4	允许	处理器 Lean.Elab.Tactic.evalAssumption（tactic），均允许
+Lean.Parser.Tactic.cases	lean4	允许	处理器 _private.Lean.Elab.Tactic.Induction.0.Lean.Elab.Tactic.evalCases（tactic），均允许
+Lean.Parser.Tactic.clear	lean4	允许	处理器 Lean.Elab.Tactic.evalClear（tactic），均允许
+Lean.Parser.Tactic.configItem	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.constructor	lean4	允许	处理器 Lean.Elab.Tactic.evalConstructor（tactic），均允许
+Lean.Parser.Tactic.contradiction	lean4	允许	处理器 Lean.Elab.Tactic.evalContradiction（tactic），均允许
+Lean.Parser.Tactic.decide	lean4	允许	处理器 Lean.Elab.Tactic.evalDecide（tactic），均允许
+Lean.Parser.Tactic.done	lean4	允许	处理器 Lean.Elab.Tactic.evalDone（tactic），均允许
+Lean.Parser.Tactic.dsimp	lean4	允许	处理器 Lean.Elab.Tactic.evalDSimp（tactic），均允许
+Lean.Parser.Tactic.elimTarget	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.eqRefl	lean4	允许	处理器 Lean.Elab.Tactic.evalRefl（tactic），均允许
+Lean.Parser.Tactic.exact	lean4	允许	处理器 Lean.Elab.Tactic.evalExact（tactic），均允许
+Lean.Parser.Tactic.fail	lean4	允许	处理器 Lean.Elab.Tactic.evalFail（tactic），均允许
+Lean.Parser.Tactic.first	lean4	允许	处理器 Lean.Elab.Tactic.evalFirst（tactic）、_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestFirstTac（try），均允许
+Lean.Parser.Tactic.focus	lean4	允许	处理器 Lean.Elab.Tactic.evalFocus（tactic），均允许
+Lean.Parser.Tactic.grind	lean4	允许	处理器 Lean.Elab.Tactic.evalGrind（tactic），均允许
+Lean.Parser.Tactic.induction	lean4	允许	处理器 _private.Lean.Elab.Tactic.Induction.0.Lean.Elab.Tactic.evalInduction（tactic），均允许
+Lean.Parser.Tactic.inductionAlt	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.inductionAltLHS	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.inductionAlts	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.intro	lean4	允许	处理器 Lean.Elab.Tactic.evalIntro（tactic），均允许
+Lean.Parser.Tactic.intros	lean4	允许	处理器 Lean.Elab.Tactic.evalIntros（tactic），均允许
+Lean.Parser.Tactic.location	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.locationHyp	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.locationType	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.locationWildcard	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.match	lean4	允许	处理器 Lean.Elab.Tactic.evalMatch（tactic），均允许
+Lean.Parser.Tactic.negConfigItem	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.obtain	lean4	允许	处理器 _private.Lean.Elab.Tactic.RCases.0.Lean.Elab.Tactic.RCases.evalObtain（tactic），均允许
+Lean.Parser.Tactic.omega	lean4	允许	处理器 Lean.Elab.Tactic.Omega.evalOmega（tactic），均允许
+Lean.Parser.Tactic.optConfig	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.paren	lean4	允许	处理器 Lean.Elab.Tactic.evalParen（tactic）、_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestParenTac（try），均允许
+Lean.Parser.Tactic.posConfigItem	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.rcases	lean4	允许	处理器 _private.Lean.Elab.Tactic.RCases.0.Lean.Elab.Tactic.RCases.evalRCases（tactic），均允许
+Lean.Parser.Tactic.rcasesPat.one	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.rcasesPat.tuple	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.rcasesPatLo	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.rcasesPatMed	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.refine	lean4	允许	处理器 Lean.Elab.Tactic.evalRefine（tactic），均允许
+Lean.Parser.Tactic.repeat'	lean4	允许	处理器 Lean.Elab.Tactic.evalRepeat'（tactic），均允许
+Lean.Parser.Tactic.rewriteSeq	lean4	允许	处理器 Lean.Elab.Tactic.evalRewriteSeq（tactic），均允许
+Lean.Parser.Tactic.rotateRight	lean4	允许	处理器 Lean.Elab.Tactic.evalRotateRight（tactic），均允许
+Lean.Parser.Tactic.rwRule	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.rwRuleSeq	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.rwSeq	lean4	允许	处理器 Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_rwSeq_1（macro），均允许
+Lean.Parser.Tactic.seq1	lean4	允许	处理器 Lean.Elab.Tactic.evalSeq1（tactic）、_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestSeq1Tac（try），均允许
+Lean.Parser.Tactic.set_option	lean4	允许	处理器 Lean.Elab.Tactic.elabSetOption（tactic），均允许
+Lean.Parser.Tactic.show	lean4	允许	处理器 Lean.Elab.Tactic.evalShow（tactic），均允许
+Lean.Parser.Tactic.simp	lean4	允许	处理器 Lean.Elab.Tactic.evalSimp（tactic），均允许
+Lean.Parser.Tactic.simpLemma	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Tactic.skip	lean4	允许	处理器 Lean.Elab.Tactic.evalSkip（tactic），均允许
+Lean.Parser.Tactic.subst	lean4	允许	处理器 Lean.Elab.Tactic.evalSubst（tactic），均允许
+Lean.Parser.Tactic.substEqs	lean4	允许	处理器 Lean.Elab.Tactic.evalSubstEqs（tactic），均允许
+Lean.Parser.Tactic.substVars	lean4	允许	处理器 Lean.Elab.Tactic.evalSubstVars（tactic），均允许
+Lean.Parser.Tactic.tacticAnd_intros	lean4	允许	处理器 Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticAnd_intros_1（macro），均允许
+Lean.Parser.Tactic.tacticHave__	lean4	允许	处理器 Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticHave___1（macro），均允许
+Lean.Parser.Tactic.tacticRefine_lift_	lean4	允许	处理器 Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticRefine_lift__1（macro），均允许
+Lean.Parser.Tactic.tacticRepeat_	lean4	允许	处理器 Lean.Elab.Tactic.evalRepeat（tactic），均允许
+Lean.Parser.Tactic.tacticRfl	lean4	允许	处理器 Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticRfl_1（macro）、Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticRfl_2（macro）、Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticRfl_3（macro）、_aux_Init_Core___macroRules_Lean_Parser_Tactic_tacticRfl_1（macro），均允许
+Lean.Parser.Tactic.tacticSeq	lean4	允许	处理器 Lean.Elab.Tactic.evalTacticSeq（tactic），均允许
+Lean.Parser.Tactic.tacticSeq1Indented	lean4	允许	处理器 Lean.Elab.Tactic.evalTacticSeq1Indented（tactic），均允许
+Lean.Parser.Tactic.tacticTry_	lean4	允许	处理器 Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticTry__1（macro）、_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestTryTac（try），均允许
+Lean.Parser.Tactic.withAnnotateState	lean4	允许	处理器 Lean.Elab.Tactic.evalWithAnnotateState（tactic），均允许
+Lean.Parser.Tactic.withReducible	lean4	允许	处理器 Lean.Elab.Tactic.evalWithReducible（tactic），均允许
+Lean.Parser.Tactic.«tactic_<;>_»	lean4	允许	处理器 Lean.Parser.Tactic.«_aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tactic_<;>__1»（macro）、_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestChainTac（try），均允许
+Lean.Parser.Term.anonymousCtor	lean4	允许	处理器 Lean.Elab.Term.elabAnonymousCtor（term），均允许
+Lean.Parser.Term.app	lean4	允许	处理器 Lean.Elab.Term.elabApp（term），均允许
+Lean.Parser.Term.arrow	lean4	允许	处理器 Lean.Elab.Term.elabArrow（term），均允许
+Lean.Parser.Term.attrInstance	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.attrKind	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.attributes	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.basicFun	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.binderDefault	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.binop	lean4	允许	处理器 Lean.Elab.Term.Op.elabBinOp（term），均允许
+Lean.Parser.Term.binrel	lean4	允许	处理器 Lean.Elab.Term.Op.elabBinRel（term），均允许
+Lean.Parser.Term.binrel_no_prop	lean4	允许	处理器 Lean.Elab.Term.Op.elabBinRelNoProp（term），均允许
+Lean.Parser.Term.byTactic	lean4	允许	处理器 Lean.Elab.Term.elabByTactic（term），均允许
+Lean.Parser.Term.cdot	lean4	允许	处理器 Lean.Elab.Term.elabBadCDot（term），均允许
+Lean.Parser.Term.clear	lean4	允许	处理器 Lean.Elab.Term.elabClear（term），均允许
+Lean.Parser.Term.dotIdent	lean4	允许	处理器 Lean.Elab.Term.elabDotIdent（term），均允许
+Lean.Parser.Term.explicit	lean4	允许	处理器 Lean.Elab.Term.expandExplicitFun（macro）、Lean.Elab.Term.elabExplicit（term），均允许
+Lean.Parser.Term.explicitBinder	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.forall	lean4	允许	处理器 Lean.Elab.Term.expandForall（macro）、Lean.Elab.Term.elabForall（term），均允许
+Lean.Parser.Term.fun	lean4	允许	处理器 Lean.Elab.Term.expandFun（macro）、Lean.Elab.Term.elabFun（term），均允许
+Lean.Parser.Term.have	lean4	允许	处理器 Lean.Elab.Term.elabHaveDecl（term），均允许
+Lean.Parser.Term.hole	lean4	允许	处理器 Lean.Elab.Term.elabHole（term），均允许
+Lean.Parser.Term.hygienicLParen	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.identProj	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.implicitBinder	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.inaccessible	lean4	允许	处理器 Lean.Elab.Term.elabInaccessible（term），均允许
+Lean.Parser.Term.instBinder	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.let	lean4	允许	处理器 Lean.Elab.Term.elabLetDecl（term），均允许
+Lean.Parser.Term.letConfig	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.letDecl	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.letEqnsDecl	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.letId	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.letIdDecl	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.letMVar	lean4	允许	处理器 Lean.Elab.Term.elabLetMVar（term），均允许
+Lean.Parser.Term.letRecDecl	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.letRecDecls	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.letrec	lean4	允许	处理器 Lean.Elab.Term.elabLetRec（term），均允许
+Lean.Parser.Term.local	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.match	lean4	允许	处理器 Qq._aux_Qq_Match___macroRules_Lean_Parser_Term_match_1（macro）、Lean.Elab.Term.Quotation.elabMatchSyntax（term）、Lean.Elab.Term.elabMatch（term），均允许
+Lean.Parser.Term.matchAlt	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.matchAlts	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.matchAltsWhereDecls	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.matchDiscr	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.noImplicitLambda	lean4	允许	处理器 Lean.Elab.Term.elabNoImplicitLambda（term），均允许
+Lean.Parser.Term.optEllipsis	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.paren	lean4	允许	处理器 Lean.Elab.Term.expandParen（macro），均允许
+Lean.Parser.Term.proj	lean4	允许	处理器 Lean.Elab.Term.elabProj（term），均允许
+Lean.Parser.Term.prop	lean4	允许	处理器 Lean.Elab.Term.elabProp（term），均允许
+Lean.Parser.Term.scoped	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.sort	lean4	允许	处理器 Lean.Elab.Term.elabSort（term），均允许
+Lean.Parser.Term.structInst	lean4	允许	处理器 Lean.Elab.Term.StructInst.expandStructInstExpectedType（macro）、Lean.Elab.Term.StructInst.expandStructInstFields（macro）、_aux_Mathlib_Tactic_Spread___macroRules_Lean_Parser_Term_structInst_1（macro）、Lean.Elab.Term.StructInst.elabStructInst（term），均允许
+Lean.Parser.Term.structInstDefault	lean4	允许	处理器 Lean.Elab.Term.StructInst.elabStructInstDefault（term），均允许
+Lean.Parser.Term.structInstFields	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.syntheticHole	lean4	允许	处理器 Lean.Elab.Term.elabSyntheticHole（term），均允许
+Lean.Parser.Term.tuple	lean4	允许	处理器 Lean.Elab.Term.expandTuple（macro），均允许
+Lean.Parser.Term.type	lean4	允许	处理器 Lean.Elab.Term.elabTypeStx（term），均允许
+Lean.Parser.Term.typeAscription	lean4	允许	处理器 Lean.Elab.Term.expandTypeAscription（macro）、Lean.Elab.Term.elabTypeAscription（term），均允许
+Lean.Parser.Term.typeSpec	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Term.waitIfTypeMVar	lean4	允许	处理器 Lean.Elab.Term.elabWaitIfTypeMVar（term），均允许
+Lean.Parser.Term.whereDecls	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Termination.decreasingBy	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Termination.suffix	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.Parser.Termination.terminationBy	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.binderIdent	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.calcFirstStep	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.calcStep	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.calcSteps	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.calcTactic	lean4	允许	处理器 Lean.Elab.Tactic._aux_Mathlib_Tactic_Widget_Calc___elabRules_Lean_calcTactic_1（tactic）、Lean.Elab.Tactic.evalCalc（tactic），均允许
+Lean.cdot	lean4	允许	处理器 Lean.Elab.Tactic.evalTacticCDot（tactic），均允许
+Lean.cdotTk	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.deprecated	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.explicitBinders	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.guardMsgsCmd	lean4	允许	处理器 Lean.Elab.Tactic.GuardMsgs.elabGuardMsgs（command），均允许
+Lean.unbracketedExplicitBinders	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Lean.«binderPred∈_»	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+Mathlib.Notation3.«termExpand_binders%(_=>_)_,_»	mathlib	允许	处理器 Mathlib.Notation3.«_aux_Mathlib_Util_Notation3___macroRules_Mathlib_Notation3_termExpand_binders%(_=>_)_,__1»（macro）、Mathlib.Notation3.«_aux_Mathlib_Util_Notation3___macroRules_Mathlib_Notation3_termExpand_binders%(_=>_)_,__2»（macro），均允许
+Mathlib.Tactic.GCongr.gcongrAttr	mathlib	允许	无处理器：结构节点，由父节点的精化器解释
+Mathlib.Tactic.Positivity.positivity	mathlib	允许	处理器 Mathlib.Tactic.Positivity._aux_Mathlib_Tactic_Positivity_Core___macroRules_Mathlib_Tactic_Positivity_positivity_1（macro）、Mathlib.Tactic.Positivity._aux_Mathlib_Tactic_Positivity_Core___elabRules_Mathlib_Tactic_Positivity_positivity_1（tactic），均允许
+Mathlib.Tactic.Ring.ring1	mathlib	允许	处理器 Mathlib.Tactic.Ring._aux_Mathlib_Tactic_Ring_Basic___elabRules_Mathlib_Tactic_Ring_ring1_1（tactic），均允许
+Mathlib.Tactic.linarith	mathlib	允许	处理器 Mathlib.Tactic._aux_Mathlib_Tactic_Linarith_Frontend___elabRules_Mathlib_Tactic_linarith_1（tactic），均允许
+Mathlib.Tactic.linarithArgsRest	mathlib	允许	无处理器：结构节点，由父节点的精化器解释
+Mathlib.Tactic.normNum	mathlib	允许	处理器 Mathlib.Tactic._aux_Mathlib_Tactic_NormNum_Core___elabRules_Mathlib_Tactic_normNum_1（tactic），均允许
+char	lean4	允许	处理器 Lean.Elab.Term.elabCharLit（term），均允许
+fieldIdx	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+finsetStx	lean4	允许	处理器 _aux_Mathlib_Data_Fintype_Sets___elabRules_finsetStx_1（term），均允许
+group	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+hygieneInfo	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+null	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+num	lean4	允许	处理器 Lean.Elab.Term.elabNumLit（term），均允许
+patternIgnore	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+prioLow	lean4	允许	处理器 _aux_Init_Notation___macroRules_prioLow_1（macro），均允许
+str	lean4	允许	处理器 Lean.Elab.Term.elabStrLit（term），均允许
+tacticClean_wf	lean4	允许	处理器 _aux_Init_WFTactics___macroRules_tacticClean_wf_1（macro），均允许
+tacticDecreasing_tactic	lean4	允许	处理器 _aux_Init_WFTactics___macroRules_tacticDecreasing_tactic_1（macro），均允许
+tacticDecreasing_trivial	lean4	允许	处理器 Array._aux_Init_Data_Array_Mem___macroRules_tacticDecreasing_trivial_1（macro）、Array._aux_Init_Data_Array_Mem___macroRules_tacticDecreasing_trivial_2（macro）、List._aux_Init_Data_List_BasicAux___macroRules_tacticDecreasing_trivial_1（macro）、Std._aux_Init_Data_Iterators_Basic___macroRules_tacticDecreasing_trivial_1（macro）、Std._aux_Init_Data_Iterators_Basic___macroRules_tacticDecreasing_trivial_2（macro）、Std._aux_Init_Data_Iterators_Basic___macroRules_tacticDecreasing_trivial_3（macro）、Std._aux_Init_Data_Iterators_Basic___macroRules_tacticDecreasing_trivial_4（macro）、String.Legacy.Iterator._aux_Init_Data_String_Iterator___macroRules_tacticDecreasing_trivial_1（macro）、String.Legacy.Iterator._aux_Init_Data_String_Iterator___macroRules_tacticDecreasing_trivial_2（macro）、String._aux_Init_Data_String_Termination___macroRules_tacticDecreasing_trivial_1（macro）、String._aux_Init_Data_String_Termination___macroRules_tacticDecreasing_trivial_2（macro）、String._aux_Init_Data_String_Termination___macroRules_tacticDecreasing_trivial_3（macro）、String._aux_Init_Data_String_Termination___macroRules_tacticDecreasing_trivial_4（macro）、_aux_Init_WFTactics___macroRules_tacticDecreasing_trivial_1（macro）、_aux_Init_WFTactics___macroRules_tacticDecreasing_trivial_2（macro）、_aux_Init_WFTactics___macroRules_tacticDecreasing_trivial_3（macro），均允许
+tacticDecreasing_with_	lean4	允许	处理器 _aux_Init_WFTactics___macroRules_tacticDecreasing_with__1（macro），均允许
+tacticGet_elem_tactic	lean4	允许	处理器 _aux_Init_Tactics___macroRules_tacticGet_elem_tactic_1（macro），均允许
+tacticGet_elem_tactic_extensible	lean4	允许	处理器 Fin._aux_Init_GetElem___macroRules_tacticGet_elem_tactic_extensible_1（macro）、Std._aux_Init_Data_Range_Polymorphic_Basic___macroRules_tacticGet_elem_tactic_extensible_1（macro）、_aux_Init_Data_Range_Basic___macroRules_tacticGet_elem_tactic_extensible_1（macro）、_aux_Init_Data_Range_Polymorphic_GetElemTactic___macroRules_tacticGet_elem_tactic_extensible_1（macro）、_aux_Init_Tactics___macroRules_tacticGet_elem_tactic_extensible_1（macro）、_aux_Init_Tactics___macroRules_tacticGet_elem_tactic_extensible_2（macro）、_aux_Init_Tactics___macroRules_tacticGet_elem_tactic_extensible_3（macro），均允许
+termDepIfThenElse	lean4	允许	处理器 _aux_Init_Notation___macroRules_termDepIfThenElse_1（macro），均允许
+termIfThenElse	lean4	允许	处理器 _aux_Init_Notation___macroRules_termIfThenElse_1（macro），均允许
+termMax_prec	lean4	允许	处理器 _aux_Init_Notation___macroRules_termMax_prec_1（macro），均允许
+token.«⊢»	lean4	允许	无处理器：结构节点，由父节点的精化器解释
+«term[_]»	lean4	允许	处理器 Lean.«_aux_Init_Data_List_Notation___macroRules_term[_]_1»（macro），均允许
+«term_&&_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_&&__1»（macro），均允许
+«term_*_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_*__1»（macro）、«_aux_Init_Notation___macroRules_term_*__2»（macro），均允许
+«term_++_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_++__1»（macro）、«_aux_Init_Notation___macroRules_term_++__2»（macro），均允许
+«term_+_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_+__1»（macro）、«_aux_Init_Notation___macroRules_term_+__2»（macro），均允许
+«term_-_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_-__1»（macro）、«_aux_Init_Notation___macroRules_term_-__2»（macro），均允许
+«term_/_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_/__1»（macro）、«_aux_Init_Notation___macroRules_term_/__2»（macro），均允许
+«term_::_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_::__1»（macro），均允许
+«term_<_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_<__1»（macro）、«_aux_Init_Notation___macroRules_term_<__2»（macro），均允许
+«term_==_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_==__1»（macro）、«_aux_Init_Notation___macroRules_term_==__2»（macro），均允许
+«term_=_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_=__1»（macro）、«_aux_Init_Notation___macroRules_term_=__2»（macro），均允许
+«term_>_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_>__1»（macro）、«_aux_Init_Notation___macroRules_term_>__2»（macro），均允许
+«term__[_]_!»	lean4	允许	处理器 «_aux_Init_GetElem___macroRules_term__[_]_!_1»（macro），均允许
+«term__[_]»	lean4	允许	处理器 Std.«_aux_Init_Data_Slice_Notation___macroRules_term__[_]_1»（macro）、«_aux_Init_GetElem___macroRules_term__[_]_1»（macro），均允许
+«term_||_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_||__1»（macro），均允许
+«term_×_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_×__1»（macro），均允许
+«term_∈_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_∈__1»（macro），均允许
+«term_∉_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_∉__1»（macro），均允许
+«term_∧_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_∧__1»（macro），均允许
+«term_≠_»	lean4	允许	处理器 «_aux_Init_Core___macroRules_term_≠__1»（macro）、«_aux_Init_Core___macroRules_term_≠__2»（macro），均允许
+«term_≤_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_≤__1»（macro）、«_aux_Init_Notation___macroRules_term_≤__2»（macro），均允许
+«term_≥_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term_≥__1»（macro）、«_aux_Init_Notation___macroRules_term_≥__2»（macro），均允许
+«term{_:_//_}»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term{_:_//_}_1»（macro），均允许
+«term¬_»	lean4	允许	处理器 «_aux_Init_Notation___macroRules_term¬__1»（macro），均允许
+«term‹_›»	lean4	允许	处理器 «_aux_Init_Tactics___macroRules_term‹_›_1»（macro），均允许
+«term∃_,_»	lean4	允许	处理器 «_aux_Init_NotationExtra___macroRules_term∃_,__1»（macro），均允许

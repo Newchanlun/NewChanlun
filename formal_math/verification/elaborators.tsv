@@ -1,0 +1,225 @@
+# 精化器与宏白名单（Lean 4.36.0 与钉选包）。由 make_lists.py 自 inventory.py 的语料产物生成；
+# 列：名字、所属包、判断（允许／拒收）、依据（声明位置与理由）。名单外的精化器一律红。
+Aesop.evalAesop	aesop	允许	.lake/packages/aesop/Aesop/Main.lean:20；静态闭包命中危险入口，链路均已归类：只在 `(config := …)`、`(simp_config := …)` 子句里求值用户项；这些子句的语法种类不在种类白名单；只在统计选项开启时写统计文件；该选项不在选项白名单；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Array._aux_Init_Data_Array_Mem___macroRules_tacticDecreasing_trivial_1	lean4	允许	src/lean/Init/Data/Array/Mem.lean:45；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Array._aux_Init_Data_Array_Mem___macroRules_tacticDecreasing_trivial_2	lean4	允许	src/lean/Init/Data/Array/Mem.lean:59；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+BigOperators._aux_Mathlib_Algebra_BigOperators_Group_Finset_Defs___macroRules_BigOperators_bigsum_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Algebra/BigOperators/Group/Finset/Defs.lean:196；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Filter.«_aux_Mathlib_Order_Filter_Defs___macroRules_Filter_term∀ᶠ_In_,__1»	mathlib	允许	.lake/packages/mathlib/Mathlib/Order/Filter/Defs.lean:283；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Fin._aux_Init_GetElem___macroRules_tacticGet_elem_tactic_extensible_1	lean4	允许	src/lean/Init/GetElem.lean:283；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.Structure.elabStructureCommand	lean4	允许	src/lean/Lean/Elab/Structure.lean:1519；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Command.elabAttr	lean4	允许	src/lean/Lean/Elab/Declaration.lean:301；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Command.elabCheck	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:457；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）
+Lean.Elab.Command.elabDeclaration	lean4	允许	src/lean/Lean/Elab/Declaration.lean:160；静态闭包命中危险入口，链路均已归类：只按名字求值已登记的 simproc；simproc 须由 `simproc` 命令与 meta 声明定义，均不在白名单；只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Command.elabEnd	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:241；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）
+Lean.Elab.Command.elabEndLocalScope	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:120；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.elabEval	lean4	拒收	Lean/Elab/BuiltinEvalCommand.lean；`#eval` 在精化期编译并运行用户项（含 IO）
+Lean.Elab.Command.elabInclude	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:554；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.elabInductiveCommand	lean4	允许	src/lean/Lean/Elab/Inductive.lean:345；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Command.elabModuleDoc	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:25；静态闭包命中危险入口，链路均已归类：只经文档渲染器求值库里登记的渲染常量
+Lean.Elab.Command.elabMutual	lean4	允许	src/lean/Lean/Elab/Declaration.lean:288；静态闭包命中危险入口，链路均已归类：只按名字求值已登记的 simproc；simproc 须由 `simproc` 命令与 meta 声明定义，均不在白名单；只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Command.elabNamespace	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:101；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.elabOmit	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:569；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）
+Lean.Elab.Command.elabOpen	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:314；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.elabPrintAxioms	lean4	允许	Lean/Elab/Print.lean；`#print axioms` 只读环境并输出公理列表；只许出现在 Chan/Final 的 #guard_msgs 内
+Lean.Elab.Command.elabSection	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:106；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.elabSetOption	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:518；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.elabUniverse	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:285；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.elabVariable	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:417；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）
+Lean.Elab.Command.expandInCmd	lean4	允许	src/lean/Lean/Elab/BuiltinCommand.lean:534；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.expandMutualElement	lean4	允许	src/lean/Lean/Elab/Declaration.lean:257；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.expandMutualNamespace	lean4	允许	src/lean/Lean/Elab/Declaration.lean:239；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.expandMutualPreamble	lean4	允许	src/lean/Lean/Elab/Declaration.lean:278；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Command.expandNamespacedDeclaration	lean4	允许	src/lean/Lean/Elab/Declaration.lean:145；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.Do.expandDefContract	lean4	允许	src/lean/Lean/Elab/Tactic/Do/Contract.lean:87；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.GuardMsgs.elabGuardMsgs	lean4	允许	src/lean/Lean/Elab/GuardMsgs.lean:208；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.Omega.evalOmega	lean4	允许	src/lean/Lean/Elab/Tactic/Omega/Frontend.lean:703；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.Rfl.evalApplyRfl	lean4	允许	src/lean/Lean/Elab/Tactic/Rfl.lean:22；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic._aux_Mathlib_Tactic_Widget_Calc___elabRules_Lean_calcTactic_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Tactic/Widget/Calc.lean:144；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.elabSetOption	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:215；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）
+Lean.Elab.Tactic.evalAllGoals	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:229；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalApply	lean4	允许	src/lean/Lean/Elab/Tactic/ElabTerm.lean:302；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalAssumption	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:311；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalCalc	lean4	允许	src/lean/Lean/Elab/Tactic/Calc.lean:17；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalClear	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:419；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）
+Lean.Elab.Tactic.evalConstructor	lean4	允许	src/lean/Lean/Elab/Tactic/ElabTerm.lean:326；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalContradiction	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:317；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalDSimp	lean4	允许	src/lean/Lean/Elab/Tactic/Simp.lean:845；静态闭包命中危险入口，链路均已归类：只按名字求值已登记的 simproc；simproc 须由 `simproc` 命令与 meta 声明定义，均不在白名单；只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalDecide	lean4	允许	src/lean/Lean/Elab/Tactic/Decide.lean:198；静态闭包命中危险入口，链路均已归类：只在 `+native` 配置下编译运行判定程序；该配置被 Perimeter.configIssues 拦截，环境层另查 Lean.ofReduceBool；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalDone	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:28；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalExact	lean4	允许	src/lean/Lean/Elab/Tactic/ElabTerm.lean:100；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalFail	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:644；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalFirst	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:633；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalFocus	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:187；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalGrind	lean4	允许	src/lean/Lean/Elab/Tactic/Grind/Main.lean:352；静态闭包命中危险入口，链路均已归类：只求值库里登记的检索选择器；只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalIntro	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:324；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalIntros	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:398；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalMatch	lean4	允许	src/lean/Lean/Elab/Tactic/Match.lean:54；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalNativeDecide	lean4	拒收	Lean/Elab/Tactic/Decide.lean；编译运行判定程序并引入 Lean.ofReduceBool
+Lean.Elab.Tactic.evalParen	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:160；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalRefine	lean4	允许	src/lean/Lean/Elab/Tactic/ElabTerm.lean:225；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalRefl	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:320；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalRepeat	lean4	允许	src/lean/Lean/Elab/Tactic/Repeat.lean:16；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalRepeat'	lean4	允许	src/lean/Lean/Elab/Tactic/Repeat.lean:28；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalRewriteSeq	lean4	允许	src/lean/Lean/Elab/Tactic/Rewrite.lean:124；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalRotateRight	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:201；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalRunTac	lean4	拒收	Lean/Elab/Tactic/BuiltinTactic.lean；`run_tac` 运行用户元程序
+Lean.Elab.Tactic.evalSeq1	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:157；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalShow	lean4	允许	src/lean/Lean/Elab/Tactic/Show.lean:68；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalSimp	lean4	允许	src/lean/Lean/Elab/Tactic/Simp.lean:792；静态闭包命中危险入口，链路均已归类：只按名字求值已登记的 simproc；simproc 须由 `simproc` 命令与 meta 声明定义，均不在白名单；只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalSkip	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:291；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalSubst	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:502；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）
+Lean.Elab.Tactic.evalSubstEqs	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:523；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Tactic.evalSubstVars	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:520；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalTacticCDot	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:175；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalTacticSeq	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:273；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalTacticSeq1Indented	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:163；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalWithAnnotateState	lean4	允许	src/lean/Lean/Elab/Tactic/BuiltinTactic.lean:23；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Tactic.evalWithReducible	lean4	允许	src/lean/Lean/Elab/Tactic/ElabTerm.lean:329；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.Op.elabBinOp	lean4	允许	src/lean/Lean/Elab/Extra.lean:478；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.Op.elabBinRel	lean4	允许	src/lean/Lean/Elab/Extra.lean:564；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.Op.elabBinRelNoProp	lean4	允许	src/lean/Lean/Elab/Extra.lean:566；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.Quotation.elabMatchSyntax	lean4	允许	src/lean/Lean/Elab/Quotation.lean:681；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.StructInst.elabStructInst	lean4	允许	src/lean/Lean/Elab/StructInst.lean:1392；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.StructInst.elabStructInstDefault	lean4	允许	src/lean/Lean/Elab/StructInst.lean:1409；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.StructInst.expandStructInstExpectedType	lean4	允许	src/lean/Lean/Elab/StructInst.lean:66；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.StructInst.expandStructInstFields	lean4	允许	src/lean/Lean/Elab/StructInst.lean:117；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabAnonymousCtor	lean4	允许	src/lean/Lean/Elab/BuiltinNotation.lean:43；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabApp	lean4	允许	src/lean/Lean/Elab/App.lean:2287；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabArrow	lean4	允许	src/lean/Lean/Elab/Binders.lean:293；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabBadCDot	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:192；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabByTactic	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:178；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabCharLit	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:248；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabClear	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:387；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabDotIdent	lean4	允许	src/lean/Lean/Elab/App.lean:2297；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabExplicit	lean4	允许	src/lean/Lean/Elab/App.lean:2309；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabForall	lean4	允许	src/lean/Lean/Elab/Binders.lean:278；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabFun	lean4	允许	src/lean/Lean/Elab/Binders.lean:678；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabHaveDecl	lean4	允许	src/lean/Lean/Elab/Binders.lean:942；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabHole	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:64；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabIdent	lean4	允许	src/lean/Lean/Elab/App.lean:2295；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabInaccessible	lean4	允许	src/lean/Lean/Elab/Match.lean:180；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabIncludeStr	lean4	拒收	Lean/Elab/BuiltinTerm.lean:431；`include_str` 经 evalTerm 求值用户项并读宿主机文件
+Lean.Elab.Term.elabLetDecl	lean4	允许	src/lean/Lean/Elab/Binders.lean:939；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabLetMVar	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:118；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabLetRec	lean4	允许	src/lean/Lean/Elab/LetRec.lean:139；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabMatch	lean4	允许	src/lean/Lean/Elab/Match.lean:1288；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabNoImplicitLambda	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:189；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabNumLit	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:210；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabProj	lean4	允许	src/lean/Lean/Elab/App.lean:2323；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabProp	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:21；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabRunElab	lean4	拒收	Lean/Elab/BuiltinNotation.lean；`run_elab` 运行用户元程序
+Lean.Elab.Term.elabSort	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:30；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabStrLit	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:198；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabSyntheticHole	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:70；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabTypeAscription	lean4	允许	src/lean/Lean/Elab/BuiltinNotation.lean:428；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Elab.Term.elabTypeStx	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:33；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.elabUnsafe	lean4	拒收	Lean/Elab/BuiltinNotation.lean:555；项级 `unsafe` 生成 unsafe 辅助声明与 implemented_by
+Lean.Elab.Term.elabWaitIfTypeMVar	lean4	允许	src/lean/Lean/Elab/BuiltinTerm.lean:137；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.expandExplicitFun	lean4	允许	src/lean/Lean/Elab/Binders.lean:661；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.expandForall	lean4	允许	src/lean/Lean/Elab/Binders.lean:272；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.expandFun	lean4	允许	src/lean/Lean/Elab/Binders.lean:648；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.expandParen	lean4	允许	src/lean/Lean/Elab/BuiltinNotation.lean:410；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.expandTuple	lean4	允许	src/lean/Lean/Elab/BuiltinNotation.lean:414；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.Term.expandTypeAscription	lean4	允许	src/lean/Lean/Elab/BuiltinNotation.lean:421；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Elab.elabDeriving	lean4	允许	src/lean/Lean/Elab/Deriving/Basic.lean:356；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_rwSeq_1	lean4	允许	src/lean/Init/Tactics.lean:632；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticAnd_intros_1	lean4	允许	src/lean/Init/Tactics.lean:1407；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticHave___1	lean4	允许	src/lean/Init/Tactics.lean:913；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticRefine_lift__1	lean4	允许	src/lean/Init/Tactics.lean:882；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticRfl_1	lean4	允许	src/lean/Init/Tactics.lean:477；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticRfl_2	lean4	允许	src/lean/Init/Tactics.lean:480；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticRfl_3	lean4	允许	src/lean/Init/Tactics.lean:482；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Parser.Tactic._aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tacticTry__1	lean4	允许	src/lean/Init/Tactics.lean:445；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.Parser.Tactic.«_aux_Init_Tactics___macroRules_Lean_Parser_Tactic_tactic_<;>__1»	lean4	允许	src/lean/Init/Tactics.lean:451；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Lean.«_aux_Init_Data_List_Notation___macroRules_term[_]_1»	lean4	允许	src/lean/Init/Data/List/Notation.lean:50；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+List._aux_Init_Data_List_BasicAux___macroRules_tacticDecreasing_trivial_1	lean4	允许	src/lean/Init/Data/List/BasicAux.lean:246；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Mathlib.Meta.elabEvalExpr	mathlib	拒收	Mathlib/Tactic/Eval.lean:41；`eval%` 经 evalExpr 运行用户项
+Mathlib.Notation3.«_aux_Mathlib_Util_Notation3___macroRules_Mathlib_Notation3_termExpand_binders%(_=>_)_,__1»	mathlib	允许	.lake/packages/mathlib/Mathlib/Util/Notation3.lean:45；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Mathlib.Notation3.«_aux_Mathlib_Util_Notation3___macroRules_Mathlib_Notation3_termExpand_binders%(_=>_)_,__2»	mathlib	允许	.lake/packages/mathlib/Mathlib/Util/Notation3.lean:49；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Mathlib.Tactic.ByElab.elabByElab	mathlib	拒收	Mathlib/Tactic/ByElab.lean；`by_elab` 运行用户写的 TermElabM 元程序
+Mathlib.Tactic.Positivity._aux_Mathlib_Tactic_Positivity_Core___elabRules_Mathlib_Tactic_Positivity_positivity_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Tactic/Positivity/Core.lean:596；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Mathlib.Tactic.Positivity._aux_Mathlib_Tactic_Positivity_Core___macroRules_Mathlib_Tactic_Positivity_positivity_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Tactic/Positivity/Core.lean:599；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Mathlib.Tactic.Ring._aux_Mathlib_Tactic_Ring_Basic___elabRules_Mathlib_Tactic_Ring_ring1_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Tactic/Ring/Basic.lean:588；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Mathlib.Tactic._aux_Mathlib_Tactic_Linarith_Frontend___elabRules_Mathlib_Tactic_linarith_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Tactic/Linarith/Frontend.lean:528；静态闭包命中危险入口，链路均已归类：只对配置值求值；配置项只许 `+名`、`-名` 与字面量（Perimeter.configIssues）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Mathlib.Tactic._aux_Mathlib_Tactic_NormNum_Core___elabRules_Mathlib_Tactic_normNum_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Tactic/NormNum/Core.lean:276；静态闭包命中危险入口，链路均已归类：只按名字求值已登记的 simproc；simproc 须由 `simproc` 命令与 meta 声明定义，均不在白名单；只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+Mathlib.Tactic.elabSudoSetOption	mathlib	拒收	Mathlib/Tactic/SudoSetOption.lean:50；`sudo set_option` 直改 Core.Context.options，不经 elabSetOption、不留 OptionInfo
+Mathlib.Tactic.elabTrace	mathlib	拒收	Mathlib/Tactic/Trace.lean:24；`trace` 经 evalExpr 运行用户项
+Mathlib.Tactic.successIfFailWithMsg	mathlib	拒收	Mathlib/Tactic/SuccessIfFailWithMsg.lean；`success_if_fail_with_msg` 经 evalTerm 运行用户项
+Qq._aux_Qq_Match___macroRules_Lean_Parser_Term_match_1	Qq	允许	.lake/packages/Qq/Qq/Match.lean:425；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Std._aux_Init_Data_Iterators_Basic___macroRules_tacticDecreasing_trivial_1	lean4	允许	src/lean/Init/Data/Iterators/Basic.lean:820；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Std._aux_Init_Data_Iterators_Basic___macroRules_tacticDecreasing_trivial_2	lean4	允许	src/lean/Init/Data/Iterators/Basic.lean:853；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Std._aux_Init_Data_Iterators_Basic___macroRules_tacticDecreasing_trivial_3	lean4	允许	src/lean/Init/Data/Iterators/Basic.lean:962；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Std._aux_Init_Data_Iterators_Basic___macroRules_tacticDecreasing_trivial_4	lean4	允许	src/lean/Init/Data/Iterators/Basic.lean:987；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Std._aux_Init_Data_Range_Polymorphic_Basic___macroRules_tacticGet_elem_tactic_extensible_1	lean4	允许	src/lean/Init/Data/Range/Polymorphic/Basic.lean:444；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+Std.«_aux_Init_Data_Slice_Notation___macroRules_term__[_]_1»	lean4	允许	src/lean/Init/Data/Slice/Notation.lean:135；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+String.Legacy.Iterator._aux_Init_Data_String_Iterator___macroRules_tacticDecreasing_trivial_1	lean4	允许	src/lean/Init/Data/String/Iterator.lean:219；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+String.Legacy.Iterator._aux_Init_Data_String_Iterator___macroRules_tacticDecreasing_trivial_2	lean4	允许	src/lean/Init/Data/String/Iterator.lean:227；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+String._aux_Init_Data_String_Termination___macroRules_tacticDecreasing_trivial_1	lean4	允许	src/lean/Init/Data/String/Termination.lean:256；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+String._aux_Init_Data_String_Termination___macroRules_tacticDecreasing_trivial_2	lean4	允许	src/lean/Init/Data/String/Termination.lean:261；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+String._aux_Init_Data_String_Termination___macroRules_tacticDecreasing_trivial_3	lean4	允许	src/lean/Init/Data/String/Termination.lean:266；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+String._aux_Init_Data_String_Termination___macroRules_tacticDecreasing_trivial_4	lean4	允许	src/lean/Init/Data/String/Termination.lean:271；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Core___macroRules_Lean_Parser_Tactic_tacticRfl_1	lean4	允许	src/lean/Init/Core.lean:1032；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Data_Range_Basic___macroRules_tacticGet_elem_tactic_extensible_1	lean4	允许	src/lean/Init/Data/Range/Basic.lean:92；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Data_Range_Polymorphic_GetElemTactic___macroRules_tacticGet_elem_tactic_extensible_1	lean4	允许	src/lean/Init/Data/Range/Polymorphic/GetElemTactic.lean:25；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Notation___macroRules_prioLow_1	lean4	允许	src/lean/Init/Notation.lean:137；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Notation___macroRules_termDepIfThenElse_1	lean4	允许	src/lean/Init/Notation.lean:474；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Notation___macroRules_termIfThenElse_1	lean4	允许	src/lean/Init/Notation.lean:489；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Notation___macroRules_termMax_prec_1	lean4	允许	src/lean/Init/Notation.lean:132；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Tactics___macroRules_tacticGet_elem_tactic_1	lean4	允许	src/lean/Init/Tactics.lean:2744；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Tactics___macroRules_tacticGet_elem_tactic_extensible_1	lean4	允许	src/lean/Init/Tactics.lean:2733；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Tactics___macroRules_tacticGet_elem_tactic_extensible_2	lean4	允许	src/lean/Init/Tactics.lean:2734；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_Tactics___macroRules_tacticGet_elem_tactic_extensible_3	lean4	允许	src/lean/Init/Tactics.lean:2735；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_WFTactics___macroRules_tacticClean_wf_1	lean4	允许	src/lean/Init/WFTactics.lean:28；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_WFTactics___macroRules_tacticDecreasing_tactic_1	lean4	允许	src/lean/Init/WFTactics.lean:79；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_WFTactics___macroRules_tacticDecreasing_trivial_1	lean4	允许	src/lean/Init/WFTactics.lean:42；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_WFTactics___macroRules_tacticDecreasing_trivial_2	lean4	允许	src/lean/Init/WFTactics.lean:43；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_WFTactics___macroRules_tacticDecreasing_trivial_3	lean4	允许	src/lean/Init/WFTactics.lean:44；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Init_WFTactics___macroRules_tacticDecreasing_with__1	lean4	允许	src/lean/Init/WFTactics.lean:59；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Mathlib_Data_Fintype_Sets___elabRules_finsetStx_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Data/Fintype/Sets.lean:307；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_aux_Mathlib_Tactic_Spread___macroRules_Lean_Parser_Term_structInst_1	mathlib	允许	.lake/packages/mathlib/Mathlib/Tactic/Spread.lean:64；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_private.Lean.Elab.Tactic.Induction.0.Lean.Elab.Tactic.evalCases	lean4	允许	src/lean/Lean/Elab/Tactic/Induction.lean:1132；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+_private.Lean.Elab.Tactic.Induction.0.Lean.Elab.Tactic.evalInduction	lean4	允许	src/lean/Lean/Elab/Tactic/Induction.lean:1004；静态闭包命中危险入口，链路均已归类：只经格式化器按语法种类求值库里登记的 formatter 常量（Lean/PrettyPrinter/Basic.lean:20）；只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+_private.Lean.Elab.Tactic.RCases.0.Lean.Elab.Tactic.RCases.evalObtain	lean4	允许	src/lean/Lean/Elab/Tactic/RCases.lean:534；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+_private.Lean.Elab.Tactic.RCases.0.Lean.Elab.Tactic.RCases.evalRCases	lean4	允许	src/lean/Lean/Elab/Tactic/RCases.lean:521；静态闭包命中危险入口，链路均已归类：只经 profileitIO 做剖析计时（unsafeBaseIO 不运行用户项）
+_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestChainTac	lean4	允许	src/lean/Lean/Elab/Tactic/Try.lean:790；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestFirstTac	lean4	允许	src/lean/Lean/Elab/Tactic/Try.lean:795；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestParenTac	lean4	允许	src/lean/Lean/Elab/Tactic/Try.lean:800；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestSeq1Tac	lean4	允许	src/lean/Lean/Elab/Tactic/Try.lean:825；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+_private.Lean.Elab.Tactic.Try.0.Lean.Elab.Tactic.Try.evalSuggestTryTac	lean4	允许	src/lean/Lean/Elab/Tactic/Try.lean:805；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Core___macroRules_term_≠__1»	lean4	允许	src/lean/Init/Core.lean:870；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Core___macroRules_term_≠__2»	lean4	允许	src/lean/Init/Core.lean:872；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_GetElem___macroRules_term__[_]_!_1»	lean4	允许	src/lean/Init/GetElem.lean:122；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_GetElem___macroRules_term__[_]_1»	lean4	允许	src/lean/Init/GetElem.lean:82；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_NotationExtra___macroRules_term∃_,__1»	lean4	允许	src/lean/Init/NotationExtra.lean:89；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_&&__1»	lean4	允许	src/lean/Init/Notation.lean:412；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_*__1»	lean4	允许	src/lean/Init/Notation.lean:286；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_*__2»	lean4	允许	src/lean/Init/Notation.lean:307；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_++__1»	lean4	允许	src/lean/Init/Notation.lean:292；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_++__2»	lean4	允许	src/lean/Init/Notation.lean:312；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_+__1»	lean4	允许	src/lean/Init/Notation.lean:284；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_+__2»	lean4	允许	src/lean/Init/Notation.lean:305；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_-__1»	lean4	允许	src/lean/Init/Notation.lean:285；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_-__2»	lean4	允许	src/lean/Init/Notation.lean:306；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_/__1»	lean4	允许	src/lean/Init/Notation.lean:287；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_/__2»	lean4	允许	src/lean/Init/Notation.lean:308；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_::__1»	lean4	允许	src/lean/Init/Notation.lean:427；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_<__1»	lean4	允许	src/lean/Init/Notation.lean:376；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_<__2»	lean4	允许	src/lean/Init/Notation.lean:390；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_==__1»	lean4	允许	src/lean/Init/Notation.lean:380；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_==__2»	lean4	允许	src/lean/Init/Notation.lean:394；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_=__1»	lean4	允许	src/lean/Init/Notation.lean:379；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_=__2»	lean4	允许	src/lean/Init/Notation.lean:393；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_>__1»	lean4	允许	src/lean/Init/Notation.lean:378；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_>__2»	lean4	允许	src/lean/Init/Notation.lean:391；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_||__1»	lean4	允许	src/lean/Init/Notation.lean:413；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_×__1»	lean4	允许	src/lean/Init/Notation.lean:273；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_∈__1»	lean4	允许	src/lean/Init/Notation.lean:420；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_∉__1»	lean4	允许	src/lean/Init/Notation.lean:421；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_∧__1»	lean4	允许	src/lean/Init/Notation.lean:404；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_≤__1»	lean4	允许	src/lean/Init/Notation.lean:375；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_≤__2»	lean4	允许	src/lean/Init/Notation.lean:389；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_≥__1»	lean4	允许	src/lean/Init/Notation.lean:377；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term_≥__2»	lean4	允许	src/lean/Init/Notation.lean:392；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term{_:_//_}_1»	lean4	允许	src/lean/Init/Notation.lean:585；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Notation___macroRules_term¬__1»	lean4	允许	src/lean/Init/Notation.lean:406；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口
+«_aux_Init_Tactics___macroRules_term‹_›_1»	lean4	允许	src/lean/Init/Tactics.lean:2716；静态调用闭包不含精化期求值、宿主机读写、白名单外公理入口

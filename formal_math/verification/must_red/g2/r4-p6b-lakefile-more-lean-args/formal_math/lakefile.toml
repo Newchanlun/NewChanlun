@@ -1,0 +1,25 @@
+name = "fixture"
+defaultTargets = ["Chan"]
+
+[leanOptions]
+autoImplicit = false
+relaxedAutoImplicit = false
+linter.unusedVariables = true
+
+[[lean_lib]]
+name = "Chan"
+globs = ["Chan.*"]
+moreLeanArgs = ["-Dlinter.unusedVariables.funArgs=false", "-Ddebug.skipKernelTC=true"]
+
+[[lean_lib]]
+name = "ChanTest"
+globs = ["ChanTest.*"]
+
+[[lean_exe]]
+name = "fm_audit"
+root = "verification.Audit"
+supportInterpreter = true
+
+[[lean_lib]]
+name = "FMEnvGates"
+roots = ["verification.EnvGates", "verification.SourceGates", "verification.Perimeter", "verification.Inventory"]

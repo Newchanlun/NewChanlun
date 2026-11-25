@@ -1,0 +1,2 @@
+Chan.Thm.IncStr
+Chan/Thm/IncStr.lean

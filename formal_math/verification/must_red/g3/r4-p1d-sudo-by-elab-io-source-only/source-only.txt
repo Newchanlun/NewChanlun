@@ -1,0 +1,2 @@
+Chan.Thm.SudoByElab
+Chan/Thm/SudoByElab.lean

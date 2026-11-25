@@ -72,6 +72,13 @@ def gate1(root):
         if name in actual and actual[name] != rev:
             red("1", "formal_math/lake-manifest.json", name, "PACKAGE_PIN", f"期望修订 {rev}")
             failed = True
+    # 修订相同而来源换成本地路径或别的远端，同样不是钉选的那份代码。
+    for package in packages:
+        want = pins["sources"].get(package["name"])
+        if want and (package.get("type") != want["type"] or package.get("url") != want["url"]):
+            red("1", "formal_math/lake-manifest.json", package["name"], "PACKAGE_SOURCE",
+                f"期望 {want['type']} 来源 {want['url']}")
+            failed = True
     return int(failed)
 
 
@@ -105,6 +112,9 @@ def gate2(root):
             failed = True
     if failed:
         return 1
+    # 封闭世界：lakefile 里能传 Lean 选项或参数的入口（moreLeanArgs、weakLeanArgs、
+    # moreServerOptions、目标级 leanOptions、插件等）一律不在名单里；名单外即红，构建照跑以便读数。
+    failed = lakefile_whitelist(root, package)
     source, state = audit_sources(root, "2")
     if state:
         return state
@@ -124,6 +134,50 @@ def gate2(root):
     return int(failed)
 
 
+LAKEFILE_KEYS = {
+    "package": {"name", "version", "defaultTargets", "leanOptions", "require", "lean_lib", "lean_exe"},
+    "require": {"name", "git", "rev", "scope"},
+    "lean_lib": {"name", "globs", "roots"},
+    "lean_exe": {"name", "root", "supportInterpreter"},
+}
+LAKEFILE_OPTIONS = {"autoImplicit": False, "relaxedAutoImplicit": False, "linter": {"unusedVariables": True}}
+
+
+def lakefile_whitelist(root, package):
+    """lakefile.toml 的键与取值白名单（Lake 4.36.0 `Lake/Load/Toml.lean` 生成的解码器接受的
+    其余键——构建参数、服务器选项、插件、原生链接参数等——都不在名单里）。"""
+    fm = root / "formal_math"
+    path = "formal_math/lakefile.toml"
+    failed = False
+
+    def bad(where, detail):
+        nonlocal failed
+        red("2", path, where, "LAKEFILE_KEY", detail)
+        failed = True
+
+    if (fm / "lakefile.lean").exists():
+        bad(1, "不许 lakefile.lean（Lake 会优先读它，绕开本白名单）")
+    for key in sorted(set(package) - LAKEFILE_KEYS["package"]):
+        bad(key, f"包级键不在白名单：{key}")
+    if package.get("leanOptions") != LAKEFILE_OPTIONS:
+        bad("leanOptions", "包级 leanOptions 只许 autoImplicit=false、relaxedAutoImplicit=false、"
+            "linter.unusedVariables=true 三项")
+    for section in ("require", "lean_lib", "lean_exe"):
+        for target in package.get(section, []):
+            if not isinstance(target, dict):
+                bad(section, f"{section} 须为表")
+                continue
+            for key in sorted(set(target) - LAKEFILE_KEYS[section]):
+                bad(f"{target.get('name', section)}.{key}", f"{section} 键不在白名单：{key}")
+            for key in ("globs", "roots"):
+                if key in target and not (isinstance(target[key], list) and
+                                          all(isinstance(v, str) for v in target[key])):
+                    bad(f"{target.get('name', section)}.{key}", f"{key} 须为字符串数组")
+            if section == "lean_exe" and not isinstance(target.get("supportInterpreter", True), bool):
+                bad(target.get("name", section), "supportInterpreter 须为布尔值")
+    return failed
+
+
 def module_name(path):
     return ".".join(path.relative_to("formal_math").with_suffix("").parts)
 
@@ -139,9 +193,16 @@ def lane(module):
     return "Chan" if module == "Chan" or module.startswith("Chan.") else ""
 
 
-def lean_audit(fm, gate, mods, config="{}"):
+def lean_audit(fm, gate, mods, config="{}", derived=None):
     checked(fm, "lake", "build", *(f"+{module}:olean" for module in mods))
-    result = command(fm, "lake", "exe", "fm_audit", gate, *mods, stdin=config)
+    extra = []
+    if derived is not None:
+        # 本轮源码层观察到的派生产物（证书）；环境层只据此豁免派生处理器的辅助函数。
+        certificate = fm / ".lake" / "fm-derived.json"
+        certificate.parent.mkdir(exist_ok=True)
+        certificate.write_text(json.dumps(sorted(set(derived))))
+        extra = ["--derived", str(certificate)]
+    result = command(fm, "lake", "exe", "fm_audit", gate, *extra, *mods, stdin=config)
     if result.returncode not in (0, 1):
         raise Undetermined(result.stderr.strip() or f"Lean 审计退出 {result.returncode}")
     return result
@@ -172,7 +233,7 @@ def source_headers(root):
     return {paths[name]: (is_module, imports) for name, is_module, imports in map(json.loads, rows)}
 
 
-def audit_sources(root, gate, headers=None):
+def audit_sources(root, gate, headers=None, derived=None):
     fm = root / "formal_math"
     source = source_headers(root) if headers is None else headers
     local = {module_name(path): path for path in source}
@@ -208,7 +269,9 @@ def audit_sources(root, gate, headers=None):
                          path.relative_to("formal_math").as_posix(), gate)
         if result.returncode not in (0, 1):
             raise Undetermined((result.stdout + result.stderr).strip())
-        exposes, issues = json.loads(result.stdout)
+        exposes, issues, made = json.loads(result.stdout)
+        if derived is not None:
+            derived.extend(made)
         relevant = [(line, detail) for number, line, detail in issues if number == gate]
         for line, detail in relevant:
             red(gate, path, line, "LOCAL_OPTION" if gate == "2" else "TOKEN", detail)
@@ -239,11 +302,12 @@ def audit_sources(root, gate, headers=None):
 
 
 def gate3(root):
-    source, failed = audit_sources(root, "3")
+    derived = []
+    source, failed = audit_sources(root, "3", derived=derived)
     mods = ["ChanTest.Probe"] if failed else [
         module_name(path) for path in source if module_name(path) not in AUDIT_TOOLS
     ]
-    return max(failed, emit_findings("3", lean_audit(root / "formal_math", "3", mods)))
+    return max(failed, emit_findings("3", lean_audit(root / "formal_math", "3", mods, derived=derived)))
 
 
 def unique_object(pairs):
@@ -410,6 +474,8 @@ def review_report(root, report_dir=None):
             cells.append("<br>".join(f"{r['evidence']}/{r['status']} {r['code']}: "
                                      f"{' '.join(r['detail'].split())}".replace("|", "\\|")
                                      for r in shown) or "—")
+        if all(cell == "—" for cell in cells):
+            continue  # 人读表只列有读数的声明；全部读数仍在 JSON 里。
         table.append("| " + " | ".join([row["module"] or "（仅签注）", row["declaration"], *cells]) + " |")
     document = json.dumps({"schema": "fm-review-v1", "declarations": rows}, ensure_ascii=False, indent=2)
     if report_dir is not None:
@@ -488,14 +554,19 @@ def gate6b(root):
     # 分开查提交、暂存区、工作树，避免两个相反的改动互相抵消。
     for revisions in ((base, head), ("--cached", head), ()):
         changes.update(checked(root, "git", "diff", "--name-only", "-z", "--no-renames", *revisions).split("\0"))
-    changes.update(checked(root, "git", "ls-files", "-z", "--others", "--exclude-standard", "--",
-                           "formal_math", "scripts", ".github/workflows").split("\0"))
+    # 整个仓库的未跟踪文件都算改动，不只看三个目录。
+    changes.update(checked(root, "git", "ls-files", "-z", "--others", "--exclude-standard").split("\0"))
     changes.discard("")
-    if not marker or prefix not in PATHS:
+    if not marker or prefix not in PATHS or not branch.partition("/")[2].strip():
         red("6b", ".git/HEAD", 1, "BRANCH_PREFIX", f"分支 {branch} 没有可交付的路径权限")
         return 1
     failed = False
     for path in sorted(changes):
+        # 符号链接能把受管路径之外的文件带进可写目录；改动里一律不许。
+        if (root / path).is_symlink() or command(root, "git", "ls-files", "-s", "--", path).stdout.startswith("120000"):
+            red("6b", path, 1, "SYMLINK", "改动不得包含符号链接")
+            failed = True
+            continue
         if within(path, PATHS[prefix]) and (
             path != SIGNOFF_PATH or prefix == "decl" or
             prefix == "infra" and initializes_empty_signoffs(root, base, head)
@@ -509,7 +580,8 @@ def gate6b(root):
 PROOF_LANES = {"Chan.Thm", "Chan.Proofs", "Chan.Exec"}
 FOUNDATION = {"Chan.Defs", "Chan.Proxy", "Chan.Hypotheses"}
 AUDIT_LANES = {"Chan.Audit", "Chan.Audit.Literal"}
-AUDIT_TOOLS = {"verification.Audit", "verification.EnvGates", "verification.SourceGates"}
+AUDIT_TOOLS = {"verification.Audit", "verification.EnvGates", "verification.SourceGates",
+               "verification.Perimeter", "verification.Inventory"}
 EXTERNAL = {"Lean", "Init", "Std", "Mathlib", "Batteries", "Aesop", "Qq", "Plausible",
             "ProofWidgets", "LeanSearchClient", "ImportGraph", "Cli", "Lake"}
 
@@ -601,12 +673,13 @@ def gate15(root):
                 pending.extend(imported for imported, _ in graph.get(target, ()))
     if failed:
         return 1
-    _, frontend = audit_sources(root, "15", source)
+    derived = []
+    _, frontend = audit_sources(root, "15", source, derived=derived)
     if frontend:
         return frontend
     definitions = [m for m in graph if lane(m) == "Chan.Defs"]
     if definitions:
-        return emit_findings("15", lean_audit(root / "formal_math", "15", definitions))
+        return emit_findings("15", lean_audit(root / "formal_math", "15", definitions, derived=derived))
     return 0
 
 
@@ -630,6 +703,9 @@ def main():
     result = 0
     selected = {"报告": lambda root: review_report(root, args.report_dir)} if args.report else (
         {args.gate: GATES[args.gate]} if args.gate else GATES)
+    if args.gate:
+        print(f"FM: 只跑了门 {args.gate}；单门结论只覆盖该门的承诺，合入以全部阻断门（默认运行）为准。",
+              file=sys.stderr)
     for number, action in selected.items():
         try:
             result = max(result, action(root))

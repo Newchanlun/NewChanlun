@@ -29,7 +29,7 @@ REPORT_KINDS = ("finding", "clean", "unknown", "known_limits")
 MAC_TEMP = Path("/Volumes/AgentStorage/fm/tmp")
 MIN_FREE = 6 * 1024**3
 SOURCES = ("run_gates.py", "pins.json", "Audit.lean", "EnvGates.lean", "SourceGates.lean",
-           "garbage-signoffs.yaml")
+           "Inventory.lean", "Perimeter.lean", "garbage-signoffs.yaml", "elaborators.tsv", "syntax-kinds.tsv")
 
 
 def temporary_root():
@@ -67,7 +67,8 @@ def base_package(repo, fixture, warm=None):
     verification = fm / "verification"
     verification.mkdir(parents=True)
     for filename in SOURCES:
-        shutil.copy2(HERE / filename, verification)
+        if (HERE / filename).is_file():
+            shutil.copy2(HERE / filename, verification)
     shutil.copy2(HERE.parent / "lean-toolchain", fm)
     shutil.copy2(HERE.parent / "lake-manifest.json", fm)
     for filename in ("formalization.yaml", "statement-lock.json"):
@@ -96,7 +97,7 @@ def base_package(repo, fixture, warm=None):
             for lib in sorted(libs)
         )
         + '\n[[lean_exe]]\nname = "fm_audit"\nroot = "verification.Audit"\nsupportInterpreter = true\n'
-        + '\n[[lean_lib]]\nname = "FMEnvGates"\nroots = ["verification.EnvGates", "verification.SourceGates"]\n'
+        + '\n[[lean_lib]]\nname = "FMEnvGates"\nroots = ["verification.EnvGates", "verification.SourceGates", "verification.Perimeter", "verification.Inventory"]\n'
     )
     if warm is not None:
         # 预编译的审计程序产物；源码逐字相同，Lake 依哈希判定无需重建。
@@ -151,7 +152,7 @@ def run_blocking(repo, fixture, gate, env):
         result = subprocess.run(["lake", "exe", "fm_audit", "source", module, path, gate],
                                 cwd=fm, env=env, capture_output=True, text=True)
         try:
-            _, issues = json.loads(result.stdout)
+            _, issues, _ = json.loads(result.stdout)
         except (ValueError, TypeError):
             raise ValueError(result.stdout + result.stderr)
         rows = [f"GATE{gate} RED {path}:{line} TOKEN {detail}"
@@ -180,6 +181,8 @@ def exercise(tmp, warm, fixture, gate, color):
             env["PATH"] = str(fake) + os.pathsep + env["PATH"]
         if gate == "6b":
             git(repo, "init", "-q", "-b", "main")
+            # 自测的临时目录不是被审改动。
+            (repo / ".git/info/exclude").write_text("/tmp/\n/fixture-bin/\n")
             git(repo, "add", "formal_math")
             git(repo, "commit", "-qm", "创建夹具基线")
             git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
@@ -188,9 +191,14 @@ def exercise(tmp, warm, fixture, gate, color):
             if branch_file.is_file():
                 git(repo, "switch", "-qc", branch_file.read_text().strip())
         shutil.copytree(fixture / "formal_math", repo / "formal_math", dirs_exist_ok=True)
+        for line in lines_of(fixture, "symlinks.txt"):
+            link, target = line.split()
+            (repo / link).symlink_to(target)
         if gate == "6b":
             git(repo, "add", "formal_math")
             git(repo, "commit", "-qm", "应用门禁夹具")
+            for name in lines_of(fixture, "root-files.txt"):
+                (repo / name).write_text("未跟踪的仓根文件\n")
             head_mode = fixture / "head.txt"
             if head_mode.is_file():
                 mode = head_mode.read_text().strip()

@@ -10,5 +10,43 @@
     "Qq": "ff055a2fcc835935e0ae607339b455a5f5896b4b",
     "batteries": "b4b25a3886a16daacaf6615c2eea7170a6e8f458",
     "Cli": "50810f72af7618bee62fe9800dc26e806c188703"
+  },
+  "sources": {
+    "mathlib": {
+      "type": "git",
+      "url": "https://github.com/leanprover-community/mathlib4.git"
+    },
+    "plausible": {
+      "type": "git",
+      "url": "https://github.com/leanprover-community/plausible"
+    },
+    "LeanSearchClient": {
+      "type": "git",
+      "url": "https://github.com/leanprover-community/LeanSearchClient"
+    },
+    "importGraph": {
+      "type": "git",
+      "url": "https://github.com/leanprover-community/import-graph"
+    },
+    "proofwidgets": {
+      "type": "git",
+      "url": "https://github.com/leanprover-community/ProofWidgets4"
+    },
+    "aesop": {
+      "type": "git",
+      "url": "https://github.com/leanprover-community/aesop"
+    },
+    "Qq": {
+      "type": "git",
+      "url": "https://github.com/leanprover-community/quote4"
+    },
+    "batteries": {
+      "type": "git",
+      "url": "https://github.com/leanprover-community/batteries"
+    },
+    "Cli": {
+      "type": "git",
+      "url": "https://github.com/leanprover/lean4-cli"
+    }
   }
 }
