@@ -8,7 +8,7 @@ FROM deps AS verify
 COPY . .
 RUN --network=none mkdir -p /out/receipts && \
     go test -race -count=1 -timeout=120s ./sdk/cliproxy/auth ./sdk/cliproxy \
-      -run 'TestPreflightReceiptProductionTransportTrust|TestPreflightReceiptStreamEndsLeaseBeforeEOF|TestPreflightReceiptStrictCodexStreamCancelRejectsDespiteCleanStreamDelivery|TestRoundTripperFor|TestPreflightRoundTripperFor' -v > /out/go-test.txt 2>&1 || (cat /out/go-test.txt; exit 1)
+      -run 'TestPreflightReceiptProductionTransportTrust|TestPreflightReceiptControlledTransportCacheBoundedAndEvictsIdle|TestPreflightReceiptStreamEndsLeaseBeforeEOF|TestPreflightReceiptStrictCodexStreamCancelRejectsDespiteCleanStreamDelivery|TestRoundTripperFor|TestPreflightRoundTripperFor' -v > /out/go-test.txt 2>&1 || (cat /out/go-test.txt; exit 1)
 RUN --network=none PREFLIGHT_FIXTURES=/out/receipts go test -tags preflight_test_roots -race -count=1 -timeout=120s \
       ./sdk/preflightreceipt -v >> /out/go-test.txt 2>&1 || (cat /out/go-test.txt; exit 1)
 RUN --network=none PREFLIGHT_FIXTURES=/out/receipts go test -tags preflight_test_roots -race -count=1 -timeout=120s \

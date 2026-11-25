@@ -900,10 +900,10 @@ index 0000000..5e13ff0
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..5081a2b 100644
+index e69de29..734b9a9 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1463 @@
+@@ -0,0 +1,1469 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -1426,10 +1426,16 @@ index e69de29..5081a2b 100644
 +			output = append(output, map[string]any{"type": "function_call", "name": "shell"})
 +		} else {
 +			outText := fmt.Sprintf(`{"status":"completed","summary":"VERDICT: PASS","model":%q,"turn":%d}`, request.Model, n)
-+			output = append(output, map[string]any{
-+				"type": "message", "role": "assistant", "status": "completed",
-+				"content": []map[string]any{{"type": "output_text", "text": outText}},
-+			})
++			output = append(output,
++				map[string]any{
++					"type": "message", "role": "assistant", "phase": "commentary", "status": "completed",
++					"content": []map[string]any{{"type": "output_text", "text": "checking diff..."}},
++				},
++				map[string]any{
++					"type": "message", "role": "assistant", "phase": "final_answer", "status": "completed",
++					"content": []map[string]any{{"type": "output_text", "text": outText}},
++				},
++			)
 +		}
 +		w.Header().Set("Content-Type", "text/event-stream")
 +		ev, _ := json.Marshal(map[string]any{
@@ -3597,10 +3603,10 @@ index 0000000..c22d62e
 +	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..7a1c343 100644
+index 6074124..b89b996 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
-@@ -3,6 +3,7 @@ package executor
+@@ -3,10 +3,12 @@ package executor
  import (
  	"bytes"
  	"context"
@@ -3608,7 +3614,12 @@ index 6074124..7a1c343 100644
  	"io"
  	"net/http"
  	"strings"
-@@ -15,6 +16,8 @@ import (
+ 	"time"
++	"unicode/utf8"
+ 
+ 	"github.com/MoeForge/moego/ojson"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/grokbuild"
+@@ -15,6 +17,8 @@ import (
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
  	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -3617,7 +3628,7 @@ index 6074124..7a1c343 100644
  	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
  	log "github.com/sirupsen/logrus"
  )
-@@ -154,7 +157,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -154,7 +158,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
@@ -3632,7 +3643,7 @@ index 6074124..7a1c343 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +453,478 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +454,495 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -3722,6 +3733,10 @@ index 6074124..7a1c343 100644
 +			}
 +			for scanner.Scan() {
 +				tl := scanner.Bytes()
++				if !utf8.Valid(tl) {
++					pc.Taint()
++					return
++				}
 +				tailLines++
 +				tailBytes += len(tl) + 1
 +				if tailLines > maxPendingStrictTerminalLines || tailBytes > maxPendingStrictTerminalBytes {
@@ -3774,8 +3789,15 @@ index 6074124..7a1c343 100644
 +			tailLines := 0
 +			tailBytes := 0
 +			for scanner.Scan() {
++				tl := scanner.Bytes()
++				if !utf8.Valid(tl) {
++					if pc != nil {
++						pc.Taint()
++					}
++					return
++				}
 +				tailLines++
-+				tailBytes += len(scanner.Bytes()) + 1
++				tailBytes += len(tl) + 1
 +				if tailLines > maxPendingStrictTerminalLines || tailBytes > maxPendingStrictTerminalBytes {
 +					if pc != nil {
 +						pc.Taint()
@@ -4054,6 +4076,12 @@ index 6074124..7a1c343 100644
 +					continue
 +				}
 +
++				if !utf8.Valid(line) {
++					pendingStrictTerminal = nil
++					pendingStrictBytes = 0
++					failPostTerminal()
++					return
++				}
 +				if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 +					if len(currentEventMeta) >= maxPendingStrictTerminalLines || currentEventMetaBytes+len(transformed)+1 > maxPendingStrictTerminalBytes {
 +						pendingStrictTerminal = nil
@@ -4113,7 +4141,7 @@ index 6074124..7a1c343 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +1009,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +1027,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
@@ -5187,10 +5215,10 @@ index e69de29..e172af8 100644
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-index e69de29..36eeacd 100644
+index e69de29..c40c7b7 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,248 @@
 +//go:build !preflight_test_roots
 +
 +package auth
@@ -5382,21 +5410,18 @@ index e69de29..36eeacd 100644
 +}
 +
 +func TestPreflightReceiptControlledTransportCacheBoundedAndEvictsIdle(t *testing.T) {
-+	// Astra P2 #3 (PR #2280 R49): controlled proxy transport cache MUST stay bounded and evict
-+	// least-recently-used entries cleanly from BOTH maps (keyed by SHA-256 hash so raw credentials
-+	// are not retained as map keys) while closing idle connections.
++	// Astra P2 #3 (R49) + Sol P2 #3 + Astra P2 #2 (R50): controlled proxy transport cache MUST stay
++	// bounded (keyed by SHA-256 hash so raw credentials are not retained as map keys) AND evicting an
++	// idle entry from the reuse cache MUST NOT revoke trust of an already-borrowed transport instance.
 +	oldCap := maxControlledPreflightTransports
 +	controlledTransportMu.Lock()
 +	savedByProxy := controlledTransportByProxy
-+	savedPtrs := controlledTransportPtrs
 +	controlledTransportByProxy = make(map[[32]byte]*controlledPreflightTransport)
-+	controlledTransportPtrs = make(map[*controlledPreflightTransport]struct{})
 +	maxControlledPreflightTransports = 3
 +	controlledTransportMu.Unlock()
 +	defer func() {
 +		controlledTransportMu.Lock()
 +		controlledTransportByProxy = savedByProxy
-+		controlledTransportPtrs = savedPtrs
 +		maxControlledPreflightTransports = oldCap
 +		controlledTransportMu.Unlock()
 +	}()
@@ -5423,16 +5448,23 @@ index e69de29..36eeacd 100644
 +
 +	controlledTransportMu.RLock()
 +	byProxyLen := len(controlledTransportByProxy)
-+	ptrsLen := len(controlledTransportPtrs)
 +	controlledTransportMu.RUnlock()
-+	if byProxyLen != 3 || ptrsLen != 3 {
-+		t.Fatalf("cache sizes after eviction = (%d, %d), want (3, 3)", byProxyLen, ptrsLen)
++	if byProxyLen != 3 {
++		t.Fatalf("cache size after eviction = %d, want 3", byProxyLen)
 +	}
-+	if isControlledPreflightTransport(first) {
-+		t.Fatalf("evicted oldest transport remained trusted in controlledTransportPtrs")
++	if !isControlledPreflightTransport(first) {
++		t.Fatalf("LRU eviction revoked trust of already-borrowed controlled transport")
 +	}
 +	if !isControlledPreflightTransport(fourth) {
 +		t.Fatalf("newly inserted transport not trusted")
++	}
++	// Requesting user1 again MUST allocate a new transport instance, proving user1 was evicted from cache.
++	recreated, err := ControlledTransportForProxy("http://user1:pass1@127.0.0.1:18081")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if recreated == first {
++		t.Fatalf("expected evicted proxy transport to be recreated on subsequent lookup")
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_prod.go b/sdk/cliproxy/auth/preflight_roots_prod.go
@@ -6023,10 +6055,10 @@ index 0000000..f6b92f0
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..0d37b3e
+index 0000000..1f4fbd9
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,186 @@
 +package auth
 +
 +import (
@@ -6053,6 +6085,7 @@ index 0000000..0d37b3e
 +// onceSetNextProtoDefaults().
 +type controlledPreflightTransport struct {
 +	tr         *http.Transport
++	sealed     bool
 +	lastUsedNS atomic.Int64
 +}
 +
@@ -6065,7 +6098,6 @@ index 0000000..0d37b3e
 +	maxControlledPreflightTransports = 64
 +	controlledTransportMu            sync.RWMutex
 +	controlledTransportByProxy       = make(map[[32]byte]*controlledPreflightTransport)
-+	controlledTransportPtrs          = make(map[*controlledPreflightTransport]struct{})
 +)
 +
 +func newFreshStandardTransport() *http.Transport {
@@ -6145,7 +6177,7 @@ index 0000000..0d37b3e
 +		return nil, preflightreceipt.ErrUnavailable
 +	}
 +
-+	wrapped := &controlledPreflightTransport{tr: tr}
++	wrapped := &controlledPreflightTransport{tr: tr, sealed: true}
 +	wrapped.lastUsedNS.Store(nowNS)
 +	var evicted []*controlledPreflightTransport
 +	controlledTransportMu.Lock()
@@ -6173,11 +6205,9 @@ index 0000000..0d37b3e
 +			break
 +		}
 +		delete(controlledTransportByProxy, oldestKey)
-+		delete(controlledTransportPtrs, oldestVal)
 +		evicted = append(evicted, oldestVal)
 +	}
 +	controlledTransportByProxy[cacheKey] = wrapped
-+	controlledTransportPtrs[wrapped] = struct{}{}
 +	controlledTransportMu.Unlock()
 +	for _, ev := range evicted {
 +		if ev != nil && ev.tr != nil {
@@ -6188,14 +6218,10 @@ index 0000000..0d37b3e
 +}
 +
 +func isControlledPreflightTransport(rt any) bool {
++	// controlledPreflightTransport is unexported and sealed only inside ControlledTransportForProxy;
++	// LRU cache eviction affects future reuse without revoking trust of already-borrowed transports.
 +	c, ok := rt.(*controlledPreflightTransport)
-+	if !ok || c == nil || c.tr == nil {
-+		return false
-+	}
-+	controlledTransportMu.RLock()
-+	_, owned := controlledTransportPtrs[c]
-+	controlledTransportMu.RUnlock()
-+	return owned
++	return ok && c != nil && c.tr != nil && c.sealed
 +}
 +
 +type failClosedRoundTripper struct {
@@ -6332,10 +6358,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..f5c5353 100644
+index e69de29..5386b45 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,9690 @@
+@@ -0,0 +1,9700 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -11097,6 +11123,10 @@ index e69de29..f5c5353 100644
 +	rawLines := c.splitSSEChunkLinesLocked(payload)
 +	c.mu.Unlock()
 +	for _, rawLine := range rawLines {
++		if !utf8.Valid(rawLine) {
++			c.taintStreamAnomaly()
++			return
++		}
 +		if len(rawLine) == 0 {
 +			c.mu.Lock()
 +			evName := c.sseEventName
@@ -11841,9 +11871,15 @@ index e69de29..f5c5353 100644
 +			if entry.inFlight == 0 && !entry.sealing && !entry.sealedFlag && reviewLedger[key] == entry {
 +				entry.mu.Lock()
 +				canEvict := !entry.markerPersisted && !entry.tainted && !entry.sealed && entry.requests == 0
++				var evictFD *os.File
++				if canEvict {
++					evictFD = entry.boundDirFD
++					entry.boundDirFD = nil
++				}
 +				entry.mu.Unlock()
 +				if canEvict {
 +					delete(reviewLedger, key)
++					closeBudgetedPinnedDirFD(evictFD)
 +				}
 +			}
 +			reviewMu.Unlock()
@@ -16027,10 +16063,10 @@ index e69de29..f5c5353 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..d6d2b5b 100644
+index e69de29..4bb8f32 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,8955 @@
+@@ -0,0 +1,9038 @@
 +package preflightreceipt
 +
 +import (
@@ -24984,5 +25020,88 @@ index e69de29..d6d2b5b 100644
 +
 +	if st, d := SealReviewWithDigest(root, launch, session); st != SealRejected || d != "" {
 +		t.Fatalf("SealReviewWithDigest after empty status on response.in_progress = (%v, %q), want (SealRejected, \"\")", st, d)
++	}
++}
++
++func TestReviewReceiptInitialReservePostRenameSyncFailReleasesPinnedFDBudget(t *testing.T) {
++	// Sol P1 #1 + Astra P1 #1 (PR #2280 R50): when initial ReserveReview renames receipt.json
++	// successfully but fails post-rename launch-directory fsync and evicts the entry from
++	// reviewLedger, it MUST close boundDirFD and return the pinnedDirFDs budget slot.
++	root := filepath.Join(t.TempDir(), "reserve-sync-fail-fd")
++	launch := "review-f5555555-2222-4333-8444-555555555501"
++	launchDir := filepath.Join(root, launch)
++
++	beforeFDs := pinnedDirFDs.Load()
++	origSync := syncDirFn
++	injected := false
++	syncDirFn = func(dir string) error {
++		if filepath.Clean(dir) == filepath.Clean(launchDir) && !injected {
++			if _, serr := os.Lstat(filepath.Join(launchDir, "receipt.json")); serr == nil {
++				injected = true
++				return errors.New("injected post-rename launch dir sync failure")
++			}
++		}
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
++	}
++	defer func() { syncDirFn = origSync }()
++
++	res, err := ReserveReview(root, launch)
++	if !errors.Is(err, ErrUnavailable) || res != nil {
++		if res != nil {
++			res.Release()
++		}
++		t.Fatalf("ReserveReview on post-rename launch sync failure = (%v, %v), want (nil, ErrUnavailable)", res, err)
++	}
++	if !injected {
++		t.Fatalf("expected post-rename launch dir sync fault to trigger")
++	}
++	if afterFDs := pinnedDirFDs.Load(); afterFDs != beforeFDs {
++		t.Fatalf("pinnedDirFDs leaked on post-rename reserve sync failure: before=%d after=%d", beforeFDs, afterFDs)
++	}
++}
++
++func TestReviewReceiptStrictRejectsInvalidUTF8InCommentOrMetadataLine(t *testing.T) {
++	// Sol P2 #2 (PR #2280 R50): invalid UTF-8 bytes in SSE comment (:) or metadata (id:/retry:)
++	// lines MUST taint the formal review stream identically to Python preflight's strict UTF-8 check.
++	for idx, badLine := range [][]byte{
++		[]byte(": keepalive-\xff-bad\n"),
++		[]byte("id: evt-\xff-bad\n"),
++		[]byte("retry: 1000\xff\n"),
++	} {
++		root := filepath.Join(t.TempDir(), fmt.Sprintf("utf8-meta-%d", idx))
++		launch := fmt.Sprintf("review-f6666666-2222-4333-8444-55555555550%d", idx+1)
++		session := fmt.Sprintf("019d0000-0000-7000-8000-fffffffff30%d", idx+1)
++
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++
++		c.ObserveStreamChunk(badLine)
++		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_meta_utf8","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++
++		if st, d := SealReviewWithDigest(root, launch, session); st != SealRejected || d != "" {
++			t.Fatalf("case %d: SealReviewWithDigest after invalid UTF-8 metadata line = (%v, %q), want (SealRejected, \"\")", idx, st, d)
++		}
 +	}
 +}

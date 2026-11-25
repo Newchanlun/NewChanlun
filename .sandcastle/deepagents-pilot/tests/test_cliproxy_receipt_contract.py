@@ -438,14 +438,33 @@ def test_generated_go_codex_and_review_receipts_consumed_by_python():
         assert completed_ev is not None
         client_resp = completed_ev["response"]
         client_resp_id_sha = hashlib.sha256(client_resp["id"].encode("utf-8")).hexdigest()
-        client_out_parts = [
+        commentary_items = [
+            item
+            for item in client_resp["output"]
+            if item.get("type") == "message" and item.get("role") == "assistant" and item.get("phase") == "commentary"
+        ]
+        assert commentary_items, "fixture SSE must include a commentary message to verify final_answer isolation"
+        all_out_parts = [
             part["text"]
             for item in client_resp["output"]
             if item.get("type") == "message" and item.get("role") == "assistant"
             for part in item.get("content", [])
             if part.get("type") == "output_text"
         ]
-        client_out_sha = hashlib.sha256("".join(client_out_parts).encode("utf-8")).hexdigest()
+        final_items = [
+            item
+            for item in client_resp["output"]
+            if item.get("type") == "message" and item.get("role") == "assistant" and item.get("phase") != "commentary"
+        ]
+        assert final_items
+        final_out_parts = [
+            part["text"]
+            for part in final_items[-1].get("content", [])
+            if part.get("type") == "output_text"
+        ]
+        client_out_sha = hashlib.sha256("".join(final_out_parts).encode("utf-8")).hexdigest()
+        all_out_sha = hashlib.sha256("".join(all_out_parts).encode("utf-8")).hexdigest()
+        assert client_out_sha != all_out_sha
         assert payload["sealed"] is True
         since = payload["started_ns"] / 1e9
         got = log_mod.review_from_receipt(
@@ -459,6 +478,14 @@ def test_generated_go_codex_and_review_receipts_consumed_by_python():
         assert got["requests"] == 2 and got["sealed"] is True
         assert len(got["response_id_sha256s"]) == 2 and got["response_id_sha256s"][-1] == client_resp_id_sha
         assert got["last_output_sha256"] == client_out_sha
+        # Commentary concatenated with final_answer MUST NOT match the sealed final-answer digest.
+        assert log_mod.review_from_receipt(
+            root / name, launch, session, since, 0,
+            expected_receipt_sha256=seal_resp["receipt_sha256"],
+            expected_response_id_sha256=client_resp_id_sha,
+            expected_output_sha256=all_out_sha,
+            min_requests=2,
+        ) is None
         assert log_mod.review_from_receipt(
             root / name, launch, session, since, 0,
             expected_receipt_sha256=seal_resp["receipt_sha256"],
