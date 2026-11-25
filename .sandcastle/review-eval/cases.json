@@ -1,0 +1,338 @@
+{
+  "schema_version": "review-eval/1",
+  "description": "基于 origin/main 真实 git 历史与正式双审记录构建的代码审查评测集（#1931）。bug 案的 head_sha 指向引入问题的提交，fix_sha 指向后续回退或修复提交，bug_locations 均经 git show 在 head_sha 中逐行核实；clean 案为单轮正式双审 PASS 合入且后续无回退的干净 PR。",
+  "cases": [
+    {
+      "case_id": "bug-1978-segment-seed-scan-revert",
+      "kind": "bug",
+      "title": "#1978 流首段重扫仍以种子扫描决定终结导致整笔提交回退",
+      "base_sha": "baef3947524d09f8dc583b81d07e93f3b9885d8f",
+      "head_sha": "b2bb88ce6fe9ca6d264e844d23e6f57be0d8dc05",
+      "fix_sha": "6d927e3ad6f8a8a006087308d19b16ddafa5296b",
+      "pr_number": null,
+      "issue_number": 1978,
+      "source_note": "提交 b2bb88ce6f 被 6d927e3ad6 整体 revert（构造期守卫后由 7557317d2e 单独带回）。",
+      "bug_locations": [
+        {
+          "file": "rust/src/theta_v0/parser/segment.rs",
+          "line_start": 572,
+          "line_end": 583,
+          "extra_ranges": [
+            [588, 588]
+          ],
+          "summary": "rescan_from_first_start 假定流首段终结仍由种子扫描决定，违背 xianduan §7.1 第 5 条按流首段自身特征序列终结的裁定。",
+          "category": "spec_violation"
+        },
+        {
+          "file": "rust/src/theta_v0/parser/segment.rs",
+          "line_start": 1176,
+          "line_end": 1187,
+          "extra_ranges": [
+            [1193, 1193],
+            [1215, 1217],
+            [1223, 1223]
+          ],
+          "summary": "divide_segments_core 在重扫未能复现种子扫描终结时静默回退到旧种子扫描特征事实。",
+          "category": "spec_violation"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-2016-spec-revocation-regression",
+      "kind": "bug",
+      "title": "#2016 SPEC 裁定撤销误用整行严格匹配导致不成形 BLOCK 无法撤销旧 PASS",
+      "base_sha": "bd54d4b28ec4f83d596837f84f1f861dd085124c",
+      "head_sha": "f5427467f72a0350bc34a1fefce14c80f9db2b41",
+      "fix_sha": "ee2294489b99089b8ddf9ebe47d218078f0e66e4",
+      "pr_number": 2016,
+      "issue_number": 2016,
+      "source_note": "f5427467f7 收紧 parseSpecRuling 后在 PR #2016 被 opus 独审拦截，由 ee2294489b 改为放行严、撤销宽。",
+      "bug_locations": [
+        {
+          "file": "scripts/wayfinder_engine.mts",
+          "line_start": 270,
+          "line_end": 271,
+          "summary": "isSpecApproved 对撤销路径也要求通过整行严格 parseSpecRuling，格式偏差的 BLOCK 评论被当成无关评论跳过，既有 PASS 保持放行（fail-open）。",
+          "category": "fail_open_regression"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-1915-prefix-ruling-bypass",
+      "kind": "bug",
+      "title": "#1915 硬门签署首行仅做前缀匹配可被否定后缀绕过",
+      "base_sha": "08d0f0e88bada7339b0443b5e52c8cf5957b146e",
+      "head_sha": "7c0e5f35f683a9da2e38287f5962dd4d92836003",
+      "fix_sha": "f5427467f72a0350bc34a1fefce14c80f9db2b41",
+      "pr_number": null,
+      "issue_number": 1915,
+      "source_note": "sweep 审查发现 7c0e5f35f6 在 decision-claimer.mts 引入的首行前缀正则允许「退回：签署但不批准」等否定后缀绕过，由 f5427467f7 修复。",
+      "bug_locations": [
+        {
+          "file": ".sandcastle/decision-claimer.mts",
+          "line_start": 753,
+          "line_end": 753,
+          "extra_ranges": [
+            [763, 763]
+          ],
+          "summary": "SIGN_HEAD_RE 仅匹配首行前缀，带否定后缀的评论首行仍被认定为合法签署。",
+          "category": "authz_bypass"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-1909-spec-ruling-prefix-bypass",
+      "kind": "bug",
+      "title": "#1909 SPEC 独审裁定首行仅做词边界前缀匹配可被否定后缀绕过",
+      "base_sha": "9b436af2d2c1ef21c7c3c4378637ea14765d2e6d",
+      "head_sha": "d7942d4a4301ce5a7dfa5390f814e8229d9e5971",
+      "fix_sha": "f5427467f72a0350bc34a1fefce14c80f9db2b41",
+      "pr_number": null,
+      "issue_number": 1909,
+      "source_note": "d7942d4a43 引入结构化 SPEC 裁定解析 parseSpecRuling 时仅用词边界前缀匹配 PASS/BLOCK，首行带否定后缀仍被解析为 PASS，由 f5427467f7 收紧为整行严格匹配。",
+      "bug_locations": [
+        {
+          "file": "scripts/wayfinder_engine.mts",
+          "line_start": 220,
+          "line_end": 223,
+          "summary": "parseSpecRuling 仅用词边界前缀匹配 PASS/BLOCK，首行带否定或附加后缀仍被解析为 PASS。",
+          "category": "authz_bypass"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-1944-recover-stale-disk-divergence",
+      "kind": "bug",
+      "title": "#1944 recover_stale 早退未写回 STALE 导致返回值与磁盘 PASS 分叉",
+      "base_sha": "f43fac8f4673c605f24e4c69c9184560f118eb34",
+      "head_sha": "0b3e7f3cf56b516af3bf0e51a87e41d089e27558",
+      "fix_sha": "bb4eae7925bd58fb8f081dcc19cdfec7b4bd7b70",
+      "pr_number": null,
+      "issue_number": 1944,
+      "source_note": "独立审查反例发现 0b3e7f3cf5 中 recover_stale 四条早退路径直接 return saved 留下磁盘未发布 PASS，由 bb4eae7925 修复。",
+      "bug_locations": [
+        {
+          "file": ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
+          "line_start": 910,
+          "line_end": 910,
+          "extra_ranges": [
+            [913, 914],
+            [920, 920],
+            [923, 923],
+            [926, 926]
+          ],
+          "summary": "recover_stale 在 Stale、回执缺失、重验不一致及会话复用四条早退分支直接返回内存 STALE 而未写回磁盘 outcome.json，导致磁盘残留旧 PASS。",
+          "category": "state_divergence"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-2022-patch-read-trailing-metadata",
+      "kind": "bug",
+      "title": "#2022 patch_read 拒绝 diff 后接只印元数据的 git show/log 引发真实审查误判",
+      "base_sha": "2301d0bea1a47a3cb1630c9292d9eb7d306b3599",
+      "head_sha": "01a6038a3c9e2c5b743ae86b56c87193948612f4",
+      "fix_sha": "18c8569c9d02bcf61cb2fa8994bb8b5ee22c32e7",
+      "pr_number": 2022,
+      "issue_number": 1968,
+      "source_note": "01a6038a3c 收紧 _would_print_patch 仅允许 git diff 后接纯管道过滤器，导致 PR #2018 run 45a4c22b 串接只印提交元数据的 git show/log 触发补丁读取门禁误判，由 PR #2022（18c8569c9d）放行尾随只读元数据段并仅在开头 diff 段取证。",
+      "bug_locations": [
+        {
+          "file": ".sandcastle/deepagents-pilot/pilot1742/patch_read.py",
+          "line_start": 486,
+          "line_end": 489,
+          "summary": "_would_print_patch 强制要求 git diff 之后只能接管道过滤器，导致完整 diff 后串接只印提交元数据的 git show/log 被误判为未读取冻结补丁。",
+          "category": "false_rejection"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-1904-nonce-substring-row-match",
+      "kind": "bug",
+      "title": "#1904 验收测试按 -14 子串筛选行消费文件在 UUID 含 -14 时误判",
+      "base_sha": "4a7ae1c5c87f481ab7b554baa16e386b2f0ecfec",
+      "head_sha": "4593b0a506c27b7aec7a16a781ebc1d5df883372",
+      "fix_sha": "979da0c634c1fb75dde2023d3d2abe6515d1845a",
+      "pr_number": 1904,
+      "issue_number": 1742,
+      "source_note": "4593b0a506 中用 f.includes('-14') 过滤行消费文件，随机 UUID nonce 包含 -14 时把 13 行文件误算作 14 行导致偶发失败，由 PR #1904（979da0c634）修复。",
+      "bug_locations": [
+        {
+          "file": ".sandcastle/deployment-acceptance.test.mts",
+          "line_start": 540,
+          "line_end": 540,
+          "extra_ranges": [
+            [564, 564]
+          ],
+          "summary": "使用 includes('-14') 匹配行消费文件名而非按完整 nonce+row 前缀精确匹配，nonce 随机含 '-14' 子串时触发误报。",
+          "category": "flaky_substring_match"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-1988-host-ahead-fail-open-and-selftest",
+      "kind": "bug",
+      "title": "#1988 HOST 领先 origin/main 时 ff-only 返回 0 未 fail-closed 且 serve --once 吞掉退出码 2",
+      "base_sha": "6a97845bf19f302b7b247b3d9c2c6ace9f31cddb",
+      "head_sha": "4d75a01afcc39b0c933ffc1126348420bb0ca0eb",
+      "fix_sha": "b57ac7e87d0a9d071f1c32b17c5c7ab78d95e23d",
+      "pr_number": null,
+      "issue_number": 1988,
+      "source_note": "4d75a01afc 中三处缺陷在 #1988 审查中暴露，由 b57ac7e87d 一并修复。",
+      "bug_locations": [
+        {
+          "file": ".sandcastle/claim-loop.mts",
+          "line_start": 168,
+          "line_end": 169,
+          "summary": "refreshHostMain 仅靠 git merge --ff-only 判失败，但 HEAD 领先 origin/main 时 ff-only 仍返回 0，部署候选未被 fail-closed 拦截。",
+          "category": "fail_open_regression"
+        },
+        {
+          "file": ".sandcastle/deepagents-pilot/pilot1742/executor.py",
+          "line_start": 917,
+          "line_end": 921,
+          "summary": "executor serve 在 --once 模式下吞掉 IdentityError 并返回 0，破坏 cutover-runbook 对退出码 2 的探活契约。",
+          "category": "error_swallowing"
+        },
+        {
+          "file": "scripts/arch_hotzone_monitor.sh",
+          "line_start": 184,
+          "line_end": 185,
+          "summary": "refresh_host_main 同理未检查 origin/main..HEAD 计数，HOST 领先时 ff-only 返回 0 未 fail-closed。",
+          "category": "fail_open_regression"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-1994-review-identity-sweep-gap",
+      "kind": "bug",
+      "title": "#1994 审查身份走 --app-identity 命令行开关遗漏 review_sweep 且权限映射可变",
+      "base_sha": "bcd7b178090863c57b01c9ebc892d05ff2c3e829",
+      "head_sha": "b81e2ec3fc65e032273902d9f8a6a356d13b9afd",
+      "fix_sha": "0064a0a53e5c0e10ee6b042e154df107bded8a3c",
+      "pr_number": 1994,
+      "issue_number": 1742,
+      "source_note": "PR #1994 正式审查 run 9fe83275 中 opus 判 BLOCK，指出命令行开关漏掉 review_sweep 且 frozen AppIdentity 内含可变 dict，由 0064a0a53e 改为固定文件 IDENTITY_CONFIG 与 MappingProxyType。",
+      "bug_locations": [
+        {
+          "file": ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
+          "line_start": 1108,
+          "line_end": 1111,
+          "extra_ranges": [
+            [1143, 1143],
+            [1148, 1148],
+            [1158, 1158]
+          ],
+          "summary": "通过可选 --app-identity 命令行参数指定审查 App 身份，review_sweep 派出的子进程不传该参数会静默回退到执行器 App。",
+          "category": "config_drift"
+        },
+        {
+          "file": ".sandcastle/deepagents-pilot/pilot1742/github_app.py",
+          "line_start": 69,
+          "line_end": 70,
+          "extra_ranges": [
+            [83, 83],
+            [87, 87]
+          ],
+          "summary": "frozen dataclass AppIdentity 的 installation_permissions 存为普通可变 dict，实例创建后仍可原地篡改权限集合。",
+          "category": "immutability_violation"
+        }
+      ]
+    },
+    {
+      "case_id": "bug-1950-agent-devskim-hash-revert",
+      "kind": "bug",
+      "title": "#1950 修改 agent.py 文案破坏 DevSkim 已审清单文件哈希触发整段回退",
+      "base_sha": "9b54087c355e42d21dc04f706defb4654b138a2e",
+      "head_sha": "65e1d7798b01c61a4dc5e0c06aaa5dc1183c440f",
+      "fix_sha": "ca1d2d5eb8d3a8bd0410dac0427e493b43c57719",
+      "pr_number": null,
+      "issue_number": 1950,
+      "source_note": "65e1d7798b 改动 agent.py 导致 .github/devskim-reviewed-1488.json 的 sha256 绑定失效并冒出 45 条旧发现，由 ca1d2d5eb8 回退。",
+      "bug_locations": [
+        {
+          "file": ".sandcastle/deepagents-pilot/pilot1742/agent.py",
+          "line_start": 284,
+          "line_end": 284,
+          "extra_ranges": [
+            [355, 355]
+          ],
+          "summary": "未同步核对 .github/devskim-reviewed-1488.json 的文件哈希钉住约束即改写 agent.py（第 284 行与第 355 行），导致 DevSkim 已审误报清单整体失效。",
+          "category": "ci_gate_breakage"
+        }
+      ]
+    },
+    {
+      "case_id": "clean-1877-boat-unpack-timeout",
+      "kind": "clean",
+      "title": "PR #1877 为运行包解压设置有界 600 秒超时（单轮双审 PASS）",
+      "base_sha": "16575c6069e1d4f67657aeae00c35151a0c2fb1a",
+      "head_sha": "2fe3b778039908db4dc948dd17b9031496c816d4",
+      "fix_sha": null,
+      "pr_number": 1877,
+      "issue_number": 1863,
+      "source_note": "external-review run p1877-a1 中 gpt-6.1-sol 与 claude-opus-5-5 单轮双 PASS，由 caf52d3b76 合入 main，后续无回退。",
+      "bug_locations": []
+    },
+    {
+      "case_id": "clean-1886-v1-cli-approval-path",
+      "kind": "clean",
+      "title": "PR #1886 补全 v1 CLI 的签批包路径（单轮双审 PASS）",
+      "base_sha": "c49e37bb1b1e5ddae00599e0309dde3cb9febea8",
+      "head_sha": "01fdefe98464d0b97258e2228fa514ace292c9bb",
+      "fix_sha": null,
+      "pr_number": 1886,
+      "issue_number": 1882,
+      "source_note": "external-review run p1886-a1 中 gpt-6.1-sol 与 claude-opus-5-5 单轮双 PASS，由 895b8ac413 合入 main，后续无回退。",
+      "bug_locations": []
+    },
+    {
+      "case_id": "clean-1904-exact-row-claim-matcher",
+      "kind": "clean",
+      "title": "PR #1904 精确匹配冻结验收行消费记录（单轮双审 PASS）",
+      "base_sha": "41729a6ac4518b2e87185afa023994c24ba753d2",
+      "head_sha": "9b940773ba5e9f7659c065cbbbb8ea01a4f8c943",
+      "fix_sha": null,
+      "pr_number": 1904,
+      "issue_number": 1742,
+      "source_note": "external-review run p1904-a1 中 gpt-6.1-sol 与 claude-opus-5-5 单轮双 PASS，由 979da0c634 合入 main，后续无回退。",
+      "bug_locations": []
+    },
+    {
+      "case_id": "clean-1974-ci-owned-shard-split",
+      "kind": "clean",
+      "title": "PR #1974 托管路径拆出 owned-h1 并将 extras 槽数调至 5（单轮双审 PASS）",
+      "base_sha": "0b3e7f3cf56b516af3bf0e51a87e41d089e27558",
+      "head_sha": "c93f24883d3bc5dce314f682046e172622eb531f",
+      "fix_sha": null,
+      "pr_number": 1974,
+      "issue_number": 1875,
+      "source_note": "external-review run p1974-a1 中 kimi-k3.1-pro 与 claude-opus-5-5 单轮双 PASS 并合入 main，后续无回退。",
+      "bug_locations": []
+    },
+    {
+      "case_id": "clean-1995-boat-ci-slim-snapshot",
+      "kind": "clean",
+      "title": "PR #1995 Boat 作业改用 CI 专用精简快照 hc-ci-slim（单轮双审 PASS）",
+      "base_sha": "6d4d066058c978bfcd1471bd68aef2a3a79628d5",
+      "head_sha": "b97816d859d3492762cc663cfbc0ed3bbae50125",
+      "fix_sha": null,
+      "pr_number": 1995,
+      "issue_number": 1875,
+      "source_note": "external-review run p1995-a1 中 kimi-k3.1-pro 与 claude-opus-5-5 单轮双 PASS，由 4cf7534960 合入 main，后续无回退。",
+      "bug_locations": []
+    },
+    {
+      "case_id": "clean-2019-fd-identity-test",
+      "kind": "clean",
+      "title": "PR #2019 FD 已关改判为不再指向原文件消除并行测试偶发失败（单轮双审 PASS）",
+      "base_sha": "7caf9b39f1dd4d3e12204d11cb13b3730dc4c9ce",
+      "head_sha": "aa406bb9e0968216fe237ccbaa3858db2023665a",
+      "fix_sha": null,
+      "pr_number": 2019,
+      "issue_number": 1527,
+      "source_note": "external-review run p2019-a1 中 kimi-k3.1-pro 与 claude-opus-5-5 单轮双 PASS，由 f4f03cade5 合入 main，后续无回退。",
+      "bug_locations": []
+    }
+  ]
+}

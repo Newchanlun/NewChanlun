@@ -1,0 +1,3676 @@
+"""代码审查回滚/事故评测集打分与外部审查运行基线统计（#1931）。"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import statistics
+import subprocess
+import sys
+from collections import Counter, defaultdict
+from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
+from dataclasses import asdict, dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, Literal
+
+SCHEMA_VERSION = "review-eval/1"
+CaseKind = Literal["bug", "clean"]
+FindingSeverity = Literal["blocking", "important", "nit", "pre_existing", "info"]
+ReviewVerdict = Literal["PASS", "BLOCK", "FAILED"]
+CaseScoreVerdict = Literal["PASS", "BLOCK", "FAILED", "MISSING"]
+
+_BLOCKING_SEVERITIES: frozenset[str] = frozenset({"blocking", "important"})
+_VALID_SEVERITIES: frozenset[str] = frozenset({"blocking", "important", "nit", "pre_existing", "info"})
+_VALID_VERDICTS: frozenset[str] = frozenset({"PASS", "BLOCK", "FAILED"})
+_VALID_SCORE_VERDICTS: frozenset[str] = frozenset({"PASS", "BLOCK", "FAILED", "MISSING"})
+_UNDECIDED_SCORE_VERDICTS: frozenset[str] = frozenset({"FAILED", "MISSING"})
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+# 启发式正则：仅用于对历史纯文本 findings 做粗粒度归类，非人工标注真值。
+_STYLE_FORMAT_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9_])(?:rustfmt|cargo\s+fmt|prettier|eslint|ruff|flake8|black|gofmt|clang-format|"
+    r"typo|style\s*(?:only|issue|nit)|formatting|whitespace|import\s*order)(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])import\s*(?:排序|顺序|分组)(?![A-Za-z0-9_])|"
+    r"代码格式(?:化|问题|对齐)?|格式对齐|排版(?:格式|问题|对齐)?|缩进|尾随空格|多余空行|拼写错误)",
+    re.IGNORECASE,
+)
+_LEADING_LIST_PREFIX_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
+_LEADING_BOLD_PREFIX_RE = re.compile(r"^(?:\*\*|__)\s*")
+_LEADING_BRACKET_TAG_RE = re.compile(
+    r"^(?:(?:\*\*|__)\s*)?[\[\【](?P<tag>[^\[\【\]\】\n\x01]{1,64})[\]\】](?:\s*(?:\*\*|__))?\s*"
+)
+_CM_LINE_END_RE = re.compile(r"\r\n|\n|\r")
+_CM_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_CM_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)[ \t]*$")
+_CM_ATX_HEADING_RE = re.compile(r"^#{1,6}(?:[ \t]|$)")
+_CM_OPEN_FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+_CM_LIST_MARKER_RE = re.compile(r"^(?P<marker>[-*+]|[0-9]{1,9}[.)])(?=$|[ \t])")
+_CM_HTML_TYPE1_START_RE = re.compile(r"^<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
+_CM_HTML_TYPE1_END_RE = re.compile(r"</(?:pre|script|style|textarea)>", re.IGNORECASE)
+_CM_HTML_TYPE6_START_RE = re.compile(
+    r"^</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|"
+    r"dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|"
+    r"h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|"
+    r"ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)"
+    r"(?:[ \t>]|/>|$)",
+    re.IGNORECASE,
+)
+_CM_HTML_TYPE7_START_RE = re.compile(
+    r"^(?:<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$"
+)
+_CM_ASCII_PUNCT: frozenset[str] = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+_INLINE_MASK_PLACEHOLDER = " \x01 "
+_CM_URI_AUTOLINK_RE = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20\x7f<>]*>")
+_CM_EMAIL_AUTOLINK_RE = re.compile(
+    r"<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*>"
+)
+_CM_HTML_COMMENT_RE = re.compile(r"<!--(?:>|->|.*?-->)", re.DOTALL)
+_CM_HTML_PI_RE = re.compile(r"<\?.*?\?>", re.DOTALL)
+_CM_HTML_DECL_RE = re.compile(r"<![A-Za-z][^>]*>")
+_CM_HTML_CDATA_RE = re.compile(r"<!\[CDATA\[.*?\]\]>", re.DOTALL)
+_CM_HTML_OPEN_TAG_RE = re.compile(
+    r"<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t\n]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t\n]*=[ \t\n]*(?:[^ \t\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t\n]*/?>"
+)
+_CM_HTML_CLOSE_TAG_RE = re.compile(r"</[A-Za-z][A-Za-z0-9-]*[ \t\n]*>")
+_BRACKET_LINE_COORD_RE = re.compile(r":\d")
+_BRACKET_FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9])")
+_KNOWN_ASCII_SEVERITY_WORD_RE = re.compile(
+    r"^(?:p[0-3]|block(?:er|ing)?|important|critical|must[-_ ]?fix|high|medium|med|low|"
+    r"minor|major|nit|info|non[-_ ]?blocking|optional|suggestion|style|warning|warn|error|bug|security)$",
+    re.IGNORECASE,
+)
+_ZH_NEGATION_HEAD_PATTERN = (
+    r"(?:并不是|并非是|并非只是|并非仅仅|不只是|不仅是|不属于|不是|并非|绝非|"
+    r"不能(?:被)?(?:算作?|视为|当作?|归为|说成?)?|"
+    r"不应(?:被)?(?:算作?|视为|当作?|归为)?|"
+    r"不可(?:被)?(?:算作?|视为|当作?)?)"
+)
+_ZH_NEGATION_MODIFIER_PATTERN = r"(?:所谓|单纯|简单|仅仅|只是|一个|一种|一项|一条|一类|个|项|条|类|种|的|地|是)*"
+_TAG_NEGATION_TOKENS: frozenset[str] = frozenset(
+    {
+        "not",
+        "no",
+        "never",
+        "isn't",
+        "aren't",
+        "wasn't",
+        "weren't",
+        "don't",
+        "doesn't",
+        "didn't",
+        "can't",
+        "couldn't",
+        "shouldn't",
+        "wouldn't",
+        "isn’t",
+        "aren’t",
+        "wasn’t",
+        "weren’t",
+        "don’t",
+        "doesn’t",
+        "didn’t",
+        "can’t",
+        "couldn’t",
+        "shouldn’t",
+        "wouldn’t",
+        "非",
+        "并非",
+        "不是",
+        "绝非",
+        "并不是",
+        "不属于",
+        "并非是",
+        "并非只是",
+        "并非仅仅",
+        "不只是",
+        "不仅是",
+        "不能",
+        "不应",
+        "不可",
+    }
+)
+_TAG_ZH_NEGATION_TOKEN_RE = re.compile(
+    rf"^(?:{_ZH_NEGATION_HEAD_PATTERN}{_ZH_NEGATION_MODIFIER_PATTERN}|(?<![是除无])非)$"
+)
+_TAG_CONTRAST_TOKENS: frozenset[str] = frozenset({"but", "yet", "however", "但", "但是", "不过", "然而", "却"})
+_TAG_ZH_NEG_ASCII_SPLIT_RE = re.compile(
+    rf"^({_ZH_NEGATION_HEAD_PATTERN}{_ZH_NEGATION_MODIFIER_PATTERN}|(?<![是除无])非)([a-z][a-z0-9_]*)$"
+)
+_EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS: frozenset[str] = frozenset(
+    {
+        "非阻断",
+        "不阻断",
+        "未阻断",
+        "不构成阻断",
+        "不作为阻断",
+        "不作为阻断理由",
+        "不作为阻断项",
+        "不作为阻断依据",
+        "不单独阻断",
+        "不单独判阻断",
+        "不单独作为阻断",
+        "不单独构成阻断",
+        "non-blocking",
+        "nonblocking",
+        "non_blocking",
+        "nit",
+    }
+)
+_LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
+_TAG_CLAUSE_SPLIT_RE = re.compile(r"[,，、;；/／|｜·・—:：]+")
+_TAG_CLAUSE_TOKEN_SPLIT_RE = re.compile(r'[\s\-"“”「」『』《》()（）]+')
+_TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS | frozenset(
+    {
+        "minor",
+        "low",
+        "低",
+        "p3",
+    }
+)
+_TIER2_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
+    {
+        "阻断",
+        "block",
+        "blocker",
+        "blocking",
+        "important",
+        "critical",
+        "must-fix",
+        "mustfix",
+        "must_fix",
+        "严重",
+        "重要",
+        "高",
+        "p0",
+        "p1",
+        "p2",
+    }
+)
+_TIER3_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
+    {
+        "info",
+        "信息",
+        "信息级",
+        "提示",
+        "建议",
+        "建议后续",
+        "建议后续跟进",
+        "后续跟进",
+        "仅作记录",
+        "低优先级",
+        "可选",
+        "通过",
+        "核实通过",
+        "核验通过",
+        "通过项",
+        "无问题",
+        "未发现问题",
+        "无误",
+        "确认无问题",
+        "确认无误",
+    }
+)
+_ALL_KNOWN_SEVERITY_TAG_TOKENS: frozenset[str] = (
+    _TIER1_NON_BLOCKING_TAG_TOKENS | _TIER2_BLOCKING_TAG_TOKENS | _TIER3_NON_BLOCKING_TAG_TOKENS
+)
+_TIER3_VERIFIED_OK_TAG_RE = re.compile(r"^已核.*(?:无问题|未发现问题)$")
+_ZH_NON_BLOCKING_TAIL_END_PATTERN = r"(?:$|[，,。；;：:！!？?、)）\]】\"”'’」』]|\.(?![A-Za-z0-9_]))"
+_ZH_EXPLICIT_GATE_OBJ_PATTERN = r"(?:(?:(?:本|该)\s*)?(?:PR|CI)(?:\s*(?:合入|合并|发布|检查|门禁))?|合入|合并|发布)"
+_NON_BLOCKING_BODY_HIT_RE = re.compile(
+    r"(?:"
+    r"[\[\【]\s*nit\s*[\]\】]|"
+    r"(?<![A-Za-z0-9_])nit\s*[:：]|"
+    r"非阻断|"
+    r"(?:不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断)"
+    rf"(?=\s*(?:{_ZH_EXPLICIT_GATE_OBJ_PATTERN})?\s*{_ZH_NON_BLOCKING_TAIL_END_PATTERN})|"
+    rf"不阻断(?=\s*{_ZH_EXPLICIT_GATE_OBJ_PATTERN}\s*{_ZH_NON_BLOCKING_TAIL_END_PATTERN})|"
+    rf"(?P<bare_zh_non_block>不阻断)(?=\s*{_ZH_NON_BLOCKING_TAIL_END_PATTERN})|"
+    r"(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
+    r"(?:可选\s*)?建议后续(?:跟进)?|"
+    r"(?:可选\s*)?后续跟进|"
+    r"可选(?:后续)?(?:建议|优化|改进|项)|"
+    r"顺手|"
+    r"(?<![A-Za-z0-9_])minor(?![A-Za-z0-9_])|"
+    r"仅作记录|低优先级"
+    r")",
+    re.IGNORECASE,
+)
+_ZH_VERDICT_SENTENCE_BOUNDARY_RE = re.compile(r"[。！？!?；;：:（(【\[]")
+_ZH_VERDICT_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,：:（(【\[]")
+_ZH_REVIEW_SUBJECT_PATTERN = (
+    r"(?:"
+    r"(?:本|该|此)(?:次|轮|条|项|处)\s*(?:评审|审查|复审|review)?|"
+    r"(?:本|该|此)?(?:评审|审查|复审)|"
+    r"(?:本|该|此)(?:问题|发现|告警|差异)"
+    r")"
+)
+_ZH_BARE_NON_BLOCKING_LEAD_RE = re.compile(
+    r"^(?:"
+    rf"(?:(?:但是|但|不过|然而)\s*)?{_ZH_REVIEW_SUBJECT_PATTERN}|"
+    rf"(?:所以|因此|故此|因而|从而|故)(?:\s*{_ZH_REVIEW_SUBJECT_PATTERN})?"
+    r")(?:\s*(?:暂时|暂|先|仍然|仍|均|都|也|亦))*$",
+    re.IGNORECASE,
+)
+_BODY_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,]")
+_BODY_CONJUNCTION_RESET_RE = re.compile(
+    r"(?:所以|因此|故|从而|于是|但是|不过|然而|但|"
+    r"(?<![A-Za-z0-9_])(?:so|therefore|thus|but|however)(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_ZH_BODY_NEGATION_SUFFIX_RE = re.compile(
+    rf"(?:{_ZH_NEGATION_HEAD_PATTERN}|(?<![是除无])非)"
+    r"(?:[\s\"'“”‘’「」『』《》（()【\[]*"
+    r"(?:所谓|单纯|简单|仅仅|只是|一个|一种|一项|一条|一类|个|项|条|类|种|的|地|是))*"
+    r"[\s\"'“‘「『《（(【\[]*$"
+)
+_EN_BODY_NEGATION_SUFFIX_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(?:not|no|never|(?:is|are|was|were|do|does|did|can|could|should|would)n['’]t)"
+    r"(?:[\s\-\"'“”‘’「」『』《》（()【\[]+"
+    r"(?:just|merely|simply|only|really|actually|strictly|purely|truly|even|a|an|the|any|some|minor|non[-_ ]?blocking))*"
+    r"[\s\-\"'“‘「『《（(【\[]+$",
+    re.IGNORECASE,
+)
+_BLOCKING_MARKER_RE = re.compile(
+    r"(?:[\[\【]\s*p[012]\s*[\]\】]|(?<![A-Za-z0-9_])p[012]\s*[:：]|阻断|必须修复|"
+    r"(?<![A-Za-z0-9_])blocking(?![A-Za-z0-9_])|(?<![A-Za-z0-9_])critical(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])high\s+severity(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+
+
+class EvalValidationError(ValueError):
+    """评测集或输入数据校验失败。"""
+
+
+class DispositionLabel(str, Enum):
+    """人工或流程回填的审查发现去向分类（对照 Anthropic 噪声度量口径）。"""
+
+    FIXED = "fixed"
+    FALSE_POSITIVE = "false_positive"
+    INTENTIONAL = "intentional"
+    NOT_IMPORTANT = "not_important"
+    UNRESOLVED = "unresolved"
+
+
+@dataclass(frozen=True)
+class BugLocation:
+    """真实事故/回滚案例在 head_sha 中的缺陷位置。"""
+
+    file: str
+    line_start: int
+    line_end: int
+    summary: str
+    category: str
+    extra_ranges: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def all_ranges(self) -> tuple[tuple[int, int], ...]:
+        return ((self.line_start, self.line_end), *self.extra_ranges)
+
+
+@dataclass(frozen=True)
+class EvalCase:
+    """单条评测案例（bug 案或 clean 案）。"""
+
+    case_id: str
+    kind: CaseKind
+    title: str
+    base_sha: str
+    head_sha: str
+    fix_sha: str | None = None
+    pr_number: int | None = None
+    issue_number: int | None = None
+    bug_locations: tuple[BugLocation, ...] = ()
+    source_note: str = ""
+
+
+@dataclass(frozen=True)
+class PredictedFinding:
+    """待评测审查器输出的单条发现。"""
+
+    file: str
+    line_start: int | None = None
+    line_end: int | None = None
+    severity: FindingSeverity = "blocking"
+    summary: str = ""
+
+    @property
+    def is_blocking(self) -> bool:
+        return self.severity in _BLOCKING_SEVERITIES
+
+
+@dataclass(frozen=True)
+class CasePrediction:
+    """待评测审查器对单条案例的整体输出。"""
+
+    case_id: str
+    verdict: ReviewVerdict
+    findings: tuple[PredictedFinding, ...] = ()
+
+
+@dataclass(frozen=True)
+class CaseScoreDetail:
+    """单条案例的打分明细。"""
+
+    case_id: str
+    kind: CaseKind
+    verdict: CaseScoreVerdict
+    expected_locations: int
+    matched_locations: int
+    matched_location_indices: tuple[int, ...]
+    blocking_findings: int
+    matched_blocking_findings: int
+    bug_recalled: bool
+    clean_false_positive: bool
+
+
+@dataclass(frozen=True)
+class EvalScore:
+    """评测集整体打分结果。"""
+
+    total_cases: int
+    evaluated_cases: int
+    failed_cases: int
+    missing_cases: int
+    coverage_rate: float
+    bug_cases: int
+    clean_cases: int
+    decided_clean_cases: int
+    recalled_bug_cases: int
+    total_bug_locations: int
+    matched_bug_locations: int
+    clean_false_positive_cases: int
+    total_blocking_findings: int
+    matched_blocking_findings: int
+    bug_case_recall: float
+    bug_location_recall: float
+    clean_false_positive_rate: float | None
+    blocking_precision: float
+    f1: float
+    line_tolerance: int
+    max_finding_span: int
+    cases_fingerprint: str
+    case_details: tuple[CaseScoreDetail, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ScoreComparison:
+    """两次评测打分的增量与逐案变化。"""
+
+    bug_case_recall_delta: float
+    bug_location_recall_delta: float
+    clean_false_positive_rate_delta: float | None
+    blocking_precision_delta: float
+    f1_delta: float
+    coverage_rate_delta: float
+    improved_cases: tuple[str, ...]
+    regressed_cases: tuple[str, ...]
+    mixed_cases: tuple[str, ...]
+    unchanged_cases: tuple[str, ...]
+    undecided_cases: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DispositionEntry:
+    """单条审查发现的显式去向台账记录。"""
+
+    run_id: str
+    pr_number: int
+    model: str
+    finding_index: int
+    disposition: DispositionLabel
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class RoundDistribution:
+    """每 PR 达到首次 PASS 的轮次分布。"""
+
+    prs_counted: int
+    bucket_1: int
+    bucket_2: int
+    bucket_3: int
+    bucket_4_plus: int
+    median: float | None
+    mean: float | None
+    max_rounds: int | None
+
+
+@dataclass(frozen=True)
+class BaselineMetrics:
+    """外部正式审查历史运行的基线统计汇总。"""
+
+    runs_dir: str
+    total_runs: int
+    missing_outcome_runs: int
+    reused_runs: int
+    reused_pass_runs: int
+    fresh_pass_runs: int
+    unorderable_runs: int
+    corrupted_files: tuple[str, ...]
+    verdict_counts: dict[str, int]
+    block_rate_all: float
+    block_rate_decided_including_reuse: float
+    block_rate_fresh_decided: float
+    unique_prs: int
+    prs_with_pass: int
+    prs_without_pass: int
+    prs_first_pass_reused: int
+    rounds_to_first_pass_all: RoundDistribution
+    rounds_to_first_pass_effective: RoundDistribution
+    model_verdict_counts: dict[str, dict[str, int]]
+    model_pair_agreement: dict[str, dict[str, int]]
+    total_receipts: int
+    completed_receipts: int
+    failed_receipts: int
+    total_findings: int
+    findings_by_receipt_status: dict[str, int]
+    findings_by_model: dict[str, int]
+    finding_heuristic_categories: dict[str, int]
+    style_or_format_findings: int
+    nit_style_or_format_findings: int
+    subsequent_head_pass_inferred_fixed: int
+    subsequent_head_pass_total_block_findings: int
+    subsequent_head_pass_undeterminable_findings: int
+    subsequent_head_pass_inferred_rate: float
+    disposition_total: int
+    disposition_coverage_rate: float
+    disposition_counts: dict[str, int]
+    disposition_resolved_rates: dict[str, float]
+
+    @property
+    def block_rate_decided(self) -> float:
+        return self.block_rate_decided_including_reuse
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _norm_path(path: str) -> str:
+    cleaned = path.strip().replace("\\", "/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned.lstrip("/")
+
+
+def _require_nonempty_str(raw: Any, field: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise EvalValidationError(f"字段 {field} 必须是非空字符串")
+    return raw.strip()
+
+
+def _require_optional_int(raw: Any, field: str) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise EvalValidationError(f"字段 {field} 必须是整数或 null")
+    return raw
+
+
+def _require_int(raw: Any, field: str) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise EvalValidationError(f"字段 {field} 必须是整数")
+    return raw
+
+
+def _require_sha(raw: Any, field: str) -> str:
+    if not isinstance(raw, str) or not _SHA_RE.fullmatch(raw):
+        raise EvalValidationError(f"字段 {field} 必须是 40 位小写 Git SHA：{raw!r}")
+    return raw
+
+
+def _merge_line_ranges(ranges: Sequence[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """将闭区间按升序排序并合并重叠或相邻区间。"""
+    if not ranges:
+        return ()
+    ordered = sorted(ranges)
+    merged: list[tuple[int, int]] = [ordered[0]]
+    for r_start, r_end in ordered[1:]:
+        prev_start, prev_end = merged[-1]
+        if r_start <= prev_end + 1:
+            merged[-1] = (prev_start, max(prev_end, r_end))
+        else:
+            merged.append((r_start, r_end))
+    return tuple(merged)
+
+
+def _validate_bug_location_ranges(all_ranges: Sequence[tuple[int, int]], prefix: str) -> None:
+    """校验 BugLocation 的全部区间满足 1 <= start <= end 且严格升序、互不重叠、无重复、无相邻未合并段。"""
+    if not all_ranges:
+        raise EvalValidationError(f"{prefix} 至少需要一个行号区间")
+    prev_end: int | None = None
+    for idx, (r_start, r_end) in enumerate(all_ranges):
+        if isinstance(r_start, bool) or not isinstance(r_start, int) or isinstance(r_end, bool) or not isinstance(r_end, int):
+            raise EvalValidationError(f"{prefix} 行号区间必须是整数：{r_start!r}..{r_end!r}")
+        if r_start < 1 or r_end < r_start:
+            raise EvalValidationError(f"{prefix} 行号区间非法：{r_start}..{r_end}")
+        if prev_end is not None and r_start <= prev_end + 1:
+            raise EvalValidationError(
+                f"{prefix} 的行号区间必须严格升序且无重叠、无重复、无相邻未合并段："
+                f"第 {idx} 段 {r_start}..{r_end} 与前一段末尾 {prev_end} 冲突"
+            )
+        prev_end = r_end
+
+
+def _parse_bug_location(raw: Any, prefix: str) -> BugLocation:
+    if not isinstance(raw, dict):
+        raise EvalValidationError(f"{prefix} 必须是 JSON 对象")
+    file_path = _norm_path(_require_nonempty_str(raw.get("file"), f"{prefix}.file"))
+    line_start = _require_int(raw.get("line_start"), f"{prefix}.line_start")
+    line_end = _require_int(raw.get("line_end"), f"{prefix}.line_end")
+    if line_start < 1 or line_end < line_start:
+        raise EvalValidationError(f"{prefix} 行号区间非法：{line_start}..{line_end}")
+    raw_extra = raw.get("extra_ranges", [])
+    if not isinstance(raw_extra, list):
+        raise EvalValidationError(f"{prefix}.extra_ranges 必须是数组")
+    extra_ranges: list[tuple[int, int]] = []
+    for r_idx, rng in enumerate(raw_extra):
+        r_prefix = f"{prefix}.extra_ranges[{r_idx}]"
+        if not isinstance(rng, list) or len(rng) != 2:
+            raise EvalValidationError(f"{r_prefix} 必须是长度为 2 的整数数组")
+        r_start = _require_int(rng[0], f"{r_prefix}[0]")
+        r_end = _require_int(rng[1], f"{r_prefix}[1]")
+        if r_start < 1 or r_end < r_start:
+            raise EvalValidationError(f"{r_prefix} 行号区间非法：{r_start}..{r_end}")
+        extra_ranges.append((r_start, r_end))
+    _validate_bug_location_ranges(((line_start, line_end), *extra_ranges), prefix)
+    summary = _require_nonempty_str(raw.get("summary"), f"{prefix}.summary")
+    category = _require_nonempty_str(raw.get("category"), f"{prefix}.category")
+    return BugLocation(
+        file=file_path,
+        line_start=line_start,
+        line_end=line_end,
+        summary=summary,
+        category=category,
+        extra_ranges=tuple(extra_ranges),
+    )
+
+
+def load_cases(path: Path) -> tuple[EvalCase, ...]:
+    """读取并做 schema 级校验，返回评测案例元组。"""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvalValidationError(f"无法解析评测集文件 {path}: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise EvalValidationError("评测集根节点必须是 JSON 对象")
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise EvalValidationError(
+            f"schema_version 不匹配：期望 {SCHEMA_VERSION!r}，实际 {payload.get('schema_version')!r}"
+        )
+
+    raw_cases = payload.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise EvalValidationError("cases 必须是非空数组")
+
+    parsed: list[EvalCase] = []
+    for idx, item in enumerate(raw_cases):
+        prefix = f"cases[{idx}]"
+        if not isinstance(item, dict):
+            raise EvalValidationError(f"{prefix} 必须是 JSON 对象")
+        case_id = _require_nonempty_str(item.get("case_id"), f"{prefix}.case_id")
+        kind_raw = _require_nonempty_str(item.get("kind"), f"{prefix}.kind")
+        if kind_raw not in ("bug", "clean"):
+            raise EvalValidationError(f"{prefix}.kind 必须是 'bug' 或 'clean'，实际 {kind_raw!r}")
+        kind: CaseKind = "bug" if kind_raw == "bug" else "clean"
+        title = _require_nonempty_str(item.get("title"), f"{prefix}.title")
+        base_sha = _require_sha(item.get("base_sha"), f"{prefix}.base_sha")
+        head_sha = _require_sha(item.get("head_sha"), f"{prefix}.head_sha")
+        fix_raw = item.get("fix_sha")
+        fix_sha = None if fix_raw is None else _require_sha(fix_raw, f"{prefix}.fix_sha")
+        pr_number = _require_optional_int(item.get("pr_number"), f"{prefix}.pr_number")
+        issue_number = _require_optional_int(item.get("issue_number"), f"{prefix}.issue_number")
+        source_note_raw = item.get("source_note", "")
+        if not isinstance(source_note_raw, str):
+            raise EvalValidationError(f"{prefix}.source_note 必须是字符串")
+        raw_locs = item.get("bug_locations")
+        if not isinstance(raw_locs, list):
+            raise EvalValidationError(f"{prefix}.bug_locations 必须是数组")
+        locs = tuple(
+            _parse_bug_location(loc, f"{prefix}.bug_locations[{loc_idx}]")
+            for loc_idx, loc in enumerate(raw_locs)
+        )
+        parsed.append(
+            EvalCase(
+                case_id=case_id,
+                kind=kind,
+                title=title,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                fix_sha=fix_sha,
+                pr_number=pr_number,
+                issue_number=issue_number,
+                bug_locations=locs,
+                source_note=source_note_raw,
+            )
+        )
+
+    cases = tuple(parsed)
+    validate_cases(cases)
+    return cases
+
+
+def _git_cat_file_exists(repo_root: Path, obj_spec: str) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "cat-file", "-e", obj_spec],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def _git_cat_file_type(repo_root: Path, obj_spec: str) -> str | None:
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "cat-file", "-t", obj_spec],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _git_blob_line_count(repo_root: Path, obj_spec: str) -> int:
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "cat-file", "-p", obj_spec],
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise EvalValidationError(f"无法读取 Git 对象内容：{obj_spec}")
+    raw = proc.stdout
+    if not raw:
+        return 0
+    return raw.count(b"\n") + (0 if raw.endswith(b"\n") else 1)
+
+
+def _parse_unified_diff_added_ranges(diff_text: str) -> tuple[tuple[int, int], ...]:
+    """逐行扫描 unified diff 正文（严格按 Git LF 边界），仅收集真实 `+` 新增/修改行号并合并为连续闭区间。"""
+    added_lines: list[int] = []
+    curr_line: int | None = None
+    remaining_old = 0
+    remaining_new = 0
+    lines = diff_text.split("\n")
+    if diff_text.endswith("\n"):
+        lines.pop()
+    for line in lines:
+        match = _DIFF_HUNK_RE.match(line)
+        if match:
+            remaining_old = int(match.group(2)) if match.group(2) is not None else 1
+            curr_line = int(match.group(3))
+            remaining_new = int(match.group(4)) if match.group(4) is not None else 1
+            continue
+        if curr_line is None or (remaining_old == 0 and remaining_new == 0):
+            continue
+        if line.startswith("\\"):
+            continue
+        if line.startswith("+") and remaining_new > 0:
+            added_lines.append(curr_line)
+            curr_line += 1
+            remaining_new -= 1
+        elif line.startswith(" ") and remaining_old > 0 and remaining_new > 0:
+            curr_line += 1
+            remaining_old -= 1
+            remaining_new -= 1
+        elif line.startswith("-") and remaining_old > 0:
+            remaining_old -= 1
+        else:
+            curr_line = None
+            remaining_old = 0
+            remaining_new = 0
+    return _merge_line_ranges([(ln, ln) for ln in added_lines])
+
+
+def _git_diff_tree_status_map(
+    repo_root: Path,
+    base_sha: str,
+    head_sha: str,
+) -> dict[str, tuple[str, str | None]]:
+    """读取 base_sha..head_sha 含重命名检测（-M）的文件状态映射：new_path -> (status, old_path | None)。"""
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "diff-tree",
+            "-r",
+            "-M",
+            "--no-commit-id",
+            "--name-status",
+            "-z",
+            base_sha,
+            head_sha,
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise EvalValidationError(f"无法读取 Git diff-tree（{base_sha}..{head_sha}）：{stderr_text}")
+
+    status_map: dict[str, tuple[str, str | None]] = {}
+    if not proc.stdout:
+        return status_map
+    parts = proc.stdout.split(b"\x00")
+    idx = 0
+    total = len(parts)
+    while idx < total:
+        raw_status = parts[idx]
+        if not raw_status:
+            idx += 1
+            continue
+        status = raw_status.decode("utf-8", errors="replace")
+        if status.startswith(("R", "C")):
+            if idx + 2 >= total:
+                raise EvalValidationError(
+                    f"解析 Git diff-tree -z 输出失败（{base_sha}..{head_sha}）：重命名/复制条目缺少路径"
+                )
+            old_path = _norm_path(parts[idx + 1].decode("utf-8", errors="replace"))
+            new_path = _norm_path(parts[idx + 2].decode("utf-8", errors="replace"))
+            status_map[new_path] = (status, old_path)
+            idx += 3
+        else:
+            if idx + 1 >= total:
+                raise EvalValidationError(
+                    f"解析 Git diff-tree -z 输出失败（{base_sha}..{head_sha}）：状态条目缺少路径"
+                )
+            path = _norm_path(parts[idx + 1].decode("utf-8", errors="replace"))
+            status_map[path] = (status, None)
+            idx += 2
+    return status_map
+
+
+def _git_diff_added_ranges(
+    repo_root: Path,
+    base_sha: str,
+    head_sha: str,
+    file_path: str,
+    *,
+    status_map: dict[str, tuple[str, str | None]] | None = None,
+) -> tuple[tuple[int, int], ...]:
+    norm_file = _norm_path(file_path)
+    resolved_status_map = (
+        status_map if status_map is not None else _git_diff_tree_status_map(repo_root, base_sha, head_sha)
+    )
+    entry = resolved_status_map.get(norm_file)
+    if entry is None:
+        return ()
+    status, old_path = entry
+    if status == "D":
+        return ()
+
+    if status.startswith("R") and old_path is not None:
+        diff_cmd = [
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "diff.interHunkContext=0",
+            "diff",
+            "-U0",
+            "--inter-hunk-context=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            f"{base_sha}:{old_path}",
+            f"{head_sha}:{norm_file}",
+        ]
+    else:
+        diff_cmd = [
+            "git",
+            "-C",
+            str(repo_root),
+            "--literal-pathspecs",
+            "-c",
+            "diff.interHunkContext=0",
+            "diff",
+            "-U0",
+            "--inter-hunk-context=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            base_sha,
+            head_sha,
+            "--",
+            norm_file,
+        ]
+
+    proc = subprocess.run(
+        diff_cmd,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise EvalValidationError(f"无法读取 Git diff（{base_sha}..{head_sha} -- {norm_file}）：{stderr_text}")
+    return _parse_unified_diff_added_ranges(proc.stdout.decode("utf-8", errors="replace"))
+
+
+def compute_cases_fingerprint(cases: Sequence[EvalCase]) -> str:
+    """按规范排序后的案例元数据与合并规范化后的缺陷位置计算评测集 sha256 指纹。"""
+    canonical = []
+    for c in sorted(cases, key=lambda item: item.case_id):
+        locs_payload = []
+        for loc in c.bug_locations:
+            norm_ranges = _merge_line_ranges(loc.all_ranges)
+            locs_payload.append(
+                {
+                    "file": _norm_path(loc.file),
+                    "line_start": norm_ranges[0][0],
+                    "line_end": norm_ranges[0][1],
+                    "extra_ranges": [[r_start, r_end] for r_start, r_end in norm_ranges[1:]],
+                }
+            )
+        canonical.append(
+            {
+                "case_id": c.case_id,
+                "kind": c.kind,
+                "base_sha": c.base_sha,
+                "head_sha": c.head_sha,
+                "bug_locations": locs_payload,
+            }
+        )
+    encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> None:
+    """校验评测集不变式；提供 repo_root 时同时核验 Git 提交、文件行号界限与 diff hunk 逐行覆盖。"""
+    if not cases:
+        raise EvalValidationError("评测集不能为空")
+
+    seen_ids: set[str] = set()
+    line_count_cache: dict[tuple[str, str], int] = {}
+    diff_status_cache: dict[tuple[str, str], dict[str, tuple[str, str | None]]] = {}
+    diff_hunk_cache: dict[tuple[str, str, str], tuple[tuple[int, int], ...]] = {}
+
+    for case in cases:
+        if not case.case_id.strip():
+            raise EvalValidationError("存在空 case_id")
+        if case.case_id in seen_ids:
+            raise EvalValidationError(f"重复的 case_id：{case.case_id}")
+        seen_ids.add(case.case_id)
+
+        if not _SHA_RE.fullmatch(case.base_sha) or not _SHA_RE.fullmatch(case.head_sha):
+            raise EvalValidationError(f"{case.case_id} 包含非法 40 位小写 SHA")
+        if case.fix_sha is not None and not _SHA_RE.fullmatch(case.fix_sha):
+            raise EvalValidationError(f"{case.case_id} 包含非法 40 位小写 fix_sha：{case.fix_sha!r}")
+        if case.base_sha == case.head_sha:
+            raise EvalValidationError(f"{case.case_id} 的 base_sha 与 head_sha 相同")
+
+        if case.kind == "bug":
+            if not case.bug_locations:
+                raise EvalValidationError(f"bug 案 {case.case_id} 的 bug_locations 不能为空")
+            for loc in case.bug_locations:
+                if not _norm_path(loc.file):
+                    raise EvalValidationError(f"{case.case_id} 存在空文件路径")
+                _validate_bug_location_ranges(loc.all_ranges, f"{case.case_id} 的 {loc.file}")
+        elif case.kind == "clean":
+            if case.bug_locations:
+                raise EvalValidationError(f"clean 案 {case.case_id} 的 bug_locations 必须为空")
+        else:
+            raise EvalValidationError(f"{case.case_id} 存在未知 kind：{case.kind!r}")
+
+        if repo_root is not None:
+            for label, sha in (("base_sha", case.base_sha), ("head_sha", case.head_sha)):
+                if not _git_cat_file_exists(repo_root, f"{sha}^{{commit}}"):
+                    raise EvalValidationError(f"{case.case_id} 的 {label}={sha} 在仓库中不存在")
+            if case.fix_sha is not None and not _git_cat_file_exists(repo_root, f"{case.fix_sha}^{{commit}}"):
+                raise EvalValidationError(f"{case.case_id} 的 fix_sha={case.fix_sha} 在仓库中不存在")
+            for loc in case.bug_locations:
+                norm_file = _norm_path(loc.file)
+                obj_spec = f"{case.head_sha}:{norm_file}"
+                obj_type = _git_cat_file_type(repo_root, obj_spec)
+                if obj_type is None:
+                    raise EvalValidationError(
+                        f"{case.case_id} 的 bug_location 文件在 {case.head_sha} 中不存在：{norm_file}"
+                    )
+                if obj_type != "blob":
+                    raise EvalValidationError(
+                        f"{case.case_id} 的 bug_location 不是 Git blob 文件：{norm_file}（实际类型：{obj_type}）"
+                    )
+                cache_key = (case.head_sha, norm_file)
+                if cache_key not in line_count_cache:
+                    line_count_cache[cache_key] = _git_blob_line_count(repo_root, obj_spec)
+                total_lines = line_count_cache[cache_key]
+                diff_key = (case.base_sha, case.head_sha, norm_file)
+                if diff_key not in diff_hunk_cache:
+                    status_key = (case.base_sha, case.head_sha)
+                    if status_key not in diff_status_cache:
+                        diff_status_cache[status_key] = _git_diff_tree_status_map(
+                            repo_root, case.base_sha, case.head_sha
+                        )
+                    diff_hunk_cache[diff_key] = _merge_line_ranges(
+                        _git_diff_added_ranges(
+                            repo_root,
+                            case.base_sha,
+                            case.head_sha,
+                            norm_file,
+                            status_map=diff_status_cache[status_key],
+                        )
+                    )
+                merged_added_ranges = diff_hunk_cache[diff_key]
+                for r_start, r_end in loc.all_ranges:
+                    if r_end > total_lines:
+                        raise EvalValidationError(
+                            f"{case.case_id} 的 {norm_file} 行号越界：{r_end} > {total_lines}"
+                        )
+                    if not any(
+                        h_start <= r_start and r_end <= h_end for h_start, h_end in merged_added_ranges
+                    ):
+                        hunks_desc = (
+                            ", ".join(f"{h_start}..{h_end}" for h_start, h_end in merged_added_ranges) or "无"
+                        )
+                        raise EvalValidationError(
+                            f"{case.case_id} 的 {norm_file}:{r_start}..{r_end} "
+                            f"未完全落在 {case.base_sha[:10]}..{case.head_sha[:10]} 的新增/修改 diff hunk 内"
+                            f"（可用 hunk：{hunks_desc}）"
+                        )
+
+
+def load_predictions(path: Path) -> tuple[CasePrediction, ...]:
+    """读取待评测审查器的预测 JSON（支持数组或 {"predictions": [...]}）。"""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvalValidationError(f"无法解析预测文件 {path}: {exc}") from exc
+
+    raw_items = payload.get("predictions") if isinstance(payload, dict) else payload
+    if not isinstance(raw_items, list):
+        raise EvalValidationError("预测文件必须是数组或含 predictions 数组的对象")
+
+    predictions: list[CasePrediction] = []
+    for idx, item in enumerate(raw_items):
+        prefix = f"predictions[{idx}]"
+        if not isinstance(item, dict):
+            raise EvalValidationError(f"{prefix} 必须是 JSON 对象")
+        case_id = _require_nonempty_str(item.get("case_id"), f"{prefix}.case_id")
+        verdict_raw = _require_nonempty_str(item.get("verdict"), f"{prefix}.verdict").upper()
+        if verdict_raw not in _VALID_VERDICTS:
+            raise EvalValidationError(f"{prefix}.verdict 非法：{verdict_raw!r}")
+        verdict: ReviewVerdict = "PASS" if verdict_raw == "PASS" else ("BLOCK" if verdict_raw == "BLOCK" else "FAILED")
+        raw_findings = item.get("findings", [])
+        if not isinstance(raw_findings, list):
+            raise EvalValidationError(f"{prefix}.findings 必须是数组")
+        findings: list[PredictedFinding] = []
+        for f_idx, rf in enumerate(raw_findings):
+            f_prefix = f"{prefix}.findings[{f_idx}]"
+            if not isinstance(rf, dict):
+                raise EvalValidationError(f"{f_prefix} 必须是 JSON 对象")
+            file_path = _norm_path(_require_nonempty_str(rf.get("file"), f"{f_prefix}.file"))
+            line_start = _require_optional_int(rf.get("line_start"), f"{f_prefix}.line_start")
+            line_end = _require_optional_int(rf.get("line_end"), f"{f_prefix}.line_end")
+            if line_start is not None and line_start < 1:
+                raise EvalValidationError(f"{f_prefix}.line_start 必须 >= 1")
+            if line_end is not None:
+                if line_start is None:
+                    raise EvalValidationError(f"{f_prefix} 指定了 line_end 但缺少 line_start")
+                if line_end < line_start:
+                    raise EvalValidationError(f"{f_prefix} 行号区间非法：{line_start}..{line_end}")
+            sev_raw = str(rf.get("severity", "blocking")).strip().lower()
+            if sev_raw not in _VALID_SEVERITIES:
+                raise EvalValidationError(f"{f_prefix}.severity 非法：{sev_raw!r}")
+            severity: FindingSeverity = (
+                "blocking"
+                if sev_raw == "blocking"
+                else "important"
+                if sev_raw == "important"
+                else "nit"
+                if sev_raw == "nit"
+                else "pre_existing"
+                if sev_raw == "pre_existing"
+                else "info"
+            )
+            summary = str(rf.get("summary", ""))
+            findings.append(
+                PredictedFinding(
+                    file=file_path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    severity=severity,
+                    summary=summary,
+                )
+            )
+        predictions.append(CasePrediction(case_id=case_id, verdict=verdict, findings=tuple(findings)))
+
+    return tuple(predictions)
+
+
+def _finding_coord_key(finding: PredictedFinding) -> tuple[str, int | None, int | None]:
+    norm_file = _norm_path(finding.file)
+    if finding.line_start is None:
+        return (norm_file, None, None)
+    eff_end = finding.line_end if finding.line_end is not None else finding.line_start
+    return (norm_file, finding.line_start, eff_end)
+
+
+def _finding_matches_location(
+    loc: BugLocation,
+    finding: PredictedFinding,
+    *,
+    line_tolerance: int,
+    max_finding_span: int,
+) -> bool:
+    if not finding.is_blocking or finding.line_start is None:
+        return False
+    f_start = finding.line_start
+    f_end = finding.line_end if finding.line_end is not None else finding.line_start
+    if f_end - f_start + 1 > max_finding_span:
+        return False
+    if _norm_path(loc.file) != _norm_path(finding.file):
+        return False
+    return any(
+        f_start <= r_end + line_tolerance and f_end >= max(1, r_start - line_tolerance)
+        for r_start, r_end in loc.all_ranges
+    )
+
+
+def _finding_sort_key(finding: PredictedFinding) -> tuple[str, int, int, str, str]:
+    norm_file = _norm_path(finding.file)
+    f_start = -1 if finding.line_start is None else finding.line_start
+    eff_end = f_start if finding.line_end is None else finding.line_end
+    return (norm_file, f_start, eff_end, finding.severity, finding.summary)
+
+
+def _match_findings_to_locations(
+    locations: Sequence[BugLocation],
+    blocking_findings: Sequence[PredictedFinding],
+    *,
+    line_tolerance: int,
+    max_finding_span: int,
+) -> tuple[int, ...]:
+    """在真实缺陷位置与阻断发现之间求一对一最大二分图匹配，返回最小字典序的命中 location 索引元组。
+
+    按横截拟阵性质以缺陷位置下标 0..L-1 升序作为左侧顶点依次寻找增广路，并对右侧发现按规范键排序，
+    确保最大匹配基数与 matched_location_indices 对 findings 的任意排列完全不变。
+    """
+    ordered_findings = sorted(blocking_findings, key=_finding_sort_key)
+    adj: list[list[int]] = [
+        [
+            f_idx
+            for f_idx, finding in enumerate(ordered_findings)
+            if _finding_matches_location(
+                loc,
+                finding,
+                line_tolerance=line_tolerance,
+                max_finding_span=max_finding_span,
+            )
+        ]
+        for loc in locations
+    ]
+    finding_match: dict[int, int] = {}
+
+    def _try_augment(loc_idx: int, visited_findings: set[int]) -> bool:
+        for f_idx in adj[loc_idx]:
+            if f_idx in visited_findings:
+                continue
+            visited_findings.add(f_idx)
+            if f_idx not in finding_match or _try_augment(finding_match[f_idx], visited_findings):
+                finding_match[f_idx] = loc_idx
+                return True
+        return False
+
+    matched_locs: list[int] = []
+    for loc_idx in range(len(locations)):
+        if _try_augment(loc_idx, set()):
+            matched_locs.append(loc_idx)
+
+    return tuple(matched_locs)
+
+
+def score_predictions(
+    cases: Sequence[EvalCase],
+    predictions: Sequence[CasePrediction],
+    *,
+    line_tolerance: int = 15,
+    max_finding_span: int = 120,
+    allow_partial: bool = False,
+) -> EvalScore:
+    """按位置容差与一对一最大匹配对审查预测结果打分。
+
+    口径：
+    - 默认严格要求 predictions 覆盖 cases 的全部 case_id；仅在显式 allow_partial=True 时记为 MISSING 并暴露 coverage_rate。
+    - evaluated_cases 仅计实际产生裁定（PASS / BLOCK）的案例数；FAILED 计入 failed_cases、MISSING 计入 missing_cases，两者均计入未裁定覆盖缺口（coverage_rate = evaluated_cases / total_cases）。
+    - bug_case_recall：真实 bug 案被判 BLOCK 且至少一条阻断/Important 发现命中真实 bug_location 的比例。
+    - bug_location_recall：所有真实 bug_location 中经规范坐标去重后一对一最大匹配命中的比例（闭区间跨度超过 max_finding_span 的宽区间发现不计命中）。
+    - clean_false_positive_rate：已实际裁定（PASS / BLOCK）的真实 clean 案中只要 verdict == BLOCK 一律计为误报（FAILED / MISSING 不充当零误报分母）；当已裁定 clean 案数 decided_clean_cases == 0 时返回 None（不可计算）。
+    - blocking_precision：所有阻断/Important 发现（含重复副本）中经去重一对一匹配计为真阳性的比例（重复发现惩罚精确率且不领取额外位置召回）。
+    - f1：blocking_precision 与 bug_location_recall 的调和平均。
+    """
+    if line_tolerance < 0:
+        raise EvalValidationError(f"line_tolerance 不能为负：{line_tolerance}")
+    if max_finding_span < 0:
+        raise EvalValidationError(f"max_finding_span 不能为负：{max_finding_span}")
+    validate_cases(cases)
+
+    case_ids = {c.case_id for c in cases}
+    pred_map: dict[str, CasePrediction] = {}
+    for pred in predictions:
+        if pred.case_id in pred_map:
+            raise EvalValidationError(f"预测中存在重复 case_id：{pred.case_id}")
+        if pred.case_id not in case_ids:
+            raise EvalValidationError(f"预测中存在未知 case_id：{pred.case_id}")
+        if pred.verdict not in _VALID_VERDICTS:
+            raise EvalValidationError(f"预测中存在非法 verdict：{pred.verdict!r}")
+        pred_map[pred.case_id] = pred
+
+    missing_ids = [c.case_id for c in cases if c.case_id not in pred_map]
+    if missing_ids and not allow_partial:
+        raise EvalValidationError(
+            f"预测缺少案例（默认拒绝缺漏，如需部分评测请显式传 allow_partial=True）：{', '.join(missing_ids)}"
+        )
+
+    bug_cases = 0
+    clean_cases = 0
+    evaluated_cases = 0
+    failed_cases = 0
+    decided_clean_cases = 0
+    missing_cases = 0
+    recalled_bug_cases = 0
+    total_bug_locations = 0
+    matched_bug_locations = 0
+    clean_false_positive_cases = 0
+    total_blocking_findings = 0
+    matched_blocking_findings = 0
+    details: list[CaseScoreDetail] = []
+
+    for case in cases:
+        case_pred = pred_map.get(case.case_id)
+        if case_pred is None:
+            missing_cases += 1
+            if case.kind == "bug":
+                bug_cases += 1
+                total_bug_locations += len(case.bug_locations)
+            else:
+                clean_cases += 1
+            details.append(
+                CaseScoreDetail(
+                    case_id=case.case_id,
+                    kind=case.kind,
+                    verdict="MISSING",
+                    expected_locations=len(case.bug_locations),
+                    matched_locations=0,
+                    matched_location_indices=(),
+                    blocking_findings=0,
+                    matched_blocking_findings=0,
+                    bug_recalled=False,
+                    clean_false_positive=False,
+                )
+            )
+            continue
+
+        if case_pred.verdict == "FAILED":
+            failed_cases += 1
+        else:
+            evaluated_cases += 1
+
+        blocking_findings = [f for f in case_pred.findings if f.is_blocking]
+        total_blocking_findings += len(blocking_findings)
+
+        if case.kind == "bug":
+            bug_cases += 1
+            total_bug_locations += len(case.bug_locations)
+            matched_indices: tuple[int, ...] = ()
+            if case_pred.verdict == "BLOCK":
+                dedup_blocking_findings: list[PredictedFinding] = []
+                seen_coords: set[tuple[str, int | None, int | None]] = set()
+                for finding in blocking_findings:
+                    coord_key = _finding_coord_key(finding)
+                    if coord_key in seen_coords:
+                        continue
+                    seen_coords.add(coord_key)
+                    dedup_blocking_findings.append(finding)
+                matched_indices = _match_findings_to_locations(
+                    case.bug_locations,
+                    dedup_blocking_findings,
+                    line_tolerance=line_tolerance,
+                    max_finding_span=max_finding_span,
+                )
+
+            case_matched_blocking = len(matched_indices)
+            matched_bug_locations += len(matched_indices)
+            matched_blocking_findings += case_matched_blocking
+            recalled = case_pred.verdict == "BLOCK" and len(matched_indices) > 0
+            if recalled:
+                recalled_bug_cases += 1
+
+            details.append(
+                CaseScoreDetail(
+                    case_id=case.case_id,
+                    kind=case.kind,
+                    verdict=case_pred.verdict,
+                    expected_locations=len(case.bug_locations),
+                    matched_locations=len(matched_indices),
+                    matched_location_indices=matched_indices,
+                    blocking_findings=len(blocking_findings),
+                    matched_blocking_findings=case_matched_blocking,
+                    bug_recalled=recalled,
+                    clean_false_positive=False,
+                )
+            )
+        else:
+            clean_cases += 1
+            if case_pred.verdict in ("PASS", "BLOCK"):
+                decided_clean_cases += 1
+            # 干净 PR 只要终态为 BLOCK 一律计为误报（无论 findings 为空、仅含 nit 或含 important/blocking）。
+            is_fp = case_pred.verdict == "BLOCK"
+            if is_fp:
+                clean_false_positive_cases += 1
+            details.append(
+                CaseScoreDetail(
+                    case_id=case.case_id,
+                    kind=case.kind,
+                    verdict=case_pred.verdict,
+                    expected_locations=0,
+                    matched_locations=0,
+                    matched_location_indices=(),
+                    blocking_findings=len(blocking_findings),
+                    matched_blocking_findings=0,
+                    bug_recalled=False,
+                    clean_false_positive=is_fp,
+                )
+            )
+
+    coverage_rate = evaluated_cases / len(cases) if cases else 0.0
+    bug_case_recall = recalled_bug_cases / bug_cases if bug_cases else 0.0
+    bug_location_recall = matched_bug_locations / total_bug_locations if total_bug_locations else 0.0
+    clean_false_positive_rate: float | None = (
+        round(clean_false_positive_cases / decided_clean_cases, 6) if decided_clean_cases > 0 else None
+    )
+    blocking_precision = matched_blocking_findings / total_blocking_findings if total_blocking_findings else 0.0
+    f1 = (
+        2.0 * blocking_precision * bug_location_recall / (blocking_precision + bug_location_recall)
+        if (blocking_precision + bug_location_recall) > 0.0
+        else 0.0
+    )
+
+    return EvalScore(
+        total_cases=len(cases),
+        evaluated_cases=evaluated_cases,
+        failed_cases=failed_cases,
+        missing_cases=missing_cases,
+        coverage_rate=round(coverage_rate, 6),
+        bug_cases=bug_cases,
+        clean_cases=clean_cases,
+        decided_clean_cases=decided_clean_cases,
+        recalled_bug_cases=recalled_bug_cases,
+        total_bug_locations=total_bug_locations,
+        matched_bug_locations=matched_bug_locations,
+        clean_false_positive_cases=clean_false_positive_cases,
+        total_blocking_findings=total_blocking_findings,
+        matched_blocking_findings=matched_blocking_findings,
+        bug_case_recall=round(bug_case_recall, 6),
+        bug_location_recall=round(bug_location_recall, 6),
+        clean_false_positive_rate=clean_false_positive_rate,
+        blocking_precision=round(blocking_precision, 6),
+        f1=round(f1, 6),
+        line_tolerance=line_tolerance,
+        max_finding_span=max_finding_span,
+        cases_fingerprint=compute_cases_fingerprint(cases),
+        case_details=tuple(details),
+    )
+
+
+def _validate_matched_location_indices(
+    raw_indices: Sequence[Any],
+    *,
+    matched_locations: int,
+    expected_locations: int,
+    prefix: str,
+) -> tuple[int, ...]:
+    """校验 matched_location_indices 为无重复非负整数元组，且长度与 matched_locations 一致。"""
+    parsed_indices: list[int] = []
+    seen_indices: set[int] = set()
+    for j, item in enumerate(raw_indices):
+        loc_idx = _require_int(item, f"{prefix}.matched_location_indices[{j}]")
+        if loc_idx < 0:
+            raise EvalValidationError(f"{prefix}.matched_location_indices[{j}] 不能为负：{loc_idx}")
+        if loc_idx >= expected_locations:
+            raise EvalValidationError(
+                f"{prefix}.matched_location_indices[{j}] 超出 expected_locations（{expected_locations}）：{loc_idx}"
+            )
+        if loc_idx in seen_indices:
+            raise EvalValidationError(f"{prefix}.matched_location_indices 包含重复索引：{loc_idx}")
+        seen_indices.add(loc_idx)
+        parsed_indices.append(loc_idx)
+    if len(parsed_indices) != matched_locations:
+        raise EvalValidationError(
+            f"{prefix}.matched_location_indices 长度（{len(parsed_indices)}）与 matched_locations（{matched_locations}）不一致"
+        )
+    return tuple(parsed_indices)
+
+
+def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
+    try:
+        raw_details = raw["case_details"]
+        if not isinstance(raw_details, list):
+            raise EvalValidationError("case_details 必须是数组")
+        parsed_details: list[CaseScoreDetail] = []
+        for idx, d in enumerate(raw_details):
+            if not isinstance(d, dict):
+                raise EvalValidationError("case_details 元素必须是对象")
+            prefix = f"case_details[{idx}]"
+            kind_raw = d["kind"]
+            if kind_raw not in ("bug", "clean"):
+                raise EvalValidationError(f"无效的 case kind：{kind_raw!r}")
+            kind: CaseKind = "bug" if kind_raw == "bug" else "clean"
+            verdict_raw = d["verdict"]
+            if verdict_raw not in _VALID_SCORE_VERDICTS:
+                raise EvalValidationError(f"无效的 case verdict：{verdict_raw!r}")
+            verdict: CaseScoreVerdict = (
+                "PASS"
+                if verdict_raw == "PASS"
+                else "BLOCK"
+                if verdict_raw == "BLOCK"
+                else "FAILED"
+                if verdict_raw == "FAILED"
+                else "MISSING"
+            )
+            expected_locations = _require_int(d["expected_locations"], f"{prefix}.expected_locations")
+            if expected_locations < 0:
+                raise EvalValidationError(f"{prefix}.expected_locations 不能为负：{expected_locations}")
+            matched_locations = _require_int(d["matched_locations"], f"{prefix}.matched_locations")
+            if matched_locations < 0:
+                raise EvalValidationError(f"{prefix}.matched_locations 不能为负：{matched_locations}")
+            raw_indices = d["matched_location_indices"]
+            if not isinstance(raw_indices, list):
+                raise EvalValidationError(f"{prefix}.matched_location_indices 必须是数组")
+            matched_location_indices = _validate_matched_location_indices(
+                raw_indices,
+                matched_locations=matched_locations,
+                expected_locations=expected_locations,
+                prefix=prefix,
+            )
+            blocking_findings = _require_int(d["blocking_findings"], f"{prefix}.blocking_findings")
+            if blocking_findings < 0:
+                raise EvalValidationError(f"{prefix}.blocking_findings 不能为负：{blocking_findings}")
+            matched_blocking_findings = _require_int(
+                d["matched_blocking_findings"],
+                f"{prefix}.matched_blocking_findings",
+            )
+            if matched_blocking_findings < 0:
+                raise EvalValidationError(f"{prefix}.matched_blocking_findings 不能为负：{matched_blocking_findings}")
+            parsed_details.append(
+                CaseScoreDetail(
+                    case_id=str(d["case_id"]),
+                    kind=kind,
+                    verdict=verdict,
+                    expected_locations=expected_locations,
+                    matched_locations=matched_locations,
+                    matched_location_indices=matched_location_indices,
+                    blocking_findings=blocking_findings,
+                    matched_blocking_findings=matched_blocking_findings,
+                    bug_recalled=bool(d["bug_recalled"]),
+                    clean_false_positive=bool(d["clean_false_positive"]),
+                )
+            )
+        cases_fp = _require_nonempty_str(raw["cases_fingerprint"], "cases_fingerprint")
+        decided_clean_cases = _require_int(raw["decided_clean_cases"], "decided_clean_cases")
+        if decided_clean_cases < 0:
+            raise EvalValidationError(f"decided_clean_cases 不能为负：{decided_clean_cases}")
+        raw_clean_fp_rate = raw["clean_false_positive_rate"]
+        if raw_clean_fp_rate is None:
+            clean_false_positive_rate: float | None = None
+        elif isinstance(raw_clean_fp_rate, bool) or not isinstance(raw_clean_fp_rate, (int, float)):
+            raise EvalValidationError("clean_false_positive_rate 必须是数值或 null")
+        else:
+            clean_false_positive_rate = float(raw_clean_fp_rate)
+        if decided_clean_cases == 0 and clean_false_positive_rate is not None:
+            raise EvalValidationError("decided_clean_cases 为 0 时 clean_false_positive_rate 必须为 null")
+        if decided_clean_cases > 0 and clean_false_positive_rate is None:
+            raise EvalValidationError("decided_clean_cases 大于 0 时 clean_false_positive_rate 不能为 null")
+        return EvalScore(
+            total_cases=int(raw["total_cases"]),
+            evaluated_cases=int(raw["evaluated_cases"]),
+            failed_cases=int(raw["failed_cases"]),
+            missing_cases=int(raw["missing_cases"]),
+            coverage_rate=float(raw["coverage_rate"]),
+            bug_cases=int(raw["bug_cases"]),
+            clean_cases=int(raw["clean_cases"]),
+            decided_clean_cases=decided_clean_cases,
+            recalled_bug_cases=int(raw["recalled_bug_cases"]),
+            total_bug_locations=int(raw["total_bug_locations"]),
+            matched_bug_locations=int(raw["matched_bug_locations"]),
+            clean_false_positive_cases=int(raw["clean_false_positive_cases"]),
+            total_blocking_findings=int(raw["total_blocking_findings"]),
+            matched_blocking_findings=int(raw["matched_blocking_findings"]),
+            bug_case_recall=float(raw["bug_case_recall"]),
+            bug_location_recall=float(raw["bug_location_recall"]),
+            clean_false_positive_rate=clean_false_positive_rate,
+            blocking_precision=float(raw["blocking_precision"]),
+            f1=float(raw["f1"]),
+            line_tolerance=int(raw["line_tolerance"]),
+            max_finding_span=int(raw["max_finding_span"]),
+            cases_fingerprint=cases_fp,
+            case_details=tuple(parsed_details),
+        )
+    except EvalValidationError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EvalValidationError(f"无效的 EvalScore JSON：{exc}") from exc
+
+
+def compare_scores(before: EvalScore, after: EvalScore) -> ScoreComparison:
+    """对比两次打分，先核验评测集与配置一致性，再产出指标增量与逐案改进/回归/混合列表。"""
+    if not before.cases_fingerprint or not after.cases_fingerprint:
+        raise EvalValidationError("对比打分缺少 cases_fingerprint，无法确认评测集一致")
+    if before.cases_fingerprint != after.cases_fingerprint:
+        raise EvalValidationError(
+            f"评测集指纹不一致，拒绝跨评测集对比：{before.cases_fingerprint} != {after.cases_fingerprint}"
+        )
+    if before.line_tolerance != after.line_tolerance:
+        raise EvalValidationError(
+            f"line_tolerance 不一致，拒绝对比：{before.line_tolerance} != {after.line_tolerance}"
+        )
+    if before.max_finding_span != after.max_finding_span:
+        raise EvalValidationError(
+            f"max_finding_span 不一致，拒绝对比：{before.max_finding_span} != {after.max_finding_span}"
+        )
+
+    before_map: dict[str, CaseScoreDetail] = {}
+    for d in before.case_details:
+        if d.case_id in before_map:
+            raise EvalValidationError(f"before 打分存在重复 case_id：{d.case_id}")
+        _validate_matched_location_indices(
+            d.matched_location_indices,
+            matched_locations=d.matched_locations,
+            expected_locations=d.expected_locations,
+            prefix=f"before.case_details[{d.case_id}]",
+        )
+        before_map[d.case_id] = d
+
+    after_map: dict[str, CaseScoreDetail] = {}
+    for d in after.case_details:
+        if d.case_id in after_map:
+            raise EvalValidationError(f"after 打分存在重复 case_id：{d.case_id}")
+        _validate_matched_location_indices(
+            d.matched_location_indices,
+            matched_locations=d.matched_locations,
+            expected_locations=d.expected_locations,
+            prefix=f"after.case_details[{d.case_id}]",
+        )
+        after_map[d.case_id] = d
+
+    if set(before_map) != set(after_map):
+        raise EvalValidationError(
+            f"before 与 after 的 case_id 集合不一致：{sorted(before_map)} != {sorted(after_map)}"
+        )
+
+    for case_id in sorted(before_map):
+        if before_map[case_id].kind != after_map[case_id].kind:
+            raise EvalValidationError(
+                f"案例 {case_id} 在 before 与 after 中的 kind 不一致："
+                f"{before_map[case_id].kind} != {after_map[case_id].kind}"
+            )
+
+    improved: list[str] = []
+    regressed: list[str] = []
+    mixed: list[str] = []
+    unchanged: list[str] = []
+    undecided: list[str] = []
+
+    for case_id in sorted(before_map):
+        b = before_map[case_id]
+        a = after_map[case_id]
+        b_undecided = b.verdict in _UNDECIDED_SCORE_VERDICTS
+        a_undecided = a.verdict in _UNDECIDED_SCORE_VERDICTS
+        if b_undecided or a_undecided:
+            if b_undecided and a_undecided:
+                undecided.append(case_id)
+            elif a_undecided:
+                b_was_good = (b.kind == "clean" and b.verdict == "PASS") or (b.kind == "bug" and b.bug_recalled)
+                if b_was_good:
+                    regressed.append(case_id)
+                else:
+                    undecided.append(case_id)
+            else:
+                undecided.append(case_id)
+            continue
+
+        if b.kind == "bug":
+            b_locs = set(b.matched_location_indices)
+            a_locs = set(a.matched_location_indices)
+            gained_locs = bool(a_locs - b_locs)
+            lost_locs = bool(b_locs - a_locs)
+            recalled_up = int(a.bug_recalled) > int(b.bug_recalled)
+            recalled_down = int(a.bug_recalled) < int(b.bug_recalled)
+            b_false_blocking = b.blocking_findings - b.matched_blocking_findings
+            a_false_blocking = a.blocking_findings - a.matched_blocking_findings
+            fp_better = a_false_blocking < b_false_blocking
+            fp_worse = a_false_blocking > b_false_blocking
+
+            any_better = recalled_up or gained_locs or fp_better
+            any_worse = recalled_down or lost_locs or fp_worse
+
+            if any_better and any_worse:
+                mixed.append(case_id)
+            elif any_better:
+                improved.append(case_id)
+            elif any_worse:
+                regressed.append(case_id)
+            else:
+                unchanged.append(case_id)
+        else:
+            b_clean_bad = (int(b.clean_false_positive), b.blocking_findings)
+            a_clean_bad = (int(a.clean_false_positive), a.blocking_findings)
+            if a_clean_bad < b_clean_bad:
+                improved.append(case_id)
+            elif a_clean_bad > b_clean_bad:
+                regressed.append(case_id)
+            else:
+                unchanged.append(case_id)
+
+    clean_fp_delta: float | None = (
+        None
+        if (
+            before.decided_clean_cases == 0
+            or after.decided_clean_cases == 0
+            or before.clean_false_positive_rate is None
+            or after.clean_false_positive_rate is None
+        )
+        else round(after.clean_false_positive_rate - before.clean_false_positive_rate, 6)
+    )
+
+    return ScoreComparison(
+        bug_case_recall_delta=round(after.bug_case_recall - before.bug_case_recall, 6),
+        bug_location_recall_delta=round(after.bug_location_recall - before.bug_location_recall, 6),
+        clean_false_positive_rate_delta=clean_fp_delta,
+        blocking_precision_delta=round(after.blocking_precision - before.blocking_precision, 6),
+        f1_delta=round(after.f1 - before.f1, 6),
+        coverage_rate_delta=round(after.coverage_rate - before.coverage_rate, 6),
+        improved_cases=tuple(improved),
+        regressed_cases=tuple(regressed),
+        mixed_cases=tuple(mixed),
+        unchanged_cases=tuple(unchanged),
+        undecided_cases=tuple(undecided),
+    )
+
+
+def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
+    """读取 JSONL 格式的审查发现显式去向台账，并拒绝重复键 (run_id, model, finding_index)。"""
+    entries: list[DispositionEntry] = []
+    seen_keys: set[tuple[str, str, int]] = set()
+    try:
+        raw_text = jsonl_path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise EvalValidationError(f"无法读取去向台账 {jsonl_path}: {exc}") from exc
+
+    raw_lines = raw_text.split("\n")
+    if raw_text.endswith("\n"):
+        raw_lines.pop()
+
+    for line_no, raw_line in enumerate(raw_lines, 1):
+        if raw_line.endswith("\r"):
+            raw_line = raw_line[:-1]
+        stripped = raw_line.strip(" \t")
+        if not stripped:
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise EvalValidationError(f"{jsonl_path}:{line_no} JSON 解析失败：{exc}") from exc
+        if not isinstance(obj, dict):
+            raise EvalValidationError(f"{jsonl_path}:{line_no} 必须是 JSON 对象")
+        run_id = _require_nonempty_str(obj.get("run_id"), f"line {line_no}.run_id")
+        pr_number = _require_int(obj.get("pr_number"), f"line {line_no}.pr_number")
+        model = _require_nonempty_str(obj.get("model"), f"line {line_no}.model")
+        finding_index = _require_int(obj.get("finding_index"), f"line {line_no}.finding_index")
+        if finding_index < 0:
+            raise EvalValidationError(f"line {line_no}.finding_index 不能为负")
+        key = (run_id, model, finding_index)
+        if key in seen_keys:
+            raise EvalValidationError(
+                f"{jsonl_path}:{line_no} 存在重复去向键：(run_id={run_id!r}, model={model!r}, finding_index={finding_index})"
+            )
+        seen_keys.add(key)
+        disp_raw = _require_nonempty_str(obj.get("disposition"), f"line {line_no}.disposition").lower()
+        try:
+            disposition = DispositionLabel(disp_raw)
+        except ValueError as exc:
+            raise EvalValidationError(f"line {line_no}.disposition 非法：{disp_raw!r}") from exc
+        note_raw = obj.get("note", "")
+        if not isinstance(note_raw, str):
+            raise EvalValidationError(f"line {line_no}.note 必须是字符串")
+        entries.append(
+            DispositionEntry(
+                run_id=run_id,
+                pr_number=pr_number,
+                model=model,
+                finding_index=finding_index,
+                disposition=disposition,
+                note=note_raw,
+            )
+        )
+    return tuple(entries)
+
+
+def _is_negated_body_prefix(prefix: str) -> bool:
+    """判断同一子句（且在最近因果/转折词之后）的紧邻前缀是否以中英文否定表达收尾。"""
+    clause = _BODY_CLAUSE_BOUNDARY_RE.split(prefix)[-1]
+    tail = _BODY_CONJUNCTION_RESET_RE.split(clause)[-1]
+    if not tail:
+        return False
+    return bool(_ZH_BODY_NEGATION_SUFFIX_RE.search(tail) or _EN_BODY_NEGATION_SUFFIX_RE.search(tail))
+
+
+def _is_standalone_zh_verdict_clause_prefix(prefix: str) -> bool:
+    """判断裸“不阻断”前文是否为句/括号级空前缀，或由显式评审主语/因果结论词引导。"""
+    sentence_prefix = _ZH_VERDICT_SENTENCE_BOUNDARY_RE.split(prefix)[-1].strip()
+    if sentence_prefix == "":
+        return True
+    clause_prefix = _ZH_VERDICT_CLAUSE_BOUNDARY_RE.split(prefix)[-1].strip()
+    return bool(clause_prefix and _ZH_BARE_NON_BLOCKING_LEAD_RE.fullmatch(clause_prefix))
+
+
+def _has_non_blocking_body_signal(text: str) -> bool:
+    for match in _NON_BLOCKING_BODY_HIT_RE.finditer(text):
+        prefix = text[: match.start()]
+        if _is_negated_body_prefix(prefix):
+            continue
+        if match.group("bare_zh_non_block") is not None and not _is_standalone_zh_verdict_clause_prefix(prefix):
+            continue
+        return True
+    return False
+
+
+def _tokenize_severity_tag_clause(clause: str) -> list[str]:
+    raw_tokens: list[str] = []
+    for part in _TAG_CLAUSE_TOKEN_SPLIT_RE.split(clause.strip()):
+        tok = part.strip("'’‘").lower()
+        if not tok:
+            continue
+        zh_ascii = _TAG_ZH_NEG_ASCII_SPLIT_RE.fullmatch(tok)
+        if zh_ascii:
+            raw_tokens.append(zh_ascii.group(1))
+            raw_tokens.append(zh_ascii.group(2))
+        else:
+            raw_tokens.append(tok)
+    tokens: list[str] = []
+    i = 0
+    while i < len(raw_tokens):
+        if i + 1 < len(raw_tokens):
+            pair = (raw_tokens[i], raw_tokens[i + 1])
+            if pair == ("non", "blocking"):
+                tokens.append("non-blocking")
+                i += 2
+                continue
+            if pair == ("must", "fix"):
+                tokens.append("must-fix")
+                i += 2
+                continue
+        tokens.append(raw_tokens[i])
+        i += 1
+    return tokens
+
+
+def _tokenize_severity_tag(tag_text: str) -> list[str]:
+    tokens: list[str] = []
+    for clause in _TAG_CLAUSE_SPLIT_RE.split(tag_text.strip()):
+        if clause.strip():
+            tokens.extend(_tokenize_severity_tag_clause(clause))
+    return tokens
+
+
+def _is_tag_negation_token(tok: str) -> bool:
+    if tok in _ALL_KNOWN_SEVERITY_TAG_TOKENS:
+        return False
+    return tok in _TAG_NEGATION_TOKENS or bool(_TAG_ZH_NEGATION_TOKEN_RE.fullmatch(tok))
+
+
+def _affirmative_severity_tag_tokens(tag_text: str) -> list[str]:
+    """按分句作用域剔除标签中被否定的词元，仅保留肯定声明的词元。"""
+    affirmative: list[str] = []
+    for clause in _TAG_CLAUSE_SPLIT_RE.split(tag_text.strip()):
+        if not clause.strip():
+            continue
+        negated = False
+        for tok in _tokenize_severity_tag_clause(clause):
+            if tok in _TAG_CONTRAST_TOKENS:
+                negated = False
+                continue
+            if _is_tag_negation_token(tok):
+                negated = True
+                continue
+            if not negated:
+                affirmative.append(tok)
+    return affirmative
+
+
+def _is_explicit_non_blocking_override_tag(tag_text: str) -> bool:
+    """判断后置方括号标签是否肯定声明了显式非阻断/Nit 覆盖（仅做整词匹配并排除否定语境）。"""
+    affirmative = _affirmative_severity_tag_tokens(tag_text)
+    if not affirmative:
+        return False
+    return any(tok in _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS for tok in affirmative)
+
+
+def _classify_severity_tag_text(tag_text: str) -> Literal["blocking", "non_blocking"] | None:
+    affirmative = _affirmative_severity_tag_tokens(tag_text)
+    if not affirmative:
+        return None
+    if any(tok in _TIER1_NON_BLOCKING_TAG_TOKENS for tok in affirmative):
+        return "non_blocking"
+    if any(tok in _TIER2_BLOCKING_TAG_TOKENS for tok in affirmative):
+        return "blocking"
+    compact = "".join(affirmative)
+    if (
+        any(tok in _TIER3_NON_BLOCKING_TAG_TOKENS or _TIER3_VERIFIED_OK_TAG_RE.fullmatch(tok) for tok in affirmative)
+        or compact in _TIER3_NON_BLOCKING_TAG_TOKENS
+        or _TIER3_VERIFIED_OK_TAG_RE.fullmatch(compact)
+    ):
+        return "non_blocking"
+    return None
+
+
+def _is_path_or_coord_bracket(tag_text: str) -> bool:
+    """判断方括号内容是否像文件路径或 file:line 坐标，避免误当作严重度标签。"""
+    inner = tag_text.strip()
+    if not inner:
+        return True
+    if _BRACKET_LINE_COORD_RE.search(inner):
+        return True
+    if "\\" in inner:
+        return True
+    if _BRACKET_FILE_EXT_RE.search(inner):
+        return True
+    if "/" in inner:
+        if inner.startswith("/"):
+            return True
+        segments = inner.split("/")
+        for raw_seg in segments[:-1]:
+            seg = raw_seg.strip()
+            if seg and re.fullmatch(r"[A-Za-z0-9._-]+", seg) and not _KNOWN_ASCII_SEVERITY_WORD_RE.fullmatch(seg):
+                return True
+    return False
+
+
+def _normalize_markdown_link_label(label: str) -> str:
+    """按 CommonMark §4.7 规范化链接引用标签：折叠连续空白并做 Unicode casefold。"""
+    return " ".join(label.split()).casefold()
+
+
+@dataclass(frozen=True)
+class _CmSourceLine:
+    line_idx: int
+    start_offset: int
+    content: str
+
+
+@dataclass(frozen=True)
+class _CmParaLine:
+    line_idx: int
+    start_offset: int
+    text: str
+
+
+@dataclass
+class _CmContainer:
+    kind: Literal["blockquote", "list_item"]
+    required_indent: int = 0
+    has_content: bool = True
+
+
+@dataclass(frozen=True)
+class _CmLinkRefDef:
+    norm_label: str
+    bracket_open_pos: int
+    start_line_idx: int
+    destination: str
+    is_angle_dest: bool
+    has_title: bool
+
+
+def _split_commonmark_lines(text: str) -> list[_CmSourceLine]:
+    """严格按 CommonMark §2.1 行尾（\\r\\n | \\n | \\r）切分文本，保留原始字符偏移。"""
+    lines: list[_CmSourceLine] = []
+    pos = 0
+    line_idx = 0
+    n = len(text)
+    while pos < n:
+        match = _CM_LINE_END_RE.search(text, pos)
+        if match is None:
+            lines.append(_CmSourceLine(line_idx=line_idx, start_offset=pos, content=text[pos:]))
+            break
+        lines.append(_CmSourceLine(line_idx=line_idx, start_offset=pos, content=text[pos : match.start()]))
+        pos = match.end()
+        line_idx += 1
+    return lines
+
+
+def _cm_skip_ws_cols(content: str, idx: int, col: int, pending: int) -> tuple[int, int, int, int]:
+    """跳过空格与 4 列制表位，返回 (跳过列数, 新字符下标, 新列号, 剩余虚拟空格=0)。"""
+    skipped = pending
+    cur_col = col + pending
+    cur_idx = idx
+    n = len(content)
+    while cur_idx < n:
+        ch = content[cur_idx]
+        if ch == " ":
+            skipped += 1
+            cur_col += 1
+            cur_idx += 1
+        elif ch == "\t":
+            tab_width = 4 - (cur_col % 4)
+            skipped += tab_width
+            cur_col += tab_width
+            cur_idx += 1
+        else:
+            break
+    return (skipped, cur_idx, cur_col, 0)
+
+
+def _cm_advance_cols(content: str, idx: int, col: int, pending: int, max_cols: int) -> tuple[int, int, int, int]:
+    """最多消费 max_cols 列空白（含半消费制表符），返回 (实际消费列数, 新下标, 新列号, 剩余虚拟空格)。"""
+    consumed = 0
+    cur_idx = idx
+    cur_col = col
+    cur_pending = pending
+    if cur_pending > 0 and max_cols > 0:
+        take = min(cur_pending, max_cols)
+        consumed += take
+        cur_col += take
+        cur_pending -= take
+    n = len(content)
+    while consumed < max_cols and cur_idx < n:
+        ch = content[cur_idx]
+        if ch == " ":
+            consumed += 1
+            cur_col += 1
+            cur_idx += 1
+        elif ch == "\t":
+            tab_width = 4 - (cur_col % 4)
+            need = max_cols - consumed
+            if tab_width <= need:
+                consumed += tab_width
+                cur_col += tab_width
+                cur_idx += 1
+            else:
+                consumed += need
+                cur_col += need
+                cur_idx += 1
+                cur_pending = tab_width - need
+                break
+        else:
+            break
+    return (consumed, cur_idx, cur_col, cur_pending)
+
+
+def _cm_parse_link_title(buf: str, start: int) -> int | None:
+    """按 CommonMark §6.3 解析链接标题，返回闭合界符之后的下标；失败返回 None。"""
+    opener = buf[start]
+    closer = ")" if opener == "(" else opener
+    i = start + 1
+    n = len(buf)
+    while i < n:
+        ch = buf[i]
+        if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+            i += 2
+            continue
+        if ch == closer:
+            return i + 1
+        if opener == "(" and ch == "(":
+            return None
+        i += 1
+    return None
+
+
+def _cm_scan_bracket_label(buf: str, start: int) -> tuple[int, str | None] | None:
+    """按 CommonMark §4.7/§6.3 扫描无嵌套方括号 `[...]`（至多 999 字符），返回 (闭合 `]` 之后下标, 规范化标签或 None)。"""
+    n = len(buf)
+    if start >= n or buf[start] != "[":
+        return None
+    i = start + 1
+    label_chars = 0
+    has_non_ws = False
+    while i < n:
+        ch = buf[i]
+        if ch == "\\":
+            if i + 1 < n and buf[i + 1] in ("\\", "[", "]"):
+                i += 2
+                label_chars += 2
+                has_non_ws = True
+            else:
+                i += 1
+                label_chars += 1
+                has_non_ws = True
+        elif ch == "[":
+            return None
+        elif ch == "]":
+            break
+        else:
+            if ch not in (" ", "\t", "\n"):
+                has_non_ws = True
+            i += 1
+            label_chars += 1
+        if label_chars > 999:
+            return None
+    if i >= n or buf[i] != "]":
+        return None
+    if label_chars == 0 or not has_non_ws:
+        return (i + 1, None)
+    norm_label = _normalize_markdown_link_label(buf[start + 1 : i])
+    return (i + 1, norm_label or None)
+
+
+def _cm_parse_ref_label_brackets(buf: str, start: int) -> tuple[int, str] | None:
+    """按 CommonMark §4.7 解析 `[label]` 链接标签，返回 (闭合 `]` 之后下标, 规范化标签)；失败返回 None。"""
+    scanned = _cm_scan_bracket_label(buf, start)
+    if scanned is None or scanned[1] is None:
+        return None
+    return (scanned[0], scanned[1])
+
+
+def _cm_parse_link_ref_def_at(buf: str, pos: int) -> tuple[int, str, str, bool, bool] | None:
+    """按 CommonMark §4.7 从段落行首位置解析单条链接引用定义。"""
+    n = len(buf)
+    label_parsed = _cm_parse_ref_label_brackets(buf, pos)
+    if label_parsed is None:
+        return None
+    i, norm_label = label_parsed
+
+    # 2) 冒号 + 可选空白（至多一个换行）
+    if i >= n or buf[i] != ":":
+        return None
+    i += 1
+    while i < n and buf[i] in (" ", "\t"):
+        i += 1
+    if i < n and buf[i] == "\n":
+        i += 1
+        while i < n and buf[i] in (" ", "\t"):
+            i += 1
+
+    # 3) 链接目标（`<...>` 或非空白括号平衡目标）
+    if i >= n or buf[i] == "\n":
+        return None
+    if buf[i] == "<":
+        is_angle_dest = True
+        dest_start = i + 1
+        i += 1
+        while i < n:
+            ch = buf[i]
+            if ch == "\n" or ch == "<":
+                return None
+            if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+                i += 2
+                continue
+            if ch == ">":
+                break
+            i += 1
+        if i >= n or buf[i] != ">":
+            return None
+        destination = buf[dest_start:i]
+        i += 1
+    else:
+        is_angle_dest = False
+        dest_start = i
+        paren_depth = 0
+        while i < n:
+            ch = buf[i]
+            code = ord(ch)
+            if code <= 0x20 or code == 0x7F:
+                break
+            if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+                i += 2
+                continue
+            if ch == "(":
+                paren_depth += 1
+                if paren_depth > 32:
+                    return None
+                i += 1
+            elif ch == ")":
+                if paren_depth == 0:
+                    return None
+                paren_depth -= 1
+                i += 1
+            else:
+                i += 1
+        if i == dest_start or paren_depth != 0:
+            return None
+        destination = buf[dest_start:i]
+
+    # 4) 可选标题 + 行尾匹配（跨行标题失败或尾随非空字符时按 §4.7 回退无标题）
+    after_dest = i
+    j = after_dest
+    while j < n and buf[j] in (" ", "\t"):
+        j += 1
+    if j == n:
+        return (j, norm_label, destination, is_angle_dest, False)
+    if buf[j] == "\n":
+        fallback_next = j + 1
+        k = fallback_next
+        while k < n and buf[k] in (" ", "\t"):
+            k += 1
+        if k < n and buf[k] in ('"', "'", "("):
+            title_end = _cm_parse_link_title(buf, k)
+            if title_end is not None:
+                m = title_end
+                while m < n and buf[m] in (" ", "\t"):
+                    m += 1
+                if m == n:
+                    return (m, norm_label, destination, is_angle_dest, True)
+                if buf[m] == "\n":
+                    return (m + 1, norm_label, destination, is_angle_dest, True)
+        return (fallback_next, norm_label, destination, is_angle_dest, False)
+
+    # 与目标同行的后续非空白：必须先有至少一个空白再接合法标题，且标题后直至行尾无非空白字符
+    if j == after_dest or buf[j] not in ('"', "'", "("):
+        return None
+    title_end = _cm_parse_link_title(buf, j)
+    if title_end is None:
+        return None
+    m = title_end
+    while m < n and buf[m] in (" ", "\t"):
+        m += 1
+    if m == n:
+        return (m, norm_label, destination, is_angle_dest, True)
+    if buf[m] == "\n":
+        return (m + 1, norm_label, destination, is_angle_dest, True)
+    return None
+
+
+def _cm_flush_paragraph_link_defs(
+    para_lines: list[_CmParaLine],
+    out_defs: list[_CmLinkRefDef],
+    out_visible_chunks: list[str] | None = None,
+) -> bool:
+    """从段落起点剥离全部连续 CommonMark §4.7 链接引用定义，返回是否仍剩余普通段落文本。"""
+    if not para_lines:
+        return False
+    buf_parts: list[str] = []
+    buf_start_to_line: dict[int, _CmParaLine] = {}
+    offset = 0
+    for idx, pline in enumerate(para_lines):
+        if idx > 0:
+            buf_parts.append("\n")
+            offset += 1
+        buf_start_to_line[offset] = pline
+        buf_parts.append(pline.text)
+        offset += len(pline.text)
+    buf = "".join(buf_parts)
+
+    pos = 0
+    buf_len = len(buf)
+    while pos < buf_len:
+        parsed = _cm_parse_link_ref_def_at(buf, pos)
+        if parsed is None:
+            break
+        next_pos, norm_label, destination, is_angle_dest, has_title = parsed
+        src_line = buf_start_to_line[pos]
+        ref_def = _CmLinkRefDef(
+            norm_label=norm_label,
+            bracket_open_pos=src_line.start_offset,
+            start_line_idx=src_line.line_idx,
+            destination=destination,
+            is_angle_dest=is_angle_dest,
+            has_title=has_title,
+        )
+        out_defs.append(ref_def)
+        pos = next_pos
+
+    if pos < buf_len and out_visible_chunks is not None:
+        out_visible_chunks.append(buf[pos:])
+
+    para_lines.clear()
+    return pos < buf_len
+
+
+def _cm_detect_html_block_type(rest: str, *, can_interrupt_paragraph: bool) -> int | None:
+    """按 CommonMark §4.6 识别 HTML 块类型（1–7）；类型 7 不能打断段落。"""
+    if not rest.startswith("<"):
+        return None
+    if _CM_HTML_TYPE1_START_RE.match(rest):
+        return 1
+    if rest.startswith("<!--"):
+        return 2
+    if rest.startswith("<?"):
+        return 3
+    if len(rest) >= 3 and rest[1] == "!" and rest[2].isascii() and rest[2].isalpha():
+        return 4
+    if rest.startswith("<![CDATA["):
+        return 5
+    if _CM_HTML_TYPE6_START_RE.match(rest):
+        return 6
+    if not can_interrupt_paragraph and _CM_HTML_TYPE7_START_RE.match(rest):
+        return 7
+    return None
+
+
+def _cm_html_block_ends_on_line(html_type: int, rest: str) -> bool:
+    if html_type == 1:
+        return bool(_CM_HTML_TYPE1_END_RE.search(rest))
+    if html_type == 2:
+        return "-->" in rest
+    if html_type == 3:
+        return "?>" in rest
+    if html_type == 4:
+        return ">" in rest
+    if html_type == 5:
+        return "]]>" in rest
+    return False
+
+
+def _parse_commonmark_blocks(text: str) -> tuple[list[_CmLinkRefDef], tuple[str, ...]]:
+    """按 CommonMark 块级结构提取全部 §4.7 链接引用定义与独立可见正文块元组（排除代码块、HTML 块与链接定义）。"""
+    out_defs: list[_CmLinkRefDef] = []
+    visible_chunks: list[str] = []
+    containers: list[_CmContainer] = []
+    leaf_kind: Literal["none", "paragraph", "fenced_code", "indented_code", "html_block"] = "none"
+    para_lines: list[_CmParaLine] = []
+    fence_char = ""
+    fence_len = 0
+    html_type = 0
+
+    def _close_leaf() -> None:
+        nonlocal leaf_kind, fence_char, fence_len, html_type
+        if leaf_kind == "paragraph":
+            _cm_flush_paragraph_link_defs(para_lines, out_defs, visible_chunks)
+        leaf_kind = "none"
+        fence_char = ""
+        fence_len = 0
+        html_type = 0
+
+    for line in _split_commonmark_lines(text):
+        content = line.content
+        idx = 0
+        col = 0
+        pending = 0
+
+        # 1) 匹配既有容器栈（引用块 / 列表项）
+        matched_count = 0
+        for cont in containers:
+            indent_cols, nonws_idx, nonws_col, _ = _cm_skip_ws_cols(content, idx, col, pending)
+            is_blank = nonws_idx >= len(content)
+            if cont.kind == "blockquote":
+                if not is_blank and indent_cols <= 3 and content[nonws_idx] == ">":
+                    after_idx = nonws_idx + 1
+                    after_col = nonws_col + 1
+                    if after_idx < len(content) and content[after_idx] in (" ", "\t"):
+                        _, idx, col, pending = _cm_advance_cols(content, after_idx, after_col, 0, 1)
+                    else:
+                        idx, col, pending = after_idx, after_col, 0
+                    matched_count += 1
+                else:
+                    break
+            else:
+                if is_blank:
+                    if not cont.has_content:
+                        break
+                    _, idx, col, pending = _cm_advance_cols(content, idx, col, pending, cont.required_indent)
+                    matched_count += 1
+                elif indent_cols >= cont.required_indent:
+                    _, idx, col, pending = _cm_advance_cols(content, idx, col, pending, cont.required_indent)
+                    cont.has_content = True
+                    matched_count += 1
+                else:
+                    break
+
+        all_matched = matched_count == len(containers)
+
+        # 2) 非段落叶子块在容器全部匹配时按各自续行/闭合规则处理；容器未全匹配则直接关闭
+        if leaf_kind in ("fenced_code", "html_block", "indented_code") and not all_matched:
+            _close_leaf()
+            del containers[matched_count:]
+            all_matched = True
+
+        indent_cols, nonws_idx, nonws_col, _ = _cm_skip_ws_cols(content, idx, col, pending)
+        is_blank = nonws_idx >= len(content)
+        rest = "" if is_blank else content[nonws_idx:]
+
+        if leaf_kind == "fenced_code":
+            if (
+                not is_blank
+                and indent_cols <= 3
+                and rest.startswith(fence_char * fence_len)
+                and rest.lstrip(fence_char).strip(" \t") == ""
+            ):
+                _close_leaf()
+            continue
+
+        if leaf_kind == "html_block":
+            if html_type in (6, 7):
+                if is_blank:
+                    _close_leaf()
+                    continue
+                continue
+            if _cm_html_block_ends_on_line(html_type, content[idx:]):
+                _close_leaf()
+            continue
+
+        if leaf_kind == "indented_code":
+            if is_blank or indent_cols >= 4:
+                continue
+            _close_leaf()
+
+        # 3) 空行关闭段落及未匹配容器
+        if is_blank:
+            _close_leaf()
+            del containers[matched_count:]
+            continue
+
+        # 4) 剥离新开的容器前缀（`>` 引用块 / 列表项），支持任意多层嵌套
+        opened_new_container = False
+        while not is_blank and indent_cols <= 3:
+            # 4a) 引用块 `>`（始终可打断段落）
+            if rest.startswith(">"):
+                if not opened_new_container:
+                    _close_leaf()
+                    del containers[matched_count:]
+                    opened_new_container = True
+                containers.append(_CmContainer(kind="blockquote"))
+                after_idx = nonws_idx + 1
+                after_col = nonws_col + 1
+                if after_idx < len(content) and content[after_idx] in (" ", "\t"):
+                    _, idx, col, pending = _cm_advance_cols(content, after_idx, after_col, 0, 1)
+                else:
+                    idx, col, pending = after_idx, after_col, 0
+                indent_cols, nonws_idx, nonws_col, _ = _cm_skip_ws_cols(content, idx, col, pending)
+                is_blank = nonws_idx >= len(content)
+                rest = "" if is_blank else content[nonws_idx:]
+                continue
+
+            # 4b) setext 下划线与分隔线优先于列表项（如 `- - -` / `---`）
+            if leaf_kind == "paragraph" and all_matched and not opened_new_container and _CM_SETEXT_UNDERLINE_RE.match(rest):
+                break
+            if _CM_THEMATIC_BREAK_RE.match(rest):
+                break
+
+            # 4c) 列表项（`-`/`*`/`+` 或 `[0-9]{1,9}[.)]`）
+            list_match = _CM_LIST_MARKER_RE.match(rest)
+            if list_match is None:
+                break
+            marker = list_match.group("marker")
+            after_marker_idx = nonws_idx + len(marker)
+            after_marker_col = nonws_col + len(marker)
+            spaces_after, content_idx, content_col, _ = _cm_skip_ws_cols(content, after_marker_idx, after_marker_col, 0)
+            item_is_blank = content_idx >= len(content)
+            # 按 CommonMark §5.2：仅当当前行处于已匹配的普通段落内部（all_matched 且未开启新容器）时，
+            # 空列表项与起始序号 != 1 的有序列表项不得打断段落；若已退至外层/兄弟容器层级（not all_matched），
+            # 则任意合法序号（如 `2.`）或空项均可结束前一个容器并开启新列表项。
+            if leaf_kind == "paragraph" and all_matched and not opened_new_container:
+                if item_is_blank:
+                    break
+                if marker[-1] in (".", ")") and int(marker[:-1]) != 1:
+                    break
+            if not opened_new_container:
+                _close_leaf()
+                del containers[matched_count:]
+                opened_new_container = True
+            if item_is_blank:
+                req_indent = indent_cols + len(marker) + 1
+                containers.append(_CmContainer(kind="list_item", required_indent=req_indent, has_content=False))
+                idx, col, pending = content_idx, content_col, 0
+                is_blank = True
+                rest = ""
+                break
+            if spaces_after >= 5:
+                req_indent = indent_cols + len(marker) + 1
+                containers.append(_CmContainer(kind="list_item", required_indent=req_indent, has_content=True))
+                _, idx, col, pending = _cm_advance_cols(content, after_marker_idx, after_marker_col, 0, 1)
+            else:
+                req_indent = indent_cols + len(marker) + spaces_after
+                containers.append(_CmContainer(kind="list_item", required_indent=req_indent, has_content=True))
+                idx, col, pending = content_idx, content_col, 0
+            indent_cols, nonws_idx, nonws_col, _ = _cm_skip_ws_cols(content, idx, col, pending)
+            is_blank = nonws_idx >= len(content)
+            rest = "" if is_blank else content[nonws_idx:]
+
+        if is_blank:
+            continue
+
+        # 5) 叶子块判定
+        # 5a) 缩进代码块（非段落续行时缩进 >= 4 列）
+        if indent_cols >= 4 and leaf_kind != "paragraph":
+            if not opened_new_container:
+                del containers[matched_count:]
+            leaf_kind = "indented_code"
+            continue
+
+        # 5b) Setext 标题下划线（段落所有前导均是链接引用定义时，按 §4.7 不构成 setext 标题）
+        if leaf_kind == "paragraph" and all_matched and not opened_new_container and indent_cols <= 3 and _CM_SETEXT_UNDERLINE_RE.match(rest):
+            has_remaining_para = _cm_flush_paragraph_link_defs(para_lines, out_defs, visible_chunks)
+            leaf_kind = "none"
+            if has_remaining_para:
+                continue
+            if _CM_THEMATIC_BREAK_RE.match(rest):
+                continue
+            # 否则（如 `===`）作为新段落首行
+            leaf_kind = "paragraph"
+            para_lines.append(_CmParaLine(line_idx=line.line_idx, start_offset=line.start_offset + nonws_idx, text=rest))
+            continue
+
+        # 5c) 分隔线（Thematic break）
+        if indent_cols <= 3 and _CM_THEMATIC_BREAK_RE.match(rest):
+            _close_leaf()
+            if not opened_new_container:
+                del containers[matched_count:]
+            continue
+
+        # 5d) ATX 标题
+        if indent_cols <= 3 and _CM_ATX_HEADING_RE.match(rest):
+            _close_leaf()
+            if not opened_new_container:
+                del containers[matched_count:]
+            heading_text = re.sub(r"(?:^|[ \t]+)#+[ \t]*$", "", rest.lstrip("#").strip(" \t"))
+            if heading_text:
+                visible_chunks.append(heading_text)
+            continue
+
+        # 5e) 围栏代码块（``` 或 ~~~）
+        if indent_cols <= 3:
+            fence_match = _CM_OPEN_FENCE_RE.match(rest)
+            if fence_match is not None:
+                f_str = fence_match.group("fence")
+                info_str = fence_match.group("info")
+                if f_str[0] == "~" or "`" not in info_str:
+                    _close_leaf()
+                    if not opened_new_container:
+                        del containers[matched_count:]
+                    leaf_kind = "fenced_code"
+                    fence_char = f_str[0]
+                    fence_len = len(f_str)
+                    continue
+
+        # 5f) HTML 块（类型 1–7）
+        if indent_cols <= 3:
+            in_paragraph = leaf_kind == "paragraph" and all_matched and not opened_new_container
+            detected_html = _cm_detect_html_block_type(rest, can_interrupt_paragraph=in_paragraph)
+            if detected_html is not None:
+                _close_leaf()
+                if not opened_new_container:
+                    del containers[matched_count:]
+                if not _cm_html_block_ends_on_line(detected_html, rest):
+                    leaf_kind = "html_block"
+                    html_type = detected_html
+                continue
+
+        # 5g) 普通段落（含容器懒续行）
+        if leaf_kind != "paragraph":
+            if not opened_new_container:
+                del containers[matched_count:]
+            leaf_kind = "paragraph"
+        para_lines.append(_CmParaLine(line_idx=line.line_idx, start_offset=line.start_offset + nonws_idx, text=rest))
+
+    _close_leaf()
+    return (out_defs, tuple(visible_chunks))
+
+
+def _extract_markdown_link_refs_and_visible_blocks(
+    text: str,
+) -> tuple[dict[str, tuple[int, ...]], tuple[str, ...]]:
+    """单次解析 CommonMark 块结构，返回 (有效链接引用定义映射, 独立可见正文块元组)。"""
+    raw_defs, visible_blocks = _parse_commonmark_blocks(text)
+    refs: dict[str, list[int]] = defaultdict(list)
+    for ref_def in raw_defs:
+        refs[ref_def.norm_label].append(ref_def.bracket_open_pos)
+    return ({label: tuple(offsets) for label, offsets in refs.items()}, visible_blocks)
+
+
+def _extract_markdown_link_ref_defs(text: str) -> dict[str, tuple[int, ...]]:
+    """按 CommonMark 块结构与 §4.7 提取有效 Markdown 链接引用定义的规范化标签及其 `[` 起始偏移。"""
+    refs, _ = _extract_markdown_link_refs_and_visible_blocks(text)
+    return refs
+
+
+def _cm_find_code_span_end(buf: str, start: int) -> int | None:
+    """按 CommonMark §6.1 查找反引号行内代码跨度的结束下标；未闭合返回 None。"""
+    n = len(buf)
+    if start >= n or buf[start] != "`":
+        return None
+    tick_len = 0
+    while start + tick_len < n and buf[start + tick_len] == "`":
+        tick_len += 1
+    i = start + tick_len
+    while i < n:
+        if buf[i] == "`":
+            run = 0
+            while i + run < n and buf[i + run] == "`":
+                run += 1
+            if run == tick_len:
+                return i + run
+            i += run
+        else:
+            i += 1
+    return None
+
+
+def _cm_match_autolink_or_inline_html(buf: str, start: int) -> int | None:
+    """按 CommonMark §6.5/§6.6 匹配自动链接或行内原始 HTML，返回结束下标；未命中返回 None。"""
+    n = len(buf)
+    if start + 1 >= n or buf[start] != "<":
+        return None
+    nxt = buf[start + 1]
+    if nxt == "!":
+        if buf.startswith("<!--", start):
+            m = _CM_HTML_COMMENT_RE.match(buf, start)
+            return m.end() if m is not None else None
+        if buf.startswith("<![CDATA[", start):
+            m = _CM_HTML_CDATA_RE.match(buf, start)
+            return m.end() if m is not None else None
+        m = _CM_HTML_DECL_RE.match(buf, start)
+        return m.end() if m is not None else None
+    if nxt == "?":
+        m = _CM_HTML_PI_RE.match(buf, start)
+        return m.end() if m is not None else None
+    if nxt == "/":
+        m = _CM_HTML_CLOSE_TAG_RE.match(buf, start)
+        return m.end() if m is not None else None
+    for pattern in (_CM_URI_AUTOLINK_RE, _CM_EMAIL_AUTOLINK_RE, _CM_HTML_OPEN_TAG_RE):
+        m = pattern.match(buf, start)
+        if m is not None:
+            return m.end()
+    return None
+
+
+def _cm_parse_inline_link_tail(buf: str, start: int) -> int | None:
+    """按 CommonMark §6.5 解析内联链接的 `(...)` 部分，返回闭合 `)` 之后下标；失败返回 None。"""
+    n = len(buf)
+    if start >= n or buf[start] != "(":
+        return None
+    i = start + 1
+    while i < n and buf[i] in (" ", "\t", "\n"):
+        i += 1
+    if i < n and buf[i] == ")":
+        return i + 1
+    if i >= n:
+        return None
+    if buf[i] == "<":
+        i += 1
+        while i < n:
+            ch = buf[i]
+            if ch == "\n" or ch == "<":
+                return None
+            if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+                i += 2
+                continue
+            if ch == ">":
+                i += 1
+                break
+            i += 1
+        else:
+            return None
+    else:
+        dest_start = i
+        paren_depth = 0
+        while i < n:
+            ch = buf[i]
+            code = ord(ch)
+            if code <= 0x20 or code == 0x7F:
+                break
+            if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+                i += 2
+                continue
+            if ch == "(":
+                paren_depth += 1
+                if paren_depth > 32:
+                    return None
+                i += 1
+            elif ch == ")":
+                if paren_depth == 0:
+                    break
+                paren_depth -= 1
+                i += 1
+            else:
+                i += 1
+        if i == dest_start or paren_depth != 0:
+            return None
+    ws_start = i
+    while i < n and buf[i] in (" ", "\t", "\n"):
+        i += 1
+    if i < n and buf[i] == ")":
+        return i + 1
+    if i > ws_start and i < n and buf[i] in ('"', "'", "("):
+        title_end = _cm_parse_link_title(buf, i)
+        if title_end is None:
+            return None
+        i = title_end
+        while i < n and buf[i] in (" ", "\t", "\n"):
+            i += 1
+        if i < n and buf[i] == ")":
+            return i + 1
+    return None
+
+
+@dataclass
+class _BracketOpener:
+    is_image: bool
+    out_start: int
+    src_pos: int
+    active: bool = True
+
+
+def _mask_inline_non_prose_in_block(block: str, defined_link_refs: AbstractSet[str]) -> str:
+    """在单个可见块内按 CommonMark §6.3 括号定界符栈从左到右屏蔽行内非正文结构（代码跨度/自动链接/行内 HTML/图片/链接）。"""
+    out: list[str] = []
+    openers: list[_BracketOpener] = []
+    i = 0
+    n = len(block)
+    while i < n:
+        ch = block[i]
+        # 1) CommonMark §2.4 反斜杠转义 ASCII 标点：原样保留，不误触发行内语法
+        if ch == "\\" and i + 1 < n and block[i + 1] in _CM_ASCII_PUNCT:
+            out.append(block[i : i + 2])
+            i += 2
+            continue
+        # 2) CommonMark §6.1 行内代码跨度：替换为隔离占位符（吞掉内部方括号）；未闭合反引号原样保留
+        if ch == "`":
+            code_end = _cm_find_code_span_end(block, i)
+            if code_end is not None:
+                out.append(_INLINE_MASK_PLACEHOLDER)
+                i = code_end
+                continue
+            tick_end = i
+            while tick_end < n and block[tick_end] == "`":
+                tick_end += 1
+            out.append(block[i:tick_end])
+            i = tick_end
+            continue
+        # 3) CommonMark §6.5 自动链接与 §6.6 行内原始 HTML（注释/标签/CDATA/PI/声明）
+        if ch == "<":
+            html_end = _cm_match_autolink_or_inline_html(block, i)
+            if html_end is not None:
+                out.append(_INLINE_MASK_PLACEHOLDER)
+                i = html_end
+                continue
+        # 4) 图片起始 `![`
+        if ch == "!" and i + 1 < n and block[i + 1] == "[":
+            openers.append(_BracketOpener(is_image=True, out_start=len(out), src_pos=i + 1, active=True))
+            out.append("![")
+            i += 2
+            continue
+        # 5) 链接起始 `[`
+        if ch == "[":
+            openers.append(_BracketOpener(is_image=False, out_start=len(out), src_pos=i, active=True))
+            out.append("[")
+            i += 1
+            continue
+        # 6) 闭合 `]`：按 CommonMark §6.3/§6.5 依次尝试内联、折叠引用、完整引用、快捷引用
+        if ch == "]":
+            if not openers:
+                out.append("]")
+                i += 1
+                continue
+            opener = openers.pop()
+            if not opener.active:
+                out.append("]")
+                i += 1
+                continue
+            after = i + 1
+            matched_end: int | None = None
+            # 6a) 内联链接/图片 [text](dest optional-title)
+            if after < n and block[after] == "(":
+                matched_end = _cm_parse_inline_link_tail(block, after)
+            # 6b) 折叠引用链接/图片 [label][]
+            if matched_end is None and after + 1 < n and block[after : after + 2] == "[]":
+                label_parsed = _cm_parse_ref_label_brackets(block, opener.src_pos)
+                if (
+                    label_parsed is not None
+                    and label_parsed[0] == after
+                    and label_parsed[1] in defined_link_refs
+                ):
+                    matched_end = after + 2
+            elif matched_end is None:
+                # 6c) 完整引用链接/图片 [text][ref]（按 §6.3，后接合法 `[...]` 形态但未定义时不回退快捷引用）
+                ref_scanned = _cm_scan_bracket_label(block, after) if after < n and block[after] == "[" else None
+                if ref_scanned is not None:
+                    if ref_scanned[1] is not None and ref_scanned[1] in defined_link_refs:
+                        matched_end = ref_scanned[0]
+                else:
+                    # 6d) 快捷引用链接/图片 [label]（含 6a 内联 `(...)` 失败或后接非合法标签 `[` 的回退）
+                    label_parsed = _cm_parse_ref_label_brackets(block, opener.src_pos)
+                    if (
+                        label_parsed is not None
+                        and label_parsed[0] == after
+                        and label_parsed[1] in defined_link_refs
+                    ):
+                        matched_end = after
+            if matched_end is not None:
+                del out[opener.out_start :]
+                out.append(_INLINE_MASK_PLACEHOLDER)
+                if not opener.is_image:
+                    # CommonMark §6.3：链接不得嵌套链接；内层链接闭合后令栈中所有外层 `[` 失效（图片 `![` 保持有效）
+                    for outer in openers:
+                        if not outer.is_image:
+                            outer.active = False
+                i = matched_end
+                continue
+            out.append("]")
+            i += 1
+            continue
+        # 7) 其余普通正文字符原样输出
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _parse_leading_severity_tag_with_body(
+    text: str,
+    *,
+    defined_link_refs: AbstractSet[str] | None = None,
+    visible_blocks: tuple[str, ...] | None = None,
+) -> tuple[Literal["blocking", "non_blocking"] | None, int | None, str | None]:
+    """解析首个可见块的行首显式严重度标签，并返回首块下标与跳过行首非路径方括号标签后的正文余部。"""
+    if defined_link_refs is None or visible_blocks is None:
+        parsed_refs, parsed_blocks = _extract_markdown_link_refs_and_visible_blocks(text)
+        effective_refs: AbstractSet[str] = parsed_refs.keys() if defined_link_refs is None else defined_link_refs
+        effective_blocks = parsed_blocks if visible_blocks is None else visible_blocks
+    else:
+        effective_refs = defined_link_refs
+        effective_blocks = visible_blocks
+
+    first_visible_entry = next(((idx, blk) for idx, blk in enumerate(effective_blocks) if blk.strip()), None)
+    if first_visible_entry is None:
+        return (None, None, None)
+    first_visible_idx, first_visible = first_visible_entry
+    masked_target = _mask_inline_non_prose_in_block(first_visible, effective_refs)
+
+    cleaned = masked_target.lstrip()
+    while True:
+        list_match = _LEADING_LIST_PREFIX_RE.match(cleaned)
+        if not list_match:
+            break
+        cleaned = cleaned[list_match.end() :].lstrip()
+
+    bold_match = _LEADING_BOLD_PREFIX_RE.match(cleaned)
+    unbold = cleaned[bold_match.end() :] if bold_match else cleaned
+
+    bracket_tags: list[str] = []
+    pos = 0
+    while True:
+        bracket_match = _LEADING_BRACKET_TAG_RE.match(unbold[pos:])
+        if not bracket_match:
+            break
+        tag_content = bracket_match.group("tag")
+        if _is_path_or_coord_bracket(tag_content):
+            break
+        bracket_tags.append(tag_content)
+        pos += bracket_match.end()
+
+    first_visible_body = unbold[pos:] if bracket_tags else masked_target
+
+    if bracket_tags:
+        first_classified: Literal["blocking", "non_blocking"] | None = None
+        for tag in bracket_tags:
+            tag_cls = _classify_severity_tag_text(tag)
+            if first_classified is None:
+                if tag_cls == "non_blocking":
+                    return ("non_blocking", first_visible_idx, first_visible_body)
+                if tag_cls == "blocking":
+                    first_classified = "blocking"
+            elif _is_explicit_non_blocking_override_tag(tag):
+                return ("non_blocking", first_visible_idx, first_visible_body)
+        if first_classified is not None:
+            return (first_classified, first_visible_idx, first_visible_body)
+
+    colon_match = _LEADING_COLON_TAG_RE.match(cleaned)
+    if colon_match:
+        prefix = colon_match.group(1).strip(" *_")
+        if prefix and "/" not in prefix and "\\" not in prefix and "." not in prefix:
+            colon_tokens = _tokenize_severity_tag(prefix)
+            if colon_tokens and all(tok in _ALL_KNOWN_SEVERITY_TAG_TOKENS for tok in colon_tokens):
+                return (_classify_severity_tag_text(prefix), first_visible_idx, first_visible_body)
+    return (None, first_visible_idx, first_visible_body)
+
+
+def _parse_leading_severity_tag(
+    text: str,
+    *,
+    defined_link_refs: AbstractSet[str] | None = None,
+    visible_blocks: tuple[str, ...] | None = None,
+) -> Literal["blocking", "non_blocking"] | None:
+    """解析首个可见块的行首显式严重度标签（先经单遍行内屏蔽，再支持列表符号/粗体/连续方括号与冒号前导）。"""
+    leading, _, _ = _parse_leading_severity_tag_with_body(
+        text,
+        defined_link_refs=defined_link_refs,
+        visible_blocks=visible_blocks,
+    )
+    return leading
+
+
+def is_non_blocking_or_nit_finding(text: str, receipt_result_status: str) -> bool:
+    """启发式判断单条发现是否属于 Nit / 非阻断级别（行首显式标签优先，正文启发式逐块屏蔽后兜底无标签发现）。"""
+    if receipt_result_status == "completed":
+        return True
+    defined_link_refs, visible_blocks = _extract_markdown_link_refs_and_visible_blocks(text)
+    ref_labels = defined_link_refs.keys()
+    leading, first_visible_idx, first_visible_body = _parse_leading_severity_tag_with_body(
+        text,
+        defined_link_refs=ref_labels,
+        visible_blocks=visible_blocks,
+    )
+    if leading == "non_blocking":
+        return True
+    if leading == "blocking":
+        return False
+    for idx, block in enumerate(visible_blocks):
+        masked_block = (
+            first_visible_body
+            if idx == first_visible_idx and first_visible_body is not None
+            else _mask_inline_non_prose_in_block(block, ref_labels)
+        )
+        if _has_non_blocking_body_signal(masked_block):
+            return True
+    return False
+
+
+def is_style_or_format_finding(text: str) -> bool:
+    """启发式判断单条发现是否涉及代码格式/风格主题（与是否阻断正交）。"""
+    return bool(_STYLE_FORMAT_RE.search(text))
+
+
+def classify_finding_heuristic(text: str, receipt_result_status: str) -> str:
+    """对历史纯文本审查发现做启发式归类（非人工真值，仅作基线参考）。
+
+    先判阻断级别再判格式主题：Nit / 非阻断发现即使提及格式（如 `[Nit] formatting`）
+    也归入 `non_blocking_or_nit`；格式主题由 `is_style_or_format_finding` 正交独立计数。
+    """
+    if is_non_blocking_or_nit_finding(text, receipt_result_status):
+        return "non_blocking_or_nit"
+    if is_style_or_format_finding(text):
+        return "blocking_style_or_format"
+    if (
+        receipt_result_status == "blocked"
+        or _parse_leading_severity_tag(text) == "blocking"
+        or _BLOCKING_MARKER_RE.search(text)
+    ):
+        return "blocking_substantive"
+    return "other"
+
+
+def _compute_round_distribution(rounds_list: Sequence[int]) -> RoundDistribution:
+    if not rounds_list:
+        return RoundDistribution(
+            prs_counted=0,
+            bucket_1=0,
+            bucket_2=0,
+            bucket_3=0,
+            bucket_4_plus=0,
+            median=None,
+            mean=None,
+            max_rounds=None,
+        )
+    b1 = sum(1 for r in rounds_list if r == 1)
+    b2 = sum(1 for r in rounds_list if r == 2)
+    b3 = sum(1 for r in rounds_list if r == 3)
+    b4 = sum(1 for r in rounds_list if r >= 4)
+    return RoundDistribution(
+        prs_counted=len(rounds_list),
+        bucket_1=b1,
+        bucket_2=b2,
+        bucket_3=b3,
+        bucket_4_plus=b4,
+        median=round(float(statistics.median(rounds_list)), 4),
+        mean=round(float(statistics.fmean(rounds_list)), 4),
+        max_rounds=max(rounds_list),
+    )
+
+
+def _append_corrupted(path: Path, runs_dir: Path, corrupted: list[str], corrupted_seen: set[str]) -> None:
+    rel = str(path.relative_to(runs_dir))
+    if rel not in corrupted_seen:
+        corrupted_seen.add(rel)
+        corrupted.append(rel)
+
+
+def _read_json_dict(
+    path: Path,
+    runs_dir: Path,
+    corrupted: list[str],
+    corrupted_seen: set[str],
+) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        _append_corrupted(path, runs_dir, corrupted, corrupted_seen)
+        return None
+    if not isinstance(data, dict):
+        _append_corrupted(path, runs_dir, corrupted, corrupted_seen)
+        return None
+    return data
+
+
+def _parse_optional_nonempty_str_field(data: dict[str, Any] | None, key: str) -> tuple[str | None, bool]:
+    """解析可选非空字符串身份字段，返回 (规范值, 是否显式非法)；键省略返回 (None, False)。"""
+    if data is None or key not in data:
+        return (None, False)
+    raw = data[key]
+    if not isinstance(raw, str) or not raw.strip():
+        return (None, True)
+    return (raw.strip(), False)
+
+
+def _parse_optional_positive_int_field(data: dict[str, Any] | None, key: str) -> tuple[int | None, bool]:
+    """解析可选正整数身份字段，返回 (规范值, 是否显式非法)；键省略返回 (None, False)。"""
+    if data is None or key not in data:
+        return (None, False)
+    raw = data[key]
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return (None, True)
+    return (raw, False)
+
+
+def _parse_optional_nonneg_int_field(data: dict[str, Any] | None, key: str) -> tuple[int | None, bool]:
+    """解析可选非负整数顺序字段，返回 (规范值, 是否显式非法)；键省略返回 (None, False)。"""
+    if data is None or key not in data:
+        return (None, False)
+    raw = data[key]
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return (None, True)
+    return (raw, False)
+
+
+@dataclass(frozen=True)
+class _RunTimelineRecord:
+    registered_at_ns: int
+    attempt: int | None
+    dir_name: str
+    head_sha: str
+    verdict: str
+    is_reused: bool
+    blocking_by_receipt_key: tuple[tuple[tuple[str, str], int], ...]
+
+
+def analyze_review_runs(
+    runs_dir: Path,
+    *,
+    dispositions_path: Path | None = None,
+    dispositions: Sequence[DispositionEntry] | None = None,
+) -> BaselineMetrics:
+    """扫描外部正式审查 runs 目录，产出轮次分布、BLOCK 率（含/去复用双分母）、模型一致性与发现去向基线。"""
+    if not runs_dir.is_dir():
+        raise EvalValidationError(f"runs 目录不存在或不是目录：{runs_dir}")
+    if dispositions_path is not None and dispositions is not None:
+        raise EvalValidationError("不能同时传入 dispositions_path 与 dispositions")
+
+    run_dirs = sorted(p for p in runs_dir.iterdir() if p.is_dir())
+    corrupted_files: list[str] = []
+    corrupted_seen: set[str] = set()
+    verdict_counts: Counter[str] = Counter()
+    missing_outcome_runs = 0
+    reused_runs = 0
+    reused_pass_runs = 0
+    unorderable_runs = 0
+
+    model_verdicts: dict[str, Counter[str]] = defaultdict(Counter)
+    pair_agreement: dict[str, Counter[str]] = defaultdict(Counter)
+
+    total_receipts = 0
+    completed_receipts = 0
+    failed_receipts = 0
+    total_findings = 0
+    findings_by_receipt_status: Counter[str] = Counter()
+    findings_by_model: Counter[str] = Counter()
+    finding_heuristic_categories: Counter[str] = Counter()
+    style_or_format_findings = 0
+    nit_style_or_format_findings = 0
+
+    all_prs: set[int] = set()
+    prs_with_any_pass: set[int] = set()
+    prs_with_unorderable_run: set[int] = set()
+    unorderable_pass_heads_by_pr: dict[int, set[str | None]] = defaultdict(set)
+    pr_timeline: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
+    unorderable_block_by_receipt_key: list[tuple[tuple[str, str], int]] = []
+
+    # (run_id, model) -> (pr_number, finding_count)
+    scanned_receipts: dict[tuple[str, str], tuple[int | None, int]] = {}
+    scanned_receipt_paths: dict[tuple[str, str], Path] = {}
+    ambiguous_receipt_keys: set[tuple[str, str]] = set()
+
+    def _register_receipt_key(
+        receipt_key: tuple[str, str],
+        receipt_path: Path,
+        effective_pr: int | None,
+        finding_count: int,
+    ) -> None:
+        if receipt_key in ambiguous_receipt_keys:
+            _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+            return
+        if receipt_key in scanned_receipt_paths:
+            _append_corrupted(scanned_receipt_paths[receipt_key], runs_dir, corrupted_files, corrupted_seen)
+            _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+            ambiguous_receipt_keys.add(receipt_key)
+            scanned_receipts.pop(receipt_key, None)
+            return
+        scanned_receipt_paths[receipt_key] = receipt_path
+        scanned_receipts[receipt_key] = (effective_pr, finding_count)
+
+    for run_dir in run_dirs:
+        target_path = run_dir / "target.json"
+        outcome_path = run_dir / "outcome.json"
+        receipt_paths = sorted(run_dir.glob("*/receipt.json"))
+
+        # 第一阶段：先读取目录级文件并完成跨文件身份一致性校验，非法或冲突目录彻底隔离。
+        target_data: dict[str, Any] | None = None
+        if target_path.exists():
+            target_data = _read_json_dict(target_path, runs_dir, corrupted_files, corrupted_seen)
+
+        outcome_data: dict[str, Any] | None = None
+        if outcome_path.exists():
+            outcome_data = _read_json_dict(outcome_path, runs_dir, corrupted_files, corrupted_seen)
+
+        outcome_target_invalid = (
+            outcome_data is not None
+            and "target" in outcome_data
+            and not isinstance(outcome_data["target"], dict)
+        )
+        outcome_target = (
+            outcome_data["target"]
+            if outcome_data is not None and isinstance(outcome_data.get("target"), dict)
+            else None
+        )
+
+        t_run_id, t_run_id_bad = _parse_optional_nonempty_str_field(target_data, "run_id")
+        t_pr, t_pr_bad = _parse_optional_positive_int_field(target_data, "pr_number")
+        t_head, t_head_bad = _parse_optional_nonempty_str_field(target_data, "head_sha")
+
+        o_run_id, o_run_id_bad = _parse_optional_nonempty_str_field(outcome_data, "run_id")
+        o_pr, o_pr_bad = _parse_optional_positive_int_field(outcome_data, "pr_number")
+        o_head, o_head_bad = _parse_optional_nonempty_str_field(outcome_data, "head_sha")
+
+        ot_run_id, ot_run_id_bad = _parse_optional_nonempty_str_field(outcome_target, "run_id")
+        ot_pr, ot_pr_bad = _parse_optional_positive_int_field(outcome_target, "pr_number")
+        ot_head, ot_head_bad = _parse_optional_nonempty_str_field(outcome_target, "head_sha")
+
+        dir_run_ids = {rid for rid in (t_run_id, o_run_id, ot_run_id) if rid is not None}
+        dir_prs = {pr for pr in (t_pr, o_pr, ot_pr) if pr is not None}
+        dir_heads = {sha for sha in (t_head, o_head, ot_head) if sha is not None}
+
+        dir_run_id_invalid = t_run_id_bad or o_run_id_bad or ot_run_id_bad
+        dir_pr_invalid = t_pr_bad or o_pr_bad or ot_pr_bad
+        dir_head_invalid = t_head_bad or o_head_bad or ot_head_bad
+        dir_head_non_str = any(
+            d is not None and "head_sha" in d and not isinstance(d["head_sha"], str)
+            for d in (target_data, outcome_data, outcome_target)
+        )
+        dir_head_conflict = len(dir_heads) > 1 or (bool(dir_heads) and dir_head_invalid) or dir_head_non_str
+
+        if not outcome_path.exists():
+            missing_outcome_runs += 1
+
+        dir_identity_corrupted = (
+            outcome_target_invalid
+            or len(dir_run_ids) > 1
+            or len(dir_prs) > 1
+            or dir_head_conflict
+            or dir_run_id_invalid
+            or dir_pr_invalid
+        )
+        if dir_identity_corrupted:
+            if target_path.exists():
+                _append_corrupted(target_path, runs_dir, corrupted_files, corrupted_seen)
+            if outcome_path.exists():
+                _append_corrupted(outcome_path, runs_dir, corrupted_files, corrupted_seen)
+            for rp in receipt_paths:
+                _append_corrupted(rp, runs_dir, corrupted_files, corrupted_seen)
+            verdict_counts["CORRUPTED_IDENTITY"] += 1
+            continue
+
+        dir_run_id: str | None = next(iter(dir_run_ids), None)
+        run_pr_number: int | None = next(iter(dir_prs), None)
+        dir_head_sha: str = next(iter(dir_heads), "")
+
+        verdict = "MISSING_OUTCOME"
+        is_reused = False
+        if outcome_data is not None:
+            raw_verdict = outcome_data.get("verdict")
+            verdict = str(raw_verdict).upper() if isinstance(raw_verdict, str) and raw_verdict.strip() else "UNKNOWN"
+            verdict_counts[verdict] += 1
+            if outcome_data.get("reused_from"):
+                is_reused = True
+                reused_runs += 1
+                if verdict == "PASS":
+                    reused_pass_runs += 1
+
+            raw_reviews = outcome_data.get("reviews")
+            if isinstance(raw_reviews, list):
+                parsed_reviews: list[tuple[str, str]] = []
+                for rev in raw_reviews:
+                    if not isinstance(rev, dict):
+                        continue
+                    model = str(rev.get("model") or "unknown")
+                    rev_verdict = str(rev.get("verdict") or "UNKNOWN").upper()
+                    model_verdicts[model][rev_verdict] += 1
+                    parsed_reviews.append((model, rev_verdict))
+                if len(parsed_reviews) == 2:
+                    ordered = sorted(parsed_reviews, key=lambda item: item[0])
+                    pair_key = f"{ordered[0][0]} vs {ordered[1][0]}"
+                    outcome_key = f"{ordered[0][1]} / {ordered[1][1]}"
+                    pair_agreement[pair_key][outcome_key] += 1
+        else:
+            verdict_counts["MISSING_OUTCOME"] += 1
+
+        if run_pr_number is not None:
+            all_prs.add(run_pr_number)
+            if verdict == "PASS":
+                prs_with_any_pass.add(run_pr_number)
+
+        # 第二阶段：预扫描目录内所有回执、校验单回执合法性与跨回执身份一致性后再提交统计与台账。
+        candidate_receipts: list[tuple[Path, dict[str, Any], str | None, int | None, str | None]] = []
+        for receipt_path in receipt_paths:
+            receipt = _read_json_dict(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+            if receipt is None:
+                continue
+            r_run_id, r_run_id_bad = _parse_optional_nonempty_str_field(receipt, "run_id")
+            r_pr, r_pr_bad = _parse_optional_positive_int_field(receipt, "pr_number")
+            r_head, r_head_bad = _parse_optional_nonempty_str_field(receipt, "head_sha")
+
+            if r_run_id_bad or r_pr_bad or r_head_bad:
+                _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+                continue
+            if dir_run_id is not None and r_run_id is not None and r_run_id != dir_run_id:
+                _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+                continue
+            if run_pr_number is not None and r_pr is not None and r_pr != run_pr_number:
+                _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+                continue
+            if dir_head_sha and r_head is not None and r_head != dir_head_sha:
+                _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+                continue
+            candidate_receipts.append((receipt_path, receipt, r_run_id, r_pr, r_head))
+
+        cand_run_ids = {r_rid for _, _, r_rid, _, _ in candidate_receipts if r_rid is not None}
+        cand_prs = {r_pr for _, _, _, r_pr, _ in candidate_receipts if r_pr is not None}
+        cand_heads = {r_head for _, _, _, _, r_head in candidate_receipts if r_head is not None}
+        cross_receipt_conflict = (
+            (dir_run_id is None and len(cand_run_ids) > 1)
+            or (run_pr_number is None and len(cand_prs) > 1)
+            or (not dir_head_sha and len(cand_heads) > 1)
+        )
+        if cross_receipt_conflict:
+            for rp, _, _, _, _ in candidate_receipts:
+                _append_corrupted(rp, runs_dir, corrupted_files, corrupted_seen)
+            candidate_receipts = []
+
+        resolved_receipt_run_id = dir_run_id or next(iter(cand_run_ids), None) or run_dir.name
+        run_blocking_by_key: list[tuple[tuple[str, str], int]] = []
+        for receipt_path, receipt, r_run_id, r_pr, _r_head in candidate_receipts:
+            total_receipts += 1
+            r_status = str(receipt.get("status") or "unknown").lower()
+            if r_status == "completed":
+                completed_receipts += 1
+            elif r_status == "failed":
+                failed_receipts += 1
+
+            model = str(receipt.get("model") or receipt_path.parent.name)
+            effective_run_id = r_run_id or resolved_receipt_run_id
+            effective_pr = run_pr_number if run_pr_number is not None else r_pr
+            receipt_key = (effective_run_id, model)
+
+            result = receipt.get("result")
+            if not isinstance(result, dict):
+                _register_receipt_key(receipt_key, receipt_path, effective_pr, 0)
+                continue
+            result_status = str(result.get("status") or "unknown").lower()
+            raw_findings = result.get("findings")
+            if not isinstance(raw_findings, list):
+                _register_receipt_key(receipt_key, receipt_path, effective_pr, 0)
+                continue
+
+            _register_receipt_key(receipt_key, receipt_path, effective_pr, len(raw_findings))
+            receipt_blocking_findings = 0
+            for finding in raw_findings:
+                text = finding if isinstance(finding, str) else json.dumps(finding, ensure_ascii=False)
+                total_findings += 1
+                findings_by_receipt_status[result_status] += 1
+                findings_by_model[model] += 1
+                is_non_blocking = is_non_blocking_or_nit_finding(text, result_status)
+                if is_style_or_format_finding(text):
+                    style_or_format_findings += 1
+                    if is_non_blocking:
+                        nit_style_or_format_findings += 1
+                category = classify_finding_heuristic(text, result_status)
+                finding_heuristic_categories[category] += 1
+                if verdict == "BLOCK" and result_status == "blocked" and not is_non_blocking:
+                    receipt_blocking_findings += 1
+            if receipt_blocking_findings > 0:
+                run_blocking_by_key.append((receipt_key, receipt_blocking_findings))
+
+        t_reg, t_reg_bad = _parse_optional_positive_int_field(target_data, "registered_at_ns")
+        ot_reg, ot_reg_bad = _parse_optional_positive_int_field(outcome_target, "registered_at_ns")
+        reg_values = {v for v in (t_reg, ot_reg) if v is not None}
+        has_valid_ts = not t_reg_bad and not ot_reg_bad and len(reg_values) == 1
+
+        t_att, t_att_bad = _parse_optional_nonneg_int_field(target_data, "attempt")
+        ot_att, ot_att_bad = _parse_optional_nonneg_int_field(outcome_target, "attempt")
+        att_values = {v for v in (t_att, ot_att) if v is not None}
+        has_valid_attempt = not t_att_bad and not ot_att_bad and len(att_values) <= 1
+
+        if run_pr_number is None or not has_valid_ts:
+            unorderable_runs += 1
+            if run_pr_number is not None:
+                prs_with_unorderable_run.add(run_pr_number)
+                if verdict == "PASS":
+                    unorderable_pass_heads_by_pr[run_pr_number].add(dir_head_sha or None)
+            if verdict == "BLOCK" and run_blocking_by_key:
+                unorderable_block_by_receipt_key.extend(run_blocking_by_key)
+            continue
+
+        if not has_valid_attempt:
+            unorderable_runs += 1
+            prs_with_unorderable_run.add(run_pr_number)
+
+        resolved_reg_at_ns = next(iter(reg_values))
+        attempt: int | None = next(iter(att_values), None) if has_valid_attempt else None
+        pr_timeline[run_pr_number].append(
+            _RunTimelineRecord(
+                registered_at_ns=resolved_reg_at_ns,
+                attempt=attempt,
+                dir_name=run_dir.name,
+                head_sha=dir_head_sha,
+                verdict=verdict,
+                is_reused=is_reused,
+                blocking_by_receipt_key=tuple(run_blocking_by_key),
+            )
+        )
+
+    rounds_all: list[int] = []
+    rounds_effective: list[int] = []
+    prs_first_pass_reused = 0
+    inferred_fixed = 0
+    total_block_findings = 0
+    undeterminable_block_findings = sum(
+        cnt for key, cnt in unorderable_block_by_receipt_key if key not in ambiguous_receipt_keys
+    )
+
+    for pr_number, records in sorted(pr_timeline.items()):
+        ordered_runs = sorted(
+            records,
+            key=lambda r: (r.registered_at_ns, r.attempt is None, r.attempt if r.attempt is not None else 0, r.dir_name),
+        )
+
+        if pr_number not in prs_with_unorderable_run:
+            grouped_by_ts: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
+            for rec in records:
+                grouped_by_ts[rec.registered_at_ns].append(rec)
+
+            earlier_runs: list[_RunTimelineRecord] = []
+            first_pass_ts_group: list[_RunTimelineRecord] | None = None
+            for ts in sorted(grouped_by_ts):
+                ts_group = grouped_by_ts[ts]
+                if any(r.verdict == "PASS" for r in ts_group):
+                    first_pass_ts_group = ts_group
+                    break
+                earlier_runs.extend(ts_group)
+
+            if first_pass_ts_group is not None:
+                resolved_pass_group: list[_RunTimelineRecord] | None = None
+                if len(first_pass_ts_group) == 1:
+                    resolved_pass_group = first_pass_ts_group
+                elif any(r.attempt is None for r in first_pass_ts_group):
+                    has_non_pass = any(r.verdict != "PASS" for r in first_pass_ts_group)
+                    has_mixed_reuse = len({r.is_reused for r in first_pass_ts_group}) > 1
+                    if not has_non_pass and not has_mixed_reuse:
+                        resolved_pass_group = first_pass_ts_group
+                else:
+                    grouped_by_attempt: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
+                    for rec in first_pass_ts_group:
+                        if rec.attempt is not None:
+                            grouped_by_attempt[rec.attempt].append(rec)
+                    for att in sorted(grouped_by_attempt):
+                        att_group = grouped_by_attempt[att]
+                        if any(r.verdict == "PASS" for r in att_group):
+                            has_non_pass = any(r.verdict != "PASS" for r in att_group)
+                            has_mixed_reuse = len({r.is_reused for r in att_group}) > 1
+                            if not has_non_pass and not has_mixed_reuse:
+                                resolved_pass_group = att_group
+                            break
+                        earlier_runs.extend(att_group)
+
+                if resolved_pass_group is not None:
+                    rounds_all.append(len(earlier_runs) + 1)
+                    if resolved_pass_group[0].is_reused:
+                        prs_first_pass_reused += 1
+                    else:
+                        # 有效评审轮次：仅计真实新产生正式裁定（PASS / BLOCK 且非 reused_from）的轮次。
+                        fresh_effective_before_pass = sum(
+                            1
+                            for rec in earlier_runs
+                            if rec.verdict in ("PASS", "BLOCK") and not rec.is_reused
+                        )
+                        rounds_effective.append(fresh_effective_before_pass + 1)
+
+        unorderable_pass_heads = unorderable_pass_heads_by_pr.get(pr_number, set())
+        for rec in ordered_runs:
+            effective_blocking_count = sum(
+                cnt for key, cnt in rec.blocking_by_receipt_key if key not in ambiguous_receipt_keys
+            )
+            if rec.verdict != "BLOCK" or effective_blocking_count <= 0:
+                continue
+            if not rec.head_sha:
+                undeterminable_block_findings += effective_blocking_count
+                continue
+            strictly_later_passes = [
+                later
+                for later in ordered_runs
+                if later.verdict == "PASS" and later.registered_at_ns > rec.registered_at_ns
+            ]
+            has_diff_head_pass = any(
+                later.head_sha and later.head_sha != rec.head_sha for later in strictly_later_passes
+            )
+            has_unorderable_diff_or_missing_head_pass = any(
+                h is None or h != rec.head_sha for h in unorderable_pass_heads
+            )
+            if has_diff_head_pass:
+                total_block_findings += effective_blocking_count
+                inferred_fixed += effective_blocking_count
+            elif has_unorderable_diff_or_missing_head_pass or any(
+                not later.head_sha for later in strictly_later_passes
+            ):
+                undeterminable_block_findings += effective_blocking_count
+            else:
+                total_block_findings += effective_blocking_count
+
+    disposition_counts_counter: Counter[str] = Counter({label.value: 0 for label in DispositionLabel})
+    entries: tuple[DispositionEntry, ...] = ()
+    if dispositions_path is not None:
+        entries = load_dispositions(dispositions_path)
+    elif dispositions is not None:
+        seen_disp_keys: set[tuple[str, str, int]] = set()
+        for idx_d, entry in enumerate(dispositions):
+            if entry.finding_index < 0:
+                raise EvalValidationError(f"dispositions[{idx_d}].finding_index 不能为负")
+            d_key = (entry.run_id, entry.model, entry.finding_index)
+            if d_key in seen_disp_keys:
+                raise EvalValidationError(
+                    f"dispositions 存在重复去向键：(run_id={entry.run_id!r}, model={entry.model!r}, finding_index={entry.finding_index})"
+                )
+            seen_disp_keys.add(d_key)
+        entries = tuple(dispositions)
+
+    for entry in entries:
+        receipt_key = (entry.run_id, entry.model)
+        if receipt_key in ambiguous_receipt_keys:
+            raise EvalValidationError(
+                f"去向台账引用了存在重复回执键的歧义回执，无法唯一指向发现："
+                f"(run_id={entry.run_id!r}, model={entry.model!r})"
+            )
+        if receipt_key not in scanned_receipts:
+            raise EvalValidationError(
+                f"去向台账引用了不存在的回执：(run_id={entry.run_id!r}, model={entry.model!r})"
+            )
+        receipt_pr, finding_count = scanned_receipts[receipt_key]
+        if receipt_pr != entry.pr_number:
+            raise EvalValidationError(
+                f"去向台账 pr_number 与回执不一致：(run_id={entry.run_id!r}, model={entry.model!r}) "
+                f"回执为 {receipt_pr}，台账为 {entry.pr_number}"
+            )
+        if not (0 <= entry.finding_index < finding_count):
+            raise EvalValidationError(
+                f"去向台账 finding_index 越界：(run_id={entry.run_id!r}, model={entry.model!r}) "
+                f"finding_index={entry.finding_index}，回执发现条数为 {finding_count}"
+            )
+        disposition_counts_counter[entry.disposition.value] += 1
+
+    disposition_total = len(entries)
+    disposition_coverage_rate = round(disposition_total / total_findings, 6) if total_findings else 0.0
+
+    resolved_labels = (
+        DispositionLabel.FIXED.value,
+        DispositionLabel.FALSE_POSITIVE.value,
+        DispositionLabel.INTENTIONAL.value,
+        DispositionLabel.NOT_IMPORTANT.value,
+    )
+    resolved_total = sum(disposition_counts_counter[label] for label in resolved_labels)
+    disposition_resolved_rates = {
+        label: round(disposition_counts_counter[label] / resolved_total, 6) if resolved_total else 0.0
+        for label in resolved_labels
+    }
+
+    total_runs = len(run_dirs)
+    block_count = verdict_counts.get("BLOCK", 0)
+    pass_count = verdict_counts.get("PASS", 0)
+    fresh_pass_runs = max(0, pass_count - reused_pass_runs)
+    decided_runs_including_reuse = block_count + pass_count
+    fresh_decided_runs = block_count + fresh_pass_runs
+
+    return BaselineMetrics(
+        runs_dir=str(runs_dir),
+        total_runs=total_runs,
+        missing_outcome_runs=missing_outcome_runs,
+        reused_runs=reused_runs,
+        reused_pass_runs=reused_pass_runs,
+        fresh_pass_runs=fresh_pass_runs,
+        unorderable_runs=unorderable_runs,
+        corrupted_files=tuple(corrupted_files),
+        verdict_counts=dict(sorted(verdict_counts.items())),
+        block_rate_all=round(block_count / total_runs, 6) if total_runs else 0.0,
+        block_rate_decided_including_reuse=(
+            round(block_count / decided_runs_including_reuse, 6) if decided_runs_including_reuse else 0.0
+        ),
+        block_rate_fresh_decided=round(block_count / fresh_decided_runs, 6) if fresh_decided_runs else 0.0,
+        unique_prs=len(all_prs),
+        prs_with_pass=len(prs_with_any_pass),
+        prs_without_pass=len(all_prs) - len(prs_with_any_pass),
+        prs_first_pass_reused=prs_first_pass_reused,
+        rounds_to_first_pass_all=_compute_round_distribution(rounds_all),
+        rounds_to_first_pass_effective=_compute_round_distribution(rounds_effective),
+        model_verdict_counts={m: dict(sorted(c.items())) for m, c in sorted(model_verdicts.items())},
+        model_pair_agreement={pair: dict(sorted(c.items())) for pair, c in sorted(pair_agreement.items())},
+        total_receipts=total_receipts,
+        completed_receipts=completed_receipts,
+        failed_receipts=failed_receipts,
+        total_findings=total_findings,
+        findings_by_receipt_status=dict(sorted(findings_by_receipt_status.items())),
+        findings_by_model=dict(sorted(findings_by_model.items())),
+        finding_heuristic_categories=dict(sorted(finding_heuristic_categories.items())),
+        style_or_format_findings=style_or_format_findings,
+        nit_style_or_format_findings=nit_style_or_format_findings,
+        subsequent_head_pass_inferred_fixed=inferred_fixed,
+        subsequent_head_pass_total_block_findings=total_block_findings,
+        subsequent_head_pass_undeterminable_findings=undeterminable_block_findings,
+        subsequent_head_pass_inferred_rate=(
+            round(inferred_fixed / total_block_findings, 6) if total_block_findings else 0.0
+        ),
+        disposition_total=disposition_total,
+        disposition_coverage_rate=disposition_coverage_rate,
+        disposition_counts=dict(disposition_counts_counter),
+        disposition_resolved_rates=disposition_resolved_rates,
+    )
+
+
+def _fmt_pct(ratio: float) -> str:
+    return f"{ratio * 100:.2f}%"
+
+
+def _render_round_table(title: str, dist: RoundDistribution) -> list[str]:
+    lines = [f"### {title}", ""]
+    if dist.prs_counted == 0:
+        lines.append("- 无已达到 PASS 的 PR 样本。")
+        lines.append("")
+        return lines
+    total = dist.prs_counted
+    lines.extend(
+        [
+            "| 轮次分桶 | PR 数 | 占比 |",
+            "| --- | ---: | ---: |",
+            f"| 1 轮 | {dist.bucket_1} | {_fmt_pct(dist.bucket_1 / total)} |",
+            f"| 2 轮 | {dist.bucket_2} | {_fmt_pct(dist.bucket_2 / total)} |",
+            f"| 3 轮 | {dist.bucket_3} | {_fmt_pct(dist.bucket_3 / total)} |",
+            f"| 4+ 轮 | {dist.bucket_4_plus} | {_fmt_pct(dist.bucket_4_plus / total)} |",
+            "",
+            f"- 样本 PR 数：`{total}`；中位数：`{dist.median}`；均值：`{dist.mean}`；最大轮次：`{dist.max_rounds}`。",
+            "",
+        ]
+    )
+    return lines
+
+
+def render_baseline_markdown(metrics: BaselineMetrics) -> str:
+    """将 BaselineMetrics 渲染为简体中文基线报告。"""
+    pass_count = metrics.verdict_counts.get("PASS", 0)
+    block_count = metrics.verdict_counts.get("BLOCK", 0)
+    decided_including_reuse = pass_count + block_count
+    fresh_decided = metrics.fresh_pass_runs + block_count
+    lines: list[str] = [
+        "# 外部正式审查基线统计报告（#1931）",
+        "",
+        f"- 扫描目录：`{metrics.runs_dir}`",
+        f"- 总运行数：`{metrics.total_runs}`（其中缺 `outcome.json` 未完结：`{metrics.missing_outcome_runs}`；沿用历史 PASS（`reused_from` 且终态为 `PASS`）：`{metrics.reused_pass_runs}`（含非 `PASS` 复用总计 `{metrics.reused_runs}`）；新产生 PASS：`{metrics.fresh_pass_runs}`；不可排序运行：`{metrics.unorderable_runs}`；损坏跳过文件：`{len(metrics.corrupted_files)}`）",
+        f"- 唯一 PR 数：`{metrics.unique_prs}`（已获 PASS：`{metrics.prs_with_pass}`；尚未 PASS：`{metrics.prs_without_pass}`；其中首次 PASS 为历史复用的 PR：`{metrics.prs_first_pass_reused}`）",
+        f"- BLOCK 率（占全量运行 `{metrics.total_runs}`）：`{_fmt_pct(metrics.block_rate_all)}`",
+        f"- BLOCK 率（含历史复用 PASS 分母 `PASS+BLOCK = {decided_including_reuse}`）：`{_fmt_pct(metrics.block_rate_decided_including_reuse)}`",
+        f"- BLOCK 率（仅新产生裁定分母 `fresh_PASS+BLOCK = {fresh_decided}`，排除 `reused_from`）：`{_fmt_pct(metrics.block_rate_fresh_decided)}`",
+        "",
+        "## 一、终态分布（收据/outcome 实测）",
+        "",
+        "| 终态 | 次数 | 占总运行比例 |",
+        "| --- | ---: | ---: |",
+    ]
+    for verdict, count in metrics.verdict_counts.items():
+        pct = count / metrics.total_runs if metrics.total_runs else 0.0
+        lines.append(f"| {verdict} | {count} | {_fmt_pct(pct)} |")
+    lines.append("")
+
+    lines.append("## 二、每 PR 达到首次 PASS 的轮次分布（收据/outcome 实测）")
+    lines.append("")
+    lines.extend(_render_round_table("2.1 全量运行口径（含 FAILED / STALE / 复用 / 未完结，仅计具备合法时间戳的运行）", metrics.rounds_to_first_pass_all))
+    lines.extend(
+        _render_round_table(
+            f"2.2 有效评审口径（仅计新产生 PASS / BLOCK，排除 infra FAILED / STALE 与 reused_from；另有 {metrics.prs_first_pass_reused} 个 PR 首次 PASS 本身为历史复用已单列）",
+            metrics.rounds_to_first_pass_effective,
+        )
+    )
+
+    lines.extend(
+        [
+            "## 三、单模型终态与双模型一致性矩阵（outcome.reviews 实测）",
+            "",
+            "### 3.1 各模型裁定分布",
+            "",
+            "| 模型 | PASS | BLOCK | FAILED | 其他 |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for model, counts in metrics.model_verdict_counts.items():
+        other = sum(v for k, v in counts.items() if k not in ("PASS", "BLOCK", "FAILED"))
+        lines.append(
+            f"| `{model}` | {counts.get('PASS', 0)} | {counts.get('BLOCK', 0)} | {counts.get('FAILED', 0)} | {other} |"
+        )
+    lines.append("")
+
+    lines.extend(["### 3.2 双模型配对一致性", ""])
+    for pair_key, outcomes in metrics.model_pair_agreement.items():
+        pair_total = sum(outcomes.values())
+        lines.append(f"#### `{pair_key}`（共 {pair_total} 次双审）")
+        lines.append("")
+        lines.append("| 裁定组合 | 次数 | 占比 |")
+        lines.append("| --- | ---: | ---: |")
+        for combo, cnt in outcomes.items():
+            lines.append(f"| `{combo}` | {cnt} | {_fmt_pct(cnt / pair_total if pair_total else 0.0)} |")
+        lines.append("")
+
+    lines.extend(
+        [
+            "## 四、审查发现统计（严格区分「收据实测」与「正则/启发式分类」）",
+            "",
+            "### 4.1 收据实测事实（`*/receipt.json` 原样计数）",
+            "",
+            f"- 回执总数：`{metrics.total_receipts}`（`completed`：`{metrics.completed_receipts}`；`failed`：`{metrics.failed_receipts}`）",
+            f"- 发现总条数：`{metrics.total_findings}`",
+            "",
+            "| 按回执 `result.status` | 发现条数 | 占比 |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    for st, cnt in metrics.findings_by_receipt_status.items():
+        lines.append(f"| `{st}` | {cnt} | {_fmt_pct(cnt / metrics.total_findings if metrics.total_findings else 0.0)} |")
+    lines.extend(["", "| 按审查模型 | 发现条数 | 占比 |", "| --- | ---: | ---: |"])
+    for model, cnt in metrics.findings_by_model.items():
+        lines.append(f"| `{model}` | {cnt} | {_fmt_pct(cnt / metrics.total_findings if metrics.total_findings else 0.0)} |")
+
+    lines.extend(
+        [
+            "",
+            "### 4.2 正则/启发式分类（估算口径，非人工真值）",
+            "",
+            "> 说明：以下分类基于发现文本正则与回执状态自动估算，用于识别格式/Nit 噪声基线，不能替代人工去向台账。",
+            "",
+            "| 启发式类别 | 发现条数 | 占总发现比例 |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    for cat, cnt in metrics.finding_heuristic_categories.items():
+        lines.append(f"| `{cat}` | {cnt} | {_fmt_pct(cnt / metrics.total_findings if metrics.total_findings else 0.0)} |")
+
+    blocking_style_count = metrics.style_or_format_findings - metrics.nit_style_or_format_findings
+    style_ratio = metrics.style_or_format_findings / metrics.total_findings if metrics.total_findings else 0.0
+    lines.extend(
+        [
+            "",
+            f"- 格式/风格主题正交命中总数（不区分阻断与 Nit）：`{metrics.style_or_format_findings}`（`{_fmt_pct(style_ratio)}`）",
+            f"  - 其中阻断态格式类（`blocking_style_or_format`）：`{blocking_style_count}`",
+            f"  - 其中 Nit / 非阻断格式类（`nit_style_or_format_findings`，互斥主类归入 `non_blocking_or_nit`）：`{metrics.nit_style_or_format_findings}`",
+        ]
+    )
+
+    lines.extend(
+        [
+            "",
+            "### 4.3 后续 head 转 PASS 推定（启发式）",
+            "",
+            f"- 可判定 BLOCK 运行中的非 Nit 阻断发现总数：`{metrics.subsequent_head_pass_total_block_findings}`",
+            f"- 缺合法时间戳/`head_sha` 或同 PR 存在不可排序的不同/缺失 `head_sha` PASS 而不可判定的 BLOCK 发现条数：`{metrics.subsequent_head_pass_undeterminable_findings}`",
+            f"- 同 PR 后续更晚时间戳出现不同非空 `head_sha` 且终态转 PASS 的推定已修条数：`{metrics.subsequent_head_pass_inferred_fixed}`（`{_fmt_pct(metrics.subsequent_head_pass_inferred_rate)}`）",
+            "",
+            "## 五、显式去向台账统计（`load_dispositions`）",
+            "",
+            f"- 当前显式去向覆盖率：`{_fmt_pct(metrics.disposition_coverage_rate)}`（`{metrics.disposition_total} / {metrics.total_findings}`）",
+            "",
+        ]
+    )
+    if metrics.disposition_total == 0:
+        lines.append("- 本次运行未叠加显式人工去向 JSONL 台账（`disposition_total = 0`）；后续回填 `fixed / false_positive / intentional / not_important` 后可直接传入 `--dispositions` 输出四类精确占比。")
+    else:
+        lines.extend(
+            [
+                f"- 台账总条数：`{metrics.disposition_total}`",
+                "",
+                "| 去向类别 | 条数 | 占已定性四类比例 |",
+                "| --- | ---: | ---: |",
+            ]
+        )
+        for label in DispositionLabel:
+            cnt = metrics.disposition_counts.get(label.value, 0)
+            rate = metrics.disposition_resolved_rates.get(label.value)
+            rate_str = _fmt_pct(rate) if rate is not None else "—"
+            lines.append(f"| `{label.value}` | {cnt} | {rate_str} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_text_file(path: Path, content: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise EvalValidationError(f"无法写入输出文件 {path}: {exc}") from exc
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m pilot1742.review_eval",
+        description="代码审查评测集校验、打分、回归对比与历史运行基线统计工具（#1931）。",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_val = sub.add_parser("validate-cases", help="校验评测集 schema 与 Git 提交/文件/行号/diff hunk 真实性")
+    p_val.add_argument("--cases", type=Path, required=True, help="cases.json 路径")
+    p_val.add_argument("--repo-root", type=Path, default=None, help="可选：Git 仓库根目录，用于核验 SHA、文件行号与 diff hunk")
+
+    p_score = sub.add_parser("score", help="对审查预测 JSON 打分")
+    p_score.add_argument("--cases", type=Path, required=True, help="cases.json 路径")
+    p_score.add_argument("--predictions", type=Path, required=True, help="预测结果 JSON 路径")
+    p_score.add_argument("--line-tolerance", type=int, default=15, help="行号匹配容差（默认 15）")
+    p_score.add_argument("--max-finding-span", type=int, default=120, help="单条发现最大行跨度上限（默认 120）")
+    p_score.add_argument("--allow-partial", action="store_true", help="允许预测缺漏案例（缺漏记为 MISSING 并暴露 coverage_rate）")
+    p_score.add_argument("--out-json", type=Path, default=None, help="可选：输出 EvalScore JSON 文件路径")
+
+    p_cmp = sub.add_parser("compare", help="对比两次 EvalScore JSON 产出增量与逐案变化")
+    p_cmp.add_argument("--before", type=Path, required=True, help="改动前 EvalScore JSON 路径")
+    p_cmp.add_argument("--after", type=Path, required=True, help="改动后 EvalScore JSON 路径")
+    p_cmp.add_argument("--out-json", type=Path, default=None, help="可选：输出 ScoreComparison JSON 文件路径")
+
+    p_base = sub.add_parser("baseline-stats", help="统计外部正式审查 runs 目录首期基线指标")
+    p_base.add_argument("--runs-dir", type=Path, required=True, help="external-review/runs 目录路径")
+    p_base.add_argument("--dispositions", type=Path, default=None, help="可选：人工发现去向 JSONL 台账")
+    p_base.add_argument("--out-json", type=Path, default=None, help="可选：输出基线 JSON 报告路径")
+    p_base.add_argument("--out-md", type=Path, default=None, help="可选：输出基线 Markdown 报告路径")
+
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        if args.command == "validate-cases":
+            cases = load_cases(args.cases)
+            if args.repo_root is not None:
+                validate_cases(cases, repo_root=args.repo_root)
+            bug_count = sum(1 for c in cases if c.kind == "bug")
+            clean_count = sum(1 for c in cases if c.kind == "clean")
+            loc_count = sum(len(c.bug_locations) for c in cases)
+            summary = {
+                "status": "ok",
+                "schema_version": SCHEMA_VERSION,
+                "total_cases": len(cases),
+                "bug_cases": bug_count,
+                "clean_cases": clean_count,
+                "total_bug_locations": loc_count,
+                "cases_fingerprint": compute_cases_fingerprint(cases),
+                "git_verified": args.repo_root is not None,
+            }
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "score":
+            cases = load_cases(args.cases)
+            predictions = load_predictions(args.predictions)
+            result = score_predictions(
+                cases,
+                predictions,
+                line_tolerance=args.line_tolerance,
+                max_finding_span=args.max_finding_span,
+                allow_partial=args.allow_partial,
+            )
+            rendered = json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+            if args.out_json is not None:
+                _write_text_file(args.out_json, rendered + "\n")
+            print(rendered)
+            return 0
+
+        if args.command == "compare":
+            try:
+                before_raw = json.loads(args.before.read_text(encoding="utf-8"))
+                after_raw = json.loads(args.after.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise EvalValidationError(f"无法读取打分文件：{exc}") from exc
+            if not isinstance(before_raw, dict) or not isinstance(after_raw, dict):
+                raise EvalValidationError("before/after 打分文件必须是 JSON 对象")
+            comparison = compare_scores(_score_from_dict(before_raw), _score_from_dict(after_raw))
+            rendered = json.dumps(comparison.to_dict(), ensure_ascii=False, indent=2)
+            if args.out_json is not None:
+                _write_text_file(args.out_json, rendered + "\n")
+            print(rendered)
+            return 0
+
+        if args.command == "baseline-stats":
+            metrics = analyze_review_runs(args.runs_dir, dispositions_path=args.dispositions)
+            json_text = json.dumps(metrics.to_dict(), ensure_ascii=False, indent=2)
+            md_text = render_baseline_markdown(metrics)
+            if args.out_json is not None:
+                _write_text_file(args.out_json, json_text + "\n")
+            if args.out_md is not None:
+                _write_text_file(args.out_md, md_text)
+            print(json_text)
+            return 0
+
+        raise EvalValidationError(f"未知子命令：{args.command}")
+    except EvalValidationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
