@@ -28,7 +28,11 @@ python3 -I formal_math/verification/gate11/selftest_identity.py
 - 运行环境由调用方负责：`GIT_DIR` 等环境变量、`--root` 与 `--rev` 应由 CI 工作流给定，不取自被审内容。脚本只固定了替换引用开关与 locale。
 - 不核引文。`formal_math/` 里的硬证据引文目前没有过审的机检工具。
 
-引文核对工具的输入只有一份（身份检查的输入见上节）：`formal_math/sources/admit/` 里的正文区准入表 `candidate/tier1_candidate.jsonl`（790 条，已过非作者实物审，范围仅限**正文归属**；记录见 #2316 评论 7166555103）。本目录不接入 `run_gates.py`，接入总入口等 #2312 过审后由主控做。
+## 未过审辅助工具的原说明
+
+本节起到文件末尾，说的都是上面「现行状态」里列出的未过审辅助工具，不属于身份检查，也不在身份检查的受审范围内。
+
+引文核对工具据以判定的准入依据只有一份（它另外还要读博文语料 `docs/chanlun/text/blog/` 与被扫描的文本，缺任何一样都退 2）：`formal_math/sources/admit/` 里的正文区准入表 `candidate/tier1_candidate.jsonl`（790 条，已过非作者实物审，范围仅限**正文归属**；记录见 #2316 评论 7166555103）。本目录不接入 `run_gates.py`，接入总入口等 #2312 过审后由主控做。
 
 只用标准库，一律 `python3 -I` 运行；仓库根按脚本位置推出（`--root` 可覆盖），脚本里没有机器路径。
 
