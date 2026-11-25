@@ -1,0 +1,260 @@
+name: formal-math
+
+# #2315（FM-06）草稿：formal_math/ 的 PR 门与主干门。尚未在 GitHub 上实跑过，没有挂进 ci-ok 的必需集合；
+#   接入方法与本机读数见 formal_math/verification/ci/README.md。
+#
+# 阻断门按 #2312 用户裁定（评论 7164343103）：1 钉选、2 受控选项与零告警、3 源码层与环境层、6a 声明锁、
+#   6b 路径权限、15 模块方向。S、7a、7b、8a、8b、9、10 是审阅报告（`--report`，退出码恒 0），只上传产物。
+#
+# 分两段：
+#   联网段：检出、elan、bubblewrap、Mathlib 缓存。这一段之前先跑 prefetch_check.py，PR 改了钉选或
+#     lakefile 时不去取任何东西。
+#   离线段：`lake build` 与全部门禁都在 offline.sh 的 bwrap 沙箱里跑：无网络、清空环境变量、
+#     /home 与 /tmp 换成空 tmpfs，只回绑仓库（只读）、formal_math/.lake（可写）与 elan（只读）。
+#     Lean 精化本身会执行代码，源码白名单只是前置防线（#2312 第四轮审阅）。
+#   `lake check` 与 `lake comparator` 由 Lake 4.36.0 自己套 bwrap（--unshare-all，只有依赖解析放网络），
+#     不再外套 offline.sh，原因见 README「嵌套沙箱」。
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'formal_math/**'
+      - '.github/workflows/formal-math.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'formal_math/**'
+      - '.github/workflows/formal-math.yml'
+  workflow_dispatch:
+    inputs:
+      paranoid:
+        description: '另跑 lake check --paranoid（五个外部检查器；耗时与资源没有读数，单独一个作业）'
+        type: boolean
+        default: false
+
+# 全部作业只读仓库内容；不引用任何 secret。
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-math-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # 钉选的 elan 发行包；sha256 于 2026-11-25 在 SafeCode 下载核对。
+  ELAN_VERSION: v4.4.0
+  ELAN_SHA256: 0e8250aa2be86c7af929ade68db617af9edc8b9ccf6eaf5ece228250d0d032e2
+
+jobs:
+  pr-gate:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # 门 6b 要 refs/remotes/origin/main 求 merge-base。
+          fetch-depth: 0
+          # 令牌不写进 .git/config：后续步骤与沙箱里的代码读不到它。
+          persist-credentials: false
+
+      - name: Cache elan toolchain
+        id: elan-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.elan
+          key: fm-elan-${{ env.ELAN_VERSION }}-${{ hashFiles('formal_math/lean-toolchain') }}
+
+      - name: Install elan (pinned release, sha256 checked)
+        env:
+          CACHE_HIT: ${{ steps.elan-cache.outputs.cache-hit }}
+        run: formal_math/verification/ci/install_elan.sh
+
+      - name: Prefetch boundary (gate 1, lakefile whitelist, require pins; no lake)
+        # 取依赖之前先确认 PR 没改钉选、没在 lakefile 里加未钉选的 require，否则不去取任何东西。
+        run: python3 formal_math/verification/ci/prefetch_check.py --repo-root .
+
+      - name: Install bubblewrap and probe the sandbox
+        run: formal_math/verification/ci/sandbox_setup.sh
+
+      - name: Cache Mathlib build artifacts
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/mathlib
+          key: fm-mathlib-${{ hashFiles('formal_math/lake-manifest.json', 'formal_math/lean-toolchain') }}
+
+      - name: Fetch dependencies (last networked step)
+        working-directory: formal_math
+        run: |
+          lake exe cache get
+          du -sh .lake/packages
+          df -h /
+
+      - name: Blocking gates 1 2 3 6a 6b 15 (offline sandbox)
+        env:
+          # 检出的是 refs/pull/N/merge（分离 HEAD），门 6b 靠它取分支名。
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+        run: |
+          formal_math/verification/ci/offline.sh \
+            python3 formal_math/verification/run_gates.py --repo-root .
+
+      - name: Review report S 7a 7b 8a 8b 9 10 (offline sandbox, never blocks)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          mkdir -p formal_math/.lake/fm-report
+          formal_math/verification/ci/offline.sh \
+            python3 formal_math/verification/run_gates.py --repo-root . \
+              --report --report-dir formal_math/.lake/fm-report \
+            > formal_math/.lake/fm-report/stdout.json 2> formal_math/.lake/fm-report/stderr.md \
+            || echo "::warning::审阅报告工具自身出错（退出 $?），不影响门禁结论"
+          cat formal_math/.lake/fm-report/stderr.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload review report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: formal-math-review-report-${{ github.job }}
+          path: formal_math/.lake/fm-report/
+          if-no-files-found: warn
+          retention-days: 30
+
+  main-gate:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # 门 6b 要 refs/remotes/origin/main 求 merge-base。
+          fetch-depth: 0
+          # 令牌不写进 .git/config：后续步骤与沙箱里的代码读不到它。
+          persist-credentials: false
+
+      - name: Cache elan toolchain
+        id: elan-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.elan
+          key: fm-elan-${{ env.ELAN_VERSION }}-${{ hashFiles('formal_math/lean-toolchain') }}
+
+      - name: Install elan (pinned release, sha256 checked)
+        env:
+          CACHE_HIT: ${{ steps.elan-cache.outputs.cache-hit }}
+        run: formal_math/verification/ci/install_elan.sh
+
+      - name: Prefetch boundary (gate 1, lakefile whitelist, require pins; no lake)
+        # 取依赖之前先确认 PR 没改钉选、没在 lakefile 里加未钉选的 require，否则不去取任何东西。
+        run: python3 formal_math/verification/ci/prefetch_check.py --repo-root .
+
+      - name: Install bubblewrap and probe the sandbox
+        run: formal_math/verification/ci/sandbox_setup.sh
+
+      - name: Cache Mathlib build artifacts
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/mathlib
+          key: fm-mathlib-${{ hashFiles('formal_math/lake-manifest.json', 'formal_math/lean-toolchain') }}
+
+      - name: Fetch dependencies (last networked step)
+        working-directory: formal_math
+        run: |
+          lake exe cache get
+          du -sh .lake/packages
+          df -h /
+
+      - name: Blocking gates 1 2 3 6a 15 (offline sandbox)
+        # 门 6b 管 PR 分支的路径权限；在 main 上分支前缀 main 不在名单里，按设计判红，所以主干门逐门跑、跳过 6b。
+        #   逐门跑会重复加载环境，比一次跑完慢；#2312 若加「跳过 6b」的开关，这里改成一次调用。
+        run: |
+          rc=0
+          for g in 1 2 3 6a 15; do
+            formal_math/verification/ci/offline.sh \
+              python3 formal_math/verification/run_gates.py --repo-root . --gate "$g" || { r=$?; [ "$r" -gt "$rc" ] && rc=$r; }
+          done
+          exit "$rc"
+
+      - name: Gate 4 kernel replay (lake check in Lake's own bwrap sandbox)
+        working-directory: formal_math
+        run: /usr/bin/time -v lake check
+
+      - name: Gate 5 statement comparison (lake comparator in Lake's own bwrap sandbox)
+        run: /usr/bin/time -v formal_math/verification/ci/comparator.sh
+
+      - name: Review report S 7a 7b 8a 8b 9 10 (offline sandbox, never blocks)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          mkdir -p formal_math/.lake/fm-report
+          formal_math/verification/ci/offline.sh \
+            python3 formal_math/verification/run_gates.py --repo-root . \
+              --report --report-dir formal_math/.lake/fm-report \
+            > formal_math/.lake/fm-report/stdout.json 2> formal_math/.lake/fm-report/stderr.md \
+            || echo "::warning::审阅报告工具自身出错（退出 $?），不影响门禁结论"
+          cat formal_math/.lake/fm-report/stderr.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload review report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: formal-math-review-report-${{ github.job }}
+          path: formal_math/.lake/fm-report/
+          if-no-files-found: warn
+          retention-days: 30
+
+  paranoid:
+    # 只在手动触发且勾选时跑。五个外部检查器的耗时、内存、磁盘都没有读数（#2315 欠账第三项），
+    #   不阻断任何东西；跑不动就如实记录，回 #2293 重定运行地点。
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.paranoid }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # 令牌不写进 .git/config：后续步骤与沙箱里的代码读不到它。
+          persist-credentials: false
+
+      - name: Cache elan toolchain
+        id: elan-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.elan
+          key: fm-elan-${{ env.ELAN_VERSION }}-${{ hashFiles('formal_math/lean-toolchain') }}
+
+      - name: Install elan (pinned release, sha256 checked)
+        env:
+          CACHE_HIT: ${{ steps.elan-cache.outputs.cache-hit }}
+        run: formal_math/verification/ci/install_elan.sh
+
+      - name: Prefetch boundary (gate 1, lakefile whitelist, require pins; no lake)
+        # 取依赖之前先确认 PR 没改钉选、没在 lakefile 里加未钉选的 require，否则不去取任何东西。
+        run: python3 formal_math/verification/ci/prefetch_check.py --repo-root .
+
+      - name: Install bubblewrap and probe the sandbox
+        run: formal_math/verification/ci/sandbox_setup.sh
+
+      - name: Cache Mathlib build artifacts
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/mathlib
+          key: fm-mathlib-${{ hashFiles('formal_math/lake-manifest.json', 'formal_math/lean-toolchain') }}
+
+      - name: Fetch dependencies (last networked step)
+        working-directory: formal_math
+        run: |
+          lake exe cache get
+          du -sh .lake/packages
+          df -h /
+
+      - name: lake check --paranoid
+        working-directory: formal_math
+        run: |
+          /usr/bin/time -v lake check --paranoid
+          df -h /

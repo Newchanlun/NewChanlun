@@ -1,0 +1,7 @@
+{
+  "challenge_module": "Sample.Challenge",
+  "solution_module": "Sample.Solution",
+  "theorem_names": ["Sample.double_eq"],
+  "definition_names": [],
+  "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"]
+}
