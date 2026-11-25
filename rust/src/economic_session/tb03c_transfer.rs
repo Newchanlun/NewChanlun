@@ -7,6 +7,8 @@ use crate::session_protocol::{nonnegative, positive, required, strict_json};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+pub(super) const B_SOURCE_DEBIT_PROOF: &str = "b_source_debit_proof";
+
 pub(super) fn is_in(event: &Value) -> bool {
     event["transfer"]["role"] == "in"
 }
@@ -429,7 +431,7 @@ pub(super) fn attach_source_proof(
     let (prev, ns, image) = read(seq)?;
     let (pprev, pns, pimage) = read(seq - 1)?;
     let proof = json!({"revision":"tb03c-source-debit-proof/1","domain_id":source.domain,"session_id":source.session,"session_generation":source.generation,"receipt":r,"previous_root":prev,"commit_ns":ns,"image":image,"previous_previous_root":pprev,"previous_commit_ns":pns,"previous_image":pimage});
-    record["b_source_debit_proof"] = proof;
+    record[B_SOURCE_DEBIT_PROOF] = proof;
     #[cfg(test)]
     super::tb03c_c5_read_tests::proof_read(record);
     verify_source_proof(config, record)?;
@@ -437,10 +439,10 @@ pub(super) fn attach_source_proof(
     drop(budget);
     if let Some((stage, job)) = import {
         store::check_operation_deadline(Some(&mut *job), deadline)?;
-        let mut refs = super::content_store::image_refs(&record["b_source_debit_proof"]["image"])
+        let mut refs = super::content_store::image_refs(&record[B_SOURCE_DEBIT_PROOF]["image"])
             .map_err(|e| e.to_string())?;
         refs.extend(
-            super::content_store::image_refs(&record["b_source_debit_proof"]["previous_image"])
+            super::content_store::image_refs(&record[B_SOURCE_DEBIT_PROOF]["previous_image"])
                 .map_err(|e| e.to_string())?,
         );
         super::content_store::import_peer_refs_with_deadline(&tx, &refs, stage, job, deadline)
@@ -453,13 +455,13 @@ pub(super) fn attach_source_proof(
 /// 恢复只核本地保存的证明，不请求当前 E/源 B；源 Applied 必须等于同一 reducer 的真实扣账。
 pub(super) fn verify_source_proof(config: &Config, record: &Value) -> Result<(), String> {
     if !is_in(&record["event"]) {
-        if record.get("b_source_debit_proof").is_some() {
+        if record.get(B_SOURCE_DEBIT_PROOF).is_some() {
             return Err("IdentityConflict：非转入原件不能携带源扣账证明".into());
         }
         return Ok(());
     }
     let proof = record
-        .get("b_source_debit_proof")
+        .get(B_SOURCE_DEBIT_PROOF)
         .ok_or("AwaitingDependency：目标尚无本地源 Applied 证明")?;
     super::voice::exact(
         proof,

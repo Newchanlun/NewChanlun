@@ -104,8 +104,11 @@
   // #1716：/3 = economic-session/1 窄测试臂，/4 = economic-session/2 内容域；两者都接受签署 cap 激活。
   const contentDomain = version => version === "tb03b-finance/2" || version === "tb03b-finance/4";
   const capActivation = version => version === "tb03b-finance/3" || version === "tb03b-finance/4";
+  // #1407 C2/C3：/5 与 /6 = economic-session/1 上的 E 精确命令生产者；/6 在命令体固化 model_ref。
+  const exactRelease = version => version === "tb03b-finance/5" || version === "tb03b-finance/6";
+  const modelBinding = version => version === "tb03b-finance/6";
   function revision(discovery) {
-    need(discovery.finance_revision === undefined || ["tb03b-finance/1", "tb03b-finance/2", "tb03b-finance/3", "tb03b-finance/4"].includes(discovery.finance_revision), "未知财务查询版本");
+    need(discovery.finance_revision === undefined || ["tb03b-finance/1", "tb03b-finance/2", "tb03b-finance/3", "tb03b-finance/4", "tb03b-finance/5", "tb03b-finance/6"].includes(discovery.finance_revision), "未知财务查询版本");
     return contentDomain(discovery.finance_revision) ? "economic-session/2" : "economic-session/1";
   }
   function evidence(value, discovery, horizon) {
@@ -125,11 +128,15 @@
     // 此 HTTP 合同未提供内容节点；只核持久头/引用，不能声称验证节点闭包或七字段正文绑定。
   }
   const financeKinds = {ImportResponsibility:"ResponsibilityImportedReceipt", PrepareDecision:"PreparedReceipt", Reserve:"ReserveReceipt", CommitDecision:"LocalCommitReceipt", AbortDecision:"AbortReceipt", CloseApplicants:"ApplicantsClosedReceipt", ActivateCapPolicy:"CapPolicyActivatedReceipt"};
-  // #1716：tb03b-finance/3 的 E 在 seq 之前最后一次显式激活的 cap 版本；未激活时由冻结原件派生 v1。
-  async function textSha256(source) {
-    const bytes=await globalThis.crypto.subtle.digest("SHA-256",new TextEncoder().encode(source));
-    return Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,"0")).join("");
+  const commandKinds = {...financeKinds, MakeDispatchable:"DispatchableReceipt", ReleaseExact:"ReleasedExactReceipt"};
+  const kindsOf = version => exactRelease(version) ? commandKinds : financeKinds;
+  async function bytesHash(bytes) {
+    return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),n=>n.toString(16).padStart(2,"0")).join("");
   }
+  async function textSha256(source) {
+    return bytesHash(new TextEncoder().encode(source));
+  }
+  // #1716：未显式激活时，由冻结原件派生 v1。
   function activeCap(image,seq,data) {
     const last=image.history.filter(e=>e.kind==="ActivateCapPolicy" && BigInt(e.commit_seq)<BigInt(seq)).at(-1);
     return last?last.record.to:{schema_revision:"funding-cap-policy/1",...(capActivation(data.schema_revision)?{profile_id:data.policy.profile_id}:{}),policy_id:data.policy.policy_id,policy_version:"1",cap:data.policy.cap,valid_through_ns:data.policy.valid_through_ns};
@@ -145,8 +152,8 @@
     if (r.cut.commit_seq === view.cut.commit_seq) need(same(r.cut, view.cut), "原回执固定根不同");
     need(integer(r.first_known_ns)<=integer(r.commit_ns), "回执知识时态不同");
     const e = image.history.find(h => h.commit_seq === r.cut.commit_seq);
-    need(e && financeKinds[e.kind] === r.kind && same(e.record, r.record) && e.first_known_ns === r.first_known_ns && e.commit_ns === r.commit_ns, "原回执与历史原件不同");
-    need(r.receipt_key === discovery.finance_revision + ":" + e.kind + ":" + await sha256(e.request.payload[e.kind === "ImportResponsibility" ? "responsibility_id" : ["Reserve","CloseApplicants"].includes(e.kind) ? "slot_id" : e.kind === "ActivateCapPolicy" ? "activation_id" : "decision_id"]), "原回执键与请求不同");
+    need(e && (e.kind==="ReleaseExact" && e.record.state==="Unsupported" ? "ReleaseUnsupportedReceipt" : kindsOf(discovery.finance_revision)[e.kind]) === r.kind && same(e.record, r.record) && e.first_known_ns === r.first_known_ns && e.commit_ns === r.commit_ns, "原回执与历史原件不同");
+    need(r.receipt_key === discovery.finance_revision + ":" + e.kind + ":" + await sha256(e.request.payload[e.kind === "ImportResponsibility" ? "responsibility_id" : ["Reserve","CloseApplicants"].includes(e.kind) ? "slot_id" : e.kind === "ActivateCapPolicy" ? "activation_id" : e.kind === "ReleaseExact" ? "command_id" : "decision_id"]), "原回执键与请求不同");
   }
   async function proof(p, horizon, discovery) {
     keys(p, ["domain_id", "receipt", "previous_root", "commit_ns", "image", "current_image", "current_epoch", "current_epoch_at_ns", "current_cut", "current_previous_root", "current_commit_ns"], "对端财务证明");
@@ -171,7 +178,7 @@
     need(g.grant_id === await sha256(["tb03b-finance/1",discovery.session_id,discovery.session_generation,slotId,g.decision_id,g.plan_hash]), "grant 派生摘要不同");
   }
   function planShape(plan,version) {
-    keys(plan,["applicant_epoch","applicant_generation","attempt_id","decision_id","expected_book_version","expected_rights_version","fee_source","fee_tail","limit_price","o_ref","owner","plan_id","price_source","quantity","quantity_source","right_id","s_ref","slot_id","voice_binding_id"],"计划");
+    keys(plan,[...(exactRelease(version)?["exact"]:[]),"applicant_epoch","applicant_generation","attempt_id","decision_id","expected_book_version","expected_rights_version","fee_source","fee_tail","limit_price","o_ref","owner","plan_id","price_source","quantity","quantity_source","right_id","s_ref","slot_id","voice_binding_id"],"计划");
     for(const field of ["owner","decision_id","attempt_id","plan_id","slot_id","right_id","voice_binding_id","price_source","quantity_source","fee_source"])text(plan[field],field);
     for(const field of ["applicant_epoch","applicant_generation","expected_book_version","expected_rights_version","quantity","limit_price"])integer(plan[field],true);
     integer(plan.fee_tail);
@@ -182,13 +189,17 @@
     keys(plan.o_ref,["operation_id","kind","source_ref","s_object_id","quantity"],"O 引用");
     text(plan.o_ref.operation_id,"O 身份");text(plan.o_ref.source_ref,"O 来源");
     need(plan.o_ref.kind==="TestOnlyCashBuy" && plan.o_ref.s_object_id===plan.s_ref.object_id && plan.o_ref.quantity===plan.quantity,"S/O 计划绑定不同");
+    if(!exactRelease(version))return;
+    const x=plan.exact,names=["command_id","logical_order_family","chong_id","allocation_id","side","symbol","projection_manifest","eligibility_ref","concurrency"];
+    keys(x,[...names,"revision","first_quantity"],"精确命令计划");for(const k of names)text(x[k],k);
+    need(!x.command_id.includes(":") && x.revision==="1" && x.first_quantity===plan.quantity && x.side==="buy" && plan.owner==="B:"+x.chong_id,"精确命令计划超出 C1 首次提交范围");
   }
   function inputWitness(event) {
     text(event.witness.input_raw,"财务原输入");
     need(new TextEncoder().encode(event.witness.input_raw).byteLength<=16*1024*1024,"财务原输入超出原 Rust 字节上限");
     const data=parse(event.witness.input_raw);
-    keys(data,["schema_revision","kind","source_id","source_epoch","policy","baseline","rights","plans","slots"],"财务原输入");
-    need((event.request.schema_revision==="economic-session/2"?["tb03b-finance/2","tb03b-finance/4"]:["tb03b-finance/1","tb03b-finance/3"]).includes(data.schema_revision) && data.kind==="TestOnly","财务原输入版本/范围不同");
+    keys(data,["schema_revision","kind","source_id","source_epoch","policy","baseline","rights","plans","slots",...(exactRelease(data.schema_revision)?["exact_release"]:[])],"财务原输入");
+    need((event.request.schema_revision==="economic-session/2"?["tb03b-finance/2","tb03b-finance/4"]:["tb03b-finance/1","tb03b-finance/3","tb03b-finance/5","tb03b-finance/6"]).includes(data.schema_revision) && data.kind==="TestOnly","财务原输入版本/范围不同");
     text(data.source_id,"输入来源");text(data.source_epoch,"输入来源代际");
     for(const k of ["rights","plans","slots"])need(Array.isArray(data[k]),"财务原输入族缺失");
     const p=data.policy,b=data.baseline;
@@ -206,7 +217,7 @@
     }
     const ids=new Set(),attempts=new Set(),plans=new Set();
     for(const q of data.plans){
-      planShape(q,data.schema_revision);const attempt=canonical([q.owner,q.attempt_id]),r=data.rights.find(r=>r.right_id===q.right_id);
+      planShape(q,data.schema_revision);need(!exactRelease(data.schema_revision) || data.plans.filter(p=>p.exact.command_id===q.exact.command_id).length===1,"原输入 command_id 重复");const attempt=canonical([q.owner,q.attempt_id]),r=data.rights.find(r=>r.right_id===q.right_id);
       need(!ids.has(q.decision_id) && !attempts.has(attempt) && !plans.has(q.plan_id),"原输入决定/attempt/plan 身份重复");ids.add(q.decision_id);attempts.add(attempt);plans.add(q.plan_id);
       need(r && r.owner===q.owner && BigInt(r.version)<=BigInt(q.expected_rights_version),"原输入计划不属于原权利/版本");
     }
@@ -229,14 +240,14 @@
     need(assigned.size===data.plans.length && assigned.size>0,"原输入计划未完整纳入非空关闭集合");
   }
   async function eventBinding(event,view,discovery,image) {
-    need(["ImportResponsibility","Reserve","CloseApplicants","ActivateCapPolicy"].includes(event.kind)?view.cut.domain_id==="E":view.cut.domain_id.startsWith("B:"),"财务原事件 owner 域不同");
+    need(["ImportResponsibility","Reserve","CloseApplicants","ActivateCapPolicy","MakeDispatchable","ReleaseExact"].includes(event.kind)?view.cut.domain_id==="E":view.cut.domain_id.startsWith("B:"),"财务原事件 owner 域不同");
     const request=event.request.payload,record=event.record,data=inputWitness(event);
     need(data.schema_revision===discovery.finance_revision,"财务原输入与查询版本不同");
     if(event.kind==="ActivateCapPolicy")need(capActivation(discovery.finance_revision),"cap 激活只属于 tb03b-finance/3 与 /4");
     await inputSlots(data,discovery);
     const active=activeCap(image,event.commit_seq,data);
     if(!["AbortDecision","CloseApplicants","ActivateCapPolicy"].includes(event.kind))need(BigInt(event.kind==="Reserve"?active.valid_through_ns:data.policy.valid_through_ns)>=integer(event.commit_ns),"原共同界/能力证据在提交时已过期");
-    const fields={ActivateCapPolicy:["op","activation_id","policy_id","from_version","to_version","cap","valid_through_ns","policy_record","writer_epoch"],ImportResponsibility:["op","responsibility_id","writer_epoch"],PrepareDecision:["op","decision_id","plan_hash","writer_epoch"],Reserve:["op","slot_id","request_set_hash","writer_epoch"],CommitDecision:["op","decision_id","plan_hash","grant_id","writer_epoch"],AbortDecision:["op","decision_id","plan_hash","writer_epoch","reason"],CloseApplicants:["op","slot_id","writer_epoch","closed","reason"]};
+    const fields={ActivateCapPolicy:["op","activation_id","policy_id","from_version","to_version","cap","valid_through_ns","policy_record","writer_epoch"],ImportResponsibility:["op","responsibility_id","writer_epoch"],PrepareDecision:["op","decision_id","plan_hash","writer_epoch"],Reserve:["op","slot_id","request_set_hash","writer_epoch"],CommitDecision:["op","decision_id","plan_hash","grant_id","writer_epoch"],AbortDecision:["op","decision_id","plan_hash","writer_epoch","reason"],CloseApplicants:["op","slot_id","writer_epoch","closed","reason"],MakeDispatchable:["op","decision_id","plan_hash","writer_epoch"],ReleaseExact:["op","decision_id","command_id","plan_hash","certificate","x_id","x_epoch","writer_epoch"]};
     keys(request,fields[event.kind],"财务原请求业务字段");integer(request.writer_epoch,true);
     if(["PrepareDecision","CommitDecision","AbortDecision"].includes(event.kind)) {
       need(request.decision_id===record.decision_id && request.plan_hash===record.prepared.plan_hash,"原计划摘要/请求业务身份不同");
@@ -259,6 +270,18 @@
       need(request.policy_id===data.policy.policy_id && request.from_version===active.policy_version && BigInt(request.to_version)===BigInt(active.policy_version)+1n && BigInt(request.valid_through_ns)>=integer(event.commit_ns) && liability<=BigInt(request.cap),"cap 激活越过原子点责任/版本/有效期");
       const to={schema_revision:"funding-cap-policy/1",profile_id:signed.profile_id,policy_id:request.policy_id,policy_version:request.to_version,cap:request.cap,valid_through_ns:request.valid_through_ns,activation_id:request.activation_id,replaces_version:request.from_version,policy_record_sha256:request.policy_record.sha256,authorizer:signed.authorizer,authorized_at_ns:signed.authorized_at_ns,signature_ref:signed.signature_ref,liability_at_activation:liability.toString(),activated_seq:event.commit_seq,activated_ns:event.commit_ns};
       need(same(record,{activation_id:request.activation_id,state:"CapPolicyActivated",from:active,to,liability_at_activation:liability.toString()}),"cap 激活记录与原子点重算不同");
+    } else if(event.kind==="MakeDispatchable") {
+      // IC E.MakeDispatchable：B 原 Commit 收据、E 自己的 grant/责任与冻结计划三者一致。
+      keys(event.witness,["input_raw","commit_proof"],"Dispatchable 依据");
+      const q=data.plans.find(q=>q.decision_id===request.decision_id),cp=event.witness.commit_proof,committed=cp.receipt.record;
+      need(q && request.plan_hash===await sha256(q),"MakeDispatchable 原计划不符");
+      need(cp.domain_id===q.owner && cp.receipt.kind==="LocalCommitReceipt" && committed.state==="Committed" && same(committed.prepared.plan,q) && same(cp.current_image.finance.decisions.find(d=>d.decision_id===q.decision_id),committed),"B 本地 Commit 原收据或当前状态不符");
+      const g=committed.grant.original,reserve=image.history.find(e=>e.kind==="Reserve" && e.record.slot_id===q.slot_id);
+      need(reserve && reserve.commit_seq===committed.grant.e_cut.commit_seq && image.finance.slots.some(s=>s.slot_id===q.slot_id && s.state==="Reserved" && s.grants.some(x=>same(x,g))) && image.finance.responsibilities.some(r=>r.responsibility_id===g.grant_id && r.amount===g.amount && same(r.grant,g)),"B Commit 的 grant 不是 E 原授信或责任未保留");
+      need(same(record,{decision_id:q.decision_id,command_id:q.exact.command_id,state:"Dispatchable",owner:q.owner,plan_hash:request.plan_hash,grant_id:g.grant_id,local_commit_receipt:committed.local_commit_receipt,commit_cut:cp.receipt.cut,dispatchable_seq:event.commit_seq,dispatchable_ns:event.commit_ns,execution_eligibility:"None"}),"Dispatchable 记录与原 Commit/计划重算不同");
+    } else if(event.kind==="ReleaseExact") {
+      keys(event.witness,["input_raw"],"放行依据");
+      await verifyRelease(event,image,data,discovery);
     } else if(event.kind==="ImportResponsibility") {
       const original={responsibility_id:data.baseline.responsibility_id,owner:"E:baseline",amount:data.baseline.amount,source:data.baseline,policy:data.policy};
       need(request.responsibility_id===data.baseline.responsibility_id && same(record,{responsibility_id:data.baseline.responsibility_id,state:"ResponsibilityImported",original}),"原责任导入全公式/身份不同");
@@ -273,6 +296,39 @@
         need(data.plans.some(p=>p.slot_id===record.slot_id && p.owner===c.owner && p.applicant_epoch===c.applicant_epoch && p.applicant_generation===c.applicant_generation),"关闭对象不在原完整申请集合");
       }
     }
+  }
+  // 用 Dispatchable 原记录、冻结投影与证书重算放行对象；不能从 X 的接纳状态反推 E。
+  async function verifyRelease(event,image,data,discovery) {
+    const req=event.request.payload,q=data.plans.find(p=>p.decision_id===req.decision_id);
+    const made=image.history.find(e=>e.kind==="MakeDispatchable" && e.record.command_id===req.command_id);
+    need(q && made && BigInt(made.commit_seq)<BigInt(event.commit_seq),"放行缺原 Dispatchable");
+    const base=made.record,x=q.exact,s=data.exact_release, target=s.x_target;
+    const change={kind:"submit",order:{command_id:x.command_id,family_id:x.logical_order_family,chong_id:x.chong_id,
+      revision:x.revision,side:x.side,quantity:q.quantity,kind:{kind:"limit",price:q.limit_price},
+      eligibility_ref:x.eligibility_ref,projection_manifest:x.projection_manifest}};
+    const certificate={rd11_policy:s.rd11_policy,responsibility_refs:[base.grant_id],
+      structure_dependencies:[q.s_ref.object_id+"@"+q.s_ref.object_hash],market_dependencies:s.market_dependencies,
+      rule_revision:s.rule_revision,conditions:s.conditions};
+    const coverage=s.model_coverage,model_ref=coverage.model_ref;
+    if(modelBinding(data.schema_revision)) digest(model_ref.content_hash,"模型内容摘要");
+    const command={command_id:x.command_id,logical_order_family:x.logical_order_family,first_quantity:x.first_quantity,
+      allocation_id:x.allocation_id,session_id:discovery.session_id,session_generation:discovery.session_generation,
+      x_id:target.x_id,x_epoch:target.x_epoch,symbol:x.symbol,projection_kind:s.projection_kind,
+      ...(modelBinding(data.schema_revision)?{model_ref}:{}),change,
+      plan_hash:await sha256(change),certificate,certificate_hash:await sha256(certificate)};
+    need(req.command_id===x.command_id && base.decision_id===q.decision_id && base.plan_hash===await sha256(q)
+      && req.x_id===target.x_id && req.x_epoch===target.x_epoch && req.plan_hash===command.plan_hash
+      && same(req.certificate,certificate),"放行请求不属于冻结计划、条件或 X");
+    const scope={order_kind:"limit",concurrency:x.concurrency,allocation_model:data.policy.allocation_policy_id};
+    const covered=coverage.input_domain.some(d=>same(d,scope)) && !coverage.unsupported_domains.some(d=>same(d,scope));
+    const result=covered ? {state:"ReleasedExact",first_quantity:x.first_quantity,allocation_id:x.allocation_id,
+      responsibility_ref:base.grant_id,release_seq:event.commit_seq,release_commit_ns:event.commit_ns,model_ref,
+      execution_eligibility:"ReleasedExact"} : {state:"Unsupported",unsupported_seq:event.commit_seq,
+      unsupported_ns:event.commit_ns,unsupported:{reason:"ModelOrderUnspecified",model_ref,domain_id:coverage.domain_id,command_id:x.command_id}};
+    need(same(event.record,{...base,command,command_hash:await sha256(command),...result}),"命令或放行记录与冻结原件不同");
+  }
+  function commandEvents(history,id) {
+    return history.filter(e=>["MakeDispatchable","ReleaseExact"].includes(e.kind) && e.record.command_id===id);
   }
   function bookBefore(image,seq) {
     let opening=null,quantity=null;
@@ -307,7 +363,7 @@
     need(right && ["amount","currency","owner","right_id","source_ref","version"].every(k=>same(right[k],p.right_source[k])),"Prepare 原权利与实际权利绑定不同");
   }
   function financeCoverage(image,view) {
-    const f=image.finance,history=image.history,events=history.filter(e=>Object.hasOwn(financeKinds,e.kind));
+    const f=image.finance,history=image.history,events=history.filter(e=>Object.hasOwn(kindsOf(f.schema_revision),e.kind));
     if(events.length) {
       need(history.at(-1).commit_seq===view.cut.commit_seq && history.at(-1).commit_ns===view.commit_ns,"实际历史末尾与固定切面不同");
       need(history.every((e,i)=>e.commit_seq===(BigInt(i)+1n).toString() && (i===0 || integer(e.commit_ns)>=integer(history[i-1].commit_ns))),"完整历史序号/提交时序不同");
@@ -335,6 +391,15 @@
     need(same(f.closed_applicants||[],closed),"关闭申请与原历史须双向覆盖");
     const activations=events.filter(e=>e.kind==="ActivateCapPolicy");
     need(activations.length?same(f.cap_policy,activations.at(-1).record.to):!Object.hasOwn(f,"cap_policy"),"当前 cap 版本与激活历史末尾不同");
+    if(exactRelease(f.schema_revision)) {
+      const current=new Map();
+      for(const event of events.filter(e=>["MakeDispatchable","ReleaseExact"].includes(e.kind))) {
+        const id=event.record.command_id, prior=current.get(id);
+        need(event.kind==="MakeDispatchable" ? !prior : prior?.state==="Dispatchable","命令历史缺原准备或出现重复迁移");
+        current.set(id,event.record);
+      }
+      need(current.size===f.commands.length && [...current.values()].every(r=>f.commands.some(c=>same(c,r))),"命令当前记录与所选切面历史末项不同");
+    }
   }
   function reservePrepared(reserve) {
     const proofs=reserve.witness.prepared_proofs,ids=new Set(),data=inputWitness(reserve),slot=reserve.record;
@@ -416,7 +481,7 @@
   async function verifyFinance(f, view, discovery, image) {
     const domain=view.cut.domain_id;
     const v3=capActivation(discovery.finance_revision);
-    keys(f,["schema_revision","rights","decisions","slots","responsibilities",...(Object.hasOwn(f,"closed_applicants")?["closed_applicants"]:[]),...(v3 && Object.hasOwn(f,"cap_policy")?["cap_policy"]:[])],"财务图像");
+    keys(f,["schema_revision","rights","decisions","slots","responsibilities",...(exactRelease(discovery.finance_revision)?["commands"]:[]),...(Object.hasOwn(f,"closed_applicants")?["closed_applicants"]:[]),...(v3 && Object.hasOwn(f,"cap_policy")?["cap_policy"]:[])],"财务图像");
     need(f.schema_revision === discovery.finance_revision,"未知或混搭财务版本");
     for(const k of Object.keys(f).filter(k=>k!=="schema_revision" && k!=="cap_policy"))need(Array.isArray(f[k]),"财务记录族须数组");
     financeCoverage(image,view);
@@ -469,8 +534,9 @@
     keys(image,["book","recorded","pending","applied","unmatched","history",...(discovery.finance_revision === undefined?[]:["finance"])],"完整经济图像");
     for(const k of ["recorded","pending","applied","unmatched","history"])need(Array.isArray(image[k]),"经济记录族不是数组");
     if(discovery.finance_revision===undefined)return;
+    const kinds=kindsOf(discovery.finance_revision);
     for(const e of image.history){
-      if(!Object.hasOwn(financeKinds,e.kind))continue;
+      if(!Object.hasOwn(kinds,e.kind))continue;
       keys(e,["kind","record","request","witness","received_ns","first_known_ns","commit_ns","commit_seq"],"财务事件");
       const first=integer(e.first_known_ns);
       need(integer(e.received_ns)<=first && first<=integer(e.commit_ns) && BigInt(e.commit_ns)<=integer(view.commit_ns) && integer(e.commit_seq,true)<=integer(view.cut.commit_seq),"财务事件知识时态不同");
@@ -481,6 +547,7 @@
       if(e.kind==="PrepareDecision")need(same(e.record.structure_evidence,e.witness.structure) && e.record.state==="Prepared", "Prepare 依据被替换");
       if(e.kind==="Reserve")for(const p of e.witness.prepared_proofs)await proof(p,first,discovery);
       if(e.kind==="CommitDecision")await proof(e.witness.grant_proof,first,discovery);
+      if(e.kind==="MakeDispatchable")await proof(e.witness.commit_proof,first,discovery);
     }
     // §5.7 仅递归列明 schema 路径；不猜测同名字段，不展开内容图改写 Hash。
     for(const r of image.recorded)if(Object.hasOwn(r,"e_commit_proof")){
@@ -493,12 +560,28 @@
     await verifyFinance(image.finance,view,discovery,image);
   }
   async function verifyOriginal(reply, state, discovery, domain, kind, id) {
-    need(state.completeness==="CompleteVector" && ["decision","grant"].includes(kind),"原件请求缺固定完整向量");
+    need(state.completeness==="CompleteVector" && (["decision","grant"].includes(kind) || (kind==="command" && domain==="E" && exactRelease(discovery.finance_revision))),"原件请求缺固定完整向量");
     keys(reply,["kind","session_id","session_generation","manifest_hash","cuts","domain_id","original"],"经济原件");
     const cuts=Object.fromEntries(Object.entries(state.domains).map(([d,v])=>[d,v.cut]));
     need(reply.kind==="EconomicOriginal" && reply.session_id===state.session_id && reply.session_generation===state.session_generation && reply.manifest_hash===state.manifest_hash && reply.domain_id===domain && same(reply.cuts,cuts),"原件身份或固定向量不同");
     const view=state.domains[domain],o=reply.original;
     need(view && view.status==="Available","原件域不可用");
+    if(kind==="command"){
+      const record=view.image.finance.commands.find(c=>c.command_id===id);
+      const head={kind:"EconomicCommand",domain_id:domain,command_id:id,cut:view.cut};
+      if(!record)need(same(o,{...head,state:"NoRecord"}),"无命令切面返回了其他原件");
+      else {
+        keys(o,[...Object.keys(head),"state","record","receipts"],"命令原件");
+        need(Object.keys(head).every(k=>same(head[k],o[k])) && o.state===record.state && same(o.record,record),"命令身份、记录或切面不同");
+        const chain=commandEvents(view.image.history,id);
+        need(chain.length>0 && Array.isArray(o.receipts) && o.receipts.length===chain.length,"命令回执链不完整");
+        for(const [i,r] of o.receipts.entries()){
+          need(r.cut.commit_seq===chain[i].commit_seq,"命令原回执不属于所选历史");
+          await receiptMatches(r,view.image,view,discovery);
+        }
+      }
+      return reply;
+    }
     keys(o,kind==="decision"?["kind","domain_id","decision","receipts"]:["kind","domain_id","grant","receipt"],"原件记录");
     need(o.domain_id===domain && o.kind===(kind==="decision"?"EconomicDecision":"EconomicGrant"),"原件类型或 owner 不同");
     if(kind==="decision"){
@@ -516,9 +599,10 @@
       need(g && same(o.grant,g) && o.receipt.record.grants.some(x=>same(x,g)),"grant 原件与快照不同");
       await receiptMatches(o.receipt,view.image,view,discovery);
     }
+    verifyProtocolCutsAndReceipts(reply, cuts, discovery.domains);
     return reply;
   }
-  async function verifySnapshot(value, discovery) {
+  async function verifySnapshot(value, discovery, unlistedPaths) {
     revision(discovery);
     keys(value, ["kind", "session_id", "session_generation", "manifest_hash", "mode", "as_known_ns", "domains", "completeness", "snapshot_token"], "经济快照");
     need(value.kind === "EconomicSnapshot" && value.session_id === discovery.session_id &&
@@ -551,19 +635,545 @@
         integer(book.opening_quantity, false, true);
         keys(book.income_book, ["Pi", "A", "W", "R"], "利润账");
         for (const amount of Object.values(book.income_book)) integer(amount, false, true);
-        for (const amount of Object.values(book.known_cost_totals)) integer(amount, false, true);
+        const totals = book.book_revision === undefined ? book.known_cost_totals : book.cost_totals;
+        need(object(totals) && (book.book_revision === undefined || book.book_revision === discovery.book_revision),
+          "成本汇总缺失或书账版本与冻结域不同");
+        for (const amount of Object.values(totals)) integer(amount, false, true);
         need(object(book.unknown) && object(book.voice) && Array.isArray(book.known_cost_components), "缺失账簿知识状态/原始成本史");
         await verifyVoices(book, view, discovery, domain);
       }
     }
     need(value.completeness === (complete ? "CompleteVector" : "PartialVector"), "域完整性声明与实际结果不同");
+    const vectorCuts = Object.fromEntries(
+      discovery.domains.map(d => [d, value.domains[d].status === "Available" ? value.domains[d].cut : null])
+    );
+    verifyProtocolCutsAndReceipts(value, vectorCuts, discovery.domains, false, unlistedPaths);
     const body = {...value}; delete body.snapshot_token;
     need(value.snapshot_token === "economic-snapshot-" + await sha256(body), "固定向量 token 与完整图像不同");
     return value;
   }
+  const PROJECTION_REV = "economic-read-projection/1";
+  const PROJECTION_ORIG_KINDS = ["fact", "allocation", "decision", "grant", "command", "model"];
+  const FILL_ALLOCATION_ROW_ALLOWED = new Set([
+    "fact_key", "fact_hash", "projection_kind", "source_kind", "manifest_hash", "symbol",
+    "fill_allocation_policy_id", "policy_revision", "from", "to", "report_kind", "component",
+    "original_fact_key", "original_allocation_id", "command_id", "grant_id", "responsibility_ref",
+    "plan_hash", "command_plan_hash", "command_hash", "evidence_id", "allocations", "x_execution_witness",
+  ]);
+  const ALLOCATION_ITEM_ALLOWED = new Set([
+    "allocation_id", "source_kind", "chong_id", "command_id", "grant_id", "responsibility_ref",
+    "family_id", "revision", "symbol", "manifest_hash", "units", "acquisition_cash", "commission",
+    "fee_deferred_to_cause_fact", "reported_fill_fee", "fee_only", "fee_type", "cause",
+    "original_fact_key", "original_allocation_id", "income_changes", "fill_allocation_policy_id",
+    "policy_revision", "component", "reversal", "unmatched_reason", "status", "target_domain",
+  ]);
+  const X_EXECUTION_WITNESS_ALLOWED = new Set([
+    "witness_revision", "x_profile_revision", "x_id", "x_epoch", "session_id", "session_generation",
+    "source_namespace", "source_epoch", "model_content_hash", "command_id", "command_hash",
+    "e_release_receipt_key", "e_release_cut", "e_release_commit_ns", "x_release_evidence",
+    "x_accept_clock", "x_command_state", "x_execute_evidence", "attempt_batch_id",
+    "attempt_batch_bar_index", "attempt_batch_request_sha256", "attempt_batch_receipt_sha256",
+    "originals_batch_id", "originals_batch_bar_index", "originals_batch_receipt_sha256",
+    "fact_raw_sha256",
+  ]);
+  const X_ACCEPT_CLOCK_ALLOWED = new Set(["received_ns", "first_known_ns", "commit_ns"]);
+  const X_AUTHORITY_EVIDENCE_BASE_ALLOWED = new Set([
+    "protocol", "session_id", "session_generation", "authority_id", "authority_epoch", "command_id", "command_hash",
+    "state", "receipt_id", "release_receipt_id", "commit_ns",
+  ]);
+  const X_EXECUTE_EVIDENCE_ALLOWED = new Set(["claimed_ns", "reply"]);
+  const COMMAND_REF_ALLOWED = new Set(["command_id", "command_hash"]);
+  const PROJECTED_RECORD_ALLOWED = new Set([
+    "fact_key", "fact_hash", "raw_sha256", "raw_utf8", "json_pointer", "event", "token",
+    "target_domain", "source_event_time", "source_received_time", "source_producer",
+    "origin_message", "origin_request_hash", "received_ns", "first_known_ns", "commit_ns",
+    "recorded_seq", "cut", "e_domain_id", "e_session_id", "e_session_generation",
+    "e_commit_proof", "e_commit_proof_omitted", "e_receipt", "e_resolution_proof",
+    "b_source_debit_proof", "b_observation", "b_origin_message", "b_origin_request_hash",
+    "resolved_allocation", "resolved_allocation_ref",
+  ]);
+  function assertWhitelistKeys(obj, allowed, label) {
+    need(object(obj), label + " 必须为对象");
+    for (const k of Object.keys(obj)) {
+      need(allowed.has(k), label + " 存在未声明字段（不在读权白名单内）：" + k);
+    }
+  }
+  function verifyFillAllocationRowWhitelist(row, hasCommand) {
+    assertWhitelistKeys(row, FILL_ALLOCATION_ROW_ALLOWED, "fill_allocation_row");
+    if (Array.isArray(row.allocations)) {
+      for (const item of row.allocations) assertWhitelistKeys(item, ALLOCATION_ITEM_ALLOWED, "fill_allocation_row.allocations[]");
+    }
+    if (row.x_execution_witness !== undefined && row.x_execution_witness !== null) {
+      const w = row.x_execution_witness;
+      const authorityAllowed = new Set([...X_AUTHORITY_EVIDENCE_BASE_ALLOWED, hasCommand ? "command" : "command_ref"]);
+      assertWhitelistKeys(w, X_EXECUTION_WITNESS_ALLOWED, "x_execution_witness");
+      if (w.x_accept_clock !== undefined && w.x_accept_clock !== null) {
+        assertWhitelistKeys(w.x_accept_clock, X_ACCEPT_CLOCK_ALLOWED, "x_accept_clock");
+      }
+      if (w.x_release_evidence !== undefined && w.x_release_evidence !== null) {
+        assertWhitelistKeys(w.x_release_evidence, authorityAllowed, "x_release_evidence");
+        if (w.x_release_evidence.command_ref !== undefined && w.x_release_evidence.command_ref !== null) {
+          assertWhitelistKeys(w.x_release_evidence.command_ref, COMMAND_REF_ALLOWED, "x_release_evidence.command_ref");
+        }
+      }
+      if (w.x_execute_evidence !== undefined && w.x_execute_evidence !== null) {
+        assertWhitelistKeys(w.x_execute_evidence, X_EXECUTE_EVIDENCE_ALLOWED, "x_execute_evidence");
+        if (w.x_execute_evidence.reply !== undefined && w.x_execute_evidence.reply !== null) {
+          assertWhitelistKeys(w.x_execute_evidence.reply, authorityAllowed, "x_execute_evidence.reply");
+          if (w.x_execute_evidence.reply.command_ref !== undefined && w.x_execute_evidence.reply.command_ref !== null) {
+            assertWhitelistKeys(w.x_execute_evidence.reply.command_ref, COMMAND_REF_ALLOWED, "x_execute_evidence.reply.command_ref");
+          }
+        }
+      }
+    }
+  }
+  function isCutShape(v) {
+    if (!object(v)) return false;
+    const ks = Object.keys(v);
+    return ks.length === 3 && Object.prototype.hasOwnProperty.call(v, "domain_id")
+      && Object.prototype.hasOwnProperty.call(v, "commit_seq")
+      && Object.prototype.hasOwnProperty.call(v, "root_hash");
+  }
+  const OPAQUE_SOURCE_FIELDS = new Set(["raw_utf8", "raw_exact_text", "model_raw_utf8", "model_exact_text", "event"]);
+  // Source components are copied verbatim by book.rs/tb03c_book.rs; derived ones lack these source fields.
+  const sourceCostComponent = item => object(item) && typeof item.source_ref === "string" && typeof item.amount_text === "string";
+  function cutEvidenceShape(node) {
+    if (isCutShape(node)) return "cut";
+    if (typeof node.kind === "string" && !node.kind.startsWith("Economic") && isCutShape(node.cut)) return "receipt";
+    if (typeof node.witness_revision === "string" && Object.hasOwn(node, "e_release_cut")) return "witness";
+    return null;
+  }
+  function* protocolCutCandidates(root, path = []) {
+    if (Array.isArray(root)) {
+      const sourceComponents = path.at(-2) === "book" && path.at(-1) === "known_cost_components";
+      for (const [i, item] of root.entries()) {
+        if (!(sourceComponents && sourceCostComponent(item))) yield* protocolCutCandidates(item, [...path, i]);
+      }
+    } else if (object(root)) {
+      const shape = cutEvidenceShape(root);
+      if (shape) yield [path, root, shape];
+      if (shape === "cut") return;
+      for (const [key, value] of Object.entries(root)) {
+        if (!OPAQUE_SOURCE_FIELDS.has(key)) yield* protocolCutCandidates(value, [...path, key]);
+      }
+    }
+  }
+  function visitProtocolCutsInImage(img, ownerDomain, onCut, onReceipt) {
+    if (!object(img)) return;
+    if (object(img.book)) {
+      if (object(img.book.opening_fact_ref) && img.book.opening_fact_ref.e_cut != null) {
+        onCut(img.book.opening_fact_ref.e_cut, "E");
+      }
+      for (const listKey of ["known_cost_components", "cost_events"]) {
+        if (Array.isArray(img.book[listKey])) {
+          for (const item of img.book[listKey]) {
+            if (object(item) && !(listKey === "known_cost_components" && sourceCostComponent(item))
+                && object(item.derivation) && item.derivation.resolve_cut != null) {
+              onCut(item.derivation.resolve_cut, "E");
+            }
+          }
+        }
+      }
+      if (Array.isArray(img.book.voice?.records)) {
+        for (const record of img.book.voice.records) {
+          visitVoiceBasis(record, onCut);
+        }
+      }
+    }
+    for (const listKey of ["recorded", "pending"]) {
+      if (Array.isArray(img[listKey])) {
+        for (const rec of img[listKey]) visitProtocolCutsInRecord(rec, onCut, onReceipt);
+      }
+    }
+    if (Array.isArray(img.fill_allocations)) {
+      for (const row of img.fill_allocations) visitProtocolCutsInFillRow(row, onCut);
+    }
+    if (object(img.finance)) visitProtocolCutsInFinance(img.finance, ownerDomain, onCut);
+    if (Array.isArray(img.history)) {
+      for (const h of img.history) {
+        if (!object(h)) continue;
+        if (object(h.x_execution_witnesses)) {
+          for (const w of Object.values(h.x_execution_witnesses)) {
+            visitExecutionWitness(w, onCut);
+          }
+        }
+        if (object(h.record)) visitProtocolCutsInFinanceRecord(h.record, ownerDomain, onCut);
+        if (object(h.witness)) {
+          if (Array.isArray(h.witness.prepared_proofs)) {
+            for (const p of h.witness.prepared_proofs) visitProtocolCutsInPeerProof(p, onCut, onReceipt);
+          }
+          if (object(h.witness.grant_proof)) visitProtocolCutsInPeerProof(h.witness.grant_proof, onCut, onReceipt);
+          if (object(h.witness.commit_proof)) visitProtocolCutsInPeerProof(h.witness.commit_proof, onCut, onReceipt);
+        }
+      }
+    }
+  }
+  function visitProtocolCutsInRecord(rec, onCut, onReceipt) {
+    if (!object(rec)) return;
+    // 只检查协议定义的证据路径，绝不解析来源数据字段（event / raw_utf8 / raw_exact_text）。
+    if (rec.cut != null) onCut(rec.cut, "E");
+    if (rec.e_receipt != null) onReceipt(rec.e_receipt, "E");
+    if (object(rec.e_resolution_proof)) {
+      if (rec.e_resolution_proof.receipt != null) onReceipt(rec.e_resolution_proof.receipt, "E");
+      if (object(rec.e_resolution_proof.image)) visitProtocolCutsInImage(rec.e_resolution_proof.image, "E", onCut, onReceipt);
+      if (object(rec.e_resolution_proof.previous_image)) visitProtocolCutsInImage(rec.e_resolution_proof.previous_image, "E", onCut, onReceipt);
+    }
+    if (object(rec.e_commit_proof) && object(rec.e_commit_proof.image)) {
+      visitProtocolCutsInImage(rec.e_commit_proof.image, "E", onCut, onReceipt);
+    }
+    const proof = rec.b_source_debit_proof;
+    if (object(proof)) {
+      const sd = typeof proof.domain_id === "string" ? proof.domain_id : null;
+      if (proof.receipt != null) onReceipt(proof.receipt, sd);
+      if (object(proof.image)) visitProtocolCutsInImage(proof.image, sd, onCut, onReceipt);
+      if (object(proof.previous_image)) visitProtocolCutsInImage(proof.previous_image, sd, onCut, onReceipt);
+    }
+  }
+  function visitProtocolCutsInFillRow(row, onCut) {
+    if (object(row)) visitExecutionWitness(row.x_execution_witness, onCut);
+  }
+  function visitExecutionWitness(w, onCut) {
+    if (object(w) && w.e_release_cut != null) onCut(w.e_release_cut, "E", w);
+  }
+  function visitVoiceBasis(record, onCut) {
+    if (record?.opening_basis?.e_cut != null) onCut(record.opening_basis.e_cut, "E");
+  }
+  function visitProtocolCutsInFinanceRecord(rec, ownerDomain, onCut) {
+    if (!object(rec)) return;
+    visitVoiceBasis(rec, onCut);
+    visitVoiceBasis(rec.prepared?.voice, onCut);
+    if (rec.prepared_cut != null) {
+      const exp = typeof rec.owner === "string" ? rec.owner : ownerDomain;
+      onCut(rec.prepared_cut, exp);
+    }
+    if (rec.commit_cut != null) {
+      const exp = typeof rec.owner === "string" ? rec.owner : null;
+      onCut(rec.commit_cut, exp);
+    }
+    if (object(rec.grant)) {
+      if (rec.grant.prepared_cut != null) onCut(rec.grant.prepared_cut, rec.grant.owner ?? null);
+      if (rec.grant.e_cut != null) onCut(rec.grant.e_cut, "E");
+      if (object(rec.grant.original) && rec.grant.original.prepared_cut != null) {
+        const exp = typeof rec.grant.original.owner === "string" ? rec.grant.original.owner : ownerDomain;
+        onCut(rec.grant.original.prepared_cut, exp);
+      }
+    }
+    if (object(rec.local_commit_receipt) && rec.local_commit_receipt.e_cut != null) {
+      onCut(rec.local_commit_receipt.e_cut, "E");
+    }
+    if (Array.isArray(rec.grants)) {
+      for (const g of rec.grants) {
+        if (object(g) && g.prepared_cut != null) {
+          onCut(g.prepared_cut, typeof g.owner === "string" ? g.owner : null);
+        }
+      }
+    }
+  }
+  function visitProtocolCutsInFinance(fin, ownerDomain, onCut) {
+    if (!object(fin)) return;
+    if (Array.isArray(fin.decisions)) {
+      for (const d of fin.decisions) visitProtocolCutsInFinanceRecord(d, ownerDomain, onCut);
+    }
+    if (Array.isArray(fin.slots)) {
+      for (const s of fin.slots) {
+        if (object(s) && Array.isArray(s.grants)) {
+          for (const g of s.grants) visitProtocolCutsInFinanceRecord(g, ownerDomain, onCut);
+        }
+      }
+    }
+    if (Array.isArray(fin.commands)) {
+      for (const c of fin.commands) visitProtocolCutsInFinanceRecord(c, ownerDomain, onCut);
+    }
+    if (Array.isArray(fin.responsibilities)) {
+      for (const r of fin.responsibilities) visitProtocolCutsInFinanceRecord(r, ownerDomain, onCut);
+    }
+  }
+  function visitProtocolCutsInPeerProof(p, onCut, onReceipt) {
+    if (!object(p)) return;
+    const pdom = typeof p.domain_id === "string" ? p.domain_id : null;
+    if (p.current_cut != null) onCut(p.current_cut, pdom);
+    if (p.receipt != null) onReceipt(p.receipt, pdom);
+    if (object(p.image)) visitProtocolCutsInImage(p.image, pdom, onCut, onReceipt);
+    if (object(p.current_image)) visitProtocolCutsInImage(p.current_image, pdom, onCut, onReceipt);
+  }
+  function visitProtocolCutsInOriginal(orig, domain, kind, onCut, onReceipt) {
+    need(object(orig), "原件载荷非对象");
+    if (kind === "fact" || orig.kind === "EconomicFactAtCut") {
+      need(orig.domain_id === domain, "回执域与期望域不符");
+      need(Array.isArray(orig.receipts), "事实回执缺失");
+      for (const r of orig.receipts) {
+        const exp = domain === "E" ? "E" : (object(r) && r.kind === "Recorded" ? "E" : domain);
+        onReceipt(r, exp);
+      }
+      if (orig.projected_record != null) visitProtocolCutsInRecord(orig.projected_record, onCut, onReceipt);
+      if (orig.fill_allocation_row != null) visitProtocolCutsInFillRow(orig.fill_allocation_row, onCut);
+    } else if (kind === "allocation" || orig.kind === "EconomicAllocationAtCut") {
+      need(orig.domain_id === domain, "回执域与期望域不符");
+      if (domain === "E") {
+        onReceipt(orig.resolve_receipt, "E");
+        if (orig.fill_allocation_row != null) visitProtocolCutsInFillRow(orig.fill_allocation_row, onCut);
+      } else {
+        onReceipt(orig.receipt, domain);
+      }
+      if (orig.fact !== null && orig.fact !== undefined) {
+        visitProtocolCutsInOriginal(orig.fact, domain, "fact", onCut, onReceipt);
+      }
+    } else if (kind === "model" || orig.kind === "EconomicModelAtCut") {
+      need(orig.domain_id === domain, "回执域与期望域不符");
+    } else if (kind === "decision" || orig.kind === "EconomicDecision") {
+      need(orig.domain_id === domain, "回执域与期望域不符");
+      need(Array.isArray(orig.receipts), "决定回执缺失");
+      for (const r of orig.receipts) onReceipt(r, domain);
+      if (object(orig.decision)) visitProtocolCutsInFinanceRecord(orig.decision, domain, onCut);
+    } else if (kind === "grant" || orig.kind === "EconomicGrant") {
+      need(domain === "E" && orig.domain_id === "E", "回执域与期望域不符");
+      onReceipt(orig.receipt, "E");
+      if (object(orig.grant)) visitProtocolCutsInFinanceRecord(orig.grant, "E", onCut);
+    } else if (kind === "command" || orig.kind === "EconomicCommand") {
+      need(domain === "E" && orig.domain_id === "E", "回执域与期望域不符");
+      if (orig.cut != null) onCut(orig.cut, "E");
+      if (Array.isArray(orig.receipts)) {
+        for (const r of orig.receipts) onReceipt(r, "E");
+      }
+      if (object(orig.record)) visitProtocolCutsInFinanceRecord(orig.record, "E", onCut);
+    }
+  }
+  function verifyProtocolCutsAndReceipts(root, cuts, knownDomains, requireKnownDomain = true, unlistedPaths) {
+    const checked = new Set();
+    const checkOneCut = (node, expectedDomain = null, witness = null) => {
+      need(isCutShape(node), "内嵌 cut 字段不完整或多余");
+      const rdomain = node.domain_id;
+      if (expectedDomain !== null) need(rdomain === expectedDomain, "回执域与期望域不符");
+      need(typeof rdomain === "string" && (!requireKnownDomain || knownDomains.includes(rdomain)), "回执所属域不在固定切面向量中");
+      cut(node, rdomain);
+      checked.add(node);
+      if (witness) checked.add(witness);
+      if (Object.prototype.hasOwnProperty.call(cuts, rdomain) && cuts[rdomain] !== null) {
+        const rseq = BigInt(node.commit_seq), cseq = BigInt(cuts[rdomain].commit_seq);
+        need(rseq <= cseq, "MissingDependency：回执(" + rdomain + ":" + node.commit_seq + ")晚于固定切面(" + rdomain + ":" + cuts[rdomain].commit_seq + ")，向量未就绪");
+        if (rseq === cseq) need(same(node, cuts[rdomain]), "同序号回执根与固定切面根不符");
+      }
+    };
+    const checkOneReceipt = (rec, expectedDomain = null) => {
+      need(object(rec), "回执非对象");
+      need(isCutShape(rec.cut), "回执缺失合法 cut");
+      need(typeof rec.domain_id === "string", "回执缺失 domain_id");
+      need(rec.domain_id === rec.cut.domain_id, "回执域与 cut 域不符");
+      if (expectedDomain !== null) need(rec.domain_id === expectedDomain, "回执域与期望域不符");
+      checked.add(rec);
+      checkOneCut(rec.cut, expectedDomain);
+      if (object(rec.record)) visitProtocolCutsInFinanceRecord(rec.record, rec.domain_id, checkOneCut);
+    };
+    if (root.kind === "EconomicSnapshot" || root.kind === "EconomicProjection") {
+      for (const [domain, view] of Object.entries(root.domains || {})) {
+        if (!object(view) || view.status !== "Available") continue;
+        checkOneCut(view.cut, domain);
+        const body = root.kind === "EconomicSnapshot" ? view.image : view.projection;
+        visitProtocolCutsInImage(body, domain, checkOneCut, checkOneReceipt);
+      }
+    } else if (root.kind === "EconomicWatch") {
+      for (const [domain, view] of Object.entries(root.domains || {})) {
+        if (!object(view) || view.status !== "Available") continue;
+        checkOneCut(view.base_cut, domain);
+        checkOneCut(view.next_cut, domain);
+        for (const change of view.changes) {
+          checkOneCut(change.cut, domain);
+          visitProtocolCutsInImage(change.image, domain, checkOneCut, checkOneReceipt);
+        }
+      }
+    } else if (root.kind === "EconomicProjectionOriginal" || root.kind === "EconomicOriginal") {
+      for (const [domain, c] of Object.entries(root.cuts || {})) checkOneCut(c, domain);
+      const kind = root.original_kind || (object(root.original) ? ({
+        EconomicDecision: "decision", EconomicGrant: "grant", EconomicCommand: "command",
+      }[root.original.kind] || null) : null);
+      visitProtocolCutsInOriginal(root.original, root.domain_id, kind, checkOneCut, checkOneReceipt);
+    }
+    const missed = [...protocolCutCandidates(root)].filter(([, node]) => !checked.has(node));
+    for (const [path, node, shape] of missed) {
+      if (unlistedPaths) unlistedPaths.push(path);
+      if (checked.has(node)) continue;
+      if (shape === "receipt") checkOneReceipt(node);
+      else if (shape === "witness") visitExecutionWitness(node, checkOneCut);
+      else checkOneCut(node);
+    }
+  }
+  function collectPeerCutDependencies(img, ownerDomain, knownDomains) {
+    const deps = new Map();
+    const recordCut = (node) => {
+      if (!isCutShape(node) || typeof node.domain_id !== "string") return;
+      if (!knownDomains.includes(node.domain_id)) return;
+      const seq = integer(node.commit_seq);
+      const prev = deps.get(node.domain_id);
+      if (prev === undefined || seq > prev) deps.set(node.domain_id, seq);
+    };
+    const recordReceipt = (rec) => {
+      if (!object(rec)) return;
+      recordCut(rec.cut);
+      if (object(rec.record)) visitProtocolCutsInFinanceRecord(rec.record, rec.domain_id || ownerDomain, recordCut);
+    };
+    visitProtocolCutsInImage(img, ownerDomain, recordCut, recordReceipt);
+    return deps;
+  }
+  async function utf8Sha256(text) {
+    return bytesHash(new TextEncoder().encode(text));
+  }
+  function checkReadError(reply, rev) {
+    if (object(reply) && reply.kind === "EconomicReadError") {
+      keys(reply, ["schema_revision", "kind", "code", "detail", "transfer_id"], "分页错误");
+      need(reply.schema_revision === rev && typeof reply.code === "string" && reply.code.length > 0
+        && typeof reply.detail === "string" && reply.detail.length > 0, "分页错误格式非法");
+      throw new Error(reply.detail.startsWith(reply.code) ? reply.detail : reply.code + "：" + reply.detail);
+    }
+  }
+  async function verifyProjectedBook(book, domain, discovery) {
+    if (domain === "E") { need(book === null, "E 不能伪装重账"); return; }
+    if (book === null) return;
+    need(object(book) && domain === "B:" + book.chong_id, "重归属与权威域不同");
+    need(book.book_revision === discovery.book_revision, "投影书账版本与冻结域不同");
+    integer(book.fixed_q, true); integer(book.operation_level);
+    integer(book.actual_quantity, false, true); integer(book.opening_quantity, false, true);
+    keys(book.income_book, ["Pi", "A", "W", "R"], "利润账");
+    for (const amount of Object.values(book.income_book)) integer(amount, false, true);
+    if (book.book_revision === "tb03c-book/1") {
+      need(object(book.cost_totals), "tb03c 成本汇总缺失");
+      integer(book.cost_totals.acquisition_cash, false, true);
+      integer(book.cost_totals.commission, false, true);
+      integer(book.cost_totals.fee_only, false, true);
+      need(object(book.cost_basis), "tb03c 成本基数缺失");
+      integer(book.cost_basis.K, false, true);
+      need(object(book.cost_remaining) && object(book.principal) && object(book.phase), "tb03c 余量/本金/阶段缺失");
+      if (book.cost_remaining.status === "Known") integer(book.cost_remaining.value, false, true);
+    }
+  }
+  async function verifyProjection(value, discovery, unlistedPaths) {
+    need(object(discovery.read_projection), "会话未声明只读投影能力");
+    keys(value, ["kind", "projection_revision", "session_id", "session_generation", "manifest_hash",
+      "mode", "as_known_ns", "domains", "projection_completeness", "projection_token"], "经济投影");
+    need(value.kind === "EconomicProjection" && value.projection_revision === PROJECTION_REV
+      && value.session_id === discovery.session_id && value.session_generation === discovery.session_generation
+      && value.manifest_hash === discovery.manifest_hash, "经济投影身份或版本不符");
+    need(value.mode === "Current" || value.mode === "AsKnown", "未知投影历史模式");
+    if (value.as_known_ns !== null) integer(value.as_known_ns);
+    keys(value.domains, discovery.domains, "投影域集合");
+    let complete = true;
+    for (const domain of discovery.domains) {
+      const view = value.domains[domain];
+      if (view.status === "Unavailable") {
+        keys(view, ["status", "error"], "不可用投影域");
+        need(typeof view.error === "string" && view.error.length > 0, "投影域不可用原因缺失");
+        complete = false;
+        continue;
+      }
+      keys(view, ["status", "projection_revision", "cut", "commit_ns", "writer_epoch", "audit_verified",
+        "authoritative_image_hash", "authoritative_image_bytes", "projection_hash", "projection_bytes",
+        "omitted_peer_images", "projection"], "可用投影域");
+      need(view.status === "Available" && view.projection_revision === PROJECTION_REV
+        && view.audit_verified === true
+        && view.writer_epoch === discovery.read_projection.owner_epochs[domain], "投影域状态、审计确认或 epoch 不符");
+      cut(view.cut, domain);
+      integer(view.commit_ns);
+      if (value.as_known_ns !== null) need(BigInt(view.commit_ns) <= BigInt(value.as_known_ns), "投影晚于获知截止时刻");
+      digest(view.authoritative_image_hash, "权威原像摘要");
+      integer(view.authoritative_image_bytes, true);
+      digest(view.projection_hash, "投影摘要");
+      const projBytes = new TextEncoder().encode(canonical(view.projection));
+      need(await bytesHash(projBytes) === view.projection_hash
+        && String(projBytes.byteLength) === view.projection_bytes, "投影正文摘要或字节长度不符");
+      need(Array.isArray(view.omitted_peer_images), "省略证明锚点列表缺失");
+      for (const om of view.omitted_peer_images) {
+        keys(om, ["path", "omitted_kind", "sha256", "byte_len"], "省略证明锚点");
+        need(typeof om.path === "string" && om.path.length > 0 && om.omitted_kind === "EmbeddedPeerImage", "省略锚点类型非法");
+        digest(om.sha256, "省略锚点摘要"); integer(om.byte_len, true);
+      }
+      const proj = view.projection;
+      need(object(proj), "投影正文非对象");
+      for (const k of ["recorded", "pending", "applied", "unmatched", "history"]) need(Array.isArray(proj[k]), "投影记录族非数组");
+      for (const rec of proj.recorded) {
+        need(object(rec) && typeof rec.raw_utf8 === "string", "投影事实缺少原件字节");
+        digest(rec.raw_sha256, "raw_sha256");
+        need(await utf8Sha256(rec.raw_utf8) === rec.raw_sha256, "投影事实 raw_utf8 与 raw_sha256 不符");
+      }
+      if (proj.finance !== undefined) {
+        need(object(proj.finance) && proj.finance.schema_revision === discovery.finance_revision, "投影财务版本不符");
+      }
+      await verifyProjectedBook(proj.book, domain, discovery);
+    }
+    need(value.projection_completeness === (complete ? "CompleteProjectionVector" : "PartialProjectionVector"), "投影完整性声明与域状态不符");
+    const vectorCuts = Object.fromEntries(
+      discovery.domains.map(d => [d, value.domains[d].status === "Available" ? value.domains[d].cut : null])
+    );
+    verifyProtocolCutsAndReceipts(value, vectorCuts, discovery.domains, true, unlistedPaths);
+    const body = {...value}; delete body.projection_token;
+    need(value.projection_token === "economic-projection-" + await sha256(body), "投影固定向量 token 与正文不符");
+    return value;
+  }
+  async function verifyProjectionOriginal(reply, state, discovery, domain, kind, id, unlistedPaths) {
+    need(state && state.kind === "EconomicProjection" && state.projection_completeness === "CompleteProjectionVector", "同切面取证需要完整投影向量");
+    keys(reply, ["kind", "projection_revision", "session_id", "session_generation", "manifest_hash",
+      "cuts", "domain_id", "original_kind", "object_id", "authoritative_image_hash",
+      "authoritative_image_bytes", "commit_ns", "writer_epoch", "original"], "同切面投影原件");
+    const cuts = Object.fromEntries(Object.entries(state.domains).map(([d, v]) => [d, v.cut]));
+    const view = state.domains[domain];
+    need(reply.kind === "EconomicProjectionOriginal" && reply.projection_revision === PROJECTION_REV
+      && reply.session_id === state.session_id && reply.session_generation === state.session_generation
+      && reply.manifest_hash === state.manifest_hash && reply.domain_id === domain
+      && reply.original_kind === kind && reply.object_id === id && same(reply.cuts, cuts)
+      && reply.authoritative_image_hash === view.authoritative_image_hash
+      && reply.authoritative_image_bytes === view.authoritative_image_bytes
+      && reply.commit_ns === view.commit_ns && reply.writer_epoch === view.writer_epoch, "同切面原件与固定投影切面不符");
+    const o = reply.original;
+    need(object(o), "同切面原件载荷非对象");
+    verifyProtocolCutsAndReceipts(reply, cuts, discovery.domains, true, unlistedPaths);
+    const originalKinds = discovery.read_projection?.original_kinds;
+    const hasCommand = Array.isArray(originalKinds) && originalKinds.includes("command");
+    const checkFact = async (f) => {
+      need(object(f) && typeof f.raw_utf8 === "string", "事实原件缺 raw_utf8");
+      digest(f.raw_sha256, "raw_sha256");
+      need(await utf8Sha256(f.raw_utf8) === f.raw_sha256, "事实原件精确字节与 raw_sha256 不符");
+      need(object(f.raw_exact_text) && f.raw_exact_text.representation === "ExactDecimalIntegerTextProjection"
+        && f.raw_exact_text.raw_sha256 === f.raw_sha256, "事实精确文本视图绑定不符");
+      need(Array.isArray(f.receipts), "事实回执缺失");
+      if (f.projected_record !== undefined && f.projected_record !== null) {
+        assertWhitelistKeys(f.projected_record, PROJECTED_RECORD_ALLOWED, "projected_record");
+      }
+      if (f.fill_allocation_row !== undefined && f.fill_allocation_row !== null) {
+        verifyFillAllocationRowWhitelist(f.fill_allocation_row, hasCommand);
+      }
+    };
+    if (kind === "fact") await checkFact(o);
+    else if (kind === "allocation") {
+      const rec = domain === "E" ? o.resolve_receipt : o.receipt;
+      need(object(rec), "分配回执缺失");
+      if (domain === "E" && o.fill_allocation_row !== undefined && o.fill_allocation_row !== null) {
+        verifyFillAllocationRowWhitelist(o.fill_allocation_row, hasCommand);
+      }
+      if (o.fact !== null && o.fact !== undefined) {
+        await checkFact(o.fact);
+      } else {
+        need(object(o.fact_ref), "未连带事实时缺具名 fact_ref");
+        digest(o.fact_ref.fact_key, "fact_ref.fact_key");
+        digest(o.fact_ref.fact_hash, "fact_ref.fact_hash");
+      }
+    } else if (kind === "model") {
+      need(object(o.model_ref), "模型原件缺 model_ref");
+      digest(o.model_ref.content_hash, "model_ref.content_hash");
+      if (o.model_raw_utf8 !== null) {
+        need(typeof o.model_raw_utf8 === "string"
+          && await utf8Sha256(o.model_raw_utf8) === o.model_ref.content_hash, "模型原件字节与 model_ref.content_hash 不符");
+        need(object(o.model_exact_text) && o.model_exact_text.representation === "ExactDecimalIntegerTextProjection"
+          && o.model_exact_text.content_hash === o.model_ref.content_hash, "模型精确文本视图绑定不符");
+      }
+    } else if (["decision", "grant", "command"].includes(kind)) {
+      const recs = kind === "grant" ? [o.receipt] : (o.receipts || []);
+      for (const r of recs) {
+        need(object(r), "财务回执非对象");
+      }
+    }
+    return reply;
+  }
   class Client {
     constructor({fetcher = globalThis.fetch.bind(globalThis), onCommit = () => {}} = {}) {
-      this.fetcher = fetcher; this.onCommit = onCommit; this.discovery = null; this.state = null; this.epoch = 0;
+      this.fetcher = fetcher; this.onCommit = onCommit; this.discovery = null; this.state = null; this.epoch = 0; this.readLog = [];
     }
     async fetchBounded(path, options, timeout, limit) {
       const control = new AbortController(), timer = setTimeout(() => control.abort(), timeout); // DevSkim: ignore DS172411 回调为函数字面量而非字符串
@@ -592,18 +1202,106 @@
       revision(d);
       integer(d.max_reply_bytes, true); integer(d.operation_timeout_ms, true);
       need(BigInt(d.max_reply_bytes) <= 67108864n && BigInt(d.operation_timeout_ms) <= 60000n, "公开配置超过浏览器资源界限");
+      if(d.read_pages!==undefined){
+        keys(d.read_pages,["schema_revision","owner_epochs"],"分页能力");
+        need(exactRelease(d.finance_revision) && d.read_pages.schema_revision==="economic-read-pages/1","未知分页合同");
+        keys(d.read_pages.owner_epochs,d.domains,"分页 owner 代际");
+        Object.values(d.read_pages.owner_epochs).forEach(n=>integer(n,true));
+      }
+      if(d.read_projection!==undefined){
+        keys(d.read_projection,["schema_revision","transport_revision","owner_epochs","original_kinds","watch_supported","available_actions"],"经济投影能力");
+        need(d.finance_revision==="tb03b-finance/6" && d.read_projection.schema_revision===PROJECTION_REV
+          && d.read_projection.transport_revision==="economic-read-pages/1"
+          && d.read_projection.watch_supported===false
+          && same(d.read_projection.available_actions,["projection","projection_original"]),"未知经济投影合同");
+        keys(d.read_projection.owner_epochs,d.domains,"投影 owner 代际");
+        Object.values(d.read_projection.owner_epochs).forEach(n=>integer(n,true));
+        need(Array.isArray(d.read_projection.original_kinds)
+          && d.read_projection.original_kinds.every(k=>PROJECTION_ORIG_KINDS.includes(k)),"投影原件类型非法");
+      }
       this.discovery = d; return d;
     }
     async query(payload, deadline = null) {
       const d = await this.discover();
+      if(d.read_pages && ["snapshot","watch","projection","projection_original"].includes(payload.op)){
+        const end = performance.now()+Math.min(30000,Number(d.operation_timeout_ms));
+        return this.pagedQuery(payload,Math.min(deadline??end,end));
+      }
+      return this.rpc(payload,payload.op,deadline);
+    }
+    async pagedQuery(query, deadline) {
+      const d=this.discovery, rev=d.read_pages.schema_revision;
+      const expectedKindMap={snapshot:"EconomicSnapshot",watch:"EconomicWatch",projection:"EconomicProjection",projection_original:"EconomicProjectionOriginal"};
+      const expectedKind=expectedKindMap[query.op];
+      need(typeof expectedKind==="string","未知分页查询类型");
+      const remaining=()=>{const ms=Math.floor(deadline-performance.now());need(ms>0,"完整分页查询超时");return String(ms);};
+      const call=(op,body)=>this.rpc({op,schema_revision:rev,...body},"read",deadline);
+      const opened=await call("EconomicReadOpen",{query,requested_remaining_ms:remaining()});
+      checkReadError(opened, rev);
+      keys(opened,["schema_revision","kind","descriptor","descriptor_sha256"],"分页 Open");
+      const h=opened.descriptor, binding={transfer_id:h.transfer_id,descriptor_sha256:opened.descriptor_sha256};
+      need(opened.schema_revision===rev && opened.kind==="EconomicReadOpened" && /^[0-9a-f]{32}$/.test(h.transfer_id)
+        && opened.descriptor_sha256===await sha256(h),"分页描述符摘要或传输身份不同");
+      const close=async()=>{
+        const closed=await call("EconomicReadClose",binding);
+        checkReadError(closed, rev);
+        need(same(closed,{schema_revision:rev,kind:"EconomicReadClosed",...binding}),"分页关闭未确认");
+      };
+      let doc;
+      try {
+        keys(h,["schema_revision","transfer_id","session_id","session_generation","manifest_hash","producer_id","producer_epoch",
+          "query_sha256","document_kind","fixed_cuts","owner_epochs","document_bytes","document_sha256","chunk_bytes","page_count"],"分页描述符");
+        need(h.schema_revision===rev && h.session_id===d.session_id && h.session_generation===d.session_generation
+          && h.manifest_hash===d.manifest_hash && h.producer_id==="Q:"+d.session_id && h.producer_epoch===d.producer_epoch
+          && same(h.owner_epochs,d.read_pages.owner_epochs) && h.query_sha256===await sha256(query)
+          && h.document_kind===expectedKind,"分页描述符不属于本次查询");
+        const size=Number(integer(h.document_bytes,true)),chunk=262144;
+        need(size<=4194304 && h.chunk_bytes===String(chunk) && h.page_count===String(Math.ceil(size/chunk)),"分页容量或页数错误");
+        const bytes=new Uint8Array(size);
+        for(let i=0;i<size;i+=chunk){
+          const page=await call("EconomicReadPage",{...binding,offset:String(i),requested_remaining_ms:remaining()});
+          checkReadError(page, rev);
+          const n=Math.min(chunk,size-i),done=i+n===size;
+          keys(page,["schema_revision","kind","transfer_id","descriptor_sha256","offset","raw_byte_count","chunk_sha256","data_base64","next_offset","done"],"分页数据");
+          need(page.schema_revision===rev && page.kind==="EconomicReadPage" && page.transfer_id===binding.transfer_id
+            && page.descriptor_sha256===binding.descriptor_sha256 && page.offset===String(i) && page.raw_byte_count===String(n)
+            && page.done===done && page.next_offset===(done?null:String(i+n)) && page.data_base64.length===4*Math.ceil(n/3),"分页边界或身份不同");
+          const raw=atob(page.data_base64);
+          need(raw.length===n && btoa(raw)===page.data_base64,"分页不是规范 base64");
+          for(let j=0;j<n;j++)bytes[i+j]=raw.charCodeAt(j);
+          need(await bytesHash(bytes.subarray(i,i+n))===page.chunk_sha256,"分页摘要不同");
+        }
+        need(await bytesHash(bytes)===h.document_sha256,"分页正文摘要不同");
+        const raw=new TextDecoder("utf-8",{fatal:true}).decode(bytes); doc=parse(raw);
+        need(canonical(doc)===raw && doc.kind===h.document_kind && doc.manifest_hash===h.manifest_hash
+          && doc.session_id===h.session_id && doc.session_generation===h.session_generation,"分页正文身份或编码不同");
+        if(query.op==="projection_original"){
+          keys(doc.cuts,d.domains,"同切面原件固定切面");
+          need(same(doc.cuts,h.fixed_cuts),"同切面原件切面与描述符不同");
+        } else {
+          keys(doc.domains,d.domains,"分页文档域");
+          const fixed=Object.fromEntries(Object.entries(doc.domains).map(([id,v])=>[id,v.status==="Available"?
+            (["snapshot","projection"].includes(query.op)?v.cut:v.next_cut):null]));
+          need(same(fixed,h.fixed_cuts),"分页文档切面与描述符不同");
+        }
+        this.readLog.push({op:query.op,document_kind:h.document_kind,document_bytes:size,page_count:Number(h.page_count),document_sha256:h.document_sha256,fixed_cuts:h.fixed_cuts});
+      } catch (error) {
+        try { await close(); } catch { /* 保留首个错误；Q 会按原期限回收传输。 */ }
+        throw error;
+      }
+      await close();
+      return doc;
+    }
+    async rpc(payload, route, deadline) {
+      const d=this.discovery;
       const request = {schema_revision: revision(d), session_id: d.session_id, session_generation: d.session_generation,
         source_namespace: "economic-browser", source_epoch: "1", message_id: "browser-" + globalThis.crypto.randomUUID(),
         producer_id: "economic-browser", producer_epoch: "1", payload_hash: await sha256(payload), causal_refs: [], payload};
       const timeout = deadline === null ? Number(d.operation_timeout_ms) + 1000 : Math.min(Number(d.operation_timeout_ms) + 1000, deadline - performance.now());
       need(timeout > 0, "整次追读超过事前时限，保留原切面");
-      const response = await this.fetchBounded("/api/economic/" + payload.op,
+      const response = await this.fetchBounded("/api/economic/" + route,
         {method: "POST", headers: {"Content-Type": "application/json"}, body: canonical(request)},
-        timeout, Number(d.max_reply_bytes));
+        timeout, route==="read"?Math.min(1048576,Number(d.max_reply_bytes)):Number(d.max_reply_bytes));
       keys(response, Object.keys(request), "公共回复");
       need(response.schema_revision === request.schema_revision && response.session_id === d.session_id &&
         response.session_generation === d.session_generation && response.producer_id === "Q:" + d.session_id &&
@@ -634,13 +1332,56 @@
       if (epoch === this.epoch) { this.state = result; this.onCommit(result); }
       return result;
     }
+    async loadProjection({cuts = null, asKnown = null, token = null} = {}) {
+      const d = await this.discover();
+      need(object(d.read_projection), "会话未声明 economic-read-projection/1");
+      const epoch = ++this.epoch;
+      const result = await this.query({
+        op: "projection",
+        projection_revision: PROJECTION_REV,
+        cuts,
+        as_known_ns: asKnown,
+        projection_token: token,
+      });
+      need(result.kind !== "Gap", "固定投影切面已过期，请重新读取当前投影向量");
+      await verifyProjection(result, this.discovery);
+      if (token !== null) need(result.projection_token === token, "返回了另一个投影固定 token");
+      else {
+        need(result.mode === (cuts !== null || asKnown !== null ? "AsKnown" : "Current") &&
+          result.as_known_ns === asKnown, "投影历史模式或获知时刻与原请求不同");
+      }
+      if (cuts !== null) for (const [domain, expected] of Object.entries(cuts)) {
+        const view = result.domains[domain];
+        if (view.status === "Available") need(same(view.cut, expected), "投影回看返回其他切面");
+      }
+      if (epoch === this.epoch) { this.state = result; this.onCommit(result); }
+      return result;
+    }
+    async projectionOriginal(state, domain, kind, id) {
+      const cuts = Object.fromEntries(Object.entries(state.domains).map(([d, v]) => [d, v.cut]));
+      const result = await this.query({
+        op: "projection_original",
+        projection_revision: PROJECTION_REV,
+        domain_id: domain,
+        kind,
+        object_id: id,
+        cuts,
+      });
+      return verifyProjectionOriginal(result, state, this.discovery, domain, kind, id);
+    }
     async original(state, domain, kind, id) {
+      if (state && state.kind === "EconomicProjection") {
+        return this.projectionOriginal(state, domain, kind, id);
+      }
       const cuts=Object.fromEntries(Object.entries(state.domains).map(([d,v])=>[d,v.cut]));
       const result=await this.query({op:"original",kind,domain_id:domain,object_id:id,cuts});
       return verifyOriginal(result,state,this.discovery,domain,kind,id);
     }
     async watch() {
-      need(this.state !== null && this.state.completeness === "CompleteVector", "需先取得完整向量才可续接");
+      need(this.state !== null && this.state.kind === "EconomicSnapshot" && this.state.completeness === "CompleteVector",
+        this.state && this.state.kind === "EconomicProjection"
+          ? "只读投影视图不支持旧 Watch，请先切换到完整快照并取得 CompleteVector"
+          : "需先取得完整向量才可续接");
       const epoch = ++this.epoch, before = this.state;
       const deadline = performance.now() + Number(this.discovery.operation_timeout_ms);
       const cuts = Object.fromEntries(Object.entries(before.domains).map(([d, v]) => [d, v.cut]));
@@ -649,9 +1390,11 @@
         changes.session_generation === before.session_generation && changes.manifest_hash === before.manifest_hash, "变化身份不符");
       keys(changes.domains, this.discovery.domains, "变化域集合");
       const next = {};
+      const bySeq = {};
       for (const [domain, result] of Object.entries(changes.domains)) {
         need(result.status === "Available", result.error || "变化域不可用，保留原切面");
         need(same(result.base_cut, cuts[domain]) && Array.isArray(result.changes), "变化起点不符");
+        const seqMap = new Map([[cuts[domain].commit_seq, {cut: cuts[domain], image: before.domains[domain].image}]]);
         let previous = cuts[domain], previousNs = BigInt(before.domains[domain].commit_ns);
         for (const batch of result.changes) {
           keys(batch, ["cut", "image", "image_hash", "commit_ns"], "完整经济变化");
@@ -660,16 +1403,42 @@
           need(BigInt(batch.commit_ns) >= previousNs && await sha256(batch.image) === batch.image_hash,
             "变化时间倒退或图像摘要不同");
           need(BigInt(batch.cut.commit_seq) === BigInt(previous.commit_seq) + 1n, "变化序号不连续");
+          seqMap.set(batch.cut.commit_seq, batch);
+          previous = batch.cut; previousNs = BigInt(batch.commit_ns);
+        }
+        need(same(previous, result.next_cut), "变化末尾与前沿不同");
+        next[domain] = result.next_cut;
+        bySeq[domain] = seqMap;
+      }
+      // 逐批复核时按该批实际因果依赖闭包选取一致同伴切面（不拿旧起点 E:0 配已依赖 E:1 的 B:1，亦不超过已核 next 前沿）。
+      for (const [domain, result] of Object.entries(changes.domains)) {
+        for (const batch of result.changes) {
           const one = {...cuts, [domain]: batch.cut};
+          const queue = [[domain, batch.image]];
+          while (queue.length > 0) {
+            const [curDom, curImg] = queue.shift();
+            const deps = collectPeerCutDependencies(curImg, curDom, this.discovery.domains);
+            for (const [peer, needSeq] of deps.entries()) {
+              if (peer === domain) continue;
+              const curPeerSeq = BigInt(one[peer].commit_seq);
+              const maxPeerSeq = BigInt(next[peer].commit_seq);
+              const targetSeq = needSeq <= maxPeerSeq ? needSeq : maxPeerSeq;
+              if (targetSeq > curPeerSeq) {
+                const peerBatch = bySeq[peer].get(targetSeq.toString());
+                if (peerBatch) {
+                  one[peer] = peerBatch.cut;
+                  queue.push([peer, peerBatch.image]);
+                }
+              }
+            }
+          }
           const fixed = await this.query({op: "snapshot", cuts: one, as_known_ns: null, snapshot_token: null}, deadline);
           await verifySnapshot(fixed, this.discovery);
           need(fixed.mode === "AsKnown" && fixed.as_known_ns === null, "逐批复核未返回指定历史模式");
           const view = fixed.domains[domain];
           need(view.status === "Available" && same(view.cut, batch.cut) && same(view.image, batch.image) &&
             view.image_hash === batch.image_hash && view.commit_ns === batch.commit_ns, "中间变化与同切面图像/时间不同");
-          previous = batch.cut; previousNs = BigInt(batch.commit_ns);
         }
-        need(same(previous, result.next_cut), "变化末尾与前沿不同"); next[domain] = result.next_cut;
       }
       const snapshot = await this.query({op: "snapshot", cuts: next, as_known_ns: null, snapshot_token: null}, deadline);
       await verifySnapshot(snapshot, this.discovery);
@@ -682,10 +1451,16 @@
         need(same(snapshot.domains[domain].cut, next[domain]) && same(snapshot.domains[domain].image, expected) &&
           snapshot.domains[domain].commit_ns === expectedNs, "完整变化与同切面快照或提交时间不同");
       }
+      verifyProtocolCutsAndReceipts(changes, next, this.discovery.domains, false);
       need(performance.now() < deadline, "整次追读超过事前时限，保留原切面");
       if (epoch === this.epoch) { this.state = snapshot; this.onCommit(snapshot); }
       return snapshot;
     }
   }
-  return Object.freeze({Client, verifySnapshot, verifyOriginal, canonical, parse, sha256});
+  return Object.freeze({Client, verifySnapshot, verifyOriginal, verifyProjection, verifyProjectionOriginal, canonical, parse, sha256,
+    protocolCutCoverage(root, cuts, domains) {
+      const missing = [];
+      verifyProtocolCutsAndReceipts(root, cuts, domains, !["EconomicSnapshot", "EconomicWatch"].includes(root.kind), missing);
+      return missing;
+    }});
 });

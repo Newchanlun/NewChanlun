@@ -6,6 +6,10 @@ use crate::session_protocol::{nonnegative, positive, required};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+pub(super) const VOICE_RECORDS: &str = "records";
+pub(super) const OPENING_BASIS: &str = "opening_basis";
+pub(super) const OPENING_E_CUT: &str = "e_cut";
+
 pub(super) fn exact(v: &Value, keys: &[&str]) -> Result<(), String> {
     let o = v.as_object().ok_or("SchemaUnsupported：Voice 字段须对象")?;
     if o.len() != keys.len() || o.keys().any(|k| !keys.contains(&k.as_str())) {
@@ -167,10 +171,13 @@ pub(super) fn bind_image(
             .ok_or("InvalidDomain：开局数量溢出")?
     };
     positive(&quantity.to_string(), "Voice opening quantity")?;
-    let opening_basis = json!({"fact_key":fact["fact_key"],"fact_hash":fact["fact_hash"],"allocation_id":basis["allocation_id"],"e_cut":fact["cut"],"raw_sha256":fact["raw_sha256"],"json_pointer":fact["json_pointer"],"quantity":quantity.to_string(),"units":doc["units"]});
+    let opening_basis = json!({"fact_key":fact["fact_key"],"fact_hash":fact["fact_hash"],"allocation_id":basis["allocation_id"],(OPENING_E_CUT):fact["cut"],"raw_sha256":fact["raw_sha256"],"json_pointer":fact["json_pointer"],"quantity":quantity.to_string(),"units":doc["units"]});
     let trusted = verified.binding();
     let mut opening_source = opening_basis.clone();
-    opening_source.as_object_mut().unwrap().remove("e_cut");
+    opening_source
+        .as_object_mut()
+        .unwrap()
+        .remove(OPENING_E_CUT);
     // γ 有效并不自动证明 instrument、carrier 或开局。它们须属于受核验的同一绑定原件。
     for k in ["carrier_ref", "gamma_ref", "sigma", "n", "parent_voice_id"] {
         if request[k] != trusted[k] {
@@ -259,10 +266,10 @@ pub(super) fn bind_image(
     {
         return Err("InvalidDomain：Voice 获知时间早于前件/时钟倒退".into());
     }
-    let record = json!({"voice_id":id,"binding_id":request["binding_id"],"identity":identity,"instrument":book["symbol"],"operation_level":book["operation_level"],"structure_view":trusted["structure_view"],"parent_voice_id":request["parent_voice_id"],"opening_basis":opening_basis,"evidence":verified.reference(),"first_known_ns":first_known_ns,"commit_ns":commit_ns,"commit_seq":seq.to_string(),"business_lifecycle":{"status":"NotRecorded"},"responsibility_tail":{"status":"Unknown","reason":"no authoritative responsibility-retirement event"}});
+    let record = json!({"voice_id":id,"binding_id":request["binding_id"],"identity":identity,"instrument":book["symbol"],"operation_level":book["operation_level"],"structure_view":trusted["structure_view"],"parent_voice_id":request["parent_voice_id"],(OPENING_BASIS):opening_basis,"evidence":verified.reference(),"first_known_ns":first_known_ns,"commit_ns":commit_ns,"commit_seq":seq.to_string(),"business_lifecycle":{"status":"NotRecorded"},"responsibility_tail":{"status":"Unknown","reason":"no authoritative responsibility-retirement event"}});
     voices.push(record.clone());
     let mut next = image.clone();
-    next["book"]["voice"] = json!({"status":"Bound","records":voices});
+    next["book"]["voice"] = json!({"status":"Bound",(VOICE_RECORDS):voices});
     Ok((next, record))
 }
 pub(super) fn receipt(config: &Config, record: &Value, cut: Value) -> Value {

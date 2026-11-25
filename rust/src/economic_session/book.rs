@@ -403,7 +403,9 @@ pub(crate) fn apply_in(
     seq: i64,
     ns: &str,
 ) -> Result<(Value, bool), String> {
-    if record["event"]["event"] == crate::history_simulation::intake::EVENT {
+    if record["event"]["event"] == crate::history_simulation::intake::EVENT
+        && record.get("resolved_allocation").is_none()
+    {
         return Err("MissingDependency：模拟原件尚无完整经济分量，不能应用持仓账".into());
     }
     match rules(manifest)? {
@@ -424,7 +426,9 @@ pub(crate) fn apply(
     ns: &str,
     rules: Rules,
 ) -> Result<(Value, bool), String> {
-    if record["event"]["event"] == crate::history_simulation::intake::EVENT {
+    if record["event"]["event"] == crate::history_simulation::intake::EVENT
+        && record.get("resolved_allocation").is_none()
+    {
         return Err("MissingDependency：模拟原件尚无完整经济分量，不能应用持仓账".into());
     }
     match rules {

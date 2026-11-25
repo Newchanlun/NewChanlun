@@ -25,6 +25,15 @@ pub(crate) const SCHEMA: &str = SCHEMA_V1;
 /// manifest 顶层的版本选择子：缺省 `/1`（旧 manifest 逐字仍可读），显式只认两个已知值。
 /// 外层 `economic-manifest/1` 不因此改变。
 const REVISION_FIELD: &str = "protocol_revision";
+/// ADR 0056:52 simulation 证据类的时钟 kind；E 只在 `tb03b-finance/5` 下认（#1407 C2）。
+pub(super) const LOGICAL_BAR: &str = "logical-bar/1";
+/// 财务 TestOnly 输入域可配的组件时钟：TestOnly，或 `/5` 下的 logical-bar/1。二者都不是 System，
+/// 所以 TestOnly 财务输入照旧不进生产时钟。
+pub(super) fn component_clock(manifest: &Value) -> bool {
+    manifest["clock"]["kind"] == "TestOnly"
+        || (manifest["clock"]["kind"] == LOGICAL_BAR
+            && super::finance::exact_release_selected(manifest))
+}
 /// `economic-session/1`、`/2` 的封闭已知 op 集合（两个域版本同一份，§5.8 逐字冻结）。
 /// 并列子合同的 op（`sr-expansion/1`、`domain-event-withdrawal/1`）只在该子合同被选择时另行算已知。
 pub(crate) const BASE_OPS: [&str; 22] = [
@@ -262,6 +271,10 @@ impl Config {
             "TestOnly" => {
                 nonnegative(required(&manifest["clock"]["plan"], "init_ns")?, "init_ns")?;
             }
+            // #1407 C2：只在 `/5` 生效，旧合同的时钟闭集不变。
+            LOGICAL_BAR if exact_release => {
+                nonnegative(required(&manifest["clock"]["bars"], "init")?, "init bar")?;
+            }
             _ => return Err("InvalidDomain：必须显式指定时钟adapter".into()),
         }
         let configured_faults = fault_plans(&manifest["test_only_fault"]);
@@ -321,6 +334,9 @@ impl Config {
         phase: &str,
         recovery_index: usize,
     ) -> Result<String, String> {
+        if self.manifest["clock"]["kind"] == LOGICAL_BAR {
+            return self.logical_bar(msg, phase, recovery_index);
+        }
         if self.manifest["clock"]["kind"] == "System" {
             let n = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -350,6 +366,34 @@ impl Config {
             format!("MissingDependency：TestOnly时钟缺{phase}/{msg:?}/{recovery_index}")
         })?;
         nonnegative(s, phase)?;
+        Ok(s.to_owned())
+    }
+    /// ADR 0052:296、ADR 0056:52：simulation 下 E 不读系统时钟。读数是调度把该消息交给 E 时的
+    /// bar_index，received/first_known/commit 三相同值，与 X 接纳时钟（已提交前沿 + 1）同一单位。
+    /// 调度表随 manifest 冻结，进 manifest_hash。
+    fn logical_bar(
+        &self,
+        msg: Option<&str>,
+        phase: &str,
+        recovery_index: usize,
+    ) -> Result<String, String> {
+        let bars = &self.manifest["clock"]["bars"];
+        let v = match msg {
+            Some(m) => {
+                let v = &bars["messages"][m];
+                if v.is_array() {
+                    &v[recovery_index]
+                } else {
+                    v
+                }
+            }
+            None if phase == "recover_ns" => &bars["recover"][recovery_index],
+            None => &bars["init"],
+        };
+        let s = v.as_str().ok_or_else(|| {
+            format!("MissingDependency：logical-bar/1 调度缺{phase}/{msg:?}/{recovery_index}")
+        })?;
+        nonnegative(s, "bar_index")?;
         Ok(s.to_owned())
     }
     pub fn authorized(&self, e: &Value) -> Result<(), String> {
@@ -701,25 +745,26 @@ pub(super) struct StoredImage {
     pub bytes: usize,
 }
 
-pub(super) fn stored_image(
+pub(super) fn stored_image_meta(c: &Connection, seq: i64) -> Result<StoredImage, String> {
+    stored_image_meta_metered(c, seq, &mut ReadBudget::new(None, None))
+}
+
+pub(super) fn stored_image_meta_metered(
     c: &Connection,
     seq: i64,
-    maximum: usize,
+    budget: &mut ReadBudget<'_>,
 ) -> Result<StoredImage, String> {
-    // CAST 为 BLOB 很关键：SQLite TEXT 的 length/substr 是字符数，并非 UTF-8 字节数。
-    let row: Option<(String, String, String, i64)> = c
-        .query_row(
-            "SELECT root,prev_root,commit_ns,length(CAST(image AS BLOB)) FROM commits WHERE seq=?",
-            [seq],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()
-        .map_err(err)?;
+    let row: Option<(String, String, String, i64)> = budget.optional(
+        c,
+        "SELECT root,prev_root,commit_ns,length(CAST(image AS BLOB)) FROM commits WHERE seq=?",
+        [seq],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
     let (root, previous_root, commit_ns, bytes) =
         row.ok_or("MissingDependency：指定历史cut不存在")?;
     let bytes = usize::try_from(bytes).map_err(err)?;
-    if bytes == 0 || bytes > maximum {
-        return Err("Incomplete：完整持久图像超出读取逻辑字节帽".into());
+    if bytes == 0 {
+        return Err("StorageUnavailable：持久图像为空".into());
     }
     Ok(StoredImage {
         seq,
@@ -730,11 +775,44 @@ pub(super) fn stored_image(
     })
 }
 
+pub(super) fn stored_image(
+    c: &Connection,
+    seq: i64,
+    maximum: usize,
+) -> Result<StoredImage, String> {
+    stored_image_metered(c, seq, maximum, &mut ReadBudget::new(None, None))
+}
+
+pub(super) fn stored_image_metered(
+    c: &Connection,
+    seq: i64,
+    maximum: usize,
+    budget: &mut ReadBudget<'_>,
+) -> Result<StoredImage, String> {
+    // CAST 为 BLOB 很关键：SQLite TEXT 的 length/substr 是字符数，并非 UTF-8 字节数。
+    let image = stored_image_meta_metered(c, seq, budget)?;
+    if image.bytes > maximum {
+        return Err("Incomplete：完整持久图像超出读取逻辑字节帽".into());
+    }
+    Ok(image)
+}
+
+#[cfg(test)]
 pub(super) fn stored_image_bytes(
     c: &Connection,
     image: &StoredImage,
     offset: usize,
     count: usize,
+) -> Result<Vec<u8>, String> {
+    stored_image_bytes_metered(c, image, offset, count, &mut ReadBudget::new(None, None))
+}
+
+pub(super) fn stored_image_bytes_metered(
+    c: &Connection,
+    image: &StoredImage,
+    offset: usize,
+    count: usize,
+    budget: &mut ReadBudget<'_>,
 ) -> Result<Vec<u8>, String> {
     let end = offset
         .checked_add(count)
@@ -744,14 +822,12 @@ pub(super) fn stored_image_bytes(
         i64::try_from(offset.checked_add(1).ok_or("InvalidDomain：页offset溢出")?).map_err(err)?;
     let count_sql = i64::try_from(end - offset).map_err(err)?;
     let size_sql = i64::try_from(image.bytes).map_err(err)?;
-    let bytes: Option<Vec<u8>> = c
-        .query_row(
-            "SELECT substr(CAST(image AS BLOB),?,?) FROM commits WHERE seq=? AND root=? AND prev_root=? AND commit_ns=? AND length(CAST(image AS BLOB))=?",
-            params![start, count_sql, image.seq, image.root, image.previous_root, image.commit_ns, size_sql],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(err)?;
+    let bytes: Option<Vec<u8>> = budget.optional(
+        c,
+        "SELECT substr(CAST(image AS BLOB),?,?) FROM commits WHERE seq=? AND root=? AND prev_root=? AND commit_ns=? AND length(CAST(image AS BLOB))=?",
+        params![start, count_sql, image.seq, image.root, image.previous_root, image.commit_ns, size_sql],
+        |r| r.get(0),
+    )?;
     let bytes = bytes.ok_or("IdentityConflict：固定cut原图像身份已改变")?;
     if bytes.len() != count {
         return Err("StorageUnavailable：原图像页截短".into());
@@ -1645,7 +1721,7 @@ pub(crate) fn verify_e_copy(record: &Value, config: &Config) -> Result<(), Strin
         "b_observation",
         "b_origin_message",
         "b_origin_request_hash",
-        "b_source_debit_proof",
+        super::tb03c_transfer::B_SOURCE_DEBIT_PROOF,
     ] {
         original
             .as_object_mut()
@@ -1658,7 +1734,10 @@ pub(crate) fn verify_e_copy(record: &Value, config: &Config) -> Result<(), Strin
     super::tb03c_allocation::verify_resolution(record, config)?;
     // E 实读阶段尚未附加源证明；凡本地已提交的 B 原件必须完整自持。
     if config.book_rules()?.is_tb03c()
-        && (record.get("b_observation").is_some() || record.get("b_source_debit_proof").is_some())
+        && (record.get("b_observation").is_some()
+            || record
+                .get(super::tb03c_transfer::B_SOURCE_DEBIT_PROOF)
+                .is_some())
     {
         super::tb03c_transfer::verify_source_proof(config, record)?;
     }

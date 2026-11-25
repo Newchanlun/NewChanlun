@@ -3,8 +3,18 @@
 from pathlib import Path
 import time
 
-from economic_query import EconomicQueryError, integer, text
+from economic_query import EconomicQuery, EconomicQueryError, integer, text
 from s_socket_client import canonical, decode_frame, digest, reply_envelope
+
+
+ECONOMIC_POST_ROUTES = {
+    **{
+        f"/api/economic/{op}": op
+        for op, (_, _, single_frame) in EconomicQuery.PUBLIC_READ_DISPATCH.items()
+        if single_frame
+    },
+    "/api/economic/read": "read",
+}
 
 
 HEADER = {"schema_revision", "session_id", "session_generation", "source_namespace", "source_epoch",
@@ -50,19 +60,25 @@ def get(handler):
     if query is None:
         handler._send_json({"ok": False, "error": "EconomicQueryNotConfigured"}, 503)
     else:
+        probed_projection = query.discover_read_projection()
         handler._send_json({"schema_revision": "economic-discovery/1", "session_id": query.session,
                             "session_generation": query.generation, "producer_epoch": query.query_epoch,
                             "manifest_hash": query.manifest_hash, "domains": list(query.nodes),
                             "max_reply_bytes": str(query.resources["max_reply_bytes"]),
                             "operation_timeout_ms": str(query.resources["operation_timeout_ms"]),
                             "scope": "TestOnlyRecordedEconomics", "configured": True,
+                            **({"clock_kind": "logical-bar/1"}
+                               if query.manifest.get("clock", {}).get("kind") == "logical-bar/1" else {}),
+                            **({"read_pages": {"schema_revision":"economic-read-pages/1", "owner_epochs":query.epochs}}
+                               if query.command_read_pages else {}),
+                            **({"read_projection": probed_projection} if probed_projection is not None else {}),
                             **({"book_revision": query.book_revision} if query.book_revision is not None else {}),
                             **({"finance_revision": query.finance_revision} if query.manifest.get("finance") else {})})
     return True
 
 
 def post(handler):
-    if handler.path not in ("/api/economic/snapshot", "/api/economic/watch", "/api/economic/original", "/api/economic/read"):
+    if handler.path not in ECONOMIC_POST_ROUTES:
         return False
     query = getattr(handler.server, "economic_query", None)
     if query is None:
@@ -92,14 +108,14 @@ def post(handler):
         candidate = decode_frame(b"".join(chunks))
         payload = validate_request(candidate, query)
         request = candidate
-        op = handler.path.rsplit("/", 1)[1]
+        op = ECONOMIC_POST_ROUTES[handler.path]
         with query.capture(request, operation_deadline):
             if op == "read":
                 result = query.read(payload, request, deadline=operation_deadline)
             else:
                 if payload.get("op") != op:
                     raise EconomicQueryError("路由与 op 不符")
-                result = {"snapshot": query.snapshot, "watch": query.watch, "original": query.original}[op](payload)
+                result = query.dispatch_public_read(op, payload)
         status = 200
     except (ValueError, KeyError, TypeError, UnicodeError, RecursionError, OSError) as exc:
         result, status = {"ok": False, "error": "EconomicQueryUnavailable", "detail": str(exc)}, 400

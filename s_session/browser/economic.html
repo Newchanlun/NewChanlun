@@ -13,11 +13,16 @@
 <p class="muted">受控历史事实 · 只读。各重独立保存；本金、阶段或开局依据缺失时会明确显示。</p>
 <div class="controls">
 <button id="current">读取当前账簿</button><button id="watch">读取后续变化</button>
+<button id="projection-current" disabled>读取固定切面投影</button>
+<label>视图模式 <select id="view-mode"><option value="snapshot">完整快照（支持 Watch）</option><option value="projection" disabled>只读投影（同切面取证，无 Watch）</option></select></label>
 <label>已保存切面 <select id="history"><option value="">请选择</option></select></label>
 <button id="revisit">回看所选切面</button>
-<label>当时可知时间（纳秒） <input id="known-at" type="text" inputmode="numeric" size="20"></label>
+<label><span id="time-label">当时可知时间（纳秒）</span> <input id="known-at" type="text" inputmode="numeric" size="20"></label>
 <button id="as-known">按时间回看</button>
+<label>指定切面向量 <input id="cuts-json" type="text" size="32" placeholder='{"E":...}'></label>
+<button id="load-cuts">按切面向量回看</button>
 </div>
+<div id="capabilities" class="muted"></div>
 <div id="status" class="status" role="status"></div><div id="cuts"></div>
 <main id="books"></main><section id="external"></section>
 <script src="/tb01c-client.js"></script><script src="/tb03a-client.js"></script>
@@ -27,6 +32,10 @@ const saved = new Map(), client = new TB03A.Client({onCommit:render});
 function el(tag, text, cls) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(cls)node.className=cls; return node; }
 function detail(title,value) { const d=el("details");d.append(el("summary",title),el("pre",JSON.stringify(value,null,2)));return d; }
 function metric(title,value){const d=el("div");d.append(el("span",title,"label"),el("strong",value));return d;}
+function isProjectionState(state){return state && state.kind==="EconomicProjection";}
+function isCompleteState(state){return isProjectionState(state)?state.projection_completeness==="CompleteProjectionVector":state.completeness==="CompleteVector";}
+function stateToken(state){return isProjectionState(state)?state.projection_token:state.snapshot_token;}
+function domainPayload(state,view){return isProjectionState(state)?view.projection:view.image;}
 function voiceDetails(voice) {
   const section=el("section");section.dataset.voice=voice.voice_id;
   section.append(el("h3","Voice · "+(voice.identity.sigma==="Long"?"买方向":"卖方向")),
@@ -38,7 +47,7 @@ function voiceDetails(voice) {
     ["执行级",voice.structure_view.execution_level],
     ["区间套梯级数",voice.structure_view.nest_depth],
     ["冻结开局数量",voice.opening_basis.quantity],
-    ["首次获知时间（纳秒）",voice.first_known_ns]
+    [client.discovery.clock_kind==="logical-bar/1"?"首次获知 bar":"首次获知时间（纳秒）",voice.first_known_ns]
   ];
   for(const [label,value] of fields){const row=el("tr");row.append(el("th",label),el("td",value));table.append(row);}
   section.append(table,el("p","业务生命周期：尚无记录；责任尾账：未知。","muted"),
@@ -51,6 +60,16 @@ function financialDetails(card, state, domain, finance) {
   if(domain==="E") {
     const total=finance.responsibilities.reduce((sum,r)=>sum+BigInt(r.amount),0n);
     section.append(el("h3","公共最大责任"),metric("保留总额",total.toString()));
+    for(const c of finance.commands||[]) {
+      const row=el("section");row.dataset.command=c.command_id;
+      row.append(el("h4",c.command_id+" · "+c.state));
+      if(c.state==="ReleasedExact")row.append(el("p","首次量 "+c.command.first_quantity+" · 分配 "+c.command.allocation_id+" · 放行读数 "+c.release_commit_ns));
+      originalButton(row,state,domain,"command",c.command_id);
+      if(isProjectionState(state) && c.state==="ReleasedExact" && c.command && c.command.model_ref){
+        originalButton(row,state,domain,"model",c.command_id,"展开模型原件 · "+c.command_id);
+      }
+      section.append(row);
+    }
     for(const slot of finance.slots) {
       section.append(el("p",slot.slot_id+" · "+slot.state+(slot.waiting_for?" · 等待 "+slot.waiting_for:"")));
       for(const grant of slot.grants)originalButton(section,state,domain,"grant",grant.grant_id);
@@ -69,60 +88,163 @@ function financialDetails(card, state, domain, finance) {
   }
   section.append(el("p","Prepared / Reserved / Committed 均无场所调用资格，实际持量与成本未因准备而变化。","muted"),detail("完整财务证据",finance));card.append(section);
 }
-function originalButton(parent,state,domain,kind,id) {
-  if(state.completeness!=="CompleteVector")return;
-  const button=el("button","查询原件 · "+id),result=el("pre");result.hidden=true;
+function originalButton(parent,state,domain,kind,id,label) {
+  if(!isCompleteState(state))return;
+  const button=el("button",label||("查询原件 · "+id)),result=el("pre");result.hidden=true;
+  const receiptLine=kind==="command"?el("p",undefined,"muted"):null;
+  if(receiptLine){receiptLine.hidden=true;parent.append(receiptLine);}
   button.dataset.originalKind=kind;button.dataset.originalDomain=domain;button.dataset.originalId=id;
-  button.onclick=async()=>{button.disabled=true;try{
+  button.onclick=async()=>{button.disabled=true;if(receiptLine)receiptLine.hidden=true;try{
     const reply=await client.original(state,domain,kind,id);
+    if(receiptLine){
+      const o=reply.original;
+      receiptLine.textContent="E 提交 "+o.cut.commit_seq+" · "+(o.receipts?o.receipts.length:0)+" 份原回执："+(o.receipts||[]).map(r=>r.kind).join("、");
+      receiptLine.hidden=false;
+    }
     result.textContent=JSON.stringify(reply,null,2);result.hidden=false;
   }catch(error){result.textContent=error.message;result.hidden=false;}finally{button.disabled=false;}};
   parent.append(button,result);
 }
 function render(state) {
-  document.getElementById("status").textContent=(state.mode==="AsKnown"?"历史切面":"当前已知")+" · "+(state.completeness==="CompleteVector"?"各域已核对":"部分域不可用，见具体原因");
+  if(client.discovery.clock_kind==="logical-bar/1")document.getElementById("time-label").textContent="当时可知 bar";
+  const projMode=isProjectionState(state);
+  const complete=isCompleteState(state);
+  const modeLabel=state.mode==="AsKnown"?"历史切面":"当前已知";
+  const kindLabel=projMode?("只读投影 "+state.projection_revision+" · "+(complete?"CompleteProjectionVector":"PartialProjectionVector")):(complete?"各域已核对":"部分域不可用，见具体原因");
+  document.getElementById("status").textContent=modeLabel+" · "+kindLabel;
   document.getElementById("status").className="status";
   const books=document.getElementById("books"), external=document.getElementById("external"), cuts=document.getElementById("cuts");
-  books.replaceChildren();external.replaceChildren();cuts.replaceChildren(el("p","会话 "+state.session_id+" · 化身 "+state.session_generation,"muted"));
+  books.replaceChildren();external.replaceChildren();
+  cuts.replaceChildren(el("p","会话 "+state.session_id+" · 化身 "+state.session_generation+(projMode?" · 协议 economic-read-projection/1（投影完整性单列，非全原像）":""),"muted"));
   for(const [domain,view] of Object.entries(state.domains)){
-    cuts.append(el("div",domain+" · "+(view.status==="Available"?"提交 "+view.cut.commit_seq+" · "+view.cut.root_hash:"不可用")));
+    const cutText=view.status==="Available"?(projMode?("提交 "+view.cut.commit_seq+" · 根 "+view.cut.root_hash+" · 权威原像 "+view.authoritative_image_bytes+" B ("+view.authoritative_image_hash.slice(0,12)+"…) · 投影 "+view.projection_bytes+" B ("+view.projection_hash.slice(0,12)+"…) · 省略证明镜像 "+view.omitted_peer_images.length+" 处"):("提交 "+view.cut.commit_seq+" · "+view.cut.root_hash)):"不可用";
+    cuts.append(el("div",domain+" · "+cutText));
     const card=el("article");card.dataset.domain=domain;
     if(view.status!=="Available"){card.append(el("h2",domain),el("div",view.error,"error"));books.append(card);continue;}
-    financialDetails(card,state,domain,view.image.finance);
-    if(domain==="E"){
-      card.append(el("h2","外部原始事实"),el("p","已记录 "+view.image.recorded.length+" 件；仍保留待核责任 "+view.image.pending.length+" 项。"),detail("原始字节、来源与待核记录",view.image));external.append(card);continue;
+    const payload=domainPayload(state,view);
+    if(projMode){
+      card.append(el("p","固定切面 seq="+view.cut.commit_seq+" · commit_ns="+view.commit_ns+" · writer_epoch="+view.writer_epoch+" · 离线完整审计已确认 · 权威原像 "+view.authoritative_image_bytes+" B / 投影正文 "+view.projection_bytes+" B","muted"));
     }
-    const b=view.image.book;
+    financialDetails(card,state,domain,payload.finance);
+    if(domain==="E"){
+      card.append(el("h2","外部原始事实"),el("p","已记录 "+payload.recorded.length+" 件；仍保留待核责任 "+payload.pending.length+" 项。"));
+      if(projMode && Array.isArray(payload.fill_allocations) && payload.fill_allocations.length){
+        const fa=el("section");fa.dataset.fillAllocations="E";
+        fa.append(el("h3","E 派生分配（同切面按需取证）"));
+        for(const row of payload.fill_allocations){
+          const item=el("div");
+          const aid=row.allocations && row.allocations[0] ? row.allocations[0].allocation_id : "";
+          item.append(el("p",row.source_kind+" · fact="+row.fact_key.slice(0,12)+"… · allocation="+aid));
+          originalButton(item,state,"E","fact",row.fact_key,"展开 E 事实原件 · "+row.source_kind);
+          if(aid)originalButton(item,state,"E","allocation",aid,"展开 E 分配回执 · "+row.source_kind);
+          if(row.source_kind==="history_sim_fill"||row.source_kind==="history_sim_fee"){
+            originalButton(item,state,"E","model",row.fact_key,"展开模拟模型原件 · "+row.source_kind);
+          }
+          fa.append(item);
+        }
+        card.append(fa);
+      }
+      card.append(detail("原始字节、来源与待核记录",payload));external.append(card);continue;
+    }
+    const b=payload.book;
     if(b===null){card.append(el("h2",domain),el("p","尚无已应用的非空开局原件。","muted"));books.append(card);continue;}
-    card.append(el("h2",b.symbol+" · 操作级别 "+b.operation_level),el("p","重身份 "+b.chong_id,"muted"));
-    const metrics=el("div",undefined,"metrics");metrics.append(metric("固定 Q",b.fixed_q),metric("实际数量",b.actual_quantity),metric("开局数量",b.opening_quantity));card.append(metrics);
+    card.append(el("h2",b.symbol+" · 操作级别 "+b.operation_level),el("p","重身份 "+b.chong_id+" · 书账版本 "+(b.book_revision||"legacy"),"muted"));
+    const metrics=el("div",undefined,"metrics");metrics.append(metric("固定 Q",b.fixed_q),metric("实际数量",b.actual_quantity),metric("开局数量",b.opening_quantity));
+    if(b.book_revision==="tb03c-book/1"){
+      metrics.append(metric("成本基数 K",b.cost_basis.K),metric("采购现金",b.cost_totals.acquisition_cash),metric("纯费用 fee_only",b.cost_totals.fee_only));
+    }
+    card.append(metrics);
     const table=el("table"), labels={Pi:"累计已实现利润 Π",A:"已分配利润 A",W:"已提取利润 W",R:"留存储备 R"};
     for(const [key,label] of Object.entries(labels)){const row=el("tr");row.append(el("th",label),el("td",b.income_book[key]));table.append(row);}card.append(table);
-    card.append(el("p","已列采购现金 "+b.known_cost_totals.acquisition_cash+"；已列佣金 "+b.known_cost_totals.commission+"；列明分量合计 "+b.known_cost_totals.listed_component_total+"。"));
-    card.append(el("p","本金与阶段："+b.unknown.principal_baseline.status+" / "+b.unknown.capital_phase.status,"muted"));
-    if(b.voice.status==="Bound"){
+    if(b.book_revision==="tb03c-book/1"){
+      const cr=b.cost_remaining.status==="Known"?("Known("+b.cost_remaining.value+")"):b.cost_remaining.status;
+      card.append(el("p","已列采购现金 "+b.cost_totals.acquisition_cash+"；佣金 "+b.cost_totals.commission+"；纯费用 fee_only "+b.cost_totals.fee_only+"；成本基数 K "+b.cost_basis.K+"；剩余成本 "+cr+"。"));
+      card.append(el("p","本金与阶段："+b.principal.status+" / "+b.phase.growth_enabled.status,"muted"));
+    } else {
+      card.append(el("p","已列采购现金 "+b.known_cost_totals.acquisition_cash+"；已列佣金 "+b.known_cost_totals.commission+"；列明分量合计 "+b.known_cost_totals.listed_component_total+"。"));
+      card.append(el("p","本金与阶段："+b.unknown.principal_baseline.status+" / "+b.unknown.capital_phase.status,"muted"));
+    }
+    if(projMode && Array.isArray(payload.applied) && payload.applied.length){
+      const ap=el("section");ap.dataset.applied=domain;
+      ap.append(el("h3","已应用分配（同切面按需取证）"));
+      for(const a of payload.applied){
+        const row=el("div");
+        row.append(el("p","allocation="+a.allocation_id+" · fact="+a.fact_key.slice(0,12)+"…"));
+        originalButton(row,state,domain,"allocation",a.allocation_id,"展开分配回执 · "+a.allocation_id);
+        originalButton(row,state,domain,"fact",a.fact_key,"展开事实原件 · "+a.allocation_id);
+        const rec=(payload.recorded||[]).find(r=>r.fact_key===a.fact_key);
+        if(rec && rec.event && rec.event.event==="history-sim-unresolved/1"){
+          originalButton(row,state,domain,"model",a.fact_key,"展开模型原件 · "+a.allocation_id);
+        }
+        ap.append(row);
+      }
+      card.append(ap);
+    }
+    if(b.voice && b.voice.status==="Bound"){
       card.append(el("p","Voice 开局依据：已绑定 "+b.voice.records.length+" 份。"));
       for(const voice of b.voice.records)card.append(voiceDetails(voice));
-    }else card.append(el("p","Voice 开局依据尚未绑定"+(b.voice.reason?" · "+b.voice.reason:"")));
-    card.append(detail("原始开局、Voice 身份与量纲",{opening_fact_ref:b.opening_fact_ref,voice:b.voice,units:b.units}),detail("逐项成本事件与缺项",{known_cost_components:b.known_cost_components,unknown:b.unknown}),detail("已应用事实、完整历史与原始回执",view.image));books.append(card);
+    }else if(b.voice){card.append(el("p","Voice 开局依据尚未绑定"+(b.voice.reason?" · "+b.voice.reason:"")));}
+    card.append(detail("原始开局、Voice 身份与量纲",{opening_fact_ref:b.opening_fact_ref,voice:b.voice,units:b.units}),detail("逐项成本事件与缺项",b.book_revision==="tb03c-book/1"?{cost_totals:b.cost_totals,cost_basis:b.cost_basis,cost_remaining:b.cost_remaining,principal:b.principal,phase:b.phase}:{known_cost_components:b.known_cost_components,unknown:b.unknown}),detail("已应用事实、完整历史与原始回执",payload));books.append(card);
   }
-  if(state.completeness==="CompleteVector"&&!saved.has(state.snapshot_token)){
-    saved.set(state.snapshot_token,state);const option=el("option",Object.entries(state.domains).map(([d,v])=>d+":"+v.cut.commit_seq).join(" / "));option.value=state.snapshot_token;document.getElementById("history").append(option);
+  const tok=stateToken(state);
+  if(complete && !saved.has(tok)){
+    saved.set(tok,state);const option=el("option",(projMode?"[投影] ":"")+Object.entries(state.domains).map(([d,v])=>d+":"+v.cut.commit_seq).join(" / "));option.value=tok;document.getElementById("history").append(option);
   }
 }
 let busy=false;
+function syncControls(){
+  const d=client.discovery, state=client.state;
+  const hasProj=Boolean(d && d.read_projection);
+  const projBtn=document.getElementById("projection-current");
+  const modeSel=document.getElementById("view-mode");
+  const projOpt=modeSel.querySelector('option[value="projection"]');
+  const watchBtn=document.getElementById("watch");
+  const cap=document.getElementById("capabilities");
+  if(d && d.clock_kind==="logical-bar/1")document.getElementById("time-label").textContent="当时可知 bar";
+  projBtn.disabled=busy || !hasProj;
+  projOpt.disabled=!hasProj;
+  if(!hasProj && modeSel.value==="projection")modeSel.value="snapshot";
+  const canWatch=!busy && state!==null && state.kind==="EconomicSnapshot" && state.completeness==="CompleteVector";
+  watchBtn.disabled=!canWatch;
+  if(isProjectionState(state)){
+    watchBtn.title="投影视图不支持旧 Watch，请点击「读取当前账簿」切回完整快照后再读取后续变化";
+    const kinds=(d && d.read_projection ? d.read_projection.original_kinds : []).join(" / ")||"无";
+    cap.textContent="当前模式：只读投影（economic-read-projection/1）· 可用动作：固定切面投影、按时间/切面回看投影、同切面按需取证（"+kinds+"）· 不支持 Watch（完整快照后可用）";
+  }else{
+    watchBtn.title=canWatch?"基于已核完整快照读取后续变化":"需先取得完整快照 CompleteVector 才可读取后续变化";
+    cap.textContent="当前模式：完整快照（EconomicSnapshot）· 可用动作：读取当前账簿、读取后续变化（Watch）、按时间/切面回看、查询原件"+(hasProj?" · 已探明支持独立只读投影（点击「读取固定切面投影」或切换视图模式使用）":" · 当前 owner 未提供只读投影");
+  }
+}
 async function run(action){
   if(busy)return;busy=true;
   const buttons=[...document.querySelectorAll(".controls button")],status=document.getElementById("status");
   for(const button of buttons)button.disabled=true;
   status.textContent="正在读取并核对账簿，请稍候…";status.className="status";status.setAttribute("aria-busy","true");
   try{await action();}catch(error){status.textContent="读取未通过核对；保留上次已核切面。"+error.message;status.className="status error";}
-  finally{busy=false;for(const button of buttons)button.disabled=false;status.removeAttribute("aria-busy");}
+  finally{busy=false;for(const button of buttons)button.disabled=false;status.removeAttribute("aria-busy");syncControls();}
 }
-document.getElementById("current").onclick=()=>run(()=>client.load());
+async function loadBySelectedMode(opts={}){
+  const d=await client.discover();
+  syncControls();
+  const mode=document.getElementById("view-mode").value;
+  if(mode==="projection"){
+    if(!d.read_projection)throw new Error("当前 owner 未探明支持 economic-read-projection/1");
+    return client.loadProjection(opts);
+  }
+  return client.load(opts);
+}
+document.getElementById("current").onclick=()=>run(async()=>{document.getElementById("view-mode").value="snapshot";await client.load();});
+document.getElementById("projection-current").onclick=()=>run(async()=>{document.getElementById("view-mode").value="projection";await client.loadProjection();});
 document.getElementById("watch").onclick=()=>run(()=>client.watch());
-document.getElementById("revisit").onclick=()=>run(()=>{const state=saved.get(document.getElementById("history").value);if(!state)throw new Error("请先选一个切面");return client.load({cuts:Object.fromEntries(Object.entries(state.domains).map(([d,v])=>[d,v.cut]))});});
-document.getElementById("as-known").onclick=()=>run(()=>client.load({asKnown:document.getElementById("known-at").value}));
-run(()=>client.load());
+document.getElementById("revisit").onclick=()=>run(()=>{
+  const state=saved.get(document.getElementById("history").value);
+  if(!state)throw new Error("请先选一个切面");
+  const cuts=Object.fromEntries(Object.entries(state.domains).map(([d,v])=>[d,v.cut]));
+  if(isProjectionState(state)){document.getElementById("view-mode").value="projection";return client.loadProjection({cuts});}
+  document.getElementById("view-mode").value="snapshot";return client.load({cuts});
+});
+document.getElementById("as-known").onclick=()=>run(()=>loadBySelectedMode({asKnown:document.getElementById("known-at").value}));
+document.getElementById("load-cuts").onclick=()=>run(()=>{const raw=document.getElementById("cuts-json").value.trim();if(!raw)throw new Error("请输入切面向量 JSON");return loadBySelectedMode({cuts:TB03A.parse(raw)});});
+run(async()=>{await client.discover();syncControls();await client.load();});
 </script>
 </body></html>
