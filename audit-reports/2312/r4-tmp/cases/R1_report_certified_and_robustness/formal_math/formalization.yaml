@@ -1,0 +1,52 @@
+{
+  "nodes": {
+    "depends_on_D": {
+      "about": [
+        "D"
+      ],
+      "mode": "依赖具体定义"
+    },
+    "generalizes_D": {
+      "about": [
+        "D"
+      ],
+      "mode": "依赖具体定义"
+    },
+    "uses_carryD": {
+      "about": [
+        "D"
+      ],
+      "mode": "依赖具体定义"
+    },
+    "uses_nom": {
+      "about": [
+        "D"
+      ],
+      "mode": "依赖具体定义"
+    },
+    "uses_prem_omega": {
+      "about": [
+        "D"
+      ],
+      "mode": "对任意实现成立"
+    },
+    "unused_prem": {
+      "about": [
+        "D"
+      ],
+      "mode": "对任意实现成立"
+    },
+    "dep_prem": {
+      "about": [
+        "D"
+      ],
+      "mode": "对任意实现成立",
+      "main_theorem": true,
+      "necessary": [
+        1,
+        2
+      ]
+    }
+  },
+  "refinements": {}
+}

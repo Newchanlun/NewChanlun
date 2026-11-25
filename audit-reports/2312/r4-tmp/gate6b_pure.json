@@ -1,0 +1,56 @@
+[
+  {
+    "name": "proof_untracked_root_file",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "proof_untracked_defs_file",
+    "rc": 1,
+    "stdout": "GATE6b RED formal_math/Chan/Defs/Sneak.lean:1 PATH_SCOPE 分支 proof/t1 不允许修改此路径",
+    "stderr": ""
+  },
+  {
+    "name": "proof_commit_then_worktree_revert_defs",
+    "rc": 1,
+    "stdout": "GATE6b RED formal_math/Chan/Defs/Base.lean:1 PATH_SCOPE 分支 proof/t1 不允许修改此路径",
+    "stderr": ""
+  },
+  {
+    "name": "proof_commit_then_commit_revert_defs",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "infra_nonempty_signoff",
+    "rc": 1,
+    "stdout": "GATE6b RED formal_math/verification/garbage-signoffs.yaml:1 PATH_SCOPE 分支 infra/t2 不允许修改此路径",
+    "stderr": ""
+  },
+  {
+    "name": "infra_init_empty_signoff",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "infra_init_nonempty_signoff",
+    "rc": 1,
+    "stdout": "GATE6b RED formal_math/verification/garbage-signoffs.yaml:1 PATH_SCOPE 分支 infra/init-empty 不允许修改此路径",
+    "stderr": ""
+  },
+  {
+    "name": "detached_decl_empty_suffix",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "proof_symlink_in_thm",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  }
+]
