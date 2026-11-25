@@ -1,0 +1,12 @@
+{
+ "total_excluded_from_hard_cite": 1,
+ "excluded_entries": [
+  {
+   "source": "fixture",
+   "id": 1,
+   "cite": "900:15",
+   "verdict": "fixture_ban",
+   "reason": "夹具：此课行禁引"
+  }
+ ]
+}

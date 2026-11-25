@@ -1,13 +1,16 @@
 {
-  "total_excluded_from_hard_cite": 25,
+  "total_excluded_from_hard_cite": 36,
   "pool_375_summary": {
     "total": 375,
-    "confirmed_firsthand": 361,
+    "confirmed_firsthand": 350,
     "confirmed_nested_quote": 9,
     "merged_line_ban": 2,
     "uncertain_near_name": 3,
     "non_author": 0,
-    "reconciliation_367_vs_375": "首轮主台账(行1至1577)答疑A2为366条，加已删id=512(029:324，实测A2)恰好367条；删512并追加尾部补录8条早期课A2(1582,1585-1591)与末行id=1605(016:578)后为367-1+8+1=375条"
+    "reconciliation_367_vs_375": "首轮主台账(行1至1577)答疑A2为366条，加已删id=512(029:324，实测A2)恰好367条；删512并追加尾部补录8条早期课A2(1582,1585-1591)与末行id=1605(016:578)后为367-1+8+1=375条",
+    "g3_second_questioner": 8,
+    "g3_boundary_undecidable": 3,
+    "r3_note": "r3 G3 重算帖边界后，原 361 条 confirmed_firsthand 中 8 条帖内有第二提问者、3 条帖边界不能机械确定，移入禁引；另 3 条（id 92、351、442）机器切不出而由 guards/g3_manual.json 逐条人工判定后保留。"
   },
   "manual_32_summary": {
     "total": 32,
@@ -237,6 +240,140 @@
       "cite": "051:314",
       "verdict": "confirmed_nested_quote",
       "reason": "051:314 位于 L302「缠中说禅：2007-05-09 16:28:32」帖内，实为 L306 读者「天山飞狐」三轮追问块中串引的前一轮缠师答语；紧接 L316「=====」续接本轮追问，L318 才是本轮一手答复，不得入门禁白名单。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 216,
+      "cite": "019:344",
+      "verdict": "g3_second_questioner",
+      "reason": "r3 G3：019:332“[匿名] 学习”帖紧接 019:334“aa”帖头，属网友转引链，帖内两名提问者；019:338、342 两道分隔后的答语所答对象不能机械确定。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 219,
+      "cite": "019:428",
+      "verdict": "g3_second_questioner",
+      "reason": "r3 G3：019:416“白纸”与 019:418“小溪”两名提问者连续帖头（转引链），答语对象不能机械确定。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 226,
+      "cite": "019:608",
+      "verdict": "g3_second_questioner",
+      "reason": "r3 G3：019:588“小强”、019:590“天地e心”、019:592“插班生”三层转引；旧记录把提问者绑在 019:590，新算帖起点 019:588，帖内三名提问者。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 229,
+      "cite": "019:688",
+      "verdict": "g3_second_questioner",
+      "reason": "r3 G3：019:676“笨笨猪”与 019:678“降龙”两名提问者连续帖头，答语对象不能机械确定。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 421,
+      "cite": "025:679",
+      "verdict": "g3_second_questioner",
+      "reason": "r3 G3：作者帖头 025:663，引两名网友 025:667“知了”、025:669“PK”；025:671 至 673 是网友之间的对话，025:675 分隔后才是作者答语。答语所对提问不唯一。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 439,
+      "cite": "026:319",
+      "verdict": "g3_second_questioner",
+      "reason": "r3 G3：作者帖头 026:305，026:307 同一行有“YY”与“背驰”两名网友帖头，026:313 还夹带第三方议论；答语对象不能机械确定。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 470,
+      "cite": "027:714",
+      "verdict": "g3_second_questioner",
+      "reason": "r3 G3：作者帖头 027:700，引 027:702“插班生”与 027:704“asdf”两名网友，027:710 为附议；答语对象不唯一。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 670,
+      "cite": "038:218",
+      "verdict": "g3_second_questioner",
+      "reason": "r3 G3：作者帖头 038:204，引 038:208“新手”与 038:210“stone”两名网友，038:212、214 两问并列；答语只回应其中之一。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 381,
+      "cite": "024:70",
+      "verdict": "g3_boundary_undecidable",
+      "reason": "r3 G3：024:56“KK”帖经 024:60、64、68 三道全角/半角分隔多轮问答，帖尾无回复尾戳，下一行 024:72 即另帖作者帖头；本轮答语归属只能依分隔惯例，帖边界与回复时间不能机械确定。M、H 未用。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 480,
+      "cite": "028:322",
+      "verdict": "g3_boundary_undecidable",
+      "reason": "r3 G3：028:310“不在潜水”帖无作者帖头、无尾戳；028:326“缠中说禅 22:43:57”紧接答语之后且无引问，是本帖回复时间还是下一帖起点不能机械确定。旧记录把回复行绑在 028:300（网友转引作者旧答的正文行）。M、H 未用。"
+    },
+    {
+      "source": "pool_375_r3_g3",
+      "id": 747,
+      "cite": "046:76",
+      "verdict": "g3_boundary_undecidable",
+      "reason": "r3 G3：046:72 行内先是上一帖答语，行尾接 2007-04-18 15:49:58 与“[匿名] 新年好”，缺作者名头；046:74 提问、行末“=”后 046:76 答语，无尾戳。旧记录把回复行绑在 046:48（每日解盘正文行）。帖头不全，不能机械确认。M、H 未用。"
+    }
+  ],
+  "excluded_lines_r3": [
+    {
+      "cite": "029:92",
+      "verdict": "merged_line_no_ledger",
+      "reason": "每日解盘与多帖问答并成一行（7306 字、48 个时间戳），台账无条目；只作登记，不引。"
+    },
+    {
+      "cite": "037:42",
+      "verdict": "merged_line_no_ledger",
+      "reason": "每日解盘与多帖问答并成一行（40 个时间戳），台账无条目；只作登记，不引。"
+    },
+    {
+      "cite": "039:50",
+      "verdict": "merged_line_no_ledger",
+      "reason": "作者帖与多帖问答并成一行（34 个时间戳），台账无条目；只作登记，不引。"
+    },
+    {
+      "cite": "056:76",
+      "verdict": "merged_line_no_ledger",
+      "reason": "每日解盘与多帖问答并成一行（18 个时间戳），台账无条目；只作登记，不引。"
+    },
+    {
+      "cite": "064:46",
+      "verdict": "merged_line_no_ledger",
+      "reason": "今日解盘与多帖问答并成一行（60 个时间戳），台账无条目；只作登记，不引。"
+    },
+    {
+      "cite": "028:36",
+      "verdict": "merged_line_no_ledger",
+      "reason": "解盘标题时间与另一作者帖头时间同行，只有帖头无正文；附录 1 仅借以推断发表日期，不作引文。"
+    },
+    {
+      "cite": "027:854",
+      "verdict": "merged_line_no_ledger",
+      "reason": "网友“学习中”转引近名“缠中说缠”帖，两层帖头同行，台账无条目；附录 1 只作网友表述的旁证登记。"
+    },
+    {
+      "cite": "044:46",
+      "verdict": "merged_line_no_ledger",
+      "reason": "整行为编者注（“娇：”），行中“-----”触发合并行判据；非作者文字，只作登记。"
+    },
+    {
+      "cite": "046:44",
+      "verdict": "merged_line_no_ledger",
+      "reason": "问答、尾戳、星号与下一帖时间同行（3 个时间戳），台账无条目；附录 1 只注“同文重复”。"
+    },
+    {
+      "cite": "078:208",
+      "verdict": "merged_line_no_ledger",
+      "reason": "网友问句与作者答语同行（短横后为问句，“==”后为答语），台账无条目；附录 1 只作概括登记。"
+    },
+    {
+      "cite": "081:20",
+      "verdict": "merged_line_no_ledger",
+      "reason": "正文区内转录的网友问答（等号长串分隔），答语出自网友，非作者；只作登记。"
     }
   ]
 }
