@@ -1117,8 +1117,11 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                                 if ev_err is not None:
                                     detail = ev_err
                                     break
-                                ev_status = inner.get("status")
                                 ev_type = event.get("type")
+                                if ev_type in ("response.created", "response.queued", "response.in_progress") and not isinstance(raw_inner, dict):
+                                    detail = "SSE 生命周期事件缺少合法 response 对象"
+                                    break
+                                ev_status = inner.get("status")
                                 if ev_status is not None and (
                                     ev_status not in ("in_progress", "queued")
                                     or (ev_type == "response.queued" and ev_status != "queued")

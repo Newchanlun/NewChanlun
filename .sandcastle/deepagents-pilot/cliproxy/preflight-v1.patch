@@ -7529,10 +7529,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..4f49ed1 100644
+index e69de29..6bd8d24 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11195 @@
+@@ -0,0 +1,11209 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -8847,7 +8847,7 @@ index e69de29..4f49ed1 100644
 +	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 +}
 +
-+func (t *strictStreamTracker) verifyCompletedOutput(output []responseOutputItem, completedSHA string) bool {
++func (t *strictStreamTracker) verifyCompletedOutput(respID string, output []responseOutputItem, completedSHA string) bool {
 +	if len(t.pendingItems) > 0 || t.pendingUnkeyed > 0 || len(t.failedItemKeys) > 0 {
 +		return false
 +	}
@@ -8873,22 +8873,9 @@ index e69de29..4f49ed1 100644
 +	matchedOutputIdx := make([]bool, len(output))
 +	for idx, item := range output {
 +		pos := int64(idx)
-+		if item.ID != "" {
-+			if boundIdx, seen := t.itemIndexByID[item.ID]; seen && boundIdx != pos {
-+				return false
-+			}
-+		}
-+		boundID, hasBoundID := t.itemIDByIndex[pos]
-+		if hasBoundID && item.ID != "" && boundID != item.ID {
++		canonKey, _, _, _, okBind := t.bindIdentity(item.ID, pos, true)
++		if !okBind {
 +			return false
-+		}
-+		canonKey := ""
-+		if item.ID != "" {
-+			canonKey = "id:" + item.ID
-+		} else if hasBoundID {
-+			canonKey = "id:" + boundID
-+		} else {
-+			canonKey = "idx:" + strconv.FormatInt(pos, 10)
 +		}
 +		itemKind := classifyOutputItemKind(item.Type, item.Role, item.Phase, true)
 +		if prevKind, exists := t.itemKindByKey[canonKey]; exists {
@@ -9016,6 +9003,10 @@ index e69de29..4f49ed1 100644
 +			return false
 +		}
 +	}
++	if t.responseID == "" && respID != "" {
++		t.responseID = respID
++	}
++	t.recomputeLastItemOutput()
 +	if completedSHA != "" && (t.lastItemOutputSHA != completedSHA || hasPendingItems) {
 +		return false
 +	}
@@ -12242,7 +12233,7 @@ index e69de29..4f49ed1 100644
 +			frame.respID == "" || strings.TrimSpace(frame.respID) != frame.respID ||
 +			(t.responseID != "" && t.responseID != frame.respID) ||
 +			(otherRespID != "" && otherRespID != frame.respID) ||
-+			!t.verifyCompletedOutput(frame.respItems, completedSHA) {
++			!t.verifyCompletedOutput(frame.respID, frame.respItems, completedSHA) {
 +			c.mu.Unlock()
 +			c.taintStreamAnomaly()
 +			return
@@ -16024,6 +16015,7 @@ index e69de29..4f49ed1 100644
 +			markerStarted                              int64
 +			markerIsReview, receiptIsReview            bool
 +			reviewDisk, pendingDisk                    ReviewReceipt
++			preflightDisk                              Receipt
 +			receiptSHA, pendingSHA, sealDigest         string
 +		)
 +		for _, child := range children {
@@ -16059,6 +16051,7 @@ index e69de29..4f49ed1 100644
 +				} else {
 +					receiptIsReview = false
 +					receiptOwner = pr.Session
++					preflightDisk = pr
 +				}
 +				receiptSHA = sha256Hex(string(raw))
 +				verified[cname] = verifiedLeafChild{name: cname, dev: dev, ino: ino, hasID: hasID, sha256: receiptSHA}
@@ -16131,6 +16124,8 @@ index e69de29..4f49ed1 100644
 +			if hasPending && markerStarted != pendingDisk.Started {
 +				return false
 +			}
++		} else if hasMarker && hasReceipt && markerStarted != preflightDisk.Started {
++			return false
 +		}
 +		if !isReview && (hasPending || hasSeal) {
 +			return false
@@ -16517,6 +16512,7 @@ index e69de29..4f49ed1 100644
 +	var receiptRaw []byte
 +	var sealPendingRaw []byte
 +	var reviewDisk ReviewReceipt
++	var preflightDisk Receipt
 +	var sealPendingDisk ReviewReceipt
 +	var reviewSealed bool
 +	for _, child := range children {
@@ -16560,6 +16556,7 @@ index e69de29..4f49ed1 100644
 +					_ = subRoot.Close()
 +					return nil, 0, 0, time.Time{}, nil, false
 +				}
++				preflightDisk = disk
 +				for _, ns := range []int64{disk.Started, disk.Finished} {
 +					if ns > 0 {
 +						if t := time.Unix(0, ns); t.After(lastMod) {
@@ -16619,6 +16616,7 @@ index e69de29..4f49ed1 100644
 +					_ = subRoot.Close()
 +					return nil, 0, 0, time.Time{}, nil, false
 +				}
++				markerStarted = marker.Started
 +				if t := time.Unix(0, marker.Started); t.After(lastMod) {
 +					lastMod = t
 +				}
@@ -16638,6 +16636,10 @@ index e69de29..4f49ed1 100644
 +	// neither confirmed SealOK nor deleted as producer-owned by quota reclamation.
 +	// Legacy preflight deletes producer.json on publication and keeps its own rule above.
 +	if reviewBucket && (!hasProducerMarker || (hasReceipt && markerStarted != reviewDisk.Started)) {
++		_ = subRoot.Close()
++		return nil, 0, 0, time.Time{}, nil, false
++	}
++	if !reviewBucket && hasProducerMarker && hasReceipt && markerStarted != preflightDisk.Started {
 +		_ = subRoot.Close()
 +		return nil, 0, 0, time.Time{}, nil, false
 +	}
@@ -17917,9 +17919,21 @@ index e69de29..4f49ed1 100644
 +		finish()
 +		return nil, ErrUnavailable
 +	}
++	if strict && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.StatusCode != http.StatusOK {
++		// Formal review only accepts HTTP 200 OK as a complete upstream response; non-200 2xx
++		// (e.g. 206 Partial Content) could carry a self-contained SSE range without proving the
++		// full upstream response completed, so fail closed and taint the launch.
++		if resp.Body != nil {
++			_ = resp.Body.Close()
++		}
++		c.Taint()
++		finish()
++		return nil, ErrUnavailable
++	}
++	isOK := resp.StatusCode == http.StatusOK
 +	c.mu.Lock()
 +	c.receipt.Routes[slot] = observed
-+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
++	if isOK {
 +		c.had2xxBody = true
 +	}
 +	c.mu.Unlock()
@@ -17927,7 +17941,7 @@ index e69de29..4f49ed1 100644
 +		finish()
 +	} else {
 +		var markEOF func()
-+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
++		if isOK {
 +			markEOF = c.MarkUpstreamEOF
 +		}
 +		resp.Body = &body{
@@ -17938,7 +17952,7 @@ index e69de29..4f49ed1 100644
 +			observedCompleted:    c.ObservedCompleted,
 +			markEOF:              markEOF,
 +			requireEOF:           true,
-+			taintOnIncompleteEOF: strict && resp.StatusCode >= 200 && resp.StatusCode < 300,
++			taintOnIncompleteEOF: strict && isOK,
 +		}
 +	}
 +	return resp, nil
@@ -18729,10 +18743,10 @@ index e69de29..4f49ed1 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..4d348e3 100644
+index e69de29..08c923b 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,13140 @@
+@@ -0,0 +1,13422 @@
 +package preflightreceipt
 +
 +import (
@@ -23753,6 +23767,33 @@ index e69de29..4d348e3 100644
 +	}
 +	if r := readReviewReceiptFile(t, root, lLateBindSnap); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
 +		t.Fatalf("late index binding hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 85b. Sol Blocking #1 (PR #2280 R73): identical out-of-order stream WITHOUT any intermediate
++	//      response.in_progress snapshot — response.completed unambiguously binds rs_lbs -> 0 and
++	//      msg_lbs -> 1, so recomputed final output hash MUST match and seal cleanly.
++	lLateBindDirect := "review-d1111111-2222-4333-8444-5555555555c6"
++	sLateBindDirect := "019d0000-0000-7000-8000-8888888881c6"
++	sseLateBindDirect := "data: " + `{"type":"response.created","response":{"id":"resp_lbd","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_lbd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"id":"rs_lbd","type":"reasoning"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_lbd","status":"completed","model":"gpt-6.2-sol","output":[{"id":"rs_lbd","type":"reasoning"},{"id":"msg_lbd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lLateBindDirect, sLateBindDirect, sseLateBindDirect); st != SealOK {
++		t.Fatalf("late index binding directly in response.completed seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lLateBindDirect); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("late index binding directly in response.completed hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 85c. Negative guard for #85b: when final message was bound to output_index=0 and late id-only
++	//      reasoning is placed at index 1 in response.completed, sneaking an unstreamed message at
++	//      index 2 MUST still fail closed (recomputed max streamed item is non-final reasoning at idx 1).
++	sseLateBindSpoof := "data: " + `{"type":"response.created","response":{"id":"resp_lbsp","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_lbsp","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"id":"rs_lbsp","type":"reasoning"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_lbsp","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_lbsp","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]},{"id":"rs_lbsp","type":"reasoning"},{"id":"msg_unstreamed","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555c7", "019d0000-0000-7000-8000-8888888881c7", sseLateBindSpoof); st != SealRejected {
++		t.Fatalf("unstreamed message after late reasoning at index 1 seal = %v, want SealRejected", st)
 +	}
 +
 +	// 86. Astra P2 #3 (PR #2280 R34): final message first appears id-only, tool item at output_index=0
@@ -30647,8 +30688,9 @@ index e69de29..4d348e3 100644
 +		t.Fatalf("second ReserveReview after rotation to #9 = %v, want nil", err)
 +	}
 +	res1.Release()
-+	if st, _ := SealReviewWithDigest(rootHealthy, l9, "sess-9"); st != SealRejected {
-+		t.Fatalf("SealReviewWithDigest on persisted tainted l9 = %v, want SealRejected", st)
++	r9 := readReviewReceiptFile(t, rootHealthy, l9)
++	if !r9.Tainted || r9.Sealed {
++		t.Fatalf("persisted l9 receipt = (tainted=%v, sealed=%v), want (true, false)", r9.Tainted, r9.Sealed)
 +	}
 +
 +	// Call 3 rotates to entry #10 on rootHealthy, persists its taint to disk, frees its slot, and succeeds.
@@ -30657,8 +30699,20 @@ index e69de29..4d348e3 100644
 +		t.Fatalf("third ReserveReview after rotation to #10 = %v, want nil", err)
 +	}
 +	res2.Release()
-+	if st, _ := SealReviewWithDigest(rootHealthy, l10, "sess-10"); st != SealRejected {
-+		t.Fatalf("SealReviewWithDigest on persisted tainted l10 = %v, want SealRejected", st)
++	r10 := readReviewReceiptFile(t, rootHealthy, l10)
++	if !r10.Tainted || r10.Sealed {
++		t.Fatalf("persisted l10 receipt = (tainted=%v, sealed=%v), want (true, false)", r10.Tainted, r10.Sealed)
++	}
++
++	// Clear the in-memory ledger and verify persisted taint rejects SealReviewWithDigest even with valid UUID sessions.
++	reviewMu.Lock()
++	reviewLedger = make(map[string]*reviewEntry)
++	reviewMu.Unlock()
++	if st, dig := SealReviewWithDigest(rootHealthy, l9, "019d0000-0000-7000-8000-00000000ff09"); st != SealRejected || dig != "" {
++		t.Fatalf("SealReviewWithDigest on persisted tainted l9 (empty ledger, valid UUID session) = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	if st, dig := SealReviewWithDigest(rootHealthy, l10, "019d0000-0000-7000-8000-00000000ff10"); st != SealRejected || dig != "" {
++		t.Fatalf("SealReviewWithDigest on persisted tainted l10 (empty ledger, valid UUID session) = (%v, %q), want (SealRejected, \"\")", st, dig)
 +	}
 +}
 +
@@ -31871,5 +31925,247 @@ index e69de29..4d348e3 100644
 +		if st, dig := SealReviewWithDigest(root, lLC, sLC); st != SealRejected || dig != "" {
 +			t.Fatalf("case %d (%s) seal = (%v, %q), want (SealRejected, \"\")", idx, tc.frame, st, dig)
 +		}
++	}
++}
++
++func TestReviewReceiptRejectsNon200SuccessStatus206PartialContent(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R73): formal review only accepts HTTP 200 OK; a 206 Partial Content
++	// carrying a self-contained response.completed SSE range with explicit Content-Length MUST fail
++	// RoundTrip with ErrUnavailable, taint the launch, and refuse to seal (even after a prior valid turn).
++	root := filepath.Join(t.TempDir(), "reject-206-partial")
++	sseOK := "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_206_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	ssePartial := "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_206_part","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++
++	// 1. Standalone 206 Partial Content turn cannot seal.
++	l1 := "review-ffb4b4b4-2222-4333-8444-555555555501"
++	s1 := "019d0000-0000-7000-8000-00000000fb51"
++	ctx1, c1, err := BeginReview(context.Background(), root, l1, s1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode:    http.StatusPartialContent,
++			ProtoMajor:    1,
++			ProtoMinor:    1,
++			ContentLength: int64(len(ssePartial)),
++			Header:        http.Header{"Content-Range": []string{fmt.Sprintf("bytes 0-%d/%d", len(ssePartial)-1, len(ssePartial)+100)}},
++			Body:          io.NopCloser(strings.NewReader(ssePartial)),
++			TLS:           verifiedTLSState("chatgpt.com"),
++		}, nil
++	})})
++	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	if resp1, err := cl1.Do(req1); !errors.Is(err, ErrUnavailable) {
++		if resp1 != nil && resp1.Body != nil {
++			_ = resp1.Body.Close()
++		}
++		t.Fatalf("206 Partial Content RoundTrip err = %v, want ErrUnavailable", err)
++	}
++	// Even if a caller feeds the partial SSE payload into ObserveStreamChunk, the tainted launch MUST NOT seal.
++	c1.ObserveStreamChunk([]byte(ssePartial))
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealRejected || dig != "" {
++		t.Fatalf("standalone 206 launch seal = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	r1 := readReviewReceiptFile(t, root, l1)
++	if !r1.Tainted || r1.Sealed {
++		t.Fatalf("standalone 206 receipt = (tainted=%v, sealed=%v), want (true, false)", r1.Tainted, r1.Sealed)
++	}
++
++	// 2. Clean 200 turn followed by a 206 Partial Content turn on the same launch MUST taint and reject seal.
++	l2 := "review-ffb4b4b4-2222-4333-8444-555555555502"
++	s2 := "019d0000-0000-7000-8000-00000000fb52"
++	ctx2a, c2a, err := BeginReview(context.Background(), root, l2, s2, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx2a, e2a, err := c2a.Start(ctx2a, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl2a := httptransport.Decorate(ctx2a, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode:    http.StatusOK,
++			ProtoMajor:    1,
++			ProtoMinor:    1,
++			ContentLength: int64(len(sseOK)),
++			Header:        make(http.Header),
++			Body:          io.NopCloser(strings.NewReader(sseOK)),
++			TLS:           verifiedTLSState("chatgpt.com"),
++		}, nil
++	})})
++	req2a, _ := http.NewRequestWithContext(ctx2a, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp2a, err := cl2a.Do(req2a)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp2a.Body)
++	_ = resp2a.Body.Close()
++	c2a.ObserveStreamChunk([]byte(sseOK))
++	e2a.End()
++	c2a.Complete(true)
++	c2a.HandlerDone(true)
++
++	ctx2b, c2b, err := BeginReview(context.Background(), root, l2, s2, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx2b, e2b, err := c2b.Start(ctx2b, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl2b := httptransport.Decorate(ctx2b, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode:    http.StatusPartialContent,
++			ProtoMajor:    1,
++			ProtoMinor:    1,
++			ContentLength: int64(len(ssePartial)),
++			Header:        make(http.Header),
++			Body:          io.NopCloser(strings.NewReader(ssePartial)),
++			TLS:           verifiedTLSState("chatgpt.com"),
++		}, nil
++	})})
++	req2b, _ := http.NewRequestWithContext(ctx2b, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	if resp2b, err := cl2b.Do(req2b); !errors.Is(err, ErrUnavailable) {
++		if resp2b != nil && resp2b.Body != nil {
++			_ = resp2b.Body.Close()
++		}
++		t.Fatalf("second turn 206 RoundTrip err = %v, want ErrUnavailable", err)
++	}
++	e2b.End()
++	c2b.Complete(false)
++	c2b.HandlerDone(false)
++	if st, dig := SealReviewWithDigest(root, l2, s2); st != SealRejected || dig != "" {
++		t.Fatalf("200-then-206 launch seal = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++}
++
++func TestPreflightReclaimRejectsMismatchedProducerAndReceiptStartedNS(t *testing.T) {
++	// Astra P2 #3 (PR #2280 R73): legacy preflight permits receipt-only directories after publish,
++	// but when BOTH producer.json and receipt.json coexist, their started_ns MUST agree before
++	// either inspectProducerReceiptSubdir or cleanOrphanReclaimDir may treat the directory as
++	// producer-owned and delete it.
++	root := filepath.Join(t.TempDir(), "preflight-started-mismatch")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lease.Close()
++
++	oldStarted := time.Now().Add(-3 * time.Hour).UnixNano()
++	oldFinished := oldStarted + int64(time.Second)
++
++	writeLegacyDir := func(parent, dirName, session string, writeMarker bool, markerStarted int64, writeReceipt bool, receiptStarted int64) string {
++		t.Helper()
++		dir := filepath.Join(parent, dirName)
++		if err := os.MkdirAll(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++		if writeMarker {
++			raw, err := json.Marshal(preflightReservationMarker{
++				Schema:  Schema,
++				Session: session,
++				Started: markerStarted,
++			})
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err := os.WriteFile(filepath.Join(dir, "producer.json"), raw, 0600); err != nil {
++				t.Fatal(err)
++			}
++		}
++		if writeReceipt {
++			raw, err := json.Marshal(Receipt{
++				Schema:   Schema,
++				Session:  session,
++				Started:  receiptStarted,
++				Finished: receiptStarted + int64(time.Second),
++				Complete: true,
++				Routes:   []string{"kimi-ai@api.kimi.ai"},
++			})
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err := os.WriteFile(filepath.Join(dir, "receipt.json"), raw, 0600); err != nil {
++				t.Fatal(err)
++			}
++		}
++		oldMod := time.Unix(0, oldFinished)
++		_ = os.Chtimes(dir, oldMod, oldMod)
++		return dir
++	}
++
++	pMismatch := "preflight-ffb5b5b5-2222-4333-8444-555555555501"
++	pMatch := "preflight-ffb5b5b5-2222-4333-8444-555555555502"
++	pReceiptOnly := "preflight-ffb5b5b5-2222-4333-8444-555555555503"
++	writeLegacyDir(root, pMismatch, pMismatch, true, oldStarted, true, oldStarted+12345)
++	writeLegacyDir(root, pMatch, pMatch, true, oldStarted, true, oldStarted)
++	writeLegacyDir(root, pReceiptOnly, pReceiptOnly, false, 0, true, oldStarted)
++
++	if sr, _, _, _, _, ok := inspectProducerReceiptSubdir(lease.dir, pMismatch, false); ok {
++		_ = sr.Close()
++		t.Fatalf("inspectProducerReceiptSubdir accepted mismatched started_ns in legacy preflight dir")
++	}
++	if sr, _, _, _, _, ok := inspectProducerReceiptSubdir(lease.dir, pMatch, false); !ok {
++		t.Fatalf("inspectProducerReceiptSubdir rejected matching started_ns in legacy preflight dir")
++	} else {
++		_ = sr.Close()
++	}
++	if sr, _, _, _, _, ok := inspectProducerReceiptSubdir(lease.dir, pReceiptOnly, false); !ok {
++		t.Fatalf("inspectProducerReceiptSubdir rejected receipt-only legacy preflight dir")
++	} else {
++		_ = sr.Close()
++	}
++
++	// Same rule in .staging/reclaim-* orphan cleanup.
++	stagingRoot, err := ensureStagingDir(lease.dir, root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = stagingRoot.Close() }()
++	stagingPath := filepath.Join(root, ".staging")
++	reclaimMismatch := "reclaim-legacy-mismatch-1"
++	reclaimMatch := "reclaim-legacy-match-1"
++	reclaimReceiptOnly := "reclaim-legacy-receiptonly-1"
++	writeLegacyDir(stagingPath, reclaimMismatch, pMismatch, true, oldStarted, true, oldStarted+999)
++	writeLegacyDir(stagingPath, reclaimMatch, pMatch, true, oldStarted, true, oldStarted)
++	writeLegacyDir(stagingPath, reclaimReceiptOnly, pReceiptOnly, false, 0, true, oldStarted)
++
++	openReclaim := func(name string) (*os.Root, uint64, uint64, bool) {
++		t.Helper()
++		sr, fi, err := openVerifiedSubdir(stagingRoot, name)
++		if err != nil {
++			t.Fatal(err)
++		}
++		dev, ino, hasID := statDevIno(fi)
++		return sr, dev, ino, hasID
++	}
++	sr1, dev1, ino1, ok1 := openReclaim(reclaimMismatch)
++	if cleanOrphanReclaimDir(stagingRoot, reclaimMismatch, sr1, dev1, ino1, ok1) {
++		t.Fatalf("cleanOrphanReclaimDir deleted legacy preflight reclaim dir with mismatched started_ns")
++	}
++	_ = sr1.Close()
++	if _, err := os.Stat(filepath.Join(stagingPath, reclaimMismatch, "receipt.json")); err != nil {
++		t.Fatalf("mismatched legacy reclaim dir should remain intact: %v", err)
++	}
++
++	sr2, dev2, ino2, ok2 := openReclaim(reclaimMatch)
++	if !cleanOrphanReclaimDir(stagingRoot, reclaimMatch, sr2, dev2, ino2, ok2) {
++		_ = sr2.Close()
++		t.Fatalf("cleanOrphanReclaimDir failed on matching legacy preflight reclaim dir")
++	}
++	sr3, dev3, ino3, ok3 := openReclaim(reclaimReceiptOnly)
++	if !cleanOrphanReclaimDir(stagingRoot, reclaimReceiptOnly, sr3, dev3, ino3, ok3) {
++		_ = sr3.Close()
++		t.Fatalf("cleanOrphanReclaimDir failed on receipt-only legacy preflight reclaim dir")
 +	}
 +}

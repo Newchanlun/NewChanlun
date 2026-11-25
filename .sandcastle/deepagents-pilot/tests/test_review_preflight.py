@@ -2402,7 +2402,7 @@ def test_open_http_rejects_explicit_zero_or_invalid_port_before_connecting(monke
     for bad_url in (
         "http://127.0.0.1:0",  # DevSkim: ignore DS162092 显式零端口拒绝回归
         "https://127.0.0.1:0",  # DevSkim: ignore DS162092 显式零端口拒绝回归
-        "http://[::1]:0",
+        "http://[::1]:0",  # DevSkim: ignore DS137138,DS162092 显式零端口拒绝回归
         "http://127.0.0.1:65536",  # DevSkim: ignore DS162092 越界端口拒绝回归
     ):
         res = preflight._round_trip_http(bad_url, KEY, OPUS, "preflight-bad-port", preflight.Deadline(3))
@@ -2436,7 +2436,8 @@ def test_open_http_disables_tls_suppress_ragged_eofs(tmp_path, monkeypatch):
 
     payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
     raw_http = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + payload
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     server_ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
 
     mode = {"ragged": True}
@@ -2581,6 +2582,49 @@ def test_chunked_framing_overhead_budget_caps_200_and_error_responses(monkeypatc
         res500 = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-flood-500", preflight.Deadline(3))
         assert res500["ok"] is False and res500["http_status"] == 500, res500
         assert res500["error"]["length"] < 200, res500
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_rejects_lifecycle_events_missing_or_null_response():
+    """Astra P2 #2 (R73): response.created / response.queued / response.in_progress 缺失 response
+    或 response 为 null 时必须拒绝，即使后续出现合法 response.completed 也不得放行。"""
+    cases = [
+        ("response.created", '{"type":"response.created"}'),
+        ("response.created", '{"type":"response.created","response":null}'),
+        ("response.queued", '{"type":"response.queued"}'),
+        ("response.queued", '{"type":"response.queued","response":null}'),
+        ("response.in_progress", '{"type":"response.in_progress"}'),
+        ("response.in_progress", '{"type":"response.in_progress","response":null}'),
+    ]
+    current = {"body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 生命周期事件缺少 response 回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 生命周期事件缺少 response 回归
+        completed = 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        for ev_name, payload in cases:
+            current["body"] = f"event: {ev_name}\ndata: {payload}\n\n{completed}".encode()
+            res = preflight._round_trip_http(url, KEY, OPUS, "preflight-missing-resp-obj", preflight.Deadline(3))
+            assert res["ok"] is False, (ev_name, payload, res)
     finally:
         srv.shutdown()
         srv.server_close()
