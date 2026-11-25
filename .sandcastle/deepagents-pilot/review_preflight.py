@@ -16,11 +16,14 @@ import os
 import re
 import shutil
 import signal
+import socket
+import ssl
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -437,29 +440,18 @@ MAX_SSE_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SSE_EVENT_BYTES = 256 * 1024
 SSE_READ_CHUNK_BYTES = 8192
 MAX_HTTP_ERROR_BYTES = 65536
+MAX_HTTP_HEADERS = 100
+MAX_HTTP_HEADER_BYTES = 65536
 _CHUNK_SIZE_HEX_RE = re.compile(rb"[0-9A-Fa-f]{1,16}")
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,20}")
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_HTTP_STATUS_LINE_RE = re.compile(rb"HTTP/1\.[01] ([0-9]{3})(?: ([\t\x20-\x7e]*))?")
 _TRAILER_FIELD_RE = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+:[\t\x20-\x7e\x80-\xff]*")
 _TCHAR_BYTES = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
 
 class _SSEReadLimitError(Exception):
     pass
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """拒绝所有 3xx 重定向，避免跟随重定向时无界读体或向跨源地址转发 Authorization。"""
-
-    def http_error_302(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
-
-    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
-
-
-def _open_http(request: urllib.request.Request, timeout: float):
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-    return opener.open(request, timeout=timeout)
 
 
 def _is_valid_chunk_ext(raw: bytes) -> bool:
@@ -521,42 +513,6 @@ def _is_valid_chunk_ext(raw: bytes) -> bool:
         return False
 
 
-def _validate_http_response_framing(response: http.client.HTTPResponse) -> None:
-    """在读取正文前核验响应头解析缺陷及所有原始 Content-Length / Transfer-Encoding 头，
-    拒绝任何解析缺陷、非法值、冲突的多重 Content-Length、以及 Content-Length 与 Transfer-Encoding 并存。"""
-    headers = getattr(response, "headers", None)
-    if headers is None or not hasattr(headers, "get_all"):
-        return
-    if getattr(headers, "defects", None):
-        raise http.client.HTTPException("malformed HTTP response headers")
-    for hname, hval in headers.items():
-        if not isinstance(hname, str) or not _HEADER_NAME_RE.fullmatch(hname):
-            raise http.client.HTTPException("invalid HTTP response header name")
-        if isinstance(hval, str) and ("\r" in hval or "\n" in hval):
-            raise http.client.HTTPException("invalid HTTP response header value")
-    te_headers = headers.get_all("Transfer-Encoding") or []
-    cl_headers = headers.get_all("Content-Length") or []
-    if te_headers and cl_headers:
-        raise http.client.HTTPException("conflicting Transfer-Encoding and Content-Length")
-    if te_headers:
-        codings = [tok.strip(" \t").lower() for hdr in te_headers for tok in hdr.split(",")]
-        if codings != ["chunked"] or not getattr(response, "chunked", False):
-            raise http.client.HTTPException("unsupported Transfer-Encoding")
-    if cl_headers:
-        parsed_lengths: set[int] = set()
-        for hdr in cl_headers:
-            for part in hdr.split(","):
-                tok = part.strip(" \t")
-                if not _CONTENT_LENGTH_RE.fullmatch(tok):
-                    raise http.client.HTTPException("invalid Content-Length")
-                parsed_lengths.add(int(tok))
-        if len(parsed_lengths) != 1:
-            raise http.client.HTTPException("conflicting Content-Length")
-        expected_len = next(iter(parsed_lengths))
-        if getattr(response, "length", None) != expected_len:
-            raise http.client.HTTPException("mismatched parsed Content-Length")
-
-
 def _read_exact_fp(fp, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
@@ -567,6 +523,307 @@ def _read_exact_fp(fp, n: int) -> bytes:
     return bytes(buf)
 
 
+class _StrictHTTPResponse:
+    """绕过 CPython email.parser / HTTPResponse 的原始字节 HTTP/1.1 响应读取器：
+    按 RFC 9112 逐行校验状态行、响应头、Content-Length / Transfer-Encoding、chunked 分帧与 trailer。"""
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        fp,
+        *,
+        status: int,
+        reason: str,
+        headers: list[tuple[str, str]],
+        chunked: bool,
+        content_length: int | None,
+    ):
+        self._sock = sock
+        self._fp = fp
+        self.status = status
+        self.reason = reason
+        self.headers = headers
+        self.chunked = chunked
+        self.length = content_length
+        self._closed = False
+        self._body_started = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+        return False
+
+    def isclosed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._fp.close()
+        except Exception:
+            pass
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+
+    def iter_body(
+        self,
+        deadline: Deadline | None,
+        *,
+        max_total_bytes: int,
+        chunk_bytes: int = SSE_READ_CHUNK_BYTES,
+    ):
+        if self._body_started:
+            raise http.client.HTTPException("response body already consumed")
+        self._body_started = True
+        total_bytes = 0
+        fp = self._fp
+        if self.chunked:
+            while True:
+                if deadline is not None and deadline.work_left() <= 0:
+                    return
+                size_line = fp.readline(http.client._MAXLINE + 1)
+                if len(size_line) > http.client._MAXLINE:
+                    raise http.client.LineTooLong("chunk size")
+                if not size_line or not size_line.endswith(b"\r\n"):
+                    raise http.client.IncompleteRead(b"")
+                size_head, sep, ext_raw = size_line[:-2].partition(b";")
+                size_token = size_head.rstrip(b" \t") if sep else size_head
+                if not _CHUNK_SIZE_HEX_RE.fullmatch(size_token):
+                    raise http.client.HTTPException("invalid chunk size")
+                if sep and not _is_valid_chunk_ext(ext_raw):
+                    raise http.client.HTTPException("invalid chunk extension")
+                chunk_size = int(size_token, 16)
+                if chunk_size == 0:
+                    total_trailer_bytes = 0
+                    while True:
+                        if deadline is not None and deadline.work_left() <= 0:
+                            return
+                        tline = fp.readline(http.client._MAXLINE + 1)
+                        if len(tline) > http.client._MAXLINE:
+                            raise http.client.LineTooLong("trailer line")
+                        if not tline:
+                            raise http.client.IncompleteRead(b"")
+                        total_trailer_bytes += len(tline)
+                        if total_trailer_bytes > 65536:
+                            raise http.client.LineTooLong("trailer section")
+                        if tline == b"\r\n":
+                            break
+                        if not tline.endswith(b"\r\n"):
+                            raise http.client.IncompleteRead(b"")
+                        if not _TRAILER_FIELD_RE.fullmatch(tline[:-2]):
+                            raise http.client.HTTPException("invalid chunk trailer")
+                    self.close()
+                    return
+                chunk_rem = chunk_size
+                while chunk_rem > 0:
+                    if deadline is not None and deadline.work_left() <= 0:
+                        return
+                    remaining = max_total_bytes - total_bytes
+                    read_size = min(chunk_bytes, chunk_rem, remaining + 1)
+                    data = fp.read(read_size)
+                    if not data:
+                        raise http.client.IncompleteRead(b"")
+                    chunk_rem -= len(data)
+                    total_bytes += len(data)
+                    if total_bytes > max_total_bytes:
+                        raise _SSEReadLimitError("SSE 响应超过大小上限")
+                    yield data
+                if _read_exact_fp(fp, 2) != b"\r\n":
+                    raise http.client.HTTPException("invalid chunk terminator")
+            return
+
+        if self.length is not None:
+            while self.length > 0:
+                if deadline is not None and deadline.work_left() <= 0:
+                    return
+                remaining = max_total_bytes - total_bytes
+                read_size = min(chunk_bytes, self.length, remaining + 1)
+                data = fp.read(read_size)
+                if not data:
+                    raise http.client.IncompleteRead(b"")
+                self.length -= len(data)
+                total_bytes += len(data)
+                if total_bytes > max_total_bytes:
+                    raise _SSEReadLimitError("SSE 响应超过大小上限")
+                yield data
+            self.close()
+            return
+
+        while True:
+            if deadline is not None and deadline.work_left() <= 0:
+                return
+            remaining = max_total_bytes - total_bytes
+            read_size = min(chunk_bytes, remaining + 1)
+            data = fp.read(read_size)
+            if not data:
+                break
+            total_bytes += len(data)
+            if total_bytes > max_total_bytes:
+                raise _SSEReadLimitError("SSE 响应超过大小上限")
+            yield data
+        self.close()
+
+    def read(self, amt: int = MAX_HTTP_ERROR_BYTES) -> bytes:
+        cap = MAX_HTTP_ERROR_BYTES if amt is None or amt < 0 else amt
+        buf = bytearray()
+        try:
+            for chunk in self.iter_body(None, max_total_bytes=cap, chunk_bytes=min(SSE_READ_CHUNK_BYTES, max(1, cap))):
+                buf.extend(chunk)
+                if len(buf) >= cap:
+                    break
+        except _SSEReadLimitError:
+            pass
+        return bytes(buf[:cap])
+
+
+def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPResponse:
+    """直连目标代理发送 HTTP/1.1 请求（禁用环境代理与所有 3xx 重定向），
+    并在原始字节边界严格校验响应状态行、响应头字段与定界头。"""
+    parsed = urllib.parse.urlsplit(request.full_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https") or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise urllib.error.URLError("unsupported URL")
+    host = parsed.hostname
+    default_port = 443 if scheme == "https" else 80
+    port = parsed.port or default_port
+    if not (1 <= port <= 65535):
+        raise urllib.error.URLError("invalid port")
+    method = request.get_method()
+    if not _HEADER_NAME_RE.fullmatch(method):
+        raise urllib.error.URLError("invalid HTTP method")
+    target = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+    if any(ch in target for ch in ("\r", "\n", " ", "\t", "\x00")):
+        raise urllib.error.URLError("invalid HTTP request target")
+    body = request.data if isinstance(request.data, (bytes, bytearray)) else b""
+    host_hdr = f"[{host}]" if ":" in host else host
+    if port != default_port:
+        host_hdr = f"{host_hdr}:{port}"
+    req_lines = [
+        f"{method} {target} HTTP/1.1",
+        f"Host: {host_hdr}",
+        "Connection: close",
+        f"Content-Length: {len(body)}",
+    ]
+    for name, val in request.header_items():
+        if name.lower() in ("host", "connection", "content-length"):
+            continue
+        if not _HEADER_NAME_RE.fullmatch(name) or any(ch in val for ch in ("\r", "\n", "\x00")):
+            raise urllib.error.URLError("invalid HTTP request header")
+        req_lines.append(f"{name}: {val}")
+    wire_head = ("\r\n".join(req_lines) + "\r\n\r\n").encode("latin-1")
+
+    raw_sock = socket.create_connection((host, port), timeout=timeout)
+    sock: socket.socket = raw_sock
+    fp = None
+    try:
+        if scheme == "https":
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+        sock.settimeout(timeout)
+        sock.sendall(wire_head)
+        if body:
+            sock.sendall(body)
+        fp = sock.makefile("rb")
+        status_line = fp.readline(http.client._MAXLINE + 1)
+        if len(status_line) > http.client._MAXLINE:
+            raise http.client.LineTooLong("status line")
+        if not status_line or not status_line.endswith(b"\r\n"):
+            raise http.client.BadStatusLine("malformed status line")
+        m = _HTTP_STATUS_LINE_RE.fullmatch(status_line[:-2])
+        if not m:
+            raise http.client.BadStatusLine("invalid status line")
+        status_code = int(m.group(1))
+        reason = (m.group(2) or b"").decode("ascii")
+        if 100 <= status_code < 200:
+            raise http.client.HTTPException("unexpected 1xx response")
+
+        raw_headers: list[tuple[str, str]] = []
+        te_headers: list[str] = []
+        cl_headers: list[str] = []
+        total_hdr_bytes = 0
+        while True:
+            hline = fp.readline(http.client._MAXLINE + 1)
+            if len(hline) > http.client._MAXLINE:
+                raise http.client.LineTooLong("header line")
+            if not hline:
+                raise http.client.IncompleteRead(b"")
+            total_hdr_bytes += len(hline)
+            if total_hdr_bytes > MAX_HTTP_HEADER_BYTES:
+                raise http.client.LineTooLong("header section")
+            if hline == b"\r\n":
+                break
+            if not hline.endswith(b"\r\n"):
+                raise http.client.HTTPException("malformed HTTP response header line ending")
+            line = hline[:-2]
+            if not _TRAILER_FIELD_RE.fullmatch(line):
+                raise http.client.HTTPException("malformed HTTP response header")
+            if len(raw_headers) >= MAX_HTTP_HEADERS:
+                raise http.client.HTTPException("too many HTTP response headers")
+            raw_name, raw_val = line.split(b":", 1)
+            hname = raw_name.decode("ascii")
+            hval = raw_val.decode("latin-1").strip(" \t")
+            raw_headers.append((hname, hval))
+            lower_name = hname.lower()
+            if lower_name == "transfer-encoding":
+                te_headers.append(hval)
+            elif lower_name == "content-length":
+                cl_headers.append(hval)
+
+        if te_headers and cl_headers:
+            raise http.client.HTTPException("conflicting Transfer-Encoding and Content-Length")
+        chunked = False
+        content_length: int | None = None
+        if te_headers:
+            codings = [tok.strip(" \t").lower() for hdr in te_headers for tok in hdr.split(",")]
+            if codings != ["chunked"]:
+                raise http.client.HTTPException("unsupported Transfer-Encoding")
+            chunked = True
+        elif cl_headers:
+            parsed_lengths: set[int] = set()
+            for hdr in cl_headers:
+                for part in hdr.split(","):
+                    tok = part.strip(" \t")
+                    if not _CONTENT_LENGTH_RE.fullmatch(tok):
+                        raise http.client.HTTPException("invalid Content-Length")
+                    parsed_lengths.add(int(tok))
+            if len(parsed_lengths) != 1:
+                raise http.client.HTTPException("conflicting Content-Length")
+            content_length = next(iter(parsed_lengths))
+    except Exception:
+        if fp is not None:
+            try:
+                fp.close()
+            except Exception:
+                pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+        raise
+
+    resp = _StrictHTTPResponse(
+        sock,
+        fp,
+        status=status_code,
+        reason=reason,
+        headers=raw_headers,
+        chunked=chunked,
+        content_length=content_length,
+    )
+    if status_code < 200 or status_code >= 300:
+        hdr_msg = http.client.HTTPMessage()
+        for hname, hval in raw_headers:
+            hdr_msg.add_header(hname, hval)
+        raise urllib.error.HTTPError(request.full_url, status_code, reason, hdr_msg, resp)
+    return resp
+
+
 def _iter_strict_http_body(
     response,
     deadline: Deadline | None,
@@ -574,69 +831,11 @@ def _iter_strict_http_body(
     max_total_bytes: int,
     chunk_bytes: int = SSE_READ_CHUNK_BYTES,
 ):
-    """严格有界读取 HTTP 响应体：先核验原始 framing 头，对真实 chunked 响应绕过 CPython 宽松分块解码，
-    在读块体前强制校验无符号 16 进制块长、块尾 \\r\\n 与 trailer 终结空行，避免负块长无界分配或坏分帧放行。"""
-    if isinstance(response, http.client.HTTPResponse):
-        _validate_http_response_framing(response)
-    total_bytes = 0
-    if isinstance(response, http.client.HTTPResponse) and getattr(response, "chunked", False):
-        fp = getattr(response, "fp", None)
-        if fp is None:
-            raise http.client.IncompleteRead(b"")
-        while True:
-            if deadline is not None and deadline.work_left() <= 0:
-                return
-            size_line = fp.readline(http.client._MAXLINE + 1)
-            if len(size_line) > http.client._MAXLINE:
-                raise http.client.LineTooLong("chunk size")
-            if not size_line or not size_line.endswith(b"\r\n"):
-                raise http.client.IncompleteRead(b"")
-            size_head, sep, ext_raw = size_line[:-2].partition(b";")
-            size_token = size_head.rstrip(b" \t") if sep else size_head
-            if not _CHUNK_SIZE_HEX_RE.fullmatch(size_token):
-                raise http.client.HTTPException("invalid chunk size")
-            if sep and not _is_valid_chunk_ext(ext_raw):
-                raise http.client.HTTPException("invalid chunk extension")
-            chunk_size = int(size_token, 16)
-            if chunk_size == 0:
-                total_trailer_bytes = 0
-                while True:
-                    if deadline is not None and deadline.work_left() <= 0:
-                        return
-                    tline = fp.readline(http.client._MAXLINE + 1)
-                    if len(tline) > http.client._MAXLINE:
-                        raise http.client.LineTooLong("trailer line")
-                    if not tline:
-                        raise http.client.IncompleteRead(b"")
-                    total_trailer_bytes += len(tline)
-                    if total_trailer_bytes > 65536:
-                        raise http.client.LineTooLong("trailer section")
-                    if tline == b"\r\n":
-                        break
-                    if not tline.endswith(b"\r\n"):
-                        raise http.client.IncompleteRead(b"")
-                    if not _TRAILER_FIELD_RE.fullmatch(tline[:-2]):
-                        raise http.client.HTTPException("invalid chunk trailer")
-                response.close()
-                return
-            chunk_rem = chunk_size
-            while chunk_rem > 0:
-                if deadline is not None and deadline.work_left() <= 0:
-                    return
-                remaining = max_total_bytes - total_bytes
-                read_size = min(chunk_bytes, chunk_rem, remaining + 1)
-                data = fp.read(read_size)
-                if not data:
-                    raise http.client.IncompleteRead(b"")
-                chunk_rem -= len(data)
-                total_bytes += len(data)
-                if total_bytes > max_total_bytes:
-                    raise _SSEReadLimitError("SSE 响应超过大小上限")
-                yield data
-            if _read_exact_fp(fp, 2) != b"\r\n":
-                raise http.client.HTTPException("invalid chunk terminator")
+    """严格有界读取 HTTP 响应体：真实连接经 _StrictHTTPResponse 原生 RFC 9112 分帧读取，测试桩走有界 read()。"""
+    if isinstance(response, _StrictHTTPResponse):
+        yield from response.iter_body(deadline, max_total_bytes=max_total_bytes, chunk_bytes=chunk_bytes)
         return
-
+    total_bytes = 0
     while True:
         if deadline is not None and deadline.work_left() <= 0:
             return
@@ -645,10 +844,7 @@ def _iter_strict_http_body(
         chunk = response.read(read_size)
         if not chunk:
             if (getattr(response, "length", None) or 0) > 0 or (
-                getattr(response, "chunked", False) and (
-                    getattr(response, "chunk_left", None) is not None
-                    or (isinstance(response, http.client.HTTPResponse) and not response.isclosed())
-                )
+                getattr(response, "chunked", False) and getattr(response, "chunk_left", None) is not None
             ):
                 raise http.client.IncompleteRead(b"")
             break
@@ -661,10 +857,10 @@ def _iter_strict_http_body(
 def _read_bounded_error_body(error: urllib.error.HTTPError, *, max_bytes: int = MAX_HTTP_ERROR_BYTES) -> bytes:
     """严格有界读取 HTTPError 正文，对 chunked 错误响应同样校验块长与上限。"""
     raw_resp = getattr(error, "fp", None)
-    if isinstance(raw_resp, http.client.HTTPResponse):
+    if isinstance(raw_resp, _StrictHTTPResponse):
         buf = bytearray()
         try:
-            for chunk in _iter_strict_http_body(raw_resp, None, max_total_bytes=max_bytes, chunk_bytes=min(SSE_READ_CHUNK_BYTES, max_bytes)):
+            for chunk in raw_resp.iter_body(None, max_total_bytes=max_bytes, chunk_bytes=min(SSE_READ_CHUNK_BYTES, max_bytes)):
                 buf.extend(chunk)
                 if len(buf) >= max_bytes:
                     break

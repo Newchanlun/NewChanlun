@@ -971,3 +971,51 @@ def test_receipt_readers_allow_execute_only_ancestor_and_handle_deep_json(tmp_pa
     deep_pf_path.write_bytes((b"[" * 4000) + (b"]" * 4000))
     os.chmod(deep_pf_path, 0o600)
     assert log_mod.route_from_receipt(real_root, deep_pf, since, 0) is None
+
+
+def test_legacy_preflight_producer_consumer_status_contract_parity(monkeypatch):
+    """Sol P2 #3 (PR #2280 R65): 配对验证新版 review_preflight 消费端与生产端 Responses API 终态契约：
+    携带完整 response.status=completed/incomplete 的终态通过，缺省 response.status 的旧桩载荷被明确拒绝。"""
+    import io
+
+    class _Resp:
+        status = 200
+
+        def __init__(self, raw: bytes):
+            self._buf = io.BytesIO(raw)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            return self._buf.read(n)
+
+    for payload, expected_ok, expected_status in (
+        (
+            b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_ok","status":"completed"}}\n\ndata: [DONE]\n\n',
+            True,
+            "completed",
+        ),
+        (
+            b'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"id":"resp_inc","status":"incomplete"}}\n\n',
+            True,
+            "incomplete",
+        ),
+        (
+            b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_missing_status"}}\n\n',
+            False,
+            None,
+        ),
+        (
+            b'data: {"type":"response.completed"}\n\n',
+            False,
+            None,
+        ),
+    ):
+        monkeypatch.setattr(preflight, "_open_http", lambda *a, _p=payload, **kw: _Resp(_p))
+        res = preflight._round_trip_http("https://proxy.invalid", "k", SOL, "preflight-status-parity", preflight.Deadline(5))
+        assert res["ok"] is expected_ok, (payload, res)
+        assert res["status"] == expected_status, (payload, res)

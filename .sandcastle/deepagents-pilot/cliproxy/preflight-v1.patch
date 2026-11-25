@@ -1,5 +1,5 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..7582028 100644
+index e69de29..3b4fc4c 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,269 @@
@@ -254,7 +254,7 @@ index e69de29..7582028 100644
 +			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"status": "rejected"})
 +			return
 +		}
-+		status, receiptSHA := preflightreceipt.SealReviewWithDigest(root, launch, session)
++		status, receiptSHA := preflightreceipt.SealReviewWithDigestContext(c.Request.Context(), root, launch, session)
 +		switch status {
 +		case preflightreceipt.SealOK:
 +			c.JSON(http.StatusOK, gin.H{
@@ -2816,10 +2816,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..6c83a34
+index 0000000..c98c7e3
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,1462 @@
+@@ -0,0 +1,1518 @@
 +package executor
 +
 +import (
@@ -4281,9 +4281,65 @@ index 0000000..6c83a34
 +			t.Fatalf("legacy preflight published receipt after mismatched event header on response.failed: %v", statErr)
 +		}
 +	})
++
++	t.Run("strict review rejects cumulative output_item.done exceeding per-stream byte budget", func(t *testing.T) {
++		// Astra P1 #2 (PR #2280 R65): cumulative response.output_item.done payloads must enforce
++		// maxCodexCollectedOutputItemBytes AT COLLECTION TIME rather than buffering unboundedly
++		// until response.completed reconstruction.
++		oldCap := maxCodexCollectedOutputItemBytes
++		maxCodexCollectedOutputItemBytes = 4096
++		defer func() { maxCodexCollectedOutputItemBytes = oldCap }()
++
++		root := filepath.Join(t.TempDir(), "receipts-cum-output-cap")
++		launch := "review-aa999999-2222-4333-8444-555555555509"
++		session := "019d0000-0000-7000-8000-00000000aa09"
++		bigText := strings.Repeat("x", 1800)
++		var b strings.Builder
++		b.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cum_cap\",\"status\":\"in_progress\",\"model\":\"gpt-6.2-sol\"}}\n\n")
++		for _, idxStr := range []string{"0", "1", "2"} {
++			b.WriteString(
++				"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":" + idxStr + ",\"item\":{\"id\":\"msg_" + idxStr + "\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"" + bigText + "\"}]}}\n\n",
++			)
++		}
++		b.WriteString("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cum_cap\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[]}}\n\n")
++		b.WriteString("data: [DONE]\n\n")
++		sseOverCap := b.String()
++
++		ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx1, lease1, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseOverCap))
++		}}
++		ctx1 = context.WithValue(ctx1, "cliproxy.roundtripper", http.RoundTripper(rt))
++		stream, err := exec.ExecuteStream(ctx1, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		sawErr := false
++		for ch := range stream.Chunks {
++			if ch.Err != nil {
++				sawErr = true
++			}
++		}
++		lease1.End()
++		c.Complete(!sawErr)
++		c.HandlerDone(!sawErr)
++		if !sawErr {
++			t.Fatalf("expected stream error when cumulative response.output_item.done exceeds 4096-byte budget")
++		}
++		if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
++			t.Fatalf("SealReview after cumulative output_item.done budget overflow = %v, want SealRejected", st)
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..b6d77a3 100644
+index 6074124..c492739 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,10 +3,12 @@ package executor
@@ -4323,7 +4379,36 @@ index 6074124..b6d77a3 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +454,489 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -224,6 +234,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 	var param any
+ 	outputItemsByIndex := make(map[int64][]byte)
+ 	var outputItemsFallback [][]byte
++	outputItemsBytes := 0
++	outputItemsOverflow := false
+ 
+ 	var bufferedChunks [][]byte
+ 	var initialChunks [][]byte
+@@ -310,7 +322,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 				}
+ 				switch eventType {
+ 				case "response.output_item.done":
+-					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
++					if !outputItemsOverflow && !collectCodexOutputItemDoneBounded(data, outputItemsByIndex, &outputItemsFallback, &outputItemsBytes, maxCodexCollectedOutputItemBytes) {
++						outputItemsOverflow = true
++					}
+ 				case "response.completed", "response.incomplete", "response.done":
+ 					terminalSuccess = true
+ 					immediateIncomplete = eventType == "response.incomplete"
+@@ -321,7 +335,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 						reporter.EnsurePublished(ctx)
+ 					}
+ 					publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, data, outputItemsByIndex, outputItemsFallback)
+-					if !preserveNativeOutput {
++					if !preserveNativeOutput && !outputItemsOverflow {
+ 						data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
+ 					}
+ 					if eventType == "response.completed" || eventType == "response.done" {
+@@ -444,19 +458,501 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -4621,7 +4706,19 @@ index 6074124..b6d77a3 100644
 +						eventType := ojson.GetBytesNoCopy(eventPayload, "type").String()
 +						switch eventType {
 +						case "response.output_item.done":
-+							collectCodexOutputItemDone(eventPayload, outputItemsByIndex, &outputItemsFallback)
++							if !collectCodexOutputItemDoneBounded(eventPayload, outputItemsByIndex, &outputItemsFallback, &outputItemsBytes, maxCodexCollectedOutputItemBytes) {
++								pendingStrictTerminal = nil
++								pendingStrictBytes = 0
++								failPostTerminal()
++								streamErr := newStrictReviewValidationError()
++								helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
++								reporter.PublishFailure(ctx, streamErr)
++								select {
++								case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
++								case <-ctx.Done():
++								}
++								return
++							}
 +						case "response.completed", "response.incomplete", "response.done":
 +							if eventType == "response.done" {
 +								pendingStrictTerminal = nil
@@ -4815,7 +4912,27 @@ index 6074124..b6d77a3 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +1021,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -497,7 +993,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 				}
+ 				switch eventType {
+ 				case "response.output_item.done":
+-					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
++					if !outputItemsOverflow && !collectCodexOutputItemDoneBounded(data, outputItemsByIndex, &outputItemsFallback, &outputItemsBytes, maxCodexCollectedOutputItemBytes) {
++						outputItemsOverflow = true
++					}
+ 				case "response.completed", "response.incomplete", "response.done":
+ 					terminalSuccess = true
+ 					isIncompleteEvent = eventType == "response.incomplete"
+@@ -508,7 +1006,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 						reporter.EnsurePublished(ctx)
+ 					}
+ 					publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, data, outputItemsByIndex, outputItemsFallback)
+-					if !preserveNativeOutput {
++					if !preserveNativeOutput && !outputItemsOverflow {
+ 						data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
+ 					}
+ 					if eventType == "response.completed" || eventType == "response.done" {
+@@ -541,11 +1039,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
@@ -4907,10 +5024,10 @@ index 6074124..b6d77a3 100644
  		if emittedCount == 0 {
  			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 diff --git a/internal/runtime/executor/codex_executor_terminal.go b/internal/runtime/executor/codex_executor_terminal.go
-index 6e513dd..159bc55 100644
+index 6e513dd..0ae5a3b 100644
 --- a/internal/runtime/executor/codex_executor_terminal.go
 +++ b/internal/runtime/executor/codex_executor_terminal.go
-@@ -46,6 +46,21 @@ func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
+@@ -46,6 +46,23 @@ func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
  	return true
  }
  
@@ -4929,9 +5046,51 @@ index 6e513dd..159bc55 100644
 +	return true
 +}
 +
++var maxCodexCollectedOutputItemBytes = 8 * 1024 * 1024 // 8 MiB cumulative budget per stream
++
  // Streamed Codex responses may emit response.output_item.done events while leaving
  // response.completed.response.output empty. Keep the stream path aligned with the
  // already-patched non-stream path by reconstructing response.output from those items.
+@@ -62,6 +79,39 @@ func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][
+ 	*outputItemsFallback = append(*outputItemsFallback, []byte(itemResult.Raw))
+ }
+ 
++func collectCodexOutputItemDoneBounded(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte, totalBytes *int, maxBytes int) bool {
++	itemResult := ojson.GetBytesNoCopy(eventData, "item")
++	if !itemResult.Exists() || itemResult.Type != ojson.JSON {
++		return true
++	}
++	rawLen := len(itemResult.Raw)
++	outputIndexResult := ojson.GetBytesNoCopy(eventData, "output_index")
++	if outputIndexResult.Exists() {
++		idx := outputIndexResult.Int()
++		prevLen := len(outputItemsByIndex[idx])
++		nextTotal := *totalBytes - prevLen + rawLen
++		if maxBytes > 0 && nextTotal > maxBytes {
++			clear(outputItemsByIndex)
++			*outputItemsFallback = nil
++			*totalBytes = 0
++			return false
++		}
++		outputItemsByIndex[idx] = []byte(itemResult.Raw)
++		*totalBytes = nextTotal
++		return true
++	}
++	nextTotal := *totalBytes + rawLen
++	if maxBytes > 0 && nextTotal > maxBytes {
++		clear(outputItemsByIndex)
++		*outputItemsFallback = nil
++		*totalBytes = 0
++		return false
++	}
++	*outputItemsFallback = append(*outputItemsFallback, []byte(itemResult.Raw))
++	*totalBytes = nextTotal
++	return true
++}
++
+ func hydrateCodexCompletedOutputItemIDs(eventData []byte, outputItems []ojson.Result, outputItemsByIndex map[int64][]byte) []byte {
+ 	var doc *ojson.Doc
+ 	changed := false
 diff --git a/internal/runtime/executor/helps/codex_sse_scanner.go b/internal/runtime/executor/helps/codex_sse_scanner.go
 index 35f5532..d44ef62 100644
 --- a/internal/runtime/executor/helps/codex_sse_scanner.go
@@ -7272,10 +7431,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..fee34a7 100644
+index e69de29..d66b19f 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,10970 @@
+@@ -0,0 +1,11016 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7657,7 +7816,7 @@ index e69de29..fee34a7 100644
 +	reservedBindingKeys           = make(map[string]bool)
 +	activeSealingKeys             = make(map[string]int)
 +	activeSealFlights             = make(map[string]*sealFlight)
-+	activeSealTotal               int
++	activeSealTotal               atomic.Int64
 +	maxConcurrentSeals            = 16
 +	reclaimingKeys                = make(map[string]bool)
 +	pendingReviewLaunches = make(map[string]*pendingReviewState)
@@ -13193,7 +13352,11 @@ index e69de29..fee34a7 100644
 +	if ent, err, done := checkExisting(); done {
 +		return ent, err
 +	}
++	// Perform disk lookup WITHOUT holding global reviewMu so slow storage never blocks
++	// admission or seal concurrency checks for unrelated launches.
 +	dir := filepath.Join(root, launch)
++	reviewMu.Unlock()
++	locked = false
 +	diskEntry, onDisk, err := loadReviewEntryFromDisk(dir, launch, session, now)
 +	if err != nil {
 +		return nil, err
@@ -13201,15 +13364,24 @@ index e69de29..fee34a7 100644
 +	if rejectSealed && onDisk && diskEntry != nil && diskEntry.sealedFlag {
 +		return nil, errReviewSealed
 +	}
++	reviewMu.Lock()
++	locked = true
++	if ent, err, done := checkExisting(); done {
++		return ent, err
++	}
 +	if len(reviewLedger) >= maxReviewLedgerEntries {
 +		evictOldestEvictableLocked := func(curNow time.Time) bool {
 +			var oldestKey string
 +			var oldestTime time.Time
 +			for k, v := range reviewLedger {
-+				if v.inFlight > 0 || v.sealing {
++				if v.inFlight > 0 || v.sealing || activeSealingKeys[k] > 0 {
 +					continue
 +				}
-+				v.mu.Lock()
++				// Never block on entry.mu while holding global reviewMu (e.g. a repeat seal
++				// holding entry.mu across disk verification/fsync).
++				if !v.mu.TryLock() {
++					continue
++				}
 +				evictable := !(v.tainted && !v.taintedPersisted) && (v.sealed || v.tainted || (v.started > 0 && curNow.UnixNano()-v.started > int64(MaxReviewDuration)))
 +				v.mu.Unlock()
 +				if !evictable {
@@ -13223,14 +13395,14 @@ index e69de29..fee34a7 100644
 +				return false
 +			}
 +			evicted := reviewLedger[oldestKey]
-+			delete(reviewLedger, oldestKey)
-+			if evicted != nil {
-+				evicted.mu.Lock()
-+				evictedFD := evicted.boundDirFD
-+				evicted.boundDirFD = nil
-+				evicted.mu.Unlock()
-+				closeBudgetedPinnedDirFD(evictedFD)
++			if evicted == nil || evicted.inFlight > 0 || evicted.sealing || activeSealingKeys[oldestKey] > 0 || !evicted.mu.TryLock() {
++				return false
 +			}
++			delete(reviewLedger, oldestKey)
++			evictedFD := evicted.boundDirFD
++			evicted.boundDirFD = nil
++			evicted.mu.Unlock()
++			closeBudgetedPinnedDirFD(evictedFD)
 +			return true
 +		}
 +		type unpersistedTaintCand struct {
@@ -13243,10 +13415,12 @@ index e69de29..fee34a7 100644
 +		expiredByRoot := make(map[string][]string)
 +		var unpersistedTaint []unpersistedTaintCand
 +		for k, v := range reviewLedger {
-+			if v.inFlight > 0 || v.sealing {
++			if v.inFlight > 0 || v.sealing || activeSealingKeys[k] > 0 {
 +				continue
 +			}
-+			v.mu.Lock()
++			if !v.mu.TryLock() {
++				continue
++			}
 +			isUnpersistedTaint := !v.sealed && v.tainted && !v.taintedPersisted
 +			evictable := !isUnpersistedTaint && (v.sealed || v.tainted || (v.started > 0 && now.UnixNano()-v.started > int64(MaxReviewDuration)))
 +			v.mu.Unlock()
@@ -13270,16 +13444,19 @@ index e69de29..fee34a7 100644
 +				oldestKey, oldestTime = k, v.touched
 +			}
 +		}
++		evictedOne := false
 +		if oldestKey != "" {
-+			evicted := reviewLedger[oldestKey]
-+			delete(reviewLedger, oldestKey)
-+			if evicted != nil {
-+				evicted.mu.Lock()
++			if evicted := reviewLedger[oldestKey]; evicted != nil && evicted.inFlight == 0 && !evicted.sealing && activeSealingKeys[oldestKey] == 0 && evicted.mu.TryLock() {
++				delete(reviewLedger, oldestKey)
 +				evictedFD := evicted.boundDirFD
 +				evicted.boundDirFD = nil
 +				evicted.mu.Unlock()
 +				closeBudgetedPinnedDirFD(evictedFD)
++				evictedOne = true
 +			}
++		}
++		if evictedOne {
++			// Slot freed cleanly without blocking on any slow disk I/O.
 +		} else if len(expiredByRoot) > 0 || len(unpersistedTaint) > 0 {
 +			// When the ledger is full solely with unpersisted-taint entries, never blindly drop
 +			// unpersisted taint records; instead release reviewMu and first attempt verified disk
@@ -13337,7 +13514,7 @@ index e69de29..fee34a7 100644
 +					triedAny = true
 +					reviewMu.Lock()
 +					cur := reviewLedger[cand.key]
-+					if cur == nil || cur != cand.entry || cur.inFlight > 0 || cur.sealing || reclaimingKeys[cand.key] {
++					if cur == nil || cur != cand.entry || cur.inFlight > 0 || cur.sealing || activeSealingKeys[cand.key] > 0 || reclaimingKeys[cand.key] {
 +						reviewMu.Unlock()
 +						continue
 +					}
@@ -13355,6 +13532,14 @@ index e69de29..fee34a7 100644
 +					}
 +				}
 +			}
++			// Refresh disk view outside reviewMu before reacquiring the global lock.
++			diskEntry, onDisk, err = loadReviewEntryFromDisk(dir, launch, session, now)
++			if err != nil {
++				return nil, err
++			}
++			if rejectSealed && onDisk && diskEntry != nil && diskEntry.sealedFlag {
++				return nil, errReviewSealed
++			}
 +			reviewMu.Lock()
 +			locked = true
 +			if triedAny {
@@ -13364,13 +13549,6 @@ index e69de29..fee34a7 100644
 +			}
 +			if ent, err, done := checkExisting(); done {
 +				return ent, err
-+			}
-+			diskEntry, onDisk, err = loadReviewEntryFromDisk(dir, launch, session, now)
-+			if err != nil {
-+				return nil, err
-+			}
-+			if rejectSealed && onDisk && diskEntry != nil && diskEntry.sealedFlag {
-+				return nil, errReviewSealed
 +			}
 +			if len(reviewLedger) >= maxReviewLedgerEntries {
 +				_ = evictOldestEvictableLocked(now)
@@ -14165,15 +14343,39 @@ index e69de29..fee34a7 100644
 +// (after verifying root and receipt.json on disk and completing launch, root, and root-parent
 +// directory fsyncs while holding the exclusive root writer lock on the exact same root & launch handles).
 +func SealReviewWithDigest(root, launch, session string) (SealStatus, string) {
++	return SealReviewWithDigestContext(context.Background(), root, launch, session)
++}
++
++// SealReviewWithDigestContext seals a formal review launch with lock-free atomic concurrency
++// admission BEFORE acquiring any shared mutex or touching disk, and respects ctx cancellation
++// when waiting on a coalesced in-flight seal for the same (root, launch, session).
++func SealReviewWithDigestContext(ctx context.Context, root, launch, session string) (SealStatus, string) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) || !reviewSessionPattern.MatchString(session) {
 +		return SealRejected, ""
 +	}
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	if ctx.Err() != nil {
++		return SealUnavailable, ""
++	}
++	// Enforce seal concurrency cap atomically BEFORE waiting on reviewMu or touching disk so
++	// over-limit requests return SealUnavailable immediately without queuing behind shared locks.
++	if capVal := int64(maxConcurrentSeals); capVal > 0 {
++		for {
++			cur := activeSealTotal.Load()
++			if cur >= capVal {
++				return SealUnavailable, ""
++			}
++			if activeSealTotal.CompareAndSwap(cur, cur+1) {
++				break
++			}
++		}
++		defer activeSealTotal.Add(-1)
++	}
 +	root = cleanRoot
 +	key := root + "\x00" + launch
-+	// Enforce seal concurrency cap and per-launch single-flight coalescing BEFORE touching disk
-+	// or acquiring the exclusive root lease so concurrent seal retries cannot pile up goroutines
-+	// or contend on root flock/fsync while disk is slow.
 +	reviewMu.Lock()
 +	if reclaimingKeys[key] {
 +		reviewMu.Unlock()
@@ -14187,24 +14389,18 @@ index e69de29..fee34a7 100644
 +		reviewMu.Unlock()
 +		return SealInFlight, ""
 +	}
-+	if maxConcurrentSeals > 0 && activeSealTotal >= maxConcurrentSeals {
-+		reviewMu.Unlock()
-+		return SealUnavailable, ""
-+	}
 +	if existingFlight := activeSealFlights[key]; existingFlight != nil {
 +		if existingFlight.session != session {
 +			reviewMu.Unlock()
 +			return SealInFlight, ""
 +		}
-+		activeSealTotal++
 +		reviewMu.Unlock()
-+		<-existingFlight.done
-+		reviewMu.Lock()
-+		if activeSealTotal > 0 {
-+			activeSealTotal--
++		select {
++		case <-existingFlight.done:
++			return existingFlight.status, existingFlight.digest
++		case <-ctx.Done():
++			return SealUnavailable, ""
 +		}
-+		reviewMu.Unlock()
-+		return existingFlight.status, existingFlight.digest
 +	}
 +	flight := &sealFlight{
 +		done:    make(chan struct{}),
@@ -14212,7 +14408,6 @@ index e69de29..fee34a7 100644
 +	}
 +	activeSealFlights[key] = flight
 +	activeSealingKeys[key]++
-+	activeSealTotal++
 +	reviewMu.Unlock()
 +
 +	finalStatus := SealUnavailable
@@ -14228,9 +14423,6 @@ index e69de29..fee34a7 100644
 +			delete(activeSealingKeys, key)
 +		} else {
 +			activeSealingKeys[key]--
-+		}
-+		if activeSealTotal > 0 {
-+			activeSealTotal--
 +		}
 +		reviewMu.Unlock()
 +		close(flight.done)
@@ -14936,6 +15128,19 @@ index e69de29..fee34a7 100644
 +		return nil, ErrUnavailable
 +	}
 +	root = cleanRoot
++	// Fast path: reuse an already-initialized, still-bound root lease without touching rootInitMu
++	// or running parent-directory fsync so formal seal durability syncs never stall legacy preflight.
++	rootLockMu.Lock()
++	if held := rootLocks[root]; held != nil {
++		if held.file != nil && held.dir != nil && held.parentFD != nil && verifyRootStillBound(held, root) == nil {
++			held.refs++
++			lease := &lockedRootLease{lock: held, dir: held.dir}
++			rootLockMu.Unlock()
++			return lease, nil
++		}
++	}
++	rootLockMu.Unlock()
++
 +	if err := ensurePrivateRoot(root); err != nil {
 +		return nil, ErrUnavailable
 +	}
@@ -18247,10 +18452,10 @@ index e69de29..fee34a7 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..f3861a8 100644
+index e69de29..1934163 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,12001 @@
+@@ -0,0 +1,12108 @@
 +package preflightreceipt
 +
 +import (
@@ -30224,21 +30429,77 @@ index e69de29..f3861a8 100644
 +	// Wait until all 3 slots are occupied (1 leader + 2 coalesced waiters).
 +	deadline := time.Now().Add(2 * time.Second)
 +	for time.Now().Before(deadline) {
-+		reviewMu.Lock()
-+		n := activeSealTotal
-+		reviewMu.Unlock()
-+		if n == 3 {
++		if activeSealTotal.Load() == 3 {
 +			break
 +		}
 +		time.Sleep(5 * time.Millisecond)
 +	}
 +	// A 4th seal (for another launch OR same launch) MUST fail closed immediately with SealUnavailable
-+	// BEFORE touching disk or waiting on the paused leader.
++	// BEFORE acquiring reviewMu or waiting on the paused leader.
 +	lOther := "review-ff6f6f6f-2222-4333-8444-555555555502"
 +	sOther := "019d0000-0000-7000-8000-00000000f602"
 +	if stCap, digCap := SealReviewWithDigest(root, lOther, sOther); stCap != SealUnavailable || digCap != "" {
 +		close(release)
 +		t.Fatalf("4th concurrent seal above cap = (%v, %q), want (SealUnavailable, \"\")", stCap, digCap)
++	}
++	// Verify cancelling a coalesced waiter immediately frees its slot (Sol P1 R65).
++	maxConcurrentSeals = 4
++	cancelCtx, cancelWait := context.WithCancel(context.Background())
++	waitDone := make(chan SealStatus, 1)
++	go func() {
++		st, _ := SealReviewWithDigestContext(cancelCtx, root, l1, s1)
++		waitDone <- st
++	}()
++	waitDeadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(waitDeadline) && activeSealTotal.Load() < 4 {
++		time.Sleep(5 * time.Millisecond)
++	}
++	cancelWait()
++	select {
++	case stCancel := <-waitDone:
++		if stCancel != SealUnavailable {
++			close(release)
++			t.Fatalf("cancelled coalesced seal waiter = %v, want SealUnavailable", stCancel)
++		}
++	case <-time.After(2 * time.Second):
++		close(release)
++		t.Fatalf("cancelled coalesced seal waiter did not unblock")
++	}
++	// Verify full-ledger eviction skips l1 (activeSealingKeys > 0 / entry.mu held across slow fsync)
++	// without blocking global reviewMu (Astra P1 #3 R65), and existing root lease reuse does not
++	// invoke parent-dir fsync on legacy preflight (Sol P2 #2 R65).
++	oldMaxLedger := maxReviewLedgerEntries
++	maxReviewLedgerEntries = 2
++	defer func() { maxReviewLedgerEntries = oldMaxLedger }()
++	lEvict := "review-ff6f6f6f-2222-4333-8444-555555555503"
++	reviewMu.Lock()
++	// Add a second already-tainted persisted entry so reviewLedger is full while l1's mu is held.
++	reviewLedger[root+"\x00"+lEvict] = &reviewEntry{
++		directory:        filepath.Join(root, lEvict),
++		launch:           lEvict,
++		started:          time.Now().Add(-time.Hour).UnixNano(),
++		touched:          time.Now().Add(-time.Hour),
++		tainted:          true,
++		taintedPersisted: true,
++	}
++	reviewMu.Unlock()
++	resDone := make(chan error, 1)
++	go func() {
++		r, rerr := ReserveReview(root, lOther)
++		if r != nil {
++			r.Release()
++		}
++		resDone <- rerr
++	}()
++	select {
++	case rerr := <-resDone:
++		if rerr != nil {
++			close(release)
++			t.Fatalf("ReserveReview while l1 repeat-seal fsync paused failed: %v", rerr)
++		}
++	case <-time.After(2 * time.Second):
++		close(release)
++		t.Fatalf("ReserveReview blocked on global reviewMu during l1 repeat-seal fsync")
 +	}
 +	// Unblock leader: all 3 coalesced calls must receive the exact (SealOK, origDig) with only 1 fsync.
 +	close(release)
@@ -30250,5 +30511,56 @@ index e69de29..f3861a8 100644
 +	}
 +	if calls := syncCalls.Load(); calls != 1 {
 +		t.Fatalf("repeat seal syncDirFn calls on l1 = %d, want 1 (coalesced)", calls)
++	}
++}
++
++func TestExistingRootLeaseReuseSkipsParentSyncAndRootInitMu(t *testing.T) {
++	// Sol P2 #2 (PR #2280 R65): once a receipt root is initialized and leased, subsequent
++	// acquirePrivateRootLease calls (e.g. legacy preflight vs formal review) must reuse the
++	// bound root lease without taking global rootInitMu or invoking parent-directory fsync.
++	root := filepath.Join(t.TempDir(), "reuse-root-no-parent-sync")
++	lease1, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lease1.Close()
++
++	parentDir := filepath.Clean(filepath.Dir(root))
++	origSync := syncDirFn
++	var parentSyncs atomic.Int32
++	syncDirFn = func(dir string) error {
++		if filepath.Clean(dir) == parentDir {
++			parentSyncs.Add(1)
++			return errors.New("unexpected parent fsync on existing root reuse")
++		}
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
++	}
++	defer func() { syncDirFn = origSync }()
++
++	// Hold global rootInitMu to prove reuse does not even block on rootInitMu.
++	rootInitMu.Lock()
++	done := make(chan error, 1)
++	go func() {
++		lease2, lerr := acquirePrivateRootLease(root)
++		if lease2 != nil {
++			lease2.Close()
++		}
++		done <- lerr
++	}()
++	select {
++	case lerr := <-done:
++		rootInitMu.Unlock()
++		if lerr != nil {
++			t.Fatalf("acquirePrivateRootLease on existing initialized root = %v, want nil", lerr)
++		}
++	case <-time.After(2 * time.Second):
++		rootInitMu.Unlock()
++		t.Fatalf("acquirePrivateRootLease on existing initialized root blocked on rootInitMu")
++	}
++	if got := parentSyncs.Load(); got != 0 {
++		t.Fatalf("parent-dir fsync count on existing root reuse = %d, want 0", got)
 +	}
 +}

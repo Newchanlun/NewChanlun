@@ -2,7 +2,7 @@
 
 **可信路由使用 CLIProxy 生产者原子发布的结构化收据。旧文本日志入口保留但不能放行；迁移必须显式使用 `--proxy-receipt-dir` 或 `--proxy-receipt-container`。本仓提供固定源码补丁和隔离 Linux 构建入口，生产代理交付与真实验收由主控安排。**
 
-> **交付范围声明（拆分边界）**：本 PR（#2280）仅交付 CLIProxy 代理侧 `cliproxy-review-v1` 封存收据生产能力、隔离构建与离线验签管道、Python 消费端读取器 `_review_preflight_log.review_from_receipt` 及跨语言契约回归测试，**不包含**将封存探针与强制封存摘要验收接入生产调用链。生产预检（`review_preflight.py` 容器内 `--probe-in-container` / `--review-seal-url`）与正式独审控制器（`pilot1742/external_review.py` 强制封存验收）的接入由后续主控合入 PR（#2207）独立交付并完成端到端验收；在 #2207 合入前，`review_preflight.py` 仍保持既有旧式 `preflight-` 预检语义不变。
+> **交付范围声明（拆分边界）**：本 PR（#2280）仅交付 CLIProxy 代理侧 `cliproxy-review-v1` 封存收据生产能力、隔离构建与离线验签管道、Python 消费端读取器 `_review_preflight_log.review_from_receipt` 及跨语言契约回归测试，**不包含**将封存探针与强制封存摘要验收接入生产调用链。生产预检（`review_preflight.py` 容器内 `--probe-in-container` / `--review-seal-url`）与正式独审控制器（`pilot1742/external_review.py` 强制封存验收）的接入由后续主控合入 PR（#2207）独立交付并完成端到端验收；在 #2207 合入前，`review_preflight.py` 仅保留既有旧式 `preflight-` 入口，并按下方**显式加固兼容性声明**收紧了 HTTP/1.1 原始分帧与 SSE 终态校验（要求合法 `response` 对象及匹配的 `response.status`，不再放行缺省 `response.status` 的旧测试桩载荷）。
 
 每次启动正式 attempt（`ExternalReview.review_pr`）之前运行一次。预检只回答“现在的环境能不能让两位 reviewer 跑完”，**不是审阅结果**：报告固定写 `"is_review_result": false`，不写 App 状态、不进 `external-review/runs`、不占 attempt 号。预检拦下时修环境，修好后再预检，通过了才启动新 attempt。
 
@@ -42,7 +42,7 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 ### 成功终态之后仍须读到 EOF
 
-预检收到 `response.completed` / `response.incomplete` 后继续读完流，不能立刻关闭连接。CLIProxy v8.0.63 的 Claude 路径仍需完成上游帧与 lifecycle 收尾；提前断开会取消执行，留下 nonce 目录但没有收据。消费者使用有界分块读取（总响应与单行/单事件均设内存上限）并在 EOF 时核验 `HTTPResponse.length == 0` 与 `chunk_left is None` 以验证 Content-Length / chunked 完整性，不把逐行迭代结束当作完整响应。整个 HTTP 往返在独立子进程组内执行，连接、响应头、成功体和错误体共用父进程传入的绝对工作期限。父进程通过 `run_bounded` 到期终止并 wait 回收进程组，不依赖 socket 空闲超时或成功体阶段的计时器。密钥仅通过 stdin 管道传入，stdout 仅返回固定字段的脱敏结果，stderr 不进入报告。只有 HTTP 响应体完整读完、未超总 deadline、无后续错误或冲突终态，往返检查才成功；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
+预检收到 `response.completed` / `response.incomplete` 后继续读完流，不能立刻关闭连接。CLIProxy v8.0.63 的 Claude 路径仍需完成上游帧与 lifecycle 收尾；提前断开会取消执行，留下 nonce 目录但没有收据。消费者绕过 CPython `email.parser` / `HTTPResponse`，直接在原始字节边界按 RFC 9112 校验 HTTP/1.1 状态行、响应头字段（拒绝裸 CR、非法控制字符、缺冒号与解析缺陷）、`Content-Length` / `Transfer-Encoding` 一致性及 chunked 块长、扩展与 trailer，同时对总响应与单行/单事件执行有界内存上限，并在 EOF 时校验完整读取，不把逐行迭代结束当作完整响应。整个 HTTP 往返在独立子进程组内执行，禁用环境代理与所有 3xx 重定向，连接、响应头、成功体和错误体共用父进程传入的绝对工作期限。父进程通过 `run_bounded` 到期终止并 wait 回收进程组，不依赖 socket 空闲超时或成功体阶段的计时器。密钥仅通过 stdin 管道传入，stdout 仅返回固定字段的脱敏结果，stderr 不进入报告。**显式兼容性加固**：往返成功除要求完整读完 HTTP 响应体、未超总 deadline、无后续错误或冲突终态外，还强制要求终态事件包含合法 `response` JSON 对象且内层 `response.status` 与事件名一致（`response.completed` 配 `completed`、`response.incomplete` 配 `incomplete`），与 OpenAI Responses API 及 CLIProxy Go 生产端一致，明确拒绝缺省 `response.status` 的不完整终态载荷；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
 
 #2055 的离线回归使用原生 Claude executor、首次 503 后重试和受控迟到的终态帧尾：客户端读终态行就断开时无收据；读完 EOF 时产生两条 Claude 路线。生产者封口条件未放宽，真实路线仍须以新正式预检的收据为证。
 

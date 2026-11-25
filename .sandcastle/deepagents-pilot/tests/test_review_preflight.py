@@ -461,7 +461,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "bad-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -484,15 +484,34 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             self.rfile.read(int(self.headers["Content-Length"]))
             if framing == "spent-budget":
                 time.sleep(0.3)
-            if framing == "bad-header":
+            if framing in ("bad-header", "bare-cr-header", "ctl-header"):
                 try:
-                    self.connection.sendall(
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Connection: close\r\n"
-                        b"MalformedHeaderWithoutColon\r\n"
-                        b"Content-Length: 999\r\n\r\n"
-                        + payload
-                    )
+                    if framing == "bad-header":
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Connection: close\r\n"
+                            b"MalformedHeaderWithoutColon\r\n"
+                            b"Content-Length: 999\r\n\r\n"
+                            + payload
+                        )
+                    elif framing == "bare-cr-header":
+                        # 裸 CR 可让 CPython email.parser 把后续 Content-Length 吞入正文而不设 defects；
+                        # 原始 HTTP/1.1 校验必须在读体前直接拒绝，即使正文含完整成功终态。
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Connection: close\r\n"
+                            b"\rContent-Length: 999\r\n\r\n"
+                            + payload
+                        )
+                    else:
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Connection: close\r\n"
+                            b"X-Bad: foo\x07bar\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    self.connection.sendall(raw_resp)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 self.close_connection = True
@@ -574,7 +593,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
         assert result["ok"] is (framing in ("length", "same-dup-cl", "chunked", "chunked-trailer", "valid-chunk-ext")), result
         if framing.startswith("short-"):
             assert result["error"]["exception"] == "IncompleteRead"
-        if framing in ("neg-chunk", "bad-chunk-sep", "bad-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-trailer", "bad-trailer-space"):
+        if framing in ("neg-chunk", "bad-chunk-sep", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-trailer", "bad-trailer-space"):
             assert result["error"]["exception"] == "HTTPException"
         if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed
