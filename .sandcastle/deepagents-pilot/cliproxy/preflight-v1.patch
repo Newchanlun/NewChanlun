@@ -5917,10 +5917,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..9051216 100644
+index e69de29..b617cac 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,6734 @@
+@@ -0,0 +1,7030 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5942,6 +5942,7 @@ index e69de29..9051216 100644
 +	"os"
 +	"path/filepath"
 +	"regexp"
++	"runtime"
 +	"strconv"
 +	"strings"
 +	"sync"
@@ -6236,7 +6237,7 @@ index e69de29..9051216 100644
 +// the rejection sequence is recorded atomically before releasing reviewMu.
 +func BeginPendingReview(root, launch string) (*PendingReviewGuard, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
-+	if !ok || !reviewLaunchPattern.MatchString(launch) {
++	if !ok || !reviewLaunchPattern.MatchString(launch) || pathHasDisallowedSymlink(cleanRoot) {
 +		return nil, ErrUnavailable
 +	}
 +	key := cleanRoot + "\x00" + launch
@@ -6550,17 +6551,81 @@ index e69de29..9051216 100644
 +		return "", false
 +	}
 +	cleaned := filepath.Clean(root)
-+	if cleaned == "" || !filepath.IsAbs(cleaned) {
++	if cleaned == "" || !filepath.IsAbs(cleaned) || cleaned == string(filepath.Separator) {
 +		return "", false
 +	}
 +	return cleaned, true
++}
++
++func isAllowedOSSymlink(path string) bool {
++	if runtime.GOOS != "darwin" {
++		return false
++	}
++	var want string
++	switch path {
++	case "/var":
++		want = "private/var"
++	case "/tmp":
++		want = "private/tmp"
++	case "/etc":
++		want = "private/etc"
++	default:
++		return false
++	}
++	target, err := os.Readlink(path)
++	if err != nil {
++		return false
++	}
++	return target == want || target == "/"+want
++}
++
++// pathHasDisallowedSymlink walks every existing path prefix from / down to path and rejects
++// any symlink component (except macOS's fixed OS-level /var, /tmp, /etc -> private/* links)
++// so a symlinked ancestor directory can never redirect receipt reads, writes, or reclamation.
++func pathHasDisallowedSymlink(path string) bool {
++	cleaned := filepath.Clean(path)
++	if cleaned == "" || !filepath.IsAbs(cleaned) {
++		return true
++	}
++	if cleaned == string(filepath.Separator) {
++		return false
++	}
++	parts := strings.Split(strings.TrimPrefix(cleaned, string(filepath.Separator)), string(filepath.Separator))
++	cur := ""
++	for _, part := range parts {
++		if part == "" {
++			continue
++		}
++		cur += string(filepath.Separator) + part
++		fi, err := os.Lstat(cur)
++		if err != nil {
++			if errors.Is(err, os.ErrNotExist) {
++				return false
++			}
++			return true
++		}
++		if fi.Mode()&os.ModeSymlink != 0 {
++			if !isAllowedOSSymlink(cur) {
++				return true
++			}
++			tfi, statErr := os.Stat(cur)
++			if statErr != nil || !tfi.IsDir() {
++				return true
++			}
++			continue
++		}
++		if !fi.IsDir() && cur != cleaned {
++			return true
++		}
++	}
++	return false
 +}
 +
 +// Begin binds the inbound nonce. Disk reservation waits for authenticated execution.
 +// The directory must be private to the proxy, outside the credential/state volume.
 +func Begin(ctx context.Context, root, session string) (context.Context, *Collector, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
-+	if !ok || !sessionPattern.MatchString(session) {
++	if !ok || !sessionPattern.MatchString(session) || pathHasDisallowedSymlink(cleanRoot) {
 +		return ctx, nil, ErrUnavailable
 +	}
 +	directory := filepath.Join(cleanRoot, session)
@@ -7657,6 +7722,26 @@ index e69de29..9051216 100644
 +			}
 +		case "response.in_progress":
 +			if respStatus != "" && respStatus != "in_progress" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		case "response.failed":
++			if respStatus != "" && respStatus != "failed" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		case "response.incomplete":
++			if respStatus != "" && respStatus != "incomplete" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		case "response.cancelled", "response.canceled":
++			if respStatus != "" && respStatus != "cancelled" && respStatus != "canceled" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		case "error":
++			if respStatus != "" && respStatus != "failed" {
 +				c.taintStreamAnomaly()
 +				return out, false
 +			}
@@ -10413,7 +10498,174 @@ index e69de29..9051216 100644
 +	return true
 +}
 +
++var (
++	reviewReceiptJSONKeys = map[string]struct{}{
++		"schema":                  {},
++		"launch":                  {},
++		"session":                 {},
++		"started_ns":              {},
++		"finished_ns":             {},
++		"sealed_at_ns":            {},
++		"complete":                {},
++		"sealed":                  {},
++		"tainted":                 {},
++		"requests":                {},
++		"routes":                  {},
++		"response_id_sha256s":     {},
++		"last_response_id_sha256": {},
++		"last_output_sha256":      {},
++	}
++	preflightReceiptJSONKeys = map[string]struct{}{
++		"schema":      {},
++		"session":     {},
++		"started_ns":  {},
++		"finished_ns": {},
++		"complete":    {},
++		"routes":      {},
++	}
++	preflightMarkerJSONKeys = map[string]struct{}{
++		"schema":     {},
++		"session":    {},
++		"started_ns": {},
++	}
++)
++
++func decodeExactReceiptJSON(raw []byte, requiredKeys map[string]struct{}, dst any) error {
++	dec := json.NewDecoder(bytes.NewReader(raw))
++	tok, err := dec.Token()
++	if err != nil {
++		return err
++	}
++	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
++		return errors.New("expected JSON object")
++	}
++	seen := make(map[string]struct{}, len(requiredKeys))
++	for dec.More() {
++		keyTok, kerr := dec.Token()
++		if kerr != nil {
++			return kerr
++		}
++		key, ok := keyTok.(string)
++		if !ok {
++			return errors.New("expected string key")
++		}
++		if _, allowed := requiredKeys[key]; !allowed {
++			return errors.New("unexpected field")
++		}
++		if _, dup := seen[key]; dup {
++			return errors.New("duplicate field")
++		}
++		seen[key] = struct{}{}
++		var val json.RawMessage
++		if verr := dec.Decode(&val); verr != nil {
++			return verr
++		}
++	}
++	endTok, err := dec.Token()
++	if err != nil {
++		return err
++	}
++	if delim, ok := endTok.(json.Delim); !ok || delim != '}' {
++		return errors.New("expected closing brace")
++	}
++	if _, trailingErr := dec.Token(); trailingErr != io.EOF {
++		return errors.New("trailing JSON data")
++	}
++	if len(seen) != len(requiredKeys) {
++		return errors.New("missing required fields")
++	}
++	dec2 := json.NewDecoder(bytes.NewReader(raw))
++	dec2.DisallowUnknownFields()
++	if err := dec2.Decode(dst); err != nil {
++		return err
++	}
++	var extra any
++	if err := dec2.Decode(&extra); err != io.EOF {
++		return errors.New("trailing JSON value")
++	}
++	return nil
++}
++
++func isValidReviewResponseIDs(ids []string, count int, last string) bool {
++	if count < 1 || count > maxReviewResponseIDs || len(ids) != count || ids[len(ids)-1] != last {
++		return false
++	}
++	for _, id := range ids {
++		if !isSHA256Hex(id) {
++			return false
++		}
++	}
++	return true
++}
++
++func isValidProducerReviewReceipt(disk ReviewReceipt, launch string) bool {
++	if disk.Schema != ReviewSchema || disk.Launch != launch {
++		return false
++	}
++	if disk.Started <= 0 || disk.Finished < disk.Started {
++		return false
++	}
++	if disk.Requests < 0 || disk.Requests > maxReviewResponseIDs {
++		return false
++	}
++	if disk.Session != "" && !reviewSessionPattern.MatchString(disk.Session) {
++		return false
++	}
++	if len(disk.Routes) != 1 {
++		return false
++	}
++	route := disk.Routes[0]
++	isAllowedRoute := route == "codex:gpt-6.2-sol@chatgpt.com" || route == "codex:gpt-6.2-astra@chatgpt.com"
++	if disk.Sealed {
++		if disk.Tainted || !disk.Complete || !isAllowedRoute || !reviewSessionPattern.MatchString(disk.Session) {
++			return false
++		}
++		if disk.Finished-disk.Started > int64(MaxReviewDuration) || disk.SealedAt < disk.Finished {
++			return false
++		}
++		return isSHA256Hex(disk.LastResponseID) &&
++			isValidReviewResponseIDs(disk.ResponseIDSHAs, disk.Requests, disk.LastResponseID) &&
++			isOptionalSHA256Hex(disk.LastOutputSHA256)
++	}
++	if disk.SealedAt != 0 {
++		return false
++	}
++	if disk.Complete {
++		if disk.Tainted || !isAllowedRoute || !reviewSessionPattern.MatchString(disk.Session) {
++			return false
++		}
++		if disk.Finished-disk.Started > int64(MaxReviewDuration) {
++			return false
++		}
++		return isSHA256Hex(disk.LastResponseID) &&
++			isValidReviewResponseIDs(disk.ResponseIDSHAs, disk.Requests, disk.LastResponseID) &&
++			isOptionalSHA256Hex(disk.LastOutputSHA256)
++	}
++	return route == "other" && len(disk.ResponseIDSHAs) == 0 && disk.LastResponseID == "" && disk.LastOutputSHA256 == ""
++}
++
++func isValidProducerPreflightReceipt(disk Receipt, session string) bool {
++	if disk.Schema != Schema || disk.Session != session {
++		return false
++	}
++	if disk.Started <= 0 || disk.Finished < disk.Started || !disk.Complete {
++		return false
++	}
++	if len(disk.Routes) < 1 || len(disk.Routes) > MaxAttempts {
++		return false
++	}
++	for _, r := range disk.Routes {
++		if strings.TrimSpace(r) == "" || len(r) > maxStrictIdentityBytes {
++			return false
++		}
++	}
++	return true
++}
++
 +func checkPrivateDir(path string, allowMissing bool) (bool, error) {
++	if pathHasDisallowedSymlink(path) {
++		return false, ErrUnavailable
++	}
 +	info, err := os.Lstat(path)
 +	if err != nil {
 +		if allowMissing && os.IsNotExist(err) {
@@ -10458,49 +10710,39 @@ index e69de29..9051216 100644
 +			touched:          now,
 +		}, true, nil
 +	}
-+	raw, err := os.ReadFile(path)
++	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 +	if err != nil {
 +		return nil, true, ErrUnavailable
 +	}
-+	var disk ReviewReceipt
-+	validResponseIDs := func(ids []string, count int, last string) bool {
-+		if count < 1 || count > maxReviewResponseIDs || len(ids) != count || ids[len(ids)-1] != last {
-+			return false
-+		}
-+		for _, id := range ids {
-+			if !isSHA256Hex(id) {
-+				return false
-+			}
-+		}
-+		return true
++	raw, err := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
++	_ = f.Close()
++	if err != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
++		return nil, true, ErrUnavailable
 +	}
-+	unmarshalErr := json.Unmarshal(raw, &disk)
-+	foreignReceipt := unmarshalErr != nil || disk.Schema != ReviewSchema || disk.Launch != launch
-+	if foreignReceipt ||
-+		disk.Tainted ||
-+		!disk.Complete ||
-+		!disk.Sealed ||
-+		disk.Requests < 1 ||
-+		disk.Started <= 0 ||
-+		disk.Finished < disk.Started ||
-+		disk.Finished-disk.Started > int64(MaxReviewDuration) ||
-+		disk.SealedAt < disk.Finished ||
-+		!reviewSessionPattern.MatchString(disk.Session) ||
-+		!isSHA256Hex(disk.LastResponseID) ||
-+		!validResponseIDs(disk.ResponseIDSHAs, disk.Requests, disk.LastResponseID) ||
-+		!isOptionalSHA256Hex(disk.LastOutputSHA256) ||
-+		len(disk.Routes) != 1 ||
-+		(disk.Routes[0] != "codex:gpt-6.2-sol@chatgpt.com" && disk.Routes[0] != "codex:gpt-6.2-astra@chatgpt.com") {
++	rawSHA := sha256Hex(string(raw))
++	var disk ReviewReceipt
++	decodeErr := decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &disk)
++	validProducer := decodeErr == nil && isValidProducerReviewReceipt(disk, launch)
++	if !validProducer || !disk.Sealed {
++		// Preserve any foreign/malformed/invalidly-sealed receipt untouched on disk; only allow
++		// crash-recovery tainting of a strictly verified unsealed producer receipt.
++		foreignReceipt := !validProducer || disk.Sealed
++		startedNS := now.UnixNano()
++		if validProducer && disk.Started > 0 {
++			startedNS = disk.Started
++		}
 +		return &reviewEntry{
 +			directory:        dir,
 +			launch:           launch,
 +			session:          disk.Session,
-+			started:          now.UnixNano(),
++			started:          startedNS,
++			requests:         disk.Requests,
 +			tainted:          true,
-+			taintedPersisted: disk.Tainted || foreignReceipt,
++			taintedPersisted: (validProducer && disk.Tainted) || foreignReceipt,
 +			foreignDisk:      foreignReceipt,
 +			reserved:         true,
 +			markerPersisted:  true,
++			lastPersistedSHA: rawSHA,
 +			touched:          now,
 +		}, true, nil
 +	}
@@ -10518,8 +10760,8 @@ index e69de29..9051216 100644
 +		lastOutputSHA:     disk.LastOutputSHA256,
 +		sealed:            true,
 +		sealedFlag:        true,
-+		sealedReceiptSHA:  sha256Hex(string(raw)),
-+		lastPersistedSHA:  sha256Hex(string(raw)),
++		sealedReceiptSHA:  rawSHA,
++		lastPersistedSHA:  rawSHA,
 +		tainted:           false,
 +		reserved:          true,
 +		markerPersisted:   true,
@@ -10829,7 +11071,7 @@ index e69de29..9051216 100644
 +		e.taintedPersisted = true
 +		return
 +	}
-+	if err := e.persistLocked(); err == nil {
++	if err := e.persistLocked(); err == nil || e.foreignDisk {
 +		e.taintedPersisted = true
 +	} else {
 +		e.taintedPersisted = false
@@ -10888,6 +11130,12 @@ index e69de29..9051216 100644
 +		entry.mu.Unlock()
 +		return
 +	}
++	if lockErr := acquirePrivateRootLock(root); lockErr != nil {
++		reviewMu.Lock()
++		taintWriteOverflow = true
++		reviewMu.Unlock()
++		return
++	}
 +	dir := filepath.Join(root, launch)
 +	diskEntry, onDisk, loadErr := loadReviewEntryFromDisk(dir, launch, "", now)
 +	if loadErr != nil {
@@ -10897,9 +11145,15 @@ index e69de29..9051216 100644
 +		return
 +	}
 +	if onDisk && diskEntry != nil {
-+		if (diskEntry.sealed && !diskEntry.tainted) || diskEntry.foreignDisk {
++		if (diskEntry.sealed && !diskEntry.tainted) || diskEntry.foreignDisk || diskEntry.taintedPersisted {
 +			return
 +		}
++		if persistErr := diskEntry.persistLocked(); persistErr != nil && !diskEntry.foreignDisk {
++			reviewMu.Lock()
++			taintWriteOverflow = true
++			reviewMu.Unlock()
++		}
++		return
 +	}
 +	temp := &reviewEntry{
 +		directory: dir,
@@ -10907,7 +11161,7 @@ index e69de29..9051216 100644
 +		started:   now.UnixNano(),
 +		tainted:   true,
 +	}
-+	if persistErr := temp.persistLocked(); persistErr != nil {
++	if persistErr := temp.persistLocked(); persistErr != nil && !temp.foreignDisk {
 +		reviewMu.Lock()
 +		taintWriteOverflow = true
 +		reviewMu.Unlock()
@@ -11114,7 +11368,7 @@ index e69de29..9051216 100644
 +			entry.sealed = false
 +			entry.sealedAt = 0
 +			entry.sealedReceiptSHA = ""
-+			entry.taintedPersisted = renamed && err == nil
++			entry.taintedPersisted = (renamed && err == nil) || entry.foreignDisk
 +			entry.mu.Unlock()
 +			finishSeal(true)
 +			return SealRejected, ""
@@ -11286,7 +11540,7 @@ index e69de29..9051216 100644
 +	c.mu.Lock()
 +	defer c.mu.Unlock()
 +	c.handlerDone = true
-+	if !success {
++	if !success || (!c.lifecycleDone && c.executions == 0 && c.active == 0 && c.bodies == 0) {
 +		c.invalid = true
 +	}
 +	c.publishLocked()
@@ -11334,7 +11588,7 @@ index e69de29..9051216 100644
 +// reservation, in-flight accounting, or SealOK.
 +func acquirePrivateRootLock(root string) error {
 +	cleanRoot, ok := cleanPrivateRoot(root)
-+	if !ok {
++	if !ok || pathHasDisallowedSymlink(cleanRoot) {
 +		return ErrUnavailable
 +	}
 +	root = cleanRoot
@@ -11422,7 +11676,7 @@ index e69de29..9051216 100644
 +
 +func ensurePrivateRoot(root string) error {
 +	cleanRoot, ok := cleanPrivateRoot(root)
-+	if !ok {
++	if !ok || pathHasDisallowedSymlink(cleanRoot) {
 +		return ErrUnavailable
 +	}
 +	root = cleanRoot
@@ -11534,7 +11788,7 @@ index e69de29..9051216 100644
 +}
 +
 +func inspectProducerReceiptDir(dir, name string, reviewBucket bool) (time.Time, bool) {
-+	if !isProducerBucketDirName(name, reviewBucket) {
++	if !isProducerBucketDirName(name, reviewBucket) || pathHasDisallowedSymlink(dir) {
 +		return time.Time{}, false
 +	}
 +	fi, err := os.Lstat(dir)
@@ -11579,7 +11833,7 @@ index e69de29..9051216 100644
 +			}
 +			if reviewBucket {
 +				var disk ReviewReceipt
-+				if json.Unmarshal(raw, &disk) != nil || disk.Schema != ReviewSchema || disk.Launch != name {
++				if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &disk) != nil || !isValidProducerReviewReceipt(disk, name) {
 +					return time.Time{}, false
 +				}
 +				reviewSealed = disk.Sealed
@@ -11592,7 +11846,7 @@ index e69de29..9051216 100644
 +				}
 +			} else {
 +				var disk Receipt
-+				if json.Unmarshal(raw, &disk) != nil || disk.Schema != Schema || disk.Session != name {
++				if decodeExactReceiptJSON(raw, preflightReceiptJSONKeys, &disk) != nil || !isValidProducerPreflightReceipt(disk, name) {
 +					return time.Time{}, false
 +				}
 +				for _, ns := range []int64{disk.Started, disk.Finished} {
@@ -11619,7 +11873,7 @@ index e69de29..9051216 100644
 +				return time.Time{}, false
 +			}
 +			var marker preflightReservationMarker
-+			if json.Unmarshal(raw, &marker) != nil || marker.Schema != Schema || marker.Session != name || marker.Started <= 0 {
++			if decodeExactReceiptJSON(raw, preflightMarkerJSONKeys, &marker) != nil || marker.Schema != Schema || marker.Session != name || marker.Started <= 0 {
 +				return time.Time{}, false
 +			}
 +			if t := time.Unix(0, marker.Started); t.After(lastMod) {
@@ -11633,14 +11887,20 @@ index e69de29..9051216 100644
 +	if !hasReceipt && !(!reviewBucket && hasProducerMarker) {
 +		return time.Time{}, false
 +	}
-+	if hasSealFile {
-+		if !reviewBucket || !hasReceipt || !reviewSealed {
++	if reviewBucket {
++		if reviewSealed {
++			if !hasSealFile {
++				return time.Time{}, false
++			}
++			savedDigest, okSeal := readVerifiedSealDigest(dir)
++			if !okSeal || savedDigest != sha256Hex(string(receiptRaw)) {
++				return time.Time{}, false
++			}
++		} else if hasSealFile {
 +			return time.Time{}, false
 +		}
-+		savedDigest, okSeal := readVerifiedSealDigest(dir)
-+		if !okSeal || savedDigest != sha256Hex(string(receiptRaw)) {
-+			return time.Time{}, false
-+		}
++	} else if hasSealFile {
++		return time.Time{}, false
 +	}
 +	return lastMod, true
 +}
@@ -12315,44 +12575,64 @@ index e69de29..9051216 100644
 +	return err
 +}
 +
-+func (e *reviewEntry) diskReceiptUnsafeLocked() bool {
++type diskReceiptState int
++
++const (
++	diskReceiptSafeToWrite diskReceiptState = iota
++	diskReceiptAlreadyTainted
++	diskReceiptPreserveUntouched
++)
++
++func (e *reviewEntry) inspectDiskReceiptBeforeWriteLocked() diskReceiptState {
++	if _, sealErr := os.Lstat(filepath.Join(e.directory, "seal.sha256")); !errors.Is(sealErr, os.ErrNotExist) {
++		// An existing seal.sha256 (or unreadable entry) indicates sealed or foreign disk state;
++		// never overwrite or unlink it.
++		return diskReceiptPreserveUntouched
++	}
 +	path := filepath.Join(e.directory, "receipt.json")
 +	finfo, err := os.Lstat(path)
-+	if !e.markerPersisted && e.lastPersistedSHA == "" && errors.Is(err, os.ErrNotExist) {
-+		// Before initial persistence, absence of receipt.json is expected.
-+		return false
++	if !e.markerPersisted && e.lastPersistedSHA == "" {
++		if errors.Is(err, os.ErrNotExist) {
++			return diskReceiptSafeToWrite
++		}
++		// A receipt.json already exists even though this entry never wrote or loaded one:
++		// preserve it untouched so a stale or racing writer can never clobber sealed/foreign files.
++		return diskReceiptPreserveUntouched
 +	}
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 ||
 +		finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) ||
 +		finfo.Size() <= 0 || finfo.Size() > maxReviewReceiptBytes {
-+		return true
++		return diskReceiptPreserveUntouched
 +	}
 +	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 +	if err != nil {
-+		return true
++		return diskReceiptPreserveUntouched
 +	}
 +	raw, err := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
 +	_ = f.Close()
 +	if err != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
-+		return true
++		return diskReceiptPreserveUntouched
 +	}
-+	if e.lastPersistedSHA != "" && sha256Hex(string(raw)) != e.lastPersistedSHA {
-+		return true
++	if e.lastPersistedSHA == "" || sha256Hex(string(raw)) != e.lastPersistedSHA {
++		return diskReceiptPreserveUntouched
 +	}
 +	var disk ReviewReceipt
-+	if err := json.Unmarshal(raw, &disk); err != nil {
-+		return true
++	if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &disk) != nil || !isValidProducerReviewReceipt(disk, e.launch) {
++		return diskReceiptPreserveUntouched
 +	}
-+	if disk.Schema != ReviewSchema || disk.Launch != e.launch || disk.Tainted {
-+		return true
++	if disk.Sealed {
++		return diskReceiptPreserveUntouched
 +	}
 +	if e.session != "" && disk.Session != "" && disk.Session != e.session {
-+		return true
++		return diskReceiptPreserveUntouched
 +	}
-+	if disk.Sealed || disk.Requests > e.requests {
-+		return true
++	if disk.Requests > e.requests {
++		return diskReceiptPreserveUntouched
 +	}
-+	return false
++	if disk.Tainted {
++		return diskReceiptAlreadyTainted
++	}
++	return diskReceiptSafeToWrite
 +}
 +
 +func (e *reviewEntry) invalidateDiskReceiptLocked() {
@@ -12392,8 +12672,9 @@ index e69de29..9051216 100644
 +	if err := acquirePrivateRootLock(root); err != nil {
 +		return false, ErrUnavailable
 +	}
++	invalidateOnFail := false
 +	fail := func(renamed bool, err error) (bool, error) {
-+		if e.tainted {
++		if invalidateOnFail && e.tainted && !e.foreignDisk {
 +			e.invalidateDiskReceiptLocked()
 +		}
 +		return renamed, err
@@ -12408,11 +12689,26 @@ index e69de29..9051216 100644
 +			return fail(false, ErrUnavailable)
 +		}
 +	}
-+	if !e.tainted && e.diskReceiptUnsafeLocked() {
++	switch e.inspectDiskReceiptBeforeWriteLocked() {
++	case diskReceiptPreserveUntouched:
 +		e.tainted = true
 +		e.sealed = false
 +		e.sealedAt = 0
++		e.foreignDisk = true
++		e.taintedPersisted = true
++		return false, ErrUnavailable
++	case diskReceiptAlreadyTainted:
++		wasTainted := e.tainted
++		e.tainted = true
++		e.sealed = false
++		e.sealedAt = 0
++		e.taintedPersisted = true
++		if wasTainted {
++			return true, nil
++		}
++		return false, ErrUnavailable
 +	}
++	invalidateOnFail = true
 +	routes := []string{"other"}
 +	respIDs := []string{}
 +	complete := false
@@ -12656,10 +12952,10 @@ index e69de29..9051216 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..96652ed 100644
+index e69de29..3bcebca 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,5831 @@
+@@ -0,0 +1,6160 @@
 +package preflightreceipt
 +
 +import (
@@ -18489,5 +18785,334 @@ index e69de29..96652ed 100644
 +				t.Fatalf("repeat SealReviewWithDigest after %s = (%v, %q), want (SealRejected, \"\")", tc.name, st, digest)
 +			}
 +		})
++	}
++}
++
++func TestReviewReceiptStaleOrTaintedPersistPreservesSealedAndForeignDisk(t *testing.T) {
++	// Sol P1 #1 + Astra P1 #2 (PR #2280 R36):
++	// 1. Even when e.tainted == true, persistWithStatusLocked MUST validate on-disk receipt.json under
++	//    the root lock and preserve a sealed or foreign receipt untouched (never overwriting/unlinking).
++	// 2. When pre-seal disk inspection detects foreign/unexpected content, SealReviewWithDigest MUST
++	//    return SealRejected without overwriting or deleting the foreign file.
++	root := filepath.Join(t.TempDir(), "receipts")
++
++	// Case A: Stale in-memory tainted entry vs sealed receipt + seal.sha256 on disk.
++	launchA := "review-f2222222-2222-4333-8444-555555555501"
++	sessionA := "019d0000-0000-7000-8000-999999999601"
++	resA, err := ReserveReview(root, launchA)
++	if err != nil {
++		t.Fatal(err)
++	}
++	resA.Release()
++	keyA := filepath.Clean(root) + "\x00" + launchA
++	reviewMu.Lock()
++	staleEntry := reviewLedger[keyA]
++	reviewMu.Unlock()
++	if staleEntry == nil {
++		t.Fatal("missing ledger entry for launchA")
++	}
++
++	now := time.Now().UnixNano()
++	sealedRec := ReviewReceipt{
++		Schema:           ReviewSchema,
++		Launch:           launchA,
++		Session:          sessionA,
++		Started:          now - int64(time.Second),
++		Finished:         now,
++		SealedAt:         now,
++		Complete:         true,
++		Sealed:           true,
++		Tainted:          false,
++		Requests:         1,
++		Routes:           []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs:   []string{sha256Hex("resp_sealed_disk")},
++		LastResponseID:   sha256Hex("resp_sealed_disk"),
++		LastOutputSHA256: sha256Hex("VERDICT: PASS"),
++	}
++	sealedRaw, err := json.Marshal(sealedRec)
++	if err != nil {
++		t.Fatal(err)
++	}
++	sealedDigest := sha256Hex(string(sealedRaw))
++	dirA := filepath.Join(root, launchA)
++	recPathA := filepath.Join(dirA, "receipt.json")
++	sealPathA := filepath.Join(dirA, "seal.sha256")
++	if err := os.WriteFile(recPathA, sealedRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(sealPathA, []byte(sealedDigest), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// Attempt to persist taint via the stale unsealed entry -> MUST preserve both files untouched.
++	staleEntry.mu.Lock()
++	staleEntry.taintAndPersistLocked()
++	preservedForeign := staleEntry.foreignDisk && staleEntry.taintedPersisted
++	staleEntry.mu.Unlock()
++	if !preservedForeign {
++		t.Fatalf("stale tainted entry did not latch foreignDisk + taintedPersisted")
++	}
++	gotRecA, err := os.ReadFile(recPathA)
++	if err != nil || string(gotRecA) != string(sealedRaw) {
++		t.Fatalf("sealed receipt.json was clobbered by stale tainted entry: err=%v raw=%q", err, string(gotRecA))
++	}
++	gotSealA, err := os.ReadFile(sealPathA)
++	if err != nil || string(gotSealA) != sealedDigest {
++		t.Fatalf("seal.sha256 was clobbered by stale tainted entry: err=%v raw=%q", err, string(gotSealA))
++	}
++
++	// Case B: Foreign receipt substituted before SealReviewWithDigest -> SealRejected AND foreign bytes preserved.
++	launchB := "review-f2222222-2222-4333-8444-555555555502"
++	sessionB := "019d0000-0000-7000-8000-999999999602"
++	ctxB, cB, err := BeginReview(context.Background(), root, launchB, sessionB, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxB, eB, err := cB.Start(ctxB, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clB := httptransport.Decorate(ctxB, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqB, _ := http.NewRequestWithContext(ctxB, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respB, err := clB.Do(reqB)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respB.Body)
++	_ = respB.Body.Close()
++	cB.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_foreign_b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	eB.End()
++	cB.Complete(true)
++	cB.HandlerDone(true)
++
++	recPathB := filepath.Join(root, launchB, "receipt.json")
++	foreignB := `{"custom_app":"keep-me","owner":"external"}`
++	if err := os.WriteFile(recPathB, []byte(foreignB), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st, digest := SealReviewWithDigest(root, launchB, sessionB); st != SealRejected || digest != "" {
++		t.Fatalf("SealReviewWithDigest with substituted foreign receipt = (%v, %q), want (SealRejected, \"\")", st, digest)
++	}
++	if gotB, err := os.ReadFile(recPathB); err != nil || string(gotB) != foreignB {
++		t.Fatalf("SealReviewWithDigest overwrote/unlinked substituted foreign receipt: err=%v raw=%q", err, string(gotB))
++	}
++}
++
++func TestReviewReceiptReclaimerRequiresFullStructuralInvariantsAndSealFile(t *testing.T) {
++	// Sol P1 #2 (PR #2280 R36): inspectProducerReceiptDir MUST enforce exact producer JSON keys,
++	// full structural invariants, and presence of verified seal.sha256 whenever sealed==true.
++	root := filepath.Join(t.TempDir(), "receipts")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	ancient := time.Now().Add(-48 * time.Hour)
++	mkDir := func(name string) string {
++		d := filepath.Join(root, name)
++		if err := os.Mkdir(d, 0700); err != nil {
++			t.Fatal(err)
++		}
++		return d
++	}
++
++	// 1. Minimal JSON with only schema + launch -> rejected.
++	l1 := "review-f3333333-2222-4333-8444-555555555501"
++	d1 := mkDir(l1)
++	if err := os.WriteFile(filepath.Join(d1, "receipt.json"), []byte(fmt.Sprintf(`{"schema":%q,"launch":%q}`, ReviewSchema, l1)), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(d1, l1, true); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted minimal partial ReviewReceipt JSON")
++	}
++
++	// 2. Unknown extra JSON key -> rejected for review receipt, preflight receipt, and producer.json.
++	l2 := "review-f3333333-2222-4333-8444-555555555502"
++	d2 := mkDir(l2)
++	extraReview := fmt.Sprintf(`{"schema":%q,"launch":%q,"session":"","started_ns":%d,"finished_ns":%d,"sealed_at_ns":0,"complete":false,"sealed":false,"tainted":false,"requests":0,"routes":["other"],"response_id_sha256s":[],"last_response_id_sha256":"","last_output_sha256":"","extra":"foreign"}`, ReviewSchema, l2, ancient.UnixNano(), ancient.UnixNano())
++	if err := os.WriteFile(filepath.Join(d2, "receipt.json"), []byte(extraReview), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(d2, l2, true); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted ReviewReceipt with unknown extra field")
++	}
++
++	p1 := "preflight-f3333333-2222-4333-8444-555555555503"
++	dp1 := mkDir(p1)
++	extraPreflight := fmt.Sprintf(`{"schema":%q,"session":%q,"started_ns":%d,"finished_ns":%d,"complete":true,"routes":["codex:gpt-6.2-sol@chatgpt.com"],"extra":"foreign"}`, Schema, p1, ancient.UnixNano(), ancient.UnixNano())
++	if err := os.WriteFile(filepath.Join(dp1, "receipt.json"), []byte(extraPreflight), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(dp1, p1, false); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted preflight Receipt with unknown extra field")
++	}
++
++	p2 := "preflight-f3333333-2222-4333-8444-555555555504"
++	dp2 := mkDir(p2)
++	extraMarker := fmt.Sprintf(`{"schema":%q,"session":%q,"started_ns":%d,"extra":"foreign"}`, Schema, p2, ancient.UnixNano())
++	if err := os.WriteFile(filepath.Join(dp2, "producer.json"), []byte(extraMarker), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(dp2, p2, false); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted producer.json with unknown extra field")
++	}
++
++	// 3. Full valid ReviewReceipt with sealed:true but MISSING seal.sha256 -> MUST be rejected.
++	l3 := "review-f3333333-2222-4333-8444-555555555505"
++	d3 := mkDir(l3)
++	sealedRec, err := json.Marshal(ReviewReceipt{
++		Schema:           ReviewSchema,
++		Launch:           l3,
++		Session:          "019d0000-0000-7000-8000-999999999705",
++		Started:          ancient.UnixNano(),
++		Finished:         ancient.UnixNano(),
++		SealedAt:         ancient.UnixNano(),
++		Complete:         true,
++		Sealed:           true,
++		Requests:         1,
++		Routes:           []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs:   []string{sha256Hex("resp_sealed_reclaim")},
++		LastResponseID:   sha256Hex("resp_sealed_reclaim"),
++		LastOutputSHA256: sha256Hex("VERDICT: PASS"),
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(d3, "receipt.json"), sealedRec, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(d3, l3, true); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted sealed=true review dir without seal.sha256")
++	}
++	// Adding exact 64-hex seal.sha256 makes it a verified producer-owned sealed dir.
++	if err := os.WriteFile(filepath.Join(d3, "seal.sha256"), []byte(sha256Hex(string(sealedRec))), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(d3, l3, true); !ok {
++		t.Fatalf("inspectProducerReceiptDir rejected valid sealed review dir with matching seal.sha256")
++	}
++}
++
++func TestReviewReceiptFailureEventContradictoryStatusTaintsLaunch(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R36): failure events (response.failed/incomplete/cancelled/error) carrying
++	// contradictory response.status (e.g. "completed") MUST fail strict validation and taint the launch,
++	// whereas a consistent response.failed (status:"failed") remains retryable.
++	root := filepath.Join(t.TempDir(), "receipts")
++	runTurn := func(t *testing.T, launch, session, evName, frame string, expectStrictOK, forwardConsumer bool) {
++		t.Helper()
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview(%s): %v", launch, err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("Start(%s): %v", launch, err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("Do(%s): %v", launch, err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		gotStrictOK := c.ValidateStrictEvent(evName, true, []byte(frame))
++		if gotStrictOK != expectStrictOK {
++			t.Fatalf("ValidateStrictEvent(%s) = %v, want %v", frame, gotStrictOK, expectStrictOK)
++		}
++		if forwardConsumer {
++			c.ObserveStreamChunk([]byte("event: " + evName + "\ndata: " + frame + "\n\n"))
++		}
++		e.End()
++		c.Complete(forwardConsumer && expectStrictOK)
++		c.HandlerDone(forwardConsumer && expectStrictOK)
++	}
++
++	for idx, tc := range []struct {
++		evName string
++		frame  string
++	}{
++		{"response.failed", `{"type":"response.failed","response":{"id":"resp_bad_1","status":"completed","model":"gpt-6.2-sol"}}`},
++		{"response.incomplete", `{"type":"response.incomplete","response":{"id":"resp_bad_2","status":"completed","model":"gpt-6.2-sol"}}`},
++		{"response.cancelled", `{"type":"response.cancelled","response":{"id":"resp_bad_3","status":"in_progress","model":"gpt-6.2-sol"}}`},
++		{"error", `{"type":"error","response":{"id":"resp_bad_4","status":"completed","model":"gpt-6.2-sol"}}`},
++	} {
++		launch := fmt.Sprintf("review-f4444444-2222-4333-8444-55555555550%d", idx)
++		session := fmt.Sprintf("019d0000-0000-7000-8000-99999999980%d", idx)
++		runTurn(t, launch, session, tc.evName, tc.frame, false, false)
++		// Launch MUST be permanently tainted: subsequent BeginReview MUST fail closed.
++		if _, _, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++			t.Fatalf("case %d: BeginReview after contradictory failure event = %v, want ErrUnavailable", idx, err)
++		}
++		if st := SealReview(root, launch, session); st != SealRejected {
++			t.Fatalf("case %d: SealReview after contradictory failure event = %v, want SealRejected", idx, st)
++		}
++	}
++
++	// Control: legitimate response.failed with status:"failed" is retryable and seals cleanly on turn 2.
++	okLaunch := "review-f4444444-2222-4333-8444-555555555509"
++	okSession := "019d0000-0000-7000-8000-999999999809"
++	runTurn(t, okLaunch, okSession, "response.failed", `{"type":"response.failed","response":{"id":"resp_fail_ok","status":"failed","model":"gpt-6.2-sol","error":{"message":"transient"}}}`, true, false)
++	runTurn(t, okLaunch, okSession, "response.completed", `{"type":"response.completed","response":{"id":"resp_retry_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`, true, true)
++	if st := SealReview(root, okLaunch, okSession); st != SealOK {
++		t.Fatalf("control retry after consistent response.failed = %v, want SealOK", st)
++	}
++}
++
++func TestReviewReceiptEarlyHandlerDoneReleasesInFlight(t *testing.T) {
++	// Astra P2 #3 (PR #2280 R36): an early HTTP 200 HandlerDone(true) when Complete() was never
++	// invoked (c.active == 0 && c.bodies == 0) MUST release inFlight instead of wedging SealInFlight.
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-f5555555-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-999999999901"
++
++	_, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	c.HandlerDone(true)
++
++	if st := SealReview(root, launch, session); st != SealRejected {
++		t.Fatalf("SealReview after early HTTP 200 HandlerDone(true) without Complete = %v, want SealRejected (not SealInFlight)", st)
++	}
++}
++
++func TestReviewReceiptSymlinkAncestorDirRejected(t *testing.T) {
++	// Astra P2 #4 (PR #2280 R36): a symlinked ancestor directory in receipt root MUST be rejected
++	// across Begin, BeginPendingReview, ReserveReview, ensurePrivateRoot, and SealReviewWithDigest
++	// without creating or mutating anything inside the symlink target.
++	base := t.TempDir()
++	realParent := filepath.Join(base, "real-parent")
++	if err := os.Mkdir(realParent, 0700); err != nil {
++		t.Fatal(err)
++	}
++	symParent := filepath.Join(base, "sym-parent")
++	if err := os.Symlink(realParent, symParent); err != nil {
++		t.Fatal(err)
++	}
++	symNestedRoot := filepath.Join(symParent, "receipts")
++	launch := "review-f6666666-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-999999999902"
++	pfSess := "preflight-f6666666-2222-4333-8444-555555555501"
++
++	if _, _, err := Begin(context.Background(), symNestedRoot, pfSess); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("Begin with symlink ancestor = %v, want ErrUnavailable", err)
++	}
++	if _, err := BeginPendingReview(symNestedRoot, launch); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("BeginPendingReview with symlink ancestor = %v, want ErrUnavailable", err)
++	}
++	if _, err := ReserveReview(symNestedRoot, launch); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveReview with symlink ancestor = %v, want ErrUnavailable", err)
++	}
++	if err := ensurePrivateRoot(symNestedRoot); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ensurePrivateRoot with symlink ancestor = %v, want ErrUnavailable", err)
++	}
++	if st, digest := SealReviewWithDigest(symNestedRoot, launch, session); st != SealUnavailable || digest != "" {
++		t.Fatalf("SealReviewWithDigest with symlink ancestor = (%v, %q), want (SealUnavailable, \"\")", st, digest)
++	}
++	if _, err := os.Lstat(filepath.Join(realParent, "receipts")); !os.IsNotExist(err) {
++		t.Fatalf("symlink ancestor created directory inside target: %v", err)
 +	}
 +}
