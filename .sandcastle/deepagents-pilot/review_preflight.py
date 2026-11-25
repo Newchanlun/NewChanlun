@@ -578,14 +578,39 @@ def route_from_container(args, session: str, since: float, wait: float,
         return None
 
 
+def _absolutize_host_receipt_dir(raw: str) -> str | None:
+    """将宿主 --proxy-receipt-dir 相对路径转为不解引用符号链接的绝对路径，拒绝跨符号链接回退的 ..。"""
+    if not raw:
+        return None
+    if os.path.isabs(raw):
+        return raw
+    cur = Path(os.getcwd())
+    for part in raw.split(os.sep):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            try:
+                if cur.is_symlink():
+                    return None
+            except OSError:
+                return None
+            cur = cur.parent
+        else:
+            cur = cur / part
+    return str(cur)
+
+
 def route_from_host_receipt(directory: str, session: str, since: float, wait: float,
                             deadline: Deadline) -> list[tuple[str, str]] | None:
     budget = min(wait, deadline.work_left() - 0.25)
     if budget <= 0:
         return None
+    abs_dir = _absolutize_host_receipt_dir(directory)
+    if abs_dir is None:
+        return None
     labels = {"@".join(route): route for route in KNOWN_ROUTES}
     try:
-        result = run_bounded([sys.executable, "-I", "-c", _LOG_READER.read_text(), "--receipt", directory,
+        result = run_bounded([sys.executable, "-I", "-c", _LOG_READER.read_text(), "--receipt", abs_dir,
                               session, str(since), str(time.time() + budget), str(budget),
                               json.dumps(sorted(KNOWN_ROUTES))], budget)
         if result.returncode or result.stderr:

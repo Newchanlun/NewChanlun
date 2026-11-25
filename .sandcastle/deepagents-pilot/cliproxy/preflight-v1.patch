@@ -5917,10 +5917,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..ba9229a 100644
+index e69de29..7164416 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,7126 @@
+@@ -0,0 +1,7516 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -6297,6 +6297,7 @@ index e69de29..ba9229a 100644
 +
 +type heldRootLock struct {
 +	file    *os.File
++	dir     *os.Root
 +	dev     uint64
 +	ino     uint64
 +	rootDev uint64
@@ -6443,6 +6444,13 @@ index e69de29..ba9229a 100644
 +	invalid, sealed, handlerDone, lifecycleDone bool
 +	attemptFailed                               bool
 +	reserved                                    bool
++	dirDev                                      uint64
++	dirIno                                      uint64
++	hasDirID                                    bool
++	markerDev                                   uint64
++	markerIno                                   uint64
++	hasMarkerID                                 bool
++	markerSHA256                                string
 +	strictCodex                                 bool
 +	expectedModel                               string
 +	review                                      *reviewEntry
@@ -10537,6 +10545,11 @@ index e69de29..ba9229a 100644
 +		"session":    receiptJSONString,
 +		"started_ns": receiptJSONInt64,
 +	}
++	reviewMarkerJSONKeys = map[string]receiptJSONKind{
++		"schema":     receiptJSONString,
++		"launch":     receiptJSONString,
++		"started_ns": receiptJSONInt64,
++	}
 +)
 +
 +func validExactReceiptJSONKind(raw []byte, kind receiptJSONKind) bool {
@@ -10725,7 +10738,7 @@ index e69de29..ba9229a 100644
 +	if disk.Schema != Schema || disk.Session != session {
 +		return false
 +	}
-+	if disk.Started <= 0 || disk.Finished < disk.Started || !disk.Complete {
++	if disk.Started <= 0 || disk.Finished < disk.Started || disk.Finished-disk.Started > int64(Lifetime) || !disk.Complete {
 +		return false
 +	}
 +	if len(disk.Routes) < 1 || len(disk.Routes) > MaxAttempts {
@@ -10737,6 +10750,105 @@ index e69de29..ba9229a 100644
 +		}
 +	}
 +	return true
++}
++
++func openVerifiedPrivateRoot(root string) (*os.Root, uint64, uint64, error) {
++	cleanRoot, ok := cleanPrivateRoot(root)
++	if !ok || pathHasDisallowedSymlink(cleanRoot) {
++		return nil, 0, 0, ErrUnavailable
++	}
++	r, err := os.OpenRoot(cleanRoot)
++	if err != nil {
++		return nil, 0, 0, err
++	}
++	df, err := r.Open(".")
++	if err != nil {
++		_ = r.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	fi, err := df.Stat()
++	_ = df.Close()
++	if err != nil || !fi.IsDir() || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++		_ = r.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	rDev, rIno, hasRootID := statDevIno(fi)
++	if pathHasDisallowedSymlink(cleanRoot) {
++		_ = r.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	lfi, err := os.Lstat(cleanRoot)
++	if err != nil || !lfi.IsDir() || lfi.Mode()&os.ModeSymlink != 0 || lfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(lfi) {
++		_ = r.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	if lDev, lIno, ok := statDevIno(lfi); ok && hasRootID && (lDev != rDev || lIno != rIno) {
++		_ = r.Close()
++		return nil, 0, 0, ErrUnavailable
++	}
++	return r, rDev, rIno, nil
++}
++
++func openVerifiedSubdir(rootHandle *os.Root, name string) (*os.Root, os.FileInfo, error) {
++	if rootHandle == nil || name == "" || strings.ContainsRune(name, filepath.Separator) || name == "." || name == ".." {
++		return nil, nil, ErrUnavailable
++	}
++	lfi, err := rootHandle.Lstat(name)
++	if err != nil {
++		return nil, nil, err
++	}
++	if !lfi.IsDir() || lfi.Mode()&os.ModeSymlink != 0 || lfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(lfi) {
++		return nil, nil, ErrUnavailable
++	}
++	sub, err := rootHandle.OpenRoot(name)
++	if err != nil {
++		return nil, nil, ErrUnavailable
++	}
++	df, err := sub.Open(".")
++	if err != nil {
++		_ = sub.Close()
++		return nil, nil, ErrUnavailable
++	}
++	fi, err := df.Stat()
++	_ = df.Close()
++	if err != nil || !fi.IsDir() || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++		_ = sub.Close()
++		return nil, nil, ErrUnavailable
++	}
++	lDev, lIno, okL := statDevIno(lfi)
++	sDev, sIno, okS := statDevIno(fi)
++	if okL && okS && (lDev != sDev || lIno != sIno) {
++		_ = sub.Close()
++		return nil, nil, ErrUnavailable
++	}
++	return sub, fi, nil
++}
++
++func syncPinnedDir(r *os.Root, fullPath string) error {
++	if r == nil {
++		return ErrUnavailable
++	}
++	f, err := r.Open(".")
++	if err != nil {
++		return err
++	}
++	fi, statErr := f.Stat()
++	if statErr != nil || !fi.IsDir() || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++		_ = f.Close()
++		return ErrUnavailable
++	}
++	syncErr := f.Sync()
++	closeErr := f.Close()
++	if syncErr != nil {
++		return syncErr
++	}
++	if closeErr != nil {
++		return closeErr
++	}
++	if syncDirFn != nil {
++		return syncDirFn(fullPath)
++	}
++	return nil
 +}
 +
 +func checkPrivateDir(path string, allowMissing bool) (bool, error) {
@@ -10758,22 +10870,27 @@ index e69de29..ba9229a 100644
 +
 +func loadReviewEntryFromDisk(dir, launch, session string, now time.Time) (*reviewEntry, bool, error) {
 +	root := filepath.Dir(dir)
-+	rootExists, err := checkPrivateDir(root, true)
++	rootHandle, _, _, err := openVerifiedPrivateRoot(root)
 +	if err != nil {
++		if errors.Is(err, os.ErrNotExist) {
++			return nil, false, nil
++		}
 +		return nil, true, ErrUnavailable
 +	}
-+	if !rootExists {
-+		return nil, false, nil
-+	}
-+	dirExists, err := checkPrivateDir(dir, true)
++	defer rootHandle.Close()
++	subRoot, _, err := openVerifiedSubdir(rootHandle, launch)
 +	if err != nil {
++		if errors.Is(err, os.ErrNotExist) {
++			return nil, false, nil
++		}
 +		return nil, true, ErrUnavailable
 +	}
-+	if !dirExists {
-+		return nil, false, nil
-+	}
-+	path := filepath.Join(dir, "receipt.json")
-+	finfo, err := os.Lstat(path)
++	defer subRoot.Close()
++	return loadReviewEntryFromSubRoot(subRoot, dir, launch, session, now)
++}
++
++func loadReviewEntryFromSubRoot(subRoot *os.Root, dir, launch, session string, now time.Time) (*reviewEntry, bool, error) {
++	finfo, err := subRoot.Lstat("receipt.json")
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) || finfo.Size() <= 0 || finfo.Size() > maxReviewReceiptBytes {
 +		return &reviewEntry{
 +			directory:        dir,
@@ -10787,13 +10904,14 @@ index e69de29..ba9229a 100644
 +			touched:          now,
 +		}, true, nil
 +	}
-+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++	f, err := subRoot.OpenFile("receipt.json", os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 +	if err != nil {
 +		return nil, true, ErrUnavailable
 +	}
-+	raw, err := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
++	fStat, statErr := f.Stat()
++	raw, readErr := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
 +	_ = f.Close()
-+	if err != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
++	if statErr != nil || readErr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
 +		return nil, true, ErrUnavailable
 +	}
 +	rawSHA := sha256Hex(string(raw))
@@ -11261,14 +11379,22 @@ index e69de29..ba9229a 100644
 +	return nil
 +}
 +
-+func readVerifiedSealDigest(dir string) (string, bool) {
-+	path := filepath.Join(dir, "seal.sha256")
-+	finfo, err := os.Lstat(path)
++func readVerifiedSealDigestFromRoot(subRoot *os.Root) (string, bool) {
++	if subRoot == nil {
++		return "", false
++	}
++	finfo, err := subRoot.Lstat("seal.sha256")
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) || finfo.Size() != 64 {
 +		return "", false
 +	}
-+	raw, err := os.ReadFile(path)
-+	if err != nil || len(raw) != 64 {
++	f, err := subRoot.OpenFile("seal.sha256", os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++	if err != nil {
++		return "", false
++	}
++	fStat, statErr := f.Stat()
++	raw, readErr := io.ReadAll(io.LimitReader(f, 65))
++	_ = f.Close()
++	if statErr != nil || readErr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || len(raw) != 64 {
 +		return "", false
 +	}
 +	digest := string(raw)
@@ -11278,8 +11404,38 @@ index e69de29..ba9229a 100644
 +	return digest, true
 +}
 +
++func readVerifiedSealDigest(dir string) (string, bool) {
++	rootHandle, _, _, err := openVerifiedPrivateRoot(filepath.Dir(dir))
++	if err != nil {
++		return "", false
++	}
++	defer rootHandle.Close()
++	subRoot, _, err := openVerifiedSubdir(rootHandle, filepath.Base(dir))
++	if err != nil {
++		return "", false
++	}
++	defer subRoot.Close()
++	return readVerifiedSealDigestFromRoot(subRoot)
++}
++
 +func verifySealedDiskReceipt(dir, launch, session, expectedSHA string, now time.Time) (SealStatus, string) {
-+	diskEntry, onDisk, err := loadReviewEntryFromDisk(dir, launch, session, now)
++	rootHandle, _, _, err := openVerifiedPrivateRoot(filepath.Dir(dir))
++	if err != nil {
++		if errors.Is(err, os.ErrNotExist) {
++			return SealRejected, ""
++		}
++		return SealUnavailable, ""
++	}
++	defer rootHandle.Close()
++	subRoot, _, err := openVerifiedSubdir(rootHandle, launch)
++	if err != nil {
++		if errors.Is(err, os.ErrNotExist) {
++			return SealRejected, ""
++		}
++		return SealUnavailable, ""
++	}
++	defer subRoot.Close()
++	diskEntry, onDisk, err := loadReviewEntryFromSubRoot(subRoot, dir, launch, session, now)
 +	if err != nil {
 +		return SealUnavailable, ""
 +	}
@@ -11289,7 +11445,7 @@ index e69de29..ba9229a 100644
 +	if !isSHA256Hex(diskEntry.sealedReceiptSHA) {
 +		return SealUnavailable, ""
 +	}
-+	savedDigest, ok := readVerifiedSealDigest(dir)
++	savedDigest, ok := readVerifiedSealDigestFromRoot(subRoot)
 +	if !ok || diskEntry.sealedReceiptSHA != savedDigest {
 +		return SealRejected, ""
 +	}
@@ -11659,39 +11815,47 @@ index e69de29..ba9229a 100644
 +	return 0, 0, false
 +}
 +
-+// acquirePrivateRootLock enforces single-writer ownership over a receipt root across same-UID
-+// proxy processes via a non-blocking exclusive flock on <root>/.writer.lock. If another process
-+// holds the lock, calls fail closed with ErrUnavailable so two instances can never race on launch
-+// reservation, in-flight accounting, or SealOK.
-+func acquirePrivateRootLock(root string) error {
++// acquirePrivateRootHandle enforces single-writer ownership over a receipt root across same-UID
++// proxy processes via a non-blocking exclusive flock on <root>/.writer.lock and returns a
++// descriptor-pinned *os.Root bound to that exact locked directory inode (caller must Close it).
++// Subsequent reads, writes, renames, and reclamations operate through this pinned root handle
++// so an ancestor rename after verification can never redirect file operations to another directory.
++func acquirePrivateRootHandle(root string) (*os.Root, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || pathHasDisallowedSymlink(cleanRoot) {
-+		return ErrUnavailable
++		return nil, ErrUnavailable
 +	}
 +	root = cleanRoot
 +	if err := ensurePrivateRoot(root); err != nil {
-+		return ErrUnavailable
++		return nil, ErrUnavailable
 +	}
-+	rootInfo, err := os.Lstat(root)
-+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(rootInfo) {
-+		return ErrUnavailable
++	candRoot, rDev, rIno, err := openVerifiedPrivateRoot(root)
++	if err != nil {
++		return nil, ErrUnavailable
 +	}
-+	rDev, rIno, hasRootID := statDevIno(rootInfo)
-+	lockPath := filepath.Join(root, ".writer.lock")
 +
 +	rootLockMu.Lock()
 +	defer rootLockMu.Unlock()
 +
 +	if held := rootLocks[root]; held != nil {
-+		if curLockInfo, err := os.Lstat(lockPath); err == nil && curLockInfo.Mode().IsRegular() &&
-+			curLockInfo.Mode()&os.ModeSymlink == 0 && curLockInfo.Mode().Perm()&0077 == 0 && ownedByCurrentUser(curLockInfo) {
-+			lDev, lIno, hasLockID := statDevIno(curLockInfo)
-+			if (!hasRootID || (held.rootDev == rDev && held.rootIno == rIno)) &&
-+				(!hasLockID || (held.dev == lDev && held.ino == lIno)) {
-+				return nil
++		if held.dir != nil && held.rootDev == rDev && held.rootIno == rIno {
++			if curLockInfo, lerr := held.dir.Lstat(".writer.lock"); lerr == nil && curLockInfo.Mode().IsRegular() &&
++				curLockInfo.Mode()&os.ModeSymlink == 0 && curLockInfo.Mode().Perm()&0077 == 0 && ownedByCurrentUser(curLockInfo) {
++				lDev, lIno, hasLockID := statDevIno(curLockInfo)
++				if !hasLockID || (held.dev == lDev && held.ino == lIno) {
++					dup, dupErr := held.dir.OpenRoot(".")
++					_ = candRoot.Close()
++					if dupErr != nil {
++						return nil, ErrUnavailable
++					}
++					return dup, nil
++				}
 +			}
 +		}
 +		_ = held.file.Close()
++		if held.dir != nil {
++			_ = held.dir.Close()
++		}
 +		delete(rootLocks, root)
 +	}
 +
@@ -11700,54 +11864,86 @@ index e69de29..ba9229a 100644
 +		for k, v := range rootLocks {
 +			if _, statErr := os.Lstat(filepath.Join(k, ".writer.lock")); statErr != nil {
 +				_ = v.file.Close()
++				if v.dir != nil {
++					_ = v.dir.Close()
++				}
 +				delete(rootLocks, k)
 +			}
 +		}
 +	}
 +
-+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
++	f, err := candRoot.OpenFile(".writer.lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 +	if err != nil {
-+		return ErrUnavailable
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
 +	finfo, err := f.Stat()
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) {
 +		_ = f.Close()
-+		return ErrUnavailable
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
 +	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 +		_ = f.Close()
-+		return ErrUnavailable
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
 +	lDev, lIno, hasLockID := statDevIno(finfo)
++	if pathHasDisallowedSymlink(root) {
++		_ = f.Close()
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
++	}
 +	curRootInfo, err := os.Lstat(root)
 +	if err != nil || !curRootInfo.IsDir() || curRootInfo.Mode()&os.ModeSymlink != 0 || curRootInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curRootInfo) {
 +		_ = f.Close()
-+		return ErrUnavailable
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
-+	if curRDev, curRIno, ok := statDevIno(curRootInfo); ok && hasRootID && (curRDev != rDev || curRIno != rIno) {
++	if curRDev, curRIno, ok := statDevIno(curRootInfo); ok && (curRDev != rDev || curRIno != rIno) {
 +		_ = f.Close()
-+		return ErrUnavailable
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
-+	curLockInfo, err := os.Lstat(lockPath)
++	curLockInfo, err := candRoot.Lstat(".writer.lock")
 +	if err != nil || !curLockInfo.Mode().IsRegular() || curLockInfo.Mode()&os.ModeSymlink != 0 || curLockInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curLockInfo) {
 +		_ = f.Close()
-+		return ErrUnavailable
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
 +	if curLDev, curLIno, ok := statDevIno(curLockInfo); ok && hasLockID && (curLDev != lDev || curLIno != lIno) {
 +		_ = f.Close()
-+		return ErrUnavailable
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
-+	if err := syncDirFn(root); err != nil {
++	if err := syncPinnedDir(candRoot, root); err != nil {
 +		_ = f.Close()
-+		return ErrUnavailable
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
++	}
++	dup, dupErr := candRoot.OpenRoot(".")
++	if dupErr != nil {
++		_ = f.Close()
++		_ = candRoot.Close()
++		return nil, ErrUnavailable
 +	}
 +	rootLocks[root] = &heldRootLock{
 +		file:    f,
++		dir:     candRoot,
 +		dev:     lDev,
 +		ino:     lIno,
 +		rootDev: rDev,
 +		rootIno: rIno,
 +	}
++	return dup, nil
++}
++
++func acquirePrivateRootLock(root string) error {
++	h, err := acquirePrivateRootHandle(root)
++	if err != nil {
++		return err
++	}
++	_ = h.Close()
 +	return nil
 +}
 +
@@ -11829,17 +12025,54 @@ index e69de29..ba9229a 100644
 +	Started int64  `json:"started_ns"`
 +}
 +
-+func writePreflightReservationMarker(dir, session string, started int64) error {
++type reviewReservationMarker struct {
++	Schema  string `json:"schema"`
++	Launch  string `json:"launch"`
++	Started int64  `json:"started_ns"`
++}
++
++func writePreflightMarkerInSubdir(subRoot *os.Root, dirPath, session string, started int64) (uint64, uint64, bool, string, error) {
 +	data, err := json.Marshal(preflightReservationMarker{
 +		Schema:  Schema,
 +		Session: session,
 +		Started: started,
 +	})
 +	if err != nil {
++		return 0, 0, false, "", err
++	}
++	f, err := subRoot.OpenFile("producer.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if err != nil {
++		return 0, 0, false, "", err
++	}
++	fi, statErr := f.Stat()
++	_, errW := f.Write(data)
++	errS := f.Sync()
++	errC := f.Close()
++	if statErr != nil || errW != nil || errS != nil || errC != nil {
++		_ = subRoot.Remove("producer.json")
++		return 0, 0, false, "", ErrUnavailable
++	}
++	if err := syncPinnedDir(subRoot, dirPath); err != nil {
++		_ = subRoot.Remove("producer.json")
++		return 0, 0, false, "", err
++	}
++	dev, ino, hasID := statDevIno(fi)
++	return dev, ino, hasID, sha256Hex(string(data)), nil
++}
++
++func writeReviewMarkerInSubdir(subRoot *os.Root, dirPath, launch string, started int64) error {
++	if started <= 0 {
++		started = time.Now().UnixNano()
++	}
++	data, err := json.Marshal(reviewReservationMarker{
++		Schema:  ReviewSchema,
++		Launch:  launch,
++		Started: started,
++	})
++	if err != nil {
 +		return err
 +	}
-+	markerPath := filepath.Join(dir, "producer.json")
-+	f, err := os.OpenFile(markerPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	f, err := subRoot.OpenFile("producer.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 +	if err != nil {
 +		return err
 +	}
@@ -11847,11 +12080,11 @@ index e69de29..ba9229a 100644
 +	errS := f.Sync()
 +	errC := f.Close()
 +	if errW != nil || errS != nil || errC != nil {
-+		_ = os.Remove(markerPath)
++		_ = subRoot.Remove("producer.json")
 +		return ErrUnavailable
 +	}
-+	if err := syncDirFn(dir); err != nil {
-+		_ = os.Remove(markerPath)
++	if err := syncPinnedDir(subRoot, dirPath); err != nil {
++		_ = subRoot.Remove("producer.json")
 +		return err
 +	}
 +	return nil
@@ -11859,23 +12092,34 @@ index e69de29..ba9229a 100644
 +
 +func isProducerOwnedReceiptFile(childName string, reviewBucket bool) bool {
 +	if reviewBucket {
-+		return childName == "receipt.json" || childName == "seal.sha256"
++		return childName == "receipt.json" || childName == "seal.sha256" || childName == "producer.json"
 +	}
 +	return childName == "receipt.json" || childName == "producer.json"
 +}
 +
-+func inspectProducerReceiptDir(dir, name string, reviewBucket bool) (time.Time, bool) {
-+	if !isProducerBucketDirName(name, reviewBucket) || pathHasDisallowedSymlink(dir) {
-+		return time.Time{}, false
-+	}
-+	fi, err := os.Lstat(dir)
-+	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
-+		return time.Time{}, false
-+	}
-+	lastMod := fi.ModTime()
-+	children, err := os.ReadDir(dir)
++func readDirFromRoot(r *os.Root) ([]os.DirEntry, error) {
++	f, err := r.Open(".")
 +	if err != nil {
-+		return time.Time{}, false
++		return nil, err
++	}
++	defer f.Close()
++	return f.ReadDir(-1)
++}
++
++func inspectProducerReceiptSubdir(rootHandle *os.Root, name string, reviewBucket bool) (*os.Root, uint64, uint64, time.Time, bool) {
++	if rootHandle == nil || !isProducerBucketDirName(name, reviewBucket) {
++		return nil, 0, 0, time.Time{}, false
++	}
++	subRoot, fi, err := openVerifiedSubdir(rootHandle, name)
++	if err != nil {
++		return nil, 0, 0, time.Time{}, false
++	}
++	subDev, subIno, _ := statDevIno(fi)
++	lastMod := fi.ModTime()
++	children, err := readDirFromRoot(subRoot)
++	if err != nil {
++		_ = subRoot.Close()
++		return nil, 0, 0, time.Time{}, false
 +	}
 +	hasReceipt := false
 +	hasProducerMarker := false
@@ -11885,33 +12129,39 @@ index e69de29..ba9229a 100644
 +	for _, child := range children {
 +		childName := child.Name()
 +		if !isProducerOwnedReceiptFile(childName, reviewBucket) {
-+			return time.Time{}, false
++			_ = subRoot.Close()
++			return nil, 0, 0, time.Time{}, false
 +		}
-+		p := filepath.Join(dir, childName)
-+		cfi, cerr := os.Lstat(p)
++		cfi, cerr := subRoot.Lstat(childName)
 +		if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || cfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(cfi) {
-+			return time.Time{}, false
++			_ = subRoot.Close()
++			return nil, 0, 0, time.Time{}, false
 +		}
 +		if cfi.ModTime().After(lastMod) {
 +			lastMod = cfi.ModTime()
 +		}
 +		if childName == "receipt.json" {
 +			if cfi.Size() <= 0 || cfi.Size() > maxReviewReceiptBytes {
-+				return time.Time{}, false
++				_ = subRoot.Close()
++				return nil, 0, 0, time.Time{}, false
 +			}
-+			f, oerr := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++			f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 +			if oerr != nil {
-+				return time.Time{}, false
++				_ = subRoot.Close()
++				return nil, 0, 0, time.Time{}, false
 +			}
++			fStat, serr := f.Stat()
 +			raw, rerr := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
 +			_ = f.Close()
-+			if rerr != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
-+				return time.Time{}, false
++			if serr != nil || rerr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
++				_ = subRoot.Close()
++				return nil, 0, 0, time.Time{}, false
 +			}
 +			if reviewBucket {
 +				var disk ReviewReceipt
 +				if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &disk) != nil || !isValidProducerReviewReceipt(disk, name) {
-+					return time.Time{}, false
++					_ = subRoot.Close()
++					return nil, 0, 0, time.Time{}, false
 +				}
 +				reviewSealed = disk.Sealed
 +				for _, ns := range []int64{disk.Started, disk.Finished, disk.SealedAt} {
@@ -11924,7 +12174,8 @@ index e69de29..ba9229a 100644
 +			} else {
 +				var disk Receipt
 +				if decodeExactReceiptJSON(raw, preflightReceiptJSONKeys, &disk) != nil || !isValidProducerPreflightReceipt(disk, name) {
-+					return time.Time{}, false
++					_ = subRoot.Close()
++					return nil, 0, 0, time.Time{}, false
 +				}
 +				for _, ns := range []int64{disk.Started, disk.Finished} {
 +					if ns > 0 {
@@ -11937,53 +12188,88 @@ index e69de29..ba9229a 100644
 +			hasReceipt = true
 +			receiptRaw = raw
 +		} else if childName == "producer.json" {
-+			if reviewBucket || cfi.Size() <= 0 || cfi.Size() > 4096 {
-+				return time.Time{}, false
++			if cfi.Size() <= 0 || cfi.Size() > 4096 {
++				_ = subRoot.Close()
++				return nil, 0, 0, time.Time{}, false
 +			}
-+			f, oerr := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++			f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 +			if oerr != nil {
-+				return time.Time{}, false
++				_ = subRoot.Close()
++				return nil, 0, 0, time.Time{}, false
 +			}
++			fStat, serr := f.Stat()
 +			raw, rerr := io.ReadAll(io.LimitReader(f, 4097))
 +			_ = f.Close()
-+			if rerr != nil || len(raw) == 0 || len(raw) > 4096 {
-+				return time.Time{}, false
++			if serr != nil || rerr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || len(raw) == 0 || len(raw) > 4096 {
++				_ = subRoot.Close()
++				return nil, 0, 0, time.Time{}, false
 +			}
-+			var marker preflightReservationMarker
-+			if decodeExactReceiptJSON(raw, preflightMarkerJSONKeys, &marker) != nil || marker.Schema != Schema || marker.Session != name || marker.Started <= 0 {
-+				return time.Time{}, false
-+			}
-+			if t := time.Unix(0, marker.Started); t.After(lastMod) {
-+				lastMod = t
++			if reviewBucket {
++				var marker reviewReservationMarker
++				if decodeExactReceiptJSON(raw, reviewMarkerJSONKeys, &marker) != nil || marker.Schema != ReviewSchema || marker.Launch != name || marker.Started <= 0 {
++					_ = subRoot.Close()
++					return nil, 0, 0, time.Time{}, false
++				}
++				if t := time.Unix(0, marker.Started); t.After(lastMod) {
++					lastMod = t
++				}
++			} else {
++				var marker preflightReservationMarker
++				if decodeExactReceiptJSON(raw, preflightMarkerJSONKeys, &marker) != nil || marker.Schema != Schema || marker.Session != name || marker.Started <= 0 {
++					_ = subRoot.Close()
++					return nil, 0, 0, time.Time{}, false
++				}
++				if t := time.Unix(0, marker.Started); t.After(lastMod) {
++					lastMod = t
++				}
 +			}
 +			hasProducerMarker = true
 +		} else if childName == "seal.sha256" {
 +			hasSealFile = true
 +		}
 +	}
-+	if !hasReceipt && !(!reviewBucket && hasProducerMarker) {
-+		return time.Time{}, false
++	if !hasReceipt && !hasProducerMarker {
++		_ = subRoot.Close()
++		return nil, 0, 0, time.Time{}, false
 +	}
 +	if reviewBucket {
 +		if reviewSealed {
 +			if !hasSealFile {
-+				return time.Time{}, false
++				_ = subRoot.Close()
++				return nil, 0, 0, time.Time{}, false
 +			}
-+			savedDigest, okSeal := readVerifiedSealDigest(dir)
++			savedDigest, okSeal := readVerifiedSealDigestFromRoot(subRoot)
 +			if !okSeal || savedDigest != sha256Hex(string(receiptRaw)) {
-+				return time.Time{}, false
++				_ = subRoot.Close()
++				return nil, 0, 0, time.Time{}, false
 +			}
 +		} else if hasSealFile {
-+			return time.Time{}, false
++			_ = subRoot.Close()
++			return nil, 0, 0, time.Time{}, false
 +		}
 +	} else if hasSealFile {
++		_ = subRoot.Close()
++		return nil, 0, 0, time.Time{}, false
++	}
++	return subRoot, subDev, subIno, lastMod, true
++}
++
++func inspectProducerReceiptDir(dir, name string, reviewBucket bool) (time.Time, bool) {
++	rootHandle, _, _, err := openVerifiedPrivateRoot(filepath.Dir(dir))
++	if err != nil {
 +		return time.Time{}, false
 +	}
++	defer rootHandle.Close()
++	subRoot, _, _, lastMod, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
++	if !ok {
++		return time.Time{}, false
++	}
++	_ = subRoot.Close()
 +	return lastMod, true
 +}
 +
-+func countRootBucketEntries(root string, reviewBucket bool) (int, []string, error) {
-+	entries, err := os.ReadDir(root)
++func countRootBucketEntries(rootHandle *os.Root, reviewBucket bool) (int, []string, error) {
++	entries, err := readDirFromRoot(rootHandle)
 +	if err != nil {
 +		return 0, nil, err
 +	}
@@ -12001,11 +12287,13 @@ index e69de29..ba9229a 100644
 +	return len(names), names, nil
 +}
 +
-+func removePrivateLeafDir(dir, name string, reviewBucket bool) bool {
-+	if _, ok := inspectProducerReceiptDir(dir, name, reviewBucket); !ok {
++func removeVerifiedLeafSubdir(rootHandle *os.Root, name string, reviewBucket bool) bool {
++	subRoot, subDev, subIno, _, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
++	if !ok {
 +		return false
 +	}
-+	children, err := os.ReadDir(dir)
++	defer subRoot.Close()
++	children, err := readDirFromRoot(subRoot)
 +	if err != nil {
 +		return false
 +	}
@@ -12013,15 +12301,22 @@ index e69de29..ba9229a 100644
 +		if !isProducerOwnedReceiptFile(child.Name(), reviewBucket) {
 +			return false
 +		}
-+		if err := os.Remove(filepath.Join(dir, child.Name())); err != nil && !os.IsNotExist(err) {
++		if err := subRoot.Remove(child.Name()); err != nil && !os.IsNotExist(err) {
 +			return false
 +		}
 +	}
-+	return os.Remove(dir) == nil
++	curFI, err := rootHandle.Lstat(name)
++	if err != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
++		return false
++	}
++	if curDev, curIno, hasID := statDevIno(curFI); hasID && (curDev != subDev || curIno != subIno) {
++		return false
++	}
++	return rootHandle.Remove(name) == nil
 +}
 +
-+func reclaimExpiredBucketEntries(root string, names []string, reviewBucket bool, need int) int {
-+	if need <= 0 {
++func reclaimExpiredBucketEntries(rootHandle *os.Root, root string, names []string, reviewBucket bool, need int) int {
++	if need <= 0 || rootHandle == nil {
 +		return 0
 +	}
 +	now := time.Now()
@@ -12031,15 +12326,15 @@ index e69de29..ba9229a 100644
 +	}
 +	candidates := make([]expiredDiskCandidate, 0)
 +	for _, name := range names {
-+		subDir := filepath.Join(root, name)
-+		lastMod, ok := inspectProducerReceiptDir(subDir, name, reviewBucket)
++		subRoot, _, _, lastMod, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
 +		if !ok {
 +			continue
 +		}
++		_ = subRoot.Close()
 +		if now.Sub(lastMod) < retention {
 +			continue
 +		}
-+		candidates = append(candidates, expiredDiskCandidate{name: name, dir: subDir, ts: lastMod.UnixNano()})
++		candidates = append(candidates, expiredDiskCandidate{name: name, dir: filepath.Join(root, name), ts: lastMod.UnixNano()})
 +	}
 +	if len(candidates) == 0 {
 +		return 0
@@ -12080,88 +12375,104 @@ index e69de29..ba9229a 100644
 +			}
 +			reviewMu.Unlock()
 +		}
-+		if removePrivateLeafDir(cand.dir, cand.name, reviewBucket) {
++		if removeVerifiedLeafSubdir(rootHandle, cand.name, reviewBucket) {
 +			reclaimed++
 +		}
 +	}
 +	if reclaimed > 0 {
-+		_ = syncDirFn(root)
++		_ = syncPinnedDir(rootHandle, root)
 +	}
 +	return reclaimed
 +}
 +
 +func reservePrivateDir(directory string, allowExisting bool) error {
-+	_, err := reservePrivateDirTracked(directory, allowExisting)
-+	return err
-+}
-+
-+func reservePrivateDirTracked(directory string, allowExisting bool) (bool, error) {
 +	directory = filepath.Clean(directory)
 +	root, ok := cleanPrivateRoot(filepath.Dir(directory))
 +	if !ok {
-+		return false, ErrUnavailable
++		return ErrUnavailable
 +	}
-+	if err := acquirePrivateRootLock(root); err != nil {
-+		return false, err
++	rootHandle, err := acquirePrivateRootHandle(root)
++	if err != nil {
++		return err
 +	}
-+	reviewBucket := isReviewBucketName(filepath.Base(directory))
++	defer rootHandle.Close()
++	subRoot, _, _, err := reservePrivateSubdir(rootHandle, root, filepath.Base(directory), allowExisting)
++	if err != nil {
++		return err
++	}
++	_ = subRoot.Close()
++	return nil
++}
++
++func reservePrivateSubdir(rootHandle *os.Root, root, name string, allowExisting bool) (*os.Root, os.FileInfo, bool, error) {
++	if rootHandle == nil || name == "" || strings.ContainsRune(name, filepath.Separator) || name == "." || name == ".." {
++		return nil, nil, false, ErrUnavailable
++	}
++	reviewBucket := isReviewBucketName(name)
 +	capLimit := maxPreflightDiskEntries
 +	if reviewBucket {
 +		capLimit = maxReviewDiskEntries
 +	}
 +	rootQuotaMu.Lock()
-+	_, statErr := os.Lstat(directory)
++	_, statErr := rootHandle.Lstat(name)
 +	if statErr == nil {
 +		rootQuotaMu.Unlock()
 +		if !allowExisting {
-+			return false, os.ErrExist
++			return nil, nil, false, os.ErrExist
 +		}
-+		if _, checkErr := checkPrivateDir(directory, false); checkErr != nil {
-+			return false, ErrUnavailable
++		subRoot, subFI, checkErr := openVerifiedSubdir(rootHandle, name)
++		if checkErr != nil {
++			return nil, nil, false, ErrUnavailable
 +		}
-+		if err := syncDirFn(root); err != nil {
-+			return false, err
++		if err := syncPinnedDir(rootHandle, root); err != nil {
++			_ = subRoot.Close()
++			return nil, nil, false, err
 +		}
-+		return false, nil
++		return subRoot, subFI, false, nil
 +	}
 +	if !os.IsNotExist(statErr) {
 +		rootQuotaMu.Unlock()
-+		return false, ErrUnavailable
++		return nil, nil, false, ErrUnavailable
 +	}
-+	existingCount, names, countErr := countRootBucketEntries(root, reviewBucket)
++	existingCount, names, countErr := countRootBucketEntries(rootHandle, reviewBucket)
 +	if countErr != nil {
 +		rootQuotaMu.Unlock()
-+		return false, ErrUnavailable
++		return nil, nil, false, ErrUnavailable
 +	}
 +	if existingCount >= capLimit {
-+		reclaimed := reclaimExpiredBucketEntries(root, names, reviewBucket, existingCount-capLimit+1)
++		reclaimed := reclaimExpiredBucketEntries(rootHandle, root, names, reviewBucket, existingCount-capLimit+1)
 +		existingCount -= reclaimed
 +		if existingCount >= capLimit {
 +			rootQuotaMu.Unlock()
-+			return false, ErrUnavailable
++			return nil, nil, false, ErrUnavailable
 +		}
 +	}
 +	created := false
-+	err := os.Mkdir(directory, 0700)
++	err := rootHandle.Mkdir(name, 0700)
 +	if err == nil {
 +		created = true
 +	}
 +	rootQuotaMu.Unlock()
 +	if err != nil {
 +		if !allowExisting || !os.IsExist(err) {
-+			return false, err
-+		}
-+		if _, checkErr := checkPrivateDir(directory, false); checkErr != nil {
-+			return false, ErrUnavailable
++			return nil, nil, false, err
 +		}
 +	}
-+	if err := syncDirFn(root); err != nil {
++	subRoot, subFI, checkErr := openVerifiedSubdir(rootHandle, name)
++	if checkErr != nil {
 +		if created {
-+			_ = os.Remove(directory)
++			_ = rootHandle.Remove(name)
 +		}
-+		return false, err
++		return nil, nil, false, ErrUnavailable
 +	}
-+	return created, nil
++	if err := syncPinnedDir(rootHandle, root); err != nil {
++		_ = subRoot.Close()
++		if created {
++			_ = rootHandle.Remove(name)
++		}
++		return nil, nil, false, err
++	}
++	return subRoot, subFI, created, nil
 +}
 +
 +// Start is called by the auth execution guard, not by an asynchronous usage sink.
@@ -12212,15 +12523,31 @@ index e69de29..ba9229a 100644
 +		c.review.mu.Unlock()
 +		c.reserved = true
 +	} else if !c.reserved {
-+		if err := reservePrivateDir(c.directory, false); err != nil {
++		rootDir := filepath.Dir(c.directory)
++		rootHandle, err := acquirePrivateRootHandle(rootDir)
++		if err != nil {
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
 +		}
-+		if err := writePreflightReservationMarker(c.directory, c.receipt.Session, c.receipt.Started); err != nil {
-+			_ = os.Remove(c.directory)
++		subRoot, subFI, createdDir, err := reservePrivateSubdir(rootHandle, rootDir, c.receipt.Session, false)
++		if err != nil {
++			_ = rootHandle.Close()
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
 +		}
++		mDev, mIno, hasMID, mSHA, err := writePreflightMarkerInSubdir(subRoot, c.directory, c.receipt.Session, c.receipt.Started)
++		_ = subRoot.Close()
++		if err != nil {
++			if createdDir {
++				_ = rootHandle.Remove(c.receipt.Session)
++			}
++			_ = rootHandle.Close()
++			c.invalid = true
++			return ctx, nil, ErrUnavailable
++		}
++		_ = rootHandle.Close()
++		c.dirDev, c.dirIno, c.hasDirID = statDevIno(subFI)
++		c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256 = mDev, mIno, hasMID, mSHA
 +		c.reserved = true
 +	}
 +	c.active++
@@ -12672,14 +12999,16 @@ index e69de29..ba9229a 100644
 +	diskReceiptPreserveUntouched
 +)
 +
-+func (e *reviewEntry) inspectDiskReceiptBeforeWriteLocked() diskReceiptState {
-+	if _, sealErr := os.Lstat(filepath.Join(e.directory, "seal.sha256")); !errors.Is(sealErr, os.ErrNotExist) {
++func (e *reviewEntry) inspectDiskReceiptBeforeWriteLocked(launchRoot *os.Root) diskReceiptState {
++	if launchRoot == nil {
++		return diskReceiptPreserveUntouched
++	}
++	if _, sealErr := launchRoot.Lstat("seal.sha256"); !errors.Is(sealErr, os.ErrNotExist) {
 +		// An existing seal.sha256 (or unreadable entry) indicates sealed or foreign disk state;
 +		// never overwrite or unlink it.
 +		return diskReceiptPreserveUntouched
 +	}
-+	path := filepath.Join(e.directory, "receipt.json")
-+	finfo, err := os.Lstat(path)
++	finfo, err := launchRoot.Lstat("receipt.json")
 +	if !e.markerPersisted && e.lastPersistedSHA == "" {
 +		if errors.Is(err, os.ErrNotExist) {
 +			return diskReceiptSafeToWrite
@@ -12693,13 +13022,14 @@ index e69de29..ba9229a 100644
 +		finfo.Size() <= 0 || finfo.Size() > maxReviewReceiptBytes {
 +		return diskReceiptPreserveUntouched
 +	}
-+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++	f, err := launchRoot.OpenFile("receipt.json", os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 +	if err != nil {
 +		return diskReceiptPreserveUntouched
 +	}
-+	raw, err := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
++	fStat, statErr := f.Stat()
++	raw, readErr := io.ReadAll(io.LimitReader(f, maxReviewReceiptBytes+1))
 +	_ = f.Close()
-+	if err != nil || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
++	if statErr != nil || readErr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || len(raw) == 0 || int64(len(raw)) > maxReviewReceiptBytes {
 +		return diskReceiptPreserveUntouched
 +	}
 +	if e.lastPersistedSHA == "" || sha256Hex(string(raw)) != e.lastPersistedSHA {
@@ -12724,23 +13054,34 @@ index e69de29..ba9229a 100644
 +	return diskReceiptSafeToWrite
 +}
 +
++func (e *reviewEntry) invalidateDiskReceiptInRootLocked(launchRoot *os.Root) {
++	if e.foreignDisk || launchRoot == nil {
++		return
++	}
++	// Never call os.Truncate on receipt.json: Truncate follows symlinks, whereas Root.Remove
++	// unlinks only the directory entry inside the verified, descriptor-pinned launch directory.
++	// Retain producer.json so a failed taint persistence still leaves the launch directory
++	// non-reusable across restarts and safely reclaimable once past reviewDiskRetention.
++	_ = launchRoot.Remove("receipt.json")
++	_ = launchRoot.Remove("seal.sha256")
++	_ = syncPinnedDir(launchRoot, e.directory)
++}
++
 +func (e *reviewEntry) invalidateDiskReceiptLocked() {
 +	if e.foreignDisk {
 +		return
 +	}
-+	if _, err := checkPrivateDir(filepath.Dir(e.directory), false); err != nil {
++	rootHandle, _, _, err := openVerifiedPrivateRoot(filepath.Dir(e.directory))
++	if err != nil {
 +		return
 +	}
-+	if _, err := checkPrivateDir(e.directory, false); err != nil {
++	defer rootHandle.Close()
++	launchRoot, _, err := openVerifiedSubdir(rootHandle, filepath.Base(e.directory))
++	if err != nil {
 +		return
 +	}
-+	finalPath := filepath.Join(e.directory, "receipt.json")
-+	sealDigestPath := filepath.Join(e.directory, "seal.sha256")
-+	// Never call os.Truncate on receipt.json: Truncate follows symlinks, whereas os.Remove
-+	// unlinks only the directory entry inside the verified private launch directory.
-+	_ = os.Remove(finalPath)
-+	_ = os.Remove(sealDigestPath)
-+	_ = syncDirFn(e.directory)
++	defer launchRoot.Close()
++	e.invalidateDiskReceiptInRootLocked(launchRoot)
 +}
 +
 +func (e *reviewEntry) persistLocked() error {
@@ -12756,36 +13097,53 @@ index e69de29..ba9229a 100644
 +	if !ok {
 +		return false, ErrUnavailable
 +	}
-+	// Acquire single-writer root lock FIRST, before any fail-cleanup or disk mutation path.
++	// Acquire single-writer root lock FIRST and pin all disk mutations to the locked root handle.
 +	// Never unlink or modify any file under root unless this process owns <root>/.writer.lock.
-+	if err := acquirePrivateRootLock(root); err != nil {
++	rootHandle, err := acquirePrivateRootHandle(root)
++	if err != nil {
 +		return false, ErrUnavailable
 +	}
++	defer rootHandle.Close()
++
++	var launchRoot *os.Root
 +	invalidateOnFail := false
 +	createdDir := false
 +	fail := func(renamed bool, err error) (bool, error) {
 +		if invalidateOnFail && e.tainted && !e.foreignDisk {
-+			e.invalidateDiskReceiptLocked()
++			e.invalidateDiskReceiptInRootLocked(launchRoot)
 +		}
 +		if createdDir && !renamed && !e.markerPersisted && e.lastPersistedSHA == "" {
-+			_ = os.Remove(e.directory)
++			if launchRoot != nil {
++				_ = launchRoot.Remove("producer.json")
++			}
++			_ = rootHandle.Remove(e.launch)
 +			e.reserved = false
 +		}
 +		return renamed, err
 +	}
 +	if !e.reserved {
-+		created, err := reservePrivateDirTracked(e.directory, true)
-+		if err != nil {
-+			return fail(false, err)
++		sub, _, created, rerr := reservePrivateSubdir(rootHandle, root, e.launch, true)
++		if rerr != nil {
++			return fail(false, rerr)
 +		}
++		launchRoot = sub
++		defer launchRoot.Close()
 +		createdDir = created
++		if created {
++			if merr := writeReviewMarkerInSubdir(launchRoot, e.directory, e.launch, e.started); merr != nil {
++				return fail(false, merr)
++			}
++		}
 +		e.reserved = true
 +	} else {
-+		if _, err := checkPrivateDir(e.directory, false); err != nil {
++		sub, _, serr := openVerifiedSubdir(rootHandle, e.launch)
++		if serr != nil {
 +			return fail(false, ErrUnavailable)
 +		}
++		launchRoot = sub
++		defer launchRoot.Close()
 +	}
-+	switch e.inspectDiskReceiptBeforeWriteLocked() {
++	switch e.inspectDiskReceiptBeforeWriteLocked(launchRoot) {
 +	case diskReceiptPreserveUntouched:
 +		e.tainted = true
 +		e.sealed = false
@@ -12857,8 +13215,8 @@ index e69de29..ba9229a 100644
 +	sealedDigest := ""
 +	if sealed {
 +		sealedDigest = sha256Hex(string(data))
-+		shaTmp := filepath.Join(e.directory, fmt.Sprintf("pending-sha-%d-%d", os.Getpid(), seq))
-+		sf, err := os.OpenFile(shaTmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++		shaTmp := fmt.Sprintf("pending-sha-%d-%d", os.Getpid(), seq)
++		sf, err := launchRoot.OpenFile(shaTmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 +		if err != nil {
 +			return fail(false, err)
 +		}
@@ -12866,19 +13224,19 @@ index e69de29..ba9229a 100644
 +		errSyncSHA := sf.Sync()
 +		errCloseSHA := sf.Close()
 +		if errWriteSHA != nil || errSyncSHA != nil || errCloseSHA != nil {
-+			_ = os.Remove(shaTmp)
++			_ = launchRoot.Remove(shaTmp)
 +			return fail(false, ErrUnavailable)
 +		}
-+		if err := os.Rename(shaTmp, filepath.Join(e.directory, "seal.sha256")); err != nil {
-+			_ = os.Remove(shaTmp)
++		if err := launchRoot.Rename(shaTmp, "seal.sha256"); err != nil {
++			_ = launchRoot.Remove(shaTmp)
 +			return fail(false, err)
 +		}
 +	}
-+	tmp := filepath.Join(e.directory, fmt.Sprintf("pending-%d-%d", os.Getpid(), seq))
-+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	tmp := fmt.Sprintf("pending-%d-%d", os.Getpid(), seq)
++	f, err := launchRoot.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 +	if err != nil {
 +		if sealed {
-+			_ = os.Remove(filepath.Join(e.directory, "seal.sha256"))
++			_ = launchRoot.Remove("seal.sha256")
 +		}
 +		return fail(false, err)
 +	}
@@ -12886,16 +13244,16 @@ index e69de29..ba9229a 100644
 +	errSync := f.Sync()
 +	errClose := f.Close()
 +	if errWrite != nil || errSync != nil || errClose != nil {
-+		_ = os.Remove(tmp)
++		_ = launchRoot.Remove(tmp)
 +		if sealed {
-+			_ = os.Remove(filepath.Join(e.directory, "seal.sha256"))
++			_ = launchRoot.Remove("seal.sha256")
 +		}
 +		return fail(false, ErrUnavailable)
 +	}
-+	if err := os.Rename(tmp, filepath.Join(e.directory, "receipt.json")); err != nil {
-+		_ = os.Remove(tmp)
++	if err := launchRoot.Rename(tmp, "receipt.json"); err != nil {
++		_ = launchRoot.Remove(tmp)
 +		if sealed {
-+			_ = os.Remove(filepath.Join(e.directory, "seal.sha256"))
++			_ = launchRoot.Remove("seal.sha256")
 +		}
 +		return fail(false, err)
 +	}
@@ -12903,7 +13261,7 @@ index e69de29..ba9229a 100644
 +	if sealed {
 +		e.sealedReceiptSHA = sealedDigest
 +	}
-+	if err := syncDirFn(e.directory); err != nil {
++	if err := syncPinnedDir(launchRoot, e.directory); err != nil {
 +		return fail(true, err)
 +	}
 +	e.markerPersisted = true
@@ -12942,7 +13300,8 @@ index e69de29..ba9229a 100644
 +	if c.invalid || c.attemptFailed || c.sealed || !c.handlerDone || !c.lifecycleDone || c.active != 0 || c.bodies != 0 || c.executions == 0 || len(c.receipt.Routes) == 0 {
 +		return
 +	}
-+	if time.Now().After(c.deadline) {
++	now := time.Now()
++	if now.After(c.deadline) {
 +		c.invalid = true
 +		return
 +	}
@@ -13022,14 +13381,33 @@ index e69de29..ba9229a 100644
 +		return
 +	}
 +	c.receipt.Complete = true
-+	c.receipt.Finished = time.Now().UnixNano()
++	c.receipt.Finished = now.UnixNano()
++	if c.receipt.Finished < c.receipt.Started || c.receipt.Finished-c.receipt.Started > int64(Lifetime) {
++		return
++	}
 +	data, err := json.Marshal(c.receipt)
 +	if err != nil {
 +		return
 +	}
-+	// Same-directory exclusive temporary file and rename: readers see all or nothing.
-+	tmp := filepath.Join(c.directory, "pending")
-+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	rootDir := filepath.Dir(c.directory)
++	rootHandle, err := acquirePrivateRootHandle(rootDir)
++	if err != nil {
++		return
++	}
++	defer rootHandle.Close()
++	subRoot, subFI, err := openVerifiedSubdir(rootHandle, c.receipt.Session)
++	if err != nil {
++		return
++	}
++	defer subRoot.Close()
++	if c.hasDirID {
++		if sDev, sIno, okID := statDevIno(subFI); okID && (sDev != c.dirDev || sIno != c.dirIno) {
++			return
++		}
++	}
++	// Same-directory exclusive temporary file and non-overwriting atomic link:
++	// readers see all or nothing, and an existing/foreign receipt.json is never clobbered.
++	f, err := subRoot.OpenFile("pending", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 +	if err != nil {
 +		return
 +	}
@@ -13037,21 +13415,33 @@ index e69de29..ba9229a 100644
 +	errSync := f.Sync()
 +	errClose := f.Close()
 +	if errWrite != nil || errSync != nil || errClose != nil {
-+		_ = os.Remove(tmp)
++		_ = subRoot.Remove("pending")
 +		return
 +	}
-+	if err := os.Rename(tmp, filepath.Join(c.directory, "receipt.json")); err == nil {
-+		_ = os.Remove(filepath.Join(c.directory, "producer.json"))
-+		_ = syncDirFn(c.directory)
-+	} else {
-+		_ = os.Remove(tmp)
++	linkErr := subRoot.Link("pending", "receipt.json")
++	_ = subRoot.Remove("pending")
++	if linkErr != nil {
++		return
 +	}
++	if c.hasMarkerID && c.markerSHA256 != "" {
++		if mf, merr := subRoot.OpenFile("producer.json", os.O_RDONLY|syscall.O_NOFOLLOW, 0); merr == nil {
++			mfi, serr := mf.Stat()
++			mRaw, rerr := io.ReadAll(io.LimitReader(mf, 4097))
++			_ = mf.Close()
++			if serr == nil && rerr == nil && mfi.Mode().IsRegular() && mfi.Mode().Perm()&0077 == 0 && ownedByCurrentUser(mfi) {
++				if mDev, mIno, okM := statDevIno(mfi); okM && mDev == c.markerDev && mIno == c.markerIno && sha256Hex(string(mRaw)) == c.markerSHA256 {
++					_ = subRoot.Remove("producer.json")
++				}
++			}
++		}
++	}
++	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..30d7c36 100644
+index e69de29..c5b13ba 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,6356 @@
+@@ -0,0 +1,6617 @@
 +package preflightreceipt
 +
 +import (
@@ -18150,6 +18540,17 @@ index e69de29..30d7c36 100644
 +		}
 +	}
 +	_ = os.Chtimes(r1RecPath, ancient, ancient)
++	r1MarkerPath := filepath.Join(r1Dir, "producer.json")
++	if rawM, err := os.ReadFile(r1MarkerPath); err == nil {
++		var m reviewReservationMarker
++		if json.Unmarshal(rawM, &m) == nil {
++			m.Started = ancient.UnixNano()
++			if dataM, merr := json.Marshal(m); merr == nil {
++				_ = os.WriteFile(r1MarkerPath, dataM, 0600)
++			}
++		}
++		_ = os.Chtimes(r1MarkerPath, ancient, ancient)
++	}
 +	_ = os.Chtimes(r1Dir, ancient, ancient)
 +	key1 := filepath.Clean(root) + "\x00" + r1Launch
 +	reviewMu.Lock()
@@ -18212,6 +18613,7 @@ index e69de29..30d7c36 100644
 +	// 2. A review-UUID dir with a foreign receipt.json MUST fail closed WITHOUT overwriting or deleting the foreign file.
 +	r2Dir := filepath.Join(root, r2Launch)
 +	_ = os.Remove(filepath.Join(r2Dir, "receipt.json"))
++	_ = os.Remove(filepath.Join(r2Dir, "producer.json"))
 +	_ = os.Remove(r2Dir)
 +	reviewMu.Lock()
 +	delete(reviewLedger, filepath.Clean(root)+"\x00"+r2Launch)
@@ -19406,5 +19808,254 @@ index e69de29..30d7c36 100644
 +
 +	if st := SealReview(root, launch, session); st != SealRejected {
 +		t.Fatalf("SealReview after output_item.added with missing item.type = %v, want SealRejected", st)
++	}
++}
++
++func TestReviewReceiptPinnedRootHandleSurvivesAncestorSwap(t *testing.T) {
++	// Sol P1 #1 + Astra P1 #1 (PR #2280 R38): once a root handle is pinned via acquirePrivateRootHandle,
++	// reclamation/removal MUST operate through that descriptor-pinned root inode even if an ancestor
++	// directory is renamed and replaced with a decoy directory containing the same launch name.
++	base := t.TempDir()
++	origParent := filepath.Join(base, "parent")
++	origRoot := filepath.Join(origParent, "receipts")
++	if err := os.Mkdir(origParent, 0700); err != nil {
++		t.Fatal(err)
++	}
++	launch := "review-a1111111-2222-4333-8444-555555555501"
++	res, err := ReserveReview(origRoot, launch)
++	if err != nil {
++		t.Fatal(err)
++	}
++	res.Release()
++
++	pinnedRoot, err := acquirePrivateRootHandle(origRoot)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer pinnedRoot.Close()
++
++	// Rename origParent away and plant a decoy tree at the original path with the exact same launch name.
++	movedParent := filepath.Join(base, "moved-parent")
++	if err := os.Rename(origParent, movedParent); err != nil {
++		t.Fatal(err)
++	}
++	decoyRoot := filepath.Join(origParent, "receipts")
++	decoyLaunchDir := filepath.Join(decoyRoot, launch)
++	if err := os.MkdirAll(decoyLaunchDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chmod(origParent, 0700)
++	_ = os.Chmod(decoyRoot, 0700)
++	_ = os.Chmod(decoyLaunchDir, 0700)
++	decoySentinel := filepath.Join(decoyLaunchDir, "receipt.json")
++	if err := os.WriteFile(decoySentinel, []byte("DO-NOT-DELETE-DECOY"), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// Removing via pinnedRoot MUST remove the moved original launch dir and NEVER touch decoyLaunchDir.
++	if !removeVerifiedLeafSubdir(pinnedRoot, launch, true) {
++		t.Fatalf("removeVerifiedLeafSubdir on pinned root failed after ancestor rename")
++	}
++	if _, err := os.Lstat(filepath.Join(movedParent, "receipts", launch)); !os.IsNotExist(err) {
++		t.Fatalf("original launch dir was not removed through pinned root: %v", err)
++	}
++	if got, err := os.ReadFile(decoySentinel); err != nil || string(got) != "DO-NOT-DELETE-DECOY" {
++		t.Fatalf("decoy tree at swapped ancestor path was modified: err=%v raw=%q", err, string(got))
++	}
++}
++
++func TestReviewReceiptFailedTaintPersistRetainsProducerMarkerAndReclaimsQuota(t *testing.T) {
++	// Sol P2 #2 (PR #2280 R38): when taint persistence fails and invalidateDiskReceiptInRootLocked
++	// removes receipt.json, producer.json MUST remain so the launch stays non-reusable after restart
++	// AND is safely reclaimed once past reviewDiskRetention so quota recovers.
++	oldReviewCap := maxReviewDiskEntries
++	oldReviewRet := reviewDiskRetention
++	maxReviewDiskEntries = 1
++	reviewDiskRetention = 24 * time.Hour
++	defer func() {
++		maxReviewDiskEntries = oldReviewCap
++		reviewDiskRetention = oldReviewRet
++	}()
++
++	root := filepath.Join(t.TempDir(), "taint-reclaim-receipts")
++	launch1 := "review-a2222222-2222-4333-8444-555555555501"
++	session1 := "019d0000-0000-7000-8000-aaaaaaaaaa01"
++	ctx, c, err := BeginReview(context.Background(), root, launch1, session1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_taint_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	// Force taint persistence to fail at tmp file creation so invalidateDiskReceiptInRootLocked removes receipt.json.
++	dir1 := filepath.Join(root, launch1)
++	blocker := filepath.Join(dir1, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
++	if err := os.Mkdir(blocker, 0700); err != nil {
++		t.Fatal(err)
++	}
++	TaintReview(root, launch1)
++	_ = os.Remove(blocker)
++
++	if _, err := os.Lstat(filepath.Join(dir1, "receipt.json")); !os.IsNotExist(err) {
++		t.Fatalf("expected receipt.json removed on failed taint persist, got %v", err)
++	}
++	markerPath := filepath.Join(dir1, "producer.json")
++	if _, err := os.Lstat(markerPath); err != nil {
++		t.Fatalf("expected producer.json retained after failed taint persist: %v", err)
++	}
++
++	// Simulate proxy restart: launch1 MUST stay unsealable & non-reusable.
++	reviewMu.Lock()
++	delete(reviewLedger, filepath.Clean(root)+"\x00"+launch1)
++	reviewMu.Unlock()
++	if st := SealReview(root, launch1, session1); st != SealRejected {
++		t.Fatalf("post-restart SealReview on marker-only tainted launch = %v, want SealRejected", st)
++	}
++	if _, err := ReserveReview(root, launch1); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("post-restart ReserveReview reused marker-only tainted launch: %v", err)
++	}
++
++	// Age producer.json + dir1 past 24h retention -> fresh launch2 MUST reclaim dir1 and recover quota.
++	ancient := time.Now().Add(-48 * time.Hour)
++	agedMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch1, Started: ancient.UnixNano()})
++	if err := os.WriteFile(markerPath, agedMarker, 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(markerPath, ancient, ancient)
++	_ = os.Chtimes(dir1, ancient, ancient)
++	reviewMu.Lock()
++	delete(reviewLedger, filepath.Clean(root)+"\x00"+launch1)
++	reviewMu.Unlock()
++
++	launch2 := "review-a2222222-2222-4333-8444-555555555502"
++	res2, err := ReserveReview(root, launch2)
++	if err != nil {
++		t.Fatalf("ReserveReview launch2 failed to reclaim expired marker-only tainted dir1: %v", err)
++	}
++	res2.Release()
++	if _, err := os.Lstat(dir1); !os.IsNotExist(err) {
++		t.Fatalf("expired marker-only dir1 was not reclaimed: %v", err)
++	}
++}
++
++func TestPreflightReceiptPublishNeverOverwritesForeignReceiptOrMarker(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R38): legacy preflight publishLocked MUST NOT overwrite an existing
++	// receipt.json (uses non-overwriting atomic Link) AND MUST NOT delete a replaced producer.json.
++	root := filepath.Join(t.TempDir(), "preflight-no-clobber")
++
++	// Case 1: Pre-existing receipt.json appears before publish -> MUST NOT be overwritten, and producer.json untouched.
++	sess1 := "preflight-a3333333-2222-4333-8444-555555555501"
++	ctx1, c1, err := Begin(context.Background(), root, sess1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp1, err := cl1.Do(req1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp1.Body)
++	_ = resp1.Body.Close()
++
++	foreignReceipt := `{"foreign":"keep-receipt-untouched"}`
++	recPath1 := filepath.Join(root, sess1, "receipt.json")
++	if err := os.WriteFile(recPath1, []byte(foreignReceipt), 0600); err != nil {
++		t.Fatal(err)
++	}
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++
++	if got, err := os.ReadFile(recPath1); err != nil || string(got) != foreignReceipt {
++		t.Fatalf("legacy preflight publish overwrote existing receipt.json: err=%v raw=%q", err, string(got))
++	}
++
++	// Case 2: producer.json replaced by foreign file before publish -> receipt.json publishes, replaced producer.json stays untouched.
++	sess2 := "preflight-a3333333-2222-4333-8444-555555555502"
++	ctx2, c2, err := Begin(context.Background(), root, sess2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx2, e2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp2, err := cl2.Do(req2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp2.Body)
++	_ = resp2.Body.Close()
++
++	foreignMarker := `{"foreign":"keep-marker-untouched"}`
++	markerPath2 := filepath.Join(root, sess2, "producer.json")
++	if err := os.Remove(markerPath2); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(markerPath2, []byte(foreignMarker), 0600); err != nil {
++		t.Fatal(err)
++	}
++	e2.End()
++	c2.Complete(true)
++	c2.HandlerDone(true)
++
++	if got, err := os.ReadFile(markerPath2); err != nil || string(got) != foreignMarker {
++		t.Fatalf("legacy preflight publish deleted replaced producer.json: err=%v raw=%q", err, string(got))
++	}
++}
++
++func TestPreflightReceiptReclaimerEnforces50sLifetime(t *testing.T) {
++	// Astra P2 #3 (PR #2280 R38): preflight receipt reclamation MUST reject receipts whose
++	// finished_ns - started_ns exceeds the 50-second Lifetime bound.
++	root := filepath.Join(t.TempDir(), "preflight-lifetime-reclaim")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	ancient := time.Now().Add(-48 * time.Hour)
++	sess := "preflight-a4444444-2222-4333-8444-555555555501"
++	dir := filepath.Join(root, sess)
++	if err := os.Mkdir(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	tooLongData, _ := json.Marshal(Receipt{
++		Schema:   Schema,
++		Session:  sess,
++		Started:  ancient.UnixNano(),
++		Finished: ancient.Add(2 * time.Hour).UnixNano(),
++		Complete: true,
++		Routes:   []string{"codex:gpt-6.2-sol@chatgpt.com"},
++	})
++	if err := os.WriteFile(filepath.Join(dir, "receipt.json"), tooLongData, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(dir, sess, false); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted preflight receipt exceeding 50s Lifetime")
 +	}
 +}

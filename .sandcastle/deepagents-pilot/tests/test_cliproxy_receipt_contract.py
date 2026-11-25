@@ -774,3 +774,47 @@ def test_receipt_readers_reject_symlinked_ancestor_directory(tmp_path):
         expected_response_id_sha256=resp_sha,
         expected_output_sha256=out_sha,
     ) is None
+
+
+def test_route_from_host_receipt_accepts_relative_path_and_rejects_symlink_ancestor(tmp_path, monkeypatch):
+    """Astra P2 #4 (PR #2280 R38): --proxy-receipt-dir 传入 ./receipts 相对路径须正常工作，仍拒绝符号链接祖先。"""
+    import time
+
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir(mode=0o700)
+    real_root = real_parent / "receipts"
+    real_root.mkdir(mode=0o700)
+    os.chmod(real_root, 0o700)
+
+    sym_parent = tmp_path / "sym-parent"
+    sym_parent.symlink_to(real_parent)
+
+    now_ns = time.time_ns()
+    since = now_ns / 1e9 - 5.0
+    pf_session = "preflight-bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeee1"
+    pf_dir = real_root / pf_session
+    pf_dir.mkdir(mode=0o700)
+    os.chmod(pf_dir, 0o700)
+    pf_path = pf_dir / "receipt.json"
+    pf_path.write_bytes(json.dumps({
+        "schema": log_mod.SCHEMA,
+        "session": pf_session,
+        "started_ns": now_ns,
+        "finished_ns": now_ns,
+        "complete": True,
+        "routes": ["codex:gpt-6.2-sol@chatgpt.com"],
+    }).encode("utf-8"))
+    os.chmod(pf_path, 0o600)
+
+    monkeypatch.chdir(real_parent)
+    assert preflight.route_from_host_receipt(
+        "./receipts", pf_session, since, 1.0, preflight.Deadline(5)
+    ) == [("codex:gpt-6.2-sol", "chatgpt.com")]
+
+    monkeypatch.chdir(tmp_path)
+    assert preflight.route_from_host_receipt(
+        "./sym-parent/receipts", pf_session, since, 1.0, preflight.Deadline(5)
+    ) is None
+    assert preflight.route_from_host_receipt(
+        "./sym-parent/../real-parent/receipts", pf_session, since, 1.0, preflight.Deadline(5)
+    ) is None
