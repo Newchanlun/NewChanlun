@@ -19,6 +19,13 @@ ENV = dict(os.environ, LC_ALL="C", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 
 
+def say(text):
+    """按 UTF-8 字节直接写标准输出，与 locale 无关。"""
+    data = (text + "\n").encode("utf-8", "backslashreplace")
+    while data:
+        data = data[os.write(1, data):]
+
+
 def sh(cwd, *cmd):
     return subprocess.run(cmd, cwd=cwd, env=ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -152,7 +159,7 @@ def main():
             commit(base)
         rc, err = check(base)
         if rc != 0:
-            print("阴性对照不绿：rc=%d %s" % (rc, err)); return 1
+            say("阴性对照不绿：rc=%d %s" % (rc, err)); return 1
         for i, (name, fn, do_commit, want_rc, want_sub) in enumerate(CASES):
             c = os.path.join(tmp, "c%d" % i)
             git(tmp, "clone", "-q", "--shared", base, c)
@@ -161,26 +168,33 @@ def main():
                 commit(c)
             rc, err = check(c)
             ok = rc == want_rc and want_sub in err
-            print("%s %-26s rc=%d %s" % ("ok  " if ok else "FAIL", name, rc, err.strip().splitlines()[:1]))
+            say("%s %-26s rc=%d %s" % ("ok  " if ok else "FAIL", name, rc, err.strip().splitlines()[:1]))
             if not ok:
                 fails.append(name)
             shutil.rmtree(c, ignore_errors=True)
-        # 输出环境：结论不随 locale 变；成功提示写不出去时退 2，不退 0 也不退别的数。
+        # 输出环境。断管用例用可编码的环境，并断言诊断确是 EPIPE；ASCII 用例断言绿行能按 UTF-8 解出。
         cmd = [sys.executable, "-I", "-X", "utf8=0", G + "/check_admit_identity.py"]
         asc = dict(ENV, LC_ALL="C", LANG="C")
+        utf = dict(ENV, LC_ALL="C.UTF-8", LANG="C.UTF-8")
         r, w = os.pipe(); os.close(r)
-        io_cases = [
-            ("ascii-locale-green", subprocess.run(cmd, cwd=base, env=asc, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode, 0),
-            ("ascii-locale-bad-rev", subprocess.run(cmd + ["--rev", "nope"], cwd=base, env=asc, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode, 2),
-            ("stdout-broken-pipe", subprocess.run(cmd, cwd=base, env=ENV, stdout=w, stderr=subprocess.PIPE).returncode, 2),
-            ("print-pin-broken-pipe", subprocess.run(cmd + ["--print-pin"], cwd=base, env=ENV, stdout=w, stderr=subprocess.PIPE).returncode, 2),
-        ]
+        run = lambda extra, env, out: subprocess.run(cmd + extra, cwd=base, env=env, stdout=out, stderr=subprocess.PIPE)
+        g = run([], asc, subprocess.PIPE)
+        b1, b2 = run([], utf, w), run(["--print-pin"], utf, w)
         os.close(w)
-        for name, rc, want in io_cases:
-            print("%s %-26s rc=%d" % ("ok  " if rc == want else "FAIL", name, rc))
-            if rc != want:
+        io_cases = [
+            ("ascii-locale-green", g.returncode == 0 and "GREEN" in g.stdout.decode("utf-8") and "身份检查" in g.stdout.decode("utf-8")),
+            ("ascii-locale-bad-rev", run(["--rev", "nope"], asc, subprocess.PIPE).returncode == 2),
+            ("stdout-broken-pipe", b1.returncode == 2 and b"Broken pipe" in b1.stderr),
+            ("print-pin-broken-pipe", b2.returncode == 2 and b"Broken pipe" in b2.stderr),
+            ("bad-argument", run(["--bogus"], asc, subprocess.PIPE).returncode == 2),
+            ("no-abbreviation", run(["--print-pi"], asc, subprocess.PIPE).returncode == 2),
+            ("missing-option-value", run(["--rev"], asc, subprocess.PIPE).returncode == 2),
+        ]
+        for name, ok in io_cases:
+            say("%s %s" % ("ok  " if ok else "FAIL", name))
+            if not ok:
                 fails.append(name)
-    print("身份检查自测：%d 项，不符 %d" % (len(CASES) + 5, len(fails)))
+    say("身份检查自测：%d 项，不符 %d" % (len(CASES) + 8, len(fails)))
     return 1 if fails else 0
 
 

@@ -7,7 +7,6 @@
 
 退出码：0 相符；1 不符；2 无法运行。调用方只应把 0 当作通过。只用标准库，`python3 -I` 运行。
 """
-import argparse
 import hashlib
 import os
 import subprocess
@@ -107,19 +106,28 @@ def note(text):
 
 
 def main():
-    ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--root", default=None)
-    ap.add_argument("--rev", default="HEAD")
-    ap.add_argument("--print-pin", action="store_true")
-    a = ap.parse_args()
+    # 参数自己解析：只认 `--root 路径`、`--rev 提交`、`--print-pin`，不接受缩写；写错退 2。
+    root, rev_arg, print_pin = None, "HEAD", False
+    args = sys.argv[1:]
+    while args:
+        opt = args.pop(0)
+        if opt == "--print-pin":
+            print_pin = True
+        elif opt in ("--root", "--rev") and args:
+            if opt == "--root":
+                root = args.pop(0)
+            else:
+                rev_arg = args.pop(0)
+        else:
+            note("无法运行：参数无效 %s" % opt)
+            return 2
     bad = []
     try:
-        root = a.root
         if root is None:
             top = git(HERE, "rev-parse", "--show-toplevel")
             root = os.fsdecode(top[:-1] if top.endswith(b"\n") else top)
-        rev = git(root, "rev-parse", "--verify", a.rev + "^{commit}").decode().strip()
-        if a.print_pin:
+        rev = git(root, "rev-parse", "--verify", rev_arg + "^{commit}").decode().strip()
+        if print_pin:
             emit(1, pin_text(tree(root, rev, ADMIT)))
             return 0
         # 钉选取自同一提交的 git 对象，不读检出的文件：检出时的换行转换不影响比对。
