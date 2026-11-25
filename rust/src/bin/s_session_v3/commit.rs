@@ -9,8 +9,9 @@ use super::audit_store::{CodecRead, NativeAdmission};
 use super::business_json::TextValue;
 use super::{control::S3Control, *};
 #[cfg(test)]
-use content_manifest::ManifestRoots;
-use content_manifest::{ManifestMetadata, ManifestRootSource, UnpublishedManifest};
+use content_manifest::{ManifestMetadata, ManifestRoots};
+use content_manifest::{ManifestRootSource, UnpublishedManifest};
+use newchan_rust::s_content::ContextError as PublishError;
 use newchan_rust::s_content::{self as sc, path::PathStep, ContentRef, Kind};
 use rusqlite::Transaction;
 use sc::capture_allocation::native_owned::NativeValue;
@@ -56,10 +57,11 @@ pub(super) struct CommitReceipt {
 pub(super) fn publish_prepared(
     mut tx: Transaction<'_>,
     begin_token: &str,
-    metadata: &ManifestMetadata,
+    metadata: &(impl crate::content_manifest::MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
 ) -> Result<CommitReceipt, String> {
+    let metadata = &metadata.view();
     let receipt = publish_borrowed(
         &mut tx,
         begin_token,
@@ -67,6 +69,7 @@ pub(super) fn publish_prepared(
         roots,
         manifest,
         &ThetaConfig::default().record_labels(),
+        None,
     )?;
     tx.commit().map_err(err)?;
     Ok(receipt)
@@ -79,11 +82,13 @@ pub(super) fn publish_prepared(
 pub(super) fn publish_borrowed(
     tx: &mut Transaction<'_>,
     begin_token: &str,
-    metadata: &ManifestMetadata,
+    metadata: &(impl crate::content_manifest::MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
     policy_records: &str,
+    commit_reading: Option<&v2::CommitReadingSlot>,
 ) -> Result<CommitReceipt, String> {
+    let metadata = &metadata.view();
     publish_prepared_inner(
         tx,
         begin_token,
@@ -100,13 +105,15 @@ pub(super) fn publish_borrowed(
         None,
         #[cfg(feature = "s_incremental")]
         None,
+        commit_reading,
     )
+    .map_err(newchan_rust::s_content::ContextError::into_message)
 }
 #[cfg(all(test, feature = "s_incremental"))]
 pub(super) fn publish_borrowed_staged(
     tx: &mut Transaction<'_>,
     token: &str,
-    m: &ManifestMetadata,
+    m: &(impl crate::content_manifest::MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
     policy_records: &str,
@@ -117,7 +124,9 @@ pub(super) fn publish_borrowed_staged(
     #[cfg(feature = "s_incremental")] source_manifest: Option<
         content_manifest::ManifestSourceReceipt,
     >,
+    commit_reading: Option<&v2::CommitReadingSlot>,
 ) -> Result<CommitReceipt, String> {
+    let m = &m.view();
     publish_prepared_inner(
         tx,
         token,
@@ -130,7 +139,9 @@ pub(super) fn publish_borrowed_staged(
         workspace,
         work,
         source_manifest,
+        commit_reading,
     )
+    .map_err(newchan_rust::s_content::ContextError::into_message)
 }
 #[cfg(feature = "s_incremental")]
 #[allow(
@@ -140,12 +151,13 @@ pub(super) fn publish_borrowed_staged(
 pub(super) fn publish_borrowed_with_workspace(
     tx: &mut Transaction<'_>,
     token: &str,
-    m: &ManifestMetadata,
+    m: &(impl crate::content_manifest::MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
     policy_records: &str,
     workspace: Option<content_manifest::PreparedManifestWorkspace>,
 ) -> Result<CommitReceipt, String> {
+    let m = &m.view();
     publish_borrowed_with_workspace_admitted(
         tx,
         token,
@@ -156,13 +168,15 @@ pub(super) fn publish_borrowed_with_workspace(
         workspace,
         None,
         None,
+        None,
     )
+    .map_err(newchan_rust::s_content::ContextError::into_message)
 }
 #[cfg(feature = "s_incremental")]
 pub(super) fn publish_borrowed_with_workspace_admitted(
     tx: &mut Transaction<'_>,
     token: &str,
-    m: &ManifestMetadata,
+    m: &(impl crate::content_manifest::MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
     policy_records: &str,
@@ -171,7 +185,9 @@ pub(super) fn publish_borrowed_with_workspace_admitted(
     #[cfg(feature = "s_incremental")] source_manifest: Option<
         content_manifest::ManifestSourceReceipt,
     >,
-) -> Result<CommitReceipt, String> {
+    commit_reading: Option<&v2::CommitReadingSlot>,
+) -> Result<CommitReceipt, PublishError> {
+    let m = &m.view();
     publish_prepared_inner(
         tx,
         token,
@@ -186,12 +202,13 @@ pub(super) fn publish_borrowed_with_workspace_admitted(
         workspace,
         work,
         source_manifest,
+        commit_reading,
     )
 }
 fn publish_prepared_inner(
     tx: &mut Transaction<'_>,
     begin_token: &str,
-    metadata: &ManifestMetadata,
+    metadata: &(impl crate::content_manifest::MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     manifest: &UnpublishedManifest,
     policy_records: &str,
@@ -204,7 +221,9 @@ fn publish_prepared_inner(
     #[cfg(feature = "s_incremental")] source_manifest: Option<
         content_manifest::ManifestSourceReceipt,
     >,
-) -> Result<CommitReceipt, String> {
+    commit_reading: Option<&v2::CommitReadingSlot>,
+) -> Result<CommitReceipt, PublishError> {
+    let metadata = &metadata.view();
     let m = metadata;
     let (count, head): (i64, i64) = tx
         .query_row(
@@ -212,9 +231,9 @@ fn publish_prepared_inner(
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(err)?;
+        .map_err(publish_err)?;
     if count != head || m.generation.checked_sub(1) != Some(head) {
-        return Err(err("发布历史缺代或本次代号不是下一代"));
+        return Err((publish_err("发布历史缺代或本次代号不是下一代")).into());
     }
     #[cfg(all(test, feature = "s_incremental"))]
     let resolved = match stage {
@@ -271,8 +290,8 @@ fn publish_prepared_inner(
         }
         None => None,
     };
-    let clock = v2::stored_clock(&tx)?;
-    let control = S3Control::attach(&tx, &clock)?;
+    let clock = v2::stored_clock_on((&*tx).into(), work)?;
+    let control = S3Control::attach(&tx, clock.view())?.with_commit_reading(commit_reading);
     let source = &m.source_commit;
     let view = control.load_pending(
         &source.source_namespace,
@@ -280,26 +299,26 @@ fn publish_prepared_inner(
         &source.message_id,
     )?;
     if view.is_committed() || view.is_fresh() {
-        return Err(err("本次发布消息不是已接纳未提交状态"));
+        return Err((publish_err("本次发布消息不是已接纳未提交状态")).into());
     }
     if !control.sealed_commit_matches(&view, &m.semantic_commit_ns)? {
-        return Err(err("本次提交时刻与持久 Begin 不同"));
+        return Err(publish_err("本次提交时刻与持久 Begin 不同"));
     }
 
     let (seq_range, run, evidence_ref) = {
         #[cfg(all(test, feature = "s_incremental"))]
         let mut store = content_store::TxStore::new_with_stage(&tx, stage)
-            .map_err(err)?
+            .map_err(publish_err)?
             .with_work(work);
         #[cfg(not(all(test, feature = "s_incremental")))]
         let mut store = content_store::TxStore::new(&tx)
-            .map_err(err)?
+            .map_err(publish_err)?
             .with_work(work);
         let seq_range = small_field(&mut store, &resolved.delta, "seq_range")?;
         let run = small_field(&mut store, &resolved.delta, "catalog_run_status")?;
         let run = run
             .as_str()
-            .ok_or_else(|| err("目录运行状态不是文本"))?
+            .ok_or_else(|| publish_err("目录运行状态不是文本"))?
             .to_owned();
         // 活动工作域下查找签发的原正文许可随引用持有，至函数结束随对象释放。
         let evidence_ref = sc::path::lookup_path_native(
@@ -307,9 +326,9 @@ fn publish_prepared_inner(
             (&resolved.delta).into(),
             &[PathStep::Field("catalog_evidence".into())],
         )
-        .map_err(err)?;
+        .map_err(publish_err)?;
         if evidence_ref.kind != Kind::Object {
-            return Err(err("目录证据不是对象"));
+            return Err((publish_err("目录证据不是对象")).into());
         }
         (canonical_json(&seq_range), run, evidence_ref)
     };
@@ -322,24 +341,24 @@ fn publish_prepared_inner(
         params![m.generation,m.session_id,m.catalog_revision,m.base_cut,m.structure_cut,
             seq_range,manifest.batch_id,m.input_frontier,run,
             reference_json(&evidence_ref)?,reference_json(&resolved.delta)?,policy_records],
-    ).map_err(err)?;
+    ).map_err(publish_err)?;
     tx.execute(
         "INSERT INTO s_content_publications(generation,batch_id,manifest_root,snapshot_root,delta_root)
          VALUES(?1,?2,?3,?4,?5)",
         params![m.generation,manifest.batch_id,&manifest.value.digest[..],
-            &resolved.snapshot.digest().map_err(err)?[..],&resolved.delta.digest().map_err(err)?[..]],
-    ).map_err(err)?;
+            &resolved.snapshot.digest().map_err(publish_err)?[..],&resolved.delta.digest().map_err(publish_err)?[..]],
+    ).map_err(publish_err)?;
     control.commit_sealed(&view, m.generation, m.input_frontier, &m.semantic_commit_ns)?;
     let admission = NativeAdmission(work);
     let generation_text = admission
         .native_format(format_args!("{}", m.generation))
-        .map_err(err)?;
+        .map_err(publish_err)?;
     let frontier_text = admission
         .native_format(format_args!("{}", m.input_frontier))
-        .map_err(err)?;
+        .map_err(publish_err)?;
     for (key, value) in [
         ("generation", generation_text.as_str()),
-        ("structure_cut", m.structure_cut.as_str()),
+        ("structure_cut", m.structure_cut),
         ("index_frontier", manifest.batch_id.as_str()),
         ("last_advance_frontier", frontier_text.as_str()),
         ("advance_state", "idle"),
@@ -362,13 +381,17 @@ fn publish_prepared_inner(
             // 本代显式控制/目录/生成根；generated_state包含catalog_axes各轴evidence。
             let current = [
                 manifest.value.digest,
-                resolved.snapshot.digest().map_err(err)?,
-                resolved.delta.digest().map_err(err)?,
-                evidence_ref.digest().map_err(err)?,
-                roots.view().generated_state.digest().map_err(err)?,
-                roots.view().publication_template.digest().map_err(err)?,
-                roots.view().delta_template.digest().map_err(err)?,
-                metadata.scope.digest().map_err(err)?,
+                resolved.snapshot.digest().map_err(publish_err)?,
+                resolved.delta.digest().map_err(publish_err)?,
+                evidence_ref.digest().map_err(publish_err)?,
+                roots.view().generated_state.digest().map_err(publish_err)?,
+                roots
+                    .view()
+                    .publication_template
+                    .digest()
+                    .map_err(publish_err)?,
+                roots.view().delta_template.digest().map_err(publish_err)?,
+                metadata.scope.digest().map_err(publish_err)?,
             ];
             stage.flush_cut(tx, staged_nodes::FlushCut::Final(&current))?;
             stage.flush_cut(tx, staged_nodes::FlushCut::Final(runtime))?;
@@ -391,8 +414,8 @@ fn err(e: impl std::fmt::Display) -> String {
     format!("PublicationInvalid：{e}")
 }
 
-fn reference_json(reference: &ContentRef) -> Result<String, String> {
-    reference.digest().map_err(err)?;
+fn reference_json(reference: &ContentRef) -> Result<String, PublishError> {
+    reference.digest().map_err(publish_err)?;
     Ok(canonical_json(&reference.to_transport_json()))
 }
 
@@ -401,14 +424,14 @@ fn small_field(
     store: &mut dyn sc::NodeStore,
     root: &ContentRef,
     field: &str,
-) -> Result<Value, String> {
+) -> Result<Value, PublishError> {
     // 活动工作域下查找签发的原正文许可随引用持有，渲染后随对象释放。
     let reference =
         sc::path::lookup_path_native(store, root.into(), &[PathStep::Field(field.into())])
-            .map_err(err)?;
+            .map_err(publish_err)?;
     let mut bytes = Vec::new();
-    sc::render_canonical(store, &reference, &mut bytes).map_err(err)?;
-    strict_json(&bytes)
+    sc::render_canonical(store, &reference, &mut bytes).map_err(publish_err)?;
+    strict_json(&bytes).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -742,4 +765,8 @@ pub(crate) mod tests {
         assert_eq!(count(&f.conn, "s_content_nodes"), 0);
         assert_eq!(count(&f.conn, "s_content_publications"), 0);
     }
+}
+
+fn publish_err(error: impl Into<PublishError>) -> PublishError {
+    error.into().context("PublicationInvalid：")
 }

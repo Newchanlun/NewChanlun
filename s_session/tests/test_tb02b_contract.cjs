@@ -73,6 +73,10 @@ test('公开Q3零代入口保留具名历史规则并拒绝未知规则', async 
       await API.Q3.validateState(emptyState(rule),protocol);
     await assert.rejects(API.Q3.validateState(emptyState('unknown-rule'),protocol),/cut规则修订未声明/);
   }
+  // #1855 B5：结构版本根各恰一份只管非零代 cut；S3 结构规则的零代空 cut 照常通过。裸 V3 结构串是 Rust 已登记串（B1）。
+  const T = API.Q3.typed;
+  for (const rule of [T.W_STRUCTURE_RULE, T.W2_PUBLICATION_RULE, T.W2_ARCHIVED_RULE, T.V3_STRUCTURE_RULE])
+    await API.Q3.validateState(emptyState(rule),'s-session/3');
 });
 // 单个完整 typed 端点对象的 cut；内容身份按该 cut 的会话规则闭合，使合同代际绑定成为唯一可能的拒因。
 async function endpointCut(generation, rule, protocol = 's-session/2') {

@@ -518,7 +518,9 @@ def PairwiseRel {α β : Type} (R : α → β → Prop) : List α → List β �
 
 /--
   ★中枢在某起点 `i` 由子走势窗口生成（codex 第三轮：核心 ZD/ZG + 外缘 DD/GG 都 sound，
-  对齐 Phase 1 `RecursiveConstruction.CenterDerivedAt`，zhongshu.md:53-60 第20课）。
+  zhongshu.md:53-60 第20课）。本定义属本文件自带 `Move` 的独立 v0 reference ladder，外缘仍取三段全外缘；
+  Phase 1 `RecursiveConstruction.CenterDerivedAt` 自 d7d8d233c5 起外缘只聚合 Zn，两者已不再对齐，
+  统一见 #2073。
 
   中枢 `c` 在起点 `i` 由 `subs` 生成 ⟺ 连续三段 `subs[i..i+2]` 的区间重叠产生 `c`：
   - 核心：`c.zd = max(三段 lo)`、`c.zg = min(三段 hi)`（zhongshu.md:60）；
