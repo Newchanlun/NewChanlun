@@ -2796,10 +2796,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..659b121
+index 0000000..9b50f41
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,1307 @@
+@@ -0,0 +1,1403 @@
 +package executor
 +
 +import (
@@ -4106,9 +4106,105 @@ index 0000000..659b121
 +			t.Fatalf("unknown bare line SealReview = %v, want SealRejected", st)
 +		}
 +	})
++
++	t.Run("legacy codex preflight rejects headerless response.done before normalization", func(t *testing.T) {
++		// Sol P1 #1 + Astra P1 #1 (PR #2280 R59): legacy Codex preflight must reject raw response.done
++		// BEFORE normalizeCodexWebsocketCompletion rewrites it to response.completed, returning a stream
++		// error and publishing no receipt.
++		root := filepath.Join(t.TempDir(), "receipts-leg-done")
++		session := "preflight-a9999999-2222-4333-8444-555555555501"
++		sseDone := "data: " + `{"type":"response.done","response":{"id":"resp_leg_done_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"ok\":true}"}]}]}}` + "\n\n"
++		ctx, c, err := preflightreceipt.Begin(context.Background(), root, session)
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseDone))
++		}}
++		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++		stream, err := exec.ExecuteStream(ctx, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		sawErr := false
++		for ch := range stream.Chunks {
++			if ch.Err != nil {
++				sawErr = true
++			}
++			if ch.Payload != nil && strings.Contains(string(ch.Payload), "response.completed") {
++				t.Fatalf("legacy preflight normalized response.done into response.completed: %s", string(ch.Payload))
++			}
++		}
++		if !sawErr {
++			t.Fatalf("expected stream error when legacy preflight receives response.done")
++		}
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if _, statErr := os.Stat(filepath.Join(root, session, "receipt.json")); !os.IsNotExist(statErr) {
++			t.Fatalf("legacy preflight published receipt for response.done: %v", statErr)
++		}
++	})
++
++	t.Run("legacy codex preflight rejects conflicting terminal in failure tail while allowing bare DONE", func(t *testing.T) {
++		// Sol P2 #2 (PR #2280 R59): legacy Codex preflight failure-tail draining must reuse strict
++		// SSE tail validation so a conflicting terminal after response.failed rejects the Collector
++		// and prevents a subsequent retry from publishing a receipt.
++		root := filepath.Join(t.TempDir(), "receipts-leg-fail-conflict")
++		session := "preflight-a9999999-2222-4333-8444-555555555502"
++		sseConflictTail := "event: response.failed\n" +
++			"data: " + `{"type":"response.failed","response":{"id":"resp_fail_c1","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"transient"}}}` + "\n\n" +
++			"event: response.completed\n" +
++			"data: " + `{"type":"response.completed","response":{"id":"resp_fail_c1","status":"completed","model":"gpt-6.2-sol"}}` + "\n\n"
++		sseOK := "event: response.completed\n" +
++			"data: " + `{"type":"response.completed","response":{"id":"resp_ok_c2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"ok\":true}"}]}]}}` + "\n\n" +
++			"data: [DONE]\n\n"
++
++		ctx, c, err := preflightreceipt.Begin(context.Background(), root, session)
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx1, lease1, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt1 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseConflictTail))
++		}}
++		ctx1 = context.WithValue(ctx1, "cliproxy.roundtripper", http.RoundTripper(rt1))
++		stream1, err := exec.ExecuteStream(ctx1, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for range stream1.Chunks {
++		}
++		lease1.End()
++
++		if ctx2, lease2, err2 := c.Start(ctx, "codex", "gpt-6.2-sol"); err2 == nil {
++			rt2 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++				return io.NopCloser(strings.NewReader(sseOK))
++			}}
++			ctx2 = context.WithValue(ctx2, "cliproxy.roundtripper", http.RoundTripper(rt2))
++			if stream2, serr2 := exec.ExecuteStream(ctx2, auth, req, opts); serr2 == nil {
++				for range stream2.Chunks {
++				}
++			}
++			lease2.End()
++		}
++		c.Complete(true)
++		c.HandlerDone(true)
++
++		if _, statErr := os.Stat(filepath.Join(root, session, "receipt.json")); !os.IsNotExist(statErr) {
++			t.Fatalf("legacy preflight published receipt despite conflicting terminal in failure tail: %v", statErr)
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..eebf25a 100644
+index 6074124..320d333 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,10 +3,12 @@ package executor
@@ -4148,7 +4244,7 @@ index 6074124..eebf25a 100644
  	var bootstrapTimeout time.Duration
  	var bootstrapStart time.Time
  	if buffering {
-@@ -444,19 +454,508 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +454,476 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -4214,8 +4310,13 @@ index 6074124..eebf25a 100644
 +				bytes.Equal(l, []byte("id")) || bytes.HasPrefix(l, []byte("id:")) ||
 +				bytes.Equal(l, []byte("retry")) || bytes.HasPrefix(l, []byte("retry:"))
 +		}
-+		drainAndValidateStrictFailureTail := func() {
-+			if !strictReview {
++		drainAndValidateFailureTail := func() {
++			// Both strict review and legacy Codex preflight (holdTerminalUntilEOF) must validate and
++			// drain the bounded failure tail through EOF before returning a retryable error: only
++			// comments, id/retry metadata, blank lines, and a bare [DONE] are valid after a terminal
++			// failure; any conflicting terminal frame, malformed line, over-limit tail, or missing EOF
++			// invalidates the Collector via failPostTerminal() so a retry cannot publish a receipt.
++			if !holdTerminalUntilEOF {
 +				return
 +			}
 +			pc := preflightreceipt.From(ctx)
@@ -4239,18 +4340,18 @@ index 6074124..eebf25a 100644
 +			for scanner.Scan() {
 +				tl := scanner.Bytes()
 +				if !utf8.Valid(tl) {
-+					pc.Taint()
++					failPostTerminal()
 +					return
 +				}
 +				tailLines++
 +				tailBytes += len(tl) + 1
 +				if tailLines > maxPendingStrictTerminalLines || tailBytes > maxPendingStrictTerminalBytes {
-+					pc.Taint()
++					failPostTerminal()
 +					return
 +				}
 +				if len(tl) == 0 {
 +					if !validateTailEvent() {
-+						pc.Taint()
++						failPostTerminal()
 +						return
 +					}
 +					tailData = nil
@@ -4275,56 +4376,16 @@ index 6074124..eebf25a 100644
 +					continue
 +				}
 +				// Unrecognized non-SSE line in failure tail violates strict SSE framing.
-+				pc.Taint()
++				failPostTerminal()
 +				return
 +			}
 +			if scanner.Err() != nil || !validateTailEvent() {
-+				pc.Taint()
++				failPostTerminal()
 +				return
 +			}
 +			closeBody()
 +			if !pc.UpstreamEOF() {
-+				pc.Taint()
-+			}
-+		}
-+		drainLegacyPreflightFailureTail := func() {
-+			// Legacy Codex preflight (holdTerminalUntilEOF && !strictReview) must drain bounded
-+			// trailing failure lines (e.g. data: [DONE]) through EOF before returning a retryable
-+			// error so bodyTracker observes EOF and keeps the shared Collector eligible to retry.
-+			// If the failure tail exceeds bounds, hits a scanner error, or does not reach upstream EOF,
-+			// reject the Collector explicitly so a later retry cannot publish a receipt.
-+			if !holdTerminalUntilEOF || strictReview {
-+				return
-+			}
-+			pc := preflightreceipt.From(ctx)
-+			tailLines := 0
-+			tailBytes := 0
-+			for scanner.Scan() {
-+				tl := scanner.Bytes()
-+				if !utf8.Valid(tl) {
-+					if pc != nil {
-+						pc.Taint()
-+					}
-+					return
-+				}
-+				tailLines++
-+				tailBytes += len(tl) + 1
-+				if tailLines > maxPendingStrictTerminalLines || tailBytes > maxPendingStrictTerminalBytes {
-+					if pc != nil {
-+						pc.Taint()
-+					}
-+					return
-+				}
-+			}
-+			if scanner.Err() != nil {
-+				if pc != nil {
-+					pc.Taint()
-+				}
-+				return
-+			}
-+			closeBody()
-+			if pc != nil && !pc.UpstreamEOF() {
-+				pc.Taint()
++				failPostTerminal()
 +			}
 +		}
 +		buildEventChunks := func(metaLines [][]byte, dataPayload []byte, isIncomplete bool) ([]cliproxyexecutor.StreamChunk, int, bool) {
@@ -4402,14 +4463,12 @@ index 6074124..eebf25a 100644
 +							if strictReview {
 +								if pc := preflightreceipt.From(ctx); pc != nil {
 +									pc.ValidateStrictEvent(evName, hasEv, joined)
-+									if sawStrictTerminal {
-+										pc.Taint()
-+									}
 +								}
-+								drainAndValidateStrictFailureTail()
-+							} else if holdTerminalUntilEOF {
-+								drainLegacyPreflightFailureTail()
 +							}
++							if sawStrictTerminal {
++								failPostTerminal()
++							}
++							drainAndValidateFailureTail()
 +							if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 +								helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 +								reporter.PublishFailure(ctx, errClearReplay)
@@ -4434,14 +4493,12 @@ index 6074124..eebf25a 100644
 +							if strictReview {
 +								if pc := preflightreceipt.From(ctx); pc != nil {
 +									pc.ValidateStrictEvent(evName, hasEv, joined)
-+									if sawStrictTerminal {
-+										pc.Taint()
-+									}
 +								}
-+								drainAndValidateStrictFailureTail()
-+							} else if holdTerminalUntilEOF {
-+								drainLegacyPreflightFailureTail()
 +							}
++							if sawStrictTerminal {
++								failPostTerminal()
++							}
++							drainAndValidateFailureTail()
 +							streamErr := newCodexEmptyIncompleteStreamError()
 +							helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 +							reporter.PublishFailure(ctx, streamErr)
@@ -4474,10 +4531,17 @@ index 6074124..eebf25a 100644
 +						case "response.output_item.done":
 +							collectCodexOutputItemDone(eventPayload, outputItemsByIndex, &outputItemsFallback)
 +						case "response.completed", "response.incomplete", "response.done":
-+							if strictReview && eventType == "response.done" {
++							if eventType == "response.done" {
 +								pendingStrictTerminal = nil
 +								pendingStrictBytes = 0
 +								failPostTerminal()
++								streamErr := newStrictReviewValidationError()
++								helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
++								reporter.PublishFailure(ctx, streamErr)
++								select {
++								case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
++								case <-ctx.Done():
++								}
 +								return
 +							}
 +							terminalSuccess = true
@@ -4659,7 +4723,7 @@ index 6074124..eebf25a 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +1040,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +1008,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
@@ -7116,10 +7180,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..ec3d1aa 100644
+index e69de29..21cb472 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,10570 @@
+@@ -0,0 +1,10641 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7292,10 +7356,13 @@ index e69de29..ec3d1aa 100644
 +	tainted               bool
 +	taintedPersisted      bool
 +	foreignDisk           bool
-+	lastTurnFailed    bool
-+	nextTurnSeq       uint64
-+	failedTurnSeq     uint64
-+	reserved          bool
++	lastTurnFailed        bool
++	nextTurnSeq           uint64
++	failedTurnSeq         uint64
++	pendingFailedTurnSeq  uint64
++	pendingTaint          bool
++	failurePersistRunning bool
++	reserved              bool
 +	markerPersisted   bool
 +	touched           time.Time
 +	inFlight          int
@@ -7578,29 +7645,70 @@ index e69de29..ec3d1aa 100644
 +	})
 +}
 +
-+func recordExistingReviewTurnFailure(entry *reviewEntry, turnSeq uint64, taint bool) {
-+	defer releaseReview(entry)
-+	entry.mu.Lock()
-+	if !entry.sealed && !entry.tainted {
-+		if taint {
-+			entry.taintAndPersistLocked()
-+		} else {
-+			if turnSeq > entry.failedTurnSeq {
-+				entry.failedTurnSeq = turnSeq
-+			}
-+			latestPubSeq := uint64(0)
-+			if len(entry.publishedTurns) > 0 {
-+				latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
-+			}
-+			entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
-+			if entry.lastTurnFailed {
-+				if err := entry.persistLocked(); err != nil {
-+					entry.taintAndPersistLocked()
++// scheduleExistingReviewTurnFailureLocked records a rejected turn's sequence/taint under reviewMu
++// and coalesces synchronous disk persistence so an overload storm on an existing launch cannot
++// queue unbounded goroutines on entry.mu or fsync; at most one goroutine drains coalesced updates
++// while holding entry.inFlight > 0 so SealReview cannot race ahead and seal a stale turn.
++func scheduleExistingReviewTurnFailureLocked(entry *reviewEntry, turnSeq uint64, taint bool) bool {
++	if entry == nil || entry.sealedFlag || entry.sealing {
++		return false
++	}
++	if turnSeq > entry.pendingFailedTurnSeq {
++		entry.pendingFailedTurnSeq = turnSeq
++	}
++	if taint {
++		entry.pendingTaint = true
++	}
++	if entry.failurePersistRunning {
++		return false
++	}
++	entry.failurePersistRunning = true
++	entry.inFlight++
++	return true
++}
++
++func drainExistingReviewTurnFailures(entry *reviewEntry) {
++	for {
++		reviewMu.Lock()
++		targetSeq := entry.pendingFailedTurnSeq
++		targetTaint := entry.pendingTaint
++		reviewMu.Unlock()
++
++		entry.mu.Lock()
++		if !entry.sealed && !entry.tainted {
++			if targetTaint {
++				entry.taintAndPersistLocked()
++			} else {
++				wasFailed := entry.lastTurnFailed
++				if targetSeq > entry.failedTurnSeq {
++					entry.failedTurnSeq = targetSeq
++				}
++				latestPubSeq := uint64(0)
++				if len(entry.publishedTurns) > 0 {
++					latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
++				}
++				entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
++				if entry.lastTurnFailed && !wasFailed {
++					if err := entry.persistLocked(); err != nil {
++						entry.taintAndPersistLocked()
++					}
 +				}
 +			}
 +		}
++		doneTerminal := entry.sealed || entry.tainted
++		entry.mu.Unlock()
++
++		reviewMu.Lock()
++		if doneTerminal || (entry.pendingFailedTurnSeq <= targetSeq && (!entry.pendingTaint || targetTaint)) {
++			entry.failurePersistRunning = false
++			if entry.inFlight > 0 {
++				entry.inFlight--
++			}
++			reviewMu.Unlock()
++			return
++		}
++		reviewMu.Unlock()
 +	}
-+	entry.mu.Unlock()
 +}
 +
 +// BeginPendingReview registers a bounded in-memory pre-admission guard BEFORE reading the
@@ -7635,10 +7743,9 @@ index e69de29..ec3d1aa 100644
 +		if st != nil && turnSeq > st.failedTurnSeq {
 +			st.failedTurnSeq = turnSeq
 +		}
-+		if entry != nil {
-+			entry.inFlight++
++		if entry != nil && scheduleExistingReviewTurnFailureLocked(entry, turnSeq, false) {
 +			reviewMu.Unlock()
-+			recordExistingReviewTurnFailure(entry, turnSeq, false)
++			drainExistingReviewTurnFailures(entry)
 +			return nil, ErrUnavailable
 +		}
 +		reviewMu.Unlock()
@@ -7646,10 +7753,9 @@ index e69de29..ec3d1aa 100644
 +	}
 +	if st != nil {
 +		if st.tainted {
-+			if entry != nil {
-+				entry.inFlight++
++			if entry != nil && scheduleExistingReviewTurnFailureLocked(entry, turnSeq, true) {
 +				reviewMu.Unlock()
-+				recordExistingReviewTurnFailure(entry, turnSeq, true)
++				drainExistingReviewTurnFailures(entry)
 +				return nil, ErrUnavailable
 +			}
 +			reviewMu.Unlock()
@@ -7661,10 +7767,9 @@ index e69de29..ec3d1aa 100644
 +		return &PendingReviewGuard{key: key, turnSeq: turnSeq, holdsSlot: true}, nil
 +	}
 +	if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
-+		if entry != nil {
-+			entry.inFlight++
++		if entry != nil && scheduleExistingReviewTurnFailureLocked(entry, turnSeq, false) {
 +			reviewMu.Unlock()
-+			recordExistingReviewTurnFailure(entry, turnSeq, false)
++			drainExistingReviewTurnFailures(entry)
 +			return nil, ErrUnavailable
 +		}
 +		reviewMu.Unlock()
@@ -15320,58 +15425,97 @@ index e69de29..ec3d1aa 100644
 +	return stagingRoot.Remove(name) == nil
 +}
 +
++type stagingSweepCursor struct {
++	dir     *os.File
++	dev     uint64
++	ino     uint64
++	hasID   bool
++	touched time.Time
++}
++
 +var (
-+	stagingSweepMu      sync.Mutex
-+	stagingSweepCursors = make(map[string]string)
++	maxStagingSweepHandles = 4
++	stagingSweepMu         sync.Mutex
++	stagingSweepCursors    = make(map[string]*stagingSweepCursor)
 +)
 +
-+func sweepOrphanStagingDir(rootHandle, stagingRoot *os.Root, root string, forceAllInactive bool) int {
++func sweepOrphanStagingDir(rootHandle, stagingRoot *os.Root, root string, stagingDev, stagingIno uint64, hasStagingID, forceAllInactive bool) int {
 +	if stagingRoot == nil {
 +		return 0
 +	}
-+	df, err := stagingRoot.Open(".")
-+	if err != nil {
-+		return 0
-+	}
-+	names, err := df.Readdirnames(-1)
-+	_ = df.Close()
-+	if err != nil || len(names) == 0 {
-+		stagingSweepMu.Lock()
-+		delete(stagingSweepCursors, root)
-+		stagingSweepMu.Unlock()
-+		return 0
-+	}
-+	slices.Sort(names)
 +	budget := maxStagingSweepInspectPerCall
 +	if forceAllInactive {
 +		budget = maxStagingSweepStartupPerCall
 +	}
 +	if budget <= 0 {
-+		budget = len(names)
++		budget = 64
 +	}
 +	stagingSweepMu.Lock()
-+	cursorName := stagingSweepCursors[root]
++	cur := stagingSweepCursors[root]
++	if cur != nil {
++		delete(stagingSweepCursors, root)
++	}
 +	stagingSweepMu.Unlock()
-+	startIdx := 0
-+	if cursorName != "" {
-+		idx, found := slices.BinarySearch(names, cursorName)
-+		if found {
-+			idx++
-+		}
-+		if idx < len(names) {
-+			startIdx = idx
++
++	var df *os.File
++	if cur != nil && cur.dir != nil {
++		if !hasStagingID || !cur.hasID || (cur.dev == stagingDev && cur.ino == stagingIno) {
++			df = cur.dir
++		} else {
++			_ = cur.dir.Close()
 +		}
 +	}
-+	endIdx := startIdx + budget
-+	if endIdx > len(names) {
-+		endIdx = len(names)
++	if df == nil {
++		opened, err := stagingRoot.Open(".")
++		if err != nil {
++			return 0
++		}
++		df = opened
++	}
++	// Bound directory enumeration itself via Readdirnames(budget) so a large crash backlog in
++	// .staging never allocates or sorts the full directory on startup or quota-reclaim paths.
++	names, readErr := df.Readdirnames(budget)
++	keepCursor := readErr == nil && len(names) == budget
++	if keepCursor {
++		var evictDir *os.File
++		stagingSweepMu.Lock()
++		if _, exists := stagingSweepCursors[root]; exists {
++			evictDir = df
++		} else {
++			if len(stagingSweepCursors) >= maxStagingSweepHandles {
++				var oldestKey string
++				var oldestTime time.Time
++				for k, c := range stagingSweepCursors {
++					if oldestKey == "" || c.touched.Before(oldestTime) {
++						oldestKey, oldestTime = k, c.touched
++					}
++				}
++				if oldestKey != "" {
++					evictDir = stagingSweepCursors[oldestKey].dir
++					delete(stagingSweepCursors, oldestKey)
++				}
++			}
++			stagingSweepCursors[root] = &stagingSweepCursor{
++				dir:     df,
++				dev:     stagingDev,
++				ino:     stagingIno,
++				hasID:   hasStagingID,
++				touched: time.Now(),
++			}
++		}
++		stagingSweepMu.Unlock()
++		if evictDir != nil {
++			_ = evictDir.Close()
++		}
++	} else {
++		_ = df.Close()
++	}
++	if len(names) == 0 {
++		return 0
 +	}
 +	now := time.Now()
 +	removed := 0
-+	lastProcessed := ""
-+	for i := startIdx; i < endIdx; i++ {
-+		name := names[i]
-+		lastProcessed = name
++	for _, name := range names {
 +		if isStagingEntryActive(root, name) {
 +			continue
 +		}
@@ -15477,16 +15621,6 @@ index e69de29..ec3d1aa 100644
 +			}
 +		}
 +	}
-+	stagingSweepMu.Lock()
-+	if len(stagingSweepCursors) > 64 {
-+		stagingSweepCursors = make(map[string]string)
-+	}
-+	if endIdx >= len(names) || lastProcessed == "" {
-+		delete(stagingSweepCursors, root)
-+	} else {
-+		stagingSweepCursors[root] = lastProcessed
-+	}
-+	stagingSweepMu.Unlock()
 +	if removed > 0 {
 +		_ = syncPinnedDir(stagingRoot, filepath.Join(root, ".staging"))
 +	}
@@ -15497,12 +15631,13 @@ index e69de29..ec3d1aa 100644
 +	if rootHandle == nil {
 +		return 0
 +	}
-+	stagingRoot, _, err := openVerifiedSubdir(rootHandle, ".staging")
++	stagingRoot, stagingFI, err := openVerifiedSubdir(rootHandle, ".staging")
 +	if err != nil {
 +		return 0
 +	}
 +	defer stagingRoot.Close()
-+	return sweepOrphanStagingDir(rootHandle, stagingRoot, root, forceAllInactive)
++	stagingDev, stagingIno, hasStagingID := statDevIno(stagingFI)
++	return sweepOrphanStagingDir(rootHandle, stagingRoot, root, stagingDev, stagingIno, hasStagingID, forceAllInactive)
 +}
 +
 +func ensureStagingDir(rootHandle *os.Root, root string) (*os.Root, error) {
@@ -17691,10 +17826,10 @@ index e69de29..ec3d1aa 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..4e34626 100644
+index e69de29..cf6e9e2 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,11042 @@
+@@ -0,0 +1,11198 @@
 +package preflightreceipt
 +
 +import (
@@ -28609,51 +28744,78 @@ index e69de29..4e34626 100644
 +}
 +
 +func TestReviewReceiptStrictTrackerEnforcesCumulativeStateBudget(t *testing.T) {
-+	// Sol P1 #1b (PR #2280 R58): strictStreamTracker must enforce cumulative hash-state and
-+	// part-entry budgets across all items in a turn (preventing item*part multiplicative blowup).
-+	oldHashCap := maxTrackedTotalHashStates
-+	oldPartCap := maxTrackedTotalPartEntries
-+	maxTrackedTotalHashStates = 3
-+	maxTrackedTotalPartEntries = 6
-+	defer func() {
-+		maxTrackedTotalHashStates = oldHashCap
-+		maxTrackedTotalPartEntries = oldPartCap
-+	}()
-+
-+	root := filepath.Join(t.TempDir(), "tracker-budget")
-+	launch := "review-fa0a0a0a-2222-4333-8444-555555555501"
-+	session := "019d0000-0000-7000-8000-fffffffffb01"
-+	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
-+	})})
-+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
-+	resp, err := cl.Do(req)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	_, _ = io.Copy(io.Discard, resp.Body)
-+	_ = resp.Body.Close()
-+
-+	// Emit 4 distinct (item_id, content_index) text deltas (exceeding maxTrackedTotalHashStates=3).
++	// Sol P1 #1b & Astra P2 #4 (PR #2280 R58/R59): run ONE complete, valid multi-item SSE stream
++	// first under sufficient cumulative budget (proving SealOK), then replay the EXACT SAME stream
++	// lowering ONLY maxTrackedTotalHashStates (proving SealRejected) and ONLY maxTrackedTotalPartEntries
++	// (proving SealRejected).
 +	var sb strings.Builder
++	var outItems []string
++	sb.WriteString("event: response.created\ndata: " + `{"type":"response.created","response":{"id":"resp_budget","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n")
 +	for i := 0; i < 4; i++ {
-+		sb.WriteString(fmt.Sprintf("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_%d\",\"output_index\":%d,\"content_index\":0,\"delta\":\"x\"}\n\n", i, i))
++		phase := "commentary"
++		if i == 3 {
++			phase = "final_answer"
++		}
++		sb.WriteString(fmt.Sprintf("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":%d,\"item\":{\"id\":\"msg_%d\",\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"%s\"}}\n\n", i, i, phase))
++		sb.WriteString(fmt.Sprintf("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_%d\",\"output_index\":%d,\"content_index\":0,\"delta\":\"x%d\"}\n\n", i, i, i))
++		sb.WriteString(fmt.Sprintf("event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_%d\",\"output_index\":%d,\"content_index\":0,\"text\":\"x%d\"}\n\n", i, i, i))
++		itemJSON := fmt.Sprintf(`{"id":"msg_%d","type":"message","role":"assistant","phase":"%s","content":[{"type":"output_text","text":"x%d"}]}`, i, phase, i)
++		sb.WriteString(fmt.Sprintf("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":%d,\"item\":%s}\n\n", i, itemJSON))
++		outItems = append(outItems, itemJSON)
 +	}
-+	sb.WriteString(`event: response.completed` + "\n" + `data: {"type":"response.completed","response":{"id":"resp_budget","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","id":"msg_0","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"x"}]}]}}` + "\n\n")
-+	c.ObserveStreamChunk([]byte(sb.String()))
-+	e.End()
-+	c.Complete(true)
-+	c.HandlerDone(true)
-+	if st := SealReview(root, launch, session); st != SealRejected {
-+		t.Fatalf("SealReview after exceeding cumulative tracker budget = %v, want SealRejected", st)
++	sb.WriteString(fmt.Sprintf("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_budget\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[%s]}}\n\n", strings.Join(outItems, ",")))
++	sb.WriteString("data: [DONE]\n\n")
++	fullStream := []byte(sb.String())
++
++	runWithCaps := func(t *testing.T, launch, session string, hashCap, partCap int) SealStatus {
++		t.Helper()
++		oldHashCap := maxTrackedTotalHashStates
++		oldPartCap := maxTrackedTotalPartEntries
++		maxTrackedTotalHashStates = hashCap
++		maxTrackedTotalPartEntries = partCap
++		defer func() {
++			maxTrackedTotalHashStates = oldHashCap
++			maxTrackedTotalPartEntries = oldPartCap
++		}()
++
++		root := filepath.Join(t.TempDir(), "tracker-budget")
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++
++		c.ObserveStreamChunk(fullStream)
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReview(root, launch, session)
++	}
++
++	// 1. Sufficient cumulative budget -> exact stream seals SealOK.
++	if st := runWithCaps(t, "review-fa0a0a0a-2222-4333-8444-555555555501", "019d0000-0000-7000-8000-fffffffffb01", 10, 20); st != SealOK {
++		t.Fatalf("valid 4-item stream under sufficient budget = %v, want SealOK", st)
++	}
++	// 2. Lower ONLY maxTrackedTotalHashStates to 3 -> exact same stream MUST fail SealRejected.
++	if st := runWithCaps(t, "review-fa0a0a0a-2222-4333-8444-555555555502", "019d0000-0000-7000-8000-fffffffffb02", 3, 20); st != SealRejected {
++		t.Fatalf("same 4-item stream under hashCap=3 = %v, want SealRejected", st)
++	}
++	// 3. Lower ONLY maxTrackedTotalPartEntries to 3 -> exact same stream MUST fail SealRejected.
++	if st := runWithCaps(t, "review-fa0a0a0a-2222-4333-8444-555555555503", "019d0000-0000-7000-8000-fffffffffb03", 10, 3); st != SealRejected {
++		t.Fatalf("same 4-item stream under partCap=3 = %v, want SealRejected", st)
 +	}
 +}
 +
@@ -28684,8 +28846,9 @@ index e69de29..4e34626 100644
 +}
 +
 +func TestStagingSweepBoundedBatchAndResumesCursor(t *testing.T) {
-+	// Astra P2 #4 (PR #2280 R58): orphan .staging sweep must process bounded batches and resume
-+	// via cursor across consecutive calls instead of scanning the entire directory on each quota hit.
++	// Astra P2 #4 (R58) & Astra P2 #3 (R59): orphan .staging sweep must bound directory
++	// enumeration itself via Readdirnames(budget), advance past non-deleted fresh entries across
++	// consecutive bounded calls, and close the directory cursor at EOF (zero leaked handles).
 +	oldBatch := maxStagingSweepInspectPerCall
 +	maxStagingSweepInspectPerCall = 3
 +	defer func() { maxStagingSweepInspectPerCall = oldBatch }()
@@ -28707,33 +28870,161 @@ index e69de29..4e34626 100644
 +
 +	ancient := time.Now().Add(-2 * time.Hour)
 +	stagingPath := filepath.Join(root, ".staging")
-+	for i := 0; i < 7; i++ {
++	// Mix 4 fresh (non-deleted!) staging files and 4 aged orphan staging files so bounded
++	// Readdirnames(3) MUST resume via its open directory cursor to reach every aged orphan.
++	for i := 0; i < 8; i++ {
 +		name := fmt.Sprintf("pending-1-%d-%016x", i+1, i+1)
 +		p := filepath.Join(stagingPath, name)
-+		raw := fmt.Sprintf(`{"schema":"cliproxy-preflight-v1","session":"preflight-00000000-0000-4000-8000-%012d","started_ns":%d,"finished_ns":%d,"complete":true,"routes":["codex:gpt-6.2-sol@chatgpt.com"]}`, i+1, ancient.UnixNano(), ancient.UnixNano())
++		ts := ancient
++		if i < 4 {
++			ts = time.Now()
++		}
++		raw := fmt.Sprintf(`{"schema":"cliproxy-preflight-v1","session":"preflight-00000000-0000-4000-8000-%012d","started_ns":%d,"finished_ns":%d,"complete":true,"routes":["codex:gpt-6.2-sol@chatgpt.com"]}`, i+1, ts.UnixNano(), ts.UnixNano())
 +		if err := os.WriteFile(p, []byte(raw), 0600); err != nil {
 +			t.Fatal(err)
 +		}
-+		_ = os.Chtimes(p, ancient, ancient)
++		if i >= 4 {
++			_ = os.Chtimes(p, ancient, ancient)
++		}
 +	}
 +
-+	r1 := sweepOrphanStagingInRoot(lease.dir, root, false)
-+	if r1 != 3 {
-+		t.Fatalf("batch 1 removed %d staging files, want 3", r1)
++	totalRemoved := 0
++	for step := 0; step < 6; step++ {
++		r := sweepOrphanStagingInRoot(lease.dir, root, false)
++		if r > 3 {
++			t.Fatalf("step %d removed %d staging files, exceeds per-call Readdirnames budget 3", step, r)
++		}
++		totalRemoved += r
++		if totalRemoved == 4 {
++			break
++		}
 +	}
-+	r2 := sweepOrphanStagingInRoot(lease.dir, root, false)
-+	if r2 != 3 {
-+		t.Fatalf("batch 2 removed %d staging files, want 3", r2)
++	if totalRemoved != 4 {
++		t.Fatalf("bounded cursor sweep removed %d aged staging files, want 4", totalRemoved)
 +	}
-+	r3 := sweepOrphanStagingInRoot(lease.dir, root, false)
-+	if r3 != 1 {
-+		t.Fatalf("batch 3 removed %d staging files, want 1", r3)
-+	}
++	// Run one more call if needed to ensure EOF closes the cursor handle cleanly.
++	_ = sweepOrphanStagingInRoot(lease.dir, root, false)
++	_ = sweepOrphanStagingInRoot(lease.dir, root, false)
 +	rem, err := os.ReadDir(stagingPath)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if len(rem) != 0 {
-+		t.Fatalf("expected .staging empty after 3 bounded batches, still has %d entries", len(rem))
++	if len(rem) != 4 {
++		t.Fatalf("expected 4 fresh staging files preserved, got %d", len(rem))
++	}
++	stagingSweepMu.Lock()
++	_, stillOpen := stagingSweepCursors[root]
++	stagingSweepMu.Unlock()
++	if stillOpen {
++		t.Fatalf("expected staging sweep cursor closed after reaching EOF")
++	}
++}
++
++func TestReviewReceiptOverloadCoalescesExistingLaunchFailurePersist(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R59): when maxPendingReviewInFlight is saturated, burst overload
++	// rejections targeting an existing unsealed launch must coalesce failure persistence instead
++	// of queuing unbounded goroutines on entry.mu/fsync, returning ErrUnavailable immediately
++	// while still preserving failure sequence and preventing stale Turn 1 sealing.
++	oldCap := maxPendingReviewInFlight
++	maxPendingReviewInFlight = 1
++	defer func() { maxPendingReviewInFlight = oldCap }()
++
++	root := filepath.Join(t.TempDir(), "overload-coalesce")
++	l1 := "review-fc0c0c0c-2222-4333-8444-555555555501"
++	s1 := "019d0000-0000-7000-8000-fffffffffe11"
++	lHold := "review-fc0c0c0c-2222-4333-8444-555555555502"
++
++	// Complete clean Turn 1 on l1 so l1 exists unsealed in reviewLedger with lastTurnFailed=false.
++	ctx1, c1, err := BeginReview(context.Background(), root, l1, s1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c1.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_coal_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++
++	// Saturate the global concurrency cap with lHold.
++	holder, err := BeginPendingReview(root, lHold)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer holder.Release()
++
++	// Block the first overload rejection's syncDirFn so we can fire 16 concurrent rejections
++	// and verify they return immediately WITHOUT queuing on entry.mu/syncDirFn.
++	syncEntered := make(chan struct{}, 1)
++	releaseSync := make(chan struct{})
++	var syncCalls atomic.Int32
++	oldSync := syncDirFn
++	syncDirFn = func(dir string) error {
++		syncCalls.Add(1)
++		select {
++		case syncEntered <- struct{}{}:
++		default:
++		}
++		<-releaseSync
++		return defaultSyncDir(dir)
++	}
++	defer func() { syncDirFn = oldSync }()
++
++	firstDone := make(chan error, 1)
++	go func() {
++		_, err := BeginPendingReview(root, l1)
++		firstDone <- err
++	}()
++	select {
++	case <-syncEntered:
++	case <-time.After(3 * time.Second):
++		close(releaseSync)
++		t.Fatalf("first overload rejection did not enter persist sync")
++	}
++
++	// Fire 16 concurrent overload rejections while first persist is blocked -> ALL 16 MUST return
++	// ErrUnavailable immediately without blocking on releaseSync!
++	burstDone := make(chan error, 16)
++	for i := 0; i < 16; i++ {
++		go func() {
++			_, err := BeginPendingReview(root, l1)
++			burstDone <- err
++		}()
++	}
++	for i := 0; i < 16; i++ {
++		select {
++		case berr := <-burstDone:
++			if !errors.Is(berr, ErrUnavailable) {
++				close(releaseSync)
++				t.Fatalf("burst rejection %d err = %v, want ErrUnavailable", i, berr)
++			}
++		case <-time.After(2 * time.Second):
++			close(releaseSync)
++			t.Fatalf("burst rejection %d blocked behind first persist instead of coalescing", i)
++		}
++	}
++
++	// Unblock first persist and verify coalesced single persist + SealReview rejects stale Turn 1.
++	close(releaseSync)
++	if ferr := <-firstDone; !errors.Is(ferr, ErrUnavailable) {
++		t.Fatalf("first overload rejection err = %v, want ErrUnavailable", ferr)
++	}
++	if calls := syncCalls.Load(); calls > 2 {
++		t.Fatalf("expected coalesced persistence (<=2 dir syncs for single persist), got %d sync calls", calls)
++	}
++	if st := SealReview(root, l1, s1); st != SealRejected {
++		t.Fatalf("SealReview(l1) after coalesced overload rejections = %v, want SealRejected", st)
 +	}
 +}
