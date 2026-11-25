@@ -810,6 +810,15 @@ def test_route_from_host_receipt_accepts_relative_path_and_rejects_symlink_ances
     assert preflight.route_from_host_receipt(
         "./receipts", pf_session, since, 1.0, preflight.Deadline(5)
     ) == [("codex:gpt-6.2-sol", "chatgpt.com")]
+    # Astra P2 #5 (PR #2280 R41): relative paths containing .. MUST be rejected before expansion
+    # even when the bypassed segment does not exist, matching absolute paths and the Go producer.
+    assert preflight.route_from_host_receipt(
+        "missing/../receipts", pf_session, since, 1.0, preflight.Deadline(5)
+    ) is None
+    assert preflight.route_from_host_receipt(
+        "./missing/../receipts", pf_session, since, 1.0, preflight.Deadline(5)
+    ) is None
+    assert log_mod.route_from_receipt(Path("missing/../receipts"), pf_session, since, 0) is None
 
     monkeypatch.chdir(tmp_path)
     assert preflight.route_from_host_receipt(

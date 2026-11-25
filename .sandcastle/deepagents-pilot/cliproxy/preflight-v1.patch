@@ -5916,11 +5916,56 @@ index 8a29e48..8c01ee0 100644
 +		t.Fatalf("unsupported https:// proxy transport did not fail closed: resp=%v err=%v", resp, errRT)
 +	}
 +}
+diff --git a/sdk/preflightreceipt/fdops_darwin.go b/sdk/preflightreceipt/fdops_darwin.go
+new file mode 100644
+index 0000000..b6589f6
+--- /dev/null
++++ b/sdk/preflightreceipt/fdops_darwin.go
+@@ -0,0 +1,9 @@
++//go:build darwin
++
++package preflightreceipt
++
++import "golang.org/x/sys/unix"
++
++func renameatNoReplace(oldfd int, oldname string, newfd int, newname string) error {
++	return unix.RenameatxNp(oldfd, oldname, newfd, newname, unix.RENAME_EXCL)
++}
+diff --git a/sdk/preflightreceipt/fdops_linux.go b/sdk/preflightreceipt/fdops_linux.go
+new file mode 100644
+index 0000000..705aa4b
+--- /dev/null
++++ b/sdk/preflightreceipt/fdops_linux.go
+@@ -0,0 +1,9 @@
++//go:build linux
++
++package preflightreceipt
++
++import "golang.org/x/sys/unix"
++
++func renameatNoReplace(oldfd int, oldname string, newfd int, newname string) error {
++	return unix.Renameat2(oldfd, oldname, newfd, newname, unix.RENAME_NOREPLACE)
++}
+diff --git a/sdk/preflightreceipt/fdops_other.go b/sdk/preflightreceipt/fdops_other.go
+new file mode 100644
+index 0000000..c34cfd7
+--- /dev/null
++++ b/sdk/preflightreceipt/fdops_other.go
+@@ -0,0 +1,9 @@
++//go:build !linux && !darwin
++
++package preflightreceipt
++
++import "golang.org/x/sys/unix"
++
++func renameatNoReplace(oldfd int, oldname string, newfd int, newname string) error {
++	return unix.Renameat(oldfd, oldname, newfd, newname)
++}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..60cbbf3 100644
+index e69de29..4b05bcb 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,7860 @@
+@@ -0,0 +1,8240 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5929,6 +5974,7 @@ index e69de29..60cbbf3 100644
 +	"bytes"
 +	"compress/gzip"
 +	"context"
++	"crypto/rand"
 +	"crypto/sha256"
 +	"crypto/tls"
 +	"crypto/x509"
@@ -5943,6 +5989,7 @@ index e69de29..60cbbf3 100644
 +	"path/filepath"
 +	"regexp"
 +	"runtime"
++	"slices"
 +	"strconv"
 +	"strings"
 +	"sync"
@@ -5952,6 +5999,7 @@ index e69de29..60cbbf3 100644
 +
 +	"github.com/klauspost/compress/zstd"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"golang.org/x/sys/unix"
 +)
 +
 +const Schema = "cliproxy-preflight-v1"
@@ -10885,6 +10933,60 @@ index e69de29..60cbbf3 100644
 +	return sub, fi, nil
 +}
 +
++func isSingleBaseName(name string) bool {
++	return name != "" && name != "." && name != ".." &&
++		!strings.ContainsRune(name, '/') &&
++		!strings.ContainsRune(name, filepath.Separator) &&
++		!strings.ContainsRune(name, 0)
++}
++
++func openPinnedDirFD(r *os.Root) (*os.File, uint64, uint64, bool, error) {
++	if r == nil {
++		return nil, 0, 0, false, ErrUnavailable
++	}
++	f, err := r.Open(".")
++	if err != nil {
++		return nil, 0, 0, false, ErrUnavailable
++	}
++	fi, statErr := f.Stat()
++	if statErr != nil || !fi.IsDir() || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++		_ = f.Close()
++		return nil, 0, 0, false, ErrUnavailable
++	}
++	dev, ino, hasID := statDevIno(fi)
++	return f, dev, ino, hasID, nil
++}
++
++func renameatPinned(oldDir *os.File, oldName string, newDir *os.File, newName string) error {
++	if oldDir == nil || newDir == nil || !isSingleBaseName(oldName) || !isSingleBaseName(newName) {
++		return ErrUnavailable
++	}
++	err := unix.Renameat(int(oldDir.Fd()), oldName, int(newDir.Fd()), newName)
++	runtime.KeepAlive(oldDir)
++	runtime.KeepAlive(newDir)
++	return err
++}
++
++func renameatNoReplacePinned(oldDir *os.File, oldName string, newDir *os.File, newName string) error {
++	if oldDir == nil || newDir == nil || !isSingleBaseName(oldName) || !isSingleBaseName(newName) {
++		return ErrUnavailable
++	}
++	err := renameatNoReplace(int(oldDir.Fd()), oldName, int(newDir.Fd()), newName)
++	runtime.KeepAlive(oldDir)
++	runtime.KeepAlive(newDir)
++	return err
++}
++
++func linkatPinned(oldDir *os.File, oldName string, newDir *os.File, newName string) error {
++	if oldDir == nil || newDir == nil || !isSingleBaseName(oldName) || !isSingleBaseName(newName) {
++		return ErrUnavailable
++	}
++	err := unix.Linkat(int(oldDir.Fd()), oldName, int(newDir.Fd()), newName, 0)
++	runtime.KeepAlive(oldDir)
++	runtime.KeepAlive(newDir)
++	return err
++}
++
 +func syncPinnedDir(r *os.Root, fullPath string) error {
 +	if r == nil {
 +		return ErrUnavailable
@@ -10906,6 +11008,7 @@ index e69de29..60cbbf3 100644
 +	if closeErr != nil {
 +		return closeErr
 +	}
++	// Production never re-opens fullPath by name (syncDirFn is nil outside tests).
 +	if syncDirFn != nil {
 +		return syncDirFn(fullPath)
 +	}
@@ -11449,7 +11552,7 @@ index e69de29..60cbbf3 100644
 +	}
 +	parent := filepath.Dir(root)
 +	if parent != "" && parent != root {
-+		if err := syncDirFn(parent); err != nil {
++		if err := syncPathDir(parent); err != nil {
 +			return err
 +		}
 +	}
@@ -11874,12 +11977,26 @@ index e69de29..60cbbf3 100644
 +	c.publishLocked()
 +}
 +
-+var syncDirFn = defaultSyncDir
++// syncDirFn is nil in production so pinned directory syncs never re-open paths by name;
++// unit tests may assign it temporarily to observe or inject directory fsync failures.
++var syncDirFn func(string) error
++
++func syncPathDir(dir string) error {
++	if syncDirFn != nil {
++		return syncDirFn(dir)
++	}
++	return defaultSyncDir(dir)
++}
 +
 +func defaultSyncDir(dir string) error {
-+	f, err := os.Open(dir)
++	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK, 0)
 +	if err != nil {
 +		return err
++	}
++	fi, statErr := f.Stat()
++	if statErr != nil || !fi.IsDir() {
++		_ = f.Close()
++		return ErrUnavailable
 +	}
 +	syncErr := f.Sync()
 +	closeErr := f.Close()
@@ -12040,6 +12157,9 @@ index e69de29..60cbbf3 100644
 +	lease := &lockedRootLease{lock: held, dir: candRoot}
 +	rootLockMu.Unlock()
 +	closeRetired()
++	// Newly acquired exclusive .writer.lock guarantees no other proxy process owns root;
++	// safely sweep crash-orphaned producer staging files/dirs not active in this process.
++	sweepOrphanStagingInRoot(candRoot, root, true)
 +	return lease, nil
 +}
 +
@@ -12064,7 +12184,7 @@ index e69de29..60cbbf3 100644
 +			return ErrUnavailable
 +		}
 +		if parentOfRoot != "" && parentOfRoot != root {
-+			if err := syncDirFn(parentOfRoot); err != nil {
++			if err := syncPathDir(parentOfRoot); err != nil {
 +				return ErrUnavailable
 +			}
 +		}
@@ -12096,7 +12216,7 @@ index e69de29..60cbbf3 100644
 +		if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 +			return err
 +		}
-+		if err := syncDirFn(filepath.Dir(dir)); err != nil {
++		if err := syncPathDir(filepath.Dir(dir)); err != nil {
 +			_ = os.Remove(dir)
 +			return err
 +		}
@@ -12139,33 +12259,238 @@ index e69de29..60cbbf3 100644
 +	Started int64  `json:"started_ns"`
 +}
 +
-+func writePreflightMarkerInSubdir(subRoot *os.Root, dirPath, session string, started int64) (uint64, uint64, bool, string, error) {
-+	data, err := json.Marshal(preflightReservationMarker{
-+		Schema:  Schema,
-+		Session: session,
-+		Started: started,
++const maxStagingCreateRetries = 8
++
++var (
++	stagingFilePattern = regexp.MustCompile(`^(?:pending|pending-sha|pending-marker)-[0-9]+-[0-9]+(?:-[0-9a-f]{16})?$`)
++	stagingDirPattern  = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
++	stagingOrphanAge   = 5 * time.Minute
++
++	activeStagingMu sync.Mutex
++	activeStaging   = make(map[string]int)
++)
++
++func stagingEntryKey(root, name string) string {
++	return root + "\x00" + name
++}
++
++func trackStagingEntry(root, name string) {
++	activeStagingMu.Lock()
++	activeStaging[stagingEntryKey(root, name)]++
++	activeStagingMu.Unlock()
++}
++
++func untrackStagingEntry(root, name string) {
++	k := stagingEntryKey(root, name)
++	activeStagingMu.Lock()
++	if n := activeStaging[k]; n <= 1 {
++		delete(activeStaging, k)
++	} else {
++		activeStaging[k] = n - 1
++	}
++	activeStagingMu.Unlock()
++}
++
++func isStagingEntryActive(root, name string) bool {
++	activeStagingMu.Lock()
++	active := activeStaging[stagingEntryKey(root, name)] > 0
++	activeStagingMu.Unlock()
++	return active
++}
++
++func randomStagingToken() (string, error) {
++	var buf [8]byte
++	if _, err := rand.Read(buf[:]); err != nil {
++		return "", err
++	}
++	return hex.EncodeToString(buf[:]), nil
++}
++
++func createStagingFileWithGen(stagingRoot *os.Root, root string, gen func() (string, error)) (string, *os.File, func(), error) {
++	if stagingRoot == nil || gen == nil {
++		return "", nil, nil, ErrUnavailable
++	}
++	for i := 0; i < maxStagingCreateRetries; i++ {
++		name, err := gen()
++		if err != nil || !isSingleBaseName(name) {
++			return "", nil, nil, ErrUnavailable
++		}
++		trackStagingEntry(root, name)
++		f, oerr := stagingRoot.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++		if oerr == nil {
++			var once sync.Once
++			release := func() {
++				once.Do(func() { untrackStagingEntry(root, name) })
++			}
++			return name, f, release, nil
++		}
++		untrackStagingEntry(root, name)
++		if os.IsExist(oerr) {
++			continue
++		}
++		return "", nil, nil, oerr
++	}
++	return "", nil, nil, ErrUnavailable
++}
++
++func createStagingFile(stagingRoot *os.Root, root, prefix string) (string, *os.File, func(), error) {
++	return createStagingFileWithGen(stagingRoot, root, func() (string, error) {
++		tok, err := randomStagingToken()
++		if err != nil {
++			return "", err
++		}
++		return fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok), nil
 +	})
++}
++
++func createStagingDir(stagingRoot *os.Root, root string) (string, *os.Root, func(), error) {
++	if stagingRoot == nil {
++		return "", nil, nil, ErrUnavailable
++	}
++	for i := 0; i < maxStagingCreateRetries; i++ {
++		tok, err := randomStagingToken()
++		if err != nil {
++			return "", nil, nil, ErrUnavailable
++		}
++		name := fmt.Sprintf("stage-dir-%d-%d-%s", os.Getpid(), tmpSeq.Add(1), tok)
++		trackStagingEntry(root, name)
++		if mkErr := stagingRoot.Mkdir(name, 0700); mkErr != nil {
++			untrackStagingEntry(root, name)
++			if os.IsExist(mkErr) {
++				continue
++			}
++			return "", nil, nil, mkErr
++		}
++		subRoot, _, oerr := openVerifiedSubdir(stagingRoot, name)
++		if oerr != nil {
++			_ = stagingRoot.Remove(name)
++			untrackStagingEntry(root, name)
++			return "", nil, nil, ErrUnavailable
++		}
++		var once sync.Once
++		release := func() {
++			once.Do(func() { untrackStagingEntry(root, name) })
++		}
++		return name, subRoot, release, nil
++	}
++	return "", nil, nil, ErrUnavailable
++}
++
++func isValidStagingMarkerFile(subRoot *os.Root, childName string) bool {
++	if subRoot == nil || childName != "producer.json" {
++		return false
++	}
++	cfi, cerr := subRoot.Lstat(childName)
++	if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || cfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(cfi) || cfi.Size() <= 0 || cfi.Size() > 4096 {
++		return false
++	}
++	f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
++	if oerr != nil {
++		return false
++	}
++	fStat, serr := f.Stat()
++	if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > 4096 {
++		_ = f.Close()
++		return false
++	}
++	raw, rerr := io.ReadAll(io.LimitReader(f, 4097))
++	_ = f.Close()
++	if rerr != nil || len(raw) == 0 || len(raw) > 4096 {
++		return false
++	}
++	var rm reviewReservationMarker
++	if decodeExactReceiptJSON(raw, reviewMarkerJSONKeys, &rm) == nil && rm.Schema == ReviewSchema && ValidReviewLaunch(rm.Launch) && rm.Started > 0 {
++		return true
++	}
++	var pm preflightReservationMarker
++	return decodeExactReceiptJSON(raw, preflightMarkerJSONKeys, &pm) == nil && pm.Schema == Schema && ValidPreflightSession(pm.Session) && pm.Started > 0
++}
++
++func sweepOrphanStagingDir(stagingRoot *os.Root, root string, forceAllInactive bool) int {
++	if stagingRoot == nil {
++		return 0
++	}
++	entries, err := readDirFromRoot(stagingRoot)
 +	if err != nil {
-+		return 0, 0, false, "", err
++		return 0
 +	}
-+	f, err := subRoot.OpenFile("producer.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	now := time.Now()
++	removed := 0
++	for _, ent := range entries {
++		name := ent.Name()
++		if isStagingEntryActive(root, name) {
++			continue
++		}
++		if stagingFilePattern.MatchString(name) {
++			fi, lerr := stagingRoot.Lstat(name)
++			if lerr != nil || !fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++				continue
++			}
++			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
++				continue
++			}
++			if stagingRoot.Remove(name) == nil {
++				removed++
++			}
++			continue
++		}
++		if stagingDirPattern.MatchString(name) {
++			fi, lerr := stagingRoot.Lstat(name)
++			if lerr != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++				continue
++			}
++			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
++				continue
++			}
++			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
++			if oerr != nil {
++				continue
++			}
++			subDev, subIno, hasSubID := statDevIno(subFI)
++			children, cerr := readDirFromRoot(subRoot)
++			canRemove := cerr == nil && len(children) <= 1
++			hasMarker := false
++			if canRemove && len(children) == 1 {
++				if isValidStagingMarkerFile(subRoot, children[0].Name()) {
++					hasMarker = true
++				} else {
++					canRemove = false
++				}
++			}
++			if canRemove && hasMarker {
++				if rerr := subRoot.Remove("producer.json"); rerr != nil && !os.IsNotExist(rerr) {
++					canRemove = false
++				}
++			}
++			_ = subRoot.Close()
++			if canRemove {
++				curFI, curErr := stagingRoot.Lstat(name)
++				if curErr == nil && curFI.IsDir() && curFI.Mode()&os.ModeSymlink == 0 && curFI.Mode().Perm()&0077 == 0 && ownedByCurrentUser(curFI) {
++					if curDev, curIno, okCur := statDevIno(curFI); !okCur || !hasSubID || (curDev == subDev && curIno == subIno) {
++						if stagingRoot.Remove(name) == nil {
++							removed++
++						}
++					}
++				}
++			}
++		}
++	}
++	if removed > 0 {
++		_ = syncPinnedDir(stagingRoot, filepath.Join(root, ".staging"))
++	}
++	return removed
++}
++
++func sweepOrphanStagingInRoot(rootHandle *os.Root, root string, forceAllInactive bool) int {
++	if rootHandle == nil {
++		return 0
++	}
++	stagingRoot, _, err := openVerifiedSubdir(rootHandle, ".staging")
 +	if err != nil {
-+		return 0, 0, false, "", err
++		return 0
 +	}
-+	fi, statErr := f.Stat()
-+	_, errW := f.Write(data)
-+	errS := f.Sync()
-+	errC := f.Close()
-+	if statErr != nil || errW != nil || errS != nil || errC != nil {
-+		_ = subRoot.Remove("producer.json")
-+		return 0, 0, false, "", ErrUnavailable
-+	}
-+	if err := syncPinnedDir(subRoot, dirPath); err != nil {
-+		_ = subRoot.Remove("producer.json")
-+		return 0, 0, false, "", err
-+	}
-+	dev, ino, hasID := statDevIno(fi)
-+	return dev, ino, hasID, sha256Hex(string(data)), nil
++	defer stagingRoot.Close()
++	return sweepOrphanStagingDir(stagingRoot, root, forceAllInactive)
 +}
 +
 +func ensureStagingDir(rootHandle *os.Root, root string) (*os.Root, error) {
@@ -12224,50 +12549,6 @@ index e69de29..60cbbf3 100644
 +		return
 +	}
 +	_ = rootHandle.Remove(name)
-+}
-+
-+func writeReviewMarkerInSubdir(subRoot *os.Root, dirPath, launch string, started int64) (uint64, uint64, bool, string, bool, error) {
-+	if started <= 0 {
-+		started = time.Now().UnixNano()
-+	}
-+	data, err := json.Marshal(reviewReservationMarker{
-+		Schema:  ReviewSchema,
-+		Launch:  launch,
-+		Started: started,
-+	})
-+	if err != nil {
-+		return 0, 0, false, "", false, err
-+	}
-+	f, err := subRoot.OpenFile("producer.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-+	if err != nil {
-+		return 0, 0, false, "", false, err
-+	}
-+	fi, statErr := f.Stat()
-+	_, errW := f.Write(data)
-+	errS := f.Sync()
-+	errC := f.Close()
-+	dev, ino, hasID := uint64(0), uint64(0), false
-+	if statErr == nil {
-+		dev, ino, hasID = statDevIno(fi)
-+	}
-+	sha := sha256Hex(string(data))
-+	if statErr != nil || errW != nil || errS != nil || errC != nil {
-+		if hasID {
-+			if curFI, lerr := subRoot.Lstat("producer.json"); lerr == nil {
-+				if curDev, curIno, okCur := statDevIno(curFI); okCur && curDev == dev && curIno == ino {
-+					_ = subRoot.Remove("producer.json")
-+				}
-+			}
-+		} else {
-+			_ = subRoot.Remove("producer.json")
-+		}
-+		return 0, 0, false, "", false, ErrUnavailable
-+	}
-+	if err := syncPinnedDir(subRoot, dirPath); err != nil {
-+		removeVerifiedMarkerInSubdir(subRoot, dev, ino, hasID, sha)
-+		return 0, 0, false, "", false, err
-+	}
-+	return dev, ino, hasID, sha, true, nil
 +}
 +
 +func isProducerOwnedReceiptFile(childName string, reviewBucket bool) bool {
@@ -12487,12 +12768,20 @@ index e69de29..60cbbf3 100644
 +				_ = subRoot.Close()
 +				return nil, 0, 0, time.Time{}, false
 +			}
-+			if sealPendingDisk.Session != reviewDisk.Session ||
++			if sealPendingDisk.Schema != reviewDisk.Schema ||
++				sealPendingDisk.Launch != reviewDisk.Launch ||
++				sealPendingDisk.Session != reviewDisk.Session ||
++				sealPendingDisk.Started != reviewDisk.Started ||
++				sealPendingDisk.Finished != reviewDisk.Finished ||
++				sealPendingDisk.Complete != reviewDisk.Complete ||
++				sealPendingDisk.Tainted != reviewDisk.Tainted ||
 +				sealPendingDisk.Requests != reviewDisk.Requests ||
++				!slices.Equal(sealPendingDisk.Routes, reviewDisk.Routes) ||
++				!slices.Equal(sealPendingDisk.ResponseIDSHAs, reviewDisk.ResponseIDSHAs) ||
 +				sealPendingDisk.LastResponseID != reviewDisk.LastResponseID ||
 +				sealPendingDisk.LastOutputSHA256 != reviewDisk.LastOutputSHA256 ||
-+				len(sealPendingDisk.Routes) != 1 || len(reviewDisk.Routes) != 1 ||
-+				sealPendingDisk.Routes[0] != reviewDisk.Routes[0] {
++				!sealPendingDisk.Sealed ||
++				sealPendingDisk.SealedAt < reviewDisk.Finished {
 +				_ = subRoot.Close()
 +				return nil, 0, 0, time.Time{}, false
 +			}
@@ -12582,6 +12871,7 @@ index e69de29..60cbbf3 100644
 +	if need <= 0 || rootHandle == nil {
 +		return 0
 +	}
++	sweepOrphanStagingInRoot(rootHandle, root, false)
 +	now := time.Now()
 +	retention := preflightDiskRetention
 +	if reviewBucket {
@@ -12655,6 +12945,27 @@ index e69de29..60cbbf3 100644
 +	return reclaimed
 +}
 +
++func marshalReservationMarker(name string, started int64) ([]byte, error) {
++	if started <= 0 {
++		started = time.Now().UnixNano()
++	}
++	if ValidReviewLaunch(name) {
++		return json.Marshal(reviewReservationMarker{
++			Schema:  ReviewSchema,
++			Launch:  name,
++			Started: started,
++		})
++	}
++	if ValidPreflightSession(name) {
++		return json.Marshal(preflightReservationMarker{
++			Schema:  Schema,
++			Session: name,
++			Started: started,
++		})
++	}
++	return nil, ErrUnavailable
++}
++
 +func reservePrivateDir(directory string, allowExisting bool) error {
 +	directory = filepath.Clean(directory)
 +	root, ok := cleanPrivateRoot(filepath.Dir(directory))
@@ -12666,7 +12977,7 @@ index e69de29..60cbbf3 100644
 +		return err
 +	}
 +	defer rootLease.Close()
-+	subRoot, _, _, err := reservePrivateSubdir(rootLease.dir, root, filepath.Base(directory), allowExisting)
++	subRoot, _, _, _, _, _, _, err := reserveStagedSubdirWithMarker(rootLease.dir, root, filepath.Base(directory), allowExisting, time.Now().UnixNano())
 +	if err != nil {
 +		return err
 +	}
@@ -12674,9 +12985,17 @@ index e69de29..60cbbf3 100644
 +	return nil
 +}
 +
-+func reservePrivateSubdir(rootHandle *os.Root, root, name string, allowExisting bool) (*os.Root, os.FileInfo, bool, error) {
-+	if rootHandle == nil || name == "" || strings.ContainsRune(name, filepath.Separator) || name == "." || name == ".." {
-+		return nil, nil, false, ErrUnavailable
++// reserveStagedSubdirWithMarker prepares a complete private 0700 directory containing an
++// atomically written, synced producer.json inside <root>/.staging/, then publishes that
++// directory into <root>/<name> via a non-overwriting descriptor-pinned renameat. A crash
++// at any point before publication leaves zero empty or half-marked directories under <root>.
++func reserveStagedSubdirWithMarker(rootHandle *os.Root, root, name string, allowExisting bool, started int64) (*os.Root, os.FileInfo, bool, uint64, uint64, bool, string, error) {
++	if rootHandle == nil || !isSingleBaseName(name) {
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++	markerData, err := marshalReservationMarker(name, started)
++	if err != nil {
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	reviewBucket := isReviewBucketName(name)
 +	capLimit := maxPreflightDiskEntries
@@ -12688,61 +13007,146 @@ index e69de29..60cbbf3 100644
 +	if statErr == nil {
 +		rootQuotaMu.Unlock()
 +		if !allowExisting {
-+			return nil, nil, false, os.ErrExist
++			return nil, nil, false, 0, 0, false, "", os.ErrExist
 +		}
 +		subRoot, subFI, checkErr := openVerifiedSubdir(rootHandle, name)
 +		if checkErr != nil {
-+			return nil, nil, false, ErrUnavailable
++			return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +		}
 +		if err := syncPinnedDir(rootHandle, root); err != nil {
 +			_ = subRoot.Close()
-+			return nil, nil, false, err
++			return nil, nil, false, 0, 0, false, "", err
 +		}
-+		return subRoot, subFI, false, nil
++		return subRoot, subFI, false, 0, 0, false, "", nil
 +	}
 +	if !os.IsNotExist(statErr) {
 +		rootQuotaMu.Unlock()
-+		return nil, nil, false, ErrUnavailable
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	existingCount, names, countErr := countRootBucketEntries(rootHandle, reviewBucket)
 +	if countErr != nil {
 +		rootQuotaMu.Unlock()
-+		return nil, nil, false, ErrUnavailable
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +	if existingCount >= capLimit {
 +		reclaimed := reclaimExpiredBucketEntries(rootHandle, root, names, reviewBucket, existingCount-capLimit+1)
 +		existingCount -= reclaimed
 +		if existingCount >= capLimit {
 +			rootQuotaMu.Unlock()
-+			return nil, nil, false, ErrUnavailable
++			return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +		}
 +	}
-+	created := false
-+	err := rootHandle.Mkdir(name, 0700)
-+	if err == nil {
-+		created = true
-+	}
-+	rootQuotaMu.Unlock()
++	stagingRoot, err := ensureStagingDir(rootHandle, root)
 +	if err != nil {
-+		if !allowExisting || !os.IsExist(err) {
-+			return nil, nil, false, err
-+		}
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", err
 +	}
-+	subRoot, subFI, checkErr := openVerifiedSubdir(rootHandle, name)
-+	if checkErr != nil {
-+		if created {
-+			_ = rootHandle.Remove(name)
++	defer stagingRoot.Close()
++	rootDirFD, _, _, _, err := openPinnedDirFD(rootHandle)
++	if err != nil {
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++	defer rootDirFD.Close()
++	stagingDirFD, _, _, _, err := openPinnedDirFD(stagingRoot)
++	if err != nil {
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++	defer stagingDirFD.Close()
++
++	stageDirName, stageSubRoot, releaseStageDir, err := createStagingDir(stagingRoot, root)
++	if err != nil {
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++	defer releaseStageDir()
++	stageSubFD, subDev, subIno, hasSubID, err := openPinnedDirFD(stageSubRoot)
++	if err != nil {
++		_ = stageSubRoot.Close()
++		_ = stagingRoot.Remove(stageDirName)
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++	subFI, statSubErr := stageSubFD.Stat()
++	if statSubErr != nil {
++		_ = stageSubFD.Close()
++		_ = stageSubRoot.Close()
++		_ = stagingRoot.Remove(stageDirName)
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++
++	markerTmp, mf, releaseMarkerTmp, err := createStagingFile(stagingRoot, root, "pending-marker")
++	if err != nil {
++		_ = stageSubFD.Close()
++		_ = stageSubRoot.Close()
++		_ = stagingRoot.Remove(stageDirName)
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++	mfi, mStatErr := mf.Stat()
++	_, errW := mf.Write(markerData)
++	errS := mf.Sync()
++	errC := mf.Close()
++	if mStatErr != nil || errW != nil || errS != nil || errC != nil {
++		_ = stagingRoot.Remove(markerTmp)
++		releaseMarkerTmp()
++		_ = stageSubFD.Close()
++		_ = stageSubRoot.Close()
++		_ = stagingRoot.Remove(stageDirName)
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++	mDev, mIno, hasMID := statDevIno(mfi)
++	mSHA := sha256Hex(string(markerData))
++	if renErr := renameatPinned(stagingDirFD, markerTmp, stageSubFD, "producer.json"); renErr != nil {
++		_ = stagingRoot.Remove(markerTmp)
++		releaseMarkerTmp()
++		_ = stageSubFD.Close()
++		_ = stageSubRoot.Close()
++		_ = stagingRoot.Remove(stageDirName)
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", ErrUnavailable
++	}
++	releaseMarkerTmp()
++	_ = stageSubFD.Close()
++	if err := syncPinnedDir(stageSubRoot, filepath.Join(root, ".staging", stageDirName)); err != nil {
++		removeVerifiedMarkerInSubdir(stageSubRoot, mDev, mIno, hasMID, mSHA)
++		_ = stageSubRoot.Close()
++		_ = stagingRoot.Remove(stageDirName)
++		rootQuotaMu.Unlock()
++		return nil, nil, false, 0, 0, false, "", err
++	}
++	pubErr := renameatNoReplacePinned(stagingDirFD, stageDirName, rootDirFD, name)
++	rootQuotaMu.Unlock()
++	if pubErr != nil {
++		removeVerifiedMarkerInSubdir(stageSubRoot, mDev, mIno, hasMID, mSHA)
++		_ = stageSubRoot.Close()
++		_ = stagingRoot.Remove(stageDirName)
++		if allowExisting && (os.IsExist(pubErr) || errors.Is(pubErr, syscall.ENOTEMPTY)) {
++			subRoot, existFI, checkErr := openVerifiedSubdir(rootHandle, name)
++			if checkErr != nil {
++				return nil, nil, false, 0, 0, false, "", ErrUnavailable
++			}
++			if err := syncPinnedDir(rootHandle, root); err != nil {
++				_ = subRoot.Close()
++				return nil, nil, false, 0, 0, false, "", err
++			}
++			return subRoot, existFI, false, 0, 0, false, "", nil
 +		}
-+		return nil, nil, false, ErrUnavailable
++		if os.IsExist(pubErr) || errors.Is(pubErr, syscall.ENOTEMPTY) {
++			return nil, nil, false, 0, 0, false, "", os.ErrExist
++		}
++		return nil, nil, false, 0, 0, false, "", pubErr
 +	}
 +	if err := syncPinnedDir(rootHandle, root); err != nil {
-+		_ = subRoot.Close()
-+		if created {
-+			_ = rootHandle.Remove(name)
-+		}
-+		return nil, nil, false, err
++		removeVerifiedMarkerInSubdir(stageSubRoot, mDev, mIno, hasMID, mSHA)
++		_ = stageSubRoot.Close()
++		removeVerifiedEmptySubdir(rootHandle, name, subDev, subIno, hasSubID)
++		return nil, nil, false, 0, 0, false, "", err
 +	}
-+	return subRoot, subFI, created, nil
++	return stageSubRoot, subFI, true, mDev, mIno, hasMID, mSHA, nil
 +}
 +
 +// Start is called by the auth execution guard, not by an asynchronous usage sink.
@@ -12783,11 +13187,21 @@ index e69de29..60cbbf3 100644
 +			return ctx, nil, ErrUnavailable
 +		}
 +		if !c.review.reserved {
-+			if err := reservePrivateDir(c.directory, true); err != nil {
++			rootDir := filepath.Dir(c.directory)
++			rootLease, lerr := acquirePrivateRootLease(rootDir)
++			if lerr != nil {
 +				c.review.mu.Unlock()
 +				c.invalid = true
 +				return ctx, nil, ErrUnavailable
 +			}
++			subRoot, _, _, _, _, _, _, rerr := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, c.review.launch, true, c.review.started)
++			rootLease.Close()
++			if rerr != nil {
++				c.review.mu.Unlock()
++				c.invalid = true
++				return ctx, nil, ErrUnavailable
++			}
++			_ = subRoot.Close()
 +			c.review.reserved = true
 +		}
 +		c.review.mu.Unlock()
@@ -12799,24 +13213,14 @@ index e69de29..60cbbf3 100644
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
 +		}
-+		subRoot, subFI, createdDir, err := reservePrivateSubdir(rootLease.dir, rootDir, c.receipt.Session, false)
++		subRoot, subFI, _, mDev, mIno, hasMID, mSHA, err := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, c.receipt.Session, false, c.receipt.Started)
++		rootLease.Close()
 +		if err != nil {
-+			rootLease.Close()
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
 +		}
 +		subDev, subIno, hasSubID := statDevIno(subFI)
-+		mDev, mIno, hasMID, mSHA, err := writePreflightMarkerInSubdir(subRoot, c.directory, c.receipt.Session, c.receipt.Started)
 +		_ = subRoot.Close()
-+		if err != nil {
-+			if createdDir {
-+				removeVerifiedEmptySubdir(rootLease.dir, c.receipt.Session, subDev, subIno, hasSubID)
-+			}
-+			rootLease.Close()
-+			c.invalid = true
-+			return ctx, nil, ErrUnavailable
-+		}
-+		rootLease.Close()
 +		c.dirDev, c.dirIno, c.hasDirID = subDev, subIno, hasSubID
 +		c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256 = mDev, mIno, hasMID, mSHA
 +		c.reserved = true
@@ -13414,7 +13818,7 @@ index e69de29..60cbbf3 100644
 +		return renamed, err
 +	}
 +	if !e.reserved {
-+		sub, subFI, created, rerr := reservePrivateSubdir(rootHandle, root, e.launch, true)
++		sub, subFI, created, mDev, mIno, hasMID, mSHA, rerr := reserveStagedSubdirWithMarker(rootHandle, root, e.launch, true, e.started)
 +		if rerr != nil {
 +			return fail(false, rerr)
 +		}
@@ -13423,11 +13827,7 @@ index e69de29..60cbbf3 100644
 +		launchDev, launchIno, hasLaunchID = statDevIno(subFI)
 +		createdDir = created
 +		if created {
-+			mDev, mIno, hasMID, mSHA, mCreated, merr := writeReviewMarkerInSubdir(launchRoot, e.directory, e.launch, e.started)
-+			if merr != nil {
-+				return fail(false, merr)
-+			}
-+			createdMarker = mCreated
++			createdMarker = true
 +			markerDev, markerIno, markerHasID, markerSHA = mDev, mIno, hasMID, mSHA
 +		}
 +		e.reserved = true
@@ -13513,18 +13913,30 @@ index e69de29..60cbbf3 100644
 +		return fail(false, err)
 +	}
 +	defer stagingRoot.Close()
-+	// Confirm e.launch inside rootHandle still refers to the exact verified launchRoot before renaming into it.
++	stagingDirFD, _, _, _, err := openPinnedDirFD(stagingRoot)
++	if err != nil {
++		return fail(false, ErrUnavailable)
++	}
++	defer stagingDirFD.Close()
++	launchDirFD, lFDDev, lFDIno, hasLFDID, err := openPinnedDirFD(launchRoot)
++	if err != nil {
++		return fail(false, ErrUnavailable)
++	}
++	defer launchDirFD.Close()
++	if hasLaunchID && hasLFDID && (lFDDev != launchDev || lFDIno != launchIno) {
++		return fail(false, ErrUnavailable)
++	}
++	// Confirm e.launch inside rootHandle still refers to the exact verified launchRoot before committing into it.
 +	if curFI, lerr := rootHandle.Lstat(e.launch); lerr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
 +		return fail(false, ErrUnavailable)
 +	} else if curDev, curIno, okCur := statDevIno(curFI); okCur && hasLaunchID && (curDev != launchDev || curIno != launchIno) {
 +		return fail(false, ErrUnavailable)
 +	}
-+	seq := tmpSeq.Add(1)
-+	tmp := fmt.Sprintf("pending-%d-%d", os.Getpid(), seq)
-+	f, err := stagingRoot.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	tmp, f, releaseTmp, err := createStagingFile(stagingRoot, root, "pending")
 +	if err != nil {
 +		return fail(false, err)
 +	}
++	defer releaseTmp()
 +	_, errWrite := f.Write(data)
 +	errSync := f.Sync()
 +	errClose := f.Close()
@@ -13535,12 +13947,12 @@ index e69de29..60cbbf3 100644
 +	sealedDigest := ""
 +	if sealed {
 +		sealedDigest = sha256Hex(string(data))
-+		shaTmp := fmt.Sprintf("pending-sha-%d-%d", os.Getpid(), seq)
-+		sf, err := stagingRoot.OpenFile(shaTmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++		shaTmp, sf, releaseSHATmp, err := createStagingFile(stagingRoot, root, "pending-sha")
 +		if err != nil {
 +			_ = stagingRoot.Remove(tmp)
 +			return fail(false, err)
 +		}
++		defer releaseSHATmp()
 +		_, errWriteSHA := sf.WriteString(sealedDigest)
 +		errSyncSHA := sf.Sync()
 +		errCloseSHA := sf.Close()
@@ -13549,28 +13961,27 @@ index e69de29..60cbbf3 100644
 +			_ = stagingRoot.Remove(tmp)
 +			return fail(false, ErrUnavailable)
 +		}
-+		// 3-step atomic commit from .staging:
-+		// 1) .staging/pending -> <launch>/seal.pending.json (complete sealed JSON)
-+		// 2) .staging/pending-sha -> <launch>/seal.sha256 (exact sha256 of seal.pending.json)
-+		// 3) <launch>/seal.pending.json -> <launch>/receipt.json
-+		// Every intermediate crash state is cryptographically verifiable and never leaves half-written files in <launch>.
-+		if err := rootHandle.Rename(filepath.Join(".staging", tmp), filepath.Join(e.launch, "seal.pending.json")); err != nil {
++		// Descriptor-pinned 3-step atomic commit using verified stagingDirFD and launchDirFD (zero path re-resolution):
++		// 1) stagingDirFD/pending -> launchDirFD/seal.pending.json (complete sealed JSON)
++		// 2) stagingDirFD/pending-sha -> launchDirFD/seal.sha256 (exact sha256 of seal.pending.json)
++		// 3) launchDirFD/seal.pending.json -> launchDirFD/receipt.json
++		if err := renameatPinned(stagingDirFD, tmp, launchDirFD, "seal.pending.json"); err != nil {
 +			_ = stagingRoot.Remove(shaTmp)
 +			_ = stagingRoot.Remove(tmp)
 +			return fail(false, err)
 +		}
-+		if err := rootHandle.Rename(filepath.Join(".staging", shaTmp), filepath.Join(e.launch, "seal.sha256")); err != nil {
++		if err := renameatPinned(stagingDirFD, shaTmp, launchDirFD, "seal.sha256"); err != nil {
 +			_ = stagingRoot.Remove(shaTmp)
 +			_ = launchRoot.Remove("seal.pending.json")
 +			return fail(false, err)
 +		}
-+		if err := launchRoot.Rename("seal.pending.json", "receipt.json"); err != nil {
++		if err := renameatPinned(launchDirFD, "seal.pending.json", launchDirFD, "receipt.json"); err != nil {
 +			_ = launchRoot.Remove("seal.sha256")
 +			_ = launchRoot.Remove("seal.pending.json")
 +			return fail(false, err)
 +		}
 +	} else {
-+		if err := rootHandle.Rename(filepath.Join(".staging", tmp), filepath.Join(e.launch, "receipt.json")); err != nil {
++		if err := renameatPinned(stagingDirFD, tmp, launchDirFD, "receipt.json"); err != nil {
 +			_ = stagingRoot.Remove(tmp)
 +			return fail(false, err)
 +		}
@@ -13750,13 +14161,27 @@ index e69de29..60cbbf3 100644
 +		return
 +	}
 +	defer stagingRoot.Close()
-+	// Stage temporary file inside <root>/.staging and publish via non-overwriting atomic Link:
-+	// <session> never holds temp files, readers see all or nothing, and an existing receipt.json is never clobbered.
-+	tmp := fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Add(1))
-+	f, err := stagingRoot.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	stagingDirFD, _, _, _, err := openPinnedDirFD(stagingRoot)
 +	if err != nil {
 +		return
 +	}
++	defer stagingDirFD.Close()
++	subDirFD, subFDDev, subFDIno, hasSubFDID, err := openPinnedDirFD(subRoot)
++	if err != nil {
++		return
++	}
++	defer subDirFD.Close()
++	if c.hasDirID && hasSubFDID && (subFDDev != c.dirDev || subFDIno != c.dirIno) {
++		return
++	}
++	// Stage temporary file inside <root>/.staging and publish via descriptor-pinned non-overwriting linkat:
++	// neither .staging nor <session> is re-resolved by path, readers see all or nothing, and an existing
++	// receipt.json is never clobbered.
++	tmp, f, releaseTmp, err := createStagingFile(stagingRoot, rootDir, "pending")
++	if err != nil {
++		return
++	}
++	defer releaseTmp()
 +	_, errWrite := f.Write(data)
 +	errSync := f.Sync()
 +	errClose := f.Close()
@@ -13773,7 +14198,7 @@ index e69de29..60cbbf3 100644
 +			return
 +		}
 +	}
-+	linkErr := rootLease.dir.Link(filepath.Join(".staging", tmp), filepath.Join(c.receipt.Session, "receipt.json"))
++	linkErr := linkatPinned(stagingDirFD, tmp, subDirFD, "receipt.json")
 +	_ = stagingRoot.Remove(tmp)
 +	if linkErr != nil {
 +		return
@@ -13782,10 +14207,10 @@ index e69de29..60cbbf3 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..793cabd 100644
+index e69de29..e1e0794 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,7031 @@
+@@ -0,0 +1,7312 @@
 +package preflightreceipt
 +
 +import (
@@ -14817,14 +15242,11 @@ index e69de29..793cabd 100644
 +		t.Fatal(err)
 +	}
 +
-+	// Simulate temp-file creation failure during taint persistence, AND re-plant the exact unsealed file
-+	// as would happen on a read-only filesystem where persist, Truncate, and Remove all fail.
++	// Simulate staging failure during taint persistence (works even as root in Linux Docker),
++	// AND re-plant the exact unsealed file as would happen on a read-only filesystem.
 +	stagingDir := filepath.Join(root, ".staging")
-+	if err := os.MkdirAll(stagingDir, 0700); err != nil {
-+		t.Fatal(err)
-+	}
-+	blocker := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
-+	if err := os.Mkdir(blocker, 0700); err != nil {
++	_ = os.RemoveAll(stagingDir)
++	if err := os.WriteFile(stagingDir, []byte("blocked"), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +	TaintReview(root, launch)
@@ -14835,7 +15257,7 @@ index e69de29..793cabd 100644
 +	if err := os.WriteFile(filepath.Join(launchDir, "receipt.json"), savedUnsealed, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	_ = os.Remove(blocker)
++	_ = os.Remove(stagingDir)
 +	// In-process: tainted entry stays pinned in RAM -> SealReview MUST reject.
 +	if st := SealReview(root, launch, session); st != SealRejected {
 +		t.Fatalf("in-process SealReview accepted read-only surviving receipt: %v", st)
@@ -15283,11 +15705,8 @@ index e69de29..793cabd 100644
 +	// Simulate taint write failure (works even when running as root in Linux Docker), then restore
 +	// the surviving initial reservation receipt as if the volume were read-only during taint.
 +	stagingDir := filepath.Join(root, ".staging")
-+	if err := os.MkdirAll(stagingDir, 0700); err != nil {
-+		t.Fatal(err)
-+	}
-+	blocker := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
-+	if err := os.Mkdir(blocker, 0700); err != nil {
++	_ = os.RemoveAll(stagingDir)
++	if err := os.WriteFile(stagingDir, []byte("blocked"), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +	res.Taint()
@@ -15295,7 +15714,7 @@ index e69de29..793cabd 100644
 +	if err := os.WriteFile(filepath.Join(dir, "receipt.json"), savedInitial, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	_ = os.Remove(blocker)
++	_ = os.Remove(stagingDir)
 +
 +	// Simulate proxy restart + storage recovery: clear reviewLedger.
 +	reviewMu.Lock()
@@ -15340,16 +15759,8 @@ index e69de29..793cabd 100644
 +		reviewMu.Unlock()
 +	})
 +	stagingDir := filepath.Join(root, ".staging")
-+	if err := os.MkdirAll(stagingDir, 0700); err != nil {
-+		t.Fatal(err)
-+	}
-+	baseSeq := tmpSeq.Load()
-+	b1 := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), baseSeq+1))
-+	b2 := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), baseSeq+2))
-+	if err := os.Mkdir(b1, 0700); err != nil {
-+		t.Fatal(err)
-+	}
-+	if err := os.Mkdir(b2, 0700); err != nil {
++	_ = os.RemoveAll(stagingDir)
++	if err := os.WriteFile(stagingDir, []byte("blocked"), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +
@@ -15367,8 +15778,7 @@ index e69de29..793cabd 100644
 +	if _, err := ReserveReview(root, launch); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("second ReserveReview bypassed missing marker persistence: err=%v", err)
 +	}
-+	_ = os.Remove(b1)
-+	_ = os.Remove(b2)
++	_ = os.Remove(stagingDir)
 +	releaseReview(entry)
 +}
 +
@@ -15923,7 +16333,10 @@ index e69de29..793cabd 100644
 +		if dir == root1 {
 +			return errors.New("injected parent dir sync error")
 +		}
-+		return origSync(dir)
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
 +	}
 +	if _, _, err := BeginReview(context.Background(), root1, launch1, session1, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("initial BeginReview with parent dir sync failure err = %v, want ErrUnavailable", err)
@@ -15966,17 +16379,14 @@ index e69de29..793cabd 100644
 +		t.Fatal(err)
 +	}
 +	stagingDir2 := filepath.Join(root2, ".staging")
-+	if err := os.MkdirAll(stagingDir2, 0700); err != nil {
-+		t.Fatal(err)
-+	}
-+	blocker2 := filepath.Join(stagingDir2, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
-+	if err := os.Mkdir(blocker2, 0700); err != nil {
++	_ = os.RemoveAll(stagingDir2)
++	if err := os.WriteFile(stagingDir2, []byte("blocked"), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +	if st := SealReview(root2, launch2, session2); st != SealUnavailable {
 +		t.Fatalf("SealReview with pre-rename failure = %v, want SealUnavailable", st)
 +	}
-+	_ = os.Remove(blocker2)
++	_ = os.Remove(stagingDir2)
 +	if err := os.WriteFile(filepath.Join(launchDir2, "receipt.json"), unsealedBefore2, 0600); err != nil {
 +		t.Fatal(err)
 +	}
@@ -16032,7 +16442,10 @@ index e69de29..793cabd 100644
 +		if dir == launchDir3 {
 +			return errors.New("injected launch dir sync error")
 +		}
-+		return origSync(dir)
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
 +	}
 +	if st, digest := SealReviewWithDigest(root3, launch3, session3); st != SealUnavailable || digest != "" {
 +		t.Fatalf("SealReviewWithDigest with post-rename dir-sync failure = (%v, %q), want (SealUnavailable, \"\")", st, digest)
@@ -16099,7 +16512,10 @@ index e69de29..793cabd 100644
 +			<-proceedSync
 +			return errors.New("injected first persist dir-sync error")
 +		}
-+		return origSync(dir)
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
 +	}
 +
 +	req1Err := make(chan error, 1)
@@ -16668,7 +17084,10 @@ index e69de29..793cabd 100644
 +		if dir == parentBase {
 +			return errors.New("injected parent of root dir sync error")
 +		}
-+		return origSync(dir)
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
 +	}
 +	if _, _, err := BeginReview(context.Background(), newRoot, "review-b8888888-2222-4333-8444-555555555505", "019d0000-0000-7000-8000-666666666805", "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("first BeginReview when root parent dir sync fails = %v, want ErrUnavailable", err)
@@ -16712,7 +17131,10 @@ index e69de29..793cabd 100644
 +		if dir == parentBase {
 +			return errors.New("injected parent of root dir sync error on seal")
 +		}
-+		return origSync(dir)
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
 +	}
 +	if st, digest := SealReviewWithDigest(newRoot, lSync, sSync); st != SealUnavailable || digest != "" {
 +		t.Fatalf("SealReviewWithDigest while root parent dir sync fails = (%v, %q), want (SealUnavailable, \"\")", st, digest)
@@ -18177,7 +18599,10 @@ index e69de29..793cabd 100644
 +				<-releaseTaintSync
 +			})
 +		}
-+		return origSyncER(dir)
++		if origSyncER != nil {
++			return origSyncER(dir)
++		}
++		return nil
 +	}
 +	defer func() { syncDirFn = origSyncER }()
 +
@@ -18882,6 +19307,17 @@ index e69de29..793cabd 100644
 +	if err := os.Chtimes(p1RecPath, oldTime, oldTime); err != nil {
 +		t.Fatal(err)
 +	}
++	p1MarkerPath := filepath.Join(p1, "producer.json")
++	if rawM, err := os.ReadFile(p1MarkerPath); err == nil {
++		var pm preflightReservationMarker
++		if json.Unmarshal(rawM, &pm) == nil {
++			pm.Started = oldTime.UnixNano()
++			if dataM, merr := json.Marshal(pm); merr == nil {
++				_ = os.WriteFile(p1MarkerPath, dataM, 0600)
++			}
++		}
++		_ = os.Chtimes(p1MarkerPath, oldTime, oldTime)
++	}
 +	if err := os.Chtimes(p1, oldTime, oldTime); err != nil {
 +		t.Fatal(err)
 +	}
@@ -18962,8 +19398,8 @@ index e69de29..793cabd 100644
 +	_ = os.Chtimes(dirtyPreflight, ancient, ancient)
 +
 +	// Remove p2 and p3 so only foreignDir and dirtyPreflight occupy the 2-entry preflight cap.
-+	_ = os.Remove(p2)
-+	_ = os.Remove(p3)
++	_ = os.RemoveAll(p2)
++	_ = os.RemoveAll(p3)
 +	p4 := filepath.Join(root, "preflight-11111111-2222-4333-8444-555555555504")
 +	if err := reservePrivateDir(p4, false); !errors.Is(err, ErrUnavailable) {
 +		t.Fatalf("reserve p4 when bucket holds only unrelated/dirty dirs = %v, want ErrUnavailable", err)
@@ -20102,7 +20538,10 @@ index e69de29..793cabd 100644
 +		if failRootSync && filepath.Clean(dir) == filepath.Clean(root) {
 +			return errors.New("simulated transient root fsync failure")
 +		}
-+		return oldSync(dir)
++		if oldSync != nil {
++			return oldSync(dir)
++		}
++		return nil
 +	}
 +
 +	lFail := "review-f8888888-2222-4333-8444-555555555501"
@@ -20270,18 +20709,15 @@ index e69de29..793cabd 100644
 +	c.Complete(true)
 +	c.HandlerDone(true)
 +
-+	// Force taint persistence to fail at tmp file creation so invalidateDiskReceiptInRootLocked removes receipt.json.
++	// Force taint persistence to fail at staging so invalidateDiskReceiptInRootLocked removes receipt.json.
 +	dir1 := filepath.Join(root, launch1)
 +	stagingDir := filepath.Join(root, ".staging")
-+	if err := os.MkdirAll(stagingDir, 0700); err != nil {
-+		t.Fatal(err)
-+	}
-+	blocker := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-%d", os.Getpid(), tmpSeq.Load()+1))
-+	if err := os.Mkdir(blocker, 0700); err != nil {
++	_ = os.RemoveAll(stagingDir)
++	if err := os.WriteFile(stagingDir, []byte("blocked"), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +	TaintReview(root, launch1)
-+	_ = os.Remove(blocker)
++	_ = os.Remove(stagingDir)
 +
 +	if _, err := os.Lstat(filepath.Join(dir1, "receipt.json")); !os.IsNotExist(err) {
 +		t.Fatalf("expected receipt.json removed on failed taint persist, got %v", err)
@@ -20498,6 +20934,8 @@ index e69de29..793cabd 100644
 +	if err := os.WriteFile(filepath.Join(dir, "producer.json"), markerBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
++	r1 := sha256Hex("resp_interrupted_1")
++	r2 := sha256Hex("resp_interrupted_2")
 +	unsealedComplete, _ := json.Marshal(ReviewReceipt{
 +		Schema:           ReviewSchema,
 +		Launch:           launch,
@@ -20508,10 +20946,10 @@ index e69de29..793cabd 100644
 +		Complete:         true,
 +		Sealed:           false,
 +		Tainted:          false,
-+		Requests:         1,
++		Requests:         2,
 +		Routes:           []string{"codex:gpt-6.2-sol@chatgpt.com"},
-+		ResponseIDSHAs:   []string{sha256Hex("resp_interrupted")},
-+		LastResponseID:   sha256Hex("resp_interrupted"),
++		ResponseIDSHAs:   []string{r1, r2},
++		LastResponseID:   r2,
 +		LastOutputSHA256: sha256Hex("VERDICT: PASS"),
 +	})
 +	if err := os.WriteFile(filepath.Join(dir, "receipt.json"), unsealedComplete, 0600); err != nil {
@@ -20525,7 +20963,60 @@ index e69de29..793cabd 100644
 +		t.Fatalf("inspectProducerReceiptDir accepted unverified seal.sha256 without matching seal.pending.json")
 +	}
 +
-+	// Add matching seal.pending.json -> mismatched seal.sha256 STILL rejected.
++	// Sol P2 #4 + Astra P2 #3 (PR #2280 R41): seal.pending.json differing in earlier response_id_sha256s
++	// or started_ns/finished_ns MUST be rejected even when requests, routes, last_response_id, and digest match.
++	badHistoryPending, _ := json.Marshal(ReviewReceipt{
++		Schema:           ReviewSchema,
++		Launch:           launch,
++		Session:          session,
++		Started:          ancient.UnixNano(),
++		Finished:         ancient.Add(time.Minute).UnixNano(),
++		SealedAt:         ancient.Add(2 * time.Minute).UnixNano(),
++		Complete:         true,
++		Sealed:           true,
++		Tainted:          false,
++		Requests:         2,
++		Routes:           []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs:   []string{sha256Hex("resp_different_earlier"), r2},
++		LastResponseID:   r2,
++		LastOutputSHA256: sha256Hex("VERDICT: PASS"),
++	})
++	if err := os.WriteFile(filepath.Join(dir, "seal.pending.json"), badHistoryPending, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, "seal.sha256"), []byte(sha256Hex(string(badHistoryPending))), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(dir, launch, true); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted seal.pending.json with mismatched earlier response_id_sha256s")
++	}
++	badTimePending, _ := json.Marshal(ReviewReceipt{
++		Schema:           ReviewSchema,
++		Launch:           launch,
++		Session:          session,
++		Started:          ancient.Add(time.Second).UnixNano(),
++		Finished:         ancient.Add(time.Minute).UnixNano(),
++		SealedAt:         ancient.Add(2 * time.Minute).UnixNano(),
++		Complete:         true,
++		Sealed:           true,
++		Tainted:          false,
++		Requests:         2,
++		Routes:           []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs:   []string{r1, r2},
++		LastResponseID:   r2,
++		LastOutputSHA256: sha256Hex("VERDICT: PASS"),
++	})
++	if err := os.WriteFile(filepath.Join(dir, "seal.pending.json"), badTimePending, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, "seal.sha256"), []byte(sha256Hex(string(badTimePending))), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(dir, launch, true); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted seal.pending.json with mismatched started_ns")
++	}
++
++	// Add exact matching seal.pending.json -> mismatched seal.sha256 STILL rejected.
 +	sealedPendingBytes, _ := json.Marshal(ReviewReceipt{
 +		Schema:           ReviewSchema,
 +		Launch:           launch,
@@ -20536,12 +21027,15 @@ index e69de29..793cabd 100644
 +		Complete:         true,
 +		Sealed:           true,
 +		Tainted:          false,
-+		Requests:         1,
++		Requests:         2,
 +		Routes:           []string{"codex:gpt-6.2-sol@chatgpt.com"},
-+		ResponseIDSHAs:   []string{sha256Hex("resp_interrupted")},
-+		LastResponseID:   sha256Hex("resp_interrupted"),
++		ResponseIDSHAs:   []string{r1, r2},
++		LastResponseID:   r2,
 +		LastOutputSHA256: sha256Hex("VERDICT: PASS"),
 +	})
++	if err := os.WriteFile(filepath.Join(dir, "seal.sha256"), []byte(sha256Hex("unrelated-string")), 0600); err != nil {
++		t.Fatal(err)
++	}
 +	if err := os.WriteFile(filepath.Join(dir, "seal.pending.json"), sealedPendingBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
@@ -20782,8 +21276,9 @@ index e69de29..793cabd 100644
 +}
 +
 +func TestReviewReceiptMarkerRollbackPreservesPreexistingMarker(t *testing.T) {
-+	// Sol P1 #1 (PR #2280 R40): when writeReviewMarkerInSubdir fails because producer.json already
-+	// exists (EEXIST), rollback MUST NEVER unlink the pre-existing producer.json file.
++	// Sol P1 #1 (PR #2280 R40) + Sol P2 #2 (PR #2280 R41): staged reservation via
++	// reserveStagedSubdirWithMarker MUST NEVER overwrite or unlink a pre-existing directory or its
++	// producer.json (both allowExisting=false and allowExisting=true).
 +	root := filepath.Join(t.TempDir(), "marker-eexist")
 +	if err := ensurePrivateRoot(root); err != nil {
 +		t.Fatal(err)
@@ -20803,17 +21298,228 @@ index e69de29..793cabd 100644
 +		t.Fatal(err)
 +	}
 +	defer lease.Close()
-+	subRoot, _, err := openVerifiedSubdir(lease.dir, launch)
++
++	if sub, _, created, _, _, _, _, rerr := reserveStagedSubdirWithMarker(lease.dir, root, launch, false, time.Now().UnixNano()); !os.IsExist(rerr) || created || sub != nil {
++		t.Fatalf("reserveStagedSubdirWithMarker(allowExisting=false) over existing dir = (created=%v, err=%v), want (false, EEXIST)", created, rerr)
++	}
++	sub, _, created, _, _, _, _, rerr := reserveStagedSubdirWithMarker(lease.dir, root, launch, true, time.Now().UnixNano())
++	if rerr != nil || created || sub == nil {
++		t.Fatalf("reserveStagedSubdirWithMarker(allowExisting=true) over existing dir = (created=%v, err=%v), want (false, nil)", created, rerr)
++	}
++	_ = sub.Close()
++	if got, gerr := os.ReadFile(markerPath); gerr != nil || string(got) != preexisting {
++		t.Fatalf("pre-existing producer.json was removed/modified: err=%v raw=%q", gerr, string(got))
++	}
++
++	// Pre-existing empty dir MUST NOT be replaced when allowExisting=false (RENAME_NOREPLACE / RENAME_EXCL).
++	pfSess := "preflight-b0000000-2222-4333-8444-555555555502"
++	emptyDir := filepath.Join(root, pfSess)
++	if err := os.Mkdir(emptyDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	emptyFI, err := os.Lstat(emptyDir)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	defer subRoot.Close()
-+
-+	_, _, _, _, created, err := writeReviewMarkerInSubdir(subRoot, dir, launch, time.Now().UnixNano())
-+	if err == nil || created {
-+		t.Fatalf("writeReviewMarkerInSubdir over existing producer.json = (created=%v, err=%v), want (false, EEXIST)", created, err)
++	eDev, eIno, _ := statDevIno(emptyFI)
++	if sub2, _, _, _, _, _, _, rerr := reserveStagedSubdirWithMarker(lease.dir, root, pfSess, false, time.Now().UnixNano()); !os.IsExist(rerr) || sub2 != nil {
++		t.Fatalf("reserveStagedSubdirWithMarker replaced pre-existing empty dir: err=%v", rerr)
 +	}
-+	if got, rerr := os.ReadFile(markerPath); rerr != nil || string(got) != preexisting {
-+		t.Fatalf("pre-existing producer.json was removed/modified: err=%v raw=%q", rerr, string(got))
++	afterFI, err := os.Lstat(emptyDir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	aDev, aIno, _ := statDevIno(afterFI)
++	if aDev != eDev || aIno != eIno {
++		t.Fatalf("pre-existing empty dir inode changed: (%d,%d) -> (%d,%d)", eDev, eIno, aDev, aIno)
++	}
++	if _, err := os.Lstat(filepath.Join(emptyDir, "producer.json")); !os.IsNotExist(err) {
++		t.Fatalf("unexpected producer.json written into pre-existing empty dir: %v", err)
++	}
++}
++
++func TestReviewReceiptStagingCollisionRetriesWithoutDeletingPreexisting(t *testing.T) {
++	// Astra P2 #4 (PR #2280 R41): colliding staging names MUST retry with a fresh name without
++	// deleting pre-existing colliding files and without failing valid publish/seal.
++	root := filepath.Join(t.TempDir(), "staging-retry")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lease.Close()
++	stagingRoot, err := ensureStagingDir(lease.dir, root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer stagingRoot.Close()
++
++	c1 := filepath.Join(root, ".staging", "pending-1-1-0000000000000001")
++	c2 := filepath.Join(root, ".staging", "pending-1-2-0000000000000002")
++	if err := os.WriteFile(c1, []byte("keep-1"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(c2, []byte("keep-2"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	candidates := []string{
++		"pending-1-1-0000000000000001",
++		"pending-1-2-0000000000000002",
++		"pending-1-3-0000000000000003",
++	}
++	idx := 0
++	name, f, release, err := createStagingFileWithGen(stagingRoot, root, func() (string, error) {
++		n := candidates[idx]
++		idx++
++		return n, nil
++	})
++	if err != nil || name != candidates[2] {
++		t.Fatalf("createStagingFileWithGen = (%q, %v), want (%q, nil)", name, err, candidates[2])
++	}
++	_ = f.Close()
++	_ = stagingRoot.Remove(name)
++	release()
++	if got1, err := os.ReadFile(c1); err != nil || string(got1) != "keep-1" {
++		t.Fatalf("colliding file c1 was removed/modified: err=%v raw=%q", err, string(got1))
++	}
++	if got2, err := os.ReadFile(c2); err != nil || string(got2) != "keep-2" {
++		t.Fatalf("colliding file c2 was removed/modified: err=%v raw=%q", err, string(got2))
++	}
++}
++
++func TestReviewReceiptOrphanStagingSweptOnLockAcquireRestart(t *testing.T) {
++	// Sol P2 #3 + Astra P2 #4 (PR #2280 R41): after a proxy crash/restart (even with PID reuse),
++	// freshly acquiring .writer.lock sweeps orphaned producer files & stage-dirs inside .staging,
++	// preserves foreign files untouched, and allows subsequent publish + seal to succeed.
++	root := filepath.Join(t.TempDir(), "staging-restart-sweep")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	stagingDir := filepath.Join(root, ".staging")
++	if err := os.Mkdir(stagingDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	orphanLegacy := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-1", os.Getpid()))
++	orphanRand := filepath.Join(stagingDir, fmt.Sprintf("pending-sha-%d-2-abcdef0123456789", os.Getpid()))
++	orphanDirEmpty := filepath.Join(stagingDir, fmt.Sprintf("stage-dir-%d-3-abcdef0123456789", os.Getpid()))
++	orphanDirMarked := filepath.Join(stagingDir, fmt.Sprintf("stage-dir-%d-4-abcdef0123456780", os.Getpid()))
++	foreignStagingFile := filepath.Join(stagingDir, "keep-foreign.txt")
++	if err := os.WriteFile(orphanLegacy, []byte("partial"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(orphanRand, []byte("partial-sha"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(orphanDirEmpty, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(orphanDirMarked, 0700); err != nil {
++		t.Fatal(err)
++	}
++	mBytes, _ := json.Marshal(reviewReservationMarker{
++		Schema:  ReviewSchema,
++		Launch:  "review-c0000000-2222-4333-8444-555555555501",
++		Started: time.Now().UnixNano(),
++	})
++	if err := os.WriteFile(filepath.Join(orphanDirMarked, "producer.json"), mBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(foreignStagingFile, []byte("foreign"), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// Fresh lock acquire simulates process restart with PID reuse.
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	lease.Close()
++
++	for _, p := range []string{orphanLegacy, orphanRand, orphanDirEmpty, orphanDirMarked} {
++		if _, statErr := os.Lstat(p); !os.IsNotExist(statErr) {
++			t.Fatalf("orphan staging artifact %s survived restart sweep: %v", p, statErr)
++		}
++	}
++	if got, err := os.ReadFile(foreignStagingFile); err != nil || string(got) != "foreign" {
++		t.Fatalf("foreign file inside .staging was removed/modified: err=%v raw=%q", err, string(got))
++	}
++
++	// End-to-end review publish + seal succeeds cleanly on the recovered root.
++	launch := "review-c0000000-2222-4333-8444-555555555502"
++	session := "019d0000-0000-7000-8000-cccccccccc02"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_after_sweep","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if st, digest := SealReviewWithDigest(root, launch, session); st != SealOK || !isSHA256Hex(digest) {
++		t.Fatalf("SealReviewWithDigest after restart staging sweep = (%v, %q), want SealOK", st, digest)
++	}
++}
++
++func TestReviewReceiptSyncPinnedDirDoesNotReopenPathInProduction(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R41): in production (syncDirFn == nil), syncPinnedDir MUST sync only
++	// the verified *os.Root descriptor and NEVER re-open fullPath by name (even if fullPath is a FIFO).
++	if syncDirFn != nil {
++		t.Fatalf("syncDirFn must be nil by default in production")
++	}
++	base := t.TempDir()
++	realDir := filepath.Join(base, "real-dir")
++	if err := os.Mkdir(realDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	r, err := os.OpenRoot(realDir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer r.Close()
++
++	fifoPath := filepath.Join(base, "blocking-fifo")
++	if err := syscall.Mkfifo(fifoPath, 0600); err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan error, 1)
++	go func() {
++		done <- syncPinnedDir(r, fifoPath)
++	}()
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatalf("syncPinnedDir failed when fullPath pointed to FIFO: %v", err)
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatalf("syncPinnedDir blocked on path-based FIFO open")
++	}
++	// defaultSyncDir (used only for parent-of-root) MUST ALSO fail fast on a FIFO via O_DIRECTORY|O_NONBLOCK.
++	doneParent := make(chan error, 1)
++	go func() {
++		doneParent <- defaultSyncDir(fifoPath)
++	}()
++	select {
++	case err := <-doneParent:
++		if err == nil {
++			t.Fatalf("defaultSyncDir unexpectedly succeeded on a FIFO")
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatalf("defaultSyncDir blocked on FIFO")
 +	}
 +}
