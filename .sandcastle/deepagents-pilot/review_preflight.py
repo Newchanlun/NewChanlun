@@ -419,7 +419,11 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
-                line = raw.decode("utf-8", "replace")
+                try:
+                    line = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    detail = "SSE 包含非法 UTF-8 字节"
+                    break
                 if line == "":
                     ev_name = event_name
                     event_name = None
