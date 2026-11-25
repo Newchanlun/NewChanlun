@@ -290,13 +290,13 @@ pub(super) fn check_projection_anchor(
     actual: &projection::Projection,
     anchor: &Value,
 ) -> Result<(), String> {
-    check_projection_anchor_view(actual, anchor.into())
+    check_projection_anchor_view(actual.anchor_view().view(), anchor.into())
 }
 pub(super) fn check_projection_anchor_view(
-    actual: &projection::Projection,
+    actual: JsonView<'_>,
     anchor: JsonView<'_>,
 ) -> Result<(), String> {
-    if anchor != actual.anchor_view().view() {
+    if anchor != actual {
         Err("IdentityConflict：projection anchor与同一读集的完整投影不同".into())
     } else {
         Ok(())

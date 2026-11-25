@@ -17,7 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-job-setup
       - name: H1 life clamp and history locks
-        run: cargo test --release --locked --features s_session,s_incremental --bin s_structure_session h1_ --jobs 4 -- --test-threads 1 --nocapture
+        # #1855：h1_ 过滤也命中 w2_h1_cold_*，四条 W2 冷锁归长作业通道 w2-cold-locks.yml，此处跳过。
+        run: cargo test --release --locked --features s_session,s_incremental --bin s_structure_session h1_ --jobs 4 -- --skip w2_h1_cold_ --test-threads 1 --nocapture
       - name: Existing SQLite commit failure locks
         run: cargo test --release --locked --features s_session,s_incremental --bin s_structure_session sqlite_commit_failure --jobs 4 -- --test-threads 1
       - name: Native debug source suffix and receipt expiry locks
