@@ -415,7 +415,10 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
             has_response_dict = False
             data_lines: list[str] = []
             event_name: str | None = None
-            for raw in _split_sse_lines(response.read()):
+            raw_body = response.read()
+            if raw_body.startswith(b"\xef\xbb\xbf"):
+                raw_body = raw_body[3:]
+            for raw in _split_sse_lines(raw_body):
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break

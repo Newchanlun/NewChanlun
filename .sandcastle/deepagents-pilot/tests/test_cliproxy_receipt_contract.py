@@ -426,29 +426,57 @@ def test_generated_go_codex_and_review_receipts_consumed_by_python():
             "session": session,
             "receipt_sha256": hashlib.sha256(raw).hexdigest(),
         }
+        # Derive expected response_id & output_text digests independently from client-observed SSE
+        # (never circularly copying them from receipt.json).
+        client_sse = (root / name / launch / "client-sse.txt").read_text(encoding="utf-8")
+        completed_ev = None
+        for line in client_sse.splitlines():
+            if line.startswith("data: "):
+                obj = json.loads(line[6:])
+                if obj.get("type") == "response.completed":
+                    completed_ev = obj
+        assert completed_ev is not None
+        client_resp = completed_ev["response"]
+        client_resp_id_sha = hashlib.sha256(client_resp["id"].encode("utf-8")).hexdigest()
+        client_out_parts = [
+            part["text"]
+            for item in client_resp["output"]
+            if item.get("type") == "message" and item.get("role") == "assistant"
+            for part in item.get("content", [])
+            if part.get("type") == "output_text"
+        ]
+        client_out_sha = hashlib.sha256("".join(client_out_parts).encode("utf-8")).hexdigest()
         assert payload["sealed"] is True
         since = payload["started_ns"] / 1e9
         got = log_mod.review_from_receipt(
             root / name, launch, session, since, 0.5,
             expected_receipt_sha256=seal_resp["receipt_sha256"],
-            expected_response_id_sha256=payload["last_response_id_sha256"],
-            expected_output_sha256=payload["last_output_sha256"],
+            expected_response_id_sha256=client_resp_id_sha,
+            expected_output_sha256=client_out_sha,
             min_requests=2,
         )
         assert got is not None and got["routes"] == [(f"codex:{model}", "chatgpt.com")]
         assert got["requests"] == 2 and got["sealed"] is True
-        assert len(got["response_id_sha256s"]) == 2 and got["response_id_sha256s"][-1] == got["last_response_id_sha256"]
+        assert len(got["response_id_sha256s"]) == 2 and got["response_id_sha256s"][-1] == client_resp_id_sha
+        assert got["last_output_sha256"] == client_out_sha
+        assert log_mod.review_from_receipt(
+            root / name, launch, session, since, 0,
+            expected_receipt_sha256=seal_resp["receipt_sha256"],
+            expected_response_id_sha256=hashlib.sha256(b"wrong-resp-id").hexdigest(),
+            expected_output_sha256=client_out_sha,
+            min_requests=2,
+        ) is None
         assert log_mod.review_from_receipt(
             root / name, launch, "019d0000-0000-7000-8000-000000000fff", since, 0,
             expected_receipt_sha256=seal_resp["receipt_sha256"],
-            expected_response_id_sha256=payload["last_response_id_sha256"],
-            expected_output_sha256=payload["last_output_sha256"],
+            expected_response_id_sha256=client_resp_id_sha,
+            expected_output_sha256=client_out_sha,
             min_requests=2,
         ) is None
         assert log_mod.review_from_receipt(
             root / name, launch, session, since, 0,
-            expected_response_id_sha256=payload["last_response_id_sha256"],
-            expected_output_sha256=payload["last_output_sha256"],
+            expected_response_id_sha256=client_resp_id_sha,
+            expected_output_sha256=client_out_sha,
             min_requests=2,
         ) is None
 

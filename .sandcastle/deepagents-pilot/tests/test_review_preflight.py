@@ -1739,3 +1739,101 @@ def test_round_trip_rejects_invalid_utf8_in_sse():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_round_trip_accepts_single_leading_utf8_bom_and_rejects_second_bom():
+    """Astra P2 #4 (R49): WHATWG SSE 允许流开头至多一个 UTF-8 BOM；重复 BOM 须拒绝。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    one_bom = (
+        b"\xef\xbb\xbf"
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_bom_1","status":"completed"}}\n\n'
+    )
+    two_boms = b"\xef\xbb\xbf" + one_bom
+    current = {"body": one_bom}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res_ok = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000097",
+            preflight.Deadline(5),
+        )
+        assert res_ok["ok"] is True
+
+        current["body"] = two_boms
+        res_bad = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000096",
+            preflight.Deadline(5),
+        )
+        assert res_bad["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_round_trip_rejects_empty_status_on_non_terminal_event():
+    """Astra P2 #2 (R49): response.in_progress 携带显式空 status 须在预检与正式生产者两端一致拒绝。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = (
+        b"event: response.in_progress\n"
+        b'data: {"type":"response.in_progress","response":{"id":"resp_empty_st","status":""}}\n\n'
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_empty_st","status":"completed"}}\n\n'
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000095",
+            preflight.Deadline(5),
+        )
+        assert res["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
