@@ -1,5 +1,32 @@
 # 门禁 11：正文区引文核对（#2317）
 
+> **现行状态（2026-11-26）。** 本目录里只有**身份检查**是阻断门、是送审对象：`check_admit_identity.py`、`admit_identity.pin`、`selftest_identity.py`，见下面「身份检查」一节。
+>
+> `check_admit_table.py`、`report_citations.py`、`selftest.py`、`pinned_admit.sha256`、`merge_shim/`、`fixtures/` 是**未过审的辅助工具**：两轮非作者独审均为 BLOCK，不接入任何门禁，读数不得当作准入或放行依据。已知未修的问题见 `origin/evidence/2317-admit-review-r2` 的报告（符号链接与 `__pycache__` 下的文件绕过旧完整性检查；单个 CR 换行使跨行标记误报通过；只含一个不换行空格的引文被报成空引文；四个外层反向自测断言对未改动副本也成立）。本文件「两个脚本」一节以下是这些工具的原说明，保留供参考。
+
+## 身份检查（阻断）
+
+```sh
+python3 -I formal_math/verification/gate11/check_admit_identity.py [--rev 提交] [--no-worktree]
+python3 -I formal_math/verification/gate11/selftest_identity.py
+```
+
+只回答一个问题：给定提交（默认 `HEAD`）里的 `formal_math/sources/admit/` 与 `docs/chanlun/text/blog/`，是不是过审时的那一份。退出码 0 相符，1 不符，2 无法运行。
+
+- **准入材料**：用 `git ls-tree -r` 取该提交里这个目录下的全部条目，每个条目必须是模式 `100644` 的普通文件；按「模式、内容 sha256、路径」逐行排成规范文本，须与 `admit_identity.pin` 逐字节相同。符号链接、可执行位、子模块、多一个或少一个受跟踪文件（不论放在哪个子目录）都会使规范文本不同。钉选文件没有注释与空行的写法。
+- **语料**：同样从该提交的 git 对象现算指纹，须等于脚本常量里的基线 `b6a35574…a0d`（与 `cd docs/chanlun/text/blog && sha256sum *.md | sha256sum` 同值）。目录里不许有子目录或非 `.md` 条目。
+- **工作区**（默认开，`--no-worktree` 关）：两个目录在磁盘上须恰好是这些普通文件且内容与提交相同，任何多出的条目都红，不设例外目录。这一步防的是下游工具读到的磁盘内容与被核的提交不是一回事。
+- 读 git 对象时关闭替换引用（`GIT_NO_REPLACE_OBJECTS=1`）。
+
+**为什么只核身份。** 790 行、两遍原件重建零差分、作者文字摘要相符，这些性质在过审时已由非作者独立核实（#2316 评论 7166555103；#2317 两轮独审均确认入库表与 `2031547003` 逐字节一致）。内容相同则性质相同，这里不再重算，也就没有替身台账的问题。
+
+**钉选了什么。** 49 项：`2031547003` 的 `fm09-admit/` 去掉 `errata/` 后的 46 个原件（逐字节相同）、改过标题与说明的 `candidate/README.md`、入库时新写的 `SHA256SUMS` 与 `CORPUS_FINGERPRINT`。复算：`python3 -I …/check_admit_identity.py --print-pin --rev <提交>`。
+
+**不防什么。**
+- 钉选文件、脚本常量与被钉内容在同一次改动里一起换，本检查不拦（自测 `table-and-pin-synced` 记录这一点）。改 `gate11/` 须经路径权限门与评审。
+- 被比对的是内容的 sha256 与 git 模式，不含文件时间、属主等 git 不记录的属性。
+- 不核引文。`formal_math/` 里的硬证据引文目前没有过审的机检工具。
+
 输入只有一份：`formal_math/sources/admit/` 里的正文区准入表 `candidate/tier1_candidate.jsonl`（790 条，已过非作者实物审，范围仅限**正文归属**；记录见 #2316 评论 7166555103）。本目录不接入 `run_gates.py`，接入总入口等 #2312 过审后由主控做。
 
 只用标准库，一律 `python3 -I` 运行；仓库根按脚本位置推出（`--root` 可覆盖），脚本里没有机器路径。
