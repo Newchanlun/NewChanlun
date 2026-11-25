@@ -33,6 +33,8 @@ python3 formal_math/verification/selftest.py
 
 `fm_audit headers` 用 `Parser.parseHeader` 读取模块头和导入；`fm_audit source` 用加载本轮依赖后的 Lean 前端逐条解析、检查、再精化命令。解析或导入加载失败退 2；语法有效而声明精化被编译器拒绝时，门 2 报构建红、其余门不能加载该环境。已经发现硬反例时不执行禁用命令。Python 只编排这些步骤并核对 Lake 导入图。
 
+单查一个文件的源码阶段：`lake exe fm_audit source Chan.Defs.Example Chan/Defs/Example.lean 3`（从 `formal_math/` 运行）。最后一项可选，可填 `2`、`3` 或 `15`；明确门编号时，源码阶段与 Python 调用方用同一退出码。模块依赖顺序、导入方向与环境检查仍由整门入口编排。
+
 本机枚举后钉选的顶层命令 kind（以下省去共同前缀 `Lean.Parser.Command.`）：
 
 - `moduleDoc`、`namespace`、`section`、`end`、`open`、`variable`、`universe`、`include`；

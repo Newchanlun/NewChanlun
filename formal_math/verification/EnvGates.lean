@@ -183,9 +183,14 @@ private def refines (struct : Name) (nparams : Nat) (fields bad : Array (Nat × 
     let clean (r : Expr) :=
       (r.find? raw).isSome &&
         !(containsFVar (r.replace fun t => if raw t then some (mkNatLit 0) else none) x)
+    let criterion (i : Nat) (f : Name) (t : Expr) :=
+      projection struct nparams f i x t true ||
+        -- Bool 作命题时，Lean 的标准强制转换是「整个字段 = true」。
+        ((t.eq?).any fun (ty, a, b) =>
+          ty.isConstOf `Bool && b.isConstOf `Bool.true &&
+            projection struct nparams f i x a true)
     return bad.all fun (i, f) => pairs.any fun (a, b) =>
-      (projection struct nparams f i x a true && clean b) ||
-        (projection struct nparams f i x b true && clean a)
+      (criterion i f a && clean b) || (criterion i f b && clean a)
 
 private def resident (name : Name) (nparams : Nat) (entries : Array Entry) : MetaM Bool :=
   entries.anyM fun w => do

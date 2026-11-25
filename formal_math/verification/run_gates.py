@@ -205,8 +205,8 @@ def audit_sources(root, gate, headers=None):
         if targets:
             checked(fm, "lake", "build", *(f"+{m}:olean" for m in targets))
         result = command(fm, "lake", "exe", "fm_audit", "source", module,
-                         path.relative_to("formal_math").as_posix())
-        if result.returncode:
+                         path.relative_to("formal_math").as_posix(), gate)
+        if result.returncode not in (0, 1):
             raise Undetermined((result.stdout + result.stderr).strip())
         exposes, issues = json.loads(result.stdout)
         relevant = [(line, detail) for number, line, detail in issues if number == gate]
@@ -222,11 +222,11 @@ def audit_sources(root, gate, headers=None):
             red("2", path, line, "BUILD_WFAIL", detail)
             print(result.stderr, file=sys.stderr, end="")
             return 1
-        if any(number == "3" for number, _, _ in issues):
-            raise Undetermined(f"{path}: 源码被门 3 拒绝，不能加载")
         if gate == "15" and is_module and lane(module) == "Chan.Defs" and not exposes:
             red("15", path, 1, "EXPOSE_SECTION", "定义文件须用 @[expose] public section")
             return 1
+        if result.returncode:
+            raise Undetermined(f"{path}: Lean 前端未返回本门的红证据")
         visiting.remove(module)
         checked_sources.add(module)
         return 0

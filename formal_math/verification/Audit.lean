@@ -50,10 +50,19 @@ private def gate3 (entries : Array FM.Entry) : CoreM UInt32 := do
 public unsafe def main (args : List String) : IO UInt32 := do
   let gate :: modules := args | return 2
   Lean.initSearchPath (← Lean.findSysroot)
-  if gate == "headers" then return ← FM.headers modules
-  if gate == "source" then
-    let [mod, path] := modules | return 2
-    return ← FM.source mod.toName path
+  if gate == "headers" || gate == "source" then
+    try
+      if gate == "headers" then return ← FM.headers modules
+      let mod :: path :: tail := modules | return 2
+      let selected ← match tail with
+        | [] => pure "all"
+        | [g] => if ["2", "3", "15"].contains g then pure g
+                 else throw (IO.userError s!"未知源码门 {g}")
+        | _ => throw (IO.userError "source 需要模块名、路径和可选门编号")
+      return ← FM.source mod.toName path selected
+    catch err =>
+      IO.eprintln err.toString
+      return 2
   let mods := modules.toArray.map String.toName
   -- 加载同一轮构建的私有分片，保留私有声明与证明体。
   let env := (← Lean.importModules (mods.map fun m => { module := m }) {}

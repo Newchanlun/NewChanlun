@@ -1,6 +1,7 @@
 module
 
 public import Chan.Defs.Fixture
+public import Mathlib.Data.Nat.Basic
 
 public section
 

@@ -27,7 +27,7 @@ def temporary_root():
     root = Path(configured).resolve(strict=True)
     if not root.is_dir():
         raise ValueError(f"{root} 不是临时目录")
-    if sys.platform == "darwin" and root.stat().st_dev == Path("/").stat().st_dev:
+    if sys.platform == "darwin" and root.stat().st_dev == Path("/System/Volumes/Data").stat().st_dev:
         raise ValueError(f"{root} 未落在独立卷上")
     return root
 

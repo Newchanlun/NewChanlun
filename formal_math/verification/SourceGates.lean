@@ -133,7 +133,7 @@ private def walk (ctx : Parser.InputContext) (mod : Name) (auditTool : Bool) :
       break
   return (exposes, issues)
 
-unsafe def source (mod : Name) (path : String) : IO UInt32 := do
+unsafe def source (mod : Name) (path gate : String) : IO UInt32 := do
   let (ctx, header, ps, msgs) ← readHeader path
   let opts := (Elab.async.set {} false).setBool `linter.unusedVariables true
     |>.setBool `autoImplicit false |>.setBool `relaxedAutoImplicit false
@@ -148,7 +148,14 @@ unsafe def source (mod : Name) (path : String) : IO UInt32 := do
   let lines := issues.map fun (stx, gate, detail) =>
     Json.arr #[toJson gate, toJson (ctx.fileMap.toPosition (stx.getPos?.getD 0)).line, toJson detail]
   IO.println <| (toJson (exposes, lines)).compress
-  return 0
+  let has (g : String) := issues.any fun (_, number, _) => number == g
+  let blocked := has "3" || has "build"
+  return match gate with
+    | "2" => if has "2" || has "build" then 1 else if blocked then 2 else 0
+    | "3" => if has "3" then 1 else if blocked then 2 else 0
+    | "15" => if blocked then 2
+      else if !header.isModule || ((`Chan.Defs).isPrefixOf mod && !exposes) then 1 else 0
+    | _ => if issues.isEmpty then 0 else 1
 
 end
 end FM
