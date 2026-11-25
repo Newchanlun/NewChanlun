@@ -229,7 +229,9 @@ def exercise(tmp, warm, fixture, gate, color):
 
 
 def exercise_report(tmp, warm, fixture, gate, kind):
-    expected = set(lines_of(fixture, "expect.txt"))
+    words = lambda name: set((fixture / name).read_text().split()) if (fixture / name).is_file() else set()
+    expected = words("expect.txt")
+    expected_exit = int((fixture / "report-exit.txt").read_text()) if (fixture / "report-exit.txt").is_file() else 0
     if kind == "finding" and not expected:
         raise ValueError(f"{fixture} 没有期望读数")
     if kind == "known_limits" and not (fixture / "README.md").is_file():
@@ -253,18 +255,22 @@ def exercise_report(tmp, warm, fixture, gate, kind):
     findings = [(name, r) for name, r in readings if r["status"] == "finding"]
     unknown = [(name, r) for name, r in readings if r["status"] == "unknown"]
     codes = {r["code"] for _, r in findings}
-    ok = result.returncode == 0 and document is not None
-    if kind == "finding":
+    ok = result.returncode == expected_exit
+    if expected_exit:
+        pass  # 夹具本身不能构建：报告按工具出错退 2，不再看读数。
+    elif document is None:
+        ok = False
+    elif kind == "finding":
         ok = ok and codes == expected
         if (fixture / "expect_decls.txt").is_file():
-            ok = ok and {name for name, _ in findings} == set(lines_of(fixture, "expect_decls.txt"))
+            ok = ok and {name for name, _ in findings} == words("expect_decls.txt")
     elif kind == "unknown":
         ok = ok and bool(unknown)
     else:
         ok = ok and not findings and not unknown
-    certified = lines_of(fixture, "expect_certified.txt")
+    certified = words("expect_certified.txt")
     if certified:
-        ok = ok and {r["code"] for _, r in findings if r["evidence"] == "certified"} == set(certified)
+        ok = ok and {r["code"] for _, r in findings if r["evidence"] == "certified"} == certified
     show = lambda items: ",".join(sorted(items)) or "—"
     actual = codes | ({"UNKNOWN"} if unknown else set())
     print(f"报告{gate}\t{fixture.name}\t{kind}:{show(expected)}\t{show(actual)}\t"

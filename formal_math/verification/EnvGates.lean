@@ -31,6 +31,9 @@ private def node (entry : Entry) : MetaM Bool := do
   unless entry.info matches .thmInfo _ | .defnInfo _ | .opaqueInfo _ do return false
   let env ← getEnv
   if (env.getProjectionStructureName? entry.name).isSome then return false
+  -- 报告按源码声明逐条列读数。门 3 封住了本地元编程，无声明范围的常量只能是 Lean 生成的辅助项
+  -- （方程引理、_proof_i、match 辅助等），不当节点；阻断门不依赖这一条。
+  if (← findDeclarationRangesCore? entry.name).isNone then return false
   isProp entry.info.type
 
 private def row (tag : String) (items : List Json) : Json :=

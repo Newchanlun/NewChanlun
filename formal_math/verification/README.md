@@ -118,7 +118,10 @@ python3 formal_math/verification/selftest.py --jobs 3                    # 阻�
 
 ## 二、审阅报告（不阻断）
 
-`--report` 对可信目录逐常量输出 S、7a、7b、8a、8b、9、10 的读数：标准输出是 JSON
+`--report` 对可信目录逐常量输出 S、7a、7b、8a、8b、9、10 的读数。门 7a、7b、8a、8b、9 的「节点」是
+Thm、Proofs、Exec、ChanChallenge 中有源码声明范围、类型为命题的定理、定义或 opaque（不含结构投影）；
+门 3 已封住本地元编程，没有声明范围的常量只能是 Lean 生成的辅助项（方程引理、`_proof_i`、`match`
+辅助等），报告不把它们当节点。阻断门不依赖声明范围。标准输出是 JSON
 （`schema: fm-review-v1`），标准错误是 Markdown 表；给 `--report-dir` 时另写 `report.json`、
 `report.md`。每条读数有：
 
@@ -181,7 +184,7 @@ python3 formal_math/verification/selftest.py --jobs 3                    # 阻�
 - **报告回归**：`report_cases/{finding,clean,unknown,known_limits}/g<门>/` 跑 `--report`，断言该门读数：
   `finding` 的命中代码集合等于 `expect.txt`（可配 `expect_decls.txt`、`expect_certified.txt`）；`clean`
   与 `known_limits` 无命中也无 `unknown`（后者须附 `README.md` 写明为何漏、由谁收口）；`unknown`
-  至少一条 `unknown`。报告退出码须为 0。
+  至少一条 `unknown`。报告退出码须为 0；夹具本身不能构建时用 `report-exit.txt` 写 2，只断言退出码。
 
 macOS 上夹具与子进程临时文件放在 `/Volumes/AgentStorage/fm/tmp/`；Linux 上用 `TMPDIR`。根分区可用
 低于 6 GiB 时停止派发。门 3 与报告装载 `.olean` 私有分片，并先读 ChanTest 的私有探针证明体；
