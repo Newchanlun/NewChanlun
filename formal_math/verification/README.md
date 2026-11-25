@@ -90,7 +90,7 @@ python3 formal_math/verification/make_lists.py <产物.json>                # �
 
 #### 精化器白名单怎么来的
 
-`elaborators.tsv`（226 条：允许 218、拒收 8）与 `syntax-kinds.tsv`（260 条：允许 259、拒收 1）由
+`elaborators.tsv`（286 条：允许 278、拒收 8（语料候选里拒收 1 条 `#eval`，其余 7 条是语料外、第四轮指出的求值入口，列出只为留依据））与 `syntax-kinds.tsv`（309 条：允许 308、拒收 1（`#eval` 的种类））由
 `inventory.py` 与 `make_lists.py` 生成，可重跑：
 
 - 语料：`must_green/` 全部夹具、`report_cases/clean/` 全部夹具、`Chan/` 现有源码（含第四轮的 W3
