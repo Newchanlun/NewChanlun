@@ -1,6 +1,6 @@
 7b368d38a4bc8c2ad8c1c9d54c94abf5037926084dc45cf03d31a6c24a2408aa  ./CORPUS_FINGERPRINT
 9f99b881746823319a98d6d03e3da09afd282e7b053b08d4adedaf467d8af3ec  ./SPEC.md
-67363bd0c3311834326ef06024c9bdc150d10d502bb46f009bab1affcf9e3908  ./candidate/README.md
+5fdaa7988e1df3911bdc9c811a801f676bc958e19fc3333cc2088067c0ffd652  ./candidate/README.md
 038370fd7a8dd0740538aaecc2f1a2b74278bb20455cdc89da3e075295510f71  ./candidate/adjudications.json
 cbf1d140e1ba4b6908db647da28ee6a114e1cb6e6c3e4ac782b3051e5c0ba16b  ./candidate/merge.py
 d7bfaea0cc72d47323a5e0c604f5ed5b34e58bac38e6e1eb29191a62702c45bd  ./candidate/tier1_candidate.jsonl

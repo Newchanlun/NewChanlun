@@ -20,6 +20,54 @@ def fail(check, msg):
     print("GATE11 RED [%s] %s" % (check, msg), file=sys.stderr)
 
 
+PIN_FILE = Path(__file__).resolve().parent / "pinned_admit.sha256"
+# 清单与指纹是入库时新增的两个文件，不在冻结原件之列
+UNPINNED_OK = {"SHA256SUMS", "CORPUS_FINGERPRINT"}
+
+
+def read_pins():
+    pins = {}
+    for l in PIN_FILE.read_text(encoding="utf-8").splitlines():
+        if l.strip() and not l.startswith("#"):
+            h, rel = l.split("  ", 1)
+            pins[rel] = h
+    return pins
+
+
+def check_pins(admit):
+    """身份：入库文件须逐个等于门禁侧钉选的冻结摘要（过审的那一份），不是「任一套自洽的」。
+    钉选清单与被钉文件若在同一次改动里一起换，本检查拦不住，那由路径权限（门 6b）与评审负责。"""
+    try:
+        pins = read_pins()
+    except (OSError, ValueError) as e:
+        fail("钉选", "无法读取钉选清单 %s: %s" % (PIN_FILE.name, e))
+        return
+    for rel, want in sorted(pins.items()):
+        p = admit / rel
+        if not p.is_file():
+            fail("钉选", "冻结原件缺失: %s" % rel)
+        elif C.sha256_bytes(p.read_bytes()) != want:
+            fail("钉选", "%s 不是过审的那一份（钉选 %s…）" % (rel, want[:12]))
+    on_disk = set()
+    for dp, dn, fn in os.walk(admit):
+        dn[:] = [d for d in dn if d != "__pycache__"]
+        for f in fn:
+            if not f.endswith(".pyc"):
+                on_disk.add(os.path.relpath(os.path.join(dp, f), admit).replace(os.sep, "/"))
+    for rel in sorted(on_disk - set(pins) - UNPINNED_OK):
+        fail("钉选", "目录里有钉选清单之外的文件: %s" % rel)
+    sums = admit / "SHA256SUMS"
+    if sums.is_file():
+        listed = {}
+        for l in sums.read_text(encoding="utf-8").splitlines():
+            if "  " in l:
+                h, r = l.split("  ", 1)
+                listed[r[2:] if r.startswith("./") else r] = h
+        for rel, want in sorted(pins.items()):
+            if listed.get(rel) != want:
+                fail("钉选", "SHA256SUMS 里 %s 的摘要与钉选清单不一致（SHA256SUMS 只是人查的副本）" % rel)
+
+
 def check_sums(admit):
     """摘要清单复算：清单里每个文件现算相符，目录里没有清单之外的文件。"""
     sums = admit / "SHA256SUMS"
@@ -162,13 +210,14 @@ def main():
     table = admit / C.TABLE_REL
     for p in (admit, blog, table):
         if not p.exists():
-            print("无法运行：缺 %s" % p.relative_to(root), file=sys.stderr)
+            print("无法运行：缺 %s（%s）" % (p.relative_to(root), "目录" if p.is_dir() or p in (admit, blog) else "文件"), file=sys.stderr)
             return 2
     try:
         rows = C.load_table(table)
     except (ValueError, OSError) as e:
         fail("准入表", "无法解析 %s: %s" % (C.TABLE_REL, e))
         rows = None
+    check_pins(admit)
     check_sums(admit)
     check_fingerprint(admit, blog)
     if rows is not None:
