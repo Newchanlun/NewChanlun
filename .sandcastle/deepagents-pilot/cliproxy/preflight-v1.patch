@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..cec28df 100644
+index e69de29..f0af4b3 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,184 @@
 +package middleware
 +
 +import (
@@ -45,13 +45,20 @@ index e69de29..cec28df 100644
 +			err       error
 +		)
 +		if hasReviewHeader {
++			abortClose := func(status int) {
++				rc := http.NewResponseController(c.Writer)
++				_ = rc.SetReadDeadline(time.Now())
++				_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
++				c.Header("Connection", "close")
++				c.AbortWithStatus(status)
++			}
 +			if !preflightreceipt.ValidReviewLaunch(launch) {
-+				c.AbortWithStatus(http.StatusBadRequest)
++				abortClose(http.StatusBadRequest)
 +				return
 +			}
 +			if isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" || !preflightreceipt.ValidReviewSession(session) {
 +				preflightreceipt.TaintExistingReview(root, launch)
-+				c.AbortWithStatus(http.StatusBadRequest)
++				abortClose(http.StatusBadRequest)
 +				return
 +			}
 +			turnDeadline := time.Now().Add(preflightreceipt.ReviewTurnTimeout)
@@ -65,14 +72,14 @@ index e69de29..cec28df 100644
 +			}
 +			pending, pendErr := preflightreceipt.BeginPendingReview(root, launch)
 +			if pendErr != nil {
-+				c.AbortWithStatus(http.StatusServiceUnavailable)
++				abortClose(http.StatusServiceUnavailable)
 +				return
 +			}
 +			defer pending.Release()
 +
 +			res, existed, resErr := preflightreceipt.ReserveExistingReview(root, launch)
 +			if resErr != nil {
-+				c.AbortWithStatus(http.StatusServiceUnavailable)
++				abortClose(http.StatusServiceUnavailable)
 +				return
 +			}
 +			if existed {
@@ -119,15 +126,16 @@ index e69de29..cec28df 100644
 +				res, resErr = preflightreceipt.ReserveReview(root, launch)
 +				if resErr != nil {
 +					preflightreceipt.TaintExistingReview(root, launch)
-+					c.AbortWithStatus(http.StatusServiceUnavailable)
++					abortClose(http.StatusServiceUnavailable)
 +					return
 +				}
 +				defer res.Release()
 +			}
++			res.SetTurnSeq(pending.TurnSeq())
 +			pending.Release()
 +			ctx, collector, err = preflightreceipt.BeginReviewReserved(turnCtx, res, session, requestedModel)
 +			if err != nil {
-+				c.AbortWithStatus(http.StatusServiceUnavailable)
++				abortClose(http.StatusServiceUnavailable)
 +				return
 +			}
 +		} else {
@@ -181,10 +189,10 @@ index e69de29..cec28df 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..8b56bd2
+index 0000000..1bc2a55
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,650 @@
 +package middleware
 +
 +import (
@@ -664,6 +672,175 @@ index 0000000..8b56bd2
 +	wg.Wait()
 +	if rec33.Code != http.StatusServiceUnavailable || body33.readCalled.Load() {
 +		t.Fatalf("33rd concurrent request on existing launch = (status=%d, readBody=%v), want (503, false)", rec33.Code, body33.readCalled.Load())
++	}
++
++	// Part 3 (Sol P1 #1 + Astra P1 #1): earlier Request A reading body on existing launch MUST NOT clear
++	// later cap-rejected Request B's failure; SealReview stays SealRejected until fresh retry Request C succeeds.
++	launch3 := "review-12345678-1234-4234-8234-123456789503"
++	session3 := "019d0000-0000-7000-8000-000000000503"
++	if code := runCleanTurn(launch3, session3); code != http.StatusOK {
++		t.Fatalf("launch3 turn 1 HTTP %d, want 200", code)
++	}
++	entA := make(chan struct{})
++	relA := make(chan struct{})
++	doneA := make(chan int, 1)
++	go func() {
++		b := &blockingReviewBody{entered: entA, release: relA, reader: strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`)}
++		req := httptest.NewRequest(http.MethodPost, "/v1/responses", b)
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("Session-Id", session3)
++		req.Header.Set(preflightreceipt.ReviewHeader, launch3)
++		rec := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++		engine.ServeHTTP(rec, req)
++		doneA <- rec.Code
++	}()
++	<-entA
++	fill31 := make([]*preflightreceipt.PendingReviewGuard, 0, 31)
++	for i := 0; i < 31; i++ {
++		other := fmt.Sprintf("review-32345678-1234-4234-8234-1234567895%02d", i)
++		g, err := preflightreceipt.BeginPendingReview(root, other)
++		if err != nil {
++			close(relA)
++			for _, h := range fill31 {
++				h.Release()
++			}
++			t.Fatalf("fill 31 slots (%d): %v", i, err)
++		}
++		fill31 = append(fill31, g)
++	}
++	// Request B arrives AFTER A, hits the 32-slot cap -> 503 and records failedTurnSeq > A.turnSeq.
++	bodyB := &mustNotReadBody{}
++	reqB := httptest.NewRequest(http.MethodPost, "/v1/responses", bodyB)
++	reqB.Header.Set("Content-Type", "application/json")
++	reqB.Header.Set("Session-Id", session3)
++	reqB.Header.Set(preflightreceipt.ReviewHeader, launch3)
++	recB := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(recB, reqB)
++	for _, h := range fill31 {
++		h.Release()
++	}
++	close(relA)
++	codeA := <-doneA
++	if recB.Code != http.StatusServiceUnavailable || bodyB.readCalled.Load() || codeA != http.StatusOK {
++		t.Fatalf("part 3 race = (B=%d readB=%v A=%d), want (503, false, 200)", recB.Code, bodyB.readCalled.Load(), codeA)
++	}
++	if st, digest := preflightreceipt.SealReviewWithDigest(root, launch3, session3); st != preflightreceipt.SealRejected || digest != "" {
++		t.Fatalf("SealReviewWithDigest after earlier A finished post-B failure = (%v, %q), want (SealRejected, \"\")", st, digest)
++	}
++	if code := runCleanTurn(launch3, session3); code != http.StatusOK {
++		t.Fatalf("launch3 fresh retry C HTTP %d, want 200", code)
++	}
++	if st, digest := preflightreceipt.SealReviewWithDigest(root, launch3, session3); st != preflightreceipt.SealOK || digest == "" {
++		t.Fatalf("SealReviewWithDigest after fresh retry C = (%v, %q), want (SealOK, non-empty)", st, digest)
++	}
++
++	// Part 4 (Astra P1 #2): brand-new launch Request A reading body inherits later cap-rejected Request B's
++	// failure without allocating a disk directory when B is rejected.
++	launch4 := "review-12345678-1234-4234-8234-123456789504"
++	session4 := "019d0000-0000-7000-8000-000000000504"
++	ent4A := make(chan struct{})
++	rel4A := make(chan struct{})
++	done4A := make(chan int, 1)
++	go func() {
++		b := &blockingReviewBody{entered: ent4A, release: rel4A, reader: strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`)}
++		req := httptest.NewRequest(http.MethodPost, "/v1/responses", b)
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("Session-Id", session4)
++		req.Header.Set(preflightreceipt.ReviewHeader, launch4)
++		rec := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++		engine.ServeHTTP(rec, req)
++		done4A <- rec.Code
++	}()
++	<-ent4A
++	fill4 := make([]*preflightreceipt.PendingReviewGuard, 0, 31)
++	for i := 0; i < 31; i++ {
++		other := fmt.Sprintf("review-42345678-1234-4234-8234-1234567895%02d", i)
++		g, err := preflightreceipt.BeginPendingReview(root, other)
++		if err != nil {
++			close(rel4A)
++			for _, h := range fill4 {
++				h.Release()
++			}
++			t.Fatalf("part 4 fill (%d): %v", i, err)
++		}
++		fill4 = append(fill4, g)
++	}
++	body4B := &mustNotReadBody{}
++	req4B := httptest.NewRequest(http.MethodPost, "/v1/responses", body4B)
++	req4B.Header.Set("Content-Type", "application/json")
++	req4B.Header.Set("Session-Id", session4)
++	req4B.Header.Set(preflightreceipt.ReviewHeader, launch4)
++	rec4B := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++	engine.ServeHTTP(rec4B, req4B)
++	if _, statErr := os.Stat(root + "/" + launch4); !os.IsNotExist(statErr) {
++		for _, h := range fill4 {
++			h.Release()
++		}
++		close(rel4A)
++		t.Fatalf("cap-rejected brand-new launch B created disk directory: %v", statErr)
++	}
++	for _, h := range fill4 {
++		h.Release()
++	}
++	close(rel4A)
++	code4A := <-done4A
++	if rec4B.Code != http.StatusServiceUnavailable || body4B.readCalled.Load() || code4A != http.StatusOK {
++		t.Fatalf("part 4 brand-new race = (B=%d readB=%v A=%d), want (503, false, 200)", rec4B.Code, body4B.readCalled.Load(), code4A)
++	}
++	if st, digest := preflightreceipt.SealReviewWithDigest(root, launch4, session4); st != preflightreceipt.SealRejected || digest != "" {
++		t.Fatalf("SealReviewWithDigest brand-new launch4 after A completed post-B rejection = (%v, %q), want (SealRejected, \"\")", st, digest)
++	}
++	if code := runCleanTurn(launch4, session4); code != http.StatusOK {
++		t.Fatalf("launch4 fresh retry C HTTP %d, want 200", code)
++	}
++	if st, digest := preflightreceipt.SealReviewWithDigest(root, launch4, session4); st != preflightreceipt.SealOK || digest == "" {
++		t.Fatalf("SealReviewWithDigest brand-new launch4 after retry C = (%v, %q), want (SealOK, non-empty)", st, digest)
++	}
++
++	// Part 5 (Sol P1 #2 + Astra P2 #3): real HTTP/1.1 server MUST send 503 + Connection: close immediately
++	// and close the TCP connection without draining an unread slow 1 MiB body when the 32-slot cap is saturated.
++	srv := httptest.NewServer(engine)
++	defer srv.Close()
++	fill5 := make([]*preflightreceipt.PendingReviewGuard, 0, 32)
++	for i := 0; i < 32; i++ {
++		other := fmt.Sprintf("review-52345678-1234-4234-8234-1234567895%02d", i)
++		g, err := preflightreceipt.BeginPendingReview(root, other)
++		if err != nil {
++			for _, h := range fill5 {
++				h.Release()
++			}
++			t.Fatalf("part 5 fill (%d): %v", i, err)
++		}
++		fill5 = append(fill5, g)
++	}
++	defer func() {
++		for _, h := range fill5 {
++			h.Release()
++		}
++	}()
++	conn, err := net.DialTimeout("tcp", srv.Listener.Addr().String(), 2*time.Second)
++	if err != nil {
++		t.Fatalf("dial httptest server: %v", err)
++	}
++	defer func() { _ = conn.Close() }()
++	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
++	rawReq := "POST /v1/responses HTTP/1.1\r\n" +
++		"Host: " + srv.Listener.Addr().String() + "\r\n" +
++		"Content-Type: application/json\r\n" +
++		"Content-Length: 1048576\r\n" +
++		"Session-Id: 019d0000-0000-7000-8000-000000000505\r\n" +
++		preflightreceipt.ReviewHeader + ": review-12345678-1234-4234-8234-123456789505\r\n" +
++		"\r\n"
++	if _, err := io.WriteString(conn, rawReq); err != nil {
++		t.Fatalf("write headers: %v", err)
++	}
++	respBytes, err := io.ReadAll(conn)
++	if err != nil {
++		t.Fatalf("read 503 + EOF from server (slow body must not stall): %v", err)
++	}
++	respStr := string(respBytes)
++	if !strings.HasPrefix(respStr, "HTTP/1.1 503 ") || !strings.Contains(strings.ToLower(respStr), "connection: close") {
++		t.Fatalf("unexpected HTTP/1.1 cap-rejection response: %q", respStr)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -5589,10 +5766,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..c4a2b2f 100644
+index e69de29..eddd0c3 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,6148 @@
+@@ -0,0 +1,6255 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5750,8 +5927,16 @@ index e69de29..c4a2b2f 100644
 +}
 +
 +type ReviewReservation struct {
-+	entry *reviewEntry
-+	once  sync.Once
++	entry   *reviewEntry
++	turnSeq uint64
++	once    sync.Once
++}
++
++func (r *ReviewReservation) SetTurnSeq(seq uint64) {
++	if r == nil || seq == 0 {
++		return
++	}
++	r.turnSeq = seq
 +}
 +
 +func (r *ReviewReservation) Release() {
@@ -5787,8 +5972,9 @@ index e69de29..c4a2b2f 100644
 +}
 +
 +type pendingReviewState struct {
-+	count   int
-+	tainted bool
++	count         int
++	tainted       bool
++	failedTurnSeq uint64
 +}
 +
 +var (
@@ -5796,6 +5982,7 @@ index e69de29..c4a2b2f 100644
 +	reviewLedger          = make(map[string]*reviewEntry)
 +	pendingReviewLaunches = make(map[string]*pendingReviewState)
 +	pendingReviewTotal    int
++	reviewTurnSeqGen      uint64
 +	taintWriteOverflow    bool
 +	tmpSeq                atomic.Uint64
 +
@@ -5805,8 +5992,16 @@ index e69de29..c4a2b2f 100644
 +)
 +
 +type PendingReviewGuard struct {
-+	key  string
-+	once sync.Once
++	key     string
++	turnSeq uint64
++	once    sync.Once
++}
++
++func (g *PendingReviewGuard) TurnSeq() uint64 {
++	if g == nil {
++		return 0
++	}
++	return g.turnSeq
 +}
 +
 +func (g *PendingReviewGuard) Release() {
@@ -5828,18 +6023,25 @@ index e69de29..c4a2b2f 100644
 +	})
 +}
 +
-+func recordExistingReviewTurnFailure(entry *reviewEntry, taint bool) {
++func recordExistingReviewTurnFailure(entry *reviewEntry, turnSeq uint64, taint bool) {
 +	defer releaseReview(entry)
 +	entry.mu.Lock()
 +	if !entry.sealed && !entry.tainted {
 +		if taint {
 +			entry.taintAndPersistLocked()
 +		} else {
-+			entry.nextTurnSeq++
-+			entry.failedTurnSeq = entry.nextTurnSeq
-+			entry.lastTurnFailed = true
-+			if err := entry.persistLocked(); err != nil {
-+				entry.taintAndPersistLocked()
++			if turnSeq > entry.failedTurnSeq {
++				entry.failedTurnSeq = turnSeq
++			}
++			latestPubSeq := uint64(0)
++			if len(entry.publishedTurns) > 0 {
++				latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
++			}
++			entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
++			if entry.lastTurnFailed {
++				if err := entry.persistLocked(); err != nil {
++					entry.taintAndPersistLocked()
++				}
 +			}
 +		}
 +	}
@@ -5847,11 +6049,10 @@ index e69de29..c4a2b2f 100644
 +}
 +
 +// BeginPendingReview registers a bounded in-memory pre-admission guard BEFORE reading the
-+// HTTP body so concurrent first requests on a brand-new launch cannot race ahead of SealReview,
-+// drop a sibling request's rejection, or exhaust memory via unbounded concurrent body reads.
-+// If an existing unsealed launch is rejected due to the global pre-admission cap, the rejected
-+// follow-up turn is atomically recorded under inFlight before releasing reviewMu so SealReview
-+// cannot seal a stale prior turn in the unlock window.
++// HTTP body and assigns the turn's monotonic sequence number up front so earlier concurrent
++// requests cannot clear a later rejected request's failure. If an existing unsealed launch
++// or an active brand-new pending launch is rejected due to the global pre-admission cap,
++// the rejection sequence is recorded atomically before releasing reviewMu.
 +func BeginPendingReview(root, launch string) (*PendingReviewGuard, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
@@ -5864,22 +6065,28 @@ index e69de29..c4a2b2f 100644
 +		reviewMu.Unlock()
 +		return nil, errReviewSealed
 +	}
++	reviewTurnSeqGen++
++	turnSeq := reviewTurnSeqGen
++	st := pendingReviewLaunches[key]
 +	if pendingReviewTotal >= maxPendingReviewInFlight {
++		if st != nil && turnSeq > st.failedTurnSeq {
++			st.failedTurnSeq = turnSeq
++		}
 +		if entry != nil {
 +			entry.inFlight++
 +			reviewMu.Unlock()
-+			recordExistingReviewTurnFailure(entry, false)
++			recordExistingReviewTurnFailure(entry, turnSeq, false)
 +			return nil, ErrUnavailable
 +		}
 +		reviewMu.Unlock()
 +		return nil, ErrUnavailable
 +	}
-+	if st := pendingReviewLaunches[key]; st != nil {
++	if st != nil {
 +		if st.tainted {
 +			if entry != nil {
 +				entry.inFlight++
 +				reviewMu.Unlock()
-+				recordExistingReviewTurnFailure(entry, true)
++				recordExistingReviewTurnFailure(entry, turnSeq, true)
 +				return nil, ErrUnavailable
 +			}
 +			reviewMu.Unlock()
@@ -5888,13 +6095,13 @@ index e69de29..c4a2b2f 100644
 +		st.count++
 +		pendingReviewTotal++
 +		reviewMu.Unlock()
-+		return &PendingReviewGuard{key: key}, nil
++		return &PendingReviewGuard{key: key, turnSeq: turnSeq}, nil
 +	}
 +	if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
 +		if entry != nil {
 +			entry.inFlight++
 +			reviewMu.Unlock()
-+			recordExistingReviewTurnFailure(entry, false)
++			recordExistingReviewTurnFailure(entry, turnSeq, false)
 +			return nil, ErrUnavailable
 +		}
 +		reviewMu.Unlock()
@@ -5903,7 +6110,7 @@ index e69de29..c4a2b2f 100644
 +	pendingReviewLaunches[key] = &pendingReviewState{count: 1}
 +	pendingReviewTotal++
 +	reviewMu.Unlock()
-+	return &PendingReviewGuard{key: key}, nil
++	return &PendingReviewGuard{key: key, turnSeq: turnSeq}, nil
 +}
 +
 +type heldRootLock struct {
@@ -5999,6 +6206,7 @@ index e69de29..c4a2b2f 100644
 +	maxOutputIndex            int64
 +	hasMaxNonFinalOutputIndex bool
 +	maxNonFinalOutputIndex    int64
++	sawUnindexedItem          bool
 +	streamedNonFinalIDs       map[string]struct{}
 +	streamedNonFinalKeys      map[string]struct{}
 +	streamedNonFinalUnkeyed   int
@@ -6038,6 +6246,7 @@ index e69de29..c4a2b2f 100644
 +	t.maxOutputIndex = 0
 +	t.hasMaxNonFinalOutputIndex = false
 +	t.maxNonFinalOutputIndex = 0
++	t.sawUnindexedItem = false
 +	t.streamedNonFinalIDs = nil
 +	t.streamedNonFinalKeys = nil
 +	t.streamedNonFinalUnkeyed = 0
@@ -8688,6 +8897,12 @@ index e69de29..c4a2b2f 100644
 +					c.taintStreamAnomaly()
 +					return
 +				}
++			} else if !isDone && canonKey != "" && item.Status != "" {
++				if _, alreadyCompSub := t.completedSubItemKeys[canonKey]; alreadyCompSub {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
 +			}
 +			snapKind := classifyOutputItemKind(item.Type, item.Role, item.Phase, isDone)
 +			if !t.recordItemKind(canonKey, snapKind) || !t.recordItemType(canonKey, item.Type) {
@@ -9055,6 +9270,11 @@ index e69de29..c4a2b2f 100644
 +				c.taintStreamAnomaly()
 +				return
 +			}
++			if _, alreadyCompSub := t.completedSubItemKeys[canonKey]; alreadyCompSub {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
 +		}
 +		if !t.recordItemKind(canonKey, addedKind) || !t.recordItemType(canonKey, itemType) {
 +			c.mu.Unlock()
@@ -9104,9 +9324,18 @@ index e69de29..c4a2b2f 100644
 +		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +			t.maxOutputIndex = effIdx
 +			t.hasMaxOutputIndex = true
++		} else if !effHasIdx {
++			t.sawUnindexedItem = true
 +		}
-+		isStrictlyEarlier := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
-+			(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++		var isStrictlyEarlier bool
++		if t.lastItemOutputSHA != "" {
++			if effHasIdx && t.hasLastItemOutputIndex {
++				isStrictlyEarlier = effIdx < t.lastItemOutputIndex
++			} else {
++				isStrictlyEarlier = seq < t.lastItemSeq &&
++					(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++			}
++		}
 +		if !isStrictlyEarlier {
 +			t.lastItemOutputSHA = ""
 +			t.lastItemResponseID = ""
@@ -9388,15 +9617,23 @@ index e69de29..c4a2b2f 100644
 +		if effHasIdx && (!t.hasMaxOutputIndex || effIdx > t.maxOutputIndex) {
 +			t.maxOutputIndex = effIdx
 +			t.hasMaxOutputIndex = true
++		} else if !effHasIdx {
++			t.sawUnindexedItem = true
 +		}
 +		t.sawStreamedOutputItem = true
 +		if isFinalCandidate {
 +			rid := t.responseID
-+			isLatest := seq >= t.maxItemSeq && seq > t.maxNonFinalSeq
-+			if effHasIdx {
-+				if (t.hasMaxOutputIndex && effIdx < t.maxOutputIndex) ||
-+					(t.hasMaxNonFinalOutputIndex && effIdx <= t.maxNonFinalOutputIndex) {
-+					isLatest = false
++			var isLatest bool
++			if effHasIdx && !t.sawUnindexedItem {
++				isLatest = (!t.hasMaxOutputIndex || effIdx >= t.maxOutputIndex) &&
++					(!t.hasMaxNonFinalOutputIndex || effIdx > t.maxNonFinalOutputIndex)
++			} else {
++				isLatest = seq >= t.maxItemSeq && seq > t.maxNonFinalSeq
++				if effHasIdx {
++					if (t.hasMaxOutputIndex && effIdx < t.maxOutputIndex) ||
++						(t.hasMaxNonFinalOutputIndex && effIdx <= t.maxNonFinalOutputIndex) {
++						isLatest = false
++					}
 +				}
 +			}
 +			if isLatest {
@@ -9420,8 +9657,15 @@ index e69de29..c4a2b2f 100644
 +				c.taintStreamAnomaly()
 +				return
 +			}
-+			isStrictlyEarlier := t.lastItemOutputSHA != "" && seq < t.lastItemSeq &&
-+				(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++			var isStrictlyEarlier bool
++			if t.lastItemOutputSHA != "" {
++				if effHasIdx && t.hasLastItemOutputIndex {
++					isStrictlyEarlier = effIdx < t.lastItemOutputIndex
++				} else {
++					isStrictlyEarlier = seq < t.lastItemSeq &&
++						(!t.hasLastItemOutputIndex || (effHasIdx && effIdx < t.lastItemOutputIndex))
++				}
++			}
 +			if !isStrictlyEarlier {
 +				t.lastItemOutputSHA = ""
 +				t.lastItemResponseID = ""
@@ -9512,6 +9756,16 @@ index e69de29..c4a2b2f 100644
 +		}
 +		if canonKey != "" {
 +			if _, alreadyDone := t.doneItemKeys[canonKey]; alreadyDone {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if _, alreadyCompSub := t.completedSubItemKeys[canonKey]; alreadyCompSub {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if _, alreadyFailed := t.failedItemKeys[canonKey]; alreadyFailed {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -10007,7 +10261,7 @@ index e69de29..c4a2b2f 100644
 +				continue
 +			}
 +			v.mu.Lock()
-+			evictable := !(v.tainted && !v.taintedPersisted) && (v.sealed || v.tainted || now.Sub(v.touched) > ReviewTurnLifetime)
++			evictable := !(v.tainted && !v.taintedPersisted) && (v.sealed || v.tainted || (v.started > 0 && now.UnixNano()-v.started > int64(MaxReviewDuration)))
 +			v.mu.Unlock()
 +			if !evictable {
 +				continue
@@ -10030,6 +10284,10 @@ index e69de29..c4a2b2f 100644
 +			session:   session,
 +			started:   now.UnixNano(),
 +			touched:   now,
++		}
++		if st := pendingReviewLaunches[key]; st != nil && st.failedTurnSeq > 0 {
++			entry.failedTurnSeq = st.failedTurnSeq
++			entry.lastTurnFailed = true
 +		}
 +	}
 +	if acquire {
@@ -10089,6 +10347,10 @@ index e69de29..c4a2b2f 100644
 +	now := time.Now()
 +	reviewMu.Lock()
 +	pendingTainted := pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
++	var pendingFailedSeq uint64
++	if st := pendingReviewLaunches[key]; st != nil {
++		pendingFailedSeq = st.failedTurnSeq
++	}
 +	if entry := reviewLedger[key]; entry != nil {
 +		if entry.sealedFlag || entry.sealing {
 +			reviewMu.Unlock()
@@ -10103,6 +10365,23 @@ index e69de29..c4a2b2f 100644
 +			entry.mu.Unlock()
 +			releaseReview(entry)
 +			return nil, true, ErrUnavailable
++		}
++		if pendingFailedSeq > 0 {
++			entry.mu.Lock()
++			if !entry.sealed && !entry.tainted && pendingFailedSeq > entry.failedTurnSeq {
++				entry.failedTurnSeq = pendingFailedSeq
++				latestPubSeq := uint64(0)
++				if len(entry.publishedTurns) > 0 {
++					latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
++				}
++				entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
++				if entry.lastTurnFailed {
++					if err := entry.persistLocked(); err != nil {
++						entry.taintAndPersistLocked()
++					}
++				}
++			}
++			entry.mu.Unlock()
 +		}
 +		res, err := finishReserveReviewEntry(root, key, entry)
 +		return res, true, err
@@ -10562,9 +10841,16 @@ index e69de29..c4a2b2f 100644
 +		res.Release()
 +		return ctx, nil, ErrUnavailable
 +	}
++	turnSeq := res.turnSeq
 +	entry, ok := res.transfer()
 +	if !ok {
 +		return ctx, nil, ErrUnavailable
++	}
++	if turnSeq == 0 {
++		reviewMu.Lock()
++		reviewTurnSeqGen++
++		turnSeq = reviewTurnSeqGen
++		reviewMu.Unlock()
 +	}
 +	now := time.Now()
 +	expectedRoute := "codex:" + requestedModel + "@chatgpt.com"
@@ -10596,8 +10882,6 @@ index e69de29..c4a2b2f 100644
 +		releaseReview(entry)
 +		return ctx, nil, ErrUnavailable
 +	}
-+	entry.nextTurnSeq++
-+	turnSeq := entry.nextTurnSeq
 +	entry.mu.Unlock()
 +
 +	c := &Collector{
@@ -11742,10 +12026,10 @@ index e69de29..c4a2b2f 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..5ea6c60 100644
+index e69de29..1d8235a 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,5255 @@
+@@ -0,0 +1,5354 @@
 +package preflightreceipt
 +
 +import (
@@ -16609,6 +16893,105 @@ index e69de29..5ea6c60 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_rfp","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_rfp","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555b8", "019d0000-0000-7000-8000-8888888881b8", sseReopenFinalizedPart); st != SealRejected {
 +		t.Fatalf("content_part.added reopening finalized output_text.done part seal = %v, want SealRejected", st)
++	}
++
++	// 78. Sol P2 #4 (PR #2280 R31): output_index=1 final answer completing BEFORE a previously-unseen
++	//     output_index=0 reasoning item MUST preserve final answer order by output_index and seal cleanly.
++	lOutOfOrderIdx := "review-d1111111-2222-4333-8444-5555555555b9"
++	sOutOfOrderIdx := "019d0000-0000-7000-8000-8888888881b9"
++	sseOutOfOrderIdx := "data: " + `{"type":"response.created","response":{"id":"resp_oooi","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_oooi","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_oooi","type":"reasoning"}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_oooi","status":"completed","model":"gpt-6.2-sol","output":[{"id":"rs_oooi","type":"reasoning"},{"id":"msg_oooi","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lOutOfOrderIdx, sOutOfOrderIdx, sseOutOfOrderIdx); st != SealOK {
++		t.Fatalf("out-of-order output_index (1 before unseen 0) seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lOutOfOrderIdx); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("out-of-order output_index hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++
++	// 79. Astra P2 #4 (PR #2280 R31): tool *.completed followed by *.in_progress (or response.in_progress
++	//     regressing the tool status to in_progress) before output_item.done MUST taint.
++	sseSubCompletedThenInProg := "data: " + `{"type":"response.created","response":{"id":"resp_sctip","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}` + "\n\n" +
++		"data: " + `{"type":"response.web_search_call.completed","output_index":0,"item_id":"ws_1"}` + "\n\n" +
++		"data: " + `{"type":"response.web_search_call.in_progress","output_index":0,"item_id":"ws_1"}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"completed"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_sctip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sctip","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_1","type":"web_search_call","status":"completed"},{"id":"msg_sctip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555ba", "019d0000-0000-7000-8000-8888888881ba", sseSubCompletedThenInProg); st != SealRejected {
++		t.Fatalf("web_search_call.completed followed by .in_progress seal = %v, want SealRejected", st)
++	}
++	sseSubCompletedThenSnapInProg := "data: " + `{"type":"response.created","response":{"id":"resp_scsip","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"ws_2","type":"web_search_call","status":"in_progress"}}` + "\n\n" +
++		"data: " + `{"type":"response.web_search_call.completed","output_index":0,"item_id":"ws_2"}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_scsip","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"ws_2","type":"web_search_call","status":"in_progress"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_2","type":"web_search_call","status":"completed"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_scsip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_scsip","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_2","type":"web_search_call","status":"completed"},{"id":"msg_scsip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555bb", "019d0000-0000-7000-8000-8888888881bb", sseSubCompletedThenSnapInProg); st != SealRejected {
++		t.Fatalf("web_search_call.completed followed by response.in_progress regression seal = %v, want SealRejected", st)
++	}
++}
++
++func TestReviewLedgerDoesNotEvictUnsealedWithinMaxReviewDuration(t *testing.T) {
++	// Sol P2 #3 (PR #2280 R31): an unsealed untainted entry still within MaxReviewDuration (2h)
++	// MUST NOT be evicted from reviewLedger after ReviewTurnLifetime (30m) of idle time.
++	oldCap := maxReviewLedgerEntries
++	maxReviewLedgerEntries = 1
++	defer func() { maxReviewLedgerEntries = oldCap }()
++
++	root := filepath.Join(t.TempDir(), "evict-2h-receipts")
++	launch1 := "review-e6666666-2222-4333-8444-555555555501"
++	session1 := "019d0000-0000-7000-8000-888888888801"
++	launch2 := "review-e6666666-2222-4333-8444-555555555502"
++
++	reviewMu.Lock()
++	savedLedger := reviewLedger
++	reviewLedger = make(map[string]*reviewEntry)
++	reviewMu.Unlock()
++	defer func() {
++		reviewMu.Lock()
++		reviewLedger = savedLedger
++		reviewMu.Unlock()
++	}()
++
++	ctx1, c1, err := BeginReview(context.Background(), root, launch1, session1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp1, err := cl1.Do(req1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp1.Body)
++	_ = resp1.Body.Close()
++	c1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_evict2h","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++
++	// Idle 45 minutes (> ReviewTurnLifetime 30m, < MaxReviewDuration 2h).
++	key1 := filepath.Clean(root) + "\x00" + launch1
++	reviewMu.Lock()
++	ent := reviewLedger[key1]
++	ent.touched = time.Now().Add(-45 * time.Minute)
++	ent.started = time.Now().Add(-45 * time.Minute).UnixNano()
++	reviewMu.Unlock()
++
++	if _, err := ReserveReview(root, launch2); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ReserveReview launch2 at ledger cap while launch1 is within 2h = %v, want ErrUnavailable", err)
++	}
++	if st, digest := SealReviewWithDigest(root, launch1, session1); st != SealOK || digest == "" {
++		t.Fatalf("SealReviewWithDigest launch1 after 45m idle = (%v, %q), want (SealOK, non-empty)", st, digest)
 +	}
 +}
 +
