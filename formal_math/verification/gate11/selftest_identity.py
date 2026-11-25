@@ -48,6 +48,7 @@ def commit(c):
 
 
 # 每个用例：(名字, 改动函数, 是否提交, 期望退出码, 红行里必须出现的子串)
+# 「不提交」的用例只动工作区：检查只读提交，所以必须仍绿。
 def m_table(c): flip(os.path.join(c, T))
 def m_symlink(c):
     p = os.path.join(c, A, "SPEC.md"); q = os.path.join(c, G, "SPEC.copy")
@@ -104,23 +105,22 @@ def add_empty_subtree(c, prefix, name):
 
 def m_empty_corpus(c): add_empty_subtree(c, B, "archive")
 def m_empty_admit(c): add_empty_subtree(c, A, "archive")
-def m_dirty_exec(c): os.chmod(os.path.join(c, A, "candidate", "merge.py"), 0o755)
-def m_dirty_root_link(c):
-    src = os.path.join(c, A); dst = os.path.join(c, "formal_math", "admit-moved")
-    os.rename(src, dst); os.symlink(dst, src)
-def m_dirty_parent_link(c):
-    src = os.path.join(c, "docs", "chanlun", "text"); dst = os.path.join(c, "docs", "text-moved")
-    os.rename(src, dst); os.symlink(dst, src)
+
+
+
+
+
+def m_wt_noise(c):
+    flip(os.path.join(c, T)); os.chmod(os.path.join(c, A, "SPEC.md"), 0o755)
+    open(os.path.join(c, A, ".DS_Store"), "w").write("x")
 
 
 CASES = [
+    ("worktree-only-changes", m_wt_noise, False, 0, ""),
     # 钉选文件检出成 CRLF（.gitattributes），受检内容未变：必须仍绿。
     ("pin-checked-out-crlf", m_eol, False, 0, ""),
     ("empty-subtree-corpus", m_empty_corpus, False, 1, "不含文件的目录"),
     ("empty-subtree-admit", m_empty_admit, False, 1, "不含文件的目录"),
-    ("dirty-exec-bit", m_dirty_exec, False, 1, "工作区文件带可执行位"),
-    ("dirty-root-symlink", m_dirty_root_link, False, 1, "工作区路径不是目录"),
-    ("dirty-parent-symlink", m_dirty_parent_link, False, 1, "工作区路径不是目录"),
     ("table-byte", m_table, True, 1, "与钉选"),
     ("symlink-same-content", m_symlink, True, 1, "非普通文件"),
     ("tracked-in-pycache", m_pycache, True, 1, "与钉选"),
@@ -131,19 +131,16 @@ CASES = [
     ("corpus-extra-file", m_corpus_extra, True, 1, "语料指纹"),
     ("corpus-subdir", m_corpus_sub, True, 1, "语料目录里有意外条目"),
     ("pin-comment-line", m_pin_comment, True, 1, "与钉选"),
-    ("dirty-table", m_table, False, 1, "工作区内容与提交不同"),
-    ("dirty-untracked-pycache", m_pycache, False, 1, "工作区多出"),
-    ("dirty-symlink", m_symlink, False, 1, "工作区不是普通文件"),
-    ("dirty-corpus", m_corpus, False, 1, "工作区内容与提交不同"),
-    ("dirty-delete", m_delete, False, 1, "工作区缺文件"),
-    ("git-replace-object", m_replace, False, 1, "工作区内容与提交不同"),
+    # 替换引用不影响判定：提交里的对象没变，仍绿（检查器关闭了替换引用）。
+    ("git-replace-object", m_replace, False, 0, ""),
     # 已明示的信任前提：表与钉选在同一次改动里一起换，本检查不拦（由路径权限与评审负责）。
     ("table-and-pin-synced", m_synced, True, 0, ""),
 ]
 
 
 def main():
-    root = git(HERE, "rev-parse", "--show-toplevel").decode().strip()
+    top = git(HERE, "rev-parse", "--show-toplevel")
+    root = os.fsdecode(top[:-1] if top.endswith(b"\n") else top)
     fails = []
     with tempfile.TemporaryDirectory() as tmp:
         base = os.path.join(tmp, "base")

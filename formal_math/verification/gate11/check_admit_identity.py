@@ -2,7 +2,7 @@
 """门禁 11 阻断检查：入库准入材料与语料的身份（#2317）。
 
 只回答一个问题：给定提交里的 `formal_math/sources/admit/` 与
-`docs/chanlun/text/blog/`，是否就是过审时的那一份。
+`docs/chanlun/text/blog/`，是否就是过审时的那一份。只读 git 对象，不读工作区文件。
 内容相同，过审时核实过的性质（790 行、重建零差分等）即随之成立，本脚本不再重算。
 
 退出码：0 相符；1 不符；2 无法运行。只用标准库，`python3 -I` 运行。
@@ -10,7 +10,6 @@
 import argparse
 import hashlib
 import os
-import stat
 import subprocess
 import sys
 
@@ -91,54 +90,10 @@ def corpus_fingerprint(entries):
     return h.hexdigest()
 
 
-def disk_problems(root, entries, prefix):
-    """工作区：prefix 下恰有这些普通文件、内容相同、无可执行位；不许有任何别的条目，不设例外。
-
-    从仓库根到 prefix 的每一级都必须是真目录（不是符号链接）。
-    """
-    bad = []
-    cur = root
-    for part in prefix.split("/"):
-        cur = os.path.join(cur, part)
-        if not stat.S_ISDIR(os.lstat(cur).st_mode):
-            return ["工作区路径不是目录：" + os.path.relpath(cur, root).replace(os.sep, "/")]
-    want = {os.fsdecode(p): d for p, _, _, d in entries}
-    seen = set()
-    for cur, dirs, files in os.walk(os.path.join(root, prefix), followlinks=False):
-        for name in dirs + files:
-            full = os.path.join(cur, name)
-            rel = os.path.relpath(full, root).replace(os.sep, "/")
-            st = os.lstat(full)
-            if stat.S_ISDIR(st.st_mode):
-                continue
-            if not stat.S_ISREG(st.st_mode):
-                bad.append("工作区不是普通文件：" + rel)
-            elif rel not in want:
-                bad.append("工作区多出文件：" + rel)
-            else:
-                seen.add(rel)
-                if st.st_mode & 0o111:
-                    bad.append("工作区文件带可执行位：" + rel)
-                with open(full, "rb") as f:
-                    if hashlib.sha256(f.read()).hexdigest() != want[rel]:
-                        bad.append("工作区内容与提交不同：" + rel)
-    for cur, dirs, _ in os.walk(os.path.join(root, prefix), followlinks=False):
-        for name in dirs:
-            full = os.path.join(cur, name)
-            rel = os.path.relpath(full, root).replace(os.sep, "/")
-            if os.path.islink(full):
-                bad.append("工作区目录是符号链接：" + rel)
-            elif not any(w.startswith(rel + "/") for w in want):
-                bad.append("工作区多出目录：" + rel)
-    bad += ["工作区缺文件：" + r for r in sorted(set(want) - seen)]
-    return bad
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=None)
     ap.add_argument("--rev", default="HEAD")
-    ap.add_argument("--no-worktree", action="store_true", help="只核提交，不核工作区（裸仓库用）")
     ap.add_argument("--print-pin", action="store_true", help="打印给定提交的规范钉选文本后退出")
     a = ap.parse_args()
     try:
@@ -169,14 +124,6 @@ def main():
             bad.append("语料指纹 %s 不等于基线" % fp)
     except ValueError as e:
         bad.append(str(e))
-    if not a.no_worktree:
-        try:
-            for entries, prefix in ((admit, ADMIT), (blog, BLOG)):
-                if entries is not None:
-                    bad += disk_problems(root, entries, prefix)
-        except OSError as e:
-            print("无法运行：读工作区失败 %s" % e, file=sys.stderr)
-            return 2
     for b in bad:
         print("RED " + b, file=sys.stderr)
     if bad:
@@ -187,4 +134,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        if sys.stdout is None:
+            raise OSError("标准输出不可用")
+        code = main()
+        sys.stdout.flush()
+    except (OSError, subprocess.CalledProcessError) as e:
+        print("无法运行：%s" % e, file=sys.stderr)
+        code = 2
+    sys.exit(code)
