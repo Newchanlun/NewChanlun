@@ -1,0 +1,455 @@
+[A1-build] gate=2 rc=1 | s!"{'"'}" 合法性编译核验
+    OUT: ✖ [0/9] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/9] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a1_interp_g2/formal_math/ChanTest.lean
+    OUT: ✔ [4/9] Built Chan (326ms)
+    ERR: error: build failed
+[A1-g2] gate=2 rc=1 | s!"{'"'}" 词法脱同步绕过门2 (关闭 linter.unusedVariables 并开启 autoImplicit)
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ✖ [0/9] Running job computation
+    ERR: error: ChanTest: some modules have bad imports or could not be read
+    ERR: ✖ [5/9] Running ChanTest
+    ERR: error: no such file or directory (error code: 2)
+    ERR:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a1_interp_g2/formal_math/ChanTest.lean
+    ERR: Some required targets logged failures:
+[A2-build] gate=3 rc=1 | s!"{'"'}" 隐藏 #eval/run_cmd/declare_syntax_cat/infixl 编译核验
+    OUT: ✖ [0/9] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/9] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a2_interp_g3/formal_math/ChanTest.lean
+    OUT: ✔ [4/9] Built ChanTest.Probe (330ms)
+    ERR: error: build failed
+[A2-g3] gate=3 rc=0 | s!"{'"'}" 词法脱同步绕过门3 (注入 #eval/run_cmd/syntax/infixl/set_option linter)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (314ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (752ms)
+[A3-build] gate=3 rc=1 | s!"{r"\"}" 编译核验
+    OUT: ✖ [0/9] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/9] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a3_interp_raw_g3/formal_math/ChanTest.lean
+    OUT: ℹ [4/9] Built Chan (385ms)
+    ERR: error: build failed
+[A3-g3] gate=3 rc=1 | s!"{r"\"}" 词法脱同步绕过门3 #eval
+    OUT: GATE3 RED formal_math/Chan.lean:3 TOKEN 禁用记号 #eval
+    ERR: ✔ [2/8] Built verification.EnvGates (1.7s)
+    ERR: ✔ [4/8] Built verification.Audit (968ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (320ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (862ms)
+[A4a-build] gate=3 rc=1 | 块注释 /- -/- #eval 1 -/ Lean 解析行为
+    OUT: ✖ [0/9] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/9] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a4_comment_edge/formal_math/ChanTest.lean
+    OUT: ✖ [4/9] Building Chan (287ms)
+    ERR: error: build failed
+[A4a-g3] gate=3 rc=1 | 块注释 /- -/- #eval 1 -/ 门3行为
+    OUT: GATE3 RED formal_math/Chan.lean:2 TOKEN 禁用记号 #eval
+    ERR: ✔ [2/8] Built verification.EnvGates (1.6s)
+    ERR: ✔ [4/8] Built verification.Audit (666ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (307ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (742ms)
+[A4b-build] gate=3 rc=1 | 块注释 /- /-/-/ + #eval 1 + 1 Lean 编译行为
+    OUT: ✖ [0/9] Running job computation
+    OUT: error: Chan: some modules have bad imports or could not be read
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/9] Running Chan
+    OUT: error: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a4b_comment_desync/formal_math/Chan.lean:5:0: unterminated comment
+    OUT: ✖ [5/9] Running ChanTest
+    ERR: error: build failed
+[A4b-g3] gate=3 rc=2 | 块注释 /- /-/-/ + #eval 1 + 1 门3行为
+    ERR: GATE3: 无法判定：第 2 行的块注释未闭合
+[A4c-build] gate=3 rc=1 | 法语引号标识符/\x22/跨行字符串/原始字符串 编译核验
+    OUT: ✖ [0/9] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/9] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a4c_guillemet/formal_math/ChanTest.lean
+    OUT: ✔ [4/9] Built Chan (348ms)
+    ERR: error: build failed
+[A4c-g3] gate=3 rc=1 | 法语引号标识符/\x22/跨行字符串/原始字符串 门3是否误报
+    OUT: GATE3 RED formal_math/Chan.lean:3 TOKEN 禁用记号 axiom
+    ERR: ✔ [2/8] Built verification.EnvGates (1.5s)
+    ERR: ✔ [4/8] Built verification.Audit (773ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (309ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (757ms)
+[A4d-g2] gate=2 rc=1 | set_option «linter».«unusedVariables» false 测门2
+    OUT: GATE2 RED formal_math/Chan.lean:2 LOCAL_OPTION 禁止在源码设置 linter
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ✖ [0/9] Running job computation
+    ERR: error: ChanTest: some modules have bad imports or could not be read
+    ERR: ✖ [2/9] Running ChanTest
+    ERR: error: no such file or directory (error code: 2)
+    ERR:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a4d_guillemet_opt/formal_math/ChanTest.lean
+    ERR: ✔ [4/9] Built Chan (309ms)
+[A5-g2] gate=2 rc=1 | lakefile.toml 顶层 [leanOptions] 增加 linter.all = false 压制未用变量警告
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ✖ [0/9] Running job computation
+    ERR: error: ChanTest: some modules have bad imports or could not be read
+    ERR: ✖ [2/9] Running ChanTest
+    ERR: error: no such file or directory (error code: 2)
+    ERR:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a5_linter_all_top/formal_math/ChanTest.lean
+    ERR: ⚠ [4/9] Building Chan (350ms)
+[A6-g2] gate=2 rc=1 | lakefile.toml moreLeanArgs = ["-Dlinter.all=false"] 绕过门2
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ✖ [0/9] Running job computation
+    ERR: error: ChanTest: some modules have bad imports or could not be read
+    ERR: ✖ [2/9] Running ChanTest
+    ERR: error: no such file or directory (error code: 2)
+    ERR:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a6_more_lean_args_linter_all/formal_math/ChanTest.lean
+    ERR: ⚠ [4/9] Building Chan (369ms)
+[A6b-g2] gate=2 rc=1 | lakefile.toml moreLeanArgs = ["-D", "warningAsError=false"] 测门2
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ✖ [0/9] Running job computation
+    ERR: error: ChanTest: some modules have bad imports or could not be read
+    ERR: ✖ [2/9] Running ChanTest
+    ERR: error: no such file or directory (error code: 2)
+    ERR:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/a6b_more_lean_args_split/formal_math/ChanTest.lean
+    ERR: ⚠ [4/9] Building Chan (396ms)
+[A7-g1] gate=1 rc=0 | lake-manifest.json 把 Cli 篡改为 type=path 指向本地包但保留 rev 测门1
+[B1_let_vs_have] gate=6a rc=0 | def 内 let vs have (letE nondep 标志改变，影响 zeta 展开) 哈希是否不变
+    OUT: ["f","Chan.Defs.Fixture",["FM-lock-v2",["str",null,"f"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Nat"],[]]],["definition","regular","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["let",["const",["str",null,"Nat"],[]],["app",["app",["app",["app",["app",["app",["const",["str",["str",null,"HAdd"],"hAdd"],[["zero"],["zero"],["zero"]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"Nat"],[]]],["app",["app",["const",["str",null,"instHAdd"],[["zero"]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"instAddNat"],[]]]],["bvar",0]],["app",["app",["app",["const",["str",["str",null,"OfNat"],"ofNat"],[["zero"]]],["const",["str",null,"Nat"],[]]],["nat",1]],["app",["const",["str",null,"instOfNatNat"],[]],["nat",1]]]],["bvar",0]]]]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.5s)
+    ERR: ✔ [4/8] Built verification.Audit (792ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (316ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (745ms)
+    EXTRA: {'same_keys': True, 'same_hashes': True, 'h1_keys': ['f'], 'h2_keys': ['f'], 'changed': [], 'unchanged': ['f']}
+[B2_hyp_unexpose] gate=6a rc=0 | Chan/Hypotheses 中 public 定义去掉 @[expose] 后门6a哈希是否不变
+    OUT: ["H","Chan.Hypotheses.Fixture",["FM-lock-v2",["str",null,"H"],0,["forall",0,["const",["str",null,"Nat"],[]],["sort",["zero"]]],["definition","regular","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["app",["const",["str",null,"Eq"],[["succ",["zero"]]]],["const",["str",null,"Nat"],[]]],["bvar",0]],["app",["app",["app",["const",["str",["str",null,"OfNat"],"ofNat"],[["zero"]]],["const",["str",null,"Nat"],[]]],["nat",0]],["app",["const",["str",null,"instOfNatNat"],[]],["nat",0]]]]]]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.5s)
+    ERR: ✔ [4/8] Built verification.Audit (707ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (327ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (2.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (766ms)
+    EXTRA: {'same_keys': True, 'same_hashes': True, 'h1_keys': ['H'], 'h2_keys': ['H'], 'changed': [], 'unchanged': ['H']}
+[B3_protected] gate=6a rc=1 | def 改为 protected def 哈希是否不变 (BUILD/AUDIT FAILED)
+    OUT: ✔ [2/3] Built ChanTest.Probe (355ms)
+    OUT: ✖ [3/3] Building Chan.Defs.Fixture (350ms)
+    OUT: trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/B3_protected_2/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/B3_protected_2/formal_math/Chan/Defs/Fixture.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/B3_protected_2/formal_math/.lake/build/lib/lean/Chan/Defs/Fixture.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/B3_protected_2/formal_math/.lake/build/lib/lean/Chan/Defs/Fixture.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/B3_protected_2/formal_math/.lake/build/ir/Chan/Defs/Fixture.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/B3_protected_2/formal_math/.lake/build/ir/Chan/Defs/Fixture.setup.json --json
+    OUT: error: Chan/Defs/Fixture.lean:3:14: protected declarations must be in a namespace
+    OUT: Some required targets logged failures:
+    OUT: - Chan.Defs.Fixture
+    ERR: error: build failed
+[B4_private] gate=6a rc=0 | def 改为 private def 哈希是否改变
+    OUT: ["_private.Chan.Defs.Fixture.0.f","Chan.Defs.Fixture",["FM-lock-v2",["str",["num",["str",["str",["str",["str",null,"_private"],"Chan"],"Defs"],"Fixture"],0],"f"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Nat"],[]]],["definition","regular","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["bvar",0]]]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.6s)
+    ERR: ✔ [4/8] Built verification.Audit (885ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (322ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (956ms)
+    EXTRA: {'same_keys': False, 'same_hashes': False, 'h1_keys': ['f'], 'h2_keys': ['_private.Chan.Defs.Fixture.0.f'], 'changed': [], 'unchanged': []}
+[B5_noncomputable] gate=6a rc=0 | def 改为 noncomputable def 哈希是否不变
+    OUT: ["f","Chan.Defs.Fixture",["FM-lock-v2",["str",null,"f"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Nat"],[]]],["definition","regular","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["bvar",0]]]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.7s)
+    ERR: ✔ [4/8] Built verification.Audit (1.4s)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (329ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (740ms)
+    EXTRA: {'same_keys': True, 'same_hashes': True, 'h1_keys': ['f'], 'h2_keys': ['f'], 'changed': [], 'unchanged': ['f']}
+[B6_irreducible] gate=6a rc=0 | def 改为 @[irreducible] def 哈希是否改变
+    OUT: ["f","Chan.Defs.Fixture",["FM-lock-v2",["str",null,"f"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Nat"],[]]],["definition","regular","safe","irreducible",["lam",0,["const",["str",null,"Nat"],[]],["bvar",0]]]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.6s)
+    ERR: ✔ [4/8] Built verification.Audit (759ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (321ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (821ms)
+    EXTRA: {'same_keys': True, 'same_hashes': False, 'h1_keys': ['f'], 'h2_keys': ['f'], 'changed': ['f'], 'unchanged': []}
+[B7_structure_field] gate=6a rc=0 | structure 改字段名 b -> c 哈希/键是否改变
+    OUT: ["S.c","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"S"],"c"],0,["forall",0,["const",["str",null,"S"],[]],["const",["str",null,"Nat"],[]]],["definition","abbrev","safe","reducible",["lam",0,["const",["str",null,"S"],[]],["proj",["str",null,"S"],1,["bvar",0]]]]]]
+    OUT: ["S.recOn","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"S"],"recOn"],1,["forall",1,["forall",0,["const",["str",null,"S"],[]],["sort",["param",0]]],["forall",0,["const",["str",null,"S"],[]],["forall",0,["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",3],["app",["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",1]],["bvar",0]]]]],["app",["bvar",2],["bvar",1]]]]],["definition","abbrev","safe","reducible",["lam",1,["forall",0,["const",["str",null,"S"],[]],["sort",["param",0]]],["lam",0,["const",["str",null,"S"],[]],["lam",0,["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",3],["app",["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",1]],["bvar",0]]]]],["app",["app",["app",["const",["str",["str",null,"S"],"rec"],[["param",0]]],["bvar",2]],["bvar",0]],["bvar",1]]]]]]]]
+    OUT: ["S._sizeOf_1","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"S"],"_sizeOf_1"],0,["forall",0,["const",["str",null,"S"],[]],["const",["str",null,"Nat"],[]]],["definition","abbrev","safe","semireducible",["lam",0,["const",["str",null,"S"],[]],["app",["app",["app",["const",["str",["str",null,"S"],"rec"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"S"],[]],["const",["str",null,"Nat"],[]]]],["lam",0,["const",["str",null,"Nat"],[]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["app",["app",["app",["app",["const",["str",["str",null,"HAdd"],"hAdd"],[["zero"],["zero"],["zero"]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"Nat"],[]]],["app",["app",["const",["str",null,"instHAdd"],[["zero"]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"instAddNat"],[]]]],["app",["app",["app",["app",["app",["app",["const",["str",["str",null,"HAdd"],"hAdd"],[["zero"],["zero"],["zero"]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"Nat"],[]]],["app",["app",["const",["str",null,"instHAdd"],[["zero"]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"instAddNat"],[]]]],["app",["app",["app",["const",["str",["str",null,"OfNat"],"ofNat"],[["zero"]]],["const",["str",null,"Nat"],[]]],["nat",1]],["app",["const",["str",null,"instOfNatNat"],[]],["nat",1]]]],["app",["app",["app",["const",["str",["str",null,"SizeOf"],"sizeOf"],[["succ",["zero"]]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"instSizeOfNat"],[]]],["bvar",1]]]],["app",["app",["app",["const",["str",["str",null,"SizeOf"],"sizeOf"],[["succ",["zero"]]]],["const",["str",null,"Nat"],[]]],["const",["str",null,"instSizeOfNat"],[]]],["bvar",0]]]]]],["bvar",0]]]]]]
+    OUT: ["S.mk._flat_ctor","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",["str",null,"S"],"mk"],"_flat_ctor"],0,["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"S"],[]]]],["definition","abbrev","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",1]],["bvar",0]]]]]]]
+    OUT: ["S.rec","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"S"],"rec"],1,["forall",1,["forall",0,["const",["str",null,"S"],[]],["sort",["param",0]]],["forall",0,["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",2],["app",["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",1]],["bvar",0]]]]],["forall",0,["const",["str",null,"S"],[]],["app",["bvar",2],["bvar",0]]]]],["recursor"]]]
+    OUT: ["S.mk.injEq","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",["str",null,"S"],"mk"],"injEq"],0,["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["const",["str",null,"Nat"],[]],["app",["app",["app",["const",["str",null,"Eq"],[["succ",["zero"]]]],["sort",["zero"]]],["app",["app",["app",["const",["str",null,"Eq"],[["succ",["zero"]]]],["const",["str",null,"S"],[]]],["app",["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",3]],["bvar",2]]],["app",["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",1]],["bvar",0]]]],["app",["app",["const",["str",null,"And"],[]],["app",["app",["app",["const",["str",null,"Eq"],[["succ",["zero"]]]],["const",["str",null,"Nat"],[]]],["bvar",3]],["bvar",1]]],["app",["app",["app",["const",["str",null,"Eq"],[["succ",["zero"]]]],["const",["str",null,"Nat"],[]]],["bvar",2]],["bvar",0]]]]]]]],["theorem"]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.9s)
+    ERR: ✔ [4/8] Built verification.Audit (968ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (320ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (2.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (733ms)
+    EXTRA: {'same_keys': False, 'same_hashes': False, 'h1_keys': ['S', 'S._sizeOf_1', 'S._sizeOf_inst', 'S.a', 'S.b', 'S.casesOn', 'S.ctorIdx', 'S.mk', 'S.mk._flat_ctor', 'S.mk.inj', 'S.mk.injEq', 'S.mk.noConfusion', 'S.mk.sizeOf_spec', 'S.noConfusion', 'S.noConfusionType', 'S.rec', 'S.recOn'], 'h2_keys': ['S', 'S._sizeOf_1', 'S._sizeOf_inst', 'S.a', 'S.c', 'S.casesOn', 'S.ctorIdx', 'S.mk', 'S.mk._flat_ctor', 'S.mk.inj', 'S.mk.injEq', 'S.mk.noConfusion', 'S.mk.sizeOf_spec', 'S.noConfusion', 'S.noConfusionType', 'S.rec', 'S.recOn'], 'changed': [], 'unchanged': ['S', 'S._sizeOf_1', 'S._sizeOf_inst', 'S.a', 'S.casesOn', 'S.ctorIdx', 'S.mk', 'S.mk._flat_ctor', 'S.mk.inj', 'S.mk.injEq', 'S.mk.noConfusion', 'S.mk.sizeOf_spec', 'S.noConfusion', 'S.noConfusionType', 'S.rec', 'S.recOn']}
+[B8_structure_to_class] gate=6a rc=0 | structure 改为 class 哈希是否改变
+    OUT: ["S.recOn","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"S"],"recOn"],1,["forall",1,["forall",0,["const",["str",null,"S"],[]],["sort",["param",0]]],["forall",0,["const",["str",null,"S"],[]],["forall",0,["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",2],["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",0]]]],["app",["bvar",2],["bvar",1]]]]],["definition","abbrev","safe","reducible",["lam",1,["forall",0,["const",["str",null,"S"],[]],["sort",["param",0]]],["lam",0,["const",["str",null,"S"],[]],["lam",0,["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",2],["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",0]]]],["app",["app",["app",["const",["str",["str",null,"S"],"rec"],[["param",0]]],["bvar",2]],["bvar",0]],["bvar",1]]]]]]]]
+    OUT: ["S.mk._flat_ctor","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",["str",null,"S"],"mk"],"_flat_ctor"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"S"],[]]],["definition","abbrev","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",0]]]]]]
+    OUT: ["S.rec","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"S"],"rec"],1,["forall",1,["forall",0,["const",["str",null,"S"],[]],["sort",["param",0]]],["forall",0,["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",1],["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",0]]]],["forall",0,["const",["str",null,"S"],[]],["app",["bvar",2],["bvar",0]]]]],["recursor"]]]
+    OUT: ["S.a","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"S"],"a"],0,["forall",3,["const",["str",null,"S"],[]],["const",["str",null,"Nat"],[]]],["definition","abbrev","safe","semireducible",["lam",3,["const",["str",null,"S"],[]],["proj",["str",null,"S"],0,["bvar",0]]]]]]
+    OUT: ["S.casesOn","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"S"],"casesOn"],1,["forall",1,["forall",0,["const",["str",null,"S"],[]],["sort",["param",0]]],["forall",0,["const",["str",null,"S"],[]],["forall",0,["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",2],["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",0]]]],["app",["bvar",2],["bvar",1]]]]],["definition","abbrev","safe","reducible",["lam",1,["forall",0,["const",["str",null,"S"],[]],["sort",["param",0]]],["lam",0,["const",["str",null,"S"],[]],["lam",0,["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",2],["app",["const",["str",["str",null,"S"],"mk"],[]],["bvar",0]]]],["app",["app",["app",["const",["str",["str",null,"S"],"rec"],[["param",0]]],["bvar",2]],["lam",0,["const",["str",null,"Nat"],[]],["app",["bvar",1],["bvar",0]]]],["bvar",1]]]]]]]]
+    OUT: ["S","Chan.Defs.Fixture",["FM-lock-v2",["str",null,"S"],0,["sort",["succ",["zero"]]],["inductive",0,0,[["str",["str",null,"S"],"mk"]],[["str",null,"S"]]]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.5s)
+    ERR: ✔ [4/8] Built verification.Audit (867ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (305ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (748ms)
+    EXTRA: {'same_keys': False, 'same_hashes': False, 'h1_keys': ['S', 'S._sizeOf_1', 'S._sizeOf_inst', 'S.a', 'S.casesOn', 'S.ctorIdx', 'S.mk', 'S.mk._flat_ctor', 'S.mk.inj', 'S.mk.injEq', 'S.mk.noConfusion', 'S.mk.sizeOf_spec', 'S.noConfusion', 'S.noConfusionType', 'S.rec', 'S.recOn'], 'h2_keys': ['S', 'S.a', 'S.casesOn', 'S.ctorIdx', 'S.mk', 'S.mk._flat_ctor', 'S.mk.noConfusion', 'S.noConfusion', 'S.noConfusionType', 'S.rec', 'S.recOn'], 'changed': ['S.a'], 'unchanged': ['S', 'S.casesOn', 'S.ctorIdx', 'S.mk', 'S.mk._flat_ctor', 'S.mk.noConfusion', 'S.noConfusion', 'S.noConfusionType', 'S.rec', 'S.recOn']}
+[B9_mutual] gate=6a rc=0 | mutual 递归改定义体哈希是否改变
+    OUT: ["odd._sunfold","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"odd"],"_sunfold"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Bool"],[]]],["definition","regular","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["app",["app",["const",["str",["str",null,"even"],"match_1"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Bool"],[]]]],["bvar",0]],["lam",0,["const",["str",null,"Unit"],[]],["const",["str",["str",null,"Bool"],"true"],[]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["const",["str",null,"even"],[]],["bvar",0]]]]]]]]
+    OUT: ["even._sunfold","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"even"],"_sunfold"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Bool"],[]]],["definition","regular","safe","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["app",["app",["const",["str",["str",null,"even"],"match_1"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Bool"],[]]]],["bvar",0]],["lam",0,["const",["str",null,"Unit"],[]],["const",["str",["str",null,"Bool"],"false"],[]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["const",["str",null,"odd"],[]],["bvar",0]]]]]]]]
+    OUT: ["odd._f","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"odd"],"_f"],0,["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["bvar",0]],["const",["str",null,"Bool"],[]]]],["definition","abbrev","safe","reducible",["lam",0,["const",["str",null,"Nat"],[]],["lam",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["bvar",0]],["app",["app",["app",["app",["app",["const",["str",["str",null,"even"],"match_1"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["forall",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["bvar",0]],["const",["str",null,"Bool"],[]]]]],["bvar",1]],["lam",0,["const",["str",null,"Unit"],[]],["lam",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["app",["app",["app",["const",["str",["str",null,"OfNat"],"ofNat"],[["zero"]]],["const",["str",null,"Nat"],[]]],["nat",0]],["app",["const",["str",null,"instOfNatNat"],[]],["nat",0]]]],["const",["str",["str",null,"Bool"],"true"],[]]]]],["lam",0,["const",["str",null,"Nat"],[]],["lam",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["app",["const",["str",["str",null,"Nat"],"succ"],[]],["bvar",0]]],["proj",["str",null,"PProd"],0,["proj",["str",null,"PProd"],0,["bvar",0]]]]]],["bvar",0]]]]]]]
+    OUT: ["even.match_1","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"even"],"match_1"],1,["forall",0,["forall",0,["const",["str",null,"Nat"],[]],["sort",["param",0]]],["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["forall",0,["const",["str",null,"Unit"],[]],["app",["bvar",2],["app",["app",["app",["const",["str",["str",null,"OfNat"],"ofNat"],[["zero"]]],["const",["str",null,"Nat"],[]]],["nat",0]],["app",["const",["str",null,"instOfNatNat"],[]],["nat",0]]]]],["forall",0,["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",3],["app",["const",["str",["str",null,"Nat"],"succ"],[]],["bvar",0]]]],["app",["bvar",3],["bvar",2]]]]]],["definition","abbrev","safe","instanceReducible",["lam",0,["forall",0,["const",["str",null,"Nat"],[]],["sort",["param",0]]],["lam",0,["const",["str",null,"Nat"],[]],["lam",0,["forall",0,["const",["str",null,"Unit"],[]],["app",["bvar",2],["app",["app",["app",["const",["str",["str",null,"OfNat"],"ofNat"],[["zero"]]],["const",["str",null,"Nat"],[]]],["nat",0]],["app",["const",["str",null,"instOfNatNat"],[]],["nat",0]]]]],["lam",0,["forall",0,["const",["str",null,"Nat"],[]],["app",["bvar",3],["app",["const",["str",["str",null,"Nat"],"succ"],[]],["bvar",0]]]],["app",["app",["app",["app",["const",["str",["str",null,"Nat"],"casesOn"],[["param",0]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["bvar",4],["bvar",0]]]],["bvar",2]],["app",["bvar",1],["const",["str",["str",null,"Unit"],"unit"],[]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["bvar",1],["bvar",0]]]]]]]]]]]
+    OUT: ["even._f","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"even"],"_f"],0,["forall",0,["const",["str",null,"Nat"],[]],["forall",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["bvar",0]],["const",["str",null,"Bool"],[]]]],["definition","abbrev","safe","reducible",["lam",0,["const",["str",null,"Nat"],[]],["lam",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["bvar",0]],["app",["app",["app",["app",["app",["const",["str",["str",null,"even"],"match_1"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["forall",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["bvar",0]],["const",["str",null,"Bool"],[]]]]],["bvar",1]],["lam",0,["const",["str",null,"Unit"],[]],["lam",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["app",["app",["app",["const",["str",["str",null,"OfNat"],"ofNat"],[["zero"]]],["const",["str",null,"Nat"],[]]],["nat",0]],["app",["const",["str",null,"instOfNatNat"],[]],["nat",0]]]],["const",["str",["str",null,"Bool"],"false"],[]]]]],["lam",0,["const",["str",null,"Nat"],[]],["lam",0,["app",["app",["const",["str",["str",null,"Nat"],"below"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["const",["str",null,"PProd"],[["succ",["zero"]],["succ",["zero"]]]],["const",["str",null,"Bool"],[]]],["const",["str",null,"Bool"],[]]]]],["app",["const",["str",["str",null,"Nat"],"succ"],[]],["bvar",0]]],["proj",["str",null,"PProd"],1,["proj",["str",null,"PProd"],0,["bvar",0]]]]]],["bvar",0]]]]]]]
+    OUT: ["odd._unsafe_rec","Chan.Defs.Fixture",["FM-lock-v2",["str",["str",null,"odd"],"_unsafe_rec"],0,["forall",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Bool"],[]]],["definition","opaque","partial","semireducible",["lam",0,["const",["str",null,"Nat"],[]],["app",["app",["app",["app",["const",["str",["str",null,"even"],"match_1"],[["succ",["zero"]]]],["lam",0,["const",["str",null,"Nat"],[]],["const",["str",null,"Bool"],[]]]],["bvar",0]],["lam",0,["const",["str",null,"Unit"],[]],["const",["str",["str",null,"Bool"],"true"],[]]]],["lam",0,["const",["str",null,"Nat"],[]],["app",["const",["str",["str",null,"even"],"_unsafe_rec"],[]],["bvar",0]]]]]]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.5s)
+    ERR: ✔ [4/8] Built verification.Audit (928ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (306ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (2.1s)
+    ERR: ✔ [8/8] Built fm_audit:exe (745ms)
+    EXTRA: {'same_keys': True, 'same_hashes': False, 'h1_keys': ['even', 'even._f', 'even._sunfold', 'even._unsafe_rec', 'even.match_1', 'odd', 'odd._f', 'odd._sunfold', 'odd._unsafe_rec'], 'h2_keys': ['even', 'even._f', 'even._sunfold', 'even._unsafe_rec', 'even.match_1', 'odd', 'odd._f', 'odd._sunfold', 'odd._unsafe_rec'], 'changed': ['even._f', 'even._sunfold', 'even._unsafe_rec', 'odd._f', 'odd._sunfold', 'odd._unsafe_rec'], 'unchanged': ['even', 'even.match_1', 'odd']}
+[B10_opaque_val] gate=6a rc=0 | opaque 改定义值哈希是否改变
+    OUT: ["opA","Chan.Defs.Fixture",["FM-lock-v2",["str",null,"opA"],0,["const",["str",null,"Nat"],[]],["opaque",false,["app",["app",["app",["const",["str",["str",null,"OfNat"],"ofNat"],[["zero"]]],["const",["str",null,"Nat"],[]]],["nat",1]],["app",["const",["str",null,"instOfNatNat"],[]],["nat",1]]]]]]
+    ERR: ✔ [2/8] Built verification.EnvGates (1.3s)
+    ERR: ✔ [4/8] Built verification.Audit (841ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (315ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (959ms)
+    EXTRA: {'same_keys': True, 'same_hashes': False, 'h1_keys': ['opA'], 'h2_keys': ['opA'], 'changed': ['opA'], 'unchanged': []}
+[C1-g6b] gate=6b rc=0 | decl/ 修改 Chan/Proxy + sources + garbage-signoffs.yaml 应绿
+[C2-g6b] gate=6b rc=0 | proof/ 修改 Chan/Exec + Chan/Final.lean + Chan.lean 应绿
+[C3-g6b] gate=6b rc=1 | infra/ 篡改已有 garbage-signoffs.yaml 必须红
+    OUT: GATE6b RED formal_math/verification/garbage-signoffs.yaml:1 PATH_SCOPE 分支 infra/tamper 不允许修改此路径
+[C4-g6b] gate=6b rc=0 | infra/ 在基线缺失时初始化空 garbage-signoffs.yaml + ChanExplore 应绿
+[C5-g6b] gate=6b rc=1 | infra/ 首次初始化非空 garbage-signoffs.yaml 必须红
+    OUT: GATE6b RED formal_math/verification/garbage-signoffs.yaml:1 PATH_SCOPE 分支 infra/init-nonempty 不允许修改此路径
+[C6-g6b] gate=6b rc=1 | infra/ 修改 lean-toolchain / Chan/Smoke.lean 的门6b行为
+    OUT: GATE6b RED formal_math/Chan/Smoke.lean:1 PATH_SCOPE 分支 infra/bump 不允许修改此路径
+[D1-g7a] gate=7a rc=1 | def / instance(Prop) / opaque(Prop) / private def / 手写相似构造器名 是否全被门7a捕获
+    OUT: GATE7a RED formal_math/Chan/Thm/Fixture.lean:FakeS.mk.inj_fake NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Thm/Fixture.lean:_private.Chan.Thm.Fixture.0.privDefProp NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Thm/Fixture.lean:opProp NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Thm/Fixture.lean:instProp NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Thm/Fixture.lean:MyPropClass.mk._flat_ctor NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Thm/Fixture.lean:defProp NODE_MISSING 定理未登记
+    ERR: ✔ [6/8] Built verification.Audit:c.o (316ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (755ms)
+[D2-g7a] gate=7a rc=1 | Chan/Exec 真实复杂 inductive/deriving/termination_by/下标证明 是否触发门7a误杀
+    OUT: GATE7a RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqBar.decEq._proof_1 NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqDir._proof_1 NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqDir._proof_2 NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqBar.decEq._proof_4 NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Exec/Fixture.lean:countdown._proof_1 NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqBar.decEq._proof_2 NODE_MISSING 定理未登记
+    ERR: ✔ [6/8] Built verification.Audit:c.o (314ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (752ms)
+[D2-g9] gate=9 rc=1 | Chan/Exec 真实复杂 inductive/deriving/termination_by/下标证明 是否触发门9误杀
+    OUT: GATE9 RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqBar.decEq._proof_1 WITNESS ChanTest 缺少见证定理 instDecidableEqBar.decEq._proof_1.witness
+    OUT: GATE9 RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqDir._proof_1 WITNESS ChanTest 缺少见证定理 instDecidableEqDir._proof_1.witness
+    OUT: GATE9 RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqDir._proof_2 WITNESS ChanTest 缺少见证定理 instDecidableEqDir._proof_2.witness
+    OUT: GATE9 RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqBar.decEq._proof_4 WITNESS ChanTest 缺少见证定理 instDecidableEqBar.decEq._proof_4.witness
+    OUT: GATE9 RED formal_math/Chan/Exec/Fixture.lean:countdown._proof_1 WITNESS ChanTest 缺少见证定理 countdown._proof_1.witness
+    OUT: GATE9 RED formal_math/Chan/Exec/Fixture.lean:instDecidableEqBar.decEq._proof_2 WITNESS ChanTest 缺少见证定理 instDecidableEqBar.decEq._proof_2.witness
+[D3-build] gate=7a rc=1 | def Flag := Bool / Id Bool / def MyPred := Prop 合法编译核验
+    OUT: ✖ [0/11] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/11] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/d3_flag_def_bypass/formal_math/ChanTest.lean
+    OUT: ✔ [4/11] Built Chan (349ms)
+    ERR: error: build failed
+[D3-g7a] gate=7a rc=1 | 用 def Flag := Bool / Id Bool / def MyPred := Prop 绕过门7a自由判据检查
+    OUT: GATE7a RED formal_math/Chan/Defs/Fixture.lean:BspEndpoint FREE_PREDICATE 自由判据字段 #[brokeCenter, afterTypeOne, leftCenter] 缺少原始数据到判据的精化定理
+    ERR: ✔ [6/8] Built verification.Audit:c.o (317ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (782ms)
+[D4-build] gate=7a rc=1 | 带 [LinearOrder P] 的合法精化结构编译核验
+    OUT: ✖ [0/379] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [370/379] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/d4_poly_struct_fp/formal_math/ChanTest.lean
+    OUT: ✔ [372/379] Built Chan (331ms)
+    ERR: error: build failed
+[D4-g7a] gate=7a rc=1 | 带 [LinearOrder P] 的合法精化结构是否被门7a refines 误杀
+    OUT: GATE7a RED formal_math/Chan/Defs/Fixture.lean:GoodBar FREE_PREDICATE 自由判据字段 #[isUp] 缺少原始数据到判据的精化定理
+    ERR: ✔ [6/8] Built verification.Audit:c.o (310ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (2.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (741ms)
+[D4b-g7a] gate=7a rc=1 | 带值参数 (k : Nat) 的合法精化结构是否被门7a refines 误杀
+    OUT: GATE7a RED formal_math/Chan/Defs/Fixture.lean:Window FREE_PREDICATE 自由判据字段 #[inRange] 缺少原始数据到判据的精化定理
+    ERR: ✔ [6/8] Built verification.Audit:c.o (324ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.1s)
+[D5a-g7a] gate=7a rc=0 | 结构内嵌 bot : False 字段 + False.elim 伪造精化测门7a
+    ERR: ✔ [6/8] Built verification.Audit:c.o (324ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (2.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.0s)
+[D5b-g7a] gate=7a rc=1 | 用非 Prop def 充当 refinements 测门7a
+    OUT: GATE7a RED formal_math/Chan/Defs/Fixture.lean:BadS2 FREE_PREDICATE 自由判据字段 #[flag] 缺少原始数据到判据的精化定理
+    ERR: ✔ [6/8] Built verification.Audit:c.o (314ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.1s)
+[D5c-g7a] gate=7a rc=1 | 加 Subsingleton/Nonempty 额外参数伪造精化测门7a
+    OUT: GATE7a RED formal_math/Chan/Defs/Fixture.lean:BadS3 FREE_PREDICATE 自由判据字段 #[flag] 缺少原始数据到判据的精化定理
+    ERR: ✔ [6/8] Built verification.Audit:c.o (311ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (2.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.0s)
+[D6a-build] gate=7b rc=1 | Chan/Hypotheses structure 用 cases h 解构 编译核验
+    OUT: ✖ [0/15] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/15] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/d6_hyp_cases_crash/formal_math/ChanTest.lean
+    OUT: ✔ [4/15] Built Chan (422ms)
+    ERR: error: build failed
+[D6a-g7b] gate=7b rc=0 | Chan/Hypotheses structure 用 cases h 解构 是否令门7b崩溃退2
+    ERR: ✔ [6/8] Built verification.Audit:c.o (312ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.0s)
+    ERR: GATE7b NOTE claim: 该证明未推广
+[D6b-g7b] gate=7b rc=2 | Chan/Hypotheses 普通 Prop inductive 是否令门7b崩溃退2
+    ERR: GATE7b: 无法判定：✔ [6/8] Built verification.Audit:c.o (334ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.1s)
+    ERR: 未获准展开的依赖 PullbackInd 隐藏了具体定义
+[D6c-g7b] gate=7b rc=0 | Chan/Hypotheses 别名包装 structure (HypAlias) 是否令门7b崩溃退2
+    ERR: ✔ [6/8] Built verification.Audit:c.o (319ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (2.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.1s)
+    ERR: GATE7b NOTE claim: 该证明未推广
+[E1-build] gate=8a rc=1 | structure/class/Prod.fst 包装空真与镜像定理 编译核验
+    OUT: ✖ [0/13] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/13] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/e1_struct_proj_bypass/formal_math/ChanTest.lean
+    OUT: ✔ [4/13] Built Chan (418ms)
+    ERR: error: build failed
+[E1-g8a] gate=8a rc=1 | structure/class/Prod.fst 包装镜像定理绕过门8a
+    OUT: GATE8a RED formal_math/Chan/Thm/Fixture.lean:wrapped_mirror PREMISE_INSTANCE 前提 a._@._internal._hyg.0 的实例即结论
+    ERR: ✔ [6/8] Built verification.Audit:c.o (315ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.0s)
+[E1-g8b] gate=8b rc=1 | structure/class/Prod.fst 包装无用前提定理绕过门8b
+    OUT: GATE8b RED formal_math/Chan/Thm/Fixture.lean:wrapped_bsp DROPPABLE_PREMISE 删去必要前提 #1 _hdiv 后原证明仍通过
+[E1-g9] gate=9 rc=1 | structure/class/Prod.fst 包装矛盾空真定理仅用 True 见证绕过门9与必要性检查
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:wrapped_vac_pair WITNESS wrapped_vac_pair.witness 的类型与生成的联合命题不定义相等
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:wrapped_vac_pair NECESSITY ChanTest 缺少见证定理 wrapped_vac_pair.without_1
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:wrapped_vac_pair NECESSITY ChanTest 缺少见证定理 wrapped_vac_pair.without_2
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:wrapped_mirror WITNESS wrapped_mirror.witness 的类型与生成的联合命题不定义相等
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:wrapped_mirror NECESSITY ChanTest 缺少见证定理 wrapped_mirror.without_1
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:wrapped_vac_class WITNESS wrapped_vac_class.witness 的类型与生成的联合命题不定义相等
+[E2-g9] gate=9 rc=2 | let / have / fun / True ∧ 包装矛盾空真定理测门9
+    ERR: GATE9: 无法判定：lake build +Chan:olean +Chan.Thm.Fixture:olean +ChanTest.Evidence:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean: error: build failed
+[E3-g8a] gate=8a rc=2 | ExistsUnique 多种变体与 AliasNat/合取前提镜像测门8a
+    ERR: GATE8a: 无法判定：lake build +Chan:olean +Chan.Thm.Fixture:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean: error: build failed
+[E4-build] gate=8b rc=1 | 门8b五种隐藏无用前提手法 编译核验
+    OUT: ✖ [0/11] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/11] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/e4_g8b_bypasses/formal_math/ChanTest.lean
+    OUT: ✔ [4/11] Built Chan (274ms)
+    ERR: error: build failed
+[E4-g8b] gate=8b rc=1 | Function.const / have / subterm beta / And.left / subterm helper 绕过门8b
+    OUT: GATE8b RED formal_math/Chan/Thm/Fixture.lean:bsp_have DROPPABLE_PREMISE 删去必要前提 #1 _hdiv 后原证明仍通过
+    ERR: ✔ [6/8] Built verification.Audit:c.o (309ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.9s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.1s)
+[E5-g8b] gate=8b rc=0 | 递归证明在门8b proofHead 下是否正常（不爆 fuel 退2）
+    ERR: ✔ [6/8] Built verification.Audit:c.o (317ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.9s)
+    ERR: ✔ [8/8] Built fm_audit:exe (1.0s)
+    ERR: GATE8b NOTE _private.Chan.Thm.Fixture.0.rec_thm.match_1_1: 后续类型依赖 #1 h，无法直接删去
+[F1-build] gate=10 rc=1 | 门10各类垃圾值表达式编译核验
+    OUT: ✖ [0/11] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/11] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/f1_g10_misses/formal_math/ChanTest.lean
+    OUT: ✔ [4/11] Built Chan (341ms)
+    ERR: error: build failed
+[F1-g10] gate=10 rc=2 | Rat.inv / Int.tdiv/ediv/fdiv / headD / getLastD / Array.get! / Option 返回夹带 panic!/head!/getLast!/get! 测门10
+    ERR: GATE10: 无法判定：lake build +Chan:olean +Chan.Defs.Fixture:olean +ChanTest.Probe:olean +verification.Audit:olean +verification.EnvGates:olean: error: build failed
+[F2-g10] gate=10 rc=1 | MyInt / MyRat 类型别名除法测门10
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:instDivMyInt._aux_1 SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:instDivMyRat._aux_1 SIGNOFF_MISSING Rat.div 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:rInt SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:rRat SIGNOFF_MISSING Rat.div 实有 1 处，签注 0 处
+[F3-build] gate=10 rc=1 | 合法安全写法集合编译核验
+    OUT: ✖ [0/11] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/11] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/f3_g10_safe_fp/formal_math/ChanTest.lean
+    OUT: ✔ [4/11] Built Chan (306ms)
+    ERR: error: build failed
+[F3-g10] gate=10 rc=1 | 合法安全写法（含 Int/Rat 0 < dt、Fin 下标、dite、Subtype）门10误报核查
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:safeIntPos SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:safeRatPos SIGNOFF_MISSING Rat.div 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:safeRatSubPos SIGNOFF_MISSING Rat.div 实有 1 处，签注 0 处
+[G1-build] gate=15 rc=1 | 未 expose 的 structure 跨模块访问 编译测试
+    OUT: ✖ [0/13] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/13] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/g1_unexposed_struct/formal_math/ChanTest.lean
+    OUT: ✔ [4/13] Built Chan (323ms)
+    ERR: error: build failed
+[G1-g15] gate=15 rc=0 | 未 expose 的 structure + 末尾空 @[expose] 门15行为
+    ERR: ✔ [2/8] Built verification.EnvGates (1.4s)
+    ERR: ✔ [4/8] Built verification.Audit (694ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (311ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (849ms)
+[G2-build] gate=15 rc=1 | 未 expose 的 deriving DecidableEq 跨模块 decide 编译测试
+    OUT: ✖ [0/13] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/13] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/g2_unexposed_instance/formal_math/ChanTest.lean
+    OUT: ✔ [4/13] Built Chan (285ms)
+    ERR: error: build failed
+[G2-g15] gate=15 rc=0 | 未 expose 的 deriving DecidableEq + 末尾空 @[expose] 门15行为
+    ERR: ✔ [2/8] Built verification.EnvGates (1.4s)
+    ERR: ✔ [4/8] Built verification.Audit (674ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (309ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (733ms)
+[G3-g15] gate=15 rc=1 | meta import all 测门15
+    OUT: GATE15 RED formal_math/Chan/Thm/Sneaky.lean:2 IMPORT_ALL 仅审计工具能使用 import all
+[G3-g3] gate=3 rc=1 | meta import all 测门3
+    OUT: GATE3 RED formal_math/Chan/Thm/Sneaky.lean:2 TOKEN 禁止普通源码使用 import all
+    ERR: ✔ [2/8] Built verification.EnvGates (1.5s)
+    ERR: ✔ [4/8] Built verification.Audit (686ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (308ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (746ms)
+[G4-g15] gate=15 rc=1 | ChanChallenge 经 Chan.Defs 传递导入 Lean 测门15
+    OUT: GATE15 RED formal_math/ChanChallenge/Claim.lean:2 IMPORT_CLOSURE 经 Chan.Defs.UseLean 间接导入 Lean
+[G5-g15] gate=15 rc=1 | s!"{'"'}" 伪造 @[expose] public section 测门15环境兜底
+    OUT: GATE15 RED formal_math/Chan/Defs/Flag.lean:_b EXPOSE_SECTION 公开定义未暴露定义体
+    OUT: GATE15 RED formal_math/Chan/Defs/Flag.lean:_c EXPOSE_SECTION 公开定义未暴露定义体
+    OUT: GATE15 RED formal_math/Chan/Defs/Flag.lean:probeFlag EXPOSE_SECTION 公开定义未暴露定义体
+    OUT: GATE15 RED formal_math/Chan/Defs/Flag.lean:_a EXPOSE_SECTION 公开定义未暴露定义体
+    ERR: ✔ [2/8] Built verification.EnvGates (1.4s)
+    ERR: ✔ [4/8] Built verification.Audit (672ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (307ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.9s)
+    ERR: ✔ [8/8] Built fm_audit:exe (731ms)
+[G6-g15] gate=15 rc=1 | 子目录非 Chan 桥接 Helper/Bridge.lean 测门15
+    OUT: GATE15 RED formal_math/Chan/Defs/Leak.lean:2 IMPORT_EDGE 禁止导入 Helper.Bridge
+    OUT: GATE15 RED formal_math/Helper/Bridge.lean:2 IMPORT_EDGE 禁止导入 ChanDyn.Secret
+[G7-build] gate=15 rc=1 | 无 @[expose] 的 abbrev 跨模块 decide 编译测试
+    OUT: ✖ [0/13] Running job computation
+    OUT: error: ChanTest: some modules have bad imports or could not be read
+    OUT: ✖ [2/13] Running ChanTest
+    OUT: error: no such file or directory (error code: 2)
+    OUT:   file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_sandbox/g7_public_import_chan_defs/formal_math/ChanTest.lean
+    OUT: ✔ [4/13] Built Chan (283ms)
+    ERR: error: build failed
+[G7-g15] gate=15 rc=0 | 无 @[expose] 的 abbrev + 末尾空 @[expose] 门15行为
+    ERR: ✔ [2/8] Built verification.EnvGates (1.3s)
+    ERR: ✔ [4/8] Built verification.Audit (666ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (310ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.9s)
+    ERR: ✔ [8/8] Built fm_audit:exe (731ms)
+
+DONE R2 ADVERSARIAL: 73 experiments written to /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_results.json

@@ -1,0 +1,234 @@
+[
+  {
+    "id": "E2-let_wrap-build",
+    "gate": "9",
+    "desc": "let_wrap 编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/11] Built Chan (304ms)\n✔ [4/11] Built Chan.Thm.Fixture (305ms)\n✔ [7/11] Built ChanTest.Probe (304ms)\n✔ [9/11] Built ChanTest.Evidence (304ms)\nBuild completed successfully (11 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E2-let_wrap-g9",
+    "gate": "9",
+    "desc": "let_wrap 包装矛盾空真定理测门9 (仅 True 见证)",
+    "rc": 1,
+    "stdout": "GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim WITNESS claim.witness 的类型与生成的联合命题不定义相等\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_1\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_2",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (303ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.9s)\n✔ [8/8] Built fm_audit:exe (728ms)"
+  },
+  {
+    "id": "E2-have_wrap-build",
+    "gate": "9",
+    "desc": "have_wrap 编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/11] Built Chan (307ms)\n✔ [4/11] Built ChanTest.Probe (309ms)\n✔ [6/11] Built ChanTest.Evidence (307ms)\n✔ [9/11] Built Chan.Thm.Fixture (325ms)\nBuild completed successfully (11 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E2-have_wrap-g9",
+    "gate": "9",
+    "desc": "have_wrap 包装矛盾空真定理测门9 (仅 True 见证)",
+    "rc": 1,
+    "stdout": "GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim WITNESS claim.witness 的类型与生成的联合命题不定义相等\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_1\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_2",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (311ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (815ms)"
+  },
+  {
+    "id": "E2-fun_wrap-build",
+    "gate": "9",
+    "desc": "fun_wrap 编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/11] Built Chan (342ms)\n✔ [4/11] Built Chan.Thm.Fixture (344ms)\n✔ [7/11] Built ChanTest.Probe (342ms)\n✔ [9/11] Built ChanTest.Evidence (342ms)\nBuild completed successfully (11 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E2-fun_wrap-g9",
+    "gate": "9",
+    "desc": "fun_wrap 包装矛盾空真定理测门9 (仅 True 见证)",
+    "rc": 1,
+    "stdout": "GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim WITNESS claim.witness 的类型与生成的联合命题不定义相等\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_1\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_2",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (315ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (733ms)"
+  },
+  {
+    "id": "E2-and_wrap-build",
+    "gate": "9",
+    "desc": "and_wrap 编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/11] Built Chan (365ms)\n✔ [4/11] Built Chan.Thm.Fixture (367ms)\n✔ [7/11] Built ChanTest.Probe (364ms)\n✔ [9/11] Built ChanTest.Evidence (364ms)\nBuild completed successfully (11 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E2-and_wrap-g9",
+    "gate": "9",
+    "desc": "and_wrap 包装矛盾空真定理测门9 (仅 True 见证)",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (312ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (761ms)"
+  },
+  {
+    "id": "E2-and-8a",
+    "gate": "8a",
+    "desc": "True ∧ 包装镜像定理测门8a",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (312ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (753ms)"
+  },
+  {
+    "id": "E2-and-8b",
+    "gate": "8b",
+    "desc": "True ∧ 包装无用前提定理测门8b",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "id": "E3-clean-build",
+    "gate": "8a",
+    "desc": "ExistsUnique 变体 + AliasNat/合取前提 编译核验",
+    "rc": 0,
+    "stdout": "✔ [193/200] Built Chan (247ms)\n✔ [195/200] Built Chan.Thm.Fixture (232ms)\n✔ [198/200] Built ChanTest.Probe (234ms)\nBuild completed successfully (200 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E3-clean-g8a",
+    "gate": "8a",
+    "desc": "ExistsUnique 变体 + AliasNat/合取前提 测门8a（每条未报即绕过）",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (304ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (720ms)"
+  },
+  {
+    "id": "E4-const-build",
+    "gate": "8b",
+    "desc": "E4-const 独立编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/9] Built Chan (337ms)\n✔ [4/9] Built Chan.Thm.Fixture (337ms)\n✔ [7/9] Built ChanTest.Probe (335ms)\nBuild completed successfully (9 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E4-const-g8b",
+    "gate": "8b",
+    "desc": "E4-const 独立测门8b（预期红，实测若0即硬绕过）",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (308ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (769ms)"
+  },
+  {
+    "id": "E4-sub-beta-build",
+    "gate": "8b",
+    "desc": "E4-sub-beta 独立编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/9] Built Chan (293ms)\n✔ [4/9] Built Chan.Thm.Fixture (293ms)\n✔ [7/9] Built ChanTest.Probe (293ms)\nBuild completed successfully (9 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E4-sub-beta-g8b",
+    "gate": "8b",
+    "desc": "E4-sub-beta 独立测门8b（预期红，实测若0即硬绕过）",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (311ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.9s)\n✔ [8/8] Built fm_audit:exe (942ms)"
+  },
+  {
+    "id": "E4-and-left-build",
+    "gate": "8b",
+    "desc": "E4-and-left 独立编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/9] Built Chan (291ms)\n✔ [4/9] Built Chan.Thm.Fixture (293ms)\n✔ [7/9] Built ChanTest.Probe (290ms)\nBuild completed successfully (9 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E4-and-left-g8b",
+    "gate": "8b",
+    "desc": "E4-and-left 独立测门8b（预期红，实测若0即硬绕过）",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (312ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.9s)\n✔ [8/8] Built fm_audit:exe (696ms)"
+  },
+  {
+    "id": "E4-sub-helper-build",
+    "gate": "8b",
+    "desc": "E4-sub-helper 独立编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/9] Built Chan (305ms)\n✔ [4/9] Built Chan.Thm.Fixture (309ms)\n✔ [7/9] Built ChanTest.Probe (303ms)\nBuild completed successfully (9 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E4-sub-helper-g8b",
+    "gate": "8b",
+    "desc": "E4-sub-helper 独立测门8b（预期红，实测若0即硬绕过）",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (299ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.9s)\n✔ [8/8] Built fm_audit:exe (727ms)"
+  },
+  {
+    "id": "D6-2field-build",
+    "gate": "7b",
+    "desc": "双字段 Prop structure 用 cases h 解构 编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/13] Built Chan (229ms)\n✔ [4/13] Built Chan.Defs.Fixture (231ms)\n✔ [6/13] Built ChanTest.Probe (229ms)\n✔ [9/13] Built Chan.Hypotheses.Fixture (174ms)\n✔ [11/13] Built Chan.Thm.Fixture (159ms)\nBuild completed successfully (13 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "D6-2field-g7b",
+    "gate": "7b",
+    "desc": "双字段 Prop structure 用 cases h 解构 测门7b是否崩溃退2",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (289ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.8s)\n✔ [8/8] Built fm_audit:exe (702ms)\nGATE7b NOTE claim: 该证明未推广"
+  },
+  {
+    "id": "F1-clean-build",
+    "gate": "10",
+    "desc": "门10垃圾值集合编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/9] Built Chan (186ms)\n✔ [4/9] Built Chan.Defs.Fixture (197ms)\n✔ [7/9] Built ChanTest.Probe (186ms)\nBuild completed successfully (9 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "F1-clean-g10",
+    "gate": "10",
+    "desc": "门10垃圾值集合检测（逐声明核查漏报）",
+    "rc": 1,
+    "stdout": "GATE10 RED formal_math/Chan/Defs/Fixture.lean:arrBang SIGNOFF_MISSING get! 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:intEdiv SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:intFdiv SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:intTdiv SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:optGetBang SIGNOFF_MISSING get! 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:optGetIdxBang SIGNOFF_MISSING get! 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:optLastBang SIGNOFF_MISSING getLast! 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:optPanic SIGNOFF_MISSING head! 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:optPanic SIGNOFF_MISSING panic! 实有 1 处，签注 0 处",
+    "stderr": ""
+  },
+  {
+    "id": "F1-ratinv-build",
+    "gate": "10",
+    "desc": "Rat.inv 编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/9] Built Chan (197ms)\n✔ [4/9] Built Chan.Defs.Fixture (199ms)\n✔ [7/9] Built ChanTest.Probe (197ms)\nBuild completed successfully (9 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "F1-ratinv-g10",
+    "gate": "10",
+    "desc": "Rat.inv (0.inv = 0) 单独测门10（预期红，实测若0即漏检）",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "id": "E5-rec-build",
+    "gate": "7a",
+    "desc": "普通递归定理 rec_thm 编译核验",
+    "rc": 0,
+    "stdout": "✔ [2/11] Built Chan (224ms)\n✔ [4/11] Built Chan.Thm.Fixture (226ms)\n✔ [7/11] Built ChanTest.Probe (224ms)\n✔ [9/11] Built ChanTest.Evidence (224ms)\nBuild completed successfully (11 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "E5-rec-g7a",
+    "gate": "7a",
+    "desc": "普通递归定理 rec_thm 是否触发编译器辅助定理误杀门7a",
+    "rc": 1,
+    "stdout": "GATE7a RED formal_math/Chan/Thm/Fixture.lean:_private.Chan.Thm.Fixture.0.rec_thm.match_1_1 NODE_MISSING 定理未登记\nGATE7a RED formal_math/Chan/Thm/Fixture.lean:rec_thm._f NODE_MISSING 定理未登记",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (294ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.8s)\n✔ [8/8] Built fm_audit:exe (704ms)"
+  },
+  {
+    "id": "E5-rec-g9",
+    "gate": "9",
+    "desc": "普通递归定理 rec_thm 是否触发编译器辅助定理误杀门9",
+    "rc": 1,
+    "stdout": "GATE9 RED formal_math/Chan/Thm/Fixture.lean:_private.Chan.Thm.Fixture.0.rec_thm.match_1_1 WITNESS ChanTest 缺少见证定理 _private.Chan.Thm.Fixture.«0».rec_thm.match_1_1.witness\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:rec_thm._f WITNESS ChanTest 缺少见证定理 rec_thm._f.witness",
+    "stderr": ""
+  }
+]

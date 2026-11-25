@@ -1,0 +1,76 @@
+=== PRE-CHECK ===
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    15Gi   9.2Gi    63%    459k   97M    0%   /
+/dev/disk7s1     931Gi   863Gi    68Gi    93%     13M  716M    2%   /Volumes/AgentStorage
+0b991736774eaa4159baa75f2f3d35a10b67e015
+?? gpt-with-taste/
+Lean (version 4.36.0, arm64-apple-darwin24.6.0, commit 611c117bfaf7b7ae1cfcf246ce6fba31e8f509e9, Release)
+Lake version 5.0.0-src+611c117 (Lean version 4.36.0)
+=== LAKE BUILD --WFAIL ===
+ℹ [3530/3537] Replayed Chan.Smoke
+info: Chan/Smoke.lean:23:0: NonemptyInterval : (α : Type u_1) → [LE α] → Type u_1
+info: Chan/Smoke.lean:24:0: @NonemptyInterval.toProd : {α : Type u_1} → [inst : LE α] → NonemptyInterval α → α × α
+info: Chan/Smoke.lean:25:0: @NonemptyInterval.toDualProd : {α : Type u_1} → [inst : LE α] → NonemptyInterval α → αᵒᵈ × α
+info: Chan/Smoke.lean:26:0: @NonemptyInterval.dual : {α : Type u_1} → [inst : LE α] → NonemptyInterval α ≃ NonemptyInterval αᵒᵈ
+info: Chan/Smoke.lean:27:0: Interval : (α : Type u_1) → [LE α] → Type u_1
+info: Chan/Smoke.lean:28:0: OrderDual : Type u_1 → Type u_1
+info: Chan/Smoke.lean:29:0: @List.IsPrefix : {α : Type u_1} → List α → List α → Prop
+info: Chan/Smoke.lean:30:0: @List.IsChain : {α : Type u_1} → (α → α → Prop) → List α → Prop
+info: Chan/Smoke.lean:31:0: @Nat.iterate : {α : Sort u_1} → (α → α) → ℕ → α → α
+info: Chan/Smoke.lean:32:0: @PiNat.cylinder : {E : ℕ → Type u_1} → ((n : ℕ) → E n) → ℕ → Set ((n : ℕ) → E n)
+info: Chan/Smoke.lean:33:0: @PiNat.firstDiff : {E : ℕ → Type u_1} → ((n : ℕ) → E n) → ((n : ℕ) → E n) → ℕ
+info: Chan/Smoke.lean:34:0: @Filter.atTop : {α : Type u_1} → [Preorder α] → Filter α
+info: Chan/Smoke.lean:35:0: @Filter.EventuallyConst : {α : Type u_1} → {β : Type u_2} → (α → β) → Filter α → Prop
+info: Chan/Smoke.lean:36:0: @Finset.sum : {ι : Type u_1} → {M : Type u_2} → [AddCommMonoid M] → Finset ι → (ι → M) → M
+info: Chan/Smoke.lean:37:0: @Finset.sup' : {α : Type u_1} → {β : Type u_2} → [SemilatticeSup α] → (s : Finset β) → s.Nonempty → (β → α) → α
+info: Chan/Smoke.lean:38:0: @Finset.inf' : {α : Type u_1} → {β : Type u_2} → [SemilatticeInf α] → (s : Finset β) → s.Nonempty → (β → α) → α
+info: Chan/Smoke.lean:39:0: IsStrictOrderedRing : (R : Type u_1) → [Semiring R] → [PartialOrder R] → Prop
+info: Chan/Smoke.lean:40:0: LocallyFiniteOrder : (α : Type u_1) → [Preorder α] → Type u_1
+info: Chan/Smoke.lean:41:0: @WellFounded : {α : Sort u_1} → (α → α → Prop) → Prop
+Build completed successfully (3537 jobs).
+RC_BUILD=0
+=== LAKE BUILD FM_AUDIT ===
+Build completed successfully (8 jobs).
+RC_FM_AUDIT=0
+=== RUN_GATES BY GATE ===
+--- GATE 1 ---
+RC_GATE_1=0
+--- GATE 2 ---
+RC_GATE_2=0
+--- GATE 3 ---
+RC_GATE_3=0
+--- GATE 6a ---
+RC_GATE_6a=0
+--- GATE 6b ---
+RC_GATE_6b=0
+--- GATE 7a ---
+RC_GATE_7a=0
+--- GATE 7b ---
+RC_GATE_7b=0
+--- GATE 8a ---
+RC_GATE_8a=0
+--- GATE 8b ---
+RC_GATE_8b=0
+--- GATE 9 ---
+RC_GATE_9=0
+--- GATE 10 ---
+RC_GATE_10=0
+--- GATE 15 ---
+RC_GATE_15=0
+=== RUN_GATES BY STAGE ===
+--- STAGE decl ---
+RC_STAGE_decl=0
+--- STAGE proof ---
+RC_STAGE_proof=0
+--- STAGE all ---
+RC_STAGE_all=0
+=== POST-RUN_GATES STATUS ===
+0b991736774eaa4159baa75f2f3d35a10b67e015
+?? gpt-with-taste/
+RC_SELFTEST=0
+=== POST-SELFTEST STATUS ===
+0b991736774eaa4159baa75f2f3d35a10b67e015
+?? gpt-with-taste/
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    15Gi   7.5Gi    68%    459k   79M    1%   /
+/dev/disk7s1     931Gi   872Gi    60Gi    94%     13M  624M    2%   /Volumes/AgentStorage

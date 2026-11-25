@@ -1,0 +1,72 @@
+[A1-clean-build] gate=2 rc=0 | 干净 lakefile 下 s!"{'"'}" + unused (α) lake build --wfail
+    OUT: ✔ [2/7] Built Chan (381ms)
+    OUT: ✔ [5/7] Built ChanTest.Probe (381ms)
+    OUT: Build completed successfully (7 jobs).
+[A1-clean-g2] gate=2 rc=0 | 干净 lakefile 下 s!"{'"'}" 绕过门2 (关闭 linter.unusedVariables + 开启 autoImplicit)
+[A5-clean-g2] gate=2 rc=1 | 干净 lakefile 下顶层 [leanOptions] linter.all = false 测门2
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ⚠ [2/7] Building Chan (321ms)
+    ERR: trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a5_clean/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a5_clean/formal_math/Chan.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a5_clean/formal_math/.lake/build/lib/lean/Chan.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a5_clean/formal_math/.lake/build/lib/lean/Chan.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a5_clean/formal_math/.lake/build/ir/Chan.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a5_clean/formal_math/.lake/build/ir/Chan.setup.json --json
+    ERR: warning: Chan.lean:2:12: Variable name `ignored` is not explicitly referenced.
+    ERR: 
+    ERR: Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+[A6-clean-g2] gate=2 rc=1 | 干净 lakefile 下 moreLeanArgs = ["-Dlinter.all=false"] 测门2
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ⚠ [2/7] Building Chan (327ms)
+    ERR: trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6_clean/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean -Dlinter.all=false /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6_clean/formal_math/Chan.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6_clean/formal_math/.lake/build/lib/lean/Chan.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6_clean/formal_math/.lake/build/lib/lean/Chan.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6_clean/formal_math/.lake/build/ir/Chan.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6_clean/formal_math/.lake/build/ir/Chan.setup.json --json
+    ERR: warning: Chan.lean:2:12: Variable name `ignored` is not explicitly referenced.
+    ERR: 
+    ERR: Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+[A6b-clean-g2] gate=2 rc=1 | 干净 lakefile 下 moreLeanArgs = ["-DwarningAsError=false"] 测门2
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ⚠ [2/7] Building Chan (346ms)
+    ERR: trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6b_clean/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean -DwarningAsError=false /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6b_clean/formal_math/Chan.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6b_clean/formal_math/.lake/build/lib/lean/Chan.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6b_clean/formal_math/.lake/build/lib/lean/Chan.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6b_clean/formal_math/.lake/build/ir/Chan.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6b_clean/formal_math/.lake/build/ir/Chan.setup.json --json
+    ERR: warning: Chan.lean:2:12: Variable name `ignored` is not explicitly referenced.
+    ERR: 
+    ERR: Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+[A6c-clean-g2] gate=2 rc=1 | 干净 lakefile 下顶层 moreLeanArgs = ["-Dlinter.all=false"] 测门2
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ⚠ [2/7] Building Chan (304ms)
+    ERR: trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6c_clean/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean -Dlinter.all=false /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6c_clean/formal_math/Chan.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6c_clean/formal_math/.lake/build/lib/lean/Chan.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6c_clean/formal_math/.lake/build/lib/lean/Chan.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6c_clean/formal_math/.lake/build/ir/Chan.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6c_clean/formal_math/.lake/build/ir/Chan.setup.json --json
+    ERR: warning: Chan.lean:2:12: Variable name `ignored` is not explicitly referenced.
+    ERR: 
+    ERR: Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+[A6d-clean-g2] gate=2 rc=1 | moreLeanArgs 组合 -D warningAsError=false + -D linter.all=false 测门2
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: ⚠ [2/7] Building Chan (370ms)
+    ERR: trace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6d_clean/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean -D warningAsError=false -D linter.all=false /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6d_clean/formal_math/Chan.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6d_clean/formal_math/.lake/build/lib/lean/Chan.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6d_clean/formal_math/.lake/build/lib/lean/Chan.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6d_clean/formal_math/.lake/build/ir/Chan.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r2_fixup_sandbox/a6d_clean/formal_math/.lake/build/ir/Chan.setup.json --json
+    ERR: warning: Chan.lean:2:12: Variable name `ignored` is not explicitly referenced.
+    ERR: 
+    ERR: Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+[A6e-g1-before] gate=1 rc=0 | lakefile.toml 增加本地 [[require]] path=../evil_dep（不改 manifest）先跑门1
+[A6e-g2] gate=2 rc=1 | lakefile.toml 增加本地 [[require]] path=../evil_dep 跑门2
+    OUT: GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1
+    ERR: error: dependency 'Evil' not in manifest; use `lake update Evil` to add it
+[A6e-g1-after] gate=1 rc=0 | 跑完门2后再跑门1（检验 lake build 是否改写 manifest）
+[G2-clean-build] gate=15 rc=0 | 未 expose 的 deriving DecidableEq 跨模块 decide 编译核验
+    OUT: ✔ [2/11] Built Chan (399ms)
+    OUT: ✔ [4/11] Built ChanTest.Probe (399ms)
+    OUT: ✔ [6/11] Built Chan.Defs.Flag (413ms)
+    OUT: ✔ [9/11] Built ChanTest.UseColor (609ms)
+    OUT: Build completed successfully (11 jobs).
+[G2-clean-g15] gate=15 rc=0 | 未 expose 的 deriving DecidableEq + 末尾空 @[expose] 门15结果
+    ERR: ✔ [2/8] Built verification.EnvGates (2.0s)
+    ERR: ✔ [4/8] Built verification.Audit (734ms)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (316ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (2.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (758ms)
+[A2-clean-g2] gate=2 rc=0 | 干净 lakefile 下 s!"{'"'}" 同时击穿门2
+[A2-clean-g3] gate=3 rc=0 | 干净 lakefile 下 s!"{'"'}" 同时击穿门3
+    ERR: ✔ [6/8] Built verification.Audit:c.o (315ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (868ms)
+[A2-syn-build] gate=3 rc=0 | s!"{'"'}" 隐藏带双引号的 syntax + macro_rules 编译核验
+    OUT: ✔ [2/7] Built Chan (362ms)
+    OUT: ✔ [5/7] Built ChanTest.Probe (351ms)
+    OUT: Build completed successfully (7 jobs).
+[A2-syn-g3] gate=3 rc=0 | s!"{'"'}" 隐藏带双引号的 syntax + macro_rules 绕过门3
+    ERR: ✔ [6/8] Built verification.Audit:c.o (314ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (754ms)
+
+DONE FIXUP: 16 experiments

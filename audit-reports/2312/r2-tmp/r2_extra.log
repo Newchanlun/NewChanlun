@@ -1,0 +1,23 @@
+[X1-protected-6a] same_hashes=True keys=['N.f']
+[X2-unexp-inst] build_rc=0 g15_rc=0
+  BUILD OUT: ✔ [2/11] Built Chan (499ms)
+  ✔ [4/11] Built Chan.Defs.Flag (506ms)
+  ✔ [7/11] Built ChanTest.Probe (501ms)
+  ✔ [9/11] Built ChanTest.UseFlag (286ms)
+  Build completed successfully (11 jobs).
+[X3-doc-only-partial] g8b_rc=1 out=GATE8b RED formal_math/Chan/Thm/Fixture.lean:two_unused DROPPABLE_PREMISE 删去必要前提 #2 _h2 后原证明仍通过
+[X4-let-have-rfl] build_rc=0
+  BUILD OUT: ✔ [2/9] Built Chan (369ms)
+  ✔ [4/9] Built Chan.Defs.Fixture (374ms)
+  ✔ [7/9] Built ChanTest.Probe (371ms)
+  Build completed successfully (9 jobs).
+[X5-g15-priv-only] g15_rc=1 out=GATE15 RED formal_math/Chan/Defs/Flag.lean:1 EXPOSE_SECTION 定义文件须用 @[expose] public section
+[X6-g10-names] g10_rc=1
+GATE10 RED formal_math/Chan/Defs/Fixture.lean:f_arr_back SIGNOFF_MISSING back! 实有 1 处，签注 0 处
+GATE10 RED formal_math/Chan/Defs/Fixture.lean:f_arr_get SIGNOFF_MISSING get! 实有 1 处，签注 0 处
+GATE10 RED formal_math/Chan/Defs/Fixture.lean:f_arr_getD SIGNOFF_MISSING getD 实有 1 处，签注 0 处
+GATE10 RED formal_math/Chan/Defs/Fixture.lean:f_list_get SIGNOFF_MISSING get! 实有 1 处，签注 0 处
+GATE10 RED formal_math/Chan/Defs/Fixture.lean:f_list_head SIGNOFF_MISSING head! 实有 1 处，签注 0 处
+GATE10 RED formal_math/Chan/Defs/Fixture.lean:f_opt_get SIGNOFF_MISSING get! 实有 1 处，签注 0 处
+GATE10 RED formal_math/Chan/Defs/Fixture.lean:f_opt_getD SIGNOFF_MISSING getD 实有 1 处，签注 0 处
+GATE10 RED formal_math/Chan/Defs/Fixture.lean:f_tail SIGNOFF_MISSING tail! 实有 1 处，签注 0 处

@@ -1,0 +1,148 @@
+[E2-let_wrap-build] gate=9 rc=0 | let_wrap 编译核验
+    OUT: ✔ [2/11] Built Chan (304ms)
+    OUT: ✔ [4/11] Built Chan.Thm.Fixture (305ms)
+    OUT: ✔ [7/11] Built ChanTest.Probe (304ms)
+    OUT: ✔ [9/11] Built ChanTest.Evidence (304ms)
+    OUT: Build completed successfully (11 jobs).
+[E2-let_wrap-g9] gate=9 rc=1 | let_wrap 包装矛盾空真定理测门9 (仅 True 见证)
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim WITNESS claim.witness 的类型与生成的联合命题不定义相等
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_1
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_2
+    ERR: ✔ [6/8] Built verification.Audit:c.o (303ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.9s)
+    ERR: ✔ [8/8] Built fm_audit:exe (728ms)
+[E2-have_wrap-build] gate=9 rc=0 | have_wrap 编译核验
+    OUT: ✔ [2/11] Built Chan (307ms)
+    OUT: ✔ [4/11] Built ChanTest.Probe (309ms)
+    OUT: ✔ [6/11] Built ChanTest.Evidence (307ms)
+    OUT: ✔ [9/11] Built Chan.Thm.Fixture (325ms)
+    OUT: Build completed successfully (11 jobs).
+[E2-have_wrap-g9] gate=9 rc=1 | have_wrap 包装矛盾空真定理测门9 (仅 True 见证)
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim WITNESS claim.witness 的类型与生成的联合命题不定义相等
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_1
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_2
+    ERR: ✔ [6/8] Built verification.Audit:c.o (311ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (815ms)
+[E2-fun_wrap-build] gate=9 rc=0 | fun_wrap 编译核验
+    OUT: ✔ [2/11] Built Chan (342ms)
+    OUT: ✔ [4/11] Built Chan.Thm.Fixture (344ms)
+    OUT: ✔ [7/11] Built ChanTest.Probe (342ms)
+    OUT: ✔ [9/11] Built ChanTest.Evidence (342ms)
+    OUT: Build completed successfully (11 jobs).
+[E2-fun_wrap-g9] gate=9 rc=1 | fun_wrap 包装矛盾空真定理测门9 (仅 True 见证)
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim WITNESS claim.witness 的类型与生成的联合命题不定义相等
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_1
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_2
+    ERR: ✔ [6/8] Built verification.Audit:c.o (315ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (733ms)
+[E2-and_wrap-build] gate=9 rc=0 | and_wrap 编译核验
+    OUT: ✔ [2/11] Built Chan (365ms)
+    OUT: ✔ [4/11] Built Chan.Thm.Fixture (367ms)
+    OUT: ✔ [7/11] Built ChanTest.Probe (364ms)
+    OUT: ✔ [9/11] Built ChanTest.Evidence (364ms)
+    OUT: Build completed successfully (11 jobs).
+[E2-and_wrap-g9] gate=9 rc=0 | and_wrap 包装矛盾空真定理测门9 (仅 True 见证)
+    ERR: ✔ [6/8] Built verification.Audit:c.o (312ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (761ms)
+[E2-and-8a] gate=8a rc=0 | True ∧ 包装镜像定理测门8a
+    ERR: ✔ [6/8] Built verification.Audit:c.o (312ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (753ms)
+[E2-and-8b] gate=8b rc=0 | True ∧ 包装无用前提定理测门8b
+[E3-clean-build] gate=8a rc=0 | ExistsUnique 变体 + AliasNat/合取前提 编译核验
+    OUT: ✔ [193/200] Built Chan (247ms)
+    OUT: ✔ [195/200] Built Chan.Thm.Fixture (232ms)
+    OUT: ✔ [198/200] Built ChanTest.Probe (234ms)
+    OUT: Build completed successfully (200 jobs).
+[E3-clean-g8a] gate=8a rc=0 | ExistsUnique 变体 + AliasNat/合取前提 测门8a（每条未报即绕过）
+    ERR: ✔ [6/8] Built verification.Audit:c.o (304ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (720ms)
+[E4-const-build] gate=8b rc=0 | E4-const 独立编译核验
+    OUT: ✔ [2/9] Built Chan (337ms)
+    OUT: ✔ [4/9] Built Chan.Thm.Fixture (337ms)
+    OUT: ✔ [7/9] Built ChanTest.Probe (335ms)
+    OUT: Build completed successfully (9 jobs).
+[E4-const-g8b] gate=8b rc=0 | E4-const 独立测门8b（预期红，实测若0即硬绕过）
+    ERR: ✔ [6/8] Built verification.Audit:c.o (308ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.0s)
+    ERR: ✔ [8/8] Built fm_audit:exe (769ms)
+[E4-sub-beta-build] gate=8b rc=0 | E4-sub-beta 独立编译核验
+    OUT: ✔ [2/9] Built Chan (293ms)
+    OUT: ✔ [4/9] Built Chan.Thm.Fixture (293ms)
+    OUT: ✔ [7/9] Built ChanTest.Probe (293ms)
+    OUT: Build completed successfully (9 jobs).
+[E4-sub-beta-g8b] gate=8b rc=0 | E4-sub-beta 独立测门8b（预期红，实测若0即硬绕过）
+    ERR: ✔ [6/8] Built verification.Audit:c.o (311ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.9s)
+    ERR: ✔ [8/8] Built fm_audit:exe (942ms)
+[E4-and-left-build] gate=8b rc=0 | E4-and-left 独立编译核验
+    OUT: ✔ [2/9] Built Chan (291ms)
+    OUT: ✔ [4/9] Built Chan.Thm.Fixture (293ms)
+    OUT: ✔ [7/9] Built ChanTest.Probe (290ms)
+    OUT: Build completed successfully (9 jobs).
+[E4-and-left-g8b] gate=8b rc=0 | E4-and-left 独立测门8b（预期红，实测若0即硬绕过）
+    ERR: ✔ [6/8] Built verification.Audit:c.o (312ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.9s)
+    ERR: ✔ [8/8] Built fm_audit:exe (696ms)
+[E4-sub-helper-build] gate=8b rc=0 | E4-sub-helper 独立编译核验
+    OUT: ✔ [2/9] Built Chan (305ms)
+    OUT: ✔ [4/9] Built Chan.Thm.Fixture (309ms)
+    OUT: ✔ [7/9] Built ChanTest.Probe (303ms)
+    OUT: Build completed successfully (9 jobs).
+[E4-sub-helper-g8b] gate=8b rc=0 | E4-sub-helper 独立测门8b（预期红，实测若0即硬绕过）
+    ERR: ✔ [6/8] Built verification.Audit:c.o (299ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.9s)
+    ERR: ✔ [8/8] Built fm_audit:exe (727ms)
+[D6-2field-build] gate=7b rc=0 | 双字段 Prop structure 用 cases h 解构 编译核验
+    OUT: ✔ [2/13] Built Chan (229ms)
+    OUT: ✔ [4/13] Built Chan.Defs.Fixture (231ms)
+    OUT: ✔ [6/13] Built ChanTest.Probe (229ms)
+    OUT: ✔ [9/13] Built Chan.Hypotheses.Fixture (174ms)
+    OUT: ✔ [11/13] Built Chan.Thm.Fixture (159ms)
+    OUT: Build completed successfully (13 jobs).
+[D6-2field-g7b] gate=7b rc=0 | 双字段 Prop structure 用 cases h 解构 测门7b是否崩溃退2
+    ERR: ✔ [6/8] Built verification.Audit:c.o (289ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.8s)
+    ERR: ✔ [8/8] Built fm_audit:exe (702ms)
+    ERR: GATE7b NOTE claim: 该证明未推广
+[F1-clean-build] gate=10 rc=0 | 门10垃圾值集合编译核验
+    OUT: ✔ [2/9] Built Chan (186ms)
+    OUT: ✔ [4/9] Built Chan.Defs.Fixture (197ms)
+    OUT: ✔ [7/9] Built ChanTest.Probe (186ms)
+    OUT: Build completed successfully (9 jobs).
+[F1-clean-g10] gate=10 rc=1 | 门10垃圾值集合检测（逐声明核查漏报）
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:arrBang SIGNOFF_MISSING get! 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:intEdiv SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:intFdiv SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:intTdiv SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:optGetBang SIGNOFF_MISSING get! 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:optGetIdxBang SIGNOFF_MISSING get! 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:optLastBang SIGNOFF_MISSING getLast! 实有 1 处，签注 0 处
+    OUT: GATE10 RED formal_math/Chan/Defs/Fixture.lean:optPanic SIGNOFF_MISSING head! 实有 1 处，签注 0 处
+[F1-ratinv-build] gate=10 rc=0 | Rat.inv 编译核验
+    OUT: ✔ [2/9] Built Chan (197ms)
+    OUT: ✔ [4/9] Built Chan.Defs.Fixture (199ms)
+    OUT: ✔ [7/9] Built ChanTest.Probe (197ms)
+    OUT: Build completed successfully (9 jobs).
+[F1-ratinv-g10] gate=10 rc=0 | Rat.inv (0.inv = 0) 单独测门10（预期红，实测若0即漏检）
+[E5-rec-build] gate=7a rc=0 | 普通递归定理 rec_thm 编译核验
+    OUT: ✔ [2/11] Built Chan (224ms)
+    OUT: ✔ [4/11] Built Chan.Thm.Fixture (226ms)
+    OUT: ✔ [7/11] Built ChanTest.Probe (224ms)
+    OUT: ✔ [9/11] Built ChanTest.Evidence (224ms)
+    OUT: Build completed successfully (11 jobs).
+[E5-rec-g7a] gate=7a rc=1 | 普通递归定理 rec_thm 是否触发编译器辅助定理误杀门7a
+    OUT: GATE7a RED formal_math/Chan/Thm/Fixture.lean:_private.Chan.Thm.Fixture.0.rec_thm.match_1_1 NODE_MISSING 定理未登记
+    OUT: GATE7a RED formal_math/Chan/Thm/Fixture.lean:rec_thm._f NODE_MISSING 定理未登记
+    ERR: ✔ [6/8] Built verification.Audit:c.o (294ms)
+    ERR: ✔ [7/8] Built verification.EnvGates:c.o (1.8s)
+    ERR: ✔ [8/8] Built fm_audit:exe (704ms)
+[E5-rec-g9] gate=9 rc=1 | 普通递归定理 rec_thm 是否触发编译器辅助定理误杀门9
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:_private.Chan.Thm.Fixture.0.rec_thm.match_1_1 WITNESS ChanTest 缺少见证定理 _private.Chan.Thm.Fixture.«0».rec_thm.match_1_1.witness
+    OUT: GATE9 RED formal_math/Chan/Thm/Fixture.lean:rec_thm._f WITNESS ChanTest 缺少见证定理 rec_thm._f.witness
+
+DONE R2 CLEAN VERIFY: 29 experiments

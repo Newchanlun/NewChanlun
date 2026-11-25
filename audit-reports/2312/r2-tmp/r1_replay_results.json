@@ -1,0 +1,378 @@
+[
+  {
+    "id": "1A",
+    "gate": "1",
+    "desc": "运行期 lean --version 为 4.35.0 但 lean-toolchain 为 v4.36.0",
+    "rc": 1,
+    "stdout": "GATE1 RED formal_math/lean-toolchain:1 RUNTIME_TOOLCHAIN_PIN 实际版本 4.35.0，期望 leanprover/lean4:v4.36.0",
+    "stderr": ""
+  },
+  {
+    "id": "2A",
+    "gate": "2",
+    "desc": "源码局部 set_option relaxedAutoImplicit true",
+    "rc": 1,
+    "stdout": "GATE2 RED formal_math/Chan.lean:2 LOCAL_OPTION 禁止在源码设置 relaxedAutoImplicit\nGATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1",
+    "stderr": "✖ [0/9] Running job computation\nerror: ChanTest: some modules have bad imports or could not be read\n✖ [2/9] Running ChanTest\nerror: no such file or directory (error code: 2)\n  file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2a/formal_math/ChanTest.lean\n✖ [4/9] Building Chan (314ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2a/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2a/formal_math/Chan.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2a/formal_math/.lake/build/lib/lean/Chan.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2a/formal_math/.lake/build/lib/lean/Chan.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2a/formal_math/.lake/build/ir/Chan.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2a/formal_math/.lake/build/ir/Chan.setup.json --json\nerror: Chan.lean:3:11: Unknown identifier `α`\n\nNote: It is not possible to treat `α` as an implicitly bound variable here because the `autoImplicit` option is set to `false`.\n✔ [7/9] Built ChanTest.Probe (319ms)\nSome required targets logged failures:\n- job computation\n- ChanTest\n- Chan\nerror: build failed"
+  },
+  {
+    "id": "2B",
+    "gate": "2",
+    "desc": "源码局部 set_option warningAsError false 压制未用变量报错",
+    "rc": 1,
+    "stdout": "GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1",
+    "stderr": "✖ [0/9] Running job computation\nerror: ChanTest: some modules have bad imports or could not be read\n✖ [2/9] Running ChanTest\nerror: no such file or directory (error code: 2)\n  file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2b/formal_math/ChanTest.lean\n⚠ [4/9] Building Chan (363ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2b/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2b/formal_math/Chan.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2b/formal_math/.lake/build/lib/lean/Chan.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2b/formal_math/.lake/build/lib/lean/Chan.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2b/formal_math/.lake/build/ir/Chan.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2b/formal_math/.lake/build/ir/Chan.setup.json --json\nwarning: Chan.lean:3:12: Variable name `ignored` is not explicitly referenced.\n\nHint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:\n  [apply] _ignored\n\nNote: This linter can be disabled with `set_option linter.unusedVariables false`\n✔ [7/9] Built ChanTest.Probe (360ms)\nSome required targets logged failures:\n- job computation\n- ChanTest\n- Chan\nerror: build failed"
+  },
+  {
+    "id": "2C",
+    "gate": "2",
+    "desc": "r\"\\\" 词法脱同步绕过 gate2 禁用 set_option linter.unusedVariables false",
+    "rc": 1,
+    "stdout": "GATE2 RED formal_math/Chan.lean:3 LOCAL_OPTION 禁止在源码设置 linter\nGATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1",
+    "stderr": "✖ [0/9] Running job computation\nerror: ChanTest: some modules have bad imports or could not be read\n✖ [2/9] Running ChanTest\nerror: no such file or directory (error code: 2)\n  file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2c/formal_math/ChanTest.lean\n✔ [4/9] Built Chan (333ms)\n✔ [7/9] Built ChanTest.Probe (330ms)\nSome required targets logged failures:\n- job computation\n- ChanTest\nerror: build failed"
+  },
+  {
+    "id": "2D",
+    "gate": "2",
+    "desc": "[[lean_lib]] 级 leanOptions 覆盖顶层禁止项",
+    "rc": 1,
+    "stdout": "GATE2 RED formal_math/lakefile.toml:1 LEAN_OPTION_OVERRIDE Chan 覆盖受控选项\nGATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1",
+    "stderr": "✖ [0/9] Running job computation\nerror: ChanTest: some modules have bad imports or could not be read\n✖ [2/9] Running ChanTest\nerror: no such file or directory (error code: 2)\n  file: /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2d/formal_math/ChanTest.lean\n✔ [4/9] Built Chan (309ms)\n✔ [7/9] Built ChanTest.Probe (308ms)\nSome required targets logged failures:\n- job computation\n- ChanTest\nerror: build failed"
+  },
+  {
+    "id": "2E",
+    "gate": "2",
+    "desc": "无 globs 的 lakefile.toml 对未导入子模块编译错",
+    "rc": 1,
+    "stdout": "GATE2 RED formal_math/lakefile.toml:1 BUILD_WFAIL lake build --wfail 退出 1",
+    "stderr": "✖ [4/4] Building Chan.Defs.Unimported (303ms)\ntrace: .> LEAN_PATH=/Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2e/formal_math/.lake/build/lib/lean /Users/silencehan/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2e/formal_math/Chan/Defs/Unimported.lean -o /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2e/formal_math/.lake/build/lib/lean/Chan/Defs/Unimported.olean -i /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2e/formal_math/.lake/build/lib/lean/Chan/Defs/Unimported.ilean -c /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2e/formal_math/.lake/build/ir/Chan/Defs/Unimported.c --setup /Volumes/AgentStorage/fm/r2/2312-r2-tmp/r1_sandbox/exp2e/formal_math/.lake/build/ir/Chan/Defs/Unimported.setup.json --json\nerror: Chan/Defs/Unimported.lean:3:42: Unknown identifier `this_does_not_even_compile`\nSome required targets logged failures:\n- Chan.Defs.Unimported\nerror: build failed"
+  },
+  {
+    "id": "3A",
+    "gate": "3",
+    "desc": "r\"\\\" 词法脱同步绕过 gate3 的 #eval/syntax/macro_rules/set_option linter",
+    "rc": 1,
+    "stdout": "GATE3 RED formal_math/Chan.lean:4 TOKEN 禁用记号 #eval\nGATE3 RED formal_math/Chan.lean:5 TOKEN 禁用记号 syntax\nGATE3 RED formal_math/Chan.lean:6 TOKEN 禁用记号 macro_rules\nGATE3 RED formal_math/Chan.lean:3 TOKEN 禁止在源码设置 linter",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.6s)\n✔ [4/8] Built verification.Audit (685ms)\n✔ [6/8] Built verification.Audit:c.o (318ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (782ms)"
+  },
+  {
+    "id": "3B-partial",
+    "gate": "3",
+    "desc": "r\"\\\" 绕过文本层后测环境层对 partial 的兜底",
+    "rc": 1,
+    "stdout": "GATE3 RED formal_math/Chan.lean:3 TOKEN 禁用记号 partial",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.6s)\n✔ [4/8] Built verification.Audit (845ms)\n✔ [6/8] Built verification.Audit:c.o (324ms)\n✔ [7/8] Built verification.EnvGates:c.o (2.1s)\n✔ [8/8] Built fm_audit:exe (739ms)"
+  },
+  {
+    "id": "3B-unsafe",
+    "gate": "3",
+    "desc": "r\"\\\" 绕过文本层后测环境层对 unsafe 的兜底",
+    "rc": 1,
+    "stdout": "GATE3 RED formal_math/Chan.lean:3 TOKEN 禁用记号 unsafe",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.7s)\n✔ [4/8] Built verification.Audit (933ms)\n✔ [6/8] Built verification.Audit:c.o (318ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (955ms)"
+  },
+  {
+    "id": "3B-extern",
+    "gate": "3",
+    "desc": "r\"\\\" 绕过文本层后测环境层对 extern 的兜底",
+    "rc": 1,
+    "stdout": "GATE3 RED formal_math/Chan.lean:3 TOKEN 禁用记号 extern",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.5s)\n✔ [4/8] Built verification.Audit (799ms)\n✔ [6/8] Built verification.Audit:c.o (313ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (749ms)"
+  },
+  {
+    "id": "3B-implby",
+    "gate": "3",
+    "desc": "r\"\\\" 绕过文本层后测环境层对 implby 的兜底",
+    "rc": 1,
+    "stdout": "GATE3 RED formal_math/Chan.lean:4 TOKEN 禁用记号 implemented_by",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.8s)\n✔ [4/8] Built verification.Audit (940ms)\n✔ [6/8] Built verification.Audit:c.o (321ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (740ms)"
+  },
+  {
+    "id": "3B-axiom",
+    "gate": "3",
+    "desc": "r\"\\\" 绕过文本层后测环境层对 axiom 的兜底",
+    "rc": 1,
+    "stdout": "GATE3 RED formal_math/Chan.lean:3 TOKEN 禁用记号 axiom",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.6s)\n✔ [4/8] Built verification.Audit (1.2s)\n✔ [6/8] Built verification.Audit:c.o (312ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (750ms)"
+  },
+  {
+    "id": "3C",
+    "gate": "3",
+    "desc": "run_cmd 在 Chan 中执行任意元编程",
+    "rc": 1,
+    "stdout": "GATE3 RED formal_math/Chan.lean:3 TOKEN 禁用记号 run_cmd",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.5s)\n✔ [4/8] Built verification.Audit (788ms)\n✔ [6/8] Built verification.Audit:c.o (314ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (755ms)"
+  },
+  {
+    "id": "6a-A-raw",
+    "gate": "6a",
+    "desc": "opaqueInfo statement() 序列化 v1",
+    "rc": 0,
+    "stdout": "[\"opA\",\"Chan.Defs.Fixture\",[\"FM-lock-v2\",[\"str\",null,\"opA\"],0,[\"const\",[\"str\",null,\"Nat\"],[]],[\"opaque\",false,[\"app\",[\"app\",[\"app\",[\"const\",[\"str\",[\"str\",null,\"OfNat\"],\"ofNat\"],[[\"zero\"]]],[\"const\",[\"str\",null,\"Nat\"],[]]],[\"nat\",0]],[\"app\",[\"const\",[\"str\",null,\"instOfNatNat\"],[]],[\"nat\",0]]]]]]",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.4s)\n✔ [4/8] Built verification.Audit (929ms)\n✔ [6/8] Built verification.Audit:c.o (315ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (747ms)"
+  },
+  {
+    "id": "6a-A-raw2",
+    "gate": "6a",
+    "desc": "opaqueInfo 修改类型后 statement() 输出对比",
+    "rc": 0,
+    "stdout": "[\"opA\",\"Chan.Defs.Fixture\",[\"FM-lock-v2\",[\"str\",null,\"opA\"],0,[\"app\",[\"lam\",0,[\"const\",[\"str\",null,\"Nat\"],[]],[\"const\",[\"str\",null,\"Nat\"],[]]],[\"app\",[\"app\",[\"app\",[\"const\",[\"str\",[\"str\",null,\"OfNat\"],\"ofNat\"],[[\"zero\"]]],[\"const\",[\"str\",null,\"Nat\"],[]]],[\"nat\",1]],[\"app\",[\"const\",[\"str\",null,\"instOfNatNat\"],[]],[\"nat\",1]]]],[\"opaque\",false,[\"app\",[\"app\",[\"app\",[\"const\",[\"str\",[\"str\",null,\"OfNat\"],\"ofNat\"],[[\"zero\"]]],[\"app\",[\"lam\",0,[\"const\",[\"str\",null,\"Nat\"],[]],[\"const\",[\"str\",null,\"Nat\"],[]]],[\"app\",[\"app\",[\"app\",[\"const\",[\"str\",[\"str\",null,\"OfNat\"],\"ofNat\"],[[\"zero\"]]],[\"const\",[\"str\",null,\"Nat\"],[]]],[\"nat\",1]],[\"app\",[\"const\",[\"str\",null,\"instOfNatNat\"],[]],[\"nat\",1]]]]],[\"nat\",0]],[\"app\",[\"const\",[\"str\",null,\"instOfNatNat\"],[]],[\"nat\",0]]]]]]",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.5s)\n✔ [4/8] Built verification.Audit (840ms)\n✔ [6/8] Built verification.Audit:c.o (311ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (861ms)"
+  },
+  {
+    "id": "6a-B-def",
+    "gate": "6a",
+    "desc": "def f 的 statement 序列化",
+    "rc": 0,
+    "stdout": "[\"f\",\"Chan.Defs.Fixture\",[\"FM-lock-v2\",[\"str\",null,\"f\"],0,[\"forall\",0,[\"const\",[\"str\",null,\"Nat\"],[]],[\"const\",[\"str\",null,\"Nat\"],[]]],[\"definition\",\"regular\",\"safe\",\"semireducible\",[\"lam\",0,[\"const\",[\"str\",null,\"Nat\"],[]],[\"bvar\",0]]]]]",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.5s)\n✔ [4/8] Built verification.Audit (1.1s)\n✔ [6/8] Built verification.Audit:c.o (319ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (810ms)"
+  },
+  {
+    "id": "6a-B-abbrev",
+    "gate": "6a",
+    "desc": "abbrev f 的 statement 序列化",
+    "rc": 0,
+    "stdout": "[\"f\",\"Chan.Defs.Fixture\",[\"FM-lock-v2\",[\"str\",null,\"f\"],0,[\"forall\",0,[\"const\",[\"str\",null,\"Nat\"],[]],[\"const\",[\"str\",null,\"Nat\"],[]]],[\"definition\",\"abbrev\",\"safe\",\"reducible\",[\"lam\",0,[\"const\",[\"str\",null,\"Nat\"],[]],[\"bvar\",0]]]]]",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.4s)\n✔ [4/8] Built verification.Audit (1.1s)\n✔ [6/8] Built verification.Audit:c.o (310ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (807ms)"
+  },
+  {
+    "id": "6a-C-thm",
+    "gate": "6a",
+    "desc": "theorem t 的 statement 序列化",
+    "rc": 0,
+    "stdout": "[\"t\",\"Chan.Defs.Fixture\",[\"FM-lock-v2\",[\"str\",null,\"t\"],0,[\"const\",[\"str\",null,\"True\"],[]],[\"theorem\"]]]",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.8s)\n✔ [4/8] Built verification.Audit (821ms)\n✔ [6/8] Built verification.Audit:c.o (338ms)\n✔ [7/8] Built verification.EnvGates:c.o (2.0s)\n✔ [8/8] Built fm_audit:exe (775ms)"
+  },
+  {
+    "id": "6a-C-ax",
+    "gate": "6a",
+    "desc": "axiom t 的 statement 序列化",
+    "rc": 0,
+    "stdout": "[\"t\",\"Chan.Defs.Fixture\",[\"FM-lock-v2\",[\"str\",null,\"t\"],0,[\"const\",[\"str\",null,\"True\"],[]],[\"axiom\",false]]]",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.6s)\n✔ [4/8] Built verification.Audit (899ms)\n✔ [6/8] Built verification.Audit:c.o (311ms)\n✔ [7/8] Built verification.EnvGates:c.o (2.0s)\n✔ [8/8] Built fm_audit:exe (767ms)"
+  },
+  {
+    "id": "6b-A",
+    "gate": "6b",
+    "desc": "decl/ 分支为门10更新 garbage-signoffs.yaml",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "id": "7a-A",
+    "gate": "7a",
+    "desc": "原版自由 Bool BspEndpoint 用字面量 dummy rfl 伪造精化定理",
+    "rc": 1,
+    "stdout": "GATE7a RED formal_math/Chan/Defs/Fixture.lean:BspEndpoint FREE_PREDICATE 自由判据字段 #[brokeCenter, afterTypeOne, leftCenter, firstRetrace] 缺少原始数据到判据的精化定理",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (316ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (743ms)"
+  },
+  {
+    "id": "7a-B",
+    "gate": "7a",
+    "desc": "原版自由 Bool BspEndpoint 用 Empty 数据参数空真伪造精化",
+    "rc": 1,
+    "stdout": "GATE7a RED formal_math/Chan/Defs/Fixture.lean:BspEndpoint FREE_PREDICATE 自由判据字段 #[brokeCenter, afterTypeOne, leftCenter, firstRetrace] 缺少原始数据到判据的精化定理",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (308ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (751ms)"
+  },
+  {
+    "id": "7a-C-g7a",
+    "gate": "7a",
+    "desc": "用 def 代替 theorem 写空真/镜像定理测门 7a",
+    "rc": 1,
+    "stdout": "GATE7a RED formal_math/Chan/Thm/Fixture.lean:sneakyTheorem NODE_MISSING 定理未登记\nGATE7a RED formal_math/Chan/Thm/Fixture.lean:sneakyMirror NODE_MISSING 定理未登记",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (318ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (926ms)"
+  },
+  {
+    "id": "7a-C-g8a",
+    "gate": "8a",
+    "desc": "用 def 代替 theorem 写空真/镜像定理测门 8a",
+    "rc": 1,
+    "stdout": "GATE8a RED formal_math/Chan/Thm/Fixture.lean:sneakyMirror PREMISE_INSTANCE 前提 h 的实例即结论",
+    "stderr": ""
+  },
+  {
+    "id": "7a-C-g8b",
+    "gate": "8b",
+    "desc": "用 def 代替 theorem 写空真/镜像定理测门 8b",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "id": "7a-C-g9",
+    "gate": "9",
+    "desc": "用 def 代替 theorem 写空真/镜像定理测门 9",
+    "rc": 1,
+    "stdout": "GATE9 RED formal_math/Chan/Thm/Fixture.lean:sneakyTheorem WITNESS ChanTest 缺少见证定理 sneakyTheorem.witness\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:sneakyMirror WITNESS ChanTest 缺少见证定理 sneakyMirror.witness",
+    "stderr": ""
+  },
+  {
+    "id": "7a-D",
+    "gate": "7a",
+    "desc": "Chan/Exec 中写普通 structure+递归函数是否触发自动 thmInfo 误杀",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (313ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (764ms)"
+  },
+  {
+    "id": "7b-A",
+    "gate": "7b",
+    "desc": "Astra 经典例 def D n := n = 0; theorem t : D 0 := Eq.refl 0",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (314ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (1.1s)\nGATE7b NOTE t: 该证明未推广"
+  },
+  {
+    "id": "7b-B",
+    "gate": "7b",
+    "desc": "Chan/Hypotheses 定义全 Prop structure 时门7b结果",
+    "rc": 0,
+    "stdout": "",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (322ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (761ms)\nGATE7b NOTE claim: 该证明未推广"
+  },
+  {
+    "id": "8a-A",
+    "gate": "8a",
+    "desc": "用 abbrev 包装全称实例化语句测门8a",
+    "rc": 1,
+    "stdout": "GATE8a RED formal_math/Chan/Thm/Fixture.lean:wrapped_mirror PREMISE_INSTANCE 前提 a._@._internal._hyg.0 的实例即结论",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (318ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (742ms)"
+  },
+  {
+    "id": "8a-B",
+    "gate": "8a",
+    "desc": "全称前提含额外 Prop 守卫测门8a",
+    "rc": 1,
+    "stdout": "GATE8a RED formal_math/Chan/Thm/Fixture.lean:guarded_mirror PREMISE_INSTANCE 前提 h 的实例即结论",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (312ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (736ms)"
+  },
+  {
+    "id": "8a-C",
+    "gate": "8a",
+    "desc": "ExistsUnique 用 ∧ True / abbrev / id y 测 FUNCTION_GRAPH",
+    "rc": 1,
+    "stdout": "GATE8a RED formal_math/Chan/Thm/Fixture.lean:eu_id FUNCTION_GRAPH 声明式唯一性只复述函数图\nGATE8a RED formal_math/Chan/Thm/Fixture.lean:eu_and_true FUNCTION_GRAPH 声明式唯一性只复述函数图\nGATE8a RED formal_math/Chan/Thm/Fixture.lean:eu_abbrev FUNCTION_GRAPH 声明式唯一性只复述函数图",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (311ms)\n✔ [7/8] Built verification.EnvGates:c.o (2.0s)\n✔ [8/8] Built fm_audit:exe (739ms)"
+  },
+  {
+    "id": "8b-A",
+    "gate": "8b",
+    "desc": "省略 necessary 字段测旧病灶 divergence_creates_bsp",
+    "rc": 1,
+    "stdout": "GATE8b RED formal_math/Chan/Thm/Fixture.lean:divergence_creates_bsp DROPPABLE_PREMISE 删去必要前提 #1 _hdiv 后原证明仍通过",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (312ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (769ms)"
+  },
+  {
+    "id": "8b-B",
+    "gate": "8b",
+    "desc": "eta-收缩证明项与哑 let _ := _hdiv 测门8b",
+    "rc": 1,
+    "stdout": "GATE8b RED formal_math/Chan/Thm/Fixture.lean:bsp_eta_true DROPPABLE_PREMISE 删去必要前提 #1 _hdiv 后原证明仍通过\nGATE8b RED formal_math/Chan/Thm/Fixture.lean:_private.Chan.Thm.Fixture.0.helper DROPPABLE_PREMISE 删去必要前提 #1 a._@._internal._hyg.0 后原证明仍通过\nGATE8b RED formal_math/Chan/Thm/Fixture.lean:bsp_eta DROPPABLE_PREMISE 删去必要前提 #1 _hdiv 后原证明仍通过\nGATE8b RED formal_math/Chan/Thm/Fixture.lean:bsp_let DROPPABLE_PREMISE 删去必要前提 #1 _hdiv 后原证明仍通过",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (308ms)\n✔ [7/8] Built verification.EnvGates:c.o (2.0s)\n✔ [8/8] Built fm_audit:exe (737ms)"
+  },
+  {
+    "id": "9A",
+    "gate": "9",
+    "desc": "用 abbrev 包装前提矛盾的空真定理测门9",
+    "rc": 1,
+    "stdout": "GATE9 RED formal_math/Chan/Thm/Fixture.lean:claim WITNESS claim.witness 的类型与生成的联合命题不定义相等\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_1\nGATE9 RED formal_math/Chan/Thm/Fixture.lean:claim NECESSITY ChanTest 缺少见证定理 claim.without_2",
+    "stderr": "✔ [6/8] Built verification.Audit:c.o (307ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (764ms)"
+  },
+  {
+    "id": "10A",
+    "gate": "10",
+    "desc": "def Price := Nat 包装后 Nat.sub/Nat.div 测门10",
+    "rc": 1,
+    "stdout": "GATE10 RED formal_math/Chan/Defs/Fixture.lean:gap SIGNOFF_MISSING Nat.sub 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:instDivPrice._aux_1 SIGNOFF_MISSING Nat.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:instSubPrice._aux_1 SIGNOFF_MISSING Nat.sub 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:rate SIGNOFF_MISSING Nat.div 实有 1 处，签注 0 处",
+    "stderr": ""
+  },
+  {
+    "id": "10B",
+    "gate": "10",
+    "desc": "Int/Rat 总化除零、Nat.pred、panic!、getLast! 测门10",
+    "rc": 1,
+    "stdout": "GATE10 RED formal_math/Chan/Defs/Fixture.lean:boom SIGNOFF_MISSING panic! 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:divInt SIGNOFF_MISSING Int.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:divRat SIGNOFF_MISSING Rat.div 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:lastBang SIGNOFF_MISSING getLast! 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:truncPred SIGNOFF_MISSING Nat.pred 实有 1 处，签注 0 处",
+    "stderr": ""
+  },
+  {
+    "id": "10C",
+    "gate": "10",
+    "desc": "返回类型为 Option 的 head! 和 getD 测门10",
+    "rc": 1,
+    "stdout": "GATE10 RED formal_math/Chan/Defs/Fixture.lean:optGetD SIGNOFF_MISSING getD 实有 1 处，签注 0 处\nGATE10 RED formal_math/Chan/Defs/Fixture.lean:optHead SIGNOFF_MISSING head! 实有 1 处，签注 0 处",
+    "stderr": ""
+  },
+  {
+    "id": "10D",
+    "gate": "10",
+    "desc": "合法正除数写法 (dt≠0, 1≤dt, dt+1, Subtype 0<n) 测门10",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "id": "15A",
+    "gate": "15",
+    "desc": "经由非 Chan 顶层 Bridge 模块导入 ChanDyn 测门15",
+    "rc": 1,
+    "stdout": "GATE15 RED formal_math/Bridge.lean:2 IMPORT_EDGE 禁止导入 ChanDyn.Secret\nGATE15 RED formal_math/Chan/Defs/Leak.lean:2 IMPORT_EDGE 禁止导入 Bridge",
+    "stderr": ""
+  },
+  {
+    "id": "15B",
+    "gate": "15",
+    "desc": "ChanChallenge 经 Chan/Audit/Literal 传递导入 Chan/Proofs 测门15",
+    "rc": 1,
+    "stdout": "GATE15 RED formal_math/Chan/Audit/Literal/Lit.lean:2 IMPORT_EDGE 禁止导入 Chan.Proofs.Helper",
+    "stderr": ""
+  },
+  {
+    "id": "15C",
+    "gate": "15",
+    "desc": "主库根 Chan.lean 直接导入独立研究库 ChanDyn 测门15",
+    "rc": 1,
+    "stdout": "GATE15 RED formal_math/Chan.lean:2 IMPORT_EDGE 禁止导入 ChanDyn.Secret",
+    "stderr": ""
+  },
+  {
+    "id": "15D-empty",
+    "gate": "15",
+    "desc": "末尾空 @[expose] public section 测门15",
+    "rc": 1,
+    "stdout": "GATE15 RED formal_math/Chan/Defs/Flag.lean:probeFlag EXPOSE_SECTION 公开定义未暴露定义体",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.5s)\n✔ [4/8] Built verification.Audit (798ms)\n✔ [6/8] Built verification.Audit:c.o (325ms)\n✔ [7/8] Built verification.EnvGates:c.o (2.0s)\n✔ [8/8] Built fm_audit:exe (1.1s)"
+  },
+  {
+    "id": "15D-desync-build",
+    "gate": "15",
+    "desc": "r\"\\\" 字符串内伪造 @[expose] public section：Lean 编译结果",
+    "rc": 0,
+    "stdout": "✔ [2/2] Built Chan.Defs.Flag (260ms)\nBuild completed successfully (2 jobs).",
+    "stderr": ""
+  },
+  {
+    "id": "15D-desync-gate15",
+    "gate": "15",
+    "desc": "r\"\\\" 字符串内伪造 @[expose] public section：门15结果",
+    "rc": 1,
+    "stdout": "GATE15 RED formal_math/Chan/Defs/Flag.lean:1 EXPOSE_SECTION 定义文件须用 @[expose] public section",
+    "stderr": ""
+  },
+  {
+    "id": "15E-g15",
+    "gate": "15",
+    "desc": "普通 Chan/Thm 文件使用 import all 测门15",
+    "rc": 1,
+    "stdout": "GATE15 RED formal_math/Chan/Thm/Sneaky.lean:2 IMPORT_ALL 仅审计工具能使用 import all",
+    "stderr": ""
+  },
+  {
+    "id": "15E-g3",
+    "gate": "3",
+    "desc": "普通 Chan/Thm 文件使用 import all 测门3",
+    "rc": 1,
+    "stdout": "GATE3 RED formal_math/Chan/Thm/Sneaky.lean:2 TOKEN 禁止普通源码使用 import all",
+    "stderr": "✔ [2/8] Built verification.EnvGates (1.6s)\n✔ [4/8] Built verification.Audit (898ms)\n✔ [6/8] Built verification.Audit:c.o (304ms)\n✔ [7/8] Built verification.EnvGates:c.o (1.0s)\n✔ [8/8] Built fm_audit:exe (1.0s)"
+  }
+]
