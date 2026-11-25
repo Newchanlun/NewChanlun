@@ -1,0 +1,533 @@
+{
+ "note": "原始数据在仓外；本清单入库。sha256 为仓外原始文件的哈希，仓内不含原始文件。",
+ "python": "3.14.4",
+ "packages": {
+  "baostock": "0.9.4",
+  "yfinance": "1.8.0",
+  "akshare": "1.20.70",
+  "pandas": "3.1.1"
+ },
+ "files": [
+  {
+   "file": "akshare/index_sh000001_sina_d.csv",
+   "sha256": "40b7abd6630e40bdce6e9e78baca40dddcfc6fdbde8263265eaf3d2267365e9f",
+   "bytes": 239346,
+   "rows": 4425,
+   "first_date": "1990-12-19",
+   "last_date": "2008-12-31",
+   "source": "AKShare(新浪)",
+   "interface": "index_zh_daily_sina",
+   "params": {
+    "symbol": "sh000001"
+   },
+   "fetched_at_utc": "2026-11-25T23:16:11Z",
+   "note": "接口返回全史，仅截取至 2008-12-31 后落盘"
+  },
+  {
+   "file": "akshare/stock_600497_d_none_sina.csv",
+   "sha256": "fab2c9b712af47ec398b7f519d6b6e9c49694263d7acd2246b6b9daa2463bdd2",
+   "bytes": 25252,
+   "rows": 587,
+   "first_date": "2004-04-20",
+   "last_date": "2006-12-29",
+   "source": "AKShare(新浪)",
+   "interface": "stock_zh_a_hist_sina",
+   "params": {
+    "symbol": "sh600497",
+    "start_date": "20040401",
+    "end_date": "20061231",
+    "adjust": ""
+   },
+   "fetched_at_utc": "2026-11-25T23:16:27Z",
+   "note": ""
+  },
+  {
+   "file": "akshare/stock_600497_d_qfq_sina.csv",
+   "sha256": "3e91ab986817e7d899edbe951825295ccd7c236fd5e00cc91e1c66edb595fbb3",
+   "bytes": 23642,
+   "rows": 587,
+   "first_date": "2004-04-20",
+   "last_date": "2006-12-29",
+   "source": "AKShare(新浪)",
+   "interface": "stock_zh_a_hist_sina",
+   "params": {
+    "symbol": "sh600497",
+    "start_date": "20040401",
+    "end_date": "20061231",
+    "adjust": "qfq"
+   },
+   "fetched_at_utc": "2026-11-25T23:16:52Z",
+   "note": ""
+  },
+  {
+   "file": "akshare/stock_600519_d_none_sina.csv",
+   "sha256": "7ce5b93a1f42fc78ad1a01489503388a5f39c460cc65785553d3ac60385273f3",
+   "bytes": 63550,
+   "rows": 1466,
+   "first_date": "2001-08-27",
+   "last_date": "2007-12-28",
+   "source": "AKShare(新浪)",
+   "interface": "stock_zh_a_hist_sina",
+   "params": {
+    "symbol": "sh600519",
+    "start_date": "20010801",
+    "end_date": "20071231",
+    "adjust": ""
+   },
+   "fetched_at_utc": "2026-11-25T23:16:17Z",
+   "note": ""
+  },
+  {
+   "file": "akshare/stock_600519_d_qfq_sina.csv",
+   "sha256": "f5842fd4fec4e147a95d78f59ac652d1429596061309ae48a9327e957fbbd23c",
+   "bytes": 60705,
+   "rows": 1466,
+   "first_date": "2001-08-27",
+   "last_date": "2007-12-28",
+   "source": "AKShare(新浪)",
+   "interface": "stock_zh_a_hist_sina",
+   "params": {
+    "symbol": "sh600519",
+    "start_date": "20010801",
+    "end_date": "20071231",
+    "adjust": "qfq"
+   },
+   "fetched_at_utc": "2026-11-25T23:16:22Z",
+   "note": ""
+  },
+  {
+   "file": "akshare/stock_601628_d_none_sina.csv",
+   "sha256": "9ef31dd4c7ea8b83fdb19a5f9c81ae0793b89b842c7171f7cdffb9ae645b1b44",
+   "bytes": 2439,
+   "rows": 54,
+   "first_date": "2007-01-09",
+   "last_date": "2007-03-30",
+   "source": "AKShare(新浪)",
+   "interface": "stock_zh_a_hist_sina",
+   "params": {
+    "symbol": "sh601628",
+    "start_date": "20070101",
+    "end_date": "20070331",
+    "adjust": ""
+   },
+   "fetched_at_utc": "2026-11-25T23:16:56Z",
+   "note": ""
+  },
+  {
+   "file": "akshare/stock_601628_d_qfq_sina.csv",
+   "sha256": "cdfa359a9404032df81b6bcdebe38715970129ac3444686e9248a1b51857f566",
+   "bytes": 2490,
+   "rows": 54,
+   "first_date": "2007-01-09",
+   "last_date": "2007-03-30",
+   "source": "AKShare(新浪)",
+   "interface": "stock_zh_a_hist_sina",
+   "params": {
+    "symbol": "sh601628",
+    "start_date": "20070101",
+    "end_date": "20070331",
+    "adjust": "qfq"
+   },
+   "fetched_at_utc": "2026-11-25T23:17:02Z",
+   "note": ""
+  },
+  {
+   "file": "baostock/index_sh000001_d.csv",
+   "sha256": "760eb70c4a591d992f5608ce996e56e81a94c9d467e2cdbb454c40791fd0f0fc",
+   "bytes": 521614,
+   "rows": 4425,
+   "first_date": "1990-12-19",
+   "last_date": "2008-12-31",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.000001",
+    "start_date": "1990-12-01",
+    "end_date": "2008-12-31",
+    "frequency": "d",
+    "adjustflag": "3"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:15Z",
+   "note": ""
+  },
+  {
+   "file": "baostock/index_sh000001_m.csv",
+   "sha256": "0529375dc0c29fa86ec7b3ff253997d09c04633f4843ed3e444824e56fcd2a7d",
+   "bytes": 23798,
+   "rows": 217,
+   "first_date": "1990-12-31",
+   "last_date": "2008-12-31",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.000001",
+    "start_date": "1990-12-01",
+    "end_date": "2008-12-31",
+    "frequency": "m",
+    "adjustflag": "3"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:20Z",
+   "note": ""
+  },
+  {
+   "file": "baostock/index_sh000001_w.csv",
+   "sha256": "10be5f9f09b67a5c8ff3f7b4157b3b4d2c85c4ccdc92728feb79713b31154c08",
+   "bytes": 97614,
+   "rows": 906,
+   "first_date": "1990-12-21",
+   "last_date": "2008-12-31",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.000001",
+    "start_date": "1990-12-01",
+    "end_date": "2008-12-31",
+    "frequency": "w",
+    "adjustflag": "3"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:18Z",
+   "note": ""
+  },
+  {
+   "file": "baostock/stock_600497_d_none.csv",
+   "sha256": "c8fba9095536c77054586fe4f3d323ae91de78c2806f423101902ba590b7d082",
+   "bytes": 67120,
+   "rows": 657,
+   "first_date": "2004-04-20",
+   "last_date": "2006-12-29",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.600497",
+    "start_date": "2004-04-01",
+    "end_date": "2006-12-31",
+    "frequency": "d",
+    "adjustflag": "3"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:44Z",
+   "note": "adjustflag 3=不复权，2=前复权（涨跌幅复权法）"
+  },
+  {
+   "file": "baostock/stock_600497_d_qfq.csv",
+   "sha256": "31f67dcf78b05965462a34bfc5dd3624cc7da097ee299b222a16ab6a5e00ef29",
+   "bytes": 84126,
+   "rows": 657,
+   "first_date": "2004-04-20",
+   "last_date": "2006-12-29",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.600497",
+    "start_date": "2004-04-01",
+    "end_date": "2006-12-31",
+    "frequency": "d",
+    "adjustflag": "2"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:49Z",
+   "note": "adjustflag 3=不复权，2=前复权（涨跌幅复权法）"
+  },
+  {
+   "file": "baostock/stock_600519_d_none.csv",
+   "sha256": "56569d1666327f12f95376340b5c79bec8de59a658d72a4b4fd38717fe4475b5",
+   "bytes": 160235,
+   "rows": 1532,
+   "first_date": "2001-08-27",
+   "last_date": "2007-12-28",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.600519",
+    "start_date": "2001-08-01",
+    "end_date": "2007-12-31",
+    "frequency": "d",
+    "adjustflag": "3"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:30Z",
+   "note": "adjustflag 3=不复权，2=前复权（涨跌幅复权法）"
+  },
+  {
+   "file": "baostock/stock_600519_d_qfq.csv",
+   "sha256": "b1a8eb5daf0c23d72225ed8364c105ae226c7af503f68aefd324440762467959",
+   "bytes": 201098,
+   "rows": 1532,
+   "first_date": "2001-08-27",
+   "last_date": "2007-12-28",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.600519",
+    "start_date": "2001-08-01",
+    "end_date": "2007-12-31",
+    "frequency": "d",
+    "adjustflag": "2"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:41Z",
+   "note": "adjustflag 3=不复权，2=前复权（涨跌幅复权法）"
+  },
+  {
+   "file": "baostock/stock_601628_d_none.csv",
+   "sha256": "6f33a9cf40506e2e2ccece57d0a774ed4853eb8965779987a571a1702d161a68",
+   "bytes": 5921,
+   "rows": 54,
+   "first_date": "2007-01-09",
+   "last_date": "2007-03-30",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.601628",
+    "start_date": "2007-01-01",
+    "end_date": "2007-03-31",
+    "frequency": "d",
+    "adjustflag": "3"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:50Z",
+   "note": "adjustflag 3=不复权，2=前复权（涨跌幅复权法）"
+  },
+  {
+   "file": "baostock/stock_601628_d_qfq.csv",
+   "sha256": "ce633df9e061958935df91c23170cc82586563e15b510d12a77bf358ea46c136",
+   "bytes": 7541,
+   "rows": 54,
+   "first_date": "2007-01-09",
+   "last_date": "2007-03-30",
+   "source": "BaoStock",
+   "interface": "query_history_k_data_plus",
+   "params": {
+    "code": "sh.601628",
+    "start_date": "2007-01-01",
+    "end_date": "2007-03-31",
+    "frequency": "d",
+    "adjustflag": "2"
+   },
+   "fetched_at_utc": "2026-11-25T23:15:50Z",
+   "note": "adjustflag 3=不复权，2=前复权（涨跌幅复权法）"
+  },
+  {
+   "file": "yfinance/index_000001SS_d.csv",
+   "sha256": "f6c9ef2982503a324bfc0e9c03cc31d7d21ef5dc6875fce5021a1336129c1860",
+   "bytes": 244621,
+   "rows": 2780,
+   "first_date": "1997-07-02",
+   "last_date": "2008-12-31",
+   "source": "yfinance",
+   "interface": "Ticker.history",
+   "params": {
+    "ticker": "000001.SS",
+    "start": "1990-12-01",
+    "end": "2009-01-01(exclusive)",
+    "interval": "1d",
+    "auto_adjust": false
+   },
+   "fetched_at_utc": "2026-11-25T23:16:07Z",
+   "note": "Open 等为 float32 量级的小数，原样记录；日期为 Asia/Shanghai 本地日"
+  }
+ ],
+ "failures": [],
+ "notes": [
+  "东方财富个股日线(stock_zh_a_hist_em)：首次取数即被 push2 限流（Push2RateLimitError），按其提示未重试、未绕过，本批个股第二来源改用 AKShare 的新浪接口 stock_zh_a_hist_sina。"
+ ],
+ "probes": {
+  "baostock_601628_5min": [
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2007-01-09",
+     "end_date": "2007-01-19",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null,
+    "last": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2007-01-01",
+     "end_date": "2007-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null,
+    "last": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2008-01-01",
+     "end_date": "2008-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null,
+    "last": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2009-01-01",
+     "end_date": "2009-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2010-01-01",
+     "end_date": "2010-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2011-01-01",
+     "end_date": "2011-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2012-01-01",
+     "end_date": "2012-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2013-01-01",
+     "end_date": "2013-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2014-01-01",
+     "end_date": "2014-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2015-01-01",
+     "end_date": "2015-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2016-01-01",
+     "end_date": "2016-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2017-01-01",
+     "end_date": "2017-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2018-01-01",
+     "end_date": "2018-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2019-01-01",
+     "end_date": "2019-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 0,
+    "first": null
+   },
+   {
+    "params": {
+     "code": "sh.601628",
+     "start_date": "2020-01-01",
+     "end_date": "2020-12-31",
+     "frequency": "5",
+     "adjustflag": "3"
+    },
+    "rows": 11664,
+    "first": [
+     "2020-01-02",
+     "20200102093500000"
+    ]
+   }
+  ],
+  "at_utc": "2026-11-25T23:16:02Z"
+ },
+ "committed_files": {
+  "compare/agg-vs-native.csv": "628d084be9390f24c5134da339d4cb7101b24054a267614fc38f9fb2ff6760be",
+  "compare/index-daily-dateset-diffs.csv": "3b95b96d4e582a80c9ba907762b58ad565d8f87bc2038e47af7d067f477bbd5a",
+  "compare/index-daily-diffs.csv": "8cbc6eef1f5f1e730fc6e925b238f85282e24cf41d674a4c3de21a2b77a16f13",
+  "compare/stock-daily-diffs.csv": "b4ed371fc2db1777fddaaa85d8ec2e446224637fc7e9828ad00749b17a539bcc",
+  "compare/summary.json": "c23767e290977ab03ffeded6eef9d547a4b9ab067384bb0d7c9b148b9a73c5f6",
+  "windows/FM60A-001.csv": "2faac08f87e0fca106c237f4cafaecd574ea5b10e1b7e562e2a204700595ead6",
+  "windows/FM60A-001.qfq.csv": "95c0dc6d1dc4ebb3cb338bc469a0a125899f3e1cc1cbcc6058cd833d1dc5a8ca",
+  "windows/FM60A-002.csv": "2faac08f87e0fca106c237f4cafaecd574ea5b10e1b7e562e2a204700595ead6",
+  "windows/FM60A-002.qfq.csv": "95c0dc6d1dc4ebb3cb338bc469a0a125899f3e1cc1cbcc6058cd833d1dc5a8ca",
+  "windows/FM60A-003.csv": "601e6b2e03a1d5b63995041536f2f70647c154e0f14b6e93f3186a2b273a54bb",
+  "windows/FM60A-003.qfq.csv": "55f2ed818aa81563b85ac823fb21034b645a4194671c7b83049a45ae81c4f48c",
+  "windows/FM60A-004.csv": "9659391c817c8859c22cfd3071ea08020df178c5b76015e02a55e17bddb9ed83",
+  "windows/FM60A-004.qfq.csv": "310c69bd35c7168a0f00090bc8c7866a7a1a06154d932cb64dd8c0f3df296705",
+  "windows/FM60A-005.csv": "9d63ef5e2ab4a2edc747be5fe6966610cd7ccbbc5d87934cbb6784823f999bf2",
+  "windows/FM60A-005.qfq.csv": "98939b93c72455b2ceb158ff5aa10eab59e562550bca298334f63c57f91a32ef",
+  "windows/FM60A-006.csv": "0bc722b97a838ae0f82362a7f887318f67fce89bbc1c7de6d804ad186b3f16d6",
+  "windows/FM60A-006.qfq.csv": "a1172ebb8d19cd99d1fac06be7d29a0b74c386bdef693f72872a4f9a64b16172",
+  "windows/FM60A-009.csv": "04e14ae2fbb6a006d99cf99fde5fd1c1a76ba6b4758309196132320586cfe32a",
+  "windows/FM60A-009.qfq.csv": "6a67a0ca02eb1a932a2a685d2428fe2f116cafdc6945ba668619c9dcf6a1f8dc",
+  "windows/FM60A-029.csv": "3fe9f7f605834b753c9c684d017cad408393a59adf6ff8382990fa4471d80a24",
+  "windows/FM60A-038.csv": "5f66cc60c94369c6e84a6e2b9bbcf3f117a9bed542c708b72310e3c3326134b6",
+  "windows/FM60A-049.csv": "f87802f85ebcac2bb52f585a33692cfeef811cf4e46988c2651714cac8ca475d",
+  "windows/FM60A-055.csv": "5abcdcace3e268559bcfb0d6601780bd9af9e23a1dbd0a64d1566b72d2c556ea",
+  "windows/FM60A-056.csv": "b0162c1b7cffec151e6a53a806977de4f5664795227dbddd6c4598e7c38339cd",
+  "windows/FM60A-056.daily.csv": "17660c52c0ed77b4cc2682b7d63cc111556d114e21084bb0d38904f17a532e21",
+  "windows/FM60A-059.csv": "c347dbd5e7db88370f01420e6d22cc5aee20a2814998a360cf3eaf595ee43745"
+ }
+}
