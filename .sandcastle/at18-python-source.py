@@ -327,10 +327,22 @@ def strip_kwonly(signature, names):
     return signature if len(kept) == len(params) else signature.replace(parameters=kept)
 
 
-KW_DROP = re.compile(r"[^\n]+\(\) got (?:multiple values for keyword argument|an unexpected keyword argument) '([^']+)'")
-KW_NEED = re.compile(r"[^\n]+\(\) missing ([1-9][0-9]*) required keyword-only (argument|arguments): (.+)")
+def strip_params(signature, names):
+    params = signature.parameters
+    kept = [p for name, p in params.items() if name not in names or p.kind not in (
+        inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    return signature if len(kept) == len(params) else signature.replace(parameters=kept)
+
+
+def strip_variadics(signature):
+    return signature.replace(parameters=[p for p in signature.parameters.values() if p.kind not in VARIADIC])
+
+
+KW_DROP = re.compile(r"[^\n]+\(\) got (?:multiple values for (?:keyword )?argument|an unexpected keyword argument) '([^']+)'")
+KW_POSONLY = re.compile(r"[^\n]+\(\) got some positional-only arguments passed as keyword arguments: '([^',]+(?:, [^',]+)*)'")
+KW_NEED = re.compile(r"[^\n]+\(\) missing ([1-9][0-9]*) required (?:keyword-only|positional) (argument|arguments): (.+)")
 KW_NAME = r"'[^']+'"
-KW_LIST = re.compile(rf"{KW_NAME}(?:(?:, {KW_NAME})*(?: and |, and ){KW_NAME})?")
+KW_LIST = re.compile(rf"{KW_NAME}(?: and {KW_NAME}|(?:, {KW_NAME})+, and {KW_NAME})?")
 
 
 def parse_kw_type_error(exc, extra_set):
@@ -342,6 +354,10 @@ def parse_kw_type_error(exc, extra_set):
         name = match[1]
         if name in extra_set:
             return "drop", (name,)
+    if match := KW_POSONLY.fullmatch(msg):
+        dropped = tuple(name for name in match[1].split(", ") if name in extra_set)
+        if dropped:
+            return "drop", dropped
     if (match := KW_NEED.fullmatch(msg)) and KW_LIST.fullmatch(match[3]):
         names = tuple(re.findall(KW_NAME, match[3]))
         if str(len(names)) == match[1] and (len(names) == 1) == (match[2] == "argument"):
@@ -471,7 +487,7 @@ class Binding:
             if not can_strip:
                 return (full,)
             return (full, stripped) if after_class_hook or not clipped.parameters else (stripped, full)
-        return (stripped, full) if can_strip else ()
+        return (stripped, full) if can_strip else (None, full)
 
     def ctor_plan(self, public, observed_names):
         primary_targets, secondary_targets = self.ctor_chains
@@ -486,50 +502,73 @@ class Binding:
         nonempty_primary = [sigs for sigs in primary_entries if sigs]
         nonempty_secondary = [sigs for sigs in secondary_entries if sigs]
         def side_variants(prefix, entries):
-            layers = (*prefix, *(sigs[0][0] for sigs in entries))
-            polarities = tuple(sigs[0][1] for sigs in entries if len(sigs) > 1)
-            variants, alternatives = [(layers, polarities)], {}
+            layers = (*prefix, *(sigs[0][0] for sigs in entries if sigs[0] is not None))
+            polarities = tuple(sigs[0] is None or sigs[0][1] for sigs in entries if len(sigs) > 1)
+            ordinary = tuple(sigs[0] is not None for sigs in entries if len(sigs) > 1)
+
+            def ordinary_polarities(values):
+                return tuple(value for value, keep in zip(values, ordinary) if keep)
+
+            variants, alternatives = [(layers, polarities, ordinary_polarities(polarities))], {}
             # 同一侧只替换一层，避免包装深度使候选数量指数增长。
-            polarity_offset = 0
+            pos, polarity_offset = len(prefix), 0
             for offset, sigs in enumerate(entries):
-                if len(sigs) == 1:
-                    continue
-                sig, is_clipped = sigs[1]
-                pos = len(prefix) + offset
-                alt_layers = (*layers[:pos], sig, *layers[pos + 1:])
-                alt_polarities = (*polarities[:polarity_offset], is_clipped, *polarities[polarity_offset + 1:])
-                alternatives[offset] = len(variants)
-                variants.append((alt_layers, alt_polarities))
-                polarity_offset += 1
+                # 主解释透明时不进入剥层；备选按原相对顺序插入完整签名。
+                end = pos + (sigs[0] is not None)
+                if len(sigs) > 1:
+                    sig, is_clipped = sigs[1]
+                    alt_layers = (*layers[:pos], sig, *layers[end:])
+                    alt_polarities = (*polarities[:polarity_offset], is_clipped, *polarities[polarity_offset + 1:])
+                    alternatives[offset] = len(variants)
+                    normal = ordinary_polarities(alt_polarities) if sigs[0] is not None else None
+                    variants.append((alt_layers, alt_polarities, normal))
+                    polarity_offset += 1
+                pos = end
             return variants, alternatives
 
         primary_variants, primary_alts = side_variants((public,), nonempty_primary)
         secondary_variants, secondary_alts = side_variants((), nonempty_secondary)
         default_primary, default_secondary = primary_variants[0][0], secondary_variants[0][0]
 
-        def polarity_rank(pair):
-            p, s = pair
-            left, right = set(primary_variants[p][1]), set(secondary_variants[s][1])
+        def polarity_rank(left, right):
+            left, right = set(left), set(right)
             if not left or not right or left == right and len(left) == 1:
                 return 0
             return 1 if left & right else 2
 
-        joint = sorted(product(range(len(primary_variants)), range(len(secondary_variants))), key=polarity_rank)
+        def joint_rank(pair):
+            p, s = pair
+            _, left, normal_left = primary_variants[p]
+            _, right, normal_right = secondary_variants[s]
+            # 补入的纯备选只影响备选配对，不改变主姿态原有的顺序或归一。
+            if normal_left is None or normal_right is None:
+                return 1, polarity_rank(left, right)
+            return 0, polarity_rank(normal_left, normal_right)
+
+        joint = sorted(product(range(len(primary_variants)), range(len(secondary_variants))), key=joint_rank)
         joint_index = {pair: i for i, pair in enumerate(joint)}
         layer_variants = [(primary_variants[p][0], secondary_variants[s][0]) for p, s in joint]
+        primary_count = sum(v[2] is not None for v in primary_variants)
+        ordinary_count = primary_count * sum(v[2] is not None for v in secondary_variants)
 
-        def aligned(variants, is_clipped):
-            return min(range(len(variants)), key=lambda i: variants[i][1].count(not is_clipped))
+        def aligned(variants, is_clipped, alternate):
+            def rank(i):
+                polarities = variants[i][1 if alternate else 2]
+                return (1, 0) if polarities is None else (0, polarities.count(not is_clipped))
+            return min(range(len(variants)), key=rank)
 
         def tagged(entries, alts, other, primary):
             for offset, sigs in enumerate(entries):
                 candidates = []
-                for sig_idx, (sig, is_clipped) in enumerate(sigs):
+                for sig_idx, candidate in enumerate(sigs):
+                    if candidate is None:
+                        continue
+                    sig, is_clipped = candidate
                     if len(sigs) == 1:
-                        variant = None if not primary and primary_alts else joint_index[0, 0]
+                        variant = None if not primary and primary_count > 1 else joint_index[0, 0]
                     else:
                         own = alts[offset] if sig_idx else 0
-                        peer = aligned(other, is_clipped)
+                        peer = aligned(other, is_clipped, sig_idx > 0)
                         variant = joint_index[own, peer] if primary else joint_index[peer, own]
                     candidates.append((sig, variant, sig_idx > 0))
                 yield candidates
@@ -559,10 +598,27 @@ class Binding:
                         (public_has_varkw or name in public_kw_names) and
                         (name in observed_names or name in public_required_kw)):
                     all_kwonly[name] = param
-        extra = {name: param for name, param in all_kwonly.items() if name not in public_kwonly}
-        full_kwonly = {**public_kwonly, **extra}
+        extra_kwonly = {name: param for name, param in all_kwonly.items() if name not in public_kwonly}
+        full_kwonly = {**public_kwonly, **extra_kwonly}
+        extra_recover = dict(extra_kwonly)
+        if public_has_varkw:
+            public_fixed_names = {name for name, p in public.parameters.items() if p.kind not in VARIADIC}
+            for sig in (*default_primary, *default_secondary):
+                for name, param in sig.parameters.items():
+                    if (name not in extra_recover and name not in public_fixed_names and
+                            param.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) and
+                            (name in observed_names or param.default is inspect.Parameter.empty)):
+                        extra_recover[name] = (param if param.kind is inspect.Parameter.KEYWORD_ONLY else
+                                               param.replace(kind=inspect.Parameter.KEYWORD_ONLY))
         pairs, recovery, recovery_keys = [], [], set()
         generic = has_variadic(public)
+
+        def add_recovery(base_sig, variant):
+            # Signature.__hash__ 会访问默认值；形状只按原生名、种类和身份去重。
+            key = variant, tuple((p.name, p.kind, id(p.default)) for p in base_sig.parameters.values())
+            if key not in recovery_keys:
+                recovery_keys.add(key)
+                recovery.append((base_sig, variant))
 
         def add(sig, variant=None, alternate=False):
             if not public_has_varkw:
@@ -570,18 +626,12 @@ class Binding:
             pairs.append((sig, variant, alternate))
             if variadic_only(sig):
                 return
-            for kw_set in ((public_kwonly, full_kwonly) if extra else (public_kwonly,)):
+            for kw_set in ((public_kwonly, full_kwonly) if extra_kwonly else (public_kwonly,)):
                 merged = merge_kwonly(sig, kw_set)
                 if merged is not None:
                     pairs.append((merged, variant, alternate))
-            if extra:
-                base_sig = strip_kwonly(sig, extra)
-                if base_sig is not sig or merged is not None:
-                    # Signature.__hash__ 会访问默认值；形状只按原生名、种类和身份去重。
-                    key = variant, tuple((p.name, p.kind, id(p.default)) for p in base_sig.parameters.values())
-                    if key not in recovery_keys:
-                        recovery_keys.add(key)
-                        recovery.append((base_sig, variant))
+            if extra_recover:
+                add_recovery(strip_params(sig, extra_recover), variant)
 
         if not generic:
             add(public)
@@ -593,7 +643,9 @@ class Binding:
                 add(*candidate)
         if generic:
             add(public)
-        return layer_variants, pairs, (recovery, public_kwonly, extra)
+        if public_has_varkw and extra_recover:
+            add_recovery(strip_variadics(public), None)
+        return layer_variants, pairs, (recovery, public_kwonly, extra_recover), ordinary_count
 
     def callables(self, instances, views, variadic=None, alternate=None, ctor_errors=None):
         if self.owner is None:
@@ -609,9 +661,9 @@ class Binding:
         except (ValueError, TypeError):
             return
         observed_names = {name for view in views for name in view}
-        layer_variants, pairs, (recovery, public_kwonly, extra_kwonly) = self.ctor_plan(public, observed_names)
+        layer_variants, pairs, (recovery, public_kwonly, extra_recover), ordinary_count = self.ctor_plan(public, observed_names)
         seen, default_refs = set(), {}
-        extra_set = set(extra_kwonly)
+        extra_set = set(extra_recover)
         if ctor_errors is None:
             ctor_errors = {}
 
@@ -629,8 +681,8 @@ class Binding:
             best_choice = ctor_choice(p0, s0, args, kwargs, defaults, default_refs)
             best_score = convergence_score(best_choice, bool(s0))
             max_score = 2 if s0 else 1
-            if best_score < max_score and len(layer_variants) > 1:
-                for alt_idx in range(1, len(layer_variants)):
+            if best_score < max_score:
+                for alt_idx in range(1, ordinary_count):
                     pa, sa = layer_variants[alt_idx]
                     alt_choice = ctor_choice(pa, sa, args, kwargs, defaults, default_refs)
                     alt_score = convergence_score(alt_choice, bool(sa))
@@ -693,12 +745,12 @@ class Binding:
 
         def recover_kwonly(pair, view):
             base_sig, variant = pair
-            extra = tuple(extra_kwonly)
+            extra = tuple(extra_recover)
             tested = {}
 
             def attempt(names):
                 if names not in tested:
-                    kw_set = {**public_kwonly, **{name: extra_kwonly[name] for name in names}}
+                    kw_set = {**public_kwonly, **{name: extra_recover[name] for name in names}}
                     sig = merge_kwonly(base_sig, kw_set)
                     tested[names] = yield from resolve(sig if sig is not None else base_sig, view, False, variant)
                 return tested[names]

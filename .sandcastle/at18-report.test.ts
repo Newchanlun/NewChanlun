@@ -4278,6 +4278,189 @@ class Adapter:
 `, "mode=1, " + seven.map(key => key + "=False").join(", "));
 });
 
+test("R39/#1319：位置注入与裁剪后只剩变参的构造签名", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = (name: string, source: string, observed: string | string[], expected = true,
+    extra: Record<string, string> = {}, registerRows = true) => t.test(name, () => {
+    const repo = feedSource({
+      ...extra,
+      [entry]: "def route(**event): return sorted(event.get('rows', [4, 1]))\n__all__ = ('route',)\n",
+      [integration]: "from functools import wraps\nfrom .at18_fixture_feed import route\n" +
+        source + "\n__all__ = ('Adapter',)\n",
+      [path]: "from trading_system.at18_fixture_feed import route\ndef test_route():\n" +
+        (typeof observed === "string" ? [observed] : observed).map(args =>
+          `    assert route(${[registerRows ? "rows=[4, 1]" : "", args].filter(Boolean).join(", ")}) == [1, 4]\n`).join(""),
+    });
+    assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+  });
+  const flags = (keys: string) => [...keys].map(key => key + "=True").join(", ");
+  for (const [name, middle] of [
+    ["68a79df1：中层以位置形参接收注入", "a,b,c,d,e,f,g"],
+    ["803a7c3a：只给中层的 d 前加 *", "a,b,c,*,d,e,f,g"],
+  ] as const) {
+    await check(name, `
+def inject(fn):
+    @wraps(fn)
+    def init(self, **kw): return fn(self, False, False, False, **kw)
+    return init
+def forward(fn):
+    @wraps(fn)
+    def mid(self, ${middle}): return fn(self, a=a,b=b,c=c,d=d,e=e,f=f,g=g)
+    return mid
+class Adapter:
+    @inject
+    @forward
+    def __init__(self, *, a,b,c,d,e,f,g): pass
+    def dispatch(self, rows, /): return route(rows=rows)
+`, flags("abcdefg"));
+  }
+
+  const injected = (options: {
+    prefix?: boolean; before?: string; positionalOnly?: boolean; keywords?: string;
+    defaults?: string; ready?: string; consume?: string; setup?: string;
+  } = {}) => `
+${options.setup ?? ""}
+def inject(fn):
+    @wraps(fn)
+    def init(self, ${options.prefix ? "prefix, /, " : ""}**kw):
+        ${options.before ?? "pass"}
+        return fn(self, False, False, False, **kw)
+    return init
+def forward(fn):
+    @wraps(fn)
+    def mid(self, a,b${options.positionalOnly ? ",/" : ""},c,d,e,f,g${options.defaults ?? ""}${options.keywords ?? ""}):
+        self.ready = not (a or b or c) and d and e and f and g${options.ready ?? ""}
+        return fn(self, a=a,b=b,c=c,d=d,e=e,f=f,g=g)
+    return mid
+class Adapter:
+    @inject
+    @forward
+    def __init__(self, a,b,c,d,e,f,g): pass
+    def dispatch(self, rows, /):
+        ${options.consume ?? "if self.ready: return route(rows=rows)"}
+`;
+  await check("无仅关键字层：剥离三个已观察的位置注入键", injected(), flags("abcdefg"));
+  await check("无仅关键字层：位置注入键均未观察", injected(), flags("defg"));
+  await check("中层拒绝两个仅位置键：同时剥离 a、b 后再剥离 c", injected({ positionalOnly: true }),
+    flags("abcdefg"));
+  await check("含公开 prefix, /：从保留前缀的骨架恢复四个关键字", injected({ prefix: true,
+    before: "assert prefix is None" }), flags("abcdefg"));
+  await check("从空集先补位置形参，再补仅关键字形参", injected({
+    keywords: ",*,h,i", ready: " and h and i", setup: "attempts = []",
+    before: "attempts.append(frozenset(kw))\n        if 'a' in kw: raise ValueError('fixed')",
+    consume: "if self.ready and frozenset() in attempts and frozenset('defg') in attempts: return route(rows=rows)",
+  }), flags("abcdefghi"));
+  await check("恢复可观察的普通形参不调用其默认哨兵的钩子", injected({
+    setup: `
+touched = []
+class Hostile:
+    def __str__(self): touched.append('str'); raise AssertionError('str')
+    def __repr__(self): touched.append('repr'); raise AssertionError('repr')
+    def __eq__(self, other): touched.append('eq'); raise AssertionError('eq')
+    def __hash__(self): touched.append('hash'); raise AssertionError('hash')
+    def __bool__(self): touched.append('bool'); raise AssertionError('bool')
+sentinel = Hostile()
+`, defaults: ", marker=sentinel", ready: " and marker is sentinel and not touched",
+    before: "if 'marker' in kw: raise ValueError('omit marker')",
+  }), flags("abcdefg") + ", marker=None");
+
+  const standalone = (spec: string, consume = "return route(rows=rows)", after = "pass") => `
+${spec}
+class Adapter:
+    @wraps(spec)
+    def __init__(self, *args, **kw):
+        self.prefix = spec(*args, **kw)
+        ${after}
+    def dispatch(self, rows, /):
+        ${consume}
+`;
+  const specRest = "def spec(prefix, /, *rest): return prefix";
+  await check("28393c67：spec(prefix, /, *rest) 仍可无尾参构造", standalone(specRest), "marker=None");
+  await check("884e1e96：只去掉规范的 *rest", standalone("def spec(prefix, /): return prefix"), "marker=None");
+  await check("完整的 *rest 备选保留带尾参的构造",
+    standalone("def spec(prefix, /, *rest): return prefix, rest",
+      "if self.prefix == (None, (17,)): return route(rows=[4, 1])"), "marker=17", true, {}, false);
+  await check("完整的 **kw 备选保留带关键字尾参的构造",
+    standalone("def spec(prefix, /, **kw): return prefix, kw",
+      "if self.prefix == (None, {'marker': 17}): return route(rows=[4, 1])"), "marker=17", true, {}, false);
+  await check("类方法 __new__ 的双接收者裁剪为 None，仍保留完整签名", `
+def spec(prefix, /): return prefix
+class Adapter:
+    @classmethod
+    @wraps(spec)
+    def __new__(cls, receiver, *args, **kw):
+        assert cls is receiver
+        obj = super().__new__(cls)
+        obj.prefix = spec(*args, **kw)
+        return obj
+    def dispatch(self, rows, /):
+        if self.prefix is None: return route(rows=rows)
+`, "marker=None");
+  await check("双构造钩子：完整首参解释与对侧完整解释对齐", `
+def new_spec(prefix, /, *rest): return prefix, rest
+def init_spec(prefix, mode=None, /): return prefix, mode
+class Adapter:
+    @wraps(new_spec)
+    def __new__(cls, *args, **kw):
+        obj = super().__new__(cls)
+        obj.left = new_spec(*args, **kw)
+        return obj
+    @wraps(init_spec)
+    def __init__(self, *args, **kw): self.right = init_spec(*args, **kw)
+    def dispatch(self, rows, /):
+        if self.left == (None, ()) and self.right == (None, None): return route(rows=rows)
+`, "marker=None");
+  await check("新增的纯备选不参与双钩子主解释的默认值去重", `
+created = []
+def new_spec(prefix, /, *rest): return prefix
+def init_spec(prefix=17, mode=None, /): return prefix, mode
+class Adapter:
+    @wraps(new_spec)
+    def __new__(cls, *args, **kw):
+        obj = super().__new__(cls)
+        obj.prefix = new_spec(*args) if args else new_spec(17)
+        return obj
+    @wraps(init_spec)
+    def __init__(self, *args, **kw): created.append(init_spec(*args, **kw))
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if self.prefix == 17 and created == [(17, None)]: return route(rows=rows)
+`, ["mode=None", ""]);
+  await check("bc52997f：透明 inner2 与前置 other 保持单次构造", `
+def outer(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs): return fn(*args, **kwargs)
+    return inner
+def forward(fn):
+    @wraps(fn)
+    def inner2(self, *args, **kwargs): return fn(self, *args, **kwargs)
+    return inner2
+created = []
+class Adapter:
+    @outer
+    @forward
+    def __init__(self, mode=None, /): created.append(mode)
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if created == [None]: return route(rows=rows)
+`, ["mode=None", ""]);
+
+  await check("外来规范不给公开构造增加备选", standalone("from .foreign import spec"), "marker=None", false, {
+    "trading_system/foreign.py": specRest + "\n",
+  });
+  await check("伪造的缺位置参提示只可排调用，不能成为覆盖", injected({
+    before: `raise TypeError("mid() missing 4 required positional arguments: 'd', 'e', 'f', and 'g'")`,
+  }), flags("abcdefg"), false);
+  await check("恢复后只创建未消费的生成器，不算进入承接", injected({
+    setup: "def deferred(rows): yield from route(rows=rows)",
+    consume: "if self.ready: deferred(rows)\n        return sorted(rows)",
+  }), flags("abcdefg"), false);
+  await check("完整签名只在构造器消费承接，公开 dispatch 仍拒",
+    standalone(specRest, "return sorted(rows)", "route(rows=[4, 1])"), "marker=None", false);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
