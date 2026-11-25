@@ -33,6 +33,9 @@ pub(super) fn dependency_key(event: &Value) -> Result<Option<String>, String> {
 /// #1406 H1：费用必须绑定原 fill 的来源身份和原 allocation，不能让任意 Applied 原件充当前件。
 /// 只读 E 已接纳或 B 已应用的原件；字段来自带来源索引的费用分量，不采请求中的派生归属。
 pub(super) fn check_fill_predecessor(event: &Value, records: &[Value]) -> Result<(), String> {
+    if super::fx_valuation::is_fx_quote_event(event) {
+        return Ok(());
+    }
     if super::tb03c_allocation::is_projected(event) {
         super::tb03c_corrections::predecessor(event, records)?;
         return Ok(()); // 原成交与更正均由同一具名前件核；累计分配在 Resolve 核。
@@ -83,6 +86,9 @@ pub(super) fn pending_entry(
         );
     }
     let event = &record["event"];
+    if super::fx_valuation::is_fx_quote_event(event) {
+        return super::fx_valuation::pending_entry(config, previous, record, seq);
+    }
     let recorded = previous["recorded"]
         .as_array()
         .ok_or("StorageUnavailable：recorded 形状")?;
@@ -229,16 +235,18 @@ pub(super) fn resolve_image(
         }
         super::finance::covered_pending(previous, covered, p)?;
         // C06.2/C06.3：FIN 域只认 E 已持久的完整责任界。请求自报的摘要只能绑定事实，不能替代保责。
-        if let Some(finance) = previous.get("finance") {
-            let responsibilities = finance["responsibilities"]
-                .as_array()
-                .ok_or("StorageUnavailable：完整责任集合缺失")?;
-            let retained: Vec<Value> = responsibilities
-                .iter()
-                .filter_map(|r| r["source"]["covered_facts"].as_array())
-                .flat_map(|a| a.iter().cloned())
-                .collect();
-            super::finance::covered_pending(previous, &retained, p)?;
+        if !super::fx_valuation::is_fx_quote_event(&fact["event"]) {
+            if let Some(finance) = previous.get("finance") {
+                let responsibilities = finance["responsibilities"]
+                    .as_array()
+                    .ok_or("StorageUnavailable：完整责任集合缺失")?;
+                let retained: Vec<Value> = responsibilities
+                    .iter()
+                    .filter_map(|r| r["source"]["covered_facts"].as_array())
+                    .flat_map(|a| a.iter().cloned())
+                    .collect();
+                super::finance::covered_pending(previous, &retained, p)?;
+            }
         }
         let fact = recorded
             .iter()
@@ -253,23 +261,36 @@ pub(super) fn resolve_image(
         }
     }
     let mut next = previous.clone();
+    let mut new_fx_coverages = std::collections::BTreeMap::new();
     for k in &order {
         let fact = recorded
             .iter()
             .find(|f| f["fact_key"] == k.as_str())
             .ok_or("StorageUnavailable：Pending 缺原件")?;
-        super::tb03c_allocation::resolve(
-            config,
-            &mut next,
-            fact,
-            required(payload, "evidence_id")?,
-        )?;
+        if super::fx_valuation::is_fx_quote_event(&fact["event"]) {
+            let p = pending
+                .iter()
+                .find(|p| p["fact_key"] == k.as_str())
+                .ok_or("MissingDependency：证据覆盖的 FX 报价事实无现存 Pending")?;
+            let cov = super::fx_valuation::validate_resolve_fx_quote(
+                config, previous, fact, p, payload, &order,
+            )?;
+            new_fx_coverages.insert(k.clone(), cov);
+        } else {
+            super::tb03c_allocation::resolve(
+                config,
+                &mut next,
+                fact,
+                required(payload, "evidence_id")?,
+            )?;
+        }
     }
     next["pending"] = json!(pending
         .iter()
         .filter(|p| !p["fact_key"].as_str().is_some_and(|k| keys.contains(k)))
         .cloned()
         .collect::<Vec<_>>());
+    super::fx_valuation::refresh_after_resolve(config, &mut next, &new_fx_coverages)?;
     Ok((next, order))
 }
 

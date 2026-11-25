@@ -26,6 +26,10 @@ const REV_V4: &str = "tb03b-finance/4";
 /// #1407 C1：`economic-session/1` 域上显式选择的 E 侧精确命令生产者 = `/1` 全部语义 + MakeDispatchable、
 /// ReleaseExact、QueryCommand 与 `x-exact-authority/1` 的 QueryReleasedExact 应答。只跑 TestOnly 已定域 slot。
 const REV_V5: &str = "tb03b-finance/5";
+/// #1407 C3：`economic-session/1` 域上显式选择的模型绑定精确命令生产者 = `/5` 全部语义 +
+/// `ExactCommand.model_ref`（取自冻结 `exact_release.model_coverage.model_ref` 并进入 `command_hash`）。
+/// `/5` 旧收据含义与摘要保持不变；新 X `/3` 拒绝缺 `model_ref` 的旧命令。
+const REV_V6: &str = "tb03b-finance/6";
 /// §5.7 `s_ref/2` 的 exact 四字段版本值。
 const S_REF_V2: &str = "s-object-ref/2";
 /// 财务子合同：一个版本串只有一种含义。
@@ -41,15 +45,18 @@ struct Contract {
     cap_activation: bool,
     /// 接受 E 侧精确命令（#1407）：冻结原件带 `exact_release`、计划带 `exact`，图像带 `commands`。
     exact_release: bool,
+    /// 精确命令体内固化获准模拟模型身份 `model_ref` 并进入 `command_hash`（#1407 C3，仅 `/6`）。
+    model_binding: bool,
 }
 /// 财务子合同的唯一登记点（§5.8：未知值与跨域混写当场拒绝，旧 manifest 缺省仍按域基础合同读）。
-const CONTRACTS: [Contract; 5] = [
+const CONTRACTS: [Contract; 6] = [
     Contract {
         revision: REV,
         domain: SCHEMA_V1,
         content: false,
         cap_activation: false,
         exact_release: false,
+        model_binding: false,
     },
     Contract {
         revision: REV_V2,
@@ -57,6 +64,7 @@ const CONTRACTS: [Contract; 5] = [
         content: true,
         cap_activation: false,
         exact_release: false,
+        model_binding: false,
     },
     Contract {
         revision: REV_V3,
@@ -64,6 +72,7 @@ const CONTRACTS: [Contract; 5] = [
         content: false,
         cap_activation: true,
         exact_release: false,
+        model_binding: false,
     },
     Contract {
         revision: REV_V4,
@@ -71,6 +80,7 @@ const CONTRACTS: [Contract; 5] = [
         content: true,
         cap_activation: true,
         exact_release: false,
+        model_binding: false,
     },
     Contract {
         revision: REV_V5,
@@ -78,6 +88,15 @@ const CONTRACTS: [Contract; 5] = [
         content: false,
         cap_activation: false,
         exact_release: true,
+        model_binding: false,
+    },
+    Contract {
+        revision: REV_V6,
+        domain: SCHEMA_V1,
+        content: false,
+        cap_activation: false,
+        exact_release: true,
+        model_binding: true,
     },
 ];
 fn contract(m: &Value) -> Result<Contract, String> {
@@ -100,7 +119,7 @@ fn contract(m: &Value) -> Result<Contract, String> {
     }
 }
 fn unsupported_contract() -> String {
-    "SchemaUnsupported：财务子合同只有 tb03b-finance/1、/2、/3、/4 与 /5".into()
+    "SchemaUnsupported：财务子合同只有 tb03b-finance/1、/2、/3、/4、/5 与 /6".into()
 }
 fn revision(m: &Value) -> Result<&'static str, String> {
     Ok(contract(m)?.revision)
@@ -205,8 +224,67 @@ fn exact_release_contract(config: &Config) -> Result<(), String> {
     if contract(&config.manifest)?.exact_release {
         Ok(())
     } else {
-        Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5".into())
+        Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5 与 /6".into())
     }
+}
+/// #1407 C3 R4：独立 E 对新 `MakeDispatchable` / `ReleaseExact` 按自身可核验的目标合同与获准能力守门。
+/// 仅在 `write_with_ingress` 优先查回原消息/原收据未命中后调用，因此不阻断已提交收据重取、
+/// 历史审计重演、查询或其余 `/5` 财务操作，也不要求 X 在线、不依赖 `clock.kind` 或归档来源配置。
+/// 当 `tb03b-finance/5`（`!model_binding`）的冻结输入指向历史模拟目标，且本会话 `authorized_sources`
+/// 中**存在同一条授权项**同时匹配冻结 `x_target.x_id`（`producer_id`）、`x_target.x_epoch`
+/// （writer epoch，对应 `producer_epoch`；不把可配置来源 `source_namespace`/`source_epoch` 误当作
+/// writer epoch）且包含 `QueryReleasedExact` 权限（不跨授权项拼接权限，即 E 实际可向目标真实历史 X
+/// 出具可兑现权威应答）时，拒绝新交付；否则（未向该精确 `(x_id, x_epoch)` 授予 `QueryReleasedExact`）
+/// 保持离线 C1 隔离验算原义（真实同代 X 经 `Config::authorized` 被拒 `来源未获准`，跨代 X 经
+/// `ExactCommand::validate` 被拒 `IdentityConflict`，且 `manifest_hash` 已在 init 冻结，永无法兑现）。
+fn exact_delivery_target_contract(config: &Config, d: &Value) -> Result<(), String> {
+    let c = contract(&config.manifest)?;
+    if c.model_binding {
+        return Ok(());
+    }
+    let targets_history_sim = d["exact_release"]["model_coverage"]["model_ref"]["model_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("history-sim/"))
+        || d["exact_release"]["conditions"]
+            .as_array()
+            .is_some_and(|list| {
+                list.iter()
+                    .any(|item| item["validator_capability"] == "simulation-local-transaction/1")
+            });
+    let target = &d["exact_release"]["x_target"];
+    let authorizes_target_x_query = target["x_id"]
+        .as_str()
+        .zip(target["x_epoch"].as_str())
+        .is_some_and(|(target_x_id, target_x_epoch)| {
+            config.manifest["authorized_sources"]
+                .as_array()
+                .is_some_and(|sources| {
+                    sources.iter().any(|s| {
+                        s["producer_id"].as_str() == Some(target_x_id)
+                            && s["producer_epoch"].as_str() == Some(target_x_epoch)
+                            && s["operations"]
+                                .as_array()
+                                .is_some_and(|ops| ops.iter().any(|op| op == "QueryReleasedExact"))
+                    })
+                })
+        });
+    if targets_history_sim && authorizes_target_x_query {
+        return Err(
+            "VersionUnsupported：tb03b-finance/5 冻结历史模拟目标且在同一授权项内向目标 X 及其 writer epoch 授予 QueryReleasedExact，\
+             因 /5 命令不绑定实装模型内容摘要，不再签发新的 MakeDispatchable/ReleaseExact 交付\
+             （原已提交收据仍按原身份优先重取，查询、其余财务写入与未向该精确 X/writer epoch 授权的离线 C1 验算不受影响；\
+             请在新会话显式使用 tb03b-finance/6 + x-execution-profile/3）"
+                .into(),
+        );
+    }
+    Ok(())
+}
+/// 仅在显式选择 `tb03b-finance/6` 且显式绑定 `fx-valuation/2` 时启用精确放行动态 FX 依赖绑定；
+/// 既有 `tb03b-finance/6` + `fx-valuation/1` 静态证书、`tb03b-finance/5` + `fx-valuation/1`
+/// 与纯非 FX `/5`/`/6` 均保持原静态合同与非空旧库恢复/重取/重试语义不变。
+fn fx_release_bound(config: &Config) -> Result<bool, String> {
+    Ok(contract(&config.manifest)?.model_binding
+        && super::fx_valuation::release_bound_enabled(config))
 }
 pub(super) fn enabled(config: &Config) -> bool {
     config.manifest.get("finance").is_some_and(|v| !v.is_null())
@@ -227,7 +305,7 @@ pub(super) fn validate_config(m: &Value) -> Result<(), String> {
         ],
     )?;
     let content = contract(m)?.content;
-    if m["clock"]["kind"] != "TestOnly" {
+    if !super::store::component_clock(m) {
         return Err("UnsupportedCapability：仅显式 TestOnly 财务输入域".into());
     }
     digest(required(f, "input_sha256")?)?;
@@ -306,6 +384,12 @@ pub(super) fn empty(config: &Config) -> Result<Value, String> {
         if contract(&config.manifest)?.exact_release {
             image["finance"]["commands"] = json!([]);
         }
+        if config.domain == "E" && super::fx_valuation::enabled(config) {
+            image["finance"]["foreign_responsibilities"] = json!([]);
+        }
+    }
+    if let Some(fx) = super::fx_valuation::empty(config)? {
+        image[super::fx_valuation::CONTRACT_FIELD] = fx;
     }
     Ok(image)
 }
@@ -608,6 +692,36 @@ fn input(config: &Config, raw: &str) -> Result<Value, String> {
     }
     if release {
         super::exact_command::validate_section(&d)?;
+        if config.domain == "E" {
+            if fx_release_bound(config)? {
+                super::exact_command::validate_fx_section(&d)?;
+            } else if !super::fx_valuation::enabled(config)
+                && super::exact_command::requests_fx_binding(&d["exact_release"])
+            {
+                // 无 FX 的显式市场模板是错配；已持久选择的 FX/1 完全按静态合同处理。
+                return Err(format!(
+                    "Unsupported：仅 tb03b-finance/6 且显式选择 fx-valuation/2 时允许声明 {}",
+                    super::exact_command::FX_RELEASE_BOUND_MARKER
+                ));
+            }
+        }
+        if contract(&config.manifest)?.model_binding {
+            super::exact_command::validate_model_binding(&d)?;
+            if let Some(binding) = config
+                .manifest
+                .get("history_simulation_source")
+                .filter(|v| v.is_object())
+            {
+                if binding["model_content_hash"]
+                    != d["exact_release"]["model_coverage"]["model_ref"]["content_hash"]
+                {
+                    return Err(
+                        "IdentityConflict：冻结模拟模型摘要与 exact_release.model_coverage.model_ref 不符"
+                            .into(),
+                    );
+                }
+            }
+        }
     }
     Ok(d)
 }
@@ -638,7 +752,9 @@ pub(super) fn covered_pending(
     }
     // #1406 OQ-3：新书账域的显式等待不能由 Reserve 的风险覆盖旁路清掉。
     // 旧域 Pending.reason 为字符串，保持原有判据。
-    if pending["scope"] == "account:*" {
+    if pending["scope"] == "account:*"
+        && !super::fx_valuation::has_persisted_attribution(previous, fact)?
+    {
         return Err("MissingDependency：账户范围 Pending 尚缺归属与影响范围证明".into());
     }
     if pending["reason"].is_object() {
@@ -714,6 +830,7 @@ pub(super) fn is_event(v: &Value) -> bool {
         v["kind"].as_str(),
         Some(
             "ImportResponsibility"
+                | "ImportFxResponsibility"
                 | "PrepareDecision"
                 | "Reserve"
                 | "CommitDecision"
@@ -728,7 +845,10 @@ pub(super) fn is_event(v: &Value) -> bool {
 fn operation_id<'a>(p: &'a Value) -> Result<&'a str, String> {
     required(
         p,
-        if p["op"] == "ImportResponsibility" {
+        if matches!(
+            p["op"].as_str(),
+            Some("ImportResponsibility" | "ImportFxResponsibility")
+        ) {
             "responsibility_id"
         } else if matches!(p["op"].as_str(), Some("Reserve" | "CloseApplicants")) {
             "slot_id"
@@ -750,7 +870,9 @@ fn key(p: &Value) -> Result<String, String> {
 }
 fn validate_request(p: &Value) -> Result<(), String> {
     match required(p, "op")? {
-        "ImportResponsibility" => exact(p, &["op", "responsibility_id", "writer_epoch"]),
+        "ImportResponsibility" | "ImportFxResponsibility" => {
+            exact(p, &["op", "responsibility_id", "writer_epoch"])
+        }
         "PrepareDecision" => exact(p, &["op", "decision_id", "plan_hash", "writer_epoch"]),
         "Reserve" => exact(p, &["op", "slot_id", "request_set_hash", "writer_epoch"]),
         "CommitDecision" => exact(
@@ -1194,8 +1316,19 @@ fn reduce_with_budget(
             }
             let r = json!({"responsibility_id":d["baseline"]["responsibility_id"],"owner":"E:baseline","amount":d["baseline"]["amount"],"source":d["baseline"],"policy":d["policy"]});
             push(&mut next["finance"], "responsibilities", r.clone());
+            super::fx_valuation::refresh_from_finance(config, &mut next)?;
             json!({"responsibility_id":p["responsibility_id"],"state":"ResponsibilityImported","original":r})
         }
+        "ImportFxResponsibility" => super::fx_valuation::import_obligation(
+            config,
+            previous,
+            &mut next,
+            &d["policy"],
+            required(w, "fx_obligation_input_raw")?,
+            required(p, "responsibility_id")?,
+            seq,
+            ns,
+        )?,
         "PrepareDecision" => {
             let plan = plan(&d, p)?;
             if plan["owner"] != config.domain || hash(plan) != p["plan_hash"] {
@@ -1336,9 +1469,18 @@ fn reduce_with_budget(
             let coverage = list(&d["baseline"], "covered_facts")?;
             let mut resolved = BTreeSet::new();
             for pending in list(previous, "pending")? {
+                super::fx_valuation::forbid_reserve_bypass(pending)?;
                 covered_pending(previous, coverage, pending)?;
                 resolved.insert(required(pending, "fact_key")?.to_owned());
             }
+            super::fx_valuation::check_gate(
+                previous,
+                super::fx_valuation::GateSubject::ReserveSlot {
+                    slot_id: required(slot, "slot_id")?,
+                    policy_id: required(&d["policy"], "policy_id")?,
+                    cap_currency: required(&d["policy"], "currency")?,
+                },
+            )?;
             if !resolved.is_empty() {
                 let kept: Vec<Value> = list(previous, "pending")?
                     .iter()
@@ -1354,6 +1496,10 @@ fn reduce_with_budget(
             let existing = responsibilities
                 .iter()
                 .try_fold(0i64, |a, r| add(a, number(r, "amount")?))?;
+            let existing = add(
+                existing,
+                super::fx_valuation::evaluated_foreign_total(previous)?,
+            )?;
             let total = add(existing, additional)?;
             let all_fit = total <= number(&live_cap, "cap")?;
             let mut r = json!({"slot_id":slot["slot_id"],"slot":slot,"state":if all_fit{"Reserved"}else{"AwaitingAllocationPolicy"},"policy_id":d["policy"]["policy_id"],"waiting_for":if all_fit{Value::Null}else{d["policy"]["allocation_policy_id"].clone()},"required_total":total.to_string(),"retained_total":if all_fit{total}else{existing}.to_string(),"grants":if all_fit{grants.clone()}else{vec![]},"closed_applicants":closed,"reserve_seq":seq.to_string(),"reserve_ns":ns});
@@ -1371,6 +1517,7 @@ fn reduce_with_budget(
                 }
             }
             push(f, "slots", r.clone());
+            super::fx_valuation::refresh_from_finance(config, &mut next)?;
             r
         }
         "CommitDecision" => {
@@ -1404,8 +1551,18 @@ fn reduce_with_budget(
             // 未覆盖风险 token 使共同约束不可核，暂停受影响新增；已独立保存的界仍覆盖的责任保留。
             let coverage = list(&d["baseline"], "covered_facts")?;
             for pending in list(&gp["current_image"], "pending")? {
+                super::fx_valuation::forbid_reserve_bypass(pending)?;
                 covered_pending(&gp["current_image"], coverage, pending)?;
             }
+            super::fx_valuation::check_gate(
+                &gp["current_image"],
+                super::fx_valuation::GateSubject::CommitGrant {
+                    grant_id: required(p, "grant_id")?,
+                    owner: &config.domain,
+                    policy_id: required(&d["policy"], "policy_id")?,
+                    cap_currency: required(&d["policy"], "currency")?,
+                },
+            )?;
             let closed = finance(config, &gp["current_image"])?
                 .get("closed_applicants")
                 .and_then(Value::as_array)
@@ -1508,9 +1665,13 @@ fn reduce_with_budget(
                         .into(),
                 );
             }
-            let liability = responsibilities
+            let cash_liability = responsibilities
                 .iter()
                 .try_fold(0i64, |a, r| add(a, number(r, "amount")?))?;
+            let liability = add(
+                cash_liability,
+                super::fx_valuation::evaluated_foreign_total(previous)?,
+            )?;
             if liability > cap {
                 return Err(format!(
                     "InvalidDomain：新 cap {cap} 低于原子点当前责任 {liability}；保留原生效版本"
@@ -1518,6 +1679,7 @@ fn reduce_with_budget(
             }
             let new = json!({"schema_revision":CAP_POLICY_REV,"profile_id":signed["profile_id"],"policy_id":p["policy_id"],"policy_version":p["to_version"],"cap":p["cap"],"valid_through_ns":p["valid_through_ns"],"activation_id":p["activation_id"],"replaces_version":p["from_version"],"policy_record_sha256":p["policy_record"]["sha256"],"authorizer":signed["authorizer"],"authorized_at_ns":signed["authorized_at_ns"],"signature_ref":signed["signature_ref"],"liability_at_activation":liability.to_string(),"activated_seq":seq.to_string(),"activated_ns":ns});
             next["finance"]["cap_policy"] = new.clone();
+            super::fx_valuation::refresh_from_finance(config, &mut next)?;
             json!({"activation_id":p["activation_id"],"state":"CapPolicyActivated","from":live_cap,"to":new,"liability_at_activation":liability.to_string()})
         }
         "CloseApplicants" => {
@@ -1553,7 +1715,7 @@ fn reduce_with_budget(
             json!({"slot_id":slot["slot_id"],"state":"ApplicantsClosed","closed":a,"reason":p["reason"],"commit_ns":ns,"responsibility_release":"None"})
         }
         "MakeDispatchable" => make_dispatchable(c, config, previous, &mut next, &d, p, w, seq, ns)?,
-        "ReleaseExact" => release_exact(config, previous, &mut next, &d, p, seq, ns)?,
+        "ReleaseExact" => release_exact(c, config, previous, &mut next, &d, p, seq, ns, budget)?,
         _ => return Err("SchemaUnsupported：未支持财务写入".into()),
     };
     Ok((next, record))
@@ -1632,7 +1794,11 @@ fn make_dispatchable(
 }
 /// IC E.ReleaseExact / SPEC C07.1–2：同一 E 事务核命令全部固定字段、获准条件清单、`model_coverage`、
 /// Pending 与该 grant 的完整责任；成立才写 ReleasedExact 与不可改交付对象。域外命令持久终态 Unsupported。
+/// 启用 `fx-valuation/2` 时，由同一事务前序切面重算推导真实市场来源/事件/修订、责任与生效政策，
+/// 组装并逐字核验证书，不允许调用方删除、替换依赖或使用占位名。
+#[allow(clippy::too_many_arguments)]
 fn release_exact(
+    c: &Connection,
     config: &Config,
     previous: &Value,
     next: &mut Value,
@@ -1640,6 +1806,7 @@ fn release_exact(
     p: &Value,
     seq: i64,
     ns: &str,
+    budget: &mut super::store::ReadBudget<'_>,
 ) -> Result<Value, String> {
     exact_release_contract(config)?;
     if config.domain != "E" {
@@ -1660,54 +1827,131 @@ fn release_exact(
         return Err("IdentityConflict：目标 X/epoch 与冻结目标不同".into());
     }
     let grant_id = required(old, "grant_id")?;
-    let command =
-        super::exact_command::command(&config.session, &config.generation, d, q, grant_id)?;
-    if p["plan_hash"] != command["plan_hash"] {
+    if p["plan_hash"] != super::exact_command::plan_hash_for(q) {
         return Err("IdentityConflict：plan_hash 不是冻结计划的精确投影".into());
     }
-    super::exact_command::check_certificate(&p["certificate"], &command["certificate"])?;
-    let mut r = old.clone();
-    r["command_hash"] = json!(hash(&command));
-    r["command"] = command;
+    let model_binding = contract(&config.manifest)?.model_binding;
+    let fx_bound = fx_release_bound(config)?;
+    let build_command = |binding: Option<&super::fx_valuation::FxReleaseBinding>| {
+        super::exact_command::command(
+            &config.session,
+            &config.generation,
+            d,
+            q,
+            grant_id,
+            model_binding,
+            binding,
+        )
+    };
+    let static_command = if fx_bound {
+        let approved = d["exact_release"]["conditions"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        super::exact_command::check_certificate_shape(&p["certificate"], approved)?;
+        None
+    } else {
+        // 旧合同在任何模型或政策检查前，先逐项比对冻结证书。
+        let cmd = build_command(None)?;
+        super::exact_command::check_certificate(&p["certificate"], &cmd["certificate"])?;
+        Some(cmd)
+    };
+
+    // 业务判定顺序（恢复父版本 bd0933e97e）：
+    // 先识别模型不能表达的命令（ADR 0052 裁定二 model_coverage）并持久落 Unsupported / ModelOrderUnspecified；
+    // 只有模型可表达、可能放行的命令才进入 Pending 覆盖检查、FX 政策门与动态依赖绑定。
     if let Some(unsupported) = super::exact_command::model_coverage(d, q) {
+        let command = match static_command {
+            Some(cmd) => cmd,
+            None => {
+                let cmd = build_command(None)?;
+                super::exact_command::check_fx_unsupported_certificate(
+                    &p["certificate"],
+                    &cmd["certificate"],
+                    grant_id,
+                )?;
+                cmd
+            }
+        };
+        let mut r = old.clone();
+        r["command_hash"] = json!(hash(&command));
+        r["command"] = command;
         r["state"] = json!("Unsupported");
         r["unsupported"] = unsupported;
         r["unsupported_seq"] = json!(seq.to_string());
         r["unsupported_ns"] = json!(ns);
-    } else {
-        let coverage = list(&d["baseline"], "covered_facts")?;
-        for pending in list(previous, "pending")? {
-            covered_pending(previous, coverage, pending)?;
-        }
-        let closed = f
-            .get("closed_applicants")
-            .and_then(Value::as_array)
-            .is_some_and(|a| {
-                a.iter().any(|x| {
-                    x["slot_id"] == q["slot_id"]
-                        && x["owner"] == q["owner"]
-                        && x["applicant_epoch"] == q["applicant_epoch"]
-                        && x["applicant_generation"] == q["applicant_generation"]
-                })
-            });
-        if closed {
-            return Err("StaleWriter：原申请代际已关闭，不得 Release；全责任保留".into());
-        }
-        let slot = item(list(f, "slots")?, "slot_id", required(q, "slot_id")?)?;
-        let g = item(list(slot, "grants")?, "grant_id", grant_id)?;
-        let liability = item(list(f, "responsibilities")?, "responsibility_id", grant_id)?;
-        if liability["grant"] != *g || liability["amount"] != g["amount"] {
-            return Err("MissingDependency：E 未保留该 grant 的完整责任".into());
-        }
-        r["state"] = json!("ReleasedExact");
-        r["first_quantity"] = q["exact"]["first_quantity"].clone();
-        r["allocation_id"] = q["exact"]["allocation_id"].clone();
-        r["responsibility_ref"] = json!(grant_id);
-        r["release_seq"] = json!(seq.to_string());
-        r["release_commit_ns"] = json!(ns);
-        r["model_ref"] = super::exact_command::model_ref(d);
-        r["execution_eligibility"] = json!("ReleasedExact");
+        replace_command(next, &r);
+        return Ok(r);
     }
+
+    let coverage = list(&d["baseline"], "covered_facts")?;
+    for pending in list(previous, "pending")? {
+        super::fx_valuation::forbid_reserve_bypass(pending)?;
+        covered_pending(previous, coverage, pending)?;
+    }
+    let command = if let Some(cmd) = static_command {
+        super::fx_valuation::check_gate(
+            previous,
+            super::fx_valuation::GateSubject::ReleaseCommand {
+                command_id: required(p, "command_id")?,
+                grant_id,
+                owner: required(q, "owner")?,
+                policy_id: required(&d["policy"], "policy_id")?,
+                cap_currency: required(&d["policy"], "currency")?,
+            },
+        )?;
+        cmd
+    } else {
+        let prev_seq = seq - 1;
+        let prev_root: String =
+            budget.one(c, "SELECT root FROM commits WHERE seq=?", [prev_seq], |r| {
+                r.get(0)
+            })?;
+        let binding = super::fx_valuation::release_binding(
+            config,
+            previous,
+            prev_seq,
+            &prev_root,
+            required(p, "command_id")?,
+            grant_id,
+            required(q, "owner")?,
+            required(&d["policy"], "policy_id")?,
+            required(&d["policy"], "currency")?,
+        )?;
+        let cmd = build_command(Some(&binding))?;
+        super::exact_command::check_certificate(&p["certificate"], &cmd["certificate"])?;
+        cmd
+    };
+    let mut r = old.clone();
+    r["command_hash"] = json!(hash(&command));
+    r["command"] = command;
+    let closed = f
+        .get("closed_applicants")
+        .and_then(Value::as_array)
+        .is_some_and(|a| {
+            a.iter().any(|x| {
+                x["slot_id"] == q["slot_id"]
+                    && x["owner"] == q["owner"]
+                    && x["applicant_epoch"] == q["applicant_epoch"]
+                    && x["applicant_generation"] == q["applicant_generation"]
+            })
+        });
+    if closed {
+        return Err("StaleWriter：原申请代际已关闭，不得 Release；全责任保留".into());
+    }
+    let slot = item(list(f, "slots")?, "slot_id", required(q, "slot_id")?)?;
+    let g = item(list(slot, "grants")?, "grant_id", grant_id)?;
+    let liability = item(list(f, "responsibilities")?, "responsibility_id", grant_id)?;
+    if liability["grant"] != *g || liability["amount"] != g["amount"] {
+        return Err("MissingDependency：E 未保留该 grant 的完整责任".into());
+    }
+    r["state"] = json!("ReleasedExact");
+    r["first_quantity"] = q["exact"]["first_quantity"].clone();
+    r["allocation_id"] = q["exact"]["allocation_id"].clone();
+    r["responsibility_ref"] = json!(grant_id);
+    r["release_seq"] = json!(seq.to_string());
+    r["release_commit_ns"] = json!(ns);
+    r["model_ref"] = super::exact_command::model_ref(d);
+    r["execution_eligibility"] = json!("ReleasedExact");
     replace_command(next, &r);
     Ok(r)
 }
@@ -1720,6 +1964,7 @@ fn latest_proof_seq(p: &Value) -> Result<i64, String> {
 pub(super) fn receipt(config: &Config, event: &Value, cut: Value) -> Result<Value, String> {
     let kind = match required(event, "kind")? {
         "ImportResponsibility" => "ResponsibilityImportedReceipt",
+        "ImportFxResponsibility" => "FxResponsibilityImportedReceipt",
         "PrepareDecision" => "PreparedReceipt",
         "Reserve" => "ReserveReceipt",
         "CommitDecision" => "LocalCommitReceipt",
@@ -1873,6 +2118,9 @@ pub(super) fn write_with_ingress(
     if matches!(p["op"].as_str(), Some("MakeDispatchable" | "ReleaseExact")) {
         exact_release_contract(config)?;
     }
+    if p["op"] == super::fx_valuation::IMPORT_OP && !super::fx_valuation::enabled(config) {
+        return Err("SchemaUnsupported：ImportFxResponsibility 只属于 fx-valuation/1".into());
+    }
     let k = key_for(config, p)?;
     let mut shared_job = if contract(&config.manifest)?.content {
         Some(new_content_job(c, config)?)
@@ -1981,6 +2229,7 @@ pub(super) fn write_with_ingress(
             )?);
         }
         "MakeDispatchable" => {
+            exact_delivery_target_contract(config, &d)?;
             let q = plan(&d, p)?;
             w["commit_proof"] = proof(
                 config,
@@ -1988,7 +2237,14 @@ pub(super) fn write_with_ingress(
                 &receipt_key_for(config, "CommitDecision", required(q, "decision_id")?)?,
             )?;
         }
-        "ImportResponsibility" | "AbortDecision" | "CloseApplicants" | "ReleaseExact" => (),
+        "ReleaseExact" => {
+            exact_delivery_target_contract(config, &d)?;
+        }
+        "ImportFxResponsibility" => {
+            w["fx_obligation_input_raw"] =
+                json!(super::fx_valuation::pinned_obligation_raw(config)?);
+        }
+        "ImportResponsibility" | "AbortDecision" | "CloseApplicants" => (),
         _ => return Err("SchemaUnsupported：财务操作未知".into()),
     }
     persist(c, config, epoch, e, w)
@@ -2083,6 +2339,10 @@ fn write_v2_inner(
                 "新 cap 签署原件"
             )?);
             check_operation_deadline(Some(&mut *job), Some(deadline))?;
+        }
+        "ImportFxResponsibility" => {
+            witness["fx_obligation_input_raw"] =
+                json!(super::fx_valuation::pinned_obligation_raw(config)?);
         }
         "ImportResponsibility" | "AbortDecision" | "CloseApplicants" => (),
         _ => return Err("SchemaUnsupported：财务操作未知".into()),
@@ -2300,7 +2560,7 @@ pub(super) fn query(c: &Connection, config: &Config, p: &Value) -> Result<Value,
     }
 }
 /// #1407 E 侧命令查询。QueryCommand 按原 command_id 返回 E 财务状态或 NoRecord，不释放责任也不造新动作；
-/// QueryReleasedExact 是 `x-exact-authority/1` 的应答，请求体即 #1942 X 发出的帧，回复为 AuthorityReply 十二字段。
+/// QueryReleasedExact 回复绑定原命令；动态 FX 合同同时声明 E 持久固定的 FX/2 版本。
 pub(super) fn query_command(
     c: &Connection,
     config: &Config,
@@ -2379,6 +2639,9 @@ pub(super) fn query_command(
         .iter()
         .find(|x| x["command_id"] == id && x["state"] != "Dispatchable");
     let epoch = epoch.to_string();
+    // 与 ReleaseExact 同一判据；manifest 及 FX 修订在建库时冻结，恢复也逐值核验。
+    let fx_valuation_revision =
+        fx_release_bound(config)?.then_some(super::FxReleaseRevision::ReleaseBound);
     let Some(r) = entry else {
         return Ok(super::exact_command::authority_reply(
             p,
@@ -2387,6 +2650,7 @@ pub(super) fn query_command(
             "NoRecord",
             &format!("NoRecord@{s}"),
             nonnegative(&frontier_ns, "commit_ns")?,
+            fx_valuation_revision,
         ));
     };
     if r["command"] != p["command"] {
@@ -2404,6 +2668,7 @@ pub(super) fn query_command(
         state,
         &receipt_key_for(config, "ReleaseExact", id)?,
         nonnegative(at, "release commit_ns")?,
+        fx_valuation_revision,
     ))
 }
 /// 业务方只给关闭 slot 的原身份。跨重协议排序由 E 模块持有，不由 UI 拼装。

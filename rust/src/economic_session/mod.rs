@@ -9,10 +9,15 @@ mod content_store;
 mod domain_event;
 mod evidence;
 mod exact_command;
-pub(crate) use exact_command::{check_condition_semantics, check_required_capabilities};
+pub use exact_command::FxReleaseRevision;
+pub(crate) use exact_command::{
+    check_condition_semantics, check_required_capabilities, FxReleaseReferences,
+    FX_RELEASE_BOUND_MARKER,
+};
 mod finance;
 mod finance_transport;
 mod financial_reader_resources;
+mod fx_valuation;
 mod phase_trace;
 mod quantity_calibration;
 mod service;
@@ -39,6 +44,8 @@ pub fn open_durable_db(
 
 #[cfg(test)]
 mod domain_event_tests;
+#[cfg(test)]
+mod fx_valuation_tests;
 #[cfg(test)]
 mod quantity_calibration_tests;
 #[cfg(test)]

@@ -78,7 +78,10 @@ S `serve` 需要 admission 锚（`<db>.control-owner.json` + `state/s-admission/
 - experiment/production 缺凭据：X 在构造任何传输之前以 `MissingDependency` 非 0 退出。
 - production 缺 `tb09_fingerprint`：X 持久化 `send_state=refused`、`send_refusal_reason=MissingTb09Fingerprint`。
 - 写调用（`submit`/`cancel`）恒返回 `UnsupportedCapability`；本步不含任何场所写代码。
-- 查询：`x_execution_session query --db x.db`（只读）。
+- 查询：`x_execution_session query --db x.db`（非历史骨架元数据只读）；历史模拟库（含早期 `/1`、后期 `/1` 全部历史准入世代、`/2`、`/3`）使用 `query-history`、`query-command --command-id ID`、`query-batch --batch-id ID`、`query-original --original-id ID` 只读审计查询（须对从封存原件恢复到独立可写取证目录的工作副本执行，见下条；读档不是重发执行许可——按冻结键集与版号严格判别布局，不靠失败降格、不补写当年没有的共同信封/授权字段、不把早期墙钟标成已验证等于 `bar.index`；无写者修订落盘的后期 `/1` 按 12+6+6 布局共同可证语义核验并由 `condition_audit_policy` / `condition_audit_unproven` 显式标明未证的后加准入闸，同时保留晚 `/1` 逻辑 bar 与 `/2`、`/3` 完整配对表及四项完备闸）。
+- 历史模拟装配与旧档封存取证（仅当 `x.profile` 含非空 `history_simulation` 字段时生效；非历史装配不预读 `economic.manifest`，保持既有启动与降级条件）：
+  - 新会话装配使用 `x-execution-profile/3` 搭配 `tb03b-finance/6`；launcher 在建库前拒绝 `FIN/5 + X/3`、`/2` 历史模拟 profile 等不兼容装配。拟定切换生效点为主控签署后成套新二进制实际启用且旧历史写者已停/隔离的切换，而非 Git 合入（退场范围与操作生效条件可采用，但读回修复经独立评审签收前不批准运行切换，详见 [`rust/src/history_simulation/README.md`](../rust/src/history_simulation/README.md) 中待裁定的 C3 R6 升级与退场合同候选）。
+  - 旧 `/1`（早期/后期全部世代）、`/2` 历史模拟库封存与取证统一采用**单一操作路径**：（1）停止/隔离旧写者及全部可能写入或 checkpoint 的其他连接，或以保证单一一致切面的快照取得全套档案；（2）成套封存同一切面的 `.db` 及所有存在的 `-wal`（并保留原 E 责任证据），**封存原件严禁直接打开**；（3）恢复一份完整副本（`.db` + 存在的 `-wal`）到独立可写取证目录，再运行 `x_execution_session query-*` 查前沿、pending、命令语义、原批与原件（工作副本允许出现 `-wal`/`-shm`；此路径不依赖原 E `manifest`，可覆盖早期非十进制 `session_generation` 如 `g1` 及全部晚期 `/1` 世代）；若需经原 E 执行固定批只读核档（`e_economic_session inspect-simulation-capture-batch`），不得修改原 `manifest` 或改写 `session_generation`，须保留原 E 既有十进制 `session_generation` 与预冻结 `history_simulation_source` 合同，且原 `manifest` 绑定的 `history_simulation_source.x_db` 绝对路径必须实际指向该独立可写工作副本（不直接打开封存原件）。仅 checkpoint、分时拷贝活库、直接在只读介质上查裸 `.db` + `-wal`、使用 `immutable=1` 或引入 `#1375` VFS 均不作为通用方案。
 
 ## simulation / dry-run 启动
 

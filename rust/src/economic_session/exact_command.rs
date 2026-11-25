@@ -1,15 +1,36 @@
 //! #1407 C1：E 侧精确命令（INTERFACE-CONTRACTS「ExactCommand」「ConditionEvidence」；SPEC C07.1–2；
 //! ADR 0052 裁定二 `model_coverage`）。只属 `tb03b-finance/5`。
 //! wire 形状与 #1942 `history_simulation::runtime::{ExactCommand, Certificate, Condition, AuthorityReply}`
-//! 逐字段对齐：命令体内的量、价、revision、x_epoch 与回复的 commit_ns 是 JSON 整数，不是十进制字符串。
-//! 首次量 L 与分配身份不在 #1942 的命令体里，留在 E 的 Release 记录（主控 #1407 切片裁定第 3 条）。
+//! 逐字段对齐。首次量和分配身份在签封前固定；IC:13 精确整数以十进制字符串进入摘要。
 use super::book::hash;
-use super::voice::exact;
+use super::fx_valuation::encode_reference;
+use super::voice::{digest, exact};
 use crate::session_protocol::{positive, required};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 pub(super) const AUTHORITY_WIRE: &str = "x-exact-authority/1";
+/// 动态 FX 合同的显式声明。缺字段是旧静态合同（FX/1 或非 FX），不是从证书内容推断。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FxReleaseRevision {
+    #[serde(rename = "fx-valuation/2")]
+    ReleaseBound,
+}
+
+impl FxReleaseRevision {
+    // 字段可缺省，但显式声明必须是已知版本，而不是 null 或未知版本。
+    pub(crate) fn deserialize_declared<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Self>, D::Error> {
+        Self::deserialize(d).map(Some)
+    }
+}
+
+/// FX/2 冻结模板的占位文本，只在已选定动态合同后用来核验模板；静态证据允许同名。
+pub(crate) const FX_RELEASE_BOUND_MARKER: &str = "fx-valuation/2:release-bound";
+const FX_COVERAGE_PROOF_PREFIX: &str = "fx-valuation/2:";
+
 /// 冻结财务原件里获准的条件清单项：IC「ConditionEvidence」九字段。
 const CONDITION_FIELDS: [&str; 9] = [
     "condition_id",
@@ -154,7 +175,7 @@ fn model_domain(v: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-/// `/5` 冻结原件顶层 `exact_release`：唯一目标 X/epoch、投影、规则与市场依赖、获准条件清单、模型覆盖域。
+/// `/5`、`/6` 冻结原件顶层 `exact_release`：唯一目标 X/epoch、投影、规则与市场依赖、获准条件清单、模型覆盖域。
 pub(super) fn validate_section(d: &Value) -> Result<(), String> {
     let s = &d["exact_release"];
     exact(
@@ -251,6 +272,13 @@ pub(super) fn validate_section(d: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+/// `/6` 模型绑定合同：冻结 `model_ref.content_hash` 须为规范 64 位小写十六进制 SHA-256 摘要。
+pub(super) fn validate_model_binding(d: &Value) -> Result<(), String> {
+    digest(required(
+        &d["exact_release"]["model_coverage"]["model_ref"],
+        "content_hash",
+    )?)
+}
 /// `/5` 计划的 `exact`：逻辑族、首次量 L 与物理 revision、分配身份、方向与场所投影引用。
 /// C1 只产首次提交：revision 1 且 L 等于计划量；现金买入模型只有 buy。
 pub(super) fn validate_plan(q: &Value) -> Result<(), String> {
@@ -316,57 +344,554 @@ pub(super) fn validate_plan(q: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-fn integer(v: &Value, k: &str) -> Result<i64, String> {
-    positive(required(v, k)?, k)
+const FX_BINDING_LIST_FIELDS: [&str; 3] =
+    ["dependency_set", "invalidation_sources", "evidence_refs"];
+
+fn condition_uses_fx_marker(c: &Value) -> bool {
+    let marker_list = json!([FX_RELEASE_BOUND_MARKER]);
+    FX_BINDING_LIST_FIELDS.iter().all(|&k| c[k] == marker_list)
+        && c["coverage_proof"] == FX_RELEASE_BOUND_MARKER
 }
+
+/// 非 FX 配置的声明槽仅是整个 market_dependencies 单项列表；不读取静态条件证据。
+pub(super) fn requests_fx_binding(section: &Value) -> bool {
+    section["market_dependencies"] == json!([FX_RELEASE_BOUND_MARKER])
+}
+
+/// 当 E 显式选择 `tb03b-finance/6` + `fx-valuation/2` 时，冻结 `exact_release` 必须显式声明 `fx-valuation/2:release-bound`，
+/// 不得在冻结原件中携带 `TestOnly-market/*` 或 `controlled-*` 占位名。
+pub(super) fn validate_fx_section(d: &Value) -> Result<(), String> {
+    let s = &d["exact_release"];
+    if !requests_fx_binding(s) {
+        return Err(format!(
+            "Unsupported：启用 fx-valuation/2 时 exact_release.market_dependencies 须显式声明 [{FX_RELEASE_BOUND_MARKER}]，不得使用静态占位名"
+        ));
+    }
+    let conditions = s["conditions"]
+        .as_array()
+        .ok_or("MissingDependency：获准条件清单为空")?;
+    for c in conditions {
+        if !condition_uses_fx_marker(c) {
+            return Err(format!(
+                "Unsupported：启用 fx-valuation/2 时获准条件清单各项须统一声明 {FX_RELEASE_BOUND_MARKER}，不得残留 controlled-* 占位名"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn change_for(q: &Value) -> Value {
+    let x = &q["exact"];
+    json!({"kind":"submit","order":{
+        "command_id":x["command_id"],
+        "family_id":x["logical_order_family"],
+        "chong_id":x["chong_id"],
+        "revision":x["revision"],
+        "side":x["side"],
+        "quantity":q["quantity"],
+        "kind":{"kind":"limit","price":q["limit_price"]},
+        "eligibility_ref":x["eligibility_ref"],
+        "projection_manifest":x["projection_manifest"],
+    }})
+}
+
+pub(super) fn plan_hash_for(q: &Value) -> String {
+    hash(&change_for(q))
+}
+
+fn format_bound_quote_dep(q: &super::fx_valuation::FxBoundQuote) -> String {
+    let supersedes = q.supersedes_revision.as_deref().unwrap_or("none");
+    format!(
+        "fx-quote:{}@rev={};coord={};supersedes={};rate={}/{};raw_sha256={};fact_key={}",
+        q.chain_id,
+        q.revision,
+        q.source_coord,
+        supersedes,
+        q.price_numerator,
+        q.price_denominator,
+        q.raw_sha256,
+        q.fact_key
+    )
+}
+
+fn build_fx_certificate(
+    session_id: &str,
+    session_generation: &str,
+    d: &Value,
+    q: &Value,
+    structure_dep: &str,
+    fx: &super::fx_valuation::FxReleaseBinding,
+) -> Result<Value, String> {
+    let s = &d["exact_release"];
+    let x = &q["exact"];
+    let m = &s["model_coverage"];
+    let mref = &m["model_ref"];
+
+    let e_cut_ref = format!("e-cut:E:{}:{}", fx.e_prev_seq, fx.e_prev_root);
+    let policy_ref = format!(
+        "cap-policy:{}@v{}:cap={}:{}:valid_through={}",
+        fx.policy_id, fx.policy_version, fx.cap_amount, fx.cap_currency, fx.valid_through_ns
+    );
+    let boundary_source = encode_reference(&[&fx.boundary_source_id, &fx.boundary_source_epoch]);
+    let boundary_hash = &fx.boundary_input_sha256;
+    let boundary_ref = format!("fx-boundary:{boundary_source}:input_sha256={boundary_hash}");
+    let empty_boundary_dep =
+        format!("fx-boundary-empty:{boundary_source}:input_sha256={boundary_hash}");
+    let exposure_ref = format!(
+        "e-exposure:cash={};foreign={};total={};cap={};currency={}",
+        fx.cash_subtotal, fx.foreign_subtotal, fx.evaluated_total, fx.cap_amount, fx.cap_currency
+    );
+    let model_ref_str = format!(
+        "{}@{}#{}",
+        required(mref, "model_id")?,
+        required(mref, "revision")?,
+        required(mref, "content_hash")?
+    );
+    let domain_id = required(m, "domain_id")?;
+    let x_id = required(&s["x_target"], "x_id")?;
+    let x_epoch = required(&s["x_target"], "x_epoch")?;
+    let command_id = required(x, "command_id")?;
+    let allocation_id = required(x, "allocation_id")?;
+    let first_quantity = required(x, "first_quantity")?;
+    let projection_manifest = required(x, "projection_manifest")?;
+    let eligibility_ref = required(x, "eligibility_ref")?;
+    let concurrency = required(x, "concurrency")?;
+    let allocation_policy_id = required(&d["policy"], "allocation_policy_id")?;
+
+    let quote_deps: Vec<String> = fx
+        .active_quotes
+        .iter()
+        .map(format_bound_quote_dep)
+        .collect();
+    let market_dependencies: Vec<String> = if quote_deps.is_empty() {
+        vec![empty_boundary_dep.clone()]
+    } else {
+        quote_deps.clone()
+    };
+    let quote_invs: Vec<String> = fx
+        .active_quotes
+        .iter()
+        .map(|bq| {
+            format!(
+                "market-supersession:{}:after_rev={}",
+                bq.chain_id, bq.revision
+            )
+        })
+        .collect();
+    let quote_covs: Vec<String> = fx
+        .active_quotes
+        .iter()
+        .map(|bq| {
+            format!(
+                "e-quote-coverage:{}@rev={}:evidence_id={}:evidence_hash={}",
+                bq.chain_id,
+                bq.revision,
+                encode_reference(&[&bq.evidence_id]),
+                bq.evidence_hash
+            )
+        })
+        .collect();
+    let quote_raws: Vec<String> = fx
+        .active_quotes
+        .iter()
+        .map(|bq| {
+            format!(
+                "market-raw:{}@rev={}:raw_sha256={}",
+                bq.chain_id, bq.revision, bq.raw_sha256
+            )
+        })
+        .collect();
+    let retired_refs: Vec<String> = fx
+        .retired_quotes
+        .iter()
+        .map(|rq| {
+            format!(
+                "fx-retired:{}@rev={}:retired_by_rev={}:evidence_id={}:evidence_hash={}",
+                rq.chain_id,
+                rq.revision,
+                rq.retired_by_revision,
+                encode_reference(&[&rq.evidence_id]),
+                rq.evidence_hash
+            )
+        })
+        .collect();
+    let ob_deps: Vec<String> = fx
+        .foreign_obligations
+        .iter()
+        .map(|ob| {
+            format!(
+                "foreign-responsibility:{}:owner={}:qty={}:{}:instrument={}:source={}:input_sha256={}",
+                ob.responsibility_id,
+                ob.owner,
+                ob.quantity,
+                ob.unit,
+                encode_reference(&[&ob.valuation_instrument]),
+                encode_reference(&[&ob.quote_source_namespace, &ob.quote_source_epoch]),
+                ob.input_sha256
+            )
+        })
+        .collect();
+    let chain_proof_summary = if fx.active_quotes.is_empty() {
+        "empty-boundary".to_owned()
+    } else {
+        fx.active_quotes
+            .iter()
+            .map(|bq| format!("{}@rev={}", bq.chain_id, bq.revision))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+
+    let approved = s["conditions"]
+        .as_array()
+        .ok_or("MissingDependency：获准条件清单为空")?;
+    let mut built_conditions = Vec::with_capacity(approved.len());
+    for tpl in approved {
+        let cap = required(tpl, "validator_capability")?;
+        let (dep_set, inv_sources, ev_refs, cov_proof) = match cap {
+            "released-exact/1" => {
+                let mut deps = vec![
+                    format!(
+                        "grant:{}:owner={}:amount={}:{}",
+                        fx.grant_id, fx.grant_owner, fx.grant_amount, fx.cap_currency
+                    ),
+                    policy_ref.clone(),
+                    boundary_ref.clone(),
+                ];
+                deps.extend(ob_deps.iter().cloned());
+                deps.extend(market_dependencies.iter().cloned());
+                let mut invs = vec![
+                    format!("e-pending:E:{}:{}", fx.policy_id, fx.cap_currency),
+                    format!("cap-policy-change:{}@v{}", fx.policy_id, fx.policy_version),
+                    format!(
+                        "fx-boundary-change:{boundary_source}:{boundary_hash}"
+                    ),
+                ];
+                invs.extend(quote_invs.iter().cloned());
+                let mut evs = vec![e_cut_ref.clone(), exposure_ref.clone()];
+                if quote_covs.is_empty() {
+                    evs.push(format!(
+                        "e-empty-fx-boundary:{boundary_source}:{boundary_hash}"
+                    ));
+                } else {
+                    evs.extend(quote_covs.iter().cloned());
+                }
+                evs.extend(retired_refs.iter().cloned());
+                let proof = format!(
+                    "{FX_COVERAGE_PROOF_PREFIX}e-release-cut=E:{}:{};cap={}@v{}:{}/{};chains={}",
+                    fx.e_prev_seq,
+                    fx.e_prev_root,
+                    fx.policy_id,
+                    fx.policy_version,
+                    fx.evaluated_total,
+                    fx.cap_amount,
+                    chain_proof_summary
+                );
+                (deps, invs, evs, proof)
+            }
+            "execute-committed/1" => {
+                let mut deps = vec![format!("structure-object:{structure_dep}")];
+                deps.extend(market_dependencies.iter().cloned());
+                let mut invs = vec![format!("structure-withdrawal:{structure_dep}")];
+                if quote_invs.is_empty() {
+                    invs.push(format!(
+                        "fx-boundary-change:{boundary_source}:{boundary_hash}"
+                    ));
+                } else {
+                    invs.extend(quote_invs.iter().cloned());
+                }
+                let mut evs = vec![e_cut_ref.clone(), format!("structure-ref:{structure_dep}")];
+                if quote_raws.is_empty() {
+                    evs.push(boundary_ref.clone());
+                } else {
+                    evs.extend(quote_raws.iter().cloned());
+                    evs.extend(quote_covs.iter().cloned());
+                }
+                let proof = format!(
+                    "{FX_COVERAGE_PROOF_PREFIX}s-market-closure:e-cut=E:{}:{};structure={};chains={}",
+                    fx.e_prev_seq, fx.e_prev_root, structure_dep, chain_proof_summary
+                );
+                (deps, invs, evs, proof)
+            }
+            "simulation-local-transaction/1" => (
+                vec![
+                    format!("x-target:{x_id}@epoch={x_epoch}"),
+                    format!("session:{session_id}@gen={session_generation}"),
+                    format!(
+                        "command:{command_id}:alloc={allocation_id}:first_qty={first_quantity}"
+                    ),
+                    format!("model-ref:{model_ref_str}"),
+                ],
+                vec![
+                    format!("x-epoch-change:{x_id}:after={x_epoch}"),
+                    format!("command-identity:{command_id}:alloc={allocation_id}"),
+                ],
+                vec![
+                    e_cut_ref.clone(),
+                    format!("projection-manifest:{projection_manifest}"),
+                    format!("eligibility-ref:{eligibility_ref}"),
+                ],
+                format!(
+                    "{FX_COVERAGE_PROOF_PREFIX}x-local-tx:{x_id}@{x_epoch}:e-cut=E:{}:{}",
+                    fx.e_prev_seq, fx.e_prev_root
+                ),
+            ),
+            "model-coverage/1" => (
+                vec![
+                    format!("model-ref:{model_ref_str}"),
+                    format!("domain-id:{domain_id}"),
+                    format!("order-domain:limit:{concurrency}:{allocation_policy_id}"),
+                ],
+                vec![
+                    format!("model-ref-change:{model_ref_str}"),
+                    format!("domain-id-change:{domain_id}"),
+                ],
+                vec![e_cut_ref.clone(), format!("model-ref:{model_ref_str}")],
+                format!(
+                    "{FX_COVERAGE_PROOF_PREFIX}model-coverage:{domain_id}:{model_ref_str}:e-cut=E:{}:{}",
+                    fx.e_prev_seq, fx.e_prev_root
+                ),
+            ),
+            other => return Err(format!("Unsupported：FX 证书绑定遇到未知核验能力 {other}")),
+        };
+        built_conditions.push(json!({
+            "condition_id": tpl["condition_id"],
+            "authority_revision": tpl["authority_revision"],
+            "dependency_set": dep_set,
+            "invalidation_sources": inv_sources,
+            "required_check_stages": tpl["required_check_stages"],
+            "evidence_refs": ev_refs,
+            "coverage_proof": cov_proof,
+            "validator_capability": tpl["validator_capability"],
+            "failure_result": tpl["failure_result"],
+        }));
+    }
+
+    Ok(json!({
+        "rd11_policy": s["rd11_policy"],
+        "responsibility_refs": fx.responsibility_refs,
+        "structure_dependencies": [structure_dep],
+        "market_dependencies": market_dependencies,
+        "rule_revision": s["rule_revision"],
+        "conditions": built_conditions,
+    }))
+}
+
+/// FX/2 已绑定证书的引用槽。只识别槽位的 wire 类型，不检查 ID 的取词；
+/// 引用真实性由 E 在放行切面逐项相等核验、X 对照 E 持久回执确认。
+pub(crate) struct FxReleaseReferences<'a> {
+    market: Vec<&'a str>,
+}
+
+impl<'a> FxReleaseReferences<'a> {
+    pub(crate) fn new(market: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
+        let market: Vec<_> = market.into_iter().collect();
+        let has_parts = |source: &str, count| {
+            source.split('|').count() == count && source.split('|').all(|part| !part.is_empty())
+        };
+        let pinned = |reference: &str| match reference.split_once(':') {
+            Some(("fx-quote", body)) => body.split_once("@rev=").is_some_and(|(chain, terms)| {
+                has_parts(chain, 4)
+                    && terms
+                        .split_once(';')
+                        .is_some_and(|(revision, _)| positive(revision, "quote revision").is_ok())
+            }),
+            Some(("fx-boundary-empty", body)) => body
+                .split_once(":input_sha256=")
+                .is_some_and(|(source, hash)| has_parts(source, 2) && digest(hash).is_ok()),
+            _ => false,
+        };
+        if market.is_empty() || !market.iter().all(|r| pinned(r)) {
+            return Err("Unsupported：FX market_dependencies 须绑定具体报价修订或空共同界".into());
+        }
+        Ok(Self { market })
+    }
+
+    pub(crate) fn validate_condition(
+        &self,
+        dependencies: impl IntoIterator<Item = &'a str>,
+        invalidations: impl IntoIterator<Item = &'a str>,
+        evidence: impl IntoIterator<Item = &'a str>,
+        proof: &str,
+    ) -> Result<(), String> {
+        let tag = |r: &'a str| {
+            r.split_once(':')
+                .filter(|(_, body)| !body.is_empty())
+                .map(|(tag, _)| tag)
+        };
+        let dependencies_valid = dependencies.into_iter().all(|r| match tag(r) {
+            Some("fx-quote" | "fx-boundary-empty") => self.market.contains(&r),
+            Some(
+                "grant"
+                | "cap-policy"
+                | "fx-boundary"
+                | "foreign-responsibility"
+                | "structure-object"
+                | "x-target"
+                | "session"
+                | "command"
+                | "model-ref"
+                | "domain-id"
+                | "order-domain",
+            ) => true,
+            _ => false,
+        });
+        let invalidations_valid = invalidations.into_iter().all(|r| {
+            matches!(
+                tag(r),
+                Some(
+                    "e-pending"
+                        | "cap-policy-change"
+                        | "fx-boundary-change"
+                        | "market-supersession"
+                        | "structure-withdrawal"
+                        | "x-epoch-change"
+                        | "command-identity"
+                        | "model-ref-change"
+                        | "domain-id-change"
+                )
+            )
+        });
+        let proof_bound = proof != FX_RELEASE_BOUND_MARKER
+            && proof
+                .strip_prefix(FX_COVERAGE_PROOF_PREFIX)
+                .is_some_and(|body| !body.is_empty());
+        if !dependencies_valid || !invalidations_valid || !proof_bound {
+            return Err("Unsupported：FX 已绑定条件的依赖、失效源或覆盖证明类型不符".into());
+        }
+        let mut cut = false;
+        for r in evidence {
+            match tag(r) {
+                Some("e-cut")
+                    if r.strip_prefix("e-cut:E:").is_some_and(|body| {
+                        body.split_once(':').is_some_and(|(seq, root)| {
+                            positive(seq, "E cut").is_ok() && digest(root).is_ok()
+                        })
+                    }) =>
+                {
+                    cut = true
+                }
+                Some(
+                    "e-exposure"
+                    | "e-empty-fx-boundary"
+                    | "e-quote-coverage"
+                    | "fx-retired"
+                    | "structure-ref"
+                    | "fx-boundary"
+                    | "market-raw"
+                    | "projection-manifest"
+                    | "eligibility-ref"
+                    | "model-ref",
+                ) => {}
+                _ => return Err("Unsupported：FX 已绑定条件的证据引用类型不符".into()),
+            }
+        }
+        if !cut {
+            return Err("MissingDependency：FX 放行条件缺少具体 E 提交切面证据".into());
+        }
+        Ok(())
+    }
+}
+
+/// 域外命令不会放行：接受冻结模板或先前已组装的绑定证书形状，只持久化冻结计划。
+pub(super) fn check_fx_unsupported_certificate(
+    given: &Value,
+    template_cert: &Value,
+    grant_id: &str,
+) -> Result<(), String> {
+    if given["rd11_policy"] != template_cert["rd11_policy"]
+        || given["rule_revision"] != template_cert["rule_revision"]
+        || given["structure_dependencies"] != template_cert["structure_dependencies"]
+        || !given["responsibility_refs"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x == grant_id))
+    {
+        return Err(
+            "IdentityConflict：域外命令证书的固定政策/结构/grant 责任与冻结计划不符".into(),
+        );
+    }
+    if given["market_dependencies"] == template_cert["market_dependencies"]
+        && given["conditions"] == template_cert["conditions"]
+    {
+        return Ok(());
+    }
+    fn refs(v: &Value) -> impl Iterator<Item = &str> {
+        v.as_array().into_iter().flatten().filter_map(Value::as_str)
+    }
+    let validate = || {
+        text_list(&given["market_dependencies"], "market_dependencies")?;
+        let refs_by_type = FxReleaseReferences::new(refs(&given["market_dependencies"]))?;
+        for c in given["conditions"].as_array().into_iter().flatten() {
+            refs_by_type.validate_condition(
+                refs(&c["dependency_set"]),
+                refs(&c["invalidation_sources"]),
+                refs(&c["evidence_refs"]),
+                required(c, "coverage_proof")?,
+            )?;
+        }
+        Ok::<_, String>(())
+    };
+    validate()
+        .map_err(|err| format!("IdentityConflict：域外命令证书不是冻结模板或已绑定证书（{err}）"))
+}
+
 /// 由冻结原件与 E 持有的 grant 组装 ExactCommand；同输入逐字节同输出。
+/// `/6`（`bind_model_ref = true`）将冻结的 `model_coverage.model_ref` 固化进命令体并进入 `command_hash`。
+/// `fx-valuation/2` 放行时传入 `fx_binding = Some(...)`，固化同切面 E cut、责任、政策与市场修订。
 pub(super) fn command(
     session_id: &str,
     session_generation: &str,
     d: &Value,
     q: &Value,
     grant_id: &str,
+    bind_model_ref: bool,
+    fx_binding: Option<&super::fx_valuation::FxReleaseBinding>,
 ) -> Result<Value, String> {
     let s = &d["exact_release"];
     let x = &q["exact"];
-    let change = json!({"kind":"submit","order":{
-        "command_id":x["command_id"],
-        "family_id":x["logical_order_family"],
-        "chong_id":x["chong_id"],
-        "revision":integer(x, "revision")?,
-        "side":x["side"],
-        "quantity":integer(q, "quantity")?,
-        "kind":{"kind":"limit","price":integer(q, "limit_price")?},
-        "eligibility_ref":x["eligibility_ref"],
-        "projection_manifest":x["projection_manifest"],
-    }});
+    let change = change_for(q);
     let s_ref = &q["s_ref"];
-    let certificate = json!({
-        "rd11_policy":s["rd11_policy"],
-        "responsibility_refs":[grant_id],
-        "structure_dependencies":[format!("{}@{}", required(s_ref, "object_id")?, required(s_ref, "object_hash")?)],
-        "market_dependencies":s["market_dependencies"],
-        "rule_revision":s["rule_revision"],
-        "conditions":s["conditions"],
-    });
-    Ok(json!({
+    let structure_dep = format!(
+        "{}@{}",
+        required(s_ref, "object_id")?,
+        required(s_ref, "object_hash")?
+    );
+    let certificate = match fx_binding {
+        Some(fx) => build_fx_certificate(session_id, session_generation, d, q, &structure_dep, fx)?,
+        None => json!({
+            "rd11_policy":s["rd11_policy"],
+            "responsibility_refs":[grant_id],
+            "structure_dependencies":[structure_dep],
+            "market_dependencies":s["market_dependencies"],
+            "rule_revision":s["rule_revision"],
+            "conditions":s["conditions"],
+        }),
+    };
+    let mut cmd = json!({
         "command_id":x["command_id"],
         "logical_order_family":x["logical_order_family"],
+        "first_quantity":x["first_quantity"],
+        "allocation_id":x["allocation_id"],
         "session_id":session_id,
         "session_generation":session_generation,
         "x_id":s["x_target"]["x_id"],
-        "x_epoch":integer(&s["x_target"], "x_epoch")?,
+        "x_epoch":s["x_target"]["x_epoch"],
         "symbol":x["symbol"],
         "projection_kind":s["projection_kind"],
         "plan_hash":hash(&change),
         "certificate_hash":hash(&certificate),
         "change":change,
         "certificate":certificate,
-    }))
+    });
+    if bind_model_ref {
+        cmd["model_ref"] = model_ref(d);
+    }
+    Ok(cmd)
 }
-/// SPEC C07.2：请求证书逐项对照获准清单。缺条件、多条件或任一条件缺九字段之一 → Unsupported；
-/// 形状完整但内容与 E 自行组装的证书不同 → IdentityConflict。
-pub(super) fn check_certificate(given: &Value, expected: &Value) -> Result<(), String> {
+/// 校验请求证书的固定结构、获准条件九字段与 condition_id 集合；不比对动态依赖内容。
+pub(super) fn check_certificate_shape(
+    given: &Value,
+    approved_conditions: &[Value],
+) -> Result<(), String> {
     let unsupported = |e: String| format!("Unsupported：{e}");
     exact(given, &CERTIFICATE_FIELDS).map_err(unsupported)?;
     let conditions = given["conditions"]
@@ -380,12 +905,19 @@ pub(super) fn check_certificate(given: &Value, expected: &Value) -> Result<(), S
             .filter_map(|c| c["condition_id"].as_str().map(str::to_owned))
             .collect()
     };
+    if conditions.len() != approved_conditions.len() || ids(conditions) != ids(approved_conditions)
+    {
+        return Err("Unsupported：条件清单与获准 manifest 展开不逐项相等".into());
+    }
+    Ok(())
+}
+/// SPEC C07.2：请求证书逐项对照获准清单。缺条件、多条件或任一条件缺九字段之一 → Unsupported；
+/// 形状完整但内容与 E 自行组装的证书不同 → IdentityConflict。
+pub(super) fn check_certificate(given: &Value, expected: &Value) -> Result<(), String> {
     let approved = expected["conditions"]
         .as_array()
         .map_or(&[][..], Vec::as_slice);
-    if conditions.len() != approved.len() || ids(conditions) != ids(approved) {
-        return Err("Unsupported：条件清单与获准 manifest 展开不逐项相等".into());
-    }
+    check_certificate_shape(given, approved)?;
     if given != expected {
         return Err("IdentityConflict：证书内容与 E 组装的责任/依赖/条件不同".into());
     }
@@ -408,7 +940,7 @@ pub(super) fn model_coverage(d: &Value, q: &Value) -> Option<Value> {
         json!({"reason":"ModelOrderUnspecified","model_ref":m["model_ref"],"domain_id":m["domain_id"],"command_id":q["exact"]["command_id"]}),
     )
 }
-/// #1942 `AuthorityReply` 的十二字段，键集逐项相等（X 端 `deny_unknown_fields`）。
+/// 保留静态合同的十二字段；只在 FX/2 权威回执中附上 E 冻结的合同声明。
 pub(super) fn authority_reply(
     request: &Value,
     command: &Value,
@@ -416,8 +948,9 @@ pub(super) fn authority_reply(
     state: &str,
     receipt_id: &str,
     commit_ns: i64,
+    fx_valuation_revision: Option<FxReleaseRevision>,
 ) -> Value {
-    json!({
+    let mut reply = json!({
         "protocol":AUTHORITY_WIRE,
         "session_id":request["session_id"],
         "session_generation":request["session_generation"],
@@ -429,6 +962,10 @@ pub(super) fn authority_reply(
         "state":state,
         "receipt_id":receipt_id,
         "release_receipt_id":Value::Null,
-        "commit_ns":commit_ns,
-    })
+        "commit_ns":commit_ns.to_string(),
+    });
+    if let Some(revision) = fx_valuation_revision {
+        reply["fx_valuation_revision"] = json!(revision);
+    }
+    reply
 }
