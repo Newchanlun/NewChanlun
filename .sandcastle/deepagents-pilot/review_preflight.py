@@ -438,6 +438,7 @@ MAX_SSE_EVENT_BYTES = 256 * 1024
 SSE_READ_CHUNK_BYTES = 8192
 MAX_HTTP_ERROR_BYTES = 65536
 _CHUNK_SIZE_HEX_RE = re.compile(rb"[0-9A-Fa-f]{1,16}")
+_CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,20}")
 
 
 class _SSEReadLimitError(Exception):
@@ -458,6 +459,35 @@ def _open_http(request: urllib.request.Request, timeout: float):
     return opener.open(request, timeout=timeout)
 
 
+def _validate_http_response_framing(response: http.client.HTTPResponse) -> None:
+    """在读取正文前核验所有原始 Content-Length / Transfer-Encoding 头，
+    拒绝非法值、冲突的多重 Content-Length、以及 Content-Length 与 Transfer-Encoding 并存。"""
+    headers = getattr(response, "headers", None)
+    if headers is None or not hasattr(headers, "get_all"):
+        return
+    te_headers = headers.get_all("Transfer-Encoding") or []
+    cl_headers = headers.get_all("Content-Length") or []
+    if te_headers and cl_headers:
+        raise http.client.HTTPException("conflicting Transfer-Encoding and Content-Length")
+    if te_headers:
+        codings = [tok.strip(" \t").lower() for hdr in te_headers for tok in hdr.split(",")]
+        if codings != ["chunked"] or not getattr(response, "chunked", False):
+            raise http.client.HTTPException("unsupported Transfer-Encoding")
+    if cl_headers:
+        parsed_lengths: set[int] = set()
+        for hdr in cl_headers:
+            for part in hdr.split(","):
+                tok = part.strip(" \t")
+                if not _CONTENT_LENGTH_RE.fullmatch(tok):
+                    raise http.client.HTTPException("invalid Content-Length")
+                parsed_lengths.add(int(tok))
+        if len(parsed_lengths) != 1:
+            raise http.client.HTTPException("conflicting Content-Length")
+        expected_len = next(iter(parsed_lengths))
+        if getattr(response, "length", None) != expected_len:
+            raise http.client.HTTPException("mismatched parsed Content-Length")
+
+
 def _read_exact_fp(fp, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
@@ -475,8 +505,10 @@ def _iter_strict_http_body(
     max_total_bytes: int,
     chunk_bytes: int = SSE_READ_CHUNK_BYTES,
 ):
-    """严格有界读取 HTTP 响应体：对真实 chunked 响应绕过 CPython 宽松分块解码，
+    """严格有界读取 HTTP 响应体：先核验原始 framing 头，对真实 chunked 响应绕过 CPython 宽松分块解码，
     在读块体前强制校验无符号 16 进制块长、块尾 \\r\\n 与 trailer 终结空行，避免负块长无界分配或坏分帧放行。"""
+    if isinstance(response, http.client.HTTPResponse):
+        _validate_http_response_framing(response)
     total_bytes = 0
     if isinstance(response, http.client.HTTPResponse) and getattr(response, "chunked", False):
         fp = getattr(response, "fp", None)

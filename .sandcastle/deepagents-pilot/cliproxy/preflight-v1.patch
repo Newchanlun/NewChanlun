@@ -7252,10 +7252,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..4fca3da 100644
+index e69de29..fb8a1a7 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,10876 @@
+@@ -0,0 +1,10904 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7632,9 +7632,12 @@ index e69de29..4fca3da 100644
 +	reclaimingKeys        = make(map[string]bool)
 +	pendingReviewLaunches = make(map[string]*pendingReviewState)
 +	pendingReviewTotal    int
-+	reviewTurnSeqGen      uint64
-+	taintWriteOverflow    bool
-+	tmpSeq                atomic.Uint64
++	reviewTurnSeqGen              uint64
++	taintWriteOverflow            bool
++	unpersistedFlushCursorTouched time.Time
++	unpersistedFlushCursorKey     string
++	hasUnpersistedFlushCursor     bool
++	tmpSeq                        atomic.Uint64
 +
 +	rootInitMu sync.Mutex
 +	rootLockMu sync.Mutex
@@ -13250,9 +13253,13 @@ index e69de29..4fca3da 100644
 +		} else if len(expiredByRoot) > 0 || len(unpersistedTaint) > 0 {
 +			// When the ledger is full solely with unpersisted-taint entries, never blindly drop
 +			// unpersisted taint records; instead release reviewMu and first attempt verified disk
-+			// reclamation of expired on-disk dirs, then retry durable taint persistence on oldest
-+			// unpersisted entries (including those whose initial persist failed before creating a
-+			// launch dir) so recovered storage can safely persist taint and free ledger slots.
++			// reclamation of expired on-disk dirs, then retry durable taint persistence on a bounded
++			// rotating batch of expired unpersisted entries (including those whose initial persist
++			// failed before creating a launch dir) so permanently stuck entries cannot starve
++			// subsequent recoverable entries.
++			curFlushTouched := unpersistedFlushCursorTouched
++			curFlushKey := unpersistedFlushCursorKey
++			hasCurFlush := hasUnpersistedFlushCursor
 +			reviewMu.Unlock()
 +			locked = false
 +			reclaimed := 0
@@ -13271,17 +13278,33 @@ index e69de29..4fca3da 100644
 +					break
 +				}
 +			}
++			var lastTried unpersistedTaintCand
++			triedAny := false
 +			if reclaimed == 0 && len(unpersistedTaint) > 0 {
 +				slices.SortFunc(unpersistedTaint, func(a, b unpersistedTaintCand) int {
-+					return a.touched.Compare(b.touched)
++					if c := a.touched.Compare(b.touched); c != 0 {
++						return c
++					}
++					return strings.Compare(a.key, b.key)
 +				})
++				start := 0
++				if hasCurFlush {
++					for i, cand := range unpersistedTaint {
++						if cand.touched.After(curFlushTouched) || (cand.touched.Equal(curFlushTouched) && cand.key > curFlushKey) {
++							start = i
++							break
++						}
++					}
++				}
 +				const maxUnpersistedFlushBatch = 8
 +				limit := len(unpersistedTaint)
 +				if limit > maxUnpersistedFlushBatch {
 +					limit = maxUnpersistedFlushBatch
 +				}
-+				for i := 0; i < limit; i++ {
-+					cand := unpersistedTaint[i]
++				for step := 0; step < limit; step++ {
++					cand := unpersistedTaint[(start+step)%len(unpersistedTaint)]
++					lastTried = cand
++					triedAny = true
 +					reviewMu.Lock()
 +					cur := reviewLedger[cand.key]
 +					if cur == nil || cur != cand.entry || cur.inFlight > 0 || cur.sealing || reclaimingKeys[cand.key] {
@@ -13304,6 +13327,11 @@ index e69de29..4fca3da 100644
 +			}
 +			reviewMu.Lock()
 +			locked = true
++			if triedAny {
++				unpersistedFlushCursorTouched = lastTried.touched
++				unpersistedFlushCursorKey = lastTried.key
++				hasUnpersistedFlushCursor = true
++			}
 +			if ent, err, done := checkExisting(); done {
 +				return ent, err
 +			}
@@ -18133,10 +18161,10 @@ index e69de29..4fca3da 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..f2087fc 100644
+index e69de29..6246f94 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,11781 @@
+@@ -0,0 +1,11894 @@
 +package preflightreceipt
 +
 +import (
@@ -29916,5 +29944,118 @@ index e69de29..f2087fc 100644
 +	}
 +	if status, _ := SealReviewWithDigest(root, l1, "sess-1"); status != SealRejected {
 +		t.Fatalf("SealReviewWithDigest on evicted tainted l1 = %v, want SealRejected", status)
++	}
++}
++
++func TestFullLedgerUnpersistedTaintFlushRotatesPastStuckFirstBatch(t *testing.T) {
++	// Astra P2 (PR #2280 R63): unpersisted taint flush must remain bounded to 8 per call while
++	// rotating across calls so 8 permanently broken oldest entries cannot starve entry #9/#10.
++	oldMaxLedger := maxReviewLedgerEntries
++	maxReviewLedgerEntries = 10
++	defer func() { maxReviewLedgerEntries = oldMaxLedger }()
++
++	reviewMu.Lock()
++	savedLedger := reviewLedger
++	savedSealed := sealedBindings
++	savedOverflow := taintWriteOverflow
++	savedCurTouched := unpersistedFlushCursorTouched
++	savedCurKey := unpersistedFlushCursorKey
++	savedHasCur := hasUnpersistedFlushCursor
++	reviewLedger = make(map[string]*reviewEntry)
++	sealedBindings = make(map[string]sealedDirBinding)
++	taintWriteOverflow = false
++	unpersistedFlushCursorTouched = time.Time{}
++	unpersistedFlushCursorKey = ""
++	hasUnpersistedFlushCursor = false
++	reviewMu.Unlock()
++	t.Cleanup(func() {
++		reviewMu.Lock()
++		reviewLedger = savedLedger
++		sealedBindings = savedSealed
++		taintWriteOverflow = savedOverflow
++		unpersistedFlushCursorTouched = savedCurTouched
++		unpersistedFlushCursorKey = savedCurKey
++		hasUnpersistedFlushCursor = savedHasCur
++		reviewMu.Unlock()
++	})
++
++	rootBroken := filepath.Join(t.TempDir(), "broken-root")
++	rootHealthy := filepath.Join(t.TempDir(), "healthy-root")
++	if err := ensurePrivateRoot(rootBroken); err != nil {
++		t.Fatal(err)
++	}
++	if err := ensurePrivateRoot(rootHealthy); err != nil {
++		t.Fatal(err)
++	}
++	// Permanently break rootBroken's .staging so its 8 oldest entries always fail to persist.
++	brokenStaging := filepath.Join(rootBroken, ".staging")
++	_ = os.RemoveAll(brokenStaging)
++	if err := os.WriteFile(brokenStaging, []byte("blocked"), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	ancient := time.Now().Add(-reviewDiskRetention - 2*time.Hour)
++	reviewMu.Lock()
++	for i := 0; i < 8; i++ {
++		l := fmt.Sprintf("review-ff5f5f5f-2222-4333-8444-5555555555%02d", i)
++		ts := ancient.Add(time.Duration(i) * time.Minute)
++		reviewLedger[rootBroken+"\x00"+l] = &reviewEntry{
++			directory:        filepath.Join(rootBroken, l),
++			launch:           l,
++			started:          ts.UnixNano(),
++			touched:          ts,
++			tainted:          true,
++			taintedPersisted: false,
++		}
++	}
++	l9 := "review-ff5f5f5f-2222-4333-8444-555555555508"
++	l10 := "review-ff5f5f5f-2222-4333-8444-555555555509"
++	reviewLedger[rootHealthy+"\x00"+l9] = &reviewEntry{
++		directory:        filepath.Join(rootHealthy, l9),
++		launch:           l9,
++		started:          ancient.Add(8 * time.Minute).UnixNano(),
++		touched:          ancient.Add(8 * time.Minute),
++		tainted:          true,
++		taintedPersisted: false,
++	}
++	reviewLedger[rootHealthy+"\x00"+l10] = &reviewEntry{
++		directory:        filepath.Join(rootHealthy, l10),
++		launch:           l10,
++		started:          ancient.Add(9 * time.Minute).UnixNano(),
++		touched:          ancient.Add(9 * time.Minute),
++		tainted:          true,
++		taintedPersisted: false,
++	}
++	reviewMu.Unlock()
++
++	lNew1 := "review-ff5f5f5f-2222-4333-8444-555555555511"
++	lNew2 := "review-ff5f5f5f-2222-4333-8444-555555555512"
++
++	// Call 1 inspects the first 8 broken entries (bounded batch=8) and advances the cursor.
++	if res, err := ReserveReview(rootHealthy, lNew1); !errors.Is(err, ErrUnavailable) {
++		if res != nil {
++			res.Release()
++		}
++		t.Fatalf("first ReserveReview before rotation = %v, want ErrUnavailable", err)
++	}
++
++	// Call 2 rotates to entry #9 on rootHealthy, persists its taint to disk, frees its slot, and succeeds.
++	res1, err := ReserveReview(rootHealthy, lNew1)
++	if err != nil {
++		t.Fatalf("second ReserveReview after rotation to #9 = %v, want nil", err)
++	}
++	res1.Release()
++	if st, _ := SealReviewWithDigest(rootHealthy, l9, "sess-9"); st != SealRejected {
++		t.Fatalf("SealReviewWithDigest on persisted tainted l9 = %v, want SealRejected", st)
++	}
++
++	// Call 3 rotates to entry #10 on rootHealthy, persists its taint to disk, frees its slot, and succeeds.
++	res2, err := ReserveReview(rootHealthy, lNew2)
++	if err != nil {
++		t.Fatalf("third ReserveReview after rotation to #10 = %v, want nil", err)
++	}
++	res2.Release()
++	if st, _ := SealReviewWithDigest(rootHealthy, l10, "sess-10"); st != SealRejected {
++		t.Fatalf("SealReviewWithDigest on persisted tainted l10 = %v, want SealRejected", st)
 +	}
 +}

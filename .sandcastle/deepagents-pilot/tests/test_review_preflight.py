@@ -461,7 +461,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "chunked-trailer", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -499,12 +499,23 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             self.send_header("Connection", "close")
             if framing in ("length", "short-length"):
                 self.send_header("Content-Length", str(len(payload) + (100 if framing == "short-length" else 0)))
+            elif framing == "same-dup-cl":
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Content-Length", str(len(payload)))
+            elif framing == "bad-cl":
+                self.send_header("Content-Length", "not-a-number")
+            elif framing == "conflict-cl":
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Content-Length", str(len(payload) + 50))
+            elif framing == "cl-and-te":
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Transfer-Encoding", "chunked")
             else:
                 self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             self.close_connection = True
             try:
-                if framing in ("length", "short-length"):
+                if framing in ("length", "short-length", "same-dup-cl", "bad-cl", "conflict-cl"):
                     self.wfile.write(payload)
                 elif framing == "neg-chunk":
                     # CPython 3.11 HTTPResponse._read_next_chunk_size 接受 -1，须在读块体前直接拒绝。
@@ -539,10 +550,10 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
         result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
         elapsed = time.monotonic() - started
         assert processes and all(process.poll() is not None for process in processes)
-        assert result["ok"] is (framing in ("length", "chunked", "chunked-trailer")), result
+        assert result["ok"] is (framing in ("length", "same-dup-cl", "chunked", "chunked-trailer")), result
         if framing.startswith("short-"):
             assert result["error"]["exception"] == "IncompleteRead"
-        if framing in ("neg-chunk", "bad-chunk-sep"):
+        if framing in ("neg-chunk", "bad-chunk-sep", "bad-cl", "conflict-cl", "cl-and-te"):
             assert result["error"]["exception"] == "HTTPException"
         if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed
