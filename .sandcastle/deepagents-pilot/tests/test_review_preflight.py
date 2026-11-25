@@ -1837,3 +1837,60 @@ def test_round_trip_rejects_empty_status_on_non_terminal_event():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_round_trip_rejects_unpaired_utf16_surrogate_and_accepts_valid_pair():
+    """Astra P1 #1 (R51): 未配对 UTF-16 代理项须被拒绝，合法代理对与真正 U+FFFD 保持接受。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    bad_payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_\\uD800","status":"completed"}}\n\n'
+    )
+    ok_payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_\\uD83D\\uDE00_\\uFFFD","status":"completed"}}\n\n'
+    )
+    current = {"body": bad_payload}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res_bad = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000094",
+            preflight.Deadline(5),
+        )
+        assert res_bad["ok"] is False
+
+        current["body"] = ok_payload
+        res_ok = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000093",
+            preflight.Deadline(5),
+        )
+        assert res_ok["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

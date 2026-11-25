@@ -368,6 +368,16 @@ def _reject_json_constant(token: str) -> object:
     raise ValueError(f"non-JSON constant: {token}")
 
 
+def _contains_surrogate(value: object) -> bool:
+    if isinstance(value, str):
+        return any(0xD800 <= ord(ch) <= 0xDFFF for ch in value)
+    if isinstance(value, list):
+        return any(_contains_surrogate(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_surrogate(k) or _contains_surrogate(v) for k, v in value.items())
+    return False
+
+
 def _split_sse_lines(raw: bytes) -> list[bytes]:
     lines: list[bytes] = []
     start = 0
@@ -455,6 +465,8 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                                 object_pairs_hook=_no_duplicate_keys,
                                 parse_constant=_reject_json_constant,
                             )
+                            if _contains_surrogate(event):
+                                raise ValueError("unpaired UTF-16 surrogate")
                         except ValueError:
                             detail = "SSE 数据帧 JSON 解析失败"
                             break

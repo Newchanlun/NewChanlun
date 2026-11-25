@@ -2458,10 +2458,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..c22d62e
+index 0000000..a6b1cfc
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,1140 @@
+@@ -0,0 +1,1225 @@
 +package executor
 +
 +import (
@@ -3601,6 +3601,91 @@ index 0000000..c22d62e
 +			t.Fatalf("legacy preflight published receipt despite oversized failure tail: %v", statErr)
 +		}
 +	})
++
++	t.Run("strict review accepts single leading UTF-8 BOM and rejects double BOM", func(t *testing.T) {
++		// Sol P2 #1 (PR #2280 R51): Go proxy production SSE stream entry must match Python preflight
++		// by stripping at most one leading UTF-8 BOM at stream offset 0 and rejecting a second BOM.
++		bodyTail := "event: response.completed\n" +
++			"data: " + `{"type":"response.completed","response":{"id":"resp_bom_proxy_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" +
++			"data: [DONE]\n\n"
++
++		// Case 1: single leading UTF-8 BOM (split across initial read boundary) -> seals SealOK.
++		rootOK := filepath.Join(t.TempDir(), "receipts-bom-ok")
++		launchOK := "review-a7777777-2222-4333-8444-555555555501"
++		sessionOK := "019d0000-0000-7000-8000-666666666601"
++		ctxOK, cOK, err := preflightreceipt.BeginReview(context.Background(), rootOK, launchOK, sessionOK, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctxOK, leaseOK, err := cOK.Start(ctxOK, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rtOK := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			pr, pw := io.Pipe()
++			go func() {
++				_, _ = pw.Write([]byte{0xEF})
++				_, _ = pw.Write(append([]byte{0xBB, 0xBF}, []byte(bodyTail)...))
++				_ = pw.Close()
++			}()
++			return pr
++		}}
++		ctxOK = context.WithValue(ctxOK, "cliproxy.roundtripper", http.RoundTripper(rtOK))
++		streamOK, err := exec.ExecuteStream(ctxOK, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for ch := range streamOK.Chunks {
++			if ch.Err != nil {
++				t.Fatalf("unexpected stream err for single leading BOM: %v", ch.Err)
++			}
++			if ch.Payload != nil {
++				cOK.ObserveStreamChunk(ch.Payload)
++			}
++		}
++		leaseOK.End()
++		cOK.Complete(true)
++		cOK.HandlerDone(true)
++		if st, dig := preflightreceipt.SealReviewWithDigest(rootOK, launchOK, sessionOK); st != preflightreceipt.SealOK || dig == "" {
++			t.Fatalf("single leading BOM SealReviewWithDigest = (%v, %q), want SealOK", st, dig)
++		}
++
++		// Case 2: double leading UTF-8 BOM -> rejected/tainted!
++		rootBad := filepath.Join(t.TempDir(), "receipts-bom-bad")
++		launchBad := "review-a7777777-2222-4333-8444-555555555502"
++		sessionBad := "019d0000-0000-7000-8000-666666666602"
++		ctxBad, cBad, err := preflightreceipt.BeginReview(context.Background(), rootBad, launchBad, sessionBad, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctxBad, leaseBad, err := cBad.Start(ctxBad, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rtBad := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader("\xef\xbb\xbf\xef\xbb\xbf" + bodyTail))
++		}}
++		ctxBad = context.WithValue(ctxBad, "cliproxy.roundtripper", http.RoundTripper(rtBad))
++		streamBad, err := exec.ExecuteStream(ctxBad, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for ch := range streamBad.Chunks {
++			if ch.Err != nil {
++				cBad.Taint()
++				break
++			}
++			if ch.Payload != nil {
++				cBad.ObserveStreamChunk(ch.Payload)
++			}
++		}
++		leaseBad.End()
++		cBad.Complete(true)
++		cBad.HandlerDone(true)
++		if st := preflightreceipt.SealReview(rootBad, launchBad, sessionBad); st != preflightreceipt.SealRejected {
++			t.Fatalf("double leading BOM SealReview = %v, want SealRejected", st)
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
 index 6074124..b89b996 100644
@@ -4259,18 +4344,20 @@ index 6e513dd..159bc55 100644
  // response.completed.response.output empty. Keep the stream path aligned with the
  // already-patched non-stream path by reconstructing response.output from those items.
 diff --git a/internal/runtime/executor/helps/codex_sse_scanner.go b/internal/runtime/executor/helps/codex_sse_scanner.go
-index 35f5532..06994a7 100644
+index 35f5532..d44ef62 100644
 --- a/internal/runtime/executor/helps/codex_sse_scanner.go
 +++ b/internal/runtime/executor/helps/codex_sse_scanner.go
-@@ -74,10 +74,57 @@ type CodexSSEScanner struct {
+@@ -74,10 +74,70 @@ type CodexSSEScanner struct {
  	budgetCheck func(line []byte, heldLines int, heldBytes int) bool
  }
  
 +type sseLineSplitter struct {
-+	pendingCR bool
++	checkedBOM bool
++	pendingCR  bool
 +}
 +
-+// Split implements WHATWG EventSource line splitting: CRLF, standalone CR, and LF.
++// Split implements WHATWG EventSource line splitting: CRLF, standalone CR, and LF,
++// stripping at most one leading UTF-8 BOM (0xEF 0xBB 0xBF) at stream offset 0.
 +// When a CR ends the current read buffer before EOF, emit the line immediately and record
 +// pendingCR so a following leading LF on the next read is consumed without stalling live streams.
 +func (s *sseLineSplitter) Split(data []byte, atEOF bool) (advance int, token []byte, err error) {
@@ -4278,7 +4365,18 @@ index 35f5532..06994a7 100644
 +		return 0, nil, nil
 +	}
 +	start := 0
-+	if s.pendingCR {
++	if !s.checkedBOM {
++		if !atEOF && ((len(data) == 1 && data[0] == 0xEF) || (len(data) == 2 && data[0] == 0xEF && data[1] == 0xBB)) {
++			return 0, nil, nil
++		}
++		s.checkedBOM = true
++		if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
++			start = 3
++			if start == len(data) {
++				return 3, nil, nil
++			}
++		}
++	} else if s.pendingCR {
 +		s.pendingCR = false
 +		if data[0] == '\n' {
 +			start = 1
@@ -4321,10 +4419,10 @@ index 35f5532..06994a7 100644
  	return &CodexSSEScanner{ctx: ctx, lines: lines, maxBytes: maxBytes}
  }
 diff --git a/internal/runtime/executor/helps/codex_sse_scanner_test.go b/internal/runtime/executor/helps/codex_sse_scanner_test.go
-index 289dd2e..0f7a6f8 100644
+index 289dd2e..f5cafaf 100644
 --- a/internal/runtime/executor/helps/codex_sse_scanner_test.go
 +++ b/internal/runtime/executor/helps/codex_sse_scanner_test.go
-@@ -339,3 +339,83 @@ func TestCodexSSEScannerMatchesBufioScannerOnWellFormedStreams(t *testing.T) {
+@@ -339,3 +339,143 @@ func TestCodexSSEScannerMatchesBufioScannerOnWellFormedStreams(t *testing.T) {
  		})
  	}
  }
@@ -4407,6 +4505,66 @@ index 289dd2e..0f7a6f8 100644
 +		t.Fatalf("unexpected extra line after EOF: %q", extra)
 +	default:
 +	}
++}
++
++func TestCodexSSEScannerSingleLeadingBOMStrippedAndSecondPreserved(t *testing.T) {
++	// Sol P2 #1 (PR #2280 R51): WHATWG EventSource strips at most one leading UTF-8 BOM at
++	// stream offset 0 (even when split across chunks), preserves a second or mid-stream BOM
++	// so downstream strict framing rejects it, and never drops truncated invalid 0xEF at EOF.
++	t.Run("contiguous single BOM", func(t *testing.T) {
++		got := scanCodexSSE(t, "\xef\xbb\xbfevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")
++		want := []string{"event: response.completed", `data: {"type":"response.completed"}`, ""}
++		if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
++			t.Fatalf("lines = %q, want %q", got, want)
++		}
++	})
++
++	t.Run("chunk-split single BOM", func(t *testing.T) {
++		reader := &codexSSEChunkReader{chunks: []string{"\xef", "\xbb\xbfdata: {\"type\":\"response.completed\"}\n\n"}}
++		sc := NewCodexSSEScanner(context.Background(), reader, 64*1024)
++		var got []string
++		for sc.Scan() {
++			got = append(got, string(sc.Bytes()))
++		}
++		if err := sc.Err(); err != nil {
++			t.Fatalf("scan error: %v", err)
++		}
++		want := []string{`data: {"type":"response.completed"}`, ""}
++		if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
++			t.Fatalf("lines = %q, want %q", got, want)
++		}
++	})
++
++	t.Run("BOM-only stream yields zero lines", func(t *testing.T) {
++		got := scanCodexSSE(t, "\xef\xbb\xbf")
++		if len(got) != 0 {
++			t.Fatalf("lines = %q, want empty", got)
++		}
++	})
++
++	t.Run("double leading BOM preserves second BOM", func(t *testing.T) {
++		got := scanCodexSSE(t, "\xef\xbb\xbf\xef\xbb\xbfdata: {\"a\":1}\n\n")
++		want := []string{"\xef\xbb\xbfdata: {\"a\":1}", ""}
++		if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
++			t.Fatalf("lines = %q, want %q", got, want)
++		}
++	})
++
++	t.Run("mid-stream BOM on later line preserved", func(t *testing.T) {
++		got := scanCodexSSE(t, "data: {\"a\":1}\n\n\xef\xbb\xbfdata: {\"b\":2}\n\n")
++		want := []string{`data: {"a":1}`, "", "\xef\xbb\xbfdata: {\"b\":2}", ""}
++		if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
++			t.Fatalf("lines = %q, want %q", got, want)
++		}
++	})
++
++	t.Run("truncated invalid 0xEF at EOF preserved", func(t *testing.T) {
++		got := scanCodexSSE(t, "\xef")
++		want := []string{"\xef"}
++		if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
++			t.Fatalf("lines = %q, want %q", got, want)
++		}
++	})
 +}
 diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
 index cd725e8..c02be99 100644
@@ -6358,10 +6516,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..5386b45 100644
+index e69de29..0c2777c 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,9700 @@
+@@ -0,0 +1,9917 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -6628,33 +6786,36 @@ index e69de29..5386b45 100644
 +
 +var (
 +	maxSealedBindings         = 2048
-+	pinnedDirFDBudgetOverride = 0
++	pinnedDirFDBudgetOverride = -1
 +	pinnedDirFDs              atomic.Int64
 +)
 +
++func computePinnedDirFDBudget(nofile uint64, maxCap int) int {
++	// Reserve at least 75% of RLIMIT_NOFILE AND at least 256 FDs for ordinary proxy HTTP traffic
++	// and temporary reclamation handles. Never impose a fixed non-zero floor that could override
++	// a low soft limit; if the limit is <= 256, return 0 so new reservations fail closed.
++	if maxCap <= 0 || nofile <= 256 {
++		return 0
++	}
++	budget := nofile / 4
++	if avail := nofile - 256; avail < budget {
++		budget = avail
++	}
++	if budget > uint64(maxCap) {
++		return maxCap
++	}
++	return int(budget)
++}
++
 +func effectivePinnedDirFDBudget() int {
-+	if pinnedDirFDBudgetOverride > 0 {
++	if pinnedDirFDBudgetOverride >= 0 {
 +		return pinnedDirFDBudgetOverride
 +	}
-+	capLimit := maxSealedBindings
 +	var rl syscall.Rlimit
-+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl); err == nil && rl.Cur > 0 {
-+		// Reserve at least 75% of RLIMIT_NOFILE (and at least 256 FDs when limit permits)
-+		// for ordinary proxy HTTP traffic and temporary reclamation handles.
-+		quarter := int(rl.Cur / 4)
-+		if rl.Cur > 256 {
-+			if avail := int(rl.Cur - 256); avail < quarter {
-+				quarter = avail
-+			}
-+		}
-+		if quarter < 16 {
-+			quarter = 16
-+		}
-+		if quarter < capLimit {
-+			capLimit = quarter
-+		}
++	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl); err == nil {
++		return computePinnedDirFDBudget(rl.Cur, maxSealedBindings)
 +	}
-+	return capLimit
++	return maxSealedBindings
 +}
 +
 +func tryReservePinnedDirFD() bool {
@@ -7087,6 +7248,9 @@ index e69de29..5386b45 100644
 +	sseEventName                                string
 +	sseHasEvent                                 bool
 +	ssePendingCR                                bool
++	sseCheckedBOM                               bool
++	sseBOMBuf                                   [3]byte
++	sseBOMLen                                   int
 +	sseDataLines                                [][]byte
 +	sseDataBytes                                int
 +	executions, active, bodies, attempts        int
@@ -7508,6 +7672,8 @@ index e69de29..5386b45 100644
 +	c.sseEventName = ""
 +	c.sseHasEvent = false
 +	c.ssePendingCR = false
++	c.sseCheckedBOM = false
++	c.sseBOMLen = 0
 +	c.sseDataLines = nil
 +	c.sseDataBytes = 0
 +}
@@ -7862,9 +8028,90 @@ index e69de29..5386b45 100644
 +	return nil
 +}
 +
++func parseHex4(b []byte) (uint16, bool) {
++	if len(b) < 4 {
++		return 0, false
++	}
++	var v uint16
++	for i := 0; i < 4; i++ {
++		c := b[i]
++		var d uint16
++		switch {
++		case c >= '0' && c <= '9':
++			d = uint16(c - '0')
++		case c >= 'a' && c <= 'f':
++			d = uint16(c-'a') + 10
++		case c >= 'A' && c <= 'F':
++			d = uint16(c-'A') + 10
++		default:
++			return 0, false
++		}
++		v = (v << 4) | d
++	}
++	return v, true
++}
++
++// hasNoUnpairedJSONSurrogates rejects JSON string literals containing unpaired UTF-16 surrogate
++// escapes (\uD800..\uDFFF without a valid high+low surrogate pair) before encoding/json can
++// silently replace them with U+FFFD, while preserving valid surrogate pairs and genuine U+FFFD.
++func hasNoUnpairedJSONSurrogates(raw []byte) bool {
++	inString := false
++	for i := 0; i < len(raw); {
++		c := raw[i]
++		if !inString {
++			if c == '"' {
++				inString = true
++			}
++			i++
++			continue
++		}
++		if c == '"' {
++			inString = false
++			i++
++			continue
++		}
++		if c != '\\' {
++			i++
++			continue
++		}
++		if i+1 >= len(raw) {
++			return false
++		}
++		if raw[i+1] != 'u' {
++			i += 2
++			continue
++		}
++		if i+6 > len(raw) {
++			return false
++		}
++		u1, ok := parseHex4(raw[i+2 : i+6])
++		if !ok {
++			return false
++		}
++		i += 6
++		if u1 >= 0xDC00 && u1 <= 0xDFFF {
++			return false
++		}
++		if u1 >= 0xD800 && u1 <= 0xDBFF {
++			if i+6 > len(raw) || raw[i] != '\\' || raw[i+1] != 'u' {
++				return false
++			}
++			u2, ok2 := parseHex4(raw[i+2 : i+6])
++			if !ok2 || u2 < 0xDC00 || u2 > 0xDFFF {
++				return false
++			}
++			i += 6
++		}
++	}
++	return !inString
++}
++
 +func decodeExactJSONObject(raw []byte, schemaKeys map[string]struct{}) (map[string]json.RawMessage, error) {
 +	if !utf8.Valid(raw) {
 +		return nil, errors.New("invalid UTF-8 in JSON")
++	}
++	if !hasNoUnpairedJSONSurrogates(raw) {
++		return nil, errors.New("unpaired UTF-16 surrogate in JSON")
 +	}
 +	if err := validateStrictJSONObject(raw, schemaKeys); err != nil {
 +		return nil, err
@@ -8770,7 +9017,60 @@ index e69de29..5386b45 100644
 +	// An empty chunk from CodexSSEScanner represents a single blank SSE event-delimiter line.
 +	if len(payload) == 0 {
 +		c.ssePendingCR = false
++		if !c.sseCheckedBOM {
++			c.sseCheckedBOM = true
++			if c.sseBOMLen > 0 {
++				bad := bytes.Clone(c.sseBOMBuf[:c.sseBOMLen])
++				c.sseBOMLen = 0
++				return [][]byte{bad, {}}
++			}
++		}
 +		return [][]byte{{}}
++	}
++	if !c.sseCheckedBOM {
++		if c.sseBOMLen == 0 {
++			if payload[0] != 0xEF {
++				c.sseCheckedBOM = true
++			} else if len(payload) >= 3 {
++				c.sseCheckedBOM = true
++				if payload[1] == 0xBB && payload[2] == 0xBF {
++					payload = payload[3:]
++					if len(payload) == 0 {
++						return nil
++					}
++				}
++			} else if len(payload) == 1 || payload[1] == 0xBB {
++				c.sseBOMLen = copy(c.sseBOMBuf[:], payload)
++				return nil
++			} else {
++				c.sseCheckedBOM = true
++			}
++		} else {
++			need := 3 - c.sseBOMLen
++			take := len(payload)
++			if take > need {
++				take = need
++			}
++			copy(c.sseBOMBuf[c.sseBOMLen:], payload[:take])
++			c.sseBOMLen += take
++			payload = payload[take:]
++			if (c.sseBOMLen >= 2 && c.sseBOMBuf[1] != 0xBB) || (c.sseBOMLen == 3 && c.sseBOMBuf[2] != 0xBF) {
++				c.sseCheckedBOM = true
++				combined := make([]byte, c.sseBOMLen+len(payload))
++				copy(combined, c.sseBOMBuf[:c.sseBOMLen])
++				copy(combined[c.sseBOMLen:], payload)
++				c.sseBOMLen = 0
++				payload = combined
++			} else if c.sseBOMLen == 3 {
++				c.sseCheckedBOM = true
++				c.sseBOMLen = 0
++				if len(payload) == 0 {
++					return nil
++				}
++			} else {
++				return nil
++			}
++		}
 +	}
 +	if c.ssePendingCR {
 +		c.ssePendingCR = false
@@ -9494,6 +9794,9 @@ index e69de29..5386b45 100644
 +}
 +
 +func canonicalJSONDigest(raw []byte) (string, bool) {
++	if !utf8.Valid(raw) || !hasNoUnpairedJSONSurrogates(raw) {
++		return "", false
++	}
 +	dec := json.NewDecoder(bytes.NewReader(raw))
 +	dec.UseNumber()
 +	var v any
@@ -11300,6 +11603,9 @@ index e69de29..5386b45 100644
 +func decodeExactReceiptJSON(raw []byte, requiredKeys map[string]receiptJSONKind, dst any) error {
 +	if !utf8.Valid(raw) {
 +		return errors.New("invalid UTF-8 in receipt JSON")
++	}
++	if !hasNoUnpairedJSONSurrogates(raw) {
++		return errors.New("unpaired UTF-16 surrogate in receipt JSON")
 +	}
 +	dec := json.NewDecoder(bytes.NewReader(raw))
 +	tok, err := dec.Token()
@@ -14071,12 +14377,28 @@ index e69de29..5386b45 100644
 +	if rootHandle == nil {
 +		return nil, ErrUnavailable
 +	}
++	// Serialize shared .staging creation, parent fsync, and rollback across concurrent quota buckets
++	// (preflight vs review) so a racing EEXIST caller never removes a .staging created by another
++	// caller, and no caller can open .staging before its creation has synced cleanly.
++	rootInitMu.Lock()
++	defer rootInitMu.Unlock()
 +	if _, err := rootHandle.Lstat(".staging"); errors.Is(err, os.ErrNotExist) {
-+		if mkErr := rootHandle.Mkdir(".staging", 0700); mkErr != nil && !os.IsExist(mkErr) {
++		mkErr := rootHandle.Mkdir(".staging", 0700)
++		createdStaging := mkErr == nil
++		if mkErr != nil && !os.IsExist(mkErr) {
 +			return nil, ErrUnavailable
 +		}
++		var createdDev, createdIno uint64
++		var hasCreatedID bool
++		if createdStaging {
++			if cfi, serr := rootHandle.Lstat(".staging"); serr == nil && cfi.IsDir() && cfi.Mode()&os.ModeSymlink == 0 {
++				createdDev, createdIno, hasCreatedID = statDevIno(cfi)
++			}
++		}
 +		if syncErr := syncPinnedDir(rootHandle, root); syncErr != nil {
-+			_ = rootHandle.Remove(".staging")
++			if createdStaging && hasCreatedID {
++				removeVerifiedEmptySubdir(rootHandle, ".staging", createdDev, createdIno, true)
++			}
 +			return nil, syncErr
 +		}
 +	} else if err != nil {
@@ -14463,9 +14785,9 @@ index e69de29..5386b45 100644
 +	return true
 +}
 +
-+func reclaimExpiredBucketEntries(rootHandle *os.Root, root string, names []string, reviewBucket bool, need int, state *bucketReclaimState) int {
-+	if need <= 0 || rootHandle == nil || len(names) == 0 {
-+		return 0
++func reclaimExpiredBucketEntries(rootHandle *os.Root, root string, names []string, reviewBucket bool, needDirs, needFDs int, state *bucketReclaimState) (int, int) {
++	if (needDirs <= 0 && needFDs <= 0) || rootHandle == nil || len(names) == 0 {
++		return 0, 0
 +	}
 +	sweepOrphanStagingInRoot(rootHandle, root, false)
 +	now := time.Now()
@@ -14483,6 +14805,22 @@ index e69de29..5386b45 100644
 +	if state != nil && len(state.cache) > maxReclaimCacheEntries {
 +		state.cache = make(map[reclaimCacheKey]reclaimCacheEntry)
 +	}
++	var pinnedSet map[string]struct{}
++	if reviewBucket && needFDs > 0 && reviewMu.TryLock() {
++		prefix := root + "\x00"
++		pinnedSet = make(map[string]struct{})
++		for k, b := range sealedBindings {
++			if b.dirFD != nil && strings.HasPrefix(k, prefix) {
++				pinnedSet[strings.TrimPrefix(k, prefix)] = struct{}{}
++			}
++		}
++		for k, ent := range reviewLedger {
++			if ent != nil && ent.inFlight == 0 && !ent.sealing && strings.HasPrefix(k, prefix) {
++				pinnedSet[strings.TrimPrefix(k, prefix)] = struct{}{}
++			}
++		}
++		reviewMu.Unlock()
++	}
 +	startIdx := 0
 +	if state != nil && len(names) > 0 {
 +		startIdx = state.cursor % len(names)
@@ -14490,31 +14828,27 @@ index e69de29..5386b45 100644
 +	candidates := make([]expiredDiskCandidate, 0)
 +	inspected := 0
 +	visited := 0
-+	for i := 0; i < len(names); i++ {
-+		idx := (startIdx + i) % len(names)
-+		name := names[idx]
-+		visited++
++	inspectName := func(name string) bool {
 +		// Fast Lstat pre-filter before any directory open or JSON parse:
 +		// inspectProducerReceiptSubdir sets lastMod >= dir.ModTime(), so a directory whose
 +		// ModTime is still within retention can never be eligible yet.
 +		lfi, lerr := rootHandle.Lstat(name)
 +		if lerr != nil || !lfi.IsDir() || lfi.Mode()&os.ModeSymlink != 0 || lfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(lfi) {
-+			continue
++			return true
 +		}
 +		if now.Sub(lfi.ModTime()) < retention {
-+			continue
++			return true
 +		}
 +		lDev, lIno, _ := statDevIno(lfi)
 +		mtimeNS := lfi.ModTime().UnixNano()
 +		ck := reclaimCacheKey{rootDev: rootDev, rootIno: rootIno, name: name}
 +		if state != nil {
 +			if ce, hit := state.cache[ck]; hit && ce.dev == lDev && ce.ino == lIno && ce.mtimeNS == mtimeNS && now.Before(ce.skipUntil) {
-+				continue
++				return true
 +			}
 +		}
 +		if inspected >= maxReclaimInspectPerCall {
-+			visited--
-+			break
++			return false
 +		}
 +		inspected++
 +		subRoot, subDev, subIno, lastMod, verified, ok := inspectProducerReceiptSubdir(rootHandle, name, reviewBucket)
@@ -14522,14 +14856,14 @@ index e69de29..5386b45 100644
 +			if state != nil {
 +				state.cache[ck] = reclaimCacheEntry{dev: lDev, ino: lIno, mtimeNS: mtimeNS, skipUntil: now.Add(reclaimNegativeCooldown)}
 +			}
-+			continue
++			return true
 +		}
 +		_ = subRoot.Close()
 +		if now.Sub(lastMod) < retention {
 +			if state != nil {
 +				state.cache[ck] = reclaimCacheEntry{dev: lDev, ino: lIno, mtimeNS: mtimeNS, skipUntil: lastMod.Add(retention)}
 +			}
-+			continue
++			return true
 +		}
 +		if state != nil {
 +			delete(state.cache, ck)
@@ -14543,12 +14877,43 @@ index e69de29..5386b45 100644
 +			hasID:      subDev != 0 || subIno != 0,
 +			receiptSHA: verified["receipt.json"].sha256,
 +		})
++		return true
 +	}
-+	if state != nil && len(names) > 0 {
-+		state.cursor = (startIdx + visited) % len(names)
++	if pinnedSet != nil {
++		// Prioritize entries that hold in-process pinned FDs so expired non-FD disk directories
++		// never crowd out FD reclamation within maxReclaimInspectPerCall.
++		for i := 0; i < len(names); i++ {
++			idx := (startIdx + i) % len(names)
++			name := names[idx]
++			if _, ok := pinnedSet[name]; !ok {
++				continue
++			}
++			if !inspectName(name) {
++				break
++			}
++		}
++	}
++	if needDirs > 0 || pinnedSet == nil {
++		for i := 0; i < len(names); i++ {
++			idx := (startIdx + i) % len(names)
++			name := names[idx]
++			visited++
++			if pinnedSet != nil {
++				if _, already := pinnedSet[name]; already {
++					continue
++				}
++			}
++			if !inspectName(name) {
++				visited--
++				break
++			}
++		}
++		if state != nil && len(names) > 0 {
++			state.cursor = (startIdx + visited) % len(names)
++		}
 +	}
 +	if len(candidates) == 0 {
-+		return 0
++		return 0, 0
 +	}
 +	// Selection-sort oldest-first (bounded by maxReclaimInspectPerCall).
 +	for i := 0; i < len(candidates); i++ {
@@ -14562,9 +14927,10 @@ index e69de29..5386b45 100644
 +			candidates[i], candidates[minIdx] = candidates[minIdx], candidates[i]
 +		}
 +	}
-+	reclaimed := 0
++	reclaimedDirs := 0
++	releasedFDs := 0
 +	for _, cand := range candidates {
-+		if reclaimed >= need {
++		if reclaimedDirs >= needDirs && releasedFDs >= needFDs {
 +			break
 +		}
 +		var (
@@ -14608,6 +14974,7 @@ index e69de29..5386b45 100644
 +			reviewMu.Unlock()
 +		}
 +		removed := removeVerifiedLeafSubdir(rootHandle, root, cand.name, reviewBucket, cand.dev, cand.ino, cand.hasID, retention, true, expectedReceiptSHA)
++		closedFDs := 0
 +		if reviewBucket {
 +			k := key
 +			expEnt := expectedEntry
@@ -14642,9 +15009,13 @@ index e69de29..5386b45 100644
 +			if reviewMu.TryLock() {
 +				fd1, fd2 := finishReclaim()
 +				reviewMu.Unlock()
-+				closeBudgetedPinnedDirFD(fd1)
-+				if fd2 != fd1 {
++				if fd1 != nil {
++					closeBudgetedPinnedDirFD(fd1)
++					closedFDs++
++				}
++				if fd2 != nil && fd2 != fd1 {
 +					closeBudgetedPinnedDirFD(fd2)
++					closedFDs++
 +				}
 +			} else {
 +				go func() {
@@ -14659,10 +15030,11 @@ index e69de29..5386b45 100644
 +			}
 +		}
 +		if removed {
-+			reclaimed++
++			reclaimedDirs++
++			releasedFDs += closedFDs
 +		}
 +	}
-+	return reclaimed
++	return reclaimedDirs, releasedFDs
 +}
 +
 +func marshalReservationMarker(name string, started int64) ([]byte, error) {
@@ -14752,6 +15124,10 @@ index e69de29..5386b45 100644
 +	fdNeed := 0
 +	if reviewBucket {
 +		fdBudget := int64(effectivePinnedDirFDBudget())
++		if fdBudget <= 0 {
++			bState.mu.Unlock()
++			return nil, nil, false, 0, 0, false, "", ErrUnavailable
++		}
 +		if cur := pinnedDirFDs.Load(); cur >= fdBudget {
 +			fdNeed = int(cur-fdBudget) + 1
 +		}
@@ -14761,12 +15137,8 @@ index e69de29..5386b45 100644
 +		diskNeed = existingCount - capLimit + 1
 +	}
 +	if diskNeed > 0 || fdNeed > 0 {
-+		need := diskNeed
-+		if fdNeed > need {
-+			need = fdNeed
-+		}
-+		reclaimed := reclaimExpiredBucketEntries(rootHandle, root, names, reviewBucket, need, bState)
-+		existingCount -= reclaimed
++		reclaimedDirs, _ := reclaimExpiredBucketEntries(rootHandle, root, names, reviewBucket, diskNeed, fdNeed, bState)
++		existingCount -= reclaimedDirs
 +		if existingCount >= capLimit {
 +			bState.mu.Unlock()
 +			return nil, nil, false, 0, 0, false, "", ErrUnavailable
@@ -14988,9 +15360,12 @@ index e69de29..5386b45 100644
 +	}
 +	e.ended = true
 +	unterminatedPostComplete := false
-+	if c.strictCodex && (len(c.sseDataLines) > 0 || c.sseHasEvent) {
-+		// Trailing SSE data or event header without a terminating blank-line delimiter is an incomplete event.
++	if c.strictCodex && (len(c.sseDataLines) > 0 || c.sseHasEvent || c.sseBOMLen > 0) {
++		// Trailing SSE data, event header, or truncated UTF-8 BOM without closure is an invalid/incomplete event.
 +		c.invalid = true
++		if c.sseBOMLen > 0 {
++			c.modelMismatch = true
++		}
 +		if c.observedCompleted {
 +			unterminatedPostComplete = true
 +		}
@@ -16063,10 +16438,10 @@ index e69de29..5386b45 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..4bb8f32 100644
+index e69de29..b1b8ead 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,9038 @@
+@@ -0,0 +1,9472 @@
 +package preflightreceipt
 +
 +import (
@@ -23656,7 +24031,7 @@ index e69de29..4bb8f32 100644
 +		t.Fatal(err)
 +	}
 +	state := &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}
-+	if got := reclaimExpiredBucketEntries(fLease.dir, freshRoot, []string{freshName}, false, 1, state); got != 0 {
++	if got, _ := reclaimExpiredBucketEntries(fLease.dir, freshRoot, []string{freshName}, false, 1, 0, state); got != 0 {
 +		t.Fatalf("reclaimExpiredBucketEntries reclaimed fresh dir: got %d", got)
 +	}
 +	if len(state.cache) != 0 {
@@ -23664,7 +24039,7 @@ index e69de29..4bb8f32 100644
 +	}
 +	// Age foreign dir -> 1st call caches negative result; 2nd call hits cache cleanly.
 +	_ = os.Chtimes(freshDir, ancient, ancient)
-+	if got := reclaimExpiredBucketEntries(fLease.dir, freshRoot, []string{freshName}, false, 1, state); got != 0 {
++	if got, _ := reclaimExpiredBucketEntries(fLease.dir, freshRoot, []string{freshName}, false, 1, 0, state); got != 0 {
 +		t.Fatalf("reclaimExpiredBucketEntries reclaimed empty foreign dir: got %d", got)
 +	}
 +	if len(state.cache) != 1 {
@@ -24108,7 +24483,7 @@ index e69de29..4bb8f32 100644
 +		t.Fatal(err)
 +	}
 +	state := &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}
-+	if got := reclaimExpiredBucketEntries(lease.dir, root, []string{launch}, true, 1, state); got != 0 {
++	if got, _ := reclaimExpiredBucketEntries(lease.dir, root, []string{launch}, true, 1, 0, state); got != 0 {
 +		lease.Close()
 +		t.Fatalf("reclaimExpiredBucketEntries with blocked .staging = %d, want 0", got)
 +	}
@@ -24153,7 +24528,7 @@ index e69de29..4bb8f32 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if got := reclaimExpiredBucketEntries(lease2.dir, root, []string{launch}, true, 1, &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}); got != 1 {
++	if got, _ := reclaimExpiredBucketEntries(lease2.dir, root, []string{launch}, true, 1, 0, &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}); got != 1 {
 +		lease2.Close()
 +		t.Fatalf("reclaimExpiredBucketEntries on restored expired dir = %d, want 1", got)
 +	}
@@ -24343,7 +24718,7 @@ index e69de29..4bb8f32 100644
 +		close(releaseSealSync)
 +		t.Fatal(err)
 +	}
-+	if got := reclaimExpiredBucketEntries(lease.dir, root, []string{launch}, true, 1, &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}); got != 0 {
++	if got, _ := reclaimExpiredBucketEntries(lease.dir, root, []string{launch}, true, 1, 0, &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}); got != 0 {
 +		lease.Close()
 +		close(releaseSealSync)
 +		t.Fatalf("reclaimExpiredBucketEntries reclaimed launch while repeat SealReviewWithDigest was active: got %d", got)
@@ -24442,7 +24817,7 @@ index e69de29..4bb8f32 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if got := reclaimExpiredBucketEntries(lease.dir, root, []string{launch}, true, 1, &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}); got != 0 {
++	if got, _ := reclaimExpiredBucketEntries(lease.dir, root, []string{launch}, true, 1, 0, &bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)}); got != 0 {
 +		lease.Close()
 +		t.Fatalf("reclaimExpiredBucketEntries reclaimed mutated-digest bound dir: got %d", got)
 +	}
@@ -25103,5 +25478,439 @@ index e69de29..4bb8f32 100644
 +		if st, d := SealReviewWithDigest(root, launch, session); st != SealRejected || d != "" {
 +			t.Fatalf("case %d: SealReviewWithDigest after invalid UTF-8 metadata line = (%v, %q), want (SealRejected, \"\")", idx, st, d)
 +		}
++	}
++}
++
++func TestReviewReceiptRejectsUnpairedUTF16SurrogatesAndPreservesValidPairsAndReplacement(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R51): unpaired UTF-16 surrogates in JSON string literals (\uD800..\uDFFF)
++	// MUST be rejected before encoding/json silently replaces them with U+FFFD, while valid surrogate
++	// pairs (\uD83D\uDE00), literal/escaped genuine U+FFFD (\uFFFD), and escaped backslashes (\\uD800)
++	// remain accepted with exact digests.
++	badFrames := []struct {
++		name string
++		raw  string
++	}{
++		{"lone_high_in_response_id", `{"type":"response.completed","response":{"id":"resp_\uD800","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`},
++		{"lone_low_in_output_text", `{"type":"response.completed","response":{"id":"resp_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"bad \uDC00 text"}]}]}}`},
++		{"reversed_surrogate_pair", `{"type":"response.completed","response":{"id":"resp_rev","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"\uDE00\uD83D"}]}]}}`},
++		{"double_high_before_low", `{"type":"response.completed","response":{"id":"resp_hh","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"\uD83D\uD83D\uDE00"}]}]}}`},
++		{"escaped_backslash_plus_lone_high", `{"type":"response.completed","response":{"id":"resp_bs","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"\\\uD800"}]}]}}`},
++	}
++	for idx, tc := range badFrames {
++		t.Run(tc.name, func(t *testing.T) {
++			root := filepath.Join(t.TempDir(), fmt.Sprintf("surrogate-bad-%d", idx))
++			launch := fmt.Sprintf("review-f7777777-2222-4333-8444-55555555550%d", idx+1)
++			session := fmt.Sprintf("019d0000-0000-7000-8000-fffffffff40%d", idx+1)
++			ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatal(err)
++			}
++			cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			})})
++			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++			resp, err := cl.Do(req)
++			if err != nil {
++				t.Fatal(err)
++			}
++			_, _ = io.Copy(io.Discard, resp.Body)
++			_ = resp.Body.Close()
++
++			if c.ValidateStrictEvent("response.completed", true, []byte(tc.raw)) {
++				t.Fatalf("ValidateStrictEvent accepted unpaired surrogate case %s", tc.name)
++			}
++			c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + tc.raw + "\n\n"))
++			e.End()
++			c.Complete(true)
++			c.HandlerDone(true)
++			if st, d := SealReviewWithDigest(root, launch, session); st != SealRejected || d != "" {
++				t.Fatalf("SealReviewWithDigest(%s) = (%v, %q), want (SealRejected, \"\")", tc.name, st, d)
++			}
++		})
++	}
++
++	// Valid surrogate pair (\uD83D\uDE00 = U+1F600), genuine \uFFFD, and literal backslash \\uD800 MUST succeed!
++	t.Run("valid_pair_genuine_fffd_and_literal_backslash", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "surrogate-valid")
++		launch := "review-f7777777-2222-4333-8444-555555555599"
++		session := "019d0000-0000-7000-8000-fffffffff499"
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++
++		validFrame := `{"type":"response.completed","response":{"id":"resp_\uD83D\uDE00_\uFFFD","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS \uD83D\uDE00 \uFFFD \\uD800"}]}]}}`
++		if !c.ValidateStrictEvent("response.completed", true, []byte(validFrame)) {
++			t.Fatalf("ValidateStrictEvent rejected valid surrogate pair / genuine U+FFFD / literal backslash")
++		}
++		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + validFrame + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		st, dig := SealReviewWithDigest(root, launch, session)
++		if st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("SealReviewWithDigest(valid) = (%v, %q), want SealOK", st, dig)
++		}
++		raw, rerr := os.ReadFile(filepath.Join(root, launch, "receipt.json"))
++		if rerr != nil {
++			t.Fatal(rerr)
++		}
++		var rr ReviewReceipt
++		if err := json.Unmarshal(raw, &rr); err != nil {
++			t.Fatal(err)
++		}
++		wantRespSHA := sha256Hex("resp_\U0001F600_\uFFFD")
++		wantOutSHA := sha256Hex("VERDICT: PASS \U0001F600 \uFFFD \\uD800")
++		if rr.LastResponseID != wantRespSHA || rr.LastOutputSHA256 != wantOutSHA {
++			t.Fatalf("receipt digests = (%s, %s), want (%s, %s)", rr.LastResponseID, rr.LastOutputSHA256, wantRespSHA, wantOutSHA)
++		}
++	})
++
++	// decodeExactReceiptJSON MUST also reject unpaired surrogates on disk.
++	var disk ReviewReceipt
++	if err := decodeExactReceiptJSON([]byte(`{"schema":"`+ReviewSchema+`","launch":"review-\uD800"}`), reviewReceiptJSONKeys, &disk); err == nil {
++		t.Fatalf("decodeExactReceiptJSON accepted unpaired surrogate escape")
++	}
++}
++
++func TestComputePinnedDirFDBudgetLowNofileHasNoFixedFloor(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R51): low RLIMIT_NOFILE MUST NOT be overridden upward by a fixed floor
++	// of 16; budget must monotonically respect >=75% and >=256 FD reserve, allowing <16 and 0.
++	cases := []struct {
++		nofile uint64
++		want   int
++	}{
++		{0, 0},
++		{16, 0},
++		{32, 0},
++		{64, 0},
++		{256, 0},
++		{260, 4},
++		{270, 14},
++		{300, 44},
++		{512, 128},
++		{1024, 256},
++		{8192, 2048},
++		{100000, 2048},
++		{^uint64(0), 2048},
++	}
++	prev := 0
++	for _, tc := range cases {
++		got := computePinnedDirFDBudget(tc.nofile, 2048)
++		if got != tc.want {
++			t.Fatalf("computePinnedDirFDBudget(%d, 2048) = %d, want %d", tc.nofile, got, tc.want)
++		}
++		if got < prev {
++			t.Fatalf("computePinnedDirFDBudget non-monotonic at %d: %d < %d", tc.nofile, got, prev)
++		}
++		if tc.nofile > 0 && got > 0 {
++			reserved := tc.nofile - uint64(got)
++			if reserved < 256 || uint64(got) > tc.nofile/4 {
++				t.Fatalf("computePinnedDirFDBudget(%d) = %d violates headroom reserve (reserved=%d)", tc.nofile, got, reserved)
++			}
++		}
++		prev = got
++	}
++
++	// Budget == 0 MUST reject new ReserveReview cleanly without creating a directory.
++	oldOverride := pinnedDirFDBudgetOverride
++	pinnedDirFDBudgetOverride = 0
++	defer func() { pinnedDirFDBudgetOverride = oldOverride }()
++	root := filepath.Join(t.TempDir(), "zero-fd-budget")
++	launch := "review-f8888888-2222-4333-8444-555555555501"
++	if res, err := ReserveReview(root, launch); !errors.Is(err, ErrUnavailable) || res != nil {
++		if res != nil {
++			res.Release()
++		}
++		t.Fatalf("ReserveReview with zero FD budget = (%v, %v), want (nil, ErrUnavailable)", res, err)
++	}
++	if _, statErr := os.Lstat(filepath.Join(root, launch)); !os.IsNotExist(statErr) {
++		t.Fatalf("rejected zero-FD-budget ReserveReview left dir on disk: %v", statErr)
++	}
++}
++
++func TestReviewReceiptPinnedFDBudgetReclaimsPastExpiredNonFDDir(t *testing.T) {
++	// Sol P2 #2 (PR #2280 R51): when pinned-FD budget is exhausted while disk quota has headroom,
++	// older expired disk directories without a pinned dirFD MUST NOT stop reclamation before
++	// reaching an expired directory that actually releases a pinned dirFD.
++	baseFDs := pinnedDirFDs.Load()
++	oldOverride := pinnedDirFDBudgetOverride
++	pinnedDirFDBudgetOverride = int(baseFDs) + 2
++	defer func() { pinnedDirFDBudgetOverride = oldOverride }()
++
++	root := filepath.Join(t.TempDir(), "fd-reclaim-mixed")
++	runAndSeal := func(launch, session, respID string) {
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview(%s): %v", launch, err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("Start(%s): %v", launch, err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if st, dig := SealReviewWithDigest(root, launch, session); st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("SealReviewWithDigest(%s) = (%v, %q), want SealOK", launch, st, dig)
++		}
++	}
++
++	lOldNoFD := "review-f9999999-2222-4333-8444-555555555501"
++	lExpWithFD := "review-f9999999-2222-4333-8444-555555555502"
++	lFreshWithFD := "review-f9999999-2222-4333-8444-555555555503"
++	lNew := "review-f9999999-2222-4333-8444-555555555504"
++
++	// Create 2 active pinned launches (filling FD budget = baseFDs + 2).
++	runAndSeal(lExpWithFD, "019d0000-0000-7000-8000-fffffffff502", "resp_mix_2")
++	runAndSeal(lFreshWithFD, "019d0000-0000-7000-8000-fffffffff503", "resp_mix_3")
++
++	// Create an OLDER (-72h) valid expired producer directory on disk with NO pinned dirFD (cold-restart).
++	older := time.Now().Add(-72 * time.Hour)
++	dirNoFD := filepath.Join(root, lOldNoFD)
++	if err := os.Mkdir(dirNoFD, 0700); err != nil {
++		t.Fatal(err)
++	}
++	noFDMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: lOldNoFD, Started: older.UnixNano()})
++	if err := os.WriteFile(filepath.Join(dirNoFD, "producer.json"), noFDMarker, 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(filepath.Join(dirNoFD, "producer.json"), older, older)
++	_ = os.Chtimes(dirNoFD, older, older)
++
++	// Age lExpWithFD to -48h (newer than lOldNoFD, but past 24h retention and holds 1 pinned dirFD).
++	aged48 := time.Now().Add(-48 * time.Hour)
++	dirWithFD := filepath.Join(root, lExpWithFD)
++	raw2, _ := os.ReadFile(filepath.Join(dirWithFD, "receipt.json"))
++	var rr2 ReviewReceipt
++	_ = json.Unmarshal(raw2, &rr2)
++	rr2.Started = aged48.UnixNano()
++	rr2.Finished = aged48.UnixNano()
++	rr2.SealedAt = aged48.UnixNano()
++	agedRaw2, _ := json.Marshal(rr2)
++	agedSHA2 := sha256Hex(string(agedRaw2))
++	agedMarker2, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: lExpWithFD, Started: aged48.UnixNano()})
++	_ = os.WriteFile(filepath.Join(dirWithFD, "receipt.json"), agedRaw2, 0600)
++	_ = os.WriteFile(filepath.Join(dirWithFD, "seal.sha256"), []byte(agedSHA2), 0600)
++	_ = os.WriteFile(filepath.Join(dirWithFD, "producer.json"), agedMarker2, 0600)
++	for _, p := range []string{filepath.Join(dirWithFD, "receipt.json"), filepath.Join(dirWithFD, "seal.sha256"), filepath.Join(dirWithFD, "producer.json"), dirWithFD} {
++		_ = os.Chtimes(p, aged48, aged48)
++	}
++	key2 := filepath.Clean(root) + "\x00" + lExpWithFD
++	reviewMu.Lock()
++	if ent := reviewLedger[key2]; ent != nil {
++		ent.touched = aged48
++	}
++	if b, ok := sealedBindings[key2]; ok {
++		b.receiptSHA = agedSHA2
++		b.recordedAt = aged48
++		sealedBindings[key2] = b
++	}
++	reviewMu.Unlock()
++
++	// Part 1: directly exercise mixed (needDirs=1, needFDs=1) where lOldNoFD (-72h, 0 FDs) is older
++	// than lExpWithFD (-48h, 1 FD): loop MUST NOT stop after reclaiming lOldNoFD alone!
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	dirsRemoved, fdsReleased := reclaimExpiredBucketEntries(
++		lease.dir, root, []string{lOldNoFD, lExpWithFD, lFreshWithFD}, true, 1, 1,
++		&bucketReclaimState{cache: make(map[reclaimCacheKey]reclaimCacheEntry)},
++	)
++	lease.Close()
++	if dirsRemoved != 2 || fdsReleased != 1 {
++		t.Fatalf("mixed reclaim (needDirs=1, needFDs=1) = (dirs=%d, fds=%d), want (2, 1)", dirsRemoved, fdsReleased)
++	}
++	if _, statErr := os.Lstat(dirWithFD); !os.IsNotExist(statErr) {
++		t.Fatalf("expected FD-holding expired dir %s reclaimed: %v", lExpWithFD, statErr)
++	}
++
++	// Part 2: refill FD budget with lNew, age lNew (-48h), recreate older non-FD expired dir (-72h),
++	// and verify ReserveReview(lNew2) with ONLY FD budget exhausted (diskNeed=0, fdNeed=1) succeeds!
++	runAndSeal(lNew, "019d0000-0000-7000-8000-fffffffff504", "resp_mix_4")
++	if err := os.Mkdir(dirNoFD, 0700); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.WriteFile(filepath.Join(dirNoFD, "producer.json"), noFDMarker, 0600)
++	_ = os.Chtimes(filepath.Join(dirNoFD, "producer.json"), older, older)
++	_ = os.Chtimes(dirNoFD, older, older)
++
++	dir4 := filepath.Join(root, lNew)
++	raw4, _ := os.ReadFile(filepath.Join(dir4, "receipt.json"))
++	var rr4 ReviewReceipt
++	_ = json.Unmarshal(raw4, &rr4)
++	rr4.Started = aged48.UnixNano()
++	rr4.Finished = aged48.UnixNano()
++	rr4.SealedAt = aged48.UnixNano()
++	agedRaw4, _ := json.Marshal(rr4)
++	agedSHA4 := sha256Hex(string(agedRaw4))
++	agedMarker4, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: lNew, Started: aged48.UnixNano()})
++	_ = os.WriteFile(filepath.Join(dir4, "receipt.json"), agedRaw4, 0600)
++	_ = os.WriteFile(filepath.Join(dir4, "seal.sha256"), []byte(agedSHA4), 0600)
++	_ = os.WriteFile(filepath.Join(dir4, "producer.json"), agedMarker4, 0600)
++	for _, p := range []string{filepath.Join(dir4, "receipt.json"), filepath.Join(dir4, "seal.sha256"), filepath.Join(dir4, "producer.json"), dir4} {
++		_ = os.Chtimes(p, aged48, aged48)
++	}
++	key4 := filepath.Clean(root) + "\x00" + lNew
++	reviewMu.Lock()
++	if ent := reviewLedger[key4]; ent != nil {
++		ent.touched = aged48
++	}
++	if b, ok := sealedBindings[key4]; ok {
++		b.receiptSHA = agedSHA4
++		b.recordedAt = aged48
++		sealedBindings[key4] = b
++	}
++	reviewMu.Unlock()
++
++	lNew2 := "review-f9999999-2222-4333-8444-555555555505"
++	runAndSeal(lNew2, "019d0000-0000-7000-8000-fffffffff505", "resp_mix_5")
++	if _, statErr := os.Lstat(dir4); !os.IsNotExist(statErr) {
++		t.Fatalf("expected FD-holding expired dir %s reclaimed on FD-only pressure: %v", lNew, statErr)
++	}
++	if got := pinnedDirFDs.Load(); got != baseFDs+2 {
++		t.Fatalf("pinnedDirFDs after FD-only reclaim + lNew2 = %d, want %d", got, baseFDs+2)
++	}
++}
++
++func TestEnsureStagingDirEEXISTAndConcurrentBucketsNeverDeleteSharedStaging(t *testing.T) {
++	// Astra P2 #3 (PR #2280 R51): concurrent creation of shared .staging across preflight & review
++	// buckets must serialize under rootInitMu and an EEXIST caller MUST NEVER delete .staging on
++	// sync failure.
++	root := filepath.Join(t.TempDir(), "staging-concurrent")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lease.Close()
++
++	// Inject a failure on the first syncPinnedDir(root) call while racing two ensureStagingDir calls:
++	// the second caller MUST block on rootInitMu until the first finishes its rollback (or opens the
++	// already-synced .staging), and if .staging already existed on disk, a sync failure must not delete it.
++	origSync := syncDirFn
++	var syncCalls atomic.Int32
++	syncDirFn = func(dir string) error {
++		if filepath.Clean(dir) == filepath.Clean(root) {
++			if syncCalls.Add(1) == 1 {
++				return errors.New("injected first root sync fail")
++			}
++		}
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
++	}
++	defer func() { syncDirFn = origSync }()
++
++	errs := make(chan error, 2)
++	roots := make(chan *os.Root, 2)
++	var wg sync.WaitGroup
++	for range 2 {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			sr, serr := ensureStagingDir(lease.dir, root)
++			errs <- serr
++			roots <- sr
++		}()
++	}
++	wg.Wait()
++	close(errs)
++	close(roots)
++
++	succeeded := 0
++	for sr := range roots {
++		if sr != nil {
++			succeeded++
++			_ = sr.Close()
++		}
++	}
++	if succeeded != 1 {
++		t.Fatalf("expected exactly 1 caller to succeed after serialized rollback + retry, got %d", succeeded)
++	}
++	// Verify .staging still exists and is intact.
++	if fi, serr := os.Lstat(filepath.Join(root, ".staging")); serr != nil || !fi.IsDir() {
++		t.Fatalf(".staging missing after concurrent ensureStagingDir: fi=%v err=%v", fi, serr)
++	}
++}
++
++func TestReviewReceiptObserveStreamChunkSingleBOMAcceptedDoubleAndTruncatedRejected(t *testing.T) {
++	// Sol P2 #1 (PR #2280 R51): Collector.ObserveStreamChunk must also strip at most one leading
++	// UTF-8 BOM (including split across chunks) and reject double BOM or truncated 0xEF at EOF.
++	frame := "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_obs_bom","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++
++	runCase := func(name, launch, session string, chunks [][]byte) SealStatus {
++		root := filepath.Join(t.TempDir(), name)
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		for _, ch := range chunks {
++			c.ObserveStreamChunk(ch)
++		}
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReview(root, launch, session)
++	}
++
++	if st := runCase("single-bom-split", "review-faaaaaaa-2222-4333-8444-555555555501", "019d0000-0000-7000-8000-fffffffff601",
++		[][]byte{{0xEF}, append([]byte{0xBB, 0xBF}, []byte(frame)...)}); st != SealOK {
++		t.Fatalf("split single BOM SealReview = %v, want SealOK", st)
++	}
++	if st := runCase("double-bom", "review-faaaaaaa-2222-4333-8444-555555555502", "019d0000-0000-7000-8000-fffffffff602",
++		[][]byte{[]byte("\xef\xbb\xbf\xef\xbb\xbf" + frame)}); st != SealRejected {
++		t.Fatalf("double BOM SealReview = %v, want SealRejected", st)
++	}
++	if st := runCase("truncated-bom", "review-faaaaaaa-2222-4333-8444-555555555503", "019d0000-0000-7000-8000-fffffffff603",
++		[][]byte{{0xEF}}); st != SealRejected {
++		t.Fatalf("truncated 0xEF SealReview = %v, want SealRejected", st)
 +	}
 +}
