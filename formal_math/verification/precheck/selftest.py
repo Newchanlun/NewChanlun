@@ -306,6 +306,18 @@ CASES = [
      1, {"LAKE_FILE"}),
     ("Lake 配置名：审计程序包更深一层", {F + b"verification/auditor/sub/lakefile.toml": X}, "infra/x", True, 1,
      {"LAKE_FILE"}),
+    # 为清理现存 formal_math/.gitignore 留的口子：infra 获放行可删，谁都不能新增或保留
+    ("清理 .gitignore：infra 有放行删除", {}, "infra/x", True, 0, set(), {F + b".gitignore": X}),
+    ("清理 .gitignore：infra 无放行删除", {}, "infra/x", False, 1, {"TRUST_UNAPPROVED"}, {F + b".gitignore": X}),
+    ("清理 .gitignore：proof 删除", {}, "proof/x", False, 1, {"PATH_SCOPE", "TRUSTED_DRIFT"},
+     {F + b".gitignore": X}),
+    ("清理 .gitignore：proof 改别处而保留它", {F + b".gitignore": X, F + b"Chan/Thm/B.lean": X}, "proof/x", False, 1,
+     {"PATH_GRAMMAR"}, {F + b".gitignore": X}),
+    ("清理 .gitignore：infra 有放行改它而保留", {F + b".gitignore": b"y\n"}, "infra/x", True, 1, {"PATH_GRAMMAR"},
+     {F + b".gitignore": X}),
+    ("清理 .gitignore：infra 有放行新增", {F + b".gitignore": X}, "infra/x", True, 1, {"PATH_GRAMMAR"}),
+    ("清理 .gitignore：decl 新增", {F + b".gitignore": X}, "decl/x", False, 1,
+     {"PATH_SCOPE", "PATH_GRAMMAR", "TRUSTED_DRIFT"}),
     # 规则 7：内容角色下受信面逐个比对
 ] + [("内容角色改受信文件 %s" % p.decode(), {p: X}, "proof/x", False, 1, {"PATH_SCOPE", "TRUSTED_DRIFT"})
      for p in TRUSTED_LIST] + [

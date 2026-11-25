@@ -47,7 +47,7 @@ python3 -I precheck.py [--trusted-change-approved] <仓库> <基线提交> <被�
 | `BASE_FORM`（退 2） | 2 | 基线清单有上一行的任一问题 | 同上 |
 | `BRANCH_ROLE` | 2、4 | 分支名不合文法、解析不出角色，却改了受管路径 | 分支名参数对固定文法 `(decl\|proof\|audit\|infra)/W(/W)*` 全匹配，`W = [A-Za-z0-9]+([._-][A-Za-z0-9]+)*`。空后缀、`..`、首尾分隔符、空白、非 ASCII、多余前缀都不给角色 |
 | `PATH_SCOPE` | 4、5 | 某条改动不在该角色的路径表里。两侧有一侧是文件时，路径须落在表项内（以 `/` 结尾的表项按字节前缀，其余逐字相等）；两侧都是目录或不存在时，目录须落在表项内或是某个表项的祖先目录 | 清单集合差 |
-| `TRUST_UNAPPROVED` | 5 | `infra` 角色的改动集合碰了受信面（门禁目录节点本身或其下任一条目、五个受信文件），调用方没给放行开关 | 清单集合差 |
+| `TRUST_UNAPPROVED` | 5 | `infra` 角色的改动集合碰了受信面（门禁目录节点本身或其下任一条目、六个受信文件），调用方没给放行开关 | 清单集合差 |
 | `MODE` | 6 | `formal_math` 根节点不是 `40000` 目录，或其下有原始模式不是 `100644` 文件或 `40000` 目录的条目：符号链接、可执行位、子模块、`100664` 一类非规范文件模式、`040000` 一类带前导零的目录模式；两个仓库根下受信文件不是 `100644`；它们的祖先目录不是 `40000` | 被审清单的原始模式串 |
 | `EMPTY_TREE` | 6 | `formal_math` 下（含根节点）有目录节点不是任何文件的祖先，即目录节点集合多于文件路径的祖先集合。空子树、只含空子树的目录、空的 `formal_math` 都在内 | 被审清单 |
 | `PATH_GRAMMAR` | 6 | `formal_math/` 下某个路径段不合 `[A-Za-z0-9_]+([.-][A-Za-z0-9_]+)*`（隐藏名、空白、换行、非 ASCII、以点或连字符结尾、连续分隔符都进不来），或两条路径只差大小写 | 被审清单 |
@@ -62,7 +62,9 @@ python3 -I precheck.py [--trusted-change-approved] <仓库> <基线提交> <被�
 
 ### 受信面
 
-受信文件逐个列全名：`formal_math/lakefile.toml`、`formal_math/lake-manifest.json`、`formal_math/lean-toolchain`、`scripts/fm_env.sh`、`.github/workflows/formal-math.yml`。外加门禁目录 `formal_math/verification/`，第 7 条按目录节点的对象名比较。
+受信文件逐个列全名：`formal_math/lakefile.toml`、`formal_math/lake-manifest.json`、`formal_math/lean-toolchain`、`scripts/fm_env.sh`、`.github/workflows/formal-math.yml`，以及 `formal_math/.gitignore`。外加门禁目录 `formal_math/verification/`，第 7 条按目录节点的对象名比较。
+
+`formal_math/.gitignore` 是为清理现存文件留的口子：它在受信文件里，所以只有 `infra` 获放行后能动它；形状规则（`PATH_GRAMMAR`，隐藏名）照旧不许任何被审提交含它。两条合起来，效果是 `infra` 获放行后可以删除它，任何人都不能新增或保留它。文件删掉以后这一项可以从清单里去掉。
 
 ### 角色路径表（前缀均在 `formal_math/` 下，除另注）
 
@@ -71,7 +73,7 @@ python3 -I precheck.py [--trusted-change-approved] <仓库> <基线提交> <被�
 | `decl` | `Chan/Defs/`、`Chan/Hypotheses/`、`Chan/Audit/Literal/`、`Chan/Proxy/`、`ChanChallenge/`、`sources/`、`blueprint/`、`statement-lock.json`、`formalization.yaml`、`garbage-signoffs.yaml`、`HISTORY.md` |
 | `proof` | `Chan/Thm/`、`Chan/Proofs/`、`Chan/Exec/`、`Chan/Final/`、`Chan/Final.lean`、`Chan.lean`、`ChanTest/`、`ChanDyn/`、`ChanExplore/`、`ChanExplore.lean` |
 | `audit` | `Chan/Audit/Math/`、`Chan/Audit/Separation/`、`Chan/Audit/Cases/`、`ChanTest/` |
-| `infra` | 受信面全部（五个受信文件，含仓库根下的两个，加 `verification/`），外加 `README.md`。`README.md` 不是受信文件，只改它不需要放行 |
+| `infra` | 受信面全部（六个受信文件，含仓库根下的两个与只为删除而列的 `.gitignore`，加 `verification/`），外加 `README.md`。`README.md` 不是受信文件，只改它不需要放行 |
 
 内容角色的表与受信面不相交，`infra` 的表里没有任何内容路径；`selftest.py` 对此有结构断言。
 
@@ -114,6 +116,7 @@ python3 -I precheck.py [--trusted-change-approved] <仓库> <基线提交> <被�
 | `decl` 改 `verification/garbage-signoffs.yaml` | 允许 | 不允许 | 门禁目录不给内容角色开口（备忘 3.3） |
 | `infra` 改 `verification/garbage-signoffs.yaml` | 只在基线缺此文件时可新建为空 `{}`；基线已有时不许改删 | 获放行即可改删，与门禁目录其它文件一样 | 该文件归受信面后，它的改动走受信文件流程；特例逻辑 `initializes_empty_signoffs` 删去。见「待后续片处理」 |
 | `formal_math/garbage-signoffs.yaml` | 无 | `decl`，并列入顶层固定名字 | 给上一项预留的新家，沿用备忘原型 |
+| `formal_math/.gitignore` | 不属于任何角色 | `infra`，列为受信文件，需放行；形状规则仍判它红，所以实际只能删 | 为清理现存文件留的口子：没有它，删除现存文件的提交本身过不了预检 |
 | 改受信面 | `infra` 直接通过 | `infra` 需放行开关 | 备忘 3.1 受信文件流程 |
 | 分支名来源 | 读 `git symbolic-ref HEAD`；分离 HEAD 时读环境变量 `GITHUB_HEAD_REF`，两者都没有退 2 | 第 4 个命令行参数；不读 `HEAD` 也不读环境变量；空串合法，只是解析不出角色 | 门禁只审提交，输入显式化 |
 | 分支名文法 | `前缀/` 后去掉空白非空即可 | 固定文法 | 备忘 3.3 第 2 条 |
@@ -141,7 +144,7 @@ python3 -I precheck.py [--trusted-change-approved] <仓库> <基线提交> <被�
 ## 待后续片处理
 
 - `formal_math/verification/garbage-signoffs.yaml` 搬出门禁目录，建议落到 `formal_math/garbage-signoffs.yaml`（`decl`）。搬家本身同时动门禁目录与 `decl` 路径，要拆两步或记账放行。
-- `formal_math/.gitignore` 不合形状规则。它只影响未跟踪文件，对按提交审的门禁没有作用，建议并入仓库根 `.gitignore`（`formal_math/.lake/`）后删除。
+- `formal_math/.gitignore` 不合形状规则。它只影响未跟踪文件，对按提交审的门禁没有作用，建议并入仓库根 `.gitignore`（`formal_math/.lake/`）后由 `infra` 获放行删除；删除后把它从受信文件清单里去掉。
 - 门禁目录里旧门 1、门 2 的 16 个 Lake 配置名夹具：旧门 1、门 2 在第四片随旧门禁一并删除；若届时仍需配置类夹具，改为在自测里现造，不入库。
 - 审计程序包落地时只能用 `verification/auditor/` 下那三个逐字写死的配置路径。
 - `formal_math/Chan/Smoke.lean` 及 `Chan/` 根下的其它文件不属于任何角色，改它们在任何角色下都是 `PATH_SCOPE`（旧表同样如此）。
@@ -158,7 +161,7 @@ TMPDIR=<有空间的目录> python3 -I selftest.py --mutants  # 弱化自测
 
 - 用例在临时目录（跟随 `TMPDIR`）里现造 git 仓库，仓库路径含非 ASCII 字符与空格。树对象全部用 `hash-object -t tree --literally` 直接写原始字节，所以能造出空子树、子模块、符号链接、非规范模式、重复或乱序的条目、名字含 `/` 的条目、目录条目指向 blob、含换行的路径。暂存区与工作树里故意放了会被判红的东西（暂存的 `formal_math/lakefile.lean`、掩盖提交里符号链接的普通文件），预检必须不受影响。
 - 每个用例断言退出码与规则码集合；绿例逐字断言绿行。标准输出只许出现 `PRECHECK RED`、`PRECHECK GREEN` 行，标准错误里的 `PRECHECK` 行只许是故障行，错位即失败。参数、祖先、输出类用例另断言失败原因：管道断开时标准错误里确有 `Broken pipe`，标准输出关闭时确有 `Bad file descriptor`，ASCII locale（`LC_ALL=C` 加 `-X utf8=0`）下绿行按 UTF-8 解出后逐字相符，红行按 UTF-8 解出后含预期的中文说明；含换行的路径在红行里转义成 `\x0a`，整行仍只占一行。
-- 第一轮独审 B1 至 B5 的每个复现形状都有同名前缀 `R1-` 的用例；五个受信文件各有「内容角色改它」「内容角色删它」两条用例。
+- 第一轮独审 B1 至 B5 的每个复现形状都有同名前缀 `R1-` 的用例；五个常设受信文件各有「内容角色改它」「内容角色删它」两条用例；`formal_math/.gitignore` 的清理口子有七条用例（`infra` 有放行删除为绿，无放行删除、内容角色删除、保留、修改、新增都红）。
 - `--mutants` 先断言未改弱的副本全过，再把预检在副本里逐一改弱，每种弱化都必须有用例失败；改弱点在源码里找不到或不唯一时自测判失败。弱化清单见 `selftest.py` 的 `MUTANTS`：去掉第 7 步、去掉模式判断、去掉空目录核对、目录节点的改动不过路径权限、`infra` 门禁目录前缀放宽为 `formal_math/`、`proof` 的 `Chan/Thm/` 放宽为 `Chan/`、第 7 步漏比 `lean-toolchain`、放行开关让内容角色跳过第 7 步、去掉树条目重名检查、去掉树条目次序检查、Lake 配置名只查顶层、去掉大小写冲突判断、祖先检查恒真、分支名文法放宽、目录条目不核对对象类型。
 - 第一轮独审另做的 8 种弱化里，M1、M2、M3、M4、M7 已收进上面的清单；M8（去掉空子树检查）对应「去掉空目录核对」。M5（去掉 `diff-tree` 的 `--no-renames`）不再适用：预检不用 `diff-tree`，改动集合是两份清单按路径做的集合差，没有重命名或复制检测这回事。M6（受信文件模式检查漏掉 `formal-math.yml`）不再适用：模式检查对整份清单一视同仁，没有逐个文件的列表可漏；`formal-math.yml` 改成可执行、符号链接、目录各有用例。
 - 自测的合同：正常环境与 ASCII locale 下，预检正确时退 0，被改弱时退非 0。自测自己的输出按 UTF-8 字节写文件描述符。自测在被破坏的输出环境下如何退出不在合同内。

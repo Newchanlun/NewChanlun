@@ -9,8 +9,9 @@ import sys
 FLAG = b"--trusted-change-approved"
 FM_ROOT, FM = b"formal_math", b"formal_math/"
 GATE_DIR = FM + b"verification"
+# 最后一项只为清理现存文件而列：infra 获放行可删它，形状规则仍不许任何被审提交含它。
 TRUSTED_FILES = (FM + b"lakefile.toml", FM + b"lake-manifest.json", FM + b"lean-toolchain",
-                 b"scripts/fm_env.sh", b".github/workflows/formal-math.yml")
+                 b"scripts/fm_env.sh", b".github/workflows/formal-math.yml", FM + b".gitignore")
 TRUSTED = TRUSTED_FILES + (GATE_DIR,)
 TRUSTED_SURFACE = TRUSTED_FILES + (GATE_DIR + b"/",)
 OUTSIDE = tuple(p for p in TRUSTED_FILES if not p.startswith(FM))
