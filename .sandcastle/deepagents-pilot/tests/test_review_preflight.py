@@ -2437,7 +2437,6 @@ def test_open_http_disables_tls_suppress_ragged_eofs(tmp_path, monkeypatch):
     payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
     raw_http = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + payload
     server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     server_ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
 
     mode = {"ragged": True}
@@ -2625,6 +2624,56 @@ def test_round_trip_rejects_lifecycle_events_missing_or_null_response():
             current["body"] = f"event: {ev_name}\ndata: {payload}\n\n{completed}".encode()
             res = preflight._round_trip_http(url, KEY, OPUS, "preflight-missing-resp-obj", preflight.Deadline(3))
             assert res["ok"] is False, (ev_name, payload, res)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_ignores_sse_extension_fields_but_rejects_malformed_lines():
+    """Astra P2 #3 (R74): WHATWG SSE 扩展元数据字段（如 x-proxy-meta / x-keepalive）须被忽略放行，
+    而裸 JSON 行或标准字段大小写变体（Data: / Event:）仍须严格拒绝。"""
+    current = {"body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 SSE 扩展字段回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 SSE 扩展字段回归
+        completed = 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        current["body"] = (
+            "x-proxy-meta: trace=123\n"
+            "x-keepalive:\n"
+            + completed
+            + "x-post-meta: done\n\n"
+        ).encode()
+        res_ok = preflight._round_trip_http(url, KEY, OPUS, "preflight-sse-ext-ok", preflight.Deadline(3))
+        assert res_ok["ok"] is True, res_ok
+
+        for bad_line in (
+            'unknown_bare_line',
+            '{"type":"error","error":{"message":"bare-json"}}',
+            'Data: {"type":"error"}',
+            'Event: response.failed',
+            'HTTP/1.1 500 Bad Gateway',
+        ):
+            current["body"] = (completed + bad_line + "\n\n").encode()
+            res_bad = preflight._round_trip_http(url, KEY, OPUS, "preflight-sse-ext-bad", preflight.Deadline(3))
+            assert res_bad["ok"] is False, (bad_line, res_bad)
     finally:
         srv.shutdown()
         srv.server_close()

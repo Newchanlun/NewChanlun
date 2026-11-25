@@ -2954,10 +2954,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..c98c7e3
+index 0000000..d32702d
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,1518 @@
+@@ -0,0 +1,1557 @@
 +package executor
 +
 +import (
@@ -3622,6 +3622,45 @@ index 0000000..c98c7e3
 +		c.HandlerDone(true)
 +		if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealRejected {
 +			t.Fatalf("bare JSON tail without blank delimiter SealReview = %v, want SealRejected", st)
++		}
++	})
++
++	t.Run("unknown WHATWG SSE extension metadata fields are ignored and seal cleanly", func(t *testing.T) {
++		// Astra P2 #3 (PR #2280 R74): valid WHATWG SSE extension metadata lines (x-proxy-meta /
++		// x-keepalive) must be ignored rather than tripping strict SSE framing, while bare JSON
++		// lines remain rejected above.
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-a4444444-2222-4333-8444-555555555509"
++		session := "019d0000-0000-7000-8000-555555555549"
++		sseExt := "x-proxy-meta: trace=123\nx-keepalive:\n" +
++			"data: " + `{"type":"response.completed","response":{"id":"resp_ext_exec","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n" +
++			"x-post-meta: done\n\n"
++		ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		rt := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++			return io.NopCloser(strings.NewReader(sseExt))
++		}}
++		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(rt))
++		stream, err := exec.ExecuteStream(ctx, auth, req, opts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for chunk := range stream.Chunks {
++			if chunk.Err == nil && chunk.Payload != nil {
++				c.ObserveStreamChunk(chunk.Payload)
++			}
++		}
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		if st := preflightreceipt.SealReview(root, launch, session); st != preflightreceipt.SealOK {
++			t.Fatalf("SSE extension metadata fields SealReview = %v, want SealOK", st)
 +		}
 +	})
 +
@@ -4477,7 +4516,7 @@ index 0000000..c98c7e3
 +	})
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..62c147c 100644
+index 6074124..b67006f 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,10 +3,12 @@ package executor
@@ -4525,7 +4564,7 @@ index 6074124..62c147c 100644
  
  	var bufferedChunks [][]byte
  	var initialChunks [][]byte
-@@ -444,19 +455,501 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -444,19 +455,513 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		}
  	}
  	go func() {
@@ -4589,7 +4628,8 @@ index 6074124..62c147c 100644
 +				bytes.Equal(l, []byte("data")) || bytes.HasPrefix(l, dataTag) ||
 +				bytes.Equal(l, []byte("event")) || bytes.HasPrefix(l, []byte("event:")) ||
 +				bytes.Equal(l, []byte("id")) || bytes.HasPrefix(l, []byte("id:")) ||
-+				bytes.Equal(l, []byte("retry")) || bytes.HasPrefix(l, []byte("retry:"))
++				bytes.Equal(l, []byte("retry")) || bytes.HasPrefix(l, []byte("retry:")) ||
++				preflightreceipt.IsValidSSEExtensionField(l)
 +		}
 +		drainAndValidateFailureTail := func() {
 +			// Both strict review and legacy Codex preflight (holdTerminalUntilEOF) must validate and
@@ -4641,7 +4681,8 @@ index 6074124..62c147c 100644
 +				}
 +				if tl[0] == ':' ||
 +					bytes.Equal(tl, []byte("id")) || bytes.HasPrefix(tl, []byte("id:")) ||
-+					bytes.Equal(tl, []byte("retry")) || bytes.HasPrefix(tl, []byte("retry:")) {
++					bytes.Equal(tl, []byte("retry")) || bytes.HasPrefix(tl, []byte("retry:")) ||
++					preflightreceipt.IsValidSSEExtensionField(tl) {
 +					continue
 +				}
 +				if bytes.Equal(tl, []byte("event")) || bytes.HasPrefix(tl, []byte("event:")) {
@@ -5004,6 +5045,16 @@ index 6074124..62c147c 100644
 +					sseEventDataBytes += len(rawData) + 1
 +					continue
 +				}
++				if preflightreceipt.IsValidSSEExtensionField(line) {
++					if currentEventMetaBytes+len(line)+1 > maxPendingStrictTerminalBytes {
++						pendingStrictTerminal = nil
++						pendingStrictBytes = 0
++						failPostTerminal()
++						return
++					}
++					currentEventMetaBytes += len(line) + 1
++					continue
++				}
 +				if bytes.Equal(line, []byte("event")) || bytes.HasPrefix(line, []byte("event:")) {
 +					if len(line) > 6 {
 +						sseEventName = string(stripOneSpace(line[6:]))
@@ -5029,7 +5080,7 @@ index 6074124..62c147c 100644
  				translatedLine = transformed
  			} else if bytes.HasPrefix(line, dataTag) {
  				data := bytes.TrimSpace(line[5:])
-@@ -541,11 +1034,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -541,11 +1046,90 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				return
  			}
  		}
@@ -7529,10 +7580,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..6bd8d24 100644
+index e69de29..de58f0d 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11209 @@
+@@ -0,0 +1,11429 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -8017,7 +8068,7 @@ index e69de29..6bd8d24 100644
 +// disk persistence onto a globally bounded worker pool (<= maxFailurePersistWorkers, deduplicated
 +// per launch so queue length is bounded by len(reviewLedger)).
 +func enqueueExistingReviewTurnFailureLocked(entry *reviewEntry, turnSeq uint64, taint bool) {
-+	if entry == nil || entry.sealedFlag || entry.sealing {
++	if entry == nil || entry.sealedFlag {
 +		return
 +	}
 +	if turnSeq > entry.pendingFailedTurnSeq.Load() {
@@ -8254,6 +8305,7 @@ index e69de29..6bd8d24 100644
 +	completedOutputSHA        string
 +	lastItemResponseID        string
 +	lastItemOutputSHA         string
++	lastItemCanonKey          string
 +	lastItemSeq               int
 +	hasLastItemOutputIndex    bool
 +	lastItemOutputIndex       int64
@@ -8296,6 +8348,7 @@ index e69de29..6bd8d24 100644
 +func (t *strictStreamTracker) resetTracking() {
 +	t.lastItemResponseID = ""
 +	t.lastItemOutputSHA = ""
++	t.lastItemCanonKey = ""
 +	t.lastItemSeq = 0
 +	t.hasLastItemOutputIndex = false
 +	t.lastItemOutputIndex = 0
@@ -8871,11 +8924,15 @@ index e69de29..6bd8d24 100644
 +	completedNonFinalIDs := make(map[string]struct{}, len(output))
 +	matchedDoneKeys := make(map[string]struct{}, len(t.doneItems))
 +	matchedOutputIdx := make([]bool, len(output))
++	lastOutputCanonKey := ""
 +	for idx, item := range output {
 +		pos := int64(idx)
-+		canonKey, _, _, _, okBind := t.bindIdentity(item.ID, pos, true)
++		canonKey, okBind := t.bindCompletedItemIdentity(item.ID, pos)
 +		if !okBind {
 +			return false
++		}
++		if idx == len(output)-1 {
++			lastOutputCanonKey = canonKey
 +		}
 +		itemKind := classifyOutputItemKind(item.Type, item.Role, item.Phase, true)
 +		if prevKind, exists := t.itemKindByKey[canonKey]; exists {
@@ -9007,8 +9064,14 @@ index e69de29..6bd8d24 100644
 +		t.responseID = respID
 +	}
 +	t.recomputeLastItemOutput()
-+	if completedSHA != "" && (t.lastItemOutputSHA != completedSHA || hasPendingItems) {
-+		return false
++	if completedSHA != "" {
++		lastIdx := len(output) - 1
++		if hasPendingItems || !matchedOutputIdx[lastIdx] || t.lastItemOutputSHA != completedSHA {
++			return false
++		}
++		if t.lastItemCanonKey != "" && t.lastItemCanonKey != lastOutputCanonKey {
++			return false
++		}
 +	}
 +	return true
 +}
@@ -10478,6 +10541,160 @@ index e69de29..6bd8d24 100644
 +	return "", "", 0, false, true
 +}
 +
++func (t *strictStreamTracker) hasTrackedKey(key string) bool {
++	if key == "" {
++		return false
++	}
++	if _, ok := t.doneItemKeys[key]; ok {
++		return true
++	}
++	if _, ok := t.doneItems[key]; ok {
++		return true
++	}
++	if _, ok := t.pendingItems[key]; ok {
++		return true
++	}
++	if _, ok := t.failedItemKeys[key]; ok {
++		return true
++	}
++	if _, ok := t.completedSubItemKeys[key]; ok {
++		return true
++	}
++	if _, ok := t.incompleteItemKeys[key]; ok {
++		return true
++	}
++	if _, ok := t.streamedNonFinalKeys[key]; ok {
++		return true
++	}
++	if _, ok := t.itemKindByKey[key]; ok {
++		return true
++	}
++	if _, ok := t.itemTypeByKey[key]; ok {
++		return true
++	}
++	if _, ok := t.itemSeqByKey[key]; ok {
++		return true
++	}
++	if _, ok := t.contentPartByItem[key]; ok {
++		return true
++	}
++	if _, ok := t.textDeltaHashByItem[key]; ok {
++		return true
++	}
++	if _, ok := t.textPrefixByItem[key]; ok {
++		return true
++	}
++	if _, ok := t.toolMetaByKey[key]; ok {
++		return true
++	}
++	if _, ok := t.toolPayloadFinalByItem[key]; ok {
++		return true
++	}
++	if _, ok := t.toolPayloadDeltaByItem[key]; ok {
++		return true
++	}
++	if _, ok := t.toolPayloadPrefixByItem[key]; ok {
++		return true
++	}
++	return false
++}
++
++// bindCompletedItemIdentity resolves item identity in response.completed.output.
++// Unlike mid-stream bindIdentity (which rejects reusing a completed index-only slot),
++// the terminal snapshot may supply an item.ID for a previously completed index-only item
++// provided that item.ID was never tracked as a distinct item and neither ID nor pos is bound.
++func (t *strictStreamTracker) bindCompletedItemIdentity(itemID string, pos int64) (string, bool) {
++	if itemID != "" {
++		if _, idBound := t.itemIndexByID[itemID]; !idBound {
++			if _, posBound := t.itemIDByIndex[pos]; !posBound {
++				idxKey := "idx:" + strconv.FormatInt(pos, 10)
++				idKey := "id:" + itemID
++				if _, idxDone := t.doneItemKeys[idxKey]; idxDone && !t.hasTrackedKey(idKey) {
++					if len(t.itemIndexByID) >= maxTrackedOutputItems || len(t.itemIDByIndex) >= maxTrackedOutputItems {
++						return "", false
++					}
++					delete(t.doneItemKeys, idxKey)
++					t.doneItemKeys[idKey] = struct{}{}
++					if rec, ok := t.doneItems[idxKey]; ok {
++						delete(t.doneItems, idxKey)
++						rec.itemID = itemID
++						rec.outputIndex = pos
++						rec.hasOutputIndex = true
++						t.doneItems[idKey] = rec
++					}
++					if _, ok := t.completedSubItemKeys[idxKey]; ok {
++						delete(t.completedSubItemKeys, idxKey)
++						t.completedSubItemKeys[idKey] = struct{}{}
++					}
++					if _, ok := t.incompleteItemKeys[idxKey]; ok {
++						delete(t.incompleteItemKeys, idxKey)
++						t.incompleteItemKeys[idKey] = struct{}{}
++					}
++					if _, ok := t.streamedNonFinalKeys[idxKey]; ok {
++						delete(t.streamedNonFinalKeys, idxKey)
++						t.streamedNonFinalKeys[idKey] = struct{}{}
++						if t.streamedNonFinalIDs == nil {
++							t.streamedNonFinalIDs = make(map[string]struct{})
++						}
++						t.streamedNonFinalIDs[itemID] = struct{}{}
++					}
++					if v, ok := t.itemKindByKey[idxKey]; ok {
++						delete(t.itemKindByKey, idxKey)
++						t.itemKindByKey[idKey] = v
++					}
++					if v, ok := t.itemTypeByKey[idxKey]; ok {
++						delete(t.itemTypeByKey, idxKey)
++						t.itemTypeByKey[idKey] = v
++					}
++					if v, ok := t.itemSeqByKey[idxKey]; ok {
++						delete(t.itemSeqByKey, idxKey)
++						t.itemSeqByKey[idKey] = v
++					}
++					if v, ok := t.contentPartByItem[idxKey]; ok {
++						delete(t.contentPartByItem, idxKey)
++						t.contentPartByItem[idKey] = v
++					}
++					if v, ok := t.textDeltaHashByItem[idxKey]; ok {
++						delete(t.textDeltaHashByItem, idxKey)
++						t.textDeltaHashByItem[idKey] = v
++					}
++					if v, ok := t.textPrefixByItem[idxKey]; ok {
++						delete(t.textPrefixByItem, idxKey)
++						t.textPrefixByItem[idKey] = v
++					}
++					if v, ok := t.toolMetaByKey[idxKey]; ok {
++						delete(t.toolMetaByKey, idxKey)
++						t.toolMetaByKey[idKey] = v
++					}
++					if v, ok := t.toolPayloadFinalByItem[idxKey]; ok {
++						delete(t.toolPayloadFinalByItem, idxKey)
++						t.toolPayloadFinalByItem[idKey] = v
++					}
++					if v, ok := t.toolPayloadDeltaByItem[idxKey]; ok {
++						delete(t.toolPayloadDeltaByItem, idxKey)
++						t.toolPayloadDeltaByItem[idKey] = v
++					}
++					if v, ok := t.toolPayloadPrefixByItem[idxKey]; ok {
++						delete(t.toolPayloadPrefixByItem, idxKey)
++						t.toolPayloadPrefixByItem[idKey] = v
++					}
++					if t.itemIndexByID == nil {
++						t.itemIndexByID = make(map[string]int64)
++					}
++					if t.itemIDByIndex == nil {
++						t.itemIDByIndex = make(map[int64]string)
++					}
++					t.itemIndexByID[itemID] = pos
++					t.itemIDByIndex[pos] = itemID
++					return idKey, true
++				}
++			}
++		}
++	}
++	canonKey, _, _, _, okBind := t.bindIdentity(itemID, pos, true)
++	return canonKey, okBind
++}
++
 +func (t *strictStreamTracker) assignSeq(canonKey string) (int, bool) {
 +	if canonKey != "" {
 +		if existing, exists := t.itemSeqByKey[canonKey]; exists {
@@ -11226,6 +11443,7 @@ index e69de29..6bd8d24 100644
 +	if t.responseID == "" {
 +		t.lastItemOutputSHA = ""
 +		t.lastItemResponseID = ""
++		t.lastItemCanonKey = ""
 +		return
 +	}
 +	allIndexed := t.pendingUnkeyed == 0 && t.streamedNonFinalUnkeyed == 0 && len(t.unkeyedDoneItems) == 0
@@ -11281,6 +11499,7 @@ index e69de29..6bd8d24 100644
 +					if rec, isDone := t.doneItems[maxKey]; isDone && rec.isFinal && rec.outputTextSHA != "" {
 +						t.lastItemOutputSHA = rec.outputTextSHA
 +						t.lastItemResponseID = t.responseID
++						t.lastItemCanonKey = maxKey
 +						return
 +					}
 +				}
@@ -11288,11 +11507,13 @@ index e69de29..6bd8d24 100644
 +		}
 +		t.lastItemOutputSHA = ""
 +		t.lastItemResponseID = ""
++		t.lastItemCanonKey = ""
 +		return
 +	}
 +	if len(t.pendingItems) > 0 || t.pendingUnkeyed > 0 {
 +		t.lastItemOutputSHA = ""
 +		t.lastItemResponseID = ""
++		t.lastItemCanonKey = ""
 +		return
 +	}
 +	hasMaxIdx := false
@@ -11321,6 +11542,7 @@ index e69de29..6bd8d24 100644
 +	}
 +	bestSeq := 0
 +	var bestRec doneItemSummary
++	bestKey := ""
 +	foundBest := false
 +	for k, rec := range t.doneItems {
 +		s := rec.seq
@@ -11330,6 +11552,7 @@ index e69de29..6bd8d24 100644
 +		if s > bestSeq {
 +			bestSeq = s
 +			bestRec = rec
++			bestKey = k
 +			foundBest = true
 +		}
 +	}
@@ -11337,23 +11560,27 @@ index e69de29..6bd8d24 100644
 +		if rec.seq > bestSeq {
 +			bestSeq = rec.seq
 +			bestRec = rec
++			bestKey = ""
 +			foundBest = true
 +		}
 +	}
 +	if !foundBest || bestSeq < t.maxItemSeq || bestSeq <= t.maxNonFinalSeq || !bestRec.isFinal || bestRec.outputTextSHA == "" {
 +		t.lastItemOutputSHA = ""
 +		t.lastItemResponseID = ""
++		t.lastItemCanonKey = ""
 +		return
 +	}
 +	if bestRec.hasOutputIndex {
 +		if (hasMaxIdx && bestRec.outputIndex < maxIdx) || (hasMaxNonFinalIdx && bestRec.outputIndex <= maxNonFinalIdx) {
 +			t.lastItemOutputSHA = ""
 +			t.lastItemResponseID = ""
++			t.lastItemCanonKey = ""
 +			return
 +		}
 +	}
 +	t.lastItemOutputSHA = bestRec.outputTextSHA
 +	t.lastItemResponseID = t.responseID
++	t.lastItemCanonKey = bestKey
 +}
 +
 +func (t *strictStreamTracker) recordNonFinal(seq int, canonKey, itemID string, outputIndex int64, hasOutputIndex, countUnkeyed bool) bool {
@@ -12651,7 +12878,8 @@ index e69de29..6bd8d24 100644
 +			continue
 +		}
 +		if bytes.Equal(rawLine, []byte("id")) || bytes.HasPrefix(rawLine, []byte("id:")) ||
-+			bytes.Equal(rawLine, []byte("retry")) || bytes.HasPrefix(rawLine, []byte("retry:")) {
++			bytes.Equal(rawLine, []byte("retry")) || bytes.HasPrefix(rawLine, []byte("retry:")) ||
++			IsValidSSEExtensionField(rawLine) {
 +			continue
 +		}
 +		// Any unrecognized non-SSE line (such as bare JSON without data:) violates strict SSE framing.
@@ -12663,6 +12891,36 @@ index e69de29..6bd8d24 100644
 +		c.mu.Unlock()
 +		c.taintStreamAnomaly()
 +	}
++}
++
++// IsValidSSEExtensionField reports whether line is a syntactically valid WHATWG SSE
++// unknown/extension metadata field carrying an explicit colon (e.g. "x-proxy-meta: value" or
++// "x-keepalive:") that receivers must ignore. Unknown bare lines without a colon, bare JSON
++// objects/arrays, malformed non-token lines, and case-variants of standard SSE fields
++// ("Data:", "Event:", "Id:", "Retry:") are rejected so smuggling cannot hide behind extension fields.
++func IsValidSSEExtensionField(line []byte) bool {
++	if len(line) == 0 || line[0] == ':' {
++		return false
++	}
++	idx := bytes.IndexByte(line, ':')
++	if idx <= 0 || idx > 128 {
++		return false
++	}
++	name := line[:idx]
++	if !((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) {
++		return false
++	}
++	for i := 1; i < len(name); i++ {
++		b := name[i]
++		if !((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-') {
++			return false
++		}
++	}
++	lower := strings.ToLower(string(name))
++	if lower == "data" || lower == "event" || lower == "id" || lower == "retry" {
++		return false
++	}
++	return true
 +}
 +
 +func ownedByCurrentUser(info os.FileInfo) bool {
@@ -13721,7 +13979,7 @@ index e69de29..6bd8d24 100644
 +		releaseReview(entry)
 +		return nil, ErrUnavailable
 +	}
-+	if entry.tainted {
++	if entry.tainted || entry.pendingTaint.Load() {
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
 +		releaseReview(entry)
@@ -13799,7 +14057,7 @@ index e69de29..6bd8d24 100644
 +		// finishReserveReviewEntry refreshes entry.touched only once the turn is actually admitted.
 +		entry.inFlight++
 +		reviewMu.Unlock()
-+		if pendingTainted {
++		if pendingTainted || entry.pendingTaint.Load() {
 +			entry.mu.Lock()
 +			entry.taintAndPersistLocked()
 +			entry.mu.Unlock()
@@ -13878,7 +14136,7 @@ index e69de29..6bd8d24 100644
 +		st.tainted = true
 +	}
 +	if entry := reviewLedger[key]; entry != nil {
-+		if entry.sealedFlag || entry.sealing {
++		if entry.sealedFlag {
 +			reviewMu.Unlock()
 +			return
 +		}
@@ -14879,6 +15137,9 @@ index e69de29..6bd8d24 100644
 +		}
 +		if entry.tainted || entry.lastTurnFailed || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) ||
 +			len(entry.responseIDSHAs) != entry.requests || entry.responseIDSHAs[len(entry.responseIDSHAs)-1] != entry.lastResponseIDSHA {
++			if entry.pendingTaint.Load() && !entry.tainted {
++				entry.taintAndPersistLocked()
++			}
 +			if entry.tainted && entry.taintedPersisted {
 +				closeBudgetedPinnedDirFD(entry.boundDirFD)
 +				entry.boundDirFD = nil
@@ -14895,6 +15156,16 @@ index e69de29..6bd8d24 100644
 +		}
 +		if entry.session != session {
 +			entry.taintAndPersistLocked()
++			entry.mu.Unlock()
++			finishSeal(false)
++			return SealRejected, ""
++		}
++		if entry.pendingTaint.Load() && !entry.tainted {
++			entry.taintAndPersistLocked()
++			if entry.taintedPersisted {
++				closeBudgetedPinnedDirFD(entry.boundDirFD)
++				entry.boundDirFD = nil
++			}
 +			entry.mu.Unlock()
 +			finishSeal(false)
 +			return SealRejected, ""
@@ -18743,10 +19014,10 @@ index e69de29..6bd8d24 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..08c923b 100644
+index e69de29..6490e5f 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,13422 @@
+@@ -0,0 +1,13643 @@
 +package preflightreceipt
 +
 +import (
@@ -23794,6 +24065,52 @@ index e69de29..08c923b 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_lbsp","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_lbsp","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]},{"id":"rs_lbsp","type":"reasoning"},{"id":"msg_unstreamed","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555c7", "019d0000-0000-7000-8000-8888888881c7", sseLateBindSpoof); st != SealRejected {
 +		t.Fatalf("unstreamed message after late reasoning at index 1 seal = %v, want SealRejected", st)
++	}
++
++	// 85d. Astra P1 #1 (PR #2280 R74): response.completed appending an unstreamed message with the
++	//      SAME text as the previously confirmed message (different ID / higher index) MUST reject.
++	sseDupTextAppend := "data: " + `{"type":"response.created","response":{"id":"resp_dta","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_dta_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_dta","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_dta_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]},{"id":"msg_dta_unstreamed","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555c8", "019d0000-0000-7000-8000-8888888881c8", sseDupTextAppend); st != SealRejected {
++		t.Fatalf("unstreamed trailing message with same text seal = %v, want SealRejected", st)
++	}
++
++	// 85e. Astra P2 #2 (PR #2280 R74): index-only output_item.done (no item.id) whose ID is supplied
++	//      in response.completed with matching content MUST seal cleanly; tampered content or duplicate
++	//      ID in response.completed MUST still reject.
++	lIdxBackfill := "review-d1111111-2222-4333-8444-5555555555c9"
++	sIdxBackfill := "019d0000-0000-7000-8000-8888888881c9"
++	sseIdxBackfill := "data: " + `{"type":"response.created","response":{"id":"resp_idxbf","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_idxbf","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_idxbf_0","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, lIdxBackfill, sIdxBackfill, sseIdxBackfill); st != SealOK {
++		t.Fatalf("index-only output_item.done backfilled with ID in response.completed seal = %v, want SealOK", st)
++	}
++	if r := readReviewReceiptFile(t, root, lIdxBackfill); r.LastOutputSHA256 != sha256Hex("VERDICT: PASS") {
++		t.Fatalf("index-only backfill hash = %q, want %q", r.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
++	}
++	sseIdxBackfillTamper := "data: " + `{"type":"response.created","response":{"id":"resp_idxbft","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: BLOCK"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_idxbft","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_idxbft_0","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555ca", "019d0000-0000-7000-8000-8888888881ca", sseIdxBackfillTamper); st != SealRejected {
++		t.Fatalf("index-only backfill with tampered text seal = %v, want SealRejected", st)
++	}
++
++	// 85f. Astra P2 #3 (PR #2280 R74): valid WHATWG SSE extension metadata fields (x-proxy-meta: /
++	//      x-keepalive:) are ignored and seal cleanly, while unknown bare lines, case-variant Data:/Event: or bare JSON reject.
++	lExtOK := "review-d1111111-2222-4333-8444-5555555555cb"
++	sExtOK := "019d0000-0000-7000-8000-8888888881cb"
++	sseExtOK := "x-proxy-meta: trace=123\nx-keepalive:\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_extok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_extok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" +
++		"x-post-meta: ok\n\n"
++	if st := runSSE(t, lExtOK, sExtOK, sseExtOK); st != SealOK {
++		t.Fatalf("valid WHATWG SSE extension fields seal = %v, want SealOK", st)
++	}
++	sseExtCaseVar := "Data: " + `{"type":"error"}` + "\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_extbad","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_extbad","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555cc", "019d0000-0000-7000-8000-8888888881cc", sseExtCaseVar); st != SealRejected {
++		t.Fatalf("case-variant Data: SSE line seal = %v, want SealRejected", st)
 +	}
 +
 +	// 86. Astra P2 #3 (PR #2280 R34): final message first appears id-only, tool item at output_index=0
@@ -32167,5 +32484,180 @@ index e69de29..08c923b 100644
 +	if !cleanOrphanReclaimDir(stagingRoot, reclaimReceiptOnly, sr3, dev3, ino3, ok3) {
 +		_ = sr3.Close()
 +		t.Fatalf("cleanOrphanReclaimDir failed on receipt-only legacy preflight reclaim dir")
++	}
++}
++
++func TestReviewReceiptTaintDuringFailedSealPersistsAndBlocksSubsequentTurnAndSeal(t *testing.T) {
++	// Sol P1 #1 (PR #2280 R74): if TaintExistingReview arrives concurrently while SealReviewWithDigest
++	// has set entry.sealing=true on an unsealed launch whose seal will fail (e.g. lastTurnFailed=true),
++	// the taint MUST NOT be dropped; subsequent turns and seals MUST remain permanently rejected.
++	// Conversely, a late TaintExistingReview against an already-sealed launch (sealedFlag=true) MUST NOT
++	// invalidate that sealed receipt.
++	root := filepath.Join(t.TempDir(), "taint-during-failed-seal")
++	launch := "review-ffb6b6b6-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-00000000fb61"
++	sseOK := "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_tdfs_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++
++	// Turn 1: clean success.
++	ctx1, c1, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp1, err := cl1.Do(req1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp1.Body)
++	_ = resp1.Body.Close()
++	c1.ObserveStreamChunk([]byte(sseOK))
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++
++	// Turn 2: retryable upstream 503 failure sets lastTurnFailed=true without tainting yet.
++	ctx2, c2, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx2, e2, err := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: http.StatusServiceUnavailable, ProtoMajor: 1, ProtoMinor: 1, ContentLength: 0, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp2, err := cl2.Do(req2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp2.Body)
++	_ = resp2.Body.Close()
++	e2.End()
++	c2.Complete(false)
++	c2.HandlerDone(false)
++
++	cleanRoot, ok := cleanPrivateRoot(root)
++	if !ok {
++		t.Fatalf("cleanPrivateRoot failed")
++	}
++	key := cleanRoot + "\x00" + launch
++	reviewMu.Lock()
++	entry := reviewLedger[key]
++	reviewMu.Unlock()
++	if entry == nil {
++		t.Fatalf("expected reviewLedger entry for %s", launch)
++	}
++
++	// Pause SealReviewWithDigest right after it sets entry.sealing=true by holding entry.mu.
++	entry.mu.Lock()
++	sealDone := make(chan SealStatus, 1)
++	go func() {
++		st, _ := SealReviewWithDigest(root, launch, session)
++		sealDone <- st
++	}()
++	deadline := time.Now().Add(3 * time.Second)
++	for {
++		reviewMu.Lock()
++		isSealing := entry.sealing
++		reviewMu.Unlock()
++		if isSealing {
++			break
++		}
++		if time.Now().After(deadline) {
++			entry.mu.Unlock()
++			t.Fatalf("timed out waiting for entry.sealing=true")
++		}
++		time.Sleep(time.Millisecond)
++	}
++
++	// Concurrent invalid request for the same launch arrives while entry.sealing=true.
++	TaintExistingReview(root, launch)
++	entry.mu.Unlock()
++
++	if st := <-sealDone; st != SealRejected {
++		t.Fatalf("failed seal during concurrent taint = %v, want SealRejected", st)
++	}
++
++	// Wait briefly for any queued failure persistence worker to drain.
++	drainDeadline := time.Now().Add(3 * time.Second)
++	for {
++		reviewMu.Lock()
++		busy := entry.failurePersistQueued || entry.failurePersistRunning
++		reviewMu.Unlock()
++		if !busy {
++			break
++		}
++		if time.Now().After(drainDeadline) {
++			t.Fatalf("timed out waiting for failure persist worker")
++		}
++		time.Sleep(time.Millisecond)
++	}
++
++	// Subsequent turn MUST be rejected, on-disk receipt MUST be tainted=true & sealed=false,
++	// and retry SealReviewWithDigest (including after clearing the ledger) MUST return SealRejected.
++	if res, existed, err := ReserveExistingReview(root, launch); !existed || !errors.Is(err, ErrUnavailable) {
++		if res != nil {
++			res.Release()
++		}
++		t.Fatalf("ReserveExistingReview after taint during failed seal = (existed=%v, err=%v), want (true, ErrUnavailable)", existed, err)
++	}
++	if _, _, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol"); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("BeginReview after taint during failed seal err = %v, want ErrUnavailable", err)
++	}
++	rec := readReviewReceiptFile(t, root, launch)
++	if !rec.Tainted || rec.Sealed {
++		t.Fatalf("on-disk receipt after taint during failed seal = (tainted=%v, sealed=%v), want (true, false)", rec.Tainted, rec.Sealed)
++	}
++	if st, dig := SealReviewWithDigest(root, launch, session); st != SealRejected || dig != "" {
++		t.Fatalf("repeat SealReviewWithDigest = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	reviewMu.Lock()
++	delete(reviewLedger, key)
++	reviewMu.Unlock()
++	if st, dig := SealReviewWithDigest(root, launch, session); st != SealRejected || dig != "" {
++		t.Fatalf("post-eviction SealReviewWithDigest = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++
++	// Positive counterpart: already-sealed launch remains cleanly sealed under late TaintExistingReview.
++	lClean := "review-ffb6b6b6-2222-4333-8444-555555555502"
++	sClean := "019d0000-0000-7000-8000-00000000fb62"
++	ctxC, cC, err := BeginReview(context.Background(), root, lClean, sClean, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctxC, eC, err := cC.Start(ctxC, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	clC := httptransport.Decorate(ctxC, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqC, _ := http.NewRequestWithContext(ctxC, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respC, err := clC.Do(reqC)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respC.Body)
++	_ = respC.Body.Close()
++	cC.ObserveStreamChunk([]byte(sseOK))
++	eC.End()
++	cC.Complete(true)
++	cC.HandlerDone(true)
++	stClean, digClean := SealReviewWithDigest(root, lClean, sClean)
++	if stClean != SealOK || digClean == "" {
++		t.Fatalf("clean seal = (%v, %q), want SealOK", stClean, digClean)
++	}
++	TaintExistingReview(root, lClean)
++	if stRepeat, digRepeat := SealReviewWithDigest(root, lClean, sClean); stRepeat != SealOK || digRepeat != digClean {
++		t.Fatalf("repeat seal after late TaintExistingReview on sealed launch = (%v, %q), want (SealOK, %q)", stRepeat, digRepeat, digClean)
 +	}
 +}

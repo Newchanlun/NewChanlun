@@ -394,6 +394,21 @@ def _check_canonical_schema_keys(obj: object, schema_keys: frozenset[str]) -> No
         seen_lower.add(lower)
 
 
+_SSE_EXT_FIELD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+_SSE_STANDARD_FIELDS = frozenset({"data", "event", "id", "retry"})
+
+
+def _is_valid_sse_extension_field(line: str) -> bool:
+    """WHATWG SSE 允许接收方忽略合法扩展元数据字段（须含冒号，如 `x-proxy-meta: ...`），
+    同时继续拒绝无冒号未知裸行、裸 JSON、非 token 行及标准字段大小写变体。"""
+    if not line or line.startswith(":") or ":" not in line:
+        return False
+    name = line.split(":", 1)[0]
+    if not _SSE_EXT_FIELD_RE.fullmatch(name):
+        return False
+    return name.lower() not in _SSE_STANDARD_FIELDS
+
+
 def _validate_sse_protocol_key_casing(event: object) -> None:
     if not isinstance(event, dict):
         return
@@ -1149,7 +1164,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                             event_data_bytes = 0
                             break
                         data_lines.append(val)
-                    elif line in ("id", "retry") or line.startswith((":", "id:", "retry:")):
+                    elif line in ("id", "retry") or line.startswith((":", "id:", "retry:")) or _is_valid_sse_extension_field(line):
                         continue
                     else:
                         detail = "SSE 存在非法非协议行"
