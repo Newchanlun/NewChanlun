@@ -457,10 +457,14 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                         if ev_name is not None and event.get("type") != ev_name:
                             detail = "SSE 事件名与数据 type 不一致"
                             break
+                        raw_inner = event.get("response")
+                        if raw_inner is not None and not isinstance(raw_inner, dict):
+                            detail = "SSE 响应字段须为 JSON 对象"
+                            break
+                        inner = raw_inner if isinstance(raw_inner, dict) else {}
                         if event.get("type") in TERMINAL_EVENTS:
                             terminal = event.get("type")
-                            has_response_dict = isinstance(event.get("response"), dict)
-                            inner = event["response"] if has_response_dict else {}
+                            has_response_dict = isinstance(raw_inner, dict)
                             # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
                             status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
                                 None if inner.get("status") is None else "other")
@@ -470,6 +474,23 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                                 None,
                             )
                             # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
+                        else:
+                            ev_err = next(
+                                (val for val in (inner.get("error"), event.get("error")) if val is not None),
+                                None,
+                            )
+                            if ev_err is not None:
+                                detail = ev_err
+                                break
+                            ev_status = inner.get("status")
+                            ev_type = event.get("type")
+                            if ev_status is not None and (
+                                ev_status not in ("in_progress", "queued")
+                                or (ev_type == "response.queued" and ev_status != "queued")
+                                or (ev_type == "response.in_progress" and ev_status != "in_progress")
+                            ):
+                                detail = "非终态事件携带非法状态"
+                                break
                     elif ev_name is not None:
                         detail = "SSE 存在无数据事件头"
                         break

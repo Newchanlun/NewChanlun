@@ -1998,10 +1998,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..cb0553d
+index 0000000..711ba55
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,930 @@
+@@ -0,0 +1,964 @@
 +package executor
 +
 +import (
@@ -2372,11 +2372,12 @@ index 0000000..cb0553d
 +	sse1 := "data: " + `{"type":"response.completed","response":{"id":"resp_fm_t1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1"}]}]}}` + "\n\n"
 +
 +	for _, tc := range []struct {
-+		name     string
-+		launch   string
-+		session  string
-+		sse2     string
-+		wantSeal preflightreceipt.SealStatus
++		name           string
++		launch         string
++		session        string
++		sse2           string
++		wantSeal       preflightreceipt.SealStatus
++		wantRetryClean bool
 +	}{
 +		{
 +			name:     "wrong model on response.failed taints launch",
@@ -2386,11 +2387,12 @@ index 0000000..cb0553d
 +			wantSeal: preflightreceipt.SealRejected,
 +		},
 +		{
-+			name:     "matching model on response.failed rejects turn only",
-+			launch:   "review-a3333333-2222-4333-8444-555555555502",
-+			session:  "019d0000-0000-7000-8000-555555555522",
-+			sse2:     "data: " + `{"type":"response.created","response":{"id":"resp_fm_t3","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" + "data: " + `{"type":"response.failed","response":{"id":"resp_fm_t3","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"transient"}}}` + "\n\n",
-+			wantSeal: preflightreceipt.SealOK,
++			name:           "matching model on response.failed rejects turn only until clean retry",
++			launch:         "review-a3333333-2222-4333-8444-555555555502",
++			session:        "019d0000-0000-7000-8000-555555555522",
++			sse2:           "data: " + `{"type":"response.created","response":{"id":"resp_fm_t3","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" + "data: " + `{"type":"response.failed","response":{"id":"resp_fm_t3","status":"failed","model":"gpt-6.2-sol","error":{"code":"server_error","message":"transient"}}}` + "\n\n",
++			wantSeal:       preflightreceipt.SealRejected,
++			wantRetryClean: true,
 +		},
 +		{
 +			name:     "conflicting response_id on response.failed with matching model taints launch",
@@ -2493,6 +2495,38 @@ index 0000000..cb0553d
 +
 +			if st := preflightreceipt.SealReview(root, tc.launch, tc.session); st != tc.wantSeal {
 +				t.Fatalf("SealReview = %v, want %v", st, tc.wantSeal)
++			}
++			if tc.wantRetryClean {
++				// Clean Turn 3 retry recovers the untainted launch and seals with Turn 3's output.
++				sse3 := "data: " + `{"type":"response.completed","response":{"id":"resp_fm_t3_retry","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn3-recovered"}]}]}}` + "\n\n"
++				ctx3, c3, err := preflightreceipt.BeginReview(context.Background(), root, tc.launch, tc.session, "gpt-6.2-sol")
++				if err != nil {
++					t.Fatalf("BeginReview turn 3: %v", err)
++				}
++				ctx3, lease3, err := c3.Start(ctx3, "codex", "gpt-6.2-sol")
++				if err != nil {
++					t.Fatalf("Start turn 3: %v", err)
++				}
++				rt3 := preflightCodexTestRT{tlsState: tlsState, bodyFn: func() io.ReadCloser {
++					return io.NopCloser(strings.NewReader(sse3))
++				}}
++				ctx3 = context.WithValue(ctx3, "cliproxy.roundtripper", http.RoundTripper(rt3))
++				stream3, err := exec.ExecuteStream(ctx3, auth, req, opts)
++				if err != nil {
++					t.Fatalf("ExecuteStream turn 3: %v", err)
++				}
++				for chunk := range stream3.Chunks {
++					if chunk.Err != nil {
++						t.Fatalf("turn 3 chunk err: %v", chunk.Err)
++					}
++					c3.ObserveStreamChunk(chunk.Payload)
++				}
++				lease3.End()
++				c3.Complete(true)
++				c3.HandlerDone(true)
++				if st := preflightreceipt.SealReview(root, tc.launch, tc.session); st != preflightreceipt.SealOK {
++					t.Fatalf("SealReview after clean turn 3 retry = %v, want SealOK", st)
++				}
 +			}
 +		})
 +	}
@@ -5337,10 +5371,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..f2f90e7 100644
+index e69de29..04e8b28 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,5930 @@
+@@ -0,0 +1,6082 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -5397,6 +5431,7 @@ index e69de29..f2f90e7 100644
 +var maxReviewLedgerEntries = 2048
 +var maxReviewDiskEntries = 2048
 +var maxPendingReviewLaunches = 2048
++var maxPendingReviewInFlight = 32
 +var maxTrackedOutputItems = 2048
 +var maxTrackedContentParts = 512
 +
@@ -5459,6 +5494,12 @@ index e69de29..f2f90e7 100644
 +	SealUnavailable
 +)
 +
++type reviewPublishedTurn struct {
++	seq        uint64
++	responseID string
++	outputSHA  string
++}
++
 +type reviewEntry struct {
 +	mu                sync.Mutex
 +	directory         string
@@ -5469,6 +5510,7 @@ index e69de29..f2f90e7 100644
 +	finished          int64
 +	sealedAt          int64
 +	requests          int
++	publishedTurns    []reviewPublishedTurn
 +	responseIDSHAs    []string
 +	lastResponseIDSHA string
 +	lastOutputSHA     string
@@ -5478,6 +5520,9 @@ index e69de29..f2f90e7 100644
 +	lastPersistedSHA  string
 +	tainted           bool
 +	taintedPersisted  bool
++	lastTurnFailed    bool
++	nextTurnSeq       uint64
++	failedTurnSeq     uint64
 +	reserved          bool
 +	markerPersisted   bool
 +	touched           time.Time
@@ -5532,6 +5577,7 @@ index e69de29..f2f90e7 100644
 +	reviewMu              sync.Mutex
 +	reviewLedger          = make(map[string]*reviewEntry)
 +	pendingReviewLaunches = make(map[string]*pendingReviewState)
++	pendingReviewTotal    int
 +	taintWriteOverflow    bool
 +	tmpSeq                atomic.Uint64
 +
@@ -5551,6 +5597,9 @@ index e69de29..f2f90e7 100644
 +	}
 +	g.once.Do(func() {
 +		reviewMu.Lock()
++		if pendingReviewTotal > 0 {
++			pendingReviewTotal--
++		}
 +		if st := pendingReviewLaunches[g.key]; st != nil {
 +			st.count--
 +			if st.count <= 0 {
@@ -5562,8 +5611,8 @@ index e69de29..f2f90e7 100644
 +}
 +
 +// BeginPendingReview registers a bounded in-memory pre-admission guard BEFORE reading the
-+// HTTP body so concurrent first requests on a brand-new launch cannot race ahead of SealReview
-+// or drop a sibling request's rejection, while avoiding any disk allocation before validation.
++// HTTP body so concurrent first requests on a brand-new launch cannot race ahead of SealReview,
++// drop a sibling request's rejection, or exhaust memory via unbounded concurrent body reads.
 +func BeginPendingReview(root, launch string) (*PendingReviewGuard, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
@@ -5575,17 +5624,22 @@ index e69de29..f2f90e7 100644
 +	if entry := reviewLedger[key]; entry != nil && (entry.sealedFlag || entry.sealing) {
 +		return nil, errReviewSealed
 +	}
++	if pendingReviewTotal >= maxPendingReviewInFlight {
++		return nil, ErrUnavailable
++	}
 +	if st := pendingReviewLaunches[key]; st != nil {
 +		if st.tainted {
 +			return nil, ErrUnavailable
 +		}
 +		st.count++
++		pendingReviewTotal++
 +		return &PendingReviewGuard{key: key}, nil
 +	}
 +	if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
 +		return nil, ErrUnavailable
 +	}
 +	pendingReviewLaunches[key] = &pendingReviewState{count: 1}
++	pendingReviewTotal++
 +	return &PendingReviewGuard{key: key}, nil
 +}
 +
@@ -5661,6 +5715,7 @@ index e69de29..f2f90e7 100644
 +	unkeyedDoneItems          []doneItemSummary
 +	failedItemKeys            map[string]struct{}
 +	completedSubItemKeys      map[string]struct{}
++	incompleteItemKeys        map[string]struct{}
 +	itemIndexByID             map[string]int64
 +	itemIDByIndex             map[int64]string
 +	itemKindByKey             map[string]strictItemKind
@@ -5699,6 +5754,7 @@ index e69de29..f2f90e7 100644
 +	t.unkeyedDoneItems = nil
 +	t.failedItemKeys = nil
 +	t.completedSubItemKeys = nil
++	t.incompleteItemKeys = nil
 +	t.itemIndexByID = nil
 +	t.itemIDByIndex = nil
 +	t.itemKindByKey = nil
@@ -5735,6 +5791,8 @@ index e69de29..f2f90e7 100644
 +	strictCodex                                 bool
 +	expectedModel                               string
 +	review                                      *reviewEntry
++	reviewTurnSeq                               uint64
++	reviewPublished                             bool
 +	reviewReleased                              bool
 +	observedCompleted                           bool
 +	upstreamEOF                                 bool
@@ -6270,6 +6328,9 @@ index e69de29..f2f90e7 100644
 +			if !doneItemMatchesOutputItem(doneRec, item) {
 +				return false
 +			}
++		}
++		if _, mustBeIncomplete := t.incompleteItemKeys[canonKey]; mustBeIncomplete && item.Status != "incomplete" {
++			return false
 +		}
 +		if !isFinalAssistantOutputItem(item) {
 +			completedNonFinalCount++
@@ -6911,9 +6972,26 @@ index e69de29..f2f90e7 100644
 +			c.taintStreamAnomaly()
 +			return out, false
 +		}
-+		if rejectErrors && (respStatus == "failed" || respStatus == "cancelled" || respStatus == "canceled") {
++		if rejectErrors && (respStatus == "failed" || respStatus == "cancelled" || respStatus == "canceled" || respStatus == "incomplete") {
 +			c.taintStreamAnomaly()
 +			return out, false
++		}
++		switch evType {
++		case "response.created":
++			if respStatus != "" && respStatus != "in_progress" && respStatus != "queued" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		case "response.queued":
++			if respStatus != "" && respStatus != "queued" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		case "response.in_progress":
++			if respStatus != "" && respStatus != "in_progress" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
 +		}
 +	}
 +	if hasEvModel && hasRespModel && evModel != respModel {
@@ -7337,6 +7415,13 @@ index e69de29..f2f90e7 100644
 +						t.completedSubItemKeys = make(map[string]struct{})
 +					}
 +					t.completedSubItemKeys[canonKey] = struct{}{}
++				}
++				if _, wasInc := t.incompleteItemKeys[idxKey]; wasInc {
++					delete(t.incompleteItemKeys, idxKey)
++					if t.incompleteItemKeys == nil {
++						t.incompleteItemKeys = make(map[string]struct{})
++					}
++					t.incompleteItemKeys[canonKey] = struct{}{}
 +				}
 +				if _, wasNonFinal := t.streamedNonFinalKeys[idxKey]; wasNonFinal {
 +					delete(t.streamedNonFinalKeys, idxKey)
@@ -7978,6 +8063,13 @@ index e69de29..f2f90e7 100644
 +	if canonKey == "" {
 +		return true
 +	}
++	if parts := t.contentPartByItem[canonKey]; parts != nil {
++		if prevTag, exists := parts[contentIdx]; exists && strings.HasPrefix(prevTag, "text:") {
++			if contentPartTag("output_text", snapText) != prevTag {
++				return false
++			}
++		}
++	}
 +	if snapText == "" {
 +		if prefixes := t.textPrefixByItem[canonKey]; prefixes != nil {
 +			if pref, exists := prefixes[contentIdx]; exists && pref.byteLen > 0 {
@@ -8283,9 +8375,29 @@ index e69de29..f2f90e7 100644
 +					t.failedItemKeys = make(map[string]struct{})
 +				}
 +				t.failedItemKeys[canonKey] = struct{}{}
++			} else if item.Status == "incomplete" {
++				if canonKey == "" {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, exists := t.incompleteItemKeys[canonKey]; !exists && len(t.incompleteItemKeys) >= maxTrackedOutputItems {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if t.incompleteItemKeys == nil {
++					t.incompleteItemKeys = make(map[string]struct{})
++				}
++				t.incompleteItemKeys[canonKey] = struct{}{}
 +			}
 +			_, alreadyDoneSnap := t.doneItems[canonKey]
 +			isDone := item.Status == "completed" || (isAssistantMsg && item.Status == "incomplete") || (alreadyDoneSnap && item.Status == "")
++			if _, mustBeIncomplete := t.incompleteItemKeys[canonKey]; mustBeIncomplete && item.Status != "incomplete" {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
 +			if isDone && canonKey != "" {
 +				if _, failed := t.failedItemKeys[canonKey]; failed {
 +					c.mu.Unlock()
@@ -8637,6 +8749,21 @@ index e69de29..f2f90e7 100644
 +				t.failedItemKeys = make(map[string]struct{})
 +			}
 +			t.failedItemKeys[canonKey] = struct{}{}
++		} else if itemStatus == "incomplete" {
++			if canonKey == "" {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if _, exists := t.incompleteItemKeys[canonKey]; !exists && len(t.incompleteItemKeys) >= maxTrackedOutputItems {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if t.incompleteItemKeys == nil {
++				t.incompleteItemKeys = make(map[string]struct{})
++			}
++			t.incompleteItemKeys[canonKey] = struct{}{}
 +		}
 +		if canonKey != "" {
 +			if _, alreadyDone := t.doneItemKeys[canonKey]; alreadyDone {
@@ -8800,6 +8927,11 @@ index e69de29..f2f90e7 100644
 +		}
 +		if canonKey != "" {
 +			if _, failed := t.failedItemKeys[canonKey]; failed {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if _, mustBeIncomplete := t.incompleteItemKeys[canonKey]; mustBeIncomplete && itemStatus != "incomplete" {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -9716,7 +9848,9 @@ index e69de29..f2f90e7 100644
 +
 +// TaintExistingReview taints launch if it already exists in the pending pre-admission wave,
 +// in-memory ledger, or on disk under root. Brand-new launches with no active siblings rejected
-+// before admission never allocate directories or files on disk.
++// before admission never allocate directories or files on disk. When an in-memory ledger entry
++// is found, inFlight is incremented BEFORE releasing reviewMu so concurrent SealReview cannot
++// race past the taint in the unlock window.
 +func TaintExistingReview(root, launch string) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
@@ -9728,12 +9862,20 @@ index e69de29..f2f90e7 100644
 +	if st := pendingReviewLaunches[key]; st != nil {
 +		st.tainted = true
 +	}
-+	existsInLedger := reviewLedger[key] != nil
-+	reviewMu.Unlock()
-+	if existsInLedger {
-+		TaintReview(root, launch)
++	if entry := reviewLedger[key]; entry != nil {
++		if entry.sealedFlag || entry.sealing {
++			reviewMu.Unlock()
++			return
++		}
++		entry.inFlight++
++		reviewMu.Unlock()
++		defer releaseReview(entry)
++		entry.mu.Lock()
++		entry.taintAndPersistLocked()
++		entry.mu.Unlock()
 +		return
 +	}
++	reviewMu.Unlock()
 +	rootExists, err := checkPrivateDir(root, true)
 +	if err != nil || !rootExists {
 +		return
@@ -10049,7 +10191,7 @@ index e69de29..f2f90e7 100644
 +			finishSeal(false)
 +			return SealUnavailable, ""
 +		}
-+		if entry.tainted || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) ||
++		if entry.tainted || entry.lastTurnFailed || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) ||
 +			len(entry.responseIDSHAs) != entry.requests || entry.responseIDSHAs[len(entry.responseIDSHAs)-1] != entry.lastResponseIDSHA {
 +			entry.mu.Unlock()
 +			finishSeal(false)
@@ -10170,6 +10312,8 @@ index e69de29..f2f90e7 100644
 +		releaseReview(entry)
 +		return ctx, nil, ErrUnavailable
 +	}
++	entry.nextTurnSeq++
++	turnSeq := entry.nextTurnSeq
 +	entry.mu.Unlock()
 +
 +	c := &Collector{
@@ -10178,6 +10322,7 @@ index e69de29..f2f90e7 100644
 +		strictCodex:   true,
 +		expectedModel: requestedModel,
 +		review:        entry,
++		reviewTurnSeq: turnSeq,
 +		receipt:       Receipt{Schema: ReviewSchema, Session: session, Started: now.UnixNano()},
 +	}
 +	return context.WithValue(ctx, contextKey{}, c), c, nil
@@ -11079,7 +11224,7 @@ index e69de29..f2f90e7 100644
 +	complete := false
 +	lastResp := ""
 +	lastOut := ""
-+	if !e.tainted && e.requests > 0 && e.route != "" && isSHA256Hex(e.lastResponseIDSHA) &&
++	if !e.tainted && !e.lastTurnFailed && e.requests > 0 && e.route != "" && isSHA256Hex(e.lastResponseIDSHA) &&
 +		len(e.responseIDSHAs) == e.requests && e.responseIDSHAs[len(e.responseIDSHAs)-1] == e.lastResponseIDSHA {
 +		routes = []string{e.route}
 +		respIDs = append([]string(nil), e.responseIDSHAs...)
@@ -11181,6 +11326,26 @@ index e69de29..f2f90e7 100644
 +
 +func (c *Collector) maybeReleaseReviewLocked() {
 +	if c.review != nil && !c.reviewReleased && c.handlerDone && c.active == 0 && c.bodies == 0 && (c.sealed || c.lifecycleDone || c.invalid || c.attemptFailed) {
++		if !c.reviewPublished {
++			entry := c.review
++			entry.mu.Lock()
++			if !entry.sealed && !entry.tainted {
++				if c.reviewTurnSeq > entry.failedTurnSeq {
++					entry.failedTurnSeq = c.reviewTurnSeq
++				}
++				latestPubSeq := uint64(0)
++				if len(entry.publishedTurns) > 0 {
++					latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
++				}
++				entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
++				if entry.lastTurnFailed {
++					if err := entry.persistLocked(); err != nil {
++						entry.taintAndPersistLocked()
++					}
++				}
++			}
++			entry.mu.Unlock()
++		}
 +		c.reviewReleased = true
 +		releaseReview(c.review)
 +	}
@@ -11239,14 +11404,35 @@ index e69de29..f2f90e7 100644
 +			entry.taintAndPersistLocked()
 +			return
 +		}
-+		entry.requests++
-+		entry.responseIDSHAs = append(entry.responseIDSHAs, lastResp)
-+		entry.lastResponseIDSHA = lastResp
-+		entry.lastOutputSHA = lastOut
-+		entry.finished = finished
++		turnRec := reviewPublishedTurn{
++			seq:        c.reviewTurnSeq,
++			responseID: lastResp,
++			outputSHA:  lastOut,
++		}
++		pos := len(entry.publishedTurns)
++		for pos > 0 && entry.publishedTurns[pos-1].seq > turnRec.seq {
++			pos--
++		}
++		entry.publishedTurns = append(entry.publishedTurns, reviewPublishedTurn{})
++		copy(entry.publishedTurns[pos+1:], entry.publishedTurns[pos:])
++		entry.publishedTurns[pos] = turnRec
++		entry.responseIDSHAs = make([]string, len(entry.publishedTurns))
++		for i, pt := range entry.publishedTurns {
++			entry.responseIDSHAs[i] = pt.responseID
++		}
++		latest := entry.publishedTurns[len(entry.publishedTurns)-1]
++		entry.requests = len(entry.publishedTurns)
++		entry.lastResponseIDSHA = latest.responseID
++		entry.lastOutputSHA = latest.outputSHA
++		entry.lastTurnFailed = entry.failedTurnSeq > latest.seq
++		if finished > entry.finished {
++			entry.finished = finished
++		}
 +		if err := entry.persistLocked(); err != nil {
 +			entry.taintAndPersistLocked()
++			return
 +		}
++		c.reviewPublished = true
 +		return
 +	}
 +	c.receipt.Complete = true
@@ -11272,10 +11458,10 @@ index e69de29..f2f90e7 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..cb0d7ea 100644
+index e69de29..24f65c6 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,5052 @@
+@@ -0,0 +1,5237 @@
 +package preflightreceipt
 +
 +import (
@@ -16085,6 +16271,191 @@ index e69de29..cb0d7ea 100644
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_sftd","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_f","type":"mcp_call","status":"completed","server_label":"s","name":"tool","arguments":"{}"},{"id":"msg_sftd","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555aa", "019d0000-0000-7000-8000-8888888881aa", sseSnapFailedThenDone); st != SealRejected {
 +		t.Fatalf("in_progress tool status=failed later claiming completed seal = %v, want SealRejected", st)
++	}
++
++	// 73. Sol P1 #2 (PR #2280 R29): lifecycle event vs response.status coherence (response.in_progress
++	//     with status="incomplete" or status="queued" or status="completed" MUST taint).
++	for i, badStatus := range []string{"incomplete", "queued", "completed"} {
++		sseBadLifecycle := "data: " + fmt.Sprintf(`{"type":"response.in_progress","response":{"id":"resp_blc_%d","status":%q,"model":"gpt-6.2-sol"}}`, i, badStatus) + "\n\n" +
++			"data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_blc_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`, i) + "\n\n"
++		if st := runSSE(t, fmt.Sprintf("review-d1111111-2222-4333-8444-5555555555b%d", i), fmt.Sprintf("019d0000-0000-7000-8000-8888888881b%d", i), sseBadLifecycle); st != SealRejected {
++			t.Fatalf("response.in_progress with status=%q seal = %v, want SealRejected", badStatus, st)
++		}
++	}
++
++	// 74. Sol P2 #1 (PR #2280 R29): response.in_progress clearing or mutating a content part already
++	//     finalized by response.output_text.done MUST taint.
++	sseClearFinalizedText := "data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_cft","type":"message","role":"assistant"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_text.done","output_index":0,"item_id":"msg_cft","content_index":0,"text":"VERDICT: PASS"}` + "\n\n" +
++		"data: " + `{"type":"response.in_progress","response":{"id":"resp_cft","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_cft","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":""}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_cft","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_cft","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_cft","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555b4", "019d0000-0000-7000-8000-8888888881b4", sseClearFinalizedText); st != SealRejected {
++		t.Fatalf("in_progress clearing finalized output_text.done part seal = %v, want SealRejected", st)
++	}
++
++	// 75. Astra P1 #2 (PR #2280 R29): output_item.added or response.in_progress declaring assistant
++	//     status="incomplete" MUST NOT later flip to completed in output_item.done / response.completed.
++	sseAddedIncompleteFlip := "data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_aif","type":"message","role":"assistant","status":"incomplete"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_aif","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_aif","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_aif","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555b5", "019d0000-0000-7000-8000-8888888881b5", sseAddedIncompleteFlip); st != SealRejected {
++		t.Fatalf("output_item.added status=incomplete flipping to completed seal = %v, want SealRejected", st)
++	}
++	sseSnapIncompleteFlip := "data: " + `{"type":"response.in_progress","response":{"id":"resp_sif","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_sif","type":"message","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_sif","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sif","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_sif","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555b6", "019d0000-0000-7000-8000-8888888881b6", sseSnapIncompleteFlip); st != SealRejected {
++		t.Fatalf("response.in_progress status=incomplete flipping to completed seal = %v, want SealRejected", st)
++	}
++}
++
++func TestReviewReceiptFailedFollowupTurnCannotSealStaleTurn(t *testing.T) {
++	// Sol P1 #1 (PR #2280 R29): after Turn 1 succeeds, a Turn 2 that fails before publishing
++	// MUST block SealReview from sealing Turn 1's stale output until a subsequent clean Turn 3 succeeds.
++	root := filepath.Join(t.TempDir(), "stale-turn-receipts")
++	launch := "review-e3333333-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-888888888601"
++	runCleanTurn := func(respID, text string) {
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk([]byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text) + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++	}
++
++	runCleanTurn("resp_stale_1", "VERDICT: PASS (turn 1)")
++
++	// Turn 2 fails before upstream execution completes (transient turn failure, not taint).
++	_, c2, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	c2.Reject()
++	c2.Complete(false)
++	c2.HandlerDone(false)
++
++	if st, digest := SealReviewWithDigest(root, launch, session); st != SealRejected || digest != "" {
++		t.Fatalf("SealReviewWithDigest after failed follow-up turn = (%v, %q), want (SealRejected, \"\")", st, digest)
++	}
++	recAfterFail := readReviewReceiptFile(t, root, launch)
++	if recAfterFail.Complete || recAfterFail.LastOutputSHA256 != "" {
++		t.Fatalf("receipt after failed follow-up turn = %+v, want complete=false and empty last_output_sha256", recAfterFail)
++	}
++
++	// Clean Turn 3 retry recovers and seals with Turn 3's output.
++	runCleanTurn("resp_stale_3", "VERDICT: BLOCK (turn 3)")
++	if st, digest := SealReviewWithDigest(root, launch, session); st != SealOK || digest == "" {
++		t.Fatalf("SealReviewWithDigest after clean retry = (%v, %q), want (SealOK, non-empty)", st, digest)
++	}
++	recAfterRetry := readReviewReceiptFile(t, root, launch)
++	if !recAfterRetry.Complete || !recAfterRetry.Sealed || recAfterRetry.LastOutputSHA256 != sha256Hex("VERDICT: BLOCK (turn 3)") {
++		t.Fatalf("receipt after clean retry = %+v, want sealed turn 3 output", recAfterRetry)
++	}
++}
++
++func TestBeginPendingReviewInFlightCap(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R29): concurrent pre-admission body reads MUST be bounded globally
++	// even when all requests target the exact same launch ID.
++	oldCap := maxPendingReviewInFlight
++	maxPendingReviewInFlight = 2
++	defer func() { maxPendingReviewInFlight = oldCap }()
++
++	root := filepath.Join(t.TempDir(), "pending-cap-receipts")
++	launch := "review-e4444444-2222-4333-8444-555555555501"
++	g1, err := BeginPendingReview(root, launch)
++	if err != nil {
++		t.Fatalf("BeginPendingReview 1: %v", err)
++	}
++	g2, err := BeginPendingReview(root, launch)
++	if err != nil {
++		g1.Release()
++		t.Fatalf("BeginPendingReview 2: %v", err)
++	}
++	if g3, err := BeginPendingReview(root, launch); !errors.Is(err, ErrUnavailable) || g3 != nil {
++		g2.Release()
++		g1.Release()
++		t.Fatalf("BeginPendingReview 3 over cap = (%v, %v), want (nil, ErrUnavailable)", g3, err)
++	}
++	g2.Release()
++	g3, err := BeginPendingReview(root, launch)
++	if err != nil || g3 == nil {
++		g1.Release()
++		t.Fatalf("BeginPendingReview after release = (%v, %v), want (non-nil, nil)", g3, err)
++	}
++	g3.Release()
++	g1.Release()
++}
++
++func TestReviewReceiptOutOfOrderPublishKeepsLatestTurn(t *testing.T) {
++	// If Turn 2 finishes background body-close/publish before Turn 1 finishes its background
++	// cleanup, response_id_sha256s MUST stay in turn-sequence order and last_response_id /
++	// last_output_sha256 MUST reflect Turn 2, never regressing to stale Turn 1.
++	root := filepath.Join(t.TempDir(), "ooo-publish-receipts")
++	launch := "review-e5555555-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-888888888701"
++	startTurn := func(respID, text string) (*Collector, *Execution) {
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk([]byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text) + "\n\n"))
++		return c, e
++	}
++
++	c1, e1 := startTurn("resp_ooo_1", "VERDICT: BLOCK (turn 1)")
++	c2, e2 := startTurn("resp_ooo_2", "VERDICT: PASS (turn 2)")
++
++	// Publish Turn 2 BEFORE Turn 1 finishes.
++	e2.End()
++	c2.Complete(true)
++	c2.HandlerDone(true)
++
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++
++	if st, digest := SealReviewWithDigest(root, launch, session); st != SealOK || digest == "" {
++		t.Fatalf("SealReviewWithDigest = (%v, %q), want (SealOK, non-empty)", st, digest)
++	}
++	rec := readReviewReceiptFile(t, root, launch)
++	if rec.Requests != 2 || len(rec.ResponseIDSHAs) != 2 ||
++		rec.ResponseIDSHAs[0] != sha256Hex("resp_ooo_1") ||
++		rec.ResponseIDSHAs[1] != sha256Hex("resp_ooo_2") ||
++		rec.LastResponseID != sha256Hex("resp_ooo_2") ||
++		rec.LastOutputSHA256 != sha256Hex("VERDICT: PASS (turn 2)") {
++		t.Fatalf("out-of-order publish regressed receipt: %+v", rec)
 +	}
 +}
 +
