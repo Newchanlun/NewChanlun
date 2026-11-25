@@ -4060,37 +4060,54 @@ index 6e513dd..159bc55 100644
  // response.completed.response.output empty. Keep the stream path aligned with the
  // already-patched non-stream path by reconstructing response.output from those items.
 diff --git a/internal/runtime/executor/helps/codex_sse_scanner.go b/internal/runtime/executor/helps/codex_sse_scanner.go
-index 35f5532..12dfd1c 100644
+index 35f5532..06994a7 100644
 --- a/internal/runtime/executor/helps/codex_sse_scanner.go
 +++ b/internal/runtime/executor/helps/codex_sse_scanner.go
-@@ -74,10 +74,39 @@ type CodexSSEScanner struct {
+@@ -74,10 +74,57 @@ type CodexSSEScanner struct {
  	budgetCheck func(line []byte, heldLines int, heldBytes int) bool
  }
  
-+// scanSSELines implements WHATWG EventSource line splitting: CRLF, standalone CR, and LF.
-+func scanSSELines(data []byte, atEOF bool) (advance int, token []byte, err error) {
-+	if atEOF && len(data) == 0 {
++type sseLineSplitter struct {
++	pendingCR bool
++}
++
++// Split implements WHATWG EventSource line splitting: CRLF, standalone CR, and LF.
++// When a CR ends the current read buffer before EOF, emit the line immediately and record
++// pendingCR so a following leading LF on the next read is consumed without stalling live streams.
++func (s *sseLineSplitter) Split(data []byte, atEOF bool) (advance int, token []byte, err error) {
++	if len(data) == 0 {
 +		return 0, nil, nil
 +	}
-+	for i, b := range data {
-+		if b == '\n' {
-+			return i + 1, data[:i], nil
++	start := 0
++	if s.pendingCR {
++		s.pendingCR = false
++		if data[0] == '\n' {
++			start = 1
++			if start == len(data) {
++				return 1, nil, nil
++			}
 +		}
-+		if b == '\r' {
++	}
++	for i := start; i < len(data); i++ {
++		if data[i] == '\n' {
++			return i + 1, data[start:i], nil
++		}
++		if data[i] == '\r' {
 +			if i+1 < len(data) {
 +				if data[i+1] == '\n' {
-+					return i + 2, data[:i], nil
++					return i + 2, data[start:i], nil
 +				}
-+				return i + 1, data[:i], nil
++				return i + 1, data[start:i], nil
 +			}
-+			if !atEOF {
-+				return 0, nil, nil
-+			}
-+			return i + 1, data[:i], nil
++			s.pendingCR = true
++			return i + 1, data[start:i], nil
 +		}
 +	}
 +	if atEOF {
-+		return len(data), data, nil
++		return len(data), data[start:], nil
++	}
++	if start > 0 {
++		return start, nil, nil
 +	}
 +	return 0, nil, nil
 +}
@@ -4099,10 +4116,99 @@ index 35f5532..12dfd1c 100644
  // as bufio.Scanner.Buffer does, and also the data lines collected for one event.
  func NewCodexSSEScanner(ctx context.Context, r io.Reader, maxBytes int) *CodexSSEScanner {
  	lines := bufio.NewScanner(r)
-+	lines.Split(scanSSELines)
++	splitter := &sseLineSplitter{}
++	lines.Split(splitter.Split)
  	lines.Buffer(nil, maxBytes)
  	return &CodexSSEScanner{ctx: ctx, lines: lines, maxBytes: maxBytes}
  }
+diff --git a/internal/runtime/executor/helps/codex_sse_scanner_test.go b/internal/runtime/executor/helps/codex_sse_scanner_test.go
+index 289dd2e..0f7a6f8 100644
+--- a/internal/runtime/executor/helps/codex_sse_scanner_test.go
++++ b/internal/runtime/executor/helps/codex_sse_scanner_test.go
+@@ -339,3 +339,83 @@ func TestCodexSSEScannerMatchesBufioScannerOnWellFormedStreams(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestCodexSSEScannerStandaloneCRAtChunkEndDoesNotStall(t *testing.T) {
++	// Astra P2 #5 (PR #2280 R47): a standalone CR ending a live SSE event at the end of a read
++	// buffer MUST emit immediately without blocking for the next byte, and a subsequent leading LF
++	// from a split CRLF MUST be consumed cleanly without producing a phantom blank line.
++	pr, pw := io.Pipe()
++	defer pr.Close()
++	defer pw.Close()
++
++	sc := NewCodexSSEScanner(context.Background(), pr, 64*1024)
++	linesCh := make(chan string, 16)
++	doneCh := make(chan error, 1)
++	go func() {
++		for sc.Scan() {
++			linesCh <- string(sc.Bytes())
++		}
++		doneCh <- sc.Err()
++	}()
++
++	// Write a complete CR-delimited event ending with \r\r and keep the pipe OPEN (no next byte yet).
++	if _, err := pw.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\r\r")); err != nil {
++		t.Fatal(err)
++	}
++	wantFirst := []string{
++		`data: {"type":"response.output_text.delta","delta":"hi"}`,
++		"",
++	}
++	for i, want := range wantFirst {
++		select {
++		case got := <-linesCh:
++			if got != want {
++				t.Fatalf("chunk1 line[%d] = %q, want %q", i, got, want)
++			}
++		case <-time.After(2 * time.Second):
++			t.Fatalf("scanner stalled waiting for byte after trailing CR on chunk1 line[%d]", i)
++		}
++	}
++
++	// Next chunk starts with '\n' (completing split CRLF from the prior trailing '\r'),
++	// followed by a second event terminated by CRLF split across two writes.
++	if _, err := pw.Write([]byte("\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"2\"}\r")); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case got := <-linesCh:
++		want := `data: {"type":"response.output_text.delta","delta":"2"}`
++		if got != want {
++			t.Fatalf("chunk2 line = %q, want %q (phantom blank line from split CRLF?)", got, want)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatalf("scanner stalled on chunk2 trailing CR")
++	}
++
++	if _, err := pw.Write([]byte("\n\n")); err != nil {
++		t.Fatal(err)
++	}
++	_ = pw.Close()
++
++	select {
++	case got := <-linesCh:
++		if got != "" {
++			t.Fatalf("chunk3 blank delimiter = %q, want empty string", got)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatalf("scanner stalled on final blank line")
++	}
++	select {
++	case err := <-doneCh:
++		if err != nil {
++			t.Fatalf("scanner ended with err=%v", err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatalf("scanner did not terminate after EOF")
++	}
++	select {
++	case extra := <-linesCh:
++		t.Fatalf("unexpected extra line after EOF: %q", extra)
++	default:
++	}
++}
 diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
 index cd725e8..c02be99 100644
 --- a/internal/runtime/executor/helps/proxy_helpers.go
@@ -5948,7 +6054,7 @@ index 0000000..705aa4b
 +}
 diff --git a/sdk/preflightreceipt/fdops_other.go b/sdk/preflightreceipt/fdops_other.go
 new file mode 100644
-index 0000000..c34cfd7
+index 0000000..89341b4
 --- /dev/null
 +++ b/sdk/preflightreceipt/fdops_other.go
 @@ -0,0 +1,9 @@
@@ -5956,16 +6062,16 @@ index 0000000..c34cfd7
 +
 +package preflightreceipt
 +
-+import "golang.org/x/sys/unix"
++import "errors"
 +
 +func renameatNoReplace(oldfd int, oldname string, newfd int, newname string) error {
-+	return unix.Renameat(oldfd, oldname, newfd, newname)
++	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..9172f55 100644
+index e69de29..60a3e57 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,9306 @@
+@@ -0,0 +1,9305 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7895,6 +8001,11 @@ index e69de29..9172f55 100644
 +			return out, false
 +		}
 +		switch evType {
++		case "response.completed":
++			if respStatus != "" && respStatus != "completed" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
 +		case "response.created":
 +			if respStatus != "" && respStatus != "in_progress" && respStatus != "queued" {
 +				c.taintStreamAnomaly()
@@ -7927,6 +8038,11 @@ index e69de29..9172f55 100644
 +			}
 +		case "error":
 +			if respStatus != "" && respStatus != "failed" {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		default:
++			if respStatus != "" && respStatus != "in_progress" && respStatus != "queued" {
 +				c.taintStreamAnomaly()
 +				return out, false
 +			}
@@ -12036,6 +12152,10 @@ index e69de29..9172f55 100644
 +			reviewMu.Unlock()
 +			return SealInFlight, ""
 +		}
++		if _, exists := sealedBindings[key]; !exists && len(sealedBindings) >= maxSealedBindings {
++			reviewMu.Unlock()
++			return SealUnavailable, ""
++		}
 +		entry.sealing = true
 +		entry.touched = now
 +		reviewMu.Unlock()
@@ -12578,52 +12698,36 @@ index e69de29..9172f55 100644
 +		return ErrUnavailable
 +	}
 +	root = cleanRoot
-+	// Serialize multi-level root directory creation and ancestor directory fsyncs within this process
-+	// so no concurrent caller can observe a newly created ancestor before its parent entry is synced.
++	parentOfRoot := filepath.Dir(root)
++	if parentOfRoot == "" || parentOfRoot == root {
++		return ErrUnavailable
++	}
++	// Require the immediate parent directory of <receipt-root> to ALREADY exist as a real non-symlink
++	// directory (never auto-create missing multi-level ancestors, which could race across processes
++	// before parent fsync completes). Serialize creation + parent fsync within this process.
 +	rootInitMu.Lock()
 +	defer rootInitMu.Unlock()
-+	parentOfRoot := filepath.Dir(root)
++	pfi, perr := os.Lstat(parentOfRoot)
++	if perr != nil || !pfi.IsDir() || pfi.Mode()&os.ModeSymlink != 0 {
++		return ErrUnavailable
++	}
 +	if _, err := os.Lstat(root); err == nil {
 +		if _, err := checkPrivateDir(root, false); err != nil {
 +			return ErrUnavailable
 +		}
-+		if parentOfRoot != "" && parentOfRoot != root {
-+			if err := syncPathDir(parentOfRoot); err != nil {
-+				return ErrUnavailable
-+			}
++		if err := syncPathDir(parentOfRoot); err != nil {
++			return ErrUnavailable
 +		}
 +		return nil
 +	} else if !os.IsNotExist(err) {
 +		return ErrUnavailable
 +	}
-+	// Collect missing ancestors up to the deepest existing parent so every newly created
-+	// directory entry (including root inside its parent) is durably synced on disk.
-+	var toCreate []string
-+	cur := root
-+	for {
-+		_, err := os.Lstat(cur)
-+		if err == nil {
-+			break
-+		}
-+		if !os.IsNotExist(err) {
-+			return ErrUnavailable
-+		}
-+		parent := filepath.Dir(cur)
-+		if parent == cur {
-+			return ErrUnavailable
-+		}
-+		toCreate = append(toCreate, cur)
-+		cur = parent
++	if err := os.Mkdir(root, 0700); err != nil && !os.IsExist(err) {
++		return err
 +	}
-+	for i := len(toCreate) - 1; i >= 0; i-- {
-+		dir := toCreate[i]
-+		if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
-+			return err
-+		}
-+		if err := syncPathDir(filepath.Dir(dir)); err != nil {
-+			_ = os.Remove(dir)
-+			return err
-+		}
++	if err := syncPathDir(parentOfRoot); err != nil {
++		_ = os.Remove(root)
++		return err
 +	}
 +	if _, err := checkPrivateDir(root, false); err != nil {
 +		return ErrUnavailable
@@ -13062,7 +13166,8 @@ index e69de29..9172f55 100644
 +
 +func cleanOrphanReclaimDir(stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool) bool {
 +	children, err := readDirFromRoot(subRoot)
-+	if err != nil {
++	if err != nil || len(children) == 0 {
++		// Never delete an empty directory with zero verified producer evidence.
 +		return false
 +	}
 +	if len(children) > 0 {
@@ -15273,10 +15378,10 @@ index e69de29..9172f55 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..0bbdef9 100644
+index e69de29..9239351 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,8519 @@
+@@ -0,0 +1,8617 @@
 +package preflightreceipt
 +
 +import (
@@ -22640,6 +22745,12 @@ index e69de29..0bbdef9 100644
 +	if err := os.WriteFile(filepath.Join(pendingReceiptNoMarkerReclaimDir, "seal.pending.json"), sealedBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
++	// Sol P2 #1 + Astra P2 #3 (R47): an empty private directory matching reclaim-* has zero
++	// producer ownership evidence and MUST be preserved untouched on restart sweep.
++	emptyReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-1-abcdef0123456791", os.Getpid()))
++	if err := os.Mkdir(emptyReclaimDir, 0700); err != nil {
++		t.Fatal(err)
++	}
 +
 +	// Fresh lock acquire simulates process restart with PID reuse.
 +	lease, err := acquirePrivateRootLease(root)
@@ -22678,6 +22789,9 @@ index e69de29..0bbdef9 100644
 +		if _, statErr := os.Lstat(filepath.Join(preserved, "seal.pending.json")); statErr != nil {
 +			t.Fatalf("incomplete seal.pending reclaim dir %s was deleted instead of preserved: %v", preserved, statErr)
 +		}
++	}
++	if _, statErr := os.Lstat(emptyReclaimDir); statErr != nil {
++		t.Fatalf("empty reclaim dir %s with zero producer evidence was deleted instead of preserved: %v", emptyReclaimDir, statErr)
 +	}
 +
 +	// End-to-end review publish + seal succeeds cleanly on the recovered root.
@@ -23678,30 +23792,77 @@ index e69de29..0bbdef9 100644
 +	b2 := sealedDirBinding{rootDev: 1, rootIno: 10, dirDev: 1, dirIno: 21, hasDirID: true, receiptSHA: sha256Hex("r2"), recordedAt: time.Now()}
 +
 +	reviewMu.Lock()
-+	defer reviewMu.Unlock()
 +	if !recordSealedBindingLocked(k1, b1, time.Now()) {
++		reviewMu.Unlock()
 +		t.Fatalf("failed to record initial binding k1")
 +	}
 +	if recordSealedBindingLocked(k2, b2, time.Now()) {
++		reviewMu.Unlock()
 +		t.Fatalf("recordSealedBindingLocked evicted un-reclaimed aged binding k1 when cap was full")
 +	}
 +	if got, ok := sealedBindings[k1]; !ok || got != b1 {
++		reviewMu.Unlock()
 +		t.Fatalf("un-reclaimed binding k1 was dropped on cap overflow")
 +	}
 +	if _, ok := sealedBindings[k2]; ok {
++		reviewMu.Unlock()
 +		t.Fatalf("rejected binding k2 was inserted despite cap overflow")
++	}
++	reviewMu.Unlock()
++
++	// Sol P2 #2 (R47): when sealedBindings is already at capacity, SealReviewWithDigest MUST
++	// fail closed with SealUnavailable BEFORE writing sealed=true or seal.sha256 to disk.
++	root := filepath.Join(t.TempDir(), "cap-full-precheck")
++	launch := "review-e4444444-2222-4333-8444-555555555509"
++	session := "019d0000-0000-7000-8000-eeeeeeeeee09"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_cap_full","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	if st, d := SealReviewWithDigest(root, launch, session); st != SealUnavailable || d != "" {
++		t.Fatalf("SealReviewWithDigest with full sealedBindings = (%v, %q), want (SealUnavailable, \"\")", st, d)
++	}
++	if _, statErr := os.Lstat(filepath.Join(root, launch, "seal.sha256")); !os.IsNotExist(statErr) {
++		t.Fatalf("SealReviewWithDigest wrote seal.sha256 despite full sealedBindings: %v", statErr)
++	}
++	if raw, rerr := os.ReadFile(filepath.Join(root, launch, "receipt.json")); rerr != nil || strings.Contains(string(raw), `"sealed":true`) {
++		t.Fatalf("SealReviewWithDigest mutated receipt.json to sealed=true despite full sealedBindings: err=%v raw=%s", rerr, string(raw))
 +	}
 +}
 +
 +func TestReviewReceiptConcurrentEnsurePrivateRootWaitsForAncestorSync(t *testing.T) {
-+	// Sol P2 #2 (PR #2280 R46): concurrent multi-level ensurePrivateRoot calls MUST serialize
-+	// so a second goroutine CANNOT return before the first goroutine finishes syncing every
-+	// newly created ancestor directory entry.
++	// Sol P2 #2 (R46) + Astra P1 #2 (R47): ensurePrivateRoot MUST reject missing multi-level
++	// ancestors (requiring pre-existing immediate parent) AND serialize single-level root creation
++	// with immediate parent fsync so concurrent callers wait for parent sync completion.
 +	base := t.TempDir()
-+	lvl1 := filepath.Join(base, "lvl1")
-+	lvl2 := filepath.Join(lvl1, "lvl2")
-+	root := filepath.Join(lvl2, "receipts")
++	missingMultiLevel := filepath.Join(base, "lvl1", "lvl2", "receipts")
++	if err := ensurePrivateRoot(missingMultiLevel); !errors.Is(err, ErrUnavailable) {
++		t.Fatalf("ensurePrivateRoot on missing multi-level ancestors = %v, want ErrUnavailable", err)
++	}
++	if _, statErr := os.Lstat(filepath.Join(base, "lvl1")); !os.IsNotExist(statErr) {
++		t.Fatalf("ensurePrivateRoot unexpectedly created missing ancestor lvl1: %v", statErr)
++	}
 +
++	root := filepath.Join(base, "receipts")
 +	origSync := syncDirFn
 +	defer func() { syncDirFn = origSync }()
 +	enteredBaseSync := make(chan struct{})
@@ -23729,7 +23890,7 @@ index e69de29..0bbdef9 100644
 +	select {
 +	case <-enteredBaseSync:
 +	case <-time.After(5 * time.Second):
-+		t.Fatalf("goroutine 1 never reached ancestor sync for %s", base)
++		t.Fatalf("goroutine 1 never reached parent sync for %s", base)
 +	}
 +
 +	err2Ch := make(chan error, 1)
@@ -23737,11 +23898,11 @@ index e69de29..0bbdef9 100644
 +		err2Ch <- ensurePrivateRoot(root)
 +	}()
 +
-+	// Goroutine 2 MUST NOT return while Goroutine 1 is still syncing base!
++	// Goroutine 2 MUST NOT return while Goroutine 1 is still syncing immediate parent base!
 +	select {
 +	case err2 := <-err2Ch:
 +		close(releaseBaseSync)
-+		t.Fatalf("concurrent ensurePrivateRoot returned early (%v) before newly created ancestor sync completed", err2)
++		t.Fatalf("concurrent ensurePrivateRoot returned early (%v) before parent sync completed", err2)
 +	case <-time.After(150 * time.Millisecond):
 +	}
 +
@@ -23753,7 +23914,7 @@ index e69de29..0bbdef9 100644
 +		t.Fatalf("goroutine 2 ensurePrivateRoot failed: %v", err2)
 +	}
 +	if !baseSynced.Load() {
-+		t.Fatalf("expected base ancestor sync completed")
++		t.Fatalf("expected parent sync completed")
 +	}
 +}
 +
@@ -23794,5 +23955,47 @@ index e69de29..0bbdef9 100644
 +
 +	if st, d := SealReviewWithDigest(root, launch, session); st != SealRejected || d != "" {
 +		t.Fatalf("SealReviewWithDigest after NBSP-prefixed JSON = (%v, %q), want (SealRejected, \"\")", st, d)
++	}
++}
++
++func TestReviewReceiptStrictRejectsCompletedStatusOnNonTerminalDelta(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R47): non-terminal events such as response.output_text.delta MUST NOT
++	// carry contradictory response.status values like "completed"; formal review validation must
++	// match preflight strictness and taint the launch.
++	root := filepath.Join(t.TempDir(), "nonterminal-bad-status")
++	launch := "review-e6666666-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-eeeeeeeeee06"
++
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++
++	badDelta := `{"type":"response.output_text.delta","delta":"hi","response":{"id":"resp_bad_delta_st","model":"gpt-6.2-sol","status":"completed"}}`
++	if c.ValidateStrictEvent("response.output_text.delta", true, []byte(badDelta)) {
++		t.Fatalf("ValidateStrictEvent accepted response.output_text.delta with response.status=completed")
++	}
++	c.ObserveStreamChunk([]byte("event: response.output_text.delta\ndata: " + badDelta + "\n\n"))
++	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_bad_delta_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	if st, d := SealReviewWithDigest(root, launch, session); st != SealRejected || d != "" {
++		t.Fatalf("SealReviewWithDigest after non-terminal delta with response.status=completed = (%v, %q), want (SealRejected, \"\")", st, d)
 +	}
 +}
