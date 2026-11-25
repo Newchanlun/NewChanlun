@@ -165,7 +165,22 @@ def main():
             if not ok:
                 fails.append(name)
             shutil.rmtree(c, ignore_errors=True)
-    print("身份检查自测：%d 项，不符 %d" % (len(CASES) + 1, len(fails)))
+        # 输出环境：结论不随 locale 变；成功提示写不出去时退 2，不退 0 也不退别的数。
+        cmd = [sys.executable, "-I", "-X", "utf8=0", G + "/check_admit_identity.py"]
+        asc = dict(ENV, LC_ALL="C", LANG="C")
+        r, w = os.pipe(); os.close(r)
+        io_cases = [
+            ("ascii-locale-green", subprocess.run(cmd, cwd=base, env=asc, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode, 0),
+            ("ascii-locale-bad-rev", subprocess.run(cmd + ["--rev", "nope"], cwd=base, env=asc, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode, 2),
+            ("stdout-broken-pipe", subprocess.run(cmd, cwd=base, env=ENV, stdout=w, stderr=subprocess.PIPE).returncode, 2),
+            ("print-pin-broken-pipe", subprocess.run(cmd + ["--print-pin"], cwd=base, env=ENV, stdout=w, stderr=subprocess.PIPE).returncode, 2),
+        ]
+        os.close(w)
+        for name, rc, want in io_cases:
+            print("%s %-26s rc=%d" % ("ok  " if rc == want else "FAIL", name, rc))
+            if rc != want:
+                fails.append(name)
+    print("身份检查自测：%d 项，不符 %d" % (len(CASES) + 5, len(fails)))
     return 1 if fails else 0
 
 

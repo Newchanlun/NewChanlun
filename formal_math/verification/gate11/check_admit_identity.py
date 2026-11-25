@@ -5,7 +5,7 @@
 `docs/chanlun/text/blog/`，是否就是过审时的那一份。只读 git 对象，不读工作区文件。
 内容相同，过审时核实过的性质（790 行、重建零差分等）即随之成立，本脚本不再重算。
 
-退出码：0 相符；1 不符；2 无法运行。只用标准库，`python3 -I` 运行。
+退出码：0 相符；1 不符；2 无法运行。调用方只应把 0 当作通过。只用标准库，`python3 -I` 运行。
 """
 import argparse
 import hashlib
@@ -90,56 +90,68 @@ def corpus_fingerprint(entries):
     return h.hexdigest()
 
 
+def emit(fd, data):
+    """直接按 UTF-8 字节写文件描述符，不经 Python 的文本层与缓冲：与 locale 无关，写失败当场抛 OSError。"""
+    if isinstance(data, str):
+        data = (data + "\n").encode("utf-8", "backslashreplace")
+    while data:
+        data = data[os.write(fd, data):]
+
+
+def note(text):
+    """写标准错误；诊断写不出不改变结论。"""
+    try:
+        emit(2, text)
+    except OSError:
+        pass
+
+
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--root", default=None)
     ap.add_argument("--rev", default="HEAD")
-    ap.add_argument("--print-pin", action="store_true", help="打印给定提交的规范钉选文本后退出")
+    ap.add_argument("--print-pin", action="store_true")
     a = ap.parse_args()
+    bad = []
     try:
         root = a.root
         if root is None:
             top = git(HERE, "rev-parse", "--show-toplevel")
             root = os.fsdecode(top[:-1] if top.endswith(b"\n") else top)
         rev = git(root, "rev-parse", "--verify", a.rev + "^{commit}").decode().strip()
-        # 钉选取自同一提交的 git 对象，不读检出的文件：检出时的换行转换不影响比对。
-        pinned = None if a.print_pin else git(root, "cat-file", "blob", rev + ":" + PIN_PATH)
-    except (OSError, subprocess.CalledProcessError) as e:
-        print("无法运行：%s" % e, file=sys.stderr)
-        return 2
-    bad, admit, blog = [], None, None
-    try:
-        admit = tree(root, rev, ADMIT)
         if a.print_pin:
-            sys.stdout.buffer.write(pin_text(admit))
+            emit(1, pin_text(tree(root, rev, ADMIT)))
             return 0
-        if pin_text(admit) != pinned:
-            bad.append("提交 %s 的 %s 与钉选 admit_identity.pin 不同" % (rev[:10], ADMIT))
-    except ValueError as e:
-        bad.append(str(e))
-    try:
-        blog = tree(root, rev, BLOG)
-        fp = corpus_fingerprint(blog)
-        if fp != CORPUS_BASELINE:
-            bad.append("语料指纹 %s 不等于基线" % fp)
-    except ValueError as e:
-        bad.append(str(e))
+        # 钉选取自同一提交的 git 对象，不读检出的文件：检出时的换行转换不影响比对。
+        pinned = git(root, "cat-file", "blob", rev + ":" + PIN_PATH)
+        try:
+            admit = tree(root, rev, ADMIT)
+            if pin_text(admit) != pinned:
+                bad.append("提交 %s 的 %s 与钉选 admit_identity.pin 不同" % (rev[:10], ADMIT))
+        except ValueError as e:
+            bad.append(str(e))
+        try:
+            blog = tree(root, rev, BLOG)
+            fp = corpus_fingerprint(blog)
+            if fp != CORPUS_BASELINE:
+                bad.append("语料指纹 %s 不等于基线" % fp)
+        except ValueError as e:
+            bad.append(str(e))
+        if not bad:
+            # 成功提示写不出去就不算通过：调用方拿不到绿行时不应得到 0。
+            emit(1, "GATE11 身份检查 GREEN：提交 %s，准入材料 %d 个文件与钉选相同，语料 %d 个文件指纹等于基线"
+                 % (rev[:10], len(admit), len(blog)))
+            return 0
+    except (OSError, subprocess.CalledProcessError, ValueError) as e:
+        # 运行故障：已经查出的不符照样报出，退 2。
+        for b in bad:
+            note("RED " + b)
+        note("无法运行：%s" % e)
+        return 2
     for b in bad:
-        print("RED " + b, file=sys.stderr)
-    if bad:
-        return 1
-    print("GATE11 身份检查 GREEN：提交 %s，准入材料 %d 个文件与钉选相同，语料 %d 个文件指纹等于基线"
-          % (rev[:10], len(admit), len(blog)))
-    return 0
+        note("RED " + b)
+    return 1
 
 
 if __name__ == "__main__":
-    try:
-        if sys.stdout is None:
-            raise OSError("标准输出不可用")
-        code = main()
-        sys.stdout.flush()
-    except (OSError, subprocess.CalledProcessError) as e:
-        print("无法运行：%s" % e, file=sys.stderr)
-        code = 2
-    sys.exit(code)
+    sys.exit(main())
