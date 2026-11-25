@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..2da4397 100644
+index e69de29..8bceb4b 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,302 @@
 +package middleware
 +
 +import (
@@ -115,21 +115,21 @@ index e69de29..2da4397 100644
 +			baseCtx := c.Request.Context()
 +			turnDeadline := time.Now().Add(preflightreceipt.ReviewTurnTimeout)
 +			turnCtx, turnCancel := context.WithDeadline(baseCtx, turnDeadline)
-+			defer func() { turnCancel() }()
++			defer turnCancel()
 +			c.Request = c.Request.WithContext(turnCtx)
 +
 +			bodyDeadline := time.Now().Add(preflightreceipt.ReviewBodyReadTimeout)
 +			if bodyDeadline.After(turnDeadline) {
 +				bodyDeadline = turnDeadline
 +			}
-+			pending, pendErr := preflightreceipt.BeginPendingReview(root, launch)
++			pending, pendErr := preflightreceipt.BeginPendingReviewContext(turnCtx, root, launch)
 +			if pendErr != nil {
 +				abortClose(http.StatusServiceUnavailable)
 +				return
 +			}
 +			defer pending.Release()
 +
-+			res, existed, resErr := preflightreceipt.ReserveExistingReview(root, launch)
++			res, existed, resErr := preflightreceipt.ReserveExistingReviewContext(turnCtx, root, launch)
 +			if resErr != nil {
 +				abortClose(http.StatusServiceUnavailable)
 +				return
@@ -138,14 +138,16 @@ index e69de29..2da4397 100644
 +				defer res.Release()
 +				if launchDeadline := res.Deadline(); !launchDeadline.IsZero() {
 +					if !launchDeadline.After(time.Now()) {
-+						res.Taint()
++						res.TaintContext(turnCtx)
 +						abortClose(http.StatusServiceUnavailable)
 +						return
 +					}
 +					if launchDeadline.Before(turnDeadline) {
 +						turnDeadline = launchDeadline
 +						turnCancel()
-+						turnCtx, turnCancel = context.WithDeadline(baseCtx, turnDeadline)
++						var launchCancel context.CancelFunc
++						turnCtx, launchCancel = context.WithDeadline(baseCtx, turnDeadline)
++						defer launchCancel()
 +						c.Request = c.Request.WithContext(turnCtx)
 +						if bodyDeadline.After(turnDeadline) {
 +							bodyDeadline = turnDeadline
@@ -155,7 +157,7 @@ index e69de29..2da4397 100644
 +			}
 +			taintFailure := func() {
 +				if existed {
-+					res.Taint()
++					res.TaintContext(turnCtx)
 +				} else {
 +					preflightreceipt.TaintExistingReview(root, launch)
 +				}
@@ -191,7 +193,7 @@ index e69de29..2da4397 100644
 +			}
 +			_ = rc.SetReadDeadline(time.Time{})
 +			if !existed {
-+				res, resErr = preflightreceipt.ReserveReview(root, launch)
++				res, resErr = preflightreceipt.ReserveReviewContext(turnCtx, root, launch)
 +				if resErr != nil {
 +					preflightreceipt.TaintExistingReview(root, launch)
 +					abortClose(http.StatusServiceUnavailable)
@@ -7774,10 +7776,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..991803f 100644
+index e69de29..f87195c 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11849 @@
+@@ -0,0 +1,12363 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7918,7 +7920,7 @@ index e69de29..991803f 100644
 +}
 +
 +type reviewEntry struct {
-+	mu                sync.Mutex
++	mu                ctxMutex
 +	directory         string
 +	launch            string
 +	session           string
@@ -7975,6 +7977,7 @@ index e69de29..991803f 100644
 +
 +type ReviewReservation struct {
 +	entry     *reviewEntry
++	started   int64
 +	turnSeq   uint64
 +	holdsSlot bool
 +	once      sync.Once
@@ -8003,13 +8006,12 @@ index e69de29..991803f 100644
 +}
 +
 +// Deadline returns the launch's absolute MaxReviewDuration expiration time (or zero if unbounded).
++// Uses the immutable launch start timestamp captured at reservation time so callers never block on entry.mu.
 +func (r *ReviewReservation) Deadline() time.Time {
 +	if r == nil || r.entry == nil {
 +		return time.Time{}
 +	}
-+	r.entry.mu.Lock()
-+	started := r.entry.started
-+	r.entry.mu.Unlock()
++	started := r.started
 +	if started <= 0 {
 +		return time.Time{}
 +	}
@@ -8038,8 +8040,41 @@ index e69de29..991803f 100644
 +}
 +
 +func (r *ReviewReservation) Taint() {
++	r.TaintContext(context.Background())
++}
++
++// TaintContext permanently taints the reserved launch, honoring ctx if entry.mu is contended
++// (falling back to the bounded asynchronous failure-persist worker so the request never hangs).
++func (r *ReviewReservation) TaintContext(ctx context.Context) {
 +	if r == nil || r.entry == nil {
 +		return
++	}
++	if ctx != nil {
++		if _, hasDeadline := ctx.Deadline(); hasDeadline {
++			if r.entry.mu.LockContext(ctx) {
++				if r.entry.sealed {
++					r.entry.mu.Unlock()
++					return
++				}
++				r.entry.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionTainted)
++				r.entry.tainted = true
++				needAsync := !r.entry.taintedPersisted && !r.entry.foreignDisk
++				if !needAsync {
++					r.entry.taintAndPersistLocked()
++				}
++				r.entry.mu.Unlock()
++				if needAsync {
++					reviewMu.Lock()
++					enqueueExistingReviewTurnFailureLocked(r.entry, 0, true)
++					reviewMu.Unlock()
++				}
++				return
++			}
++			reviewMu.Lock()
++			enqueueExistingReviewTurnFailureLocked(r.entry, 0, true)
++			reviewMu.Unlock()
++			return
++		}
 +	}
 +	r.entry.mu.Lock()
 +	r.entry.taintAndPersistLocked()
@@ -8161,20 +8196,33 @@ index e69de29..991803f 100644
 +}
 +
 +type ctxMutex struct {
-+	ch chan struct{}
++	once sync.Once
++	ch   chan struct{}
 +}
 +
 +func newCtxMutex() *ctxMutex {
-+	ch := make(chan struct{}, 1)
-+	ch <- struct{}{}
-+	return &ctxMutex{ch: ch}
++	m := &ctxMutex{}
++	m.init()
++	return m
++}
++
++func (m *ctxMutex) init() {
++	m.once.Do(func() {
++		if m.ch == nil {
++			ch := make(chan struct{}, 1)
++			ch <- struct{}{}
++			m.ch = ch
++		}
++	})
 +}
 +
 +func (m *ctxMutex) Lock() {
++	m.init()
 +	<-m.ch
 +}
 +
 +func (m *ctxMutex) TryLock() bool {
++	m.init()
 +	select {
 +	case <-m.ch:
 +		return true
@@ -8184,6 +8232,11 @@ index e69de29..991803f 100644
 +}
 +
 +func (m *ctxMutex) LockContext(ctx context.Context) bool {
++	m.init()
++	if ctx == nil {
++		<-m.ch
++		return true
++	}
 +	if ctx.Err() != nil {
 +		return false
 +	}
@@ -8200,6 +8253,7 @@ index e69de29..991803f 100644
 +}
 +
 +func (m *ctxMutex) Unlock() {
++	m.init()
 +	m.ch <- struct{}{}
 +}
 +
@@ -8361,10 +8415,12 @@ index e69de29..991803f 100644
 +			targetTaint := entry.pendingTaint.Load()
 +
 +			entry.mu.Lock()
-+			if !entry.sealed && !entry.tainted {
++			if !entry.sealed {
 +				if targetTaint {
-+					entry.taintAndPersistLocked()
-+				} else {
++					if !entry.taintedPersisted {
++						entry.taintAndPersistLocked()
++					}
++				} else if !entry.tainted {
 +					wasFailed := entry.lastTurnFailed
 +					if targetSeq > entry.failedTurnSeq {
 +						entry.failedTurnSeq = targetSeq
@@ -8381,7 +8437,7 @@ index e69de29..991803f 100644
 +					}
 +				}
 +			}
-+			doneTerminal := entry.sealed || entry.tainted
++			doneTerminal := entry.sealed || (entry.tainted && entry.taintedPersisted) || (targetTaint && entry.tainted)
 +			entry.mu.Unlock()
 +
 +			reviewMu.Lock()
@@ -8395,20 +8451,80 @@ index e69de29..991803f 100644
 +	}
 +}
 +
++var (
++	pathHasDisallowedSymlinkFn = pathHasDisallowedSymlink
++	existingReviewProbeSem     = make(chan struct{}, maxPendingReviewInFlight)
++)
++
++func recordPendingTurnFailure(key string, turnSeq uint64) {
++	reviewMu.Lock()
++	st := pendingReviewLaunches[key]
++	if st != nil && turnSeq > st.failedTurnSeq {
++		st.failedTurnSeq = turnSeq
++	}
++	if entry := reviewLedger[key]; entry != nil {
++		enqueueExistingReviewTurnFailureLocked(entry, turnSeq, st != nil && st.tainted)
++	}
++	reviewMu.Unlock()
++}
++
++func releasePendingSlot(key string) {
++	reviewMu.Lock()
++	if pendingReviewTotal > 0 {
++		pendingReviewTotal--
++	}
++	if st := pendingReviewLaunches[key]; st != nil {
++		st.count--
++		if st.count <= 0 {
++			delete(pendingReviewLaunches, key)
++		}
++	}
++	reviewMu.Unlock()
++}
++
++func failAndReleasePendingSlot(key string, turnSeq uint64) {
++	reviewMu.Lock()
++	st := pendingReviewLaunches[key]
++	if st != nil && turnSeq > st.failedTurnSeq {
++		st.failedTurnSeq = turnSeq
++	}
++	if entry := reviewLedger[key]; entry != nil {
++		enqueueExistingReviewTurnFailureLocked(entry, turnSeq, st != nil && st.tainted)
++	}
++	if pendingReviewTotal > 0 {
++		pendingReviewTotal--
++	}
++	if st != nil {
++		st.count--
++		if st.count <= 0 {
++			delete(pendingReviewLaunches, key)
++		}
++	}
++	reviewMu.Unlock()
++}
++
 +// BeginPendingReview registers a bounded in-memory pre-admission guard BEFORE reading the
 +// HTTP body and assigns the turn's monotonic sequence number up front so earlier concurrent
-+// requests cannot clear a later rejected request's failure. If an existing unsealed launch
-+// or an active brand-new pending launch is rejected due to the global pre-admission cap,
-+// the rejection sequence is recorded atomically before releasing reviewMu and persisted via
-+// the globally bounded background worker queue without blocking the rejected request thread.
++// requests cannot clear a later rejected request's failure.
 +func BeginPendingReview(root, launch string) (*PendingReviewGuard, error) {
++	return BeginPendingReviewContext(context.Background(), root, launch)
++}
++
++// BeginPendingReviewContext enforces the global 32-slot concurrency cap and records overload
++// failures purely in memory BEFORE running any filesystem Lstat checks, and bounds the post-admission
++// symlink check by ctx so stalled receipt storage cannot accumulate unbounded waiters beyond 32.
++func BeginPendingReviewContext(ctx context.Context, root, launch string) (*PendingReviewGuard, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
 +		return nil, ErrUnavailable
 +	}
-+	symlinkBad := pathHasDisallowedSymlink(cleanRoot)
 +	key := cleanRoot + "\x00" + launch
-+	reviewMu.Lock()
++	if !reviewMu.LockContext(ctx) {
++		return nil, ErrUnavailable
++	}
 +	if reclaimingKeys[key] {
 +		reviewMu.Unlock()
 +		return nil, ErrUnavailable
@@ -8425,16 +8541,6 @@ index e69de29..991803f 100644
 +	reviewTurnSeqGen++
 +	turnSeq := reviewTurnSeqGen
 +	st := pendingReviewLaunches[key]
-+	if symlinkBad {
-+		if st != nil && turnSeq > st.failedTurnSeq {
-+			st.failedTurnSeq = turnSeq
-+		}
-+		if entry != nil {
-+			enqueueExistingReviewTurnFailureLocked(entry, turnSeq, st != nil && st.tainted)
-+		}
-+		reviewMu.Unlock()
-+		return nil, ErrUnavailable
-+	}
 +	if pendingReviewTotal >= maxPendingReviewInFlight {
 +		if st != nil && turnSeq > st.failedTurnSeq {
 +			st.failedTurnSeq = turnSeq
@@ -8455,20 +8561,55 @@ index e69de29..991803f 100644
 +		}
 +		st.count++
 +		pendingReviewTotal++
-+		reviewMu.Unlock()
-+		return &PendingReviewGuard{key: key, turnSeq: turnSeq, holdsSlot: true}, nil
-+	}
-+	if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
-+		if entry != nil {
-+			enqueueExistingReviewTurnFailureLocked(entry, turnSeq, false)
++	} else {
++		if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
++			if entry != nil {
++				enqueueExistingReviewTurnFailureLocked(entry, turnSeq, false)
++			}
++			reviewMu.Unlock()
++			return nil, ErrUnavailable
 +		}
-+		reviewMu.Unlock()
++		pendingReviewLaunches[key] = &pendingReviewState{count: 1, started: time.Now().UnixNano()}
++		pendingReviewTotal++
++	}
++	reviewMu.Unlock()
++
++	doneCh := make(chan bool, 1)
++	var stateMu sync.Mutex
++	callerLeft := false
++	go func() {
++		bad := pathHasDisallowedSymlinkFn(cleanRoot)
++		stateMu.Lock()
++		left := callerLeft
++		if !left {
++			doneCh <- bad
++		}
++		stateMu.Unlock()
++		if left {
++			releasePendingSlot(key)
++		}
++	}()
++	select {
++	case bad := <-doneCh:
++		if bad {
++			failAndReleasePendingSlot(key, turnSeq)
++			return nil, ErrUnavailable
++		}
++		return &PendingReviewGuard{key: key, turnSeq: turnSeq, holdsSlot: true}, nil
++	case <-ctx.Done():
++		stateMu.Lock()
++		select {
++		case <-doneCh:
++			stateMu.Unlock()
++			failAndReleasePendingSlot(key, turnSeq)
++			return nil, ErrUnavailable
++		default:
++			callerLeft = true
++			stateMu.Unlock()
++		}
++		recordPendingTurnFailure(key, turnSeq)
 +		return nil, ErrUnavailable
 +	}
-+	pendingReviewLaunches[key] = &pendingReviewState{count: 1, started: time.Now().UnixNano()}
-+	pendingReviewTotal++
-+	reviewMu.Unlock()
-+	return &PendingReviewGuard{key: key, turnSeq: turnSeq, holdsSlot: true}, nil
 +}
 +
 +type heldRootLock struct {
@@ -8590,6 +8731,8 @@ index e69de29..991803f 100644
 +	contentPartByItem         map[string]map[int64]string
 +	textDeltaHashByItem       map[string]map[int64]*textDeltaState
 +	textPrefixByItem          map[string]map[int64]textPrefixCheck
++	refusalDeltaHashByItem    map[string]map[int64]*textDeltaState
++	refusalPrefixByItem       map[string]map[int64]textPrefixCheck
 +	totalHashStates           int
 +	totalPartEntries          int
 +	pendingUnkeyed            int
@@ -8633,6 +8776,8 @@ index e69de29..991803f 100644
 +	t.contentPartByItem = nil
 +	t.textDeltaHashByItem = nil
 +	t.textPrefixByItem = nil
++	t.refusalDeltaHashByItem = nil
++	t.refusalPrefixByItem = nil
 +	t.totalHashStates = 0
 +	t.totalPartEntries = 0
 +	t.pendingUnkeyed = 0
@@ -8926,13 +9071,19 @@ index e69de29..991803f 100644
 +	return status == "" || status == "completed"
 +}
 +
-+func isValidCompletedToolItem(itemType, callID, name string, argsIsStr bool) bool {
-+	if itemType == "function_call" {
++func isValidCompletedToolItem(itemType, callID, name string, argsIsStr, inputIsStr bool) bool {
++	switch itemType {
++	case "function_call":
 +		return callID != "" && strings.TrimSpace(callID) == callID &&
 +			name != "" && strings.TrimSpace(name) == name &&
 +			argsIsStr
++	case "custom_tool_call":
++		return callID != "" && strings.TrimSpace(callID) == callID &&
++			name != "" && strings.TrimSpace(name) == name &&
++			inputIsStr
++	default:
++		return true
 +	}
-+	return true
 +}
 +
 +func isTerminalAssistantItemStatus(status string) bool {
@@ -9213,7 +9364,7 @@ index e69de29..991803f 100644
 +				return false
 +			}
 +		} else if !isCompletedNonMessageItemStatus(item.Status) ||
-+			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ArgsIsStr) {
++			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ArgsIsStr, item.InputIsStr) {
 +			return false
 +		}
 +	}
@@ -9318,6 +9469,34 @@ index e69de29..991803f 100644
 +				}
 +				part := item.Content[cIdx]
 +				if part.Type != "output_text" || len(part.Text) < pref.byteLen || sha256Hex(part.Text[:pref.byteLen]) != pref.sha256 {
++					return false
++				}
++			}
++		}
++		if deltaHashes, hasDeltas := t.refusalDeltaHashByItem[canonKey]; hasDeltas {
++			if item.Type != "message" || item.Role != "assistant" {
++				return false
++			}
++			for cIdx, st := range deltaHashes {
++				if cIdx < 0 || int(cIdx) >= len(item.Content) {
++					return false
++				}
++				part := item.Content[cIdx]
++				if part.Type != "refusal" || ((!st.fromSnapshot || st.hasDelta) && sha256Hex(part.Refusal) != hex.EncodeToString(st.h.Sum(nil))) {
++					return false
++				}
++			}
++		}
++		if prefixes, hasPrefixes := t.refusalPrefixByItem[canonKey]; hasPrefixes {
++			if item.Type != "message" || item.Role != "assistant" {
++				return false
++			}
++			for cIdx, pref := range prefixes {
++				if cIdx < 0 || int(cIdx) >= len(item.Content) {
++					return false
++				}
++				part := item.Content[cIdx]
++				if part.Type != "refusal" || len(part.Refusal) < pref.byteLen || sha256Hex(part.Refusal[:pref.byteLen]) != pref.sha256 {
 +					return false
 +				}
 +			}
@@ -10880,6 +11059,40 @@ index e69de29..991803f 100644
 +						}
 +					}
 +				}
++				if prevDeltas, hasDeltas := t.refusalDeltaHashByItem[idxKey]; hasDeltas {
++					delete(t.refusalDeltaHashByItem, idxKey)
++					curDeltas := t.refusalDeltaHashByItem[canonKey]
++					if curDeltas == nil {
++						t.refusalDeltaHashByItem[canonKey] = prevDeltas
++					} else {
++						for cIdx, st := range prevDeltas {
++							if _, dup := curDeltas[cIdx]; dup {
++								return "", "", 0, false, false
++							}
++							if len(curDeltas) >= maxTrackedContentParts {
++								return "", "", 0, false, false
++							}
++							curDeltas[cIdx] = st
++						}
++					}
++				}
++				if prevPrefixes, hasPrefixes := t.refusalPrefixByItem[idxKey]; hasPrefixes {
++					delete(t.refusalPrefixByItem, idxKey)
++					curPrefixes := t.refusalPrefixByItem[canonKey]
++					if curPrefixes == nil {
++						t.refusalPrefixByItem[canonKey] = prevPrefixes
++					} else {
++						for cIdx, pref := range prevPrefixes {
++							if existing, dup := curPrefixes[cIdx]; dup && existing != pref {
++								return "", "", 0, false, false
++							}
++							if len(curPrefixes) >= maxTrackedContentParts {
++								return "", "", 0, false, false
++							}
++							curPrefixes[cIdx] = pref
++						}
++					}
++				}
 +				if seq, hasSeq := t.itemSeqByKey[idxKey]; hasSeq {
 +					if idSeq, hasIDSeq := t.itemSeqByKey[canonKey]; !hasIDSeq || seq < idSeq {
 +						t.itemSeqByKey[canonKey] = seq
@@ -10966,6 +11179,12 @@ index e69de29..991803f 100644
 +	if _, ok := t.textPrefixByItem[key]; ok {
 +		return true
 +	}
++	if _, ok := t.refusalDeltaHashByItem[key]; ok {
++		return true
++	}
++	if _, ok := t.refusalPrefixByItem[key]; ok {
++		return true
++	}
 +	if _, ok := t.toolMetaByKey[key]; ok {
 +		return true
 +	}
@@ -11043,6 +11262,14 @@ index e69de29..991803f 100644
 +					if v, ok := t.textPrefixByItem[idxKey]; ok {
 +						delete(t.textPrefixByItem, idxKey)
 +						t.textPrefixByItem[idKey] = v
++					}
++					if v, ok := t.refusalDeltaHashByItem[idxKey]; ok {
++						delete(t.refusalDeltaHashByItem, idxKey)
++						t.refusalDeltaHashByItem[idKey] = v
++					}
++					if v, ok := t.refusalPrefixByItem[idxKey]; ok {
++						delete(t.refusalPrefixByItem, idxKey)
++						t.refusalPrefixByItem[idKey] = v
 +					}
 +					if v, ok := t.toolMetaByKey[idxKey]; ok {
 +						delete(t.toolMetaByKey, idxKey)
@@ -11501,28 +11728,49 @@ index e69de29..991803f 100644
 +	return true
 +}
 +
-+func (t *strictStreamTracker) recordTextPrefix(canonKey string, contentIdx int64, text string) bool {
++func (t *strictStreamTracker) recordPartPrefix(
++	canonKey string,
++	contentIdx int64,
++	text string,
++	pendingTag string,
++	finalPrefix string,
++	prefixMapPtr *map[string]map[int64]textPrefixCheck,
++	otherDeltaMap map[string]map[int64]*textDeltaState,
++	otherPrefixMap map[string]map[int64]textPrefixCheck,
++) bool {
 +	if canonKey == "" || text == "" {
 +		return true
 +	}
 +	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
 +		return false
 +	}
-+	if parts := t.contentPartByItem[canonKey]; parts != nil {
-+		if prevTag, exists := parts[contentIdx]; exists && prevTag != "text-pending" && !strings.HasPrefix(prevTag, "text:") {
++	if otherDeltas := otherDeltaMap[canonKey]; otherDeltas != nil {
++		if otherDeltas[contentIdx] != nil {
 +			return false
 +		}
 +	}
-+	prefixes := t.textPrefixByItem[canonKey]
-+	if prefixes == nil {
-+		if len(t.textPrefixByItem) >= maxTrackedOutputItems {
++	if otherPrefixes := otherPrefixMap[canonKey]; otherPrefixes != nil {
++		if _, exists := otherPrefixes[contentIdx]; exists {
 +			return false
 +		}
-+		if t.textPrefixByItem == nil {
-+			t.textPrefixByItem = make(map[string]map[int64]textPrefixCheck)
++	}
++	if parts := t.contentPartByItem[canonKey]; parts != nil {
++		if prevTag, exists := parts[contentIdx]; exists && prevTag != pendingTag && !strings.HasPrefix(prevTag, finalPrefix) {
++			return false
++		}
++	}
++	prefixMap := *prefixMapPtr
++	prefixes := prefixMap[canonKey]
++	if prefixes == nil {
++		if len(prefixMap) >= maxTrackedOutputItems {
++			return false
++		}
++		if prefixMap == nil {
++			prefixMap = make(map[string]map[int64]textPrefixCheck)
++			*prefixMapPtr = prefixMap
 +		}
 +		prefixes = make(map[int64]textPrefixCheck)
-+		t.textPrefixByItem[canonKey] = prefixes
++		prefixMap[canonKey] = prefixes
 +	}
 +	if prev, exists := prefixes[contentIdx]; exists {
 +		if len(text) < prev.byteLen || sha256Hex(text[:prev.byteLen]) != prev.sha256 {
@@ -11539,6 +11787,14 @@ index e69de29..991803f 100644
 +	}
 +	prefixes[contentIdx] = textPrefixCheck{byteLen: len(text), sha256: sha256Hex(text)}
 +	return true
++}
++
++func (t *strictStreamTracker) recordTextPrefix(canonKey string, contentIdx int64, text string) bool {
++	return t.recordPartPrefix(canonKey, contentIdx, text, "text-pending", "text:", &t.textPrefixByItem, t.refusalDeltaHashByItem, t.refusalPrefixByItem)
++}
++
++func (t *strictStreamTracker) recordRefusalPrefix(canonKey string, contentIdx int64, refusal string) bool {
++	return t.recordPartPrefix(canonKey, contentIdx, refusal, "refusal-pending", "refusal:", &t.refusalPrefixByItem, t.textDeltaHashByItem, t.textPrefixByItem)
 +}
 +
 +func canonicalJSONDigest(raw []byte) (string, bool) {
@@ -11562,53 +11818,66 @@ index e69de29..991803f 100644
 +	return sha256Hex(string(canon)), true
 +}
 +
-+func (t *strictStreamTracker) recordSnapshotText(canonKey string, contentIdx int64, snapText string) bool {
-+	if !t.recordPendingTextPart(canonKey, contentIdx) {
++func (t *strictStreamTracker) recordSnapshotPart(
++	canonKey string,
++	contentIdx int64,
++	snapText string,
++	partType string,
++	pendingTag string,
++	finalPrefix string,
++	deltaMapPtr *map[string]map[int64]*textDeltaState,
++	prefixMapPtr *map[string]map[int64]textPrefixCheck,
++	otherDeltaMap map[string]map[int64]*textDeltaState,
++	otherPrefixMap map[string]map[int64]textPrefixCheck,
++) bool {
++	if !t.recordPendingPart(canonKey, contentIdx, pendingTag, finalPrefix, otherDeltaMap, otherPrefixMap) {
 +		return false
 +	}
 +	if canonKey == "" {
 +		return true
 +	}
 +	if parts := t.contentPartByItem[canonKey]; parts != nil {
-+		if prevTag, exists := parts[contentIdx]; exists && strings.HasPrefix(prevTag, "text:") {
-+			if contentPartTag("output_text", snapText) != prevTag {
++		if prevTag, exists := parts[contentIdx]; exists && strings.HasPrefix(prevTag, finalPrefix) {
++			if contentPartTag(partType, snapText) != prevTag {
 +				return false
 +			}
 +		}
 +	}
 +	if snapText == "" {
-+		if prefixes := t.textPrefixByItem[canonKey]; prefixes != nil {
++		if prefixes := (*prefixMapPtr)[canonKey]; prefixes != nil {
 +			if pref, exists := prefixes[contentIdx]; exists && pref.byteLen > 0 {
 +				return false
 +			}
 +		}
-+		if hashes := t.textDeltaHashByItem[canonKey]; hashes != nil {
++		if hashes := (*deltaMapPtr)[canonKey]; hashes != nil {
 +			if st := hashes[contentIdx]; st != nil && hex.EncodeToString(st.h.Sum(nil)) != sha256Hex("") {
 +				return false
 +			}
 +		}
 +		return true
 +	}
-+	if !t.recordTextPrefix(canonKey, contentIdx, snapText) {
++	if !t.recordPartPrefix(canonKey, contentIdx, snapText, pendingTag, finalPrefix, prefixMapPtr, otherDeltaMap, otherPrefixMap) {
 +		return false
 +	}
-+	hashes := t.textDeltaHashByItem[canonKey]
++	deltaMap := *deltaMapPtr
++	hashes := deltaMap[canonKey]
 +	if hashes == nil {
-+		if len(t.textDeltaHashByItem) >= maxTrackedOutputItems {
++		if len(deltaMap) >= maxTrackedOutputItems {
 +			return false
 +		}
-+		if t.textDeltaHashByItem == nil {
-+			t.textDeltaHashByItem = make(map[string]map[int64]*textDeltaState)
++		if deltaMap == nil {
++			deltaMap = make(map[string]map[int64]*textDeltaState)
++			*deltaMapPtr = deltaMap
 +		}
 +		hashes = make(map[int64]*textDeltaState)
-+		t.textDeltaHashByItem[canonKey] = hashes
++		deltaMap[canonKey] = hashes
 +	}
 +	snapSHA := sha256Hex(snapText)
 +	if st := hashes[contentIdx]; st != nil {
 +		if st.hasDelta {
 +			return hex.EncodeToString(st.h.Sum(nil)) == snapSHA
 +		}
-+		// Advance pre-delta snapshot seed (monotonic prefix already proven by recordTextPrefix).
++		// Advance pre-delta snapshot seed (monotonic prefix already proven by recordPartPrefix).
 +		h := sha256.New()
 +		_, _ = h.Write([]byte(snapText))
 +		st.h = h
@@ -11626,46 +11895,66 @@ index e69de29..991803f 100644
 +	return true
 +}
 +
-+func (t *strictStreamTracker) recordInitialText(canonKey string, contentIdx int64, initText string) bool {
++func (t *strictStreamTracker) recordSnapshotText(canonKey string, contentIdx int64, snapText string) bool {
++	return t.recordSnapshotPart(canonKey, contentIdx, snapText, "output_text", "text-pending", "text:", &t.textDeltaHashByItem, &t.textPrefixByItem, t.refusalDeltaHashByItem, t.refusalPrefixByItem)
++}
++
++func (t *strictStreamTracker) recordSnapshotRefusal(canonKey string, contentIdx int64, snapRefusal string) bool {
++	return t.recordSnapshotPart(canonKey, contentIdx, snapRefusal, "refusal", "refusal-pending", "refusal:", &t.refusalDeltaHashByItem, &t.refusalPrefixByItem, t.textDeltaHashByItem, t.textPrefixByItem)
++}
++
++func (t *strictStreamTracker) recordInitialPart(
++	canonKey string,
++	contentIdx int64,
++	initText string,
++	pendingTag string,
++	finalPrefix string,
++	deltaMapPtr *map[string]map[int64]*textDeltaState,
++	prefixMapPtr *map[string]map[int64]textPrefixCheck,
++	otherDeltaMap map[string]map[int64]*textDeltaState,
++	otherPrefixMap map[string]map[int64]textPrefixCheck,
++) bool {
 +	if canonKey != "" {
 +		if parts := t.contentPartByItem[canonKey]; parts != nil {
-+			if prevTag, exists := parts[contentIdx]; exists && strings.HasPrefix(prevTag, "text:") {
++			if prevTag, exists := parts[contentIdx]; exists && strings.HasPrefix(prevTag, finalPrefix) {
 +				return false
 +			}
 +		}
 +	}
-+	if !t.recordPendingTextPart(canonKey, contentIdx) {
++	if !t.recordPendingPart(canonKey, contentIdx, pendingTag, finalPrefix, otherDeltaMap, otherPrefixMap) {
 +		return false
 +	}
 +	if canonKey == "" {
 +		return true
 +	}
 +	if initText == "" {
-+		if prefixes := t.textPrefixByItem[canonKey]; prefixes != nil {
++		if prefixes := (*prefixMapPtr)[canonKey]; prefixes != nil {
 +			if pref, exists := prefixes[contentIdx]; exists && pref.byteLen > 0 {
 +				return false
 +			}
 +		}
-+		if hashes := t.textDeltaHashByItem[canonKey]; hashes != nil {
++		if hashes := (*deltaMapPtr)[canonKey]; hashes != nil {
 +			if st := hashes[contentIdx]; st != nil && hex.EncodeToString(st.h.Sum(nil)) != sha256Hex("") {
 +				return false
 +			}
 +		}
 +		return true
 +	}
-+	if !t.recordTextPrefix(canonKey, contentIdx, initText) {
++	if !t.recordPartPrefix(canonKey, contentIdx, initText, pendingTag, finalPrefix, prefixMapPtr, otherDeltaMap, otherPrefixMap) {
 +		return false
 +	}
-+	hashes := t.textDeltaHashByItem[canonKey]
++	deltaMap := *deltaMapPtr
++	hashes := deltaMap[canonKey]
 +	if hashes == nil {
-+		if len(t.textDeltaHashByItem) >= maxTrackedOutputItems {
++		if len(deltaMap) >= maxTrackedOutputItems {
 +			return false
 +		}
-+		if t.textDeltaHashByItem == nil {
-+			t.textDeltaHashByItem = make(map[string]map[int64]*textDeltaState)
++		if deltaMap == nil {
++			deltaMap = make(map[string]map[int64]*textDeltaState)
++			*deltaMapPtr = deltaMap
 +		}
 +		hashes = make(map[int64]*textDeltaState)
-+		t.textDeltaHashByItem[canonKey] = hashes
++		deltaMap[canonKey] = hashes
 +	}
 +	initSHA := sha256Hex(initText)
 +	if st := hashes[contentIdx]; st != nil {
@@ -11684,28 +11973,56 @@ index e69de29..991803f 100644
 +	return true
 +}
 +
-+func (t *strictStreamTracker) recordTextDelta(canonKey string, contentIdx int64, delta string) bool {
++func (t *strictStreamTracker) recordInitialText(canonKey string, contentIdx int64, initText string) bool {
++	return t.recordInitialPart(canonKey, contentIdx, initText, "text-pending", "text:", &t.textDeltaHashByItem, &t.textPrefixByItem, t.refusalDeltaHashByItem, t.refusalPrefixByItem)
++}
++
++func (t *strictStreamTracker) recordInitialRefusal(canonKey string, contentIdx int64, initRefusal string) bool {
++	return t.recordInitialPart(canonKey, contentIdx, initRefusal, "refusal-pending", "refusal:", &t.refusalDeltaHashByItem, &t.refusalPrefixByItem, t.textDeltaHashByItem, t.textPrefixByItem)
++}
++
++func (t *strictStreamTracker) recordPartDelta(
++	canonKey string,
++	contentIdx int64,
++	delta string,
++	pendingTag string,
++	deltaMapPtr *map[string]map[int64]*textDeltaState,
++	otherDeltaMap map[string]map[int64]*textDeltaState,
++	otherPrefixMap map[string]map[int64]textPrefixCheck,
++) bool {
 +	if canonKey == "" {
 +		return true
 +	}
 +	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
 +		return false
 +	}
-+	if parts := t.contentPartByItem[canonKey]; parts != nil {
-+		if prevTag, finalized := parts[contentIdx]; finalized && prevTag != "text-pending" {
++	if otherDeltas := otherDeltaMap[canonKey]; otherDeltas != nil {
++		if otherDeltas[contentIdx] != nil {
 +			return false
 +		}
 +	}
-+	hashes := t.textDeltaHashByItem[canonKey]
-+	if hashes == nil {
-+		if len(t.textDeltaHashByItem) >= maxTrackedOutputItems {
++	if otherPrefixes := otherPrefixMap[canonKey]; otherPrefixes != nil {
++		if _, exists := otherPrefixes[contentIdx]; exists {
 +			return false
 +		}
-+		if t.textDeltaHashByItem == nil {
-+			t.textDeltaHashByItem = make(map[string]map[int64]*textDeltaState)
++	}
++	if parts := t.contentPartByItem[canonKey]; parts != nil {
++		if prevTag, finalized := parts[contentIdx]; finalized && prevTag != pendingTag {
++			return false
++		}
++	}
++	deltaMap := *deltaMapPtr
++	hashes := deltaMap[canonKey]
++	if hashes == nil {
++		if len(deltaMap) >= maxTrackedOutputItems {
++			return false
++		}
++		if deltaMap == nil {
++			deltaMap = make(map[string]map[int64]*textDeltaState)
++			*deltaMapPtr = deltaMap
 +		}
 +		hashes = make(map[int64]*textDeltaState)
-+		t.textDeltaHashByItem[canonKey] = hashes
++		deltaMap[canonKey] = hashes
 +	}
 +	st := hashes[contentIdx]
 +	if st == nil {
@@ -11721,17 +12038,42 @@ index e69de29..991803f 100644
 +	return true
 +}
 +
-+func (t *strictStreamTracker) recordPendingTextPart(canonKey string, contentIdx int64) bool {
++func (t *strictStreamTracker) recordTextDelta(canonKey string, contentIdx int64, delta string) bool {
++	return t.recordPartDelta(canonKey, contentIdx, delta, "text-pending", &t.textDeltaHashByItem, t.refusalDeltaHashByItem, t.refusalPrefixByItem)
++}
++
++func (t *strictStreamTracker) recordRefusalDelta(canonKey string, contentIdx int64, delta string) bool {
++	return t.recordPartDelta(canonKey, contentIdx, delta, "refusal-pending", &t.refusalDeltaHashByItem, t.textDeltaHashByItem, t.textPrefixByItem)
++}
++
++func (t *strictStreamTracker) recordPendingPart(
++	canonKey string,
++	contentIdx int64,
++	pendingTag string,
++	finalPrefix string,
++	otherDeltaMap map[string]map[int64]*textDeltaState,
++	otherPrefixMap map[string]map[int64]textPrefixCheck,
++) bool {
 +	if canonKey == "" {
 +		return true
 +	}
 +	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
 +		return false
 +	}
++	if otherDeltas := otherDeltaMap[canonKey]; otherDeltas != nil {
++		if otherDeltas[contentIdx] != nil {
++			return false
++		}
++	}
++	if otherPrefixes := otherPrefixMap[canonKey]; otherPrefixes != nil {
++		if _, exists := otherPrefixes[contentIdx]; exists {
++			return false
++		}
++	}
 +	parts := t.contentPartByItem[canonKey]
 +	if parts != nil {
 +		if prevTag, exists := parts[contentIdx]; exists {
-+			return prevTag == "text-pending" || strings.HasPrefix(prevTag, "text:")
++			return prevTag == pendingTag || strings.HasPrefix(prevTag, finalPrefix)
 +		}
 +		if len(parts) >= maxTrackedContentParts {
 +			return false
@@ -11749,42 +12091,17 @@ index e69de29..991803f 100644
 +	if t.totalPartEntries >= maxTrackedTotalPartEntries {
 +		return false
 +	}
-+	parts[contentIdx] = "text-pending"
++	parts[contentIdx] = pendingTag
 +	t.totalPartEntries++
 +	return true
 +}
 +
++func (t *strictStreamTracker) recordPendingTextPart(canonKey string, contentIdx int64) bool {
++	return t.recordPendingPart(canonKey, contentIdx, "text-pending", "text:", t.refusalDeltaHashByItem, t.refusalPrefixByItem)
++}
++
 +func (t *strictStreamTracker) recordPendingRefusal(canonKey string, contentIdx int64) bool {
-+	if canonKey == "" {
-+		return true
-+	}
-+	if contentIdx < 0 || contentIdx >= int64(maxTrackedContentParts) {
-+		return false
-+	}
-+	parts := t.contentPartByItem[canonKey]
-+	if parts != nil {
-+		if prevTag, exists := parts[contentIdx]; exists {
-+			return prevTag == "refusal-pending" || strings.HasPrefix(prevTag, "refusal:")
-+		}
-+		if len(parts) >= maxTrackedContentParts {
-+			return false
-+		}
-+	} else {
-+		if len(t.contentPartByItem) >= maxTrackedOutputItems {
-+			return false
-+		}
-+		if t.contentPartByItem == nil {
-+			t.contentPartByItem = make(map[string]map[int64]string)
-+		}
-+		parts = make(map[int64]string)
-+		t.contentPartByItem[canonKey] = parts
-+	}
-+	if t.totalPartEntries >= maxTrackedTotalPartEntries {
-+		return false
-+	}
-+	parts[contentIdx] = "refusal-pending"
-+	t.totalPartEntries++
-+	return true
++	return t.recordPendingPart(canonKey, contentIdx, "refusal-pending", "refusal:", t.textDeltaHashByItem, t.textPrefixByItem)
 +}
 +
 +func (t *strictStreamTracker) recordContentPart(canonKey string, contentIdx int64, partType, text string) bool {
@@ -11804,6 +12121,20 @@ index e69de29..991803f 100644
 +	if prefixes := t.textPrefixByItem[canonKey]; prefixes != nil {
 +		if pref, hasPref := prefixes[contentIdx]; hasPref {
 +			if partType != "output_text" || len(text) < pref.byteLen || sha256Hex(text[:pref.byteLen]) != pref.sha256 {
++				return false
++			}
++		}
++	}
++	if hashes := t.refusalDeltaHashByItem[canonKey]; hashes != nil {
++		if st := hashes[contentIdx]; st != nil {
++			if partType != "refusal" || ((!st.fromSnapshot || st.hasDelta) && hex.EncodeToString(st.h.Sum(nil)) != sha256Hex(text)) {
++				return false
++			}
++		}
++	}
++	if prefixes := t.refusalPrefixByItem[canonKey]; prefixes != nil {
++		if pref, hasPref := prefixes[contentIdx]; hasPref {
++			if partType != "refusal" || len(text) < pref.byteLen || sha256Hex(text[:pref.byteLen]) != pref.sha256 {
 +				return false
 +			}
 +		}
@@ -12086,7 +12417,7 @@ index e69de29..991803f 100644
 +			}
 +			isAssistantMsg := item.Type == "message" && item.Role == "assistant"
 +			if !isValidOutputItemStatus(item.Type, item.Role, item.Status, true) ||
-+				(item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ArgsIsStr)) {
++				(item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ArgsIsStr, item.InputIsStr)) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -12191,9 +12522,27 @@ index e69de29..991803f 100644
 +						}
 +					}
 +				}
++				if deltaHashes, hasDeltas := t.refusalDeltaHashByItem[canonKey]; hasDeltas {
++					for cIdx := range deltaHashes {
++						if cIdx < 0 || int(cIdx) >= len(item.Content) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
++				if prefixes, hasPrefixes := t.refusalPrefixByItem[canonKey]; hasPrefixes {
++					for cIdx := range prefixes {
++						if cIdx < 0 || int(cIdx) >= len(item.Content) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
 +				if isDone {
 +					for cIdx, part := range item.Content {
-+						if !t.recordContentPart(canonKey, int64(cIdx), part.Type, part.Text) {
++						if !t.recordContentPart(canonKey, int64(cIdx), part.Type, contentPartPayload(part)) {
 +							c.mu.Unlock()
 +							c.taintStreamAnomaly()
 +							return
@@ -12204,6 +12553,8 @@ index e69de29..991803f 100644
 +						var okPart bool
 +						if part.Type == "output_text" {
 +							okPart = t.recordSnapshotText(canonKey, int64(cIdx), part.Text)
++						} else if part.Type == "refusal" {
++							okPart = t.recordSnapshotRefusal(canonKey, int64(cIdx), part.Refusal)
 +						} else {
 +							okPart = t.recordContentPart(canonKey, int64(cIdx), part.Type, "")
 +						}
@@ -12230,6 +12581,16 @@ index e69de29..991803f 100644
 +					return
 +				}
 +				if _, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, hasDeltas := t.refusalDeltaHashByItem[canonKey]; hasDeltas {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, hasPrefixes := t.refusalPrefixByItem[canonKey]; hasPrefixes {
 +					c.mu.Unlock()
 +					c.taintStreamAnomaly()
 +					return
@@ -12547,7 +12908,7 @@ index e69de29..991803f 100644
 +				if part.Type == "output_text" {
 +					okPart = t.recordInitialText(canonKey, int64(i), part.Text)
 +				} else if part.Type == "refusal" {
-+					okPart = t.recordPendingRefusal(canonKey, int64(i))
++					okPart = t.recordInitialRefusal(canonKey, int64(i), part.Refusal)
 +				} else {
 +					okPart = t.recordContentPart(canonKey, int64(i), part.Type, part.Text)
 +				}
@@ -12631,7 +12992,7 @@ index e69de29..991803f 100644
 +				return
 +			}
 +		} else if !isCompletedNonMessageItemStatus(itemStatus) ||
-+			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneArgs.isStr) {
++			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneArgs.isStr, doneInput.isStr) {
 +			c.taintStreamAnomaly()
 +			return
 +		}
@@ -12713,6 +13074,24 @@ index e69de29..991803f 100644
 +						}
 +					}
 +				}
++				if deltaHashes, hasDeltas := t.refusalDeltaHashByItem[canonKey]; hasDeltas {
++					for cIdx := range deltaHashes {
++						if cIdx < 0 || int(cIdx) >= len(parts) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
++				if prefixes, hasPrefixes := t.refusalPrefixByItem[canonKey]; hasPrefixes {
++					for cIdx := range prefixes {
++						if cIdx < 0 || int(cIdx) >= len(parts) {
++							c.mu.Unlock()
++							c.taintStreamAnomaly()
++							return
++						}
++					}
++				}
 +				for i, part := range parts {
 +					if !t.recordContentPart(canonKey, int64(i), part.Type, contentPartPayload(part)) {
 +						c.mu.Unlock()
@@ -12736,6 +13115,16 @@ index e69de29..991803f 100644
 +					return
 +				}
 +				if _, hasPrefixes := t.textPrefixByItem[canonKey]; hasPrefixes {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, hasDeltas := t.refusalDeltaHashByItem[canonKey]; hasDeltas {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++				if _, hasPrefixes := t.refusalPrefixByItem[canonKey]; hasPrefixes {
 +					c.mu.Unlock()
 +					c.taintStreamAnomaly()
 +					return
@@ -13054,7 +13443,7 @@ index e69de29..991803f 100644
 +				return
 +			}
 +		case "response.refusal.delta":
-+			if !t.recordPendingRefusal(canonKey, cIdx) {
++			if !frame.hasEvDelta || !t.recordRefusalDelta(canonKey, cIdx, frame.evDelta) || !t.recordPendingRefusal(canonKey, cIdx) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -13079,6 +13468,7 @@ index e69de29..991803f 100644
 +			}
 +			pType, _ := exactOptionalString(frame.partFields, "type")
 +			pText, _ := exactOptionalString(frame.partFields, "text")
++			pRef, _ := exactOptionalString(frame.partFields, "refusal")
 +			if strings.TrimSpace(pType) == "" {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
@@ -13093,7 +13483,7 @@ index e69de29..991803f 100644
 +					return
 +				}
 +			} else if pType == "refusal" {
-+				if !t.recordPendingRefusal(canonKey, cIdx) {
++				if !t.recordInitialRefusal(canonKey, cIdx, pRef) {
 +					c.mu.Unlock()
 +					c.taintStreamAnomaly()
 +					return
@@ -14156,13 +14546,22 @@ index e69de29..991803f 100644
 +}
 +
 +func getOrCreateReviewEntry(root, launch, session string, now time.Time, acquire, rejectSealed bool) (*reviewEntry, error) {
++	return getOrCreateReviewEntryContext(context.Background(), root, launch, session, now, acquire, rejectSealed)
++}
++
++func getOrCreateReviewEntryContext(ctx context.Context, root, launch, session string, now time.Time, acquire, rejectSealed bool) (*reviewEntry, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok {
 +		return nil, ErrUnavailable
 +	}
 +	root = cleanRoot
 +	key := root + "\x00" + launch
-+	reviewMu.Lock()
++	if !reviewMu.LockContext(ctx) {
++		return nil, ErrUnavailable
++	}
 +	locked := true
 +	defer func() {
 +		if locked {
@@ -14217,7 +14616,9 @@ index e69de29..991803f 100644
 +	if rejectSealed && onDisk && diskEntry != nil && diskEntry.sealedFlag {
 +		return nil, errReviewSealed
 +	}
-+	reviewMu.Lock()
++	if !reviewMu.LockContext(ctx) {
++		return nil, ErrUnavailable
++	}
 +	locked = true
 +	if ent, err, done := checkExisting(); done {
 +		return ent, err
@@ -14393,7 +14794,9 @@ index e69de29..991803f 100644
 +			if rejectSealed && onDisk && diskEntry != nil && diskEntry.sealedFlag {
 +				return nil, errReviewSealed
 +			}
-+			reviewMu.Lock()
++			if !reviewMu.LockContext(ctx) {
++				return nil, ErrUnavailable
++			}
 +			locked = true
 +			if triedAny {
 +				unpersistedFlushCursorTouched = lastTried.touched
@@ -14438,24 +14841,73 @@ index e69de29..991803f 100644
 +	return entry, nil
 +}
 +
-+func finishReserveReviewEntry(root, key string, entry *reviewEntry) (*ReviewReservation, error) {
-+	entry.mu.Lock()
++func finishReserveReviewEntryContext(ctx context.Context, root, key string, entry *reviewEntry, pendingTainted bool, pendingFailedSeq uint64) (*ReviewReservation, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	_, hasDeadline := ctx.Deadline()
++	if !entry.mu.LockContext(ctx) {
++		reviewMu.Lock()
++		if pendingTainted || entry.pendingTaint.Load() {
++			enqueueExistingReviewTurnFailureLocked(entry, 0, true)
++		} else {
++			reviewTurnSeqGen++
++			failSeq := reviewTurnSeqGen
++			if pendingFailedSeq > failSeq {
++				failSeq = pendingFailedSeq
++			}
++			enqueueExistingReviewTurnFailureLocked(entry, failSeq, false)
++		}
++		if entry.inFlight > 0 {
++			entry.inFlight--
++		}
++		reviewMu.Unlock()
++		return nil, ErrUnavailable
++	}
 +	if entry.sealed {
 +		entry.mu.Unlock()
 +		releaseReview(entry)
 +		return nil, ErrUnavailable
 +	}
-+	if entry.tainted || entry.pendingTaint.Load() {
++	taintAndRejectLocked := func() (*ReviewReservation, error) {
++		if hasDeadline && !entry.taintedPersisted && !entry.foreignDisk {
++			entry.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionTainted)
++			entry.tainted = true
++			entry.mu.Unlock()
++			reviewMu.Lock()
++			enqueueExistingReviewTurnFailureLocked(entry, 0, true)
++			if entry.inFlight > 0 {
++				entry.inFlight--
++			}
++			reviewMu.Unlock()
++			return nil, ErrUnavailable
++		}
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
 +		releaseReview(entry)
 +		return nil, ErrUnavailable
 +	}
++	if pendingTainted || entry.tainted || entry.pendingTaint.Load() {
++		return taintAndRejectLocked()
++	}
 +	if entry.started > 0 && time.Now().UnixNano()-entry.started > int64(MaxReviewDuration) {
-+		entry.taintAndPersistLocked()
-+		entry.mu.Unlock()
-+		releaseReview(entry)
-+		return nil, ErrUnavailable
++		return taintAndRejectLocked()
++	}
++	needAsyncFailPersist := false
++	if pendingFailedSeq > 0 && pendingFailedSeq > entry.failedTurnSeq {
++		entry.failedTurnSeq = pendingFailedSeq
++		latestPubSeq := uint64(0)
++		if len(entry.publishedTurns) > 0 {
++			latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
++		}
++		entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
++		if entry.lastTurnFailed {
++			if hasDeadline {
++				needAsyncFailPersist = true
++			} else if err := entry.persistLocked(); err != nil {
++				return taintAndRejectLocked()
++			}
++		}
 +	}
 +	if !entry.markerPersisted {
 +		if lockErr := acquirePrivateRootLock(root); lockErr != nil || entry.persistLocked() != nil {
@@ -14484,13 +14936,63 @@ index e69de29..991803f 100644
 +			return nil, ErrUnavailable
 +		}
 +	}
++	started := entry.started
 +	entry.mu.Unlock()
 +	reviewMu.Lock()
++	if needAsyncFailPersist {
++		enqueueExistingReviewTurnFailureLocked(entry, pendingFailedSeq, false)
++	}
 +	if now := time.Now(); now.After(entry.touched) {
 +		entry.touched = now
 +	}
 +	reviewMu.Unlock()
-+	return &ReviewReservation{entry: entry}, nil
++	return &ReviewReservation{entry: entry, started: started}, nil
++}
++
++func probeExistingReviewDirContext(ctx context.Context, root, dir string) (bool, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	if ctx.Err() != nil {
++		return false, ErrUnavailable
++	}
++	select {
++	case existingReviewProbeSem <- struct{}{}:
++	case <-ctx.Done():
++		return false, ErrUnavailable
++	}
++	type probeRes struct {
++		exists bool
++		err    error
++	}
++	ch := make(chan probeRes, 1)
++	go func() {
++		defer func() { <-existingReviewProbeSem }()
++		rootExists, err := checkPrivateDir(root, true)
++		if err != nil {
++			ch <- probeRes{false, ErrUnavailable}
++			return
++		}
++		if !rootExists {
++			ch <- probeRes{false, nil}
++			return
++		}
++		if _, statErr := os.Lstat(dir); statErr != nil {
++			if os.IsNotExist(statErr) {
++				ch <- probeRes{false, nil}
++				return
++			}
++			ch <- probeRes{false, ErrUnavailable}
++			return
++		}
++		ch <- probeRes{true, nil}
++	}()
++	select {
++	case r := <-ch:
++		return r.exists, r.err
++	case <-ctx.Done():
++		return false, ErrUnavailable
++	}
 +}
 +
 +// ReserveExistingReview reserves an in-flight turn ONLY if launch already exists in the
@@ -14498,13 +15000,26 @@ index e69de29..991803f 100644
 +// without creating root or any launch directory on disk, so rejected pre-admission requests
 +// cannot consume disk space or inodes.
 +func ReserveExistingReview(root, launch string) (*ReviewReservation, bool, error) {
++	return ReserveExistingReviewContext(context.Background(), root, launch)
++}
++
++// ReserveExistingReviewContext is the context-bounded variant of ReserveExistingReview: if
++// ctx expires while waiting on reviewMu, entry.mu (e.g. a previous turn fsyncing), or disk
++// existence checks, it records a failed turn on any existing launch, decrements inFlight, and
++// returns immediately so admission slots cannot stay pinned past the request deadline.
++func ReserveExistingReviewContext(ctx context.Context, root, launch string) (*ReviewReservation, bool, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
 +		return nil, false, ErrUnavailable
 +	}
 +	root = cleanRoot
 +	key := root + "\x00" + launch
-+	reviewMu.Lock()
++	if !reviewMu.LockContext(ctx) {
++		return nil, false, ErrUnavailable
++	}
 +	if reclaimingKeys[key] {
 +		reviewMu.Unlock()
 +		return nil, true, ErrUnavailable
@@ -14520,34 +15035,10 @@ index e69de29..991803f 100644
 +			return nil, true, ErrUnavailable
 +		}
 +		// Do NOT refresh entry.touched before pendingTainted / tainted / MaxReviewDuration checks;
-+		// finishReserveReviewEntry refreshes entry.touched only once the turn is actually admitted.
++		// finishReserveReviewEntryContext refreshes entry.touched only once the turn is actually admitted.
 +		entry.inFlight++
 +		reviewMu.Unlock()
-+		if pendingTainted || entry.pendingTaint.Load() {
-+			entry.mu.Lock()
-+			entry.taintAndPersistLocked()
-+			entry.mu.Unlock()
-+			releaseReview(entry)
-+			return nil, true, ErrUnavailable
-+		}
-+		if pendingFailedSeq > 0 {
-+			entry.mu.Lock()
-+			if !entry.sealed && !entry.tainted && pendingFailedSeq > entry.failedTurnSeq {
-+				entry.failedTurnSeq = pendingFailedSeq
-+				latestPubSeq := uint64(0)
-+				if len(entry.publishedTurns) > 0 {
-+					latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
-+				}
-+				entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
-+				if entry.lastTurnFailed {
-+					if err := entry.persistLocked(); err != nil {
-+						entry.taintAndPersistLocked()
-+					}
-+				}
-+			}
-+			entry.mu.Unlock()
-+		}
-+		res, err := finishReserveReviewEntry(root, key, entry)
++		res, err := finishReserveReviewEntryContext(ctx, root, key, entry, pendingTainted, pendingFailedSeq)
 +		return res, true, err
 +	}
 +	if _, sealedBound := sealedBindings[key]; sealedBound {
@@ -14559,21 +15050,15 @@ index e69de29..991803f 100644
 +	if overflowed || pendingTainted {
 +		return nil, false, ErrUnavailable
 +	}
-+	rootExists, err := checkPrivateDir(root, true)
-+	if err != nil {
++	dir := filepath.Join(root, launch)
++	exists, probeErr := probeExistingReviewDirContext(ctx, root, dir)
++	if probeErr != nil {
 +		return nil, false, ErrUnavailable
 +	}
-+	if !rootExists {
++	if !exists {
 +		return nil, false, nil
 +	}
-+	dir := filepath.Join(root, launch)
-+	if _, statErr := os.Lstat(dir); statErr != nil {
-+		if os.IsNotExist(statErr) {
-+			return nil, false, nil
-+		}
-+		return nil, false, ErrUnavailable
-+	}
-+	res, resErr := ReserveReview(root, launch)
++	res, resErr := ReserveReviewContext(ctx, root, launch)
 +	return res, true, resErr
 +}
 +
@@ -14625,13 +15110,23 @@ index e69de29..991803f 100644
 +// an overlapping pending request, persists the initial unsealed reservation marker on disk before
 +// admitting the first request, and registers an in-flight request.
 +func ReserveReview(root, launch string) (*ReviewReservation, error) {
++	return ReserveReviewContext(context.Background(), root, launch)
++}
++
++// ReserveReviewContext is the context-bounded variant of ReserveReview.
++func ReserveReviewContext(ctx context.Context, root, launch string) (*ReviewReservation, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
 +		return nil, ErrUnavailable
 +	}
 +	root = cleanRoot
 +	key := root + "\x00" + launch
-+	reviewMu.Lock()
++	if !reviewMu.LockContext(ctx) {
++		return nil, ErrUnavailable
++	}
 +	if reclaimingKeys[key] {
 +		reviewMu.Unlock()
 +		return nil, ErrUnavailable
@@ -14649,21 +15144,18 @@ index e69de29..991803f 100644
 +	if err := acquirePrivateRootLock(root); err != nil {
 +		return nil, ErrUnavailable
 +	}
-+	entry, err := getOrCreateReviewEntry(root, launch, "", time.Now(), true, true)
++	entry, err := getOrCreateReviewEntryContext(ctx, root, launch, "", time.Now(), true, true)
 +	if err != nil {
 +		return nil, ErrUnavailable
 +	}
 +	reviewMu.Lock()
 +	pendingTainted = pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
-+	reviewMu.Unlock()
-+	if pendingTainted {
-+		entry.mu.Lock()
-+		entry.taintAndPersistLocked()
-+		entry.mu.Unlock()
-+		releaseReview(entry)
-+		return nil, ErrUnavailable
++	var pendingFailedSeq uint64
++	if st := pendingReviewLaunches[key]; st != nil {
++		pendingFailedSeq = st.failedTurnSeq
 +	}
-+	return finishReserveReviewEntry(root, key, entry)
++	reviewMu.Unlock()
++	return finishReserveReviewEntryContext(ctx, root, key, entry, pendingTainted, pendingFailedSeq)
 +}
 +
 +func acquireReview(entry *reviewEntry) {
@@ -15958,11 +16450,14 @@ index e69de29..991803f 100644
 +// BeginReviewReserved transfers an already-reserved in-flight review launch into a Collector
 +// without ever dropping inFlight to zero between middleware admission and collector completion.
 +func BeginReviewReserved(ctx context.Context, res *ReviewReservation, session, requestedModel string) (context.Context, *Collector, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
 +	if res == nil || res.entry == nil {
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if !reviewSessionPattern.MatchString(session) || (requestedModel != "gpt-6.2-sol" && requestedModel != "gpt-6.2-astra") {
-+		res.Taint()
++		res.TaintContext(ctx)
 +		res.Release()
 +		return ctx, nil, ErrUnavailable
 +	}
@@ -15977,44 +16472,65 @@ index e69de29..991803f 100644
 +		turnSeq = reviewTurnSeqGen
 +		reviewMu.Unlock()
 +	}
++	_, hasDeadline := ctx.Deadline()
 +	now := time.Now()
 +	expectedRoute := "codex:" + requestedModel + "@chatgpt.com"
-+	entry.mu.Lock()
++	if !entry.mu.LockContext(ctx) {
++		reviewMu.Lock()
++		enqueueExistingReviewTurnFailureLocked(entry, turnSeq, false)
++		if entry.inFlight > 0 {
++			entry.inFlight--
++		}
++		if holdsSlot && pendingReviewTotal > 0 {
++			pendingReviewTotal--
++		}
++		reviewMu.Unlock()
++		return ctx, nil, ErrUnavailable
++	}
++	taintAndAbortLocked := func() (context.Context, *Collector, error) {
++		if hasDeadline && !entry.taintedPersisted && !entry.foreignDisk {
++			entry.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionTainted)
++			entry.tainted = true
++			entry.mu.Unlock()
++			reviewMu.Lock()
++			enqueueExistingReviewTurnFailureLocked(entry, 0, true)
++			if entry.inFlight > 0 {
++				entry.inFlight--
++			}
++			if holdsSlot && pendingReviewTotal > 0 {
++				pendingReviewTotal--
++			}
++			reviewMu.Unlock()
++			return ctx, nil, ErrUnavailable
++		}
++		entry.taintAndPersistLocked()
++		entry.mu.Unlock()
++		releaseReviewWithSlot(entry, holdsSlot)
++		return ctx, nil, ErrUnavailable
++	}
 +	if entry.sealed {
 +		entry.mu.Unlock()
 +		releaseReviewWithSlot(entry, holdsSlot)
 +		return ctx, nil, ErrUnavailable
 +	}
-+	if entry.tainted {
-+		entry.taintAndPersistLocked()
-+		entry.mu.Unlock()
-+		releaseReviewWithSlot(entry, holdsSlot)
-+		return ctx, nil, ErrUnavailable
++	if entry.tainted || entry.pendingTaint.Load() {
++		return taintAndAbortLocked()
 +	}
 +	if entry.session == "" {
 +		entry.session = session
 +	} else if entry.session != session {
-+		entry.taintAndPersistLocked()
-+		entry.mu.Unlock()
-+		releaseReviewWithSlot(entry, holdsSlot)
-+		return ctx, nil, ErrUnavailable
++		return taintAndAbortLocked()
 +	}
 +	if entry.route == "" {
 +		entry.route = expectedRoute
 +	} else if entry.route != expectedRoute {
-+		entry.taintAndPersistLocked()
-+		entry.mu.Unlock()
-+		releaseReviewWithSlot(entry, holdsSlot)
-+		return ctx, nil, ErrUnavailable
++		return taintAndAbortLocked()
 +	}
 +	turnDeadline := now.Add(ReviewTurnTimeout)
 +	if entry.started > 0 {
 +		launchDeadline := time.Unix(0, entry.started).Add(MaxReviewDuration)
 +		if !launchDeadline.After(now) {
-+			entry.taintAndPersistLocked()
-+			entry.mu.Unlock()
-+			releaseReviewWithSlot(entry, holdsSlot)
-+			return ctx, nil, ErrUnavailable
++			return taintAndAbortLocked()
 +		}
 +		if launchDeadline.Before(turnDeadline) {
 +			turnDeadline = launchDeadline
@@ -19628,10 +20144,10 @@ index e69de29..991803f 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..e751df5 100644
+index e69de29..29d5f3e 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,14497 @@
+@@ -0,0 +1,14875 @@
 +package preflightreceipt
 +
 +import (
@@ -23660,6 +24176,7 @@ index e69de29..e751df5 100644
 +		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_rok","type":"message","role":"assistant"}}` + "\n\n" +
 +		"data: " + `{"type":"response.content_part.added","output_index":0,"item_id":"msg_rok","content_index":0,"part":{"type":"refusal","refusal":""}}` + "\n\n" +
 +		"data: " + `{"type":"response.refusal.delta","output_index":0,"item_id":"msg_rok","content_index":0,"delta":"cannot "}` + "\n\n" +
++		"data: " + `{"type":"response.refusal.delta","output_index":0,"item_id":"msg_rok","content_index":0,"delta":"comply"}` + "\n\n" +
 +		"data: " + `{"type":"response.refusal.done","output_index":0,"item_id":"msg_rok","content_index":0,"refusal":"cannot comply"}` + "\n\n" +
 +		"data: " + `{"type":"response.content_part.done","output_index":0,"item_id":"msg_rok","content_index":0,"part":{"type":"refusal","refusal":"cannot comply"}}` + "\n\n" +
 +		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_rok","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"cannot comply"}]}}` + "\n\n" +
@@ -34128,6 +34645,383 @@ index e69de29..e751df5 100644
 +			t.Fatalf("LastOutputSHA256 = %q, want sha256(VERDICT: PASS) %q", rr.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
 +		}
 +	})
++}
++
++func TestReviewReceiptRefusalDeltaAndLifecycleSnapshotParity(t *testing.T) {
++	// Sol P1 + Astra P1 + Astra P2 #1 (PR #2280 R81):
++	// 1. Contradictory response.refusal.delta vs response.refusal.done MUST be rejected even when
++	//    subsequent done/completed frames match each other and another output_text part exists.
++	// 2. Multi-chunk response.refusal.delta matching refusal.done/output_item.done/completed MUST seal.
++	// 3. In-progress lifecycle snapshot carrying a refusal part (empty or prefix) followed by consistent
++	//    deltas/done/completed MUST NOT prematurely lock refusal to "" and MUST seal cleanly.
++	// 4. Completed lifecycle snapshot carrying a refusal part MUST record part.Refusal (not part.Text),
++	//    rejecting subsequent contradictory refusal text while sealing consistent refusal text.
++	runTurn := func(t *testing.T, launch, session, stream string) (string, SealStatus, string) {
++		t.Helper()
++		root := filepath.Join(t.TempDir(), "receipts")
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview: %v", err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte(stream))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		st, dig := SealReviewWithDigest(root, launch, session)
++		return root, st, dig
++	}
++
++	t.Run("contradictory-refusal-delta-vs-done-rejected", func(t *testing.T) {
++		stream := strings.Join([]string{
++			`event: response.created`,
++			`data: {"type":"response.created","response":{"id":"resp_rd_bad","status":"in_progress","model":"gpt-6.2-sol"}}`,
++			``,
++			`event: response.refusal.delta`,
++			`data: {"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"refusal X"}`,
++			``,
++			`event: response.refusal.done`,
++			`data: {"type":"response.refusal.done","item_id":"msg_1","output_index":0,"content_index":0,"refusal":"refusal Y"}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"refusal Y"},{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++			``,
++			`event: response.completed`,
++			`data: {"type":"response.completed","response":{"id":"resp_rd_bad","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"refusal Y"},{"type":"output_text","text":"VERDICT: PASS"}]}]}}`,
++			``,
++			``,
++		}, "\n")
++		_, st, dig := runTurn(t, "review-e81e8101-1111-4111-8111-111111111101", "019d0000-0000-7000-8000-00000000eb01", stream)
++		if st != SealRejected || dig != "" {
++			t.Fatalf("contradictory refusal.delta seal = (%v, %q), want (SealRejected, \"\")", st, dig)
++		}
++	})
++
++	t.Run("matching-multi-chunk-refusal-delta-seals", func(t *testing.T) {
++		stream := strings.Join([]string{
++			`event: response.created`,
++			`data: {"type":"response.created","response":{"id":"resp_rd_ok","status":"in_progress","model":"gpt-6.2-sol"}}`,
++			``,
++			`event: response.refusal.delta`,
++			`data: {"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"refusal "}`,
++			``,
++			`event: response.refusal.delta`,
++			`data: {"type":"response.refusal.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"parts"}`,
++			``,
++			`event: response.refusal.done`,
++			`data: {"type":"response.refusal.done","item_id":"msg_1","output_index":0,"content_index":0,"refusal":"refusal parts"}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"refusal parts"},{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++			``,
++			`event: response.completed`,
++			`data: {"type":"response.completed","response":{"id":"resp_rd_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"refusal parts"},{"type":"output_text","text":"VERDICT: PASS"}]}]}}`,
++			``,
++			``,
++		}, "\n")
++		_, st, dig := runTurn(t, "review-e81e8102-1111-4111-8111-111111111102", "019d0000-0000-7000-8000-00000000eb02", stream)
++		if st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("matching multi-chunk refusal.delta seal = (%v, %q), want SealOK", st, dig)
++		}
++	})
++
++	t.Run("in-progress-snapshot-refusal-seals-when-consistent", func(t *testing.T) {
++		stream := strings.Join([]string{
++			`event: response.in_progress`,
++			`data: {"type":"response.in_progress","response":{"id":"resp_snap_ref_ok","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[{"type":"refusal","refusal":"can"}]}]}}`,
++			``,
++			`event: response.refusal.done`,
++			`data: {"type":"response.refusal.done","item_id":"msg_1","output_index":0,"content_index":0,"refusal":"cannot comply"}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"cannot comply"}]}}`,
++			``,
++			`event: response.completed`,
++			`data: {"type":"response.completed","response":{"id":"resp_snap_ref_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"cannot comply"}]}]}}`,
++			``,
++			``,
++		}, "\n")
++		_, st, dig := runTurn(t, "review-e81e8103-1111-4111-8111-111111111103", "019d0000-0000-7000-8000-00000000eb03", stream)
++		if st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("consistent in-progress snapshot refusal seal = (%v, %q), want SealOK", st, dig)
++		}
++	})
++
++	t.Run("completed-snapshot-refusal-matches-and-rejects-contradiction", func(t *testing.T) {
++		streamOK := strings.Join([]string{
++			`event: response.in_progress`,
++			`data: {"type":"response.in_progress","response":{"id":"resp_snap_done_ok","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"policy block"}]}]}}`,
++			``,
++			`event: response.completed`,
++			`data: {"type":"response.completed","response":{"id":"resp_snap_done_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"policy block"}]}]}}`,
++			``,
++			``,
++		}, "\n")
++		_, st, dig := runTurn(t, "review-e81e8104-1111-4111-8111-111111111104", "019d0000-0000-7000-8000-00000000eb04", streamOK)
++		if st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("consistent completed-snapshot refusal seal = (%v, %q), want SealOK", st, dig)
++		}
++
++		streamBad := strings.Join([]string{
++			`event: response.in_progress`,
++			`data: {"type":"response.in_progress","response":{"id":"resp_snap_done_bad","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"policy A"}]}]}}`,
++			``,
++			`event: response.completed`,
++			`data: {"type":"response.completed","response":{"id":"resp_snap_done_bad","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"policy B"}]}]}}`,
++			``,
++			``,
++		}, "\n")
++		_, stBad, digBad := runTurn(t, "review-e81e8105-1111-4111-8111-111111111105", "019d0000-0000-7000-8000-00000000eb05", streamBad)
++		if stBad != SealRejected || digBad != "" {
++			t.Fatalf("contradictory completed-snapshot refusal seal = (%v, %q), want (SealRejected, \"\")", stBad, digBad)
++		}
++	})
++}
++
++func TestReviewReceiptCompletedCustomToolCallRequiresCallIDNameAndStringInput(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R81): completed custom_tool_call items (whether in response.completed.output,
++	// output_item.done, or completed lifecycle snapshot) must include non-empty call_id, name, and string input.
++	runTurn := func(t *testing.T, launch, session, stream string) (SealStatus, string) {
++		t.Helper()
++		root := filepath.Join(t.TempDir(), "receipts")
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview: %v", err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte(stream))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReviewWithDigest(root, launch, session)
++	}
++
++	badPayloads := []struct {
++		name   string
++		launch string
++		sess   string
++		stream string
++	}{
++		{
++			name:   "completed-only-missing-call-id-and-input",
++			launch: "review-e81e8111-1111-4111-8111-111111111111",
++			sess:   "019d0000-0000-7000-8000-00000000eb11",
++			stream: "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_ct_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"custom_tool_call","name":"apply_patch"}]}}` + "\n\n",
++		},
++		{
++			name:   "completed-only-missing-input",
++			launch: "review-e81e8112-1111-4111-8111-111111111112",
++			sess:   "019d0000-0000-7000-8000-00000000eb12",
++			stream: "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_ct_2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch"}]}}` + "\n\n",
++		},
++		{
++			name:   "completed-only-non-string-input",
++			launch: "review-e81e8113-1111-4111-8111-111111111113",
++			sess:   "019d0000-0000-7000-8000-00000000eb13",
++			stream: "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_ct_3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":{"patch":"x"}}]}}` + "\n\n",
++		},
++		{
++			name:   "output-item-done-missing-call-id",
++			launch: "review-e81e8114-1111-4111-8111-111111111114",
++			sess:   "019d0000-0000-7000-8000-00000000eb14",
++			stream: "event: response.created\ndata: " + `{"type":"response.created","response":{"id":"resp_ct_4","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++				"event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ct_1","type":"custom_tool_call","status":"completed","name":"apply_patch","input":"diff"}}` + "\n\n" +
++				"event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_ct_4","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ct_1","type":"custom_tool_call","status":"completed","name":"apply_patch","input":"diff"}]}}` + "\n\n",
++		},
++	}
++	for _, tc := range badPayloads {
++		t.Run(tc.name, func(t *testing.T) {
++			if st, dig := runTurn(t, tc.launch, tc.sess, tc.stream); st != SealRejected || dig != "" {
++				t.Fatalf("SealReviewWithDigest = (%v, %q), want (SealRejected, \"\")", st, dig)
++			}
++		})
++	}
++	t.Run("valid-completed-custom-tool-call-seals", func(t *testing.T) {
++		stream := "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_ct_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"custom_tool_call","status":"completed","call_id":"c1","name":"apply_patch","input":"*** Begin Patch"}]}}` + "\n\n"
++		if st, dig := runTurn(t, "review-e81e8115-1111-4111-8111-111111111115", "019d0000-0000-7000-8000-00000000eb15", stream); st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("valid completed custom_tool_call seal = (%v, %q), want SealOK", st, dig)
++		}
++	})
++}
++
++func TestReviewReceiptReserveExistingReviewContextAndBeginPendingCapBeforeLstat(t *testing.T) {
++	// Sol P2 + Astra P2 #2 (PR #2280 R81):
++	// 1. ReserveExistingReviewContext MUST honor ctx when entry.mu is held (e.g. previous turn fsyncing),
++	//    return promptly at deadline, record a failed turn on the existing entry, and release inFlight.
++	// 2. BeginPendingReviewContext MUST enforce the global 32-slot concurrency cap BEFORE calling
++	//    pathHasDisallowedSymlink (zero filesystem Lstat syscalls when full) AND honor ctx when
++	//    an admitted request's Lstat stalls, releasing the slot once Lstat unblocks.
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-e81e8120-1111-4111-8111-111111111120"
++	session := "019d0000-0000-7000-8000-00000000eb20"
++
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("BeginReview: %v", err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("c.Start: %v", err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatalf("cl.Do: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_ctx_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	// Part 1 (Sol P2): hold entry.mu to simulate a previous turn stalled in persistLocked/fsync.
++	key := filepath.Clean(root) + "\x00" + launch
++	reviewMu.Lock()
++	entry := reviewLedger[key]
++	reviewMu.Unlock()
++	if entry == nil {
++		t.Fatal("missing ledger entry after Turn 1")
++	}
++	entry.mu.Lock()
++	lockedEntry := true
++	defer func() {
++		if lockedEntry {
++			entry.mu.Unlock()
++		}
++	}()
++
++	shortCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
++	defer cancel()
++	start := time.Now()
++	res, existed, rerr := ReserveExistingReviewContext(shortCtx, root, launch)
++	elapsed := time.Since(start)
++	if res != nil || !existed || !errors.Is(rerr, ErrUnavailable) {
++		t.Fatalf("ReserveExistingReviewContext under contended entry.mu = (%v, %v, %v), want (nil, true, ErrUnavailable)", res, existed, rerr)
++	}
++	if elapsed > 2*time.Second {
++		t.Fatalf("ReserveExistingReviewContext blocked %v past 40ms ctx deadline", elapsed)
++	}
++	reviewMu.Lock()
++	gotInFlight := entry.inFlight
++	reviewMu.Unlock()
++	if gotInFlight != 0 {
++		t.Fatalf("entry.inFlight after timed-out ReserveExistingReviewContext = %d, want 0", gotInFlight)
++	}
++	entry.mu.Unlock()
++	lockedEntry = false
++
++	// Timed-out Turn 2 MUST have recorded a failed turn so stale Turn 1 cannot SealOK.
++	if st, dig := SealReviewWithDigest(root, launch, session); st != SealRejected || dig != "" {
++		t.Fatalf("SealReviewWithDigest after timed-out ReserveExistingReviewContext = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++
++	// Part 2 (Astra P2 #2): fill all 32 slots, then inject a panicking/counting pathHasDisallowedSymlinkFn.
++	// The 33rd BeginPendingReviewContext MUST reject purely in memory with ZERO calls to pathHasDisallowedSymlinkFn.
++	var guards []*PendingReviewGuard
++	defer func() {
++		for _, g := range guards {
++			g.Release()
++		}
++	}()
++	for i := 0; i < maxPendingReviewInFlight; i++ {
++		g, berr := BeginPendingReviewContext(context.Background(), root, fmt.Sprintf("review-e81e8130-1111-4111-8111-1111111111%02d", i))
++		if berr != nil {
++			t.Fatalf("fill slot %d: %v", i, berr)
++		}
++		guards = append(guards, g)
++	}
++
++	oldSymlinkFn := pathHasDisallowedSymlinkFn
++	var lstatCalls atomic.Int32
++	pathHasDisallowedSymlinkFn = func(p string) bool {
++		lstatCalls.Add(1)
++		return oldSymlinkFn(p)
++	}
++	defer func() { pathHasDisallowedSymlinkFn = oldSymlinkFn }()
++
++	if g, berr := BeginPendingReviewContext(context.Background(), root, "review-e81e8139-1111-4111-8111-111111111199"); g != nil || !errors.Is(berr, ErrUnavailable) {
++		if g != nil {
++			g.Release()
++		}
++		t.Fatalf("over-cap BeginPendingReviewContext = (%v, %v), want (nil, ErrUnavailable)", g, berr)
++	}
++	if got := lstatCalls.Load(); got != 0 {
++		t.Fatalf("over-cap BeginPendingReviewContext invoked pathHasDisallowedSymlink %d times, want 0", got)
++	}
++
++	// Free 1 slot and stall pathHasDisallowedSymlinkFn; admitted request MUST return at ctx deadline
++	// while keeping the slot held until the stalled Lstat returns, then release cleanly.
++	guards[len(guards)-1].Release()
++	guards = guards[:len(guards)-1]
++
++	lstatEntered := make(chan struct{})
++	releaseLstat := make(chan struct{})
++	pathHasDisallowedSymlinkFn = func(p string) bool {
++		close(lstatEntered)
++		<-releaseLstat
++		return false
++	}
++	stallCtx, stallCancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
++	defer stallCancel()
++	if g, berr := BeginPendingReviewContext(stallCtx, root, "review-e81e8140-1111-4111-8111-111111111140"); g != nil || !errors.Is(berr, ErrUnavailable) {
++		if g != nil {
++			g.Release()
++		}
++		t.Fatalf("stalled-Lstat BeginPendingReviewContext = (%v, %v), want (nil, ErrUnavailable)", g, berr)
++	}
++	<-lstatEntered
++	// While Lstat is still stalled, the 32nd slot stays occupied (blocking a 33rd caller).
++	if g, berr := BeginPendingReviewContext(context.Background(), root, "review-e81e8141-1111-4111-8111-111111111141"); g != nil || !errors.Is(berr, ErrUnavailable) {
++		if g != nil {
++			g.Release()
++		}
++		t.Fatalf("33rd BeginPendingReviewContext during stalled Lstat = (%v, %v), want (nil, ErrUnavailable)", g, berr)
++	}
++	// Once Lstat unblocks, restore normal symlink check and verify the slot is reclaimed cleanly.
++	pathHasDisallowedSymlinkFn = oldSymlinkFn
++	close(releaseLstat)
++	deadline := time.Now().Add(2 * time.Second)
++	for {
++		g, berr := BeginPendingReviewContext(context.Background(), root, "review-e81e8142-1111-4111-8111-111111111142")
++		if berr == nil {
++			g.Release()
++			break
++		}
++		if time.Now().After(deadline) {
++			t.Fatalf("slot never released after stalled Lstat unblocked: %v", berr)
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
 new file mode 100644
