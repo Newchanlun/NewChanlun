@@ -2733,6 +2733,15 @@ def test_round_trip_enforces_consistent_response_id_when_present():
                 'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":null}\n\n'
                 'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
             ),
+            # Astra P2 (R79): output_item.added / output_item.done 完全缺失 item 对象也须拒绝。
+            (
+                'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
+            (
+                'event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":0}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
         ):
             current["body"] = bad_stream.encode()
             res_bad = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-bad", preflight.Deadline(3))

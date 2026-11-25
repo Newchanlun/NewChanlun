@@ -425,7 +425,11 @@ def _extract_explicit_response_ids(event: dict, raw_inner: object) -> tuple[list
                 if not isinstance(out_item, dict):
                     return [], False
                 containers.append((out_item, "response_id"))
-    if "item" in event:
+    if event.get("type") in ("response.output_item.added", "response.output_item.done"):
+        if "item" not in event or not isinstance(event["item"], dict):
+            return [], False
+        containers.append((event["item"], "response_id"))
+    elif "item" in event:
         raw_item = event["item"]
         if not isinstance(raw_item, dict):
             return [], False

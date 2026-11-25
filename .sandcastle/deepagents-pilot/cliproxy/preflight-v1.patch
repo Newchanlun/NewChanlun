@@ -7774,10 +7774,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..03bd83c 100644
+index e69de29..78cb50a 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11545 @@
+@@ -0,0 +1,11711 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -8160,8 +8160,51 @@ index e69de29..03bd83c 100644
 +	digest  string
 +}
 +
++type ctxMutex struct {
++	ch chan struct{}
++}
++
++func newCtxMutex() *ctxMutex {
++	ch := make(chan struct{}, 1)
++	ch <- struct{}{}
++	return &ctxMutex{ch: ch}
++}
++
++func (m *ctxMutex) Lock() {
++	<-m.ch
++}
++
++func (m *ctxMutex) TryLock() bool {
++	select {
++	case <-m.ch:
++		return true
++	default:
++		return false
++	}
++}
++
++func (m *ctxMutex) LockContext(ctx context.Context) bool {
++	if ctx.Err() != nil {
++		return false
++	}
++	select {
++	case <-m.ch:
++		if ctx.Err() != nil {
++			m.ch <- struct{}{}
++			return false
++		}
++		return true
++	case <-ctx.Done():
++		return false
++	}
++}
++
++func (m *ctxMutex) Unlock() {
++	m.ch <- struct{}{}
++}
++
 +var (
-+	reviewMu                      sync.Mutex
++	reviewMu                      = newCtxMutex()
 +	reviewLedger                  = make(map[string]*reviewEntry)
 +	sealedBindings                = make(map[string]sealedDirBinding)
 +	reservedBindingKeys           = make(map[string]bool)
@@ -8877,6 +8920,26 @@ index e69de29..03bd83c 100644
 +
 +func isIrreversibleFailureItemStatus(status string) bool {
 +	return status == "failed" || status == "cancelled" || status == "canceled"
++}
++
++func isValidOutputItemStatus(itemType, itemRole, status string, allowCompleted bool) bool {
++	if status == "" {
++		return true
++	}
++	switch status {
++	case "in_progress", "incomplete", "failed", "cancelled", "canceled":
++		return true
++	case "completed":
++		return allowCompleted
++	case "searching":
++		return itemType == "web_search_call" || itemType == "file_search_call"
++	case "interpreting":
++		return itemType == "code_interpreter_call"
++	case "generating":
++		return itemType == "image_generation_call"
++	default:
++		return false
++	}
 +}
 +
 +func doneItemStatusCompatible(doneStatus, nextStatus string) bool {
@@ -9912,6 +9975,7 @@ index e69de29..03bd83c 100644
 +		itemStatus, hasStatus, ok4 := exactOptionalStringPresent(frame.itemFields, "status")
 +		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" ||
 +			(hasStatus && (itemStatus == "" || strings.TrimSpace(itemStatus) != itemStatus)) ||
++			!isValidOutputItemStatus(itemType, itemRole, itemStatus, false) ||
 +			len(itemType) > maxStrictIdentityBytes || len(itemRole) > maxStrictIdentityBytes ||
 +			len(itemPhase) > maxStrictIdentityBytes || len(itemStatus) > maxStrictIdentityBytes {
 +			return false
@@ -11906,6 +11970,11 @@ index e69de29..03bd83c 100644
 +				seenSnapKeys[canonKey] = struct{}{}
 +			}
 +			isAssistantMsg := item.Type == "message" && item.Role == "assistant"
++			if !isValidOutputItemStatus(item.Type, item.Role, item.Status, true) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
 +			if isIrreversibleFailureItemStatus(item.Status) || (!isAssistantMsg && item.Status == "incomplete") {
 +				if canonKey == "" {
 +					c.mu.Unlock()
@@ -14830,7 +14899,7 @@ index e69de29..03bd83c 100644
 +	return true, true
 +}
 +
-+func recordSealedBindingLocked(key string, b sealedDirBinding, now time.Time, hasReservation bool) (bool, *os.File) {
++func recordSealedBindingLocked(key string, b sealedDirBinding, now time.Time, hasReservation bool, verifiedExistingFD *os.File) (bool, *os.File) {
 +	if existing, exists := sealedBindings[key]; exists {
 +		if hasReservation {
 +			delete(reservedBindingKeys, key)
@@ -14838,7 +14907,9 @@ index e69de29..03bd83c 100644
 +		if !sealedBindingMatches(existing, b) {
 +			return false, b.dirFD
 +		}
-+		if existing.dirFD != nil && !verifyPinnedDirFDAlive(existing.dirFD, existing.dirDev, existing.dirIno) {
++		// Never run filesystem syscalls (fd.Stat) while holding reviewMu: callers must verify
++		// any pre-existing pinned dirFD outside reviewMu and pass that exact handle here.
++		if existing.dirFD != nil && existing.dirFD != verifiedExistingFD {
 +			return false, b.dirFD
 +		}
 +		if !existing.hasDirID && b.hasDirID {
@@ -15067,7 +15138,9 @@ index e69de29..03bd83c 100644
 +	}()
 +	root = cleanRoot
 +	key := root + "\x00" + launch
-+	reviewMu.Lock()
++	if !reviewMu.LockContext(ctx) {
++		return SealUnavailable, ""
++	}
 +	if reclaimingKeys[key] {
 +		reviewMu.Unlock()
 +		return SealUnavailable, ""
@@ -15198,11 +15271,11 @@ index e69de29..03bd83c 100644
 +	if entry != nil {
 +		if entry.sealedFlag {
 +			var wantPinFD bool
++			var preBind sealedDirBinding
++			var hasPreBind bool
 +			if existing, hasBind := sealedBindings[key]; hasBind {
-+				if existing.dirFD != nil && !verifyPinnedDirFDAlive(existing.dirFD, existing.dirDev, existing.dirIno) {
-+					reviewMu.Unlock()
-+					return SealUnavailable, ""
-+				}
++				preBind = existing
++				hasPreBind = true
 +				wantPinFD = existing.dirFD == nil
 +			} else {
 +				wantPinFD = true
@@ -15231,6 +15304,9 @@ index e69de29..03bd83c 100644
 +				}
 +			}
 +			defer releaseSlot()
++			if hasPreBind && preBind.dirFD != nil && !verifyPinnedDirFDAlive(preBind.dirFD, preBind.dirDev, preBind.dirIno) {
++				return SealUnavailable, ""
++			}
 +			if wantPinFD && !reclaimedForSeal && effectivePinnedDirFDBudget() > 0 && pinnedDirFDs.Load() >= int64(effectivePinnedDirFDBudget()) {
 +				reclaimedForSeal = true
 +				reclaimExpiredReviewBindingsForSeal(rootLease, root, launch, false, true)
@@ -15268,6 +15344,10 @@ index e69de29..03bd83c 100644
 +				entry.boundDirFD = nil
 +			}
 +			entry.mu.Unlock()
++			if hasPreBind && preBind.dirFD != nil && !verifyPinnedDirFDAlive(preBind.dirFD, preBind.dirDev, preBind.dirIno) {
++				closeBudgetedPinnedDirFD(pinFD)
++				return SealUnavailable, ""
++			}
 +			// Always release entry.mu BEFORE acquiring reviewMu (canonical lock order: reviewMu -> entry.mu).
 +			reviewMu.Lock()
 +			if cur := reviewLedger[key]; cur != nil && cur != entry {
@@ -15288,7 +15368,7 @@ index e69de29..03bd83c 100644
 +				dirFD:      pinFD,
 +				receiptSHA: digest,
 +				recordedAt: now,
-+			}, now, reservedSlot)
++			}, now, reservedSlot, preBind.dirFD)
 +			slotReleased = true
 +			reviewMu.Unlock()
 +			if extraFD != nil {
@@ -15385,6 +15465,17 @@ index e69de29..03bd83c 100644
 +			}
 +			entry.mu.Unlock()
 +			reviewMu.Lock()
++			existingFD := sealedBindings[key].dirFD
++			existingDev := sealedBindings[key].dirDev
++			existingIno := sealedBindings[key].dirIno
++			if existingFD != nil {
++				reviewMu.Unlock()
++				if !verifyPinnedDirFDAlive(existingFD, existingDev, existingIno) {
++					closeBudgetedPinnedDirFD(pinFD)
++					return SealUnavailable, ""
++				}
++				reviewMu.Lock()
++			}
 +			recorded, extraFD := recordSealedBindingLocked(key, sealedDirBinding{
 +				rootDev:    rootLease.lock.rootDev,
 +				rootIno:    rootLease.lock.rootIno,
@@ -15394,7 +15485,7 @@ index e69de29..03bd83c 100644
 +				dirFD:      pinFD,
 +				receiptSHA: digest,
 +				recordedAt: now,
-+			}, now, reservedSlot)
++			}, now, reservedSlot, existingFD)
 +			reservedSlot = false
 +			entry.sealing = false
 +			entry.sealedFlag = true
@@ -15515,6 +15606,19 @@ index e69de29..03bd83c 100644
 +			var extraFD *os.File
 +			reviewMu.Lock()
 +			if isSHA256Hex(digest) {
++				existingBind := sealedBindings[key]
++				if existingBind.dirFD != nil {
++					reviewMu.Unlock()
++					if !verifyPinnedDirFDAlive(existingBind.dirFD, existingBind.dirDev, existingBind.dirIno) {
++						reviewMu.Lock()
++						entry.sealing = false
++						entry.sealedFlag = true
++						reviewMu.Unlock()
++						closeBudgetedPinnedDirFD(pinFD)
++						return SealUnavailable, ""
++					}
++					reviewMu.Lock()
++				}
 +				_, extraFD = recordSealedBindingLocked(key, sealedDirBinding{
 +					rootDev:    sRootDev,
 +					rootIno:    sRootIno,
@@ -15524,7 +15628,7 @@ index e69de29..03bd83c 100644
 +					dirFD:      pinFD,
 +					receiptSHA: digest,
 +					recordedAt: now,
-+				}, now, reservedSlot)
++				}, now, reservedSlot, existingBind.dirFD)
 +				reservedSlot = false
 +			} else {
 +				if reservedSlot {
@@ -15549,6 +15653,23 @@ index e69de29..03bd83c 100644
 +		entry.boundDirFD = nil
 +		entry.mu.Unlock()
 +		reviewMu.Lock()
++		existingBind := sealedBindings[key]
++		if existingBind.dirFD != nil {
++			reviewMu.Unlock()
++			if !verifyPinnedDirFDAlive(existingBind.dirFD, existingBind.dirDev, existingBind.dirIno) {
++				reviewMu.Lock()
++				if reservedSlot {
++					delete(reservedBindingKeys, key)
++					reservedSlot = false
++				}
++				entry.sealing = false
++				entry.sealedFlag = true
++				reviewMu.Unlock()
++				closeBudgetedPinnedDirFD(pinFD)
++				return SealUnavailable, ""
++			}
++			reviewMu.Lock()
++		}
 +		recorded, extraFD := recordSealedBindingLocked(key, sealedDirBinding{
 +			rootDev:    sRootDev,
 +			rootIno:    sRootIno,
@@ -15558,7 +15679,7 @@ index e69de29..03bd83c 100644
 +			dirFD:      pinFD,
 +			receiptSHA: digest,
 +			recordedAt: now,
-+		}, now, reservedSlot)
++		}, now, reservedSlot, existingBind.dirFD)
 +		reservedSlot = false
 +		entry.sealing = false
 +		entry.sealedFlag = true
@@ -15571,11 +15692,10 @@ index e69de29..03bd83c 100644
 +	}
 +	binding, hasBinding := sealedBindings[key]
 +	if hasBinding {
++		reviewMu.Unlock()
 +		if binding.dirFD != nil && !verifyPinnedDirFDAlive(binding.dirFD, binding.dirDev, binding.dirIno) {
-+			reviewMu.Unlock()
 +			return SealUnavailable, ""
 +		}
-+		reviewMu.Unlock()
 +		dir := filepath.Join(root, launch)
 +		if rootLease.lock.rootDev != binding.rootDev || rootLease.lock.rootIno != binding.rootIno {
 +			return SealUnavailable, ""
@@ -15589,9 +15709,13 @@ index e69de29..03bd83c 100644
 +			closeBudgetedPinnedDirFD(pinFD)
 +			return st, ""
 +		}
++		if binding.dirFD != nil && !verifyPinnedDirFDAlive(binding.dirFD, binding.dirDev, binding.dirIno) {
++			closeBudgetedPinnedDirFD(pinFD)
++			return SealUnavailable, ""
++		}
 +		reviewMu.Lock()
 +		curBind, stillExists := sealedBindings[key]
-+		if !stillExists || (curBind.dirFD != nil && !verifyPinnedDirFDAlive(curBind.dirFD, curBind.dirDev, curBind.dirIno)) {
++		if !stillExists || curBind.dirFD != binding.dirFD {
 +			reviewMu.Unlock()
 +			closeBudgetedPinnedDirFD(pinFD)
 +			return SealUnavailable, ""
@@ -15605,7 +15729,7 @@ index e69de29..03bd83c 100644
 +			dirFD:      pinFD,
 +			receiptSHA: digest,
 +			recordedAt: now,
-+		}, now, false)
++		}, now, false, binding.dirFD)
 +		reviewMu.Unlock()
 +		closeBudgetedPinnedDirFD(extraFD)
 +		if !recorded {
@@ -15653,6 +15777,24 @@ index e69de29..03bd83c 100644
 +			closeBudgetedPinnedDirFD(pinFD)
 +			return SealUnavailable, ""
 +		}
++		existingBind := sealedBindings[key]
++		if existingBind.dirFD != nil {
++			reviewMu.Unlock()
++			if !verifyPinnedDirFDAlive(existingBind.dirFD, existingBind.dirDev, existingBind.dirIno) {
++				closeBudgetedPinnedDirFD(pinFD)
++				return SealUnavailable, ""
++			}
++			reviewMu.Lock()
++			if reviewLedger[key] != nil {
++				if reservedSlot {
++					delete(reservedBindingKeys, key)
++					slotReleased = true
++				}
++				reviewMu.Unlock()
++				closeBudgetedPinnedDirFD(pinFD)
++				return SealUnavailable, ""
++			}
++		}
 +		recorded, extraFD := recordSealedBindingLocked(key, sealedDirBinding{
 +			rootDev:    rootLease.lock.rootDev,
 +			rootIno:    rootLease.lock.rootIno,
@@ -15662,7 +15804,7 @@ index e69de29..03bd83c 100644
 +			dirFD:      pinFD,
 +			receiptSHA: digest,
 +			recordedAt: now,
-+		}, now, reservedSlot)
++		}, now, reservedSlot, existingBind.dirFD)
 +		slotReleased = true
 +		reviewMu.Unlock()
 +		closeBudgetedPinnedDirFD(extraFD)
@@ -17601,13 +17743,17 @@ index e69de29..03bd83c 100644
 +					continue
 +				}
 +				idMismatch := ent.foreignDisk
++				var checkBoundFD *os.File
++				var checkBoundDev, checkBoundIno uint64
 +				if !idMismatch && ent.hasBoundDirID {
 +					if ent.boundRootDev != rootDev || ent.boundRootIno != rootIno ||
 +						!cand.hasID || ent.boundDirDev != cand.dev || ent.boundDirIno != cand.ino {
 +						idMismatch = true
 +					}
-+					if !idMismatch && ent.boundDirFD != nil && !verifyPinnedDirFDAlive(ent.boundDirFD, ent.boundDirDev, ent.boundDirIno) {
-+						idMismatch = true
++					if !idMismatch && ent.boundDirFD != nil {
++						checkBoundFD = ent.boundDirFD
++						checkBoundDev = ent.boundDirDev
++						checkBoundIno = ent.boundDirIno
 +					}
 +				}
 +				if !idMismatch {
@@ -17629,20 +17775,40 @@ index e69de29..03bd83c 100644
 +					continue
 +				}
 +				expectedEntry = ent
-+			}
-+			if b, ok := sealedBindings[key]; ok {
-+				if now.Sub(b.recordedAt) < retention || b.rootDev != rootDev || b.rootIno != rootIno ||
-+					(b.hasDirID && (!cand.hasID || b.dirDev != cand.dev || b.dirIno != cand.ino)) ||
-+					b.receiptSHA == "" || cand.receiptSHA != b.receiptSHA {
++				if b, ok := sealedBindings[key]; ok {
++					if now.Sub(b.recordedAt) < retention || b.rootDev != rootDev || b.rootIno != rootIno ||
++						(b.hasDirID && (!cand.hasID || b.dirDev != cand.dev || b.dirIno != cand.ino)) ||
++						b.receiptSHA == "" || cand.receiptSHA != b.receiptSHA {
++						reviewMu.Unlock()
++						continue
++					}
++					hadBinding = true
++					expectedBind = b
++					expectedReceiptSHA = b.receiptSHA
++				}
++				reclaimingKeys[key] = true
++				reviewMu.Unlock()
++				if checkBoundFD != nil && !verifyPinnedDirFDAlive(checkBoundFD, checkBoundDev, checkBoundIno) {
++					reviewMu.Lock()
++					delete(reclaimingKeys, key)
 +					reviewMu.Unlock()
 +					continue
 +				}
-+				hadBinding = true
-+				expectedBind = b
-+				expectedReceiptSHA = b.receiptSHA
++			} else {
++				if b, ok := sealedBindings[key]; ok {
++					if now.Sub(b.recordedAt) < retention || b.rootDev != rootDev || b.rootIno != rootIno ||
++						(b.hasDirID && (!cand.hasID || b.dirDev != cand.dev || b.dirIno != cand.ino)) ||
++						b.receiptSHA == "" || cand.receiptSHA != b.receiptSHA {
++						reviewMu.Unlock()
++						continue
++					}
++					hadBinding = true
++					expectedBind = b
++					expectedReceiptSHA = b.receiptSHA
++				}
++				reclaimingKeys[key] = true
++				reviewMu.Unlock()
 +			}
-+			reclaimingKeys[key] = true
-+			reviewMu.Unlock()
 +		}
 +		removed := removeVerifiedLeafSubdir(rootHandle, root, cand.name, reviewBucket, cand.dev, cand.ino, cand.hasID, retention, true, expectedReceiptSHA)
 +		closedFDs := 0
@@ -19324,10 +19490,10 @@ index e69de29..03bd83c 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..95f8944 100644
+index e69de29..e94d592 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,14090 @@
+@@ -0,0 +1,14239 @@
 +package preflightreceipt
 +
 +import (
@@ -27389,21 +27555,21 @@ index e69de29..95f8944 100644
 +	altDigest := origBinding
 +	altDigest.dirFD = nil
 +	altDigest.receiptSHA = sha256Hex("forged-second-receipt")
-+	if okRec, _ := recordSealedBindingLocked(key, altDigest, time.Now(), false); okRec {
++	if okRec, _ := recordSealedBindingLocked(key, altDigest, time.Now(), false, origBinding.dirFD); okRec {
 +		reviewMu.Unlock()
 +		t.Fatalf("recordSealedBindingLocked overwrote existing binding with different receiptSHA")
 +	}
 +	altIno := origBinding
 +	altIno.dirFD = nil
 +	altIno.dirIno++
-+	if okRec, _ := recordSealedBindingLocked(key, altIno, time.Now(), false); okRec {
++	if okRec, _ := recordSealedBindingLocked(key, altIno, time.Now(), false, origBinding.dirFD); okRec {
 +		reviewMu.Unlock()
 +		t.Fatalf("recordSealedBindingLocked overwrote existing binding with different dirIno")
 +	}
 +	altRoot := origBinding
 +	altRoot.dirFD = nil
 +	altRoot.rootIno++
-+	if okRec, _ := recordSealedBindingLocked(key, altRoot, time.Now(), false); okRec {
++	if okRec, _ := recordSealedBindingLocked(key, altRoot, time.Now(), false, origBinding.dirFD); okRec {
 +		reviewMu.Unlock()
 +		t.Fatalf("recordSealedBindingLocked overwrote existing binding with different rootIno")
 +	}
@@ -27882,11 +28048,11 @@ index e69de29..95f8944 100644
 +	b2 := sealedDirBinding{rootDev: 1, rootIno: 10, dirDev: 1, dirIno: 21, hasDirID: true, receiptSHA: sha256Hex("r2"), recordedAt: time.Now()}
 +
 +	reviewMu.Lock()
-+	if okRec, _ := recordSealedBindingLocked(k1, b1, time.Now(), false); !okRec {
++	if okRec, _ := recordSealedBindingLocked(k1, b1, time.Now(), false, nil); !okRec {
 +		reviewMu.Unlock()
 +		t.Fatalf("failed to record initial binding k1")
 +	}
-+	if okRec, _ := recordSealedBindingLocked(k2, b2, time.Now(), false); okRec {
++	if okRec, _ := recordSealedBindingLocked(k2, b2, time.Now(), false, nil); okRec {
 +		reviewMu.Unlock()
 +		t.Fatalf("recordSealedBindingLocked evicted un-reclaimed aged binding k1 when cap was full")
 +	}
@@ -33414,6 +33580,155 @@ index e69de29..95f8944 100644
 +				if st != SealRejected || dig != "" {
 +					t.Fatalf("SealReviewWithDigest = (%v, %q), want (SealRejected, \"\")", st, dig)
 +				}
++			}
++		})
++	}
++}
++
++func TestReviewReceiptSealContendedReviewMuHonorsContextDeadlineAndReleasesSlot(t *testing.T) {
++	// Sol P1 + Astra P1 (PR #2280 R79): SealReviewWithDigestContext must abort promptly at
++	// ctx.Done() and immediately release its activeSealTotal slot even when reviewMu is contended.
++	root := filepath.Join(t.TempDir(), "seal-contended-mu")
++	launch := "review-e79e7901-1111-4111-8111-111111111101"
++	session := "019d0000-0000-7000-8000-00000000e901"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("BeginReview: %v", err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("c.Start: %v", err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatalf("cl.Do: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_mu_cont","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	reviewMu.Lock()
++	locked := true
++	defer func() {
++		if locked {
++			reviewMu.Unlock()
++		}
++	}()
++
++	sealCtx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
++	defer cancel()
++	start := time.Now()
++	st, dig := SealReviewWithDigestContext(sealCtx, root, launch, session)
++	elapsed := time.Since(start)
++	if st != SealUnavailable || dig != "" {
++		t.Fatalf("SealReviewWithDigestContext under contended reviewMu = (%v, %q), want (SealUnavailable, \"\")", st, dig)
++	}
++	if elapsed > time.Second {
++		t.Fatalf("SealReviewWithDigestContext took %v under contended reviewMu, expected prompt deadline return", elapsed)
++	}
++	if got := activeSealTotal.Load(); got != 0 {
++		t.Fatalf("activeSealTotal after contended-lock timeout = %d, want 0", got)
++	}
++
++	reviewMu.Unlock()
++	locked = false
++	if stOK, digOK := SealReviewWithDigest(root, launch, session); stOK != SealOK || !isSHA256Hex(digOK) {
++		t.Fatalf("SealReviewWithDigest after reviewMu released = (%v, %q), want SealOK", stOK, digOK)
++	}
++}
++
++func TestReviewReceiptOutputItemAddedRejectsInvalidExplicitStatus(t *testing.T) {
++	// Astra P2 (PR #2280 R79): response.output_item.added must validate explicit item.status by
++	// item type so an unknown or wrong-type status taints the stream even if a valid done follows.
++	runTurn := func(t *testing.T, launch, session, stream string) (SealStatus, string) {
++		t.Helper()
++		root := filepath.Join(t.TempDir(), launch)
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview: %v", err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte(stream))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReviewWithDigest(root, launch, session)
++	}
++
++	cases := []struct {
++		name    string
++		launch  string
++		session string
++		added   string
++		wantOK  bool
++	}{
++		{
++			name:    "assistant-message-unknown-status-rejected-despite-valid-done",
++			launch:  "review-e79e7911-1111-4111-8111-111111111111",
++			session: "019d0000-0000-7000-8000-00000000e911",
++			added:   `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"bogus_state"}}`,
++			wantOK:  false,
++		},
++		{
++			name:    "assistant-message-tool-only-searching-status-rejected",
++			launch:  "review-e79e7912-1111-4111-8111-111111111112",
++			session: "019d0000-0000-7000-8000-00000000e912",
++			added:   `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"searching"}}`,
++			wantOK:  false,
++		},
++		{
++			name:    "assistant-message-in-progress-status-accepted",
++			launch:  "review-e79e7913-1111-4111-8111-111111111113",
++			session: "019d0000-0000-7000-8000-00000000e913",
++			added:   `{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress"}}`,
++			wantOK:  true,
++		},
++	}
++
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			stream := strings.Join([]string{
++				`event: response.created`,
++				`data: {"type":"response.created","response":{"id":"resp_added_st","status":"in_progress","model":"gpt-6.2-sol"}}`,
++				``,
++				`event: response.output_item.added`,
++				`data: ` + tc.added,
++				``,
++				`event: response.output_item.done`,
++				`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++				``,
++				`event: response.completed`,
++				`data: {"type":"response.completed","response":{"id":"resp_added_st","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`,
++				``,
++				``,
++			}, "\n")
++			st, dig := runTurn(t, tc.launch, tc.session, stream)
++			if tc.wantOK {
++				if st != SealOK || !isSHA256Hex(dig) {
++					t.Fatalf("SealReviewWithDigest = (%v, %q), want SealOK", st, dig)
++				}
++			} else if st != SealRejected || dig != "" {
++				t.Fatalf("SealReviewWithDigest = (%v, %q), want (SealRejected, \"\")", st, dig)
 +			}
 +		})
 +	}
