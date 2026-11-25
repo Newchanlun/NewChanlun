@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..6323ea0 100644
+index e69de29..9f4ab60 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,213 @@
 +package middleware
 +
 +import (
@@ -61,9 +61,10 @@ index e69de29..6323ea0 100644
 +				abortClose(http.StatusBadRequest)
 +				return
 +			}
++			baseCtx := c.Request.Context()
 +			turnDeadline := time.Now().Add(preflightreceipt.ReviewTurnTimeout)
-+			turnCtx, turnCancel := context.WithDeadline(c.Request.Context(), turnDeadline)
-+			defer turnCancel()
++			turnCtx, turnCancel := context.WithDeadline(baseCtx, turnDeadline)
++			defer func() { turnCancel() }()
 +			c.Request = c.Request.WithContext(turnCtx)
 +
 +			bodyDeadline := time.Now().Add(preflightreceipt.ReviewBodyReadTimeout)
@@ -86,13 +87,14 @@ index e69de29..6323ea0 100644
 +				defer res.Release()
 +				if launchDeadline := res.Deadline(); !launchDeadline.IsZero() {
 +					if !launchDeadline.After(time.Now()) {
++						res.Taint()
 +						abortClose(http.StatusServiceUnavailable)
 +						return
 +					}
 +					if launchDeadline.Before(turnDeadline) {
 +						turnDeadline = launchDeadline
 +						turnCancel()
-+						turnCtx, turnCancel = context.WithDeadline(c.Request.Context(), turnDeadline)
++						turnCtx, turnCancel = context.WithDeadline(baseCtx, turnDeadline)
 +						c.Request = c.Request.WithContext(turnCtx)
 +						if bodyDeadline.After(turnDeadline) {
 +							bodyDeadline = turnDeadline
@@ -216,10 +218,10 @@ index e69de29..6323ea0 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..1bc2a55
+index 0000000..5e13ff0
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,650 @@
+@@ -0,0 +1,677 @@
 +package middleware
 +
 +import (
@@ -868,6 +870,33 @@ index 0000000..1bc2a55
 +	respStr := string(respBytes)
 +	if !strings.HasPrefix(respStr, "HTTP/1.1 503 ") || !strings.Contains(strings.ToLower(respStr), "connection: close") {
 +		t.Fatalf("unexpected HTTP/1.1 cap-rejection response: %q", respStr)
++	}
++
++	// Part 6 (Sol P2 #3 + Astra P1 #1/#2, PR #2280 R35):
++	// When an existing launch has <30m remaining in its 2h window (tightening turnDeadline to launchDeadline),
++	// middleware MUST derive the tightened context from the uncanceled base request context so the follow-up
++	// turn reaches the handler with ctx.Err()==nil and seals cleanly.
++	origTurnTimeout := preflightreceipt.ReviewTurnTimeout
++	// Temporarily set ReviewTurnTimeout > MaxReviewDuration so launchDeadline < turnDeadline triggers immediately!
++	preflightreceipt.ReviewTurnTimeout = preflightreceipt.MaxReviewDuration + 10*time.Minute
++	defer func() { preflightreceipt.ReviewTurnTimeout = origTurnTimeout }()
++
++	for _, h := range fill5 {
++		h.Release()
++	}
++	fill5 = nil
++
++	launch6 := "review-12345678-1234-4234-8234-123456789506"
++	session6 := "019d0000-0000-7000-8000-000000000506"
++	if code := runCleanTurn(launch6, session6); code != http.StatusOK {
++		t.Fatalf("launch6 turn 1 HTTP %d, want 200", code)
++	}
++	// Turn 2 enters the `if existed { if launchDeadline.Before(turnDeadline) { ... } }` tightening path!
++	if code := runCleanTurn(launch6, session6); code != http.StatusOK {
++		t.Fatalf("launch6 turn 2 with tightened launch deadline HTTP %d, want 200 (must not pre-cancel context)", code)
++	}
++	if st, digest := preflightreceipt.SealReviewWithDigest(root, launch6, session6); st != preflightreceipt.SealOK || digest == "" {
++		t.Fatalf("SealReviewWithDigest launch6 after tightened turn 2 = (%v, %q), want (SealOK, non-empty)", st, digest)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -5888,10 +5917,10 @@ index 8a29e48..8c01ee0 100644
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..8083b86 100644
+index e69de29..9051216 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,6667 @@
+@@ -0,0 +1,6734 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -10861,8 +10890,16 @@ index e69de29..8083b86 100644
 +	}
 +	dir := filepath.Join(root, launch)
 +	diskEntry, onDisk, loadErr := loadReviewEntryFromDisk(dir, launch, "", now)
-+	if loadErr == nil && onDisk && diskEntry != nil && diskEntry.sealed && !diskEntry.tainted {
++	if loadErr != nil {
++		reviewMu.Lock()
++		taintWriteOverflow = true
++		reviewMu.Unlock()
 +		return
++	}
++	if onDisk && diskEntry != nil {
++		if (diskEntry.sealed && !diskEntry.tainted) || diskEntry.foreignDisk {
++			return
++		}
 +	}
 +	temp := &reviewEntry{
 +		directory: dir,
@@ -11455,11 +11492,45 @@ index e69de29..8083b86 100644
 +	return ValidPreflightSession(name)
 +}
 +
++type preflightReservationMarker struct {
++	Schema  string `json:"schema"`
++	Session string `json:"session"`
++	Started int64  `json:"started_ns"`
++}
++
++func writePreflightReservationMarker(dir, session string, started int64) error {
++	data, err := json.Marshal(preflightReservationMarker{
++		Schema:  Schema,
++		Session: session,
++		Started: started,
++	})
++	if err != nil {
++		return err
++	}
++	markerPath := filepath.Join(dir, "producer.json")
++	f, err := os.OpenFile(markerPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if err != nil {
++		return err
++	}
++	_, errW := f.Write(data)
++	errS := f.Sync()
++	errC := f.Close()
++	if errW != nil || errS != nil || errC != nil {
++		_ = os.Remove(markerPath)
++		return ErrUnavailable
++	}
++	if err := syncDirFn(dir); err != nil {
++		_ = os.Remove(markerPath)
++		return err
++	}
++	return nil
++}
++
 +func isProducerOwnedReceiptFile(childName string, reviewBucket bool) bool {
 +	if reviewBucket {
 +		return childName == "receipt.json" || childName == "seal.sha256"
 +	}
-+	return childName == "receipt.json"
++	return childName == "receipt.json" || childName == "producer.json"
 +}
 +
 +func inspectProducerReceiptDir(dir, name string, reviewBucket bool) (time.Time, bool) {
@@ -11476,6 +11547,7 @@ index e69de29..8083b86 100644
 +		return time.Time{}, false
 +	}
 +	hasReceipt := false
++	hasProducerMarker := false
 +	hasSealFile := false
 +	var receiptRaw []byte
 +	var reviewSealed bool
@@ -11486,7 +11558,7 @@ index e69de29..8083b86 100644
 +		}
 +		p := filepath.Join(dir, childName)
 +		cfi, cerr := os.Lstat(p)
-+		if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || !ownedByCurrentUser(cfi) {
++		if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || cfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(cfi) {
 +			return time.Time{}, false
 +		}
 +		if cfi.ModTime().After(lastMod) {
@@ -11533,25 +11605,40 @@ index e69de29..8083b86 100644
 +			}
 +			hasReceipt = true
 +			receiptRaw = raw
++		} else if childName == "producer.json" {
++			if reviewBucket || cfi.Size() <= 0 || cfi.Size() > 4096 {
++				return time.Time{}, false
++			}
++			f, oerr := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++			if oerr != nil {
++				return time.Time{}, false
++			}
++			raw, rerr := io.ReadAll(io.LimitReader(f, 4097))
++			_ = f.Close()
++			if rerr != nil || len(raw) == 0 || len(raw) > 4096 {
++				return time.Time{}, false
++			}
++			var marker preflightReservationMarker
++			if json.Unmarshal(raw, &marker) != nil || marker.Schema != Schema || marker.Session != name || marker.Started <= 0 {
++				return time.Time{}, false
++			}
++			if t := time.Unix(0, marker.Started); t.After(lastMod) {
++				lastMod = t
++			}
++			hasProducerMarker = true
 +		} else if childName == "seal.sha256" {
 +			hasSealFile = true
 +		}
 +	}
-+	if !hasReceipt {
++	if !hasReceipt && !(!reviewBucket && hasProducerMarker) {
 +		return time.Time{}, false
 +	}
 +	if hasSealFile {
-+		if !reviewBucket || !reviewSealed {
++		if !reviewBucket || !hasReceipt || !reviewSealed {
 +			return time.Time{}, false
 +		}
-+		sp := filepath.Join(dir, "seal.sha256")
-+		sf, serr := os.OpenFile(sp, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-+		if serr != nil {
-+			return time.Time{}, false
-+		}
-+		sraw, rerr := io.ReadAll(io.LimitReader(sf, 129))
-+		_ = sf.Close()
-+		if rerr != nil || strings.TrimSpace(string(sraw)) != sha256Hex(string(receiptRaw)) {
++		savedDigest, okSeal := readVerifiedSealDigest(dir)
++		if !okSeal || savedDigest != sha256Hex(string(receiptRaw)) {
 +			return time.Time{}, false
 +		}
 +	}
@@ -11777,6 +11864,11 @@ index e69de29..8083b86 100644
 +		c.reserved = true
 +	} else if !c.reserved {
 +		if err := reservePrivateDir(c.directory, false); err != nil {
++			c.invalid = true
++			return ctx, nil, ErrUnavailable
++		}
++		if err := writePreflightReservationMarker(c.directory, c.receipt.Session, c.receipt.Started); err != nil {
++			_ = os.Remove(c.directory)
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
 +		}
@@ -12553,17 +12645,21 @@ index e69de29..8083b86 100644
 +	errSync := f.Sync()
 +	errClose := f.Close()
 +	if errWrite != nil || errSync != nil || errClose != nil {
++		_ = os.Remove(tmp)
 +		return
 +	}
 +	if err := os.Rename(tmp, filepath.Join(c.directory, "receipt.json")); err == nil {
++		_ = os.Remove(filepath.Join(c.directory, "producer.json"))
 +		_ = syncDirFn(c.directory)
++	} else {
++		_ = os.Remove(tmp)
 +	}
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..d49910e 100644
+index e69de29..96652ed 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,5737 @@
+@@ -0,0 +1,5831 @@
 +package preflightreceipt
 +
 +import (
@@ -17763,6 +17859,100 @@ index e69de29..d49910e 100644
 +	}
 +	if raw, err := os.ReadFile(foreignRecPath); err != nil || string(raw) != foreignBytes {
 +		t.Fatalf("foreign receipt.json was overwritten/deleted: raw=%q err=%v", string(raw), err)
++	}
++
++	// Sol P1 #1 + Astra P1 #3 (PR #2280 R35): TaintReview fallback when memory ledger is full
++	// MUST ALSO preserve foreign receipt.json without overwriting it.
++	oldLedgerCap := maxReviewLedgerEntries
++	maxReviewLedgerEntries = 1
++	reviewMu.Lock()
++	savedLedger := reviewLedger
++	blockerKey := filepath.Clean(root) + "\x00review-e7777777-2222-4333-8444-555555555596"
++	reviewLedger = map[string]*reviewEntry{
++		blockerKey: {directory: filepath.Join(root, "review-e7777777-2222-4333-8444-555555555596"), inFlight: 1, touched: time.Now()},
++	}
++	reviewMu.Unlock()
++	TaintReview(root, foreignLaunch)
++	reviewMu.Lock()
++	reviewLedger = savedLedger
++	reviewMu.Unlock()
++	maxReviewLedgerEntries = oldLedgerCap
++	if raw, err := os.ReadFile(foreignRecPath); err != nil || string(raw) != foreignBytes {
++		t.Fatalf("TaintReview ledger-full fallback overwrote foreign receipt.json: raw=%q err=%v", string(raw), err)
++	}
++
++	// Astra P2 #5 (PR #2280 R35): a sealed review dir whose seal.sha256 has trailing bytes (>64 bytes)
++	// fails verifySealedDiskReceipt and MUST NOT be deleted by the reclaimer.
++	badSealLaunch := "review-e7777777-2222-4333-8444-555555555595"
++	badSealDir := filepath.Join(root, badSealLaunch)
++	if err := os.Mkdir(badSealDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	badSealRecData, _ := json.Marshal(ReviewReceipt{
++		Schema: ReviewSchema, Launch: badSealLaunch, Session: "019d0000-0000-7000-8000-888888888895",
++		Started: ancient.UnixNano(), Finished: ancient.UnixNano(), SealedAt: ancient.UnixNano(),
++		Complete: true, Sealed: true, Requests: 1, Routes: []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs: []string{sha256Hex("r1")}, LastResponseID: sha256Hex("r1"),
++	})
++	badSealRecPath := filepath.Join(badSealDir, "receipt.json")
++	if err := os.WriteFile(badSealRecPath, badSealRecData, 0600); err != nil {
++		t.Fatal(err)
++	}
++	badSealFile := filepath.Join(badSealDir, "seal.sha256")
++	if err := os.WriteFile(badSealFile, []byte(sha256Hex(string(badSealRecData))+"\n"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(badSealRecPath, ancient, ancient)
++	_ = os.Chtimes(badSealFile, ancient, ancient)
++	_ = os.Chtimes(badSealDir, ancient, ancient)
++	if _, ok := inspectProducerReceiptDir(badSealDir, badSealLaunch, true); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted seal.sha256 with trailing newline (>64 bytes)")
++	}
++
++	// Sol P1 #2 + Astra P2 #4 (PR #2280 R35): failed/disconnected legacy preflight writes producer.json
++	// (no receipt.json), allowing bounded reclamation once past preflightDiskRetention.
++	failRoot := filepath.Join(t.TempDir(), "failed-preflight-reclaim")
++	maxPreflightDiskEntries = 1
++	failSess1 := "preflight-22222222-2222-4333-8444-555555555501"
++	ctxF, cF, err := Begin(context.Background(), failRoot, failSess1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, execF, err := cF.Start(ctxF, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	execF.End()
++	cF.Complete(false)
++	cF.HandlerDone(false)
++	failDir1 := filepath.Join(failRoot, failSess1)
++	if _, err := os.Stat(filepath.Join(failDir1, "receipt.json")); !os.IsNotExist(err) {
++		t.Fatalf("failed preflight unexpectedly created receipt.json: %v", err)
++	}
++	markerPath := filepath.Join(failDir1, "producer.json")
++	if _, err := os.Stat(markerPath); err != nil {
++		t.Fatalf("failed preflight missing producer.json marker: %v", err)
++	}
++	// Age marker & dir past preflightDiskRetention -> 2nd preflight MUST reclaim failDir1 and succeed.
++	agedMarker, _ := json.Marshal(preflightReservationMarker{Schema: Schema, Session: failSess1, Started: ancient.UnixNano()})
++	_ = os.WriteFile(markerPath, agedMarker, 0600)
++	_ = os.Chtimes(markerPath, ancient, ancient)
++	_ = os.Chtimes(failDir1, ancient, ancient)
++
++	failSess2 := "preflight-22222222-2222-4333-8444-555555555502"
++	ctxF2, cF2, err := Begin(context.Background(), failRoot, failSess2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, execF2, err := cF2.Start(ctxF2, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("second preflight failed to reclaim aged failed preflight dir: %v", err)
++	}
++	execF2.End()
++	cF2.Complete(false)
++	cF2.HandlerDone(false)
++	if _, err := os.Stat(failDir1); !os.IsNotExist(err) {
++		t.Fatalf("aged failed preflight dir was not reclaimed: %v", err)
 +	}
 +}
 +
