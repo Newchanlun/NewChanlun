@@ -4116,6 +4116,168 @@ class Adapter:
     ["mode=1, a={'cb': lambda: None}, d=True, b=True, e=True, c=True"], false);
 });
 
+test("R38/#1319：独立构造解释与原生关键字绑定恢复", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = (name: string, source: string, observed: string, expected = true,
+    extra: Record<string, string> = {}) => t.test(name, () => {
+    const repo = feedSource({
+      ...extra,
+      [entry]: "def route(**event): return sorted(event['rows'])\n__all__ = ('route',)\n",
+      [integration]: "from functools import wraps\nfrom .at18_fixture_feed import route\n" +
+        source + "\n__all__ = ('Adapter',)\n",
+      [path]: "from trading_system.at18_fixture_feed import route\ndef test_route():\n" +
+        `    assert route(rows=[4, 1], ${observed}) == [1, 4]\n`,
+    });
+    assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+  });
+  const flags = (keys: string[]) => keys.map(key => key + "=True").join(", ");
+  const inline = `
+def outer(fn):
+    @wraps(fn)
+    def wrap(self, *args, **kw): return fn(self, *args, audit=False, **kw)
+    return wrap
+class Adapter:
+    @outer
+    def __init__(self, *, active=False, audit=False): self.active = active
+    def dispatch(self, rows, /):
+        if self.active: return route(rows=rows)
+`;
+  await check("inline-keys-all", inline, "active=True, audit=True");
+  await check("inline-keys-control", inline, "active=True");
+  for (const audit of ["True", "False"]) {
+    await check("剥离唯一的内联键 audit=" + audit, `
+def outer(fn):
+    @wraps(fn)
+    def wrap(self, *args, **kw): return fn(self, *args, audit=False, **kw)
+    return wrap
+class Adapter:
+    @outer
+    def __init__(self, mode, /, *, audit=False): self.ready = mode == 1 and audit is False
+    def dispatch(self, rows, /):
+        if self.ready: return route(rows=rows)
+`, "mode=1, audit=" + audit);
+  }
+
+  const required = (decl: string[], injected: string[][], ready: string, before = "", setup = "",
+    consume = "if self.ready and self.mode == 1: return route(rows=rows)") => setup +
+    injected.map((layer, i) => `
+def outer${i}(fn):
+    @wraps(fn)
+    def wrap(self, *args, **kw):
+        ${i === 0 ? before || "pass" : "pass"}
+        return fn(self, *args, ${layer.map(key => key + "=False").join(", ")}, **kw)
+    return wrap
+`).join("") + `
+def middle(fn):
+    @wraps(fn)
+    def wrap(self, *args, ${decl.join(", ")}, **kw):
+        self.ready = ${ready}
+        return fn(self, *args, **kw)
+    return wrap
+class Adapter:
+${injected.map((_, i) => "    @outer" + i + "\n").join("")}    @middle
+    def __init__(self, mode, /): self.mode = mode
+    def dispatch(self, rows, /):
+        ${consume}
+`;
+  const seven = ["a", "b", "c", "d", "e", "f", "g"];
+  const ready = "a and b and c and d";
+  const injected = [["e", "f", "g"]];
+  await check("7-observed-required", required(seven, injected, ready), "mode=1, " + flags(seven));
+  await check("six-observed-required-control", required(seven, injected, ready), "mode=1, " + flags(seven.slice(0, 6)));
+  await check("十个必填键、两层各注入两个和三个：五次冲突剥离",
+    required([...seven, "h", "i", "j"], [["f", "g"], ["h", "i", "j"]], `${ready} and e`,
+      "if args == (1,): attempts.append(tuple(kw))", "attempts = []\n",
+      "if self.ready and self.mode == 1 and [len(k) for k in attempts if k] == [10, 9, 8, 7, 6, 5]: return route(rows=rows)"),
+    "mode=1, " + flags([...seven, "h", "i", "j"]));
+  await check("七必填、三可选：剥离三个必填冲突和一个可选冲突",
+    required([...seven, "h=False", "i=False", "j=False"], [["e", "f"], ["g", "h"]], `${ready} and i and j`),
+    "mode=1, " + flags([...seven, "h", "i", "j"]));
+  await check("外层 ValueError 拒 e：从空集按缺参提示直接增长四个必填键",
+    required(seven, injected, ready,
+      "if args == (1,) and kw: attempts.append(tuple(kw))\n        if 'e' in kw: raise ValueError('fixed')", "attempts = []\n",
+      "if self.ready and self.mode == 1 and [len(k) for k in attempts] == [7, 4]: return route(rows=rows)"),
+    "mode=1, " + flags(seven));
+
+  await check("十个必填键、两层注入五个：全集被拒后直接补齐剩余五键",
+    required([...seven, "h", "i", "j"], [["f", "g"], ["h", "i", "j"]], `${ready} and e`,
+      "if args == (1,) and kw: attempts.append(tuple(kw))\n        if 'f' in kw: raise ValueError('fixed')", "attempts = []\n",
+      "if self.ready and self.mode == 1 and [len(k) for k in attempts] == [10, 5]: return route(rows=rows)"),
+    "mode=1, " + flags([...seven, "h", "i", "j"]));
+  await check("缺参增长后逐一接纳可选键，再合成为一次公开调用",
+    required([...seven, "h=False", "i=False", "j=False"], [["e", "f"], ["g", "h"]], `${ready} and i and j`,
+      "if 'e' in kw: raise ValueError('fixed')"),
+    "mode=1, " + flags([...seven, "h", "i", "j"]));
+
+  const ambiguity = (prefix: string, spec = `def spec(${prefix}, mode=None, /): return prefix, mode`,
+    init = "", consume = "if self.active and self.mode == 1: return route(rows=rows)") => `
+def outer(fn):
+    @wraps(fn)
+    def wrap(self, *args, public=True, **kw): return fn(self, *args, audit=False, **kw)
+    return wrap
+def middle(fn):
+    @wraps(fn)
+    def wrap(self, *args, active=False, audit=False, **kw):
+        self.active = active
+        return fn(self, *args, **kw)
+    return wrap
+${spec}
+class Adapter:
+    @outer
+    @middle
+    @wraps(spec)
+    def __init__(self, *args):
+        self.mode = args[1] if len(args) == 2 else None
+        ${init || "pass"}
+    def dispatch(self, rows, /):
+        ${consume}
+`;
+  const observed = "mode=1, active=True, audit=True, public=True, marker=None";
+  await check("fallback-alt-suppressed", ambiguity("prefix"), observed);
+  await check("fallback-alt-control", ambiguity("prefix=None"), observed);
+  await check("门 2：外来包装签名不提供恢复候选",
+    ambiguity("prefix", "from .foreign import spec"), observed, false, {
+      "trading_system/foreign.py": "def spec(prefix, mode=None, /): return prefix, mode\n",
+    });
+  await check("门 4：恢复后只在构造器进入承接不计",
+    ambiguity("prefix", undefined, "if self.active and self.mode == 1: route(rows=[4, 1])", "return sorted(rows)"),
+    observed, false);
+  await check("门 5：冲突剥离不传递容器里的非纯回调",
+    required(["a=None", ...seven.slice(1)], injected, "type(a) is dict and 'cb' in a and b and c and d"),
+    "mode=1, a={'cb': lambda: None}, " + flags(seven.slice(1)), false);
+
+  const hostile = `
+touched = []
+class Hostile:
+    def __str__(self): touched.append('str'); raise AssertionError('str')
+    def __eq__(self, other): touched.append('eq'); raise AssertionError('eq')
+    def __hash__(self): touched.append('hash'); raise AssertionError('hash')
+    def __bool__(self): touched.append('bool'); raise AssertionError('bool')
+sentinel = Hostile()
+`;
+  await check("TypeError(hostile) 不解析对象，随后从空集增长并进入承接",
+    required(seven, injected, ready + " and not touched", "if 'e' in kw: raise TypeError(sentinel)", hostile),
+    "mode=1, " + flags(seven));
+  await check("七开关显式或省略默认与前置 other 共享一次构造", hostile + `
+made = []
+def outer(fn):
+    @wraps(fn)
+    def wrap(self, *args, **kw): return fn(self, *args, **kw)
+    return wrap
+class Adapter:
+    @outer
+    def __init__(self, mode=1, /, *, a=False, b=False, c=False, d=False, e=False, f=False, g=False, marker=sentinel):
+        made.append((a, b, c, d, e, f, g, marker is sentinel))
+        self.mode = mode
+    def other(self, rows, /): return sorted(rows)
+    def dispatch(self, rows, /):
+        if self.mode == 1 and made == [(False, False, False, False, False, False, False, True)] and not touched:
+            return route(rows=rows)
+`, "mode=1, " + seven.map(key => key + "=False").join(", "));
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";

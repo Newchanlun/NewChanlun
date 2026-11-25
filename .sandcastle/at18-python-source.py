@@ -8,6 +8,7 @@ import importlib
 import inspect
 import json
 import os
+import re
 import struct
 import sys
 from collections import Counter
@@ -319,6 +320,36 @@ def merge_kwonly(signature, extra_kwonly):
         return None
 
 
+def strip_kwonly(signature, names):
+    params = signature.parameters
+    kept = [p for name, p in params.items()
+            if p.kind is not inspect.Parameter.KEYWORD_ONLY or name not in names]
+    return signature if len(kept) == len(params) else signature.replace(parameters=kept)
+
+
+KW_DROP = re.compile(r"[^\n]+\(\) got (?:multiple values for keyword argument|an unexpected keyword argument) '([^']+)'")
+KW_NEED = re.compile(r"[^\n]+\(\) missing ([1-9][0-9]*) required keyword-only (argument|arguments): (.+)")
+KW_NAME = r"'[^']+'"
+KW_LIST = re.compile(rf"{KW_NAME}(?:(?:, {KW_NAME})*(?: and |, and ){KW_NAME})?")
+
+
+def parse_kw_type_error(exc, extra_set):
+    # 诊断只用于安排实参；是否覆盖仍由实际公开调用的轨迹决定。
+    if type(exc) is not TypeError or len(exc.args) != 1 or type(exc.args[0]) is not str:
+        return None
+    msg = exc.args[0]
+    if match := KW_DROP.fullmatch(msg):
+        name = match[1]
+        if name in extra_set:
+            return "drop", (name,)
+    if (match := KW_NEED.fullmatch(msg)) and KW_LIST.fullmatch(match[3]):
+        names = tuple(re.findall(KW_NAME, match[3]))
+        if str(len(names)) == match[1] and (len(names) == 1) == (match[2] == "argument"):
+            missing = tuple(name[1:-1] for name in names if name[1:-1] in extra_set)
+            if missing:
+                return "need", missing
+
+
 def peel_chain(layers, args, kwargs, default_refs):
     parts, cur_args, cur_kwargs = [], tuple(args), dict(kwargs)
     pos_offset = 0
@@ -397,17 +428,6 @@ def ctor_choice(primary_layers, secondary_layers, args, kwargs, defaults, defaul
 CTOR_PROBE_TIERS = ((False, False), (False, True), (True, None))
 
 
-def ctor_kwonly_pair(pair, kw_set):
-    sig, fallback, variant, alternate = pair
-    merged = merge_kwonly(sig, kw_set)
-    merged_fallback = (
-        merge_kwonly(fallback, kw_set)
-        if fallback is not None and not variadic_only(fallback)
-        else None
-    )
-    if merged is not None or merged_fallback is not None:
-        return merged or sig, merged_fallback or fallback, variant, alternate
-
 
 class Binding:
     def __init__(self, key, member, chain, owner=None, ctor_chains=((), ())):
@@ -438,22 +458,20 @@ class Binding:
         if variadic_only(params):
             return ()
         if strip == 0:
-            return ((params, None, False),)
+            return ((params, False),)
         clipped = strip_receivers(params, strip)
         if guaranteed:
-            return () if (clipped is None or variadic_only(clipped)) else ((clipped, None, True),)
+            return () if (clipped is None or variadic_only(clipped)) else ((clipped, True),)
         slots = tuple(params.parameters.values())
         if not slots or slots[0].kind not in POSITIONAL:
-            return ((params, None, False),)
+            return ((params, False),)
+        full, stripped = (params, False), (clipped, True)
+        can_strip = clipped is not None and not variadic_only(clipped)
         if slots[0].default is not inspect.Parameter.empty or slots[0].name in observed_names:
-            if clipped is None or not clipped.parameters or variadic_only(clipped):
-                fb = None if (clipped is None or variadic_only(clipped)) else clipped
-                return ((params, fb, False),)
-            full, stripped = (params, None, False), (clipped, None, True)
-            return (full, stripped) if after_class_hook else (stripped, full)
-        if clipped is None or variadic_only(clipped):
-            return ()
-        return ((clipped, params, True),)
+            if not can_strip:
+                return (full,)
+            return (full, stripped) if after_class_hook or not clipped.parameters else (stripped, full)
+        return (stripped, full) if can_strip else ()
 
     def ctor_plan(self, public, observed_names):
         primary_targets, secondary_targets = self.ctor_chains
@@ -469,14 +487,14 @@ class Binding:
         nonempty_secondary = [sigs for sigs in secondary_entries if sigs]
         def side_variants(prefix, entries):
             layers = (*prefix, *(sigs[0][0] for sigs in entries))
-            polarities = tuple(sigs[0][2] for sigs in entries if len(sigs) > 1)
+            polarities = tuple(sigs[0][1] for sigs in entries if len(sigs) > 1)
             variants, alternatives = [(layers, polarities)], {}
             # 同一侧只替换一层，避免包装深度使候选数量指数增长。
             polarity_offset = 0
             for offset, sigs in enumerate(entries):
                 if len(sigs) == 1:
                     continue
-                sig, _, is_clipped = sigs[1]
+                sig, is_clipped = sigs[1]
                 pos = len(prefix) + offset
                 alt_layers = (*layers[:pos], sig, *layers[pos + 1:])
                 alt_polarities = (*polarities[:polarity_offset], is_clipped, *polarities[polarity_offset + 1:])
@@ -506,14 +524,14 @@ class Binding:
         def tagged(entries, alts, other, primary):
             for offset, sigs in enumerate(entries):
                 candidates = []
-                for sig_idx, (sig, fallback, is_clipped) in enumerate(sigs):
+                for sig_idx, (sig, is_clipped) in enumerate(sigs):
                     if len(sigs) == 1:
                         variant = None if not primary and primary_alts else joint_index[0, 0]
                     else:
                         own = alts[offset] if sig_idx else 0
                         peer = aligned(other, is_clipped)
                         variant = joint_index[own, peer] if primary else joint_index[peer, own]
-                    candidates.append((sig, fallback, variant, sig_idx > 0))
+                    candidates.append((sig, variant, sig_idx > 0))
                 yield candidates
 
         primary_tagged = list(tagged(nonempty_primary, primary_alts, secondary_variants, True))
@@ -541,43 +559,29 @@ class Binding:
                         (public_has_varkw or name in public_kw_names) and
                         (name in observed_names or name in public_required_kw)):
                     all_kwonly[name] = param
-        kwonly_sets = []
-        if public_kwonly:
-            kwonly_sets.append(public_kwonly)
         extra = {name: param for name, param in all_kwonly.items() if name not in public_kwonly}
-        if extra:
-            kwonly_sets.append({**public_kwonly, **extra})
-
-        def project_kwonly(sig):
-            if sig is None or public_has_varkw:
-                return sig
-            kept = [
-                p for name, p in sig.parameters.items()
-                if not (p.kind is inspect.Parameter.KEYWORD_ONLY and name not in public_kw_names)
-            ]
-            if len(kept) == len(sig.parameters):
-                return sig
-            try:
-                return sig.replace(parameters=kept)
-            except ValueError:
-                return sig
-
-        pairs, recovery = [], []
+        full_kwonly = {**public_kwonly, **extra}
+        pairs, recovery, recovery_keys = [], [], set()
         generic = has_variadic(public)
 
-        def add(sig, fallback=None, variant=None, alternate=False):
-            sig = project_kwonly(sig)
-            fallback = project_kwonly(fallback)
-            pair = sig, fallback, variant, alternate
-            pairs.append(pair)
-            if not variadic_only(sig):
-                full_pair = None
-                for kw_set in kwonly_sets:
-                    full_pair = ctor_kwonly_pair(pair, kw_set)
-                    if full_pair is not None:
-                        pairs.append(full_pair)
-                if len(extra) >= 2 and full_pair is not None:
-                    recovery.append(pair)
+        def add(sig, variant=None, alternate=False):
+            if not public_has_varkw:
+                sig = strip_kwonly(sig, sig.parameters.keys() - public_kw_names)
+            pairs.append((sig, variant, alternate))
+            if variadic_only(sig):
+                return
+            for kw_set in ((public_kwonly, full_kwonly) if extra else (public_kwonly,)):
+                merged = merge_kwonly(sig, kw_set)
+                if merged is not None:
+                    pairs.append((merged, variant, alternate))
+            if extra:
+                base_sig = strip_kwonly(sig, extra)
+                if base_sig is not sig or merged is not None:
+                    # Signature.__hash__ 会访问默认值；形状只按原生名、种类和身份去重。
+                    key = variant, tuple((p.name, p.kind, id(p.default)) for p in base_sig.parameters.values())
+                    if key not in recovery_keys:
+                        recovery_keys.add(key)
+                        recovery.append((base_sig, variant))
 
         if not generic:
             add(public)
@@ -591,7 +595,7 @@ class Binding:
             add(public)
         return layer_variants, pairs, (recovery, public_kwonly, extra)
 
-    def callables(self, instances, views, variadic=None, alternate=None):
+    def callables(self, instances, views, variadic=None, alternate=None, ctor_errors=None):
         if self.owner is None:
             if not variadic and alternate is not True:
                 yield self.member
@@ -607,6 +611,9 @@ class Binding:
         observed_names = {name for view in views for name in view}
         layer_variants, pairs, (recovery, public_kwonly, extra_kwonly) = self.ctor_plan(public, observed_names)
         seen, default_refs = set(), {}
+        extra_set = set(extra_kwonly)
+        if ctor_errors is None:
+            ctor_errors = {}
 
         def convergence_score(choice, has_secondary):
             if not has_secondary:
@@ -635,91 +642,106 @@ class Binding:
 
         def resolve(sig, view, use_variadic, variant):
             if use_variadic and not has_variadic(sig):
-                return False
+                return False, None
             try:
                 args, kwargs, defaults = arguments(sig, view, use_variadic)
                 public.bind(*args, **kwargs)
                 ctor_key = pick_ctor_key(variant, args, kwargs, defaults)
             except (ValueError, TypeError):
-                return False
-            key = (id(self.owner), ctor_key)
+                return False, None
+            key = id(self.owner), ctor_key
             raw_key = None
-            if len(layer_variants) > 1:
+            if len(layer_variants) > 1 or extra_set:
                 raw_key = (
                     id(self.owner),
                     MISSING,
                     tuple(choice_value_key(v, default_refs) for v in args),
                     tuple((k, choice_value_key(v, default_refs)) for k, v in kwargs.items()),
                 )
-            if ctor_key in seen:
-                inst = instances.get(key)
-                if inst is not None and raw_key is not None:
-                    instances.setdefault(raw_key, inst)
-                return inst is not None
-            seen.add(ctor_key)
+            # 成功仍按绑定后默认值归一；失败若含可恢复键，按原实参记录。
+            # 显式传默认值可能与外层注入冲突，而同一键省略时可以成功。
+            failed_key = raw_key if extra_set else key
+            if failed_key in instances and instances[failed_key] is None:
+                return False, ctor_errors.get(failed_key)
             if key not in instances:
                 if raw_key is not None and raw_key in instances:
-                    instances[key] = instances[raw_key]
+                    inst = instances[raw_key]
+                    if inst is None:
+                        return False, ctor_errors.get(raw_key)
                 else:
-                    instances[key] = None  # 构造器异常也只试一次。
                     ctor_args, ctor_kwargs = copy_arguments(args, kwargs, defaults)
                     try:
-                        instances[key] = self.owner(*ctor_args, **ctor_kwargs)
-                    except (Exception, SystemExit):
+                        inst = self.owner(*ctor_args, **ctor_kwargs)
+                    except (Exception, SystemExit) as exc:
+                        tag = parse_kw_type_error(exc, extra_set) if extra_set else None
+                        instances[failed_key] = None
                         if raw_key is not None:
                             instances[raw_key] = None
-                        return False
-                    if raw_key is not None:
-                        instances[raw_key] = instances[key]
-            elif instances[key] is not None and raw_key is not None:
-                instances.setdefault(raw_key, instances[key])
-            if instances[key] is not None:
-                yield self.member.__get__(instances[key], self.owner)
-                return True
-            return False
-
-        def resolve_pair(pair, view, use_variadic):
-            sig, fallback, variant, _ = pair
-            if (yield from resolve(sig, view, use_variadic, variant)):
-                return True
-            if fallback is not None:
-                return (yield from resolve(fallback, view, use_variadic, variant))
-            return False
+                        if tag is not None:
+                            ctor_errors[failed_key] = tag
+                        return False, tag
+                instances[key] = inst
+            inst = instances[key]
+            if inst is None:
+                return False, None
+            if raw_key is not None:
+                instances.setdefault(raw_key, inst)
+            if ctor_key not in seen:
+                seen.add(ctor_key)
+                yield self.member.__get__(inst, self.owner)
+            return True, None
 
         def recover_kwonly(pair, view):
+            base_sig, variant = pair
             extra = tuple(extra_kwonly)
-            tested = {(), extra}
+            tested = {}
 
             def attempt(names):
-                if names in tested:
-                    return False
-                tested.add(names)
-                kw_set = {**public_kwonly, **{name: extra_kwonly[name] for name in names}}
-                candidate = ctor_kwonly_pair(pair, kw_set)
-                if candidate is not None:
-                    return (yield from resolve_pair(candidate, view, False))
-                return False
+                if names not in tested:
+                    kw_set = {**public_kwonly, **{name: extra_kwonly[name] for name in names}}
+                    sig = merge_kwonly(base_sig, kw_set)
+                    tested[names] = yield from resolve(sig if sig is not None else base_sig, view, False, variant)
+                return tested[names]
 
-            # 构造成功只说明这个键可用；是否覆盖仍由外层实际调用判定。
+            # 从全集按真实绑定冲突剥离；每一轮至少少一个键。
+            cur = extra
+            while True:
+                _, error = yield from attempt(cur)
+                if error is None or error[0] != "drop":
+                    break
+                reduced = tuple(name for name in cur if name not in error[1])
+                if reduced == cur:
+                    break
+                cur = reduced
+
+            # 全集也可能先遇到用户异常。从空集只增长真实缺少的必填键。
+            cur = ()
+            while True:
+                ok, error = yield from attempt(cur)
+                if error is None or error[0] != "need":
+                    break
+                enlarged = tuple(name for name in extra if name in cur or name in error[1])
+                if enlarged == cur:
+                    break
+                cur = enlarged
+            if ok and cur and cur != extra:
+                accepted = set(cur)
+                for name in extra:
+                    if name not in cur:
+                        combo = tuple(k for k in extra if k in cur or k == name)
+                        if (yield from attempt(combo))[0]:
+                            accepted.add(name)
+                yield from attempt(tuple(name for name in extra if name in accepted))
+
+            # 构造成功只表示接纳实参，不表示已经覆盖承接导出。
             accepted = []
             for name in extra:
-                if (yield from attempt((name,))):
+                if (yield from attempt((name,)))[0]:
                     accepted.append(name)
             if 2 <= len(accepted) < len(extra):
                 yield from attempt(tuple(accepted))
 
-            required = {name for name in extra if extra_kwonly[name].default is inspect.Parameter.empty}
-            if required and len(accepted) < 2:
-                yield from attempt(tuple(name for name in extra if name in required))
-                with_required = required.copy()
-                for name in extra:
-                    if name not in required:
-                        combo = tuple(k for k in extra if k in required or k == name)
-                        if (yield from attempt(combo)):
-                            with_required.add(name)
-                yield from attempt(tuple(name for name in extra if name in with_required))
-
-            # 小集合遍历全部剩余形状；大集合仅补试删一键、删两键，限制构造次数。
+            # 无可用绑定诊断时，小集合补齐子集；大集合只补试删一键、删两键。
             n = len(extra)
             sizes = range(n - 1, 1, -1) if n <= 6 else (n - 1, n - 2)
             for size in sizes:
@@ -733,9 +755,9 @@ class Binding:
                 continue
             only_alternate = alternate if use_variadic else use_alternate
             for view in views:
-                for pair in pairs:
-                    if only_alternate is None or pair[3] is only_alternate:
-                        yield from resolve_pair(pair, view, use_variadic)
+                for sig, variant, is_alternate in pairs:
+                    if only_alternate is None or is_alternate is only_alternate:
+                        yield from resolve(sig, view, use_variadic, variant)
             if use_alternate is True:
                 for view in views:
                     for pair in recovery:
@@ -1371,11 +1393,12 @@ def public_probe(production, targets, origins, test_entered, samples, shapes, ov
     targets.load(origins)
 
     views = (samples, *overrides)
-    instances, tried = {}, set()
+    instances, ctor_errors, tried = {}, {}, set()
     for variadic, alternate in CTOR_PROBE_TIERS:
         for binding in production.members:
             try:
-                for fn in binding.callables(instances, views, variadic=variadic, alternate=alternate):
+                for fn in binding.callables(instances, views, variadic=variadic, alternate=alternate,
+                                            ctor_errors=ctor_errors):
                     try:
                         identity = (id(fn.__func__), id(fn.__self__)) if type(fn) is MethodType else (id(fn),)
                         if identity in tried:
