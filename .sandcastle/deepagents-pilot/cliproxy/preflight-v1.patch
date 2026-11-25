@@ -1,5 +1,5 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..2ac9365 100644
+index e69de29..7582028 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,269 @@
@@ -57,21 +57,21 @@ index e69de29..2ac9365 100644
 +	return func(c *gin.Context) {
 +		session, sessionPresent, sessionAmbiguous := singleHeaderValue(c.Request.Header, "Session-Id")
 +		launch, launchPresent, launchAmbiguous := singleHeaderValue(c.Request.Header, preflightreceipt.ReviewHeader)
-+		anyPreflightSession := false
++		anyPreflightNamespace := false
 +		for _, sv := range c.Request.Header.Values("Session-Id") {
 +			for _, part := range strings.Split(sv, ",") {
-+				if preflightreceipt.ValidPreflightSession(strings.TrimSpace(part)) {
-+					anyPreflightSession = true
++				if strings.HasPrefix(strings.TrimSpace(part), "preflight-") {
++					anyPreflightNamespace = true
 +					break
 +				}
 +			}
-+			if anyPreflightSession {
++			if anyPreflightNamespace {
 +				break
 +			}
 +		}
 +		isPreflight := !sessionAmbiguous && sessionPresent && preflightreceipt.ValidPreflightSession(session)
 +		hasReviewHeader := launchPresent
-+		if !anyPreflightSession && !hasReviewHeader {
++		if !anyPreflightNamespace && !hasReviewHeader {
 +			c.Next()
 +			return
 +		}
@@ -107,7 +107,7 @@ index e69de29..2ac9365 100644
 +				abortClose(http.StatusBadRequest)
 +				return
 +			}
-+			if sessionAmbiguous || !sessionPresent || anyPreflightSession || isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || hasAnyHeaderValue(c.Request.Header, "Upgrade") || !preflightreceipt.ValidReviewSession(session) {
++			if sessionAmbiguous || !sessionPresent || anyPreflightNamespace || isPreflight || c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || hasAnyHeaderValue(c.Request.Header, "Upgrade") || !preflightreceipt.ValidReviewSession(session) {
 +				preflightreceipt.TaintExistingReview(root, launch)
 +				abortClose(http.StatusBadRequest)
 +				return
@@ -274,10 +274,10 @@ index e69de29..2ac9365 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..520fb91
+index 0000000..b677bb9
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,959 @@
+@@ -0,0 +1,979 @@
 +package middleware
 +
 +import (
@@ -1045,6 +1045,26 @@ index 0000000..520fb91
 +		engine.ServeHTTP(recPF, reqPF)
 +		if recPF.Code != http.StatusBadRequest || handlerCalls.Load() != 0 {
 +			t.Fatalf("duplicate preflight Session-Id %v -> code=%d handlerCalls=%d, want (400, 0)", vals, recPF.Code, handlerCalls.Load())
++		}
++	}
++
++	// 3b. Astra P2 #3 (PR #2280 R64): when receipts are enabled, ANY preflight- namespace Session-Id
++	// with a malformed UUID (including comma-combined or multi-header forms) MUST be rejected (400)
++	// and NEVER fall through to the ordinary upstream handler.
++	for _, vals := range [][]string{
++		{"preflight-demo"},
++		{"preflight-not-a-uuid"},
++		{"preflight-bad, ordinary"},
++		{"ordinary", "preflight-bad"},
++	} {
++		reqBadPF := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		for _, v := range vals {
++			reqBadPF.Header.Add("Session-Id", v)
++		}
++		recBadPF := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++		engine.ServeHTTP(recBadPF, reqBadPF)
++		if recBadPF.Code != http.StatusBadRequest || handlerCalls.Load() != 0 {
++			t.Fatalf("malformed preflight- namespace Session-Id %v -> code=%d handlerCalls=%d, want (400, 0)", vals, recBadPF.Code, handlerCalls.Load())
 +		}
 +	}
 +
@@ -7252,10 +7272,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..fb8a1a7 100644
+index e69de29..fee34a7 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,10904 @@
+@@ -0,0 +1,10970 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7623,13 +7643,23 @@ index e69de29..fb8a1a7 100644
 +	pinnedDirFDs.Add(-1)
 +}
 +
++type sealFlight struct {
++	done    chan struct{}
++	session string
++	status  SealStatus
++	digest  string
++}
++
 +var (
-+	reviewMu              sync.Mutex
-+	reviewLedger          = make(map[string]*reviewEntry)
-+	sealedBindings        = make(map[string]sealedDirBinding)
-+	reservedBindingKeys   = make(map[string]bool)
-+	activeSealingKeys     = make(map[string]int)
-+	reclaimingKeys        = make(map[string]bool)
++	reviewMu                      sync.Mutex
++	reviewLedger                  = make(map[string]*reviewEntry)
++	sealedBindings                = make(map[string]sealedDirBinding)
++	reservedBindingKeys           = make(map[string]bool)
++	activeSealingKeys             = make(map[string]int)
++	activeSealFlights             = make(map[string]*sealFlight)
++	activeSealTotal               int
++	maxConcurrentSeals            = 16
++	reclaimingKeys                = make(map[string]bool)
 +	pendingReviewLaunches = make(map[string]*pendingReviewState)
 +	pendingReviewTotal    int
 +	reviewTurnSeqGen              uint64
@@ -14141,6 +14171,75 @@ index e69de29..fb8a1a7 100644
 +	}
 +	root = cleanRoot
 +	key := root + "\x00" + launch
++	// Enforce seal concurrency cap and per-launch single-flight coalescing BEFORE touching disk
++	// or acquiring the exclusive root lease so concurrent seal retries cannot pile up goroutines
++	// or contend on root flock/fsync while disk is slow.
++	reviewMu.Lock()
++	if reclaimingKeys[key] {
++		reviewMu.Unlock()
++		return SealUnavailable, ""
++	}
++	if st := pendingReviewLaunches[key]; st != nil && st.count > 0 {
++		reviewMu.Unlock()
++		return SealInFlight, ""
++	}
++	if ent := reviewLedger[key]; ent != nil && !ent.sealedFlag && (ent.sealing || ent.inFlight > 0) {
++		reviewMu.Unlock()
++		return SealInFlight, ""
++	}
++	if maxConcurrentSeals > 0 && activeSealTotal >= maxConcurrentSeals {
++		reviewMu.Unlock()
++		return SealUnavailable, ""
++	}
++	if existingFlight := activeSealFlights[key]; existingFlight != nil {
++		if existingFlight.session != session {
++			reviewMu.Unlock()
++			return SealInFlight, ""
++		}
++		activeSealTotal++
++		reviewMu.Unlock()
++		<-existingFlight.done
++		reviewMu.Lock()
++		if activeSealTotal > 0 {
++			activeSealTotal--
++		}
++		reviewMu.Unlock()
++		return existingFlight.status, existingFlight.digest
++	}
++	flight := &sealFlight{
++		done:    make(chan struct{}),
++		session: session,
++	}
++	activeSealFlights[key] = flight
++	activeSealingKeys[key]++
++	activeSealTotal++
++	reviewMu.Unlock()
++
++	finalStatus := SealUnavailable
++	finalDigest := ""
++	defer func() {
++		flight.status = finalStatus
++		flight.digest = finalDigest
++		reviewMu.Lock()
++		if activeSealFlights[key] == flight {
++			delete(activeSealFlights, key)
++		}
++		if activeSealingKeys[key] <= 1 {
++			delete(activeSealingKeys, key)
++		} else {
++			activeSealingKeys[key]--
++		}
++		if activeSealTotal > 0 {
++			activeSealTotal--
++		}
++		reviewMu.Unlock()
++		close(flight.done)
++	}()
++	finalStatus, finalDigest = sealReviewWithDigestCore(root, key, launch, session)
++	return finalStatus, finalDigest
++}
++
++func sealReviewWithDigestCore(root, key, launch, session string) (SealStatus, string) {
 +	// Check in-memory pending/in-flight state BEFORE checking root existence on disk:
 +	// on a fresh deployment, BeginPendingReview registers the launch before reading the body
 +	// and before root is created, so a concurrent seal must see SealInFlight, never SealRejected.
@@ -14157,9 +14256,6 @@ index e69de29..fb8a1a7 100644
 +			return SealInFlight, true
 +		}
 +		return SealRejected, false
-+	}
-+	if earlySt, hit := checkEarlyInFlight(); hit {
-+		return earlySt, ""
 +	}
 +	rootExists, err := checkPrivateDir(root, true)
 +	if err != nil {
@@ -14182,16 +14278,6 @@ index e69de29..fb8a1a7 100644
 +		reviewMu.Unlock()
 +		return SealUnavailable, ""
 +	}
-+	activeSealingKeys[key]++
-+	defer func() {
-+		reviewMu.Lock()
-+		if activeSealingKeys[key] <= 1 {
-+			delete(activeSealingKeys, key)
-+		} else {
-+			activeSealingKeys[key]--
-+		}
-+		reviewMu.Unlock()
-+	}()
 +	reclaimedForSeal := false
 +retrySeal:
 +	if reclaimingKeys[key] {
@@ -18161,10 +18247,10 @@ index e69de29..fb8a1a7 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..6246f94 100644
+index e69de29..f3861a8 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,11894 @@
+@@ -0,0 +1,12001 @@
 +package preflightreceipt
 +
 +import (
@@ -30057,5 +30143,112 @@ index e69de29..6246f94 100644
 +	res2.Release()
 +	if st, _ := SealReviewWithDigest(rootHealthy, l10, "sess-10"); st != SealRejected {
 +		t.Fatalf("SealReviewWithDigest on persisted tainted l10 = %v, want SealRejected", st)
++	}
++}
++
++func TestReviewReceiptSealCoalescesConcurrentRetriesAndCapsConcurrency(t *testing.T) {
++	// Astra P2 #4 (PR #2280 R64): concurrent repeat seals for the same (root, launch, session)
++	// must coalesce onto one root lease/fsync, and exceeding maxConcurrentSeals must fail closed
++	// with SealUnavailable BEFORE touching disk or waiting on root lock.
++	oldMaxSeals := maxConcurrentSeals
++	maxConcurrentSeals = 3
++	defer func() { maxConcurrentSeals = oldMaxSeals }()
++
++	root := filepath.Join(t.TempDir(), "seal-coalesce-cap")
++	l1 := "review-ff6f6f6f-2222-4333-8444-555555555501"
++	s1 := "019d0000-0000-7000-8000-00000000f601"
++	ctx, c, err := BeginReview(context.Background(), root, l1, s1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	origSt, origDig := SealReviewWithDigest(root, l1, s1)
++	if origSt != SealOK || !isSHA256Hex(origDig) {
++		t.Fatalf("initial seal = (%v, %q), want SealOK", origSt, origDig)
++	}
++
++	// Pause inside syncDirFn during repeat seal so concurrent retries overlap on l1.
++	origSync := syncDirFn
++	entered := make(chan struct{}, 8)
++	release := make(chan struct{})
++	var syncCalls atomic.Int32
++	syncDirFn = func(dir string) error {
++		if filepath.Clean(dir) == filepath.Clean(filepath.Join(root, l1)) {
++			if syncCalls.Add(1) == 1 {
++				entered <- struct{}{}
++				<-release
++			}
++		}
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
++	}
++	defer func() { syncDirFn = origSync }()
++
++	type res struct {
++		st  SealStatus
++		dig string
++	}
++	// Launch 3 concurrent retries (leader + 2 coalesced waiters = maxConcurrentSeals).
++	ch := make(chan res, 3)
++	go func() {
++		st, dig := SealReviewWithDigest(root, l1, s1)
++		ch <- res{st, dig}
++	}()
++	<-entered
++	for i := 0; i < 2; i++ {
++		go func() {
++			st, dig := SealReviewWithDigest(root, l1, s1)
++			ch <- res{st, dig}
++		}()
++	}
++	// Wait until all 3 slots are occupied (1 leader + 2 coalesced waiters).
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		reviewMu.Lock()
++		n := activeSealTotal
++		reviewMu.Unlock()
++		if n == 3 {
++			break
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	// A 4th seal (for another launch OR same launch) MUST fail closed immediately with SealUnavailable
++	// BEFORE touching disk or waiting on the paused leader.
++	lOther := "review-ff6f6f6f-2222-4333-8444-555555555502"
++	sOther := "019d0000-0000-7000-8000-00000000f602"
++	if stCap, digCap := SealReviewWithDigest(root, lOther, sOther); stCap != SealUnavailable || digCap != "" {
++		close(release)
++		t.Fatalf("4th concurrent seal above cap = (%v, %q), want (SealUnavailable, \"\")", stCap, digCap)
++	}
++	// Unblock leader: all 3 coalesced calls must receive the exact (SealOK, origDig) with only 1 fsync.
++	close(release)
++	for i := 0; i < 3; i++ {
++		got := <-ch
++		if got.st != SealOK || got.dig != origDig {
++			t.Fatalf("coalesced seal #%d = (%v, %q), want (SealOK, %q)", i, got.st, got.dig, origDig)
++		}
++	}
++	if calls := syncCalls.Load(); calls != 1 {
++		t.Fatalf("repeat seal syncDirFn calls on l1 = %d, want 1 (coalesced)", calls)
 +	}
 +}

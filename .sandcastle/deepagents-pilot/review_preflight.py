@@ -439,6 +439,9 @@ SSE_READ_CHUNK_BYTES = 8192
 MAX_HTTP_ERROR_BYTES = 65536
 _CHUNK_SIZE_HEX_RE = re.compile(rb"[0-9A-Fa-f]{1,16}")
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,20}")
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_TRAILER_FIELD_RE = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+:[\t\x20-\x7e\x80-\xff]*")
+_TCHAR_BYTES = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
 
 class _SSEReadLimitError(Exception):
@@ -459,12 +462,78 @@ def _open_http(request: urllib.request.Request, timeout: float):
     return opener.open(request, timeout=timeout)
 
 
+def _is_valid_chunk_ext(raw: bytes) -> bool:
+    """按 RFC 9112 §7.1.1 线性校验首分号后的 chunk-ext 语法，无回溯风险。"""
+    n = len(raw)
+    i = 0
+    while True:
+        while i < n and raw[i] in (32, 9):
+            i += 1
+        name_start = i
+        while i < n and raw[i] in _TCHAR_BYTES:
+            i += 1
+        if i == name_start:
+            return False
+        while i < n and raw[i] in (32, 9):
+            i += 1
+        if i < n and raw[i] == 61:  # '='
+            i += 1
+            while i < n and raw[i] in (32, 9):
+                i += 1
+            if i >= n:
+                return False
+            if raw[i] == 34:  # '"' quoted-string
+                i += 1
+                closed = False
+                while i < n:
+                    b = raw[i]
+                    if b == 34:
+                        i += 1
+                        closed = True
+                        break
+                    if b == 92:  # '\\' quoted-pair
+                        i += 1
+                        if i >= n:
+                            return False
+                        qb = raw[i]
+                        if not (qb in (9, 32) or 0x21 <= qb <= 0x7E or qb >= 0x80):
+                            return False
+                        i += 1
+                    elif b in (9, 32, 0x21) or (0x23 <= b <= 0x5B) or (0x5D <= b <= 0x7E) or b >= 0x80:
+                        i += 1
+                    else:
+                        return False
+                if not closed:
+                    return False
+            else:
+                val_start = i
+                while i < n and raw[i] in _TCHAR_BYTES:
+                    i += 1
+                if i == val_start:
+                    return False
+            while i < n and raw[i] in (32, 9):
+                i += 1
+        if i == n:
+            return True
+        if raw[i] == 59:  # ';'
+            i += 1
+            continue
+        return False
+
+
 def _validate_http_response_framing(response: http.client.HTTPResponse) -> None:
-    """在读取正文前核验所有原始 Content-Length / Transfer-Encoding 头，
-    拒绝非法值、冲突的多重 Content-Length、以及 Content-Length 与 Transfer-Encoding 并存。"""
+    """在读取正文前核验响应头解析缺陷及所有原始 Content-Length / Transfer-Encoding 头，
+    拒绝任何解析缺陷、非法值、冲突的多重 Content-Length、以及 Content-Length 与 Transfer-Encoding 并存。"""
     headers = getattr(response, "headers", None)
     if headers is None or not hasattr(headers, "get_all"):
         return
+    if getattr(headers, "defects", None):
+        raise http.client.HTTPException("malformed HTTP response headers")
+    for hname, hval in headers.items():
+        if not isinstance(hname, str) or not _HEADER_NAME_RE.fullmatch(hname):
+            raise http.client.HTTPException("invalid HTTP response header name")
+        if isinstance(hval, str) and ("\r" in hval or "\n" in hval):
+            raise http.client.HTTPException("invalid HTTP response header value")
     te_headers = headers.get_all("Transfer-Encoding") or []
     cl_headers = headers.get_all("Content-Length") or []
     if te_headers and cl_headers:
@@ -522,10 +591,12 @@ def _iter_strict_http_body(
                 raise http.client.LineTooLong("chunk size")
             if not size_line or not size_line.endswith(b"\r\n"):
                 raise http.client.IncompleteRead(b"")
-            size_head, sep, _ext = size_line[:-2].partition(b";")
+            size_head, sep, ext_raw = size_line[:-2].partition(b";")
             size_token = size_head.rstrip(b" \t") if sep else size_head
             if not _CHUNK_SIZE_HEX_RE.fullmatch(size_token):
                 raise http.client.HTTPException("invalid chunk size")
+            if sep and not _is_valid_chunk_ext(ext_raw):
+                raise http.client.HTTPException("invalid chunk extension")
             chunk_size = int(size_token, 16)
             if chunk_size == 0:
                 total_trailer_bytes = 0
@@ -544,6 +615,8 @@ def _iter_strict_http_body(
                         break
                     if not tline.endswith(b"\r\n"):
                         raise http.client.IncompleteRead(b"")
+                    if not _TRAILER_FIELD_RE.fullmatch(tline[:-2]):
+                        raise http.client.HTTPException("invalid chunk trailer")
                 response.close()
                 return
             chunk_rem = chunk_size

@@ -461,7 +461,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "bad-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -484,6 +484,19 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             self.rfile.read(int(self.headers["Content-Length"]))
             if framing == "spent-budget":
                 time.sleep(0.3)
+            if framing == "bad-header":
+                try:
+                    self.connection.sendall(
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Connection: close\r\n"
+                        b"MalformedHeaderWithoutColon\r\n"
+                        b"Content-Length: 999\r\n\r\n"
+                        + payload
+                    )
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                self.close_connection = True
+                return
             if framing in ("header-drip", "error-drip"):
                 try:
                     self.connection.sendall(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 30\r\n")
@@ -522,6 +535,10 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     self.wfile.write(b"-1\r\n" + payload + b"\r\n0\r\n\r\n")
                 elif framing == "bad-chunk-sep":
                     self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"XX0\r\n\r\n")
+                elif framing == "bad-chunk-ext":
+                    self.wfile.write(f"{len(payload):x};bad ext=1\r\n".encode() + payload + b"\r\n0\r\n\r\n")
+                elif framing == "valid-chunk-ext":
+                    self.wfile.write(f'{len(payload):x};ext="v\\\\1";flag\r\n'.encode() + payload + b"\r\n0\r\n\r\n")
                 else:
                     self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
                     self.wfile.flush()
@@ -535,6 +552,10 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                         self.wfile.write(b"0\r\n")
                     elif framing == "short-trailer-header":
                         self.wfile.write(b"0\r\nX-Trailer: 1\r\n")
+                    elif framing == "bad-trailer":
+                        self.wfile.write(b"0\r\nNotAHeaderLine\r\n\r\n")
+                    elif framing == "bad-trailer-space":
+                        self.wfile.write(b"0\r\nX-Foo : 1\r\n\r\n")
                     elif framing == "chunked-trailer":
                         self.wfile.write(b"0\r\nX-Trailer: 1\r\n\r\n")
                     elif framing != "short-chunked":
@@ -550,10 +571,10 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
         result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
         elapsed = time.monotonic() - started
         assert processes and all(process.poll() is not None for process in processes)
-        assert result["ok"] is (framing in ("length", "same-dup-cl", "chunked", "chunked-trailer")), result
+        assert result["ok"] is (framing in ("length", "same-dup-cl", "chunked", "chunked-trailer", "valid-chunk-ext")), result
         if framing.startswith("short-"):
             assert result["error"]["exception"] == "IncompleteRead"
-        if framing in ("neg-chunk", "bad-chunk-sep", "bad-cl", "conflict-cl", "cl-and-te"):
+        if framing in ("neg-chunk", "bad-chunk-sep", "bad-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-trailer", "bad-trailer-space"):
             assert result["error"]["exception"] == "HTTPException"
         if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed
