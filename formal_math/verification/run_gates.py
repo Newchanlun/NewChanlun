@@ -24,7 +24,7 @@ def command(cwd, *args, stdin=None):
 def checked(cwd, *args):
     result = command(cwd, *args)
     if result.returncode:
-        raise Undetermined(f"{' '.join(args)}: {result.stderr.strip() or result.stdout.strip()}")
+        raise Undetermined(f"{' '.join(args)}: {(result.stdout + result.stderr).strip()}")
     return result.stdout
 
 
@@ -38,56 +38,10 @@ def sources(root):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         here = Path(directory).relative_to(root)
         if here == Path("formal_math/verification"):
-            dirs[:] = [d for d in dirs if d not in {"must_red", "must_green", "must_unknown"}]
+            dirs[:] = [d for d in dirs if d not in {"must_red", "must_green", "must_unknown", "known_limits"}]
         for name in sorted(files):
             if name.endswith(".lean"):
                 yield here / name
-
-
-# 消费完整标识符、注释、字面量；不把说明文字算作命令。
-LEX = re.compile(
-    r'/\-|--[^\n]*|r#*"|'
-    r'"(?:\\.|[^"\\])*"|' r"'(?:\\.|[^'\\\n])'|"
-    r'«[^»]*»|[#@]?[^\W\d][\w′\']*|[^\s]',
-    re.UNICODE,
-)
-
-
-def tokens(text):
-    index = 0
-    line = 1
-    while match := LEX.search(text, index):
-        line += text.count("\n", index, match.start())
-        token = match.group()
-        end = match.end()
-        if token == "/-":
-            depth = 1
-            while depth:
-                marker = re.search(r"/-|-/", text[end:])
-                if marker is None:
-                    raise Undetermined(f"第 {line} 行的块注释未闭合")
-                depth += 1 if marker.group() == "/-" else -1
-                end += marker.end()
-        elif token.startswith('r') and token.endswith('"'):
-            delimiter = '"' + token[1:-1]
-            close = text.find(delimiter, end)
-            if close < 0:
-                raise Undetermined(f"第 {line} 行的原始字符串未闭合")
-            end = close + len(delimiter)
-            yield "", line
-        elif token.startswith("--"):
-            pass
-        elif token.startswith(('"', 'r"', "r#", "'")) and len(token) > 1:
-            # 字面量仍是语法中的一个位置，不允许跳过它找首条命令。
-            yield "", line
-        else:
-            yield token.removeprefix("«").removesuffix("»"), line
-        line += text.count("\n", match.start(), end)
-        index = end
-
-
-def load_sources(root):
-    return {path: list(tokens((root / path).read_text())) for path in sources(root)}
 
 
 def gate1(root):
@@ -121,15 +75,6 @@ def gate1(root):
     return int(failed)
 
 
-def option_issues(items, include_linter=True):
-    values = [t for t, _ in items]
-    for i, (value, line) in enumerate(items):
-        if value == "set_option" and i + 1 < len(items):
-            key = values[i + 1]
-            if key in {"autoImplicit", "relaxedAutoImplicit"} or (include_linter and key == "linter"):
-                yield line, key
-
-
 def gate2(root):
     config = root / "formal_math/lakefile.toml"
     package = tomllib.loads(config.read_text())
@@ -158,11 +103,11 @@ def gate2(root):
         if table.get(pieces[-1]) is not expected:
             red("2", config.relative_to(root), 1, "LEAN_OPTION", f"{option} 必须为 {str(expected).lower()}")
             failed = True
-    source = load_sources(root)
-    for path, items in source.items():
-        for line, key in option_issues(items):
-            red("2", path, line, "LOCAL_OPTION", f"禁止在源码设置 {key}")
-            failed = True
+    if failed:
+        return 1
+    source, state = audit_sources(root, "2")
+    if state:
+        return state
     targets = [f"+{module_name(p)}:olean" for p in source if p.parts[1] != "verification"]
     result = command(config.parent, "lake", "build", "--wfail")
     if not result.returncode and targets:
@@ -177,15 +122,6 @@ def gate2(root):
         print(result.stdout + result.stderr, file=sys.stderr, end="")
         failed = True
     return int(failed)
-
-
-BANNED = {
-    "axiom", "sorry", "admit", "native_decide", "unsafe", "extern",
-    "implemented_by", "partial", "syntax", "macro", "macro_rules", "elab",
-    "elab_rules", "notation", "infix", "infixl", "infixr", "prefix", "postfix",
-    "declare_syntax_cat",
-    "run_cmd", "run_meta", "initialize", "builtin_initialize",
-}
 
 
 def module_name(path):
@@ -227,27 +163,87 @@ def emit_findings(gate, result):
     return result.returncode
 
 
-def gate3(root):
-    source = load_sources(root)
-    findings = []
-    for path, items in source.items():
-        if items and items[0][0] == "module" and module_name(path) not in AUDIT_TOOLS:
-            for _, line, import_all in read_imports(items):
-                if import_all:
-                    findings.append((path, line, "禁止普通源码使用 import all"))
-        for value, line in items:
-            if value in BANNED or (value == "#eval" and lane(module_name(path)) != "ChanExplore"):
-                findings.append((path, line, f"禁用记号 {value}"))
-        for line, key in option_issues(items):
-            if key == "linter":
-                findings.append((path, line, "禁止在源码设置 linter"))
+def source_headers(root):
     fm = root / "formal_math"
-    # 文本已有硬反例时，只编译与读取独立探针，不编译有禁用记号的模块。
-    mods = ["ChanTest.Probe"] if findings else [module_name(path) for path in source]
-    environment = emit_findings("3", lean_audit(fm, "3", mods))
-    for path, line, detail in findings:
-        red("3", path, line, "TOKEN", detail)
-    return max(environment, int(bool(findings)))
+    paths = {path.relative_to("formal_math").as_posix(): path for path in sources(root)}
+    rows = checked(fm, "lake", "exe", "fm_audit", "headers", *paths).splitlines()
+    if len(rows) != len(paths):
+        raise Undetermined("Lean 前端没有返回完整的源码头部")
+    return {paths[name]: (is_module, imports) for name, is_module, imports in map(json.loads, rows)}
+
+
+def audit_sources(root, gate, headers=None):
+    fm = root / "formal_math"
+    source = source_headers(root) if headers is None else headers
+    local = {module_name(path): path for path in source}
+    visiting, checked_sources, built = set(), set(), set()
+
+    def visit(path):
+        module = module_name(path)
+        if module in checked_sources:
+            return 0
+        if module in visiting:
+            raise Undetermined(f"{module}: 模块导入有环")
+        visiting.add(module)
+        is_module, imports = source[path]
+        if gate == "3" and module not in AUDIT_TOOLS:
+            denied = [line for _, line, import_all in imports if import_all]
+            if denied:
+                for line in denied:
+                    red("3", path, line, "TOKEN", "禁止普通源码使用 import all")
+                return 1
+        targets = []
+        for dependency, _, _ in imports:
+            if dependency not in local:
+                continue
+            status = visit(local[dependency])
+            if status:
+                return status
+            if dependency not in built:
+                targets.append(dependency)
+                built.add(dependency)
+        if targets:
+            checked(fm, "lake", "build", *(f"+{m}:olean" for m in targets))
+        result = command(fm, "lake", "exe", "fm_audit", "source", module,
+                         path.relative_to("formal_math").as_posix())
+        if result.returncode:
+            raise Undetermined((result.stdout + result.stderr).strip())
+        exposes, issues = json.loads(result.stdout)
+        relevant = [(line, detail) for number, line, detail in issues if number == gate]
+        for line, detail in relevant:
+            red(gate, path, line, "LOCAL_OPTION" if gate == "2" else "TOKEN", detail)
+        if relevant:
+            return 1
+        for number, line, detail in issues:
+            if number != "build":
+                continue
+            if gate != "2":
+                raise Undetermined(result.stderr.strip() or f"{path}:{line}: {detail}")
+            red("2", path, line, "BUILD_WFAIL", detail)
+            print(result.stderr, file=sys.stderr, end="")
+            return 1
+        if any(number == "3" for number, _, _ in issues):
+            raise Undetermined(f"{path}: 源码被门 3 拒绝，不能加载")
+        if gate == "15" and is_module and lane(module) == "Chan.Defs" and not exposes:
+            red("15", path, 1, "EXPOSE_SECTION", "定义文件须用 @[expose] public section")
+            return 1
+        visiting.remove(module)
+        checked_sources.add(module)
+        return 0
+
+    for path in source:
+        result = visit(path)
+        if result:
+            return source, result
+    return source, 0
+
+
+def gate3(root):
+    source, failed = audit_sources(root, "3")
+    mods = ["ChanTest.Probe"] if failed else [
+        module_name(path) for path in source if module_name(path) not in AUDIT_TOOLS
+    ]
+    return max(failed, emit_findings("3", lean_audit(root / "formal_math", "3", mods)))
 
 
 def unique_object(pairs):
@@ -276,7 +272,7 @@ def formalization(fm):
         if not isinstance(conf, dict):
             raise ValueError(f"{name}: 节点登记需要对象")
         row = {"registration": "about" in conf and "mode" in conf}
-        for field in ("about", "helpers", "necessary"):
+        for field in ("about", "helpers"):
             values = conf.get(field, [])
             if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
                 raise ValueError(f"{name}: {field} 需要非空字符串组成的数组")
@@ -290,7 +286,22 @@ def formalization(fm):
             if not re.fullmatch(r"[1-9][0-9]*", key) or not isinstance(reason, str) or not reason.strip():
                 raise ValueError(f"{name}: doc_only 需要从 1 起算的前提序号及理由")
             row["doc_only"].append((int(key), reason))
-        for field in ("declarative_unique", "needs_necessity"):
+        for field in ("convenience",):
+            row[field] = []
+            for key, reason in conf.get(field, {}).items():
+                if not re.fullmatch(r"[1-9][0-9]*", key) or not isinstance(reason, str) or not reason.strip():
+                    raise ValueError(f"{name}: {field} 需要从 1 起算的前提序号及理由")
+                row[field].append((int(key), reason.strip()))
+        necessary = conf.get("necessary", [])
+        if not isinstance(necessary, list):
+            raise ValueError(f"{name}: necessary 需要前提序号数组")
+        # 老台账非主定理的名字数组只用于历史回归；不视为主定理的登记。
+        if necessary and all(isinstance(v, str) for v in necessary) and not conf.get("main_theorem"):
+            necessary = []
+        if not all(type(v) is int and v > 0 for v in necessary) or len(set(necessary)) != len(necessary):
+            raise ValueError(f"{name}: necessary 需要互异的正整数前提序号")
+        row["necessary"] = necessary
+        for field in ("declarative_unique", "needs_necessity", "main_theorem"):
             row[field] = conf.get(field, False)
         normalized.append((name, row))
     return json.dumps({"nodes": normalized, "refinements": list(refinements.items())})
@@ -355,7 +366,7 @@ def compare_signoffs(fm, result):
 def environment_gate(root, gate):
     fm = root / "formal_math"
     mods = [module_name(path) for path in sources(root)]
-    config = formalization(fm) if gate in {"7a", "7b", "8a", "8b", "9"} else '{"nodes":[],"refinements":[]}'
+    config = formalization(fm) if gate in {"7a", "7b", "8a", "8b", "9", "S"} else '{"nodes":[],"refinements":[]}'
     result = lean_audit(fm, gate, mods, config)
     if gate in {"6a", "10"}:
         if result.returncode:
@@ -440,35 +451,10 @@ def gate6b(root):
     return int(failed)
 
 
-def read_imports(items):
-    index = 1  # 调用方已检查首条命令。
-    if index < len(items) and items[index][0] == "prelude":
-        index += 1
-    while index < len(items):
-        while index < len(items) and items[index][0] in {"public", "meta"}:
-            index += 1
-        if index == len(items) or items[index][0] != "import":
-            break
-        line = items[index][1]
-        index += 1
-        import_all = index < len(items) and items[index][0] == "all"
-        if import_all:
-            index += 1
-        if index == len(items):
-            raise Undetermined(f"第 {line} 行的 import 缺少模块")
-        parts = [items[index][0]]
-        index += 1
-        # Lean 的层级名不允许把有空白的独立点号误当作路径；构建另验语法。
-        while index + 1 < len(items) and items[index][0] == ".":
-            parts.append(items[index + 1][0])
-            index += 2
-        yield ".".join(parts), line, import_all
-
-
 PROOF_LANES = {"Chan.Thm", "Chan.Proofs", "Chan.Exec"}
 FOUNDATION = {"Chan.Defs", "Chan.Proxy", "Chan.Hypotheses"}
 AUDIT_LANES = {"Chan.Audit", "Chan.Audit.Literal"}
-AUDIT_TOOLS = {"verification.Audit", "verification.EnvGates"}
+AUDIT_TOOLS = {"verification.Audit", "verification.EnvGates", "verification.SourceGates"}
 EXTERNAL = {"Lean", "Init", "Std", "Mathlib", "Batteries", "Aesop", "Qq", "Plausible",
             "ProofWidgets", "LeanSearchClient", "ImportGraph", "Cli", "Lake"}
 
@@ -510,25 +496,18 @@ def allowed_edge(src, dst, local, transitive=False):
 
 
 def gate15(root):
-    source = load_sources(root)
+    source = source_headers(root)
     local = {module_name(path) for path in source}
     graph = defaultdict(list)
     failed = False
-    for path, items in source.items():
+    for path, (is_module, imports) in source.items():
         module = module_name(path)
         graph[module]
-        if not items or items[0][0] != "module":
-            red("15", path, items[0][1] if items else 1, "MODULE_FIRST", "第一条命令必须为 module")
+        if not is_module:
+            red("15", path, 1, "MODULE_FIRST", "第一条命令必须为 module")
             failed = True
             continue
-        values = [t for t, _ in items]
-        expose = ["@", "[", "expose", "]", "public", "section"]
-        if lane(module) == "Chan.Defs" and not any(
-            values[i:i + len(expose)] == expose for i in range(len(values))
-        ):
-            red("15", path, 1, "EXPOSE_SECTION", "定义文件须用 @[expose] public section")
-            failed = True
-        for dst, line, import_all in read_imports(items):
+        for dst, line, import_all in imports:
             graph[module].append((dst, line))
             if dst == "Mathlib":
                 red("15", path, line, "WHOLE_MATHLIB", "请只导入所需的 Mathlib 子模块")
@@ -567,6 +546,9 @@ def gate15(root):
                 pending.extend(imported for imported, _ in graph.get(target, ()))
     if failed:
         return 1
+    _, frontend = audit_sources(root, "15", source)
+    if frontend:
+        return frontend
     definitions = [m for m in graph if lane(m) == "Chan.Defs"]
     if definitions:
         return emit_findings("15", lean_audit(root / "formal_math", "15", definitions))
@@ -574,8 +556,8 @@ def gate15(root):
 
 
 GATES = {"1": gate1, "2": gate2, "3": gate3, "6a": None, "6b": gate6b, "7a": None,
-         "7b": None, "8a": None, "8b": None, "9": None, "10": None, "15": gate15}
-DECL_ONLY = {"7a", "8a", "10"}
+         "7b": None, "S": None, "8a": None, "8b": None, "9": None, "10": None, "15": gate15}
+DECL_ONLY = {"7a", "S", "8a", "10"}
 PROOF_ONLY = {"7b", "8b"}
 
 

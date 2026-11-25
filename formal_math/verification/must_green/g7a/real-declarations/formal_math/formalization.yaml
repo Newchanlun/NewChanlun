@@ -1,0 +1,68 @@
+{
+  "nodes": {
+    "recThm": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "fromWhere": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "mutualA": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "mutualB": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "Pos.mk": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "Pos.pos": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "posOne": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "instPosOfNatNat": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "fromLetRec": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "_private.Chan.Exec.Shape.0.hidden": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "_private.Chan.Exec.Shape.0.privateWhere": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "_private.Chan.Exec.Shape.0.privateWhere.helper": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "_private.Chan.Exec.Shape.0.fromWhere.helper": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "_private.Chan.Exec.Shape.0.fromLetRec.helper": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "_private.Chan.Exec.Shape.0.fromPrivateLetRec": {
+      "about": [],
+      "mode": "对任意实现成立"
+    },
+    "_private.Chan.Exec.Shape.0.fromPrivateLetRec.helper": {
+      "about": [],
+      "mode": "对任意实现成立"
+    }
+  }
+}

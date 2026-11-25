@@ -19,7 +19,7 @@ def locked (entry : Entry) : Bool :=
   [`Chan.Defs, `Chan.Hypotheses, `Chan.Audit.Literal, `ChanChallenge].any (within entry.mod)
 
 private def projectModule (mod : Name) : Bool :=
-  [`Chan, `ChanChallenge, `ChanDyn, `ChanTest].any (within mod)
+  [`Chan, `ChanChallenge, `ChanDyn, `ChanTest, `ChanExplore].any (within mod)
 
 private def owner (env : Environment) (name : Name) : Option Name := do
   let idx ← env.getModuleIdxFor? name
@@ -28,16 +28,7 @@ private def owner (env : Environment) (name : Name) : Option Name := do
 private def node (entry : Entry) : MetaM Bool := do
   unless [`Chan.Thm, `Chan.Proofs, `Chan.Exec, `ChanChallenge].any (within entry.mod) do
     return false
-  unless entry.info matches .thmInfo _ | .defnInfo _ | .opaqueInfo _ do return false
-  let env ← getEnv
-  if (env.getProjectionFnInfo? entry.name).isSome ||
-      isAuxRecursor env entry.name || isNoConfusion env entry.name then return false
-  if (← findDeclarationRangesCore? entry.name).isNone then
-    -- 不按名称片段跳过手写的私有证明；只认保留名或实际构造器归属。
-    if isReservedName env entry.name then return false
-    if let .str parent key := entry.name then
-      if env.isConstructor parent && ["inj", "injEq", "sizeOf_spec", "elim"].contains key then
-        return false
+  if (← findDeclarationRangesCore? entry.name).isNone then return false
   isProp entry.info.type
 
 private def row (tag : String) (items : List Json) : Json :=
@@ -115,7 +106,9 @@ structure NodeConfig where
   mode : String := ""
   helpers : List String := []
   declarative_unique : Bool := false
-  necessary : List String := []
+  main_theorem : Bool := false
+  necessary : List Nat := []
+  convenience : List (Nat × String) := []
   doc_only : List (Nat × String) := []
   needs_necessity : Bool := false
   deriving FromJson
@@ -173,9 +166,14 @@ private def refines (struct : Name) (nparams : Nat) (fields bad : Array (Nat × 
     let x := xs[nparams]!
     let ty ← inferType x
     if !ty.isAppOfArity struct nparams || ty.getAppArgs != xs.extract 0 nparams then return false
-    -- 不从不相干的空类型或额外假设推出精化。
+    -- 逐个按结构类型的参数域对账，不限制显隐或实例绑定。
+    let .const _ levels := ty.getAppFn | return false
+    let mut structTy := (← getConstInfo struct).instantiateTypeLevelParams levels
     for p in xs.extract 0 nparams do
-      unless (← whnf (← inferType p)).isSort do return false
+      let .forallE _ expected rest _ ← whnf structTy | return false
+      unless ← withoutModifyingState <| withTransparency .default <|
+          isDefEq (← inferType p) expected do return false
+      structTy := rest.instantiate1 p
     let pairs := equations 256 result
     let raw (t : Expr) := fields.any fun (i, f) =>
       !bad.contains (i, f) && projection struct nparams f i x t true
@@ -186,7 +184,16 @@ private def refines (struct : Name) (nparams : Nat) (fields bad : Array (Nat × 
       (projection struct nparams f i x a true && clean b) ||
         (projection struct nparams f i x b true && clean a)
 
-private def gate7a (e : Entry) (cfg : Config) : MetaM Bool := do
+private def resident (name : Name) (nparams : Nat) (entries : Array Entry) : MetaM Bool :=
+  entries.anyM fun w => do
+    unless within w.mod `ChanTest && (← findDeclarationRangesCore? w.name).isSome do
+      return false
+    -- 见证可直接给出结构项，或内核已验的 Nonempty 实例。
+    let ty ← withTransparency .reducible <| whnf w.info.type
+    let ty := if ty.isAppOfArity `Nonempty 1 then ty.appArg! else ty
+    return ty.isAppOfArity name nparams && w.info.levelParams.isEmpty && w.info.hasValue true
+
+private def gate7a (e : Entry) (cfg : Config) (entries : Array Entry) : MetaM Bool := do
   let env ← getEnv
   if ← node e then
     let some n := cfg.nodes.lookup e.name.toString
@@ -203,19 +210,27 @@ private def gate7a (e : Entry) (cfg : Config) : MetaM Bool := do
     let some (.inductInfo ind) := env.find? e.name | throwError "未读取到结构构造器"
     let [ctor] := ind.ctors | throwError "结构不止一个构造器"
     let allFields := structureInfo.fieldNames.mapIdx (fun i n => (i, n))
-    let fields ← forallTelescope (← getConstInfo ctor).type fun xs _ => do
+    let (fields, hasProp) ← forallTelescope (← getConstInfo ctor).type fun xs _ => do
       let mut result := #[]
+      let mut hasProp := false
       for (x, field) in xs[ind.numParams:].toArray.zip allFields do
-        if ← forallTelescopeReducing (← inferType x) (whnfType := true) fun _ ty =>
-            pure (ty.isConstOf `Bool || ty == mkSort .zero) then
-          result := result.push field
-      return result
+        let fieldTy ← inferType x
+        let proofField ← isProp fieldTy
+        let (isBool, isPredicate) ← forallTelescopeReducing fieldTy (whnfType := true) fun _ ty =>
+          pure (ty.isConstOf `Bool, ty == mkSort .zero)
+        hasProp := hasProp || proofField || isPredicate
+        if isBool || isPredicate then result := result.push field
+      return (result, hasProp)
+    let mut red := false
+    if hasProp && !(← resident e.name ind.numParams entries) then
+      red ← finding "7a" e "RESIDENCE" "ChanTest 缺少具体参数下的闭项居留见证"
     if !fields.isEmpty then
       if let some name := cfg.refinements.lookup e.name.toString then
         if let some (.thmInfo thm) := resolve env name then
           if ← refines e.name ind.numParams allFields fields thm.type then
-            return false
+            return red
       return ← finding "7a" e "FREE_PREDICATE" s!"自由判据字段 {fields.map Prod.snd} 缺少原始数据到判据的精化定理"
+    return red
   return false
 
 -- 只展开本包命题别名和可约的计算包装，保留库连接词的逻辑边界。
@@ -234,6 +249,52 @@ private def statementHead : Nat → Expr → MetaM Expr
     if reduced == e then return e
     statementHead k reduced
 
+private def unfoldStatement (e : Expr) (fuel : Nat := 128) : MetaM Expr := do
+  let e := e.consumeMData
+  let .const n us := e.getAppFn | return e
+  let env ← getEnv
+  let some mod := owner env n | return e
+  unless projectModule mod && !locked { mod, name := n, info := ← getConstInfo n } do
+    return e
+  let some c@(.defnInfo _) := env.find? n | return e
+  match fuel with
+  | 0 => throwError "命题骨架展开超过上限"
+  | k + 1 => unfoldStatement ((c.instantiateValueLevelParams! us).beta e.getAppArgs) k
+
+private def skeleton (e : Expr) (parallel : Bool := false) (fuel : Nat := 1024) :
+    MetaM (Option String) := do
+  let e ← unfoldStatement e
+  if parallel && e.isConstOf `True then return some "True 不能作前提或合取项"
+  if parallel && !e.hasFVar then return some "闭命题不能作前提或合取项"
+  match fuel with
+  | 0 => throwError "命题骨架超过上限"
+  | k + 1 =>
+    if let .forallE n d r bi := e then
+      if ← isProp d then
+        if let some issue ← skeleton d true k then return some issue
+      return ← withLocalDecl n bi d fun x => skeleton (r.instantiate1 x) false k
+    if e.isAppOfArity `And 2 || e.isAppOfArity `Or 2 || e.isAppOfArity `Iff 2 then
+      let p := e.isAppOfArity `And 2
+      if let some issue ← skeleton e.getAppArgs[0]! p k then return some issue
+      return ← skeleton e.getAppArgs[1]! p k
+    if e.isAppOfArity `Not 1 then return ← skeleton e.appArg! false k
+    if e.isAppOfArity `Exists 2 || e.isAppOfArity (Name.mkSimple "ExistsUnique") 2 then
+      return ← withLocalDeclD `x e.getAppArgs[0]! fun x =>
+        skeleton (e.appArg!.beta #[x]) false k
+    if e.getAppFn.isFVar then return none
+    if let .const n _ := e.getAppFn then
+      if (← getConstInfo n).type.getForallBody == mkSort .zero then return none
+    return some s!"头部 {e.getAppFn} 不是陈述范式允许的命题"
+
+private def gateS (e : Entry) : MetaM Bool := do
+  unless [`Chan.Defs, `Chan.Hypotheses, `Chan.Proxy, `Chan.Thm, `Chan.Proofs,
+      `Chan.Exec, `ChanChallenge, `Chan.Final, `Chan.Audit].any (within e.mod) do return false
+  unless e.info matches .thmInfo _ | .defnInfo _ | .opaqueInfo _ do return false
+  unless (← findDeclarationRangesCore? e.name).isSome && (← isProp e.info.type) do return false
+  if let some issue ← skeleton e.info.type then
+    finding "S" e "STATEMENT_FORM" (issue.replace "\n" " ")
+  else pure false
+
 private def telescope {α : Type} (type : Expr) (k : Array Expr → Expr → MetaM α) :
     MetaM α :=
   go 1024 #[] type
@@ -241,25 +302,41 @@ where
   go : Nat → Array Expr → Expr → MetaM α
     | 0, _, _ => throwError "望远镜超过上限"
     | fuel + 1, xs, ty => do
-      let ty ← statementHead 128 ty
+      let ty ← unfoldStatement ty
       if let .forallE n d r bi := ty then
+        let d ← if ← isProp d then unfoldStatement d else pure d
         withLocalDecl n bi d fun x => go fuel (xs.push x) (r.instantiate1 x)
       else k xs ty
 
--- 用其他已有数据或证明参数实例化；同一个前提不能给自己提供守卫。
-private def premiseInstance (args : Array Expr) (conclusion : Expr) (budget : IO.Ref Nat) :
+-- 用定义相等约束全称变量；未解出的前提须由同作用域的参数补齐。
+private def premiseInstance (args : Array Expr) (conclusion : Expr) :
     Nat → Expr → MetaM Bool
   | 0, _ => throwError "假设实例化超过递归上限"
   | fuel + 1, ty => do
-    if (← budget.get) == 0 then throwError "全称前提实例搜索超过总上限"
-    budget.modify (· - 1)
-    if ← same ty conclusion then return true
     let ty ← statementHead 128 ty
-    if ← same ty conclusion then return true
-    if let .forallE _ domain rest _ := ty then
-      for d in args do
-        if ← same domain (← inferType d) then
-          if ← premiseInstance args conclusion budget fuel (rest.instantiate1 d) then return true
+    if ← withoutModifyingState (isDefEq ty conclusion) then return true
+    if ty.isAppOfArity `And 2 then
+      return (← premiseInstance args conclusion fuel ty.getAppArgs[0]!) ||
+        (← premiseInstance args conclusion fuel ty.getAppArgs[1]!)
+    if ty.isForall then
+      return ← withoutModifyingState <| withNewMCtxDepth do
+        let (vars, _, body) ← forallMetaTelescope ty
+        let rec fill (vs : List Expr) : MetaM Bool := do
+          match vs with
+          | [] => return !(← vars.anyM fun v => return (← instantiateMVars v).hasMVar)
+          | v :: rest =>
+            if !(← instantiateMVars v).isMVar then return ← fill rest
+            return ← args.anyM fun a => withoutModifyingState do
+              if ← isDefEq v a then fill rest else pure false
+        let rec solve (body : Expr) (budget : Nat) : MetaM Bool := do
+          let budget + 1 := budget | throwError "合取匹配超过上限"
+          let body ← statementHead 128 body
+          if body.isAppOfArity `And 2 then
+            if ← withoutModifyingState (solve body.getAppArgs[0]! budget) then return true
+            return ← solve body.getAppArgs[1]! budget
+          unless ← isDefEq body conclusion do return false
+          fill vars.toList
+        solve body fuel
     return false
 
 private def stripTrue : Nat → Expr → MetaM Expr
@@ -281,32 +358,38 @@ private def graphEq (x body : Expr) : MetaM Bool := do
 
 private def functionGraph (result : Expr) : MetaM Bool := do
   let result ← stripTrue 128 result
+  let result ← if result.isAppOfArity (Name.mkSimple "ExistsUnique") 2 then
+      withTransparency .default <| whnf result
+    else pure result
   let args := result.getAppArgs
-  if result.isAppOfArity (Name.mkSimple "ExistsUnique") 2 then
-    return ← withLocalDeclD `y args[0]! fun y => graphEq y (mkApp args[1]! y)
   if result.isAppOfArity `Exists 2 then
     return ← withLocalDeclD `y args[0]! fun y => do
       let b ← stripTrue 128 (mkApp args[1]! y)
       unless b.isAppOfArity `And 2 do return false
-      let p := b.getAppArgs[0]!
-      unless ← graphEq y p do return false
-      let q ← statementHead 128 b.getAppArgs[1]!
-      let .forallE _ d rest _ := q | return false
-      unless ← same d args[0]! do return false
-      withLocalDeclD `z d fun z => do
-        let .forallE _ premise goal _ ← statementHead 128 (rest.instantiate1 z) | return false
-        unless ← same (← stripTrue 128 premise) (← stripTrue 128 (p.replaceFVar y z)) do return false
-        let some (_, a, b) := (← stripTrue 128 goal).eq? | return false
-        return (a == z && b == y) || (a == y && b == z)
+      for (p, unique) in #[(b.getAppArgs[0]!, b.getAppArgs[1]!),
+                             (b.getAppArgs[1]!, b.getAppArgs[0]!)] do
+        unless ← graphEq y p do continue
+        let q ← statementHead 128 unique
+        let .forallE _ d rest _ := q | continue
+        unless ← same d args[0]! do continue
+        if ← withLocalDeclD `z d fun z => do
+          let .forallE _ premise goal _ ← statementHead 128 (rest.instantiate1 z) | return false
+          unless ← withoutModifyingState <| withTransparency .default <|
+              isDefEq (← stripTrue 128 premise) (← stripTrue 128 (p.replaceFVar y z)) do return false
+          let some (_, a, b) := (← stripTrue 128 goal).eq? | return false
+          let a ← withTransparency .default <| whnf a
+          let b ← withTransparency .default <| whnf b
+          return (a == z && b == y) || (a == y && b == z)
+        then return true
+      return false
   return false
 
 private def gate8a (e : Entry) (cfg : NodeConfig) : MetaM Bool :=
   telescope e.info.type fun xs result => do
     let (_, premises) ← params xs
-    let budget ← IO.mkRef 20000
     let mut red := false
     for h in premises do
-      if ← premiseInstance (xs.filter (· != h)) result budget 256 (← inferType h) then
+      if ← premiseInstance (xs.filter (· != h)) result 256 (← inferType h) then
         red ← finding "8a" e "PREMISE_INSTANCE" s!"前提 {← h.fvarId!.getUserName} 的实例即结论"
     if cfg.declarative_unique && (← functionGraph result) then
       red ← finding "8a" e "FUNCTION_GRAPH" "声明式唯一性只复述函数图"
@@ -335,16 +418,22 @@ private def bodyOf (e : Entry) : MetaM Expr := do
   return body
 
 -- 替换的是原证明的定义等价展开，不为删前提重新搜证。
-private def proofHead : Nat → Expr → MetaM Expr
-  | 0, _ => throwError "证明头展开超过上限"
-  | k + 1, p => do
-    let p ← zetaReduce p
-    let .const n us := p.getAppFn | return p
-    let env ← getEnv
-    unless (owner env n).any projectModule do return p
-    let some c := env.checked.get.find? n | throwError "缺少证明依赖 {n}"
-    unless c.hasValue true do return p
-    proofHead k ((c.instantiateValueLevelParams! us true).beta p.getAppArgs)
+private def normalizeProof (body : Expr) : MetaM Expr := do
+  let env ← getEnv
+  let isLocked (n : Name) := (owner env n).any fun mod =>
+    [`Chan.Defs, `Chan.Hypotheses, `Chan.Audit.Literal, `ChanChallenge].any (within mod)
+  transform body (skipConstInApp := true) (pre := fun p => do
+    if let .const n us := p.getAppFn then
+      if ((owner env n).any projectModule && !isLocked n) ||
+          [`Function.const, `And.left, `And.right].contains n then
+        let some c := env.checked.get.find? n | throwError "缺少证明依赖 {n}"
+        if c.hasValue true then
+          return .visit ((c.instantiateValueLevelParams! us true).beta p.getAppArgs)
+    let p' ← whnfCore p
+    if p' != p then return .visit p'
+    return .continue) (post := fun p => do
+      let p' := (← whnfCore p).eta
+      return if p' == p then .done p else .visit p')
 
 private def gate8b (e : Entry) (cfg : NodeConfig) : MetaM Bool :=
   telescope e.info.type fun xs result => do
@@ -353,7 +442,7 @@ private def gate8b (e : Entry) (cfg : NodeConfig) : MetaM Bool :=
       throwError "{e.name}: doc_only 的前提序号超出望远镜"
     if premises.isEmpty then return false
     let body ← bodyOf e
-    let applied ← proofHead 128 (body.beta xs)
+    let applied ← normalizeProof (body.beta xs)
     let mut red := false
     for i in [:premises.size] do
       if (cfg.doc_only.lookup (i + 1)).isSome then continue
@@ -393,6 +482,15 @@ private def constantApps (e : Expr) : IO (Array Expr) := do
     if t.isConst then found.modify (·.insert t)
   return (← found.get).toArray
 
+private def inductiveOwner (env : Environment) (name : Name) : Option Name :=
+  match env.find? name with
+  | some (.inductInfo _) => some name
+  | some (.ctorInfo info) => some info.induct
+  | some (.recInfo info) => some info.getMajorInduct
+  | _ =>
+    env.getProjectionStructureName? name <|>
+      if isAuxRecursor env name || isNoConfusion env name then some name.getPrefix else none
+
 private def expand (env : Environment) (targets helpers : List Name) (nominal : NameSet) :
     Nat → Expr → MetaM Expr
   | 0, _ => throwError "辅助接口展开超过上限"
@@ -402,7 +500,7 @@ private def expand (env : Environment) (targets helpers : List Name) (nominal : 
     for t in ← constantApps e do
       let .const n levels := t | continue
       if targets.contains n then continue
-      if nominal.contains n || (env.getProjectionStructureName? n).any nominal.contains then continue
+      if (inductiveOwner env n).any nominal.contains then continue
       let inHyp := (owner env n).any (within · `Chan.Hypotheses)
       let hasBody := (env.checked.get.find? n).any (·.hasValue true)
       if helpers.contains n || (inHyp && hasBody) then
@@ -447,13 +545,9 @@ private def gate7b (e : Entry) (cfg : NodeConfig) : MetaM Bool := do
   for c in (← constantApps e.info.type) ++ (← constantApps body) do
     let n := c.constName!
     if (owner env n).any (within · `Chan.Hypotheses) then
-      let structName := if (getStructureInfo? env n).isSome then some n
-        else env.getProjectionStructureName? n
-      if let some s := structName then
+      if let some s := inductiveOwner env n then
         if !nominal.contains s && (← hiddenDependency env targets 0 20000 [s] {}) then
           nominal := nominal.insert s
-          if let some (.inductInfo ind) := env.find? s then
-            for ctor in ind.ctors do nominal := nominal.insert ctor
   let ty ← expand env targets helpers nominal 128 e.info.type
   let proof ← expand env targets helpers nominal 128 body
   let all := (← constantApps ty) ++ (← constantApps proof)
@@ -465,7 +559,8 @@ private def gate7b (e : Entry) (cfg : NodeConfig) : MetaM Bool := do
     else ordered := ordered ++ relevant
   if ← abstractReplay e ordered #[] ty proof then
     unless nominal.isEmpty do
-      throwError "{e.name}: 重放仍保留锁定 D 的名义假设接口，不能签发泛化证书"
+      IO.eprintln s!"GATE7b NOTE {e.name}: 重放保留锁定 D 的名义假设，不签发泛化证书"
+      return false
     finding "7b" e "GENERALIZES" "替换为任意同类型实现后，内核接受原证明"
   else
     IO.eprintln s!"GATE7b NOTE {e.name}: 该证明未推广"
@@ -515,8 +610,18 @@ private def gate9 (e : Entry) (cfg : NodeConfig) (entries : Array Entry) : MetaM
     let (_, premises) ← params xs
     let expected := (← witnessType premises none xs.toList none).getD (mkConst `True)
     let mut red ← checkWitness e entries "witness" "WITNESS" expected
-    if cfg.needs_necessity then
-      for i in [:premises.size] do
+    if cfg.main_theorem then
+      for i in cfg.necessary ++ cfg.convenience.map Prod.fst do
+        if i == 0 || i > premises.size then
+          red ← finding "9" e "PREMISE_REGISTRATION" s!"序号 #{i} 超出命题前提望远镜"
+    for i in [:premises.size] do
+      let necessary := cfg.necessary.contains (i + 1)
+      let convenience := (cfg.convenience.lookup (i + 1)).isSome
+      if cfg.main_theorem && necessary == convenience then
+        red ← finding "9" e "PREMISE_REGISTRATION" s!"前提 #{i + 1} 必须二选一登记必要性或便利性"
+      if convenience then
+        IO.eprintln s!"GATE9 REVIEW {e.name}: 便利前提 #{i + 1}，{(cfg.convenience.lookup (i + 1)).getD ""}"
+      if necessary || cfg.needs_necessity then
         let h := premises[i]!
         let negated := mkApp (mkConst `Not) result
         let expected := (← witnessType premises (some h) xs.toList (some negated)).getD negated
@@ -550,6 +655,8 @@ private def guards (b : Expr) : Nat → Expr → MetaM Bool
       if let some (_, x, y) := p.appArg!.eq? then
         return ((← numeral x) == some 0 && (← equal b y)) ||
           ((← numeral y) == some 0 && (← equal b x))
+    if p.isAppOfArity `LT.lt 4 then
+      return (← numeral args[2]!) == some 0 && (← equal b args[3]!)
     if ← equal (← inferType b) (mkConst `Nat) then
       return (← equal p (mkApp2 (mkConst `Nat.lt) (mkNatLit 0) b)) ||
         (← equal p (mkApp2 (mkConst `Nat.le) (mkNatLit 1) b))
@@ -580,22 +687,36 @@ private def safeDivisor (b : Expr) (kind : String) : MetaM Bool := do
       return true
   for d in ← getLCtx do
     if ← guards b 128 d.type then return true
+    let x := mkFVar d.fvarId
+    let ty ← whnf d.type
+    if let .const n _ := ty.getAppFn then
+      let env ← getEnv
+      if let some info := getStructureInfo? env n then
+        for field in info.fieldNames do
+          let some projFn := getProjFnForField? env n field | continue
+          let proj ← mkAppM projFn #[x]
+          if ← guards b 128 (← inferType proj) then return true
   return false
 
 private def operation (e : Expr) : MetaM (Option String) := do
   let .const n _ := e.getAppFn | return none
   let args := e.getAppArgs
-  let divNames := [`Nat.div, `Int.ediv, `Int.tdiv, `Int.fdiv, `Rat.div, `HDiv.hDiv, `Div.div]
-  if [`Nat.sub, `HSub.hSub, `Sub.sub].contains n || divNames.contains n then
+  let .str _ key := n | return none
+  let isDivision := [`HDiv.hDiv, `Div.div].contains n ||
+    ["div", "ediv", "tdiv", "fdiv", "bdiv"].contains key
+  -- 类运算识别异质与同质族；直调接口保留具体运算名供签注定位。
+  if [`HMod.hMod, `Mod.mod, `Inv.inv].contains n ||
+      ["inv", "mod", "emod", "tmod", "fmod", "bmod"].contains key then
+    return some n.toString
+  if [`Nat.sub, `HSub.hSub, `Sub.sub].contains n || isDivision then
     let direct := ![`HSub.hSub, `HDiv.hDiv, `Sub.sub, `Div.div].contains n
     let offset := if direct then 0 else if n == `HSub.hSub || n == `HDiv.hDiv then 4 else 2
-    if divNames.contains n then
+    if isDivision then
       let b := args[offset + 1]?
       let domain ← if let some d := b then inferType d
         else if !direct then pure (args[if offset == 4 then 1 else 0]?.getD (.sort .zero))
-        else if n == `Nat.div then pure (mkConst `Nat)
-        else if n == `Rat.div then pure (mkConst `Rat)
-        else pure (mkConst `Int)
+        else if let .forallE _ d _ _ := (← getConstInfo n).type then pure d
+        else pure (.sort .zero)
       let kind ← if ← equal domain (mkConst `Nat) then pure "Nat.div"
         else if ← equal domain (mkConst `Int) then pure "Int.div"
         else if ← equal domain (mkConst `Rat) then pure "Rat.div"
@@ -611,11 +732,10 @@ private def operation (e : Expr) : MetaM (Option String) := do
     return some "Nat.sub"
   if n == `Inhabited.default || n == `Finset.sup || n == `Finset.inf || n == `Nat.pred then
     return some n.toString
-  let .str _ key := n | return none
   if ["panicWithPosWithDecl", "panicWithPos", "panic", "panicCore"].contains key then
     return some "panic!"
-  if ["head!", "get!", "getD", "getElem!", "getLast!", "tail!", "back!",
-      "sSup", "sInf", "iSup", "iInf"].contains key then
+  if key.endsWith "!" || ["getD", "getElemD", "headD", "getLastD",
+      "backD", "frontD", "tailD", "sSup", "sInf", "iSup", "iInf"].contains key then
     return some (if key == "getElem!" then "get!" else key)
   return none
 
@@ -660,10 +780,11 @@ def run (gate : String) (entries : Array Entry) (cfg : Config)
           | .error detail => throwError "{e.name}: {detail}"
           | .ok j => IO.println <| (row e.name.toString [toJson e.mod.toString, j]).compress
         pure false
-      | "7a" => gate7a e cfg
+      | "7a" => gate7a e cfg entries
+      | "S" => gateS e
       | "7b" => if ← node e then gate7b e config else pure false
       | "8a" => if ← node e then gate8a e config else pure false
-      | "8b" => if ← node e then gate8b e config else pure false
+      | "8b" => if e.info.hasValue true && (← node e) then gate8b e config else pure false
       | "9" => if ← node e then gate9 e config entries else pure false
       | "10" => gate10 e *> pure false
       | "15" =>

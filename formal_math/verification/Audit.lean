@@ -3,6 +3,7 @@ module
 public import Lean
 import all Lean.Util.CollectAxioms
 import verification.EnvGates
+import verification.SourceGates
 
 open Lean
 
@@ -50,9 +51,13 @@ private def gate3 (env : Environment) (entries : Array FM.Entry) : IO UInt32 := 
       red := true
   return if red then 1 else 0
 
-public def main (args : List String) : IO UInt32 := do
+public unsafe def main (args : List String) : IO UInt32 := do
   let gate :: modules := args | return 2
   Lean.initSearchPath (← Lean.findSysroot)
+  if gate == "headers" then return ← FM.headers modules
+  if gate == "source" then
+    let [mod, path] := modules | return 2
+    return ← FM.source mod.toName path
   let mods := modules.toArray.map String.toName
   -- 加载同一轮构建的私有分片，保留私有声明与证明体。
   let env := (← Lean.importModules (mods.map fun m => { module := m }) {}

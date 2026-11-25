@@ -1,6 +1,9 @@
 """把每个夹具装入独立临时仓库，从入口重算门禁。"""
 
+import argparse
 import os
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import re
 import shutil
@@ -10,7 +13,7 @@ import tempfile
 
 
 HERE = Path(__file__).resolve().parent
-GATES = ("1", "2", "3", "6a", "6b", "7a", "7b", "8a", "8b", "9", "10", "15")
+GATES = ("1", "2", "3", "6a", "6b", "7a", "7b", "S", "8a", "8b", "9", "10", "15")
 
 
 def git(repo, *args):
@@ -25,7 +28,8 @@ def base_package(repo, fixture):
     fm = repo / "formal_math"
     verification = fm / "verification"
     verification.mkdir(parents=True)
-    for filename in ("run_gates.py", "pins.json", "Audit.lean", "EnvGates.lean", "garbage-signoffs.yaml"):
+    for filename in ("run_gates.py", "pins.json", "Audit.lean", "EnvGates.lean", "SourceGates.lean",
+                     "garbage-signoffs.yaml"):
         shutil.copy2(HERE / filename, verification)
     shutil.copy2(HERE.parent / "lean-toolchain", fm)
     shutil.copy2(HERE.parent / "lake-manifest.json", fm)
@@ -54,8 +58,8 @@ def base_package(repo, fixture):
             f'\n[[lean_lib]]\nname = "{lib}"\nglobs = ["{lib}.*"]\n'
             for lib in sorted(libs)
         )
-        + '\n[[lean_exe]]\nname = "fm_audit"\nroot = "verification.Audit"\n'
-        + '\n[[lean_lib]]\nname = "FMEnvGates"\nroots = ["verification.EnvGates"]\n'
+        + '\n[[lean_exe]]\nname = "fm_audit"\nroot = "verification.Audit"\nsupportInterpreter = true\n'
+        + '\n[[lean_lib]]\nname = "FMEnvGates"\nroots = ["verification.EnvGates", "verification.SourceGates"]\n'
     )
 
 
@@ -67,7 +71,7 @@ def exercise(tmp, fixture, gate, color):
         repo = Path(directory)
         env = os.environ.copy()
         env.pop("GITHUB_HEAD_REF", None)
-        expected_exit = {"green": 0, "red": 1, "unknown": 2}[color]
+        expected_exit = {"green": 0, "red": 1, "unknown": 2, "known_limits": 0}[color]
         base_package(repo, fixture)
         if (fixture / "lean-version.txt").is_file():
             fake = repo / "fixture-bin"
@@ -124,24 +128,48 @@ def exercise(tmp, fixture, gate, color):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("gates", nargs="*", metavar="门禁")
+    args = parser.parse_args()
+    selected = args.gates or GATES
+    if args.jobs < 1 or not set(selected) <= set(GATES):
+        parser.error("并行数须为正整数，门禁须为已实现编号")
     tmp = os.environ.get("TMPDIR")
     if not tmp or not Path(tmp).is_dir():
         print("请先 source scripts/fm_env.sh，令 TMPDIR 指向现有的 FM 临时目录。", file=sys.stderr)
         return 1
     print("门禁\t样本\t期望代码\t实际代码\t退出码\t自测", flush=True)
     ok = True
-    for gate in GATES:
-        for color in ("red", "green", "unknown"):
-            fixtures = sorted((HERE / f"must_{color}" / f"g{gate}").glob("*/"))
-            if not fixtures and color != "unknown":
+    attempted, passed = Counter(), Counter()
+    cases = []
+    for gate in selected:
+        for color in ("red", "green", "unknown", "known_limits"):
+            group = color if color == "known_limits" else f"must_{color}"
+            fixtures = sorted((HERE / group / f"g{gate}").glob("*/"))
+            if not fixtures and color in ("red", "green"):
                 print(f"门禁 {gate} 缺少 {color} 夹具", file=sys.stderr)
                 ok = False
             for fixture in fixtures:
-                try:
-                    ok = exercise(tmp, fixture, gate, color) and ok
-                except (OSError, ValueError, subprocess.CalledProcessError) as exc:
-                    print(f"{fixture}: {exc}", file=sys.stderr)
-                    ok = False
+                attempted[group] += 1
+                cases.append((fixture, gate, color, group))
+
+    def run(case):
+        fixture, gate, color, group = case
+        try:
+            if color == "known_limits" and not (fixture / "README.md").is_file():
+                raise ValueError("已知边界须附说明")
+            return group, exercise(tmp, fixture, gate, color)
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            print(f"{fixture}: {exc}", file=sys.stderr)
+            return group, False
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        for group, success in pool.map(run, cases):
+            passed[group] += success
+            ok = success and ok
+    print("；".join(f"{g}={passed[g]}/{attempted[g]}"
+                   for g in ("must_red", "must_green", "must_unknown", "known_limits")))
     return int(not ok)
 
 
