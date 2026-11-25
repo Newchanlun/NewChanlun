@@ -1053,6 +1053,7 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
         with _open_http(request, timeout=timeout) as response:
             terminal, detail, status = None, "流在终态事件前结束", None
             has_response_dict = False
+            seen_response_id: str | None = None
             data_lines: list[str] = []
             event_data_bytes = 0
             event_name: str | None = None
@@ -1112,6 +1113,22 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                                 detail = "SSE 响应字段须为 JSON 对象"
                                 break
                             inner = raw_inner if isinstance(raw_inner, dict) else {}
+                            id_mismatch = False
+                            for raw_rid in (event.get("response_id"), inner.get("id")):
+                                if raw_rid is None:
+                                    continue
+                                if not isinstance(raw_rid, str) or not raw_rid or raw_rid.strip() != raw_rid:
+                                    detail = "SSE 响应 ID 非法"
+                                    id_mismatch = True
+                                    break
+                                if seen_response_id is None:
+                                    seen_response_id = raw_rid
+                                elif raw_rid != seen_response_id:
+                                    detail = "SSE 流内出现冲突的 response.id"
+                                    id_mismatch = True
+                                    break
+                            if id_mismatch:
+                                break
                             if event.get("type") in TERMINAL_EVENTS:
                                 terminal = event.get("type")
                                 has_response_dict = isinstance(raw_inner, dict)

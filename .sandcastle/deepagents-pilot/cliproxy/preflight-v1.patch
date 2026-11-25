@@ -295,10 +295,10 @@ index e69de29..2d18367 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..9796d17
+index 0000000..5f12b61
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,1096 @@
+@@ -0,0 +1,1102 @@
 +package middleware
 +
 +import (
@@ -410,7 +410,7 @@ index 0000000..9796d17
 +	origBodyTimeout := preflightreceipt.ReviewBodyReadTimeout
 +	origTurnTimeout := preflightreceipt.ReviewTurnTimeout
 +	preflightreceipt.ReviewBodyReadTimeout = 2 * time.Second
-+	preflightreceipt.ReviewTurnTimeout = 150 * time.Millisecond
++	preflightreceipt.ReviewTurnTimeout = 400 * time.Millisecond
 +	defer func() {
 +		preflightreceipt.ReviewBodyReadTimeout = origBodyTimeout
 +		preflightreceipt.ReviewTurnTimeout = origTurnTimeout
@@ -673,7 +673,9 @@ index 0000000..9796d17
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		n := turnCounter.Add(1)
-+		col.ObserveStreamChunk([]byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_mw_cap_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS %d"}]}]}}`, n, n) + "\n\n"))
++		turnJSON := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_mw_cap_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS %d"}]}]}}`, n, n)
++		col.ValidateStrictEvent("", false, []byte(turnJSON))
++		col.ObserveStreamChunk([]byte("data: " + turnJSON + "\n\n"))
 +		execLease.End()
 +		col.Complete(true)
 +		c.Status(http.StatusOK)
@@ -1019,7 +1021,9 @@ index 0000000..9796d17
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		col.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_hdr_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		hdrJSON := `{"type":"response.completed","response":{"id":"resp_hdr_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`
++		col.ValidateStrictEvent("", false, []byte(hdrJSON))
++		col.ObserveStreamChunk([]byte("data: " + hdrJSON + "\n\n"))
 +		execLease.End()
 +		col.Complete(true)
 +		c.Status(http.StatusOK)
@@ -1344,7 +1348,9 @@ index 0000000..9796d17
 +	}
 +	_, _ = io.Copy(io.Discard, respUp.Body)
 +	_ = respUp.Body.Close()
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_seal_nobody","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	sealNobodyJSON := `{"type":"response.completed","response":{"id":"resp_seal_nobody","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`
++	c.ValidateStrictEvent("response.completed", true, []byte(sealNobodyJSON))
++	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + sealNobodyJSON + "\n\n"))
 +	ex.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -6662,13 +6668,14 @@ index 0000000..6de513e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000..1c8abfa
+index 0000000..e3a233e
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
-@@ -0,0 +1,592 @@
+@@ -0,0 +1,596 @@
 +package auth
 +
 +import (
++	"bytes"
 +	"context"
 +	"crypto/ecdsa"
 +	"crypto/elliptic"
@@ -6880,6 +6887,7 @@ index 0000000..1c8abfa
 +	if err := resp1.Body.Close(); err != nil {
 +		t.Fatal(err)
 +	}
++	c1.ValidateStrictEvent("", false, bytes.TrimSpace(bytes.TrimPrefix(raw1, []byte("data: "))))
 +	c1.ObserveStreamChunk(raw1)
 +	lease1.End()
 +	c1.Complete(true)
@@ -7011,6 +7019,7 @@ index 0000000..1c8abfa
 +		if !c.UpstreamEOF() {
 +			t.Fatalf("expected UpstreamEOF() == true after clean EOF body close")
 +		}
++		c.ValidateStrictEvent("", false, bytes.TrimSpace(bytes.TrimPrefix([]byte(sse), []byte("data: "))))
 +
 +		orig := make(chan executor.StreamChunk, 2)
 +		orig <- executor.StreamChunk{Payload: []byte(sse)}
@@ -7156,6 +7165,7 @@ index 0000000..1c8abfa
 +	if err := resp2.Body.Close(); err != nil {
 +		t.Fatal(err)
 +	}
++	cR.ValidateStrictEvent("", false, bytes.TrimSpace(bytes.TrimPrefix(raw2, []byte("data: "))))
 +	orig2 := make(chan executor.StreamChunk, 1)
 +	orig2 <- executor.StreamChunk{Payload: raw2}
 +	close(orig2)
@@ -7580,10 +7590,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..de58f0d 100644
+index e69de29..b51a050 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11429 @@
+@@ -0,0 +1,11496 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7762,6 +7772,7 @@ index e69de29..de58f0d 100644
 +	failedTurnSeq         uint64
 +	pendingFailedTurnSeq  atomic.Uint64
 +	pendingTaint          atomic.Bool
++	sealDecision          atomic.Uint32
 +	failurePersistQueued  bool
 +	failurePersistRunning bool
 +	reserved              bool
@@ -7771,6 +7782,12 @@ index e69de29..de58f0d 100644
 +	sealing           bool
 +	sealedFlag        bool
 +}
++
++const (
++	sealDecisionOpen uint32 = iota
++	sealDecisionCommitted
++	sealDecisionTainted
++)
 +
 +type ReviewReservation struct {
 +	entry     *reviewEntry
@@ -8071,11 +8088,17 @@ index e69de29..de58f0d 100644
 +	if entry == nil || entry.sealedFlag {
 +		return
 +	}
++	if taint {
++		if !entry.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionTainted) &&
++			entry.sealDecision.Load() != sealDecisionTainted {
++			return
++		}
++		entry.pendingTaint.Store(true)
++	} else if entry.sealDecision.Load() == sealDecisionCommitted {
++		return
++	}
 +	if turnSeq > entry.pendingFailedTurnSeq.Load() {
 +		entry.pendingFailedTurnSeq.Store(turnSeq)
-+	}
-+	if taint {
-+		entry.pendingTaint.Store(true)
 +	}
 +	if entry.failurePersistQueued || entry.failurePersistRunning {
 +		return
@@ -8270,6 +8293,7 @@ index e69de29..de58f0d 100644
 +	isAssistantMsg   bool
 +	outputTextSHA    string
 +	doneDigest       string
++	responseID       string
 +}
 +
 +type toolItemMeta struct {
@@ -9011,11 +9035,18 @@ index e69de29..de58f0d 100644
 +			}
 +		}
 +		if doneRec, exists := t.doneItems[canonKey]; exists {
-+			matchedDoneKeys[canonKey] = struct{}{}
-+			matchedOutputIdx[idx] = true
++			if doneRec.responseID != "" && respID != "" && doneRec.responseID != respID {
++				return false
++			}
 +			if !doneItemMatchesOutputItem(doneRec, item) {
 +				return false
 +			}
++			if doneRec.responseID == "" && respID != "" {
++				doneRec.responseID = respID
++				t.doneItems[canonKey] = doneRec
++			}
++			matchedDoneKeys[canonKey] = struct{}{}
++			matchedOutputIdx[idx] = true
 +		}
 +		if _, mustBeIncomplete := t.incompleteItemKeys[canonKey]; mustBeIncomplete && item.Status != "incomplete" {
 +			return false
@@ -9032,7 +9063,11 @@ index e69de29..de58f0d 100644
 +	}
 +	if len(t.unkeyedDoneItems) > 0 {
 +		scan := 0
-+		for _, unkeyedRec := range t.unkeyedDoneItems {
++		for i := range t.unkeyedDoneItems {
++			unkeyedRec := t.unkeyedDoneItems[i]
++			if unkeyedRec.responseID != "" && respID != "" && unkeyedRec.responseID != respID {
++				return false
++			}
 +			found := false
 +			for scan < len(output) {
 +				if matchedOutputIdx[scan] {
@@ -9040,6 +9075,9 @@ index e69de29..de58f0d 100644
 +					continue
 +				}
 +				if doneItemMatchesOutputItem(unkeyedRec, output[scan]) {
++					if unkeyedRec.responseID == "" && respID != "" {
++						t.unkeyedDoneItems[i].responseID = respID
++					}
 +					matchedOutputIdx[scan] = true
 +					scan++
 +					found = true
@@ -11496,9 +11534,10 @@ index e69de29..de58f0d 100644
 +		if hasMax {
 +			if _, isPending := t.pendingItems[maxKey]; !isPending {
 +				if _, isNonFinal := t.streamedNonFinalKeys[maxKey]; !isNonFinal {
-+					if rec, isDone := t.doneItems[maxKey]; isDone && rec.isFinal && rec.outputTextSHA != "" {
++					if rec, isDone := t.doneItems[maxKey]; isDone && rec.isFinal && rec.outputTextSHA != "" &&
++						rec.responseID != "" && rec.responseID == t.responseID {
 +						t.lastItemOutputSHA = rec.outputTextSHA
-+						t.lastItemResponseID = t.responseID
++						t.lastItemResponseID = rec.responseID
 +						t.lastItemCanonKey = maxKey
 +						return
 +					}
@@ -11564,7 +11603,8 @@ index e69de29..de58f0d 100644
 +			foundBest = true
 +		}
 +	}
-+	if !foundBest || bestSeq < t.maxItemSeq || bestSeq <= t.maxNonFinalSeq || !bestRec.isFinal || bestRec.outputTextSHA == "" {
++	if !foundBest || bestSeq < t.maxItemSeq || bestSeq <= t.maxNonFinalSeq || !bestRec.isFinal || bestRec.outputTextSHA == "" ||
++		bestRec.responseID == "" || bestRec.responseID != t.responseID {
 +		t.lastItemOutputSHA = ""
 +		t.lastItemResponseID = ""
 +		t.lastItemCanonKey = ""
@@ -11579,7 +11619,7 @@ index e69de29..de58f0d 100644
 +		}
 +	}
 +	t.lastItemOutputSHA = bestRec.outputTextSHA
-+	t.lastItemResponseID = t.responseID
++	t.lastItemResponseID = bestRec.responseID
 +	t.lastItemCanonKey = bestKey
 +}
 +
@@ -11894,6 +11934,15 @@ index e69de29..de58f0d 100644
 +						c.taintStreamAnomaly()
 +						return
 +					}
++					if prevRec.responseID != "" && t.responseID != "" && prevRec.responseID != t.responseID {
++						c.mu.Unlock()
++						c.taintStreamAnomaly()
++						return
++					}
++					if prevRec.responseID == "" && t.responseID != "" {
++						prevRec.responseID = t.responseID
++						t.doneItems[canonKey] = prevRec
++					}
 +					continue
 +				}
 +				if len(t.doneItemKeys) >= maxTrackedOutputItems {
@@ -11934,6 +11983,7 @@ index e69de29..de58f0d 100644
 +					isFinal:          isFinalCandidate,
 +					isAssistantMsg:   isAssistantMsg,
 +					outputTextSHA:    outTextSHA,
++					responseID:       t.responseID,
 +				}
 +				if seq > t.maxItemSeq {
 +					t.maxItemSeq = seq
@@ -12373,6 +12423,7 @@ index e69de29..de58f0d 100644
 +				isAssistantMsg:   isAssistantMsg,
 +				outputTextSHA:    outTextSHA,
 +				doneDigest:       doneDigest,
++				responseID:       t.responseID,
 +			}
 +			if seq > t.maxItemSeq {
 +				t.maxItemSeq = seq
@@ -12424,6 +12475,7 @@ index e69de29..de58f0d 100644
 +				isAssistantMsg:   isAssistantMsg,
 +				outputTextSHA:    outTextSHA,
 +				doneDigest:       doneDigest,
++				responseID:       t.responseID,
 +			})
 +			if seq > t.maxItemSeq {
 +				t.maxItemSeq = seq
@@ -13666,7 +13718,7 @@ index e69de29..de58f0d 100644
 +			}, true, nil
 +		}
 +	}
-+	return &reviewEntry{
++	ent := &reviewEntry{
 +		directory:         dir,
 +		launch:            launch,
 +		session:           disk.Session,
@@ -13686,7 +13738,9 @@ index e69de29..de58f0d 100644
 +		reserved:          true,
 +		markerPersisted:   true,
 +		touched:           now,
-+	}, true, nil
++	}
++	ent.sealDecision.Store(sealDecisionCommitted)
++	return ent, true, nil
 +}
 +
 +func getOrCreateReviewEntry(root, launch, session string, now time.Time, acquire, rejectSealed bool) (*reviewEntry, error) {
@@ -14136,7 +14190,7 @@ index e69de29..de58f0d 100644
 +		st.tainted = true
 +	}
 +	if entry := reviewLedger[key]; entry != nil {
-+		if entry.sealedFlag {
++		if entry.sealedFlag || entry.sealDecision.Load() == sealDecisionCommitted {
 +			reviewMu.Unlock()
 +			return
 +		}
@@ -14231,6 +14285,7 @@ index e69de29..de58f0d 100644
 +	if e.sealed {
 +		return
 +	}
++	e.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionTainted)
 +	e.tainted = true
 +	if e.foreignDisk || e.taintedPersisted {
 +		e.taintedPersisted = true
@@ -15186,7 +15241,15 @@ index e69de29..de58f0d 100644
 +			entry.sealed = false
 +			entry.sealedAt = 0
 +			entry.sealedReceiptSHA = ""
-+			entry.taintedPersisted = (renamed && err == nil) || entry.foreignDisk || entry.markerOnlySynced
++			if !entry.foreignDisk && !entry.taintedPersisted {
++				entry.tainted = true
++				entry.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionTainted)
++				if pRenamed, pErr := entry.persistWithStatusInRootLocked(rootLease, root, false); (pRenamed && pErr == nil) || entry.foreignDisk || entry.markerOnlySynced {
++					entry.taintedPersisted = true
++				}
++			} else {
++				entry.taintedPersisted = entry.taintedPersisted || (renamed && err == nil) || entry.foreignDisk || entry.markerOnlySynced
++			}
 +			// Entry is permanently closed via finishSeal(true) and can never seal SealOK;
 +			// release any pinned dirFD now so rejected/foreignDisk launches never leak FD budget.
 +			closeBudgetedPinnedDirFD(entry.boundDirFD)
@@ -17745,7 +17808,7 @@ index e69de29..de58f0d 100644
 +		}
 +	}
 +	producerMismatch := false
-+	if c.strictCodex && (c.producerRequired || c.producerObserved) {
++	if c.strictCodex {
 +		if c.producer.sawCompleted && c.consumer.sawCompleted &&
 +			c.producer.responseID != "" && c.producer.responseID == c.consumer.responseID &&
 +			c.producer.completedOutputSHA == c.consumer.completedOutputSHA &&
@@ -18735,6 +18798,20 @@ index e69de29..de58f0d 100644
 +			_ = launchRoot.Remove("seal.pending.json")
 +			return fail(false, err)
 +		}
++		// Single atomic commit decision point shared with TaintExistingReview / enqueueExistingReviewTurnFailureLocked:
++		// any taint registered before this CAS aborts BEFORE replacing receipt.json, cleans up staged seal files,
++		// and causes SealReviewWithDigest to persist taint and return SealRejected.
++		notifySealBeforeCommit()
++		if !e.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionCommitted) {
++			cleanupSealStage(false, false)
++			_ = launchRoot.Remove("seal.sha256")
++			_ = launchRoot.Remove("seal.pending.json")
++			e.tainted = true
++			e.sealed = false
++			e.sealedAt = 0
++			e.sealedReceiptSHA = ""
++			return false, ErrUnavailable
++		}
 +		if err := renameatPinned(launchDirFD, "seal.pending.json", launchDirFD, "receipt.json"); err != nil {
 +			cleanupSealStage(false, false)
 +			_ = launchRoot.Remove("seal.sha256")
@@ -18844,7 +18921,7 @@ index e69de29..de58f0d 100644
 +		routes := append([]string(nil), c.receipt.Routes...)
 +		observedCompleted := c.observedCompleted
 +		modelMismatch := c.modelMismatch
-+		if c.strictCodex && c.lastAttemptRequiredProducer && !c.lastAttemptProducerVerified {
++		if c.strictCodex && !c.lastAttemptProducerVerified {
 +			modelMismatch = true
 +		}
 +		lastResp := c.lastResponseIDSHA
@@ -19014,10 +19091,10 @@ index e69de29..de58f0d 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..6490e5f 100644
+index e69de29..08eb50c 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,13643 @@
+@@ -0,0 +1,13795 @@
 +package preflightreceipt
 +
 +import (
@@ -19572,7 +19649,7 @@ index e69de29..6490e5f 100644
 +					"output": output,
 +				},
 +			})
-+			c.ObserveStreamChunk(append([]byte("data: "), append(ev, '\n', '\n')...))
++			observeStrictSSEForTest(c, append([]byte("data: "), append(ev, '\n', '\n')...))
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
@@ -19640,7 +19717,7 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	cP.ObserveStreamChunk([]byte(`{"id":"resp_plain","object":"response","status":"completed","model":"gpt-6.2-sol","output":[]}`))
++	observeStrictSSEForTest(cP, []byte(`{"id":"resp_plain","object":"response","status":"completed","model":"gpt-6.2-sol","output":[]}`))
 +	_ = respP.Body.Close()
 +	eP.End()
 +	cP.Complete(true)
@@ -19724,7 +19801,7 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	cM.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_fb","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cM, []byte(`data: {"type":"response.completed","response":{"id":"resp_fb","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback"}]}]}}` + "\n\n"))
 +	_ = respM.Body.Close()
 +	eM.End()
 +	cM.Complete(true)
@@ -19973,7 +20050,7 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	c0.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_sealed","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c0, []byte(`data: {"type":"response.completed","response":{"id":"resp_sealed","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass"}]}]}}` + "\n\n"))
 +	_, _ = io.Copy(io.Discard, resp0.Body)
 +	_ = resp0.Body.Close()
 +	e0.End()
@@ -20044,7 +20121,7 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	c.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_clean","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.completed","response":{"id":"resp_clean","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +	e.End()
@@ -20255,9 +20332,11 @@ index e69de29..6490e5f 100644
 +		if err != nil {
 +			t.Fatal(err)
 +		}
++		chunkBytes := make([][]byte, 0, len(chunks))
 +		for _, ch := range chunks {
-+			c.ObserveStreamChunk([]byte(ch))
++			chunkBytes = append(chunkBytes, []byte(ch))
 +		}
++		observeStrictSSEChunksForTest(c, chunkBytes...)
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e.End()
@@ -20324,6 +20403,15 @@ index e69de29..6490e5f 100644
 +	}); r == nil || !r.Complete || r.LastOutputSHA256 != "" {
 +		t.Fatalf("unattributed output_item.done leaked into receipt: %+v", r)
 +	}
++	// 5b. Astra P1 #2 (PR #2280 R75): a later response.in_progress WITHOUT output MUST NOT
++	//     retroactively attribute an earlier unattributed output_item.done to the new response ID.
++	if r := runSingle(t, "review-eeee1111-2222-4333-8444-55555555555b", "019d0000-0000-7000-8000-00000000055b", []string{
++		`data: {"type":"response.output_item.done","item":{"id":"msg_unattr","type":"message","role":"assistant","content":[{"type":"output_text","text":"unattributed-late"}]}}` + "\n\n",
++		`data: {"type":"response.in_progress","response":{"id":"resp_late_id","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n",
++		`data: {"type":"response.completed","response":{"id":"resp_late_id","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n",
++	}); r == nil || !r.Complete || r.LastOutputSHA256 != "" {
++		t.Fatalf("unattributed output_item.done retroactively bound by output-less response.in_progress: %+v", r)
++	}
 +	// 6. Matching response.created + output_item.done + response.completed IS adopted.
 +	if r := runSingle(t, "review-eeee1111-2222-4333-8444-555555555506", "019d0000-0000-7000-8000-000000000506", []string{
 +		`data: {"type":"response.created","response":{"id":"resp_bound"}}` + "\n\n",
@@ -20353,8 +20441,8 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	c.ObserveStreamChunk([]byte(`data: {"type":"response.created","response":{"id":"resp_aborted"}}` + "\n\n"))
-+	c.ObserveStreamChunk([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"leaked-from-exec1"}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.created","response":{"id":"resp_aborted"}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"leaked-from-exec1"}]}}` + "\n\n"))
 +	_, _ = io.Copy(io.Discard, rp1.Body)
 +	_ = rp1.Body.Close()
 +	e1.End()
@@ -20371,8 +20459,8 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	c.ObserveStreamChunk([]byte(`data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"))
-+	c.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
 +	_, _ = io.Copy(io.Discard, rp2.Body)
 +	_ = rp2.Body.Close()
 +	e2.End()
@@ -20401,7 +20489,7 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	cT.ObserveStreamChunk([]byte(`data: {"type":"response.created","response":{"id":"resp_trunc"}}` + "\n\n"))
++	observeStrictSSEForTest(cT, []byte(`data: {"type":"response.created","response":{"id":"resp_trunc"}}` + "\n\n"))
 +	_, _ = io.Copy(io.Discard, rpT1.Body)
 +	_ = rpT1.Body.Close()
 +	eT1.End()
@@ -20436,7 +20524,7 @@ index e69de29..6490e5f 100644
 +		if err != nil {
 +			t.Fatal(err)
 +		}
-+		c0.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_race","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++		observeStrictSSEForTest(c0, []byte(`data: {"type":"response.completed","response":{"id":"resp_race","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e0.End()
@@ -20648,7 +20736,7 @@ index e69de29..6490e5f 100644
 +	if _, err := io.ReadFull(resp1.Body, buf); err != nil {
 +		t.Fatal(err)
 +	}
-+	c1.ObserveStreamChunk(buf)
++	observeStrictSSEForTest(c1, buf)
 +	// Close WITHOUT draining the trailing bytes to io.EOF.
 +	_ = resp1.Body.Close()
 +	e1.End()
@@ -20684,7 +20772,7 @@ index e69de29..6490e5f 100644
 +	if !errors.Is(readErr2, io.ErrUnexpectedEOF) {
 +		t.Fatalf("expected ErrUnexpectedEOF, got %v", readErr2)
 +	}
-+	c2.ObserveStreamChunk(raw2)
++	observeStrictSSEForTest(c2, raw2)
 +	_ = resp2.Body.Close()
 +	e2.End()
 +	c2.Complete(true)
@@ -20719,7 +20807,7 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	c3.ObserveStreamChunk(raw3)
++	observeStrictSSEForTest(c3, raw3)
 +	_ = resp3.Body.Close()
 +	e3.End()
 +	c3.Complete(true)
@@ -20763,7 +20851,7 @@ index e69de29..6490e5f 100644
 +			if err != nil {
 +				t.Fatal(err)
 +			}
-+			c1.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_t1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++			observeStrictSSEForTest(c1, []byte(`data: {"type":"response.completed","response":{"id":"resp_t1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
 +			_, _ = io.Copy(io.Discard, resp1.Body)
 +			_ = resp1.Body.Close()
 +			e1.End()
@@ -20791,7 +20879,7 @@ index e69de29..6490e5f 100644
 +			if err != nil {
 +				t.Fatal(err)
 +			}
-+			c2.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_t2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n" + tc.trail))
++			observeStrictSSEForTest(c2, []byte(`data: {"type":"response.completed","response":{"id":"resp_t2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n" + tc.trail))
 +			_, _ = io.Copy(io.Discard, resp2.Body)
 +			_ = resp2.Body.Close()
 +			e2.End()
@@ -20834,9 +20922,11 @@ index e69de29..6490e5f 100644
 +		if err != nil {
 +			t.Fatal(err)
 +		}
++		chunkBytes := make([][]byte, 0, len(chunks))
 +		for _, ch := range chunks {
-+			c.ObserveStreamChunk([]byte(ch))
++			chunkBytes = append(chunkBytes, []byte(ch))
 +		}
++		observeStrictSSEChunksForTest(c, chunkBytes...)
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e.End()
@@ -21110,7 +21200,7 @@ index e69de29..6490e5f 100644
 +	if _, err := io.ReadFull(resp.Body, buf); err != nil {
 +		t.Fatal(err)
 +	}
-+	c.ObserveStreamChunk(buf)
++	observeStrictSSEForTest(c, buf)
 +	closed := make(chan error, 1)
 +	go func() { closed <- resp.Body.Close() }()
 +	select {
@@ -21180,7 +21270,7 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	c2.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c2, []byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
 +	_, _ = io.Copy(io.Discard, resp2.Body)
 +	_ = resp2.Body.Close()
 +	e2.End()
@@ -21240,7 +21330,7 @@ index e69de29..6490e5f 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	c3.ObserveStreamChunk([]byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c3, []byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
 +	_, _ = io.Copy(io.Discard, resp3.Body)
 +	_ = resp3.Body.Close()
 +	e3.End()
@@ -21510,7 +21600,7 @@ index e69de29..6490e5f 100644
 +	}
 +	raw, _ := io.ReadAll(resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk(raw)
++	observeStrictSSEForTest(c, raw)
 +	lease.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -21580,7 +21670,7 @@ index e69de29..6490e5f 100644
 +	}
 +	raw, _ := io.ReadAll(resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk(raw)
++	observeStrictSSEForTest(c, raw)
 +	lease.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -21702,7 +21792,7 @@ index e69de29..6490e5f 100644
 +		}
 +		raw, _ := io.ReadAll(resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk(raw)
++		observeStrictSSEForTest(c, raw)
 +		lease.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -21763,7 +21853,7 @@ index e69de29..6490e5f 100644
 +		}
 +		raw, _ := io.ReadAll(resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk(raw)
++		observeStrictSSEForTest(c, raw)
 +		lease.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -21834,7 +21924,7 @@ index e69de29..6490e5f 100644
 +		}
 +		raw, _ := io.ReadAll(resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk(raw)
++		observeStrictSSEForTest(c, raw)
 +		lease.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -21937,7 +22027,7 @@ index e69de29..6490e5f 100644
 +	}
 +	rawS, _ := io.ReadAll(respS.Body)
 +	_ = respS.Body.Close()
-+	cS.ObserveStreamChunk(rawS)
++	observeStrictSSEForTest(cS, rawS)
 +	eS.End()
 +	cS.Complete(true)
 +	cS.HandlerDone(true)
@@ -22067,7 +22157,7 @@ index e69de29..6490e5f 100644
 +		}
 +		raw, _ := io.ReadAll(resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk(raw)
++		observeStrictSSEForTest(c, raw)
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -22215,7 +22305,7 @@ index e69de29..6490e5f 100644
 +		}
 +		raw, _ := io.ReadAll(resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk(raw)
++		observeStrictSSEForTest(c, raw)
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -22333,7 +22423,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respD1.Body)
 +	_ = respD1.Body.Close()
-+	cD1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_dur","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cD1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_dur","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
 +	eD1.End()
 +	cD1.Complete(true)
 +	cD1.HandlerDone(true)
@@ -22367,7 +22457,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respD2.Body)
 +	_ = respD2.Body.Close()
-+	cD2.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_dur2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cD2, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_dur2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
 +	eD2.End()
 +	cD2.Complete(true)
 +	cD2.HandlerDone(true)
@@ -22550,7 +22640,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respT1.Body)
 +	_ = respT1.Body.Close()
-+	cT.ObserveStreamChunk([]byte("data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"stale_open","type":"function_call","name":"exec_command"}}` + "\n\n"))
++	observeStrictSSEForTest(cT, []byte("data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"stale_open","type":"function_call","name":"exec_command"}}` + "\n\n"))
 +	eT1.End()
 +	// Attempt 2 starts cleanly and emits a complete final answer.
 +	ctxT2, eT2, err := cT.Start(ctxT, "codex", "gpt-6.2-sol")
@@ -22567,7 +22657,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respT2.Body)
 +	_ = respT2.Body.Close()
-+	cT.ObserveStreamChunk([]byte("data: " + `{"type":"response.created","response":{"id":"resp_retry_ok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
++	observeStrictSSEForTest(cT, []byte("data: " + `{"type":"response.created","response":{"id":"resp_retry_ok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
 +		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"clean-retry-answer"}]}}` + "\n\n" +
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_retry_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"clean-retry-answer"}]}]}}` + "\n\n"))
 +	eT2.End()
@@ -22644,7 +22734,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respP1.Body)
 +	_ = respP1.Body.Close()
-+	cP1.ObserveStreamChunk([]byte(sseTurn1OK))
++	observeStrictSSEForTest(cP1, []byte(sseTurn1OK))
 +	eP1.End()
 +	cP1.Complete(true)
 +	cP1.HandlerDone(true)
@@ -22865,7 +22955,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respPC1.Body)
 +	_ = respPC1.Body.Close()
-+	cPC1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_pc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1-clean"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cPC1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_pc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1-clean"}]}]}}` + "\n\n"))
 +	ePC1.End()
 +	cPC1.Complete(true)
 +	cPC1.HandlerDone(true)
@@ -22954,7 +23044,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, respB1.Body)
 +		_ = respB1.Body.Close()
-+		cB1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_ok1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"t1"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(cB1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_ok1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"t1"}]}]}}` + "\n\n"))
 +		eB1.End()
 +		cB1.Complete(true)
 +		cB1.HandlerDone(true)
@@ -23139,6 +23229,14 @@ index e69de29..6490e5f 100644
 +	if st := runProducerConsumer(t, "review-d1111111-2222-4333-8444-555555555560", "019d0000-0000-7000-8000-888888888160", "", consPass, true); st != SealRejected {
 +		t.Fatalf("RequireStrictProducer without producer completion seal = %v, want SealRejected", st)
 +	}
++	// Astra P1 #1 (PR #2280 R75): formal review MUST reject consumer-only response.completed
++	// even when RequireStrictProducer was NOT explicitly called by the executor.
++	if st := runProducerConsumer(t, "review-d1111111-2222-4333-8444-5555555555fd", "019d0000-0000-7000-8000-8888888881fd", "", consPass, false); st != SealRejected {
++		t.Fatalf("consumer-only completion without producer verification (requireProd=false) seal = %v, want SealRejected", st)
++	}
++	if rNoProd := readReviewReceiptFile(t, root, "review-d1111111-2222-4333-8444-5555555555fd"); !rNoProd.Tainted || rNoProd.Sealed {
++		t.Fatalf("consumer-only completion without producer verification receipt = (tainted=%v, sealed=%v), want (true, false)", rNoProd.Tainted, rNoProd.Sealed)
++	}
 +	prodPass := `{"type":"response.completed","response":{"id":"resp_pc_match","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`
 +	consMatch := "event: response.completed\ndata: " + prodPass + "\n\n"
 +	if st := runProducerConsumer(t, "review-d1111111-2222-4333-8444-555555555561", "019d0000-0000-7000-8000-888888888161", prodPass, consMatch, true); st != SealOK {
@@ -23257,7 +23355,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respMC1.Body)
 +	_ = respMC1.Body.Close()
-+	cMC1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_mc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cMC1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_mc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	eMC1.End()
 +	cMC1.Complete(true)
 +	cMC1.HandlerDone(true)
@@ -23378,7 +23476,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respER1.Body)
 +	_ = respER1.Body.Close()
-+	cER1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_er1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cER1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_er1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	eER1.End()
 +	cER1.Complete(true)
 +	cER1.HandlerDone(true)
@@ -23402,7 +23500,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respER2.Body)
 +	_ = respER2.Body.Close()
-+	cER2.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_er2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" + "data: {\"type\":\"error\"}\n"))
++	observeStrictSSEForTest(cER2, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_er2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" + "data: {\"type\":\"error\"}\n"))
 +
 +	inTaintSync := make(chan struct{})
 +	releaseTaintSync := make(chan struct{})
@@ -23466,7 +23564,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respTE1.Body)
 +	_ = respTE1.Body.Close()
-+	cTE1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_te1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cTE1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_te1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	eTE1.End()
 +	cTE1.Complete(true)
 +	cTE1.HandlerDone(true)
@@ -23490,7 +23588,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respTE2.Body)
 +	_ = respTE2.Body.Close()
-+	cTE2.ObserveStreamChunk([]byte("data: " + `{"type":"response.created","response":{"id":"resp_te2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n"))
++	observeStrictSSEForTest(cTE2, []byte("data: " + `{"type":"response.created","response":{"id":"resp_te2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n"))
 +	eTE2.End()
 +	cTE2.Complete(false)
 +	cTE2.HandlerDone(false)
@@ -23559,7 +23657,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respE1.Body)
 +	_ = respE1.Body.Close()
-+	cE1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_e200_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cE1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_e200_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	eE1.End()
 +	cE1.Complete(true)
 +	cE1.HandlerDone(true)
@@ -23583,7 +23681,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respE2.Body)
 +	_ = respE2.Body.Close()
-+	cE2.ObserveStreamChunk([]byte(": keepalive\n\n"))
++	observeStrictSSEForTest(cE2, []byte(": keepalive\n\n"))
 +	eE2.End()
 +	cE2.Complete(false)
 +	cE2.HandlerDone(false)
@@ -24572,7 +24670,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp1.Body)
 +	_ = resp1.Body.Close()
-+	c1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_evict2h","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_evict2h","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -24624,7 +24722,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text) + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text) + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -24719,7 +24817,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text) + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text) + "\n\n"))
 +		return c, e
 +	}
 +
@@ -24836,7 +24934,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp1.Body)
 +	_ = resp1.Body.Close()
-+	c1.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_q1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_q1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -24971,7 +25069,7 @@ index e69de29..6490e5f 100644
 +			}
 +			_, _ = io.Copy(io.Discard, resp.Body)
 +			_ = resp.Body.Close()
-+			c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_preseal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++			observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_preseal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +			e.End()
 +			c.Complete(true)
 +			c.HandlerDone(true)
@@ -25083,7 +25181,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respB.Body)
 +	_ = respB.Body.Close()
-+	cB.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_foreign_b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cB, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_foreign_b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	eB.End()
 +	cB.Complete(true)
 +	cB.HandlerDone(true)
@@ -25512,9 +25610,9 @@ index e69de29..6490e5f 100644
 +	if c.ValidateStrictEvent("response.output_item.added", true, []byte(badAdded)) {
 +		t.Fatalf("ValidateStrictEvent accepted output_item.added with missing item.type")
 +	}
-+	c.ObserveStreamChunk([]byte("event: response.output_item.added\ndata: " + badAdded + "\n\n"))
-+	c.ObserveStreamChunk([]byte(`event: response.output_item.done` + "\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n"))
-+	c.ObserveStreamChunk([]byte(`event: response.completed` + "\n" + `data: {"type":"response.completed","response":{"id":"resp_notype","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.output_item.added\ndata: " + badAdded + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`event: response.output_item.done` + "\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`event: response.completed` + "\n" + `data: {"type":"response.completed","response":{"id":"resp_notype","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -25611,7 +25709,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_taint_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_taint_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -26113,7 +26211,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte(sse))
++		observeStrictSSEForTest(c, []byte(sse))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -26558,7 +26656,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_after_sweep","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_after_sweep","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -26594,7 +26692,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_rot_root","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_rot_root","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -26764,7 +26862,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -26925,7 +27023,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_lock_order","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_lock_order","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -26999,7 +27097,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_sealed_immut","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_sealed_immut","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27109,7 +27207,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_fail_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_fail_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27261,7 +27359,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_first_seal_swap","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_first_seal_swap","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27331,7 +27429,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_mutex_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_mutex_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27459,7 +27557,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_mut_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_mut_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27594,7 +27692,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_cap_full","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_cap_full","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27710,7 +27808,7 @@ index e69de29..6490e5f 100644
 +	if c.ValidateStrictEvent("response.completed", true, []byte(nbspPayload)) {
 +		t.Fatalf("ValidateStrictEvent accepted leading U+00A0 NBSP before terminal JSON")
 +	}
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + nbspPayload + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + nbspPayload + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27751,8 +27849,8 @@ index e69de29..6490e5f 100644
 +	if c.ValidateStrictEvent("response.output_text.delta", true, []byte(badDelta)) {
 +		t.Fatalf("ValidateStrictEvent accepted response.output_text.delta with response.status=completed")
 +	}
-+	c.ObserveStreamChunk([]byte("event: response.output_text.delta\ndata: " + badDelta + "\n\n"))
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_bad_delta_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.output_text.delta\ndata: " + badDelta + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_bad_delta_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27792,7 +27890,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_slot_` + pair[0] + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_slot_` + pair[0] + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -27930,7 +28028,7 @@ index e69de29..6490e5f 100644
 +	chunk = append(chunk, []byte("event: response.completed\ndata: ")...)
 +	chunk = append(chunk, badUTF8...)
 +	chunk = append(chunk, []byte("\n\n")...)
-+	c.ObserveStreamChunk(chunk)
++	observeStrictSSEForTest(c, chunk)
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27970,7 +28068,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -28081,8 +28179,8 @@ index e69de29..6490e5f 100644
 +	if c.ValidateStrictEvent("response.in_progress", true, []byte(badInProg)) {
 +		t.Fatalf("ValidateStrictEvent accepted response.in_progress with explicit empty status")
 +	}
-+	c.ObserveStreamChunk([]byte("event: response.in_progress\ndata: " + badInProg + "\n\n"))
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_empty_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.in_progress\ndata: " + badInProg + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_empty_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -28163,8 +28261,8 @@ index e69de29..6490e5f 100644
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +
-+		c.ObserveStreamChunk(badLine)
-+		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_meta_utf8","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, badLine)
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_meta_utf8","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -28217,7 +28315,7 @@ index e69de29..6490e5f 100644
 +			if c.ValidateStrictEvent("response.completed", true, []byte(tc.raw)) {
 +				t.Fatalf("ValidateStrictEvent accepted unpaired surrogate case %s", tc.name)
 +			}
-+			c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + tc.raw + "\n\n"))
++			observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + tc.raw + "\n\n"))
 +			e.End()
 +			c.Complete(true)
 +			c.HandlerDone(true)
@@ -28370,7 +28468,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -28592,9 +28690,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		for _, ch := range chunks {
-+			c.ObserveStreamChunk(ch)
-+		}
++		observeStrictSSEChunksForTest(c, chunks...)
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -28878,7 +28974,7 @@ index e69de29..6490e5f 100644
 +	if c.ValidateStrictEvent("response.completed", true, []byte(frame)) {
 +		t.Fatalf("ValidateStrictEvent accepted case-duplicate status/Status frame")
 +	}
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + frame + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + frame + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -28915,7 +29011,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_corrupt_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_corrupt_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29052,7 +29148,7 @@ index e69de29..6490e5f 100644
 +		if c.ValidateStrictEvent("response.completed", true, []byte(frame)) {
 +			t.Fatalf("ValidateStrictEvent accepted response.completed with top-level message")
 +		}
-+		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + frame + "\n\n"))
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + frame + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -29126,7 +29222,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -29391,7 +29487,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_repl_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_repl_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29484,7 +29580,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_full_led","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_full_led","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29704,7 +29800,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -29808,7 +29904,7 @@ index e69de29..6490e5f 100644
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +
-+	c.ObserveStreamChunk([]byte("id\nretry\ndata\n\nevent: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_obs_bare","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("id\nretry\ndata\n\nevent: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_obs_bare","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29884,7 +29980,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_unrelated_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_unrelated_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -30093,7 +30189,7 @@ index e69de29..6490e5f 100644
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +
-+		c.ObserveStreamChunk(fullStream)
++		observeStrictSSEForTest(c, fullStream)
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -30248,7 +30344,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c1.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_coal_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_coal_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -30350,7 +30446,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c1.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_taint_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_taint_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -30434,7 +30530,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c1.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -31062,7 +31158,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -31272,7 +31368,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_cold_contra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_cold_contra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -31352,7 +31448,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_first_extra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_first_extra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -31549,7 +31645,7 @@ index e69de29..6490e5f 100644
 +					_, _ = io.Copy(io.Discard, resp.Body)
 +				}
 +				if len(data) > 0 {
-+					col.ObserveStreamChunk(data)
++					observeStrictSSEForTest(col, data)
 +				}
 +			}
 +			_ = resp.Body.Close()
@@ -31606,7 +31702,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_marker","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_marker","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -31719,7 +31815,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_ovl_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`, i) + "\n\n"))
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_ovl_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`, i) + "\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -31952,7 +32048,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte(ssePayload))
++		observeStrictSSEForTest(c, []byte(ssePayload))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -32148,7 +32244,7 @@ index e69de29..6490e5f 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		c.ObserveStreamChunk([]byte(ssePayload))
++		observeStrictSSEForTest(c, []byte(ssePayload))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -32235,7 +32331,7 @@ index e69de29..6490e5f 100644
 +		if c.ValidateStrictEvent(tc.evName, true, []byte(tc.frame)) {
 +			t.Fatalf("case %d (%s) unexpectedly accepted by ValidateStrictEvent", idx, tc.frame)
 +		}
-+		c.ObserveStreamChunk([]byte("event: " + tc.evName + "\ndata: " + tc.frame + "\n\n" + ssePayload))
++		observeStrictSSEForTest(c, []byte("event: " + tc.evName + "\ndata: " + tc.frame + "\n\n" + ssePayload))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -32283,7 +32379,7 @@ index e69de29..6490e5f 100644
 +		t.Fatalf("206 Partial Content RoundTrip err = %v, want ErrUnavailable", err)
 +	}
 +	// Even if a caller feeds the partial SSE payload into ObserveStreamChunk, the tainted launch MUST NOT seal.
-+	c1.ObserveStreamChunk([]byte(ssePartial))
++	observeStrictSSEForTest(c1, []byte(ssePartial))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -32324,7 +32420,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp2a.Body)
 +	_ = resp2a.Body.Close()
-+	c2a.ObserveStreamChunk([]byte(sseOK))
++	observeStrictSSEForTest(c2a, []byte(sseOK))
 +	e2a.End()
 +	c2a.Complete(true)
 +	c2a.HandlerDone(true)
@@ -32517,7 +32613,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp1.Body)
 +	_ = resp1.Body.Close()
-+	c1.ObserveStreamChunk([]byte(sseOK))
++	observeStrictSSEForTest(c1, []byte(sseOK))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -32648,7 +32744,7 @@ index e69de29..6490e5f 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respC.Body)
 +	_ = respC.Body.Close()
-+	cC.ObserveStreamChunk([]byte(sseOK))
++	observeStrictSSEForTest(cC, []byte(sseOK))
 +	eC.End()
 +	cC.Complete(true)
 +	cC.HandlerDone(true)
@@ -32659,5 +32755,186 @@ index e69de29..6490e5f 100644
 +	TaintExistingReview(root, lClean)
 +	if stRepeat, digRepeat := SealReviewWithDigest(root, lClean, sClean); stRepeat != SealOK || digRepeat != digClean {
 +		t.Fatalf("repeat seal after late TaintExistingReview on sealed launch = (%v, %q), want (SealOK, %q)", stRepeat, digRepeat, digClean)
++	}
++}
++
++
++func observeStrictSSEForTest(c *Collector, payload []byte) {
++	observeStrictSSEChunksForTest(c, payload)
++}
++
++func observeStrictSSEChunksForTest(c *Collector, chunks ...[]byte) {
++	var all []byte
++	for _, ch := range chunks {
++		all = append(all, ch...)
++	}
++	s := bytes.TrimPrefix(all, []byte{0xEF, 0xBB, 0xBF})
++	s = bytes.ReplaceAll(s, []byte("\r\n"), []byte("\n"))
++	s = bytes.ReplaceAll(s, []byte("\r"), []byte("\n"))
++	parts := bytes.Split(s, []byte("\n"))
++	// A line is only complete when terminated by a newline; drop the trailing unterminated fragment
++	// so a single trailing "\n" without a blank delimiter "\n\n" never prematurely dispatches an event.
++	if len(parts) > 0 {
++		parts = parts[:len(parts)-1]
++	}
++	var evName string
++	hasEv := false
++	var dataLines [][]byte
++	for _, line := range parts {
++		if len(line) == 0 {
++			if len(dataLines) > 0 {
++				joined := bytes.Trim(bytes.Join(dataLines, []byte{'\n'}), " \t\r\n")
++				if len(joined) > 0 && !bytes.Equal(joined, []byte("[DONE]")) {
++					c.ValidateStrictEvent(evName, hasEv, joined)
++				}
++			}
++			evName = ""
++			hasEv = false
++			dataLines = nil
++			continue
++		}
++		if bytes.Equal(line, []byte("event")) || bytes.HasPrefix(line, []byte("event:")) {
++			evName = ""
++			if len(line) > 6 {
++				evName = string(stripSSEFieldValue(line[6:]))
++			}
++			hasEv = true
++		} else if bytes.Equal(line, []byte("data")) || bytes.HasPrefix(line, []byte("data:")) {
++			var val []byte
++			if len(line) > 5 {
++				val = stripSSEFieldValue(line[5:])
++			}
++			dataLines = append(dataLines, val)
++		}
++	}
++	for _, ch := range chunks {
++		c.ObserveStreamChunk(ch)
++	}
++}
++
++func TestReviewReceiptTaintDuringSealStagingWindowAbortsBeforeRename(t *testing.T) {
++	// Sol P1 #1 (PR #2280 R75): if TaintExistingReview arrives AFTER SealReviewWithDigest has
++	// staged seal.pending.json and seal.sha256 into the launch dir, right BEFORE the atomic
++	// sealDecision CAS + renameatPinned("seal.pending.json" -> "receipt.json"), the taint MUST
++	// win the single atomic decision point, abort sealing, clean up staged seal files, persist
++	// tainted=true & sealed=false, and return SealRejected (never SealOK).
++	root := filepath.Join(t.TempDir(), "taint-during-seal-staging")
++	launch := "review-ffb7b7b7-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-00000000fb71"
++	sseOK := "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_stage_race","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	observeStrictSSEForTest(c, []byte(sseOK))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	fired := false
++	restore := setBeforeSealCommitHook(func() {
++		if !fired {
++			fired = true
++			// Verify staged files exist in launch dir right before the atomic commit decision point.
++			if _, err := os.Stat(filepath.Join(root, launch, "seal.pending.json")); err != nil {
++				t.Errorf("expected seal.pending.json before commit hook: %v", err)
++			}
++			if _, err := os.Stat(filepath.Join(root, launch, "seal.sha256")); err != nil {
++				t.Errorf("expected seal.sha256 before commit hook: %v", err)
++			}
++			TaintExistingReview(root, launch)
++		}
++	})
++	defer restore()
++
++	st, dig := SealReviewWithDigest(root, launch, session)
++	if !fired {
++		t.Fatalf("expected before-seal-commit hook to fire")
++	}
++	if st != SealRejected || dig != "" {
++		t.Fatalf("seal raced by TaintExistingReview during staging = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	if _, err := os.Stat(filepath.Join(root, launch, "seal.pending.json")); !os.IsNotExist(err) {
++		t.Fatalf("seal.pending.json left behind after aborted seal: %v", err)
++	}
++	if _, err := os.Stat(filepath.Join(root, launch, "seal.sha256")); !os.IsNotExist(err) {
++		t.Fatalf("seal.sha256 left behind after aborted seal: %v", err)
++	}
++	rec := readReviewReceiptFile(t, root, launch)
++	if !rec.Tainted || rec.Sealed {
++		t.Fatalf("receipt after staging-window taint = (tainted=%v, sealed=%v), want (true, false)", rec.Tainted, rec.Sealed)
++	}
++	if st2, dig2 := SealReviewWithDigest(root, launch, session); st2 != SealRejected || dig2 != "" {
++		t.Fatalf("repeat seal after staging-window taint = (%v, %q), want (SealRejected, \"\")", st2, dig2)
++	}
++	cleanRoot, _ := cleanPrivateRoot(root)
++	reviewMu.Lock()
++	delete(reviewLedger, cleanRoot+"\x00"+launch)
++	reviewMu.Unlock()
++	if st3, dig3 := SealReviewWithDigest(root, launch, session); st3 != SealRejected || dig3 != "" {
++		t.Fatalf("cold-restart seal after staging-window taint = (%v, %q), want (SealRejected, \"\")", st3, dig3)
++	}
++}
+diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
+new file mode 100644
+index 0000000..fdf1f50
+--- /dev/null
++++ b/sdk/preflightreceipt/seal_hook_disabled.go
+@@ -0,0 +1,5 @@
++//go:build !preflight_test_roots
++
++package preflightreceipt
++
++func notifySealBeforeCommit() {}
+diff --git a/sdk/preflightreceipt/seal_hook_enabled.go b/sdk/preflightreceipt/seal_hook_enabled.go
+new file mode 100644
+index 0000000..164e818
+--- /dev/null
++++ b/sdk/preflightreceipt/seal_hook_enabled.go
+@@ -0,0 +1,31 @@
++//go:build preflight_test_roots
++
++package preflightreceipt
++
++import "sync"
++
++var (
++	beforeSealCommitMu sync.Mutex
++	beforeSealCommitFn func()
++)
++
++func setBeforeSealCommitHook(fn func()) func() {
++	beforeSealCommitMu.Lock()
++	prev := beforeSealCommitFn
++	beforeSealCommitFn = fn
++	beforeSealCommitMu.Unlock()
++	return func() {
++		beforeSealCommitMu.Lock()
++		beforeSealCommitFn = prev
++		beforeSealCommitMu.Unlock()
++	}
++}
++
++func notifySealBeforeCommit() {
++	beforeSealCommitMu.Lock()
++	fn := beforeSealCommitFn
++	beforeSealCommitMu.Unlock()
++	if fn != nil {
++		fn()
 +	}
 +}

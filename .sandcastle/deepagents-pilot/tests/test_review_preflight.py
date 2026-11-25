@@ -2677,3 +2677,56 @@ def test_round_trip_ignores_sse_extension_fields_but_rejects_malformed_lines():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_round_trip_enforces_consistent_response_id_when_present():
+    """Astra P2 #3 (R75): 流内显式出现的 response.id / response_id 须前后一致，跨事件冲突须拒绝；
+    未提供 ID 的既有载荷仍保持兼容。"""
+    current = {"body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 response.id 一致性回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 response.id 一致性回归
+        # 1. 同流不同 response.id 须拒绝。
+        current["body"] = (
+            'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_a","status":"in_progress"}}\n\n'
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_b","status":"completed"}}\n\n'
+        ).encode()
+        res_conflict = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-conflict", preflight.Deadline(3))
+        assert res_conflict["ok"] is False, res_conflict
+
+        # 2. 同流一致 response.id 须通过。
+        current["body"] = (
+            'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_a","status":"in_progress"}}\n\n'
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+        ).encode()
+        res_same = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-same", preflight.Deadline(3))
+        assert res_same["ok"] is True, res_same
+
+        # 3. 省略 response.id 的既有载荷保持兼容。
+        current["body"] = (
+            'event: response.created\ndata: {"type":"response.created","response":{"status":"in_progress"}}\n\n'
+            'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        ).encode()
+        res_omitted = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-omitted", preflight.Deadline(3))
+        assert res_omitted["ok"] is True, res_omitted
+    finally:
+        srv.shutdown()
+        srv.server_close()
