@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..7b6f579 100644
+index e69de29..2da4397 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,300 @@
 +package middleware
 +
 +import (
@@ -283,6 +283,8 @@ index e69de29..7b6f579 100644
 +		status, receiptSHA := callSealReviewWithDigestContext(sealCtx, root, launch, session)
 +		if sealCtx.Err() != nil {
 +			c.Header("Connection", "close")
++			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
++			return
 +		}
 +		switch status {
 +		case preflightreceipt.SealOK:
@@ -1473,10 +1475,10 @@ index 0000000..6a3f821
 +}
 diff --git a/internal/api/middleware/seal_hook_enabled_test.go b/internal/api/middleware/seal_hook_enabled_test.go
 new file mode 100644
-index 0000000..da52892
+index 0000000..9cdebe2
 --- /dev/null
 +++ b/internal/api/middleware/seal_hook_enabled_test.go
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,103 @@
 +//go:build preflight_test_roots
 +
 +package middleware
@@ -1495,11 +1497,11 @@ index 0000000..da52892
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
 +
-+func TestSealReviewReceiptHandlerCancelsContextAtDeadlineWhileClientKeepsConnectionOpen(t *testing.T) {
-+	// Astra P2 (PR #2280 R77): SealReviewReceiptHandler must pass a deadline-bound context
-+	// matching ReviewBodyReadTimeout into SealReviewWithDigestContext so waiting duplicate seal
-+	// callers wake up, return 503 unavailable, and release their global seal slot even when the
-+	// client keeps the TCP connection open.
++func TestPreflightReceiptSealHandlerCancelsContextAtDeadlineWhileClientKeepsConnectionOpen(t *testing.T) {
++	// Astra P2 (R77) + Sol P1/P2 & Astra P2 (R78): SealReviewReceiptHandler must pass a
++	// ReviewBodyReadTimeout-bounded context to SealReviewWithDigestContext, return 503 unavailable
++	// with Connection: close even when the client keeps TCP open, and never return 200 after the
++	// deadline has expired. Named TestPreflightReceipt* so Dockerfile:16 executes it in offline builds.
 +	gin.SetMode(gin.TestMode)
 +	root := filepath.Join(t.TempDir(), "seal-handler-ctx-deadline")
 +	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
@@ -1508,57 +1510,76 @@ index 0000000..da52892
 +	preflightreceipt.ReviewBodyReadTimeout = 150 * time.Millisecond
 +	defer func() { preflightreceipt.ReviewBodyReadTimeout = origTimeout }()
 +
-+	sawDeadline := make(chan bool, 1)
-+	wokeOnCancel := make(chan error, 1)
-+	restoreHook := setSealInvokeHook(func(ctx context.Context, _, _, _ string) (preflightreceipt.SealStatus, string) {
-+		dl, ok := ctx.Deadline()
-+		sawDeadline <- ok && time.Until(dl) <= time.Second
-+		<-ctx.Done()
-+		wokeOnCancel <- ctx.Err()
-+		return preflightreceipt.SealUnavailable, ""
-+	})
-+	defer restoreHook()
++	for _, tc := range []struct {
++		name       string
++		hookStatus preflightreceipt.SealStatus
++		hookDigest string
++	}{
++		{
++			name:       "waiter-returns-unavailable-on-deadline",
++			hookStatus: preflightreceipt.SealUnavailable,
++			hookDigest: "",
++		},
++		{
++			name:       "late-seal-ok-after-deadline-still-returns-503",
++			hookStatus: preflightreceipt.SealOK,
++			hookDigest: strings.Repeat("a", 64),
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			sawDeadline := make(chan bool, 1)
++			wokeOnCancel := make(chan error, 1)
++			restoreHook := setSealInvokeHook(func(ctx context.Context, _, _, _ string) (preflightreceipt.SealStatus, string) {
++				dl, ok := ctx.Deadline()
++				sawDeadline <- ok && time.Until(dl) <= time.Second
++				<-ctx.Done()
++				wokeOnCancel <- ctx.Err()
++				return tc.hookStatus, tc.hookDigest
++			})
++			defer restoreHook()
 +
-+	engine := gin.New()
-+	engine.POST("/v1/review-receipts/seal", SealReviewReceiptHandler())
-+	srv := httptest.NewServer(engine)
-+	defer srv.Close()
++			engine := gin.New()
++			engine.POST("/v1/review-receipts/seal", SealReviewReceiptHandler())
++			srv := httptest.NewServer(engine)
++			defer srv.Close()
 +
-+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/review-receipts/seal", nil)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	req.Header.Set(preflightreceipt.ReviewHeader, "review-12345678-1234-4234-8234-123456789778")
-+	req.Header.Set("Session-Id", "019d0000-0000-7000-8000-000000000778")
++			req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/review-receipts/seal", nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			req.Header.Set(preflightreceipt.ReviewHeader, "review-12345678-1234-4234-8234-123456789778")
++			req.Header.Set("Session-Id", "019d0000-0000-7000-8000-000000000778")
 +
-+	// Keep-alive client with a long timeout (5s >> 150ms) so cancellation must come from handler deadline.
-+	client := &http.Client{Timeout: 5 * time.Second}
-+	start := time.Now()
-+	resp, err := client.Do(req)
-+	if err != nil {
-+		t.Fatalf("client.Do: %v", err)
-+	}
-+	defer resp.Body.Close()
-+	body, _ := io.ReadAll(resp.Body)
-+	elapsed := time.Since(start)
++			// Keep-alive client with a long timeout (5s >> 150ms) so cancellation must come from handler deadline.
++			client := &http.Client{Timeout: 5 * time.Second}
++			start := time.Now()
++			resp, err := client.Do(req)
++			if err != nil {
++				t.Fatalf("client.Do: %v", err)
++			}
++			defer resp.Body.Close()
++			body, _ := io.ReadAll(resp.Body)
++			elapsed := time.Since(start)
 +
-+	if okDL := <-sawDeadline; !okDL {
-+		t.Fatal("SealReviewReceiptHandler did not pass a ReviewBodyReadTimeout-bounded context")
-+	}
-+	if cerr := <-wokeOnCancel; cerr != context.DeadlineExceeded {
-+		t.Fatalf("blocked seal waiter ctx err = %v, want context.DeadlineExceeded", cerr)
-+	}
-+	if resp.StatusCode != http.StatusServiceUnavailable {
-+		t.Fatalf("status = %d (%s), want 503 unavailable", resp.StatusCode, string(body))
-+	}
-+	if !strings.Contains(string(body), `"unavailable"`) {
-+		t.Fatalf("body = %q, want unavailable status", string(body))
-+	}
-+	if !resp.Close {
-+		t.Fatalf("resp.Close = false, want true (Connection: close)")
-+	}
-+	if elapsed > 2*time.Second {
-+		t.Fatalf("handler took %v, expected prompt cancellation near ReviewBodyReadTimeout", elapsed)
++			if okDL := <-sawDeadline; !okDL {
++				t.Fatal("SealReviewReceiptHandler did not pass a ReviewBodyReadTimeout-bounded context")
++			}
++			if cerr := <-wokeOnCancel; cerr != context.DeadlineExceeded {
++				t.Fatalf("blocked seal waiter ctx err = %v, want context.DeadlineExceeded", cerr)
++			}
++			if resp.StatusCode != http.StatusServiceUnavailable {
++				t.Fatalf("status = %d (%s), want 503 unavailable", resp.StatusCode, string(body))
++			}
++			if !strings.Contains(string(body), `"unavailable"`) {
++				t.Fatalf("body = %q, want unavailable status", string(body))
++			}
++			if !resp.Close {
++				t.Fatalf("resp.Close = false, want true (Connection: close)")
++			}
++			if elapsed > 2*time.Second {
++				t.Fatalf("handler took %v, expected prompt cancellation near ReviewBodyReadTimeout", elapsed)
++			}
++		})
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -7753,10 +7774,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..befdfa0 100644
+index e69de29..03bd83c 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11516 @@
+@@ -0,0 +1,11545 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -9741,9 +9762,10 @@ index e69de29..befdfa0 100644
 +		typ, ok1 := exactOptionalString(fields, "type")
 +		role, ok2 := exactOptionalString(fields, "role")
 +		phase, ok3 := exactOptionalString(fields, "phase")
-+		status, ok4 := exactOptionalString(fields, "status")
++		status, hasStatus, ok4 := exactOptionalStringPresent(fields, "status")
 +		itemRespID, hasItemRespID, okRespID := exactOptionalStringPresent(fields, "response_id")
 +		if !okID || !ok1 || !ok2 || !ok3 || !ok4 || !okRespID ||
++			(hasStatus && (status == "" || strings.TrimSpace(status) != status)) ||
 +			strings.TrimSpace(typ) == "" ||
 +			len(itemID) > maxStrictIdentityBytes || len(itemRespID) > maxStrictIdentityBytes ||
 +			len(typ) > maxStrictIdentityBytes || len(role) > maxStrictIdentityBytes ||
@@ -9862,14 +9884,13 @@ index e69de29..befdfa0 100644
 +	}
 +	if rawIdx, exists := evFields["output_index"]; exists {
 +		trimmed := trimJSONSpace(rawIdx)
-+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
-+			var idx int64
-+			if err := json.Unmarshal(trimmed, &idx); err != nil || idx < 0 {
-+				return "", "", 0, false, false
-+			}
-+			outputIndex = idx
-+			hasOutputIndex = true
++		var idx int64
++		if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) ||
++			json.Unmarshal(trimmed, &idx) != nil || idx < 0 {
++			return "", "", 0, false, false
 +		}
++		outputIndex = idx
++		hasOutputIndex = true
 +	}
 +	if itemID != "" {
 +		itemKey = "id:" + itemID
@@ -9888,8 +9909,9 @@ index e69de29..befdfa0 100644
 +		itemType, ok1 := exactOptionalString(frame.itemFields, "type")
 +		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
-+		itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
++		itemStatus, hasStatus, ok4 := exactOptionalStringPresent(frame.itemFields, "status")
 +		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" ||
++			(hasStatus && (itemStatus == "" || strings.TrimSpace(itemStatus) != itemStatus)) ||
 +			len(itemType) > maxStrictIdentityBytes || len(itemRole) > maxStrictIdentityBytes ||
 +			len(itemPhase) > maxStrictIdentityBytes || len(itemStatus) > maxStrictIdentityBytes {
 +			return false
@@ -9912,8 +9934,9 @@ index e69de29..befdfa0 100644
 +		itemType, ok1 := exactOptionalString(frame.itemFields, "type")
 +		itemRole, ok2 := exactOptionalString(frame.itemFields, "role")
 +		itemPhase, ok3 := exactOptionalString(frame.itemFields, "phase")
-+		itemStatus, ok4 := exactOptionalString(frame.itemFields, "status")
++		itemStatus, hasStatus, ok4 := exactOptionalStringPresent(frame.itemFields, "status")
 +		if !ok1 || !ok2 || !ok3 || !ok4 || itemType == "" ||
++			(hasStatus && (itemStatus == "" || strings.TrimSpace(itemStatus) != itemStatus)) ||
 +			len(itemType) > maxStrictIdentityBytes || len(itemRole) > maxStrictIdentityBytes ||
 +			len(itemPhase) > maxStrictIdentityBytes || len(itemStatus) > maxStrictIdentityBytes {
 +			return false
@@ -10199,15 +10222,14 @@ index e69de29..befdfa0 100644
 +	hasContentIndex := false
 +	if rawCIdx, exists := evFields["content_index"]; exists {
 +		trimmedCIdx := trimJSONSpace(rawCIdx)
-+		if len(trimmedCIdx) > 0 && !bytes.Equal(trimmedCIdx, []byte("null")) {
-+			var cIdx int64
-+			if err := json.Unmarshal(trimmedCIdx, &cIdx); err != nil || cIdx < 0 || cIdx >= int64(maxTrackedContentParts) {
-+				c.taintStreamAnomaly()
-+				return out, false
-+			}
-+			contentIndex = cIdx
-+			hasContentIndex = true
++		var cIdx int64
++		if len(trimmedCIdx) == 0 || bytes.Equal(trimmedCIdx, []byte("null")) ||
++			json.Unmarshal(trimmedCIdx, &cIdx) != nil || cIdx < 0 || cIdx >= int64(maxTrackedContentParts) {
++			c.taintStreamAnomaly()
++			return out, false
 +		}
++		contentIndex = cIdx
++		hasContentIndex = true
 +	}
 +	var evText string
 +	var hasEvText bool
@@ -15025,6 +15047,7 @@ index e69de29..befdfa0 100644
 +	}
 +	// Enforce seal concurrency cap atomically BEFORE waiting on reviewMu or touching disk so
 +	// over-limit requests return SealUnavailable immediately without queuing behind shared locks.
++	acquiredSlot := false
 +	if capVal := int64(maxConcurrentSeals); capVal > 0 {
 +		for {
 +			cur := activeSealTotal.Load()
@@ -15032,11 +15055,16 @@ index e69de29..befdfa0 100644
 +				return SealUnavailable, ""
 +			}
 +			if activeSealTotal.CompareAndSwap(cur, cur+1) {
++				acquiredSlot = true
 +				break
 +			}
 +		}
-+		defer activeSealTotal.Add(-1)
 +	}
++	defer func() {
++		if acquiredSlot {
++			activeSealTotal.Add(-1)
++		}
++	}()
 +	root = cleanRoot
 +	key := root + "\x00" + launch
 +	reviewMu.Lock()
@@ -15052,6 +15080,9 @@ index e69de29..befdfa0 100644
 +		reviewMu.Unlock()
 +		select {
 +		case <-existingFlight.done:
++			if ctx.Err() != nil {
++				return SealUnavailable, ""
++			}
 +			return existingFlight.status, existingFlight.digest
 +		case <-ctx.Done():
 +			return SealUnavailable, ""
@@ -15073,25 +15104,44 @@ index e69de29..befdfa0 100644
 +	activeSealingKeys[key]++
 +	reviewMu.Unlock()
 +
-+	finalStatus := SealUnavailable
-+	finalDigest := ""
-+	defer func() {
-+		flight.status = finalStatus
-+		flight.digest = finalDigest
-+		reviewMu.Lock()
-+		if activeSealFlights[key] == flight {
-+			delete(activeSealFlights, key)
-+		}
-+		if activeSealingKeys[key] <= 1 {
-+			delete(activeSealingKeys, key)
-+		} else {
-+			activeSealingKeys[key]--
-+		}
-+		reviewMu.Unlock()
-+		close(flight.done)
++	// Hand off leader concurrency slot ownership to the background persistence goroutine so
++	// cancelling/expiring ctx returns SealUnavailable promptly while keeping in-flight disk
++	// persistence counted against maxConcurrentSeals and deduplicated until completion.
++	workerOwnsSlot := acquiredSlot
++	acquiredSlot = false
++	go func() {
++		finalStatus := SealUnavailable
++		finalDigest := ""
++		defer func() {
++			flight.status = finalStatus
++			flight.digest = finalDigest
++			reviewMu.Lock()
++			if activeSealFlights[key] == flight {
++				delete(activeSealFlights, key)
++			}
++			if activeSealingKeys[key] <= 1 {
++				delete(activeSealingKeys, key)
++			} else {
++				activeSealingKeys[key]--
++			}
++			reviewMu.Unlock()
++			if workerOwnsSlot {
++				activeSealTotal.Add(-1)
++			}
++			close(flight.done)
++		}()
++		finalStatus, finalDigest = sealReviewWithDigestCore(root, key, launch, session)
 +	}()
-+	finalStatus, finalDigest = sealReviewWithDigestCore(root, key, launch, session)
-+	return finalStatus, finalDigest
++
++	select {
++	case <-flight.done:
++		if ctx.Err() != nil {
++			return SealUnavailable, ""
++		}
++		return flight.status, flight.digest
++	case <-ctx.Done():
++		return SealUnavailable, ""
++	}
 +}
 +
 +func sealReviewWithDigestCore(root, key, launch, session string) (SealStatus, string) {
@@ -19274,10 +19324,10 @@ index e69de29..befdfa0 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..169ff7c 100644
+index e69de29..95f8944 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,13829 @@
+@@ -0,0 +1,14090 @@
 +package preflightreceipt
 +
 +import (
@@ -33106,6 +33156,267 @@ index e69de29..169ff7c 100644
 +			t.Fatalf("LastOutputSHA256 = %q, want %q", rr.LastOutputSHA256, sha256Hex("VERDICT: PASS"))
 +		}
 +	})
++}
++
++func TestReviewReceiptSealLeaderContextCancelReturnsUnavailableWhileRetainingConcurrencySlot(t *testing.T) {
++	// Sol P1 + Astra P2 (PR #2280 R78): cancelling/expiring the sealing leader's ctx while
++	// sealReviewWithDigestCore is blocked in fsync must return SealUnavailable promptly while
++	// keeping the in-flight persistence work counted against maxConcurrentSeals and deduplicated
++	// until completion.
++	oldMaxSeals := maxConcurrentSeals
++	maxConcurrentSeals = 1
++	defer func() { maxConcurrentSeals = oldMaxSeals }()
++
++	root := filepath.Join(t.TempDir(), "leader-cancel-slot")
++	launch := "review-e78e7801-1111-4111-8111-111111111101"
++	session := "019d0000-0000-7000-8000-00000000e801"
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("BeginReview: %v", err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("c.Start: %v", err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatalf("cl.Do: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_leader_cancel","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	var enteredOnce sync.Once
++	origSync := syncDirFn
++	syncDirFn = func(dir string) error {
++		if strings.HasSuffix(dir, launch) {
++			enteredOnce.Do(func() { close(entered) })
++			<-release
++		}
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
++	}
++	defer func() { syncDirFn = origSync }()
++
++	leaderCtx, cancelLeader := context.WithCancel(context.Background())
++	leaderDone := make(chan struct {
++		st  SealStatus
++		dig string
++	}, 1)
++	go func() {
++		st, dig := SealReviewWithDigestContext(leaderCtx, root, launch, session)
++		leaderDone <- struct {
++			st  SealStatus
++			dig string
++		}{st, dig}
++	}()
++
++	select {
++	case <-entered:
++	case <-time.After(3 * time.Second):
++		cancelLeader()
++		close(release)
++		t.Fatal("leader seal never reached syncDirFn")
++	}
++
++	cancelLeader()
++	select {
++	case res := <-leaderDone:
++		if res.st != SealUnavailable || res.dig != "" {
++			close(release)
++			t.Fatalf("cancelled leader seal = (%v, %q), want (SealUnavailable, \"\")", res.st, res.dig)
++		}
++	case <-time.After(2 * time.Second):
++		close(release)
++		t.Fatal("cancelled leader seal did not return promptly while fsync blocked")
++	}
++
++	// Background persistence MUST still occupy the single concurrency slot so cap is not bypassed.
++	if got := activeSealTotal.Load(); got != 1 {
++		close(release)
++		t.Fatalf("activeSealTotal while blocked leader persists = %d, want 1", got)
++	}
++	lOther := "review-e78e7802-1111-4111-8111-111111111102"
++	sOther := "019d0000-0000-7000-8000-00000000e802"
++	if stCap, digCap := SealReviewWithDigest(root, lOther, sOther); stCap != SealUnavailable || digCap != "" {
++		close(release)
++		t.Fatalf("seal above cap while cancelled leader persists = (%v, %q), want (SealUnavailable, \"\")", stCap, digCap)
++	}
++
++	// Unblock persistence; slot must return to 0 and subsequent idempotent seal must succeed.
++	close(release)
++	dl := time.Now().Add(3 * time.Second)
++	for time.Now().Before(dl) && activeSealTotal.Load() != 0 {
++		time.Sleep(5 * time.Millisecond)
++	}
++	if got := activeSealTotal.Load(); got != 0 {
++		t.Fatalf("activeSealTotal after persistence completed = %d, want 0", got)
++	}
++	if st, dig := SealReviewWithDigest(root, launch, session); st != SealOK || !isSHA256Hex(dig) {
++		t.Fatalf("repeat seal after background leader finished = (%v, %q), want SealOK", st, dig)
++	}
++}
++
++func TestReviewReceiptRejectsExplicitInvalidItemStatusAndNullIndices(t *testing.T) {
++	// Astra P1 + P2 (PR #2280 R78): explicit empty/null item.status on output_item.done or
++	// response.output, and explicit null content_index / output_index, must taint and reject
++	// instead of silently falling back to omitted defaults.
++	runTurn := func(t *testing.T, launch, session, stream string) (SealStatus, string) {
++		t.Helper()
++		root := filepath.Join(t.TempDir(), launch)
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview: %v", err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte(stream))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReviewWithDigest(root, launch, session)
++	}
++
++	cases := []struct {
++		name    string
++		launch  string
++		session string
++		stream  string
++		wantOK  bool
++	}{
++		{
++			name:    "completed-output-explicit-empty-status-rejected",
++			launch:  "review-e78e7811-1111-4111-8111-111111111111",
++			session: "019d0000-0000-7000-8000-00000000e811",
++			stream: "event: response.completed\ndata: " +
++				`{"type":"response.completed","response":{"id":"resp_st_empty","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			wantOK: false,
++		},
++		{
++			name:    "completed-output-explicit-null-status-rejected",
++			launch:  "review-e78e7812-1111-4111-8111-111111111112",
++			session: "019d0000-0000-7000-8000-00000000e812",
++			stream: "event: response.completed\ndata: " +
++				`{"type":"response.completed","response":{"id":"resp_st_null","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":null,"content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			wantOK: false,
++		},
++		{
++			name:    "stream-output-item-done-explicit-empty-status-rejected",
++			launch:  "review-e78e7813-1111-4111-8111-111111111113",
++			session: "019d0000-0000-7000-8000-00000000e813",
++			stream: strings.Join([]string{
++				`event: response.created`,
++				`data: {"type":"response.created","response":{"id":"resp_done_st_empty","status":"in_progress","model":"gpt-6.2-sol"}}`,
++				``,
++				`event: response.output_item.done`,
++				`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++				``,
++				`event: response.completed`,
++				`data: {"type":"response.completed","response":{"id":"resp_done_st_empty","status":"completed","model":"gpt-6.2-sol","output":[]}}`,
++				``,
++				``,
++			}, "\n"),
++			wantOK: false,
++		},
++		{
++			name:    "explicit-null-content-index-on-delta-rejected",
++			launch:  "review-e78e7814-1111-4111-8111-111111111114",
++			session: "019d0000-0000-7000-8000-00000000e814",
++			stream: strings.Join([]string{
++				`event: response.created`,
++				`data: {"type":"response.created","response":{"id":"resp_cidx_null","status":"in_progress","model":"gpt-6.2-sol"}}`,
++				``,
++				`event: response.output_text.delta`,
++				`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":null,"delta":"VERDICT: PASS"}`,
++				``,
++				`event: response.output_item.done`,
++				`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++				``,
++				`event: response.completed`,
++				`data: {"type":"response.completed","response":{"id":"resp_cidx_null","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`,
++				``,
++				``,
++			}, "\n"),
++			wantOK: false,
++		},
++		{
++			name:    "explicit-null-output-index-rejected",
++			launch:  "review-e78e7815-1111-4111-8111-111111111115",
++			session: "019d0000-0000-7000-8000-00000000e815",
++			stream: strings.Join([]string{
++				`event: response.created`,
++				`data: {"type":"response.created","response":{"id":"resp_oidx_null","status":"in_progress","model":"gpt-6.2-sol"}}`,
++				``,
++				`event: response.output_item.done`,
++				`data: {"type":"response.output_item.done","output_index":null,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++				``,
++				`event: response.completed`,
++				`data: {"type":"response.completed","response":{"id":"resp_oidx_null","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`,
++				``,
++				``,
++			}, "\n"),
++			wantOK: false,
++		},
++		{
++			name:    "omitted-status-and-omitted-content-index-remain-compatible",
++			launch:  "review-e78e7816-1111-4111-8111-111111111116",
++			session: "019d0000-0000-7000-8000-00000000e816",
++			stream: strings.Join([]string{
++				`event: response.created`,
++				`data: {"type":"response.created","response":{"id":"resp_omit_ok","status":"in_progress","model":"gpt-6.2-sol"}}`,
++				``,
++				`event: response.output_text.delta`,
++				`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"VERDICT: PASS"}`,
++				``,
++				`event: response.output_item.done`,
++				`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++				``,
++				`event: response.completed`,
++				`data: {"type":"response.completed","response":{"id":"resp_omit_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`,
++				``,
++				``,
++			}, "\n"),
++			wantOK: true,
++		},
++	}
++
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			st, dig := runTurn(t, tc.launch, tc.session, tc.stream)
++			if tc.wantOK {
++				if st != SealOK || !isSHA256Hex(dig) {
++					t.Fatalf("SealReviewWithDigest = (%v, %q), want SealOK", st, dig)
++				}
++			} else {
++				if st != SealRejected || dig != "" {
++					t.Fatalf("SealReviewWithDigest = (%v, %q), want (SealRejected, \"\")", st, dig)
++				}
++			}
++		})
++	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
 new file mode 100644
