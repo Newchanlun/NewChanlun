@@ -4,16 +4,42 @@ import argparse
 import os
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from threading import Event
 
 
 HERE = Path(__file__).resolve().parent
 GATES = ("1", "2", "3", "6a", "6b", "7a", "7b", "S", "8a", "8b", "9", "10", "15")
+MAC_TEMP = Path("/Volumes/AgentStorage/fm/tmp")
+MIN_FREE = 6 * 1024**3
+
+
+def temporary_root():
+    configured = MAC_TEMP if sys.platform == "darwin" else os.environ.get("TMPDIR")
+    if not configured:
+        raise ValueError("请先 source scripts/fm_env.sh")
+    root = Path(configured).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError(f"{root} 不是临时目录")
+    if sys.platform == "darwin" and root.stat().st_dev == Path("/").stat().st_dev:
+        raise ValueError(f"{root} 未落在独立卷上")
+    return root
+
+
+@contextmanager
+def fixture_repo(tmp, gate):
+    # 仅清理由 mkdtemp 创建的本夹具；不会递归进入共享 packages 符号链接。
+    repo = Path(tempfile.mkdtemp(prefix=f"fm-g{gate}-", dir=tmp))
+    try:
+        yield repo
+    finally:
+        shutil.rmtree(repo)
 
 
 def git(repo, *args):
@@ -67,9 +93,11 @@ def exercise(tmp, fixture, gate, color):
     expected = set((fixture / "expect.txt").read_text().split()) if color == "red" else set()
     if color == "red" and not expected:
         raise ValueError(f"{fixture} 没有期望代码")
-    with tempfile.TemporaryDirectory(prefix=f"fm-g{gate}-", dir=tmp) as directory:
-        repo = Path(directory)
+    with fixture_repo(tmp, gate) as repo:
+        scratch = repo / "tmp"
+        scratch.mkdir()
         env = os.environ.copy()
+        env.update(dict.fromkeys(("TMPDIR", "TMP", "TEMP"), str(scratch)))
         env.pop("GITHUB_HEAD_REF", None)
         expected_exit = {"green": 0, "red": 1, "unknown": 2, "known_limits": 0}[color]
         base_package(repo, fixture)
@@ -135,9 +163,10 @@ def main():
     selected = args.gates or GATES
     if args.jobs < 1 or not set(selected) <= set(GATES):
         parser.error("并行数须为正整数，门禁须为已实现编号")
-    tmp = os.environ.get("TMPDIR")
-    if not tmp or not Path(tmp).is_dir():
-        print("请先 source scripts/fm_env.sh，令 TMPDIR 指向现有的 FM 临时目录。", file=sys.stderr)
+    try:
+        tmp = temporary_root()
+    except (OSError, ValueError) as exc:
+        print(exc, file=sys.stderr)
         return 1
     print("门禁\t样本\t期望代码\t实际代码\t退出码\t自测", flush=True)
     ok = True
@@ -154,12 +183,28 @@ def main():
                 attempted[group] += 1
                 cases.append((fixture, gate, color, group))
 
+    stop = Event()
+
+    def disk_ok():
+        if sys.platform != "darwin":
+            return True
+        free = shutil.disk_usage("/").free
+        if free < MIN_FREE:
+            if not stop.is_set():
+                print(f"内置盘可用 {free / 1024**3:.2f} GiB，低于 6 GiB；停止派发夹具。",
+                      file=sys.stderr)
+            stop.set()
+        return not stop.is_set()
+
     def run(case):
         fixture, gate, color, group = case
+        if not disk_ok():
+            return group, False
         try:
             if color == "known_limits" and not (fixture / "README.md").is_file():
                 raise ValueError("已知边界须附说明")
-            return group, exercise(tmp, fixture, gate, color)
+            success = exercise(tmp, fixture, gate, color)
+            return group, disk_ok() and success
         except (OSError, ValueError, subprocess.CalledProcessError) as exc:
             print(f"{fixture}: {exc}", file=sys.stderr)
             return group, False
