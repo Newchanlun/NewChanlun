@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..905dd18 100644
+index e69de29..ab2e2e4 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,261 @@
 +package middleware
 +
 +import (
@@ -36,11 +36,8 @@ index e69de29..905dd18 100644
 +	vals := h.Values(preflightreceipt.ReviewHeader)
 +	unique := ""
 +	for _, v := range vals {
-+		if v == "" {
-+			continue
-+		}
 +		if !preflightreceipt.ValidReviewLaunch(v) {
-+			return "", false
++			continue
 +		}
 +		if unique == "" {
 +			unique = v
@@ -269,10 +266,10 @@ index e69de29..905dd18 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..588b640
+index 0000000..c0677b5
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,875 @@
+@@ -0,0 +1,876 @@
 +package middleware
 +
 +import (
@@ -1116,13 +1113,14 @@ index 0000000..588b640
 +	// with uniquely attributable duplicate ReviewHeader ([launch, launch] or ["", launch]) MUST return 400
 +	// AND taint that existing launch so subsequent SealReview cannot seal stale Turn 1.
 +	for idx, tc := range []struct {
-+		name     string
-+		launch   string
-+		session  string
-+		dupHdrs  []string
++		name    string
++		launch  string
++		session string
++		dupHdrs []string
 +	}{
 +		{"identical_dup_launch", "review-62345678-1234-4234-8234-123456789604", "019d0000-0000-7000-8000-000000000604", []string{"review-62345678-1234-4234-8234-123456789604", "review-62345678-1234-4234-8234-123456789604"}},
 +		{"empty_plus_valid_launch", "review-62345678-1234-4234-8234-123456789605", "019d0000-0000-7000-8000-000000000605", []string{"", "review-62345678-1234-4234-8234-123456789605"}},
++		{"malformed_plus_valid_launch", "review-62345678-1234-4234-8234-123456789606", "019d0000-0000-7000-8000-000000000606", []string{"not-a-valid-launch", "review-62345678-1234-4234-8234-123456789606"}},
 +	} {
 +		req1 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		req1.Header.Set(preflightreceipt.ReviewHeader, tc.launch)
@@ -5622,10 +5620,10 @@ index e69de29..e172af8 100644
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-index e69de29..c40c7b7 100644
+index e69de29..7598819 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,300 @@
 +//go:build !preflight_test_roots
 +
 +package auth
@@ -5639,9 +5637,12 @@ index e69de29..c40c7b7 100644
 +	"net"
 +	"net/http"
 +	"net/http/httptest"
++	"net/url"
 +	"sync/atomic"
 +	"testing"
 +	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
 +)
 +
 +type nonStandardRoundTripper struct{}
@@ -5872,6 +5873,55 @@ index e69de29..c40c7b7 100644
 +	}
 +	if recreated == first {
 +		t.Fatalf("expected evicted proxy transport to be recreated on subsequent lookup")
++	}
++}
++
++func TestPreflightReceiptProductionTransportTrustInheritEnvProxy(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R55): ModeInherit MUST apply the exact same scheme allowlist
++	// (http, socks5, socks5h; reject https) to environment-selected proxies as explicit ModeProxy.
++	rt, err := ControlledTransportForProxy("")
++	if err != nil {
++		t.Fatalf("ControlledTransportForProxy(inherit): %v", err)
++	}
++	wrapped, ok := rt.(*controlledPreflightTransport)
++	if !ok || wrapped == nil || wrapped.tr == nil || wrapped.tr.Proxy == nil {
++		t.Fatalf("unexpected ModeInherit transport shape: %T", rt)
++	}
++	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	origEnvFn := envProxyFunc
++	defer func() { envProxyFunc = origEnvFn }()
++
++	// Rejected schemes (matching explicit ModeProxy): https:// proxy MUST fail closed with ErrUnavailable.
++	for _, badProxy := range []string{"https://proxy.example:443", "ftp://proxy.example:21"} {
++		u, uerr := url.Parse(badProxy)
++		if uerr != nil {
++			t.Fatal(uerr)
++		}
++		envProxyFunc = func(*http.Request) (*url.URL, error) { return u, nil }
++		gotURL, gotErr := wrapped.tr.Proxy(req)
++		if !errors.Is(gotErr, preflightreceipt.ErrUnavailable) || gotURL != nil {
++			t.Fatalf("ModeInherit proxy(%q) = (%v, %v), want (nil, ErrUnavailable)", badProxy, gotURL, gotErr)
++		}
++	}
++	// Allowed schemes (http, socks5, socks5h) and direct (nil) MUST pass.
++	for _, goodProxy := range []string{"http://127.0.0.1:8080", "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080"} {
++		u, uerr := url.Parse(goodProxy)
++		if uerr != nil {
++			t.Fatal(uerr)
++		}
++		envProxyFunc = func(*http.Request) (*url.URL, error) { return u, nil }
++		gotURL, gotErr := wrapped.tr.Proxy(req)
++		if gotErr != nil || gotURL == nil || gotURL.String() != goodProxy {
++			t.Fatalf("ModeInherit proxy(%q) = (%v, %v), want (%s, nil)", goodProxy, gotURL, gotErr, goodProxy)
++		}
++	}
++	envProxyFunc = func(*http.Request) (*url.URL, error) { return nil, nil }
++	if gotURL, gotErr := wrapped.tr.Proxy(req); gotErr != nil || gotURL != nil {
++		t.Fatalf("ModeInherit proxy(nil) = (%v, %v), want (nil, nil)", gotURL, gotErr)
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_prod.go b/sdk/cliproxy/auth/preflight_roots_prod.go
@@ -6462,10 +6512,10 @@ index 0000000..f6b92f0
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..1f4fbd9
+index 0000000..7d877c9
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,202 @@
 +package auth
 +
 +import (
@@ -6474,6 +6524,7 @@ index 0000000..1f4fbd9
 +	"errors"
 +	"net"
 +	"net/http"
++	"net/url"
 +	"strings"
 +	"sync"
 +	"sync/atomic"
@@ -6505,7 +6556,21 @@ index 0000000..1f4fbd9
 +	maxControlledPreflightTransports = 64
 +	controlledTransportMu            sync.RWMutex
 +	controlledTransportByProxy       = make(map[[32]byte]*controlledPreflightTransport)
++	envProxyFunc                     = http.ProxyFromEnvironment
 +)
++
++func strictEnvProxyFunc(req *http.Request) (*url.URL, error) {
++	proxyURL, err := envProxyFunc(req)
++	if err != nil || proxyURL == nil {
++		return proxyURL, err
++	}
++	switch strings.ToLower(proxyURL.Scheme) {
++	case "http", "socks5", "socks5h":
++		return proxyURL, nil
++	default:
++		return nil, preflightreceipt.ErrUnavailable
++	}
++}
 +
 +func newFreshStandardTransport() *http.Transport {
 +	// Constructed directly without cloning http.DefaultTransport so an external
@@ -6516,7 +6581,7 @@ index 0000000..1f4fbd9
 +		KeepAlive: 30 * time.Second,
 +	}
 +	return &http.Transport{
-+		Proxy:                 http.ProxyFromEnvironment,
++		Proxy:                 strictEnvProxyFunc,
 +		DialContext:           dialer.DialContext,
 +		ForceAttemptHTTP2:     true,
 +		MaxIdleConns:          100,
@@ -6548,7 +6613,8 @@ index 0000000..1f4fbd9
 +	tr := newFreshStandardTransport()
 +	switch setting.Mode {
 +	case proxyutil.ModeInherit:
-+		// Keeps ProxyFromEnvironment with clean OS trust roots.
++		// Keeps strictEnvProxyFunc (same scheme allowlist as ModeProxy: http/socks5/socks5h only)
++		// with clean OS trust roots.
 +	case proxyutil.ModeDirect:
 +		tr.Proxy = nil
 +	case proxyutil.ModeProxy:
@@ -6765,10 +6831,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..59a14af 100644
+index e69de29..e812b18 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,10021 @@
+@@ -0,0 +1,10145 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -12209,7 +12275,7 @@ index e69de29..59a14af 100644
 +		return nil, true, ErrUnavailable
 +	}
 +	defer subRoot.Close()
-+	ent, onDisk, loadErr := loadReviewEntryFromSubRoot(subRoot, dir, launch, session, now)
++	ent, onDisk, loadErr := loadReviewEntryFromSubRoot(subRoot, subFI.ModTime(), dir, launch, session, now)
 +	if ent != nil && hasRootID {
 +		if subDev, subIno, hasSubID := statDevIno(subFI); hasSubID {
 +			ent.boundRootDev = rootDev
@@ -12235,9 +12301,63 @@ index e69de29..59a14af 100644
 +	return loadReviewEntryFromRoot(rootHandle, dir, launch, session, now)
 +}
 +
-+func loadReviewEntryFromSubRoot(subRoot *os.Root, dir, launch, session string, now time.Time) (*reviewEntry, bool, error) {
++func verifyProducerMarkerOnlySubdir(subRoot *os.Root, dirMod time.Time, launch string) (int64, time.Time, bool) {
++	if subRoot == nil || !ValidReviewLaunch(launch) {
++		return 0, time.Time{}, false
++	}
++	children, err := readDirFromRoot(subRoot)
++	if err != nil || len(children) != 1 || children[0].Name() != "producer.json" {
++		return 0, time.Time{}, false
++	}
++	mfi, merr := subRoot.Lstat("producer.json")
++	if merr != nil || !mfi.Mode().IsRegular() || mfi.Mode()&os.ModeSymlink != 0 || mfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(mfi) {
++		return 0, time.Time{}, false
++	}
++	raw, _, _, _, ok := readPrivateRegularFileInSubdir(subRoot, "producer.json", 4096)
++	if !ok {
++		return 0, time.Time{}, false
++	}
++	var marker reviewReservationMarker
++	if decodeExactReceiptJSON(raw, reviewMarkerJSONKeys, &marker) != nil ||
++		marker.Schema != ReviewSchema ||
++		marker.Launch != launch ||
++		marker.Started <= 0 {
++		return 0, time.Time{}, false
++	}
++	lastMod := dirMod
++	if mfi.ModTime().After(lastMod) {
++		lastMod = mfi.ModTime()
++	}
++	if ts := time.Unix(0, marker.Started); ts.After(lastMod) {
++		lastMod = ts
++	}
++	return marker.Started, lastMod, true
++}
++
++func loadReviewEntryFromSubRoot(subRoot *os.Root, dirMod time.Time, dir, launch, session string, now time.Time) (*reviewEntry, bool, error) {
 +	finfo, err := subRoot.Lstat("receipt.json")
 +	if err != nil || !finfo.Mode().IsRegular() || finfo.Mode()&os.ModeSymlink != 0 || finfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(finfo) || finfo.Size() <= 0 || finfo.Size() > maxReviewReceiptBytes {
++		if errors.Is(err, os.ErrNotExist) {
++			if markerStarted, markerLastMod, okMarker := verifyProducerMarkerOnlySubdir(subRoot, dirMod, launch); okMarker {
++				// Crash-leftover or invalidated producer marker-only directory: non-reusable and
++				// unsealable, yet distinguished from genuinely foreign directories so expired
++				// quota reclamation can safely remove it after retention.
++				return &reviewEntry{
++					directory:             dir,
++					launch:                launch,
++					session:               session,
++					started:               markerStarted,
++					tainted:               true,
++					taintedPersisted:      true,
++					markerOnlyInvalidated: true,
++					markerOnlySynced:      true,
++					foreignDisk:           false,
++					reserved:              true,
++					markerPersisted:       true,
++					touched:               markerLastMod,
++				}, true, nil
++			}
++		}
 +		return &reviewEntry{
 +			directory:        dir,
 +			launch:           launch,
@@ -12322,28 +12442,46 @@ index e69de29..59a14af 100644
 +	root = cleanRoot
 +	key := root + "\x00" + launch
 +	reviewMu.Lock()
-+	defer reviewMu.Unlock()
-+	if reclaimingKeys[key] {
-+		return nil, ErrUnavailable
-+	}
-+	if entry := reviewLedger[key]; entry != nil {
-+		if rejectSealed && (entry.sealedFlag || entry.sealing) {
-+			return nil, errReviewSealed
++	locked := true
++	defer func() {
++		if locked {
++			reviewMu.Unlock()
 +		}
-+		entry.touched = now
-+		if acquire {
-+			entry.inFlight++
++	}()
++	checkExisting := func() (*reviewEntry, error, bool) {
++		if reclaimingKeys[key] {
++			return nil, ErrUnavailable, true
 +		}
-+		return entry, nil
-+	}
-+	if _, sealedBound := sealedBindings[key]; sealedBound {
-+		if rejectSealed {
-+			return nil, errReviewSealed
++		if entry := reviewLedger[key]; entry != nil {
++			if rejectSealed && (entry.sealedFlag || entry.sealing) {
++				return nil, errReviewSealed, true
++			}
++			keepTouched := true
++			if entry.inFlight == 0 && !entry.sealing && entry.mu.TryLock() {
++				keepTouched = !(entry.tainted && entry.taintedPersisted)
++				entry.mu.Unlock()
++			}
++			if keepTouched {
++				entry.touched = now
++			}
++			if acquire {
++				entry.inFlight++
++			}
++			return entry, nil, true
 +		}
-+		return nil, ErrUnavailable
++		if _, sealedBound := sealedBindings[key]; sealedBound {
++			if rejectSealed {
++				return nil, errReviewSealed, true
++			}
++			return nil, ErrUnavailable, true
++		}
++		if taintWriteOverflow {
++			return nil, ErrUnavailable, true
++		}
++		return nil, nil, false
 +	}
-+	if taintWriteOverflow {
-+		return nil, ErrUnavailable
++	if ent, err, done := checkExisting(); done {
++		return ent, err
 +	}
 +	dir := filepath.Join(root, launch)
 +	diskEntry, onDisk, err := loadReviewEntryFromDisk(dir, launch, session, now)
@@ -12356,6 +12494,7 @@ index e69de29..59a14af 100644
 +	if len(reviewLedger) >= maxReviewLedgerEntries {
 +		var oldestKey string
 +		var oldestTime time.Time
++		expiredByRoot := make(map[string][]string)
 +		for k, v := range reviewLedger {
 +			if v.inFlight > 0 || v.sealing {
 +				continue
@@ -12364,6 +12503,12 @@ index e69de29..59a14af 100644
 +			evictable := !(v.tainted && !v.taintedPersisted) && (v.sealed || v.tainted || (v.started > 0 && now.UnixNano()-v.started > int64(MaxReviewDuration)))
 +			v.mu.Unlock()
 +			if !evictable {
++				if !reclaimingKeys[k] && now.Sub(v.touched) >= reviewDiskRetention {
++					if sep := strings.IndexByte(k, '\x00'); sep > 0 && sep+1 < len(k) {
++						candRoot, candLaunch := k[:sep], k[sep+1:]
++						expiredByRoot[candRoot] = append(expiredByRoot[candRoot], candLaunch)
++					}
++				}
 +				continue
 +			}
 +			if oldestKey == "" || v.touched.Before(oldestTime) {
@@ -12379,6 +12524,43 @@ index e69de29..59a14af 100644
 +				evicted.boundDirFD = nil
 +				evicted.mu.Unlock()
 +				closeBudgetedPinnedDirFD(evictedFD)
++			}
++		} else if len(expiredByRoot) > 0 {
++			// When the ledger is full solely with unpersisted-taint entries, never blindly drop
++			// unpersisted taint records; instead release reviewMu and attempt verified disk
++			// reclamation of entries past reviewDiskRetention so quota recovers once storage heals.
++			reviewMu.Unlock()
++			locked = false
++			reclaimed := 0
++			for candRoot, candNames := range expiredByRoot {
++				rootLease, rerr := acquirePrivateRootLease(candRoot)
++				if rerr != nil {
++					continue
++				}
++				bState := bucketStateFor(true)
++				bState.mu.Lock()
++				d, _ := reclaimExpiredBucketEntries(rootLease.dir, candRoot, candNames, true, 1, 0, bState)
++				bState.mu.Unlock()
++				rootLease.Close()
++				reclaimed += d
++				if reclaimed > 0 {
++					break
++				}
++			}
++			reviewMu.Lock()
++			locked = true
++			if ent, err, done := checkExisting(); done {
++				return ent, err
++			}
++			diskEntry, onDisk, err = loadReviewEntryFromDisk(dir, launch, session, now)
++			if err != nil {
++				return nil, err
++			}
++			if rejectSealed && onDisk && diskEntry != nil && diskEntry.sealedFlag {
++				return nil, errReviewSealed
++			}
++			if len(reviewLedger) >= maxReviewLedgerEntries {
++				return nil, ErrUnavailable
 +			}
 +		} else {
 +			return nil, ErrUnavailable
@@ -12659,7 +12841,7 @@ index e69de29..59a14af 100644
 +		return
 +	}
 +	e.tainted = true
-+	if e.foreignDisk {
++	if e.foreignDisk || e.taintedPersisted {
 +		e.taintedPersisted = true
 +		closeBudgetedPinnedDirFD(e.boundDirFD)
 +		e.boundDirFD = nil
@@ -12671,6 +12853,10 @@ index e69de29..59a14af 100644
 +		e.boundDirFD = nil
 +	} else {
 +		e.taintedPersisted = false
++		if e.boundDirFD != nil && !verifyPinnedDirFDAlive(e.boundDirFD, e.boundDirDev, e.boundDirIno) {
++			closeBudgetedPinnedDirFD(e.boundDirFD)
++			e.boundDirFD = nil
++		}
 +	}
 +}
 +
@@ -13047,7 +13233,7 @@ index e69de29..59a14af 100644
 +	if checkDirID && (!hasSubID || subDev != expectDirDev || subIno != expectDirIno) {
 +		return SealUnavailable, "", 0, 0, false, nil
 +	}
-+	diskEntry, onDisk, err := loadReviewEntryFromSubRoot(subRoot, dir, launch, session, now)
++	diskEntry, onDisk, err := loadReviewEntryFromSubRoot(subRoot, subFI.ModTime(), dir, launch, session, now)
 +	if err != nil {
 +		return SealUnavailable, "", 0, 0, false, nil
 +	}
@@ -13373,6 +13559,10 @@ index e69de29..59a14af 100644
 +			entry.sealedAt = 0
 +			entry.sealedReceiptSHA = ""
 +			entry.taintAndPersistLocked()
++			// finishSeal(true) permanently closes entry (sealedFlag=true) so it can never seal SealOK;
++			// release boundDirFD now so a replaced launch dir or pre-rename failure never leaks FD budget.
++			closeBudgetedPinnedDirFD(entry.boundDirFD)
++			entry.boundDirFD = nil
 +			entry.mu.Unlock()
 +			finishSeal(true)
 +			return SealUnavailable, ""
@@ -16791,10 +16981,10 @@ index e69de29..59a14af 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..b1c0f81 100644
+index e69de29..1e8788a 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,10175 @@
+@@ -0,0 +1,10417 @@
 +package preflightreceipt
 +
 +import (
@@ -26969,4 +27159,246 @@ index e69de29..b1c0f81 100644
 +			t.Fatalf("reclaim deleted marker-only dir with unexpected receipt.json: (%d, %d), want (0, 0)", dirs, fds)
 +		}
 +	})
++}
++
++func TestReviewReceiptCrashLeftoverMarkerOnlyDirReclaimableAfterRetry(t *testing.T) {
++	// Sol P1 #1 (PR #2280 R55): a crash-leftover producer directory containing ONLY a valid
++	// producer.json (no receipt.json yet) retried after restart MUST be rejected for reuse,
++	// MUST NOT be misclassified as foreignDisk, and MUST be safely reclaimed once past 24h
++	// retention without requiring ledger eviction or another restart.
++	oldReviewCap := maxReviewDiskEntries
++	maxReviewDiskEntries = 1
++	defer func() { maxReviewDiskEntries = oldReviewCap }()
++
++	root := filepath.Join(t.TempDir(), "crash-marker-only-reclaim")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	launch1 := "review-f1010101-2222-4333-8444-555555555501"
++	dir1 := filepath.Join(root, launch1)
++	ancient := time.Now().Add(-48 * time.Hour)
++	if err := os.Mkdir(dir1, 0700); err != nil {
++		t.Fatal(err)
++	}
++	markerRaw, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch1, Started: ancient.UnixNano()})
++	if err := os.WriteFile(filepath.Join(dir1, "producer.json"), markerRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(filepath.Join(dir1, "producer.json"), ancient, ancient)
++	_ = os.Chtimes(dir1, ancient, ancient)
++
++	// Post-restart retry of launch1 MUST fail closed (non-reusable), yet NOT mark foreignDisk.
++	if res1, err := ReserveReview(root, launch1); !errors.Is(err, ErrUnavailable) || res1 != nil {
++		if res1 != nil {
++			res1.Release()
++		}
++		t.Fatalf("ReserveReview(crash-leftover launch1) = (%v, %v), want (nil, ErrUnavailable)", res1, err)
++	}
++	key1 := filepath.Clean(root) + "\x00" + launch1
++	reviewMu.Lock()
++	ent1 := reviewLedger[key1]
++	reviewMu.Unlock()
++	if ent1 == nil {
++		t.Fatalf("expected launch1 loaded into reviewLedger")
++	}
++	ent1.mu.Lock()
++	isForeign := ent1.foreignDisk
++	isMarkerOnly := ent1.markerOnlyInvalidated
++	ent1.mu.Unlock()
++	if isForeign || !isMarkerOnly {
++		t.Fatalf("crash-leftover marker-only entry flags = (foreignDisk=%v, markerOnly=%v), want (false, true)", isForeign, isMarkerOnly)
++	}
++
++	// Disk bucket cap is 1: reserving brand-new launch2 WITHOUT clearing reviewLedger MUST reclaim dir1!
++	launch2 := "review-f1010101-2222-4333-8444-555555555502"
++	res2, err := ReserveReview(root, launch2)
++	if err != nil {
++		t.Fatalf("ReserveReview(launch2) failed to reclaim expired crash-leftover marker-only dir1: %v", err)
++	}
++	res2.Release()
++	if _, statErr := os.Lstat(dir1); !os.IsNotExist(statErr) {
++		t.Fatalf("expired crash-leftover dir1 still present on disk: %v", statErr)
++	}
++}
++
++func TestReviewReceiptFirstSealOnReplacedLaunchDirReleasesPinnedFDBudget(t *testing.T) {
++	// Sol P1 #2 (PR #2280 R55): when first SealReviewWithDigest detects that the launch directory
++	// on disk was replaced (inode mismatch -> !renamed), it MUST preserve the replacement dir,
++	// return SealUnavailable, AND release boundDirFD back to pinnedDirFDs so budget never leaks.
++	beforeFDs := pinnedDirFDs.Load()
++	root := filepath.Join(t.TempDir(), "first-seal-replaced-fd")
++	launch := "review-f2020202-2222-4333-8444-555555555501"
++	session := "019d0000-0000-7000-8000-fffffffffa01"
++
++	ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_repl_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	if duringFDs := pinnedDirFDs.Load(); duringFDs != beforeFDs+1 {
++		t.Fatalf("pinnedDirFDs before replace = %d, want %d", duringFDs, beforeFDs+1)
++	}
++
++	dir := filepath.Join(root, launch)
++	origMoved := filepath.Join(t.TempDir(), "orig-moved")
++	if err := os.Rename(dir, origMoved); err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = os.RemoveAll(origMoved) }()
++	if err := os.Mkdir(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	sentinel := filepath.Join(dir, "keep-me.txt")
++	if err := os.WriteFile(sentinel, []byte("foreign"), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	if st, dig := SealReviewWithDigest(root, launch, session); st != SealUnavailable || dig != "" {
++		t.Fatalf("first SealReviewWithDigest on replaced dir = (%v, %q), want (SealUnavailable, \"\")", st, dig)
++	}
++	if got, rerr := os.ReadFile(sentinel); rerr != nil || string(got) != "foreign" {
++		t.Fatalf("replacement dir sentinel altered: err=%v got=%q", rerr, string(got))
++	}
++	if afterFDs := pinnedDirFDs.Load(); afterFDs != beforeFDs {
++		t.Fatalf("pinnedDirFDs leaked after first seal detected replaced launch dir: before=%d after=%d", beforeFDs, afterFDs)
++	}
++}
++
++func TestReviewReceiptFullLedgerWithExpiredUnpersistedTaintsTriggersDiskReclaim(t *testing.T) {
++	// Astra P2 #3 (PR #2280 R55): when reviewLedger is full with tainted && !taintedPersisted
++	// entries (e.g. from a storage outage), getOrCreateReviewEntry MUST fail closed while they
++	// are within retention, and once storage recovers and retention expires MUST trigger verified
++	// disk reclamation so new launches succeed without blindly dropping unpersisted taint records.
++	reviewMu.Lock()
++	savedLedger := reviewLedger
++	savedBindings := sealedBindings
++	savedReserved := reservedBindingKeys
++	savedMaxLedger := maxReviewLedgerEntries
++	reviewLedger = make(map[string]*reviewEntry)
++	sealedBindings = make(map[string]sealedDirBinding)
++	reservedBindingKeys = make(map[string]bool)
++	maxReviewLedgerEntries = 1
++	reviewMu.Unlock()
++	defer func() {
++		reviewMu.Lock()
++		for _, ent := range reviewLedger {
++			if ent != nil {
++				ent.mu.Lock()
++				fd := ent.boundDirFD
++				ent.boundDirFD = nil
++				ent.mu.Unlock()
++				closeBudgetedPinnedDirFD(fd)
++			}
++		}
++		for _, b := range sealedBindings {
++			closeBudgetedPinnedDirFD(b.dirFD)
++		}
++		reviewLedger = savedLedger
++		sealedBindings = savedBindings
++		reservedBindingKeys = savedReserved
++		maxReviewLedgerEntries = savedMaxLedger
++		reviewMu.Unlock()
++	}()
++
++	beforeFDs := pinnedDirFDs.Load()
++	root := filepath.Join(t.TempDir(), "full-ledger-unpersisted-taint")
++	launch1 := "review-f3030303-2222-4333-8444-555555555501"
++	session1 := "019d0000-0000-7000-8000-fffffffffb01"
++
++	ctx, c, err := BeginReview(context.Background(), root, launch1, session1, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	c.ObserveStreamChunk([]byte("data: " + `{"type":"response.completed","response":{"id":"resp_full_led","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	// Force BOTH .staging block AND launch dir fsync failure so launch1 stays tainted && !taintedPersisted!
++	dir1 := filepath.Join(root, launch1)
++	stagingDir := filepath.Join(root, ".staging")
++	_ = os.RemoveAll(stagingDir)
++	if err := os.WriteFile(stagingDir, []byte("blocked"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	origSync := syncDirFn
++	syncDirFn = func(dir string) error {
++		if filepath.Clean(dir) == filepath.Clean(dir1) {
++			return errors.New("injected outage fsync fail")
++		}
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
++	}
++	TaintReview(root, launch1)
++	syncDirFn = origSync
++	_ = os.Remove(stagingDir)
++
++	// While launch1 is fresh (<24h), full ledger MUST fail closed (cannot drop unpersisted taint).
++	launch2 := "review-f3030303-2222-4333-8444-555555555502"
++	if res2, rerr := ReserveReview(root, launch2); !errors.Is(rerr, ErrUnavailable) || res2 != nil {
++		if res2 != nil {
++			res2.Release()
++		}
++		t.Fatalf("ReserveReview(launch2) while unpersisted taint fresh = (%v, %v), want (nil, ErrUnavailable)", res2, rerr)
++	}
++
++	// Age launch1 past 24h retention -> getOrCreateReviewEntry MUST reclaim dir1 from disk,
++	// free its ledger slot + boundDirFD, and admit launch2 cleanly!
++	ancient := time.Now().Add(-48 * time.Hour)
++	agedMarker, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch1, Started: ancient.UnixNano()})
++	_ = os.WriteFile(filepath.Join(dir1, "producer.json"), agedMarker, 0600)
++	_ = os.Chtimes(filepath.Join(dir1, "producer.json"), ancient, ancient)
++	_ = os.Chtimes(dir1, ancient, ancient)
++	key1 := filepath.Clean(root) + "\x00" + launch1
++	reviewMu.Lock()
++	if ent := reviewLedger[key1]; ent != nil {
++		ent.touched = ancient
++	}
++	reviewMu.Unlock()
++
++	res2, err := ReserveReview(root, launch2)
++	if err != nil {
++		t.Fatalf("ReserveReview(launch2) failed after unpersisted-taint entry expired: %v", err)
++	}
++	res2.Release()
++	if _, statErr := os.Lstat(dir1); !os.IsNotExist(statErr) {
++		t.Fatalf("expired dir1 still present after full-ledger reclaim: %v", statErr)
++	}
++	if curFDs := pinnedDirFDs.Load(); curFDs != beforeFDs+1 {
++		t.Fatalf("pinnedDirFDs after reclaiming dir1 + reserving launch2 = %d, want %d", curFDs, beforeFDs+1)
++	}
 +}
