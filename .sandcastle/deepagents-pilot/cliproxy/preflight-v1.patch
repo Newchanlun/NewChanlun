@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..3b4fc4c 100644
+index e69de29..2d18367 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,290 @@
 +package middleware
 +
 +import (
@@ -244,10 +244,31 @@ index e69de29..3b4fc4c 100644
 +func SealReviewReceiptHandler() gin.HandlerFunc {
 +	root := os.Getenv("CLIPROXY_PREFLIGHT_RECEIPTS")
 +	return func(c *gin.Context) {
++		rejectClose := func(status int, statusText string) {
++			rc := http.NewResponseController(c.Writer)
++			_ = rc.SetReadDeadline(time.Unix(1, 0))
++			_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
++			c.Header("Connection", "close")
++			c.AbortWithStatusJSON(status, gin.H{"status": statusText})
++		}
 +		if root == "" {
-+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
++			rejectClose(http.StatusServiceUnavailable, "unavailable")
 +			return
 +		}
++		// Reject any seal request carrying a body (positive Content-Length, unknown/chunked -1,
++		// or Transfer-Encoding) BEFORE entering SealReviewWithDigestContext, and expire the read
++		// deadline + close the connection so Go's HTTP/1.1 server never drains an unbounded body.
++		if c.Request.ContentLength != 0 || len(c.Request.TransferEncoding) > 0 {
++			rejectClose(http.StatusBadRequest, "rejected")
++			return
++		}
++		rc := http.NewResponseController(c.Writer)
++		_ = rc.SetReadDeadline(time.Now().Add(preflightreceipt.ReviewBodyReadTimeout))
++		_ = rc.SetWriteDeadline(time.Now().Add(preflightreceipt.ReviewBodyReadTimeout))
++		defer func() {
++			_ = rc.SetReadDeadline(time.Time{})
++			_ = rc.SetWriteDeadline(time.Time{})
++		}()
 +		launch, launchPresent, launchAmbiguous := singleHeaderValue(c.Request.Header, preflightreceipt.ReviewHeader)
 +		session, sessionPresent, sessionAmbiguous := singleHeaderValue(c.Request.Header, "Session-Id")
 +		if !launchPresent || launchAmbiguous || launch == "" || !sessionPresent || sessionAmbiguous || session == "" {
@@ -274,10 +295,10 @@ index e69de29..3b4fc4c 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..b677bb9
+index 0000000..f47381a
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,979 @@
+@@ -0,0 +1,1096 @@
 +package middleware
 +
 +import (
@@ -1255,6 +1276,123 @@ index 0000000..b677bb9
 +	engine.ServeHTTP(rec34, req34)
 +	if rec34.Code != http.StatusOK {
 +		t.Fatalf("review stream after active streams finished -> HTTP %d, want 200", rec34.Code)
++	}
++}
++
++type sealTestRoundTripper func(*http.Request) (*http.Response, error)
++
++func (f sealTestRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++func TestSealReviewReceiptHandlerRejectsBodyWithoutDraining(t *testing.T) {
++	// Astra P2 #3 (PR #2280 R69): POST /v1/review-receipts/seal MUST reject any request carrying
++	// a non-empty Content-Length or Transfer-Encoding: chunked body BEFORE entering seal logic,
++	// send 400 + Connection: close immediately, and never hang waiting to drain unread body bytes.
++	gin.SetMode(gin.TestMode)
++	root := t.TempDir()
++	if err := os.Chmod(root, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/review-receipts/seal", SealReviewReceiptHandler())
++	srv := httptest.NewServer(engine)
++	defer srv.Close()
++
++	launch := "review-82345678-1234-4234-8234-123456789601"
++	session := "019d0000-0000-7000-8000-000000000601"
++	ctx, c, err := preflightreceipt.BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, ex, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		Subject:      pkix.Name{CommonName: "chatgpt.com"},
++		DNSNames:     []string{"chatgpt.com"},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(time.Hour),
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &cert.PublicKey, cert)
++	if err != nil {
++		t.Fatal(err)
++	}
++	leaf, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: sealTestRoundTripper(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode: 200,
++			Header:     make(http.Header),
++			Body:       io.NopCloser(strings.NewReader("")),
++			TLS:        &tls.ConnectionState{HandshakeComplete: true, ServerName: "chatgpt.com", VerifiedChains: [][]*x509.Certificate{{leaf}}},
++		}, nil
++	})})
++	reqUp, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respUp, err := cl.Do(reqUp)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.Copy(io.Discard, respUp.Body)
++	_ = respUp.Body.Close()
++	c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_seal_nobody","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	ex.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	for _, tc := range []struct {
++		name   string
++		header string
++	}{
++		{"positive-content-length", "Content-Length: 1048576\r\n"},
++		{"chunked-body", "Transfer-Encoding: chunked\r\n"},
++	} {
++		conn, err := net.DialTimeout("tcp", srv.Listener.Addr().String(), 2*time.Second)
++		if err != nil {
++			t.Fatalf("%s dial: %v", tc.name, err)
++		}
++		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
++		rawReq := "POST /v1/review-receipts/seal HTTP/1.1\r\n" +
++			"Host: " + srv.Listener.Addr().String() + "\r\n" +
++			tc.header +
++			"Session-Id: " + session + "\r\n" +
++			preflightreceipt.ReviewHeader + ": " + launch + "\r\n" +
++			"\r\n"
++		if _, err := io.WriteString(conn, rawReq); err != nil {
++			_ = conn.Close()
++			t.Fatalf("%s write: %v", tc.name, err)
++		}
++		respBytes, err := io.ReadAll(conn)
++		_ = conn.Close()
++		if err != nil {
++			t.Fatalf("%s read 400 + EOF (must not wait for unread body): %v", tc.name, err)
++		}
++		respStr := string(respBytes)
++		if !strings.HasPrefix(respStr, "HTTP/1.1 400 ") || !strings.Contains(strings.ToLower(respStr), "connection: close") {
++			t.Fatalf("%s unexpected seal rejection response: %q", tc.name, respStr)
++		}
++	}
++
++	// Empty-body seal on the same launch still succeeds cleanly.
++	reqOK, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/review-receipts/seal", nil)
++	reqOK.Header.Set("Session-Id", session)
++	reqOK.Header.Set(preflightreceipt.ReviewHeader, launch)
++	respOK, err := http.DefaultClient.Do(reqOK)
++	if err != nil {
++		t.Fatalf("clean empty-body seal: %v", err)
++	}
++	defer func() { _ = respOK.Body.Close() }()
++	if respOK.StatusCode != http.StatusOK {
++		t.Fatalf("clean empty-body seal HTTP %d, want 200", respOK.StatusCode)
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
@@ -7390,10 +7528,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..eb3d391 100644
+index e69de29..baeb307 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11080 @@
+@@ -0,0 +1,11130 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7570,8 +7708,9 @@ index e69de29..eb3d391 100644
 +	lastTurnFailed        bool
 +	nextTurnSeq           uint64
 +	failedTurnSeq         uint64
-+	pendingFailedTurnSeq  uint64
-+	pendingTaint          bool
++	pendingFailedTurnSeq  atomic.Uint64
++	pendingTaint          atomic.Bool
++	failurePersistQueued  bool
 +	failurePersistRunning bool
 +	reserved              bool
 +	markerPersisted   bool
@@ -7777,6 +7916,9 @@ index e69de29..eb3d391 100644
 +	activeSealFlights             = make(map[string]*sealFlight)
 +	activeSealTotal               atomic.Int64
 +	maxConcurrentSeals            = 16
++	maxFailurePersistWorkers      = 4
++	failurePersistQueue           []*reviewEntry
++	failurePersistWorkers         int
 +	reclaimingKeys                = make(map[string]bool)
 +	pendingReviewLaunches = make(map[string]*pendingReviewState)
 +	pendingReviewTotal    int
@@ -7869,69 +8011,85 @@ index e69de29..eb3d391 100644
 +	})
 +}
 +
-+// scheduleExistingReviewTurnFailureLocked records a rejected turn's sequence/taint under reviewMu
-+// and coalesces synchronous disk persistence so an overload storm on an existing launch cannot
-+// queue unbounded goroutines on entry.mu or fsync; at most one goroutine drains coalesced updates
-+// while holding entry.inFlight > 0 so SealReview cannot race ahead and seal a stale turn.
-+func scheduleExistingReviewTurnFailureLocked(entry *reviewEntry, turnSeq uint64, taint bool) bool {
++// enqueueExistingReviewTurnFailureLocked records a rejected turn's sequence/taint immediately in
++// memory (closing the SealReview race window without blocking the caller on disk/fsync) and queues
++// disk persistence onto a globally bounded worker pool (<= maxFailurePersistWorkers, deduplicated
++// per launch so queue length is bounded by len(reviewLedger)).
++func enqueueExistingReviewTurnFailureLocked(entry *reviewEntry, turnSeq uint64, taint bool) {
 +	if entry == nil || entry.sealedFlag || entry.sealing {
-+		return false
++		return
 +	}
-+	if turnSeq > entry.pendingFailedTurnSeq {
-+		entry.pendingFailedTurnSeq = turnSeq
++	if turnSeq > entry.pendingFailedTurnSeq.Load() {
++		entry.pendingFailedTurnSeq.Store(turnSeq)
 +	}
 +	if taint {
-+		entry.pendingTaint = true
++		entry.pendingTaint.Store(true)
 +	}
-+	if entry.failurePersistRunning {
-+		return false
++	if entry.failurePersistQueued || entry.failurePersistRunning {
++		return
 +	}
-+	entry.failurePersistRunning = true
-+	entry.inFlight++
-+	return true
++	entry.failurePersistQueued = true
++	failurePersistQueue = append(failurePersistQueue, entry)
++	if failurePersistWorkers < maxFailurePersistWorkers {
++		failurePersistWorkers++
++		go runFailurePersistWorker()
++	}
 +}
 +
-+func drainExistingReviewTurnFailures(entry *reviewEntry) {
++func runFailurePersistWorker() {
 +	for {
 +		reviewMu.Lock()
-+		targetSeq := entry.pendingFailedTurnSeq
-+		targetTaint := entry.pendingTaint
-+		reviewMu.Unlock()
-+
-+		entry.mu.Lock()
-+		if !entry.sealed && !entry.tainted {
-+			if targetTaint {
-+				entry.taintAndPersistLocked()
-+			} else {
-+				wasFailed := entry.lastTurnFailed
-+				if targetSeq > entry.failedTurnSeq {
-+					entry.failedTurnSeq = targetSeq
-+				}
-+				latestPubSeq := uint64(0)
-+				if len(entry.publishedTurns) > 0 {
-+					latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
-+				}
-+				entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
-+				if entry.lastTurnFailed && !wasFailed {
-+					if err := entry.persistLocked(); err != nil {
-+						entry.taintAndPersistLocked()
-+					}
-+				}
-+			}
-+		}
-+		doneTerminal := entry.sealed || entry.tainted
-+		entry.mu.Unlock()
-+
-+		reviewMu.Lock()
-+		if doneTerminal || (entry.pendingFailedTurnSeq <= targetSeq && (!entry.pendingTaint || targetTaint)) {
-+			entry.failurePersistRunning = false
-+			if entry.inFlight > 0 {
-+				entry.inFlight--
-+			}
++		if len(failurePersistQueue) == 0 {
++			failurePersistWorkers--
 +			reviewMu.Unlock()
 +			return
 +		}
++		entry := failurePersistQueue[0]
++		failurePersistQueue[0] = nil
++		failurePersistQueue = failurePersistQueue[1:]
++		if len(failurePersistQueue) == 0 {
++			failurePersistQueue = nil
++		}
++		entry.failurePersistQueued = false
++		entry.failurePersistRunning = true
 +		reviewMu.Unlock()
++
++		for {
++			targetSeq := entry.pendingFailedTurnSeq.Load()
++			targetTaint := entry.pendingTaint.Load()
++
++			entry.mu.Lock()
++			if !entry.sealed && !entry.tainted {
++				if targetTaint {
++					entry.taintAndPersistLocked()
++				} else {
++					wasFailed := entry.lastTurnFailed
++					if targetSeq > entry.failedTurnSeq {
++						entry.failedTurnSeq = targetSeq
++					}
++					latestPubSeq := uint64(0)
++					if len(entry.publishedTurns) > 0 {
++						latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
++					}
++					entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
++					if entry.lastTurnFailed && !wasFailed {
++						if err := entry.persistLocked(); err != nil {
++							entry.taintAndPersistLocked()
++						}
++					}
++				}
++			}
++			doneTerminal := entry.sealed || entry.tainted
++			entry.mu.Unlock()
++
++			reviewMu.Lock()
++			if doneTerminal || (entry.pendingFailedTurnSeq.Load() <= targetSeq && (!entry.pendingTaint.Load() || targetTaint)) {
++				entry.failurePersistRunning = false
++				reviewMu.Unlock()
++				break
++			}
++			reviewMu.Unlock()
++		}
 +	}
 +}
 +
@@ -7939,7 +8097,8 @@ index e69de29..eb3d391 100644
 +// HTTP body and assigns the turn's monotonic sequence number up front so earlier concurrent
 +// requests cannot clear a later rejected request's failure. If an existing unsealed launch
 +// or an active brand-new pending launch is rejected due to the global pre-admission cap,
-+// the rejection sequence is recorded atomically before releasing reviewMu.
++// the rejection sequence is recorded atomically before releasing reviewMu and persisted via
++// the globally bounded background worker queue without blocking the rejected request thread.
 +func BeginPendingReview(root, launch string) (*PendingReviewGuard, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) || pathHasDisallowedSymlink(cleanRoot) {
@@ -7967,20 +8126,16 @@ index e69de29..eb3d391 100644
 +		if st != nil && turnSeq > st.failedTurnSeq {
 +			st.failedTurnSeq = turnSeq
 +		}
-+		if entry != nil && scheduleExistingReviewTurnFailureLocked(entry, turnSeq, false) {
-+			reviewMu.Unlock()
-+			drainExistingReviewTurnFailures(entry)
-+			return nil, ErrUnavailable
++		if entry != nil {
++			enqueueExistingReviewTurnFailureLocked(entry, turnSeq, false)
 +		}
 +		reviewMu.Unlock()
 +		return nil, ErrUnavailable
 +	}
 +	if st != nil {
 +		if st.tainted {
-+			if entry != nil && scheduleExistingReviewTurnFailureLocked(entry, turnSeq, true) {
-+				reviewMu.Unlock()
-+				drainExistingReviewTurnFailures(entry)
-+				return nil, ErrUnavailable
++			if entry != nil {
++				enqueueExistingReviewTurnFailureLocked(entry, turnSeq, true)
 +			}
 +			reviewMu.Unlock()
 +			return nil, ErrUnavailable
@@ -7991,10 +8146,8 @@ index e69de29..eb3d391 100644
 +		return &PendingReviewGuard{key: key, turnSeq: turnSeq, holdsSlot: true}, nil
 +	}
 +	if len(pendingReviewLaunches) >= maxPendingReviewLaunches {
-+		if entry != nil && scheduleExistingReviewTurnFailureLocked(entry, turnSeq, false) {
-+			reviewMu.Unlock()
-+			drainExistingReviewTurnFailures(entry)
-+			return nil, ErrUnavailable
++		if entry != nil {
++			enqueueExistingReviewTurnFailureLocked(entry, turnSeq, false)
 +		}
 +		reviewMu.Unlock()
 +		return nil, ErrUnavailable
@@ -13240,9 +13393,9 @@ index e69de29..eb3d391 100644
 +		}, true, nil
 +	}
 +	if validProducer && disk.Sealed {
-+		// A clean sealed directory cannot simultaneously contain an unfinished seal.pending.json
-+		// or any unexpected extra files; treat contradictory disk states as tainted/foreign.
-+		if !verifyReviewDirAllowedEntries(subRoot, true) {
++		// A clean sealed directory cannot simultaneously contain an unfinished seal.pending.json,
++		// a corrupted/foreign producer.json marker, or any unexpected extra files.
++		if !verifyReviewDirAllowedEntries(subRoot, launch, true) {
 +			return &reviewEntry{
 +				directory:        dir,
 +				launch:           launch,
@@ -13353,7 +13506,7 @@ index e69de29..eb3d391 100644
 +			var oldestKey string
 +			var oldestTime time.Time
 +			for k, v := range reviewLedger {
-+				if v.inFlight > 0 || v.sealing || activeSealingKeys[k] > 0 {
++				if v.inFlight > 0 || v.sealing || v.failurePersistQueued || v.failurePersistRunning || activeSealingKeys[k] > 0 {
 +					continue
 +				}
 +				// Never block on entry.mu while holding global reviewMu (e.g. a repeat seal
@@ -13374,7 +13527,7 @@ index e69de29..eb3d391 100644
 +				return false
 +			}
 +			evicted := reviewLedger[oldestKey]
-+			if evicted == nil || evicted.inFlight > 0 || evicted.sealing || activeSealingKeys[oldestKey] > 0 || !evicted.mu.TryLock() {
++			if evicted == nil || evicted.inFlight > 0 || evicted.sealing || evicted.failurePersistQueued || evicted.failurePersistRunning || activeSealingKeys[oldestKey] > 0 || !evicted.mu.TryLock() {
 +				return false
 +			}
 +			delete(reviewLedger, oldestKey)
@@ -13394,7 +13547,7 @@ index e69de29..eb3d391 100644
 +		expiredByRoot := make(map[string][]string)
 +		var unpersistedTaint []unpersistedTaintCand
 +		for k, v := range reviewLedger {
-+			if v.inFlight > 0 || v.sealing || activeSealingKeys[k] > 0 {
++			if v.inFlight > 0 || v.sealing || v.failurePersistQueued || v.failurePersistRunning || activeSealingKeys[k] > 0 {
 +				continue
 +			}
 +			if !v.mu.TryLock() {
@@ -13425,7 +13578,7 @@ index e69de29..eb3d391 100644
 +		}
 +		evictedOne := false
 +		if oldestKey != "" {
-+			if evicted := reviewLedger[oldestKey]; evicted != nil && evicted.inFlight == 0 && !evicted.sealing && activeSealingKeys[oldestKey] == 0 && evicted.mu.TryLock() {
++			if evicted := reviewLedger[oldestKey]; evicted != nil && evicted.inFlight == 0 && !evicted.sealing && !evicted.failurePersistQueued && !evicted.failurePersistRunning && activeSealingKeys[oldestKey] == 0 && evicted.mu.TryLock() {
 +				delete(reviewLedger, oldestKey)
 +				evictedFD := evicted.boundDirFD
 +				evicted.boundDirFD = nil
@@ -13493,7 +13646,7 @@ index e69de29..eb3d391 100644
 +					triedAny = true
 +					reviewMu.Lock()
 +					cur := reviewLedger[cand.key]
-+					if cur == nil || cur != cand.entry || cur.inFlight > 0 || cur.sealing || activeSealingKeys[cand.key] > 0 || reclaimingKeys[cand.key] {
++					if cur == nil || cur != cand.entry || cur.inFlight > 0 || cur.sealing || cur.failurePersistQueued || cur.failurePersistRunning || activeSealingKeys[cand.key] > 0 || reclaimingKeys[cand.key] {
 +						reviewMu.Unlock()
 +						continue
 +					}
@@ -13725,11 +13878,7 @@ index e69de29..eb3d391 100644
 +			reviewMu.Unlock()
 +			return
 +		}
-+		if scheduleExistingReviewTurnFailureLocked(entry, 0, true) {
-+			reviewMu.Unlock()
-+			drainExistingReviewTurnFailures(entry)
-+			return
-+		}
++		enqueueExistingReviewTurnFailureLocked(entry, 0, true)
 +		reviewMu.Unlock()
 +		return
 +	}
@@ -14202,16 +14351,21 @@ index e69de29..eb3d391 100644
 +	return true, nil
 +}
 +
-+// verifyReviewDirAllowedEntries enforces the exact directory-entry allowlist shared by
-+// pre-write inspection, first seal, cold-restart loading, and repeat seal verification.
-+func verifyReviewDirAllowedEntries(subRoot *os.Root, allowSealedFiles bool) bool {
++// verifyReviewDirAllowedEntries enforces the exact directory-entry allowlist and producer.json
++// marker validation shared by pre-write inspection, first seal, cold-restart loading, repeat seal
++// verification, and expired-directory reclamation (inspectProducerReceiptSubdir).
++func verifyReviewDirAllowedEntries(subRoot *os.Root, launch string, allowSealedFiles bool) bool {
 +	entries, trunc, err := readDirCapped(subRoot, maxProducerLeafFiles)
 +	if err != nil || trunc {
 +		return false
 +	}
 +	for _, de := range entries {
 +		switch de.Name() {
-+		case "receipt.json", "producer.json":
++		case "receipt.json":
++		case "producer.json":
++			if !verifyProducerMarkerInSubdir(subRoot, launch) {
++				return false
++			}
 +		case "seal.sha256":
 +			if !allowSealedFiles {
 +				return false
@@ -14258,8 +14412,8 @@ index e69de29..eb3d391 100644
 +		return SealRejected, "", 0, 0, false, nil
 +	}
 +	// Enforce exact sealed directory shape shared with first seal and inspectProducerReceiptSubdir:
-+	// reject contradictory seal.pending.json or unexpected extra files before confirming SealOK.
-+	if !verifyReviewDirAllowedEntries(subRoot, true) {
++	// reject contradictory seal.pending.json, invalid producer.json, or unexpected extra files before confirming SealOK.
++	if !verifyReviewDirAllowedEntries(subRoot, launch, true) {
 +		return SealRejected, "", 0, 0, false, nil
 +	}
 +	// Always confirm launch, root, and pinned root-parent fsyncs plus active root/launch inode binding
@@ -14702,6 +14856,17 @@ index e69de29..eb3d391 100644
 +			entry.mu.Unlock()
 +			finishSeal(false)
 +			return SealUnavailable, ""
++		}
++		if entry.pendingTaint.Load() && !entry.tainted {
++			entry.taintAndPersistLocked()
++		}
++		if pf := entry.pendingFailedTurnSeq.Load(); pf > entry.failedTurnSeq {
++			entry.failedTurnSeq = pf
++			latestPubSeq := uint64(0)
++			if len(entry.publishedTurns) > 0 {
++				latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
++			}
++			entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
 +		}
 +		if entry.tainted || entry.lastTurnFailed || entry.requests < 1 || entry.route == "" || !isSHA256Hex(entry.lastResponseIDSHA) ||
 +			len(entry.responseIDSHAs) != entry.requests || entry.responseIDSHAs[len(entry.responseIDSHAs)-1] != entry.lastResponseIDSHA {
@@ -16655,13 +16820,13 @@ index e69de29..eb3d391 100644
 +		for k, b := range sealedBindings {
 +			if b.dirFD != nil && strings.HasPrefix(k, prefix) && now.Sub(b.recordedAt) >= retention &&
 +				pendingReviewLaunches[k] == nil && activeSealingKeys[k] == 0 && !reclaimingKeys[k] {
-+				if ent := reviewLedger[k]; ent == nil || (ent.inFlight == 0 && !ent.sealing && now.Sub(ent.touched) >= retention) {
++				if ent := reviewLedger[k]; ent == nil || (ent.inFlight == 0 && !ent.sealing && !ent.failurePersistQueued && !ent.failurePersistRunning && now.Sub(ent.touched) >= retention) {
 +					pinnedSet[strings.TrimPrefix(k, prefix)] = struct{}{}
 +				}
 +			}
 +		}
 +		for k, ent := range reviewLedger {
-+			if ent != nil && ent.inFlight == 0 && !ent.sealing && strings.HasPrefix(k, prefix) && now.Sub(ent.touched) >= retention &&
++			if ent != nil && ent.inFlight == 0 && !ent.sealing && !ent.failurePersistQueued && !ent.failurePersistRunning && strings.HasPrefix(k, prefix) && now.Sub(ent.touched) >= retention &&
 +				pendingReviewLaunches[k] == nil && activeSealingKeys[k] == 0 && !reclaimingKeys[k] {
 +				if b, ok := sealedBindings[k]; ok && now.Sub(b.recordedAt) < retention {
 +					continue
@@ -16809,7 +16974,7 @@ index e69de29..eb3d391 100644
 +				continue
 +			}
 +			if ent := reviewLedger[key]; ent != nil {
-+				if ent.inFlight > 0 || ent.sealing || now.Sub(ent.touched) < retention {
++				if ent.inFlight > 0 || ent.sealing || ent.failurePersistQueued || ent.failurePersistRunning || now.Sub(ent.touched) < retention {
 +					reviewMu.Unlock()
 +					continue
 +				}
@@ -17677,6 +17842,23 @@ index e69de29..eb3d391 100644
 +			return nil, ErrUnavailable
 +		}
 +	}
++	// Reject close-delimited HTTP/1.x 2xx upstream responses (no Content-Length and no chunked
++	// Transfer-Encoding): Go's crypto/tls reports a truncated TCP FIN at a TLS record boundary
++	// (without close_notify) as ordinary io.EOF, which would falsely satisfy upstream EOF framing.
++	// HTTP/2 (END_STREAM), chunked encoding (0\r\n\r\n), and explicit Content-Length enforce independent framing.
++	hasChunkedTE := len(resp.TransferEncoding) > 0 && strings.EqualFold(resp.TransferEncoding[len(resp.TransferEncoding)-1], "chunked")
++	if resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ProtoMajor < 2 && resp.ContentLength < 0 && !hasChunkedTE {
++		if resp.Body != nil {
++			_ = resp.Body.Close()
++		}
++		if strict {
++			c.Taint()
++		} else {
++			c.Reject()
++		}
++		finish()
++		return nil, ErrUnavailable
++	}
 +	c.mu.Lock()
 +	c.receipt.Routes[slot] = observed
 +	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -17774,10 +17956,10 @@ index e69de29..eb3d391 100644
 +		}
 +		return diskReceiptPreserveUntouched
 +	}
-+	// Enforce the same directory entry allowlist as repeat/cold-restart seal verification before
-+	// writing or first-sealing so pre-existing unexpected files never get confirmed SealOK once
-+	// and then rejected on repeat verification.
-+	if !verifyReviewDirAllowedEntries(launchRoot, false) {
++	// Enforce the same directory entry allowlist and producer.json validation as repeat/cold-restart
++	// seal verification before writing or first-sealing so corrupted markers or pre-existing unexpected
++	// files never get confirmed SealOK once and then rejected on repeat verification or reclamation.
++	if !verifyReviewDirAllowedEntries(launchRoot, e.launch, false) {
 +		return diskReceiptPreserveUntouched
 +	}
 +	finfo, err := launchRoot.Lstat("receipt.json")
@@ -18244,7 +18426,7 @@ index e69de29..eb3d391 100644
 +		if err := syncSealAncestorsForSubRoot(rootLease, launchRoot, e.launch, e.directory, root, launchDev, launchIno, hasLaunchID); err != nil {
 +			return fail(true, err)
 +		}
-+		if sealed && !verifyReviewDirAllowedEntries(launchRoot, true) {
++		if sealed && !verifyReviewDirAllowedEntries(launchRoot, e.launch, true) {
 +			e.tainted = true
 +			e.sealed = false
 +			e.sealedAt = 0
@@ -18270,6 +18452,9 @@ index e69de29..eb3d391 100644
 +			entry := c.review
 +			entry.mu.Lock()
 +			if !entry.sealed && !entry.tainted {
++				if pf := entry.pendingFailedTurnSeq.Load(); pf > entry.failedTurnSeq {
++					entry.failedTurnSeq = pf
++				}
 +				if c.reviewTurnSeq > entry.failedTurnSeq {
 +					entry.failedTurnSeq = c.reviewTurnSeq
 +				}
@@ -18319,7 +18504,7 @@ index e69de29..eb3d391 100644
 +		if entry.sealed {
 +			return
 +		}
-+		if entry.tainted || modelMismatch {
++		if entry.tainted || entry.pendingTaint.Load() || modelMismatch {
 +			entry.taintAndPersistLocked()
 +			return
 +		}
@@ -18367,6 +18552,9 @@ index e69de29..eb3d391 100644
 +		entry.requests = len(entry.publishedTurns)
 +		entry.lastResponseIDSHA = latest.responseID
 +		entry.lastOutputSHA = latest.outputSHA
++		if pf := entry.pendingFailedTurnSeq.Load(); pf > entry.failedTurnSeq {
++			entry.failedTurnSeq = pf
++		}
 +		entry.lastTurnFailed = entry.failedTurnSeq > latest.seq
 +		if finished > entry.finished {
 +			entry.finished = finished
@@ -18475,10 +18663,10 @@ index e69de29..eb3d391 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..18db7c4 100644
+index e69de29..eb06d38 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,12254 @@
+@@ -0,0 +1,12600 @@
 +package preflightreceipt
 +
 +import (
@@ -30731,5 +30919,351 @@ index e69de29..18db7c4 100644
 +	reviewMu.Unlock()
 +	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealRejected || dig != "" {
 +		t.Fatalf("cold-restart seal after rejected first seal = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++}
++
++func TestReviewReceiptRejectsCloseDelimitedUpstreamTLSAndRequiresFramedEOF(t *testing.T) {
++	// Sol P1 #1 (PR #2280 R69): real TLS HTTP/1.1 close-delimited upstream responses (no Content-Length
++	// and no Transfer-Encoding: chunked) MUST be rejected/tainted because Go crypto/tls reports a
++	// TCP FIN at a TLS record boundary without close_notify as ordinary io.EOF. Chunked responses
++	// require the explicit 0\r\n\r\n terminator and fail closed if truncated.
++	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber:          big.NewInt(42),
++		Subject:               pkix.Name{CommonName: "chatgpt.com"},
++		DNSNames:              []string{"chatgpt.com"},
++		NotBefore:             time.Now().Add(-time.Hour),
++		NotAfter:              time.Now().Add(time.Hour),
++		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
++		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++		BasicConstraintsValid: true,
++		IsCA:                  true,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caKey.PublicKey, caKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	leafCert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pool := x509.NewCertPool()
++	pool.AddCert(leafCert)
++	serverTLS := &tls.Config{
++		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: caKey}},
++	}
++
++	ssePayload := "event: response.completed\ndata: " +
++		`{"type":"response.completed","response":{"id":"resp_tls_framed","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` +
++		"\n\n"
++
++	var mode atomic.Value
++	mode.Store("close-delimited")
++
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = ln.Close() }()
++
++	go func() {
++		for {
++			rawConn, aerr := ln.Accept()
++			if aerr != nil {
++				return
++			}
++			go func(c net.Conn) {
++				tlsConn := tls.Server(c, serverTLS)
++				defer func() { _ = tlsConn.Close() }()
++				_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
++				if err := tlsConn.Handshake(); err != nil {
++					return
++				}
++				// Drain HTTP request headers + fixed Content-Length body.
++				buf := make([]byte, 4096)
++				n, _ := tlsConn.Read(buf)
++				_ = n
++				switch mode.Load().(string) {
++				case "close-delimited":
++					// HTTP/1.1 200 without Content-Length or Transfer-Encoding; close raw TCP without TLS close_notify.
++					_, _ = io.WriteString(tlsConn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"+ssePayload)
++					_ = c.Close()
++				case "chunked-truncated":
++					// Chunked payload delivered cleanly, then TCP dropped BEFORE 0\r\n\r\n without close_notify.
++					_, _ = io.WriteString(tlsConn, fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n%s\r\n", len(ssePayload), ssePayload))
++					_ = c.Close()
++				case "chunked-complete":
++					_, _ = io.WriteString(tlsConn, fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n%s\r\n0\r\n\r\n", len(ssePayload), ssePayload))
++					_ = tlsConn.CloseWrite()
++				}
++			}(rawConn)
++		}
++	}()
++
++	makeClient := func(ctx context.Context) *http.Client {
++		tr := &http.Transport{
++			TLSClientConfig: &tls.Config{
++				RootCAs:    pool,
++				ServerName: "chatgpt.com",
++			},
++			DialContext: func(dctx context.Context, network, _ string) (net.Conn, error) {
++				var d net.Dialer
++				return d.DialContext(dctx, "tcp", ln.Addr().String())
++			},
++			DisableKeepAlives: true,
++		}
++		return httptransport.Decorate(ctx, &http.Client{Transport: tr, Timeout: 5 * time.Second})
++	}
++
++	root := filepath.Join(t.TempDir(), "tls-framing")
++	runCase := func(caseMode, launch, session string) (error, error, SealStatus) {
++		mode.Store(caseMode)
++		ctx, col, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s BeginReview: %v", caseMode, err)
++		}
++		ctx, ex, err := col.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s Start: %v", caseMode, err)
++		}
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, rtErr := makeClient(ctx).Do(req)
++		var readErr error
++		if rtErr == nil && resp != nil {
++			data, rerr := io.ReadAll(resp.Body)
++			readErr = rerr
++			if len(data) > 0 {
++				col.ObserveStreamChunk(data)
++			}
++			_ = resp.Body.Close()
++		}
++		ex.End()
++		col.Complete(rtErr == nil && readErr == nil)
++		col.HandlerDone(rtErr == nil && readErr == nil)
++		st, _ := SealReviewWithDigest(root, launch, session)
++		return rtErr, readErr, st
++	}
++
++	// 1. Close-delimited HTTP/1.1 TLS response -> rejected in RoundTrip, cannot seal.
++	if rtErr, _, st := runCase("close-delimited", "review-ff9a9a9a-2222-4333-8444-555555555501", "019d0000-0000-7000-8000-00000000f901"); !errors.Is(rtErr, ErrUnavailable) || st != SealRejected {
++		t.Fatalf("close-delimited TLS = (rtErr=%v, seal=%v), want (ErrUnavailable, SealRejected)", rtErr, st)
++	}
++	// 2. Truncated chunked HTTP/1.1 TLS response (no 0\r\n\r\n) -> read error, cannot seal.
++	if rtErr, readErr, st := runCase("chunked-truncated", "review-ff9a9a9a-2222-4333-8444-555555555502", "019d0000-0000-7000-8000-00000000f902"); rtErr != nil || readErr == nil || st != SealRejected {
++		t.Fatalf("chunked-truncated TLS = (rtErr=%v, readErr=%v, seal=%v), want (nil, non-nil, SealRejected)", rtErr, readErr, st)
++	}
++	// 3. Complete chunked HTTP/1.1 TLS response (with 0\r\n\r\n) -> seals cleanly.
++	if rtErr, readErr, st := runCase("chunked-complete", "review-ff9a9a9a-2222-4333-8444-555555555503", "019d0000-0000-7000-8000-00000000f903"); rtErr != nil || readErr != nil || st != SealOK {
++		t.Fatalf("chunked-complete TLS = (rtErr=%v, readErr=%v, seal=%v), want (nil, nil, SealOK)", rtErr, readErr, st)
++	}
++}
++
++func TestSealRejectsCorruptedOrWrongLaunchProducerMarker(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R69): corrupted, permissive, or wrong-launch producer.json MUST be
++	// rejected identically by first seal, repeat seal, cold-restart seal, and reaper inspection.
++	root := filepath.Join(t.TempDir(), "bad-producer-marker")
++	runClean := func(launch, session string) {
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_marker","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++	}
++
++	// 1. Wrong-launch producer.json before FIRST seal -> SealRejected.
++	l1 := "review-ff9b9b9b-2222-4333-8444-555555555501"
++	s1 := "019d0000-0000-7000-8000-00000000f911"
++	runClean(l1, s1)
++	wrongMarker, err := marshalReservationMarker("review-ff9b9b9b-2222-4333-8444-555555555599", time.Now().UnixNano())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, l1, "producer.json"), wrongMarker, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st, dig := SealReviewWithDigest(root, l1, s1); st != SealRejected || dig != "" {
++		t.Fatalf("first seal with wrong-launch producer.json = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++
++	// 2. Clean first seal, then corrupt producer.json -> repeat & cold-restart seal BOTH SealRejected.
++	l2 := "review-ff9b9b9b-2222-4333-8444-555555555502"
++	s2 := "019d0000-0000-7000-8000-00000000f912"
++	runClean(l2, s2)
++	if st, dig := SealReviewWithDigest(root, l2, s2); st != SealOK || dig == "" {
++		t.Fatalf("clean first seal l2 = (%v, %q), want SealOK", st, dig)
++	}
++	if err := os.WriteFile(filepath.Join(root, l2, "producer.json"), []byte(`{"broken":true}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if st, dig := SealReviewWithDigest(root, l2, s2); st != SealRejected || dig != "" {
++		t.Fatalf("repeat seal with corrupted producer.json = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	key2 := filepath.Clean(root) + "\x00" + l2
++	reviewMu.Lock()
++	delete(reviewLedger, key2)
++	if b, ok := sealedBindings[key2]; ok {
++		closeBudgetedPinnedDirFD(b.dirFD)
++		delete(sealedBindings, key2)
++	}
++	reviewMu.Unlock()
++	if st, dig := SealReviewWithDigest(root, l2, s2); st != SealRejected || dig != "" {
++		t.Fatalf("cold-restart seal with corrupted producer.json = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++}
++
++func TestOverloadTurnFailuresUseGloballyBoundedPersistQueue(t *testing.T) {
++	// Astra P1 #1 (PR #2280 R69): when the global 32-slot pre-admission cap is saturated and many
++	// distinct unsealed launches hit overload simultaneously under slow disk sync, rejected callers
++	// MUST return ErrUnavailable immediately without blocking on fsync, concurrent disk persistence
++	// MUST stay bounded by maxFailurePersistWorkers (4), and SealReview MUST NOT seal stale turns.
++	root := filepath.Join(t.TempDir(), "bounded-overload-queue")
++	const nLaunches = 12
++	launches := make([]string, nLaunches)
++	sessions := make([]string, nLaunches)
++	for i := 0; i < nLaunches; i++ {
++		launches[i] = fmt.Sprintf("review-ff9c9c9c-2222-4333-8444-5555555555%02d", i)
++		sessions[i] = fmt.Sprintf("019d0000-0000-7000-8000-00000000f9%02d", i)
++		ctx, c, err := BeginReview(context.Background(), root, launches[i], sessions[i], "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk([]byte("event: response.completed\ndata: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_ovl_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`, i) + "\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++	}
++
++	// Saturate all global pre-admission slots.
++	fill := make([]*PendingReviewGuard, 0, maxPendingReviewInFlight)
++	for i := 0; i < maxPendingReviewInFlight; i++ {
++		g, err := BeginPendingReview(root, fmt.Sprintf("review-ff9d9d9d-2222-4333-8444-5555555555%02d", i))
++		if err != nil {
++			for _, h := range fill {
++				h.Release()
++			}
++			t.Fatalf("fill slot %d: %v", i, err)
++		}
++		fill = append(fill, g)
++	}
++	defer func() {
++		for _, h := range fill {
++			h.Release()
++		}
++	}()
++
++	var activeSync atomic.Int64
++	var peakSync atomic.Int64
++	syncStarted := make(chan struct{}, nLaunches)
++	releaseSync := make(chan struct{})
++	oldSync := syncDirFn
++	syncDirFn = func(dir string) error {
++		cur := activeSync.Add(1)
++		for {
++			prev := peakSync.Load()
++			if cur <= prev || peakSync.CompareAndSwap(prev, cur) {
++				break
++			}
++		}
++		syncStarted <- struct{}{}
++		<-releaseSync
++		activeSync.Add(-1)
++		return defaultSyncDir(dir)
++	}
++	defer func() { syncDirFn = oldSync }()
++
++	// Overload all 12 distinct launches concurrently: every BeginPendingReview MUST return immediately!
++	done := make(chan error, nLaunches)
++	for i := 0; i < nLaunches; i++ {
++		go func(idx int) {
++			_, err := BeginPendingReview(root, launches[idx])
++			done <- err
++		}(i)
++	}
++	for i := 0; i < nLaunches; i++ {
++		select {
++		case err := <-done:
++			if !errors.Is(err, ErrUnavailable) {
++				close(releaseSync)
++				t.Fatalf("overloaded BeginPendingReview %d err = %v, want ErrUnavailable", i, err)
++			}
++		case <-time.After(2 * time.Second):
++			close(releaseSync)
++			t.Fatalf("overloaded BeginPendingReview %d blocked on slow disk sync instead of returning immediately", i)
++		}
++	}
++
++	// Wait for the bounded worker pool to fill, then verify concurrency never exceeds maxFailurePersistWorkers.
++	for i := 0; i < maxFailurePersistWorkers; i++ {
++		select {
++		case <-syncStarted:
++		case <-time.After(3 * time.Second):
++			close(releaseSync)
++			t.Fatalf("expected %d background persist workers to start, got %d", maxFailurePersistWorkers, i)
++		}
++	}
++	time.Sleep(50 * time.Millisecond)
++	if peak := peakSync.Load(); peak > int64(maxFailurePersistWorkers) {
++		close(releaseSync)
++		t.Fatalf("peak concurrent failure persist fsyncs = %d, exceeds bound %d", peak, maxFailurePersistWorkers)
++	}
++
++	close(releaseSync)
++	// Wait until all queued background persistence workers drain cleanly before restoring syncDirFn.
++	deadline := time.Now().Add(5 * time.Second)
++	for time.Now().Before(deadline) {
++		reviewMu.Lock()
++		idle := failurePersistWorkers == 0 && len(failurePersistQueue) == 0
++		reviewMu.Unlock()
++		if idle {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	reviewMu.Lock()
++	leftWorkers, leftQueue := failurePersistWorkers, len(failurePersistQueue)
++	reviewMu.Unlock()
++	if leftWorkers != 0 || leftQueue != 0 {
++		t.Fatalf("failure persist pool did not drain: workers=%d queue=%d", leftWorkers, leftQueue)
++	}
++
++	// None of the 12 overloaded launches may seal their stale Turn 1.
++	for i := 0; i < nLaunches; i++ {
++		if st, dig := SealReviewWithDigest(root, launches[i], sessions[i]); st != SealRejected || dig != "" {
++			t.Fatalf("SealReviewWithDigest launch %d after overload = (%v, %q), want (SealRejected, \"\")", i, st, dig)
++		}
 +	}
 +}

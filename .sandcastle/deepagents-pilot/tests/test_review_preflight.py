@@ -461,7 +461,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "obs-text-reason", "empty-reason", "missing-status-sp", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "obs-text-reason", "empty-reason", "missing-status-sp", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-chunk-ext-trailing-ws-name", "bad-chunk-ext-trailing-ws-val", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -640,6 +640,10 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"XX0\r\n\r\n")
                 elif framing == "bad-chunk-ext":
                     self.wfile.write(f"{len(payload):x};bad ext=1\r\n".encode() + payload + b"\r\n0\r\n\r\n")
+                elif framing == "bad-chunk-ext-trailing-ws-name":
+                    self.wfile.write(f"{len(payload):x};flag \r\n".encode() + payload + b"\r\n0\r\n\r\n")
+                elif framing == "bad-chunk-ext-trailing-ws-val":
+                    self.wfile.write(f"{len(payload):x};k=v\t\r\n".encode() + payload + b"\r\n0\r\n\r\n")
                 elif framing == "valid-chunk-ext":
                     self.wfile.write(f'{len(payload):x};ext="v\\\\1";flag\r\n'.encode() + payload + b"\r\n0\r\n\r\n")
                 else:
@@ -681,7 +685,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             assert result["error"]["exception"] == "IncompleteRead"
         if framing in ("status-204", "status-201"):
             assert result["http_status"] == int(framing.split("-")[1])
-        if framing in ("early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "gzip-encoding", "neg-chunk", "bad-chunk-sep", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-trailer", "bad-trailer-space"):
+        if framing in ("early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "gzip-encoding", "neg-chunk", "bad-chunk-sep", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-chunk-ext-trailing-ws-name", "bad-chunk-ext-trailing-ws-val", "bad-trailer", "bad-trailer-space"):
             assert result["error"]["exception"] == "HTTPException"
         if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed

@@ -466,9 +466,12 @@ def _is_valid_chunk_ext(raw: bytes) -> bool:
             i += 1
         if i == name_start:
             return False
+        ws_start = i
         while i < n and raw[i] in (32, 9):
             i += 1
-        if i < n and raw[i] == 61:  # '='
+        if i == n:
+            return i == ws_start
+        if raw[i] == 61:  # '='
             i += 1
             while i < n and raw[i] in (32, 9):
                 i += 1
@@ -503,10 +506,11 @@ def _is_valid_chunk_ext(raw: bytes) -> bool:
                     i += 1
                 if i == val_start:
                     return False
+            val_ws_start = i
             while i < n and raw[i] in (32, 9):
                 i += 1
-        if i == n:
-            return True
+            if i == n:
+                return i == val_ws_start
         if raw[i] == 59:  # ';'
             i += 1
             continue
