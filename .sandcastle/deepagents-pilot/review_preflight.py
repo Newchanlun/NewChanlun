@@ -588,6 +588,8 @@ class _StrictHTTPResponse:
         total_bytes = 0
         fp = self._fp
         if self.chunked:
+            framing_bytes = 0
+            max_framing_bytes = max(4096, max_total_bytes)
             while True:
                 if deadline is not None and deadline.work_left() <= 0:
                     return
@@ -596,6 +598,10 @@ class _StrictHTTPResponse:
                     raise http.client.LineTooLong("chunk size")
                 if not size_line or not size_line.endswith(b"\r\n"):
                     raise http.client.IncompleteRead(b"")
+                framing_bytes += len(size_line)
+                if framing_bytes > max_framing_bytes:
+                    self.close()
+                    raise _SSEReadLimitError("chunked 分帧开销超过字节上限")
                 size_head, sep, ext_raw = size_line[:-2].partition(b";")
                 size_token = size_head.rstrip(b" \t") if sep else size_head
                 if not _CHUNK_SIZE_HEX_RE.fullmatch(size_token):
@@ -614,8 +620,12 @@ class _StrictHTTPResponse:
                         if not tline:
                             raise http.client.IncompleteRead(b"")
                         total_trailer_bytes += len(tline)
+                        framing_bytes += len(tline)
                         if total_trailer_bytes > 65536:
                             raise http.client.LineTooLong("trailer section")
+                        if framing_bytes > max_framing_bytes:
+                            self.close()
+                            raise _SSEReadLimitError("chunked 分帧开销超过字节上限")
                         if tline == b"\r\n":
                             break
                         if not tline.endswith(b"\r\n"):
@@ -638,6 +648,10 @@ class _StrictHTTPResponse:
                     if total_bytes > max_total_bytes:
                         raise _SSEReadLimitError("SSE 响应超过大小上限")
                     yield data
+                framing_bytes += 2
+                if framing_bytes > max_framing_bytes:
+                    self.close()
+                    raise _SSEReadLimitError("chunked 分帧开销超过字节上限")
                 if _read_exact_fp(fp, 2) != b"\r\n":
                     raise http.client.HTTPException("invalid chunk terminator")
             return

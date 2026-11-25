@@ -7529,10 +7529,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..5e8d849 100644
+index e69de29..6b34ee1 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,11141 @@
+@@ -0,0 +1,11158 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -13460,7 +13460,8 @@ index e69de29..5e8d849 100644
 +			}
 +			keepTouched := true
 +			if entry.inFlight == 0 && !entry.sealing && entry.mu.TryLock() {
-+				keepTouched = !(entry.tainted && entry.taintedPersisted)
++				expired := entry.started > 0 && now.UnixNano()-entry.started > int64(MaxReviewDuration)
++				keepTouched = !(entry.tainted && entry.taintedPersisted) && !expired
 +				entry.mu.Unlock()
 +			}
 +			if keepTouched {
@@ -13765,6 +13766,11 @@ index e69de29..5e8d849 100644
 +		}
 +	}
 +	entry.mu.Unlock()
++	reviewMu.Lock()
++	if now := time.Now(); now.After(entry.touched) {
++		entry.touched = now
++	}
++	reviewMu.Unlock()
 +	return &ReviewReservation{entry: entry}, nil
 +}
 +
@@ -13779,7 +13785,6 @@ index e69de29..5e8d849 100644
 +	}
 +	root = cleanRoot
 +	key := root + "\x00" + launch
-+	now := time.Now()
 +	reviewMu.Lock()
 +	if reclaimingKeys[key] {
 +		reviewMu.Unlock()
@@ -13795,7 +13800,8 @@ index e69de29..5e8d849 100644
 +			reviewMu.Unlock()
 +			return nil, true, ErrUnavailable
 +		}
-+		entry.touched = now
++		// Do NOT refresh entry.touched before pendingTainted / tainted / MaxReviewDuration checks;
++		// finishReserveReviewEntry refreshes entry.touched only once the turn is actually admitted.
 +		entry.inFlight++
 +		reviewMu.Unlock()
 +		if pendingTainted {
@@ -14545,14 +14551,6 @@ index e69de29..5e8d849 100644
 +		reviewMu.Unlock()
 +		return SealUnavailable, ""
 +	}
-+	if st := pendingReviewLaunches[key]; st != nil && st.count > 0 {
-+		reviewMu.Unlock()
-+		return SealInFlight, ""
-+	}
-+	if ent := reviewLedger[key]; ent != nil && !ent.sealedFlag && (ent.sealing || ent.inFlight > 0) {
-+		reviewMu.Unlock()
-+		return SealInFlight, ""
-+	}
 +	if existingFlight := activeSealFlights[key]; existingFlight != nil {
 +		if existingFlight.session != session {
 +			reviewMu.Unlock()
@@ -14565,6 +14563,14 @@ index e69de29..5e8d849 100644
 +		case <-ctx.Done():
 +			return SealUnavailable, ""
 +		}
++	}
++	if st := pendingReviewLaunches[key]; st != nil && st.count > 0 {
++		reviewMu.Unlock()
++		return SealInFlight, ""
++	}
++	if ent := reviewLedger[key]; ent != nil && !ent.sealedFlag && (ent.sealing || ent.inFlight > 0) {
++		reviewMu.Unlock()
++		return SealInFlight, ""
 +	}
 +	flight := &sealFlight{
 +		done:    make(chan struct{}),
@@ -14770,7 +14776,8 @@ index e69de29..5e8d849 100644
 +		entry.sealing = true
 +		keepTouched := true
 +		if entry.mu.TryLock() {
-+			keepTouched = !(entry.tainted && entry.taintedPersisted)
++			expired := entry.started > 0 && now.UnixNano()-entry.started > int64(MaxReviewDuration)
++			keepTouched = !(entry.tainted && entry.taintedPersisted) && !expired
 +			entry.mu.Unlock()
 +		}
 +		if keepTouched {
@@ -16597,6 +16604,14 @@ index e69de29..5e8d849 100644
 +		_ = subRoot.Close()
 +		return nil, 0, 0, time.Time{}, nil, false
 +	}
++	// Formal review directories always retain producer.json; require it here to match seal
++	// verification (verifyReviewDirAllowedEntries) so directories missing producer.json are
++	// neither confirmed SealOK nor deleted as producer-owned by quota reclamation.
++	// Legacy preflight deletes producer.json on publication and keeps its own rule above.
++	if reviewBucket && !hasProducerMarker {
++		_ = subRoot.Close()
++		return nil, 0, 0, time.Time{}, nil, false
++	}
 +	if reviewBucket {
 +		if reviewSealed {
 +			if !hasSealFile || hasSealPending {
@@ -17854,16 +17869,18 @@ index e69de29..5e8d849 100644
 +			return nil, ErrUnavailable
 +		}
 +	}
-+	// Reject close-delimited HTTP/1.x 2xx upstream responses (no Content-Length and no chunked
-+	// Transfer-Encoding): Go's crypto/tls reports a truncated TCP FIN at a TLS record boundary
-+	// (without close_notify) as ordinary io.EOF, which would falsely satisfy upstream EOF framing.
-+	// HTTP/2 (END_STREAM), chunked encoding (0\r\n\r\n), and explicit Content-Length enforce independent framing.
++	// Reject close-delimited HTTP/1.x upstream responses for ALL status codes carrying a body
++	// (no Content-Length and no chunked Transfer-Encoding): Go's crypto/tls reports a truncated
++	// TCP FIN at a TLS record boundary (without close_notify) as ordinary io.EOF, which would
++	// falsely count even a truncated 503 retry attempt as a complete read. HTTP/2 (END_STREAM),
++	// chunked encoding (0\r\n\r\n), and explicit Content-Length enforce independent framing.
++	hasResponseBody := resp.Body != nil && resp.Body != http.NoBody &&
++		resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified &&
++		!(resp.StatusCode >= 100 && resp.StatusCode < 200)
 +	hasChunkedTE := len(resp.TransferEncoding) > 0 && strings.EqualFold(resp.TransferEncoding[len(resp.TransferEncoding)-1], "chunked")
-+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ProtoMajor < 2 && resp.ContentLength < 0 && !hasChunkedTE {
-+		if resp.Body != nil {
-+			_ = resp.Body.Close()
-+		}
-+		if strict {
++	if hasResponseBody && resp.ProtoMajor < 2 && resp.ContentLength < 0 && !hasChunkedTE {
++		_ = resp.Body.Close()
++		if strict && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 +			c.Taint()
 +		} else {
 +			c.Reject()
@@ -18675,10 +18692,10 @@ index e69de29..5e8d849 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..9756828 100644
+index e69de29..a25d359 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,12687 @@
+@@ -0,0 +1,12925 @@
 +package preflightreceipt
 +
 +import (
@@ -24752,15 +24769,22 @@ index e69de29..9756828 100644
 +	if err := os.WriteFile(filepath.Join(d3, "receipt.json"), sealedRec, 0600); err != nil {
 +		t.Fatal(err)
 +	}
++	marker3, err := marshalReservationMarker(l3, ancient.UnixNano())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(d3, "producer.json"), marker3, 0600); err != nil {
++		t.Fatal(err)
++	}
 +	if _, ok := inspectProducerReceiptDir(d3, l3, true); ok {
 +		t.Fatalf("inspectProducerReceiptDir accepted sealed=true review dir without seal.sha256")
 +	}
-+	// Adding exact 64-hex seal.sha256 makes it a verified producer-owned sealed dir.
++	// Adding exact 64-hex seal.sha256 alongside valid producer.json makes it a verified producer-owned sealed dir.
 +	if err := os.WriteFile(filepath.Join(d3, "seal.sha256"), []byte(sha256Hex(string(sealedRec))), 0600); err != nil {
 +		t.Fatal(err)
 +	}
 +	if _, ok := inspectProducerReceiptDir(d3, l3, true); !ok {
-+		t.Fatalf("inspectProducerReceiptDir rejected valid sealed review dir with matching seal.sha256")
++		t.Fatalf("inspectProducerReceiptDir rejected valid sealed review dir with matching seal.sha256 and producer.json")
 +	}
 +}
 +
@@ -26231,6 +26255,15 @@ index e69de29..9756828 100644
 +	if err := os.WriteFile(recPath, recBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
++	markerBytes, err := marshalReservationMarker(launch, ancient.UnixNano())
++	if err != nil {
++		t.Fatal(err)
++	}
++	markerPath := filepath.Join(dir, "producer.json")
++	if err := os.WriteFile(markerPath, markerBytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = os.Chtimes(markerPath, ancient, ancient)
 +	_ = os.Chtimes(recPath, ancient, ancient)
 +	_ = os.Chtimes(dir, ancient, ancient)
 +
@@ -31364,5 +31397,227 @@ index e69de29..9756828 100644
 +		if st, dig := SealReviewWithDigest(root, launches[i], sessions[i]); st != SealRejected || dig != "" {
 +			t.Fatalf("SealReviewWithDigest launch %d after overload = (%v, %q), want (SealRejected, \"\")", i, st, dig)
 +		}
++	}
++}
++
++func TestR72ReviewCloseDelimited503MissingMarkerFirstSealCoalesceAndStaleTouch(t *testing.T) {
++	// 1. Astra P1 #1 (PR #2280 R71): close-delimited HTTP/1.1 503 attempt 1 followed by clean
++	//    chunked 200 attempt 2 within the same request MUST NOT publish or seal a receipt.
++	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber:          big.NewInt(72),
++		Subject:               pkix.Name{CommonName: "chatgpt.com"},
++		DNSNames:              []string{"chatgpt.com"},
++		NotBefore:             time.Now().Add(-time.Hour),
++		NotAfter:              time.Now().Add(time.Hour),
++		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
++		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++		BasicConstraintsValid: true,
++		IsCA:                  true,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caKey.PublicKey, caKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	leafCert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pool := x509.NewCertPool()
++	pool.AddCert(leafCert)
++	serverTLS := &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: caKey}}}
++
++	ssePayload := "event: response.completed\ndata: " +
++		`{"type":"response.completed","response":{"id":"resp_503_retry","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` +
++		"\n\n"
++	var attemptNum atomic.Int64
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = ln.Close() }()
++	go func() {
++		for {
++			rawConn, aerr := ln.Accept()
++			if aerr != nil {
++				return
++			}
++			go func(c net.Conn) {
++				tlsConn := tls.Server(c, serverTLS)
++				defer func() { _ = tlsConn.Close() }()
++				_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
++				if err := tlsConn.Handshake(); err != nil {
++					return
++				}
++				buf := make([]byte, 4096)
++				_, _ = tlsConn.Read(buf)
++				if attemptNum.Add(1) == 1 {
++					// Attempt 1: HTTP/1.1 503 close-delimited (no CL, no TE), TCP drop without close_notify.
++					_, _ = io.WriteString(tlsConn, "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\noverloaded")
++					_ = c.Close()
++					return
++				}
++				// Attempt 2: clean chunked 200.
++				_, _ = io.WriteString(tlsConn, fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n%s\r\n0\r\n\r\n", len(ssePayload), ssePayload))
++				_ = tlsConn.CloseWrite()
++			}(rawConn)
++		}
++	}()
++
++	root := filepath.Join(t.TempDir(), "r72-guards")
++	l503 := "review-ffa1a1a1-2222-4333-8444-555555555501"
++	s503 := "019d0000-0000-7000-8000-00000000fa01"
++	ctx503, col503, err := BeginReview(context.Background(), root, l503, s503, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx503, ex503, err := col503.Start(ctx503, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	tr := &http.Transport{
++		TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: "chatgpt.com"},
++		DialContext: func(dctx context.Context, _, _ string) (net.Conn, error) {
++			var d net.Dialer
++			return d.DialContext(dctx, "tcp", ln.Addr().String())
++		},
++		DisableKeepAlives: true,
++	}
++	cl503 := httptransport.Decorate(ctx503, &http.Client{Transport: tr, Timeout: 5 * time.Second})
++	req1, _ := http.NewRequestWithContext(ctx503, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	if _, err1 := cl503.Do(req1); !errors.Is(err1, ErrUnavailable) {
++		t.Fatalf("close-delimited 503 attempt 1 err = %v, want ErrUnavailable", err1)
++	}
++	// Retry attempt 2 in the same collector MUST also fail because attempt 1 marked collector invalid.
++	req2, _ := http.NewRequestWithContext(ctx503, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	if _, err2 := cl503.Do(req2); !errors.Is(err2, ErrUnavailable) {
++		t.Fatalf("retry attempt 2 after close-delimited 503 err = %v, want ErrUnavailable", err2)
++	}
++	ex503.End()
++	col503.Complete(true)
++	col503.HandlerDone(true)
++	if st, dig := SealReviewWithDigest(root, l503, s503); st != SealRejected || dig != "" {
++		t.Fatalf("seal after close-delimited 503 attempt = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++
++	// 2. Astra P1 #2 (PR #2280 R71): formal review dir missing producer.json MUST be rejected by
++	//    inspectProducerReceiptDir so quota reclamation cannot delete unattributed directories.
++	lNoMark := "review-ffa1a1a1-2222-4333-8444-555555555502"
++	sNoMark := "019d0000-0000-7000-8000-00000000fa02"
++	runMockTurn := func(launch, session string) {
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatal(err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		c.ObserveStreamChunk([]byte(ssePayload))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++	}
++	runMockTurn(lNoMark, sNoMark)
++	if st, dig := SealReviewWithDigest(root, lNoMark, sNoMark); st != SealOK || dig == "" {
++		t.Fatalf("clean seal lNoMark = (%v, %q), want SealOK", st, dig)
++	}
++	if _, ok := inspectProducerReceiptDir(filepath.Join(root, lNoMark), lNoMark, true); !ok {
++		t.Fatalf("inspectProducerReceiptDir rejected intact sealed review dir")
++	}
++	if err := os.Remove(filepath.Join(root, lNoMark, "producer.json")); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := inspectProducerReceiptDir(filepath.Join(root, lNoMark), lNoMark, true); ok {
++		t.Fatalf("inspectProducerReceiptDir accepted formal review dir missing producer.json")
++	}
++
++	// 3. Astra P2 #3 (PR #2280 R71): concurrent same-session SealReviewWithDigest retries DURING
++	//    the FIRST seal (while entry.sealing == true) MUST coalesce and return SealOK + same digest.
++	lCoal := "review-ffa1a1a1-2222-4333-8444-555555555503"
++	sCoal := "019d0000-0000-7000-8000-00000000fa03"
++	runMockTurn(lCoal, sCoal)
++	sealSyncEntered := make(chan struct{}, 1)
++	releaseSealSync := make(chan struct{})
++	oldSync := syncDirFn
++	syncDirFn = func(dir string) error {
++		if strings.HasSuffix(dir, lCoal) {
++			select {
++			case sealSyncEntered <- struct{}{}:
++			default:
++			}
++			<-releaseSealSync
++		}
++		return defaultSyncDir(dir)
++	}
++	defer func() { syncDirFn = oldSync }()
++
++	type sealRes struct {
++		st  SealStatus
++		dig string
++	}
++	firstRes := make(chan sealRes, 1)
++	go func() {
++		st, dig := SealReviewWithDigest(root, lCoal, sCoal)
++		firstRes <- sealRes{st, dig}
++	}()
++	select {
++	case <-sealSyncEntered:
++	case <-time.After(3 * time.Second):
++		close(releaseSealSync)
++		t.Fatalf("first seal did not enter syncDirFn")
++	}
++	// Concurrent same-session retry while entry.sealing == true MUST wait on activeSealFlights and return SealOK!
++	retryRes := make(chan sealRes, 1)
++	go func() {
++		st, dig := SealReviewWithDigest(root, lCoal, sCoal)
++		retryRes <- sealRes{st, dig}
++	}()
++	// Different-session concurrent seal MUST still get SealInFlight immediately.
++	if diffSt, diffDig := SealReviewWithDigest(root, lCoal, "019d0000-0000-7000-8000-00000000fa99"); diffSt != SealInFlight || diffDig != "" {
++		close(releaseSealSync)
++		t.Fatalf("different-session seal during first seal = (%v, %q), want (SealInFlight, \"\")", diffSt, diffDig)
++	}
++	time.Sleep(50 * time.Millisecond)
++	close(releaseSealSync)
++	r1 := <-firstRes
++	r2 := <-retryRes
++	if r1.st != SealOK || r2.st != SealOK || !isSHA256Hex(r1.dig) || r1.dig != r2.dig {
++		t.Fatalf("coalesced first seal = (%+v, %+v), want both SealOK with matching digest", r1, r2)
++	}
++	syncDirFn = oldSync
++
++	// 4. Sol P2 #2 (PR #2280 R71): rejected ReserveExistingReview on tainted or expired launch
++	//    MUST NOT refresh entry.touched so retention expiration cannot be extended indefinitely.
++	lStale := "review-ffa1a1a1-2222-4333-8444-555555555504"
++	sStale := "019d0000-0000-7000-8000-00000000fa04"
++	runMockTurn(lStale, sStale)
++	TaintReview(root, lStale)
++	staleTime := time.Now().Add(-48 * time.Hour)
++	keyStale := filepath.Clean(root) + "\x00" + lStale
++	reviewMu.Lock()
++	reviewLedger[keyStale].touched = staleTime
++	reviewMu.Unlock()
++	if res, existed, rerr := ReserveExistingReview(root, lStale); res != nil || !existed || !errors.Is(rerr, ErrUnavailable) {
++		t.Fatalf("ReserveExistingReview tainted launch = (%v, %v, %v), want (nil, true, ErrUnavailable)", res, existed, rerr)
++	}
++	reviewMu.Lock()
++	gotTouched := reviewLedger[keyStale].touched
++	reviewMu.Unlock()
++	if !gotTouched.Equal(staleTime) {
++		t.Fatalf("rejected ReserveExistingReview refreshed tainted entry.touched from %v to %v", staleTime, gotTouched)
 +	}
 +}

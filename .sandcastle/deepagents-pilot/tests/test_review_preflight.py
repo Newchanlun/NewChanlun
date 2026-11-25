@@ -2522,3 +2522,46 @@ def test_open_http_disables_tls_suppress_ragged_eofs(tmp_path, monkeypatch):
         stop_evt.set()
         listener.close()
         thread.join(timeout=3)
+
+
+def test_chunked_framing_overhead_budget_caps_200_and_error_responses(monkeypatch):
+    """Astra P2 #4 (R71): chunked 读取器必须对 chunk-size/chunk-ext/trailer 累计分帧开销设上限，
+    防止大量带长扩展的小块在正文未超限时持续耗尽预算（200 成功体与 500 错误体均受限）。"""
+    monkeypatch.setattr(preflight, "MAX_SSE_RESPONSE_BYTES", 2048)
+    ext = b"a=1;" * 128  # ~512B per chunk header
+    chunk_flood = (b"1;" + ext[:-1] + b"\r\n \r\n") * 200 + b"0\r\n\r\n"
+    mode = {"status": 200}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.close_connection = True
+            self.send_response(mode["status"])
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(chunk_flood)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 chunked 分帧预算回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 chunked 分帧预算回归
+        mode["status"] = 200
+        res200 = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-flood-200", preflight.Deadline(3))
+        assert res200["ok"] is False, res200
+
+        mode["status"] = 500
+        res500 = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-flood-500", preflight.Deadline(3))
+        assert res500["ok"] is False and res500["http_status"] == 500, res500
+        assert res500["error"]["length"] < 200, res500
+    finally:
+        srv.shutdown()
+        srv.server_close()
