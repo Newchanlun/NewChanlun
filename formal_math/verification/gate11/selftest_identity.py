@@ -74,7 +74,53 @@ def m_replace(c):
     os.remove(os.path.join(c, T)); git(c, "checkout", "-q", "--", T)  # 经替换引用检出，工作区拿到被换的内容
 
 
+def m_eol(c):
+    open(os.path.join(c, ".gitattributes"), "a").write("\n" + G + "/admit_identity.pin text eol=crlf\n")
+    commit(c)
+    f = os.path.join(c, G, "admit_identity.pin"); os.remove(f); git(c, "checkout", "-q", "--", f)
+    assert b"\r\n" in open(f, "rb").read()
+
+
+def add_empty_subtree(c, prefix, name):
+    """用底层命令造一个提交：prefix 下多一个空目录节点（普通检出不会生成它）。"""
+    empty = subprocess.run(["git", "mktree"], cwd=c, env=ENV, input=b"",
+                           stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+    parts = prefix.split("/")
+    def rebuild(rev_path, depth):
+        listing = git(c, "ls-tree", "-z", "HEAD:" + rev_path if rev_path else "HEAD")
+        recs = [r for r in listing.split(b"\0") if r]
+        if depth == len(parts):
+            recs.append(b"040000 tree " + empty.encode() + b"\t" + name.encode())
+        else:
+            child = rebuild((rev_path + "/" if rev_path else "") + parts[depth], depth + 1)
+            recs = [(b"040000 tree " + child.encode() + b"\t" + parts[depth].encode())
+                    if r.split(b"\t", 1)[1] == parts[depth].encode() else r for r in recs]
+        return subprocess.run(["git", "mktree", "-z"], cwd=c, env=ENV, input=b"\0".join(recs) + b"\0",
+                              stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+    top = rebuild("", 0)
+    new = git(c, "commit-tree", top, "-p", "HEAD", "-m", "empty subtree").decode().strip()
+    git(c, "update-ref", "HEAD", new)
+
+
+def m_empty_corpus(c): add_empty_subtree(c, B, "archive")
+def m_empty_admit(c): add_empty_subtree(c, A, "archive")
+def m_dirty_exec(c): os.chmod(os.path.join(c, A, "candidate", "merge.py"), 0o755)
+def m_dirty_root_link(c):
+    src = os.path.join(c, A); dst = os.path.join(c, "formal_math", "admit-moved")
+    os.rename(src, dst); os.symlink(dst, src)
+def m_dirty_parent_link(c):
+    src = os.path.join(c, "docs", "chanlun", "text"); dst = os.path.join(c, "docs", "text-moved")
+    os.rename(src, dst); os.symlink(dst, src)
+
+
 CASES = [
+    # 钉选文件检出成 CRLF（.gitattributes），受检内容未变：必须仍绿。
+    ("pin-checked-out-crlf", m_eol, False, 0, ""),
+    ("empty-subtree-corpus", m_empty_corpus, False, 1, "不含文件的目录"),
+    ("empty-subtree-admit", m_empty_admit, False, 1, "不含文件的目录"),
+    ("dirty-exec-bit", m_dirty_exec, False, 1, "工作区文件带可执行位"),
+    ("dirty-root-symlink", m_dirty_root_link, False, 1, "工作区路径不是目录"),
+    ("dirty-parent-symlink", m_dirty_parent_link, False, 1, "工作区路径不是目录"),
     ("table-byte", m_table, True, 1, "与钉选"),
     ("symlink-same-content", m_symlink, True, 1, "非普通文件"),
     ("tracked-in-pycache", m_pycache, True, 1, "与钉选"),
@@ -102,8 +148,8 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         base = os.path.join(tmp, "base")
         git(tmp, "clone", "-q", "--shared", root, base)
-        # 把当前工作区里的门禁脚本与钉选带进克隆（它们可能尚未提交）
-        for f in ("check_admit_identity.py", "admit_identity.pin"):
+        # 把当前工作区里的检查脚本带进克隆（它可能尚未提交）；钉选一律取自提交
+        for f in ("check_admit_identity.py",):
             shutil.copy(os.path.join(HERE, f), os.path.join(base, G, f))
         if git(base, "status", "--porcelain"):
             commit(base)
