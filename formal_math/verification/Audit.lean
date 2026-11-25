@@ -129,12 +129,6 @@ private def gate3 (entries : Array FM.Entry) : MetaM UInt32 := do
       red := true
   return if red then 1 else 0
 
-/-- 报告逐声明列读数：只列有源码声明范围的常量（报告用，不作任何豁免依据）。 -/
-private def declarations (entries : Array FM.Entry) : MetaM Unit := do
-  for e in entries do
-    if (← findDeclarationRangesCore? e.name).isSome then
-      IO.println <| (toJson #[e.mod.toString, e.name.toString]).compress
-
 public unsafe def main (args : List String) : IO UInt32 := do
   let gate :: modules := args | return 2
   Lean.initSearchPath (← Lean.findSysroot)
@@ -171,10 +165,9 @@ public unsafe def main (args : List String) : IO UInt32 := do
     if mods.contains mod then some { mod, name, info } else none).toArray
   let options := maxRecDepth.set (maxHeartbeats.set {} 6000000) 1024
   let ctx : Core.Context := { fileName := "FM 门禁", fileMap := default, options }
-  if gate == "3" || gate == "decls" then
+  if gate == "3" then
     try
-      let run := if gate == "3" then gate3 entries else declarations entries *> pure 0
-      let (code, _) ← (run.run'.toIO ctx { env })
+      let (code, _) ← (gate3 entries).run'.toIO ctx { env }
       return code
     catch err =>
       IO.eprintln err.toString
