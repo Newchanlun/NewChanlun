@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FM-60a 内核判例数字化（#2324）机械核对脚本。
+"""FM-60a 内核判例数字化（#2324，fm60a-kernel-v2 三层格式）机械核对脚本。
 
 用法（仓库内任意目录）：
     python3 -I fm60a-kernel/check.py
@@ -7,23 +7,37 @@
 仅使用 Python 标准库；通过 `git rev-parse --show-toplevel` 定位仓库根，不含任何机器绝对路径。
 
 核对内容：
-  1. classification.jsonl 与 fm60a-inventory/cases.jsonl 逐一双射（61 条齐全、无重复、类别枚举合法），
-     且 kernel_only + both 集合与 kernel-cases.jsonl 的 case_id 集合完全一致；
-  2. kernel-cases.jsonl 每条记录字段齐全、枚举合法、case_id 唯一；
-  3. 每条 cite 的 quote 逐字等于语料 docs/chanlun/text/blog/<lesson>-*.md 对应行 char_span 处的字符
-     （不做任何字符归一化）；
-  4. 每条 cite 的 in_admit_table / admit_id / tier 与准入表 git 对象
-     `7d0082ff6f8b1d7d9b7b98eb24712723d0a95d9c:formal_math/sources/admit/candidate/tier1_candidate.jsonl`
-     现场重算完全一致（取不到准入表即退 2，绝不静默跳过）；
-  5. zone 与「↑正文」界标一致；from_inventory=true 的 cite 与清点表逐字一致；
-  6. 递归扫描每条记录中全部 refs：指向有效 cite、speaker 必须为「作者」（严禁网友/编者作证据）、
-     ref.literal 必须逐字出现在对应 cite.quote 中；
-  7. 非合成区（structure_spec、assertions、counterfactuals、literal_facts）及合成区 locked_values 中的
-     每一个字面数值，都必须能在其所引原文 refs 的 literal 文本中以等值数字出现（防静默补数）；
-  8. 每条 assertion 的 evidence_tier 与整条判例的 evidence_grade 按其引用 cite 现场重算一致；
-  9. 每个合成见证（synthetic_witnesses）必须显式标记 synthetic=true，写清 determined_by_text、
-     free_parameters 与 freedom_justification，locked_values 与 data 中数值逐项一致，且
-     check_constraints 中的每条约束在 data 上求值全为真（对 counterfactual 变体核对替换后的约束）。
+  1. classification.jsonl 与 fm60a-inventory/cases.jsonl 逐一双射（61 条齐全、类别枚举与
+     kernel_digitization_status 合法）；
+  2. kernel-cases.jsonl 仅包含当前受审的 9 条 v2 示范判例（schema_version="fm60a-kernel-v2"），
+     legacy-v1-unreviewed.jsonl 包含其余 20 条旧格式未审查记录（schema_version="fm60a-kernel-v1"、
+     exemplar=false），两者不相交且并集恰等于 classification.jsonl 的 29 条 kernel_only+both；
+  3. 逐字引文（cites）：每条 quote 逐字等于 docs/chanlun/text/blog/<lesson>-*.md 对应行 char_span
+     （不做字符归一化），相对准入表对象 7d0082ff 现场重算 in_admit_table / admit_id / tier，
+     校验 ↑正文 界标、from_inventory 逐字一致、原清点表作者引文 100% 保留、严禁非作者入 refs；
+  4. 第一层（作者陈述层 author_statements）：
+     - mood 必须属于 7 值封闭枚举且非空；
+     - mood 为「条件句」或「假设或反事实」时 antecedent 必填非空，其余语气必须为 null；
+     - statement、antecedent 与 literal_values[*].value 中的每一个数值都必须逐字（或等价数字）
+       出现在对应 refs 引文中；
+     - 高风险限定词（「严格」「唯一」「必然」「已」）若出现在 statement 或 antecedent 中，
+       必须也出现在对应 refs 引文中；
+     - evidence_tier 与记录级 evidence_grade 按 refs 现场重算一致；
+  5. 第二层（整理者建模层 organizer_models）：
+     - 每条模型、每条 computable_conditions、每条 expected_under_model 都必须指向至少一条合法的
+       作者陈述（depends_on_statements 非空且全合法）；
+     - added_premises 与 alternative_models 必填非空；uses_premises 指向本模型合法前提；
+     - 每个模型至少关联 1 条实例（无悬空模型）；
+  6. 第三层（实例层 instances，全部合成）：
+     - 外层 synthetic=true 且 data.synthetic=true；严禁残留旧字段 determined_by_text；
+     - data 中每一个数值叶节点（vertex_prices / strengths / scalars / kbars 全部数值字段）必须且只能
+       出现在 literal_bindings 或 free_parameters 之一：两者互不相交、并集不漏一数；
+     - literal_bindings 必须指向作者陈述层中 binds_instance_target_literally=true 的 LV*，
+       且 data 数值与 LV.value 相等；free_parameters 须带非空 note 且数值与 data 一致；
+     - 反事实实例（instance_role="counterfactual"）必须填写 counterfactual_proposer
+       （"author" 或 "organizer"）：写 "author" 时 counterfactual_statement_id 必填且所指作者陈述
+       的 mood 必须是「假设或反事实」；写 "organizer" 时 counterfactual_statement_id 必须为 null；
+     - check_conditions（含反事实覆盖）在 data 上全部机械求值为真。
 
 退出码：
   0  全部通过
@@ -42,6 +56,7 @@ ADMIT_COMMIT = "7d0082ff6f8b1d7d9b7b98eb24712723d0a95d9c"
 ADMIT_PATH = "formal_math/sources/admit/candidate/tier1_candidate.jsonl"
 
 CATEGORIES = {"kernel_only", "market_only", "both", "unusable"}
+DIG_STATUSES = {"v2_exemplar", "v1_legacy_unreviewed", "not_kernel"}
 INPUT_KINDS = {
     "polyline_segments",
     "polyline_with_strength",
@@ -51,12 +66,32 @@ INPUT_KINDS = {
 ZONES = {"正文", "答疑", "课间", "解盘", "拿不准"}
 TIERS = {"硬证据", "二级，未提升", "非作者，不作证据"}
 SPEAKERS = {"作者", "网友", "编者"}
-PROVENANCES = {"literal", "derived_from_text", "structural_default"}
-FREEDOM_MODES = {
-    "order_invariant",
-    "multi_instance_coverage",
-    "order_invariant_plus_multi_instance",
-    "explicit_freedom_documented",
+
+# 作者陈述层封闭语气枚举（7 项）
+MOODS = {
+    "直陈事实",
+    "条件句",
+    "假设或反事实",
+    "预测",
+    "事后回顾",
+    "设问或留作作业",
+    "引述他人",
+}
+CONDITIONAL_MOODS = {"条件句", "假设或反事实"}
+FORBIDDEN_UNQUOTED_QUALIFIERS = ("严格", "唯一", "必然", "已")
+
+INSTANCE_ROLES = {"positive", "counterfactual"}
+CF_PROPOSERS = {"author", "organizer"}
+
+ALLOWED_DATA_KEYS = {
+    "synthetic",
+    "vertex_prices",
+    "strengths",
+    "scalars",
+    "flags",
+    "kbars",
+    "segments",
+    "notes",
 }
 
 CLASS_KEYS = [
@@ -64,13 +99,14 @@ CLASS_KEYS = [
     "group",
     "category",
     "digitized_in_kernel",
+    "kernel_digitization_status",
     "batch_a_status",
     "inventory_status",
     "inventory_image_dependent",
     "reason",
 ]
 
-CASE_KEYS = [
+CASE_V2_KEYS = [
     "schema_version",
     "case_id",
     "group",
@@ -81,14 +117,11 @@ CASE_KEYS = [
     "evidence_grade",
     "base_and_pen",
     "paired_cases",
-    "cites",
-    "literal_facts",
-    "structure_spec",
-    "assertions",
-    "counterfactuals",
-    "synthetic_witnesses",
-    "interpretive_choices",
     "real_market_dependency",
+    "cites",
+    "author_statements",
+    "organizer_models",
+    "instances",
 ]
 
 CITE_KEYS = [
@@ -105,8 +138,6 @@ CITE_KEYS = [
     "from_inventory",
 ]
 
-NUM_RE = re.compile(r"(?<![A-Za-z0-9_])(?:\d+(?:\.\d+)?)(?![A-Za-z0-9_])")
-# 文本中汉字紧邻数字（如「4087到4122点」「5分钟」「3个中枢」「9段」「5386.47比」）
 ZH_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 CN_DIGIT_MAP = {
     "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
@@ -125,7 +156,7 @@ def git(root, *args):
 
 
 def extract_numbers_from_text(text):
-    """从原文片段中提取所有字面出现的数值集合（含简单中文数字如「三」「两」「一」「四」「九」）。"""
+    """提取文本中所有数值（阿拉伯数字及简单中文数字）。"""
     nums = set()
     for m in ZH_NUM_RE.findall(text):
         try:
@@ -138,8 +169,18 @@ def extract_numbers_from_text(text):
     return nums
 
 
-def num_in_refs(num, refs, cites):
-    """检查数字 num 是否作为字面数值出现在 refs 指向的 literal 文本中。"""
+def extract_arabic_numbers(text):
+    """仅提取文本中的阿拉伯数字（供作者陈述层转写防补数核对）。"""
+    out = []
+    for m in ZH_NUM_RE.findall(text):
+        try:
+            out.append((m, float(m)))
+        except ValueError:
+            pass
+    return out
+
+
+def num_in_refs(num, refs):
     target = float(num)
     for r in refs:
         lit = r.get("literal", "")
@@ -149,25 +190,62 @@ def num_in_refs(num, refs, cites):
     return False
 
 
-def collect_numeric_literals_from_expr(expr):
-    """收集约束表达式里的裸数字常量（用于 provenance='literal' 的防补数核对）。"""
-    out = []
-    if isinstance(expr, bool):
-        return out
-    if isinstance(expr, (int, float)):
-        out.append(expr)
-    elif isinstance(expr, list):
-        for x in expr:
-            out.extend(collect_numeric_literals_from_expr(x))
-    elif isinstance(expr, dict):
-        for k, v in expr.items():
-            if k in ("op", "fn", "key", "first_dir", "outer", "inner", "a", "b", "bars"):
+def collect_data_numeric_targets(data, tag, bad):
+    """枚举 instance.data 中全部数值叶节点，杜绝任何未入账数值。"""
+    targets = {}
+    if not isinstance(data, dict):
+        bad.append(f"{tag}: data 须为对象")
+        return targets
+    for k in data:
+        if k not in ALLOWED_DATA_KEYS:
+            bad.append(f"{tag}.data: 未登记的数据字段 {k!r}（请归入标准数据桶以免绕过数值核对）")
+    for bucket in ("vertex_prices", "strengths", "scalars"):
+        if bucket in data and data[bucket] is not None:
+            d = data[bucket]
+            if not isinstance(d, dict):
+                bad.append(f"{tag}.data.{bucket}: 须为字典")
                 continue
-            out.extend(collect_numeric_literals_from_expr(v))
-    return out
+            for sym, val in d.items():
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    bad.append(f"{tag}.data.{bucket}.{sym}: 须为数值，实际 {val!r}")
+                    continue
+                if sym in targets:
+                    bad.append(f"{tag}.data: 数值符号 {sym!r} 在多个数据桶重名")
+                targets[sym] = float(val)
+    if "kbars" in data and data["kbars"] is not None:
+        bars = data["kbars"]
+        if not isinstance(bars, list):
+            bad.append(f"{tag}.data.kbars: 须为列表")
+        else:
+            seen_bar = set()
+            for bi, b in enumerate(bars):
+                if not isinstance(b, dict) or not b.get("id"):
+                    bad.append(f"{tag}.data.kbars[{bi}]: 须含非空 id")
+                    continue
+                bid = b["id"]
+                if bid in seen_bar:
+                    bad.append(f"{tag}.data.kbars: 重复 bar id {bid!r}")
+                seen_bar.add(bid)
+                for fk, fv in b.items():
+                    if fk == "id":
+                        continue
+                    if isinstance(fv, bool) or not isinstance(fv, (int, float)):
+                        bad.append(f"{tag}.data.kbars[{bid}].{fk}: 须为数值，实际 {fv!r}")
+                        continue
+                    tkey = f"{bid}.{fk}"
+                    targets[tkey] = float(fv)
+    if "flags" in data and data["flags"] is not None:
+        fl = data["flags"]
+        if not isinstance(fl, dict):
+            bad.append(f"{tag}.data.flags: 须为字典")
+        else:
+            for fk, fv in fl.items():
+                if not isinstance(fv, (bool, str)):
+                    bad.append(f"{tag}.data.flags.{fk}: 只允许布尔或枚举字符串，禁止藏匿数值 {fv!r}")
+    return targets
 
 
-# ---------------- 合成见证约束求值器（纯算术/序关系核对，不是缠论定义） ----------------
+# ---------------- 实例条件求值器（纯算术/序关系自检，不是缠论定义） ----------------
 def _bar_map(data):
     bars = data.get("kbars") or []
     return {b["id"]: b for b in bars}
@@ -312,7 +390,7 @@ def eval_expr(expr, data):
         return all(eval_expr(a, data) for a in expr["args"])
     if op == "or":
         return any(eval_expr(a, data) for a in expr["args"])
-    raise ValueError(f"未知约束算子 {op!r}")
+    raise ValueError(f"未知条件算子 {op!r}")
 
 
 def compute_tier_from_refs(refs, cites):
@@ -344,13 +422,13 @@ def check_refs_list(refs, cites, tag, bad, require_nonempty=True):
             continue
         idx = r["cite"]
         lit = r["literal"]
-        if not isinstance(idx, int) or not (0 <= idx < len(cites)):
+        if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(cites)):
             bad.append(f"{rtag}: cite 索引越界 {idx!r}")
             ok = False
             continue
         ct = cites[idx]
         if ct["speaker"] != "作者":
-            bad.append(f"{rtag}: 禁止引用非作者（{ct['speaker']}）cite[{idx}] 作为结构或断言依据")
+            bad.append(f"{rtag}: 禁止引用非作者（{ct['speaker']}）cite[{idx}] 作为依据")
             ok = False
         if not isinstance(lit, str) or not lit:
             bad.append(f"{rtag}: literal 须为非空字符串")
@@ -362,7 +440,6 @@ def check_refs_list(refs, cites, tag, bad, require_nonempty=True):
 
 
 def walk_all_refs(obj, cites, path, bad):
-    """递归检查整条记录内出现的所有 refs 字段，杜绝遗漏的悬空或非作者引用。"""
     if isinstance(obj, dict):
         if "refs" in obj:
             check_refs_list(obj["refs"], cites, path, bad, require_nonempty=False)
@@ -373,6 +450,18 @@ def walk_all_refs(obj, cites, path, bad):
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
             walk_all_refs(item, cites, f"{path}[{i}]", bad)
+
+
+def check_depends_on(dep_ids, as_map, tag, bad):
+    if not isinstance(dep_ids, list) or not dep_ids:
+        bad.append(f"{tag}: depends_on_statements 须为非空数组")
+        return False
+    ok = True
+    for sid in dep_ids:
+        if sid not in as_map:
+            bad.append(f"{tag}: depends_on_statements 含未知作者陈述 {sid!r}")
+            ok = False
+    return ok
 
 
 def main():
@@ -442,7 +531,8 @@ def main():
     # 4. 读取产物文件
     class_path = os.path.join(here, "classification.jsonl")
     kernel_path = os.path.join(here, "kernel-cases.jsonl")
-    for p in (class_path, kernel_path):
+    legacy_path = os.path.join(here, "legacy-v1-unreviewed.jsonl")
+    for p in (class_path, kernel_path, legacy_path):
         if not os.path.exists(p):
             die(1, f"缺少产物文件：{os.path.basename(p)}")
 
@@ -470,11 +560,17 @@ def main():
         cls_by_id[cid] = row
         if row["category"] not in CATEGORIES:
             bad.append(f"classification[{cid}]: category 非法 {row['category']!r}")
+        if row["kernel_digitization_status"] not in DIG_STATUSES:
+            bad.append(f"classification[{cid}]: kernel_digitization_status 非法 {row['kernel_digitization_status']!r}")
         if not isinstance(row["digitized_in_kernel"], bool):
             bad.append(f"classification[{cid}]: digitized_in_kernel 须为布尔值")
         want_dig = row["category"] in ("kernel_only", "both")
         if row["digitized_in_kernel"] != want_dig:
             bad.append(f"classification[{cid}]: digitized_in_kernel={row['digitized_in_kernel']} 与 category={row['category']} 不符")
+        if want_dig and row["kernel_digitization_status"] == "not_kernel":
+            bad.append(f"classification[{cid}]: category={row['category']} 但 kernel_digitization_status=not_kernel")
+        if not want_dig and row["kernel_digitization_status"] != "not_kernel":
+            bad.append(f"classification[{cid}]: category={row['category']} 但 kernel_digitization_status={row['kernel_digitization_status']!r}")
         if cid not in inv:
             bad.append(f"classification[{cid}]: 不在清点表中")
         else:
@@ -495,7 +591,25 @@ def main():
     if inv_ids != cls_ids:
         bad.append(f"classification 覆盖不齐：漏 {sorted(inv_ids - cls_ids)}，多 {sorted(cls_ids - inv_ids)}")
 
-    # 6. 核对 kernel-cases.jsonl
+    # 6. 核对 legacy-v1-unreviewed.jsonl（仅验隔离完整性，不对旧格式跑 v2 核对）
+    legacy_ids = set()
+    with open(legacy_path, encoding="utf-8") as f:
+        for ln, raw in enumerate(f, 1):
+            if raw.strip():
+                try:
+                    rec = json.loads(raw)
+                except ValueError as e:
+                    die(1, f"legacy-v1-unreviewed.jsonl 第 {ln} 行不是合法 JSON：{e}")
+                lcid = rec.get("case_id", "?")
+                if lcid in legacy_ids:
+                    bad.append(f"legacy[{lcid}]: case_id 重复")
+                legacy_ids.add(lcid)
+                if rec.get("schema_version") != "fm60a-kernel-v1":
+                    bad.append(f"legacy[{lcid}]: 隔离文件只应含 fm60a-kernel-v1，实际 {rec.get('schema_version')!r}")
+                if rec.get("exemplar") is not False:
+                    bad.append(f"legacy[{lcid}]: 隔离文件只应含非示范条目（exemplar=false）")
+
+    # 7. 核对 kernel-cases.jsonl（v2 三层格式，9 条示范判例）
     kcases = []
     with open(kernel_path, encoding="utf-8") as f:
         for ln, raw in enumerate(f, 1):
@@ -507,36 +621,38 @@ def main():
 
     seen_k = set()
     n_cites = 0
-    n_assertions = 0
-    n_witnesses = 0
-    n_constraint_evals = 0
-    n_counterfactuals = 0
+    n_statements = 0
+    n_models = 0
+    n_instances = 0
+    n_cf_author = 0
+    n_cf_organizer = 0
+    n_cond_evals = 0
 
     for kc in kcases:
         cid = kc.get("case_id", "?")
-        miss = [k for k in CASE_KEYS if k not in kc]
+        miss = [k for k in CASE_V2_KEYS if k not in kc]
         if miss:
-            bad.append(f"{cid}: 缺字段 {miss}")
+            bad.append(f"{cid}: 缺顶层字段 {miss}")
             continue
         if cid in seen_k:
             bad.append(f"{cid}: case_id 重复")
         seen_k.add(cid)
-        if kc["schema_version"] != "fm60a-kernel-v1":
-            bad.append(f"{cid}: schema_version 非法 {kc['schema_version']!r}")
+        if kc["schema_version"] != "fm60a-kernel-v2":
+            bad.append(f"{cid}: schema_version 须为 'fm60a-kernel-v2'，实际 {kc['schema_version']!r}")
+        if kc["exemplar"] is not True:
+            bad.append(f"{cid}: 当前 kernel-cases.jsonl 仅收示范判例（exemplar=true）")
         if kc["category"] not in ("kernel_only", "both"):
-            bad.append(f"{cid}: kernel-cases 中只应含 kernel_only/both，实际 {kc['category']!r}")
+            bad.append(f"{cid}: category 非法 {kc['category']!r}")
         if cid in cls_by_id and kc["category"] != cls_by_id[cid]["category"]:
             bad.append(f"{cid}: category 与 classification.jsonl 不一致")
         if cid in inv and kc["group"] != inv[cid]["group"]:
             bad.append(f"{cid}: group 与清点表不一致")
         if kc["input_kind"] not in INPUT_KINDS:
             bad.append(f"{cid}: input_kind 非法 {kc['input_kind']!r}")
-        if not isinstance(kc["exemplar"], bool):
-            bad.append(f"{cid}: exemplar 须为布尔值")
         if not isinstance(kc["target_concepts"], list) or not kc["target_concepts"]:
             bad.append(f"{cid}: target_concepts 须为非空数组")
 
-        # 6a. 核对 cites
+        # 7a. 核对 cites
         cites = kc["cites"]
         if not isinstance(cites, list) or not cites:
             bad.append(f"{cid}: cites 不能为空")
@@ -577,7 +693,6 @@ def main():
                 tup = (k, n, (a, b), ct["quote"])
                 if tup not in inv_cite_tuples:
                     bad.append(f"{tag}: 标了 from_inventory=true，但清点表 {cid} 无此逐字引文")
-            # 准入表重算
             recs = admit.get((k, n), [])
             want_in = bool(recs)
             hits = sorted(d["id"] for d in recs for sa, sb in d["author_spans"] if sa <= a and b <= sb)
@@ -591,7 +706,6 @@ def main():
             want_tier = "非作者，不作证据" if ct["speaker"] != "作者" else ("硬证据" if want_id is not None else "二级，未提升")
             if ct["tier"] != want_tier:
                 bad.append(f"{tag}: tier={ct['tier']!r} 现算 {want_tier!r}")
-            # 界标检查
             m = marker(k)
             if ct["zone"] == "正文":
                 if m is None or n >= m:
@@ -602,7 +716,7 @@ def main():
                 bad.append(f"{tag}: 硬证据但 zone 不是正文")
             n_cites += 1
 
-        # 确认清点表里的所有作者 cite 都被保留（不丢原清点证据）
+        # 确认原清点表作者引文 100% 保留
         if cid in inv:
             kept = {(ct["lesson"], ct["line"], tuple(ct["char_span"])) for ct in cites}
             for ict in inv[cid]["cites"]:
@@ -611,221 +725,407 @@ def main():
                     if key not in kept:
                         bad.append(f"{cid}: 遗漏了清点表原作者引文 {ict['lesson']}:{ict['line']}{ict['char_span']}")
 
-        # 6b. 递归核对全记录 refs
+        # 递归检查所有 refs
         walk_all_refs(kc, cites, cid, bad)
 
-        # 6c. literal_facts
-        lfacts = kc["literal_facts"]
-        if not isinstance(lfacts, list) or not lfacts:
-            bad.append(f"{cid}: literal_facts 不能为空")
-        for j, lf in enumerate(lfacts):
-            tag = f"{cid}.literal_facts[{j}]"
-            for k in ("fact_id", "kind", "statement", "refs"):
-                if k not in lf:
-                    bad.append(f"{tag}: 缺字段 {k}")
-            check_refs_list(lf.get("refs"), cites, tag, bad, require_nonempty=True)
+        # 7b. 第一层：作者陈述层 author_statements
+        statements = kc["author_statements"]
+        if not isinstance(statements, list) or not statements:
+            bad.append(f"{cid}: author_statements 不能为空")
+            continue
+        as_map = {}
+        lv_global = {}  # value_id -> (statement_id, lv_obj)
+        all_as_refs = []
+        for j, st in enumerate(statements):
+            sid = st.get("statement_id", f"#{j}")
+            tag = f"{cid}.author_statements[{sid}]"
+            for req in ("statement_id", "mood", "antecedent", "statement", "literal_values", "evidence_tier", "refs"):
+                if req not in st:
+                    bad.append(f"{tag}: 缺字段 {req}")
+            if any(req not in st for req in ("statement_id", "mood", "antecedent", "statement", "literal_values", "evidence_tier", "refs")):
+                continue
+            if sid in as_map:
+                bad.append(f"{tag}: statement_id 重复")
+            as_map[sid] = st
+            mood = st["mood"]
+            if not isinstance(mood, str) or mood not in MOODS:
+                bad.append(f"{tag}: mood 非法或为空 {mood!r}（合法枚举：{sorted(MOODS)}）")
+            ant = st["antecedent"]
+            if mood in CONDITIONAL_MOODS:
+                if not isinstance(ant, str) or not ant.strip():
+                    bad.append(f"{tag}: mood={mood!r} 必须填写非空 antecedent 保留原条件")
+            else:
+                if ant is not None:
+                    bad.append(f"{tag}: mood={mood!r} 时 antecedent 应为 null（若为条件句请改 mood）")
+            stmt_text = st["statement"]
+            if not isinstance(stmt_text, str) or not stmt_text.strip():
+                bad.append(f"{tag}: statement 不能为空")
+            refs_ok = check_refs_list(st["refs"], cites, tag, bad, require_nonempty=True)
+            if refs_ok:
+                want_tier = compute_tier_from_refs(st["refs"], cites)
+                if st["evidence_tier"] != want_tier:
+                    bad.append(f"{tag}: evidence_tier={st['evidence_tier']!r} 现算 {want_tier!r}")
+                all_as_refs.extend(st["refs"])
+                refs_concat = "".join(r["literal"] for r in st["refs"])
+                # 核对 statement / antecedent 中每一个阿拉伯数值均出现在 refs 引文中
+                for fname, ftxt in (("statement", stmt_text), ("antecedent", ant or "")):
+                    for raw_num, fval in extract_arabic_numbers(ftxt):
+                        if not num_in_refs(fval, st["refs"]):
+                            bad.append(f"{tag}.{fname}: 含数值 {raw_num!r} 未出现在 refs 引文中")
+                    # 核对高风险未引限定词不得私自加入
+                    for q in FORBIDDEN_UNQUOTED_QUALIFIERS:
+                        if q in ftxt and q not in refs_concat:
+                            bad.append(f"{tag}.{fname}: 含引文未出现的限定词 {q!r}")
+            # 核对 literal_values
+            lvs = st["literal_values"]
+            if not isinstance(lvs, list):
+                bad.append(f"{tag}: literal_values 须为数组")
+            else:
+                for lvi, lv in enumerate(lvs):
+                    lvtag = f"{tag}.literal_values[{lvi}]"
+                    for req in ("value_id", "value", "unit_or_role", "author_target", "binds_instance_target_literally"):
+                        if req not in lv:
+                            bad.append(f"{lvtag}: 缺字段 {req}")
+                    if any(req not in lv for req in ("value_id", "value", "unit_or_role", "author_target", "binds_instance_target_literally")):
+                        continue
+                    vid = lv["value_id"]
+                    if vid in lv_global:
+                        bad.append(f"{lvtag}: value_id {vid!r} 在本判例内重复")
+                    lv_global[vid] = (sid, lv)
+                    if isinstance(lv["value"], bool) or not isinstance(lv["value"], (int, float)):
+                        bad.append(f"{lvtag}: value 须为数值，实际 {lv['value']!r}")
+                    elif refs_ok and not num_in_refs(lv["value"], st["refs"]):
+                        bad.append(f"{lvtag}: literal value {lv['value']} 未出现在 refs 引文中")
+                    if not isinstance(lv["binds_instance_target_literally"], bool):
+                        bad.append(f"{lvtag}: binds_instance_target_literally 须为布尔值")
+                    if not lv.get("unit_or_role") or not lv.get("author_target"):
+                        bad.append(f"{lvtag}: unit_or_role 与 author_target 均不能为空")
+            n_statements += 1
 
-        # 6d. structure_spec & constraints
-        spec = kc["structure_spec"]
-        if not isinstance(spec, dict) or spec.get("domain") != kc["input_kind"]:
-            bad.append(f"{cid}.structure_spec: domain 须等于 input_kind ({kc['input_kind']!r})")
-        constraints = spec.get("constraints") or []
-        if not constraints:
-            bad.append(f"{cid}.structure_spec: constraints 不能为空")
-        cmap = {}
-        for j, con in enumerate(constraints):
-            tag = f"{cid}.constraints[{j}]"
-            for k in ("id", "expr", "provenance", "refs"):
-                if k not in con:
-                    bad.append(f"{tag}: 缺字段 {k}")
-                    continue
-            if con["id"] in cmap:
-                bad.append(f"{tag}: 约束 id 重复 {con['id']!r}")
-            cmap[con["id"]] = con
-            prov = con.get("provenance")
-            if prov not in PROVENANCES:
-                bad.append(f"{tag}: provenance 非法 {prov!r}")
-            if prov in ("literal", "derived_from_text"):
-                check_refs_list(con.get("refs"), cites, tag, bad, require_nonempty=True)
-            if prov == "derived_from_text" and not con.get("rationale"):
-                bad.append(f"{tag}: derived_from_text 必须带 rationale")
-            if prov == "literal":
-                # 严防在 literal 约束中夹带未出现在原文的数值
-                for num in collect_numeric_literals_from_expr(con["expr"]):
-                    if not num_in_refs(num, con["refs"], cites):
-                        bad.append(f"{tag}: literal 约束含数值 {num}，但未出现在其 refs 原文中")
-
-        # 检查 vertices/kbars 中的字面价格或字面值必须出现在 refs
-        for j, vtx in enumerate(spec.get("vertices") or []):
-            tag = f"{cid}.vertices[{j}]"
-            if vtx.get("literal_price") is not None:
-                if check_refs_list(vtx.get("refs"), cites, tag, bad, require_nonempty=True):
-                    if not num_in_refs(vtx["literal_price"], vtx["refs"], cites):
-                        bad.append(f"{tag}: literal_price={vtx['literal_price']} 未出现在其 refs 原文中")
-        for j, kb in enumerate(spec.get("kbars") or []):
-            tag = f"{cid}.kbars[{j}]"
-            for fld in ("literal_high", "literal_low"):
-                if kb.get(fld) is not None:
-                    if check_refs_list(kb.get("refs"), cites, tag, bad, require_nonempty=True):
-                        if not num_in_refs(kb[fld], kb["refs"], cites):
-                            bad.append(f"{tag}: {fld}={kb[fld]} 未出现在其 refs 原文中")
-
-        # 6e. assertions 与 evidence_grade 重算
-        assertions = kc["assertions"]
-        if not isinstance(assertions, list) or not assertions:
-            bad.append(f"{cid}: assertions 不能为空")
-        all_assert_refs = []
-        assert_ids = set()
-        for j, a in enumerate(assertions):
-            tag = f"{cid}.assertions[{j}]"
-            for k in ("id", "kind", "subject", "expected", "evidence_tier", "refs"):
-                if k not in a:
-                    bad.append(f"{tag}: 缺字段 {k}")
-                    continue
-            if a["id"] in assert_ids:
-                bad.append(f"{tag}: assertion id 重复 {a['id']!r}")
-            assert_ids.add(a["id"])
-            if check_refs_list(a["refs"], cites, tag, bad, require_nonempty=True):
-                want_at = compute_tier_from_refs(a["refs"], cites)
-                if a["evidence_tier"] != want_at:
-                    bad.append(f"{tag}: evidence_tier={a['evidence_tier']!r} 现算 {want_at!r}")
-                all_assert_refs.extend(a["refs"])
-                # 递归检查 assertions.expected / subject 里的所有字面数值是否均出现在 refs 中
-                for box_name in ("subject", "expected"):
-                    for num in collect_numeric_literals_from_expr(a[box_name]):
-                        if not num_in_refs(num, a["refs"], cites):
-                            bad.append(f"{tag}.{box_name} 含数值 {num} 未出现在其 refs 原文中")
-            n_assertions += 1
-
-        if all_assert_refs:
-            want_grade = compute_tier_from_refs(all_assert_refs, cites)
+        if all_as_refs:
+            want_grade = compute_tier_from_refs(all_as_refs, cites)
             if kc["evidence_grade"] != want_grade:
                 bad.append(f"{cid}: evidence_grade={kc['evidence_grade']!r} 现算 {want_grade!r}")
 
-        # 6f. counterfactuals
-        cf_map = {}
-        for j, cf in enumerate(kc["counterfactuals"]):
-            tag = f"{cid}.counterfactuals[{j}]"
-            for k in ("id", "description", "replace_constraints", "expected_change", "evidence_tier", "refs"):
-                if k not in cf:
-                    bad.append(f"{tag}: 缺字段 {k}")
-                    continue
-            cf_map[cf["id"]] = cf
-            if check_refs_list(cf["refs"], cites, tag, bad, require_nonempty=True):
-                want_ct = compute_tier_from_refs(cf["refs"], cites)
-                if cf["evidence_tier"] != want_ct:
-                    bad.append(f"{tag}: evidence_tier={cf['evidence_tier']!r} 现算 {want_ct!r}")
-            for rc in cf.get("replace_constraints") or []:
-                if rc.get("target") not in cmap:
-                    bad.append(f"{tag}: replace_constraints.target={rc.get('target')!r} 不在 constraints 中")
-            n_counterfactuals += 1
+        # 7c. 第二层：整理者建模层 organizer_models
+        models = kc["organizer_models"]
+        if not isinstance(models, list) or not models:
+            bad.append(f"{cid}: organizer_models 不能为空")
+            continue
+        model_map = {}
+        model_conds = {}
+        model_expects = {}
+        for mi, md in enumerate(models):
+            mid = md.get("model_id", f"#{mi}")
+            tag = f"{cid}.organizer_models[{mid}]"
+            req_m = (
+                "model_id", "title", "reading_group", "depends_on_statements",
+                "symbol_schema", "added_premises", "alternative_models",
+                "computable_conditions", "expected_under_model",
+            )
+            miss_m = [k for k in req_m if k not in md]
+            if miss_m:
+                bad.append(f"{tag}: 缺字段 {miss_m}")
+                continue
+            if mid in model_map:
+                bad.append(f"{tag}: model_id 重复")
+            model_map[mid] = md
+            check_depends_on(md["depends_on_statements"], as_map, tag, bad)
+            if not md.get("title") or not md.get("reading_group"):
+                bad.append(f"{tag}: title 与 reading_group 不能为空")
+            if not isinstance(md["symbol_schema"], dict) or md["symbol_schema"].get("domain") != kc["input_kind"]:
+                bad.append(f"{tag}.symbol_schema: domain 须等于 input_kind ({kc['input_kind']!r})")
+            # added_premises
+            prems = md["added_premises"]
+            prem_ids = set()
+            if not isinstance(prems, list) or not prems:
+                bad.append(f"{tag}: added_premises 须为非空数组")
+            else:
+                for pi, pr in enumerate(prems):
+                    ptag = f"{tag}.added_premises[{pi}]"
+                    if not isinstance(pr, dict) or not pr.get("premise_id") or not pr.get("category") or not pr.get("statement"):
+                        bad.append(f"{ptag}: 须含非空 premise_id / category / statement")
+                        continue
+                    if pr["premise_id"] in prem_ids:
+                        bad.append(f"{ptag}: premise_id {pr['premise_id']!r} 重复")
+                    prem_ids.add(pr["premise_id"])
+            # alternative_models
+            alts = md["alternative_models"]
+            if not isinstance(alts, list) or not alts or any(not isinstance(a, str) or not a.strip() for a in alts):
+                bad.append(f"{tag}: alternative_models 须为非空字符串数组")
+            # computable_conditions
+            conds = md["computable_conditions"]
+            cmap = {}
+            if not isinstance(conds, list) or not conds:
+                bad.append(f"{tag}: computable_conditions 不能为空")
+            else:
+                for ci, co in enumerate(conds):
+                    cid_co = co.get("cond_id", f"#{ci}")
+                    ctag = f"{tag}.computable_conditions[{cid_co}]"
+                    for req in ("cond_id", "depends_on_statements", "uses_premises", "description", "expr"):
+                        if req not in co:
+                            bad.append(f"{ctag}: 缺字段 {req}")
+                    if any(req not in co for req in ("cond_id", "depends_on_statements", "uses_premises", "description", "expr")):
+                        continue
+                    if cid_co in cmap:
+                        bad.append(f"{ctag}: cond_id 重复")
+                    cmap[cid_co] = co
+                    check_depends_on(co["depends_on_statements"], as_map, ctag, bad)
+                    if not isinstance(co["uses_premises"], list):
+                        bad.append(f"{ctag}: uses_premises 须为数组")
+                    else:
+                        for pid in co["uses_premises"]:
+                            if pid not in prem_ids:
+                                bad.append(f"{ctag}: uses_premises 含未知前提 {pid!r}")
+                    if not co.get("description"):
+                        bad.append(f"{ctag}: description 不能为空")
+            model_conds[mid] = cmap
+            # expected_under_model
+            exps = md["expected_under_model"]
+            emap = {}
+            if not isinstance(exps, list) or not exps:
+                bad.append(f"{tag}: expected_under_model 不能为空")
+            else:
+                for ei, ex in enumerate(exps):
+                    eid = ex.get("expect_id", f"#{ei}")
+                    etag = f"{tag}.expected_under_model[{eid}]"
+                    for req in ("expect_id", "depends_on_statements", "uses_premises", "subject", "expected", "compatibility_note"):
+                        if req not in ex:
+                            bad.append(f"{etag}: 缺字段 {req}")
+                    if any(req not in ex for req in ("expect_id", "depends_on_statements", "uses_premises", "subject", "expected", "compatibility_note")):
+                        continue
+                    if eid in emap:
+                        bad.append(f"{etag}: expect_id 重复")
+                    emap[eid] = ex
+                    check_depends_on(ex["depends_on_statements"], as_map, etag, bad)
+                    if not isinstance(ex["uses_premises"], list):
+                        bad.append(f"{etag}: uses_premises 须为数组")
+                    else:
+                        for pid in ex["uses_premises"]:
+                            if pid not in prem_ids:
+                                bad.append(f"{etag}: uses_premises 含未知前提 {pid!r}")
+                    if not ex.get("subject") or not isinstance(ex.get("expected"), dict) or not ex.get("compatibility_note"):
+                        bad.append(f"{etag}: subject / expected(dict) / compatibility_note 不能为空")
+            model_expects[mid] = emap
+            n_models += 1
 
-        # 6g. synthetic_witnesses 标记 + locked_values + 约束求值
-        wits = kc["synthetic_witnesses"]
-        if not isinstance(wits, list) or not wits:
-            bad.append(f"{cid}: synthetic_witnesses 不能为空")
-        for j, w in enumerate(wits):
-            tag = f"{cid}.synthetic_witnesses[{j}]({w.get('witness_id','?')})"
-            for k in (
-                "witness_id", "synthetic", "variant", "covers_assertion_ids",
-                "determined_by_text", "free_parameters", "freedom_justification",
-                "locked_values", "data", "check_constraints",
-            ):
-                if k not in w:
-                    bad.append(f"{tag}: 缺字段 {k}")
-                    continue
-            if w.get("synthetic") is not True:
-                bad.append(f"{tag}: 合成见证必须显式标记 synthetic=true")
-            if not w.get("determined_by_text"):
-                bad.append(f"{tag}: determined_by_text 不能为空")
-            if not w.get("free_parameters"):
-                bad.append(f"{tag}: free_parameters 不能为空")
-            fj = w.get("freedom_justification") or {}
-            if fj.get("mode") not in FREEDOM_MODES or not fj.get("note"):
-                bad.append(f"{tag}: freedom_justification 须含合法 mode 与非空 note")
-            if fj.get("mode") in ("multi_instance_coverage", "order_invariant_plus_multi_instance") and len(wits) < 2:
-                bad.append(f"{tag}: freedom_justification 声明多实例覆盖但见证数 < 2")
-            for aid in w.get("covers_assertion_ids") or []:
-                if aid not in assert_ids and aid not in cf_map:
-                    bad.append(f"{tag}: covers_assertion_ids 含未知编号 {aid!r}")
-            # 核对 locked_values 与 data 一致且字面出现在 refs
-            wdata = w.get("data") or {}
-            for lidx, lv in enumerate(w.get("locked_values") or []):
-                ltag = f"{tag}.locked_values[{lidx}]"
-                if check_refs_list(lv.get("refs"), cites, ltag, bad, require_nonempty=True):
-                    if not num_in_refs(lv["value"], lv["refs"], cites):
-                        bad.append(f"{ltag}: 锁定值 {lv['value']} 未出现在其 refs 原文中")
-                try:
-                    actual = eval_val(lv["symbol"], wdata)
-                    if abs(actual - float(lv["value"])) > EPS:
-                        bad.append(f"{ltag}: data 中 {lv['symbol']}={actual} != locked value {lv['value']}")
-                except (KeyError, ValueError, TypeError) as e:
-                    bad.append(f"{ltag}: 无法在 data 中读取 {lv['symbol']!r}: {e}")
-            # 核对约束在 data 上全部成立
-            overrides = {}
-            cf_id = w.get("counterfactual_id")
-            if cf_id is not None:
-                if cf_id not in cf_map:
-                    bad.append(f"{tag}: counterfactual_id={cf_id!r} 未定义")
+        # 7d. 第三层：实例层 instances（全部合成）
+        insts = kc["instances"]
+        if not isinstance(insts, list) or not insts:
+            bad.append(f"{cid}: instances 不能为空")
+            continue
+        seen_inst = set()
+        used_models = set()
+        for ii, ins in enumerate(insts):
+            iid = ins.get("instance_id", f"#{ii}")
+            tag = f"{cid}.instances[{iid}]"
+            if "determined_by_text" in ins:
+                bad.append(f"{tag}: v2 严禁存在中间态字段 determined_by_text")
+            req_i = (
+                "instance_id", "model_id", "synthetic", "instance_role",
+                "counterfactual_proposer", "counterfactual_statement_id",
+                "counterfactual_rationale", "expected_under_instance",
+                "data", "literal_bindings", "free_parameters", "check_conditions",
+            )
+            miss_i = [k for k in req_i if k not in ins]
+            if miss_i:
+                bad.append(f"{tag}: 缺字段 {miss_i}")
+                continue
+            if iid in seen_inst:
+                bad.append(f"{tag}: instance_id 重复")
+            seen_inst.add(iid)
+            mid = ins["model_id"]
+            if mid not in model_map:
+                bad.append(f"{tag}: model_id={mid!r} 不在 organizer_models 中")
+                continue
+            used_models.add(mid)
+            if ins["synthetic"] is not True:
+                bad.append(f"{tag}: 外层 synthetic 必须为 true")
+            idata = ins["data"]
+            if not isinstance(idata, dict) or idata.get("synthetic") is not True:
+                bad.append(f"{tag}: data.synthetic 必须显式为 true")
+
+            role = ins["instance_role"]
+            if role not in INSTANCE_ROLES:
+                bad.append(f"{tag}: instance_role 非法 {role!r}")
+            prop = ins["counterfactual_proposer"]
+            cf_sid = ins["counterfactual_statement_id"]
+            cf_rat = ins["counterfactual_rationale"]
+            overrides = ins.get("condition_overrides") or {}
+            if not isinstance(overrides, dict):
+                bad.append(f"{tag}: condition_overrides 须为对象")
+                overrides = {}
+
+            if role == "positive":
+                if prop is not None:
+                    bad.append(f"{tag}: positive 实例的 counterfactual_proposer 须为 null")
+                if cf_sid is not None:
+                    bad.append(f"{tag}: positive 实例的 counterfactual_statement_id 须为 null")
+                if cf_rat is not None:
+                    bad.append(f"{tag}: positive 实例的 counterfactual_rationale 须为 null")
+                if overrides:
+                    bad.append(f"{tag}: positive 实例不允许使用 condition_overrides")
+                eui = ins["expected_under_instance"]
+                if not isinstance(eui, list) or not eui:
+                    bad.append(f"{tag}: positive 实例的 expected_under_instance 须为非空 expect_id 列表")
                 else:
-                    for rc in cf_map[cf_id]["replace_constraints"]:
-                        overrides[rc["target"]] = rc["expr"]
-            if not w.get("check_constraints"):
-                bad.append(f"{tag}: check_constraints 不能为空")
-            for con_id in w.get("check_constraints") or []:
-                if con_id not in cmap:
-                    bad.append(f"{tag}: check_constraints 含未知约束 {con_id!r}")
-                    continue
-                expr = overrides.get(con_id, cmap[con_id]["expr"])
-                try:
-                    res = eval_expr(expr, wdata)
-                except (KeyError, ValueError, TypeError) as e:
-                    bad.append(f"{tag}: 约束 {con_id} 求值出错：{e}")
-                    continue
-                n_constraint_evals += 1
-                if not res:
-                    bad.append(f"{tag}: 约束 {con_id} 在合成数据上不成立（expr={expr}）")
-            n_witnesses += 1
+                    for eid in eui:
+                        if eid not in model_expects[mid]:
+                            bad.append(f"{tag}: expected_under_instance 含未知 expect_id {eid!r}")
+            elif role == "counterfactual":
+                if prop not in CF_PROPOSERS:
+                    bad.append(f"{tag}: 反事实实例 counterfactual_proposer 必填且须为 'author' 或 'organizer'，实际 {prop!r}")
+                if not isinstance(cf_rat, str) or not cf_rat.strip():
+                    bad.append(f"{tag}: 反事实实例 counterfactual_rationale 不能为空")
+                if prop == "author":
+                    n_cf_author += 1
+                    if not isinstance(cf_sid, str) or cf_sid not in as_map:
+                        bad.append(f"{tag}: counterfactual_proposer='author' 时 counterfactual_statement_id 必须指向合法作者陈述，实际 {cf_sid!r}")
+                    elif as_map[cf_sid]["mood"] != "假设或反事实":
+                        bad.append(
+                            f"{tag}: counterfactual_proposer='author' 指向 {cf_sid}，"
+                            f"但其 mood={as_map[cf_sid]['mood']!r} != '假设或反事实'"
+                        )
+                elif prop == "organizer":
+                    n_cf_organizer += 1
+                    if cf_sid is not None:
+                        bad.append(f"{tag}: counterfactual_proposer='organizer' 时 counterfactual_statement_id 须为 null")
+                eui = ins["expected_under_instance"]
+                if not isinstance(eui, dict) or not eui.get("scope_note") or not isinstance(eui.get("expected"), dict):
+                    bad.append(f"{tag}: counterfactual 实例的 expected_under_instance 须为含 scope_note 与 expected(dict) 的对象")
 
-        # 6h. interpretive_choices & real_market_dependency
-        if not isinstance(kc["interpretive_choices"], list):
-            bad.append(f"{cid}: interpretive_choices 须为数组")
-        for j, ic in enumerate(kc["interpretive_choices"]):
-            for k in ("choice_id", "summary", "basis", "alternatives"):
-                if k not in ic or not ic[k]:
-                    bad.append(f"{cid}.interpretive_choices[{j}]: 缺或空字段 {k}")
+            # 核对 data 全部数值在 literal_bindings 与 free_parameters 间严格二分（不重不漏）
+            all_targets = collect_data_numeric_targets(idata, tag, bad)
+            lit_targets = set()
+            free_targets = set()
+
+            lbinds = ins["literal_bindings"]
+            if not isinstance(lbinds, list):
+                bad.append(f"{tag}: literal_bindings 须为数组")
+            else:
+                for li, lb in enumerate(lbinds):
+                    ltag = f"{tag}.literal_bindings[{li}]"
+                    for req in ("target", "value", "statement_id", "value_id"):
+                        if req not in lb:
+                            bad.append(f"{ltag}: 缺字段 {req}")
+                    if any(req not in lb for req in ("target", "value", "statement_id", "value_id")):
+                        continue
+                    tgt = lb["target"]
+                    if tgt in lit_targets:
+                        bad.append(f"{ltag}: target {tgt!r} 重复")
+                    lit_targets.add(tgt)
+                    sid = lb["statement_id"]
+                    vid = lb["value_id"]
+                    if sid not in as_map:
+                        bad.append(f"{ltag}: statement_id={sid!r} 不存在")
+                    elif vid not in lv_global or lv_global[vid][0] != sid:
+                        bad.append(f"{ltag}: {sid} 中不存在 literal value {vid!r}")
+                    else:
+                        lv_obj = lv_global[vid][1]
+                        if lv_obj["binds_instance_target_literally"] is not True:
+                            bad.append(
+                                f"{ltag}: {sid}.{vid} 的 binds_instance_target_literally=false"
+                                f"（原文未字面指定所指字段），不得放入 literal_bindings，请移入 free_parameters"
+                            )
+                        if abs(float(lb["value"]) - float(lv_obj["value"])) > EPS:
+                            bad.append(f"{ltag}: value={lb['value']} != {sid}.{vid}.value={lv_obj['value']}")
+                    if tgt not in all_targets:
+                        bad.append(f"{ltag}: target {tgt!r} 不在 data 数值集合中")
+                    elif abs(all_targets[tgt] - float(lb["value"])) > EPS:
+                        bad.append(f"{ltag}: data[{tgt}]={all_targets[tgt]} != value={lb['value']}")
+
+            fparams = ins["free_parameters"]
+            if not isinstance(fparams, list):
+                bad.append(f"{tag}: free_parameters 须为数组")
+            else:
+                for fi, fp in enumerate(fparams):
+                    ftag = f"{tag}.free_parameters[{fi}]"
+                    for req in ("target", "value", "note"):
+                        if req not in fp:
+                            bad.append(f"{ftag}: 缺字段 {req}")
+                    if any(req not in fp for req in ("target", "value", "note")):
+                        continue
+                    tgt = fp["target"]
+                    if tgt in free_targets:
+                        bad.append(f"{ftag}: target {tgt!r} 重复")
+                    free_targets.add(tgt)
+                    if not isinstance(fp["note"], str) or not fp["note"].strip():
+                        bad.append(f"{ftag}: note 不能为空")
+                    if tgt not in all_targets:
+                        bad.append(f"{ftag}: target {tgt!r} 不在 data 数值集合中")
+                    elif abs(all_targets[tgt] - float(fp["value"])) > EPS:
+                        bad.append(f"{ftag}: data[{tgt}]={all_targets[tgt]} != value={fp['value']}")
+
+            overlap_t = sorted(lit_targets & free_targets)
+            if overlap_t:
+                bad.append(f"{tag}: literal_bindings 与 free_parameters 重叠：{overlap_t}")
+            missing_t = sorted(set(all_targets.keys()) - (lit_targets | free_targets))
+            if missing_t:
+                bad.append(f"{tag}: data 中以下数值既不在 literal_bindings 也不在 free_parameters：{missing_t}")
+
+            # 核对 check_conditions
+            cmap = model_conds[mid]
+            cconds = ins["check_conditions"]
+            if not isinstance(cconds, list) or not cconds:
+                bad.append(f"{tag}: check_conditions 不能为空")
+            else:
+                for ok_cid in overrides:
+                    if ok_cid not in cmap:
+                        bad.append(f"{tag}: condition_overrides 含未知条件 {ok_cid!r}")
+                    elif ok_cid not in cconds:
+                        bad.append(f"{tag}: condition_overrides 覆盖了未列入 check_conditions 的 {ok_cid!r}")
+                for co_id in cconds:
+                    if co_id not in cmap:
+                        bad.append(f"{tag}: check_conditions 含未知条件 {co_id!r}")
+                        continue
+                    expr = overrides.get(co_id, cmap[co_id]["expr"])
+                    try:
+                        res = eval_expr(expr, idata)
+                    except (KeyError, ValueError, TypeError) as e:
+                        bad.append(f"{tag}: 条件 {co_id} 求值出错：{e}")
+                        continue
+                    n_cond_evals += 1
+                    if not res:
+                        bad.append(f"{tag}: 条件 {co_id} 在合成数据上不成立（expr={expr}）")
+            n_instances += 1
+
+        # 检查无悬空模型
+        unused_m = sorted(set(model_map.keys()) - used_models)
+        if unused_m:
+            bad.append(f"{cid}: 以下 organizer_models 缺少对应实例：{unused_m}")
+
+        # real_market_dependency
         rmd = kc["real_market_dependency"]
-        if not isinstance(rmd, dict) or not isinstance(rmd.get("needs_historical_data_for_kernel"), bool) or not rmd.get("historical_data_meaning"):
-            bad.append(f"{cid}: real_market_dependency 字段不完整")
-        if rmd.get("needs_historical_data_for_kernel") is not False:
-            bad.append(f"{cid}: 内核判例的 needs_historical_data_for_kernel 应为 false")
+        if not isinstance(rmd, dict) or rmd.get("needs_historical_data_for_kernel") is not False or not rmd.get("historical_data_meaning"):
+            bad.append(f"{cid}: real_market_dependency 字段不完整或 needs_historical_data_for_kernel 不为 false")
 
-    # 7. 核对 classification 中标记 digitized_in_kernel=true 的集合与 kernel-cases.jsonl 完全一致
-    want_k = {cid for cid, row in cls_by_id.items() if row["digitized_in_kernel"]}
-    if want_k != seen_k:
-        bad.append(f"kernel-cases.jsonl 与 classification 不一致：漏 {sorted(want_k - seen_k)}，多 {sorted(seen_k - want_k)}")
+    # 8. 核对 classification / kernel-cases (v2) / legacy-v1-unreviewed 三方对齐
+    want_v2_ids = {r["case_id"] for r in cls_rows if r["kernel_digitization_status"] == "v2_exemplar"}
+    want_legacy_ids = {r["case_id"] for r in cls_rows if r["kernel_digitization_status"] == "v1_legacy_unreviewed"}
+    if seen_k & legacy_ids:
+        bad.append(f"kernel-cases.jsonl 与 legacy-v1-unreviewed.jsonl 存在重叠：{sorted(seen_k & legacy_ids)}")
+    if seen_k != want_v2_ids:
+        bad.append(f"kernel-cases.jsonl 与 classification(v2_exemplar) 不一致：漏 {sorted(want_v2_ids - seen_k)}，多 {sorted(seen_k - want_v2_ids)}")
+    if legacy_ids != want_legacy_ids:
+        bad.append(f"legacy-v1-unreviewed.jsonl 与 classification(v1_legacy_unreviewed) 不一致：漏 {sorted(want_legacy_ids - legacy_ids)}，多 {sorted(legacy_ids - want_legacy_ids)}")
 
     if bad:
-        dedup = list(dict.fromkeys(bad))
-        print(f"不符 {len(dedup)} 处：")
-        for s in dedup:
-            print("  -", s)
+        print(f"FAIL: 共 {len(bad)} 处不符：", file=sys.stderr)
+        for m in bad:
+            print(" -", m, file=sys.stderr)
         sys.exit(1)
 
     cat_cnt = Counter(r["category"] for r in cls_rows)
-    kind_cnt = Counter(kc["input_kind"] for kc in kcases)
-    grade_cnt = Counter(kc["evidence_grade"] for kc in kcases)
-    cite_tier_cnt = Counter(ct["tier"] for kc in kcases for ct in kc["cites"])
+    grade_cnt = Counter(k["evidence_grade"] for k in kcases)
     print(
-        f"全部通过：分类 {len(cls_rows)} 条（{dict(cat_cnt)}）；"
-        f"内核判例 {len(kcases)} 条（示范 {sum(1 for x in kcases if x['exemplar'])} 条），"
-        f"{n_cites} 条引文，{n_assertions} 条断言，{n_counterfactuals} 条反事实，"
-        f"{n_witnesses} 个合成见证，{n_constraint_evals} 次约束求值全部成立；"
-        f"准入表 {n_admit} 条"
+        f"OK: classification={len(cls_rows)} 条 "
+        f"(kernel_only={cat_cnt['kernel_only']}, market_only={cat_cnt['market_only']}, "
+        f"both={cat_cnt['both']}, unusable={cat_cnt['unusable']}) | "
+        f"v2示范={len(kcases)} 条 | 旧格式隔离未审={len(legacy_ids)} 条 | "
+        f"cites={n_cites} | 作者陈述={n_statements} | 整理者建模={n_models} | "
+        f"合成实例={n_instances} (作者反事实={n_cf_author}, 整理者反事实={n_cf_organizer}) | "
+        f"条件求值通过={n_cond_evals} | 证据等级={dict(grade_cnt)}"
     )
-    print("input_kind：    ", dict(kind_cnt))
-    print("evidence_grade：", dict(grade_cnt))
-    print("cite tier：     ", dict(cite_tier_cnt))
     sys.exit(0)
 
 
