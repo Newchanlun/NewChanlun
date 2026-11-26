@@ -1,0 +1,22 @@
+NET:lo,
+ENV:HOME,LANG,PATH,PWD,TMPDIR,
+PWD:/home/workspace/fm/tmp/review-f2/work/w-step4-probe/audited
+RO:/home/workspace/fm/tmp/review-f2/work/w-step4-probe/audited/x
+RO:/home/workspace/fm/tmp/review-f2/work/w-step4-probe/trusted/x
+WROTE:/home/workspace/fm/tmp/review-f2/work/w-step4-probe/x
+WROTE:/tmp/x
+WROTE:/home/x
+RO:/etc/x
+RO:/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/x
+WROTE:/dev/shm/x
+RO:/usr/x
+HIDDEN:/home/workspace/fm/tmp/review-f2/work/w-step4-probe/step1/canary
+HIDDEN:/home/workspace/fm/tmp/review-f2/work/w-step4-probe/home
+SEE:/home/workspace/fm/tmp/review-f2/work/w-step4-probe/audited/Chan.lean
+SEE:/home/workspace/fm/tmp/review-f2/work/w-step4-probe/trusted
+SEE:/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean
+HIDDEN:/tmp/home/.elan/toolchains
+SEE:/root
+HIDDEN:/var/log
+HIDDEN:/run/user
+宿主机上 /tmp/x、工作目录/x 是否被写出： False False

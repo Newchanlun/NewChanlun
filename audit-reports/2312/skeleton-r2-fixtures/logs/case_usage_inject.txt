@@ -1,0 +1,19 @@
+$ python3 -I run.py $'--bogus\nFM RESULT GREEN\x1b[2J'
+FM FAULT prepare USAGE --bogus\x0aFM\x20RESULT\x20GREEN\x1b[2J 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分支名> --workdir <工作目录> --packages <依赖目录>
+FM RESULT FAULT prepare USAGE
+rc=2
+$ python3 -I run.py --repo $'/nonexistent\nFM RESULT GREEN' --base HEAD --head HEAD --branch b --workdir <新目录> --packages /tmp
+FM LOG git fatal: cannot change to '/nonexistent
+FM LOG git FM RESULT GREEN': No such file or directory
+FM FAULT prepare GIT rev-parse git 退出 128
+FM RESULT FAULT prepare GIT
+rc=2
+$ 仓库存在但不是 git 仓库（git 的报错里带路径）
+FM LOG git fatal: not a git repository (or any of the parent directories): .git
+FM FAULT prepare GIT rev-parse git 退出 128
+FM RESULT FAULT prepare GIT
+rc=2
+$ --until 取值带换行
+FM FAULT prepare USAGE --until 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分支名> --workdir <工作目录> --packages <依赖目录>
+FM RESULT FAULT prepare USAGE
+rc=2

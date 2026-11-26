@@ -1,0 +1,177 @@
+=== T1 标准输出是写满的非阻塞管道，0.6 秒后读端才开始读（预先填了 65536 个换行）
+rc=2
+--- stdout
+FM STEP 3 auditor GREEN 8.5s binary=/home/workspace/fm/tmp/review-f2/work/w-T1-nonblocking-stdout/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 1.0s 7 个模块都有产物
+FM STEP 7 env GREEN 0.4s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+FM RESULT FAULT output OUTPUT
+--- stderr(tail)
+OG auditor ✔ [10/11] Built Main:c.o (2.6s)
+FM LOG auditor ✔ [11/11] Built fm_audit:exe (1.1s)
+FM LOG auditor Build completed successfully (11 jobs).
+FM LOG build ✔ [2/20] Built Chan (374ms)
+FM LOG build ✔ [4/20] Built Chan.Base (380ms)
+FM LOG build ✔ [6/20] Built Chan.Thm.Ok (409ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (401ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (425ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (404ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (331ms)
+FM LOG build Build completed successfully (20 jobs).
+FM FAULT output OUTPUT stdout 输出写不出：BlockingIOError
+
+--- FM RESULT 行 2 条：['FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）', 'FM RESULT FAULT output OUTPUT']
+
+=== T2 绿，标准输出已关闭（>&-）
+rc=2
+--- stdout
+--- stderr(tail)
+FM LOG auditor Build completed successfully (11 jobs).
+FM LOG build ✔ [2/20] Built Chan (393ms)
+FM LOG build ✔ [4/20] Built Chan.Base (338ms)
+FM LOG build ✔ [6/20] Built ChanTest.Probe (323ms)
+FM LOG build ✔ [9/20] Built ChanChallenge.Base (332ms)
+FM LOG build ✔ [12/20] Built ChanDyn.Base (347ms)
+FM LOG build ✔ [15/20] Built Chan.Thm.Ok (406ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (304ms)
+FM LOG build Build completed successfully (20 jobs).
+FM FAULT output OUTPUT stdout 输出写不出：OSError
+
+--- FM RESULT 行 0 条：[]
+
+=== T3 绿，标准错误已关闭（2>&-）
+rc=0
+--- stdout
+FM MODE baseline trusted=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 base=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 head=cdca697a75d6d583f9aa97851e338beaf7259231 受信代码取自基线
+FM RUNNER blob=5cf75c7e6529f05694da7bfd9eabf10f95cddcfd from=bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f2/work/w-T-stream/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 0.9s 7 个模块都有产物
+FM STEP 7 env GREEN 0.4s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- stderr(tail)
+
+--- FM RESULT 行 1 条：['FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）']
+
+=== T4 红，标准输出已关闭（>&-）
+rc=1
+--- stdout
+--- stderr(tail)
+M LOG build error: Chan/Thm/Bad.lean:5:23: Type mismatch
+FM LOG build   rfl
+FM LOG build has type
+FM LOG build   ?m.8 = ?m.8
+FM LOG build but is expected to have type
+FM LOG build   1 = 2
+FM LOG build ✔ [4/20] Built ChanChallenge.Base (348ms)
+FM LOG build ✔ [7/20] Built ChanDyn.Base (388ms)
+FM LOG build ✔ [10/20] Built Chan (408ms)
+FM LOG build ✔ [12/20] Built Chan.Base (400ms)
+FM LOG build ✔ [15/20] Built ChanTest.Probe (411ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (301ms)
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.Bad
+FM LOG build error: build failed
+
+--- FM RESULT 行 0 条：[]
+
+=== T5 红，标准输出指向 /dev/full（>/dev/full）
+rc=1
+--- stdout
+--- stderr(tail)
+d   1
+FM LOG build is not definitionally equal to the right-hand side
+FM LOG build   2
+FM LOG build error: Chan/Thm/Bad.lean:5:23: Type mismatch
+FM LOG build   rfl
+FM LOG build has type
+FM LOG build   ?m.8 = ?m.8
+FM LOG build but is expected to have type
+FM LOG build   1 = 2
+FM LOG build ✔ [9/20] Built ChanTest.Probe (370ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (372ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (368ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (315ms)
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.Bad
+FM LOG build error: build failed
+
+--- FM RESULT 行 0 条：[]
+
+=== T6 绿，标准输出指向 /dev/full（>/dev/full）
+rc=2
+--- stdout
+--- stderr(tail)
+FM LOG auditor Build completed successfully (11 jobs).
+FM LOG build ✔ [2/20] Built Chan (335ms)
+FM LOG build ✔ [4/20] Built Chan.Base (350ms)
+FM LOG build ✔ [6/20] Built Chan.Thm.Ok (355ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (362ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (364ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (381ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (287ms)
+FM LOG build Build completed successfully (20 jobs).
+FM FAULT output OUTPUT stdout 输出写不出：OSError
+
+--- FM RESULT 行 0 条：[]
+
+=== T7 绿，三路全关（<&- >&- 2>&-）
+rc=2
+--- stdout
+--- stderr(tail)
+
+--- FM RESULT 行 0 条：[]
+
+=== T8 第 6 步期间 SIGINT
+rc=2
+--- stdout
+FM MODE baseline trusted=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 base=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 head=c703dcb83a05981791f34d1a71bd43bdeb4e9061 受信代码取自基线
+FM RUNNER blob=5cf75c7e6529f05694da7bfd9eabf10f95cddcfd from=bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 8.1s binary=/home/workspace/fm/tmp/review-f2/work/w-T-signal/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+--- stderr(tail)
+FM LOG auditor ✔ [2/11] Built Auditor.EnvGates (1.2s)
+FM LOG auditor ✔ [4/11] Built Auditor.EnvGates:c.o (813ms)
+FM LOG auditor ✔ [5/11] Built Auditor.Headers (1.2s)
+FM LOG auditor ✔ [7/11] Built Auditor.Headers:c.o (491ms)
+FM LOG auditor ✔ [8/11] Built Main (1.7s)
+FM LOG auditor ✔ [10/11] Built Main:c.o (2.4s)
+FM LOG auditor ✔ [11/11] Built fm_audit:exe (1.1s)
+FM LOG auditor Build completed successfully (11 jobs).
+
+--- FM RESULT 行 0 条：[]
+
+tick 字节数 14 → 14（2 秒后）；仍在运行且命令行含本次工作目录的进程：无
+
+=== T9 第 6 步期间 SIGTERM
+rc=-15
+--- stdout
+FM MODE baseline trusted=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 base=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 head=c703dcb83a05981791f34d1a71bd43bdeb4e9061 受信代码取自基线
+FM RUNNER blob=5cf75c7e6529f05694da7bfd9eabf10f95cddcfd from=bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 8.3s binary=/home/workspace/fm/tmp/review-f2/work/w-T-signal/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.3s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+--- stderr(tail)
+FM LOG auditor ✔ [2/11] Built Auditor.EnvGates (1.1s)
+FM LOG auditor ✔ [4/11] Built Auditor.EnvGates:c.o (803ms)
+FM LOG auditor ✔ [5/11] Built Auditor.Headers (1.3s)
+FM LOG auditor ✔ [7/11] Built Auditor.Headers:c.o (494ms)
+FM LOG auditor ✔ [8/11] Built Main (1.6s)
+FM LOG auditor ✔ [10/11] Built Main:c.o (2.4s)
+FM LOG auditor ✔ [11/11] Built fm_audit:exe (1.2s)
+FM LOG auditor Build completed successfully (11 jobs).
+
+--- FM RESULT 行 0 条：[]
+
+tick 字节数 12 → 12（2 秒后）；仍在运行且命令行含本次工作目录的进程：无
+

@@ -1,0 +1,24 @@
+工作目录含非 UTF-8（已存在非空）                          rc=2 故障=WORKDIR protocol=合规
+    out: FM RESULT FAULT prepare WORKDIR
+    err: FM FAULT prepare WORKDIR /home/workspace/fm/tmp/review-f2/work/wd-\xff-nonempty 工作目录须不存在或为空目录
+依赖目录含非 UTF-8 且不存在                            rc=2 故障=PACKAGES protocol=合规
+    out: FM RESULT FAULT prepare PACKAGES
+    err: FM FAULT prepare PACKAGES /nonexistent-\xff 依赖目录不存在
+工作目录含非 UTF-8、父目录不存在                          rc=2 故障=INTERNAL protocol=合规
+    out: FM RESULT FAULT prepare INTERNAL
+    err: FM FAULT prepare INTERNAL - FileNotFoundError: [Errno 2] No such file or directory: '/home/workspace/fm/tmp/review-f2/work/a-bad-\x5cudcff/x'
+工作目录含非 UTF-8、可新建（应正常跑到第 1 步）                 rc=2 故障=— protocol=合规
+    out: =bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py ⏎ FM STEP 1 precheck GREEN 0.1s role=proof ⏎ FM RESULT PARTIAL 只跑到第 1 步，没有做完整判定
+    err: 
+仓库路径非 UTF-8 且不存在                             rc=2 故障=GIT protocol=合规
+    out: FM RESULT FAULT prepare GIT
+    err: FM FAULT prepare GIT rev-parse git 退出 128
+自举提交参数非 UTF-8                                rc=2 故障=BAD_REV protocol=合规
+    out: FM RESULT FAULT prepare BAD_REV
+    err: FM FAULT prepare BAD_REV \xff\xfe 解析不出提交
+基线参数是孤立代理项的 UTF-8 形式                         rc=2 故障=BAD_REV protocol=合规
+    out: FM RESULT FAULT prepare BAD_REV
+    err: FM FAULT prepare BAD_REV \xed\xa0\x80 解析不出提交
+分支名非 UTF-8 且带换行                              rc=2 故障=— protocol=合规
+    out: from=bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py ⏎ FM STEP 1 precheck GREEN 0.1s role=- ⏎ FM RESULT PARTIAL 只跑到第 1 步，没有做完整判定
+    err: 

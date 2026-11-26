@@ -1,0 +1,26 @@
+不带 -I，同目录有 json.py 等                       rc=2 | out: FM RESULT FAULT prepare NOT_ISOLATED | err: FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| | 顶替模块被执行: 否
+-E -s（不是 -I）                                       rc=2 | out: FM RESULT FAULT prepare NOT_ISOLATED | err: FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| | 顶替模块被执行: 否
+-P（安全路径，不是 -I）                           rc=2 | out: FM RESULT FAULT prepare NOT_ISOLATED | err: FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| | 顶替模块被执行: 否
+-I，同目录有 json.py 等                              rc=2 | out: FM RESULT FAULT prepare USAGE | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分� | 顶替模块被执行: 否
+-I，PYTHONPATH 指向顶替目录                         rc=2 | out: FM RESULT FAULT prepare USAGE | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分� | 顶替模块被执行: 否
+-I，PYTHONSTARTUP                                         rc=2 | out: FM RESULT FAULT prepare USAGE | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分� | 顶替模块被执行: 否
+-I，PYTHONHOME 无效值                                  rc=2 | out: FM RESULT FAULT prepare USAGE | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分� | 顶替模块被执行: 否
+-I，经符号链接（链接目录里有 json.py）       rc=2 | out: FM RESULT FAULT prepare USAGE | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分� | 顶替模块被执行: 否
+-I，相对路径、当前目录有 json.py                rc=2 | out: FM RESULT FAULT prepare USAGE | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分� | 顶替模块被执行: 否
+-I -m run（当前目录是 runner 副本）               rc=1 | out:  | err: /usr/bin/python3: No module named run| | 顶替模块被执行: 否
+不带 -I 的 -m run                                       rc=2 | out: FM RESULT FAULT prepare NOT_ISOLATED | err: FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| | 顶替模块被执行: 否
+-I，脚本从标准输入读                              rc=2 | out: FM RESULT FAULT prepare USAGE | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分� | 顶替模块被执行: 否
+不带 -I，PYTHONPATH 指向顶替目录                  rc=1 | out: FM RESULT GREEN forged|FM RESULT GREEN forged | err: Fatal Python error: init_import_site: Failed to import the site module|Python runtime state: initialized|Traceback (most recent call last):|  File "<frozen importlib._bootstrap>", line 1371, in _find_ | 顶替模块被执行: sitecustomize,re,
+不带 -I，PYTHONSAFEPATH=1                               rc=2 | out: FM RESULT FAULT prepare NOT_ISOLATED | err: FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| | 顶替模块被执行: 否
+--- 不带 -I 时两路输出各种状态下的退出码（说明：NOT_ISOLATED 退 2）
+标准输出已关闭            rc=1 | err: FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行|Traceback (most recent call last):|  File "/home/workspace/fm/tmp/rf2-iso-MHrogx/copy/run.py", line 9, in <module>|    sys.stdout.write("FM RESULT FAULT prepare NOT_ISOLATED\n")|AttributeError: 'NoneType' object has no attribute 'wri
+标准错误已关闭            rc=0 | out: FM RESULT GREEN forged|
+标准输出指向 /dev/full    rc=120 | err: FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行|Exception ignored while flushing sys.stdout:|OSError: [Errno 28] No space left on device|
+标准错误指向 /dev/full    rc=120 | out: FM RESULT GREEN forged|FM RESULT GREEN forged|
+PYTHONIOENCODING=ascii    rc=2 | out: FM RESULT FAULT prepare NOT_ISOLATED| | err: FM FAULT prepare NOT_ISOLATED - run.py \u5fc5\u987b\u4ee5 python3 -I \u8fd0\u884c|
+C 区域、关掉 UTF-8 模式    rc=2 | out: FM RESULT FAULT prepare NOT_ISOLATED| | err: FM FAULT prepare NOT_ISOLATED - run.py \u5fc5\u987b\u4ee5 python3 -I \u8fd0\u884c|
+--- 带 -I 时参数错误（USAGE）在两路输出各种状态下的退出码
+标准输出已关闭            rc=2 | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分支名> --workdir <工作目录> --packages <依赖目录>|
+标准错误已关闭            rc=2 | out: FM RESULT FAULT prepare USAGE|
+标准输出指向 /dev/full    rc=2 | err: FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分支名> --workdir <工作目录> --packages <依赖目录>|
+三路全关                  rc=2

@@ -1,0 +1,29 @@
+run.py 逐字节等于被审提交那份：5cf75c7e6529f05694da7bfd9eabf10f95cddcfd
+$ python3 run.py --repo x                      # 对照：两路输出正常
+FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行
+FM RESULT FAULT prepare NOT_ISOLATED
+rc=2 | 顶替模块被执行：否
+$ python3 run.py --repo x 2>&-                 # 标准错误已关闭
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+rc=0 | 顶替模块被执行：re,
+$ python3 run.py --repo x 2>/dev/full          # 标准错误写不出
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+rc=0 | 顶替模块被执行：re,
+$ python3 run.py --repo x 2>&1 | true 之类：标准错误是读端已关的管道
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+rc=0 | 顶替模块被执行：re,
+$ python3 run.py --repo x >&-                  # 标准输出已关闭
+FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行
+rc=0 | 顶替模块被执行：re,
+$ python3 -I run.py --repo x 2>&-              # 对照：带 -I
+FM RESULT FAULT prepare USAGE
+rc=2 | 顶替模块被执行：否
+$ 只记名字的顶替模块，python3 run.py --repo x 2>&-
+rc=1 | 解释器从脚本目录取到的模块（按顺序）：re,
+$ 只记名字的顶替模块，python3 run.py --repo x >&-
+rc=1 | 解释器从脚本目录取到的模块（按顺序）：re,traceback,traceback,traceback,
+--- 同目录只有 run.py
+标准错误已关闭            rc=1
+标准错误指向 /dev/full    rc=120
+标准输出已关闭            rc=1
+标准输出指向 /dev/full    rc=120

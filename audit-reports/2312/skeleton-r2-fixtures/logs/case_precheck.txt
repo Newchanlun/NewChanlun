@@ -1,0 +1,54 @@
+== 第一部分：真预检
+一致	GREEN                  直跑预检 rc=0 红码=— 故障=— | 运行脚本 rc=2 红码=— 故障=— 结果行=FM RESULT PARTIAL 只跑到第 1 步，没有做完整判定 | protocol=合规
+一致	TREE_FORM              直跑预检 rc=1 红码=TREE_FORM 故障=— | 运行脚本 rc=1 红码=TREE_FORM 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	EMPTY_TREE             直跑预检 rc=1 红码=EMPTY_TREE 故障=— | 运行脚本 rc=1 红码=EMPTY_TREE 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	MODE                   直跑预检 rc=1 红码=MODE 故障=— | 运行脚本 rc=1 红码=MODE 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	LAKE_FILE              直跑预检 rc=1 红码=LAKE_FILE 故障=— | 运行脚本 rc=1 红码=LAKE_FILE 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	PATH_GRAMMAR           直跑预检 rc=1 红码=PATH_GRAMMAR 故障=— | 运行脚本 rc=1 红码=PATH_GRAMMAR 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	PATH_GRAMMAR-case      直跑预检 rc=1 红码=PATH_GRAMMAR 故障=— | 运行脚本 rc=1 红码=PATH_GRAMMAR 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	TOP_LEVEL              直跑预检 rc=1 红码=PATH_SCOPE,TOP_LEVEL 故障=— | 运行脚本 rc=1 红码=PATH_SCOPE,TOP_LEVEL 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	CONTENT_SHAPE          直跑预检 rc=1 红码=CONTENT_SHAPE 故障=— | 运行脚本 rc=1 红码=CONTENT_SHAPE 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	BRANCH_ROLE            直跑预检 rc=1 红码=BRANCH_ROLE 故障=— | 运行脚本 rc=1 红码=BRANCH_ROLE 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	PATH_SCOPE             直跑预检 rc=1 红码=PATH_SCOPE 故障=— | 运行脚本 rc=1 红码=PATH_SCOPE 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	TRUST_UNAPPROVED       直跑预检 rc=1 红码=TRUST_UNAPPROVED 故障=— | 运行脚本 rc=1 红码=TRUST_UNAPPROVED 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	infra-approved-GREEN   直跑预检 rc=0 红码=— 故障=— | 运行脚本 rc=2 红码=— 故障=— 结果行=FM RESULT PARTIAL 只跑到第 1 步，没有做完整判定 | protocol=合规
+一致	TRUSTED_DRIFT          直跑预检 rc=1 红码=PATH_SCOPE,TRUSTED_DRIFT 故障=— | 运行脚本 rc=1 红码=PATH_SCOPE,TRUSTED_DRIFT 故障=— 结果行=FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | protocol=合规
+一致	NOT_ANCESTOR           直跑预检 rc=2 红码=— 故障=NOT_ANCESTOR | 运行脚本 rc=2 红码=— 故障=PRECHECK_EXIT 结果行=FM RESULT FAULT precheck PRECHECK_EXIT | protocol=合规
+一致	BASE_FORM              直跑预检 rc=2 红码=— 故障=BASE_FORM | 运行脚本 rc=2 红码=— 故障=PRECHECK_EXIT 结果行=FM RESULT FAULT precheck PRECHECK_EXIT | protocol=合规
+== 第二部分：假预检（自举模式，受信提交里的 precheck.py 被换掉；run.py 仍是受信那份）
+退 0，绿行两条                                     rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 0，绿行提交名不符                                  rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 0，绿行后多一行                                   rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 0，没有输出                                     rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 0，绿行没有换行结尾                                 rc=2 红码=— 故障=PRECHECK_OUTPUT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_OUTPUT
+退 0，输出是红行                                    rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 1，没有输出                                     rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 1，绿行                                       rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 1，红行加一行杂项                                  rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 1，红码小写                                     rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 1，红行缺说明栏                                   rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 1，红行加空行                                    rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 1，红行与绿行混排                                  rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 2，带红行                                      rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 3                                          rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT
+退 1，未知红码（应原样转出，退 1）                          rc=1 红码=BRAND_NEW_RULE 故障=— protocol=合规
+    标准输出第 3 行起：FM RED precheck BRAND_NEW_RULE formal_math/x\x0aFM\x20RESULT\x20GREEN msg \xff\x1b[2J\u2028tail ⏎ FM STEP 1 precheck RED 0.0s - ⏎ FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑
+退 0，绿行的 role 栏带控制符（应全绿到第 1 步，PARTIAL）        rc=2 红码=— 故障=— protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck GREEN 0.0s role=proof\x1b[2J\x0dFM RESULT GREEN ⏎ FM RESULT PARTIAL 只跑到第 1 步，没有做完整判定
+被信号杀死                                        rc=2 红码=— 故障=PRECHECK_EXIT protocol=合规
+    标准输出第 3 行起：FM STEP 1 precheck FAULT 0.0s ⏎ FM RESULT FAULT precheck PRECHECK_EXIT

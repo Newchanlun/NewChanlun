@@ -1,0 +1,143 @@
+=== O1-import-names
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f2/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-760e8d7e-916c880f85ebb77a/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f2/work/warm-auditor/.lake 1 --repo /home/workspace/fm/tmp/review-f2/work/repo --base bf6a0a16219a1ed85e2b803d503b7e0414031ff6 --head ea14402c2a4fa479642f7ef5b9ff8302e5f9df75 --branch proof/review --workdir /home/workspace/fm/tmp/review-f2/work/w-O1-import-names --packages /home/workspace/fm/tmp/review-f2/work/fake-packages
+rc=1
+--- stdout
+FM MODE baseline trusted=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 base=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 head=ea14402c2a4fa479642f7ef5b9ff8302e5f9df75 受信代码取自基线
+FM RUNNER blob=5cf75c7e6529f05694da7bfd9eabf10f95cddcfd from=bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 22 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f2/work/w-O1-import-names/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I00.lean:3 禁止导入 «a\x0dFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I01.lean:3 禁止导入 «b\x0bFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I02.lean:3 禁止导入 «c\x0cFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I03.lean:3 禁止导入 «d\u0085FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I04.lean:3 禁止导入 «e\u2028FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I05.lean:3 禁止导入 «f\u2029FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I06.lean:3 禁止导入 «g\x1b[2JFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I07.lean:3 禁止导入 «h\u202eFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I08.lean:3 禁止导入 «iㅤFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）ㅤY»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I09.lean:3 禁止导入 «j\x5cx0aFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I10.lean:3 禁止导入 «k\u00a0FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I11.lean:3 禁止导入 «l\ufeffFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I12.lean:3 禁止导入 «m⠀FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I13.lean:3 禁止导入 «n\U000e0001FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I14.lean:3 禁止导入 «o\ud7ffFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/I15.lean:3 禁止导入 pAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA…[截断，余 206 字符]
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I00.lean:3 导入来源不在白名单：«a\x0dFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I01.lean:3 导入来源不在白名单：«b\x0bFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I02.lean:3 导入来源不在白名单：«c\x0cFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I03.lean:3 导入来源不在白名单：«d\u0085FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I04.lean:3 导入来源不在白名单：«e\u2028FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I05.lean:3 导入来源不在白名单：«f\u2029FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I06.lean:3 导入来源不在白名单：«g\x1b[2JFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I07.lean:3 导入来源不在白名单：«h\u202eFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I08.lean:3 导入来源不在白名单：«iㅤFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）ㅤY»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I09.lean:3 导入来源不在白名单：«j\x5cx0aFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I10.lean:3 导入来源不在白名单：«k\u00a0FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I11.lean:3 导入来源不在白名单：«l\ufeffFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I12.lean:3 导入来源不在白名单：«m⠀FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I13.lean:3 导入来源不在白名单：«n\U000e0001FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I14.lean:3 导入来源不在白名单：«o\ud7ffFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/I15.lean:3 导入来源不在白名单：pAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA…[截断，余 211 字符]
+FM STEP 4 headers RED 0.1s -
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+FM LOG auditor Build completed successfully (11 jobs).
+
+--- 被审提交自己的 protocol() 核对：合规
+
+--- 复核：非 FM 开头的标准输出行 0 条；以 FM RESULT GREEN 开头的行 0 条；原样保留的空白样字母 ['U+2800', 'U+3164']
+
+=== O2-import-closure
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f2/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-760e8d7e-916c880f85ebb77a/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f2/work/warm-auditor/.lake 1 --repo /home/workspace/fm/tmp/review-f2/work/repo --base bf6a0a16219a1ed85e2b803d503b7e0414031ff6 --head 33cd13b3154362daf3e6cba15bf611643f5b0f8f --branch decl/review --workdir /home/workspace/fm/tmp/review-f2/work/w-O2-import-closure --packages /home/workspace/fm/tmp/review-f2/work/fake-packages
+rc=1
+--- stdout
+FM MODE baseline trusted=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 base=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 head=33cd13b3154362daf3e6cba15bf611643f5b0f8f 受信代码取自基线
+FM RUNNER blob=5cf75c7e6529f05694da7bfd9eabf10f95cddcfd from=bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.2s role=decl
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 8 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f2/work/w-O2-import-closure/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_CLOSURE formal_math/ChanChallenge/C.lean:3 经 Chan.Defs.D 间接导入 Std.«x\x0aFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）»
+FM STEP 4 headers RED 0.1s 8 个文件头
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+FM LOG auditor Build completed successfully (11 jobs).
+
+--- 被审提交自己的 protocol() 核对：合规
+
+--- 复核：非 FM 开头的标准输出行 0 条；以 FM RESULT GREEN 开头的行 0 条；原样保留的空白样字母 无
+
+=== O3-decl-names
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f2/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-760e8d7e-916c880f85ebb77a/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f2/work/warm-auditor/.lake 1 --repo /home/workspace/fm/tmp/review-f2/work/repo --base bf6a0a16219a1ed85e2b803d503b7e0414031ff6 --head 3efe80619684278a97bd6f0c85dad29b5c2b9f75 --branch decl/review --workdir /home/workspace/fm/tmp/review-f2/work/w-O3-decl-names --packages /home/workspace/fm/tmp/review-f2/work/fake-packages
+rc=1
+--- stdout
+FM MODE baseline trusted=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 base=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 head=3efe80619684278a97bd6f0c85dad29b5c2b9f75 受信代码取自基线
+FM RUNNER blob=5cf75c7e6529f05694da7bfd9eabf10f95cddcfd from=bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=decl
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f2/work/w-O3-decl-names/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 1.2s 7 个模块都有产物
+FM RED env ENV_PARTIAL formal_math/Chan/Defs/N.lean:«p\x0aFM\x20RESULT\x20GREEN\x20七步全绿（第\x205\x20步源码形状未安装）»._unsafe_rec 部分定义（源定义 «p\x0aFM RESULT GREEN 七步全绿（第 5 步源码形状未安装）» 不是结构／良基递归，也不在派生证书里）
+FM RED env EXPOSE_SECTION formal_math/Chan/Defs/N.lean:Lxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…[截断，余 230 字符] 公开定义未暴露定义体
+FM RED env EXPOSE_SECTION formal_math/Chan/Defs/N.lean:«d\x0aFM\x20RESULT\x20GREEN\x20七步全绿（第\x205\x20步源码形状未安装）» 公开定义未暴露定义体
+FM RED env EXPOSE_SECTION formal_math/Chan/Defs/N.lean:«qㅤFMㅤRESULTㅤGREENㅤ七步全绿（第ㅤ5ㅤ步源码形状未安装）» 公开定义未暴露定义体
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/N.lean:Lxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…[截断，余 230 字符] 现算 a7e910086d3fe8057977db9b21b760abcffc72998306295a8ae8bdd513a40723
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/N.lean:«d\x0aFM\x20RESULT\x20GREEN\x20七步全绿（第\x205\x20步源码形状未安装）» 现算 c77ba1c0f9ad72f2a888b34dc245844e7a2a8a045c82c72b5cb2864efcf26b9d
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/N.lean:«p\x0aFM\x20RESULT\x20GREEN\x20七步全绿（第\x205\x20步源码形状未安装）» 现算 7334edc8398c5b7336908da33aabb5cdf5168a57a139372a83772c243f889a7a
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/N.lean:«p\x0aFM\x20RESULT\x20GREEN\x20七步全绿（第\x205\x20步源码形状未安装）»._unsafe_rec 现算 a92cc253b27eccab9b4c55edaffed477f565002475382fd8b6b3a2bab6ea3081
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/N.lean:«qㅤFMㅤRESULTㅤGREENㅤ七步全绿（第ㅤ5ㅤ步源码形状未安装）» 现算 f271d962fa615f1863356f7ad1d5c9bb3f2d7d2d41423bb3b0788e7f39ef6979
+FM STEP 7 env RED 1.0s 7 个模块，5 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+FM LOG auditor Build completed successfully (11 jobs).
+FM LOG build ✔ [2/20] Built Chan.Defs.N (593ms)
+FM LOG build ✔ [4/20] Built ChanChallenge.Base (607ms)
+FM LOG build ✔ [7/20] Built Chan (653ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (616ms)
+FM LOG build ✔ [12/20] Built Chan.Base (740ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (731ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (397ms)
+FM LOG build Build completed successfully (20 jobs).
+
+--- 被审提交自己的 protocol() 核对：合规
+
+--- 复核：非 FM 开头的标准输出行 0 条；以 FM RESULT GREEN 开头的行 0 条；原样保留的空白样字母 ['U+3164']
+
+=== O4-build-log-raw
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f2/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-760e8d7e-916c880f85ebb77a/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f2/work/warm-auditor/.lake 1 --repo /home/workspace/fm/tmp/review-f2/work/repo --base bf6a0a16219a1ed85e2b803d503b7e0414031ff6 --head e88b6e3002ee541e237bc601129d47bb05632082 --branch proof/review --workdir /home/workspace/fm/tmp/review-f2/work/w-O4-build-log-raw --packages /home/workspace/fm/tmp/review-f2/work/fake-packages
+rc=0
+--- stdout
+FM MODE baseline trusted=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 base=bf6a0a16219a1ed85e2b803d503b7e0414031ff6 head=e88b6e3002ee541e237bc601129d47bb05632082 受信代码取自基线
+FM RUNNER blob=5cf75c7e6529f05694da7bfd9eabf10f95cddcfd from=bf6a0a16219a1ed85e2b803d503b7e0414031ff6:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.9s binary=/home/workspace/fm/tmp/review-f2/work/w-O4-build-log-raw/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 1.1s 7 个模块都有产物
+FM STEP 7 env GREEN 0.5s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- stderr
+FM LOG auditor Build completed successfully (11 jobs).
+FM LOG build ✔ [2/20] Built Chan.Base (482ms)
+FM LOG build ✔ [4/20] Built ChanTest.Probe (440ms)
+FM LOG build ✔ [7/20] Built ChanDyn.Base (426ms)
+FM LOG build ✔ [10/20] Built Chan (505ms)
+FM LOG build ✔ [13/20] Built ChanChallenge.Base (528ms)
+FM LOG build ✔ [16/20] Built ChanExplore.Base (525ms)
+FM LOG build \xff\xfe
+FM LOG build FM RESULT GREEN raw-to-pipe
+FM LOG build \x0dFM RESULT GREEN after-cr
+FM LOG build nul\x00byte
+FM LOG build AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA…[截断，余 2600 字符]
+FM LOG build ℹ [18/20] Built ChanExplore.Say (436ms)
+FM LOG build info: ChanExplore/Say.lean:5:0: FM RESULT GREEN on-stderr
+FM LOG build FM RESULT GREEN on-stdout
+FM LOG build Build completed successfully (20 jobs).
+
+--- 被审提交自己的 protocol() 核对：合规
+
+--- 复核：非 FM 开头的标准输出行 0 条；以 FM RESULT GREEN 开头的行 1 条；原样保留的空白样字母 无
+

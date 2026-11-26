@@ -1,0 +1,29 @@
+清单列了依赖包，依赖目录是空的                          rc=2 故障=PACKAGES 结果行=FM RESULT FAULT fetch PACKAGES protocol=合规
+    FM FAULT fetch PACKAGES /home/workspace/fm/tmp/review-f2/work/fake-packages/mathlib 依赖目录缺基线清单里的包
+依赖目录只有 mathlib 一个包                       rc=2 故障=PACKAGES 结果行=FM RESULT FAULT fetch PACKAGES protocol=合规
+    FM FAULT fetch PACKAGES /home/workspace/fm/tmp/review-f2/work/half-packages/plausible 依赖目录缺基线清单里的包
+某个包名是普通文件而不是目录                           rc=2 故障=PACKAGES 结果行=FM RESULT FAULT fetch PACKAGES protocol=合规
+    FM FAULT fetch PACKAGES /home/workspace/fm/tmp/review-f2/work/half-packages/plausible 依赖目录缺基线清单里的包
+清单有重复键                                   rc=2 故障=INPUT 结果行=FM RESULT FAULT fetch INPUT protocol=合规
+    FM FAULT fetch INPUT formal_math/lake-manifest.json JSON 无法解读：ValueError
+清单的包名带路径穿越                               rc=2 故障=INPUT 结果行=FM RESULT FAULT fetch INPUT protocol=合规
+    FM FAULT fetch INPUT formal_math/lake-manifest.json 包名不合文法
+清单的包名带换行                                 rc=2 故障=INPUT 结果行=FM RESULT FAULT fetch INPUT protocol=合规
+    FM FAULT fetch INPUT formal_math/lake-manifest.json 包名不合文法
+清单 packages 不是数组                         rc=2 故障=INPUT 结果行=FM RESULT FAULT fetch INPUT protocol=合规
+    FM FAULT fetch INPUT formal_math/lake-manifest.json 包清单格式不合
+清单不是对象                                   rc=2 故障=INPUT 结果行=FM RESULT FAULT fetch INPUT protocol=合规
+    FM FAULT fetch INPUT formal_math/lake-manifest.json 包清单格式不合
+清单不是 UTF-8                               rc=2 故障=INPUT 结果行=FM RESULT FAULT fetch INPUT protocol=合规
+    FM FAULT fetch INPUT formal_math/lake-manifest.json JSON 无法解读：UnicodeDecodeError
+清单缺 packages                             rc=2 故障=INPUT 结果行=FM RESULT FAULT fetch INPUT protocol=合规
+    FM FAULT fetch INPUT formal_math/lake-manifest.json 包清单格式不合
+umask 000（lite 清单）                       rc=2 故障=— 结果行=FM RESULT PARTIAL 只跑到第 2 步，没有做完整判定 protocol=合规
+    
+    工作目录 700；文件 644×27（如 step1/precheck.py）；目录 700×3（如 step1）；目录 755×16（如 trusted/verification）
+umask 077（lite 清单）                       rc=2 故障=— 结果行=FM RESULT PARTIAL 只跑到第 2 步，没有做完整判定 protocol=合规
+    
+    工作目录 700；文件 644×27（如 step1/precheck.py）；目录 700×3（如 step1）；目录 755×16（如 trusted/verification）
+umask 777（lite 清单）                       rc=2 故障=— 结果行=FM RESULT PARTIAL 只跑到第 2 步，没有做完整判定 protocol=合规
+    
+    工作目录 700；文件 644×27（如 step1/precheck.py）；目录 700×3（如 step1）；目录 755×16（如 trusted/verification）
