@@ -60,6 +60,10 @@ class Repo:
             mode, inner = value
             if mode == b"160000":
                 return mode, b"commit", inner
+            if inner is COMMIT_OBJ:  # 用给定模式指向一个真实存在的提交对象
+                return mode, b"commit", self.commit({}).encode()
+            if inner is MISSING:  # 用给定模式指向一个仓库里没有的对象
+                return mode, b"blob", b"2" * 40
             return (mode,) + (self.entry(inner)[1:] if isinstance(inner, (dict, list)) else (b"blob", self.blob(inner)))
         if isinstance(value, dict):
             return b"40000", b"tree", self.raw([(n, value[n]) for n in sorted(value, key=lambda n: gitkey(n, value[n]))])
@@ -87,7 +91,7 @@ class Repo:
         return git(self.path, *args).strip().decode()
 
 
-KEEP = object()
+KEEP, COMMIT_OBJ, MISSING = object(), object(), object()
 
 
 class Body(bytes):
@@ -167,6 +171,22 @@ def root_edit(name, value):
 NO_FM_ENV = {b"scripts/fm_env.sh": None, b"scripts/other.sh": b"o\n"}
 WF_040755 = as_raw(b".github", {b"workflows": (b"040755", KEEP)})
 NO_FM = {k: None for k in BASE if k.startswith(F)}
+EVIL = [as_raw(F + b"sources", {b"evil.md": (b"100644", v)}) for v in ({b"a": X}, COMMIT_OBJ, MISSING)]
+NOFM_NOSCRIPTS = {**NO_FM, b"scripts/fm_env.sh": None}
+NOFM_NOGH = {**NO_FM, b".github/workflows/formal-math.yml": None, b".github/workflows/ci.yml": None}
+NO_ENV, NO_WF = {b"scripts/fm_env.sh": None}, {b".github/workflows/formal-math.yml": None}
+FOO = {b"scripts/foo.sh": X}
+# (说明, 基线相对 BASE 的改动, 被审相对 BASE 的改动)：都只碰受管范围外的兄弟文件
+R3B2_SHAPES = [
+    ("无 formal_math：新增第一个 scripts/foo.sh", NOFM_NOSCRIPTS, {**NOFM_NOSCRIPTS, **FOO}),
+    ("无 formal_math：新增第一个 ci.yml", NOFM_NOGH, {**NO_FM, **NO_WF}),
+    ("无 formal_math：删除最后一个 scripts/foo.sh", {**NOFM_NOSCRIPTS, **FOO}, NOFM_NOSCRIPTS),
+    ("无 formal_math：删除最后一个 ci.yml", {**NO_FM, **NO_WF}, NOFM_NOGH),
+    ("有 formal_math 无 fm_env.sh：新增第一个 scripts/foo.sh", NO_ENV, {**NO_ENV, **FOO}),
+    ("有 formal_math 无 fm_env.sh：删除最后一个 scripts/foo.sh", {**NO_ENV, **FOO}, NO_ENV),
+    ("有 formal_math 无 formal-math.yml：删除最后一个 ci.yml", NO_WF, {**NO_WF, b".github/workflows/ci.yml": None}),
+    ("祖先存在且合法：只改兄弟 scripts/other.sh", {}, {b"scripts/other.sh": X}),
+]
 SUB_DUP = [(b"B.lean", MOD), (b"Sub", None), (b"Sub.lean", MOD), (b"Sub", {b"E.lean": MOD})]
 
 
@@ -267,7 +287,7 @@ CASES = [
     ("工作流文件改成符号链接", {b".github/workflows/formal-math.yml": LINK}, "infra/x", True, 1, {"MODE"}),
     ("工作流文件改成目录", {b".github/workflows/formal-math.yml": {b"x": X}}, "infra/x", True, 1, {"MODE"}),
     ("受信文件的祖先目录改成符号链接", {b"scripts/fm_env.sh": None, b"scripts": LINK}, "infra/x", True, 1,
-     {"MODE", "PATH_SCOPE"}),
+     {"MODE"}),
     # 第 2 条：清单规范性（逐层读原始树对象）
     ("树条目重复", {F + b"Chan/Thm/B.lean": None, F + b"Chan/Thm": [(b"B.lean", X), (b"B.lean", MOD)]},
      "proof/x", False, 1, {"TREE_FORM"}),
@@ -346,20 +366,20 @@ CASES = [
     ("R2 只改 ci.yml proof", {b".github/workflows/ci.yml": X}, "proof/x", False, 0, set()),
     ("R2 只改 ci.yml infra 无放行", {b".github/workflows/ci.yml": X}, "infra/x", False, 0, set()),
     ("R2-B1a scripts 目录模式改成 040000 main", root_edit(b"scripts", (b"040000", KEEP)), "main", False, 1,
-     {"MODE", "BRANCH_ROLE"}),
+     {"MODE"}),
     ("R2-B1a scripts 目录模式改成 40755 proof", root_edit(b"scripts", (b"40755", KEEP)), "proof/x", False, 1,
-     {"MODE", "PATH_SCOPE"}),
-    ("R2-B1a .github/workflows 目录模式改成 040755 proof", WF_040755, "proof/x", False, 1, {"MODE", "PATH_SCOPE"}),
+     {"MODE"}),
+    ("R2-B1a .github/workflows 目录模式改成 040755 proof", WF_040755, "proof/x", False, 1, {"MODE"}),
     ("R2-B1a .github/workflows 目录模式改成 040755 infra 放行", WF_040755, "infra/x", True, 1, {"MODE"}),
     ("R2 基线里的祖先目录已不规范且未改", WF_040755, "main", False, 1, {"MODE"}, WF_040755),
     ("R2-B1b 受信文件不存在时 scripts 换成符号链接 main", {**NO_FM_ENV, b"scripts/other.sh": None, b"scripts": LINK},
-     "main", False, 1, {"MODE", "BRANCH_ROLE"}, NO_FM_ENV),
+     "main", False, 1, {"MODE"}, NO_FM_ENV),
     ("R2-B1b 受信文件不存在时 scripts 换成符号链接 proof", {**NO_FM_ENV, b"scripts/other.sh": None, b"scripts": LINK},
-     "proof/x", False, 1, {"MODE", "PATH_SCOPE"}, NO_FM_ENV),
+     "proof/x", False, 1, {"MODE"}, NO_FM_ENV),
     ("R2-B1b 受信文件不存在时 scripts 换成普通文件", {**NO_FM_ENV, b"scripts/other.sh": None, b"scripts": X},
-     "proof/x", False, 1, {"MODE", "PATH_SCOPE"}, NO_FM_ENV),
+     "proof/x", False, 1, {"MODE"}, NO_FM_ENV),
     ("R2-B1b 受信文件不存在时 scripts 换成子模块", {**NO_FM_ENV, b"scripts/other.sh": None, b"scripts": GITLINK},
-     "proof/x", False, 1, {"MODE", "PATH_SCOPE"}, NO_FM_ENV),
+     "proof/x", False, 1, {"MODE"}, NO_FM_ENV),
     ("R2 受信文件存在时 scripts 换成符号链接 proof", {b"scripts/fm_env.sh": None, b"scripts": LINK}, "proof/x", False,
      1, {"MODE", "PATH_SCOPE", "TRUSTED_DRIFT"}),
     ("R2 受信文件存在时 .github 换成普通文件 main", {b".github/workflows/formal-math.yml": None,
@@ -381,6 +401,19 @@ CASES = [
      {"TREE_FORM"}),
     ("Lake 配置名：例外路径是目录", {F + b"verification/auditor/lakefile.toml/x": X}, "infra/x", True, 1,
      {"LAKE_FILE"}),
+    # 审阅 R3-B1：基线清单与被审清单走同一个规范性检查（含文件条目的对象类型）
+] + [("R3-B1 基线 %s，被审%s" % (kind, how), head, "decl/x", False, 2, want, base_edits)
+     for kind, base_edits, fault in (("文件条目指向树", EVIL[0], "BASE_FORM"), ("文件条目指向提交", EVIL[1], "BASE_FORM"),
+                                     ("文件条目指向缺失对象", EVIL[2], "GIT"))
+     for how, head, want in (("原样", base_edits, {fault} | ({"TREE_FORM"} if fault == "BASE_FORM" else set())),
+                             ("修复", {F + b"sources/evil.md": X}, {fault}), ("删除", {}, {fault}))] + [
+    ("R3-B1 基线 fm_env.sh 指向树，infra 放行修复", {}, "infra/x", True, 2, {"BASE_FORM"},
+     {b"scripts/fm_env.sh": (b"100644", {b"a": X})}),
+    ("R3-M7 基线树不规范时被审红项先报出", {F + b"Chan/Thm/B.lean": EXEC}, "proof/x", False, 2, {"MODE", "BASE_FORM"},
+     {F + b"Chan/Thm/B.lean": None, F + b"Chan/Thm": [(b"B.lean", X), (b"B.lean", MOD)]}),
+    # 审阅 R3-B2：祖先目录的出现与消失不进改动集合
+] + [("R3-B2 %s（%s）" % (what, branch), head, branch, False, 0, set(), base_edits)
+     for what, base_edits, head in R3B2_SHAPES for branch in ("proof/x", "main", "whatever name")] + [
     # 规则 7：内容角色下受信面逐个比对
 ] + [("内容角色改受信文件 %s" % p.decode(), {p: X}, "proof/x", False, 1, {"PATH_SCOPE", "TRUSTED_DRIFT"})
      for p in TRUSTED_LIST] + [
@@ -447,12 +480,14 @@ def build(tmp):
     tree = git(repo.corrupt, "rev-parse", green + "^{tree}").strip().decode()
     os.remove(os.path.join(repo.corrupt, b".git/objects", tree[:2].encode(), tree[2:].encode()))
     # 输出被篡改的 git：cat-file --batch 的输出后面多出一个字节（真实 git 不会这样，用来锁住输出核对）。
-    repo.wrapped = os.path.join(os.fsdecode(os.path.dirname(repo.path)), "wrapped-git")
-    os.makedirs(repo.wrapped)
-    with open(os.path.join(repo.wrapped, "git"), "w", encoding="utf-8") as f:
-        f.write('#!/bin/sh\nfor a in "$@"; do [ "$a" = --batch ] && { %s "$@"; s=$?; printf x; exit $s; }; done\n'
-                'exec %s "$@"\n' % ((shlex.quote(shutil.which("git")),) * 2))
-    os.chmod(os.path.join(repo.wrapped, "git"), 0o755)
+    repo.wrapped = {}
+    for flag in ("--batch", "--batch-check"):
+        d = repo.wrapped[flag] = os.path.join(os.fsdecode(os.path.dirname(repo.path)), "wrapped-git" + flag)
+        os.makedirs(d)
+        with open(os.path.join(d, "git"), "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\nfor a in "$@"; do [ "$a" = %s ] && { %s "$@"; s=$?; printf x; exit $s; }; done\n'
+                    'exec %s "$@"\n' % ((flag,) + (shlex.quote(shutil.which("git")),) * 2))
+        os.chmod(os.path.join(d, "git"), 0o755)
     return repo, base, heads, parents
 
 
@@ -481,8 +516,10 @@ def special(script, repo, base, heads):
     expect("基线是树对象", run(script, [r, base + "^{tree}", green, "proof/x"]), 2, {"BAD_REV"})
     expect("被审带范围语法", run(script, [r, base, base + ".." + green, "proof/x"]), 2, {"BAD_REV"})
     expect("被审提交的根树对象缺失", run(script, [repo.corrupt, base, green, "proof/x"]), 2, {"GIT"})
-    wrapped_env = {**RUN_ENV, "PATH": repo.wrapped + os.pathsep + RUN_ENV["PATH"]}
-    expect("R2-M4 cat-file 输出尾随多余字节", run(script, [r, base, green, "proof/x"], env=wrapped_env), 2, {"GIT"})
+    for flag, label in (("--batch", "R2-M4"), ("--batch-check", "R3-M8")):
+        wrapped_env = {**RUN_ENV, "PATH": repo.wrapped[flag] + os.pathsep + RUN_ENV["PATH"]}
+        expect("%s cat-file %s 输出尾随多余字节" % (label, flag), run(script, [r, base, green, "proof/x"], env=wrapped_env),
+               2, {"GIT"})
     expect("仓库不存在", run(script, [r + b"/nope", base, green, "proof/x"]), 2, {"GIT"})
     rd, wr = os.pipe()
     os.close(rd)
@@ -558,6 +595,9 @@ def suite(script, tmp, verbose, fixture=None):
     return len(results), len(failed)
 
 
+HEAD_PART = "    new = normative(repo, head, red)\n    shape(new, red)\n"
+BASE_PART = ('    base_form = []\n    old = normative(repo, base, lambda *r: base_form.append(r))\n'
+             '    if base_form:\n        raise Fault("BASE_FORM", base_form[0][1], "基线树不规范：" + base_form[0][2])\n')
 MUTANTS = [
     ("去掉第 7 步", 'if old.get(path) != new.get(path):\n                red("TRUSTED_DRIFT"',
      'if False:\n                red("TRUSTED_DRIFT"'),
@@ -583,13 +623,15 @@ MUTANTS = [
     ("去掉 cat-file 输出多余字节检查（审阅 R2-M4）", "if pos != len(data):", "if False:"),
     ("TRUST_UNAPPROVED 漏掉门禁目录节点自身（审阅 R2-M10）", "any(p == GATE_DIR or within(p, TRUSTED_SURFACE)",
      "any(within(p, TRUSTED_SURFACE)"),
-    ("祖先目录不进改动集合（审阅 R2-B1）", "entry[:1] if path in ANCESTORS else entry",
-     "None if path in ANCESTORS else entry"),
     ("形状检查只在清单有变化时做（审阅 R2-B1）",
-     "    shape(new, red)\n    file_objects(repo, new, red)\n    base_form = []\n"
-     "    old = inventory(repo, base, lambda *r: base_form.append(r))\n",
-     "    file_objects(repo, new, red)\n    base_form = []\n"
-     "    old = inventory(repo, base, lambda *r: base_form.append(r))\n    shape(new, red) if old != new else None\n"),
+     "    shape(new, red)\n    base_form = []\n    old = normative(repo, base, lambda *r: base_form.append(r))\n",
+     "    base_form = []\n    old = normative(repo, base, lambda *r: base_form.append(r))\n"
+     "    shape(new, red) if old != new else None\n"),
+    ("祖先目录的出现与消失进改动集合（审阅 R3-B2）", "if p not in ANCESTORS and old.get(p) != new.get(p)",
+     "if old.get(p) != new.get(p)"),
+    ("基线不核文件条目的对象类型（审阅 R3-B1）", "old = normative(repo, base,", "old = inventory(repo, base,"),
+    ("基线不规范先于被审红项退 2（审阅 R3-M7）", "%s%s" % (HEAD_PART, BASE_PART), "%s%s" % (BASE_PART, HEAD_PART)),
+    ("--batch-check 不核尾随多余字节（审阅 R3-M8）", "if pos != len(data):", "if body and pos != len(data):"),
     ("去掉文件条目的 blob 类型核对", "if kinds[oid][0] != BLOB:", "if False:"),
     ("Lake 配置名例外不分文件与目录", "(kind != BLOB or path not in LAKE_ALLOWED)", "(path not in LAKE_ALLOWED)"),
 ]
