@@ -120,6 +120,15 @@ test("路由门：模型不得带 mf/、yd/ 等中转前缀，provider 只能是
   assert.ok(providerOverrides().every((item) => !item.includes(fixtureKey)));
 });
 
+test("#2334 现役模型可显式派发，不重复且不改变固定独审名单", () => {
+  for (const model of ["gpt-6.2-sol", "gpt-6.2-astra", "claude-fable-5-2", "claude-sonnet-5-5"]) {
+    assert.ok(ALLOWED_MODELS.includes(model), model);
+    assert.doesNotThrow(() => assertRoute(model));
+  }
+  assert.equal(ALLOWED_MODELS.length, new Set(ALLOWED_MODELS).size);
+  assert.deepEqual(EXTERNAL_REVIEW_MODELS, ["kimi-k3.1-pro", "claude-opus-5-5"]);
+});
+
 test("deepagents/review 审查员与控制器 MODELS 相同、两家族不同，且无论主模型是否被覆盖都能派发", () => {
   const source = readFileSync(join(__dirname, "deepagents-pilot/pilot1742/external_review.py"), "utf8");
   const declared = /^MODELS = \(([^)]*)\)$/m.exec(source)?.[1].split(",").map((item) => item.trim().replace(/^"|"$/g, ""));
