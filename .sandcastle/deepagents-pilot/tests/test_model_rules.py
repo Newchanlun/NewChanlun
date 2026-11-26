@@ -9,7 +9,7 @@ from v2env import V2_TASK, V2Env
 from pilot1742 import executor, queue
 from pilot1742 import run as run_module
 from pilot1742.domain import parse_model
-from pilot1742.run import PilotRun, plan_roles, read_model_rules
+from pilot1742.run import PilotRun, RolePlan, plan_roles, read_model_rules
 
 
 def test_comments_preserve_single_strict_parser():
@@ -19,6 +19,36 @@ def test_comments_preserve_single_strict_parser():
         plan_roles(commented.replace('gpt-6.1-sol', 'unknown-model'))
     with pytest.raises(ValueError, match='同一家族'):
         plan_roles(MODELS.replace('gpt-6.1-sol', 'claude-opus-5-5'))
+
+
+@pytest.mark.parametrize('slug', ['gpt-6.2-sol', 'gpt-6.2-astra', 'claude-fable-5-2', 'claude-sonnet-5-5'])
+def test_parse_current_model(slug):
+    assert parse_model(slug) == slug
+
+
+def _current_rules(author, reviewer):
+    return f"""feature, refactoring: {author} # 作者
+judgment and prose: {reviewer} # 独审
+hardest tasks: gpt-6.2-astra # 主控
+architect runners: gpt-6.2-sol, claude-sonnet-5-5 # 设计
+arena cross-judge pool: gpt-6.2-sol, claude-fable-5-2 # 裁判
+"""
+
+
+@pytest.mark.parametrize('reviewer', ['claude-fable-5-2', 'claude-sonnet-5-5'])
+def test_current_model_rules_accept_commented_cross_family_roles(reviewer):
+    assert plan_roles(_current_rules('gpt-6.2-sol', reviewer)) == RolePlan(
+        'gpt-6.2-sol', reviewer, 'gpt-6.2-astra', ('gpt-6.2-sol', 'claude-sonnet-5-5'), 'claude-fable-5-2',
+    )
+
+
+@pytest.mark.parametrize(('author', 'reviewer'), [
+    ('gpt-6.2-sol', 'gpt-6.2-astra'),
+    ('claude-fable-5-2', 'claude-opus-5-5'),
+])
+def test_current_model_rules_reject_same_family_review(author, reviewer):
+    with pytest.raises(ValueError, match='作者与独审是同一家族'):
+        plan_roles(_current_rules(author, reviewer))
 
 
 def test_default_and_explicit_source(tmp_path, monkeypatch):
