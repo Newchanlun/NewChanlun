@@ -4772,6 +4772,139 @@ class Factory(type):
     adapter("(Base, metaclass=Factory)", ""), itemRoute, "item=17", "18", false, foreignInit);
 });
 
+test("R42/#1319：绑定诊断、观察位置槽与逐层元类默认", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const check = (name: string, prod: string, target: string, observed: string, expected = true,
+    extra: Record<string, string> = {}) => t.test(name, () => {
+    const repo = feedSource({
+      ...extra,
+      [entry]: target + "\n__all__ = ('route',)\n",
+      [integration]: "from functools import wraps\nfrom . import at18_fixture_feed as f\n" +
+        prod + "\n__all__ = ('Adapter',)\n",
+      [path]: "from trading_system import at18_fixture_feed as f\ndef test_route():\n" +
+        `    assert f.route(${observed}) == 116\n`,
+    });
+    assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+  });
+
+  const twoInjections = (invoke: string, body = "return f.route(tag, prefix=prefix)") => `
+def first(fn):
+    @wraps(fn)
+    def outer(self, tag, /, **opts):
+        assert tag == 99
+        assert 'prefix' in opts and opts['prefix'] == 17
+        return fn(self, tag, noise=5, **opts)
+    return outer
+def second(fn):
+    @wraps(fn)
+    def outer(self, tag, /, **opts):
+        return fn(self, tag, color=7, **opts)
+    return outer
+class Adapter:
+    @first
+    @second
+    def dispatch(self, tag, /, *, prefix, noise, color):
+        assert (tag,noise,color) == (99,5,7)
+        assert prefix == 17
+        ${invoke}
+        ${body}
+`;
+  const methodTarget = "def route(tag, /, **opts): return tag + opts['prefix']";
+  const methodShape = "99,prefix=17,noise=23,color=31,irrelevant=True";
+  await check("两层依次注入不同键，再按未知键筛选", twoInjections("pass"), methodTarget, methodShape);
+  await check("绑定恢复仍须公开入口实际承接", twoInjections("pass", "return 116"),
+    methodTarget, methodShape, false);
+  await check("绑定恢复不消费被公开方法丢弃的延迟对象",
+    twoInjections("later(tag, prefix)", "return 116") + "\ndef later(tag,prefix): yield f.route(tag,prefix=prefix)\n",
+    methodTarget, methodShape, false);
+  const alias = twoInjections("pass").replace("self, tag, /, *, prefix, noise, color",
+    "self, base, /, *, tag, noise, color").replace("assert (tag,noise,color)", "assert (base,noise,color)")
+    .replaceAll("opts['prefix']", "opts['tag']").replace("'prefix' in opts", "'tag' in opts")
+    .replace("assert prefix == 17", "assert tag == 17").replace("return f.route(tag, prefix=prefix)", "return f.route(base, tag=tag)");
+  await check("实收同名 / 槽与 **键不互相覆盖", alias,
+    "def route(tag, /, **opts): return tag + opts['tag']", "99,tag=17,noise=23,color=31");
+
+  const sentinel = `
+class Token:
+    def hostile(self, *args): raise AssertionError('不能触碰默认值的协议')
+    __bool__ = __eq__ = __hash__ = __repr__ = hostile
+token = Token()
+`;
+  const tail = (slots: string, assertPrefix: string, ctor = true) =>
+    sentinel + `class Adapter:
+    def ${ctor ? "__init__" : "dispatch"}(self,${slots},/,*items,**flags):
+        ${assertPrefix}
+        assert items == ([8,9],17) and not flags
+        items[0].append(42)
+        ${ctor ? "self.value = items[1]" : "return f.route(40,59,*items)"}
+${ctor ? "    def dispatch(self): return f.route(40,59,[8,9],self.value)" : ""}
+`;
+  const tailTarget = "def route(a,b,/,*items,**opts): return a + b + items[-1]";
+  for (const ctor of [true, false]) {
+    await check((ctor ? "构造" : "方法") + "：扣两个观察槽，保留夹在中间的默认对象",
+      tail("a, marker=token, b=None", "assert (a,b) == (40,59) and marker is token", ctor),
+      tailTarget, "40,59,[8,9],17,debug=True");
+  }
+  await check("扣三个观察槽，两个默认值不占用原尾段",
+    tail("a,b,c=None,marker=token, other=None", "assert (a,b,c) == (40,59,3) and marker is token and other is None"),
+    "def route(a,b,c,/,*items): return a + b + items[-1]", "40,59,3,[8,9],17");
+  await check("同值关键字不是位置前缀，不能删除真实尾参", sentinel + `
+class Adapter:
+    def __init__(self, item=None, marker=token, /, *items):
+        assert item == 17 and marker is token and items == (17,)
+        self.value = items[0]
+    def dispatch(self): return f.route(self.value,item=17)
+`, "def route(*items,item): return 99 + items[0]", "17,item=17");
+
+  const metas = (outer = "tag is token and mode == 17", inner = "tag == 99 and mode is another") =>
+    sentinel + `
+another = Token()
+class Inner(type):
+    def __call__(cls,tag=another,mode=another,/,*args,**opts):
+        assert ${inner}
+        return super().__call__(*args,**opts)
+class Outer(Inner):
+    def __call__(cls,tag=token,mode=token,/,*args,**opts):
+        assert ${outer}
+        return super().__call__(*args,**opts)
+class Adapter(metaclass=Outer):
+    def __init__(self,tag,mode,/):
+        assert (tag,mode) == (99,17)
+        self.tag, self.mode = tag, mode
+    def dispatch(self):
+        return f.route(self.tag,self.mode)
+`;
+  const metaTarget = "def route(tag,mode,/): return tag + mode";
+  await check("两个合作元类层各自混用观察值和真实默认哨兵", metas(), metaTarget, "99,17");
+  await check("两个合作元类层仍允许全部覆盖",
+    metas("(tag,mode) == (99,17)", "(tag,mode) == (99,17)"), metaTarget, "99,17");
+  await check("透明外层仍保留本地内层的两个默认槽",
+    metas().replace("def __call__(cls,tag=token,mode=token,/,*args,**opts):\n        assert tag is token and mode == 17",
+      "def __call__(cls,*args,**opts):"), metaTarget, "99,17");
+  const foreign = metas().slice(0, metas().indexOf("class Adapter"));
+  const adapter = metas().slice(metas().indexOf("class Adapter"));
+  await check("外来元类不能获得多层备用方案", "from .foreign import Outer\n" + adapter, metaTarget, "99,17",
+    false, { "trading_system/foreign.py": foreign });
+  await check("本地外层不为外来中间元类提供构造归属", sentinel + `
+from .foreign import Inner
+class Outer(Inner):
+    def __call__(cls,tag=token,mode=token,/,*args,**opts):
+        assert tag is token and mode == 17
+        return super().__call__(*args,**opts)
+` + adapter, metaTarget, "99,17", false, { "trading_system/foreign.py": foreign });
+  for (const hook of ["__new__", "__init__"]) {
+    const prod = hook === "__new__"
+      ? metas().replace("    def __init__", "    __new__ = staticmethod(foreign)\n    def __init__")
+      : metas().replace(/    def __init__[\s\S]+?(?=    def dispatch)/, "    __init__ = foreign\n");
+    const external = hook === "__new__" ? "def hook(cls,tag,mode,/): return object.__new__(cls)"
+      : "def hook(self,tag,mode,/): self.tag,self.mode = tag,mode";
+    await check("本地元类不为外来 " + hook + " 合成前缀", "from .foreign import hook as foreign\n" + prod,
+      metaTarget, "99,17", false, { "trading_system/foreign.py": external + "\n" });
+  }
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
