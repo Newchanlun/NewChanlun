@@ -120,7 +120,7 @@
 #### 第二类买点（Second Buy Point / 2B）
 某级别中，第一类买点出现后，次级别上涨结束后**再次下跌**的那个次级别走势的**结束点**。
 
-- **前提条件**：第一类买点已出现
+- **前提条件**：本级第一类买点已出现；回拉终点处的次级别一买按 B-2 另证。
 - **安全性保证**：第一类买点后必然出现盘整或上涨 → 走势至少包含3段次级别运动 → 后面必然至少还有一个向上的次级别运动
 - **位置关系**：可出现在中枢上方、中枢内或中枢下方
   - 中枢上方 → 中枢新生机会大（强势）
@@ -130,7 +130,7 @@
 #### 第二类卖点（Second Sell Point / 2S）
 某级别中，第一类卖点出现后，次级别下跌结束后**再次上涨**的那个次级别走势的**结束点**。
 
-- **前提条件**：第一类卖点已出现
+- **前提条件**：本级第一类卖点已出现；反抽终点处的次级别一卖按 B-2 另证。
 - **安全性保证**：对称于第二类买点
 
 #### 第三类买点（Third Buy Point / 3B）
@@ -202,13 +202,13 @@
 
 ### B-2①：二类点 = 次级别第一类点构成（**构成形**）
 
-**裁定**：买卖点定律一（`014-第14课.md:34`【正文】「大级别的第二类买点由次一级别相应走势的第一类买点构成」）在判据层**兑现**——二类点判据 = **次级别第一类点（破中枢 ∧ 背驰）构成 + 次级别回拉段**。Lean 侧补次级别递归（填 `still-MISSING-D`），与本仓生产链已有的真下钻同形。`[旧缠论]`
+**裁定**：买卖点定律一（`014-第14课.md:34`【正文】「大级别的第二类买点由次一级别相应走势的第一类买点构成」）在判据层**兑现**：先以**本级一类点**定位一买后先涨再跌的首次次级别回拉，再核该回拉**终点处的次级别正式一类点**。后者与本级二类点同一结构位置，不是再找回拉的起点。`014:36`【正文】以茅台 2004 年 6 月 18 日同一低点为例：「这就构成了日线上的第一类买点，而这个买点，在周线上就是第二类买点。」卖点镜像适用。`[旧缠论]`
 
 **推论（编排者当场补）**：经 B-1，次级别一类点 = 破中枢 ∧ 背驰 ⟹ **二类点判据必然含背驰**（经次级别一类点）。
 
 **依据**：`014:34`【正文】；#814 读出三步（降级是补救，找的是同一个东西，不是另立判据）；`017-第17课.md:60`【正文】（本级别可观测形「一类点后第一次次级别回调的低点」与构成形是同一东西的两面）。
 
-**冲突消解**：Lean `IsType2 = afterTypeOne ∧ ¬brokeCenter`（本级别可观测形）与 Rust `find_second_type_structure`（构成形）判同一个东西但判据不同形（踩 #804 总缝规则）——按本裁定统一到**构成形**：Lean 补递归，Rust 保持真下钻。
+**实施边界**：Lean `IsType2` 补次级别递归；Rust `find_second_type_structure` 保留真下钻，但按上述两级归属绑定端点，不以次级别一类候选后的下一段代替原回拉。两路实施见 [#2114 清单](qushi.md#2114-受影响代码清单)。
 
 ### B-2②：跌破一类的二类点**准入**（不设「不创新低」闸）
 
@@ -218,7 +218,7 @@
 
 **旧闸**：`rmove_compose.rs` 的 `retrace_no_break` / `no_new_low` 硬闸（#851 查实：原文列为正常三种情况之一的那类被整批判为不存在）——按本裁定拆，实施归 [#884](https://github.com/xy7365527-lang/NewChanlun/issues/884)（S4-c，教义面已由本裁定落地）。**已落地 = #884**（2026-08-17，见受影响代码清单 T-4/T-5）。
 
-**落地（#884，2026-08-17）**：T-4 拆闸——`find_second_type_structure` 回拉段 = 第一类离开之后首个后继走势（i2 = i1+1，**不问**新不新低）；`no_new_low`/`no_new_high`/`retrace_no_break` 降为几何谓词（仅作标注取值）；重合标注 = `SecondTypeStructure.retrace_breaks_extreme` → `BspPoint.retrace_breaks_type1: Option<bool>`（Some(true)=回拉破一类极值，语义归 #817，不作准入分档）；Lean `RMoveCompose.SecondTypeStructure` 同步拆 `RetraceNoBreak` 合取 + 新增 `RetraceBreaksExtreme` 标注谓词 + `witness_secondTypeStructure_brokeExtreme` 见证（跌破一类仍构成第二类结构）；实测对照：BTC 全史 461 万 bar 普查「跌破一买」类二类点从 0 到有（读数见 #884 resolution）；旧引擎 `buysellpoint.rs` 同闸处置路由归 T-6/673-fix。
+**落地（#884，2026-08-17）**：T-4 拆掉回拉不创新低／新高的闸；当时 `find_second_type_structure` 的后继取段是旧实现，按 B-2① 对齐本级前置点和回拉终点处的次级别一类点；`no_new_low`/`no_new_high`/`retrace_no_break` 降为几何谓词（仅作标注取值）；重合标注 = `SecondTypeStructure.retrace_breaks_extreme` → `BspPoint.retrace_breaks_type1: Option<bool>`（Some(true)=回拉破一类极值，语义归 #817，不作准入分档）；Lean `RMoveCompose.SecondTypeStructure` 同步拆 `RetraceNoBreak` 合取 + 新增 `RetraceBreaksExtreme` 标注谓词 + `witness_secondTypeStructure_brokeExtreme` 见证（跌破一类仍构成第二类结构）；实测对照：BTC 全史 461 万 bar 普查「跌破一买」类二类点从 0 到有（读数见 #884 resolution）；旧引擎 `buysellpoint.rs` 同闸处置路由归 T-6/673-fix。
 
 **v2 修订（#218）关系**：二类归属锚 = 一类点身份锚是**归属层**裁定（修级别错配），与本裁定不冲突——归属不问跌破与否。
 
@@ -239,7 +239,7 @@
 | T-1 | 对拍/Rust | `rust/tests/theta_v0_classifier_parity.rs:528,:629`（[#811](https://github.com/xy7365527-lang/NewChanlun/issues/811) 两条红）；`bsp.rs`/`signal.rs` 的 `below_last_center` 填充链 | **按 B-1 对齐 Rust 侧背驰语义**（统一含 Extreme 方向），断言转绿。**已落地 = [#903](https://github.com/xy7365527-lang/NewChanlun/issues/903)**（below_last_center 对齐统一背驰判据，两条红断言转绿） |
 | T-2 | Lean | `formal/Origin/BspClassification.lean:103-104`（`IsType2`）＋ `formal/Origin/SellClosedLoop.lean:368,374-375`（MISSING-D 登记处） | **按 B-2① 补次级别递归**（形态按 map #854 Notes N-2：具名 `Prop` + 显式前件，不用 `axiom`）。新开 Lean 票 |
 | T-3 | Rust | `rust/src/theta_v0/classifier/bsp.rs:86-88`（`is_third`）；发布端见 [#2114 实施交接](qushi.md#2114-受影响代码清单) | [#905](https://github.com/Newchanlun/NewChanlun/issues/905) 的「第一次」显式化保留；旧右界配对由 B-3 的共用段角色判据替代。 |
-| T-4 | Rust | `rust/src/theta_v0/classifier/rmove_compose.rs:160`（`retrace_no_break`）＋ `:80-82`（`no_new_low` 硬闸） | **按 B-2② 拆闸**，实施归 [#884](https://github.com/xy7365527-lang/NewChanlun/issues/884)（教义面已落地）。**已落地 = #884**（2026-08-17）：`retrace_no_break` 硬闸拆除，回拉段 = 首个后继走势（不问新不新低）；`SecondTypeStructure.retrace_breaks_extreme` + `BspPoint.retrace_breaks_type1: Option<bool>` 重合标注（不作准入分档，语义归 #817）；Lean `RMoveCompose.SecondTypeStructure` 同步拆 `RetraceNoBreak` 合取 + 新增 `RetraceBreaksExtreme` 标注谓词与 `witness_secondTypeStructure_brokeExtreme` 见证；旧引擎 `buysellpoint.rs` 同闸处置路由归 T-6/673-fix（见下） |
+| T-4 | Rust | `rust/src/theta_v0/classifier/rmove_compose.rs:160`（`retrace_no_break`）＋ `:80-82`（`no_new_low` 硬闸） | **按 B-2② 拆闸**，实施归 [#884](https://github.com/xy7365527-lang/NewChanlun/issues/884)（教义面已落地）。**已落地 = #884**（2026-08-17）：`retrace_no_break` 硬闸拆除；回拉归属和端点按 B-2①，不继承旧后继取段；`SecondTypeStructure.retrace_breaks_extreme` + `BspPoint.retrace_breaks_type1: Option<bool>` 重合标注（不作准入分档，语义归 #817）；Lean `RMoveCompose.SecondTypeStructure` 同步拆 `RetraceNoBreak` 合取 + 新增 `RetraceBreaksExtreme` 标注谓词与 `witness_secondTypeStructure_brokeExtreme` 见证；旧引擎 `buysellpoint.rs` 同闸处置路由归 T-6/673-fix（见下） |
 | T-5 | 三侧追认 | `rmove_compose.rs:144-170`、`descend.rs:176-191`、`bsp.rs:78-80`；Lean `BspClassification.lean:94-95,:111-121`；`buysellpoint.rs:186-209` | 与裁定同形，注释口径对齐（带 #816 票号）。**已落地 = #884**（2026-08-17）：三处 Rust 与 `BspClassification.IsType2` 注释已带 #816 票号对齐；`buysellpoint.rs` 的 `make_type2_point` `geom` 合取（现 `:272-276`，清单行号已漂）加 #816 B-2② 注释并明记处置路由归 T-6/673-fix（旧引擎逐位等价 Python 侧，T-6 未落地前两侧同拍不改判据） |
 | T-6 | Python | `src/newchan/a_buysellpoint_v1.py` | Type1 只收 `trend` 已对齐；Type2 确认层接口拆分（673-fix/task #33）与 B-2② 的关系明记于该票；**已落地 = [#1276](https://github.com/xy7365527-lang/NewChanlun/issues/1276)**（26dcae96c3，Type2 确认层拆分 + 旧引擎 geom 合取同拍改）；**已冻结退役=#1286**（2026-08-27，历史对照，不参生产准入） |
 | T-7 | Lean legacy | `formal/Formal/BSPLabels.lean`、`formal/Strict/BSP.lean`、`formal/Foundation/CompleteClassificationLimits.lean` | **冻结为历史对照**（#816 B-1 追认、与 Rust `bsp.rs` 位级镜像、不参生产准入、#812 Z-3 判例同族处置；生产判据已迁 `Origin.BspClassification`）。**已落地 = [#1295](https://github.com/xy7365527-lang/NewChanlun/issues/1295)**（F-5 冻结声明三件套）。**B-3 缺口**（legacy `IsThird` 无 `firstRetrace` 字段）登记路径单独处置，不在本票强改 |
@@ -297,7 +297,7 @@
 | 类型 | 正式发布前件 |
 |---|---|
 | 一类 | [#2114 的 `TrendFormed` 语境](qushi.md#2114-裁定开放期分离趋势形成与走势完成2026-11-20)及 B-1 的破枢、趋势背驰前件证齐；MACD 外推是操作判断（`024:24,28`【正文】）。 |
-| 二类 | 按 B-2 消费对应次级别的**正式一类点见证**及其后首个合规次级别回拉；结构和归属均证齐才发。破枢及旧背驰候选不代正式一类点；次级别 `TrendFormed` 或 `c` 自身完成见证未到，不先发二类点。见 [#2114 实施交接](qushi.md#2114-受影响代码清单)。 |
+| 二类 | 按 B-2 核**本级前置一类点**，以及其后的首次次级别回拉（一买后先涨再跌，一卖镜像）；该回拉终点须有对应的**次级别正式一类点见证**。破枢及旧背驰候选不代正式见证。见证若晚到，待结构和归属都证齐才发，点位仍锚在原回拉终点，不移到后继段或获知位置。见 [#2114 实施交接](qushi.md#2114-受影响代码清单)。 |
 | 三类 | 按 B-3 的共用段角色判据取证发布；已结算中枢的反向三类点不重复结算，也不等走势实例完成，见[走势正本 C4](zoushi.md#c4-买点状态与发布)。 |
 
 旧表和统一公式中以 `Move.settled` 作为确认门的条款，均由 #2114 替代。候选不作正式发布；旧组位置、延迟档位与事后标记均不补证。
@@ -360,7 +360,7 @@
 
 ### 直接依赖
 1. **走势类型（`.chanlun/definitions/zoushi.md`）** — 核心依赖
-   - 标准一类点需要该趋势的 `TrendFormed` 与次级别末段 `c` 的完成见证；不预设本级走势完成。
+   - 标准一类点需要该趋势的 `TrendFormed` 与次级别末段 `c` 的有证完整窗；不预设本级走势完成。
    - 第三类买卖点需要走势类型对应中枢的离开/回试判定
    - 买卖点与走势类型的约束关系（如上涨中只有3B）
 2. **中枢（`.chanlun/definitions/zhongshu.md`）** — 核心依赖
