@@ -501,7 +501,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 
 （append-only：裁定一至七与 #1523 修订节原文不改。依据同 ADR 0038「修订（#1539）」节。）
 
-1. **恢复读法。** :27、:147、:289 引用的 ADR 0038:60 按 ADR 0038「修订（#1539）」读：`production_session` 启动时检测 checkpoint，加载快照后重放持久日志。experiment/production profile 下不回退 checkpoint 之后已持久的 X/E/Bᵢ 事实，在途订单先只读对账、外部未知按最大责任保留，与 :288「不回退旧 writer」同向；simulation profile 按该修订第 2 条执行。
+1. **恢复读法。** :27、:147、:289 引用的 ADR 0038:60 按 ADR 0038「修订（#1539）」读。检测 checkpoint、加载快照、重放与幂等核验由各域持锁执行，`production_session` 只编排并核对所提交的恢复回执；分工与时点见 [ADR 0065「恢复职责分派」](0065-production-session-endpoint-ownership.md#恢复职责分派)。experiment/production profile 下不回退 checkpoint 之后已持久的 X/E/Bᵢ 事实，在途订单先只读对账、外部未知按最大责任保留，与 :288「不回退旧 writer」同向；simulation profile 按该修订第 2 条执行。
 2. **引用行号。** :26、:288、:326、:412、:427 所引「ADR 0030:44」现址为 ADR 0030:48（#1599 批复插入观察期段后漂移，提交 `40f11b540f`），文义不变。
 
 ## 修订（#1540，凭据来源改名与发送门，2026-11-07）
