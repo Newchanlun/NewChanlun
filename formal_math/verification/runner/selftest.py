@@ -115,8 +115,11 @@ steps = list(run.STEP_FUNCS)
 if os.environ.get("FM_SELFTEST_SKIP_SHAPE"):
     # 骨架用例里要让被审代码在构建期执行（#eval、meta initialize 等），这里跳过第 5 步；派生证书为空。
     def skip_shape(ctx):
-        # 值为 nocert 时连派生凭证也不写（S32），否则有意写一份空凭证，第 7 步照常拿到它。
-        if os.environ["FM_SELFTEST_SKIP_SHAPE"] != "nocert":
+        # 值为 nocert 时连派生凭证也不写（S32）；othercert 时把凭证指向受信目录里另一个存在的文件（S33）；
+        # 否则有意写一份空凭证，第 7 步照常拿到它。
+        if os.environ["FM_SELFTEST_SKIP_SHAPE"] == "othercert":
+            ctx.certificate = os.path.join(ctx.trusted_dir, "verification", "runner", "run.py")
+        elif os.environ["FM_SELFTEST_SKIP_SHAPE"] != "nocert":
             ctx.certificate = os.path.join(ctx.trusted_dir, "derived.json")
             run.write_files(ctx.trusted_dir, [("derived.json", b"[]")])
         return [], "自测旁路：跳过源码形状"
@@ -422,14 +425,22 @@ SHAPE_RED = [
      {"SHAPE_FORBIDDEN"}),
     (T + "FbCfgConv.lean", (), "theorem fmA5 (a : Nat) : a + 0 = a := by\n  conv => lhs; simp (config := {})",
      {"SHAPE_FORBIDDEN"}),
-    # 必绿对照：新式字面量配置项不受旧式配置子句规则影响（本文件不得出现在红行里）
+    # 按形状判的代价（独审 r2 甲-C1）：参数名以 config 结尾的命名参数同样判红
+    (T + "FbCfgNamedArg.lean", (), "def fmRun (config n : Nat) : Nat := config + n\n"
+     "theorem fmNA : fmRun (config := 1) 2 = 3 := rfl", {"SHAPE_FORBIDDEN"}),
+    # 必绿对照：新式字面量配置项、名字不以 config 结尾的命名参数、「( 以 config 结尾的名字」后面不是 := 的写法
+    # （类型标注、元组；钉住 legacyConfig 的 := 要件），本文件不得出现在红行里
     (T + "CfgNewStyleGreen.lean", ("Mathlib.Tactic.Common",),
      "theorem fmG1 (a : Nat) : a + 0 = a := by simp (maxSteps := 1000)\n"
      "theorem fmG2 (p : Prop) (h : p) : p := by simp +contextual [h]\n"
      "theorem fmG3 (a : Nat) : a = a := by simp -zeta\n"
      "theorem fmG4 : 2 < 3 := by decide +kernel\n"
      "theorem fmG5 (a : Nat) : a + 0 = a := by\n  conv => lhs; simp (maxSteps := 10)\n"
-     "theorem fmG6 : True := by\n  first | simp (maxDischargeDepth := 2) | trivial", set()),
+     "theorem fmG6 : True := by\n  first | simp (maxDischargeDepth := 2) | trivial\n"
+     "def fmRun2 (cfg n : Nat) : Nat := cfg + n\n"
+     "theorem fmG7 : fmRun2 (cfg := 1) 2 = fmRun2 1 2 := rfl\n"
+     "def fmG8 (my_config : Nat) : Nat := (my_config : Nat)\n"
+     "def fmG9 (config : Nat) : Nat × Nat := (config, config)", set()),
     (T + "FbIncludeStr.lean", (), 'def fmStr : String := include_str "x.txt"', {"SHAPE_FORBIDDEN"}),
     (T + "FbEvalPercent.lean", ("Mathlib.Tactic.Eval",), "def fmEv : Nat := eval% 1 + 1", {"SHAPE_FORBIDDEN"}),
     (T + "FbByElab.lean", (), "def fmBe : Nat := by_elab pure (Lean.mkNatLit 1)", {"SHAPE_FORBIDDEN"}),
@@ -912,6 +923,31 @@ def skeleton(s):
         return check("S32 第 5 步没有产出派生凭证（驱动脚本跳过第 5 步且不写凭证）：第 7 步 NO_CERTIFICATE 退 2，不靠异常兜底",
                      good, r)
 
+    @case("S33")
+    def _():
+        r = s.run("S33-other-certificate", lite_green, lite=True, env={"FM_SELFTEST_SKIP_SHAPE": "othercert"}, mode="plain")
+        good = r["rc"] == 2 and r["faults"] == ["NO_CERTIFICATE"] and r["steps"][-1][1:] == ("env", "FAULT")
+        return check("S33 派生凭证非空但不是第 5 步写出的那一份（指向受信目录里另一个存在的文件）：第 7 步 NO_CERTIFICATE 退 2",
+                     good, r)
+
+    oracle_src = read(os.path.join(VERIFICATION, "must_green", "known-not-covered", "linarith-oracle-eval", "formal_math",
+                                   "Chan", "Thm", "LinarithOracle.lean"))
+    oracle_head = s.repo.commit({**s.base_files, "formal_math/Chan/Thm/LinarithOracle.lean": oracle_src}, s.base)
+
+    @case("H4")
+    def _():
+        mark = "FM-R2-LINARITH-ORACLE-RAN"
+        before = snapshot(s.repo.path)
+        r = s.run("H4-linarith-oracle", oracle_head)
+        in_log = [l for l in r["err"].splitlines() if mark in l]
+        outside = [os.path.join(d, n) for root in (s.tmp, s.repo.path) for d, _, ns in os.walk(root)
+                   for n in ns if mark in n]
+        good = r["rc"] == 0 and bool(in_log) and all(l.startswith("FM LOG build ") for l in in_log) and \
+            mark not in r["out"] and not outside and snapshot(s.repo.path) == before
+        return check("H4 已知不防 linarith (oracle := …)（独审 r2 甲-2）：第 5 步按设计放行、七步全绿，取值在构建期被求值；"
+                     "标记只出现在 FM LOG build 行里，沙箱外没有哨兵、仓库目录不变", good, r,
+                     "标记行=%d 沙箱外=%s" % (len(in_log), outside or "无"))
+
     ghost_files = {**s.lite_files, "formal_math/lake-manifest.json":
                    b'{"version": "1.3.0", "packagesDir": ".lake/packages", "packages": [{"name": "ghost"}], '
                    b'"name": "fixture", "lakeDir": ".lake", "fixedToolchain": false}\n'}
@@ -1365,6 +1401,11 @@ MUTANTS = [
     ("第 7 步不要求第 5 步产出的派生凭证", RUNNER,
      [('if certificate is None or certificate != os.path.join(ctx.trusted_dir, "derived.json"):', "if False:")],
      "S32"),
+    ("legacyConfig 不要求第三个子节点是 :=（独审 r2 甲-C2）", SHAPE,
+     [('stx[2].isAtom && stx[2].getAtomVal.trimAscii.copy == ":=" then', "true then")], "H1"),
+    ("NO_CERTIFICATE 只查为空、不比路径（独审 r2 乙-C1）", RUNNER,
+     [('if certificate is None or certificate != os.path.join(ctx.trusted_dir, "derived.json"):',
+       "if certificate is None:")], "S33"),
     ("形状检查不核对每组文件行", RUNNER,
      [("if sorted(r[1] for r in done) != sorted(files) or any(f[2] not in files for f in findings):", "if False:")],
      "S5g"),

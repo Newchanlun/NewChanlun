@@ -258,3 +258,5 @@ must_green/g3/r5-b4-readme-promised	第四片	1	build	BUILD_WFAIL	R5-B4 的误�
 must_red/known-not-covered/rfl-prime-false	第四片（已知不防的接手对照）	1	build	BUILD_WFAIL	已知不防 rfl' 的接手对照：用 rfl' 证假命题，第 6 步构建判红（形状门看不见 rfl' 展开出的 smartUnfolding，但它改不了证明是否成立）
 must_red/g3/r1-legacy-config	第四片	1	shape	SHAPE_FORBIDDEN	独审 r1 甲-1 的三种写法（aesop (config := …) 取值带 dbgTrace 标记、aesop (simp_config := …)、plausible (config := …)）；本片判红：禁用清单（旧式配置子句）。修复前 1acb400d63 上七步全绿，标记 FM-LEGACY-CONFIG-RAN 出现在构建日志
 must_green/known-issue/autoparam-default-proof	已知问题（环境层误拒）	1	env	ENV_META	独审 r1 N1：structure 字段的自动证明默认值 `:= by omega` 生成 meta 常量 Win.ok._autoParam，第 7 步 ENV_META。这是误拒，待后续片修，届时期望改为绿（退 0）
+must_green/known-not-covered/linarith-oracle-eval	第四片（已知不防）	0	-	-	独审 r2 甲-2：linarith (oracle := …) 键不以 config 结尾，第 5 步按设计放行；已知不防：构建期求值被审项（Mathlib 用 derive_eval_expr_instance_using_meta_eval 打开 Meta.evalExpr'），能力上界是纯计算与往标准错误输出；宿主机一侧由第 6 步沙箱接（自测 H4 断言标记只出现在 FM LOG build 行、沙箱外无哨兵）；伪造产物一类后果归 #2315，本票未测；按设计不往禁用清单补键名
+must_green/g3/r2-config-shaped-green	第四片	0	-	-	独审 r2 甲-C1／甲-C2 的必绿对照：新式字面量配置项、(cfg := 1) 命名参数、(my_config : Nat) 类型标注、(config, config) 元组；第 5 步零命中、七步全绿
