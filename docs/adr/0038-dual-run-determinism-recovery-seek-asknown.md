@@ -237,7 +237,9 @@
 
      在上述前置齐备时真杀 X，独立核 S 侧请求与记录。C 发送一次 `RequestConditionalExecution`，核实际 `ExecuteCommitted` 后推进。每条恢复臂发送该申请 **0** 次，必须实际收到 S 的 `NoRecord`；原批仍 `pending`，原 `ExecutionRequested` 和责任不变，无 S 资格收据、X 新占有或撮合原件。R₁、R₂ 在同一等待切面核六面等价，报告保留 C 已推进、R 仍等待的差异。要继续推进原批，仍须交付此状态的可证续接：`NoRecord` 不授权重发，本地撮合事务幂等也不覆盖这条 X→S 边。安全留停不记作已恢复推进。
 
-   - **S 资格查回晚于原批的负控（simulation）。** S₁ 在 10 提交后、X 收到回包前真杀；S₂ 的查询绑定在 20 生效，X 首次实际从 S₂ 取得有效原回执时读数为 20，但原 `pending` 批的 `claimed_ns` 为 15。虽已持久留存真实资格证据，X 仍须拒绝占有，不得进入 `MayHaveCalled`、调用或产生撮合原件；原批及责任保留，不能重标时点。离线重验须拒绝声称以该时序取得调用权的记录。C 在 15 前真实获知 S₁ 收据，可按原批推进；R₁、R₂ 在同一等待切面核等，专项记录等待及与 C 的实际差异，不计作 H2 已推进。
+   - **S 资格查回晚于原批的负控（simulation）。** S₁ 在 10 提交后、X 收到回包前真杀；S₂ 的查询绑定在 20 生效。
+     - **在线：** 原批 15 仍为 `pending`，已提交 `last_bar=14`。X 从 S₂ 查回有效原回执时，必须从已提交前沿实读 `last_bar + 1 = 15`，不以夹具填入 20，也不换批推进时钟。读数低于绑定生效下限，X 须拒绝占有，不进入 `MayHaveCalled`、不调用或生成撮合原件，保留原批与责任。C 在 15 真实获知 S₁ 回执并按原批推进；R₁、R₂ 在同一等待切面核等，专项如实记录差异，不计作 H2 已推进。
+     - **离线重验：** 另构声称已取得调用权的记录，原提交为 10、绑定生效为 20、`first_known_ns=20`、`claimed_ns=15`。虽满足首次获知的下限，调用占有早于首次获知，必须拒绝；该记录不作为在线读数证据。
 
    - **`Prepared` 已持久提交、E 尚未 `Reserve`（simulation）。** 预登记单申请 slot；真杀 B₁ 前在三臂核同一 `PreparedReceipt` 和本地私有锁，且 E 尚无该 slot 的 grant。其他授信条件固定为可通过。C 以仍有效的原 `applicant_epoch` 获得原申请的 grant，独立核 E 责任增加该 grant 全额。R₁、R₂ 原址恢复 B 至 B₂，保留原 `Prepared` 与私有锁，以 B₂ 的实际证明核 `current_epoch` 已不同于原 `applicant_epoch`；E 实际尝试 `Reserve`，必须以旧申请代拒绝，无新增 grant、`ReserveReceipt` 或该申请的 E 增责，既存责任不变。B 不可用、未到达授信判断或改写原 `applicant_epoch` 均不算通过。R₁ 与 R₂ 在相同切面核六面等价；对 C 单列 grant 与责任差异，不为凑齐六面重建原申请或授信。
 
@@ -252,7 +254,10 @@
 
    - **两条独立 cap 负控。** 不激活时，在 `Reserve` 断言无该 grant 或 `ReleasedExact`，既存责任不变。另起一用例：已激活的 cap 在 `Reserve` 和 `MakeDispatchable` 时均有效，已取得完整 grant 与 `Dispatchable`；冻结时钟使激活版在 `ReleaseExact` 的拟提交时刻已过期、创世版和其他交付条件仍有效。必须因当前 cap 过期拒绝，不能回退创世版；保留原 `Dispatchable` 和 grant 全量责任，无 `ReleasedExact` 提交或交付回执。X 用原命令向实际 E 查询 `QueryReleasedExact`，核 E 应答为 `NoRecord` 且 X 不接纳，超时不算通过。错摘要、缺件/换件、跨 profile、签署或量纲不符、旧请求写新版、cap 不足仍各有失败锁。
    - **跨过创世期限的正控。** 创世版与激活版均有效时完成 `Reserve` 并取得完整 grant；创世版在授信后、B 本地提交前过期。激活版与独立能力在后续 `CommitDecision`、`MakeDispatchable`、`ReleaseExact` 均有效，且其他条件满足。三步须分别产生真实 `LocalCommitReceipt`、`DispatchableReceipt`、`ReleasedExactReceipt`；核原切面、cap 与能力证据的选择，X 向同一 E 发新版 `QueryReleasedExact` 可查并接纳，持久引用与该回执相符。不得预先取得 `Dispatchable` 来跳过两个中间期限门。
-   - **中间期限门的四个独立负控。** B 在已取得完整 grant 后尝试 `CommitDecision`，E 在已取得真实 `LocalCommitReceipt` 后尝试 `MakeDispatchable`。对每一步各跑两例：仅现行 cap 过期、仅独立能力过期；其他条件均有效，所有前序步骤均在各自期限内完成。必须由该步因相应期限拒绝：B 不新增 `Committed` 或 `LocalCommitReceipt`，E 不新增 `Dispatchable` 或 `DispatchableReceipt`，已有持久状态不改，原 grant 责任不减。不继续到 `ReleaseExact` 才判失败。
+   - **中间期限门的四个独立负控。** 其他条件均有效，前序步骤均在各自期限内完成；每一步各跑一次仅现行 cap 过期、一次仅独立能力过期。
+     - `CommitDecision` 的 cap 过期例：以 v2 完成 `Reserve` 并取得完整 grant；在 B 本地提交前激活覆盖现有责任的 v3。B 实际核到的 E 权威切面以 v3 为现行，拟提交时 v3 已过期，但 `Reserve` 留存的 v2 与独立能力均仍有效。
+     - `MakeDispatchable` 的 cap 过期例：以 v2 完成 `Reserve` 并取得真实 `LocalCommitReceipt`；在 E 转 `Dispatchable` 前激活覆盖现有责任的 v3。E 的事务前切面以 v3 为现行，拟提交时 v3 已过期，但 `Reserve` 留存的 v2 与独立能力均仍有效。
+     - 两个能力过期例各保持当步所用的现行 cap 有效，只让独立能力在该步拟提交时过期。四例均须由被测步骤因相应期限直接拒绝：B 不新增 `Committed` 或 `LocalCommitReceipt`；E 不新增 `Dispatchable` 或 `DispatchableReceipt`。已有持久状态不改，原 grant 责任不减；不得等到 `ReleaseExact` 才拒绝。
    - **能力期限负控。** 当 cap 和独立能力证据均有效时取得完整 grant 与 `Dispatchable`；随后仅能力证据在 `ReleaseExact` 拟提交时刻过期，现行 cap 和其余交付门仍有效。必须因能力过期拒绝 `ReleaseExact`，不生成交付回执，原 grant 责任不变；从实际 E 查询为 `NoRecord`，不以超时或其他门拒绝代替。
    - **`Reserve` 后切版负控（v2 → v3）。** 用仍有效的 v2 取得 grant 与 `Dispatchable`，核 `Reserve` 原记录留存 v2。再实际激活覆盖全部现有责任（含该 grant）的 v3，并核 E 前切面已以 v3 为现行。冻结交付时点使 v3 已过期、v2 和其他交付条件仍有效。E 必须因现行 v3 过期拒绝 `ReleaseExact`，不按 `Reserve` 的 v2 放行；核无 `ReleasedExact` 或交付回执，X 向实际 E 查询得到 `NoRecord`，原 grant 责任与 `Reserve` 原记录不变。
    - **非普通签署原件负控。** 在仍获准的同一角色定位放入非普通文件，至少测无人打开写端的 FIFO；其余新激活条件均有效。实际 E 须在该操作期限内因文件类型拒绝，不新增消息绑定、激活回执、cap 或根。同一 E 不经重启仍须在响应期限内回答随后一条合法 `ReadView`；不得等写端出现或让测试进程代为解堵。
