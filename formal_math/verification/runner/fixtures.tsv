@@ -257,4 +257,10 @@ must_green/g3/r5-b4-everyday-terms	第四片	1	build	BUILD_WFAIL	R5-B4 的误拒
 must_green/g3/r5-b4-readme-promised	第四片	1	build	BUILD_WFAIL	R5-B4 的误拒汇总（第五轮审阅 r5-fixtures/b4-…）；第 5 步零命中；第 6 步构建判红，原因是夹具自身的告警/错误（见 README「R5-B4」），不是形状门
 must_red/known-not-covered/rfl-prime-false	第四片（已知不防的接手对照）	1	build	BUILD_WFAIL	已知不防 rfl' 的接手对照：用 rfl' 证假命题，第 6 步构建判红（形状门看不见 rfl' 展开出的 smartUnfolding，但它改不了证明是否成立）
 must_red/g3/r1-legacy-config	第四片	1	shape	SHAPE_FORBIDDEN	独审 r1 甲-1 的三种写法（aesop (config := …) 取值带 dbgTrace 标记、aesop (simp_config := …)、plausible (config := …)）；本片判红：禁用清单（旧式配置子句）。修复前 1acb400d63 上七步全绿，标记 FM-LEGACY-CONFIG-RAN 出现在构建日志
-must_green/known-issue/autoparam-default-proof	已知问题（环境层误拒）	1	env	ENV_META	独审 r1 N1：structure 字段的自动证明默认值 `:= by omega` 生成 meta 常量 Win.ok._autoParam，第 7 步 ENV_META。这是误拒，待后续片修，届时期望改为绿（退 0）
+must_green/autoparam/default-proof	自动参数（环境层豁免第 4 类）	0	-	-	独审 r1 N1：structure 字段的自动证明默认值 `:= by omega` 生成 meta 常量 Win.ok._autoParam；原在 must_green/known-issue（第 7 步 ENV_META），第 4 类豁免后七步全绿
+must_green/autoparam/binders	自动参数（环境层豁免第 4 类）	0	-	-	第 1 步查到的生成点各一个：def、theorem、abbrev 参数，类型里的 ∀ 绑定器，structure 参数，inductive 构造子参数，structure 字段、继承、子结构覆写、class 字段；以及省略它们的使用处
+must_green/autoparam/combined	自动参数（环境层豁免第 4 类）	0	-	-	自动参数与 deriving（递归类型，派生证书）、instance、mutual、private、protected 同时出现
+must_green/autoparam/many-fields	自动参数（环境层豁免第 4 类）	0	-	-	一个文件里三个结构体、每个多个带自动证明默认值的字段
+must_green/known-issue/autoparam-variable-binder	已知问题（环境层误拒）	1	env	ENV_META	variable 绑定器上的自动参数：Lean 生成的载体 _private.<模块>.0._auto_<N> 没有任何声明以 autoParam 引用，按「必须被引用」仍判 ENV_META（刻意保留的窄误拒）；绕开办法是写在用到它的 def/theorem 自己的绑定器上
+must_red/autoparam/spoofs	环境层	1	env	ENV_IMPLEMENTED_BY,ENV_META,ENV_UNSAFE	第 4 类豁免的冒用形态（手写 meta def 逐字照抄生成值、孤立、值里有函数调用、值里引用别的常量、类型是别名、名字形态不对、unsafe、implemented_by、给生成的载体事后挂 implemented_by），每种一个文件，另有一个合法载体作对照；逐声明的比对见自测 A2；语料用例跳过第 5 步跑（meta、unsafe、implemented_by 第 5 步会拒）
+must_red/g6a/autoparam-tactic-edit	声明锁	1	env	LOCK_CHANGED	已知问题的现状记录（不是归属门的承诺）：锁文件按 `by omega` 生成，源码只把结构体字段的默认证明改成 `by (omega)`；自动参数载体 LockWin.ok._autoParam 在锁定目录里进入锁行，它的锁行变（LOCK_CHANGED），结构体与构造子的锁行不变。载体该不该算锁定内容留待以后定；语料用例跳过第 5 步跑

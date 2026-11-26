@@ -72,7 +72,7 @@ private def ctorIdxImpl (decl impl : Name) : MetaM Bool := do
 
 /--
 生成来源判据：常量带 `unsafe`、`partial`、`implemented_by` 时，只有能机械复核为下列三类
-Lean 自动生成的辅助项才豁免（`extern`、`meta` 不在任何豁免之内）：
+Lean 自动生成的辅助项才豁免（`extern` 不在任何豁免之内；`meta` 只豁免自动参数的战术载体，见 `FM.autoParamCarriers`）：
 1. 归纳类型的 `ctorIdx` 与其运行期实现：按生成器重算后逐字相同（见 `ctorIdxImpl`）。
 2. 结构递归或良基递归定义的编译影子：`Compiler.isUnsafeRecName?` 指向的源定义是同模块、
    内核检查过的安全 `def`，且 `isRecursiveDefinition` 登记为结构／良基递归，类型逐字相同。
@@ -132,6 +132,7 @@ private def gate3 (entries : Array FM.Entry) (derived : NameSet) : MetaM UInt32 
     match Compiler.getImplementedBy? env e.name with
     | some impl => m.insert impl e.name
     | none => m
+  let carriers ← FM.autoParamCarriers entries
   let mut red := false
   let deps := CollectAxioms.runM env <| names.mapM fun (_, name, _) =>
     CollectAxioms.collectAndGet (fun _ _ => none) name
@@ -144,7 +145,7 @@ private def gate3 (entries : Array FM.Entry) (derived : NameSet) : MetaM UInt32 
     let mut issues : Array (String × String) := #[]
     if info matches .axiomInfo _ then
       issues := issues.push ("ENV_AXIOM", "包内声明是公理")
-    if isMarkedMeta env name then
+    if isMarkedMeta env name && !carriers.contains name then
       issues := issues.push ("ENV_META", "声明是 meta 元程序")
     -- 全部常量都查；只有能复核生成来源的辅助项豁免，不看有无声明范围、不按名字后缀匹配。
     if isExtern env name then

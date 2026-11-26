@@ -1137,6 +1137,121 @@ def skeleton(s):
         r = s.run("E16-shape-escape", head, lite=True)
         good = r["rc"] == 1 and r["reds"] == {"SHAPE_OPTION", "SHAPE_PARSE"}
         return check("E16 形状门发现的说明栏含被审文字（带换行与方向控制符的选项名、解析错误消息）：输出协议不破", good, r)
+
+    # ---- 环境层豁免第 4 类：自动参数的战术载体 ----
+    def env_pairs(res):
+        """第 7 步门 3 红行的（红码，路径:声明）集合。"""
+        return {(line.split(" ")[3], line.split(" ")[4]) for line in res["out"].splitlines()
+                if line.startswith("FM RED env ")}
+
+    @case("A2")
+    def _():
+        r, _how = corpus_case(s, "must_red/autoparam/spoofs", skip_shape=True)
+        got, want = env_pairs(r), {("ENV_META" if c == "M" else "ENV_UNSAFE" if c == "U" else "ENV_IMPLEMENTED_BY",
+                                    "formal_math/Chan/Thm/%s.lean:%s" % (f, n)) for c, f, n in AUTOPARAM_SPOOFS}
+        good = r["rc"] == 1 and last_step(r) == "env" and got == want
+        return check("A2 第 4 类豁免的冒用形态（只审环境层，跳过第 5 步）：逐声明比对红行，合法载体 SpLegit.ok._autoParam "
+                     "不在其中", good, r, "多出=%s 缺少=%s" % (sorted(got - want)[:6], sorted(want - got)[:6]))
+
+    @case("A3")
+    def _():
+        r, _how = corpus_case(s, "must_green/known-issue/autoparam-variable-binder")
+        got = env_pairs(r)
+        good = r["rc"] == 1 and r["reds"] == {"ENV_META"} and bool(got) and all(
+            re.fullmatch(r"formal_math/Chan/Thm/Var\.lean:_private\.Chan\.Thm\.Var\.0\._auto_\d+", o) for _, o in got)
+        return check("A3 variable 绑定器上的自动参数（已知的窄误拒）：生成的载体没有任何声明引用，第 7 步 ENV_META", good, r,
+                     "红行对象=%s" % sorted(o for _, o in got)[:4])
+    return cases
+
+
+# 第 4 类豁免冒用夹具 must_red/autoparam/spoofs 的期望红行：（M=ENV_META、U=ENV_UNSAFE、I=ENV_IMPLEMENTED_BY，文件，声明）
+AUTOPARAM_SPOOFS = [
+    ("M", "Copy", "SpCopy._auto_1"), ("M", "Orphan", "SpOrphan._auto_1"), ("M", "Call", "SpCall._auto_1"),
+    ("M", "Ref", "spRefHelper"), ("M", "Ref", "SpRef._auto_1"), ("M", "Alias", "SpAlias._auto_1"),
+    ("M", "Name", "spName"), ("M", "Unsafe", "SpUnsafe._auto_1"), ("U", "Unsafe", "SpUnsafe._auto_1"),
+    ("U", "Unsafe", "spUnsafeUse"), ("M", "Impl", "SpImpl._auto_1"), ("I", "Impl", "SpImpl._auto_1"),
+    ("M", "Impl", "spImplTarget"), ("M", "PostImpl", "SpPost.h._autoParam"), ("I", "PostImpl", "SpPost.h._autoParam"),
+    ("M", "PostImpl", "spPostTarget"),
+]
+
+
+# ---- 单元自测：第 4 类豁免的判定函数 ----
+
+# 单元自测 U1 的期望：Forge.lean 造出的每个候选常量是否被 FM.autoParamCarriers 判为载体，以及它在哪一条判据上不同。
+UNIT_CARRIERS = {
+    "U.ok._auto_1": "正例：生成器 declareTacticSyntax 本身产出",
+    "U.field._autoParam": "正例：逐字照抄生成值，字段名形态",
+    "U.identOk._auto_1": "正例：含标识符的语法树（Syntax.ident 的解码与重算）",
+}
+UNIT_REJECTED = {
+    "U.badName": "判据 1 名字形态：末段不是 _autoParam、_auto_<数字>",
+    "U.noDigits._auto_": "判据 1 名字形态：_auto_ 后没有数字",
+    "U.unsafe._auto_1": "判据 2 安全性：unsafe",
+    "U.impl._auto_1": "判据 2 安全性：implemented_by",
+    "U.hints._auto_1": "判据 2 提示：regular",
+    "U.abbrev._auto_1": "判据 2 提示：abbrev",
+    "U.univ._auto_1": "判据 2 宇宙参数",
+    "U.alias._auto_1": "判据 3 类型是定义上相等的别名",
+    "U.orphan._auto_1": "判据 4 没有任何常量以 autoParam 引用",
+    "U.call._auto_1": "判据 5 值里有函数调用",
+    "U.ref._auto_1": "判据 5 值里引用别的常量",
+    "U.rawNeq._auto_1": "判据 5 形状对，标识符的原文与重算不等",
+    "U.nameNeq._auto_1": "判据 5 形状对，名字的编码与重算不等",
+    "U.helper": "对照：meta 但名字与引用都不对",
+    "U.plain._auto_1": "对照：没有 meta 标记，不在判定范围",
+}
+
+
+def unit(s):
+    """测试设施，不是被审内容，不经过流水线：在临时目录起一个最小 Lean 包（只依赖工具链自带的 Lean），
+    用 addDecl 造常量，调用审计程序库里的 FM.autoParamCarriers，断言每个候选常量的判定。"""
+    cases = []
+    cases_dir = os.path.join(HERE, "selftest-cases", "autoparam")
+
+    def u1():
+        top = os.path.join(s.tmp, "unit-U1")
+        pkg = os.path.join(top, "pkg")
+        os.makedirs(pkg)
+        with open(os.path.join(pkg, "lakefile.toml"), "w") as f:
+            f.write('name = "fmunit"\ndefaultTargets = ["U"]\n\n[[lean_lib]]\nname = "U"\n')
+        shutil.copy(os.path.join(FM, "lean-toolchain"), os.path.join(pkg, "lean-toolchain"))
+        shutil.copy(os.path.join(cases_dir, "Forge.lean"), os.path.join(pkg, "U.lean"))
+        prefix = subprocess.run(["lean", "--print-prefix"], cwd=pkg, capture_output=True, text=True).stdout.strip()
+        if s.warm:
+            lib = os.path.join(s.warm, "build", "lib", "lean")
+        else:
+            aud = os.path.join(top, "auditor")
+            shutil.copytree(os.path.join(VERIFICATION, "auditor"), aud, ignore=shutil.ignore_patterns(".lake"))
+            b = subprocess.run([os.path.join(prefix, "bin", "lake"), "build"], cwd=aud, capture_output=True)
+            if b.returncode:
+                raise RuntimeError("构建审计程序失败：" + b.stdout.decode(errors="replace")[-2000:])
+            lib = os.path.join(aud, ".lake", "build", "lib", "lean")
+        b = subprocess.run([os.path.join(prefix, "bin", "lake"), "build"], cwd=pkg, capture_output=True)
+        if b.returncode:
+            raise RuntimeError("构建单元自测包失败：" + b.stdout.decode(errors="replace")[-2000:])
+        env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/"),
+               "LEAN_PATH": lib + ":" + os.path.join(pkg, ".lake", "build", "lib", "lean")}
+        p = subprocess.run([os.path.join(prefix, "bin", "lean"), "--run", os.path.join(cases_dir, "Check.lean"), "U"],
+                           cwd=pkg, capture_output=True, env=env)
+        rows = {row[0]: set(row[1]) for row in map(json.loads, p.stdout.decode().splitlines())}
+        if p.returncode or set(rows) != {"carriers", "present"}:
+            raise RuntimeError("驱动输出不对：rc=%d %s" % (p.returncode, (p.stdout + p.stderr).decode(errors="replace")[-2000:]))
+        oks = []
+        for name, why in sorted({**UNIT_CARRIERS, **UNIT_REJECTED}.items()):
+            want = name in UNIT_CARRIERS
+            ok = name in rows["present"] and (name in rows["carriers"]) == want
+            oks.append(ok)
+            os.write(1, ("%s\tU1 %s：%s，期望%s\t%s\n" % ("通过" if ok else "失败", name, why, "豁免" if want else "不豁免",
+                                                     "常量不存在" if name not in rows["present"] else
+                                                     "判为载体" if name in rows["carriers"] else "不是载体")).encode())
+        extra = rows["carriers"] - set(UNIT_CARRIERS)
+        if extra:
+            os.write(1, ("失败\tU1 多判为载体：%s\n" % sorted(extra)).encode())
+        os.write(1, ("单元自测 U1：判定项 %d/%d 通过\n" % (sum(oks), len(oks))).encode())
+        rmtree(top)
+        return all(oks) and not extra
+
+    cases.append(("U1", u1))
     return cases
 
 
@@ -1210,7 +1325,7 @@ def corpus_case(s, fixture, keep=False, skip_shape=False):
         for n in names:
             full = os.path.join(d, n)
             overlay["formal_math/" + os.path.relpath(full, src)] = read(full)
-    warm = "warm:" + s.warm
+    warm = "warm:" + s.warm if s.warm else None
     touches_trusted = any(p in ("formal_math/" + c for c in CONFIG_NAMES) or p.startswith("formal_math/verification/")
                           for p in overlay)
     if touches_trusted:
@@ -1264,6 +1379,7 @@ def corpus(s, discover, only):
 
 RUNNER = "verification/runner/run.py"
 SHAPE = "verification/auditor/Auditor/Shape.lean"
+ENVG = "verification/auditor/Auditor/EnvGates.lean"
 MUTANTS = [
     ("去掉 RUNNER_MISMATCH", RUNNER, [("if me != object_at(ctx, ctx.trusted, TRUSTED_CODE[0]):", "if False:")],
      "S13"),
@@ -1365,6 +1481,20 @@ MUTANTS = [
     ("第 7 步不要求第 5 步产出的派生凭证", RUNNER,
      [('if certificate is None or certificate != os.path.join(ctx.trusted_dir, "derived.json"):', "if False:")],
      "S32"),
+    # 环境层豁免第 4 类：自动参数的战术载体
+    ("第 4 类豁免去掉名字形态", ENVG, [("unless isMarkedMeta env e.name && carrierName e.name do return s",
+                                    "unless isMarkedMeta env e.name do return s")], "U1"),
+    ("第 4 类豁免去掉安全性条件（safe、无 implemented_by、无 extern）", ENVG,
+     [("    unless d.safety == .safe && !isExtern env e.name && (Compiler.getImplementedBy? env e.name).isNone do return s\n",
+       "")], "A2,U1"),
+    ("第 4 类豁免去掉 opaque 提示", ENVG, [("unless d.levelParams.isEmpty && d.hints matches .opaque do return s",
+                                       "unless d.levelParams.isEmpty do return s")], "A2,U1"),
+    ("第 4 类豁免去掉「类型恰为 Lean.Syntax」", ENVG, [("    unless d.type == .const ``Syntax [] do return s\n", "")], "U1"),
+    ("第 4 类豁免去掉「被 autoParam 引用」", ENVG, [("    unless refs.contains e.name do return s\n", "")], "A3,U1"),
+    ("第 4 类豁免去掉「值按生成器重算逐字相等」", ENVG,
+     [("    let some stx := quotedSyntax d.value | return s\n"
+       "    unless ← (try pure ((← Elab.Term.quoteAutoTactic stx) == d.value) catch _ => pure false) do return s\n", "")],
+     "U1"),
     ("形状检查不核对每组文件行", RUNNER,
      [("if sorted(r[1] for r in done) != sorted(files) or any(f[2] not in files for f in findings):", "if False:")],
      "S5g"),
@@ -1462,6 +1592,7 @@ def main(argv):
         s = Suite(tmp, packages, warm=not skip_corpus)
         cases = [] if discover or only else [fn for cid, fn in skeleton(s)
                                              if cases_filter is None or cid in cases_filter]
+        units = [] if discover or only else [fn for cid, fn in unit(s) if cases_filter is None or cid in cases_filter]
         if not skip_corpus and cases_filter is None:
             cases += corpus(s, discover, only)
         began = time.monotonic()
@@ -1473,11 +1604,13 @@ def main(argv):
                          .encode("utf-8", "backslashreplace"))
                 return False
         with ThreadPoolExecutor(max_workers=jobs) as pool:
-            results = list(pool.map(guarded, cases))
+            results = list(pool.map(guarded, cases + units))
         if discover:
             return 0
+        results, unit_results = results[:len(cases)], results[len(cases):]
         os.write(1, ("自测：%d/%d 通过（%.0fs）\n" % (sum(results), len(results), time.monotonic() - began)).encode())
-        return 0 if all(results) else 1
+        os.write(1, ("单元自测：%d/%d 通过\n" % (sum(unit_results), len(unit_results))).encode())
+        return 0 if all(results) and all(unit_results) else 1
     finally:
         rmtree(tmp)
 
