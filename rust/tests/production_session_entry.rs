@@ -439,7 +439,7 @@ fn stop(launcher: &mut Child) -> std::process::ExitStatus {
 }
 
 /// 域进程出现在 launcher 名下不等于已持锁/建库/开 socket；就绪类断言一律限时轮询。
-fn eventually(what: &str, ready: impl Fn() -> bool) {
+fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !ready() {
         assert!(Instant::now() < deadline, "{what} 未就绪");
@@ -914,6 +914,196 @@ fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
     let mut reply = String::new();
     stream.read_to_string(&mut reply).unwrap();
     serde_json::from_str(reply.trim_end()).unwrap()
+}
+
+fn wait_simulation_sockets(space: &Space) {
+    for name in ["s.sock", "e.sock", "b.sock"] {
+        eventually(name, || UnixStream::connect(space.path(name)).is_ok());
+    }
+}
+
+fn stopped_events(launcher: &mut Child) -> Vec<Value> {
+    launcher_stderr(launcher)
+        .lines()
+        .filter_map(|line| line.strip_prefix("production_session "))
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+#[test]
+fn orderly_stop_closes_same_s_db_without_claiming_socket_handoff() {
+    let space = Space::new();
+    let (manifest, s_db) = simulation(&space, "simulation", false);
+    let mut launcher = spawn_launcher(&manifest);
+    wait_simulation_sockets(&space);
+    let id = std::fs::metadata(&s_db).unwrap().ino();
+    let paths = ["s.sock", "e.sock", "b.sock"].map(|name| space.path(name));
+    let socket_ids = paths
+        .each_ref()
+        .map(|path| std::fs::symlink_metadata(path).unwrap().ino());
+
+    let first = s_ingest(&paths[0], DECLARED_NS, 1);
+    assert_eq!(first["payload"]["kind"], "Committed", "{first}");
+    assert_eq!(first["payload"]["publication"]["structure_cut"], "cut-1");
+    assert!(s_db.with_extension("db-shm").exists());
+    assert!(
+        std::fs::metadata(s_db.with_extension("db-wal"))
+            .unwrap()
+            .len()
+            > 0
+    );
+
+    let status = stop(&mut launcher);
+    let events = stopped_events(&mut launcher);
+    assert!(status.success(), "{events:?}");
+    for domain in ["S", "E", "B:one"] {
+        assert!(
+            events.iter().any(|event| event["event"] == "domain-stopped"
+                && event["domain"] == domain
+                && event["writer_closed"] == true),
+            "{events:?}"
+        );
+    }
+    assert!(
+        events.iter().any(|event| event["event"] == "stopped"
+            && event["failed"] == false
+            && event["socket_handoff"] == "not_performed"),
+        "{events:?}"
+    );
+    assert_eq!(
+        paths
+            .each_ref()
+            .map(|path| std::fs::symlink_metadata(path).unwrap().ino()),
+        socket_ids
+    );
+    assert!(!s_db.with_extension("db-shm").exists());
+    assert!(!s_db.with_extension("db-wal").exists());
+    assert_eq!(std::fs::metadata(&s_db).unwrap().ino(), id);
+    // 只读验证关库后原切仍可取；S3 公共快照是另一 Q3 服务入口。
+    let cut = meta(&s_db, "SELECT value FROM meta WHERE key='structure_cut'").unwrap();
+    assert_eq!(cut, "cut-1");
+
+    // 保留既有配置、临时媒体与 socket；不能把能关闭库算成整套实地重启。
+    let restarted = run_refusal(
+        Command::new(launcher_bin())
+            .arg("--manifest")
+            .arg(&manifest),
+    );
+    assert_eq!(restarted.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&restarted.stderr);
+    assert!(err.contains("socket路径已占用"), "{err}");
+    assert_eq!(
+        paths
+            .each_ref()
+            .map(|path| std::fs::symlink_metadata(path).unwrap().ino()),
+        socket_ids
+    );
+    println!("原 S 主库 inode={id}，只读核验 {cut}；原 manifest 再启动按 socket 门拒绝");
+}
+
+#[test]
+fn closing_writer_does_not_claim_or_touch_replaced_socket() {
+    let space = Space::new();
+    let (manifest, _) = simulation(&space, "simulation", false);
+    let mut launcher = spawn_launcher(&manifest);
+    wait_simulation_sockets(&space);
+    let original = space.path("s.sock");
+    assert_eq!(
+        s_ingest(&original, DECLARED_NS, 1)["payload"]["kind"],
+        "Committed"
+    );
+    let moved = space.path("original.sock");
+    std::fs::rename(&original, &moved).unwrap();
+    let replacement = std::os::unix::net::UnixListener::bind(&original).unwrap();
+    let id = std::fs::symlink_metadata(&original).unwrap().ino();
+
+    let status = stop(&mut launcher);
+    let events = stopped_events(&mut launcher);
+    assert!(status.success(), "{events:?}");
+    assert!(
+        events.iter().any(|event| event["event"] == "domain-stopped"
+            && event["domain"] == "S"
+            && event["writer_closed"] == true),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "stopped" && event["socket_handoff"] == "not_performed"),
+        "{events:?}"
+    );
+    assert_eq!(std::fs::symlink_metadata(&original).unwrap().ino(), id);
+    UnixStream::connect(&original).unwrap();
+    replacement.accept().unwrap();
+    assert!(moved.exists());
+}
+
+#[test]
+fn standalone_s_ignores_obsolete_launcher_environment_and_pipe_byte() {
+    let space = Space::new();
+    let db = s_init_v3(&space, Some(&declaration("TestOnlyStructure", DECLARED_NS)));
+    let limits = anchor(&db);
+    let socket = space.path("s.sock");
+    let mut child = s_serve_command(&space, &db, &limits)
+        .stdin(Stdio::piped())
+        .env("NC_SESSION_SUPERVISED_STOP", "1")
+        .spawn()
+        .unwrap();
+    eventually("独立 S 入口", || UnixStream::connect(&socket).is_ok());
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(&[1]).unwrap();
+    drop(input);
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        assert!(child.try_wait().unwrap().is_none(), "环境不能启用受管关停");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let result = s_ingest(&socket, DECLARED_NS, 1);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(result["payload"]["kind"], "Committed", "{result}");
+}
+
+#[test]
+fn killed_s_is_not_orderly_and_its_socket_remains_for_explicit_recovery() {
+    let space = Space::new();
+    let (manifest, _) = simulation(&space, "simulation", false);
+    let mut launcher = spawn_launcher(&manifest);
+    wait_simulation_sockets(&space);
+    let socket = space.path("s.sock");
+    assert_eq!(
+        s_ingest(&socket, DECLARED_NS, 1)["payload"]["kind"],
+        "Committed"
+    );
+    let id = std::fs::symlink_metadata(&socket).unwrap().ino();
+    let (_, pid) = domain_children(launcher.id())
+        .into_iter()
+        .find(|(name, _)| name == "s_structure_session")
+        .unwrap();
+    // 只命中本例已接纳 input-1 的直接 S 子进程。
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    eventually("因 S 被杀而退出", || {
+        launcher.try_wait().unwrap().is_some()
+    });
+    assert_eq!(launcher.wait().unwrap().code(), Some(1));
+    let events = stopped_events(&mut launcher);
+    assert!(
+        events.iter().any(|event| event["event"] == "exit"
+            && event["domain"] == "S"
+            && event["critical"] == true),
+        "{events:?}"
+    );
+    assert_eq!(std::fs::symlink_metadata(&socket).unwrap().ino(), id);
+
+    let result = run_refusal(
+        Command::new(launcher_bin())
+            .arg("--manifest")
+            .arg(&manifest),
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&result.stderr);
+    assert!(err.contains("socket路径已占用"), "{err}");
+    assert_eq!(std::fs::symlink_metadata(&socket).unwrap().ino(), id);
 }
 
 #[test]

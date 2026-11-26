@@ -16,7 +16,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc, Arc,
 };
 use std::time::{Duration, Instant};
@@ -620,40 +620,144 @@ pub fn serve_unix(
     socket: &Path,
     bounds: TransportBounds,
     validate: EnvelopeValidator,
+    handler: impl FnMut(&Value) -> Value,
+) -> Result<(), String> {
+    serve_unix_with_shutdown(socket, bounds, validate, ShutdownMode::Standalone, handler)
+}
+
+pub fn serve_unix_with_shutdown(
+    socket: &Path,
+    bounds: TransportBounds,
+    validate: EnvelopeValidator,
+    shutdown: ShutdownMode,
     mut handler: impl FnMut(&Value) -> Value,
 ) -> Result<(), String> {
-    serve_unix_inner(socket, bounds, validate, legacy_job, |job: &Job| {
-        handler(&job.envelope)
-    })
+    serve_unix_inner(
+        socket,
+        bounds,
+        validate,
+        shutdown,
+        legacy_job,
+        |job: &Job| handler(&job.envelope),
+    )
 }
-/// New economic domain only: deliver the I/O thread's original response
-/// deadline to the actor as trusted memory context. It is never wire data.
+
+/// 只给经济域传入由 I/O 线程记录的可信响应期限；不从信封取期限。
 pub fn serve_unix_with_deadline(
     socket: &Path,
     bounds: TransportBounds,
     validate: EnvelopeValidator,
+    handler: impl FnMut(&Value, Instant) -> Value,
+) -> Result<(), String> {
+    serve_unix_with_deadline_and_shutdown(
+        socket,
+        bounds,
+        validate,
+        ShutdownMode::Standalone,
+        handler,
+    )
+}
+
+pub fn serve_unix_with_deadline_and_shutdown(
+    socket: &Path,
+    bounds: TransportBounds,
+    validate: EnvelopeValidator,
+    shutdown: ShutdownMode,
     mut handler: impl FnMut(&Value, Instant) -> Value,
 ) -> Result<(), String> {
-    serve_unix_inner(socket, bounds, validate, timed_job, |job: &TimedJob| {
-        handler(&job.job.envelope, job.response_deadline)
-    })
+    serve_unix_inner(
+        socket,
+        bounds,
+        validate,
+        shutdown,
+        timed_job,
+        |job: &TimedJob| handler(&job.job.envelope, job.response_deadline),
+    )
 }
+
+/// Launcher 私有控制管道协定，不从环境或业务 socket 启用。
+pub const SHUTDOWN_CONTROL_FLAG: &str = "--shutdown-control";
+pub const SHUTDOWN_STDIN_V1: &str = "stdin/1";
+pub const SUPERVISED_STOP_BYTE: u8 = 1;
+const STOP_POLL: Duration = Duration::from_millis(25);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownMode {
+    Standalone,
+    SupervisedStdin,
+}
+
+impl ShutdownMode {
+    pub fn from_option(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None => Ok(Self::Standalone),
+            Some(SHUTDOWN_STDIN_V1) => Ok(Self::SupervisedStdin),
+            Some(_) => Err(format!(
+                "InvalidDomain：{SHUTDOWN_CONTROL_FLAG} 只接受 {SHUTDOWN_STDIN_V1}"
+            )),
+        }
+    }
+}
+
 fn serve_unix_inner<T: QueuedJob + 'static>(
     socket: &Path,
     bounds: TransportBounds,
     validate: EnvelopeValidator,
+    shutdown: ShutdownMode,
     make_job: fn(Value, mpsc::SyncSender<Value>, Instant) -> T,
     mut handler: impl FnMut(&T) -> Value,
 ) -> Result<(), String> {
-    // 不擅自unlink既有socket：SIGKILL残留由监督器核路径/PID后清理。
+    // 只有 launcher 传来的私有管道允许有序关停。EOF（包括 launcher 崩溃）
+    // 不是关停请求；普通独立 serve 的启动与残留路径行为不变。
+    let supervised = shutdown == ShutdownMode::SupervisedStdin;
     let listener = UnixListener::bind(socket)
         .map_err(|e| format!("TransportUnavailable：socket绑定失败 {e}"))?;
+    if supervised {
+        listener.set_nonblocking(true).map_err(err)?;
+    }
+    let stopping = Arc::new(AtomicBool::new(false));
+    if supervised {
+        let stopping = stopping.clone();
+        std::thread::spawn(move || {
+            let mut byte = [0];
+            if std::io::Read::read_exact(&mut std::io::stdin().lock(), &mut byte).is_ok()
+                && byte == [SUPERVISED_STOP_BYTE]
+            {
+                stopping.store(true, Ordering::Release);
+            }
+        });
+    }
+
     let (tx, rx) = mpsc::sync_channel::<T>(bounds.queue);
     let count = Arc::new(AtomicUsize::new(0));
     let accept_bounds = bounds.clone();
-    std::thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let Ok(stream) = incoming else { break };
+    let stop_accepting = stopping.clone();
+    let acceptor = std::thread::spawn(move || -> std::io::Result<()> {
+        while !stop_accepting.load(Ordering::Acquire) {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if supervised && e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let mut fd = libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY：fd 在本线程持有，poll 只访问一个初始化的 pollfd。
+                    if unsafe { libc::poll(&mut fd, 1, STOP_POLL.as_millis() as i32) } < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() != std::io::ErrorKind::Interrupted {
+                            return Err(error);
+                        }
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            if supervised {
+                // BSD 的 accept 可能继承监听端的非阻塞标志；处理端仍使用原绝对期限。
+                stream.set_nonblocking(false)?;
+            }
             if count
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                     if n < accept_bounds.connections {
@@ -664,7 +768,6 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
                 })
                 .is_err()
             {
-                drop(stream);
                 continue;
             }
             let t = tx.clone();
@@ -672,10 +775,36 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
             let c = count.clone();
             std::thread::spawn(move || io_connection_inner(stream, t, b, c, validate, make_job));
         }
+        Ok(())
     });
-    for job in rx {
+    while !stopping.load(Ordering::Acquire) {
+        let next = if supervised {
+            match rx.recv_timeout(STOP_POLL) {
+                Ok(job) => Some(job),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => None,
+            }
+        } else {
+            rx.recv().ok()
+        };
+        let Some(job) = next else { break };
+        if stopping.load(Ordering::Acquire) {
+            break;
+        }
         let out = handler(&job);
         let _ = job.result().try_send(out);
+    }
+    drop(rx);
+    let outcome = acceptor
+        .join()
+        .map_err(|_| "TransportUnavailable：socket 接纳线程异常退出")?;
+    // 只交还本进程 FD；任意 manifest 路径没有名字空间排他合同（#1823）。
+    // 不触碰文件系统中的 socket 条目。普通 serve 保持原返回口径。
+    if supervised {
+        outcome.map_err(err)?;
+        if !stopping.load(Ordering::Acquire) {
+            return Err("TransportUnavailable：socket 未收到有序关停请求".into());
+        }
     }
     Ok(())
 }
