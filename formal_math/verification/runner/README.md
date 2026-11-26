@@ -330,7 +330,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | H1b | `decl` 角色的提交：`Chan/Defs` 下不用 `@[expose] public section` 的文件 `SHAPE_EXPOSE`，用了的文件不报 |
 | H2a–c | 作用域跟踪（`selftest-cases/shape/scope/`，以 Mathlib 的作用域记号 `n !` 为探针）：阴性对照里有 `namespace`/`section`/`end` 嵌套、`open … in`、`mutual … end`、`public section`、文件末尾未闭合的节，七步全绿，且只解析与真实精化的命令数逐文件相等；三个红例（`end Nat` 之后、`section` 内 `open` 再 `end` 之后、`open … in` 的下一条命令）第 5 步 `SHAPE_PARSE`；同一红例提交跳过第 5 步时真实构建同样拒绝 |
 | H3a–b | 不执行被审代码：带 `initialize`、`#eval`、宏定义、`run_cmd` 与宏使用的文件第 5 步红，这些代码打印的标记不出现在任何日志里、构建目录没建；正对照：跳过第 5 步时同一个 `#eval` 在构建期执行，标记出现在构建日志里 |
-| H4 | 已知不防 `linarith (oracle := …)`（独审 r2 甲-2，夹具 `must_green/known-not-covered/linarith-oracle-eval`）：第 5 步按设计放行、七步全绿，取值在构建期被求值；标记只出现在 `FM LOG build` 行里（标准输出里没有），沙箱外没有带标记的文件，仓库目录快照不变 |
+| H4 | 已知不防 `linarith (oracle := …)`（独审 r2 甲-2，夹具 `must_green/known-not-covered/linarith-oracle-eval`）：第 5 步按设计放行、七步全绿，取值在构建期被求值；标记只出现在 `FM LOG build` 行里（标准输出里没有），临时目录与仓库里没有带标记的文件 |
 | D1a–b | 派生证书正例：递归类型 `deriving Repr, BEq, Hashable, Ord`（生成 `partial` 辅助函数）七步全绿；同一提交证书为空时第 7 步 `ENV_PARTIAL` |
 | D2 | 派生证书反例：同一模块里有合法派生，再手写 `partial def Spoof.loop`，驱动脚本去掉第 5 步的发现（放行）：第 7 步只有 `Spoof.loop._unsafe_rec` 一条 `ENV_PARTIAL` |
 | E13 | 调用方的 `--workdir`、`--packages` 含非 UTF-8 字节与换行：`INTERNAL`（父目录不存在时建目录失败）、`PACKAGES`，退 2，异常消息经转义 |

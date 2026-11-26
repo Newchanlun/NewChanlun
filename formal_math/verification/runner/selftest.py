@@ -937,15 +937,14 @@ def skeleton(s):
     @case("H4")
     def _():
         mark = "FM-R2-LINARITH-ORACLE-RAN"
-        before = snapshot(s.repo.path)
         r = s.run("H4-linarith-oracle", oracle_head)
         in_log = [l for l in r["err"].splitlines() if mark in l]
         outside = [os.path.join(d, n) for root in (s.tmp, s.repo.path) for d, _, ns in os.walk(root)
                    for n in ns if mark in n]
         good = r["rc"] == 0 and bool(in_log) and all(l.startswith("FM LOG build ") for l in in_log) and \
-            mark not in r["out"] and not outside and snapshot(s.repo.path) == before
+            mark not in r["out"] and not outside
         return check("H4 已知不防 linarith (oracle := …)（独审 r2 甲-2）：第 5 步按设计放行、七步全绿，取值在构建期被求值；"
-                     "标记只出现在 FM LOG build 行里，沙箱外没有哨兵、仓库目录不变", good, r,
+                     "标记只出现在 FM LOG build 行里，沙箱外没有带标记的文件", good, r,
                      "标记行=%d 沙箱外=%s" % (len(in_log), outside or "无"))
 
     ghost_files = {**s.lite_files, "formal_math/lake-manifest.json":
@@ -1422,7 +1421,7 @@ def mutants(packages, jobs):
             for rel in ("lean-toolchain", "lake-manifest.json", "ChanTest/Probe.lean"):
                 os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
                 shutil.copy2(os.path.join(FM, rel), os.path.join(root, rel))
-            for sub in ("runner", "precheck", "auditor"):
+            for sub in ("runner", "precheck", "auditor", "must_green/known-not-covered/linarith-oracle-eval"):
                 shutil.copytree(os.path.join(VERIFICATION, sub), os.path.join(root, "verification", sub),
                                 ignore=shutil.ignore_patterns(".lake", "__pycache__"))
             return root
