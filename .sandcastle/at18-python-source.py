@@ -285,20 +285,29 @@ def arguments(signature, samples, variadic=False, *, following_positional=False,
 def default_arguments(signature, view, mode, omitted, outer_consumed=(frozenset(), frozenset()), distinct_defaults=()):
     args, kwargs, defaults = arguments(signature, view, mode, omitted=omitted, outer_consumed=outer_consumed)
     yield args, kwargs, defaults
-    positional = [p for p in signature.parameters.values() if p.kind in POSITIONAL]
+    params = signature.parameters
+    positional = [p for p in params.values() if p.kind in POSITIONAL]
     if omitted and type(mode) is tuple and any(p.kind is inspect.Parameter.VAR_POSITIONAL
-                                                for p in signature.parameters.values()):
+                                                for p in params.values()):
         source = mode[3]
-        replaced = set(named_source_positions((p for p in positional if p.name in omitted), view,
-                                             source.args, source.indices).values())
+        replaced = set(named_source_positions(
+            (p for p in params.values() if p.name in omitted and p.kind not in VARIADIC),
+            view, source.args, source.indices).values())
         retained = set(outer_consumed[0]) | {i for p, i in source.positions.items() if p not in omitted}
         # 保留原省略姿态；替换姿态只扣掉被默认值占据的具名源位置。
         if replaced - retained and len(retained | replaced) < len(source.args):
             yield arguments(signature, view, mode, omitted=omitted, outer_consumed=outer_consumed,
                             replaced_positions=replaced)
+    if not distinct_defaults:
+        return
     for i, p in enumerate(positional):
         if i >= len(args) and (i, id(p.default)) in distinct_defaults and (p.name in omitted or p.name not in view):
             yield arguments(signature, view, mode, omitted=omitted, outer_consumed=outer_consumed, explicit_prefix=i + 1)
+    occupied = {p.name for p in positional[:len(args)]} | outer_consumed[1] | kwargs.keys()
+    for p in params.values():
+        if (p.kind in KEYWORD and p.name not in occupied and (p.name, id(p.default)) in distinct_defaults and
+                (p.name in omitted or p.name not in view)):
+            yield args, kwargs | {p.name: p.default}, defaults | {p.name: p.default}
 
 
 def variadic_only(signature):
@@ -460,7 +469,12 @@ def argument_choice(bound, args, kwargs, defaults, default_refs):
 
 def copy_arguments(args, kwargs, defaults):
     return (tuple(v if i in defaults else sample(v) for i, v in enumerate(args)),
-            {k: sample(v) for k, v in kwargs.items()})
+            {k: v if is_keyword_default(defaults, k, v) else sample(v) for k, v in kwargs.items()})
+
+
+def is_keyword_default(defaults, name, value):
+    # 位置用索引，关键字用名字；只有生成器标记的同一生产对象能绕过样本复制。
+    return name in defaults and defaults[name] is value
 
 
 def ctor_receiver_count(hook_name, member):
@@ -520,6 +534,7 @@ def strip_variadics(signature):
 KW_DROP_SUFFIXES = ("() got an unexpected keyword argument ", "() got multiple values for keyword argument ",
                     "() got multiple values for argument ")
 KW_POSONLY = re.compile(r"[^\n]+\(\) got some positional-only arguments passed as keyword arguments: '([^',]+(?:, [^',]+)*)'")
+INSPECT_POSONLY = re.compile(r"got some positional-only arguments passed as keyword arguments: '([^']+)'")
 KW_NEED = re.compile(r"[^\n]+\(\) missing ([1-9][0-9]*) required (?:keyword-only|positional) (argument|arguments): (.+)")
 KW_NAME = r"'[^']+'"
 KW_LIST = re.compile(rf"{KW_NAME}(?: and {KW_NAME}|(?:, {KW_NAME})+, and {KW_NAME})?")
@@ -535,10 +550,14 @@ def parse_kw_type_error(exc, kwargs, required=None):
     while origin is not None and origin.tb_next is not None:
         origin = origin.tb_next
     if origin is not None and origin.tb_frame.f_code is SIGNATURE_BIND:
+        if match := INSPECT_POSONLY.fullmatch(msg):
+            # _bind 对槽名的逗号连接整体取 repr；连接结果不是一个关键字。
+            names = match[1].split(", ")
+            dropped = tuple(name for name in names if name in kwargs)
+            return ("drop", dropped) if dropped and all(name.isidentifier() for name in names) else None
         for name in kwargs:
             quoted = repr(name)
-            if msg in (f"got an unexpected keyword argument {quoted}", f"multiple values for argument {quoted}",
-                       f"got some positional-only arguments passed as keyword arguments: {quoted}"):
+            if msg in (f"got an unexpected keyword argument {quoted}", f"multiple values for argument {quoted}"):
                 return "drop", (name,)
         return None
     # CPython 3.14 可在键名之后附上建议；建议本身不参与匹配。
@@ -635,7 +654,8 @@ def constructor_arguments(layers, instance_sig, view, mode, instance_arguments, 
                     prefix, options, refs = arguments(
                         sig, view | overrides, omitted=skip, outer_consumed=consumed,
                         following_positional=bool(pos) or bool(keywords & claimed.keys()))
-                    refs.update({len(prefix) + j: value for j, value in identities.items()})
+                    refs.update({len(prefix) + slot if type(slot) is int else slot: value
+                                 for slot, value in identities.items() if type(slot) is int or slot not in options})
                     yield [*prefix, *pos], kw | options, refs
 
         yield from compose(0, (frozenset(), frozenset()))
@@ -664,7 +684,8 @@ def peel_chain(layers, args, kwargs, defaults, default_refs):
             elif kind is inspect.Parameter.VAR_KEYWORD:
                 next_kwargs, var_kw = value, True
             else:
-                layer_items.append((name, choice_value_key(value, default_refs, default=value is param.default)))
+                layer_items.append((name, choice_value_key(value, default_refs, default=value is param.default or
+                                                           is_keyword_default(defaults, name, value))))
         consumed_pos = len(cur_args) - len(next_args) if var_pos else len(cur_args)
         for j in range(consumed_pos):
             param = pos_params[j]
@@ -677,7 +698,7 @@ def peel_chain(layers, args, kwargs, defaults, default_refs):
             if (param is not None and
                     param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) and
                     param.default is not inspect.Parameter.empty and
-                    choice_value_key(v, default_refs, default=v is param.default) ==
+                    choice_value_key(v, default_refs, default=v is param.default or is_keyword_default(defaults, k, v)) ==
                     choice_value_key(param.default, default_refs, default=True)):
                 kw_default_matches.add(k)
         pos_offset += consumed_pos
@@ -696,7 +717,8 @@ def peel_chain(layers, args, kwargs, defaults, default_refs):
         return True, tuple(parts), (), (), pos_offset, trailing_default_pos, frozenset(kw_default_matches)
     res_args = tuple(choice_value_key(item, default_refs, default=pos_offset + i in defaults)
                      for i, item in enumerate(cur_args))
-    res_kwargs = tuple((k, choice_value_key(v, default_refs)) for k, v in cur_kwargs.items())
+    res_kwargs = tuple((k, choice_value_key(v, default_refs, default=is_keyword_default(defaults, k, v)))
+                       for k, v in cur_kwargs.items())
     return False, tuple(parts), res_args, res_kwargs, pos_offset, trailing_default_pos, frozenset(kw_default_matches)
 
 
@@ -705,8 +727,9 @@ def ctor_choice(primary_layers, secondary_layers, args, kwargs, defaults, defaul
     for i, value in enumerate(args):
         if i not in defaults:
             sample(value)
-    for value in kwargs.values():
-        sample(value)
+    for name, value in kwargs.items():
+        if not is_keyword_default(defaults, name, value):
+            sample(value)
     c1, p1, ra1, rk1, rp1, td1, dkw1 = peel_chain(primary_layers, args, kwargs, defaults, default_refs)
     if not secondary_layers:
         return c1, p1, ra1, rk1
@@ -781,14 +804,23 @@ class Binding:
             sig = next((form[0] for h, strip, guaranteed, after_hook in hooks
                         if (forms := self.ctor_target_signatures(h, strip, guaranteed, observed_names, after_hook))
                         and (form := forms[0]) is not None), None)
-            sides.append([p for p in sig.parameters.values() if p.kind in POSITIONAL] if sig is not None else [])
+            sides.append(list(sig.parameters.values()) if sig is not None else [])
         if len(sides) != 2:
             return frozenset()
-        # __new__ 和 __init__ 收到同一位置序列；按槽索引和默认对象身份比对。
-        return frozenset((i, id(p.default)) for i, (left, right) in enumerate(zip(*sides))
-                         if left.default is not right.default and
-                         all(p.default is not inspect.Parameter.empty for p in (left, right))
-                         for p in (left, right))
+
+        def distinct(left, right):
+            return (left.default is not right.default and
+                    all(p.default is not inspect.Parameter.empty for p in (left, right)))
+
+        # 双钩子收到同一位置序列。位置无法对齐时，同名槽须都能接受关键字。
+        positions = [[p for p in side if p.kind in POSITIONAL] for side in sides]
+        defaults = {(i, id(p.default)) for i, (left, right) in enumerate(zip(*positions))
+                    if distinct(left, right) for p in (left, right)}
+        aligned = {left.name for left, right in zip(*positions) if left.name == right.name}
+        left_kw, right_kw = ({p.name: p for p in side if p.kind in KEYWORD} for side in sides)
+        defaults.update((name, id(p.default)) for name in (left_kw.keys() & right_kw.keys()) - aligned
+                        if distinct(left_kw[name], right_kw[name]) for p in (left_kw[name], right_kw[name]))
+        return frozenset(defaults)
 
     def ctor_plan(self, public, observed_names):
         primary_targets, secondary_targets = self.ctor_chains
@@ -1049,7 +1081,8 @@ class Binding:
                     id(self.owner),
                     MISSING,
                     tuple(choice_value_key(v, default_refs, default=i in defaults) for i, v in enumerate(args)),
-                    tuple((k, choice_value_key(v, default_refs)) for k, v in kwargs.items()),
+                    tuple((k, choice_value_key(v, default_refs, default=is_keyword_default(defaults, k, v)))
+                          for k, v in kwargs.items()),
                 )
             # 成功仍按绑定后默认值归一；失败若含可恢复键，按原实参记录。
             # 显式传默认值可能与外层注入冲突，而同一键省略时可以成功。
@@ -1107,8 +1140,10 @@ class Binding:
                                 continue
                             if name in values:
                                 kwargs[name] = sample(values[name])
+                                defaults.pop(name, None)
                             elif param.default is inspect.Parameter.empty:
                                 kwargs[name] = None
+                                defaults.pop(name, None)
                     yield args, kwargs, defaults
 
             if type(variant) is not InstanceComposition:

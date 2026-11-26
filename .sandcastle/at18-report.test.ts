@@ -5307,6 +5307,155 @@ class Adapter(metaclass=${metaclass}):
   }
 });
 
+test("R46/#1319：绑定诊断保留槽名，默认替换保留源索引和对象身份", () => {
+  execFileSync("python3", ["-IB", "-c", String.raw`
+import inspect, runpy, sys
+source = runpy.run_path(sys.argv[1])
+parse = source['parse_kw_type_error']
+def price(甲=0, β=0, /, *, offset, currency): return offset
+def drop(bind, args, rejected, options, *names):
+    try:
+        bind(*args, **rejected)
+    except TypeError as exc:
+        assert parse(exc, options) == ('drop', names), (exc, options, names)
+    else:
+        raise AssertionError('expected a binding diagnostic')
+bind = inspect.signature(price).bind
+valid = {'offset': 17, 'currency': 'USD'}
+both = {'β': 3, '甲': 2, '甲, β': 9, **valid}
+drop(bind, (), both, both, '甲', 'β')
+single = {'β': 3, '甲': 2, **valid}
+drop(bind, (1,), single, single, 'β')
+drop(bind, (1, 2), {'甲, β': 9, **valid}, both, '甲, β')
+def duplicate(tag, **options): pass
+drop(inspect.signature(duplicate).bind, (1,), {'tag': 2}, {'tag': 2}, 'tag')
+
+token = []
+def target(*items, tag=token, **kw): pass
+sig = inspect.signature(target)
+arg = (99, 17, 99)
+shape = source['SourceShape'](arg, {'flag': True}, {'tag': 0}, {'tag': 0}, frozenset(), {})
+mode = ('shape', arg[1:], shape.kwargs, shape)
+choices = list(source['default_arguments'](sig, {'tag': 99}, mode, {'tag'}))
+assert choices == [(list(arg), {'flag': True}, {}), ([17, 99], {'flag': True}, {})], choices
+spent = list(source['default_arguments'](sig, {'tag': 99}, mode, {'tag'}, ({0}, frozenset())))
+assert spent == [([17, 99], {'flag': True}, {})], spent
+
+left, right = [99], [99]
+def new(*, marker=left, offset): pass
+def init(*, marker=right, offset): pass
+p, s = inspect.signature(new), inspect.signature(init)
+targets = (((new, 0, True, False),), ((init, 0, True, False),))
+binding = source['Binding']('probe', new, (new,), ctor_alternates=targets)
+distinct = binding.distinct_instance_defaults({'marker', 'offset'})
+omitted, explicit = list(source['default_arguments'](p, {'marker': [99], 'offset': 17},
+                                                    False, {'marker'}, distinct_defaults=distinct))
+args, kw, defaults = explicit
+assert omitted == ([], {'offset': 17}, {})
+assert kw['marker'] is left and defaults['marker'] is left
+assert source['copy_arguments'](args, kw, defaults)[1]['marker'] is left
+key = source['ctor_choice']((p,), (s,), args, kw, defaults, {})
+for other in (omitted, ([], {'marker': [99], 'offset': 17}, {})):
+    assert key != source['ctor_choice']((p,), (s,), *other, {})
+for rejected in (object(), lambda: None, {'wrapped': [object()]}):
+    try:
+        source['ctor_choice']((p,), (s,), args, kw | {'marker': rejected}, defaults, {})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('untrusted value borrowed a production default identity')
+`, join(sandbox, "at18-python-source.py")], { stdio: "pipe" });
+});
+
+test("R46/#1319：正式 CLI 核验多槽绑定、固定源索引与本地双钩子默认对象", {
+  timeout: 240_000,
+}, async t => {
+  const check = (name: string, production: string, route: string, observed: string,
+                 rejects = false) => t.test(name, async () => {
+    const { f, report } = await control({
+      feedIntegration: "from . import at18_fixture_feed as f\n" + production + "\n__all__ = ('Adapter',)\n",
+      feedReplacement: route + "\n__all__ = ('route',)\n",
+      feedTest: "from trading_system.at18_fixture_feed import route\n" +
+        `def test_route(): assert route(${observed}) == 116\n`,
+    }, "R46/" + name);
+    assert.equal(report.head, f.F);
+    assert.equal(report.overall_result, rejects ? "FAIL" : "PASS");
+    assert.equal(report.failed_checks.length, rejects ? 1 : 0, JSON.stringify(report.failed_checks));
+    const ticket = report.legacy_dispositions.find(r => r.ticket === 1319);
+    assert.deepEqual([ticket?.ticket_state, ticket?.disposition_valid], ["CLOSED", !rejects]);
+  });
+
+  const price = "def route(quote, /, **kw): return quote + kw['offset']";
+  await check("只删 inspect 的实际仅位置槽，后续再按单键诊断处理字面拼接键", `
+import inspect
+def _price(甲=0, β=0, /, *, offset, currency): return offset
+class Adapter:
+    def dispatch(self, quote, /, **options):
+        assert options['currency'] == 'USD'
+        inspect.signature(_price).bind(**options)
+        return f.route(quote, offset=options['offset'], currency=options['currency'])
+`, price, "99, offset=17, currency='USD', **{'β': 3, '甲': 2, '甲, β': 9}");
+
+  const indexed = "def route(tag, /, *items, **kw): return tag + items[0]";
+  for (const ctor of [false, true]) {
+    const hook = ctor ? "__init__" : "dispatch";
+    const forward = ctor ? "    def dispatch(self): return f.route(99, 17, 99, flag=True)" :
+      "        return f.route(99, 17, 99, flag=True)";
+    await check(hook + " 的仅关键字默认槽仅扣除固定源位置，保留等值匿名尾参", `
+token = object()
+class Adapter:
+    def ${hook}(self, *items, tag=token, **kw):
+        assert tag is token and items == (17, 99) and kw == {'flag': True}
+${forward}
+`, indexed, "99, 17, 99, flag=True");
+  }
+  await check("仅匿名尾参不能填入不同名的固定槽", `
+class Adapter:
+    def dispatch(self, fixed, /):
+        assert fixed == 77
+        return f.route(39, 77)
+`, "def route(*items): return sum(items)", "39, 77", true);
+
+  const markerRoute = "def route(marker, /, *, offset): return marker + offset";
+  const observedMarker = "99, offset=17";
+  const dual = (newSlot: string, initSlot: string, expected: string) => `
+left, right = [99], [99]
+class Adapter:
+    def __new__(cls, ${newSlot}):
+        assert marker is left and offset == 17
+        return super().__new__(cls)
+    def __init__(self, ${initSlot}):
+        assert marker is ${expected} and offset == 17
+    def dispatch(self): return f.route(99, offset=17)
+`;
+  const newKw = "*, marker=left, offset", initKw = "*, marker=right, offset";
+  await check("本地仅关键字双钩子显式共享同一个默认对象", dual(newKw, initKw, "left"),
+    markerRoute, observedMarker);
+  await check("本地仅关键字双钩子省略时各自使用原默认对象", dual(newKw, initKw, "right"),
+    markerRoute, observedMarker);
+  await check("仅一侧限定关键字也可显式共享默认对象",
+    dual("marker=left, *, offset", initKw, "left"), markerRoute, observedMarker);
+  await check("位置不对齐时，同名默认槽按关键字共享",
+    dual("marker=left, *, offset", "pad=None, marker=right, *, offset", "left"), markerRoute, observedMarker);
+  await check("本地元类转发时保留双钩子显式关键字默认对象",
+    "class Relay(type):\n    def __call__(cls, *args, **kw): return super().__call__(*args, **kw)\n" +
+      dual(newKw, initKw, "left").replace("class Adapter:", "class Adapter(metaclass=Relay):"),
+    markerRoute, observedMarker);
+  await check("双钩子仍可按原位置显式传同一默认对象",
+    dual("marker=left, /, *, offset", "marker=right, /, *, offset", "left"), markerRoute, observedMarker);
+  for (const hook of ["__init__", "__new__"] as const) {
+    const location = hook === "__new__" ? /    def __new__[\s\S]*?(?=    def __init__)/ :
+      /    def __init__[\s\S]*?(?=    def dispatch)/;
+    const foreign = hook === "__new__" ?
+      "def hook(cls, *, marker=right, offset):\n    assert marker is not right and offset == 17\n    return object.__new__(cls)\n" :
+      "def hook(self, *, marker=right, offset):\n    from . import left\n    assert marker is left and offset == 17\n";
+    await check("不能为外来 " + hook + " 合成显式默认对象",
+      "from .at18_fixture_feed import hook\n" + dual(newKw, initKw, "right")
+        .replace(location, `    ${hook} = ${hook === "__new__" ? "staticmethod(hook)" : "hook"}\n`),
+      markerRoute + "\nright = [99]\n" + foreign, observedMarker, true);
+  }
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
