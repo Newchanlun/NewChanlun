@@ -92,7 +92,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | `EXTRA_ARTIFACT` | 不在上表里：名字带多余的点（`Chan/Thm.Ok.olean` 是另一个模块 `Chan.«Thm.Ok»`）、隐藏名、没有源码的模块、名字合法但类型不对（名为 `X.olean` 的目录）、`.lake` 或 `build` 下多出的东西、依赖挂载点下有东西。表外的目录不再往下走 |
 | `NO_ARTIFACT` | 某个内容模块的 `build/lib/lean/A/B/C.olean` 不存在或没有通过上面的检查 |
 
-真实仓库（3 个内容模块）一次完整构建后 `.lake` 共 73 个目录项，全部在表内，见交接汇报里的分类计数。
+真实仓库（3 个内容模块）一次完整构建后 `.lake` 共 64 个目录项，全部在表内：目录 12 个（`build`；`build/lib`、`build/lib/lean`、`lib/lean/Chan`、`lib/lean/ChanTest`；`build/ir`、`ir/Chan`、`ir/ChanTest`；`config`、`config/1`、`config/5`；`packages`），`build/lib/lean` 下文件 39 个（13 个后缀各 3 个），`build/ir` 下文件 9 个（3 个后缀各 3 个），`config` 下文件 4 个；没有符号链接、管道或套接字。
 
 ## 输出与退出码
 
