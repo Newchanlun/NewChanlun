@@ -58,13 +58,13 @@
 | `src/newchan/` | 现役（Python 引擎） | 活 | analysis 72 脚本消费 |
 | `rust/src/trading/` | **收敛候选区**（31 文件/34,431 行） | 现役（GUARD-ROLE 两次核查） | 五 pymodule 导出、96 个 .py 调用文件；ADR 0017/qujiantao 伪引文落点 |
 | `rust/src/spiral/` + `fugue_v3/` | **收敛候选区** | 现役（#762 改判） | ADR 0016 双互斥 λ 宿主（`LAMBDA` 2.0 vs 3.0） |
-| `rust/src/recursive_t/` | **收敛候选区**（待杀） | 现役（#762 二次订正） | 退场 = 执刀票 #951（#808 条款） |
+| `rust/src/recursive_t/` | 冻结影子（ADR 0048 一·A） | 保留研究，不给生产写权 | #1096 承接退场条件；#1385 OE11 不授权删除 |
 | `rust/src/bin/`（53 文件） | 装备区 | 活 | π 引擎全部消费面（`bi.md:342`）；探针宿主 |
 | `rust/tests/` + `tests/` | **验收载体区** | 活（CI cargo test） | 对拍锁宿主（#804：载体只能是测试锁）；formal↔rust E7 边落点 |
 | `formal/` | 验收载体区（Lean 对拍） | 活（fixture-drift job） | 154 文件/144 .lean |
 | `analysis/` | 研究消费区 | 活 | #844 订正：698 条 ≈ 一半文档；E4 sys.path 注入覆盖 |
 | `scripts/` | 研究装备区 | 活 | `check_fixture_drift.py` = CI fixture-drift 执行者；与 `analysis/` 是两个独立节点 |
-| `trading_system/` | 研究消费区（离下单最近） | 活 | `rec_t_strategy.py` 生产策略在此 |
+| `trading_system/` | 研究及其他交易系统消费区 | 按各入口区分 | #951 后继任 NT 回测使用 OE08 `ThetaStream`；原 `rec_t_strategy.py` 不再是策略入口 |
 
 **出界声明（R3：一行一条，不许无声缺席）**：
 - `topological-computation/` —— 已删除：#1945 整体移出仓库，原样归档于 `/Volumes/AgentStorage/repo-archive/f43fac8f46-batch2/`；git 历史里 #1945 合入前的 main（如 `2267aa75`）也能取回。它原是独立研究系统（signifier_net），承载语料第二副本（109 份，行号体系与正本不同），副本随之出仓——**语料正本 = `docs/chanlun/text/blog/`**（AGENTS.md 已钉）。
@@ -75,6 +75,13 @@
 - `tradingview-mcp-plugin/` 等 —— TV 集成侧（K4 支柱）。
 - 根级散件 `tws_margin_check.py`/`vcp_screener_v2.py` —— IBKR/VCP 边角（K4/执行支柱）。
 - `tmp/`、`.scratch/` 等 —— 工作垃圾，图上不列。
+
+**#1385 OE11 / #1096：**旧列四处中，`rec_t_strategy.py` 与 `rec_backtest.py` 是同一条已换源的 NT 链；
+`capture_ratio_matrix.py` 和 `t3_exit_trigger_diag.py` 是保留的 `RecTStream` 研究调用，
+不消费逐 bar 的裸目标做交易决定。另一路 flat `TFugueStream` 由
+[`backtest_t_fugue.py`](../trading_system/backtest_t_fugue.py) 写 `t_fugue_*.json`；
+新报告带出处，旧报告仍按原结构阅读、出处未知。两类输出不能互认，也不进入正式 E/B；
+见 [#1385 接收侧收据](https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-6988784670)。
 
 ## 五、装备插件层（Q2 分层裁定）
 
@@ -92,12 +99,12 @@
 |---|---|---|
 | SPEC #847（结构层实施总单） | 判定 7/10/12/16 + 量层 | 落点参考本图第四节；S 编号不变 |
 | SPEC #756（端到端模块化） | 深模块 C1–C6 | C1（BSP 绑定单源化）= 对位判定的落点收敛；与收敛候选区（trading/spiral/fugue_v3）交叉 |
-| #951（执刀票，图外） | recursive_t 退场 | 落点层收敛候选区的第一个执行件 |
+| #951 / #1096 | 旧 NT 装配换源 / `recursive_t` 冻结与退场 | #951 已换源；退场条件按 ADR 0048 一·A 由 #1096 承接 |
 | ADR 0022（验收参数） | 判定层外（验收尺子） | 本图句 2 的执行细则 |
 
 ## 八、画图定死的三个小口（#960 Q5 随附）
 
-1. **单列读**：trading/spiral/fugue_v3/recursive_t 四族各自单列（#762 已判现役、各有独立 pymodule 面；折叠读会让 34K 行的 trading 族继续隐形）。
+1. **单列读**：trading/spiral/fugue_v3/recursive_t 四族各自单列（各有独立 pymodule 面；折叠读会让 34K 行的 trading 族继续隐形）。
 2. **`analysis/` 与 `scripts/` = 两个独立节点**（E4 只覆盖 analysis）。
 3. **出界声明 = 一行一条 + 理由**（第四节末）。
 
