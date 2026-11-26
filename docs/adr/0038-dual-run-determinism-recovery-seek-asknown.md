@@ -237,9 +237,9 @@
 
      在上述前置齐备时真杀 X，独立核 S 侧请求与记录。C 发送一次 `RequestConditionalExecution`，核实际 `ExecuteCommitted` 后推进。每条恢复臂发送该申请 **0** 次，必须实际收到 S 的 `NoRecord`；原批仍 `pending`，原 `ExecutionRequested` 和责任不变，无 S 资格收据、X 新占有或撮合原件。R₁、R₂ 在同一等待切面核六面等价，报告保留 C 已推进、R 仍等待的差异。要继续推进原批，仍须交付此状态的可证续接：`NoRecord` 不授权重发，本地撮合事务幂等也不覆盖这条 X→S 边。安全留停不记作已恢复推进。
 
-   - **S 资格查回晚于原批的负控（simulation）。** S₁ 在 10 提交后、X 收到回包前真杀；S₂ 的查询绑定在 20 生效。
+   - **S 资格查回晚于原批的负控（simulation）。** S₁ 在 15 提交后、X 收到回包前真杀；S₂ 的查询绑定在 20 生效。
      - **在线：** 原批 15 仍为 `pending`，已提交 `last_bar=14`。X 从 S₂ 查回有效原回执时，必须从已提交前沿实读 `last_bar + 1 = 15`，不以夹具填入 20，也不换批推进时钟。读数低于绑定生效下限，X 须拒绝占有，不进入 `MayHaveCalled`、不调用或生成撮合原件，保留原批与责任。C 在 15 真实获知 S₁ 回执并按原批推进；R₁、R₂ 在同一等待切面核等，专项如实记录差异，不计作 H2 已推进。
-     - **离线重验：** 另构声称已取得调用权的记录，原提交为 10、绑定生效为 20、`first_known_ns=20`、`claimed_ns=15`。虽满足首次获知的下限，调用占有早于首次获知，必须拒绝；该记录不作为在线读数证据。
+     - **离线重验：** 另构声称已取得调用权的记录，原提交为 15、绑定生效为 20、`first_known_ns=20`、`claimed_ns=15`。虽满足首次获知的下限，调用占有早于首次获知，必须拒绝；该记录不作为在线读数证据。
 
    - **`Prepared` 已持久提交、E 尚未 `Reserve`（simulation）。** 预登记单申请 slot；真杀 B₁ 前在三臂核同一 `PreparedReceipt` 和本地私有锁，且 E 尚无该 slot 的 grant。其他授信条件固定为可通过。C 以仍有效的原 `applicant_epoch` 获得原申请的 grant，独立核 E 责任增加该 grant 全额。R₁、R₂ 原址恢复 B 至 B₂，保留原 `Prepared` 与私有锁，以 B₂ 的实际证明核 `current_epoch` 已不同于原 `applicant_epoch`；E 实际尝试 `Reserve`，必须以旧申请代拒绝，无新增 grant、`ReserveReceipt` 或该申请的 E 增责，既存责任不变。B 不可用、未到达授信判断或改写原 `applicant_epoch` 均不算通过。R₁ 与 R₂ 在相同切面核六面等价；对 C 单列 grant 与责任差异，不为凑齐六面重建原申请或授信。
 
