@@ -1,0 +1,23 @@
+| 规则 | 期望红变体 | 实测红 | 期望绿对照 | 实测零命中 |
+|---|---|---|---|---|
+| 禁用清单：`sorry`／`admit` 各语法位置 | 90 | **90** | 0 | 0 |
+| 禁用清单：`sorryAx` 标识符 | 7 | **7** | 0 | 0 |
+| 禁用清单：`native_decide` 与 `decide` 的 native 配置 | 19 | **19** | 1 | 1 |
+| 禁用清单：旧式 `(config := …)` | 43 | **39** | 0 | 0 |
+| 禁用清单：求值入口与求值命令 | 48 | **47** | 1 | 1 |
+| 命令白名单 | 64 | **64** | 1 | 1 |
+| 声明白名单 | 17 | **17** | 0 | 0 |
+| 修饰符白名单（含 `meta section`） | 47 | **47** | 2 | 2 |
+| 属性白名单 | 52 | **52** | 3 | 3 |
+| 派生目标类白名单 | 16 | **16** | 1 | 1 |
+| `#guard_msgs` 限制与 `#print axioms` | 30 | **30** | 1 | 1 |
+| `set_option` 各语法位置与选项名单 | 64 | **64** | 1 | 1 |
+| `Chan/Defs` 的 `@[expose] public section` | 7 | **7** | 5 | 5 |
+| 未点名写法探针（期望绿，记录实际行为） | 0 | — | 17 | 17 |
+
+期望红但实测零命中（漏）: 5
+    c-probe Chan/Thm/PlausibleConfig.lean
+    c-probe Chan/Thm/PlausibleConfig2.lean
+    c-probe Chan/Thm/AesopConfig.lean
+    c-probe Chan/Thm/AesopSimpConfig.lean
+    a-forbidden Chan/Thm/EvalPctNoImport.lean
