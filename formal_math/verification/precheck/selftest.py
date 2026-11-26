@@ -5,10 +5,12 @@
       selftest.py --mutants  先断言未改弱的副本全过，再断言 MUTANTS 里每种弱化各自被至少一例抓住
 输出一律按 UTF-8 字节写文件描述符，不经 print。
 """
+import functools
 import hashlib
 import importlib.util
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -51,6 +53,9 @@ class Repo:
     def entry(self, value):
         """(原始模式, 类型, 对象)。dict 是子树；list 是按给定顺序原样写的子树（可重复、乱序、名字含 /）；
         (模式, 内容) 按给定的原始模式写，内容是 dict/list 时为子树，模式 160000 时内容是提交对象名。"""
+        if isinstance(value, Body):
+            return b"40000", b"tree", git(self.path, "hash-object", "-t", "tree", "-w", "--literally", "--stdin",
+                                          data=bytes(value)).strip()
         if isinstance(value, tuple):
             mode, inner = value
             if mode == b"160000":
@@ -77,12 +82,23 @@ class Repo:
                 for part in parts[:-1]:
                     node = node.setdefault(part, {})
                 node[parts[-1]] = value
-        tree = self.raw([(n, spec[n] if v is KEEP else v) for n, v in root]) if root else self.entry(spec)[2]
+        tree = self.raw([(n, keep(v, spec.get(n))) for n, v in root]) if root else self.entry(spec)[2]
         args = ["commit-tree", tree.decode(), "-m", "c"] + (["-p", parent] if parent else [])
         return git(self.path, *args).strip().decode()
 
 
 KEEP = object()
+
+
+class Body(bytes):
+    """树对象的原始字节，原样写入，用来造截断、空名、错位模式等无法逐条构造的树。"""
+
+
+def keep(value, original):
+    """KEEP 取原值；(模式, KEEP) 取原值并换成给定的原始模式。"""
+    if value is KEEP:
+        return original
+    return (value[0], original) if isinstance(value, tuple) and value[1] is KEEP else value
 
 
 def gitkey(name, value):
@@ -123,7 +139,7 @@ def as_raw(prefix, override):
             for part in parts[:-1]:
                 node = node.setdefault(part, {})
             node[parts[-1]] = v
-    sub.update(override)
+    sub.update({n: keep(v, sub.get(n)) for n, v in override.items()})
     items = sorted(((n, v) for n, v in sub.items() if v is not None), key=lambda e: gitkey(*e))
     return {**{k: None for k in BASE if k.startswith(prefix + b"/")}, prefix: items}
 
@@ -143,6 +159,13 @@ def root_raw(insert, before=True):
 
 # 一个 blob，内容恰好是合法的树对象字节（含一条指向 MOD 的 A.lean），用来区分「按类型读」与「按内容猜」。
 TREE_LIKE_BLOB = b"100644 A.lean\0" + hashlib.sha1(b"blob %d\0" % len(MOD) + MOD).digest()
+def root_edit(name, value):
+    """根树原样写，只把 name 那一条换成 value。"""
+    return {b"": [(n, value if n == name else KEEP) for n, v in root_raw(None) if v is KEEP]}
+
+
+NO_FM_ENV = {b"scripts/fm_env.sh": None, b"scripts/other.sh": b"o\n"}
+WF_040755 = as_raw(b".github", {b"workflows": (b"040755", KEEP)})
 NO_FM = {k: None for k in BASE if k.startswith(F)}
 SUB_DUP = [(b"B.lean", MOD), (b"Sub", None), (b"Sub.lean", MOD), (b"Sub", {b"E.lean": MOD})]
 
@@ -243,7 +266,8 @@ CASES = [
     ("工作流文件改成可执行", {b".github/workflows/formal-math.yml": (b"100755", b"w\n")}, "infra/x", True, 1, {"MODE"}),
     ("工作流文件改成符号链接", {b".github/workflows/formal-math.yml": LINK}, "infra/x", True, 1, {"MODE"}),
     ("工作流文件改成目录", {b".github/workflows/formal-math.yml": {b"x": X}}, "infra/x", True, 1, {"MODE"}),
-    ("受信文件的祖先目录改成符号链接", {b"scripts/fm_env.sh": None, b"scripts": LINK}, "infra/x", True, 1, {"MODE"}),
+    ("受信文件的祖先目录改成符号链接", {b"scripts/fm_env.sh": None, b"scripts": LINK}, "infra/x", True, 1,
+     {"MODE", "PATH_SCOPE"}),
     # 第 2 条：清单规范性（逐层读原始树对象）
     ("树条目重复", {F + b"Chan/Thm/B.lean": None, F + b"Chan/Thm": [(b"B.lean", X), (b"B.lean", MOD)]},
      "proof/x", False, 1, {"TREE_FORM"}),
@@ -318,6 +342,45 @@ CASES = [
     ("清理 .gitignore：infra 有放行新增", {F + b".gitignore": X}, "infra/x", True, 1, {"PATH_GRAMMAR"}),
     ("清理 .gitignore：decl 新增", {F + b".gitignore": X}, "decl/x", False, 1,
      {"PATH_SCOPE", "PATH_GRAMMAR", "TRUSTED_DRIFT"}),
+    # 审阅 R2：受信文件的祖先目录是清单正式条目，比模式与类型，不比对象名；形状检查无条件执行
+    ("R2 只改 ci.yml proof", {b".github/workflows/ci.yml": X}, "proof/x", False, 0, set()),
+    ("R2 只改 ci.yml infra 无放行", {b".github/workflows/ci.yml": X}, "infra/x", False, 0, set()),
+    ("R2-B1a scripts 目录模式改成 040000 main", root_edit(b"scripts", (b"040000", KEEP)), "main", False, 1,
+     {"MODE", "BRANCH_ROLE"}),
+    ("R2-B1a scripts 目录模式改成 40755 proof", root_edit(b"scripts", (b"40755", KEEP)), "proof/x", False, 1,
+     {"MODE", "PATH_SCOPE"}),
+    ("R2-B1a .github/workflows 目录模式改成 040755 proof", WF_040755, "proof/x", False, 1, {"MODE", "PATH_SCOPE"}),
+    ("R2-B1a .github/workflows 目录模式改成 040755 infra 放行", WF_040755, "infra/x", True, 1, {"MODE"}),
+    ("R2 基线里的祖先目录已不规范且未改", WF_040755, "main", False, 1, {"MODE"}, WF_040755),
+    ("R2-B1b 受信文件不存在时 scripts 换成符号链接 main", {**NO_FM_ENV, b"scripts/other.sh": None, b"scripts": LINK},
+     "main", False, 1, {"MODE", "BRANCH_ROLE"}, NO_FM_ENV),
+    ("R2-B1b 受信文件不存在时 scripts 换成符号链接 proof", {**NO_FM_ENV, b"scripts/other.sh": None, b"scripts": LINK},
+     "proof/x", False, 1, {"MODE", "PATH_SCOPE"}, NO_FM_ENV),
+    ("R2-B1b 受信文件不存在时 scripts 换成普通文件", {**NO_FM_ENV, b"scripts/other.sh": None, b"scripts": X},
+     "proof/x", False, 1, {"MODE", "PATH_SCOPE"}, NO_FM_ENV),
+    ("R2-B1b 受信文件不存在时 scripts 换成子模块", {**NO_FM_ENV, b"scripts/other.sh": None, b"scripts": GITLINK},
+     "proof/x", False, 1, {"MODE", "PATH_SCOPE"}, NO_FM_ENV),
+    ("R2 受信文件存在时 scripts 换成符号链接 proof", {b"scripts/fm_env.sh": None, b"scripts": LINK}, "proof/x", False,
+     1, {"MODE", "PATH_SCOPE", "TRUSTED_DRIFT"}),
+    ("R2 受信文件存在时 .github 换成普通文件 main", {b".github/workflows/formal-math.yml": None,
+                                                b".github/workflows/ci.yml": None, b".github": X}, "main", False, 1,
+     {"MODE", "BRANCH_ROLE", "TRUSTED_DRIFT"}),
+    ("R2-M10 门禁目录节点自身模式改成 040000 infra 无放行", as_raw(F[:-1], {b"verification": (b"040000", KEEP)}),
+     "infra/x", False, 1, {"MODE", "TRUST_UNAPPROVED"}),
+    ("R2-M2 树对象里对象名截断", {F + b"Chan/Thm/B.lean": None, F + b"Chan/Thm": Body(b"100644 B.lean\0" + b"\x11" * 19)},
+     "proof/x", False, 1, {"TREE_FORM", "EMPTY_TREE"}),
+    ("树对象里条目名为空", {F + b"Chan/Thm/B.lean": None, F + b"Chan/Thm": Body(b"100644 \0" + b"\x11" * 20)},
+     "proof/x", False, 1, {"TREE_FORM", "EMPTY_TREE"}),
+    ("树对象里模式七位", {F + b"Chan/Thm/B.lean": None, F + b"Chan/Thm": Body(b"1006440 B.lean\0" + b"\x11" * 20)},
+     "proof/x", False, 1, {"TREE_FORM", "EMPTY_TREE"}),
+    ("树对象里模式非八进制", {F + b"Chan/Thm/B.lean": None, F + b"Chan/Thm": Body(b"100684 B.lean\0" + b"\x11" * 20)},
+     "proof/x", False, 1, {"TREE_FORM", "EMPTY_TREE"}),
+    ("文件条目指向树对象（内容根）", as_raw(F + b"Chan/Thm", {b"X.lean": (b"100644", {b"a.lean": MOD})}), "proof/x",
+     False, 1, {"TREE_FORM"}),
+    ("文件条目指向树对象（sources）", as_raw(F + b"sources", {b"evil.md": (b"100644", {b"a": X})}), "decl/x", False, 1,
+     {"TREE_FORM"}),
+    ("Lake 配置名：例外路径是目录", {F + b"verification/auditor/lakefile.toml/x": X}, "infra/x", True, 1,
+     {"LAKE_FILE"}),
     # 规则 7：内容角色下受信面逐个比对
 ] + [("内容角色改受信文件 %s" % p.decode(), {p: X}, "proof/x", False, 1, {"PATH_SCOPE", "TRUSTED_DRIFT"})
      for p in TRUSTED_LIST] + [
@@ -377,6 +440,19 @@ def build(tmp):
     os.makedirs(os.path.join(repo.path, b(FM + "Chan/Thm")))
     with open(os.path.join(repo.path, b(FM + "Chan/Thm/link.lean")), "wb") as f:
         f.write(b"module\n")
+    # 缺失对象：整仓复制一份（测试仓库的对象都是松散对象），删掉绿例被审提交的根树对象。
+    green = heads["proof 改 Thm"]
+    repo.corrupt = os.path.join(os.path.dirname(repo.path), b"corrupt")
+    shutil.copytree(repo.path, repo.corrupt)
+    tree = git(repo.corrupt, "rev-parse", green + "^{tree}").strip().decode()
+    os.remove(os.path.join(repo.corrupt, b".git/objects", tree[:2].encode(), tree[2:].encode()))
+    # 输出被篡改的 git：cat-file --batch 的输出后面多出一个字节（真实 git 不会这样，用来锁住输出核对）。
+    repo.wrapped = os.path.join(os.fsdecode(os.path.dirname(repo.path)), "wrapped-git")
+    os.makedirs(repo.wrapped)
+    with open(os.path.join(repo.wrapped, "git"), "w", encoding="utf-8") as f:
+        f.write('#!/bin/sh\nfor a in "$@"; do [ "$a" = --batch ] && { %s "$@"; s=$?; printf x; exit $s; }; done\n'
+                'exec %s "$@"\n' % ((shlex.quote(shutil.which("git")),) * 2))
+    os.chmod(os.path.join(repo.wrapped, "git"), 0o755)
     return repo, base, heads, parents
 
 
@@ -404,11 +480,9 @@ def special(script, repo, base, heads):
     expect("基线解析不出", run(script, [r, "nope", green, "proof/x"]), 2, {"BAD_REV"})
     expect("基线是树对象", run(script, [r, base + "^{tree}", green, "proof/x"]), 2, {"BAD_REV"})
     expect("被审带范围语法", run(script, [r, base, base + ".." + green, "proof/x"]), 2, {"BAD_REV"})
-    corrupt = os.path.join(os.fsencode(os.path.dirname(os.fsdecode(r))), b"corrupt")
-    shutil.copytree(r, corrupt)  # 测试仓库的对象都是松散对象，删一个文件即可造出缺失
-    tree = git(corrupt, "rev-parse", green + "^{tree}").strip().decode()
-    os.remove(os.path.join(corrupt, b".git/objects", tree[:2].encode(), tree[2:].encode()))
-    expect("被审提交的根树对象缺失", run(script, [corrupt, base, green, "proof/x"]), 2, {"GIT"})
+    expect("被审提交的根树对象缺失", run(script, [repo.corrupt, base, green, "proof/x"]), 2, {"GIT"})
+    wrapped_env = {**RUN_ENV, "PATH": repo.wrapped + os.pathsep + RUN_ENV["PATH"]}
+    expect("R2-M4 cat-file 输出尾随多余字节", run(script, [r, base, green, "proof/x"], env=wrapped_env), 2, {"GIT"})
     expect("仓库不存在", run(script, [r + b"/nope", base, green, "proof/x"]), 2, {"GIT"})
     rd, wr = os.pipe()
     os.close(rd)
@@ -437,10 +511,7 @@ def special(script, repo, base, heads):
 
 def tables(script):
     """规则 5 的结构断言：内容角色的表不碰受信面，infra 的表只有受信面加说明文档。"""
-    sys.dont_write_bytecode = True  # 不在源码目录留下 __pycache__
-    spec = importlib.util.spec_from_file_location("precheck_under_test", script)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
+    m = load(script)
     ok = True
     for role, rules in m.ROLES.items():
         for rule in rules:
@@ -452,14 +523,30 @@ def tables(script):
     return [("角色表互斥", bool(ok), None)]
 
 
-def suite(script, tmp, verbose):
-    repo, base, heads, parents = build(tmp)
+@functools.lru_cache(maxsize=None)
+def load(script):
+    sys.dont_write_bytecode = True  # 不在源码目录留下 __pycache__
+    spec = importlib.util.spec_from_file_location("precheck_under_test", script)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def expected_role(branch):
+    """绿行里的角色按未改弱的 precheck.py 的分支文法算，不另写近似正则。"""
+    m = load(PRECHECK).BRANCH.fullmatch(b(branch))
+    return m.group(1) if m else b"-"
+
+
+def suite(script, tmp, verbose, fixture=None):
+    """fixture 是 build() 的结果；夹具仓库对预检只读，--mutants 各轮复用同一份。"""
+    repo, base, heads, parents = fixture or build(tmp)
     results = []
     for name, _, branch, approved, rc, want, *_ in CASES:
         argv = [repo.path, parents[name], heads[name], b(branch)]
         got = run(script, (["--trusted-change-approved"] if approved else []) + argv)
-        green_line = got[0] != 0 or got[1] == b"PRECHECK GREEN OK %s role=%s\n" % (
-            heads[name].encode(), (branch.split("/")[0] if re.fullmatch(r"(decl|proof|audit|infra)/\S+", branch) else "-").encode())
+        green_line = got[0] != 0 or got[1] == b"PRECHECK GREEN OK %s role=%s\n" % (heads[name].encode(),
+                                                                                     expected_role(branch))
         results.append((name, got[0] == rc and codes(got[1], got[2]) == want and bool(green_line), got))
     results += special(script, repo, base, heads) + tables(script)
     failed = [r for r in results if not r[1]]
@@ -492,11 +579,25 @@ MUTANTS = [
     ("祖先检查恒真（审阅 M3）", 'if git(repo, b"merge-base", b"--is-ancestor", base, head, ok=(0, 1))[0]:', "if False:"),
     ("分支名文法放宽（审阅 M4）", 'WORD = rb"[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*"', 'WORD = rb"[A-Za-z0-9._-]+"'),
     ("目录条目不核对对象类型", "if kind != TREE:\n                red(", "if False:\n                red("),
+    ("去掉对象名截断检查（审阅 R2-M2）", "if not m or m.end() + hash_len > len(body):", "if not m:"),
+    ("去掉 cat-file 输出多余字节检查（审阅 R2-M4）", "if pos != len(data):", "if False:"),
+    ("TRUST_UNAPPROVED 漏掉门禁目录节点自身（审阅 R2-M10）", "any(p == GATE_DIR or within(p, TRUSTED_SURFACE)",
+     "any(within(p, TRUSTED_SURFACE)"),
+    ("祖先目录不进改动集合（审阅 R2-B1）", "entry[:1] if path in ANCESTORS else entry",
+     "None if path in ANCESTORS else entry"),
+    ("形状检查只在清单有变化时做（审阅 R2-B1）",
+     "    shape(new, red)\n    file_objects(repo, new, red)\n    base_form = []\n"
+     "    old = inventory(repo, base, lambda *r: base_form.append(r))\n",
+     "    file_objects(repo, new, red)\n    base_form = []\n"
+     "    old = inventory(repo, base, lambda *r: base_form.append(r))\n    shape(new, red) if old != new else None\n"),
+    ("去掉文件条目的 blob 类型核对", "if kinds[oid][0] != BLOB:", "if False:"),
+    ("Lake 配置名例外不分文件与目录", "(kind != BLOB or path not in LAKE_ALLOWED)", "(path not in LAKE_ALLOWED)"),
 ]
 
 
 def mutants(tmp):
     source = open(PRECHECK, encoding="utf-8").read()
+    fixture = build(os.path.join(tmp, "fixture"))
     ok = True
     for i, (name, old, new) in enumerate([("未改弱的副本", "", "")] + MUTANTS):
         if old and source.count(old) != 1:
@@ -507,7 +608,7 @@ def mutants(tmp):
         os.makedirs(os.path.dirname(script))
         with open(script, "w", encoding="utf-8") as f:
             f.write(source.replace(old, new) if old else source)
-        total, failed = suite(script, os.path.join(tmp, "m%d" % i), verbose=not old)
+        total, failed = suite(script, None, verbose=not old, fixture=fixture)
         killed = failed > 0
         out("MUTANT %s：%d 例中 %d 例失败（%s）\n" % (name, total, failed, "应全过" if not old else "应被抓住"))
         ok &= killed if old else not failed

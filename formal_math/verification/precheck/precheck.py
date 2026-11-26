@@ -76,17 +76,19 @@ def is_tree(mode):
     return int(mode, 8) & 0o170000 == 0o040000
 
 
-def objects(repo, oids):
-    """cat-file --batch 一次读一批对象的原始字节：{对象: (类型, 内容)}；头行、长度与结尾换行逐一核对。"""
+def objects(repo, oids, body=True):
+    """cat-file --batch（body 为假时 --batch-check）一次读一批对象：{对象: (类型, 原始内容)}。
+    头行、长度、结尾换行逐一核对，整段输出不许有多余字节；对象缺失即运行故障。"""
     oids, found, pos = sorted(set(oids)), {}, 0
-    data = git(repo, b"cat-file", b"--batch", data=b"".join(o + b"\n" for o in oids))[1]
+    mode = b"--batch" if body else b"--batch-check"
+    data = git(repo, b"cat-file", mode, data=b"".join(o + b"\n" for o in oids))[1]
     for oid in oids:
         nl = data.find(b"\n", pos)
         head = data[pos:nl].split(b" ") if nl >= 0 else []
         if len(head) != 3 or head[0] != oid or not head[2].isdigit():
             raise Fault("GIT", oid, "cat-file 输出无法解读或对象缺失")
-        end = nl + 1 + int(head[2])
-        if data[end:end + 1] != b"\n":
+        end = nl + 1 + int(head[2]) if body else nl
+        if body and data[end:end + 1] != b"\n":
             raise Fault("GIT", oid, "cat-file 输出长度不符")
         found[oid], pos = (head[1], data[nl + 1:end]), end + 1
     if pos != len(data):
@@ -132,6 +134,20 @@ def inventory(repo, commit, red):
     return found
 
 
+def file_objects(repo, tree, red):
+    """第 2 条续：清单里每个文件条目（子模块除外）指向的对象必须是 blob。只核类型，不读内容。"""
+    files = {p: oid for p, (mode, oid) in tree.items() if int(mode, 8) & 0o170000 not in (0o040000, 0o160000)}
+    kinds = objects(repo, files.values(), body=False)
+    for path, oid in files.items():
+        if kinds[oid][0] != BLOB:
+            red("TREE_FORM", path, "文件条目指向的不是 blob，而是 %s" % kinds[oid][0].decode())
+
+
+def signature(path, entry):
+    """第 3 条的比较值：受信文件的祖先目录只比原始模式（其对象名会随受管范围外的兄弟文件变），其余比模式与对象名。"""
+    return None if entry is None else entry[:1] if path in ANCESTORS else entry
+
+
 def within(path, rules):
     return any(path.startswith(r) if r.endswith(b"/") else path == r for r in rules)
 
@@ -159,7 +175,7 @@ def shape(tree, red):
             continue
         rel = path[len(FM):]
         parts, kind = rel.split(b"/"), TREE if mode == TREE_MODE else BLOB
-        if parts[-1].lower() in LAKE_NAMES and path not in LAKE_ALLOWED:
+        if parts[-1].lower() in LAKE_NAMES and (kind != BLOB or path not in LAKE_ALLOWED):
             red("LAKE_FILE", path, "formal_math 下此位置不许出现 Lake 配置名")
         if not all(SEGMENT.fullmatch(s) for s in parts):
             red("PATH_GRAMMAR", path, "路径段不合 ASCII 白名单文法")
@@ -183,25 +199,24 @@ def check(repo, base, head, branch, approved, red):
         raise Fault("NOT_ANCESTOR", base, "基线不是被审提交的祖先")
     m = BRANCH.fullmatch(branch)
     role = m.group(1) if m else None
+    # 第 2、6 条对被审清单无条件执行，先于一切可能退 2 的步骤；改动集合为空只免去第 4、5 条。
+    new = inventory(repo, head, red)
+    shape(new, red)
+    file_objects(repo, new, red)
     base_form = []
     old = inventory(repo, base, lambda *r: base_form.append(r))
     if base_form:
         raise Fault("BASE_FORM", base_form[0][1], "基线树不规范：" + base_form[0][2])
-    new = inventory(repo, head, red)
-    # 第 3 条：改动集合是两份清单的集合差；仓库根下受信文件的祖先目录只核对形状，不算改动。
-    changed = sorted(p for p in set(old) | set(new) if p not in ANCESTORS and old.get(p) != new.get(p))
-    if not changed:
-        return head, role
-    if role is None:
+    changed = sorted(p for p in set(old) | set(new) if signature(p, old.get(p)) != signature(p, new.get(p)))
+    if changed and role is None:
         red("BRANCH_ROLE", branch, "分支名解析不出角色，却改了 formal_math 或受信文件")
-    else:
+    elif changed:
         for path in changed:
             if not allowed(path, old.get(path), new.get(path), ROLES[role]):
                 status = "A" if path not in old else "D" if path not in new else "M"
                 red("PATH_SCOPE", path, "%s 角色不得改此路径（%s）" % (role.decode(), status))
         if role == b"infra" and not approved and any(p == GATE_DIR or within(p, TRUSTED_SURFACE) for p in changed):
             red("TRUST_UNAPPROVED", branch, "改了受信文件，调用方未给放行开关")
-    shape(new, red)
     if role != b"infra":
         for path in TRUSTED:
             if old.get(path) != new.get(path):
