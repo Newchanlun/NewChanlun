@@ -137,15 +137,22 @@ def inventory(repo, commit, red):
 def file_objects(repo, tree, red):
     """第 2 条续：清单里每个文件条目（子模块除外）指向的对象必须是 blob。只核类型，不读内容。"""
     files = {p: oid for p, (mode, oid) in tree.items() if int(mode, 8) & 0o170000 not in (0o040000, 0o160000)}
+    if not files:
+        return
     kinds = objects(repo, files.values(), body=False)
     for path, oid in files.items():
         if kinds[oid][0] != BLOB:
             red("TREE_FORM", path, "文件条目指向的不是 blob，而是 %s" % kinds[oid][0].decode())
 
 
-def signature(path, entry):
-    """第 3 条的比较值：受信文件的祖先目录只比原始模式（其对象名会随受管范围外的兄弟文件变），其余比模式与对象名。"""
-    return None if entry is None else entry[:1] if path in ANCESTORS else entry
+def normative(repo, commit, red, with_shape=False):
+    """第 2 条：取清单并核其规范性（树对象逐层核对、文件条目的对象类型）。基线与被审提交走同一个函数。
+    with_shape 时在核对象类型之前先做第 6 条，使对象缺失退 2 时形状红项已报出。"""
+    tree = inventory(repo, commit, red)
+    if with_shape:
+        shape(tree, red)
+    file_objects(repo, tree, red)
+    return tree
 
 
 def within(path, rules):
@@ -199,15 +206,14 @@ def check(repo, base, head, branch, approved, red):
         raise Fault("NOT_ANCESTOR", base, "基线不是被审提交的祖先")
     m = BRANCH.fullmatch(branch)
     role = m.group(1) if m else None
-    # 第 2、6 条对被审清单无条件执行，先于一切可能退 2 的步骤；改动集合为空只免去第 4、5 条。
-    new = inventory(repo, head, red)
-    shape(new, red)
-    file_objects(repo, new, red)
+    # 被审清单的第 2、6 条无条件执行，并在读基线清单之前做完：基线不规范退 2 时，被审提交的红项已先报出。
+    new = normative(repo, head, red, with_shape=True)
     base_form = []
-    old = inventory(repo, base, lambda *r: base_form.append(r))
+    old = normative(repo, base, lambda *r: base_form.append(r))
     if base_form:
         raise Fault("BASE_FORM", base_form[0][1], "基线树不规范：" + base_form[0][2])
-    changed = sorted(p for p in set(old) | set(new) if signature(p, old.get(p)) != signature(p, new.get(p)))
+    # 第 3 条：受信文件的祖先目录只受形状约束，不进改动集合；受管文件的增删改由其自身条目体现。
+    changed = sorted(p for p in set(old) | set(new) if p not in ANCESTORS and old.get(p) != new.get(p))
     if changed and role is None:
         red("BRANCH_ROLE", branch, "分支名解析不出角色，却改了 formal_math 或受信文件")
     elif changed:
