@@ -100,6 +100,17 @@ def patched(ctx, cmd, binds, env, cwd, *a, **k):
 run.sandbox = patched
 if mode == "timeout":
     run.TIMEOUT["build"] = 30
+if mode == "late-signal":
+    # 结果行写出之后、主路径返回之前给自己发 SIGTERM：处理函数里的 finish() 不得再写第二行结果行。
+    import signal
+    real_finish, sent = run.finish, []
+    def finish(*a):
+        ok = real_finish(*a)
+        if not sent:
+            sent.append(1)
+            os.kill(os.getpid(), signal.SIGTERM)
+        return ok
+    run.finish = finish
 steps = list(run.STEP_FUNCS)
 if os.environ.get("FM_SELFTEST_SKIP_SHAPE"):
     # 骨架用例里要让被审代码在构建期执行（#eval、meta initialize 等），这里跳过第 5 步；派生证书为空。
@@ -693,13 +704,15 @@ def skeleton(s):
         "L=.lake/build/lib/lean; mkdir -p $L/Init && : > $L/Init/Fake.olean; : > $L/Chan/Ghost.olean; "
         "ln -s /etc/hostname $L/Chan/Link.olean; : > $L/Chan/Base.x.olean; mkfifo $L/Chan/Pipe.olean; "
         "mkdir $L/Chan/Dir.olean; : > .lake/stray; mkdir -p .lake/build/bin && : > .lake/build/bin/x; "
-        ": > $L/ChanDyn/Ghost2.olean && chmod 111 $L/ChanDyn", ("Chan", "Chan.Base", "ChanDyn.Base"))})
+        ": > $L/ChanDyn/Ghost2.olean && chmod 111 $L/ChanDyn; chmod 755 $L/Chan/Base.ilean",
+        ("Chan", "Chan.Base", "ChanDyn.Base"))})
     L = "formal_math/.lake/build/lib/lean/"
     plant_pairs = {("ARTIFACT_ROOT", L + "Init"), ("EXTRA_ARTIFACT", L + "Chan/Ghost.olean"),
                    ("ARTIFACT_FORM", L + "Chan/Link.olean"), ("EXTRA_ARTIFACT", L + "Chan/Base.x.olean"),
                    ("ARTIFACT_FORM", L + "Chan/Pipe.olean"), ("EXTRA_ARTIFACT", L + "Chan/Dir.olean"),
                    ("EXTRA_ARTIFACT", "formal_math/.lake/stray"), ("EXTRA_ARTIFACT", "formal_math/.lake/build/bin"),
-                   ("ARTIFACT_FORM", L + "ChanDyn"), ("NO_ARTIFACT", "formal_math/ChanDyn/Base.lean")}
+                   ("ARTIFACT_FORM", L + "ChanDyn"), ("NO_ARTIFACT", "formal_math/ChanDyn/Base.lean"),
+                   ("ARTIFACT_FORM", L + "Chan/Base.ilean")}
 
     @case("S20")
     def _():
@@ -857,6 +870,17 @@ def skeleton(s):
             r = s.run(cid + "-auditor-signal", lite_green, mode="sig-" + step, lite=True)
             good = r["rc"] == 2 and r["faults"] == ["SIGNAL"] and r["steps"][-1][1:] == (step, "FAULT")
             return check("%s 第 %s 步的审计程序被信号杀死：SIGNAL 退 2" % (cid, step), good, r)
+
+    @case("S31")
+    def _():
+        r = s.run("S31-late-signal", lite_green, mode="late-signal", lite=True)
+        results = [l for l in r["out"].splitlines() if l.startswith("FM RESULT ")]
+        good = r["rc"] == 2 and len(results) == 1 and results[0].startswith("FM RESULT GREEN") and \
+            r["out"].endswith(results[0] + "\n") and "SIGNAL" in r["faults"]
+        # 这一例的退出码与绿结果行按单向契约本就可以不一致（出现绿行不保证退 0），不套用 protocol() 的双向核对。
+        res = {k: r[k] for k in ("rc", "reds", "faults", "out", "err")}
+        return check("S31 绿结果行写出后、进程退出前收到 SIGTERM：处理函数不再写第二行结果行（标准输出仍只有那一行绿），退 2",
+                     good, res, "结果行=%s" % results)
 
     ghost_files = {**s.lite_files, "formal_math/lake-manifest.json":
                    b'{"version": "1.3.0", "packagesDir": ".lake/packages", "packages": [{"name": "ghost"}], '
@@ -1262,6 +1286,10 @@ MUTANTS = [
      [('        if STATE["output"] is not None:\n            STATE["step"] = "output"',
        '        if False:\n            STATE["step"] = "output"')], "S25"),
     ("不装 SIGINT、SIGTERM 处理函数", RUNNER, [("        signal.signal(sig, on_signal)", "        pass")], "S26a,S26b"),
+    ("去掉产物文件模式检查：执行位、特殊位、属主可读（骨架复审 r3 Q2）", RUNNER,
+     [("            if mode & 0o7111 or not mode & 0o400:", "            if False:")], "S20"),
+    ("finish() 去掉「整次运行至多写一次」的守卫（骨架复审 r3 Q5）", RUNNER,
+     [('    if STATE["result"]:\n        return False\n    STATE["result"] = True\n', '    STATE["result"] = True\n')], "S31"),
     ("不查隔离模式", RUNNER, [("if not sys.flags.isolated:", "if False:")], "S24"),
     ("隔离检查失败时的诊断经 sys 的流写、不兜异常（N-1 旧形）", RUNNER,
      [("        try:\n            posix.write(fd, line.encode())\n        except BaseException:  # noqa: BLE001\n            pass",
