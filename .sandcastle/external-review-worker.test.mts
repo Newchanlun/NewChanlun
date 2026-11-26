@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { codexWorker } from "./codex-route.mts";
+import { contractDigest } from "./docker-acceptance.mts";
 import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VM_SPACE_RESERVE, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, trimVmDisk, VM_TRIM_SCRIPT, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, withVolumeAdmissionLock, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
@@ -347,6 +348,7 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       await runExternalReview(f.folder, deps);
       const elapsed = Date.now() - started;
       const receipt = JSON.parse(readFileSync(join(f.folder, "receipt.json"), "utf8"));
+      assert.equal(receipt.isolation_contract, contractDigest());
       assert.equal(creates, mode === "volume-mismatch" ? 0 : 1); assert.equal(closed, mode !== "volume-mismatch");
       assert.equal(receipt.status, ["PASS", "BLOCK", "reconnect-429-recovers", "volume-remove-fails"].includes(mode) ? "completed" : "failed");
       // 每次 launch 恰灌一个卷；容器关闭后删卷，删不掉只记 volume_removed=false，不改结论。
@@ -519,7 +521,8 @@ test("trimVmDisk 以 checkout_root 为节流根调用 vm_trim.py，辅助进程�
 test("沿用前准入与正式派发同一组检查：controller 未提交或镜像未验收即拒绝", () => {
   const head = "c".repeat(40);
   const ready = (img: string) => { assert.equal(img, REVIEW_IMAGE); return image; };
-  assert.deepEqual(checkReviewAdmission({ identity: () => ({ head, dirty: "" }), ready }), { controller_code_head: head, image_id: image });
+  assert.deepEqual(checkReviewAdmission({ identity: () => ({ head, dirty: "" }), ready }),
+    { controller_code_head: head, image_id: image, isolation_contract: contractDigest() });
   assert.throws(() => checkReviewAdmission({ identity: () => ({ head, dirty: " M .sandcastle/x" }), ready }), /未提交/);
   assert.throws(() => checkReviewAdmission({ identity: () => ({ head, dirty: "" }),
     ready: () => { throw new Error("外部独审必须先完成当前代码 head 的 Docker 验收"); } }), /Docker 验收/);
