@@ -1,5 +1,5 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..8bceb4b 100644
+index e69de29..e6b3df9 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,302 @@
@@ -129,7 +129,7 @@ index e69de29..8bceb4b 100644
 +			}
 +			defer pending.Release()
 +
-+			res, existed, resErr := preflightreceipt.ReserveExistingReviewContext(turnCtx, root, launch)
++			res, existed, resErr := preflightreceipt.ReserveExistingReviewContext(turnCtx, root, launch, pending.TurnSeq())
 +			if resErr != nil {
 +				abortClose(http.StatusServiceUnavailable)
 +				return
@@ -193,7 +193,7 @@ index e69de29..8bceb4b 100644
 +			}
 +			_ = rc.SetReadDeadline(time.Time{})
 +			if !existed {
-+				res, resErr = preflightreceipt.ReserveReviewContext(turnCtx, root, launch)
++				res, resErr = preflightreceipt.ReserveReviewContext(turnCtx, root, launch, pending.TurnSeq())
 +				if resErr != nil {
 +					preflightreceipt.TaintExistingReview(root, launch)
 +					abortClose(http.StatusServiceUnavailable)
@@ -7776,10 +7776,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..f87195c 100644
+index e69de29..3490c55 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,12363 @@
+@@ -0,0 +1,12793 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -8257,6 +8257,17 @@ index e69de29..f87195c 100644
 +	m.ch <- struct{}{}
 +}
 +
++type diskTaintJob struct {
++	key    string
++	root   string
++	launch string
++}
++
++type pendingDiskTaint struct {
++	done      chan struct{}
++	uncertain bool
++}
++
 +var (
 +	reviewMu                      = newCtxMutex()
 +	reviewLedger                  = make(map[string]*reviewEntry)
@@ -8267,8 +8278,12 @@ index e69de29..f87195c 100644
 +	activeSealTotal               atomic.Int64
 +	maxConcurrentSeals            = 16
 +	maxFailurePersistWorkers      = 4
++	maxDiskTaintQueue             = 256
 +	failurePersistQueue           []*reviewEntry
 +	failurePersistWorkers         int
++	pendingDiskTaintKeys          = make(map[string]*pendingDiskTaint)
++	diskTaintQueue                []diskTaintJob
++	diskTaintWorkers              int
 +	reclaimingKeys                = make(map[string]bool)
 +	pendingReviewLaunches = make(map[string]*pendingReviewState)
 +	pendingReviewTotal    int
@@ -8346,6 +8361,17 @@ index e69de29..f87195c 100644
 +	g.once.Do(func() {
 +		reviewMu.Lock()
 +		if g.holdsSlot {
++			// Guard was never handed off via AttachPendingSlot; publish this turn's original
++			// TurnSeq failure BEFORE making the pending slot invisible to concurrent SealReview.
++			if g.turnSeq > 0 {
++				st := pendingReviewLaunches[g.key]
++				if st != nil && g.turnSeq > st.failedTurnSeq {
++					st.failedTurnSeq = g.turnSeq
++				}
++				if entry := reviewLedger[g.key]; entry != nil {
++					enqueueExistingReviewTurnFailureLocked(entry, g.turnSeq, st != nil && st.tainted)
++				}
++			}
 +			g.holdsSlot = false
 +			if pendingReviewTotal > 0 {
 +				pendingReviewTotal--
@@ -8454,7 +8480,67 @@ index e69de29..f87195c 100644
 +var (
 +	pathHasDisallowedSymlinkFn = pathHasDisallowedSymlink
 +	existingReviewProbeSem     = make(chan struct{}, maxPendingReviewInFlight)
++	initialPersistSem          = make(chan struct{}, maxPendingReviewInFlight)
++	diskTaintCheckFn           = checkDiskTaintTarget
 +)
++
++func checkDiskTaintTarget(root, launch string) (existsDir bool, uncertain bool) {
++	rootExists, err := checkPrivateDir(root, true)
++	if err != nil {
++		return false, true
++	}
++	if !rootExists {
++		return false, false
++	}
++	fi, statErr := os.Lstat(filepath.Join(root, launch))
++	if statErr != nil {
++		if os.IsNotExist(statErr) {
++			return false, false
++		}
++		return false, true
++	}
++	if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
++		return false, false
++	}
++	return true, false
++}
++
++func runDiskTaintWorker() {
++	for {
++		reviewMu.Lock()
++		if len(diskTaintQueue) == 0 {
++			diskTaintWorkers--
++			reviewMu.Unlock()
++			return
++		}
++		job := diskTaintQueue[0]
++		diskTaintQueue[0] = diskTaintJob{}
++		diskTaintQueue = diskTaintQueue[1:]
++		if len(diskTaintQueue) == 0 {
++			diskTaintQueue = nil
++		}
++		reviewMu.Unlock()
++
++		existsDir, uncertain := diskTaintCheckFn(job.root, job.launch)
++		if existsDir {
++			TaintReview(job.root, job.launch)
++		}
++
++		reviewMu.Lock()
++		if entry := reviewLedger[job.key]; entry != nil && !entry.sealedFlag && entry.sealDecision.Load() != sealDecisionCommitted {
++			enqueueExistingReviewTurnFailureLocked(entry, 0, true)
++		}
++		if dt := pendingDiskTaintKeys[job.key]; dt != nil {
++			if uncertain {
++				dt.uncertain = true
++			} else {
++				delete(pendingDiskTaintKeys, job.key)
++			}
++			close(dt.done)
++		}
++		reviewMu.Unlock()
++	}
++}
 +
 +func recordPendingTurnFailure(key string, turnSeq uint64) {
 +	reviewMu.Lock()
@@ -8522,10 +8608,45 @@ index e69de29..f87195c 100644
 +		return nil, ErrUnavailable
 +	}
 +	key := cleanRoot + "\x00" + launch
++	if ctx.Err() != nil {
++		reviewMu.Lock()
++		entry := reviewLedger[key]
++		st := pendingReviewLaunches[key]
++		if !reclaimingKeys[key] && (st != nil || (entry != nil && !entry.sealedFlag && !entry.sealing)) {
++			reviewTurnSeqGen++
++			turnSeq := reviewTurnSeqGen
++			if st != nil && turnSeq > st.failedTurnSeq {
++				st.failedTurnSeq = turnSeq
++			}
++			if entry != nil && !entry.sealedFlag && !entry.sealing {
++				enqueueExistingReviewTurnFailureLocked(entry, turnSeq, st != nil && st.tainted)
++			}
++		}
++		reviewMu.Unlock()
++		return nil, ErrUnavailable
++	}
 +	if !reviewMu.LockContext(ctx) {
++		reviewMu.Lock()
++		entry := reviewLedger[key]
++		st := pendingReviewLaunches[key]
++		if !reclaimingKeys[key] && (st != nil || (entry != nil && !entry.sealedFlag && !entry.sealing)) {
++			reviewTurnSeqGen++
++			turnSeq := reviewTurnSeqGen
++			if st != nil && turnSeq > st.failedTurnSeq {
++				st.failedTurnSeq = turnSeq
++			}
++			if entry != nil && !entry.sealedFlag && !entry.sealing {
++				enqueueExistingReviewTurnFailureLocked(entry, turnSeq, st != nil && st.tainted)
++			}
++		}
++		reviewMu.Unlock()
 +		return nil, ErrUnavailable
 +	}
 +	if reclaimingKeys[key] {
++		reviewMu.Unlock()
++		return nil, ErrUnavailable
++	}
++	if dt := pendingDiskTaintKeys[key]; dt != nil && dt.uncertain {
 +		reviewMu.Unlock()
 +		return nil, ErrUnavailable
 +	}
@@ -8572,7 +8693,51 @@ index e69de29..f87195c 100644
 +		pendingReviewLaunches[key] = &pendingReviewState{count: 1, started: time.Now().UnixNano()}
 +		pendingReviewTotal++
 +	}
++	waitDiskTaint := pendingDiskTaintKeys[key]
 +	reviewMu.Unlock()
++
++	if waitDiskTaint != nil {
++		select {
++		case <-waitDiskTaint.done:
++		case <-ctx.Done():
++			failAndReleasePendingSlot(key, turnSeq)
++			return nil, ErrUnavailable
++		}
++		reviewMu.Lock()
++		if dt := pendingDiskTaintKeys[key]; dt != nil {
++			reviewMu.Unlock()
++			failAndReleasePendingSlot(key, turnSeq)
++			return nil, ErrUnavailable
++		}
++		if taintWriteOverflow {
++			reviewMu.Unlock()
++			failAndReleasePendingSlot(key, turnSeq)
++			return nil, ErrUnavailable
++		}
++		if ent := reviewLedger[key]; ent != nil {
++			if ent.sealedFlag || ent.sealing {
++				reviewMu.Unlock()
++				releasePendingSlot(key)
++				return nil, errReviewSealed
++			}
++			if ent.pendingTaint.Load() || ent.sealDecision.Load() == sealDecisionTainted {
++				reviewMu.Unlock()
++				failAndReleasePendingSlot(key, turnSeq)
++				return nil, ErrUnavailable
++			}
++		}
++		if _, sealedBound := sealedBindings[key]; sealedBound {
++			reviewMu.Unlock()
++			releasePendingSlot(key)
++			return nil, errReviewSealed
++		}
++		if curSt := pendingReviewLaunches[key]; curSt != nil && curSt.tainted {
++			reviewMu.Unlock()
++			failAndReleasePendingSlot(key, turnSeq)
++			return nil, ErrUnavailable
++		}
++		reviewMu.Unlock()
++	}
 +
 +	doneCh := make(chan bool, 1)
 +	var stateMu sync.Mutex
@@ -8597,17 +8762,19 @@ index e69de29..f87195c 100644
 +		}
 +		return &PendingReviewGuard{key: key, turnSeq: turnSeq, holdsSlot: true}, nil
 +	case <-ctx.Done():
++		// Publish this turn's failure BEFORE setting callerLeft=true so the path-check goroutine
++		// can never drop st.count to 0 ahead of pendingFailedTurnSeq for a concurrent SealReview.
++		recordPendingTurnFailure(key, turnSeq)
 +		stateMu.Lock()
 +		select {
 +		case <-doneCh:
 +			stateMu.Unlock()
-+			failAndReleasePendingSlot(key, turnSeq)
++			releasePendingSlot(key)
 +			return nil, ErrUnavailable
 +		default:
 +			callerLeft = true
 +			stateMu.Unlock()
 +		}
-+		recordPendingTurnFailure(key, turnSeq)
 +		return nil, ErrUnavailable
 +	}
 +}
@@ -10649,6 +10816,11 @@ index e69de29..f87195c 100644
 +		}
 +		if pType == "output_text" {
 +			if _, hasPText, okPText := exactOptionalStringPresent(partFields, "text"); !okPText || !hasPText {
++				c.taintStreamAnomaly()
++				return out, false
++			}
++		} else if pType == "refusal" {
++			if _, hasPRef, okPRef := exactOptionalStringPresent(partFields, "refusal"); !okPRef || !hasPRef {
 +				c.taintStreamAnomaly()
 +				return out, false
 +			}
@@ -14841,27 +15013,85 @@ index e69de29..f87195c 100644
 +	return entry, nil
 +}
 +
-+func finishReserveReviewEntryContext(ctx context.Context, root, key string, entry *reviewEntry, pendingTainted bool, pendingFailedSeq uint64) (*ReviewReservation, error) {
++func recordExistingEntryTurnFailure(entry *reviewEntry, turnSeq uint64, pendingTainted bool, pendingFailedSeq uint64) {
++	if entry == nil {
++		return
++	}
++	reviewMu.Lock()
++	if pendingTainted || entry.pendingTaint.Load() {
++		enqueueExistingReviewTurnFailureLocked(entry, 0, true)
++	} else {
++		failSeq := turnSeq
++		if failSeq == 0 {
++			reviewTurnSeqGen++
++			failSeq = reviewTurnSeqGen
++		}
++		if pendingFailedSeq > failSeq {
++			failSeq = pendingFailedSeq
++		}
++		enqueueExistingReviewTurnFailureLocked(entry, failSeq, false)
++	}
++	reviewMu.Unlock()
++}
++
++func failAndReleaseReservationEntry(entry *reviewEntry, turnSeq uint64, pendingTainted bool, pendingFailedSeq uint64) {
++	if entry == nil {
++		return
++	}
++	reviewMu.Lock()
++	if pendingTainted || entry.pendingTaint.Load() {
++		enqueueExistingReviewTurnFailureLocked(entry, 0, true)
++	} else {
++		failSeq := turnSeq
++		if failSeq == 0 {
++			reviewTurnSeqGen++
++			failSeq = reviewTurnSeqGen
++		}
++		if pendingFailedSeq > failSeq {
++			failSeq = pendingFailedSeq
++		}
++		enqueueExistingReviewTurnFailureLocked(entry, failSeq, false)
++	}
++	if entry.inFlight > 0 {
++		entry.inFlight--
++	}
++	reviewMu.Unlock()
++}
++
++func rollbackUnpersistedEntry(key string, entry *reviewEntry) {
++	if entry == nil {
++		return
++	}
++	reviewMu.Lock()
++	if entry.inFlight > 0 {
++		entry.inFlight--
++	}
++	var evictFD *os.File
++	if entry.inFlight == 0 && !entry.sealing && !entry.sealedFlag &&
++		!entry.failurePersistQueued && !entry.failurePersistRunning &&
++		!entry.pendingTaint.Load() && entry.pendingFailedTurnSeq.Load() == 0 &&
++		reviewLedger[key] == entry && entry.mu.TryLock() {
++		canEvict := !entry.markerPersisted && !entry.tainted && !entry.sealed && entry.requests == 0
++		if canEvict {
++			evictFD = entry.boundDirFD
++			entry.boundDirFD = nil
++		}
++		entry.mu.Unlock()
++		if canEvict {
++			delete(reviewLedger, key)
++		}
++	}
++	reviewMu.Unlock()
++	closeBudgetedPinnedDirFD(evictFD)
++}
++
++func finishReserveReviewEntryContext(ctx context.Context, root, key string, entry *reviewEntry, turnSeq uint64, pendingTainted bool, pendingFailedSeq uint64) (*ReviewReservation, error) {
 +	if ctx == nil {
 +		ctx = context.Background()
 +	}
 +	_, hasDeadline := ctx.Deadline()
 +	if !entry.mu.LockContext(ctx) {
-+		reviewMu.Lock()
-+		if pendingTainted || entry.pendingTaint.Load() {
-+			enqueueExistingReviewTurnFailureLocked(entry, 0, true)
-+		} else {
-+			reviewTurnSeqGen++
-+			failSeq := reviewTurnSeqGen
-+			if pendingFailedSeq > failSeq {
-+				failSeq = pendingFailedSeq
-+			}
-+			enqueueExistingReviewTurnFailureLocked(entry, failSeq, false)
-+		}
-+		if entry.inFlight > 0 {
-+			entry.inFlight--
-+		}
-+		reviewMu.Unlock()
++		failAndReleaseReservationEntry(entry, turnSeq, pendingTainted, pendingFailedSeq)
 +		return nil, ErrUnavailable
 +	}
 +	if entry.sealed {
@@ -14909,35 +15139,85 @@ index e69de29..f87195c 100644
 +			}
 +		}
 +	}
++	var started int64
 +	if !entry.markerPersisted {
-+		if lockErr := acquirePrivateRootLock(root); lockErr != nil || entry.persistLocked() != nil {
-+			entry.mu.Unlock()
-+			reviewMu.Lock()
-+			if entry.inFlight > 0 {
-+				entry.inFlight--
-+			}
-+			var evictFD *os.File
-+			if entry.inFlight == 0 && !entry.sealing && !entry.sealedFlag &&
-+				!entry.failurePersistQueued && !entry.failurePersistRunning &&
-+				!entry.pendingTaint.Load() && entry.pendingFailedTurnSeq.Load() == 0 &&
-+				reviewLedger[key] == entry && entry.mu.TryLock() {
-+				canEvict := !entry.markerPersisted && !entry.tainted && !entry.sealed && entry.requests == 0
-+				if canEvict {
-+					evictFD = entry.boundDirFD
-+					entry.boundDirFD = nil
-+				}
++		if hasDeadline {
++			select {
++			case initialPersistSem <- struct{}{}:
++			default:
 +				entry.mu.Unlock()
-+				if canEvict {
-+					delete(reviewLedger, key)
++				rollbackUnpersistedEntry(key, entry)
++				return nil, ErrUnavailable
++			}
++			type initPersistRes struct {
++				started int64
++				err     error
++			}
++			doneCh := make(chan initPersistRes, 1)
++			var stateMu sync.Mutex
++			callerLeft := false
++			go func() {
++				defer func() { <-initialPersistSem }()
++				var persistErr error
++				if lockErr := acquirePrivateRootLock(root); lockErr != nil || entry.persistLocked() != nil {
++					persistErr = ErrUnavailable
++				}
++				startedVal := entry.started
++				entry.mu.Unlock()
++
++				stateMu.Lock()
++				left := callerLeft
++				if !left {
++					doneCh <- initPersistRes{started: startedVal, err: persistErr}
++				}
++				stateMu.Unlock()
++
++				if left {
++					if persistErr != nil {
++						rollbackUnpersistedEntry(key, entry)
++					} else {
++						failAndReleaseReservationEntry(entry, turnSeq, pendingTainted, pendingFailedSeq)
++					}
++				}
++			}()
++			select {
++			case r := <-doneCh:
++				if r.err != nil {
++					rollbackUnpersistedEntry(key, entry)
++					return nil, ErrUnavailable
++				}
++				started = r.started
++			case <-ctx.Done():
++				recordExistingEntryTurnFailure(entry, turnSeq, pendingTainted, pendingFailedSeq)
++				stateMu.Lock()
++				select {
++				case r := <-doneCh:
++					stateMu.Unlock()
++					if r.err != nil {
++						rollbackUnpersistedEntry(key, entry)
++					} else {
++						releaseReview(entry)
++					}
++					return nil, ErrUnavailable
++				default:
++					callerLeft = true
++					stateMu.Unlock()
++					return nil, ErrUnavailable
 +				}
 +			}
-+			reviewMu.Unlock()
-+			closeBudgetedPinnedDirFD(evictFD)
-+			return nil, ErrUnavailable
++		} else {
++			if lockErr := acquirePrivateRootLock(root); lockErr != nil || entry.persistLocked() != nil {
++				entry.mu.Unlock()
++				rollbackUnpersistedEntry(key, entry)
++				return nil, ErrUnavailable
++			}
++			started = entry.started
++			entry.mu.Unlock()
 +		}
++	} else {
++		started = entry.started
++		entry.mu.Unlock()
 +	}
-+	started := entry.started
-+	entry.mu.Unlock()
 +	reviewMu.Lock()
 +	if needAsyncFailPersist {
 +		enqueueExistingReviewTurnFailureLocked(entry, pendingFailedSeq, false)
@@ -14946,7 +15226,7 @@ index e69de29..f87195c 100644
 +		entry.touched = now
 +	}
 +	reviewMu.Unlock()
-+	return &ReviewReservation{entry: entry, started: started}, nil
++	return &ReviewReservation{entry: entry, started: started, turnSeq: turnSeq}, nil
 +}
 +
 +func probeExistingReviewDirContext(ctx context.Context, root, dir string) (bool, error) {
@@ -15000,14 +15280,15 @@ index e69de29..f87195c 100644
 +// without creating root or any launch directory on disk, so rejected pre-admission requests
 +// cannot consume disk space or inodes.
 +func ReserveExistingReview(root, launch string) (*ReviewReservation, bool, error) {
-+	return ReserveExistingReviewContext(context.Background(), root, launch)
++	return ReserveExistingReviewContext(context.Background(), root, launch, 0)
 +}
 +
 +// ReserveExistingReviewContext is the context-bounded variant of ReserveExistingReview: if
 +// ctx expires while waiting on reviewMu, entry.mu (e.g. a previous turn fsyncing), or disk
-+// existence checks, it records a failed turn on any existing launch, decrements inFlight, and
-+// returns immediately so admission slots cannot stay pinned past the request deadline.
-+func ReserveExistingReviewContext(ctx context.Context, root, launch string) (*ReviewReservation, bool, error) {
++// existence checks, it records a failed turn using the caller's original turnSeq on any
++// existing launch, decrements inFlight, and returns immediately so admission slots cannot
++// stay pinned past the request deadline.
++func ReserveExistingReviewContext(ctx context.Context, root, launch string, turnSeq uint64) (*ReviewReservation, bool, error) {
 +	if ctx == nil {
 +		ctx = context.Background()
 +	}
@@ -15017,12 +15298,66 @@ index e69de29..f87195c 100644
 +	}
 +	root = cleanRoot
 +	key := root + "\x00" + launch
-+	if !reviewMu.LockContext(ctx) {
++	if ctx.Err() != nil {
++		reviewMu.Lock()
++		if entry := reviewLedger[key]; entry != nil && !entry.sealedFlag && !entry.sealing {
++			st := pendingReviewLaunches[key]
++			failSeq := turnSeq
++			if failSeq == 0 {
++				reviewTurnSeqGen++
++				failSeq = reviewTurnSeqGen
++			}
++			if st != nil && failSeq > st.failedTurnSeq {
++				st.failedTurnSeq = failSeq
++			}
++			enqueueExistingReviewTurnFailureLocked(entry, failSeq, st != nil && st.tainted)
++			reviewMu.Unlock()
++			return nil, true, ErrUnavailable
++		}
++		reviewMu.Unlock()
 +		return nil, false, ErrUnavailable
 +	}
-+	if reclaimingKeys[key] {
++	if !reviewMu.LockContext(ctx) {
++		reviewMu.Lock()
++		if entry := reviewLedger[key]; entry != nil && !entry.sealedFlag && !entry.sealing {
++			st := pendingReviewLaunches[key]
++			failSeq := turnSeq
++			if failSeq == 0 {
++				reviewTurnSeqGen++
++				failSeq = reviewTurnSeqGen
++			}
++			if st != nil && failSeq > st.failedTurnSeq {
++				st.failedTurnSeq = failSeq
++			}
++			enqueueExistingReviewTurnFailureLocked(entry, failSeq, st != nil && st.tainted)
++			reviewMu.Unlock()
++			return nil, true, ErrUnavailable
++		}
 +		reviewMu.Unlock()
-+		return nil, true, ErrUnavailable
++		return nil, false, ErrUnavailable
++	}
++	for {
++		if reclaimingKeys[key] {
++			reviewMu.Unlock()
++			return nil, true, ErrUnavailable
++		}
++		if dt := pendingDiskTaintKeys[key]; dt != nil {
++			if dt.uncertain {
++				reviewMu.Unlock()
++				return nil, true, ErrUnavailable
++			}
++			reviewMu.Unlock()
++			select {
++			case <-dt.done:
++			case <-ctx.Done():
++				return nil, true, ErrUnavailable
++			}
++			if !reviewMu.LockContext(ctx) {
++				return nil, true, ErrUnavailable
++			}
++			continue
++		}
++		break
 +	}
 +	pendingTainted := pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
 +	var pendingFailedSeq uint64
@@ -15038,7 +15373,7 @@ index e69de29..f87195c 100644
 +		// finishReserveReviewEntryContext refreshes entry.touched only once the turn is actually admitted.
 +		entry.inFlight++
 +		reviewMu.Unlock()
-+		res, err := finishReserveReviewEntryContext(ctx, root, key, entry, pendingTainted, pendingFailedSeq)
++		res, err := finishReserveReviewEntryContext(ctx, root, key, entry, turnSeq, pendingTainted, pendingFailedSeq)
 +		return res, true, err
 +	}
 +	if _, sealedBound := sealedBindings[key]; sealedBound {
@@ -15058,15 +15393,15 @@ index e69de29..f87195c 100644
 +	if !exists {
 +		return nil, false, nil
 +	}
-+	res, resErr := ReserveReviewContext(ctx, root, launch)
++	res, resErr := ReserveReviewContext(ctx, root, launch, turnSeq)
 +	return res, true, resErr
 +}
 +
 +// TaintExistingReview taints launch if it already exists in the pending pre-admission wave,
-+// in-memory ledger, or on disk under root. Brand-new launches with no active siblings rejected
-+// before admission never allocate directories or files on disk. When an in-memory ledger entry
-+// is found, inFlight is incremented BEFORE releasing reviewMu so concurrent SealReview cannot
-+// race past the taint in the unlock window.
++// in-memory ledger, or on disk under root without ever blocking the caller on filesystem I/O.
++// In-memory state is updated immediately under reviewMu (blocking subsequent admission and
++// unsealed seals atomically), while cold-restart disk probes/persistence run on a globally
++// bounded background worker pool.
 +func TaintExistingReview(root, launch string) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || !reviewLaunchPattern.MatchString(launch) {
@@ -15095,26 +15430,30 @@ index e69de29..f87195c 100644
 +		reviewMu.Unlock()
 +		return
 +	}
++	if _, queued := pendingDiskTaintKeys[key]; !queued {
++		if len(pendingDiskTaintKeys) >= maxDiskTaintQueue {
++			taintWriteOverflow = true
++		} else {
++			pendingDiskTaintKeys[key] = &pendingDiskTaint{done: make(chan struct{})}
++			diskTaintQueue = append(diskTaintQueue, diskTaintJob{key: key, root: root, launch: launch})
++			if diskTaintWorkers < maxFailurePersistWorkers {
++				diskTaintWorkers++
++				go runDiskTaintWorker()
++			}
++		}
++	}
 +	reviewMu.Unlock()
-+	rootExists, err := checkPrivateDir(root, true)
-+	if err != nil || !rootExists {
-+		return
-+	}
-+	if fi, statErr := os.Lstat(filepath.Join(root, launch)); statErr != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
-+		return
-+	}
-+	TaintReview(root, launch)
 +}
 +
 +// ReserveReview atomically checks that the launch is neither sealed nor sealing nor rejected by
 +// an overlapping pending request, persists the initial unsealed reservation marker on disk before
 +// admitting the first request, and registers an in-flight request.
 +func ReserveReview(root, launch string) (*ReviewReservation, error) {
-+	return ReserveReviewContext(context.Background(), root, launch)
++	return ReserveReviewContext(context.Background(), root, launch, 0)
 +}
 +
 +// ReserveReviewContext is the context-bounded variant of ReserveReview.
-+func ReserveReviewContext(ctx context.Context, root, launch string) (*ReviewReservation, error) {
++func ReserveReviewContext(ctx context.Context, root, launch string, turnSeq uint64) (*ReviewReservation, error) {
 +	if ctx == nil {
 +		ctx = context.Background()
 +	}
@@ -15127,9 +15466,28 @@ index e69de29..f87195c 100644
 +	if !reviewMu.LockContext(ctx) {
 +		return nil, ErrUnavailable
 +	}
-+	if reclaimingKeys[key] {
-+		reviewMu.Unlock()
-+		return nil, ErrUnavailable
++	for {
++		if reclaimingKeys[key] {
++			reviewMu.Unlock()
++			return nil, ErrUnavailable
++		}
++		if dt := pendingDiskTaintKeys[key]; dt != nil {
++			if dt.uncertain {
++				reviewMu.Unlock()
++				return nil, ErrUnavailable
++			}
++			reviewMu.Unlock()
++			select {
++			case <-dt.done:
++			case <-ctx.Done():
++				return nil, ErrUnavailable
++			}
++			if !reviewMu.LockContext(ctx) {
++				return nil, ErrUnavailable
++			}
++			continue
++		}
++		break
 +	}
 +	pendingTainted := pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
 +	_, sealedBound := sealedBindings[key]
@@ -15141,10 +15499,77 @@ index e69de29..f87195c 100644
 +		TaintExistingReview(root, launch)
 +		return nil, ErrUnavailable
 +	}
-+	if err := acquirePrivateRootLock(root); err != nil {
-+		return nil, ErrUnavailable
++	var entry *reviewEntry
++	var err error
++	if _, hasDeadline := ctx.Deadline(); hasDeadline {
++		select {
++		case initialPersistSem <- struct{}{}:
++		default:
++			return nil, ErrUnavailable
++		}
++		type loadRes struct {
++			entry *reviewEntry
++			err   error
++		}
++		doneCh := make(chan loadRes, 1)
++		var stateMu sync.Mutex
++		callerLeft := false
++		cleanupAbandonedLoaded := func(ent *reviewEntry) {
++			if ent == nil {
++				return
++			}
++			ent.mu.Lock()
++			isUnpersistedEmpty := !ent.markerPersisted && !ent.tainted && !ent.sealed && ent.requests == 0
++			ent.mu.Unlock()
++			if isUnpersistedEmpty {
++				rollbackUnpersistedEntry(key, ent)
++			} else {
++				failAndReleaseReservationEntry(ent, turnSeq, false, 0)
++			}
++		}
++		go func() {
++			defer func() { <-initialPersistSem }()
++			var ent *reviewEntry
++			var lerr error
++			if lockErr := acquirePrivateRootLock(root); lockErr != nil {
++				lerr = ErrUnavailable
++			} else {
++				ent, lerr = getOrCreateReviewEntryContext(context.Background(), root, launch, "", time.Now(), true, true)
++			}
++			stateMu.Lock()
++			left := callerLeft
++			if !left {
++				doneCh <- loadRes{entry: ent, err: lerr}
++			}
++			stateMu.Unlock()
++			if left && ent != nil {
++				cleanupAbandonedLoaded(ent)
++			}
++		}()
++		select {
++		case r := <-doneCh:
++			entry, err = r.entry, r.err
++		case <-ctx.Done():
++			stateMu.Lock()
++			select {
++			case r := <-doneCh:
++				stateMu.Unlock()
++				if r.entry != nil {
++					cleanupAbandonedLoaded(r.entry)
++				}
++				return nil, ErrUnavailable
++			default:
++				callerLeft = true
++				stateMu.Unlock()
++				return nil, ErrUnavailable
++			}
++		}
++	} else {
++		if lockErr := acquirePrivateRootLock(root); lockErr != nil {
++			return nil, ErrUnavailable
++		}
++		entry, err = getOrCreateReviewEntryContext(ctx, root, launch, "", time.Now(), true, true)
 +	}
-+	entry, err := getOrCreateReviewEntryContext(ctx, root, launch, "", time.Now(), true, true)
 +	if err != nil {
 +		return nil, ErrUnavailable
 +	}
@@ -15155,7 +15580,7 @@ index e69de29..f87195c 100644
 +		pendingFailedSeq = st.failedTurnSeq
 +	}
 +	reviewMu.Unlock()
-+	return finishReserveReviewEntryContext(ctx, root, key, entry, pendingTainted, pendingFailedSeq)
++	return finishReserveReviewEntryContext(ctx, root, key, entry, turnSeq, pendingTainted, pendingFailedSeq)
 +}
 +
 +func acquireReview(entry *reviewEntry) {
@@ -16012,6 +16437,11 @@ index e69de29..f87195c 100644
 +		if entry.sealing || entry.inFlight > 0 {
 +			reviewMu.Unlock()
 +			return SealInFlight, ""
++		}
++		if _, diskTainted := pendingDiskTaintKeys[key]; diskTainted {
++			enqueueExistingReviewTurnFailureLocked(entry, 0, true)
++			reviewMu.Unlock()
++			return SealRejected, ""
 +		}
 +		reservedSlot, slotOK := reserveSealedBindingSlotLocked(key)
 +		if !slotOK {
@@ -20144,10 +20574,10 @@ index e69de29..f87195c 100644
 +	_ = syncPinnedDir(subRoot, c.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..29d5f3e 100644
+index e69de29..0be0019 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,14875 @@
+@@ -0,0 +1,15247 @@
 +package preflightreceipt
 +
 +import (
@@ -34923,7 +35353,7 @@ index e69de29..29d5f3e 100644
 +	shortCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 +	defer cancel()
 +	start := time.Now()
-+	res, existed, rerr := ReserveExistingReviewContext(shortCtx, root, launch)
++	res, existed, rerr := ReserveExistingReviewContext(shortCtx, root, launch, 0)
 +	elapsed := time.Since(start)
 +	if res != nil || !existed || !errors.Is(rerr, ErrUnavailable) {
 +		t.Fatalf("ReserveExistingReviewContext under contended entry.mu = (%v, %v, %v), want (nil, true, ErrUnavailable)", res, existed, rerr)
@@ -35022,6 +35452,378 @@ index e69de29..29d5f3e 100644
 +		}
 +		time.Sleep(5 * time.Millisecond)
 +	}
++}
++
++func TestReviewReceiptCancellationOrderBoundedInitialPersistAsyncDiskTaintAndRefusalAdded(t *testing.T) {
++	// PR #2280 R82 Sol + Astra regression suite:
++	// 1. Cancellation between BeginPendingReviewContext and ReserveExistingReviewContext records
++	//    failure using original TurnSeq BEFORE dropping pending slot, preventing stale Turn 1 SealOK.
++	// 2. Earlier request timing out on entry.mu uses its original TurnSeq (NOT a newly allocated seq),
++	//    so a later request that completes cleanly CAN still SealOK.
++	// 3. Stalled first-turn persistLocked() under deadline-bound ReserveReviewContext returns promptly
++	//    at ctx.Done() while keeping unfinished disk work inside bounded initialPersistSem.
++	// 4. TaintExistingReview on an unloaded launch never blocks caller on stalled disk I/O and
++	//    immediately blocks admission via pendingDiskTaintKeys.
++	// 5. response.content_part.added with type="refusal" rejects missing or null refusal field while
++	//    allowing valid empty string "".
++	runCleanTurn := func(t *testing.T, root, launch, session, respID, verdict string) {
++		t.Helper()
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview: %v", err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":%q}]}]}}`, respID, verdict)+"\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++	}
++
++	t.Run("cancel-between-begin-pending-and-reserve-existing-blocks-stale-seal", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-e82e8201-1111-4111-8111-111111111101"
++		sess := "019d0000-0000-7000-8000-00000000ec01"
++		runCleanTurn(t, root, launch, sess, "resp_c1", "VERDICT: PASS")
++
++		// Turn 2 gets a PendingReviewGuard, then ctx cancels BEFORE ReserveExistingReviewContext runs.
++		pend, err := BeginPendingReviewContext(context.Background(), root, launch)
++		if err != nil {
++			t.Fatalf("BeginPendingReviewContext turn 2: %v", err)
++		}
++		canceledCtx, cancel := context.WithCancel(context.Background())
++		cancel()
++		res, _, rerr := ReserveExistingReviewContext(canceledCtx, root, launch, pend.TurnSeq())
++		if res != nil || !errors.Is(rerr, ErrUnavailable) {
++			if res != nil {
++				res.Release()
++			}
++			pend.Release()
++			t.Fatalf("canceled ReserveExistingReviewContext = (%v, %v), want (nil, ErrUnavailable)", res, rerr)
++		}
++		pend.Release()
++
++		if st, dig := SealReviewWithDigest(root, launch, sess); st != SealRejected || dig != "" {
++			t.Fatalf("SealReviewWithDigest after canceled Turn 2 = (%v, %q), want (SealRejected, \"\")", st, dig)
++		}
++	})
++
++	t.Run("earlier-timeout-preserves-original-seq-below-later-success", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-e82e8202-1111-4111-8111-111111111102"
++		sess := "019d0000-0000-7000-8000-00000000ec02"
++		runCleanTurn(t, root, launch, sess, "resp_ord_1", "VERDICT: BLOCK")
++
++		// Turn 2 arrives BEFORE Turn 3 and gets the lower TurnSeq.
++		pend2, err := BeginPendingReviewContext(context.Background(), root, launch)
++		if err != nil {
++			t.Fatalf("pend2: %v", err)
++		}
++		pend3, err := BeginPendingReviewContext(context.Background(), root, launch)
++		if err != nil {
++			pend2.Release()
++			t.Fatalf("pend3: %v", err)
++		}
++		if pend2.TurnSeq() >= pend3.TurnSeq() {
++			pend2.Release()
++			pend3.Release()
++			t.Fatalf("expected pend2.TurnSeq(%d) < pend3.TurnSeq(%d)", pend2.TurnSeq(), pend3.TurnSeq())
++		}
++
++		// Hold entry.mu so Turn 2 times out waiting on entry.mu while Turn 3 waits to proceed later.
++		key := filepath.Clean(root) + "\x00" + launch
++		reviewMu.Lock()
++		entry := reviewLedger[key]
++		reviewMu.Unlock()
++		entry.mu.Lock()
++
++		shortCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
++		defer cancel()
++		if res2, _, rerr := ReserveExistingReviewContext(shortCtx, root, launch, pend2.TurnSeq()); res2 != nil || !errors.Is(rerr, ErrUnavailable) {
++			entry.mu.Unlock()
++			pend2.Release()
++			pend3.Release()
++			t.Fatalf("Turn 2 ReserveExistingReviewContext = (%v, %v), want (nil, ErrUnavailable)", res2, rerr)
++		}
++		pend2.Release()
++		entry.mu.Unlock()
++
++		// Now Turn 3 (higher seq) runs cleanly to completion and MUST SealOK!
++		res3, existed, err := ReserveExistingReviewContext(context.Background(), root, launch, pend3.TurnSeq())
++		if err != nil || !existed || res3 == nil {
++			pend3.Release()
++			t.Fatalf("Turn 3 ReserveExistingReviewContext = (%v, %v, %v)", res3, existed, err)
++		}
++		res3.AttachPendingSlot(pend3)
++		pend3.Release()
++		ctx3, c3, err := BeginReviewReserved(context.Background(), res3, sess, "gpt-6.2-sol")
++		if err != nil {
++			res3.Release()
++			t.Fatalf("BeginReviewReserved turn 3: %v", err)
++		}
++		ctx3, e3, err := c3.Start(ctx3, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c3.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx3, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx3, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c3, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_ord_3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++		e3.End()
++		c3.Complete(true)
++		c3.HandlerDone(true)
++
++		if st, dig := SealReviewWithDigest(root, launch, sess); st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("SealReviewWithDigest after older timeout + newer clean Turn 3 = (%v, %q), want SealOK", st, dig)
++		}
++	})
++
++	t.Run("stalled-initial-persist-honors-deadline", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-e82e8203-1111-4111-8111-111111111103"
++
++		enteredSync := make(chan struct{}, 1)
++		releaseSync := make(chan struct{})
++		oldSync := syncDirFn
++		var stalledOnce atomic.Bool
++		syncDirFn = func(path string) error {
++			if strings.Contains(path, launch) && stalledOnce.CompareAndSwap(false, true) {
++				select {
++				case enteredSync <- struct{}{}:
++				default:
++				}
++				<-releaseSync
++			}
++			if oldSync != nil {
++				return oldSync(path)
++			}
++			return nil
++		}
++		defer func() {
++			syncDirFn = oldSync
++			select {
++			case <-releaseSync:
++			default:
++				close(releaseSync)
++			}
++		}()
++
++		pend, err := BeginPendingReviewContext(context.Background(), root, launch)
++		if err != nil {
++			t.Fatalf("BeginPendingReviewContext: %v", err)
++		}
++		shortCtx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
++		defer cancel()
++		start := time.Now()
++		res, rerr := ReserveReviewContext(shortCtx, root, launch, pend.TurnSeq())
++		elapsed := time.Since(start)
++		pend.Release()
++		if res != nil || !errors.Is(rerr, ErrUnavailable) {
++			if res != nil {
++				res.Release()
++			}
++			t.Fatalf("stalled initial ReserveReviewContext = (%v, %v), want (nil, ErrUnavailable)", res, rerr)
++		}
++		if elapsed > 2*time.Second {
++			t.Fatalf("stalled initial ReserveReviewContext blocked %v past 60ms deadline", elapsed)
++		}
++		select {
++		case <-enteredSync:
++		case <-time.After(time.Second):
++			t.Fatal("expected initial persist to enter syncDirFn")
++		}
++		close(releaseSync)
++		drainDeadline := time.Now().Add(2 * time.Second)
++		for {
++			reviewMu.Lock()
++			busyWorkers := failurePersistWorkers
++			reviewMu.Unlock()
++			if len(initialPersistSem) == 0 && busyWorkers == 0 {
++				break
++			}
++			if time.Now().After(drainDeadline) {
++				t.Fatalf("background workers still busy (initialPersistSem=%d failurePersistWorkers=%d) after releasing sync", len(initialPersistSem), busyWorkers)
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++	})
++
++	t.Run("async-disk-taint-never-blocks-caller-and-immediately-blocks-admission", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-e82e8204-1111-4111-8111-111111111104"
++
++		enteredProbe := make(chan struct{}, 1)
++		releaseProbe := make(chan struct{})
++		oldCheck := diskTaintCheckFn
++		diskTaintCheckFn = func(r, l string) (bool, bool) {
++			if l == launch {
++				select {
++				case enteredProbe <- struct{}{}:
++				default:
++				}
++				<-releaseProbe
++				return false, false
++			}
++			return oldCheck(r, l)
++		}
++		defer func() {
++			diskTaintCheckFn = oldCheck
++			select {
++			case <-releaseProbe:
++			default:
++				close(releaseProbe)
++			}
++		}()
++
++		start := time.Now()
++		TaintExistingReview(root, launch)
++		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
++			t.Fatalf("TaintExistingReview on unloaded launch blocked caller %v under stalled storage", elapsed)
++		}
++		<-enteredProbe
++
++		// While disk check is still stalled, admission for that launch MUST fail closed by ctx deadline.
++		taintBlockCtx, taintBlockCancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
++		defer taintBlockCancel()
++		if g, err := BeginPendingReviewContext(taintBlockCtx, root, launch); g != nil || !errors.Is(err, ErrUnavailable) {
++			if g != nil {
++				g.Release()
++			}
++			t.Fatalf("BeginPendingReviewContext while pendingDiskTaintKeys stalled = (%v, %v), want (nil, ErrUnavailable)", g, err)
++		}
++		close(releaseProbe)
++		// Wait for worker to finish and clear nonexistent launch from pendingDiskTaintKeys.
++		deadline := time.Now().Add(2 * time.Second)
++		for {
++			reviewMu.Lock()
++			_, still := pendingDiskTaintKeys[filepath.Clean(root)+"\x00"+launch]
++			busyDiskWorkers := diskTaintWorkers
++			reviewMu.Unlock()
++			if !still && busyDiskWorkers == 0 {
++				break
++			}
++			if time.Now().After(deadline) {
++				t.Fatalf("disk taint worker did not drain (still=%v diskTaintWorkers=%d)", still, busyDiskWorkers)
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++
++		// Cold-restart on-disk unsealed launch (evicted from memory ledger): restore real check hook
++		// after draining worker, then verify TaintExistingReview asynchronously taints on disk and
++		// blocks immediate admission and seal.
++		diskTaintCheckFn = oldCheck
++		coldLaunch := "review-e82e8208-1111-4111-8111-111111111108"
++		coldSess := "019d0000-0000-7000-8000-00000000ec08"
++		runCleanTurn(t, root, coldLaunch, coldSess, "resp_cold_taint", "VERDICT: PASS")
++		coldKey := filepath.Clean(root) + "\x00" + coldLaunch
++		reviewMu.Lock()
++		delete(reviewLedger, coldKey)
++		reviewMu.Unlock()
++
++		TaintExistingReview(root, coldLaunch)
++		if g, err := BeginPendingReviewContext(context.Background(), root, coldLaunch); g != nil || !errors.Is(err, ErrUnavailable) {
++			if g != nil {
++				g.Release()
++			}
++			t.Fatalf("BeginPendingReviewContext on cold-restarted tainted launch = (%v, %v), want (nil, ErrUnavailable)", g, err)
++		}
++		if st, dig := SealReviewWithDigest(root, coldLaunch, coldSess); st != SealRejected || dig != "" {
++			t.Fatalf("SealReviewWithDigest on cold-restarted tainted launch = (%v, %q), want (SealRejected, \"\")", st, dig)
++		}
++		drainCold := time.Now().Add(2 * time.Second)
++		for {
++			reviewMu.Lock()
++			busy := diskTaintWorkers
++			reviewMu.Unlock()
++			if busy == 0 {
++				break
++			}
++			if time.Now().After(drainCold) {
++				t.Fatalf("cold-restart disk taint worker did not drain (busy=%d)", busy)
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++	})
++
++	t.Run("content-part-added-refusal-requires-string-field", func(t *testing.T) {
++		runSSECase := func(t *testing.T, launch, sess, partJSON string) (SealStatus, string) {
++			t.Helper()
++			root := filepath.Join(t.TempDir(), "receipts")
++			ctx, c, err := BeginReview(context.Background(), root, launch, sess, "gpt-6.2-sol")
++			if err != nil {
++				t.Fatalf("BeginReview: %v", err)
++			}
++			ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++			if err != nil {
++				t.Fatalf("c.Start: %v", err)
++			}
++			cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			})})
++			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++			resp, err := cl.Do(req)
++			if err != nil {
++				t.Fatalf("cl.Do: %v", err)
++			}
++			_, _ = io.Copy(io.Discard, resp.Body)
++			_ = resp.Body.Close()
++			stream := strings.Join([]string{
++				`event: response.created`,
++				`data: {"type":"response.created","response":{"id":"resp_cpa_ref","status":"in_progress","model":"gpt-6.2-sol"}}`,
++				``,
++				`event: response.output_item.added`,
++				`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress"}}`,
++				``,
++				`event: response.content_part.added`,
++				fmt.Sprintf(`data: {"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"part":%s}`, partJSON),
++				``,
++				`event: response.refusal.done`,
++				`data: {"type":"response.refusal.done","item_id":"msg_1","output_index":0,"content_index":0,"refusal":""}`,
++				``,
++				`event: response.output_item.done`,
++				`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":""},{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++				``,
++				`event: response.completed`,
++				`data: {"type":"response.completed","response":{"id":"resp_cpa_ref","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":""},{"type":"output_text","text":"VERDICT: PASS"}]}]}}`,
++				``,
++				``,
++			}, "\n")
++			observeStrictSSEForTest(c, []byte(stream))
++			e.End()
++			c.Complete(true)
++			c.HandlerDone(true)
++			return SealReviewWithDigest(root, launch, sess)
++		}
++
++		if st, dig := runSSECase(t, "review-e82e8205-1111-4111-8111-111111111105", "019d0000-0000-7000-8000-00000000ec05", `{"type":"refusal"}`); st != SealRejected || dig != "" {
++			t.Fatalf("missing refusal field in content_part.added = (%v, %q), want (SealRejected, \"\")", st, dig)
++		}
++		if st, dig := runSSECase(t, "review-e82e8206-1111-4111-8111-111111111106", "019d0000-0000-7000-8000-00000000ec06", `{"type":"refusal","refusal":null}`); st != SealRejected || dig != "" {
++			t.Fatalf("null refusal field in content_part.added = (%v, %q), want (SealRejected, \"\")", st, dig)
++		}
++		if st, dig := runSSECase(t, "review-e82e8207-1111-4111-8111-111111111107", "019d0000-0000-7000-8000-00000000ec07", `{"type":"refusal","refusal":""}`); st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("empty string refusal field in content_part.added = (%v, %q), want SealOK", st, dig)
++		}
++	})
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
 new file mode 100644
