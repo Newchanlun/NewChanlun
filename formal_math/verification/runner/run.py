@@ -3,16 +3,27 @@
 必须以 `python3 -I` 运行。退出码 0 七步全绿、1 某步判红、2 无法判定（含 --until 提前停下）。"""
 import sys
 
-# 隔离模式之前不导入任何标准库模块：不带 -I 时脚本所在目录在模块搜索路径最前面，同目录的 json.py 之类会顶替标准库。
+# 隔离检查。不带 -I 时脚本所在目录排在模块搜索路径最前面，同目录的 json.py、re.py 之类会顶替标准库，
+# 所以检查通过之前只用内建模块：sys 与 posix 都在 sys.builtin_module_names 里（本机 Python 3.14.4 实测），
+# 由 BuiltinImporter 在路径查找之前加载，路径上的同名文件顶替不了；os 不是内建模块，这里不用。
+# 失败时先定下退出，再尽力写两行诊断（写不出就算了），最后 posix._exit(2)：不走异常处理与收尾钩子，
+# 解释器不会再为打印回溯或刷新流去导入任何模块。
 if not sys.flags.isolated:
-    sys.stderr.write("FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行\n")
-    sys.stdout.write("FM RESULT FAULT prepare NOT_ISOLATED\n")
-    raise SystemExit(2)
+    import posix
+    for fd, line in ((2, "FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行\n"),
+                     (1, "FM RESULT FAULT prepare NOT_ISOLATED\n")):
+        try:
+            posix.write(fd, line.encode())
+        except BaseException:  # noqa: BLE001
+            pass
+    posix._exit(2)
 
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import signal  # noqa: E402
+import stat  # noqa: E402
 import subprocess  # noqa: E402
 import time  # noqa: E402
 import unicodedata  # noqa: E402
@@ -40,6 +51,10 @@ GIT_ENV = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C", "GIT_NO_RE
            "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
 TIMEOUT = {"git": 600, "precheck": 600, "auditor": 3600, "headers": 600, "build": 4 * 3600, "env": 3600}
 LIMIT = 400
+
+
+# 一次运行的全局状态：当前步骤、标准输出是否写失败过、结果行是否已写过、正在运行的子进程。
+STATE = {"step": "prepare", "output": None, "result": False, "child": None}
 
 
 class Fault(Exception):
@@ -96,24 +111,37 @@ def log(tag, data):
             emit(2, "LOG", tag, line)
 
 
+def kill_group(p):
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 def call(argv, timeout, code, tag, merge=False, **kw):
-    """起子进程，标准错误（merge 时连同标准输出）捕获后经 log() 写出；超时、起不来都是 Fault。"""
-    if "input" not in kw:
-        kw.setdefault("stdin", subprocess.DEVNULL)
+    """起子进程（独立进程组），标准错误（merge 时连同标准输出）捕获后经 log() 写出；子进程从不继承本进程的
+    标准输出与标准错误。超时则杀掉整个进程组；超时、起不来都是 Fault。"""
+    data = kw.pop("input", None)
+    kw["stdin"] = subprocess.PIPE if data is not None else subprocess.DEVNULL
     kw["stderr"] = subprocess.STDOUT if merge else subprocess.PIPE
-    if merge:
+    if merge or kw.get("stdout") is None:
         kw["stdout"] = subprocess.PIPE
     try:
-        p = subprocess.run(argv, timeout=timeout, **kw)
-    except subprocess.TimeoutExpired as e:
-        log(tag, e.stdout if merge else e.stderr)
-        raise Fault(code, argv[0], "超时（%d 秒）" % timeout)
+        p = subprocess.Popen(argv, start_new_session=True, **kw)
     except OSError as e:
         raise Fault(code, argv[0], "%s: %s" % (type(e).__name__, e.strerror or e))
-    log(tag, p.stdout if merge else p.stderr)
-    if merge:
-        p.stdout = None
-    return p
+    STATE["child"] = p
+    try:
+        out, err = p.communicate(data, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group(p)
+        out, err = p.communicate()
+        log(tag, out if merge else err)
+        raise Fault(code, argv[0], "超时（%d 秒）" % timeout)
+    finally:
+        STATE["child"] = None
+    log(tag, out if merge else err)
+    return subprocess.CompletedProcess(argv, p.returncode, None if merge else out, err)
 
 
 # ---- git 对象 ----
@@ -519,30 +547,65 @@ def step_shape(ctx):
 
 # ---- 第 6 步：沙箱构建 ----
 
-def artifact_reds(ctx, lib):
-    """产物目录：不得经由符号链接；顶层只许内容根（第 7 步的搜索路径上被审产物排在工具链库之前，
-    别的根会遮住 Init 等库模块）；`.olean` 的集合须恰好等于内容模块。"""
-    reds = []
-    if os.path.lexists(lib) and (os.path.realpath(lib) != lib or not os.path.isdir(lib)):
-        return [("ARTIFACT_ROOT", "formal_math/.lake/build/lib/lean", "产物目录是符号链接、经由符号链接或不是目录")]
-    for name in sorted(os.listdir(lib)) if os.path.isdir(lib) else []:
-        if name.split(".")[0] not in ROOT_NAMES:
-            reds.append(("ARTIFACT_ROOT", "formal_math/.lake/build/lib/lean/" + name, "产物目录顶层只许内容根"))
-    built = set()
-    for d, dirs, names in os.walk(lib):
-        for n in dirs + names:
-            full = os.path.join(d, n)
-            if os.path.islink(full):
-                reds.append(("ARTIFACT_ROOT", "formal_math/.lake/build/lib/lean/" + os.path.relpath(full, lib),
-                             "产物目录里不许符号链接"))
-            elif n.endswith(".olean") and n in names:
-                built.add(os.path.relpath(full, lib)[:-6].replace(os.sep, "."))
-    for module in sorted(set(ctx.modules) - built):
-        reds.append(("NO_ARTIFACT", "formal_math/%s.lean" % module.replace(".", "/"),
-                     "默认目标的构建没有产出这个模块的 .olean"))
-    for module in sorted(built - set(ctx.modules)):
-        reds.append(("EXTRA_ARTIFACT", "formal_math/.lake/build/lib/lean/%s.olean" % module.replace(".", "/"),
-                     "产物目录里有没有源码的模块"))
+# Lake 4.36.0 在 .lake 里为每个内容模块 A/B/C 放的文件（真实仓库与自测构建实测），以及其余允许出现的目录项。
+LIB_SUFFIXES = (".olean", ".olean.hash", ".olean.private", ".olean.private.hash", ".olean.server",
+                ".olean.server.hash", ".ilean", ".ilean.hash", ".ir", ".ir.hash", ".ir.sig", ".ir.sig.hash", ".trace")
+IR_SUFFIXES = (".c", ".c.hash", ".setup.json")
+CONFIG_DIR = re.compile(r"config/[0-9]+")
+CONFIG_FILE = re.compile(r"config/[0-9]+/lakefile\.olean(\.trace)?")
+
+
+def artifact_reds(ctx, lake_dir):
+    """被审构建可写的整个 .lake 逐项过形状表：用 lstat，不跟随符号链接，每个目录都要列得出。
+    - ARTIFACT_ROOT：build/lib/lean 顶层不是内容根（第 7 步的搜索路径上它排在工具链库之前，会遮住 Init 等）；
+    - ARTIFACT_FORM：不是普通文件或目录（符号链接、设备、管道、套接字），目录不是属主可读写进入或带特殊位，
+      文件带执行位或特殊位、属主不可读，目录列不出；
+    - EXTRA_ARTIFACT：形状表外的目录项（名字带多余的点、隐藏名、没有源码的模块、依赖挂载点下有东西等）；
+    - NO_ARTIFACT：内容模块缺 .olean。"""
+    mods = [m.split(".") for m in ctx.modules]
+    prefixes = {"/".join(m[:i]) for m in mods for i in range(1, len(m))}
+    dirs = {"build", "packages", "config", "build/lib", "build/lib/lean", "build/ir"}
+    dirs |= {"build/lib/lean/" + d for d in prefixes} | {"build/ir/" + d for d in prefixes}
+    files = {"build/lib/lean/" + "/".join(m) + s for m in mods for s in LIB_SUFFIXES}
+    files |= {"build/ir/" + "/".join(m) + s for m in mods for s in IR_SUFFIXES}
+    reds, good = [], set()
+
+    def red(code, rel, msg):
+        reds.append((code, "formal_math/.lake/" + rel if rel else "formal_math/.lake", msg))
+
+    def visit(rel):
+        path = os.path.join(lake_dir, rel) if rel else lake_dir
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return red("ARTIFACT_FORM", rel, "读不到目录项")
+        kind, mode = st.st_mode, stat.S_IMODE(st.st_mode)
+        if rel.startswith("build/lib/lean/") and rel.count("/") == 3 and \
+                rel.rsplit("/", 1)[1].split(".")[0] not in ROOT_NAMES:
+            return red("ARTIFACT_ROOT", rel, "产物目录顶层只许内容根")
+        if not (stat.S_ISDIR(kind) or stat.S_ISREG(kind)):
+            return red("ARTIFACT_FORM", rel, "不是普通文件或目录")
+        if rel and not (rel in dirs or CONFIG_DIR.fullmatch(rel) if stat.S_ISDIR(kind)
+                        else rel in files or CONFIG_FILE.fullmatch(rel)):
+            return red("EXTRA_ARTIFACT", rel, "形状表外的目录项")
+        if stat.S_ISREG(kind):
+            if mode & 0o7111 or not mode & 0o400:
+                return red("ARTIFACT_FORM", rel, "文件模式 %o 不合（不许执行位与特殊位，属主须可读）" % mode)
+            good.add(rel)
+            return
+        if mode & 0o7000 or mode & 0o700 != 0o700:
+            return red("ARTIFACT_FORM", rel, "目录模式 %o 不合（属主须可读写进入，不许特殊位）" % mode)
+        try:
+            names = sorted(os.listdir(path))
+        except OSError:
+            return red("ARTIFACT_FORM", rel, "目录列不出")
+        for name in names:
+            visit(rel + "/" + name if rel else name)
+
+    visit("")
+    for m in mods:
+        if "build/lib/lean/%s.olean" % "/".join(m) not in good:
+            reds.append(("NO_ARTIFACT", "formal_math/%s.lean" % "/".join(m), "默认目标的构建没有产出这个模块的 .olean"))
     return reds
 
 
@@ -559,8 +622,8 @@ def step_build(ctx):
                 merge=True)
     if p.returncode:
         return [("BUILD_WFAIL", b"formal_math/lakefile.toml", "lake build --wfail 退出 %d" % p.returncode)], ""
-    reds = artifact_reds(ctx, os.path.join(lake_dir, "build", "lib", "lean"))
-    return reds, "%d 个模块都有产物" % len(ctx.content)
+    reds = artifact_reds(ctx, lake_dir)
+    return reds, "" if reds else "%d 个模块都有产物，.lake 全部目录项合乎形状表" % len(ctx.content)
 
 
 # ---- 第 7 步：环境层与声明锁 ----
@@ -659,20 +722,49 @@ def prepare(argv):
     return ctx
 
 
+def finish(status, *fields):
+    """结果行：整次运行至多写一次，用一次 os.write 写整行（不超过 PIPE_BUF，管道上要么整行写出要么一字未写）。
+    返回是否整行写出。"""
+    if STATE["result"]:
+        return False
+    STATE["result"] = True
+    try:
+        parts = [safe(f) for f in fields[:-1]] + [safe(fields[-1], spaces=True)]
+        data = ("FM RESULT %s %s\n" % (status, " ".join(parts))).encode("utf-8")
+        return len(data) <= 4096 and os.write(1, data) == len(data)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def on_signal(signum, frame):
+    """SIGINT、SIGTERM：杀掉正在运行的子进程组，尽力写一行 FAULT 与结果行，立即以 2 退出。"""
+    if STATE["child"] is not None:
+        kill_group(STATE["child"])
+    emit(2, "FAULT", STATE["step"], "SIGNAL", "-", "运行脚本收到信号 %d，中止" % signum)
+    finish("FAULT", STATE["step"], "SIGNAL")
+    os._exit(2)
+
+
 def main(argv, steps=STEP_FUNCS, start=1):
     """start 只给自测的旁路用例用（从第 2 步直接起跑）；命令行入口恒从第 1 步开始。
-    任何异常都落成无法判定：标准错误一行 FM FAULT，标准输出最后一行 FM RESULT FAULT，退 2。"""
-    state = {"step": "prepare", "output": None}
+    标准输出至多一行结果行；有绿结果行则退出码为 0；退出码为 0 则恰有一行绿结果行且它是标准输出最后一行。"""
+    STATE.update(step="prepare", output=None, result=False, child=None)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, on_signal)
 
     def out(kind, *fields):
         err = emit(1, kind, *fields)
-        if err is not None and state["output"] is None:
-            state["output"] = err
+        if err is not None and STATE["output"] is None:
+            STATE["output"] = err
 
     def fault(f):
         code, obj, msg = (tuple(f.args) + ("-", "-", "-"))[:3]
-        emit(2, "FAULT", state["step"], code, obj, msg)
-        emit(1, "RESULT", "FAULT", state["step"], code)
+        emit(2, "FAULT", STATE["step"], code, obj, msg)
+        finish("FAULT", STATE["step"], code)
+        return 2
+
+    def lost():
+        emit(2, "FAULT", "output", "OUTPUT", "stdout", "结果行写不出")
         return 2
 
     try:
@@ -691,9 +783,9 @@ def main(argv, steps=STEP_FUNCS, start=1):
             if n < start:
                 continue
             if n > ctx.until:
-                out("RESULT", "PARTIAL", "只跑到第 %d 步，没有做完整判定" % ctx.until)
+                finish("PARTIAL", "只跑到第 %d 步，没有做完整判定" % ctx.until)
                 return 2
-            state["step"], began = name, time.monotonic()
+            STATE["step"], began = name, time.monotonic()
             try:
                 reds, note = step(ctx)
             except Exception:
@@ -703,13 +795,11 @@ def main(argv, steps=STEP_FUNCS, start=1):
                 out("RED", name, code, obj, msg)
             out("STEP", n, name, "RED" if reds else "GREEN", "%.1fs" % (time.monotonic() - began), note)
             if reds:
-                out("RESULT", "RED", "第 %d 步 %s 判红，后面的步骤没有跑" % (n, name))
-                return 1
-        out("RESULT", "GREEN", "七步全绿（第 5 步源码形状未安装）")
-        if state["output"] is not None:
-            state["step"] = "output"
-            return fault(Fault("OUTPUT", "stdout", "输出写不出：%s" % type(state["output"]).__name__))
-        return 0
+                return 1 if finish("RED", "第 %d 步 %s 判红，后面的步骤没有跑" % (n, name)) else lost()
+        if STATE["output"] is not None:
+            STATE["step"] = "output"
+            return fault(Fault("OUTPUT", "stdout", "前面有输出行写不出：%s" % type(STATE["output"]).__name__))
+        return 0 if finish("GREEN", "七步全绿（第 5 步源码形状未安装）") else lost()
     except Fault as f:
         return fault(f)
     except Exception as e:  # noqa: BLE001  意外一律归入无法判定

@@ -10,6 +10,8 @@
 须先 `source scripts/fm_env.sh`，并整体包在 `flock <lean.lock> guard.sh` 里跑。"""
 import json
 import os
+import signal
+import stat
 import re
 import shutil
 import subprocess
@@ -65,6 +67,8 @@ def probe(ctx, step, binds, env, cwd):
 def patched(ctx, cmd, binds, env, cwd, *a, **k):
     if mode == "probe" and (cmd[:2] == ["lake", "build"] or cmd[0] == getattr(ctx, "auditor", None) and cmd[1] == "env"):
         probe(ctx, "build" if cmd[0] == "lake" else "env", binds, env, cwd)
+    if mode.startswith("sig-") and cmd[0] == getattr(ctx, "auditor", None) and cmd[1] == mode[4:]:
+        return orig(ctx, ["/bin/sh", "-c", "kill -KILL $$"], binds, env, cwd, *a, **k)
     p = orig(ctx, cmd, binds, env, cwd, *a, **k)
     if cmd[0] != getattr(ctx, "auditor", None):
         return p
@@ -99,6 +103,13 @@ sys.exit(run.main(argv, steps=steps, start=2 if mode == "bypass" else 1))
 def read(path):
     with open(path, "rb") as f:
         return f.read()
+
+
+def rmtree(path):
+    """被审构建可能留下属主不可列出的目录（模式 0111），先放开属主权限再删。"""
+    if os.path.lexists(path):
+        subprocess.run(["chmod", "-R", "u+rwx", path], capture_output=True)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class Repo:
@@ -232,7 +243,7 @@ class Suite:
         return self.repo.commit({**self.lite_files, **extra}, self.lite_base)
 
     def run(self, name, head, branch="proof/selftest", base=None, extra=(), mode=None, keep=False, workdir=None,
-            repo=None, lite=False, env=None, argv=None):
+            repo=None, lite=False, env=None, argv=None, umask=None):
         work = workdir or self.workdir(name)
         if argv is None:
             argv = ["--repo", (repo or self.repo).path, "--base", base or (self.lite_base if lite else self.base),
@@ -241,11 +252,12 @@ class Suite:
         cmd = [sys.executable, "-I", RUN, *argv] if mode is None else \
             [sys.executable, "-I", os.path.join(self.tmp, "driver.py"), RUN, mode, *argv]
         p = subprocess.run(cmd, capture_output=True, env={"PATH": os.environ["PATH"], CANARY: "leak-canary",
-                                                          "HOME": os.environ.get("HOME", "/"), **(env or {})})
+                                                          "HOME": os.environ.get("HOME", "/"), **(env or {})},
+                           preexec_fn=None if umask is None else (lambda: os.umask(umask)))
         res = parse_result(p)
         res["work"] = work
-        if not keep and os.path.isdir(work):
-            shutil.rmtree(work)
+        if not keep:
+            rmtree(work)
         return res
 
 
@@ -254,7 +266,8 @@ def parse_result(p):
     reds = {line.split(" ")[3] for line in out.splitlines() if line.startswith("FM RED ")}
     steps = re.findall(r"^FM STEP (\d) (\S+) (\S+)", out, re.M)
     faults = re.findall(r"^FM FAULT \S+ (\S+)", err, re.M)
-    return dict(rc=p.returncode, reds=reds, steps=steps, faults=faults, out=out, err=err,
+    pairs = {tuple(line.split(" ")[3:5]) for line in out.splitlines() if line.startswith("FM RED ")}
+    return dict(rc=p.returncode, reds=reds, steps=steps, faults=faults, out=out, err=err, pairs=pairs,
                 out_b=p.stdout, err_b=p.stderr)
 
 
@@ -341,7 +354,7 @@ def skeleton(s):
         r = s.run("S2-r5b1", hijack, branch="infra/hijack", extra=["--trusted-change-approved"], keep=True)
         good = r["rc"] == 1 and r["reds"] == {"PATH_SCOPE"} and last_step(r) == "precheck" and \
             len(r["steps"]) == 1 and not os.path.exists(os.path.join(r["work"], "trusted"))
-        shutil.rmtree(r["work"])
+        rmtree(r["work"])
         return check("S2 R5-B1 劫持在第 1 步预检判红，后续步骤没跑", good, r)
 
     @case("S3")
@@ -355,7 +368,7 @@ def skeleton(s):
             r["steps"][0][:2] == ("2", "fetch") and ("binary=%s " % binary) in r["out"] and \
             read(os.path.join(work, "audited", "lakefile.toml")) == s.base_files["formal_math/lakefile.toml"] and \
             not planted
-        shutil.rmtree(work)
+        rmtree(work)
         return check("S3 绕过预检从第 2 步起跑：配置仍取自基线、执行的是受信目录的审计程序、假 main 没跑", good, r,
                      "哨兵=%s" % (planted or "无"))
 
@@ -373,7 +386,7 @@ def skeleton(s):
         got = os.path.join(r["work"], "audited", "Chan", "Thm", "Attr.lean")
         same = os.path.isfile(got) and read(got) == attr_file and (os.stat(got).st_mode & 0o7777) == 0o644
         good = r["rc"] == 0 and same and b"Attr.lean" not in archived
-        shutil.rmtree(r["work"])
+        rmtree(r["work"])
         return check("S4 .gitattributes（export-ignore、filter、eol）不影响取料：文件在、逐字节相同、模式 0644", good, r,
                      "对照：git archive %s 该文件" % ("不含" if b"Attr.lean" not in archived else "含"))
 
@@ -394,7 +407,7 @@ def skeleton(s):
         good = r["rc"] == 1 and r["reds"] == {"IMPORT_EDGE", "IMPORT_SOURCE"} and \
             [x[1] for x in r["steps"]] == ["precheck", "fetch", "auditor", "headers"] and \
             not os.path.exists(os.path.join(r["work"], "audited", ".lake"))
-        shutil.rmtree(r["work"])
+        rmtree(r["work"])
         return check("S6a 第 4 步判红后第 5–7 步没跑（无步骤行，构建目录不存在）", good, r)
 
     broken = s.lite({"formal_math/Chan/Thm/Broken.lean": (M + "theorem broken : 1 = 2 := rfl\n").encode()})
@@ -426,8 +439,10 @@ def skeleton(s):
                         read(os.path.join(audited, p)) == files["formal_math/" + p]
                         for p in ("lake-manifest.json", "Chan/Base.lean"))
         inside = os.path.isfile(os.path.join(audited, ".lake", "inside-ok"))
-        good = r["rc"] == 0 and not leaked and inside and untouched and snapshot(repo.path) == before
-        shutil.rmtree(work)
+        # 正对照写进 .lake 的文件不在形状表里，第 6 步因此恰好报这一条 EXTRA_ARTIFACT。
+        good = r["rc"] == 1 and r["pairs"] == {("EXTRA_ARTIFACT", "formal_math/.lake/inside-ok")} and not leaked and \
+            inside and untouched and snapshot(repo.path) == before
+        rmtree(work)
         return check("S7 被审代码在构建期执行，但被审工作区源码、配置与工作区之外都没有被写入", good, r,
                      "工作区内对照=%s 源码配置未变=%s 外泄=%s" % (inside, untouched, leaked or "无"))
 
@@ -522,7 +537,7 @@ def skeleton(s):
             wrote = os.path.exists(os.path.join(r2["work"], "audited"))
             good = r2["rc"] == 2 and r2["faults"] == ["GIT"] and [x[1:] for x in r2["steps"]] == [
                 ("fetch", "FAULT")] and not wrote
-            shutil.rmtree(r2["work"])
+            rmtree(r2["work"])
             ok2 = check("%s 同一提交绕过预检：取料按对象读取时失败退 2，不写出被审工作区（纵深防御）" % cid, good, r2)
             return ok1 and ok2
 
@@ -561,24 +576,45 @@ def skeleton(s):
         time.sleep(2)
         after = os.path.getsize(tick) if os.path.exists(tick) else -1
         good = r["rc"] == 2 and r["faults"] == ["BUILD"] and "超时" in r["err"] and size > 0 and size == after
-        shutil.rmtree(r["work"])
+        rmtree(r["work"])
         return check("S19 第 6 步超时（自测把时限改成 30 秒）：退 2，沙箱里的进程随之结束", good, r,
                      "tick 字节数 %d → %d（2 秒后）" % (size, after))
 
-    plant = s.lite({"formal_math/ChanExplore/Plant.lean": (
-        M + '#eval show IO Unit from do\n'
-            '  IO.FS.createDirAll ".lake/build/lib/lean/Init"\n'
-            '  IO.FS.writeFile ".lake/build/lib/lean/Init/Fake.olean" ""\n'
-            '  IO.FS.createDirAll ".lake/build/lib/lean/Chan"\n'
-            '  IO.FS.writeFile ".lake/build/lib/lean/Chan/Ghost.olean" ""\n'
-            '  let _ ← IO.Process.output {cmd := "ln", args := #["-s", "/etc/hostname", '
-            '".lake/build/lib/lean/Chan/Link.olean"]}\n').encode()})
+    def shell(script, imports=()):
+        """被审模块在构建期跑一段 shell；imports 里的模块先于它构建。"""
+        head = "module\n\n" + "".join("public import %s\n" % m for m in imports) + "\npublic section\n\n"
+        return (head + '#eval show IO Unit from do\n  let _ ← IO.Process.output {cmd := "/bin/sh", args := #["-c", %s]}\n'
+                % json.dumps(script)).encode()
+
+    plant = s.lite({"formal_math/ChanExplore/Plant.lean": shell(
+        "L=.lake/build/lib/lean; mkdir -p $L/Init && : > $L/Init/Fake.olean; : > $L/Chan/Ghost.olean; "
+        "ln -s /etc/hostname $L/Chan/Link.olean; : > $L/Chan/Base.x.olean; mkfifo $L/Chan/Pipe.olean; "
+        "mkdir $L/Chan/Dir.olean; : > .lake/stray; mkdir -p .lake/build/bin && : > .lake/build/bin/x; "
+        ": > $L/ChanDyn/Ghost2.olean && chmod 111 $L/ChanDyn", ("Chan", "Chan.Base", "ChanDyn.Base"))})
+    L = "formal_math/.lake/build/lib/lean/"
+    plant_pairs = {("ARTIFACT_ROOT", L + "Init"), ("EXTRA_ARTIFACT", L + "Chan/Ghost.olean"),
+                   ("ARTIFACT_FORM", L + "Chan/Link.olean"), ("EXTRA_ARTIFACT", L + "Chan/Base.x.olean"),
+                   ("ARTIFACT_FORM", L + "Chan/Pipe.olean"), ("EXTRA_ARTIFACT", L + "Chan/Dir.olean"),
+                   ("EXTRA_ARTIFACT", "formal_math/.lake/stray"), ("EXTRA_ARTIFACT", "formal_math/.lake/build/bin"),
+                   ("ARTIFACT_FORM", L + "ChanDyn"), ("NO_ARTIFACT", "formal_math/ChanDyn/Base.lean")}
 
     @case("S20")
     def _():
         r = s.run("S20-artifacts", plant, lite=True)
-        good = r["rc"] == 1 and r["reds"] == {"ARTIFACT_ROOT", "EXTRA_ARTIFACT"} and last_step(r) == "build"
-        return check("S20 构建在产物目录里放 Init、没有源码的模块与符号链接：第 6 步 ARTIFACT_ROOT、EXTRA_ARTIFACT", good, r)
+        good = r["rc"] == 1 and r["pairs"] == plant_pairs and last_step(r) == "build"
+        return check("S20 构建往 .lake 里放 Init、没有源码的模块、名字带多余点的 .olean、名为 .olean 的目录、符号链接、"
+                     "管道、杂项文件与目录、把内容目录改成 0111：每一项按形状表各报其码（逐项比对红码与路径）", good, r,
+                     "多出=%s 缺少=%s" % (sorted(r["pairs"] - plant_pairs), sorted(plant_pairs - r["pairs"])))
+
+    relink = s.lite({"formal_math/ChanExplore/Relink.lean": shell(
+        "mv .lake/build/lib/lean .lake/build/lib/real && ln -s real .lake/build/lib/lean", ("Chan", "Chan.Base"))})
+
+    @case("S28")
+    def _():
+        r = s.run("S28-lib-symlink", relink, lite=True)
+        want = {("ARTIFACT_FORM", "formal_math/.lake/build/lib/lean"), ("EXTRA_ARTIFACT", "formal_math/.lake/build/lib/real")}
+        good = r["rc"] == 1 and want <= r["pairs"] and r["reds"] == {"ARTIFACT_FORM", "EXTRA_ARTIFACT", "NO_ARTIFACT"}
+        return check("S28 构建把 build/lib/lean 换成指向别处的符号链接：ARTIFACT_FORM，且不跟随它去核对", good, r)
 
     nodyn_files = template(lite=True, roots=("Chan", "ChanChallenge", "ChanExplore"))
     nodyn_base = s.repo.commit(nodyn_files)
@@ -617,19 +653,126 @@ def skeleton(s):
                      "第 6 步只有 .lake 可写、第 7 步全只读、受信目录第 6 步不可见", good, r,
                      "第6步=%s 第7步=%s" % (b, e))
 
+    impostors = ("re", "json", "os", "sitecustomize", "traceback", "posix", "sys", "signal", "stat", "time")
+
     @case("S24")
     def _():
         copy = os.path.join(s.tmp, "isolated-copy")
         os.makedirs(copy, exist_ok=True)
         shutil.copy2(RUN, copy)
-        sentinel = os.path.join(s.tmp, "json-py-ran")
-        with open(os.path.join(copy, "json.py"), "w") as f:
-            f.write("open(%r, 'w').close()\nimport sys\nsys.stdout.write('FM RESULT GREEN forged\\n')\n"
-                    "raise SystemExit(0)\n" % sentinel)
-        res = parse_result(subprocess.run([sys.executable, os.path.join(copy, "run.py"), "--repo", s.repo.path],
-                                          capture_output=True, env={"PATH": os.environ["PATH"]}))
-        good = res["rc"] == 2 and res["faults"] == ["NOT_ISOLATED"] and not os.path.exists(sentinel)
-        return check("S24 不带 -I 运行：同目录的 json.py 没有被执行，退 2", good, res)
+        marks = os.path.join(s.tmp, "impostor-marks")
+        os.makedirs(marks, exist_ok=True)
+        for name in impostors:
+            with open(os.path.join(copy, name + ".py"), "w") as f:
+                f.write("open(%r, 'w').close()\nraise SystemExit(0)\n" % os.path.join(marks, name))
+        results = []
+        for label, redirect in (("两路正常", ""), ("标准输出关闭", ">&-"), ("标准错误关闭", "2>&-"),
+                                ("两路都关闭", ">&- 2>&-"), ("标准输出写满", ">/dev/full"), ("标准错误写满", "2>/dev/full")):
+            p = subprocess.run(["/bin/sh", "-c", 'exec "$@" ' + redirect, "sh", sys.executable,
+                                os.path.join(copy, "run.py"), "--repo", s.repo.path],
+                               stdout=subprocess.PIPE if not redirect else subprocess.DEVNULL,
+                               stderr=subprocess.PIPE if not redirect else subprocess.DEVNULL,
+                               env={"PATH": os.environ["PATH"]})
+            ran = sorted(os.listdir(marks))
+            for m in ran:
+                os.unlink(os.path.join(marks, m))
+            ok = p.returncode == 2 and not ran and bool(redirect or p.stdout == b"FM RESULT FAULT prepare NOT_ISOLATED\n")
+            results.append(ok)
+            os.write(1 if ok else 2, ("  S24 %s：rc=%d 冒名模块被执行=%s\n" % (label, p.returncode, ran or "无")).encode())
+        res = dict(rc="-", reds=set(), faults=[], out="", err="")
+        return check("S24 不带 -I 运行（Python %d.%d.%d），两路正常、关闭、写满六种状态：同目录的 %s 都没有被执行，退 2"
+                     % (sys.version_info[:3] + ("、".join(impostors),)), all(results), res, "逐项=%s" % results)
+
+    @case("S25")
+    def _():
+        work = s.workdir("S25-stdout-eagain")
+        argv = [sys.executable, "-I", RUN, "--repo", s.repo.path, "--base", s.lite_base, "--head", lite_green,
+                "--branch", "proof/selftest", "--workdir", work, "--packages", s.fake_packages]
+        rfd, wfd = os.pipe()
+        os.set_blocking(wfd, False)
+        try:
+            while True:
+                os.write(wfd, b"\n" * 65536)
+        except BlockingIOError:
+            pass
+        p = subprocess.Popen(argv, stdout=wfd, stderr=subprocess.PIPE, env={"PATH": os.environ["PATH"],
+                                                                             "HOME": os.environ.get("HOME", "/")})
+        os.close(wfd)
+        time.sleep(0.6)  # 这段时间里开头几行因管道满写不出（EAGAIN），之后读端开始读
+        data = b""
+        while True:
+            chunk = os.read(rfd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        os.close(rfd)
+        err = p.stderr.read()
+        rc = p.wait()
+        rmtree(work)
+        lines = data.lstrip(b"\n").decode("utf-8", "replace").splitlines()
+        results = [l for l in lines if l.startswith("FM RESULT ")]
+        good = rc == 2 and len(results) <= 1 and not any(l.startswith("FM RESULT GREEN") for l in lines)
+        res = dict(rc=rc, reds=set(), faults=re.findall(r"^FM FAULT \S+ (\S+)", err.decode("utf-8", "replace"), re.M),
+                   out="\n".join(lines), err=err.decode("utf-8", "replace"))
+        return check("S25 标准输出一度写不出（满的非阻塞管道）、后来又写得出：退 2，至多一行结果行，没有绿结果行", good, res,
+                     "结果行=%s" % results)
+
+    for cid, sig in (("S26a", signal.SIGINT), ("S26b", signal.SIGTERM)):
+        @case(cid)
+        def _(cid=cid, sig=sig):
+            work = s.workdir(cid + "-signal")
+            argv = [sys.executable, "-I", RUN, "--repo", s.repo.path, "--base", s.lite_base, "--head", spin,
+                    "--branch", "proof/selftest", "--workdir", work, "--packages", s.fake_packages]
+            p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env={"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/")},
+                                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+            tick = os.path.join(work, "audited", ".lake", "tick")
+            for _ in range(900):
+                if os.path.exists(tick):
+                    break
+                time.sleep(0.1)
+            time.sleep(1)
+            p.send_signal(sig)
+            out, err = p.communicate()
+            size = os.path.getsize(tick) if os.path.exists(tick) else -1
+            time.sleep(2)
+            after = os.path.getsize(tick) if os.path.exists(tick) else -1
+            left = subprocess.run(["pgrep", "-f", work], capture_output=True).stdout.strip()
+            rmtree(work)
+            res = parse_result(subprocess.CompletedProcess(argv, p.returncode, out, err))
+            good = res["rc"] == 2 and res["out"].endswith("FM RESULT FAULT build SIGNAL\n") and size > 0 and \
+                size == after and not left
+            return check("%s 第 6 步期间给运行脚本发 %s：写一行 FM RESULT FAULT … SIGNAL 后退 2，沙箱里的进程随之结束"
+                         % (cid, sig.name), good, res, "tick %d → %d 残留进程=%s" % (size, after, left or "无"))
+
+    for cid, step in (("S27a", "headers"), ("S27b", "env")):
+        @case(cid)
+        def _(cid=cid, step=step):
+            r = s.run(cid + "-auditor-signal", lite_green, mode="sig-" + step, lite=True)
+            good = r["rc"] == 2 and r["faults"] == ["SIGNAL"] and r["steps"][-1][1:] == (step, "FAULT")
+            return check("%s 第 %s 步的审计程序被信号杀死：SIGNAL 退 2" % (cid, step), good, r)
+
+    ghost_files = {**s.lite_files, "formal_math/lake-manifest.json":
+                   b'{"version": "1.3.0", "packagesDir": ".lake/packages", "packages": [{"name": "ghost"}], '
+                   b'"name": "fixture", "lakeDir": ".lake", "fixedToolchain": false}\n'}
+    ghost_base = s.repo.commit(ghost_files)
+    ghost_head = s.repo.commit({**ghost_files, **ok_thm}, ghost_base)
+
+    @case("S29")
+    def _():
+        r = s.run("S29-missing-package", ghost_head, base=ghost_base, lite=True)
+        good = r["rc"] == 2 and r["faults"] == ["PACKAGES"] and r["steps"][-1][1:] == ("fetch", "FAULT")
+        return check("S29 基线清单列了依赖目录里没有的包：取料 PACKAGES 退 2", good, r)
+
+    @case("S30")
+    def _():
+        r = s.run("S30-umask", lite_green, lite=True, keep=True, umask=0o077)
+        modes = {rel: oct(stat.S_IMODE(os.stat(os.path.join(r["work"], rel)).st_mode))
+                 for rel in ("audited/Chan", "trusted/verification", "audited/Chan/Base.lean")}
+        rmtree(r["work"])
+        good = r["rc"] == 0 and modes == {"audited/Chan": "0o755", "trusted/verification": "0o755",
+                                          "audited/Chan/Base.lean": "0o644"}
+        return check("S30 umask 077 下取料写出的目录仍是 0755、文件 0644", good, r, "模式=%s" % modes)
 
     # ---- 被审内容与调用方输入进输出的各个入口（B-1、B-2） ----
     inject = "x\nFM STEP 4 headers GREEN 0.1s\nFM RESULT GREEN 七步全绿\u202e "
@@ -655,13 +798,15 @@ def skeleton(s):
                                 ("E4", b'{"\\ud800": "x"}', 2, "INPUT"),
                                 ("E5", b'{"\\ud800": "x", "\\ud800": "y"}', 2, "INPUT"),
                                 ("E6", b'{"k": "\\ud800"}', 2, "INPUT"),
-                                ("E7", b'{"k": NaN}', 2, "INPUT")):
+                                ("E7", b'{"k": NaN}', 2, "INPUT"),
+                                ("E14", b'{"a": "x", "a": "y"}', 2, "INPUT"),
+                                ("E15", b'{"a": "\xff"}', 2, "INPUT")):
         @case(cid)
         def _(cid=cid, lock=lock, rc=rc, want=want):
             head = s.lite({"formal_math/statement-lock.json": lock})
             r = s.run(cid + "-lock", head, branch="decl/lock", lite=True)
             good = r["rc"] == rc and (r["reds"] == {want} if rc == 1 else r["faults"] == [want])
-            return check("%s 锁文件 %s：%s" % (cid, lock.decode(), "红行转义" if rc == 1 else "无法判定退 2，不回溯"),
+            return check("%s 锁文件 %s：%s" % (cid, lock.decode("utf-8", "backslashreplace"), "红行转义" if rc == 1 else "无法判定退 2，不回溯"),
                          good, r)
 
     @case("E8")
@@ -787,8 +932,8 @@ MUTANTS = [
     ("去掉模块数比对", RUNNER, [("if result[3] != len(ctx.modules):", "if False:")], "S5a"),
     ("不核对判定、发现与退出码一致", RUNNER,
      [("(result[2] == \"red\") != bool(findings) or p.returncode != (1 if findings else 0)", "False")], "S5d,S5e"),
-    ("判红后继续跑下一步", RUNNER, [("            if reds:\n                out(\"RESULT\", \"RED\"",
-                              "            if reds and n == 7:\n                out(\"RESULT\", \"RED\"")], "S2,S6a"),
+    ("判红后继续跑下一步", RUNNER, [("            if reds:\n                return 1 if finish(",
+                              "            if reds and n == 7:\n                return 1 if finish(")], "S2,S6a"),
     ("第 6 步受信目录可见可写", RUNNER, [('("--ro-bind", ctx.packages, os.path.join(lake_dir, "packages"))]',
                                  '("--ro-bind", ctx.packages, os.path.join(lake_dir, "packages")), '
                                  '("--bind", ctx.trusted_dir, ctx.trusted_dir)]')], "S22"),
@@ -806,15 +951,37 @@ MUTANTS = [
      "S22"),
     ("沙箱不遮宿主机目录", RUNNER, [('for hidden in ("/home", "/root", "/run", "/var", "/tmp", ctx.workdir):',
                                'for hidden in ("/tmp",):')], "S7,S22"),
-    ("去掉 ARTIFACT_ROOT", RUNNER, [('if name.split(".")[0] not in ROOT_NAMES:', "if False:"),
-                                   ("if os.path.islink(full):", "if False:")], "S20"),
-    ("去掉 NO_ARTIFACT", RUNNER, [("for module in sorted(set(ctx.modules) - built):", "for module in []:")], "S21"),
-    ("去掉 EXTRA_ARTIFACT", RUNNER, [("for module in sorted(built - set(ctx.modules)):", "for module in []:")], "S20"),
+    ("去掉「产物目录顶层只许内容根」（R16）", RUNNER,
+     [('rel.rsplit("/", 1)[1].split(".")[0] not in ROOT_NAMES:', "False:")], "S20"),
+    ("去掉目录项类型检查：符号链接、管道等（R3、R15）", RUNNER,
+     [("if not (stat.S_ISDIR(kind) or stat.S_ISREG(kind)):", "if False:")], "S20,S28"),
+    ("去掉形状表（EXTRA_ARTIFACT）", RUNNER, [('return red("EXTRA_ARTIFACT", rel, "形状表外的目录项")', "pass")], "S20"),
+    ("目录模式异常或列不出时跳过", RUNNER,
+     [('return red("ARTIFACT_FORM", rel, "目录模式 %o 不合（属主须可读写进入，不许特殊位）" % mode)', "return"),
+      ('return red("ARTIFACT_FORM", rel, "目录列不出")', "return")], "S20"),
+    ("去掉 NO_ARTIFACT", RUNNER, [('if "build/lib/lean/%s.olean" % "/".join(m) not in good:', "if False:")], "S21"),
     ("信号死亡不归入无法判定", RUNNER, [("if p.returncode >= 128 or p.returncode < 0:", "if p.returncode < 0:")], "S18"),
+    ("信号判定只对第 6 步构建生效（R5b）", RUNNER,
+     [("if p.returncode >= 128 or p.returncode < 0:", 'if tag == "build" and (p.returncode >= 128 or p.returncode < 0):')],
+     "S27a,S27b"),
     ("输出不转义", RUNNER, [("if 0x21 <= c < 0x7F and c != 0x5C or (spaces and c == 0x20):", "if True:")],
      "E1,E2,E3,E8,E10"),
     ("JSON 不拒孤立代理项", RUNNER, [("if not no_surrogates(value):", "if False:")], "E6"),
+    ("JSON 接受重复键（R2）", RUNNER, [('raise ValueError("重复键")', "pass")], "E14"),
+    ("JSON 不要求合法 UTF-8（R7）", RUNNER, [('json.loads(data.decode("utf-8"),', 'json.loads(data.decode("utf-8", "ignore"),')],
+     "E15"),
+    ("不核对依赖目录里有没有基线清单的包（R8）", RUNNER,
+     [("missing = [n for n in names if not os.path.isdir(os.path.join(ctx.packages, n))]", "missing = []")], "S29"),
+    ("建目录后不 chmod（R14）", RUNNER, [("    os.mkdir(path, mode)\n    os.chmod(path, mode)", "    os.mkdir(path, mode)")],
+     "S30"),
+    ("绿的结论不再要求标准输出都写出去了（R4）", RUNNER,
+     [('        if STATE["output"] is not None:\n            STATE["step"] = "output"',
+       '        if False:\n            STATE["step"] = "output"')], "S25"),
+    ("不装 SIGINT、SIGTERM 处理函数", RUNNER, [("        signal.signal(sig, on_signal)", "        pass")], "S26a,S26b"),
     ("不查隔离模式", RUNNER, [("if not sys.flags.isolated:", "if False:")], "S24"),
+    ("隔离检查失败时的诊断经 sys 的流写、不兜异常（N-1 旧形）", RUNNER,
+     [("        try:\n            posix.write(fd, line.encode())\n        except BaseException:  # noqa: BLE001\n            pass",
+       "        (sys.stderr if fd == 2 else sys.stdout).write(line)")], "S24"),
     ("审计程序加载扩展并运行初始化器", "verification/auditor/Main.lean",
      [("  let env := (← Lean.importModules (mods.map fun m => { module := m }) {}\n    (level := .private))",
        "  Lean.enableInitializersExecution\n"
@@ -872,11 +1039,11 @@ def mutants(packages, jobs):
                                                                 time.monotonic() - began, "；".join(failed) or "—"))
                          .encode())
                 ok = ok and good
-            shutil.rmtree(os.path.join(top, "m%02d" % i), ignore_errors=True)
+            rmtree(os.path.join(top, "m%02d" % i))
         os.write(1, ("弱化自测：%s（%d 种弱化）\n" % ("全部被抓到" if ok else "有弱化没被抓到", len(MUTANTS))).encode())
         return 0 if ok else 1
     finally:
-        shutil.rmtree(top, ignore_errors=True)
+        rmtree(top)
 
 
 def main(argv):
@@ -931,7 +1098,7 @@ def main(argv):
         os.write(1, ("自测：%d/%d 通过（%.0fs）\n" % (sum(results), len(results), time.monotonic() - began)).encode())
         return 0 if all(results) else 1
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rmtree(tmp)
 
 
 if __name__ == "__main__":

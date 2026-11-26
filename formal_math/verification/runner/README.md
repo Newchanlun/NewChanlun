@@ -20,7 +20,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
     --workdir <工作目录> --packages <依赖目录>
 ```
 
-- **必须带 `-I`**（隔离模式）。不带时脚本所在目录排在模块搜索路径最前面，同目录的 `json.py` 之类会顶替标准库，在任何检查之前被执行。`run.py` 开头只用内建的 `sys` 查 `sys.flags.isolated`，不满足就写 `FM FAULT prepare NOT_ISOLATED` 退 2，在这之前不导入任何标准库模块（自测 S24）。#2315 的工作流同样要带 `-I`。
+- **必须带 `-I`**（隔离模式）。不带时脚本所在目录排在模块搜索路径最前面，同目录的 `json.py`、`re.py` 之类会顶替标准库。`run.py` 开头只用内建模块：`sys` 查 `sys.flags.isolated`；不满足时 `import posix`（`sys` 与 `posix` 都在 `sys.builtin_module_names` 里，由内建导入器在路径查找之前加载，路径上的同名文件顶替不了；`os` 不是内建模块，这段不用它），用 `posix.write` 尽力向两路各写一行（写不出就跳过，异常一律吞掉），然后 `posix._exit(2)`：不走异常处理与收尾钩子，解释器不会再为打印回溯或刷新流去导入任何模块。本机 Python 3.14.4 实测（自测 S24）：两路正常、标准输出关闭、标准错误关闭、两路都关闭、标准输出指向 `/dev/full`、标准错误指向 `/dev/full` 六种状态都退 2，同目录放的 `re`、`json`、`os`、`sitecustomize`、`traceback`、`posix`、`sys`、`signal`、`stat`、`time` 十个冒名模块都没有被执行。`-I` 管不到的：不带 `-I` 时若 `PYTHONPATH` 指向别人能写的目录，解释器在执行 `run.py` 第一行之前就会导入那里的 `sitecustomize`；`python3 -I -m run` 不受支持，只能按脚本路径调用。这两条交给 #2315 的工作流（调用一律 `python3 -I <路径>/run.py`，不设 `PYTHONPATH`）。
 - 参数自己解析，不用 `argparse`：选项只认全名，每个最多一次，取值不得为空或以 `-` 开头；`--x=y`、缩写、未知开关、缺项都退 2。没有任何参数组合能在没做完整判定时退 0：`--until <n>`（n<7）跑完前 n 步且全绿时退 2（`FM RESULT PARTIAL`），遇红仍退 1。
 - `--workdir`：调用方给，必须不存在或是空目录，且与仓库检出目录、git 目录、依赖目录互不包含。运行脚本不删除它。
 - `--packages`：依赖目录（Mathlib 等，按基线 `lake-manifest.json` 的包名逐个取 `<依赖目录>/<包名>`）。由调用方准备好；运行脚本不联网、不下载。SafeCode 上是 `/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages`。
@@ -42,10 +42,10 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | 3 | `auditor` | 核对受信 `auditor/lean-toolchain` 与被审工作区的（基线的）工具链文件逐字节相同；`lean --print-prefix` 定位工具链并核对 `lean --version`；在受信目录里 `lake build`。输出审计二进制的路径与 sha256 | — | `TOOLCHAIN_MISMATCH`、`TOOLCHAIN`、`AUDITOR_BUILD` |
 | 4 | `headers` | 沙箱里跑 `fm_audit headers <模块> <路径> …`：审计程序只解析文件头，不加载任何导入。头部白名单的发现由审计程序给出；目录方向表、传递闭包、整库导入 Mathlib 由运行脚本按审计程序给的导入列表判定 | `MODULE_FIRST`、`PRELUDE`、`IMPORT_ALL`、`META_IMPORT`、`IMPORT_PINNED`、`IMPORT_SOURCE`、`HEADER_PARSE`（审计程序）；`WHOLE_MATHLIB`、`IMPORT_EDGE`、`IMPORT_CLOSURE`（运行脚本） | `AUDITOR_OUTPUT`、`MODULE_COUNT`、`AUDITOR`、`SIGNAL` |
 | 5 | `shape` | **空位**，第四片实现。直接通过，输出 `SHAPE 未安装` | — | — |
-| 6 | `build` | 先在同一沙箱里跑 `lean --version` 作探针，再 `lake build --wfail`（基线配置的默认目标）。之后核对产物目录：`.olean` 的模块集合恰好等于 git 树数出的内容模块（少了 `NO_ARTIFACT`，多了 `EXTRA_ARTIFACT`），顶层只有内容根、任何层级都没有符号链接（`ARTIFACT_ROOT`） | `BUILD_WFAIL`、`NO_ARTIFACT`、`EXTRA_ARTIFACT`、`ARTIFACT_ROOT` | `SANDBOX`、`BUILD`（超时）、`SIGNAL`（沙箱内进程被信号终止） |
+| 6 | `build` | 先在同一沙箱里跑 `lean --version` 作探针，再 `lake build --wfail`（基线配置的默认目标）。之后把被审构建可写的整个 `.lake` 逐项过形状表，见下「产物形状表」 | `BUILD_WFAIL`、`NO_ARTIFACT`、`EXTRA_ARTIFACT`、`ARTIFACT_ROOT`、`ARTIFACT_FORM` | `SANDBOX`、`BUILD`（超时）、`SIGNAL`（沙箱顶层进程被信号终止，见「沙箱布局」） |
 | 7 | `env` | 另起沙箱，只读挂载被审工作区（含构建产物）、依赖目录与受信目录，跑 `fm_audit env <模块> …`：门 3 环境层、门 15 暴露检查、门 6a 声明锁的规范序列化。运行脚本对锁行求 sha256，与**被审提交**的 `formal_math/statement-lock.json` 逐项比对 | `ENV_AXIOM`、`ENV_AXIOM_DEP`、`ENV_SORRY`、`ENV_META`、`ENV_EXTERN`、`ENV_UNSAFE`、`ENV_PARTIAL`、`ENV_IMPLEMENTED_BY`、`EXPOSE_SECTION`、`LOCK_CHANGED`、`LOCK_REMOVED`、`LOCK_UNLISTED` | `AUDITOR_OUTPUT`、`MODULE_COUNT`、`INPUT`（锁文件缺失或不是严格 JSON 对象）、`CERTIFICATE`、`AUDITOR`、`SIGNAL` |
 
-运行前的准备（解析参数、解析提交、核对工作目录、受信代码是否齐全、`run.py` 是否就是受信那份）失败时步骤名记 `prepare`，退 2。任何意外异常（含输出函数自身的失败）都归入 `INTERNAL`，退 2，并照样写出结果行 `FM RESULT FAULT`；`__main__` 外面还有一层兜底，连 `main` 的异常处理都失败时也退 2，不会落成 0 或 1。
+运行前的准备（解析参数、解析提交、核对工作目录、受信代码是否齐全、`run.py` 是否就是受信那份）失败时步骤名记 `prepare`，退 2。任何意外异常（含输出函数自身的失败）都归入 `INTERNAL`，退 2，并尝试写结果行 `FM RESULT FAULT`（契约见「输出与退出码」）；`__main__` 外面还有一层兜底，连 `main` 的异常处理都失败时也退 2，不会落成 0 或 1。
 
 ### 取料
 
@@ -59,7 +59,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 
 ### 沙箱布局（第 4、6、7 步）
 
-`bwrap --ro-bind / /`，`/home`、`/root`、`/run`、`/var`、`/tmp` 与**整个工作目录**先盖成空 tmpfs，再按步回绑；`--clearenv` 后只放回 `HOME=/tmp/home`、`TMPDIR=/tmp`、`LANG=C.UTF-8`、`PATH=<工具链>/bin:/usr/bin:/bin`（第 7 步另加 `LEAN_PATH`、`LEAN_SYSROOT`）；`--unshare-all`（断网）、`--die-with-parent`、`--new-session`。`bwrap` 进程本身也只拿到 `PATH` 一个环境变量（两层：调用 `bwrap` 时的环境与 `--clearenv`）。沙箱里的进程被信号杀死时 `bwrap` 以 `128+n` 退出：第 4、6、7 步（含探针）凡是退出码 ≥128 或为负，一律 `SIGNAL` 退 2，不当作判红。超时由 `subprocess` 杀掉 `bwrap`，`--die-with-parent` 带走沙箱里的进程（自测 S19 核对超时后再无写入）。
+`bwrap --ro-bind / /`，`/home`、`/root`、`/run`、`/var`、`/tmp` 与**整个工作目录**先盖成空 tmpfs，再按步回绑；`--clearenv` 后只放回 `HOME=/tmp/home`、`TMPDIR=/tmp`、`LANG=C.UTF-8`、`PATH=<工具链>/bin:/usr/bin:/bin`（第 7 步另加 `LEAN_PATH`、`LEAN_SYSROOT`）；`--unshare-all`（断网）、`--die-with-parent`、`--new-session`。`bwrap` 进程本身也只拿到 `PATH` 一个环境变量（两层：调用 `bwrap` 时的环境与 `--clearenv`）。**信号**：`bwrap` 只转出它直接启动的那个进程（第 4、7 步的审计程序，第 6 步的 `lake` 与探针 `lean --version`）的退出状态。沙箱里由运行脚本直接启动的那个进程以大于等于 128 或负的退出码结束时，归入 `SIGNAL` 退 2（自测 S18、S27）。`lake` 启动的 `lean` 工作进程被杀时，`lake` 把它记成一次构建失败、自己以 1 退出，运行脚本报 `BUILD_WFAIL` 退 1：运行脚本分不清「`lean` 被内核杀掉」与「被审代码自己搞死 `lean`」，构建日志又是被审方可写的。两种情形退出码都非零。超时由运行脚本杀掉 `bwrap` 所在的整个进程组，`--die-with-parent` 带走沙箱里的进程（自测 S19 核对超时后再无写入）。
 
 | 步 | 被审工作区 | `.lake` | 依赖目录 | 受信目录 | 工具链 |
 |---|---|---|---|---|---|
@@ -67,7 +67,32 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | 6 | 只读 | **可写** | 只读挂到 `.lake/packages` | 不挂（被 tmpfs 盖住） | 只读 |
 | 7 | 只读（含产物） | 只读 | 只读，挂在原路径 | 只读 | 只读 |
 
-审计二进制永远是第 3 步在受信目录里构建的那一个，运行脚本按绝对路径执行它，不对被审包调用 `lake exe`。第 7 步的搜索路径由运行脚本按基线清单拼出：依赖包的 `.lake/build/lib/lean` 在前，被审产物在后，工具链自带的库由 Lean 追加在最后；第 6 步因此另查产物目录顶层只许内容根，免得被审构建在那里放一个 `Init` 或别的库根去遮住真库（`ARTIFACT_ROOT`）。
+审计二进制永远是第 3 步在受信目录里构建的那一个，运行脚本按绝对路径执行它，不对被审包调用 `lake exe`。第 7 步的搜索路径由运行脚本按基线清单拼出：依赖包的 `.lake/build/lib/lean` 在前，被审产物在后，工具链自带的库由 Lean 追加在最后；第 6 步因此逐项核对 `.lake`（见下）；第 7 步的搜索路径里被审方的部分只有 `.lake/build/lib/lean`，它是核对过的那一部分，审计程序也只经搜索路径读产物。
+
+### 产物形状表（第 6 步，`artifact_reds()`）
+
+被审构建在沙箱里只能写 `.lake`。构建结束后运行脚本从 `.lake` 起递归遍历每一个目录项：用 `lstat`，不跟随符号链接；每个目录都必须列得出，列不出不跳过而是判红。形状表按 Lake 4.36.0 实际放的东西列（真实仓库与自测构建实测）：
+
+| 位置 | 允许的目录项 |
+|---|---|
+| `.lake/` | 目录 `build`、`packages`、`config` |
+| `.lake/packages/` | 空（依赖目录在沙箱里只读挂在这里，宿主机这一侧的挂载点不会有东西） |
+| `.lake/config/` | 目录 `<数字>`，其中只有文件 `lakefile.olean`、`lakefile.olean.trace`（Lake 为依赖包的 `lakefile.lean` 缓存的配置，依赖目录只读时写在这里） |
+| `.lake/build/` | 目录 `lib`、`ir` |
+| `.lake/build/lib/` | 目录 `lean` |
+| `.lake/build/lib/lean/` | 对每个内容模块 `A.B.C`：目录 `A`、`A/B`（只许是内容模块路径的前缀），文件 `A/B/C` 加下列 13 个后缀之一：`.olean`、`.olean.hash`、`.olean.private`、`.olean.private.hash`、`.olean.server`、`.olean.server.hash`、`.ilean`、`.ilean.hash`、`.ir`、`.ir.hash`、`.ir.sig`、`.ir.sig.hash`、`.trace`。只有 `.olean` 是每个模块必须有的 |
+| `.lake/build/ir/` | 同样的目录前缀；文件 `A/B/C` 加 `.c`、`.c.hash`、`.setup.json` |
+
+判定，按顺序，每个目录项只报一条：
+
+| 码 | 条件 |
+|---|---|
+| `ARTIFACT_ROOT` | `build/lib/lean` 顶层目录项的名字（第一个点之前）不是内容根。第 7 步的搜索路径上被审产物排在工具链库之前，`Init` 之类会遮住真库 |
+| `ARTIFACT_FORM` | 不是普通文件或目录（符号链接、设备、管道、套接字）；目录模式不是属主可读写进入或带特殊位；文件带执行位或特殊位、属主不可读；目录列不出；读不到目录项 |
+| `EXTRA_ARTIFACT` | 不在上表里：名字带多余的点（`Chan/Thm.Ok.olean` 是另一个模块 `Chan.«Thm.Ok»`）、隐藏名、没有源码的模块、名字合法但类型不对（名为 `X.olean` 的目录）、`.lake` 或 `build` 下多出的东西、依赖挂载点下有东西。表外的目录不再往下走 |
+| `NO_ARTIFACT` | 某个内容模块的 `build/lib/lean/A/B/C.olean` 不存在或没有通过上面的检查 |
+
+真实仓库（3 个内容模块）一次完整构建后 `.lake` 共 73 个目录项，全部在表内，见交接汇报里的分类计数。
 
 ## 输出与退出码
 
@@ -77,12 +102,12 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | 1 | 某一步判红。该步的红行之后是 `FM STEP <n> <名字> RED` 与 `FM RESULT RED`，后面的步骤不跑也不报 |
 | 2 | 无法判定，包括参数、前置条件、工具缺失、构建审计程序失败、沙箱探针失败、审计程序输出无法解读或与 git 树对不上、超时、意外异常、`--until` 提前停下。诊断行 `FM FAULT <步骤> <码> <对象> <说明>` 写标准错误 |
 
-- **行协议**。标准输出只有 `FM MODE`、`FM RUNNER`、`FM RED <步骤> <规则码> <路径或对象> <说明>`、`FM STEP <n> <名字> <GREEN|RED|FAULT> <秒> <备注>`、`FM RESULT <GREEN|RED|FAULT|PARTIAL> …` 五种行，最后一行恒为唯一的 `FM RESULT`，状态与退出码一一对应（0 `GREEN`，1 `RED`，2 `FAULT` 或 `PARTIAL`）。准备阶段没失败时首行是 `FM MODE`；参数或前置条件错误时标准输出只有一行 `FM RESULT FAULT prepare <码>`。标准错误只有 `FM FAULT <步骤> <码> <对象> <说明>` 与 `FM LOG <来源> <行>` 两种行。
+- **行协议**。标准输出只有 `FM MODE`、`FM RUNNER`、`FM RED <步骤> <规则码> <路径或对象> <说明>`、`FM STEP <n> <名字> <GREEN|RED|FAULT> <秒> <备注>`、`FM RESULT <GREEN|RED|FAULT|PARTIAL> …` 五种行；标准错误只有 `FM FAULT <步骤> <码> <对象> <说明>` 与 `FM LOG <来源> <行>` 两种行。**结果行的契约**：标准输出至多一行结果行；有绿结果行则退出码为 0；退出码为 0 则恰有一行绿结果行且它是标准输出最后一行。实现：最终状态与退出码先定下来，结果行整次运行只尝试写一次，用一次 `os.write` 写整行（不超过 `PIPE_BUF`，管道上要么整行写出要么一字未写）；写不出就把退出码改成 2，不补写第二行。绿的结论另要求前面每一行都写出去了：前面有任何一行没写出，就不写绿而写 `FM RESULT FAULT output OUTPUT`、退 2（自测 S25）。被 SIGINT、SIGTERM 打断时，处理函数杀掉正在运行的子进程组，尽力写一行 `FM FAULT` 与 `FM RESULT FAULT <步骤> SIGNAL`，以 2 退出（自测 S26）；被别的信号（如 SIGKILL）终止，或连这一行都写不出时，可能没有结果行，退出码非零。**调用方以退出码为准。**
 - **一条转义规则，一个函数**（`safe()`）。写进标准输出或标准错误的每一个字段都先经它，不分来源：可见 ASCII（反斜杠除外）与 Unicode 字母、数字、标点、符号原样保留；空格只在最后一栏（说明、日志行）保留；其余一律写成可见形式——ASCII 控制字符、非 UTF-8 字节写 `\xNN`，换行以外的其它码点（行与段分隔符、方向控制符、零宽字符、组合符、孤立代理项、未分配码点）写 `\uNNNN`；每个字段最多 400 个字符，超出截断并注明。`emit()` 是唯一写两路输出的函数，它不抛异常。
 - **子进程的输出不透传**。git、预检、`lake`（构建审计程序与第 6 步构建）、审计程序的标准错误（构建时连同标准输出）都先捕获，再逐行写成 `FM LOG <来源> <行>`。被审代码在构建期打印的任何文字（包括形似 `FM RESULT GREEN` 的行）因此只能以转义后的日志行出现在标准错误里（自测 E10）。预检红行的对象栏它自己已转义过，运行脚本先还原成原字节再经 `safe()`，不会二次转义。
 - **进入输出的外来片段**（逐个有自测）：模块路径（E11）；导入名（E1）；声明名与公理名（E2）；锁文件的键与值（E3–E7）；分支名（E8、E9）；提交名参数（E9）；预检转出的红行（E8、E11a、S2）；`lake` 构建输出（E10、S17）；审计程序的标准错误（S17）；异常消息与调用方路径参数（E13）；审计程序发现行里的说明文字（E1、E2，其中含被审名字）。
 - **JSON 一律严格解析**（`strict_json()`）：字节须是合法 UTF-8；重复键、`NaN`/`Infinity`、任何字符串（含键）里的孤立代理项都拒收。锁文件与基线清单不合格退 2（`INPUT`），审计程序输出不合格退 2（`AUDITOR_OUTPUT`）。审计程序用 Lean 的 `Json.compress` 输出，字符串里的换行与控制字符本来就转义成 `\n`、`\u00XX`，名字里的换行打不破它的逐行格式；运行脚本按 `\n` 切行后逐行严格解析，任何一行不合格整次退 2。
-- 全部按 UTF-8 字节 `os.write`，不用 `print`（原因同第一片）。绿的结论要求全部标准输出都写出去了，否则退 2。
+- 全部按 UTF-8 字节 `os.write`，不用 `print`（原因同第一片）。
 - **运行脚本不凭审计程序的退出码下结论**。审计程序每个子命令在标准输出逐行给 JSON，最后一行是 `["result", 子命令, "red"|"green", 审过的模块数]`。运行脚本核对：每行都能解析且形状对；结果行恰好一条且在最后；判定为红当且仅当有发现行；退出码与判定一致（红 1、绿 0）；模块数与运行脚本从 git 树数出的内容文件数相等；第 4 步还核对头部记录与请求的文件一一对应。任何一条不符都退 2。
 
 ## 审计程序包 `../auditor/`
@@ -142,7 +167,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 1. **`--packages` 是新增的必填输入**。任务列的输入里没有依赖目录；运行脚本不联网，必须由调用方指出 Mathlib 等的位置。备忘 3.2 要求「沙箱里依赖目录只读挂载」，这里照做。
 2. **`--until` 提前停下退 2**。备忘 3.7「0：七步都跑完且全绿」；部分运行不是完整判定。
 3. **运行脚本核对自己与受信提交同一 blob**（`RUNNER_MISMATCH`）。备忘 3.1 只要求「在输出里写明代码来自哪个提交」，写明的前提是能核对。
-4. **`ARTIFACT_ROOT`**：第 6 步多一条形状检查（产物目录顶层只许内容根、不许符号链接）。它属于送审问题「经声明之外的通道影响审计程序的输入」：搜索路径上被审产物在库之后、工具链库之前，被审构建可以在产物目录里放 `Init/…` 遮住工具链的库。
+4. **`.lake` 的形状表**（`ARTIFACT_ROOT`、`ARTIFACT_FORM`、`EXTRA_ARTIFACT`、`NO_ARTIFACT`）：第 6 步多出的核对。它属于送审问题「经声明之外的通道影响审计程序的输入」：搜索路径上被审产物在库之后、工具链库之前，被审构建可以在产物目录里放 `Init/…` 遮住工具链的库。
 5. **头部规则分在两处**：白名单类在审计程序（Lean），方向表与闭包在运行脚本（Python），各自原样搬自旧实现。
 6. **`HEADER_PARSE` 判红而非无法判定**，见搬家差异。
 7. **`formal_math/.gitignore`**：按任务并入仓库根 `.gitignore` 并删除。预检返修（`5b6cc3ea16`）后它是 `infra` 的受信文件，获放行可删；仓库根 `.gitignore` 在受管范围以外，不再判红。
@@ -172,7 +197,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | S4 | 基线带仓库根 `.gitattributes`（`export-ignore`、`filter=fmevil`、`eol=crlf`，并给仓库配了会改内容的 smudge 过滤器）：被审文件在工作区里、逐字节等于 blob、模式 0644；对照：`git archive` 的输出里没有它 |
 | S5a–e | 五种篡改（驱动脚本包一层沙箱函数改审计程序的输出）：`env` 模块数加一 → `MODULE_COUNT`；`headers` 插一行非 JSON、删一行头部记录 → `AUDITOR_OUTPUT`；`env` 无发现却报红、绿却退 1 → `AUDITOR_OUTPUT`。全部退 2 |
 | S6a–b | 第 4 步红：后面没有步骤行、`.lake` 没建；第 6 步红：没有第 7 步行 |
-| S7 | 哨兵：被审文件在构建期 `#eval` 尝试写临时目录、本次受信目录、另一个仓库目录、`.lake/packages`（假依赖目录）、被审工作区的 `lake-manifest.json` 与一个源码文件；同时写 `.lake/inside-ok` 作正对照。期望：全绿、正对照存在、四个哨兵都不存在、工作区的配置与源码逐字节未变、仓库目录快照（路径与 mtime）不变 |
+| S7 | 哨兵：被审文件在构建期 `#eval` 尝试写临时目录、本次受信目录、另一个仓库目录、`.lake/packages`（假依赖目录）、被审工作区的 `lake-manifest.json` 与一个源码文件；同时写 `.lake/inside-ok` 作正对照。期望：整次运行恰好因正对照文件报一条 `EXTRA_ARTIFACT`（它不在形状表里）、正对照存在、四个哨兵都不存在、工作区的配置与源码逐字节未变、仓库目录快照（路径与 mtime）不变 |
 | S8 | 参数与前置条件：缩写、`--until=3`、重复、缺 `--packages`、`--until 8`、未知开关、工作目录在仓库里、工作目录非空，都退 2、没有步骤行、输出协议合规 |
 | S9–S10 | `--until 3` 全绿退 2；`--until 1` 遇红退 1 |
 | S11–S12 | 基线缺受信代码：没给自举开关退 2（`NO_TRUSTED_CODE`）；给了则首行写自举、全绿 |
@@ -183,13 +208,19 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | S17 | 被审模块带 `meta initialize`（把进程名写到标准错误），另一个模块导入它：构建日志里有 `…/bin/lean` 运行它的记录（正对照），第 4、7 步审计程序的日志里没有；整次运行在第 7 步 `ENV_META` |
 | S18 | 构建期 `kill -KILL 2`（沙箱里 2 号进程是 `lake`）：第 6 步 `SIGNAL` 退 2，不报 `BUILD_WFAIL` |
 | S19 | 构建期无限循环、每 0.2 秒往 `.lake/tick` 追加一行；驱动脚本把第 6 步时限改成 30 秒：`BUILD` 超时退 2；运行结束后再等 2 秒，`tick` 不再增长 |
-| S20 | 构建期在产物目录放 `Init/Fake.olean`、没有源码的 `Chan/Ghost.olean`、指向 `/etc/hostname` 的符号链接：第 6 步 `ARTIFACT_ROOT`、`EXTRA_ARTIFACT` |
+| S20 | 构建期在 `.lake` 里放 `Init/Fake.olean`、没有源码的 `Chan/Ghost.olean`、名字带多余点的 `Chan/Base.x.olean`、名为 `Chan/Dir.olean` 的目录、指向 `/etc/hostname` 的符号链接、命名管道、`.lake/stray`、`.lake/build/bin/x`，并把 `build/lib/lean/ChanDyn` 改成 0111：逐项比对（红码，路径）集合，十项各报其码（`ChanDyn` 报 `ARTIFACT_FORM`，其中模块因此 `NO_ARTIFACT`） |
 | S21 | 基线配置不构建 `ChanDyn`，被审提交加 `ChanDyn/X.lean`：第 6 步 `NO_ARTIFACT` |
 | S22 | 沙箱探针：驱动脚本在第 6、7 步各用**同一份挂载与环境**先跑一段 shell。断言两步都只有回环网卡；环境变量只在 `HOME`、`TMPDIR`、`LANG`、`PATH`、`PWD`、`SHLVL`、`_`、`OLDPWD`、`LEAN_PATH`、`LEAN_SYSROOT` 之内（运行脚本自己的环境里放了金丝雀变量）；宿主机临时目录里的金丝雀文件与仓库 `.git` 都不可见；第 6 步受信目录不可见，第 7 步只读可见；第 6 步只有 `.lake` 可写，被审源码、假依赖目录、受信目录都写不进；第 7 步什么都写不进 |
-| S24 | 把 `run.py` 复制到一个放了 `json.py` 的目录，不带 `-I` 运行：退 2（`NOT_ISOLATED`），`json.py` 没有被执行 |
+| S24 | 把 `run.py` 复制到一个放了 `re`、`json`、`os`、`sitecustomize`、`traceback`、`posix`、`sys`、`signal`、`stat`、`time` 十个冒名模块的目录，不带 `-I` 运行，两路正常、标准输出关闭、标准错误关闭、两路都关闭、标准输出写满、标准错误写满各一次：都退 2，冒名模块一个都没有被执行 |
+| S25 | 标准输出是满的非阻塞管道，0.6 秒后读端才开始读（开头几行因 `EAGAIN` 写不出，后来又写得出）：退 2，至多一行结果行，没有绿结果行 |
+| S26a–b | 第 6 步期间给运行脚本发 SIGINT、SIGTERM：标准输出最后一行是 `FM RESULT FAULT build SIGNAL`，退 2，沙箱里的进程随之结束、没有残留进程 |
+| S27a–b | 第 4、7 步的审计程序被信号杀死（驱动脚本把审计程序换成 `kill -KILL $$`）：`SIGNAL` 退 2 |
+| S28 | 构建期把 `build/lib/lean` 换成指向别处的符号链接：`ARTIFACT_FORM`，不跟随它去核对 |
+| S29 | 基线清单列了依赖目录里没有的包：取料 `PACKAGES` 退 2 |
+| S30 | umask 077 下取料写出的目录仍是 0755、文件 0644 |
 | E1 | 导入名带换行、行分隔符、方向控制符，内容是伪造的 `FM STEP …`、`FM RESULT GREEN` 行：第 4 步红，输出协议不破 |
 | E2 | 公理名、定理名、`unsafe def` 名带换行或制表符：第 7 步 `ENV_AXIOM`、`ENV_AXIOM_DEP`、`ENV_UNSAFE`，输出协议不破 |
-| E3–E7 | 锁文件：键带换行 → `LOCK_REMOVED` 红；键是孤立代理项、重复的孤立代理项键、值是孤立代理项、`NaN` → `INPUT` 退 2，没有回溯 |
+| E3–E7、E14–E15 | 锁文件：键带换行 → `LOCK_REMOVED` 红；键是孤立代理项、重复的孤立代理项键、值是孤立代理项、`NaN`、普通的重复键、非 UTF-8 字节 → `INPUT` 退 2，没有回溯 |
 | E8 | 分支名带换行与 ESC：预检 `BRANCH_ROLE` 红行转出，只转义一次 |
 | E9 | 提交名参数带换行、分支名参数非 UTF-8：`BAD_REV` 退 2 |
 | E10 | 构建期 `#eval` 打印伪造的 `FM RESULT GREEN`、`FM STEP`、ESC 与行分隔符：整次运行仍是唯一一行真绿，伪造内容只以转义后的 `FM LOG` 行出现在标准错误 |
@@ -197,7 +228,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | E12 | 内容文件不是 UTF-8：取料 `CONTENT_ENCODING` |
 | E13 | 调用方的 `--workdir`、`--packages` 含非 UTF-8 字节与换行：`INTERNAL`（父目录不存在时建目录失败）、`PACKAGES`，退 2，异常消息经转义 |
 
-**弱化自测**（`--mutants`）：把 `runner/`、`precheck/`、`auditor/` 复制到临时目录，先断言未改弱的副本骨架全过，再逐一在副本里改弱一处、用副本自己的自测跑相关骨架用例，每种弱化都必须有用例失败；改弱点在源码里找不到或不唯一时也判失败。共 18 种：去掉 `RUNNER_MISMATCH`；去掉模块数比对；不核对判定、发现与退出码一致；判红后继续跑；第 6 步受信目录可见可写；第 6 步被审工作区整个可写；第 7 步被审工作区可写；沙箱不断网；沙箱不清环境（去掉 `--clearenv` 且 `bwrap` 继承调用方环境——只去掉一层时另一层仍挡住，观察不到）；沙箱不遮宿主机目录；去掉 `ARTIFACT_ROOT`；去掉 `NO_ARTIFACT`；去掉 `EXTRA_ARTIFACT`；信号死亡不归入无法判定；输出不转义；JSON 不拒孤立代理项；不查隔离模式；审计程序加载扩展并运行初始化器（改 `auditor/Main.lean` 的副本）。
+**弱化自测**（`--mutants`）：把 `runner/`、`precheck/`、`auditor/` 复制到临时目录，先断言未改弱的副本骨架全过，再逐一在副本里改弱一处、用副本自己的自测跑相关骨架用例，每种弱化都必须有用例失败；改弱点在源码里找不到或不唯一时也判失败。共 28 种，清单见 `selftest.py` 的 `MUTANTS`：上一轮的 18 种（其中三种产物核对的改弱点随形状表改写）；独审 r2 另做而自测没抓到的 10 种，除不再适用的一种外都已收进来，共 7 个新改弱点——JSON 接受重复键（R2）、去掉目录项类型检查（R3 产物目录本身是符号链接与 R15 任意层级符号链接是同一处）、绿的结论不再要求标准输出都写出去了（R4）、信号判定只对第 6 步生效（R5b）、JSON 不要求合法 UTF-8（R7）、不核对依赖目录里的包（R8）、建目录后不 `chmod`（R14），R16「去掉顶层只许内容根」与上一轮的「去掉 ARTIFACT_ROOT」是同一处；本轮另加 3 种：目录模式异常或列不出时跳过、不装 SIGINT 与 SIGTERM 处理函数、隔离检查失败时的诊断经 `sys` 的流写且不兜异常（N-1 的旧形）。r2 的「`.olean` 不要求是文件」不再适用：形状表按目录项类型分别查目录表与文件表，名为 `X.olean` 的目录从来查不到文件表，没有单独的「须是文件」一步可改弱（S20 的 `Chan/Dir.olean` 覆盖这个形状）。沙箱不清环境一种同时去掉 `--clearenv` 与「调用 `bwrap` 时只给 `PATH`」两层，只去掉一层时另一层仍挡住、观察不到。
 
 语料用例：`fixtures.tsv` 列出全部旧夹具的归属与本片的实测期望（见下）。只含内容的夹具，基线与被审是同一提交（预检的改动类规则不触发，形状规则照常检查），构建配置按夹具实有的内容根生成；改了构建配置或门禁目录的夹具，基线是模板、被审提交叠上夹具，按证明角色送审。`--discover` 只打印实测结果，供更新表格。
 
