@@ -1,3 +1,0 @@
-Chan.Thm.Importer
-Chan/Thm/Importer.lean
-Chan.Thm.InitMod

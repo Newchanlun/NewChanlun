@@ -49,7 +49,8 @@ PRECHECK_RED = re.compile(rb"PRECHECK RED ([A-Z_]+) (\S+) (.+)")
 GIT_ENV = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C", "GIT_NO_REPLACE_OBJECTS": "1",
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_GRAFT_FILE": os.devnull,
            "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
-TIMEOUT = {"git": 600, "precheck": 600, "auditor": 3600, "headers": 600, "build": 4 * 3600, "env": 3600}
+TIMEOUT = {"git": 600, "precheck": 600, "auditor": 3600, "headers": 600, "shape": 3600, "build": 4 * 3600,
+           "env": 3600}
 LIMIT = 400
 
 
@@ -416,8 +417,9 @@ def step_auditor(ctx):
     return [], "binary=%s sha256=%s" % (ctx.auditor, digest)
 
 
-def run_auditor(ctx, command, binds, env, timeout):
-    """在沙箱里跑受信审计程序，逐行严格解析 JSON；退出码只用于核对，不用于下结论。"""
+def run_auditor(ctx, command, binds, env, timeout, expect=None):
+    """在沙箱里跑受信审计程序，逐行严格解析 JSON；退出码只用于核对，不用于下结论。
+    expect：这次调用应审过的模块数，缺省为 git 树里的全部内容文件数（第 5 步每组只审一部分）。"""
     p = sandbox(ctx, [ctx.auditor, command, *ctx.auditor_args], binds, env, ctx.audited, timeout,
                 "AUDITOR", command)
     if not p.stdout.endswith(b"\n"):
@@ -431,8 +433,9 @@ def run_auditor(ctx, command, binds, env, timeout):
     if any(len(f) != 6 or not all(isinstance(x, str) for x in f) for f in findings) or \
             (result[2] == "red") != bool(findings) or p.returncode != (1 if findings else 0):
         raise Fault("AUDITOR_OUTPUT", command, "判定、发现与退出码 %d 不一致" % p.returncode)
-    if result[3] != len(ctx.modules):
-        raise Fault("MODULE_COUNT", command, "审计程序审过 %d 个模块，git 树里有 %d 个" % (result[3], len(ctx.modules)))
+    want = len(ctx.modules) if expect is None else expect
+    if result[3] != want:
+        raise Fault("MODULE_COUNT", command, "审计程序审过 %d 个模块，应为 %d 个" % (result[3], want))
     return findings, [r for r in rows if not (isinstance(r, list) and r[:1] == ["finding"])]
 
 
@@ -541,8 +544,56 @@ def step_headers(ctx):
 
 # ---- 第 5 步：源码形状（第四片） ----
 
+def shape_rows(rows, kind, width, files, ctx):
+    """第 5 步审计程序的非发现行：标签、路径（本组请求的文件）、模块（与路径对应）、width 个非负整数。"""
+    out = []
+    for row in rows:
+        if not (isinstance(row, list) and len(row) == 3 + width and row[0] == kind and row[1] in files and
+                row[2] == ctx.modules[ctx.content.index(row[1])] and
+                all(type(x) is int and x >= 0 for x in row[3:])):
+            raise Fault("AUDITOR_OUTPUT", "shape", "%s 行无法解读" % kind)
+        out.append(row)
+    return out
+
+
 def step_shape(ctx):
-    return [], "SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层"
+    """先由 shape-plan 按模块制的导入规则算出每个文件在真实构建里加载的库模块，按集合分组；每组一个沙箱进程，
+    只加载这组库导入（被审产物目录不在搜索路径上），只解析不精化。派生目标类语法节点的位置写成派生证书，
+    放在受信目录下交给第 7 步。"""
+    search = [os.path.join(ctx.packages, n, ".lake", "build", "lib", "lean") for n in ctx.package_names]
+    binds = [("--ro-bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),
+             ("--ro-bind", ctx.trusted_dir, ctx.trusted_dir)]
+    env = {"LEAN_PATH": ":".join(search), "LEAN_SYSROOT": ctx.prefix}
+    ctx.auditor_args = [x for rel, mod in zip(ctx.content, ctx.modules) for x in (mod, rel)]
+    findings, rows = run_auditor(ctx, "shape-plan", binds, env, TIMEOUT["shape"])
+    groups, planned = {}, set()
+    for row in rows:
+        if findings or not (isinstance(row, list) and len(row) == 4 and row[0] == "plan" and row[1] in ctx.content and
+                            row[1] not in planned and row[2] == ctx.modules[ctx.content.index(row[1])] and
+                            isinstance(row[3], list) and all(isinstance(x, str) and x and "\0" not in x and
+                                                             not x.startswith("-") for x in row[3])):
+            raise Fault("AUDITOR_OUTPUT", "shape-plan", "分组行无法解读")
+        planned.add(row[1])
+        groups.setdefault(tuple(sorted(set(row[3]))), []).append(row[1])
+    if planned != set(ctx.content):
+        raise Fault("AUDITOR_OUTPUT", "shape-plan", "分组行与请求的文件不一一对应")
+    reds, seen, commands, cert = [], set(), 0, []
+    for libs, files in sorted(groups.items()):
+        ctx.auditor_args = [*libs, "--", *(x for rel in files for x in (ctx.modules[ctx.content.index(rel)], rel))]
+        findings, rows = run_auditor(ctx, "shape", binds, env, TIMEOUT["shape"], expect=len(files))
+        done = shape_rows([r for r in rows if r[:1] == ["file"]], "file", 1, files, ctx)
+        if sorted(r[1] for r in done) != sorted(files) or any(f[2] not in files for f in findings):
+            raise Fault("AUDITOR_OUTPUT", "shape", "文件行与本组请求的文件不一一对应")
+        cert += [[r[2], *r[3:]] for r in shape_rows([r for r in rows if r[:1] != ["file"]], "derive", 4, files, ctx)]
+        commands += sum(r[3] for r in done)
+        seen.update(files)
+        reds += [(f[4], "formal_math/%s:%s" % (f[2], f[3]), f[5]) for f in findings]
+    if seen != set(ctx.content):
+        raise Fault("AUDITOR_OUTPUT", "shape", "有文件没有被任何一组审过")
+    ctx.certificate = os.path.join(ctx.trusted_dir, "derived.json")
+    write_files(ctx.trusted_dir, [("derived.json", json.dumps(sorted(cert)).encode())])
+    return reds, "%d 个文件分 %d 组库导入，%d 条命令，%d 个派生目标类节点" % (
+        len(ctx.content), len(groups), commands, len(cert))
 
 
 # ---- 第 6 步：沙箱构建 ----
@@ -648,8 +699,9 @@ def compare_lock(expect, rows):
     return reds
 
 
-def step_env(ctx, certificate=None):
-    """certificate：派生证书文件，必须位于受信目录下；本片没有产生它的一侧（第四片），恒为 None。"""
+def step_env(ctx):
+    """派生证书由第 5 步写在受信目录下（ctx.certificate），这里再核对一次它在受信目录里。"""
+    certificate = ctx.certificate
     if ctx.lock is None:
         raise Fault("INPUT", "formal_math/statement-lock.json", "被审提交没有锁文件")
     expect = strict_json(blobs(ctx, [ctx.lock])[ctx.lock], "INPUT", "formal_math/statement-lock.json")
@@ -799,7 +851,7 @@ def main(argv, steps=STEP_FUNCS, start=1):
         if STATE["output"] is not None:
             STATE["step"] = "output"
             return fault(Fault("OUTPUT", "stdout", "前面有输出行写不出：%s" % type(STATE["output"]).__name__))
-        return 0 if finish("GREEN", "七步全绿（第 5 步源码形状未安装）") else lost()
+        return 0 if finish("GREEN", "七步全绿") else lost()
     except Fault as f:
         return fault(f)
     except Exception as e:  # noqa: BLE001  意外一律归入无法判定

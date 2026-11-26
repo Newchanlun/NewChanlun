@@ -1,1 +1,0 @@
-#guard_msgs 内只许 #check 与 #print axioms

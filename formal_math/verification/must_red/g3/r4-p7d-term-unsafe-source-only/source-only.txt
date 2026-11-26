@@ -1,2 +1,0 @@
-Chan.Thm.TermUnsafe
-Chan/Thm/TermUnsafe.lean

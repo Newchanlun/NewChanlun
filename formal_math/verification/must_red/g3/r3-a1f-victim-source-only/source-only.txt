@@ -1,3 +1,0 @@
-Chan.Thm.Victim
-Chan/Thm/Victim.lean
-Chan.Thm.Helper

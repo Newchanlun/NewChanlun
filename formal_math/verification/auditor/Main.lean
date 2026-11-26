@@ -5,6 +5,7 @@ import all Lean.Util.CollectAxioms
 import Lean.Meta.Constructions.CtorIdx
 import Auditor.EnvGates
 import Auditor.Headers
+import Auditor.Shape
 
 open Lean Meta
 
@@ -101,6 +102,29 @@ private def generatedBy (name : Name) (info : ConstantInfo) (implTargets : NameM
     return none
   | _ => return none
 
+/-- 派生证书 `[[模块, 起行, 起列, 止行, 止列], …]`：形状门在解析时记下的派生目标类语法节点范围。 -/
+private def certificate (file : String) : IO (Array (Name × Position × Position)) := do
+  let bad := IO.userError "派生证书无法解码"
+  let .ok (rows : Array (Array Json)) := Json.parse (← IO.FS.readFile file) >>= fromJson? | throw bad
+  rows.mapM fun
+    | #[m, l1, c1, l2, c2] => match m.getStr?, l1.getNat?, c1.getNat?, l2.getNat?, c2.getNat? with
+      | .ok m, .ok l1, .ok c1, .ok l2, .ok c2 => pure (m.toName, ⟨l1, c1⟩, ⟨l2, c2⟩)
+      | _, _, _, _, _ => throw bad
+    | _ => throw bad
+
+/--
+派生产物：声明范围的起点落在同一模块某个派生目标类语法节点之内的常量。判据同旧源码层
+`SourceGates.derivedBy`：派生处理器在 `withRef` 该节点下精化生成的命令，手写声明的范围在它自己的语法上。
+-/
+private def derivedBy (spans : Array (Name × Position × Position)) (entries : Array FM.Entry) :
+    MetaM NameSet := do
+  let le (x y : Position) := x.line < y.line || (x.line == y.line && x.column ≤ y.column)
+  entries.foldlM (init := {}) fun s e => do
+    unless spans.any (·.1 == e.mod) do return s
+    let some r ← findDeclarationRanges? e.name | return s
+    let p := r.range.pos
+    return if spans.any (fun (m, a, b) => m == e.mod && le a p && le p b) then s.insert e.name else s
+
 private def gate3 (entries : Array FM.Entry) (derived : NameSet) : MetaM UInt32 := do
   let env ← getEnv
   let names := entries.map fun e => (e.mod, e.name, e.info)
@@ -145,6 +169,7 @@ private def gate3 (entries : Array FM.Entry) (derived : NameSet) : MetaM UInt32 
 
 /--
 `fm_audit headers <模块> <路径> ...`：只解析文件头，见 `Auditor/Headers.lean`。
+`fm_audit shape-plan …`、`fm_audit shape …`：源码形状门，只解析，见 `Auditor/Shape.lean`。
 `fm_audit env [--derived <证书>] <模块> ...`：读同一轮构建的产物，跑门 3 环境层、门 6a 声明锁的
 规范序列化与门 15 的暴露检查。不加载环境扩展，被审模块的初始化器不运行。标准输出逐行 JSON：
 `["finding", 门, 路径, 声明, 红码, 说明]`、`["lock", 声明, 模块, 序列化]`，最后一行
@@ -153,19 +178,17 @@ private def gate3 (entries : Array FM.Entry) (derived : NameSet) : MetaM UInt32 
 public unsafe def main (args : List String) : IO UInt32 := do
   let gate :: modules := args | return 2
   Lean.initSearchPath (← Lean.findSysroot)
-  if gate == "headers" then
-    try return ← FM.headers modules
+  if gate == "headers" || gate == "shape" || gate == "shape-plan" then
+    try return ← (if gate == "headers" then FM.headers else if gate == "shape" then FM.Shape.shape
+        else FM.Shape.plan) modules
     catch err =>
       IO.eprintln err.toString
       return 2
   unless gate == "env" do return 2
   -- 派生证书由运行脚本从受信目录给出；单独调用时没有证书。
-  let (derived, modules) ← match modules with
-    | "--derived" :: file :: rest => do
-      let .ok (names : Array String) := Json.parse (← IO.FS.readFile file) >>= fromJson?
-        | throw (IO.userError "派生证书无法解码")
-      pure (names.foldl (fun s n => s.insert n.toName) ({} : NameSet), rest)
-    | _ => pure ({}, modules)
+  let (spans, modules) ← match modules with
+    | "--derived" :: file :: rest => do pure (← certificate file, rest)
+    | _ => pure (#[], modules)
   let mods := modules.toArray.map String.toName
   -- 加载同一轮构建的私有分片，保留私有声明与证明体。
   let env := (← Lean.importModules (mods.map fun m => { module := m }) {}
@@ -181,6 +204,7 @@ public unsafe def main (args : List String) : IO UInt32 := do
   let options := maxRecDepth.set (maxHeartbeats.set {} 6000000) 1024
   let ctx : Core.Context := { fileName := "FM 门禁", fileMap := default, options }
   try
+    let (derived, _) ← (derivedBy spans entries).run'.toIO ctx { env }
     let (g3, _) ← (gate3 entries derived).run'.toIO ctx { env }
     if g3 == 2 then return 2
     let (g6a, _) ← (FM.run "6a" entries).run'.toIO ctx { env }

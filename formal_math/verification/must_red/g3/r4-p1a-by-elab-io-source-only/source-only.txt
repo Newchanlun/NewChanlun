@@ -1,2 +1,0 @@
-Chan.Thm.ByElabPwn
-Chan/Thm/ByElabPwn.lean

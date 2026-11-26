@@ -1,2 +1,0 @@
-Chan.Thm.ZeroImportRCE
-Chan/Thm/ZeroImportRCE.lean

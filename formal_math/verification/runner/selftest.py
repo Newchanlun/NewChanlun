@@ -35,7 +35,7 @@ GIT_ID = {"GIT_AUTHOR_NAME": "FM 自测", "GIT_AUTHOR_EMAIL": "fm-fixture@exampl
 M = "module\n\npublic section\n\n"
 
 DRIVER = r'''
-import importlib.util, json, os, sys
+import importlib.util, json, os, re, sys
 spec = importlib.util.spec_from_file_location("fm_run", sys.argv[1])
 run = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(run)
@@ -65,8 +65,9 @@ def probe(ctx, step, binds, env, cwd):
         f.write(json.dumps({"step": step, "lines": p.stdout.decode(errors="replace").splitlines()}) + "\n")
 
 def patched(ctx, cmd, binds, env, cwd, *a, **k):
-    if mode == "probe" and (cmd[:2] == ["lake", "build"] or cmd[0] == getattr(ctx, "auditor", None) and cmd[1] == "env"):
-        probe(ctx, "build" if cmd[0] == "lake" else "env", binds, env, cwd)
+    if mode == "probe" and (cmd[:2] == ["lake", "build"] or cmd[0] == getattr(ctx, "auditor", None) and
+                            cmd[1] in ("env", "shape")):
+        probe(ctx, "build" if cmd[0] == "lake" else cmd[1], binds, env, cwd)
     if mode.startswith("sig-") and cmd[0] == getattr(ctx, "auditor", None) and cmd[1] == mode[4:]:
         return orig(ctx, ["/bin/sh", "-c", "kill -KILL $$"], binds, env, cwd, *a, **k)
     p = orig(ctx, cmd, binds, env, cwd, *a, **k)
@@ -83,12 +84,30 @@ def patched(ctx, cmd, binds, env, cwd, *a, **k):
         lines[-1] = lines[-1].replace(b'"green"', b'"red"')
     elif mode == "env-exit" and cmd[1] == "env":
         p.returncode = 1
+    elif mode == "shape-count" and cmd[1] == "shape":
+        lines[-1] = re.sub(rb",(\d+)\]$", lambda m: b",%d]" % (int(m[1]) + 1), lines[-1])
+    elif mode == "shape-drop" and cmd[1] == "shape":
+        del lines[[l.startswith(b'["file"') for l in lines].index(True)]
+    elif mode == "plan-garbage" and cmd[1] == "shape-plan":
+        lines.insert(0, b'["plan","x","y",[]]')
+    elif mode == "shape-noreds" and cmd[1] == "shape":
+        # 去掉形状门的发现（模拟形状门放行），派生行原样保留，用来单测第 7 步按证书位置比对。
+        lines = [l for l in lines if not l.startswith(b'["finding"')]
+        lines[-1] = lines[-1].replace(b'"red"', b'"green"')
+        p.returncode = 0
     p.stdout = b"".join(l + b"\n" for l in lines)
     return p
 run.sandbox = patched
 if mode == "timeout":
     run.TIMEOUT["build"] = 30
 steps = list(run.STEP_FUNCS)
+if os.environ.get("FM_SELFTEST_SKIP_SHAPE"):
+    # 骨架用例里要让被审代码在构建期执行（#eval、meta initialize 等），这里跳过第 5 步；派生证书为空。
+    def skip_shape(ctx):
+        ctx.certificate = os.path.join(ctx.trusted_dir, "derived.json")
+        run.write_files(ctx.trusted_dir, [("derived.json", b"[]")])
+        return [], "自测旁路：跳过源码形状"
+    steps[4] = skip_shape
 if mode.startswith("warm:"):
     # 语料用例复用预编译的审计程序产物：源码逐字相同，第 3 步的 lake build 核对哈希后不重建。
     import shutil
@@ -243,8 +262,11 @@ class Suite:
         return self.repo.commit({**self.lite_files, **extra}, self.lite_base)
 
     def run(self, name, head, branch="proof/selftest", base=None, extra=(), mode=None, keep=False, workdir=None,
-            repo=None, lite=False, env=None, argv=None, umask=None):
+            repo=None, lite=False, env=None, argv=None, umask=None, skip_shape=False):
+        """skip_shape：经驱动脚本跳过第 5 步（派生证书为空），给要让被审代码在构建期执行的骨架用例用。"""
         work = workdir or self.workdir(name)
+        if skip_shape:
+            mode, env = mode or "plain", {**(env or {}), "FM_SELFTEST_SKIP_SHAPE": "1"}
         if argv is None:
             argv = ["--repo", (repo or self.repo).path, "--base", base or (self.lite_base if lite else self.base),
                     "--head", head, "--branch", branch, "--workdir", work,
@@ -321,6 +343,85 @@ def snapshot(root):
                   for d, _, ns in os.walk(root) for n in ns)
 
 
+# ---- 形状门红例目录：（相对 formal_math 的路径，导入，正文，期望红码集合） ----
+T, F = "Chan/Thm/", "Chan/Final/"
+SHAPE_RED = [
+    # 命令白名单：本地元编程与不在名单里的命令
+    (T + "CmdMacro.lean", (), 'macro "fm_m" : term => `(1)', {"SHAPE_COMMAND"}),
+    (T + "CmdSyntax.lean", (), 'syntax "fm_s" : term', {"SHAPE_COMMAND"}),
+    (T + "CmdNotation.lean", (), 'notation "fm_n" => 1', {"SHAPE_COMMAND"}),
+    (T + "CmdElab.lean", (), 'elab "fm_e" : term => pure (Lean.mkNatLit 1)', {"SHAPE_COMMAND"}),
+    (T + "CmdInitialize.lean", (), "initialize pure ()", {"SHAPE_COMMAND"}),
+    (T + "CmdPrint.lean", (), "#print Nat", {"SHAPE_COMMAND"}),
+    (T + "CmdExport.lean", (), "export Nat (succ)", {"SHAPE_COMMAND"}),
+    (T + "CmdLemma.lean", ("Mathlib.Tactic.Lemma",), "lemma fmL : True := trivial", {"SHAPE_COMMAND"}),
+    # 声明白名单
+    (T + "DeclAxiom.lean", (), "axiom fmAx : True", {"SHAPE_DECL"}),
+    # 修饰符白名单与 meta section
+    (T + "ModMeta.lean", (), "meta def fmMeta : Nat := 1", {"SHAPE_MODIFIER"}),
+    (T + "ModUnsafe.lean", (), "unsafe def fmUnsafe : Nat := 1", {"SHAPE_MODIFIER"}),
+    (T + "ModPartial.lean", (), "partial def fmPartial (n : Nat) : Nat := fmPartial n", {"SHAPE_MODIFIER"}),
+    (T + "ModMetaSection.lean", (), "meta section\nend", {"SHAPE_MODIFIER"}),
+    # 属性白名单（含属性宏不展开、-attr 擦除）
+    (T + "AttrImplementedBy.lean", (), "def fmI : Nat := 1\n@[implemented_by fmI] def fmX : Nat := 1", {"SHAPE_ATTRIBUTE"}),
+    (T + "AttrExtern.lean", (), '@[extern "fm_c"] opaque fmExt : Nat → Nat', {"SHAPE_ATTRIBUTE"}),
+    (T + "AttrInit.lean", (), "def fmIO : IO Unit := pure ()\n@[init fmIO] def fmInit : Unit := ()", {"SHAPE_ATTRIBUTE"}),
+    (T + "AttrCsimp.lean", (), "@[csimp] theorem fmC : @Nat.add = @Nat.add := rfl", {"SHAPE_ATTRIBUTE"}),
+    (T + "AttrErase.lean", (), "def fmE : Nat := 1\nattribute [-implemented_by] fmE", {"SHAPE_ATTRIBUTE"}),
+    (T + "AttrLocalMacro.lean", (), "@[local macro Lean.Parser.Term.app] def fmMac : Nat := 1", {"SHAPE_ATTRIBUTE"}),
+    # 派生目标类白名单（行内与 deriving instance）
+    (T + "DerivingInline.lean", (), "inductive FmD where\n  | a\nderiving Lean.ToJson", {"SHAPE_DERIVING"}),
+    (T + "DerivingInstance.lean", (), "inductive FmD2 where\n  | a\nderiving instance Lean.ToExpr for FmD2",
+     {"SHAPE_DERIVING"}),
+    # #guard_msgs 的限制
+    (F + "GuardSpec.lean", (), "/-- info: Nat : Type -/\n#guard_msgs (drop warning) in\n#check Nat", {"SHAPE_GUARD_MSGS"}),
+    (F + "GuardInner.lean", (), "#guard_msgs in\nexample : True := trivial", {"SHAPE_GUARD_MSGS"}),
+    (F + "PrintAxiomsBare.lean", (), "#print axioms Nat.add", {"SHAPE_GUARD_MSGS"}),
+    (T + "GuardOutsideFinal.lean", (), "/-- info: Nat : Type -/\n#guard_msgs in\n#check Nat", {"SHAPE_COMMAND"}),
+    # set_option 的各个语法位置
+    (T + "OptCommand.lean", (), "set_option autoImplicit true", {"SHAPE_OPTION_CONTROLLED"}),
+    (T + "OptCommandIn.lean", (), "set_option relaxedAutoImplicit true in\ntheorem fmO : True := trivial",
+     {"SHAPE_OPTION_CONTROLLED"}),
+    (T + "OptTerm.lean", (), "def fmT : Nat := set_option linter.unusedVariables false in 1", {"SHAPE_OPTION_CONTROLLED"}),
+    (T + "OptTactic.lean", (), "theorem fmTac : True := by set_option debug.skipKernelTC true in trivial", {"SHAPE_OPTION"}),
+    (T + "OptGrind.lean", (), "theorem fmG (x : Nat) : x = x := by\n  grind =>\n    set_option smartUnfolding false in\n"
+     "    skip", {"SHAPE_OPTION"}),
+    (T + "OptGuillemet.lean", (), "set_option «linter».unusedVariables false", {"SHAPE_OPTION_CONTROLLED"}),
+    (T + "OptTrace.lean", (), "set_option trace.Meta.synthInstance true", {"SHAPE_OPTION"}),
+    # 点名的禁用清单，每项一例
+    (T + "FbSorryTerm.lean", (), "theorem fmS : 1 = 2 := sorry", {"SHAPE_FORBIDDEN"}),
+    (T + "FbSorryTactic.lean", (), "theorem fmS : 1 = 2 := by sorry", {"SHAPE_FORBIDDEN"}),
+    (T + "FbAdmit.lean", (), "theorem fmS : 1 = 2 := by admit", {"SHAPE_FORBIDDEN"}),
+    (T + "FbNativeDecide.lean", (), "theorem fmN : 1 < 2 := by native_decide", {"SHAPE_FORBIDDEN"}),
+    (T + "FbDecideNative.lean", (), "theorem fmN : 1 < 2 := by decide +native", {"SHAPE_FORBIDDEN"}),
+    (T + "FbDecideNativeVal.lean", (), "theorem fmN : 1 < 2 := by decide (native := true)", {"SHAPE_FORBIDDEN"}),
+    (T + "FbOldConfig.lean", (), "theorem fmC : 1 = 1 := by simp (config := {})", {"SHAPE_FORBIDDEN"}),
+    (T + "FbIncludeStr.lean", (), 'def fmStr : String := include_str "x.txt"', {"SHAPE_FORBIDDEN"}),
+    (T + "FbEvalPercent.lean", ("Mathlib.Tactic.Eval",), "def fmEv : Nat := eval% 1 + 1", {"SHAPE_FORBIDDEN"}),
+    (T + "FbByElab.lean", (), "def fmBe : Nat := by_elab pure (Lean.mkNatLit 1)", {"SHAPE_FORBIDDEN"}),
+    (T + "FbRunTac.lean", (), "theorem fmR : True := by run_tac pure ()", {"SHAPE_FORBIDDEN"}),
+    (T + "FbRunCmd.lean", (), "run_cmd pure ()", {"SHAPE_COMMAND", "SHAPE_FORBIDDEN"}),
+    (T + "FbRunMeta.lean", (), "run_meta pure ()", {"SHAPE_COMMAND", "SHAPE_FORBIDDEN"}),
+    (T + "FbRunElab.lean", (), "run_elab pure ()", {"SHAPE_COMMAND", "SHAPE_FORBIDDEN"}),
+    (T + "FbSudo.lean", ("Mathlib.Tactic.SudoSetOption",), "def fmSu : Nat := sudo set_option fm.x true in 1",
+     {"SHAPE_FORBIDDEN"}),
+    (T + "FbTermUnsafe.lean", (), "def fmU : Nat := unsafe 1", {"SHAPE_FORBIDDEN"}),
+    (T + "FbTrace.lean", (), 'theorem fmTr : True := by\n  trace "x"\n  trivial', {"SHAPE_FORBIDDEN"}),
+    (T + "FbSuccessIfFail.lean", ("Mathlib.Tactic.SuccessIfFailWithMsg",),
+     'theorem fmSf : True := by\n  success_if_fail_with_msg "x" fail\n  trivial', {"SHAPE_FORBIDDEN"}),
+    (T + "FbEval.lean", (), "#eval 1", {"SHAPE_COMMAND", "SHAPE_FORBIDDEN"}),
+    (T + "FbEvalBang.lean", (), "#eval! 1", {"SHAPE_COMMAND", "SHAPE_FORBIDDEN"}),
+    (T + "FbExit.lean", (), "#exit", {"SHAPE_COMMAND", "SHAPE_FORBIDDEN"}),
+    (T + "FbSorryAx.lean", (), "def fmSa : Nat := sorryAx Nat", {"SHAPE_FORBIDDEN"}),
+    (T + "FbRootSorryAxCheck.lean", (), "#check (_root_.sorryAx False false)", {"SHAPE_FORBIDDEN"}),
+    (T + "FbRootSorryAxVariable.lean", (), "variable (h : False := _root_.sorryAx False false)", {"SHAPE_FORBIDDEN"}),
+    (F + "FbRootSorryAxGuard.lean", (), "#guard_msgs in\n#check _root_.sorryAx False false", {"SHAPE_FORBIDDEN"}),
+    # 解析失败、缺库模块
+    (T + "ParseError.lean", (), "theorem fmP : True := by (", {"SHAPE_PARSE"}),
+    (T + "MissingLibrary.lean", ("Mathlib.FmDoesNotExist",), "def fmM : Nat := 1", {"SHAPE_IMPORT"}),
+]
+
+
 # ---- 骨架用例 ----
 
 def skeleton(s):
@@ -340,7 +441,8 @@ def skeleton(s):
     def _():
         r = s.run("S1-green", green)
         good = r["rc"] == 0 and not r["reds"] and [x[2] for x in r["steps"]] == ["GREEN"] * 7 and \
-            "SHAPE 未安装" in r["out"] and r["out"].startswith("FM MODE baseline ")
+            re.search(r"^FM STEP 5 shape GREEN ", r["out"], re.M) is not None and "未安装" not in r["out"] and \
+            r["out"].startswith("FM MODE baseline ")
         return check("S1 阴性对照：未改动的证明提交七步全绿", good, r)
 
     # 夹具里的 lakefile 存成 hijack-lakefile.toml：门禁目录下任何层级的 Lake 配置名都会被预检判 LAKE_FILE。
@@ -359,7 +461,7 @@ def skeleton(s):
 
     @case("S3")
     def _():
-        r = s.run("S3-r5b1-bypass", hijack, branch="infra/hijack", mode="bypass", keep=True)
+        r = s.run("S3-r5b1-bypass", hijack, branch="infra/hijack", mode="bypass", keep=True, skip_shape=True)
         work = r["work"]
         binary = os.path.join(work, "trusted", "verification", "auditor", ".lake", "build", "bin", "fm_audit")
         planted = [os.path.join(d, n) for root in (s.tmp, s.repo.path) for d, _, ns in os.walk(root)
@@ -392,7 +494,8 @@ def skeleton(s):
 
     for cid, mode, fault in (("S5a", "env-count", "MODULE_COUNT"), ("S5b", "headers-garbage", "AUDITOR_OUTPUT"),
                              ("S5c", "headers-drop", "AUDITOR_OUTPUT"), ("S5d", "env-verdict", "AUDITOR_OUTPUT"),
-                             ("S5e", "env-exit", "AUDITOR_OUTPUT")):
+                             ("S5e", "env-exit", "AUDITOR_OUTPUT"), ("S5f", "shape-count", "MODULE_COUNT"),
+                             ("S5g", "shape-drop", "AUDITOR_OUTPUT"), ("S5h", "plan-garbage", "AUDITOR_OUTPUT")):
         @case(cid)
         def _(mode=mode, fault=fault):
             r = s.run("S5-" + mode, lite_green, mode=mode, lite=True)
@@ -432,7 +535,7 @@ def skeleton(s):
         base = repo.commit(s.lite_files)
         head = repo.commit(files, base)
         before = snapshot(repo.path)
-        r = s.run("S7-sentinel", head, base=base, keep=True, workdir=work, repo=repo, lite=True)
+        r = s.run("S7-sentinel", head, base=base, keep=True, workdir=work, repo=repo, lite=True, skip_shape=True)
         leaked = [t for t in targets if os.path.lexists(t)]
         audited = os.path.join(work, "audited")
         untouched = all(os.path.isfile(os.path.join(audited, p)) and
@@ -547,7 +650,7 @@ def skeleton(s):
 
     @case("S17")
     def _():
-        r = s.run("S17-init", init_head, lite=True)
+        r = s.run("S17-init", init_head, lite=True, skip_shape=True)
         built = re.search(r"^FM LOG build .*FM-SELFTEST-INIT-RAN app=\S*/bin/lean", r["err"], re.M) is not None
         audited = re.search(r"^FM LOG (env|headers) .*FM-SELFTEST-INIT-RAN", r["err"], re.M) is not None
         good = r["rc"] == 1 and r["reds"] == {"ENV_META"} and last_step(r) == "env" and built and not audited
@@ -560,7 +663,7 @@ def skeleton(s):
 
     @case("S18")
     def _():
-        r = s.run("S18-signal", kill, lite=True)
+        r = s.run("S18-signal", kill, lite=True, skip_shape=True)
         good = r["rc"] == 2 and r["faults"] == ["SIGNAL"] and r["steps"][-1][1:] == ("build", "FAULT")
         return check("S18 第 6 步沙箱里的 lake 被信号杀死：无法判定退 2，不报 BUILD_WFAIL", good, r)
 
@@ -570,7 +673,7 @@ def skeleton(s):
 
     @case("S19")
     def _():
-        r = s.run("S19-timeout", spin, mode="timeout", keep=True, lite=True)
+        r = s.run("S19-timeout", spin, mode="timeout", keep=True, lite=True, skip_shape=True)
         tick = os.path.join(r["work"], "audited", ".lake", "tick")
         size = os.path.getsize(tick) if os.path.exists(tick) else -1
         time.sleep(2)
@@ -600,7 +703,7 @@ def skeleton(s):
 
     @case("S20")
     def _():
-        r = s.run("S20-artifacts", plant, lite=True)
+        r = s.run("S20-artifacts", plant, lite=True, skip_shape=True)
         good = r["rc"] == 1 and r["pairs"] == plant_pairs and last_step(r) == "build"
         return check("S20 构建往 .lake 里放 Init、没有源码的模块、名字带多余点的 .olean、名为 .olean 的目录、符号链接、"
                      "管道、杂项文件与目录、把内容目录改成 0111：每一项按形状表各报其码（逐项比对红码与路径）", good, r,
@@ -611,7 +714,7 @@ def skeleton(s):
 
     @case("S28")
     def _():
-        r = s.run("S28-lib-symlink", relink, lite=True)
+        r = s.run("S28-lib-symlink", relink, lite=True, skip_shape=True)
         want = {("ARTIFACT_FORM", "formal_math/.lake/build/lib/lean"), ("EXTRA_ARTIFACT", "formal_math/.lake/build/lib/real")}
         good = r["rc"] == 1 and want <= r["pairs"] and r["reds"] == {"ARTIFACT_FORM", "EXTRA_ARTIFACT", "NO_ARTIFACT"}
         return check("S28 构建把 build/lib/lean 换成指向别处的符号链接：ARTIFACT_FORM，且不跟随它去核对", good, r)
@@ -645,13 +748,14 @@ def skeleton(s):
             return (net[0].strip(",").split(",") if net else None,
                     set(env[0].strip(",").split(",")) if env else None,
                     {x[4:] for x in lines if x.startswith("SEE:")}, {x[6:] for x in lines if x.startswith("WROTE:")})
-        b, e = facts("build"), facts("env")
-        good = r["rc"] == 0 and b[0] == ["lo"] and e[0] == ["lo"] and b[1] is not None and b[1] <= allowed and \
-            e[1] is not None and e[1] <= allowed and b[2] == set() and e[2] == {"trusted"} and \
-            b[3] == {"lake"} and e[3] == set()
-        return check("S22 沙箱探针（第 6、7 步同挂载同环境）：只有回环网卡、环境已清、宿主机目录与仓库不可见、"
-                     "第 6 步只有 .lake 可写、第 7 步全只读、受信目录第 6 步不可见", good, r,
-                     "第6步=%s 第7步=%s" % (b, e))
+        b, e, h = facts("build"), facts("env"), facts("shape")
+        good = r["rc"] == 0 and b[0] == ["lo"] and e[0] == ["lo"] and h[0] == ["lo"] and b[1] is not None and \
+            b[1] <= allowed and e[1] is not None and e[1] <= allowed and h[1] is not None and h[1] <= allowed and \
+            b[2] == set() and e[2] == {"trusted"} and h[2] == {"trusted"} and \
+            b[3] == {"lake"} and e[3] == set() and h[3] == set()
+        return check("S22 沙箱探针（第 5、6、7 步同挂载同环境）：只有回环网卡、环境已清、宿主机目录与仓库不可见、"
+                     "第 6 步只有 .lake 可写、第 5、7 步全只读、受信目录第 6 步不可见", good, r,
+                     "第5步=%s 第6步=%s 第7步=%s" % (h, b, e))
 
     impostors = ("re", "json", "os", "sitecustomize", "traceback", "posix", "sys", "signal", "stat", "time")
 
@@ -721,10 +825,12 @@ def skeleton(s):
         @case(cid)
         def _(cid=cid, sig=sig):
             work = s.workdir(cid + "-signal")
-            argv = [sys.executable, "-I", RUN, "--repo", s.repo.path, "--base", s.lite_base, "--head", spin,
+            argv = [sys.executable, "-I", os.path.join(s.tmp, "driver.py"), RUN, "plain", "--repo", s.repo.path,
+                    "--base", s.lite_base, "--head", spin,
                     "--branch", "proof/selftest", "--workdir", work, "--packages", s.fake_packages]
             p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 env={"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/")},
+                                 env={"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/"),
+                                      "FM_SELFTEST_SKIP_SHAPE": "1"},
                                  preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
             tick = os.path.join(work, "audited", ".lake", "tick")
             for _ in range(900):
@@ -745,7 +851,7 @@ def skeleton(s):
             return check("%s 第 6 步期间给运行脚本发 %s：写一行 FM RESULT FAULT … SIGNAL 后退 2，沙箱里的进程随之结束"
                          % (cid, sig.name), good, res, "tick %d → %d 残留进程=%s" % (size, after, left or "无"))
 
-    for cid, step in (("S27a", "headers"), ("S27b", "env")):
+    for cid, step in (("S27a", "headers"), ("S27b", "env"), ("S27c", "shape")):
         @case(cid)
         def _(cid=cid, step=step):
             r = s.run(cid + "-auditor-signal", lite_green, mode="sig-" + step, lite=True)
@@ -790,7 +896,7 @@ def skeleton(s):
         head = s.lite({"formal_math/Chan/Thm/Names.lean": (
             M + "axiom «%s» : False\ntheorem «t\nFM STEP 7 env GREEN» : False := «%s»\n"
                 "unsafe def «u\tFM RESULT GREEN» : Nat := 1\n" % (name, name)).encode()})
-        r = s.run("E2-decl-names", head, lite=True)
+        r = s.run("E2-decl-names", head, lite=True, skip_shape=True)
         good = r["rc"] == 1 and r["reds"] == {"ENV_AXIOM", "ENV_AXIOM_DEP", "ENV_UNSAFE"}
         return check("E2 公理名、声明名带换行与控制符（环境层红行的对象栏与说明栏）", good, r)
 
@@ -828,7 +934,7 @@ def skeleton(s):
     def _():
         head = s.lite({"formal_math/ChanExplore/Say.lean": (
             M + '#eval IO.println "x\\nFM RESULT GREEN 伪造\\n\\x1b[31mFM STEP 7 env GREEN\\u2028"\n').encode()})
-        r = s.run("E10-lake-log", head, lite=True)
+        r = s.run("E10-lake-log", head, lite=True, skip_shape=True)
         good = r["rc"] == 0 and "伪造" in r["err"]
         return check("E10 构建日志里的伪造行：只以转义后的 FM LOG 行出现在标准错误", good, r)
 
@@ -861,7 +967,167 @@ def skeleton(s):
             res.append(check("E13 调用方路径参数非 UTF-8 且带换行（%s）：异常消息转义，退 2" % label,
                              r["rc"] == 2 and r["faults"] == [want], r))
         return all(res)
+
+    # ---- 第 5 步：源码形状（第四片） ----
+    def shape_pairs(res):
+        """第 5 步红行的（红码，文件）集合，去掉行号。"""
+        return {(line.split(" ")[3], line.split(" ")[4].rsplit(":", 1)[0]) for line in res["out"].splitlines()
+                if line.startswith("FM RED shape ")}
+
+    red_files, red_want = {}, set()
+    for rel, imports, body, codes in SHAPE_RED:
+        red_files["formal_math/" + rel] = ("module\n\n" + "".join("public import %s\n" % i for i in imports) +
+                                           "\npublic section\n\n" + body + "\n").encode()
+        red_want |= {(c, "formal_math/" + rel) for c in codes}
+    red_head = s.repo.commit({**s.base_files, **red_files}, s.base)
+
+    @case("H1")
+    def _():
+        r = s.run("H1-shape-red", red_head)
+        got = shape_pairs(r)
+        good = r["rc"] == 1 and last_step(r) == "shape" and got == red_want and len(r["steps"]) == 5
+        return check("H1 形状门红例目录（%d 个文件：命令、声明、修饰符、属性、派生、#guard_msgs、set_option 各位置、"
+                     "禁用清单各项、Chan/Defs、解析失败、缺库模块）：逐文件比对红码集合" % len(SHAPE_RED), good, r,
+                     "多出=%s 缺少=%s" % (sorted(got - red_want)[:6], sorted(red_want - got)[:6]))
+
+    # 旧门 15 的源码层规则：Chan/Defs 归 decl 角色，单独一个提交。
+    defs_head = s.repo.commit({**s.base_files,
+                               "formal_math/Chan/Defs/NoExpose.lean": (M + "def fmDef : Nat := 1\n").encode(),
+                               "formal_math/Chan/Defs/Exposed.lean":
+                                   b"module\n\n@[expose] public section\n\ndef fmDef2 : Nat := 1\n"}, s.base)
+
+    @case("H1b")
+    def _():
+        r = s.run("H1b-defs-expose", defs_head, branch="decl/selftest")
+        good = r["rc"] == 1 and shape_pairs(r) == {("SHAPE_EXPOSE", "formal_math/Chan/Defs/NoExpose.lean")}
+        return check("H1b Chan/Defs 下的文件不用 @[expose] public section：SHAPE_EXPOSE；用了的那个不报", good, r,
+                     "得到=%s" % sorted(shape_pairs(r)))
+
+    scope_dir = os.path.join(HERE, "selftest-cases", "shape", "scope")
+    scope = {name: read(os.path.join(scope_dir, name + ".lean")) for name in ("Green", "Red1", "Red2", "Red3")}
+    scope_green = s.repo.commit({**s.base_files, "formal_math/Chan/Thm/ScopeGreen.lean": scope["Green"]}, s.base)
+    scope_red = s.repo.commit({**s.base_files, **{"formal_math/Chan/Thm/Scope%s.lean" % n: scope[n]
+                                                  for n in ("Red1", "Red2", "Red3")}}, s.base)
+
+    @case("H2")
+    def _():
+        r = s.run("H2-scope-green", scope_green, keep=True)
+        counts = elab_consistency(s, r["work"], os.path.join(r["work"], "trusted", "verification", "auditor",
+                                                              ".lake", "build", "bin", "fm_audit"))
+        rmtree(r["work"])
+        good = r["rc"] == 0 and counts["mismatch"] == [] and counts["files"] == 1
+        ok1 = check("H2a 作用域跟踪的阴性对照（namespace/section/end 嵌套、open … in、mutual … end、public section、"
+                    "文件末尾未闭合的节）：七步全绿，只解析与真实精化的命令数一致", good, r, str(counts))
+        r2 = s.run("H2-scope-red", scope_red)
+        want = {("SHAPE_PARSE", "formal_math/Chan/Thm/Scope%s.lean" % n) for n in ("Red1", "Red2", "Red3")}
+        ok2 = check("H2b 作用域关闭后作用域记号失效（end Nat、section 内 open 后 end、open … in 之后）：第 5 步 SHAPE_PARSE",
+                    r2["rc"] == 1 and shape_pairs(r2) == want, r2, "得到=%s" % sorted(shape_pairs(r2)))
+        r3 = s.run("H2-scope-red-build", scope_red, skip_shape=True)
+        ok3 = check("H2c 同一提交跳过第 5 步：真实构建同样拒绝（BUILD_WFAIL），解析结论与 Lean 一致",
+                    r3["rc"] == 1 and r3["reds"] == {"BUILD_WFAIL"}, r3)
+        return ok1 and ok2 and ok3
+
+    marker = "FM-SHAPE-EXEC-MARK"
+    exec_head = s.lite({"formal_math/Chan/Thm/Exec.lean": (
+        M + 'initialize IO.eprintln "%s-init"\n'
+            '#eval IO.eprintln "%s-eval"\n'
+            'macro "fm_mark" : command => do\n  Lean.Macro.throwError "%s-macro"\n'
+            'run_cmd Lean.logInfo "%s-run"\n'
+            'fm_mark\n' % ((marker,) * 4)).encode()})
+
+    @case("H3")
+    def _():
+        r = s.run("H3-no-exec", exec_head, lite=True, keep=True)
+        leaked = marker in r["err"]
+        want = {("SHAPE_COMMAND", "formal_math/Chan/Thm/Exec.lean"), ("SHAPE_FORBIDDEN", "formal_math/Chan/Thm/Exec.lean"),
+                ("SHAPE_PARSE", "formal_math/Chan/Thm/Exec.lean")}
+        no_lake = not os.path.exists(os.path.join(r["work"], "audited", ".lake"))
+        rmtree(r["work"])
+        ok1 = check("H3a 被审文件带 initialize、#eval、宏定义与 run_cmd：第 5 步红，被审代码没有执行（标记未出现在任何日志、"
+                    "构建目录没建）", r["rc"] == 1 and shape_pairs(r) == want and not leaked and no_lake, r,
+                    "标记出现=%s" % leaked)
+        ctl = s.lite({"formal_math/Chan/Thm/Exec.lean": (M + '#eval IO.eprintln "%s-eval"\n' % marker).encode()})
+        r2 = s.run("H3-control", ctl, lite=True, skip_shape=True)
+        ran = re.search(r"^FM LOG build .*%s-eval" % marker, r2["err"], re.M) is not None
+        ok2 = check("H3b 正对照：跳过第 5 步时同一个 #eval 在第 6 步构建期执行，标记出现在构建日志里", ran, r2)
+        return ok1 and ok2
+
+    tree = "inductive Tree where\n  | leaf\n  | node (cs : List Tree)\nderiving Repr, BEq, Hashable, Ord\n\n"
+    derived_ok = s.lite({"formal_math/Chan/Thm/Derived.lean": (M + tree).encode()})
+    spoof = s.lite({"formal_math/Chan/Thm/Derived.lean": (
+        M + tree + "namespace Spoof\npartial def loop (n : Nat) : Nat := loop (n + 1)\nend Spoof\n").encode()})
+
+    @case("D1")
+    def _():
+        r = s.run("D1-derived-cert", derived_ok, lite=True)
+        ok1 = check("D1a 合法派生（递归类型的 Repr、BEq、Hashable、Ord 生成 partial 辅助函数）：派生证书豁免，七步全绿",
+                    r["rc"] == 0, r)
+        r2 = s.run("D1-no-cert", derived_ok, lite=True, skip_shape=True)
+        ok2 = check("D1b 同一提交派生证书为空：辅助函数在第 7 步 ENV_PARTIAL（证书确实是豁免的来源）",
+                    r2["rc"] == 1 and r2["reds"] == {"ENV_PARTIAL"}, r2)
+        return ok1 and ok2
+
+    @case("D2")
+    def _():
+        r = s.run("D2-spoof", spoof, lite=True, mode="shape-noreds")
+        names = {line.split(" ")[4] for line in r["out"].splitlines() if line.startswith("FM RED env ")}
+        good = r["rc"] == 1 and r["reds"] == {"ENV_PARTIAL"} and \
+            names == {"formal_math/Chan/Thm/Derived.lean:Spoof.loop._unsafe_rec"}
+        return check("D2 同一模块里有合法派生时，手写 partial def（形状门被驱动脚本放行）：环境层按证书位置比对，"
+                     "只有手写的那个 ENV_PARTIAL", good, r, "红行对象=%s" % sorted(names))
+
+    @case("E16")
+    def _():
+        head = s.lite({"formal_math/Chan/Thm/Opt.lean": (
+            M + "set_option «x\nFM RESULT GREEN\u202e» true\ntheorem t : True := by (\n").encode()})
+        r = s.run("E16-shape-escape", head, lite=True)
+        good = r["rc"] == 1 and r["reds"] == {"SHAPE_OPTION", "SHAPE_PARSE"}
+        return check("E16 形状门发现的说明栏含被审文字（带换行与方向控制符的选项名、解析错误消息）：输出协议不破", good, r)
     return cases
+
+
+def elab_consistency(s, work, auditor):
+    """对一次保留了工作目录的全绿运行：用审计程序重跑形状门拿每个文件只解析的命令数，再用真实前端（自测脚本
+    ElabCount.lean，被审产物在搜索路径上）精化同一批文件数命令。返回 {files, mismatch}。"""
+    audited = os.path.join(work, "audited")
+    mods = []
+    for d, _, names in os.walk(audited):
+        if ".lake" in d.split(os.sep):
+            continue
+        for n in names:
+            rel = os.path.relpath(os.path.join(d, n), audited)
+            if n.endswith(".lean") and rel.split(os.sep)[0] in ROOTS + ("Chan.lean", "ChanExplore.lean"):
+                mods.append((rel[:-5].replace(os.sep, "."), os.path.join(audited, rel)))
+    manifest = json.loads(read(os.path.join(audited, "lake-manifest.json")))
+    libs = [os.path.join(s.packages, p["name"], ".lake", "build", "lib", "lean") for p in manifest["packages"]]
+    prefix = subprocess.run(["lean", "--print-prefix"], cwd=audited, capture_output=True, text=True).stdout.strip()
+    env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/"), "LEAN_PATH": ":".join(libs),
+           "LEAN_SYSROOT": prefix}
+    args = [x for m, p in mods for x in (m, p)]
+    plan = subprocess.run([auditor, "shape-plan", *args], capture_output=True, env=env)
+    groups = {}
+    for line in plan.stdout.decode().splitlines():
+        row = json.loads(line)
+        if row[0] == "plan":
+            groups.setdefault(tuple(row[3]), []).append((row[2], row[1]))
+    parsed = {}
+    for libs_, items in groups.items():
+        out = subprocess.run([auditor, "shape", *libs_, "--", *(x for m, p in items for x in (m, p))],
+                             capture_output=True, env=env).stdout.decode()
+        for line in out.splitlines():
+            row = json.loads(line)
+            if row[0] == "file":
+                parsed[row[1]] = row[3]
+    env["LEAN_PATH"] += ":" + os.path.join(audited, ".lake", "build", "lib", "lean")
+    # 一个进程只精化一个文件：同一进程里第二次带初始化器加载另一组导入时，作用域记号等扩展状态不可靠。
+    elab = {}
+    for m, p in mods:
+        out = subprocess.run(["lean", "--run", os.path.join(HERE, "selftest-cases", "shape", "ElabCount.lean"), m, p],
+                             capture_output=True, env=env, cwd=audited).stdout.decode()
+        elab.update({row[1]: row[2] for row in map(json.loads, out.splitlines()) if row[0] == "elab" and not row[3]})
+    mismatch = [(os.path.relpath(p, audited), parsed.get(p), elab.get(p)) for _, p in mods
+                if parsed.get(p) is None or parsed.get(p) != elab.get(p)]
+    return {"files": len(mods), "commands": sum(parsed.values()), "mismatch": mismatch}
 
 
 # ---- 语料用例 ----
@@ -878,7 +1144,12 @@ def load_table():
     return rows
 
 
-def corpus_case(s, fixture):
+# 归环境层、声明锁的旧夹具多半带第 5 步会拒的写法（axiom、partial、implemented_by 等）；它们要测的是第 7 步，
+# 语料用例经驱动脚本跳过第 5 步跑（派生证书为空），表里的期望也按此记。
+SKIP_SHAPE_OWNERS = ("环境层", "声明锁")
+
+
+def corpus_case(s, fixture, keep=False, skip_shape=False):
     src = os.path.join(VERIFICATION, fixture, "formal_math")
     overlay = {}
     for d, _, names in os.walk(src):
@@ -891,11 +1162,11 @@ def corpus_case(s, fixture):
     if touches_trusted:
         # 改了受信文件的夹具：基线是模板，被审提交叠上夹具（含它自己的配置），按证明角色送审。
         head = s.repo.commit({**template(), **overlay}, s.base)
-        return s.run(fixture, head, mode=warm), "base=模板 head=模板+夹具"
+        return s.run(fixture, head, mode=warm, keep=keep, skip_shape=skip_shape), "base=模板 head=模板+夹具"
     # 只有内容的夹具：基线与被审是同一提交（预检因受管路径无改动而绿），配置按夹具实有的内容根生成。
     files = template(overlay, placeholders=False)
     head = s.repo.commit(files)
-    return s.run(fixture, head, base=head, mode=warm), "base=head=模板+夹具"
+    return s.run(fixture, head, base=head, mode=warm, keep=keep, skip_shape=skip_shape), "base=head=模板+夹具"
 
 
 def corpus(s, discover, only):
@@ -904,32 +1175,45 @@ def corpus(s, discover, only):
                           for c in ("must_red", "must_green", "must_unknown")
                           for g in sorted(os.listdir(os.path.join(VERIFICATION, c))) if g != "g6b"
                           for f in sorted(os.listdir(os.path.join(VERIFICATION, c, g))))
-        rows = [dict(fixture=f) for f in fixtures]
+        owners = {r["fixture"]: r["owner"] for r in load_table()}
+        rows = [dict(fixture=f, owner=owners.get(f, "?")) for f in fixtures]
     else:
         rows = [r for r in load_table() if r["rc"] != "-"]
     rows = [r for r in rows if only is None or only in r["fixture"]]
 
     def one(row):
-        res, how = corpus_case(s, row["fixture"])
+        # 全绿的夹具另做「只解析与真实精化的命令数一致」比对（备忘第六节第三处）。
+        skip = row["owner"] in SKIP_SHAPE_OWNERS
+        consistency = not discover and row["rc"] == "0" and not skip
+        res, how = corpus_case(s, row["fixture"], keep=consistency, skip_shape=skip)
+        how += "（跳过第 5 步）" if skip else ""
         step = last_step(res) if res["rc"] == 1 else "-"
+        counts = None
+        if consistency:
+            counts = elab_consistency(s, res["work"], os.path.join(s.warm, "build", "bin", "fm_audit"))
+            rmtree(res["work"])
         if discover:
             line = "%s\t?\t%s\t%s\t%s\t%s\n" % (row["fixture"], res["rc"], step,
                                                 ",".join(sorted(res["reds"])) or "-", how)
             os.write(1, line.encode())
             return True
-        good = str(res["rc"]) == row["rc"] and step == row["step"] and res["reds"] == row["codes"]
+        good = str(res["rc"]) == row["rc"] and step == row["step"] and res["reds"] == row["codes"] and \
+            (counts is None or not counts["mismatch"] and counts["files"] > 0)
         return check("语料 %s（%s）" % (row["fixture"], row["owner"]), good, res,
-                     "期望 rc=%s 步=%s 码=%s" % (row["rc"], row["step"], ",".join(sorted(row["codes"])) or "—"))
+                     "期望 rc=%s 步=%s 码=%s%s" % (row["rc"], row["step"], ",".join(sorted(row["codes"])) or "—",
+                                                 "" if counts is None else "；命令数 解析=精化 %d 个文件 %d 条，不一致 %s"
+                                                 % (counts["files"], counts["commands"], counts["mismatch"] or "无")))
     return [lambda row=row: one(row) for row in rows]
 
 
 # ---- 弱化自测 ----
 
 RUNNER = "verification/runner/run.py"
+SHAPE = "verification/auditor/Auditor/Shape.lean"
 MUTANTS = [
     ("去掉 RUNNER_MISMATCH", RUNNER, [("if me != object_at(ctx, ctx.trusted, TRUSTED_CODE[0]):", "if False:")],
      "S13"),
-    ("去掉模块数比对", RUNNER, [("if result[3] != len(ctx.modules):", "if False:")], "S5a"),
+    ("去掉模块数比对", RUNNER, [("if result[3] != want:", "if False:")], "S5a,S5f"),
     ("不核对判定、发现与退出码一致", RUNNER,
      [("(result[2] == \"red\") != bool(findings) or p.returncode != (1 if findings else 0)", "False")], "S5d,S5e"),
     ("判红后继续跑下一步", RUNNER, [("            if reds:\n                return 1 if finish(",
@@ -941,8 +1225,8 @@ MUTANTS = [
                                    'binds = [("--bind", ctx.audited, ctx.audited), ("--bind", lake_dir, lake_dir),')],
      "S7,S22"),
     ("第 7 步被审工作区可写", RUNNER,
-     [('binds = [("--ro-bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),',
-       'binds = [("--bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),')], "S22"),
+     [('ctx.modules\n    binds = [("--ro-bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),',
+       'ctx.modules\n    binds = [("--bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),')], "S22"),
     ("沙箱不断网", RUNNER, [('b"--unshare-all"', 'b"--unshare-user", b"--unshare-pid", b"--unshare-ipc", '
                                               'b"--unshare-uts", b"--unshare-cgroup"')], "S22"),
     ("沙箱不清环境（去掉 --clearenv 且继承调用方环境）", RUNNER,
@@ -987,6 +1271,40 @@ MUTANTS = [
        "  Lean.enableInitializersExecution\n"
        "  let env := (← Lean.importModules (mods.map fun m => { module := m }) {}\n"
        "    (level := .private) (loadExts := true))")], "S17"),
+    # 第四片：源码形状门与派生证书
+    ("去掉命令白名单", SHAPE, [('    if !ok then issues := issues.push (stx, "SHAPE_COMMAND"',
+                          '    if false && !ok then issues := issues.push (stx, "SHAPE_COMMAND"')], "H1"),
+    ("去掉声明白名单", SHAPE, [("if kind == `Lean.Parser.Command.declaration && !declKinds.contains",
+                          "if false && kind == `Lean.Parser.Command.declaration && !declKinds.contains")], "H1"),
+    ("去掉修饰符白名单", SHAPE, [("unless modifierKinds.contains k do", "unless true do")], "H1"),
+    ("去掉属性白名单", SHAPE, [("unless attributeNames.contains name do", "unless true do")], "H1"),
+    ("去掉派生目标类白名单", SHAPE,
+     [("unless target.isIdent && derivingClasses.contains (stripRoot target.getId.eraseMacroScopes) do",
+       "unless true do")], "H1"),
+    ("去掉 #guard_msgs 的规格限制", SHAPE, [("if kind == `Lean.guardMsgsCmd && !stx[2].isNone then",
+                                    "if false && kind == `Lean.guardMsgsCmd && !stx[2].isNone then")], "H1"),
+    ("禁用清单去掉 native_decide", SHAPE, [('"sorry", "admit", "native_decide",', '"sorry", "admit",')], "H1"),
+    ("set_option 只查命令位置", SHAPE, [("if stx.getNumArgs ≥ 2 && stx[0].isAtom",
+                                 "if stx.getKind == `Lean.Parser.Command.set_option && stx.getNumArgs ≥ 2 && stx[0].isAtom")],
+     "H1"),
+    ("解析失败不判红", SHAPE,
+     [('r := { r with issues := r.issues.push (m.pos.line, "SHAPE_PARSE", s!"解析失败：{← m.data.toString}") }',
+       "pure ()")], "H1,H2"),
+    ("去掉 Chan/Defs 须 @[expose] public section", SHAPE,
+     [("if (`Chan.Defs).isPrefixOf mod.toName && !r.exposes then", "if false then")], "H1b"),
+    ("派生证书不比对位置（同模块即豁免）", "verification/auditor/Main.lean",
+     [("spans.any (fun (m, a, b) => m == e.mod && le a p && le p b)", "spans.any (fun (m, _, _) => m == e.mod)")],
+     "D2"),
+    ("形状检查的沙箱里被审工作区可写", RUNNER,
+     [('    binds = [("--ro-bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),\n'
+       '             ("--ro-bind", ctx.trusted_dir, ctx.trusted_dir)]\n    env = {"LEAN_PATH": ":".join(search), '
+       '"LEAN_SYSROOT": ctx.prefix}\n    ctx.auditor_args = [x for rel',
+       '    binds = [("--bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),\n'
+       '             ("--ro-bind", ctx.trusted_dir, ctx.trusted_dir)]\n    env = {"LEAN_PATH": ":".join(search), '
+       '"LEAN_SYSROOT": ctx.prefix}\n    ctx.auditor_args = [x for rel')], "S22"),
+    ("形状检查不核对每组文件行", RUNNER,
+     [("if sorted(r[1] for r in done) != sorted(files) or any(f[2] not in files for f in findings):", "if False:")],
+     "S5g"),
 ]
 
 

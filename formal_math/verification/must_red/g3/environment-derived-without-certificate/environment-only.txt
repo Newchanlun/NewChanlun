@@ -1,1 +1,0 @@
-直调门 3 环境审计，不带源码层的派生证书：派生处理器生成的 partial 辅助函数不豁免（第四轮 R4-A5，豁免 3 只认证书）。完整门 3 下同一源码为绿，见 must_green/g3/generated-auxiliaries。
