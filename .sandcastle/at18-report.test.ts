@@ -4905,6 +4905,181 @@ class Outer(Inner):
   }
 });
 
+test("R43/#1319：预绑定逐键恢复、位置来源及跨层默认组合", { timeout: 120_000 }, async t => {
+  const entry = "trading_system/at18_fixture_feed.py";
+  const integration = "trading_system/__init__.py";
+  const path = "trading_system/tests/test_at18_fixture_feed.py";
+  const route = "def route(price, /, **kw): return price + kw['offset']";
+  const check = (name: string, prod: string, observed: string, target = route, expected = true) =>
+    t.test(name, () => {
+      const repo = feedSource({
+        [entry]: target + "\n__all__ = ('route',)\n",
+        [integration]: "from functools import wraps\nfrom . import at18_fixture_feed as f\n" +
+          prod + "\n__all__ = ('Adapter',)\n",
+        [path]: "from trading_system import at18_fixture_feed as f\ndef test_route():\n" +
+          `    assert f.route(${observed}) == 116\n`,
+      });
+      assert.equal(pythonReplacement(repo, G0, entry, integration, path, "test_route", 1), expected);
+    });
+
+  const bindings = (ctor: boolean, wire: boolean) => `
+def public(fn):
+    @wraps(fn)
+    def strict(self, quote, *, offset, first=None, second=None):
+        assert (quote, offset) == (99, 17)
+        opt = {k:v for k,v in dict(first=first, second=second).items() if v is not None}
+        return fn(self, quote, offset=offset, **opt)
+    return strict
+def inject(key, value):
+    def wrap(fn):
+        @wraps(fn)
+        def relay(self, quote, **kw):
+            return fn(self, quote, **{key:value}, **kw)
+        return relay
+    return wrap
+class Adapter:
+    @public
+    @inject('first', 7)
+    @inject('second', 11)
+    def ${ctor ? "__init__" : "dispatch"}(self, quote, *, offset, first, second, audit=0, trace=0):
+        assert (quote, offset, first, second, audit, trace) == (99, 17, 7, 11, 0, 0)
+        ${ctor ? "self.quote, self.offset = quote, offset" : wire ? "return f.route(quote, offset=offset)" : "return 116"}
+${ctor ? "    def dispatch(self): " + (wire ? "return f.route(self.quote, offset=self.offset)" : "return 116") : ""}
+`;
+  for (const ctor of [false, true]) for (const wire of [true, false]) {
+    await check(`${ctor ? "构造" : "方法"}：公开预绑定与双层注入冲突${wire ? "恢复" : "但不承接"}`,
+      bindings(ctor, wire), "99,offset=17,quote=123,audit=5,trace=9,first=19,second=23", route, wire);
+  }
+
+  const tails = (ctor: boolean, renamed: boolean) => `
+token = []
+class Adapter:
+    def ${ctor ? "__init__" : "dispatch"}(self, offset, ask, ${renamed ? "quote" : "bid"}, marker=token, depth=0, /, *items, flag=False):
+        assert (offset, ask, ${renamed ? "quote" : "bid"}, depth) == (3, 45, 31, 9)
+        assert marker is token and items == ([10], 17) and flag is True
+        items[0].append(999)
+        ${ctor ? "self.value = items[1]" : "return f.route(31,45,depth,[10],17,offset=offset,flag=flag)"}
+${ctor ? "    def dispatch(self): return f.route(31,45,9,[10],self.value,offset=3,flag=True)" : ""}
+`;
+  const tailRoute = "def route(bid, ask, depth, /, *items, offset, flag): return bid + ask + depth + items[0][0] + items[-1] + offset + flag";
+  for (const ctor of [false, true]) for (const renamed of [false, true]) {
+    await check(`${ctor ? "构造" : "方法"}：关键字、换序、哨兵和混合尾参${renamed ? "（混合按名与按位）" : ""}`,
+      tails(ctor, renamed), "31,45,9,[10],17,offset=3,flag=True", tailRoute);
+  }
+  await check("显式关键字提供前缀，其余关键字与位置尾参分别保留", `
+token = object()
+class Adapter:
+    def __init__(self, offset, tag, marker=token, /, *items, **opts):
+        assert (offset, tag) == (3, 96) and marker is token
+        assert items == (17,) and opts == {'flag': True}
+    def dispatch(self): return f.route(96,17,offset=3,flag=True)
+`, "96,17,offset=3,flag=True", "def route(tag, /, *items, **opts): return tag + items[0] + opts['offset']");
+  await check("源同名位置槽与关键字即使同值也可分别使用", `
+class Adapter:
+    def __init__(self, tag, /, *items, **opts):
+        assert tag == 99 and items == (99,17) and opts == {'flag': True}
+    def dispatch(self): return f.route(99,17,tag=99,flag=True)
+`, "99,17,tag=99,flag=True", "def route(tag, /, *items, **opts): return tag + items[-1]");
+  await check("元类与实例共同扣除来源，实例按位绑定不抢外层源槽", `
+token = object()
+class Meta(type):
+    def __call__(cls, offset, tag, /, *pos, **kw):
+        assert (offset, tag) == (4,90)
+        return super().__call__(*pos, **kw)
+class Adapter(metaclass=Meta):
+    def __init__(self, ask, renamed, marker=token, /, *items, **opts):
+        assert (ask, renamed) == (2,3) and marker is token
+        assert items == (17,) and opts == {'flag': True}
+    def dispatch(self): return f.route(90,3,2,17,offset=4,flag=True)
+`, "90,3,2,17,offset=4,flag=True",
+  "def route(tag, depth, ask, /, *items, **opts): return tag + depth + ask + items[-1] + opts['offset']");
+
+  const joint = (flip: boolean) => `
+outer = []
+inner = []
+terminal = []
+class Inner(type):
+    def __call__(cls, tag=inner, opt=inner, /, *pos, **kw):
+        assert tag ${flip ? "== [99] and tag is not inner" : "is inner"}
+        assert opt ${flip ? "is inner" : "== [17] and opt is not inner"}
+        return super().__call__(*pos, **kw)
+class Outer(Inner):
+    def __call__(cls, tag=outer, opt=outer, /, *pos, **kw):
+        assert tag ${flip ? "is outer" : "== [99] and tag is not outer"}
+        assert opt ${flip ? "== [17] and opt is not outer" : "is outer"}
+        return super().__call__(*pos, **kw)
+class Adapter(metaclass=Outer):
+    def __new__(cls, tag=terminal, mode=3, /, *, audit=terminal, **kw):
+        assert tag ${flip ? "== [99] and tag is not terminal" : "is terminal"}
+        assert mode == 3 and audit is terminal
+        return object.__new__(cls)
+    def __init__(self, tag=terminal, mode=3, /, *, opt):
+        assert mode == 3 and opt == [17]
+    def dispatch(self): return f.route([99], offset=[17], audit=[2], mode=3, opt=[17], tag=[99])
+`;
+  const jointRoute = "def route(price, /, **kw): return price[0] + kw['offset'][0]";
+  for (const flip of [false, true]) {
+    await check("六个可选槽：两层元类和共享实例入参独立选择 " + flip,
+      joint(flip), "[99],offset=[17],audit=[2],opt=[17],tag=[99]", jointRoute);
+  }
+  await check("透明元类也保留实例的默认／覆盖组合", `
+token = object()
+class Meta(type):
+    def __call__(cls, *pos, **kw): return super().__call__(*pos, **kw)
+class Adapter(metaclass=Meta):
+    def __new__(cls, *, offset=token, **kw):
+        assert offset == 17
+        return object.__new__(cls)
+    def __init__(self, *, audit=token, **kw):
+        assert audit is token
+    def dispatch(self): return f.route(99, offset=17, audit=3)
+`, "99,offset=17,audit=3");
+  await check("与观察数值相等的生产默认值不与覆盖姿态合并", `
+token = float('99.125')
+class Meta(type):
+    def __call__(cls, tag, /, *pos):
+        assert tag == 99.125
+        return super().__call__(*pos)
+class Adapter(metaclass=Meta):
+    def __init__(self, tag=token, offset=None, /):
+        assert tag is token and offset == 17
+    def dispatch(self): return f.route(99, offset=17, tag=99.125)
+`, "99,offset=17,tag=99.125");
+
+  const clipped = (which: "instance-slot" | "instance-layer" | "meta-layer") => `
+metaToken = object()
+instanceToken = object()
+class Meta(type):
+    def __call__(cls, a=metaToken, b=metaToken, c=metaToken, d=metaToken, /, *pos, **kw):
+        assert ${which === "meta-layer" ? "all(x is metaToken for x in (a,b,c,d))" : "(a,b,c,d) == (1,2,3,4)"}
+        return super().__call__(*pos, **kw)
+class Adapter(metaclass=Meta):
+    def __init__(self, a=instanceToken, b=instanceToken, c=instanceToken, d=instanceToken, /, *, offset):
+        assert ${which === "instance-layer" ? "all(x is instanceToken for x in (a,b,c,d))" :
+          which === "instance-slot" ? "a is instanceToken and (b,c,d) == (2,3,4)" : "(a,b,c,d) == (1,2,3,4)"}
+        assert offset == 17
+    def dispatch(self): return f.route(99, offset=17,a=1,b=2,c=3,d=4)
+`;
+  for (const which of ["instance-slot", "instance-layer", "meta-layer"] as const) {
+    await check("八槽裁剪仍保留 " + which, clipped(which), "99,offset=17,a=1,b=2,c=3,d=4");
+  }
+  await check("八槽裁剪覆盖实例独立钩子的全默认／全覆盖", `
+token = object()
+class Meta(type):
+    def __call__(cls, x=token, y=token, /, *pos, **kw):
+        assert (x,y) == (1,2)
+        return super().__call__(*pos, **kw)
+class Adapter(metaclass=Meta):
+    def __new__(cls, a=token, b=token, c=token, **kw):
+        assert all(value is token for value in (a,b,c))
+        return object.__new__(cls)
+    def __init__(self, d=token, e=token, z=token, *, offset, **kw):
+        assert (d,e,z,offset) == (4,5,6,17)
+    def dispatch(self): return f.route(99,offset=17,x=1,y=2,a=1,b=2,c=3,d=4,e=5,z=6)
+`,
+  "99,offset=17,x=1,y=2,a=1,b=2,c=3,d=4,e=5,z=6");
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";

@@ -16,6 +16,7 @@ from contextvars import ContextVar
 from itertools import combinations, product
 from pathlib import Path
 from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType, MethodType
+from typing import NamedTuple
 from weakref import WeakKeyDictionary
 
 import pytest
@@ -50,10 +51,13 @@ def selected_test(path, selector):
     return node if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
 
 
+SCALAR_TYPES = (type(None), bool, int, float, complex, str, bytes)
+
+
 def sample(value, depth=5):
     """只复用登记测试的普通数据，不把测试对象、回调或其状态交给生产入口。"""
     kind = type(value)
-    if any(kind is native for native in (type(None), bool, int, float, complex, str, bytes)):
+    if any(kind is native for native in SCALAR_TYPES):
         return value
     if depth and kind is dict:
         return {sample(k, depth - 1): sample(v, depth - 1) for k, v in value.items()}
@@ -88,22 +92,64 @@ KEYWORD = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ON
 VARIADIC = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
 
 
-def matched_tail(signature, view, args, observed):
-    consumed = 0
-    for param in signature.parameters.values():
-        if param.kind not in POSITIONAL or param.name not in view:
-            continue
-        name = param.name
-        if consumed == len(args) or name not in observed:
-            break
-        value = sample_key(view[name])
-        if value != sample_key(observed[name]) or value != sample_key(args[consumed]):
-            break
-        consumed += 1
-    return args[consumed:]
+class SourceShape(NamedTuple):
+    args: tuple
+    kwargs: dict
+    indices: dict
+    positions: dict
+    keywords: frozenset
+    overrides: dict
 
 
-def variadic_modes(signature, shapes=(), view=None, shape_views=None):
+def selections(slots, groups=()):
+    full = frozenset(slots)
+    yield frozenset()
+    if not slots:
+        return
+    yield full
+    if len(slots) <= 6:
+        for size in range(1, len(slots)):
+            yield from map(frozenset, combinations(slots, size))
+        return
+    seen = {frozenset(), full}
+    for group in (*groups, *(frozenset((slot,)) for slot in slots)):
+        for selection in (group, full - group):
+            if selection not in seen:
+                seen.add(selection)
+                yield selection
+
+
+def named_source_positions(slots, view, source_pos_args, indices):
+    # 具名绑定优先保留源槽身份；值一致只用于确认同次观察，不用值反推索引。
+    return {p.name: indices[p.name] for p in slots if p.name in view and p.name in indices
+            and sample_key(view[p.name]) == sample_key(source_pos_args[indices[p.name]])}
+
+
+def by_position(slots, view, indices, reserved):
+    # 换名的必填槽沿已观察固定位置顺序补齐，不猜测默认槽或匿名尾参。
+    available = iter(sorted(set(indices.values()) - reserved))
+    return {p.name: idx for p in slots if p.name not in view and p.default is inspect.Parameter.empty
+            and (idx := next(available, None)) is not None}
+
+
+def source_prefixes(signature, view, source_pos_args, indices, source_kwargs):
+    slots = [p for p in signature.parameters.values() if p.kind in POSITIONAL]
+    by_name = named_source_positions(slots, view, source_pos_args, indices)
+    # 源的仅位置槽与同名 **kwargs 是两个实参，即便两者值相等。
+    shadow_slots = tuple(name for name in by_name if name in source_kwargs)
+    for shadow in selections(shadow_slots):
+        claimed = {name: idx for name, idx in by_name.items() if name not in shadow}
+        keywords = shadow | {p.name for p in slots if p.name not in claimed and p.name in source_kwargs
+                             and p.name in view and sample_key(view[p.name]) == sample_key(source_kwargs[p.name])}
+        overrides = {name: source_kwargs[name] for name in source_kwargs if name in shadow}
+        yield claimed, keywords, overrides
+        # 换名的必填槽可沿源固定位置顺序补齐，不抢具名绑定，也不猜测默认槽或匿名尾参。
+        direct = by_position(slots, view, indices, set(claimed.values()))
+        if direct:
+            yield claimed | direct, keywords, overrides | {name: source_pos_args[idx] for name, idx in direct.items()}
+
+
+def variadic_modes(signature, shapes=(), view=None, shape_views=None, *, joint_defaults=False):
     kinds = {param.kind for param in signature.parameters.values()}
     has_kwargs = inspect.Parameter.VAR_KEYWORD in kinds
     has_args = inspect.Parameter.VAR_POSITIONAL in kinds
@@ -123,25 +169,37 @@ def variadic_modes(signature, shapes=(), view=None, shape_views=None):
             try:
                 position_key = tuple(sample_key(sample(value)) for value in args)
                 keyword_key = keyword_sample_key(kwargs)
-                observations = () if view is None else (
-                    (view,) if shape_views is None else shape_views.get((position_key, keyword_key), ()))
-                # 只扣同次观察确实消费的前缀；插入的默认槽不消费观察位置。
-                tails = [matched_tail(signature, view, args, observed) for observed in observations]
+                observations = () if view is None or shape_views is None else shape_views.get(
+                    (position_key, keyword_key), ())
+                plans = [(indices, *plan) for indices in observations
+                         for plan in source_prefixes(signature, view, args, indices, kwargs)]
             except ValueError:
                 continue
-            for tail in (*tails, args):
-                key = position_key[len(args) - len(tail):]
-                if has_kwargs and kwargs and (key, keyword_key) not in seen_mixed:
-                    seen_mixed.add((key, keyword_key))
-                    yield "shape", tail, kwargs
+            for indices, claimed, keywords, overrides in plans or (({}, {}, frozenset(), {}),):
+                consumed_source_pos_indices = set(claimed.values())
+                remaining = [idx for idx in range(len(args)) if idx not in consumed_source_pos_indices]
+                tail = tuple(args[idx] for idx in remaining)
+                key = tuple(position_key[idx] for idx in remaining), keyword_sample_key(overrides)
+                if joint_defaults:
+                    key += (position_key, tuple(indices.items()), tuple(claimed.items()), keyword_key)
+                provenance = SourceShape(args, kwargs, indices, claimed, keywords, overrides)
+                mixed = tuple(item for item in keyword_key if joint_defaults or item[0] not in keywords)
+                mixed_key = key, mixed, keywords if joint_defaults else ()
+                if has_kwargs and mixed and mixed_key not in seen_mixed:
+                    seen_mixed.add(mixed_key)
+                    yield "shape", tail, kwargs, provenance
                 if key not in seen_tails:
                     seen_tails.add(key)
-                    yield "shape", tail, {}
+                    yield "shape", tail, {}, provenance
 
 
-def arguments(signature, samples, variadic=False, *, following_positional=False):
+def arguments(signature, samples, variadic=False, *, following_positional=False, omitted=(),
+              outer_consumed=(frozenset(), frozenset())):
     args, kwargs, defaults = [], {}, {}
     params = signature.parameters
+    original = samples
+    if omitted:
+        samples = {name: value for name, value in samples.items() if name not in omitted}
     extra_args, extra_kwargs = (), {}
     if variadic is True:
         # 诊断调用仍使用原来的单通道解释。
@@ -154,9 +212,25 @@ def arguments(signature, samples, variadic=False, *, following_positional=False)
         fixed = {name for name, param in params.items()
                  if (param.kind in KEYWORD if shadow else param.kind not in VARIADIC)}
         if type(variadic) is tuple:
-            _, tail, options = variadic
+            _, tail, options, source = variadic
+            source_pos_args, claimed, overrides = source.args, source.positions, source.overrides
+            outer_positions, outer_keywords = outer_consumed
+            if outer_positions and any(name not in original for name in claimed):
+                # 串行元类的具名绑定优先于实例侧猜测的按位绑定。
+                claimed = {name: idx for name, idx in claimed.items() if name in original and name not in omitted}
+                slots = [p for p in params.values() if p.kind in POSITIONAL]
+                direct = by_position(slots, original, source.indices, outer_positions | set(claimed.values()))
+                claimed |= direct
+                overrides = ({name: value for name, value in overrides.items() if name in original} |
+                             {name: source_pos_args[idx] for name, idx in direct.items()})
+            if omitted or outer_positions:
+                consumed_source_pos_indices = outer_positions | {idx for name, idx in claimed.items() if name not in omitted}
+                tail = tuple(v for idx, v in enumerate(source_pos_args) if idx not in consumed_source_pos_indices)
+            if overrides:
+                samples = samples | {name: value for name, value in overrides.items() if name not in omitted}
             extra_args = tuple(map(sample, tail))
-            extra_kwargs = {k: sample(v) for k, v in options.items() if k not in fixed}
+            extra_kwargs = {k: sample(v) for k, v in options.items()
+                            if k not in fixed and k not in outer_keywords and (k not in source.keywords or k in omitted)}
         else:
             remaining = {k: sample(v) for k, v in samples.items() if k not in fixed}
             if variadic == "args":
@@ -314,30 +388,31 @@ def mro_member(cls, name):
     return None, None
 
 
-def choice_value_key(value, default_refs):
-    try:
-        plain = sample(value)
-    except ValueError:
-        # 非纯数据的生产默认值只按身份比较；保活以免 id 被复用。
-        identity = id(value)
-        default_refs[identity] = value
-        return MISSING, identity
-    return sample_key(plain)
+def choice_value_key(value, default_refs, *, default=False):
+    if not default or value is None or type(value) is bool:
+        try:
+            return sample_key(sample(value))
+        except ValueError:
+            pass
+    # 默认对象即使与普通数据同值，省略该槽和显式传入样本也不能合并。
+    identity = id(value)
+    default_refs[identity] = value
+    return MISSING, identity
 
 
-def argument_choice(signature, args, kwargs, defaults, default_refs):
+def argument_choice(bound, args, kwargs, defaults, default_refs):
     # 先校验全部来自测试侧的实参，避免非纯测试对象进入 bind 后落入默认值身份分支。
     for i, value in enumerate(args):
         if i not in defaults:
             sample(value)
     for value in kwargs.values():
         sample(value)
-    bound = signature.bind(*args, **kwargs)
     bound.apply_defaults()
-    params = signature.parameters
+    params = bound.signature.parameters
     items = []
     for name, value in bound.arguments.items():
-        kind = params[name].kind
+        param = params[name]
+        kind = param.kind
         if kind is inspect.Parameter.VAR_POSITIONAL:
             key = tuple(choice_value_key(item, default_refs) for item in value)
         elif kind is inspect.Parameter.VAR_KEYWORD:
@@ -435,53 +510,75 @@ def parse_kw_type_error(exc, extra_set):
                 return "need", missing
 
 
+def bind_public(signature, args, kwargs):
+    try:
+        return signature.bind(*args, **kwargs), None
+    except TypeError:
+        # inspect.bind 与原生调用的诊断格式不同。只移除公开签名能证明
+        # 拒收的键；有 **kwargs 时，同名仅位置槽不占用该关键字。
+        params = signature.parameters
+        bound_positions = {p.name for _, p in zip(args, params.values())
+                           if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD}
+        has_varkw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        for name in kwargs:
+            if name in bound_positions or (not has_varkw and
+                    (name not in params or params[name].kind not in KEYWORD)):
+                return None, ("drop", (name,))
+        return None, None
+
+
 def drop_conflicting_keywords(kwargs, attempt):
     # 只沿真实诊断删键；键数严格递减，不枚举未被诊断的子集。
     while True:
         ok, error = yield from attempt(kwargs)
         if ok or error is None or error[0] != "drop":
-            return ok, kwargs
+            return ok, kwargs, error
         reduced = {k: v for k, v in kwargs.items() if k not in error[1]}
         if len(reduced) == len(kwargs):
-            return ok, kwargs
+            return ok, kwargs, error
         kwargs = reduced
 
 
-def metaclass_prefixes(layers, instance_sig, view, args, kwargs, defaults):
-    # 槽位身份是 (层, 名字)。仅对下层也认领的可选槽补试本层的默认值。
-    claimed = {name for name, param in instance_sig.parameters.items() if param.kind not in VARIADIC}
-    collisions = []
-    for i in reversed(range(len(layers))):
-        slots = layers[i].parameters
-        collisions.extend((i, name) for name, param in slots.items()
-                          if name in claimed and name in view and param.kind not in VARIADIC
-                          and param.default is not inspect.Parameter.empty)
-        claimed.update(name for name, param in slots.items() if param.kind not in VARIADIC)
+def default_selections(layers, view, terminal_groups=()):
+    # 槽位身份是 (层, 名字)：重名不共享选择。没有观察覆盖值的槽始终用默认值。
+    groups = [frozenset((i, p.name) for p in sig.parameters.values()
+                        if p.name in view and p.default is not inspect.Parameter.empty)
+              for i, sig in enumerate(layers)]
+    slots = tuple((i, p.name) for i, sig in enumerate(layers) for p in sig.parameters.values()
+                  if (i, p.name) in groups[i])
+    terminal = groups[-1]
+    groups.extend(frozenset(slot for slot in terminal if slot[1] in names) for names in terminal_groups)
+    yield from selections(slots, groups)
 
-    def compose(omitted):
-        position, keywords, identities = args, kwargs, defaults
+
+def metaclass_prefixes(layers, instance_sig, view, mode, instance_arguments, terminal_groups):
+    for omitted in default_selections((*layers, instance_sig), view, terminal_groups):
+        by_layer = [set() for _ in range(len(layers) + 1)]
+        for idx, name in omitted:
+            by_layer[idx].add(name)
+        outer_positions, outer_keywords = set(), set()
+        if type(mode) is tuple:
+            source = mode[3]
+            for sig, skip in zip(layers, by_layer):
+                slots = [p for p in sig.parameters.values() if p.kind in POSITIONAL and p.name not in skip]
+                indices_used = named_source_positions(slots, view, source.args, source.indices)
+                outer_positions.update(indices_used.values())
+                outer_keywords.update(p.name for p in slots if p.name not in indices_used and p.name in view
+                                      and p.name in source.kwargs
+                                      and sample_key(view[p.name]) == sample_key(source.kwargs[p.name]))
+        position, keywords, identities = instance_arguments(by_layer[-1], (outer_positions, outer_keywords))
         for i in reversed(range(len(layers))):
             sig = layers[i]
             if position and not any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()):
-                return None
-            own = {name: value for name, value in view.items() if (i, name) not in omitted}
-            prefix, options, refs = arguments(sig, own, following_positional=bool(position))
+                break
+            prefix, options, refs = arguments(sig, view, following_positional=bool(position), omitted=by_layer[i])
             refs.update({len(prefix) + j: default for j, default in identities.items()})
             position, keywords, identities = [*prefix, *position], keywords | options, refs
-        return position, keywords, identities
-
-    count = len(collisions)
-    # 两端始终保留。小集合穷举混合赋值；大集合只补试两端各偏离一槽。
-    sizes = (0,) if not count else (0, count, *(
-        range(1, count) if count <= 6 else (1, count - 1)))
-    for size in sizes:
-        for omitted in combinations(collisions, size):
-            result = compose(set(omitted))
-            if result is not None:
-                yield result
+        else:
+            yield position, keywords, identities
 
 
-def peel_chain(layers, args, kwargs, default_refs):
+def peel_chain(layers, args, kwargs, defaults, default_refs):
     parts, cur_args, cur_kwargs = [], tuple(args), dict(kwargs)
     pos_offset = 0
     pos_default_matches, kw_default_matches = set(), set()
@@ -497,25 +594,28 @@ def peel_chain(layers, args, kwargs, default_refs):
         next_args, next_kwargs, var_pos, var_kw = (), {}, False, False
         layer_items = []
         for name, value in bound.arguments.items():
-            kind = params[name].kind
+            param = params[name]
+            kind = param.kind
             if kind is inspect.Parameter.VAR_POSITIONAL:
                 next_args, var_pos = value, True
             elif kind is inspect.Parameter.VAR_KEYWORD:
                 next_kwargs, var_kw = value, True
             else:
-                layer_items.append((name, choice_value_key(value, default_refs)))
+                layer_items.append((name, choice_value_key(value, default_refs, default=value is param.default)))
         consumed_pos = len(cur_args) - len(next_args) if var_pos else len(cur_args)
         for j in range(consumed_pos):
             param = pos_params[j]
             if (param.default is not inspect.Parameter.empty and
-                    choice_value_key(cur_args[j], default_refs) == choice_value_key(param.default, default_refs)):
+                    choice_value_key(cur_args[j], default_refs, default=cur_args[j] is param.default) ==
+                    choice_value_key(param.default, default_refs, default=True)):
                 pos_default_matches.add(pos_offset + j)
         for k, v in cur_kwargs.items():
             param = params.get(k)
             if (param is not None and
                     param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) and
                     param.default is not inspect.Parameter.empty and
-                    choice_value_key(v, default_refs) == choice_value_key(param.default, default_refs)):
+                    choice_value_key(v, default_refs, default=v is param.default) ==
+                    choice_value_key(param.default, default_refs, default=True)):
                 kw_default_matches.add(k)
         pos_offset += consumed_pos
         parts.append(tuple(layer_items))
@@ -531,7 +631,8 @@ def peel_chain(layers, args, kwargs, default_refs):
         i -= 1
     if concrete:
         return True, tuple(parts), (), (), pos_offset, trailing_default_pos, frozenset(kw_default_matches)
-    res_args = tuple(choice_value_key(item, default_refs) for item in cur_args)
+    res_args = tuple(choice_value_key(item, default_refs, default=pos_offset + i in defaults)
+                     for i, item in enumerate(cur_args))
     res_kwargs = tuple((k, choice_value_key(v, default_refs)) for k, v in cur_kwargs.items())
     return False, tuple(parts), res_args, res_kwargs, pos_offset, trailing_default_pos, frozenset(kw_default_matches)
 
@@ -543,10 +644,10 @@ def ctor_choice(primary_layers, secondary_layers, args, kwargs, defaults, defaul
             sample(value)
     for value in kwargs.values():
         sample(value)
-    c1, p1, ra1, rk1, rp1, td1, dkw1 = peel_chain(primary_layers, args, kwargs, default_refs)
+    c1, p1, ra1, rk1, rp1, td1, dkw1 = peel_chain(primary_layers, args, kwargs, defaults, default_refs)
     if not secondary_layers:
         return c1, p1, ra1, rk1
-    c2, p2, ra2, rk2, rp2, td2, dkw2 = peel_chain(secondary_layers, args, kwargs, default_refs)
+    c2, p2, ra2, rk2, rp2, td2, dkw2 = peel_chain(secondary_layers, args, kwargs, defaults, default_refs)
     limit1 = len(args) - td2
     ra1 = tuple(v for m, v in enumerate(ra1) if rp1 + m < limit1)
     rk1 = tuple((k, v) for k, v in rk1 if k not in dkw2)
@@ -775,6 +876,15 @@ class Binding:
             add(public)
         for sig in alternates:
             add(sig, META_INSTANCE, alternate=True)
+        instance_keywords = {name: param.replace(kind=inspect.Parameter.KEYWORD_ONLY)
+                             for sig in reversed(alternates) for name, param in sig.parameters.items()
+                             if param.kind in KEYWORD}
+        for sig in alternates:
+            # __new__ 与 __init__ 接收同一份输入；一侧的关键字专用槽
+            # 可以经另一侧的 **kwargs 携带，不可当成两个串行的位置前缀。
+            if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                if (merged := merge_kwonly(sig, instance_keywords)) is not None:
+                    add(merged, META_INSTANCE, alternate=True)
         if public_has_varkw and extra_recover:
             add_recovery(strip_variadics(public), None)
         return layer_variants, pairs, (recovery, public_kwonly, extra_recover, ordinary_recover), ordinary_count
@@ -801,6 +911,9 @@ class Binding:
         seen, default_refs = set(), {}
         extra_set = set(extra_recover)
         known_keywords = extra_set | {name for name, param in public.parameters.items() if param.kind in KEYWORD}
+        terminal_groups = tuple(dict.fromkeys(
+            frozenset(name for name, p in sig.parameters.items() if p.default is not inspect.Parameter.empty)
+            for sig, variant, _ in pairs if variant is META_INSTANCE))
         if ctor_errors is None:
             ctor_errors = {}
 
@@ -830,23 +943,27 @@ class Binding:
             return best_idx, best_choice
 
         def resolve_args(args, kwargs, defaults, variant, error_keys):
+            bound, conflict = bind_public(public, args, kwargs)
+            if bound is None:
+                return False, conflict
             try:
-                public.bind(*args, **kwargs)
                 ctor_key = pick_ctor_key(variant, args, kwargs, defaults)
             except (ValueError, TypeError):
                 return False, None
             key = id(self.owner), ctor_key
             raw_key = None
-            if len(layer_variants) > 1 or error_keys:
+            if len(layer_variants) > 1 or error_keys or kwargs:
                 raw_key = (
                     id(self.owner),
                     MISSING,
-                    tuple(choice_value_key(v, default_refs) for v in args),
+                    tuple(choice_value_key(v, default_refs, default=i in defaults) for i, v in enumerate(args)),
                     tuple((k, choice_value_key(v, default_refs)) for k, v in kwargs.items()),
                 )
             # 成功仍按绑定后默认值归一；失败若含可恢复键，按原实参记录。
             # 显式传默认值可能与外层注入冲突，而同一键省略时可以成功。
             failed_key = raw_key if error_keys else key
+            if raw_key in ctor_errors:
+                return False, ctor_errors[raw_key]
             if failed_key in instances and instances[failed_key] is None:
                 return False, ctor_errors.get(failed_key)
             if key not in instances:
@@ -859,7 +976,9 @@ class Binding:
                     try:
                         inst = self.owner(*ctor_args, **ctor_kwargs)
                     except (Exception, SystemExit) as exc:
-                        tag = parse_kw_type_error(exc, error_keys) if error_keys else None
+                        tag = parse_kw_type_error(exc, error_keys | kwargs.keys()) if error_keys or kwargs else None
+                        if tag is not None:
+                            failed_key = raw_key
                         instances[failed_key] = None
                         if raw_key is not None:
                             instances[raw_key] = None
@@ -877,9 +996,16 @@ class Binding:
                 yield self.member.__get__(inst, self.owner)
             return True, None
 
+        def recover_args(args, kwargs, defaults, variant, error_keys):
+            def attempt(options):
+                return (yield from resolve_args(args, options, defaults, variant, error_keys))
+
+            ok, _, error = yield from drop_conflicting_keywords(kwargs, attempt)
+            return ok, error
+
         def resolve(sig, view, mode, variant, shadow_kw=None, error_keys=ordinary_recover, shadow_values=None):
-            try:
-                args, kwargs, defaults = arguments(sig, view, mode)
+            def instance_arguments(omitted, outer_consumed=(frozenset(), frozenset())):
+                args, kwargs, defaults = arguments(sig, view, mode, omitted=omitted, outer_consumed=outer_consumed)
                 if shadow_kw:
                     values = view if shadow_values is None else shadow_values
                     for name, param in shadow_kw.items():
@@ -887,19 +1013,23 @@ class Binding:
                             kwargs[name] = sample(values[name])
                         elif param.default is inspect.Parameter.empty:
                             kwargs[name] = None
+                return args, kwargs, defaults
+
+            try:
+                args, kwargs, defaults = instance_arguments(())
             except (ValueError, TypeError):
                 return False, None
             if variant is not META_INSTANCE:
-                return (yield from resolve_args(args, kwargs, defaults, variant, error_keys))
+                return (yield from recover_args(args, kwargs, defaults, variant, error_keys))
 
             # 先试直接传参，再试由元类消费固定前缀、将剩余实参转给实例。
-            result = yield from resolve_args(args, kwargs, defaults, None, error_keys)
+            result = yield from recover_args(args, kwargs, defaults, None, error_keys)
             plans = ((public,), (public, *self.meta_layers)) if self.meta_layers else ((public,),)
             for layers in plans:
                 try:
                     for prefix_args, prefix_kw, prefix_defaults in metaclass_prefixes(
-                            layers, sig, view, args, kwargs, defaults):
-                        forwarded = yield from resolve_args(prefix_args, prefix_kw, prefix_defaults, None, error_keys)
+                            layers, sig, view, mode, instance_arguments, terminal_groups):
+                        forwarded = yield from recover_args(prefix_args, prefix_kw, prefix_defaults, None, error_keys)
                         if forwarded[0] or not result[0] and result[1] is None:
                             result = forwarded
                 except (ValueError, TypeError):
@@ -969,7 +1099,7 @@ class Binding:
             def attempt(options):
                 return (yield from resolve_args(args, options, {}, None, set(options)))
 
-            ok, cur = yield from drop_conflicting_keywords(kwargs, attempt)
+            ok, cur, _ = yield from drop_conflicting_keywords(kwargs, attempt)
             # 外层可在绑定发生前拒绝多余键；按已核验的声明补试一次。
             if not ok:
                 projected = {k: v for k, v in cur.items() if k in known_keywords}
@@ -989,7 +1119,8 @@ class Binding:
                 for sig, variant, is_alternate in pairs:
                     if only_alternate is None or is_alternate is only_alternate:
                         if use_variadic:
-                            for mode in variadic_modes(sig, shapes, view, shape_views):
+                            for mode in variadic_modes(sig, shapes, view, shape_views,
+                                                       joint_defaults=variant is META_INSTANCE):
                                 yield from resolve(sig, view, mode, variant, error_keys=extra_set)
                         else:
                             yield from resolve(sig, view, False, variant)
@@ -1055,27 +1186,35 @@ class Binding:
                     if len(filtered) != len(kwargs):
                         yield args, filtered, {}
 
+        # 方法继续按类型化纯数据去重；构造组合的默认身份不能改变方法尝试次数。
         choices, attempts, default_refs = set(), {}, {}
         for args, kwargs, defaults in candidates():
-            try:
-                choice = argument_choice(public, args, kwargs, defaults, default_refs)
-            except (ValueError, TypeError):
-                continue
-            if choice not in choices:
-                choices.add(choice)
+            normalizing = True
 
-                def attempt(options):
-                    # 省略显式默认键可能改变包装器转发；恢复时按未归一的实参去重。
-                    key = (tuple(choice_value_key(v, default_refs) for v in args), keyword_sample_key(options))
-                    if key not in attempts:
-                        try:
-                            public.bind(*args, **options)
-                        except TypeError:
+            def attempt(options):
+                nonlocal normalizing
+                bound, conflict = bind_public(public, args, options)
+                if bound is None:
+                    if conflict is not None:
+                        normalizing = False
+                    return False, conflict
+                try:
+                    if normalizing:
+                        normalizing = False
+                        choice = argument_choice(bound, args, options, defaults, default_refs)
+                        if choice in choices:
                             return False, None
+                        choices.add(choice)
+                    # 省略显式默认键可能改变包装器转发；恢复时按未归一的实参去重。
+                    key = (tuple(choice_value_key(v, default_refs) for v in args),
+                           keyword_sample_key(options))
+                    if key not in attempts:
                         attempts[key] = yield copy_arguments(args, options, defaults)
                     return False, attempts[key]
+                except ValueError:
+                    return False, None
 
-                yield from drop_conflicting_keywords(kwargs, attempt)
+            yield from drop_conflicting_keywords(kwargs, attempt)
 
 
 def has_executable_body(code):
@@ -1231,7 +1370,7 @@ class Exports:
             except (ValueError, TypeError):
                 entry = None
             if entry is not None and variadic_only(entry) and all(map(variadic_only, meta_layers)):
-                return primary, secondary, True, (), ()
+                return primary, secondary, True, (*primary, *secondary), ()
         return meta_items, (), True, (*primary, *secondary), tuple(meta_layers)
 
     def instance_ctor_chains(self, owner, *, include_first=False):
@@ -1643,7 +1782,7 @@ class Trace:
             named.setdefault(key, value)
         shape = tuple(positional), keywords | extras
         if position_slots:
-            return named, shape, dict(zip(positional_names, positional))
+            return named, shape, {name: idx for idx, name in enumerate(positional_names[:len(positional)])}
         return named, shape
 
     def accepted(self):
@@ -1830,7 +1969,7 @@ def proves(doc, scratch):
                         key = tuple(map(sample_key, args)), keyword_sample_key(kwargs)
                         self.shapes.setdefault(key, (args, kwargs))
                         named_key = keyword_sample_key(samples)
-                        self.shape_views.setdefault(key, {}).setdefault(keyword_sample_key(positional), positional)
+                        self.shape_views.setdefault(key, {}).setdefault(tuple(positional.items()), positional)
                         self.named_observations.setdefault(named_key, samples)
                         # 补充具名视图按同次调用保留两条通道，只在备用阶段参与构造。
                         if any(name in samples and sample_key(samples[name]) != value_key
