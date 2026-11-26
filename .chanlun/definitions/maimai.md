@@ -137,7 +137,7 @@
 一个次级别走势类型向上**离开**缠中说禅走势中枢，然后以一个次级别走势类型**回试**，其低点**不跌破ZG**（中枢上边缘），则构成第三类买点。
 
 - **前提条件**：
-  1. 按 B-3 的共用 R5 见证，完成的离开与紧接的首回试归同一中枢。
+  1. 按 B-3 的共用判据取证，完成的离开与紧接的首回试归同一中枢。
   2. 首回试的低点严格 `> ZG`；三卖镜像用高点 `< ZD`。
 - **安全性保证**：
   - 回试不跌破ZG → 中枢被有效突破
@@ -228,7 +228,7 @@
 
 **现状**：Lean `IsType3Buy/IsType3Sell` 显式含 `firstRetrace`（追认为正解）；`bsp.rs is_third = leftCenter ∧ retrace_not_reenter` **无**「第一次」条件（对齐见 T-3）；旧引擎 `buysellpoint.rs` 取突破后第一段反向走势（隐式第一次）——显式化或注释注明。
 
-**现行配对（#2114，CC-019）**：用[中枢正本 §5.2](zhongshu.md#52-r5-段角色与结算时机)与 [#2114 R5 条款](qushi.md#2114-裁定开放期分离趋势形成与走势完成2026-11-20)的**同一份 R5 见证**。离开段在该枢成枢三段之后；有效首回抽紧接此次离开，两段均已完成且关节有证，三买低点 `> ZG`、三卖高点 `< ZD`。发布端直接认领见证中的中枢身份，在首回抽证齐的切面发三类点；不按旧扫描右界反查前枢，不等待趋势类型或所属走势实例完成。首回抽失败不能用同一次离开的后续回抽顶替。成员归属仍按中枢正本 §4.1。
+**现行配对（#2114，CC-019）**：与[中枢正本 §5.2](zhongshu.md#52-r5-段角色与结算时机)共用判据。离开段在该枢成枢三段之后；有效首回抽紧接此次离开，两段均已完成且关节有证，三买低点 `> ZG`、三卖高点 `< ZD`。枢尚开放时，首次 R5 结算和对应三类点消费同一份见证；枢已结算时，新的反向离开及有效首回抽独立成点，仍归原枢，不再结算（[C4 二、三买重合](zoushi.md#c4-买点状态与发布)）。发布端直接认领见证中的中枢身份，证齐即发点；不按旧扫描右界反查前枢，不等待趋势类型或所属走势实例完成。首回抽失败不能用同一次离开的后续回抽顶替。成员归属仍按中枢正本 §4.1。
 
 **旧实现与替代**：#905 曾用 `first_retrace_pair` 显式化「第一次」（锁 `third_class_first_retrace_only_lock`，GOLDEN `0xcb91_2871_4985_4dd5`）。旧规则「离开段从中枢右边之后开始」由 #2114 替代：旧扫描可把穿过核心的离开段记为末成员，正式配对仍归 R5 所证的本枢。[实施交接](qushi.md#2114-受影响代码清单)核对第 5／6 段例的时钟和中枢归属。
 
@@ -238,7 +238,7 @@
 |---|---|---|---|
 | T-1 | 对拍/Rust | `rust/tests/theta_v0_classifier_parity.rs:528,:629`（[#811](https://github.com/xy7365527-lang/NewChanlun/issues/811) 两条红）；`bsp.rs`/`signal.rs` 的 `below_last_center` 填充链 | **按 B-1 对齐 Rust 侧背驰语义**（统一含 Extreme 方向），断言转绿。**已落地 = [#903](https://github.com/xy7365527-lang/NewChanlun/issues/903)**（below_last_center 对齐统一背驰判据，两条红断言转绿） |
 | T-2 | Lean | `formal/Origin/BspClassification.lean:103-104`（`IsType2`）＋ `formal/Origin/SellClosedLoop.lean:368,374-375`（MISSING-D 登记处） | **按 B-2① 补次级别递归**（形态按 map #854 Notes N-2：具名 `Prop` + 显式前件，不用 `axiom`）。新开 Lean 票 |
-| T-3 | Rust | `rust/src/theta_v0/classifier/bsp.rs:86-88`（`is_third`）；发布端见 [#2114 实施交接](qushi.md#2114-受影响代码清单) | [#905](https://github.com/Newchanlun/NewChanlun/issues/905) 的「第一次」显式化保留；旧右界配对由 B-3 的共用 R5 替代。 |
+| T-3 | Rust | `rust/src/theta_v0/classifier/bsp.rs:86-88`（`is_third`）；发布端见 [#2114 实施交接](qushi.md#2114-受影响代码清单) | [#905](https://github.com/Newchanlun/NewChanlun/issues/905) 的「第一次」显式化保留；旧右界配对由 B-3 的共用段角色判据替代。 |
 | T-4 | Rust | `rust/src/theta_v0/classifier/rmove_compose.rs:160`（`retrace_no_break`）＋ `:80-82`（`no_new_low` 硬闸） | **按 B-2② 拆闸**，实施归 [#884](https://github.com/xy7365527-lang/NewChanlun/issues/884)（教义面已落地）。**已落地 = #884**（2026-08-17）：`retrace_no_break` 硬闸拆除，回拉段 = 首个后继走势（不问新不新低）；`SecondTypeStructure.retrace_breaks_extreme` + `BspPoint.retrace_breaks_type1: Option<bool>` 重合标注（不作准入分档，语义归 #817）；Lean `RMoveCompose.SecondTypeStructure` 同步拆 `RetraceNoBreak` 合取 + 新增 `RetraceBreaksExtreme` 标注谓词与 `witness_secondTypeStructure_brokeExtreme` 见证；旧引擎 `buysellpoint.rs` 同闸处置路由归 T-6/673-fix（见下） |
 | T-5 | 三侧追认 | `rmove_compose.rs:144-170`、`descend.rs:176-191`、`bsp.rs:78-80`；Lean `BspClassification.lean:94-95,:111-121`；`buysellpoint.rs:186-209` | 与裁定同形，注释口径对齐（带 #816 票号）。**已落地 = #884**（2026-08-17）：三处 Rust 与 `BspClassification.IsType2` 注释已带 #816 票号对齐；`buysellpoint.rs` 的 `make_type2_point` `geom` 合取（现 `:272-276`，清单行号已漂）加 #816 B-2② 注释并明记处置路由归 T-6/673-fix（旧引擎逐位等价 Python 侧，T-6 未落地前两侧同拍不改判据） |
 | T-6 | Python | `src/newchan/a_buysellpoint_v1.py` | Type1 只收 `trend` 已对齐；Type2 确认层接口拆分（673-fix/task #33）与 B-2② 的关系明记于该票；**已落地 = [#1276](https://github.com/xy7365527-lang/NewChanlun/issues/1276)**（26dcae96c3，Type2 确认层拆分 + 旧引擎 geom 合取同拍改）；**已冻结退役=#1286**（2026-08-27，历史对照，不参生产准入） |
@@ -298,7 +298,7 @@
 |---|---|
 | 一类 | [#2114 的 `TrendFormed` 语境](qushi.md#2114-裁定开放期分离趋势形成与走势完成2026-11-20)及 B-1 的破枢、趋势背驰前件证齐；MACD 外推是操作判断（`024:24,28`【正文】）。 |
 | 二类 | 按 B-2 的次级别第一类点构成及相应回拉段取证。 |
-| 三类 | 按 B-3 的 R5 首回抽见证发布，反向三类也不等走势实例完成，见[走势正本 C4](zoushi.md#c4-买点状态与发布)。 |
+| 三类 | 按 B-3 的共用段角色判据取证发布；已结算中枢的反向三类点不重复结算，也不等走势实例完成，见[走势正本 C4](zoushi.md#c4-买点状态与发布)。 |
 
 旧表和统一公式中以 `Move.settled` 作为确认门的条款，均由 #2114 替代。候选不作正式发布；旧组位置、延迟档位与事后标记均不补证。
 
@@ -360,7 +360,7 @@
 
 ### 直接依赖
 1. **走势类型（`.chanlun/definitions/zoushi.md`）** — 核心依赖
-   - 第一类买卖点需要走势类型的完成判定
+   - 标准一类点需要该趋势的 `TrendFormed` 与次级别末段 `c` 的完成见证；不预设本级走势完成。
    - 第三类买卖点需要走势类型对应中枢的离开/回试判定
    - 买卖点与走势类型的约束关系（如上涨中只有3B）
 2. **中枢（`.chanlun/definitions/zhongshu.md`）** — 核心依赖
@@ -389,7 +389,7 @@
 3. **`.chanlun/genealogy/settled/004-provenance-framework.md`** — 概念溯源框架
    - 影响：买卖点定义中ZG/ZD来自第20课原文定义
 4. **`.chanlun/genealogy/settled/005b-object-negates-object-grammar.md`** — 对象否定对象语法规则
-   - 影响：走势完成（第一类买卖点的前提）必须由走势内部机制否定，不允许外部条件
+   - 影响：走势完成须由实例自身的结构取证；标准一类点消费正式趋势背驰，不把本级完成反作前件。
 5. **不确定是否有其他相关谱系** — 买卖点作为新创建的定义，尚无直接对应的谱系条目
 
 ---
