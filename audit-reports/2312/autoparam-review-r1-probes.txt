@@ -1,0 +1,628 @@
+====== RUN 1 (Probes 1-10) ======
+Command exited with code 0.
+
+Command output:
+=== 1_ProbeLocalLet (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=ca1f46c5ff33c4bbc6a320c930d9b92a94a72c26 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.7s binary=/tmp/probes-2312h-195863/w001-1_ProbeLocalLet/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，3 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 1.9s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM RED env ENV_META formal_math/Chan/Thm/ProbeLocalLet.lean:_private.Chan.Thm.ProbeLocalLet.0.localLet._auto_1 声明是 meta 元程序
+FM STEP 7 env RED 0.1s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan.Base (94ms)
+FM LOG build ✔ [4/20] Built Chan (101ms)
+FM LOG build ✔ [6/20] Built Chan.Thm.ProbeLocalLet (105ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (106ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (93ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (92ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (100ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 2_ProbeLocalHave (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=0c07beb72e189154e78c3569462a2aa0462f8c4a 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-195863/w002-2_ProbeLocalHave/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，3 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 1.7s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM RED env ENV_META formal_math/Chan/Thm/ProbeLocalHave.lean:_private.Chan.Thm.ProbeLocalHave.0.localHave._auto_1_1 声明是 meta 元程序
+FM STEP 7 env RED 0.1s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (87ms)
+FM LOG build ✔ [4/20] Built Chan.Thm.ProbeLocalHave (92ms)
+FM LOG build ✔ [6/20] Built Chan.Base (90ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (92ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (91ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (87ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (84ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 3_ProbeLocalFun (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=a607329fd75207870850e77052282cb8eeb3f4ac 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.6s binary=/tmp/probes-2312h-195863/w003-3_ProbeLocalFun/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM RED shape SHAPE_PARSE formal_math/Chan/Thm/ProbeLocalFun.lean:6 解析失败：unexpected token ':='; expected ')'
+FM STEP 5 shape RED 0.1s 7 个文件分 1 组库导入，2 条命令，0 个派生目标类节点
+FM RESULT RED 第 5 步 shape 判红，后面的步骤没有跑
+=== 4_ProbeAbbrevType (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=37982f64c6ac84bb7b21b995a4c3e91f81c25fcf 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-195863/w004-4_ProbeAbbrevType/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，5 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 1.7s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM RED env ENV_META formal_math/Chan/Thm/ProbeAbbrevType.lean:AutoArrow._auto_1 声明是 meta 元程序
+FM STEP 7 env RED 0.1s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (92ms)
+FM LOG build ✔ [4/20] Built Chan.Thm.ProbeAbbrevType (99ms)
+FM LOG build ✔ [6/20] Built Chan.Base (89ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (93ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (88ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (87ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (87ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 5_ProbeWhereLetRec (branch=proof/p skip_shape=False) ===
+RC= 0
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=64c88dabed1fa626f2726ed0a442f36674562463 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.6s binary=/tmp/probes-2312h-195863/w005-5_ProbeWhereLetRec/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 1.8s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM STEP 7 env GREEN 0.1s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (85ms)
+FM LOG build ✔ [4/20] Built Chan.Base (86ms)
+FM LOG build ✔ [6/20] Built ChanTest.Probe (82ms)
+FM LOG build ✔ [9/20] Built ChanChallenge.Base (80ms)
+FM LOG build ✔ [12/20] Built ChanDyn.Base (86ms)
+FM LOG build ✔ [15/20] Built ChanExplore.Base (82ms)
+FM LOG build ✔ [18/20] Built Chan.Thm.ProbeWhereLetRec (102ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 6_ProbeExample (branch=proof/p skip_shape=False) ===
+RC= 0
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=f871dd749b5b51158fcf8709f76a93823a0c9d27 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.6s binary=/tmp/probes-2312h-195863/w006-6_ProbeExample/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 1.7s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM STEP 7 env GREEN 0.1s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (87ms)
+FM LOG build ✔ [4/20] Built Chan.Thm.ProbeExample (92ms)
+FM LOG build ✔ [6/20] Built Chan.Base (87ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (91ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (86ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (86ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (91ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 7_ProbeVarUsed (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=0f96a26df2333cd672a58aee0d99b32debbad03b 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.4s binary=/tmp/probes-2312h-195863/w007-7_ProbeVarUsed/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 1.6s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (86ms)
+FM LOG build ✖ [4/20] Building Chan.Thm.ProbeVarUsed (93ms)
+FM LOG build trace: .> LEAN_PATH=/tmp/probes-2312h-195863/w007-7_ProbeVarUsed/audited/.lake/packages/Cli/.lake/build/lib/lean:/tmp/probes-2312h-195863/w007-7_ProbeVarUsed/audited/.lake/packages/batteries/.lake/build/lib/lean:/tmp/probes-2312h-195863/w007-7_ProbeVarUsed/audited/.lake/packages/Qq/.lake/build/lib/lean:/tmp/probes-2312h-195863/w007-7_ProbeVarUsed/audited/.lake/packages/aesop/.lake/build/lib/lean:/…[截断，余 1149 字符]
+FM LOG build error: Chan/Thm/ProbeVarUsed.lean:7:33: Unknown identifier `hv`
+FM LOG build ✔ [6/20] Built Chan.Base (89ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (87ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (85ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (82ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (85ms)
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.ProbeVarUsed
+FM LOG build error: build failed
+=== 8_ProbeComplex_verbatim (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=eb27e872443e220920ce64d0ac316891c61acb8d 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-195863/w008-8_ProbeComplex_verbatim/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.8s 7 个文件分 2 组库导入，16 条命令，0 个派生目标类节点
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 2.3s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [1/664] Built Chan (82ms)
+FM LOG build ✔ [1720/1736] Built Chan.Base (86ms)
+FM LOG build ✔ [1722/1736] Built ChanTest.Probe (88ms)
+FM LOG build ✔ [1725/1736] Built ChanChallenge.Base (83ms)
+FM LOG build ✔ [1728/1736] Built ChanDyn.Base (86ms)
+FM LOG build ✔ [1731/1736] Built ChanExplore.Base (80ms)
+FM LOG build ✖ [1734/1736] Building Chan.Thm.ProbeComplex (445ms)
+FM LOG build trace: .> LEAN_PATH=/tmp/probes-2312h-195863/w008-8_ProbeComplex_verbatim/audited/.lake/packages/Cli/.lake/build/lib/lean:/tmp/probes-2312h-195863/w008-8_ProbeComplex_verbatim/audited/.lake/packages/batteries/.lake/build/lib/lean:/tmp/probes-2312h-195863/w008-8_ProbeComplex_verbatim/audited/.lake/packages/Qq/.lake/build/lib/lean:/tmp/probes-2312h-195863/w008-8_ProbeComplex_verbatim/audited/.lake/p…[截断，余 1284 字符]
+FM LOG build warning: Chan/Thm/ProbeComplex.lean:18:26: Variable name `hab` is not explicitly referenced.
+FM LOG build Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+FM LOG build   [apply] _hab
+FM LOG build Note: This linter can be disabled with `set_option linter.unusedVariables false`
+FM LOG build error: Chan/Thm/ProbeComplex.lean:49:23: could not synthesize default value for parameter '_h' using tactics
+FM LOG build error: Chan/Thm/ProbeComplex.lean:49:23: Unknown identifier `a`
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.ProbeComplex
+FM LOG build error: build failed
+=== 8b_ProbeComplex_noSetOpt_extra (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=0582a614c04323f1f99d97238e2ca57d00e60548 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-195863/w009-8b_ProbeComplex_noSetOpt_extra/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.6s 7 个文件分 2 组库导入，16 条命令，0 个派生目标类节点
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 2.2s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [1/657] Built Chan (88ms)
+FM LOG build ✔ [1720/1736] Built Chan.Base (87ms)
+FM LOG build ✔ [1722/1736] Built ChanTest.Probe (88ms)
+FM LOG build ✔ [1725/1736] Built ChanChallenge.Base (87ms)
+FM LOG build ✔ [1728/1736] Built ChanDyn.Base (86ms)
+FM LOG build ✔ [1731/1736] Built ChanExplore.Base (84ms)
+FM LOG build ✖ [1734/1736] Building Chan.Thm.ProbeComplex2 (448ms)
+FM LOG build trace: .> LEAN_PATH=/tmp/probes-2312h-195863/w009-8b_ProbeComplex_noSetOpt_extra/audited/.lake/packages/Cli/.lake/build/lib/lean:/tmp/probes-2312h-195863/w009-8b_ProbeComplex_noSetOpt_extra/audited/.lake/packages/batteries/.lake/build/lib/lean:/tmp/probes-2312h-195863/w009-8b_ProbeComplex_noSetOpt_extra/audited/.lake/packages/Qq/.lake/build/lib/lean:/tmp/probes-2312h-195863/w009-8b_ProbeComplex_no…[截断，余 1394 字符]
+FM LOG build warning: Chan/Thm/ProbeComplex2.lean:18:26: Variable name `hab` is not explicitly referenced.
+FM LOG build Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+FM LOG build   [apply] _hab
+FM LOG build Note: This linter can be disabled with `set_option linter.unusedVariables false`
+FM LOG build error: Chan/Thm/ProbeComplex2.lean:48:23: could not synthesize default value for parameter '_h' using tactics
+FM LOG build error: Chan/Thm/ProbeComplex2.lean:48:23: Unknown identifier `a`
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.ProbeComplex2
+FM LOG build error: build failed
+=== 9_ProbeDefsExpose (branch=decl/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=76b7c8dfc2038a460ed82195b50cd688aac07fb2 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=decl
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-195863/w010-9_ProbeDefsExpose/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 1.6s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto 现算 8a4d24986ef78fe6912fc5d9f534624e5f25c87d4e66caa0c0dbf7528bba22d2
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto._sizeOf_1 现算 3c06765f1ba727bf4fb65e8c306bc8842d50645e3065f6018b169f11a89322f5
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto._sizeOf_inst 现算 748c4f7b8a8f3f45856cabf3b195f8e0706c71ba3c8374ec4d770e33884b0cb7
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.casesOn 现算 17b1feaad066a833a80dd3ecaa1949d45d0c371ce780af0622d0a402f6dbb944
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.ctorIdx 现算 eb323729986fd98359b3de3861b8fa024dc3bd01f2651a50ce37ca26c1beaf45
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.mk 现算 9dfa9b058060941c685c47ef45df5ac2cc75c8810b4518ccf4913a045eefdc16
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.mk._flat_ctor 现算 158dfe8707bb740b03de2f362997faf0d686a41f410ed755fdf69e372195710e
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.mk.inj 现算 72db6f301aecd205923f68eabc3cb260ed3b68411d50ee0c57a3363c93c018c7
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.mk.injEq 现算 1d74625ce7ef5f03bbaa4e767ba60ed98ba4eff325436534a1b2b37d5936c6b6
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.mk.noConfusion 现算 f4e74d9c6296f6a8823fac4efe3dd44c4e9f5ac23631b4f38c78ecfa44375a24
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.mk.sizeOf_spec 现算 d86684b3cd8cd5a1d7be596dc2297c8a1ea92d66d1377e603fd7a6339b41ea53
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.n 现算 c3a47537de38b3db8ea1e7d1bb7e714df660f0661ea9489be89c9fba6f3af336
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.noConfusion 现算 a2da98e6f1010bb06779f0f80bb8afafa5348ce66813e71fd9c689448c5115e1
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.noConfusionType 现算 a07d6f0e53cdf44dabaeea907fc8f734cea32b4d79e469d5f863b41a41e4d795
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.ok 现算 9239aadc8b39d0d9eafaf71d583b095a28b8654957aa34bc0b3aae2f257f790e
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.ok._autoParam 现算 fcf048069b4d0dffc6336aa6894d6440a6e018e0ca63ae5b6dda76b6f185a817
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.rec 现算 01a13efea34d94337a537c0955eed05a9854a8646f0c44885b848415edb37fb7
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:StructAuto.recOn 现算 96238935af15ae65b3c930c192c0a2b3a863aac44dc1c0630feb62ff548fe0b7
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:defAuto 现算 f5e4cc51cfab9e95dbaf987574ec1c8c992371c6e3810368e0c9d4d173a3ba44
+FM RED env LOCK_UNLISTED formal_math/Chan/Defs/ProbeDefsExpose.lean:defAuto._auto_1 现算 3ea1f1c07fb1eb983985003178466459658acaae228023cc2f1dd9120844c847
+FM STEP 7 env RED 0.3s 7 个模块，20 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (85ms)
+FM LOG build ✔ [4/20] Built Chan.Defs.ProbeDefsExpose (96ms)
+FM LOG build ✔ [6/20] Built Chan.Base (85ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (88ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (82ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (85ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (83ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 11_ProbeSpoofIrred (branch=proof/p skip_shape=True) ===
+RC= 2
+--- STDOUT ---
+
+--- STDERR (excl auditor build) ---
+/usr/bin/python3: can't open file '/tmp/probes-2312h-195863/driver.py': [Errno 2] No such file or directory
+=== 12_ProbePostExtern (branch=proof/p skip_shape=True) ===
+RC= 2
+--- STDOUT ---
+
+--- STDERR (excl auditor build) ---
+/usr/bin/python3: can't open file '/tmp/probes-2312h-195863/driver.py': [Errno 2] No such file or directory
+=== 10_ProbeUnitHyg (unit Check.lean) ===
+LAKE_BUILD_RC= 0
+✔ [3/12] Built Auditor.EnvGates (401ms)
+ℹ [5/12] Built U (560ms)
+info: U.lean:10:0: P.hyg._auto_1_VALUE=Lean.Expr.app
+  (Lean.Expr.app
+    (Lean.Expr.app
+      (Lean.Expr.app (Lean.Expr.const `Lean.Syntax.ident []) (Lean.Expr.const `Lean.SourceInfo.none []))
+      (Lean.Expr.app (Lean.Expr.const `String.toRawSubstring []) (Lean.Expr.lit (Lean.Literal.strVal "foo._hyg.42"))))
+    (Lean.Expr.app
+      (Lean.Expr.app
+        (Lean.Expr.const `Lean.Name.num [])
+        (Lean.Expr.app
+          (Lean.Expr.app
+            (Lean.Expr.const `Lean.Name.str [])
+            (Lean.Expr.app
+              (Lean.Expr.app (Lean.Expr.const `Lean.Name.str []) (Lean.Expr.const `Lean.Name.anonymous []))
+              (Lean.Expr.lit (Lean.Literal.strVal "foo"))))
+          (Lean.Expr.lit (Lean.Literal.strVal "_hyg"))))
+      (Lean.Expr.app
+        (Lean.Expr.app
+          (Lean.Expr.app (Lean.Expr.const `OfNat.ofNat [Lean.Level.zero]) (Lean.Expr.const `Nat []))
+          (Lean.Expr.lit (Lean.Literal.natVal 42)))
+        (Lean.Expr.app (Lean.Expr.const `instOfNatNat []) (Lean.Expr.lit (Lean.Literal.natVal 42))))))
+  (Lean.Expr.app
+    (Lean.Expr.app
+      (Lean.Expr.app (Lean.Expr.const `List.cons [Lean.Level.zero]) (Lean.Expr.const `Lean.Syntax.Preresolved []))
+      (Lean.Expr.app
+        (Lean.Expr.const `Lean.Syntax.Preresolved.namespace [])
+        (Lean.Expr.app
+          (Lean.Expr.app
+            (Lean.Expr.const `Lean.Name.num [])
+            (Lean.Expr.app
+              (Lean.Expr.app (Lean.Expr.const `Lean.Name.str []) (Lean.Expr.const `Lean.Name.anonymous []))
+              (Lean.Expr.lit (Lean.Literal.strVal "Ns"))))
+          (Lean.Expr.app
+            (Lean.Expr.app
+              (Lean.Expr.app (Lean.Expr.const `OfNat.ofNat [Lean.Level.zero]) (Lean.Expr.const `Nat []))
+              (Lean.Expr.lit (Lean.Literal.natVal 7)))
+            (Lean.Expr.app (Lean.Expr.const `instOfNatNat []) (Lean.Expr.lit (Lean.Literal.natVal 7)))))))
+    (Lean.Expr.app
+      (Lean.Expr.app
+        (Lean.Expr.app (Lean.Expr.const `List.cons [Lean.Level.zero]) (Lean.Expr.const `Lean.Syntax.Preresolved []))
+        (Lean.Expr.app
+          (Lean.Expr.app
+            (Lean.Expr.const `Lean.Syntax.Preresolved.decl [])
+            (Lean.Expr.app
+              (Lean.Expr.app (Lean.Expr.const `Lean.Name.mkStr2 []) (Lean.Expr.lit (Lean.Literal.strVal "Nat")))
+              (Lean.Expr.lit (Lean.Literal.strVal "add"))))
+          (Lean.Expr.app
+            (Lean.Expr.app
+              (Lean.Expr.app (Lean.Expr.const `List.cons [Lean.Level.zero]) (Lean.Expr.const `String []))
+              (Lean.Expr.lit (Lean.Literal.strVal "x")))
+            (Lean.Expr.app
+              (Lean.Expr.app
+                (Lean.Expr.app (Lean.Expr.const `List.cons [Lean.Level.zero]) (Lean.Expr.const `String []))
+                (Lean.Expr.lit (Lean.Literal.strVal "y")))
+              (Lean.Expr.app (Lean.Expr.const `List.nil [Lean.Level.zero]) (Lean.Expr.const `String []))))))
+      (Lean.Expr.app (Lean.Expr.const `List.nil [Lean.Level.zero]) (Lean.Expr.const `Lean.Syntax.Preresolved []))))
+P.numKind._auto_1_VALUE=Lean.Expr.app
+  (Lean.Expr.app
+    (Lean.Expr.app (Lean.Expr.const `Lean.Syntax.node []) (Lean.Expr.const `Lean.SourceInfo.none []))
+    (Lean.Expr.app
+      (Lean.Expr.app
+        (Lean.Expr.const `Lean.Name.num [])
+        (Lean.Expr.app
+          (Lean.Expr.app (Lean.Expr.const `Lean.Name.str []) (Lean.Expr.const `Lean.Name.anonymous []))
+          (Lean.Expr.lit (Lean.Literal.strVal "k"))))
+      (Lean.Expr.app
+        (Lean.Expr.app
+          (Lean.Expr.app (Lean.Expr.const `OfNat.ofNat [Lean.Level.zero]) (Lean.Expr.const `Nat []))
+          (Lean.Expr.lit (Lean.Literal.natVal 0)))
+        (Lean.Expr.app (Lean.Expr.const `instOfNatNat []) (Lean.Expr.lit (Lean.Literal.natVal 0))))))
+  (Lean.Expr.app
+    (Lean.Expr.app
+      (Lean.Expr.app (Lean.Expr.const `Array.push [Lean.Level.zero]) (Lean.Expr.const `Lean.Syntax []))
+      (Lean.Expr.app (Lean.Expr.const `Array.empty [Lean.Level.zero]) (Lean.Expr.const `Lean.Syntax [])))
+    (Lean.Expr.app (Lean.Expr.const `Lean.mkAtom []) (Lean.Expr.lit (Lean.Literal.strVal "x"))))
+✔ [8/12] Built Check (411ms)
+✔ [10/12] Built Check:c.o (101ms)
+✔ [11/12] Built Auditor.EnvGates:c.o (515ms)
+✔ [12/12] Built check:exe (431ms)
+Build completed successfully (12 jobs).
+
+LAKE_BUILD_ERR= info: fm_probe10: no previous manifest, creating one from scratch
+info: toolchain not updated; already up-to-date
+
+CHECK_RC= 0
+CHECK_OUT= ["carriers",["P.hyg._auto_1","P.long._auto_1","P.numKind._auto_1"]]
+["present",["P.hyg._auto_1","P.hyg.use","P.long._auto_1","P.long.use","P.numKind._auto_1","P.numKind.use","use"]]
+
+PKG_UNCHANGED_OK
+
+====== RUN 2 (Probes 11-12 + extras 7b, 8c) ======
+Command exited with code 0.
+
+Command output:
+=== 7b_ProbeVarUsed_include_extra (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=8fea4537273e853671049612eea777e0dc8f393b 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.4s binary=/tmp/probes-2312h-p2-199854/w001-7b_ProbeVarUsed_include_extra/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 1.6s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (86ms)
+FM LOG build ⚠ [4/20] Building Chan.Thm.ProbeVarUsed2 (91ms)
+FM LOG build trace: .> LEAN_PATH=/tmp/probes-2312h-p2-199854/w001-7b_ProbeVarUsed_include_extra/audited/.lake/packages/Cli/.lake/build/lib/lean:/tmp/probes-2312h-p2-199854/w001-7b_ProbeVarUsed_include_extra/audited/.lake/packages/batteries/.lake/build/lib/lean:/tmp/probes-2312h-p2-199854/w001-7b_ProbeVarUsed_include_extra/audited/.lake/packages/Qq/.lake/build/lib/lean:/tmp/probes-2312h-p2-199854/w001-7b_ProbeV…[截断，余 1424 字符]
+FM LOG build warning: Chan/Thm/ProbeVarUsed2.lean:8:8: declaration uses `sorry`
+FM LOG build ✔ [6/20] Built Chan.Base (86ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (83ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (88ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (84ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (88ms)
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.ProbeVarUsed2
+FM LOG build error: build failed
+=== 8c_ProbeComplex_compiles_extra (branch=proof/p skip_shape=False) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=5b30978ebf36156a9bd30b4a39e849f3e5e810f7 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.4s binary=/tmp/probes-2312h-p2-199854/w002-8c_ProbeComplex_compiles_extra/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.7s 7 个文件分 2 组库导入，16 条命令，0 个派生目标类节点
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 2.3s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [1/716] Built Chan (87ms)
+FM LOG build ✔ [1720/1736] Built Chan.Base (85ms)
+FM LOG build ✔ [1722/1736] Built ChanTest.Probe (86ms)
+FM LOG build ✔ [1725/1736] Built ChanChallenge.Base (83ms)
+FM LOG build ✔ [1728/1736] Built ChanDyn.Base (87ms)
+FM LOG build ✔ [1731/1736] Built ChanExplore.Base (81ms)
+FM LOG build ✖ [1734/1736] Building Chan.Thm.ProbeComplex3 (466ms)
+FM LOG build trace: .> LEAN_PATH=/tmp/probes-2312h-p2-199854/w002-8c_ProbeComplex_compiles_extra/audited/.lake/packages/Cli/.lake/build/lib/lean:/tmp/probes-2312h-p2-199854/w002-8c_ProbeComplex_compiles_extra/audited/.lake/packages/batteries/.lake/build/lib/lean:/tmp/probes-2312h-p2-199854/w002-8c_ProbeComplex_compiles_extra/audited/.lake/packages/Qq/.lake/build/lib/lean:/tmp/probes-2312h-p2-199854/w002-8c_Pro…[截断，余 1439 字符]
+FM LOG build error: Chan/Thm/ProbeComplex3.lean:47:23: could not synthesize default value for parameter '_h' using tactics
+FM LOG build error: Chan/Thm/ProbeComplex3.lean:47:23: No goals to be solved
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.ProbeComplex3
+FM LOG build error: build failed
+=== 11_ProbeSpoofIrred (branch=proof/p skip_shape=True) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=31a1fa3acf0ee487cbd2fe9ace8e61c0bdd6bd68 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.4s binary=/tmp/probes-2312h-p2-199854/w003-11_ProbeSpoofIrred/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.0s 自测旁路：跳过源码形状
+FM STEP 6 build GREEN 1.6s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM RED env ENV_META formal_math/Chan/Thm/ProbeSpoofIrred.lean:SpIrred._auto_1 声明是 meta 元程序
+FM STEP 7 env RED 0.1s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (87ms)
+FM LOG build ✔ [4/20] Built Chan.Thm.ProbeSpoofIrred (97ms)
+FM LOG build ✔ [6/20] Built Chan.Base (87ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (89ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (87ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (84ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (89ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 12_ProbePostExtern (branch=proof/p skip_shape=True) ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=85837b14129ea67316c7d6266fa33acc7d940b42 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-p2-199854/w004-12_ProbePostExtern/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s 自测旁路：跳过源码形状
+FM STEP 6 build GREEN 2.1s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM RED env ENV_EXTERN formal_math/Chan/Thm/ProbePostExtern.lean:SpExt.h._autoParam 声明具有 extern 属性
+FM RED env ENV_META formal_math/Chan/Thm/ProbePostExtern.lean:SpExt.h._autoParam 声明是 meta 元程序
+FM STEP 7 env RED 0.1s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- STDERR (excl auditor build) ---
+FM LOG build ✔ [2/20] Built Chan (94ms)
+FM LOG build ✔ [4/20] Built Chan.Thm.ProbePostExtern (110ms)
+FM LOG build ✔ [6/20] Built Chan.Base (101ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (101ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (96ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (100ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (96ms)
+FM LOG build Build completed successfully (20 jobs).
+
+====== RUN 3 (Extras 7c, 8d) ======
+Command exited with code 0.
+
+Command output:
+=== 7c_ProbeVarUsed_in_type_extra ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=6d3f344b02fc0025e5479c47c6666fc6b06c7e7c 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-p3-201453/w001-7c_ProbeVarUsed_in_type_extra/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 1.6s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- STDERR ---
+FM LOG build ✔ [2/20] Built Chan (91ms)
+FM LOG build ⚠ [4/20] Building Chan.Thm.ProbeVarUsed3 (95ms)
+FM LOG build trace: .> LEAN_PATH=/tmp/probes-2312h-p3-201453/w001-7c_ProbeVarUsed_in_type_extra/audited/.lake/packages/Cli/.lake/build/lib/lean:/tmp/probes-2312h-p3-201453/w001-7c_ProbeVarUsed_in_type_extra/audited/.lake/packages/batteries/.lake/build/lib/lean:/tmp/probes-2312h-p3-201453/w001-7c_ProbeVarUsed_in_type_extra/audited/.lake/packages/Qq/.lake/build/lib/lean:/tmp/probes-2312h-p3-201453/w001-7c_ProbeV…[截断，余 1424 字符]
+FM LOG build warning: Chan/Thm/ProbeVarUsed3.lean:7:4: declaration uses `sorry`
+FM LOG build ✔ [6/20] Built Chan.Base (86ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (88ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (86ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (86ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (86ms)
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.ProbeVarUsed3
+FM LOG build error: build failed
+=== 8d_ProbeComplex_reaches_step7_extra ===
+RC= 0
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=09364cdf796b52dc953852bdebd53b3aa30061be 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-p3-201453/w002-8d_ProbeComplex_reaches_step7_extra/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.6s 7 个文件分 2 组库导入，16 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 2.4s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM STEP 7 env GREEN 0.6s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿
+--- STDERR ---
+FM LOG build ✔ [1/644] Built Chan (86ms)
+FM LOG build ✔ [1720/1736] Built Chan.Base (91ms)
+FM LOG build ✔ [1722/1736] Built ChanTest.Probe (92ms)
+FM LOG build ✔ [1725/1736] Built ChanChallenge.Base (84ms)
+FM LOG build ✔ [1728/1736] Built ChanDyn.Base (82ms)
+FM LOG build ✔ [1731/1736] Built ChanExplore.Base (85ms)
+FM LOG build ✔ [1734/1736] Built Chan.Thm.ProbeComplex4 (496ms)
+FM LOG build Build completed successfully (1736 jobs).
+
+====== RUN 4 (Probes 13a, 13b, 13c, 14) ======
+Command exited with code 0.
+
+Command output:
+=== 13a_ProbeCollision ===
+RC= 0
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=019e67fcbe1e7b79fcc17c157783fa47dc6a34fd 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-p1314-202369/w001-13a_ProbeCollision/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 1.9s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM STEP 7 env GREEN 0.1s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿
+--- STDERR ---
+FM LOG build ✔ [2/20] Built Chan (87ms)
+FM LOG build ✔ [4/20] Built Chan.Thm.ProbeCollision (96ms)
+FM LOG build ✔ [6/20] Built Chan.Base (92ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (90ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (83ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (88ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (88ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 13b_ProbeNestedAuto ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=12abc2296e7da04c0810b486986e17dac302228d 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.5s binary=/tmp/probes-2312h-p1314-202369/w002-13b_ProbeNestedAuto/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM STEP 6 build GREEN 1.8s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM RED env ENV_META formal_math/Chan/Thm/ProbeNestedAuto.lean:_private.Chan.Thm.ProbeNestedAuto.0.defByHave._auto_1 声明是 meta 元程序
+FM RED env ENV_META formal_math/Chan/Thm/ProbeNestedAuto.lean:_private.Chan.Thm.ProbeNestedAuto.0.thmTwoHaves._auto_1_1 声明是 meta 元程序
+FM RED env ENV_META formal_math/Chan/Thm/ProbeNestedAuto.lean:_private.Chan.Thm.ProbeNestedAuto.0.thmTwoHaves._auto_1_3 声明是 meta 元程序
+FM STEP 7 env RED 0.1s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- STDERR ---
+FM LOG build ✔ [2/20] Built Chan (85ms)
+FM LOG build ✔ [4/20] Built Chan.Base (85ms)
+FM LOG build ✔ [6/20] Built ChanTest.Probe (89ms)
+FM LOG build ✔ [9/20] Built ChanChallenge.Base (86ms)
+FM LOG build ✔ [12/20] Built ChanDyn.Base (82ms)
+FM LOG build ✔ [15/20] Built ChanExplore.Base (82ms)
+FM LOG build ✔ [18/20] Built Chan.Thm.ProbeNestedAuto (104ms)
+FM LOG build Build completed successfully (20 jobs).
+=== 14_ProbeVarRef ===
+RC= 1
+--- STDOUT ---
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=6f2e0de56ef862b0def23effe1183ccff74767fd 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.6s binary=/tmp/probes-2312h-p1314-202369/w003-14_ProbeVarRef/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.0s 7 个文件头
+FM STEP 5 shape GREEN 0.1s 7 个文件分 1 组库导入，4 条命令，0 个派生目标类节点
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 1.7s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- STDERR ---
+FM LOG build ✔ [2/20] Built Chan (91ms)
+FM LOG build ⚠ [4/20] Building Chan.Thm.ProbeVarRef (96ms)
+FM LOG build trace: .> LEAN_PATH=/tmp/probes-2312h-p1314-202369/w003-14_ProbeVarRef/audited/.lake/packages/Cli/.lake/build/lib/lean:/tmp/probes-2312h-p1314-202369/w003-14_ProbeVarRef/audited/.lake/packages/batteries/.lake/build/lib/lean:/tmp/probes-2312h-p1314-202369/w003-14_ProbeVarRef/audited/.lake/packages/Qq/.lake/build/lib/lean:/tmp/probes-2312h-p1314-202369/w003-14_ProbeVarRef/audited/.lake/packages/aeso…[截断，余 1234 字符]
+FM LOG build warning: Chan/Thm/ProbeVarRef.lean:7:8: declaration uses `sorry`
+FM LOG build ✔ [6/20] Built Chan.Base (91ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (92ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (91ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (92ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (92ms)
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.ProbeVarRef
+FM LOG build error: build failed
+=== 13c_InspectMetaAndRefs ===
+13c_RUN_RC= 1
+FM MODE baseline trusted=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 base=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2 head=02402a506b25ba6777f7aac3b89936722dfc3ec0 受信代码取自基线
+FM RUNNER blob=6a41c40ad9dbb5d83ce4b9d0a3796fa83cb73234 from=5fbd9edb58ed5c2bcc77b7d92708599e582e2fa2:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.0s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 24 个文件，内容 11 个模块，配置取自基线
+FM STEP 3 auditor GREEN 3.4s binary=/tmp/probes-2312h-p1314-202369/w004-13c-build/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=2ee650ac6682edcd76112d11820bc166e8d37a887e352bc05921f1da93ad2b96
+FM STEP 4 headers GREEN 0.1s 11 个文件头
+FM STEP 5 shape GREEN 0.1s 11 个文件分 1 组库导入，15 条命令，0 个派生目标类节点
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 1.7s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+INSPECT_RC= 0
+--- MODULE Chan.Thm.ProbeLocalLet (4 consts) ---
+  const=localLet meta=false typeRefs=[] valRefs=[_private.Chan.Thm.ProbeLocalLet.0.localLet._auto_1]
+  const=_private.Chan.Thm.ProbeLocalLet.0.localLet._auto_1 meta=true typeRefs=[] valRefs=[]
+--- MODULE Chan.Thm.ProbeLocalHave (3 consts) ---
+  const=localHave meta=false typeRefs=[] valRefs=[_private.Chan.Thm.ProbeLocalHave.0.localHave._auto_1_1]
+  const=_private.Chan.Thm.ProbeLocalHave.0.localHave._auto_1_1 meta=true typeRefs=[] valRefs=[]
+--- MODULE Chan.Thm.ProbeAbbrevType (6 consts) ---
+  const=AutoArrow._auto_1 meta=true typeRefs=[] valRefs=[]
+  const=AutoArrow meta=false typeRefs=[] valRefs=[AutoArrow._auto_1]
+--- MODULE Chan.Thm.ProbeVarRef (3 consts) ---
+  const=_private.Chan.Thm.ProbeVarRef.0._auto_2 meta=true typeRefs=[] valRefs=[]
+  const=_private.Chan.Thm.ProbeVarRef.0._auto_5 meta=true typeRefs=[] valRefs=[]
+--- MODULE Chan.Thm.ProbeCollision (3 consts) ---
+  const=foo meta=false typeRefs=[foo._auto_2] valRefs=[]
+  const=foo._auto_2 meta=true typeRefs=[] valRefs=[]
+
