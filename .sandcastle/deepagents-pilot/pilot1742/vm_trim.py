@@ -33,7 +33,9 @@ LOCK_NAME = ".vm-trim.lock"
 STAMP_NAME = ".vm-trim.stamp"
 # 宿主 Docker 定位合同：显式 context 贯穿准入、监督、回收与 trim；未指定时仍由 Docker 选默认。
 # 不传 DOCKER_HOST、DOCKER_CONFIG 或任意凭据；这不是审阅容器的环境白名单。
-DOCKER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "DOCKER_CONTEXT")
+# SANDCASTLE_APPARMOR_ABSENT（#2070）是部署对隔离合同 AppArmor 策略的显式声明，准入与监督子进程据此算合同摘要，
+#   必须与部署同值，否则子进程按缺省 enforce 拒绝新合同 receipt（#2071 独审 P1）。它只到宿主侧子进程，不进审阅容器。
+DOCKER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "DOCKER_CONTEXT", "SANDCASTLE_APPARMOR_ABSENT")
 TRIM_TARGET = "/var/lib/docker"
 
 Runner = Callable[[List[str], float], subprocess.CompletedProcess]
