@@ -150,28 +150,35 @@ where
 
 private def carrierName : Name → Bool
   | .str _ s =>
-    s == "_autoParam" || (s.startsWith "_auto_" && (s.toList.drop 6 |>.all Char.isDigit) && s.length > 6)
+    s == "_autoParam" ||
+      (s.startsWith "_auto_" &&
+        let parts := (s.splitOn "_").drop 2
+        !parts.isEmpty && parts.all fun p => !p.isEmpty && p.toList.all Char.isDigit)
   | _ => false
 
 /--
 自动参数战术载体：带 `meta` 标记的常量只有同时满足下列各条才豁免 `ENV_META`，判据全部从环境现算。
-1. 名字末段是 `_autoParam` 或 `_auto_<数字>`；
+1. 名字末段是 `_autoParam` 或 `_auto_<数字>`（可多段，如 `_auto_1_1`）；
 2. 安全的普通定义：`defnInfo`、`safe`，无 `implemented_by`、无 `extern`；无宇宙参数、`opaque` 提示
    （手写的 `def` 一律是 `regular` 提示，源码写不出满足这一条的冒用）；
 3. 类型恰为 `Lean.Syntax`；
-4. 同一模块里另有常量的类型含 `autoParam _ <该常量>`；
+4. 同一模块里另有常量的类型或定义体／证明体含 `autoParam _ <该常量>`；
 5. 值是 `quoteAutoTactic` 对某棵语法树的输出，逐字相同（解码后用 Lean 自己的 `quoteAutoTactic` 重算比对）。
 第 3、5 条对源码写得出的冒用是冗余的（已被第 2 条的提示挡住），防的是产物被伪造时载体形态不符。
 -/
 def autoParamCarriers (entries : Array Entry) : MetaM NameSet := do
   let env ← getEnv
   let refs ← IO.mkRef ({} : NameSet)
-  for e in entries do
-    e.info.type.forEachWhere (·.isAppOfArity ``autoParam 2) fun x => do
+  let scan (e : Entry) (expr : Expr) : MetaM Unit :=
+    expr.forEachWhere (·.isAppOfArity ``autoParam 2) fun x => do
       if let .const c [] := x.appArg! then
         if c != e.name && (env.getModuleIdxFor? c).isSome &&
             env.getModuleIdxFor? c == env.getModuleIdxFor? e.name then
           refs.modify (·.insert c)
+  for e in entries do
+    scan e e.info.type
+    if let some v := e.info.value? true then
+      scan e v
   let refs ← refs.get
   entries.foldlM (init := {}) fun s e => do
     let .defnInfo d := e.info | return s

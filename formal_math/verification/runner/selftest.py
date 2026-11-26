@@ -1183,8 +1183,9 @@ def skeleton(s):
     @case("A2")
     def _():
         r, _how = corpus_case(s, "must_red/autoparam/spoofs", skip_shape=True)
-        got, want = env_pairs(r), {("ENV_META" if c == "M" else "ENV_UNSAFE" if c == "U" else "ENV_IMPLEMENTED_BY",
-                                    "formal_math/Chan/Thm/%s.lean:%s" % (f, n)) for c, f, n in AUTOPARAM_SPOOFS}
+        code_map = {"M": "ENV_META", "U": "ENV_UNSAFE", "I": "ENV_IMPLEMENTED_BY", "E": "ENV_EXTERN"}
+        got, want = env_pairs(r), {(code_map[c], "formal_math/Chan/Thm/%s.lean:%s" % (f, n))
+                                   for c, f, n in AUTOPARAM_SPOOFS}
         good = r["rc"] == 1 and last_step(r) == "env" and got == want
         return check("A2 第 4 类豁免的冒用形态（只审环境层，跳过第 5 步）：逐声明比对红行，合法载体 SpLegit.ok._autoParam "
                      "不在其中", good, r, "多出=%s 缺少=%s" % (sorted(got - want)[:6], sorted(want - got)[:6]))
@@ -1207,14 +1208,14 @@ SKELETON_FIXTURES = (
     "must_green/known-not-covered/linarith-oracle-eval",
 )
 
-# 第 4 类豁免冒用夹具 must_red/autoparam/spoofs 的期望红行：（M=ENV_META、U=ENV_UNSAFE、I=ENV_IMPLEMENTED_BY，文件，声明）
+# 第 4 类豁免冒用夹具 must_red/autoparam/spoofs 的期望红行：（M=ENV_META、U=ENV_UNSAFE、I=ENV_IMPLEMENTED_BY、E=ENV_EXTERN，文件，声明）
 AUTOPARAM_SPOOFS = [
     ("M", "Copy", "SpCopy._auto_1"), ("M", "Orphan", "SpOrphan._auto_1"), ("M", "Call", "SpCall._auto_1"),
     ("M", "Ref", "spRefHelper"), ("M", "Ref", "SpRef._auto_1"), ("M", "Alias", "SpAlias._auto_1"),
     ("M", "Name", "spName"), ("M", "Unsafe", "SpUnsafe._auto_1"), ("U", "Unsafe", "SpUnsafe._auto_1"),
     ("U", "Unsafe", "spUnsafeUse"), ("M", "Impl", "SpImpl._auto_1"), ("I", "Impl", "SpImpl._auto_1"),
     ("M", "Impl", "spImplTarget"), ("M", "PostImpl", "SpPost.h._autoParam"), ("I", "PostImpl", "SpPost.h._autoParam"),
-    ("M", "PostImpl", "spPostTarget"),
+    ("M", "PostImpl", "spPostTarget"), ("M", "PostExtern", "SpExt.h._autoParam"), ("E", "PostExtern", "SpExt.h._autoParam"),
 ]
 
 
@@ -1224,11 +1225,18 @@ AUTOPARAM_SPOOFS = [
 UNIT_CARRIERS = {
     "U.ok._auto_1": "正例：生成器 declareTacticSyntax 本身产出",
     "U.field._autoParam": "正例：逐字照抄生成值，字段名形态",
+    "U.multi._auto_1_1": "正例：多段数字后缀（theorem 异步证明块形态）",
+    "U.valRef._auto_1": "正例：仅被同模块常量的定义体以 autoParam 引用",
+    "U.hyg._auto_1": "正例：含 Name.num 卫生名与非空 Syntax.Preresolved（.namespace/.decl）",
+    "U.long._auto_1": "正例：9 段全字符串名（Name.str 退化链）",
     "U.identOk._auto_1": "正例：含标识符的语法树（Syntax.ident 的解码与重算）",
 }
 UNIT_REJECTED = {
-    "U.badName": "判据 1 名字形态：末段不是 _autoParam、_auto_<数字>",
+    "U.badName": "判据 1 名字形态：末段不是 _autoParam、_auto_<数字>(_<数字>)*",
     "U.noDigits._auto_": "判据 1 名字形态：_auto_ 后没有数字",
+    "U.trailUnder._auto_1_": "判据 1 名字形态：多段后缀以 _ 结尾",
+    "U.badAlpha._auto_1a": "判据 1 名字形态：数字段含非数字字符",
+    "U.doubleUnder._auto__1": "判据 1 名字形态：连续下划线空段",
     "U.unsafe._auto_1": "判据 2 安全性：unsafe",
     "U.impl._auto_1": "判据 2 安全性：implemented_by",
     "U.hints._auto_1": "判据 2 提示：regular",
@@ -1535,6 +1543,8 @@ MUTANTS = [
     ("第 4 类豁免去掉安全性条件（safe、无 implemented_by、无 extern）", ENVG,
      [("    unless d.safety == .safe && !isExtern env e.name && (Compiler.getImplementedBy? env e.name).isNone do return s\n",
        "")], "A2,U1"),
+    ("第 4 类豁免去掉 !isExtern 条件", ENVG,
+     [("!isExtern env e.name && ", "")], "A2"),
     ("第 4 类豁免去掉 opaque 提示", ENVG, [("unless d.levelParams.isEmpty && d.hints matches .opaque do return s",
                                        "unless d.levelParams.isEmpty do return s")], "A2,U1"),
     ("第 4 类豁免去掉「类型恰为 Lean.Syntax」", ENVG, [("    unless d.type == .const ``Syntax [] do return s\n", "")], "U1"),

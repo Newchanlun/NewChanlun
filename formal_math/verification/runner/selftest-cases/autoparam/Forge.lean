@@ -20,6 +20,12 @@ def use (n c : Name) (us : List Level := []) (safety := DefinitionSafety.safe) :
   let value := mkLambda `h .default dom (mkConst ``True.intro)
   addDecl (.defnDecl { name := n, levelParams := [], type, value, hints := .regular 1, safety })
 
+/-- 造一个仅在定义体里含 `autoParam True c`（类型不含）的引用者。 -/
+def useInVal (n c : Name) : CoreM Unit := do
+  let dom := mkApp2 (.const ``autoParam [Level.zero]) (mkConst ``True) (.const c [])
+  let value := mkForall `h .default dom (mkConst ``True)
+  addDecl (.defnDecl { name := n, levelParams := [], type := mkSort Level.zero, value, hints := .regular 1, safety := .safe })
+
 run_cmd liftTermElabM do
   -- 正例 1：生成器本身（`declareTacticSyntax`）产出的载体。
   let tac ← `(tactic| omega)
@@ -31,11 +37,37 @@ run_cmd liftTermElabM do
   -- 正例 2：逐字照抄生成值，名字是字段形态。
   forge `U.field._autoParam syn v
   use `U.field.use `U.field._autoParam
-  -- 判据 1：名字形态不对。
+  -- 正例 3（r1 阻断-2）：多段数字后缀 `_auto_1_1`。
+  forge `U.multi._auto_1_1 syn v
+  use `U.multi.use `U.multi._auto_1_1
+  -- 正例 4（r1 阻断-1）：仅由同模块常量的定义体引用。
+  forge `U.valRef._auto_1 syn v
+  useInVal `U.valRef.use `U.valRef._auto_1
+  -- 正例 5（r1 块二-C1）：含 Name.num（卫生名）与非空 Syntax.Preresolved（.namespace 与 .decl）。
+  let hygName : Name := Name.num (Name.str (Name.str .anonymous "foo") "_hyg") 42
+  let pre : List Syntax.Preresolved := [
+    .namespace (Name.num (Name.str .anonymous "Ns") 7),
+    .decl `Nat.add ["x", "y"]
+  ]
+  let stxHyg : Syntax := .ident .none (toString hygName).toRawSubstring hygName pre
+  discard <| Term.declareTacticSyntax stxHyg (some `U.hyg._auto_1)
+  use `U.hyg.use `U.hyg._auto_1
+  -- 正例 6（r1 块二-C1）：9 段全字符串名（触发 ToExpr Name 的 Name.str 退化支）。
+  let longName : Name := `A.B.C.D.E.F.G.H.I
+  let stxLong : Syntax := .ident .none (toString longName).toRawSubstring longName []
+  discard <| Term.declareTacticSyntax stxLong (some `U.long._auto_1)
+  use `U.long.use `U.long._auto_1
+  -- 判据 1：名字形态不对（含多段后缀边界反例）。
   forge `U.badName syn v
   use `U.badName.use `U.badName
   forge `U.noDigits._auto_ syn v
   use `U.noDigits.use `U.noDigits._auto_
+  forge `U.trailUnder._auto_1_ syn v
+  use `U.trailUnder.use `U.trailUnder._auto_1_
+  forge `U.badAlpha._auto_1a syn v
+  use `U.badAlpha.use `U.badAlpha._auto_1a
+  forge `U.doubleUnder._auto__1 syn v
+  use `U.doubleUnder.use `U.doubleUnder._auto__1
   -- 判据 2：安全性、提示、宇宙参数。
   forge `U.unsafe._auto_1 syn v (safety := .unsafe)
   use `U.unsafe.use `U.unsafe._auto_1 (safety := .unsafe)

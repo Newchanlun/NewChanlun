@@ -250,15 +250,16 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 
 ### 生成点（实测，Lean 4.36.0）
 
-生成出来的载体都是：普通定义、`safe`、提示 `opaque`、无宇宙参数、类型 `Lean.Syntax`、带 `meta`、无 `implemented_by`／`extern`、没有声明范围；值只由 `Syntax.node`、`SourceInfo.none`、`Name.mkStrN`、`Array.push`、`Array.empty`、`mkAtom`（标识符另有 `Syntax.ident`、`String.toRawSubstring`、`List` 构造）组成。除 `ENV_META` 外不触发环境层任何红码（公理闭包为空；门 15 因没有声明范围跳过；`mutual` 的 `_unsafe_rec` 引用载体，由第 2 类豁免照常放行）。
+生成出来的载体都是：普通定义、`safe`、提示 `opaque`、无宇宙参数、类型 `Lean.Syntax`、带 `meta`、无 `implemented_by`／`extern`、没有声明范围；值只由 `Syntax.node`、`SourceInfo.none`、`Name.mkStrN`（超过 8 段或含数字段的名称用 `Name.anonymous`/`Name.str`/`Name.num`，数字按 `OfNat.ofNat Nat` 编码）、`Array.push`、`Array.empty`、`mkAtom`（标识符另有 `Syntax.ident`、`String.toRawSubstring`、`List` 及 `Syntax.Preresolved.namespace`/`Syntax.Preresolved.decl` 构造）组成。除 `ENV_META` 外不触发环境层任何红码（公理闭包为空；门 15 因没有声明范围跳过；`mutual` 的 `_unsafe_rec` 引用载体，由第 2 类豁免照常放行）。
 
-| 写法 | 常量名 | 被谁的类型以 `autoParam _ <载体>` 引用 |
+| 写法 | 常量名 | 被谁的类型或定义体／证明体以 `autoParam _ <载体>` 引用 |
 |---|---|---|
 | 结构体字段 `f : p := by tac` | `S.f._autoParam` | `S.mk`、`S.mk._flat_ctor`、`injEq`／`inj`／`noConfusion`／`sizeOf_spec`；继承它的子结构的 `_flat_ctor` |
 | 子结构覆写 `f := by tac` | `Child.f._autoParam` | `Child.mk._flat_ctor` |
 | `class` 字段 | `C.f._autoParam` | `C.mk`、`_flat_ctor`、`noConfusion` |
 | `def`、`theorem`、`abbrev` 的绑定器（含 `private`、`protected`、`mutual`） | `<声明>._auto_<n>`；私有为 `_private.<模块>.0.<声明>._auto_<n>` | 声明本身；`mutual` 时另有 `_unsafe_rec`、`_sunfold` |
-| 类型里的 `∀ (h : p := by tac)` | `<声明>._auto_<n>` | 声明本身与它的 `_proof_` 辅助 |
+| 类型里的 `∀ (h : p := by tac)`（含 `abbrev` 类型别名体） | `<声明>._auto_<n>` | 声明本身的类型或定义体与它的 `_proof_` 辅助 |
+| `def`／`theorem` 局部 `let`、`have` 绑定器 | `_private.<模块>.0.<声明>._auto_<n>`（`theorem` 异步证明块内可生成多段数字后缀，如 `_auto_1_1`） | 宿主声明的定义体或证明体 |
 | `structure` 参数 | `S._auto_<n>` | `S`、`S.mk`、投影、`ctorIdx` 等 |
 | `inductive` 构造子参数 | `I._auto_<n>` | `I.mk` 等 |
 | `variable` 绑定器 | `_private.<模块>.0._auto_<N>`，一处 `variable` 会生成多个（实测 1 条定理时 2 个），N 是模块内计数 | **没有任何引用**（见「已知问题」） |
@@ -273,10 +274,10 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 
 带 `meta` 的常量同时满足下列各条才不报 `ENV_META`，判据全部从构建产物的环境现算，不用源码层给的任何信息：
 
-1. 名字末段是 `_autoParam` 或 `_auto_<数字>`（附加条件，不是唯一依据）；
+1. 名字末段是 `_autoParam` 或 `_auto_<数字>`（可多段，如 `_auto_1_1`；附加条件，不是唯一依据）；
 2. 普通定义（`defnInfo`）、`safe`，无 `implemented_by`、无 `extern`；无宇宙参数、提示为 `opaque`；
 3. 类型恰为 `Lean.Syntax`（定义上相等的别名不算）；
-4. 同一模块里另有常量的**类型**含 `autoParam _ <该常量>`；
+4. 同一模块里另有常量的**类型或定义体／证明体**含 `autoParam _ <该常量>`；
 5. 值按 `quoteAutoTactic` 的输出形状解码成语法树，再用 Lean 自己的 `Lean.Elab.Term.quoteAutoTactic` 重算，与值逐字相等（`==`）。同第 1 类豁免「按生成器重算后逐字相同」的做法；这里调用的就是同一工具链里的生成函数，不另抄一份。
 
 `extern` 仍无任何豁免；`unsafe`、`partial`、`implemented_by` 的判定不受本类影响，照旧由前三类管。
@@ -298,6 +299,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | `Unsafe.lean` | `meta unsafe def`，由 `unsafe def` 引用 | `ENV_META`、`ENV_UNSAFE`（引用者另报 `ENV_UNSAFE`） |
 | `Impl.lean` | `@[implemented_by …] meta def` | `ENV_META`、`ENV_IMPLEMENTED_BY`（目标另报 `ENV_META`） |
 | `PostImpl.lean` | 给真生成的载体事后 `attribute [implemented_by …]` | `ENV_META`、`ENV_IMPLEMENTED_BY` |
+| `PostExtern.lean` | 给真生成的载体事后 `attribute [extern …]` | `ENV_META`、`ENV_EXTERN` |
 | `Legit.lean` | 对照：合法的字段默认证明 | 不出现在红行里 |
 
 `partial` 的同形定义用源码写不出：不递归的 `meta partial def` 被 Lean 降成普通安全定义（就是 `Copy.lean` 的形态）；递归的 `partial def` 产出 `opaqueInfo` 与 `_unsafe_rec`，不是普通定义。第 2 条的「无宇宙参数」与「提示 `opaque`」的反例、类型与值的反例由单元自测 U1 覆盖（用 `addDecl` 直接造，属于伪造产物一类，只用来测判定函数）。
@@ -410,16 +412,16 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | D1a–b | 派生证书正例：递归类型 `deriving Repr, BEq, Hashable, Ord`（生成 `partial` 辅助函数）七步全绿；同一提交证书为空时第 7 步 `ENV_PARTIAL` |
 | D2 | 派生证书反例：同一模块里有合法派生，再手写 `partial def Spoof.loop`，驱动脚本去掉第 5 步的发现（放行）：第 7 步只有 `Spoof.loop._unsafe_rec` 一条 `ENV_PARTIAL` |
 | E13 | 调用方的 `--workdir`、`--packages` 含非 UTF-8 字节与换行：`INTERNAL`（父目录不存在时建目录失败）、`PACKAGES`，退 2，异常消息经转义 |
-| A2 | 第 4 类豁免的冒用形态（`must_red/autoparam/spoofs`，跳过第 5 步）：逐声明比对第 7 步红行，恰为「为什么冒用不了」表里的 16 条，合法载体不在其中 |
+| A2 | 第 4 类豁免的冒用形态（`must_red/autoparam/spoofs`，跳过第 5 步）：逐声明比对第 7 步红行，恰为「为什么冒用不了」表里的 18 条，合法载体不在其中 |
 | A3 | `variable` 绑定器上的自动参数（`must_green/known-issue/autoparam-variable-binder`，完整流水线）：第 7 步只有 `ENV_META`，红行对象都是 `_private.Chan.Thm.Var.0._auto_<N>` |
 
-**单元自测**（与流水线自测分开报数，随全量与 `--skip-corpus` 一起跑，`--cases U1` 单跑）：U1 在临时目录起一个最小 Lean 包，只依赖工具链自带的 Lean（不碰 Mathlib，不写共享依赖目录），用 `selftest-cases/autoparam/Forge.lean` 以 `addDecl` 直接造 18 个候选常量（正例 3：生成器本身产出、逐字照抄的字段名形态、含标识符的语法树；反例 15：每个只在一条判据上与正例不同——名字 2、安全性 2、提示 2、宇宙参数 1、类型 1、引用 1、值 4、对照 2），再由 `Check.lean` 按私有层级读回、调用审计程序库里的 `FM.autoParamCarriers`，逐个比对判定。它是测试设施，不是被审内容，不经过流水线；它证明判定函数按所写判据工作，不证明流水线能防伪造产物。
+**单元自测**（与流水线自测分开报数，随全量与 `--skip-corpus` 一起跑，`--cases U1` 单跑）：U1 在临时目录起一个最小 Lean 包，只依赖工具链自带的 Lean（不碰 Mathlib，不写共享依赖目录），用 `selftest-cases/autoparam/Forge.lean` 以 `addDecl` 直接造 25 个候选常量（正例 7：生成器本身产出、逐字照抄的字段名形态、多段数字后缀 `_auto_1_1`、仅被定义体引用、含 `Name.num` 与非空 `Syntax.Preresolved`、9 段全字符串名、含标识符的语法树；反例 18：每个只在一条判据上与正例不同——名字 5、安全性 2、提示 2、宇宙参数 1、类型 1、引用 1、值 4、对照 2），再由 `Check.lean` 按私有层级读回、调用审计程序库里的 `FM.autoParamCarriers`，逐个比对判定。它是测试设施，不是被审内容，不经过流水线；它证明判定函数按所写判据工作，不证明流水线能防伪造产物。
 
-**弱化自测**（`--mutants`）：把 `runner/`、`precheck/`、`auditor/` 与骨架用例依赖的夹具目录（`SKELETON_FIXTURES`）复制到临时目录，先断言未改弱的副本骨架全过，再逐一在副本里改弱一处、用副本自己的自测跑相关骨架用例，每种弱化都必须有用例失败；改弱点在源码里找不到或不唯一时也判失败。第四片另加 18 种（见下），自动参数片另加 6 种（见下），共 52 种，清单见 `selftest.py` 的 `MUTANTS`。骨架片的 28 种：上一轮的 18 种（其中三种产物核对的改弱点随形状表改写）；独审 r2 另做而自测没抓到的 10 种，除不再适用的一种外都已收进来，共 7 个新改弱点——JSON 接受重复键（R2）、去掉目录项类型检查（R3 产物目录本身是符号链接与 R15 任意层级符号链接是同一处）、绿的结论不再要求标准输出都写出去了（R4）、信号判定只对第 6 步生效（R5b）、JSON 不要求合法 UTF-8（R7）、不核对依赖目录里的包（R8）、建目录后不 `chmod`（R14），R16「去掉顶层只许内容根」与上一轮的「去掉 ARTIFACT_ROOT」是同一处；本轮另加 3 种：目录模式异常或列不出时跳过、不装 SIGINT 与 SIGTERM 处理函数、隔离检查失败时的诊断经 `sys` 的流写且不兜异常（N-1 的旧形）。r2 的「`.olean` 不要求是文件」不再适用：形状表按目录项类型分别查目录表与文件表，名为 `X.olean` 的目录从来查不到文件表，没有单独的「须是文件」一步可改弱（S20 的 `Chan/Dir.olean` 覆盖这个形状）。沙箱不清环境一种同时去掉 `--clearenv` 与「调用 `bwrap` 时只给 `PATH`」两层，只去掉一层时另一层仍挡住、观察不到。
+**弱化自测**（`--mutants`）：把 `runner/`、`precheck/`、`auditor/` 与骨架用例依赖的夹具目录（`SKELETON_FIXTURES`）复制到临时目录，先断言未改弱的副本骨架全过，再逐一在副本里改弱一处、用副本自己的自测跑相关骨架用例，每种弱化都必须有用例失败；改弱点在源码里找不到或不唯一时也判失败。第四片另加 18 种（见下），自动参数片另加 7 种（见下），共 53 种，清单见 `selftest.py` 的 `MUTANTS`。骨架片的 28 种：上一轮的 18 种（其中三种产物核对的改弱点随形状表改写）；独审 r2 另做而自测没抓到的 10 种，除不再适用的一种外都已收进来，共 7 个新改弱点——JSON 接受重复键（R2）、去掉目录项类型检查（R3 产物目录本身是符号链接与 R15 任意层级符号链接是同一处）、绿的结论不再要求标准输出都写出去了（R4）、信号判定只对第 6 步生效（R5b）、JSON 不要求合法 UTF-8（R7）、不核对依赖目录里的包（R8）、建目录后不 `chmod`（R14），R16「去掉顶层只许内容根」与上一轮的「去掉 ARTIFACT_ROOT」是同一处；本轮另加 3 种：目录模式异常或列不出时跳过、不装 SIGINT 与 SIGTERM 处理函数、隔离检查失败时的诊断经 `sys` 的流写且不兜异常（N-1 的旧形）。r2 的「`.olean` 不要求是文件」不再适用：形状表按目录项类型分别查目录表与文件表，名为 `X.olean` 的目录从来查不到文件表，没有单独的「须是文件」一步可改弱（S20 的 `Chan/Dir.olean` 覆盖这个形状）。沙箱不清环境一种同时去掉 `--clearenv` 与「调用 `bwrap` 时只给 `PATH`」两层，只去掉一层时另一层仍挡住、观察不到。
 
 第四片的 18 种（括号里是抓它的用例）。独审 r2 后加的一种：`NO_CERTIFICATE` 只查为空不比路径（S33）；「`legacyConfig` 不要求第三个子节点是 `:=`」与原规则等价、抓不到，没有加，原因见「按形状判的代价」后一段。独审 r1 后加的两种：去掉旧式配置子句规则（H1）、第 7 步不要求第 5 步产出的派生凭证（S32）。骨架复审 r3 指出的两个自测缺口：去掉产物文件模式检查（S20 的 0755 文件）、`finish()` 去掉「至多写一次」的守卫（S31）。形状门的 13 种：去掉命令白名单、声明白名单、修饰符白名单、属性白名单、派生目标类白名单、`#guard_msgs` 规格限制（H1）；禁用清单去掉 `native_decide`（H1）；`set_option` 只查命令位置（H1 的项、战术、`grind` 三例）；解析失败不判红（H1、H2）；去掉 `Chan/Defs` 规则（H1b）；派生证书不比对位置、同模块即豁免（D2）；形状检查的沙箱里被审工作区可写（S22）；不核对每组的文件行（S5g）。另有两种原有弱化的改弱点随本片更新：「去掉模块数比对」现在同时由 S5a、S5f 抓；「第 7 步被审工作区可写」的改弱点加了上下文以区分第 5 步的同形挂载。
 
-自动参数片的 6 种（括号里是抓它的用例）：第 4 类豁免去掉名字形态（U1）、去掉安全性条件（A2 的 `PostImpl.lean`、U1）、去掉 `opaque` 提示（A2 的 `Copy.lean`、U1）、去掉「类型恰为 `Lean.Syntax`」（U1）、去掉「被 `autoParam` 引用」（A3、U1）、去掉「值按生成器重算逐字相等」（U1）。类型与值两种只有 U1 抓得到：源码写得出的冒用都先被 `opaque` 提示那一条挡住。语料用例 `corpus_case` 在没有预编译审计程序时（`--skip-corpus`，弱化自测即如此）改走普通模式，A2、A3 借它跑夹具。
+自动参数片的 7 种（括号里是抓它的用例）：第 4 类豁免去掉名字形态（U1）、去掉安全性条件（A2 的 `PostImpl.lean` 与 `PostExtern.lean`、U1）、去掉 `!isExtern` 条件（A2 的 `PostExtern.lean`）、去掉 `opaque` 提示（A2 的 `Copy.lean`、U1）、去掉「类型恰为 `Lean.Syntax`」（U1）、去掉「被 `autoParam` 引用」（A3、U1）、去掉「值按生成器重算逐字相等」（U1）。类型与值两种只有 U1 抓得到：源码写得出的冒用都先被 `opaque` 提示那一条挡住。语料用例 `corpus_case` 在没有预编译审计程序时（`--skip-corpus`，弱化自测即如此）改走普通模式，A2、A3 借它跑夹具。
 
 语料用例：`fixtures.tsv` 列出全部旧夹具的归属与本片的实测期望（见下）。期望全绿、且不跳过第 5 步的夹具另做命令数比对：跑完保留工作目录，用审计程序（`shape-plan`、`shape`）拿每个文件只解析的命令数，再用自测脚本 `selftest-cases/shape/ElabCount.lean`（`IO.processCommands`，被审产物在搜索路径上，一个进程一个文件）真实精化同一文件数命令，逐文件不等即失败。归环境层、声明锁的夹具经驱动脚本跳过第 5 步跑（`SKIP_SHAPE_OWNERS`）。只含内容的夹具，基线与被审是同一提交（预检的改动类规则不触发，形状规则照常检查），构建配置按夹具实有的内容根生成；改了构建配置或门禁目录的夹具，基线是模板、被审提交叠上夹具，按证明角色送审。`--discover` 只打印实测结果，供更新表格。
 
@@ -453,7 +455,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | 归属有误 | 0 | — |
 | （阴性对照） | 27（全部是 must_green） | 第 5 步零命中。22 个七步全绿；`attributes-whitelist` 第 6 步因夹具自身告警（`@[no_expose]` has no effect）判红；`r3-a7-named-expose-section`、`r3-a8-mathlib`、`r4-w1d-defs-deriving`、`r4-w2-w3-proofs` 不带锁文件，第 7 步 `LOCK_UNLISTED` |
 
-「已知不防」里还有两类没有做成独立夹具，照实写：
+「已知不防」里还有两类没有穷尽做成独立夹具，照实写：
 
 - **清单外的求值入口**。分两部分写，出处是第四片独审 r1（`origin/evidence/2312-shape-review` @ `b97bb7f836` 的 `audit-reports/2312/shape-review-r1.md`「清单外求值入口的调查」一节）。
   - **独审实测的结论**（不是证明不存在）：独审 r1 在修掉甲-1 之后没有再找到能过第 5 步、又在构建期对被审文件给的项求值的入口；独审 r2 找到一例，见下面「仍未穷尽」里的 `linarith (oracle := …)`。下面列出的通往宿主机读写的通道都被堵住（这是枚举，不是全集）：项级与声明级 `unsafe`（`unsafeBaseIO` 等也要先有 `unsafe`）、`include_str`、`eval%`、`by_elab`、`run_tac`／`run_cmd`／`run_meta`／`run_elab`、`sudo` 已点名，第 5 步判红；用到 `IO`／`CoreM`／`TacticM` 这类元层类型要 `meta`，`meta def` 第 5 步红，改用 `import Lean.*` 第 4 步 `IMPORT_PINNED` 红。Aesop 规则战术按名字求值从被审源码结构性地触达不到：规则体是元层类型，构建报 `may not access declaration … imported as meta`（审阅夹具 `fx/e-eval4`、`fx/e-eval3`）。甲-1 那条入口（旧式配置子句）的能力上界是纯计算加往标准错误打字（`dbgTrace`、`panic!`）：取值是非元层类型的项，后果只到构建日志。
