@@ -1,0 +1,12 @@
+/-!
+`definition_names` 必红样本的解答：不导入锁定定义，自己声明同名、同类型、定义体不同的
+`Sample.double`，再证明 Challenge 里那条在原定义下为假的陈述。
+-/
+
+namespace Sample
+
+def double (_ : Nat) : Nat := 0
+
+theorem double_one_eq_zero : double 1 = 0 := rfl
+
+end Sample

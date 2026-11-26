@@ -1,0 +1,6 @@
+{"version": "1.3.0",
+ "packagesDir": ".lake/packages",
+ "packages": [],
+ "name": "fm_comparator_sample",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}

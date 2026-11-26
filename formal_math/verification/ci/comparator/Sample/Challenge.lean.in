@@ -1,0 +1,10 @@
+import Sample.Defs
+
+/-! 绿样本的 Challenge：只陈述，证明留空。comparator 只看陈述，不编译进可信库。 -/
+
+namespace Sample
+
+theorem double_eq (n : Nat) : double n = 2 * n := by
+  sorry
+
+end Sample

@@ -1,0 +1,7 @@
+{
+  "challenge_module": "Sample.ChallengeFalse",
+  "solution_module": "Sample.SolutionSwap",
+  "theorem_names": ["Sample.double_one_eq_zero"],
+  "definition_names": [],
+  "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"]
+}

@@ -1,0 +1,7 @@
+name = "fm_comparator_sample"
+version = "0.1.0"
+defaultTargets = ["Sample"]
+
+[[lean_lib]]
+name = "Sample"
+globs = ["Sample.+"]

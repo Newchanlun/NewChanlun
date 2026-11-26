@@ -1,0 +1,12 @@
+import Sample.Defs
+
+/-!
+`definition_names` 必红样本的 Challenge。在锁定的 `double` 下这条陈述为假（`double 1 = 2`）。
+-/
+
+namespace Sample
+
+theorem double_one_eq_zero : double 1 = 0 := by
+  sorry
+
+end Sample

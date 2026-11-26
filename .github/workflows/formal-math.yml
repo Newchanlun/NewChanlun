@@ -1,0 +1,456 @@
+name: formal-math
+
+# #2315（FM-06）：formal_math/ 的受信 PR 门、受保护受信放行门、主干门与手动 paranoid 作业。
+#
+# 安全边界（对应 #2315 评论 7176006564 六条硬要求）：
+#   1. PR 门使用 `pull_request_target`（工作流定义与脚本永远取自 main），拒绝 fork PR，
+#      仅拉取 PR head 的 git 对象，绝不检出、绝不在沙箱外执行 PR 的任何文件。
+#   2. 不使用 `paths:` 过滤：未改动 formal_math/ 与受信文件的 PR 走纯静态快速路径直接绿，
+#      确保设为分支保护必需检查时不会停在等待状态；不并入 ci.yml。
+#   3. 依赖目录只按 main 的基线三配置预取并设为只读，沙箱内 `--ro-bind` 挂载；
+#      run.py（七步）、lake check（门 4）、lake comparator（门 5 挑战与解答两段）各有独立干净目录。
+#   4. `lake comparator` 强制 definition_names 为空，挑战模块在物理不含证明文件的独立目录先构建并导出。
+#   5. `lake check` 在 PR 门与主干门均运行。
+#   6. 自动 PR 门永不读 PR 标签/正文授予 `--trusted-change-approved`（改受信文件默认红）；
+#      放行仅经 `workflow_dispatch` + GitHub 受保护环境 `formal-math-trusted-change`
+#      且绑定固定 pr_number 与 40 位 pr_head_sha。
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: '配合 trusted_change_approved 放行指定 infra PR（留空则跑 main 主干门）'
+        type: string
+        default: ''
+      pr_head_sha:
+        description: '必填（当 pr_number 非空）：40 位完整提交 SHA，绑定审查提交防 TOCTOU'
+        type: string
+        default: ''
+      trusted_change_approved:
+        description: '放行 infra 分支对受信文件的改动（须经 formal-math-trusted-change 环境人工批准）'
+        type: boolean
+        default: false
+      paranoid:
+        description: '另跑 lake check --paranoid（五个外部检查器，耗时与内存高，不阻断）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-math-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+env:
+  # 钉选的 elan 发行包（x86_64-unknown-linux-gnu）；sha256 已下载核对。
+  ELAN_VERSION: v4.4.0
+  ELAN_SHA256: 0e8250aa2be86c7af929ade68db617af9edc8b9ccf6eaf5ece228250d0d032e2
+
+jobs:
+  formal-math-pr:
+    if: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout trusted main (no PR code, no persisted credentials)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch PR head git object only (reject forks, never checkout)
+        id: fetch_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$PR_HEAD_REPO" != "$REPO_FULL" ]; then
+            echo "::error::拒绝来自外部 fork 的 PR（$PR_HEAD_REPO != $REPO_FULL）"
+            exit 1
+          fi
+          if [ "$PR_BASE_REF" != "main" ]; then
+            echo "::error::目标分支必须是 main（实际 $PR_BASE_REF）"
+            exit 1
+          fi
+          base_sha=$(git rev-parse --verify "HEAD^{commit}")
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --no-recurse-submodules origin "refs/pull/${PR_NUMBER}/head:refs/fm-pr/head"
+          unset auth GH_TOKEN
+          fetched=$(git rev-parse --verify "refs/fm-pr/head^{commit}")
+          if [ "$fetched" != "$PR_HEAD_SHA" ]; then
+            echo "::error::拉取到的 PR 提交 ($fetched) 与事件 head.sha ($PR_HEAD_SHA) 不一致"
+            exit 1
+          fi
+          printf 'base_sha=%s\nhead_sha=%s\n' "$base_sha" "$fetched" >> "$GITHUB_OUTPUT"
+
+      - name: Static preflight and non-formal_math fast-path
+        id: preflight
+        env:
+          BASE_SHA: ${{ steps.fetch_pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.fetch_pr.outputs.head_sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          bash formal_math/verification/ci/run_pr_gate.sh \
+            --phase preflight --mode pr \
+            --repo . --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$HEAD_REF" \
+            --output-file "$GITHUB_OUTPUT"
+
+      - name: Cache elan toolchain
+        id: elan_cache
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.elan
+          key: fm-elan-${{ env.ELAN_VERSION }}-${{ hashFiles('formal_math/lean-toolchain') }}
+
+      - name: Install elan (pinned release, sha256 checked)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          CACHE_HIT: ${{ steps.elan_cache.outputs.cache-hit }}
+        run: bash formal_math/verification/ci/install_elan.sh
+
+      - name: Install bubblewrap and probe offline sandbox
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        run: bash formal_math/verification/ci/sandbox_setup.sh
+
+      - name: Cache Mathlib build artifacts
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/mathlib
+          key: fm-mathlib-${{ hashFiles('formal_math/lake-manifest.json', 'formal_math/lean-toolchain') }}
+
+      - name: Prepare read-only packages from main configs (last networked step)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          BASE_SHA: ${{ steps.fetch_pr.outputs.base_sha }}
+        run: |
+          bash formal_math/verification/ci/prepare_packages.sh \
+            --repo . --base "$BASE_SHA" --out "$RUNNER_TEMP/fm-packages"
+
+      - name: Run blocking gates (run.py + lake check + lake comparator, offline)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          BASE_SHA: ${{ steps.fetch_pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.fetch_pr.outputs.head_sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          bash formal_math/verification/ci/run_pr_gate.sh \
+            --phase heavy --mode pr \
+            --repo . --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$HEAD_REF" \
+            --packages "$RUNNER_TEMP/fm-packages" \
+            --log-dir "$RUNNER_TEMP/fm-logs" \
+            --timeout-sec 4500
+
+      - name: Upload gate logs (non-blocking)
+        if: ${{ always() && steps.preflight.outputs.need_heavy == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: formal-math-pr-logs-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/fm-logs/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  formal-math-trusted-release:
+    # 独立于 PR 标签与写码代理令牌的受信改动放行通道：
+    #   仅由 workflow_dispatch + 受保护环境 formal-math-trusted-change（人工审批）进入，
+    #   且强制绑定 pr_number 与 40 位 pr_head_sha。
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.trusted_change_approved }}
+    environment: formal-math-trusted-change
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout trusted main (no PR code, no persisted credentials)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate pinned PR and fetch head object only
+        id: fetch_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          WANT_SHA: ${{ inputs.pr_head_sha }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::trusted_change_approved 必须提供正整数 pr_number"
+            exit 1
+          fi
+          if [[ ! "$WANT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::trusted_change_approved 必须提供 40 位小写十六进制 pr_head_sha"
+            exit 1
+          fi
+          pr_json=$(gh api "repos/${REPO_FULL}/pulls/${PR_NUMBER}")
+          head_ref=$(jq -r '.head.ref' <<<"$pr_json")
+          head_sha=$(jq -r '.head.sha' <<<"$pr_json")
+          base_ref=$(jq -r '.base.ref' <<<"$pr_json")
+          head_repo=$(jq -r '.head.repo.full_name' <<<"$pr_json")
+          if [ "$head_repo" != "$REPO_FULL" ] || [ "$base_ref" != "main" ]; then
+            echo "::error::PR #${PR_NUMBER} 必须来自本仓且目标为 main（repo=$head_repo base=$base_ref）"
+            exit 1
+          fi
+          if [ "$head_sha" != "$WANT_SHA" ]; then
+            echo "::error::PR #${PR_NUMBER} 当前 head.sha ($head_sha) 与放行绑定的 pr_head_sha ($WANT_SHA) 不一致"
+            exit 1
+          fi
+          if [[ ! "$head_ref" =~ ^infra/[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::放行通道只允许合法的 infra/* 分支名（实际 $head_ref）"
+            exit 1
+          fi
+          base_sha=$(git rev-parse --verify "HEAD^{commit}")
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --no-recurse-submodules origin "refs/pull/${PR_NUMBER}/head:refs/fm-pr/head"
+          unset auth GH_TOKEN
+          fetched=$(git rev-parse --verify "refs/fm-pr/head^{commit}")
+          if [ "$fetched" != "$WANT_SHA" ]; then
+            echo "::error::拉取到的 PR 提交 ($fetched) 与 pr_head_sha ($WANT_SHA) 不一致"
+            exit 1
+          fi
+          printf 'base_sha=%s\nhead_sha=%s\nhead_ref=%s\n' "$base_sha" "$fetched" "$head_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Static preflight (with --trusted-change-approved)
+        id: preflight
+        env:
+          BASE_SHA: ${{ steps.fetch_pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.fetch_pr.outputs.head_sha }}
+          HEAD_REF: ${{ steps.fetch_pr.outputs.head_ref }}
+        run: |
+          bash formal_math/verification/ci/run_pr_gate.sh \
+            --phase preflight --mode pr --trusted-change-approved \
+            --repo . --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$HEAD_REF" \
+            --output-file "$GITHUB_OUTPUT"
+
+      - name: Cache elan toolchain
+        id: elan_cache
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.elan
+          key: fm-elan-${{ env.ELAN_VERSION }}-${{ hashFiles('formal_math/lean-toolchain') }}
+
+      - name: Install elan (pinned release, sha256 checked)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          CACHE_HIT: ${{ steps.elan_cache.outputs.cache-hit }}
+        run: bash formal_math/verification/ci/install_elan.sh
+
+      - name: Install bubblewrap and probe offline sandbox
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        run: bash formal_math/verification/ci/sandbox_setup.sh
+
+      - name: Cache Mathlib build artifacts
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/mathlib
+          key: fm-mathlib-${{ hashFiles('formal_math/lake-manifest.json', 'formal_math/lean-toolchain') }}
+
+      - name: Prepare read-only packages from main configs (last networked step)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          BASE_SHA: ${{ steps.fetch_pr.outputs.base_sha }}
+        run: |
+          bash formal_math/verification/ci/prepare_packages.sh \
+            --repo . --base "$BASE_SHA" --out "$RUNNER_TEMP/fm-packages"
+
+      - name: Run blocking gates with trusted approval (offline)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          BASE_SHA: ${{ steps.fetch_pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.fetch_pr.outputs.head_sha }}
+          HEAD_REF: ${{ steps.fetch_pr.outputs.head_ref }}
+        run: |
+          bash formal_math/verification/ci/run_pr_gate.sh \
+            --phase heavy --mode pr --trusted-change-approved \
+            --repo . --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$HEAD_REF" \
+            --packages "$RUNNER_TEMP/fm-packages" \
+            --log-dir "$RUNNER_TEMP/fm-logs" \
+            --timeout-sec 4500
+
+      - name: Upload gate logs (non-blocking)
+        if: ${{ always() && steps.preflight.outputs.need_heavy == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: formal-math-trusted-release-logs-${{ inputs.pr_number }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/fm-logs/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  formal-math-main:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.trusted_change_approved && !inputs.paranoid) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Validate dispatch inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          if [ -n "$PR_NUMBER" ]; then
+            echo "::error::主干门不接受 pr_number；如需放行 infra PR，请同时勾选 trusted_change_approved 并提供 pr_head_sha"
+            exit 1
+          fi
+
+      - name: Checkout main (no persisted credentials)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Main preflight and fast-path check
+        id: preflight
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse --verify "HEAD^{commit}")
+          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
+          extra=()
+          if [ "$EVENT_NAME" = "push" ] && [ -n "$BEFORE_SHA" ]; then
+            extra=(--before "$BEFORE_SHA")
+          fi
+          # main 上以 base=head=HEAD、branch=main 运行：precheck.py 仍无条件校验整树形状，不跳过门禁。
+          bash formal_math/verification/ci/run_pr_gate.sh \
+            --phase preflight --mode main "${extra[@]}" \
+            --repo . --base "$head_sha" --head "$head_sha" --branch "main" \
+            --output-file "$GITHUB_OUTPUT"
+
+      - name: Cache elan toolchain
+        id: elan_cache
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.elan
+          key: fm-elan-${{ env.ELAN_VERSION }}-${{ hashFiles('formal_math/lean-toolchain') }}
+
+      - name: Install elan (pinned release, sha256 checked)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          CACHE_HIT: ${{ steps.elan_cache.outputs.cache-hit }}
+        run: bash formal_math/verification/ci/install_elan.sh
+
+      - name: Install bubblewrap and probe offline sandbox
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        run: bash formal_math/verification/ci/sandbox_setup.sh
+
+      - name: Cache Mathlib build artifacts
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/mathlib
+          key: fm-mathlib-${{ hashFiles('formal_math/lake-manifest.json', 'formal_math/lean-toolchain') }}
+
+      - name: Prepare read-only packages from main configs (last networked step)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          HEAD_SHA: ${{ steps.preflight.outputs.head_sha }}
+        run: |
+          bash formal_math/verification/ci/prepare_packages.sh \
+            --repo . --base "$HEAD_SHA" --out "$RUNNER_TEMP/fm-packages"
+
+      - name: Run main blocking gates (run.py + lake check + lake comparator, offline)
+        if: ${{ steps.preflight.outputs.need_heavy == 'true' }}
+        env:
+          HEAD_SHA: ${{ steps.preflight.outputs.head_sha }}
+        run: |
+          bash formal_math/verification/ci/run_pr_gate.sh \
+            --phase heavy --mode main \
+            --repo . --base "$HEAD_SHA" --head "$HEAD_SHA" --branch "main" \
+            --packages "$RUNNER_TEMP/fm-packages" \
+            --log-dir "$RUNNER_TEMP/fm-logs" \
+            --timeout-sec 5400
+
+      - name: Upload gate logs (non-blocking)
+        if: ${{ always() && steps.preflight.outputs.need_heavy == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: formal-math-main-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/fm-logs/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  formal-math-paranoid:
+    # 手动触发且勾选 paranoid 时才跑。SafeCode 实测 nanoda 在 10 GiB 上限处被 OOM 杀掉，
+    # GitHub 托管 ubuntu-24.04（16 GiB 内存）能否跑完全部五个外部检查器待实测，因此不阻断。
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.paranoid }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    continue-on-error: true
+    steps:
+      - name: Checkout main (no persisted credentials)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Cache elan toolchain
+        id: elan_cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.elan
+          key: fm-elan-${{ env.ELAN_VERSION }}-${{ hashFiles('formal_math/lean-toolchain') }}
+
+      - name: Install elan (pinned release, sha256 checked)
+        env:
+          CACHE_HIT: ${{ steps.elan_cache.outputs.cache-hit }}
+        run: bash formal_math/verification/ci/install_elan.sh
+
+      - name: Install bubblewrap and probe offline sandbox
+        run: bash formal_math/verification/ci/sandbox_setup.sh
+
+      - name: Cache Mathlib build artifacts
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/mathlib
+          key: fm-mathlib-${{ hashFiles('formal_math/lake-manifest.json', 'formal_math/lean-toolchain') }}
+
+      - name: Prepare read-only packages from main configs (last networked step)
+        run: |
+          head_sha=$(git rev-parse --verify "HEAD^{commit}")
+          bash formal_math/verification/ci/prepare_packages.sh \
+            --repo . --base "$head_sha" --out "$RUNNER_TEMP/fm-packages"
+
+      - name: Run lake check --paranoid (offline, read-only packages)
+        run: |
+          head_sha=$(git rev-parse --verify "HEAD^{commit}")
+          bash formal_math/verification/ci/run_lake_check.sh \
+            --repo . --base "$head_sha" --head "$head_sha" \
+            --packages "$RUNNER_TEMP/fm-packages" \
+            --paranoid --timeout-sec 18000 \
+            --log "$RUNNER_TEMP/fm-paranoid.log"
+          df -h / || true
+
+      - name: Upload paranoid log
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: formal-math-paranoid-log-${{ github.run_id }}
+          path: ${{ runner.temp }}/fm-paranoid.log
+          if-no-files-found: ignore
+          retention-days: 30

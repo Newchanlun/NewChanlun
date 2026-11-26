@@ -1,0 +1,7 @@
+/-! 锁定定义的替身：真实包里对应 `Chan/Defs`，Challenge 与解答都从这里导入。 -/
+
+namespace Sample
+
+def double (n : Nat) : Nat := n + n
+
+end Sample
