@@ -20,7 +20,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
     --workdir <工作目录> --packages <依赖目录>
 ```
 
-- **必须带 `-I`**（隔离模式）。不带时脚本所在目录排在模块搜索路径最前面，同目录的 `json.py`、`re.py` 之类会顶替标准库。`run.py` 开头只用内建模块：`sys` 查 `sys.flags.isolated`；不满足时 `import posix`（`sys` 与 `posix` 都在 `sys.builtin_module_names` 里，由内建导入器在路径查找之前加载，路径上的同名文件顶替不了；`os` 不是内建模块，这段不用它），用 `posix.write` 尽力向两路各写一行（写不出就跳过，异常一律吞掉），然后 `posix._exit(2)`：不走异常处理与收尾钩子，解释器不会再为打印回溯或刷新流去导入任何模块。本机 Python 3.14.4 实测（自测 S24）：两路正常、标准输出关闭、标准错误关闭、两路都关闭、标准输出指向 `/dev/full`、标准错误指向 `/dev/full` 六种状态都退 2，同目录放的 `re`、`json`、`os`、`sitecustomize`、`traceback`、`posix`、`sys`、`signal`、`stat`、`time` 十个冒名模块都没有被执行。`-I` 管不到的：不带 `-I` 时若 `PYTHONPATH` 指向别人能写的目录，解释器在执行 `run.py` 第一行之前就会导入那里的 `sitecustomize`；`python3 -I -m run` 不受支持，只能按脚本路径调用。这两条交给 #2315 的工作流（调用一律 `python3 -I <路径>/run.py`，不设 `PYTHONPATH`）。
+- **必须带 `-I`**（隔离模式）。不带时脚本所在目录排在模块搜索路径最前面，同目录的 `json.py`、`re.py` 之类会顶替标准库。`run.py` 开头只用内建模块：`sys` 查 `sys.flags.isolated`；不满足时 `import posix`（`sys` 与 `posix` 都在 `sys.builtin_module_names` 里，由内建导入器在路径查找之前加载，路径上的同名文件顶替不了；`os` 不是内建模块，这段不用它），用 `posix.write` 尽力向两路各写一行（写不出就跳过，异常一律吞掉），然后 `posix._exit(2)`：不走异常处理与收尾钩子，解释器不会再为打印回溯或刷新流去导入任何模块。本机 Python 3.14.4 实测（自测 S24）：两路正常、标准输出关闭、标准错误关闭、两路都关闭、标准输出指向 `/dev/full`、标准错误指向 `/dev/full` 六种状态都退 2，同目录放的 `re`、`json`、`os`、`sitecustomize`、`traceback`、`posix`、`sys`、`signal`、`stat`、`time` 十个冒名模块都没有被执行。`-I` 管不到的：不带 `-I` 时若 `PYTHONPATH` 指向别人能写的目录，解释器在执行 `run.py` 第一行之前就会导入那里的 `sitecustomize`；`python3 -I -m run` 不受支持；`python3 -c "exec(open('run.py').read())"` 之类以 `-c` 加 `exec` 运行也不受支持——不带 `-I` 时当前目录在搜索路径上，解释器在执行 `exec` 的内容之前就会导入当前目录里的冒名模块（本机 Python 3.14.4 实测：冒名目录里的 `linecache.py`、`re.py` 被执行），`run.py` 的隔离检查根本来不及运行。只能按脚本路径调用。这几条交给 #2315 的工作流（调用一律 `python3 -I <路径>/run.py`，不设 `PYTHONPATH`）。
 - 参数自己解析，不用 `argparse`：选项只认全名，每个最多一次，取值不得为空或以 `-` 开头；`--x=y`、缩写、未知开关、缺项都退 2。没有任何参数组合能在没做完整判定时退 0：`--until <n>`（n<7）跑完前 n 步且全绿时退 2（`FM RESULT PARTIAL`），遇红仍退 1。
 - `--workdir`：调用方给，必须不存在或是空目录，且与仓库检出目录、git 目录、依赖目录互不包含。运行脚本不删除它。
 - `--packages`：依赖目录（Mathlib 等，按基线 `lake-manifest.json` 的包名逐个取 `<依赖目录>/<包名>`）。由调用方准备好；运行脚本不联网、不下载。SafeCode 上是 `/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages`。
@@ -52,7 +52,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 - 只用 `ls-tree -r -z <提交>:<路径>` 加 `cat-file --batch` 逐个取 blob 原始字节。不用 `git archive`、检出或 `git worktree`，所以被审树里的 `.gitattributes`（`export-ignore`、`filter`、`eol`）与仓库配置的过滤器都不起作用。
 - 受信目录里每条路径段须合 `[A-Za-z0-9_][A-Za-z0-9_.-]*` 且是 100644 普通文件，否则退 2。内容文件的每个路径段（去掉 `.lean`）须合模块名文法 `[A-Za-z][A-Za-z0-9_]*`。
 - 写文件用 `O_CREAT|O_EXCL|O_NOFOLLOW`，模式固定 0644，目录 0755（建好后再 `chmod`，不受 umask 影响）；已存在或遇到符号链接即失败。
-- 基线清单 `lake-manifest.json` 在这一步从 git 对象严格解析，定下第 7 步搜索路径用的包名，并核对依赖目录里每个包都在（缺了退 2）；之后各步不再读被审工作区里的任何文件来决定输入。
+- 基线清单 `lake-manifest.json` 在这一步从 git 对象严格解析，定下第 7 步搜索路径用的包名，并核对依赖目录里每个包都在（缺了退 2）；之后各步决定输入时只再读被审工作区里一个文件：第 3 步读 `lean-toolchain` 来核对工具链，它是取料时写出的基线那份，此时被审代码还没有运行过。第 6 步之后不再读被审工作区里的任何文件来决定输入。
 - **与预检的交接**：模式是文件的条目必须指向 blob。预检（`d660582472` 起）自己核对这一点，不是则 `TREE_FORM` 判红；取料仍保留同一道检查作纵深防御：用 `cat-file --batch` 读每个对象时核对头行类型必须是 `blob`，不是就 `GIT` 故障退 2，这一步发生在建任何目录之前，被审工作区与受信目录都不会写出，更不会把它当空文件写出或跳过。自测 S16 两例（对象实为树、实为提交）各跑两次：经预检在第 1 步 `TREE_FORM`；绕过预检从第 2 步起跑则取料退 2。
 - 第 1 步只接受两种预检输出：退 0 且恰好一行绿行；退 1 且每行都是 `PRECHECK RED <码> <对象> <说明>`。红码按 `[A-Z_]+` 原样转出，预检新增的码（`LAKE_FILE`、`TREE_FORM` 等）不需要改运行脚本；其它任何输出（未知格式、退 2 的 `BASE_FORM`、`NOT_ANCESTOR` 等，此时预检已写到标准输出的红行不转出）一律退 2。
 - 被审提交里 `formal_math/` 下的其它文件（README、台账等）与它自己的三个构建配置文件都不进被审工作区。锁文件由运行脚本在第 7 步直接从被审提交的 git 对象读。
@@ -71,7 +71,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 
 ### 产物形状表（第 6 步，`artifact_reds()`）
 
-被审构建在沙箱里只能写 `.lake`。构建结束后运行脚本从 `.lake` 起递归遍历每一个目录项：用 `lstat`，不跟随符号链接；每个目录都必须列得出，列不出不跳过而是判红。形状表按 Lake 4.36.0 实际放的东西列（真实仓库与自测构建实测）：
+被审构建在**宿主机上**只能写到 `.lake`。沙箱里 `/tmp`（含 `HOME=/tmp/home`）、`/dev`、`/dev/shm`、`/var`、`/run`、`/home`、`/root` 也可写，但它们都是 `bwrap` 建的 tmpfs，写进去的东西随沙箱消失、落不到宿主机。构建结束后运行脚本从 `.lake` 起递归遍历每一个目录项：用 `lstat`，不跟随符号链接；每个目录都必须列得出，列不出不跳过而是判红。形状表按 Lake 4.36.0 实际放的东西列（真实仓库与自测构建实测）：
 
 | 位置 | 允许的目录项 |
 |---|---|
@@ -102,8 +102,11 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | 1 | 某一步判红。该步的红行之后是 `FM STEP <n> <名字> RED` 与 `FM RESULT RED`，后面的步骤不跑也不报 |
 | 2 | 无法判定，包括参数、前置条件、工具缺失、构建审计程序失败、沙箱探针失败、审计程序输出无法解读或与 git 树对不上、超时、意外异常、`--until` 提前停下。诊断行 `FM FAULT <步骤> <码> <对象> <说明>` 写标准错误 |
 
-- **行协议**。标准输出只有 `FM MODE`、`FM RUNNER`、`FM RED <步骤> <规则码> <路径或对象> <说明>`、`FM STEP <n> <名字> <GREEN|RED|FAULT> <秒> <备注>`、`FM RESULT <GREEN|RED|FAULT|PARTIAL> …` 五种行；标准错误只有 `FM FAULT <步骤> <码> <对象> <说明>` 与 `FM LOG <来源> <行>` 两种行。**结果行的契约**：标准输出至多一行结果行；有绿结果行则退出码为 0；退出码为 0 则恰有一行绿结果行且它是标准输出最后一行。实现：最终状态与退出码先定下来，结果行整次运行只尝试写一次，用一次 `os.write` 写整行（不超过 `PIPE_BUF`，管道上要么整行写出要么一字未写）；写不出就把退出码改成 2，不补写第二行。绿的结论另要求前面每一行都写出去了：前面有任何一行没写出，就不写绿而写 `FM RESULT FAULT output OUTPUT`、退 2（自测 S25）。被 SIGINT、SIGTERM 打断时，处理函数杀掉正在运行的子进程组，尽力写一行 `FM FAULT` 与 `FM RESULT FAULT <步骤> SIGNAL`，以 2 退出（自测 S26）；被别的信号（如 SIGKILL）终止，或连这一行都写不出时，可能没有结果行，退出码非零。**调用方以退出码为准。**
-- **一条转义规则，一个函数**（`safe()`）。写进标准输出或标准错误的每一个字段都先经它，不分来源：可见 ASCII（反斜杠除外）与 Unicode 字母、数字、标点、符号原样保留；空格只在最后一栏（说明、日志行）保留；其余一律写成可见形式——ASCII 控制字符、非 UTF-8 字节写 `\xNN`，换行以外的其它码点（行与段分隔符、方向控制符、零宽字符、组合符、孤立代理项、未分配码点）写 `\uNNNN`；每个字段最多 400 个字符，超出截断并注明。`emit()` 是唯一写两路输出的函数，它不抛异常。
+- **行协议**。标准输出只有 `FM MODE`、`FM RUNNER`、`FM RED <步骤> <规则码> <路径或对象> <说明>`、`FM STEP <n> <名字> <GREEN|RED> <秒> <备注>` 与 `FM STEP <n> <名字> FAULT <秒>`（`FAULT` 的步骤行没有备注栏）、`FM RESULT <GREEN|RED|FAULT|PARTIAL> …` 五种行；标准错误只有 `FM FAULT <步骤> <码> <对象> <说明>` 与 `FM LOG <来源> <行>` 两种行。**结果行的契约**：标准输出至多一行结果行；**退出码为 0 则恰有一行绿结果行且它是标准输出最后一行**。反过来不成立：出现绿结果行不保证退出码为 0——结果行写出之后、进程退出之前，进程仍可能被信号终止（见下）。**调用方一律以退出码（退出状态）为准，退出码不是 0 时不得因为看到绿结果行而当作通过。**实现：最终状态与退出码先定下来，结果行整次运行只尝试写一次，用一次 `os.write` 写整行（不超过 `PIPE_BUF`，管道上要么整行写出要么一字未写）；写不出就把退出码改成 2，不补写第二行。绿的结论另要求前面每一行都写出去了：前面有任何一行没写出，就不写绿而写 `FM RESULT FAULT output OUTPUT`、退 2（自测 S25）。被 SIGINT、SIGTERM 打断时，处理函数杀掉正在运行的子进程组，先写一行 `FM FAULT` 到标准错误、再写 `FM RESULT FAULT <步骤> SIGNAL`，以 2 退出（自测 S26）。以下情形可能没有结果行或没有 0、1、2 这样的退出码：
+  - 被别的信号（如 SIGKILL）终止，或结果行写不出：可能没有结果行，退出码非零。
+  - 绿结果行写出之后、进程退完之前到达的 SIGINT、SIGTERM：这时主路径已经返回、解释器在收尾，处理函数不再执行（独审 r3 实测：标准错误里没有 `FM FAULT`，进程以「被 SIGTERM 终止」的状态结束），退出状态既不是 0 也不是 2，绿结果行已留在标准输出。按上面的契约，这不算通过。
+  - **两路输出都是阻塞写。** 标准错误是满的、没有人读的管道时，运行脚本会卡在写标准错误上；处理函数也是先写标准错误再写结果行，所以这时发信号同样卡住：既没有结果行，进程也不退出、不产生退出码。**调用方必须持续读取标准错误（或把它重定向到文件），否则运行可能挂起而不退出；调用方应当自己设总超时，超时按失败处理。**
+- **一条转义规则，一个函数**（`safe()`）。写进标准输出或标准错误的每一个字段都先经它，不分来源：可见 ASCII（反斜杠除外）与 Unicode 字母、数字、标点、符号原样保留；空格只在最后一栏（说明、日志行）保留；其余一律写成可见形式——ASCII 控制字符、非 UTF-8 字节写 `\xNN`，换行以外的其它码点（行与段分隔符、方向控制符、零宽字符、组合符、孤立代理项、未分配码点）写 `\uNNNN`，大于 U+FFFF 的写 `\UNNNNNNNN`；每个字段最多 400 个字符，超出截断并注明。`emit()` 是唯一写两路输出的函数，它不抛异常。
 - **子进程的输出不透传**。git、预检、`lake`（构建审计程序与第 6 步构建）、审计程序的标准错误（构建时连同标准输出）都先捕获，再逐行写成 `FM LOG <来源> <行>`。被审代码在构建期打印的任何文字（包括形似 `FM RESULT GREEN` 的行）因此只能以转义后的日志行出现在标准错误里（自测 E10）。预检红行的对象栏它自己已转义过，运行脚本先还原成原字节再经 `safe()`，不会二次转义。
 - **进入输出的外来片段**（逐个有自测）：模块路径（E11）；导入名（E1）；声明名与公理名（E2）；锁文件的键与值（E3–E7）；分支名（E8、E9）；提交名参数（E9）；预检转出的红行（E8、E11a、S2）；`lake` 构建输出（E10、S17）；审计程序的标准错误（S17）；异常消息与调用方路径参数（E13）；审计程序发现行里的说明文字（E1、E2，其中含被审名字）。
 - **JSON 一律严格解析**（`strict_json()`）：字节须是合法 UTF-8；重复键、`NaN`/`Infinity`、任何字符串（含键）里的孤立代理项都拒收。锁文件与基线清单不合格退 2（`INPUT`），审计程序输出不合格退 2（`AUDITOR_OUTPUT`）。审计程序用 Lean 的 `Json.compress` 输出，字符串里的换行与控制字符本来就转义成 `\n`、`\u00XX`，名字里的换行打不破它的逐行格式；运行脚本按 `\n` 切行后逐行严格解析，任何一行不合格整次退 2。
@@ -172,6 +175,9 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 6. **`HEADER_PARSE` 判红而非无法判定**，见搬家差异。
 7. **`formal_math/.gitignore`**：按任务并入仓库根 `.gitignore` 并删除。预检返修（`5b6cc3ea16`）后它是 `infra` 的受信文件，获放行可删；仓库根 `.gitignore` 在受管范围以外，不再判红。
 8. **门禁目录里不能有 Lake 配置名的文件**（预检 `LAKE_FILE`）：R5-B1 自测夹具里的 `lakefile.toml` 存为 `selftest-cases/r5-b1/hijack-lakefile.toml`，自测造提交时改回原名放到被审树里。
+9. **内容文件须是合法 UTF-8**（`CONTENT_ENCODING`）：第 2 步取料时判红。此前非 UTF-8 的内容文件让审计程序读文件头时抛异常、整次退 2（独审 r1 建议 4）；新入口把它当被审提交的问题，且不改审计程序（`auditor/` 的 Lean 已过审）。
+10. **必须以 `python3 -I` 运行**（`NOT_ISOLATED`）：备忘没有提调用方式。运行脚本取自受信提交，但同目录或搜索路径上的冒名模块能在它的任何检查之前被执行，隔离模式是这条前提的唯一保障，见「调用」。
+11. **`SIGNAL` 归类**：沙箱里由运行脚本直接启动的那个进程被信号终止时归入无法判定退 2，`lean` 工作进程被杀仍表现为构建失败退 1（见「沙箱布局」）；运行脚本自己收到 SIGINT、SIGTERM 时写 `FM RESULT FAULT … SIGNAL` 退 2（见「输出与退出码」）。备忘 3.7 只列了「工具缺失、崩溃、超时」等无法判定的情形。
 
 ## 自测
 
@@ -253,7 +259,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 
 - 归第四片的 76 个必红夹具里，24 个现在整次运行为绿（源码选项写法、`#eval`、`#guard_msgs` 吞告警、`rfl'` 等）；另有 `r4-p3a-eval-percent` 两个现在只因夹具在 `formal_math` 顶层放了模拟宿主机文件 `host_secret_probe.txt` 而被预检判 `TOP_LEVEL`，去掉那个文件仍是绿，所以按漏洞计是 26 个。其余由预检形状、构建（`--wfail`）、头部或环境层兜住。在第四片合入之前这 26 个是已知漏洞，另加「`Chan/Defs` 须用 `@[expose] public section`」这条未搬的规则（见「未搬的源码层规则」）。
 - 预检 `d660582472` 起形状规则无条件执行，语料里 22 个夹具因此改由第 1 步 `TOP_LEVEL` 判红：20 个 `r4-p*` 夹具在 `formal_math` 顶层放了 `host_secret_probe.txt`，`g15/bridge` 放了顶层 `Bridge.lean`，`g15/r2-g6-bridge-subdir` 放了顶层 `Helper/` 目录。后两个归属改为预检，前 20 个归属仍是第四片。
-- 13 个环境层夹具在第 7 步判出旧期望的码；另 3 个（`private-proof`、`r4-p7a-deriving-spoof`、`r3-a1f/a1g-environment`）整次运行先在构建或头部一步红，它们的环境层码由其它夹具覆盖（`ENV_SORRY` 由 `r4-p5b-guard-msgs-swallow` 覆盖）。九个环境层红码 `ENV_AXIOM`、`ENV_AXIOM_DEP`、`ENV_SORRY`、`ENV_META`、`ENV_EXTERN`、`ENV_UNSAFE`、`ENV_PARTIAL`、`ENV_IMPLEMENTED_BY`、`EXPOSE_SECTION` 都至少有一个夹具在新入口上判出。
+- 12 个环境层夹具在第 7 步判出旧期望的码；另 4 个（`private-proof`、`r4-p7a-deriving-spoof`、`r3-a1f/a1g-environment`）整次运行先在构建或头部一步红，它们的环境层码由其它夹具覆盖（`ENV_SORRY` 由 `r4-p5b-guard-msgs-swallow` 覆盖）。九个环境层红码 `ENV_AXIOM`、`ENV_AXIOM_DEP`、`ENV_SORRY`、`ENV_META`、`ENV_EXTERN`、`ENV_UNSAFE`、`ENV_PARTIAL`、`ENV_IMPLEMENTED_BY`、`EXPOSE_SECTION` 都至少有一个夹具在新入口上判出。
 - 夹具本身不带锁文件、却有 `Chan/Defs` 等锁定目录里的声明时，全跑会在声明锁一步判 `LOCK_UNLISTED`；含派生的阴性夹具因为没有派生证书判 `ENV_PARTIAL`（已接受）。表里逐行写明。
 - 删除的 16 个夹具目录（46 个文件）：`must_green/g1/pins`，`must_red/g1/` 的 `r4-manifest-path-source`、`r4-manifest-url`、`revision`、`toolchain`，`must_red/g2/` 的 `lib-option`、`missing-option`、`r2-a5-build-config`、`r2-a6-build-config`、`r2-a6b-build-config`、`r2-a6c-build-config`、`r2-a6d-build-config`、`r4-p6a-lakefile-invalid-toml`、`r4-p6b-lakefile-more-lean-args`、`r4-p6c-lakefile-package-options`、`unimported-child`。它们服务的 `lakefile` 逐键白名单与门 1 钉选已由「构建配置与基线同一对象」取代；这些形状由预检自测覆盖。`fixtures.tsv` 保留这 16 行，期望列为 `-`。
 - `must_green/g3/attributes-whitelist` 自身有告警（`@[no_expose]` has no effect），`--wfail` 判红；旧自测只跑门 3，不构建。
@@ -264,4 +270,4 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 - 第四片：源码形状门；派生证书的产生一侧（写到受信目录，经 `step_env(ctx, certificate=…)` 交给审计程序）；删除 `run_gates.py`、`selftest.py`、`SourceGates.lean`、`Perimeter.lean`、`Inventory.lean`、`inventory.py`、`make_lists.py`、两份名单、`pins.json` 与旧夹具里只服务已删机制的部分。
 - 审阅报告（S、7a、7b、8a、8b、9、10）**没有搬**：旧入口 `run_gates.py --report` 随本片停用，报告暂时不可用。它不阻断，由第四或第五片决定搬去哪里。
 - 真实被审包的 `lakefile.toml` 只有 `Chan`、`ChanTest` 两个库：`ChanChallenge/`、`ChanDyn/`、`ChanExplore/` 一旦有文件，第 6 步会因 `NO_ARTIFACT` 判红，需要 `infra` 先补库。
-- #2315：由主干版本工作流触发并设为必需检查；CI 上依赖目录的准备与只读挂载。
+- #2315：由主干版本工作流触发并设为必需检查；CI 上依赖目录的准备与只读挂载；调用一律 `python3 -I <路径>/run.py`；**持续读取运行脚本的标准错误（或重定向到文件），并给整次运行设总超时、超时按失败处理**（两路输出都是阻塞写，标准错误没人读时运行可能挂起而不退出，见「输出与退出码」）；以退出码为准，不以看到的结果行为准。
