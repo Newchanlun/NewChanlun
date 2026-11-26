@@ -7915,10 +7915,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..1cdb67c 100644
+index e69de29..d6ace07 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,13072 @@
+@@ -0,0 +1,13356 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7971,6 +7971,7 @@ index e69de29..1cdb67c 100644
 +	ReviewTurnTimeout     = ReviewTurnLifetime
 +	ReviewBodyReadTimeout = 30 * time.Second
 +)
++
 +const maxOutboundModelBody = 32 << 20
 +const maxReviewResponseIDs = 512
 +const maxReviewReceiptBytes = 65536
@@ -8059,33 +8060,33 @@ index e69de29..1cdb67c 100644
 +}
 +
 +type reviewEntry struct {
-+	mu                ctxMutex
-+	directory         string
-+	launch            string
-+	session           string
-+	route             string
-+	started           int64
-+	finished          int64
-+	sealedAt          int64
-+	requests          int
-+	publishedTurns    []reviewPublishedTurn
-+	responseIDSHAs    []string
-+	lastResponseIDSHA string
-+	lastOutputSHA     string
-+	sealed            bool
-+	sealSynced        bool
-+	sealedReceiptSHA  string
-+	sealedRootDev     uint64
-+	sealedRootIno     uint64
-+	sealedDirDev      uint64
-+	sealedDirIno      uint64
-+	hasSealedDirID    bool
-+	boundRootDev      uint64
-+	boundRootIno      uint64
-+	boundDirDev       uint64
-+	boundDirIno       uint64
-+	hasBoundDirID     bool
-+	boundDirFD        *os.File
++	mu                    ctxMutex
++	directory             string
++	launch                string
++	session               string
++	route                 string
++	started               int64
++	finished              int64
++	sealedAt              int64
++	requests              int
++	publishedTurns        []reviewPublishedTurn
++	responseIDSHAs        []string
++	lastResponseIDSHA     string
++	lastOutputSHA         string
++	sealed                bool
++	sealSynced            bool
++	sealedReceiptSHA      string
++	sealedRootDev         uint64
++	sealedRootIno         uint64
++	sealedDirDev          uint64
++	sealedDirIno          uint64
++	hasSealedDirID        bool
++	boundRootDev          uint64
++	boundRootIno          uint64
++	boundDirDev           uint64
++	boundDirIno           uint64
++	hasBoundDirID         bool
++	boundDirFD            *os.File
 +	lastPersistedSHA      string
 +	markerOnlyInvalidated bool
 +	markerOnlySynced      bool
@@ -8100,12 +8101,15 @@ index e69de29..1cdb67c 100644
 +	sealDecision          atomic.Uint32
 +	failurePersistQueued  bool
 +	failurePersistRunning bool
++	finalizeJobs          []*reviewFinalizeJob
++	finalizeQueued        bool
++	finalizeRunning       bool
 +	reserved              bool
-+	markerPersisted   bool
-+	touched           time.Time
-+	inFlight          int
-+	sealing           bool
-+	sealedFlag        bool
++	markerPersisted       bool
++	touched               time.Time
++	inFlight              int
++	sealing               bool
++	sealedFlag            bool
 +}
 +
 +const (
@@ -8428,6 +8432,18 @@ index e69de29..1cdb67c 100644
 +	deadline  time.Time
 +}
 +
++type cancelFailRecord struct {
++	key          string
++	turnSeq      uint64
++	allowNewSeq  bool
++	needFreshSeq bool
++}
++
++type cancelFailEntryReq struct {
++	turnSeq uint64
++	taint   bool
++}
++
 +var (
 +	reviewMu                      = newCtxMutex()
 +	reviewLedger                  = make(map[string]*reviewEntry)
@@ -8444,15 +8460,21 @@ index e69de29..1cdb67c 100644
 +	maxFinalizeQueue              = 64
 +	failurePersistQueue           []*reviewEntry
 +	failurePersistWorkers         int
-+	finalizeQueue                 []*reviewFinalizeJob
++	finalizeQueue                 []*reviewEntry
++	finalizePendingJobs           int
 +	finalizeWorkers               int
++	cancelFailMu                  sync.Mutex
++	cancelFailPending             = make(map[string]cancelFailRecord)
++	cancelFailEntries             = make(map[*reviewEntry]cancelFailEntryReq)
++	cancelFailOverflow            bool
++	cancelFailRunning             bool
 +	pendingDiskTaintKeys          = make(map[string]*pendingDiskTaint)
 +	diskTaintDroppedRoots         = make(map[string]struct{})
 +	diskTaintQueue                []diskTaintJob
 +	diskTaintWorkers              int
 +	reclaimingKeys                = make(map[string]bool)
-+	pendingReviewLaunches = make(map[string]*pendingReviewState)
-+	pendingReviewTotal    int
++	pendingReviewLaunches         = make(map[string]*pendingReviewState)
++	pendingReviewTotal            int
 +	reviewTurnSeqGen              uint64
 +	taintWriteOverflow            bool
 +	unpersistedFlushCursorTouched time.Time
@@ -8811,6 +8833,197 @@ index e69de29..1cdb67c 100644
 +	return BeginPendingReviewContext(context.Background(), root, launch)
 +}
 +
++func applyCanceledFailureLocked(rec cancelFailRecord) bool {
++	if reclaimingKeys[rec.key] {
++		return false
++	}
++	entry := reviewLedger[rec.key]
++	st := pendingReviewLaunches[rec.key]
++	existed := entry != nil && !entry.sealedFlag && !entry.sealing
++	if !existed && (!rec.allowNewSeq || st == nil) {
++		return false
++	}
++	failSeq := rec.turnSeq
++	if rec.needFreshSeq || failSeq == 0 {
++		reviewTurnSeqGen++
++		if reviewTurnSeqGen > failSeq {
++			failSeq = reviewTurnSeqGen
++		}
++	}
++	if st != nil && failSeq > st.failedTurnSeq {
++		st.failedTurnSeq = failSeq
++	}
++	if existed {
++		enqueueExistingReviewTurnFailureLocked(entry, failSeq, st != nil && st.tainted)
++	}
++	return existed
++}
++
++func enqueueCancelFail(rec cancelFailRecord) {
++	cancelFailMu.Lock()
++	if prev, ok := cancelFailPending[rec.key]; ok {
++		if rec.turnSeq > prev.turnSeq {
++			prev.turnSeq = rec.turnSeq
++		}
++		if rec.allowNewSeq {
++			prev.allowNewSeq = true
++		}
++		if rec.needFreshSeq {
++			prev.needFreshSeq = true
++		}
++		cancelFailPending[rec.key] = prev
++	} else if len(cancelFailPending) < maxPendingReviewLaunches*2 {
++		cancelFailPending[rec.key] = rec
++	} else {
++		cancelFailOverflow = true
++	}
++	if !cancelFailRunning {
++		cancelFailRunning = true
++		go runCancelFailWorker()
++	}
++	cancelFailMu.Unlock()
++}
++
++func runCancelFailWorker() {
++	for {
++		cancelFailMu.Lock()
++		if len(cancelFailPending) == 0 && len(cancelFailEntries) == 0 && !cancelFailOverflow {
++			cancelFailRunning = false
++			cancelFailMu.Unlock()
++			return
++		}
++		overflow := cancelFailOverflow
++		cancelFailOverflow = false
++		var keyBatch []cancelFailRecord
++		if len(cancelFailPending) > 0 {
++			keyBatch = make([]cancelFailRecord, 0, len(cancelFailPending))
++			for k, rec := range cancelFailPending {
++				keyBatch = append(keyBatch, rec)
++				delete(cancelFailPending, k)
++			}
++		}
++		type entryItem struct {
++			entry *reviewEntry
++			req   cancelFailEntryReq
++		}
++		var entryBatch []entryItem
++		if len(cancelFailEntries) > 0 {
++			entryBatch = make([]entryItem, 0, len(cancelFailEntries))
++			for ent, req := range cancelFailEntries {
++				entryBatch = append(entryBatch, entryItem{entry: ent, req: req})
++				delete(cancelFailEntries, ent)
++			}
++		}
++		cancelFailMu.Unlock()
++
++		reviewMu.Lock()
++		for _, rec := range keyBatch {
++			applyCanceledFailureLocked(rec)
++		}
++		for _, item := range entryBatch {
++			enqueueExistingReviewTurnFailureLocked(item.entry, item.req.turnSeq, item.req.taint)
++		}
++		if overflow {
++			for k := range reviewLedger {
++				applyCanceledFailureLocked(cancelFailRecord{key: k, allowNewSeq: true, needFreshSeq: true})
++			}
++			for k := range pendingReviewLaunches {
++				applyCanceledFailureLocked(cancelFailRecord{key: k, allowNewSeq: true, needFreshSeq: true})
++			}
++		}
++		reviewMu.Unlock()
++	}
++}
++
++func recordCanceledFailureNonBlocking(key string, turnSeq uint64, allowNewSeq bool) bool {
++	rec := cancelFailRecord{
++		key:          key,
++		turnSeq:      turnSeq,
++		allowNewSeq:  allowNewSeq,
++		needFreshSeq: turnSeq == 0,
++	}
++	if reviewMu.TryLock() {
++		existed := applyCanceledFailureLocked(rec)
++		reviewMu.Unlock()
++		return existed
++	}
++	enqueueCancelFail(rec)
++	return false
++}
++
++func recordEntryFailureNonBlocking(entry *reviewEntry, turnSeq uint64, taint bool) {
++	if entry == nil {
++		return
++	}
++	if taint {
++		if !entry.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionTainted) &&
++			entry.sealDecision.Load() != sealDecisionTainted {
++			return
++		}
++		entry.pendingTaint.Store(true)
++	} else if entry.sealDecision.Load() == sealDecisionCommitted {
++		return
++	}
++	if turnSeq > entry.pendingFailedTurnSeq.Load() {
++		entry.pendingFailedTurnSeq.Store(turnSeq)
++	}
++	if reviewMu.TryLock() {
++		enqueueExistingReviewTurnFailureLocked(entry, turnSeq, taint)
++		reviewMu.Unlock()
++		return
++	}
++	cancelFailMu.Lock()
++	prev := cancelFailEntries[entry]
++	if turnSeq > prev.turnSeq {
++		prev.turnSeq = turnSeq
++	}
++	if taint {
++		prev.taint = true
++	}
++	cancelFailEntries[entry] = prev
++	if !cancelFailRunning {
++		cancelFailRunning = true
++		go runCancelFailWorker()
++	}
++	cancelFailMu.Unlock()
++}
++
++func deriveStartContext(ctx, turnCtx context.Context, deadline time.Time) (context.Context, context.CancelFunc, bool) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	hasTurnDeadline := false
++	if turnCtx != nil {
++		_, hasTurnDeadline = turnCtx.Deadline()
++	}
++	hasCtxDeadline := false
++	if _, ok := ctx.Deadline(); ok {
++		hasCtxDeadline = true
++	}
++	startCtx := ctx
++	var cancels []func()
++	if turnCtx != nil && turnCtx != ctx {
++		var cancel context.CancelFunc
++		startCtx, cancel = context.WithCancel(startCtx)
++		stop := context.AfterFunc(turnCtx, cancel)
++		cancels = append(cancels, func() {
++			stop()
++			cancel()
++		})
++	}
++	if !deadline.IsZero() {
++		var cancel context.CancelFunc
++		startCtx, cancel = context.WithDeadline(startCtx, deadline)
++		cancels = append(cancels, cancel)
++	}
++	cleanup := func() {
++		for i := len(cancels) - 1; i >= 0; i-- {
++			cancels[i]()
++		}
++	}
++	return startCtx, cleanup, hasTurnDeadline || hasCtxDeadline
++}
++
 +// BeginPendingReviewContext enforces the global 32-slot concurrency cap and records overload
 +// failures purely in memory BEFORE running any filesystem Lstat checks, and bounds the post-admission
 +// symlink check by ctx so stalled receipt storage cannot accumulate unbounded waiters beyond 32.
@@ -8824,37 +9037,11 @@ index e69de29..1cdb67c 100644
 +	}
 +	key := cleanRoot + "\x00" + launch
 +	if ctx.Err() != nil {
-+		reviewMu.Lock()
-+		entry := reviewLedger[key]
-+		st := pendingReviewLaunches[key]
-+		if !reclaimingKeys[key] && (st != nil || (entry != nil && !entry.sealedFlag && !entry.sealing)) {
-+			reviewTurnSeqGen++
-+			turnSeq := reviewTurnSeqGen
-+			if st != nil && turnSeq > st.failedTurnSeq {
-+				st.failedTurnSeq = turnSeq
-+			}
-+			if entry != nil && !entry.sealedFlag && !entry.sealing {
-+				enqueueExistingReviewTurnFailureLocked(entry, turnSeq, st != nil && st.tainted)
-+			}
-+		}
-+		reviewMu.Unlock()
++		recordCanceledFailureNonBlocking(key, 0, true)
 +		return nil, ErrUnavailable
 +	}
 +	if !reviewMu.LockContext(ctx) {
-+		reviewMu.Lock()
-+		entry := reviewLedger[key]
-+		st := pendingReviewLaunches[key]
-+		if !reclaimingKeys[key] && (st != nil || (entry != nil && !entry.sealedFlag && !entry.sealing)) {
-+			reviewTurnSeqGen++
-+			turnSeq := reviewTurnSeqGen
-+			if st != nil && turnSeq > st.failedTurnSeq {
-+				st.failedTurnSeq = turnSeq
-+			}
-+			if entry != nil && !entry.sealedFlag && !entry.sealing {
-+				enqueueExistingReviewTurnFailureLocked(entry, turnSeq, st != nil && st.tainted)
-+			}
-+		}
-+		reviewMu.Unlock()
++		recordCanceledFailureNonBlocking(key, 0, true)
 +		return nil, ErrUnavailable
 +	}
 +	if reclaimingKeys[key] {
@@ -8892,7 +9079,7 @@ index e69de29..1cdb67c 100644
 +			needRootRecoveryCheck = true
 +		}
 +	}
-+	if pendingReviewTotal >= maxPendingReviewInFlight || len(finalizeQueue) >= maxFinalizeQueue {
++	if pendingReviewTotal >= maxPendingReviewInFlight || finalizePendingJobs >= maxFinalizeQueue {
 +		if st != nil && turnSeq > st.failedTurnSeq {
 +			st.failedTurnSeq = turnSeq
 +		}
@@ -8933,9 +9120,11 @@ index e69de29..1cdb67c 100644
 +			failAndReleasePendingSlot(key, turnSeq)
 +			return nil, ErrUnavailable
 +		}
-+		reviewMu.Lock()
++		if !reviewMu.LockContext(ctx) {
++			failAndReleasePendingSlot(key, turnSeq)
++			return nil, ErrUnavailable
++		}
 +		if waitDiskTaint.uncertain {
-+			reviewMu.Unlock()
 +			failAndReleasePendingSlot(key, turnSeq)
 +			return nil, ErrUnavailable
 +		}
@@ -15548,42 +15737,12 @@ index e69de29..1cdb67c 100644
 +	root = cleanRoot
 +	key := root + "\x00" + launch
 +	if ctx.Err() != nil {
-+		reviewMu.Lock()
-+		if entry := reviewLedger[key]; entry != nil && !entry.sealedFlag && !entry.sealing {
-+			st := pendingReviewLaunches[key]
-+			failSeq := turnSeq
-+			if failSeq == 0 {
-+				reviewTurnSeqGen++
-+				failSeq = reviewTurnSeqGen
-+			}
-+			if st != nil && failSeq > st.failedTurnSeq {
-+				st.failedTurnSeq = failSeq
-+			}
-+			enqueueExistingReviewTurnFailureLocked(entry, failSeq, st != nil && st.tainted)
-+			reviewMu.Unlock()
-+			return nil, true, ErrUnavailable
-+		}
-+		reviewMu.Unlock()
-+		return nil, false, ErrUnavailable
++		existed := recordCanceledFailureNonBlocking(key, turnSeq, false)
++		return nil, existed, ErrUnavailable
 +	}
 +	if !reviewMu.LockContext(ctx) {
-+		reviewMu.Lock()
-+		if entry := reviewLedger[key]; entry != nil && !entry.sealedFlag && !entry.sealing {
-+			st := pendingReviewLaunches[key]
-+			failSeq := turnSeq
-+			if failSeq == 0 {
-+				reviewTurnSeqGen++
-+				failSeq = reviewTurnSeqGen
-+			}
-+			if st != nil && failSeq > st.failedTurnSeq {
-+				st.failedTurnSeq = failSeq
-+			}
-+			enqueueExistingReviewTurnFailureLocked(entry, failSeq, st != nil && st.tainted)
-+			reviewMu.Unlock()
-+			return nil, true, ErrUnavailable
-+		}
-+		reviewMu.Unlock()
-+		return nil, false, ErrUnavailable
++		existed := recordCanceledFailureNonBlocking(key, turnSeq, false)
++		return nil, existed, ErrUnavailable
 +	}
 +	for {
 +		if reclaimingKeys[key] {
@@ -15643,7 +15802,9 @@ index e69de29..1cdb67c 100644
 +		if !rootDropDrained || !checkDiskTaintRootHealthyContext(ctx, root) {
 +			return nil, false, ErrUnavailable
 +		}
-+		reviewMu.Lock()
++		if !reviewMu.LockContext(ctx) {
++			return nil, false, ErrUnavailable
++		}
 +		if len(pendingDiskTaintKeys) == 0 && diskTaintWorkers == 0 {
 +			delete(diskTaintDroppedRoots, root)
 +		} else {
@@ -19471,78 +19632,169 @@ index e69de29..1cdb67c 100644
 +// Start is called by the auth execution guard, not by an asynchronous usage sink.
 +func (c *Collector) Start(ctx context.Context, provider, model string) (context.Context, *Execution, error) {
 +	c.mu.Lock()
-+	defer c.mu.Unlock()
 +	if c.invalid || c.sealed || c.handlerDone || c.lifecycleDone || time.Now().After(c.deadline) {
 +		c.invalid = true
++		c.mu.Unlock()
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if c.strictCodex && c.active > 0 {
 +		c.invalid = true
++		c.mu.Unlock()
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if c.review != nil {
++		entry := c.review
++		expectedModel := c.expectedModel
++		turnCtx := c.turnCtx
++		deadline := c.deadline
++		turnSeq := c.reviewTurnSeq
++		dir := c.directory
++		c.mu.Unlock()
++
++		markInvalidAndFail := func(taint bool) (context.Context, *Execution, error) {
++			c.mu.Lock()
++			c.invalid = true
++			c.mu.Unlock()
++			recordEntryFailureNonBlocking(entry, turnSeq, taint)
++			return ctx, nil, ErrUnavailable
++		}
++
++		startCtx, cancelStart, hasDeadline := deriveStartContext(ctx, turnCtx, deadline)
++		defer cancelStart()
++
 +		expected := "codex:" + model + "@chatgpt.com"
-+		c.review.mu.Lock()
-+		if c.review.sealed {
-+			c.review.mu.Unlock()
++		if !entry.mu.LockContext(startCtx) {
++			return markInvalidAndFail(false)
++		}
++		entryLocked := true
++		unlockEntry := func() {
++			if entryLocked {
++				entryLocked = false
++				entry.mu.Unlock()
++			}
++		}
++		if entry.sealed {
++			unlockEntry()
++			c.mu.Lock()
++			c.invalid = true
++			c.mu.Unlock()
++			return ctx, nil, ErrUnavailable
++		}
++		if entry.tainted || entry.pendingTaint.Load() {
++			unlockEntry()
++			c.mu.Lock()
++			c.invalid = true
++			c.mu.Unlock()
++			return ctx, nil, ErrUnavailable
++		}
++		if provider != "codex" || expectedModel == "" || model != expectedModel || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") || entry.route != expected {
++			if hasDeadline && !entry.taintedPersisted && !entry.foreignDisk {
++				entry.sealDecision.CompareAndSwap(sealDecisionOpen, sealDecisionTainted)
++				entry.pendingTaint.Store(true)
++				entry.tainted = true
++				unlockEntry()
++				return markInvalidAndFail(true)
++			}
++			entry.taintAndPersistLocked()
++			unlockEntry()
++			c.mu.Lock()
++			c.invalid = true
++			c.mu.Unlock()
++			return ctx, nil, ErrUnavailable
++		}
++		if !entry.reserved {
++			if entry.markerPersisted {
++				entry.reserved = true
++			} else if hasDeadline {
++				select {
++				case initialPersistSem <- struct{}{}:
++				default:
++					unlockEntry()
++					return markInvalidAndFail(false)
++				}
++				doneCh := make(chan error, 1)
++				entryLocked = false
++				go func() {
++					defer func() { <-initialPersistSem }()
++					var rerr error
++					rootDir := filepath.Dir(dir)
++					rootLease, lerr := acquirePrivateRootLease(rootDir)
++					if lerr != nil {
++						rerr = lerr
++					} else {
++						subRoot, _, _, _, _, _, _, err := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, entry.launch, true, entry.started)
++						rootLease.Close()
++						if err != nil {
++							rerr = err
++						} else {
++							_ = subRoot.Close()
++							entry.reserved = true
++						}
++					}
++					entry.mu.Unlock()
++					doneCh <- rerr
++				}()
++				select {
++				case rerr := <-doneCh:
++					if rerr != nil {
++						return markInvalidAndFail(false)
++					}
++				case <-startCtx.Done():
++					return markInvalidAndFail(false)
++				}
++			} else {
++				rootDir := filepath.Dir(dir)
++				rootLease, lerr := acquirePrivateRootLease(rootDir)
++				if lerr != nil {
++					unlockEntry()
++					c.mu.Lock()
++					c.invalid = true
++					c.mu.Unlock()
++					return ctx, nil, ErrUnavailable
++				}
++				subRoot, _, _, _, _, _, _, rerr := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, entry.launch, true, entry.started)
++				rootLease.Close()
++				if rerr != nil {
++					unlockEntry()
++					c.mu.Lock()
++					c.invalid = true
++					c.mu.Unlock()
++					return ctx, nil, ErrUnavailable
++				}
++				_ = subRoot.Close()
++				entry.reserved = true
++			}
++		}
++		unlockEntry()
++
++		c.mu.Lock()
++		defer c.mu.Unlock()
++		if c.invalid || c.sealed || c.handlerDone || c.lifecycleDone || time.Now().After(c.deadline) || (c.strictCodex && c.active > 0) {
 +			c.invalid = true
 +			return ctx, nil, ErrUnavailable
 +		}
-+		if c.review.tainted {
-+			c.review.mu.Unlock()
-+			c.invalid = true
-+			return ctx, nil, ErrUnavailable
-+		}
-+		if provider != "codex" || c.expectedModel == "" || model != c.expectedModel || (model != "gpt-6.2-sol" && model != "gpt-6.2-astra") {
-+			c.review.taintAndPersistLocked()
-+			c.review.mu.Unlock()
-+			c.invalid = true
-+			return ctx, nil, ErrUnavailable
-+		}
-+		if c.review.route != expected {
-+			c.review.taintAndPersistLocked()
-+			c.review.mu.Unlock()
-+			c.invalid = true
-+			return ctx, nil, ErrUnavailable
-+		}
-+		if !c.review.reserved {
++		c.reserved = true
++	} else {
++		defer c.mu.Unlock()
++		if !c.reserved {
 +			rootDir := filepath.Dir(c.directory)
-+			rootLease, lerr := acquirePrivateRootLease(rootDir)
-+			if lerr != nil {
-+				c.review.mu.Unlock()
++			rootLease, err := acquirePrivateRootLease(rootDir)
++			if err != nil {
 +				c.invalid = true
 +				return ctx, nil, ErrUnavailable
 +			}
-+			subRoot, _, _, _, _, _, _, rerr := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, c.review.launch, true, c.review.started)
++			subRoot, subFI, _, mDev, mIno, hasMID, mSHA, err := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, c.receipt.Session, false, c.receipt.Started)
 +			rootLease.Close()
-+			if rerr != nil {
-+				c.review.mu.Unlock()
++			if err != nil {
 +				c.invalid = true
 +				return ctx, nil, ErrUnavailable
 +			}
++			subDev, subIno, hasSubID := statDevIno(subFI)
 +			_ = subRoot.Close()
-+			c.review.reserved = true
++			c.dirDev, c.dirIno, c.hasDirID = subDev, subIno, hasSubID
++			c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256 = mDev, mIno, hasMID, mSHA
++			c.reserved = true
 +		}
-+		c.review.mu.Unlock()
-+		c.reserved = true
-+	} else if !c.reserved {
-+		rootDir := filepath.Dir(c.directory)
-+		rootLease, err := acquirePrivateRootLease(rootDir)
-+		if err != nil {
-+			c.invalid = true
-+			return ctx, nil, ErrUnavailable
-+		}
-+		subRoot, subFI, _, mDev, mIno, hasMID, mSHA, err := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, c.receipt.Session, false, c.receipt.Started)
-+		rootLease.Close()
-+		if err != nil {
-+			c.invalid = true
-+			return ctx, nil, ErrUnavailable
-+		}
-+		subDev, subIno, hasSubID := statDevIno(subFI)
-+		_ = subRoot.Close()
-+		c.dirDev, c.dirIno, c.hasDirID = subDev, subIno, hasSubID
-+		c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256 = mDev, mIno, hasMID, mSHA
-+		c.reserved = true
 +	}
 +	c.active++
 +	c.executions++
@@ -20659,10 +20911,21 @@ index e69de29..1cdb67c 100644
 +			job.entry.pendingFailedTurnSeq.Store(job.turnSeq)
 +		}
 +	}
-+	finalizeQueue = append(finalizeQueue, job)
-+	if finalizeWorkers < maxFinalizeWorkers {
-+		finalizeWorkers++
-+		go runFinalizeWorker()
++	entry := job.entry
++	if entry == nil {
++		reviewMu.Unlock()
++		close(job.done)
++		return
++	}
++	entry.finalizeJobs = append(entry.finalizeJobs, job)
++	finalizePendingJobs++
++	if !entry.finalizeQueued && !entry.finalizeRunning {
++		entry.finalizeQueued = true
++		finalizeQueue = append(finalizeQueue, entry)
++		if finalizeWorkers < maxFinalizeWorkers {
++			finalizeWorkers++
++			go runFinalizeWorker()
++		}
 +	}
 +	reviewMu.Unlock()
 +}
@@ -20675,17 +20938,38 @@ index e69de29..1cdb67c 100644
 +			reviewMu.Unlock()
 +			return
 +		}
-+		job := finalizeQueue[0]
++		entry := finalizeQueue[0]
 +		finalizeQueue[0] = nil
 +		finalizeQueue = finalizeQueue[1:]
 +		if len(finalizeQueue) == 0 {
 +			finalizeQueue = nil
 +		}
++		entry.finalizeQueued = false
++		entry.finalizeRunning = true
 +		reviewMu.Unlock()
 +
-+		executeReviewFinalizeJob(job)
-+		releaseReview(job.entry)
-+		close(job.done)
++		for {
++			reviewMu.Lock()
++			if len(entry.finalizeJobs) == 0 {
++				entry.finalizeRunning = false
++				reviewMu.Unlock()
++				break
++			}
++			job := entry.finalizeJobs[0]
++			entry.finalizeJobs[0] = nil
++			entry.finalizeJobs = entry.finalizeJobs[1:]
++			if len(entry.finalizeJobs) == 0 {
++				entry.finalizeJobs = nil
++			}
++			if finalizePendingJobs > 0 {
++				finalizePendingJobs--
++			}
++			reviewMu.Unlock()
++
++			executeReviewFinalizeJob(job)
++			releaseReview(entry)
++			close(job.done)
++		}
 +	}
 +}
 +
@@ -20992,10 +21276,10 @@ index e69de29..1cdb67c 100644
 +	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..63df22e 100644
+index e69de29..e85eedc 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,15514 @@
+@@ -0,0 +1,15901 @@
 +package preflightreceipt
 +
 +import (
@@ -21702,7 +21986,7 @@ index e69de29..63df22e 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	observeStrictSSEForTest(cM, []byte(`data: {"type":"response.completed","response":{"id":"resp_fb","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cM, []byte(`data: {"type":"response.completed","response":{"id":"resp_fb","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback"}]}]}}`+"\n\n"))
 +	_ = respM.Body.Close()
 +	eM.End()
 +	cM.Complete(true)
@@ -21951,7 +22235,7 @@ index e69de29..63df22e 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	observeStrictSSEForTest(c0, []byte(`data: {"type":"response.completed","response":{"id":"resp_sealed","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c0, []byte(`data: {"type":"response.completed","response":{"id":"resp_sealed","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass"}]}]}}`+"\n\n"))
 +	_, _ = io.Copy(io.Discard, resp0.Body)
 +	_ = resp0.Body.Close()
 +	e0.End()
@@ -22022,7 +22306,7 @@ index e69de29..63df22e 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	observeStrictSSEForTest(c, []byte(`data: {"type":"response.completed","response":{"id":"resp_clean","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.completed","response":{"id":"resp_clean","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`+"\n\n"))
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +	e.End()
@@ -22342,8 +22626,8 @@ index e69de29..63df22e 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	observeStrictSSEForTest(c, []byte(`data: {"type":"response.created","response":{"id":"resp_aborted"}}` + "\n\n"))
-+	observeStrictSSEForTest(c, []byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"leaked-from-exec1"}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.created","response":{"id":"resp_aborted"}}`+"\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"leaked-from-exec1"}]}}`+"\n\n"))
 +	_, _ = io.Copy(io.Discard, rp1.Body)
 +	_ = rp1.Body.Close()
 +	e1.End()
@@ -22360,8 +22644,8 @@ index e69de29..63df22e 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	observeStrictSSEForTest(c, []byte(`data: {"type":"response.created","response":{"id":"resp_retry"}}` + "\n\n"))
-+	observeStrictSSEForTest(c, []byte(`data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.created","response":{"id":"resp_retry"}}`+"\n\n"))
++	observeStrictSSEForTest(c, []byte(`data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed","model":"gpt-6.2-sol","output":[]}}`+"\n\n"))
 +	_, _ = io.Copy(io.Discard, rp2.Body)
 +	_ = rp2.Body.Close()
 +	e2.End()
@@ -22390,7 +22674,7 @@ index e69de29..63df22e 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	observeStrictSSEForTest(cT, []byte(`data: {"type":"response.created","response":{"id":"resp_trunc"}}` + "\n\n"))
++	observeStrictSSEForTest(cT, []byte(`data: {"type":"response.created","response":{"id":"resp_trunc"}}`+"\n\n"))
 +	_, _ = io.Copy(io.Discard, rpT1.Body)
 +	_ = rpT1.Body.Close()
 +	eT1.End()
@@ -22425,7 +22709,7 @@ index e69de29..63df22e 100644
 +		if err != nil {
 +			t.Fatal(err)
 +		}
-+		observeStrictSSEForTest(c0, []byte(`data: {"type":"response.completed","response":{"id":"resp_race","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++		observeStrictSSEForTest(c0, []byte(`data: {"type":"response.completed","response":{"id":"resp_race","status":"completed","model":"gpt-6.2-sol","output":[]}}`+"\n\n"))
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
 +		e0.End()
@@ -22752,7 +23036,7 @@ index e69de29..63df22e 100644
 +			if err != nil {
 +				t.Fatal(err)
 +			}
-+			observeStrictSSEForTest(c1, []byte(`data: {"type":"response.completed","response":{"id":"resp_t1","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"))
++			observeStrictSSEForTest(c1, []byte(`data: {"type":"response.completed","response":{"id":"resp_t1","status":"completed","model":"gpt-6.2-sol","output":[]}}`+"\n\n"))
 +			_, _ = io.Copy(io.Discard, resp1.Body)
 +			_ = resp1.Body.Close()
 +			e1.End()
@@ -22780,7 +23064,7 @@ index e69de29..63df22e 100644
 +			if err != nil {
 +				t.Fatal(err)
 +			}
-+			observeStrictSSEForTest(c2, []byte(`data: {"type":"response.completed","response":{"id":"resp_t2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n" + tc.trail))
++			observeStrictSSEForTest(c2, []byte(`data: {"type":"response.completed","response":{"id":"resp_t2","status":"completed","model":"gpt-6.2-sol","output":[]}}`+"\n\n"+tc.trail))
 +			_, _ = io.Copy(io.Discard, resp2.Body)
 +			_ = resp2.Body.Close()
 +			e2.End()
@@ -23171,7 +23455,7 @@ index e69de29..63df22e 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	observeStrictSSEForTest(c2, []byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c2, []byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`+"\n\n"))
 +	_, _ = io.Copy(io.Discard, resp2.Body)
 +	_ = resp2.Body.Close()
 +	e2.End()
@@ -23231,7 +23515,7 @@ index e69de29..63df22e 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	observeStrictSSEForTest(c3, []byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c3, []byte(`data: {"type":"response.completed","response":{"id":"resp_dirsync3","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`+"\n\n"))
 +	_, _ = io.Copy(io.Discard, resp3.Body)
 +	_ = resp3.Body.Close()
 +	e3.End()
@@ -24324,7 +24608,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respD1.Body)
 +	_ = respD1.Body.Close()
-+	observeStrictSSEForTest(cD1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_dur","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cD1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_dur","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`+"\n\n"))
 +	eD1.End()
 +	cD1.Complete(true)
 +	cD1.HandlerDone(true)
@@ -24358,7 +24642,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respD2.Body)
 +	_ = respD2.Body.Close()
-+	observeStrictSSEForTest(cD2, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_dur2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cD2, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_dur2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`+"\n\n"))
 +	eD2.End()
 +	cD2.Complete(true)
 +	cD2.HandlerDone(true)
@@ -24541,7 +24825,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respT1.Body)
 +	_ = respT1.Body.Close()
-+	observeStrictSSEForTest(cT, []byte("data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"stale_open","type":"function_call","name":"exec_command"}}` + "\n\n"))
++	observeStrictSSEForTest(cT, []byte("data: "+`{"type":"response.output_item.added","output_index":0,"item":{"id":"stale_open","type":"function_call","name":"exec_command"}}`+"\n\n"))
 +	eT1.End()
 +	// Attempt 2 starts cleanly and emits a complete final answer.
 +	ctxT2, eT2, err := cT.Start(ctxT, "codex", "gpt-6.2-sol")
@@ -24558,9 +24842,9 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respT2.Body)
 +	_ = respT2.Body.Close()
-+	observeStrictSSEForTest(cT, []byte("data: " + `{"type":"response.created","response":{"id":"resp_retry_ok","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
-+		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"clean-retry-answer"}]}}` + "\n\n" +
-+		"data: " + `{"type":"response.completed","response":{"id":"resp_retry_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"clean-retry-answer"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cT, []byte("data: "+`{"type":"response.created","response":{"id":"resp_retry_ok","status":"in_progress","model":"gpt-6.2-sol"}}`+"\n\n"+
++		"data: "+`{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"clean-retry-answer"}]}}`+"\n\n"+
++		"data: "+`{"type":"response.completed","response":{"id":"resp_retry_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"output_text","text":"clean-retry-answer"}]}]}}`+"\n\n"))
 +	eT2.End()
 +	cT.Complete(true)
 +	cT.HandlerDone(true)
@@ -24856,7 +25140,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respPC1.Body)
 +	_ = respPC1.Body.Close()
-+	observeStrictSSEForTest(cPC1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_pc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1-clean"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cPC1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_pc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"turn1-clean"}]}]}}`+"\n\n"))
 +	ePC1.End()
 +	cPC1.Complete(true)
 +	cPC1.HandlerDone(true)
@@ -24945,7 +25229,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, respB1.Body)
 +		_ = respB1.Body.Close()
-+		observeStrictSSEForTest(cB1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_ok1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"t1"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(cB1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_ok1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"t1"}]}]}}`+"\n\n"))
 +		eB1.End()
 +		cB1.Complete(true)
 +		cB1.HandlerDone(true)
@@ -25257,7 +25541,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respMC1.Body)
 +	_ = respMC1.Body.Close()
-+	observeStrictSSEForTest(cMC1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_mc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cMC1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_mc1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	eMC1.End()
 +	cMC1.Complete(true)
 +	cMC1.HandlerDone(true)
@@ -25378,7 +25662,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respER1.Body)
 +	_ = respER1.Body.Close()
-+	observeStrictSSEForTest(cER1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_er1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cER1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_er1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	eER1.End()
 +	cER1.Complete(true)
 +	cER1.HandlerDone(true)
@@ -25402,7 +25686,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respER2.Body)
 +	_ = respER2.Body.Close()
-+	observeStrictSSEForTest(cER2, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_er2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n" + "data: {\"type\":\"error\"}\n"))
++	observeStrictSSEForTest(cER2, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_er2","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"+"data: {\"type\":\"error\"}\n"))
 +
 +	inTaintSync := make(chan struct{})
 +	releaseTaintSync := make(chan struct{})
@@ -25466,7 +25750,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respTE1.Body)
 +	_ = respTE1.Body.Close()
-+	observeStrictSSEForTest(cTE1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_te1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cTE1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_te1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	eTE1.End()
 +	cTE1.Complete(true)
 +	cTE1.HandlerDone(true)
@@ -25490,7 +25774,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respTE2.Body)
 +	_ = respTE2.Body.Close()
-+	observeStrictSSEForTest(cTE2, []byte("data: " + `{"type":"response.created","response":{"id":"resp_te2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n"))
++	observeStrictSSEForTest(cTE2, []byte("data: "+`{"type":"response.created","response":{"id":"resp_te2","status":"in_progress","model":"gpt-6.2-sol"}}`+"\n\n"))
 +	eTE2.End()
 +	cTE2.Complete(false)
 +	cTE2.HandlerDone(false)
@@ -25559,7 +25843,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respE1.Body)
 +	_ = respE1.Body.Close()
-+	observeStrictSSEForTest(cE1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_e200_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cE1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_e200_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	eE1.End()
 +	cE1.Complete(true)
 +	cE1.HandlerDone(true)
@@ -26499,6 +26783,18 @@ index e69de29..63df22e 100644
 +	// Astra P2 #4 (PR #2280 R32): a brand-new launch's started timestamp MUST be anchored at the
 +	// first BeginPendingReview arrival rather than after slow body reads finish.
 +	root := filepath.Join(t.TempDir(), "pending-started-receipts")
++	t.Cleanup(func() {
++		deadline := time.Now().Add(2 * time.Second)
++		for {
++			reviewMu.Lock()
++			busy := failurePersistWorkers
++			reviewMu.Unlock()
++			if busy == 0 || time.Now().After(deadline) {
++				break
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++	})
 +	launch := "review-e8888888-2222-4333-8444-555555555501"
 +	key := filepath.Clean(root) + "\x00" + launch
 +
@@ -26572,7 +26868,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp1.Body)
 +	_ = resp1.Body.Close()
-+	observeStrictSSEForTest(c1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_evict2h","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_evict2h","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -26624,7 +26920,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text) + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: "+fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text)+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -26719,7 +27015,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("data: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text) + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: "+fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, respID, text)+"\n\n"))
 +		return c, e
 +	}
 +
@@ -26836,7 +27132,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp1.Body)
 +	_ = resp1.Body.Close()
-+	observeStrictSSEForTest(c1, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_q1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_q1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -26971,7 +27267,7 @@ index e69de29..63df22e 100644
 +			}
 +			_, _ = io.Copy(io.Discard, resp.Body)
 +			_ = resp.Body.Close()
-+			observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_preseal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++			observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_preseal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +			e.End()
 +			c.Complete(true)
 +			c.HandlerDone(true)
@@ -27083,7 +27379,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, respB.Body)
 +	_ = respB.Body.Close()
-+	observeStrictSSEForTest(cB, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_foreign_b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(cB, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_foreign_b","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	eB.End()
 +	cB.Complete(true)
 +	cB.HandlerDone(true)
@@ -27512,9 +27808,9 @@ index e69de29..63df22e 100644
 +	if c.ValidateStrictEvent("response.output_item.added", true, []byte(badAdded)) {
 +		t.Fatalf("ValidateStrictEvent accepted output_item.added with missing item.type")
 +	}
-+	observeStrictSSEForTest(c, []byte("event: response.output_item.added\ndata: " + badAdded + "\n\n"))
-+	observeStrictSSEForTest(c, []byte(`event: response.output_item.done` + "\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n"))
-+	observeStrictSSEForTest(c, []byte(`event: response.completed` + "\n" + `data: {"type":"response.completed","response":{"id":"resp_notype","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.output_item.added\ndata: "+badAdded+"\n\n"))
++	observeStrictSSEForTest(c, []byte(`event: response.output_item.done`+"\n"+`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`+"\n\n"))
++	observeStrictSSEForTest(c, []byte(`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"id":"resp_notype","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_notype","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -27611,7 +27907,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_taint_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_taint_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -28558,7 +28854,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_after_sweep","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_after_sweep","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -28594,7 +28890,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_rot_root","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_rot_root","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -28660,7 +28956,7 @@ index e69de29..63df22e 100644
 +		Schema: ReviewSchema, Launch: launch, Session: session,
 +		Started: ancient.UnixNano(), Finished: ancient.UnixNano(), SealedAt: 0,
 +		Complete: true, Sealed: false, Tainted: false, Requests: 1,
-+		Routes: []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		Routes:         []string{"codex:gpt-6.2-sol@chatgpt.com"},
 +		ResponseIDSHAs: []string{sha256Hex("resp_swap")}, LastResponseID: sha256Hex("resp_swap"),
 +		LastOutputSHA256: sha256Hex("ok"),
 +	})
@@ -28764,7 +29060,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -28925,7 +29221,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_lock_order","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_lock_order","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -28999,7 +29295,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_sealed_immut","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_sealed_immut","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29109,7 +29405,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_fail_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_fail_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29261,7 +29557,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_first_seal_swap","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_first_seal_swap","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29331,7 +29627,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_mutex_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_mutex_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29459,7 +29755,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_mut_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_mut_reclaim","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29594,7 +29890,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_cap_full","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_cap_full","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29710,7 +30006,7 @@ index e69de29..63df22e 100644
 +	if c.ValidateStrictEvent("response.completed", true, []byte(nbspPayload)) {
 +		t.Fatalf("ValidateStrictEvent accepted leading U+00A0 NBSP before terminal JSON")
 +	}
-+	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + nbspPayload + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+nbspPayload+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29751,8 +30047,8 @@ index e69de29..63df22e 100644
 +	if c.ValidateStrictEvent("response.output_text.delta", true, []byte(badDelta)) {
 +		t.Fatalf("ValidateStrictEvent accepted response.output_text.delta with response.status=completed")
 +	}
-+	observeStrictSSEForTest(c, []byte("event: response.output_text.delta\ndata: " + badDelta + "\n\n"))
-+	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_bad_delta_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.output_text.delta\ndata: "+badDelta+"\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_bad_delta_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -29792,7 +30088,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_slot_` + pair[0] + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_slot_`+pair[0]+`","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -29970,7 +30266,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"`+respID+`","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -30081,8 +30377,8 @@ index e69de29..63df22e 100644
 +	if c.ValidateStrictEvent("response.in_progress", true, []byte(badInProg)) {
 +		t.Fatalf("ValidateStrictEvent accepted response.in_progress with explicit empty status")
 +	}
-+	observeStrictSSEForTest(c, []byte("event: response.in_progress\ndata: " + badInProg + "\n\n"))
-+	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_empty_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.in_progress\ndata: "+badInProg+"\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_empty_st","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -30164,7 +30460,7 @@ index e69de29..63df22e 100644
 +		_ = resp.Body.Close()
 +
 +		observeStrictSSEForTest(c, badLine)
-+		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_meta_utf8","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_meta_utf8","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -30217,7 +30513,7 @@ index e69de29..63df22e 100644
 +			if c.ValidateStrictEvent("response.completed", true, []byte(tc.raw)) {
 +				t.Fatalf("ValidateStrictEvent accepted unpaired surrogate case %s", tc.name)
 +			}
-+			observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + tc.raw + "\n\n"))
++			observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+tc.raw+"\n\n"))
 +			e.End()
 +			c.Complete(true)
 +			c.HandlerDone(true)
@@ -30370,7 +30666,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"`+respID+`","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -30876,7 +31172,7 @@ index e69de29..63df22e 100644
 +	if c.ValidateStrictEvent("response.completed", true, []byte(frame)) {
 +		t.Fatalf("ValidateStrictEvent accepted case-duplicate status/Status frame")
 +	}
-+	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + frame + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+frame+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -30913,7 +31209,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_corrupt_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_corrupt_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -31050,7 +31346,7 @@ index e69de29..63df22e 100644
 +		if c.ValidateStrictEvent("response.completed", true, []byte(frame)) {
 +			t.Fatalf("ValidateStrictEvent accepted response.completed with top-level message")
 +		}
-+		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + frame + "\n\n"))
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+frame+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -31124,7 +31420,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"`+respID+`","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -31389,7 +31685,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_repl_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_repl_fd","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -31482,7 +31778,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"resp_full_led","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"resp_full_led","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -31702,7 +31998,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("data: " + `{"type":"response.completed","response":{"id":"` + respID + `","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("data: "+`{"type":"response.completed","response":{"id":"`+respID+`","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -31806,7 +32102,7 @@ index e69de29..63df22e 100644
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
 +
-+	observeStrictSSEForTest(c, []byte("id\nretry\ndata\n\nevent: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_obs_bare","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("id\nretry\ndata\n\nevent: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_obs_bare","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -31882,7 +32178,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_unrelated_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_unrelated_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -32246,7 +32542,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_coal_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_coal_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -32348,7 +32644,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_taint_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_taint_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -32432,7 +32728,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_rep_seal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e1.End()
 +	c1.Complete(true)
 +	c1.HandlerDone(true)
@@ -33060,7 +33356,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_coal","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -33270,7 +33566,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_cold_contra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_cold_contra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -33350,7 +33646,7 @@ index e69de29..63df22e 100644
 +	}
 +	_, _ = io.Copy(io.Discard, resp.Body)
 +	_ = resp.Body.Close()
-+	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_first_extra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_first_extra","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +	e.End()
 +	c.Complete(true)
 +	c.HandlerDone(true)
@@ -33604,7 +33900,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_marker","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"))
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_marker","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -33717,7 +34013,7 @@ index e69de29..63df22e 100644
 +		}
 +		_, _ = io.Copy(io.Discard, resp.Body)
 +		_ = resp.Body.Close()
-+		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_ovl_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`, i) + "\n\n"))
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_ovl_%d","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`, i)+"\n\n"))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -34233,7 +34529,7 @@ index e69de29..63df22e 100644
 +		if c.ValidateStrictEvent(tc.evName, true, []byte(tc.frame)) {
 +			t.Fatalf("case %d (%s) unexpectedly accepted by ValidateStrictEvent", idx, tc.frame)
 +		}
-+		observeStrictSSEForTest(c, []byte("event: " + tc.evName + "\ndata: " + tc.frame + "\n\n" + ssePayload))
++		observeStrictSSEForTest(c, []byte("event: "+tc.evName+"\ndata: "+tc.frame+"\n\n"+ssePayload))
 +		e.End()
 +		c.Complete(true)
 +		c.HandlerDone(true)
@@ -34659,7 +34955,6 @@ index e69de29..63df22e 100644
 +		t.Fatalf("repeat seal after late TaintExistingReview on sealed launch = (%v, %q), want (SealOK, %q)", stRepeat, digRepeat, digClean)
 +	}
 +}
-+
 +
 +func observeStrictSSEForTest(c *Collector, payload []byte) {
 +	observeStrictSSEChunksForTest(c, payload)
@@ -36509,6 +36804,382 @@ index e69de29..63df22e 100644
 +			time.Sleep(10 * time.Millisecond)
 +		}
 +	})
++}
++
++func TestReviewCollectorStartRespectsContextDeadlineWhenEntryMuStalled(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2"
++	sess := "e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2"
++
++	pend1, err := BeginPendingReviewContext(context.Background(), root, launch)
++	if err != nil {
++		t.Fatalf("BeginPendingReviewContext turn 1: %v", err)
++	}
++	res1, err := ReserveReviewContext(context.Background(), root, launch, pend1.TurnSeq())
++	if err != nil {
++		pend1.Release()
++		t.Fatalf("ReserveReviewContext turn 1: %v", err)
++	}
++	res1.AttachPendingSlot(pend1)
++	pend1.Release()
++	turnCtx1, cancel1 := context.WithTimeout(context.Background(), 60*time.Millisecond)
++	defer cancel1()
++	ctx1, c1, err := BeginReviewReserved(turnCtx1, res1, sess, "gpt-6.2-sol")
++	if err != nil {
++		res1.Release()
++		t.Fatalf("BeginReviewReserved turn 1: %v", err)
++	}
++
++	// Admit a concurrent turn 2 on the same launch BEFORE turn 1 stalls entry.mu in final persistence.
++	pend2, err := BeginPendingReviewContext(context.Background(), root, launch)
++	if err != nil {
++		t.Fatalf("BeginPendingReviewContext turn 2: %v", err)
++	}
++	res2, existed, err := ReserveExistingReviewContext(context.Background(), root, launch, pend2.TurnSeq())
++	if err != nil || !existed {
++		pend2.Release()
++		t.Fatalf("ReserveExistingReviewContext turn 2: existed=%v err=%v", existed, err)
++	}
++	res2.AttachPendingSlot(pend2)
++	pend2.Release()
++	turnCtx2, cancel2 := context.WithTimeout(context.Background(), 80*time.Millisecond)
++	defer cancel2()
++	ctx2, c2, err := BeginReviewReserved(turnCtx2, res2, sess, "gpt-6.2-sol")
++	if err != nil {
++		res2.Release()
++		t.Fatalf("BeginReviewReserved turn 2: %v", err)
++	}
++
++	// Run turn 1 to completion, then stall its final directory sync while holding entry.mu.
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("c1.Start: %v", err)
++	}
++	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatalf("cl.Do turn 1: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_start_stall_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++	e1.End()
++	c1.Complete(true)
++
++	enteredSync := make(chan struct{}, 1)
++	releaseSync := make(chan struct{})
++	oldSync := syncDirFn
++	var stalledOnce atomic.Bool
++	syncDirFn = func(path string) error {
++		if strings.Contains(path, launch) && stalledOnce.CompareAndSwap(false, true) {
++			select {
++			case enteredSync <- struct{}{}:
++			default:
++			}
++			<-releaseSync
++		}
++		if oldSync != nil {
++			return oldSync(path)
++		}
++		return nil
++	}
++	defer func() {
++		select {
++		case <-releaseSync:
++		default:
++			close(releaseSync)
++		}
++		drain := time.Now().Add(2 * time.Second)
++		for {
++			reviewMu.Lock()
++			busy := finalizeWorkers + failurePersistWorkers
++			reviewMu.Unlock()
++			cancelFailMu.Lock()
++			cfBusy := cancelFailRunning
++			cancelFailMu.Unlock()
++			if busy == 0 && !cfBusy {
++				break
++			}
++			if time.Now().After(drain) {
++				break
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++		syncDirFn = oldSync
++	}()
++
++	c1.HandlerDone(true)
++	<-enteredSync
++
++	// While turn 1 holds entry.mu inside syncDirFn, turn 2's Collector.Start MUST abort at its
++	// deadline rather than blocking indefinitely, and HandlerDone(false) MUST release its slot.
++	start := time.Now()
++	_, _, startErr := c2.Start(ctx2, "codex", "gpt-6.2-sol")
++	if startErr == nil {
++		t.Fatalf("c2.Start succeeded while entry.mu was stalled past turnCtx2 deadline")
++	}
++	c2.HandlerDone(false)
++	if elapsed := time.Since(start); elapsed > 2*time.Second {
++		t.Fatalf("c2.Start+HandlerDone blocked %v past 80ms turn deadline", elapsed)
++	}
++	reviewMu.Lock()
++	gotPending := pendingReviewTotal
++	reviewMu.Unlock()
++	if gotPending != 0 {
++		t.Fatalf("pendingReviewTotal after both timed-out turns = %d, want 0", gotPending)
++	}
++
++	// Once storage unblocks, turn 2's later TurnSeq failure MUST prevent SealOK.
++	close(releaseSync)
++	waitFinal := time.Now().Add(2 * time.Second)
++	for {
++		st, _ := SealReviewWithDigest(root, launch, sess)
++		if st == SealRejected {
++			break
++		}
++		if st != SealInFlight || time.Now().After(waitFinal) {
++			t.Fatalf("SealReviewWithDigest after stalled Start failure = %v, want SealRejected", st)
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++}
++
++func TestReviewFinalizeQueuePerLaunchIsolationNoStarvation(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	stallLaunch := "review-e3e3e3e3-e3e3-4e3e-8e3e-e3e3e3e3e3e3"
++	stallSess := "e3e3e3e3-e3e3-4e3e-8e3e-e3e3e3e3e3e3"
++	healthyLaunch := "review-e4e4e4e4-e4e4-4e4e-8e4e-e4e4e4e4e4e4"
++	healthySess := "e4e4e4e4-e4e4-4e4e-8e4e-e4e4e4e4e4e4"
++
++	stallTurns := maxFinalizeWorkers + 4
++	stallCollectors := make([]*Collector, 0, stallTurns)
++	for i := 0; i < stallTurns; i++ {
++		pend, err := BeginPendingReviewContext(context.Background(), root, stallLaunch)
++		if err != nil {
++			t.Fatalf("BeginPendingReviewContext stall[%d]: %v", i, err)
++		}
++		var res *ReviewReservation
++		if i == 0 {
++			res, err = ReserveReviewContext(context.Background(), root, stallLaunch, pend.TurnSeq())
++		} else {
++			var existed bool
++			res, existed, err = ReserveExistingReviewContext(context.Background(), root, stallLaunch, pend.TurnSeq())
++			if err == nil && !existed {
++				t.Fatalf("stall[%d] expected existed=true", i)
++			}
++		}
++		if err != nil {
++			pend.Release()
++			t.Fatalf("reserve stall[%d]: %v", i, err)
++		}
++		res.AttachPendingSlot(pend)
++		pend.Release()
++		turnCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
++		defer cancel()
++		_, c, err := BeginReviewReserved(turnCtx, res, stallSess, "gpt-6.2-sol")
++		if err != nil {
++			res.Release()
++			t.Fatalf("BeginReviewReserved stall[%d]: %v", i, err)
++		}
++		stallCollectors = append(stallCollectors, c)
++	}
++
++	enteredSync := make(chan struct{}, 1)
++	releaseSync := make(chan struct{})
++	oldSync := syncDirFn
++	var stalledOnce atomic.Bool
++	syncDirFn = func(path string) error {
++		if strings.Contains(path, stallLaunch) && stalledOnce.CompareAndSwap(false, true) {
++			select {
++			case enteredSync <- struct{}{}:
++			default:
++			}
++			<-releaseSync
++		}
++		if oldSync != nil {
++			return oldSync(path)
++		}
++		return nil
++	}
++	defer func() {
++		select {
++		case <-releaseSync:
++		default:
++			close(releaseSync)
++		}
++		drain := time.Now().Add(3 * time.Second)
++		for {
++			reviewMu.Lock()
++			busy := finalizeWorkers + failurePersistWorkers
++			reviewMu.Unlock()
++			if busy == 0 {
++				break
++			}
++			if time.Now().After(drain) {
++				break
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++		syncDirFn = oldSync
++	}()
++
++	// Enqueue maxFinalizeWorkers+4 finalize jobs for stallLaunch; per-launch serialization must
++	// occupy at most 1 finalize worker while leaving the other workers free.
++	for _, c := range stallCollectors {
++		c.HandlerDone(false)
++	}
++	<-enteredSync
++
++	reviewMu.Lock()
++	gotWorkers := finalizeWorkers
++	reviewMu.Unlock()
++	if gotWorkers != 1 {
++		t.Fatalf("finalizeWorkers occupied by single stalled launch = %d, want 1", gotWorkers)
++	}
++
++	// Now run a completely unrelated healthy launch end-to-end and seal it WHILE stallLaunch stays blocked.
++	pendH, err := BeginPendingReviewContext(context.Background(), root, healthyLaunch)
++	if err != nil {
++		t.Fatalf("BeginPendingReviewContext healthy: %v", err)
++	}
++	resH, err := ReserveReviewContext(context.Background(), root, healthyLaunch, pendH.TurnSeq())
++	if err != nil {
++		pendH.Release()
++		t.Fatalf("ReserveReviewContext healthy: %v", err)
++	}
++	resH.AttachPendingSlot(pendH)
++	pendH.Release()
++	ctxH, cH, err := BeginReviewReserved(context.Background(), resH, healthySess, "gpt-6.2-sol")
++	if err != nil {
++		resH.Release()
++		t.Fatalf("BeginReviewReserved healthy: %v", err)
++	}
++	ctxH, eH, err := cH.Start(ctxH, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("cH.Start: %v", err)
++	}
++	clH := httptransport.Decorate(ctxH, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	reqH, _ := http.NewRequestWithContext(ctxH, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	respH, err := clH.Do(reqH)
++	if err != nil {
++		t.Fatalf("clH.Do: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, respH.Body)
++	_ = respH.Body.Close()
++	observeStrictSSEForTest(cH, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_healthy_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++	eH.End()
++	cH.Complete(true)
++	doneH := make(chan struct{})
++	go func() {
++		cH.HandlerDone(true)
++		close(doneH)
++	}()
++	select {
++	case <-doneH:
++	case <-time.After(2 * time.Second):
++		t.Fatalf("healthy launch HandlerDone starved behind single stalled launch")
++	}
++	if st, dig := SealReviewWithDigest(root, healthyLaunch, healthySess); st != SealOK || !isSHA256Hex(dig) {
++		t.Fatalf("SealReviewWithDigest healthy launch while stallLaunch blocked = (%v, %q), want SealOK", st, dig)
++	}
++}
++
++func TestReviewContextAdmissionDoesNotBlockOnReviewMuAfterCancel(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-e5e5e5e5-e5e5-4e5e-8e5e-e5e5e5e5e5e5"
++	sess := "e5e5e5e5-e5e5-4e5e-8e5e-e5e5e5e5e5e5"
++
++	// Create an active unsealed review launch with 1 completed turn in memory.
++	pend, err := BeginPendingReviewContext(context.Background(), root, launch)
++	if err != nil {
++		t.Fatalf("BeginPendingReviewContext: %v", err)
++	}
++	res, err := ReserveReviewContext(context.Background(), root, launch, pend.TurnSeq())
++	if err != nil {
++		pend.Release()
++		t.Fatalf("ReserveReviewContext: %v", err)
++	}
++	res.AttachPendingSlot(pend)
++	pend.Release()
++	ctx, c, err := BeginReviewReserved(context.Background(), res, sess, "gpt-6.2-sol")
++	if err != nil {
++		res.Release()
++		t.Fatalf("BeginReviewReserved: %v", err)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("c.Start: %v", err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatalf("cl.Do: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_cancel_nonblock","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++
++	// Hold reviewMu to simulate lock contention, then verify canceled context calls return immediately
++	// without falling back to unbounded reviewMu.Lock().
++	reviewMu.Lock()
++	canceledCtx, cancel := context.WithCancel(context.Background())
++	cancel()
++
++	doneCh := make(chan error, 2)
++	go func() {
++		_, err := BeginPendingReviewContext(canceledCtx, root, launch)
++		doneCh <- err
++	}()
++	go func() {
++		_, _, err := ReserveExistingReviewContext(canceledCtx, root, launch, 999999)
++		doneCh <- err
++	}()
++	for i := 0; i < 2; i++ {
++		select {
++		case gotErr := <-doneCh:
++			if gotErr == nil {
++				reviewMu.Unlock()
++				t.Fatalf("canceled admission call %d unexpectedly succeeded", i)
++			}
++		case <-time.After(500 * time.Millisecond):
++			reviewMu.Unlock()
++			t.Fatalf("canceled admission call %d blocked on contended reviewMu", i)
++		}
++	}
++	reviewMu.Unlock()
++
++	// Once reviewMu is released, the async cancel-failure worker must still record the failure so
++	// SealReviewWithDigest rejects the launch.
++	deadline := time.Now().Add(2 * time.Second)
++	for {
++		cancelFailMu.Lock()
++		cfBusy := cancelFailRunning || len(cancelFailPending) > 0 || len(cancelFailEntries) > 0
++		cancelFailMu.Unlock()
++		reviewMu.Lock()
++		fpBusy := failurePersistWorkers > 0
++		reviewMu.Unlock()
++		if !cfBusy && !fpBusy {
++			break
++		}
++		if time.Now().After(deadline) {
++			t.Fatalf("cancelFail / failurePersist workers did not drain")
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	if st, _ := SealReviewWithDigest(root, launch, sess); st != SealRejected {
++		t.Fatalf("SealReviewWithDigest after contended-cancel failure = %v, want SealRejected", st)
++	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
 new file mode 100644
