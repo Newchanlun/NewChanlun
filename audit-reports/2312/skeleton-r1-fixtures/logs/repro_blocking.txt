@@ -1,0 +1,82 @@
+=== B2-lock-lone-surrogate-key
+$ /usr/bin/python3 -I /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 3aaad4964d414e44170870c1eda78673d05f0693 --branch decl/review --workdir /home/workspace/fm/tmp/review-f/work/w-B2-lock-lone-surrogate-key --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=3aaad4964d414e44170870c1eda78673d05f0693 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=decl
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 6 个模块，配置取自基线
+FM STEP 3 auditor GREEN 8.9s binary=/home/workspace/fm/tmp/review-f/work/w-B2-lock-lone-surrogate-key/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 6 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.5s 6 个模块都有产物
+--- stderr(tail)
+8] Built Chan (484ms)
+Build completed successfully (18 jobs).
+Traceback (most recent call last):
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 598, in <module>
+    raise SystemExit(main(sys.argv[1:]))
+                     ~~~~^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 584, in main
+    for code, obj, msg in sorted(set(reds), key=lambda r: (r[0], show(r[1]), r[2])):
+                          ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 584, in <lambda>
+    for code, obj, msg in sorted(set(reds), key=lambda r: (r[0], show(r[1]), r[2])):
+                                                                 ~~~~^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 45, in show
+    obj = obj if isinstance(obj, bytes) else str(obj).encode("utf-8")
+                                             ~~~~~~~~~~~~~~~^^^^^^^^^
+UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in position 32: surrogates not allowed
+
+=== B2-lock-dup-surrogate-key
+$ /usr/bin/python3 -I /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 77bf95311203f47487028e43a6926a985ec3cb96 --branch decl/review --workdir /home/workspace/fm/tmp/review-f/work/w-B2-lock-dup-surrogate-key --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=77bf95311203f47487028e43a6926a985ec3cb96 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=decl
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 6 个模块，配置取自基线
+FM STEP 3 auditor GREEN 9.1s binary=/home/workspace/fm/tmp/review-f/work/w-B2-lock-dup-surrogate-key/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 6 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.8s 6 个模块都有产物
+FM STEP 7 env FAULT 0.0s
+--- stderr(tail)
+无法解读：重复键：\ud800')
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 598, in <module>
+    raise SystemExit(main(sys.argv[1:]))
+                     ~~~~^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 580, in main
+    return fault(name, f)
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 550, in fault
+    emit(2, b"FM FAULT", step, code, show(obj), msg)
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 51, in emit
+    data = b" ".join(f if isinstance(f, bytes) else str(f).encode("utf-8") for f in fields) + b"\n"
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 51, in <genexpr>
+    data = b" ".join(f if isinstance(f, bytes) else str(f).encode("utf-8") for f in fields) + b"\n"
+                                                    ~~~~~~~~~~~~~^^^^^^^^^
+UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in position 9: surrogates not allowed
+
+=== B3-kill-lake
+$ /usr/bin/python3 -I /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 9af3d832f8d7e8f880c6cee4dcd119f876003046 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-B3-kill-lake --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=9af3d832f8d7e8f880c6cee4dcd119f876003046 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 9.3s binary=/home/workspace/fm/tmp/review-f/work/w-B3-kill-lake/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 137
+FM STEP 6 build RED 4.5s 
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+

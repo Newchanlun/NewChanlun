@@ -1,0 +1,117 @@
+## id
+uid=1002(workspace) gid=1002(workspace) groups=1002(workspace)
+## env
+HOME=/tmp/home
+TMPDIR=/tmp
+PATH=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin:/usr/bin:/bin
+LANG=C.UTF-8
+LEAN_PATH=/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/Cli/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/batteries/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/Qq/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/aesop/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/proofwidgets/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/importGraph/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/LeanSearchClient/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/plausible/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/mathlib/.lake/build/lib/lean:/home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/build/lib/lean
+PWD=/home/workspace/fm/tmp/review-f/work/w-probe/audited
+## pwd
+/home/workspace/fm/tmp/review-f/work/w-probe/audited
+## ps
+## net
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+/usr/bin/ip
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host proto kernel_lo 
+       valid_lft forever preferred_lft forever
+bash: connect: Network is unreachable
+bash: line 1: /dev/tcp/1.1.1.1/53: Network is unreachable
+NET-CLOSED
+## read host files
+READABLE /etc/passwd
+NOREAD /etc/shadow
+READABLE /etc/hostname
+READABLE /etc/environment
+NOREAD /etc/ssh/ssh_host_ed25519_key
+READABLE /etc/ssh/ssh_host_ed25519_key.pub
+READABLE /proc/1/environ
+READABLE /proc/1/cmdline
+NOREAD /home/workspace/.ssh/id_ed25519
+NOREAD /home/workspace/.config
+NOREAD /home/workspace/.gitconfig
+NOREAD /home/workspace/.netrc
+NOREAD /etc/gitconfig
+NOREAD /etc/apt/auth.conf
+NOREAD /var/lib/docker
+DIR /srv: 
+DIR /opt: containerd google safe-code 
+DIR /mnt: safe-code 
+DIR /media: 
+DIR /snap: README bare bin core22 core24 firefox gnome-42-2204 gnome-46-2404 gtk-common-themes mesa-2404 snapd 
+DIR /usr/local: bin etc games include lib man sbin share src 
+## write tests
+ro-or-absent /
+ro-or-absent /etc
+ro-or-absent /usr
+ro-or-absent /usr/local
+ro-or-absent /opt
+ro-or-absent /srv
+ro-or-absent /mnt
+ro-or-absent /media
+WRITABLE /dev/shm
+ro-or-absent /var/tmp
+WRITABLE /tmp
+WRITABLE /home
+WRITABLE /home/workspace
+WRITABLE /root
+WRITABLE /run
+ro-or-absent /sys
+ro-or-absent /sys/fs/cgroup
+ro-or-absent /proc/sys/kernel
+WRITABLE /home/workspace/fm/tmp/review-f/work/w-probe
+ro-or-absent /home/workspace/fm/tmp/review-f/work/w-probe/trusted
+ro-or-absent /home/workspace/fm/tmp/review-f/work/w-probe/audited
+ro-or-absent /home/workspace/fm/tmp/review-f/work/w-probe/audited/Chan
+WRITABLE /home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake
+ro-or-absent /home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages
+ro-or-absent /home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/packages/mathlib
+ro-or-absent /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+ro-or-absent /home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0
+ro-or-absent /home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin
+ro-or-absent /home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/lib/lean
+/bin/sh: 19: cannot create /home/workspace/fm/tmp/review-f/work/w-probe/audited/lakefile.toml: Read-only file system
+lakefile.toml not writable
+## writable anywhere (find, depth<=3, excluding /proc /dev /tmp)
+/home
+/home/rf-probe-sentinel
+/home/workspace
+/home/workspace/rf-probe-sentinel
+/home/workspace/.elan
+/home/workspace/fm
+/root
+/root/rf-probe-sentinel
+/run
+/run/rf-probe-sentinel
+/var
+## unshare nested
+unshare: unshare failed: Operation not permitted
+## fds
+total 0
+dr-x------ 2 workspace workspace  6 Nov 25 16:25 .
+dr-xr-xr-x 9 workspace workspace  0 Nov 25 16:25 ..
+lr-x------ 1 workspace workspace 64 Nov 25 16:25 0 -> /dev/null
+l-wx------ 1 workspace workspace 64 Nov 25 16:25 1 -> /home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/probe.txt
+lr-x------ 1 workspace workspace 64 Nov 25 16:25 15 -> /dev/null
+l-wx------ 1 workspace workspace 64 Nov 25 16:25 2 -> /home/workspace/fm/tmp/review-f/work/w-probe/audited/.lake/probe.txt
+lr-x------ 1 workspace workspace 64 Nov 25 16:25 25 -> /dev/null
+lr-x------ 1 workspace workspace 64 Nov 25 16:25 3 -> /proc/226/fd
+## suid
+/usr/bin/chfn
+/usr/bin/chsh
+/usr/bin/fusermount3
+/usr/bin/gpasswd
+/usr/bin/mount
+/usr/bin/ntfs-3g
+/usr/bin/passwd
+/usr/bin/su
+/usr/bin/umount
+/usr/bin/pkexec
+## sockets
+## done

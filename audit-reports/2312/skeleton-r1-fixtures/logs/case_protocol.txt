@@ -1,0 +1,249 @@
+=== P1-import-newline
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 28d08fd04918d1f5089f58a089ef797af20d747e --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P1-import-newline --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 1.0s binary=/home/workspace/fm/tmp/review-f/work/w-P1-import-newline/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/P1.lean:3 禁止导入 «x"]
+["result","headers","green",8]
+["y»
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/P1.lean:3 导入来源不在白名单：«x"]
+["result","headers","green",8]
+["y»
+FM STEP 4 headers RED 0.1s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+
+=== P2-non-utf8
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 44688770daf8ea01cbb8fb474401e060741e59cd --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P2-non-utf8 --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=2
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-P2-non-utf8/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers FAULT 0.1s
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Tried to read file 'Chan/Thm/P2.lean' containing non UTF-8 data.
+FM FAULT headers AUDITOR_OUTPUT headers 缺少结果行（退出 2）
+
+=== P3-nul
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 29395f3867f3dcacb6519277af84115c24d42d32 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P3-nul --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-P3-nul/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 4.3s 
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+mp/review-f/work/w-P3-nul/audited/.lake/build/lib/lean/Chan/Thm/P3.olean -i /home/workspace/fm/tmp/review-f/work/w-P3-nul/audited/.lake/build/lib/lean/Chan/Thm/P3.ilean -c /home/workspace/fm/tmp/review-f/work/w-P3-nul/audited/.lake/build/ir/Chan/Thm/P3.c --setup /home/workspace/fm/tmp/review-f/work/w-P3-nul/audited/.lake/build/ir/Chan/Thm/P3.setup.json --json
+error: Chan/Thm/P3.lean:2:0: expected token
+Some required targets logged failures:
+- Chan.Thm.P3
+error: build failed
+
+=== P3b-empty
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 34f07a343fea4017cd9b99bbcb3b041190d0fcba --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P3b-empty --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.6s binary=/home/workspace/fm/tmp/review-f/work/w-P3b-empty/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers MODULE_FIRST formal_math/Chan/Thm/P3b.lean:1 源码第一条命令必须是 module
+FM STEP 4 headers RED 0.1s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+
+=== P4-decl-newline
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 166a7a81ded46d1bbdbb47902af8ba05c448f426 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P4-decl-newline --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-P4-decl-newline/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.6s 7 个模块都有产物
+FM RED env ENV_AXIOM formal_math/Chan/Thm/P4.lean:\xc2\xaba"]\x0a["result","env","green",8]\x0a["b\xc2\xbb 包内声明是公理
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/P4.lean:\xc2\xaba"]\x0a["result","env","green",8]\x0a["b\xc2\xbb 闭包包含禁用公理 «a"]
+["result","env","green",8]
+["b»
+FM STEP 7 env RED 0.3s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+
+=== P6-init-sentinel
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head cdd584d9dc8bdf6dbb095ee4046c1a8c2cbfc46b --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P6-init-sentinel --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=0
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 8 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-P6-init-sentinel/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 8 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.7s 8 个模块都有产物
+FM STEP 7 env GREEN 0.4s 8 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (22 jobs).
+
+P6: 标准错误里 RF-INIT-RAN 行：
+=== P7-plant-init
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head af2986f12d3ecc0550784793ea5fc9b62df81815 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P7-plant-init --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-P7-plant-init/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build ARTIFACT_ROOT formal_math/.lake/build/lib/lean/Init 产物目录顶层只许内容根
+FM RED build ARTIFACT_ROOT formal_math/.lake/build/lib/lean/Init.olean 产物目录顶层只许内容根
+FM STEP 6 build RED 4.4s 7 个模块都有产物
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+
+=== P7b-plant-symlink-root
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 84b6fe62f6625670fc6053226725dfe2d2dd0835 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P7b-plant-symlink-root --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 8 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-P7b-plant-symlink-root/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 8 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build ARTIFACT_ROOT formal_math/.lake/build/lib/lean/Chan.evil 产物目录顶层只许内容根
+FM RED build ARTIFACT_ROOT formal_math/.lake/build/lib/lean/ChanX 产物目录顶层只许内容根
+FM STEP 6 build RED 4.8s 8 个模块都有产物
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (22 jobs).
+
+=== P8-kill-lake
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 8ddeb16de1566abde3959c1ea2eefe7dde242586 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P8-kill-lake --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-P8-kill-lake/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 137
+FM STEP 6 build RED 5.0s 
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+
+=== P9-symlink-lib
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head d558beff640409fd4ce1e5da53ebe9b19a277860 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P9-symlink-lib --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=0
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 8 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-P9-symlink-lib/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 8 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.7s 8 个模块都有产物
+FM STEP 7 env GREEN 0.4s 8 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (22 jobs).
+
+=== P10-daemon
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 8e896e94a222cf6e7eebf6266728f6a30fba379b --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P10-daemon --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=0
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-P10-daemon/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.4s 7 个模块都有产物
+FM STEP 7 env GREEN 0.4s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+
+（此处两行是 pgrep 匹配到审阅者自己的 shell 命令行，属噪声，已删去）
+（此处两行是 pgrep 匹配到审阅者自己的 shell 命令行，属噪声，已删去）
+P10: late-sentinel 运行结束时= 3 秒后= 现在=1795652848.997 → 后台进程已死
+=== P11-truncate-olean
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 8cf74c87d62f095e12a1aca2edf7d4bd55ab912d --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P11-truncate-olean --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=2
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 8 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-P11-truncate-olean/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 8 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.4s 8 个模块都有产物
+FM STEP 7 env FAULT 0.2s
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (22 jobs).
+uncaught exception: failed to read file '/home/workspace/fm/tmp/review-f/work/w-P11-truncate-olean/audited/.lake/build/lib/lean/ChanExplore/A.olean.private', invalid header
+FM FAULT env AUDITOR_OUTPUT env 审计程序输出不是逐行 JSON（退出 1）
+
+=== P11b-garbage-olean
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 0cec2819c0a39d4cd3ba357de143e2d387899d74 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P11b-garbage-olean --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 8 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-P11b-garbage-olean/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.5s 8 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 5.1s 
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+toolchains/leanprover--lean4---v4.36.0/bin/lean /home/workspace/fm/tmp/review-f/work/w-P11b-garbage-olean/audited/ChanExplore/P11b.lean -o /home/workspace/fm/tmp/review-f/work/w-P11b-garbage-olean/audited/.lake/build/lib/lean/ChanExplore/P11b.olean -i /home/workspace/fm/tmp/review-f/work/w-P11b-garbage-olean/audited/.lake/build/lib/lean/ChanExplore/P11b.ilean -c /home/workspace/fm/tmp/review-f/work/w-P11b-garbage-olean/audited/.lake/build/ir/ChanExplore/P11b.c --setup /home/workspace/fm/tmp/review-f/work/w-P11b-garbage-olean/audited/.lake/build/ir/ChanExplore/P11b.setup.json --json
+error: Lean exited with code 139
+Some required targets logged failures:
+- ChanExplore.P11b
+error: build failed
+
+=== P12-delete-olean
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 57dc9c3eb607d2e6760d44e1e4928ff509f1f552 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P12-delete-olean --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 8 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-P12-delete-olean/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 8 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build NO_ARTIFACT formal_math/ChanExplore/A.lean 默认目标的构建没有产出这个模块的 .olean
+FM STEP 6 build RED 5.1s 8 个模块都有产物
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (22 jobs).
+
+
+=== P10-daemon 重跑（哨兵改为追加写，模块内多等 2 秒；上面那次的哨兵是空文件，不足以下结论）
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b
+rc=0
+--- stdout
+FM STEP 6 build GREEN 7.2s 7 个模块都有产物
+FM STEP 7 env GREEN 0.4s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- stderr(tail)
+.Base (640ms)
+Build completed successfully (20 jobs).
+
+P10: 运行结束时刻=1795654752.735；哨兵行数与末行时间戳：运行结束时=(11, '1795654752.203313175')，3 秒后=(11, '1795654752.203313175') → 后台进程已随沙箱结束

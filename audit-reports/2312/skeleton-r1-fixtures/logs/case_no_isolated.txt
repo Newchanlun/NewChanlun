@@ -1,0 +1,8 @@
+run.py 与被审提交逐字节相同
+--- 不带 -I：
+FM RESULT GREEN (forged by sibling json.py)
+rc=0
+--- 带 -I：
+fatal: cannot change to '/nonexistent': No such file or directory
+FM FAULT prepare GIT rev-parse git 退出 128
+rc=2

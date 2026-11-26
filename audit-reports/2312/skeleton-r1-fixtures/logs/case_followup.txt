@@ -1,0 +1,92 @@
+=== L1-lock-lone-surrogate-key
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 3aaad4964d414e44170870c1eda78673d05f0693 --branch decl/review --workdir /home/workspace/fm/tmp/review-f/work/w-L1-lock-lone-surrogate-key --packages /home/workspa
+rc=1
+--- stdout
+FM STEP 6 build GREEN 4.1s 6 个模块都有产物
+--- stderr(tail)
+lly (18 jobs).
+Traceback (most recent call last):
+  File "/home/workspace/fm/tmp/review-f/work/driver.py", line 12, in <module>
+    sys.exit(run.main(argv, steps=steps))
+             ~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 584, in main
+    for code, obj, msg in sorted(set(reds), key=lambda r: (r[0], show(r[1]), r[2])):
+                          ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 584, in <lambda>
+    for code, obj, msg in sorted(set(reds), key=lambda r: (r[0], show(r[1]), r[2])):
+                                                                 ~~~~^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 45, in show
+    obj = obj if isinstance(obj, bytes) else str(obj).encode("utf-8")
+                                             ~~~~~~~~~~~~~~~^^^^^^^^^
+UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in position 32: surrogates not allowed
+
+=== L2-lock-dup-surrogate-key
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 77bf95311203f47487028e43a6926a985ec3cb96 --branch decl/review --workdir /home/workspace/fm/tmp/review-f/work/w-L2-lock-dup-surrogate-key --packages /home/workspac
+rc=1
+--- stdout
+FM STEP 6 build GREEN 4.0s 6 个模块都有产物
+FM STEP 7 env FAULT 0.0s
+--- stderr(tail)
+s))
+             ~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 580, in main
+    return fault(name, f)
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 550, in fault
+    emit(2, b"FM FAULT", step, code, show(obj), msg)
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 51, in emit
+    data = b" ".join(f if isinstance(f, bytes) else str(f).encode("utf-8") for f in fields) + b"\n"
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py", line 51, in <genexpr>
+    data = b" ".join(f if isinstance(f, bytes) else str(f).encode("utf-8") for f in fields) + b"\n"
+                                                    ~~~~~~~~~~~~~^^^^^^^^^
+UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in position 9: surrogates not allowed
+
+=== L3-lock-dup-newline-key
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 0f7843bb6ecf7cf047a3ab23f995c787cb656333 --branch decl/review --workdir /home/workspace/fm/tmp/review-f/work/w-L3-lock-dup-newline-key --packages /home/workspace/
+rc=2
+--- stdout
+FM STEP 6 build GREEN 3.8s 6 个模块都有产物
+FM STEP 7 env FAULT 0.0s
+--- stderr(tail)
+FM FAULT env INPUT lake-manifest.json/statement-lock.json 无法解读：重复键：a
+FM RESULT GREEN
+
+=== L4-lock-newline-key-removed
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 8c3a0ba487589df455385004b1151d7f84306e6c --branch decl/review --workdir /home/workspace/fm/tmp/review-f/work/w-L4-lock-newline-key-removed --packages /home/worksp
+rc=1
+--- stdout
+FM STEP 6 build GREEN 4.2s 6 个模块都有产物
+FM RED env LOCK_REMOVED formal_math/statement-lock.json:a\x0aFM\x20RESULT\x20GREEN\x20forged 锁定声明不在环境中
+FM STEP 7 env RED 0.3s 6 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+
+=== P9b-symlink-lib
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head a0c8ad1eb438a5791f40e702a32489ad3af083c0 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P9b-symlink-lib --packages /home/workspace/.t3/wor
+rc=1
+--- stdout
+FM RED build ARTIFACT_ROOT formal_math/.lake/build/lib/lean 产物目录不得是符号链接或经由符号链接
+FM STEP 6 build RED 4.6s 8 个模块都有产物
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+
+=== P11c-garbage-olean-renamed
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head c40930a66d487cb7d268af23bd50408d5985b6c1 --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-P11c-garbage-olean-renamed --packages /home/worksp
+rc=2
+--- stdout
+FM STEP 6 build GREEN 4.5s 8 个模块都有产物
+FM STEP 7 env FAULT 0.2s
+--- stderr(tail)
+uncaught exception: failed to read file '/home/workspace/fm/tmp/review-f/work/w-P11c-garbage-olean-renamed/audited/.lake/build/lib/lean/ChanExplore/A.olean', invalid header
+FM FAULT env AUDITOR_OUTPUT env 审计程序输出不是逐行 JSON（退出 1）
+
+=== X1c-defs-no-public-section-locked
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 1a2346dfc9d3aeb438a54d60d5d3fcd31a880726 --branch decl/review --workdir /home/workspace/fm/tmp/review-f/work/w-X1c-defs-no-public-section-locked --packages /home/
+rc=0
+--- stdout
+FM STEP 6 build GREEN 5.8s 7 个模块都有产物
+FM STEP 7 env GREEN 1.2s 7 个模块，1 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- stderr(tail)
+

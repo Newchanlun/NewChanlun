@@ -1,0 +1,39 @@
+=== I1-init
+$ /usr/bin/python3 -I /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head af7fcb7533f3a3ba30931f191e0c6f79e07d421b --branch proof/review --workdir /home/workspace/fm/tmp/review-f/work/w-I1-init --packages /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=af7fcb7533f3a3ba30931f191e0c6f79e07d421b 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 9 个模块，配置取自基线
+FM STEP 3 auditor GREEN 11.5s binary=/home/workspace/fm/tmp/review-f/work/w-I1-init/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 9 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.7s 9 个模块都有产物
+FM RED env ENV_META formal_math/ChanExplore/Sentinel.lean:_private.ChanExplore.Sentinel.0.initFn._@.ChanExplore.Sentinel.3514676293._hygCtx._hyg.2 声明是 meta 元程序
+FM STEP 7 env RED 0.5s 9 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+4] Built ChanTest.Probe (507ms)
+ℹ [22/24] Built ChanExplore.User (331ms)
+info: stderr:
+RF-INIT-RAN app=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean
+Build completed successfully (24 jobs).
+
+标准错误里的初始化器行：
+    RF-INIT-RAN app=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean
+第 6 步后 .lake 下的哨兵： ['rf-init-ran-lean']
+直跑 fm_audit env：rc=1
+stdout:
+["finding","3","formal_math/ChanExplore/Sentinel.lean","_private.ChanExplore.Sentinel.0.initFn._@.ChanExplore.Sentinel.3514676293._hygCtx._hyg.2","ENV_META","声明是 meta 元程序"]
+["result","env","red",9]
+
+stderr:
+
+直跑后 .lake 下的哨兵： []
+正对照（lean --run，loadExts := true）：rc=0 stdout='control-done\n'
+stderr:
+RF-INIT-RAN app=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean
+RF-PLAIN-INIT-RAN app=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean
+
+正对照后 .lake 下的哨兵： ['rf-init-ran-lean']

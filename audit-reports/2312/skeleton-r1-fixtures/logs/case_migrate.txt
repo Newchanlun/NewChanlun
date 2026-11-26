@@ -1,0 +1,466 @@
+=== M2-sorry-warn-off
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 98c51683fd99a48e8551a3a214aa38f059d43ba3 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=98c51683fd99a48e8551a3a214aa38f059d43ba3 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-M2-sorry-warn-off/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.9s 7 个模块都有产物
+FM RED env ENV_SORRY formal_math/Chan/Thm/M2.lean:m2 闭包包含禁用公理 sorryAx
+FM STEP 7 env RED 0.4s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M2b-sorry-plain
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 6066abb70a2d75e96f76184f92a6da1710cddc96 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=6066abb70a2d75e96f76184f92a6da1710cddc96 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-M2b-sorry-plain/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 5.0s 
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+lain/audited/.lake/build/lib/lean /home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /home/workspace/fm/tmp/review-f/work/w-M2b-sorry-plain/audited/Chan/Thm/M2b.lean -o /home/workspace/fm/tmp/review-f/work/w-M2b-sorry-plain/audited/.lake/build/lib/lean/Chan/Thm/M2b.olean -i /home/workspace/fm/tmp/review-f/work/w-M2b-sorry-plain/audited/.lake/build/lib/lean/Chan/Thm/M2b.ilean -c 
+warning: Chan/Thm/M2b.lean:5:8: declaration uses `sorry`
+Some required targets logged failures:
+- Chan.Thm.M2b
+error: build failed
+=== M2c-sorryAx-direct
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head e54d562e530b3738cd5cb2bd141c5debf1583ed8 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=e54d562e530b3738cd5cb2bd141c5debf1583ed8 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-M2c-sorryAx-direct/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.6s 7 个模块都有产物
+FM RED env ENV_SORRY formal_math/Chan/Thm/M2c.lean:m2c 闭包包含禁用公理 sorryAx
+FM STEP 7 env RED 0.4s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M3-native-decide
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 6088d83e62b3f1effb815b71934c144c087121a2 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=6088d83e62b3f1effb815b71934c144c087121a2 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-M3-native-decide/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.8s 7 个模块都有产物
+FM RED env ENV_AXIOM formal_math/Chan/Thm/M3.lean:_private.Chan.Thm.M3.0.m3._native.native_decide.ax_1_1 包内声明是公理
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M3.lean:_private.Chan.Thm.M3.0.m3._native.native_decide.ax_1_1 闭包包含禁用公理 _private.Chan.Thm.M3.0.m3._native.native_decide.ax_1_1
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M3.lean:m3 闭包包含禁用公理 _private.Chan.Thm.M3.0.m3._native.native_decide.ax_1_1
+FM STEP 7 env RED 0.5s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M3b-decide-native
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 257b5923e81b74100d57039db25a4fa73d3a32e0 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=257b5923e81b74100d57039db25a4fa73d3a32e0 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-M3b-decide-native/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.9s 7 个模块都有产物
+FM RED env ENV_AXIOM formal_math/Chan/Thm/M3b.lean:_private.Chan.Thm.M3b.0.m3b._native.decide.ax_1_1 包内声明是公理
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M3b.lean:_private.Chan.Thm.M3b.0.m3b._native.decide.ax_1_1 闭包包含禁用公理 _private.Chan.Thm.M3b.0.m3b._native.decide.ax_1_1
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M3b.lean:m3b 闭包包含禁用公理 _private.Chan.Thm.M3b.0.m3b._native.decide.ax_1_1
+FM STEP 7 env RED 0.4s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M4-unsafe
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 0e570e6a94ae0fed7469f7bb7bf72ff6dee7811e --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=0e570e6a94ae0fed7469f7bb7bf72ff6dee7811e 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.9s binary=/home/workspace/fm/tmp/review-f/work/w-M4-unsafe/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.5s 7 个模块都有产物
+FM RED env ENV_UNSAFE formal_math/Chan/Thm/M4.lean:m4 声明不受内核安全性保证
+FM STEP 7 env RED 0.5s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M5-partial
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head efd98fb37d9d1c04adafb543a27f41a95f9f1ef6 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=efd98fb37d9d1c04adafb543a27f41a95f9f1ef6 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 1.0s binary=/home/workspace/fm/tmp/review-f/work/w-M5-partial/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.8s 7 个模块都有产物
+FM RED env ENV_PARTIAL formal_math/Chan/Thm/M5.lean:m5._unsafe_rec 部分定义（源定义 m5 不是结构／良基递归，也不在派生证书里）
+FM STEP 7 env RED 0.4s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M6-implemented-by
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 5eee7cd250fc42c4f284b7706849a584acbd0ac1 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=5eee7cd250fc42c4f284b7706849a584acbd0ac1 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-M6-implemented-by/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.4s 7 个模块都有产物
+FM RED env ENV_IMPLEMENTED_BY formal_math/Chan/Thm/M6.lean:m6 声明具有 implemented_by 属性
+FM STEP 7 env RED 0.4s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M7-extern
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head cd9f1cd71bbb256f8294641c68c8d37fb9c08efd --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=cd9f1cd71bbb256f8294641c68c8d37fb9c08efd 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 1.0s binary=/home/workspace/fm/tmp/review-f/work/w-M7-extern/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.3s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.3s 7 个模块都有产物
+FM RED env ENV_EXTERN formal_math/Chan/Thm/M7.lean:m7 声明具有 extern 属性
+FM STEP 7 env RED 0.4s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M8-meta
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head dc4fecc924cd9361b47ca9d0bf90f1a33f3e7f65 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=dc4fecc924cd9361b47ca9d0bf90f1a33f3e7f65 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 1.2s binary=/home/workspace/fm/tmp/review-f/work/w-M8-meta/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.4s 7 个模块都有产物
+FM RED env ENV_META formal_math/Chan/Thm/M8.lean:m8 声明是 meta 元程序
+FM STEP 7 env RED 0.5s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M9-private-axiom
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 193d01ae14fe3d80220c2e056587c5e46f45ee9e --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=193d01ae14fe3d80220c2e056587c5e46f45ee9e 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.9s binary=/home/workspace/fm/tmp/review-f/work/w-M9-private-axiom/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.7s 7 个模块都有产物
+FM RED env ENV_AXIOM formal_math/Chan/Thm/M9.lean:_private.Chan.Thm.M9.0.m9 包内声明是公理
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M9.lean:_private.Chan.Thm.M9.0.m9 闭包包含禁用公理 _private.Chan.Thm.M9.0.m9
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M9.lean:m9use 闭包包含禁用公理 _private.Chan.Thm.M9.0.m9
+FM STEP 7 env RED 0.3s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M9b-axiom-in-explore
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head c89accebd628cfe04f01c30ef36a2bc22fd2e005 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=c89accebd628cfe04f01c30ef36a2bc22fd2e005 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.3s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.9s binary=/home/workspace/fm/tmp/review-f/work/w-M9b-axiom-in-explore/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.3s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 5.0s 7 个模块都有产物
+FM RED env ENV_AXIOM formal_math/ChanExplore/M9b.lean:m9b 包内声明是公理
+FM RED env ENV_AXIOM_DEP formal_math/ChanExplore/M9b.lean:m9b 闭包包含禁用公理 m9b
+FM STEP 7 env RED 0.3s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== M9c-axiom-in-instance-proof
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head ff7cbf9ac6188241cdd9bed0c77afa6e38571630 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=ff7cbf9ac6188241cdd9bed0c77afa6e38571630 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-M9c-axiom-in-instance-proof/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 4.6s 7 个模块都有产物
+FM RED env ENV_AXIOM formal_math/Chan/Thm/M9c.lean:m9c 包内声明是公理
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M9c.lean:instInhabitedSubtypeNatEqHAddOfNat_chan 闭包包含禁用公理 m9c
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M9c.lean:instInhabitedSubtypeNatEqHAddOfNat_chan._proof_1 闭包包含禁用公理 m9c
+FM RED env ENV_AXIOM_DEP formal_math/Chan/Thm/M9c.lean:m9c 闭包包含禁用公理 m9c
+FM STEP 7 env RED 0.3s 7 个模块，0 条锁行
+FM RESULT RED 第 7 步 env 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Build completed successfully (20 jobs).
+=== H1-prelude
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 915aafbdc760ecf77c91978c92c5b4ccbd112b8d --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=915aafbdc760ecf77c91978c92c5b4ccbd112b8d 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.9s binary=/home/workspace/fm/tmp/review-f/work/w-H1-prelude/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers PRELUDE formal_math/Chan/Thm/H1.lean:1 禁止 prelude
+FM STEP 4 headers RED 0.1s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H2-meta-import
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 52cd30fb9b4c6bfbd911e2c494f688158948cdf9 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=52cd30fb9b4c6bfbd911e2c494f688158948cdf9 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-H2-meta-import/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/H2.lean:3 禁止导入 Chan.Base
+FM RED headers META_IMPORT formal_math/Chan/Thm/H2.lean:3 禁止 meta import 或 import all：Chan.Base
+FM STEP 4 headers RED 0.1s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H2b-public-meta-import
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 5d931a061323a61b31df25c48a1f5ce03aa65cfc --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=5d931a061323a61b31df25c48a1f5ce03aa65cfc 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-H2b-public-meta-import/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/H2b.lean:3 禁止导入 Chan.Base
+FM RED headers META_IMPORT formal_math/Chan/Thm/H2b.lean:3 禁止 meta import 或 import all：Chan.Base
+FM STEP 4 headers RED 0.3s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H3-import-all
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head c60d9bdcf32517e4cd95beca5ae790cc62b41403 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=c60d9bdcf32517e4cd95beca5ae790cc62b41403 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.9s binary=/home/workspace/fm/tmp/review-f/work/w-H3-import-all/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_ALL formal_math/Chan/Thm/H3.lean:3 禁止 meta import 或 import all：Chan.Base
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/H3.lean:3 禁止导入 Chan.Base
+FM STEP 4 headers RED 0.2s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H4-import-lean
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head cb2495c1a941fc1cee8c2e98a6cb57e36d090a4d --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=cb2495c1a941fc1cee8c2e98a6cb57e36d090a4d 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.9s binary=/home/workspace/fm/tmp/review-f/work/w-H4-import-lean/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_PINNED formal_math/Chan/Thm/H4.lean:3 可信目录不得导入 Lean
+FM STEP 4 headers RED 0.2s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H4b-import-unknown-root
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 010ef3f034d994528ecd251239e69654033c4084 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=010ef3f034d994528ecd251239e69654033c4084 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-H4b-import-unknown-root/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/H4b.lean:3 禁止导入 Foo.Bar
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/H4b.lean:3 导入来源不在白名单：Foo.Bar
+FM STEP 4 headers RED 0.2s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H5-no-module
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head bef7cb49c14119a2266cea19be51efc9b9e8d467 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=bef7cb49c14119a2266cea19be51efc9b9e8d467 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.9s binary=/home/workspace/fm/tmp/review-f/work/w-H5-no-module/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers MODULE_FIRST formal_math/Chan/Thm/H5.lean:1 源码第一条命令必须是 module
+FM STEP 4 headers RED 0.2s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H6-thm-imports-explore
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 17fdd170e80abcab737a1774ca470bcecdd5561d --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=17fdd170e80abcab737a1774ca470bcecdd5561d 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 1.0s binary=/home/workspace/fm/tmp/review-f/work/w-H6-thm-imports-explore/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers IMPORT_EDGE formal_math/Chan/Thm/H6.lean:3 禁止导入 ChanExplore.Base
+FM RED headers IMPORT_SOURCE formal_math/Chan/Thm/H6.lean:3 导入来源不在白名单：ChanExplore.Base
+FM STEP 4 headers RED 0.2s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H7-defs-imports-thm
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head ab5df0bb6a92246fe9acce482d7462ee220bca7b --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=ab5df0bb6a92246fe9acce482d7462ee220bca7b 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM RED precheck PATH_SCOPE formal_math/Chan/Defs proof 角色不得改此路径（A）
+FM RED precheck PATH_SCOPE formal_math/Chan/Defs/H7.lean proof 角色不得改此路径（A）
+FM STEP 1 precheck RED 0.1s 
+FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑
+--- stderr(tail)
+=== H8-whole-mathlib
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 318a0c835263e03a9b2d148028a1f4efaad4707b --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=318a0c835263e03a9b2d148028a1f4efaad4707b 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.7s binary=/home/workspace/fm/tmp/review-f/work/w-H8-whole-mathlib/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers WHOLE_MATHLIB formal_math/Chan/Thm/H8.lean:3 请只导入所需的 Mathlib 子模块
+FM STEP 4 headers RED 0.1s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+=== H9-header-garbage
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head cba0bc37e5c9daeb9d6a8dcf0deb6af6556e56ea --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=cba0bc37e5c9daeb9d6a8dcf0deb6af6556e56ea 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-H9-header-garbage/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM RED headers HEADER_PARSE formal_math/Chan/Thm/H9.lean:1 文件头解析失败
+FM STEP 4 headers RED 0.3s 
+FM RESULT RED 第 4 步 headers 判红，后面的步骤没有跑
+--- stderr(tail)
+Build completed successfully (11 jobs).
+Chan/Thm/H9.lean:3:6: error: unexpected token 'import'; expected identifier
+=== G1-honest-green
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head fa4b4cb91d8e7781698c6a0429bdb8d614d959ab --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=fa4b4cb91d8e7781698c6a0429bdb8d614d959ab 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f/work/w-G1-honest-green/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.2s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+FM STEP 6 build RED 4.6s 
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr(tail)
+d/.lake/build/lib/lean/Chan/Thm/G1.ilean -c /home/workspace/fm/tmp/review-f/work/w-G1-honest-green/audited/.lake/build/ir/Chan/Thm/G1.c --setup /home/workspace/fm/tmp/review-f/work/w-G1-honest-green/audited/.lake/build/ir/Chan/Thm/G1.setup.json --json
+warning: Chan/Thm/G1.lean:18:5: Variable name `h` is not explicitly referenced.
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _h
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+error: Chan/Thm/G1.lean:26:35: Unknown identifier `helper`
+Note: A private declaration `helper` (from the current module) exists but would need to be public to access here.
+Some required targets logged failures:
+- Chan.Thm.G1
+error: build failed
+=== X1-defs-no-public-section
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-279c6aca-c1e9a2095915fa5f/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f/work/warm-auditor/.lake --repo /home/workspace/fm/tmp/review-f/work/repo --base bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 --head 5cd0806333d8216fbfe97a46be4829f1e611e152 --branch proof/review
+rc=1
+--- stdout
+FM MODE baseline trusted=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 base=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22 head=5cd0806333d8216fbfe97a46be4829f1e611e152 受信代码取自基线
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22:formal_math/verification/runner/run.py
+FM RED precheck PATH_SCOPE formal_math/Chan/Defs proof 角色不得改此路径（A）
+FM RED precheck PATH_SCOPE formal_math/Chan/Defs/X1.lean proof 角色不得改此路径（A）
+FM STEP 1 precheck RED 0.1s 
+FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑
+--- stderr(tail)
+名字	退出码	红码	期望
+M2-sorry-warn-off	1	ENV_SORRY	1 ENV_SORRY
+M2b-sorry-plain	1	BUILD_WFAIL	1 BUILD_WFAIL
+M2c-sorryAx-direct	1	ENV_SORRY	1 ENV_SORRY
+M3-native-decide	1	ENV_AXIOM,ENV_AXIOM_DEP	1 ENV_AXIOM,ENV_AXIOM_DEP
+M3b-decide-native	1	ENV_AXIOM,ENV_AXIOM_DEP	1 ENV_AXIOM,ENV_AXIOM_DEP
+M4-unsafe	1	ENV_UNSAFE	1 ENV_UNSAFE
+M5-partial	1	ENV_PARTIAL	1 ENV_PARTIAL
+M6-implemented-by	1	ENV_IMPLEMENTED_BY	1 ENV_IMPLEMENTED_BY
+M7-extern	1	ENV_EXTERN	1 ENV_EXTERN
+M8-meta	1	ENV_META	1 ENV_META
+M9-private-axiom	1	ENV_AXIOM,ENV_AXIOM_DEP	1 ENV_AXIOM,ENV_AXIOM_DEP
+M9b-axiom-in-explore	1	ENV_AXIOM,ENV_AXIOM_DEP	1 ENV_AXIOM,ENV_AXIOM_DEP
+M9c-axiom-in-instance-proof	1	ENV_AXIOM,ENV_AXIOM_DEP	1 ENV_AXIOM,ENV_AXIOM_DEP
+H1-prelude	1	PRELUDE	1 PRELUDE
+H2-meta-import	1	IMPORT_EDGE,META_IMPORT	1 META_IMPORT
+H2b-public-meta-import	1	IMPORT_EDGE,META_IMPORT	1 META_IMPORT
+H3-import-all	1	IMPORT_ALL,IMPORT_EDGE	1 IMPORT_ALL
+H4-import-lean	1	IMPORT_PINNED	1 IMPORT_PINNED
+H4b-import-unknown-root	1	IMPORT_EDGE,IMPORT_SOURCE	1 IMPORT_SOURCE(+IMPORT_EDGE)
+H5-no-module	1	MODULE_FIRST	1 MODULE_FIRST
+H6-thm-imports-explore	1	IMPORT_EDGE,IMPORT_SOURCE	1 IMPORT_EDGE(+IMPORT_SOURCE)
+H7-defs-imports-thm	1	PATH_SCOPE	1 IMPORT_EDGE
+H8-whole-mathlib	1	WHOLE_MATHLIB	1 WHOLE_MATHLIB
+H9-header-garbage	1	HEADER_PARSE	1 HEADER_PARSE 或构建红
+G1-honest-green	1	BUILD_WFAIL	0 -
+X1-defs-no-public-section	1	PATH_SCOPE	旧：1 EXPOSE_SECTION；新：见实测

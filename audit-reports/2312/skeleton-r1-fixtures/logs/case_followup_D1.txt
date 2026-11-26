@@ -1,0 +1,62 @@
+
+=== D1 派生证书等价性：12 个旧必绿夹具
+must_green/g15/r4-w1d-defs-deriving
+   流水线 rc=1 红码=['ENV_PARTIAL', 'EXPOSE_SECTION', 'LOCK_UNLISTED']
+   无证书发现=[('ENV_PARTIAL', 'instBEqRose.beq._unsafe_rec'), ('ENV_PARTIAL', 'instHashableRose.hash._unsafe_rec'), ('ENV_PARTIAL', 'instOrdRose.ord._unsafe_rec'), ('ENV_PARTIAL', 'instReprRose.repr._unsafe_rec'), ('EXPOSE_SECTION', 'instHashableBar.hash'), ('EXPOSE_SECTION', 'instHashableDir.hash'), ('EXPOSE_SECTION', 'instReprBar.repr'), ('EXPOSE_SECTION', 'instReprDir.repr')]
+   证书名单=['instBEqRose.beq', 'instHashableBar.hash', 'instHashableDir.hash', 'instHashableRose.hash', 'instOrdRose.ord', 'instReprBar.repr', 'instReprDir.repr', 'instReprRose.repr']
+   给证书后 rc=0 剩余发现=[]
+must_green/g2/generated-auxiliaries
+   流水线 rc=1 红码=['ENV_PARTIAL']
+   无证书发现=[('ENV_PARTIAL', 'Shapes.instBEqA.beq_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instBEqA.beq_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instBEqB.beq_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instBEqB.beq_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instBEqTree.beq._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableA.hash_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableA.hash_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableB.hash_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableB.hash_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableTree.hash._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdA.ord_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdA.ord_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdB.ord_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdB.ord_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdTree.ord._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instReprA.repr_1._unsaf
+   证书名单=['Shapes.instBEqA.beq_1', 'Shapes.instBEqA.beq_2', 'Shapes.instBEqB.beq_1', 'Shapes.instBEqB.beq_2', 'Shapes.instBEqTree.beq', 'Shapes.instHashableA.hash_1', 'Shapes.instHashableA.hash_2', 'Shapes.instHashableB.hash_1', 'Shapes.instHashableB.hash_2', 'Shapes.instHashableTree.hash', 'Shapes.instOrdA.ord_1', 'Shapes.instOrdA.ord_2', 'Shapes.instOrdB.ord_1', 'Shapes.instOrdB.ord_2', 'Shapes.instOrdTree.ord', 'Shapes.instReprA.repr_1', 'Shapes.instReprA.repr_2', 'Shapes.instReprB.repr_1', 'Shapes.instReprB.repr_2', 'Shapes.instReprTree.repr']
+   给证书后 rc=0 剩余发现=[]
+must_green/g2/r3-a7b-mutual-deriving
+   流水线 rc=1 红码=['ENV_PARTIAL']
+   无证书发现=[('ENV_PARTIAL', 'instReprTreeA.repr_1._unsafe_rec'), ('ENV_PARTIAL', 'instReprTreeA.repr_2._unsafe_rec'), ('ENV_PARTIAL', 'instReprTreeB.repr_1._unsafe_rec'), ('ENV_PARTIAL', 'instReprTreeB.repr_2._unsafe_rec')]
+   证书名单=['instReprTreeA.repr_1', 'instReprTreeA.repr_2', 'instReprTreeB.repr_1', 'instReprTreeB.repr_2']
+   给证书后 rc=0 剩余发现=[]
+must_green/g2/r4-w1a-plain-rec-ord
+   流水线 rc=1 红码=['ENV_PARTIAL']
+   无证书发现=[('ENV_PARTIAL', 'instOrdBinTree.ord._unsafe_rec')]
+   证书名单=['instOrdBinTree.ord']
+   给证书后 rc=0 剩余发现=[]
+must_green/g2/r4-w2-w3-proofs
+   流水线 rc=1 红码=['ENV_PARTIAL', 'LOCK_UNLISTED']
+   无证书发现=[('ENV_PARTIAL', 'instBEqExprA.beq_1._unsafe_rec'), ('ENV_PARTIAL', 'instBEqExprA.beq_2._unsafe_rec'), ('ENV_PARTIAL', 'instBEqExprB.beq_1._unsafe_rec'), ('ENV_PARTIAL', 'instBEqExprB.beq_2._unsafe_rec'), ('ENV_PARTIAL', 'instHashableExprA.hash_1._unsafe_rec'), ('ENV_PARTIAL', 'instHashableExprA.hash_2._unsafe_rec'), ('ENV_PARTIAL', 'instHashableExprB.hash_1._unsafe_rec'), ('ENV_PARTIAL', 'instHashableExprB.hash_2._unsafe_rec'), ('ENV_PARTIAL', 'instOrdExprA.ord_1._unsafe_rec'), ('ENV_PARTIAL', 'instOrdExprA.ord_2._unsafe_rec'), ('ENV_PARTIAL', 'instOrdExprB.ord_1._unsafe_rec'), ('ENV_PARTIAL', 'instOrdExprB.ord_2._unsafe_rec'), ('ENV_PARTIAL', 'instReprExprA.repr_1._unsafe_rec'), ('ENV_PARTIAL', 'instReprExprA.repr_2._unsafe_rec'), ('ENV_PARTIAL', 'instReprExprB.repr_1._unsafe_rec'), ('ENV_PARTIAL', 'instReprExprB.repr_2._unsafe_rec')]
+   证书名单=['instBEqExprA.beq_1', 'instBEqExprA.beq_2', 'instBEqExprB.beq_1', 'instBEqExprB.beq_2', 'instHashableExprA.hash_1', 'instHashableExprA.hash_2', 'instHashableExprB.hash_1', 'instHashableExprB.hash_2', 'instOrdExprA.ord_1', 'instOrdExprA.ord_2', 'instOrdExprB.ord_1', 'instOrdExprB.ord_2', 'instReprExprA.repr_1', 'instReprExprA.repr_2', 'instReprExprB.repr_1', 'instReprExprB.repr_2']
+   给证书后 rc=0 剩余发现=[]
+must_green/g3/generated-auxiliaries
+   流水线 rc=1 红码=['ENV_PARTIAL']
+   无证书发现=[('ENV_PARTIAL', 'Shapes.instBEqA.beq_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instBEqA.beq_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instBEqB.beq_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instBEqB.beq_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instBEqTree.beq._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableA.hash_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableA.hash_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableB.hash_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableB.hash_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instHashableTree.hash._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdA.ord_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdA.ord_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdB.ord_1._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdB.ord_2._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instOrdTree.ord._unsafe_rec'), ('ENV_PARTIAL', 'Shapes.instReprA.repr_1._unsaf
+   证书名单=['Shapes.instBEqA.beq_1', 'Shapes.instBEqA.beq_2', 'Shapes.instBEqB.beq_1', 'Shapes.instBEqB.beq_2', 'Shapes.instBEqTree.beq', 'Shapes.instHashableA.hash_1', 'Shapes.instHashableA.hash_2', 'Shapes.instHashableB.hash_1', 'Shapes.instHashableB.hash_2', 'Shapes.instHashableTree.hash', 'Shapes.instOrdA.ord_1', 'Shapes.instOrdA.ord_2', 'Shapes.instOrdB.ord_1', 'Shapes.instOrdB.ord_2', 'Shapes.instOrdTree.ord', 'Shapes.instReprA.repr_1', 'Shapes.instReprA.repr_2', 'Shapes.instReprB.repr_1', 'Shapes.instReprB.repr_2', 'Shapes.instReprTree.repr']
+   给证书后 rc=0 剩余发现=[]
+must_green/g3/r3-a7b-mutual-deriving
+   流水线 rc=1 红码=['ENV_PARTIAL']
+   无证书发现=[('ENV_PARTIAL', 'instReprTreeA.repr_1._unsafe_rec'), ('ENV_PARTIAL', 'instReprTreeA.repr_2._unsafe_rec'), ('ENV_PARTIAL', 'instReprTreeB.repr_1._unsafe_rec'), ('ENV_PARTIAL', 'instReprTreeB.repr_2._unsafe_rec')]
+   证书名单=['instReprTreeA.repr_1', 'instReprTreeA.repr_2', 'instReprTreeB.repr_1', 'instReprTreeB.repr_2']
+   给证书后 rc=0 剩余发现=[]
+must_green/g3/r4-w1a-plain-rec-ord
+   流水线 rc=1 红码=['ENV_PARTIAL']
+   无证书发现=[('ENV_PARTIAL', 'instOrdBinTree.ord._unsafe_rec')]
+   证书名单=['instOrdBinTree.ord']
+   给证书后 rc=0 剩余发现=[]
+must_green/g3/r4-w1c-ns-private-deriving
+   流水线 rc=1 红码=['ENV_PARTIAL']
+   无证书发现=[('ENV_PARTIAL', 'Bar.instBEqRose.beq._unsafe_rec'), ('ENV_PARTIAL', 'Bar.instHashableRose.hash._unsafe_rec'), ('ENV_PARTIAL', 'Bar.instOrdRose.ord._unsafe_rec'), ('ENV_PARTIAL', 'Bar.instReprRose.repr._unsafe_rec'), ('ENV_PARTIAL', '_private.Chan.Exec.NsDerive.0.instBEqPrivRose.beq._unsafe_rec'), ('ENV_PARTIAL', '_private.Chan.Exec.NsDerive.0.instHashablePrivRose.hash._unsafe_rec'), ('ENV_PARTIAL', '_private.Chan.Exec.NsDerive.0.instOrdPrivRose.ord._unsafe_rec'), ('ENV_PARTIAL', '_private.Chan.Exec.NsDerive.0.instReprPrivRose.repr._unsafe_rec'), ('ENV_PARTIAL', 'instBEqParamRose.beq._unsafe_rec'), ('ENV_PARTIAL', 'instHashableParamRose.hash._unsafe_rec'), ('ENV_PARTIAL', 'instOrdParamRose.ord._unsafe_rec'), ('ENV_PARTIAL', 'instReprParamRose.repr._unsafe_rec')]
+   证书名单=['Bar.instBEqRose.beq', 'Bar.instHashableRose.hash', 'Bar.instOrdRose.ord', 'Bar.instReprRose.repr', '_private.Chan.Exec.NsDerive.0.instBEqPrivRose.beq', '_private.Chan.Exec.NsDerive.0.instHashablePrivRose.hash', '_private.Chan.Exec.NsDerive.0.instOrdPrivRose.ord', '_private.Chan.Exec.NsDerive.0.instReprPrivRose.repr', 'instBEqParamRose.beq', 'instHashableParamRose.hash', 'instOrdParamRose.ord', 'instReprParamRose.repr']
+   给证书后 rc=0 剩余发现=[]
+must_green/g3/r4-w1d-defs-deriving
+   流水线 rc=1 红码=['ENV_PARTIAL', 'EXPOSE_SECTION', 'LOCK_UNLISTED']
+   无证书发现=[('ENV_PARTIAL', 'instBEqRose.beq._unsafe_rec'), ('ENV_PARTIAL', 'instHashableRose.hash._unsafe_rec'), ('ENV_PARTIAL', 'instOrdRose.ord._unsafe_rec'), ('ENV_PARTIAL', 'instReprRose.repr._unsafe_rec'), ('EXPOSE_SECTION', 'instHashableBar.hash'), ('EXPOSE_SECTION', 'instHashableDir.hash'), ('EXPOSE_SECTION', 'instReprBar.repr'), ('EXPOSE_SECTION', 'instReprDir.repr')]
+   证书名单=['instBEqRose.beq', 'instHashableBar.hash', 'instHashableDir.hash', 'instHashableRose.hash', 'instOrdRose.ord', 'instReprBar.repr', 'instReprDir.repr', 'instReprRose.repr']
+   给证书后 rc=0 剩余发现=[]
+must_green/g3/r4-w1e-ns-param-deriving
+   流水线 rc=1 红码=['ENV_PARTIAL']
+   无证书发现=[('ENV_PARTIAL', 'Bar.instReprTree.repr._unsafe_rec')]
+   证书名单=['Bar.instReprTree.repr']
+   给证书后 rc=0 剩余发现=[]
+must_green/g3/r4-w2-w3-proofs
+   流水线 rc=1 红码=['ENV_PARTIAL', 'LOCK_UNLISTED']
+   无证书发现=[('ENV_PARTIAL', 'instBEqExprA.beq_1._unsafe_rec'), ('ENV_PARTIAL', 'instBEqExprA.beq_2._unsafe_rec'), ('ENV_PARTIAL', 'instBEqExprB.beq_1._unsafe_rec'), ('ENV_PARTIAL', 'instBEqExprB.beq_2._unsafe_rec'), ('ENV_PARTIAL', 'instHashableExprA.hash_1._unsafe_rec'), ('ENV_PARTIAL', 'instHashableExprA.hash_2._unsafe_rec'), ('ENV_PARTIAL', 'instHashableExprB.hash_1._unsafe_rec'), ('ENV_PARTIAL', 'instHashableExprB.hash_2._unsafe_rec'), ('ENV_PARTIAL', 'instOrdExprA.ord_1._unsafe_rec'), ('ENV_PARTIAL', 'instOrdExprA.ord_2._unsafe_rec'), ('ENV_PARTIAL', 'instOrdExprB.ord_1._unsafe_rec'), ('ENV_PARTIAL', 'instOrdExprB.ord_2._unsafe_rec'), ('ENV_PARTIAL', 'instReprExprA.repr_1._unsafe_rec'), ('ENV_PARTIAL', 'instReprExprA.repr_2._unsafe_rec'), ('ENV_PARTIAL', 'instReprExprB.repr_1._unsafe_rec'), ('ENV_PARTIAL', 'instReprExprB.repr_2._unsafe_rec')]
+   证书名单=['instBEqExprA.beq_1', 'instBEqExprA.beq_2', 'instBEqExprB.beq_1', 'instBEqExprB.beq_2', 'instHashableExprA.hash_1', 'instHashableExprA.hash_2', 'instHashableExprB.hash_1', 'instHashableExprB.hash_2', 'instOrdExprA.ord_1', 'instOrdExprA.ord_2', 'instOrdExprB.ord_1', 'instOrdExprB.ord_2', 'instReprExprA.repr_1', 'instReprExprA.repr_2', 'instReprExprB.repr_1', 'instReprExprB.repr_2']
+   给证书后 rc=0 剩余发现=[]

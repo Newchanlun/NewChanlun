@@ -1,0 +1,13 @@
+通过	语料 must_red/g6a/opaque-type（声明锁）	rc=1 红码=LOCK_CHANGED 故障=—	期望 rc=1 步=env 码=LOCK_CHANGED
+通过	语料 must_red/g6a/changed-constant（声明锁）	rc=1 红码=LOCK_CHANGED 故障=—	期望 rc=1 步=env 码=LOCK_CHANGED
+通过	语料 must_red/g6a/def-to-abbrev（声明锁）	rc=1 红码=LOCK_CHANGED 故障=—	期望 rc=1 步=env 码=LOCK_CHANGED
+通过	语料 must_red/g6a/theorem-to-axiom（声明锁）	rc=1 红码=ENV_AXIOM,ENV_AXIOM_DEP,LOCK_CHANGED 故障=—	期望 rc=1 步=env 码=ENV_AXIOM,ENV_AXIOM_DEP,LOCK_CHANGED
+通过	语料 must_red/g6a/removed（声明锁）	rc=1 红码=LOCK_REMOVED 故障=—	期望 rc=1 步=env 码=LOCK_REMOVED
+通过	语料 must_red/g6a/unlisted（声明锁）	rc=1 红码=LOCK_UNLISTED 故障=—	期望 rc=1 步=env 码=LOCK_UNLISTED
+通过	语料 must_green/g6a/alpha-rename（声明锁）	rc=0 红码=— 故障=—	期望 rc=0 步=- 码=—
+通过	语料 must_green/g6a/opaque-type（声明锁）	rc=0 红码=— 故障=—	期望 rc=0 步=- 码=—
+通过	语料 must_green/g6a/def-to-abbrev（声明锁）	rc=0 红码=— 故障=—	期望 rc=0 步=- 码=—
+通过	语料 must_green/g6a/original（声明锁）	rc=0 红码=— 故障=—	期望 rc=0 步=- 码=—
+通过	语料 must_green/g6a/theorem-to-axiom（声明锁）	rc=0 红码=— 故障=—	期望 rc=0 步=- 码=—
+通过	语料 must_green/g6a/r4-p9a-let-vs-have（声明锁）	rc=0 红码=— 故障=—	期望 rc=0 步=- 码=—
+自测：12/12 通过

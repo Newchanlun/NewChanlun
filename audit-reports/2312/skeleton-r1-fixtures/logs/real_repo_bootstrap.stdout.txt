@@ -1,0 +1,10 @@
+FM MODE bootstrap trusted=be069d974f8f4539fbc6c087fa3a3e1bbb6736c5 base=594e49b5ec034461f9196c6cfb0c58fe017e8dc5 head=be069d974f8f4539fbc6c087fa3a3e1bbb6736c5 自举模式：受信代码取自调用方指定的提交，不保证来自主干
+FM RUNNER blob=15d7dc1c2ee88b687b0750403fa595c9dd018712 from=be069d974f8f4539fbc6c087fa3a3e1bbb6736c5:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.2s role=infra
+FM STEP 2 fetch GREEN 0.3s 受信 1061 个文件，内容 3 个模块，配置取自基线
+FM STEP 3 auditor GREEN 9.6s binary=/home/workspace/fm/tmp/review-f/work/w-real/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 3 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 8.0s 3 个模块都有产物
+FM STEP 7 env GREEN 3.4s 3 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）

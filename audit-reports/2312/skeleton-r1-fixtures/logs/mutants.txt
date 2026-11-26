@@ -1,0 +1,16 @@
+# 第一轮（一次 flock 内连续跑；MU3a 一项已中止并从脚本删除，见报告第九节）
+MU0-unmodified                     selftest rc=0 自测：22/22 通过 失败用例=无
+MU1-no-runner-mismatch             selftest rc=1 自测：21/22 通过 失败用例=['S13 正在运行的 run.py 与受信提交不同：退 2']
+MU2-no-module-count                selftest rc=1 自测：21/22 通过 失败用例=['S5 审计程序输出被篡改（env-count）退 2']
+
+# 第二轮（每个变异单独取锁；名字后的数字是骨架用例序号子集，无数字为全部 22 个骨架用例）
+MU5-continue-after-red:1,9,10,14,17 rc=0 自测（子集 1,9,10,14,17）：0/5 通过 失败用例=['S2 R5-B1 劫持在第 1 步预检判红，后续步骤没跑', 'S6a 第 4 步判红后第 5–7 步没跑（无步骤行，构建目录不存在）', 'S6b 第 6 步构建判红后第 7 步没跑', 'S10 --until 1 遇红仍退 1', 'S14 被审提交在 Chan/Thm/ 下放 lakefile.lean：第 1 步 LAKE_FILE']
+MU10-exit-code-trusted:4,5,6,7,8   rc=0 自测（子集 4,5,6,7,8）：3/5 通过 失败用例=['S5 审计程序输出被篡改（env-verdict）退 2', 'S5 审计程序输出被篡改（env-exit）退 2']
+MU3b-trusted-writable-in-build:2,11 rc=0 自测（子集 2,11）：1/2 通过 失败用例=['S7 被审代码在构建期执行，但被审工作区之外没有被写入（四个哨兵、初始化器、仓库快照）']
+MU3c-audited-writable-in-build:0,2,11 rc=0 自测（子集 0,2,11）：3/3 通过 失败用例=无
+MU7-network-shared:0,11            rc=0 自测（子集 0,11）：2/2 通过 失败用例=无
+MU8-no-clearenv:0,11               rc=0 自测（子集 0,11）：2/2 通过 失败用例=无
+MU9-no-artifact-check:0,10         rc=0 自测（子集 0,10）：2/2 通过 失败用例=无
+MU11-no-hidden-dirs:0,2,11         rc=0 自测（子集 0,2,11）：3/3 通过 失败用例=无
+MU4-no-artifact-root               rc=0 自测：22/22 通过 失败用例=无
+MU6-auditor-loads-exts             rc=0 自测：22/22 通过 失败用例=无

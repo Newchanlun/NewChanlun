@@ -1,0 +1,40 @@
+无参数                          rc=2 | out:  | err: FM FAULT prepare USAGE --repo 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <
+只有 --help                      rc=2 | out:  | err: FM FAULT prepare USAGE --help 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <
+缺 --workdir                      rc=2 | out:  | err: FM FAULT prepare USAGE --workdir 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --hea
+--until 0                          rc=2 | out:  | err: FM FAULT prepare USAGE --until 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head 
+--until 07                         rc=2 | out:  | err: FM FAULT prepare USAGE --until 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head 
+--until 全角７                  rc=2 | out:  | err: FM FAULT prepare USAGE --until 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head 
+--until 1（绿）                 rc=2 | out: FM RESULT PARTIAL 只跑到第 1 步，没有做完整判定 | err: 
+--until 2（绿）                 rc=2 | out: FM RESULT PARTIAL 只跑到第 2 步，没有做完整判定 | err: 
+空值 --branch ''                 rc=2 | out:  | err: FM FAULT prepare USAGE --branch 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head
+值以 - 开头                    rc=2 | out:  | err: FM FAULT prepare USAGE --branch 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head
+放行开关重复                 rc=2 | out:  | err: FM FAULT prepare USAGE --trusted-change-approved 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --b
+仓库不存在                    rc=2 | out:  | err: FM FAULT prepare GIT rev-parse git 退出 128
+仓库是文件                    rc=2 | out:  | err: FM FAULT prepare GIT rev-parse git 退出 128
+基线解析不出                 rc=2 | out:  | err: FM FAULT prepare BAD_REV deadbeef 解析不出提交
+基线是树对象                 rc=2 | out:  | err: FM FAULT prepare BAD_REV bbadf9a57b94771ebeaeb53bd1ad119dbc28ec22^{tree} 解析不出提交
+被审=基线                      rc=2 | out: FM RESULT PARTIAL 只跑到第 2 步，没有做完整判定 | err: 
+基线不是祖先（对调）     rc=2 | out: FM STEP 1 precheck FAULT 0.1s | err: FM FAULT precheck PRECHECK_EXIT precheck.py 预检退出 2，输出 0 行，无法解读为绿或红
+依赖目录不存在              rc=2 | out:  | err: FM FAULT prepare PACKAGES /nonexistent 依赖目录不存在
+依赖目录是文件              rc=2 | out:  | err: FM FAULT prepare PACKAGES /etc/passwd 依赖目录不存在
+依赖目录空（缺包）        rc=1 | out: FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑 | err: 
+工作目录=/                     rc=2 | out:  | err: FM FAULT prepare WORKDIR / 工作目录必须在仓库检出、git 目录与依赖目录之外，且互不包含
+工作目录是文件              rc=2 | out:  | err: FM FAULT prepare WORKDIR /etc/passwd 工作目录须不存在或为空目录
+工作目录在依赖目录里     rc=2 | out:  | err: FM FAULT prepare WORKDIR /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/rf-x 工作目录必须在仓库检出、git 目录与依赖目录
+工作目录包含仓库           rc=2 | out:  | err: FM FAULT prepare WORKDIR /home/workspace/fm/tmp/review-f/work 工作目录必须在仓库检出、git 目录与依赖目录之外，且互不包含
+工作目录在 .git 里           rc=2 | out:  | err: FM FAULT prepare WORKDIR /home/workspace/fm/tmp/review-f/work/repo/.git/rf-x 工作目录必须在仓库检出、git 目录与依赖目录之外，且互不包含
+工作目录是指向空目录的符号链接 rc=2 | out:  | err: FM FAULT prepare WORKDIR /home/workspace/fm/tmp/review-f/work/link-target 工作目录须不存在或为空目录
+工作目录的父目录不存在  rc=2 | out:  | err: FM FAULT prepare INTERNAL - FileNotFoundError: [Errno 2] No such file or directory: '/home/workspace/fm/tmp/review-f/work/no/such/parent'
+工作目录是相对路径        rc=2 | out: FM RESULT PARTIAL 只跑到第 1 步，没有做完整判定 | err: 
+工作目录含非 UTF-8 字节    rc=2 | out:  | err: FM FAULT prepare INTERNAL - FileNotFoundError: [Errno 2] No such file or directory: '/home/workspace/fm/tmp/review-f/work/a-bad-\udcff/x'
+工作目录含非 UTF-8（已存在非空） rc=1 | out:  | err: UnicodeEncodeError: 'utf-8' codec can't encode character '\udcff' in position 39: surrogates not allowed
+依赖目录含非 UTF-8 且不存在 rc=1 | out:  | err: UnicodeEncodeError: 'utf-8' codec can't encode character '\udcff' in position 13: surrogates not allowed
+分支名含换行                 rc=1 | out: FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | err: 
+分支名非 UTF-8                 rc=1 | out: FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | err: 
+分支名无角色                 rc=1 | out: FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑 | err: 
+自举指向解析不出的提交  rc=2 | out:  | err: FM FAULT prepare BAD_REV nope 解析不出提交
+自举指向被审提交（--until 2） rc=2 | out: FM RESULT PARTIAL 只跑到第 2 步，没有做完整判定 | err: 
+标准输出=/dev/full（全流程，应退 2）   rc=2 | err: FM FAULT output OUTPUT stdout 输出写不出：[Errno 28] No space left on device
+标准输出关闭（全流程，应退 2）        rc=2 | err: FM FAULT output OUTPUT stdout 输出写不出：[Errno 9] Bad file descriptor
+标准错误关闭（全流程）                rc=0 | out: FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+标准输出管道提前关闭（全流程）        rc=2 | err: FM FAULT output OUTPUT stdout 输出写不出：[Errno 32] Broken pipe

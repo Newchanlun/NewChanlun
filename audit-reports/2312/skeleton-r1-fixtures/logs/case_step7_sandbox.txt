@@ -1,0 +1,38 @@
+=== 第 4 步挂载 rc=0
+只读     /home/workspace/fm/tmp/review-f/work/w-green/audited
+只读     /home/workspace/fm/tmp/review-f/work/w-green/audited/Chan
+只读     /home/workspace/fm/tmp/review-f/work/w-green/audited/.lake
+只读     /home/workspace/fm/tmp/review-f/work/w-green/audited/.lake/build/lib/lean
+只读     /home/workspace/fm/tmp/review-f/work/w-green/trusted
+只读     /home/workspace/fm/tmp/review-f/work/w-green/trusted/verification/auditor/.lake/build/bin
+不存在   /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+不存在   /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/mathlib
+WRITABLE /home/workspace/fm/tmp/review-f/work/w-green
+WRITABLE /tmp
+WRITABLE /home
+WRITABLE /home/workspace
+只读     /home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0
+env: A=/home/workspace/fm/tmp/review-f/work/w-green/audited HOME=/tmp/home LANG=C.UTF-8 P=/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages PATH=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin:/usr/bin:/bin PWD=/home/workspace/fm/tmp/review-f/work/w-green/audited T=/home/workspace/fm/tmp/review-f/work/w-green/trusted TMPDIR=/tmp W=/home/workspace/fm/tmp/review-f/work/w-green X=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0 
+NET-CLOSED
+audited
+trusted
+
+=== 第 7 步挂载 rc=0
+只读     /home/workspace/fm/tmp/review-f/work/w-green/audited
+只读     /home/workspace/fm/tmp/review-f/work/w-green/audited/Chan
+只读     /home/workspace/fm/tmp/review-f/work/w-green/audited/.lake
+只读     /home/workspace/fm/tmp/review-f/work/w-green/audited/.lake/build/lib/lean
+只读     /home/workspace/fm/tmp/review-f/work/w-green/trusted
+只读     /home/workspace/fm/tmp/review-f/work/w-green/trusted/verification/auditor/.lake/build/bin
+只读     /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages
+只读     /home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/mathlib
+WRITABLE /home/workspace/fm/tmp/review-f/work/w-green
+WRITABLE /tmp
+WRITABLE /home
+WRITABLE /home/workspace
+只读     /home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0
+env: A=/home/workspace/fm/tmp/review-f/work/w-green/audited HOME=/tmp/home LANG=C.UTF-8 LEAN_PATH=x LEAN_SYSROOT=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0 P=/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages PATH=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0/bin:/usr/bin:/bin PWD=/home/workspace/fm/tmp/review-f/work/w-green/audited T=/home/workspace/fm/tmp/review-f/work/w-green/trusted TMPDIR=/tmp W=/home/workspace/fm/tmp/review-f/work/w-green X=/home/workspace/.elan/toolchains/leanprover--lean4---v4.36.0 
+NET-CLOSED
+audited
+trusted
+
