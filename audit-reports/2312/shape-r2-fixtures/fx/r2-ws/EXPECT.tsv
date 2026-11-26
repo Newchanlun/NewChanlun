@@ -1,0 +1,15 @@
+Chan/Thm/WSpaceInside.lean	SHAPE_FORBIDDEN
+Chan/Thm/WNoSpace.lean	SHAPE_FORBIDDEN
+Chan/Thm/WNewlines.lean	SHAPE_FORBIDDEN
+Chan/Thm/WLineComment.lean	SHAPE_FORBIDDEN
+Chan/Thm/WBlockComments.lean	SHAPE_FORBIDDEN
+Chan/Thm/WLineCommentBeforeAssign.lean	SHAPE_FORBIDDEN
+Chan/Thm/WNestedBlockComment.lean	SHAPE_FORBIDDEN
+Chan/Thm/WSimpConfigSpaces.lean	SHAPE_FORBIDDEN
+Chan/Thm/WPlausibleNewline.lean	SHAPE_FORBIDDEN
+Chan/Thm/WPlausibleBlock.lean	SHAPE_FORBIDDEN
+Chan/Thm/WCongrNewline.lean	SHAPE_FORBIDDEN
+Chan/Thm/WSimpNewStyleBlock.lean	SHAPE_FORBIDDEN
+Chan/Thm/WSimpNewStyleNewline.lean	SHAPE_FORBIDDEN
+Chan/Thm/WClauseOnNextLine.lean	SHAPE_FORBIDDEN
+Chan/Thm/WDocCommentBetween.lean	SHAPE_FORBIDDEN

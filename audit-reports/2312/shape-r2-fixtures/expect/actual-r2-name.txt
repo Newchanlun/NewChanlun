@@ -1,0 +1,34 @@
+Chan/Thm/NAesopCapital.lean                          cmds=1   SHAPE_PARSE
+      L8 SHAPE_PARSE 解析失败：unexpected identifier; expected 'add', 'config', 'erase', 'rule_sets' or 'simp_config'
+Chan/Thm/NAesopConfigPrime.lean                      cmds=1   SHAPE_PARSE
+      L8 SHAPE_PARSE 解析失败：unexpected identifier; expected 'add', 'config', 'erase', 'rule_sets' or 'simp_config'
+Chan/Thm/NAesopGuillemet.lean                        cmds=1   SHAPE_PARSE
+      L8 SHAPE_PARSE 解析失败：unexpected identifier; expected 'add', 'config', 'erase', 'rule_sets' or 'simp_config'
+Chan/Thm/NAesopMyConfig.lean                         cmds=1   SHAPE_PARSE
+      L8 SHAPE_PARSE 解析失败：unexpected identifier; expected 'add', 'config', 'erase', 'rule_sets' or 'simp_config'
+Chan/Thm/NAesopNamespaced.lean                       cmds=1   SHAPE_PARSE
+      L8 SHAPE_PARSE 解析失败：unexpected identifier; expected 'add', 'config', 'erase', 'rule_sets' or 'simp_config'
+Chan/Thm/NCapitalConfig.lean                         cmds=2   GREEN
+Chan/Thm/NConfigPrime.lean                           cmds=2   GREEN
+Chan/Thm/NConfigUnderscore.lean                      cmds=2   GREEN
+Chan/Thm/NConfigs.lean                               cmds=2   GREEN
+Chan/Thm/NGuillemetConfig.lean                       cmds=2   SHAPE_FORBIDDEN
+      L7 SHAPE_FORBIDDEN 禁用旧式配置子句 (config := …)
+Chan/Thm/NGuillemetDottedConfig.lean                 cmds=2   GREEN
+Chan/Thm/NGuillemetSpaceConfig.lean                  cmds=2   GREEN
+Chan/Thm/NMyConfig.lean                              cmds=2   SHAPE_FORBIDDEN
+      L7 SHAPE_FORBIDDEN 禁用旧式配置子句 (my_config := …)
+Chan/Thm/NNamespacedConfig.lean                      cmds=2   SHAPE_FORBIDDEN
+      L7 SHAPE_FORBIDDEN 禁用旧式配置子句 (X.config := …)
+Chan/Thm/NPlausibleGuillemet.lean                    cmds=2   SHAPE_PARSE
+      L8 SHAPE_PARSE 解析失败：unexpected token '('; expected command
+Chan/Thm/NPlausibleSimpConfig.lean                   cmds=2   SHAPE_PARSE
+      L8 SHAPE_PARSE 解析失败：unexpected token '('; expected command
+Chan/Thm/NReconfig.lean                              cmds=2   SHAPE_FORBIDDEN
+      L7 SHAPE_FORBIDDEN 禁用旧式配置子句 (reconfig := …)
+Chan/Thm/NRootConfig.lean                            cmds=2   SHAPE_FORBIDDEN
+      L7 SHAPE_FORBIDDEN 禁用旧式配置子句 (_root_.config := …)
+Chan/Thm/NSimpConfigAesop.lean                       cmds=2   SHAPE_FORBIDDEN
+      L8 SHAPE_FORBIDDEN 禁用旧式配置子句 (simp_config := …)
+Chan/Thm/NTermConfigItem.lean                        cmds=2   GREEN
+Chan/Thm/NUpperCONFIG.lean                           cmds=2   GREEN

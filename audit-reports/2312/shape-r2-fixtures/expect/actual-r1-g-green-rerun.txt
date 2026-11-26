@@ -1,0 +1,4 @@
+Chan/Defs/Core.lean                                  cmds=20  GREEN
+Chan/Final/Report.lean                               cmds=6   GREEN
+Chan/Thm/Basic.lean                                  cmds=38  GREEN
+ChanTest/Probe.lean                                  cmds=1   GREEN

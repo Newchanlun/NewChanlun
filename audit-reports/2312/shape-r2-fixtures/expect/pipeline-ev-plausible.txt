@@ -1,0 +1,15 @@
+rc=1 steps=precheck:GREEN fetch:GREEN auditor:GREEN headers:GREEN shape:GREEN build:RED
+  FM RED build BUILD_WFAIL formal_math/lakefile.toml lake build --wfail 退出 1
+  FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+FM LOG auditor Build completed successfully (14 jobs).
+FM LOG build ✔ [980/987] Built Chan (319ms)
+FM LOG build ✔ [982/987] Built ChanTest.Probe (351ms)
+FM LOG build ✖ [985/987] Building Chan.Thm.A (1.2s)
+FM LOG build trace: .> LEAN_PATH=/home/workspace/fm/tmp/review-g2/suite/w6566560-ev-plausible/audited/.lake/packages/Cli/.lake/build/lib/lean:/home/workspace/fm/tmp/review-g2/suite/w6566560-ev-plausible/audited/.lake/packages/batteries/.lake/build/lib/lean:/home/workspace/fm/tmp/review-g2/suite/w6566560-ev-plausible/audited/.lake/packages/Qq/.lake/build/lib/lean:/home/workspace/fm/tmp/review-g2/suite/w6566560-…[截断，余 1333 字符]
+FM LOG build error: Chan/Thm/A.lean:8:23: Could not evaluate the expression:
+FM LOG build   dbgTrace "FM-R2-PLAUSIBLE-RAN" fun x => 5
+FM LOG build of type `Nat`.
+FM LOG build info: Chan/Thm/A.lean:8:2: Unable to find a counter-example
+FM LOG build Some required targets logged failures:
+FM LOG build - Chan.Thm.A
+FM LOG build error: build failed

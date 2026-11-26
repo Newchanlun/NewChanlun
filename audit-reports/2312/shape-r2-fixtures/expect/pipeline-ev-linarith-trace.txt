@@ -1,0 +1,8 @@
+rc=0 steps=precheck:GREEN fetch:GREEN auditor:GREEN headers:GREEN shape:GREEN build:GREEN env:GREEN
+  FM RESULT GREEN 七步全绿
+FM LOG auditor Build completed successfully (14 jobs).
+FM LOG build ✔ [1254/1725] Built Chan (370ms)
+FM LOG build ✔ [1720/1725] Built ChanTest.Probe (351ms)
+FM LOG build ℹ [1723/1725] Built Chan.Thm.A (1.5s)
+FM LOG build info: Chan/Thm/A.lean:7:0: FM-R2-LINARITH-ORACLE-RAN
+FM LOG build Build completed successfully (1725 jobs).

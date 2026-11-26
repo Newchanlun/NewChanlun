@@ -1,0 +1,12 @@
+total 36
+drwxrwxr-x 11 workspace workspace  152 2026-11-26 08:42:22.839258931 +0800 .
+drwxrwxr-x  5 workspace workspace   49 2026-11-24 07:09:05.192041217 +0800 ..
+drwxrwxr-x  6 workspace workspace 4096 2026-11-24 07:02:54.412820775 +0800 Cli
+drwxrwxr-x  7 workspace workspace 4096 2026-11-24 07:04:19.805590767 +0800 LeanSearchClient
+drwxrwxr-x  7 workspace workspace 4096 2026-11-24 07:03:16.553599117 +0800 Qq
+drwxrwxr-x  7 workspace workspace 4096 2026-11-24 07:03:14.914663425 +0800 aesop
+drwxrwxr-x 11 workspace workspace 4096 2026-11-24 07:02:56.304921914 +0800 batteries
+drwxrwxr-x 11 workspace workspace 4096 2026-11-24 07:03:25.684453555 +0800 importGraph
+drwxrwxr-x 18 workspace workspace 4096 2026-11-24 07:01:37.817173151 +0800 mathlib
+drwxrwxr-x  7 workspace workspace 4096 2026-11-24 07:03:16.503599914 +0800 plausible
+drwxrwxr-x 10 workspace workspace 4096 2026-11-24 07:02:16.670553765 +0800 proofwidgets

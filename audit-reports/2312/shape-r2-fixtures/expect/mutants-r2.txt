@@ -1,0 +1,78 @@
+control	对照（未改弱）	用例 H1,S32	rc=0	['自测：2/2 通过（18s）']	24s
+m1	legacyConfig 只看前两个子节点（不要求第三个是 :=）	用例 H1,H1b,H2,D1	rc=0	['自测：4/4 通过（86s）']	91s
+m2	名字判据由「以 config 结尾」改成「等于 config」	用例 H1	rc=1	['自测：0/1 通过（18s）']	28s
+    失败	H1 形状门红例目录（65 个文件：命令、声明、修饰符、属性、派生、#guard_msgs、set_option 各位置、禁用清单各项、Chan/Defs、解析失败、缺库模块）：逐文件比对红码集合	rc=1 红码=SHAPE_ATTRIBUTE,SHAPE_COMMAND,SHAPE_DECL,SHAPE_DERIVING,SHAPE_FORBIDDEN,SHAPE_GUARD_MSGS,SHAPE_IMPORT,SHAPE_MODIFIER,SHAPE_OPTION,SHAPE_OPTION_CONTROLLED,SHAPE_PARSE 故障=—	多出=[] 缺少=[('SHAPE_FORBIDDEN', 'formal_math/Chan/Thm/FbCfgAesopSimpByTerm.lean')]
+    STDERR  71 个文件分 8 组库导入，138 条命令，2 个派生目标类节点
+FM RESULT RED 第 5 步 shape 判红，后面的步骤没有跑
+FM LOG auditor ✔ [2/14] Built Auditor.EnvGates (1.2s)
+FM LOG auditor ✔ [4/14] Built Auditor.EnvGates:c.o (945ms)
+FM LOG auditor ✔ [5/14] Built Auditor.Headers (1.5s)
+FM LOG auditor ✔ [7/14] Built Auditor.Headers:c.o (502ms)
+FM LOG auditor ✔ [8/14] Built Auditor.Shape (4.1s)
+FM LOG auditor ✔ [10/14] Built Main (1.0s)
+FM LOG auditor ✔ [12/14] Built Auditor.Shape:c.o (1.0s)
+FM LOG auditor ✔ [13/14] Built Main:c.o (3.1s)
+FM LOG auditor ✔ [14/14] Built fm_audit:exe (1.0s)
+FM LOG auditor Build completed successfully (14 jobs).
+
+m3	NO_CERTIFICATE 去掉路径比对（只查 None）	用例 S32,S22,D1,D2	rc=0	['自测：4/4 通过（43s）']	52s
+m4	legacyConfig 不认标识符形式的键（只认记号）	用例 H1	rc=1	['自测：0/1 通过（18s）']	28s
+    失败	H1 形状门红例目录（65 个文件：命令、声明、修饰符、属性、派生、#guard_msgs、set_option 各位置、禁用清单各项、Chan/Defs、解析失败、缺库模块）：逐文件比对红码集合	rc=1 红码=SHAPE_ATTRIBUTE,SHAPE_COMMAND,SHAPE_DECL,SHAPE_DERIVING,SHAPE_FORBIDDEN,SHAPE_GUARD_MSGS,SHAPE_IMPORT,SHAPE_MODIFIER,SHAPE_OPTION,SHAPE_OPTION_CONTROLLED,SHAPE_PARSE 故障=—	多出=[] 缺少=[('SHAPE_FORBIDDEN', 'formal_math/Chan/Thm/FbCfgConv.lean'), ('SHAPE_FORBIDDEN', 'formal_math/Chan/Thm/FbOldConfig.lean')]
+    STDERR  71 个文件分 8 组库导入，138 条命令，2 个派生目标类节点
+FM RESULT RED 第 5 步 shape 判红，后面的步骤没有跑
+FM LOG auditor ✔ [2/14] Built Auditor.EnvGates (1.2s)
+FM LOG auditor ✔ [4/14] Built Auditor.EnvGates:c.o (930ms)
+FM LOG auditor ✔ [5/14] Built Auditor.Headers (1.3s)
+FM LOG auditor ✔ [7/14] Built Auditor.Headers:c.o (472ms)
+FM LOG auditor ✔ [8/14] Built Auditor.Shape (4.1s)
+FM LOG auditor ✔ [10/14] Built Main (1.9s)
+FM LOG auditor ✔ [12/14] Built Auditor.Shape:c.o (1.0s)
+FM LOG auditor ✔ [13/14] Built Main:c.o (2.7s)
+FM LOG auditor ✔ [14/14] Built fm_audit:exe (1.3s)
+FM LOG auditor Build completed successfully (14 jobs).
+
+m5	legacyConfig 不认记号形式的键（只认标识符）	用例 H1	rc=1	['自测：0/1 通过（20s）']	31s
+    失败	H1 形状门红例目录（65 个文件：命令、声明、修饰符、属性、派生、#guard_msgs、set_option 各位置、禁用清单各项、Chan/Defs、解析失败、缺库模块）：逐文件比对红码集合	rc=1 红码=SHAPE_ATTRIBUTE,SHAPE_COMMAND,SHAPE_DECL,SHAPE_DERIVING,SHAPE_FORBIDDEN,SHAPE_GUARD_MSGS,SHAPE_IMPORT,SHAPE_MODIFIER,SHAPE_OPTION,SHAPE_OPTION_CONTROLLED,SHAPE_PARSE 故障=—	多出=[] 缺少=[('SHAPE_FORBIDDEN', 'formal_math/Chan/Thm/FbCfgAesop.lean'), ('SHAPE_FORBIDDEN', 'formal_math/Chan/Thm/FbCfgAesopSimpByTerm.lean'), ('SHAPE_FORBIDDEN', 'formal_math/Chan/Thm/FbCfgCongr.lean'), ('SHAPE_FORBIDDEN', 'formal_math/Chan/Thm/FbCfgPlausibleFirst.lean')]
+    STDERR  71 个文件分 8 组库导入，138 条命令，2 个派生目标类节点
+FM RESULT RED 第 5 步 shape 判红，后面的步骤没有跑
+FM LOG auditor ✔ [2/14] Built Auditor.EnvGates (1.3s)
+FM LOG auditor ✔ [4/14] Built Auditor.EnvGates:c.o (897ms)
+FM LOG auditor ✔ [5/14] Built Auditor.Headers (1.7s)
+FM LOG auditor ✔ [7/14] Built Auditor.Headers:c.o (597ms)
+FM LOG auditor ✔ [8/14] Built Auditor.Shape (4.6s)
+FM LOG auditor ✔ [10/14] Built Auditor.Shape:c.o (2.3s)
+FM LOG auditor ✔ [11/14] Built Main (2.5s)
+FM LOG auditor ✔ [13/14] Built Main:c.o (3.3s)
+FM LOG auditor ✔ [14/14] Built fm_audit:exe (1.5s)
+FM LOG auditor Build completed successfully (14 jobs).
+
+m6	valConfigItem 分支不再查 native	用例 H1	rc=1	['自测：0/1 通过（18s）']	28s
+    失败	H1 形状门红例目录（65 个文件：命令、声明、修饰符、属性、派生、#guard_msgs、set_option 各位置、禁用清单各项、Chan/Defs、解析失败、缺库模块）：逐文件比对红码集合	rc=1 红码=SHAPE_ATTRIBUTE,SHAPE_COMMAND,SHAPE_DECL,SHAPE_DERIVING,SHAPE_FORBIDDEN,SHAPE_GUARD_MSGS,SHAPE_IMPORT,SHAPE_MODIFIER,SHAPE_OPTION,SHAPE_OPTION_CONTROLLED,SHAPE_PARSE 故障=—	多出=[] 缺少=[('SHAPE_FORBIDDEN', 'formal_math/Chan/Thm/FbDecideNativeVal.lean')]
+    STDERR  71 个文件分 8 组库导入，138 条命令，2 个派生目标类节点
+FM RESULT RED 第 5 步 shape 判红，后面的步骤没有跑
+FM LOG auditor ✔ [2/14] Built Auditor.EnvGates (1.2s)
+FM LOG auditor ✔ [4/14] Built Auditor.EnvGates:c.o (853ms)
+FM LOG auditor ✔ [5/14] Built Auditor.Headers (1.4s)
+FM LOG auditor ✔ [7/14] Built Auditor.Headers:c.o (655ms)
+FM LOG auditor ✔ [8/14] Built Auditor.Shape (4.3s)
+FM LOG auditor ✔ [10/14] Built Main (1.8s)
+FM LOG auditor ✔ [12/14] Built Auditor.Shape:c.o (1.9s)
+FM LOG auditor ✔ [13/14] Built Main:c.o (2.9s)
+FM LOG auditor ✔ [14/14] Built fm_audit:exe (1.1s)
+FM LOG auditor Build completed successfully (14 jobs).
+
+m7	NO_CERTIFICATE 只做路径比对、去掉 None 判定之外整条改成恒假的另一半：只留 None 之外（certificate != 路径）	用例 S32	rc=1	['自测：0/1 通过（13s）']	25s
+    失败	S32 第 5 步没有产出派生凭证（驱动脚本跳过第 5 步且不写凭证）：第 7 步 NO_CERTIFICATE 退 2，不靠异常兜底	rc=0 红码=— 故障=—	
+    STDERR ditor ✔ [12/14] Built Auditor.Shape:c.o (1.8s)
+FM LOG auditor ✔ [13/14] Built Main:c.o (2.9s)
+FM LOG auditor ✔ [14/14] Built fm_audit:exe (1.0s)
+FM LOG auditor Build completed successfully (14 jobs).
+FM LOG build ✔ [2/20] Built Chan (381ms)
+FM LOG build ✔ [4/20] Built ChanTest.Probe (345ms)
+FM LOG build ✔ [7/20] Built ChanChallenge.Base (376ms)
+FM LOG build ✔ [10/20] Built Chan.Base (423ms)
+FM LOG build ✔ [12/20] Built Chan.Thm.Ok (431ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (396ms)
+FM LOG build ✔ [18/20] Built ChanExplore.Base (264ms)
+FM LOG build Build completed successfully (20 jobs).
+
