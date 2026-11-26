@@ -51,6 +51,8 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 - 只用 `ls-tree -r -z <提交>:<路径>` 加 `cat-file --batch` 逐个取 blob 原始字节。不用 `git archive`、检出或 `git worktree`，所以被审树里的 `.gitattributes`（`export-ignore`、`filter`、`eol`）与仓库配置的过滤器都不起作用。
 - 受信目录里每条路径段须合 `[A-Za-z0-9_][A-Za-z0-9_.-]*` 且是 100644 普通文件，否则退 2。内容文件的每个路径段（去掉 `.lean`）须合模块名文法 `[A-Za-z][A-Za-z0-9_]*`。
 - 写文件用 `O_CREAT|O_EXCL|O_NOFOLLOW`，模式固定 0644，目录 0755；已存在或遇到符号链接即失败。
+- **与预检的交接**：预检不查「模式是文件的条目指向的对象是不是 blob」（第一片 README「不防什么」）。取料用 `cat-file --batch` 读每个对象时逐个核对头行的类型必须是 `blob`，不是就 `GIT` 故障退 2；这一步发生在建任何目录之前，被审工作区与受信目录都不会写出，更不会把它当空文件写出或跳过。自测 S16 用模式 `100644`、对象实为树或提交的条目核对。
+- 第 1 步只接受两种预检输出：退 0 且恰好一行绿行；退 1 且每行都是 `PRECHECK RED <码> <对象> <说明>`。红码按 `[A-Z_]+` 原样转出，预检新增的码（`LAKE_FILE`、`TREE_FORM` 等）不需要改运行脚本；其它任何输出（未知格式、退 2 的 `BASE_FORM`、`NOT_ANCESTOR` 等，此时预检已写到标准输出的红行不转出）一律退 2。
 - 被审提交里 `formal_math/` 下的其它文件（README、台账等）与它自己的三个构建配置文件都不进被审工作区。锁文件由运行脚本在第 7 步直接从被审提交的 git 对象读。
 
 ### 沙箱布局（第 4、6、7 步）
@@ -131,7 +133,8 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 4. **`ARTIFACT_ROOT`**：第 6 步多一条形状检查（产物目录顶层只许内容根、不许符号链接）。它属于送审问题「经声明之外的通道影响审计程序的输入」：搜索路径上被审产物在库之后、工具链库之前，被审构建可以在产物目录里放 `Init/…` 遮住工具链的库。
 5. **头部规则分在两处**：白名单类在审计程序（Lean），方向表与闭包在运行脚本（Python），各自原样搬自旧实现。
 6. **`HEADER_PARSE` 判红而非无法判定**，见搬家差异。
-7. **本地 R5 的 `formal_math/.gitignore`**：按任务并入仓库根 `.gitignore` 并删除。但以 `594e49b5ec` 为基线时预检仍判红：`infra` 角色的路径表不含仓库根 `.gitignore`，也不含 `formal_math/.gitignore`，删除它与改根 `.gitignore` 都是 `PATH_SCOPE`。第一片在独审中，这里不改预检。
+7. **`formal_math/.gitignore`**：按任务并入仓库根 `.gitignore` 并删除。预检返修（`5b6cc3ea16`）后它是 `infra` 的受信文件，获放行可删；仓库根 `.gitignore` 在受管范围以外，不再判红。
+8. **门禁目录里不能有 Lake 配置名的文件**（预检 `LAKE_FILE`）：R5-B1 自测夹具里的 `lakefile.toml` 存为 `selftest-cases/r5-b1/hijack-lakefile.toml`，自测造提交时改回原名放到被审树里。
 
 ## 自测
 
@@ -158,6 +161,9 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | S9–S10 | `--until 3` 全绿退 2；`--until 1` 遇红退 1 |
 | S11–S12 | 基线缺受信代码：没给自举开关退 2（`NO_TRUSTED_CODE`）；给了则首行写自举、全绿 |
 | S13 | 受信提交里的 `run.py` 与正在运行的不同：退 2（`RUNNER_MISMATCH`） |
+| S14 | 被审提交在 `Chan/Thm/` 下放 `lakefile.lean`：第 1 步 `LAKE_FILE`，只有一行步骤行 |
+| S15 | 用 `hash-object -t tree --literally` 造一棵含两条同名 `Ok.lean` 的 `Chan/Thm` 树：第 1 步 `TREE_FORM` |
+| S16 | `Chan/Thm/Ok.lean` 的模式是 `100644`、对象实为树（另一例为提交）：预检绿（它不查），第 2 步 `GIT` 故障退 2，被审工作区没有建 |
 
 语料用例：`fixtures.tsv` 列出全部旧夹具的归属与本片的实测期望（见下）。只含内容的夹具，基线与被审是同一提交（预检因受管路径无改动而绿），构建配置按夹具实有的内容根生成；改了构建配置或门禁目录的夹具，基线是模板、被审提交叠上夹具，按证明角色送审。`--discover` 只打印实测结果，供更新表格。
 
@@ -165,11 +171,12 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 
 `fixtures.tsv` 每行：夹具、归属、期望退出码、判红的步骤、红码集合、说明。归属取值：`预检`（第一片）、`取料`、`头部`、`沙箱构建`、`环境层`、`声明锁`、`第四片`（源码形状）、`#2315`、`不再检查`（只靠已删除机制，如工作树与未跟踪文件扫描、运行期版本钉选）。期望列是本片在新入口上的实测，**不是**归属门的承诺：归第四片的夹具现在可能是绿的，表里照实写，第四片合入时改这一列。
 
-汇总（252 个旧夹具；g6b 的 11 个是工作树与分支名来源类，没有在新入口上跑）：
+汇总（252 个旧夹具；g6b 的 11 个是工作树与分支名来源类，没有在新入口上跑；另有 16 个旧门 1、门 2 的 Lake 配置名夹具已删除，见下）：
 
 | 归属 | 夹具数 | must_red / must_green / must_unknown | 新入口实测：退 1 / 退 0 / 未跑 |
 |---|---|---|---|
-| 预检 | 23 | 19 / 4 / 0 | 15 / 1 / 7 |
+| 预检 | 7 | 4 / 3 / 0 | 0 / 0 / 7 |
+| 预检（规则 `TRUSTED_DRIFT`、`LAKE_FILE`）取代，夹具已删除 | 16 | 15 / 1 / 0 | — / — / 16 |
 | 取料 | 1 | 1 / 0 / 0 | 1 / 0 / 0 |
 | 头部 | 79 | 71 / 7 / 1 | 78 / 1 / 0 |
 | 沙箱构建 | 13 | 1 / 9 / 3 | 8 / 5 / 0 |
@@ -183,6 +190,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 - 归第四片的 76 个必红夹具里，26 个现在整次运行为绿（源码选项写法、`#eval`、`eval%`、`#guard_msgs` 吞告警、`rfl'` 等），其余 50 个由构建（`--wfail`）、头部或环境层兜住。在第四片合入之前这 26 个是已知漏洞。
 - 13 个环境层夹具在第 7 步判出旧期望的码；另 3 个（`private-proof`、`r4-p7a-deriving-spoof`、`r3-a1f/a1g-environment`）整次运行先在构建或头部一步红，它们的环境层码由其它夹具覆盖（`ENV_SORRY` 由 `r4-p5b-guard-msgs-swallow` 覆盖）。九个环境层红码 `ENV_AXIOM`、`ENV_AXIOM_DEP`、`ENV_SORRY`、`ENV_META`、`ENV_EXTERN`、`ENV_UNSAFE`、`ENV_PARTIAL`、`ENV_IMPLEMENTED_BY`、`EXPOSE_SECTION` 都至少有一个夹具在新入口上判出。
 - 夹具本身不带锁文件、却有 `Chan/Defs` 等锁定目录里的声明时，全跑会在声明锁一步判 `LOCK_UNLISTED`；含派生的阴性夹具因为没有派生证书判 `ENV_PARTIAL`（已接受）。表里逐行写明。
+- 删除的 16 个夹具目录（46 个文件）：`must_green/g1/pins`，`must_red/g1/` 的 `r4-manifest-path-source`、`r4-manifest-url`、`revision`、`toolchain`，`must_red/g2/` 的 `lib-option`、`missing-option`、`r2-a5-build-config`、`r2-a6-build-config`、`r2-a6b-build-config`、`r2-a6c-build-config`、`r2-a6d-build-config`、`r4-p6a-lakefile-invalid-toml`、`r4-p6b-lakefile-more-lean-args`、`r4-p6c-lakefile-package-options`、`unimported-child`。它们服务的 `lakefile` 逐键白名单与门 1 钉选已由「构建配置与基线同一对象」取代；这些形状由预检自测覆盖。`fixtures.tsv` 保留这 16 行，期望列为 `-`。
 - `must_green/g3/attributes-whitelist` 自身有告警（`@[no_expose]` has no effect），`--wfail` 判红；旧自测只跑门 3，不构建。
 - `must_unknown` 的写坏源码从「无法判定」变成构建或头部一步判红（`HEADER_PARSE`）。
 

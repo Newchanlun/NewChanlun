@@ -79,8 +79,8 @@ class Repo:
             raise RuntimeError("git %s: %s" % (args[0], p.stderr.decode(errors="replace")))
         return p.stdout
 
-    def commit(self, files, parent=None):
-        """files：{相对仓库根的路径: 字节}；返回提交对象名。"""
+    def commit(self, files, parent=None, raw=None):
+        """files：{相对仓库根的路径: 字节}；raw：{目录路径: 树对象原始字节}，用来造畸形树；返回提交对象名。"""
         tree = {}
         for path, data in files.items():
             node = tree
@@ -89,11 +89,13 @@ class Repo:
                 node = node.setdefault(d, {})
             node[name] = self.git("hash-object", "-w", "--no-filters", "--stdin", data=data).strip()
 
-        def mktree(node):
+        def mktree(node, path=""):
+            if path in (raw or {}):
+                return self.git("hash-object", "-t", "tree", "--literally", "-w", "--stdin", data=raw[path]).strip()
             rows = b""
             for name, value in sorted(node.items()):
                 kind, mode = ("tree", "040000") if isinstance(value, dict) else ("blob", "100644")
-                oid = mktree(value) if isinstance(value, dict) else value
+                oid = mktree(value, path + "/" + name if path else name) if isinstance(value, dict) else value
                 rows += b"%s %s %s\t%s\0" % (mode.encode(), kind.encode(), oid, name.encode())
             return self.git("mktree", "-z", data=rows).strip()
 
@@ -217,8 +219,10 @@ def skeleton(s):
         return check("S1 阴性对照：未改动的证明提交七步全绿", good, r)
     cases.append(s1)
 
-    b1 = {"formal_math/" + rel: read(os.path.join(HERE, "selftest-cases", "r5-b1", rel))
-          for rel in ("lakefile.toml", "ChanExplore/FakeAudit.lean", "Chan/Thm/Bogus.lean")}
+    # 夹具里的 lakefile 存成 hijack-lakefile.toml：门禁目录下任何层级的 Lake 配置名都会被预检判 LAKE_FILE。
+    b1 = {"formal_math/" + dst: read(os.path.join(HERE, "selftest-cases", "r5-b1", src))
+          for src, dst in (("hijack-lakefile.toml", "lakefile.toml"), ("ChanExplore/FakeAudit.lean",) * 2,
+                           ("Chan/Thm/Bogus.lean",) * 2)}
     hijack = s.repo.commit({**s.base_files, **b1}, s.base)
 
     def s2():
@@ -366,6 +370,42 @@ def skeleton(s):
             r["out"].splitlines()[0]
         return check("S12 自举模式：首行写明自举，受信代码取自指定提交，全绿", good, r)
     cases.append(s12)
+
+    def entry(mode, name, oid):
+        return b"%s %s\0" % (mode, name) + bytes.fromhex(oid.decode() if isinstance(oid, bytes) else oid)
+
+    ok_blob = s.repo.git("hash-object", "-w", "--no-filters", "--stdin", data=ok_thm["formal_math/Chan/Thm/Ok.lean"]).strip()
+    with_thm = {**s.base_files, **ok_thm}
+
+    lake_file = s.repo.commit({**with_thm, "formal_math/Chan/Thm/lakefile.lean": b"import Lake\n"}, s.base)
+
+    def s14():
+        r = s.run("S14-lake-file", lake_file)
+        good = r["rc"] == 1 and r["reds"] == {"LAKE_FILE"} and len(r["steps"]) == 1
+        return check("S14 被审提交在 Chan/Thm/ 下放 lakefile.lean：第 1 步 LAKE_FILE", good, r)
+    cases.append(s14)
+
+    dup = s.repo.commit(with_thm, s.base, raw={"formal_math/Chan/Thm": entry(b"100644", b"Ok.lean", ok_blob) * 2})
+
+    def s15():
+        r = s.run("S15-tree-form", dup)
+        good = r["rc"] == 1 and "TREE_FORM" in r["reds"] and len(r["steps"]) == 1
+        return check("S15 树对象里有重复条目：第 1 步 TREE_FORM", good, r)
+    cases.append(s15)
+
+    some_tree = s.repo.git("rev-parse", s.base + ":formal_math/ChanTest").strip()
+    for label, target in (("tree", some_tree), ("commit", s.base.encode())):
+        bad = s.repo.commit(with_thm, s.base, raw={"formal_math/Chan/Thm": entry(b"100644", b"Ok.lean", target)})
+
+        def s16(label=label, bad=bad):
+            r = s.run("S16-blob-mode-" + label, bad, keep=True)
+            wrote = os.path.exists(os.path.join(r["work"], "audited"))
+            good = r["rc"] == 2 and r["faults"] == ["GIT"] and [x[1:] for x in r["steps"]] == [
+                ("precheck", "GREEN"), ("fetch", "FAULT")] and not wrote
+            shutil.rmtree(r["work"])
+            return check("S16 模式 100644 的条目实为%s对象：预检不查，取料按对象读取时失败退 2，不写出被审工作区" % label,
+                         good, r)
+        cases.append(s16)
 
     stale = dict(s.base_files)
     stale["formal_math/verification/runner/run.py"] += b"# drift\n"
