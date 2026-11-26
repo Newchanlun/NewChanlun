@@ -48,9 +48,13 @@
 
 负的签署值按非法记录拒收；负的实测值或代理下界按该项无合格输入返回 `NotEvaluable(UnavailableCost(该项))`（持有项为 `Holding`），并报告负值越界。合格输入不会得到 `C < 0` 或 `C_min < 0`；若仍得到负合计，显式报成本定义域错误并停止，不进入求值表。
 
-**再校验证据门记录，再查波幅读数。** 成本输入可用后，按 [ADR 0022](0022-acceptance-criterion-parameters.md)「版本规则」「缺失语义」校验成本政策引用的具名门版本。所引记录找不到、字段缺失或非法（含越界），或该版本未获有效授权，均显式报 `PolicyError` 并停止，不出四态或验收读数，不回退常数或别的版本。读数给出有效的 `run_started_at` 时，若 `authorized_at ≥ run_started_at`，仍报 `PolicyError`：所引版本未在本次运行前获授权。
+**成本输入可用后，依序校验证据门与 ROUNDTRIP 波幅证据。** 依据 [ADR 0022](0022-acceptance-criterion-parameters.md)「版本规则」「缺失语义」及裁定六／七：
 
-门记录有效后，才按该版本及裁定六／七核验 ROUNDTRIP 波幅证据。每份读数须给出有效的 `run_started_at`（本次运行首次读取评价数据的时点），并以 `prereg_frozen_at < run_started_at` 证明窗口事前冻结。读数缺失或 `run_started_at` 缺失／无效，均返回 `InsufficientEvidence(Amplitude)`，不进入下表，无论已知总成本 `C` 为正还是为零。无法证明窗口事前冻结、读数引用与所引门版本不符、样本或覆盖不足等证据不合格情形，同样返回该状态。合格下界与下界数值过线是两件事：
+1. **门记录本身。** 成本政策引用的具名门记录缺失、字段缺失或非法（含越界），或该版本本身未获有效授权，均报 `PolicyError`。
+2. **本次运行的时点。** `run_started_at` 是本次运行首次读取评价数据的时点。调用上下文给出该时点时，直接据此校验 `authorized_at < run_started_at`，不满足则报 `PolicyError`。读数必须存在、属于本次运行、引用同一具名门版本，并自带有效的 `run_started_at`；上下文已给出时点时，两处时点须一致。任一条件不满足，返回 `InsufficientEvidence(Amplitude)`。仅由读数提供时点时，先确认读数满足上述条件，再用其时点校验 `authorized_at < run_started_at`，不满足同样报 `PolicyError`。
+3. **窗口与样本。** 以已确认的 `run_started_at` 校验 `prereg_frozen_at < run_started_at`，再按所引门版本核验预登记窗口、样本与覆盖。任一条件不满足，返回 `InsufficientEvidence(Amplitude)`。
+
+遇 `PolicyError` 须显式报错并停止，不出四态或验收读数，不回退常数或其他版本。无论已知总成本 `C` 为正还是为零，波幅证据合格后才查下表：
 
 | 成本证据 | 合格波幅下界的读法 | 输出 |
 |---|---|---|
@@ -68,8 +72,6 @@
 - `PolicyError` 或负合计成本定义域错误（`C < 0` 或 `C_min < 0`）：均不放行。按 ADR 0022 的停止语义，显式报错并中止本次进阶复测，不再逐级推进，不产出四态或验收读数。
 
 所有未放行路径（含错误）在返回状态或传播错误前，均须维持复测前冻结的生效塔底；试延伸若已临时切换塔底，先回退至该塔底。不得提交新塔底，须保留既有及本次已形成的延伸记录。
-
-ADR 0035 裁定三原文「否则 Disabled」不再作为复测的求值结果映射；**复测返回哪一状态或错误以本条为准**，未放行时的塔底回退与延伸记录保留动作仍沿用裁定三。
 
 上述输入域、零分母处置和证据先决关系在各级和各有效 profile 使用同一规则（#804）。将净额口径做成 v1 的开关，会让同一成本门对同一笔负 holding 在「拒收」和「准许抵扣」两套准入判据间选择，而不是为同一判据选参数；即使事前单选也不符合 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 裁定二、四（#799）。净额保留为独立方法候选；若采用，须另行裁定并在具名新版本中事前冻结输入域、非正分母和代理下界的处置，按新口径重新推导，不作 v1 的失败兜底。
 
@@ -139,7 +141,7 @@ valid_through: 2027-10-21
   - [`policy_records.rs:76-87,625-647`](https://github.com/Newchanlun/NewChanlun/blob/b7e23c31bc353378b71b090499c6eeea91676c92/rust/src/theta_v0/policy_records.rs#L76) 与取证快照中的 [`cost-stop.json:4-56`](https://github.com/Newchanlun/NewChanlun/blob/b7e23c31bc353378b71b090499c6eeea91676c92/rust/src/theta_v0/policy_records/cost-stop.json#L4-L56)：继续读既有 v1，不改签值；零值用非生产夹具覆盖。[#2126](https://github.com/Newchanlun/NewChanlun/pull/2126) 将两份记录分置于 [`P0.v1.json`](https://github.com/Newchanlun/NewChanlun/blob/c2806071dec8d0669f478cec4df093781f691232/rust/src/theta_v0/policy_records/cost-stop/P0.v1.json) 与 [`P1-hl-testnet.v1.json`](https://github.com/Newchanlun/NewChanlun/blob/c2806071dec8d0669f478cec4df093781f691232/rust/src/theta_v0/policy_records/cost-stop/P1-hl-testnet.v1.json)。
   - 行号取自 `impl/1441-cost-stop-policy` 的 `5a4033fd9083aafaea580ef56c050c1e21ef29df`，#1441 第三轮重写后以其新头为准：[`cost_stop.rs:418-420`](https://github.com/Newchanlun/NewChanlun/blob/5a4033fd9083aafaea580ef56c050c1e21ef29df/rust/src/theta_v0/cost_stop.rs#L418-L420) 移除了 `ZeroTotalCost`；`:442-454` 定义待裁错误，`:549-551` 在证据门前返回 `Err(CostStopError::ZeroMeasuredCostAwaitingRuling2111)`；`:1054-1068` 的 `zero_measured_total_never_produces_a_four_state_result` 断言与本裁定相反；`:561-564` 在证据门后已按 §三处理零代理下界。
   - #1441 须分开传播门记录错误与波幅不足，并在有向资金费转成非负成本输入前校验值域。当前基线的参照为 [`backtest/evidence_gate.rs:155-175`](../../rust/src/theta_v0/backtest/evidence_gate.rs#L155-L175)（`PolicyError`）和 [`strategy/risk.rs:998-1026`](../../rust/src/theta_v0/strategy/risk.rs#L998-L1026)（有向计提，原符号语义不改）。
-  - 文档同步点：[ADR 0035 裁定三](0035-cost-stop-policy-instance-and-base-extension-evidence.md#三第一层--l0-余量对象--复测协议)的「否则 Disabled」须指向 §三的结果与动作分界；冻结、立即复测、塔底回退和延伸记录保留仍按原协议。
+  - 文档已同步：[ADR 0035 裁定三](0035-cost-stop-policy-instance-and-base-extension-evidence.md#三第一层--l0-余量对象--复测协议)已将原「否则 Disabled」的结果映射改为引用本 ADR §三；冻结、立即复测、塔底回退和延伸记录保留仍按原协议。
 - [#1602](https://github.com/xy7365527-lang/NewChanlun/issues/1602)：成本参数版本化记录以本 ADR 为数值来源。
 
 ## 溯源标签
