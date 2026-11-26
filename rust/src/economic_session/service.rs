@@ -5,7 +5,8 @@ use crate::session_protocol::{
     canonical_json, nonnegative, positive, reply_envelope, required, sha256_hex, validate_envelope,
 };
 use crate::session_transport::{
-    process_lock, serve_unix_with_deadline, EnvelopeValidator, TransportBounds,
+    process_lock, serve_unix_with_deadline_and_shutdown, EnvelopeValidator, ShutdownMode,
+    TransportBounds, SHUTDOWN_CONTROL_FLAG,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -1512,7 +1513,17 @@ fn handle_with_deadline(
     }
 }
 /// 正式 owner 服务循环。cli `serve` 取得同一域独占锁后调用；测试子进程同样先取锁再调用。
+#[cfg(test)]
 pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), String> {
+    serve_with_shutdown(config, epoch, e_epoch, ShutdownMode::Standalone)
+}
+
+fn serve_with_shutdown(
+    config: &Config,
+    epoch: i64,
+    e_epoch: i64,
+    shutdown: ShutdownMode,
+) -> Result<(), String> {
     let (mut c, runtime) = open(&config.db, false)?;
     check_epoch(&c, epoch)?;
     audit(&c, config)?;
@@ -1536,19 +1547,25 @@ pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), Str
     };
     let mut reads = ReadTransfers::default();
     let revision = config.revision()?;
-    serve_unix_with_deadline(&config.socket, bounds, validator, |e, deadline| {
-        if matches!(
-            e["payload"]["op"].as_str(),
-            Some("EconomicReadOpen" | "EconomicReadPage" | "EconomicReadClose")
-        ) {
-            handle_paged_read(&mut c, config, epoch, &runtime, e, deadline, &mut reads)
-        } else if revision == SCHEMA_V2 {
-            handle_with_deadline(&mut c, config, epoch, e_epoch, &runtime, e, Some(deadline))
-        } else {
-            // /1 金融写入口保持原有语义；只读分页使用新 transport 截止。
-            handle(&mut c, config, epoch, e_epoch, &runtime, e)
-        }
-    })
+    serve_unix_with_deadline_and_shutdown(
+        &config.socket,
+        bounds,
+        validator,
+        shutdown,
+        |e, deadline| {
+            if matches!(
+                e["payload"]["op"].as_str(),
+                Some("EconomicReadOpen" | "EconomicReadPage" | "EconomicReadClose")
+            ) {
+                handle_paged_read(&mut c, config, epoch, &runtime, e, deadline, &mut reads)
+            } else if revision == SCHEMA_V2 {
+                handle_with_deadline(&mut c, config, epoch, e_epoch, &runtime, e, Some(deadline))
+            } else {
+                // /1 金融写入口保持原有语义；只读分页使用新 transport 截止。
+                handle(&mut c, config, epoch, e_epoch, &runtime, e)
+            }
+        },
+    )
 }
 /// 正式 owner 入口。init/recover/serve 共用同一域独占锁；不给客户端创建替代权威路径。
 pub fn cli(is_b: bool) -> Result<(), String> {
@@ -1556,6 +1573,12 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     let command = args.next().ok_or(
         "usage: init|serve|recover --manifest FILE --db FILE [--chong ID] [--epoch N --e-epoch N]",
     )?;
+    let named_recovery = match command.as_str() {
+        "recover-named" => Some(super::recovery::Action::Recover),
+        "query-recovery" => Some(super::recovery::Action::Query),
+        "current-recovery" => Some(super::recovery::Action::VerifyCurrent),
+        _ => None,
+    };
     let mut opts = BTreeMap::new();
     while let Some(k) = args.next() {
         if !k.starts_with("--") || opts.contains_key(&k) {
@@ -1564,10 +1587,17 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         opts.insert(k, args.next().ok_or("InvalidDomain：参数缺值")?);
     }
     for k in opts.keys() {
-        if !["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].contains(&k.as_str()) {
+        let allowed = if named_recovery.is_some() {
+            ["--manifest", "--db", "--chong", "--recovery-request"].contains(&k.as_str())
+        } else {
+            ["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].contains(&k.as_str())
+                || (command == "serve" && k == SHUTDOWN_CONTROL_FLAG)
+        };
+        if !allowed {
             return Err(format!("InvalidDomain：未知参数{k}"));
         }
     }
+    let shutdown = ShutdownMode::from_option(opts.get(SHUTDOWN_CONTROL_FLAG).map(String::as_str))?;
     let get = |k: &str| {
         opts.get(k)
             .map(String::as_str)
@@ -1581,6 +1611,16 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     if !is_b && opts.contains_key("--chong") {
         return Err("InvalidDomain：E不能指定重".into());
     }
+    if let Some(action) = named_recovery {
+        let request =
+            super::recovery::Request::load(Path::new(get("--recovery-request")?), &config)?;
+        let _lock = process_lock(&config.db, &config.domain)?;
+        println!(
+            "{}",
+            canonical_json(&super::recovery::run(&config, &request, action)?)
+        );
+        return Ok(());
+    }
     let _lock = process_lock(&config.db, &config.domain)?;
     match command.as_str() {
         "init" => println!("{}", canonical_json(&init(&config)?)),
@@ -1592,7 +1632,7 @@ pub fn cli(is_b: bool) -> Result<(), String> {
             } else {
                 epoch
             };
-            serve(&config, epoch, e_epoch)?;
+            serve_with_shutdown(&config, epoch, e_epoch, shutdown)?;
         }
         _ => return Err("InvalidDomain：未知子命令".into()),
     }
