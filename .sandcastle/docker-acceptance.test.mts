@@ -368,16 +368,30 @@ test("receipt/accepted 缺 imageId 或 Id 不是 sha256：解析失败", () => {
   assert.throws(() => checkAdmission(IMAGE, ctx(d, "13", B13)), /receipt 无效.*imageId/);
 });
 
-test("合同摘要含容器 env 白名单与 Id 绑定：改白名单即改摘要", async () => {
+test("合同摘要绑定容器 env 白名单与镜像 Id，且缺省 AppArmor 策略保持旧摘要", async () => {
   const iso = await import("./docker-isolation.mts");
   assert.deepEqual([...iso.CONTAINER_ENV_ALLOW], ["CLIPROXY_BASE_URL", "CLIPROXY_LOCAL_KEY", "SANDCASTLE_MERGE_INSTANCE", "SANDCASTLE_MERGE_RUN"]);
-  const canonical = (allow: readonly string[]) => createHash("sha256").update(JSON.stringify({
+  const canonical = (allow: readonly string[], apparmorPolicy?: "absent-accepted") => createHash("sha256").update(JSON.stringify({
     id: "1742-docker-plan-b-v4-frozen-deployment-v1", protectedSubpaths: iso.PROTECTED_SUBPATHS, innerSandbox: iso.DOCKER_INNER_SANDBOX,
+    ...(apparmorPolicy ? { apparmorPolicy } : {}),
     capMask: iso.DEFAULT_CAP_MASK.toString(16), securityOpts: [], containerEnvAllow: allow, imageIdBound: true, probe: iso.PROBE_SCRIPT,
     receiptSchema: 3, bindingRules: ["receipt-purpose-v1", "frozen-row13-fresh-branch-v1", "merge-plan-sealed-v1", "merge-run-admission-then-conflict-v1", "row-recovery-checkpoint-v1"],
   })).digest("hex");
-  assert.equal(contractDigest(), canonical(iso.CONTAINER_ENV_ALLOW), "摘要正文含白名单与 Id 绑定");
-  assert.notEqual(contractDigest(), canonical([...iso.CONTAINER_ENV_ALLOW, "KIMI_API_KEY"]), "白名单变化即摘要变化");
+  const digestUnder = (allowAbsent: boolean) => {
+    const env = { ...process.env };
+    if (allowAbsent) env.SANDCASTLE_APPARMOR_ABSENT = "accept";
+    else delete env.SANDCASTLE_APPARMOR_ABSENT;
+    const moduleUrl = new URL("./docker-acceptance.mts", import.meta.url).href;
+    return execFileSync(process.execPath, [...process.execArgv, "--input-type=module", "--eval",
+      `import { contractDigest } from ${JSON.stringify(moduleUrl)}; process.stdout.write(contractDigest());`],
+    { env, encoding: "utf8" });
+  };
+  const enforce = digestUnder(false);
+  const absentAccepted = digestUnder(true);
+  assert.equal(enforce, canonical(iso.CONTAINER_ENV_ALLOW));
+  assert.notEqual(enforce, canonical([...iso.CONTAINER_ENV_ALLOW, "KIMI_API_KEY"]), "白名单变化即摘要变化");
+  assert.equal(absentAccepted, canonical(iso.CONTAINER_ENV_ALLOW, "absent-accepted"));
+  assert.notEqual(absentAccepted, enforce);
 });
 
 test("dockerImageId 默认解析：真实 docker inspect 的 Id；镜像不存在时抛错而不是回退 tag", { skip: process.env.SANDCASTLE_REAL_DOCKER_TESTS !== "1" ? "真实 docker 测试默认关闭（设 SANDCASTLE_REAL_DOCKER_TESTS=1 开启）" : realImage("alpine:3.22") ? false : "本机无 alpine:3.22" }, () => {

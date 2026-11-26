@@ -1450,12 +1450,47 @@ def test_reuse_requires_current_deployment_admission(lane, env, change):
     assert "reused_from" not in result and len(result["reviews"]) == len(MODELS)
 
 
-def test_reuse_records_admission(lane, env):
+@pytest.mark.parametrize("policy,digest", [(None, "1" * 64), ("accept", "2" * 64)])
+def test_reuse_records_admission(lane, env, monkeypatch, policy, digest):
+    if policy is None:
+        monkeypatch.delenv("SANDCASTLE_APPARMOR_ABSENT", raising=False)
+    else:
+        monkeypatch.setenv("SANDCASTLE_APPARMOR_ABSENT", policy)
     lane.review_pr(1810)
     _advance_main(lane, env)
     result = lane.review_pr(1810)
     assert result["reused_from"]["admission"] == {"controller_code_head": git(lane.source, "rev-parse", "HEAD"),
-                                                  "image_id": "sha256:" + "1" * 64}
+                                                  "image_id": "sha256:" + "1" * 64, "isolation_contract": digest}
+
+
+@pytest.mark.parametrize("change", ["policy", "legacy-receipt"])
+def test_reuse_requires_both_receipts_to_match_isolation_contract(lane, env, monkeypatch, change):
+    monkeypatch.setenv("SANDCASTLE_APPARMOR_ABSENT", "accept")
+    first = lane.review_pr(1810)
+    if change == "policy":
+        monkeypatch.delenv("SANDCASTLE_APPARMOR_ABSENT")
+    else:
+        old = ReviewTarget(**first["target"])
+        path = lane.state_root / "runs" / old.key / MODELS[1] / "receipt.json"
+        receipt = json.loads(path.read_text())
+        del receipt["isolation_contract"]
+        path.write_text(json.dumps(receipt))
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS"
+    assert "reused_from" not in result
+    assert [r["model"] for r in result["reviews"]] == list(MODELS)
+
+
+@pytest.mark.parametrize("digest", [None, "a" * 63, "A" * 64, 10**63])
+def test_deployment_admission_rejects_missing_or_invalid_isolation_contract(lane, monkeypatch, digest):
+    head = git(lane.source, "rev-parse", "HEAD")
+    output = {"controller_code_head": head, "image_id": "sha256:" + "1" * 64}
+    if digest is not None:
+        output["isolation_contract"] = digest
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps(output)))
+    assert lane._deployment_admission(head) is None
 
 
 
@@ -2278,6 +2313,7 @@ def test_docker_context_at_admission_supervisor_and_recovery_boundaries(lane, mo
         monkeypatch.setenv(key, "fixture-must-not-pass")
     monkeypatch.setenv("SANDCASTLE_MAIN_MODEL", "fixture-not-the-review-model")
     monkeypatch.setenv("CLIPROXY_LOCAL_KEY", "fixture-worker-only")
+    monkeypatch.setenv("SANDCASTLE_APPARMOR_ABSENT", "accept")  # #2071：部署的 AppArmor 策略声明要到准入与监督子进程
     trace = tmp_path / "docker-calls.jsonl"
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -2304,6 +2340,7 @@ from pathlib import Path
 assert os.environ.get("DOCKER_CONTEXT") == {context!r}
 assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN", "SANDCASTLE_MAIN_MODEL"))
 admission = sys.argv[1:] == ["--admission-only"]
+assert os.environ.get("SANDCASTLE_APPARMOR_ABSENT") == "accept"
 assert os.environ.get("CLIPROXY_LOCAL_KEY") == (None if admission else "fixture-worker-only")
 if not admission:
     launch = json.loads((Path(sys.argv[-1]) / "launch.json").read_text())
