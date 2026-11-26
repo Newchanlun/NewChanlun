@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { acceptanceRoot, assertHomeNotRedirected, controlledDir } from "./acceptance-dir.mts";
-import { CONTAINER_ENV_ALLOW, DEFAULT_CAP_MASK, DOCKER_INNER_SANDBOX, PROBE_SCRIPT, PROTECTED_SUBPATHS, imageEnvSecrets } from "./docker-isolation.mts";
+import { APPARMOR_POLICY, CONTAINER_ENV_ALLOW, DEFAULT_CAP_MASK, DOCKER_INNER_SANDBOX, PROBE_SCRIPT, PROTECTED_SUBPATHS, imageEnvSecrets } from "./docker-isolation.mts";
 import { DrainFrozenError, withFileLock, withFrozenAdmission } from "./drain-control.mts";
 import { MAIN_MODEL } from "./main-model.mts";
 import { MERGE_CHECK_ID, validateMergeManifest, type MergeManifest, type MergeState } from "./managed-merge.mts";
@@ -26,10 +26,12 @@ export const MAX_CHECKPOINTS = 16;
 
 export const CONTRACT_ID = "1742-docker-plan-b-v4-frozen-deployment-v1";
 export const BINDING_RULES = ["receipt-purpose-v1", "frozen-row13-fresh-branch-v1", "merge-plan-sealed-v1", "merge-run-admission-then-conflict-v1", "row-recovery-checkpoint-v1"] as const;
-/** 合同摘要：改任一项（受保护路径、内层沙箱模式、cap 上界、探针脚本、无 security 选项、容器 env 白名单、绑定规则版本）即新合同，旧 receipt 作废。 */
+/** 合同摘要：改任一项（受保护路径、内层沙箱模式、AppArmor 策略、cap 上界、探针脚本、无 security 选项、容器 env 白名单、绑定规则版本）即新合同，旧 receipt 作废。 */
 export function contractDigest(): string {
   const canonical = JSON.stringify({
     id: CONTRACT_ID, protectedSubpaths: PROTECTED_SUBPATHS, innerSandbox: DOCKER_INNER_SANDBOX,
+    // 缺省 enforce 不进摘要，已有 receipt 不受影响；放宽为 absent-accepted 即新合同，必须重新验收。
+    ...(APPARMOR_POLICY === "enforce" ? {} : { apparmorPolicy: APPARMOR_POLICY }),
     capMask: DEFAULT_CAP_MASK.toString(16), securityOpts: [], containerEnvAllow: CONTAINER_ENV_ALLOW, imageIdBound: true, probe: PROBE_SCRIPT,
     receiptSchema: 3, bindingRules: BINDING_RULES,
   });
