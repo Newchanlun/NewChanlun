@@ -293,4 +293,4 @@ ADR 0028:24 的动作维度：
 
 （append-only：以上原文不改；本节仅同步 #2134 指针，已裁 P 类正文与授权硬门照旧。）
 
-本 ADR 第 40、147 行规定的是 `/2` 启用时的整对象改名：`credential_scope.{env,file}` 一并迁到 `credential_source.{env,file}`，不得回读旧 `env` 或 `file`。`credential_source.env` 沿用 [ADR 0039「修订（#2134）」](0039-production-entry-inventory-and-unique-launcher.md#修订2134x-凭据注入键名2026-11-20) 的键名规则；受支持版本的非法键才走前置 `InvalidDomain`。当前 X 只支持 `/1`；#2113 不启用 `/2`，两入口须先以 `VersionUnsupported`、退出码 `2` 拒绝 `/2`，即使键名合规。字段规则不授予凭据接触或实盘发送权限。
+本 ADR 第 40、147 行规定的是 `/2` 启用时的整对象改名：`credential_scope.{env,file}` 一并迁到 `credential_source.{env,file}`，不得回读旧 `env` 或 `file`。当前只运行 `/1`；对已识别的 `/2`，launcher 与单启 X 按 [ADR 0039「修订（#2134）」](0039-production-entry-inventory-and-unique-launcher.md#修订2134x-凭据注入键名2026-11-20) 先验 `credential_source.env`。该键缺失、非字符串或不合规，均报 `InvalidDomain`，即使旧键合法也不回读；该键合规后，才因 `/2` 尚未启用报 `VersionUnsupported`、退出 `2`。两类拒绝均不读取凭据、不启动发送。#2113 不启用 `/2`，也不授予凭据接触或实盘发送权限。

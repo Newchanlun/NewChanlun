@@ -72,10 +72,10 @@ S `serve` 需要 admission 锚（`<db>.control-owner.json` + `state/s-admission/
  "credential_scope": {"env": "NC_X_VENUE_CREDENTIAL", "file": "/abs/credential-file"}}
 ```
 
-- `mode` 必须等于 manifest `profile`。
+- `mode` 必须等于 manifest `profile`。部署方发布新版执行 profile 时，须先写入新版本路径，再更新下次启动所用 manifest 的 `x.profile`；严禁原地覆盖、改写或重指向本次启动绑定的路径。
 - launcher 读 `credential_scope.file`，只以 `credential_scope.env` 注入 X 子进程，不写自身环境。S/E/B 清空环境启动（仅放回 `PATH` 与 S 的两个 admission 声明变量）。凭据值不落库、不打印。
 - 用示例的 `NC_X_VENUE_CREDENTIAL`，或加下划线和后缀，如 `NC_X_VENUE_CREDENTIAL_P1`。后缀以 ASCII 字母或数字起首，只含 ASCII 字母、数字或下划线，全名最多 64 字节。按 [ADR 0039「修订（#2134）」](adr/0039-production-entry-inventory-and-unique-launcher.md#修订2134x-凭据注入键名2026-11-20)，#2113 在读凭据文件或开域库之前以 `InvalidDomain` 拒绝 `/1` 的非法键名；升级前同步更新 profile 和获授权的注入配置。
-- **当前只用上例的 `/1`。** 即使键名合规，launcher 与单启 X 也须以 `VersionUnsupported`、退出码 `2` 拒绝 `/2`（#2113 将 launcher 对齐单启 X 已有的版本门）。#2113 只对现有版本加键名校验，不启用 `/2` 或实盘发送权限。将来启用 [ADR 0062 的 `/2`](adr/0062-fu18-venue-account-permission-binding.md#L40) 时，把 `{env,file}` 一并迁到 `credential_source`，不回读旧 `credential_scope` 的 `env` 或 `file`。
+- **当前只用上例的 `/1`。** #2113 规定两入口对 `/2` 的拒绝顺序：`credential_source.env` 缺失或非法报 `InvalidDomain`，不回读旧字段；键名合规则报 `VersionUnsupported`、退出 `2`。两者都不读凭据、不启动发送。#2113 不启用 `/2` 或实盘发送权限。将来启用 [ADR 0062 的 `/2`](adr/0062-fu18-venue-account-permission-binding.md#L40) 时，把 `{env,file}` 一并迁到 `credential_source`，不回读旧 `credential_scope` 的 `env` 或 `file`。
 - experiment/production 缺凭据：X 在构造任何传输之前以 `MissingDependency` 非 0 退出。
 - production 缺 `tb09_fingerprint`：X 持久化 `send_state=refused`、`send_refusal_reason=MissingTb09Fingerprint`。
 - 写调用（`submit`/`cancel`）恒返回 `UnsupportedCapability`；本步不含任何场所写代码。
