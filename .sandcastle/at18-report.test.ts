@@ -5080,6 +5080,127 @@ class Adapter(metaclass=Meta):
   "99,offset=17,x=1,y=2,a=1,b=2,c=3,d=4,e=5,z=6");
 });
 
+test("R44/#1319：公开签名两侧共用来源分配与绑定恢复", { timeout: 180_000 }, async t => {
+  const check = (name: string, production: string, route: string, observed: string, accepts = true) =>
+    t.test(name, async () => {
+      const { f, report } = await control({
+        feedIntegration: "\nfrom . import at18_fixture_feed as f\n" + production + "\n__all__ = ('Adapter',)\n",
+        feedReplacement: route + "\n__all__ = ('route',)\n",
+        feedTest: "from trading_system.at18_fixture_feed import route\n" +
+          "def test_route(): assert route(" + observed + ") == 116\n",
+      }, "R44/" + name);
+      assert.equal(report.head, f.F);
+      const ticket = report.legacy_dispositions.find(r => r.ticket === 1319);
+      assert.equal(ticket?.ticket_state, "CLOSED");
+      assert.equal(ticket?.disposition_valid, accepts);
+      assert.deepEqual(report.failed_checks.map(r => [r.check_id, r.scope]),
+        accepts ? [] : [["LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE"]]);
+      assert.equal(report.overall_result, accepts ? "PASS" : "FAIL");
+    });
+
+  const defaultsRoute = "def route(quote, /, *, marker, offset): return quote + offset";
+  const observe = "99, marker=[99], offset=17";
+  for (const hook of ["__init__", "__new__", "dispatch"]) {
+    const receiver = hook === "__new__" ? "cls" : "self";
+    const body = hook === "__new__" ? "return super().__new__(cls)" : hook === "__init__" ? "self.offset = offset" :
+      "return f.route(99, marker=marker, offset=offset)";
+    const dispatch = hook === "dispatch" ? "" :
+      "\n    def dispatch(self): return f.route(99, marker=sentinel, offset=" +
+        (hook === "__init__" ? "self.offset" : "17") + ")";
+    await check(hook + "：同值样本与默认哨兵分别尝试",
+      "\nsentinel = [99]\nclass Adapter:\n    def " + hook + "(" + receiver + ", marker=sentinel, offset=None, /):\n" +
+      "        assert marker is sentinel and offset == 17\n        " + body + "\n" + dispatch, defaultsRoute, observe);
+  }
+  await check("type 默认元类：双钩子共享载荷、独立选择默认槽", `
+left, right = object(), object()
+class Adapter:
+    def __new__(cls, *, a=left, b=None, **kw):
+        assert a is left and b == 2
+        return super().__new__(cls)
+    def __init__(self, *, c=right, offset=None, **kw):
+        assert c is right and offset == 17
+    def dispatch(self): return f.route(99, a=1, b=2, c=3, offset=17)
+`, "def route(quote, /, **kw): return quote + kw['offset']", "99, a=1, b=2, c=3, offset=17");
+
+  const channels = "def route(tag, /, *items, **kw): return tag + items[-1]";
+  await check("元类取同名关键字，位置与其余关键字留给实例", `
+marker = object()
+class Meta(type):
+    def __call__(cls, tag, /, *pos, **kw):
+        assert tag == 99
+        return super().__call__(*pos, **kw)
+class Adapter(metaclass=Meta):
+    def __init__(self, keep=marker, /, *items, **kw):
+        assert keep is marker and items == (99, 17) and kw == {'flag': True}
+    def dispatch(self): return f.route(99, 17, tag=99, flag=True)
+`, channels, "99, 17, tag=99, flag=True");
+  await check("实例取同名关键字，保留原位置而不重传同名关键字", `
+marker = object()
+class Meta(type):
+    def __call__(cls, offset, /, *pos, **kw):
+        assert offset == 4
+        return super().__call__(*pos, **kw)
+class Adapter(metaclass=Meta):
+    def __init__(self, tag, keep=marker, /, *items, **kw):
+        assert tag == 99 and keep is marker and items == (99, 17) and kw == {'flag': True}
+    def dispatch(self): return f.route(99, 17, tag=99, flag=True, offset=4)
+`, channels, "99, 17, tag=99, flag=True, offset=4");
+  await check("改名元类两槽择位、实例保留具名槽及尾参", `
+marker = object()
+class Meta(type):
+    def __call__(cls, offset, bucket, quantity, /, *pos, **kw):
+        assert (offset, bucket, quantity) == (4, 7, 90)
+        return super().__call__(*pos, **kw)
+class Adapter(metaclass=Meta):
+    def __init__(self, ask, renamed, keep=marker, /, *items, **kw):
+        assert (ask, renamed) == (2, 3) and keep is marker and items == (17,) and kw == {'flag': True}
+    def dispatch(self): return f.route(90, 3, 2, 7, 17, offset=4, flag=True)
+`, "def route(tag, depth, ask, lot, /, *items, **kw): return tag + depth + ask + items[0] + kw['offset']",
+  "90, 3, 2, 7, 17, offset=4, flag=True");
+
+  for (const keywordOuter of [false, true]) {
+    const metaArgs = keywordOuter ? "*pos, tag, **kw" : "tag, /, *pos, **kw";
+    await check("同名异值：关键字来源归" + (keywordOuter ? "元类专用槽" : "实例"),
+      `
+marker = object()
+class Meta(type):
+    def __call__(cls, ${metaArgs}):
+        assert tag == ${keywordOuter ? 19 : 99}
+        return super().__call__(*pos, **kw)
+class Adapter(metaclass=Meta):
+    def __init__(self, tag, keep=marker, /, *items, **kw):
+        assert tag == ${keywordOuter ? 99 : 19} and keep is marker and items == (17,) and kw == {'flag': True}
+    def dispatch(self): return f.route(99, 17, tag=19, flag=True)
+`, channels, "99, 17, tag=19, flag=True");
+  }
+
+  const keys = ["o'clock", '双"引号', `双"'引号`, "有 空格", "换\n行", "a\\b", "中文", "", "\0", "ofset"];
+  const options = JSON.stringify(Object.fromEntries(keys.map(key => [key, 5])));
+  for (const ctor of [false, true]) {
+    const flow = ctor ? "        self.quote, self.total = quote, _price(quote, **options)\n" +
+      "    def dispatch(self): return f.route(self.quote, offset=self.total-self.quote, currency='USD')" :
+      "        total = _price(quote, **options)\n        return f.route(quote, offset=total-quote, currency='USD')";
+    await check((ctor ? "构造" : "方法") + "：原生诊断逐个剥离任意字符串键",
+      "\ndef _price(quote, *, offset, currency):\n    assert (quote, offset, currency) == (99, 17, 'USD')\n" +
+      "    return quote + offset\nclass Adapter:\n    def " + (ctor ? "__init__" : "dispatch") +
+      "(self, quote, /, **options):\n" + flow,
+      "def route(quote, /, **options): return quote + options['offset']",
+      "99, offset=17, currency='USD', **" + options);
+    const duplicate = JSON.stringify(`已注入"'值`);
+    await check((ctor ? "构造" : "方法") + "：原生诊断删除带引号的重复关键字",
+      "\ndef _price(quote, *, offset, currency):\n    return quote + offset\n" +
+      "def _ready(quote, *, offset, currency, **options):\n" +
+      "    assert options == {" + duplicate + ": 11} and currency == 'USD'\n" +
+      "    return _price(quote, offset=offset, currency=currency)\nclass Adapter:\n    def " +
+      (ctor ? "__init__" : "dispatch") + "(self, quote, /, **options):\n" +
+      flow.replace("_price(quote, **options)", "_ready(quote, **{" + duplicate + ": 11}, **options)"),
+      "def route(quote, /, **options): return quote + options['offset']",
+      "99, offset=17, currency='USD', **{" + duplicate + ": 5}");
+  }
+  await check("同值结果没有进入承接导出仍拒绝",
+    "\nclass Adapter:\n    def dispatch(self, marker=None, offset=None): return 116", defaultsRoute, observe, false);
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";

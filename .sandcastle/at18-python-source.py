@@ -13,7 +13,7 @@ import struct
 import sys
 from collections import Counter
 from contextvars import ContextVar
-from itertools import combinations, product
+from itertools import combinations, permutations, product
 from pathlib import Path
 from types import AsyncGeneratorType, CodeType, CoroutineType, FunctionType, GeneratorType, MethodType
 from typing import NamedTuple
@@ -125,27 +125,35 @@ def named_source_positions(slots, view, source_pos_args, indices):
             and sample_key(view[p.name]) == sample_key(source_pos_args[indices[p.name]])}
 
 
-def by_position(slots, view, indices, reserved):
-    # 换名的必填槽沿已观察固定位置顺序补齐，不猜测默认槽或匿名尾参。
-    available = iter(sorted(set(indices.values()) - reserved))
-    return {p.name: idx for p in slots if p.name not in view and p.default is inspect.Parameter.empty
-            and (idx := next(available, None)) is not None}
-
-
-def source_prefixes(signature, view, source_pos_args, indices, source_kwargs):
-    slots = [p for p in signature.parameters.values() if p.kind in POSITIONAL]
-    by_name = named_source_positions(slots, view, source_pos_args, indices)
+def source_prefixes(signature, view, source_pos_args, indices, source_kwargs, *,
+                    omitted=(), outer_consumed=(frozenset(), frozenset())):
+    slots = [p for p in signature.parameters.values() if p.kind not in VARIADIC and p.name not in omitted]
+    positional = [p for p in slots if p.kind in POSITIONAL]
+    outer_positions, outer_keywords = outer_consumed
+    matching_positions = named_source_positions(slots, view, source_pos_args, indices)
+    by_name = {p.name: matching_positions[p.name] for p in positional if p.name in matching_positions
+               and matching_positions[p.name] not in outer_positions}
+    keyword_values = {p.name: source_kwargs[p.name] for p in slots if p.name in view and
+                      p.name in source_kwargs and p.name not in outer_keywords and
+                      (p.name in matching_positions or sample_key(view[p.name]) == sample_key(source_kwargs[p.name]))}
     # 源的仅位置槽与同名 **kwargs 是两个实参，即便两者值相等。
-    shadow_slots = tuple(name for name in by_name if name in source_kwargs)
+    shadow_slots = tuple(name for name in by_name if name in keyword_values)
     for shadow in selections(shadow_slots):
         claimed = {name: idx for name, idx in by_name.items() if name not in shadow}
-        keywords = shadow | {p.name for p in slots if p.name not in claimed and p.name in source_kwargs
-                             and p.name in view and sample_key(view[p.name]) == sample_key(source_kwargs[p.name])}
-        overrides = {name: source_kwargs[name] for name in source_kwargs if name in shadow}
+        keywords = frozenset(keyword_values.keys() - claimed.keys())
+        overrides = {name: value for name, value in keyword_values.items() if name in keywords and
+                     (name in shadow or sample_key(view[name]) != sample_key(value))}
         yield claimed, keywords, overrides
         # 换名的必填槽可沿源固定位置顺序补齐，不抢具名绑定，也不猜测默认槽或匿名尾参。
-        direct = by_position(slots, view, indices, set(claimed.values()))
-        if direct:
+        missing = [p.name for p in positional if p.name not in view and p.default is inspect.Parameter.empty]
+        available = sorted(set(indices.values()) - outer_positions - set(claimed.values()))
+        count = min(len(missing), len(available))
+        if not count:
+            continue
+        # 小池保留所有分配：某个源槽可能是下一层唯一的具名实参。
+        allocations = permutations(available, count) if len(available) <= 6 else (available[:count],)
+        for allocation in allocations:
+            direct = dict(zip(missing, allocation))
             yield claimed | direct, keywords, overrides | {name: source_pos_args[idx] for name, idx in direct.items()}
 
 
@@ -161,7 +169,7 @@ def variadic_modes(signature, shapes=(), view=None, shape_views=None, *, joint_d
     # 不从外来规范或任意具名值的顺序发明位置尾参。
     if has_args and (not has_kwargs or not variadic_only(signature)):
         yield "args"
-    if has_args and not variadic_only(signature):
+    if joint_defaults or has_args and not variadic_only(signature):
         seen_tails, seen_mixed = set(), set()
         for args, kwargs in shapes:
             if not args:
@@ -171,8 +179,8 @@ def variadic_modes(signature, shapes=(), view=None, shape_views=None, *, joint_d
                 keyword_key = keyword_sample_key(kwargs)
                 observations = () if view is None or shape_views is None else shape_views.get(
                     (position_key, keyword_key), ())
-                plans = [(indices, *plan) for indices in observations
-                         for plan in source_prefixes(signature, view, args, indices, kwargs)]
+                plans = [(indices, *plan) for indices in observations for plan in
+                         ((({}, frozenset(), {}),) if joint_defaults else source_prefixes(signature, view, args, indices, kwargs))]
             except ValueError:
                 continue
             for indices, claimed, keywords, overrides in plans or (({}, {}, frozenset(), {}),):
@@ -197,7 +205,6 @@ def arguments(signature, samples, variadic=False, *, following_positional=False,
               outer_consumed=(frozenset(), frozenset())):
     args, kwargs, defaults = [], {}, {}
     params = signature.parameters
-    original = samples
     if omitted:
         samples = {name: value for name, value in samples.items() if name not in omitted}
     extra_args, extra_kwargs = (), {}
@@ -215,22 +222,18 @@ def arguments(signature, samples, variadic=False, *, following_positional=False,
             _, tail, options, source = variadic
             source_pos_args, claimed, overrides = source.args, source.positions, source.overrides
             outer_positions, outer_keywords = outer_consumed
-            if outer_positions and any(name not in original for name in claimed):
-                # 串行元类的具名绑定优先于实例侧猜测的按位绑定。
-                claimed = {name: idx for name, idx in claimed.items() if name in original and name not in omitted}
-                slots = [p for p in params.values() if p.kind in POSITIONAL]
-                direct = by_position(slots, original, source.indices, outer_positions | set(claimed.values()))
-                claimed |= direct
-                overrides = ({name: value for name, value in overrides.items() if name in original} |
-                             {name: source_pos_args[idx] for name, idx in direct.items()})
             if omitted or outer_positions:
                 consumed_source_pos_indices = outer_positions | {idx for name, idx in claimed.items() if name not in omitted}
                 tail = tuple(v for idx, v in enumerate(source_pos_args) if idx not in consumed_source_pos_indices)
             if overrides:
                 samples = samples | {name: value for name, value in overrides.items() if name not in omitted}
-            extra_args = tuple(map(sample, tail))
-            extra_kwargs = {k: sample(v) for k, v in options.items()
-                            if k not in fixed and k not in outer_keywords and (k not in source.keywords or k in omitted)}
+            # 上层已用关键字时，内层仍可单独通过位置接收同名源槽。
+            following_positional |= bool(outer_keywords & claimed.keys())
+            if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params.values()):
+                extra_args = tuple(map(sample, tail))
+            if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                extra_kwargs = {k: sample(v) for k, v in options.items() if
+                                k not in fixed and k not in outer_keywords and (k not in source.keywords or k in omitted)}
         else:
             remaining = {k: sample(v) for k, v in samples.items() if k not in fixed}
             if variadic == "args":
@@ -263,6 +266,8 @@ def arguments(signature, samples, variadic=False, *, following_positional=False,
             elif param.default is inspect.Parameter.empty:
                 kwargs[param.name] = None
     kwargs.update(extra_kwargs)
+    for key in outer_consumed[1]:
+        kwargs.pop(key, None)
     return args, kwargs, defaults
 
 
@@ -418,7 +423,7 @@ def argument_choice(bound, args, kwargs, defaults, default_refs):
         elif kind is inspect.Parameter.VAR_KEYWORD:
             key = tuple((k, sample_key(sample(v))) for k, v in value.items())
         else:
-            key = choice_value_key(value, default_refs)
+            key = choice_value_key(value, default_refs, default=value is param.default)
         items.append((name, key))
     return tuple(items)
 
@@ -482,30 +487,37 @@ def strip_variadics(signature):
     return signature.replace(parameters=[p for p in signature.parameters.values() if p.kind not in VARIADIC])
 
 
-KW_DROP = re.compile(r"[^\n]+\(\) got (?:multiple values for (?:keyword )?argument|an unexpected keyword argument) '([^']+)'")
+KW_DROP_SUFFIXES = ("() got an unexpected keyword argument ", "() got multiple values for keyword argument ",
+                    "() got multiple values for argument ")
 KW_POSONLY = re.compile(r"[^\n]+\(\) got some positional-only arguments passed as keyword arguments: '([^',]+(?:, [^',]+)*)'")
 KW_NEED = re.compile(r"[^\n]+\(\) missing ([1-9][0-9]*) required (?:keyword-only|positional) (argument|arguments): (.+)")
 KW_NAME = r"'[^']+'"
 KW_LIST = re.compile(rf"{KW_NAME}(?: and {KW_NAME}|(?:, {KW_NAME})+, and {KW_NAME})?")
 
 
-def parse_kw_type_error(exc, extra_set):
+def parse_kw_type_error(exc, kwargs, required=None):
     # 诊断只用于安排实参；是否覆盖仍由实际公开调用的轨迹决定。
     if type(exc) is not TypeError or len(exc.args) != 1 or type(exc.args[0]) is not str:
         return None
     msg = exc.args[0]
-    if match := KW_DROP.fullmatch(msg):
-        name = match[1]
-        if name in extra_set:
-            return "drop", (name,)
+    # CPython 3.14 可在键名之后附上建议；建议本身不参与匹配。
+    prefix, marker, suggestion = msg.rpartition(". Did you mean ")
+    messages = ((msg, prefix) if marker and suggestion.startswith("'") and suggestion.endswith("'?") and
+                suggestion[1:-2].isidentifier() else (msg,))
+    for name in sorted(kwargs, key=len, reverse=True):
+        for quoted in (f"'{name}'", f'"{name}"', repr(name)):
+            if any(text.endswith(quoted) and text[:-len(quoted)].endswith(KW_DROP_SUFFIXES) or
+                   text in (f"got an unexpected keyword argument {quoted}",
+                            f"multiple values for argument {quoted}") for text in messages):
+                return "drop", (name,)
     if match := KW_POSONLY.fullmatch(msg):
-        dropped = tuple(name for name in match[1].split(", ") if name in extra_set)
+        dropped = tuple(name for name in match[1].split(", ") if name in kwargs)
         if dropped:
             return "drop", dropped
     if (match := KW_NEED.fullmatch(msg)) and KW_LIST.fullmatch(match[3]):
         names = tuple(re.findall(KW_NAME, match[3]))
         if str(len(names)) == match[1] and (len(names) == 1) == (match[2] == "argument"):
-            missing = tuple(name[1:-1] for name in names if name[1:-1] in extra_set)
+            missing = tuple(name[1:-1] for name in names if name[1:-1] in (kwargs if required is None else required))
             if missing:
                 return "need", missing
 
@@ -513,7 +525,7 @@ def parse_kw_type_error(exc, extra_set):
 def bind_public(signature, args, kwargs):
     try:
         return signature.bind(*args, **kwargs), None
-    except TypeError:
+    except TypeError as exc:
         # inspect.bind 与原生调用的诊断格式不同。只移除公开签名能证明
         # 拒收的键；有 **kwargs 时，同名仅位置槽不占用该关键字。
         params = signature.parameters
@@ -524,7 +536,7 @@ def bind_public(signature, args, kwargs):
             if name in bound_positions or (not has_varkw and
                     (name not in params or params[name].kind not in KEYWORD)):
                 return None, ("drop", (name,))
-        return None, None
+        return None, parse_kw_type_error(exc, kwargs, ())
 
 
 def drop_conflicting_keywords(kwargs, attempt):
@@ -551,31 +563,43 @@ def default_selections(layers, view, terminal_groups=()):
     yield from selections(slots, groups)
 
 
-def metaclass_prefixes(layers, instance_sig, view, mode, instance_arguments, terminal_groups):
+def constructor_arguments(layers, instance_sig, view, mode, instance_arguments, terminal_groups):
     for omitted in default_selections((*layers, instance_sig), view, terminal_groups):
         by_layer = [set() for _ in range(len(layers) + 1)]
         for idx, name in omitted:
             by_layer[idx].add(name)
-        outer_positions, outer_keywords = set(), set()
-        if type(mode) is tuple:
-            source = mode[3]
-            for sig, skip in zip(layers, by_layer):
-                slots = [p for p in sig.parameters.values() if p.kind in POSITIONAL and p.name not in skip]
-                indices_used = named_source_positions(slots, view, source.args, source.indices)
-                outer_positions.update(indices_used.values())
-                outer_keywords.update(p.name for p in slots if p.name not in indices_used and p.name in view
-                                      and p.name in source.kwargs
-                                      and sample_key(view[p.name]) == sample_key(source.kwargs[p.name]))
-        position, keywords, identities = instance_arguments(by_layer[-1], (outer_positions, outer_keywords))
-        for i in reversed(range(len(layers))):
-            sig = layers[i]
-            if position and not any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()):
-                break
-            prefix, options, refs = arguments(sig, view, following_positional=bool(position), omitted=by_layer[i])
-            refs.update({len(prefix) + j: default for j, default in identities.items()})
-            position, keywords, identities = [*prefix, *position], keywords | options, refs
-        else:
-            yield position, keywords, identities
+
+        def compose(depth, consumed):
+            terminal = depth == len(layers)
+            sig = instance_sig if terminal else layers[depth]
+            skip = by_layer[depth]
+            if type(mode) is tuple:
+                source = mode[3]
+                plans = source_prefixes(sig, view, source.args, source.indices, source.kwargs,
+                                        omitted=skip, outer_consumed=consumed)
+            else:
+                plans = (({}, frozenset(), {}),)
+            for claimed, keys, overrides in plans:
+                if terminal:
+                    terminal_mode = mode
+                    if type(mode) is tuple:
+                        allocated = source._replace(positions=claimed, keywords=keys, overrides=overrides)
+                        tail = tuple(v for i, v in enumerate(source.args) if i not in claimed.values())
+                        terminal_mode = ("shape", tail, mode[2], allocated)
+                    yield instance_arguments(skip, consumed, terminal_mode)
+                    continue
+                positions, keywords = consumed
+                next_consumed = positions | set(claimed.values()), keywords | keys
+                for pos, kw, identities in compose(depth + 1, next_consumed):
+                    if pos and not any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()):
+                        continue
+                    prefix, options, refs = arguments(
+                        sig, view | overrides, omitted=skip, outer_consumed=consumed,
+                        following_positional=bool(pos) or bool(keywords & claimed.keys()))
+                    refs.update({len(prefix) + j: value for j, value in identities.items()})
+                    yield [*prefix, *pos], kw | options, refs
+
+        yield from compose(0, (frozenset(), frozenset()))
 
 
 def peel_chain(layers, args, kwargs, defaults, default_refs):
@@ -658,13 +682,15 @@ def ctor_choice(primary_layers, secondary_layers, args, kwargs, defaults, defaul
 
 
 CTOR_PROBE_TIERS = ((False, False), (False, True), (True, None))
-META_INSTANCE = object()
 
+
+class InstanceComposition(NamedTuple):
+    normalization: int | None
 
 
 class Binding:
     def __init__(self, key, member, chain, owner=None, ctor_chains=((), ()), ctor_shapes=True, ctor_alternates=(),
-                 meta_layers=()):
+                 meta_layers=None):
         self.key, self.member, self.chain, self.owner = key, member, chain, owner
         self.ctor_chains = ctor_chains if len(ctor_chains) == 2 else ((), ())
         self.ctor_shapes = ctor_shapes
@@ -874,17 +900,28 @@ class Binding:
                 add(*candidate)
         if generic:
             add(public)
-        for sig in alternates:
-            add(sig, META_INSTANCE, alternate=True)
+        # type 的实例签名已参与公开构造归一；合成时沿用各姿态的缓存键。
+        # 自定义元类的实例签名只生成备选，归一仍由元类主链决定。
+        instance_forms = ([(sig, variant) for sig, variant, _ in pairs if not variadic_only(sig)]
+                          if self.meta_layers is None and alternates else [(sig, None) for sig in alternates])
+
+        def add_instance(sig, variant):
+            tagged = InstanceComposition(variant)
+            if self.meta_layers is None:
+                pairs.append((sig, tagged, True))
+            else:
+                add(sig, tagged, alternate=True)
+
         instance_keywords = {name: param.replace(kind=inspect.Parameter.KEYWORD_ONLY)
                              for sig in reversed(alternates) for name, param in sig.parameters.items()
                              if param.kind in KEYWORD}
-        for sig in alternates:
+        for sig, variant in instance_forms:
+            add_instance(sig, variant)
             # __new__ 与 __init__ 接收同一份输入；一侧的关键字专用槽
             # 可以经另一侧的 **kwargs 携带，不可当成两个串行的位置前缀。
             if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                 if (merged := merge_kwonly(sig, instance_keywords)) is not None:
-                    add(merged, META_INSTANCE, alternate=True)
+                    add_instance(merged, variant)
         if public_has_varkw and extra_recover:
             add_recovery(strip_variadics(public), None)
         return layer_variants, pairs, (recovery, public_kwonly, extra_recover, ordinary_recover), ordinary_count
@@ -913,7 +950,7 @@ class Binding:
         known_keywords = extra_set | {name for name, param in public.parameters.items() if param.kind in KEYWORD}
         terminal_groups = tuple(dict.fromkeys(
             frozenset(name for name, p in sig.parameters.items() if p.default is not inspect.Parameter.empty)
-            for sig, variant, _ in pairs if variant is META_INSTANCE))
+            for sig, variant, _ in pairs if type(variant) is InstanceComposition))
         if ctor_errors is None:
             ctor_errors = {}
 
@@ -976,7 +1013,7 @@ class Binding:
                     try:
                         inst = self.owner(*ctor_args, **ctor_kwargs)
                     except (Exception, SystemExit) as exc:
-                        tag = parse_kw_type_error(exc, error_keys | kwargs.keys()) if error_keys or kwargs else None
+                        tag = parse_kw_type_error(exc, kwargs, error_keys) if error_keys or kwargs else None
                         if tag is not None:
                             failed_key = raw_key
                         instances[failed_key] = None
@@ -1004,32 +1041,39 @@ class Binding:
             return ok, error
 
         def resolve(sig, view, mode, variant, shadow_kw=None, error_keys=ordinary_recover, shadow_values=None):
-            def instance_arguments(omitted, outer_consumed=(frozenset(), frozenset())):
-                args, kwargs, defaults = arguments(sig, view, mode, omitted=omitted, outer_consumed=outer_consumed)
+            def instance_arguments(omitted, outer_consumed=(frozenset(), frozenset()), terminal_mode=mode):
+                args, kwargs, defaults = arguments(sig, view, terminal_mode, omitted=omitted, outer_consumed=outer_consumed)
                 if shadow_kw:
                     values = view if shadow_values is None else shadow_values
                     for name, param in shadow_kw.items():
+                        if name in outer_consumed[1]:
+                            continue
                         if name in values:
                             kwargs[name] = sample(values[name])
                         elif param.default is inspect.Parameter.empty:
                             kwargs[name] = None
                 return args, kwargs, defaults
 
-            try:
-                args, kwargs, defaults = instance_arguments(())
-            except (ValueError, TypeError):
-                return False, None
-            if variant is not META_INSTANCE:
+            if type(variant) is not InstanceComposition:
+                try:
+                    args, kwargs, defaults = instance_arguments(())
+                except (ValueError, TypeError):
+                    return False, None
                 return (yield from recover_args(args, kwargs, defaults, variant, error_keys))
 
-            # 先试直接传参，再试由元类消费固定前缀、将剩余实参转给实例。
-            result = yield from recover_args(args, kwargs, defaults, None, error_keys)
-            plans = ((public,), (public, *self.meta_layers)) if self.meta_layers else ((public,),)
+            # type 不消耗前缀；本地 __call__ 层可以顺序消费。两者共享终端组合器。
+            result = False, None
+            plans = ((),)
+            if self.meta_layers is not None:
+                plans += ((public,),)
+                if self.meta_layers:
+                    plans += ((public, *self.meta_layers),)
             for layers in plans:
                 try:
-                    for prefix_args, prefix_kw, prefix_defaults in metaclass_prefixes(
+                    for prefix_args, prefix_kw, prefix_defaults in constructor_arguments(
                             layers, sig, view, mode, instance_arguments, terminal_groups):
-                        forwarded = yield from recover_args(prefix_args, prefix_kw, prefix_defaults, None, error_keys)
+                        forwarded = yield from recover_args(prefix_args, prefix_kw, prefix_defaults, variant.normalization,
+                                                            error_keys)
                         if forwarded[0] or not result[0] and result[1] is None:
                             result = forwarded
                 except (ValueError, TypeError):
@@ -1120,7 +1164,7 @@ class Binding:
                     if only_alternate is None or is_alternate is only_alternate:
                         if use_variadic:
                             for mode in variadic_modes(sig, shapes, view, shape_views,
-                                                       joint_defaults=variant is META_INSTANCE):
+                                                       joint_defaults=type(variant) is InstanceComposition):
                                 yield from resolve(sig, view, mode, variant, error_keys=extra_set)
                         else:
                             yield from resolve(sig, view, False, variant)
@@ -1166,6 +1210,7 @@ class Binding:
             return
 
         def candidates():
+            default_plans = []
             for args, kwargs in shapes:
                 yield args, kwargs, {}
             for view, keywords in ((named, {}), *((view, {}) for view in overrides), *shadow_observations):
@@ -1175,6 +1220,9 @@ class Binding:
                     for mode in modes:
                         try:
                             yield arguments(signature, values, mode)
+                            if signature is public and any(p.name in values and p.default is not inspect.Parameter.empty
+                                                           for p in public.parameters.values()):
+                                default_plans.append((values, mode))
                         except (ValueError, TypeError):
                             continue
             signatures = tuple(self.signatures(fn, public, named))
@@ -1185,9 +1233,17 @@ class Binding:
                     filtered = {name: value for name, value in kwargs.items() if name in known}
                     if len(filtered) != len(kwargs):
                         yield args, filtered, {}
+            for values, mode in default_plans:
+                for omitted in default_selections((public,), values):
+                    if omitted:
+                        try:
+                            yield arguments(public, values, mode, omitted={name for _, name in omitted})
+                        except (ValueError, TypeError):
+                            continue
 
-        # 方法继续按类型化纯数据去重；构造组合的默认身份不能改变方法尝试次数。
+        # 观察值仍按类型和值去重（包括 NaN）；只给公开方法自己的默认对象保留身份。
         choices, attempts, default_refs = set(), {}, {}
+        public_positional = tuple(p for p in public.parameters.values() if p.kind in POSITIONAL)
         for args, kwargs, defaults in candidates():
             normalizing = True
 
@@ -1206,7 +1262,9 @@ class Binding:
                             return False, None
                         choices.add(choice)
                     # 省略显式默认键可能改变包装器转发；恢复时按未归一的实参去重。
-                    key = (tuple(choice_value_key(v, default_refs) for v in args),
+                    key = (tuple(choice_value_key(v, default_refs, default=
+                                                  i < len(public_positional) and v is public_positional[i].default)
+                                 for i, v in enumerate(args)),
                            keyword_sample_key(options))
                     if key not in attempts:
                         attempts[key] = yield copy_arguments(args, options, defaults)
@@ -1331,8 +1389,8 @@ class Exports:
     def ctor_chains(self, owner):
         meta_cls, meta_member = mro_member(type(owner), "__call__")
         if meta_cls is None or meta_cls is type:
-            primary, secondary, local = self.instance_ctor_chains(owner)
-            return primary, secondary, local, (), ()
+            primary, secondary, local = self.instance_ctor_chains(owner, include_first=True)
+            return primary[1:], secondary, local, (*primary, *secondary) if local else (), None
         chain = self.local_ctor_chain(meta_cls, self.ctor_callable(meta_cls, meta_member))
         if not chain:
             return (), (), False, (), ()
@@ -1414,7 +1472,7 @@ class Exports:
         return p_items, s_items, shapes_local
 
     def binding(self, key, member, owner=None, ctor_chains=((), ()), ctor_shapes=True, ctor_alternates=(),
-                meta_layers=()):
+                meta_layers=None):
         fn = underlying(member)
         if chain := self.wrapped_chain(fn):
             return Binding(key, member, chain, owner, ctor_chains, ctor_shapes, ctor_alternates, meta_layers)
