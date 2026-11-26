@@ -42,9 +42,15 @@
 
 ### 三、已知总成本为零的求值（[#2111](https://github.com/Newchanlun/NewChanlun/issues/2111)，2026-11-20）
 
-记 `C = 2·fee + slippage + latency_error [+ holding]`，与 [ADR 0035](0035-cost-stop-policy-instance-and-base-extension-evidence.md) 裁定一同尺度、同往返口径。先按请求时刻的有效记录、有效域、级别及来源解析成本；只合计适用项。适用项 Missing 或无合格输入仍按 §二与 ADR 0035 裁定二处理为不可评估，不用 0 占位；未到生效级别的 holding 不适用。获授权的已知零值与匹配已登记 Known 来源的运行实测零值，在各自来源门通过后同为 0；来源及有效域各自保留。零费率可进入合法记录，不代表其余成本为零；运行读数不得覆盖已签值或将 Missing、代理下界改成 Known。
+**先解析成本。** 记 `C = 2·fee + slippage + latency_error [+ holding]`，与 [ADR 0035](0035-cost-stop-policy-instance-and-base-extension-evidence.md) 裁定一同尺度、同往返口径；含代理项时，以其下界代入得到 `C_min`。按请求时刻的有效记录、有效域、级别及来源解析，只合计适用项；未到生效级别的 holding 不适用。适用项 Missing 或无合格输入仍按 §二与 ADR 0035 裁定二处理为不可评估，不用 0 占位。获授权的已知零值与匹配已登记 Known 来源的运行实测零值，在各自来源门通过后同为 0；来源及有效域各自保留。零费率可进入合法记录，不代表其余成本为零；运行读数不得覆盖已签值或将 Missing、代理下界改成 Known。
 
-成本来源可用后，先查 ROUNDTRIP 波幅证据是否符合所引证据门（[ADR 0022](0022-acceptance-criterion-parameters.md) 裁定六／七和版本记录）。不满足时为 `InsufficientEvidence(Amplitude)`，即使所有适用成本项均已知且 `C = 0`。合格下界与下界数值过线是两件事：
+**各适用成本项及代理下界只接受非负定点值。** P1 的资金费在完整持有区间按仓位方向计提并汇总净额（`funding_accrual_signed`：正为付费，负为收入）。来源合格且净额非负，才可换算到同一往返成本尺度作为 holding。净收入在账务上仍为收入，即使其他成本足以抵销它，也不得作为负的 holding 入门；不得逐期丢弃收入、取绝对值或截零。
+
+负的签署值按非法记录拒收；负的实测值或代理下界按该项无合格输入返回 `NotEvaluable(UnavailableCost(该项))`（持有项为 `Holding`），并报告负值越界。合格输入不会得到 `C < 0` 或 `C_min < 0`；若仍得到负合计，显式报成本定义域错误并停止，不进入求值表。
+
+**再校验证据门记录，再查波幅读数。** 成本输入可用后，按 [ADR 0022](0022-acceptance-criterion-parameters.md)「版本规则」「缺失语义」校验成本政策引用的具名门版本。所引记录找不到、字段缺失或非法（含越界），或该版本未获有效授权（本次读数已给出 `run_started_at` 时，授权必须早于它），均显式报 `PolicyError` 并停止，不出四态或验收读数，不回退常数或别的版本。
+
+记录有效后，才按该版本及裁定六／七核验 ROUNDTRIP 波幅证据。证据缺失或不合格（如读数引用与所引门版本不符、窗口未事前冻结、样本或覆盖不足）才返回 `InsufficientEvidence(Amplitude)`，即使所有适用成本项均已知且 `C = 0`。合格下界与下界数值过线是两件事：
 
 | 成本证据 | 合格波幅下界的读法 | 输出 |
 |---|---|---|
@@ -55,7 +61,7 @@
 
 `Disabled` 表示证据已证明门槛不满足，不表示比值无定义。此门没有独立的绝对波幅最低值；正成本比较上的不过线仍为 `Disabled`，零总成本时不得用交叉相乘的等价式越出正分母定义域，也不填极限值、最小分母或备用判据。三种非 Enabled 结果均不放行本门；调用方保留四态及原因，不把「缺证据／不可评估」记成测得不过线，不改现有塔底和进阶复测协议。
 
-零分母处置和证据先决关系是对既有比值及证据契约的边界补全，不设可调字段（[ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 裁定二、四；#799、#804）。同一规则用于各级和各有效 profile；继续按已授权版本读取 θ 与成本来源，变动成本值或来源仍须按原合同另出版本。P0、P1-hl-testnet 两份 v1 签署值、来源与有效域不变；两版滑点仍为 Missing，按原合同输出 `NotEvaluable`。本条只定求值方法，不签任何实际取值。
+上述输入域、零分母处置和证据先决关系在各级和各有效 profile 使用同一规则，不设可调字段（[ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 裁定二、四；#799、#804）。继续按已授权版本读取 θ 与成本来源，变动成本值或来源仍须按原合同另出版本。若要以资金费净收入抵扣其他成本，须另行裁定净成本口径及其比值定义域。P0、P1-hl-testnet 两份 v1 签署值、来源与有效域不变；两版滑点仍为 Missing，按原合同输出 `NotEvaluable`。本条只定求值方法，不签任何实际取值。
 
 ## 签署记录
 
@@ -120,14 +126,16 @@ valid_through: 2027-10-21
   - [`cost_stop.rs:69-86,136-161,171-195,209-278,282-301`](https://github.com/Newchanlun/NewChanlun/blob/b7e23c31bc353378b71b090499c6eeea91676c92/rust/src/theta_v0/cost_stop.rs#L69)：签署费率和实测来源、四态、波幅证据与分母检查（旧零早返 :249-251）、来源匹配；测试 seam `:322-452,499-516`。
   - [`policy_records.rs:76-87,625-647`](https://github.com/Newchanlun/NewChanlun/blob/b7e23c31bc353378b71b090499c6eeea91676c92/rust/src/theta_v0/policy_records.rs#L76) 与取证快照中的 [`cost-stop.json:4-56`](https://github.com/Newchanlun/NewChanlun/blob/b7e23c31bc353378b71b090499c6eeea91676c92/rust/src/theta_v0/policy_records/cost-stop.json#L4-L56)：继续读既有 v1，不改签值；零值用非生产夹具覆盖。[#2126](https://github.com/Newchanlun/NewChanlun/pull/2126) 将两份记录分置于 [`P0.v1.json`](https://github.com/Newchanlun/NewChanlun/blob/c2806071dec8d0669f478cec4df093781f691232/rust/src/theta_v0/policy_records/cost-stop/P0.v1.json) 与 [`P1-hl-testnet.v1.json`](https://github.com/Newchanlun/NewChanlun/blob/c2806071dec8d0669f478cec4df093781f691232/rust/src/theta_v0/policy_records/cost-stop/P1-hl-testnet.v1.json)。
   - 行号取自 `impl/1441-cost-stop-policy` 的 `5a4033fd9083aafaea580ef56c050c1e21ef29df`，#1441 第三轮重写后以其新头为准：[`cost_stop.rs:418-420`](https://github.com/Newchanlun/NewChanlun/blob/5a4033fd9083aafaea580ef56c050c1e21ef29df/rust/src/theta_v0/cost_stop.rs#L418-L420) 移除了 `ZeroTotalCost`；`:442-454` 定义待裁错误，`:549-551` 在证据门前返回 `Err(CostStopError::ZeroMeasuredCostAwaitingRuling2111)`；`:1054-1068` 的 `zero_measured_total_never_produces_a_four_state_result` 断言与本裁定相反；`:561-564` 在证据门后已按 §三处理零代理下界。
+  - #1441 须分开传播门记录错误与波幅不足，并在有向资金费转成非负成本输入前校验值域。当前基线的参照为 [`backtest/evidence_gate.rs:155-175`](../../rust/src/theta_v0/backtest/evidence_gate.rs#L155-L175)（`PolicyError`）和 [`strategy/risk.rs:998-1026`](../../rust/src/theta_v0/strategy/risk.rs#L998-L1026)（有向计提，原符号语义不改）。
 - [#1602](https://github.com/xy7365527-lang/NewChanlun/issues/1602)：成本参数版本化记录以本 ADR 为数值来源。
 
 ## 溯源标签
 
 θ 倍数、VIP0 档、testnet 按主网同表、P0 holding 起始级别 L0 为 `[新缠论:选择]`；成本门方向 `[旧缠论]`（`035:30`）；原签署记录其余条款为已裁沿用（ADR 0035、ADR 0040）。
 
-§三（#2111）以下三条为 `[新缠论:推论]`，不属 ADR 0035「其余 `[新缠论:选择]`」：
+§三（#2111）以下为 `[新缠论:推论]`，不属 ADR 0035「其余 `[新缠论:选择]`」：
 
+- **净收入不属于本版成本输入域**：ADR 0035 裁定一比较的是同趟往返波幅与成本支出，裁定二的代理下界只用于证明不过线；本版不把各项成本支出改成跨项抵销后的净成本，也不拿零替代净收入。
 - **全 Known 零总成本归 `NotEvaluable(ZeroTotalCost)`**：ADR 0035 裁定一的 `r = A_ℓ/C` 在 `C=0` 时无定义；已有合格波幅证据，故这是不可求值，不是证据不足或已证明不过线。
-- **波幅证据先于定义域检查**：ADR 0035 裁定一继承 ADR 0022 裁定六／七；证据不合格即须明示判不出，不产出可用于判定的 `A_ℓ`，不能以分母原因替代这项证据结果。
+- **无效门记录与波幅不足不同**：ADR 0035 裁定一继承 ADR 0022 裁定六／七和具名版本的缺失语义。没有有效门记录就不能核验证据；记录有效但波幅证据不足时也没有可用于判定的 `A_ℓ`，不能以零分母的结果替代波幅证据不足。
 - **零代理下界归 `InsufficientEvidence(UpperBoundOnly)`**：ADR 0035 裁定二只许以比值上界证明失败；合成下界为零不证明实际成本为零，也不能从该下界证明一个有效的比值低于 θ。
