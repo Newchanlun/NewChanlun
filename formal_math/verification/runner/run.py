@@ -64,6 +64,7 @@ class Fault(Exception):
 
 class Run:
     """一次运行的输入与中间产物；字段在各步里依次填上。"""
+    certificate = None  # 第 5 步写出的派生凭证路径；第 7 步要求它就是第 5 步写的那一份
 
 
 # ---- 输出：一切写进标准输出、标准错误的片段都经 safe() ----
@@ -702,6 +703,8 @@ def compare_lock(expect, rows):
 def step_env(ctx):
     """派生证书由第 5 步写在受信目录下（ctx.certificate），这里再核对一次它在受信目录里。"""
     certificate = ctx.certificate
+    if certificate is None or certificate != os.path.join(ctx.trusted_dir, "derived.json"):
+        raise Fault("NO_CERTIFICATE", "derived.json", "没有第 5 步产出的派生凭证")
     if ctx.lock is None:
         raise Fault("INPUT", "formal_math/statement-lock.json", "被审提交没有锁文件")
     expect = strict_json(blobs(ctx, [ctx.lock])[ctx.lock], "INPUT", "formal_math/statement-lock.json")

@@ -256,3 +256,5 @@ must_green/g3/r5-b4-everyday-tactics	第四片	1	build	BUILD_WFAIL	R5-B4 的误�
 must_green/g3/r5-b4-everyday-terms	第四片	1	build	BUILD_WFAIL	R5-B4 的误拒汇总（第五轮审阅 r5-fixtures/b4-…）；第 5 步零命中；第 6 步构建判红，原因是夹具自身的告警/错误（见 README「R5-B4」），不是形状门
 must_green/g3/r5-b4-readme-promised	第四片	1	build	BUILD_WFAIL	R5-B4 的误拒汇总（第五轮审阅 r5-fixtures/b4-…）；第 5 步零命中；第 6 步构建判红，原因是夹具自身的告警/错误（见 README「R5-B4」），不是形状门
 must_red/known-not-covered/rfl-prime-false	第四片（已知不防的接手对照）	1	build	BUILD_WFAIL	已知不防 rfl' 的接手对照：用 rfl' 证假命题，第 6 步构建判红（形状门看不见 rfl' 展开出的 smartUnfolding，但它改不了证明是否成立）
+must_red/g3/r1-legacy-config	第四片	1	shape	SHAPE_FORBIDDEN	独审 r1 甲-1 的三种写法（aesop (config := …) 取值带 dbgTrace 标记、aesop (simp_config := …)、plausible (config := …)）；本片判红：禁用清单（旧式配置子句）。修复前 1acb400d63 上七步全绿，标记 FM-LEGACY-CONFIG-RAN 出现在构建日志
+must_green/known-issue/autoparam-default-proof	已知问题（环境层误拒）	1	env	ENV_META	独审 r1 N1：structure 字段的自动证明默认值 `:= by omega` 生成 meta 常量 Win.ok._autoParam，第 7 步 ENV_META。这是误拒，待后续片修，届时期望改为绿（退 0）

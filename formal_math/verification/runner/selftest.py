@@ -115,8 +115,10 @@ steps = list(run.STEP_FUNCS)
 if os.environ.get("FM_SELFTEST_SKIP_SHAPE"):
     # 骨架用例里要让被审代码在构建期执行（#eval、meta initialize 等），这里跳过第 5 步；派生证书为空。
     def skip_shape(ctx):
-        ctx.certificate = os.path.join(ctx.trusted_dir, "derived.json")
-        run.write_files(ctx.trusted_dir, [("derived.json", b"[]")])
+        # 值为 nocert 时连派生凭证也不写（S32），否则有意写一份空凭证，第 7 步照常拿到它。
+        if os.environ["FM_SELFTEST_SKIP_SHAPE"] != "nocert":
+            ctx.certificate = os.path.join(ctx.trusted_dir, "derived.json")
+            run.write_files(ctx.trusted_dir, [("derived.json", b"[]")])
         return [], "自测旁路：跳过源码形状"
     steps[4] = skip_shape
 if mode.startswith("warm:"):
@@ -407,6 +409,27 @@ SHAPE_RED = [
     (T + "FbDecideNative.lean", (), "theorem fmN : 1 < 2 := by decide +native", {"SHAPE_FORBIDDEN"}),
     (T + "FbDecideNativeVal.lean", (), "theorem fmN : 1 < 2 := by decide (native := true)", {"SHAPE_FORBIDDEN"}),
     (T + "FbOldConfig.lean", (), "theorem fmC : 1 = 1 := by simp (config := {})", {"SHAPE_FORBIDDEN"}),
+    # 旧式配置子句（独审 r1 甲-1）：按记号形状查，覆盖核心 config 种类、Aesop 的两种子句、新式 valConfigItem，
+    # 出现位置覆盖战术块、by 项、conv、first 分支
+    (T + "FbCfgAesop.lean", ("Mathlib.Tactic.Common",),
+     "theorem fmA1 : True := by\n  aesop (config := { maxRuleApplications := 200 })", {"SHAPE_FORBIDDEN"}),
+    (T + "FbCfgAesopSimpByTerm.lean", ("Mathlib.Tactic.Common",),
+     "theorem fmA2 : True ∧ True := ⟨by aesop (simp_config := { zeta := false }), trivial⟩", {"SHAPE_FORBIDDEN"}),
+    (T + "FbCfgPlausibleFirst.lean", ("Mathlib.Tactic.Common",),
+     "theorem fmA3 (n : Nat) : n = n := by\n  first | plausible (config := { numInst := 5 }) | rfl", {"SHAPE_FORBIDDEN"}),
+    (T + "FbCfgCongr.lean", ("Batteries.Tactic.Congr",),
+     "theorem fmA4 (f : Nat → Nat) (a b : Nat) (h : a = b) : f a = f b := by\n  congr (config := {})",
+     {"SHAPE_FORBIDDEN"}),
+    (T + "FbCfgConv.lean", (), "theorem fmA5 (a : Nat) : a + 0 = a := by\n  conv => lhs; simp (config := {})",
+     {"SHAPE_FORBIDDEN"}),
+    # 必绿对照：新式字面量配置项不受旧式配置子句规则影响（本文件不得出现在红行里）
+    (T + "CfgNewStyleGreen.lean", ("Mathlib.Tactic.Common",),
+     "theorem fmG1 (a : Nat) : a + 0 = a := by simp (maxSteps := 1000)\n"
+     "theorem fmG2 (p : Prop) (h : p) : p := by simp +contextual [h]\n"
+     "theorem fmG3 (a : Nat) : a = a := by simp -zeta\n"
+     "theorem fmG4 : 2 < 3 := by decide +kernel\n"
+     "theorem fmG5 (a : Nat) : a + 0 = a := by\n  conv => lhs; simp (maxSteps := 10)\n"
+     "theorem fmG6 : True := by\n  first | simp (maxDischargeDepth := 2) | trivial", set()),
     (T + "FbIncludeStr.lean", (), 'def fmStr : String := include_str "x.txt"', {"SHAPE_FORBIDDEN"}),
     (T + "FbEvalPercent.lean", ("Mathlib.Tactic.Eval",), "def fmEv : Nat := eval% 1 + 1", {"SHAPE_FORBIDDEN"}),
     (T + "FbByElab.lean", (), "def fmBe : Nat := by_elab pure (Lean.mkNatLit 1)", {"SHAPE_FORBIDDEN"}),
@@ -882,6 +905,13 @@ def skeleton(s):
         return check("S31 绿结果行写出后、进程退出前收到 SIGTERM：处理函数不再写第二行结果行（标准输出仍只有那一行绿），退 2",
                      good, res, "结果行=%s" % results)
 
+    @case("S32")
+    def _():
+        r = s.run("S32-no-certificate", lite_green, lite=True, env={"FM_SELFTEST_SKIP_SHAPE": "nocert"}, mode="plain")
+        good = r["rc"] == 2 and r["faults"] == ["NO_CERTIFICATE"] and r["steps"][-1][1:] == ("env", "FAULT")
+        return check("S32 第 5 步没有产出派生凭证（驱动脚本跳过第 5 步且不写凭证）：第 7 步 NO_CERTIFICATE 退 2，不靠异常兜底",
+                     good, r)
+
     ghost_files = {**s.lite_files, "formal_math/lake-manifest.json":
                    b'{"version": "1.3.0", "packagesDir": ".lake/packages", "packages": [{"name": "ghost"}], '
                    b'"name": "fixture", "lakeDir": ".lake", "fixedToolchain": false}\n'}
@@ -1330,6 +1360,11 @@ MUTANTS = [
        '    binds = [("--bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),\n'
        '             ("--ro-bind", ctx.trusted_dir, ctx.trusted_dir)]\n    env = {"LEAN_PATH": ":".join(search), '
        '"LEAN_SYSROOT": ctx.prefix}\n    ctx.auditor_args = [x for rel')], "S22"),
+    ("去掉旧式配置子句规则（独审 r1 甲-1）", SHAPE,
+     [("if let some key := legacyConfig stx then", "if let some key := (none : Option String) then")], "H1"),
+    ("第 7 步不要求第 5 步产出的派生凭证", RUNNER,
+     [('if certificate is None or certificate != os.path.join(ctx.trusted_dir, "derived.json"):', "if False:")],
+     "S32"),
     ("形状检查不核对每组文件行", RUNNER,
      [("if sorted(r[1] for r in done) != sorted(files) or any(f[2] not in files for f in findings):", "if False:")],
      "S5g"),

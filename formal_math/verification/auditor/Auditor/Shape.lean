@@ -89,6 +89,21 @@ private def setting (stx : Syntax) : Option Name :=
 
 private def stripRoot (n : Name) : Name := n.replacePrefix `_root_ .anonymous
 
+/--
+旧式配置子句，按记号形状查、不按语法种类列名单（同 `setting`）：节点的前三个子节点依次是记号 `(`、
+一个名字以 `config` 结尾的记号或标识符、记号 `:=`。钉选库里实际存在的是核心 `Lean.Parser.Tactic.config`
+（`(config := …)`，被 `plausible`、Batteries 的 `congr`／`rcongr` 等复用）、Aesop 的
+`(config := …)`／`(simp_config := …)` 子句；前两类的取值在精化期经 `declare_config_elab` 编译求值（独审 r1
+甲-1）。新式 `optConfig` 里键为 `config` 的 `valConfigItem` 形状相同，一并判红（上一版也查它）。返回子句名。
+-/
+private def legacyConfig (stx : Syntax) : Option String :=
+  if stx.getNumArgs ≥ 3 && stx[0].isAtom && stx[0].getAtomVal.trimAscii.copy == "(" &&
+      stx[2].isAtom && stx[2].getAtomVal.trimAscii.copy == ":=" then
+    let key := if stx[1].isAtom then stx[1].getAtomVal.trimAscii.copy
+      else if stx[1].isIdent then stx[1].getId.eraseMacroScopes.toString else ""
+    if key.endsWith "config" then some key else none
+  else none
+
 private def attributeName (attr : Syntax) : Name :=
   if attr.getKind == ``Parser.Attr.simple then attr[0].getId.eraseMacroScopes
   else match attr.getKind with
@@ -137,15 +152,16 @@ private partial def inspect (mod : Name) (stx : Syntax) (command guarded : Bool)
       issues := issues.push (stx, "SHAPE_OPTION_CONTROLLED", s!"禁止设置受控选项 {key}")
     else if !allowedOption key then
       issues := issues.push (stx, "SHAPE_OPTION", s!"选项不在白名单：{key}")
-  -- 战术配置：`+native`、`(native := …)` 与旧式 `(config := …)` 不许。
+  -- 战术配置：`+native`、`(native := …)` 不许；旧式配置子句见 `legacyConfig`。
+  if let some key := legacyConfig stx then
+    issues := issues.push (stx, "SHAPE_FORBIDDEN", s!"禁用旧式配置子句 ({key} := …)")
   match kind with
   | .str _ "posConfigItem" | .str _ "negConfigItem" =>
     if stx[1].getId.eraseMacroScopes == `native then
       issues := issues.push (stx, "SHAPE_FORBIDDEN", "禁用配置项 native")
   | .str _ "valConfigItem" =>
-    let key := stx[1].getId.eraseMacroScopes
-    if key == `native || key == `config then
-      issues := issues.push (stx, "SHAPE_FORBIDDEN", s!"禁用配置项 {key}")
+    if stx[1].getId.eraseMacroScopes == `native then
+      issues := issues.push (stx, "SHAPE_FORBIDDEN", "禁用配置项 native")
   | _ => pure ()
   if kind == ``Parser.Term.attrInstance then
     let name := attributeName stx[1]
