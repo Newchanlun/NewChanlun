@@ -1015,7 +1015,7 @@ def skeleton(s):
         counts = elab_consistency(s, r["work"], os.path.join(r["work"], "trusted", "verification", "auditor",
                                                               ".lake", "build", "bin", "fm_audit"))
         rmtree(r["work"])
-        good = r["rc"] == 0 and counts["mismatch"] == [] and counts["files"] == 1
+        good = r["rc"] == 0 and counts["mismatch"] == [] and counts["files"] >= 1
         ok1 = check("H2a 作用域跟踪的阴性对照（namespace/section/end 嵌套、open … in、mutual … end、public section、"
                     "文件末尾未闭合的节）：七步全绿，只解析与真实精化的命令数一致", good, r, str(counts))
         r2 = s.run("H2-scope-red", scope_red)

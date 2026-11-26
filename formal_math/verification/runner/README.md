@@ -168,7 +168,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | 同一组 + 50 个文件（每个 18 条命令） | 墙钟 1.63 s，最大常驻 952 MiB：每个文件约 2.4 ms |
 | 一组库导入（`Mathlib.Data.Finset.Basic`、`Mathlib.Data.Rat.Defs`）+ 1 个文件 | 墙钟 1.50 s，最大常驻 853 MiB |
 | 只有 `Init` + 1 个文件 | 墙钟 0.31 s，最大常驻 288 MiB |
-| 真实仓库第 5 步总耗时（含 `shape-plan` 与沙箱启动） | REALREPO_PLACEHOLDER |
+| 真实仓库第 5 步总耗时（3 个文件分 2 组，32 条命令；含 `shape-plan` 与沙箱启动） | 2.8 s（七步：0.3、0.2、11.1、0.1、2.8、6.8、2.4 s） |
 
 备忘 3.5 报的「常驻内存约 3.1 GiB」是原型按私有级别加载；这里按真实构建的 `.exported` 级别加载，常驻不到 1 GiB。时间主要在每组一次的库加载上，组数等于不同的库导入集合数。
 
