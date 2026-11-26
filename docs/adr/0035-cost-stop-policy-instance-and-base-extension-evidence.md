@@ -11,9 +11,9 @@
 ### 一、记录形状与读法
 `tower_base_ref` 的值域与 `zhongshu.md` §2.1.1 一致；当前 `L0 = segment`，机读记录为 `tower-base/1`（#1626）。`kline3`／`trade3` 只在相应真实构件与数据 profile 具备时可签，缺位时显式拒绝，不以线段输入冒充。
 
-政策 id 族 `#1354/cost-stop-policy/v1`。记录 ⟨policy_id, version, profile_id, symbol, granularity, tower_base_ref, inputs{fee(Known, 费率簿引用含 source_url/retrieved_at/tier/role), slippage(Known|ProxyLowerBound|Missing), latency_error(同), holding(funding/borrow 引用 | Missing)}, amplitude{pairing=ROUNDTRIP, per_level[{level, median, lower_bound_95, n, max_month_cluster, windows[]}], probe_run_ref}, threshold{form=ratio_lb_ge_theta, theta 整数对(用户签署), authorizer, authorized_at}, evidence_gate(继承 ADR 0022 裁定六/七), valid_through, supersedes⟩。比值 `r(ℓ) = A_ℓ / (2·fee + slippage + latency_error [+ holding])`，A_ℓ 取 ROUNDTRIP 波幅单边 95% 下界（按月 block bootstrap）。通过 ⟺ `lb(r) ≥ θ` ∧ 证据门；`InsufficientEvidence` 与 `Fail` 分开。交易成本政策的 θ 仍由用户授权签署；普通研发方法和离线参数按 ADR 0041「授权来源与生效边界」由代理独审裁定，不冒充用户签名、不自动启用交易。系统拒绝 θ < 1（约束，非默认值）。全部定点整数。
+政策 id 族 `#1354/cost-stop-policy/v1`。记录 ⟨policy_id, version, profile_id, symbol, granularity, tower_base_ref, inputs{fee(Known, 费率簿引用含 source_url/retrieved_at/tier/role), slippage(Known|ProxyLowerBound|Missing), latency_error(同), holding(funding/borrow 引用 | Missing)}, amplitude{pairing=ROUNDTRIP, method_id, evidence_gate_version, per_level[{level, windows[]}], probe_run_ref}, threshold{form=ratio_lb_ge_theta, theta 整数对(用户签署), authorizer, authorized_at}, evidence_gate(继承 ADR 0022 裁定六/七), valid_through, supersedes⟩。新记录按 `evidence_gate_version` 读取冻结置信度，逐窗保存 ROUNDTRIP 波幅单边下界 `A_{ℓ,w}` 及样本和月块资格；级别层的 `lower_bound_95` 仅保留供历史记录兼容，不用于新读数或准入。
 
-波幅下界的可复算算法、版本与证据消费，见文末 #2121 修订。
+Known 往返总成本为正时，证据门合格且各窗 `A_{ℓ,w} / (2·fee + slippage + latency_error [+ holding]) ≥ θ` 才通过。逐窗算法、版本及其余求值状态见文末 #2121 修订。交易成本政策的 θ 仍由用户授权签署；普通研发方法和离线参数按 ADR 0041「授权来源与生效边界」由代理独审裁定，不冒充用户签名、不自动启用交易。系统拒绝 θ < 1（约束，非默认值）。全部定点整数。
 
 ADR 0035 `amplitude.pairing` 保持单值 ROUNDTRIP，不恢复 AMP_EXEC。依据 [#907 resolution 评论5194145006](https://github.com/xy7365527-lang/NewChanlun/issues/907#issuecomment-5194145006) 的三步：成本每趟往返支付；与其可比的波幅是同一趟往返能吃到的幅度；相邻同向点不对应完整交易。标签 `[新缠论:推论]`，排除类别为「违已裁推论」，不以拟合好坏作选择理由。该评论的否证口逐字为：“若能论证「成本也可以按单边逐点计而不按往返计」，则 AMP_EXEC 回到候选。”逐字原件见 #907 该 resolution。若将来满足否证口，仍按现行裁定变更流程处理；后一句是流程要求，不冒称 #907 原话。
 
@@ -62,7 +62,7 @@ Q6 新增方法（用户 2026-10-26 已批准；θ₂ 数值仍待签）：`shar
 
 ## 修订：第一层 ROUNDTRIP 波幅下界（[#2121](https://github.com/Newchanlun/NewChanlun/issues/2121)，2026-11-20）
 
-本节细化裁定一的 `A_ℓ`，不改配对、阈值、适用成本项或塔底。教义入口仍是 [区间套 §4.5.3](../../.chanlun/definitions/qujiantao.md)；本节不改裁定四的下钻占比方法。方法及默认值为 `[新缠论:选择]`，按 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 走 #1909 代理独审裁定，不是 `UserSigned`。
+本节细化裁定一的逐窗波幅下界 `A_{ℓ,w}`，不改配对、阈值、适用成本项或塔底。教义入口仍是 [区间套 §4.5.3](../../.chanlun/definitions/qujiantao.md)；本节不改裁定四的下钻占比方法。方法及默认值为 `[新缠论:选择]`，按 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 走 #1909 代理独审裁定，不是 `UserSigned`。
 
 ### 方法记录和输入
 
@@ -72,18 +72,18 @@ Q6 新增方法（用户 2026-10-26 已批准；θ₂ 数值仍待签）：`shar
 
 **每趟波幅以入场价归一。** 对一层一窗内合格、唯一、完整的 ROUNDTRIP 事件，`p_entry`、`p_exit` 分别取预登记数据集中入场信号和配对的出场信号各自确认 bar 的收盘价，使用同一标的、同一报价单位的精确值，不取结构端点价或成交价。两价都须是可由原件核验的有限正数。无论买入后卖出还是卖出后买入，原比例均为 `|p_exit − p_entry| / p_entry`；单趟波幅为 `floor(10^9 × |p_exit − p_entry| / p_entry)` ppb（比例一的十亿分之一），不先转浮点。例如入场 100、出场 110，波幅为 10%（`100000000 ppb`），不以 110 作分母。
 
-与裁定一、ADR 0044 §三对齐：波幅和成本均以入场名义价值为基准，表示每趟完整往返的无量纲比例。金额形式的成本先按该基准归一，比较前对齐表示单位；已签单边费率 `fee` 仍按 `2·fee` 计入，其他适用成本项与合计公式不变。
+成本侧沿用裁定一与 ADR 0044 §三的政策线性往返近似 `C = 2·fee + slippage + latency_error [+ holding]`；金额形式的其他适用成本项按入场名义价值归一，比较前对齐表示单位。`2·fee` 是政策层的双边费率近似；回测[开仓](../../rust/src/theta_v0/backtest/fill.rs#L251)和[平仓](../../rust/src/theta_v0/backtest/fill.rs#L208)则各按该腿实际成交名义额收费。等量、同费率时，以入场成交名义额归一的实际手续费比例为 `fee × (1 + 出场成交价／入场成交价)`。若将成本门改为逐腿名义额计费，须另行裁定并出新版本，不回写 ADR 0044 两份 v1 签署记录。
 
 入、出场均须在预登记窗内（端点 bar 都计入）；跨月但同窗的完整往返归进场 UTC 日历月，不切开、不重复；跨窗往返不计入任何窗，不把截断段补成样本。窗内应计事件任一端价格缺失、非有限、非正或无法与原件核对，拒收该窗波幅证据；不填零，也不剔除坏样本后过门。其他样本缺损或身份、值、覆盖无法按证据合同核实时同样拒收。中位数、原样本数、非空块数、最大月簇和逐窗下界均从登记原件推导，不接受自报摘要代替原件。
 
-依 [ADR 0022 记录化 §6](0022-acceptance-criterion-parameters.md#6-与-cost-stop-记录对接) 从所引门版本读 confidence、block_unit 和四项最低门槛。`#1677/evidence-gate/v1` 为单边 95/100、UTC 日历月、每窗 ≥30 个事件且 ≥12 个非空块、≥3 个互不重叠窗、合计时长覆盖预登记全史区间 ≥1/2；各窗资格由原件推导。这里的 v1 方法支持 UTC 日历月，遇不支持的块单位不改走其他算法。最大月簇用最大块事件数／窗内事件数报告，不自创最大簇阈值；12 个非空月块也不证明跨月独立。
+`evidence_gate_version` 是具名门版本引用；新读数按 [ADR 0022 版本规则](0022-acceptance-criterion-parameters.md#4-版本规则) 在读数头以 `evidence_gate_ref` 携带同一引用，须与成本政策所引门版本一致。从该版本读取已冻结的 `confidence`、`block_unit` 和四项最低门槛。`per_level[].windows[]` 按预登记窗分别保存单边下界 `A_{ℓ,w}`（ppb）、中位数、样本数、非空月块数、最大月簇及样本和月块资格；各窗资格由原件推导。`#1677/evidence-gate/v1` 为单边 95/100、UTC 日历月、每窗 ≥30 个事件且 ≥12 个非空块、≥3 个互不重叠窗、合计时长覆盖预登记全史区间 ≥1/2。这里的 v1 方法支持 UTC 日历月，遇不支持的块单位不改走其他算法。最大月簇用最大块事件数／窗内事件数报告，不自创最大簇阈值；12 个非空月块也不证明跨月独立。
 
 ### 计算：每窗独立重采样
 
 1. 按进场月升序排该窗的 `m` 个非空块，索引从 0 起。不计空月，月内所有事件共同入样。每次独立有放回抽 `m` 块；某块抽到几次，它的全部事件就计几次。不同月块样本数可以不同。对抽中块合并后的**全部事件**排序取中位数：奇数取中间项，偶数取中间两项的算术平均。每次中位数保留精确半 ppb，用整数分子 `t = 2 × 中位数` 表示；不平均各块中位数，不给每个月或每个事件另设权重。
 2. 新裁配置：`B=10000`，`seed=0`，`PCG-XSH-RR 64/32`，`stream=1`；借裁定四的工程先例，不借其占比分子、分母或 id。为唯一可复算，取 PCG set-sequence 语义：状态 `s` 为无符号 64 位，`inc=(2×stream+1) mod 2^64`。一步取旧状态 `u=s`，更新 `s=(6364136223846793005×u+inc) mod 2^64`；输出把 `(((u >> 18) XOR u) >> 27) mod 2^32` 右循环移位 `u >> 59` 位（32 位，转 0 位即原值）。每窗从 `s=0` 起，先走一步并丢弃输出，加 `seed`（模 `2^64`），再走一步丢弃输出；正式抽样才取下一个输出。每窗重新按同种子初始化，不混入级别、窗口 ID 或并行顺序。
 3. 抽块用拒绝取模：对于 `2 ≤ m ≤ 2^32`，算 `d=2^32 mod m`；若下一无符号 32 位输出 `u32<d`，丢弃并继续取下一个；否则取索引 `u32 mod m`。接受域长度是 `m` 的倍数。一次重采样结束后继续消耗同一窗的流，直到 `B` 次；不得用裸取模、跳过拒绝输出消耗或让线程调度改变抽样序列。
-4. 若置信度为 `p/q`，把 `B` 个 `t` 升序排序，取 1-based 第 `ceil((q−p)×B/q)` 项；用精确整数求秩，不插值。v1 的 `95/100` 与 `B=10000` 给第 **500** 项。选中后才算 `A_{ℓ,w}=floor(t/2)` ppb：向上或就近取整会让边界上的不足量抬到过线；向下最多损失半 ppb。中间整数用足够宽的类型并检查溢出，不饱和、不截断（PRNG 明定的模运算除外）；无法复算是证据不足。这里的 5% 是**重采样中位数分布**的分位，不是原波幅样本的 p5，也不是窗内中位数点估计。
+4. 若置信度为 `p/q`，把 `B` 个 `t` 升序排序，取 1-based 第 `ceil((q−p)×B/q)` 项；用精确整数求秩，不插值。`#1677/evidence-gate/v1` 的 `95/100` 与 `B=10000` 给第 **500** 项。选中后才算 `A_{ℓ,w}=floor(t/2)` ppb：向上或就近取整会让边界上的不足量抬到过线；向下最多损失半 ppb。中间整数用足够宽的类型并检查溢出，不饱和、不截断（PRNG 明定的模运算除外）；无法复算是证据不足。取的是**重采样中位数分布**的分位，不是原波幅样本的分位或窗内中位数点估计。
 
 采用中位数置信下界是新裁，目标是「典型完整往返」的保守估计。#907 的报告以中位数描述典型量，并明确建议补中位数区间；直接用点估计仍排除。等月权统计换成了「典型月份」，总和或总价差／总入场价分别混入事件数或价格权重；不作当前事件口径的替代。区块最小值不估计所要求的 bootstrap 置信下界。固定种子与次数定义了可复算口径，不替代区间适用性或合格来源。
 
@@ -93,7 +93,7 @@ Q6 新增方法（用户 2026-10-26 已批准；θ₂ 数值仍待签）：`shar
 
 1. **成本先行。** 只合计来源合格的适用成本项及代理下界，取非负定点值；适用项 Missing 或无合格输入为不可评估，不代零。负签署值按非法记录拒收；负实测值或负代理下界报越界并返回 `NotEvaluable(UnavailableCost(该项))`。若仍得到负合计，显式报成本定义域错误并停止。
 2. **先核证据门记录，再核读数。** 具名门记录缺失、字段缺失或非法、版本未获有效授权，均报 `PolicyError`。若调用上下文提供 `run_started_at`，先用该时点校验门版本的 `authorized_at < run_started_at`；否则先确认读数存在、属于本次运行、引用同一门版本并带有有效时点，再校验该授权时序。授权时序不满足也报 `PolicyError`，显式报错并停止，不出四态或验收读数。读数不合格（含上下文与读数时点不一致）则返回 `InsufficientEvidence(Amplitude)`。
-3. **再核波幅证据。** 按已确认的 `run_started_at` 核验方法绑定及窗表是否事前冻结，再核验全部预登记窗的样本和覆盖，重算各窗 `A_{ℓ,w}`。方法绑定、冻结时序或任一窗不合格，整级为 `InsufficientEvidence(Amplitude)`；不因其他窗有结果或成本为零而提前判定。不跨窗汇样、平均下界或以合计补窗。置信度只针对各窗的下界。
+3. **再核波幅证据。** 按已确认的 `run_started_at` 核验方法绑定及窗表是否事前冻结，再按 `evidence_gate_version` 核验全部预登记窗的样本和覆盖，以该版本的置信度重算各窗 `A_{ℓ,w}`。方法绑定、冻结时序或任一窗不合格，整级为 `InsufficientEvidence(Amplitude)`；不因其他窗有结果或成本为零而提前判定。不跨窗汇样、平均下界或以合计补窗，也不以历史级别字段 `lower_bound_95` 代替任何窗的下界。置信度只针对各窗的下界。
 
 波幅证据全部合格后，才按成本类型与分母求值。`C` 为 Known 往返总成本；含代理项时以其下界代入总成本公式，得到 `C_min`：
 
