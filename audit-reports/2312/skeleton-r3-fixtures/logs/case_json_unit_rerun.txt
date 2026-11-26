@@ -1,0 +1,65 @@
+空对象                                接受  {}
+重复键                                拒收  Fault('CODE', 'what', 'JSON 无法解读：ValueError')
+嵌套对象里的重复键                          拒收  Fault('CODE', 'what', 'JSON 无法解读：ValueError')
+数组里的对象重复键                          拒收  Fault('CODE', 'what', 'JSON 无法解读：ValueError')
+键转义后相同                             拒收  Fault('CODE', 'what', 'JSON 无法解读：ValueError')
+NaN                                拒收  Fault('CODE', 'what', 'JSON 无法解读：ValueError')
+Infinity                           拒收  Fault('CODE', 'what', 'JSON 无法解读：ValueError')
+-Infinity                          拒收  Fault('CODE', 'what', 'JSON 无法解读：ValueError')
+1e999（溢出成无穷大）                      接受  {'k': inf}
+-1e999                             接受  {'k': -inf}
+5000 位整数                           拒收  Fault('CODE', 'what', 'JSON 无法解读：ValueError')
+孤立高代理项（转义）                         拒收  Fault('CODE', 'what', 'JSON 字符串含孤立代理项')
+孤立低代理项（转义）                         拒收  Fault('CODE', 'what', 'JSON 字符串含孤立代理项')
+代理项顺序颠倒                            拒收  Fault('CODE', 'what', 'JSON 字符串含孤立代理项')
+合法代理对                              接受  {'k': '😀'}
+键里的孤立代理项                           拒收  Fault('CODE', 'what', 'JSON 字符串含孤立代理项')
+数组深处的孤立代理项                         拒收  Fault('CODE', 'what', 'JSON 字符串含孤立代理项')
+原始字节形式的代理项 ED A0 80                拒收  Fault('CODE', 'what', 'JSON 无法解读：UnicodeDecodeError')
+非 UTF-8 字节                         拒收  Fault('CODE', 'what', 'JSON 无法解读：UnicodeDecodeError')
+过长编码 C0 80                         拒收  Fault('CODE', 'what', 'JSON 无法解读：UnicodeDecodeError')
+UTF-8 BOM                          拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+UTF-16                             拒收  Fault('CODE', 'what', 'JSON 无法解读：UnicodeDecodeError')
+字符串里的原始换行                          拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+字符串里的原始制表符                         拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+NUL 转义                             接受  {'k': '\x00'}
+尾随逗号                               拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+单引号                                拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+注释                                 拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+尾部多余内容                             拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+两个值                                拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+前导零                                拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+十六进制数                              拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+空输入                                拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+只有空白                               拒收  Fault('CODE', 'what', 'JSON 无法解读：JSONDecodeError')
+顶层标量                               接受  1
+顶层字符串                              接受  'x'
+顶层 null                            接受  None
+顶层数组                               接受  []
+嵌套 600 层数组                         逃出 strict_json 的异常  RecursionError
+嵌套 10 万层数组                         拒收  Fault('CODE', 'what', 'JSON 无法解读：RecursionError')
+嵌套 600 层对象                         逃出 strict_json 的异常  RecursionError
+前后有回车与空白                           接受  {'k': 1}
+true/false/null                    接受  {'a': True, 'b': False, 'c': None}
+负零与小数                              接受  {'a': 0, 'b': 1.0, 'c': 100.0}
+--- safe() 抽查
+空串                       spaces=False '-' | spaces=True '-'
+字节 -                     spaces=False '-' | spaces=True '-'
+反斜杠                      spaces=False 'a\\x5cx0ab' | spaces=True 'a\\x5cx0ab'
+非 UTF-8 字节               spaces=False 'a\\xff\\xfeb' | spaces=True 'a\\xff\\xfeb'
+孤立代理项                    spaces=False 'a\\ud800b' | spaces=True 'a\\ud800b'
+低代理项（非字节来源）              spaces=False 'a\\x80b' | spaces=True 'a\\x80b'
+换行与空格                    spaces=False 'a\\x20b\\x0ac' | spaces=True 'a b\\x0ac'
+韩文填充符                    spaces=False 'aㅤb' | spaces=True 'aㅤb'
+不换行空格                    spaces=False 'a\\u00a0b' | spaces=True 'a\\u00a0b'
+超长                       spaces=False 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…[截断，余 5 字符]' | spaces=True 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…[截断，余 5 字符]'
+None                     spaces=False 'None' | spaces=True 'None'
+整数                       spaces=False '7' | spaces=True '7'
+--- unescape() 往返
+b'a b' -> 预检转义 b'a\\x20b' -> unescape b'a b' 一致
+b'\\x0a' -> 预检转义 b'\\x5cx0a' -> unescape b'\\x0a' 一致
+b'\\' -> 预检转义 b'\\x5c' -> unescape b'\\' 一致
+b'\xff\n' -> 预检转义 b'\\xff\\x0a' -> unescape b'\xff\n' 一致
+b'\\x5cx0a' -> 预检转义 b'\\x5cx5cx0a' -> unescape b'\\x5cx0a' 一致
+b'-' -> 预检转义 b'-' -> unescape b'-' 一致
+b'' -> 预检转义 b'-' -> unescape b'-' 一致

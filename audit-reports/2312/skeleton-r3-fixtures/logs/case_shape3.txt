@@ -1,0 +1,86 @@
+基线 7d308cc64b37dadebb33d65547484b0cfa2c96f8；A 头 4a5b5b18d7a3956bc64d7bf6b383b334e56146a1；B 头 a9400bd181a24c47b642a852d76ddeab844b566c
+
+=== N2-A-legal-names
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f3/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-798198d0-7f46c36c7d707dbd/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f3/work/warm-auditor/.lake 1 --repo /home/workspace/fm/tmp/review-f3/work/repo --base 7d308cc64b37dadebb33d65547484b0cfa2c96f8 --head 4a5b5b18d7a3956bc64d7bf6b383b334e56146a1 --branch proof/review --workdir /home/workspace/fm/tmp/review-f3/work/w-N2-A-legal-names --packages /home/workspace/fm/tmp/review-f3/work/fake-packages
+rc=0
+--- stdout
+FM MODE baseline trusted=7d308cc64b37dadebb33d65547484b0cfa2c96f8 base=7d308cc64b37dadebb33d65547484b0cfa2c96f8 head=4a5b5b18d7a3956bc64d7bf6b383b334e56146a1 受信代码取自基线
+FM RUNNER blob=52e1c64939b89edd961f318626c3f26b33509e9e from=7d308cc64b37dadebb33d65547484b0cfa2c96f8:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.8s binary=/home/workspace/fm/tmp/review-f3/work/w-N2-A-legal-names/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM STEP 6 build GREEN 1.0s 7 个模块都有产物，.lake 全部目录项合乎形状表
+FM STEP 7 env GREEN 0.3s 7 个模块，0 条锁行
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- stderr
+FM LOG auditor Build completed successfully (11 jobs).
+FM LOG build ✔ [2/20] Built Chan (378ms)
+FM LOG build ✔ [4/20] Built Chan.Base (389ms)
+FM LOG build ✔ [7/20] Built ChanTest.Probe (394ms)
+FM LOG build ✔ [10/20] Built ChanChallenge.Base (389ms)
+FM LOG build ✔ [13/20] Built ChanDyn.Base (352ms)
+FM LOG build ✔ [16/20] Built ChanExplore.Base (361ms)
+FM LOG build ✔ [18/20] Built ChanExplore.PlantA (440ms)
+FM LOG build Build completed successfully (20 jobs).
+
+--- 被审提交自己的 protocol() 核对：合规
+
+A 组：rc=0 红码=[]
+A 组运行后宿主机一侧：
+  宿主机金丝雀内容 = 'original-host-content\n'
+  /etc/hostname = 'safe-7b057cb8\n'（对照：'safe-7b057cb8\n'）
+  被审工作区 Chan/Base.lean = b'module\n'
+  build/lib/lean/Chan/Base.olean.hash            链接数=1 大小=16 实占块=8 模式=664
+  build/lib/lean/Chan/Base.trace                 链接数=1 大小=4 实占块=8 模式=664
+  build/lib/lean/Chan/Base.ilean.hash            链接数=1 大小=16 实占块=8 模式=664
+  build/lib/lean/Chan/Base.olean                 链接数=1 大小=1120 实占块=8 模式=664
+  build/lib/lean/Chan/Base.olean.server          链接数=1 大小=96 实占块=8 模式=664
+  build/lib/lean/Chan/Base.ir                    链接数=1 大小=3221225472 实占块=8 模式=664
+  config/77/lakefile.olean                       链接数=1 大小=13 实占块=8 模式=664
+  A 组 .lake 全部目录项数 = 131
+=== N2-B-near-miss
+$ /usr/bin/python3 -I /home/workspace/fm/tmp/review-f3/work/driver.py /home/workspace/.t3/worktrees/NewChanlun/t3-798198d0-7f46c36c7d707dbd/formal_math/verification/runner/run.py /home/workspace/fm/tmp/review-f3/work/warm-auditor/.lake 1 --repo /home/workspace/fm/tmp/review-f3/work/repo --base 7d308cc64b37dadebb33d65547484b0cfa2c96f8 --head a9400bd181a24c47b642a852d76ddeab844b566c --branch proof/review --workdir /home/workspace/fm/tmp/review-f3/work/w-N2-B-near-miss --packages /home/workspace/fm/tmp/review-f3/work/fake-packages
+rc=1
+--- stdout
+FM MODE baseline trusted=7d308cc64b37dadebb33d65547484b0cfa2c96f8 base=7d308cc64b37dadebb33d65547484b0cfa2c96f8 head=a9400bd181a24c47b642a852d76ddeab844b566c 受信代码取自基线
+FM RUNNER blob=52e1c64939b89edd961f318626c3f26b33509e9e from=7d308cc64b37dadebb33d65547484b0cfa2c96f8:formal_math/verification/runner/run.py
+FM STEP 1 precheck GREEN 0.1s role=proof
+FM STEP 2 fetch GREEN 0.0s 受信 16 个文件，内容 7 个模块，配置取自基线
+FM STEP 3 auditor GREEN 0.6s binary=/home/workspace/fm/tmp/review-f3/work/w-N2-B-near-miss/trusted/verification/auditor/.lake/build/bin/fm_audit sha256=52d41ce1a690f74b209547fbc33c41df82c0751b59cff03d8babcdfaf293899e
+FM STEP 4 headers GREEN 0.1s 7 个文件头
+FM STEP 5 shape GREEN 0.0s SHAPE 未安装：源码形状门归第四片，本次的绿不含这一层
+FM RED build EXTRA_ARTIFACT formal_math/.lake/build/lib/extra 形状表外的目录项
+FM RED build EXTRA_ARTIFACT formal_math/.lake/build/lib/lean/Chan/.Base.olean 形状表外的目录项
+FM RED build EXTRA_ARTIFACT formal_math/.lake/build/lib/lean/Chan/Base 形状表外的目录项
+FM RED build EXTRA_ARTIFACT formal_math/.lake/build/lib/lean/Chan/Base.olean.hash.hash 形状表外的目录项
+FM RED build EXTRA_ARTIFACT formal_math/.lake/build/lib/lean/Chan/Bаse.olean 形状表外的目录项
+FM RED build EXTRA_ARTIFACT formal_math/.lake/build/lib/lean/Chan/Hard.olean 形状表外的目录项
+FM RED build EXTRA_ARTIFACT formal_math/.lake/build/lib/lean/Chan/base.olean 形状表外的目录项
+FM RED build EXTRA_ARTIFACT formal_math/.lake/config/88/other.olean 形状表外的目录项
+FM STEP 6 build RED 1.1s -
+FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑
+--- stderr
+FM LOG auditor Build completed successfully (11 jobs).
+FM LOG build ✔ [2/20] Built Chan (358ms)
+FM LOG build ✔ [4/20] Built ChanExplore.Base (342ms)
+FM LOG build ✔ [6/20] Built Chan.Base (435ms)
+FM LOG build ✔ [9/20] Built ChanTest.Probe (423ms)
+FM LOG build ✔ [12/20] Built ChanChallenge.Base (403ms)
+FM LOG build ✔ [15/20] Built ChanDyn.Base (426ms)
+FM LOG build ✔ [18/20] Built ChanExplore.PlantB (403ms)
+FM LOG build Build completed successfully (20 jobs).
+
+--- 被审提交自己的 protocol() 核对：合规
+
+B 组：rc=1 红码=['EXTRA_ARTIFACT']
+B 组逐项（红码，路径）：
+    ('EXTRA_ARTIFACT', 'formal_math/.lake/build/lib/extra')
+    ('EXTRA_ARTIFACT', 'formal_math/.lake/build/lib/lean/Chan/.Base.olean')
+    ('EXTRA_ARTIFACT', 'formal_math/.lake/build/lib/lean/Chan/Base')
+    ('EXTRA_ARTIFACT', 'formal_math/.lake/build/lib/lean/Chan/Base.olean.hash.hash')
+    ('EXTRA_ARTIFACT', 'formal_math/.lake/build/lib/lean/Chan/Bаse.olean')
+    ('EXTRA_ARTIFACT', 'formal_math/.lake/build/lib/lean/Chan/Hard.olean')
+    ('EXTRA_ARTIFACT', 'formal_math/.lake/build/lib/lean/Chan/base.olean')
+    ('EXTRA_ARTIFACT', 'formal_math/.lake/config/88/other.olean')

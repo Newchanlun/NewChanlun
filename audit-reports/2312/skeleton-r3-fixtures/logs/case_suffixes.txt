@@ -1,0 +1,46 @@
+### 单模块 Chan（lake build --wfail 退 0）
+  目录项 20 个（目录 4、文件 16、链接 0）；形状表判定：全部在表内（无红）
+  出现的文件后缀：.c, .c.hash, .ilean, .ilean.hash, .ir, .ir.hash, .ir.sig, .ir.sig.hash, .olean, .olean.hash, .olean.private, .olean.private.hash, .olean.server, .olean.server.hash, .setup.json, .trace
+### 多级目录 Chan/A/B/C，带 deriving、instance、structure（退 0）
+  目录项 42 个（目录 10、文件 32、链接 0）；形状表判定：全部在表内（无红）
+  出现的文件后缀：.c, .c.hash, .ilean, .ilean.hash, .ir, .ir.hash, .ir.sig, .ir.sig.hash, .olean, .olean.hash, .olean.private, .olean.private.hash, .olean.server, .olean.server.hash, .setup.json, .trace
+### @[expose] public section（退 0）
+  目录项 40 个（目录 8、文件 32、链接 0）；形状表判定：全部在表内（无红）
+  出现的文件后缀：.c, .c.hash, .ilean, .ilean.hash, .ir, .ir.hash, .ir.sig, .ir.sig.hash, .olean, .olean.hash, .olean.private, .olean.private.hash, .olean.server, .olean.server.hash, .setup.json, .trace
+### 增量构建（第一次退 0，改一个文件后第二次退 0）
+  目录项 42 个（目录 10、文件 32、链接 0）；形状表判定：全部在表内（无红）
+  出现的文件后缀：.c, .c.hash, .ilean, .ilean.hash, .ir, .ir.hash, .ir.sig, .ir.sig.hash, .olean, .olean.hash, .olean.private, .olean.private.hash, .olean.server, .olean.server.hash, .setup.json, .trace
+### 无改动再建一次（退 0）
+  目录项 42 个（目录 10、文件 32、链接 0）；形状表判定：全部在表内（无红）
+  出现的文件后缀：.c, .c.hash, .ilean, .ilean.hash, .ir, .ir.hash, .ir.sig, .ir.sig.hash, .olean, .olean.hash, .olean.private, .olean.private.hash, .olean.server, .olean.server.hash, .setup.json, .trace
+  增量前后目录项差异：新增 [] 消失 []
+### 构建失败后（退 1）
+  目录项 7 个（目录 6、文件 1、链接 0）；形状表判定：[('NO_ARTIFACT', 'formal_math/Chan.lean', '默认目标的构建没有产出这个模块的 .olean'), ('NO_ARTIFACT', 'formal_math/Chan/Bad.lean', '默认目标的构建没有产出这个模块的 .olean')]
+  出现的文件后缀：.setup.json
+### 修好后重跑（退 0）
+  目录项 38 个（目录 6、文件 32、链接 0）；形状表判定：全部在表内（无红）
+  出现的文件后缀：.c, .c.hash, .ilean, .ilean.hash, .ir, .ir.hash, .ir.sig, .ir.sig.hash, .olean, .olean.hash, .olean.private, .olean.private.hash, .olean.server, .olean.server.hash, .setup.json, .trace
+### 带 unusedVariables 告警、--wfail（退 1）
+  目录项 38 个（目录 6、文件 32、链接 0）；形状表判定：全部在表内（无红）
+  出现的文件后缀：.c, .c.hash, .ilean, .ilean.hash, .ir, .ir.hash, .ir.sig, .ir.sig.hash, .olean, .olean.hash, .olean.private, .olean.private.hash, .olean.server, .olean.server.hash, .setup.json, .trace
+### 正常结束后 .lake 里与锁/临时/packages/config 相关的目录项：[]
+### .lake 顶层：['build']
+### 包目录顶层（.lake 之外）：['Chan', 'Chan.lean', 'home', 'lake-manifest.json', 'lakefile.toml', 'lean-toolchain']
+
+=== 实测到的全部文件后缀（去重）
+['.c', '.c.hash', '.ilean', '.ilean.hash', '.ir', '.ir.hash', '.ir.sig', '.ir.sig.hash', '.olean', '.olean.hash', '.olean.private', '.olean.private.hash', '.olean.server', '.olean.server.hash', '.setup.json', '.trace']
+=== 被审形状表 LIB_SUFFIXES（13 个）
+['.olean', '.olean.hash', '.olean.private', '.olean.private.hash', '.olean.server', '.olean.server.hash', '.ilean', '.ilean.hash', '.ir', '.ir.hash', '.ir.sig', '.ir.sig.hash', '.trace']
+=== 被审形状表 IR_SUFFIXES（3 个）
+['.c', '.c.hash', '.setup.json']
+=== 实测后缀里不在形状表的：[]
+
+=== 各情形的形状表判定汇总
+  单模块                → 无红
+  多级+deriving        → 无红
+  @[expose]          → 无红
+  增量构建               → 无红
+  无改动重建              → 无红
+  构建失败后              → [('NO_ARTIFACT', 'formal_math/Chan.lean', '默认目标的构建没有产出这个模块的 .olean'), ('NO_ARTIFACT', 'formal_math/Chan/Bad.lean', '默认目标的构建没有产出这个模块的 .olean')]
+  失败后修好重跑            → 无红
+  --wfail 告警         → 无红

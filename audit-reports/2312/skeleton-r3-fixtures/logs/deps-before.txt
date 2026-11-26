@@ -1,0 +1,10 @@
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages 1795653742 2026-11-26 08:42:22.839258931 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/aesop 1795474994 2026-11-24 07:03:14.914663425 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/batteries 1795474976 2026-11-24 07:02:56.304921914 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/Cli 1795474974 2026-11-24 07:02:54.412820775 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/importGraph 1795475005 2026-11-24 07:03:25.684453555 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/LeanSearchClient 1795475059 2026-11-24 07:04:19.805590767 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/mathlib 1795474897 2026-11-24 07:01:37.817173151 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/plausible 1795474996 2026-11-24 07:03:16.503599914 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/proofwidgets 1795474936 2026-11-24 07:02:16.670553765 +0800 775
+/home/workspace/.t3/worktrees/NewChanlun/t3-f01a145b-83fe37a7a2bbcc16/formal_math/.lake/packages/Qq 1795474996 2026-11-24 07:03:16.553599117 +0800 775

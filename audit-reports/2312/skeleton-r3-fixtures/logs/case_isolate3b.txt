@@ -1,0 +1,55 @@
+=== 不带 -I：run.py 自己的退出码（fork+execv，不经 shell）
+两路正常                                     run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout='FM RESULT FAULT prepare NOT_ISOLATED\n'
+    stderr='FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行\n'
+stdout 关闭                                run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr='FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行\n'
+stderr 关闭                                run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout='FM RESULT FAULT prepare NOT_ISOLATED\n'
+    stderr=''
+两路都关                                     run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr=''
+stdout=/dev/full                         run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr='FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行\n'
+stderr=/dev/full                         run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout='FM RESULT FAULT prepare NOT_ISOLATED\n'
+    stderr=''
+两路=/dev/full                             run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr=''
+stdout 读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr='FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行\n'
+stderr 读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout='FM RESULT FAULT prepare NOT_ISOLATED\n'
+    stderr=''
+两路读端已关管道                                 run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr=''
+stdout 关、stderr 管道                       run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr=''
+stdout=/dev/full、stderr 关                run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr=''
+=== 对照：带 -I（期望 USAGE 退 2）
+带 -I 两路正常                                run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout='FM RESULT FAULT prepare USAGE\n'
+    stderr='FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --br'
+带 -I 两路都关                                run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr=''
+带 -I 两路读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+    stdout=''
+    stderr=''
+=== `-c exec(open(...).read())`：不是 README 支持的调用方式，查 linecache 从哪来
+-c exec(run.py)                          run.py 自己的 rc=退0    冒名模块被执行：linecache
+    stdout='FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）\n'
+    stderr=''
+    PYTHONVERBOSE 里与 linecache 相关的行：['# /home/workspace/fm/tmp/review-f3/work/iso3/dir/__pycache__/linecache.cpython-314.pyc matches /home/workspace/fm/tmp/review-f3/work/iso3/dir/linecache.py', "# code object from '/home/workspace/fm/tmp/review-f3/work/iso3/dir/__pycache__/linecache.cpython-314.pyc'", '# destroy linecache']
+=== 内建模块能否被同目录文件顶替（直接问解释器）
+    flags=['无'] → FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+    flags=['-I'] → isolated 1 posix.__file__ None sys.__file__ None loader type path0 /usr/lib/python314.zip

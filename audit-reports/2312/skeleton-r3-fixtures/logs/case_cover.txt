@@ -1,0 +1,68 @@
+##### 第 6 步的挂载（被审工作区只读、.lake 可写、依赖只读挂到 .lake/packages，受信目录不挂）
+/home              存在=是 条目数=1 前几项=workspace,
+/root              存在=是 条目数=0 前几项=
+/run               存在=是 条目数=0 前几项=
+/var               存在=是 条目数=0 前几项=
+/tmp               存在=是 条目数=1 前几项=home,
+/home/workspace    存在=是 条目数=1 前几项=fm,
+/run/user          存在=否 条目数=0 前几项=
+/var/log           存在=否 条目数=0 前几项=
+/etc               存在=是 条目数=241 前几项=.pwd.lock,.resolv.conf.systemd-resolved.bak,.updated,ModemManager,
+/opt               存在=是 条目数=3 前几项=containerd,google,safe-code,
+/usr/share         存在=是 条目数=241 前几项=GConf,ModemManager,PackageKit,Thunar,
+--- 具体文件
+/etc/passwd                              可读=是
+/etc/shadow                              可读=否
+/etc/hostname                            可读=是
+/run/utmp                                可读=否
+/var/log/syslog                          可读=否
+/home/workspace/fm/tmp/review-f3/work/cover/workdir-canary 可读=否
+/home/workspace/fm/tmp/review-f3/work/cover/trusted/secret-trusted 可读=否
+--- 宿主机用户家目录
+HOME=/tmp/home 内容数=0
+--- findmnt 里 /run 一支
+TARGET FSTYPE OPTIONS
+/run   tmpfs  ro,nosuid,nodev,noexec,relatime,size=2407968k,mode=755,inode64
+/run   tmpfs  rw,nosuid,nodev,relatime,mode=755,uid=1002,gid=1002,inode64
+--- /proc/self/mountinfo 里 /run、/home 的最后一条
+2151 571 0:28 / /run ro,nosuid,nodev,noexec,relatime master:5 - tmpfs tmpfs rw,size=2407968k,mode=755,inode64
+2175 571 0:35 / /tmp ro,nosuid,nodev master:15 - tmpfs tmpfs rw,nr_inodes=1048576,inode64,usrquota
+2230 571 0:73 / /home rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1002,gid=1002,inode64
+2232 2151 0:75 / /run rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1002,gid=1002,inode64
+2233 571 0:76 / /var rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1002,gid=1002,inode64
+2234 2175 0:77 / /tmp rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1002,gid=1002,inode64
+
+##### 第 7 步的挂载（被审工作区、依赖、受信目录都只读）
+/home              存在=是 条目数=1 前几项=workspace,
+/root              存在=是 条目数=0 前几项=
+/run               存在=是 条目数=0 前几项=
+/var               存在=是 条目数=0 前几项=
+/tmp               存在=是 条目数=1 前几项=home,
+/home/workspace    存在=是 条目数=1 前几项=fm,
+/run/user          存在=否 条目数=0 前几项=
+/var/log           存在=否 条目数=0 前几项=
+/etc               存在=是 条目数=241 前几项=.pwd.lock,.resolv.conf.systemd-resolved.bak,.updated,ModemManager,
+/opt               存在=是 条目数=3 前几项=containerd,google,safe-code,
+/usr/share         存在=是 条目数=241 前几项=GConf,ModemManager,PackageKit,Thunar,
+--- 具体文件
+/etc/passwd                              可读=是
+/etc/shadow                              可读=否
+/etc/hostname                            可读=是
+/run/utmp                                可读=否
+/var/log/syslog                          可读=否
+/home/workspace/fm/tmp/review-f3/work/cover/workdir-canary 可读=否
+/home/workspace/fm/tmp/review-f3/work/cover/trusted/secret-trusted 可读=是
+--- 宿主机用户家目录
+HOME=/tmp/home 内容数=0
+--- findmnt 里 /run 一支
+TARGET FSTYPE OPTIONS
+/run   tmpfs  ro,nosuid,nodev,noexec,relatime,size=2407968k,mode=755,inode64
+/run   tmpfs  rw,nosuid,nodev,relatime,mode=755,uid=1002,gid=1002,inode64
+--- /proc/self/mountinfo 里 /run、/home 的最后一条
+2152 572 0:28 / /run ro,nosuid,nodev,noexec,relatime master:5 - tmpfs tmpfs rw,size=2407968k,mode=755,inode64
+2176 572 0:35 / /tmp ro,nosuid,nodev master:15 - tmpfs tmpfs rw,nr_inodes=1048576,inode64,usrquota
+2231 572 0:74 / /home rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1002,gid=1002,inode64
+2233 2152 0:76 / /run rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1002,gid=1002,inode64
+2234 572 0:77 / /var rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1002,gid=1002,inode64
+2235 2176 0:79 / /tmp rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1002,gid=1002,inode64
+

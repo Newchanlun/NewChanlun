@@ -1,0 +1,29 @@
+通过	S4 .gitattributes（export-ignore、filter、eol）不影响取料：文件在、逐字节相同、模式 0644	rc=0 红码=— 故障=—	对照：git archive 不含 该文件
+通过	S5 审计程序输出被篡改（env-count）退 2	rc=2 红码=— 故障=MODULE_COUNT	
+通过	S3 绕过预检从第 2 步起跑：配置仍取自基线、执行的是受信目录的审计程序、假 main 没跑	rc=1 红码=ENV_AXIOM,ENV_AXIOM_DEP 故障=—	哨兵=无
+通过	S1 阴性对照：未改动的证明提交七步全绿	rc=0 红码=— 故障=—	
+通过	S5 审计程序输出被篡改（headers-garbage）退 2	rc=2 红码=— 故障=AUDITOR_OUTPUT	
+通过	S5 审计程序输出被篡改（headers-drop）退 2	rc=2 红码=— 故障=AUDITOR_OUTPUT	
+通过	S13 正在运行的 run.py 与受信提交不同：退 2	rc=2 红码=— 故障=RUNNER_MISMATCH	
+通过	E15 模式 100644 的条目实为树对象：预检第 1 步 TREE_FORM	rc=1 红码=TREE_FORM 故障=—	
+通过	E15 同一提交绕过预检：取料按对象读取时失败退 2，不写出被审工作区（纵深防御）	rc=2 红码=— 故障=GIT	
+通过	E15 模式 100644 的条目实为提交对象：预检第 1 步 TREE_FORM	rc=1 红码=TREE_FORM 故障=—	
+通过	E15 同一提交绕过预检：取料按对象读取时失败退 2，不写出被审工作区（纵深防御）	rc=2 红码=— 故障=GIT	
+通过	S5 审计程序输出被篡改（env-exit）退 2	rc=2 红码=— 故障=AUDITOR_OUTPUT	
+通过	S5 审计程序输出被篡改（env-verdict）退 2	rc=2 红码=— 故障=AUDITOR_OUTPUT	
+通过	S7 被审代码在构建期执行，但被审工作区源码、配置与工作区之外都没有被写入	rc=1 红码=EXTRA_ARTIFACT 故障=—	工作区内对照=True 源码配置未变=True 外泄=无
+通过	S17 读环境不运行被审模块的初始化器：构建期 lean 运行了它（正对照），审计程序没有	rc=1 红码=ENV_META 故障=—	正对照=True 审计程序运行=False
+通过	S27a 第 headers 步的审计程序被信号杀死：SIGNAL 退 2	rc=2 红码=— 故障=SIGNAL	
+通过	S22 沙箱探针（第 6、7 步同挂载同环境）：只有回环网卡、环境已清、宿主机目录与仓库不可见、第 6 步只有 .lake 可写、第 7 步全只读、受信目录第 6 步不可见	rc=0 红码=— 故障=—	第6步=(['lo'], {'HOME', 'PWD', 'TMPDIR', 'PATH', 'LANG'}, set(), {'lake'}) 第7步=(['lo'], {'HOME', 'LEAN_PATH', 'PWD', 'TMPDIR', 'PATH', 'LANG', 'LEAN_SYSROOT'}, {'trusted'}, set())
+通过	S27b 第 env 步的审计程序被信号杀死：SIGNAL 退 2	rc=2 红码=— 故障=SIGNAL	
+通过	E8 分支名带换行与 ESC：预检红行转出时只转义一次	rc=1 红码=BRANCH_ROLE 故障=—	
+通过	E1 导入名带换行、行分隔符与方向控制符：红行里转义，输出协议不破	rc=1 红码=IMPORT_EDGE,IMPORT_SOURCE 故障=—	
+通过	E2 公理名、声明名带换行与控制符（环境层红行的对象栏与说明栏）	rc=1 红码=ENV_AXIOM,ENV_AXIOM_DEP,ENV_UNSAFE 故障=—	
+通过	E3 锁文件 {"a\nFM RESULT GREEN": "x"}：红行转义	rc=1 红码=LOCK_REMOVED 故障=—	
+通过	E10 构建日志里的伪造行：只以转义后的 FM LOG 行出现在标准错误	rc=0 红码=— 故障=—	
+自测：21/21 通过（58s）
+
+对照退出码 = 0
+umask 0022：lake build 退 0；Lake 建的目录模式 {'build': '0o755', 'build/lib': '0o755', 'build/lib/lean': '0o755', 'build/lib/lean/Chan': '0o755'}；形状表判定 无红
+umask 0077：lake build 退 0；Lake 建的目录模式 {'build': '0o700', 'build/lib': '0o700', 'build/lib/lean': '0o700', 'build/lib/lean/Chan': '0o700'}；形状表判定 无红
+umask 0277：lake build 退 1；Lake 建的目录模式 {'build': '0o500', 'build/lib': '不存在', 'build/lib/lean': '不存在', 'build/lib/lean/Chan': '不存在'}；形状表判定 [('ARTIFACT_FORM', 'build'), ('NO_ARTIFACT', 'formal_math/Chan.lean'), ('NO_ARTIFACT', 'formal_math/Chan/A.lean')]

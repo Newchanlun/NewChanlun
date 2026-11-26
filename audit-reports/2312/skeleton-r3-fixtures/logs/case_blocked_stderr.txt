@@ -1,0 +1,3 @@
+emit                 **8 秒内没有结束（卡住）**，此前的标准输出=''
+signal               **8 秒内没有结束（卡住）**，此前的标准输出=''
+signal-reordered     8 秒内结束：rc=0 标准输出='FM RESULT FAULT build SIGNAL\n（对照）先写结果行后它出来了\n'

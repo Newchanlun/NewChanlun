@@ -1,0 +1,45 @@
+=== 被审原件（对照）
+=== 不带 -I：run.py 自己的退出码（fork+execv，不经 shell）
+两路正常                                     run.py 自己的 rc=退2    冒名模块被执行：否
+stdout 关闭                                run.py 自己的 rc=退2    冒名模块被执行：否
+stderr 关闭                                run.py 自己的 rc=退2    冒名模块被执行：否
+两路都关                                     run.py 自己的 rc=退2    冒名模块被执行：否
+stdout=/dev/full                         run.py 自己的 rc=退2    冒名模块被执行：否
+stderr=/dev/full                         run.py 自己的 rc=退2    冒名模块被执行：否
+两路=/dev/full                             run.py 自己的 rc=退2    冒名模块被执行：否
+stdout 读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+stderr 读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+两路读端已关管道                                 run.py 自己的 rc=退2    冒名模块被执行：否
+stdout 关、stderr 管道                       run.py 自己的 rc=退2    冒名模块被执行：否
+stdout=/dev/full、stderr 关                run.py 自己的 rc=退2    冒名模块被执行：否
+=== 对照：带 -I（期望 USAGE 退 2）
+带 -I 两路正常                                run.py 自己的 rc=退2    冒名模块被执行：否
+带 -I 两路都关                                run.py 自己的 rc=退2    冒名模块被执行：否
+带 -I 两路读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+=== `-c exec(open(...).read())`：不是 README 支持的调用方式，查 linecache 从哪来
+-c exec(run.py)                          run.py 自己的 rc=退0    冒名模块被执行：linecache
+=== 内建模块能否被同目录文件顶替（直接问解释器）
+    flags=['-I'] → isolated 1 posix.__file__ None sys.__file__ None loader type path0 /usr/lib/python314.zip
+
+=== Q6 弱化副本（出口改成 raise SystemExit(2)）
+=== 不带 -I：run.py 自己的退出码（fork+execv，不经 shell）
+两路正常                                     run.py 自己的 rc=退2    冒名模块被执行：否
+stdout 关闭                                run.py 自己的 rc=退2    冒名模块被执行：否
+stderr 关闭                                run.py 自己的 rc=退2    冒名模块被执行：否
+两路都关                                     run.py 自己的 rc=退2    冒名模块被执行：否
+stdout=/dev/full                         run.py 自己的 rc=退2    冒名模块被执行：否
+stderr=/dev/full                         run.py 自己的 rc=退2    冒名模块被执行：否
+两路=/dev/full                             run.py 自己的 rc=退2    冒名模块被执行：否
+stdout 读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+stderr 读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+两路读端已关管道                                 run.py 自己的 rc=退2    冒名模块被执行：否
+stdout 关、stderr 管道                       run.py 自己的 rc=退2    冒名模块被执行：否
+stdout=/dev/full、stderr 关                run.py 自己的 rc=退2    冒名模块被执行：否
+=== 对照：带 -I（期望 USAGE 退 2）
+带 -I 两路正常                                run.py 自己的 rc=退2    冒名模块被执行：否
+带 -I 两路都关                                run.py 自己的 rc=退2    冒名模块被执行：否
+带 -I 两路读端已关管道                            run.py 自己的 rc=退2    冒名模块被执行：否
+=== `-c exec(open(...).read())`：不是 README 支持的调用方式，查 linecache 从哪来
+-c exec(run.py)                          run.py 自己的 rc=退0    冒名模块被执行：否
+=== 内建模块能否被同目录文件顶替（直接问解释器）
+    flags=['-I'] → isolated 1 posix.__file__ None sys.__file__ None loader type path0 /usr/lib/python314.zip

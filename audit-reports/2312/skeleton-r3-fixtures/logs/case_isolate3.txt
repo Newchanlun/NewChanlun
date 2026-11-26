@@ -1,0 +1,32 @@
+run.py 与被审提交那份的 blob：52e1c64939b89edd961f318626c3f26b33509e9e
+受信提交里的 blob：52e1c64939b89edd961f318626c3f26b33509e9e
+--- 不带 -I，各种流状态（Python 3.14.4）
+无 -I，两路正常                          rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+无 -I，stderr 关闭                         rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=                                                             冒名模块被执行：否
+无 -I，stdout 关闭                         rc=0    stdout=                                                                       stderr=rc=2|ULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+无 -I，两路都关                          rc=0    stdout=                                                                       stderr=                                                             冒名模块被执行：否
+无 -I，stderr=/dev/full                      rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=                                                             冒名模块被执行：否
+无 -I，stdout=/dev/full                      rc=2    stdout=                                                                       stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+无 -I，两路=/dev/full                      rc=2    stdout=                                                                       stderr=                                                             冒名模块被执行：否
+无 -I，stdout 为已关读端管道          rc=0    stdout=                                                                       stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+无 -I，stderr 为已关读端管道          rc=0    stdout=                                                                       stderr=                                                             冒名模块被执行：否
+--- 其它启动方式
+-c 载入                                      rc=0    stdout=FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）       stderr=                                                             冒名模块被执行：linecache,
+-m run（无 -I）                             rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+-P                                             rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+PYTHONSAFEPATH=1                               rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+-E -s                                          rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+符号链接路径（链接目录干净）     rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+绝对路径、cwd 为 dir                     rc=2    stdout=FM RESULT FAULT prepare NOT_ISOLATED                                   stderr=FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行| 冒名模块被执行：否
+--- 对照：带 -I
+带 -I，两路正常                          rc=2    stdout=FM RESULT FAULT prepare USAGE                                          stderr=FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-ap 冒名模块被执行：否
+带 -I，stderr 关闭                         rc=2    stdout=FM RESULT FAULT prepare USAGE                                          stderr=                                                             冒名模块被执行：否
+带 -I，PYTHONPATH=dir                        rc=2    stdout=FM RESULT FAULT prepare USAGE                                          stderr=FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-ap 冒名模块被执行：否
+带 -I，cwd 为 dir、脚本在别处         rc=2    stdout=FM RESULT FAULT prepare USAGE                                          stderr=FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-ap 冒名模块被执行：否
+--- sys 与 posix 是不是内建
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）
+--- 带 -I 时 sys.path[0]
+['/usr/lib/python314.zip', '/usr/lib/python3.14', '/usr/lib/python3.14/lib-dynload']
+FM FAULT prepare USAGE --base 用法：run.py [--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> --base <基线提交> --head <被审提交> --branch <分支名> --workdir <工作目录> --packages <依赖目录>
+FM RESULT FAULT prepare USAGE
+FM RESULT GREEN 七步全绿（第 5 步源码形状未安装）

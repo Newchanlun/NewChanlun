@@ -1,0 +1,28 @@
+link /etc/hostname                                Invalid cross-device link errno=18
+link /usr/bin/env                                 Invalid cross-device link errno=18
+link Chan/A.lean                                  Invalid cross-device link errno=18
+link .lake/build/lib/lean/Chan/A.olean            成功 nlink=2
+link /home/workspace/fm/tmp/review-f3/work/hl-canary No such file or directory errno=2
+CapEff 0000000000000000
+TARGET                                                                     FSTYPE      OPTIONS
+/                                                                          xfs         ro,nosuid,nodev,relatime,inode64,logbufs=8,logbsize=32k,noquota
+├─/dev                                                                     devtmpfs    ro,nosuid,nodev,relatime,size=10244168k,nr_inodes=2561042,mode=755,inode64
+│ ├─/dev/pts                                                               devpts      ro,nosuid,nodev,noexec,relatime,gid=5,mode=600,ptmxmode=000
+│ ├─/dev/shm                                                               tmpfs       ro,nosuid,nodev,inode64,usrquota
+│ ├─/dev/mqueue                                                            mqueue      ro,nosuid,nodev,noexec,relatime
+│ ├─/dev/hugepages                                                         hugetlbfs   ro,nosuid,nodev,relatime,pagesize=2M
+│ └─/dev                                                                   tmpfs       rw,nosuid,nodev,relatime,mode=755,uid=1002,gid=1002,inode64
+│   ├─/dev/null                                                            devtmpfs    rw,nosuid,relatime,size=10244168k,nr_inodes=2561042,mode=755,inode64
+│   ├─/dev/zero                                                            devtmpfs    rw,nosuid,relatime,size=10244168k,nr_inodes=2561042,mode=755,inode64
+│   ├─/dev/full                                                            devtmpfs    rw,nosuid,relatime,size=10244168k,nr_inodes=2561042,mode=755,inode64
+│   ├─/dev/random                                                          devtmpfs    rw,nosuid,relatime,size=10244168k,nr_inodes=2561042,mode=755,inode64
+│   ├─/dev/urandom                                                         devtmpfs    rw,nosuid,relatime,size=10244168k,nr_inodes=2561042,mode=755,inode64
+│   ├─/dev/tty                                                             devtmpfs    rw,nosuid,relatime,size=10244168k,nr_inodes=2561042,mode=755,inode64
+│   └─/dev/pts                                                             devpts      rw,nosuid,noexec,relatime,mode=620,ptmxmode=666
+├─/run                                                                     tmpfs       ro,nosuid,nodev,noexec,relatime,size=2407968k,mode=755,inode64
+│ ├─/run/user/1001                                                         tmpfs       ro,nosuid,nodev,relatime,size=2407968k,nr_inodes=601992,mode=700,uid=1001,gid=1001,inode64
+│ │ └─/run/user/1001/doc                                                   fuse.portal rw,nosuid,nodev,relatime,user_id=1001,group_id=1001
+│ ├─/run/credentials/getty@tty1.service                                    tmpfs       ro,nosuid,nodev,noexec,relatime,size=1024k,nr_inodes=1024,mode=700,inode64,noswap
+│ ├─/run/user/112                                                          tmpfs       ro,nosuid,nodev,relatime,size=2407968k,nr_inodes=601992,mode=700,uid=112,gid=113,inode64
+
+宿主机金丝雀 = 'ORIG\n'；被审源码 = 'module\n'

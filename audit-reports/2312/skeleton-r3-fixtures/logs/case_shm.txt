@@ -1,0 +1,21 @@
+可写 /dev/shm
+可写 /tmp
+可写 /tmp/home
+可写 /dev
+不可写 /proc
+可写 /var
+可写 /run
+可写 /home
+可写 /root
+不可写 /etc
+不可写 /usr
+可写 .lake
+--- /dev/shm 列表
+fm-write-probe
+--- /dev/shm 挂载
+TARGET   FSTYPE OPTIONS
+/dev/shm tmpfs  ro,nosuid,nodev,inode64,usrquota
+
+宿主机 /dev/shm/fm-write-probe 存在=False
+宿主机 /tmp/fm-write-probe 存在=False
+宿主机 .lake/fm-write-probe 存在=True（沙箱里 .lake 可写，这个应为 True）

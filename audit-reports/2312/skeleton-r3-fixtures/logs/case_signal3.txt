@@ -1,0 +1,42 @@
+## 各步被 SIGTERM / SIGINT 打断（延迟按预热后各步的时点挑）
+=== sig-step1-TERM（SIGTERM，延迟 0.1s）
+  rc=2（正常退出）
+  标准输出行数=2；结果行 1 条：['FM RESULT FAULT prepare SIGNAL']
+  最后一行='FM RESULT FAULT prepare SIGNAL'
+  绿结果行=0；契约：至多一条结果行=True，绿则 rc=0=True，rc=0 则恰一条绿且在最后=True
+  标准错误的 FM FAULT 行 1 条：['FM FAULT prepare SIGNAL - 运行脚本收到信号 15，中止']
+  残留进程 0 个：[]
+  .lake/tick 字节数 None → None（2 秒后）
+=== sig-step3-INT（SIGINT，延迟 0.3s）
+  rc=1（正常退出）
+  标准输出行数=5；结果行 1 条：['FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑']
+  最后一行='FM RESULT RED 第 1 步 precheck 判红，后面的步骤没有跑'
+  绿结果行=0；契约：至多一条结果行=True，绿则 rc=0=True，rc=0 则恰一条绿且在最后=True
+  标准错误的 FM FAULT 行 0 条：[]
+  残留进程 0 个：[]
+  .lake/tick 字节数 None → None（2 秒后）
+=== sig-step6-TERM-spin（SIGTERM，延迟 2.2s）
+  rc=2（正常退出）
+  标准输出行数=8；结果行 1 条：['FM RESULT FAULT build SIGNAL']
+  最后一行='FM RESULT FAULT build SIGNAL'
+  绿结果行=0；契约：至多一条结果行=True，绿则 rc=0=True，rc=0 则恰一条绿且在最后=True
+  标准错误的 FM FAULT 行 1 条：['FM FAULT build SIGNAL - 运行脚本收到信号 15，中止']
+  残留进程 0 个：[]
+  .lake/tick 字节数 5 → 5（2 秒后）
+=== sig-step6-INT-spin（SIGINT，延迟 2.2s）
+  rc=2（正常退出）
+  标准输出行数=8；结果行 1 条：['FM RESULT FAULT build SIGNAL']
+  最后一行='FM RESULT FAULT build SIGNAL'
+  绿结果行=0；契约：至多一条结果行=True，绿则 rc=0=True，rc=0 则恰一条绿且在最后=True
+  标准错误的 FM FAULT 行 1 条：['FM FAULT build SIGNAL - 运行脚本收到信号 2，中止']
+  残留进程 0 个：[]
+  .lake/tick 字节数 10 → 10（2 秒后）
+## 处理函数里再被打断（第二次信号紧随其后）
+=== sig-double-INT-spin（SIGINT，延迟 2.2s，0.0s 后再来一次）
+  rc=2（正常退出）
+  标准输出行数=8；结果行 1 条：['FM RESULT FAULT build SIGNAL']
+  最后一行='FM RESULT FAULT build SIGNAL'
+  绿结果行=0；契约：至多一条结果行=True，绿则 rc=0=True，rc=0 则恰一条绿且在最后=True
+  标准错误的 FM FAULT 行 1 条：['FM FAULT build SIGNAL - 运行脚本收到信号 2，中止']
+  残留进程 0 个：[]
+  .lake/tick 字节数 10 → 10（2 秒后）

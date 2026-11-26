@@ -1,0 +1,46 @@
+=== 合法构建（应无红）与目录项计数
+合法的完整构建                                      ✓  无红 目录项 64 个（3 模块：13+3 后缀、12 目录、config 4 文件）
+
+=== 文件模式（Q2 弱化没被自测抓到的那一处）
+合法 .olean 带执行位 0755                             [('ARTIFACT_FORM', 'build/lib/lean/Chan/Smoke.olean'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+合法 .olean 带 setuid 4644                         [('ARTIFACT_FORM', 'build/lib/lean/Chan/Smoke.olean'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+合法 .olean 属主不可读 0244                            [('ARTIFACT_FORM', 'build/lib/lean/Chan/Smoke.olean'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+合法 .trace 带执行位                                  [('ARTIFACT_FORM', 'build/lib/lean/Chan/Smoke.trace')] 
+合法 .olean 模式 0400（只读，应放行）                    ✓  无红 
+合法 .olean 模式 0600（应放行）                       ✓  无红 
+
+=== 目录模式
+内容目录 0111（可进不可列）                                [('ARTIFACT_FORM', 'build/lib/lean/Chan'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+内容目录 0500（不可写）                                  [('ARTIFACT_FORM', 'build/lib/lean/Chan'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+内容目录带 setgid 2755                               [('ARTIFACT_FORM', 'build/lib/lean/Chan'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+内容目录带 sticky 1755                               [('ARTIFACT_FORM', 'build/lib/lean/Chan'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+内容目录 0755（应放行）                               ✓  无红 
+内容目录 0700（应放行）                               ✓  无红 
+
+=== 名字与类型
+顶层放 Init/                                       [('ARTIFACT_ROOT', 'build/lib/lean/Init')] 
+顶层放 Init.olean 文件                               [('ARTIFACT_ROOT', 'build/lib/lean/Init.olean')] 
+没有源码的模块 Chan/Ghost.olean                        [('EXTRA_ARTIFACT', 'build/lib/lean/Chan/Ghost.olean')] 
+名字带多余点 Chan/Smoke.x.olean                       [('EXTRA_ARTIFACT', 'build/lib/lean/Chan/Smoke.x.olean')] 
+隐藏名 Chan/.Smoke.olean                           [('EXTRA_ARTIFACT', 'build/lib/lean/Chan/.Smoke.olean')] 
+只差大小写 Chan/smoke.olean                          [('EXTRA_ARTIFACT', 'build/lib/lean/Chan/smoke.olean')] 
+西里尔同形名 Chan/Smokе.olean                         [('EXTRA_ARTIFACT', 'build/lib/lean/Chan/Smokе.olean')] 
+非 UTF-8 名字                                      [('EXTRA_ARTIFACT', 'build/lib/lean/Chan/Aÿ.olean')] 
+名为 X.olean 的目录                                  [('EXTRA_ARTIFACT', 'build/lib/lean/Chan/Dir.olean')] 
+符号链接（指向表内合法名）                                   [('ARTIFACT_FORM', 'build/lib/lean/Chan/Smoke.ilean.x'), ('ARTIFACT_FORM', 'build/lib/lean/Chan/Smoke.olean.server.hash2')] 
+把合法 .olean 换成符号链接                               [('ARTIFACT_FORM', 'build/lib/lean/Chan/Smoke.olean'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+命名管道占用合法名                                       [('ARTIFACT_FORM', 'build/lib/lean/Chan/Smoke.trace')] 
+把 build/lib/lean 换成符号链接                         [('ARTIFACT_FORM', 'build/lib/lean'), ('EXTRA_ARTIFACT', 'build/lib/real'), ('NO_ARTIFACT', 'formal_math/Chan.lean'), ('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean'), ('NO_ARTIFACT', 'formal_math/ChanTest/Probe.lean')] 
+.lake 顶层多一个文件                                   [('EXTRA_ARTIFACT', 'stray')] 
+.lake/build/bin/x                               [('EXTRA_ARTIFACT', 'build/bin')] 
+依赖挂载点下有东西                                       [('EXTRA_ARTIFACT', 'packages/x')] 
+config/<非数字>                                    [('EXTRA_ARTIFACT', 'config/abc')] 
+config/9/other.olean                            [('EXTRA_ARTIFACT', 'config/9/other.olean')] 
+config/007（应放行）                              ✓  无红 
+缺一个模块的 .olean                                   [('NO_ARTIFACT', 'formal_math/Chan/Smoke.lean')] 
+缺一个模块的 .trace（应放行）                           ✓  无红 
+缺整个 ir 目录（应放行）                               ✓  无红 
+缺 packages 目录（应放行）                           ✓  无红 
+硬链接到表内另一个合法名                                 ✓  无红 
+3 GB 稀疏的合法 .olean                            ✓  无红 （稀疏，形状表不查大小与内容）
+内容被换成别的模块的产物                                 ✓  无红 

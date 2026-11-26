@@ -1,0 +1,21 @@
+## N-3：lean 工作进程被杀（kill -KILL $PPID）→ 说明说应报 BUILD_WFAIL 退 1
+=== N3-kill-own-lean
+  rc=1 红码=['BUILD_WFAIL'] 故障=[]
+  结果行 1 条 ['FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑']；最后一行='FM RESULT RED 第 6 步 build 判红，后面的步骤没有跑'
+  FM FAULT=[]
+  相关日志=['FM LOG build error: Lean exited with code 137']
+  契约：至多一条结果行=True
+## 对照：沙箱顶层进程 lake 被杀（kill -KILL 2）→ 说明说应 SIGNAL 退 2
+=== N3-kill-lake
+  rc=2 红码=[] 故障=['SIGNAL']
+  结果行 1 条 ['FM RESULT FAULT build SIGNAL']；最后一行='FM RESULT FAULT build SIGNAL'
+  FM FAULT=['FM FAULT build SIGNAL lake 沙箱内进程被信号终止（退出 137）']
+  相关日志=[]
+  契约：至多一条结果行=True
+## 超时与信号同时发生：第 6 步时限改成 10 秒，第 9.9 秒发 SIGTERM
+=== N4-timeout-plus-signal
+  rc=2
+  结果行 1 条 ['FM RESULT FAULT build BUILD']
+  最后一行='FM RESULT FAULT build BUILD'
+  FM FAULT=['FM FAULT build BUILD bwrap 超时（10 秒）']
+  tick 字节数 225 → 225（2 秒后）；残留进程=['1460237 bwrap           bwrap --unshare-all --die-with-parent --chdir / --ro-bind /usr /usr --dev /dev --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache --ro-bind-try /nix/store /nix/store --tmpfs /tmp-home --tmpfs /tmp-run --clearenv --setenv HOME /tmp-home --setenv XDG_RUNTIME_DIR /tmp-run --setenv XDG_RUNTIME_DIR /run/user/1002 --symlink /usr/lib /lib --symlink /usr/lib64 /lib64 --seccomp 26 /usr/libexec/glycin-loaders/2+/glycin-image-rs --dbus-fd 23', '1460239 bwrap           bwrap --unshare-all --die-with-parent --chdir / --ro-bind /usr /usr --dev /dev --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache --ro-bind-try /nix/store /nix/store --tmpfs /tmp-home --tmpfs /tmp-run --clearenv --setenv HOME /tmp-home --setenv XDG_RUNTIME_DIR /tmp-run --setenv XDG_RUNTIME_DIR /run/user/1002 --symlink /usr/lib /lib --symlink /usr/lib64 /lib64 --seccomp 26 /usr/libexec/glycin-loaders/2+/glycin-image-rs --dbus-fd 23']
