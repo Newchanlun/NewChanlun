@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..e6b3df9 100644
+index e69de29..6fd8d68 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,304 @@
 +package middleware
 +
 +import (
@@ -195,7 +195,9 @@ index e69de29..e6b3df9 100644
 +			if !existed {
 +				res, resErr = preflightreceipt.ReserveReviewContext(turnCtx, root, launch, pending.TurnSeq())
 +				if resErr != nil {
-+					preflightreceipt.TaintExistingReview(root, launch)
++					// Record only this turn's failure via defer pending.Release() (preserving original
++					// TurnSeq) rather than permanently tainting the launch, so a concurrent later valid
++					// turn starting the same brand-new launch can still complete and seal cleanly.
 +					abortClose(http.StatusServiceUnavailable)
 +					return
 +				}
@@ -307,10 +309,10 @@ index e69de29..e6b3df9 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..b7c1228
+index 0000000..282c68c
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,1102 @@
+@@ -0,0 +1,1239 @@
 +package middleware
 +
 +import (
@@ -331,6 +333,7 @@ index 0000000..b7c1228
 +	"net/http"
 +	"net/http/httptest"
 +	"os"
++	"path/filepath"
 +	"strings"
 +	"sync"
 +	"sync/atomic"
@@ -1412,6 +1415,142 @@ index 0000000..b7c1228
 +	if respOK.StatusCode != http.StatusOK {
 +		t.Fatalf("clean empty-body seal HTTP %d, want 200", respOK.StatusCode)
 +	}
++}
++
++func TestPreflightReceiptMiddlewareEarlierNewLaunchReserveCancelDoesNotTaintLaterValidTurn(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R83): when two valid concurrent requests start the same brand-new launch
++	// (both initially observing existed==false) and the earlier request fails ReserveReviewContext
++	// because its request context was canceled after body read, the middleware MUST record only that
++	// turn's failure via its original TurnSeq (NOT permanently taint the launch via TaintExistingReview),
++	// so the later concurrent valid turn can complete and SealOK.
++	gin.SetMode(gin.TestMode)
++	root := filepath.Join(t.TempDir(), "receipts")
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	tlsState := middlewareVerifiedTLS(t, "chatgpt.com")
++
++	launch := "review-e83e8330-1111-4111-8111-111111111130"
++	session := "019d0000-0000-7000-8000-00000000ed30"
++
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		col := preflightreceipt.From(c.Request.Context())
++		if col == nil {
++			c.AbortWithStatus(http.StatusInternalServerError)
++			return
++		}
++		ctx, ex, err := col.Start(c.Request.Context(), "codex", "gpt-6.2-sol")
++		if err != nil {
++			c.AbortWithStatus(http.StatusServiceUnavailable)
++			return
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: middlewareFakeRT(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: http.StatusOK,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(strings.NewReader("")),
++				TLS:        tlsState,
++			}, nil
++		})})
++		upReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		upResp, err := cl.Do(upReq)
++		if err != nil {
++			ex.End()
++			col.Complete(false)
++			c.AbortWithStatus(http.StatusBadGateway)
++			return
++		}
++		_, _ = io.Copy(io.Discard, upResp.Body)
++		_ = upResp.Body.Close()
++		evJSON := `{"type":"response.completed","response":{"id":"resp_conc_new_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`
++		col.ValidateStrictEvent("response.completed", true, []byte(evJSON))
++		col.ObserveStreamChunk([]byte("event: response.completed\ndata: " + evJSON + "\n\n"))
++		ex.End()
++		col.Complete(true)
++		c.Status(http.StatusOK)
++	})
++
++	// Request 1 arrives FIRST (lower TurnSeq), passes BeginPendingReviewContext and ReserveExistingReviewContext
++	// (existed==false), then pauses inside its body reader until Request 2 arrives (higher TurnSeq) and ALSO
++	// sees existed==false; Request 1 then finishes reading a valid body right as its context cancels so
++	// ReserveReviewContext fails with ErrUnavailable.
++	req1InBody := make(chan struct{})
++	releaseReq1Body := make(chan struct{})
++	req1Ctx, cancelReq1 := context.WithCancel(context.Background())
++	defer cancelReq1()
++	req1Body := &blockingReader{
++		data:    []byte(`{"model":"gpt-6.2-sol","stream":true}`),
++		onRead:  func() { close(req1InBody); <-releaseReq1Body; cancelReq1() },
++	}
++	req1 := httptest.NewRequest(http.MethodPost, "/v1/responses", req1Body).WithContext(req1Ctx)
++	req1.Header.Set(preflightreceipt.ReviewHeader, launch)
++	req1.Header.Set("Session-Id", session)
++	rec1 := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++
++	req1Done := make(chan struct{})
++	go func() {
++		defer close(req1Done)
++		engine.ServeHTTP(rec1, req1)
++	}()
++	<-req1InBody
++
++	// Request 2 arrives SECOND (higher TurnSeq) while Request 1 has not created the launch yet,
++	// pauses inside its own body reader until Request 1 finishes failing ReserveReviewContext,
++	// then completes cleanly.
++	req2InBody := make(chan struct{})
++	releaseReq2Body := make(chan struct{})
++	req2Body := &blockingReader{
++		data:   []byte(`{"model":"gpt-6.2-sol","stream":true}`),
++		onRead: func() { close(req2InBody); <-releaseReq2Body },
++	}
++	req2 := httptest.NewRequest(http.MethodPost, "/v1/responses", req2Body)
++	req2.Header.Set(preflightreceipt.ReviewHeader, launch)
++	req2.Header.Set("Session-Id", session)
++	rec2 := &fullDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
++
++	req2Done := make(chan struct{})
++	go func() {
++		defer close(req2Done)
++		engine.ServeHTTP(rec2, req2)
++	}()
++	<-req2InBody
++
++	close(releaseReq1Body)
++	<-req1Done
++	if rec1.Code != http.StatusServiceUnavailable {
++		t.Fatalf("canceled earlier Request 1 HTTP %d, want 503", rec1.Code)
++	}
++
++	close(releaseReq2Body)
++	<-req2Done
++	if rec2.Code != http.StatusOK {
++		t.Fatalf("later valid Request 2 HTTP %d, want 200", rec2.Code)
++	}
++
++	if st, dig := preflightreceipt.SealReviewWithDigest(root, launch, session); st != preflightreceipt.SealOK || dig == "" {
++		t.Fatalf("SealReviewWithDigest after earlier ReserveReviewContext cancel + later clean Turn 2 = (%v, %q), want SealOK", st, dig)
++	}
++}
++
++type blockingReader struct {
++	data   []byte
++	pos    int
++	once   sync.Once
++	onRead func()
++}
++
++func (b *blockingReader) Read(p []byte) (int, error) {
++	b.once.Do(func() {
++		if b.onRead != nil {
++			b.onRead()
++		}
++	})
++	if b.pos >= len(b.data) {
++		return 0, io.EOF
++	}
++	n := copy(p, b.data[b.pos:])
++	b.pos += n
++	return n, nil
 +}
 diff --git a/internal/api/middleware/seal_hook_disabled.go b/internal/api/middleware/seal_hook_disabled.go
 new file mode 100644
@@ -7776,10 +7915,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..3490c55 100644
+index e69de29..1cdb67c 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,12793 @@
+@@ -0,0 +1,13072 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -8258,14 +8397,35 @@ index e69de29..3490c55 100644
 +}
 +
 +type diskTaintJob struct {
-+	key    string
-+	root   string
-+	launch string
++	key      string
++	root     string
++	launch   string
++	attempts int
 +}
 +
 +type pendingDiskTaint struct {
 +	done      chan struct{}
 +	uncertain bool
++}
++
++type reviewFinalizeJob struct {
++	entry         *reviewEntry
++	turnSeq       uint64
++	publish       bool
++	routes        []string
++	observedComp  bool
++	modelMismatch bool
++	lastResp      string
++	lastOut       string
++	finished      int64
++	done          chan struct{}
++}
++
++type finalizeWait struct {
++	job       *reviewFinalizeJob
++	holdsSlot bool
++	turnCtx   context.Context
++	deadline  time.Time
 +}
 +
 +var (
@@ -8279,9 +8439,15 @@ index e69de29..3490c55 100644
 +	maxConcurrentSeals            = 16
 +	maxFailurePersistWorkers      = 4
 +	maxDiskTaintQueue             = 256
++	maxDiskTaintRetries           = 3
++	maxFinalizeWorkers            = 16
++	maxFinalizeQueue              = 64
 +	failurePersistQueue           []*reviewEntry
 +	failurePersistWorkers         int
++	finalizeQueue                 []*reviewFinalizeJob
++	finalizeWorkers               int
 +	pendingDiskTaintKeys          = make(map[string]*pendingDiskTaint)
++	diskTaintDroppedRoots         = make(map[string]struct{})
 +	diskTaintQueue                []diskTaintJob
 +	diskTaintWorkers              int
 +	reclaimingKeys                = make(map[string]bool)
@@ -8482,7 +8648,41 @@ index e69de29..3490c55 100644
 +	existingReviewProbeSem     = make(chan struct{}, maxPendingReviewInFlight)
 +	initialPersistSem          = make(chan struct{}, maxPendingReviewInFlight)
 +	diskTaintCheckFn           = checkDiskTaintTarget
++	diskTaintRootHealthyFn     = checkDiskTaintRootHealthy
 +)
++
++func checkDiskTaintRootHealthy(root string) bool {
++	_, err := checkPrivateDir(root, true)
++	return err == nil
++}
++
++func checkDiskTaintRootHealthyContext(ctx context.Context, root string) bool {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	if ctx.Err() != nil {
++		return false
++	}
++	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
++		return diskTaintRootHealthyFn(root)
++	}
++	select {
++	case existingReviewProbeSem <- struct{}{}:
++	case <-ctx.Done():
++		return false
++	}
++	ch := make(chan bool, 1)
++	go func() {
++		defer func() { <-existingReviewProbeSem }()
++		ch <- diskTaintRootHealthyFn(root)
++	}()
++	select {
++	case ok := <-ch:
++		return ok
++	case <-ctx.Done():
++		return false
++	}
++}
 +
 +func checkDiskTaintTarget(root, launch string) (existsDir bool, uncertain bool) {
 +	rootExists, err := checkPrivateDir(root, true)
@@ -8525,17 +8725,32 @@ index e69de29..3490c55 100644
 +		if existsDir {
 +			TaintReview(job.root, job.launch)
 +		}
++		if uncertain {
++			job.attempts++
++			if job.attempts < maxDiskTaintRetries {
++				time.Sleep(time.Duration(job.attempts) * 10 * time.Millisecond)
++				reviewMu.Lock()
++				diskTaintQueue = append(diskTaintQueue, job)
++				reviewMu.Unlock()
++				continue
++			}
++		}
 +
 +		reviewMu.Lock()
 +		if entry := reviewLedger[job.key]; entry != nil && !entry.sealedFlag && entry.sealDecision.Load() != sealDecisionCommitted {
 +			enqueueExistingReviewTurnFailureLocked(entry, 0, true)
 +		}
++		if uncertain {
++			diskTaintDroppedRoots[job.root] = struct{}{}
++		}
 +		if dt := pendingDiskTaintKeys[job.key]; dt != nil {
 +			if uncertain {
 +				dt.uncertain = true
-+			} else {
-+				delete(pendingDiskTaintKeys, job.key)
 +			}
++			// Always remove resolved or retry-exhausted keys from pendingDiskTaintKeys so the
++			// 256-slot map never leaks permanently; exhausted transient errors hand off to
++			// diskTaintDroppedRoots[root] for bounded recovery once storage heals.
++			delete(pendingDiskTaintKeys, job.key)
 +			close(dt.done)
 +		}
 +		reviewMu.Unlock()
@@ -8662,7 +8877,22 @@ index e69de29..3490c55 100644
 +	reviewTurnSeqGen++
 +	turnSeq := reviewTurnSeqGen
 +	st := pendingReviewLaunches[key]
-+	if pendingReviewTotal >= maxPendingReviewInFlight {
++	// Reject unloaded launches while the disk-taint backlog is still draining after a queue
++	// saturation or transient storage error; once drained, verify root health inside the 32-slot cap.
++	needRootRecoveryCheck := false
++	if entry == nil {
++		if _, dropped := diskTaintDroppedRoots[cleanRoot]; dropped {
++			if len(pendingDiskTaintKeys) > 0 || diskTaintWorkers > 0 {
++				if st != nil && turnSeq > st.failedTurnSeq {
++					st.failedTurnSeq = turnSeq
++				}
++				reviewMu.Unlock()
++				return nil, ErrUnavailable
++			}
++			needRootRecoveryCheck = true
++		}
++	}
++	if pendingReviewTotal >= maxPendingReviewInFlight || len(finalizeQueue) >= maxFinalizeQueue {
 +		if st != nil && turnSeq > st.failedTurnSeq {
 +			st.failedTurnSeq = turnSeq
 +		}
@@ -8704,6 +8934,11 @@ index e69de29..3490c55 100644
 +			return nil, ErrUnavailable
 +		}
 +		reviewMu.Lock()
++		if waitDiskTaint.uncertain {
++			reviewMu.Unlock()
++			failAndReleasePendingSlot(key, turnSeq)
++			return nil, ErrUnavailable
++		}
 +		if dt := pendingDiskTaintKeys[key]; dt != nil {
 +			reviewMu.Unlock()
 +			failAndReleasePendingSlot(key, turnSeq)
@@ -8744,6 +8979,19 @@ index e69de29..3490c55 100644
 +	callerLeft := false
 +	go func() {
 +		bad := pathHasDisallowedSymlinkFn(cleanRoot)
++		if !bad && needRootRecoveryCheck {
++			if !diskTaintRootHealthyFn(cleanRoot) {
++				bad = true
++			} else {
++				reviewMu.Lock()
++				if len(pendingDiskTaintKeys) == 0 && diskTaintWorkers == 0 {
++					delete(diskTaintDroppedRoots, cleanRoot)
++				} else {
++					bad = true
++				}
++				reviewMu.Unlock()
++			}
++		}
 +		stateMu.Lock()
 +		left := callerLeft
 +		if !left {
@@ -8979,6 +9227,7 @@ index e69de29..3490c55 100644
 +	markerSHA256                                string
 +	strictCodex                                 bool
 +	expectedModel                               string
++	turnCtx                                     context.Context
 +	review                                      *reviewEntry
 +	reviewTurnSeq                               uint64
 +	holdsConcurrencySlot                        bool
@@ -15352,6 +15601,9 @@ index e69de29..3490c55 100644
 +			case <-ctx.Done():
 +				return nil, true, ErrUnavailable
 +			}
++			if dt.uncertain {
++				return nil, true, ErrUnavailable
++			}
 +			if !reviewMu.LockContext(ctx) {
 +				return nil, true, ErrUnavailable
 +			}
@@ -15381,9 +15633,24 @@ index e69de29..3490c55 100644
 +		return nil, true, ErrUnavailable
 +	}
 +	overflowed := taintWriteOverflow
++	_, rootDropped := diskTaintDroppedRoots[root]
++	rootDropDrained := len(pendingDiskTaintKeys) == 0 && diskTaintWorkers == 0
 +	reviewMu.Unlock()
 +	if overflowed || pendingTainted {
 +		return nil, false, ErrUnavailable
++	}
++	if rootDropped {
++		if !rootDropDrained || !checkDiskTaintRootHealthyContext(ctx, root) {
++			return nil, false, ErrUnavailable
++		}
++		reviewMu.Lock()
++		if len(pendingDiskTaintKeys) == 0 && diskTaintWorkers == 0 {
++			delete(diskTaintDroppedRoots, root)
++		} else {
++			reviewMu.Unlock()
++			return nil, false, ErrUnavailable
++		}
++		reviewMu.Unlock()
 +	}
 +	dir := filepath.Join(root, launch)
 +	exists, probeErr := probeExistingReviewDirContext(ctx, root, dir)
@@ -15432,7 +15699,10 @@ index e69de29..3490c55 100644
 +	}
 +	if _, queued := pendingDiskTaintKeys[key]; !queued {
 +		if len(pendingDiskTaintKeys) >= maxDiskTaintQueue {
-+			taintWriteOverflow = true
++			// Distinguish transient queue saturation on unverified launches from confirmed
++			// unpersistable taints: mark only this root for bounded re-verification rather
++			// than permanently latching process-wide taintWriteOverflow.
++			diskTaintDroppedRoots[root] = struct{}{}
 +		} else {
 +			pendingDiskTaintKeys[key] = &pendingDiskTaint{done: make(chan struct{})}
 +			diskTaintQueue = append(diskTaintQueue, diskTaintJob{key: key, root: root, launch: launch})
@@ -15482,6 +15752,9 @@ index e69de29..3490c55 100644
 +			case <-ctx.Done():
 +				return nil, ErrUnavailable
 +			}
++			if dt.uncertain {
++				return nil, ErrUnavailable
++			}
 +			if !reviewMu.LockContext(ctx) {
 +				return nil, ErrUnavailable
 +			}
@@ -15491,6 +15764,9 @@ index e69de29..3490c55 100644
 +	}
 +	pendingTainted := pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
 +	_, sealedBound := sealedBindings[key]
++	_, inLedger := reviewLedger[key]
++	_, rootDropped := diskTaintDroppedRoots[root]
++	rootDropDrained := len(pendingDiskTaintKeys) == 0 && diskTaintWorkers == 0
 +	reviewMu.Unlock()
 +	if sealedBound {
 +		return nil, ErrUnavailable
@@ -15498,6 +15774,19 @@ index e69de29..3490c55 100644
 +	if pendingTainted {
 +		TaintExistingReview(root, launch)
 +		return nil, ErrUnavailable
++	}
++	if !inLedger && rootDropped {
++		if !rootDropDrained || !checkDiskTaintRootHealthyContext(ctx, root) {
++			return nil, ErrUnavailable
++		}
++		reviewMu.Lock()
++		if len(pendingDiskTaintKeys) == 0 && diskTaintWorkers == 0 {
++			delete(diskTaintDroppedRoots, root)
++		} else {
++			reviewMu.Unlock()
++			return nil, ErrUnavailable
++		}
++		reviewMu.Unlock()
 +	}
 +	var entry *reviewEntry
 +	var err error
@@ -15511,9 +15800,7 @@ index e69de29..3490c55 100644
 +			entry *reviewEntry
 +			err   error
 +		}
-+		doneCh := make(chan loadRes, 1)
-+		var stateMu sync.Mutex
-+		callerLeft := false
++		doneCh := make(chan loadRes)
 +		cleanupAbandonedLoaded := func(ent *reviewEntry) {
 +			if ent == nil {
 +				return
@@ -15536,33 +15823,19 @@ index e69de29..3490c55 100644
 +			} else {
 +				ent, lerr = getOrCreateReviewEntryContext(context.Background(), root, launch, "", time.Now(), true, true)
 +			}
-+			stateMu.Lock()
-+			left := callerLeft
-+			if !left {
-+				doneCh <- loadRes{entry: ent, err: lerr}
-+			}
-+			stateMu.Unlock()
-+			if left && ent != nil {
-+				cleanupAbandonedLoaded(ent)
++			select {
++			case doneCh <- loadRes{entry: ent, err: lerr}:
++			case <-ctx.Done():
++				if ent != nil {
++					cleanupAbandonedLoaded(ent)
++				}
 +			}
 +		}()
 +		select {
 +		case r := <-doneCh:
 +			entry, err = r.entry, r.err
 +		case <-ctx.Done():
-+			stateMu.Lock()
-+			select {
-+			case r := <-doneCh:
-+				stateMu.Unlock()
-+				if r.entry != nil {
-+					cleanupAbandonedLoaded(r.entry)
-+				}
-+				return nil, ErrUnavailable
-+			default:
-+				callerLeft = true
-+				stateMu.Unlock()
-+				return nil, ErrUnavailable
-+			}
++			return nil, ErrUnavailable
 +		}
 +	} else {
 +		if lockErr := acquirePrivateRootLock(root); lockErr != nil {
@@ -16973,6 +17246,7 @@ index e69de29..3490c55 100644
 +		deadline:             turnDeadline,
 +		strictCodex:          true,
 +		expectedModel:        requestedModel,
++		turnCtx:              ctx,
 +		review:               entry,
 +		reviewTurnSeq:        turnSeq,
 +		holdsConcurrencySlot: holdsSlot,
@@ -17010,19 +17284,30 @@ index e69de29..3490c55 100644
 +	c.mu.Lock()
 +	c.invalid = true
 +	entry := c.review
-+	if entry != nil {
++	hasDeadline := false
++	if c.turnCtx != nil {
++		_, hasDeadline = c.turnCtx.Deadline()
++	}
++	if entry != nil && !hasDeadline {
 +		acquireReview(entry)
 +	}
 +	c.mu.Unlock()
 +	if entry != nil {
-+		defer releaseReview(entry)
-+		entry.mu.Lock()
-+		entry.taintAndPersistLocked()
-+		entry.mu.Unlock()
++		if hasDeadline {
++			reviewMu.Lock()
++			enqueueExistingReviewTurnFailureLocked(entry, 0, true)
++			reviewMu.Unlock()
++		} else {
++			defer releaseReview(entry)
++			entry.mu.Lock()
++			entry.taintAndPersistLocked()
++			entry.mu.Unlock()
++		}
 +	}
 +	c.mu.Lock()
-+	c.maybeReleaseReviewLocked()
++	fw := c.prepareReleaseReviewLocked()
 +	c.mu.Unlock()
++	fw.waitAndReleaseSlot()
 +}
 +
 +func (c *Collector) HandlerDone(success bool) {
@@ -17030,12 +17315,13 @@ index e69de29..3490c55 100644
 +		return
 +	}
 +	c.mu.Lock()
-+	defer c.mu.Unlock()
 +	c.handlerDone = true
 +	if !success || (!c.lifecycleDone && c.executions == 0 && c.active == 0 && c.bodies == 0) {
 +		c.invalid = true
 +	}
-+	c.publishLocked()
++	fw := c.publishLocked()
++	c.mu.Unlock()
++	fw.waitAndReleaseSlot()
 +}
 +
 +func (c *Collector) Complete(success bool) {
@@ -17043,13 +17329,14 @@ index e69de29..3490c55 100644
 +		return
 +	}
 +	c.mu.Lock()
-+	defer c.mu.Unlock()
 +	// Multiple lifecycle owners under one inbound request are not covered.
 +	if c.lifecycleDone || !success {
 +		c.invalid = true
 +	}
 +	c.lifecycleDone = true
-+	c.publishLocked()
++	fw := c.publishLocked()
++	c.mu.Unlock()
++	fw.waitAndReleaseSlot()
 +}
 +
 +// syncDirFn is nil in production so pinned directory syncs never re-open paths by name;
@@ -19318,19 +19605,21 @@ index e69de29..3490c55 100644
 +		c.invalid = true
 +	}
 +	if unterminatedPostComplete || producerMismatch || truncatedStream {
-+		// Hold c.active (keeping entry.inFlight > 0) until c.Taint() finishes persisting taint
++		// Hold c.active (keeping entry.inFlight > 0) until c.Taint() registers taint
 +		// so concurrent HandlerDone() + SealReview can never race ahead and seal a prior clean turn.
 +		c.mu.Unlock()
 +		c.Taint()
 +		c.mu.Lock()
 +		c.active--
-+		c.maybeReleaseReviewLocked()
++		fw := c.prepareReleaseReviewLocked()
 +		c.mu.Unlock()
++		fw.waitAndReleaseSlot()
 +		return
 +	}
 +	c.active--
-+	c.publishLocked()
++	fw := c.publishLocked()
 +	c.mu.Unlock()
++	fw.waitAndReleaseSlot()
 +}
 +
 +type restoredBody struct {
@@ -19677,7 +19966,13 @@ index e69de29..3490c55 100644
 +		outReq.Header.Set("Accept-Encoding", "identity")
 +	}
 +	resp, err := t.next.RoundTrip(outReq)
-+	finish := func() { c.mu.Lock(); defer c.mu.Unlock(); c.bodies--; c.publishLocked() }
++	finish := func() {
++		c.mu.Lock()
++		c.bodies--
++		fw := c.publishLocked()
++		c.mu.Unlock()
++		fw.waitAndReleaseSlot()
++	}
 +	if err != nil {
 +		if strict {
 +			if observed != "other" && isTLSVerificationError(err) {
@@ -20357,192 +20652,314 @@ index e69de29..3490c55 100644
 +	return true, nil
 +}
 +
-+func (c *Collector) maybeReleaseReviewLocked() {
-+	if c.review != nil && !c.reviewReleased && c.handlerDone && c.active == 0 && c.bodies == 0 && (c.sealed || c.lifecycleDone || c.invalid || c.attemptFailed) {
-+		if !c.reviewPublished {
-+			entry := c.review
-+			entry.mu.Lock()
-+			if !entry.sealed && !entry.tainted {
-+				if pf := entry.pendingFailedTurnSeq.Load(); pf > entry.failedTurnSeq {
-+					entry.failedTurnSeq = pf
-+				}
-+				if c.reviewTurnSeq > entry.failedTurnSeq {
-+					entry.failedTurnSeq = c.reviewTurnSeq
-+				}
-+				latestPubSeq := uint64(0)
-+				if len(entry.publishedTurns) > 0 {
-+					latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
-+				}
-+				entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
-+				if entry.lastTurnFailed {
-+					if err := entry.persistLocked(); err != nil {
-+						entry.taintAndPersistLocked()
-+					}
-+				}
-+			}
-+			entry.mu.Unlock()
++func enqueueReviewFinalize(job *reviewFinalizeJob) {
++	reviewMu.Lock()
++	if !job.publish && job.turnSeq > 0 && job.entry != nil && !job.entry.sealedFlag && job.entry.sealDecision.Load() != sealDecisionCommitted {
++		if job.turnSeq > job.entry.pendingFailedTurnSeq.Load() {
++			job.entry.pendingFailedTurnSeq.Store(job.turnSeq)
 +		}
-+		c.reviewReleased = true
-+		holdsSlot := c.holdsConcurrencySlot
-+		c.holdsConcurrencySlot = false
-+		releaseReviewWithSlot(c.review, holdsSlot)
++	}
++	finalizeQueue = append(finalizeQueue, job)
++	if finalizeWorkers < maxFinalizeWorkers {
++		finalizeWorkers++
++		go runFinalizeWorker()
++	}
++	reviewMu.Unlock()
++}
++
++func runFinalizeWorker() {
++	for {
++		reviewMu.Lock()
++		if len(finalizeQueue) == 0 {
++			finalizeWorkers--
++			reviewMu.Unlock()
++			return
++		}
++		job := finalizeQueue[0]
++		finalizeQueue[0] = nil
++		finalizeQueue = finalizeQueue[1:]
++		if len(finalizeQueue) == 0 {
++			finalizeQueue = nil
++		}
++		reviewMu.Unlock()
++
++		executeReviewFinalizeJob(job)
++		releaseReview(job.entry)
++		close(job.done)
 +	}
 +}
 +
-+func (c *Collector) publishLocked() {
-+	defer c.maybeReleaseReviewLocked()
-+	if c.invalid || c.attemptFailed || c.sealed || !c.handlerDone || !c.lifecycleDone || c.active != 0 || c.bodies != 0 || c.executions == 0 || len(c.receipt.Routes) == 0 {
++func executeReviewFinalizeJob(job *reviewFinalizeJob) {
++	entry := job.entry
++	if entry == nil {
 +		return
++	}
++	published := false
++	entry.mu.Lock()
++	defer entry.mu.Unlock()
++	if job.publish {
++		for {
++			if entry.sealed {
++				break
++			}
++			if entry.tainted || entry.pendingTaint.Load() || job.modelMismatch {
++				entry.taintAndPersistLocked()
++				break
++			}
++			badRoute := false
++			for _, r := range job.routes {
++				if r != "codex:gpt-6.2-sol@chatgpt.com" && r != "codex:gpt-6.2-astra@chatgpt.com" {
++					entry.taintAndPersistLocked()
++					badRoute = true
++					break
++				}
++				if entry.route == "" {
++					entry.route = r
++				} else if entry.route != r {
++					entry.taintAndPersistLocked()
++					badRoute = true
++					break
++				}
++			}
++			if badRoute {
++				break
++			}
++			if !job.observedComp || !isSHA256Hex(job.lastResp) {
++				break
++			}
++			if len(entry.responseIDSHAs) >= maxReviewResponseIDs {
++				entry.taintAndPersistLocked()
++				break
++			}
++			finished := job.finished
++			if entry.started <= 0 || finished < entry.started || finished-entry.started > int64(MaxReviewDuration) {
++				entry.taintAndPersistLocked()
++				break
++			}
++			turnRec := reviewPublishedTurn{
++				seq:        job.turnSeq,
++				responseID: job.lastResp,
++				outputSHA:  job.lastOut,
++			}
++			pos := len(entry.publishedTurns)
++			for pos > 0 && entry.publishedTurns[pos-1].seq > turnRec.seq {
++				pos--
++			}
++			entry.publishedTurns = append(entry.publishedTurns, reviewPublishedTurn{})
++			copy(entry.publishedTurns[pos+1:], entry.publishedTurns[pos:])
++			entry.publishedTurns[pos] = turnRec
++			entry.responseIDSHAs = make([]string, len(entry.publishedTurns))
++			for i, pt := range entry.publishedTurns {
++				entry.responseIDSHAs[i] = pt.responseID
++			}
++			latest := entry.publishedTurns[len(entry.publishedTurns)-1]
++			entry.requests = len(entry.publishedTurns)
++			entry.lastResponseIDSHA = latest.responseID
++			entry.lastOutputSHA = latest.outputSHA
++			if pf := entry.pendingFailedTurnSeq.Load(); pf > entry.failedTurnSeq {
++				entry.failedTurnSeq = pf
++			}
++			entry.lastTurnFailed = entry.failedTurnSeq > latest.seq
++			if finished > entry.finished {
++				entry.finished = finished
++			}
++			if err := entry.persistLocked(); err != nil {
++				entry.taintAndPersistLocked()
++				break
++			}
++			published = true
++			break
++		}
++	}
++	if !published && !entry.sealed && !entry.tainted {
++		if pf := entry.pendingFailedTurnSeq.Load(); pf > entry.failedTurnSeq {
++			entry.failedTurnSeq = pf
++		}
++		if job.turnSeq > entry.failedTurnSeq {
++			entry.failedTurnSeq = job.turnSeq
++		}
++		latestPubSeq := uint64(0)
++		if len(entry.publishedTurns) > 0 {
++			latestPubSeq = entry.publishedTurns[len(entry.publishedTurns)-1].seq
++		}
++		entry.lastTurnFailed = entry.failedTurnSeq > latestPubSeq
++		if entry.lastTurnFailed {
++			if err := entry.persistLocked(); err != nil {
++				entry.taintAndPersistLocked()
++			}
++		}
++	}
++}
++
++func (fw *finalizeWait) waitAndReleaseSlot() {
++	if fw == nil {
++		return
++	}
++	hasDeadline := false
++	if fw.turnCtx != nil {
++		_, hasDeadline = fw.turnCtx.Deadline()
++	}
++	if !hasDeadline {
++		<-fw.job.done
++		releaseReviewWithSlot(nil, fw.holdsSlot)
++		return
++	}
++	var timer *time.Timer
++	var timerCh <-chan time.Time
++	if !fw.deadline.IsZero() {
++		rem := time.Until(fw.deadline)
++		if rem <= 0 {
++			releaseReviewWithSlot(nil, fw.holdsSlot)
++			return
++		}
++		timer = time.NewTimer(rem)
++		defer timer.Stop()
++		timerCh = timer.C
++	}
++	select {
++	case <-fw.job.done:
++	case <-fw.turnCtx.Done():
++	case <-timerCh:
++	}
++	releaseReviewWithSlot(nil, fw.holdsSlot)
++}
++
++func (c *Collector) prepareReleaseReviewLocked() *finalizeWait {
++	if c.review != nil && !c.reviewReleased && c.handlerDone && c.active == 0 && c.bodies == 0 && (c.sealed || c.lifecycleDone || c.invalid || c.attemptFailed) {
++		c.reviewReleased = true
++		holdsSlot := c.holdsConcurrencySlot
++		c.holdsConcurrencySlot = false
++		job := &reviewFinalizeJob{
++			entry:   c.review,
++			turnSeq: c.reviewTurnSeq,
++			publish: false,
++			done:    make(chan struct{}),
++		}
++		enqueueReviewFinalize(job)
++		return &finalizeWait{
++			job:       job,
++			holdsSlot: holdsSlot,
++			turnCtx:   c.turnCtx,
++			deadline:  c.deadline,
++		}
++	}
++	return nil
++}
++
++func (c *Collector) publishLocked() *finalizeWait {
++	if c.review != nil {
++		canPublish := !c.invalid && !c.attemptFailed && !c.sealed && c.handlerDone && c.lifecycleDone && c.active == 0 && c.bodies == 0 && c.executions > 0 && len(c.receipt.Routes) > 0
++		if canPublish {
++			if time.Now().After(c.deadline) {
++				c.invalid = true
++				canPublish = false
++			} else {
++				c.sealed = true
++			}
++		}
++		if !c.reviewReleased && c.handlerDone && c.active == 0 && c.bodies == 0 && (c.sealed || c.lifecycleDone || c.invalid || c.attemptFailed) {
++			c.reviewReleased = true
++			holdsSlot := c.holdsConcurrencySlot
++			c.holdsConcurrencySlot = false
++			job := &reviewFinalizeJob{
++				entry:   c.review,
++				turnSeq: c.reviewTurnSeq,
++				publish: canPublish,
++				done:    make(chan struct{}),
++			}
++			if canPublish {
++				job.routes = append([]string(nil), c.receipt.Routes...)
++				job.observedComp = c.observedCompleted
++				job.modelMismatch = c.modelMismatch || (c.strictCodex && !c.lastAttemptProducerVerified)
++				job.lastResp = c.lastResponseIDSHA
++				job.lastOut = c.lastOutputSHA
++				job.finished = time.Now().UnixNano()
++			}
++			enqueueReviewFinalize(job)
++			return &finalizeWait{
++				job:       job,
++				holdsSlot: holdsSlot,
++				turnCtx:   c.turnCtx,
++				deadline:  c.deadline,
++			}
++		}
++		return nil
++	}
++	if c.invalid || c.attemptFailed || c.sealed || !c.handlerDone || !c.lifecycleDone || c.active != 0 || c.bodies != 0 || c.executions == 0 || len(c.receipt.Routes) == 0 {
++		return nil
 +	}
 +	now := time.Now()
 +	if now.After(c.deadline) {
 +		c.invalid = true
-+		return
++		return nil
 +	}
 +	c.sealed = true
-+	if c.review != nil {
-+		routes := append([]string(nil), c.receipt.Routes...)
-+		observedCompleted := c.observedCompleted
-+		modelMismatch := c.modelMismatch
-+		if c.strictCodex && !c.lastAttemptProducerVerified {
-+			modelMismatch = true
-+		}
-+		lastResp := c.lastResponseIDSHA
-+		lastOut := c.lastOutputSHA
-+		entry := c.review
-+		entry.mu.Lock()
-+		defer entry.mu.Unlock()
-+		if entry.sealed {
-+			return
-+		}
-+		if entry.tainted || entry.pendingTaint.Load() || modelMismatch {
-+			entry.taintAndPersistLocked()
-+			return
-+		}
-+		for _, r := range routes {
-+			if r != "codex:gpt-6.2-sol@chatgpt.com" && r != "codex:gpt-6.2-astra@chatgpt.com" {
-+				entry.taintAndPersistLocked()
-+				return
-+			}
-+			if entry.route == "" {
-+				entry.route = r
-+			} else if entry.route != r {
-+				entry.taintAndPersistLocked()
-+				return
-+			}
-+		}
-+		if !observedCompleted || !isSHA256Hex(lastResp) {
-+			return
-+		}
-+		if len(entry.responseIDSHAs) >= maxReviewResponseIDs {
-+			entry.taintAndPersistLocked()
-+			return
-+		}
-+		finished := time.Now().UnixNano()
-+		if entry.started <= 0 || finished < entry.started || finished-entry.started > int64(MaxReviewDuration) {
-+			entry.taintAndPersistLocked()
-+			return
-+		}
-+		turnRec := reviewPublishedTurn{
-+			seq:        c.reviewTurnSeq,
-+			responseID: lastResp,
-+			outputSHA:  lastOut,
-+		}
-+		pos := len(entry.publishedTurns)
-+		for pos > 0 && entry.publishedTurns[pos-1].seq > turnRec.seq {
-+			pos--
-+		}
-+		entry.publishedTurns = append(entry.publishedTurns, reviewPublishedTurn{})
-+		copy(entry.publishedTurns[pos+1:], entry.publishedTurns[pos:])
-+		entry.publishedTurns[pos] = turnRec
-+		entry.responseIDSHAs = make([]string, len(entry.publishedTurns))
-+		for i, pt := range entry.publishedTurns {
-+			entry.responseIDSHAs[i] = pt.responseID
-+		}
-+		latest := entry.publishedTurns[len(entry.publishedTurns)-1]
-+		entry.requests = len(entry.publishedTurns)
-+		entry.lastResponseIDSHA = latest.responseID
-+		entry.lastOutputSHA = latest.outputSHA
-+		if pf := entry.pendingFailedTurnSeq.Load(); pf > entry.failedTurnSeq {
-+			entry.failedTurnSeq = pf
-+		}
-+		entry.lastTurnFailed = entry.failedTurnSeq > latest.seq
-+		if finished > entry.finished {
-+			entry.finished = finished
-+		}
-+		if err := entry.persistLocked(); err != nil {
-+			entry.taintAndPersistLocked()
-+			return
-+		}
-+		c.reviewPublished = true
-+		return
-+	}
 +	c.receipt.Complete = true
 +	c.receipt.Finished = now.UnixNano()
 +	if c.receipt.Finished < c.receipt.Started || c.receipt.Finished-c.receipt.Started > int64(Lifetime) {
-+		return
++		return nil
 +	}
 +	data, err := json.Marshal(c.receipt)
 +	if err != nil {
-+		return
++		return nil
 +	}
 +	rootDir := filepath.Dir(c.directory)
 +	rootLease, err := acquirePrivateRootLease(rootDir)
 +	if err != nil {
-+		return
++		return nil
 +	}
 +	defer rootLease.Close()
 +	subRoot, subFI, err := openVerifiedSubdir(rootLease.dir, c.receipt.Session)
 +	if err != nil {
-+		return
++		return nil
 +	}
 +	defer subRoot.Close()
 +	if c.hasDirID {
 +		if sDev, sIno, okID := statDevIno(subFI); okID && (sDev != c.dirDev || sIno != c.dirIno) {
-+			return
++			return nil
 +		}
 +	}
 +	// Refuse to publish into a polluted or tampered session directory: ONLY our exact verified
 +	// reservation marker (producer.json matching dev/ino/sha256) may exist prior to publication.
 +	subDirFile, err := subRoot.Open(".")
 +	if err != nil {
-+		return
++		return nil
 +	}
 +	subEntries, readDirErr := subDirFile.ReadDir(4)
 +	_ = subDirFile.Close()
 +	if readDirErr != nil && !errors.Is(readDirErr, io.EOF) {
-+		return
++		return nil
 +	}
 +	if len(subEntries) != 1 || subEntries[0].Name() != "producer.json" {
-+		return
++		return nil
 +	}
 +	if !verifyMarkerInSubdir(subRoot, c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256) {
-+		return
++		return nil
 +	}
 +	stagingRoot, err := ensureStagingDir(rootLease.dir, rootDir)
 +	if err != nil {
-+		return
++		return nil
 +	}
 +	defer stagingRoot.Close()
 +	stagingDirFD, _, _, _, err := openPinnedDirFD(stagingRoot)
 +	if err != nil {
-+		return
++		return nil
 +	}
 +	defer stagingDirFD.Close()
 +	subDirFD, subFDDev, subFDIno, hasSubFDID, err := openPinnedDirFD(subRoot)
 +	if err != nil {
-+		return
++		return nil
 +	}
 +	defer subDirFD.Close()
 +	if c.hasDirID && hasSubFDID && (subFDDev != c.dirDev || subFDIno != c.dirIno) {
-+		return
++		return nil
 +	}
 +	// Stage temporary file inside <root>/.staging and publish via descriptor-pinned non-overwriting linkat:
 +	// neither .staging nor <session> is re-resolved by path, readers see all or nothing, and an existing
 +	// receipt.json is never clobbered.
 +	tmp, f, releaseTmp, err := createStagingFile(rootLease.dir, stagingRoot, rootDir, "pending")
 +	if err != nil {
-+		return
++		return nil
 +	}
 +	defer releaseTmp()
 +	_, errWrite := f.Write(data)
@@ -20550,34 +20967,35 @@ index e69de29..3490c55 100644
 +	errClose := f.Close()
 +	if errWrite != nil || errSync != nil || errClose != nil {
 +		_ = stagingRoot.Remove(tmp)
-+		return
++		return nil
 +	}
 +	if c.hasDirID {
 +		if curFI, lerr := rootLease.dir.Lstat(c.receipt.Session); lerr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
 +			_ = stagingRoot.Remove(tmp)
-+			return
++			return nil
 +		} else if curDev, curIno, okCur := statDevIno(curFI); okCur && (curDev != c.dirDev || curIno != c.dirIno) {
 +			_ = stagingRoot.Remove(tmp)
-+			return
++			return nil
 +		}
 +	}
 +	if !verifyMarkerInSubdir(subRoot, c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256) {
 +		_ = stagingRoot.Remove(tmp)
-+		return
++		return nil
 +	}
 +	linkErr := linkatPinned(stagingDirFD, tmp, subDirFD, "receipt.json")
 +	_ = stagingRoot.Remove(tmp)
 +	if linkErr != nil {
-+		return
++		return nil
 +	}
 +	removeVerifiedMarkerInSubdir(subRoot, c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256)
 +	_ = syncPinnedDir(subRoot, c.directory)
++	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..0be0019 100644
+index e69de29..63df22e 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,15247 @@
+@@ -0,0 +1,15514 @@
 +package preflightreceipt
 +
 +import (
@@ -35822,6 +36240,273 @@ index e69de29..0be0019 100644
 +		}
 +		if st, dig := runSSECase(t, "review-e82e8207-1111-4111-8111-111111111107", "019d0000-0000-7000-8000-00000000ec07", `{"type":"refusal","refusal":""}`); st != SealOK || !isSHA256Hex(dig) {
 +			t.Fatalf("empty string refusal field in content_part.added = (%v, %q), want SealOK", st, dig)
++		}
++	})
++}
++
++func TestReviewReceiptDiskTaintSaturationRecoveryAndBoundedHandlerDoneFinalize(t *testing.T) {
++	// PR #2280 R83 Sol + Astra regression suite:
++	// 1. Saturating diskTaintQueue with unverified launches or transient uncertain storage errors
++	//    MUST NOT permanently latch taintWriteOverflow or block unrelated in-memory launches from
++	//    sealing; once the queue drains and storage recovers, new launches MUST resume cleanly.
++	// 2. When final receipt persistLocked() stalls during HandlerDone, a deadline-bound formal
++	//    review turn MUST exit promptly at deadline and release its concurrency slot while
++	//    keeping entry.inFlight > 0 (forbidding SealOK -> SealInFlight) until persistence completes.
++	t.Run("disk-taint-saturation-and-transient-error-recover-without-poisoning-unrelated-launches", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "receipts")
++		// Establish an unrelated healthy launch in memory BEFORE saturation.
++		healthyLaunch := "review-e83e8301-1111-4111-8111-111111111101"
++		healthySess := "019d0000-0000-7000-8000-00000000ed01"
++		ctx, c, err := BeginReview(context.Background(), root, healthyLaunch, healthySess, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview healthy: %v", err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_healthy_sat","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++
++		// Shrink queue cap temporarily and stall/fail disk taint probes to trigger saturation + retry exhaustion.
++		oldCap := maxDiskTaintQueue
++		oldRetries := maxDiskTaintRetries
++		oldCheck := diskTaintCheckFn
++		oldHealthy := diskTaintRootHealthyFn
++		reviewMu.Lock()
++		maxDiskTaintQueue = 2
++		maxDiskTaintRetries = 2
++		reviewMu.Unlock()
++		releaseStall := make(chan struct{})
++		var failUncertain atomic.Bool
++		failUncertain.Store(true)
++		diskTaintCheckFn = func(r, l string) (bool, bool) {
++			<-releaseStall
++			if failUncertain.Load() {
++				return false, true
++			}
++			return oldCheck(r, l)
++		}
++		var rootHealthy atomic.Bool
++		rootHealthy.Store(false)
++		diskTaintRootHealthyFn = func(r string) bool {
++			return rootHealthy.Load() && oldHealthy(r)
++		}
++		defer func() {
++			select {
++			case <-releaseStall:
++			default:
++				close(releaseStall)
++			}
++			deadline := time.Now().Add(2 * time.Second)
++			for {
++				reviewMu.Lock()
++				busy := diskTaintWorkers
++				reviewMu.Unlock()
++				if busy == 0 {
++					break
++				}
++				if time.Now().After(deadline) {
++					break
++				}
++				time.Sleep(5 * time.Millisecond)
++			}
++			reviewMu.Lock()
++			maxDiskTaintQueue = oldCap
++			maxDiskTaintRetries = oldRetries
++			delete(diskTaintDroppedRoots, filepath.Clean(root))
++			reviewMu.Unlock()
++			diskTaintCheckFn = oldCheck
++			diskTaintRootHealthyFn = oldHealthy
++		}()
++
++		// 3 unverified launches saturate maxDiskTaintQueue=2 -> marks diskTaintDroppedRoots[root], NOT taintWriteOverflow.
++		TaintExistingReview(root, "review-e83e8311-1111-4111-8111-111111111111")
++		TaintExistingReview(root, "review-e83e8312-1111-4111-8111-111111111112")
++		TaintExistingReview(root, "review-e83e8313-1111-4111-8111-111111111113")
++
++		reviewMu.Lock()
++		overflowed := taintWriteOverflow
++		_, dropped := diskTaintDroppedRoots[filepath.Clean(root)]
++		reviewMu.Unlock()
++		if overflowed {
++			t.Fatal("disk taint queue saturation latched process-wide taintWriteOverflow=true")
++		}
++		if !dropped {
++			t.Fatal("expected diskTaintDroppedRoots[root] to be marked on queue saturation")
++		}
++
++		// While backlog is active, an unloaded launch MUST fail closed, while unrelated healthyLaunch MUST still SealOK.
++		if g, berr := BeginPendingReviewContext(context.Background(), root, "review-e83e8314-1111-4111-8111-111111111114"); g != nil || !errors.Is(berr, ErrUnavailable) {
++			if g != nil {
++				g.Release()
++			}
++			t.Fatalf("unloaded launch during saturated diskTaintQueue = (%v, %v), want (nil, ErrUnavailable)", g, berr)
++		}
++		if st, dig := SealReviewWithDigest(root, healthyLaunch, healthySess); st != SealOK || !isSHA256Hex(dig) {
++			t.Fatalf("unrelated healthy launch SealReviewWithDigest during saturation = (%v, %q), want SealOK", st, dig)
++		}
++
++		// Unblock workers with uncertain errors -> retries exhaust -> pendingDiskTaintKeys drains to 0 (no leak!).
++		close(releaseStall)
++		drainDeadline := time.Now().Add(2 * time.Second)
++		for {
++			reviewMu.Lock()
++			busy := diskTaintWorkers
++			remKeys := len(pendingDiskTaintKeys)
++			reviewMu.Unlock()
++			if busy == 0 && remKeys == 0 {
++				break
++			}
++			if time.Now().After(drainDeadline) {
++				t.Fatalf("disk taint workers/keys did not drain after retry exhaustion: workers=%d keys=%d", busy, remKeys)
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++
++		// While root is still unhealthy, unloaded launch stays rejected.
++		if g, berr := BeginPendingReviewContext(context.Background(), root, "review-e83e8315-1111-4111-8111-111111111115"); g != nil || !errors.Is(berr, ErrUnavailable) {
++			if g != nil {
++				g.Release()
++			}
++			t.Fatalf("unloaded launch before root health recovery = (%v, %v), want (nil, ErrUnavailable)", g, berr)
++		}
++
++		// Once storage heals, unloaded launch recovers and clears diskTaintDroppedRoots[root].
++		failUncertain.Store(false)
++		rootHealthy.Store(true)
++		gOK, berr := BeginPendingReviewContext(context.Background(), root, "review-e83e8316-1111-4111-8111-111111111116")
++		if berr != nil || gOK == nil {
++			t.Fatalf("new launch after storage recovery = (%v, %v), want non-nil guard", gOK, berr)
++		}
++		gOK.Release()
++	})
++
++	t.Run("handler-done-exits-at-deadline-when-final-persist-stalls-and-forbids-seal-until-done", func(t *testing.T) {
++		root := filepath.Join(t.TempDir(), "receipts")
++		launch := "review-e83e8320-1111-4111-8111-111111111120"
++		sess := "019d0000-0000-7000-8000-00000000ed20"
++
++		pend, err := BeginPendingReviewContext(context.Background(), root, launch)
++		if err != nil {
++			t.Fatalf("BeginPendingReviewContext: %v", err)
++		}
++		res, err := ReserveReviewContext(context.Background(), root, launch, pend.TurnSeq())
++		if err != nil {
++			pend.Release()
++			t.Fatalf("ReserveReviewContext: %v", err)
++		}
++		res.AttachPendingSlot(pend)
++		pend.Release()
++
++		turnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
++		defer cancel()
++		ctx, c, err := BeginReviewReserved(turnCtx, res, sess, "gpt-6.2-sol")
++		if err != nil {
++			res.Release()
++			t.Fatalf("BeginReviewReserved: %v", err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("c.Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("cl.Do: %v", err)
++		}
++		_, _ = io.Copy(io.Discard, resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_hd_stall","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++		e.End()
++		c.Complete(true)
++
++		// Now stall final receipt directory sync right before HandlerDone(true).
++		enteredSync := make(chan struct{}, 1)
++		releaseSync := make(chan struct{})
++		oldSync := syncDirFn
++		var stalledOnce atomic.Bool
++		syncDirFn = func(path string) error {
++			if strings.Contains(path, launch) && stalledOnce.CompareAndSwap(false, true) {
++				select {
++				case enteredSync <- struct{}{}:
++				default:
++				}
++				<-releaseSync
++			}
++			if oldSync != nil {
++				return oldSync(path)
++			}
++			return nil
++		}
++		defer func() {
++			select {
++			case <-releaseSync:
++			default:
++				close(releaseSync)
++			}
++			drain := time.Now().Add(2 * time.Second)
++			for {
++				reviewMu.Lock()
++				busy := finalizeWorkers + failurePersistWorkers
++				reviewMu.Unlock()
++				if busy == 0 {
++					break
++				}
++				if time.Now().After(drain) {
++					break
++				}
++				time.Sleep(5 * time.Millisecond)
++			}
++			syncDirFn = oldSync
++		}()
++
++		start := time.Now()
++		c.HandlerDone(true)
++		elapsed := time.Since(start)
++		if elapsed > 2*time.Second {
++			t.Fatalf("HandlerDone blocked %v past 60ms turn deadline while persistLocked stalled", elapsed)
++		}
++		<-enteredSync
++
++		// Concurrency slot MUST already be released, while SealReview MUST return SealInFlight until persist finishes.
++		reviewMu.Lock()
++		gotPendingTotal := pendingReviewTotal
++		reviewMu.Unlock()
++		if gotPendingTotal != 0 {
++			t.Fatalf("pendingReviewTotal after timed-out HandlerDone = %d, want 0", gotPendingTotal)
++		}
++		if st, _ := SealReviewWithDigest(root, launch, sess); st != SealInFlight {
++			t.Fatalf("SealReviewWithDigest while final persist is stalled = %v, want SealInFlight", st)
++		}
++
++		// Once disk sync unblocks, finalization completes and SealReviewWithDigest succeeds with SealOK.
++		close(releaseSync)
++		waitFinal := time.Now().Add(2 * time.Second)
++		for {
++			st, dig := SealReviewWithDigest(root, launch, sess)
++			if st == SealOK && isSHA256Hex(dig) {
++				break
++			}
++			if st != SealInFlight || time.Now().After(waitFinal) {
++				t.Fatalf("SealReviewWithDigest after final persist unblocked = (%v, %q), want SealOK", st, dig)
++			}
++			time.Sleep(10 * time.Millisecond)
 +		}
 +	})
 +}
