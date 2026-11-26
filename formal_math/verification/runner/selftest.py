@@ -3,7 +3,8 @@
 
 用法：selftest.py --packages <依赖目录> [--jobs N] [--only 子串] [--cases S1,E2,…] [--skip-corpus] [--discover]
       selftest.py --packages <依赖目录> --mutants [--jobs N]
-- 骨架用例（S*、E*）：见 README「自测」。每次运行都另核对输出协议（`protocol()`）。
+- 骨架用例（S*、E*、H*、D*、A*）：见 README「自测」。每次运行都另核对输出协议（`protocol()`）。
+- 单元自测（U1）：第 4 类豁免的判定函数，测试设施自建最小 Lean 包，不经过流水线；与流水线自测分开报数。
 - 语料用例：`fixtures.tsv` 里每个标了期望的旧夹具。`--discover` 只打印实测结果（同表格式），不断言。
 - `--mutants`：在临时副本里逐一改弱运行脚本或审计程序，每种弱化都必须让骨架自测失败；先断言未改弱的副本全过。
 共享依赖目录只读使用：凡是要验证「依赖目录写不进」的用例都用临时目录里自建的假依赖目录（lite 基线，无依赖包）。
@@ -1164,6 +1165,9 @@ def skeleton(s):
     return cases
 
 
+# 骨架用例借 corpus_case 跑的夹具；弱化自测的副本也要带上它们。
+SKELETON_FIXTURES = ("must_red/autoparam/spoofs", "must_green/known-issue/autoparam-variable-binder")
+
 # 第 4 类豁免冒用夹具 must_red/autoparam/spoofs 的期望红行：（M=ENV_META、U=ENV_UNSAFE、I=ENV_IMPLEMENTED_BY，文件，声明）
 AUTOPARAM_SPOOFS = [
     ("M", "Copy", "SpCopy._auto_1"), ("M", "Orphan", "SpOrphan._auto_1"), ("M", "Call", "SpCall._auto_1"),
@@ -1325,6 +1329,8 @@ def corpus_case(s, fixture, keep=False, skip_shape=False):
         for n in names:
             full = os.path.join(d, n)
             overlay["formal_math/" + os.path.relpath(full, src)] = read(full)
+    if not overlay:
+        raise RuntimeError("夹具目录不存在或为空：" + fixture)
     warm = "warm:" + s.warm if s.warm else None
     touches_trusted = any(p in ("formal_math/" + c for c in CONFIG_NAMES) or p.startswith("formal_math/verification/")
                           for p in overlay)
@@ -1511,7 +1517,7 @@ def mutants(packages, jobs):
             for rel in ("lean-toolchain", "lake-manifest.json", "ChanTest/Probe.lean"):
                 os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
                 shutil.copy2(os.path.join(FM, rel), os.path.join(root, rel))
-            for sub in ("runner", "precheck", "auditor"):
+            for sub in ("runner", "precheck", "auditor") + SKELETON_FIXTURES:
                 shutil.copytree(os.path.join(VERIFICATION, sub), os.path.join(root, "verification", sub),
                                 ignore=shutil.ignore_patterns(".lake", "__pycache__"))
             return root
