@@ -428,8 +428,8 @@ SHAPE_RED = [
     # 按形状判的代价（独审 r2 甲-C1）：参数名以 config 结尾的命名参数同样判红
     (T + "FbCfgNamedArg.lean", (), "def fmRun (config n : Nat) : Nat := config + n\n"
      "theorem fmNA : fmRun (config := 1) 2 = 3 := rfl", {"SHAPE_FORBIDDEN"}),
-    # 必绿对照：新式字面量配置项、名字不以 config 结尾的命名参数、「( 以 config 结尾的名字」后面不是 := 的写法
-    # （类型标注、元组；钉住 legacyConfig 的 := 要件），本文件不得出现在红行里
+    # 必绿对照：新式字面量配置项、名字不以 config 结尾的命名参数、类型标注与元组，本文件不得出现在红行里。
+    # 类型标注与元组的左括号是 hygienicLParen 节点而不是记号，钉不住 legacyConfig 的 := 要件（见 README）
     (T + "CfgNewStyleGreen.lean", ("Mathlib.Tactic.Common",),
      "theorem fmG1 (a : Nat) : a + 0 = a := by simp (maxSteps := 1000)\n"
      "theorem fmG2 (p : Prop) (h : p) : p := by simp +contextual [h]\n"
@@ -1400,8 +1400,6 @@ MUTANTS = [
     ("第 7 步不要求第 5 步产出的派生凭证", RUNNER,
      [('if certificate is None or certificate != os.path.join(ctx.trusted_dir, "derived.json"):', "if False:")],
      "S32"),
-    ("legacyConfig 不要求第三个子节点是 :=（独审 r2 甲-C2）", SHAPE,
-     [('stx[2].isAtom && stx[2].getAtomVal.trimAscii.copy == ":=" then', "true then")], "H1"),
     ("NO_CERTIFICATE 只查为空、不比路径（独审 r2 乙-C1）", RUNNER,
      [('if certificate is None or certificate != os.path.join(ctx.trusted_dir, "derived.json"):',
        "if certificate is None:")], "S33"),
