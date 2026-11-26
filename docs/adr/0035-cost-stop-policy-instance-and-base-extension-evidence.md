@@ -19,7 +19,7 @@ ADR 0035 `amplitude.pairing` 保持单值 ROUNDTRIP，不恢复 AMP_EXEC。依�
 任一输入 Missing ⟹ `AwaitingPolicy{cost_input}`，成本门 `NotEvaluable`；此时停止判据只剩塔底（阶段一塔底 = L0，现役塔不受影响），阶段二任何延伸不得开启。ProxyLowerBound 代入只得 `UpperBoundOnly`：可判失败，不可判通过。holding Missing 只影响持有时间长于 funding 周期的级别列，记录须写明起始级别。
 
 ### 三、第一层 = L0 余量对象 + 复测协议
-`L0Margin{policy_version, lb_r, theta, status}`。复测协议：延伸前冻结版本与塔底；延伸后立即以同一探针血统测新级；`lb(r) ≥ θ` ∧ 证据门 ⟹ Enabled，否则 Disabled 且塔底回退、延伸记录保留；逐级重复。当前在案材料（#907）按本记录评估为 `InsufficientEvidence`（中位数、窗重叠、滑点代理、无区间），可作 probe_run_ref，不可作通过证据。
+`L0Margin{policy_version, lb_r, theta, status}`。复测协议：延伸前冻结版本与塔底；延伸后立即以同一探针血统测新级；求值结果以 [ADR 0044 §三](0044-cost-stop-policy-signed-instance-v1.md#三已知总成本为零的求值21112026-11-20) 为准，仅 `Enabled` 通过本成本门，方可继续逐级复测；未放行（含错误）则维持或回退至冻结的塔底，保留延伸记录。当前在案材料（#907）按本记录评估为 `InsufficientEvidence`（中位数、窗重叠、滑点代理、无区间），可作 probe_run_ref，不可作通过证据。
 
 ### 四、第二层判据与逐层逐窗证据（#1598）
 
