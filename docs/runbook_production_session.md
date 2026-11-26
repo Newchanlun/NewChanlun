@@ -23,8 +23,10 @@ cd rust && cargo build --release --features production_session \
 | Bᵢ | `b_chong_session serve --chong <id>` | `economic.b[i].db` | 同上 | 同上 |
 | X | `x_execution_session serve` | `x.db` | 同上 | `x_meta.writer_epoch` |
 
-launcher 不打开任何域库；各域进程自行持锁与 epoch。S/E/B 任一退出 → 回收其余域、退出码 1；
-X 退出只记日志，S/E/B 继续。旧 simulation / dry-run 骨架收到 SIGTERM/SIGINT 后向存活子进程发 SIGTERM，超出 10 秒宽限期则强制回收。
+launcher 不以写者身份打开域库；各域进程自行持锁与核验 epoch。S/E/B 任一异常退出，launcher 回收本次其余域、退出码 1。
+已部署 ADR 0065 两阶段启动时，**最终接纳／发送放行前** X 是必需成员：X 准备、绑定或末次核验失败、退出，或域收到监督管道 EOF，均中止整组启动，关闭本次已开监听并退出；E/B 不消费关库标记、不补写标记、不接客。初始化／绑定许可不是最终放行。
+**最终放行后**，X 单独退出只记日志，S/E/B 继续；监督管道 EOF 后仍持锁服务的进程按[第 1 节](#1-结束仍持写者锁的孤儿)处置。
+旧 simulation / dry-run 骨架没有两阶段放行，X 退出只记日志；收到 SIGTERM/SIGINT 后向存活子进程发 SIGTERM，超出 10 秒宽限期则强制回收。
 已部署有序停止的正式会话由 launcher 先向 S、E 和各 B 的控制管道写停止字节；停机可能失败，按[第 8 节](#8-选对启动停止与恢复入口)逐域核实。
 
 ## manifest（`production-session-manifest/1`）
@@ -38,7 +40,7 @@ X 退出只记日志，S/E/B 继续。旧 simulation / dry-run 骨架收到 SIGT
   "structure_source": {"category": "TestOnlyStructure", "namespaces": ["testonly.tick.ohlc"]},
   "s": {"db": "...", "session": "...", "catalog": "...", "profile": "...", "clock_plan": "...",
         "session_generation": "1", "delivery_retain_generations": "4",
-        "admission_job_limits": "<state>/s-admission/limits.json", "writer_epoch": "1",
+        "admission_job_limits": "/abs/s-control/s-admission/limits.json", "writer_epoch": "1",
         "socket": "...", "resource_config": "<s-structure-resources/1 文件>"},
   "economic": {"manifest": "<economic-manifest/1 文件>", "e": {"db": "...", "epoch": "1"},
                "b": [{"chong": "one", "db": "...", "epoch": "1"}]},
@@ -62,7 +64,7 @@ X 退出只记日志，S/E/B 继续。旧 simulation / dry-run 骨架收到 SIGT
 - S.AcceptInput（`raw_input::accept_events`，v1/S2/S3 共用）对声明之外的 `source_namespace` 返回 `InvalidDomain`，
   不落行。不带声明的既有 TestOnly 库行为不变（但进不了 production_session）。
 
-S `serve` 需要 admission 锚（`<db>.control-owner.json` + `state/s-admission/{limits,binding}.json`）。
+S `serve` 需要准入锚（`<db>.control-owner.json` 和该 owner 指定的准入控制目录内的 `s-admission/{limits,binding}.json`）。它不从 launcher 的 `state_dir` 推导。
 生产首签归 #1657，未决前只能用 TestOnly 夹具造锚。
 
 ## X 执行 profile（`x-execution-profile/1`）
@@ -174,9 +176,9 @@ Clamp 与迁移后 `data_version` 连续性复核还会以 `HistoricalAuditStale
 
    **两种入口都要确认**同库的写者、读者及外部 SQLite 工具、调试器等进程与连接均已停止，并记录确认人。任一停止超时、身份不明或仍有连接时，不复制变化中的库现场，不自动升级为 KILL，也不打开 SQLite 探查库。
 
-2. **保全共用的库文件。** 全部停止后，逐件登记文件原件的绝对路径、设备号/inode、字节大小、mtime 与采集时间，复制后复核原件这些属性和副本字节。符号链接登记链接本身的元数据及链接目标，悬空链接也算原件。不存在的旁挂记录为不存在；副本 inode 不能代替原件记录。复制或核对失败即停在人工门，保留错误，不覆盖旧证据包。
+2. **保全共用的库文件。** 全部停止后，逐件登记原件绝对路径、存在性、类型、设备号/inode、`ctime_ns`、UID/GID、权限、链接数、字节大小、mtime 与采集时间。复制后复核原件属性和副本字节。符号链接登记链接本身及链接目标，悬空链接也算原件。只有确认没有目录项才记为不存在；不可读或无法核验时保留错误。副本 inode 不能代替原件记录。复制或核对失败即停在人工门，不覆盖旧证据包。
 
-   下列清单覆盖主库、SQLite 与 audit-ledger 旁挂、控制 owner、控制锁和写锁；audit-ledger 名称见 `rust/src/bin/s_session_v3/admission_provider.rs:117-123`。将 `S_DB`、`S_EVIDENCE` 设为已核对的主库和全新仓外证据目录的绝对路径，证据目录须位于原件目录之外。`cp -RPp` 复制链接本身并保留属性，不移动或删除原件。元数据清单与停机记录一并归档。
+   下列清单覆盖主库、SQLite 与 audit-ledger 旁挂、控制 owner、控制锁、写者锁、维护锁及适用的持久锁身份记录。S 准入按[实际库路径](../rust/src/bin/s_session_v3/admission.rs#L329-L343)取得 `<db>.writer.lock`，随后取得 `<db>.maintenance.lock`；部署锁连续性合同的域还须逐域采集实际库旁的 `<db>.writer-lock-id`，记录缺失，不现场补建。audit-ledger 名称见 `rust/src/bin/s_session_v3/admission_provider.rs:117-123`。将 `S_DB` 设为已核对的 S 规范库绝对路径，`S_EVIDENCE` 设为原件目录之外全新的仓外证据目录。`cp -RPp` 复制链接本身并保留属性，不移动或删除原件。命令只复制可见条目；逐项存在性与原件身份另记清单，随停机记录归档。
 
    <!-- drill: preserve-s-db -->
    ```bash
@@ -190,7 +192,7 @@ Clamp 与迁移后 `data_version` 连续性复核还会以 `HistoricalAuditStale
    for suffix in -wal -shm -journal \
      .audit-ledger.sqlite .audit-ledger.sqlite-wal \
      .audit-ledger.sqlite-shm .audit-ledger.sqlite-journal \
-     .control-owner.json .control.lock .writer.lock; do
+     .control-owner.json .control.lock .writer.lock .maintenance.lock .writer-lock-id; do
      if [ -e "$S_DB$suffix" ] || [ -L "$S_DB$suffix" ]; then
        cp -RPp "$S_DB$suffix" "$S_EVIDENCE/database/"
      fi
@@ -200,7 +202,12 @@ Clamp 与迁移后 `data_version` 连续性复核还会以 `HistoricalAuditStale
 
 3. **按入口保全首错与运行记录。** 两种入口都要保全实际发布件的版本、冻结配置、资源原件和 clock plan；归档文件时沿用步骤 2 的元数据与字节核对，并记原件到副本的路径映射。
 
-   **正式会话（`production_session`）：** 从部署记录核对本次实例、启动批次（宿主机/启动时间或调用 ID）、launcher PID、发布件和原 manifest，登记 manifest 中实际使用的 `state_dir`；归档 manifest 和本次生成的 `state_dir/structure-source.json`，若拒启发生在生成前则记录未生成。正式 launcher 不生成 Python 控制器的 `s.log`、`s.process.json` 或 `q.process.json`。
+   **正式会话（`production_session`）：** 从部署记录核对本次实例、启动批次（宿主机/启动时间或调用 ID）、launcher PID、发布件和原 manifest。用两个原件分别定位目录：
+
+   - **launcher 状态目录：** 取原 manifest 的顶层 `state_dir`。归档 manifest 和该目录本次生成的 `structure-source.json`；拒启发生在生成前则记录未生成。正式 launcher 不生成 Python 控制器的 `s.log`、`s.process.json` 或 `q.process.json`。
+   - **S 准入控制目录：** 取规范 S 库旁原 `<db>.control-owner.json` 内的 `state_dir`，不用 launcher 的 `state_dir` 代替。按 [S 签锚合同](../rust/src/bin/s_session_v3/admission_anchor.rs#L1328-L1385)对照 owner 的 `db`、`admission` 及 manifest 的 `s.admission_job_limits`，登记控制目录自身、`s-admission/`、`s-admission/binding.json`、`s-admission/limits.json` 和同级于 `s-admission/` 的 `.s-admission-pending`。逐项记原件身份和存在性，复制现有原件；pending 是目录时连同内容保全。owner 缺失、半写、路径冲突或不可核时，记录冲突与已知候选路径的来源和现场，不把任一候选冒充已证实的签锚目录。
+
+   **正式与独立入口都按本次实际合同保存签锚和 pending**，并与步骤 2 的 owner、维护锁及适用的 `.writer-lock-id` 清单一起归档。副本只供取证，不补发签锚，不清 pending 或旁挂。
 
    - **定位日志。** S `serve` 的 stdout 被丢弃，stderr 继承 launcher 的 stderr。查本次启动实际生效的重定向或服务配置，从真正收到 stderr 的文件、服务管理器或采集器保存本次调用从启动到退出的原始日志。
    - **限定批次。** 共享日志用部署记录中的实例和调用 ID 限定；无调用 ID 时须有等价的宿主机、实例与启动时间/PID 记录来排除其他批次。保留事件原序、选择条件及来源。
@@ -251,7 +258,7 @@ v1 `accept` 另被 `LegacyAdmissionBudgetAdapterMissing` 设计性关闭，S 唯
 
 ## 端点拒启与原址续服（#2130）
 
-启动被拒时，先分清是进程仍在、端点名被占，还是域库不准入。修好一项不会放行另一项。以下流程供已实施并部署 [ADR 0065（#2079 获审版）](https://github.com/Newchanlun/NewChanlun/blob/d18e70fad7aae91156ac28860acab1132a076bea/docs/adr/0065-production-session-endpoint-ownership.md) 的实例使用；以实际发布版本为准，不能从本手册推定当前二进制已支持认领或恢复计划。
+启动被拒时，先分清是进程仍在、端点名被占，还是域库不准入。修好一项不会放行另一项。按部署记录核对 launcher 和各域二进制实际实现的合同。本节所称新版指 [ADR 0065 的修订口径（#2139）](https://github.com/Newchanlun/NewChanlun/blob/92b6ea489217db9204f6a169b2e317e052f8c1f2/docs/adr/0065-production-session-endpoint-ownership.md)；原四键 owner 等历史行为按[旧版口径](https://github.com/Newchanlun/NewChanlun/blob/d18e70fad7aae91156ac28860acab1132a076bea/docs/adr/0065-production-session-endpoint-ownership.md)取证。下列正式入口仅供已经实施、获批且已部署相应能力的实例使用。版本或能力不能确认时，保全原件，停在人工门。
 
 **本节只定义流程，不授予任何账户终止进程、移动或删除文件、改属主或权限、恢复库、启用部署或使用凭据的权限。** 值班负责人按 [ADR 0041](adr/0041-degrees-of-freedom-configurable-not-excluded.md) 和 TB-09 [#1383](https://github.com/Newchanlun/NewChanlun/issues/1383)、[#1401](https://github.com/Newchanlun/NewChanlun/issues/1401) 核对实际执行身份与权限。真实 X 的发送者隔离和在途责任仍走 #1401；本地 socket 或写者锁不能证明真实发送停止。
 
@@ -259,22 +266,43 @@ v1 `accept` 另被 `LegacyAdmissionBudgetAdapterMissing` 设计性关闭，S 唯
 
 1. 从已部署的 manifest、域配置和服务记录取实例、域、库、端点和二进制版本。约定下文 `K` 是原端点绝对路径，`OWNER="$K.owner"`，`DIR` 是端点父目录，`WRITER_LOCK` 是域实际打开的锁路径，不是从显示的库别名猜出的路径。库已存在时，取其规范路径再接 `.writer.lock`；S 取原准入 lease 绑定的路径。锁名不代表锁 inode。
 2. 由值班负责人暂停相关实例的自动拉起；对动文件的步骤，隔离所有可能改动相关目录的进程和外部工具，在实际宿主机及对应的挂载、PID、网络命名空间核实已停。清场和恢复还须排除外部库连接。停单个服务、一次 `lsof` 空结果、同 UID 或一次试连失败，都不能建立排他窗口。拿不到排他窗口就保留现场并移交部署负责人。
-3. 在 Linux 上用 `namei -l -- "$K" "$OWNER" "$WRITER_LOCK"`、`findmnt -T "$DIR" -o TARGET,SOURCE,FSTYPE,OPTIONS`、`stat -c '%d:%i %F uid=%u gid=%g mode=%a links=%h ctime=%z %n' -- "$K" "$OWNER" "$WRITER_LOCK"` 记录路径分量和原件。GNU `stat` 在这里不加 `-L`，记录链接本身。区分明确的不存在与无法核验；后者停止。仅在父路径无链接、权限及对象身份已核清之后，才执行下面的文件操作。
-4. 对要改动的每个现有端点，持有其所有相关域的原写者锁，含异锁 owner 指向的已核实域；不跟随 owner 字段任意打开路径。对每把锁，在同一维护 shell 重复下列步骤，保存 FD 到动作和复核完成；`LOCK_ID` 来自步骤 3 已核实的锁文件 `dev:ino`。锁文件缺失、是链接、换过 inode、身份不明或锁不可取时，不创建或替换锁，停止并交域负责人核实。命令失败不得继续。正式恢复和开服前关掉这些 FD，继续保持部署侧隔离，直到移交给正式入口。
+3. 在 Linux 上用 `namei -l -- "$K" "$OWNER" "$WRITER_LOCK"`、`findmnt -T "$DIR" -o TARGET,SOURCE,FSTYPE,OPTIONS` 和不跟随叶链接的 `stat` 采集目录、端点、owner、锁和锁身份记录的原件。区分确无条目和无法核验；后者停止。这些读数只描述现场，不证明锁与前代连续，也不能排除挂载别名。动名字、改权或开服前，还须按第 3、6 节核清物理布局和隔离。
+4. **动名字前，核的是前代的锁。** 每个相关域（包括经部署记录证实归属的异锁域）先按 [ADR 0065 锁连续性](https://github.com/Newchanlun/NewChanlun/blob/92b6ea489217db9204f6a169b2e317e052f8c1f2/docs/adr/0065-production-session-endpoint-ownership.md#L51-L53) 核原 `<db>.writer-lock-id`：从已核的规范库父目录无链接打开，核普通文件、域 euid、单链接、`0600`、规范内容和目录项仍指向所读原件。按第 7 节核适用的端点 owner；存在新版 owner 时，`writer_lock` 和 `lock.{dev,ino,ctime_ns}` 必须与持久记录逐项相同。锁路径取原配置及记录共同证实的实际路径，不从 owner 任意取路径。旧库未登记、首登中断、已登记锁缺失、记录或 owner 冲突或不可核时，保持拒绝，带原件移交域与部署负责人走专门的旧库导入或身份处置；不在现场创建、替换锁或重建锁身份记录。
+
+   在交互终端用下例为每把锁取非阻塞排他锁。在取锁后、每次动名字前和动作复核时，将实际持锁 FD、无链接的当前锁叶、持久身份记录及适用的 owner 锁字段核到同一路径和同一 `dev/ino/ctime_ns`；锁叶与 FD 均须是域 euid 所有的单链接普通文件。填写 `LOCK_DEV`、`LOCK_INO`、`LOCK_CTIME_NS` 为**持久记录**的原值，不从事故现场 `stat` 填写；`LOCK_UID` 为这个域的已核 euid。脚本只核内核对象与这些原值，不代读或认证记录。多把锁时逐把进入内层维护 shell，最后一把取到之前不动任何名字。用输出的 shell PID 与 FD 编号复核，各 FD 保留到动作和复核完成。失败不可继续，不用后台进程保锁。正式恢复和开服前退出所有维护 shell，继续保持部署侧隔离。
 
    <!-- drill: writer-lock -->
    ```bash
-   test -f "$WRITER_LOCK" && test ! -L "$WRITER_LOCK" &&
-     exec {lock_fd}<"$WRITER_LOCK" &&
-     test "$(stat -Lc '%d:%i' "/proc/$$/fd/$lock_fd")" = "$LOCK_ID" &&
-     flock -nx "$lock_fd"
+   python3 - "$WRITER_LOCK" "$LOCK_DEV" "$LOCK_INO" "$LOCK_CTIME_NS" "$LOCK_UID" <<'PY'
+   import fcntl, os, stat, sys
+
+   path = sys.argv[1]
+   dev, ino, ctime_ns, uid = map(int, sys.argv[2:])
+
+   def matches(st):
+       return (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+               and (st.st_dev, st.st_ino, st.st_ctime_ns, st.st_uid)
+               == (dev, ino, ctime_ns, uid))
+
+   fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+   if not matches(os.fstat(fd)):
+       sys.exit("锁 FD 不符前代记录；保持现场")
+   fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+   if not matches(os.fstat(fd)) or not matches(os.lstat(path)):
+       sys.exit("持锁复核不符前代记录；保持现场")
+   os.set_inheritable(fd, True)
+   with open("/dev/tty", "rb", buffering=0) as tty:
+       os.dup2(tty.fileno(), 0)
+   print(f"维护 shell PID={os.getpid()}，持锁 FD={fd}，路径={path}", flush=True)
+   os.execlp("bash", "bash", "--noprofile", "--norc", "-i")
+   PY
    ```
 
 每次操作留一份故障单记录：实例、域、时间、授权引用和执行人，原始拒绝、暂停拉起与排他确认，操作的绝对路径和前后身份，命令退出码、复核结果、剩余阻塞。只记录核验所需的字段，不记录凭据、进程环境或含秘密的完整参数。
 
 ### 1. 结束仍持写者锁的孤儿
 
-launcher 已退出，而域仍在原端点服务或持原锁时，由获准发信号的部署运维处置。launcher 控制管道 EOF 不停域，不能因 launcher 的 PID 消失就启动第二个写者。
+新版在最终放行前收到监督 EOF 必须中止整组启动、关闭已开的监听并退出，不消费 E/B 标记或接客；若仍有进程或持锁，按中止异常保全并移交，不当作已放行。**最终放行后**控制管道 EOF 不停域；launcher 已退出而域仍在原端点服务或持原锁，由获准发信号的部署运维处置。不能因 launcher PID 消失就启动第二个写者。
 
 1. 从部署记录核实例、域、boot ID、PID 和启动 tick、运行 UID、可执行文件身份、cgroup、服务参数中的库及端点；对照 `/proc/<pid>/fd` 和 `fdinfo`，确认持的是原锁 inode。若是场所 X，先按 #1401 处置可能发送的旧进程和已有请求。任一身份对不上，不发送信号。
 2. 确认部署没有更合适的有序停止入口后，向**已核定的单个进程**发 TERM。以下 Linux 示例使用 Python 3.9+（含 pidfd 接口）和支持 pidfd 的 Linux 内核。把 `PID BOOT START_TICKS RUN_UID EXE_ID LOCK_FD LOCK_ID` 填成上一步已核值，`EXE_ID` 是可执行文件 `dev:ino`，`LOCK_FD` 是该进程的持锁 FD 编号。pidfd 不可用时，交部署控制面处理，不换裸 PID、不按进程名杀。TERM 超时停止；升级信号须有对应处置授权并重新核身份。
@@ -311,7 +339,7 @@ launcher 已退出，而域仍在原端点服务或持原锁时，由获准发�
    PY
    ```
 
-3. 确认目标进程退出、原锁可按上节取得、没有仍持监听或代发的其他进程。保留 `K`、owner 和库侧件，不用杀进程代替清场或库恢复。E/各 B 无本代正常关库标记须先正式恢复；S 若留 SHM 或遇未完成 Begin，见下文恢复门；本地 X 走原有启动门。记录身份核验、信号、退出、锁与各域后续决定；TERM 成功本身不是正常关库证据。
+3. 确认目标进程退出、原锁可按上节取得、没有仍持监听或代发的其他进程。保留 `K`、owner 和库侧件，不用杀进程代替清场或库恢复。整会话先按第 5 节核共同 checkpoint，再分别判断 E/B 正常关库标记、S 介质或未完成 Begin 和 X 的恢复需要。记录身份核验、信号、退出、锁与各域后续决定；TERM 成功本身不是正常关库证据。
 
 ### 2. 隔离端点名上的拒绝对象
 
@@ -366,7 +394,9 @@ launcher 已退出，而域仍在原端点服务或持原锁时，由获准发�
 
 预核发现父目录属主不是域的运行 euid、组或其他位可写，或路径分量是符号链接时，由部署目录管理员处置；旧合同只可能在端点名和 owner 名都明确不存在时直绑，不会接管残留，也不是整改方案。
 
-1. 按共用步骤查 `namei -l` 和 `findmnt`，对照实际运行 UID/GID、调用方目录搜索权限、文件系统与 ADR 0065 的适用条件。若是共享目录、链接、挂载或文件系统不合规，先由部署方批准独立真实目录和引用变更，不能给链接目标递归改权。只有同名路径能按原布局重建时才保留同址承诺。
+1. 按共用步骤查 `namei -l` 和 `findmnt`，对照实际运行 UID/GID、调用方目录搜索权限、文件系统与 ADR 0065 的适用条件。先过第 6 节的物理布局和部署隔离核验；路径初筛退出 0 不授权改权、改名或开服。若目录共享、经链接或挂载混用，或文件系统不合规，先由部署方批准独立真实目录和引用变更，不能给链接目标递归改权。只有同名路径能按原布局重建时才保留同址承诺。
+
+   **涉及 `financial-serve` 时另核专用目录。** 该监听器只读财务，但[启动失败可按名删除自己的 socket](../rust/src/bin/s_session_v3/financial_session.rs#L1728-L1740)，不遵守写者端点的认领锁。核它的实际目录树与所有写者端点树不重合、互不包含，且双向均无符号链接或挂载别名。两边均不得使用或重指对方的目录或端点。整改前后均核；不能证明隔离就不启用该财务监听配置。
 2. 对已确认专用、真实且已排他的目录，设 `DIR_ID` 为核准的 inode 身份、`RUN_UID:RUN_GID` 为部署身份、`DIR_MODE` 为已核准的非组/其他可写模式（仅服务用户访问时用 `0700`）。只改这一级，不改锁、owner、库或子项。新目录由管理员用 `install -d -o "$RUN_UID" -g "$RUN_GID" -m "$DIR_MODE" -- "$DIR"` 创建；先核新路径，不能借此覆盖已有条目。
 
    <!-- drill: permissions -->
@@ -379,13 +409,13 @@ launcher 已退出，而域仍在原端点服务或持原锁时，由获准发�
      stat -c '%d:%i uid=%u gid=%g mode=%a %n' -- "$DIR"
    ```
 
-3. 用域运行身份复核路径可达，父目录 UID 与其 euid 一致、权限与调用方需求相符且组/其他不可写。复查整个路径无链接、挂载在适用清单内；S 或带监听的模拟 X 还须核 M。记录前后属主、权限、挂载和已批准的配置改动，确认未改其他路径后再开服。
+3. 用域运行身份复核路径可达，父目录 UID 与其 euid 一致、权限与调用方需求相符且组/其他不可写。重核完整路径、挂载视图、实际目录和第 6 节适用的 M 门；S 若在 M 内或 M 外不可证，不做 M 外认领。记录前后属主、权限、挂载和已批准的配置改动，确认未改其他路径，再按第 8 节启动。
 
 ### 4. 清理已确认的退役对象
 
 域把旧 socket 改名到 `<basename>.retired.<ino>`，不删除。达到部署保留期限或容量门槛时，由获准清理的运维在维护窗处理。若只凭文件名找到条目，不得删除：放回失败留下的对象也可能占用退役名。
 
-1. 用认领成功的 `endpoint-claim`（`retired` 或 `adopted` 且有对应退役 basename）与原对象身份、运维清单核对来源、`dev:ino` 和保留期限；留档冻结的留在原地。排除任何放回失败、未知或仍被引用的对象。锁和 `K`、owner 不在清理对象内。
+1. 先按第 7 节核 owner 版本、锁字段和退役状态。新版 `endpoint-claim` 只认 `fresh`、`vacant`、`retired` 三种事件，日志只用于观察。用同版本已完成的退役证据（持原 FD 复核并已提交清除意图）、原对象身份和运维清单核对退役来源、basename、`dev:ino` 及保留期限；`retired` 事件只能辅助关联。任何 `bound=null` 但 `K` 存在、`retiring` 未清、当前 owner 的旧 `bound` 对应退役名仍在或不可核，均移交第 7 节，不进入本批清理。旧版 `adopted` 只留作历史线索，不作为 `unlink` 凭据，也不得跨版本沿用。放回失败、来源不明、留档冻结或仍被引用的对象留在原地。锁、身份记录、`K` 和 owner 都不在清理对象内。
 2. 处于排他窗口并持原域锁时，逐件用第 2 节钉住试连，确认仅返回 `ECONNREFUSED`。以下 `RETIRED` 是该端点确认退役的绝对路径，`RETIRED_ID` 是已核 `dev:ino`，`RUN_UID` 是原域 euid。保留前后清单，不用通配删除。
 
    <!-- drill: retired -->
@@ -399,12 +429,30 @@ launcher 已退出，而域仍在原端点服务或持原锁时，由获准发�
 
 3. 复核退役名消失，现役名、owner、原锁及旁挂身份不变。运行正式入口后复核原址读口。记录退役来源、身份、保留期判定、删除回执及未清理对象；删除没有改名隔离的回退能力。
 
-### 5. 恢复备份或从旧二进制前滚后，先正式恢复再启动
+### 5. 先补齐共同 checkpoint，再对需要恢复的域升代
 
-E 或任一 B 的库从备份恢复，或曾由不识 `clean_close/1` 的二进制开服时，即使库内标记与当前持久代相同，也不能证明最近一次服务已正常关库。由获授权的域运维逐域正式恢复，不能先试启看是否报错。
+恢复备份、从旧二进制前滚或异常停机后，先判断整会话能否续上同一业务边界，再判断哪些域需要升代。E 或任一 B 从备份恢复，或曾由不识 `clean_close/1` 的二进制开服时，即使库内标记匹配持久代，也不能证明最近一次正常关库；该域仍须正式恢复。
 
-1. 停原实例并排除旧 writer、SQLite 外部连接和自动拉起。查备份来源、恢复范围、原库及旁挂一致性、最后可信 cut、原代、刚才用过的二进制、未决责任。确认 E 和各 B 原库齐全；部分缺库不 init，全失也不能把产品的首启行为当成恢复。保全原库、侧件、配置及已有回执。不要手工改标记或库代。
-2. 使用含具名恢复和本合同的正式发布件。部署侧隔离继续生效，先释放人工维护 FD，由对应域 bin 自取原锁。准备获准的 `economic-recovery/1` 原件，绑定域、会话、会话代、经济 manifest、最新持久 cut 和恢复前代，使用本事故的唯一 `recovery_id`。下例只运行需要恢复的域；`RELEASE` 是已核 bin 目录，`ECON_MANIFEST` 和各 DB、请求路径从部署记录取。将 `RECOVERY_EVIDENCE` 设为本事故已核准、已存在的证据父目录绝对路径。每次尝试独占创建新的子目录，分存 stdout、stderr 和退出码。
+1. **停旧会话和发送者。** 按第 8 节第 1 步停机并确认全部旧域已退出、自动拉起暂停、外部 SQLite 连接已隔离。真实场所 X 另按 #1401 隔离旧发送者并保留在途责任。记录原发布件、原 manifest、备份来源与范围、原代，保全 S、E、每个 B、X 的原库、侧件、配置、快照、原收据和未决责任。任何原库缺失或不可核都停，不 init；全失也不能当作首启。严禁用普通启动探测：所核 [`main` launcher](../rust/src/bin/production_session.rs#L297-L319) 会逐个 `init` 缺失的 E/B 库。
+2. **只读核共同向量与推进边界。** 按 [ADR 0065 共同 checkpoint](https://github.com/Newchanlun/NewChanlun/blob/92b6ea489217db9204f6a169b2e317e052f8c1f2/docs/adr/0065-production-session-endpoint-ownership.md#L194-L201)，以原 manifest 的 S、E、全部 B（manifest 顺序）、X 为全员，不按幸存回执或换代计划选成员。逐域从原件核同一会话、会话代、manifest／证据类、`checkpoint_id`、bar 边界和输入前沿、各域 cut、快照／重放起点、实际最高已推进边界。
+
+   每条跨域前件都须在源域所选 cut 的已核链内，核其提交序号、root 和被引用的原记录。全员封口记录绑定同一向量且因果闭合，才得到最后共同向量。首个业务 bar 中断时，可用已封齐的初始向量 N=0。原件不足、向量冲突或不可核即停，不能取更旧向量掩盖推进。
+3. **仅部分推进时，只离线补这一 bar。** 若共同向量之后的下一 bar 仅部分推进，由获授权的域运维使用已获批、已部署的 `recover-checkpoint`。同一具名离线计划绑定原会话／manifest／证据类、最后共同向量、下一 bar 的确切边界及冻结输入、策略、时钟和前件。缺实现、批准或原件就保持停机。
+
+   释放人工 FD 后，命令在部署隔离下取本域原锁，按因果顺序复用已提交原件，只补缺失的应用或封口；不监听、不接纳新业务、不重调场所、不重发、不回退。实验／生产只按获准的只读对账取证，未知责任保留。中断保留已提交原件；仅在同一计划可幂等核验时续做。复核全员完成的下一 bar 向量与因果闭合后才能继续。`recover-checkpoint` 在 E/B 首次改写的事务撤销旧关库标记，不写新标记，也不代替换代。
+4. **共同向量完成后，才对确需恢复的域升代。** E 和各 B 走本节具名恢复，S 走第 8 节的具名恢复，真实 X 仍按 #1401/C09.8。保持部署侧隔离；执行恢复命令前释放人工维护 FD，由对应域二进制自取原锁。不要手工改关库标记或库代。
+
+   **先核 E/B CLI 世代，再选命令。** 从发布清单核对 launcher 与域二进制，不拿原库试探参数。
+
+   | 发布能力 | 写入型恢复 | 只读回执与 launcher 计划 |
+   |---|---|---|
+   | 此处所核 `main`（`0e29d008`） | [只提供非具名 `recover`](../rust/src/economic_session/service.rs#L1553-L1597)，会[直接提交新 epoch](../rust/src/economic_session/store.rs#L1709-L1725) | 无具名核验；[launcher 只认 `--manifest`](../rust/src/bin/production_session.rs#L251-L256)，不支持计划 |
+   | [#2082 具名基线](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/economic_session/service.rs#L1570-L1622) | `recover-named` 需要经济 manifest、原库、原请求，B 另带 `--chong`；没有 S 布局两参 | `query-recovery`／`current-recovery`；[计划键集必须等于 E/B 全集](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L273-L296)，不能用下文子集计划，也不得为填齐键而多升代 |
+   | 已部署 ADR 0065 修订及具名恢复 | 下列 `recover-named` 另须 `--s-db`、`--s-admission-job-limits`，按第 6 节核布局并核原锁连续性 | 两个只读子命令不因布局条款增加参数；launcher 支持子集计划，先核共同向量，再按第 8 节两阶段装配 |
+
+   **下面两个写命令仅用于第三行发布件。** 能力不符、版本不可核或命令被拒就在人工门保留首错；严禁改用非具名 `recover` 试错。所核 `main` 的 launcher [报 `refused` 并退出 2](../rust/src/bin/production_session.rs#L451-L457)也不证明前面的 init 等动作未发生。
+
+   准备获准的 `economic-recovery/1` 原请求，绑定域、会话及会话代、经济 manifest、共同边界完成后的本域持久 cut 和恢复前代，使用本事故的唯一 `recovery_id`。只对确需恢复的域运行。`RELEASE` 取已核 bin 目录，经济 manifest、各域原库和请求路径取部署记录；`S_DB`、`S_LIMITS` 取同一 launcher manifest 的 `s.db`、`s.admission_job_limits` 原值。`RECOVERY_EVIDENCE` 是本事故已核准、已存在的证据父目录绝对路径。每次尝试分存 stdout、stderr 和退出码。
 
    <!-- drill: recover-e -->
    ```bash
@@ -416,6 +464,7 @@ E 或任一 B 的库从备份恢复，或曾由不识 `clean_close/1` 的二进�
    rc=0
    "$RELEASE/e_economic_session" recover-named --manifest "$ECON_MANIFEST" \
      --db "$E_DB" --recovery-request "$E_REQUEST" \
+     --s-db "${S_DB:?}" --s-admission-job-limits "${S_LIMITS:?}" \
      > "$attempt/recover.stdout" 2> "$attempt/recover.stderr" || rc=$?
    printf '%s\n' "$rc" > "$attempt/exit-code"
    exit "$rc"
@@ -432,6 +481,7 @@ E 或任一 B 的库从备份恢复，或曾由不识 `clean_close/1` 的二进�
    rc=0
    "$RELEASE/b_chong_session" recover-named --manifest "$ECON_MANIFEST" \
      --db "$B_DB" --chong "$CHONG" --recovery-request "$B_REQUEST" \
+     --s-db "${S_DB:?}" --s-admission-job-limits "${S_LIMITS:?}" \
      > "$attempt/recover.stdout" 2> "$attempt/recover.stderr" || rc=$?
    printf '%s\n' "$rc" > "$attempt/exit-code"
    exit "$rc"
@@ -440,28 +490,28 @@ E 或任一 B 的库从备份恢复，或曾由不识 `clean_close/1` 的二进�
 
    非零退出时，本次目录只登记为失败证据，即使 stdout 非空也不当作回执；保留旧回执原件，不覆盖、不删除，不启动 launcher。成功退出后仍须核对 stdout 的回执，核对通过才登记为本次成功回执；再次尝试也使用新目录。
 
-   只有明确获准按非具名恢复合同交接有效代的部署，才改用对应域的 `recover`（同一 `--manifest`、`--db` 及 B 的 `--chong`，无 `--recovery-request`）；非具名结果不能冒充 launcher 的具名请求。恢复回执丢失时，用相同请求 `query-recovery` 查原回执，再用 `current-recovery` 核是否对应当前代，两者参数与 `recover-named` 相同。重取回执不会重写已被 serve 消费的标记；若期间开服又崩溃，重新判明恢复需要，不能复用旧回执放行。
-3. 核对回执的域、cut、有效代和实际部署合同。对具名链，用 `launcher-economic-recovery/1` 的 `requests` 对象把已恢复、需回执交接的域（`E`、`B:<id>`）映射到各自原请求文件的绝对路径；未换代域继续用 manifest 的代。不要把回执文件当成请求文件。例如仅恢复 E 时，计划为：
+   **只读核验适用已部署具名 CLI 的后两行。** 回执丢失时，用 `query-recovery` 和同一原请求查原回执，用 `current-recovery` 核当前代。两者传 `--manifest`、`--db`、`--recovery-request`（B 另加 `--chong`）；不加本条的两个 S 布局参数。历史回执不证明当前资格；重取不重写被 serve 消费的标记。若期间开服又崩溃，重新判断恢复需要，不拿旧回执放行。
+5. **核完回执，再准备启动交接。** 核回执的域、cut、有效代。仅当已部署 ADR 0065 修订版的子集能力时，才用 `launcher-economic-recovery/1` 的 `requests` 把需交接有效代的域（`E`、`B:<id>`）映射到各自**原请求**绝对路径，不填回执路径。未列的域使用原 manifest 的代，B 的 `--e-epoch` 取 E 有效代。launcher 在拉写者前用 `current-recovery` 逐项核；有一项被拒就停止，不删条目、不退回 manifest 旧代。仅 E 需交接且已部署子集能力时：
 
    ```json
    {"schema_revision":"launcher-economic-recovery/1","requests":{"E":"/abs/recovery/e-request.json"}}
    ```
 
-   先处理端点拒绝与依赖域准入，再按第 8 节启动。S 的强杀和介质再准入见 [#2128](https://github.com/Newchanlun/NewChanlun/issues/2128) 与本文 H1 人工恢复门；E/S 升代后的模拟 X 权威绑定见 [#2129](https://github.com/Newchanlun/NewChanlun/issues/2129)，未经对应交接不得改冻结配置强启。
-4. 从正式读口核原 cut/收据和本次有效代；核 E/B 接纳前已消费该代标记的版本证据，不能仅凭 `endpoint-claim` 通过就判断恢复正确。留备份或旧版本来源、前后代、恢复请求/回执、计划、启动序列及首个正式读口结果。
+   保留备份或旧版本来源、完整共同向量、需要补齐时的离线计划及原件、前后代、原请求和回执。最后按第 8 节两阶段启动和验证；端点认领事件不能代替恢复证据。
 
-### 6. 把带本地监听的模拟 X 放在 S 测量域之外
+### 6. 核实 E、各 B、X 的库和端点在 S 测量域之外
 
-部署预检或拒启排查发现模拟 X 目录可能落在 M 时，由布局管理员和 S/X 域负责人在启动前核对。X 认领本身不核 M，launcher 的 ADR 0059 预检也不核 X 的本地监听路径。取 X profile 的 `history_simulation.socket`，不是场所 `endpoint`，也不是 X 指向 S/E 的客户端 socket；无本地监听的 profile 不适用这项端点检查，但 X 库和锁仍受布局合同约束。
+布局管理员和域负责人在变更或启动前核对。新版的 launcher 在任何目录写入、init 或子进程启动前初核 E、各 B 的监听端点以及 E/B/X 的库布局；各域仍须在实际操作前复核。模拟 X 取实际加载的 profile 的 `history_simulation.socket`，不是场所 `endpoint`，也不是 X 指向 S/E 的客户端读口。无本地监听的 X 不核端点，但仍核库、侧件和锁。
 
-1. 从 manifest 读 `S_DB=s.db`、`S_LIMITS=s.admission_job_limits`、`X_DB=x.db` 与 `x.profile`，从对应 profile 取 `X_K`。按 [ADR 0059 第 1–4 条](adr/0059-production-session-layout-contract.md#裁定) 取 `P=parent(canon(S_DB))`、`b=basename(canon(S_DB))` 和 `A=canon(parent(parent(S_LIMITS)))`。检查 X 的库目录、实际库目录、锁目标目录（含库未存在的锁候选）以及端点名所在目录、端点叶链接的实际目标所在目录；缺失或悬空条目按 ADR 0059 追到最近存在祖先，不能把拒绝访问误当成缺失。
-2. 用 `namei -l` 对照链接走向，必要时用 `readlink -- "$X_K"` 读端点叶链接（相对目标从链接所在目录解析）。对已存在的路径用 `realpath -e`。只有确认缺失时，才从已核祖先拼接剩余路径；不可核验就保持暂停。把规范库路径 `canon(S_DB)` 和上一步的 A 分别记为 `S_CANON`、`A`。逐一填写以下规范目录 `Q` 并运行判定：
+1. **先做路径初筛。** 从原 launcher manifest 取 `s.db`、`s.admission_job_limits`、E/各 B/X 的库路径和 `x.profile`；从经济 manifest 取 `e.socket` 和各 `chongs[j].socket`。按 [ADR 0059 第 1–4 条](adr/0059-production-session-layout-contract.md#裁定) 取 `P=parent(canon(S_DB))`、`b=basename(canon(S_DB))`、`A=canon(parent(parent(S_LIMITS)))`。用 `namei -l` 核路径分量、`readlink` 查叶链接、`realpath -e` 核存在路径。只有父目录已核且确认无叶才可拼接剩余路径；拒绝访问不是缺失。新版拒绝悬空的库链接和带链接的 E/B/X 端点父路径；不能把解析后的路径当作原路径合格。
 
-   - X 库：`canon(parent(X_DB))`、`parent(canon(X_DB))`。
-   - X 写者锁：取 `canon(X_DB)` 接 `.writer.lock` 后解析锁路径，取其父目录。库未存在时，也核 `canon(parent(X_DB))/basename(X_DB)` 接 `.writer.lock` 后解析的锁目标父目录。
-   - X 端点：`canon(parent(X_K))` 和 `parent(canon(X_K))`，即端点目录项和叶链接目标所在目录。
+   将 `S_CANON` 和 `A` 填成上面的 S 规范库和准入控制目录。对 E、每个 B 和 X 的下列目录逐一填 `Q`：
 
-   P 内的普通子目录不自动属于 M；A 的所有子目录都属于 M。
+   - 库：库参数父目录及规范库父目录。
+   - 锁和侧件：实际规范库旁的写锁、锁身份记录、`-wal`、`-shm`、`-journal` 所在目录，含确无条目时将创建它们的目录；发现链接另记，不跟随以放行。
+   - 监听端点：目录项父目录及叶链接可能指向的目录。
+
+   P 内的普通子目录不自动属于 M；A 的所有子目录都属于 M。以下脚本只检查规范路径文字，退出 0 **不证明 M 外**，不能据此改权、移动或开服。
 
    <!-- drill: measure -->
    ```bash
@@ -481,38 +531,75 @@ E 或任一 B 的库从备份恢复，或曾由不识 `clean_close/1` 的二进�
            "$b"|"$b".*|"$b"-*) printf 'M: S 族条目 %s\n' "$Q"; exit 1 ;;
          esac ;;
      esac
-     printf 'M 外: %s\n' "$Q"
+     printf '路径初筛通过，仍须核物理对象和挂载: %s\n' "$Q"
    )
    ```
 
-3. 有交集就停实例，在已获准的 M 外专用目录按第 3 节建目录。改动布局时同步核 X profile、生产 manifest、各客户端引用及冻结合同；已冻结的路径不能直接编辑库中的绑定。若没有经批准的迁移与重绑路径，保持停机交部署及域负责人，不另建空 X 库来绕过。对旧端点残物按第 2 节处置，不借整改删库侧件。
-4. 重跑全部目录判定并核新路径无链接、属主及权限满足认领，正式启动后从 S 的准入结果与 X 的正式读口核对，确认 X 不再在 M 内写入。留 P、A、族条目、各 Q、命中判据、批准的改动和复核结果。
+2. **在实际部署的挂载视图核物理对象和双向别名。** 按 [ADR 0065 第 3、4 条](https://github.com/Newchanlun/NewChanlun/blob/92b6ea489217db9204f6a169b2e317e052f8c1f2/docs/adr/0065-production-session-endpoint-ownership.md#L31-L47)，钉住 P、A、现存 S 族目录及候选目录，按 FD 的 `dev/ino` 比较：Q 本身与 P 同对象，或 Q 或其物理祖先与 A、S 族目录同对象，都命中 M。核实际主库、侧件、锁和锁身份记录的叶；按该合同核类型、链接数及父子挂载 ID，排除硬链接、单文件挂载和未证实的叶。
 
-### 7. 保全半写 owner 或放回失败的现场
+   - **从候选向 M 查：** 对照 FD 的挂载 ID（`statx(STATX_MNT_ID)`）与同一视图的 `/proc/self/mountinfo` 核物理祖先。遇子树挂载、同一文件系统的多个整根挂载或物理身份不可核，不判 M 外；挂载 ID 不同不代表不是同一对象。
+   - **从 M 向候选查：** 枚举 P、A 及后代的挂载项（含嵌套项），按其实际落点确定是否属于 M。打开可见挂载点，核源对象和文件系统内 `root`，不把 `mount source` 字符串当成源路径。仅因挂载点等于 P 入选时，只比源根与 Q 自身；落在 A 或族树时，比源根与 Q 及其物理祖先；文件挂载比源叶与实际操作叶。任一方向相交、不可核或复核时变动，E/B/X 停止写入或绑定，不回退直绑。
+3. **核部署隔离及复核时点。** 从实际 UID、父目录权限、ACL 和可绕过权限核变更权，确保非授权主体不能移动相关目录或重指 M；仅把端点目录设成 `0700` 不保护父目录里的名字。S/E/B/X 使用同一受控私有挂载视图；排除外部挂载传播，核业务和并发主体不能变更挂载或进入视图改挂载。E/B/X 在取锁或开库前初核库布局，持锁后在可写开库或创建前用实际 FD 重核。带监听的模拟 X **在取锁、开库或写入前初核监听路径，实际 bind 前重核 S 测量域和已钉目录**；E/B 也在动端点前重核。E/B/X 用已核目录绑定，bind 后、报告完成前再核公开路径、实际目录和 M 分类；隔离贯穿整个窗口。S 的 M 外认领同样须证实布局和隔离。
+4. 有交集或不可核时保持停机。如获批准，按第 3 节用独立实际目录整改，同步核 profile、manifest、客户端引用和冻结合同；涉及财务只读监听时另核其专用树隔离。冻结路径不能直接编辑库绑定；无批准的迁移与重绑流程就移交，不另建空库。改后重跑路径和物理核验，记录 P、A、族目录、各 Q、挂载视图、隔离依据和复核结果，再走第 8 节。旧残物按第 2 节处置，不借整改删库侧件。
 
-进程在原地写 owner 时中断，可能留下不可解析的 JSON；退役后复核发现移错对象，若原名被占或放回失败，程序保留退役名并报告两个名字。二者都交获准处置端点名的运维和域负责人，不能当作 `bound=null` 或正常退役。
+### 7. 按版本核 owner，保全未确认的退役现场
 
-1. 按共用步骤锁定现场。对已钉明是普通文件且获准读取的 owner，用 `python3 -m json.tool "$OWNER" > /dev/null` 判是否可解析。解析成功还须对照 `endpoint-owner/1` 四个键（`schema`、`socket`、`writer_lock`、`bound`）及类型、UID、单链接、`0600` 和原始身份；JSON 工具不判合同归属。保存原字节、副本和拒绝日志，记录半写前后的原名及 inode。**不补写 JSON，不手造 owner，不删库旁挂。**
-2. 半写 owner 经核属本域且已获准清场：按第 2 节逐件隔离半写 owner 和相伴的无可信归属残留，不能只移 owner 然后把原 socket 当作可接管。若 socket 仍能连接或来源未明，保持两个名字和服务拒绝。原端点不存在时，只隔离确认的半写 owner。
-3. 放回失败：用错误中的原名与退役名分别 `stat`（不跟随叶链接），对照先前固定对象、现有占用者及退役名下对象的实际 `dev:ino`。若能证明该对象应回原名、原名明确空且没有后续认领，经双方负责人批准用第 2 节的不覆盖改名放回同一 inode。原名仍被占、对象可能仍在用或证据不全时保留两名原件，不自动恢复；经审定不应放回且处置安全的对象移到隔离目录，不纳入第 4 节批次。
-4. 核对每件原件的去向、对象身份和未被覆盖的名字，受影响域照常走库准入；标记未消费并不能解除端点拒绝。记录日志中的两个名字和错误、原件字节或对象身份、复核/放回/隔离结果及是否仍须保持拒绝。
+owner 原地更新中断可能留下半写 JSON；退役可能停在改名后、复核和提交前，也可能移错对象且放回失败。先保全，不把这些状态当成可用空址或正常退役。
+
+1. 在排他窗口从已核目录无链接钉住 owner，核普通文件、域 euid、单链接、`0600` 和路径仍指向所读原件。解析规范 JSON，不能用通用 JSON 语法检查代替版本及归属核验。按发布件选择合同：历史四键是 `schema`、`socket`、`writer_lock`、`bound`；新版同样叫 `endpoint-owner/1`，却必须**恰有六键**，另含 `lock`、`retiring`。逐项核 `schema`、原 `socket=K`、实际 `writer_lock`；新版 `lock` 按共用步骤 4 核持久记录和 FD，`lock` 及非 null 的 `bound` 各恰含十进制字符串 `dev`、`ino`、`ctime_ns`。`retiring` 只可为 null 或非 null 的 `bound` 对应的唯一退役 basename。禁止把旧四键文件当作新版合法 owner。
+2. **保留三类现场：** `bound=null` 但 `K` 存在；`retiring` 非 null；或者当前 owner 的旧 `bound` 对应的 `$K.retired.<bound.ino>` 仍在或不可核。最后一项无论 `K` 是否存在都要查；用不跟随叶链接的元数据核退役对象类型、属主、链接数和 `dev:ino`。改名后不比较旧 ctime。即使 `dev:ino` 一致或试连拒绝，也不能补回崩溃前持原 FD 验证并提交的证据。这三类不走 `vacant`，不清 `bound` 或意图，不自动放回，不进入第 4 节。
+3. 半写、身份冲突或放回失败时，保留原 owner 字节及日志，记录原名、候选退役名、现有占用者、身份与核验错误，移交获授权的域与部署负责人。任何专门处置须另定，先证明前代锁连续性、原对象归属和非在用；未满足共用锁与布局门就保持原样。获准隔离时按第 2 节逐件操作；获准人工放回还须证实原名确无条目且无后续认领，用同一不覆盖改名移回同一 inode。**不补写 JSON，不手造 owner，不删除库旁挂。**
+4. 记录每件原件去向、对象身份、未被覆盖的名字和剩余拒绝条件。受影响域照常走库准入；标记未消费不能解除端点拒绝。
 
 ### 8. 选对启动、停止与恢复入口
 
 在 [H1 生效条件](#h1-生效条件) 中引用的 `s_service_control.py start-s` 和 `recover`，只描述独立 S 的 `s-launcher/4` 链。对 ADR 0065 管辖的生产会话端点目录，**不得运行** [S Python 控制器](../s_session/s_service_control.py) 或 [E/B Python 控制器](../s_session/economic_service_control.py)（包括用来清场、启动、停止或恢复）。不得借用两者的旧端点清理逻辑（包括 `prepare_socket`）。即使本次布局只适用 ADR 0065 的旧合同直绑，也不切换到 Python 控制器。其他原有独立用法不变。
 
-1. 正式会话拒启、计划停机或恢复时，由已授权的会话运维先核发布件、原 manifest、域与端点目录范围。launcher 仍存活时通过部署控制面向已确认身份的 launcher 请求有序停止，核每个域退出、监听关闭、锁释放；已退出且有孤儿则走第 1 节。不把启动失败的 `stopped` 或退出码当作各域已干净关库证据。
-2. 恢复由获准的本域正式入口执行，launcher 只校验和装配。E/B 按第 5 节。S 维持原 R4、未完成 Begin、epoch 与签锚，H1 仍使用原冻结 `resource_identity` 对应配置，不另造资源档。若 S 介质或者恢复后有效代无已部署合同，停在 H1 人工恢复门，等 #2128 对应的部署流程；不得用 Python `recover`、手删 SHM/WAL 或换域入口硬启。
-3. 已核各域可接纳、关闭人工维护 FD 后，从同一 manifest 用正式 launcher 启动。未发生需要回执交接的 E/B 换代时不加计划；否则使用第 5 节的 `RECOVERY_PLAN`。两个命令是条件分支，不是失败后的回退顺序。
+1. 正式会话拒启、计划停机或恢复时，由已授权的会话运维先核发布件、原 manifest、域与端点目录范围。launcher 仍存活时，通过部署控制面请求已核身份的 launcher 有序停止；核每个域退出、监听关闭、锁释放。最终放行后若 launcher 已退而有孤儿，走第 1 节；真实场所 X 的旧发送者另按 #1401 确认隔离。启动失败的 `stopped` 或退出码不是逐域正常关库证据。
+2. **停完先走第 5 节第 1–3 步：** 核最后共同向量，若且仅若下一 bar 部分推进，离线补齐它。共同向量完成后才对确需恢复的域升代；launcher 只校验和装配。E/B 用第 5 节的具名恢复。S 用本次已获批、已部署的 [ADR 0050 #2128](https://github.com/Newchanlun/NewChanlun/blob/be2749f2996f8e928e72051193a693819c72fdbf/docs/adr/0050-s-resource-admission-contract-v1.md#L62-L101) 正式恢复链：从同一原 manifest 用 `production_session s-recovery inspect-recovery` 只读取证、制备原 `s-recovery/1` 请求，再用该入口的 `recover-named` 恢复。保留原 R4、签锚、未完成 Begin 处置和 H1 冻结 `resource_identity`；不手删 SHM/WAL，不换介质或入口硬启。S 恢复、E/B 具名子集、模拟 X 连续交接或共同 checkpoint／两阶段放行，**凡本次需要但尚未部署，停在人工门**。
+
+   持久版本先决定读写合同。按 [ADR 0038 旧原件边界](https://github.com/Newchanlun/NewChanlun/blob/aeb79b0e1a8ce5318fe34bb370ffdb11630a2af9/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L186-L190)，旧库按原写合同与原布局续服，不能用 `recover` 或 `serve` 原地升级格式，也不能混写或把旧责任自动迁入新库。旧部署缺本事故所需的恢复能力时，停在人工门；需迁移另走获准流程。
+3. **用原 manifest 装配有效代。** 下表只适用于已部署新版 ADR 0065 启动门和本行所需的配套能力，且共同向量、布局及本域准入前件均已核。先退出所有人工维护 shell。表中“换代”指相对原 manifest 仍须凭原回执交接有效代：以前已换代而这次仍须交接的域带原请求，不再次升代。设置 `SESSION_MANIFEST` 为原 manifest，`RECOVERY_PLAN` 为第 5 节计划，`S_REQUEST` 为对应 S 的原请求文件。选择一行，不按失败顺序试跑：
+
+   | 换代交接 | 启动实参（均带 `--manifest "$SESSION_MANIFEST"`） | 模拟 X 的权威绑定 |
+   |---|---|---|
+   | 无换代 | 无额外实参 | E、S 按原合法代；不新增绑定 |
+   | 仅 E/B | `--economic-recovery-plan "$RECOVERY_PLAN"` | 若 E 换代，只续 E；仅 B 换代不改 X 权威绑定 |
+   | 仅 S | `--s-recovery-request "$S_REQUEST"` | 只续 S |
+   | S 与 E/B 均换代 | 两个参数都带 | 续 S；若 E 也换代，按 E、S 顺序一次提交一个向量 |
+
+   **仅使用本行匹配的发布件。** S 参数须是已部署 #2128 的 launcher 能力；经济计划须是已部署 ADR 0065 修订的子集能力（#2082 基线只收全集，`main` 不接收任一恢复参数）。S 换代必带原 `--s-recovery-request`：launcher 用 `current-recovery` 核原切面及当前持久代，S 在自身 serve 锁内再核同一原回执。核验失败不退回 manifest 旧代。
+
+   **模拟 X 按 [ADR 0073 #2129](https://github.com/Newchanlun/NewChanlun/blob/027caa6b61f587e73082c8c2b1d21f352cda58af/docs/adr/0073-simulation-x-recovery-authority-binding.md#L32-L44) 交接。** launcher 用匹配域的 `current-recovery` 在原配置指定的同一库、同一域 bin 上核原请求，取当前原回执；不拿历史查询、手填代、日志或 socket 应答代替。等相关 E/S 按已核有效代持锁启动、满足各自前件后，launcher 才经受控启动输入交回执。X 在自己的原库和原锁内核首写部署登记、原绑定、历史和 pending，按每项 `from_epoch` 等于当前绑定且新代恰为下一代的规则原子追加或核回同一已提交绑定；提交且全员获最终放行后，才可按当前绑定交换。X 仍绑 E1、E 已到 E3 又缺 E1→E2 交接时就停，不凭 E3 当前回执跨代，不补造中间记录。保留 X 自身会话、写者代、源身份及 E 的 `authorized_sources`；不编辑 manifest 或冻结 profile（[所核 `main` 会拒绝档案不符](../rust/src/history_simulation/runtime.rs#L815-L826)）。真实 X 的发送、对账和在途责任仍按 #1401。
+
+   **无换代，已部署两阶段放行：**
 
    <!-- drill: start -->
    ```bash
-   "$RELEASE/production_session" --manifest "$SESSION_MANIFEST"
+   "$RELEASE/production_session" --manifest "${SESSION_MANIFEST:?}"
    ```
+
+   **仅 E/B 换代，另须已部署子集计划：**
 
    <!-- drill: start-plan -->
    ```bash
-   "$RELEASE/production_session" --manifest "$SESSION_MANIFEST" --economic-recovery-plan "$RECOVERY_PLAN"
+   "$RELEASE/production_session" --manifest "${SESSION_MANIFEST:?}" --economic-recovery-plan "${RECOVERY_PLAN:?}"
    ```
 
-4. 确认用的是原目录、原端点名和已核有效代；用正式读口复核原收据、各域就绪和监听（认领布局才有 `endpoint-claim`），把部署入口、实参中的 manifest/计划路径、回执、每域结果记进故障单。拒绝就留首错和现场，不改走 Python 控制器、改名启动或另建库。放开自动拉起前仍须满足部署及发送门。
+   **仅 S 换代，另须已部署 #2128：**
+
+   <!-- drill: start-s-plan -->
+   ```bash
+   "$RELEASE/production_session" --manifest "${SESSION_MANIFEST:?}" --s-recovery-request "${S_REQUEST:?}"
+   ```
+
+   **S 和 E/B 均换代，另须已部署两种参数的组合：**
+
+   <!-- drill: start-combined-plan -->
+   ```bash
+   "$RELEASE/production_session" --manifest "${SESSION_MANIFEST:?}" \
+     --s-recovery-request "${S_REQUEST:?}" --economic-recovery-plan "${RECOVERY_PLAN:?}"
+   ```
+
+4. **等全员两阶段放行。** 第一阶段，S、E、每个 B 和 X 各持原锁重核本域布局、介质和同一共同向量；launcher 收齐准备回报才发初始化／绑定许可。续服不 init。第二阶段，各监听域实际 bind／listen 并完成末次布局、身份及适用的认领核验后回报；无监听 X 也须完成本域启动前件。launcher 收齐同批全员回报才最终放行；此前不消费 E/B 标记、不 accept、不发送，此后 E/B 仍须先事务消费本代标记才首个 accept。X 失败或监督 EOF 落在最终放行前时，关闭监听整组退出；不抹去已验证完成的合法退役，不补写关库标记。
+5. 从正式读口核原 cut、原收据与各域有效代，核本代 E/B 标记已在接纳前消费，再恢复自动拉起。真实 X 仍须单独满足部署及发送门。记录原目录和端点、实际 manifest／计划／请求路径、各域回执、两阶段与读口结果。拒绝就保留首错和现场，不改走 Python、另换路径或新建库。单条 `endpoint-claim` 不是整组已就绪的证据。
