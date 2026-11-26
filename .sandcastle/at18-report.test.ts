@@ -5201,6 +5201,112 @@ class Adapter(metaclass=Meta):
     "\nclass Adapter:\n    def dispatch(self, marker=None, offset=None): return 116", defaultsRoute, observe, false);
 });
 
+test("R45/#1319：按绑定诊断来源区分真实换行与反斜杠键", () => {
+  execFileSync("python3", ["-IB", "-c", String.raw`
+import inspect, runpy, sys
+parse = runpy.run_path(sys.argv[1])['parse_kw_type_error']
+def price(*, offset): return offset
+real, literal = 'line\nbreak', 'line\\nbreak'
+kwargs = {literal: 'USD', real: 5, 'offset': 17}
+for key in (real, literal):
+    for bind in (price, inspect.signature(price).bind):
+        try:
+            bind(**{key: kwargs[key], 'offset': 17})
+        except TypeError as exc:
+            assert parse(exc, kwargs) == ('drop', (key,)), (exc, key, bind)
+            assert parse(exc, {'offset': 17}) is None
+        else:
+            raise AssertionError('expected a binding diagnostic')
+`, join(sandbox, "at18-python-source.py")], { stdio: "pipe" });
+});
+
+test("R45/#1319：公开调用的来源扣除、默认身份与绑定诊断", { timeout: 240_000 }, async t => {
+  const check = (name: string, production: string, route: string, observed: string) => t.test(name, async () => {
+    const { f, report } = await control({
+      feedIntegration: "\nfrom . import at18_fixture_feed as f\n" + production + "\n__all__ = ('Adapter',)\n",
+      feedReplacement: route + "\n__all__ = ('route',)",
+      feedTest: "from trading_system.at18_fixture_feed import route\n" +
+        `def test_route(): assert route(${observed}) == 116\n`,
+    }, "R45/" + name);
+    assert.equal(report.head, f.F);
+    assert.deepEqual(report.failed_checks, []);
+    assert.equal(report.overall_result, "PASS");
+    const ticket = report.legacy_dispositions.find(r => r.ticket === 1319);
+    assert.deepEqual([ticket?.ticket_state, ticket?.disposition_valid], ["CLOSED", true]);
+  });
+
+  await check("同名必填槽改用尚未消费的固定源位置", `
+token = object()
+class Meta(type):
+    def __call__(cls, tag, /, *rest, **kw):
+        assert tag == 90
+        return super().__call__(*rest, **kw)
+class Adapter(metaclass=Meta):
+    def __init__(self, tag, mark=token, /, *tail, **kw):
+        assert tag == 3 and mark is token and tail == (17,) and kw == {'flag': True}
+    def dispatch(self): return f.route(90, 3, 17, flag=True)
+`, "def route(tag, depth, /, *tail, **kw): return tag + depth + tail[0] + 6", "90, 3, 17, flag=True");
+
+  const positionalSource = "def route(tag, /, *items, **kw): return tag + items[0]";
+  await check("元类关键字专用槽扣除源位置", `
+class Meta(type):
+    def __call__(cls, *items, tag, **kw):
+        assert tag == 99 and items == (17,) and kw == {'flag': True}
+        return super().__call__(*items, **kw)
+class Adapter(metaclass=Meta):
+    def __init__(self, mark, *tail, **kw):
+        assert mark == 17 and not tail and kw == {'flag': True}
+    def dispatch(self): return f.route(99, 17, flag=True)
+`, positionalSource, "99, 17, flag=True");
+
+  for (const [kind, hook, dispatch] of [
+    ["构造", "__init__", "\n    def dispatch(self): return f.route(99, 17, flag=True)"],
+    ["方法", "dispatch", ""],
+  ] as const) {
+    const forward = hook === "dispatch" ? "\n        return f.route(99, 17, flag=True)" : "";
+    await check(kind + "关键字专用槽扣除源位置", `
+class Adapter:
+    def ${hook}(self, *items, tag, **kw):
+        assert tag == 99 and items == (17,) and kw == {'flag': True}${forward}${dispatch}
+`, positionalSource, "99, 17, flag=True");
+    await check(kind + "用默认哨兵替换固定源位置，保留匿名尾参", `
+token = []
+class Adapter:
+    def ${hook}(self, tag=token, /, *items, **kw):
+        assert tag is token and items == (17,) and kw == {'flag': True}${forward}${dispatch}
+`, positionalSource, "99, 17, flag=True");
+    for (const inspected of [false, true]) {
+      const price = inspected ? "inspect.signature(_price).bind(quote, **options)" : "_price(quote, **options)";
+      const forwardPrice = hook === "dispatch" ? "\n        return f.route(quote, offset=17)" :
+        "\n    def dispatch(self): return f.route(99, offset=17)";
+      await check(kind + (inspected ? " inspect 诊断" : " CPython 诊断") + "只删除真实换行键", String.raw`
+import inspect
+def _price(quote, *, offset): return quote + offset
+class Adapter:
+    def ${hook}(self, quote, /, **options):
+        assert options.pop('line\\nbreak') == 'USD'
+        ${price}${forwardPrice}
+`, "def route(quote, /, **kw): return quote + kw['offset']",
+      String.raw`99, offset=17, **{'line\nbreak':5, 'line\\nbreak':'USD'}`);
+    }
+  }
+
+  for (const metaclass of ["type", "Relay"] as const) for (const explicit of [false, true]) {
+    await check(`${metaclass} 的双钩子${explicit ? "显式共享默认对象" : "省略各用自己的默认对象"}`, `
+left, right = object(), object()
+class Relay(type):
+    def __call__(cls, *args, **kw): return super().__call__(*args, **kw)
+class Adapter(metaclass=${metaclass}):
+    def __new__(cls, marker=left, /, *, offset):
+        assert marker is left and offset == 17
+        return super().__new__(cls)
+    def __init__(self, marker=right, /, *, offset):
+        assert marker is ${explicit ? "left" : "right"} and offset == 17
+    def dispatch(self): return f.route(99, offset=17)
+`, "def route(marker, /, *, offset): return marker + offset", "99, offset=17");
+  }
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";
