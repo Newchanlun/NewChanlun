@@ -379,7 +379,7 @@ R5 见证同时给出该次中枢结算和第三类点的中枢身份，发布�
 
 **推论一：一类点之前必有三类点（带限定词）。**
 
-安全写法：**标准第一类买卖点（同级趋势背驰点）之前，末段 `c` 已包含对该趋势最后中枢 `B` 的同向第三类买卖点**（`037-第37课.md:18`）。
+**标准一类点要求末段 `c` 已包含对该趋势最后中枢 `B` 的同向三类点**（`037-第37课.md:18`）。按 [#2114](qushi.md#2114-裁定开放期分离趋势形成与走势完成2026-11-20)，在全窗消费共用 R5 见证核归属和方向，不另跑几何配对。
 
 **但单中枢盘整可以出现盘整背驰而没有三类点**——`024-第24课.md:40`：「随后的回跌，马上跌回大的中枢之内，所以不可能有什么第三类买点」。该点在原文严格术语中不是同级第一类买点，最多在大级别称「类第一类」（`027-第27课.md:66`）。
 
@@ -546,7 +546,7 @@ R5 见证同时给出该次中枢结算和第三类点的中枢身份，发布�
 | R11 | `rust/src/theta_v0/classifier/mod.rs:521-522` `is_l0` 分派 | `classify_level(&units, is_l0)` | **不动**（E1 判为伪分歧，已撤销） | Z-3 | 裁定记 `mod.rs:522` 为 units 来源；units 实际构造在 **`mod.rs:460`** ★行号订正 |
 | R12 | `rust/src/theta_v0/classifier/mod.rs:461` / `:623` anchor provenance | L0 不消费，L≥1 派生，`None`=fallback | **不动**；anchor 门降为实现注记 | S-3 ⑥ | |
 | R13 | `rust/src/theta_v0/classifier/signal.rs:570` `judge_third_cert` | 三类点判据本体 | 判据上移中枢模块，此处改为**调用** | S-3 ③ | **★行号订正**：裁定记 `:528`（该行是 doc 注释首行），`fn` 在 `:570` |
-| R14 | `rust/src/theta_v0/classifier/signal.rs:650` `trend_third_class_in_c` | 自陈「去 anchor 门」版 = 同一判断的宽严两档 | **收敛掉**；anchor 改为可选参数而非另写一函数 | S-3 ③ + [#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) | **★行号订正**：裁定记 `:632`（doc 行），`fn` 在 `:650` |
+| R14 | `rust/src/theta_v0/classifier/signal.rs:650` `trend_third_class_in_c` | 自陈「去 anchor 门」版 = 同一判断的宽严两档 | 按 [#2114 实施交接](qushi.md#2114-受影响代码清单)改为消费 R5：保留全 `c` 窗，核末枢身份、同向和区间，不再以可选 anchor 或几何重判补证 | S-3 ③ + [#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) | **★行号订正**：裁定记 `:632`（doc 行），`fn` 在 `:650` |
 | R15 | `rust/src/theta_v0/classifier/center_lifecycle.rs:564-593` | 单实例 `alive` + `Superseded` 登记 | **不动**；但「一类点 = 在场中枢同死」等式**作废**，只保留「一类点 = 走势类型终结」 | S-3 ⑤ | 裁定记 `:569-593`；实际推进循环起于 `:564` |
 | R16 | `rust/src/zhongshu.rs:224` `(break_seg_idx - 2).max(seg_end_idx)` | 续扫锚 A 口径 | **改为 C**（`last + 2`） | Z-5 | |
 | R17 | `rust/src/zhongshu.rs:143` bit-exact 锁（注释锁定 A 口径） | 锁在 A 上 | **锁会断**，随 Z-5 一起改 | Z-5 | |
