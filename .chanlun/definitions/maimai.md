@@ -222,7 +222,7 @@
 
 **落地（#884，2026-08-17）**：T-4 拆掉回拉不创新低／新高的闸；当时 `find_second_type_structure` 的后继取段是旧实现，按 B-2① 对齐两条路径的定位证据与回拉终点处的次级别一类点；`no_new_low`/`no_new_high`/`retrace_no_break` 降为几何谓词（仅作标注取值）；重合标注 = `SecondTypeStructure.retrace_breaks_extreme` → `BspPoint.retrace_breaks_type1: Option<bool>`（Some(true)=回拉破一类极值，语义归 #817，不作准入分档）；Lean `RMoveCompose.SecondTypeStructure` 同步拆 `RetraceNoBreak` 合取 + 新增 `RetraceBreaksExtreme` 标注谓词 + `witness_secondTypeStructure_brokeExtreme` 见证（跌破一类仍构成第二类结构）；实测对照：BTC 全史 461 万 bar 普查「跌破一买」类二类点从 0 到有（读数见 #884 resolution）；旧引擎 `buysellpoint.rs` 同闸处置路由归 T-6/673-fix。
 
-**v2 修订（#218）关系**：二类归属锚 = 一类点身份锚是**归属层**裁定（修级别错配），与本裁定不冲突——归属不问跌破与否。
+**二类点的归属锚（#218／#2114）[新缠论:推论]**：常规二类点沿用 #218 的本级前置一类点身份锚 `Type1Anchor`。小转大二类点用独立结构锚，绑定**已证的本级转折**与**回拉终点处的次级别正式一类点身份**。写入和反查按两种身份各找对应见证：小转大的归属反查不以本级一类位为前提，也不把下级一类点冒作本级锚。两路共用 B-2 的回拉终点和确认规则；归属不以回拉是否破极值分档。写端、反查与验收见 [#2114 实施交接](qushi.md#2114-受影响代码清单)。
 
 ### B-3：三类点「第一次回抽」**在判据且显式**
 
