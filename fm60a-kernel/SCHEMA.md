@@ -1,96 +1,72 @@
-# FM-60a 内核判例机读格式说明（`fm60a-kernel-v2`）
+# FM-60a 原典作者陈述库机读格式说明（`fm60a-author-statements-v1`）
 
-> 本格式为 R1 忠实性独审（`origin/evidence/2324-kernel-review` @ `ab339d74`）后的结构性重设计。核心原则：**把「作者字面说了什么」「整理者如何把它落成可计算条件」「拿什么合成数值来实例化」在结构上分成彼此独立的三层，而不是放在同一层靠自贴标签区分。**
+> **交付物定位（R3 改定）**：本目录的正式内核交付物是**纯作者陈述库**——每条记录只保存缠师在原文里说过的具体命题及其完整语境、语气、条件限定、对象指代、依存关系与说话人确认依据，力求**不回读博文也能准确读懂、不会读错**。
 >
-> **下游测试语义（必读）**：下游 FM-60b（`ChanTest`）若拿本格式中的建模与实例作为回归测试，**测到的是「在某一套整理者建模 `M*` 的前提下，待测定义与作者陈述 `AS*` 是否相容」**——既不宣称 `M*` 是作者唯一指定的算法或读法，也不替待测定义或作者陈述下对错裁决。
+> **本交付物不是什么**：本交付物**不包含任何整理者建模（`organizer_models`）、合成数值实例（`instances`）、额外补入前提（`added_premises`）或预期输出**。怎样把这些陈述落成可计算条件、补哪些前提、用什么数去测试，留给后续编写形式化定义与回归测试的作者，在他们自己的名下、带着他们自己列出的前提去做。
 
 ---
 
-## 一、文件组织与旧格式隔离
+## 一、文件划分：正式交付物 vs 隔离草稿/旧格式
 
-1. **`classification.jsonl`**（61 行，与 `fm60a-inventory/cases.jsonl` 严格双射）：
-   - 字段：`case_id`、`group`、`category`（`kernel_only` / `market_only` / `both` / `unusable`）、`digitized_in_kernel`（布尔）、`kernel_digitization_status`（`v2_exemplar` / `v1_legacy_unreviewed` / `not_kernel`）、`batch_a_status`、`inventory_status`、`inventory_image_dependent`、`reason`。
-   - 四分类计数保持不变：`kernel_only` 3 条、`market_only` 27 条、`both` 26 条、`unusable` 5 条。
-2. **`kernel-cases.jsonl`**（**9 行**，`schema_version: "fm60a-kernel-v2"`）：
-   - 本轮只按新三层格式重做并受审 5 组共 9 条示范判例：`FM60A-011, 012, 020, 021, 026, 027, 028, 031, 043`。
-3. **`legacy-v1-unreviewed.jsonl`**（**20 行**，`schema_version: "fm60a-kernel-v1"`）与 **`LEGACY-V1-WARNING.md`**：
-   - 其余 20 条内核判例从 R1 提交 `950ca9d2` **原封不动**移入此隔离文件，**旧格式，未经忠实性审查，不得用于下游回归**。
-
----
-
-## 二、回答下游两个不同问题（修复 B21）
-
-旧格式（v1）只给断言和反事实挂了 `refs / evidence_tier`，导致下游无法区分「**谁主张了这个命题**」与「**所引语料处于什么准入等级**」（例如 `FM60A-026` 作者亲口反事实与 `FM60A-012` 整理者构造反事实都挂硬证据）。v2 用两个正交维度彻底分开：
-
-1. **谁主张这个具体命题**：由所在结构层与字段决定——
-   - `author_statements[]`（含 `mood`、`antecedent`、`literal_values`）：作者字面命题；
-   - `organizer_models[]`（含 `depends_on_statements`、`added_premises`、`alternative_models`）：整理者将作者陈述落成可计算条件的建模与前提；
-   - `instances[]`（含 `literal_bindings`、`free_parameters`、`counterfactual_proposer`）：全部合成的数值实例，并强制区分作者提出的反事实与整理者构造的反事实。
-2. **所引语料获什么准入等级**：仍由 `cites[*]` 相对准入表 `7d0082ff` 单一 `author_spans` 区间现场重算（`硬证据` / `二级，未提升`），并逐条投影到每条 `author_statements[*].evidence_tier`（本批 9 条共 53 条作者陈述均按纯等级分拆，避免把硬证据与二级句段混压在同一条陈述里）。
+| 分类 | 文件 | 状态与用途 |
+|---|---|---|
+| **正式交付物** | `classification.jsonl` | 61 条判例四分类映射（与 `fm60a-inventory/cases.jsonl` 严格双射；四类计数不变：`3 / 27 / 26 / 5`） |
+| **正式交付物** | `kernel-cases.jsonl` | **9 条示范判例的纯作者陈述库**（`schema_version: "fm60a-author-statements-v1"`：`011, 012, 020, 021, 026, 027, 028, 031, 043`，共 63 条作者陈述） |
+| **正式交付物** | `check.py` | 纯标准库机械核对脚本（只机检作者陈述库与隔离边界，详见 §四） |
+| **正式交付物** | `SCHEMA.md`, `JUDGMENT.md`, `LIMITATIONS.md`, `REVISION-R1.md`, `REVISION-R2.md`, `README.md` | 格式契约、四分类判断、机检盲区与对读记录、两轮独审返修对照表 |
+| **隔离区（非交付物）** | `draft-models-unreviewed.jsonl` + `DRAFT-MODELS-WARNING.md` + `drafts/non_normative_probe.py` | R2 移出的 9 条整理者建模与合成实例草稿（原样移出、未过审，仅供参考，使用者须自行核对前提） |
+| **隔离区（非交付物）** | `legacy-v1-unreviewed.jsonl` + `LEGACY-V1-WARNING.md` | R1 移出的其余 20 条旧格式 `fm60a-kernel-v1` 记录（原样隔离、未经忠实性审查，不得使用） |
 
 ---
 
-## 三、`kernel-cases.jsonl` 三层结构契约
+## 二、`kernel-cases.jsonl` 字段契约（`fm60a-author-statements-v1`）
 
-### 公共元信息与逐字锚点
-- 顶层身份字段：`schema_version`（`"fm60a-kernel-v2"`）、`case_id`、`group`、`category`、`exemplar`（`true`）、`input_kind`、`target_concepts`、`evidence_grade`（按全部 `author_statements[*].refs` 现算）、`base_and_pen`、`paired_cases`、`real_market_dependency`。
-- `cites[]`：每条含 `cite_index, lesson, line, speaker, quote, char_span, zone, in_admit_table, admit_id, tier, from_inventory`。原清点表作者引文 100% 保留；所有 `refs` 严禁引用非作者（`网友` / `编者`）。
+每条判例仅含**元信息**、**逐字引文（`cites`）**与**作者陈述（`author_statements`）**三部分，`check.py` 机械禁止出现 `organizer_models`、`instances`、`added_premises`、`synthetic_witnesses`、`structure_spec`、`assertions`、`counterfactuals` 等任何建模/实例字段。
 
-### 第一层：作者陈述层（`author_statements[]`）
-只收作者字面说出的命题，**不含任何算法、不含任何整理者自选符号或原文未出现的数值**。每条必填字段：
-- `statement_id`：`AS1`, `AS2`, ...
-- `mood`：**7 值封闭枚举**（必填非空）：
-  1. `直陈事实`
-  2. `条件句`
-  3. `假设或反事实`
-  4. `预测`
-  5. `事后回顾`
-  6. `设问或留作作业`
-  7. `引述他人`
-- `antecedent`：条件部分。当 `mood` 为 `条件句` 或 `假设或反事实` 时**必填非空字符串**，原样保留前置条件、不得合并进结论；其他语气时必须为 `null`。
-- `statement`：逐词可对回 `refs` 的精简转写。不得夹带引文未出现的数值，不得私自加入引文未出现的限定词（`严格`、`唯一`、`必然`、`已`）。
-- `literal_values[]`：作者字面给出的数值清单，每项含：
-  - `value_id`（`LV*`，判例内唯一）、`value`（机检必出现在 `refs` 中）、`unit_or_role`、`author_target`（**精确记录作者将该数字绑定到什么对象**，例如「1分钟中枢区间下沿」或「前一分钟数值点，原文未指明高点或低点」）、`binds_instance_target_literally`（布尔：**仅当作者既给了数值又字面指明了目标对象/字段时才为 `true`**；若对象有歧义如 `081:30` 的 `5386.39`，必须为 `false`，禁止实例层放入 `literal_bindings`）。
-- `evidence_tier`：按本条 `refs` 现场重算（`硬证据` / `二级，未提升` / `混合（含硬证据与二级）`）。
-- `refs[]`：指向 `cites[]` 的非空逐字切片。
+### 1. 顶层元信息
+- `schema_version`：固定 `"fm60a-author-statements-v1"`
+- `case_id`、`group`、`category`（`kernel_only` / `both`）、`exemplar`（`true`）、`target_concepts`、`evidence_grade`（按全条 `author_statements[*].refs` 现算）、`base_and_pen`（准确写明各引文实际准入等级与笔期，不把正文二级冒充硬证据）、`paired_cases`、`real_market_dependency`。
 
-### 第二层：整理者建模层（`organizer_models[]`）
-把作者陈述落成可计算条件的每一步都放这里。**同一条作者陈述若存在多种合理读法、候选解释或条件分支，必须在 `organizer_models[]` 中并列给出多个 `M*`，各自配齐实例，绝不单选其一。** 每条模型必填字段：
-- `model_id`（`M1`, `M2`, ...）、`title`、`reading_group`（标明同组并列读法分叉的维度）。
-- `depends_on_statements[]`：必填非空，指向本模型所依赖的 `AS*`。
-- `symbol_schema`：本模型引入的符号与数据结构声明（`domain` 须等于 `input_kind`）。
-- `added_premises[]`：必填非空数组，每项 `{premise_id: "P*", category, statement}` 逐条列出整理者补入的原文未明说前提（如成核规则、端点与顶点对应、等号边界选支、力度比较代理、7 根无前置包含布局、读法选择等）。
-- `alternative_models[]`：必填非空字符串数组，说明别的合理落法或指向同记录的并列 `M*`。
-- `computable_conditions[]`：每条 `{cond_id: "C*", depends_on_statements, uses_premises, description, expr}`，逐条绑定所依赖的作者陈述 `AS*` 与所用的整理者前提 `P*`。
-- `expected_under_model[]`：每条 `{expect_id: "E*", depends_on_statements, uses_premises, subject, expected, compatibility_note}`，明示在「本模型 `M*` + 前提 `P*`」下待测定义与作者陈述相容时应满足的输出。
+### 2. 逐字引文锚点（`cites[]`）
+每条含：`cite_index`, `lesson`, `line`, `speaker`, **`speaker_basis`**, `quote`, `char_span`, `zone`, `in_admit_table`, `admit_id`, `tier`, `from_inventory`。
+- **原清点表作者引文 100% 保留**（`from_inventory=true`）；
+- **`speaker_basis`（必填非空）**：尤其对未命中 `7d0082ff` 准入表 `author_spans` 的二级材料，逐条写明确认该段确系缠师本人说话而非网友原话或行内编者注的依据（帖头与发文时间、`↑正文` 界标、`==` 答疑分隔符、无行内编注与外层引语），供非作者人审直接核查。
 
-### 第三层：实例层（`instances[]`，全部合成）
-每条实例均为合成数据，彻底删除旧版 `determined_by_text` 中间态。每条必填字段：
-- `instance_id`（`I1`, `I2`, ...）、`model_id`（指向合法 `M*`）、`synthetic: true`。
-- `data`：对象，**内部必须同样显式包含 `"synthetic": true`**（响应 S10，使独立导出 `data` 时仍自带合成标记）。
-- `instance_role`：`"positive"` | `"counterfactual"`。
-- 反事实来源三件套：
-  - `counterfactual_proposer`：正例必为 `null`；反事实**必填** `"author"` 或 `"organizer"`；
-  - `counterfactual_statement_id`：当 `counterfactual_proposer == "author"` 时**必填**，且所指 `AS*` 的 `mood` 必须为 `"假设或反事实"`；当为 `"organizer"` 或正例时必为 `null`；
-  - `counterfactual_rationale`：反事实必填非空说明，正例为 `null`。
-- `expected_under_instance`：正例为 `model_id` 下非空 `E*` 列表；反事实为 `{scope_note, expected}` 对象（仅写由该扰动实际能推出的最小结论）。
-- **数值严格二分（不重不漏）**：
-  - `literal_bindings[]`：每项 `{target, value, statement_id, value_id}`，所指 `LV*` 的 `binds_instance_target_literally` 必为 `true`，且同时锁定「原文数值 + 原文所指对象」（例如 `reported_1m_zd=4087`、`v6=4077`、`g0=18.5`、`b5_1017.low=5386.47`、`p0=6124`；反事实中被替换的值如 `v6=4087` 或 `b5_1017.low=5386.39` 一律不得放这里）。
-  - `free_parameters[]`：每项 `{target, value, note}`，包含全部整理者自选坐标、力度、等号边界、扰动值与读法映射值。
-  - **机检不变式**：`literal_bindings` 与 `free_parameters` 的目标集合互不相交，且其并集严格等于 `data` 中全部数值叶节点集合（零遗漏、零重叠）。
-- `check_conditions[]`（及仅允许在反事实中出现的 `condition_overrides`）：每条在 `data` 上由 `check.py` 机械求值为真。
+### 3. 作者陈述（`author_statements[]`）
+每条陈述对应原文中作者说的一件事，包含以下必填字段：
+
+| 字段 | 契约说明 |
+|---|---|
+| `statement_id` | 判例内唯一编号（`AS1`, `AS2`, ...） |
+| `context` | 说话场景对象：`scene_kind`（8 值枚举：`事后复盘` / `当日更正复盘` / `当日盘后分析` / `一般规则与举例` / `图例分析` / `课后答疑` / `布置作业` / `后续规则调整`）、`post_timestamp`（原博文发表时间戳）、`time_anchor`（相对时间词「昨天」「今天」「目前」「以后」指向的具体日期）、`summary`（该句所处的具体上下文）。 |
+| `mood` + `mood_note` | 7 值封闭枚举（`直陈事实` / `条件句` / `假设或反事实` / `预测` / `事后回顾` / `设问或留作作业` / `引述他人`）加非空 `mood_note`。采用**保守标法**：复盘旧日行情标 `事后回顾`，含尺度/范围/操作提醒/例外条件标 `条件句`，自设反问标 `设问或留作作业`，拿不准是否为无条件直陈的一律不标 `直陈事实` 并在 `mood_note` 写明理由。 |
+| `antecedent` | 当 `mood` 为 `条件句` 或 `假设或反事实` 时必填非空字符串，完整保留外层与内层条件，**严禁把操作指示（「就在……回补」）搬入前件**；其他语气时必须为 `null`。 |
+| `scope_qualifiers` | 原样保留的尺度、许可与外层限定语列表（如「可以看成」「可以当下地等待」「在1分钟级别显微镜下」「以后可以把笔的成立条件略微放松一下」），严禁改写为「是」「都是」「已经」。 |
+| `statement` | 逐词可对回 `refs` 的忠实转写；若原文有相对时间锚点，在对应词后以 `（YYYY-MM-DD）` 保留所指日期（该日期须登记在 `context.time_anchor` 中）；除此类时间锚点日期外，**不得出现任何不在 `refs` 里的数值**，也不得私自添加引文未出现的限定词（`严格`、`唯一`、`必然`、`已`）。 |
+| `objects_and_values[]` | 逐项登记陈述中的字面数值（`kind="literal_number"`）与关键对象（`kind="symbolic_object"`）：`item_id`、`literal_value`、`author_target`（原文指称的对象，如「56段反抽到达的价位」「1017的低点」）、`precise_point_or_field`（若原文未点明对应哪个顶点、哪根 K 线或高点/低点，**必须写精确字符串 `"原文未指明"`** 并填写 `unspecified_note`）。 |
+| `depends_on_statements[]` | 本条成立所依赖的同判例其他陈述列表（每项 `{statement_id, relation, note}`，`relation` 取 `语境前提` / `分解前提` / `指代前文` / `图设条件` / `规则例外配对` / `规则依据`），构成**有向无环图（DAG）**。 |
+| `qualified_by_statements[]` | 指向同判例中对本条加以限定、补充例外或约束实现状态的陈述编号（例如 `026.AS9` 禁相邻同级中枢规则指向同句例外 `AS10`；`012.AS5` 指向 `024:50` MACD 局限 `AS6`；`043.AS2` 标准跌法预测指向 `AS3/AS4`）。 |
+| `evidence_tier` | 仅按本条自身 `refs` 现场重算的准入等级（本批 63 条全部为纯 `硬证据` 或纯 `二级，未提升`，零混合）。 |
+| `effective_tier_with_dependencies` | 按本条 `refs` **并上全部传递 `depends_on_statements` 的 `refs`** 现场重算的有效等级。**下游按等级筛选时必须同时看此字段与 `depends_on_statements`**：例如 `028.AS7`（`054:58` 硬证据）依赖 `028.AS6`（`054:56` 二级分解二），其有效等级为 `混合（含硬证据与二级）`，从而杜绝按单条硬级筛选时把成立前提裁掉。 |
+| `refs[]` | 指向 `cites[]` 的非空逐字切片。 |
 
 ---
 
-## 四、条件表达式（`computable_conditions[*].expr`）微型语法
+## 三、下游（FM-60b / 定义作者）如何使用本库
 
-仅包含纯算术与序谓词，**不含任何缠论业务定义**：
-- **数值操作数**：裸数字；符号名（查 `vertex_prices` / `strengths` / `scalars`）；K 线字段（`"b5_1017.low"`）；聚合函数 `sum` / `min` / `max` / `sub` / `abs_sub` / `len`。
-- **布尔算子**：`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `in_closed`, `overlap_eq`, `overlap_nonempty`, `overlap_empty`, `seg_alternating`, `kbar_valid`, `kbar_contains`, `kbar_no_inclusion`, `kbar_bottom_fractal`, `kbar_top_fractal`, `flag_eq`, `not`, `and`, `or`。
+1. **先读陈述与依存，再自行建模**：按 `case_id` 读取 `author_statements`，沿 `depends_on_statements` 与 `qualified_by_statements` 一并读全语境、分解前提与作者明说的例外。
+2. **尊重「原文未指明」**：凡 `precise_point_or_field == "原文未指明"` 之处（本批 9 例共 33 项），代表原文未给出该顶点、字段、算法或高低次序；定义作者若要构造具体测试数据，须在自己的测试代码里显式声明自己补入的前提，并把测试失败如实归因为「在该前提下与作者陈述不相容」，不得当作作者字面报错。
+3. **按有效等级分栏**：单条纯硬证据 31 条中，含传递依存后仍为纯硬证据的共 **12 条**，其余 **19 条**依赖二级语境/分解陈述（有效等级为 `混合`），纯二级陈述 **15 条**（含依存计数见 `check.py` 输出）。需要提升二级语境/规则时请走 #2336 / #2337，不越权提级。
+4. **草稿文件不作真值**：`draft-models-unreviewed.jsonl` 仅作灵感或对照参考，不得直接导入回归测试。
 
 ---
 
-## 五、`check.py` 机检边界与人审边界
+## 四、`check.py` 机检范围与证明不了的事
 
-- **`check.py` 能机械保证的**：逐字语料切片、准入表重算、禁止非作者入 `refs`、语气枚举合法性、条件句 `antecedent` 非空、作者陈述层阿拉伯数值与 `LV*` 逐字回溯、未引高风险限定词拦截、建模层必指 `AS*` 且无悬空模型、实例外层与 `data.synthetic` 双重标记、反事实提出者必填且 `author` 必指 `假设或反事实` 语气、`data` 全数值在 `literal_bindings` 与 `free_parameters` 间不重不漏二分、全部 `check_conditions` 求值为真。
-- **`check.py` 无法判断、必须靠非作者人审的**（详见 `LIMITATIONS.md` §一）：转写 `statement` 是否忠实于原文语境、语气 `mood` 归类是否准确、`binds_instance_target_literally` 是否错标、`added_premises` 是否漏列隐含前提、并列读法是否遗漏其他合理分支，以及反事实 `expected_under_instance` 是否超推。
+- **`check.py` 机械检查的**：`classification.jsonl` 61 条双射、隔离文件对齐、禁止建模/实例字段、逐字引文与准入表 `7d0082ff` 现场重算、`↑正文` 界标、原清点表作者引文保留、`speaker_basis` 非空、拒绝已标非作者的 cite 入 `refs`、语气 7 值枚举、`条件句`/`假设或反事实` 必带 `antecedent`、陈述/前件/数值对象中的数值逐字回溯至 `refs`（仅放行已在 `time_anchor` 登记的 `（YYYY-MM-DD）`）、高风险未引限定词拦截、`原文未指明` 必带说明、`depends_on_statements` 指向存在且无环、`evidence_tier` / `effective_tier_with_dependencies` / `evidence_grade` 现场重算一致。
+- **`check.py` 证明不了、必须靠非作者人审的**（详见 `LIMITATIONS.md` §一）：
+  1. **二级文本的实际说话人**：未命中准入表 `author_spans` 时，机检只查 `speaker=="作者"` 且 `speaker_basis` 非空，**不能证明**该切片确实不是网友原话、转述他人或行内编者注；
+  2. **转写忠实性与语境完整度**：机检无法判断是否删掉了外层条件、是否误把操作指示搬入前件、是否把「可以看成/可以等待」改写成已发生事实；
+  3. **语气判定与适用时间**：机检无法判断 `mood` 是否判准、相对时间锚点日期解析是否正确、跨日规则（如 `081:110`）是否被误套用到前一日；
+  4. **跨句指代与依存是否漏连**：机检只查已写出的 `depends_on_statements` 合法无环，无法发现漏写的分解前提、漏配的作者例外或指代错位；
+  5. **「原文未指明」标注是否遗漏或错标**：机检无法判断某个对象究竟是原文点明的还是整理者替作者补的。
