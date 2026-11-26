@@ -444,10 +444,10 @@ v1 `accept` 另被 `LegacyAdmissionBudgetAdapterMissing` 设计性关闭，S 唯
 
    **先核 E/B CLI 世代，再选命令。** 从发布清单核对 launcher 与域二进制，不拿原库试探参数。
 
-   | 发布能力 | 写入型恢复 | 只读回执与 launcher 计划 |
+   | 发布能力 | 写入型恢复 | 回执查询与 launcher 计划 |
    |---|---|---|
    | 此处所核 `main`（`0e29d008`） | [只提供非具名 `recover`](../rust/src/economic_session/service.rs#L1553-L1597)，会[直接提交新 epoch](../rust/src/economic_session/store.rs#L1709-L1725) | 无具名核验；[launcher 只认 `--manifest`](../rust/src/bin/production_session.rs#L251-L256)，不支持计划 |
-   | [#2082 具名基线](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/economic_session/service.rs#L1570-L1622) | `recover-named` 需要经济 manifest、原库、原请求，B 另带 `--chong`；没有 S 布局两参 | `query-recovery`／`current-recovery`；[计划键集必须等于 E/B 全集](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L273-L296)，不能用下文子集计划，也不得为填齐键而多升代 |
+   | [#2082 具名基线](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/economic_session/service.rs#L1570-L1622) | `recover-named` 需要经济 manifest、原库、原请求，B 另带 `--chong`；没有 S 布局两参 | `query-recovery`／`current-recovery` 只读域库，**可能创建缺失的锁文件**，须先过下文旧代锁门。[计划键集必须等于 E/B 全集](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L273-L296)，不能用下文子集计划，也不得为填齐键而多升代 |
    | 已部署 ADR 0065 修订及具名恢复 | 下列 `recover-named` 另须 `--s-db`、`--s-admission-job-limits`，按第 6 节核布局并核原锁连续性 | 两个只读子命令不因布局条款增加参数；launcher 支持子集计划，先核共同向量，再按第 8 节两阶段装配 |
 
    **下面两个写命令仅用于第三行发布件。** 能力不符、版本不可核或命令被拒就在人工门保留首错；严禁改用非具名 `recover` 试错。所核 `main` 的 launcher [报 `refused` 并退出 2](../rust/src/bin/production_session.rs#L451-L457)也不证明前面的 init 等动作未发生。
@@ -490,7 +490,11 @@ v1 `accept` 另被 `LegacyAdmissionBudgetAdapterMissing` 设计性关闭，S 唯
 
    非零退出时，本次目录只登记为失败证据，即使 stdout 非空也不当作回执；保留旧回执原件，不覆盖、不删除，不启动 launcher。成功退出后仍须核对 stdout 的回执，核对通过才登记为本次成功回执；再次尝试也使用新目录。
 
-   **只读核验适用已部署具名 CLI 的后两行。** 回执丢失时，用 `query-recovery` 和同一原请求查原回执，用 `current-recovery` 核当前代。两者传 `--manifest`、`--db`、`--recovery-request`（B 另加 `--chong`）；不加本条的两个 S 布局参数。历史回执不证明当前资格；重取不重写被 serve 消费的标记。若期间开服又崩溃，重新判断恢复需要，不拿旧回执放行。
+   **旧代锁门（#2082）。** 两个查询动作都先取 `process_lock`，再[只读打开域库](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/economic_session/recovery.rs#L112-L119)。[取锁会以读写和 `create(true)` 打开](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/session_transport.rs#L70-L79)，即使原库和原请求都在，缺锁时也会新建，改变现场。
+
+   直接查询或由旧 launcher 代调前，先停服隔离并保全现场，再依据可信的前代证据逐域核实规范库旁的原 `<db>.writer.lock` 仍在，且原路径、对象身份和属主可信；一次现场 `stat` 不足以证明是原锁。原锁缺失或不可核就停，不能调用或补建锁。#2082 没有新版的 `<db>.writer-lock-id`，不以该记录为旧代查询前提，也不为查询补写。保留部署隔离，调用前释放人工持锁 FD，让命令自取已核原锁。
+
+   **回执读法。** 已部署匹配的具名 CLI 且通过适用的锁门后，用 `query-recovery` 和同一原请求查原回执，用 `current-recovery` 核当前代。两者传 `--manifest`、`--db`、`--recovery-request`（B 另加 `--chong`）；不加两个 S 布局参数。历史回执不证明当前资格；重取不重写被 serve 消费的标记。若期间开服又崩溃，重新判断恢复需要，不拿旧回执放行。
 5. **核完回执，再准备启动交接。** 核回执的域、cut、有效代。仅当已部署 ADR 0065 修订版的子集能力时，才用 `launcher-economic-recovery/1` 的 `requests` 把需交接有效代的域（`E`、`B:<id>`）映射到各自**原请求**绝对路径，不填回执路径。未列的域使用原 manifest 的代，B 的 `--e-epoch` 取 E 有效代。launcher 在拉写者前用 `current-recovery` 逐项核；有一项被拒就停止，不删条目、不退回 manifest 旧代。仅 E 需交接且已部署子集能力时：
 
    ```json
@@ -559,7 +563,11 @@ owner 原地更新中断可能留下半写 JSON；退役可能停在改名后、
 2. **停完先走第 5 节第 1–3 步：** 核最后共同向量，若且仅若下一 bar 部分推进，离线补齐它。共同向量完成后才对确需恢复的域升代；launcher 只校验和装配。E/B 用第 5 节的具名恢复。S 用本次已获批、已部署的 [ADR 0050 #2128](https://github.com/Newchanlun/NewChanlun/blob/be2749f2996f8e928e72051193a693819c72fdbf/docs/adr/0050-s-resource-admission-contract-v1.md#L62-L101) 正式恢复链：从同一原 manifest 用 `production_session s-recovery inspect-recovery` 只读取证、制备原 `s-recovery/1` 请求，再用该入口的 `recover-named` 恢复。保留原 R4、签锚、未完成 Begin 处置和 H1 冻结 `resource_identity`；不手删 SHM/WAL，不换介质或入口硬启。S 恢复、E/B 具名子集、模拟 X 连续交接或共同 checkpoint／两阶段放行，**凡本次需要但尚未部署，停在人工门**。
 
    持久版本先决定读写合同。按 [ADR 0038 旧原件边界](https://github.com/Newchanlun/NewChanlun/blob/aeb79b0e1a8ce5318fe34bb370ffdb11630a2af9/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L186-L190)，旧库按原写合同与原布局续服，不能用 `recover` 或 `serve` 原地升级格式，也不能混写或把旧责任自动迁入新库。旧部署缺本事故所需的恢复能力时，停在人工门；需迁移另走获准流程。
-3. **用原 manifest 装配有效代。** 下表只适用于已部署新版 ADR 0065 启动门和本行所需的配套能力，且共同向量、布局及本域准入前件均已核。先退出所有人工维护 shell。表中“换代”指相对原 manifest 仍须凭原回执交接有效代：以前已换代而这次仍须交接的域带原请求，不再次升代。设置 `SESSION_MANIFEST` 为原 manifest，`RECOVERY_PLAN` 为第 5 节计划，`S_REQUEST` 为对应 S 的原请求文件。选择一行，不按失败顺序试跑：
+
+   **四分支之前先排除 X 自身故障。** 若模拟 X 自己在持有 `ExecutionRequested` 原批时被杀，下面四行都不适用，即使 E、S 和各 B 都未换代。先核旧 X 写者已退出。仅在已部署且获准的原址受限入口下，由 X 持本域原锁核真实升代和原批，用获准新 `producer_epoch` 对原批只发 `QueryExecuteCommitted`。保留旧 `pending_epoch`、原命令 `x_epoch`、原命令字节和摘要、E 原交付回执；由 S 核新代对原会话、原 X 的只读权限。不接纳新业务、不取得调用占有。没有该入口就保持停机，不用旧代常规 `serve` 或裸 `--manifest` 补查。[当前 `main` 拒绝带旧 pending 换代](../rust/src/history_simulation/runtime.rs#L776-L785)不是向 S 查询，更不是取得 `NoRecord`。
+
+   仅当独立监督器证实“S 资格请求已落盘、首字节未发”时，才按 [ADR 0038 专项](https://github.com/Newchanlun/NewChanlun/blob/aeb79b0e1a8ce5318fe34bb370ffdb11630a2af9/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L231-L233)预期并实核 S 返回 `NoRecord`。首字节已发或无法确认时，按 [ADR 0073 第 8 条](https://github.com/Newchanlun/NewChanlun/blob/032a99603d44fe2f0acca56bd66d7830d8d0c8d1/docs/adr/0073-simulation-x-recovery-authority-binding.md#L53-L62)以 S 实际持久原件为准。只有核到原 `ExecuteCommitted` 才按原合同续接；确定拒绝或终止也按原合同。遇 `NoRecord`、超时或结果不可核，保留原 pending 和最大责任，资格申请零重发，不新增占有或撮合。
+3. **用原 manifest 装配有效代。** 通过上述 X 排除门后，且已部署新版 ADR 0065 启动门及本行所需能力，才可选下表；共同向量、布局及本域准入前件须已核。先退出所有人工维护 shell。表中“换代”指相对原 manifest 仍须凭原回执交接有效代：以前已换代而这次仍须交接的域带原请求，不再次升代。设置 `SESSION_MANIFEST` 为原 manifest，`RECOVERY_PLAN` 为第 5 节计划，`S_REQUEST` 为对应 S 的原请求文件。选择一行，不按失败顺序试跑：
 
    | 换代交接 | 启动实参（均带 `--manifest "$SESSION_MANIFEST"`） | 模拟 X 的权威绑定 |
    |---|---|---|
@@ -570,7 +578,7 @@ owner 原地更新中断可能留下半写 JSON；退役可能停在改名后、
 
    **仅使用本行匹配的发布件。** S 参数须是已部署 #2128 的 launcher 能力；经济计划须是已部署 ADR 0065 修订的子集能力（#2082 基线只收全集，`main` 不接收任一恢复参数）。S 换代必带原 `--s-recovery-request`：launcher 用 `current-recovery` 核原切面及当前持久代，S 在自身 serve 锁内再核同一原回执。核验失败不退回 manifest 旧代。
 
-   **模拟 X 按 [ADR 0073 #2129](https://github.com/Newchanlun/NewChanlun/blob/027caa6b61f587e73082c8c2b1d21f352cda58af/docs/adr/0073-simulation-x-recovery-authority-binding.md#L32-L44) 交接。** launcher 用匹配域的 `current-recovery` 在原配置指定的同一库、同一域 bin 上核原请求，取当前原回执；不拿历史查询、手填代、日志或 socket 应答代替。等相关 E/S 按已核有效代持锁启动、满足各自前件后，launcher 才经受控启动输入交回执。X 在自己的原库和原锁内核首写部署登记、原绑定、历史和 pending，按每项 `from_epoch` 等于当前绑定且新代恰为下一代的规则原子追加或核回同一已提交绑定；提交且全员获最终放行后，才可按当前绑定交换。X 仍绑 E1、E 已到 E3 又缺 E1→E2 交接时就停，不凭 E3 当前回执跨代，不补造中间记录。保留 X 自身会话、写者代、源身份及 E 的 `authorized_sources`；不编辑 manifest 或冻结 profile（[所核 `main` 会拒绝档案不符](../rust/src/history_simulation/runtime.rs#L815-L826)）。真实 X 的发送、对账和在途责任仍按 #1401。
+   **仅对端换代时，模拟 X 按 [ADR 0073 #2129](https://github.com/Newchanlun/NewChanlun/blob/032a99603d44fe2f0acca56bd66d7830d8d0c8d1/docs/adr/0073-simulation-x-recovery-authority-binding.md#L32-L44) 保代交接。** launcher 用匹配域的 `current-recovery` 在原配置指定的同一库、同一域 bin 上核原请求，取当前原回执；不拿历史查询、手填代、日志或 socket 应答代替。等相关 E/S 按已核有效代持锁启动、满足各自前件后，launcher 才经受控启动输入交回执。X 在自己的原库和原锁内核首写部署登记、原绑定、历史和 pending，按每项 `from_epoch` 等于当前绑定且新代恰为下一代的规则原子追加或核回同一已提交绑定；提交且全员获最终放行后，才可按当前绑定交换。X 仍绑 E1、E 已到 E3 又缺 E1→E2 交接时就停，不凭 E3 当前回执跨代，不补造中间记录。保留 X 自身会话、写者代、源身份及 E 的 `authorized_sources`；不编辑 manifest 或冻结 profile（[所核 `main` 会拒绝档案不符](../rust/src/history_simulation/runtime.rs#L815-L826)）。真实 X 的发送、对账和在途责任仍按 #1401。
 
    **无换代，已部署两阶段放行：**
 
@@ -602,4 +610,4 @@ owner 原地更新中断可能留下半写 JSON；退役可能停在改名后、
    ```
 
 4. **等全员两阶段放行。** 第一阶段，S、E、每个 B 和 X 各持原锁重核本域布局、介质和同一共同向量；launcher 收齐准备回报才发初始化／绑定许可。续服不 init。第二阶段，各监听域实际 bind／listen 并完成末次布局、身份及适用的认领核验后回报；无监听 X 也须完成本域启动前件。launcher 收齐同批全员回报才最终放行；此前不消费 E/B 标记、不 accept、不发送，此后 E/B 仍须先事务消费本代标记才首个 accept。X 失败或监督 EOF 落在最终放行前时，关闭监听整组退出；不抹去已验证完成的合法退役，不补写关库标记。
-5. 从正式读口核原 cut、原收据与各域有效代，核本代 E/B 标记已在接纳前消费，再恢复自动拉起。真实 X 仍须单独满足部署及发送门。记录原目录和端点、实际 manifest／计划／请求路径、各域回执、两阶段与读口结果。拒绝就保留首错和现场，不改走 Python、另换路径或新建库。单条 `endpoint-claim` 不是整组已就绪的证据。
+5. 常规续服获最终放行后，从正式读口核原 cut、原收据与各域有效代，核本代 E/B 标记已在接纳前消费，再恢复自动拉起。X 受限查询后仍留停时，记录实际 S 查询结果、原 pending 和责任，保持暂停，不按整组续服登记。真实 X 仍须单独满足部署及发送门。记录原目录和端点、实际 manifest／计划／请求路径、各域回执、两阶段与读口结果。拒绝就保留首错和现场，不改走 Python、另换路径或新建库。单条 `endpoint-claim` 不是整组已就绪的证据。
