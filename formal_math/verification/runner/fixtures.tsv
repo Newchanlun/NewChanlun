@@ -5,7 +5,7 @@ must_red/g1/r4-manifest-url	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代�
 must_red/g1/revision	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 PACKAGE_PIN；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
 must_red/g1/runtime-pin	不再检查	0	-	-	旧期望 RUNTIME_TOOLCHAIN_PIN；运行期 Lean 版本不符改为第 3 步 TOOLCHAIN 环境故障退 2；本自测不伪造 lean，故全绿
 must_red/g1/toolchain	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 TOOLCHAIN_PIN；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
-must_red/g15/bridge	取料	1	fetch	CONTENT_PATH	旧期望 IMPORT_EDGE；顶层 Bridge.lean 不是内容文件，第 2 步 CONTENT_PATH；真实流程里预检先以 TOP_LEVEL 判红
+must_red/g15/bridge	预检	1	precheck	TOP_LEVEL	旧期望 IMPORT_EDGE；夹具在 formal_math 顶层放了 Bridge.lean，预检形状规则（d660582472 起无条件执行）判 TOP_LEVEL
 must_red/g15/chan-audit-math-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
 must_red/g15/chan-audit-math-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
 must_red/g15/chan-defs-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
@@ -46,13 +46,13 @@ must_red/g15/chantest-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE
 must_red/g15/empty-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
 must_red/g15/literal-proof	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
 must_red/g15/main-dynamics	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
-must_red/g15/no-expose	第四片	1	build	BUILD_WFAIL	旧期望 EXPOSE_SECTION；源码层规则「定义文件须用 @[expose] public section」；现状由 build 一步兜住
+must_red/g15/no-expose	第四片	1	build	BUILD_WFAIL	旧期望 EXPOSE_SECTION；源码层规则「Chan/Defs 须用 @[expose] public section」归第四片，本片未搬；现状由 build 一步红只因本夹具的 ChanTest/UseFlag.lean 编译不过，Chan/Defs 下只含私有定义或定义体都已公开的文件不用该写法时七步全绿
 must_red/g15/no-module	头部	1	headers	MODULE_FIRST	旧期望 MODULE_FIRST
 must_red/g15/private-import	头部	1	headers	IMPORT_ALL	旧期望 IMPORT_ALL
 must_red/g15/r2-g3-meta-import-all	头部	1	headers	IMPORT_ALL	旧期望 IMPORT_ALL
 must_red/g15/r2-g4-challenge-trans-ext	头部	1	headers	IMPORT_PINNED	旧期望 IMPORT_CLOSURE
 must_red/g15/r2-g5-interp-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
-must_red/g15/r2-g6-bridge-subdir	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/r2-g6-bridge-subdir	预检	1	precheck	TOP_LEVEL	旧期望 IMPORT_EDGE；夹具在 formal_math 顶层放了 Helper/，预检形状规则（d660582472 起无条件执行）判 TOP_LEVEL
 must_red/g15/r4-p9d2-challenge-trans-std	头部	1	headers	IMPORT_CLOSURE	旧期望 IMPORT_CLOSURE
 must_red/g15/raw-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
 must_red/g15/whole-mathlib	头部	1	headers	WHOLE_MATHLIB	旧期望 WHOLE_MATHLIB
@@ -140,26 +140,26 @@ must_red/g3/r3-a5a-example-sorryax	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN
 must_red/g3/r3-a5b-grind-option	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
 must_red/g3/r3-a5c-grind-kernel	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
 must_red/g3/r3-a8b-mathlib-lemma	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
-must_red/g3/r4-p0-include-str-unsafe-io	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p0-include-str-unsafe-io-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p1a-by-elab-io	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p1a-by-elab-io-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p1b-by-elab-options	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p1b-by-elab-options-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p1d-sudo-by-elab-io	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p1d-sudo-by-elab-io-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p0-include-str-unsafe-io	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p0-include-str-unsafe-io-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p1a-by-elab-io	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p1a-by-elab-io-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p1b-by-elab-options	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p1b-by-elab-options-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p1d-sudo-by-elab-io	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p1d-sudo-by-elab-io-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
 must_red/g3/r4-p2a-sudo-set-option	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
 must_red/g3/r4-p2b-sudo-set-option-clean	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
-must_red/g3/r4-p3a-eval-percent	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
-must_red/g3/r4-p3a-eval-percent-source-only	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
-must_red/g3/r4-p3b-include-str-host-read	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p3b-include-str-host-read-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p3b2-include-str-clean	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p3b2-include-str-clean-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p3c-trace-siffwm	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p3c-trace-siffwm-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p3d-trace-siffwm-eval	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
-must_red/g3/r4-p3d-trace-siffwm-eval-source-only	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
+must_red/g3/r4-p3a-eval-percent	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片（去掉这个文件时整次运行为绿，仍是待第四片的漏洞）
+must_red/g3/r4-p3a-eval-percent-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片（去掉这个文件时整次运行为绿，仍是待第四片的漏洞）
+must_red/g3/r4-p3b-include-str-host-read	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p3b-include-str-host-read-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p3b2-include-str-clean	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p3b2-include-str-clean-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p3c-trace-siffwm	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p3c-trace-siffwm-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p3d-trace-siffwm-eval	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p3d-trace-siffwm-eval-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
 must_red/g3/r4-p4a-decreasing-by-rfl-prime	第四片	0	-	-	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状漏，待第四片
 must_red/g3/r4-p5a-guard-msgs-substring	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
 must_red/g3/r4-p5b-guard-msgs-swallow	第四片	1	env	ENV_SORRY	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
@@ -172,8 +172,8 @@ must_red/g3/r4-p7b2-ctoridx-spoof	环境层	1	env	ENV_IMPLEMENTED_BY,ENV_UNSAFE	
 must_red/g3/r4-p7b2-ctoridx-spoof-source	第四片	1	env	ENV_IMPLEMENTED_BY,ENV_UNSAFE	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
 must_red/g3/r4-p7c-extern-on-exempt	环境层	1	env	ENV_EXTERN	旧期望 ENV_EXTERN
 must_red/g3/r4-p7c-extern-on-exempt-source	第四片	1	env	ENV_EXTERN	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
-must_red/g3/r4-p7d-term-unsafe	第四片	1	env	ENV_IMPLEMENTED_BY	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
-must_red/g3/r4-p7d-term-unsafe-source-only	第四片	1	env	ENV_IMPLEMENTED_BY	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
+must_red/g3/r4-p7d-term-unsafe	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
+must_red/g3/r4-p7d-term-unsafe-source-only	第四片	1	precheck	TOP_LEVEL	旧期望 TOKEN；夹具在 formal_math 顶层放了 host_secret_probe.txt（模拟宿主机文件），预检形状规则（d660582472 起无条件执行）先判 TOP_LEVEL，夹具的源码层意图仍归第四片
 must_red/g3/r4-p7e-root-sorryax	第四片	1	build	BUILD_WFAIL	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 build 一步兜住
 must_red/g3/raw-command	第四片	1	env	ENV_META	旧期望 TOKEN；源码形状（TOKEN、LOCAL_OPTION 等）；现状由 env 一步兜住
 must_red/g3/run-cmd	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下

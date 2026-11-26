@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """#2312 第二片：formal_math 阻断门的运行骨架。七步固定顺序，前一步不绿即停；规则与信任前提见同目录 README.md。
-退出码 0 七步全绿、1 某步判红、2 无法判定（含 --until 提前停下）。"""
-import hashlib
-import json
-import os
-import re
-import subprocess
+必须以 `python3 -I` 运行。退出码 0 七步全绿、1 某步判红、2 无法判定（含 --until 提前停下）。"""
 import sys
-import time
+
+# 隔离模式之前不导入任何标准库模块：不带 -I 时脚本所在目录在模块搜索路径最前面，同目录的 json.py 之类会顶替标准库。
+if not sys.flags.isolated:
+    sys.stderr.write("FM FAULT prepare NOT_ISOLATED - run.py 必须以 python3 -I 运行\n")
+    sys.stdout.write("FM RESULT FAULT prepare NOT_ISOLATED\n")
+    raise SystemExit(2)
+
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+import time  # noqa: E402
+import unicodedata  # noqa: E402
 
 USAGE = ("[--trusted-change-approved] [--bootstrap-trusted-from <提交>] [--until <1-7>] --repo <仓库> "
          "--base <基线提交> --head <被审提交> --branch <分支名> --workdir <工作目录> --packages <依赖目录>")
@@ -31,6 +39,7 @@ GIT_ENV = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C", "GIT_NO_RE
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_GRAFT_FILE": os.devnull,
            "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
 TIMEOUT = {"git": 600, "precheck": 600, "auditor": 3600, "headers": 600, "build": 4 * 3600, "env": 3600}
+LIMIT = 400
 
 
 class Fault(Exception):
@@ -41,32 +50,78 @@ class Run:
     """一次运行的输入与中间产物；字段在各步里依次填上。"""
 
 
-def show(obj):
-    obj = obj if isinstance(obj, bytes) else str(obj).encode("utf-8")
-    return b"".join(bytes([c]) if 0x21 <= c < 0x7F and c != 0x5C else b"\\x%02x" % c for c in obj) or b"-"
+# ---- 输出：一切写进标准输出、标准错误的片段都经 safe() ----
+
+def safe(x, spaces=False, limit=LIMIT):
+    """可见 ASCII（反斜杠除外）与 Unicode 字母、数字、标点、符号原样保留；空格只在 spaces 时保留。
+    其余一律写成可见形式：ASCII 控制字符与非 UTF-8 字节 `\\xNN`，其它码点（换行、行分隔符、方向控制、
+    组合符、孤立代理项、未分配码点等）`\\uNNNN` 或 `\\UNNNNNNNN`。超过 limit 个字符截断并注明。"""
+    if isinstance(x, bytes):
+        x = x.decode("utf-8", "surrogateescape")
+    elif not isinstance(x, str):
+        x = str(x)
+    out = []
+    for i, ch in enumerate(x):
+        if i >= limit:
+            out.append("…[截断，余 %d 字符]" % (len(x) - i))
+            break
+        c = ord(ch)
+        if 0x21 <= c < 0x7F and c != 0x5C or (spaces and c == 0x20):
+            out.append(ch)
+        elif c < 0x80 or 0xDC80 <= c <= 0xDCFF:
+            out.append("\\x%02x" % (c & 0xFF))
+        elif unicodedata.category(ch)[0] in "LNPS":
+            out.append(ch)
+        else:
+            out.append("\\u%04x" % c if c <= 0xFFFF else "\\U%08x" % c)
+    return "".join(out) or "-"
 
 
-def emit(fd, *fields):
-    """按 UTF-8 字节直接写文件描述符；写不出时返回该错误。"""
-    data = b" ".join(f if isinstance(f, bytes) else str(f).encode("utf-8") for f in fields) + b"\n"
+def emit(fd, kind, *fields):
+    """写一行 `FM <kind> <字段…> <说明>`：最后一个字段可含空格，其余字段不含；全部经 safe()。
+    本函数不抛异常，写不出时返回该异常。"""
     try:
+        parts = [safe(f) for f in fields[:-1]] + [safe(fields[-1], spaces=True)] if fields else []
+        data = ("FM %s %s\n" % (kind, " ".join(parts))).encode("utf-8")
         while data:
             data = data[os.write(fd, data):]
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001  输出函数自身失败也只能记下来
         return e
 
 
-def call(argv, timeout, code, **kw):
-    try:
-        return subprocess.run(argv, timeout=timeout, **kw)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise Fault(code, argv[0], "%s: %s" % (type(e).__name__, getattr(e, "strerror", None) or e))
+def log(tag, data):
+    """子进程的输出不直接透传：逐行经 safe() 写成 `FM LOG <来源> <行>`。"""
+    for line in (data or b"").split(b"\n"):
+        if line.strip():
+            emit(2, "LOG", tag, line)
 
+
+def call(argv, timeout, code, tag, merge=False, **kw):
+    """起子进程，标准错误（merge 时连同标准输出）捕获后经 log() 写出；超时、起不来都是 Fault。"""
+    if "input" not in kw:
+        kw.setdefault("stdin", subprocess.DEVNULL)
+    kw["stderr"] = subprocess.STDOUT if merge else subprocess.PIPE
+    if merge:
+        kw["stdout"] = subprocess.PIPE
+    try:
+        p = subprocess.run(argv, timeout=timeout, **kw)
+    except subprocess.TimeoutExpired as e:
+        log(tag, e.stdout if merge else e.stderr)
+        raise Fault(code, argv[0], "超时（%d 秒）" % timeout)
+    except OSError as e:
+        raise Fault(code, argv[0], "%s: %s" % (type(e).__name__, e.strerror or e))
+    log(tag, p.stdout if merge else p.stderr)
+    if merge:
+        p.stdout = None
+    return p
+
+
+# ---- git 对象 ----
 
 def git(ctx, *args, data=None, ok=(0,)):
     argv = [b"git", b"-C", ctx.repo, b"-c", b"advice.graftFileDeprecated=false", *args]
-    p = call(argv, TIMEOUT["git"], "GIT", env=GIT_ENV, input=data,
-             stdin=subprocess.DEVNULL if data is None else None, stdout=subprocess.PIPE)
+    kw = {"input": data} if data is not None else {}
+    p = call(argv, TIMEOUT["git"], "GIT", "git", env=GIT_ENV, stdout=subprocess.PIPE, **kw)
     if p.returncode not in ok:
         raise Fault("GIT", args[0], "git 退出 %d" % p.returncode)
     return p.returncode, p.stdout
@@ -98,7 +153,7 @@ def tree(ctx, rev, path):
 
 
 def blobs(ctx, oids):
-    """`cat-file --batch` 按对象名取原始字节，不做任何过滤或换行转换。"""
+    """`cat-file --batch` 按对象名取原始字节，不做任何过滤或换行转换；对象类型逐个核对为 blob。"""
     uniq = sorted(set(oids))
     out = git(ctx, b"cat-file", b"--batch", data=b"".join(o + b"\n" for o in uniq))[1]
     result, pos = {}, 0
@@ -106,7 +161,7 @@ def blobs(ctx, oids):
         end = out.find(b"\n", pos)
         head = out[pos:end].split(b" ")
         if end < 0 or len(head) != 3 or head[0] != oid or head[1] != b"blob" or not head[2].isdigit():
-            raise Fault("GIT", oid, "cat-file 输出无法解读")
+            raise Fault("GIT", oid, "cat-file 输出无法解读或对象不是 blob")
         size = int(head[2])
         result[oid], pos = out[end + 1:end + 1 + size], end + 2 + size
         if out[pos - 1:pos] != b"\n":
@@ -116,8 +171,50 @@ def blobs(ctx, oids):
     return result
 
 
+# ---- JSON：严格 UTF-8、拒绝重复键、拒绝孤立代理项与非有限数 ----
+
+def unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("重复键")
+        obj[key] = value
+    return obj
+
+
+def reject_constant(name):
+    raise ValueError("非有限数 %s" % name)
+
+
+def no_surrogates(value):
+    if isinstance(value, str):
+        return not any(0xD800 <= ord(c) <= 0xDFFF for c in value)
+    if isinstance(value, list):
+        return all(no_surrogates(v) for v in value)
+    if isinstance(value, dict):
+        return all(no_surrogates(k) and no_surrogates(v) for k, v in value.items())
+    return True
+
+
+def strict_json(data, code, what):
+    try:
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=reject_constant)
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
+        raise Fault(code, what, "JSON 无法解读：%s" % type(e).__name__)
+    if not no_surrogates(value):
+        raise Fault(code, what, "JSON 字符串含孤立代理项")
+    return value
+
+
+# ---- 文件系统 ----
+
+def mkdir(path, mode):
+    os.mkdir(path, mode)
+    os.chmod(path, mode)
+
+
 def write_files(root, files):
-    """逐个新建文件，模式固定 0644、目录 0755；已存在或遇到符号链接即失败。"""
+    """逐个新建文件，模式固定 0644、目录 0755（不受 umask 影响）；已存在或遇到符号链接即失败。"""
     made = set()
     for rel, data in files:
         parts = rel.split("/")
@@ -125,7 +222,7 @@ def write_files(root, files):
             d = os.path.join(root, *parts[:i])
             if d not in made:
                 if not os.path.isdir(d) or os.path.islink(d):
-                    os.mkdir(d, 0o755)
+                    mkdir(d, 0o755)
                 made.add(d)
         fd = os.open(os.path.join(root, *parts), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
         try:
@@ -146,44 +243,57 @@ def inside(a, b):
     return a == b or a.startswith(b.rstrip(os.sep) + os.sep)
 
 
-def sandbox(ctx, argv, binds, env, cwd, timeout, code, stdout):
-    """bwrap：根只读，/home 等换成空 tmpfs，整个工作目录先盖成空 tmpfs 再按需回绑；断网、清环境。"""
+# ---- 沙箱 ----
+
+def sandbox(ctx, argv, binds, env, cwd, timeout, code, tag, merge=False):
+    """bwrap：根只读，/home 等换成空 tmpfs，整个工作目录先盖成空 tmpfs 再按需回绑；断网、清环境。
+    沙箱里的进程被信号终止时 bwrap 以 128+n 退出，这里统一归入无法判定。"""
+    fs = os.fsencode
     args = [b"bwrap", b"--ro-bind", b"/", b"/"]
     for hidden in ("/home", "/root", "/run", "/var", "/tmp", ctx.workdir):
-        args += [b"--tmpfs", hidden.encode()]
+        args += [b"--tmpfs", fs(hidden)]
     args += [b"--dir", b"/tmp/home", b"--dev", b"/dev", b"--proc", b"/proc"]
     for kind, src, dst in binds + [("--ro-bind", ctx.prefix, ctx.prefix)]:
-        args += [kind.encode(), src.encode(), dst.encode()]
+        args += [fs(kind), fs(src), fs(dst)]
     args.append(b"--clearenv")
     base = {"HOME": "/tmp/home", "TMPDIR": "/tmp", "LANG": "C.UTF-8",
             "PATH": os.path.join(ctx.prefix, "bin") + ":/usr/bin:/bin"}
     for key, value in {**base, **env}.items():
-        args += [b"--setenv", key.encode(), value.encode()]
-    args += [b"--unshare-all", b"--die-with-parent", b"--new-session", b"--chdir", cwd.encode(), b"--",
-             *(a if isinstance(a, bytes) else a.encode() for a in argv)]
-    return call(args, timeout, code, stdin=subprocess.DEVNULL, stdout=stdout, env={"PATH": GIT_ENV["PATH"]})
+        args += [b"--setenv", fs(key), fs(value)]
+    args += [b"--unshare-all", b"--die-with-parent", b"--new-session", b"--chdir", fs(cwd), b"--",
+             *(a if isinstance(a, bytes) else fs(a) for a in argv)]
+    p = call(args, timeout, code, tag, merge=merge, stdout=None if merge else subprocess.PIPE,
+             env={"PATH": GIT_ENV["PATH"]})
+    if p.returncode >= 128 or p.returncode < 0:
+        raise Fault("SIGNAL", argv[0], "沙箱内进程被信号终止（退出 %d）" % p.returncode)
+    return p
 
 
 # ---- 第 1 步：预检（第一片，取自受信提交） ----
 
+def unescape(obj):
+    """预检把对象栏转义成 `\\xNN`；还原成原字节，再由 safe() 统一转义，避免二次转义。"""
+    return re.sub(rb"\\x([0-9a-f]{2})", lambda m: bytes([int(m[1], 16)]), obj)
+
+
 def step_precheck(ctx):
     path = os.path.join(ctx.workdir, "step1")
-    os.mkdir(path, 0o700)
+    mkdir(path, 0o700)
     oid = object_at(ctx, ctx.trusted, TRUSTED_CODE[1])
     write_files(path, [("precheck.py", blobs(ctx, [oid])[oid])])
     argv = [sys.executable, "-I", os.path.join(path, "precheck.py"), *([FLAG] if ctx.approved else []),
             ctx.repo, ctx.base, ctx.head, ctx.branch]
-    p = call(argv, TIMEOUT["precheck"], "PRECHECK", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    p = call(argv, TIMEOUT["precheck"], "PRECHECK", "precheck", stdout=subprocess.PIPE,
              env={"PATH": GIT_ENV["PATH"]})
     lines = p.stdout.split(b"\n")
     if lines[-1] != b"":
         raise Fault("PRECHECK_OUTPUT", b"stdout", "预检输出没有以换行结尾")
     lines = lines[:-1]
     if p.returncode == 0 and len(lines) == 1 and lines[0].startswith(b"PRECHECK GREEN OK " + ctx.head + b" role="):
-        return [], lines[0][len(b"PRECHECK GREEN OK ") + len(ctx.head) + 1:].decode("ascii", "replace")
+        return [], lines[0][len(b"PRECHECK GREEN OK ") + len(ctx.head) + 1:]
     reds = [PRECHECK_RED.fullmatch(line) for line in lines]
     if p.returncode == 1 and reds and all(reds):
-        return [(m[1].decode(), m[2], m[3].decode("utf-8", "replace")) for m in reds], ""
+        return [(m[1].decode(), unescape(m[2]), m[3].decode("utf-8", "surrogateescape")) for m in reds], ""
     raise Fault("PRECHECK_EXIT", b"precheck.py", "预检退出 %d，输出 %d 行，无法解读为绿或红" % (p.returncode, len(lines)))
 
 
@@ -219,9 +329,28 @@ def step_fetch(ctx):
     if not content:
         raise Fault("NO_CONTENT", ctx.head, "被审提交没有内容文件")
     data = blobs(ctx, [oid for _, oid in trusted_files + configs + content])
+    for rel, oid in content:
+        try:
+            data[oid].decode("utf-8")
+        except UnicodeDecodeError:
+            reds.append(("CONTENT_ENCODING", "formal_math/" + rel, "内容文件不是合法的 UTF-8"))
+    if reds:
+        return reds, ""
+    # 第 7 步的搜索路径在这里从基线清单的 git 对象定下来，之后不再读被审工作区里的任何文件。
+    manifest = strict_json(data[dict(configs)["lake-manifest.json"]], "INPUT", "formal_math/lake-manifest.json")
+    try:
+        names = [p["name"] for p in manifest["packages"]]
+    except (KeyError, TypeError):
+        raise Fault("INPUT", "formal_math/lake-manifest.json", "包清单格式不合")
+    if not all(isinstance(n, str) and PACKAGE.fullmatch(n) for n in names):
+        raise Fault("INPUT", "formal_math/lake-manifest.json", "包名不合文法")
+    missing = [n for n in names if not os.path.isdir(os.path.join(ctx.packages, n))]
+    if missing:
+        raise Fault("PACKAGES", os.path.join(ctx.packages, missing[0]), "依赖目录缺基线清单里的包")
+    ctx.package_names = names
     ctx.trusted_dir, ctx.audited = os.path.join(ctx.workdir, "trusted"), os.path.join(ctx.workdir, "audited")
-    os.mkdir(ctx.trusted_dir, 0o700)
-    os.mkdir(ctx.audited, 0o700)
+    mkdir(ctx.trusted_dir, 0o700)
+    mkdir(ctx.audited, 0o700)
     write_files(ctx.trusted_dir, [("verification/" + rel, data[oid]) for rel, oid in trusted_files])
     write_files(ctx.audited, [(rel, data[oid]) for rel, oid in configs + content])
     ctx.content = sorted(rel for rel, _ in content)
@@ -240,19 +369,18 @@ def step_auditor(ctx):
     m = re.fullmatch(rb"leanprover/lean4:v([0-9][0-9A-Za-z.-]*)\n?", toolchain)
     if not m:
         raise Fault("TOOLCHAIN", b"formal_math/lean-toolchain", "工具链文件不合 leanprover/lean4:v<版本>")
-    p = call(["lean", "--print-prefix"], 60, "TOOLCHAIN", cwd=pkg, stdin=subprocess.DEVNULL,
-             stdout=subprocess.PIPE, env={k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "ELAN_HOME")})
-    ctx.prefix = os.path.realpath(p.stdout.decode("utf-8", "replace").strip()) if p.returncode == 0 else ""
+    p = call(["lean", "--print-prefix"], 60, "TOOLCHAIN", "toolchain", cwd=pkg, stdout=subprocess.PIPE,
+             env={k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "ELAN_HOME")})
+    ctx.prefix = os.path.realpath(os.fsdecode(p.stdout.strip())) if p.returncode == 0 else ""
     lean, lake = os.path.join(ctx.prefix, "bin", "lean"), os.path.join(ctx.prefix, "bin", "lake")
-    v = call([lean, "--version"], 60, "TOOLCHAIN", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE) \
+    v = call([lean, "--version"], 60, "TOOLCHAIN", "toolchain", stdout=subprocess.PIPE) \
         if ctx.prefix and os.path.isfile(lean) else None
     if v is None or not v.stdout.startswith(b"Lean (version " + m[1] + b","):
         raise Fault("TOOLCHAIN", ctx.prefix or "lean", "运行中的 Lean 与工具链文件 v%s 不符" % m[1].decode())
     home = os.path.join(ctx.workdir, "home")
-    os.mkdir(home, 0o700)
+    mkdir(home, 0o700)
     env = {"PATH": os.path.join(ctx.prefix, "bin") + ":/usr/bin:/bin", "HOME": home, "LANG": "C.UTF-8"}
-    p = call([lake, "build"], TIMEOUT["auditor"], "AUDITOR_BUILD", cwd=pkg, env=env,
-             stdin=subprocess.DEVNULL, stdout=2)
+    p = call([lake, "build"], TIMEOUT["auditor"], "AUDITOR_BUILD", "auditor", merge=True, cwd=pkg, env=env)
     ctx.auditor = os.path.join(pkg, ".lake", "build", "bin", "fm_audit")
     if p.returncode or os.path.islink(ctx.auditor) or not os.path.isfile(ctx.auditor):
         raise Fault("AUDITOR_BUILD", pkg, "受信审计程序构建失败（退出 %d）" % p.returncode)
@@ -261,17 +389,12 @@ def step_auditor(ctx):
 
 
 def run_auditor(ctx, command, binds, env, timeout):
-    """在沙箱里跑受信审计程序，逐行解析 JSON；退出码只用于核对，不用于下结论。"""
+    """在沙箱里跑受信审计程序，逐行严格解析 JSON；退出码只用于核对，不用于下结论。"""
     p = sandbox(ctx, [ctx.auditor, command, *ctx.auditor_args], binds, env, ctx.audited, timeout,
-                "AUDITOR", subprocess.PIPE)
-    rows = []
-    try:
-        text = p.stdout.decode("utf-8")
-        if not text.endswith("\n"):
-            raise ValueError
-        rows = [json.loads(line) for line in text[:-1].split("\n")]
-    except ValueError:
-        raise Fault("AUDITOR_OUTPUT", command, "审计程序输出不是逐行 JSON（退出 %d）" % p.returncode)
+                "AUDITOR", command)
+    if not p.stdout.endswith(b"\n"):
+        raise Fault("AUDITOR_OUTPUT", command, "审计程序输出没有以换行结尾（退出 %d）" % p.returncode)
+    rows = [strict_json(line, "AUDITOR_OUTPUT", command) for line in p.stdout[:-1].split(b"\n")]
     result = rows.pop() if rows else None
     if not (isinstance(result, list) and len(result) == 4 and result[:2] == ["result", command] and
             result[2] in ("red", "green") and type(result[3]) is int):
@@ -396,45 +519,51 @@ def step_shape(ctx):
 
 # ---- 第 6 步：沙箱构建 ----
 
+def artifact_reds(ctx, lib):
+    """产物目录：不得经由符号链接；顶层只许内容根（第 7 步的搜索路径上被审产物排在工具链库之前，
+    别的根会遮住 Init 等库模块）；`.olean` 的集合须恰好等于内容模块。"""
+    reds = []
+    if os.path.lexists(lib) and (os.path.realpath(lib) != lib or not os.path.isdir(lib)):
+        return [("ARTIFACT_ROOT", "formal_math/.lake/build/lib/lean", "产物目录是符号链接、经由符号链接或不是目录")]
+    for name in sorted(os.listdir(lib)) if os.path.isdir(lib) else []:
+        if name.split(".")[0] not in ROOT_NAMES:
+            reds.append(("ARTIFACT_ROOT", "formal_math/.lake/build/lib/lean/" + name, "产物目录顶层只许内容根"))
+    built = set()
+    for d, dirs, names in os.walk(lib):
+        for n in dirs + names:
+            full = os.path.join(d, n)
+            if os.path.islink(full):
+                reds.append(("ARTIFACT_ROOT", "formal_math/.lake/build/lib/lean/" + os.path.relpath(full, lib),
+                             "产物目录里不许符号链接"))
+            elif n.endswith(".olean") and n in names:
+                built.add(os.path.relpath(full, lib)[:-6].replace(os.sep, "."))
+    for module in sorted(set(ctx.modules) - built):
+        reds.append(("NO_ARTIFACT", "formal_math/%s.lean" % module.replace(".", "/"),
+                     "默认目标的构建没有产出这个模块的 .olean"))
+    for module in sorted(built - set(ctx.modules)):
+        reds.append(("EXTRA_ARTIFACT", "formal_math/.lake/build/lib/lean/%s.olean" % module.replace(".", "/"),
+                     "产物目录里有没有源码的模块"))
+    return reds
+
+
 def step_build(ctx):
     lake_dir = os.path.join(ctx.audited, ".lake")
-    os.mkdir(lake_dir, 0o755)
-    os.mkdir(os.path.join(lake_dir, "packages"), 0o755)
+    mkdir(lake_dir, 0o755)
+    mkdir(os.path.join(lake_dir, "packages"), 0o755)
     binds = [("--ro-bind", ctx.audited, ctx.audited), ("--bind", lake_dir, lake_dir),
              ("--ro-bind", ctx.packages, os.path.join(lake_dir, "packages"))]
-    probe = sandbox(ctx, ["lean", "--version"], binds, {}, ctx.audited, 60, "SANDBOX", subprocess.PIPE)
+    probe = sandbox(ctx, ["lean", "--version"], binds, {}, ctx.audited, 60, "SANDBOX", "probe")
     if probe.returncode or not probe.stdout.startswith(b"Lean (version "):
         raise Fault("SANDBOX", b"bwrap", "沙箱探针失败（退出 %d）" % probe.returncode)
-    p = sandbox(ctx, ["lake", "build", "--wfail"], binds, {}, ctx.audited, TIMEOUT["build"], "BUILD", 2)
-    if p.returncode < 0:
-        raise Fault("BUILD", b"lake", "构建被信号 %d 终止" % -p.returncode)
+    p = sandbox(ctx, ["lake", "build", "--wfail"], binds, {}, ctx.audited, TIMEOUT["build"], "BUILD", "build",
+                merge=True)
     if p.returncode:
         return [("BUILD_WFAIL", b"formal_math/lakefile.toml", "lake build --wfail 退出 %d" % p.returncode)], ""
-    reds = []
-    for rel in ctx.content:
-        olean = os.path.join(lake_dir, "build", "lib", "lean", rel[:-5] + ".olean")
-        if os.path.islink(olean) or not os.path.isfile(olean):
-            reds.append(("NO_ARTIFACT", "formal_math/" + rel, "默认目标的构建没有产出这个模块的 .olean"))
-    # 第 7 步的搜索路径上被审产物排在工具链库之前：顶层只许内容根，免得遮住 Init 等库模块。
-    lib = os.path.join(lake_dir, "build", "lib", "lean")
-    if os.path.realpath(lib) != lib:
-        reds.append(("ARTIFACT_ROOT", "formal_math/.lake/build/lib/lean", "产物目录不得是符号链接或经由符号链接"))
-    for name in sorted(os.listdir(lib)) if os.path.isdir(lib) else []:
-        if name.split(".")[0] not in ROOT_NAMES or os.path.islink(os.path.join(lib, name)):
-            reds.append(("ARTIFACT_ROOT", "formal_math/.lake/build/lib/lean/" + name, "产物目录顶层只许内容根"))
+    reds = artifact_reds(ctx, os.path.join(lake_dir, "build", "lib", "lean"))
     return reds, "%d 个模块都有产物" % len(ctx.content)
 
 
 # ---- 第 7 步：环境层与声明锁 ----
-
-def unique_object(pairs):
-    obj = {}
-    for key, value in pairs:
-        if key in obj:
-            raise ValueError(f"重复键：{key}")
-        obj[key] = value
-    return obj
-
 
 def compare_lock(expect, rows):
     actual = {}
@@ -458,20 +587,14 @@ def compare_lock(expect, rows):
 
 def step_env(ctx, certificate=None):
     """certificate：派生证书文件，必须位于受信目录下；本片没有产生它的一侧（第四片），恒为 None。"""
-    try:
-        manifest = json.loads(read(os.path.join(ctx.audited, "lake-manifest.json")),
-                              object_pairs_hook=unique_object)
-        names = [p["name"] for p in manifest["packages"]]
-        if ctx.lock is None:
-            raise ValueError("被审提交没有 formal_math/statement-lock.json")
-        expect = json.loads(blobs(ctx, [ctx.lock])[ctx.lock], object_pairs_hook=unique_object)
-    except (ValueError, KeyError, TypeError) as e:
-        raise Fault("INPUT", "lake-manifest.json/statement-lock.json", "无法解读：%s" % e)
-    if not all(isinstance(n, str) and PACKAGE.fullmatch(n) for n in names) or not isinstance(expect, dict):
-        raise Fault("INPUT", "lake-manifest.json/statement-lock.json", "包名或锁文件格式不合")
+    if ctx.lock is None:
+        raise Fault("INPUT", "formal_math/statement-lock.json", "被审提交没有锁文件")
+    expect = strict_json(blobs(ctx, [ctx.lock])[ctx.lock], "INPUT", "formal_math/statement-lock.json")
+    if not isinstance(expect, dict):
+        raise Fault("INPUT", "formal_math/statement-lock.json", "锁文件须是对象")
     if certificate is not None and not inside(os.path.realpath(certificate), ctx.trusted_dir):
         raise Fault("CERTIFICATE", certificate, "派生证书必须在受信目录下")
-    search = [os.path.join(ctx.packages, n, ".lake", "build", "lib", "lean") for n in names]
+    search = [os.path.join(ctx.packages, n, ".lake", "build", "lib", "lean") for n in ctx.package_names]
     search.append(os.path.join(ctx.audited, ".lake", "build", "lib", "lean"))
     ctx.auditor_args = (["--derived", certificate] if certificate else []) + ctx.modules
     binds = [("--ro-bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.packages, ctx.packages),
@@ -532,28 +655,30 @@ def prepare(argv):
         if os.path.islink(opts[b"--workdir"]) or not os.path.isdir(ctx.workdir) or os.listdir(ctx.workdir):
             raise Fault("WORKDIR", ctx.workdir, "工作目录须不存在或为空目录")
     else:
-        os.mkdir(ctx.workdir, 0o700)
+        mkdir(ctx.workdir, 0o700)
     return ctx
 
 
 def main(argv, steps=STEP_FUNCS, start=1):
-    """start 只给自测的旁路用例用（从第 2 步直接起跑）；命令行入口恒从第 1 步开始。"""
-    out_err = []
+    """start 只给自测的旁路用例用（从第 2 步直接起跑）；命令行入口恒从第 1 步开始。
+    任何异常都落成无法判定：标准错误一行 FM FAULT，标准输出最后一行 FM RESULT FAULT，退 2。"""
+    state = {"step": "prepare", "output": None}
 
-    def out(*fields):
-        err = emit(1, b"FM", *fields)
-        if err:
-            out_err.append(err)
+    def out(kind, *fields):
+        err = emit(1, kind, *fields)
+        if err is not None and state["output"] is None:
+            state["output"] = err
 
-    def fault(step, f):
+    def fault(f):
         code, obj, msg = (tuple(f.args) + ("-", "-", "-"))[:3]
-        emit(2, b"FM FAULT", step, code, show(obj), msg)
+        emit(2, "FAULT", state["step"], code, obj, msg)
+        emit(1, "RESULT", "FAULT", state["step"], code)
         return 2
 
     try:
         ctx = prepare(argv)
-        mode = b"bootstrap" if ctx.bootstrap else b"baseline"
-        out(b"MODE", mode, b"trusted=" + ctx.trusted, b"base=" + ctx.base, b"head=" + ctx.head,
+        mode = "bootstrap" if ctx.bootstrap else "baseline"
+        out("MODE", mode, b"trusted=" + ctx.trusted, b"base=" + ctx.base, b"head=" + ctx.head,
             "自举模式：受信代码取自调用方指定的提交，不保证来自主干" if ctx.bootstrap else "受信代码取自基线")
         missing = [p for p in TRUSTED_CODE if object_at(ctx, ctx.trusted, p) is None]
         if missing:
@@ -561,38 +686,39 @@ def main(argv, steps=STEP_FUNCS, start=1):
         me = git(ctx, b"hash-object", b"--no-filters", b"--stdin", data=read(os.path.abspath(__file__)))[1].strip()
         if me != object_at(ctx, ctx.trusted, TRUSTED_CODE[0]):
             raise Fault("RUNNER_MISMATCH", me, "正在运行的 run.py 不是受信提交里的那一份")
-        out(b"RUNNER", b"blob=" + me, b"from=" + ctx.trusted + b":" + TRUSTED_CODE[0])
+        out("RUNNER", b"blob=" + me, b"from=" + ctx.trusted + b":" + TRUSTED_CODE[0])
+        for n, (name, step) in enumerate(zip(STEPS, steps), 1):
+            if n < start:
+                continue
+            if n > ctx.until:
+                out("RESULT", "PARTIAL", "只跑到第 %d 步，没有做完整判定" % ctx.until)
+                return 2
+            state["step"], began = name, time.monotonic()
+            try:
+                reds, note = step(ctx)
+            except Exception:
+                out("STEP", n, name, "FAULT", "%.1fs" % (time.monotonic() - began))
+                raise
+            for code, obj, msg in sorted(set(reds), key=lambda r: (safe(r[0]), safe(r[1]), safe(r[2]))):
+                out("RED", name, code, obj, msg)
+            out("STEP", n, name, "RED" if reds else "GREEN", "%.1fs" % (time.monotonic() - began), note)
+            if reds:
+                out("RESULT", "RED", "第 %d 步 %s 判红，后面的步骤没有跑" % (n, name))
+                return 1
+        out("RESULT", "GREEN", "七步全绿（第 5 步源码形状未安装）")
+        if state["output"] is not None:
+            state["step"] = "output"
+            return fault(Fault("OUTPUT", "stdout", "输出写不出：%s" % type(state["output"]).__name__))
+        return 0
     except Fault as f:
-        return fault("prepare", f)
-    except Exception as e:  # 意外一律归入无法判定
-        return fault("prepare", Fault("INTERNAL", "-", "%s: %s" % (type(e).__name__, e)))
-    for n, (name, step) in enumerate(zip(STEPS, steps), 1):
-        if n < start:
-            continue
-        if n > ctx.until:
-            out(b"RESULT PARTIAL", "只跑到第 %d 步，没有做完整判定" % ctx.until)
-            return 2
-        began = time.monotonic()
-        try:
-            reds, note = step(ctx)
-        except Fault as f:
-            out(b"STEP", n, name, b"FAULT", "%.1fs" % (time.monotonic() - began))
-            return fault(name, f)
-        except Exception as e:
-            out(b"STEP", n, name, b"FAULT", "%.1fs" % (time.monotonic() - began))
-            return fault(name, Fault("INTERNAL", "-", "%s: %s" % (type(e).__name__, e)))
-        for code, obj, msg in sorted(set(reds), key=lambda r: (r[0], show(r[1]), r[2])):
-            out(b"RED", name, code, show(obj), msg)
-        out(b"STEP", n, name, b"RED" if reds else b"GREEN", "%.1fs" % (time.monotonic() - began), note)
-        if reds:
-            out(b"RESULT RED", "第 %d 步 %s 判红，后面的步骤没有跑" % (n, name))
-            return 1
-    out(b"RESULT GREEN", "七步全绿（第 5 步源码形状未安装）")
-    if out_err:
-        emit(2, b"FM FAULT output OUTPUT stdout", "输出写不出：%s" % out_err[0])
-        return 2
-    return 0
+        return fault(f)
+    except Exception as e:  # noqa: BLE001  意外一律归入无法判定
+        return fault(Fault("INTERNAL", "-", "%s: %s" % (type(e).__name__, e)))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    try:
+        code = main(sys.argv[1:])
+    except BaseException:  # noqa: BLE001  连 main 的兜底都失败时仍以无法判定结束
+        code = 2
+    raise SystemExit(code)
