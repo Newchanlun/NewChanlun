@@ -409,6 +409,8 @@ CASES = [
                              ("修复", {F + b"sources/evil.md": X}, {fault}), ("删除", {}, {fault}))] + [
     ("R3-B1 基线 fm_env.sh 指向树，infra 放行修复", {}, "infra/x", True, 2, {"BASE_FORM"},
      {b"scripts/fm_env.sh": (b"100644", {b"a": X})}),
+    ("R3 被审符号链接指向缺失对象：先报 MODE 再退 2", {F + b"Chan/Thm/link.lean": (b"120000", MISSING)}, "proof/x",
+     False, 2, {"MODE", "GIT"}),
     ("R3-M7 基线树不规范时被审红项先报出", {F + b"Chan/Thm/B.lean": EXEC}, "proof/x", False, 2, {"MODE", "BASE_FORM"},
      {F + b"Chan/Thm/B.lean": None, F + b"Chan/Thm": [(b"B.lean", X), (b"B.lean", MOD)]}),
     # 审阅 R3-B2：祖先目录的出现与消失不进改动集合
@@ -595,7 +597,7 @@ def suite(script, tmp, verbose, fixture=None):
     return len(results), len(failed)
 
 
-HEAD_PART = "    new = normative(repo, head, red)\n    shape(new, red)\n"
+HEAD_PART = "    new = normative(repo, head, red, with_shape=True)\n"
 BASE_PART = ('    base_form = []\n    old = normative(repo, base, lambda *r: base_form.append(r))\n'
              '    if base_form:\n        raise Fault("BASE_FORM", base_form[0][1], "基线树不规范：" + base_form[0][2])\n')
 MUTANTS = [
@@ -624,9 +626,12 @@ MUTANTS = [
     ("TRUST_UNAPPROVED 漏掉门禁目录节点自身（审阅 R2-M10）", "any(p == GATE_DIR or within(p, TRUSTED_SURFACE)",
      "any(within(p, TRUSTED_SURFACE)"),
     ("形状检查只在清单有变化时做（审阅 R2-B1）",
-     "    shape(new, red)\n    base_form = []\n    old = normative(repo, base, lambda *r: base_form.append(r))\n",
-     "    base_form = []\n    old = normative(repo, base, lambda *r: base_form.append(r))\n"
-     "    shape(new, red) if old != new else None\n"),
+     "    new = normative(repo, head, red, with_shape=True)\n    base_form = []\n"
+     "    old = normative(repo, base, lambda *r: base_form.append(r))\n",
+     "    new = normative(repo, head, red)\n    base_form = []\n"
+     "    old = normative(repo, base, lambda *r: base_form.append(r))\n    shape(new, red) if old != new else None\n"),
+    ("对象类型核对先于形状检查（审阅 R3 探针 FILE-OBJ）", "    if with_shape:\n        shape(tree, red)\n    file_objects(repo, tree, red)\n",
+     "    file_objects(repo, tree, red)\n    if with_shape:\n        shape(tree, red)\n"),
     ("祖先目录的出现与消失进改动集合（审阅 R3-B2）", "if p not in ANCESTORS and old.get(p) != new.get(p)",
      "if old.get(p) != new.get(p)"),
     ("基线不核文件条目的对象类型（审阅 R3-B1）", "old = normative(repo, base,", "old = inventory(repo, base,"),

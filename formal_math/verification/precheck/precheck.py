@@ -145,9 +145,12 @@ def file_objects(repo, tree, red):
             red("TREE_FORM", path, "文件条目指向的不是 blob，而是 %s" % kinds[oid][0].decode())
 
 
-def normative(repo, commit, red):
-    """第 2 条：取清单并核其规范性（树对象逐层核对、文件条目的对象类型）。基线与被审提交走同一个函数。"""
+def normative(repo, commit, red, with_shape=False):
+    """第 2 条：取清单并核其规范性（树对象逐层核对、文件条目的对象类型）。基线与被审提交走同一个函数。
+    with_shape 时在核对象类型之前先做第 6 条，使对象缺失退 2 时形状红项已报出。"""
     tree = inventory(repo, commit, red)
+    if with_shape:
+        shape(tree, red)
     file_objects(repo, tree, red)
     return tree
 
@@ -204,8 +207,7 @@ def check(repo, base, head, branch, approved, red):
     m = BRANCH.fullmatch(branch)
     role = m.group(1) if m else None
     # 被审清单的第 2、6 条无条件执行，并在读基线清单之前做完：基线不规范退 2 时，被审提交的红项已先报出。
-    new = normative(repo, head, red)
-    shape(new, red)
+    new = normative(repo, head, red, with_shape=True)
     base_form = []
     old = normative(repo, base, lambda *r: base_form.append(r))
     if base_form:
