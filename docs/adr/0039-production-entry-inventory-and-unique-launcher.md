@@ -514,5 +514,11 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 ## 修订（#2134，X 凭据注入键名，2026-11-20）
 
 1. **键名。** X 执行 profile 必须显式指定一个凭据注入键。推荐 `NC_X_VENUE_CREDENTIAL`；也可在该名字后加一个下划线和一个非空后缀。后缀首字节须为 ASCII 字母或数字，其余字节只许 ASCII 字母、数字或下划线；全名最多 64 字节，区分大小写，按原字节使用。空名、等号、NUL、空白、非 ASCII 和专用命名空间外的名字一律不合法。该命名空间只用于 X 凭据注入，不作查找路径、动态加载或其他进程控制变量；不维护逐项禁止名单。在 Linux/macOS 的 `name=value` 启动环境中，首个等号就是键值分隔符；合规名字只编码为同名键，不可能编码成 `PATH`。
-2. **入口与拒绝。** launcher 装读 X profile 与 X 自己读 profile 的 `serve`（含单独启动）用同一个键名谓词。旧 `x-execution-profile/1` 的 `credential_scope.env` 与 [ADR 0062](0062-fu18-venue-account-permission-binding.md) 的 `x-execution-profile/2` 的 `credential_source.env` 同口径。各版本只取自己定义的字段，任何模式均不得用旧字段、默认值、别名、去空白或大小写转换挽救不合法值。缺字段、非字符串或不合规均报 `InvalidDomain`；launcher 在读凭据文件、创建状态及启动任何域（含 init）前拒绝，X 在持写者锁、开库或取环境凭据前拒绝。拒绝信息指出字段及合法形状，不回显原输入或凭据。
-3. **隔离与生效。** 本修订只限名字，不改凭据来源、作用域、发送门、交易与账本判据。读用真实凭据和授予权限仍按 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 的独立用户授权；文书裁定不代签。现有配置若取命名空间外的名字，部署方须在启用新版本前改成合规名字并同步已有获授权的注入配置，不设旧配置豁免。键名校验和 Linux `stat` 子进程环境收口由 #2113 一并实现；本节不把校验等同于清理单启 X 时外部传入的原始环境，也不把文书合入当作验收 13 已通过。
+2. **先查版本，再验键名。** 当前 X 只支持 `x-execution-profile/1`。#2113 须让 launcher 与单启 X 在解析凭据字段前一致拒绝不支持的版本：即使 `/2` 的键名合规，两入口也须报 `VersionUnsupported`、退出 `2`。当前从 `credential_scope.env` 取键；将来独立启用 [ADR 0062](0062-fu18-venue-account-permission-binding.md) 的 `/2` 时，`{env,file}` 整体迁到 `credential_source`，不得回读旧 `env` 或 `file`。两入口对受支持版本用同一个键名谓词；键名字段缺失、非字符串或不合规均报 `InvalidDomain`，不用默认值、别名、去空白或大小写转换。launcher 在读凭据文件、创建状态及启动任何域（含 init）前拒绝，X 在持写者锁、开库或取环境凭据前拒绝。键名错误指出字段及合法形状，不回显原输入或凭据。
+3. **同一次启动只认一份执行 profile。** launcher 启动的硬性前提是部署方提供版本化不可变路径；发布新版本用新路径，不得改写、覆盖或重指向本次启动绑定的路径。launcher 从首次读到的完整原始字节计算内容身份，用同一份字节解析配置，并把绑定的路径和内容身份传给 X。由 launcher 启动的 X 核对自己读到的字节的内容身份，并只消费这份已核对的字节；身份缺失、不符或文件读不到，均须在持锁、开库、读环境凭据前拒绝 X 启动，不重试另一份 profile。单启 X 直接校验并消费自身一次读取的字节。
+   - **负控：** launcher 读完键为 `NC_X_VENUE_CREDENTIAL_A` 的 profile 后、X 读取前，测试夹具切换成键为 `NC_X_VENUE_CREDENTIAL_B` 的 profile。两个键均合规，验收须看到 X 因 profile 内容身份不符拒绝启动，而非归入非法键拒绝；不得出现 launcher 注入 `_A`、X 按 `_B` 查凭据并继续启动。
+4. **Linux `stat` 环境。** #2113 验收 `stat` 实际收到的进程环境：父进程原有 `PATH` 按原字节保留；原本未设就不补；除此以外，环境项必须为零。只删除指定凭据键、或只验证某个键不出现，均不满足该后置条件。
+5. **B13 门禁。** #1383 在包含全树进程环境采样测试的 Linux 实装候选上，按验收 13 的 `--exact` 命令实际运行 `production_session_entry` 中的 `credential_key_only_in_x_child`。日志须有 `test credential_key_only_in_x_child ... ok` 和 `1 passed`；命令退出 `0` 但匹配零用例不通过。本修订的纯文档 PR（#2153）CI 不替代该实装测试。
+6. **权限与迁移。** #2113 落实当前 `/1` 的准入、启动绑定与隔离，不改凭据作用域、发送门、交易或账本判据，不启用 `/2` 或任何实盘发送权限。读用真实凭据与授予权限仍须 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 的独立用户授权。已有名字不合规时，部署方须在升级前同步改好 profile 和获授权的注入配置，不设旧配置豁免。
+
+勘误（`origin/main@0e29d008`）：本文件第 511–512 行引用的凭据条款在第 287 行，启动门正文在第 289–290 行；历史引文保留原样。
