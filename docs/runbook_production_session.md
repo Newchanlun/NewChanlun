@@ -429,7 +429,7 @@ v1 `accept` 另被 `LegacyAdmissionBudgetAdapterMissing` 设计性关闭，S 唯
 
 3. 复核退役名消失，现役名、owner、原锁及旁挂身份不变。运行正式入口后复核原址读口。记录退役来源、身份、保留期判定、删除回执及未清理对象；删除没有改名隔离的回退能力。
 
-### 5. 先补齐共同 checkpoint，再对需要恢复的域升代
+### 5. 先补齐共同 checkpoint 再续服；S 介质阻断时可先具名恢复
 
 恢复备份、从旧二进制前滚或异常停机后，先判断整会话能否续上同一业务边界，再判断哪些域需要升代。E 或任一 B 从备份恢复，或曾由不识 `clean_close/1` 的二进制开服时，即使库内标记匹配持久代，也不能证明最近一次正常关库；该域仍须正式恢复。
 
@@ -437,10 +437,10 @@ v1 `accept` 另被 `LegacyAdmissionBudgetAdapterMissing` 设计性关闭，S 唯
 2. **只读核共同向量与推进边界。** 按 [ADR 0065 共同 checkpoint](https://github.com/Newchanlun/NewChanlun/blob/855cf58a42919bf904b06e000682b71a64feabc0/docs/adr/0065-production-session-endpoint-ownership.md#L212-L222)，以原 manifest 的 S、E、全部 B（manifest 顺序）、X 为全员，不按幸存回执或换代计划选成员。逐域从原件核同一会话、会话代、manifest／证据类、`checkpoint_id`、bar 边界和输入前沿、各域 cut、快照／重放起点、实际最高已推进边界（含未封口 bar）。
 
    每条跨域前件都须在源域所选 cut 的已核链内，核其提交序号、root 和被引用的原记录。全员封口记录绑定同一向量且因果闭合，才得到最后共同向量。首个业务 bar 中断时，可用已封齐的初始向量 N=0。缺证、冲突、前件落在向量外或有域已推进未共同封口时，普通续服以 `StorageUnavailable：共同 checkpoint 未完成或不可核验` 拒绝，不 init、不起写者。不能取更旧向量掩盖推进，也不能当作首启。
-3. **推进超出最后共同边界时，离线逐 bar 补齐。** 最后共同向量 N 因果闭合、且能证明停服时的最高推进边界时，获授权的域运维才可使用已获批、已部署的 `recover-checkpoint`。同一具名离线计划绑定原会话／manifest／证据类、N 的完整向量、已证最高边界及冻结输入、策略、时钟和前件。从 N 的下一 bar 按原时钟逐个补到最高边界，不能跨 bar 拼 cut。缺实现、批准或原件就保持停机。
+3. **推进超出最后共同边界时，离线逐 bar 补齐。** 整组停写、保全并核实各域进度后，若仅 S 已持久推进下一 bar 并崩溃留下可核的同源 WAL/SHM，或 S 介质阻断补 bar，且满足第 8 节第 2 步的 ADR 0050 全部前件，可先用原具名请求执行 `s-recovery recover-named`，取得 S 当前回执；未全员封口仍禁整组启动。最后共同向量 N 因果闭合且停服时的最高推进边界可证时，获授权的域运维才可使用已获批、已部署的 `recover-checkpoint`。同一具名离线计划绑定原会话／manifest／证据类、N 的完整向量、已证最高边界及冻结输入、策略、时钟和前件；从 N 的下一 bar 按原时钟逐个补到最高边界，不能跨 bar 拼 cut。缺实现、批准或原件就保持停机。
 
    释放人工 FD 后，由命令在部署隔离下取本域原锁。已收盘的域用不可改写的本 bar 收盘原件核原 cut、提交链、快照和前件，不用最新 cut 倒填；未收盘的域从上一共同边界按原因果重放，校对已有 ID、回执和 root，只补可核的未应用事项和缺失收盘记录。每一 bar 先核全员向量和因果闭合、完成共同封口，再处理下一 bar；中断后用同一计划复核并复用已完成的原件。全程不监听、不接纳新业务、不启动发送 adapter，不重调场所、不重发、不回退已提交事实。simulation 只按原工作态和受控撮合重跑，保留已提交真相行；实验／生产只按获准的只读对账取证，未知责任保留。`recover-checkpoint` 在 E/B 首次改写的事务撤销旧关库标记，不写新标记，也不代替换代。
-4. **共同向量完成后，才对确需恢复的域升代。** E 和各 B 走本节具名恢复，S 走第 8 节的具名恢复，真实 X 仍按 #1401/C09.8。保持部署侧隔离；执行恢复命令前释放人工维护 FD，由对应域二进制自取原锁。不要手工改关库标记或库代。
+4. **全员封口后，先为确需恢复的 E/B 升代，再走整组普通续服。** E 和各 B 走本节具名恢复。S 若在封口前已恢复，续服沿用并复核同一份 S 当前回执，不再升代；S 尚未恢复且确需恢复时按第 8 节处理。真实 X 仍按 #1401/C09.8。保持部署侧隔离；执行恢复命令前释放人工维护 FD，由对应域二进制自取原锁。不要手工改关库标记或库代。
 
    **先核 E/B CLI 世代，再选命令。** 从发布清单核对 launcher 与域二进制，不拿原库试探参数。
 
@@ -565,11 +565,11 @@ owner 原地更新中断可能留下半写 JSON；退役可能停在改名后、
 在 [H1 生效条件](#h1-生效条件) 中引用的 `s_service_control.py start-s` 和 `recover`，只描述独立 S 的 `s-launcher/4` 链。对 ADR 0065 管辖的生产会话端点目录，**不得运行** [S Python 控制器](../s_session/s_service_control.py) 或 [E/B Python 控制器](../s_session/economic_service_control.py)（包括用来清场、启动、停止或恢复）。不得借用两者的旧端点清理逻辑（包括 `prepare_socket`）。即使本次布局只适用 ADR 0065 的旧合同直绑，也不切换到 Python 控制器。其他原有独立用法不变。
 
 1. 正式会话拒启、计划停机或恢复时，由已授权的会话运维先核发布件、原 manifest、域与端点目录范围。launcher 仍存活时，通过部署控制面请求已核身份的 launcher 有序停止；核每个域退出、监听关闭、锁释放。最终放行后若 launcher 已退而有孤儿，走第 1 节；真实场所 X 的旧发送者另按 #1401 确认隔离。启动失败的 `stopped` 或退出码不是逐域正常关库证据。
-2. **停完先走第 5 节第 1–3 步：** 核最后共同向量；有域推进超出共同边界时，按同一具名计划逐 bar 补到已证最高边界。共同向量完成后才对确需恢复的域升代；launcher 只校验和装配。E/B 用第 5 节的具名恢复。S 用本次已获批、已部署的 [ADR 0050 #2128](https://github.com/Newchanlun/NewChanlun/blob/6cbcbf22222929f07501399c3226454441fdd698/docs/adr/0050-s-resource-admission-contract-v1.md#L62-L110) 正式恢复链。S 恢复、E/B 具名子集、模拟 X 连续交接或共同 checkpoint／两阶段放行，**凡本次需要但尚未部署，停在人工门**。
+2. **停完先保全现场、核各域进度和最后共同向量（第 5 节第 1–2 步）。** S 需恢复时，按本次已获批、已部署的 [ADR 0050 #2128](https://github.com/Newchanlun/NewChanlun/blob/6cbcbf22222929f07501399c3226454441fdd698/docs/adr/0050-s-resource-admission-contract-v1.md#L62-L110) 走下述本域具名恢复；满足第 5 节第 3 步的 S 介质恢复条件时，可在补 bar 前先做。共同边界之后仍有未封口进展时，按同一具名离线计划逐 bar 补齐；全员封口前严禁启动整组。封口后只对确需恢复的 E/B 按第 5 节升代；launcher 只校验和装配。S 恢复、E/B 具名子集、模拟 X 连续交接或共同 checkpoint／两阶段放行，**凡本次需要但尚未部署，停在人工门**。
 
    **S：同一原 manifest、同一具名请求。** 将 `SESSION_MANIFEST` 设为原 manifest，运行 `"$RELEASE/production_session" s-recovery inspect-recovery --manifest "$SESSION_MANIFEST"` 只读取证。按已核切面和原时钟 Plan 制备 `s-recovery/1` 并将 `S_REQUEST` 设为该请求路径；用同一二进制执行 `s-recovery recover-named --manifest "$SESSION_MANIFEST" --s-recovery-request "$S_REQUEST"`。域入口先核原签锚、binding 和 limits 原字节，由生效合同裁定后才使用预算或读取请求及业务载荷；`AdmissionContractAwaitingMeasurement` 不换入口。故障前登记的库身份、独立前沿和端点索引必须可核；按原锁序取得原写者锁和维护锁，不创建替代锁，持双锁至 SQLite 关闭、持久收尾及记账结束。
 
-   具名恢复先落持久意图，有 SHM 才按批准的受控 VFS 路径收尾，再按同一个 R4（含适用的 H1 和原冻结 `resource_identity`）核介质与切面，才提交新代、未完成 Begin 处置和原回执。不中途手删 SHM/WAL，不绕过活动意图；只有同 ID、同字节、同部署的原具名请求可续做。历史 `query-recovery` 只取持久原件，不能替代 `current-recovery` 的当前资格核验。
+   具名恢复先落持久意图，有 SHM 才按批准的受控 VFS 路径收尾，再按同一个 R4（含适用的 H1 和原冻结 `resource_identity`）核介质与切面，才提交新代、未完成 Begin 处置和原回执。不中途手删 SHM/WAL，不绕过活动意图；只有同 ID、同字节、同部署的原具名请求可续做。用同一原请求经 `current-recovery` 核取当前回执；历史 `query-recovery` 只取持久原件。若下一 bar 尚未全员封口，即使当前回执有效，整组也必须保持停服（`unsealed_next_bar`：普通启动报 `StorageUnavailable：共同 checkpoint 未完成或不可核验`，不 init、不起写者、不 bind、不接纳或发送）。按同一离线计划用 `recover-checkpoint` 从最后共同边界逐 bar 补齐并封口，再以同一原请求复核并沿用这份 S 回执续服，不再给 S 升代。
 
    持久版本先决定读写合同。按 [ADR 0038 旧原件边界](https://github.com/Newchanlun/NewChanlun/blob/e9b12ef9eeff26cab51e295826a11c871e189ac7/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L190-L194)，旧库按原写合同与原布局续服，不能用 `recover` 或 `serve` 原地升级格式，也不能混写或把旧责任自动迁入新库。封存原件按原持久版本在归档介质上只读核验，缺原件不从当前态补证。旧部署缺本事故所需的恢复能力时，停在人工门；需迁移另走获准流程。
 
@@ -622,7 +622,7 @@ owner 原地更新中断可能留下半写 JSON；退役可能停在改名后、
      --s-recovery-request "${S_REQUEST:?}" --economic-recovery-plan "${RECOVERY_PLAN:?}"
    ```
 
-4. **按批次的原子提交点判定两阶段放行。** 第一阶段，S、E、每个 B 和 X 各持原锁重核本域布局、介质和同一共同向量；launcher 收齐同批准备回报才发初始化／绑定许可。续服不 init；首启在许可后以原 guard 初始化所需库，首笔业务前须持久封齐 N=0。
+4. **按批次的原子提交点判定两阶段放行。** 第一阶段，S、E、每个 B 和 X 先核本域布局，按两条路径准备。**全新首启：** 各域持本域 guard（有原锁则核原锁）重证空址或合法初始库、无历史业务进展，确认 E/B 的库存在性组合与预检一致（部分缺失即拒）；不要求已有 N=0 向量。launcher 收齐同批准备回报才发初始化／绑定许可；收到许可后才按原 guard 初始化所需库、取得真实初始 cut，并在首笔业务前持久封齐 N=0。**续服：** 各域持原锁重核本域布局、介质、所选共同 checkpoint 向量及实际推进边界。launcher 收齐同批准备回报才发绑定许可，续服严禁 init。
 
    第二阶段，各监听域实际 bind／listen，完成末次布局、身份及适用的认领核验后回报；无监听 X 也须回报本域启动前件完成。launcher 收齐同批回报与适用的 N=0 证据后，在共享放行字仍为 0 时对全员做最后一轮存活复核。已有退出记录、本轮观察到退出或无法核验（包括 X）均中止；手册开头所说的放行前 X 退出按这一观察边界判定。只有全员通过才由唯一可写的 launcher 将该批的放行字一次原子写为 1；各域只读，回报和通知都不等于提交。
 
