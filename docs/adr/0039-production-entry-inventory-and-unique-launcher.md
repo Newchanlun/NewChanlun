@@ -510,3 +510,9 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 
 1. **凭据来源。** :285 的「profile 的 `credential_scope` 指向的来源」读作 X 执行 profile 的 `credential_source.{env,file}`（由 `credential_scope.{env,file}` 改名）。`credential_scope` 只指 ADR 0028:22 的作用域政策字段（ADR 0062 裁定二）。
 2. **启动门。** :287-288 对 `experiment` profile 同样生效（ADR 0062 裁定五），作为独立的发送前置件，不是 ADR 0045 SR-3 的失效触发，拒发不产生 SR-3 记录。X 按 ADR 0062「发送门（8 步）」核验，拒发词汇按 ADR 0062 裁定六。拒发在当前 `writer_epoch` 内为终态并拦截一切写请求（ADR 0062 裁定七），**仅对 `P1-hl-testnet`（`experiment`）签署**；production（P2）下拒发期间撤单、reduce-only 平仓与急停是否放行是真金取舍，属 P 类，在 P2 激活时另裁（#1561 后继），本条不预裁。
+
+## 修订（#2079，端点与整会话恢复职责，2026-11-25）
+
+（append-only：保留上列裁定与修订原文；本节按 [#2079](https://github.com/Newchanlun/NewChanlun/issues/2079) 的 [ADR 0065「恢复职责分派」](0065-production-session-endpoint-ownership.md#恢复职责分派) 执行。）
+
+裁定三「启动门」和 #1539「恢复读法」所列 checkpoint 义务不变，执行者明确分开：各域持自己的写者锁，检测本域 checkpoint 证据、加载本域快照、重放并校验幂等；`production_session` 只读汇总共同完成证据、核回执与编排启动，不替域写库、重放或升代。共同完成不明或仅部分域推进时，按 ADR 0065 拒绝普通整会话续服；#1539 的三种证据类及其重放边界不变。
