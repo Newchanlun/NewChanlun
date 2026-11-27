@@ -82,7 +82,7 @@ while [ "\$#" -gt 0 ]; do
     continue
   fi
   case "\$arg" in
-    --bind|--ro-bind|--dev-bind|--bind-try|--ro-bind-try|--dev-bind-try|--symlink|--setenv)
+    --bind|--ro-bind|--dev-bind|--bind-try|--ro-bind-try|--dev-bind-try|--symlink|--setenv|--chmod|--file|--bind-data|--ro-bind-data|--bind-fd|--ro-bind-fd)
       [ "\$#" -ge 2 ] || { echo "bwrap_pkgbind: 缺少参数: \$arg" >&2; exit 2; }
       out+=("\$arg" "\$1" "\$2")
       if [ -n "\$pkg_src" ] && { [ "\$arg" = "--bind" ] || [ "\$arg" = "--ro-bind" ]; } && [ "\$2" = "\$lake_dir" ]; then
@@ -90,7 +90,7 @@ while [ "\$#" -gt 0 ]; do
       fi
       shift 2
       ;;
-    --tmpfs|--dir|--dev|--proc|--chdir|--unsetenv|--file|--bind-data|--ro-bind-data|--seccomp|--add-seccomp-fd|--info-fd|--json-status-fd|--sync-fd|--block-fd|--userns-block-fd|--hostname|--cap-add|--cap-drop|--uid|--gid|--perms|--size|--chmod|--remount-ro)
+    --tmpfs|--dir|--dev|--proc|--chdir|--unsetenv|--seccomp|--add-seccomp-fd|--info-fd|--json-status-fd|--sync-fd|--block-fd|--userns-block-fd|--hostname|--cap-add|--cap-drop|--uid|--gid|--perms|--size|--remount-ro)
       [ "\$#" -ge 1 ] || { echo "bwrap_pkgbind: 缺少参数: \$arg" >&2; exit 2; }
       out+=("\$arg" "\$1")
       shift
@@ -107,6 +107,10 @@ while [ "\$#" -gt 0 ]; do
       ;;
   esac
 done
+if [ "\$saw_lake" = 1 ] && [ -n "\$pkg_src" ]; then
+  echo "bwrap_pkgbind: 未遇到 --unshare-all 或 --，拒绝未注入只读依赖绑定继续执行" >&2
+  exit 2
+fi
 exec "\$real_bwrap" "\${out[@]}"
 EOF
 chmod 0700 "$out_exe"

@@ -18,7 +18,11 @@
   T12 要求 4 必红：正式 comparator.json 含非空 definition_names -> 门 5 拒收
   T13 要求 4 必红：正式 comparator.json 含非标准公理 sorryAx -> 门 5 拒收
   T14 要求 4 隔离核验：materialize.py challenge 物理不含任何证明目录文件
-  T15 要求 3 隔离核验：bwrap_pkgbind.sh 剥除 --share-net 且沙箱内无法写只读依赖目录
+  T15 要求 3 隔离核验：bwrap_pkgbind.sh 剥除 --share-net、双参 --chmod、未注入 fail-closed 且沙箱内无法写只读依赖目录
+  T16 mode=main 快进快速路径与完整主干门
+  T17 B2 回归：mode=main 非快进回退禁止快速路径，强制重型门
+  T18 B1 回归：损坏 ChallengeFalse.lean.in 时 comparator.sh 必须判红（不得假绿）
+  T19 C1 回归：comparator 封闭顶层键白名单、双配置共存、非法 challenge_module、有 ChanChallenge 缺配置必红
 
 用法：
   python3 -I formal_math/verification/ci/selftest_ci.py [--repo <仓库根目录>]
@@ -105,21 +109,36 @@ def test_t1_workflow_and_shell(repo):
         assert "paths" not in (on_block.get("pull_request_target") or {}), "pull_request_target 禁止 paths 过滤"
         assert "paths" not in (on_block.get("push") or {}), "push 禁止 paths 过滤"
         assert parsed.get("permissions") == {"contents": "read"}, "permissions 必须严格为 contents: read"
+        assert "concurrency" not in parsed, "不得使用顶层共享 concurrency（防 paranoid 阻塞主干/放行门）"
         jobs = parsed.get("jobs") or {}
         assert set(jobs.keys()) >= {"formal-math-pr", "formal-math-trusted-release", "formal-math-main", "formal-math-paranoid"}
         assert jobs["formal-math-trusted-release"].get("environment") == "formal-math-trusted-change"
-        # 检查所有 uses 均为 40 位 SHA 钉选，且 run: 文本中不直接插值不可信事件/输入表达式
+        # 四个作业各自独立 concurrency 组，且所有 workflow_dispatch 路径限定 refs/heads/main、checkout 钉 ref: main
+        groups = {}
+        for jname in ("formal-math-pr", "formal-math-trusted-release", "formal-math-main", "formal-math-paranoid"):
+            conc = jobs[jname].get("concurrency") or {}
+            assert conc.get("group"), f"{jname} 缺少作业级 concurrency.group"
+            groups[jname] = conc["group"]
+        assert len(set(groups.values())) == 4, f"作业并发组碰撞: {groups}"
+        for jname in ("formal-math-trusted-release", "formal-math-main", "formal-math-paranoid"):
+            assert "github.ref == 'refs/heads/main'" in str(jobs[jname].get("if", "")), \
+                f"{jname} 缺少 github.ref == 'refs/heads/main' 约束"
+        assert wf.count("::add-mask::$auth") == 2, "fetch_pr 须对 $auth 做 ::add-mask::"
+        # 检查所有 uses 均为 40 位 SHA 钉选、checkout 显式 ref: main、run: 不直接插值不可信表达式
         bad_expr = re.compile(r"\$\{\{\s*(github\.event\.pull_request\.|inputs\.)")
         for jname, jdef in jobs.items():
             for step in jdef.get("steps", []):
                 if "uses" in step:
                     assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", step["uses"]), f"{jname} action 未钉选 SHA: {step['uses']}"
+                    if step["uses"].startswith("actions/checkout@"):
+                        assert (step.get("with") or {}).get("ref") == "main", f"{jname} checkout 必须显式 ref: main"
                 if "run" in step:
                     assert not bad_expr.search(step["run"]), f"{jname} step.run 含未隔离表达式: {step['name']}"
     except ImportError:
         assert "pull_request_target:" in wf
         assert "paths:" not in wf
         assert "environment: formal-math-trusted-change" in wf
+        assert wf.count("::add-mask::$auth") == 2
         for m in re.finditer(r"uses:\s*(\S+)", wf):
             assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", m.group(1)), f"action 未钉选 SHA: {m.group(1)}"
 
@@ -129,15 +148,41 @@ def test_t1_workflow_and_shell(repo):
     assert len(sh_files) >= 6, f".sh 数量过少: {sh_files}"
     for p in sh_files:
         run(["bash", "-n", p], check=True)
-    # 全仓工作流与 ci/ 下文件在磁盘上无执行位
+    # 全仓工作流与 ci/ 下文件在磁盘上无执行位，且 ci/ 内不含 LAKE_NAMES 原名
+    lake_names = {"lakefile.toml", "lakefile.lean", "lake-manifest.json", "lean-toolchain", ".lake"}
     for root in (ci_dir,):
         for dp, _, fns in os.walk(root):
             for fn in fns:
+                assert fn.lower() not in lake_names, f"ci/ 下禁止出现 Lake 配置原名: {fn}"
                 fp = os.path.join(dp, fn)
                 mode = stat.S_IMODE(os.lstat(fp).st_mode)
                 assert (mode & 0o111) == 0, f"formal_math 下不允许执行位: {fp} ({oct(mode)})"
     wf_mode = stat.S_IMODE(os.lstat(wf_path).st_mode)
     assert (wf_mode & 0o111) == 0, f"formal-math.yml 不允许执行位 ({oct(wf_mode)})"
+
+
+def test_t2_precheck_compliance(repo):
+    """核对当前仓库 HEAD（及其父提交）对 precheck.py 的形状与放行规则完全合规。"""
+    precheck = os.path.join(repo, "formal_math", "verification", "precheck", "precheck.py")
+    if not os.path.isfile(precheck):
+        raise AssertionError(f"缺少 precheck.py: {precheck}")
+    head = git(repo, "rev-parse", "HEAD")
+    # 1) 自身对自身：整棵 formal_math 形状与模式必须 100% 绿
+    p_self = run([sys.executable, "-I", precheck, repo, head, head, "main"])
+    assert p_self.returncode == 0 and p_self.stdout.strip() == f"PRECHECK GREEN OK {head} role=-", \
+        f"T2 整树形状失败: {p_self.returncode}\n{p_self.stdout}\n{p_self.stderr}"
+    # 2) 若父提交已有 precheck.py 且本提交改了 ci/ 或 formal-math.yml，则未放行报 TRUST_UNAPPROVED、放行绿
+    parent_p = run(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "HEAD^^{commit}"], env=GIT_ENV)
+    if parent_p.returncode == 0:
+        parent = parent_p.stdout.strip()
+        diff_names = git(repo, "diff", "--name-only", f"{parent}..{head}").splitlines()
+        if any(p == ".github/workflows/formal-math.yml" or p.startswith("formal_math/verification/") for p in diff_names):
+            p_red = run([sys.executable, "-I", precheck, repo, parent, head, "infra/t2-check"])
+            assert p_red.returncode == 1 and "TRUST_UNAPPROVED" in p_red.stdout, \
+                f"T2 未放行应报 TRUST_UNAPPROVED: {p_red.returncode}\n{p_red.stdout}"
+            p_ok = run([sys.executable, "-I", precheck, "--trusted-change-approved", repo, parent, head, "infra/t2-check"])
+            assert p_ok.returncode == 0 and p_ok.stdout.strip() == f"PRECHECK GREEN OK {head} role=infra", \
+                f"T2 放行应绿: {p_ok.returncode}\n{p_ok.stdout}\n{p_ok.stderr}"
 
 
 def test_t3_materialize_isolated(repo):
@@ -318,6 +363,16 @@ def test_t15_bwrap_pkgbind_ro_offline(repo, tmp):
             f'if touch "{lake_dir}/packages/pwned" 2>/dev/null; then echo "RO_BYPASS" >&2; exit 11; fi'
         ])
         assert p.returncode == 0, f"T15 失败 ({p.returncode}): {p.stdout}\n{p.stderr}"
+        # C2 回归：--chmod 吃 2 参，且缺 --unshare-all / -- 时必须 fail-closed 退 2
+        echo_wrap = os.path.join(tmp, "wrap-echo-test.sh")
+        run(["bash", os.path.join(repo, "formal_math/verification/ci/bwrap_pkgbind.sh"),
+             "--emit", echo_wrap, "--lake-dir", lake_dir, "--packages", pkg_dir,
+             "--bwrap", "/bin/echo", "--offline"], check=True)
+        p_chmod = run(["env", "-i", echo_wrap, "--bind", lake_dir, lake_dir,
+                       "--chmod", "0755", "--share-net", "--unshare-all", "--", "/bin/true"], check=True)
+        assert "--chmod 0755 --share-net --ro-bind" in p_chmod.stdout, p_chmod.stdout
+        p_no_flush = run(["env", "-i", echo_wrap, "--bind", lake_dir, lake_dir, "/bin/true"])
+        assert p_no_flush.returncode == 2, f"C2 未注入只读绑定应退 2，实际 {p_no_flush.returncode}"
     finally:
         os.chmod(pkg_dir, 0o755)
         os.chmod(sentinel, 0o644)
@@ -403,7 +458,7 @@ end Chan.Thm
     })
     p = run(["bash", gate, "--phase", "preflight", "--mode", "pr",
              "--repo", mini, "--base", c_main2, "--head", c_stale_proof, "--branch", "proof/stale"])
-    assert p.returncode == 1 and "NOT_ANCESTOR" in p.stderr, f"T9 失败: {p.returncode}\n{p.stdout}\n{p.stderr}"
+    assert p.returncode == 2 and "NOT_ANCESTOR" in p.stderr, f"T9 失败: {p.returncode}\n{p.stdout}\n{p.stderr}"
     print("PASS T9_PROOF_BEHIND_MAIN_RED")
 
     # T10: 合法 proof/* PR 全流程绿（run.py 七步 + lake check + 正式两段隔离 comparator）
@@ -505,6 +560,70 @@ end Chan.Thm
     assert "FM_CI GREEN" in p.stdout and "Your solution is okay!" in p.stdout, p.stdout
     print("PASS T16_MAIN_FAST_PATH_AND_FULL")
 
+    # T17 (B2 回归): mode=main 非快进回退（before 改了 formal_math，head 回退到旧提交）禁止快速路径
+    c_main_fm = make_branch_commit("infra/main-fm-change", c_main2, {
+        "formal_math/README.md": "# changed on main\n"
+    })
+    out17 = os.path.join(tmp, "t17.out")
+    p = run(["bash", gate, "--phase", "preflight", "--mode", "main", "--before", c_main_fm,
+             "--repo", mini, "--base", c_main2, "--head", c_main2, "--branch", "main",
+             "--output-file", out17], check=True)
+    assert "FM_CI PREFLIGHT_OK" in p.stdout and "need_heavy=true" in open(out17).read(), p.stdout
+    print("PASS T17_B2_MAIN_ROLLBACK_NO_FAST_PATH")
+
+    # T18 (B1 回归): 破坏 ChallengeFalse.lean.in 导致挑战构建失败时，comparator.sh 必须判红（不得假绿）
+    broken_ci = os.path.join(tmp, "t18-broken-ci")
+    copy_tree_files(os.path.join(repo, "formal_math/verification/ci"), broken_ci)
+    write_text(os.path.join(broken_ci, "comparator/Sample/ChallengeFalse.lean.in"), "BROKEN SYNTAX ::::\n")
+    p = run(["bash", os.path.join(broken_ci, "comparator.sh")])
+    assert p.returncode == 1 and "挑战构建或导出失败" in p.stdout, \
+        f"T18 B1 回归失败: rc={p.returncode}\n{p.stdout}\n{p.stderr}"
+    print("PASS T18_B1_COMPARATOR_CHAL_FAIL_NO_FALSE_GREEN")
+
+    # T19 (C1 回归): 封闭顶层键白名单、双配置共存、非法 challenge_module、有 ChanChallenge 缺配置必红
+    base_cfg = {
+        "challenge_module": "ChanChallenge.Goal",
+        "solution_module": "Chan.Thm.Basic",
+        "theorem_names": ["Chan.Thm.double_eq"],
+        "definition_names": [],
+        "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
+    }
+    for extra_k, extra_v in (
+        ("external_kernels", {"e": ["/bin/true"]}),
+        ("external_kernels?", {"e": ["/bin/true"]}),
+        ("enable_nanoda", True),
+        ("enable_nanoda", False),
+        ("enable_nanoda?", True),
+        ("unknown_key", 123),
+    ):
+        cf = os.path.join(tmp, f"t19_{extra_k.replace('?', 'q')}_{str(extra_v)[:3]}.json")
+        write_text(cf, json.dumps({**base_cfg, extra_k: extra_v}))
+        p = run([sys.executable, "-I", mat, "validate-comparator-config", "--file", cf])
+        assert p.returncode == 1, f"T19 应拒白名单外键 {extra_k}: rc={p.returncode}\n{p.stdout}\n{p.stderr}"
+
+    c_dual = make_branch_commit("infra/dual-cfg", c_main2, {
+        "formal_math/comparator.json": json.dumps(base_cfg) + "\n"
+    })
+    p = run(["bash", comp, "--skip-samples", "--repo", mini, "--base", c_main2, "--head", c_dual, "--packages", pkg_dir])
+    assert p.returncode == 1, f"T19 双配置共存应退 1，实际 {p.returncode}"
+
+    c_bad_chal = make_branch_commit("infra/bad-chal-mod", c_main2, {
+        "formal_math/verification/comparator.json": json.dumps({
+            **base_cfg, "challenge_module": "Chan.Thm.Basic", "solution_module": "ChanChallenge.Goal"
+        }) + "\n"
+    })
+    p = run(["bash", comp, "--skip-samples", "--repo", mini, "--base", c_main2, "--head", c_bad_chal, "--packages", pkg_dir])
+    assert p.returncode == 1, f"T19 非声明目录 challenge_module 应退 1，实际 {p.returncode}"
+
+    git(mini, "checkout", "-B", "infra/no-comp-cfg", c_main2)
+    git(mini, "rm", "formal_math/verification/comparator.json")
+    git(mini, "commit", "-m", "rm comparator.json while ChanChallenge exists")
+    c_no_cfg = git(mini, "rev-parse", "HEAD")
+    git(mini, "checkout", "main")
+    p = run(["bash", comp, "--skip-samples", "--repo", mini, "--base", c_main2, "--head", c_no_cfg, "--packages", pkg_dir])
+    assert p.returncode == 1, f"T19 存在 ChanChallenge 却缺 comparator.json 应退 1，实际 {p.returncode}"
+    print("PASS T19_C1_COMPARATOR_CLOSED_SCHEMA_AND_GUARDS")
+
 
 def main(argv):
     repo = DEFAULT_REPO
@@ -516,6 +635,8 @@ def main(argv):
 
     test_t1_workflow_and_shell(repo)
     print("PASS T1_WORKFLOW_AND_SHELL")
+    test_t2_precheck_compliance(repo)
+    print("PASS T2_PRECHECK_COMPLIANCE")
     test_t3_materialize_isolated(repo)
     print("PASS T3_MATERIALIZE_ISOLATED")
 

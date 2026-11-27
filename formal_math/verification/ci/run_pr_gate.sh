@@ -99,41 +99,52 @@ do_preflight() {
     --path "formal_math/verification/precheck/precheck.py" \
     --out "$precheck_py" >/dev/null
 
-  # 快速路径：用受信提交的 precheck.py 以空分支名核对唯一 merge-base..head。
-  # 仅当（1）merge-base 唯一，（2）受管范围（formal_math/ 与两个仓根受信文件）零改动（含原始模式与目录节点），
-  # （3）被审提交整棵 formal_math/ 通过全部形状检查时，precheck.py 才退 0 且输出精确绿行。
-  local mb_target=""
+  # 快速路径：用受信提交的 precheck.py 以空分支名核对基线..head。
+  # - mode=pr：要求 merge-base 唯一，且 merge-base..head 在受管范围零改动且整树形状合法；
+  # - mode=main：仅当 --before 有效且是 head 的祖先（快进推送）时直接以 before..head 核对；
+  #   非快进回退或历史改写禁止快速路径，强制执行全量主干门。
+  local fp_base=""
   if [ "$mode" = pr ]; then
-    mb_target=$base_sha
-  elif [ "$mode" = main ] && [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
-    if sgit rev-parse --verify --quiet --end-of-options "${before}^{commit}" >/dev/null 2>&1; then
-      mb_target=$(sgit rev-parse --verify --quiet --end-of-options "${before}^{commit}")
-    fi
-  fi
-
-  if [ -n "$mb_target" ]; then
-    local mbs mb_count mb
-    mbs=$(sgit merge-base --all -- "$mb_target" "$head_sha" || true)
+    local mbs mb_count
+    mbs=$(sgit merge-base --all -- "$base_sha" "$head_sha" || true)
     mb_count=$(printf '%s\n' "$mbs" | awk 'NF{c++} END{print c+0}')
     if [ "$mb_count" = 1 ]; then
-      mb=$(printf '%s\n' "$mbs" | awk 'NF{print; exit}')
-      local fp_out fp_rc=0
-      fp_out=$(python3 -I "$precheck_py" "$repo" "$mb" "$head_sha" "" 2>/dev/null) || fp_rc=$?
-      if [ "$fp_rc" = 0 ] && [ "$fp_out" = "PRECHECK GREEN OK ${head_sha} role=-" ]; then
-        echo "FM_CI FAST_PATH_GREEN mode=${mode} head=${head_sha} merge_base=${mb} base=${base_sha} (未改动 formal_math 或受信文件)"
-        write_out need_heavy false
-        write_out fast_path true
-        return 0
+      fp_base=$(printf '%s\n' "$mbs" | awk 'NF{print; exit}')
+    fi
+  elif [ "$mode" = main ] && [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+    local before_sha=""
+    if before_sha=$(sgit rev-parse --verify --quiet --end-of-options "${before}^{commit}" 2>/dev/null); then
+      local anc_rc=0
+      sgit merge-base --is-ancestor -- "$before_sha" "$head_sha" || anc_rc=$?
+      if [ "$anc_rc" = 0 ]; then
+        fp_base=$before_sha
       fi
     fi
   fi
 
-  # 改动了 formal_math 或受信文件（或形状有问题 / 无唯一 merge-base）：
+  if [ -n "$fp_base" ]; then
+    local fp_out fp_rc=0
+    fp_out=$(python3 -I "$precheck_py" "$repo" "$fp_base" "$head_sha" "" 2>/dev/null) || fp_rc=$?
+    if [ "$fp_rc" = 0 ] && [ "$fp_out" = "PRECHECK GREEN OK ${head_sha} role=-" ]; then
+      echo "FM_CI FAST_PATH_GREEN mode=${mode} head=${head_sha} fast_base=${fp_base} base=${base_sha} (未改动 formal_math 或受信文件)"
+      write_out need_heavy false
+      write_out fast_path true
+      return 0
+    fi
+  fi
+
+  # 改动了 formal_math 或受信文件（或形状有问题 / 无唯一 merge-base / 非快进推送）：
   # 在任何联网下载之前，先严格核对基线祖先关系与静态预检。
-  if ! sgit merge-base --is-ancestor -- "$base_sha" "$head_sha"; then
-    echo "FM_CI RED NOT_ANCESTOR base=${base_sha} head=${head_sha} 基线不是被审提交的祖先，请先追平 main 后重试" >&2
+  local is_anc_rc=0
+  sgit merge-base --is-ancestor -- "$base_sha" "$head_sha" || is_anc_rc=$?
+  if [ "$is_anc_rc" = 1 ]; then
+    echo "FM_CI FAULT NOT_ANCESTOR base=${base_sha} head=${head_sha} 基线不是被审提交的祖先，请先追平 main 后重试" >&2
     write_out need_heavy false
-    return 1
+    return 2
+  elif [ "$is_anc_rc" != 0 ]; then
+    echo "FM_CI FAULT GIT merge-base --is-ancestor 异常退出 ${is_anc_rc}" >&2
+    write_out need_heavy false
+    return 2
   fi
 
   local pc_args=()

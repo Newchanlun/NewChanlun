@@ -43,10 +43,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: formal-math-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
-
 env:
   # 钉选的 elan 发行包（x86_64-unknown-linux-gnu）；sha256 已下载核对。
   ELAN_VERSION: v4.4.0
@@ -55,6 +51,9 @@ env:
 jobs:
   formal-math-pr:
     if: ${{ github.event_name == 'pull_request_target' }}
+    concurrency:
+      group: formal-math-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -87,6 +86,7 @@ jobs:
           fi
           base_sha=$(git rev-parse --verify "HEAD^{commit}")
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
           git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= \
             -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
             fetch --no-tags --no-recurse-submodules origin "refs/pull/${PR_NUMBER}/head:refs/fm-pr/head"
@@ -169,9 +169,12 @@ jobs:
 
   formal-math-trusted-release:
     # 独立于 PR 标签与写码代理令牌的受信改动放行通道：
-    #   仅由 workflow_dispatch + 受保护环境 formal-math-trusted-change（人工审批）进入，
+    #   仅允许在 main 分支上通过 workflow_dispatch + 受保护环境 formal-math-trusted-change（人工审批）进入，
     #   且强制绑定 pr_number 与 40 位 pr_head_sha。
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.trusted_change_approved }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.trusted_change_approved }}
+    concurrency:
+      group: formal-math-trusted-${{ inputs.pr_number }}
+      cancel-in-progress: false
     environment: formal-math-trusted-change
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -219,6 +222,7 @@ jobs:
           fi
           base_sha=$(git rev-parse --verify "HEAD^{commit}")
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
           git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= \
             -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
             fetch --no-tags --no-recurse-submodules origin "refs/pull/${PR_NUMBER}/head:refs/fm-pr/head"
@@ -300,7 +304,10 @@ jobs:
           retention-days: 30
 
   formal-math-main:
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.trusted_change_approved && !inputs.paranoid) }}
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !inputs.trusted_change_approved && !inputs.paranoid) }}
+    concurrency:
+      group: formal-math-main
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -317,6 +324,7 @@ jobs:
       - name: Checkout main (no persisted credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -333,7 +341,7 @@ jobs:
           if [ "$EVENT_NAME" = "push" ] && [ -n "$BEFORE_SHA" ]; then
             extra=(--before "$BEFORE_SHA")
           fi
-          # main 上以 base=head=HEAD、branch=main 运行：precheck.py 仍无条件校验整树形状，不跳过门禁。
+          # push 且快进未碰 formal_math/受信文件时走快速路径；否则（含非快进与手动触发）以 base=head=HEAD、branch=main 跑全量主干门。
           bash formal_math/verification/ci/run_pr_gate.sh \
             --phase preflight --mode main "${extra[@]}" \
             --repo . --base "$head_sha" --head "$head_sha" --branch "main" \
@@ -395,9 +403,12 @@ jobs:
           retention-days: 30
 
   formal-math-paranoid:
-    # 手动触发且勾选 paranoid 时才跑。SafeCode 实测 nanoda 在 10 GiB 上限处被 OOM 杀掉，
+    # 手动触发（仅限 main 分支）且勾选 paranoid 时才跑。SafeCode 实测 nanoda 在 10 GiB 上限处被 OOM 杀掉，
     # GitHub 托管 ubuntu-24.04（16 GiB 内存）能否跑完全部五个外部检查器待实测，因此不阻断。
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.paranoid }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.paranoid }}
+    concurrency:
+      group: formal-math-paranoid
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     continue-on-error: true
@@ -405,6 +416,7 @@ jobs:
       - name: Checkout main (no persisted credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
 

@@ -55,20 +55,36 @@ trap 'chmod -R u+w -- "$work" 2>/dev/null || true; rm -rf -- "$work"' EXIT
 status=0
 
 # 在完全隔离的 chal_dir 中离线沙箱构建 challenge_mod，并在纯只读离线沙箱中导出 challenge.export。
+# 注意：本函数可能被置于 `if` / `||` 下（Bash 会关闭函数体内 set -e），因此每条关键命令均显式失败返回。
 build_and_export_challenge() {
   local chal_dir=$1 chal_mod=$2 export_out=$3 pkg_dir=$4 lean_path_extra=$5
   shift 5
   local targets=("$@")
 
-  local prefix
-  prefix=$(cd "$chal_dir" && lean --print-prefix)
-  prefix=$(cd -P -- "$prefix" && pwd)
+  local want_tc want_ver actual_ver prefix
+  want_tc=$(tr -d '\r\n' < "$chal_dir/lean-toolchain") || return 2
+  want_ver=${want_tc#leanprover/lean4:v}
+  if [ "$want_ver" = "$want_tc" ] || [ -z "$want_ver" ]; then
+    echo "comparator.sh: lean-toolchain 格式不合: $want_tc" >&2
+    return 2
+  fi
+  actual_ver=$(cd "$chal_dir" && lean --version) || return 2
+  case "$actual_ver" in
+    "Lean (version ${want_ver},"*) ;;
+    *)
+      echo "comparator.sh: 运行中 Lean ($actual_ver) 与工具链 v$want_ver 不符" >&2
+      return 2
+      ;;
+  esac
+
+  prefix=$(cd "$chal_dir" && lean --print-prefix) || return 2
+  prefix=$(cd -P -- "$prefix" && pwd) || return 2
   [ -x "$prefix/bin/leanexport" ] || { echo "comparator.sh: 找不到 $prefix/bin/leanexport" >&2; return 2; }
 
-  mkdir -p -- "$chal_dir/.lake"
+  mkdir -p -- "$chal_dir/.lake" || return 2
   local build_binds=(--ro-bind "$chal_dir" "$chal_dir" --bind "$chal_dir/.lake" "$chal_dir/.lake" --ro-bind "$prefix" "$prefix")
   if [ -n "$pkg_dir" ]; then
-    mkdir -p -- "$chal_dir/.lake/packages"
+    mkdir -p -- "$chal_dir/.lake/packages" || return 2
     build_binds+=(--ro-bind "$pkg_dir" "$chal_dir/.lake/packages")
   fi
 
@@ -84,7 +100,7 @@ build_and_export_challenge() {
       --setenv PATH "$prefix/bin:/usr/bin:/bin" \
       --setenv LEAN_ABORT_ON_PANIC 1 \
       --unshare-all --die-with-parent --new-session --chdir "$chal_dir" -- \
-      lake build "$chal_mod"
+      lake build "$chal_mod" || return $?
 
   local export_lp="$chal_dir/.lake/build/lib/lean"
   if [ -n "$lean_path_extra" ]; then
@@ -108,14 +124,16 @@ build_and_export_challenge() {
       --setenv LEAN_PATH "$export_lp" \
       --setenv LEAN_ABORT_ON_PANIC 1 \
       --unshare-all --die-with-parent --new-session --chdir "$chal_dir" -- \
-      "$prefix/bin/leanexport" "$chal_mod" -- "${targets[@]}" > "$export_out"
+      "$prefix/bin/leanexport" "$chal_mod" -- "${targets[@]}" > "$export_out" || return $?
+  [ -s "$export_out" ] || { echo "comparator.sh: challenge.export 为空" >&2; return 2; }
+  return 0
 }
 
 run_sample_case() {
-  local name=$1 want=$2 cfg_name=$3 chal_file=$4 sol_file=$5 extra_chal_defs=$6 extra_sol_defs=$7
+  local name=$1 want=$2 cfg_name=$3 chal_file=$4 sol_file=$5 extra_chal_defs=$6 extra_sol_defs=$7 want_pattern=${8:-}
   local case_dir=$work/sample_$name
   local chal=$case_dir/chal sol=$case_dir/sol cfg=$case_dir/$cfg_name chal_exp=$case_dir/chal.export
-  local wrap=$case_dir/bwrap_sol.sh
+  local wrap=$case_dir/bwrap_sol.sh comp_log=$case_dir/comp.log
 
   mkdir -p -- "$chal/Sample" "$sol/Sample"
   cp -- "$here/comparator/lakefile.toml.in" "$chal/lakefile.toml"
@@ -153,23 +171,31 @@ run_sample_case() {
   bash "$here/bwrap_pkgbind.sh" --emit "$wrap" --lake-dir "$sol/.lake" --bwrap "$real_bwrap" --offline
 
   echo "::group::lake comparator $name"
-  local rc=0
-  build_and_export_challenge "$chal" "$chal_mod" "$chal_exp" "" "" "${targets[@]}" || rc=$?
-  if [ "$rc" = 0 ]; then
-    (cd "$sol" && COMPARATOR_BWRAP="$wrap" timeout --signal=TERM --kill-after=30 "$timeout_sec" \
-      lake comparator --config "$cfg" --challenge-from-export "$chal_exp") || rc=$?
+  local chal_rc=0 comp_rc=0
+  build_and_export_challenge "$chal" "$chal_mod" "$chal_exp" "" "" "${targets[@]}" || chal_rc=$?
+  if [ "$chal_rc" != 0 ]; then
+    echo "::endgroup::"
+    echo "::error::$name: 挑战构建或导出失败（退出 $chal_rc），未进入 lake comparator"
+    status=1
+    return 0
   fi
+  (cd "$sol" && COMPARATOR_BWRAP="$wrap" timeout --signal=TERM --kill-after=30 "$timeout_sec" \
+    lake comparator --config "$cfg" --challenge-from-export "$chal_exp") >"$comp_log" 2>&1 || comp_rc=$?
+  cat "$comp_log"
   echo "::endgroup::"
 
-  echo "$name: 退出 $rc（期望 $want）"
+  echo "$name: 退出 $comp_rc（期望 $want）"
   if [ "$want" = record ]; then
-    if [ "$rc" = 0 ]; then
+    if [ "$comp_rc" = 0 ]; then
       echo "$name: 实测 Lake 接受了 definition_names 中的锁定定义替换，证明门 5 必须拒收非空 definition_names。"
     else
-      echo "::warning::$name: Lake 此次拒收了（退出 $rc），与既有读数不符，请复核门 5 依据。"
+      echo "::warning::$name: Lake 此次拒收了（退出 $comp_rc），与既有读数不符，请复核门 5 依据。"
     fi
-  elif [ "$rc" != "$want" ]; then
-    echo "::error::$name: 退出 $rc，期望 $want"
+  elif [ "$comp_rc" != "$want" ]; then
+    echo "::error::$name: 退出 $comp_rc，期望 $want"
+    status=1
+  elif [ -n "$want_pattern" ] && ! grep -Fq "$want_pattern" "$comp_log"; then
+    echo "::error::$name: 退出码符合 $want，但输出未包含预期诊断 '$want_pattern'"
     status=1
   fi
 }
@@ -186,8 +212,8 @@ if [ "$skip_samples" = 0 ]; then
     echo "gate5-reject-defhole: 退出 1（符合预期：非空 definition_names 已拒收）"
   fi
 
-  run_sample_case sample-green 0 comparator.json Challenge.lean Solution.lean 1 1
-  run_sample_case defhole-control 1 comparator-defhole-control.json ChallengeFalse.lean SolutionSwap.lean 1 0
+  run_sample_case sample-green 0 comparator.json Challenge.lean Solution.lean 1 1 "Your solution is okay!"
+  run_sample_case defhole-control 1 comparator-defhole-control.json ChallengeFalse.lean SolutionSwap.lean 1 0 "Const does not match"
   run_sample_case defhole-filled record comparator-defhole.json ChallengeFalse.lean SolutionSwap.lean 1 0
 fi
 
@@ -229,6 +255,14 @@ if [ -n "$repo" ]; then
   fi
 
   if [ -z "$chosen" ]; then
+    # 若 ChanChallenge/ 已落地任何 .lean 文件但缺少配置文件，禁止静默跳过。
+    has_challenge_lean=$(GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_GRAFT_FILE=/dev/null \
+      git -C "$repo" -c core.hooksPath=/dev/null ls-tree -r --name-only "$head" -- formal_math/ChanChallenge 2>/dev/null \
+      | grep -E '\.lean$' || true)
+    if [ -n "$has_challenge_lean" ]; then
+      echo "::error::formal_math/ChanChallenge/ 已存在 .lean 文件，但缺少 formal_math/verification/comparator.json，拒绝跳过正式比对"
+      exit 1
+    fi
     echo "formal_math/verification/comparator.json 与 formal_math/comparator.json 均不存在（ChanChallenge 未落地），正式比对跳过。"
   else
     formal_dir=$work/formal
@@ -275,26 +309,30 @@ if [ -n "$repo" ]; then
     fi
 
     echo "::group::lake comparator formal ($chosen)"
-    rc=0
-    build_and_export_challenge "$chal" "$chal_mod" "$chal_exp" "$packages" "$lp_extra" "${targets[@]}" || rc=$?
-    if [ "$rc" = 0 ]; then
+    chal_rc=0
+    comp_rc=0
+    build_and_export_challenge "$chal" "$chal_mod" "$chal_exp" "$packages" "$lp_extra" "${targets[@]}" || chal_rc=$?
+    if [ "$chal_rc" != 0 ]; then
+      echo "::endgroup::"
+      echo "::error::formal ($chosen): 挑战构建或导出失败（退出 $chal_rc），未进入 lake comparator"
+      status=1
+    else
       if [ -x /usr/bin/time ]; then
-        (cd "$sol" && COMPARATOR_BWRAP="$wrap" timeout --signal=TERM --kill-after=30 "$timeout_sec" /usr/bin/time -v "${comp_args[@]}") || rc=$?
+        (cd "$sol" && COMPARATOR_BWRAP="$wrap" timeout --signal=TERM --kill-after=30 "$timeout_sec" /usr/bin/time -v "${comp_args[@]}") || comp_rc=$?
       else
-        (cd "$sol" && COMPARATOR_BWRAP="$wrap" timeout --signal=TERM --kill-after=30 "$timeout_sec" "${comp_args[@]}") || rc=$?
+        (cd "$sol" && COMPARATOR_BWRAP="$wrap" timeout --signal=TERM --kill-after=30 "$timeout_sec" "${comp_args[@]}") || comp_rc=$?
+      fi
+      echo "::endgroup::"
+      echo "formal ($chosen): 退出 $comp_rc（期望 0）"
+      if [ "$comp_rc" != 0 ]; then
+        status=1
       fi
     fi
-    echo "::endgroup::"
 
     if [ -n "$(ls -A "$chal/.lake/packages" 2>/dev/null || true)" ] || \
        [ -n "$(ls -A "$sol/.lake/packages" 2>/dev/null || true)" ]; then
       echo "::error::异常：宿主机 .lake/packages 挂载点非空"
       exit 2
-    fi
-
-    echo "formal ($chosen): 退出 $rc（期望 0）"
-    if [ "$rc" != 0 ]; then
-      status=1
     fi
   fi
 fi

@@ -51,6 +51,13 @@ CHALLENGE_MODULE_PREFIXES = (
     "Chan.Audit.Literal",
 )
 STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
+ALLOWED_COMPARATOR_KEYS = {
+    "challenge_module",
+    "solution_module",
+    "theorem_names",
+    "definition_names",
+    "permitted_axioms",
+}
 PRIMITIVE_TARGETS = (
     "Nat.add", "Nat.sub", "Nat.mul", "Nat.pow", "Nat.gcd", "Nat.div", "Nat.mod",
     "Nat.beq", "Nat.ble", "Nat.land", "Nat.lor", "Nat.xor", "Nat.shiftLeft", "Nat.shiftRight",
@@ -135,7 +142,7 @@ def read_blobs(repo, oids):
     return result
 
 
-def strict_json(data, label):
+def strict_json(data, label, fault_code=1):
     def unique_object(pairs):
         obj = {}
         for k, v in pairs:
@@ -159,9 +166,9 @@ def strict_json(data, label):
     try:
         val = json.loads(data.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=reject_constant)
     except (UnicodeDecodeError, ValueError, RecursionError) as e:
-        raise Fail(1, f"{label}: 严格 JSON 解析失败: {e}")
+        raise Fail(fault_code, f"{label}: 严格 JSON 解析失败: {e}")
     if not no_surrogates(val):
-        raise Fail(1, f"{label}: JSON 含孤立代理项")
+        raise Fail(fault_code, f"{label}: JSON 含孤立代理项")
     return val
 
 
@@ -216,7 +223,7 @@ def verify_config_pins(lakefile_bytes, manifest_bytes):
         pkg = tomllib.loads(lakefile_bytes.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise Fail(2, f"基线 lakefile.toml 无法解析: {e}")
-    manifest = strict_json(manifest_bytes, "formal_math/lake-manifest.json")
+    manifest = strict_json(manifest_bytes, "formal_math/lake-manifest.json", fault_code=2)
     if not isinstance(manifest, dict):
         raise Fail(2, "formal_math/lake-manifest.json 顶层须为对象")
     for key, want in (("packagesDir", ".lake/packages"), ("lakeDir", ".lake")):
@@ -341,6 +348,9 @@ def cmd_validate_comparator(opts, flags):
     cfg = strict_json(raw, path)
     if not isinstance(cfg, dict):
         raise Fail(1, "门 5：comparator 配置顶层须为 JSON 对象")
+    extra_keys = sorted(set(cfg.keys()) - ALLOWED_COMPARATOR_KEYS)
+    if extra_keys:
+        raise Fail(1, f"门 5：comparator 配置含白名单外顶层键: {extra_keys}")
     allow_def = "--allow-def-names" in flags
     allow_sample = "--allow-sample-modules" in flags
 
@@ -372,12 +382,6 @@ def cmd_validate_comparator(opts, flags):
     bad_axioms = [a for a in axioms if a not in STANDARD_AXIOMS]
     if bad_axioms:
         raise Fail(1, f"门 5：permitted_axioms 含标准三公理之外的公理: {bad_axioms}")
-
-    if cfg.get("enable_nanoda"):
-        raise Fail(1, "门 5：配置中不许开启 enable_nanoda（外部检查器由 --paranoid 开关控制）")
-    ext = cfg.get("external_kernels")
-    if ext is not None and ext != {}:
-        raise Fail(1, "门 5：配置中不许指定 external_kernels")
 
     print(f"CHALLENGE_MODULE={chal}")
     print(f"SOLUTION_MODULE={sol}")
