@@ -44,7 +44,7 @@ Origin/PromQual.lean — 提升谓词 Qual_* + 提升算子 Prom_ℓ（spec §16
     (b) 自相似交换律 `promote_shift_commute`（★核心，spec line 103/151）：
         `𝒩_{ℓ+1}(Prom_ℓ es) = Prom_*(𝒩_ℓ es)`，即 `shiftMove k (promote lvl es) =
         promote (lvl+k) (es.map (shiftMove k))`——平移不变。非平凡：依赖 `windowCenters_shift`
-        （𝒩 保 lo/hi ⟹ 派生中枢不变），证「高一级结构不是特殊生成，是同一 Prom_* 在更高尺度再应用」。
+        （𝒩 保 lo/hi 与单元方向 ⟹ 派生中枢不变），证「高一级结构不是特殊生成，是同一 Prom_* 在更高尺度再应用」。
 
 ── 去根化（spec §4，边界胚元）──────────────────────────────────────────────────
   `promote` 是**级别多态全函数**——无「根级别」特例分支（不 `if lvl=ℓ_max then 特殊`）。
@@ -125,11 +125,10 @@ theorem windowCenters_of_firstOverlap {a b c : Move} {rest : List Move}
     泛化既有 `deriveWindowCenter3_derivedAt`（仅 [a,b,c]）到带尾列表——total 的 CentersDerivedFrom 需要。 -/
 theorem deriveWindowCenter3_derivedAt_cons (a b c : Move) (rest : List Move)
     (h : WindowOverlap a b c) :
-    CenterDerivedAt (a :: b :: c :: rest) (deriveWindowCenter3 a b c h) 0 := by
-  unfold CenterDerivedAt deriveWindowCenter3
-  refine ⟨by simp only [List.length_cons]; omega, ?_⟩
-  intro _ _ _
-  refine ⟨?_, ?_, ?_, ?_⟩ <;> simp [Move.lo, Move.hi]
+    CenterDerivedAt (a :: b :: c :: rest) (deriveWindowCenter3 a b c h) 0 :=
+  ⟨by simp only [List.length_cons]; omega,
+    fun _ _ _ => ⟨rfl, rfl, a.unitDir, b.unitDir, c.unitDir,
+      a.unitDir_spec, b.unitDir_spec, c.unitDir_spec, rfl, rfl⟩⟩
 
 /-- ★Qual 结构暴露（L0）：`Qual lvl es` ⟹ es 形如 a::b::c::rest 且首窗重叠 + 级别一致 + 全良构。
     短列表分支由 `Qual = False` 关死（Lean 空类型消去自动 discharge）——这把 Qual 的 length≥3
@@ -285,12 +284,26 @@ theorem shiftMove_compose (k : Nat) (subs : List Move) (centers : List Center) (
       = Move.compose (subs.map (shiftMove k)) centers (level + k) := by
   simp only [shiftMove, shiftMoveList_eq_map]
 
-/-- ★平移保价格区间（L0）：`(shiftMove k m).interval = m.interval`——shiftMove 只改级别（compose）
-    或不改（segment），interval 由 segment 直接字段 / compose 中枢外缘算（中枢不变）⟹ 区间不变。 -/
-theorem shiftMove_interval (k : Nat) (m : Move) : (shiftMove k m).interval = m.interval := by
-  cases m with
-  | segment d lo hi => simp only [shiftMove]
-  | compose subs centers level => simp only [shiftMove, Move.interval]
+mutual
+  /-- ★平移保价格区间（L0）：`(shiftMove k m).interval = m.interval`——shiftMove 只改级别（compose）
+      或不改（segment）；interval 由 segment 直接字段 / compose 全部子走势区间算（★#1419 r2：子走势
+      逐个平移、各自区间不变）⟹ 区间不变。 -/
+  theorem shiftMove_interval (k : Nat) : (m : Move) → (shiftMove k m).interval = m.interval
+    | Move.segment d lo hi => by simp only [shiftMove]
+    | Move.compose subs centers level => by
+        simp only [shiftMove, Move.interval]
+        exact shiftMoveList_listInterval k subs
+  /-- ★平移保子走势序列区间极值（L0，`shiftMove_interval` 的列表半边）。 -/
+  theorem shiftMoveList_listInterval (k : Nat) :
+      (xs : List Move) → Move.listInterval (shiftMoveList k xs) = Move.listInterval xs
+    | [] => by simp only [shiftMoveList, Move.listInterval]
+    | [m] => by simp only [shiftMoveList, Move.listInterval]; exact shiftMove_interval k m
+    | m :: m' :: ms => by
+        have h1 := shiftMove_interval k m
+        have h2 := shiftMoveList_listInterval k (m' :: ms)
+        simp only [shiftMoveList] at h2 ⊢
+        simp only [Move.listInterval, h1, h2]
+end
 
 /-- ★平移保下沿（L0，windowCenters_shift 用）。 -/
 theorem shiftMove_lo (k : Nat) (m : Move) : (shiftMove k m).lo = m.lo := by
@@ -300,8 +313,11 @@ theorem shiftMove_lo (k : Nat) (m : Move) : (shiftMove k m).lo = m.lo := by
 theorem shiftMove_hi (k : Nat) (m : Move) : (shiftMove k m).hi = m.hi := by
   unfold Move.hi; rw [shiftMove_interval]
 
-/-- ★windowCenters 仅依赖首三段 lo/hi 的同余（L0）：首三段 lo/hi 对应相等 ⟹ windowCenters 相等
-    （WindowOverlap 与 deriveWindowCenter3 全由 lo/hi 决定，rest 不影响）。 -/
+/-- ★平移保单元方向（L0，windowCenters_shift 用）：线段原样，compose 仍是 compose。 -/
+theorem shiftMove_unitDir (k : Nat) (m : Move) : (shiftMove k m).unitDir = m.unitDir := by
+  cases m <;> simp only [shiftMove, Move.unitDir]
+
+/-- 四个区间端点对应相等 ⟹ 中枢相等（三个证明字段不参与）。 -/
 theorem center_eq {c1 c2 : Center} (hdd : c1.dd = c2.dd) (hzd : c1.zd = c2.zd)
     (hzg : c1.zg = c2.zg) (hgg : c1.gg = c2.gg) : c1 = c2 := by
   obtain ⟨dd1, zd1, zg1, gg1, _, _, _⟩ := c1
@@ -309,9 +325,12 @@ theorem center_eq {c1 c2 : Center} (hdd : c1.dd = c2.dd) (hzd : c1.zd = c2.zd)
   subst hdd; subst hzd; subst hzg; subst hgg
   rfl
 
-theorem windowCenters_congr_lohi {a b c a' b' c' : Move} {rest rest' : List Move}
+/-- ★windowCenters 仅依赖首三段 lo/hi 与单元方向的同余（L0）：首三段三者对应相等 ⟹ windowCenters 相等
+    （WindowOverlap 由 lo/hi 决定；deriveWindowCenter3 的 Zn 外缘另读单元方向，#1419；rest 不影响）。 -/
+theorem windowCenters_congr {a b c a' b' c' : Move} {rest rest' : List Move}
     (ha : a.lo = a'.lo) (ha2 : a.hi = a'.hi) (hb : b.lo = b'.lo) (hb2 : b.hi = b'.hi)
-    (hc : c.lo = c'.lo) (hc2 : c.hi = c'.hi) :
+    (hc : c.lo = c'.lo) (hc2 : c.hi = c'.hi)
+    (hda : a.unitDir = a'.unitDir) (hdb : b.unitDir = b'.unitDir) (hdc : c.unitDir = c'.unitDir) :
     windowCenters (a :: b :: c :: rest) = windowCenters (a' :: b' :: c' :: rest') := by
   show (if h : WindowOverlap a b c then [deriveWindowCenter3 a b c h] else [])
      = (if h : WindowOverlap a' b' c' then [deriveWindowCenter3 a' b' c' h] else [])
@@ -321,23 +340,26 @@ theorem windowCenters_congr_lohi {a b c a' b' c' : Move} {rest rest' : List Move
   · rw [dif_pos h, dif_pos (hiff.mp h)]
     congr 1
     apply center_eq
-    · show min a.lo (min b.lo c.lo) = min a'.lo (min b'.lo c'.lo); rw [ha, hb, hc]
+    · show znDD a.unitDir b.unitDir c.unitDir a b c = znDD a'.unitDir b'.unitDir c'.unitDir a' b' c'
+      unfold znDD znLo; rw [ha, hb, hc, hda, hdb, hdc]
     · show max a.lo (max b.lo c.lo) = max a'.lo (max b'.lo c'.lo); rw [ha, hb, hc]
     · show min a.hi (min b.hi c.hi) = min a'.hi (min b'.hi c'.hi); rw [ha2, hb2, hc2]
-    · show max a.hi (max b.hi c.hi) = max a'.hi (max b'.hi c'.hi); rw [ha2, hb2, hc2]
+    · show znGG a.unitDir b.unitDir c.unitDir a b c = znGG a'.unitDir b'.unitDir c'.unitDir a' b' c'
+      unfold znGG znHi; rw [ha2, hb2, hc2, hda, hdb, hdc]
   · rw [dif_neg h, dif_neg (fun hp => h (hiff.mpr hp))]
 
 /-- ★windowCenters 平移不变（L0，自相似交换律核心引理）：`windowCenters (es.map (shiftMove k)) =
-    windowCenters es`——𝒩 保 lo/hi（shiftMove_lo/hi）⟹ 派生中枢不变。这坐实「同一中枢规则在
+    windowCenters es`——𝒩 保 lo/hi 与单元方向（shiftMove_lo/hi/unitDir）⟹ 派生中枢不变。这坐实「同一中枢规则在
     平移后的次级别序列上产同一中枢」。 -/
 theorem windowCenters_shift (k : Nat) (es : List Move) :
     windowCenters (es.map (shiftMove k)) = windowCenters es := by
   match es with
   | a :: b :: c :: rest =>
       simp only [List.map_cons]
-      exact windowCenters_congr_lohi
+      exact windowCenters_congr
         (shiftMove_lo k a) (shiftMove_hi k a) (shiftMove_lo k b) (shiftMove_hi k b)
         (shiftMove_lo k c) (shiftMove_hi k c)
+        (shiftMove_unitDir k a) (shiftMove_unitDir k b) (shiftMove_unitDir k c)
   | [] => rfl
   | [_] => rfl
   | [_, _] => rfl
@@ -351,7 +373,7 @@ theorem windowCenters_shift (k : Nat) (es : List Move) :
   这是「高一级结构不是特殊生成，而是同一个 Prom_* 在更高尺度上的再应用」（spec line 153）的机器证明：
   Prom_* = 同一 `promote`（级别多态），lvl+k 处提升 = lvl 处提升再平移 k。
 
-  非平凡：依赖 `windowCenters_shift`（𝒩 保 lo/hi ⟹ 派生中枢不变）+ shiftMove_compose（级别 +k 分配
+  非平凡：依赖 `windowCenters_shift`（𝒩 保 lo/hi 与单元方向 ⟹ 派生中枢不变）+ shiftMove_compose（级别 +k 分配
   到 subs）+ 级别算术 (lvl+1)+k = (lvl+k)+1。**无条件成立**（对任意 k/lvl/es），即去根化——所有
   级别同一规则，无特殊根（spec §4）。
 -/
